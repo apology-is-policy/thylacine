@@ -513,15 +513,6 @@ fi
 if [[ "${THYLACINE_NOSTORM:-0}" == "1" ]]; then
     append_tokens+=("thylacine.nostorm")
 fi
-# d-1b (test-only): the ls-gfx-session E2E drives a scripted logout to witness
-# aurora's resume. THYLACINE_HALCYON_SESSION_AUTOEXIT=1 makes the per-user
-# `halcyond --session` return 0 after a bounded frame count (a stand-in for the
-# real logout, which arrives when a session tile can exit at d-2/d-3);
-# session_main reads it via /hw/chosen/bootargs. Compared to "1" (not -n) so =0
-# is a real off, and inert without the session lever (no halcyond --session runs).
-if [[ "${THYLACINE_HALCYON_SESSION_AUTOEXIT:-0}" == "1" ]]; then
-    append_tokens+=("thylacine.halcyon.session.autoexit")
-fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends

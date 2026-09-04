@@ -79,21 +79,51 @@ operand (`env::args().operands()`):
   identity-stamp is login's). It holds NO console-renderer role: `session_main`
   skips the whole `/dev/cons` trio and never reads the console mirror. It
   connects to the SYSTEM tapestryd (`/srv/tapestry`) as an ordinary-user
-  `Actor::Session` (connecting is ungated) and presents a fullscreen surface; it
-  will host the session's terminals as `kaua-term` processes it spawns as itself
+  `Actor::Session` (connecting is ungated) and presents a fullscreen surface,
+  hosting the session's terminals as `kaua-term` processes it spawns as itself
   (§14.2), ingesting each tile's record stream through the `Tile` model below
   instead of the console drain.
 
-**d-1a is the bootstrap only.** `session_main` presents a BLANK Daylight ground
-(`daylight_sheet().ground`) — it reuses only the connect/surface/present
-primitives (`EventRing::connect_sqpoll` + `Surface::fullscreen_on` + the
-first-present-before-wait discipline + the SQPOLL unified-poll wait on
-`ring.poll_fd()`), NOT the render brain (no fonts, atlas, transcript, or
-chrome). The witness is `halcyond: session up NxN px`, printed only inside
-`Ok(present)`, so it proves connect + present, not merely that the line ran. The
-tiles wire in at KT-1.5d-2; the aurora relinquish → `Direct(halcyond)` display
-handoff (emergent from tapestryd's pane layout, no new primitive) + the logout
-resume are KT-1.5d-1b.
+**The bootstrap (d-1a).** `session_main` connects + takes a fullscreen surface
+(the connect/surface/present primitives — `EventRing::connect_sqpoll` +
+`Surface::fullscreen_on` + the first-present-before-wait discipline + the SQPOLL
+unified-poll wait on `ring.poll_fd()`). The witness is `halcyond: session up
+NxN px`, printed only inside `Ok(present)`, so it proves connect + present, not
+merely that the line ran. The aurora → `Direct(halcyond)` handoff is d-1b
+(tapestryd's reconcile backgrounds the console renderer, §14.12 step 4; no new
+primitive).
+
+**One session tile (d-2).** `session_main` spawns ONE `kaua-term` hosting
+`/bin/ut`, AS itself (the user login stamped — plain `t_spawn`, no cap, zero
+delegation), with `Stdio::Piped` on stdin/stdout: the child's fd 0 = the down
+pipe (halcyond writes `Key`/`Resize` `Input` frames) and fd 1 = the up pipe
+(the child writes the `Record` stream); fd 2 inherits. The pts is internal to
+the child, so `ut` never sees these pipes. The loop then:
+
+- **renders** the `Tile` (grid tail + scrollback flow, `Tile::render` below) via
+  the reused render brain (a `GlyphSource` + the Daylight sheet + cartoon),
+  presenting each dirty frame — the FIRST render is at the loop top before any
+  wait (first-present-wins);
+- **waits** on ONE `poll { ring.poll_fd() | up_pipe }` — a surface event on the
+  ring (`poll_event` pumps the SQPOLL CQEs) or records on the up pipe;
+- **ingests** the up pipe: one `t_read` per wake → `FrameDecoder` → `parse_record`
+  → `Tile::apply` (the trust boundary: a bounds-checked wire, a `WireError` tears
+  down the tile — here the whole one-tile session, i.e. logout, §14.11.10/.12);
+- **routes input**: a `TEV_KEY` → `input::map_key` → an `Input::Key` frame down
+  the pipe → the kaua-term re-encodes it (honoring DECCKM) to the pts (§14.11.9;
+  one tile, so always focused — a backgrounded console renderer no longer holds
+  input focus, the tapestryd reconcile focus transfer);
+- **resizes** on `TEV_CONFIGURE`: recompute cols/rows from the surface, resize the
+  tile grid, send `Resize` down (the kaua-term sets the pts winsize + replies with
+  a full CellDiff);
+- **logs out** when the tile's `ut` exits — a `Control::Exit` (or an up-pipe EOF)
+  latches the exit and `session_main` returns; `login`'s `wait()` returns → getty
+  → the session leaf retires → aurora un-backgrounds + resumes (d-1b). The witness
+  is `halcyond: session tile exited (code N) -- logout`. On teardown it drops the
+  down pipe (EOF → the kaua-term group exits, taking `ut`), then kills + reaps.
+
+The witnesses on the diagnostic UART: `session tile spawned pid=N WxH (/bin/ut)`,
+`session tile ingest live` (the first record applied), the logout line above.
 
 **The session lever.** `login` reads the one-token `/lib/halcyon/session` file:
 `on` → the session variant; absent / any other token → the proven `ut` path
@@ -136,10 +166,43 @@ path interns a pre-styled `vt::Cell` via the same `intern_style` `style_idx`
 uses, and charges the same block-cap / eviction cost, so a tile that scrolls
 forever stays bounded.
 
-**Landed at KT-1.5b-ii-a as the host-tested model** (13 grid + tile tests). The
-render composition (normal = scrollback + grid tail; alt = grid only), the child
-spawn (one `kaua-term` per leaf over a pipe pair), and folding the up-pipe into
-the unified `poll` are KT-1.5b-ii-b (graphical).
+**The model landed host-tested at KT-1.5b-ii-a** (grid + tile tests). **The
+render + spawn + poll-fold landed at KT-1.5d-2**, inside the per-user
+`session_main` (above): the child spawn (one `kaua-term` over a `Stdio::Piped`
+pair), folding the up-pipe into the unified `poll { ring | up_pipe }`, and the
+render below.
+
+`Tile::render(cart, w, h, gs, sheet, scroll_up) -> content_h` composes the
+frame (14.11.3):
+
+- **Alt-screen** (`Mode(AltScreen)`, e.g. `vim`): the live grid alone, full-tile
+  from the top-left. Returns the grid height.
+- **Normal**: the scrollback flows above (each block laid once via `layout_block`
+  and rendered via `render_block` — the SAME proportional path the console
+  transcript uses), and the live grid renders as a fixed-height mono tail
+  (`grid_rows * cell_h`) at the bottom. The content `[scrollback][grid]` is
+  bottom-anchored, raised by `scroll_up` px (0 = the grid sits at the view bottom,
+  history off the top; scrolling reveals history — the wheel input is a follow-on,
+  `scroll_up` is wired but held at 0 in d-2). Returns the total content height.
+
+The grid painter (`paint_grid`) is a mono cell store: per-cell it paints a bg
+Rect only when the cell bg differs from the sheet ground (a blank Daylight grid
+is all-ground, so it emits only the cursor beam), then the `FACE_MONO` glyph
+(space/NUL skipped), then an underline Rect; `ATTR_REVERSE` swaps fg/bg. The
+block cursor beam (2 px, the accent) sits at the clamped cursor cell. Cells carry
+resolved RGB in the compositor's palette (the kaua-term stamps `vt::DAYLIGHT`,
+§14.6 — the palette is applied at the producer since the seam ships RGB, not
+re-mapped here), so the tile composites coherently with the Daylight transcript.
+
+`input::map_key(code, rune, value) -> Option<KeyEvent>` maps a tapestryd
+`TEV_KEY` to a kaua `KeyEvent` for the down-channel: a composed `rune` (tapestryd
+Ctrl-folds + shift-resolves) passes through as `Char(rune)` (byte-identical to the
+console `key_bytes` rune arm); a rune-less nav key (arrows / Home / End / page /
+Del / Ins) maps to its `KeyCode` so the kaua-term honors DECCKM; a release
+(`value 0`) or an unknown key is `None`.
+
+All of `Tile` + `render` + `paint_grid` + `map_key` are host-tested (the lib
+half), so the format/render logic is exercised without a boot.
 
 ## Load-bearing invariants (prose; the audit anchors)
 

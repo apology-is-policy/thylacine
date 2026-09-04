@@ -34,7 +34,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use kaua_term::wire::{encode_record, parse_input, FrameDecoder, Input};
 use kaua_term::{encode_key, Control, Producer, Record};
 use ptyhold::{set_winsize, Master};
-use vt::Vt;
+use vt::{Vt, DAYLIGHT};
 
 use libthyla_rs::{
     env, t_burrow_attach, t_close, t_exit_group, t_putstr, t_read, t_wait_pid_for, t_write, thread,
@@ -60,7 +60,11 @@ impl WriteLock {
         WriteLock(AtomicU32::new(0))
     }
     fn lock(&self) {
-        if self.0.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        if self
+            .0
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
             return;
         }
         // Contended: claim as "held, maybe-waiters" and park until free.
@@ -239,7 +243,10 @@ fn run() -> i64 {
     }
 
     // The output thread (this one): master -> producer -> records -> fd 1.
-    let mut vt = Vt::new(cols as usize, rows as usize);
+    // Cells are born in the compositor's Daylight palette (HALCYON.md 14.12):
+    // the seam ships resolved RGB, so halcyond cannot re-theme downstream -- the
+    // tile grid must composite coherently with halcyond's Daylight transcript.
+    let mut vt = Vt::with_palette(cols as usize, rows as usize, DAYLIGHT);
     vt.set_capture_events(true);
     let mut prod = Producer::new(&vt);
     let mut recs: Vec<Record> = Vec::new();

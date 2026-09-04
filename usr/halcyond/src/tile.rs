@@ -21,11 +21,15 @@
 // (parsing an untrusted per-tile stream) is one parser, audited once.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::grid::Grid;
+use crate::layout::{layout_block, render_block, LaidBlock, Sheet};
+use crate::raster::{GlyphSource, FACE_MONO};
 use crate::transcript::Transcript;
+use cartoon::{Cartoon, Op};
 use kaua_term::{Control, Record, ScreenMode};
-use vt::Palette;
+use vt::{Palette, ATTR_REVERSE, ATTR_UNDERLINE};
 
 pub struct Tile {
     pub grid: Grid,
@@ -90,6 +94,147 @@ impl Tile {
     /// Take + clear the pending bell affordance (the render rings it once).
     pub fn take_bell(&mut self) -> bool {
         core::mem::replace(&mut self.bell, false)
+    }
+
+    /// Paint the tile into `cart` (HALCYON.md 14.11.3). Returns the total
+    /// content height in px (for scroll clamping by the caller).
+    ///
+    /// Normal mode: the scrollback flow renders above, the live grid renders as
+    /// a fixed-height tail (`grid_rows * cell_h`) at the bottom; the content is
+    /// bottom-anchored, raised by `scroll_up` px (0 = the grid sits at the view
+    /// bottom, history off the top; scrolling up reveals history). Alt-screen
+    /// mode: the grid alone, full-tile from the top-left, scrollback frozen +
+    /// hidden. The `cart` is `reset()` first, so the caller passes one reusable
+    /// display list. Grid glyphs come from FACE_MONO (the tile is a terminal);
+    /// the scrollback flows through the proportional `layout_block`/`render_block`
+    /// exactly as the console transcript does.
+    pub fn render(
+        &self,
+        cart: &mut Cartoon,
+        w: usize,
+        h: usize,
+        gs: &mut GlyphSource,
+        sheet: &Sheet,
+        scroll_up: i32,
+    ) -> i32 {
+        cart.reset();
+        cart.ops.push(Op::Clear {
+            color: sheet.ground,
+        });
+        let (_cw, cell_h, _base) = gs.mono_cell();
+        let grid_h = self.grid.dims().1 as i32 * cell_h;
+
+        if self.mode == ScreenMode::AltScreen {
+            paint_grid(cart, &self.grid, 0, 0, gs, sheet);
+            return grid_h;
+        }
+
+        // Normal: lay the scrollback flow (pass 1, stored), then bottom-anchor
+        // [scrollback][grid] and render (pass 2). Two passes so the grid tail's
+        // screen-y is known before any block is emitted -- layout is done once
+        // per block, its result reused.
+        let widthi = w as i32;
+        let viewh = h as i32;
+        let mut laid: Vec<LaidBlock> = Vec::new();
+        let mut total = sheet.block_gap; // a leading gap above the first block
+        for b in self.scrollback.frozen_blocks().iter() {
+            let lb = layout_block(b, widthi, sheet, gs);
+            total += lb.height + sheet.block_gap;
+            laid.push(lb);
+        }
+        // The open block is the newest (un-frozen) history; no trailing gap --
+        // the grid follows it directly as the live tail.
+        let open_lb = layout_block(self.scrollback.open_block(), widthi, sheet, gs);
+        total += open_lb.height;
+        laid.push(open_lb);
+
+        let content_h = total + grid_h;
+        let su = scroll_up.clamp(0, (content_h - viewh).max(0));
+        let y0 = if content_h <= viewh {
+            0
+        } else {
+            viewh - content_h + su
+        };
+
+        let mut y = y0 + sheet.block_gap;
+        let n = laid.len();
+        for (i, lb) in laid.iter().enumerate() {
+            if y + lb.height >= 0 && y <= viewh {
+                render_block(cart, lb, y, gs);
+            }
+            // Every block but the last (the open block) carries a trailing gap,
+            // mirroring the `total` accumulation above so `y` lands at the grid.
+            y += lb.height;
+            if i + 1 < n {
+                y += sheet.block_gap;
+            }
+        }
+        // `y` is now the grid tail's screen-y (== y0 + total).
+        paint_grid(cart, &self.grid, 0, y, gs, sheet);
+        content_h
+    }
+}
+
+/// Paint the live grid's cells at screen origin `(x0, y0)` into `cart` (a mono
+/// cell store: per-cell bg rect when it differs from the ground, then the glyph,
+/// then the underline; the block cursor beam last). Out-of-range is impossible
+/// -- `Grid::row` and `Grid::cursor` are already clamped (grid.rs), the tile
+/// trust boundary (14.11.12).
+fn paint_grid(
+    cart: &mut Cartoon,
+    grid: &Grid,
+    x0: i32,
+    y0: i32,
+    gs: &mut GlyphSource,
+    sheet: &Sheet,
+) {
+    let (cw, ch, base) = gs.mono_cell();
+    let (cols, rows) = grid.dims();
+    let gen = gs.gen(); // stable across this frame: glyph() inserts never regen
+    for r in 0..rows {
+        let cy = y0 + r as i32 * ch;
+        for c in 0..cols {
+            let cell = grid.row(r)[c];
+            let cx = x0 + c as i32 * cw;
+            let (fg, bg) = if cell.attrs & ATTR_REVERSE != 0 {
+                (cell.bg, cell.fg)
+            } else {
+                (cell.fg, cell.bg)
+            };
+            if bg != sheet.ground {
+                cart.ops.push(Op::Rect {
+                    x: cx,
+                    y: cy,
+                    w: cw as u32,
+                    h: ch as u32,
+                    color: bg,
+                });
+            }
+            if cell.ch != ' ' && cell.ch != '\0' {
+                if let Some(gref) = gs.glyph(FACE_MONO, 0.0, cell.ch) {
+                    cart.push_glyphs(gen, cx, cy + base, fg, &[gref]);
+                }
+            }
+            if cell.attrs & ATTR_UNDERLINE != 0 {
+                cart.ops.push(Op::Rect {
+                    x: cx,
+                    y: cy + ch - 1,
+                    w: cw as u32,
+                    h: 1,
+                    color: fg,
+                });
+            }
+        }
+    }
+    let (curx, cury, vis) = grid.cursor();
+    if vis {
+        cart.ops.push(Op::Rect {
+            x: x0 + curx as i32 * cw,
+            y: y0 + cury as i32 * ch,
+            w: 2,
+            h: ch as u32,
+            color: sheet.accent,
+        });
     }
 }
 
@@ -226,5 +371,80 @@ mod tests {
             1,
             "the post-zone scroll-off is alone in the new block"
         );
+    }
+
+    // The render (14.11.3): a Cartoon is composed with a real GlyphSource. These
+    // are shape assertions (a Clear, then glyph runs, plus the height contract),
+    // not pixel checks -- the pixels are the ls-gfx-session E2E's job.
+    fn daylight_tile(cols: usize, rows: usize) -> Tile {
+        Tile::new(cols, rows, vt::DAYLIGHT)
+    }
+
+    #[test]
+    fn render_alt_is_grid_only_and_emits_glyphs() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let mut t = daylight_tile(20, 4);
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
+            cursor: (0, 2, true),
+        });
+        let mut cart = Cartoon::new();
+        let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
+        let content = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        assert_eq!(content, 4 * ch, "alt-screen content height == grid height");
+        assert!(matches!(cart.ops.first(), Some(Op::Clear { .. })));
+        assert!(
+            cart.ops.iter().any(|o| matches!(o, Op::Glyphs { .. })),
+            "the grid's glyphs are emitted"
+        );
+    }
+
+    #[test]
+    fn render_normal_scrollback_adds_height_above_the_grid() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let mut t = daylight_tile(20, 4);
+        t.apply(Record::CellDiff {
+            changed: vec![(3, 0, cell('x'))],
+            cursor: (3, 1, true),
+        });
+        let mut cart = Cartoon::new();
+        let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
+        let grid_only = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        // Three lines scroll off -> the scrollback grows -> the content is taller
+        // than the grid tail alone (the flow renders above it, 14.11.3).
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cell('a')], vec![cell('b')], vec![cell('c')]],
+        });
+        let with_hist = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        assert!(
+            with_hist > grid_only,
+            "scrollback adds content height above the grid tail ({with_hist} > {grid_only})"
+        );
+    }
+
+    #[test]
+    fn render_blank_daylight_grid_skips_bg_rects() {
+        // A blank Daylight grid: every cell's bg == the sheet ground, so no bg
+        // Rect is emitted (only the Clear) -- the paint_grid ground-skip. The
+        // cursor beam is one Rect, so exactly one Rect total (the cursor).
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let mut t = daylight_tile(8, 2);
+        t.apply(Record::Mode(ScreenMode::AltScreen)); // grid only, no scrollback flow
+        let mut cart = Cartoon::new();
+        let (w, h) = ((8 * cw) as usize, (2 * ch) as usize);
+        t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let rects = cart
+            .ops
+            .iter()
+            .filter(|o| matches!(o, Op::Rect { .. }))
+            .count();
+        assert_eq!(rects, 1, "only the cursor beam Rect (blank cells skip bg)");
     }
 }

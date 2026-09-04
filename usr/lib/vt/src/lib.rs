@@ -63,7 +63,11 @@ pub struct Palette {
     pub ansi: [u32; 16],
 }
 
-pub const BONFIRE: Palette = Palette { bg: BG, fg: FG, ansi: ANSI };
+pub const BONFIRE: Palette = Palette {
+    bg: BG,
+    fg: FG,
+    ansi: ANSI,
+};
 
 // Parchment: the light counterpart (warm paper + ink; the ANSI tier darkened
 // for contrast on a light field). Values are Aurora's derivation, like the
@@ -127,6 +131,25 @@ pub static THEMES: [(&str, Palette); 3] = [
     ("parchment", PARCHMENT),
     ("spinifex", SPINIFEX),
 ];
+
+// Daylight: the Halcyon compositor's render palette (HALCYON.md section 14.12).
+// A per-tile kaua-term stamps cells in the COMPOSITOR's theme, because the seam
+// ships resolved RGB (14.3) -- the palette must be applied at the producer, not
+// re-mapped in halcyond. Parchment's ANSI over the exact Daylight surface + ink
+// (libhalcyon::DAYLIGHT), so a session tile's grid composites coherently with
+// halcyond's Daylight transcript. Single source of truth: libhalcyon::
+// daylight_palette() returns this. NOT in THEMES (it is the render palette, not
+// a user-selectable set_theme choice). v1.x: the compositor plumbs the palette
+// to the kaua-term (14.6's tier precedent) rather than the producer defaulting.
+pub const DAYLIGHT: Palette = Palette {
+    bg: 0xFFF2_EBE0, // libhalcyon DAYLIGHT.surface
+    fg: 0xFF1A_120A, // libhalcyon DAYLIGHT.fg
+    ansi: {
+        let mut a = PARCHMENT.ansi;
+        a[15] = 0xFF1A_120A; // bright white == default fg (the slot-uniqueness alias)
+        a
+    },
+};
 
 pub const ATTR_REVERSE: u8 = 1 << 0;
 pub const ATTR_UNDERLINE: u8 = 1 << 1;
@@ -200,65 +223,240 @@ fn char_width(c: char) -> usize {
 // selectors). The sort/non-overlap invariant that in_ranges' binary search
 // relies on is asserted by combining_table_is_sorted.
 const COMBINING: &[(u32, u32)] = &[
-    (0x0300, 0x036F), (0x0483, 0x0489), (0x0591, 0x05BD), (0x05BF, 0x05BF),
-    (0x05C1, 0x05C2), (0x05C4, 0x05C5), (0x05C7, 0x05C7), (0x0610, 0x061A),
-    (0x064B, 0x065F), (0x0670, 0x0670), (0x06D6, 0x06DC), (0x06DF, 0x06E4),
-    (0x06E7, 0x06E8), (0x06EA, 0x06ED), (0x0711, 0x0711), (0x0730, 0x074A),
-    (0x07A6, 0x07B0), (0x07EB, 0x07F3), (0x0816, 0x0819), (0x081B, 0x0823),
-    (0x0825, 0x0827), (0x0829, 0x082D), (0x0859, 0x085B), (0x08E3, 0x0902),
-    (0x093A, 0x093A), (0x093C, 0x093C), (0x0941, 0x0948), (0x094D, 0x094D),
-    (0x0951, 0x0957), (0x0962, 0x0963), (0x0981, 0x0981), (0x09BC, 0x09BC),
-    (0x09C1, 0x09C4), (0x09CD, 0x09CD), (0x09E2, 0x09E3), (0x0A01, 0x0A02),
-    (0x0A3C, 0x0A3C), (0x0A41, 0x0A42), (0x0A47, 0x0A48), (0x0A4B, 0x0A4D),
-    (0x0A70, 0x0A71), (0x0A75, 0x0A75), (0x0A81, 0x0A82), (0x0ABC, 0x0ABC),
-    (0x0AC1, 0x0AC5), (0x0AC7, 0x0AC8), (0x0ACD, 0x0ACD), (0x0AE2, 0x0AE3),
-    (0x0B01, 0x0B01), (0x0B3C, 0x0B3C), (0x0B3F, 0x0B3F), (0x0B41, 0x0B44),
-    (0x0B4D, 0x0B4D), (0x0B56, 0x0B56), (0x0B62, 0x0B63), (0x0B82, 0x0B82),
-    (0x0BC0, 0x0BC0), (0x0BCD, 0x0BCD), (0x0C00, 0x0C00), (0x0C3E, 0x0C40),
-    (0x0C46, 0x0C48), (0x0C4A, 0x0C4D), (0x0C55, 0x0C56), (0x0C62, 0x0C63),
-    (0x0C81, 0x0C81), (0x0CBC, 0x0CBC), (0x0CBF, 0x0CBF), (0x0CC6, 0x0CC6),
-    (0x0CCC, 0x0CCD), (0x0CE2, 0x0CE3), (0x0D01, 0x0D01), (0x0D41, 0x0D44),
-    (0x0D4D, 0x0D4D), (0x0D62, 0x0D63), (0x0DCA, 0x0DCA), (0x0DD2, 0x0DD4),
-    (0x0DD6, 0x0DD6), (0x0E31, 0x0E31), (0x0E34, 0x0E3A), (0x0E47, 0x0E4E),
-    (0x0EB1, 0x0EB1), (0x0EB4, 0x0EB9), (0x0EBB, 0x0EBC), (0x0EC8, 0x0ECD),
-    (0x0F18, 0x0F19), (0x0F35, 0x0F35), (0x0F37, 0x0F37), (0x0F39, 0x0F39),
-    (0x0F71, 0x0F7E), (0x0F80, 0x0F84), (0x0F86, 0x0F87), (0x0F8D, 0x0F97),
-    (0x0F99, 0x0FBC), (0x0FC6, 0x0FC6), (0x102D, 0x1030), (0x1032, 0x1037),
-    (0x1039, 0x103A), (0x103D, 0x103E), (0x1058, 0x1059), (0x105E, 0x1060),
-    (0x1071, 0x1074), (0x1082, 0x1082), (0x1085, 0x1086), (0x108D, 0x108D),
-    (0x109D, 0x109D), (0x135D, 0x135F), (0x1712, 0x1714), (0x1732, 0x1734),
-    (0x1752, 0x1753), (0x1772, 0x1773), (0x17B4, 0x17B5), (0x17B7, 0x17BD),
-    (0x17C6, 0x17C6), (0x17C9, 0x17D3), (0x17DD, 0x17DD), (0x180B, 0x180D),
-    (0x1885, 0x1886), (0x18A9, 0x18A9), (0x1920, 0x1922), (0x1927, 0x1928),
-    (0x1932, 0x1932), (0x1939, 0x193B), (0x1A17, 0x1A18), (0x1A1B, 0x1A1B),
-    (0x1A56, 0x1A56), (0x1A58, 0x1A5E), (0x1A60, 0x1A60), (0x1A62, 0x1A62),
-    (0x1A65, 0x1A6C), (0x1A73, 0x1A7C), (0x1A7F, 0x1A7F), (0x1AB0, 0x1ABE),
-    (0x1B00, 0x1B03), (0x1B34, 0x1B34), (0x1B36, 0x1B3A), (0x1B3C, 0x1B3C),
-    (0x1B42, 0x1B42), (0x1B6B, 0x1B73), (0x1B80, 0x1B81), (0x1BA2, 0x1BA5),
-    (0x1BA8, 0x1BA9), (0x1BAB, 0x1BAD), (0x1BE6, 0x1BE6), (0x1BE8, 0x1BE9),
-    (0x1BED, 0x1BED), (0x1BEF, 0x1BF1), (0x1C2C, 0x1C33), (0x1C36, 0x1C37),
-    (0x1CD0, 0x1CD2), (0x1CD4, 0x1CE0), (0x1CE2, 0x1CE8), (0x1CED, 0x1CED),
-    (0x1CF4, 0x1CF4), (0x1CF8, 0x1CF9), (0x1DC0, 0x1DFF), (0x20D0, 0x20F0),
-    (0x2CEF, 0x2CF1), (0x2D7F, 0x2D7F), (0x2DE0, 0x2DFF), (0x302A, 0x302D),
-    (0x3099, 0x309A), (0xA66F, 0xA672), (0xA674, 0xA67D), (0xA69E, 0xA69F),
-    (0xA6F0, 0xA6F1), (0xA802, 0xA802), (0xA806, 0xA806), (0xA80B, 0xA80B),
-    (0xA825, 0xA826), (0xA8C4, 0xA8C5), (0xA8E0, 0xA8F1), (0xA926, 0xA92D),
-    (0xA947, 0xA951), (0xA980, 0xA982), (0xA9B3, 0xA9B3), (0xA9B6, 0xA9B9),
-    (0xA9BC, 0xA9BC), (0xAA29, 0xAA2E), (0xAA31, 0xAA32), (0xAA35, 0xAA36),
-    (0xAA43, 0xAA43), (0xAA4C, 0xAA4C), (0xAAB0, 0xAAB0), (0xAAB2, 0xAAB4),
-    (0xAAB7, 0xAAB8), (0xAABE, 0xAABF), (0xAAC1, 0xAAC1), (0xAAEC, 0xAAED),
-    (0xAAF6, 0xAAF6), (0xABE5, 0xABE5), (0xABE8, 0xABE8), (0xABED, 0xABED),
-    (0xFB1E, 0xFB1E), (0xFE00, 0xFE0F), (0xFE20, 0xFE2F), (0x101FD, 0x101FD),
-    (0x102E0, 0x102E0), (0x10376, 0x1037A), (0x10A01, 0x10A03), (0x10A05, 0x10A06),
-    (0x10A0C, 0x10A0F), (0x10A38, 0x10A3A), (0x10A3F, 0x10A3F), (0x10AE5, 0x10AE6),
-    (0x11001, 0x11001), (0x11038, 0x11046), (0x1107F, 0x11081), (0x110B3, 0x110B6),
-    (0x110B9, 0x110BA), (0x11100, 0x11102), (0x11127, 0x1112B), (0x1112D, 0x11134),
-    (0x11173, 0x11173), (0x11180, 0x11181), (0x111B6, 0x111BE), (0x116AB, 0x116AB),
-    (0x116AD, 0x116AD), (0x116B0, 0x116B5), (0x116B7, 0x116B7), (0x16AF0, 0x16AF4),
-    (0x16B30, 0x16B36), (0x16F8F, 0x16F92), (0x1D167, 0x1D169), (0x1D17B, 0x1D182),
-    (0x1D185, 0x1D18B), (0x1D1AA, 0x1D1AD), (0x1D242, 0x1D244), (0x1DA00, 0x1DA36),
-    (0x1DA3B, 0x1DA6C), (0x1DA75, 0x1DA75), (0x1DA84, 0x1DA84), (0x1DA9B, 0x1DA9F),
-    (0x1DAA1, 0x1DAAF), (0xE0100, 0xE01EF),
+    (0x0300, 0x036F),
+    (0x0483, 0x0489),
+    (0x0591, 0x05BD),
+    (0x05BF, 0x05BF),
+    (0x05C1, 0x05C2),
+    (0x05C4, 0x05C5),
+    (0x05C7, 0x05C7),
+    (0x0610, 0x061A),
+    (0x064B, 0x065F),
+    (0x0670, 0x0670),
+    (0x06D6, 0x06DC),
+    (0x06DF, 0x06E4),
+    (0x06E7, 0x06E8),
+    (0x06EA, 0x06ED),
+    (0x0711, 0x0711),
+    (0x0730, 0x074A),
+    (0x07A6, 0x07B0),
+    (0x07EB, 0x07F3),
+    (0x0816, 0x0819),
+    (0x081B, 0x0823),
+    (0x0825, 0x0827),
+    (0x0829, 0x082D),
+    (0x0859, 0x085B),
+    (0x08E3, 0x0902),
+    (0x093A, 0x093A),
+    (0x093C, 0x093C),
+    (0x0941, 0x0948),
+    (0x094D, 0x094D),
+    (0x0951, 0x0957),
+    (0x0962, 0x0963),
+    (0x0981, 0x0981),
+    (0x09BC, 0x09BC),
+    (0x09C1, 0x09C4),
+    (0x09CD, 0x09CD),
+    (0x09E2, 0x09E3),
+    (0x0A01, 0x0A02),
+    (0x0A3C, 0x0A3C),
+    (0x0A41, 0x0A42),
+    (0x0A47, 0x0A48),
+    (0x0A4B, 0x0A4D),
+    (0x0A70, 0x0A71),
+    (0x0A75, 0x0A75),
+    (0x0A81, 0x0A82),
+    (0x0ABC, 0x0ABC),
+    (0x0AC1, 0x0AC5),
+    (0x0AC7, 0x0AC8),
+    (0x0ACD, 0x0ACD),
+    (0x0AE2, 0x0AE3),
+    (0x0B01, 0x0B01),
+    (0x0B3C, 0x0B3C),
+    (0x0B3F, 0x0B3F),
+    (0x0B41, 0x0B44),
+    (0x0B4D, 0x0B4D),
+    (0x0B56, 0x0B56),
+    (0x0B62, 0x0B63),
+    (0x0B82, 0x0B82),
+    (0x0BC0, 0x0BC0),
+    (0x0BCD, 0x0BCD),
+    (0x0C00, 0x0C00),
+    (0x0C3E, 0x0C40),
+    (0x0C46, 0x0C48),
+    (0x0C4A, 0x0C4D),
+    (0x0C55, 0x0C56),
+    (0x0C62, 0x0C63),
+    (0x0C81, 0x0C81),
+    (0x0CBC, 0x0CBC),
+    (0x0CBF, 0x0CBF),
+    (0x0CC6, 0x0CC6),
+    (0x0CCC, 0x0CCD),
+    (0x0CE2, 0x0CE3),
+    (0x0D01, 0x0D01),
+    (0x0D41, 0x0D44),
+    (0x0D4D, 0x0D4D),
+    (0x0D62, 0x0D63),
+    (0x0DCA, 0x0DCA),
+    (0x0DD2, 0x0DD4),
+    (0x0DD6, 0x0DD6),
+    (0x0E31, 0x0E31),
+    (0x0E34, 0x0E3A),
+    (0x0E47, 0x0E4E),
+    (0x0EB1, 0x0EB1),
+    (0x0EB4, 0x0EB9),
+    (0x0EBB, 0x0EBC),
+    (0x0EC8, 0x0ECD),
+    (0x0F18, 0x0F19),
+    (0x0F35, 0x0F35),
+    (0x0F37, 0x0F37),
+    (0x0F39, 0x0F39),
+    (0x0F71, 0x0F7E),
+    (0x0F80, 0x0F84),
+    (0x0F86, 0x0F87),
+    (0x0F8D, 0x0F97),
+    (0x0F99, 0x0FBC),
+    (0x0FC6, 0x0FC6),
+    (0x102D, 0x1030),
+    (0x1032, 0x1037),
+    (0x1039, 0x103A),
+    (0x103D, 0x103E),
+    (0x1058, 0x1059),
+    (0x105E, 0x1060),
+    (0x1071, 0x1074),
+    (0x1082, 0x1082),
+    (0x1085, 0x1086),
+    (0x108D, 0x108D),
+    (0x109D, 0x109D),
+    (0x135D, 0x135F),
+    (0x1712, 0x1714),
+    (0x1732, 0x1734),
+    (0x1752, 0x1753),
+    (0x1772, 0x1773),
+    (0x17B4, 0x17B5),
+    (0x17B7, 0x17BD),
+    (0x17C6, 0x17C6),
+    (0x17C9, 0x17D3),
+    (0x17DD, 0x17DD),
+    (0x180B, 0x180D),
+    (0x1885, 0x1886),
+    (0x18A9, 0x18A9),
+    (0x1920, 0x1922),
+    (0x1927, 0x1928),
+    (0x1932, 0x1932),
+    (0x1939, 0x193B),
+    (0x1A17, 0x1A18),
+    (0x1A1B, 0x1A1B),
+    (0x1A56, 0x1A56),
+    (0x1A58, 0x1A5E),
+    (0x1A60, 0x1A60),
+    (0x1A62, 0x1A62),
+    (0x1A65, 0x1A6C),
+    (0x1A73, 0x1A7C),
+    (0x1A7F, 0x1A7F),
+    (0x1AB0, 0x1ABE),
+    (0x1B00, 0x1B03),
+    (0x1B34, 0x1B34),
+    (0x1B36, 0x1B3A),
+    (0x1B3C, 0x1B3C),
+    (0x1B42, 0x1B42),
+    (0x1B6B, 0x1B73),
+    (0x1B80, 0x1B81),
+    (0x1BA2, 0x1BA5),
+    (0x1BA8, 0x1BA9),
+    (0x1BAB, 0x1BAD),
+    (0x1BE6, 0x1BE6),
+    (0x1BE8, 0x1BE9),
+    (0x1BED, 0x1BED),
+    (0x1BEF, 0x1BF1),
+    (0x1C2C, 0x1C33),
+    (0x1C36, 0x1C37),
+    (0x1CD0, 0x1CD2),
+    (0x1CD4, 0x1CE0),
+    (0x1CE2, 0x1CE8),
+    (0x1CED, 0x1CED),
+    (0x1CF4, 0x1CF4),
+    (0x1CF8, 0x1CF9),
+    (0x1DC0, 0x1DFF),
+    (0x20D0, 0x20F0),
+    (0x2CEF, 0x2CF1),
+    (0x2D7F, 0x2D7F),
+    (0x2DE0, 0x2DFF),
+    (0x302A, 0x302D),
+    (0x3099, 0x309A),
+    (0xA66F, 0xA672),
+    (0xA674, 0xA67D),
+    (0xA69E, 0xA69F),
+    (0xA6F0, 0xA6F1),
+    (0xA802, 0xA802),
+    (0xA806, 0xA806),
+    (0xA80B, 0xA80B),
+    (0xA825, 0xA826),
+    (0xA8C4, 0xA8C5),
+    (0xA8E0, 0xA8F1),
+    (0xA926, 0xA92D),
+    (0xA947, 0xA951),
+    (0xA980, 0xA982),
+    (0xA9B3, 0xA9B3),
+    (0xA9B6, 0xA9B9),
+    (0xA9BC, 0xA9BC),
+    (0xAA29, 0xAA2E),
+    (0xAA31, 0xAA32),
+    (0xAA35, 0xAA36),
+    (0xAA43, 0xAA43),
+    (0xAA4C, 0xAA4C),
+    (0xAAB0, 0xAAB0),
+    (0xAAB2, 0xAAB4),
+    (0xAAB7, 0xAAB8),
+    (0xAABE, 0xAABF),
+    (0xAAC1, 0xAAC1),
+    (0xAAEC, 0xAAED),
+    (0xAAF6, 0xAAF6),
+    (0xABE5, 0xABE5),
+    (0xABE8, 0xABE8),
+    (0xABED, 0xABED),
+    (0xFB1E, 0xFB1E),
+    (0xFE00, 0xFE0F),
+    (0xFE20, 0xFE2F),
+    (0x101FD, 0x101FD),
+    (0x102E0, 0x102E0),
+    (0x10376, 0x1037A),
+    (0x10A01, 0x10A03),
+    (0x10A05, 0x10A06),
+    (0x10A0C, 0x10A0F),
+    (0x10A38, 0x10A3A),
+    (0x10A3F, 0x10A3F),
+    (0x10AE5, 0x10AE6),
+    (0x11001, 0x11001),
+    (0x11038, 0x11046),
+    (0x1107F, 0x11081),
+    (0x110B3, 0x110B6),
+    (0x110B9, 0x110BA),
+    (0x11100, 0x11102),
+    (0x11127, 0x1112B),
+    (0x1112D, 0x11134),
+    (0x11173, 0x11173),
+    (0x11180, 0x11181),
+    (0x111B6, 0x111BE),
+    (0x116AB, 0x116AB),
+    (0x116AD, 0x116AD),
+    (0x116B0, 0x116B5),
+    (0x116B7, 0x116B7),
+    (0x16AF0, 0x16AF4),
+    (0x16B30, 0x16B36),
+    (0x16F8F, 0x16F92),
+    (0x1D167, 0x1D169),
+    (0x1D17B, 0x1D182),
+    (0x1D185, 0x1D18B),
+    (0x1D1AA, 0x1D1AD),
+    (0x1D242, 0x1D244),
+    (0x1DA00, 0x1DA36),
+    (0x1DA3B, 0x1DA6C),
+    (0x1DA75, 0x1DA75),
+    (0x1DA84, 0x1DA84),
+    (0x1DA9B, 0x1DA9F),
+    (0x1DAA1, 0x1DAAF),
+    (0xE0100, 0xE01EF),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -271,7 +469,12 @@ pub struct Cell {
 
 impl Cell {
     fn blank(fg: u32, bg: u32) -> Cell {
-        Cell { ch: ' ', fg, bg, attrs: 0 }
+        Cell {
+            ch: ' ',
+            fg,
+            bg,
+            attrs: 0,
+        }
     }
 }
 
@@ -326,7 +529,11 @@ pub struct SgrPen {
 
 impl SgrPen {
     pub fn new(pal: &Palette) -> SgrPen {
-        SgrPen { fg: pal.fg, bg: pal.bg, attrs: 0 }
+        SgrPen {
+            fg: pal.fg,
+            bg: pal.bg,
+            attrs: 0,
+        }
     }
 
     /// Apply one SGR parameter list (the numbers between `CSI` and `m`).
@@ -535,13 +742,20 @@ pub struct Vt {
 
 impl Vt {
     pub fn new(cols: usize, rows: usize) -> Vt {
+        Vt::with_palette(cols, rows, BONFIRE)
+    }
+
+    /// Like `new`, but the screen is born in `pal` (its default fg/bg + ANSI).
+    /// A per-tile kaua-term uses this with `DAYLIGHT` so its cells carry the
+    /// COMPOSITOR's theme (HALCYON.md 14.6/14.12) -- the seam ships resolved
+    /// RGB, so the palette is applied at the producer, not re-mapped downstream.
+    pub fn with_palette(cols: usize, rows: usize, pal: Palette) -> Vt {
         // The parser assumes cols >= 1 && rows >= 1 (scroll_bot = rows-1, cursor
         // clamps, cy*cols+cx indexing). resize() guards this; new() must too, so
         // compositor-supplied zero geometry cannot underflow at birth (F2). A
         // shared crate -- kaua-term constructs a Vt per tile.
         let cols = cols.max(1);
         let rows = rows.max(1);
-        let pal = BONFIRE;
         Vt {
             cols,
             rows,
@@ -629,7 +843,11 @@ impl Vt {
         if (ncols == self.cols && nrows == self.rows) || ncols == 0 || nrows == 0 {
             return;
         }
-        let shift = if self.cy >= nrows { self.cy + 1 - nrows } else { 0 };
+        let shift = if self.cy >= nrows {
+            self.cy + 1 - nrows
+        } else {
+            0
+        };
         let ccols = if self.cols < ncols { self.cols } else { ncols };
         let (pfg, pbg) = (self.pal.fg, self.pal.bg);
         let mut cells = vec![Cell::blank(pfg, pbg); ncols * nrows];
@@ -664,8 +882,16 @@ impl Vt {
             self.cx = ncols - 1;
         }
         self.saved = (
-            if self.saved.0 >= ncols { ncols - 1 } else { self.saved.0 },
-            if self.saved.1 >= nrows { nrows - 1 } else { self.saved.1 },
+            if self.saved.0 >= ncols {
+                ncols - 1
+            } else {
+                self.saved.0
+            },
+            if self.saved.1 >= nrows {
+                nrows - 1
+            } else {
+                self.saved.1
+            },
         );
         self.dirty = vec![true; nrows];
     }
@@ -1015,7 +1241,11 @@ impl Vt {
         // The shim over the extracted SgrPen (one SGR machinery, two
         // consumers -- see SgrPen). Copy-in/apply/copy-out keeps the grid's
         // field layout untouched.
-        let mut pen = SgrPen { fg: self.fg, bg: self.bg, attrs: self.attrs };
+        let mut pen = SgrPen {
+            fg: self.fg,
+            bg: self.bg,
+            attrs: self.attrs,
+        };
         pen.apply(&self.pal, &self.params[..self.nparams]);
         self.fg = pen.fg;
         self.bg = pen.bg;
@@ -1061,7 +1291,11 @@ impl Vt {
             }
         }
         let (cx, cy) = (self.cx, self.cy);
-        let attrs = if w == 2 { self.attrs | ATTR_WIDE } else { self.attrs };
+        let attrs = if w == 2 {
+            self.attrs | ATTR_WIDE
+        } else {
+            self.attrs
+        };
         self.write_cell(cx, cy, ch, attrs);
         if w == 2 {
             // The continuation (right half): a blank carrying the pen (so
@@ -1113,10 +1347,12 @@ impl Vt {
         // it. A DECSTBM region (top != 0) discards its top line, and the alt
         // screen has no scrollback -- neither surfaces a Scroll boundary.
         if self.capture_events && !self.on_alt && top == 0 {
-            self.pending.push(Boundary::Scroll(self.cells[0..cols].to_vec()));
+            self.pending
+                .push(Boundary::Scroll(self.cells[0..cols].to_vec()));
         }
         // Shift rows (top+1..=bot) up one within the band; blank row `bot`.
-        self.cells.copy_within((top + 1) * cols..(bot + 1) * cols, top * cols);
+        self.cells
+            .copy_within((top + 1) * cols..(bot + 1) * cols, top * cols);
         let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[bot * cols..(bot + 1) * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
@@ -1128,7 +1364,8 @@ impl Vt {
         let cols = self.cols;
         let (top, bot) = (self.scroll_top, self.scroll_bot);
         // Shift rows (top..bot) down one within the band; blank row `top`.
-        self.cells.copy_within(top * cols..bot * cols, (top + 1) * cols);
+        self.cells
+            .copy_within(top * cols..bot * cols, (top + 1) * cols);
         let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[top * cols..(top + 1) * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
@@ -1224,7 +1461,8 @@ impl Vt {
         let cols = self.cols;
         let start = self.cy * cols;
         let end = (self.scroll_bot + 1) * cols;
-        self.cells.copy_within(start..end - n * cols, start + n * cols);
+        self.cells
+            .copy_within(start..end - n * cols, start + n * cols);
         let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[start..start + n * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
@@ -1327,8 +1565,11 @@ impl Vt {
             if let Some(rest) = s.strip_prefix("7770;aurora;") {
                 is_config = true;
                 if let Some((k, v)) = rest.split_once(';') {
-                    let clean = |t: &str| !t.is_empty() && !t.bytes().any(|b| b < 0x20 || b == b';');
-                    if clean(k) && !v.contains(';') && !v.bytes().any(|b| b < 0x20)
+                    let clean =
+                        |t: &str| !t.is_empty() && !t.bytes().any(|b| b < 0x20 || b == b';');
+                    if clean(k)
+                        && !v.contains(';')
+                        && !v.bytes().any(|b| b < 0x20)
                         && self.settings_req.len() < 16
                     {
                         let mut line = String::with_capacity(k.len() + 1 + v.len());
@@ -1429,14 +1670,14 @@ mod tests {
     #[test]
     fn erase_mode1_at_deferred_wrap_last_row_no_oob() {
         let mut vt = Vt::new(8, 4); // cols=8, rows=4
-        // Move to the last row, then fill the row exactly to the width so the
-        // cursor lands in the deferred-wrap state cx == cols.
+                                    // Move to the last row, then fill the row exactly to the width so the
+                                    // cursor lands in the deferred-wrap state cx == cols.
         feed(&mut vt, b"\x1b[4;1H"); // CUP row 4 col 1 -> cy=3, cx=0
         feed(&mut vt, b"abcdefgh"); // 8 chars fill the row; cx now == cols (8)
         assert_eq!(vt.cy, 3);
         assert_eq!(vt.cx, vt.cols); // the deferred-wrap state
-        // ESC[1J (erase from start of display to cursor inclusive) MUST NOT
-        // panic. Pre-fix: cur = 3*8 + 8 = 32 == cells.len() -> cells[..=32] OOB.
+                                    // ESC[1J (erase from start of display to cursor inclusive) MUST NOT
+                                    // panic. Pre-fix: cur = 3*8 + 8 = 32 == cells.len() -> cells[..=32] OOB.
         feed(&mut vt, b"\x1b[1J");
         // ESC[1K (erase from start of line to cursor inclusive) -- the sibling.
         feed(&mut vt, b"\x1b[4;1H");
@@ -1484,7 +1725,7 @@ mod tests {
         feed(&mut vt, b"\x1b]0;title-with-no-terminator"); // unterminated OSC
         feed(&mut vt, b"\xff\xfe"); // stray UTF-8 continuation bytes
         feed(&mut vt, b"x"); // ground state still works
-        // No panic reaching here is the assertion.
+                             // No panic reaching here is the assertion.
     }
 
     // Alt-screen enter/leave swaps a fresh buffer and restores dims + cursor.
@@ -1515,7 +1756,7 @@ mod tests {
         assert!(!vt.wrap);
         feed(&mut vt, b"\x1b[?1049l"); // leave WITHOUT ?7h
         assert!(vt.wrap); // the implicit DECRC restored autowrap
-        // The explicit DECSC/DECRC pair carries it too.
+                          // The explicit DECSC/DECRC pair carries it too.
         feed(&mut vt, b"\x1b7\x1b[?7l");
         assert!(!vt.wrap);
         feed(&mut vt, b"\x1b8");
@@ -1567,11 +1808,16 @@ mod tests {
         // value on .lines(), so `theme spinifex\nmode 640 480` slipped the
         // compositor-tier `mode` past the single-token allowlist). The
         // whole crafted OSC is dropped; nothing reaches settings_req.
-        feed(&mut vt, b"\x1b]7770;aurora;theme;spinifex\nmode 640 480\x07");
+        feed(
+            &mut vt,
+            b"\x1b]7770;aurora;theme;spinifex\nmode 640 480\x07",
+        );
         feed(&mut vt, b"\x1b]7770;aurora;theme\x01;evil\x07"); // control in key
         feed(&mut vt, b"\x1b]7770;aurora;theme;a\rb\x07"); // CR in value
-        assert!(vt.settings_req.is_empty(),
-            "a control byte in an OSC settings key/value must be rejected");
+        assert!(
+            vt.settings_req.is_empty(),
+            "a control byte in an OSC settings key/value must be rejected"
+        );
         // Oversize discards; the parser stays in sync after it.
         let mut big = Vec::from(&b"\x1b]7770;aurora;theme;"[..]);
         big.extend(core::iter::repeat(b'x').take(300));
@@ -1624,7 +1870,10 @@ mod tests {
     #[test]
     fn decstbm_confines_scroll() {
         let mut vt = Vt::new(4, 5);
-        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
         feed(&mut vt, b"\x1b[2;4r"); // region 1-based 2;4 -> 0-based [1,3], homes (0,0)
         feed(&mut vt, b"\x1b[4;1H\n"); // cursor to the bottom margin (row 3), LF scrolls the band
         assert_eq!(vt.cells[0].ch, '0'); // row 0: outside the region, untouched
@@ -1658,7 +1907,10 @@ mod tests {
     #[test]
     fn ri_scrolls_region_down_at_top() {
         let mut vt = Vt::new(4, 5);
-        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
         feed(&mut vt, b"\x1b[2;4r\x1b[2;1H"); // region [1,3]; cursor to the top margin (row 1)
         feed(&mut vt, b"\x1bM"); // RI at the top margin -> scroll the band down
         assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
@@ -1690,7 +1942,10 @@ mod tests {
     #[test]
     fn su_scrolls_region_up_cursor_unmoved() {
         let mut vt = Vt::new(4, 5);
-        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
         feed(&mut vt, b"\x1b[2;4r"); // region 0-based [1,3]; homes cursor to (0,0)
         feed(&mut vt, b"\x1b[3;2H"); // park the cursor at cy=2, cx=1
         feed(&mut vt, b"\x1b[S"); // SU default 1 -> band shifts up, row 3 blanks
@@ -1705,7 +1960,10 @@ mod tests {
     #[test]
     fn sd_scrolls_region_down() {
         let mut vt = Vt::new(4, 5);
-        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
         feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
         feed(&mut vt, b"\x1b[T"); // SD default 1 -> band shifts down, row 1 blanks
         assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
@@ -1720,7 +1978,10 @@ mod tests {
         // The clamp: a hostile CSI count scrolls at most the band height, which
         // clears the region -- and bounds the loop (no multi-billion iteration).
         let mut vt = Vt::new(4, 5);
-        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
         feed(&mut vt, b"\x1b[2;4r"); // region [1,3], height 3
         feed(&mut vt, b"\x1b[999999S"); // clamped to 3 -> whole band cleared
         assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
@@ -1856,7 +2117,7 @@ mod tests {
         assert_eq!(vt.cells[0].ch, '\u{4E00}');
         assert_eq!(vt.cells[0].attrs & ATTR_WIDE, 0); // degraded, not marked wide
         assert!(vt.cx <= vt.cols); // the invariant ICH/DCH/ECH rely on
-        // the original abort site: a wide glyph at the bottom row of a 1-col grid
+                                   // the original abort site: a wide glyph at the bottom row of a 1-col grid
         let mut vt = Vt::new(1, 4);
         feed(&mut vt, b"\x1b[4;1H"); // last row
         feed(&mut vt, b"\xf0\x9f\x98\x80"); // U+1F600 emoji, wide
@@ -1880,7 +2141,10 @@ mod tests {
     fn insert_lines_confined_to_region() {
         // F3 (P1): IL confined to [scroll_top, scroll_bot].
         let mut vt = Vt::new(1, 5);
-        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
         feed(&mut vt, b"\x1b[2;4r"); // region 0-based [1,3]
         feed(&mut vt, b"\x1b[2;1H"); // cursor row 1 (inside)
         feed(&mut vt, b"\x1b[L"); // IL 1
@@ -1894,7 +2158,10 @@ mod tests {
     #[test]
     fn delete_lines_confined_to_region() {
         let mut vt = Vt::new(1, 5);
-        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
         feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
         feed(&mut vt, b"\x1b[2;1H"); // row 1
         feed(&mut vt, b"\x1b[M"); // DL 1
@@ -1908,7 +2175,10 @@ mod tests {
     #[test]
     fn insert_delete_lines_noop_outside_region() {
         let mut vt = Vt::new(1, 5);
-        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
         feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
         feed(&mut vt, b"\x1b[5;1H"); // cursor row 4 (BELOW region)
         feed(&mut vt, b"\x1b[L");
@@ -1974,9 +2244,15 @@ mod tests {
     fn title_osc_forwarded_raw() {
         let mut vt = Vt::new(6, 1);
         vt.set_capture_events(true);
-        assert_eq!(drive(&mut vt, b"\x1b]0;hi\x07"), vec![Boundary::Osc(b"0;hi".to_vec())]);
+        assert_eq!(
+            drive(&mut vt, b"\x1b]0;hi\x07"),
+            vec![Boundary::Osc(b"0;hi".to_vec())]
+        );
         // OSC 2 (title) via ST terminator.
-        assert_eq!(drive(&mut vt, b"\x1b]2;t\x1b\\"), vec![Boundary::Osc(b"2;t".to_vec())]);
+        assert_eq!(
+            drive(&mut vt, b"\x1b]2;t\x1b\\"),
+            vec![Boundary::Osc(b"2;t".to_vec())]
+        );
     }
 
     #[test]
@@ -2026,10 +2302,13 @@ mod tests {
         feed(&mut vt, b"\x1b[2;1HA\x1b[3;1HB\x1b[4;1HC"); // rows 1,2,3 = A,B,C
         feed(&mut vt, b"\x1b[4;1H"); // cursor to the region's bottom
         let bs = drive(&mut vt, b"\n"); // one region scroll
-        // Positive control: the scroll DID happen (row 2 'B' shifted into row 1),
-        // so the absence of a Scroll boundary is meaningful, not vacuous.
+                                        // Positive control: the scroll DID happen (row 2 'B' shifted into row 1),
+                                        // so the absence of a Scroll boundary is meaningful, not vacuous.
         assert_eq!(vt.cells[2].ch, 'B'); // row 1 (index 1*cols=2) now holds 'B'
-        assert!(bs.iter().all(|b| !matches!(b, Boundary::Scroll(_))), "{bs:?}");
+        assert!(
+            bs.iter().all(|b| !matches!(b, Boundary::Scroll(_))),
+            "{bs:?}"
+        );
     }
 
     #[test]

@@ -5741,9 +5741,10 @@ impl Comp {
         // (either direction) is logged once as the fg/bg witness. BACKWARD-COMPAT:
         // no session leaf -> has_session false -> bg_now empty -> active_* equal the
         // raw vis/nleaves and the decision is byte-identical to the pre-d-1b logic.
-        let has_session = vis
-            .iter()
-            .any(|v| self.surf(v.1).map_or(false, |s| principal_is_session(s.owner_principal)));
+        let has_session = vis.iter().any(|v| {
+            self.surf(v.1)
+                .map_or(false, |s| principal_is_session(s.owner_principal))
+        });
         let bg_now: Vec<usize> = if has_session {
             vis.iter()
                 .filter(|v| {
@@ -5776,6 +5777,28 @@ impl Comp {
                     "session gone"
                 }
             );
+        }
+        // A backgrounded leaf is invisible + dormant, so it must not keep input
+        // focus: the user's keystrokes would vanish into a renderer they cannot
+        // see. When a session leaf takes the display, move focus off a now-
+        // backgrounded leaf (the console renderer) onto a visible session leaf --
+        // the input twin of the scanout priority (14.11.9), so a session tile
+        // actually receives keys. On logout the session leaf retires and `retire`
+        // re-homes focus to what remains. Gated by has_session, so every
+        // pre-session + session-less path is untouched (byte-identical focus).
+        if has_session
+            && self
+                .layout
+                .focused_surface()
+                .map_or(false, |f| bg_now.contains(&f))
+        {
+            if let Some(slot) = vis.iter().find_map(|v| {
+                self.surf(v.1)
+                    .filter(|s| principal_is_session(s.owner_principal))
+                    .map(|_| v.0)
+            }) {
+                self.layout.focus(slot);
+            }
         }
         let active_vis: Vec<(usize, usize, Rect)> = vis
             .iter()
@@ -6220,8 +6243,7 @@ impl Comp {
             match actor {
                 Actor::Renderer => true,
                 Actor::Session(p) => {
-                    self.layout.is_empty_leaf(slot)
-                        && self.layout.pane_owner_principal(slot) == p
+                    self.layout.is_empty_leaf(slot) && self.layout.pane_owner_principal(slot) == p
                 }
                 Actor::Client(_) => false,
             }
