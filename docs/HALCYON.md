@@ -1536,10 +1536,21 @@ dies shows an exit affordance; a relayout that drops the leaf reaps it.
   unified wait: the `poll_scan_one` `KOBJ_LOOM` arm + `loom_poll`; `libtapestry`'s
   `EventRing` SQPOLL setup + userspace CQ reap + the ring fd exposed for `poll`. Its
   own kernel-test (`test_loom.c` extension) + the SMP gate; audit-bearing (Loom + poll).
-- **KT-1.5b -- halcyond ingest -> the model (on the unified `poll`).** The
-  `poll { loom-fd | N up-pipes | consdrain }` loop; apply CellDiff to a per-tile live
-  grid, ScrollOff + Control(Osc1936) to the scrollback transcript, Mode to the render
-  mode; render normal (scrollback + grid) and alt (grid only).
+- **KT-1.5b-i -- the unified `poll` (consdrain only). LANDED.** `libtapestry`
+  gains `connect_sqpoll` / `adopt_flags` / `poll_fd` (additive; `connect` stays
+  non-SQPOLL, so aurora is untouched); halcyond opens its event set SQPOLL and
+  replaces the block-on-ring (`EventRing::wait`) with ONE `poll { ring.poll_fd()
+  | /dev/consdrain }`. Fixes the frame-coupled console latency (shell output
+  wakes the renderer at once, not at the next compositor frame tick) and removes
+  the F7 root cause (the SQPOLL kthread demuxes the session's parked read replies
+  continuously -- see `docs/reference/150-halcyond.md`). No tiles yet. Proven by
+  the default suite (aurora-no-regression, `loom.poll` unit, the `loom-smoke`
+  SQPOLL leg) + the `ls-halcyon.exp` graphical E2E (render + rich + reflow +
+  menus, all on the SQPOLL ring).
+- **KT-1.5b-ii -- halcyond ingest -> the model.** halcyond spawns ONE kaua-term
+  over a pipe pair and folds its up-pipe into the same `poll`; apply CellDiff to a
+  per-tile live grid, ScrollOff + Control(Osc1936) to the scrollback transcript,
+  Mode to the render mode; render normal (scrollback + grid) and alt (grid only).
 - **KT-1.5c -- multi-tile.** Per-leaf spawn/teardown off `reconcile`, the N-pipe
   multiplex in the unified poll, focus-routed input (Key/Resize down), per-tile
   composite -> **unblocks H-4d**.

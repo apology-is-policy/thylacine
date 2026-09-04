@@ -278,10 +278,18 @@ with the menu still placed -- THE GATE's wedged-owner lever -- and says
 `tapestry::EventRing` (one session + one Loom ring) and every surface it
 owns lives on it: the console (`Surface::fullscreen_on`), each tag-bar
 tile (`chrome_on`), the menu (`menu_on`); the pane-tree files are read on
-the ring's session root. The loop's step (1) takes the console's next
-event or, when its queue is empty, blocks in `EventRing::wait` -- any
-surface's event wakes it -- and the pumps (`ChromeSet::pump`,
-`MenuSet::service`) drain their surfaces' queues every pass. This retires
+the ring's session root. Since KT-1.5b-i (2026-09-04) the ring is SQPOLL
+(`EventRing::connect_sqpoll`), so a kernel poll-thread drives the session
+reader and posts completions off-thread. The loop's step (1) takes the
+console's next event or, when its queue is empty, blocks in ONE `poll(2)`
+over the ring fd (`EventRing::poll_fd`) AND `/dev/consdrain` -- `poll`
+reports POLLIN for any surface's event exactly as the old `EventRing::wait`
+woke on any completion, AND for console output, so shell output wakes the
+renderer at once instead of at the next compositor frame tick (the old
+`EventRing::wait` blocked on the ring alone; the console mirror was drained
+per-pass only after some other event woke the loop -- the frame-coupled
+console latency). The pumps (`ChromeSet::pump`, `MenuSet::service`) drain
+their surfaces' queues every pass. This retires
 the H-3c session-reader dance (`service(block_first)` waiting on the
 menu's own ring while the console was polled) and FIXES the H-3b-3 tiles'
 latency: a tile's CONFIGURE used to land only at the next pane-tree RPC
@@ -408,12 +416,18 @@ optimization (v0 presents full frames).
 - The consfeed held-queue discipline is aurora's #129/#135/#136 verbatim;
   its policy lives in `input.rs` so the host tests pin it — do not inline
   a "simpler" retry loop in the bin.
-- OWNED, deferred (the H-3c-2 round F7, pre-existing): the held-feed path
-  (`wait_is_bounded`) polls and sleeps; a submit-only Loom enter demuxes
-  nothing, so while the feed is held and nothing else makes an RPC on the
-  session, the console's parked read reply sits undemuxed and every KEY
-  typed queues server-side until the compositor's 128-event cap WEDGE-
-  retires the console (a held key for ~4 s in front of a silent, non-reading
-  foreground). The honest primitive is a timed Loom enter (a kernel seam +
-  a syscall-arg change); a per-pass throwaway RPC would be a workaround.
+- ADDRESSED by KT-1.5b-i (the H-3c-2 round F7, pre-existing): the held-feed
+  path (`wait_is_bounded`) polls and sleeps; on the OLD non-SQPOLL ring a
+  submit-only Loom enter demuxed nothing, so while the feed was held and
+  nothing else made an RPC on the session, the console's parked read reply
+  sat undemuxed and every KEY typed queued server-side until the compositor's
+  128-event cap WEDGE-retired the console (a held key for ~4 s in front of a
+  silent, non-reading foreground). The honest primitive named here -- a timed
+  Loom enter -- is exactly what the SQPOLL ring now provides: its kernel
+  poll-thread drives the session reader on a frame-boundary deadline
+  (`p9_client_reader_pump_once_deadline`) and demuxes the parked reply
+  continuously, independent of halcyond's loop branch, so the held-feed path
+  no longer starves the console's demux. A targeted repro (feed held + silent
+  foreground + key flood, asserting no wedge-retire) is owed at the KT-1 audit
+  to confirm the close.
   `memory/bug_held_feed_path_never_demuxes.md`.

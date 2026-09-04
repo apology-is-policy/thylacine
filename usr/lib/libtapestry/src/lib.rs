@@ -59,7 +59,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 #[cfg(feature = "guest")]
-use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, ENTER_GETEVENTS};
+use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, ENTER_GETEVENTS, SETUP_SQPOLL};
 #[cfg(feature = "guest")]
 use libthyla_rs::{
     t_close, t_open, t_read, t_weft_map, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
@@ -981,13 +981,42 @@ impl EventRing {
         Self::adopt(root)
     }
 
-    /// A ring over a session root fd the caller opened; the ring owns it
-    /// from here (closed with the ring).
-    pub fn adopt(root: i64) -> Result<EventRing, TapError> {
+    /// As `connect`, but SQPOLL (KT-1.5b): the kernel poll-thread drives
+    /// this session's reader and posts completions asynchronously, so the
+    /// ring fd (`poll_fd`) becomes pollable and a multiplexing client waits
+    /// in one `poll(2)` over the ring + its other streams instead of
+    /// blocking in `wait`. The `/srv/tapestry` (srvconn) transport is
+    /// deadline-capable, which the SQPOLL reader requires (the kernel loom
+    /// register gate rejects a non-deadline-capable handle on an SQPOLL ring).
+    pub fn connect_sqpoll() -> Result<EventRing, TapError> {
+        let root = unsafe {
+            t_open(
+                T_WALK_OPEN_FROM_ROOT,
+                b"/srv/tapestry".as_ptr(),
+                13,
+                T_OREAD,
+            )
+        };
         if root < 0 {
             return Err(TapError::Connect);
         }
-        let ring = match Ring::setup(RING_ENTRIES, 0) {
+        Self::adopt_flags(root, SETUP_SQPOLL)
+    }
+
+    /// A ring over a session root fd the caller opened; the ring owns it
+    /// from here (closed with the ring). Non-SQPOLL (the client's own
+    /// blocking `wait` drives the reader -- aurora's discipline).
+    pub fn adopt(root: i64) -> Result<EventRing, TapError> {
+        Self::adopt_flags(root, 0)
+    }
+
+    /// As `adopt`, with the Loom setup `flags` (`SETUP_SQPOLL` for a
+    /// pollable, kthread-driven ring -- see `connect_sqpoll`).
+    pub fn adopt_flags(root: i64, flags: u32) -> Result<EventRing, TapError> {
+        if root < 0 {
+            return Err(TapError::Connect);
+        }
+        let ring = match Ring::setup(RING_ENTRIES, flags) {
             Ok(r) => r,
             Err(_) => {
                 unsafe { t_close(root) };
@@ -1027,6 +1056,15 @@ impl EventRing {
     /// the ring: never close it.
     pub fn root(&self) -> i64 {
         self.core.borrow().root.0
+    }
+
+    /// The ring's Loom fd, for `poll(2)`. Meaningful only on an SQPOLL ring
+    /// (`connect_sqpoll`): the kthread posts completions off-thread there, so
+    /// `poll` reports POLLIN when an event is ready. On a non-SQPOLL ring
+    /// nothing drives the reads outside `wait`, so this never becomes ready.
+    /// Owned by the ring: never close it.
+    pub fn poll_fd(&self) -> i32 {
+        self.core.borrow().ring.raw_fd()
     }
 
     /// The display geometry off this session's global ctl.

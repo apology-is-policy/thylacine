@@ -302,16 +302,22 @@ pub extern "C" fn rs_main() -> i64 {
 
     // THE EVENT SET (H-3c-2): ONE session + ONE Loom ring for every surface
     // this renderer opens -- the console, the tag-bar tiles, the menu -- so
-    // one blocking wait wakes for any of their events and one session's
-    // reader demuxes all of them. (Two sessions under one thread starved
-    // whichever the thread was not waiting on: a tile's CONFIGURE landed
-    // only at the next pane-tree RPC, a menu's key never -- the H-3c lever.)
-    // The console surface + the ring (bounded connect retry; aurora's
-    // discipline).
+    // one wait wakes for any of their events and one session's reader demuxes
+    // all of them. (Two sessions under one thread starved whichever the
+    // thread was not waiting on: a tile's CONFIGURE landed only at the next
+    // pane-tree RPC, a menu's key never -- the H-3c lever.)
+    //
+    // KT-1.5b: the ring is SQPOLL, so the kernel poll-thread drives the
+    // session reader and posts completions off-thread. The main loop then
+    // blocks in ONE poll(2) over { ring.poll_fd() | /dev/consdrain } instead
+    // of the ring alone, so shell output wakes the renderer at once rather
+    // than at the next compositor frame tick (the frame-coupled console
+    // latency). The console surface + the ring (bounded connect retry;
+    // aurora keeps the non-SQPOLL connect()).
     let mut ring: Option<EventRing> = None;
     let mut surf: Option<Surface> = None;
     for i in 0..CONNECT_TRIES {
-        let r = match EventRing::connect() {
+        let r = match EventRing::connect_sqpoll() {
             Ok(r) => r,
             Err(e) => {
                 if i == CONNECT_TRIES - 1 {
@@ -785,8 +791,31 @@ pub extern "C" fn rs_main() -> i64 {
             match surf.poll_event() {
                 Ok(Some(e)) => Some(e),
                 Ok(None) => {
-                    if ring.wait().is_err() {
-                        say!("halcyond: event ring wait failed (compositor gone); exiting");
+                    // KT-1.5b-i: block in ONE poll over the SQPOLL ring AND
+                    // the console mirror, so shell output wakes us at once
+                    // instead of at the next compositor frame tick (the
+                    // frame-coupled console latency). The ring's kthread
+                    // drives the session reader and posts CQEs off-thread, so
+                    // poll(ring_fd) reports POLLIN for any surface's event
+                    // (console / tile / menu) exactly as the old ring.wait()
+                    // woke on any completion; timeout -1 blocks indefinitely,
+                    // matching it. A console-only wake leaves this surface's
+                    // queue empty (take_event -> None); step (2) drains the
+                    // console and the top re-renders.
+                    let mut waitfds = [
+                        TPollFd {
+                            fd: ring.poll_fd(),
+                            events: T_POLLIN,
+                            revents: 0,
+                        },
+                        TPollFd {
+                            fd: drain as i32,
+                            events: T_POLLIN,
+                            revents: 0,
+                        },
+                    ];
+                    if unsafe { t_poll(waitfds.as_mut_ptr(), 2, -1) } < 0 {
+                        say!("halcyond: unified poll failed (compositor gone); exiting");
                         return 1;
                     }
                     match surf.poll_event() {
