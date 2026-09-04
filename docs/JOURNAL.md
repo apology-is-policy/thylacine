@@ -121,10 +121,15 @@ rate-limit follow-up is tracked), and F5 (SDL declares DYNAMIC unconditionally,
 so a static visible SDL app pins the clock -- a power tradeoff, the doc's
 argued policy) are recorded as bounded "Known caveats" in reference/139. No code
 defect surfaced, so no re-build/re-gate and no round 2 (a clean close needs
-none). **Still open:** the current build is `BAKE_DOSBOX=0` (no Duke3D
-in the pool), so a full rebuild is owed before the operator can play Duke3D with
-the fix in place -- the SDL path is proven via quake, but the operator's exact
-app wants the DOSBox image rebuilt (deferred; the mac went to the main track).
+none). **Duke3D image rebuilt + regression-gated:** a full `BAKE_DOSBOX=1` build
+re-baked SDL2 (with the fix, cached from the earlier build) + DOSBox + staged
+Duke3D to the pool; `ls-gfx-dosbox-duke3d` GREEN -- Duke3D runs under
+core=dynamic (CAP_JIT dynrec), renders, and takes input, with no regression from
+the SDL change (DOSBox declares DYNAMIC via the same SDL path). So the operator
+can now boot and play Duke3D with the oscillation fixed. **Still open (DX-5 loose
+ends, fresh context):** the dynrec-vs-normal perf number (unblocked now the clock
+is stable) and the DX5M.COM mouse witness (the mouse path is already proven via
+ls-gfx-play, so this is a rigorous witness, not a feature gap).
 
 ---
 
