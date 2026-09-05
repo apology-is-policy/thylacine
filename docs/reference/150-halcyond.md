@@ -863,10 +863,3 @@ optimization (v0 presents full frames).
   foreground + key flood, asserting no wedge-retire) is owed at the KT-1 audit
   to confirm the close.
   `memory/bug_held_feed_path_never_demuxes.md`.
-- H-4d-2: `tile.rs`'s
-  `a_mark_drags_the_view_to_its_row_and_the_frame_maps_every_block` (the
-  frame covers every block in order without overlap, `hit` answers the block
-  under a y and nothing in the gaps, a mark on the oldest block scrolls the
-  view up to it and paints the band, a mark on the newest scrolls back, the
-  written-back offset is clamped); `tiles.rs`'s two `tile_command` cases;
-  kaua-term's `input_round_trips` gained `Text`.

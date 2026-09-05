@@ -281,10 +281,6 @@ impl SessionTile {
         );
         Some(SessionTile {
             leaf,
-        // The tile renders RICH (halcyond rasterizes the transcript, fontdue):
-        // the kaua-term declares it to the hosted program (KAUA-TERM.md R1),
-        // which is what arms a tile shell's zones and a tool's objects.
-        cmd.arg("--beacon").arg("rich");
             surf,
             child,
             _down: down,

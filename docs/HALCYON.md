@@ -1438,13 +1438,6 @@ The gate (H-4d) never waits on the kernel work.
   composition.
 - **§13.3** "ingests the byte stream via `t.feed()`" (in-process) → the generic-VT
   parse **moves to the `kaua-term`**; the transcript **consumes cells** over the seam
-  **AS-BUILT (H-4d-2a, 2026-09-05):** the advertise side rides the SPAWN
-  (`kaua-term --beacon <tier>` -> the hosted program's inherited
-  `/env/BEACON`) rather than a pts ctl verb -- per-tile as required, no
-  dynamic switch at v1.0 -- and the kernel's part is the pts SLAVE's `'t'`
-  class (`SYS_FD_DEVCLASS`; the Beacon gate reads `'c'` or `'t'`). The render
-  side is halcyond's rasterizer, RICH for every tile. The console
-  special-case remains for the non-tile fallback.
   (§14.3). The `TCell` model and everything above the parse are unchanged.
 - **§13.4(a)** "the raw-VT pane class hosts a full `Vt` grid … in `halcyond`" →
   **superseded** by the `kaua-term` process; the shared `usr/lib/vt` crate is grown
@@ -1607,27 +1600,6 @@ waking promptly on any -- a byte on a tile pipe, a surface event, or console out
 On a tile pipe -> drain records -> that tile's `FrameDecoder` -> its grid; on the
 loom-fd -> reap the CQ in userspace + route surface events; on consdrain -> the
 existing console drain. Pipes and `/dev/consdrain` are already pollable
-**AS-BUILT at H-4d-2b (2026-09-05): the span state reaches the cells.** The
-zone/block cut is as above, but the SPAN state (obj / em / hdr) had never
-reached the grid's cells or the scrolled-off rows (interned with no obj), so
-no row in a tile ever carried an obj run -- the tile menu (H-4d-2) landed
-hollow on its first gate (Esc entered Normal mode with zero rows: the `ls`
-output was still on the 36-row grid, and the grid was invisible to the row
-machinery). Now the PRODUCER stamps every cell with the serial of the last
-Beacon frame its VT forwarded (`vt::Cell.span`; the kaua-term reads no body --
-a numeric OSC selector, R5 kept), the record carries that serial
-(`Control::Osc1936Raw { serial, frame }` -- explicit on the wire, never
-counted at both ends, so a dropped or oversize frame can never shift every
-later cell onto the wrong span), and halcyond, feeding the same frames in
-order, notes the state AFTER each under its serial (`SpanMap`, an 8192-entry
-ring validated by the full serial). A grid cell therefore resolves to
-(block, obj, em, hdr) however late it scrolls off, and `push_scrolled_rows`
-interns em / obj / hdr -- COPYING an obj from its source block into the
-landing block when the grid straddled a zone cut, so every block stays
-self-contained (its Line styles index its own obj table). Genera/CLIM-shaped:
-presentations are recorded on the output stream at output time, never
-reconstructed by the display.
-
 (`kernel/pipe.c`; `cons_drain_poll`); the **new** piece is making the Loom ring
 pollable (§14.11.7a). This also eliminates a pre-existing **FRAME-coupled** console
 latency: halcyond/aurora block on the ring and drain consdrain only per frame ->
@@ -1635,16 +1607,6 @@ latency: halcyond/aurora block on the ring and drain consdrain only per frame ->
 (`tapestryd/src/main.rs:124`, `aurora/src/main.rs:21`). With a pollable ring the wait
 is byte-driven, not frame-driven -- the fix lands system-wide (aurora shares
 `EventRing`).
-**AS-BUILT at H-4d-2b (2026-09-05):** the grid IS the virtual trailing block.
-`select::GRID_BLOCK` rows follow the transcript's in a tile's flat list
-(`flatten_with_grid`); Normal mode starts on the grid's cursor row (the
-prompt), `w` / `b` step obj runs across both (`Tile::grid_runs` -- a grid run
-is keyed by its start column + 1, the grid's analogue of a block's obj
-index), Enter and a click resolve a grid run through its cell span to the
-owning block's obj (`grid_run_obj`), and the render bands the marked grid row
-and underlines its run under `GRID_KEY`. Yank in a tile is still owed (the
-pts clipboard work).
-
 
 **14.11.7a The kernel enabler -- `KObj_Loom` pollable + the compositor ring runs
 SQPOLL (operator-ratified live 2026-09-03).** Two pieces, both small and

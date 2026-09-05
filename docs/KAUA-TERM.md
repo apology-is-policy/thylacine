@@ -166,12 +166,6 @@ Main records the same contract in HALCYON 14.3 (its scripture half).
 
 ```
   tile:  app (ut OR Linux binary)
-AS-BUILT (H-4d-2a, 2026-09-05): `kaua-term --beacon <none|cells|rich>` writes the
-tier into its own `/env/BEACON` before `spawn_on_slave`, so the hosted app inherits
-it; the pts SLAVE answers `'t'` to `SYS_FD_DEVCLASS` (the kernel's pts registry,
-never a qid bit) and the Beacon gate admits `'t'` beside the console's `'c'`; `ut`'s
-pts branch arms its transcript zones from the inheritance iff rich AND its stdout
-is that terminal. Absent = none, fail-closed. Until this every tile was plain.
            |  fd 0/1/2 = the pts SLAVE
            v
          pts slave  --(ptyfs userspace line discipline: cook/echo/isig)-->  pts master
