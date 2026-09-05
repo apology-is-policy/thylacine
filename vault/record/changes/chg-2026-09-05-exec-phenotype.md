@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-exec brought current: the phenotype threaded, the interpreter rewrite, the pheno-mount resolver"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["f590e607"]
 touched:
   - sub-kernel-exec
 established: []
