@@ -23,6 +23,72 @@ needed the operator.
 
 ---
 
+## Run 32 (vault absorption, 2026-09-05, Opus 4.8, effort max): four kernel-entry/namespace giants + the H-arc folds
+
+**Where it sits.** A vault-track run (`../thylacine-vault`, `vault/bootstrap` ==
+origin/main), not main's. The operator ratified keeping aux's R6 tooling fix and
+greenlit "keep going through the knowledge backlog." This run de-staled the four
+kernel-entry/namespace dossiers whose code had drifted furthest, then cleared the
+H-4c/H-4d-1 fold backlog. Six increments, all lint-green, both mirrors, tip
+`1db2e9b9`. It runs AFTER Run 31 because it consumes Run 31's output (it folds
+H-4c/H-4d-1).
+
+**The method, because it repeated four times.** Each dossier is `audit: hard`,
+so every count was RE-DERIVED by measurement against the code, never incremented
+from the dossier's own prior figure. `syscall-abi` (`13e2c89a`): 103->107 live
+syscalls, span 106->109, holes 4->3 (SYS_FD_DEVCLASS filled 80), C mirror 75->77,
+Rust 95->100 -- the Rust count intersected against the kernel enum because its
+naive `T_SYS_` prefix returns 102 and two of those are bounds constants, the trap
+the dossier already flagged. `syscall-dispatch` (`04d2cd63`): 11138->14731 lines,
+103->107 arms, 49->50 handler/inner splits, 69->88 validator sites; the one
+structural add was execve's Design-D phenotype re-decision. `stalk` (`c3989a56`):
+three whole features the dossier predated -- union resolution (the atomic member
+snapshot + cross-the-exact-source, UM-8 F4), symlink expansion (an absolute
+target re-anchors at the caller's OWN Territory root; a `..`-bearing target MUST
+restart, not splice, because a `..` pop needs a 1:1 trail), and the phenotype
+accumulator seeded at the `restart:` label. `vivarium` (`490620b0`, biggest at
+2671 churn): the principles were current and left intact; the enumerations were
+stale (T1 6->11, reject ~50->73) and two of its own caveats had gone doubly stale
+(VIV_NATIVE_CEILING 105->109).
+
+**The wrong turn worth recording.** The `syscall-abi` mirror-agreement check --
+does every name in both a library and the kernel agree on its number? -- first
+returned "0 agreeing, 0 disagreeing" for BOTH mirrors, which is impossible (the C
+mirror obviously overlaps). The cause was BSD `sed`: it does not understand `\s`,
+so the `s/^\s*.../` transforms normalizing the name->number pairs were silent
+no-ops, and `join` compared untransformed lines that never matched. Re-run with
+`[[:space:]]`, the intersections were clean (77 C names, 100 Rust names, zero
+disagreements). A control returning zero for the impossible case is the tell; the
+macOS-BSD trap is the cause.
+
+**A convention learned, not assumed.** Provenance backlinks are NOT materialized
+into dossier files -- `quaestor backlinks <id>` computes them on demand, and the
+"(generated ...)" block in stalk/vivarium stays an empty placeholder; syscall-abi
+and syscall-dispatch instead carry hand-written Provenance lines. So the two
+families take opposite handling: append to the hand-written line, leave the
+generated block alone. Verified against the territory dossier (whose chg landed
+last session and whose generated block is likewise empty).
+
+**The H-arc folds.** main lands its H-4 chunks with `no-dossier-change` naming
+the exact delta and deferring the vault-owned prose to this track (the KT-1
+inheritance pattern). Two were owed: H-4c (`447cbea9`, beacon's `ObjType::Layout`
++ three `verbs.default` rules) and H-4d-1 (`1db2e9b9`, sub-tapestryd's
+`creator_conn` reservation that answers E_AGAIN -- not E_PERM -- to a
+same-principal sibling conn while the creator lives, closing the
+restore-tool-vs-session-compositor claim race; and sub-libthyla-rs's `println`
+one-write form, which matters because the console writer role is claimed per
+write). Each folded as a vault fold-chg citing main's record, verified against the
+landed code -- not a re-derivation. One fumble, caught by lint: `depth: standard`
+on the first fold-chg; the field takes only `rich`|`skeletal`.
+
+**What is open.** The remaining stale dossiers are fresh-subsystem or
+fresh-window work: `sub-stratum-boot` (joey.c, ~5659 churn, the biggest), the
+proc.c cluster (proc/jobctl/caps/death -- it will close the Design-D and
+fork-inherits-caps cross-refs this run's dispatch/vivarium dossiers point at),
+`sub-substrate-build`, and a NEW `sub-sdl-port` for aux's N-2a-2 SDL work. The
+stale backlog stands at 53 dossiers (from 56 at the run's start; four dossiers
+dropped off, and the folds touched already-current ones).
+
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
 **Where it sits.** Run 30 closed and landed the KT-1 audit arc (`6e6503ad`). This run picked up the operator's Cmd+F report that aux reproduced and handed over (yip 0048, `memory/bug_zoom_fullscreen_surface_not_scaled.md`): zooming DOSBox-X showed its 640x417 frame native at the display's top-left on black. Compositor geometry, so main's.
