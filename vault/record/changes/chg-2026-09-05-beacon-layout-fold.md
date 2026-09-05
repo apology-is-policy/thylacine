@@ -4,7 +4,7 @@ type: chg
 title: "The H-4c layout gesture folded into sub-beacon: ObjType::Layout (type=layout) + the three verbs.default layout rules"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["b5a65d18"]
 touched:
   - sub-beacon
 established: []
