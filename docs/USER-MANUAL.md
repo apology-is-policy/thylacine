@@ -22,6 +22,23 @@ The bar: a user landing on a topic page should be able to learn how to do the th
 
 ---
 
+## In-OS manual + rich rendering (the `/manual` plan)
+
+The manual is authored here as Markdown — the source of truth in the repo. It is
+destined to ship **in the OS at `/manual`**, so a running-system user reads it the
+way Unix users read `man` pages, and a companion reader will render it richly via
+**Beacon** (`docs/BEACON.md`, Thylacine's semantic output markup): rich under
+Halcyon/Aurora, degrading to the same clean plain text on a serial terminal or a
+pipe. One source therefore serves both `cat /manual/<topic>` today and a rich
+reader later — no second format, no transpile-and-diverge.
+
+Design confirmed 2026-09-05; this **supersedes the 2026-05-31 deferral**. The
+manual is now grown chapter-by-chapter as user-facing surfaces stabilise, starting
+with the DOSBox chapter. (Not every PR is gated on a manual update yet — chapters
+are added deliberately, not mandated per-commit, until the surface set settles.)
+
+---
+
 ## Snapshot
 
 - **Thylacine version**: pre-v0.1 (Phase 0 complete; Phase 1 not yet started).
@@ -50,8 +67,9 @@ The bar: a user landing on a topic page should be able to learn how to do the th
 | 11-troubleshooting.md (planned) | Boot failures, recovery shell, common panics, /ctl/log/ | All users | Phase 5+ |
 | 12-halcyon.md (planned) | Halcyon usage; scroll buffer; image display; video; customization | End users | Phase 8 |
 | 13-keyboard-shortcuts.md (planned) | Halcyon keybindings, terminal-mode keybindings | End users | Phase 8 |
+| [40-dosbox.md](manual/40-dosbox.md) | DOSBox-X: DOS + 3dfx/Glide games — settings, cycle presets, mouse capture | Users | **Available now** |
 
-(Pages appear as their underlying surfaces ship. Phase 0 scaffold provides the index + overview only.)
+(OS-topic pages are 00–13; ported **applications** start at 40. Pages appear as their surfaces stabilise; the DOSBox chapter is the first grown under the revived manual.)
 
 ---
 
@@ -91,3 +109,4 @@ Update cadence:
 | Date | Change | Reason |
 |---|---|---|
 | 2026-05-04 | Scaffolded (Phase 0 complete). | Index and template for the user manual. Per-topic pages appear as their surfaces ship from Phase 4 onward (Stratum admin), Phase 5 (Utopia), Phase 6 (Linux compat + containers + network), Phase 8 (Halcyon). |
+| 2026-09-05 | Revived; added the `/manual` in-OS + Beacon-render plan and the first content chapter (`40-dosbox.md`). | Supersedes the 2026-05-31 deferral (operator-directed). Manual now grown chapter-by-chapter, Markdown source → shipped at `/manual` → rich-rendered via Beacon. |
