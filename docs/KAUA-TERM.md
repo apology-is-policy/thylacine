@@ -151,6 +151,12 @@ Main records the same contract in HALCYON 14.3 (its scripture half).
 
 ```
   tile:  app (ut OR Linux binary)
+AS-BUILT (H-4d-2a, 2026-09-05): `kaua-term --beacon <none|cells|rich>` writes the
+tier into its own `/env/BEACON` before `spawn_on_slave`, so the hosted app inherits
+it; the pts SLAVE answers `'t'` to `SYS_FD_DEVCLASS` (the kernel's pts registry,
+never a qid bit) and the Beacon gate admits `'t'` beside the console's `'c'`; `ut`'s
+pts branch arms its transcript zones from the inheritance iff rich AND its stdout
+is that terminal. Absent = none, fail-closed. Until this every tile was plain.
            |  fd 0/1/2 = the pts SLAVE
            v
          pts slave  --(ptyfs userspace line discipline: cook/echo/isig)-->  pts master
@@ -263,7 +269,11 @@ its own worktree.
   render tier. Retiring the single-renderer `/dev/winsize` + `CCONSWINSZONLY`
   console special-case for tiles moves winsize AND the beacon advertisement onto
   the per-tile pts ctl together. (The console special-case stays for the non-tile
-  console/serial fallback.)
+  console/serial fallback.) **AS-BUILT (H-4d-2a):** the advertise side rides the
+  spawn (`--beacon` -> the hosted program's inherited `/env/BEACON`) plus the
+  kernel's `'t'` class, not a pts ctl verb -- per-tile as required, no dynamic
+  switch at v1.0; winsize was already per-pts (KT-1). The console special-case
+  remains.
 - **R2 -- SHARED PARSER crate** (refined by seam=B): the full-xterm PARSER
   (`usr/lib/vt`) is the one shared codebase, consumed by the kaua-term (tile
   producer) AND aurora (console renderer); halcyond consumes its `Cell` type on

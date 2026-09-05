@@ -109,9 +109,7 @@ fn read_beacon_tier() -> Option<&'static str> {
     }
     let line = &buf[..n];
     let needle = b"beacon ";
-    let at = line
-        .windows(needle.len())
-        .position(|w| w == needle)?;
+    let at = line.windows(needle.len()).position(|w| w == needle)?;
     let word = &line[at + needle.len()..];
     if word.starts_with(b"rich") {
         Some("rich")
@@ -121,6 +119,20 @@ fn read_beacon_tier() -> Option<&'static str> {
         Some("none")
     } else {
         None
+    }
+}
+
+// H-4d: a pts-hosted ut takes its tier from the pts HOST's advertisement --
+// the inherited /env/BEACON the host wrote at spawn (KAUA-TERM.md R1: the
+// tile's kaua-term declares what halcyond renders). The console's /dev/beacon
+// leaf describes the CONSOLE renderer, which is not this tile's.
+fn env_beacon_tier() -> Option<&'static str> {
+    let v = libthyla_rs::env::var("BEACON")?;
+    match v.trim() {
+        "rich" => Some("rich"),
+        "cells" => Some("cells"),
+        "none" => Some("none"),
+        _ => None,
     }
 }
 
@@ -273,12 +285,7 @@ fn read_file(path: &str) -> Option<String> {
 /// and the session proceeds (tools needing a writable /tmp degrade).
 fn bind_user_tmp(home: &str) {
     unsafe {
-        let hd = t_open(
-            T_WALK_OPEN_FROM_ROOT,
-            home.as_ptr(),
-            home.len(),
-            T_OPATH,
-        );
+        let hd = t_open(T_WALK_OPEN_FROM_ROOT, home.as_ptr(), home.len(), T_OPATH);
         if hd < 0 {
             t_putstr("ut: tmp bind: home open failed\n");
             return;
@@ -355,6 +362,28 @@ pub extern "C" fn rs_main() -> i64 {
         } else {
             t_putstr("ut: pts session (ldisc mode-set rejected)\n");
         }
+        // H-4d (KAUA-TERM.md R1 as-built): the tier is the pts host's
+        // advertisement, inherited in /env/BEACON; zones arm iff it is rich
+        // AND ut's own stdout is a terminal (the pts slave answers 't' to
+        // SYS_FD_DEVCLASS -- a redirected shell emits nothing). No per-prompt
+        // re-read: a tile's tier is fixed for its host's life (no dynamic
+        // per-tile switch at v1.0), so beacon_tier stays None below and the
+        // console re-read never runs. Loud either way -- the H-1 F1 canary's
+        // pts twin; ls-gfx-session asserts the armed line for every tile.
+        match env_beacon_tier() {
+            Some(t) => {
+                t_putstr("ut: beacon ");
+                t_putstr(t);
+                t_putstr(" inherited (pts host)\n");
+                if t == "rich" && libthyla_rs::stdout_is_terminal() {
+                    repl.set_beacon_rich(true);
+                    t_putstr("ut: beacon rich (transcript zones armed)\n");
+                }
+            }
+            None => {
+                t_putstr("ut: beacon tier not advertised by the pts host (plain)\n");
+            }
+        }
     }
 
     // #94-B-b: a session `ut` receives login's inherited /dev/consctl fd
@@ -387,8 +416,10 @@ pub extern "C" fn rs_main() -> i64 {
         // is the ONLY writer of /env/BEACON (it read the advertisement off
         // the console it owns); a consctl-less / pts-hosted / bare-spawned ut
         // takes this branch never, so an INHERITED /env/BEACON from a parent
-        // session is left alone. Zones arm iff the tier is rich AND ut's own
-        // stdout is the console (a redirected session emits nothing).
+        // session is left alone (a pts-hosted ut resolves its tier from that
+        // inheritance in the jc block above). Zones arm iff the tier is rich
+        // AND ut's own stdout is the console (a redirected session emits
+        // nothing).
         let tier = read_beacon_tier();
         if let Some(t) = tier {
             export_beacon(t);

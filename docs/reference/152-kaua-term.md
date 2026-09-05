@@ -40,7 +40,8 @@ pub mod wire {                     // the framed codec, both directions
 }
 ```
 
-The bin (`main.rs`): `kaua-term <cols> <rows> [prog [args...]]` -- fd 0 is
+The bin (`main.rs`): `kaua-term [--beacon none|cells|rich] <cols> <rows> [prog
+[args...]]` -- fd 0 is
 the DOWN channel (halcyond's `Input` frames), fd 1 the UP channel (the
 `Record` frames), fd 2 inherited. It opens a pts pair through `ptyhold`,
 spawns `prog` (default `/bin/ut`, `--home` forwarded verbatim) on the slave,

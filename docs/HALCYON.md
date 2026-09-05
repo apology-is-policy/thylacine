@@ -1280,7 +1280,9 @@ pollable (§14.11.7 / §14.11.7a). The record set:
   to reach the aux tree (a build-prep sync at KT-2; §14.10).
 - **Tier**: under B halcyond renders, so the render tier is RICH for every Halcyon
   tile; the pts advertises `BEACON=rich` (set at kaua-term spawn — §14.6's advertise
-  side), so a tier-aware program in the tile emits rich markup.
+  side), so a tier-aware program in the tile emits rich markup. AS-BUILT at
+  H-4d-2a (2026-09-05): `kaua-term --beacon rich` from the session compositor,
+  the pts slave's `'t'` class from the kernel; §13.7 "Rich tiles".
 
 The native-`ut` VT-round-trip (a native Kaua app feeding cells more directly than
 emitting VT to be re-parsed) stays a **v1.x optimization**; v1.0 native `ut` emits VT
@@ -1386,6 +1388,13 @@ The gate (H-4d) never waits on the kernel work.
   composition.
 - **§13.3** "ingests the byte stream via `t.feed()`" (in-process) → the generic-VT
   parse **moves to the `kaua-term`**; the transcript **consumes cells** over the seam
+  **AS-BUILT (H-4d-2a, 2026-09-05):** the advertise side rides the SPAWN
+  (`kaua-term --beacon <tier>` -> the hosted program's inherited
+  `/env/BEACON`) rather than a pts ctl verb -- per-tile as required, no
+  dynamic switch at v1.0 -- and the kernel's part is the pts SLAVE's `'t'`
+  class (`SYS_FD_DEVCLASS`; the Beacon gate reads `'c'` or `'t'`). The render
+  side is halcyond's rasterizer, RICH for every tile. The console
+  special-case remains for the non-tile fallback.
   (§14.3). The `TCell` model and everything above the parse are unchanged.
 - **§13.4(a)** "the raw-VT pane class hosts a full `Vt` grid … in `halcyond`" →
   **superseded** by the `kaua-term` process; the shared `usr/lib/vt` crate is grown
