@@ -135,15 +135,15 @@ impl Driver for Nocturned {
             // 3. Poll: the listener (only with room, the ptyfs F4 lesson), the
             //    connections, and the IRQ (readable at pending-count >= 1).
             let nc = conns.len().min(MAX_CONNS);
-            let has_room = conns.len() < MAX_CONNS;
             let mut pollfds: Vec<TPollFd> = Vec::with_capacity(2 + nc);
-            if has_room {
-                pollfds.push(TPollFd {
-                    fd: listener as i32,
-                    events: T_POLLIN,
-                    revents: 0,
-                });
-            }
+            // The listener is ALWAYS polled; when full we accept-and-close (below)
+            // so a connector fails fast instead of stalling ~5 s on the srvconn
+            // handshake deadline and only then falling to its own fallback.
+            pollfds.push(TPollFd {
+                fd: listener as i32,
+                events: T_POLLIN,
+                revents: 0,
+            });
             let conn_base = pollfds.len();
             for c in conns.iter().take(nc) {
                 pollfds.push(TPollFd {
@@ -169,11 +169,18 @@ impl Driver for Nocturned {
                 let _ = self.snd.irq_wait();
             }
 
-            // 5. Accept.
-            if has_room && pollfds[0].revents & T_POLLIN != 0 {
+            // 5. Accept -- push if there is room, else close immediately so the
+            //    connector's handshake fails fast (EOF) and it falls to its own
+            //    fallback (SDL's DUMMY), rather than stalling on the handshake
+            //    deadline. conns.len() is fresh here (the teardown pass above ran).
+            if pollfds[0].revents & T_POLLIN != 0 {
                 let h = unsafe { t_srv_accept(listener) };
                 if h >= 0 {
-                    conns.push(Conn::new(h));
+                    if conns.len() < MAX_CONNS {
+                        conns.push(Conn::new(h));
+                    } else {
+                        let _ = unsafe { t_close(h) };
+                    }
                 }
             }
 

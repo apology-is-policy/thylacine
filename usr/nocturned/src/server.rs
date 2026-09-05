@@ -31,7 +31,7 @@ use libthyla_rs::{t_close, t_open, t_walk_create, T_OPATH, T_OREAD, T_WALK_OPEN_
 
 use crate::snd::{Stats, BUFFER_BYTES, PERIODS, PERIOD_BYTES, RATE_HZ};
 
-pub const MAX_CONNS: usize = 8;
+pub const MAX_CONNS: usize = 32;
 const MAX_FIDS: usize = 32;
 const MAX_PENDING_WRITES: usize = 8;
 const SRV_MSIZE: u32 = 32768;

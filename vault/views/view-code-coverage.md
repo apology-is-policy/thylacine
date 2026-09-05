@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 86 unowned · 491 files (82% owned) · ~22805 unswept lines.**
+**405 owned · 86 unowned · 491 files (82% owned) · ~22812 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **68 files, ~30585 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -75,7 +75,7 @@ Excluded as harness and counted here rather than dropped: **68 files, ~30585 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/nocturned | 0 | 3 | 2009 |
+| usr/nocturned | 0 | 3 | 2016 |
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1033 |
 | arch | 34 | 4 | 971 |
@@ -152,9 +152,9 @@ Excluded as harness and counted here rather than dropped: **68 files, ~30585 lin
 | kernel/extinction.c | 229 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
 | kernel/include/thylacine/devcap.h | 208 |
+| usr/nocturned/src/main.rs | 205 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
-| usr/nocturned/src/main.rs | 198 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/ports/sdl2/SDL_config.h | 191 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
