@@ -4,7 +4,7 @@ type: chg
 title: "abi-boot-banner recount: the prose caught up to the twenty-eight-mirror set"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["bca0aa1a"]
 touched:
   - abi-boot-banner
 established: []
