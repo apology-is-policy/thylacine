@@ -136,8 +136,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-05 [[chg-2026-09-05-crate-extraction-sweep]] — The crate extractions -- the refactor the 2026-08-04 sweep named finally landed
 - 2026-09-05 [[chg-2026-09-05-exec-phenotype]] — sub-kernel-exec brought current: the phenotype threaded, the interpreter rewrite, the pheno-mount resolver
 - 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
+- 2026-09-05 [[chg-2026-09-05-fullscreen-zoom]] — The fullscreen-zoom fix: the #56 patchwork latch re-keyed on slot rotation; the letterboxed compose clips to the damage's projection
 - 2026-09-05 [[chg-2026-09-05-halcyon-libs-sweep]] — The Halcyon graphics libs -- the three crates the handoff did not name
 - 2026-09-05 [[chg-2026-09-05-kt1-audit-close-r3]] — KT-1 audit close, round 3: the restructures re-read -- the held-cells sink, the constant open-block cap, the seat held while it hosts, TEV_LAYOUT coalesced
 - 2026-09-05 [[chg-2026-09-05-kt1-audit-close]] — KT-1 audit close, rounds 1-2: the identity mask, the declared seat (takeover, undeclared fallback, TEV_LAYOUT), the windowed tile layout, the never-dropped Resize, the shipped ScrollOffs
-- 2026-09-05 [[chg-2026-09-05-libtapestry-event-ring]] — sub-libtapestry brought current: the shared event ring (H-3c-2), the role constructors (H-3c/H-3d), the surface-leak Drop fix, the host tests
 <!-- generated:end -->

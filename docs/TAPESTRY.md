@@ -1045,7 +1045,23 @@ content. **The §18.3 CONFIGURE emission half is pulled forward**
 at structural composed repaints to all visible surfaces + at
 pending-direct entry), because an accumulator client's slots are
 patchwork (aurora measured — static rows never healed without it); the
-resize-ack/reweave half stays `E_OPNOTSUPP` until G-6b. The 9P tree
+resize-ack/reweave half stays `E_OPNOTSUPP` until G-6b. **Placement of a
+size-mismatched surface (fork 2 + the #56 latch, re-keyed 2026-09-05):** a
+surface whose size differs from its pane's content LETTERBOXES (aspect-fit,
+centered, `libhalcyon::place::letterbox`) unless the compositor has latched it
+an ACCUMULATOR — a present whose damage does not cover the surface **on a
+surface that has presented two or more distinct slots**. Rotation is the
+property the latch exists for: only a rotating client's slot is stale outside
+its damage (it holds the frame from `nslots` presents back), so scaling one
+slot composes half-stale frames and the accumulator CROPS at the content
+origin, damage-clipped. A single-slot presenter (the SDL class: slot 0 is the
+app's framebuffer, complete by construction) may present partial damage —
+`SDL_UpdateWindowSurfaceRects`; DOSBox-X's changed scanline bands — and stays
+letterboxed, each partial present redrawn through the scale as its damage's
+projection (`place::scaled_clip`). Keyed on coverage alone the latch classified
+DOSBox-X an accumulator and pinned it native at the corner: zoomed, 640x417 at
+the top-left of a black display (aux 0048). The latch is one-way; the
+compositor says `surface N patchwork latched (...)` once when it trips. The 9P tree
 gains `layout` + `pane/<id>/{ctl,mode,role,tag,surface,geometry}` (V4
 §18.5); pane files are global — the environment-role mutation gate + the
 D5 layout-observability caveat are the recorded Halcyon-era seam. **This

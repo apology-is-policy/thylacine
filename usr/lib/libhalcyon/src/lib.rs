@@ -9,5 +9,6 @@
 extern crate alloc;
 
 pub mod layout;
+pub mod place;
 pub mod skeleton;
 pub mod theme;

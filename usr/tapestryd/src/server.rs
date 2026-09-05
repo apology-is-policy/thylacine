@@ -908,15 +908,28 @@ struct Surface {
     /// The last letterbox placement logged (one-shot diagnostic).
     lb_logged: Option<(u32, u32, u32, u32)>,
     /// The present-style latch (#56): set the first time a present's
-    /// damage does not cover the full surface; never cleared. A latched
-    /// surface is an ACCUMULATOR (aurora's cell-diff over rotating weave
-    /// slots): each slot is patchwork, so scaling any one slot composes
-    /// alternating half-stale frames -- a size mismatch therefore CROPS
-    /// (damage-clipped) instead of letterboxing. Full-frame presenters
-    /// (the SDL class, the battery) never latch and letterbox both
-    /// directions. One-way by design: a later full redraw must not flap
-    /// the placement back.
+    /// damage does not cover the full surface ON A SURFACE THAT ROTATES
+    /// SLOTS (`slots_presented` names two or more); never cleared. A
+    /// latched surface is an ACCUMULATOR (aurora's cell-diff over rotating
+    /// weave slots): each slot is patchwork -- outside its damage it holds
+    /// the frame from `nslots` presents back -- so scaling any one slot
+    /// composes alternating half-stale frames; a size mismatch therefore
+    /// CROPS (damage-clipped) instead of letterboxing. The rotation
+    /// conjunct is the property the latch exists for: a SINGLE-SLOT
+    /// presenter (the SDL class -- slot 0 IS the app's framebuffer, complete
+    /// by construction) presenting partial damage (SDL_UpdateWindowSurface-
+    /// Rects: DOSBox-X's changed scanline bands, its menu bar) is NOT
+    /// patchwork and letterboxes, its damage projected through the scale
+    /// (`ComposeOp.clip`). Keyed on coverage alone, the latch pinned DOSBox
+    /// at native size in the content's corner -- zoomed, top-left on black.
+    /// Full-frame presenters (the battery, TyrQuake) never latch either
+    /// way. One-way by design: a later full redraw must not flap the
+    /// placement back.
     patchwork: bool,
+    /// Bitmask of the weave slots this surface has ever presented (the
+    /// latch's rotation witness). Survives a reweave: the client's present
+    /// discipline is a property of the client, not of a generation.
+    slots_presented: u32,
     slot_stride: u64,
     /// The CURRENT weave generation (the spec's g-highest). weft_ensure,
     /// the geometry reads, and every post-fence present serve/validate
@@ -1226,6 +1239,11 @@ const HEALTH_PERIOD: u64 = 4;
 struct ComposeOp {
     src: Rect,
     dst: Rect,
+    /// The screen-space part of `dst` this op actually changes: `dst`
+    /// itself for a crop, the damage's projection through the scale for a
+    /// letterboxed compose (`place::scaled_clip`). The CPU path composes and
+    /// pushes only this; the GPU blit is whole-op (one command either way).
+    clip: Rect,
 }
 
 /// The present-path cost census (Warp-C C-4): one cell per op class, wall
@@ -2425,6 +2443,7 @@ impl Comp {
             h: 0,
             lb_logged: None,
             patchwork: false,
+            slots_presented: 0,
             slot_stride: 0,
             weave: None,
             res_ids: [0; WEAVE_SLOTS as usize], // minted with the first generation
@@ -4133,6 +4152,9 @@ impl Comp {
                 return None;
             }
             let (ox, oy, dw2, dh2) = Self::letterbox(sw, sh_full, content.w, content.h);
+            // The damage's projection: what this present changes on screen.
+            let (cx, cy, cw2, ch2) =
+                libhalcyon::place::scaled_clip((x, y, pw, ph), sw, sh_full, dw2, dh2);
             // One-shot geometry diagnostic (per distinct placement).
             if let Some(su) = self.surf_mut(n) {
                 let sig = (ox, oy, dw2, dh2);
@@ -4165,6 +4187,12 @@ impl Comp {
                     w: dw2,
                     h: dh2,
                 },
+                clip: Rect {
+                    x: content.x + ox + cx,
+                    y: content.y + oy + cy,
+                    w: cw2,
+                    h: ch2,
+                },
             });
         }
         // Same-size fast path: damage-clipped.
@@ -4177,14 +4205,16 @@ impl Comp {
         if inter.is_empty() {
             return None;
         }
+        let dst = Rect {
+            x: content.x + inter.x,
+            y: content.y + inter.y,
+            w: inter.w,
+            h: inter.h,
+        };
         Some(ComposeOp {
             src: inter,
-            dst: Rect {
-                x: content.x + inter.x,
-                y: content.y + inter.y,
-                w: inter.w,
-                h: inter.h,
-            },
+            dst,
+            clip: dst,
         })
     }
 
@@ -4289,19 +4319,31 @@ impl Comp {
         };
         let dw = self.gpu.width as u64;
         if op.src.w != op.dst.w || op.src.h != op.dst.h {
+            // Only the clip's rows/cols are composed, indexed ABSOLUTELY
+            // within dst so the nearest-source mapping is the whole-rect
+            // one (`place::nearest_src`, the function `scaled_clip` was
+            // derived from): pixel-identical to a full compose, no seam at
+            // the clip's edge.
+            let c = op.clip.intersect(op.dst);
+            if c.is_empty() {
+                return;
+            }
+            let (row0, row1) = ((c.y - op.dst.y) as u64, (c.y - op.dst.y + c.h) as u64);
+            let (col0, col1) = ((c.x - op.dst.x) as u64, (c.x - op.dst.x + c.w) as u64);
             // SAFETY: src reads stay inside the source image (sx < sw, sy <
             // sh_full by the ratio bound: lx < dst.w => lx*sw/dst.w < sw --
             // valid for scale-down and up); dst rows stay inside the screen
             // buffer (letterbox() bounds the scaled rect inside content, and
-            // content inside the display by the geometry pass).
+            // content inside the display by the geometry pass; the clip is
+            // inside dst by the intersect above).
             unsafe {
-                for row in 0..op.dst.h as u64 {
-                    let sy = (row * sh_full as u64) / op.dst.h as u64;
+                for row in row0..row1 {
+                    let sy = libhalcyon::place::nearest_src(row as u32, sh_full, op.dst.h) as u64;
                     let dy = op.dst.y as u64 + row;
                     let srow = (src_base + sy * sw as u64 * 4) as *const u32;
                     let drow = (screen_va + (dy * dw + op.dst.x as u64) * 4) as *mut u32;
-                    for col in 0..op.dst.w as u64 {
-                        let sx = (col * sw as u64) / op.dst.w as u64;
+                    for col in col0..col1 {
+                        let sx = libhalcyon::place::nearest_src(col as u32, sw, op.dst.w) as u64;
                         *drow.add(col as usize) = *srow.add(sx as usize);
                     }
                 }
@@ -5374,14 +5416,16 @@ impl Comp {
         if src.is_empty() {
             return None;
         }
+        let dst = Rect {
+            x: m.rect.x + src.x,
+            y: m.rect.y + src.y,
+            w: src.w,
+            h: src.h,
+        };
         let op = ComposeOp {
             src,
-            dst: Rect {
-                x: m.rect.x + src.x,
-                y: m.rect.y + src.y,
-                w: src.w,
-                h: src.h,
-            },
+            dst,
+            clip: dst,
         };
         self.compose_cpu(op, va + (slot as u64) * slot_stride, sw, sh);
         Some(op.dst)
@@ -6213,7 +6257,7 @@ impl Comp {
             None => weave_va + (slot as u64) * slot_stride,
         };
         self.compose_cpu(op, src_base, sw, sh_full);
-        Some(op.dst)
+        Some(op.clip)
     }
 
     /// Push a screen-BUFFER region to the host resource + display: the CPU
@@ -7144,26 +7188,12 @@ impl Comp {
     /// return the identity (0, 0, cw, ch). THE ONE GEOMETRY AUTHORITY:
     /// blit_composed_pixels' forward map and ptr_hit's inverse both
     /// derive from this, so they cannot drift apart (the G-7c audit-F3
-    /// lesson made structural).
+    /// lesson made structural). A partial present of a letterboxed surface
+    /// redraws only its damage's projection (`place::scaled_clip`).
     fn letterbox(sw: u32, sh: u32, cw: u32, ch: u32) -> (u32, u32, u32, u32) {
-        if sw == cw && sh == ch {
-            return (0, 0, cw, ch);
-        }
-        // Width-bound iff cw/sw <= ch/sh  <=>  cw*sh <= ch*sw (u64: no
-        // overflow for display-scale dims).
-        let (dw2, dh2) = if (cw as u64) * (sh as u64) <= (ch as u64) * (sw as u64) {
-            (
-                cw,
-                (((sh as u64) * (cw as u64)) / (sw as u64).max(1)) as u32,
-            )
-        } else {
-            (
-                (((sw as u64) * (ch as u64)) / (sh as u64).max(1)) as u32,
-                ch,
-            )
-        };
-        let (dw2, dh2) = (dw2.max(1), dh2.max(1));
-        ((cw - dw2) / 2, (ch - dh2) / 2, dw2, dh2)
+        // The math lives in libhalcyon::place (host-tested) so the battery
+        // derives its sample points from the SAME function.
+        libhalcyon::place::letterbox(sw, sh, cw, ch)
     }
 
     /// The surface under display point (px, py) + the point translated to
@@ -16157,9 +16187,25 @@ impl Conn {
         // (rects_cover_full): the battery's multi-rect leg presents the
         // full frame as two tiles, which a single-full-rect shortcut
         // falsely latched (the moveB pane-center regression).
-        if !rects_cover_full(&rects, w, h) {
-            if let Some(s) = comp.surf_mut(n) {
+        let covers_full = rects_cover_full(&rects, w, h);
+        if let Some(s) = comp.surf_mut(n) {
+            s.slots_presented |= 1 << slot;
+            // Rotation = two or more distinct slots ever presented. Only then
+            // is a slot stale outside its damage (see the field doc); a
+            // single-slot presenter's partial damage is a hint, not a
+            // patchwork, and stays letterboxed.
+            let rotates = s.slots_presented & (s.slots_presented - 1) != 0;
+            if !covers_full && rotates && !s.patchwork {
                 s.patchwork = true;
+                say!(
+                    "tapestryd: surface {} patchwork latched (slot {} of slots {:#b}, {} rects of {}x{})",
+                    n,
+                    slot,
+                    s.slots_presented,
+                    rects.len(),
+                    w,
+                    h
+                );
             }
         }
 

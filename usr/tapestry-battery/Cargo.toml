@@ -11,4 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 libtapestry = { path = "../lib/libtapestry" }
+# The compositor's placement math (letterbox), so the single-slot leg's sample
+# points derive from the SAME function tapestryd composes by.
+libhalcyon = { path = "../lib/libhalcyon" }
 libthyla-rs = { path = "../lib/libthyla-rs" }

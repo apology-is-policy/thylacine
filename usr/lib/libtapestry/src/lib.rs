@@ -242,6 +242,13 @@ pub struct Surface {
     /// Per slot, the `presents` value at which it was last presented, or
     /// `SLOT_UNSEEN` when its content is undefined. Drives `age`.
     slot_seen: [u64; MAX_SLOTS],
+    /// The single-slot discipline (thyla_tap's, the SDL class): every present
+    /// names the current slot and nothing rotates, so that one slot always
+    /// holds the COMPLETE frame and a partial present is a damage hint, not
+    /// a patchwork. The compositor keys its #56 accumulator latch on
+    /// rotation, so such a surface stays letterboxed however small its
+    /// damage; a rotating client's partial present latches the crop.
+    single_slot: bool,
 }
 
 #[cfg(feature = "guest")]
@@ -513,7 +520,18 @@ impl Surface {
             cur_slot: 0,
             presents: 0,
             slot_seen: [SLOT_UNSEEN; MAX_SLOTS],
+            single_slot: false,
         })
+    }
+
+    /// Pin every present to the current slot (on) or resume rotating (off).
+    /// On: the slot is the client's one framebuffer -- draw, present any
+    /// damage, repeat; `age` reads 1 after the first present. Off: the
+    /// rotating discipline (`age` per slot). Under the compositor's #56 rule
+    /// a pinned surface never latches the accumulator crop; a rotating one
+    /// does at its second slot's first partial present.
+    pub fn set_single_slot(&mut self, on: bool) {
+        self.single_slot = on;
     }
 
     /// Handle a CONFIGURE event (section 18.3). A same-size CONFIGURE is
@@ -799,7 +817,9 @@ impl Surface {
         }
         self.slot_seen[self.cur_slot as usize] = self.presents;
         self.presents += 1;
-        self.cur_slot = (self.cur_slot + 1) % self.nslots;
+        if !self.single_slot {
+            self.cur_slot = (self.cur_slot + 1) % self.nslots;
+        }
         Ok(())
     }
 
