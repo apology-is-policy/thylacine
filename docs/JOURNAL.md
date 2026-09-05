@@ -124,11 +124,29 @@ comment is stale -- the live `_Static_assert(sizeof(struct Proc) == 392)` is
 correct, VIVARIUM's phenotype fields grew it after that comment was written.
 Cosmetic (the assert is sound); a vivarium-arc code fix, not a vault edit.
 
+**Then the H-4d-2 family fold cleared the whole H-arc fold backlog.** The peer's
+merge (`f626fe04` -> `7ab2257d`) brought three chgs -- h4d2-tile-menu,
+h4d2a-rich-tiles, h4d3-welcome -- each with `no-dossier-change` and "the vault peer
+folds these." One combined fold-chg (`83ce0206` / `ab7d80b1`) across eight dossiers,
+the rich session tile in three layers: the beacon-tier plumbing (a pts slave is a
+terminal too -- `DC_PTS`, `stdout_is_terminal` = `'c'||'t'`, `env_beacon_tier`), the
+span-serial Beacon threading (a tile renders obj/em/hdr over a cell grid with no
+second parser -- lib-vt's `span_serial` -> halcyond's 8192-ring `SpanMap`, R5), and
+the tile Normal mode / menu / selection. Every named symbol verified in the landed
+code first. The fold also caught a drift my *own* pre-merge de-stale had left:
+syscall.c is 14749, not the 14731 the census recorded, because h4d2a's
+`spoor_devclass` classifier extraction landed via the merge AFTER I measured --
+corrected, with a note that it is a classifier, not a new handler/inner split
+(the 50/45 metric holds). The welcome (h4d3) is "none in code" for sub-halcyond
+(compositor-hosted), correctly no edit.
+
 Eight kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
 vivarium, proc, caps, death, jobctl -- the entry/namespace four plus the whole
-proc.c cluster), the two H-arc folds, and this entry. Backlog: 49 (from 56 at the
-run's start). Open beyond the cluster: `sub-stratum-boot` (joey.c ~5659, biggest),
-`sub-substrate-build`, and a NEW `sub-sdl-port` for aux's N-2a-2 SDL work.
+proc.c cluster), the H-arc fold backlog cleared ENTIRELY (h4c + h4d1 + the
+h4d2-family's eight-dossier fold), and this entry. Backlog: 47 (from 56 at the
+run's start). Open next: `sub-stratum-boot` (joey.c ~5659, biggest),
+`sub-kernel-cons`, `sub-kernel-notes` (aux's area -- check owner first), and a NEW
+`sub-sdl-port` for aux's N-2a-2 SDL work.
 
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
