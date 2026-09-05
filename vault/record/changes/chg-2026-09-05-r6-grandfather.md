@@ -4,7 +4,7 @@ type: chg
 title: "R6 grandfathers committed history: a grown mirror set stops failing past chgs"
 date: 2026-09-05
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["86ad7e8c"]
 touched: [dec-2026-07-31-quaestor]
 established: []
 closed: []
