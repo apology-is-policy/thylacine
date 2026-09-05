@@ -4,7 +4,7 @@ type: chg
 title: "The KT-1 session-compositor crates dossiered: sub-halcyond + sub-kaua-term (from the 150/152 reference prose)"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["3f3cd362"]
 touched: []
 established:
   - sub-halcyond
