@@ -28,6 +28,10 @@ pub enum Cmd<'a> {
     LayoutSave { name: &'a str },
     /// `halcyon layout restore <name>` -- rebuild a saved tree (H-4b).
     LayoutRestore { name: &'a str },
+    /// `halcyon layout list` -- every saved layout, both tiers (H-4c).
+    LayoutList,
+    /// `halcyon layout delete <name>` -- remove a session-tier layout (H-4c).
+    LayoutDelete { name: &'a str },
     /// `halcyon`, `halcyon help`, `--help`, `-h`.
     Help,
 }
@@ -38,9 +42,9 @@ pub enum Cmd<'a> {
 pub enum CmdError {
     /// The first token was not a known subcommand.
     UnknownCommand,
-    /// `layout` with no verb, or a verb that is not save/restore.
+    /// `layout` with no verb, or a verb that is not save/restore/list/delete.
     BadLayoutVerb,
-    /// `layout save|restore` with no name operand.
+    /// `layout save|restore|delete` with no name operand.
     MissingName,
     /// A trailing operand after the name.
     ExtraOperand,
@@ -60,7 +64,13 @@ pub fn parse_cmd<'a>(tokens: &[&'a str]) -> Result<Cmd<'a>, CmdError> {
 
 fn parse_layout<'a>(rest: &[&'a str]) -> Result<Cmd<'a>, CmdError> {
     let verb = rest.first().copied().ok_or(CmdError::BadLayoutVerb)?;
-    if verb != "save" && verb != "restore" {
+    if verb == "list" {
+        if rest.len() > 1 {
+            return Err(CmdError::ExtraOperand);
+        }
+        return Ok(Cmd::LayoutList);
+    }
+    if verb != "save" && verb != "restore" && verb != "delete" {
         return Err(CmdError::BadLayoutVerb);
     }
     let name = *rest.get(1).ok_or(CmdError::MissingName)?;
@@ -70,24 +80,97 @@ fn parse_layout<'a>(rest: &[&'a str]) -> Result<Cmd<'a>, CmdError> {
     if !name_is_valid(name) {
         return Err(CmdError::BadName);
     }
-    Ok(if verb == "save" {
-        Cmd::LayoutSave { name }
-    } else {
-        Cmd::LayoutRestore { name }
+    Ok(match verb {
+        "save" => Cmd::LayoutSave { name },
+        "restore" => Cmd::LayoutRestore { name },
+        _ => Cmd::LayoutDelete { name },
     })
 }
 
 /// A layout name is a single safe path component: non-empty, <= MAX_NAME_LEN,
-/// no leading `.` (so `.`, `..`, and hidden names are all out), and drawn only
-/// from `[A-Za-z0-9._-]` (so no `/` traversal and no whitespace/control). The
-/// name lands in the user's OWN namespace, but a conservative charset keeps a
-/// saved layout a predictable filename and closes traversal by construction.
+/// no leading `.` (so `.`, `..`, and hidden names are all out), no leading `-`
+/// (a name is never mistaken for an option: `halcyon layout restore -h` cannot
+/// name a layout, and a verb menu's `{}` needs no `--`), not the save's
+/// temporary suffix, and drawn only from `[A-Za-z0-9._-]` (so no `/`
+/// traversal and no whitespace/control). The name lands in the user's OWN
+/// namespace, but a conservative charset keeps a saved layout a predictable
+/// filename and closes traversal by construction.
 pub fn name_is_valid(name: &str) -> bool {
-    if name.is_empty() || name.len() > MAX_NAME_LEN || name.starts_with('.') {
+    if name.is_empty()
+        || name.len() > MAX_NAME_LEN
+        || name.starts_with('.')
+        || name.starts_with('-')
+        || name.ends_with(SAVE_TMP_SUFFIX)
+    {
         return false;
     }
     name.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
+/// The suffix of a save's temporary file (`<name>.tmp`, renamed over the
+/// layout once its content is durable). A crash between the write and the
+/// rename leaves one behind; `list` never shows it and no name may end in it.
+pub const SAVE_TMP_SUFFIX: &str = ".tmp";
+
+/// Which tier a listed layout was found in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutTier {
+    /// `$home/lib/halcyon/layouts` -- the user's own, writable.
+    Session,
+    /// `/lib/halcyon/layouts` -- the image's, read-only to the session tool.
+    Device,
+}
+
+impl LayoutTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LayoutTier::Session => "session",
+            LayoutTier::Device => "device",
+        }
+    }
+}
+
+/// One row of `halcyon layout list`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayoutRow {
+    pub name: String,
+    pub tier: LayoutTier,
+    /// A device-tier layout a session-tier one of the same name hides: a
+    /// restore of that name takes the session one (13.7's order).
+    pub shadowed: bool,
+}
+
+/// The list rows from the two directories' entries: invalid names (a save's
+/// `.tmp`, a stray dotfile) dropped, sorted by name with a session row before
+/// the device row it shadows.
+pub fn list_rows(session: &[String], device: &[String]) -> Vec<LayoutRow> {
+    let mut rows: Vec<LayoutRow> = Vec::new();
+    for n in session {
+        if name_is_valid(n) {
+            rows.push(LayoutRow {
+                name: n.clone(),
+                tier: LayoutTier::Session,
+                shadowed: false,
+            });
+        }
+    }
+    for n in device {
+        if name_is_valid(n) {
+            let shadowed = session.iter().any(|s| s == n);
+            rows.push(LayoutRow {
+                name: n.clone(),
+                tier: LayoutTier::Device,
+                shadowed,
+            });
+        }
+    }
+    rows.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then((a.tier == LayoutTier::Device).cmp(&(b.tier == LayoutTier::Device)))
+    });
+    rows
 }
 
 /// The session-tier layouts directory: `<home>/lib/halcyon/layouts` (HALCYON.md
@@ -206,6 +289,64 @@ mod tests {
     }
 
     #[test]
+    fn parse_list_and_delete() {
+        assert_eq!(parse_cmd(&["layout", "list"]), Ok(Cmd::LayoutList));
+        assert_eq!(
+            parse_cmd(&["layout", "list", "extra"]),
+            Err(CmdError::ExtraOperand)
+        );
+        assert_eq!(
+            parse_cmd(&["layout", "delete", "work"]),
+            Ok(Cmd::LayoutDelete { name: "work" })
+        );
+        assert_eq!(parse_cmd(&["layout", "delete"]), Err(CmdError::MissingName));
+    }
+
+    #[test]
+    fn a_name_never_begins_with_a_dash_or_ends_in_the_tmp_suffix() {
+        assert!(!name_is_valid("-h"));
+        assert!(!name_is_valid("--help"));
+        assert!(!name_is_valid("work.tmp"));
+        assert!(name_is_valid("work-1.v2_x"));
+        assert_eq!(
+            parse_cmd(&["layout", "restore", "-h"]),
+            Err(CmdError::BadName)
+        );
+    }
+
+    #[test]
+    fn list_rows_drop_temps_sort_by_name_and_mark_shadowed_device_rows() {
+        let session = vec![
+            String::from("work"),
+            String::from("work.tmp"),
+            String::from(".hidden"),
+        ];
+        let device = vec![String::from("default"), String::from("work")];
+        let rows = list_rows(&session, &device);
+        assert_eq!(
+            rows,
+            vec![
+                LayoutRow {
+                    name: String::from("default"),
+                    tier: LayoutTier::Device,
+                    shadowed: false
+                },
+                LayoutRow {
+                    name: String::from("work"),
+                    tier: LayoutTier::Session,
+                    shadowed: false
+                },
+                LayoutRow {
+                    name: String::from("work"),
+                    tier: LayoutTier::Device,
+                    shadowed: true
+                },
+            ]
+        );
+        assert!(list_rows(&[], &[]).is_empty());
+    }
+
+    #[test]
     fn parse_help_forms() {
         assert_eq!(parse_cmd(&[]), Ok(Cmd::Help));
         assert_eq!(parse_cmd(&["help"]), Ok(Cmd::Help));
@@ -269,7 +410,10 @@ mod tests {
 
     #[test]
     fn device_paths() {
-        assert_eq!(device_layout_path("default"), "/lib/halcyon/layouts/default");
+        assert_eq!(
+            device_layout_path("default"),
+            "/lib/halcyon/layouts/default"
+        );
     }
 
     #[test]
@@ -299,8 +443,8 @@ mod tests {
         // Another real user, and the SYSTEM console: env.
         assert!(owner_is_env(Some(1001), me));
         assert!(owner_is_env(Some(0xFFFF_FFFE), me)); // T_PRINCIPAL_SYSTEM
-        // Owner 0 (INVALID / nobody): env -- the fail-OPEN arm F2 closed. An
-        // occupied principal-0 tile must never be respawned as the user.
+                                                      // Owner 0 (INVALID / nobody): env -- the fail-OPEN arm F2 closed. An
+                                                      // occupied principal-0 tile must never be respawned as the user.
         assert!(owner_is_env(Some(0), me));
         // Unreadable: fail-CLOSED (env, never respawned).
         assert!(owner_is_env(None, me));
@@ -309,7 +453,10 @@ mod tests {
     #[test]
     fn argv_splits_a_tag_on_whitespace() {
         assert_eq!(argv_of("tapestry-demo"), vec!["tapestry-demo"]);
-        assert_eq!(argv_of("hx  /lib/aurora/config\t-r"), vec!["hx", "/lib/aurora/config", "-r"]);
+        assert_eq!(
+            argv_of("hx  /lib/aurora/config\t-r"),
+            vec!["hx", "/lib/aurora/config", "-r"]
+        );
         assert!(argv_of("").is_empty());
         assert!(argv_of("   ").is_empty());
     }

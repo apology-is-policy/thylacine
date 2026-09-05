@@ -256,6 +256,22 @@ expect {
     eof { lc_fail "qemu exited during unzoom" }
 }
 
+# --- H-4c setup: a saved two-tile layout + the startup script, typed into the
+# focused tile B. The tile's own output never reaches this log (it is pixels),
+# so the setup is witnessed at the RE-LOGIN below: the compositor's init line
+# names the rc, the tool restores the layout, the tiling witness reads THREE
+# tiles. `mkdir` is single-level (the mkdir-p-under-home refusal).
+after 1500
+foreach line [list "mkdir /home/michael/lib\n" \
+                   "echo halcyon layout restore rc > /home/michael/lib/halcyon.rc\n" \
+                   "halcyon layout save rc\n"] {
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $line} err]} {
+        lc_fail "qmp-sendtext H-4c setup failed: $err"
+    }
+    after 1200
+}
+after 2000
+
 # --- d-3: FOCUS-ROUTED input + CONTAINMENT -- exit B (focused), A survives ---
 #
 # The new tile B is focused (split sets focused=new-leaf). QMP `exit\n` is
@@ -355,5 +371,69 @@ if {!$saw_logout || !$saw_fg || !$saw_direct} {
 }
 
 lc_pass "KT-1.5d-3: root tile -> split -> 2 tiles -> focus-routed exit (contained) -> last-tile logout -> console resumes"
+
+# --- H-4c: the startup script runs at the NEXT login (rio's `-i`) ---
+#
+# getty -> login again; the compositor's first present spawns the rc under
+# `ut --home`; the rc's `halcyon layout restore rc` rebuilds the saved
+# two-tile tree beside the root tile (empty tags -> no spawns, `0 of 0`), the
+# compositor fills the two owned empties with tiles -> THREE tiles; the init
+# child is reaped (its exit line). A missing init line means the setup above
+# never landed (no rc) or the runner did not fire.
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " { lc_step "H-4c: login prompt after logout" }
+    -re {EXTINCTION:}       { lc_extinction_fail "extinction before the second login prompt" }
+    timeout                 { lc_fail "no login prompt after logout" }
+    eof                     { lc_fail "qemu exited before the second login" }
+}
+lc_raw_send "michael\r" "second login user"
+expect {
+    -ex "password: "  { lc_step "H-4c: password prompt" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction at the second password prompt" }
+    timeout           { lc_fail "no password prompt on the second login" }
+    eof               { lc_fail "qemu exited at the second password prompt" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "second login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" { lc_step "H-4c: the session compositor spawned again" }
+    -ex "login incorrect"  { lc_fail "auth rejected on the second login" }
+    -re {EXTINCTION:}      { lc_extinction_fail "extinction during the second login" }
+    timeout                { lc_fail "the second login never spawned the session compositor" }
+    eof                    { lc_fail "qemu exited during the second login" }
+}
+set timeout 60
+expect {
+    -re {halcyond: session init: /bin/ut --home /home/michael /home/michael/lib/halcyon\.rc \(pid \d+\)} {
+        lc_pass "H-4c: the compositor ran the user's halcyon.rc at session start"
+    }
+    -re {halcyond: session init: /bin/halcyon layout restore default} { lc_fail "H-4c: the rc was not found (the device default ran instead) -- the typed setup did not land" }
+    -re {halcyond: session init spawn failed} { lc_fail "H-4c: the init spawn failed" }
+    -re {halcyond: session logout} { lc_fail "H-4c: the session logged out before the init ran" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction at session init" }
+    timeout { lc_fail "H-4c: no session init line (no rc on disk, or the runner did not fire)" }
+    eof     { lc_fail "qemu exited awaiting the session init" }
+}
+expect {
+    -ex "halcyon: restored 0 of 0 program(s)" { lc_pass "H-4c: the rc restored the saved layout through the session tool" }
+    -re {halcyon: .*(refused|malformed|unreachable|no layout)} { lc_fail "H-4c: the rc's restore errored" }
+    -re {halcyond: session init exited \(code [1-9]} { lc_fail "H-4c: the rc exited non-zero before restoring" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during the rc restore" }
+    timeout { lc_fail "H-4c: the rc's restore never reported" }
+    eof     { lc_fail "qemu exited during the rc restore" }
+}
+expect {
+    -re {tapestryd: session-tiling active=3 } { lc_pass "H-4c: the compositor filled the two restored leaves -- three tiles" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction filling the restored leaves" }
+    timeout { lc_fail "H-4c: the tiling never reached three tiles (the restored empties were not filled)" }
+    eof     { lc_fail "qemu exited awaiting the three-tile witness" }
+}
+expect {
+    -re {halcyond: session init exited \(code 0\)} { lc_pass "H-4c: the init child exited clean and was reaped" }
+    -re {halcyond: session init exited \(code [1-9-]} { lc_fail "H-4c: the init child exited non-zero" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction reaping the init child" }
+    timeout { lc_fail "H-4c: the init child was never reaped" }
+    eof     { lc_fail "qemu exited awaiting the init reap" }
+}
 
 lc_quit

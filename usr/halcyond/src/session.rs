@@ -24,11 +24,12 @@ use halcyond::downq::DownQueue;
 use halcyond::input::map_key;
 use halcyond::layout::{daylight_sheet, Sheet};
 use halcyond::raster::GlyphSource;
+use halcyond::session_init;
 use halcyond::tile::Tile;
 use halcyond::tiles::plan_tiles;
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
 use libhalcyon::theme::daylight_palette;
-use libthyla_rs::fs::File;
+use libthyla_rs::fs::{self, File};
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_poll, t_read, t_write, TPollFd, T_POLLHUP, T_POLLIN, T_POLLOUT};
@@ -83,6 +84,10 @@ const POLL_MAX_NFDS: usize = 64;
 /// The bounded wait when a tile's POLLOUT entry did not fit the poll set
 /// (unreachable at today's pane cap; the defence a raised cap would need).
 const DOWN_OMITTED_POLL_MS: i32 = 10;
+/// While the session init child (halcyon.rc / the default restore) runs, the
+/// idle wait is bounded so its exit is reaped promptly (a zombie holds a
+/// proc-table slot until the next wake otherwise).
+const INIT_REAP_POLL_MS: i32 = 200;
 
 /// How many connect iterations tolerate a refused `session on` before the
 /// compositor runs UNDECLARED: the seat may be mid-handover (the previous
@@ -571,8 +576,24 @@ pub fn run(home: Option<String>) -> i64 {
     let mut ingest_announced = false;
     let mut present_fails: u32 = 0;
     let mut logout: Option<i32> = None;
+    // The session init child (H-4c: rio's `-i` idiom), spawned once after the
+    // first present; reaped at the loop top; killed at logout.
+    let mut init: Option<Child> = None;
+    let mut init_spawned = false;
 
     loop {
+        // (0) Reap the session init child when it exits (the bounded poll
+        // below keeps this reachable while it runs).
+        if let Some(c) = init.as_mut() {
+            if let Ok(Some(st)) = c.try_wait() {
+                say!(
+                    "halcyond: session init exited (code {})",
+                    st.code().unwrap_or(-1)
+                );
+                init = None;
+            }
+        }
+
         // (1) Render dirty tiles at the TOP: the root's first present precedes
         // any wait (first-present-wins scanout; frame ticks reach only visible
         // surfaces).
@@ -595,6 +616,10 @@ pub fn run(home: Option<String>) -> i64 {
                         disp_h,
                         if declared { "" } else { " (undeclared)" }
                     );
+                }
+                if up_announced && !init_spawned {
+                    init_spawned = true;
+                    init = spawn_session_init(home.as_deref());
                 }
             } else {
                 present_fails += 1;
@@ -743,7 +768,13 @@ pub fn run(home: Option<String>) -> i64 {
             }
         }
         let nfds = fds.len();
-        let timeout = if omitted { DOWN_OMITTED_POLL_MS } else { -1 };
+        let timeout = if init.is_some() {
+            INIT_REAP_POLL_MS
+        } else if omitted {
+            DOWN_OMITTED_POLL_MS
+        } else {
+            -1
+        };
         if unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) } < 0 {
             say!("halcyond: session poll failed (compositor gone); exiting");
             logout = Some(1);
@@ -816,8 +847,56 @@ pub fn run(home: Option<String>) -> i64 {
     // next login -> aurora un-backgrounds + resumes (14.12 step 4).
     let code = logout.unwrap_or(0);
     say!("halcyond: session logout (code {})", code);
+    // A still-running init script does not outlive the session.
+    if let Some(mut c) = init.take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
     for (_, t) in core::mem::take(&mut tiles) {
         t.teardown();
     }
     code as i64
+}
+
+/// Spawn the session's startup command (HALCYON.md 13.7, H-4c): the user's
+/// `$home/lib/halcyon.rc` under `ut --home`, else the device `default`
+/// layout's restore through the session tool, else nothing. AS the user (the
+/// compositor already is), under the tile cap mask (the identity axis stops
+/// here, as for every tile program); stdin from /dev/null (a script never
+/// reads the console), stdout/stderr the compositor's own (its lines land in
+/// the daemon log beside ours). None = nothing to run, or the spawn failed
+/// (said; the session lives on -- an rc is a convenience, never a gate).
+fn spawn_session_init(home: Option<&str>) -> Option<Child> {
+    let init = session_init::decide(
+        home,
+        |p: &str| fs::exists(p),
+        fs::exists(session_init::DEVICE_DEFAULT_PATH),
+    );
+    let argv = session_init::argv(&init)?;
+    let mut cmd = Command::new(argv[0].clone());
+    for a in &argv[1..] {
+        cmd.arg(a.clone());
+    }
+    let stdin = match File::open("/dev/null") {
+        Ok(f) => Stdio::File(f),
+        Err(_) => Stdio::Inherit,
+    };
+    cmd.caps(!libthyla_rs::T_CAP_SET_IDENTITY)
+        .stdin(stdin)
+        .stdout(Stdio::Inherit)
+        .stderr(Stdio::Inherit);
+    match cmd.spawn() {
+        Ok(c) => {
+            say!(
+                "halcyond: session init: {} (pid {})",
+                argv.join(" "),
+                c.pid()
+            );
+            Some(c)
+        }
+        Err(e) => {
+            say!("halcyond: session init spawn failed: {:?}", e);
+            None
+        }
+    }
 }

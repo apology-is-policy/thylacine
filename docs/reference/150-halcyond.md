@@ -609,6 +609,33 @@ KillToStart, so a draft half-typed at the prompt moves to the kill buffer
 `echo fols -l ...`); a canonical reader sees VKILL, a raw-mode program two
 keys. The system-tier templates carry `--` where their programs take it.
 
+## The session init (H-4c): halcyon.rc or the device default layout
+
+`session::run` spawns one startup command after the first tile's first present
+(`up_announced`): `session_init::decide(home, exists, default_exists)` picks
+`Rc` (`ut --home <home> <home>/lib/halcyon.rc`) when the rc exists, else
+`DefaultLayout` (`halcyon layout restore default`) when
+`/lib/halcyon/layouts/default` exists, else `Nothing` -- rio's `-i initcmd`
+idiom with the welcome as the shipped default (HALCYON.md 13.7, 14.12). The
+spawn (`spawn_session_init`) runs AS the user (the compositor already is) under
+the tile cap mask (`!T_CAP_SET_IDENTITY`, the identity axis stops here as for
+every tile program), stdin from `/dev/null` (a script never reads the console),
+stdout/stderr inherited (its lines land in the daemon log). The child is
+`try_wait`ed at the loop top; while it runs the idle poll is bounded
+(`INIT_REAP_POLL_MS` = 200 ms) so its exit is reaped promptly instead of
+holding a proc-table slot until the next wake; a still-running init is killed
++ reaped at logout. Witness lines: `halcyond: session init: <argv> (pid N)`,
+`halcyond: session init exited (code N)`, `halcyond: session init spawn
+failed: ...`. Gate: ls-gfx-session's rc leg -- a saved two-tile layout + an rc
+that restores it, a logout, a re-login: the init line, the tool's
+`restored 0 of 0 program(s)`, the tiling witness at three tiles (the root tile
+plus the two restored empties the compositor fills), the exit line.
+
+Known limit (OWED at H-4d): a restore of TAGGED leaves under the session
+compositor races `reconcile`'s empty-leaf tile spawn for the same leaves
+(same principal; the last claim wins). The fix shape is the compositor
+skipping an empty leaf that carries a tag (the tool tags before it spawns).
+
 ## Tests
 
 - Host: 55 lib tests (the table above; H-3c added `menu.rs`'s six: runs per

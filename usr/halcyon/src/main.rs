@@ -44,8 +44,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use halcyon::{
-    argv_of, device_layout_path, owner_is_env, parse_cmd, prog_candidates, session_dir_chain,
-    session_layout_path, Cmd, CmdError,
+    argv_of, device_layout_path, list_rows, name_is_valid, owner_is_env, parse_cmd,
+    prog_candidates, session_dir_chain, session_layout_path, session_layouts_dir, Cmd, CmdError,
+    DEVICE_LAYOUTS_DIR, SAVE_TMP_SUFFIX,
 };
 use libhalcyon::layout::{self, LayoutMode};
 use libhalcyon::skeleton::{self, Op};
@@ -55,7 +56,7 @@ use libthyla_rs::io::{self, Write};
 use libthyla_rs::process::Command;
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{
-    env, eprintln, identity, println, t_close, t_fsync, t_open, t_read, t_write, T_OREAD, T_ORDWR,
+    env, eprintln, identity, println, t_close, t_fsync, t_open, t_read, t_write, T_ORDWR, T_OREAD,
     T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -92,6 +93,18 @@ usage: halcyon layout save <name>
   each pane's command line as you, placed into its pane. Reads the session
   tier first, then /lib/halcyon/layouts/<name>.
 
+  halcyon layout list
+  Every saved layout: yours ($HOME/lib/halcyon/layouts, the session tier)
+  and the image's (/lib/halcyon/layouts, the device tier). On a rich
+  console each name is a layout object whose menu offers restore / save /
+  delete.
+
+  halcyon layout delete <name>
+  Remove a layout from the session tier (the device tier is read-only).
+
+  At session start the per-user compositor runs $HOME/lib/halcyon.rc (a ut
+  script) if it exists, else restores the device layout named `default`.
+
   halcyon --help
 ";
 
@@ -119,6 +132,8 @@ fn run() -> i64 {
         }
         Ok(Cmd::LayoutSave { name }) => layout_save(name),
         Ok(Cmd::LayoutRestore { name }) => layout_restore(name),
+        Ok(Cmd::LayoutList) => layout_list(),
+        Ok(Cmd::LayoutDelete { name }) => layout_delete(name),
         Err(e) => {
             report_cmd_error(e);
             2
@@ -263,7 +278,7 @@ fn mkdir_p(home: &str) -> bool {
 /// post-rename barrier rolls back to the old file, never a torn one.
 fn durable_write(path: &str, bytes: &[u8]) -> bool {
     let mut tmp = String::from(path);
-    tmp.push_str(".tmp");
+    tmp.push_str(SAVE_TMP_SUFFIX);
     let mut f = match File::create(&tmp) {
         Ok(f) => f,
         Err(_) => return false,
@@ -510,7 +525,10 @@ fn read_layout_file(home: &str, name: &str) -> Option<(String, String)> {
             }
         }
     }
-    eprintln!("halcyon: no layout named `{}` (session or device tier)", name);
+    eprintln!(
+        "halcyon: no layout named `{}` (session or device tier)",
+        name
+    );
     None
 }
 
@@ -596,7 +614,10 @@ fn layout_restore(name: &str) -> i64 {
     let tap = match Tap::open() {
         Some(t) => t,
         None => {
-            eprintln!("halcyon: {} unreachable -- is the compositor up?", TAPESTRY_SRV);
+            eprintln!(
+                "halcyon: {} unreachable -- is the compositor up?",
+                TAPESTRY_SRV
+            );
             return 1;
         }
     };
@@ -870,5 +891,128 @@ fn wait_landed(tap: &Tap, spawned: &[(u32, i32, String)]) -> Vec<bool> {
         }
         let _ = sleep(Duration::from_millis(LAND_POLL_MS));
         waited += LAND_POLL_MS;
+    }
+}
+
+// =============================================================================
+// list + delete (H-4c: named-layout management)
+// =============================================================================
+
+/// The names in one layouts directory (a missing or unreadable directory is
+/// an empty tier, not an error: a fresh session has no session tier yet, and
+/// an image may ship no device tier). Only valid layout names pass -- a
+/// save's `.tmp` residue and stray dotfiles are dropped.
+fn dir_names(dir: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let Ok(rd) = fs::read_dir(dir) else {
+        return names;
+    };
+    for ent in rd.flatten() {
+        if name_is_valid(ent.file_name()) {
+            names.push(ent.into_file_name());
+        }
+    }
+    names
+}
+
+/// The Beacon emission gate a native tool composes (BEACON.md 12.4): the
+/// renderer's advertised tier (`$BEACON`), the Dev class of stdout (frames go
+/// only onto the interactive console under Auto), and no flag here.
+fn stdout_is_rich() -> bool {
+    let env_tier = env::var("BEACON")
+        .and_then(|v| beacon::Tier::parse(&v))
+        .unwrap_or(beacon::Tier::None);
+    beacon::effective_tier(
+        env_tier,
+        libthyla_rs::fd_devclass(1),
+        beacon::BeaconMode::Auto,
+    ) == beacon::Tier::Rich
+}
+
+/// A `beacon::sink::Out` straight onto fd 1 (the orphan rule keeps this
+/// adapter in the bin).
+struct StdoutOut;
+
+impl beacon::sink::Out for StdoutOut {
+    fn out(&mut self, bytes: &[u8]) {
+        io::out(bytes);
+    }
+}
+
+/// `halcyon layout list`: every layout in both tiers. Rich stdout gets a
+/// table whose NAME cells are `obj type=layout` presentations (the verb menu
+/// offers restore / save / delete on them); a plain stdout gets one
+/// `name<TAB>tier` line each, a shadowed device row marked.
+fn layout_list() -> i64 {
+    let session: Vec<String> = match env::var("HOME") {
+        Some(h) if !h.is_empty() => dir_names(&session_layouts_dir(&h)),
+        _ => Vec::new(),
+    };
+    let device = dir_names(DEVICE_LAYOUTS_DIR);
+    let rows = list_rows(&session, &device);
+    if rows.is_empty() {
+        println!("halcyon: no saved layouts");
+        return 0;
+    }
+    if stdout_is_rich() {
+        let mut t = beacon::sink::Table::new("lll").hdr();
+        t.push_row(alloc::vec![
+            beacon::sink::Cell::plain("NAME"),
+            beacon::sink::Cell::plain("TIER"),
+            beacon::sink::Cell::plain(""),
+        ]);
+        for r in &rows {
+            t.push_row(alloc::vec![
+                beacon::sink::Cell::obj(beacon::sink::ObjType::Layout, &r.name, &r.name),
+                beacon::sink::Cell::plain(r.tier.as_str()),
+                beacon::sink::Cell::plain(if r.shadowed { "shadowed" } else { "" }),
+            ]);
+        }
+        let mut out = StdoutOut;
+        let mut s = beacon::sink::Sink::new(&mut out, beacon::Tier::Rich);
+        t.realize(&mut s);
+        return 0;
+    }
+    for r in &rows {
+        if r.shadowed {
+            println!("{}\t{}\t(shadowed)", r.name, r.tier.as_str());
+        } else {
+            println!("{}\t{}", r.name, r.tier.as_str());
+        }
+    }
+    0
+}
+
+/// `halcyon layout delete <name>`: unlink the session-tier file. A name that
+/// exists only in the device tier is refused by NAME (the tool never writes
+/// the image's tier); an absent name is reported as such. The unlink's
+/// durability is Stratum's own commit (no directory fsync exists at v1 --
+/// a directory cannot be opened for write, and SYS_FSYNC gates on it).
+fn layout_delete(name: &str) -> i64 {
+    let home = match home_dir() {
+        Some(h) => h,
+        None => return 1,
+    };
+    let path = session_layout_path(&home, name);
+    match fs::remove_file(&path) {
+        Ok(()) => {
+            println!("halcyon: deleted {}", name);
+            0
+        }
+        Err(Error::NotFound) => {
+            if fs::exists(device_layout_path(name)) {
+                eprintln!(
+                    "halcyon: {} is a device-tier layout ({}, read-only); nothing deleted",
+                    name, DEVICE_LAYOUTS_DIR
+                );
+            } else {
+                eprintln!("halcyon: no layout named {}", name);
+            }
+            1
+        }
+        Err(e) => {
+            eprintln!("halcyon: could not delete {}: {}", path, e);
+            1
+        }
     }
 }

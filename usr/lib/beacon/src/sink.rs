@@ -78,6 +78,9 @@ pub enum ObjType {
     Url,
     Commit,
     User,
+    /// A saved Halcyon layout, by NAME (one path component, HALCYON.md
+    /// 13.7) -- the ref the session tool's verbs take, not a file path.
+    Layout,
 }
 
 impl ObjType {
@@ -88,6 +91,7 @@ impl ObjType {
             ObjType::Url => "url",
             ObjType::Commit => "commit",
             ObjType::User => "user",
+            ObjType::Layout => "layout",
         }
     }
 }

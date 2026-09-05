@@ -184,8 +184,11 @@ The layout system is a direct payoff of layout-as-9P (TAPESTRY §15):
   the swallow hack: our tags are authoritative).
 - **Named layouts** live in the two-tier config pattern (aurora-config
   precedent): `/lib/halcyon/layouts/` (system/device tier) +
-  `$home/lib/halcyon/layouts/` (session tier). `halcyon.rc` remains a script
-  writing `/dev/tapestry` files; a layout file is data it feeds.
+  `$home/lib/halcyon/layouts/` (session tier). `halcyon.rc` is the user's
+  session startup script (§13.7, H-4c): a ut script the per-user compositor
+  runs at session start (rio's `-i initcmd`), driving the compositor through
+  the session tool (`halcyon layout restore <name>`) -- never through the
+  shared `/dev/tapestry` mount, whose peer is the mounter (the H-4b finding).
 - Geometry-only restore (attach-on-next-launch) is the degenerate case of the
   same format; respawn is the ambition and the default.
 
@@ -1063,7 +1066,28 @@ authority) is not audit-bearing on its own.
   `$home/lib/halcyon/layouts/` (session tier) — the aurora-config two-tier
   precedent, including its hard-won durability discipline (fsync the same
   OWRITE fd post-rename; `gfx-status.md` cfg-2a records the three-iteration
-  lesson — do not relearn it).
+  lesson — do not relearn it). **H-4c AS-BUILT (2026-09-05): the gesture +
+  named-layout management + the startup script.** `halcyon layout list`
+  prints every layout of both tiers (name, tier, `shadowed` for a device
+  layout a session one hides); on a rich console each name is an
+  `obj type=layout` presentation (BEACON.md §12.2, the `layout` type) whose
+  menu offers `restore` / `save` / `delete` — the gesture IS the transcript's
+  own verb menu, no renderer code. `halcyon layout delete <name>` unlinks the
+  session-tier file (the device tier is read-only to the tool; the unlink's
+  durability is Stratum's commit — no directory fsync exists). A layout name
+  never begins with `-` (so a verb template needs no `--` and no name reads
+  as an option) and never ends in the save's `.tmp` (a crashed save's
+  residue, hidden from `list`). **The startup script**: once the per-user
+  compositor's first tile presents (§14.12) it spawns, AS the user under the
+  tile cap mask, `ut --home $home $home/lib/halcyon.rc` if that file exists,
+  else `halcyon layout restore default` if the image ships
+  `/lib/halcyon/layouts/default` (the first-launch welcome, H-4d), else
+  nothing — rio's `-i` idiom; no marker state (an empty rc opts out of the
+  welcome). The child is reaped by the compositor (a bounded idle poll while
+  it runs) and killed at logout. OWED at H-4d: a restore with TAGGED leaves
+  under the session compositor races the compositor's own empty-leaf tile
+  spawn for the same leaves (both same-principal; last claim wins) — the
+  compositor must leave a tagged empty leaf to whoever tagged it.
 
 ### 13.8 Audit + scripture-sync obligations (the §18.10 pattern; owed at
 ### each chunk's close)
@@ -1751,3 +1775,13 @@ format-fuzz audit class (ingesting untrusted per-tile record streams, 14.11.12).
 login->per-user-halcyond spawn + the aurora handoff are the new privilege-adjacent
 surfaces (an AUDIT-TRIGGERS row at KT-1.5d-1). The kaua-term parser stays the
 crash-isolated hostile-input surface (14.2).
+
+**The session init (H-4c, 2026-09-05).** After the first tile's first
+present the compositor runs ONE startup command as the user — the rc
+(`$home/lib/halcyon.rc` under `ut --home`) or the device `default` layout's
+restore — with the tile cap mask (`!CAP_SET_IDENTITY`), stdin from
+`/dev/null`, stdout/stderr its own (the daemon log). `halcyond: session init:
+<argv> (pid N)` / `session init exited (code N)` are the witnesses; a spawn
+failure is said and the session lives on (an rc is a convenience, never a
+gate). The pure decision is `halcyond::session_init` (host-tested); the rule
+itself is §13.7's.

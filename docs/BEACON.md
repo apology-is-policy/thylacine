@@ -103,7 +103,7 @@ requires a version bump plus scripture amendment here.
 | Op | Args | Meaning |
 |---|---|---|
 | `em` | `class=emph \| strong \| dim \| code` | Emphasis by class, never by face. |
-| `obj` | `type=path \| pid \| url \| commit \| user`, `ref=<canonical>` | **A presentation**: this run of text presents an object of `type`, canonically named by `ref`. For `type=path`, `ref` is the cleaned absolute 9P path. The run becomes mouse-sensitive in a rich renderer (§7). |
+| `obj` | `type=path \| pid \| url \| commit \| user \| layout`, `ref=<canonical>` | **A presentation**: this run of text presents an object of `type`, canonically named by `ref`. For `type=path`, `ref` is the cleaned absolute 9P path. The run becomes mouse-sensitive in a rich renderer (§7). |
 
 The `obj` op is the Genera payoff and the reason Beacon exists; everything else
 is furniture around it.
@@ -199,7 +199,8 @@ with `#` is an INTERNAL action a renderer interprets itself (halcyond's
 test-mode `#wedge <ms>`, THE GATE's lever), admitted only when the parser is
 asked to and dropped by a production build (the #880 strip class). The
 system tier is baked at `/lib/beacon/verbs` from `usr/lib/beacon/verbs.default`
-(path: ls / cat / stat / cd / edit / hexdump; pid: kill; url: fetch). The
+(path: ls / cat / stat / cd / edit / hexdump; pid: kill; url: fetch;
+layout: restore / save / delete -- H-4c, the ref is the layout NAME). The
 SESSION tier is deferred: halcyond is spawned pre-login as the device's
 renderer and knows no `$home`, so `$home/lib/beacon/verbs` will arrive over
 the settings channel (the aurora-config cfg-2 push precedent), not as a file
@@ -357,10 +358,13 @@ Normative rules, each load-bearing:
 | `hdr` | paired | `level=1\|2\|3` | A heading. |
 | `rule` | point | — | A separator. Plain realization: the emitter's own rule line (payload). |
 | `em` | paired | `class=emph \| strong \| dim \| code` | Emphasis by class. `code` implies monospace in every rich stylesheet. |
-| `obj` | paired | `type=path \| pid \| url \| commit \| user; ref=<canonical>` | The presentation. `type=path` ⇒ `ref` is the cleaned ABSOLUTE 9P path (the emitter resolves relative names before emitting; a ref the emitter cannot canonicalize ⇒ emit no frame, plain text only). `pid` ⇒ `ref` is the decimal pid. `url`/`commit`/`user` ⇒ ref is the literal. |
+| `obj` | paired | `type=path \| pid \| url \| commit \| user \| layout; ref=<canonical>` | The presentation. `type=path` ⇒ `ref` is the cleaned ABSOLUTE 9P path (the emitter resolves relative names before emitting; a ref the emitter cannot canonicalize ⇒ emit no frame, plain text only). `pid` ⇒ `ref` is the decimal pid. `url`/`commit`/`user` ⇒ ref is the literal. `layout` ⇒ `ref` is a saved Halcyon layout's NAME (one path component, HALCYON.md §13.7 -- never a path: the session tool's verbs take the name, and a name never begins with `-`). |
 
 **Vocabulary growth policy**: any new op or key is an amendment to this table
-plus a version note; renderers already tolerate it (rule 4). Growth toward
+plus a version note; renderers already tolerate it (rule 4). **Version notes**:
+v1 (2026-09-01, the registry above); v1 + `type=layout` (2026-09-05, H-4c --
+a value of an existing key, emitted by `halcyon layout list`; the renderer's
+type handling is by string, so no parser change). Growth toward
 layout/typography ops is REFUSED on sight — that was the TermKit failure.
 
 ### 12.3 The tier mechanism (consctl verb + environment)

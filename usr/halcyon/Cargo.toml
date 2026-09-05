@@ -39,5 +39,8 @@ backend = ["dep:libthyla-rs", "dep:libhalcyon"]
 # Both gate behind `backend`: only the bin (the /dev/tapestry walk + the
 # durable write) needs them; the pure lib compiles clean on the host with
 # neither.
+# The layout list presents its names as `obj type=layout` (the verb menu's
+# restore/save/delete rides them); no_std, no deps, so the lib tests build.
+beacon = { path = "../lib/beacon" }
 libhalcyon = { path = "../lib/libhalcyon", optional = true }
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }

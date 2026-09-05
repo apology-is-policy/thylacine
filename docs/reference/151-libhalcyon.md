@@ -379,3 +379,26 @@ return); *Daylight* is the scripture's name for its first theme. Neither is a
 Thylacine-thematic coinage of this crate — they are inherited from
 `docs/HALCYON.md` / `docs/HALCYON-VISUAL.md`, and the crate is named for the
 environment it serves.
+
+## `halcyon layout list` / `delete` (H-4c, 2026-09-05)
+
+`halcyon::parse_cmd` grew `Cmd::LayoutList` (`layout list`, no operand) and
+`Cmd::LayoutDelete { name }`; `name_is_valid` additionally refuses a leading
+`-` (no name reads as an option; a verb template needs no `--`) and the save's
+`.tmp` suffix (`SAVE_TMP_SUFFIX`, now the one constant the save's temp file and
+the list's filter share). `list_rows(session, device) -> Vec<LayoutRow>` is the
+pure list: invalid names dropped, sorted by name, a session row before the
+device row it shadows (`shadowed`). The bin's `layout_list` reads both
+directories (`fs::read_dir`; a missing tier is empty), and emits either a
+Beacon table (`cols=lll`, header NAME / TIER / note; the NAME cell is
+`obj type=layout ref=<name>`) when `beacon::effective_tier($BEACON,
+fd_devclass(1), Auto)` is Rich, or `name<TAB>tier[<TAB>(shadowed)]` lines.
+`layout_delete` unlinks the session-tier file; a device-only name is refused
+by name (read-only tier), an unknown name reported. The verbs a rich renderer
+offers on a `layout` obj come from `/lib/beacon/verbs` (`restore` / `save` /
+`delete`, each `halcyon layout <verb> {}`). Host tests: `parse_list_and_delete`,
+`a_name_never_begins_with_a_dash_or_ends_in_the_tmp_suffix`,
+`list_rows_drop_temps_sort_by_name_and_mark_shadowed_device_rows`. Gate:
+ls-gfx-restore's list/delete legs (the list shows `e2e` in the session tier;
+the delete removes it; a restore and a second delete then report no such
+layout).

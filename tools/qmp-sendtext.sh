@@ -51,7 +51,19 @@ sock_path, mode, text = sys.argv[1], sys.argv[2], sys.argv[3]
 
 QCODE = {**{c: c for c in "abcdefghijklmnopqrstuvwxyz"},
          **{c: c for c in "0123456789"},
-         " ": "spc", "-": "minus", ".": "dot", "/": "slash", "\n": "ret"}
+         " ": "spc", "-": "minus", ".": "dot", "/": "slash", "\n": "ret",
+         ";": "semicolon", ",": "comma", "=": "equal", "'": "apostrophe",
+         "[": "bracket_left", "]": "bracket_right", "\\": "backslash",
+         "`": "grave_accent"}
+# Shifted characters: the SAME qcode under a held shift (the compositor's
+# keymap resolves the rune from keycode + shift, keymap.rs); uppercase
+# letters likewise. US layout, like the unshifted table above.
+SHIFTED = {**{c.upper(): c for c in "abcdefghijklmnopqrstuvwxyz"},
+           ">": "dot", "<": "comma", ":": "semicolon", "_": "minus",
+           '"': "apostrophe", "?": "slash", "+": "equal", "{": "bracket_left",
+           "}": "bracket_right", "|": "backslash", "~": "grave_accent",
+           "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6",
+           "&": "7", "*": "8", "(": "9", ")": "0"}
 
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.settimeout(10)
@@ -148,11 +160,18 @@ if mode == "chord":
 text = text.replace("\\n", "\n")
 for ch in text:
     q = QCODE.get(ch)
+    shifted = q is None and ch in SHIFTED
+    if shifted:
+        q = SHIFTED[ch]
     if q is None:
         print(f"qmp-sendtext: unsupported char {ch!r}", file=sys.stderr)
         sys.exit(1)
+    if shifted:
+        key("shift", True)
     key(q, True)
     key(q, False)
+    if shifted:
+        key("shift", False)
     time.sleep(0.03)  # keystroke pacing (the guest drains per FRAME tick)
 print(f"qmp-sendtext: typed {text!r}")
 PYEOF

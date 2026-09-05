@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 77 unowned · 482 files (84% owned) · ~20062 unswept lines.**
+**405 owned · 78 unowned · 483 files (83% owned) · ~20479 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30236 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -75,7 +75,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30236 lin
 | usr/ports | 0 | 18 | 4033 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/halcyon | 0 | 2 | 1202 |
+| usr/halcyon | 0 | 2 | 1493 |
 | usr/quarry | 0 | 1 | 1028 |
 | arch | 34 | 4 | 971 |
 | usr/stratumd-stub | 0 | 1 | 453 |
@@ -83,13 +83,13 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30236 lin
 | usr/coreutils | 59 | 1 | 297 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/susp-mask-child | 0 | 1 | 139 |
+| usr/halcyond | 18 | 1 | 126 |
 | usr/stub-driver | 0 | 1 | 119 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
 | usr/corvus | 1 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
-| usr/halcyond | 18 | 0 | 0 |
 | usr/httpd | 1 | 0 | 0 |
 | usr/https | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
@@ -123,9 +123,10 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30236 lin
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1028 |
-| usr/halcyon/src/main.rs | 874 |
+| usr/halcyon/src/main.rs | 1018 |
 | arch/arm64/uart.c | 674 |
 | kernel/joey.c | 478 |
+| usr/halcyon/src/lib.rs | 475 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 390 |
 | kernel/include/thylacine/errno.h | 388 |
@@ -133,7 +134,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30236 lin
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 336 |
 | kernel/fault_test.c | 332 |
-| usr/halcyon/src/lib.rs | 328 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
 | usr/ports/sdl2/thylacine/thyla_tap.c | 320 |
 | usr/lib/thylajit/thyla_capjit.h | 318 |
@@ -160,6 +160,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30236 lin
 | usr/ports/tyrquake/tyr-glquake-launcher.c | 134 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
+| usr/halcyond/src/session_init.rs | 126 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | usr/ports/sdl2/thylacine/thyla_tap.h | 125 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |

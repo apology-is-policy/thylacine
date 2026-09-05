@@ -19,6 +19,7 @@ pub mod layout;
 pub mod menu;
 pub mod raster;
 pub mod select;
+pub mod session_init;
 pub mod status;
 pub mod tile;
 pub mod tiles;

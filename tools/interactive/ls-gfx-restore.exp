@@ -108,6 +108,44 @@ expect {
     eof { lc_fail "qemu exited before the restore tally" }
 }
 
+# H-4c: named-layout management. `list` shows the saved layout in the session
+# tier (a rich console renders the Beacon table's payload with the name and
+# tier on one row); `delete` removes it; a restore and a second delete then
+# both report no such layout -- the negative that proves the unlink landed.
+set timeout 30
+lc_send "halcyon layout list"
+expect {
+    -re {e2e[^\n]{0,240}session} { lc_pass "list: the saved layout is listed in the session tier (name and tier on one row; the obj frames sit between)" }
+    -ex "halcyon: no saved layouts" { lc_fail "list: the saved layout was not listed" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during list" }
+    timeout { lc_fail "list: no row for the saved layout" }
+    eof { lc_fail "qemu exited during list" }
+}
+lc_send "halcyon layout delete e2e"
+expect {
+    -ex "halcyon: deleted e2e" { lc_pass "delete: the session-tier layout was removed" }
+    -re {halcyon: (no layout named|could not delete)} { lc_fail "delete: the tool refused to remove the session-tier layout" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during delete" }
+    timeout { lc_fail "delete: no confirmation" }
+    eof { lc_fail "qemu exited during delete" }
+}
+lc_send "halcyon layout restore e2e"
+expect {
+    -ex "halcyon: no layout named `e2e`" { lc_pass "delete: a restore of the deleted name finds nothing in either tier" }
+    -re {halcyon: pane \d+: tapestry-demo} { lc_fail "delete: the deleted layout still restored (the unlink did not land)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction restoring a deleted layout" }
+    timeout { lc_fail "delete: the restore of a deleted name gave no verdict" }
+    eof { lc_fail "qemu exited restoring a deleted layout" }
+}
+lc_send "halcyon layout delete e2e"
+expect {
+    -ex "halcyon: no layout named e2e" { lc_pass "delete: a second delete reports no such layout" }
+    -ex "halcyon: deleted e2e" { lc_fail "delete: a second delete succeeded (the first did not unlink)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction on the second delete" }
+    timeout { lc_fail "delete: the second delete gave no verdict" }
+    eof { lc_fail "qemu exited on the second delete" }
+}
+
 lc_quit
-lc_pass "ls-gfx-restore: layout restore verified (skeleton build + claim placement + cross-process focus)"
+lc_pass "ls-gfx-restore: layout restore verified (skeleton build + claim placement + cross-process focus + list/delete)"
 exit 0
