@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-syscall-abi census re-derived by measurement: 107 live / span 109 / 3 holes, spawn's fourth growth, t_stat to 88"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["62be584d"]
 touched:
   - sub-kernel-syscall-abi
 established: []
