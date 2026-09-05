@@ -35,6 +35,8 @@ needed the operator.
 
 **What it does not cover.** The real DOSBox re-run needs the fixture only aux-3 carries (32 commits ahead of main on the port): owed to aux after the merge, with `dx-fullscreen-repro.exp` as the driver. FIT vs FILL was not put to the operator: aspect-fit is the compositor's existing letterbox policy and the fix restores it (640x417 -> 1227x800, 26 px pillars); a fill/integer-scale preference would be a new per-surface knob, not this bug. The chunk is UNAUDITED by design (the double-the-distance rule): row 42 of AUDIT-TRIGGERS carries the prosecution notes for the next tapestryd round.
 
+**Landed** at `ea270d39` (+ the hash fixup), both mirrors.
+
 **The lesson, pinned.** A latch keyed on a proxy property fires on every class the proxy covers and the property does not. The tell was in the doc comment itself: it named the property ("rotating weave slots") and asserted a class ("the SDL class never latches") that the code never checked.
 
 ---

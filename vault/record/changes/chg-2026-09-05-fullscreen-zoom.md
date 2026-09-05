@@ -4,7 +4,7 @@ type: chg
 title: "The fullscreen-zoom fix: the #56 patchwork latch re-keyed on slot rotation; the letterboxed compose clips to the damage's projection"
 date: 2026-09-05
 arc: arc-tapestry
-commits: ["*(pending)*"]
+commits: ["ea270d39"]
 touched: [sub-tapestryd, sub-libtapestry]
 established: [adt-zoom-r1, haz-latch-keyed-on-proxy]
 closed: [fnd-zoom-r1-f1]
