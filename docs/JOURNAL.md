@@ -323,6 +323,22 @@ carried `invalid command name "}"` -- an orphan brace my replacement had left af
 the loop. The symptom is worth its own line: the scenario's last recorded step was
 a PASS.
 
+**The commits themselves needed a repair (`8bc2a313`).** The three sub-chunks were
+staged by hunk with zero context (`git apply --cached --unidiff-zero`) and
+committed under `git stash push --keep-index` so the vault lint would see a
+working tree equal to the index. A zero-context hunk can land one statement off;
+the pop then three-way-merged the commit's placement with the full file's, and
+wherever they differed BOTH survived -- and the whole-file commits that followed
+took the merged result. HEAD did not compile (the kaua-term `--beacon rich` block
+sat a second time inside a struct literal) and three docs carried passages twice.
+Nothing had noticed because every gate had run on the pre-commit tree; the
+halcyon-lever bake for the console-menu gate was the first build of the COMMITTED
+tree, and it failed. The dropped keep-index stash survived as a dangling commit
+holding the exact tree the gates ran on; the four files were restored from it and
+the code tree now equals it byte for byte. Rule: stage by hunk with context, or
+commit whole files and split by file -- and build the committed tree before
+calling it green.
+
 ## Run 30 (2026-09-05, Fable 5.1, effort max): the KT-1 audit's round 2 — the fixes re-prosecuted, and the two the arithmetic had not reached
 
 **Where it sits.** Runs 28-29 landed F2 (`53ee407f`) and the round-1 audit close (`488cab49`, rebased to `062efe18` after the vault cutover). This run resumed from a self-compaction at the 600k line with two round-2 prosecutors already running against the round-1 fixes, and the vault peer's cutover of `vault/` onto `main` (`60021691`, both mirrors) landing mid-run.
