@@ -54,6 +54,18 @@ The Thylacine (abstractly depicted in the logo above) is an extinct (though I be
 
 ## Latest
 
+### DOSBox-X Ported via Pouch
+
+_"I came to kick ass and chew bubblegum... and I'm all outta gum..."_
+
+Important to mention that we fully support the DOXBox __dynarec__ using our capability-gated JIT (normally we're W^X).
+
+![](readme_assets/duken-small.png)
+
+### Native Linux Git Binary Fully Operational under Vivarium
+
+Vivarium, the Thylacine foreign-system container runner, now has enough Linux syscall coverage that Thylacine can now seamlessly run git using a statically-compiled Alpine Linux Git binary.
+
 ### LLVM/Clang: Compiling/Linking C++ against Clade/Pouch:
 
 An example C++ program showcasing a toy function I once made up in high school out of boredom, "filling" missing inverse functions on my Casio scientific calculator. The program is shown open in Nora, the Helix-like modal text editor I named after my daughter. It doesn't have syntax highlighting for CXX yet, but it __uses clangd to provide real-time diagnostics__:

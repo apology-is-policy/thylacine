@@ -1,0 +1,359 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-session.exp -- KT-1.5d: the per-user session
+# compositor (HALCYON.md 14.12) + its MULTI-TILE body (14.11.6/.7/.9/.10). The
+# arc, end to end on one boot:
+#
+#   d-1a  login -> per-user compositor: login authenticates, then spawns
+#         /bin/halcyond --session AS the user; halcyond connects to the SYSTEM
+#         tapestryd + presents ("halcyond: session up NxN px", printed only
+#         inside Ok(present) -- the M-PIN post-present marker rule).
+#   d-1b  the handoff: the session leaf appears -> tapestryd backgrounds aurora
+#         (a SYSTEM leaf) -> Direct(halcyond); the full-display takeover.
+#   d-2   the ROOT tile: halcyond spawns a kaua-term hosting ut, drains its
+#         up-pipe in the unified poll, decodes the record stream into the Tile
+#         model -- "session tile leaf=A spawned" + "session tile ingest live".
+#   d-3   the SPLIT: QMP sends Super+H; tapestryd splits the focused (root) leaf,
+#         the NEW empty leaf is focused + session-owned; halcyond's reconcile
+#         CLAIMS it and spawns a SECOND kaua-term -- "session tile leaf=B
+#         spawned" (B != A). This witnesses reconcile-create + claim + the
+#         N-pipe fold.
+#   d-3   FOCUS-ROUTED input + CONTAINMENT: QMP types `exit\n`. tapestryd
+#         delivers KEY only to the FOCUSED surface -- leaf B (focused since the
+#         split) -- so ut in B exits and B's leaf CLOSES, while A survives:
+#         "session tile leaf=B exited (code 0) -- closing", and NO logout. This
+#         is the focus-routing witness (the exit reached B, not A) AND the
+#         per-tile containment witness (one tile's exit does not end the
+#         environment).
+#   d-3   focus re-home + last-tile logout: closing B re-homes focus to A
+#         (compositor close_inner); a second `exit\n` reaches A, A closes, and
+#         with no tiles left halcyond logs out: "session tile leaf=A exited
+#         (code 0) -- closing" -> "session logout".
+#   d-1b  resume: login's wait() returns -> getty -> the session leaf is retired
+#         -> aurora un-backgrounds, its FRAME loop resumes -> Direct(console).
+#
+# GATED ON THE BAKED LEVER (the cfg-4 / ls-halcyon precedent): the pool carries
+# /lib/halcyon/session = "on" only under THYLACINE_HALCYON_SESSION=1. On a
+# default image login spawns ut and this scenario SKIPs cleanly.
+#
+# aurora is the pre-login console renderer and does NOT silence serial, so login
+# is drivable over serial exactly as ls-ci; halcyond's markers ride the kernel
+# diagnostic UART (t_putstr) regardless of any renderer silence. HVF like the
+# gfx siblings; the GPU environment (virtio-gpu + tapestryd) is present by
+# default (THYLACINE_DISPLAY unset -> virtio-gpu on).
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+lc_boot
+
+global lc_boot_timeout timeout
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " { lc_step "login prompt" }
+    -re {EXTINCTION:}       { lc_extinction_fail "extinction before login prompt" }
+    timeout                 { lc_fail "no login prompt within ${lc_boot_timeout}s" }
+    eof                     { lc_fail "qemu exited before login prompt" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: "  { lc_step "password prompt" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction at password prompt" }
+    timeout           { lc_fail "no password prompt (username not received?)" }
+    eof               { lc_fail "qemu exited at password prompt" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+
+# DISCRIMINATE: the session lever (proceed) vs a default image (SKIP).
+expect {
+    -ex "login: session compositor (halcyond) spawned" {
+        lc_step "session path taken (lever image)"
+    }
+    -ex "Thylacine textual shell" {
+        lc_step "default (ut) image -- session lever absent; SKIP"
+        lc_quit
+        exit 0
+    }
+    -ex "login incorrect"  { lc_fail "auth rejected for michael -- see ls-ci's #233 note (an echoed byte after 'password: ' truncated the passphrase)" }
+    -re {EXTINCTION:}      { lc_extinction_fail "extinction during login/session spawn" }
+    timeout                { lc_fail "neither session nor ut path within ${lc_boot_timeout}s" }
+    eof                    { lc_fail "qemu exited during login" }
+}
+
+# --- d-1b: the handoff -- tapestryd backgrounds the console renderer ---
+expect {
+    -re {tapestryd: background surface [0-9]+ \(session took the display\)} {
+        lc_step "tapestryd backgrounded the console renderer under the session"
+    }
+    -re {halcyond: FAIL session} { lc_fail "halcyond --session failed to connect/present" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the renderer backgrounded" }
+    timeout { lc_fail "tapestryd never backgrounded the console renderer" }
+    eof     { lc_fail "qemu exited before the renderer backgrounded" }
+}
+expect {
+    -re {tapestryd: scanout pending-direct} {
+        lc_step "tapestryd -> Direct(halcyond): the full-display handoff"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during the Direct handoff" }
+    timeout { lc_fail "scanout never went Direct after backgrounding" }
+    eof     { lc_fail "qemu exited during the Direct handoff" }
+}
+
+# --- d-2: the ROOT tile spawns (capture its leaf id A) ---
+set A ""
+expect {
+    -re {halcyond: session tile leaf=([0-9]+) spawned} {
+        set A $expect_out(1,string)
+        lc_step "d-2: the root session tile spawned (leaf $A)"
+    }
+    -re {halcyond: session tile leaf=[0-9]+ spawn failed} { lc_fail "the root session tile failed to spawn (kaua-term or the pipes)" }
+    -re {halcyond: FAIL session tile} { lc_fail "the root session tile failed to spawn" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the root tile spawned" }
+    timeout { lc_fail "the root session tile never spawned" }
+    eof     { lc_fail "qemu exited before the root tile spawned" }
+}
+expect {
+    -ex "halcyond: session up" { lc_step "d-1a: per-user compositor connected + PRESENTED (post-present marker)" }
+    -re {halcyond: FAIL session} { lc_fail "halcyond --session failed to present" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during session bringup" }
+    timeout { lc_fail "halcyond: session up never appeared (no successful present)" }
+    eof     { lc_fail "qemu exited during session bringup" }
+}
+expect {
+    -ex "halcyond: session tile ingest live" {
+        lc_step "d-2: the root tile ingested its kaua-term's record stream"
+    }
+    -re {halcyond: session tile leaf=[0-9]+ crashed} { lc_fail "the root tile crashed (the ingest trust boundary tripped)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during tile ingest" }
+    timeout { lc_fail "the root tile never ingested (no kaua-term output reached halcyond)" }
+    eof     { lc_fail "qemu exited during tile ingest" }
+}
+
+# --- caps: a session tile's programs must NOT hold CAP_SET_IDENTITY ---
+#
+# login masks the compositor's caps (the shell's mask); halcyond masks the
+# tile spawn again. /bin/caps-probe, typed into the focused tile's ut, tries a
+# plain spawn (the control: the spawn path works) and then the same spawn with
+# an identity set, which the kernel refuses without the cap. Its lines ride
+# SYS_PUTS to the serial. ACCEPTED here is the round-1 P0 (an unmasked spawn
+# leaked login's CAP_SET_IDENTITY into every tile program).
+after 1500
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "/bin/caps-probe\n"} err]} {
+    lc_fail "qmp-sendtext caps-probe failed: $err"
+}
+set timeout 60
+expect {
+    -ex "caps-probe: plain spawn OK" { lc_step "caps: the control spawn from a session tile works" }
+    -ex "caps-probe: plain spawn FAILED" { lc_fail "caps-probe control broken: a plain spawn from the tile failed" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during caps-probe" }
+    timeout { lc_fail "caps-probe never ran in the tile (typed input did not reach ut, or /bin/caps-probe is missing)" }
+    eof { lc_fail "qemu exited during caps-probe" }
+}
+expect {
+    -ex "caps-probe: identity spawn REFUSED" { lc_pass "caps: an identity spawn from a session tile is REFUSED (CAP_SET_IDENTITY did not leak past login)" }
+    -ex "caps-probe: identity spawn ACCEPTED" { lc_fail "P0: a session tile holds CAP_SET_IDENTITY -- an identity spawn was ACCEPTED" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during caps-probe" }
+    timeout { lc_fail "caps-probe printed no identity verdict" }
+    eof { lc_fail "qemu exited during caps-probe" }
+}
+
+# --- d-3: SPLIT -- Super+H creates a SECOND tile (capture its leaf id B) ---
+#
+# Settle the root ut at a prompt, then Super+H over QMP. tapestryd's Super chord
+# layer (section 18.4) splits the FOCUSED (root) leaf; the new empty leaf is
+# focused + owned by the session principal, so halcyond's reconcile mints its
+# claim and spawns a second kaua-term. A 2nd spawn line -- a DIFFERENT leaf --
+# is the reconcile-create + claim + N-pipe-multiplex witness.
+after 2000
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+h"} err]} {
+    lc_fail "qmp-sendtext split chord failed: $err"
+}
+set timeout 60
+# The F2 geometry witness comes BEFORE the spawn line, deterministically:
+# `session-tiling active=2` fires when B's SURFACE is created (halcyond's
+# open_claim_on -> tapestryd reconcile), and halcyond logs "leaf B spawned"
+# only AFTER it then spawns the kaua-term. And expect matches by ARM ORDER,
+# NOT buffer position (the run-27 lesson, re-proven here in isolation): a spawn
+# arm listed in the same expect matches the LATER spawn line first and consumes
+# PAST the witness. So capture them SEQUENTIALLY in their real order -- the
+# witness first (looping over the active=1 transients), THEN the spawn.
+#
+# F2 (d-1b tiling completion): a BACKGROUNDED aurora leaf must not consume a
+# tiling column. Pre-F2 the flat [aurora, A, B] tiling gave each session tile a
+# THIRD (~418px, sum ~836 of 1280); post-F2 aurora is excluded so [A, B] each
+# get a HALF (~632px, sum ~1264). Assert the foreground tile widths SUM to >85%
+# of disp_w -- a leg that FAILS on the pre-F2 engine, a real discriminator.
+set act ""
+set sumw 0
+set minw 0
+set dispw 0
+expect {
+    -re {tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)} {
+        if {$expect_out(1,string) < 2} {
+            exp_continue
+        }
+        set act $expect_out(1,string)
+        set minw $expect_out(2,string)
+        set sumw $expect_out(3,string)
+        set dispw $expect_out(4,string)
+    }
+    -re {halcyond: session tile leaf=[0-9]+ spawn failed} { lc_fail "the split tile failed to spawn (claim refused, or kaua-term/pipes)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction awaiting the session-tiling geometry witness" }
+    timeout { lc_fail "no active>=2 session-tiling witness -- the split did not reach 2 foreground tiles (reconcile/claim/tiling broken)" }
+    eof { lc_fail "qemu exited awaiting the session-tiling geometry witness" }
+}
+if {$sumw < ($dispw * 85 / 100)} {
+    lc_fail "F2: the session tiles fill only ${sumw}px of ${dispw}px (a backgrounded leaf is stealing a column; active=$act min_w=$minw)"
+}
+lc_pass "d-3 F2: the two session tiles fill the display (active=$act sum_w=$sumw of $dispw, min_w=$minw)"
+# The spawn line followed the witness -- capture leaf B now.
+set B ""
+expect {
+    -re {halcyond: session tile leaf=([0-9]+) spawned} {
+        set B $expect_out(1,string)
+        lc_step "d-3: the split spawned a second session tile (leaf $B)"
+    }
+    -re {halcyond: session tile leaf=[0-9]+ spawn failed} { lc_fail "the split tile failed to spawn (claim refused, or kaua-term/pipes)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during the split-tile spawn" }
+    timeout { lc_fail "Super+H produced no second tile spawn line after the geometry witness" }
+    eof { lc_fail "qemu exited during the split-tile spawn" }
+}
+if {$B eq $A} {
+    lc_fail "the split reused the root leaf id ($A) -- no new leaf was created"
+}
+
+# --- zoom: a HIDDEN tile stays hosted (its shell survives the zoom) ---
+#
+# Super+F zooms the FOCUSED leaf (B): A is laid out hidden. The session
+# compositor must read a hidden leaf as still hosted -- the round-1 P0 read it
+# as vanished and killed A's shell. Witness: B alone at full width (the lone
+# foreground leaf is borderless), and NO exit/crash line for A across the
+# zoom; then the unzoom restores both tiles at the widths captured above.
+after 1500
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+f"} err]} {
+    lc_fail "qmp-sendtext zoom chord failed: $err"
+}
+set timeout 60
+expect {
+    -re "tapestryd: session-tiling active=1 min_w=$dispw sum_w=$dispw" { lc_step "zoom: B alone fills the display (borderless, $dispw wide)" }
+    -re "halcyond: session tile leaf=$A (exited|crashed)" { lc_fail "P0: the zoom killed the HIDDEN tile A (a hidden leaf read as vanished)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during zoom" }
+    timeout { lc_fail "no active=1 full-width witness after the zoom chord (zoom, or the lone-leaf borderless rule, broken)" }
+    eof { lc_fail "qemu exited during zoom" }
+}
+after 1500
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+f"} err]} {
+    lc_fail "qmp-sendtext unzoom chord failed: $err"
+}
+expect {
+    -re "tapestryd: session-tiling active=2 min_w=$minw sum_w=$sumw" { lc_pass "zoom: unzoom restored both tiles; A survived hidden (sum_w=$sumw)" }
+    -re "halcyond: session tile leaf=$A (exited|crashed)" { lc_fail "P0: tile A died across the zoom" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during unzoom" }
+    timeout { lc_fail "no active=2 witness after the unzoom chord" }
+    eof { lc_fail "qemu exited during unzoom" }
+}
+
+# --- d-3: FOCUS-ROUTED input + CONTAINMENT -- exit B (focused), A survives ---
+#
+# The new tile B is focused (split sets focused=new-leaf). QMP `exit\n` is
+# delivered by tapestryd to the FOCUSED surface only, so it MUST reach B: ut in
+# B exits, B's leaf closes. A closing OF A here would mean the exit hit the root
+# (focus routing broken); a session logout here would mean one tile's exit ended
+# the environment (containment broken).
+after 2000
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "exit\n"} err]} {
+    lc_fail "qmp-sendtext exit (B) failed: $err"
+}
+set timeout 60
+expect {
+    -re "halcyond: session tile leaf=$B exited \\(code 0\\) -- closing" {
+        lc_step "d-3: `exit` routed to the FOCUSED tile B (leaf $B) -> B closed"
+    }
+    -re "halcyond: session tile leaf=$A exited" {
+        lc_fail "`exit` closed the ROOT tile (leaf $A), not the focused split tile B -- focus routing broken"
+    }
+    -re {halcyond: session logout} {
+        lc_fail "the session logged out on the FIRST exit -- per-tile containment broken (a tile exit ended the environment)"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction closing the focused tile" }
+    timeout { lc_fail "no close after `exit` -- input never reached the focused tile B" }
+    eof     { lc_fail "qemu exited closing the focused tile" }
+}
+
+# --- lone tile: the survivor returns to borderless full width ---
+#
+# With B gone, A is the only foreground leaf beside the zero-rect console
+# leaf: the inset counts foreground leaves, so A is borderless and full width
+# (Direct-eligible) -- round-1 F4 had it keep a ring + tag bar forever.
+set timeout 30
+expect {
+    -re "tapestryd: session-tiling active=1 min_w=$dispw sum_w=$dispw" { lc_pass "lone tile: A is borderless + full width after B closed" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction after B closed" }
+    timeout { lc_fail "after B closed, A did not return to full width (the inset counted a zero-rect leaf)" }
+    eof { lc_fail "qemu exited after B closed" }
+}
+
+# --- d-3: focus re-home + last-tile logout -- exit A -> logout ---
+#
+# Closing B re-homed focus to A (compositor close_inner). A second `exit\n` now
+# reaches A; A closes, no tiles remain, halcyond logs out.
+after 2000
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "exit\n"} err]} {
+    lc_fail "qmp-sendtext exit (A) failed: $err"
+}
+set timeout 90
+expect {
+    -re "halcyond: session tile leaf=$A exited \\(code 0\\) -- closing" {
+        lc_step "d-3: focus re-homed to A (leaf $A); `exit` reached it -> A closed"
+    }
+    -re {halcyond: session tile leaf=[0-9]+ exited \(code [1-9]} {
+        lc_fail "the last tile exited non-zero (ut did not run `exit` cleanly)"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction closing the last tile" }
+    timeout { lc_fail "no close after the second `exit` -- focus did not re-home to A after B closed" }
+    eof     { lc_fail "qemu exited closing the last tile" }
+}
+# The last tile is gone. THREE terminal markers now appear, ALL cross-process
+# (halcyond's `session logout` vs tapestryd's `foreground surface` + the console
+# reclaiming the scanout via `scanout pending-direct`) and freely interleaved.
+# expect matches by ARM ORDER, not buffer position, so separate or multi-arm
+# expects let a later-listed marker's arm consume PAST an earlier marker in the
+# buffer, losing it (this bit twice: logout ate the earlier foreground, then the
+# logout/fg loop ate the Direct line between them). Match ALL THREE with ONE
+# alternation pattern -- which resolves to the EARLIEST occurrence of ANY --
+# distinguishing via the matched text, and loop until all three are seen.
+set saw_logout 0
+set saw_fg 0
+set saw_direct 0
+set tries 0
+while {(!$saw_logout || !$saw_fg || !$saw_direct) && $tries < 8} {
+    incr tries
+    expect {
+        -re {halcyond: session logout|tapestryd: foreground surface [0-9]+ \(session gone\)|tapestryd: scanout pending-direct} {
+            set m $expect_out(0,string)
+            if {[string match "*logout*" $m]} {
+                set saw_logout 1
+                lc_step "d-3: the last tile is gone -> the session logged out"
+            } elseif {[string match "*foreground*" $m]} {
+                set saw_fg 1
+                lc_step "tapestryd FOREGROUNDED the console renderer on logout"
+            } else {
+                set saw_direct 1
+                lc_step "tapestryd -> Direct(console): the display returned to the console"
+            }
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction at logout/foreground/Direct" }
+        timeout { lc_fail "logout/foreground/Direct not all seen (logout=$saw_logout fg=$saw_fg direct=$saw_direct)" }
+        eof     { lc_fail "qemu exited before logout/foreground/Direct" }
+    }
+}
+if {!$saw_logout || !$saw_fg || !$saw_direct} {
+    lc_fail "logout/foreground/Direct not all seen (logout=$saw_logout fg=$saw_fg direct=$saw_direct)"
+}
+
+lc_pass "KT-1.5d-3: root tile -> split -> 2 tiles -> focus-routed exit (contained) -> last-tile logout -> console resumes"
+
+lc_quit

@@ -54,7 +54,29 @@ __pycache__/
 .env.local
 *.local
 
+# Obsidian workspace state (the repo root is the Obsidian root)
+.obsidian/
+
+# Vault operator scratch (Obsidian dailies, canvases) -- never load-bearing (R8)
+vault/journal/
+vault/**/*.canvas
 # Per-checkout agent relay config (yip): host-specific absolute paths,
 # so it is joined per checkout with `yip install` rather than committed.
 .mcp.json
 .claude/settings.local.json
+
+# quaestor build artifact (go build ./... drops the binary in-package)
+vault/meta/quaestor/quaestor
+
+# --- Vendored third_party/rust: track the precompiled subset ---
+# The broad *.o / *.a / *.bin / target/ rules above would exclude files the
+# vendored crates SHIP: ring's precompiled crypto objects + test fixtures, the
+# windows/aegis static libs, and the cc crate's `src/target` SOURCE module.
+# Excluding them breaks a FRESH checkout's userspace build (Cargo's per-crate
+# vendored checksum fails one file at a time). Track them so a clean clone / CI /
+# thyla-pi sync is reproducible. Build output stays under build/ (unaffected).
+!third_party/rust/**/*.a
+!third_party/rust/**/*.bin
+!third_party/rust/**/*.o
+!third_party/rust/cc/src/target/
+!third_party/rust/cc/src/target/**

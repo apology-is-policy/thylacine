@@ -191,6 +191,15 @@ fn actor_owner_principal(actor: Actor) -> u32 {
     }
 }
 
+/// d-1b (HALCYON 14.12 step 4): is `p` a real user principal (a SESSION), as
+/// opposed to a sentinel (SYSTEM / unauthenticated / unknown -- the console
+/// renderer + system clients)? This is exactly the discriminator `actor()`
+/// applies to a conn's peer_principal, read here off a leaf's stamped
+/// `owner_principal`. A SESSION leaf outranks SYSTEM leaves for the display.
+fn principal_is_session(p: u32) -> bool {
+    p != T_PRINCIPAL_INVALID && p != T_PRINCIPAL_SYSTEM && p != T_PRINCIPAL_NONE
+}
+
 /// What a `create` hosts (the surface_ctl arm's parse, typed): a content
 /// surface -- optionally steered by an H-4b placement claim -- or one of
 /// the never-hosted renderer classes. The claim rides ONLY the content
@@ -210,7 +219,9 @@ enum Host {
 /// the next pass takes the rest.
 const LAYOUT_VERBS_PER_PASS: u32 = 4;
 const MAX_SURFACES_PER_RENDERER: usize = MAX_SURFACES_PER_CONN + pane::MAX_PANES;
-const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + pane::MAX_PANES;
+// One renderer and one declared session compositor may each hold a tile per
+// pane on top of the per-conn allowance.
+const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * pane::MAX_PANES;
 
 /// Warp-2c: the GPU-seam slot pools. ONE context per client (the I-45
 /// exposure bound, GPU-DESIGN section 8: no cross-context resource naming,
@@ -811,6 +822,13 @@ pub const TEV_FOCUS: u16 = 7;
 // stream-END is still the event-fid EOF (poll_events' dead-surface arm +
 // h_read's gone-surface arm). Request and end are distinct on purpose.
 pub const TEV_CLOSE: u16 = 8;
+/// The layout tree changed structurally: re-read `layout`. Sent to ONE
+/// surface of the DECLARED session conn (section 18.4 kind 10; `value` =
+/// the layout epoch). A split of an EMPTY leaf fans no CONFIGURE (nothing
+/// hosted changes size) and no FOCUS (no surface gains it), so the conn
+/// that claims empties would otherwise learn of them only at an unrelated
+/// event.
+pub const TEV_LAYOUT: u16 = 10;
 
 #[derive(Clone, Copy)]
 pub struct Tevent {
@@ -901,21 +919,40 @@ struct Surface {
     /// carry their sentinel principal here but are Client(stripes) actors,
     /// so this is inert for them.
     owner_principal: u32,
+    /// d-1b (HALCYON 14.12 step 4): this SYSTEM leaf (console renderer / system
+    /// client) is backgrounded by a visible SESSION leaf -- excluded from the
+    /// scanout decision, not composited, not FRAME-ticked. Set + cleared per
+    /// reconcile; false whenever no session leaf is present (so it is inert on
+    /// every pre-session + gfx-test path).
+    backgrounded: bool,
     state: SurfState,
     w: u32,
     h: u32,
     /// The last letterbox placement logged (one-shot diagnostic).
     lb_logged: Option<(u32, u32, u32, u32)>,
     /// The present-style latch (#56): set the first time a present's
-    /// damage does not cover the full surface; never cleared. A latched
-    /// surface is an ACCUMULATOR (aurora's cell-diff over rotating weave
-    /// slots): each slot is patchwork, so scaling any one slot composes
-    /// alternating half-stale frames -- a size mismatch therefore CROPS
-    /// (damage-clipped) instead of letterboxing. Full-frame presenters
-    /// (the SDL class, the battery) never latch and letterbox both
-    /// directions. One-way by design: a later full redraw must not flap
-    /// the placement back.
+    /// damage does not cover the full surface ON A SURFACE THAT ROTATES
+    /// SLOTS (`slots_presented` names two or more); never cleared. A
+    /// latched surface is an ACCUMULATOR (aurora's cell-diff over rotating
+    /// weave slots): each slot is patchwork -- outside its damage it holds
+    /// the frame from `nslots` presents back -- so scaling any one slot
+    /// composes alternating half-stale frames; a size mismatch therefore
+    /// CROPS (damage-clipped) instead of letterboxing. The rotation
+    /// conjunct is the property the latch exists for: a SINGLE-SLOT
+    /// presenter (the SDL class -- slot 0 IS the app's framebuffer, complete
+    /// by construction) presenting partial damage (SDL_UpdateWindowSurface-
+    /// Rects: DOSBox-X's changed scanline bands, its menu bar) is NOT
+    /// patchwork and letterboxes, its damage projected through the scale
+    /// (`ComposeOp.clip`). Keyed on coverage alone, the latch pinned DOSBox
+    /// at native size in the content's corner -- zoomed, top-left on black.
+    /// Full-frame presenters (the battery, TyrQuake) never latch either
+    /// way. One-way by design: a later full redraw must not flap the
+    /// placement back.
     patchwork: bool,
+    /// Bitmask of the weave slots this surface has ever presented (the
+    /// latch's rotation witness). Survives a reweave: the client's present
+    /// discipline is a property of the client, not of a generation.
+    slots_presented: u32,
     slot_stride: u64,
     /// The CURRENT weave generation (the spec's g-highest). weft_ensure,
     /// the geometry reads, and every post-fence present serve/validate
@@ -1228,6 +1265,11 @@ const HEALTH_PERIOD: u64 = 4;
 struct ComposeOp {
     src: Rect,
     dst: Rect,
+    /// The screen-space part of `dst` this op actually changes: `dst`
+    /// itself for a crop, the damage's projection through the scale for a
+    /// letterboxed compose (`place::scaled_clip`). The CPU path composes and
+    /// pushes only this; the GPU blit is whole-op (one command either way).
+    clip: Rect,
 }
 
 /// The present-path cost census (Warp-C C-4): one cell per op class, wall
@@ -1597,6 +1639,14 @@ pub struct Comp {
     /// focus-only epoch bump redraws borders without blanking content
     /// (idle clients must not lose their pixels to a focus ring move).
     geom_sig: u64,
+    /// The conns that DECLARED themselves the display's session compositor
+    /// (`session on` on their own ctl). The display handoff keys on this,
+    /// never on a surface's principal: a user program drawing a window is
+    /// not a session, and must not put the console renderer to sleep. One
+    /// at a time (a display has one seat); cleared with the conn.
+    /// The DECLARED session conn (`session on`) with its principal: the seat.
+    /// At most one entry; cleared when the conn retires.
+    session_conns: Vec<(u64, u32)>,
     /// The FRAME clock (section 18.4): a synthesized fixed-rate tick.
     pub tick: u64,
     pub clock_hz: u32,
@@ -2298,6 +2348,7 @@ impl Comp {
             pending_bind_refused_said: false,
             chrome_epoch: 0,
             geom_sig: 0,
+            session_conns: Vec::new(),
             tick: 0,
             clock_hz: 60,
             present_bucket_start: None,
@@ -2412,11 +2463,13 @@ impl Comp {
             owner_conn: conn_id,
             owner_peer: peer,
             owner_principal: principal,
+            backgrounded: false,
             state: SurfState::Minted,
             w: 0,
             h: 0,
             lb_logged: None,
             patchwork: false,
+            slots_presented: 0,
             slot_stride: 0,
             weave: None,
             res_ids: [0; WEAVE_SLOTS as usize], // minted with the first generation
@@ -3895,7 +3948,7 @@ impl Comp {
         }
         let leaf = self.layout.find_hosting(n)?;
         let p = self.layout.get(leaf)?;
-        if !p.visible {
+        if !p.visible || p.content.is_empty() {
             return None;
         }
         Some(p.content)
@@ -4126,6 +4179,9 @@ impl Comp {
                 return None;
             }
             let (ox, oy, dw2, dh2) = Self::letterbox(sw, sh_full, content.w, content.h);
+            // The damage's projection: what this present changes on screen.
+            let (cx, cy, cw2, ch2) =
+                libhalcyon::place::scaled_clip((x, y, pw, ph), sw, sh_full, dw2, dh2);
             // One-shot geometry diagnostic (per distinct placement).
             if let Some(su) = self.surf_mut(n) {
                 let sig = (ox, oy, dw2, dh2);
@@ -4158,6 +4214,12 @@ impl Comp {
                     w: dw2,
                     h: dh2,
                 },
+                clip: Rect {
+                    x: content.x + ox + cx,
+                    y: content.y + oy + cy,
+                    w: cw2,
+                    h: ch2,
+                },
             });
         }
         // Same-size fast path: damage-clipped.
@@ -4170,14 +4232,16 @@ impl Comp {
         if inter.is_empty() {
             return None;
         }
+        let dst = Rect {
+            x: content.x + inter.x,
+            y: content.y + inter.y,
+            w: inter.w,
+            h: inter.h,
+        };
         Some(ComposeOp {
             src: inter,
-            dst: Rect {
-                x: content.x + inter.x,
-                y: content.y + inter.y,
-                w: inter.w,
-                h: inter.h,
-            },
+            dst,
+            clip: dst,
         })
     }
 
@@ -4282,19 +4346,31 @@ impl Comp {
         };
         let dw = self.gpu.width as u64;
         if op.src.w != op.dst.w || op.src.h != op.dst.h {
+            // Only the clip's rows/cols are composed, indexed ABSOLUTELY
+            // within dst so the nearest-source mapping is the whole-rect
+            // one (`place::nearest_src`, the function `scaled_clip` was
+            // derived from): pixel-identical to a full compose, no seam at
+            // the clip's edge.
+            let c = op.clip.intersect(op.dst);
+            if c.is_empty() {
+                return;
+            }
+            let (row0, row1) = ((c.y - op.dst.y) as u64, (c.y - op.dst.y + c.h) as u64);
+            let (col0, col1) = ((c.x - op.dst.x) as u64, (c.x - op.dst.x + c.w) as u64);
             // SAFETY: src reads stay inside the source image (sx < sw, sy <
             // sh_full by the ratio bound: lx < dst.w => lx*sw/dst.w < sw --
             // valid for scale-down and up); dst rows stay inside the screen
             // buffer (letterbox() bounds the scaled rect inside content, and
-            // content inside the display by the geometry pass).
+            // content inside the display by the geometry pass; the clip is
+            // inside dst by the intersect above).
             unsafe {
-                for row in 0..op.dst.h as u64 {
-                    let sy = (row * sh_full as u64) / op.dst.h as u64;
+                for row in row0..row1 {
+                    let sy = libhalcyon::place::nearest_src(row as u32, sh_full, op.dst.h) as u64;
                     let dy = op.dst.y as u64 + row;
                     let srow = (src_base + sy * sw as u64 * 4) as *const u32;
                     let drow = (screen_va + (dy * dw + op.dst.x as u64) * 4) as *mut u32;
-                    for col in 0..op.dst.w as u64 {
-                        let sx = (col * sw as u64) / op.dst.w as u64;
+                    for col in col0..col1 {
+                        let sx = libhalcyon::place::nearest_src(col as u32, sw, op.dst.w) as u64;
                         *drow.add(col as usize) = *srow.add(sx as usize);
                     }
                 }
@@ -4472,6 +4548,33 @@ impl Comp {
     /// E_INVAL; prior reweave still draining -> E_AGAIN (the <=2-gens
     /// bound: present a frame, then re-ack).
     fn resize_ack(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
+        let r = self.resize_ack_inner(n, w, h, serial);
+        if cfg!(feature = "test-mode") && r.is_err() {
+            // The client sees one Rwrite error; the state that decided it
+            // (stale vs no offer vs echo mismatch vs draining) is only
+            // visible here.
+            let st = self.surf(n).map(|s| {
+                (
+                    s.cfg_serial,
+                    s.offered,
+                    s.weave.is_some(),
+                    s.old_weave.is_some(),
+                )
+            });
+            say!(
+                "tapestryd: resize-ack {} {}x{} serial {} refused {:?} state {:?}",
+                n,
+                w,
+                h,
+                serial,
+                r,
+                st
+            );
+        }
+        r
+    }
+
+    fn resize_ack_inner(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
         let s = self.surf(n).ok_or(p9::E_BADF)?;
         if s.weave.is_none() {
             return Err(p9::E_INVAL); // no generation to reweave
@@ -5192,6 +5295,10 @@ impl Comp {
         }
         let mut wedged: Vec<usize> = Vec::new();
         for (_, n, c) in self.layout.visible_hosted() {
+            // d-1b: a backgrounded SYSTEM leaf is not composited/reconfigured.
+            if self.surf(n).map_or(false, |s| s.backgrounded) {
+                continue;
+            }
             if !c.intersect(r).is_empty() && !self.emit_configure_to(n, c.w, c.h) {
                 wedged.push(n);
             }
@@ -5282,6 +5389,10 @@ impl Comp {
     /// HOLD) slot stays unshown, as `release` promises.
     fn prefill_from_shown(&mut self) {
         for (_, n, _) in self.layout.visible_hosted() {
+            // d-1b: a backgrounded SYSTEM leaf contributes no composed pixels.
+            if self.surf(n).map_or(false, |s| s.backgrounded) {
+                continue;
+            }
             if self.gl_adoption(n).is_some() {
                 continue;
             }
@@ -5332,14 +5443,16 @@ impl Comp {
         if src.is_empty() {
             return None;
         }
+        let dst = Rect {
+            x: m.rect.x + src.x,
+            y: m.rect.y + src.y,
+            w: src.w,
+            h: src.h,
+        };
         let op = ComposeOp {
             src,
-            dst: Rect {
-                x: m.rect.x + src.x,
-                y: m.rect.y + src.y,
-                w: src.w,
-                h: src.h,
-            },
+            dst,
+            clip: dst,
         };
         self.compose_cpu(op, va + (slot as u64) * slot_stride, sw, sh);
         Some(op.dst)
@@ -5665,6 +5778,21 @@ impl Comp {
             let c = p.content;
             fold((c.x as u64) << 32 | c.y as u64);
             fold((c.w as u64) << 32 | c.h as u64);
+            if let pane::Kind::Leaf { surface } = &p.kind {
+                // What a leaf SHOWS is geometry too: a hosting into an
+                // already-split empty leaf changes no rect, and a signature
+                // over rects alone runs that pass non-structural -- the
+                // CONFIGURE fan the new surface needs never fires. The
+                // incarnation (slot, gen) rather than the slot, so a
+                // retire-and-rehost of one slot inside a single pass still
+                // reads as a change.
+                fold(match surface {
+                    Some(n) => {
+                        ((*n as u64) << 32) | self.surf(*n).map_or(u32::MAX, |s| s.gen) as u64
+                    }
+                    None => u64::MAX,
+                });
+            }
         }
         h
     }
@@ -5730,26 +5858,163 @@ impl Comp {
             Some(sr) => dh - sr.h,
             None => dh,
         };
+        // F2 (d-1b tiling completion): determine backgrounding from the TREE
+        // BEFORE recompute so layout_pane can exclude a backgrounded leaf from
+        // tiling. A leaf is backgrounded iff it hosts a NON-session surface AND
+        // some hosted leaf carries a session surface. Owner-based + visibility-
+        // independent (recompute has not run yet): the Split arm zero-rects
+        // these, the foreground siblings fill. This drives ONLY tiling; the
+        // visibility-based Surface.backgrounded below still drives compose, so a
+        // Tab-active backgrounded leaf (shown via the One path) is never
+        // blanked. On a session-less display the set is EMPTY -> no exclusion
+        // -> byte-identical tiling to the pre-F2 engine (the console path).
+        let hosted = self.layout.hosted_leaves();
+        let has_session_tree = hosted.iter().any(|&(_, n)| {
+            self.surf(n)
+                .is_some_and(|s| self.session_declared(s.owner_conn))
+        });
+        let bg_tiling: Vec<usize> = if has_session_tree {
+            hosted
+                .iter()
+                .filter(|&&(_, n)| {
+                    self.surf(n)
+                        .is_some_and(|s| !principal_is_session(s.owner_principal))
+                })
+                .map(|&(slot, _)| slot)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.layout.apply_backgrounded(&bg_tiling);
         self.layout.recompute(dw, layout_h, self.chords.gaps);
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
+
+        // d-1b (HALCYON 14.12 step 4): a user SESSION outranks SYSTEM content for
+        // the display. A session is a conn that DECLARED itself the session
+        // compositor (`session on`) -- a user program drawing a window is not
+        // one; SYSTEM leaves (the console renderer aurora + any system client)
+        // are BACKGROUNDED while a declared session hosts a leaf -- excluded from the
+        // decision below, skipped by the compose + CONFIGURE-fan sites, and skipped
+        // by frame_tick, so the root collapses to the session (Direct) and aurora's
+        // FRAME-driven loop goes dormant. Recomputed every reconcile; a transition
+        // (either direction) is logged once as the fg/bg witness. BACKWARD-COMPAT:
+        // no session leaf -> has_session false -> bg_now empty -> active_* equal the
+        // raw vis/nleaves and the decision is byte-identical to the pre-d-1b logic.
+        let has_session = has_session_tree;
+        // ONE flag: a surface is backgrounded iff its leaf is (the tree flag
+        // stamped above) -- never re-derived from visibility, which flaps as a
+        // tab hides and shows the leaf.
+        let bg_now: Vec<usize> = bg_tiling
+            .iter()
+            .filter_map(|&slot| self.layout.leaf_surface(slot))
+            .collect();
+        let mut bg_transitions: Vec<(usize, bool)> = Vec::new();
+        for n in 0..MAX_SURFACES {
+            let now = bg_now.contains(&n);
+            if let Some(s) = self.surf_mut(n) {
+                if s.backgrounded != now {
+                    s.backgrounded = now;
+                    bg_transitions.push((n, now));
+                }
+            }
+        }
+        for (n, now) in bg_transitions {
+            say!(
+                "tapestryd: {} surface {} ({})",
+                if now { "background" } else { "foreground" },
+                n,
+                if now {
+                    "session took the display"
+                } else {
+                    "session gone"
+                }
+            );
+        }
+        // A backgrounded leaf is invisible + dormant, so it must not keep input
+        // focus: the user's keystrokes would vanish into a renderer they cannot
+        // see. When a session leaf takes the display, move focus off a now-
+        // backgrounded leaf (the console renderer) onto a visible session leaf --
+        // the input twin of the scanout priority (14.11.9), so a session tile
+        // actually receives keys. On logout the session leaf retires and `retire`
+        // re-homes focus to what remains. Gated by has_session, so every
+        // pre-session + session-less path is untouched (byte-identical focus).
+        if has_session
+            && self
+                .layout
+                .focused_surface()
+                .map_or(false, |f| bg_now.contains(&f))
+        {
+            if let Some(slot) = vis.iter().find_map(|v| {
+                self.surf(v.1)
+                    .filter(|s| principal_is_session(s.owner_principal))
+                    .map(|_| v.0)
+            }) {
+                self.layout.focus(slot);
+            }
+        }
+        let active_vis: Vec<(usize, usize, Rect)> = vis
+            .iter()
+            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded))
+            .cloned()
+            .collect();
+        let bg_visible = vis.iter().filter(|v| bg_now.contains(&v.1)).count();
+        let active_nleaves = nleaves.saturating_sub(bg_visible);
+
+        // F2 witness (test-mode): the FOREGROUND (non-backgrounded) session
+        // tile widths when a session holds the display, so the ls-gfx-session
+        // E2E can assert the tiles FILL the width -- a backgrounded aurora leaf
+        // no longer steals a column. Fires every reconcile with a session up
+        // (unlike the per-placement letterbox latch), off `active_vis`, so a
+        // third-width tile (the pre-F2 sum_w ~= 2/3 disp_w) is a regression the
+        // E2E catches deterministically.
+        #[cfg(feature = "test-mode")]
+        if has_session {
+            let sum_w: u32 = active_vis.iter().map(|v| v.2.w).sum();
+            let min_w: u32 = active_vis.iter().map(|v| v.2.w).min().unwrap_or(0);
+            say!(
+                "tapestryd: session-tiling active={} min_w={} sum_w={} disp_w={}",
+                active_vis.len(),
+                min_w,
+                sum_w,
+                dw
+            );
+        }
 
         // H-3c round F2: a placed menu is a visible thing with nothing under
         // it too -- Off would leave an invisible grab.
         // H-3d: a status bar is a visible thing too (Off would hide it), and a
         // leaf above the carve is smaller than the display (Direct is a
         // display-sized weave): both arms need no bar.
-        let want = if vis.is_empty() && nleaves <= 1 && self.menu.is_none() && self.status.is_none()
+        let want = if active_vis.is_empty()
+            && active_nleaves <= 1
+            && self.menu.is_none()
+            && self.status.is_none()
         {
             match self.scanout {
                 Scanout::Boot => Scanout::Boot,
                 _ => Scanout::Off,
             }
-        } else if vis.len() == 1 && nleaves == 1 && self.menu.is_none() && self.status.is_none() {
+        } else if active_vis.len() == 1
+            && active_nleaves == 1
+            && self.menu.is_none()
+            && self.status.is_none()
+        {
             // H-3c: a placed menu is a second visible thing -- it composes
             // over the leaf, so Direct is off while one is up.
-            let n = vis[0].1;
-            let full = self.surf(n).map_or(false, |s| s.w == dw && s.h == dh);
+            let n = active_vis[0].1;
+            // Direct shows the surface at the display origin, so the layout
+            // must agree: a lone foreground leaf beside a zero-rect
+            // backgrounded one is borderless (recompute counts foreground
+            // leaves), and this conjunct is the guard that it stayed so.
+            let full = self.surf(n).is_some_and(|s| s.w == dw && s.h == dh)
+                && active_vis[0].2
+                    == (Rect {
+                        x: 0,
+                        y: 0,
+                        w: dw,
+                        h: dh,
+                    });
             if full {
                 Scanout::Direct(n)
             } else {
@@ -5901,6 +6166,10 @@ impl Comp {
                     // cropped/letterboxed by the blit clip.
                     let mut wedged: Vec<usize> = Vec::new();
                     for (_, n, c) in self.layout.visible_hosted() {
+                        // d-1b: a backgrounded SYSTEM leaf gets no redraw offer.
+                        if self.surf(n).map_or(false, |s| s.backgrounded) {
+                            continue;
+                        }
                         if !self.emit_configure_to(n, c.w, c.h) {
                             wedged.push(n);
                         }
@@ -5909,6 +6178,23 @@ impl Comp {
                     // relayout hook their owner repaints or resizes on.
                     for (n, t) in self.visible_chrome() {
                         if !self.emit_configure_to(n, t.w, t.h) {
+                            wedged.push(n);
+                        }
+                    }
+                    // The declared session conn hears every structural
+                    // change on one of its surfaces (TEV_LAYOUT): the
+                    // empties it owns fan nothing else.
+                    if let Some(n) = self.session_notify_surface() {
+                        let ev = Tevent {
+                            kind: TEV_LAYOUT,
+                            code: 0,
+                            value: self.layout.epoch as u32,
+                            rune: 0,
+                            mods: 0,
+                            flags: 0,
+                            tick: self.tick,
+                        };
+                        if !self.push_event(n, ev) {
                             wedged.push(n);
                         }
                     }
@@ -5998,7 +6284,7 @@ impl Comp {
             None => weave_va + (slot as u64) * slot_stride,
         };
         self.compose_cpu(op, src_base, sw, sh_full);
-        Some(op.dst)
+        Some(op.clip)
     }
 
     /// Push a screen-BUFFER region to the host resource + display: the CPU
@@ -6106,15 +6392,54 @@ impl Comp {
                 .subtree_surfaces(slot)
                 .iter()
                 .all(|&n| self.surf(n).map_or(false, |s| s.owner_peer == c)),
-            // H-4b-2: a session owns the subtree iff every hosted surface
-            // is its principal's (an all-empty subtree is vacuously true --
-            // "anyone's", same as Client; empty-leaf placement authority is
-            // the separate claim-mint gate, not this structural check).
+            // H-4b-2 + F2 structural transparency: a session owns the subtree
+            // iff every hosted surface is its principal's -- but a BACKGROUNDED
+            // leaf (a console renderer a session stepped back) is transparent
+            // and skipped, so a session's authority over its OWN panes is not
+            // blocked by a system leaf sharing their container (the flat
+            // [aurora, A, B] root a wide auto-host split produces). GUARD:
+            // require at least one owned, non-backgrounded surface -- a subtree
+            // that is ENTIRELY backgrounded system content is NOT the session's
+            // (else a session could close/mode the console renderer). An
+            // all-EMPTY subtree stays vacuously owned (empty-leaf placement is
+            // the separate claim-mint gate).
+            Actor::Session(p) => {
+                // The skip keys on the LEAF's tree flag (`is_bg_leaf`, owner-
+                // based, stable), NOT `Surface.backgrounded`: that one is
+                // visibility-derived and CLEARS once a tab hides the leaf
+                // (it drops out of `vis`), which would re-expose aurora to
+                // this walk exactly when `tab next` cycles the tabbed root.
+                let hosted = self.layout.subtree_hosted(slot);
+                if hosted.is_empty() {
+                    return true;
+                }
+                let mut owned_any = false;
+                for &(leaf, n) in &hosted {
+                    if self.layout.is_bg_leaf(leaf) {
+                        continue;
+                    }
+                    match self.surf(n) {
+                        Some(s) if s.owner_principal == p => owned_any = true,
+                        _ => return false,
+                    }
+                }
+                owned_any
+            }
+        }
+    }
+
+    /// Ownership with NO transparency: every hosted surface in the subtree is
+    /// the actor's. The predicate for a DESTRUCTIVE verb (`close` unhosts
+    /// every leaf it reaches, backgrounded or not), where a transparent
+    /// console leaf would be closed along with the session's own panes.
+    fn actor_owns_subtree_all(&self, actor: Actor, slot: usize) -> bool {
+        match actor {
             Actor::Session(p) => self
                 .layout
                 .subtree_surfaces(slot)
                 .iter()
-                .all(|&n| self.surf(n).map_or(false, |s| s.owner_principal == p)),
+                .all(|&n| self.surf(n).is_some_and(|s| s.owner_principal == p)),
+            other => self.actor_owns_subtree(other, slot),
         }
     }
 
@@ -6159,8 +6484,7 @@ impl Comp {
             match actor {
                 Actor::Renderer => true,
                 Actor::Session(p) => {
-                    self.layout.is_empty_leaf(slot)
-                        && self.layout.pane_owner_principal(slot) == p
+                    self.layout.is_empty_leaf(slot) && self.layout.pane_owner_principal(slot) == p
                 }
                 Actor::Client(_) => false,
             }
@@ -6298,7 +6622,7 @@ impl Comp {
                 return Err(p9::E_INVAL);
             }
         } else if cmd == "close" {
-            if !self.actor_owns_subtree(actor, slot) {
+            if !self.actor_owns_subtree_all(actor, slot) {
                 return Err(p9::E_PERM);
             }
             // Closing a pane strands its surfaces invisible BY DESIGN
@@ -6478,12 +6802,38 @@ impl Comp {
     }
 
     /// Retire every surface owned by a dying conn (teardown / Tversion).
+    /// The declaration clears AFTER the retires: each retire reconciles, and
+    /// with the conn still declared the console stays backgrounded through
+    /// the intermediate passes (a crash with N tiles is one transition to
+    /// `Direct(console)`, not N-1 composed passes of dead tiles beside it);
+    /// the last retire already sees a declared conn hosting nothing.
     fn retire_conn(&mut self, conn_id: u64) {
         for n in 0..MAX_SURFACES {
             if self.surf(n).map_or(false, |s| s.owner_conn == conn_id) {
                 self.retire(n);
             }
         }
+        self.session_conns.retain(|&(c, _)| c != conn_id);
+    }
+
+    /// Is `conn` the declared session conn (the seat)?
+    fn session_declared(&self, conn: u64) -> bool {
+        self.session_conns.iter().any(|&(c, _)| c == conn)
+    }
+
+    /// The lowest-slot surface of the declared session conn, if any -- the
+    /// one TEV_LAYOUT rides (one event per change, not one per tile).
+    fn session_notify_surface(&self) -> Option<usize> {
+        let &(conn, _) = self.session_conns.first()?;
+        (0..MAX_SURFACES).find(|&n| self.surf(n).is_some_and(|s| s.owner_conn == conn))
+    }
+
+    /// Does `conn` host a leaf (any hosted surface it owns)?
+    fn conn_hosts(&self, conn: u64) -> bool {
+        self.layout
+            .hosted_leaves()
+            .iter()
+            .any(|&(_, n)| self.surf(n).is_some_and(|s| s.owner_conn == conn))
     }
 
     /// H-4b-2: reap a departed session's empty scaffolding. `retire_conn`
@@ -6598,6 +6948,17 @@ impl Comp {
             // queue with non-droppable FOCUS records and wedge-retired it;
             // a client that never read the transient gain lost nothing).
             if let Some(c) = s.events.iter_mut().find(|e| e.kind == TEV_FOCUS) {
+                *c = ev;
+                return true;
+            }
+        }
+        if ev.kind == TEV_LAYOUT {
+            // The layout epoch is a STATE too: the newest subsumes every
+            // unread one (the reader re-reads `layout` once per event). It
+            // is pushed at EVERY structural pass, whoever caused it, so a
+            // foreign client's window churn against a momentarily
+            // non-draining session must never fill this queue.
+            if let Some(c) = s.events.iter_mut().find(|e| e.kind == TEV_LAYOUT) {
                 *c = ev;
                 return true;
             }
@@ -6718,7 +7079,16 @@ impl Comp {
             self.reconcile();
         }
         self.comp_replay_deferred_imports();
-        let mut vis: Vec<usize> = self.layout.visible_hosted().iter().map(|v| v.1).collect();
+        // d-1b: a backgrounded SYSTEM leaf (a session holds the display) gets no
+        // FRAME -- that is exactly what makes the console renderer's FRAME-driven
+        // loop go dormant while the session owns the display.
+        let mut vis: Vec<usize> = self
+            .layout
+            .visible_hosted()
+            .iter()
+            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded))
+            .map(|v| v.1)
+            .collect();
         vis.extend(self.visible_chrome().iter().map(|v| v.0));
         for n in vis {
             let ev = Tevent {
@@ -6863,26 +7233,12 @@ impl Comp {
     /// return the identity (0, 0, cw, ch). THE ONE GEOMETRY AUTHORITY:
     /// blit_composed_pixels' forward map and ptr_hit's inverse both
     /// derive from this, so they cannot drift apart (the G-7c audit-F3
-    /// lesson made structural).
+    /// lesson made structural). A partial present of a letterboxed surface
+    /// redraws only its damage's projection (`place::scaled_clip`).
     fn letterbox(sw: u32, sh: u32, cw: u32, ch: u32) -> (u32, u32, u32, u32) {
-        if sw == cw && sh == ch {
-            return (0, 0, cw, ch);
-        }
-        // Width-bound iff cw/sw <= ch/sh  <=>  cw*sh <= ch*sw (u64: no
-        // overflow for display-scale dims).
-        let (dw2, dh2) = if (cw as u64) * (sh as u64) <= (ch as u64) * (sw as u64) {
-            (
-                cw,
-                (((sh as u64) * (cw as u64)) / (sw as u64).max(1)) as u32,
-            )
-        } else {
-            (
-                (((sw as u64) * (ch as u64)) / (sh as u64).max(1)) as u32,
-                ch,
-            )
-        };
-        let (dw2, dh2) = (dw2.max(1), dh2.max(1));
-        ((cw - dw2) / 2, (ch - dh2) / 2, dw2, dh2)
+        // The math lives in libhalcyon::place (host-tested) so the battery
+        // derives its sample points from the SAME function.
+        libhalcyon::place::letterbox(sw, sh, cw, ch)
     }
 
     /// The surface under display point (px, py) + the point translated to
@@ -7239,7 +7595,28 @@ impl Comp {
             ChordAction::Split(mode) => {
                 self.layout.unzoom();
                 let f = self.layout.focused;
-                if self.layout.split(f, mode).is_some() {
+                // The new empty leaf must record the owner of the leaf being
+                // split (its hosted surface's principal), so a SESSION that
+                // Super+H-splits its own tile can later mint the placement
+                // claim on the new leaf (HALCYON.md 13.7). The client `split`
+                // verb (pane_cmd) already stamps this; the chord path must
+                // match, else a session-driven split yields an environment-
+                // owned (0) leaf its own compositor cannot claim -- KT-1.5d-3.
+                let owner = self
+                    .layout
+                    .leaf_surface(f)
+                    .and_then(|n| self.surf(n))
+                    .map(|s| s.owner_principal)
+                    .unwrap_or_else(|| self.layout.pane_owner_principal(f));
+                // The field's vocabulary is "0 = the environment's": a system
+                // surface's sentinel principal never lands on a leaf.
+                let owner = if principal_is_session(owner) {
+                    owner
+                } else {
+                    0
+                };
+                if let Some(new_leaf) = self.layout.split(f, mode) {
+                    self.layout.set_owner_principal(new_leaf, owner);
                     self.reconcile();
                 }
             }
@@ -13179,7 +13556,7 @@ impl Conn {
             // chrome surface per visible leaf on top of its own, so its cap
             // is widened by MAX_PANES; the global pool is sized so every
             // conn can reach its cap at once (nothing starves).
-            let cap = if self.peer_is_renderer() {
+            let cap = if self.peer_is_renderer() || comp.session_declared(self.conn_id) {
                 MAX_SURFACES_PER_RENDERER
             } else {
                 MAX_SURFACES_PER_CONN
@@ -15274,6 +15651,57 @@ impl Conn {
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
+        if let Some(rest) = s.strip_prefix("session ") {
+            // The display handoff is a DECLARATION, made by the session
+            // compositor on its own conn: a Session principal only (the
+            // renderer and SYSTEM clients never take the display this way),
+            // one declared conn per display at a time, cleared with the conn.
+            // Not renderer-gated: the declaring conn IS the user's seat.
+            if !principal_is_session(self.peer_principal) {
+                return Err(p9::E_PERM);
+            }
+            match rest.trim() {
+                "on" => {
+                    if let Some(&(other, other_p)) = comp.session_conns.first() {
+                        if other == self.conn_id {
+                            return Ok(());
+                        }
+                        // The seat is held by a conn WHILE IT HOSTS: an
+                        // idle declaration holds no display and is taken
+                        // over by anyone (a crashed compositor's conn is
+                        // retired -- and un-declared -- as soon as its EOF
+                        // is serviced, so a restart never needs more). A
+                        // holder that hosts leaves keeps it, whoever the
+                        // newcomer is: a same-principal newcomer is the
+                        // user's own program, and stealing the seat from
+                        // the user's live compositor would degrade it (the
+                        // mint cap, no TEV_LAYOUT, no re-declare) for the
+                        // rest of the session. The newcomer runs undeclared,
+                        // beside the console -- never a login loop.
+                        if comp.conn_hosts(other) {
+                            say!(
+                                "tapestryd: session declare refused: conn {} (principal {}) holds the seat",
+                                other,
+                                other_p
+                            );
+                            return Err(p9::E_BUSY);
+                        }
+                        say!(
+                            "tapestryd: session takeover: conn {} -> conn {}",
+                            other,
+                            self.conn_id
+                        );
+                        comp.session_conns.clear();
+                    }
+                    comp.session_conns.push((self.conn_id, self.peer_principal));
+                    say!("tapestryd: session declared by conn {}", self.conn_id);
+                }
+                "off" => comp.session_conns.retain(|&(c, _)| c != self.conn_id),
+                _ => return Err(p9::E_INVAL),
+            }
+            comp.reconcile();
+            return Ok(());
+        }
         // The apply-authority gate (cfg-3; the ARCH section 25.4 cfg-3
         // addendum is the prosecution list): every AUTHORITY-BEARING
         // global verb -- mode, clock-rate, and every future global
@@ -15814,9 +16242,25 @@ impl Conn {
         // (rects_cover_full): the battery's multi-rect leg presents the
         // full frame as two tiles, which a single-full-rect shortcut
         // falsely latched (the moveB pane-center regression).
-        if !rects_cover_full(&rects, w, h) {
-            if let Some(s) = comp.surf_mut(n) {
+        let covers_full = rects_cover_full(&rects, w, h);
+        if let Some(s) = comp.surf_mut(n) {
+            s.slots_presented |= 1 << slot;
+            // Rotation = two or more distinct slots ever presented. Only then
+            // is a slot stale outside its damage (see the field doc); a
+            // single-slot presenter's partial damage is a hint, not a
+            // patchwork, and stays letterboxed.
+            let rotates = s.slots_presented & (s.slots_presented - 1) != 0;
+            if !covers_full && rotates && !s.patchwork {
                 s.patchwork = true;
+                say!(
+                    "tapestryd: surface {} patchwork latched (slot {} of slots {:#b}, {} rects of {}x{})",
+                    n,
+                    slot,
+                    s.slots_presented,
+                    rects.len(),
+                    w,
+                    h
+                );
             }
         }
 

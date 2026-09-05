@@ -39,6 +39,13 @@
 //                 (B stays blue on screen with magenta already blitted;
 //                 release flips it) (G-6c);
 //   close       : a compositor pane close delivers TEV_CLOSE (G-6b).
+//   singleslot  : the #56 latch's real discriminator (the fullscreen-zoom
+//                 bug, aux 0048): a SINGLE-SLOT client presenting PARTIAL
+//                 damage stays letterboxed -- zoomed, its half-size frame
+//                 scales 2x over the whole display and each partial present
+//                 lands through the scale; then the one-variable-away
+//                 control: the SAME surface, rotation back on, latches the
+//                 accumulator crop at its second slot (the aurora class).
 //
 // Clipping is exercised deliberately: A (display-sized) is larger than
 // its pane -> the compose blit crops it; solid fills keep the pixel
@@ -255,6 +262,39 @@ fn find_pane(layout: &str, surf: u32) -> Option<PaneInfo> {
     None
 }
 
+/// The surface a layout line's leaf hosts (None: not a hosted leaf line).
+/// Siblings print in child order, so the line index is the ORDER witness
+/// when rects cannot order two panes (a zero-rect backgrounded leaf).
+fn leaf_surface(line: &str) -> Option<u32> {
+    if !line.contains(" leaf ") {
+        return None;
+    }
+    line.split_ascii_whitespace()
+        .find_map(|t| t.strip_prefix("surface="))
+        .and_then(|v| v.parse().ok())
+}
+
+/// The root container's pane id: the first pane line after the `epoch` header.
+fn layout_root_id(layout: &str) -> Option<u32> {
+    let line = layout.lines().nth(1)?;
+    line.split_ascii_whitespace()
+        .next()?
+        .trim_end_matches('*')
+        .parse()
+        .ok()
+}
+
+/// A pane's content size from its `geometry` file (`x y w h`); (0, 0) when
+/// unreadable -- callers treat that as the backgrounded ZERO rect, so a
+/// parse failure fails closed.
+fn pane_wh(root: i64, id: u32) -> (u32, u32) {
+    let g = read_file(root, &alloc::format!("pane/{}/geometry", id)).unwrap_or_default();
+    let mut it = g.split_ascii_whitespace().skip(2);
+    let w: u32 = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
+    let h: u32 = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
+    (w, h)
+}
+
 /// Parse `<key> <n>` from the ctl text.
 fn ctl_u64(ctl: &str, key: &str) -> Option<u64> {
     for line in ctl.lines() {
@@ -271,12 +311,13 @@ fn fill(surf: &mut Surface, color: u32) {
     }
 }
 
-/// The compositor's placement, mirrored for sample points. The battery
-/// presents FULL-FRAME only (present(None) everywhere), so it never
-/// trips the #56 patchwork latch and always LETTERBOXES -- centered,
-/// scaled up or down -- meaning the pane center always samples the
-/// fill. (The pre-#56 size discriminator needed a covered-region-center
-/// arm for the overflow crop; a latched accumulator would need it back.)
+/// The compositor's placement, mirrored for sample points. A and B present
+/// FULL-FRAME only (present(None); the multi-rect legs tile the whole
+/// surface), so they never trip the #56 patchwork latch and always
+/// LETTERBOX -- centered, scaled up or down -- meaning the pane center
+/// always samples the fill. (The single-slot leg presents partial damage on
+/// purpose, on a surface the latch must NOT trip for; its sample points
+/// come from `libhalcyon::place::letterbox`, the compositor's own function.)
 fn sample_point(px: u32, py: u32, pw: u32, ph: u32, _sw: u32, _sh: u32) -> (u32, u32) {
     (px + pw / 2, py + ph / 2)
 }
@@ -460,6 +501,30 @@ pub extern "C" fn rs_main() -> i64 {
     }
     say!("battery: focus event OK");
 
+    // Deterministic structure: pane::host() picks the auto-split direction
+    // from the focused leaf's shape, and F2's aurora-exclusion flips A from
+    // TALL (pre-F2, aurora took a column -> splitV) to WIDE (aurora excluded
+    // -> splitH). The mode-sensitive legs below (unzoom compares A's original
+    // geometry after a `mode splitv`; move escalates through the splitv)
+    // assume a NESTED splitV [A,B]. Force it independent of host(): split A's
+    // leaf splitv -- a mode different from the root splith NESTS a [A,B] splitv
+    // container, and B (hosted next) lands in the focused empty child.
+    {
+        let l = read_file(root, "layout").unwrap_or_default();
+        match find_pane(&l, a.id) {
+            Some(pa0) => {
+                if !write_file(root, "layout", &alloc::format!("split {} v", pa0.id)) {
+                    say!("tapestry-battery: FAIL split A splitv");
+                    return 1;
+                }
+            }
+            None => {
+                say!("tapestry-battery: FAIL find A pre-split");
+                return 1;
+            }
+        }
+    }
+
     // Client B: half-sized (fits its quarter-ish pane loosely).
     let mut b = match Surface::open(disp.0 / 2, disp.1 / 2) {
         Ok(s) => s,
@@ -532,6 +597,33 @@ pub extern "C" fn rs_main() -> i64 {
                 want
             );
             return 1;
+        }
+    }
+    // An UNDECLARED user client (this battery has not written `session on`)
+    // must not put the console renderer to sleep: its leaf keeps a real
+    // column. A None here while the layout carries a foreign surface is the
+    // parser drifting, not a headless run -- fail, never skip.
+    match foreign_pane(&layout, &[a.id, b.id]) {
+        Some(cid) => {
+            let (cw, ch) = pane_wh(root, cid);
+            if cw == 0 || ch == 0 {
+                say!(
+                    "tapestry-battery: FAIL console leaf backgrounded by an undeclared client ({} {})",
+                    cw,
+                    ch
+                );
+                return 1;
+            }
+            say!("battery: console leaf tiled {} {}", cw, ch);
+        }
+        None => {
+            if layout
+                .lines()
+                .any(|l| leaf_surface(l).is_some_and(|n| n != a.id && n != b.id))
+            {
+                say!("tapestry-battery: FAIL foreign_pane found no console leaf in a layout that hosts one");
+                return 1;
+            }
         }
     }
     say!("tapestry-battery: structure OK");
@@ -990,9 +1082,16 @@ pub extern "C" fn rs_main() -> i64 {
         // ring+tagbar below the container top.
         let inset = 4u32;
         let tagbar = 20u32; // METRICS.header_h
-        let cx = tb.x - inset;
+
+        // The tab strip sits at the container top. When aurora is excluded (F2
+        // structural transparency) the tabbed root's active child is the ONLY
+        // visible leaf, so it is borderless (no ring/tagbar) and sits at the
+        // display top-left (tb.x=0, tb.y=strip). saturating_sub keeps the strip
+        // coords valid there AND in the chromed >1-leaf case -- both land the
+        // strip row center; a raw subtraction underflowed u32 -> OOB probe.
+        let cx = tb.x.saturating_sub(inset);
         let cw = tb.w + 2 * inset;
-        let sy = tb.y - tagbar - inset - 5 + 2; // strip row center
+        let sy = tb.y.saturating_sub(tagbar + inset + 5) + 2; // strip row center
         let sax = cx + cw / 4;
         let sbx = cx + 3 * cw / 4;
         say!("battery: tabbed ready {} {} {}", sy, sax, sbx);
@@ -1120,13 +1219,28 @@ pub extern "C" fn rs_main() -> i64 {
                 return 1;
             }
         };
-        if mb.x >= ma.x || mb.x < disp.0 / 6 {
-            // B must sit BETWEEN aurora (the leftmost third) and A -- a
-            // B at the left edge means the pull-out landed wrong.
+        // B must sit BETWEEN the console leaf and A: left of A by rect, and
+        // AFTER the console leaf by child order. The console leaf is
+        // backgrounded (zero-rect) while the battery holds the display, so
+        // only the layout text's line order places B relative to it -- a
+        // pull-out landing BEFORE the console leaf would print B first.
+        let leaves: alloc::vec::Vec<Option<u32>> = fresh.lines().map(leaf_surface).collect();
+        let pos = |surf: u32| leaves.iter().position(|s| *s == Some(surf));
+        let console = leaves
+            .iter()
+            .position(|s| matches!(s, Some(n) if *n != a.id && *n != b.id));
+        let ordered = matches!(
+            (console, pos(b.id), pos(a.id)),
+            (Some(c), Some(bl), Some(al)) if c < bl && bl < al
+        );
+        if mb.x >= ma.x || !ordered {
             say!(
-                "tapestry-battery: FAIL move-left order (B.x={} A.x={})",
+                "tapestry-battery: FAIL move-left order (B.x={} A.x={} lines console={:?} B={:?} A={:?})",
                 mb.x,
-                ma.x
+                ma.x,
+                console,
+                pos(b.id),
+                pos(a.id)
             );
             return 1;
         }
@@ -1506,6 +1620,222 @@ pub extern "C" fn rs_main() -> i64 {
         drop(c2);
         drop(c1);
         say!("battery: claim OK");
+    }
+
+    // The #56 latch's REAL discriminator (the fullscreen-zoom bug, aux 0048).
+    // A SINGLE-SLOT client (thyla_tap's discipline: slot 0 IS the app's
+    // framebuffer, complete by construction) presenting PARTIAL damage must
+    // stay letterboxed: zoomed, its 640x400 frame scales 2x onto the whole
+    // display and every partial present lands through the scale. Keyed on
+    // damage coverage alone, the latch made DOSBox-X (changed scanline
+    // bands, its menu bar) an "accumulator" and cropped it native at the
+    // display's corner. The compositor's own one-shot placement line is the
+    // witness aux's log LACKED after Super+F -- the .exp expects it for D --
+    // and its latch line is a FAIL arm there. Then the one-variable-away
+    // positive control: the SAME surface, rotation back on, two partial
+    // presents -> the second (a second distinct slot) latches, as the aurora
+    // class must.
+    {
+        let mut d = match Surface::open(disp.0 / 2, disp.1 / 2) {
+            Ok(s) => s,
+            Err(e) => {
+                say!("tapestry-battery: FAIL client D {:?}", e);
+                return 1;
+            }
+        };
+        d.set_single_slot(true);
+        fill(&mut d, BLUE);
+        if d.present(None).is_err() {
+            say!("tapestry-battery: FAIL D present");
+            return 1;
+        }
+        say!("battery: singleslot D {}", d.id);
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        let Some(pd) = find_pane(&fresh, d.id) else {
+            say!("tapestry-battery: FAIL singleslot: D's pane not found");
+            return 1;
+        };
+        if !write_file(root, "layout", &alloc::format!("zoom {}", pd.id)) {
+            say!("tapestry-battery: FAIL singleslot: zoom D");
+            return 1;
+        }
+        let g = read_file(root, &alloc::format!("pane/{}/geometry", pd.id)).unwrap_or_default();
+        let wantg = alloc::format!("0 0 {} {}", disp.0, disp.1);
+        if g.trim() != wantg {
+            say!(
+                "tapestry-battery: FAIL singleslot: zoom geometry '{}' != '{}'",
+                g.trim(),
+                wantg
+            );
+            return 1;
+        }
+        // The zoom's CONFIGURE (the display-size offer) is DECLINED: a fixed-
+        // size client keeps its dims and the compositor letterboxes (fork 2).
+        // The sample points are the compositor's own map of D's pixels.
+        let (dw, dh) = (d.w, d.h);
+        let (ox, oy, sw2, sh2) = libhalcyon::place::letterbox(dw, dh, disp.0, disp.1);
+        let sx = |x: u32| ox + ((x as u64) * (sw2 as u64) / (dw as u64)) as u32;
+        let sy = |y: u32| oy + ((y as u64) * (sh2 as u64) / (dh as u64)) as u32;
+        // Partial present 1: the top-left quadrant goes GREEN; the rest of
+        // the slot is still BLUE from the full present -- and must show so.
+        {
+            let px = d.pixels();
+            for y in 0..dh / 4 {
+                for x in 0..dw / 4 {
+                    px[(y * dw + x) as usize] = GREEN;
+                }
+            }
+        }
+        if d.present(Some(Rect {
+            x: 0,
+            y: 0,
+            w: dw / 4,
+            h: dh / 4,
+        }))
+        .is_err()
+        {
+            say!("tapestry-battery: FAIL singleslot: partial present 1");
+            return 1;
+        }
+        say!(
+            "battery: singleslot zoomed {} {} {} {}",
+            sx(dw / 8),
+            sy(dh / 8),
+            sx(3 * dw / 4),
+            sy(3 * dh / 4)
+        );
+        probe(root, sx(dw / 8), sy(dh / 8));
+        probe(root, sx(3 * dw / 4), sy(3 * dh / 4));
+        nap(DUMP_MS);
+        // Partial present 2 (the DOSBox steady state after Super+F): the
+        // bottom-right quadrant goes YELLOW and must land through the scale.
+        {
+            let px = d.pixels();
+            for y in 3 * dh / 4..dh {
+                for x in 3 * dw / 4..dw {
+                    px[(y * dw + x) as usize] = YELLOW;
+                }
+            }
+        }
+        if d.present(Some(Rect {
+            x: 3 * dw / 4,
+            y: 3 * dh / 4,
+            w: dw - 3 * dw / 4,
+            h: dh - 3 * dh / 4,
+        }))
+        .is_err()
+        {
+            say!("tapestry-battery: FAIL singleslot: partial present 2");
+            return 1;
+        }
+        say!(
+            "battery: singleslot damage {} {}",
+            sx(7 * dw / 8),
+            sy(7 * dh / 8)
+        );
+        probe(root, sx(7 * dw / 8), sy(7 * dh / 8));
+        nap(DUMP_MS);
+        if !write_file(root, "layout", &alloc::format!("zoom {}", pd.id)) {
+            say!("tapestry-battery: FAIL singleslot: unzoom D");
+            return 1;
+        }
+        // The control: rotation on, two partial presents. The first lands in
+        // the pinned slot (no second slot yet -- no latch); the second rotates
+        // to a fresh slot and MUST latch (the compositor says so).
+        d.set_single_slot(false);
+        let small = Rect {
+            x: 0,
+            y: 0,
+            w: 8,
+            h: 8,
+        };
+        if d.present(Some(small)).is_err() || d.present(Some(small)).is_err() {
+            say!("tapestry-battery: FAIL singleslot: control presents");
+            return 1;
+        }
+        say!("battery: singleslot control presented");
+        drop(d);
+    }
+
+    // The declared-handoff control, one variable away from the undeclared
+    // check above: the SAME console leaf goes to the ZERO rect the moment the
+    // conn HOSTING A declares `session on` (a standalone Surface owns its own
+    // conn; `root` here is a separate, idle one -- an idle declaration holds
+    // no display, by design), and gets its column back on `session off`.
+    // Without it, "tiled because undeclared" is indistinguishable from
+    // "backgrounding is absent".
+    {
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        let Some(cid) = foreign_pane(&fresh, &[a.id]) else {
+            say!("tapestry-battery: FAIL declare control: no console leaf to background");
+            return 1;
+        };
+        let (w0, h0) = pane_wh(root, cid);
+        if w0 == 0 || h0 == 0 {
+            say!("tapestry-battery: FAIL declare control: console leaf not tiled beforehand");
+            return 1;
+        }
+        if let Err(e) = a.global_ctl("session on") {
+            say!(
+                "tapestry-battery: FAIL declare control: session on refused {:?}",
+                e
+            );
+            return 1;
+        }
+        let (w1, h1) = pane_wh(root, cid);
+        if w1 != 0 || h1 != 0 {
+            say!(
+                "tapestry-battery: FAIL declare control: console leaf still tiled {} {} under a declared session",
+                w1,
+                h1
+            );
+            return 1;
+        }
+        say!("battery: console leaf backgrounded by the declaration");
+        // The round-1 C-F2 regression: a DECLARED session's `close` on the
+        // container holding the (transparent, backgrounded) console leaf is
+        // refused -- the destructive verb sees the whole subtree, not the
+        // session's view of it. Pre-fix the close succeeded and the console
+        // renderer received TEV_CLOSE.
+        let Some(rid) = layout_root_id(&fresh) else {
+            say!("tapestry-battery: FAIL declare control: no root container in the layout");
+            return 1;
+        };
+        let rc = raw_write(root, &alloc::format!("pane/{}/ctl", rid), "close");
+        if rc != -1 {
+            say!(
+                "tapestry-battery: FAIL declare control: close of the console's container rc {} want -1 (E_PERM)",
+                rc
+            );
+            return 1;
+        }
+        let (wc, hc) = pane_wh(root, cid);
+        if (wc, hc) != (0, 0)
+            || foreign_pane(&read_file(root, "layout").unwrap_or_default(), &[a.id]).is_none()
+        {
+            say!("tapestry-battery: FAIL declare control: the refused close still disturbed the console leaf");
+            return 1;
+        }
+        say!("battery: declared session cannot close the console's container");
+        if let Err(e) = a.global_ctl("session off") {
+            say!(
+                "tapestry-battery: FAIL declare control: session off refused {:?}",
+                e
+            );
+            return 1;
+        }
+        let (w2, h2) = pane_wh(root, cid);
+        if (w2, h2) != (w0, h0) {
+            say!(
+                "tapestry-battery: FAIL declare control: console leaf {} {} after session off, want {} {}",
+                w2,
+                h2,
+                w0,
+                h0
+            );
+            return 1;
+        }
+        say!("battery: console leaf restored {} {}", w2, h2);
     }
 
     // Focus returns to the console's pane by the CLOSE path, not by a write

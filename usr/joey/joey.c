@@ -3138,8 +3138,14 @@ static int login_e2e_run(const char *user, size_t ulen,
     // console-attached here (do_login_e2e runs before the relinquish), so the
     // devdev_open mint-gate lets it open. Best-effort: -1 runs the bare spawn.
     long cc_fd = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/consctl", 12, T_ORDWR);
-    static const char login_argv_bare[]    = "login\0";
-    static const char login_argv_consctl[] = "login\0" "--consctl-fd\0" "3\0";
+    // KT-1.5d-1a (HALCYON 14.12): --no-session forces login down the ut path
+    // regardless of the /lib/halcyon/session lever. This seeded boot-test waits
+    // for login to EXIT (t_wait_pid_for below), and a session halcyond never
+    // exits -- so without this flag a lever-on image would hang HERE, before
+    // SYS_BOOT_COMPLETE and the interactive getty. The getty login passes no
+    // such flag, so the interactive session still reads the lever normally.
+    static const char login_argv_bare[]    = "login\0" "--no-session\0";
+    static const char login_argv_consctl[] = "login\0" "--consctl-fd\0" "3\0" "--no-session\0";
     const char login_name[] = "/bin/login";  // #58: resolved via the post-pivot /bin bind
     int e2e_cc = (cc_fd >= 0);
     unsigned int login_fds[4] = { (unsigned int)cr_rd, (unsigned int)cr_rd,
@@ -3151,7 +3157,7 @@ static int login_e2e_run(const char *user, size_t ulen,
         .name_len      = sizeof(login_name) - 1,
         .argv_data_len = e2e_cc ? (unsigned int)(sizeof(login_argv_consctl) - 1)
                                 : (unsigned int)(sizeof(login_argv_bare) - 1),
-        .argc          = e2e_cc ? 3u : 1u,
+        .argc          = e2e_cc ? 4u : 2u,
         .fd_count      = e2e_cc ? 4u : 3u,
         .perm_flags    = LOGIN_PERMS,
         ._pad_envp     = 0,
@@ -10178,6 +10184,32 @@ int main(void) {
         }
         (void)t_close(pts_root);
         t_putstr("joey: /dev/pts mounted (ptyfs devpts tree)\n");
+
+#if THYLA_BOOT_PROBES
+        // === /kaua-term-probe (KT-1.5a: the kaua-term transport boot-prove) ===
+        // Proves the process-level transport that is NOT host-testable: the probe
+        // spawns a /bin/kaua-term hosting `echo`, drains its UP pipe with t_read,
+        // decodes the seam record stream, and asserts the hosted output + a clean
+        // Control::Exit. Placed HERE because it needs both /bin (the #58 post-pivot
+        // bind) and /dev/pts (mounted just above). Default perms suffice: minting a
+        // pts is not cap-gated (ptyfs perm_check passes any principal rw), and
+        // spawning children is not perm-gated. Boot-fatal on any failure.
+        {
+            const char ktp_name[] = "/bin/kaua-term-probe";
+            long ktp_pid = t_spawn(ktp_name, sizeof(ktp_name) - 1);
+            if (ktp_pid <= 0) {
+                t_putstr("joey: t_spawn(\"kaua-term-probe\") FAILED\n");
+                return 1;
+            }
+            int ktp_status = -1;
+            long ktp_reaped = t_wait_pid_for((int)ktp_pid, 0, &ktp_status);
+            if (ktp_reaped != ktp_pid || ktp_status != 0) {
+                t_putstr("joey: /kaua-term-probe FAILED -- KT-1.5a transport (pts host + 2-thread + codec over a pipe)\n");
+                return 1;
+            }
+            t_putstr("joey: /kaua-term-probe reaped status=0 (KT-1.5a: kaua-term bin + seam codec over a real pipe verified)\n");
+        }
+#endif /* THYLA_BOOT_PROBES (KT-1.5a kaua-term transport prove) */
 
         // === VIVARIUM V-4a: spawn /sbin/diorama + run the in-guest gate ===
         //

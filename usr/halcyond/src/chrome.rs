@@ -42,19 +42,33 @@ pub struct Leaf {
     pub id: u32,
     pub focused: bool,
     pub surface: Option<u32>,
+    /// Not laid out this pass (a zoom or a tab hides it). Still a leaf, still
+    /// hosted: absent from the chrome, present in the tree.
+    pub hidden: bool,
 }
 
 /// Parse the leaf lines of the `layout` text: "<id>[*] leaf surface=<n>|empty
-/// [x,y,w,h][ hidden]" (tapestryd pane.rs render_pane). Hidden leaves are
-/// skipped: they carve no strip. Containers and the epoch header are not
-/// leaves; a malformed id is skipped, never guessed.
+/// [x,y,w,h][ hidden]" (tapestryd pane.rs render_pane), visible leaves only
+/// -- the chrome's input (a hidden leaf carves no strip). Containers and the
+/// epoch header are not leaves; a malformed id is skipped, never guessed.
 pub fn parse_leaves(layout: &str) -> Vec<Leaf> {
+    parse_leaves_all(layout)
+        .into_iter()
+        .filter(|l| !l.hidden)
+        .collect()
+}
+
+/// Every leaf line, hidden ones included, with `hidden` set. The session
+/// compositor's input: a hidden leaf is still hosted and must never read as
+/// vanished (dropping it would kill the tile's shell on a zoom).
+pub fn parse_leaves_all(layout: &str) -> Vec<Leaf> {
     let mut out = Vec::new();
     for line in layout.lines() {
         let line = line.trim();
-        if !line.contains(" leaf ") || line.ends_with("hidden") {
+        if !line.contains(" leaf ") {
             continue;
         }
+        let hidden = line.ends_with("hidden");
         let mut it = line.split_ascii_whitespace();
         let idtok = match it.next() {
             Some(t) => t,
@@ -72,6 +86,7 @@ pub fn parse_leaves(layout: &str) -> Vec<Leaf> {
             id,
             focused,
             surface,
+            hidden,
         });
     }
     out
@@ -190,7 +205,8 @@ mod tests {
             Leaf {
                 id: 2,
                 focused: false,
-                surface: Some(0)
+                surface: Some(0),
+                hidden: false,
             }
         );
         assert_eq!(
@@ -198,7 +214,8 @@ mod tests {
             Leaf {
                 id: 3,
                 focused: true,
-                surface: None
+                surface: None,
+                hidden: false,
             }
         );
     }

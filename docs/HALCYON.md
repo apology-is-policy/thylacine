@@ -1190,9 +1190,15 @@ as-built: `halcyond` already stores `TCell`s and renders them (§14.0); only the
 
 **AS-SETTLED — the seam protocol (2026-09-03, yip call 0045; the render
 responsibility operator-ratified B).** The wire is one **ordered record stream**
-up (kaua-term → halcyond) plus a small stream down, and it is **transport-agnostic**
-(halcyond's ingest is a halcyond-owned Loom ring per tile — the H-3c-2 `EventRing`
-reuse; the kernel primitive firms at KT-1):
+up (kaua-term → halcyond) plus a small stream down. It is **transport-agnostic at
+the record level** — the wire codec (`kaua_term::wire`) is independent of how the
+bytes move — but the concrete transport is a **pipe pair** per tile (§14.11.6). The
+earlier "halcyond-owned Loom ring per tile" is **struck (KT-1.5, 2026-09-03)**: a
+Loom `read` requires a dev9p (9P-backed) handle (`kernel/loom.c:1198`), so a pipe is
+`-EINVAL`-rejected at submit, and the prior "confirmed `loom.rs:281`" pointed only at
+the `Sqe::read` struct builder (which asserts nothing about handle types). halcyond
+instead drains the up-pipes and unifies its wait by making the Loom ring itself
+pollable (§14.11.7 / §14.11.7a). The record set:
 
 - **Up** (kaua-term → halcyond): `CellDiff{ changed (row,col,cell)[], cursor(row,col,vis) }`
   (the live screen) · `ScrollOff{ rows: cell[] }` (normal-mode lines off the top →
@@ -1302,9 +1308,12 @@ inline, promote it to fullscreen" and "a terminal in a tile" are one mechanism.
 ### 14.9 Build order
 
 1. **`kaua-term` native mode + the seam + `halcyond` per-tile composite** →
-   **unblocks H-4d** (the welcome's two `ut` panes). **Zero kernel work**: native
-   `ut` already has full pts job control today (`t_tty_*` + the PTY-4b session
-   dance). This is aux's KT-1 (`docs/KAUA-TERM.md`).
+   **unblocks H-4d** (the welcome's two `ut` panes). Native `ut` already has full
+   pts job control today (`t_tty_*` + the PTY-4b session dance), so the *terminal*
+   half needs no kernel work; the *ingest* half adds **one small kernel enabler** --
+   `KObj_Loom` pollable + SQPOLL for the compositor ring (§14.11.7a, KT-1.5,
+   operator-ratified Option 1 2026-09-03), which also fixes the pre-existing
+   frame-coupled console latency. This is KT-1 (`docs/KAUA-TERM.md`).
 2. **C2-k1c** → Linux tiles (termios/winsize reach).
 3. **C2-k3** → Linux job control (fg/bg/^Z).
 
@@ -1331,6 +1340,414 @@ The gate (H-4d) never waits on the kernel work.
   surfaces (an AUDIT-TRIGGERS row at their build). The seam is a new IPC parse surface
   on `halcyond`'s side (bounds-check the cell-feed like the 9P wire).
 - **Open**: the seam **protocol** is now **SETTLED** (§14.3 AS-SETTLED, yip call 0045);
-  what remains is the **H-2a crate sync** to the aux tree (a build-prep step, aux's
-  cherry-pick at KT-2), the native-`ut` VT-round-trip **v1.x optimization**, and
-  sixel/kitty + JPEG → v1.x.
+  the **halcyond ingest model** (the grid live-area + scrollback transcript, the
+  render composition, spawn/multiplex/focus/teardown) is designed in **§14.11**
+  (KT-1.5, 2026-09-03) -- the finding that §14.3's "clean refactor" under-estimated
+  it (halcyond is single-console + flow-based, no grid, no spawn). What remains to
+  build is KT-1.5 (§14.11.11 stages); what remains cross-tree is the **H-2a crate
+  sync** to the aux tree (build-prep, aux's cherry-pick at KT-2), the native-`ut`
+  VT-round-trip **v1.x optimization**, and sixel/kitty + JPEG → v1.x.
+
+### 14.11 The halcyond ingest model -- the live grid + the scrollback transcript (KT-1.5 design)
+
+**Why this section (the finding that drove it, 2026-09-03 run 21).** Building the
+kaua-term producer side surfaced that §14.3's "clean refactor -- only the
+`t.feed()` parse moves out of process" materially under-estimates the halcyond
+side. As-built (Explore-mapped): halcyond is a **single-console, flow-based**
+renderer -- ONE `Transcript` (`transcript.rs:221`, a flowed deque of blocks; no
+fixed grid, no alt-screen buffer), ONE byte source (`/dev/consdrain`,
+`main.rs:278` -- a kernel console mirror; it owns no pty and **spawns no child
+process**), and its "tiles" (`chromeset.rs`) are tag-bar chrome for the
+compositor's leaves, not terminal content. The seam sends a **grid** model
+(CellDiff on rows x cols). So KT-1.5 is not "move the parse out"; it is: give
+halcyond a per-tile grid it never had, child-spawn machinery it never had, a
+multiplex of N record streams, and a transcript refactored to ingest
+grid+scrollback. This section pins that model (scripture before code, the
+design-conversation pattern; operator chose "scripture design pass first").
+
+**14.11.1 The per-tile model = a live grid + a scrollback transcript.** Each tile
+holds two structures, not one:
+
+- **The live grid** -- a fixed `rows x cols` cell buffer (`vt::Cell`), the current
+  terminal screen. It is what CellDiff mutates. It is the §13.4(a) "raw-VT pane
+  grid" resurrected as the *universal* live-screen (both modes), now fed by the
+  kaua-term's records rather than an in-halcyond `Vt`.
+- **The scrollback transcript** -- the existing block model (`transcript.rs`,
+  §13.3), now fed by **ScrollOff** (lines that left the top of the grid), cut into
+  blocks by **Beacon zones**. It is pure history: everything that has scrolled off.
+
+They are **separate** because the grid spans zone boundaries: the last `rows`
+lines of a session routinely straddle a prompt (the tail of one command's output
++ the next prompt), so the grid cannot be "one zone's block". The grid is
+zone-agnostic; the transcript carries the zone structure. This supersedes §13.3's
+"the open block is the live tail" -- under §14 the live tail is the **grid**, and
+the transcript's blocks are finalized history.
+
+**14.11.2 The record -> model mapping.**
+
+| Up record | Applied to |
+|---|---|
+| `CellDiff{changed, cursor}` | the live grid (position-keyed cell writes + cursor) |
+| `ScrollOff{rows}` | append rows to the current history block (a new block if a zone just opened) |
+| `Control(Osc1936Raw)` | fed to `beacon::wire::parse` -> the zone/block cut + span state (exactly as `Transcript::feed` does today, `transcript.rs:407`) |
+| `Control(Bell)` | the bell affordance (visual/log; no kernel bell) |
+| `Control(Title)` | the tile's OSC-0/2 title |
+| `Control(Exit(code))` | the tile's exit latch (the child is gone; teardown) |
+| `Control(WinsizeAck)` | resize handshake bookkeeping |
+| `Mode(Normal\|AltScreen)` | the render mode (14.11.3) |
+
+The ORDER is load-bearing and already guaranteed by the producer (a pending
+CellDiff is flushed before every ScrollOff/Control/Mode) -- so a zone frame lands
+at the exact point between the cells it separates, and a scroll-off after a
+zone-open lands in the new zone.
+
+**14.11.3 The render composition.**
+
+- **Normal mode**: the scrollback blocks (flow layout, `layout.rs`, cursor-anchored
+  like #55) render above; the **live grid** renders as the tail (a fixed-height
+  grid region at the bottom). The viewport shows the tail by default; scrolling up
+  reveals history. The seam is contiguous: a line leaving the grid (ScrollOff)
+  becomes the top-of-history-block's newest line.
+- **Alt-screen mode** (`Mode(AltScreen)`, e.g. vim): render the **live grid only**,
+  full-tile; the scrollback is frozen and hidden. On `Mode(Normal)` the scrollback
+  returns and the grid resumes as the tail. This finally renders full-screen apps
+  correctly -- today halcyond sets `raw_vt_intent` and *paints nothing*
+  (`transcript.rs:932`).
+
+**14.11.4 Beacon zones + the grid.** Beacon frames arrive as `Control(Osc1936Raw)`
+interleaved in stream order; halcyond feeds them to the *same* `beacon::wire`
+parser it uses today, driving the *same* block-cut / span state on the scrollback
+transcript. The grid is not zoned; the "current zone" is simply whichever block
+ScrollOff is currently appending to. A zone-open freezes the current block and
+starts a new one; subsequent ScrollOff lines land there.
+
+**14.11.5 Selection + inline media.** Helix-modal selection addresses
+`(block, item, col)` over the scrollback AND the live grid (the grid is selectable
+as the live region -- a virtual trailing block; yank re-derives cell text as
+today). Inline media (`Image`/`Embed`) stays the **out-of-band native seam**
+(§14.7): the grid is text-only; a graphical app in a tile promotes to a Tapestry
+surface (§14.8), it does not paint pixels through the cell stream.
+
+**14.11.6 Spawn.** halcyond spawns one `kaua-term` per **leaf tile**. The
+enumeration hook already exists: `ChromeSet::reconcile` (`chromeset.rs:129`)
+iterates `parse_leaves` (`chrome.rs:51`) over the compositor's `layout` file per
+`u32` leaf id, computing the create/keep/drop diff each relayout -- KT-1.5 hangs
+per-leaf spawn/teardown off that same diff. The child is launched
+`kaua-term <cols> <rows> [prog]` with **fd 0 = the down pipe** (halcyond->child)
+and **fd 1 = the up pipe** (child->halcyond); fd 2 = stderr to halcyond's log.
+The pts is internal to the child; spawn installs only the child's three slots, so
+the app the child hosts never sees halcyond's pipes (the non-inheritance ptyhost
+relies on). This is halcyond's FIRST child-spawn -- new machinery
+(`Command`/`Stdio::File` on the two pipe ends).
+
+**14.11.7 Multiplex -- the unified `poll(2)` (CORRECTED; operator-ratified Option 1,
+2026-09-03).** The tile up-channels are **pipes**, not Loom-registered handles: a
+Loom `read` requires a dev9p handle (`kernel/loom.c:1198`; a pipe `-EINVAL`s at
+submit), and the earlier "confirmed `loom.rs:281`" was a misread of the `Sqe::read`
+struct builder, which says nothing about handle types (triple-confirmed by the KT-1.5
+research pass -- Weft is out too: its readiness ring is single-source and its
+blocking park is unwired, so the only wake-on-any-of-N is a Loom ring, and that needs
+dev9p handles). halcyond therefore multiplexes every readiness source in **one
+`poll(2)`**:
+
+```
+poll { tapestry-EventRing loom-fd | N tile up-pipes | /dev/consdrain }
+```
+
+waking promptly on any -- a byte on a tile pipe, a surface event, or console output.
+On a tile pipe -> drain records -> that tile's `FrameDecoder` -> its grid; on the
+loom-fd -> reap the CQ in userspace + route surface events; on consdrain -> the
+existing console drain. Pipes and `/dev/consdrain` are already pollable
+(`kernel/pipe.c`; `cons_drain_poll`); the **new** piece is making the Loom ring
+pollable (§14.11.7a). This also eliminates a pre-existing **FRAME-coupled** console
+latency: halcyond/aurora block on the ring and drain consdrain only per frame ->
+~16 ms active, up to ~67 ms idle, and a full stall on an occluded surface
+(`tapestryd/src/main.rs:124`, `aurora/src/main.rs:21`). With a pollable ring the wait
+is byte-driven, not frame-driven -- the fix lands system-wide (aurora shares
+`EventRing`).
+
+**14.11.7a The kernel enabler -- `KObj_Loom` pollable + the compositor ring runs
+SQPOLL (operator-ratified live 2026-09-03).** Two pieces, both small and
+well-precedented:
+
+- **`KObj_Loom.poll`.** `poll_scan_one` (`kernel/poll.c:213`) gains a `KOBJ_LOOM`
+  arm calling a new `loom_poll(l, events, pw)` that registers the poller on the ring's
+  **existing** `l->cq_waiters` list and reports `POLLIN` iff `loom_cq_ready(l) > 0`.
+  The wake is already wired -- every CQE post fires
+  `poll_waiter_list_wake(&l->cq_waiters)` (`kernel/loom.c:374,678`) -- so this is a
+  direct **register-then-observe** on the same list `loom_wait_for_completions`
+  already uses (`loom_cqw_cond`, `kernel/loom.c:1758`). **No new spec:** unlike the
+  cons `.poll` (LS-8a / `cons_poll.tla`, whose IRQ-context RX forced a deferred
+  mgr-kthread relay), the Loom CQE wake ALREADY runs in process/kthread context, so it
+  is a plain instance of the poll_waiter_list I-9 pattern (`poll.tla` lineage) --
+  validated by prose + the existing poll/loom buggy cfgs + runtime tests + the audit,
+  per the standing spec-first suspension (no re-enablement warranted).
+
+- **SQPOLL for the compositor ring.** A poll on a Loom ring is only meaningful if CQEs
+  post **without** the owner calling `enter` (else nothing pumps the 9P session while
+  halcyond sleeps in `poll`). `LOOM_SETUP_SQPOLL` already provides this -- a kernel
+  poll-thread admits + pumps + posts autonomously (kernel-tested -- `test_loom.c`'s
+  `sqpoll_*` tests; it had **no** EL0 consumer until KT-1.5-kernel -- `loom-bench`
+  runs `flags=0` -- so the loom-smoke poll leg is the FIRST EL0 SQPOLL driver).
+  `libtapestry`'s `EventRing` gains an SQPOLL setup mode + a userspace
+  CQ-reap path (reap without `enter`) + the ring fd exposed for `poll`; the tapestry
+  session is one-per-ring (the `EventRing` invariant), so the SQPOLL kthread's
+  single-session pump is sound (no cross-session starvation).
+
+**Audit-bearing.** Both `kernel/loom.c` and `kernel/poll.c` are audit-trigger surfaces
+(I-29/I-30 Loom completion integrity; I-9 poll wake). The `KObj_Loom.poll` arm + the
+SQPOLL compositor adoption get an `AUDIT-TRIGGERS.md` row + the vault
+`sub-kernel-loom` / `sub-kernel-poll` / `sub-libtapestry` updates at implementation,
+and join the batched KT-1 audit.
+
+**14.11.8 Resize.** halcyond is the geometry authority (it owns the tile rects).
+On a tile resize it sends `Resize{cols, rows}` down; the kaua-term sets the pts
+winsize (kernel `SIGWINCH` to the fg pgrp) and resizes its `Vt`, then emits a full
+CellDiff of the new grid, which halcyond applies to the (resized) live grid. The
+scrollback reflows by re-running the pure `layout()` at the new width (§13.3,
+correct-by-construction).
+
+**14.11.9 Focus + input.** halcyond routes post-chrome-chord keyboard input to the
+**focused** tile only: it filters its own chrome chords first (menu, split, zoom,
+focus-move -- the existing `input.rs` path), then encodes the remaining KeyEvent as
+`Key{KeyEvent}` down the focused tile's pipe; the kaua-term xterm-encodes it
+(honoring DECCKM) to the pts. Focus is the compositor's `l.focused` / the `*` in
+the layout (`chrome.rs`), already parsed.
+
+**14.11.10 Teardown + the trust boundary.** The kaua-term is the crash-isolated
+**hostile-input** parser, so halcyond's record ingest is a trust boundary: it
+bounds-checks the wire (the `kaua_term::wire` `FrameDecoder` -- MAX_FRAME, checked
+fields, no untrusted pre-alloc; the "bounds-check like the 9P wire"). A
+`WireError` (oversize/malformed), a `Control(Exit)`, or an up-pipe EOF tears down
+**only that tile** -- its pipe fds, its poll-set slot, its grid+transcript, and
+its Tapestry content surface -- never the whole environment. A tile whose child
+dies shows an exit affordance; a relayout that drops the leaf reaps it.
+
+**14.11.11 Build stages (KT-1.5).**
+
+- **KT-1.5a -- the transport prover (`kaua-term-probe`).** A boot probe (NOT
+  halcyond) spawns ONE kaua-term hosting a known program over a real pipe pair,
+  drains its records with **`t_read`** (a blocking pipe read -- Loom does not read
+  pipes), decodes them, and asserts the hosted output + a clean `Control::Exit`.
+  Boot-proves the untestable process-level surface: the pts host, the two blocking
+  threads, the codec over a real pipe. (Run 21's probe becomes this once its
+  Loom-over-pipe read is replaced with `t_read`.)
+- **KT-1.5-kernel -- `KObj_Loom` pollable + SQPOLL (§14.11.7a).** The enabler for the
+  unified wait: the `poll_scan_one` `KOBJ_LOOM` arm + `loom_poll`; `libtapestry`'s
+  `EventRing` SQPOLL setup + userspace CQ reap + the ring fd exposed for `poll`. Its
+  own kernel-test (`test_loom.c` extension) + the SMP gate; audit-bearing (Loom + poll).
+- **KT-1.5b-i -- the unified `poll` (consdrain only). LANDED.** `libtapestry`
+  gains `connect_sqpoll` / `adopt_flags` / `poll_fd` (additive; `connect` stays
+  non-SQPOLL, so aurora is untouched); halcyond opens its event set SQPOLL and
+  replaces the block-on-ring (`EventRing::wait`) with ONE `poll { ring.poll_fd()
+  | /dev/consdrain }`. Fixes the frame-coupled console latency (shell output
+  wakes the renderer at once, not at the next compositor frame tick) and removes
+  the F7 root cause (the SQPOLL kthread demuxes the session's parked read replies
+  continuously -- see `docs/reference/150-halcyond.md`). No tiles yet. Proven by
+  the default suite (aurora-no-regression, `loom.poll` unit, the `loom-smoke`
+  SQPOLL leg) + the `ls-halcyon.exp` graphical E2E (render + rich + reflow +
+  menus, all on the SQPOLL ring).
+- **KT-1.5b-ii -- halcyond ingest -> the model. RESHAPED by 14.12.** The old
+  "halcyond spawns ONE kaua-term + renders" framing is superseded by the per-user
+  compositor decision (14.12, operator-ratified 2026-09-04): the spawn+render lands
+  INSIDE a per-user halcyond login spawns as the user, staged as **KT-1.5d-1** (the
+  per-user bootstrap + the aurora->halcyond display handoff), **KT-1.5d-2** (one
+  session tile: CellDiff->grid / ScrollOff->scrollback / Mode->render-mode + the
+  normal/alt render, on the ii-a `Tile` model), **KT-1.5d-3** (multi-tile -> H-4d).
+  The KT-1.5b-ii-a `Tile` MODEL (grid + ingest, host-tested, @a0324198) feeds
+  KT-1.5d-2 directly.
+- **KT-1.5c -- multi-tile.** Per-leaf spawn/teardown off `reconcile`, the N-pipe
+  multiplex in the unified poll, focus-routed input (Key/Resize down), per-tile
+  composite -> **unblocks H-4d**.
+
+Then the batched KT-1 audit (KT-1.1..1.5; format-fuzz + PTY-master + the new
+ingest trust boundary) + the boot gate, then push.
+
+**14.11.12 Invariants + audit.** The ingest joins the **format-fuzz** audit class
+(halcyond parsing an untrusted per-tile stream). A tile's kaua-term crash, a
+malformed/oversize frame, or its exit MUST be contained to that tile (no
+cross-tile effect, no halcyond death) -- the I-27-adjacent isolation the whole
+uniform-Y topology (§14.2) rests on. The grid is text-only (no pixel path through
+cells; graphical apps promote to a Tapestry surface, preserving D7). An
+AUDIT-TRIGGERS row lands with the KT-1.5 code.
+
+### 14.12 The per-user session compositor -- login spawns halcyond as the user (operator-ratified 2026-09-04)
+
+**The problem this resolves.** 14.11.6 has `halcyond` spawn the session's `kaua-term`
+tiles, but the session `ut` needs the **user identity + the encrypted `/home/<user>`
+that only `/sbin/login` establishes** (`CAP_SET_IDENTITY` + the per-user DEK unlock,
+A-5). The as-built `halcyond` is a **system** renderer spawned by joey *before* login
+(`joey.c:11255-11319`), so "halcyond spawns the session tile" collides with "login
+owns the user identity." Closing that gap by giving the system halcyond
+identity-delegation power is an **I-22 ambient-authority hole** (a system daemon that
+can run code as any user). Ground truth (Explore, run 23): the trusted path is
+**orthogonal** (SAK is a kernel `/dev/cons` BREAK -> `proc_console_sak` `proc.c:2091`;
+a pts carries none of it; `/dev/consfeed` hardwires `is_break=false`; the graphical
+trusted path is unbuilt, the live one serial-only), so the crux is **identity, not the
+trusted path**.
+
+**The decision (operator-ratified 2026-09-04, over system-halcyond-delegation and
+prove-first-defer).** `halcyond` is a **per-user session compositor**, spawned by
+`/sbin/login` **as the user**, not a system renderer. This is the Plan 9 rio idiom
+(a per-user window system started after login), the Wayland compositor-per-session
+model, and the Fuchsia session-per-user model, fused onto Thylacine's per-principal
+`tapestryd`. **Zero identity delegation** -- the only identity-stamp is login's, which
+login already holds.
+
+**The model.**
+
+1. **Pre-login (system): aurora renders the console.** joey spawns `aurora` (the
+   existing fbcon system renderer, `SPAWN_PERM_CONSOLE_RENDERER`); the getty runs
+   `/sbin/login` on the kernel `/dev/cons`; aurora mirror-renders the login prompt
+   via `/dev/consdrain`. This is aurora's existing role -- **the `THYLACINE_HALCYON`
+   lever that made joey spawn halcyond as the SYSTEM console renderer is retired**;
+   halcyond is now per-user/post-login and never the console renderer.
+2. **Login (on `/dev/cons`, aurora-rendered).** `/sbin/login` authenticates via corvus
+   and establishes the user identity + unlocks + mounts `/home/<user>` (A-5,
+   unchanged). Then, instead of spawning `ut` on `/dev/cons`, login spawns a **per-user
+   `halcyond` AS the user** -- `Command::new("/bin/halcyond").identity(pid,gid,&supp)`,
+   exactly as it spawns `ut` today (`login/main.rs:1236`) -- and `wait()`s it; the
+   halcyond exit is logout.
+3. **Session (per-user halcyond).** The per-user halcyond:
+   - connects to the **system** `tapestryd` (`/srv/tapestry`) as the user. Connecting
+     is ungated and classifies the conn `Actor::Session(user_principal)` -- the
+     per-principal design already anticipates ordinary-user renderer clients
+     (`server.rs:15185-15202`); no special cap.
+   - presents a fullscreen surface and hosts the session's terminals as **kaua-term
+     processes** (14.2 uniform-Y -- separate + crash-isolated), spawned **as itself**
+     (the user's identity; plain `t_spawn`, no cap, no delegation). It reuses the
+     current halcyond render brain (transcript / chrome / menus / fontdue / cartoon,
+     the ii-a `Tile` model) but ingests each tile's record stream instead of the
+     `/dev/consdrain` mirror.
+   - routes input (tapestryd `TEV_KEY`/`TEV_PTR` on its EventRing, the same input path
+     aurora uses) to the **focused tile's pts down-channel**, not `/dev/consfeed`.
+   - the session `ut`s run in the tiles (pts job control -- the Ctrl-C axis is the
+     pts fg pgrp, not the `/dev/cons` owner), never on `/dev/cons`.
+4. **The display handoff -- the compositor backgrounds the console renderer
+   (operator-ratified 2026-09-04; the Plan 9 rio / Fuchsia-Wayland idiom; the
+   trigger AMENDED 2026-09-05 by the KT-1 audit, C-F6 -- the record is under
+   KT-1.5d-1b below).** tapestryd's scanout follows the layout AND a **declared
+   seat** (`Comp::reconcile`): the session compositor DECLARES the handoff by
+   writing `session on` on its own ctl conn before its first surface hosts
+   (Session-principal-gated; one declared conn per display). The seat is held
+   by a conn WHILE IT HOSTS: any Session conn takes it over while the holder
+   hosts nothing (an idle declaration holds no display; a crashed compositor's
+   conn is un-declared the moment its EOF is serviced), and a holder hosting
+   leaves keeps it against every newcomer, the user's own programs included --
+   the newcomer then runs UNDECLARED, its tiles beside the console like any
+   user window, never a login loop. The compositor re-issues `session on` after
+   its first surface hosts and takes that verdict, closing the idle window
+   between its declaration and its first mint. While the DECLARED conn hosts a leaf, the SYSTEM
+   leaves (a sentinel principal: the console renderer aurora, and any system
+   client) are **BACKGROUNDED** -- excluded from the scanout decision, not
+   composited, and not FRAME-ticked. So aurora + a per-user halcyond both
+   presenting fullscreen do NOT tile: the root collapses to the session
+   (`Direct(halcyond)`), and aurora's own FRAME-driven loop goes dormant (no FRAME
+   -> it blocks in `wait_event`; it keeps its surface + ring the whole time,
+   staying observable). On logout (halcyond exits; its conn retires, which clears
+   the declaration), reconcile re-runs, aurora is no longer backgrounded, the
+   FRAME clock ticks it again, and it resumes + repaints -> `Direct(aurora)`,
+   rendering the next login. A user program that merely draws a window never
+   takes the display (it tiles beside the console as before).
+   **NO new primitive, NO drain-poll.** The "emergent, drain-idle resume" of the
+   earlier draft was WRONG: `SYS_PUTS`/`say!` routes through `cons_emit` (kernel #76),
+   so the console drain carries ALL daemon diagnostic output and is NEVER idle during
+   a session -- a drain-based resume flaps (relinquish -> tapestryd logs -> drain ->
+   resume -> ...). The declaration is **backward-compatible**: with no declared conn
+   present (every pre-session + gfx-test path) nothing backgrounds and the pre-existing
+   `Direct(n)` iff one display-sized leaf else `Composed` logic is byte-identical.
+   **aurora is UNCHANGED** -- the whole mechanism lives in tapestryd's reconcile +
+   frame_tick + compose.
+5. **Trusted path (I-27) -- orthogonal, unchanged (14.5).** `/dev/cons` + the SAK
+   stay the kernel trusted path (serial today, kernel-sink future); whichever renderer
+   is active suspends during a trusted episode (when the graphical suspension lands).
+   login's credential entry stays on `/dev/cons`, the path the future graphical trusted
+   sink will protect -- it is **never** buried in an untrusted kaua-term pts (which
+   would let a userspace terminal see the passphrase). The tiles are below the trusted
+   console, never trusted.
+
+**What is reused vs retired.** REUSED: the entire halcyond render brain (H-2 transcript,
+H-3 chrome/menus/status, the Daylight stylesheet, fontdue + cartoon, the KT-1.5b-ii-a
+`Tile` grid+scrollback model) + libtapestry + the KT-1.5b-i unified poll. RETIRED for
+the session: halcyond as the **system console renderer** -- it no longer opens
+`/dev/consdrain`/`consfeed`/`consctl` (the session halcyond is a **variant** that skips
+that trio, `main.rs:278-296`, and reads pts tiles instead) and no longer holds
+`g_console_renderer` (aurora does, for the pre-login console). The `THYLACINE_HALCYON`
+pool lever + the ls-halcyon system-renderer test are superseded by a per-user-session
+graphical test.
+
+**Capabilities (I-22 clean; Explore-verified).** The per-user halcyond needs: (a)
+connect to tapestryd -- **none** (ungated); (b) spawn kaua-term processes -- **none**
+(same-identity children); (c) route input -- **none** (pts writes). It does **not** need
+`CAP_SET_IDENTITY` (it is a user, not an identity-stamper) or `SPAWN_PERM_CONSOLE_RENDERER`
+(it does not read the kernel console mirror). The single identity-stamp is login's,
+already held.
+
+**Sequencing (a multi-chunk arc; supersedes the old KT-1.5b-ii-b single-tile framing).**
+14.12 is scripture; implementation stages:
+- **KT-1.5d-1 -- the per-user halcyond bootstrap.** Split a/b to de-risk (the
+  handoff touches the load-bearing fbcon; the bootstrap is additive + gated):
+  - **KT-1.5d-1a (additive, gated -- default boot untouched).** login reads the
+    `/lib/halcyon/session` lever and, when `on`, spawns `/bin/halcyond --session`
+    AS the user; a session-variant halcyond (`session_main`) that skips the
+    `/dev/cons` trio, connects to tapestryd as `Session`, and presents a BLANK
+    fullscreen surface (content to compose ALONGSIDE aurora -- Composed). Prove:
+    login -> per-user halcyond presents (`halcyond: session up`, a post-present
+    marker). Graphical E2E `ls-gfx-session` (serial-driven: aurora is serial-loud
+    without `thylacine.display=gpu`; halcyond's markers ride the diagnostic UART
+    regardless).
+  - **KT-1.5d-1b -- the clean display handoff.** tapestryd's reconcile backgrounds
+    the console renderer (aurora) when a session leaf is present -> `Direct(halcyond)`;
+    on logout aurora un-backgrounds and its FRAME-driven loop resumes (14.12 step 4).
+    Touches tapestryd's scanout machine (audit-bearing); **aurora is unchanged** (no
+    FRAME -> dormant; FRAME -> renders). No new primitive; backward-compatible (the
+    priority is inert with no session leaf present).
+    **AMENDED 2026-09-05 (the KT-1 audit, C-F6; self-resolved under the standing
+    autonomy, recorded for the operator):** "a session leaf is present" is NOT
+    "a user-principal leaf is present". `principal_is_session` is true for every
+    real user, so the d-1b trigger put the console renderer to sleep whenever any
+    user program (DOSBox, tapestry-demo, the battery) drew a window from the
+    console shell -- a default-boot behaviour change shipped under a "byte-
+    identical console path" claim. The display handoff is an EXPLICIT act of the
+    session compositor: it writes `session on` on its own ctl conn before its
+    first surface (Session-principal-gated; one declared conn per display at a
+    time; cleared when the conn retires -> the console un-backgrounds). Only a
+    DECLARED session backgrounds the console; a user program that merely draws
+    never does (it tiles beside the console as before, and a zoom hides it the
+    old way). **The seat is the principal's, not the conn's (the round-2
+    finding C2-F1):** a first-come slot with no takeover let ANY Session conn
+    that wrote `session on` -- a same-user program, an orphan of a previous
+    user -- hold the seat until it died, and the compositor's fatal reaction
+    to the refusal turned every later login into the C-F12 re-prompt loop.
+    Now any Session conn takes the seat over while the holder hosts nothing,
+    and a holder that hosts leaves answers E_BUSY to every newcomer (round 3
+    F6 removed the same-principal exception: a user's own program stealing
+    the seat from the user's LIVE compositor degraded it for the session) --
+    which halcyond retries briefly (a seat mid-handover) and then TOLERATES:
+    it runs undeclared, beside the console, and says so; it re-declares after
+    its first surface hosts, so an idle usurper in that window cannot leave
+    it mislabelled. The declaration clears AFTER the dying
+    conn's surfaces retire (one transition to `Direct(console)`, not N-1
+    composed passes of dead tiles beside it). The declared conn also hears
+    every structural layout change on one of its surfaces (`TEV_LAYOUT`,
+    kind 10): a split of an EMPTY leaf fans no CONFIGURE and no FOCUS, and
+    the empties it must claim have no other channel. The declared conn also mints surfaces up to the renderer's cap (one
+    tile per pane), and a surface's backgrounded state derives from its leaf's
+    tree flag alone. The console renderer's DISPLAY-level chrome (a status bar,
+    a placed menu) is NOT backgrounded with it: aurora has none, and a renderer
+    that does (the retired halcyond-console lever) must dismiss/hide it on the
+    handoff (C-F11, open).
+- **KT-1.5d-2 -- one session tile.** the per-user halcyond spawns ONE kaua-term (as
+  the user) hosting `ut`, folds its up-pipe into the unified poll, ingests via the
+  ii-a `Tile` model, and renders it (normal = scrollback + grid tail; alt = grid only,
+  14.11.3). This is the old ii-b render, now inside the per-user compositor.
+- **KT-1.5d-3 -- multi-tile.** per-leaf spawn/teardown + N-pipe multiplex +
+  focus-routed input (the old 1.5c) -> **unblocks H-4d** (the welcome's two `ut` panes).
+
+**Invariants + audit.** No new I-22 surface (zero delegation -- the property to
+prosecute is exactly that: the per-user halcyond holds no identity-stamp and no
+console-renderer role). I-27 unchanged (14.5). The session halcyond joins the
+format-fuzz audit class (ingesting untrusted per-tile record streams, 14.11.12). The
+login->per-user-halcyond spawn + the aurora handoff are the new privilege-adjacent
+surfaces (an AUDIT-TRIGGERS row at KT-1.5d-1). The kaua-term parser stays the
+crash-isolated hostile-input surface (14.2).

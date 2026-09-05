@@ -1,529 +1,58 @@
-# 17 — SMP secondary bring-up (as-built reference)
-
-P2-Ca's deliverable: secondary CPUs (1..N-1) come up via PSCI_CPU_ON, run a minimal asm trampoline that flips a per-CPU online flag, and park at WFI. Boot CPU iterates DTB cpus + waits for each secondary's flag with a per-CPU timeout. Foundation for P2-Cb (per-CPU sched + per-CPU init) and P2-Cd (cross-CPU IPIs).
-
-Scope: `lib/dtb.c` (cpu enumeration + PSCI method detection), `kernel/include/thylacine/dtb.h`, `arch/arm64/psci.{h,c}` (new), `arch/arm64/start.S` (`secondary_entry` trampoline), `kernel/include/thylacine/smp.h` (new), `kernel/smp.c` (new), `kernel/main.c` (smp_init wiring), `kernel/test/test_smp.c` (new).
-
-Reference: `ARCHITECTURE.md §20` (per-core discipline), §22.2 (DTB-driven hardware discovery). Arm DEN 0022D (PSCI specification).
-
----
-
-## Purpose
-
-ARM64 multicore systems hold secondary CPUs in a low-power "PSCI parked" state at reset; only the primary CPU runs the bootloader-to-kernel handoff. For the kernel to actually use multiple cores, it must explicitly wake each secondary via the PSCI (Power State Coordination Interface) mechanism. PSCI is a firmware/hypervisor-level protocol: the kernel issues `HVC #0` (when running under a hypervisor-style firmware like QEMU virt) or `SMC #0` (when running under EL3 secure firmware on real hardware) with a function ID and arguments; the firmware/hypervisor wakes the requested CPU and points it at the entry-point address the kernel provides.
-
-P2-Ca is the **minimum viable PSCI bring-up**. Each secondary, once awakened, runs an intentionally-minimal asm trampoline (no MMU, no PAC, no per-CPU exception stack, no per-CPU run tree) that:
-1. Validates the PSCI-passed `context_id` (= secondary CPU index) is in range.
-2. Computes the address of `g_cpu_online[idx]` via PC-relative addressing.
-3. Stores `1` to that byte (to memory directly, since caches are off).
-4. `dsb sy` to globally publish the store.
-5. Parks at `wfi` indefinitely.
-
-The boot CPU's `smp_init()` waits for each secondary's flag with a per-CPU timeout. If observed, the secondary is counted online; if timeout or PSCI failure, the secondary is counted offline and boot continues. Failures are logged to the UART but do not abort the kernel.
-
-P2-Cb adds full per-CPU init (MMU, PAC, vector table, sched_init, idle thread) — at which point secondaries can run actual kernel code and be scheduled to. P2-Cd lands the IPI infrastructure that lets the primary signal secondaries (e.g., IPI_RESCHED).
-
----
-
-## Public API
-
-### `<thylacine/dtb.h>` — CPU + PSCI enumeration
-
-```c
-#define DTB_MAX_CPUS 8u
-
-u32  dtb_cpu_count(void);                         // # /cpus/cpu@* nodes
-bool dtb_cpu_mpidr(u32 idx, u64 *out_mpidr);     // MPIDR aff value
-typedef enum { DTB_PSCI_NONE = 0,
-               DTB_PSCI_HVC  = 1,
-               DTB_PSCI_SMC  = 2 } dtb_psci_method_t;
-dtb_psci_method_t dtb_psci_method(void);
-```
-
-`dtb_cpu_count()` walks the structure block, counts nodes whose `device_type` property contains "cpu". `dtb_cpu_mpidr(idx, out)` returns the `reg` cell (a single u32 under /cpus's #address-cells = 1, #size-cells = 0). On QEMU virt, MPIDR aff values are linear (0, 1, 2, 3) — the PSCI target arg passes the raw cell value.
-
-`dtb_psci_method()` finds `/psci` (or `/psci@*`) and reads its `method` property. Returns `DTB_PSCI_HVC` for QEMU virt + KVM-style hypervised environments; `DTB_PSCI_SMC` for ARM TF-A and similar EL3 firmware. `DTB_PSCI_NONE` if the node is missing or the method is unknown — callers fall back to UP.
-
-### `<arch/arm64/psci.h>` — calling primitives
-
-```c
-#define PSCI_VERSION              0x84000000u
-#define PSCI_CPU_ON_64            0xC4000003u
-#define PSCI_SUCCESS              0
-#define PSCI_NOT_SUPPORTED        -1
-#define PSCI_INVALID_PARAMETERS   -2
-#define PSCI_DENIED               -3
-#define PSCI_ALREADY_ON           -4
-#define PSCI_ON_PENDING           -5
-#define PSCI_INTERNAL_FAILURE     -6
-#define PSCI_NOT_PRESENT          -7
-#define PSCI_DISABLED             -8
-#define PSCI_INVALID_ADDRESS      -9
-
-bool psci_init(void);
-bool psci_is_ready(void);
-int  psci_cpu_on(u64 target, u64 entry_point, u64 context_id);
-```
-
-`psci_init` reads `/psci/method` from the DTB and caches the conduit (HVC or SMC). `psci_cpu_on` issues the `PSCI_CPU_ON_64` SMCCC call via the cached conduit. The function ID (0xC4000003) is the standard PSCI 0.2+ CPU_ON 64-bit variant — older PSCI variants with custom IDs are not supported (the DTB would have to declare them via `cpu_on = <id>`; we ignore those overrides at v1.0).
-
-### `<thylacine/smp.h>` — bring-up + introspection
-
-```c
-extern volatile u8 g_cpu_online[DTB_MAX_CPUS];
-unsigned smp_init(void);
-unsigned smp_cpu_count(void);
-unsigned smp_cpu_online_count(void);
-```
-
-`smp_init` does the actual bring-up loop. `g_cpu_online` is the per-CPU online flag (a byte per CPU in BSS); the asm trampoline writes the secondary's slot, the primary reads via volatile. `smp_cpu_count()` is `dtb_cpu_count()` cached. `smp_cpu_online_count()` returns the count after smp_init's wait loop.
-
----
-
-## Implementation
-
-### DTB walker for /cpus and /psci
-
-`dtb_walk_cpus()` (lib/dtb.c) walks all nodes; for each, tracks `device_type` and `reg` per-node via a stack indexed by depth. On `END_NODE`, if the node was a cpu (device_type contains "cpu") and had a reg property, its reg cell is appended to the output array.
-
-`dtb_psci_method()` walks until it finds a node whose name starts with "psci"; reads its `method` property. The walk stops at the END_NODE that pops out of /psci (depth tracking).
-
-The walker handles the QEMU virt convention (#address-cells = 1, #size-cells = 0 under /cpus, single u32 reg cell). Other DTB formats (e.g., 64-bit MPIDR with #address-cells = 2) would need a parent-property walker — deferred until a Pi 5 / non-QEMU port needs it.
-
-### PSCI calling
-
-`smccc_call` (arch/arm64/psci.c) issues the SMCCC HVC or SMC instruction depending on the cached conduit. Function ID in x0; args in x1-x3; return in x0. The `register u64 x0 __asm__("x0")` constraint pins the function ID + return value; the inline asm uses `+r(x0)` for in/out.
-
-The conduit (HVC vs SMC) is fixed at psci_init time and doesn't change at runtime. The two-branch dispatch in `smccc_call` is unavoidable because the same binary may run on different boards.
-
-### Secondary trampoline (start.S)
-
-`secondary_entry` lives in `.text` of the kernel image. The primary computes its PA at runtime as `kaslr_kernel_pa_start() + (secondary_entry_va - _kernel_start_va)`. Both are linked at high VA, but the offset between them is the same regardless of KASLR slide — so the PA computation is correct.
-
-The trampoline runs at low PA with MMU off, IRQs masked (PSCI default). Sequence:
-1. `bti c` — defensive landing pad.
-2. Validate `x0` (= secondary CPU index, passed as PSCI's `context_id`) is in `[1, DTB_MAX_CPUS)`. Out-of-range branches to `secondary_bad` (a silent WFI loop with no flag set).
-3. Compute `&g_cpu_online[idx]` via `adrp + lo12 + add`. PC-relative addressing works because PC = PA at trampoline entry, and `g_cpu_online` is in the same kernel image.
-4. `strb #1` to write the online flag. With MMU off, the store is treated as Device-nGnRnE per ARM ARM B2.7 — goes directly to memory bypassing cache.
-5. `dsb sy` — System-shareable Data Synchronization Barrier. Ensures the store is globally observable before any subsequent instruction.
-6. `wfi` loop. PSCI-default IRQ masking means no IRQ delivery, so WFI sleeps until an external event (sev, reset). For P2-Ca there's no event source — secondaries sleep forever (intended).
-
-**Why no MMU enable?** Enabling MMU on the secondary requires:
-- Programming TTBR0/TTBR1 with the primary's already-built page tables.
-- Enabling PAC (paciasp/autiasp need APIA programmed), or compiling secondary code without PAC.
-- Setting up VBAR_EL1 (vector table) — secondaries inherit primary's, but the table assumes per-CPU exception stack.
-- Per-CPU TPIDR_EL1 (current_thread).
-
-Each of these is a substantive sub-piece. Doing them at P2-Ca would balloon the chunk to 1500+ LOC and conflate "PSCI works" with "per-CPU init works." Splitting cleanly: P2-Ca proves PSCI; P2-Cb adds per-CPU init.
-
-**Why dsb sy and not dsb ishst?** The store target (g_cpu_online) is observable to ALL CPUs (boot included), not just the inner-shareable domain. dsb sy is the strongest barrier, ensuring globally visibility through caches + interconnect. dsb ishst would suffice on QEMU virt (boot is in the inner-shareable domain) but not on systems with non-coherent CPU clusters. Cheap insurance.
-
-### `smp_init()` flow
-
-1. Cache `dtb_cpu_count()` in `g_cpu_count`. If 0 (malformed DTB), treat as UP.
-2. Mark `g_cpu_online[0] = 1` (boot CPU).
-3. If `psci_is_ready()` is false, log "PSCI not available" and return 0.
-4. Compute `entry_pa = kaslr_kernel_pa_start() + (secondary_entry - _kernel_start)`.
-5. For `i = 1..N-1`:
-    - Get `mpidr = dtb_cpu_mpidr(i)`.
-    - Call `psci_cpu_on(mpidr, entry_pa, i)`.
-    - On success or ALREADY_ON, wait for `g_cpu_online[i]` with timeout (100 ticks ≈ 100 ms).
-    - On any other PSCI status, log + skip.
-6. Return the count of secondaries that came online.
-
-The wait loop uses `dmb ish` on each iteration to ensure the volatile read picks up the secondary's `dsb sy`-published store. On QEMU virt this is automatic; on real hardware the ish barrier prevents any reordering of the load with respect to the secondary's store-via-memory.
-
----
-
-## Data structures
-
-### `g_cpu_online` (BSS, 8 bytes)
-
-```c
-extern volatile u8 g_cpu_online[DTB_MAX_CPUS];
-```
-
-One byte per CPU. Set by:
-- `smp_init` for boot CPU (slot 0).
-- Asm trampoline `strb` for each secondary (slot 1..N-1).
-
-Read by:
-- `smp_init`'s wait loop.
-- `test_smp_bringup_smoke` for verification.
-
-`volatile` so the compiler doesn't hoist reads out of polling loops. Cache coherence on QEMU virt is automatic; bare-metal might require explicit `dc ivac` before reads (P2-Ca trip-hazard).
-
-`DTB_MAX_CPUS = 8` — matches ARCH §20.7's v1.0 SMP cap. Increasing requires bumping the macro + auditing the per-CPU array dimensions everywhere.
-
----
-
-## Spec cross-reference
-
-P2-Ca touches no formal spec — PSCI bring-up is hardware/firmware coordination, not a kernel concurrency invariant. The cross-CPU spec work begins at P2-Cd (IPI ordering, ARCH §28 I-18) when SGIs are used to coordinate scheduler events across CPUs.
-
----
-
-## Tests
-
-| Test | What it verifies |
-|---|---|
-| `smp.bringup_smoke` | After `smp_init` completes (during main.c boot): `dtb_cpu_count() ≥ 1`; `smp_cpu_count() == dtb_cpu_count()`; `smp_cpu_online_count() == smp_cpu_count()` (all CPUs online); `g_cpu_online[0..N-1]` all 1; `g_cpu_online[N..DTB_MAX_CPUS-1]` all 0 (untouched). |
-
-The test runs in the boot kthread context after smp_init has already executed; it inspects the resulting state. Direct injection of "force a secondary to fail" would require a test-only PSCI hook — deferred.
-
----
-
-## Error paths
-
-| Condition | Behavior |
-|---|---|
-| `dtb_init` failed | smp_init treats cpu_count = 1, marks boot online, returns 0. |
-| No /psci node | smp_init logs "PSCI not available — secondaries held", returns 0. |
-| PSCI returns non-success/ALREADY_ON for a specific cpu | Logs the PSCI error name + cpu index, skips, continues with next cpu. |
-| Timeout waiting for online flag | Logs "PSCI ok but online-flag timed out", counts cpu as offline. |
-| `dtb_cpu_count() > DTB_MAX_CPUS` | Caps at DTB_MAX_CPUS, logs warning. |
-
-No extinction at P2-Ca's smp_init — secondaries failing to come up degrade gracefully to lower-CPU operation.
-
----
-
-## Performance characteristics
-
-PSCI HVC on QEMU virt: microseconds per call (HVC is just a hypercall to the QEMU-emulated hypervisor). The trampoline runs in tens of nanoseconds (a handful of asm instructions). Wait loop polls `g_cpu_online[i]` with `dmb ish` each iteration — sub-microsecond per iteration; the secondary's flag is typically observable within microseconds of PSCI success.
-
-Total smp_init for 4 CPUs on QEMU virt: ~50 µs.
-
-Bare metal will be slower (PSCI calls go to TF-A/EL3 firmware which programs the power controller). 100 ticks = 100 ms timeout is generous.
-
----
-
-## Per-CPU init at high VA (P2-Cb)
-
-P2-Cb extends the trampoline so secondaries reach a real C entry point at the kernel's high VA. After the minimal P2-Ca trampoline (online flag + WFI), the trampoline now:
-
-1. **Sets SP** to the top of `g_secondary_boot_stacks[idx-1]` — a 20 KiB slot (4 KiB guard page + 16 KiB usable stack), page-aligned BSS. See "Secondary boot-stack guard pages" below.
-2. **Flips `g_cpu_online[idx]`** with caches off — early "trampoline reached" signal (kept for diagnostic distinction from `g_cpu_alive`).
-3. **`bl pac_apply_this_cpu`** — leaf asm function (start.S) loads `g_pac_keys[8]` into `AP*KEY*_EL1` + sets SCTLR.EnIA/EnIB/EnDA/EnDB/BT0. Cross-CPU PAC consistency is REQUIRED for thread migration (P2-Ce work-stealing): a thread's signed return address on its kstack must auth-validate against APIA on whichever CPU resumes it.
-4. **`bl mmu_program_this_cpu`** — re-uses primary's already-built page tables; programs MAIR/TCR/TTBR0/TTBR1/SCTLR.M.
-5. **Long-branch via `kaslr_high_va_addr` to high VA `per_cpu_main(idx)`**.
-
-`per_cpu_main(int cpu_idx)` (kernel/smp.c) is `noreturn` and:
-1. Sets `VBAR_EL1` to `_exception_vectors` (shared with primary).
-2. Sets `TPIDR_EL1 = NULL` (no per-CPU current thread at P2-Cb; P2-Cd or later assigns per-CPU idle threads).
-3. Flips `g_cpu_alive[cpu_idx] = 1` + `dsb sy` — the "fully initialized" signal.
-4. Enters idle WFI loop indefinitely with IRQs masked.
-
-**PAC keys refactor** (P2-Cb): primary's inline PAC code in start.S replaced with `bl pac_derive_keys` (asm function that derives 8 key halves from `cntpct_el0` + ROR chain, stores to `g_pac_keys[8]` BSS) + `bl pac_apply_this_cpu`. Each CPU calls `pac_apply_this_cpu` to load the same shared keys.
-
-**`mmu_enable` refactor** (P2-Ca, used at P2-Cb): split into `mmu_program_this_cpu` (program MMU registers from already-built tables) + `mmu_enable` (build_page_tables + program). Primary calls `mmu_enable` once; secondaries call `mmu_program_this_cpu` directly.
-
-**`smp_init` watches `g_cpu_alive`** at P2-Cb (was `g_cpu_online` at P2-Ca). The stricter signal catches PAC/MMU/VBAR/TPIDR failures that would leave a secondary stuck mid-init. `g_cpu_online` is still set by the trampoline as a diagnostic for "trampoline reached but per_cpu_main didn't" failures (logged with that specific message).
-
----
-
-## Per-CPU exception stacks via SPSel=0 (P2-Cc)
-
-P2-Cc separates the kernel's "normal mode" stack from its "exception handling" stack on every CPU. The kernel runs at EL1 with `PSTATE.SPSel = 0` — `sp` refers to `SP_EL0`, which holds the current thread/boot stack. Hardware exception entry sets `SPSel = 1` (per ARM ARM D1.10.4), so `KERNEL_ENTRY` in vectors.S operates on `SP_EL1`. Each CPU's `SP_EL1` is set to the top of its own slot in `g_exception_stacks[DTB_MAX_CPUS][4096]` BSS — total 32 KiB. After the handler returns, `KERNEL_EXIT`'s `eret` restores `SPSel` from `SPSR_EL1.M[0] = 0` and the kernel resumes on `SP_EL0`.
-
-### What this gives us
-
-1. **Per-CPU isolation**. CPU N's `SP_EL1` is `&g_exception_stacks[N][4096]`. Concurrent IRQs on different CPUs land on different exception stacks — there's no cross-CPU stack sharing for handler frames.
-2. **Stack-overflow safety**. A kernel thread that overruns its `SP_EL0` stack into the guard page faults. The fault's `KERNEL_ENTRY` runs on `SP_EL1` (a known-good stack with full headroom), not on the dying `SP_EL0`. So `KERNEL_ENTRY`'s `sub sp, sp, #EXCEPTION_CTX_SIZE` does NOT recursively fault, and `exception_sync_curr_el`'s `kernel stack overflow` diagnostic is reachable. This closes the P1-F "KNOWN LIMITATION" comment in vectors.S.
-
-### How SP_EL0 / SP_EL1 are set up
-
-Both registers are written via different mechanisms because of ARM ARM access rules:
-
-- `SP_EL0`: writable from EL1 via `msr sp_el0, xN` regardless of `SPSel`.
-- `SP_EL1`: `msr sp_el1, xN` is **UNDEFINED** at EL1 (ARM ARM B6.2). The only legal way to write `SP_EL1` from EL1 is `mov sp, xN` while `SPSel = 1` (so that `sp` refers to `SP_EL1`).
-
-So the boot sequence (start.S `_real_start` step 4.6) is:
-1. `mov x0, sp` — copy current sp (= `SP_EL1` = boot stack, set in step 3).
-2. `msr sp_el0, x0` — `SP_EL0 := boot stack top`.
-3. Compute `g_exception_stacks[0]`'s top.
-4. `mov sp, x0` — `SP_EL1 := exception-stack top` (still `SPSel = 1`).
-5. `msr SPSel, #0` — `sp` now refers to `SP_EL0` (= boot stack).
-6. `isb`.
-
-`SP_EL1` at this point is still a low PA (PC-relative resolution before MMU is on). Step 8.5 (after `bl mmu_enable`) re-anchors `SP_EL1` at the post-KASLR HIGH VA via `kaslr_high_va_addr` + the SPSel-dance:
-```asm
-adrp x0, g_exception_stacks
-add  x0, x0, :lo12:g_exception_stacks
-add  x0, x0, #4096                    // EXCEPTION_STACK_SIZE; CPU 0 top
-bl   kaslr_high_va_addr               // x0 = HIGH VA of slot 0 top
-msr  SPSel, #1                         // sp now refers to SP_EL1
-isb
-mov  sp, x0                            // SP_EL1 := HIGH VA top
-msr  SPSel, #0                         // sp back to SP_EL0
-isb
-```
-
-Secondaries do the equivalent in `secondary_entry`: SP_EL0 = per-CPU boot stack, SP_EL1 = per-CPU exception stack at LOW PA, SPSel = 0; then after `bl mmu_program_this_cpu`, the SPSel-dance re-anchors SP_EL1 at the HIGH VA of `g_exception_stacks[idx]`.
-
-### Vector dispatch under SPSel=0
-
-ARM64 routes "current EL" exceptions to one of two vector groups based on `PSTATE.SPSel` at exception time:
-- `SPSel = 0` → offsets `0x000-0x180` ("Current EL with SP_EL0")
-- `SPSel = 1` → offsets `0x200-0x380` ("Current EL with SP_ELx")
-
-P2-Cc moves the live Sync + IRQ slots into the `SP_EL0` group (`0x000` + `0x080`) — that's where the kernel's normal-mode SPSel=0 exceptions land. The `SP_ELx` slots remain live too (`0x200` + `0x280`) because the kernel transits through SPSel=1 mode after a sched() context-switch from inside an IRQ handler: cpu_switch_context's `mov sp` writes the current-SP register (= SP_EL1 since hardware set SPSel=1 on entry) to the new thread's kstack value, then the ret-path lands on `thread_trampoline` which unmasks IRQs while still in SPSel=1 mode. The next IRQ on that CPU dispatches to the SPx group rather than the SP_EL0 group. Both groups call into the same C handlers (`exception_sync_curr_el`, `exception_irq_curr_el`) — identical recovery path, both routes observably equivalent. After the eventual eret unwinds back to the original thread's natural EL1t state, subsequent IRQs route to the SP_EL0 group.
-
-FIQ and SError slots in both groups remain `VEC_UNEXPECTED` — neither is unmasked at v1.0.
-
-### Observability
-
-`smp.exception_stack_smoke` (test_smp.c) verifies the discipline at runtime:
-- Confirms `PSTATE.SPSel == 0` in normal kernel mode (read via `mrs ..., SPSel`).
-- Confirms `g_exception_stacks` BSS is sized exactly `DTB_MAX_CPUS * EXCEPTION_STACK_SIZE` and slots are contiguous.
-- Reads `g_exception_stack_observed[0]`, written by `timer_irq_handler` on its first invocation per CPU as `&local`. Verifies the address falls inside `g_exception_stacks[0]`'s slot — runtime evidence that the timer IRQ ran on the per-CPU exception stack as expected. (Direct `mrs sp_el1` from EL1 is UNDEFINED per ARM ARM, so the observation is captured indirectly via the C handler's local-address.)
-
-`smp_cpu_idx_self()` (smp.c) returns `MPIDR_EL1.Aff0` masked to 8 bits — the boot CPU sees 0, secondaries see 1..N-1. Used by `timer_irq_handler` to index `g_exception_stack_observed`; reusable as a per-CPU dispatch key in future sub-chunks.
-
-### What stays at LOW PA
-
-`g_secondary_boot_stacks` (the per-secondary "normal mode" stack used as `SP_EL0` initially) is set by `secondary_entry` to its low-PA address pre-MMU. After `mmu_program_this_cpu`, `SP_EL1` is re-anchored to high VA but `SP_EL0` is NOT — secondaries continue executing on the low-PA boot stack until P2-Cd assigns each one a per-CPU idle thread (which has its own kstack at high VA). This is a deliberate v1.0 P2-Cc choice: the SP_EL0-side address space transition is part of the per-CPU idle-thread bring-up, not the exception-stack bring-up.
-
----
-
-## Secondary boot-stack guard pages (P5-secondary-stack-guard)
-
-Each secondary CPU runs — first its `secondary_entry` trampoline, then permanently its idle thread — on a slot of `g_secondary_boot_stacks`. Under the uniform-EL1h model (see `docs/reference/67-el1h-kernel.md`) that slot is `SP_EL1`, the kernel's single stack bank on that CPU; the idle thread owns no per-thread kstack, so the boot stack is its *only* stack. An overflow there would silently corrupt the adjacent slot or BSS. The boot CPU's stack has had a guard page since P1 (`_boot_stack_guard`, kernel.ld); P5-secondary-stack-guard extends the same protection to the secondaries — closing el1h audit F1.
-
-`g_secondary_boot_stacks` is now `struct secondary_stack[DTB_MAX_CPUS-1]`, each slot a `{ char guard[4096]; char usable[16384]; }` — the guard page LEADS the slot — and the whole array is `aligned(4096)` so every slot base, and thus every guard page, is page-aligned. `secondary_entry` sets `SP` to `slot_base + SECONDARY_STACK_SLOT_SIZE` (20480) — the top of `usable` — so the stack grows DOWN through the 16 KiB usable region, and an overflow past its bottom crosses into the guard page.
-
-`build_page_tables` (mmu.c) zeroes the L3 PTE of every slot's guard page in BOTH `l3_kernel` (the kernel-image L3 — shared by the TTBR0 identity map and the TTBR1 high-VA map) and `l3_directmap_kernel` (the direct-map alias), mirroring its handling of `_boot_stack_guard`. A secondary's `SP` is a kernel-image high VA (re-anchored to high VA after MMU enable), so an overflow store faults via the zeroed `l3_kernel` entry. `addr_is_stack_guard` (fault.c) recognizes a FAR inside any secondary guard page (PA and high-VA forms) → `extinction("kernel stack overflow")`.
-
-The slot stride `SECONDARY_STACK_SLOT_SIZE` (20480) is mirrored as a literal in `secondary_entry` (asm cannot include `smp.h`); smp.h's `_Static_assert`s pin the C side — including a tripwire on the literal value. The `secondary_stack_guard` fault-test variant (`tools/test-fault.sh`) writes into a guard page and asserts the `EXTINCTION: kernel stack overflow` diagnostic; `smp.secondary_stack_guard_layout` (test_smp.c) pins the slot layout.
-
-A 1-page guard (matching the boot CPU's `_boot_stack_guard`) is sufficient for the boot/idle code that runs on these stacks — shallow, controlled usage with no deep recursion. The per-thread kstack guard is wider (4 pages); boot stacks deliberately match the boot-CPU precedent.
-
-## Status
-
-Implemented: P2-Ca + P2-Cb + P2-Cc + P2-Cd (Cda + Cdb + Cdc) at `<commit-pending>`. Stubbed: nothing. Deferred:
-- **Cross-CPU thread placement**: P2-Ce work-stealing. Currently `ready(t)` inserts into THIS CPU's tree; threads created on the boot CPU stay on the boot CPU.
-- **finish_task_switch pattern (closes SMP wait/wake race)**: P2-Cf.
-- **scheduler.tla SMP refinement** (per-CPU runqueues + Steal action + IPI ordering invariant I-18): P2-Cg.
-- **IPI_TLB_FLUSH / IPI_HALT / IPI_GENERIC** (ARCH §20.4): land when use-cases arrive (TLB shootdown for territory rebind in Phase 5+; shutdown for clean halt; generic callback delivery).
-- **Per-CPU SP_EL0 to high VA on secondaries**: P2-Ce (alongside per-CPU work delivery).
-- **Pi 5 / multi-cluster Aff{1,2,3} encoding**: Phase 7 hardening pass.
-
----
-
-## P2-Cd: per-CPU run trees + idle threads + IPI infrastructure
-
-P2-Cd extends per_cpu_main beyond a pure WFI park. After per-CPU init (PAC, MMU, VBAR, exception stack — all from P2-Cb/Cc), each secondary now:
-
-1. Allocates an idle Thread descriptor via `thread_init_per_cpu_idle(cpu_idx)` (no kstack — runs on the per-CPU boot stack assigned by start.S secondary_entry).
-2. Sets TPIDR_EL1 to that idle Thread.
-3. Calls `sched_init(cpu_idx)` — initializes this CPU's slot in `g_cpu_sched[]` (run tree, vd_counter, idle pointer).
-4. Calls `smp_cpu_ipi_init(cpu_idx)` — see below.
-5. Sets `g_cpu_alive[cpu_idx]` (the "fully ready" signal that smp_init waits for).
-6. Enters the idle loop: `for(;;){sched();wfi;}`.
-
-**#810 — per-CPU timer armed at the production transition.** Secondaries do NOT arm a per-CPU generic timer at bring-up; they stay quiescent (woken only by a notify IPI) through the deliberately-UP-like in-kernel test suite. At the production transition, `boot_main` calls `smp_enable_secondary_preemption()` (right after `sched_set_notify_enabled(true)`, after `test_run_all`), which RELEASE-publishes a flag and broadcasts `smp_resched_others()`; each secondary's idle loop then arms its OWN banked timer (`gic_enable_irq(TIMER_INTID_EL1_PHYS_NS)` on its redistributor + `timer_arm_this_cpu()`) the first iteration it ACQUIRE-observes the flag. This gives every CPU the preemptive tick (invariants I-8 / I-17 now hold on secondaries), so a CPU-bound EL0 thread on a secondary can no longer monopolize it. The deferral keeps the test phase deterministic (arming during tests let a secondary self-wake and steal a test thread, surfacing as `thread_free of RUNNING thread` in `scheduler.preemption_smoke`); it mirrors the `sched_set_notify_enabled` gate. See `docs/reference/11-timer.md` + `kernel/smp.c`.
-
-### Per-CPU GIC bring-up (P2-Cdc)
-
-`gic_init_secondary(cpu_idx)` performs this CPU's GIC initialization:
-- Per-CPU redistributor wake + SGI/PPI bank config (group 1 NS, default priority, all disabled). Frame at `g_redist_base + cpu_idx * 0x20000`.
-- Per-CPU CPU interface system-register bring-up: ICC_SRE/PMR/BPR/CTLR/IGRPEN1.
-
-The redistributor MMIO region was mapped Device-nGnRnE in `gic_init` — covers all per-CPU frames in one mmu_map_device call (region size from DTB).
-
-### IPI infrastructure
-
-SGI INTID assignments (`IPI_*` macros in `<thylacine/smp.h>`):
-- **`IPI_RESCHED = 0`** — wake target CPU's WFI to process its run tree. v1.0 P2-Cdc lands this only.
-- IPI_TLB_FLUSH / HALT / GENERIC reserved per ARCH §20.4; deferred until use-cases arrive.
-
-`gic_send_ipi(target_cpu_idx, sgi_intid)` writes ICC_SGI1R_EL1:
-```
-sgi = (sgi_intid << 24) | (1 << target_cpu_idx);
-```
-Encoding pinned for QEMU virt's flat-Aff0 cluster (Aff{1,2,3}=0). Multi-cluster hardware needs Aff fields populated — Phase 7 work.
-
-`ipi_resched_handler(intid, arg)` (smp.c) increments `g_ipi_resched_count[smp_cpu_idx_self()]` for observability. The handler doesn't manually call sched() — vectors.S IRQ slot calls `preempt_check_irq` after `exception_irq_curr_el → gic_dispatch → ipi_resched_handler` returns; if any cross-CPU placer set this CPU's `need_resched`, preempt_check_irq picks it up. At v1.0 P2-Cdc no cross-CPU placer exists yet (P2-Ce); IPI_RESCHED is purely a "wake from WFI" signal proving the SGI delivery path works.
-
-### smp_cpu_ipi_init order
-
-Called from per_cpu_main BEFORE `g_cpu_alive[cpu_idx] = 1` so by the time the boot CPU's smp_init wait observes alive, the secondary is fully IPI-receivable:
-1. gic_init_secondary(cpu_idx)
-2. gic_attach(IPI_RESCHED, ipi_resched_handler, NULL)
-3. gic_enable_irq(IPI_RESCHED)
-4. msr daifclr, #2 (unmask IRQs at PSTATE)
-
-### gic_enable_irq SGI/PPI now per-CPU
-
-P2-Cdc bug fix: `gic_enable_irq` for SGI/PPI was hardcoded to write `g_redist_base` (CPU 0's frame). For secondaries calling it from their own context, the write must target the calling CPU's frame. Refactored to use `cpu_redist_base(smp_cpu_idx_self())`. The fix doesn't affect existing CPU-0 callers (gic_init's timer-PPI enable in main.c) because `cpu_redist_base(0) == g_redist_base`.
-
-### Test
-
-`smp.ipi_resched_smoke`:
-- Snapshot pre-send `g_ipi_resched_count[]` baseline.
-- Boot CPU calls `gic_send_ipi(i, IPI_RESCHED)` for each secondary `i`.
-- Polls (with 100-tick timeout per secondary) until each secondary's count > baseline.
-- Verifies boot CPU's slot unchanged (we don't IPI ourselves).
-- **GIC SGI infrastructure + IPI dispatch** (IPI_RESCHED/TLB_FLUSH/HALT/GENERIC): P2-Cd.
-- **Work-stealing**: P2-Ce.
-- **finish_task_switch pattern (closes SMP wait/wake race)**: P2-Cf.
-- **scheduler.tla SMP refinement** (per-CPU runqueues + Steal action + IPI ordering invariant I-18): P2-Cg.
-
----
-
-## Known caveats / footguns
-
-1. **Secondaries cannot execute kernel code beyond the trampoline at P2-Ca**. They have no MMU, no PAC, no exception vectors, no per-CPU stack, no per-CPU TPIDR_EL1. Any IRQ to a secondary would fault into the (unset) vector table → undefined behavior. Currently all device IRQs are routed to the boot CPU (default GIC routing); P2-Cd's per-CPU IRQ routing closes this.
-
-2. **PSCI's `context_id` arg is the secondary CPU index** (`i` from the loop). Don't confuse with MPIDR — MPIDR is the target-cpu arg, context_id is what arrives in the secondary's x0 at trampoline entry.
-
-3. **The secondary trampoline's PA depends on `_kernel_start_va` matching the linker script's BASE**. If the linker script changes the base of the kernel image, `kaslr_kernel_pa_start() + (secondary_entry - _kernel_start)` may compute wrong. The KASLR base is `KASLR_LINK_VA = 0xFFFFA00000080000`; `_kernel_start` is the symbol at the linker-script's image base; their relationship is fixed by the linker script. Don't move `_kernel_start` without updating the trampoline PA computation.
-
-4. **Cache coherence assumption — CLOSED at #214**: the asm trampoline writes `g_cpu_online[idx]` with caches off (Device-nGnRnE), and this caveat's prophecy ("on bare-metal hardware the boot CPU might need an explicit `dc ivac` before the read; Pi 5 bring-up revisits") came due on the Pi 400. The flag arrays are now line-isolated mailboxes under an explicit CIVAC protocol — see "#214: real-silicon bring-up (Pi 400/KVM)" below.
-
-5. **No PSCI version check**. We assume PSCI 0.2+ standard function IDs. Older PSCI variants use different IDs declared in the DTB (`cpu_on = <id>` etc.); we ignore those. QEMU virt advertises PSCI 1.0; bare-metal will too.
-
-6. **The trampoline is in `.text` (executable from the kernel image)**. It must therefore be reachable via the kernel's load PA. The boot loader (QEMU's load_aarch64_image) loads the entire image at a single PA; the trampoline is part of the image; it's reachable by computing kaslr_kernel_pa_start + offset.
-
-7. **DTB_MAX_CPUS = 8 is hard-coded throughout**. The DTB walker's stack arrays, the asm trampoline's bounds check (`mov x9, #8`), the `g_cpu_online` array dimension, all depend on this. Bumping it requires updating each site.
-
----
-
-## #214: real-silicon bring-up (Pi 400/KVM, 2026-08-11)
-
-The first `-smp 4` boot on real silicon (Pi 400, 4x Cortex-A72, KVM)
-froze at secondary bring-up. Every emulated substrate (TCG, HVF) had
-been structurally incapable of catching any of the four defects below.
-The chunk landed them together; the boot now reaches
-`Thylacine boot OK` at 4/4 CPUs on the Pi.
-
-### Root cause: UNKNOWN-reset TPIDR_EL1 + KVM's poison
-
-`secondary_entry` never initialized TPIDR_EL1/TPIDR_EL0 — architecturally
-UNKNOWN at PSCI entry, exactly as at cold boot, where `_real_start` step
-4.5 zeroes them (P2-A R4 F44/F45). QEMU TCG/HVF reset them to 0, so
-`current_thread()` returned NULL and `spin_preempt_inc`'s `!t` guard
-held — by accident. KVM deliberately poisons UNKNOWN-reset sysregs with
-`0x1de7ec7edbadc0de`, so the secondary's first `current_thread()`
-dereference — `spin_preempt_inc`'s `t->magic` probe, reached via
-`thread_init_per_cpu_idle`'s first allocation lock in `per_cpu_main` —
-read through the poison (ESR `0x96000004`: data abort, L0 translation
-fault; FAR = the poison) and died. The fix: the trampoline zeroes
-TPIDR_EL1, TPIDR_EL0, and TPIDRRO_EL0 at entry (TPIDRRO additionally
-because the kernel never writes it and EL0 can always read it — a boot
-leftover would be EL0-visible forever; `_real_start` gained the same
-TPIDRRO zeroing).
-
-### The amplifier: recursive EL1h-sync descent (guards in exception.c + extinction.c)
-
-The poison fault's handler chain re-dereferenced the same poison (cons
-locks take `spin_preempt_inc` too), so fault -> extinction ->
-halls/print faults -> fault recursed. Each re-entry ran KERNEL_ENTRY on
-the same stack: with a mapped SP every iteration landed a 288-byte
-frame and marched DOWN — past the kstack guard (SP arithmetic never
-faults; stores resume wherever SP re-enters mapped territory) —
-scribbling exception frames across physical RAM through the directmap
-until the L1 page tables themselves held 'THRD'-magic frames and every
-CPU's vector fetch died at a level-1 translation fault. Two guards now
-bound the class:
-
-- `exception_sync_curr_el` (exception.c) carries a per-CPU depth
-  counter measuring SYNCHRONOUS recursion: at depth 3 it flushes the
-  staged cons ring (trylock, bounded), prints one raw
-  `EXTINCTION: el1-sync recursion` banner with the killing frame's
-  ELR/ESR/FAR, and parks the CPU in `_torpor` with the stack corpse
-  intact. A legitimate EL1h-sync handler CAN sleep (kernel-uaccess of a
-  cold demand-paged FILE page blocks in 9P), so the raw count is not
-  bounded under load — the audit-F1 correction: the scheduler clears
-  the counter at every context switch (`exception_sync_depth_reset_
-  this_cpu` from `sched()`), because a switch proves forward progress
-  while a genuine runaway (synchronous, IRQ-masked) never reaches
-  `sched()` and its count survives to trip. The reset-to-0 on
-  successful unwind (not decrement) additionally keeps a cross-CPU-
-  migrated handler's exit from stranding a foreign increment.
-- `extinction()` / `extinction_with_addr()` carry a per-CPU re-entrancy
-  guard: a second entry prints the message with the halls dump
-  suppressed and parks; a third parks silently.
-
-The unmapped-SP variant of the spiral (stores all fault, nothing lands)
-still recurses below the C layer — harmless to memory, that CPU spins.
-The asm-side SP-validity check in the 0x200 vector slot switching to
-`g_exception_stacks` remains the deferred stronger form (vectors.S trip
-hazard).
-
-### D1: the bring-up timeout rode a dead clock; partial bring-up now extincts
-
-`wait_for_flag`'s timeout counted `g_ticks` — advanced only by cpu0's
-timer IRQ, not guaranteed live in the smp_init context — and the loop
-had never once terminated by timeout on any substrate (secondaries
-always arrived first), so the first real secondary failure froze boot
-forever, silently. The timeout now rides `timer_get_counter()`
-(CNTVCT_EL0, always advances), in ms (`SMP_BRINGUP_TIMEOUT_MS`, 1000 —
-audit F3: since a timeout is now FATAL, the bound carries ~3 orders of
-magnitude of margin over the worst observed full bring-up; the cost
-lands only on the failure path). And `smp_init` now refuses a degraded
-boot: if any DTB-listed secondary fails bring-up while PSCI is ready,
-it prints per-CPU diagnostics and extincts — a partially-SMP boot is a
-lie waiting to be verified around.
-
-### The mailbox protocol + the per-CPU stage trace
-
-The trampoline's MMU-off stores are Device-nGnRnE writes straight to
-PoC, NOT coherent with the primary's cacheable view (the old caveat-4
-prophecy). `g_cpu_online` is now a line-isolated mailbox
-(`aligned(64)`, padded to `SMP_MAILBOX_BYTES`): the primary writes
-`[0]` once, `DC CIVAC`s the line before the first CPU_ON (so DRAM is
-current and no cached copy's writeback can clobber a secondary's Device
-write), re-CIVACs before every diagnostic read, and never writes the
-line again. `g_cpu_stage` (one line PER CPU, byte at
-`idx * SMP_MAILBOX_BYTES`) records each bring-up step
-(`SMP_STAGE_*` in smp.h, mirrored as literals in the trampoline):
-Device writes pre-MMU, coherent stores after — per-CPU lines because a
-cacheable store to a line another CPU is still Device-writing would
-fill from a stale copy and clobber it on writeback. On timeout the
-diagnostic names the exact stage (this is what localized the root cause
-to the `thread_init_per_cpu_idle` window in one boot). `g_cpu_alive`
-needs no maintenance — written with the MMU on, polled coherently.
-
-The trampoline also gained: VBAR_EL1 installed (high VA) right after
-the SP re-anchor, BEFORE any C runs — previously every fault between
-MMU-on and `per_cpu_main` vectored through a reset-UNKNOWN VBAR, a
-silent wedge; and `mmu_program_this_cpu` gained `ic iallu` beside the
-R6-B F120 `tlbi` (the I-side of the same no-firmware-trust argument —
-A72 has no FEAT_DIC/IDC) plus a hoisted `asid_hw_bits()` call and a
-leaf-ness constraint comment: the function runs with the MMU off and
-returns with it on, so a call frame would be pushed as a Device write
-and popped as a cacheable read of possibly-stale lines. It must remain
-a frameless register-only leaf (verified by disassembly at #214).
-
-### Audit round (holotype, Fable 5, post-`0847f2f7`)
-
-0 P0 / 1 P1 / 0 P2 / 2 P3; MODEL(start)==MODEL(end). All three fixed in
-the close commit: F1 [P1] the depth guard's false park under
-interleaved SLEEPING uaccess demand-page handlers (the reviewer proved
-the sleeping path: R12-uaccess -> `userland_demand_page` FILE slow path
--> 9P `sleep()`, which also bypasses the #806 `g_in_kernel_fault`
-flag) — fixed by the scheduler clearing the counter at every switch;
-F2 [P3] the leaf-ness constraint was prose — now a fail-closed
-post-link build gate (kernel/CMakeLists.txt `leaf-check`, both failure
-arms discrimination-proven); F3 [P3] the newly-fatal 100 ms bring-up
-timeout — widened to 1 s with the margin argument. No regression test
-can deterministically drive F1's interleaving (three same-CPU cold-file
-uaccess sleepers); the fix is correct by construction (a runaway never
-reaches `sched()`) and the construction is documented at the guard.
-
-### Evidence
-
-thyla-pi `~/warp/`: `smoke-boot.log` (the original freeze),
-`smp4-fix2.log` + the QMP/gdb autopsies (the descent corpse: L1 table
-overwritten with exception frames), `smp4-fix3.log` (guards + stage
-trace: all three secondaries at stage 5, parked by the recursion guard,
-fail-loud extinction with per-CPU stages), `smp4-fix4.log` (the fix:
-`smp: 4/4 cpus online` -> `Thylacine boot OK`, go4c cold build 7.7 s).
-
----
-
-## Naming rationale
-
-`smp_init`, `smp_cpu_count`, `smp_cpu_online_count` — standard Linux/BSD vocabulary. `secondary_entry` — Linux uses `secondary_startup`; we shorten. `g_cpu_online` — Linux uses `cpu_online_mask` (bitmap); we use a byte array for simplicity at v1.0.
-
-PSCI function names + return codes are pinned by the Arm spec (DEN 0022D); no thematic alternative would communicate intent better.
+# 17 — SMP secondary bring-up [ABSORBED INTO THE VAULT]
+
+Absorbed at the scheduler sweep (`chg-2026-08-01-sched-sweep`). Its
+content now lives, code-verified and current, at:
+
+    vault/system/kernel/scheduling/sub-kernel-sched-smp.md
+
+(PSCI bring-up, the trampoline, the online/alive flag pair,
+`per_cpu_main`'s full per-CPU init, the two production gates that keep
+secondaries quiescent during the test phase, and the MPIDR identity
+assertion), alongside the `on_cpu` protocol and the idle park it brings
+each secondary into.
+
+**What this file got WRONG by the time it was absorbed.** Same mode as
+its two siblings, and here it is nearly total: the file is frozen at
+**P2-Ca**, the minimum-viable-PSCI chunk, and describes secondaries that
+never run kernel code.
+
+- "run a minimal asm trampoline that flips a per-CPU online flag, and
+  **park at WFI** ... For P2-Ca there's no event source — secondaries
+  sleep forever (intended)." They have run `per_cpu_main` — MMU, PAC,
+  VBAR, FP, per-CPU idle, `sched_init`, GIC bring-up, IPI attach — since
+  P2-Cb, and they schedule real work.
+- **"Why no MMU enable?"** is a whole section arguing a deferral that was
+  taken the next chunk. It reads as current design rationale.
+- The `smp_init()` flow says it waits on **`g_cpu_online[i]`**. It waits
+  on `g_cpu_alive[i]` — the stricter flag `per_cpu_main` sets after the
+  per-CPU init completes, deliberately, because that is the one that
+  proves PAC/MMU/VBAR all worked. `g_cpu_online` only proves the
+  trampoline ran, and the code uses the difference to say *which stage*
+  failed in its diagnostic.
+- The public-API block lists four symbols. `smp.h` also exports
+  `smp_cpu_idx_self`, `smp_cpu_ipi_init`, `smp_boot_cpu_ipi_init`,
+  `smp_resched_others`, `smp_enable_secondary_preemption`,
+  `smp_bootcpu_idle_stack_top`, `g_cpu_alive`, `g_pac_keys`,
+  `g_secondary_boot_stacks`, `g_bootcpu_idle_stack`,
+  `g_ipi_resched_count`.
+- Nothing about the two **production gates** (`#810`'s deferred timer
+  arming, `sched_set_notify_enabled`) that keep secondaries quiescent
+  during the deterministic in-kernel test phase — which is load-bearing:
+  without the timer gate a secondary self-waking on its own tick stole a
+  test thread and surfaced as `thread_free of RUNNING thread`.
+- Nothing about the **MPIDR identity assertion** (`cpu_idx ==
+  smp_cpu_idx_self()`), the only thing standing between a cluster-MPIDR
+  board and silent per-CPU slot aliasing — now
+  `vault/seams/seam-sparse-mpidr.md`.
+- Nothing about `g_bootcpu_idle_stack`, the guard-paged stack cpu0's idle
+  runs on since the SMP redesign, or about why `g_exception_stacks` is
+  allocated and asserted but unused at runtime under uniform EL1h.
+
+What it got RIGHT and is worth preserving as history: the PSCI protocol
+detail (conduit selection, the `PSCI_CPU_ON_64` function ID, the status
+codes), the trampoline's PC-relative addressing argument, and the
+`dsb sy` vs `dsb ishst` reasoning — all still accurate, and all the
+primary source for the dossier's bring-up section.
+
+Design scripture is unchanged: `docs/ARCHITECTURE.md` §20, §22.2; Arm DEN
+0022D (PSCI).

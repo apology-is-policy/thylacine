@@ -8,6 +8,9 @@
 // mux's core mechanism -- mint / host / pump / relay is exactly what each
 // tmux window does -- with one window and no UI (PTY-DESIGN section 14).
 //
+// The mint/seed/host core now lives in `ptyhold` (shared with the kaua-term,
+// KT-1); ptyhost keeps only its RELAY policy -- the two raw byte pumps below.
+//
 // The composition that keeps this trivial (section 14.2): `ptyhost` is
 // registered in ut's `is_raw_command`, so the OUTER shell's LS-7 dance flips
 // the outer console RAW (-isig) around it and restores it after. The outer
@@ -40,31 +43,19 @@
 
 extern crate alloc;
 
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use libthyla_rs::fs::OpenOptions;
-use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::{
-    env, t_burrow_attach, t_close, t_exit_group, t_fstat, t_open, t_putstr, t_read, t_thread_exit,
-    t_wait_pid_for, t_write, thread, T_ORDWR, T_WALK_OPEN_FROM_ROOT,
+    env, t_burrow_attach, t_close, t_exit_group, t_putstr, t_read, t_thread_exit, t_wait_pid_for,
+    t_write, thread,
 };
+use ptyhold::{HoldError, Master};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
-/// The ptyfs endpoint-qid contract (PTY-DESIGN section 5): PTS_FLAG | N<<8 |
-/// filekind; filekind 1 = master.
-const PTS_FLAG: u64 = 1 << 40;
-const PTS_FK_MASTER: u64 = 1;
-
 /// The input-pump thread's stack (a fixed read/write loop; generous).
 const PUMP_STACK: u64 = 64 * 1024;
-
-fn open_rdwr(path: &str) -> i64 {
-    // SAFETY: t_open is the SYS_OPEN SVC wrapper; path is a valid byte slice.
-    unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_ORDWR) }
-}
 
 /// The input pump: OUTER stdin -> the master, byte-for-byte. Runs on its own
 /// thread (`arg` = the master fd). Ends the WHOLE host on outer-stdin EOF
@@ -80,13 +71,26 @@ extern "C" fn pump_in(arg: u64) {
             break;
         }
         let mut off = 0usize;
+        let mut zeros = 0u32;
         while off < n as usize {
             let w = unsafe { t_write(mfd, buf.as_ptr().add(off), n as usize - off) };
-            if w <= 0 {
+            if w < 0 {
                 // Master unusable: the main thread owns the teardown.
                 // SAFETY: `!`-returning SVC.
                 unsafe { t_thread_exit() }
             }
+            if w == 0 {
+                // A raw-mode master accepts what fits and answers 0 when its
+                // ring is full: back-pressure, not an error. Wait it out
+                // briefly; a ring full past the bound drops the rest.
+                zeros += 1;
+                if zeros > 200 {
+                    break;
+                }
+                let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(1));
+                continue;
+            }
+            zeros = 0;
             off += w as usize;
         }
     }
@@ -114,76 +118,47 @@ fn run() -> i64 {
         argv.push(String::from("/bin/ut"));
     }
 
-    // 1. Mint: open the clone file; the fd IS the master.
-    let mfd = open_rdwr("/dev/pts/ptmx");
-    if mfd < 0 {
-        t_putstr("ptyhost: open(/dev/pts/ptmx) failed\n");
-        return 2;
-    }
-    // ptsname: the fstat qid carries PTS_FLAG | N<<8 | fk (the documented
-    // contract; t_stat.qid_path at byte offset 8).
-    let mut st = [0u8; 88]; // #100: t_stat ABI is 88 bytes (kernel copies out sizeof(t_stat))
-    // SAFETY: SVC wrapper; st is a valid 88-byte t_stat buffer.
-    if unsafe { t_fstat(mfd, st.as_mut_ptr()) } != 0 {
-        t_putstr("ptyhost: fstat(master) failed\n");
-        let _ = unsafe { t_close(mfd) };
-        return 2;
-    }
-    let mut q = [0u8; 8];
-    q.copy_from_slice(&st[8..16]);
-    let qid = u64::from_le_bytes(q);
-    if qid & PTS_FLAG == 0 || (qid & 0xff) != PTS_FK_MASTER {
-        t_putstr("ptyhost: ptmx qid is not a pts master\n");
-        let _ = unsafe { t_close(mfd) };
-        return 2;
-    }
-    let n = (qid >> 8) & 0xff_ffff;
+    // 1. Mint: the returned master fd IS this host's endpoint (ptyhold owns
+    //    the clone-open + qid validation; its failures close the fd for us).
+    let master = match Master::mint() {
+        Ok(m) => m,
+        Err(HoldError::Mint) => {
+            t_putstr("ptyhost: open(/dev/pts/ptmx) failed\n");
+            return 2;
+        }
+        Err(HoldError::Fstat) => {
+            t_putstr("ptyhost: fstat(master) failed\n");
+            return 2;
+        }
+        Err(HoldError::NotMaster) => {
+            t_putstr("ptyhost: ptmx qid is not a pts master\n");
+            return 2;
+        }
+        Err(_) => return 2,
+    };
+    let mfd = master.mfd;
 
     // 2. Seed the winsize (the host has no queryable outer size at v1.0 --
     //    the kernel console reports none -- so the classic 80x24; a resize
     //    surface is the graphical-terminal consumer's, Halcyon).
-    let ctl_path = format!("/dev/pts/{}ctl", n);
-    let ctl = open_rdwr(&ctl_path);
-    if ctl >= 0 {
-        let ws = b"winsize 80 24";
-        // SAFETY: SVC wrapper; ws is a valid static slice.
-        let _ = unsafe { t_write(ctl, ws.as_ptr(), ws.len()) };
-        let _ = unsafe { t_close(ctl) };
-    }
+    master.seed_winsize(80, 24);
 
-    // 3. The slave, three times over -- one File per stdio slot (each spawn
-    //    slot consumes its own File; the parent copies close inside spawn,
-    //    so the child's exit is what drops the slave-open count to zero and
-    //    arms drain-then-EOF on the master).
-    let slave_path = format!("/dev/pts/{}", n);
-    let mut slaves = Vec::new();
-    for _ in 0..3 {
-        match OpenOptions::new().read(true).write(true).open(&slave_path) {
-            Ok(f) => slaves.push(f),
-            Err(_) => {
-                t_putstr("ptyhost: open(slave) failed\n");
-                let _ = unsafe { t_close(mfd) };
-                return 2;
-            }
-        }
-    }
-    let s2 = slaves.pop().unwrap();
-    let s1 = slaves.pop().unwrap();
-    let s0 = slaves.pop().unwrap();
-
-    // 4. Host the program on the slave. The child runs its own session dance
-    //    (ut detects fd-0-is-a-pts and does setsid/acquire/set_fg).
-    let mut cmd = Command::new(argv[0].clone());
-    for a in &argv[1..] {
-        cmd.arg(a.clone());
-    }
-    cmd.stdin(Stdio::File(s0));
-    cmd.stdout(Stdio::File(s1));
-    cmd.stderr(Stdio::File(s2));
-    let child = match cmd.spawn() {
+    // 3+4. Host the program on the slave. The child runs its own session dance
+    //      (ut detects fd-0-is-a-pts and does setsid/acquire/set_fg). On any
+    //      failure past mint we own the master fd, so we close it.
+    let child = match master.spawn_on_slave(&argv) {
         Ok(c) => c,
-        Err(_) => {
+        Err(HoldError::OpenSlave) => {
+            t_putstr("ptyhost: open(slave) failed\n");
+            let _ = unsafe { t_close(mfd) };
+            return 2;
+        }
+        Err(HoldError::Spawn) => {
             t_putstr("ptyhost: spawn failed\n");
+            let _ = unsafe { t_close(mfd) };
+            return 2;
+        }
+        Err(_) => {
             let _ = unsafe { t_close(mfd) };
             return 2;
         }
@@ -195,8 +170,15 @@ fn run() -> i64 {
     //    renders; it just cannot be typed at) -- reported, not fatal.
     let stack = unsafe { t_burrow_attach(PUMP_STACK) };
     if stack < 0
-        || unsafe { thread::spawn_raw(pump_in as *const () as u64, stack as u64 + PUMP_STACK, mfd as u64, 0) }
-            .is_err()
+        || unsafe {
+            thread::spawn_raw(
+                pump_in as *const () as u64,
+                stack as u64 + PUMP_STACK,
+                mfd as u64,
+                0,
+            )
+        }
+        .is_err()
     {
         t_putstr("ptyhost: input pump spawn failed (output-only)\n");
     }

@@ -59,13 +59,13 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 #[cfg(feature = "guest")]
-use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, ENTER_GETEVENTS};
+use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "guest")]
+use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, ENTER_GETEVENTS, SETUP_SQPOLL};
 #[cfg(feature = "guest")]
 use libthyla_rs::{
     t_close, t_open, t_read, t_weft_map, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
-#[cfg(feature = "guest")]
-use core::sync::atomic::{AtomicBool, Ordering};
 
 mod ring;
 
@@ -134,6 +134,13 @@ pub const TEV_FRAME: u16 = 5;
 pub const TEV_CONFIGURE: u16 = 6;
 pub const TEV_FOCUS: u16 = 7;
 pub const TEV_CLOSE: u16 = 8;
+/// The layout tree changed structurally (a split, a close, a tab flip, a
+/// backgrounding): re-read `layout`. Sent to ONE surface of the DECLARED
+/// session conn (`session on`), which owns leaves it hosts nothing in yet
+/// -- a split of an EMPTY leaf fans no CONFIGURE and no FOCUS to anyone, so
+/// without this the new empties waited for an unrelated event. `value` is
+/// the layout epoch.
+pub const TEV_LAYOUT: u16 = 10;
 
 /// A decoded tevent record (section 18.4; 24 bytes on the wire).
 #[derive(Clone, Copy, Debug)]
@@ -235,6 +242,13 @@ pub struct Surface {
     /// Per slot, the `presents` value at which it was last presented, or
     /// `SLOT_UNSEEN` when its content is undefined. Drives `age`.
     slot_seen: [u64; MAX_SLOTS],
+    /// The single-slot discipline (thyla_tap's, the SDL class): every present
+    /// names the current slot and nothing rotates, so that one slot always
+    /// holds the COMPLETE frame and a partial present is a damage hint, not
+    /// a patchwork. The compositor keys its #56 accumulator latch on
+    /// rotation, so such a surface stays letterboxed however small its
+    /// damage; a rotating client's partial present latches the crop.
+    single_slot: bool,
 }
 
 #[cfg(feature = "guest")]
@@ -517,7 +531,18 @@ impl Surface {
             cur_slot: 0,
             presents: 0,
             slot_seen: [SLOT_UNSEEN; MAX_SLOTS],
+            single_slot: false,
         })
+    }
+
+    /// Pin every present to the current slot (on) or resume rotating (off).
+    /// On: the slot is the client's one framebuffer -- draw, present any
+    /// damage, repeat; `age` reads 1 after the first present. Off: the
+    /// rotating discipline (`age` per slot). Under the compositor's #56 rule
+    /// a pinned surface never latches the accumulator crop; a rotating one
+    /// does at its second slot's first partial present.
+    pub fn set_single_slot(&mut self, on: bool) {
+        self.single_slot = on;
     }
 
     /// Handle a CONFIGURE event (section 18.3). A same-size CONFIGURE is
@@ -813,7 +838,9 @@ impl Surface {
         }
         self.slot_seen[self.cur_slot as usize] = self.presents;
         self.presents += 1;
-        self.cur_slot = (self.cur_slot + 1) % self.nslots;
+        if !self.single_slot {
+            self.cur_slot = (self.cur_slot + 1) % self.nslots;
+        }
         Ok(())
     }
 
@@ -1002,13 +1029,42 @@ impl EventRing {
         Self::adopt(root)
     }
 
-    /// A ring over a session root fd the caller opened; the ring owns it
-    /// from here (closed with the ring).
-    pub fn adopt(root: i64) -> Result<EventRing, TapError> {
+    /// As `connect`, but SQPOLL (KT-1.5b): the kernel poll-thread drives
+    /// this session's reader and posts completions asynchronously, so the
+    /// ring fd (`poll_fd`) becomes pollable and a multiplexing client waits
+    /// in one `poll(2)` over the ring + its other streams instead of
+    /// blocking in `wait`. The `/srv/tapestry` (srvconn) transport is
+    /// deadline-capable, which the SQPOLL reader requires (the kernel loom
+    /// register gate rejects a non-deadline-capable handle on an SQPOLL ring).
+    pub fn connect_sqpoll() -> Result<EventRing, TapError> {
+        let root = unsafe {
+            t_open(
+                T_WALK_OPEN_FROM_ROOT,
+                b"/srv/tapestry".as_ptr(),
+                13,
+                T_OREAD,
+            )
+        };
         if root < 0 {
             return Err(TapError::Connect);
         }
-        let ring = match Ring::setup(RING_ENTRIES, 0) {
+        Self::adopt_flags(root, SETUP_SQPOLL)
+    }
+
+    /// A ring over a session root fd the caller opened; the ring owns it
+    /// from here (closed with the ring). Non-SQPOLL (the client's own
+    /// blocking `wait` drives the reader -- aurora's discipline).
+    pub fn adopt(root: i64) -> Result<EventRing, TapError> {
+        Self::adopt_flags(root, 0)
+    }
+
+    /// As `adopt`, with the Loom setup `flags` (`SETUP_SQPOLL` for a
+    /// pollable, kthread-driven ring -- see `connect_sqpoll`).
+    pub fn adopt_flags(root: i64, flags: u32) -> Result<EventRing, TapError> {
+        if root < 0 {
+            return Err(TapError::Connect);
+        }
+        let ring = match Ring::setup(RING_ENTRIES, flags) {
             Ok(r) => r,
             Err(_) => {
                 unsafe { t_close(root) };
@@ -1048,6 +1104,31 @@ impl EventRing {
     /// the ring: never close it.
     pub fn root(&self) -> i64 {
         self.core.borrow().root.0
+    }
+
+    /// Write one global-ctl verb on THIS ring's conn (the conn-keyed verbs:
+    /// `session on` declares the session compositor). Opens ctl per write.
+    pub fn global_ctl(&self, cmd: &str) -> Result<(), TapError> {
+        let root = self.root();
+        let ctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OWRITE) };
+        if ctl < 0 {
+            return Err(TapError::Protocol);
+        }
+        let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
+        unsafe { t_close(ctl) };
+        if rc < 0 {
+            return Err(TapError::Protocol);
+        }
+        Ok(())
+    }
+
+    /// The ring's Loom fd, for `poll(2)`. Meaningful only on an SQPOLL ring
+    /// (`connect_sqpoll`): the kthread posts completions off-thread there, so
+    /// `poll` reports POLLIN when an event is ready. On a non-SQPOLL ring
+    /// nothing drives the reads outside `wait`, so this never becomes ready.
+    /// Owned by the ring: never close it.
+    pub fn poll_fd(&self) -> i32 {
+        self.core.borrow().ring.raw_fd()
     }
 
     /// The display geometry off this session's global ctl.

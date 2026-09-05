@@ -174,18 +174,30 @@ pub const fn hairline(t: &Theme) -> Argb {
 /// with bright-white pinned to the default fg for coherence. Foreign-program
 /// SGR renders through this; halcyon's own output renders through the Sheet.
 pub fn daylight_palette() -> vt::Palette {
-    let mut ansi = vt::THEMES[1].1.ansi;
-    ansi[15] = DAYLIGHT.fg; // bright white == default fg
-    vt::Palette {
-        bg: DAYLIGHT.surface,
-        fg: DAYLIGHT.fg,
-        ansi,
-    }
+    // Single source of truth is `vt::DAYLIGHT` (so a per-tile kaua-term, which
+    // depends on `vt` but not this crate, stamps identical cells -- HALCYON.md
+    // 14.12). The `daylight_is_vt_daylight` test pins that const against this
+    // theme's surface/fg, so the two cannot drift apart silently.
+    vt::DAYLIGHT
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The single-source pin: `vt::DAYLIGHT` (the kaua-term's render palette,
+    // HALCYON.md 14.12) must equal what this theme derives -- surface as bg,
+    // fg as fg, Parchment's ANSI with bright-white aliased to fg. A drift makes
+    // a session tile's grid theme diverge from halcyond's transcript.
+    #[test]
+    fn daylight_is_vt_daylight() {
+        let p = daylight_palette();
+        assert_eq!(p.bg, DAYLIGHT.surface);
+        assert_eq!(p.fg, DAYLIGHT.fg);
+        let mut want = vt::THEMES[1].1.ansi; // Parchment
+        want[15] = DAYLIGHT.fg;
+        assert_eq!(p.ansi, want);
+    }
 
     // Every Daylight value pinned against HALCYON-VISUAL section 1/2/6. A drift
     // here is a scripture divergence, not a taste change.

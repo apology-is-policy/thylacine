@@ -305,29 +305,6 @@ build_kernel() {
     # G-7b: cross-build TyrQuake + stage the shareware pak BEFORE the pool
     # fixture (populate_stratum_pool puts the stage at /quake).
     build_tyrquake
-    # DX-2 (Cryptid): cross-build DOSBox-X before the ramfs bake. DEFAULT-ON
-    # since DX-2 close (the emulator ships in the default image, operator
-    # direction 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
-    # opts out for a fast iteration loop; an absent LLVM C++ fork skips gracefully
-    # (build_dosbox_x returns 0). See the pouch_bins staging note.
-    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" ]] && build_dosbox_x
-    # DX-5 (Cryptid): fetch + stage the Duke Nukem 3D shareware data BEFORE the
-    # pool fixture (populate_stratum_pool puts the stage at /duke3d). It is the
-    # compute-heavy showcase for the DX-4 CAP_JIT dynarec. Gated on dosbox too:
-    # the game DATA is useless without the emulator that runs it, so an emulator
-    # opt-out (THYLACINE_BAKE_DOSBOX=0) also skips the 12 MB of game data.
-    # THYLACINE_BAKE_DUKE3D=0 opts out of just the game (keeps the emulator) for
-    # a fast/offline iteration loop.
-    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" ]] && build_duke3d_fixture
-    # DX-8 (Cryptid): fetch + stage the Tomb Raider 3dfx demo the same way
-    # (-> /tombraider; the DX-7 software-Voodoo showcase). Same gating shape:
-    # useless without the emulator; THYLACINE_BAKE_TOMBRAIDER=0 opts out of
-    # just the game.
-    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_TOMBRAIDER:-1}" == "1" ]] && build_tombraider_fixture
-    # DX-8: render the DOSBox-X system default config (-> /lib/dosbox-x) from
-    # the build config's CPU preset (THYLACINE_DOSBOX_CPU_PRESET). It rides the
-    # emulator's opt-in: no emulator, no config to default.
-    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" ]] && stage_dosbox_sysconf
     # Warp W-4: cross-build vkQuake over venus + the W-3e SDL Vulkan glue.
     # Self-skips (announced) without the fetched venus link set.
     build_vkquake
@@ -491,7 +468,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "kaua-term" "kaua-term-probe" "caps-probe" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -617,11 +594,6 @@ EOF
     # Same curation discipline — explicit list, not a glob.
     local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "tyr-glquake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
-    # DX-2 (Cryptid): dosbox-x (17.6 MB) is DEFAULT-ON since DX-2 close (operator
-    # direction 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
-    # opts out for a fast iteration loop; an absent LLVM C++ fork leaves no binary,
-    # so this stages nothing (the -f guard below).
-    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" ]] && pouch_bins+=( "dosbox-x" )
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
         if [[ -f "$src" ]]; then
@@ -629,51 +601,6 @@ EOF
             chmod 0755 "$ramfs_src/$bin"
         fi
     done
-
-    # DX-2c (Cryptid: run a real DOS program): emit the 49-byte DX2C.COM DOS
-    # program into the ramfs root. It is a DATA file (a DOS .COM the emulated
-    # guest runs, NOT a Thylacine binary), so it rides the bake directly rather
-    # than pouch_bins. The ls-gfx-dosbox gate mounts a writable guest dir as C:,
-    # copies this in, runs it, and reads back C:\OUT.TXT ("DX-2C-OK"). Same
-    # THYLACINE_BAKE_DOSBOX default-on gate as the emulator binary above.
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" ]]; then
-        python3 "$REPO_ROOT/tools/dx2c-dosprog.py" "$ramfs_src/DX2C.COM" \
-            || { echo "==> ramfs: DX2C.COM emit FAILED" >&2; exit 1; }
-        chmod 0644 "$ramfs_src/DX2C.COM"
-        ledger "ramfs.cpio: staged DX2C.COM (DX-2c DOS run-a-program witness)"
-        # DX-3: the 67-byte DX3K.COM keystroke witness -- prints a prompt,
-        # reads ONE key (INT 21h AH=08h), writes "KEY=<c>" to C:\OUT.TXT. The
-        # ls-gfx-dosbox-input gate injects a key via QMP and reads the file
-        # back, proving the QMP -> virtio-keyboard -> tapestryd -> SDL -> DOS
-        # input path end to end.
-        python3 "$REPO_ROOT/tools/dx3-keyprog.py" "$ramfs_src/DX3K.COM" \
-            || { echo "==> ramfs: DX3K.COM emit FAILED" >&2; exit 1; }
-        chmod 0644 "$ramfs_src/DX3K.COM"
-        ledger "ramfs.cpio: staged DX3K.COM (DX-3 DOS keystroke witness)"
-        # DX-3b: a sample DOSBox-X config demonstrating declarative startup.
-        # `dosbox-x -conf <file>` loads settings + runs the [autoexec] section
-        # (the file-based equivalent of -c flags). This SAMPLE mounts the seeded
-        # user's home as C: and runs a program on startup; users copy it and
-        # edit the path/program. The ls-gfx-dosbox-conf gate proves -conf loads
-        # the [autoexec] from a file (OUT.TXT appears with NO -c flags passed).
-        cat > "$ramfs_src/dosbox-x.conf" <<'DOSBOXCONF'
-# Thylacine DOSBox-X sample config (DX-3b). Load it with:
-#   dosbox-x -conf /path/to/dosbox-x.conf
-# The [autoexec] section runs at startup -- the declarative form of -c flags.
-# Sound is stubbed on Thylacine (v1.0 non-goal); emulated sound devices still
-# run so DOS software detects a card and plays silently rather than misbehaving.
-[sdl]
-output=surface
-
-[autoexec]
-@echo off
-mount c /home/michael
-c:
-DX2C.COM
-DOSBOXCONF
-        chmod 0644 "$ramfs_src/dosbox-x.conf"
-        ledger "ramfs.cpio: staged dosbox-x.conf (DX-3b sample config/autoexec)"
-    fi
 
     # P6-pouch-stratumd-boot (sub-chunk 16a): copy the cross-built stratumd
     # daemon binary if build_stratumd has produced it. Separate from
@@ -3534,46 +3461,6 @@ populate_stratum_pool() {
         echo "==> populate pool: Quake shareware baked at /quake"
     fi
 
-    # --- DX-5: the Duke Nukem 3D shareware data (-> /duke3d). Staged by
-    # build_duke3d_fixture; skipped when the stage is absent OR the game/the
-    # emulator is opted out (THYLACINE_BAKE_DUKE3D=0 / THYLACINE_BAKE_DOSBOX=0
-    # -- a stale stage from an earlier build must not bake past an opt-out;
-    # the bake-verify below keys on the same predicate). This is the
-    # READ-ONLY MASTER (SYSTEM-owned; the natural staged modes -- 0644 files,
-    # 0755 dir -- ride through the put). DOSBox-X opens the group file
-    # READ-WRITE, and a non-owner cannot open a SYSTEM-owned file read-write
-    # even at 0666 (the pool ownership model, the "walls"), so Duke3D is NOT run
-    # in place from here -- a "Could not find group file" bail. Instead a user
-    # (and the ls-gfx-dosbox-duke3d gate) copies /duke3d into their own writable
-    # home and runs from there: the same "install to a writable dir" step a real
-    # DOS game needs, and the quake precedent's per-user game-dir shape. ---
-    local duke3d_stage="$BUILD_DIR/duke3d/stage"
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" && -f "$duke3d_stage/DUKE3D.GRP" ]]; then
-        echo "==> populate pool: baking Duke3D shareware data ($duke3d_stage -> /duke3d, $(du -sh "$duke3d_stage" | cut -f1))"
-        "$stratum_fs_bin" -s "$sock_path" put "$duke3d_stage" /duke3d \
-            || { echo "==> populate pool: put /duke3d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        "$stratum_fs_bin" -s "$sock_path" sync \
-            || { echo "==> populate pool: sync after /duke3d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        echo "==> populate pool: Duke3D shareware baked at /duke3d"
-    fi
-
-    # --- DX-7/DX-8 (Cryptid): the Tomb Raider 3dfx DOS demo (-> /tombraider).
-    # Staged by build_tombraider_fixture (the archive.org fetch, sha256-pinned);
-    # baked iff TOMB.EXE is staged AND neither the game nor the emulator is
-    # opted out (THYLACINE_BAKE_TOMBRAIDER / THYLACINE_BAKE_DOSBOX). The 3dfx
-    # build (TOMB.EXE + DOS4GW) drives Glide -> DOSBox-X's built-in GLIDE2X.OVL ->
-    # the software-emulated Voodoo (voodoo_card=software; C_OPENGL off). Read-only
-    # SYSTEM master; the gate copies it to a writable home (the quake shape).
-    local tombraider_stage="$BUILD_DIR/tombraider/stage"
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_TOMBRAIDER:-1}" == "1" && -f "$tombraider_stage/TOMB.EXE" ]]; then
-        echo "==> populate pool: baking Tomb Raider 3dfx demo ($tombraider_stage -> /tombraider, $(du -sh "$tombraider_stage" | cut -f1))"
-        "$stratum_fs_bin" -s "$sock_path" put "$tombraider_stage" /tombraider \
-            || { echo "==> populate pool: put /tombraider FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        "$stratum_fs_bin" -s "$sock_path" sync \
-            || { echo "==> populate pool: sync after /tombraider FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        echo "==> populate pool: Tomb Raider 3dfx demo baked at /tombraider"
-    fi
-
     # --- VIVARIUM V-7: the container bundles (-> /vivarium; staged by
     # stage_viv_bundles per docs/VIVARIUM.md section 7.2). The probe bundle is
     # the V-7 boot gate's fixture -- joey spawns `viv run /vivarium/probe`
@@ -3724,25 +3611,6 @@ populate_stratum_pool() {
     fi
     [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
 
-    # DX-8 (Cryptid): the DOSBox-X system default config -> /lib/dosbox-x/
-    # dosbox-x.conf, the base layer the 0008 patch parses under every launch
-    # (rendered by stage_dosbox_sysconf from DOSBOX_CPU_PRESET). /lib exists
-    # from the ndb bake above; mkdir is single-level. Rides the emulator's
-    # opt-in AND the rendered file, so a stale render from an earlier build
-    # never bakes past an opted-out emulator.
-    local dbxconf_stage="$BUILD_DIR/dosbox-x-sysconf/dosbox-x.conf"
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && -f "$dbxconf_stage" ]]; then
-        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/dosbox-x \
-            || { echo "==> populate pool: mkdir /lib/dosbox-x FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        "$stratum_fs_bin" -s "$sock_path" write /lib/dosbox-x/dosbox-x.conf < "$dbxconf_stage" \
-            || { echo "==> populate pool: write /lib/dosbox-x/dosbox-x.conf FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        "$stratum_fs_bin" -s "$sock_path" sync \
-            || { echo "==> populate pool: sync (dosbox-x sysconf) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        "$stratum_fs_bin" -s "$sock_path" read /lib/dosbox-x/dosbox-x.conf | cmp -s - "$dbxconf_stage" \
-            || { echo "==> populate pool: /lib/dosbox-x/dosbox-x.conf readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        echo "==> populate pool: /lib/dosbox-x/dosbox-x.conf baked + readback-verified (DX-8 system defaults, preset ${THYLACINE_DOSBOX_CPU_PRESET:-pentium})"
-    fi
-
     # H-3c: bake the presentation verb table at /lib/beacon/verbs (BEACON.md
     # 7; the system tier of the plumber-style rules halcyond's obj menu
     # offers). /lib exists from the ndb bake above. Under the HALCYON lever
@@ -3793,6 +3661,31 @@ populate_stratum_pool() {
             || { echo "==> populate pool: /lib/halcyon/renderer readback MISMATCH" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
         rm -f "$halrend"
         echo "==> populate pool: HALCYON renderer lever ENABLED (/lib/halcyon/renderer = halcyond)"
+    fi
+
+    # KT-1.5d-1a (HALCYON 14.12): the per-user session lever. Under
+    # THYLACINE_HALCYON_SESSION=1 the device boots the per-user Halcyon
+    # SESSION -- login reads the one-token /lib/halcyon/session file and, when
+    # it is "on", spawns /bin/halcyond --session AS the user instead of ut on
+    # /dev/cons (aurora stays the pre-login console renderer). Distinct from
+    # THYLACINE_HALCYON (joey's system-renderer lever, being retired 14.12):
+    # absent = the proven ut path, fail-safe. NOT baked by default; the
+    # ls-gfx-session scenario probes the post-login markers + SKIPs on a
+    # default image (login spawns ut -> "Thylacine textual shell").
+    # The mkdir is EEXIST-tolerant (the renderer block above may have made the
+    # dir); the write's readback is the real bake-verify (verify by CONTENT).
+    if [[ "${THYLACINE_HALCYON_SESSION:-0}" != "0" ]]; then
+        local halsess=/tmp/thyla-halcyon-session.$$
+        printf 'on\n' > "$halsess"
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon 2>/dev/null || true
+        "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/session < "$halsess" \
+            || { echo "==> populate pool: write /lib/halcyon/session FAILED" >&2; rm -f "$halsess"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (halcyon session) FAILED" >&2; rm -f "$halsess"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/session | cmp -s - "$halsess" \
+            || { echo "==> populate pool: /lib/halcyon/session readback MISMATCH" >&2; rm -f "$halsess"; kill -TERM "$stratumd_pid"; exit 1; }
+        rm -f "$halsess"
+        echo "==> populate pool: HALCYON session lever ENABLED (/lib/halcyon/session = on)"
     fi
 
     # cfg-3 F1 (the OSC-laundering regression): a file of RAW bytes carrying
@@ -3859,9 +3752,6 @@ populate_stratum_pool() {
     local vp_clade="$BUILD_DIR/clade/stage"
     local vp_storm="$BUILD_DIR/storm/stage"
     local vp_quake="$BUILD_DIR/quake/stage"
-    local vp_duke3d="$BUILD_DIR/duke3d/stage"
-    local vp_tombraider="$BUILD_DIR/tombraider/stage"
-    local vp_dbxconf="$BUILD_DIR/dosbox-x-sysconf/dosbox-x.conf"
 
     # /thylacine-version is written unconditionally near the top of this
     # function, so it is the POSITIVE CONTROL: it proves `stat` can see a file
@@ -3895,20 +3785,6 @@ STORM /storm/Makefile"
     if [[ -f "$vp_quake/id1/pak0.pak" ]]; then
         bake_want="$bake_want
 QUAKE /quake/id1/pak0.pak"
-    fi
-    # The DOSBox chunks key on the SAME predicates their populate arms use
-    # (flags AND stage), so an opted-out game is neither baked nor expected.
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" && -f "$vp_duke3d/DUKE3D.GRP" ]]; then
-        bake_want="$bake_want
-DUKE3D /duke3d/DUKE3D.GRP"
-    fi
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_TOMBRAIDER:-1}" == "1" && -f "$vp_tombraider/TOMB.EXE" ]]; then
-        bake_want="$bake_want
-TOMBRAIDER /tombraider/TOMB.EXE"
-    fi
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && -f "$vp_dbxconf" ]]; then
-        bake_want="$bake_want
-DBXCONF /lib/dosbox-x/dosbox-x.conf"
     fi
 
     local bake_missing=""
@@ -4702,502 +4578,6 @@ build_tyrquake() {
     echo "    tyr-glquake: $(wc -c < "$glq" | tr -d ' ') bytes (ET_EXEC, static,"
     echo "                 OSMesa entry points resolved)"
     ledger "tyr-glquake: BUILT (GL acceptance gate, section 9 step 3)"
-}
-
-build_duke3d_fixture() {
-    # DX-5 (Cryptid): the Duke Nukem 3D shareware data -> /duke3d. It is the
-    # compute-heavy real DOS program that exercises + demonstrates the DX-4
-    # CAP_JIT dynarec (core=dynamic); DOSBox-X mounts /duke3d as a DOS drive C:
-    # and runs DUKE3D.EXE. Unlike build_tyrquake (a NATIVE SDL port), Duke3D is
-    # a DOS program run UNDER DOSBox-X, so this stages DATA only -- no compile.
-    #
-    # The shareware distribution (3dduke13.zip, Apogee's official v1.3d
-    # shareware, sha256-pinned) is fetched ONCE into build/duke3d/ and the
-    # released file set extracted from its DN3DSW13.SHR payload -- a PKLITE
-    # self-extractor wrapping a standard ZIP, which the host bsdtar/libarchive
-    # reads natively (the same trick build_tyrquake uses for the DeIce resource
-    # -- no extra dependency). populate_stratum_pool puts the stage at /duke3d.
-    # The zip is NEVER committed -- build-time fetch only.
-    #
-    # LICENSE (3D Realms shareware, 1996): individuals are encouraged to share
-    # and give copies, conditioned on all released files being included WITHOUT
-    # modification and no copyright/trademark removed. We therefore stage the
-    # COMPLETE released file set (every file in the .SHR), not a runnable
-    # subset. Commercial/product redistribution (CD-ROM, retail) requires 3D
-    # Realms' written permission -- a v1.0-packaging decision noted in
-    # docs/DOSBOX.md, orthogonal to this dev/gate fixture. Mirrors the existing
-    # ungated /quake shareware bake.
-    local duke_dir="$BUILD_DIR/duke3d"
-    local stage="$duke_dir/stage"
-    local zip="$duke_dir/3dduke13.zip"
-    local zip_sha="c67efd179022bc6d9bde54f404c707cbcbdc15423c20be72e277bc2bdddf3d0e"
-    local grp_sha="f943d0c2e2a0803a644a2107c81ea897dec87596d9dd1a6a432131ad6f5818d6"
-
-    # Extraction is cache-guarded on the GRP sha (a truncated/wrong cached stage
-    # re-fetches rather than shipping corrupt game data). The CFG copy at the
-    # end always runs, so adding or altering the shipped config does not require
-    # busting the expensive .SHR extraction.
-    local need_extract=1
-    if [[ -f "$stage/DUKE3D.GRP" ]]; then
-        local have_sha
-        have_sha="$(shasum -a 256 "$stage/DUKE3D.GRP" | awk '{print $1}')"
-        if [[ "$have_sha" == "$grp_sha" ]]; then
-            need_extract=0
-        else
-            echo "==> duke3d: cached GRP sha mismatch ($have_sha); re-staging" >&2
-            rm -rf "$stage"
-        fi
-    fi
-
-    if [[ "$need_extract" == "1" ]]; then
-        mkdir -p "$duke_dir" "$stage"
-        if [[ ! -f "$zip" ]]; then
-            echo "==> duke3d: fetching 3dduke13.zip (Apogee v1.3d shareware, ~5.9 MB)"
-            curl -sL --max-time 300 -o "$zip" \
-                "https://archive.org/download/3dduke13/3dduke13.zip" \
-                || { echo "==> duke3d: shareware fetch failed" >&2; exit 1; }
-        fi
-        local got_sha
-        got_sha="$(shasum -a 256 "$zip" | awk '{print $1}')"
-        if [[ "$got_sha" != "$zip_sha" ]]; then
-            echo "==> duke3d: 3dduke13.zip sha256 mismatch ($got_sha)" >&2
-            exit 1
-        fi
-
-        rm -rf "$duke_dir/unzip"
-        mkdir -p "$duke_dir/unzip"
-        unzip -o -q "$zip" -d "$duke_dir/unzip"
-        # DN3DSW13.SHR = PKLITE MZ stub + embedded ZIP; libarchive reads past the
-        # stub and extracts the COMPLETE released file set (license condition).
-        /usr/bin/tar xf "$duke_dir/unzip/DN3DSW13.SHR" -C "$stage" \
-            || { echo "==> duke3d: .SHR extract failed" >&2; exit 1; }
-        rm -rf "$duke_dir/unzip"
-
-        local pak_sha
-        pak_sha="$(shasum -a 256 "$stage/DUKE3D.GRP" | awk '{print $1}')"
-        if [[ "$pak_sha" != "$grp_sha" ]]; then
-            echo "==> duke3d: DUKE3D.GRP sha256 mismatch ($pak_sha) -- not the v1.3d shareware GRP" >&2
-            exit 1
-        fi
-        echo "    duke3d shareware staged ($(du -sh "$stage" | cut -f1), GRP $(wc -c < "$stage/DUKE3D.GRP" | tr -d ' ') bytes, episode 1 shareware)"
-    fi
-
-    # Ship a ready-to-play config. DUKE3D.CFG is NOT in the .SHR (SETUP.EXE
-    # generates it per-user); we ship a SETUP-generated default (sound device
-    # None -- Thylacine stubs audio, so no init hang; ControllerType=1 =
-    # keyboard+mouse, mouse Fire/Strafe bound) so the game boots straight to its
-    # title without the user running SETUP first. It is a generated config, not
-    # a 3D Realms file, so it rides the repo (not the sha-pinned fetch) and is
-    # orthogonal to license condition [C]. Copied unconditionally (idempotent)
-    # so it lands even on the GRP cache-hit path.
-    mkdir -p "$stage"
-    cp "$REPO_ROOT/usr/ports/dosbox-x/duke3d/DUKE3D.CFG" "$stage/DUKE3D.CFG" \
-        || { echo "==> duke3d: DUKE3D.CFG stage failed" >&2; exit 1; }
-    # DX-8: the per-game DOSBox-X config (autolock + dynrec + fixed cycles +
-    # an [autoexec] that mounts . and runs DUKE3D.EXE), so `cd ~/duke3d;
-    # dosbox-x` is the whole launch. Ours, not 3D Realms' (condition [C] is
-    # about THEIR released files); copied unconditionally like the CFG.
-    cp "$REPO_ROOT/usr/ports/dosbox-x/duke3d/dosbox-x.conf" "$stage/dosbox-x.conf" \
-        || { echo "==> duke3d: dosbox-x.conf stage failed" >&2; exit 1; }
-}
-
-build_tombraider_fixture() {
-    # DX-8 (Cryptid): the Tomb Raider (1996) 3dfx DOS demo -> /tombraider. The
-    # DX-7 showcase: TOMB.EXE (the DOS4GW 3dfx build) drives Glide into
-    # DOSBox-X's built-in GLIDE2X.OVL -> the software Voodoo, on the CAP_JIT
-    # dynrec. DATA only -- no compile (the Duke3D shape).
-    #
-    # tomb3dem.zip is the archive.org item `tomb3dem` (2,310,970 B, sha256-
-    # pinned), fetched ONCE into build/tombraider/ and NEVER committed. The zip
-    # carries a single tomb3dem/ directory holding the released demo file set
-    # (TOMB.EXE, SETUP.EXE, DOS4GW.EXE, the two HMI sound drivers, SETTINGS.DAT,
-    # DATA/{TITLE,LEVEL2}.PHD + two PCX) -- all ten files are staged as-is and
-    # TOMB.EXE is sha256-verified as the fixture's identity. The demo is the
-    # freely distributed 1996/97 promotional demo (Core Design / Eidos; the 3dfx
-    # site + cover discs); commercial/product redistribution of a shipped image
-    # is the same v1.0-packaging decision the Duke3D/Quake shareware carries.
-    local tr_dir="$BUILD_DIR/tombraider"
-    local stage="$tr_dir/stage"
-    local zip="$tr_dir/tomb3dem.zip"
-    local zip_sha="4ffd686c7cc21513abd5bc352057314ed6bcf5519acd532987807d29a8cdfd72"
-    local exe_sha="6a333d2da2a099f88ad04f78707d0fd0392caad07b7502c81f93b622ab02d53d"
-
-    # Cache-guarded on the TOMB.EXE sha (a truncated/wrong stage re-fetches
-    # rather than baking corrupt game data); the per-game config copy at the
-    # end always runs, so a config change never busts the fetch.
-    local need_extract=1
-    if [[ -f "$stage/TOMB.EXE" ]]; then
-        local have_sha
-        have_sha="$(shasum -a 256 "$stage/TOMB.EXE" | awk '{print $1}')"
-        if [[ "$have_sha" == "$exe_sha" ]]; then
-            need_extract=0
-        else
-            echo "==> tombraider: cached TOMB.EXE sha mismatch ($have_sha); re-staging" >&2
-            rm -rf "$stage"
-        fi
-    fi
-
-    if [[ "$need_extract" == "1" ]]; then
-        mkdir -p "$tr_dir"
-        if [[ ! -f "$zip" ]]; then
-            echo "==> tombraider: fetching tomb3dem.zip (the 1996 3dfx demo, ~2.3 MB)"
-            curl -sL --max-time 300 -o "$zip" \
-                "https://archive.org/download/tomb3dem/tomb3dem.zip" \
-                || { echo "==> tombraider: demo fetch failed" >&2; exit 1; }
-        fi
-        local got_sha
-        got_sha="$(shasum -a 256 "$zip" | awk '{print $1}')"
-        if [[ "$got_sha" != "$zip_sha" ]]; then
-            echo "==> tombraider: tomb3dem.zip sha256 mismatch ($got_sha)" >&2
-            exit 1
-        fi
-
-        rm -rf "$tr_dir/unzip" "$stage"
-        mkdir -p "$tr_dir/unzip"
-        unzip -o -q "$zip" -d "$tr_dir/unzip" \
-            || { echo "==> tombraider: unzip failed" >&2; exit 1; }
-        # The zip's single top-level directory IS the released file set.
-        [[ -f "$tr_dir/unzip/tomb3dem/TOMB.EXE" ]] \
-            || { echo "==> tombraider: tomb3dem/TOMB.EXE not in the zip (layout changed?)" >&2; exit 1; }
-        mv "$tr_dir/unzip/tomb3dem" "$stage"
-        rm -rf "$tr_dir/unzip"
-
-        local exe_got
-        exe_got="$(shasum -a 256 "$stage/TOMB.EXE" | awk '{print $1}')"
-        if [[ "$exe_got" != "$exe_sha" ]]; then
-            echo "==> tombraider: TOMB.EXE sha256 mismatch ($exe_got) -- not the 3dfx demo build" >&2
-            exit 1
-        fi
-        echo "    tombraider 3dfx demo staged ($(du -sh "$stage" | cut -f1), TOMB.EXE $(wc -c < "$stage/TOMB.EXE" | tr -d ' ') bytes)"
-    fi
-
-    # The per-game DOSBox-X config (autolock + dynrec + fixed cycles + the
-    # software Voodoo + an [autoexec] that mounts . and runs TOMB.EXE), so
-    # `cd ~/tombraider; dosbox-x` is the whole launch. Ours, not Eidos's: it
-    # rides the repo, copied unconditionally (idempotent).
-    mkdir -p "$stage"
-    cp "$REPO_ROOT/usr/ports/dosbox-x/tombraider/dosbox-x.conf" "$stage/dosbox-x.conf" \
-        || { echo "==> tombraider: dosbox-x.conf stage failed" >&2; exit 1; }
-}
-
-stage_dosbox_sysconf() {
-    # DX-8 (Cryptid): render the DOSBox-X SYSTEM default config the 0008 patch
-    # parses under every launch (/lib/dosbox-x/dosbox-x.conf; populate_stratum_pool
-    # bakes it). Three values, each one upstream's default gets wrong for us:
-    # autolock=true (mouse-look works out of the box; upstream is false),
-    # core=dynamic_rec (the CAP_JIT dynrec every showcase + gate runs; upstream's
-    # `auto` switches cores only on entering protected mode), and a FIXED cycle
-    # count from the build config's CPU preset (cycles=auto hunts -- DX-5), and quit warning=false (Ctrl+F9 quits at once:
-    # DOSBox-X's confirmation has no GUI dialog on this port -- it prompts "y/n"
-    # on the CONSOLE, unreachable behind a captured game window, and a
-    # backgrounded launch loops the prompt onto the console pane forever;
-    # measured in the DX-8 gate).
-    local preset="${THYLACINE_DOSBOX_CPU_PRESET:-pentium}"
-    local cycles
-    case "$preset" in
-        xt)       cycles=500 ;;      # ~4.77 MHz 8088
-        286)      cycles=3000 ;;     # ~12 MHz 286
-        386)      cycles=12000 ;;    # ~25-40 MHz 386
-        486)      cycles=45000 ;;    # ~66 MHz 486
-        pentium)  cycles=60000 ;;    # ~100-133 MHz Pentium (the showcases)
-        pentium2) cycles=200000 ;;   # ~233-450 MHz Pentium II
-        *) echo "==> dosbox-x: unknown THYLACINE_DOSBOX_CPU_PRESET '$preset' (xt|286|386|486|pentium|pentium2)" >&2; exit 1 ;;
-    esac
-    local out_dir="$BUILD_DIR/dosbox-x-sysconf"
-    mkdir -p "$out_dir"
-    cat > "$out_dir/dosbox-x.conf" <<DOSBOXSYSCONF
-# Thylacine system defaults for DOSBox-X -- the base layer under every launch.
-# Baked by tools/build.sh from the build config (DOSBOX_CPU_PRESET=$preset);
-# SYSTEM-owned, read-only. Override it per user in ~/.config/dosbox-x/ (your
-# first launch generates that file from these values), per game with a
-# dosbox-x.conf in the game directory, or per launch with -conf / -set.
-# Reference: docs/manual/40-dosbox.md.
-
-[sdl]
-# Click in the window to capture the mouse (motion then reaches the game);
-# Ctrl+F10 releases it.
-autolock=true
-
-[cpu]
-# The CAP_JIT dynarec (I-42). A fixed cycle count pins the emulated speed:
-# preset $preset = $cycles cycles per emulated millisecond.
-core=dynamic_rec
-cycles=fixed $cycles
-
-[dosbox]
-# Ctrl+F9 quits at once (upstream DOSBox behaviour). DOSBox-X's confirmation
-# has no dialog here: it asks "y/n" on the CONSOLE, which sits behind a
-# captured game window, and a backgrounded launch re-asks it forever.
-quit warning=false
-DOSBOXSYSCONF
-    ledger "dosbox-x: system config rendered (preset $preset -> cycles=fixed $cycles)"
-}
-
-build_zlib() {
-    # zlib 1.3.1 for aarch64-thylacine -- a dependency of the DOSBox-X (Cryptid)
-    # port: cdrom_image.cpp unity-includes libchdr (CHD disk images) and
-    # include/zip.h (savestates + zip drive mounts), both needing zlib.h/-lz.
-    # Pure C, no configure (zconf.h ships pre-made). Installs libz.a + zlib.h +
-    # zconf.h into the pouch sysroot for any port to link. (zlib license --
-    # permissive, GPL-compatible.)
-    local sysroot="$BUILD_DIR/sysroot"
-    local vendor="$REPO_ROOT/third_party/zlib"
-    local obj="$BUILD_DIR/pouch/zlib-obj"
-    local clang="$LLVM_PREFIX/bin/clang"
-    local ar_tool="$LLVM_PREFIX/bin/llvm-ar"
-    local archive="$sysroot/lib/libz.a"
-
-    if [[ ! -f "$vendor/zlib.h" ]]; then
-        echo "==> zlib: vendored source missing at $vendor" >&2
-        exit 1
-    fi
-    if sysroot_is_stale; then build_sysroot; fi
-
-    # Staleness: reuse the archive when newer than the vendored tree + this recipe.
-    if [[ -f "$archive" && -f "$sysroot/include/zlib.h" ]]; then
-        local stale
-        stale="$(find "$vendor" -type f -newer "$archive" -print -quit 2>/dev/null)"
-        if [[ -z "$stale" && ! "${BASH_SOURCE[0]}" -nt "$archive" ]]; then
-            ledger "libz.a: REUSED (cached + up-to-date)"
-            return 0
-        fi
-    fi
-
-    echo "==> building zlib 1.3.1 (aarch64-thylacine)"
-    rm -rf "$obj"; mkdir -p "$obj" "$sysroot/lib" "$sysroot/include"
-    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
-                   -std=gnu11 -O2 -fno-pie -DNDEBUG -DZ_HAVE_UNISTD_H=1
-                   -nostdlibinc -isystem "$sysroot/include" -I"$vendor" )
-    local zc n=0 f
-    local zsrc=( adler32 compress crc32 deflate gzclose gzlib gzread gzwrite
-                 infback inffast inflate inftrees trees uncompr zutil )
-    for f in "${zsrc[@]}"; do
-        "$clang" "${cflags[@]}" -c "$vendor/$f.c" -o "$obj/$f.o"
-        n=$((n + 1))
-    done
-    "$ar_tool" rcs "$archive.tmp" "$obj"/*.o
-    mv "$archive.tmp" "$archive"
-    cp "$vendor/zlib.h" "$vendor/zconf.h" "$sysroot/include/"
-    echo "    libz.a: $n objects -> $(wc -c < "$archive" | tr -d ' ') bytes"
-    ledger "libz.a (zlib 1.3.1): BUILT"
-}
-
-build_dosbox_x() {
-    # DX-1 (the Cryptid DOS/Win9x-emulation arc; docs/DOSBOX.md) -- cross-build
-    # DOSBox-X (SDL2 path, core=normal, software-surface video, sound stubbed)
-    # for aarch64-thylacine against the pouch sysroot + libc++ + libSDL2.a (the
-    # SDL_thylacine Tapestry backend). "TyrQuake, upgraded C -> C++, at larger
-    # scale": the vendored tree (third_party/dosbox-x, pruned-pristine per its
-    # PRUNE-MANIFEST.md) compiles via a curated object list DERIVED from the
-    # upstream Makefile.am SOURCES (tools/dosbox-x-sources.py) + the hand
-    # config.h (usr/ports/dosbox-x/). The link is a DIRECT pouch link (fork
-    # clang++ driver + -lSDL2), NOT autotools -- we own the static / ET_EXEC /
-    # no-PT_DYNAMIC / custom-CRT shape libtool would fight.
-    #
-    # Feature posture is DX-1: no dynarec (core=normal; the CAP_JIT dynarec is
-    # DX-4), no GL/D3D/TTF, no zlib/libpng, no SDL_net/pcap/slirp, no curses
-    # debugger. config.h enforces it; the object list omits the disabled libs.
-    #
-    # DBX_LANDSCAPE=1 -> compile-only, never exit nonzero, report failing TUs +
-    # keep per-file logs (the compile-fix loop's instrument). DBX_OPT overrides
-    # the opt level (-O0 for a fast iteration loop; default -O2 for the ship).
-    local sysroot="$BUILD_DIR/sysroot"
-    local dbx_vendor="$REPO_ROOT/third_party/dosbox-x"
-    local port_dir="$REPO_ROOT/usr/ports/dosbox-x"
-    local dbx_src="$BUILD_DIR/pouch/dosbox-x-src"
-    local dbx_obj="$BUILD_DIR/pouch/dosbox-x-obj"
-    local progs_out="$BUILD_DIR/pouch/progs"
-    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
-    local clangxx="${POUCH_CXX:-$fork/build/bin/clang++}"
-    local clang_c="${POUCH_CC:-$fork/build/bin/clang}"
-    local out="$progs_out/dosbox-x"
-    local opt="${DBX_OPT:--O2}"
-    local jobs="${DBX_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
-
-    if [[ ! -f "$dbx_vendor/src/dosbox.cpp" ]]; then
-        echo "==> dosbox-x: vendored source missing at $dbx_vendor" >&2
-        exit 1
-    fi
-    if [[ ! -x "$clangxx" ]]; then
-        echo "==> dosbox-x: fork clang++ not found at $clangxx (the C++ gate --"
-        echo "    build the LLVM fork; see build_libcxx). Skipping."
-        return 0
-    fi
-    if [[ ! -f "$sysroot/lib/libSDL2.a" ]]; then build_sdl2; fi
-    if [[ ! -f "$sysroot/lib/libc++.a" ]]; then build_libcxx; fi
-    if [[ ! -f "$sysroot/lib/libz.a" ]]; then build_zlib; fi
-
-    # Staleness: reuse when the binary is newer than the tree + port + extractor
-    # + the archives it links.
-    if [[ -f "$out" && -z "${DBX_FORCE:-}" ]]; then
-        local stale
-        stale="$(find "$dbx_vendor" "$port_dir" "$REPO_ROOT/tools/dosbox-x-sources.py" \
-                      "$REPO_ROOT/usr/lib/thylajit" \
-                      -type f -newer "$out" -print -quit 2>/dev/null)"
-        if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$out" \
-              && ! "$sysroot/lib/libc++.a" -nt "$out" \
-              && ! "$sysroot/lib/libz.a" -nt "$out" ]]; then
-            ledger "dosbox-x: REUSED (cached + up-to-date)"
-            return 0
-        fi
-    fi
-
-    echo "==> building DOSBox-X 2026.08.31 (SDL2, core=normal, aarch64-thylacine, $opt, -j$jobs)"
-    rm -rf "$dbx_src" "$dbx_obj"
-    mkdir -p "$dbx_src" "$dbx_obj" "$progs_out"
-    cp -R "$dbx_vendor/src" "$dbx_src/src"
-    cp -R "$dbx_vendor/include" "$dbx_src/include"
-    # vs/sdl/src/cdrom/ carries the SDL1-CD-ROM compat shim (compat_SDL_cdrom.h
-    # + SDL_cdrom.c + the dummy "0 host drives" syscdrom backend) that cdrom.h
-    # reaches via "../../vs/sdl/src/cdrom/..."; the rest of vs/ is pruned.
-    cp -R "$dbx_vendor/vs" "$dbx_src/vs"
-    # The hand config lands at the src-copy root (on the -I path). DOSBox sources
-    # #include "config.h" -> resolved via -I"$dbx_src/src".
-    cp "$port_dir/config.h" "$dbx_src/src/config.h"
-    cp "$port_dir/config_package.h" "$dbx_src/src/config_package.h"
-    # Port-glue: stubs for host APIs Thylacine lacks at DX-1 (opusfile/speexdsp
-    # for opus CD-audio; the SERIAL_* host serial port). Compiled beside the tree.
-    cp -R "$port_dir/glue" "$dbx_src/thylacine-glue"
-    # Boundary-line patches apply to the COPY; the vendored tree stays pristine.
-    local pp
-    for pp in "$port_dir"/patches/*.patch; do
-        [[ -e "$pp" ]] || continue
-        # Fail LOUD on a patch that does not apply (audit DX-4 F3): a silently
-        # skipped hunk (patch -t) after a vendored-tree bump would compile with
-        # __thylacine__ defined but WITHOUT the dynrec CAP_JIT arm -> the malloc
-        # fallback hands back a non-executable region -> a runtime fault the gate
-        # only catches downstream. The dosbox patches all apply rc=0 (verified).
-        patch -s -p1 -t -d "$dbx_src" -i "$pp" || {
-            echo "==> dosbox-x: patch $(basename "$pp") FAILED to apply" >&2
-            exit 1
-        }
-    done
-
-    # Include search: the src root (config.h + shared headers), the top include/,
-    # and the bundled-lib dirs whose headers cross-included TUs reference.
-    # The union of every kept subsystem's AM_CPPFLAGS -I set (a single global
-    # search path rather than per-TU flags): the top dir (for "include/menu.h"
-    # + "src/ints/int10.h" style includes), src root, include/, the bundled-lib
-    # dirs, and the snd_pc98 (PC-98 sound) subtree that hardware/ files reference
-    # by bare header name.
-    local incs=(
-        -I"$dbx_src"
-        -I"$dbx_src/src"
-        -I"$dbx_src/include"
-        -I"$REPO_ROOT/usr/lib/thylajit"   # DX-4: thyla_jit.h + thyla_capjit.h (CAP_JIT dynrec)
-        -I"$dbx_src/src/libs"
-        -I"$dbx_src/src/libs/gui_tk"
-        -I"$dbx_src/src/libs/zmbv"
-        -I"$dbx_src/src/aviwriter"
-        -I"$dbx_src/src/hardware"
-        -I"$dbx_src/src/hardware/snd_pc98/sound"
-        -I"$dbx_src/src/hardware/snd_pc98/sound/getsnd"
-        -I"$dbx_src/src/hardware/snd_pc98/common"
-        -I"$dbx_src/src/hardware/snd_pc98/generic"
-        -I"$dbx_src/src/hardware/snd_pc98/x11"
-        -I"$dbx_src/src/hardware/snd_pc98/cbus"
-        -I"$dbx_src/vs/sdl/src/cdrom"
-        -I"$dbx_src/vs/zlib/contrib/minizip"
-    )
-    # DOSBox-X uses C++ exceptions + RTTI -> keep them ON. -fno-pie for the
-    # static ET_EXEC. -Wno-* silence the high-volume legacy-tree warnings that
-    # would drown the real errors in the landscape pass.
-    # -Wno-register: minizip/decoder C code is unity-#included into .cpp TUs and
-    # uses the C++17-removed 'register' keyword; allow it rather than patch vendored C.
-    local common_warn=( -Wno-format -Wno-unused-parameter -Wno-unused-variable
-                        -Wno-deprecated-declarations -Wno-register )
-    local cxxflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
-                     -std=gnu++17 "$opt" -fno-pie
-                     -nostdlibinc -D_GNU_SOURCE=1 -D__thylacine__=1 -DC_SDL2=1
-                     -isystem "$sysroot/include/c++/v1"
-                     -isystem "$sysroot/include"
-                     -isystem "$sysroot/include/SDL2"
-                     "${incs[@]}" "${common_warn[@]}" )
-    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
-                   -std=gnu11 "$opt" -fno-pie
-                   -nostdlibinc -D_GNU_SOURCE=1 -D__thylacine__=1 -DC_SDL2=1
-                   -isystem "$sysroot/include"
-                   -isystem "$sysroot/include/SDL2"
-                   "${incs[@]}" "${common_warn[@]}" )
-
-    # Generate the per-TU compiler (baked flags; xargs -P drives it in parallel).
-    # A failure drops a .fail marker beside the object (append-race-free) + keeps
-    # the per-file .log -- the compile-fix loop reads build/pouch/dosbox-x-obj.
-    local cc1="$dbx_obj/cc-one.sh"
-    {
-        echo '#!/usr/bin/env bash'
-        echo 'set -u'
-        echo "SRC='$dbx_src'"
-        echo "OBJ='$dbx_obj'"
-        echo "CLANGXX='$clangxx'"
-        echo "CLANG_C='$clang_c'"
-        echo "CXXFLAGS='${cxxflags[*]}'"
-        echo "CFLAGS='${cflags[*]}'"
-        cat <<'CC1'
-f="$1"
-src="$SRC/$f"
-obj="$OBJ/${f%.*}.o"
-log="$OBJ/${f%.*}.log"
-mkdir -p "$(dirname "$obj")"
-if [[ "$f" == *.c ]]; then
-    "$CLANG_C" $CFLAGS -c "$src" -o "$obj" 2>"$log" || touch "$obj.fail"
-else
-    "$CLANGXX" $CXXFLAGS -c "$src" -o "$obj" 2>"$log" || touch "$obj.fail"
-fi
-CC1
-    } > "$cc1"
-    chmod +x "$cc1"
-
-    # The compile list is TOP-RELATIVE (compiled from $dbx_src): the extractor's
-    # src/-relative paths get an "src/" prefix. The vs/ SDL1-CD-ROM compat files
-    # (SDL_cdrom.c + dummy/SDL_syscdrom.c) are vendored but NOT compiled here --
-    # cdrom.cpp unity-#includes them (the dummy backend via its no-platform #else
-    # arm), so compiling them standalone would duplicate the SDL_CD* symbols.
-    local list_file="$dbx_obj/sources.list"
-    {
-        python3 "$REPO_ROOT/tools/dosbox-x-sources.py" "$dbx_src/src" | sed 's|^|src/|'
-        echo "thylacine-glue/thylacine-audio-stubs.c"
-        echo "thylacine-glue/thylacine-serial-stub.cpp"
-    } > "$list_file"
-    local total
-    total="$(wc -l < "$list_file" | tr -d ' ')"
-    echo "    compiling $total translation units..."
-    xargs -P "$jobs" -n 1 "$cc1" < "$list_file"
-
-    local nfail
-    nfail="$(find "$dbx_obj" -name '*.o.fail' | wc -l | tr -d ' ')"
-    echo "    compiled $((total - nfail))/$total objects ($nfail failed)"
-    if [[ "$nfail" -gt 0 ]]; then
-        echo "    == failing TUs (first line of each error log) =="
-        find "$dbx_obj" -name '*.o.fail' | sed "s|$dbx_obj/||; s|\.o\.fail\$||" \
-            | sort | while read -r ff; do
-            echo "      $ff: $(head -1 "$dbx_obj/$ff.log" 2>/dev/null)"
-        done | head -60
-        if [[ -n "${DBX_LANDSCAPE:-}" ]]; then
-            echo "    (DBX_LANDSCAPE: compile-only; logs under $dbx_obj)"
-            return 0
-        fi
-        echo "==> dosbox-x: $nfail compile failures (logs under $dbx_obj)" >&2
-        exit 1
-    fi
-
-    # Link via the fork clang++ driver (adds --eh-frame-hdr + the c++ runtime
-    # trio + CRT + libc + builtins), plus libSDL2 (the Tapestry backend). Publish
-    # atomically so a killed link never leaves a fresh-mtime partial the reuse
-    # gate would trust.
-    echo "    linking dosbox-x..."
-    if ! "$clangxx" --target=aarch64-thylacine --sysroot="$sysroot" \
-        $(find "$dbx_obj" -name '*.o') \
-        -L"$sysroot/lib" -lSDL2 -lz \
-        -o "$out.tmp" 2>"$dbx_obj/link.log"; then
-        echo "==> dosbox-x: LINK FAILED (see $dbx_obj/link.log)" >&2
-        tail -40 "$dbx_obj/link.log" >&2
-        [[ -n "${DBX_LANDSCAPE:-}" ]] && return 0
-        exit 1
-    fi
-    mv "$out.tmp" "$out"
-    echo "    dosbox-x: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static)"
-    ledger "dosbox-x: BUILT"
 }
 
 build_vkquake() {
@@ -6344,8 +5724,6 @@ case "$target" in
     pouch-progs) build_pouch_progs ;;
     sdl2)        build_sdl2        ;;
     tyrquake)    build_tyrquake    ;;
-    zlib)        build_zlib        ;;
-    dosbox-x)    build_dosbox_x    ;;
     vkquake)     build_vkquake     ;;
     gnumake)     build_gnumake     ;;
     libcxx)      build_libcxx      ;;

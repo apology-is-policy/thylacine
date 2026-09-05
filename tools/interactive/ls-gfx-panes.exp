@@ -39,6 +39,10 @@
 #                it (two dumps bracket the release);
 #   close      : a compositor-initiated pane close delivers TEV_CLOSE
 #                (G-6b); the surface retires only when the client drops.
+#   singleslot : the #56 latch's real discriminator (the fullscreen-zoom
+#                bug): a SINGLE-SLOT partial presenter zooms letterboxed 2x
+#                (placement line + three pixels); the rotating control
+#                still latches at its second slot;
 # The coda proves teardown: the battery exits, its panes collapse, the
 # console returns to fullscreen direct scanout, and the -c console verify
 # passes again.
@@ -95,6 +99,12 @@ expect {
     eof { lc_fail "qemu exited during the battery" }
 }
 
+expect {
+    -ex "battery: console leaf tiled" { lc_pass "panes: the console leaf keeps a real column under an UNDECLARED client" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the undeclared-client control failed" }
+    timeout { lc_fail "the undeclared-client control never reported" }
+    eof { lc_fail "qemu exited during the battery" }
+}
 expect {
     -ex "tapestry-battery: structure OK" { lc_pass "panes: in-guest structure asserts OK" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "battery structure legs failed" }
@@ -402,9 +412,86 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the claim leg failed" }
     timeout { lc_fail "the claim leg never finished" }
 }
+# The #56 latch's real discriminator (the fullscreen-zoom bug, aux 0048): a
+# SINGLE-SLOT client presenting PARTIAL damage stays letterboxed. D (640x400)
+# is zoomed; the compositor's own one-shot placement line -- the witness
+# aux's DOSBox log LACKED after Super+F -- must name the 2x letterbox over the
+# whole display, and its latch line is a FAIL arm. Then the pixels: the
+# partial present's green lands through the scale, the untouched frame is
+# blue at three-quarters (black there under the bug: the native crop covers
+# only the top-left quarter), and a partial present AFTER the zoom (the
+# DOSBox steady state) projects too. Last, the one-variable-away control:
+# rotation back on, the second partial present latches (the aurora class).
+expect {
+    -re {battery: singleslot D (\d+)\r?\n} { set did $expect_out(1,string) }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the single-slot leg failed at create" }
+    timeout { lc_fail "battery never created the single-slot client" }
+}
+expect {
+    -re "tapestryd: surface $did letterbox 640x400 -> 1280x800 @\\(0,0\\) in 1280x800" {}
+    -re "tapestryd: surface $did patchwork latched" { lc_fail "the single-slot client latched the accumulator crop (the fullscreen-zoom bug)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the single-slot zoom failed" }
+    timeout { lc_fail "no 2x letterbox placement line for the zoomed single-slot client (the crop arm took it)" }
+}
+lc_pass "panes: the zoomed single-slot client is placed by the letterbox arm (2x over the display)"
+expect {
+    -re {battery: singleslot zoomed (\d+) (\d+) (\d+) (\d+)\r?\n} {
+        set ssgx $expect_out(1,string)
+        set ssgy $expect_out(2,string)
+        set ssbx $expect_out(3,string)
+        set ssby $expect_out(4,string)
+    }
+    -re "tapestryd: surface $did patchwork latched" { lc_fail "the single-slot client latched on its partial present" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the single-slot zoom leg failed" }
+    timeout { lc_fail "battery never reached the single-slot zoom samples" }
+}
+gfx_sample ssgreen $ssgx $ssgy "0 255 0"
+gfx_sample ssblue $ssbx $ssby "0 0 255"
+lc_pass "panes: a single-slot partial present lands through the 2x scale and the frame fills the display"
+expect {
+    -re {battery: singleslot damage (\d+) (\d+)\r?\n} {
+        set ssyx $expect_out(1,string)
+        set ssyy $expect_out(2,string)
+    }
+    -re "tapestryd: surface $did patchwork latched" { lc_fail "the single-slot client latched on its second partial present" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the post-zoom partial present failed" }
+    timeout { lc_fail "battery never reached the post-zoom partial present" }
+}
+gfx_sample ssyellow $ssyx $ssyy "255 255 0"
+lc_pass "panes: a partial present after the zoom projects through the scale (the DOSBox steady state)"
+expect {
+    -re "tapestryd: surface $did patchwork latched \\(slot 1 of slots 0b11" {}
+    -ex "battery: singleslot control presented" { lc_fail "the rotating control never latched (the accumulator class lost its crop)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the rotating control failed" }
+    timeout { lc_fail "the rotating control never latched" }
+}
+expect {
+    -ex "battery: singleslot control presented" { lc_pass "panes: the rotating partial presenter still latches at its second slot (the accumulator control)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the rotating control failed after the latch" }
+    timeout { lc_fail "battery never finished the rotating control" }
+}
+# The declared-handoff control (the KT-1 audit's round-2 C-F3): the SAME
+# console leaf the undeclared control found tiled goes to the ZERO rect when
+# the battery's conn declares `session on`, and comes back on `session off`
+# -- the one-variable pair that proves the backgrounding is real AND gated.
+expect {
+    -ex "battery: console leaf backgrounded by the declaration" { lc_pass "panes: a declared session backgrounds the console leaf" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the declare control failed" }
+    timeout { lc_fail "the declare control never backgrounded the console leaf" }
+}
+expect {
+    -ex "battery: declared session cannot close the console's container" { lc_pass "panes: the destructive close sees the transparent console leaf (E_PERM)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the declared-close control failed" }
+    timeout { lc_fail "the declared-close control never reported" }
+}
+expect {
+    -ex "battery: console leaf restored" { lc_pass "panes: session off restores the console leaf's column" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the undeclare control failed" }
+    timeout { lc_fail "session off never restored the console leaf" }
+}
 expect {
     -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }
-    -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the claim leg" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the declare control" }
     timeout { lc_fail "battery never finished" }
 }
 
@@ -429,5 +516,5 @@ lc_run_expect "cat /dev/winsize" "winsize 128 36"
 lc_pass "panes: winsize restored fullscreen after the battery (#55 live across reweaves)"
 
 lc_quit
-lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + close + collapse)"
+lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + close + singleslot + collapse)"
 exit 0

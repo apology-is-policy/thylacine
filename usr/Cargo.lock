@@ -156,6 +156,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "caps-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "cartoon"
 version = "0.1.0"
 
@@ -648,6 +655,8 @@ dependencies = [
  "cartoon",
  "cornucopia",
  "fontdue",
+ "kaua",
+ "kaua-term",
  "libhalcyon",
  "libtapestry",
  "libthyla-rs",
@@ -782,6 +791,24 @@ dependencies = [
 name = "kaua"
 version = "0.1.0"
 dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "kaua-term"
+version = "0.1.0"
+dependencies = [
+ "kaua",
+ "libthyla-rs",
+ "ptyhold",
+ "vt",
+]
+
+[[package]]
+name = "kaua-term-probe"
+version = "0.1.0"
+dependencies = [
+ "kaua-term",
  "libthyla-rs",
 ]
 
@@ -1300,10 +1327,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptyhold"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "ptyhost"
 version = "0.1.0"
 dependencies = [
  "libthyla-rs",
+ "ptyhold",
 ]
 
 [[package]]
@@ -1686,6 +1721,7 @@ dependencies = [
 name = "tapestry-battery"
 version = "0.1.0"
 dependencies = [
+ "libhalcyon",
  "libtapestry",
  "libthyla-rs",
 ]

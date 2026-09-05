@@ -572,6 +572,10 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
 // composes with the c->lock the async-completion path holds (the seam contract).
 int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags);
 
+// KT-1.5: the KObj_Loom .poll hook (poll_scan_one's KOBJ_LOOM arm). Registers
+// pw on l->cq_waiters + reports POLLIN iff a CQE is ready. See loom.c.
+short loom_poll(struct Loom *l, short events, struct poll_waiter *pw);
+
 // Diagnostics (tests).
 u64 loom_total_created(void);
 u64 loom_total_destroyed(void);

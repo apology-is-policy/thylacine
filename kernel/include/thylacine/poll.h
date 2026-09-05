@@ -78,8 +78,10 @@
 //   dropping it before the sleep. `sys_poll_for_proc` drops every
 //   retained ref AFTER the unregister sweep.
 //
-//   The two REAL registering paths are both KOBJ_SPOOR, and the retained
-//   Spoor handle ref keeps the object alive TRANSITIVELY:
+//   Two of the three REAL registering paths are KOBJ_SPOOR, and the
+//   retained Spoor handle ref keeps the object alive TRANSITIVELY (the
+//   third, KOBJ_LOOM, is safe for a different reason: `handle_get` on a
+//   Loom handle takes a DIRECT `loom_ref`, retained the same way):
 //     - pipe ring: `devpipe_close` drops the ring ref only at the Spoor's
 //       last `spoor_clunk`, so a live Spoor handle ref defers the free of
 //       `r->poll_list`.

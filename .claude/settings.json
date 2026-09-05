@@ -1,0 +1,55 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "[ ! -f \"$CLAUDE_PROJECT_DIR/vault/meta/hook-readlog.py\" ] || python3 \"$CLAUDE_PROJECT_DIR/vault/meta/hook-readlog.py\" || true",
+            "type": "command"
+          }
+        ],
+        "matcher": "Read"
+      },
+      {
+        "hooks": [
+          {
+            "command": "[ ! -x /Users/northkillpd/.yip/bin/yip ] || /Users/northkillpd/.yip/bin/yip hook posttooluse  # yip-line-hook",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "[ ! -f \"$CLAUDE_PROJECT_DIR/vault/meta/hook-dossier-nag.py\" ] || python3 \"$CLAUDE_PROJECT_DIR/vault/meta/hook-dossier-nag.py\" || true",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "[ ! -x /Users/northkillpd/.yip/bin/yip ] || /Users/northkillpd/.yip/bin/yip hook sessionstart  # yip-line-hook",
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume|compact"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "[ ! -x /Users/northkillpd/.yip/bin/yip ] || /Users/northkillpd/.yip/bin/yip hook stop  # yip-line-hook",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

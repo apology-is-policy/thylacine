@@ -16,7 +16,9 @@ It is spawned by joey as the console renderer (the G-4 slot,
 `/lib/halcyon/renderer` reads `halcyond`; anything else — absent file,
 short read, unknown token — spawns aurora (fail-safe: a corrupt config can
 only name the proven fbcon). `usr/joey/joey.c` (the G-4 block) is the only
-reader.
+reader. Since KT-1.5d-1a (HALCYON.md §14.12) halcyond has a **second role** —
+the per-user session compositor, `login`-spawned with `--session`, which holds
+NO console-renderer role (see "The `--session` variant" below).
 
 ## Structure — lib is the brain, bin is the body
 
@@ -61,6 +63,275 @@ Input: TEV_KEY → (Insert) `key_bytes` → `/dev/consfeed` with the held-feed
 discipline; (Normal) the selection state. `beacon rich` is advertised on
 `/dev/consctl` at startup — halcyond is the tree's first rich advertiser;
 ut reads `/dev/beacon` and exports `/env/BEACON` (BEACON.md §12.3).
+
+## The `--session` variant: the per-user compositor bootstrap (KT-1.5d-1a)
+
+halcyond has TWO roles, selected by `rs_main`'s first act — a `--session`
+operand (`env::args().operands()`):
+
+- **No `--session` (the default, joey-spawned):** the console renderer above —
+  it opens the `/dev/consdrain`/`consfeed`/`consctl` trio, holds the
+  `g_console_renderer` role, and weaves the `/dev/cons` transcript.
+- **`--session` (login-spawned, HALCYON.md §14.12):** the **per-user session
+  compositor**. `/sbin/login` spawns `/bin/halcyond --session` AS the
+  authenticated user (identity only — no `CAP_SET_IDENTITY`, no
+  `SPAWN_PERM_CONSOLE_RENDERER`; zero identity delegation, the only
+  identity-stamp is login's). It holds NO console-renderer role: `session_main`
+  skips the whole `/dev/cons` trio and never reads the console mirror. It
+  connects to the SYSTEM tapestryd (`/srv/tapestry`) as an ordinary-user
+  `Actor::Session` (connecting is ungated) and presents a fullscreen surface,
+  hosting the session's terminals as `kaua-term` processes it spawns as itself
+  (§14.2), ingesting each tile's record stream through the `Tile` model below
+  instead of the console drain.
+
+**The bootstrap (d-1a).** `session::run` connects + takes a fullscreen surface
+(the connect/surface/present primitives — `EventRing::connect_sqpoll` +
+`Surface::fullscreen_on` + the first-present-before-wait discipline + the SQPOLL
+unified-poll wait on `ring.poll_fd()`). The witness is `halcyond: session up
+NxN px`, printed only inside `Ok(present)`, so it proves connect + present, not
+merely that the line ran. The aurora → `Direct(halcyond)` handoff is d-1b
+(tapestryd's reconcile backgrounds the console renderer, §14.12 step 4; no new
+primitive).
+
+**Multiple session tiles (d-3).** `session::run` (in `session.rs` — the I/O half
+of the 13.1 lib/bin split; the pure create/drop diff is host-tested in
+`halcyond::tiles::plan_tiles`) hosts ONE `kaua-term` + content `Surface` + `Tile`
+per compositor leaf, keyed by leaf id in a `BTreeMap`, reconciled off the
+`layout` file each relayout. d-2 was the single-tile special case of this loop.
+Each `kaua-term` runs `/bin/ut` AS the session (plain `t_spawn`, no cap, zero
+delegation), `Stdio::Piped`: the child's fd 0 = the down pipe (halcyond writes
+`Key`/`Resize` `Input` frames), fd 1 = the up pipe (the child writes the `Record`
+stream), fd 2 inherits; the pts is internal to the child, so `ut` never sees
+these pipes. The loop:
+
+- **reconciles** on every relayout (a `TEV_CONFIGURE` on any tile): reads the
+  `layout`, `plan_tiles` diffs the visible leaves against what it hosts. A new
+  EMPTY leaf it owns is CLAIMED (`pane/<id>/claim`, the server-side owner +
+  emptiness authority, §13.7 — a failed read means "not ours", skip) and hosted
+  with `Surface::open_claim_on` at the leaf's `pane/<id>/geometry` size, then a
+  `kaua-term` is spawned into it. A vanished leaf's tile is reaped. The bootstrap
+  root is the first entry, keyed on the leaf hosting the fullscreen surface.
+- **renders** each dirty `Tile` (grid tail + scrollback flow, `Tile::render`
+  below) via the reused render brain (a `GlyphSource` + the Daylight sheet +
+  cartoon); the FIRST render precedes any wait (first-present-wins).
+- **waits** on ONE `poll { ring.poll_fd() | up_0 .. up_N }` — a surface event on
+  the ring (`poll_event` pumps the SQPOLL CQEs, demuxed per surface) or records
+  on any LIVE tile's up pipe (a crashed/exited tile's pipe is skipped).
+- **ingests** each readable tile: one `t_read` per wake → `FrameDecoder` →
+  `parse_record` → `Tile::apply` — the trust boundary (a bounds-checked wire).
+- **routes input to the focused tile FOR FREE**: tapestryd delivers `TEV_KEY`
+  only to the FOCUSED surface (`key_event` → `layout.focused_surface`), so
+  draining each tile's surface events and forwarding its `TEV_KEY` (via
+  `input::map_key` → an `Input::Key` frame down THAT tile's pipe) is inherently
+  focus-routed — halcyond never reads `l.focused` (§14.11.9). The Super chord
+  layer (split / focus-move / zoom / close, §18.4) is the compositor's; halcyond
+  only reacts to the layout changes it produces.
+- **resizes** per tile on `TEV_CONFIGURE`: recompute cols/rows, resize the tile
+  grid, send `Resize` down (the kaua-term sets the pts winsize + replies with a
+  full CellDiff).
+- **contains a tile's death** (§14.11.10): a `Control::Exit(0)` (clean) CLOSES
+  the leaf (a `close <leaf>` layout verb — the pane collapses, tmux-style) and
+  reaps the tile; a `WireError` / non-clean exit / abnormal EOF (a crash of the
+  isolated parser) FREEZES the tile as an affordance (its last frame held, its
+  pipe skipped, its `kaua-term` killed), reaped when the user closes the leaf.
+  Neither ends the environment. A `closed` leaf-id set is the permanent respawn
+  guard: a leaf whose tile is gone is never re-filled (leaf ids never reuse).
+- **logs out** when the LAST tile is gone — `session::run` returns, `login`'s
+  `wait()` returns → getty → the session leaf retires → aurora un-backgrounds +
+  resumes (d-1b).
+
+The witnesses on the diagnostic UART: `session tile leaf=N spawned pid=M WxH`
+(per tile), `session up NxN px` (the first successful present), `session tile
+ingest live` (the first record applied), `session tile leaf=N exited (code C)
+-- closing` (a clean tile close) / `session tile leaf=N crashed -- affordance
+held` (a contained crash), and `session logout (code C)` (the last tile gone).
+
+**The session lever.** `login` reads the one-token `/lib/halcyon/session` file:
+`on` → the session variant; absent / any other token → the proven `ut` path
+(fail-safe, exactly as joey's renderer lever). Distinct from
+`/lib/halcyon/renderer` (joey's system-renderer choice, being retired at
+§14.12). Baked under `THYLACINE_HALCYON_SESSION=1`; the `ls-gfx-session`
+scenario probes the post-login markers + SKIPs cleanly on a default image.
+
+## The session compositor after the KT-1 audit (rounds 1-2, 2026-09-05)
+
+The batched KT-1 holotype (three prosecutors on 53ee407f, two on the fixes)
+reshaped the `--session` loop in seven places. This section is the as-built
+form; the finding records are `vault/record/audits/adt-kt1-r{1,2}.md`.
+
+**The declaration (`connect`).** Before its first surface, the compositor
+writes `session on` through `EventRing::global_ctl` on the conn every tile
+surface will share: that act, not its principal, is what backgrounds the
+console renderer (HALCYON.md §14.12 step 4). The seat is held by a conn
+WHILE IT HOSTS: an idle declaration is taken over by anyone (a crashed
+compositor's conn is un-declared as soon as its EOF is serviced), and a
+holder with live tiles keeps it against every newcomer, the user's own
+programs included. A refusal -- E_BUSY while the seat is held by live tiles,
+E_PERM for a conn without a session principal -- is retried through
+`DECLARE_TRIES` (40 x 25 ms; a seat mid-handover clears within milliseconds)
+and then TOLERATED: `connect` returns `declared = false`, the session runs
+UNDECLARED (its tiles beside the console like any user window, the ordinary
+surface cap), says once `session declare refused ... running UNDECLARED
+beside the console`, and `session up NxN px (undeclared)` marks it. Once the
+first surface hosts, `connect` writes `session on` AGAIN and takes THAT
+verdict as `declared`: between the declaration and the mint the conn held
+nothing, so an idle re-claimer could take the seat back in that window; the
+repeat is idempotent for the holder, a takeover of an idle usurper, and the
+truth about the session that runs. It never exits here: login treats
+halcyond's exit as logout regardless of status, so exiting would re-prompt
+the seat forever (C-F12, `seam-login-halcyond-fallback`).
+
+**Identity.** login spawns halcyond with `.caps(SHELL_CAPS)` and halcyond
+spawns every kaua-term with `.caps(!T_CAP_SET_IDENTITY)`; the kernel
+intersects, so no tile program can spawn as another principal (C-F1, a P0:
+`Command` inherits every capability by default and login had masked only its
+`ut` path). `/bin/caps-probe` is the two-arm witness ls-gfx-session types into
+a tile: a plain spawn succeeds, the same spawn with an identity request is
+REFUSED.
+
+**Hidden leaves.** `parse_leaves_all` keeps every leaf with `Leaf.hidden`
+(the layout line ends in `hidden`: a zoom, a Tab sibling); `plan_tiles` never
+creates a tile for a hidden leaf and never drops one whose leaf is merely
+hidden -- only a leaf ABSENT from the tree is vanished (B-F2, a P0: the zoom
+chord killed every non-visible tile's shell and jobs). A hidden tile receives
+no CONFIGURE (the fans iterate visible leaves), so its grid keeps its size
+until it shows again.
+
+**Reconcile triggers.** `TEV_CONFIGURE` on any tile, `TEV_FOCUS`, a tile's
+clean exit, and `TEV_LAYOUT` (tapestryd event kind 10, sent to one surface of
+the DECLARED conn at every structural layout pass) all set `relayout`. The
+last exists because a split of an EMPTY leaf fans no CONFIGURE and no FOCUS to
+anyone, and the empties are exactly what the session must claim (B-F10 /
+B2-F6). A refused claim (the surface pool at its cap) says once and CLOSES the
+leaf rather than leaving a focused empty leaf with the keyboard routed into it
+(C-F5).
+
+**The down channel (`halcyond::downq::DownQueue`).** halcyond is a tile's
+pipe's only writer and must never block on it (a parked compositor is a dead
+seat; natives cannot mark a pipe non-blocking). Input is queued and delivered
+one byte per ready POLLOUT (`drain_down`: POLLOUT means >= 1 free byte and a
+one-byte write from the sole writer cannot block). Two record classes, two
+policies: KEYS are bounded to `DOWN_PENDING_MAX` (4096 B) and the NEWEST drop
+past it, said once; the GEOMETRY record is never dropped -- one waits
+(latest-wins), it goes out ahead of any further key, and a record in flight
+is never split by another (B2-F3: a Resize dropped at the cap was never
+re-sent, no later CONFIGURE at the same size re-queues it, and nothing acks
+it -- the tile stayed at the old size for life). The unified poll registers a
+POLLOUT entry per tile with pending input, stopping at the kernel's
+`POLL_MAX_NFDS` (64; B2-F8: 1 + 32 + 32 = 65 would have returned -1, which
+the loop reads as "compositor gone").
+
+**The scrollback budget.** ONE `SESSION_SCROLLBACK_BUDGET` (32 MiB) shared by
+tile count: every reconcile calls `Transcript::set_max_cost(budget / N)` on
+every tile, and `set_max_cost` now evicts AT ONCE (freezing an over-cap open
+block so the loop can reach it) -- a quiet tile never pushes, so a lazy cap
+let it keep its whole old share and the retained sum grew as 32 MiB x H(N)
+(B2-F2). Every retained line is charged `ITEM_OVERHEAD` on top of its cells
+(B-F5: empty lines were free). `Tile::with_budget` seeds a new tile's share.
+
+**The windowed render (`Tile::render`).** The budget bounds what is STORED;
+the old render laid out EVERY frozen block per paint, a transient of ~1.8x the
+retained bytes charged to nothing -- one tile with ~20K full-width rows of
+history, well under its share, OOM'd the whole session at its next paint
+(B2-F1, the round-2 P1; `vault/hazards/haz-budget-stored-not-derived.md`).
+`render` now keeps a per-block HEIGHT cache (`heights`: `(block id, the
+block's exit, laid height)`, 32 B/block, keyed by width, aligned to the
+front-evicted / back-appended frozen deque -- block ids are strictly
+increasing along it; `exit` is in the key because it is the ONE field a
+frozen block can still acquire, a floating exit mark, and a non-zero code
+adds the badge line); the exact content height and every block's screen-y
+follow from the cache, and only the blocks intersecting the view are laid
+out, each dropped after it renders. The open block (the one no cache can
+position) is laid out whole every render and lives across the walk, so at
+most TWO laid blocks exist at once and a block that merely touches the view
+is laid out whole: the transient is O(view + 2 x `OPEN_BLOCK_MAX_COST`),
+the constant (512 KiB of cells) at which the open block now freezes whatever
+the share -- at a 32 MiB share it used to be 4 MiB, ~7 MiB laid per paint.
+The same constant bounds what a re-budget cannot evict (the newest frozen
+block). A width change re-lays every block once for its height (time, not
+memory). `laid_last` / `laid_lines_last` witness the window (host tests: a
+warm render lays out <= 4 blocks and <= 12 lines for 200 blocks in history,
+at the bottom and at the top; the cache follows eviction, width changes and
+a floating exit mark; the content height equals the whole-history
+computation).
+
+**Other round-1 fixes.** `--home <dir>` is forwarded from login through
+halcyond to every tile's `ut` (B-F9: `$home`, `cd`, history and the per-user
+`/tmp` bind were skipped in every tile). A refused `session on` and a
+compositor crash with several tiles are the unconstructed arms (see the
+tapestryd dossier's Tests).
+
+## The tile model (KT-1.5b-ii): the live grid + the scrollback ingest
+
+The data flow above is halcyond's **console** path (one `/dev/consdrain` byte
+stream). The **multi-console terminal** (KT-1.5) gives each leaf its own hosted
+`kaua-term` process, and halcyond ingests a pre-digested **record** stream per
+leaf rather than raw bytes. (This "tile" is the leaf's terminal CONTENT --
+distinct from the H-3b chrome tag-bar surfaces, which are also per-leaf and
+also called tiles.)
+
+`tile.rs` holds one `Tile` per leaf: a **live grid** + a **scrollback
+`Transcript`** (HALCYON 14.11.1). They are separate because the grid spans zone
+boundaries -- the last `rows` lines routinely straddle a prompt. The record ->
+model dispatch (`Tile::apply`, 14.11.2):
+
+| Record | applied to |
+|---|---|
+| `CellDiff{changed,cursor}` | the live grid (`grid.rs`) |
+| `ScrollOff{rows}` | `Transcript::push_scrolled_rows` (history) |
+| `Control(Osc1936Raw)` | `Transcript::feed` -- the SAME beacon parser the console uses |
+| `Control(Title/Exit/Bell/WinsizeAck)` | tile fields |
+| `Mode(Normal\|AltScreen)` | the render mode |
+
+`grid.rs` is a fixed rows x cols `vt::Cell` buffer -- what `CellDiff` mutates,
+running no VT parser (the kaua-term already did). halcyond is the geometry
+authority, and a tile is untrusted (14.11.12, the format-fuzz class): an
+out-of-bounds cell write is DROPPED and the cursor is clamped on read, so a
+buggy/hostile producer cannot index past the buffer.
+
+Reusing `Transcript::feed` for the beacon frames keeps the format-fuzz surface
+(parsing an untrusted per-tile stream) ONE audited parser, not N. The ScrollOff
+path interns a pre-styled `vt::Cell` via the same `intern_style` `style_idx`
+uses, and charges the same block-cap / eviction cost, so a tile that scrolls
+forever stays bounded.
+
+**The model landed host-tested at KT-1.5b-ii-a** (grid + tile tests). **The
+render + spawn + poll-fold landed at KT-1.5d-2**, inside the per-user
+`session_main` (above): the child spawn (one `kaua-term` over a `Stdio::Piped`
+pair), folding the up-pipe into the unified `poll { ring | up_pipe }`, and the
+render below.
+
+`Tile::render(cart, w, h, gs, sheet, scroll_up) -> content_h` composes the
+frame (14.11.3):
+
+- **Alt-screen** (`Mode(AltScreen)`, e.g. `vim`): the live grid alone, full-tile
+  from the top-left. Returns the grid height.
+- **Normal**: the scrollback flows above (each block laid once via `layout_block`
+  and rendered via `render_block` — the SAME proportional path the console
+  transcript uses), and the live grid renders as a fixed-height mono tail
+  (`grid_rows * cell_h`) at the bottom. The content `[scrollback][grid]` is
+  bottom-anchored, raised by `scroll_up` px (0 = the grid sits at the view bottom,
+  history off the top; scrolling reveals history — the wheel input is a follow-on,
+  `scroll_up` is wired but held at 0 in d-2). Returns the total content height.
+
+The grid painter (`paint_grid`) is a mono cell store: per-cell it paints a bg
+Rect only when the cell bg differs from the sheet ground (a blank Daylight grid
+is all-ground, so it emits only the cursor beam), then the `FACE_MONO` glyph
+(space/NUL skipped), then an underline Rect; `ATTR_REVERSE` swaps fg/bg. The
+block cursor beam (2 px, the accent) sits at the clamped cursor cell. Cells carry
+resolved RGB in the compositor's palette (the kaua-term stamps `vt::DAYLIGHT`,
+§14.6 — the palette is applied at the producer since the seam ships RGB, not
+re-mapped here), so the tile composites coherently with the Daylight transcript.
+
+`input::map_key(code, rune, value) -> Option<KeyEvent>` maps a tapestryd
+`TEV_KEY` to a kaua `KeyEvent` for the down-channel: a composed `rune` (tapestryd
+Ctrl-folds + shift-resolves) passes through as `Char(rune)` (byte-identical to the
+console `key_bytes` rune arm); a rune-less nav key (arrows / Home / End / page /
+Del / Ins) maps to its `KeyCode` so the kaua-term honors DECCKM; a release
+(`value 0`) or an unknown key is `None`.
+
+All of `Tile` + `render` + `paint_grid` + `map_key` are host-tested (the lib
+half), so the format/render logic is exercised without a boot.
 
 ## Load-bearing invariants (prose; the audit anchors)
 
@@ -278,10 +549,18 @@ with the menu still placed -- THE GATE's wedged-owner lever -- and says
 `tapestry::EventRing` (one session + one Loom ring) and every surface it
 owns lives on it: the console (`Surface::fullscreen_on`), each tag-bar
 tile (`chrome_on`), the menu (`menu_on`); the pane-tree files are read on
-the ring's session root. The loop's step (1) takes the console's next
-event or, when its queue is empty, blocks in `EventRing::wait` -- any
-surface's event wakes it -- and the pumps (`ChromeSet::pump`,
-`MenuSet::service`) drain their surfaces' queues every pass. This retires
+the ring's session root. Since KT-1.5b-i (2026-09-04) the ring is SQPOLL
+(`EventRing::connect_sqpoll`), so a kernel poll-thread drives the session
+reader and posts completions off-thread. The loop's step (1) takes the
+console's next event or, when its queue is empty, blocks in ONE `poll(2)`
+over the ring fd (`EventRing::poll_fd`) AND `/dev/consdrain` -- `poll`
+reports POLLIN for any surface's event exactly as the old `EventRing::wait`
+woke on any completion, AND for console output, so shell output wakes the
+renderer at once instead of at the next compositor frame tick (the old
+`EventRing::wait` blocked on the ring alone; the console mirror was drained
+per-pass only after some other event woke the loop -- the frame-coupled
+console latency). The pumps (`ChromeSet::pump`, `MenuSet::service`) drain
+their surfaces' queues every pass. This retires
 the H-3c session-reader dance (`service(block_first)` waiting on the
 menu's own ring while the console was polled) and FIXES the H-3b-3 tiles'
 latency: a tile's CONFIGURE used to land only at the next pane-tree RPC
@@ -408,12 +687,18 @@ optimization (v0 presents full frames).
 - The consfeed held-queue discipline is aurora's #129/#135/#136 verbatim;
   its policy lives in `input.rs` so the host tests pin it — do not inline
   a "simpler" retry loop in the bin.
-- OWNED, deferred (the H-3c-2 round F7, pre-existing): the held-feed path
-  (`wait_is_bounded`) polls and sleeps; a submit-only Loom enter demuxes
-  nothing, so while the feed is held and nothing else makes an RPC on the
-  session, the console's parked read reply sits undemuxed and every KEY
-  typed queues server-side until the compositor's 128-event cap WEDGE-
-  retires the console (a held key for ~4 s in front of a silent, non-reading
-  foreground). The honest primitive is a timed Loom enter (a kernel seam +
-  a syscall-arg change); a per-pass throwaway RPC would be a workaround.
+- ADDRESSED by KT-1.5b-i (the H-3c-2 round F7, pre-existing): the held-feed
+  path (`wait_is_bounded`) polls and sleeps; on the OLD non-SQPOLL ring a
+  submit-only Loom enter demuxed nothing, so while the feed was held and
+  nothing else made an RPC on the session, the console's parked read reply
+  sat undemuxed and every KEY typed queued server-side until the compositor's
+  128-event cap WEDGE-retired the console (a held key for ~4 s in front of a
+  silent, non-reading foreground). The honest primitive named here -- a timed
+  Loom enter -- is exactly what the SQPOLL ring now provides: its kernel
+  poll-thread drives the session reader on a frame-boundary deadline
+  (`p9_client_reader_pump_once_deadline`) and demuxes the parked reply
+  continuously, independent of halcyond's loop branch, so the held-feed path
+  no longer starves the console's demux. A targeted repro (feed held + silent
+  foreground + key flood, asserting no wedge-retire) is owed at the KT-1 audit
+  to confirm the close.
   `memory/bug_held_feed_path_never_demuxes.md`.

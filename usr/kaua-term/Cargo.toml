@@ -1,0 +1,27 @@
+[package]
+name = "kaua-term"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "kaua_term"
+path = "src/lib.rs"
+
+# The process. Gated behind `bin` so host tests (--no-default-features) build
+# only the pure lib -- libthyla-rs does not compile on the host target.
+[[bin]]
+name = "kaua-term"
+path = "src/main.rs"
+required-features = ["bin"]
+
+[features]
+default = ["bin"]
+bin = ["dep:libthyla-rs", "dep:ptyhold"]
+
+[dependencies]
+vt = { path = "../lib/vt" }
+# The pure event model only (no `backend` = no libthyla-rs), so lib + wire +
+# encoder host-test like vt.
+kaua = { path = "../lib/kaua", default-features = false }
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+ptyhold = { path = "../lib/ptyhold", optional = true }

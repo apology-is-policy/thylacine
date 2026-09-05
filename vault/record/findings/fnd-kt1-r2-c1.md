@@ -1,0 +1,27 @@
+---
+id: fnd-kt1-r2-c1
+type: fnd
+title: "the declaration is first-come exclusive with no takeover, and halcyond treats a declare refusal as FATAL -- any Session-principal conn that wrote `session on` (a same-user program; an orphan of a previous user) turns the seat's graphical login into the C-F12 login loop until reboot"
+round: adt-kt1-r2
+severity: P2
+status: fixed
+surface: [sub-tapestryd]
+threatens: [inv-i32]
+fixed-by: chg-2026-09-05-kt1-audit-close
+regression: "ls-gfx-panes declared control (session on/off); takeover arms unconstructed"
+created: 2026-09-05
+---
+## Prosecution
+
+**File**: usr/tapestryd/src/server.rs:15517-15542 (the verb), usr/halcyond/src/session.rs:439-445 (the fatal arm) vs :446-455 (the retried create arm), :471-474 (`run` returns 1), usr/login/src/main.rs:1387 (`child.wait()` = logout), usr/joey/joey.c:3285-3392 (the getty loop reaps only DEAD orphans; nothing terminates a session's strays)
+**Invariant**: I-32 (a resource bound must fail CLEAN and legibly; here the seat's one declaration slot fails into a no-shell loop); HALCYON.md 14.12 amendment ("one declared conn per display at a time" is meant as one SEAT, but is enforced as first-come-holds-forever); the round-1 C-F12 deferral ("login loops ... a fallback-to-ut is owed") whose trigger set this fix widens.
+**Prosecution**:
+1. State: a Session-principal process P (any program run in a tile or on the console shell -- `principal_is_session(self.peer_principal)` is the only gate: `if !principal_is_session(self.peer_principal) { return Err(p9::E_PERM); }` 15522-15524) holds a /srv/tapestry conn and has written `session on`: `comp.session_conns.push(self.conn_id); say!(...)` (15534-15535). P hosts NO leaf, so `has_session_tree` (5793-5796) is false, the console stays foreground and the declaration is invisible to the user. P outlives its session: joey's getty loop only `reap_adopted_orphans()` (joey.c:3370, "orphans that died during the previous session"); a `prog &` under a tile's ut is in a background pgrp, so the kaua-term's death (`tty:hup` to the fg pgrp only, kaua-term/main.rs:322) does not reach it.
+2. The user logs in with the lever on. login spawns `halcyond --session` (login/main.rs:1358-1372). `connect()`: `EventRing::connect_sqpoll()` succeeds, then `if let Err(e) = r.global_ctl("session on") { say!("halcyond: FAIL session declare {:?}", e); return None; }` (session.rs:442-445). The server: `if let Some(&other) = comp.session_conns.first() { if other != self.conn_id { return Err(p9::E_BUSY); } ... }` (15528-15532) -> E_BUSY -> `t_write` < 0 -> `TapError::Protocol` (libtapestry lib.rs:1072-1075) -> `None`. Note the asymmetry: the create arm one line below retries `CONNECT_TRIES` times (446-455); the declare arm never retries and never degrades.
+3. `run()` -> `return 1` (473). login: "Session leader: wait the shell. Its exit IS logout (regardless of status)" (1386-1387) -> logout teardown -> login exits 0 -> joey's getty respawns login (joey.c:3382-3392) -> the prompt -> the same credentials -> the same E_BUSY. Every login on the seat repeats this until P dies; the lever image has no ut path to fall back to (the C-F12 shape, deferred at round 1 as a lever-without-compositor edge; this fix adds a CLIENT-TRIGGERABLE input to it).
+4. Observes: a seat-level denial of the graphical login, persisting across logouts (cross-user if P is user A's orphan and user B logs in next), recoverable only by killing P from a shell nobody can reach (or a reboot). The exclusivity is a NEW power the fix introduced (round 1's trigger needed no act and blocked nobody); the narrowing of C-F6 is correct, the exclusivity has no owner-of-the-seat semantics behind it -- an IDLE declaration (hosting nothing, holding no display) holds the seat.
+**Suggested fix**: (server) let `session on` TAKE OVER a declared conn that hosts no leaf -- `!self.layout.hosted_leaves().iter().any(|&(_, n)| self.surf(n).is_some_and(|s| s.owner_conn == other))` -> replace the entry (an idle declaration holds no display, so nothing is torn from anyone); (client) halcyond must not die on a declare refusal: say it once and run UNDECLARED (its tiles tile beside the console exactly as any user window does -- a degraded but working session), or at least retry through the same bounded loop the create arm uses; (login) land the C-F12 fallback (halcyond exits non-zero within N seconds -> spawn ut on /dev/cons) so no future compositor-side refusal can loop the seat. Witness: ls-gfx-session leg -- from a tile, run a probe that writes `session on` on a private conn (expect E_BUSY, the compositor keeps the seat); and a boot-test arm that pre-declares from a stray conn, then logs in (expect a working session, not a re-prompt).
+
+## Disposition
+
+Fixed in the round-2 close: the seat is the PRINCIPAL's, held through a conn. `session on` takes the seat over from a holder of the same principal (a restarted compositor whose dead conn is not yet retired) and from any holder that hosts nothing (an idle declaration holds no display); only a holder hosting leaves for ANOTHER principal answers E_BUSY (logged with the holder). halcyond retries a refused declaration through `DECLARE_TRIES` (a seat mid-handover) and then runs UNDECLARED -- its tiles beside the console, said once, `session up ... (undeclared)` -- never exiting into the login loop. The takeover arms are unconstructed by a gate (a second conn of the same principal; a foreign holder); the declare/undeclare path runs in ls-gfx-panes' declared control and ls-gfx-session.

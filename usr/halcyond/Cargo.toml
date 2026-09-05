@@ -46,6 +46,14 @@ vt = { path = "../lib/vt" }
 cartoon = { path = "../lib/cartoon" }
 libhalcyon = { path = "../lib/libhalcyon" }
 beacon = { path = "../lib/beacon" }
+# The tile seam types + wire codec only (default-features off drops the `bin`
+# process, whose libthyla-rs dep does not host-compile -- so the halcyond lib
+# host tests keep building). KT-1.5.
+kaua-term = { path = "../kaua-term", default-features = false }
+# The KeyEvent model only (default-features off drops the `backend` = no
+# libthyla-rs, so the halcyond lib host tests build). KT-1.5d-2: `input::map_key`
+# builds a kaua KeyEvent for the tile down-channel.
+kaua = { path = "../lib/kaua", default-features = false }
 cornucopia = { path = "../lib/cornucopia" }
 fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }

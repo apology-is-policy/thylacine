@@ -538,6 +538,7 @@ void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
 void test_loom_cq_waiter_wake(void);
+void test_loom_poll(void);
 void test_loom_cq_waiter_no_spurious_wake_on_full(void);
 void test_loom_enter_inline_min_complete(void);
 void test_loom_enter_min_complete_no_inflight(void);
@@ -2234,6 +2235,7 @@ struct test_case g_tests[] = {
     { "loom.enter_flags_and_bad_index",  test_loom_enter_flags_and_bad_index,  false, NULL },
     { "loom.enter_cq_admission_backpressure", test_loom_enter_cq_admission_backpressure, false, NULL },
     { "loom.cq_waiter_wake",             test_loom_cq_waiter_wake,             false, NULL },
+    { "loom.poll",                       test_loom_poll,                       false, NULL },
     { "loom.cq_waiter_no_spurious_wake_on_full", test_loom_cq_waiter_no_spurious_wake_on_full, false, NULL },
     { "loom.enter_inline_min_complete",  test_loom_enter_inline_min_complete,  false, NULL },
     { "loom.enter_min_complete_no_inflight", test_loom_enter_min_complete_no_inflight, false, NULL },

@@ -284,6 +284,20 @@ pub struct Transcript {
 pub const DEFAULT_MAX_BLOCKS: usize = 1000;
 pub const DEFAULT_MAX_COST: usize = 32 << 20;
 pub const DEFAULT_MAX_LINES_PER_BLOCK: usize = 10_000;
+/// The open block freezes at the smaller of `max_cost / 8` and this: the
+/// open block is laid out WHOLE on every render (it is the one block no
+/// height cache can position), and a block straddling the view is laid out
+/// whole too, so the render transient is O(view + 2 x this), not O(share /
+/// 8) -- 4 MiB of cells at a 32 MiB share. It also bounds what a re-budget
+/// cannot evict (the newest frozen block, sized by the cap in force when it
+/// froze). 64 such blocks fill the default budget; the block cap holds 1000.
+pub const OPEN_BLOCK_MAX_COST: usize = 512 << 10;
+
+/// What one retained line costs beyond its cells: the `Item` slot, the
+/// `Line`'s vector header, and the allocator's per-block overhead. A cost
+/// model that charged only cells let an empty line be free, and a count cap
+/// alone is a budget the item count can spend past.
+const ITEM_OVERHEAD: usize = core::mem::size_of::<Item>() + core::mem::size_of::<Line>() + 16;
 
 impl Transcript {
     pub fn new(pal: Palette) -> Transcript {
@@ -333,7 +347,7 @@ impl Transcript {
             max_blocks,
             max_cost,
             max_lines_per_block: max_lines.max(1),
-            max_open_cost: (max_cost / 8).max(1),
+            max_open_cost: open_cap(max_cost),
             seq: 0,
         }
     }
@@ -745,7 +759,7 @@ impl Transcript {
             return;
         }
         let cells = core::mem::take(&mut self.line);
-        let cost = cells.len() * core::mem::size_of::<TCell>();
+        let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
         self.open.cost += cost;
         self.stored_cost += cost;
         self.open.items.push(Item::Line(Line { cells }));
@@ -1032,7 +1046,11 @@ impl Transcript {
             return; // row separation is structural, not textual
         }
         if self.line.is_empty() {
-            // A blank line is content: keep it as an empty Line item.
+            // A blank line is content: keep it as an empty Line item -- and
+            // charge it: a million empty lines is a million items.
+            let cost = ITEM_OVERHEAD;
+            self.open.cost += cost;
+            self.stored_cost += cost;
             self.open.items.push(Item::Line(Line { cells: Vec::new() }));
             self.col = 0;
             self.enforce_block_cap();
@@ -1051,17 +1069,22 @@ impl Transcript {
             obj: self.obj_stack.last().copied().unwrap_or(0),
             hdr: self.hdr,
         };
-        // Blocks carry few styles; a linear scan with a hot tail wins over
-        // a map here.
+        self.intern_style(s)
+    }
+
+    /// Intern an explicit style as an index in the OPEN block: dedup on the hot
+    /// tail, linear scan under the cap, then degrade-to-last past it (bounds
+    /// memory + keeps the index in u16; a truecolor-gradient spam otherwise
+    /// scans a growing table per char, and reaching thousands of distinct
+    /// styles in one block is hostile). Shared by the pen path (`style_idx`) and
+    /// the KT-1.5 ScrollOff ingest (`push_scrolled_rows`, a pre-styled vt::Cell).
+    fn intern_style(&mut self, s: Style) -> u16 {
+        // Blocks carry few styles; a linear scan with a hot tail wins over a map.
         if let Some(last) = self.open.styles.last() {
             if *last == s {
                 return (self.open.styles.len() - 1) as u16;
             }
         }
-        // At the cap: don't grow (bounds memory + keeps the index in u16) and
-        // don't full-scan (bounds CPU to O(1) post-cap -- a truecolor-gradient
-        // spam otherwise scans a growing table per char). Degrade to the last
-        // style; reaching thousands of distinct styles in one block is hostile.
         if self.open.styles.len() >= MAX_STYLES_PER_BLOCK {
             return (self.open.styles.len() - 1) as u16;
         }
@@ -1073,9 +1096,64 @@ impl Transcript {
         self.open.styles.push(s);
         (self.open.styles.len() - 1) as u16
     }
+
+    /// KT-1.5 (HALCYON 14.11.2): ingest ScrollOff rows -- lines that left the top
+    /// of a tile's live grid -- as history in the current (open) block. Each row
+    /// is a finished screen line of pre-styled `vt::Cell`s (the kaua-term already
+    /// ran the VT); intern each cell's style into the open block and append the
+    /// row as a `Line`, mirroring `flush_line`'s cost accounting so the block-cap
+    /// / eviction machinery bounds a tile that scrolls forever. No zone logic
+    /// here: a zone cut arrives as a separate `Control(Osc1936Raw)` record fed
+    /// through `feed`, and stream order (guaranteed by the producer) lands each
+    /// scroll-off in the block that was open when it happened.
+    pub fn push_scrolled_rows(&mut self, rows: &[Vec<vt::Cell>]) {
+        for row in rows {
+            let mut cells: Vec<TCell> = Vec::with_capacity(row.len());
+            for c in row {
+                let style = self.intern_style(Style {
+                    fg: c.fg,
+                    bg: c.bg,
+                    attrs: c.attrs,
+                    em: EM_NONE,
+                    obj: 0,
+                    hdr: 0,
+                });
+                cells.push(TCell { ch: c.ch, style });
+            }
+            let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
+            self.open.cost += cost;
+            self.stored_cost += cost;
+            self.open.items.push(Item::Line(Line { cells }));
+            self.enforce_block_cap();
+        }
+    }
+
+    /// Re-budget a live transcript (a session shares one scrollback budget
+    /// across its tiles, so each tile's share moves as tiles come and go).
+    /// Enforced NOW, not at the next push: a QUIET tile never pushes, so a
+    /// lazy cap would let it keep its whole old share indefinitely and the
+    /// session's retained sum would grow as the budget times the harmonic
+    /// number of the tile count. The open block freezes if it alone exceeds
+    /// the new open cap, so the eviction loop can reach it.
+    pub fn set_max_cost(&mut self, max_cost: usize) {
+        self.max_cost = max_cost;
+        self.max_open_cost = open_cap(max_cost);
+        self.enforce_block_cap();
+        self.enforce_budget();
+    }
+
+    /// The retained cost the budget bounds (frozen blocks + the open one).
+    pub fn stored_cost(&self) -> usize {
+        self.stored_cost
+    }
 }
 
 // --- the chunk-boundary holdback -------------------------------------------
+
+/// The open block's byte cap for a budget (see `OPEN_BLOCK_MAX_COST`).
+fn open_cap(max_cost: usize) -> usize {
+    (max_cost / 8).clamp(1, OPEN_BLOCK_MAX_COST)
+}
 
 /// Find the safe parse cut: the start of the escape sequence still OPEN at
 /// the buffer end (or len when none is). A last-ESC heuristic is wrong
@@ -1632,6 +1710,87 @@ mod tests {
     // eviction can reach any of it. Small caps make the test cheap: the open
     // block must never exceed its byte cap, and the whole transcript must
     // stay within one open-cap of the budget.
+    #[test]
+    fn a_re_budget_residue_is_bounded_by_the_constant_open_cap() {
+        // Round-3 F5: the eviction floor keeps the newest frozen block, sized
+        // by the open cap in force when it froze -- at a 32 MiB share that
+        // was 4 MiB, and across N re-budgeted tiles it summed to 4 MiB x H(N)
+        // over the budget. With a CONSTANT open cap the residue is <= that
+        // constant (+ the styles charged at freeze) whatever the old share.
+        let share = 32 << 20;
+        let mut t = Transcript::with_caps(daylight(), 1000, share, 10_000);
+        let row: Vec<vt::Cell> = (0..128)
+            .map(|_| vt::Cell {
+                ch: 'y',
+                fg: 0xFFFFFF,
+                bg: 0,
+                attrs: 0,
+            })
+            .collect();
+        let rows: Vec<Vec<vt::Cell>> = alloc::vec![row; 64];
+        // several cap-sized continuation blocks
+        while t.frozen_blocks().len() < 6 {
+            t.push_scrolled_rows(&rows);
+        }
+        let last = t.frozen_blocks().back().map_or(0, |b| b.cost);
+        assert!(
+            last <= OPEN_BLOCK_MAX_COST + 128 * 1024 + 64 * 1024,
+            "a frozen block is bounded by the constant cap (+ one row + styles), got {last}"
+        );
+        let small = 1 << 20;
+        t.set_max_cost(small);
+        assert!(
+            t.stored_cost()
+                <= small + OPEN_BLOCK_MAX_COST + 128 * 1024 + 64 * 1024 + open_cap(small),
+            "residue {} exceeds the new share {} plus the constant cap",
+            t.stored_cost(),
+            small
+        );
+    }
+
+    #[test]
+    fn set_max_cost_evicts_a_quiet_transcript_at_once() {
+        // B2-F2: lowering the share of a tile that receives no more output
+        // must shrink its retained set NOW -- nothing else will ever push.
+        let big = 1 << 20;
+        let mut t = Transcript::with_caps(daylight(), 1000, big, 10_000);
+        let row: Vec<vt::Cell> = (0..128)
+            .map(|_| vt::Cell {
+                ch: 'x',
+                fg: 0xFFFFFF,
+                bg: 0,
+                attrs: 0,
+            })
+            .collect();
+        let rows: Vec<Vec<vt::Cell>> = alloc::vec![row; 64];
+        while t.stored_cost() < big - (big / 8) {
+            t.push_scrolled_rows(&rows);
+        }
+        let before = t.stored_cost();
+        assert!(
+            before > big / 2,
+            "the fill reached the old share ({before})"
+        );
+        assert!(
+            t.frozen_blocks().len() > 1,
+            "several frozen blocks to evict"
+        );
+
+        let small = big / 4;
+        t.set_max_cost(small);
+        // At most the new cap plus one un-evictable block (the loop keeps the
+        // newest frozen block) plus the new open cap.
+        let slack = t.frozen_blocks().back().map_or(0, |b| b.cost) + open_cap(small);
+        assert!(
+            t.stored_cost() <= small + slack,
+            "stored_cost {} still above the new share {} (+{} slack) after set_max_cost",
+            t.stored_cost(),
+            small,
+            slack
+        );
+        assert!(t.stored_cost() < before, "the re-budget evicted something");
+    }
+
     #[test]
     fn open_block_freezes_on_bytes_so_the_budget_can_evict_it() {
         // 1 MiB budget -> a 128 KiB open cap (4 soft-wrapped lines per block);

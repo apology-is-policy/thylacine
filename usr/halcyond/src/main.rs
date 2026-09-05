@@ -50,6 +50,10 @@ use tapestry::{
     TEV_PTR_MOVE,
 };
 
+// The per-user SESSION compositor (the `--session` body) lives in `session.rs`
+// (KT-1.5d-3, the multi-tile multiplex); the console-renderer body below is the
+// `rs_main` default path.
+
 macro_rules! say {
     ($($a:tt)*) => {{
         let mut s = alloc::format!($($a)*);
@@ -60,6 +64,7 @@ macro_rules! say {
 
 mod chromeset;
 mod menuset;
+mod session;
 mod statusset;
 
 /// evdev BTN_LEFT (the tapestry PTR_BTN `code`).
@@ -268,6 +273,32 @@ impl LayoutCache {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    // KT-1.5d-1a (HALCYON 14.12): `--session` selects the per-user SESSION
+    // compositor -- login spawns this AS the user, NOT joey as the system
+    // console renderer. The session variant holds no g_console_renderer role:
+    // it skips the /dev/cons drain/feed/consctl trio entirely and hosts the
+    // session in tapestryd (later: pts tiles), never the console mirror. The
+    // console-renderer body below is unchanged (the proven aurora-shaped path,
+    // still selected by joey when the device names halcyond as the renderer).
+    if libthyla_rs::env::args()
+        .operands()
+        .any(|a| a == b"--session")
+    {
+        // `--home <dir>`: forwarded to every tile's shell (its $home, `cd`,
+        // history and the per-user /tmp bind all key on it).
+        let mut home: Option<alloc::string::String> = None;
+        let mut want = false;
+        for a in libthyla_rs::env::args().operands() {
+            if want {
+                home = core::str::from_utf8(a)
+                    .ok()
+                    .map(alloc::string::String::from);
+                break;
+            }
+            want = a == b"--home";
+        }
+        return session::run(home);
+    }
     if !cornucopia::verify_all() {
         say!("halcyond: FAIL atlas magic/version");
         return 1;
@@ -302,16 +333,22 @@ pub extern "C" fn rs_main() -> i64 {
 
     // THE EVENT SET (H-3c-2): ONE session + ONE Loom ring for every surface
     // this renderer opens -- the console, the tag-bar tiles, the menu -- so
-    // one blocking wait wakes for any of their events and one session's
-    // reader demuxes all of them. (Two sessions under one thread starved
-    // whichever the thread was not waiting on: a tile's CONFIGURE landed
-    // only at the next pane-tree RPC, a menu's key never -- the H-3c lever.)
-    // The console surface + the ring (bounded connect retry; aurora's
-    // discipline).
+    // one wait wakes for any of their events and one session's reader demuxes
+    // all of them. (Two sessions under one thread starved whichever the
+    // thread was not waiting on: a tile's CONFIGURE landed only at the next
+    // pane-tree RPC, a menu's key never -- the H-3c lever.)
+    //
+    // KT-1.5b: the ring is SQPOLL, so the kernel poll-thread drives the
+    // session reader and posts completions off-thread. The main loop then
+    // blocks in ONE poll(2) over { ring.poll_fd() | /dev/consdrain } instead
+    // of the ring alone, so shell output wakes the renderer at once rather
+    // than at the next compositor frame tick (the frame-coupled console
+    // latency). The console surface + the ring (bounded connect retry;
+    // aurora keeps the non-SQPOLL connect()).
     let mut ring: Option<EventRing> = None;
     let mut surf: Option<Surface> = None;
     for i in 0..CONNECT_TRIES {
-        let r = match EventRing::connect() {
+        let r = match EventRing::connect_sqpoll() {
             Ok(r) => r,
             Err(e) => {
                 if i == CONNECT_TRIES - 1 {
@@ -707,10 +744,9 @@ pub extern "C" fn rs_main() -> i64 {
         // the expanded command into the console (the tag line's "executes
         // typed text" -- the gesture is the choice); the compositor's own
         // dismiss (Esc / click-away / a chord) arrives as a closed stream.
-        // While a menu is up this WAITS on the menu's ring (see
-        // `MenuSet::service`: its session is read only by a waiter on it;
-        // the menu's FRAME ticks bound the wait) and step (1) polls the
-        // console's stream instead of blocking on it.
+        // While a menu is up `MenuSet::service` drains the menu's events
+        // NON-blockingly off the one shared ring (the H-3c-2 event set);
+        // the loop's unified poll wakes for them like the console's own.
         match menus.service(&mut gs) {
             menuset::MenuEvent::Chosen(Action::Command(cmd)) => {
                 menus.close();
@@ -785,8 +821,31 @@ pub extern "C" fn rs_main() -> i64 {
             match surf.poll_event() {
                 Ok(Some(e)) => Some(e),
                 Ok(None) => {
-                    if ring.wait().is_err() {
-                        say!("halcyond: event ring wait failed (compositor gone); exiting");
+                    // KT-1.5b-i: block in ONE poll over the SQPOLL ring AND
+                    // the console mirror, so shell output wakes us at once
+                    // instead of at the next compositor frame tick (the
+                    // frame-coupled console latency). The ring's kthread
+                    // drives the session reader and posts CQEs off-thread, so
+                    // poll(ring_fd) reports POLLIN for any surface's event
+                    // (console / tile / menu) exactly as the old ring.wait()
+                    // woke on any completion; timeout -1 blocks indefinitely,
+                    // matching it. A console-only wake leaves this surface's
+                    // queue empty (take_event -> None); step (2) drains the
+                    // console and the top re-renders.
+                    let mut waitfds = [
+                        TPollFd {
+                            fd: ring.poll_fd(),
+                            events: T_POLLIN,
+                            revents: 0,
+                        },
+                        TPollFd {
+                            fd: drain as i32,
+                            events: T_POLLIN,
+                            revents: 0,
+                        },
+                    ];
+                    if unsafe { t_poll(waitfds.as_mut_ptr(), 2, -1) } < 0 {
+                        say!("halcyond: unified poll failed (compositor gone); exiting");
                         return 1;
                     }
                     match surf.poll_event() {

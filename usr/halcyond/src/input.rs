@@ -13,6 +13,7 @@
 // (a hidden surface receives no frame ticks).
 
 use alloc::vec::Vec;
+use kaua::{KeyCode, KeyEvent};
 
 /// The held-input bound: ~8x the kernel ring; far past any human burst.
 pub const FEED_PENDING_MAX: usize = 4096;
@@ -94,6 +95,41 @@ pub fn key_bytes(code: u16, value: u32, rune: u32, out: &mut Vec<u8>) {
         _ => return,
     };
     out.extend_from_slice(seq);
+}
+
+/// Map a tapestryd `TEV_KEY` (`code` = evdev keycode, `rune` = the composed
+/// terminal rune, `value` 0=release/1=press/2=repeat) to a kaua `KeyEvent` for
+/// a tile's down-channel (HALCYON.md 14.11.9). `None` for a release or an
+/// unencodable key.
+///
+/// tapestryd's keymap composes the rune (folds Ctrl -> control byte, resolves
+/// shift; `keymap.rs::resolve`), so a char/control key passes through as
+/// `Char(rune)` with NO mods -- the kaua-term's `encode_char` then emits UTF-8,
+/// byte-identical to the console `key_bytes` rune arm above. A rune-less nav
+/// key (arrows / Home / End / page / Del / Ins -- the same evdev table as
+/// `key_bytes`) maps to its `KeyCode`, so the kaua-term re-encodes it honoring
+/// DECCKM (the app-cursor fidelity the raw-byte console path cannot carry).
+pub fn map_key(code: u16, rune: u32, value: u32) -> Option<KeyEvent> {
+    if value == 0 {
+        return None;
+    }
+    if rune != 0 {
+        return Some(KeyEvent::new(KeyCode::Char(char::from_u32(rune)?)));
+    }
+    let kc = match code {
+        103 => KeyCode::Up,
+        108 => KeyCode::Down,
+        106 => KeyCode::Right,
+        105 => KeyCode::Left,
+        102 => KeyCode::Home,
+        107 => KeyCode::End,
+        104 => KeyCode::PageUp,
+        109 => KeyCode::PageDown,
+        111 => KeyCode::Delete,
+        110 => KeyCode::Insert,
+        _ => return None,
+    };
+    Some(KeyEvent::new(kc))
 }
 
 /// The transcript's two keyboard modes (HALCYON.md section 4: the
@@ -282,5 +318,68 @@ mod tests {
         assert_eq!(normal_key(0, 0x70), NormalAct::Paste);
         assert_eq!(normal_key(0, 0x1b), NormalAct::Collapse);
         assert_eq!(normal_key(0, 0x7a), NormalAct::None);
+    }
+
+    // map_key: the tile down-channel translation (14.11.9). A rune passes
+    // through as Char (tapestryd already composed it -- Ctrl-folded, shift-
+    // resolved); a rune-less nav key maps to its KeyCode so the kaua-term
+    // honors DECCKM. A release or an unknown key is None.
+    #[test]
+    fn map_key_release_is_none() {
+        assert_eq!(map_key(30, 0x61, 0), None); // 'a' release
+    }
+
+    #[test]
+    fn map_key_rune_passes_through_as_char() {
+        // a printable, a Ctrl-folded control rune, Enter, Tab, Esc, Backspace --
+        // all arrive from tapestryd as the composed rune, so all are Char(rune).
+        assert_eq!(
+            map_key(30, 0x61, 1),
+            Some(KeyEvent::new(KeyCode::Char('a')))
+        );
+        assert_eq!(
+            map_key(46, 0x03, 1), // Ctrl-C -> 0x03
+            Some(KeyEvent::new(KeyCode::Char('\u{3}')))
+        );
+        assert_eq!(
+            map_key(28, 0x0d, 1),
+            Some(KeyEvent::new(KeyCode::Char('\r')))
+        );
+        assert_eq!(
+            map_key(15, 0x09, 1),
+            Some(KeyEvent::new(KeyCode::Char('\t')))
+        );
+        assert_eq!(
+            map_key(1, 0x1b, 1),
+            Some(KeyEvent::new(KeyCode::Char('\u{1b}')))
+        );
+        assert_eq!(
+            map_key(14, 0x08, 1), // Backspace -> 0x08 (matches the console key_bytes arm)
+            Some(KeyEvent::new(KeyCode::Char('\u{8}')))
+        );
+        // Ctrl-D -> 0x04, the E2E logout key (ut reads it as EOF).
+        assert_eq!(
+            map_key(32, 0x04, 1),
+            Some(KeyEvent::new(KeyCode::Char('\u{4}')))
+        );
+    }
+
+    #[test]
+    fn map_key_nav_keys_map_to_keycodes() {
+        assert_eq!(map_key(103, 0, 1), Some(KeyEvent::new(KeyCode::Up)));
+        assert_eq!(map_key(108, 0, 1), Some(KeyEvent::new(KeyCode::Down)));
+        assert_eq!(map_key(106, 0, 1), Some(KeyEvent::new(KeyCode::Right)));
+        assert_eq!(map_key(105, 0, 1), Some(KeyEvent::new(KeyCode::Left)));
+        assert_eq!(map_key(102, 0, 1), Some(KeyEvent::new(KeyCode::Home)));
+        assert_eq!(map_key(107, 0, 1), Some(KeyEvent::new(KeyCode::End)));
+        assert_eq!(map_key(104, 0, 1), Some(KeyEvent::new(KeyCode::PageUp)));
+        assert_eq!(map_key(109, 0, 1), Some(KeyEvent::new(KeyCode::PageDown)));
+        assert_eq!(map_key(111, 0, 1), Some(KeyEvent::new(KeyCode::Delete)));
+        assert_eq!(map_key(110, 0, 1), Some(KeyEvent::new(KeyCode::Insert)));
+    }
+
+    #[test]
+    fn map_key_unknown_runeless_is_none() {
+        assert_eq!(map_key(9999, 0, 1), None);
     }
 }

@@ -3,8 +3,9 @@
 // app-side emitter). The subset covers what the tree's emitters produce
 // (libutopia's ANSI + truecolor SGR, Kaua's cursor/erase/alt-screen, login's
 // plain lines) plus the classic VT100 core; unknown sequences are parsed and
-// dropped (never desync). DECSTBM scroll regions are accepted-and-ignored
-// (full-screen scroll only) -- the recorded MVP seam.
+// dropped (never desync). DECSTBM scroll regions, DECOM origin mode, SU/SD,
+// wide (double-width) glyphs, and italic/dim/blink/strike SGR are honored
+// (KT-1a); full wide/attr RENDERING is the consumer's (KT-1c/1d).
 //
 // Colors are the Bonfire palette (docs/UTOPIA-VISUAL.md section 1): default
 // bg/fg + the role-derived ANSI-16 map below. SGR 38;2 truecolor passes
@@ -62,7 +63,11 @@ pub struct Palette {
     pub ansi: [u32; 16],
 }
 
-pub const BONFIRE: Palette = Palette { bg: BG, fg: FG, ansi: ANSI };
+pub const BONFIRE: Palette = Palette {
+    bg: BG,
+    fg: FG,
+    ansi: ANSI,
+};
 
 // Parchment: the light counterpart (warm paper + ink; the ANSI tier darkened
 // for contrast on a light field). Values are Aurora's derivation, like the
@@ -127,11 +132,334 @@ pub static THEMES: [(&str, Palette); 3] = [
     ("spinifex", SPINIFEX),
 ];
 
+// Daylight: the Halcyon compositor's render palette (HALCYON.md section 14.12).
+// A per-tile kaua-term stamps cells in the COMPOSITOR's theme, because the seam
+// ships resolved RGB (14.3) -- the palette must be applied at the producer, not
+// re-mapped in halcyond. Parchment's ANSI over the exact Daylight surface + ink
+// (libhalcyon::DAYLIGHT), so a session tile's grid composites coherently with
+// halcyond's Daylight transcript. Single source of truth: libhalcyon::
+// daylight_palette() returns this. NOT in THEMES (it is the render palette, not
+// a user-selectable set_theme choice). v1.x: the compositor plumbs the palette
+// to the kaua-term (14.6's tier precedent) rather than the producer defaulting.
+pub const DAYLIGHT: Palette = Palette {
+    bg: 0xFFF2_EBE0, // libhalcyon DAYLIGHT.surface
+    fg: 0xFF1A_120A, // libhalcyon DAYLIGHT.fg
+    ansi: {
+        let mut a = PARCHMENT.ansi;
+        a[15] = 0xFF1A_120A; // bright white == default fg (the slot-uniqueness alias)
+        a
+    },
+};
+
 pub const ATTR_REVERSE: u8 = 1 << 0;
 pub const ATTR_UNDERLINE: u8 = 1 << 1;
 pub const ATTR_BOLD: u8 = 1 << 2;
+pub const ATTR_ITALIC: u8 = 1 << 3;
+pub const ATTR_DIM: u8 = 1 << 4;
+pub const ATTR_BLINK: u8 = 1 << 5;
+pub const ATTR_STRIKE: u8 = 1 << 6;
 
-#[derive(Clone, Copy)]
+/// Cell geometry, not an SGR pen attr: the parser sets it on the LEFT half of
+/// a double-width glyph so a consumer draws it two cells wide and skips the
+/// next (blank) continuation cell. It lives above the SGR pen bits (which the
+/// SgrPen owns, 0..=6) so the pen never sets it.
+pub const ATTR_WIDE: u8 = 1 << 7;
+
+// Cell display width (a wcwidth over Unicode scalars -- the parser decodes
+// UTF-8 before put_char, so this sees full code points). 0 = combining /
+// zero-width, 2 = East Asian Wide/Fullwidth + emoji, else 1. A hostile-input
+// surface: total over every char, never panics. Ranges follow Markus Kuhn's
+// reference wcwidth (the de-facto terminal standard) plus the supplementary
+// emoji planes; obscure combining marks outside the table fall back to width 1
+// -- a minor rendering imperfection, never a misaccounting of the common case.
+fn in_ranges(cp: u32, table: &[(u32, u32)]) -> bool {
+    let (mut lo, mut hi) = (0usize, table.len());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let (a, b) = table[mid];
+        if cp < a {
+            hi = mid;
+        } else if cp > b {
+            lo = mid + 1;
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_wide(cp: u32) -> bool {
+    cp >= 0x1100
+        && (cp <= 0x115F // Hangul Jamo (leading)
+            || cp == 0x2329
+            || cp == 0x232A
+            || ((0x2E80..=0xA4CF).contains(&cp) && cp != 0x303F) // CJK radicals..Yi
+            || (0xAC00..=0xD7A3).contains(&cp) // Hangul Syllables
+            || (0xF900..=0xFAFF).contains(&cp) // CJK Compat Ideographs
+            || (0xFE10..=0xFE19).contains(&cp) // Vertical forms
+            || (0xFE30..=0xFE6F).contains(&cp) // CJK Compat Forms
+            || (0xFF00..=0xFF60).contains(&cp) // Fullwidth forms
+            || (0xFFE0..=0xFFE6).contains(&cp) // Fullwidth signs
+            || (0x1F300..=0x1FAFF).contains(&cp) // emoji pictographs
+            || (0x20000..=0x3FFFD).contains(&cp)) // CJK Ext B..G
+}
+
+fn char_width(c: char) -> usize {
+    let cp = c as u32;
+    if cp == 0 {
+        return 0;
+    }
+    if in_ranges(cp, COMBINING) {
+        return 0;
+    }
+    if is_wide(cp) {
+        return 2;
+    }
+    1
+}
+
+// Sorted, non-overlapping inclusive nonspacing-mark ranges (Kuhn's combining
+// table, BMP-complete + the high-value supplementary marks + variation
+// selectors). The sort/non-overlap invariant that in_ranges' binary search
+// relies on is asserted by combining_table_is_sorted.
+const COMBINING: &[(u32, u32)] = &[
+    (0x0300, 0x036F),
+    (0x0483, 0x0489),
+    (0x0591, 0x05BD),
+    (0x05BF, 0x05BF),
+    (0x05C1, 0x05C2),
+    (0x05C4, 0x05C5),
+    (0x05C7, 0x05C7),
+    (0x0610, 0x061A),
+    (0x064B, 0x065F),
+    (0x0670, 0x0670),
+    (0x06D6, 0x06DC),
+    (0x06DF, 0x06E4),
+    (0x06E7, 0x06E8),
+    (0x06EA, 0x06ED),
+    (0x0711, 0x0711),
+    (0x0730, 0x074A),
+    (0x07A6, 0x07B0),
+    (0x07EB, 0x07F3),
+    (0x0816, 0x0819),
+    (0x081B, 0x0823),
+    (0x0825, 0x0827),
+    (0x0829, 0x082D),
+    (0x0859, 0x085B),
+    (0x08E3, 0x0902),
+    (0x093A, 0x093A),
+    (0x093C, 0x093C),
+    (0x0941, 0x0948),
+    (0x094D, 0x094D),
+    (0x0951, 0x0957),
+    (0x0962, 0x0963),
+    (0x0981, 0x0981),
+    (0x09BC, 0x09BC),
+    (0x09C1, 0x09C4),
+    (0x09CD, 0x09CD),
+    (0x09E2, 0x09E3),
+    (0x0A01, 0x0A02),
+    (0x0A3C, 0x0A3C),
+    (0x0A41, 0x0A42),
+    (0x0A47, 0x0A48),
+    (0x0A4B, 0x0A4D),
+    (0x0A70, 0x0A71),
+    (0x0A75, 0x0A75),
+    (0x0A81, 0x0A82),
+    (0x0ABC, 0x0ABC),
+    (0x0AC1, 0x0AC5),
+    (0x0AC7, 0x0AC8),
+    (0x0ACD, 0x0ACD),
+    (0x0AE2, 0x0AE3),
+    (0x0B01, 0x0B01),
+    (0x0B3C, 0x0B3C),
+    (0x0B3F, 0x0B3F),
+    (0x0B41, 0x0B44),
+    (0x0B4D, 0x0B4D),
+    (0x0B56, 0x0B56),
+    (0x0B62, 0x0B63),
+    (0x0B82, 0x0B82),
+    (0x0BC0, 0x0BC0),
+    (0x0BCD, 0x0BCD),
+    (0x0C00, 0x0C00),
+    (0x0C3E, 0x0C40),
+    (0x0C46, 0x0C48),
+    (0x0C4A, 0x0C4D),
+    (0x0C55, 0x0C56),
+    (0x0C62, 0x0C63),
+    (0x0C81, 0x0C81),
+    (0x0CBC, 0x0CBC),
+    (0x0CBF, 0x0CBF),
+    (0x0CC6, 0x0CC6),
+    (0x0CCC, 0x0CCD),
+    (0x0CE2, 0x0CE3),
+    (0x0D01, 0x0D01),
+    (0x0D41, 0x0D44),
+    (0x0D4D, 0x0D4D),
+    (0x0D62, 0x0D63),
+    (0x0DCA, 0x0DCA),
+    (0x0DD2, 0x0DD4),
+    (0x0DD6, 0x0DD6),
+    (0x0E31, 0x0E31),
+    (0x0E34, 0x0E3A),
+    (0x0E47, 0x0E4E),
+    (0x0EB1, 0x0EB1),
+    (0x0EB4, 0x0EB9),
+    (0x0EBB, 0x0EBC),
+    (0x0EC8, 0x0ECD),
+    (0x0F18, 0x0F19),
+    (0x0F35, 0x0F35),
+    (0x0F37, 0x0F37),
+    (0x0F39, 0x0F39),
+    (0x0F71, 0x0F7E),
+    (0x0F80, 0x0F84),
+    (0x0F86, 0x0F87),
+    (0x0F8D, 0x0F97),
+    (0x0F99, 0x0FBC),
+    (0x0FC6, 0x0FC6),
+    (0x102D, 0x1030),
+    (0x1032, 0x1037),
+    (0x1039, 0x103A),
+    (0x103D, 0x103E),
+    (0x1058, 0x1059),
+    (0x105E, 0x1060),
+    (0x1071, 0x1074),
+    (0x1082, 0x1082),
+    (0x1085, 0x1086),
+    (0x108D, 0x108D),
+    (0x109D, 0x109D),
+    (0x135D, 0x135F),
+    (0x1712, 0x1714),
+    (0x1732, 0x1734),
+    (0x1752, 0x1753),
+    (0x1772, 0x1773),
+    (0x17B4, 0x17B5),
+    (0x17B7, 0x17BD),
+    (0x17C6, 0x17C6),
+    (0x17C9, 0x17D3),
+    (0x17DD, 0x17DD),
+    (0x180B, 0x180D),
+    (0x1885, 0x1886),
+    (0x18A9, 0x18A9),
+    (0x1920, 0x1922),
+    (0x1927, 0x1928),
+    (0x1932, 0x1932),
+    (0x1939, 0x193B),
+    (0x1A17, 0x1A18),
+    (0x1A1B, 0x1A1B),
+    (0x1A56, 0x1A56),
+    (0x1A58, 0x1A5E),
+    (0x1A60, 0x1A60),
+    (0x1A62, 0x1A62),
+    (0x1A65, 0x1A6C),
+    (0x1A73, 0x1A7C),
+    (0x1A7F, 0x1A7F),
+    (0x1AB0, 0x1ABE),
+    (0x1B00, 0x1B03),
+    (0x1B34, 0x1B34),
+    (0x1B36, 0x1B3A),
+    (0x1B3C, 0x1B3C),
+    (0x1B42, 0x1B42),
+    (0x1B6B, 0x1B73),
+    (0x1B80, 0x1B81),
+    (0x1BA2, 0x1BA5),
+    (0x1BA8, 0x1BA9),
+    (0x1BAB, 0x1BAD),
+    (0x1BE6, 0x1BE6),
+    (0x1BE8, 0x1BE9),
+    (0x1BED, 0x1BED),
+    (0x1BEF, 0x1BF1),
+    (0x1C2C, 0x1C33),
+    (0x1C36, 0x1C37),
+    (0x1CD0, 0x1CD2),
+    (0x1CD4, 0x1CE0),
+    (0x1CE2, 0x1CE8),
+    (0x1CED, 0x1CED),
+    (0x1CF4, 0x1CF4),
+    (0x1CF8, 0x1CF9),
+    (0x1DC0, 0x1DFF),
+    (0x20D0, 0x20F0),
+    (0x2CEF, 0x2CF1),
+    (0x2D7F, 0x2D7F),
+    (0x2DE0, 0x2DFF),
+    (0x302A, 0x302D),
+    (0x3099, 0x309A),
+    (0xA66F, 0xA672),
+    (0xA674, 0xA67D),
+    (0xA69E, 0xA69F),
+    (0xA6F0, 0xA6F1),
+    (0xA802, 0xA802),
+    (0xA806, 0xA806),
+    (0xA80B, 0xA80B),
+    (0xA825, 0xA826),
+    (0xA8C4, 0xA8C5),
+    (0xA8E0, 0xA8F1),
+    (0xA926, 0xA92D),
+    (0xA947, 0xA951),
+    (0xA980, 0xA982),
+    (0xA9B3, 0xA9B3),
+    (0xA9B6, 0xA9B9),
+    (0xA9BC, 0xA9BC),
+    (0xAA29, 0xAA2E),
+    (0xAA31, 0xAA32),
+    (0xAA35, 0xAA36),
+    (0xAA43, 0xAA43),
+    (0xAA4C, 0xAA4C),
+    (0xAAB0, 0xAAB0),
+    (0xAAB2, 0xAAB4),
+    (0xAAB7, 0xAAB8),
+    (0xAABE, 0xAABF),
+    (0xAAC1, 0xAAC1),
+    (0xAAEC, 0xAAED),
+    (0xAAF6, 0xAAF6),
+    (0xABE5, 0xABE5),
+    (0xABE8, 0xABE8),
+    (0xABED, 0xABED),
+    (0xFB1E, 0xFB1E),
+    (0xFE00, 0xFE0F),
+    (0xFE20, 0xFE2F),
+    (0x101FD, 0x101FD),
+    (0x102E0, 0x102E0),
+    (0x10376, 0x1037A),
+    (0x10A01, 0x10A03),
+    (0x10A05, 0x10A06),
+    (0x10A0C, 0x10A0F),
+    (0x10A38, 0x10A3A),
+    (0x10A3F, 0x10A3F),
+    (0x10AE5, 0x10AE6),
+    (0x11001, 0x11001),
+    (0x11038, 0x11046),
+    (0x1107F, 0x11081),
+    (0x110B3, 0x110B6),
+    (0x110B9, 0x110BA),
+    (0x11100, 0x11102),
+    (0x11127, 0x1112B),
+    (0x1112D, 0x11134),
+    (0x11173, 0x11173),
+    (0x11180, 0x11181),
+    (0x111B6, 0x111BE),
+    (0x116AB, 0x116AB),
+    (0x116AD, 0x116AD),
+    (0x116B0, 0x116B5),
+    (0x116B7, 0x116B7),
+    (0x16AF0, 0x16AF4),
+    (0x16B30, 0x16B36),
+    (0x16F8F, 0x16F92),
+    (0x1D167, 0x1D169),
+    (0x1D17B, 0x1D182),
+    (0x1D185, 0x1D18B),
+    (0x1D1AA, 0x1D1AD),
+    (0x1D242, 0x1D244),
+    (0x1DA00, 0x1DA36),
+    (0x1DA3B, 0x1DA6C),
+    (0x1DA75, 0x1DA75),
+    (0x1DA84, 0x1DA84),
+    (0x1DA9B, 0x1DA9F),
+    (0x1DAA1, 0x1DAAF),
+    (0xE0100, 0xE01EF),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
     pub ch: char,
     pub fg: u32,
@@ -141,8 +469,46 @@ pub struct Cell {
 
 impl Cell {
     fn blank(fg: u32, bg: u32) -> Cell {
-        Cell { ch: ' ', fg, bg, attrs: 0 }
+        Cell {
+            ch: ' ',
+            fg,
+            bg,
+            attrs: 0,
+        }
     }
+}
+
+/// A boundary event emitted DURING feed, in VT-stream order, when the parser
+/// is in event-capture mode (`set_capture_events(true)`; off by default so the
+/// console renderer sees byte-identical behavior). The kaua-term (KT-1) drains
+/// these via `feed_until` to build the ordered seam record stream: a boundary
+/// delimits a Beacon zone, so a consumer flushes its pending cell-diff at each
+/// one. When capture is OFF the parser pushes nothing and the enum is inert.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Boundary {
+    /// A normal-mode, full-screen (top margin at row 0) scroll pushed this row
+    /// off the top of the screen -> the transcript. Carries the row's cells as
+    /// they were before the scroll. A DECSTBM region scroll (top margin != 0)
+    /// discards its top line like xterm and emits nothing.
+    Scroll(Vec<Cell>),
+    /// BEL (0x07) in ground state.
+    Bell,
+    /// A non-7770 OSC terminated: the raw payload bytes between the OSC
+    /// introducer and the terminator (e.g. `b"0;title"` or `b"1936;v1;..."`).
+    /// The consumer routes by the leading numeric code; vt stays agnostic of
+    /// title/Beacon semantics. The 7770 aurora-config channel is consumed
+    /// in-parser (settings_req) and never surfaces here.
+    Osc(Vec<u8>),
+    /// Entered the alt screen. Carries the OUTGOING main buffer AND its cursor
+    /// `(cx, cy)` (the swap has already happened, so `cells` is the fresh blank
+    /// alt and the live cursor is homed) -- the consumer flushes the main's
+    /// final diff with THIS cursor (so a later alt-leave restores it correctly),
+    /// emits the mode switch, then resets its shadow to the now-blank alt.
+    AltEnter(Vec<Cell>, (usize, usize)),
+    /// Left the alt screen. Carries the RESTORED main buffer (== `cells` now)
+    /// -- the alt live grid is discarded; the consumer resets its shadow to
+    /// this and resumes normal-mode diffing.
+    AltLeave(Vec<Cell>),
 }
 
 /// The SGR pen: the fg/bg/attrs state one `CSI ... m` sequence mutates.
@@ -163,7 +529,11 @@ pub struct SgrPen {
 
 impl SgrPen {
     pub fn new(pal: &Palette) -> SgrPen {
-        SgrPen { fg: pal.fg, bg: pal.bg, attrs: 0 }
+        SgrPen {
+            fg: pal.fg,
+            bg: pal.bg,
+            attrs: 0,
+        }
     }
 
     /// Apply one SGR parameter list (the numbers between `CSI` and `m`).
@@ -184,11 +554,18 @@ impl SgrPen {
                     self.attrs = 0;
                 }
                 1 => self.attrs |= ATTR_BOLD,
+                2 => self.attrs |= ATTR_DIM,
+                3 => self.attrs |= ATTR_ITALIC,
                 4 => self.attrs |= ATTR_UNDERLINE,
+                5 | 6 => self.attrs |= ATTR_BLINK, // 6 (rapid) folded into blink
                 7 => self.attrs |= ATTR_REVERSE,
-                22 => self.attrs &= !ATTR_BOLD,
+                9 => self.attrs |= ATTR_STRIKE,
+                22 => self.attrs &= !(ATTR_BOLD | ATTR_DIM), // 22 clears both
+                23 => self.attrs &= !ATTR_ITALIC,
                 24 => self.attrs &= !ATTR_UNDERLINE,
+                25 => self.attrs &= !ATTR_BLINK,
                 27 => self.attrs &= !ATTR_REVERSE,
+                29 => self.attrs &= !ATTR_STRIKE,
                 30..=37 => self.fg = self.ansi_fg(pal, (v - 30) as usize),
                 39 => self.fg = pal.fg,
                 40..=47 => self.bg = pal.ansi[(v - 40) as usize],
@@ -265,7 +642,7 @@ const MAX_PARAMS: usize = 16;
 // Append `n` in decimal (the CPR reply formatter; no core::fmt in the byte
 // machine's hot path).
 fn push_dec(out: &mut Vec<u8>, n: usize) {
-    let mut buf = [0u8; 8];
+    let mut buf = [0u8; 20]; // max usize decimal digits
     let mut i = buf.len();
     let mut v = n.max(1); // rows/cols are 1-based and nonzero
     while v > 0 {
@@ -296,6 +673,16 @@ pub struct Vt {
     param_seen: bool,
     csi_priv: bool,
     saved: (usize, usize),
+    // DECSTBM scroll region [scroll_top, scroll_bot], 0-based inclusive; default
+    // full screen. LF at the bottom margin, RI at the top, and SU/SD scroll only
+    // this band; xterm resets it to full on resize. aurora never sets DECSTBM, so
+    // the full-screen default preserves its behavior (the shared-crate contract).
+    scroll_top: usize,
+    scroll_bot: usize,
+    // DECOM (?6): when set, CUP/VPA rows are origin-relative + region-clamped
+    // (see origin_row); default off (absolute). Relative moves (CUU/CUD/CUF/CUB)
+    // are NOT confined to the band -- a full-DECOM refinement, deferred.
+    origin: bool,
     // DECAWM (?7). Default SET (autowrap on -- the VT default). Kaua's
     // Terminal::enter emits ?7l so it can paint the bottom-right cell
     // scroll-free; ignoring it made every last-cell paint arm the deferred
@@ -334,11 +721,41 @@ pub struct Vt {
     utf_acc: u32,
     utf_rem: u8,
     pub dirty: Vec<bool>, // per-row damage
+    // KT-1 event capture. Off by default: the console renderer (aurora) never
+    // sets it, so the leaf handlers push nothing and every path is byte- and
+    // allocation-identical to before. The kaua-term sets it and drains
+    // `pending` via feed_until to build the ordered seam record stream.
+    capture_events: bool,
+    // Boundaries queued by the current byte, drained one per feed_until return.
+    // A single byte can queue several (a bulk SU scroll pushes up to `rows`
+    // rows off the top -- bounded by scroll_region_up's n.min(band)); the OSC
+    // payload cap (256) and per-row cell clones bound the rest.
+    pending: Vec<Boundary>,
+    // KT-1.3 DECCKM (?1, application cursor keys), set by the app's OUTPUT stream
+    // and read by the kaua-term's DOWN-channel key re-encoder to emit SS3 arrows
+    // instead of CSI. It only steers key encoding, never the cell grid, so the
+    // console renderer (which does not re-encode keys) ignores it. Application
+    // keypad (DECKPAM/DECKPNM) is deferred with its keycodes -- the shared
+    // KeyEvent model has no keypad keys yet, so there is nothing to re-encode.
+    app_cursor: bool,
 }
 
 impl Vt {
     pub fn new(cols: usize, rows: usize) -> Vt {
-        let pal = BONFIRE;
+        Vt::with_palette(cols, rows, BONFIRE)
+    }
+
+    /// Like `new`, but the screen is born in `pal` (its default fg/bg + ANSI).
+    /// A per-tile kaua-term uses this with `DAYLIGHT` so its cells carry the
+    /// COMPOSITOR's theme (HALCYON.md 14.6/14.12) -- the seam ships resolved
+    /// RGB, so the palette is applied at the producer, not re-mapped downstream.
+    pub fn with_palette(cols: usize, rows: usize, pal: Palette) -> Vt {
+        // The parser assumes cols >= 1 && rows >= 1 (scroll_bot = rows-1, cursor
+        // clamps, cy*cols+cx indexing). resize() guards this; new() must too, so
+        // compositor-supplied zero geometry cannot underflow at birth (F2). A
+        // shared crate -- kaua-term constructs a Vt per tile.
+        let cols = cols.max(1);
+        let rows = rows.max(1);
         Vt {
             cols,
             rows,
@@ -359,6 +776,9 @@ impl Vt {
             param_seen: false,
             csi_priv: false,
             saved: (0, 0),
+            scroll_top: 0,
+            scroll_bot: rows - 1,
+            origin: false,
             wrap: true,
             saved_wrap: true,
             reply: Vec::new(),
@@ -368,7 +788,48 @@ impl Vt {
             utf_acc: 0,
             utf_rem: 0,
             dirty: vec![true; rows],
+            capture_events: false,
+            pending: Vec::new(),
+            app_cursor: false,
         }
+    }
+
+    /// DECCKM (?1): application cursor-key mode. When set, the kaua-term's key
+    /// re-encoder emits SS3 (`ESC O A`) for the arrows/Home/End instead of CSI
+    /// (`ESC [ A`) -- what full-screen apps (vim, less) expect.
+    pub fn app_cursor(&self) -> bool {
+        self.app_cursor
+    }
+
+    /// Enable/disable boundary-event capture (KT-1). The console renderer
+    /// leaves it off (the default); the kaua-term turns it on so feed_until
+    /// yields the ordered seam boundaries. Toggling clears any queued events.
+    pub fn set_capture_events(&mut self, on: bool) {
+        self.capture_events = on;
+        self.pending.clear();
+    }
+
+    /// Resumable feed for the event-capture consumer (KT-1). Processes bytes
+    /// from `*pos` and returns at the first boundary event (having advanced
+    /// `*pos` past its triggering byte and applied its cell effect), or None at
+    /// end-of-slice. Parser state persists in self, so a chunk split across
+    /// calls resumes correctly. With capture off this consumes the whole slice
+    /// and returns None (behaving like feed). The consumer flushes a pending
+    /// cell-diff before acting on each returned boundary (the Beacon-zone
+    /// ordering the seam requires).
+    pub fn feed_until(&mut self, bytes: &[u8], pos: &mut usize) -> Option<Boundary> {
+        if !self.pending.is_empty() {
+            return Some(self.pending.remove(0));
+        }
+        while *pos < bytes.len() {
+            let b = bytes[*pos];
+            *pos += 1;
+            self.byte(b);
+            if !self.pending.is_empty() {
+                return Some(self.pending.remove(0));
+            }
+        }
+        None
     }
 
     /// #55 (AURORA.md section 4): the reweave grid resize. Content-preserving
@@ -382,9 +843,22 @@ impl Vt {
         if (ncols == self.cols && nrows == self.rows) || ncols == 0 || nrows == 0 {
             return;
         }
-        let shift = if self.cy >= nrows { self.cy + 1 - nrows } else { 0 };
+        let shift = if self.cy >= nrows {
+            self.cy + 1 - nrows
+        } else {
+            0
+        };
         let ccols = if self.cols < ncols { self.cols } else { ncols };
         let (pfg, pbg) = (self.pal.fg, self.pal.bg);
+        // Rows a shrink pushes off the top are scrolled off, not lost: under
+        // capture each becomes a Scroll boundary so a consumer's scrollback
+        // keeps them (xterm's behaviour on a shrink).
+        if self.capture_events && !self.on_alt {
+            for r in 0..shift.min(self.rows) {
+                let row = self.cells[r * self.cols..(r + 1) * self.cols].to_vec();
+                self.pending.push(Boundary::Scroll(row));
+            }
+        }
         let mut cells = vec![Cell::blank(pfg, pbg); ncols * nrows];
         for r in 0..nrows {
             let or = r + shift;
@@ -406,6 +880,9 @@ impl Vt {
         self.alt_cells = alt;
         self.cols = ncols;
         self.rows = nrows;
+        // DECSTBM resets to the full screen on resize (xterm parity).
+        self.scroll_top = 0;
+        self.scroll_bot = nrows - 1;
         self.cy = self.cy.saturating_sub(shift);
         if self.cy >= nrows {
             self.cy = nrows - 1;
@@ -414,8 +891,16 @@ impl Vt {
             self.cx = ncols - 1;
         }
         self.saved = (
-            if self.saved.0 >= ncols { ncols - 1 } else { self.saved.0 },
-            if self.saved.1 >= nrows { nrows - 1 } else { self.saved.1 },
+            if self.saved.0 >= ncols {
+                ncols - 1
+            } else {
+                self.saved.0
+            },
+            if self.saved.1 >= nrows {
+                nrows - 1
+            } else {
+                self.saved.1
+            },
         );
         self.dirty = vec![true; nrows];
     }
@@ -436,6 +921,12 @@ impl Vt {
     pub fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.byte(b);
+        }
+        // feed() does not surface the event stream; drop anything capture mode
+        // queued so it cannot leak into a later feed_until (aurora never sets
+        // capture, so this is a no-op on the console path).
+        if !self.pending.is_empty() {
+            self.pending.clear();
         }
     }
 
@@ -501,7 +992,11 @@ impl Vt {
                 let next = (self.cx / 8 + 1) * 8;
                 self.cx = next.min(self.cols - 1);
             }
-            0x07 => {} // BEL
+            0x07 => {
+                if self.capture_events {
+                    self.pending.push(Boundary::Bell);
+                }
+            } // BEL
             0x00..=0x06 | 0x0B..=0x0C | 0x0E..=0x1F | 0x7F => {} // other C0 + DEL: drop
             0x20..=0x7E => self.put_char(b as char),
             0xC0..=0xDF => {
@@ -548,11 +1043,11 @@ impl Vt {
             }
             b'D' => self.line_feed(),
             b'M' => {
-                // Reverse index: up, scrolling down at the top.
-                if self.cy > 0 {
-                    self.cy -= 1;
-                } else {
+                // Reverse index: up, scrolling the region down at the top margin.
+                if self.cy == self.scroll_top {
                     self.scroll_down();
+                } else if self.cy > 0 {
+                    self.cy -= 1;
                 }
             }
             b'c' => {
@@ -562,7 +1057,11 @@ impl Vt {
                 self.attrs = 0;
                 self.cx = 0;
                 self.cy = 0;
+                self.scroll_top = 0;
+                self.scroll_bot = self.rows - 1;
+                self.origin = false;
                 self.cursor_visible = true;
+                self.app_cursor = false;
                 let (fg, bg) = (self.pal.fg, self.bg);
                 for c in self.cells.iter_mut() {
                     *c = Cell::blank(fg, bg);
@@ -625,9 +1124,9 @@ impl Vt {
             b'C' => self.cx = (self.cx + self.p(0, 1) as usize).min(self.cols - 1),
             b'D' => self.cx = self.cx.saturating_sub(self.p(0, 1) as usize),
             b'G' => self.cx = (self.p(0, 1) as usize - 1).min(self.cols - 1),
-            b'd' => self.cy = (self.p(0, 1) as usize - 1).min(self.rows - 1),
+            b'd' => self.cy = self.origin_row(self.p(0, 1) as usize - 1),
             b'H' | b'f' => {
-                self.cy = (self.p(0, 1) as usize - 1).min(self.rows - 1);
+                self.cy = self.origin_row(self.p(0, 1) as usize - 1);
                 self.cx = (self.p(1, 1) as usize - 1).min(self.cols - 1);
             }
             b'J' => self.erase_display(self.p(0, 0)),
@@ -637,6 +1136,13 @@ impl Vt {
             b'@' => self.insert_chars(self.p(0, 1) as usize),
             b'P' => self.delete_chars(self.p(0, 1) as usize),
             b'X' => self.erase_chars(self.p(0, 1) as usize),
+            b'S' if !self.csi_priv => self.scroll_region_up(self.p(0, 1) as usize),
+            // CSI T with 0/1 params is SD; the 5-param form is xterm highlight
+            // mouse tracking (unimplemented) -- don't read it as a giant scroll.
+            // Both gate on !csi_priv: CSI ? ... S/T are private (sixel) queries.
+            b'T' if !self.csi_priv && self.nparams <= 1 => {
+                self.scroll_region_down(self.p(0, 1) as usize)
+            }
             b'm' => self.sgr(),
             b'h' | b'l' => self.mode_set(fin == b'h'),
             b's' => self.saved = (self.cx, self.cy),
@@ -644,7 +1150,22 @@ impl Vt {
                 self.cx = self.saved.0.min(self.cols - 1);
                 self.cy = self.saved.1.min(self.rows - 1);
             }
-            b'r' => {} // DECSTBM: accepted, ignored (full-screen scroll; MVP seam)
+            b'r' if !self.csi_priv => {
+                // DECSTBM: set the scroll region [top, bot] (1-based params;
+                // empty -> full screen). A malformed region (top >= bot, or out
+                // of range) resets to full (xterm). Homes the cursor (origin-aware).
+                let top = (self.p(0, 1).max(1) as usize) - 1;
+                let bot = (self.p(1, self.rows as u32) as usize) - 1;
+                if top < bot && bot < self.rows {
+                    self.scroll_top = top;
+                    self.scroll_bot = bot;
+                } else {
+                    self.scroll_top = 0;
+                    self.scroll_bot = self.rows - 1;
+                }
+                self.cx = 0;
+                self.cy = if self.origin { self.scroll_top } else { 0 };
+            }
             // DSR. 6 = CPR: answer with the cursor position -- kaua's size
             // handshake (SAVE + park-far + [6n + RESTORE) reads the parked
             // report to learn the real grid; an unanswered request strands
@@ -670,6 +1191,14 @@ impl Vt {
         }
         for i in 0..self.nparams {
             match self.params[i] {
+                1 => self.app_cursor = set, // DECCKM (application cursor keys)
+                6 => {
+                    // DECOM origin mode. Set/reset homes the cursor to the
+                    // (origin-relative) top-left (xterm / DEC STD-070).
+                    self.origin = set;
+                    self.cx = 0;
+                    self.cy = if set { self.scroll_top } else { 0 };
+                }
                 7 => self.wrap = set, // DECAWM (kaua paints the last cell under ?7l)
                 25 => self.cursor_visible = set,
                 47 | 1047 | 1049 => self.alt_screen(set),
@@ -702,6 +1231,18 @@ impl Vt {
             self.cy = self.saved.1.min(self.rows - 1);
             self.wrap = self.saved_wrap;
         }
+        if self.capture_events {
+            // After the swap: on enter the outgoing main sits in alt_cells (cells
+            // is the freshly-blanked alt); on leave the restored main is in cells.
+            // The consumer flushes its pending diff against the carried buffer,
+            // then resets its shadow (blank alt on enter / restored main on leave).
+            self.pending.push(if enter {
+                // self.saved holds the main cursor (implicit DECSC at enter).
+                Boundary::AltEnter(self.alt_cells.clone(), self.saved)
+            } else {
+                Boundary::AltLeave(self.cells.clone())
+            });
+        }
         self.mark_all();
     }
 
@@ -709,7 +1250,11 @@ impl Vt {
         // The shim over the extracted SgrPen (one SGR machinery, two
         // consumers -- see SgrPen). Copy-in/apply/copy-out keeps the grid's
         // field layout untouched.
-        let mut pen = SgrPen { fg: self.fg, bg: self.bg, attrs: self.attrs };
+        let mut pen = SgrPen {
+            fg: self.fg,
+            bg: self.bg,
+            attrs: self.attrs,
+        };
         pen.apply(&self.pal, &self.params[..self.nparams]);
         self.fg = pen.fg;
         self.bg = pen.bg;
@@ -717,51 +1262,108 @@ impl Vt {
     }
 
     fn put_char(&mut self, ch: char) {
+        let w = char_width(ch);
+        if w == 0 {
+            // Combining / zero-width: no column of its own, no advance. (A
+            // fuller impl folds it into the preceding cell; either way the
+            // grid stays width-correct -- the invariant is it takes no column.)
+            return;
+        }
+        // A double-width glyph in a terminal too narrow to ever hold one shows
+        // single-width: the margin-wrap below assumes wrapping creates room
+        // (true only for cols >= 2); without this the continuation write runs
+        // off the row (F1 P0), and cx would exceed cols (ICH/DCH/ECH underflow).
+        let w = if w == 2 && self.cols < 2 { 1 } else { w };
+        // Resolve a deferred wrap left pending by the previous glyph.
         if self.cx >= self.cols {
             if self.wrap {
-                // Deferred wrap (last-column semantics simplified: wrap
-                // before the write once past the edge).
                 self.cx = 0;
                 self.line_feed();
             } else {
                 // DECAWM reset: the cursor sticks at the right margin; each
                 // new glyph overwrites the last column (the VT100 rule).
-                // Without this gate a bottom-right-cell paint line-fed at
-                // the last row -> a whole-screen scroll per status repaint.
                 self.cx = self.cols - 1;
             }
         }
+        // A double-width glyph never straddles the right margin: with autowrap
+        // it moves whole to the next line; without, it degrades to a single-
+        // width paint clamped into the last cell.
+        if w == 2 && self.cx + 1 >= self.cols {
+            if self.wrap {
+                self.cx = 0;
+                self.line_feed();
+            } else {
+                let (cx, cy) = (self.cols - 1, self.cy);
+                self.write_cell(cx, cy, ch, self.attrs);
+                self.cx = self.cols - 1;
+                return;
+            }
+        }
         let (cx, cy) = (self.cx, self.cy);
+        let attrs = if w == 2 {
+            self.attrs | ATTR_WIDE
+        } else {
+            self.attrs
+        };
+        self.write_cell(cx, cy, ch, attrs);
+        if w == 2 {
+            // The continuation (right half): a blank carrying the pen (so
+            // reverse video / bg covers both cells), NOT marked wide.
+            self.write_cell(cx + 1, cy, ' ', self.attrs);
+        }
+        self.cx += w;
+    }
+
+    fn write_cell(&mut self, cx: usize, cy: usize, ch: char, attrs: u8) {
         let idx = cy * self.cols + cx;
         self.cells[idx] = Cell {
             ch,
-            fg: if self.attrs & ATTR_BOLD != 0 && self.fg == self.pal.fg {
+            fg: if attrs & ATTR_BOLD != 0 && self.fg == self.pal.fg {
                 // Bold default-fg stays fg (no brighter tier exists).
                 self.pal.fg
             } else {
                 self.fg
             },
             bg: self.bg,
-            attrs: self.attrs,
+            attrs,
         };
         self.mark(cy);
-        self.cx += 1;
+    }
+
+    // Map a 0-based CUP/VPA row through DECOM: origin-relative + region-clamped
+    // when set, absolute (clamped to the screen) when reset.
+    fn origin_row(&self, row: usize) -> usize {
+        if self.origin {
+            (self.scroll_top + row).min(self.scroll_bot)
+        } else {
+            row.min(self.rows - 1)
+        }
     }
 
     fn line_feed(&mut self) {
-        if self.cy + 1 < self.rows {
-            self.cy += 1;
-        } else {
+        if self.cy == self.scroll_bot {
             self.scroll_up();
+        } else if self.cy + 1 < self.rows {
+            self.cy += 1;
         }
     }
 
     fn scroll_up(&mut self) {
         let cols = self.cols;
-        self.cells.copy_within(cols.., 0);
+        let (top, bot) = (self.scroll_top, self.scroll_bot);
+        // A full-screen scroll in normal mode pushes the top row into the
+        // transcript (xterm scrollback). Capture it before the shift overwrites
+        // it. A DECSTBM region (top != 0) discards its top line, and the alt
+        // screen has no scrollback -- neither surfaces a Scroll boundary.
+        if self.capture_events && !self.on_alt && top == 0 {
+            self.pending
+                .push(Boundary::Scroll(self.cells[0..cols].to_vec()));
+        }
+        // Shift rows (top+1..=bot) up one within the band; blank row `bot`.
+        self.cells
+            .copy_within((top + 1) * cols..(bot + 1) * cols, top * cols);
         let (fg, bg) = (self.pal.fg, self.bg);
-        let last = (self.rows - 1) * cols;
-        for c in self.cells[last..].iter_mut() {
+        for c in self.cells[bot * cols..(bot + 1) * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
         }
         self.mark_all();
@@ -769,13 +1371,32 @@ impl Vt {
 
     fn scroll_down(&mut self) {
         let cols = self.cols;
-        let total = self.cols * self.rows;
-        self.cells.copy_within(0..total - cols, cols);
+        let (top, bot) = (self.scroll_top, self.scroll_bot);
+        // Shift rows (top..bot) down one within the band; blank row `top`.
+        self.cells
+            .copy_within(top * cols..bot * cols, (top + 1) * cols);
         let (fg, bg) = (self.pal.fg, self.bg);
-        for c in self.cells[..cols].iter_mut() {
+        for c in self.cells[top * cols..(top + 1) * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
         }
         self.mark_all();
+    }
+
+    // SU (CSI S) / SD (CSI T): scroll the band by n lines, cursor unmoved.
+    // n is clamped to the band height -- scrolling by >= the region height
+    // just clears it, and the clamp bounds the cost against a hostile count.
+    fn scroll_region_up(&mut self, n: usize) {
+        let band = self.scroll_bot - self.scroll_top + 1;
+        for _ in 0..n.min(band) {
+            self.scroll_up();
+        }
+    }
+
+    fn scroll_region_down(&mut self, n: usize) {
+        let band = self.scroll_bot - self.scroll_top + 1;
+        for _ in 0..n.min(band) {
+            self.scroll_down();
+        }
     }
 
     fn erase_display(&mut self, mode: u32) {
@@ -836,37 +1457,50 @@ impl Vt {
     }
 
     fn insert_lines(&mut self, n: usize) {
-        let n = n.min(self.rows - self.cy);
+        // xterm: IL is confined to the scroll region and is a no-op when the
+        // cursor is outside it (F3). Lines within [cy, scroll_bot] shift down;
+        // content pushed past scroll_bot is discarded.
+        if self.cy < self.scroll_top || self.cy > self.scroll_bot {
+            return;
+        }
+        let n = n.min(self.scroll_bot + 1 - self.cy);
         if n == 0 {
             return;
         }
         let cols = self.cols;
         let start = self.cy * cols;
-        let end = self.rows * cols;
-        self.cells.copy_within(start..end - n * cols, start + n * cols);
+        let end = (self.scroll_bot + 1) * cols;
+        self.cells
+            .copy_within(start..end - n * cols, start + n * cols);
         let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[start..start + n * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
         }
-        for r in self.cy..self.rows {
+        for r in self.cy..=self.scroll_bot {
             self.mark(r);
         }
     }
 
     fn delete_lines(&mut self, n: usize) {
-        let n = n.min(self.rows - self.cy);
+        // xterm: DL is confined to the scroll region and is a no-op when the
+        // cursor is outside it (F3). Lines within [cy, scroll_bot] shift up; the
+        // vacated bottom of the region is blanked.
+        if self.cy < self.scroll_top || self.cy > self.scroll_bot {
+            return;
+        }
+        let n = n.min(self.scroll_bot + 1 - self.cy);
         if n == 0 {
             return;
         }
         let cols = self.cols;
         let start = self.cy * cols;
-        let end = self.rows * cols;
+        let end = (self.scroll_bot + 1) * cols;
         self.cells.copy_within(start + n * cols..end, start);
         let (fg, bg) = (self.pal.fg, self.bg);
-        for c in self.cells[end - n * cols..].iter_mut() {
+        for c in self.cells[end - n * cols..end].iter_mut() {
             *c = Cell::blank(fg, bg);
         }
-        for r in self.cy..self.rows {
+        for r in self.cy..=self.scroll_bot {
             self.mark(r);
         }
     }
@@ -935,11 +1569,16 @@ impl Vt {
             self.osc_buf.clear();
             return;
         }
+        let mut is_config = false;
         if let Ok(s) = core::str::from_utf8(&self.osc_buf) {
             if let Some(rest) = s.strip_prefix("7770;aurora;") {
+                is_config = true;
                 if let Some((k, v)) = rest.split_once(';') {
-                    let clean = |t: &str| !t.is_empty() && !t.bytes().any(|b| b < 0x20 || b == b';');
-                    if clean(k) && !v.contains(';') && !v.bytes().any(|b| b < 0x20)
+                    let clean =
+                        |t: &str| !t.is_empty() && !t.bytes().any(|b| b < 0x20 || b == b';');
+                    if clean(k)
+                        && !v.contains(';')
+                        && !v.bytes().any(|b| b < 0x20)
                         && self.settings_req.len() < 16
                     {
                         let mut line = String::with_capacity(k.len() + 1 + v.len());
@@ -950,6 +1589,12 @@ impl Vt {
                     }
                 }
             }
+        }
+        // KT-1: forward every non-config OSC raw (titles = 0/2, Beacon = 1936,
+        // ...) as a boundary; the consumer routes by leading code. The 7770
+        // aurora-config channel is consumed above and never surfaced.
+        if self.capture_events && !is_config {
+            self.pending.push(Boundary::Osc(self.osc_buf.clone()));
         }
         self.osc_buf.clear();
     }
@@ -1034,14 +1679,14 @@ mod tests {
     #[test]
     fn erase_mode1_at_deferred_wrap_last_row_no_oob() {
         let mut vt = Vt::new(8, 4); // cols=8, rows=4
-        // Move to the last row, then fill the row exactly to the width so the
-        // cursor lands in the deferred-wrap state cx == cols.
+                                    // Move to the last row, then fill the row exactly to the width so the
+                                    // cursor lands in the deferred-wrap state cx == cols.
         feed(&mut vt, b"\x1b[4;1H"); // CUP row 4 col 1 -> cy=3, cx=0
         feed(&mut vt, b"abcdefgh"); // 8 chars fill the row; cx now == cols (8)
         assert_eq!(vt.cy, 3);
         assert_eq!(vt.cx, vt.cols); // the deferred-wrap state
-        // ESC[1J (erase from start of display to cursor inclusive) MUST NOT
-        // panic. Pre-fix: cur = 3*8 + 8 = 32 == cells.len() -> cells[..=32] OOB.
+                                    // ESC[1J (erase from start of display to cursor inclusive) MUST NOT
+                                    // panic. Pre-fix: cur = 3*8 + 8 = 32 == cells.len() -> cells[..=32] OOB.
         feed(&mut vt, b"\x1b[1J");
         // ESC[1K (erase from start of line to cursor inclusive) -- the sibling.
         feed(&mut vt, b"\x1b[4;1H");
@@ -1089,7 +1734,7 @@ mod tests {
         feed(&mut vt, b"\x1b]0;title-with-no-terminator"); // unterminated OSC
         feed(&mut vt, b"\xff\xfe"); // stray UTF-8 continuation bytes
         feed(&mut vt, b"x"); // ground state still works
-        // No panic reaching here is the assertion.
+                             // No panic reaching here is the assertion.
     }
 
     // Alt-screen enter/leave swaps a fresh buffer and restores dims + cursor.
@@ -1120,7 +1765,7 @@ mod tests {
         assert!(!vt.wrap);
         feed(&mut vt, b"\x1b[?1049l"); // leave WITHOUT ?7h
         assert!(vt.wrap); // the implicit DECRC restored autowrap
-        // The explicit DECSC/DECRC pair carries it too.
+                          // The explicit DECSC/DECRC pair carries it too.
         feed(&mut vt, b"\x1b7\x1b[?7l");
         assert!(!vt.wrap);
         feed(&mut vt, b"\x1b8");
@@ -1172,11 +1817,16 @@ mod tests {
         // value on .lines(), so `theme spinifex\nmode 640 480` slipped the
         // compositor-tier `mode` past the single-token allowlist). The
         // whole crafted OSC is dropped; nothing reaches settings_req.
-        feed(&mut vt, b"\x1b]7770;aurora;theme;spinifex\nmode 640 480\x07");
+        feed(
+            &mut vt,
+            b"\x1b]7770;aurora;theme;spinifex\nmode 640 480\x07",
+        );
         feed(&mut vt, b"\x1b]7770;aurora;theme\x01;evil\x07"); // control in key
         feed(&mut vt, b"\x1b]7770;aurora;theme;a\rb\x07"); // CR in value
-        assert!(vt.settings_req.is_empty(),
-            "a control byte in an OSC settings key/value must be rejected");
+        assert!(
+            vt.settings_req.is_empty(),
+            "a control byte in an OSC settings key/value must be rejected"
+        );
         // Oversize discards; the parser stays in sync after it.
         let mut big = Vec::from(&b"\x1b]7770;aurora;theme;"[..]);
         big.extend(core::iter::repeat(b'x').take(300));
@@ -1222,5 +1872,511 @@ mod tests {
         vt.reply.clear();
         feed(&mut vt, b"\x1b[2;5H\x1b[6n");
         assert_eq!(vt.reply.as_slice(), b"\x1b[2;5R");
+    }
+
+    // --- KT-1a-1: DECSTBM scroll regions + DECOM origin mode ---
+
+    #[test]
+    fn decstbm_confines_scroll() {
+        let mut vt = Vt::new(4, 5);
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
+        feed(&mut vt, b"\x1b[2;4r"); // region 1-based 2;4 -> 0-based [1,3], homes (0,0)
+        feed(&mut vt, b"\x1b[4;1H\n"); // cursor to the bottom margin (row 3), LF scrolls the band
+        assert_eq!(vt.cells[0].ch, '0'); // row 0: outside the region, untouched
+        assert_eq!(vt.cells[16].ch, '4'); // row 4: outside, untouched
+        assert_eq!(vt.cells[4].ch, '2'); // row 1 <- old row 2
+        assert_eq!(vt.cells[8].ch, '3'); // row 2 <- old row 3
+        assert_eq!(vt.cells[12].ch, ' '); // row 3 blanked
+    }
+
+    #[test]
+    fn decstbm_malformed_resets_full() {
+        let mut vt = Vt::new(2, 4);
+        feed(&mut vt, b"\x1b[9;99r"); // top=8 out of range -> reset to full [0,3]
+        feed(&mut vt, b"\x1b[1;1Ha\x1b[4;1H\n"); // 'a' at (0,0), LF at the last row -> full scroll
+        assert_eq!(vt.cells[0].ch, ' '); // 'a' scrolled off the top (proves the region is full)
+    }
+
+    #[test]
+    fn origin_mode_cup_is_region_relative() {
+        let mut vt = Vt::new(4, 6);
+        feed(&mut vt, b"\x1b[3;5r"); // region 0-based [2,4]
+        feed(&mut vt, b"\x1b[?6h"); // DECOM on (homes to scroll_top = 2)
+        feed(&mut vt, b"\x1b[1;1HX"); // origin CUP 1;1 -> row scroll_top(2)
+        assert_eq!(vt.cells[8].ch, 'X');
+        feed(&mut vt, b"\x1b[99;1HY"); // origin CUP row 99 -> clamped to scroll_bot(4)
+        assert_eq!(vt.cells[16].ch, 'Y');
+        feed(&mut vt, b"\x1b[?6l\x1b[1;1HZ"); // DECOM off -> absolute, homes (0,0)
+        assert_eq!(vt.cells[0].ch, 'Z');
+    }
+
+    #[test]
+    fn ri_scrolls_region_down_at_top() {
+        let mut vt = Vt::new(4, 5);
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
+        feed(&mut vt, b"\x1b[2;4r\x1b[2;1H"); // region [1,3]; cursor to the top margin (row 1)
+        feed(&mut vt, b"\x1bM"); // RI at the top margin -> scroll the band down
+        assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
+        assert_eq!(vt.cells[16].ch, '4'); // outside, untouched
+        assert_eq!(vt.cells[4].ch, ' '); // row 1 blanked
+        assert_eq!(vt.cells[8].ch, '1'); // row 2 <- old row 1
+        assert_eq!(vt.cells[12].ch, '2'); // row 3 <- old row 2
+    }
+
+    #[test]
+    fn full_screen_lf_scrolls_all_no_decstbm() {
+        // Backward-compat with aurora: no DECSTBM -> the whole screen scrolls.
+        let mut vt = Vt::new(4, 3);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[3;1H\n");
+        assert_eq!(vt.cells[0].ch, '1'); // row 0 <- old row 1
+        assert_eq!(vt.cells[4].ch, '2'); // row 1 <- old row 2
+        assert_eq!(vt.cells[8].ch, ' '); // row 2 blanked
+    }
+
+    #[test]
+    fn decstbm_resets_on_resize() {
+        let mut vt = Vt::new(4, 5);
+        feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
+        vt.resize(4, 6); // resize -> region resets to full [0,5]
+        feed(&mut vt, b"\x1b[1;1Ha\x1b[6;1H\n"); // 'a' at (0,0), LF at the new last row
+        assert_eq!(vt.cells[0].ch, ' '); // full-screen scroll -> 'a' gone
+    }
+
+    #[test]
+    fn su_scrolls_region_up_cursor_unmoved() {
+        let mut vt = Vt::new(4, 5);
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
+        feed(&mut vt, b"\x1b[2;4r"); // region 0-based [1,3]; homes cursor to (0,0)
+        feed(&mut vt, b"\x1b[3;2H"); // park the cursor at cy=2, cx=1
+        feed(&mut vt, b"\x1b[S"); // SU default 1 -> band shifts up, row 3 blanks
+        assert_eq!(vt.cells[0].ch, '0'); // outside band, untouched
+        assert_eq!(vt.cells[4].ch, '2'); // row 1 <- old row 2
+        assert_eq!(vt.cells[8].ch, '3'); // row 2 <- old row 3
+        assert_eq!(vt.cells[12].ch, ' '); // row 3 (scroll_bot) blanked
+        assert_eq!(vt.cells[16].ch, '4'); // outside band, untouched
+        assert_eq!((vt.cy, vt.cx), (2, 1)); // SU never moves the cursor
+    }
+
+    #[test]
+    fn sd_scrolls_region_down() {
+        let mut vt = Vt::new(4, 5);
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
+        feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
+        feed(&mut vt, b"\x1b[T"); // SD default 1 -> band shifts down, row 1 blanks
+        assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
+        assert_eq!(vt.cells[4].ch, ' '); // row 1 (scroll_top) blanked
+        assert_eq!(vt.cells[8].ch, '1'); // row 2 <- old row 1
+        assert_eq!(vt.cells[12].ch, '2'); // row 3 <- old row 2
+        assert_eq!(vt.cells[16].ch, '4'); // outside, untouched
+    }
+
+    #[test]
+    fn su_huge_count_clears_band_no_hang() {
+        // The clamp: a hostile CSI count scrolls at most the band height, which
+        // clears the region -- and bounds the loop (no multi-billion iteration).
+        let mut vt = Vt::new(4, 5);
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
+        feed(&mut vt, b"\x1b[2;4r"); // region [1,3], height 3
+        feed(&mut vt, b"\x1b[999999S"); // clamped to 3 -> whole band cleared
+        assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
+        assert_eq!(vt.cells[4].ch, ' ');
+        assert_eq!(vt.cells[8].ch, ' ');
+        assert_eq!(vt.cells[12].ch, ' ');
+        assert_eq!(vt.cells[16].ch, '4'); // outside, untouched
+    }
+
+    #[test]
+    fn sd_five_param_is_highlight_not_scroll() {
+        // CSI 1;2;3;4;5 T is xterm highlight mouse tracking (unimplemented),
+        // NOT SD -- a 5-param T must not scroll the screen.
+        let mut vt = Vt::new(4, 3);
+        feed(&mut vt, b"\x1b[1;1HA"); // 'A' at (0,0)
+        feed(&mut vt, b"\x1b[1;2;3;4;5T"); // 5 params -> ignored, no scroll
+        assert_eq!(vt.cells[0].ch, 'A'); // unmoved
+        assert_eq!(vt.cells[4].ch, ' '); // did NOT scroll down into row 1
+    }
+
+    #[test]
+    fn combining_table_is_sorted() {
+        // in_ranges' binary search relies on sorted, non-overlapping ranges;
+        // this catches any transcription slip in COMBINING.
+        let mut prev: Option<u32> = None;
+        for &(a, b) in COMBINING {
+            assert!(a <= b, "inverted range {:#x}..{:#x}", a, b);
+            if let Some(pv) = prev {
+                assert!(a > pv, "range {:#x} not strictly after {:#x}", a, pv);
+            }
+            prev = Some(b);
+        }
+    }
+
+    #[test]
+    fn char_width_representative_points() {
+        assert_eq!(char_width('A'), 1);
+        assert_eq!(char_width(' '), 1);
+        assert_eq!(char_width('\u{00E9}'), 1); // precomposed 'e-acute' is narrow
+        assert_eq!(char_width('\u{0301}'), 0); // combining acute
+        assert_eq!(char_width('\u{FE0F}'), 0); // variation selector-16
+        assert_eq!(char_width('\u{4E00}'), 2); // CJK ideograph
+        assert_eq!(char_width('\u{FF21}'), 2); // fullwidth A
+        assert_eq!(char_width('\u{1F600}'), 2); // emoji
+        assert_eq!(char_width('\u{1100}'), 2); // Hangul Jamo leading
+        assert_eq!(char_width('\u{303F}'), 1); // the Kuhn wide-range exclusion
+    }
+
+    #[test]
+    fn wide_char_advances_two_and_marks_left() {
+        let mut vt = Vt::new(6, 2);
+        feed(&mut vt, b"\xe4\xb8\x80"); // U+4E00 CJK (wide)
+        assert_eq!(vt.cells[0].ch, '\u{4E00}');
+        assert!(vt.cells[0].attrs & ATTR_WIDE != 0); // left half marked wide
+        assert_eq!(vt.cells[1].ch, ' '); // blank continuation
+        assert_eq!(vt.cells[1].attrs & ATTR_WIDE, 0); // continuation not marked
+        assert_eq!(vt.cx, 2); // advanced two columns
+    }
+
+    #[test]
+    fn wide_char_at_right_margin_wraps_whole() {
+        let mut vt = Vt::new(3, 2); // cols = 3
+        feed(&mut vt, b"ab"); // cols 0,1; cx = 2 (the last column)
+        feed(&mut vt, b"\xe4\xb8\x80"); // wide: can't fit at col 2 -> wrap
+        assert_eq!(vt.cells[2].ch, ' '); // col 2 left blank
+        assert_eq!(vt.cells[3].ch, '\u{4E00}'); // row 1 col 0
+        assert!(vt.cells[3].attrs & ATTR_WIDE != 0);
+        assert_eq!(vt.cells[4].ch, ' '); // continuation
+        assert_eq!((vt.cy, vt.cx), (1, 2));
+    }
+
+    #[test]
+    fn wide_char_no_wrap_at_margin_degrades_single() {
+        let mut vt = Vt::new(3, 2);
+        feed(&mut vt, b"\x1b[?7l"); // DECAWM off
+        feed(&mut vt, b"ab"); // cx = 2 at the last column
+        feed(&mut vt, b"\xe4\xb8\x80"); // wide, no room, no wrap -> single
+        assert_eq!(vt.cells[2].ch, '\u{4E00}'); // placed at the margin
+        assert_eq!(vt.cells[2].attrs & ATTR_WIDE, 0); // degraded, not marked wide
+        assert_eq!((vt.cy, vt.cx), (0, 2)); // cursor sticks at the margin
+        assert_eq!(vt.cells[5].ch, ' '); // nothing spilled onto row 1
+    }
+
+    #[test]
+    fn combining_mark_takes_no_column() {
+        let mut vt = Vt::new(4, 2);
+        feed(&mut vt, b"e"); // 'e' at col 0; cx = 1
+        feed(&mut vt, b"\xcc\x81"); // U+0301 combining acute -> width 0
+        assert_eq!(vt.cells[0].ch, 'e');
+        assert_eq!(vt.cx, 1); // no advance for the combining mark
+        feed(&mut vt, b"x"); // lands at col 1, not col 2
+        assert_eq!(vt.cells[1].ch, 'x');
+    }
+
+    #[test]
+    fn sgr_italic_dim_blink_strike_tracked() {
+        let mut vt = Vt::new(8, 1);
+        feed(&mut vt, b"\x1b[3mi"); // italic
+        feed(&mut vt, b"\x1b[2md"); // + dim
+        feed(&mut vt, b"\x1b[5mb"); // + blink
+        feed(&mut vt, b"\x1b[9ms"); // + strike
+        assert!(vt.cells[0].attrs & ATTR_ITALIC != 0);
+        assert_eq!(
+            vt.cells[1].attrs & (ATTR_ITALIC | ATTR_DIM),
+            ATTR_ITALIC | ATTR_DIM
+        );
+        assert!(vt.cells[2].attrs & ATTR_BLINK != 0);
+        assert!(vt.cells[3].attrs & ATTR_STRIKE != 0);
+        feed(&mut vt, b"\x1b[23m\x1b[25m\x1b[29mR"); // clear italic/blink/strike
+        let a = vt.cells[4].attrs;
+        assert_eq!(a & (ATTR_ITALIC | ATTR_BLINK | ATTR_STRIKE), 0);
+        assert!(a & ATTR_DIM != 0); // dim survives -- only 0/22 clear it
+    }
+
+    #[test]
+    fn sgr_22_clears_bold_and_dim() {
+        let mut vt = Vt::new(4, 1);
+        feed(&mut vt, b"\x1b[1m\x1b[2mA"); // bold + dim
+        assert_eq!(
+            vt.cells[0].attrs & (ATTR_BOLD | ATTR_DIM),
+            ATTR_BOLD | ATTR_DIM
+        );
+        feed(&mut vt, b"\x1b[22mB"); // 22 clears BOTH
+        assert_eq!(vt.cells[1].attrs & (ATTR_BOLD | ATTR_DIM), 0);
+    }
+
+    #[test]
+    fn wide_char_in_narrow_grid_degrades_no_oob() {
+        // F1 (P0): a wide glyph in a <2-col grid must degrade to single width,
+        // not write the continuation off the row (an OOB abort at the bottom).
+        let mut vt = Vt::new(1, 1);
+        feed(&mut vt, b"\xe4\xb8\x80"); // U+4E00, wide
+        assert_eq!(vt.cells[0].ch, '\u{4E00}');
+        assert_eq!(vt.cells[0].attrs & ATTR_WIDE, 0); // degraded, not marked wide
+        assert!(vt.cx <= vt.cols); // the invariant ICH/DCH/ECH rely on
+                                   // the original abort site: a wide glyph at the bottom row of a 1-col grid
+        let mut vt = Vt::new(1, 4);
+        feed(&mut vt, b"\x1b[4;1H"); // last row
+        feed(&mut vt, b"\xf0\x9f\x98\x80"); // U+1F600 emoji, wide
+        feed(&mut vt, b"\x1b[@"); // ICH: cols-cx underflows (panic) if cx>cols
+        assert!(vt.cx <= vt.cols);
+    }
+
+    #[test]
+    fn zero_dimension_grid_is_clamped_not_panic() {
+        // F2 (P2): a zero dimension clamps to 1, never underflows at birth.
+        let mut vt = Vt::new(1, 0); // rows=0 -> 1
+        feed(&mut vt, b"x");
+        assert!(!vt.cells.is_empty());
+        let mut vt = Vt::new(0, 3); // cols=0 -> 1
+        feed(&mut vt, b"\t"); // the cols-1 underflow path
+        feed(&mut vt, b"\xe4\xb8\x80"); // wide into a 1-col grid
+        assert!(!vt.cells.is_empty());
+    }
+
+    #[test]
+    fn insert_lines_confined_to_region() {
+        // F3 (P1): IL confined to [scroll_top, scroll_bot].
+        let mut vt = Vt::new(1, 5);
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
+        feed(&mut vt, b"\x1b[2;4r"); // region 0-based [1,3]
+        feed(&mut vt, b"\x1b[2;1H"); // cursor row 1 (inside)
+        feed(&mut vt, b"\x1b[L"); // IL 1
+        assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
+        assert_eq!(vt.cells[1].ch, ' '); // inserted blank
+        assert_eq!(vt.cells[2].ch, '1'); // <- old row 1
+        assert_eq!(vt.cells[3].ch, '2'); // <- old row 2 (old '3' discarded)
+        assert_eq!(vt.cells[4].ch, '4'); // outside, untouched (was corrupted pre-fix)
+    }
+
+    #[test]
+    fn delete_lines_confined_to_region() {
+        let mut vt = Vt::new(1, 5);
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
+        feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
+        feed(&mut vt, b"\x1b[2;1H"); // row 1
+        feed(&mut vt, b"\x1b[M"); // DL 1
+        assert_eq!(vt.cells[0].ch, '0'); // outside
+        assert_eq!(vt.cells[1].ch, '2'); // <- old row 2
+        assert_eq!(vt.cells[2].ch, '3'); // <- old row 3
+        assert_eq!(vt.cells[3].ch, ' '); // scroll_bot blanked
+        assert_eq!(vt.cells[4].ch, '4'); // outside, untouched
+    }
+
+    #[test]
+    fn insert_delete_lines_noop_outside_region() {
+        let mut vt = Vt::new(1, 5);
+        feed(
+            &mut vt,
+            b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4",
+        );
+        feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
+        feed(&mut vt, b"\x1b[5;1H"); // cursor row 4 (BELOW region)
+        feed(&mut vt, b"\x1b[L");
+        feed(&mut vt, b"\x1b[M");
+        for (i, c) in [b'0', b'1', b'2', b'3', b'4'].iter().enumerate() {
+            assert_eq!(vt.cells[i].ch, *c as char); // nothing moved
+        }
+    }
+
+    #[test]
+    fn private_scroll_finals_are_not_scroll() {
+        // F5: CSI ? ... S / T are private (sixel) queries, not SU/SD.
+        let mut vt = Vt::new(1, 3);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2");
+        feed(&mut vt, b"\x1b[?1S"); // private -> ignored
+        feed(&mut vt, b"\x1b[?1T"); // private -> ignored
+        assert_eq!(vt.cells[0].ch, '0');
+        assert_eq!(vt.cells[2].ch, '2'); // unmoved
+    }
+
+    // ---- KT-1 boundary-event capture (feed_until) ----
+
+    // Drain every boundary from one feed chunk (capture must be on).
+    fn drive(vt: &mut Vt, s: &[u8]) -> Vec<Boundary> {
+        let mut pos = 0;
+        let mut out = Vec::new();
+        while let Some(b) = vt.feed_until(s, &mut pos) {
+            out.push(b);
+        }
+        out
+    }
+
+    #[test]
+    fn capture_off_feed_until_consumes_all_no_boundaries() {
+        // With capture off, feed_until behaves like feed: no boundaries, all
+        // bytes consumed, identical cells. The console (aurora) path.
+        let mut a = Vt::new(6, 2);
+        let mut b = Vt::new(6, 2);
+        let seq = b"hi\x07\x1b]0;t\x07\x1b[?1049hx\x1b[?1049l";
+        feed(&mut a, seq);
+        assert!(drive(&mut b, seq).is_empty()); // capture off by default
+        assert_eq!(a.cells, b.cells);
+        assert_eq!(a.on_alt, b.on_alt);
+    }
+
+    #[test]
+    fn bell_is_a_boundary_between_cell_runs() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        // Manually drive to prove the ORDER: the Bell arrives with 'A' painted
+        // and 'B' not yet -- the flush-at-boundary contract.
+        let seq = b"A\x07B";
+        let mut pos = 0;
+        let first = vt.feed_until(seq, &mut pos).unwrap();
+        assert_eq!(first, Boundary::Bell);
+        assert_eq!(vt.cells[0].ch, 'A');
+        assert_eq!(vt.cells[1].ch, ' '); // B not processed yet
+        assert!(vt.feed_until(seq, &mut pos).is_none());
+        assert_eq!(vt.cells[1].ch, 'B'); // now it is
+    }
+
+    #[test]
+    fn title_osc_forwarded_raw() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        assert_eq!(
+            drive(&mut vt, b"\x1b]0;hi\x07"),
+            vec![Boundary::Osc(b"0;hi".to_vec())]
+        );
+        // OSC 2 (title) via ST terminator.
+        assert_eq!(
+            drive(&mut vt, b"\x1b]2;t\x1b\\"),
+            vec![Boundary::Osc(b"2;t".to_vec())]
+        );
+    }
+
+    #[test]
+    fn osc1936_forwarded_raw() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        assert_eq!(
+            drive(&mut vt, b"\x1b]1936;v1;zone;k=prompt\x1b\\"),
+            vec![Boundary::Osc(b"1936;v1;zone;k=prompt".to_vec())]
+        );
+    }
+
+    #[test]
+    fn config_7770_consumed_not_forwarded() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        // The aurora config channel is consumed in-parser, never surfaced.
+        assert!(drive(&mut vt, b"\x1b]7770;aurora;theme;dark\x07").is_empty());
+        assert_eq!(vt.settings_req, vec![String::from("theme dark")]);
+    }
+
+    #[test]
+    fn scroll_off_captures_the_leaving_row() {
+        let mut vt = Vt::new(4, 2); // cols=4, rows=2, full-screen scroll region
+        vt.set_capture_events(true);
+        // Row 0 = "top!", row 1 = "bot!", cursor at bottom, then LF scrolls.
+        let bs = drive(&mut vt, b"\x1b[1;1Htop!\x1b[2;1Hbot!\x1b[2;1H\n");
+        assert_eq!(bs.len(), 1);
+        match &bs[0] {
+            Boundary::Scroll(row) => {
+                let s: String = row.iter().map(|c| c.ch).collect();
+                assert_eq!(s, "top!");
+            }
+            other => panic!("expected Scroll, got {other:?}"),
+        }
+        // Post-scroll: "bot!" is now the top row, bottom blanked.
+        assert_eq!(vt.cells[0].ch, 'b');
+    }
+
+    #[test]
+    fn region_scroll_emits_no_scrolloff() {
+        let mut vt = Vt::new(2, 4);
+        vt.set_capture_events(true);
+        // DECSTBM rows 2..4 (1-based) -> top margin != 0: a region scroll
+        // discards its top line (xterm) and must NOT surface a Scroll boundary.
+        feed(&mut vt, b"\x1b[2;4r"); // set region; also homes to origin
+        feed(&mut vt, b"\x1b[2;1HA\x1b[3;1HB\x1b[4;1HC"); // rows 1,2,3 = A,B,C
+        feed(&mut vt, b"\x1b[4;1H"); // cursor to the region's bottom
+        let bs = drive(&mut vt, b"\n"); // one region scroll
+                                        // Positive control: the scroll DID happen (row 2 'B' shifted into row 1),
+                                        // so the absence of a Scroll boundary is meaningful, not vacuous.
+        assert_eq!(vt.cells[2].ch, 'B'); // row 1 (index 1*cols=2) now holds 'B'
+        assert!(
+            bs.iter().all(|b| !matches!(b, Boundary::Scroll(_))),
+            "{bs:?}"
+        );
+    }
+
+    #[test]
+    fn alt_enter_and_leave_carry_the_main_buffer() {
+        let mut vt = Vt::new(6, 3);
+        vt.set_capture_events(true);
+        let bs = drive(&mut vt, b"main\x1b[?1049halt\x1b[?1049l");
+        assert_eq!(bs.len(), 2);
+        match &bs[0] {
+            Boundary::AltEnter(outgoing, cursor) => {
+                assert_eq!(outgoing[0].ch, 'm'); // outgoing main
+                assert_eq!(*cursor, (4, 0)); // main cursor (cx=4 after "main", cy=0)
+            }
+            other => panic!("expected AltEnter, got {other:?}"),
+        }
+        match &bs[1] {
+            Boundary::AltLeave(restored) => assert_eq!(restored[0].ch, 'm'), // restored main
+            other => panic!("expected AltLeave, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bulk_su_emits_one_scroll_per_row_bounded() {
+        let mut vt = Vt::new(2, 3);
+        vt.set_capture_events(true);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2"); // rows "0","1","2"
+        let bs = drive(&mut vt, b"\x1b[9S"); // SU 9, bounded to band (3)
+        let rows: Vec<char> = bs
+            .iter()
+            .filter_map(|b| match b {
+                Boundary::Scroll(r) => Some(r[0].ch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows, vec!['0', '1', '2']); // exactly the band, in order
+    }
+
+    #[test]
+    fn decckm_app_cursor_tracks_and_ris_resets() {
+        let mut vt = Vt::new(4, 2);
+        assert!(!vt.app_cursor());
+        feed(&mut vt, b"\x1b[?1h"); // DECCKM set (application cursor keys)
+        assert!(vt.app_cursor());
+        feed(&mut vt, b"\x1b[?1l"); // reset
+        assert!(!vt.app_cursor());
+        feed(&mut vt, b"\x1b[?1h\x1bc"); // set, then RIS
+        assert!(!vt.app_cursor()); // RIS cleared it
+    }
+
+    #[test]
+    fn feed_until_resumes_a_split_osc_across_calls() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        // The OSC is split across two slices; parser state persists in self, so
+        // the boundary surfaces once, whole, from the second slice.
+        let mut pos = 0;
+        assert!(vt.feed_until(b"\x1b]0;h", &mut pos).is_none()); // slice 1: no terminator yet
+        let mut pos2 = 0;
+        let got = vt.feed_until(b"i\x07", &mut pos2).unwrap();
+        assert_eq!(got, Boundary::Osc(b"0;hi".to_vec()));
     }
 }

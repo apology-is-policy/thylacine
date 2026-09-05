@@ -1,0 +1,114 @@
+---
+id: moc-userspace-shell-tui
+type: moc
+title: "The shell and TUI stack — text in, effects out, and a screen in between"
+parent: moc-userspace
+created: 2026-08-03
+updated: 2026-08-04
+---
+What a person actually touches, and what they look at while doing it: `ut`, the
+rc-shaped shell — its parser, its evaluator, and the line editor in front of
+both — the console-TUI substrate and the editor built on it, and the renderer
+that turns the console itself into pixels. Orientation only; the facts live in
+the `sub-*` dossiers.
+
+## The organizing fact
+
+**This area spans the widest range of risk in the tree, and the range is the
+thing to keep in view.**
+
+At one end is a parser that touches nothing outside its own arguments — no
+syscall, no filesystem, no capability. At the other is the raw-mode handoff, in
+which the shell puts the console into a state the user cannot type their way
+out of, hands it to a child, and must restore it whatever happens to that
+child. Between them sits an evaluator that turns text into spawns, pipes and
+redirections.
+
+Since [[sub-aurora]] joined, the range extends past the handoff to a *console
+role*: a process that sees every byte the console emits and injects every byte
+the keyboard produces. That is the most privileged-looking position in the
+area and one of the least privileged in fact — the trusted-path invariant
+splits the console three ways, and the renderer holds the one third that
+confers neither elevation nor the interrupt target. Reading it next to the
+shell is the clearest illustration in the tree of a capability being defined by
+what it deliberately excludes.
+
+So the dossiers here carry different `audit` levels for a real reason rather
+than a filing convention, and reading them together is how the range stays
+visible. In particular, two failure modes are worth not conflating:
+
+- **A pure layer can still kill the shell.** The parser's one genuine hazard is
+  stack depth: a `no_std` program has no guard page of its own, so a deep
+  enough input faults, and a shell that dies takes the session with it. That is
+  a liveness property with no invariant number, defended by hand-written
+  counters.
+- **A layer that is not a privilege boundary can still hold the console
+  hostage.** Restoring cooked mode is not a capability question — nothing stops
+  the shell from getting it wrong — and a native binary is `panic = abort`, so
+  a crashed child's own cleanup never runs. The shell is the authoritative
+  restorer of a console it does not own.
+
+## Children
+
+- [[sub-utopia-parser]] — text to AST: the rc-shaped grammar, the eight
+  lexical surfaces, and the three separate recursion bounds that exist because
+  the recursion has three shapes no single counter sees.
+- [[sub-utopia-eval]] — AST to effects: the three-way command resolution, the
+  two foreground wait paths (console forwarding vs pts process groups), and the
+  single recursion counter that answers the parser's question the other way,
+  because a shell's recursion shapes compose rather than stay separate.
+- [[sub-utopia-interactive]] — bytes to a line and back to a screen: the editor
+  state machine, the fd-agnostic REPL, and the startup order in which a shell
+  must become self-managing *before* it becomes a signal target.
+- [[sub-kaua]] — the substrate a full-screen app paints on: a cell diff, a total
+  VT parser, and a capability story preserved by omission (fd 0 and fd 1, never
+  the line discipline). The other half of the raw-mode handoff `ut` performs.
+- [[sub-parley]] — the editor's dialogue with its language and debug servers: a
+  JSON codec, Content-Length framing, two protocol grammars and two pure
+  clients, with only the transport touching a process. The one area here whose
+  untrusted input arrives from another program rather than from a keyboard.
+- [[sub-nora-engine]] — what a keystroke does: the char-addressed text buffer,
+  the modal state machine, and the soft-wrap arithmetic the scroller and the
+  renderer share. The layer that can neither act nor fail — every effect is
+  raised as a request for someone else to perform, and every out-of-range input
+  clamps rather than erroring.
+- [[sub-nora-view]] — what reaches the screen: the renderer, and the five
+  display models it draws from. Each is defined by what it refuses to know — no
+  terminal, no LSP, no DAP, no grammar — and the one refusal that costs
+  something, the screen's geometry, is paid for by exporting the calculation so
+  the scroller cannot hold a second copy of it.
+- [[sub-nora-host]] — everything the other two refuse to do: the screen, the
+  keyboard, every file write, and two child processes that must not outlive the
+  editor. The only part of nora with a boundary to guard, and its contribution
+  to the trusted path is an abstention — it never touches the line discipline,
+  which stays the shell's job.
+- [[sub-aurora]] — the console on a screen: a byte-stream interpreter, a cell
+  grid, an alpha blit through [[sub-libtapestry]], and the third console role.
+  Everything else here paints *into* a terminal; aurora paints the terminal.
+  Also the area's sharpest instance of a test suite that does not run — and one
+  module that says it does.
+
+## Cross-cutting
+
+- Everything here is native, so it stands on [[sub-libthyla-rs]] — the same
+  ownership, error and allocation discipline, and the same fixed heap.
+- The shell is also the thing that *starts* other programs, so its evaluator is
+  the busiest consumer of the process and namespace surfaces the kernel plane
+  describes.
+- **The test story here is split down the middle, and knowing which half a
+  dossier is in matters before reading any coverage claim.** The workspace pins
+  a bare-metal target with no test harness, so a crate's `#[test]` blocks run on
+  the host only if the crate gates `no_std` on `cfg(test)` and makes libthyla-rs
+  optional. kaua, parley and nora do — their suites run, and a coverage claim in
+  those dossiers means assertions that execute. The `libutopia` crate does not
+  (it depends on libthyla-rs unconditionally), so the parser and evaluator
+  dossiers describe a *dead* suite, and their real coverage is a separate
+  in-guest binary driving the public entry points on every boot. Two figures
+  have been published for this and both were wrong; the measured split is 489
+  running against 389 stranded.
+  **[[sub-aurora]] is on the stranded side and is the case worth knowing
+  about**, because three of its four modules say so and the fourth — the one
+  with half the tests, over the byte machine every program on the console feeds
+  — says the opposite. Verified by building: nineteen errors, no harness. So in
+  this area a dossier's coverage claim needs the crate checked, and a *source
+  comment's* claim needs it checked twice.

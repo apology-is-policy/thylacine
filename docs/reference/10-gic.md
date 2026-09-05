@@ -1,432 +1,64 @@
-# 10 — GIC v2 + v3 driver (as-built reference)
-
-The kernel's interrupt controller driver. Detects ARM Generic Interrupt Controller version from DTB ("arm,gic-v3" → v3; "arm,cortex-a15-gic" / "arm,gic-400" → v2; both live), brings up the distributor + (v3) redistributor + system-register CPU interface OR (v2) the GICC MMIO CPU interface + banked SGI/PPI, exposes IRQ enable / disable / acknowledge / EOI, and dispatches INTIDs to registered handlers.
-
-P1-G deliverable (v3); **the GICv2 path landed at Lazarus W2** (`PORTABILITY.md §5`) -- the HVF-on-Apple enabler. The first IRQ source wired through is the ARM generic timer (virtual timer PPI 11 → INTID 27 since Lazarus W2; see `docs/reference/11-timer.md`).
-
-Scope: `arch/arm64/gic.{h,c}`, the IRQ slot in `arch/arm64/vectors.S` (P1-G repoint), `arch/arm64/exception.c`'s `exception_irq_curr_el`, `kernel/main.c`'s `gic_init` slot in `boot_main`, banner updates.
-
-Reference: `ARCHITECTURE.md §12.3` (GIC autodetect commitment), `§28` invariant I-15 (DTB-driven hardware discovery), ARM IHI 0069 (GICv3 + GICv4 architecture specification).
-
----
-
-## Purpose
-
-Until P1-G, the kernel's IRQ vector slot routed to `exception_unexpected` — any IRQ would be a kernel bug. P1-G installs a real GIC driver and turns the IRQ slot live. From here on, the kernel can:
-
-- Receive periodic timer ticks (1000 Hz) — the basis for Phase 2's scheduler.
-- Receive device IRQs (PL011 IRQ-driven TX, virtio devices) — though P1-G wires only the timer; UART IRQ-driven mode is post-v1.0.
-- Send inter-processor interrupts (SGIs) — Phase 2 with SMP.
-
-Both v2 and v3 are live (DTB compat probe selects). v3 was the P1-G deliverable; **the GICv2 path landed at Lazarus W2** because the v2 MMIO CPU interface (GICC) is what lets the kernel run under HVF on Apple Silicon -- the GICv3 distributor MMIO trips a QEMU/HVF `isv=0` assertion that the MMIO CPU interface + a `dsb`-between-accesses mitigation sidestep. v2 is also the Pi 4 / GIC-400 target. See [The GICv2 path](#the-gicv2-path-lazarus-w2).
-
----
-
-## Public API
-
-`arch/arm64/gic.h`:
-
-```c
-// INTID conventions (architectural).
-#define GIC_NUM_INTIDS         1020
-#define GIC_INTID_SPURIOUS     1023
-#define GIC_SGI_MIN            0    // 0..15
-#define GIC_PPI_MIN            16   // 16..31
-#define GIC_SPI_MIN            32   // 32..1019
-#define GIC_PPI_TO_INTID(ppi)  ((ppi) + 16)
-
-typedef enum {
-    GIC_VERSION_NONE = 0,
-    GIC_VERSION_V2   = 2,
-    GIC_VERSION_V3   = 3,
-} gic_version_t;
-
-typedef void (*gic_irq_handler_t)(u32 intid, void *arg);
-
-bool          gic_init(void);
-gic_version_t gic_version(void);
-u64           gic_dist_base(void);
-u64           gic_redist_base(void);
-u32           gic_max_intid(void);          // R12-gic-edge audit close
-
-bool gic_attach(u32 intid, gic_irq_handler_t handler, void *arg);
-bool gic_enable_irq(u32 intid);
-bool gic_disable_irq(u32 intid);
-
-bool gic_set_pending_spi(u32 intid);                  // P4-Ic5-IRQ-probe
-void gic_set_spi_edge_triggered(u32 intid);           // P4-Ic5b2 + R12-gic-edge
-
-u32  gic_acknowledge(void);
-void gic_eoi(u32 intid);
-void gic_dispatch(u32 intid);   // called by exception_irq_curr_el
-```
-
-`gic_init` is one-time — autodetects version, maps MMIO, brings up the distributor + (v3) this CPU's redistributor / (v2) its banked SGI/PPI, + the CPU interface (v3 system registers / v2 GICC MMIO). Must run after `dtb_init` and `exception_init` (so unexpected IRQs during bring-up route through the vector table cleanly). Returns `true` on success; extincts only on a malformed DTB GIC node or vmalloc exhaustion mapping the MMIO.
-
-`gic_attach(intid, handler, arg)` registers `handler` for `intid`. The handler runs in IRQ context (PSTATE.I masked) on the existing SP_EL1; it must complete in bounded time and must not block. Replacing an existing handler is allowed (no return slot for the previous handler at v1.0; if the caller needs to chain, they cache the previous from elsewhere).
-
-`gic_enable_irq` / `gic_disable_irq` flip the source-side enable bit. SGI/PPI (intid < 32) hits the redistributor's banked `GICR_ISENABLER0`; SPI (intid >= 32) hits the distributor's `GICD_ISENABLER<n>`.
-
-`gic_acknowledge` reads `ICC_IAR1_EL1` and returns the INTID portion (low 24 bits). `gic_eoi(intid)` writes `ICC_EOIR1_EL1` (one-step priority drop + deactivate, since `ICC_CTLR_EL1.EOImode = 0`). For spurious INTID (1023) the caller MUST NOT EOI per GICv3 SR conventions; `exception_irq_curr_el` handles this.
-
-`gic_dispatch(intid)` is called by `exception_irq_curr_el` after `gic_acknowledge`; it looks up the handler and invokes it. If no handler is registered or `intid` is out of range, it extincts with the diagnostic.
-
-`gic_set_pending_spi(intid)` (P4-Ic5-IRQ-probe) writes `GICD_ISPENDR<n>.bit` to manually pend an SPI — test-harness mechanism for simulating an IRQ fire without driving the device wire. SPI-only.
-
-`gic_set_spi_edge_triggered(intid)` (P4-Ic5b2; **audit-closed at R12-gic-edge**) flips `GICD_ICFGR<n>` to `0b10` (edge) for the given SPI. Returns void; extincts on a precondition violation (intid outside `[GIC_SPI_MIN, gic_max_intid()]` OR GIC not initialized). Both conditions indicate a kernel-internal-bug at v1.0 — callers must enforce them via `kobj_irq_create`'s `intid >= 32` guard + `intid_try_claim`'s `g_max_intid` bound + boot ordering (`gic_init` before any caller). The body issues `dsb sy` after the ICFGR write so the distributor's internal latching is observable to a subsequent `GICD_ISENABLER<n>` write in `gic_enable_irq` — without this barrier, ARM IHI 0069 §3.4.2 + Linux's GICv3 driver pattern would allow the ENABLE to race the configuration change.
-
-`gic_max_intid()` (R12-gic-edge audit close) returns the runtime-discovered maximum dispatchable INTID, sourced from `GICD_TYPER.ITLinesNumber` at `gic_init`. Returns 0 before `gic_init` runs. Used by `intid_try_claim` to bound INTID claims against the actual distributor implementation rather than the architectural `GIC_NUM_INTIDS` upper bound, so a CAP_HW_CREATE userspace caller cannot reach the GIC helpers with intids in `(g_max_intid, GIC_NUM_INTIDS]` that would produce UNPREDICTABLE register writes per IHI 0069 §12.9.7.
-
----
-
-## Implementation
-
-### Boot sequence
-
-```
-dtb_init                 (boot_main step 1)
-exception_init           (boot_main step 4)
-gic_init:                (boot_main step 5)
-   detect_version_from_dtb
-   if v2:                          (gic_init_v2, Lazarus W2)
-      dist_base = dtb_get_compat_reg_n(<v2 compat>, 0)   // GICD
-      cpu_base  = dtb_get_compat_reg_n(<v2 compat>, 1)   // GICC
-      mmu_map_mmio(dist_base); mmu_map_mmio(cpu_base)
-      dist_init_v2                 (one-time, CPU 0; GICD_CTLR/SPI config)
-      gic_cpu_config_v2            (per-CPU, banked SGI/PPI in GICD low region)
-      cpu_iface_init_v2            (per-CPU, GICC PMR/BPR/CTLR)
-      return true
-   if v3:
-      dist_base, dist_size  = dtb_get_compat_reg_n("arm,gic-v3", 0)
-      redist_base, redist_size = dtb_get_compat_reg_n("arm,gic-v3", 1)
-      mmu_map_mmio(dist_base); mmu_map_mmio(redist_base)
-      dist_init                   (one-time, CPU 0)
-      redist_init_cpu0            (per-CPU, banked SGI/PPI)
-      cpu_iface_init              (per-CPU, system regs)
-   return true
-timer_init(1000)
-gic_attach(INTID 27, timer_irq_handler, NULL)   // virtual timer PPI 11
-gic_enable_irq(INTID 27)
-msr daifclr, #2          (PSTATE.I = 0)
-```
-
-After this sequence the timer fires at 1000 Hz and `exception_irq_curr_el` dispatches each interrupt to `timer_irq_handler`.
-
-### The GICv2 path (Lazarus W2)
-
-`PORTABILITY.md §5`. v2 differs from v3 in four register surfaces; the public API (`gic_acknowledge` / `gic_eoi` / `gic_send_ipi` / `gic_enable_irq` / `gic_disable_irq` / `gic_init_secondary`) is unchanged -- each branches on `g_version`.
-
-- **CPU interface = GICC MMIO** (DTB reg[1]), not the `ICC_*` system registers. `gic_acknowledge` reads `GICC_IAR`, `gic_eoi` writes `GICC_EOIR`. The GICv2 SGI subtlety (ARM IHI 0048B §4.4.5): `GICC_IAR` carries the **source CPUID** in bits[12:10] for an SGI, and `GICC_EOIR` must echo it back. The raw IAR is saved per-CPU in `g_v2_eoi_token[]` at acknowledge and replayed at EOI. There is exactly one in-flight IAR per CPU (handlers run PSTATE.I-masked -- no nesting), and each CPU writes only its own slot, so there is no cross-CPU race. A spurious acknowledge (INTID ≥ 1020) leaves a stale token that the next acknowledge overwrites before any EOI consumes it.
-- **SGI/PPI live in the distributor's per-CPU-banked low region** (INTID 0..31), not a redistributor. `gic_cpu_config_v2` + `cpu_iface_init_v2` run on each CPU for its own bank; `gic_enable_irq`/`gic_disable_irq` route both SGI/PPI and SPI through `GICD_ISENABLER(intid/32)` (the n=0 register is banked).
-- **IPI via `GICD_SGIR`**: TargetListFilter=0 + `1 << target` in the CPUTargetList byte + the SGI INTID. GICv2 caps at 8 CPUs (the target is double-bounded by `smp_cpu_count()` and 7).
-- **SPI routing via `GICD_ITARGETSR`** (8-bit per-INTID CPU bitmask) -- `dist_init_v2` routes every SPI to CPU 0 (0x01), the v2 analog of v3's `GICD_IROUTER<n>=0`.
-
-**HVF-MMIO mitigation.** `v2_w32`/`v2_r32`/`v2_w8` issue a `dsb sy` after every GIC access. Under QEMU/HVF on Apple Silicon, rapid back-to-back GIC MMIO can trap with `ESR.ISV=0` (no instruction syndrome), which QEMU cannot decode and asserts on; the barrier paces the trap rate so the access is decodable. Device-nGnRnE memory is already strongly ordered architecturally, so the barrier is for the emulator, not for correctness on silicon. Confined to the v2 path; v3 keeps the plain accessors. **Empirically validated under HVF on M-series** (`gic_init`, the timer, IRQ delivery, and the full kernel boot run clean under `-accel hvf -machine virt,gic-version=2`).
-
-**No IGROUPR.** QEMU virt's gic-version=2 presents no security extensions, so there is a single interrupt group and `GICD_IGROUPR` is RAZ/WI -- `dist_init_v2` leaves it untouched (matching Linux's gic-v2 driver). A security-ext GIC-400 accessed from the non-secure world is a W4 (Pi 4) concern.
-
-### Distributor init (`dist_init`, one-time)
-
-```c
-mmio_w32(dist, GICD_CTLR, 0);                          // disable
-typer = mmio_r32(dist, GICD_TYPER);
-max_intid = ((typer & 0x1f) + 1) * 32 - 1;             // ITLinesNumber
-
-// SPIs (intid >= 32): clear pending, disable, group=1NS, prio=0xa0,
-// edge/level=level, route to CPU 0.
-for n in [1 .. max_intid/32]:
-    GICD_ICENABLER(n) = 0xFFFFFFFF
-    GICD_ICPENDR(n)   = 0xFFFFFFFF
-    GICD_IGROUPR(n)   = 0xFFFFFFFF      // group 1 NS
-    GICD_ICFGR(n*2),(n*2+1) = 0          // level
-
-for n in [32 .. max_intid]:
-    GICD_IPRIORITYR(n>>2) byte n%4 = 0xa0
-    GICD_IROUTER(n) = 0                  // affinity 0.0.0.0 (CPU 0)
-
-mmio_w32(dist, GICD_CTLR, ARE_NS | EnableGrp1NS);      // enable + ARE
-```
-
-### Redistributor init (`redist_init_cpu0`)
-
-```c
-// Wake.
-waker = mmio_r32(redist, GICR_WAKER) & ~ProcessorSleep
-mmio_w32(redist, GICR_WAKER, waker)
-while (mmio_r32(redist, GICR_WAKER) & ChildrenAsleep) {}
-
-// SGI/PPI bank: disable, group=1NS, priority=0xa0, level.
-mmio_w32(redist, GICR_ICENABLER0, 0xFFFFFFFF)
-mmio_w32(redist, GICR_IGROUPR0,   0xFFFFFFFF)
-for n in [0 .. 31]:
-    GICR_IPRIORITYR(n>>2) byte n%4 = 0xa0
-mmio_w32(redist, GICR_ICFGR1, 0)        // PPI level
-```
-
-### CPU interface init (`cpu_iface_init`, system regs)
-
-```c
-ICC_SRE_EL1   |= 1            ; enable system-register interface
-ICC_PMR_EL1    = 0xff         ; lowest priority mask (admit all)
-ICC_BPR1_EL1   = 0            ; full priority comparison
-ICC_CTLR_EL1   = 0            ; EOImode = 0 (one-step EOI)
-ICC_IGRPEN1_EL1 = 1           ; enable group 1 interrupts
-```
-
-ISBs surround the SRE write (it changes the architectural state from MMIO-CPU-interface mode to system-register mode) and the IGRPEN1 write (subsequent code needs the new value visible).
-
-### Spurious INTID handling
-
-`gic_acknowledge` returns the INTID portion of `ICC_IAR1_EL1`. If the value is `1023` (spurious), `exception_irq_curr_el` returns without dispatching and without EOIing — per ARM IHI 0069 §3.7, EOIing a spurious read corrupts the running-priority stack. The IRQ vector slot's `.Lexception_return` then `eret`s back to whatever was running, and the IRQ line is re-asserted (or not — spurious typically means "the IRQ was taken away between assertion and acknowledge").
-
----
-
-## Data structures
-
-### Handler dispatch table
-
-```c
-struct gic_irq_slot {
-    gic_irq_handler_t handler;
-    void *arg;
-};
-static struct gic_irq_slot g_handlers[GIC_NUM_INTIDS];
-```
-
-1020 entries × 16 bytes = 16320 bytes BSS. Indexed directly by INTID (no hashing, no compaction). Cleared at boot by the BSS clear; `gic_attach` writes; `gic_dispatch` reads.
-
-A future optimization: split into per-CPU SGI/PPI slots (32 INTIDs × NCPUS) plus a shared SPI slot table (988 INTIDs). At v1.0 with NCPUS=1 the gain is zero; revisit at SMP.
-
-### Cached MMIO bases + version
-
-```c
-static gic_version_t g_version;
-static u64 g_dist_base, g_redist_base;
-static u32 g_max_intid;
-```
-
-Populated by `gic_init`; read by every public function. No locking needed at v1.0 (single-threaded boot path; per-CPU bring-up happens before SMP secondaries start).
-
----
-
-## State machines
-
-The GIC itself has hardware state machines (ack-pending-active-deactivated per INTID; affinity routing; priority drop) but the driver doesn't model them — it passes through to the hardware via MMIO + system registers and trusts the IHI 0069 architectural guarantees.
-
-The audit-relevant state machine is the IRQ flow:
-
-```
-IDLE
-  → (HW: external IRQ asserts source line, distributor forwards to redist, CPU interface signals IRQ to PE)
-PE delivers IRQ → vectors.S 0x280 entry
-  → KERNEL_ENTRY (save ctx)
-  → exception_irq_curr_el(ctx)
-      → gic_acknowledge: read ICC_IAR1_EL1 → intid
-      → if intid == 1023: return (spurious, no dispatch, no EOI)
-      → gic_dispatch(intid):
-          → handler(intid, arg)
-      → gic_eoi(intid): write ICC_EOIR1_EL1 = intid
-  → b .Lexception_return → KERNEL_EXIT → eret
-IDLE
-```
-
-Single-threaded at P1-G. No nested IRQs (PSTATE.I is set on entry; we don't clear it). Phase 2 may opt into nested IRQs for low-priority sources during a high-priority handler, but v1.0 doesn't.
-
----
-
-## Spec cross-reference
-
-No formal spec at P1-G. ARCH §28 invariants potentially implicated by future work:
-
-| Invariant | When relevant | Spec |
-|---|---|---|
-| I-9 (no wakeup lost between wait check and sleep) | Phase 2 wait/wake on IRQ-driven completions | `scheduler.tla`, `poll.tla`, `futex.tla` |
-| I-18 (IPIs in send order) | Phase 2 SMP scheduler IPIs (SGIs) | `scheduler.tla` |
-
-Neither invariant is live at P1-G (no scheduler, no SMP, no wait queues). The IRQ entry path itself is invariant-free at v1.0 — it's a straightforward ack/dispatch/EOI flow.
-
----
-
-## Tests
-
-Two leaf-API tests at landing (in-kernel, `kernel/test/`):
-
-| Test | What | Coverage |
-|---|---|---|
-| `gic.init_smoke` (`test_gic.c`) | `gic_version() == V3`, `gic_dist_base() != 0`, `gic_redist_base() != 0` | confirms autodetect found v3 + bases populated |
-| `timer.tick_increments` (`test_timer.c`) | tick count advances after `timer_busy_wait_ticks(2)` | end-to-end IRQ delivery (dist + redist + CPU iface + vector slot + handler + EOI) |
-
-The `timer.tick_increments` test is the canonical smoke for the entire IRQ infrastructure — if any step is broken, it wedges or fails.
-
-What's NOT tested:
-
-- Non-architectural priorities (we use `0xa0` for everything; no priority hierarchy yet).
-- IRQ source enable/disable race (no concurrent users at v1.0).
-- ICFGR edge-vs-level (UART IRQs are level; future virtio is per-spec).
-- Spurious INTID handling (would need fault injection).
-- v2 path (deferred — see [Caveats](#caveats)).
-
-P1-I will add a sanitizer matrix run that exercises the IRQ path under ASan / UBSan.
-
----
-
-## Error paths
-
-| Condition | Behavior |
-|---|---|
-| DTB has no GIC compat string | `gic_init` extinctions: `"gic_init: no GIC compat in DTB ..."` |
-| DTB advertises v2 (`arm,cortex-a15-gic` / `arm,gic-400`) | `gic_init_v2` runs (Lazarus W2); extincts only if the v2 node lacks reg[0] (GICD) or reg[1] (GICC), or the MMIO map fails |
-| DTB advertises v3 but `reg[0]` (distributor) absent | `gic_init` extinctions: `"gic_init: DTB arm,gic-v3 has no reg[0] (distributor)"` |
-| DTB advertises v3 but `reg[1]` (redistributor) absent | `gic_init` extinctions: `"gic_init: DTB arm,gic-v3 has no reg[1] (redistributor)"` |
-| MMIO region above 4 GiB (Pi 5) | `gic_init` extinctions: `"gic_init: mmu_map_device(...) failed (>4 GiB?)"` (deferred — TTBR0 extension at Pi 5 port) |
-| `gic_attach(intid, ...)` with `intid >= GIC_NUM_INTIDS` | returns `false`; caller is expected to check |
-| `gic_enable_irq(intid)` / `gic_disable_irq(intid)` with `intid >= GIC_NUM_INTIDS` | returns `false` |
-| `gic_dispatch(intid)` with `intid >= GIC_NUM_INTIDS` | extinctions: `"gic_dispatch: INTID out of range"` (the IAR was bogus — hardware bug or spec violation) |
-| `gic_dispatch(intid)` with no handler attached | extinctions: `"gic_dispatch: no handler for INTID"` |
-| `gic_eoi(GIC_INTID_SPURIOUS)` | no-op (per IHI 0069 §3.7 — spurious must not EOI) |
-
----
-
-## Performance characteristics
-
-| Metric | Estimated | Notes |
-|---|---|---|
-| `gic_init` total cost | ~50–100 µs | dist init walks all SPI groups; on QEMU virt with `max_intid = 159` (5 groups) it's a few hundred MMIO writes |
-| `gic_acknowledge` cost | ~10–20 cycles | one MRS via system register + dsb |
-| `gic_eoi` cost | ~10 cycles | one MSR + isb |
-| `gic_dispatch` cost (excluding handler) | ~5 cycles | array index + indirect call |
-| Total IRQ service overhead (excluding handler) | ~50 cycles | ack + dispatch + EOI + KERNEL_ENTRY + KERNEL_EXIT |
-| BSS footprint (handler table) | 16 320 bytes | 1020 × 16 |
-| BSS footprint (per-CPU IRQ counter) | 1 024 bytes | 8 × 128 (granule-padded; see below) |
-| Code size (gic.c) | ~3 KB stripped | reasonable for a driver |
-
-### The per-CPU IRQ counter is cache-granule padded (V-4c-3 F5, task #73)
-
-`gic_dispatch` stores to its CPU's slot of `g_cpu_irq_count` on **every**
-interrupt on **every** CPU — the timer PPI at tick rate, plus IPIs and every
-device IRQ. As first written (V-4c-2b) the counter was a plain
-`u64 g_cpu_irq_count[DTB_MAX_CPUS]`, which at `DTB_MAX_CPUS == 8` is exactly 64
-bytes: one cache coherency granule, write-contended by every core on the
-kernel's hottest path.
-
-Correctness was never at issue — the store is single-writer per CPU, and that
-reasoning was and remains right. It was simply *silent about sharing*. The tell
-is the sibling counter added in the same commit: `CpuSched.nctxt` lives inside a
-large per-CPU struct, so its slots were line-separated for free.
-
-Each slot is now padded and the array aligned to `CACHE_LINE_MAX_BYTES`
-(`arch/arm64/hwfeat.h`). The counter deliberately stays in `gic.c` rather than
-folding into `CpuSched`: gic owns interrupt dispatch the way sched owns context
-switches, and `CpuSched` is file-private to `sched.c`, so folding would add a
-cross-TU call on the hottest path and point `arch/arm64` at scheduler internals
-to save 1 KiB of BSS.
-
-**On the constant.** `CACHE_LINE_MAX_BYTES` is 128, which is 2× the granule any
-target actually reports: measured CWG == DminLine == 64 under both HVF
-`-cpu host` (real Apple M2) and TCG `-cpu max`. The margin is deliberate —
-over-padding costs 512 bytes of BSS once, while under-padding silently restores
-the contention with no symptom any test would catch. It is also the only defence
-available, since `CTR_EL0` exposes DminLine and CWG but not outer-level line
-sizes, so a hardware-queried pad is always a lower bound.
-
-**What is and is not proven.** `gic.cpu_irq_counter_geometry` verifies the
-geometry (slot alignment, one-granule stride, and that the reported CWG fits the
-pad) and is revert-probed against the pre-fix layout. It does **not** measure a
-speedup, and none is claimed: QEMU does not model coherence traffic, so
-quantifying this needs real multi-core hardware and a targeted microbenchmark.
-The fix is justified as geometry, not as a measured win.
-
-VISION §4.5's IRQ-to-userspace handler p99 budget is < 5 µs. Kernel-internal IRQ overhead (P1-G's measure) is comfortably under that — the userspace path adds context switches at Phase 5.
-
----
-
-## Status
-
-**Implemented at P1-G**:
-
-- Version detection via DTB (`arm,gic-v3` → V3; `arm,cortex-a15-gic` / `arm,gic-400` → V2 → extinction).
-- GICv3 distributor init (one-time, CPU 0): SPI groups, priorities, ICFGR, IROUTER, GICD_CTLR enable.
-- GICv3 redistributor init (per-CPU, CPU 0 at v1.0): wake, SGI/PPI bank config.
-- CPU interface init (per-CPU): SRE / PMR / BPR / CTLR / IGRPEN1.
-- IRQ enable/disable for SGI/PPI (banked) + SPI (non-banked).
-- `gic_acknowledge` / `gic_eoi` via system registers (ICC_IAR1_EL1, ICC_EOIR1_EL1).
-- Handler dispatch table (1020 INTIDs × {handler, arg}).
-- `gic_attach` registration.
-- `mmu_map_device` integration: GIC distributor + redistributor mapped Device-nGnRnE in TTBR0 from DTB.
-- Tests: `gic.init_smoke` (autodetect + base addresses).
-
-**Landed at Lazarus W2** (`PORTABILITY.md §5`):
-
-- GICv2 path (distributor + GICC MMIO CPU interface + CPUID-preserving GICC ack/EOI + `GICD_SGIR` IPI + banked SGI/PPI). The HVF-on-Apple enabler -- empirically validated under `-accel hvf -machine virt,gic-version=2`. Owed: #890 (the userspace virtio-mmio driver trips the same `isv` assert under HVF -- a different layer).
-
-**Not yet implemented**:
-
-- SMP redistributor walk for secondary CPUs. Phase 2 with thread machinery.
-- SGI (inter-processor interrupt) generation via ICC_SGI1R_EL1. Phase 2 scheduler.
-- Per-IRQ priority hierarchy. Post-v1.0 hardening.
-- ITS (Interrupt Translation Service) for MSI. Phase 3 with VirtIO over PCIe (we don't currently expose virtio-pci; virtio-mmio uses regular SPIs).
-- Pi 5 support: GIC distributor at PA > 4 GiB; needs TTBR0 extension or high-VA mapping.
-- IRQ-driven UART. Mechanism is in place; routing through `gic_attach` is post-v1.0.
-
-**Landed**: P1-G at commit `39eafb4`.
-
-**Extended at P4-Ic5-IRQ-probe** (`0c7a51b` / `221cd18`): `gic_set_pending_spi(intid)` for test-harness IRQ injection.
-
-**Extended at P4-Ic5b2** (`fe40f1b` / `542f2a6`): `gic_set_spi_edge_triggered(intid)` for SPI ICFGR transition; called unconditionally by `kobj_irq_create` for SPIs ≥ 32 because QEMU virt's virtio-mmio + most real-ARM device IRQs are edge-triggered per DTB.
-
-**Audit-closed at R12-gic-edge** (this round): added `dsb sy` after ICFGR write (F200); converted `gic_set_spi_edge_triggered` to void + extinction on precondition violations (F201); exposed `gic_max_intid()` accessor + tightened `intid_try_claim` to bound against runtime line count (F205); added `_Static_assert`s for the ICFGR 0b10 / 0b00 encoding to pin SBZ discipline (F204). Two P3s deferred: F202 (ICFGR RMW SMP-safety — v1.0 serial-claim discipline holds; Phase 5+ concurrent driver-init revisit) and F203 (stale `GICD_ICPENDR` not cleared on edge-trigger transition — re-claim cycles not exercised at v1.0).
-
----
-
-## Caveats
-
-### v2 vs v3 ABI deltas (both live)
-
-ARCH §12 commits to v2/v3 autodetect; both are now implemented. `gic_init` probes `arm,gic-v3`, then `arm,gic-400` / `arm,cortex-a15-gic`. The v2 ABI deltas the driver handles (see [The GICv2 path](#the-gicv2-path-lazarus-w2)): the CPU interface is GICC MMIO (`GICC_IAR`/`GICC_EOIR`) vs v3's `ICC_IAR1_EL1`/`ICC_EOIR1_EL1`; SGI/PPI are in the distributor's banked low region vs a redistributor; IPIs go through `GICD_SGIR` vs `ICC_SGI1R_EL1`; and the GICC EOI must echo the SGI source CPUID. The default + CI run on `gic-version=3` (`tools/run-vm.sh`); `THYLACINE_GIC=2` exercises v2, and `THYLACINE_ACCEL=hvf THYLACINE_GIC=2` is the HVF dev loop the v2 path was built to enable.
-
-### Pi 5 GIC at PA > 4 GiB needs TTBR0 extension
-
-Pi 5's GICv3 distributor sits at PA ~0x107FFF8000 — above 4 GiB. Our TTBR0 identity covers `[0, 4 GiB)` only; `mmu_map_device` rejects anything past that. Pi 5 port plan: extend TTBR0 to cover the GIC PA range, or map the GIC into TTBR1 high VA. Lands when there's a Pi 5 testbed.
-
-### Handler context: SP_EL1, no nesting
-
-P1-G's IRQ handler runs on the existing SP_EL1 (boot stack at v1.0). Same recursive-fault hazard as the sync handler — a stack overflow inside a handler wedges QEMU. Mitigation: per-CPU exception stack at Phase 2.
-
-PSTATE.I is set on IRQ entry; we don't clear it. Nested IRQs (high-priority preempting low-priority handler) are a Phase 2+ feature.
-
-### Distributor RMW SMP-safety (R12-gic-edge F202 deferred)
-
-The `gic_set_spi_edge_triggered` helper performs a read-modify-write on `GICD_ICFGR<n>` (one 32-bit register covers 16 INTIDs at 2 bits each). Two concurrent `kobj_irq_create` calls on different SPIs in the same ICFGR word could in principle race the RMW. At v1.0 this is not reachable: `intid_try_claim` takes `g_intid_lock` per-claim, but only for the claim-table mutation — the lock is dropped before `gic_set_spi_edge_triggered` runs. The de-facto serialization at v1.0 is that all driver bring-up is serialized (test sequence + virtio-* probes run one at a time). Phase 5+ concurrent driver-init would expose the race; the fix is to lift `g_intid_lock` to cover the GIC RMW or introduce a dedicated `g_gic_dist_lock`. Tracked as R12-gic-edge F202.
-
-### Stale `GICD_ICPENDR` after edge-trigger re-claim (R12-gic-edge F203 deferred)
-
-`kobj_irq_free_internal` calls `gic_disable_irq` (clears ENABLE) but does NOT clear `GICD_ICPENDR<n>.bit`. A subsequent `kobj_irq_create` for the same SPI flips ICFGR to edge + enables it; if the SPI had a stale pending bit from a previous level-triggered configuration, the GIC delivers a phantom IRQ on the next ENABLE transition into the new driver's `kobj_irq_dispatch`. At v1.0 the test that exercises edge-trigger transition (virtio-blk-probe) runs once per boot, so the stale-pending hazard isn't reached. Phase 5+ re-claim cycles (driver supervision / restart, kexec) would surface it. Fix: clear `GICD_ICPENDR(intid/32)` between ICFGR write and ENABLE write. Tracked as R12-gic-edge F203.
-
-### `gic_attach` does not return the previous handler
-
-Attaching twice silently overwrites. v1.0 callers register exactly once at boot; misuse extincts at the first IRQ via the dispatch path's "no handler / unexpected handler" diagnostics. If a future caller needs to chain (multiplexed IRQ), they cache the previous attach themselves before overwriting.
-
-### Default priority is 0xa0 for everything
-
-Source-side priority register holds 8 bits per INTID; we set every active INTID to `0xa0`. Phase 2 may want a hierarchy (timer above device IRQs above SGIs); the API supports it (just write a different byte to `IPRIORITYR` / `GICR_IPRIORITYR`), but v1.0 doesn't use it.
-
-### `dsb sy` before `mrs ICC_IAR1_EL1`
-
-We add `dsb sy` before reading IAR per ARM IHI 0069 §3.7 to ensure prior gic_eoi writes have observed before this acknowledge. On a non-pipelined CPU this is overkill, but on speculative cores the ordering matters for re-entry chains. Cost is one DSB per IRQ (~10 cycles); not load-bearing for performance at v1.0.
-
-### Group 1 NS only
-
-We use group 1 non-secure exclusively. Group 0 (secure) and group 1 secure are not used; `IGROUPR` writes the INTID to non-secure group 1. This is correct for EL1-non-secure operation. Pi 5's secure boot may require revisiting (we may need group-0 IRQs from the secure firmware).
-
----
-
-## See also
-
-- `docs/reference/01-boot.md` — entry sequence (`gic_init` slot in `boot_main`).
-- `docs/reference/03-mmu.md` — `mmu_map_device` API used to map GIC regions Device-nGnRnE.
-- `docs/reference/02-dtb.md` — `dtb_get_compat_reg_n`, `dtb_has_compat` used for autodetect + region discovery.
-- `docs/reference/08-exception.md` — `exception_irq_curr_el` calls into `gic_dispatch`; `.Lexception_return` trampoline.
-- `docs/reference/11-timer.md` — first IRQ source wired through (virtual timer PPI 11 → INTID 27 since Lazarus W2).
-- `docs/ARCHITECTURE.md §12.3` — design intent for the GIC autodetect commitment.
-- ARM IHI 0069 (current rev H.b) — GICv3 + GICv4 architecture specification.
-- Linux `drivers/irqchip/irq-gic-v3.c` — reference implementation; we reference its register map but not its code.
+# 10 — GIC driver [ABSORBED INTO THE VAULT]
+
+This document was absorbed at the interrupt-and-time sweep
+(`chg-2026-08-02-devices-interrupt-time-sweep`). Its content now lives,
+code-verified and current, in the dossier:
+
+    vault/system/kernel/devices/sub-kernel-gic.md
+
+(version detection and why version and addresses must come from one node, the
+three-stage bring-up on each generation and the orderings the architecture
+forces, the per-CPU contract on enabling and secondary bring-up, dispatch and
+its per-CPU counter, the completion echo, inter-processor interrupts and their
+bounds check, and the edge configuration a lent interrupt needs.)
+
+**What this file got wrong is a failure mode the other two absorbed documents
+do not show: it was updated for a feature's *presence* but not its
+*substance*.** The headline is accurate, the identifiers are right, the older
+generation is named eleven times, and the summary correctly describes it as
+reaching its CPU interface through memory-mapped registers rather than system
+registers. Nothing here is false.
+
+But the mechanisms are absent — and specifically the ones that make the older
+generation genuinely different to drive rather than merely differently spelled:
+
+- **The completion echo.** Acknowledging on the older generation returns a word
+  whose next three bits, for an inter-processor interrupt, identify the
+  *sending* CPU, and completion must write that same field back. This is the
+  reason a per-CPU slot exists to hold the raw acknowledgement between the two
+  calls, and the reason that slot needs no lock. Zero mentions.
+- **The active-state clear at bring-up.** Enable and pending are cleared;
+  so is *active*, because firmware or a previous kernel may have left an
+  interrupt half-delivered. Zero mentions.
+- **Byte-wise priority writes**, so that a concurrent update to a neighbouring
+  interrupt in the same word is not lost. Zero mentions.
+- **The runtime line-count bound**, read from the implementation at bring-up
+  and used to reject interrupt numbers past what the hardware actually has —
+  writes beyond it are undefined. Zero mentions.
+- **The barrier after edge configuration**, without which a strict
+  implementation could process the following enable first and deliver the first
+  interrupt as level-sensitive, which for a source nothing deasserts is an
+  unrecoverable storm rather than a wrong value. Zero mentions.
+- **The per-CPU dispatch counter**, added later to feed process statistics, and
+  deliberately counted at the point every interrupt passes rather than reusing
+  the narrower count of interrupts forwarded to driver processes. Zero mentions.
+
+So a reader who needs to know *whether* the older generation is supported is
+well served, and a reader who needs to *change* the driver learns nothing about
+what is hard. That is the specific gap: the presence of a feature is a fact
+about the project, and its mechanism is a fact about the code, and only the
+first was written down.
+
+**What it got right and the vault kept:** the version-detection order and the
+compatible strings, the shape of the three-stage bring-up on both generations,
+the affinity-routing enable preceding the routing writes, and the bounded wait
+for the per-CPU interface to acknowledge its wake.
+
+The invariants live at `vault/invariants/inv-i15.md` (which now records that
+this is the one device where the tree selects the *driver*, with no fallback)
+and `inv-i18.md` (whose statement this sweep sharpened: the pending state is a
+bitmap, so the invariant holds vacuously with one interrupt and breaks on the
+second, whether or not it carries a payload). The open debt is
+`seam-gic-handler-slot-never-cleared` (no task). Design scripture is unchanged:
+`ARCHITECTURE.md section 12.3`, `PORTABILITY.md section 5`, ARM IHI 0069 and
+IHI 0048B.

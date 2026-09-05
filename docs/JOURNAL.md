@@ -1053,6 +1053,684 @@ SMP soundness inherited from c83da249 (aux-3's kernel is the byte-identical
 binary main gated 40 boots / 0 corruption -- not re-run on identical bits). The
 operator's 3-part bar is met: aux-2 merged, aux-3 fresh off merged-main, both
 build+test green. Role split: aux -> viv on aux-3, main -> KT-1.
+## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
+
+**Where it sits.** Run 30 closed and landed the KT-1 audit arc (`6e6503ad`). This run picked up the operator's Cmd+F report that aux reproduced and handed over (yip 0048, `memory/bug_zoom_fullscreen_surface_not_scaled.md`): zooming DOSBox-X showed its 640x417 frame native at the display's top-left on black. Compositor geometry, so main's.
+
+**Three hypotheses, one ground truth.** Aux's memory hypothesised the zoomed leaf's CONTENT rect reaching `placement_rect` as ~640x417 (three sub-arms, all "instrument it"). The pickup note's lead was the SDL backend reweaving the surface to the offered display size on the zoom's CONFIGURE. Neither survived ten minutes of reading: `recompute`'s zoom arm sets content = the display and `surface_target` returns it; and aux's own port carries `0005-thylacine-non-resizable-window.patch`, which pins DOSBox-X non-resizable so the backend DECLINES every offer (the fork-2 letterbox path). The decisive evidence was already in aux's scratchpad: `fs-1-tiled.png` shows DOSBox at the TOP-LEFT of its tile, not centered -- the crop arm -- while the log's one-shot `letterbox 640x400 -> 632x395 @(0,188)` belonged to an earlier 640x400 incarnation (`retire surface 1` three times: DOSBox re-creates its window per mode change, the last at 640x417 with its menu bar). So the tile was already wrong; the zoom just made it visible. The crop arm has two entrances, same-size and `patchwork`; the surface was not same-size, so it was latched.
+
+**The mechanism.** The #56 latch (`Surface.patchwork`) set on the first present whose damage did not cover the surface, for a stated reason: aurora's cell-diff over ROTATING weave slots leaves each slot stale outside its damage, so scaling one slot composes half-stale frames and an accumulator must crop, damage-clipped. Its doc claimed "the SDL class never latches". False at the class level: `SDL_UpdateWindowSurfaceRects` is a standard API and DOSBox-X uses it for its menu bar and changed scanline bands. The latch keyed on a PROXY (damage coverage) for the property it exists for (slot rotation), and the proxy fires on a class the property does not cover -- thyla_tap presents slot 0 only, the app's framebuffer, complete by construction. The fix keys the latch on the property: `slots_presented` (a bitmask) and partial damage latches only once two distinct slots were presented. Aurora latches at exactly the same present as before (its second present is always a second slot); DOSBox never does. Plus the cost half: a letterboxed compose ignored damage and redrew the whole scaled rect per rect per present -- DOSBox's four overscan rects would have rescaled the display four times -- so `ComposeOp.clip` is the damage's projection through the scale (`libhalcyon::place::scaled_clip`), brute-force host-tested against the exact mapping `compose_cpu` samples by, and the CPU path composes and pushes only that. `letterbox` moved to `libhalcyon::place` so the battery's sample points come from the compositor's own function instead of a mirror.
+
+**The witness is the line the log lacked.** Aux's smoking gun was ZERO letterbox output after Super+F. The new battery leg (`singleslot`) makes that the positive witness: a single-slot client D (640x400, `Surface::set_single_slot`) is zoomed and the gate expects the compositor's own `surface N letterbox 640x400 -> 1280x800 @(0,0) in 1280x800` line, with the latch line as a FAIL arm; then three pixels (the partial present's green through the 2x scale; the untouched frame's blue at three-quarters, which is black under the bug; a post-zoom partial present's yellow, the DOSBox steady state); then the one-variable-away control -- the same surface, rotation back on, latches at its second slot. Gates: panes PASS with the leg (48 s), restore PASS, test.sh PASS, session PASS (40 s), chords PASS (35 s) -- one chain, one host, no retries..
+
+**What it does not cover.** The real DOSBox re-run needs the fixture only aux-3 carries (32 commits ahead of main on the port): owed to aux after the merge, with `dx-fullscreen-repro.exp` as the driver. FIT vs FILL was not put to the operator: aspect-fit is the compositor's existing letterbox policy and the fix restores it (640x417 -> 1227x800, 26 px pillars); a fill/integer-scale preference would be a new per-surface knob, not this bug. The chunk is UNAUDITED by design (the double-the-distance rule): row 42 of AUDIT-TRIGGERS carries the prosecution notes for the next tapestryd round.
+
+**Landed** at `f25781ad` (rebased onto the vault peer's dossier landing `5a34fd60`; the pre-rebase hash `ea270d39` appears in the first fixup's subject only), both mirrors.
+
+**The lesson, pinned.** A latch keyed on a proxy property fires on every class the proxy covers and the property does not. The tell was in the doc comment itself: it named the property ("rotating weave slots") and asserted a class ("the SDL class never latches") that the code never checked.
+
+---
+
+## Run 30 (2026-09-05, Fable 5.1, effort max): the KT-1 audit's round 2 — the fixes re-prosecuted, and the two the arithmetic had not reached
+
+**Where it sits.** Runs 28-29 landed F2 (`53ee407f`) and the round-1 audit close (`488cab49`, rebased to `062efe18` after the vault cutover). This run resumed from a self-compaction at the 600k line with two round-2 prosecutors already running against the round-1 fixes, and the vault peer's cutover of `vault/` onto `main` (`60021691`, both mirrors) landing mid-run.
+
+**The cutover, absorbed.** `main` fast-forwarded cleanly onto the vault's lineage and `kt1-audit-close` rebased with zero overlapping files. One side effect worth recording: `main` now tracks `.claude/settings.json` (the vault-inline hooks: the read-log, the dossier nag, the quaestor pre-commit lint), so the local untracked copy was backed up to the scratchpad and replaced. The `quaestor owner` verdict on this close's surfaces is MIXED: tapestryd, libtapestry, login, ptyhost and poll.h are vault-owned (dossier sections), halcyond / kaua-term / vt / the battery are UNOWNED (`docs/reference`), so this close writes both — and the round records are vault notes (`adt-kt1-r{1,2}`, 24 `fnd-kt1-*`, 3 seams, a hazard, the chg), following the weft7 precedent for findings on surfaces without a dossier (they stay in the `adt` body until that surface's sweep). The round-1 close (`062efe18`) had landed pre-cutover with only the memory closed list; its findings are now in the vault too.
+
+**Round 2's verdict: 0 P0 / 1 P1 / 4 P2 / 7 P3**, not dirty by the count rule but dirty by invasiveness, because two of the fixes restructure a mechanism. The two findings that matter most were both *residues of round-1 fixes whose arithmetic stopped one container short*:
+
+- **B2-F1 (P1).** Round 1 budgeted halcyond's scrollback (one 32 MiB session budget shared by tile count, every line charged) and declared "their sum must fit the heap". But `Tile::render` laid out EVERY frozen block on every paint — a transient of ~1.8x the retained bytes (a `GlyphRef` + an `i32` per cell, a `Vec<Seg>` per line), charged to nothing. One tile with ~20K full-width rows of history, well under its share, would OOM the whole session at its next paint. The fix is a windowed layout on a per-block HEIGHT cache (12 bytes per block, keyed by width, aligned to the front-evicted/back-appended frozen deque): the exact content height and every block's screen-y follow from the cache, and only the blocks intersecting the view are laid out, one `LaidBlock` alive at a time. Host tests pin it: a warm render lays out at most 4 blocks for 200 in history, at the bottom AND scrolled to the top; the cache follows eviction and width changes; the content height equals the whole-history computation. The lesson is now `vault/hazards/haz-budget-stored-not-derived.md`: **a budget on stored bytes does not bound the derived working set** — and the same shape was B2-F4 in the kaua-term: `scroll_cap` bounded one ScrollOff, not how many one `feed` piles up before the first write (`ESC [ 36 S` is five bytes and thirty-six rows: 29K rows per 4 KiB read). `Producer::feed_into` now ships each capped ScrollOff through a sink as it forms.
+- **C2-F1 (P2).** Round 1 replaced the any-user-principal trigger with an explicit `session on` declaration — correct — but made the slot first-come-exclusive with no takeover, and halcyond died on a refusal. Any Session conn that had written `session on` (a same-user program; an orphan of a previous user, which the getty loop never kills) held the seat until it died, and login's "exit is logout" turned every later graphical login into the deferred C-F12 re-prompt loop. A fix introduced a denial-of-service that the defect it fixed did not have. Now the seat is the PRINCIPAL's: `session on` takes over a same-principal holder or an idle one, E_BUSY only for another principal's live tiles; halcyond retries briefly and then runs UNDECLARED (its tiles beside the console) rather than exiting.
+
+**The other P2s**: `set_max_cost` was enforced only at the next freeze, so a QUIET tile kept its old share and the retained sum grew as 32 MiB x H(N) (evicts at once now); the round-1 down queue's drop-newest was record-blind, so a Resize dropped at the cap was never re-sent and the tile stayed at the old geometry for life (`DownQueue`: the geometry record has its own never-dropped latest-wins slot, delivered first at a record boundary). Seven P3s all fixed, including a new event kind `TEV_LAYOUT` (10) so the declared conn hears a split of an EMPTY leaf, which fans no CONFIGURE and no FOCUS to anyone.
+
+**A wrong turn, caught by the gate.** The new battery control (`session on` from the battery's own conn → the console leaf reads the ZERO rect → `session off` restores it) failed 3/3 with `session on rc 10`: a ctl write answers its byte count, and I had tested `rc != 0`. Ten is the length of `session on`. The gate's failure detail carried the discriminant, which is exactly what the test-mode resize-ack logging was added for in run 29 — read the number before theorizing. The same control gained the round-1 C-F2 regression that round 1 had landed without: a declared session's `close` on the container holding the (transparent, backgrounded) console leaf must answer E_PERM with the leaf undisturbed.
+
+**Gates on the round-2 tree**: ls-gfx-panes (with the three declare-control arms), ls-gfx-restore, test.sh, ls-gfx-session (the declaration line, caps-probe OK/REFUSED, the zoom survival, the lone tile, 1264/1280), ls-gfx-chords — all PASS; host tests halcyond 97 / kaua-term 28. The kernel is byte-identical since `53ee407f` (a poll.h comment), so the 40/40 SMP gate stands.
+
+**Round 3 (`cf499fe1` + the parallel self-audit): 0 P0 / 0 P1 / 1 P2 / 6 P3, clean.** The prosecutor re-read the two restructures and found the round-2 sink's arithmetic had stopped one record CLASS short: it fired only on the Scroll arm, and an alt-screen toggle (`ESC[?1049h`/`l`, eight bytes each way) yields a FULL screen each way — a 4 KiB read of toggles is 512 full diffs, 45 MiB at the shipping geometry and 32 MiB from 320 bytes at 4K, measured with the real producer. The same hazard, one class over: the sink now triggers on the cells HELD in `out`, whichever class put them there. The self-audit that ran in parallel with the prosecutor found its own defect first — a floating exit mark (an exit code arriving after its zone closed) is the one way a FROZEN block mutates, and the round-2 height cache was keyed on the block id alone, so a badge line could appear under a cached height; the cache is keyed on (id, exit) now, and the prosecutor re-derived that no second post-freeze mutation path exists. The other five: the open block (laid whole every render) was capped at share/8 — 4 MiB of cells at a 32 MiB share — while the round-2 comment promised O(view); a constant 512 KiB cap now bounds both the render transient and the re-budget residue the eviction floor keeps. `TEV_LAYOUT` was the only non-coalesced state event (a window-churning foreign client could wedge-retire the session's root surface); the resize drain diffed against the old-geometry shadow when the cell count was unchanged; and the round-2 takeover rule let the user's own program steal the seat from the user's LIVE compositor — a same-principal exception the restart case never needed, because a crashed compositor's conn is un-declared as soon as its EOF is serviced. The seat is now held only while it hosts, and halcyond re-declares after its first surface so an idle usurper in the declare-to-mint window cannot leave it mislabelled.
+
+**A shell slip worth recording.** An unquoted heredoc (`<<PY`) carrying prose with backticked commands executed them: the working tree was checked out at `main` for a minute while the prosecutor was reading it, and a `git push origin main` went out — rejected only because the remote had moved. The prosecutor was told, re-read by md5 against the commit, and nothing was published; the lesson is a memory pin (always `<<'EOF'`).
+
+**Landed.** The full gate set passed on the round-3 tree (ls-gfx-panes with the declare controls, ls-gfx-restore, test.sh, ls-gfx-session, ls-gfx-chords; host tests halcyond 99 / kaua-term 30); the close is `65bb05b3`, its hash fixup `22293c3f`, and the vault peer's commits (`4134fc37`, vault-only) were merged in with the two generated views regenerated — `732a95c8` is `main` on both mirrors. One vault rule learned at the commit: a landed `chg` is append-only (R3) — the hook refused the round-3 edges appended to the round-2 note, so round 3 carries its own superseding `chg`. **Next**: the aux-handed fullscreen-zoom bug (instrument the zoomed leaf's placement before believing either root-cause theory), then H-4c/H-4d.
+
+---
+
+## 2026-09-05 (runs 28-29, Fable 5.1) -- KT-1.5d-3 F2: the tiling exclusion, structural transparency, and the hosting-fan defect the battery dug up
+
+Run 28 owed three things in order: prove the d-3 chord-split owner-stamp (F1,
+in `402fbf0a`) inert on the console chord path, surface F2, then land it. F1
+verified on a DEFAULT bake -- and the first verification SKIPPED ls-gfx-chords
+(no cfg-4 bake); a SKIP is not coverage, so it was re-baked with
+`THYLACINE_AURORA_CFG4=1` and passed. The operator ratified "filter bg leaves":
+reconcile now decides backgrounding from the TREE before recompute (owner-based,
+visibility-independent) into `Pane.backgrounded`, and `layout_pane`'s Split arm
+zero-rects a backgrounded leaf while the foreground siblings take the full rect.
+Measured on ls-gfx-session: two session tiles now sum **1264 of 1280 px**
+(pre-F2 ~836), captured by a witness-then-spawn expect written sequentially
+because expect matches by ARM ORDER, not buffer position -- proven in
+isolation before it went into the gate.
+
+**Wrong turn #1, the visible one: F2 broke ls-gfx-panes, and the fix moved the
+ownership model.** Excluding aurora makes the battery's pane A WIDE, so
+`pane::host()`'s shape-keyed split picked SplitH and flattened `[aurora, A, B]`
+into the root; `mode A tabbed` then targeted a subtree containing aurora ->
+E_PERM. The operator's second vote: a backgrounded leaf is transparent to a
+session's structural ops (`actor_owns_subtree(Session)` skips it, guarded on at
+least one owned non-bg surface so a session can never close an aurora-only
+subtree; `tab_cycle` / `visible_strips` / the Tab arm skip it). Two residues
+closed by ground truth: a u32 underflow in the battery's strip arithmetic on
+the now-borderless tabbed-root child (an OOB probe crash reported as "never
+reached tabbed"), and `tab next` E_PERM'ing because the skip keyed on
+`Surface.backgrounded` -- visibility-derived, it CLEARS the moment a tab hides
+the leaf -- rather than the stable tree flag. Two flags, one name, different
+bases; the transparency must key on the tree.
+
+**Wrong turn #2, the expensive one: adapting the battery to the new geometry,
+leg by leg.** The third vote ("adapt the battery") added an explicit
+`split <A> v` before hosting B, restoring the nested splitV the mode legs
+assume. That fixed unzoom and then the RESIZE leg failed: the stale-serial probe
+(`resize 1 1 0`, expects E_AGAIN) got `Protocol`. Run 28 wrote it up as "the
+split's extra reconcile bumped B's serial" and handed off at the context
+wind-down. That theory was wrong on its face -- a bumped serial still makes 0
+STALE, which is E_AGAIN; only a MISSING offer is E_INVAL -- and it never
+consulted the error's own discriminant. The cost of not reading `resize_ack`'s
+error paths before theorizing was one compaction and a mis-aimed handoff.
+
+**The finding nobody planned (run 29): a pre-existing compositor defect.**
+Reading `resize_ack` gave four rejection causes and only one non-EAGAIN one
+that fit: `offered == None`. `offered` is set solely by the CONFIGURE fan, the
+fan runs only on a STRUCTURAL reconcile, and structural means `calc_geom_sig`
+changed -- a signature over each visible leaf's `(id, content rect)`. Hosting B
+into the pre-split EMPTY leaf changes no rect. So the pass ran non-structural,
+B never got its offer, and its first ack was E_INVAL. Reach: every
+host-into-an-existing-empty-leaf path -- an explicit split then a spawn, the
+H-4b claim placement, `host()`'s first arm -- masked since G-6 because every
+gate hosted through the SPLIT arm and the production clients pre-size their
+surface to the pane. The fix folds the hosted surface INCARNATION `(slot, gen)`
+into the signature (state-based, every placement path, no per-caller poison),
+and test-mode now logs each resize-ack rejection with its discriminant and the
+deciding state -- the witness run 28 lacked. ls-gfx-panes is the regression
+test: it fails 3/3 without the fold. With the fold in, and the battery's move leg re-keyed from "B must not sit at the left edge" (a discriminator that was really aurora's pre-F2 column) to the layout text's child order, ls-gfx-panes passed all 15 legs; restore, test.sh, session (**1264/1280**) and chords (cfg-4) passed on the same code. Landed as the F2 unit (hash: the status row in `docs/halcyon-status.md`).
+
+**Found while landing, not fixed: the vault is un-committable.** CLAUDE.md's
+doc step 0 routed the tapestryd prose into the vault (`quaestor owner` says
+it carries `server.rs` + `pane.rs`), and the vault's own pre-commit lint
+refused the commit on five items that predate it -- three 2026-08 change
+records whose `mirrors-checked` covers 15 of the boot-banner note's 28
+mirrors, and two stale generated views. Nobody has been able to commit
+there for about three weeks, which is the vault's coverage-is-not-currency
+lesson applied to its own gate. The section + record sit staged in
+`../thylacine-vault`; the vault track was rung (yip 0049) rather than the
+hook bypassed.
+
+**The batched KT-1 audit (three Fable prosecutors, in parallel) came back
+DIRTY -- 3 P0.** The poll substrate (A) was clean but for six P3s; the
+kaua-term seam (B) and the compositor + session (C) each found the same P0
+from two directions: login spawns the per-user compositor WITHOUT the cap
+mask it applies to the console shell, and `Command` inherits every cap by
+default -- so halcyond, every kaua-term and every program in every tile held
+CAP_SET_IDENTITY, and could spawn as any principal. The d-1a commit had
+asserted "no extra cap" and the reference doc repeated it; neither was
+evidence. The second P0 was a data-loss bug: the session reconcile parsed the
+layout with the CHROME parser, which skips hidden leaves, so a zoom read the
+hidden tile as vanished and killed its shell. Both are witnessed now: a
+`/bin/caps-probe` typed into a tile (plain spawn OK, identity spawn REFUSED)
+and a zoom/unzoom leg that fails if the hidden tile dies. C also showed the
+F2 commit's "session-less display -> byte-identical console path" claim was
+FALSE: `principal_is_session` is true for ANY user, so a DOSBox run from the
+console shell put the console to sleep. The display handoff is now an
+explicit act -- `session on`, declared by the compositor on its own conn --
+which is also what closes the per-conn surface cap for a session and lets the
+flag be derived from the tree alone (the two-flags trap dissolves). Every
+P0/P1/P2 is fixed on the branch; the kernel P3s from A are deferred with the
+kernel untouched, so the SMP gate's 40/40 on 53ee407f still stands.
+
+**The cutover, mid-close.** The vault track (operator-approved) asked for a
+hold on `main` at `2ceb606a` while the vault lands there; the audit-close
+work moved to a local branch and rebases after the push. The vault had
+already carried my staged F2 files into its resync, so the yip-0049 block
+resolved itself; reference docs retire to dossiers from here.
+
+**Lessons, both reusable.** A state signature that omits a dimension makes every
+change along it invisible: the detector consumed (where, what) and hashed only
+(where). And read an error's discriminant before theorizing about it -- the code
+had already said which case it was. Open after this run: the aux-handed
+fullscreen-zoom bug (`bug_zoom_fullscreen_surface_not_scaled`, same geometry
+path; rebase on this commit first), then the batched KT-1 audit + SMP gate +
+push.
+
+---
+
+## 2026-09-04 (run 27, Opus 4.8) -- KT-1.5d-3: multi-tile; the E2E hunt that surfaced two tapestryd bugs
+
+d-3 generalized the per-user compositor from one session tile to N. New
+`usr/halcyond/src/session.rs` (`session::run`, the I/O half, moved out of
+`main.rs`) hosts one `kaua-term` + content `Surface` + `Tile` per compositor
+leaf, keyed by leaf id, reconciled off the `layout` file each relayout; new
+host-tested `halcyond::tiles::plan_tiles` (the pure create/drop diff, 6 tests).
+Create = claim (`pane/<id>/claim`, the owner+emptiness authority) + `open_claim_on`
+at the leaf's `geometry`; multiplex = ONE `poll { ring | up_0..up_N }`; input is
+focus-routed FOR FREE (tapestryd delivers KEY only to the focused surface, so
+per-surface drain is inherently routed -- halcyond never reads `l.focused`);
+teardown is contained (clean exit closes the leaf, a crash freezes an affordance).
+
+**The chunk was supposed to be halcyond-only. The E2E proved it was not** -- and
+the proving is the reusable part.
+
+**Wrong turn #1, caught: the green that wasn't.** The first E2E's harness exit was
+0, but the SCENARIO had failed all 3 attempts -- `test-interactive.sh` returns 0
+regardless. Reading the exit code would have shipped a broken chunk; reading the
+CONTENT (`grep FAIL`) showed `Super+H produced no second tile`. The M-PIN
+two-halves lesson, live.
+
+**Wrong turn #2, avoided: theory vs ground truth.** The transcript showed a
+baffling `surface 1 letterbox 1280x800 -> 418x261 in 418x772` -- a 3-column
+geometry from one split. Rather than theorize, I baked in a reconcile DIAG and
+re-ran. The DIAG settled everything in four lines: `reconcile 3 leaves
+[(1,Some(0)), (3,Some(1)), (4,None,focused)]; create [4]` then `claim leaf=4
+DENIED`. The split HAD fired; my session simply could not claim the new leaf.
+
+**F1 (the blocker, FIXED).** `exec_chord`'s `Split` (the compositor's Super-chord
+layer) creates the new leaf via `alloc` (owner_principal=0, the environment) and
+-- unlike the client `split` verb (`pane_cmd`, which stamps
+`set_owner_principal(new_leaf, actor)`) -- NEVER stamped the owner. The claim gate
+is `Session(p) => owner==p`, so a session could not claim its own chord-split
+leaf. Latent because the console renderer never claims leaves; d-3 is the first
+claimant. Fix: `exec_chord` stamps the new leaf with the split (focused) leaf's
+surface owner. With it, the DIAG re-run showed the full correct chain --
+`leaf=4 spawned 42x35` -> focus-routed `exit` closed the focused B -> the d-2
+focus-transfer re-homed focus to session leaf 3 (the close's `first_leaf` had
+picked aurora, backgrounded; reconcile moved it back) -> `leaf=3 exited` ->
+`foreground` -> `session logout`. The mechanism works.
+
+**Wrong turn #3, caught: my own test's ordering.** Even with F1 the E2E stayed
+red -- `the console renderer never foregrounded`. But the log showed it DID
+foreground. `foreground` (tapestryd) and `session logout` (halcyond) are
+cross-process and interleave; the observed order was foreground-THEN-logout, but
+my expects demanded logout-then-foreground, so matching "logout" discarded the
+earlier "foreground" line. Fixed with an order-tolerant `exp_continue` matcher
+that ticks off both in either order. A false red from a test that assumed a
+cross-process order it could not guarantee.
+
+**F2 (OPEN, surfaced).** The DIAG also exposed a real d-1b bug: aurora's
+BACKGROUNDED leaf (leaf 1, surface 0) still consumes a tiling column. d-1b's
+backgrounding is SCANOUT-ONLY -- `recompute` (the shared layout engine) tiles ALL
+leaves and runs BEFORE backgrounding is even determined in reconcile -- so a
+multi-tile session tiles into N+1 columns (2 session tiles at 418px + a blank
+aurora third), not N. Masked with one tile (Direct fills the display, bypassing
+tiling); the first split exposes it. It does NOT block d-3's mechanism (the E2E
+greens; the d-2 focus-transfer self-corrects the focus), but the geometry is
+wrong and H-4d (the welcome's two ut panes) needs it. The fix is a non-trivial
+reconcile/recompute restructure (an audit surface) with a genuine shape choice
+(reorder backgrounding before recompute / a conditional second recompute /
+per-session workspaces), and it refines the operator-ratified d-1b -- so on Opus
+I surfaced it rather than self-resolving. Enqueued:
+`memory/bug_d3_aurora_backgrounded_leaf_tiling.md`.
+
+**Cost:** d-3 stopped being halcyond-only -- F1 lives in `usr/tapestryd/src/server.rs`
+(`exec_chord`), the aux-3 merge surface (aux edits `main.rs`, a different file).
+The batched KT-1 audit now covers the chord-split owner-stamp + F2's eventual fix.
+
+
+---
+
+## 2026-09-04 (run 26, Opus 4.8) -- KT-1.5d-2: one session tile; two integration findings the E2E surfaced
+
+d-2 made the per-user compositor host a REAL terminal: `halcyond --session` spawns
+one `kaua-term` running `/bin/ut`, ingests its record stream into the ii-a `Tile`
+model, renders it, routes input to it, and the tile's `ut` EXITING is the logout
+(retiring the d-1b autoexit test lever). Landed `65db7b6f`, local, batched to the
+KT-1 close. `ls-gfx-session` PASS 30s first attempt, the full chain in order, zero
+flap: `background surface 0` -> `Direct(halcyond)` -> `tile spawned pid=2411 128x36`
+-> `session up 1280x800` -> `tile ingest live` -> input `exit` -> `tile exited (code
+0) -- logout` -> `foreground surface 0` -> `Direct(console)`.
+
+The chunk was mostly plumbing (`Stdio::Piped` maps 1:1 onto the kaua-term's
+fd0=down/fd1=up contract; `FrameDecoder`/`parse_record`/`Tile::apply` was already
+host-tested at ii-a). Two integration facts it did NOT plan for are the reusable
+part:
+
+**Finding 1 -- the palette is the PRODUCER's job (the seam ships RGB).** The
+kaua-term's `Vt::new` hardcoded BONFIRE (bg `0xFF0E0C0C`, near-black); the session
+surface is Daylight (surface `0xFFF2EBE0`, near-white). Cells carry RESOLVED fg/bg
+over the seam (14.3), so halcyond cannot re-theme downstream -- a BONFIRE tile would
+paint dark boxes on the light ground. The theme authority is the compositor (14.6),
+so the palette must be applied where the cells are stamped. Fix: `vt::DAYLIGHT` +
+`Vt::with_palette` (new delegates with BONFIRE, aurora untouched); the kaua-term
+builds its Vt with DAYLIGHT; `libhalcyon::daylight_palette()` now returns
+`vt::DAYLIGHT` as the single source, pinned by `daylight_is_vt_daylight`. v1.x seam:
+the compositor should PLUMB the palette (the 14.6 tier precedent) rather than the
+producer defaulting -- noted in the vt const.
+
+**Finding 2 -- a backgrounded leaf must not hold input focus (a d-1b gap d-2
+surfaced).** `pane.rs::host` splits the focused leaf but leaves focus on the OLD
+leaf (`self.focused` unchanged). Pre-login aurora is the focused console leaf; the
+session halcyond hosts by splitting it, so focus STAYS on aurora -- which d-1b then
+backgrounds. Input routes to `layout.focused_surface()`, so the session tile's `ut`
+would have been UNINPUTTABLE in production, not just the test. Fix: reconcile now
+moves focus off a now-backgrounded leaf onto the visible session leaf (the input
+twin of the d-1b scanout priority), gated by `has_session` so session-less paths
+are byte-identical. The `exit` E2E leg is the end-to-end witness -- it reaches `ut`
+only if focus reached halcyond.
+
+**The caught verification wrong turn.** First regression pass: I baked the pool with
+`THYLACINE_HALCYON_SESSION=1` (for ls-gfx-session) and ran ls-gfx-panes against that
+SAME pool -- panes failed deterministically at "pre-battery console verify", and the
+log showed `login: session compositor (halcyond) spawned` + `background surface 0`
+firing PRE-battery. The lever is POOL-WIDE: michael's login in ANY test spawns the
+session halcyond, backgrounding aurora before the -c console check. That is a
+bake-config artifact, not a code regression. Re-baked default (lever off), re-ran:
+ls-gfx-panes PASS 43s, ls-gfx-restore PASS 28s -- and both EXERCISED the interaction
+(2x `background`/`foreground surface 0` cycles, the battery a michael/session
+principal), including panes' focus + chord legs and the post-battery console+winsize
+restore. So d-1b's backgrounding + d-2's focus transfer do NOT regress the
+michael-session gfx path. Lesson: a per-pool lever changes EVERY login in the pool;
+verify a lever-gated feature and the default gfx suite against SEPARATE bakes.
+
+Default suite (test.sh, default pool): 1464 `[test]` PASS, 0 FAIL, 0 EXTINCTION,
+boot OK, aurora console up -- the `Vt::new`->`with_palette` refactor does not
+regress aurora.
+
+**Open (batched to the KT-1 close):** the focused audit of the reconcile
+backgrounding + focus transfer (audit-bearing scanout, I-40-adjacent); the vault
+ring (`sub-tapestryd` owns `server.rs`, plus the unowned vt/libhalcyon/kaua-term/
+halcyond surfaces filed for a sweep); the `halcyon-status.md` rows for the whole
+KT-1.5 arc; the `AUDIT-TRIGGERS.md` note; the SMP gate + the full matrix. Deferred
+inside d-2: wheel-scroll (`scroll_up` is wired but held at 0), and a screendump
+pixel-proof leg (the render is proven by the present + the boot, not pixels).
+
+## 2026-09-04 (run 25, Opus 4.8) -- KT-1.5d-1b: the display handoff; the drain-resume flap and the compositor-backgrounding redesign
+
+Run 24 queued d-1b as "aurora relinquish -> Direct(halcyond) + logout resume." Run
+25 built it -- but the design d-1a had recorded was WRONG, the E2E caught it, and the
+operator ratified a better one. Landed `fe16a8b0` (scripture) + `9a4b9c0b` (impl),
+both local, batched to the KT-1 close. `ls-gfx-session` E2E PASS, zero flap.
+
+**The surfaced fork (on Opus, per the operator-away rule).** d-1b's mechanism was a
+real fork touching the load-bearing fbcon, so on the Opus fallback I surfaced it
+(AskUserQuestion) with the prior-art research (Plan 9 rio: the window system owns
+the display while up; Fuchsia/Wayland: the compositor decides ownership + tells the
+client) and recommended the "emergent, no new primitive" option: aurora relinquishes
+its surface when tiled and RESUMES when `/dev/consdrain` shows output (the post-logout
+login prompt), on the premise the drain is idle during a session. The operator picked
+it.
+
+**The premise was false, and the E2E proved it.** The E2E passed its markers but the
+log showed an 18-cycle/session relinquish<->resume FLAP. Ground truth (elusive-bug
+playbook: stop theorizing, OBSERVE): a FLAPDBG probe read the waking drain bytes --
+they decoded to `tapestryd: retire surface 0\r\n...`. `SYS_PUTS`/`say!` routes
+through `cons_output_write` -> `cons_emit` (`kernel/syscall.c` #76, deliberately, so
+daemon diagnostics reach the renderer), so the drain mirrors ALL daemon output and is
+NEVER idle during a session. aurora's own relinquish made tapestryd log via say! ->
+the drain -> aurora's drain-resume fired -> a self-sustaining feedback loop. Two
+theory-driven fixes (drain-in-the-relinquish-pass; suspect the poll readiness) each
+failed a re-test before the probe settled it -- the playbook's "a theory contradicted
+twice -> instrument and observe" earning its keep.
+
+**The ratified redesign (compositor-backgrounding).** I surfaced the corrected
+research: "drain has data" cannot mean "logout"; the resume signal must come from the
+compositor (the display owner) -- the rio/Fuchsia/Wayland answer. The operator chose
+it: a SESSION leaf (a real user principal) outranks SYSTEM leaves; when a session is
+visible, `Comp::reconcile` BACKGROUNDS the console renderer (excluded from the scanout
+decision, not composited, not FRAME-ticked). The elegant part: **aurora needed ZERO
+changes** -- its 60 Hz FRAME heartbeat IS dormancy (no FRAME -> it blocks in
+`wait_event`) and resume (FRAME returns -> it renders) for free -- so the whole
+mechanism is `server.rs` reconcile + frame_tick + compose. BACKWARD-COMPATIBLE by
+construction: no session leaf -> nothing backgrounds -> the decision is byte-identical
+to the pre-d-1b logic, so every pre-session + gfx-test path is untouched.
+
+**What the E2E witnesses.** ls-gfx-session drives the full cycle via a test-only
+scripted logout (halcyond auto-exits after 30 frames -- a stand-in for a session tile
+exiting at d-2/d-3; a test DRIVER, not a behaviour double): Direct(console) ->
+`background surface 0 (session took the display)` -> `scanout direct 1` (halcyond) ->
+logout -> `foreground surface 0 (session gone)` -> `scanout direct 0` (console).
+Background 1x, foreground 1x. Two of my own E2E bugs were caught + fixed (both
+test-only): an assertion ordering (background fires BEFORE "session up" -- it rides
+the surface HOST, not the first present) and a regex with a space before "session"
+where the log has "(session".
+
+**Open / deferred to the KT-1 batch close.** The focused audit of the reconcile
+change (audit-bearing scanout, I-40-adjacent); the vault ring of sub-tapestryd +
+sub-substrate-machine (both vault-owned per quaestor); the 150-halcyond autoexit note
++ an AUDIT-TRIGGERS note. aurora was reverted to committed (the drop/recreate code is
+gone).
+
+**Next:** KT-1.5d-2 (one session tile) -> d-3 (multi-tile -> H-4d) -> the batched
+KT-1 audit + SMP gate -> push.
+
+---
+
+## 2026-09-04 (run 24, Opus 4.8) -- KT-1.5d-1a: the per-user session bootstrap; the lever that hung the boot
+
+Run 23 self-compacted at a design->impl boundary; the operator had ratified 14.12
+(login spawns a per-user halcyond as the user, zero delegation). Run 24 built the
+bootstrap half. Landed `739f6cb7` (local, batched to the KT-1 close): halcyond's
+`--session` variant, login's session lever + spawn branch, joey's boot-test fix,
+the pool bake, the E2E, and the docs.
+
+**The decomposition.** 14.12 listed KT-1.5d-1 as one chunk (bootstrap + aurora
+handoff + logout). I split it a/b to de-risk: d-1a is additive + gated (no aurora
+or joey-renderer change; the default boot is untouched); d-1b touches aurora, the
+load-bearing fbcon, for the clean `Direct(halcyond)` handoff + logout resume. The
+research that forced the split: there is **no kernel console-renderer suspend
+primitive** (`cons.c` `serialsilent` gates only the serial sink, not a renderer's
+tapestryd surface; the framebuffer-SAK renderer suspension of 14.5 is unbuilt), so
+the aurora->halcyond handoff must be emergent from tapestryd's pane layout -- which
+is d-1b's work, not d-1a's. `session_main` therefore reuses only connect/present
+and paints a blank Daylight ground; the render brain waits for d-2's first tile.
+
+**The wedge, and what caught it (the run's real work).** The first E2E wedged --
+30 minutes, each attempt burning the full 900s boot budget. Ground truth over
+theory: `"Thylacine login:"` appeared **0 times** in the guest log (the scenario
+died at its first expect, the getty prompt), yet BOTH `"Thylacine textual shell"`
+(ut) and `"halcyond: session up"` appeared and the log **ended** at "session up".
+The joey boot flow is `do_recover_e2e` -> `do_login_e2e` (seeded michael+cora) ->
+`SYS_BOOT_COMPLETE` -> `session_getty_loop` (interactive). Root cause: the SEEDED
+`do_login_e2e` michael login read `/lib/halcyon/session=on` and spawned
+`halcyond --session`, which **never exits** -> `login_e2e_run`'s `t_wait_pid_for`
+never returned -> the boot hung *before* BOOT_COMPLETE and the getty. So the getty
+prompt never printed, and my scenario (which drives the interactive getty) wedged.
+
+This was a **real defect**, not a test artifact: any boot-probes image with the
+lever on hangs at boot. The seeded boot-test is testing login->shell (it needs
+login to EXIT); the session is interactive and non-terminating. Fix: the seeded
+login opts out via `--no-session` (joey `login_e2e_run` passes it; login honors it
+as `session_halcyon = read_session_lever() && !--no-session`), restoring its
+login->ut behavior. The interactive getty (`session_getty_loop`) passes no flag,
+so it reads the lever. `do_recover_e2e` was unaffected (its recovery login exits
+before any shell spawn). Generalizes: a non-terminating child breaks any waiter
+that assumes the child exits, and a lever that changes login's terminal behavior
+must account for *every* login invocation, not just the interactive one.
+
+Post-fix, the E2E PASSed in **27s, first attempt**: `Thylacine boot OK` -> getty
+prompt -> `login michael` -> `halcyond: session up 1280x800 px` -> `LS-CI PASS`.
+
+The scanout sequence (verified in the passing log, not assumed): aurora
+`scanout direct 0` (its OWN console surface, `aurora: console up`) -> login spawns
+halcyond -> `tapestryd: scanout composed` -> `halcyond: session up` in **Composed**
+mode. So aurora and halcyond **tile**, exactly as d-1a scoped ("content to compose
+alongside aurora"). d-1b therefore remains the FULL aurora relinquish ->
+`Direct(halcyond)` -- the leaf must collapse to halcyond alone -- plus logout
+resume; it is not "mostly logout/resume". (A wrong turn, corrected here: I first
+read the log's `scanout direct 0` as halcyond taking Direct with no aurora
+contention. It was AURORA's console surface, stamped BEFORE halcyond appeared --
+"a comment true about the wrong subject". The commit 739f6cb7 message carries the
+same overstatement in its Deferred paragraph; this is the correction of record.)
+
+**A wrong turn I caught cheaply.** I ran `expect -c "source ls-gfx-session.exp"`
+as a "syntax check" -- `source` *executes* the scenario, which called `lc_boot`
+and started a VM boot on the mac (which the operator held for Duke3D). The
+`head -3` pipe-close SIGPIPE'd the chain before qemu fully launched; `ps` confirmed
+no stray from my tree. Lesson: never `expect -c source <scenario>` for a parse
+check -- Tcl `info complete` on the file content validates balance without
+executing.
+
+**Coordination.** The operator was interactively testing Duke3D on the mac
+(aux's DX arc) and asked me to keep off until they released; I did all the
+core-free work (code, harness, docs, self-audit) while queued, asked via yip 0047
+rather than stealing an expired lease, and built only once they said "Free now."
+
+**I-22, verified by construction:** tapestryd's `actor()` (`server.rs:15184`)
+classifies an ordinary-user, non-renderer peer as `Actor::Session(principal)`,
+ungated, owning only its own principal's subtree -- no cross-user authority, no
+delegation. The property the KT-1 audit must prosecute holds at the source.
+
+**Open (recorded, not lost):** d-1b (aurora relinquish + logout resume); a
+login-loop if a lever-on image lacks tapestryd (a fallback-to-ut would be more
+robust); CONSOLE_OWNER semantics for the session (real at d-2). The full default
+suite + SMP gate run at the KT-1 batch close, not per-commit.
+
+## 2026-09-04 (run 23, Opus 4.8) -- KT-1.5b-i: the halcyond consumer; the near-gap I proved closed by reading the kthread
+
+Run 22 landed the kernel enabler (a Loom ring made pollable) and self-compacted at
+the 600k line. Run 23 built the consumer half: halcyond now waits in ONE `poll(2)`
+over its SQPOLL event ring AND `/dev/consdrain`, retiring the block-on-ring model.
+Landed at `a85c94e4` (local, batched to the KT-1 close). Two files of code
+(libtapestry additive SQPOLL; halcyond's else-branch wait), two of docs.
+
+**The near-gap, and what caught it.** The run-22 design + my resume note asserted
+`poll_event()` "ALREADY arms+wakes+reaps on an SQPOLL ring ... CONFIRMED by the
+loom-smoke leg." That confirmation was for a **NOP** (inline-completed, no 9P RPC).
+The event ring's reads are **dev9p** reads over `/srv/tapestry`, and under SQPOLL
+halcyond's thread sits in `poll(2)`, not in a blocking `enter` -- so *who demuxes
+the 9P replies* was an open question the NOP never touched. Left unproven, a broken
+answer means halcyond hangs (reads staged, replies never demuxed, `poll` never
+fires). I read the mechanism instead of assuming it: `loom_sqpoll_main`
+(kernel/loom.c:2157) drives `p9_client_reader_pump_once_deadline` on every inflight
+op, each demuxed reply posts a CQE (`loom_post_cqe`:628) that wakes `l->cq_waiters`
+(:678) -- the same list `loom_poll` (:1489) registers on. Then the gating check:
+the kthread only recvs on a **deadline-capable** transport (the register gate,
+:487), so I chased that too -- `p9_client_recv_is_deadline_capable` returns
+`set_recv_deadline != NULL` (9p_client.c:1195), and srvconn wires it
+(`p9_srvconn_transport_ops`:172), its comment stating the ops exist *precisely* to
+"let the Loom SQPOLL reader arm a frame-boundary idle deadline." The disk
+spoor-pipe transport is NULL there -- which is exactly why loom-stress/loom-bench
+stay non-SQPOLL and why the loom-smoke SQPOLL leg used a NOP. The picture is
+coherent and Option 1 needs **no second kernel enabler**. This was the run's real
+work; the code was the easy part.
+
+**A pre-existing hazard fell out.** 150-halcyond.md carried an OWNED F7 note: on the
+held-feed path a submit-only Loom enter "demuxes nothing," so a silent foreground +
+a key flood pile up server-side until the compositor's 128-event cap wedge-retires
+the console; it named the fix as "a timed Loom enter (a kernel seam + a syscall-arg
+change)." That primitive is *exactly* the SQPOLL kthread's deadline-capable reader
+pump -- it demuxes the parked reply continuously, independent of halcyond's loop
+branch. So KT-1.5b-i removes F7's root cause. I did NOT mark it closed: a targeted
+repro (feed held + silent foreground + key flood, asserting no wedge) is owed at the
+KT-1 audit. The doc says "ADDRESSED ... repro owed," not "fixed."
+
+**Verification.** aurora keeps the non-SQPOLL `connect()`, so the shipping console
+path is untouched by construction -- and measured: the default suite ran 1463
+`[test]` PASS, 0 FAIL, 0 EXTINCTION, aurora spawned + feed-selftest PASS + console
+up. The new path proved two ways: `loom.poll` (kernel unit) + `loom-smoke:
+KObj_Loom.poll ok` (the first EL0 SQPOLL consumer), and the `ls-halcyon.exp`
+graphical E2E under HVF (THYLACINE_HALCYON=1) all-green -- rich-tier advertise,
+transcript surface, `ls -l` rich frames (console output through the unified
+consdrain), status bar (chrome CQEs), split/zoom **reflow** (CONFIGURE events),
+keyboard/click **menus** + wedge-dismiss (menu CQEs). Console output *and* every
+compositor-event class flow through the one poll. Cost: ~7 min mac hold, one
+userspace build + two paired pool bakes + two HVF boots.
+
+**KT-1.5b-ii-a landed (`a0324198`) -- the tile model, host-tested.** The piece that
+gives halcyond the live grid it never had (as-built it is single-console,
+flow-only, no grid, no child): `grid.rs` (a fixed rows x cols vt::Cell buffer,
+CellDiff-mutated, OOB writes dropped since a tile is untrusted -- 14.11.12
+format-fuzz) + `tile.rs` (the `apply(Record)` dispatch: CellDiff->grid,
+ScrollOff->scrollback, Osc1936Raw->the SAME beacon parser the console uses,
+Mode->render mode) + `transcript.rs` (extract `intern_style`, add
+`push_scrolled_rows`). 13 new host tests (6 grid + 7 tile), 75 pass; clippy +
+rustfmt clean; device build green. Pure logic, no boot -- the render/spawn wiring
+is ii-b.
+
+**Two design forks surfaced + resolved (operator present, live).** KT-1.5b-ii-b
+(spawn + render) turned out to be a load-bearing architectural transition, not a
+"just implement" chunk, so I stopped and surfaced it rather than deciding unilaterally
+on a login/trusted-path surface. **Fork 1** ("how invasive is the first kaua-term
+tile?") -> the operator chose **replace the console now** (over prove-first-defer).
+That opened **fork 2**, which two Explore passes turned out to hinge on IDENTITY, not
+the trusted path: the trusted path (SAK) is a kernel `/dev/cons` BREAK, orthogonal to
+the renderer (14.5 confirmed); the real crux is that the session `ut` needs the user
+identity + encrypted /home only `/sbin/login` establishes, while 14.11.6 has the
+SYSTEM halcyond (spawned before login) spawn the tile -- and delegating that identity
+power to a system daemon is an I-22 hole. **Fork 2** ("how does the session ut reach
+its tile?") -> the operator chose **per-user halcyond (rio-aligned)**: login spawns
+halcyond AS the user, zero delegation.
+
+**14.12 landed (`eba6951f`, scripture-only).** The per-user session compositor:
+aurora renders the pre-login console (its existing role; the THYLACINE_HALCYON
+system-renderer lever retired); login authenticates on /dev/cons then spawns a per-user
+halcyond AS the user (`.identity()`, as it spawns ut); that halcyond joins the
+system tapestryd as `Actor::Session(user)` (ungated, no special cap -- Explore-verified),
+presents fullscreen, and hosts kaua-term PROCESSES spawned as itself. The display
+handoff is emergent from tapestryd's shared pane layout (scanout follows the layout,
+not identity -- no new primitive: aurora relinquishes -> the root leaf collapses to
+halcyond -> Direct(halcyond)). Zero identity delegation (I-22 clean); the trusted path
+is untouched (I-27); login's credential entry stays on /dev/cons, never in an untrusted
+pts. The arc reshapes: old KT-1.5b-ii-b -> KT-1.5d-1 (per-user bootstrap + handoff),
+KT-1.5d-2 (one session tile, on the ii-a model), KT-1.5d-3 (multi-tile -> H-4d).
+
+**Method note worth keeping.** The design was NOT guessed: the two Explore passes
+(a7491dc8 login/trusted-path, a027432b tapestryd/scanout/input) turned a scary "this
+touches I-27 + login" into "the trusted path is orthogonal; the only crux is identity,
+and the per-user model closes it with zero new capability." The one agent error caught:
+a027432b read the KT-1.5b-ii-a Cargo.toml dep (the wire TYPES) as "kaua-term is a
+library, terminals emulated in-process" -- but 14.2 ratified kaua-term as separate
+crash-isolated PROCESSES; the conclusion (spawn as the user, no cap) held regardless.
+
+**Open.** KT-1.5d-1 (the per-user bootstrap) is the next implementation chunk. The
+batched KT-1 audit (Opus fallback, Fable credit-exhausted) + SMP gate + push ride the
+arc close; the F7 repro rides that audit; the 1.5b-i latency win is structural +
+proven-correct but not yet measured in ms (a cheap follow-up if wanted).
+
+---
+
+## 2026-09-03 (run 22, Opus 4.8) -- KT-1.5: the tile transport was impossible; the fix makes a Loom ring pollable
+
+Run 21 built the kaua-term producer side and surfaced KT-1.5 (halcyond ingest) as
+a design question. This run answered it -- and the answer overturned a transport
+claim I had ratified into scripture the same day.
+
+**The defect.** HALCYON 14.11.7 (mine, run 21) said halcyond drains each tile's
+up-PIPE over a per-tile Loom ring, "confirmed loom.rs:281." Impossible: a Loom
+read/write requires a dev9p (9P-backed) handle (kernel/loom.c:1198
+dev9p_client_fid); a pipe -EINVALs at submit, and the kernel deliberately bars
+non-9P handles from going async (loom.c:491-497). The "confirmation" pointed at
+the Sqe::read STRUCT BUILDER (libthyla-rs/src/loom.rs:281) -- a true statement
+about the wrong layer. The KT-1.5a probe encoding it compiled but was never
+boot-wired, so nothing had caught it.
+
+**The research (operator asked for it).** The operator did not want a cold fork;
+they asked for "the most performant solution that is simultaneously aligned with
+Thylacine's values." Three parallel agents mapped the candidates against verified
+code:
+- Weft (the zero-copy shared-Burrow dataplane) is OUT: no cheap EL0 path
+  (SYS_WEFT_SHARE needs CAP_HW_CREATE + a Tweft 9P server -- an authority
+  inversion for a crash-prone tile), and its readiness ring is single-source with
+  an UNWIRED blocking park, so it is not even the multiplex primitive.
+- A 9P-server-per-tile (~1.2-1.8k LOC/tile) buys zero-copy that is irrelevant
+  here -- records are pre-digested + low-volume, and a generic Loom read copies
+  anyway (loom.c:763).
+- The real multiplex primitive is the Loom ring (N dev9p handles, reap-any in one
+  enter). But a Loom ring is NOT pollable (KObj_Loom -> POLLNVAL), and halcyond is
+  irrevocably a Loom consumer (tapestry surface events arrive only via the
+  EventRing), so its two wait domains (Loom + poll) could not be unified.
+- The research also surfaced a pre-existing, quantified wart: halcyond/aurora
+  block on the ring and drain /dev/consdrain only per FRAME -> ~16-67 ms console
+  latency, a full stall on an occluded surface (tapestryd/main.rs:124).
+
+**The decision (operator, live: "Option 1 absolutely").** Make the Loom ring
+pollable + keep tiles as plain pipes, so halcyond waits on {tapestry loom-fd | N
+up-pipes | /dev/consdrain} in ONE poll(2) -- which also retires the frame-coupled
+wart, system-wide. Landed scripture-first (8eeff965), per the design-conversation
+pattern.
+
+**KT-1.5a -- the transport boot-prove (90d95d08).** The probe reads its pipe with
+t_read (Loom cannot read a pipe). It boot-proves the un-host-testable process
+surface: the pts host, the two threads, the codec over a real pipe
+(kaua-term-probe: PASS + Thylacine boot OK). No kaua-term change was needed -- its
+multi-thread exit is already sound (SYS_EXITS -> exits_code's live-peer cascade
+#811 + the #926 close-handles-at-termination path delivers up_wr's EOF to the
+probe). WRONG TURN caught by the boot: attempt 1 spawned by the BARE name
+"kaua-term-probe" and FAILED -- post-pivot, every spawn resolves by full path
+(/bin/X via the #58 bind); the pre-pivot loom-smoke idiom does not carry over.
+
+**KT-1.5-kernel -- loom_poll (VERIFIED).**
+poll_scan_one gains a KOBJ_LOOM arm -> loom_poll, which registers the poller on
+the ring's EXISTING l->cq_waiters and reports POLLIN iff loom_cq_ready>0, under
+l->lock (register-then-observe; the wake was already wired at loom.c:374,678). No
+new spec: unlike the cons .poll's IRQ relay, the CQE wake runs in process/kthread
+context -- a plain poll_waiter_list I-9 instance. The keep_out ref-retention holds
+the loom alive across the sleep automatically (handle_get/put ref/unref
+KOBJ_LOOM). Proven two ways: a deterministic kernel unit test (test_loom_poll) and
+an EL0 e2e leg in loom-smoke.
+
+WRONG TURN, TWICE, same shape -- a grep match read as a usage. I wrote "SQPOLL ...
+used by loom-bench" in the scripture; loom-bench runs Ring::setup(_, 0) --
+NON-SQPOLL. The grep for "SQPOLL" had matched a COMMENT. I had made the identical
+error minutes earlier reading aurora ("aurora uses SQPOLL" -- also a comment
+match; aurora is non-SQPOLL and carries the frame-coupled wart). SQPOLL had NO EL0
+consumer at all, so the loom-smoke leg is the first. Both corrected. The lesson is
+the standing one (MEMORY.md): a grep hit is a location, not a usage -- read the
+call, not the file.
+
+**Open / next.** KT-1.5-kernel is VERIFIED -- the loom.poll kernel unit test PASSES
++ the loom-smoke SQPOLL leg PASSES + Thylacine boot OK. The SMP gate (loom + poll
+are audit-trigger surfaces) is owed at the batched KT-1 audit-close, per the
+"double the distance between gates" discipline -- loom_poll composes the already-
+SMP-gated cq_waiters register-then-observe + the generic poll dispatch, so it adds
+no new SMP surface. Then KT-1.5b (libtapestry EventRing SQPOLL mode + halcyond's unified
+poll + the per-tile grid/scrollback ingest) -> KT-1.5c (multi-tile, unblocks
+H-4d) -> the batched KT-1 audit -> push.
+
+---
+
+## 2026-09-03 (run 21, Opus 4.8) -- KT-1: the kaua-term producer side, built + self-audited; and what halcyond actually is
+
+The KT arc's KT-1 (the per-tile terminal that unblocks H-4d). This run built the
+ENTIRE aux-plus-main "producer side" of the multi-console seam -- the kaua-term
+process and everything under it -- as eight local commits (a90eea53..5879804d,
+unpushed; the batched-audit-then-push discipline), each host-tested against the
+authoritative HALCYON 14.3 contract:
+
+- **KT-1.1** (a90eea53): extracted `usr/lib/ptyhold` (Master mint/seed_winsize/
+  spawn_on_slave) from ptyhost, ptyhost re-pointed BEHAVIOR-IDENTICAL. The shared
+  master-hold both hosts need; the relay policy stays per-host (ptyhost pumps raw
+  bytes, the kaua-term parses).
+- **KT-1.2a** (3cce9ff1): grew `usr/lib/vt` with a resumable `feed_until` + a
+  Boundary event stream (Scroll/Bell/Osc/AltEnter+cursor/AltLeave), OPT-IN behind
+  `capture_events` so aurora stays byte- AND allocation-identical (host-tested).
+  This was the crux: vt was a state machine exposing only final state, but the
+  seam needs the events interleaved with cell changes IN STREAM ORDER (a boundary
+  delimits a Beacon zone).
+- **KT-1.2b** (e2c115bc): `usr/kaua-term` -- the Producer (boundary-flushed
+  shadow-diff) + the Record types. The alt-screen buffer discontinuity was the
+  subtle case; the fix required refining AltEnter to carry the outgoing cursor
+  (else a later alt-leave restores a stale cursor -- caught by a producer test).
+- **KT-1.3** (3851df53): the KeyEvent->xterm re-encoder + DECCKM (?1) tracking in
+  vt. Application keypad was DEFERRED with its keycodes (the shared KeyEvent model
+  has none, so tracking it now would be dead state -- built as one unit later).
+- **KT-1.4a** (e55543e3): the wire codec. The decode side is the trust boundary
+  (halcyond ingests the untrusted, crash-isolated kaua-term), so it is bounds-safe
+  on any byte sequence -- every field checked, MAX_FRAME hard cap, no untrusted
+  pre-alloc, trailing-bytes + non-UTF-8 rejected.
+- **KT-1.4b** (91333a9a): the process. fd0=down, fd1=up, pts internal; two
+  blocking threads (master non-QTPOLL, the ptyhost model). Crate feature-gated so
+  the lib host-tests without libthyla-rs (--no-default-features).
+
+**The self-audit earned its keep -- two reachable P1s the ptyhost precedent does
+not have, both from the kaua-term PARSING (ptyhost is a dumb relay):**
+- @1f991394: the master has TWO writers now (the output thread's CPR replies +
+  the input thread's keys); write_all loops on partial writes, so a reply during
+  a keystroke interleaves and corrupts the app's stdin. Live -- ut/kaua emits
+  `ESC [ 6 n`. Fixed with a blocking futex mutex on master writes (a spinlock is
+  wrong -- a master write can park server-side).
+- @5879804d: the producer coalesced ScrollOff unbounded; `seq 100000` / `yes ''`
+  makes a single ScrollOff serialize past MAX_FRAME, which halcyond rejects and
+  kills the tile. Ordinary output would kill the tile. Fixed with a cols-derived
+  cap that splits the run, losing no row.
+
+**The finding that was not in the plan: what halcyond actually is.** An Explore
+map of halcyond (main.rs 54KB, transcript.rs 66KB) established that HALCYON 14.3's
+"clean refactor -- only the t.feed() parse moves out of process" materially
+under-estimates KT-1.5. halcyond today is a SINGLE-console, FLOW-based renderer:
+one `Transcript` (a flowed deque of blocks -- no grid, no alt-screen buffer), one
+byte source (`/dev/consdrain`, a kernel console mirror -- it owns no pty and
+spawns NO child process), and its "tiles" (chromeset) are tag-bar chrome for the
+compositor's leaves, not terminal content. But the seam sends a GRID model
+(CellDiff on rows x cols). So KT-1.5 is not "move the parse out" -- it is: add a
+per-tile grid live-area, add child-spawn machinery halcyond has never had,
+multiplex N record streams into the ring loop, and refactor the flow-based
+transcript to ingest the grid+scrollback model. That is a genuine load-bearing
+design gap (halcyond gaining a grid) that scripture assumed already existed --
+surfaced to the operator per the design-conversation pattern rather than built
+unilaterally.
+
+**Open:** KT-1.5 (halcyond ingest) -- the design question above is with the
+operator. KT-1.1..1.4b stay LOCAL until the batched KT-1 audit (after KT-1.5) +
+the boot gate (the bin's 2-thread PTY surface is not host-testable in isolation),
+then push. Numbering note: this run's "KT-1.x" are sub-chunks of scripture's KT-1
+(the integration); the earlier-pushed "KT-1a-*" were scripture's KT-2 (the parser).
 
 ## 2026-09-03 (run 20, Opus 4.8) -- the aux-2 -> main merge: a syscall collision, one half of it silent
 
@@ -1118,6 +1796,71 @@ Verification: kernel + userspace build clean (the static_assert compiles); the
 default suite passes (boot OK, arc gates L-6c + D-5 PASS). The SMP gate passed clean -- 40 boots (default+UBSan x smp4/smp8, N=10), 0
 corruption / 0 external-kill / 0 timing / 0 other -- validating the merged
 audit-bearing kernel at runtime under SMP.
+
+### run 20 continued (post-self-compact) -- KT-1a: the shared VT parser to full-xterm, and a P0 that a new feature had hidden
+
+**Numbering (corrected post-push, operator-ratified 2026-09-03):** this parser growth
+is scripture's **KT-2** in the ratified build order (HALCYON 14.9 / KAUA-TERM 6: KT-1 =
+the kaua-term integration, KT-2 = the parser, KT-3/KT-4 = the ioctl reach). It was
+committed under the label `KT-1a-*` -- a self-compact mis-numbering; the pushed commits
+keep that label, this is the map. KT-1 (the integration) is next.
+
+After the merge the operator said "start KT." KT-1a grows `usr/lib/vt` (the
+shared parser aurora + halcyond + the coming kaua-term all render from) to the
+xterm behaviors a real Linux TUI needs. Four pieces: `c01bb942` KT-1a-1 (DECSTBM
+scroll regions + DECOM origin mode, landed pre-compact); `1c4d537d` KT-1a-2..4
+(SU/SD band scroll; wide chars via a Kuhn wcwidth with a new `ATTR_WIDE` bit;
+SGR italic/dim/blink/strike). All host-tested + clippy-clean before the audit.
+
+The audit is where the run earned its keep. Fable died mid-spawn on credit
+exhaustion; per the reviewer discipline (never skip a round for want of Fable;
+on credit-death go straight to the fallback tier) I re-spawned on Opus at max
+with the fallback framing -- family diversity forfeit, context-independence
+retained, re-derive don't-trust-comments. Round 1 returned **1 P0 + 1 P1 + 1 P2
++ 2 P3**.
+
+**The P0 is the reusable finding.** A double-width glyph in a 1-column grid
+wrote its blank continuation cell at `cx+1` -- off the row -- an OOB abort at the
+bottom row, plus it stranded `cx>cols` which cascades into an
+insert/delete/erase-chars `cols-cx` underflow. My own concurrent self-audit
+found the same OOB but rated it **P1** (latent -- "aurora's grid is always
+wide"). The prosecutor rated it **P0**, and it was right: it read
+`aurora/main.rs:876`, where the resize floors `cols` at `.max(1)` and a comment
+declares that floor panic-safe ("only a cosmetically-small fbcon, never a
+panic"). KT-1a-3 silently invalidated that proof -- a 1px-narrow tile or an
+oversized font yields `cols=1`, and then any CJK/emoji at the bottom row aborts
+the *shared console*. This is the [[bug-240-new-gate-hollows-old-negative]] /
+[[bug-230-lifted-constant-voids-proofs]] family: **a new capability (width-2
+writes) voids a bound a prior author proved complete for the old input set
+(narrow ASCII).** The lesson for the self-audit: reachability is not "does a
+caller do this today" -- it is "does any bound elsewhere in the tree now rest on
+an assumption my feature broke." The prosecutor's willingness to open
+`aurora/main.rs` and read the resize floor is exactly the context-independence
+the fallback round still buys. Fix: a wide glyph degrades to single-width when
+`cols<2`, restoring `cx<=cols`.
+
+The P1 (IL/DL ignored the DECSTBM region) was also an elevation: I'd rated it
+P3 (not unsound), the prosecutor rated it P1 because it corrupts exactly the
+region-using TUIs the arc exists to serve (ncurses/pagers/tmux) and is
+internally inconsistent with the region-aware SU/SD KT-1a-1 shipped. Fixed by
+confining IL/DL to `[scroll_top, scroll_bot]`.
+
+Because a P0 returned, the close was dirty -> a round-2 audit on the fixes
+(`a8dbf46c`), also Opus fallback. **R2 = CLEAN (0/0/0/0)**: it built a verbatim
+copy under `overflow-checks` and ran an exhaustive F3 sweep (every
+`(scroll_top, scroll_bot, cy, n)` on a 5-row grid) plus a 4000-sequence fuzz over
+every grid 1x1..4x4, and could not break a fix. Clean via two rounds is still
+clean. Both rounds were Opus (Fable credit-exhausted); a Fable round would add
+the one axis -- family diversity -- these lacked, but the surface is small,
+single-threaded, alloc-free, and exhaustively fuzzed.
+
+Cost/close: vt host tests 34 (+12 for the features, +6 for the audit
+regressions); the full build + boot gate is green -- aurora comes up 128x36 and
+its #129 feed selftest passes, so the new parser renders in a real boot. New
+reference doc `docs/reference/150-vt.md`. Still open (deferred, documented,
+non-soundness): DECOM does not confine relative cursor moves to the band -- a
+full-DECOM fidelity refinement no in-tree consumer needs yet.
+
 
 ## 2026-09-03 (run 19, Opus 4.8) — the multi-console design: a topology fork caught, an operator override, and the tree-divergence rule 3x
 

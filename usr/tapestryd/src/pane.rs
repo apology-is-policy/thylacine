@@ -260,6 +260,17 @@ pub struct Pane {
     /// -- HALCYON.md 13.6); an occupied leaf's ownership is its surface's,
     /// so this field is meaningful only while the leaf is empty.
     pub owner_principal: u32,
+    /// F2 (d-1b tiling completion): this leaf hosts a BACKGROUNDED surface (a
+    /// non-session renderer while a session holds the display). Set by
+    /// reconcile BEFORE recompute from the tree (owner-based, visibility-
+    /// independent). Consulted ONLY by `layout_pane`'s Split arm, which
+    /// excludes a backgrounded leaf from its parent's division (zero rect) so
+    /// the foreground siblings fill the space. Orthogonal to
+    /// `Surface.backgrounded` (visibility-based, post-recompute, drives
+    /// compose/scanout): a Tab/Stack ACTIVE child is shown via the One path
+    /// regardless of this flag, so a backgrounded-but-active leaf is never
+    /// blanked.
+    pub backgrounded: bool,
 }
 
 pub struct Layout {
@@ -320,6 +331,7 @@ impl Layout {
             visible: false,
             claim_token: None,
             owner_principal: 0,
+            backgrounded: false,
         };
         let slot = match self.panes.iter().position(|s| s.is_none()) {
             Some(i) => {
@@ -647,6 +659,28 @@ impl Layout {
         let mut out = Vec::new();
         self.collect_surfaces(slot, &mut out);
         out
+    }
+
+    /// F2: every hosted leaf in `slot`'s subtree as (leaf slot, surface) --
+    /// the ownership walk's input, so a caller can consult the LEAF's stable
+    /// tree `backgrounded` flag rather than the surface's visibility-derived
+    /// one (which clears the moment a tab hides the leaf).
+    pub fn subtree_hosted(&self, slot: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        self.collect_hosted(slot, &mut out);
+        out
+    }
+
+    fn collect_hosted(&self, slot: usize, out: &mut Vec<(usize, usize)>) {
+        match self.get(slot).map(|p| &p.kind) {
+            Some(Kind::Leaf { surface: Some(n) }) => out.push((slot, *n)),
+            Some(Kind::Container { children, .. }) => {
+                for &c in children.clone().iter() {
+                    self.collect_hosted(c, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn collect_surfaces(&self, slot: usize, out: &mut Vec<usize>) {
@@ -1081,6 +1115,15 @@ impl Layout {
                 })
             );
             if is_tab {
+                // F2 structural transparency: cycle over the NON-backgrounded
+                // children, so `tab next/prev` never lands on a stepped-back
+                // console leaf. Snapshot children first (releasing the borrow),
+                // flag bg-ness, then advance under the mut borrow.
+                let kids: Vec<usize> = match self.get(p).map(|q| &q.kind) {
+                    Some(Kind::Container { children, .. }) => children.clone(),
+                    _ => return false,
+                };
+                let bg: Vec<bool> = kids.iter().map(|&c| self.is_bg_subtree(c)).collect();
                 let target = match self.get_mut(p).map(|q| &mut q.kind) {
                     Some(Kind::Container {
                         children, active, ..
@@ -1089,11 +1132,18 @@ impl Layout {
                         if n == 0 {
                             return false;
                         }
-                        *active = if forward {
-                            (*active + 1) % n
-                        } else {
-                            (*active + n - 1) % n
-                        };
+                        let mut next = *active;
+                        for _ in 0..n {
+                            next = if forward {
+                                (next + 1) % n
+                            } else {
+                                (next + n - 1) % n
+                            };
+                            if !bg.get(next).copied().unwrap_or(false) {
+                                break;
+                            }
+                        }
+                        *active = next;
                         children[*active]
                     }
                     _ => return false,
@@ -1152,10 +1202,25 @@ impl Layout {
                     rect,
                     ..
                 }) => {
-                    let strip = Self::strip_h(*m, children.len() as u32, *rect);
+                    // F2 structural transparency: a BACKGROUNDED leaf is not a
+                    // strip segment. Filter to the effective children and remap
+                    // the active into that list (clamped in range).
+                    let eff: Vec<usize> = children
+                        .iter()
+                        .copied()
+                        .filter(|&c| !self.is_bg_subtree(c))
+                        .collect();
+                    if eff.is_empty() {
+                        return None;
+                    }
+                    let strip = Self::strip_h(*m, eff.len() as u32, *rect);
                     if strip == 0 {
                         return None;
                     }
+                    let eff_active = children
+                        .get(*active)
+                        .and_then(|&ac| eff.iter().position(|&c| c == ac))
+                        .unwrap_or(0);
                     Some((
                         i,
                         Rect {
@@ -1165,8 +1230,8 @@ impl Layout {
                             h: strip,
                         },
                         *m,
-                        children.clone(),
-                        *active,
+                        eff,
+                        eff_active,
                     ))
                 }
                 _ => None,
@@ -1185,6 +1250,27 @@ impl Layout {
                     Some(Pane {
                         kind: Kind::Leaf { .. },
                         visible: true,
+                        ..
+                    })
+                )
+            })
+            .count()
+    }
+
+    /// Visible leaves that are not backgrounded: the count the chrome inset
+    /// keys on. A backgrounded leaf is visible with a zero rect, so counting
+    /// it would put a ring + tag bar on a lone foreground leaf the Direct
+    /// scanout then shows at the display origin.
+    pub fn foreground_leaf_count(&self) -> usize {
+        self.panes
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p,
+                    Some(Pane {
+                        kind: Kind::Leaf { .. },
+                        visible: true,
+                        backgrounded: false,
                         ..
                     })
                 )
@@ -1233,14 +1319,15 @@ impl Layout {
             },
         );
         // Pass 2: the content inset -- the Daylight chrome ring per leaf iff
-        // >1 leaf visible. A single fullscreen leaf stays borderless (the
-        // stage-0 look). The ring = floor(`gaps`, the tunable gap) +
+        // >1 FOREGROUND leaf visible (a backgrounded zero-rect leaf does not
+        // count). A single fullscreen leaf stays borderless (the stage-0
+        // look). The ring = floor(`gaps`, the tunable gap) +
         // bevel(2) + hairline(1); the bevel+hairline is fixed structural
         // chrome (HALCYON-VISUAL section 2/2.4), the floor is the tunable
         // inter-pane gap (section 2.3 -- at gaps=1 the two abutting floors
         // give the 2px inter-pane floor).
         let chrome = (theme::METRICS.bevel + theme::METRICS.hairline) as u32;
-        let inset = if self.visible_leaf_count() > 1 {
+        let inset = if self.foreground_leaf_count() > 1 {
             gaps + chrome
         } else {
             0
@@ -1288,8 +1375,8 @@ impl Layout {
     fn layout_pane(&mut self, slot: usize, rect: Rect) {
         enum Next {
             Done,
-            One(usize, Rect),
             Split(Mode, Vec<usize>),
+            Tab(Mode, Vec<usize>, usize),
         }
         let next = {
             let p = match self.get_mut(slot) {
@@ -1308,37 +1395,81 @@ impl Layout {
                     // Tab/stack: only the active child is visible, in the
                     // rect below the indicator strip (G-6c; strip_h = 0
                     // when the rect is too small to carve).
-                    m @ (Mode::Tabbed | Mode::Stacked) => {
-                        let strip = Self::strip_h(*m, children.len() as u32, rect);
-                        match children.get(*active).copied() {
-                            Some(a) => Next::One(
-                                a,
-                                Rect {
-                                    x: rect.x,
-                                    y: rect.y + strip,
-                                    w: rect.w,
-                                    h: rect.h - strip,
-                                },
-                            ),
-                            None => Next::Done,
-                        }
-                    }
+                    // The effective children (backgrounded leaves skipped) and
+                    // the strip carve are resolved OUTSIDE this `&mut p` borrow
+                    // -- `is_bg_leaf` needs `&self` -- so hand them to the
+                    // `Next::Tab` arm below.
+                    m @ (Mode::Tabbed | Mode::Stacked) => Next::Tab(*m, children.clone(), *active),
                     m => Next::Split(*m, children.clone()),
                 },
             }
         };
         match next {
             Next::Done => {}
-            Next::One(a, r) => self.layout_pane(a, r),
+            Next::Tab(mode, children, active) => {
+                // F2 structural transparency: a BACKGROUNDED leaf is not a
+                // tab/stack segment and never the shown child. Carve the strip
+                // for the EFFECTIVE count and show the effective active child
+                // (the raw active never lands on a backgrounded leaf after
+                // `tab_cycle`, but fall back to the first effective child).
+                let eff: Vec<usize> = children
+                    .iter()
+                    .copied()
+                    .filter(|&c| !self.is_bg_subtree(c))
+                    .collect();
+                let strip = Self::strip_h(mode, eff.len() as u32, rect);
+                let shown = children
+                    .get(active)
+                    .copied()
+                    .filter(|&a| !self.is_bg_subtree(a))
+                    .or_else(|| eff.first().copied());
+                if let Some(a) = shown {
+                    self.layout_pane(
+                        a,
+                        Rect {
+                            x: rect.x,
+                            y: rect.y + strip,
+                            w: rect.w,
+                            h: rect.h - strip,
+                        },
+                    );
+                }
+            }
             Next::Split(mode, children) => {
-                let n = children.len() as u32;
-                if n == 0 {
+                if children.is_empty() {
                     return;
                 }
+                // F2 (d-1b tiling completion): exclude a BACKGROUNDED leaf (a
+                // non-session renderer while a session holds the display) from
+                // the division -- it gets a ZERO rect (kept visible, so the
+                // post-recompute vis/bg accounting is untouched) and the
+                // foreground siblings divide the FULL rect. Guard: if EVERY
+                // child is backgrounded, divide among all (never blank a
+                // container). Only the Split arm consults `backgrounded`; a
+                // Tab/Stack ACTIVE child rides the One path above regardless,
+                // so a backgrounded-but-active leaf is shown, never blanked.
+                let divide: Vec<usize> = {
+                    let fg: Vec<usize> = children
+                        .iter()
+                        .copied()
+                        .filter(|&c| !self.is_bg_subtree(c))
+                        .collect();
+                    if fg.is_empty() {
+                        children.clone()
+                    } else {
+                        fg
+                    }
+                };
+                for &c in children.iter() {
+                    if !divide.contains(&c) {
+                        self.layout_pane(c, Rect::ZERO);
+                    }
+                }
+                let n = divide.len() as u32;
                 if mode == Mode::SplitH {
                     let each = rect.w / n;
                     let mut x = rect.x;
-                    for (i, &c) in children.iter().enumerate() {
+                    for (i, &c) in divide.iter().enumerate() {
                         let w = if i as u32 == n - 1 {
                             rect.x + rect.w - x
                         } else {
@@ -1358,7 +1489,7 @@ impl Layout {
                 } else {
                     let each = rect.h / n;
                     let mut y = rect.y;
-                    for (i, &c) in children.iter().enumerate() {
+                    for (i, &c) in divide.iter().enumerate() {
                         let h = if i as u32 == n - 1 {
                             rect.y + rect.h - y
                         } else {
@@ -1395,6 +1526,65 @@ impl Layout {
                 _ => None,
             })
             .collect()
+    }
+
+    /// F2: every hosted leaf (leaf slot, surface index), regardless of
+    /// visibility -- the pre-recompute input for the backgrounding decision.
+    /// It must NOT depend on visibility (recompute has not run yet); the
+    /// visibility-filtered twin is `visible_hosted`.
+    pub fn hosted_leaves(&self) -> Vec<(usize, usize)> {
+        self.panes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| match p {
+                Some(Pane {
+                    kind: Kind::Leaf { surface: Some(n) },
+                    ..
+                }) => Some((i, *n)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// F2: stamp the backgrounded set on every pane (true iff its slot is in
+    /// `bg`), called by reconcile BEFORE recompute. One pass clears stale
+    /// flags and sets the current set, so a leaf that stops being backgrounded
+    /// (the session logs out) is un-stamped the same reconcile.
+    pub fn apply_backgrounded(&mut self, bg: &[usize]) {
+        for (i, p) in self.panes.iter_mut().enumerate() {
+            if let Some(p) = p {
+                p.backgrounded = bg.contains(&i);
+            }
+        }
+    }
+
+    /// F2: is `slot` a backgrounded LEAF (the structural-transparency
+    /// predicate)? Restricted to leaves: a container's backgrounding is its
+    /// leaves'. This is the TREE flag (owner-based, set before recompute),
+    /// stable across a tab hiding the leaf -- unlike `Surface.backgrounded`,
+    /// which is visibility-derived and clears once a tab hides the leaf.
+    pub fn is_bg_leaf(&self, slot: usize) -> bool {
+        self.get(slot)
+            .is_some_and(|p| p.backgrounded && matches!(p.kind, Kind::Leaf { .. }))
+    }
+
+    /// Is `slot` backgrounded as a whole: a backgrounded leaf, or a container
+    /// whose every child is. The transparency predicate for a CHILD of a
+    /// division/tab/cycle -- a system-only container beside a session must
+    /// vanish exactly like a lone system leaf does.
+    pub fn is_bg_subtree(&self, slot: usize) -> bool {
+        match self.get(slot) {
+            Some(Pane {
+                kind: Kind::Leaf { .. },
+                backgrounded,
+                ..
+            }) => *backgrounded,
+            Some(Pane {
+                kind: Kind::Container { children, .. },
+                ..
+            }) => !children.is_empty() && children.iter().all(|&c| self.is_bg_subtree(c)),
+            None => false,
+        }
     }
 
     /// The focused leaf's hosted surface (input routing).
