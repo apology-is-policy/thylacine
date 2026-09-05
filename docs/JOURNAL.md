@@ -174,6 +174,155 @@ device default layout bake + the gate's welcome/menu legs; drafted).
 
 ---
 
+### H-4d-2a / H-4d-2 / H-4d-3 (same run, after the second self-compaction): rich tiles `eaa258db`, the tile menu over cell spans `7c180bfa`, the welcome `65ec1602`
+
+**The dependency the drafted legs sat on.** Both H-4d-3 gate legs drafted before
+the compaction assumed a session tile renders Beacon objects: the tour "at the
+rich tier", `ls /lib/halcyon` presenting path objects for the menu. Before
+applying them I went looking for the evidence that a tile is rich, and found the
+opposite, three times over: `ut` resolves its Beacon tier only inside its console
+branch (its own comment: a pts-hosted ut "takes this branch never"); the console's
+`/dev/beacon` leaf describes the CONSOLE renderer, not a tile; and `SYS_FD_DEVCLASS`
+answered dev9p's `'9'` for a pts slave, so the Auto gate every native tool composes
+(frames only onto `'c'`) refused a tile's stdout outright. The d-1 gate log (a full
+PASS) carries no `ut: beacon` line for any tile -- the tile shells printed `pts
+session ok` and nothing about their tier. KAUA-TERM.md R1 and HALCYON 14.3/14.6 had
+named the missing half since KT-1 ("the pts advertises `BEACON=` at kaua-term
+spawn, the aux producer side"); nothing had built it, and no gate had asserted it,
+so the whole session-compositor line had been running plain without anyone noticing.
+The welcome cannot exist without it (a live transcript in a tile IS the feature), so
+it was pulled forward as H-4d-2a rather than seamed (CLAUDE.md: a current-chunk
+dependency defaults to BUILD-now).
+
+**What caught it:** not a test -- a grep for the witness line in a passing log
+before trusting the premise. The general form: a gate that never asserted a property
+is silent about it, and "the design says X" is not evidence that X was built.
+
+**The design (heritage-aligned, auto-accepted under the standing autonomy).** rio
+gives a program its window as `/dev/cons` -- the window IS the terminal; Unix pairs
+`isatty()` with `TERM` -- the class says "a terminal", the env says "which". So: the
+kernel answers `'t'` for a registered pts SLAVE (`spoor_devclass`, the tty seam's own
+`pts_resolve_spoor` -- a ref-held (conn, qid) binding pointer-compared under
+`g_pts_lock`, never a server-settable qid bit; the master stays `'9'`, since
+printing onto a master is typing into the terminal; `spoor_is_console` and I-27
+untouched); the Beacon gate admits `'t'` beside `'c'`; and the pts HOST declares the
+tier it renders -- `kaua-term --beacon <tier>` writes it into its own `/env/BEACON`
+before the spawn (absent = none, fail-closed), halcyond --session passes `rich`, and
+`ut`'s pts branch arms its zones iff the inheritance says rich AND its stdout is that
+terminal. In-guest witness: the tile shell's `ut: beacon rich (transcript zones
+armed)` -- the line only the `'t'` answer + the rich inheritance produce (the kernel
+test can pin only the negative arms: no kernel-test fixture builds a dev9p Spoor over
+a live SrvConn). A ptyhost-hosted ut now says `beacon tier not advertised by the pts
+host (plain)` -- correct, ptyhost declares nothing.
+
+**H-4d-2, the menu in a tile**, landed as drafted (the console renderer's Normal
+mode + obj verb menu ported into `SessionTile`; `Tile.frame` as the hit map;
+`Mark` + the view following the cursor; a choice typed into the tile it was opened
+over as ONE `Input::Text` record `^E^U<cmd>\n`), plus a host test for the frame /
+hit / mark mechanics the draft had left unwitnessed.
+
+**H-4d-3, the welcome**, landed as drafted: the baked `default` layout (`splith
+[tour, env] active=1`), `halcyon welcome` (a Beacon tour, then `t_execve` of the
+user's shell in place), the objs-count assertion relaxed from `>= 3` to `>= 1`
+before the first run -- the count is whatever the ingest batch held when the first
+object landed, a read-batching artifact no verdict should key on.
+
+**The gate's first run lost all three attempts to arm order, again.** The init
+line (`session init: /bin/halcyon layout restore default`) landed BEFORE the root
+tile's ingest witness in every attempt; the ingest loop consumed it, the welcome
+leg's first expect then saw only `session init exited` (its failure arm) or timed
+out, and the harness killed the VM there -- so the log's silence about the tour was
+the kill, not a defect. The second run, with the ingest markers, the init line, the
+welcome markers and the tiling readings folded into ONE alternation, saw the ingest
+witness arrive AFTER the init's exit -- the order really is unknowable, which is the
+whole argument for the one-loop shape (the third time this run has needed it; it is
+now the default for any cross-process marker set).
+
+**The menu leg's silence, and the bake that never ran.** The second run's menu
+leg saw NOTHING after `ls` landed its objects -- not the placement, not the
+"no obj run" line -- for 60 s. Reading the key path against the console renderer's
+found no difference (the same rune for Esc, the same `normal_key`, the same
+`step_run`), so instead of a fourth theory the decision points got test-mode lines
+(`normal mode (R rows)`, `run -> row R obj O` / `no run back`, `act: no cursor
+row`, `act: obj O not in its block`) and the gate now paces Esc / `b` / Enter on
+those lines instead of fixed waits. The re-bake and re-run that followed did not
+run at all: the shell's cwd had persisted in `usr/` after a `cargo` step, the
+relative `tools/build.sh` and `build/…log` paths pointed at nothing, the redirect
+failed before anything launched, and the background task reported the trailing
+`echo`'s exit code -- 0. Caught by the gate finishing in seconds and its log not
+existing. The rule that follows: a background task's exit code is its LAST
+command's; verify the artifact it was supposed to produce, never the number.
+
+**The instrumented run answered at once, and the answer was structural.** `normal
+mode (0 rows)`: Esc entered Normal mode over an EMPTY row list, so `b` had nothing
+to step to and Enter bailed before any say line. A session tile's content is
+cells -- the live grid (36 rows, holding the prompt and the whole `ls` output) and
+scrolled-off rows that `push_scrolled_rows` interned with `obj: 0` -- and the
+console's row / run machinery reads transcript ITEMS, of which the tile had none.
+The port had been written against the console's all-text model without checking
+that the tile's model had the same content shape: the class of "an unconstructed
+state". HALCYON 14.11.4 ("the frames drive the same span state") and 14.11.5 ("the
+grid is a virtual trailing block") had named both missing halves since KT-1.
+
+**The design that closed it (H-4d-2b).** The obj-to-cell association must be made
+where the cells are written: stamping halcyond's grid at CellDiff time looked
+cheapest, but the producer's diff after a scroll rewrites nearly every cell (a
+shadow compare), so a consumer-side stamp is wiped by the very shift it must
+survive. So the producer stamps -- parser-free: the vt advances a span serial on
+every OSC whose code is 1936 (a numeric selector, no body read, R5 intact), stamps
+every cell it writes with it, and the record carries the serial explicitly
+(`Osc1936Raw { serial, frame }`) -- not counted at both ends, because a dropped or
+oversize frame would then shift every later cell onto the wrong object, which is
+the anti-clickjack class. halcyond notes the transcript's span state after feeding
+each frame under its serial (an 8192-ring validated by the full serial; a serial
+that fell off resolves to NO span), resolves grid cells through it, and at
+scroll-off interns em/obj/hdr -- copying an obj from its source block into the
+landing block, since the grid's rows straddle zone cuts and a block's Line styles
+must index its own obj table. The heritage check that settled it: CLIM records
+presentations on the OUTPUT stream at output time; the display never reconstructs
+them. Host-proven end to end (vt: the stamps, the scroll carrying them; halcyond: a
+stamped grid row's run, hit, rect and obj, then a zone cut + a scroll-off copying
+the obj into the landing block and the row's run resolving there).
+
+**Three wrong turns of the harness kind, all caught by an artifact, none by a
+number.** A bake and a gate that never ran (cwd persisted in `usr/`; the redirect's
+directory did not exist; the task reported the trailing echo's 0). Then a bake that
+DID run from `usr/` and failed at corvus-mint -- cargo discovers its config from the
+cwd, and `usr/.cargo` replaces crates-io with the vendored tree, whose `aegis`
+0.9.8 cannot satisfy that host tool's 0.9.12 lock; the same bake from the root
+passes. Fixed in build.sh (the step now runs from the repo root whatever the
+caller's cwd), and that failed populate had already regenerated the pool key, so
+the build directory had to be re-baked whole. And the gate's welcome loop lost a
+marker to arm order a SECOND time: separate arms are tried in list order, so a
+chunk carrying `focus -> pane 3` a line before `tagged 1 pane(s)` matched the
+later-listed `tagged` arm and consumed the focus line unseen; the loop is one
+regex alternation now (the leftmost marker wins), dispatched on the matched text
+-- the shape the draft had, before I "improved" it.
+
+**Run 4 proved the grid menu and taught the gate one more thing.** Esc entered
+Normal mode over 35 rows (the grid's), `b` selected the run on row 4, the SESSION
+compositor placed the verb menu for `/lib/halcyon/session`, Enter typed
+`ls -l -- '/lib/halcyon/session'` into the tile, and the split / zoom / close /
+logout legs passed behind it. The rc leg then failed with its "refusal" marker
+missing -- while the log showed two refusals, in order, before the release. The
+tally expect placed BEFORE the loop had consumed them: this run the compositor's
+refused mints landed before the tool's tally line, last time after it. The fourth
+arm-order bite in one run, and a second lesson on top of it: the refusal witnesses
+one interleaving (the compositor minting while the tool still lives), which nothing
+guarantees -- a tool can finish before the compositor's reconcile runs -- so
+requiring it was asserting a race outcome. The gate now REPORTS the refusal when it
+occurs and asserts the invariant that IS deterministic: the compositor hosts a
+tool-built leaf only after the release line (causally ordered through tapestryd's
+retire -> fan -> the compositor's mint -> its spawn line), in both the welcome and
+the rc leg.
+
+**Run 5: the fixed rc leg witnessed everything (the refusal, the release, three fills
+after it) and the harness still said FAIL -- with no failure line anywhere.** A
+gate that fails without an `lc_fail` line died of its own script: the harness log
+carried `invalid command name "}"` -- an orphan brace my replacement had left after
+the loop. The symptom is worth its own line: the scenario's last recorded step was
+a PASS.
+
 ## Run 30 (2026-09-05, Fable 5.1, effort max): the KT-1 audit's round 2 — the fixes re-prosecuted, and the two the arithmetic had not reached
 
 **Where it sits.** Runs 28-29 landed F2 (`53ee407f`) and the round-1 audit close (`488cab49`, rebased to `062efe18` after the vault cutover). This run resumed from a self-compaction at the 600k line with two round-2 prosecutors already running against the round-1 fixes, and the vault peer's cutover of `vault/` onto `main` (`60021691`, both mirrors) landing mid-run.

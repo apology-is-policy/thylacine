@@ -550,8 +550,12 @@ mint claims on the same leaves and the last mint wins. A mark made
 AFTER the split (a tag, a claim) leaves a window the compositor enters;
 the reservation is made BY the split. rio's rule: a window a program
 creates is that program's, not the menu's. Gate: ls-gfx-session's rc leg
-(the reservation line is the positive control that the compositor's
-mint was refused, not merely beaten) and its welcome leg.
+and its welcome leg -- both assert, every run, that the compositor hosts a
+tool-built leaf only AFTER the release line (a host before it means the
+reservation did not hold), and REPORT the refusal line when the compositor
+tried while the tool lived (that interleaving is not guaranteed: the tool can
+finish before the compositor's reconcile runs -- run 4 of H-4d-3's gate saw
+both orders in one boot).
 
 ## The resize protocol + pane close (G-6b): weave generations
 
