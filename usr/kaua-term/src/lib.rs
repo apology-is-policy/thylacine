@@ -112,15 +112,38 @@ impl Producer {
         self.feed_into(vt, bytes, out, &mut |_| {});
     }
 
-    /// `feed`, with `sink` called each time a capped ScrollOff lands in `out`
-    /// so the caller can ship (serialize + write + clear) what has accumulated
-    /// so far. The per-RECORD cap (`scroll_cap`) bounds one ScrollOff; this
-    /// bounds how many of them one chunk can pile up before anything is
-    /// written: the rows per chunk are the VT's to decide, not the chunk
+    /// `feed`, with `sink` called whenever the cells held in `out` reach
+    /// `SCROLL_ACC_BYTES` so the caller can ship (serialize + write + clear)
+    /// what has accumulated so far. The per-RECORD cap (`scroll_cap`) bounds
+    /// one ScrollOff; this bounds how much one chunk can pile up before
+    /// anything is written, for EVERY record class that scales with the
+    /// screen: the rows per chunk are the VT's to decide, not the chunk
     /// size's -- `ESC [ 36 S` is five bytes and thirty-six rows, so a 4 KiB
-    /// read can yield ~30K rows, tens of MiB of cells held at once. A sink
-    /// that leaves `out` untouched degrades to plain accumulation.
+    /// read can yield ~30K rows -- and an alt-screen toggle is eight bytes
+    /// and a full screen each way, so a 4 KiB read of toggles is 512 full
+    /// diffs. A sink that leaves `out` untouched degrades to plain
+    /// accumulation.
     pub fn feed_into(
+        &mut self,
+        vt: &mut Vt,
+        bytes: &[u8],
+        out: &mut Vec<Record>,
+        sink: &mut dyn FnMut(&mut Vec<Record>),
+    ) {
+        self.feed_core(vt, bytes, out, sink);
+        self.flush(vt, out);
+    }
+
+    /// The vt's PENDING boundaries (a shrink's scrolled-off rows) as records,
+    /// with NO screen diff: for the resize path, where the shadow still has
+    /// the old geometry and a diff against it would address the new cells at
+    /// the old pitch (the full diff `resized` emits next is the screen).
+    pub fn drain_pending(&mut self, vt: &mut Vt, out: &mut Vec<Record>) {
+        self.feed_core(vt, &[], out, &mut |_| {});
+        self.flush_scroll(out);
+    }
+
+    fn feed_core(
         &mut self,
         vt: &mut Vt,
         bytes: &[u8],
@@ -140,7 +163,6 @@ impl Producer {
                     self.scroll_acc.push(row);
                     if self.scroll_acc.len() >= self.scroll_cap() {
                         self.flush_scroll(out);
-                        sink(out);
                     }
                 }
                 Boundary::Bell => {
@@ -175,8 +197,12 @@ impl Producer {
                     out.push(self.full_diff());
                 }
             }
+            // Ship whenever the held cells reach the accumulator bound,
+            // whichever record class put them there.
+            if cells_in(out) >= SCROLL_ACC_BYTES / core::mem::size_of::<Cell>() {
+                sink(out);
+            }
         }
-        self.flush(vt, out);
     }
 
     /// After the caller resizes the vt (a down-channel Resize; the compositor is
@@ -272,6 +298,18 @@ impl Producer {
         self.shadow = to.to_vec();
         self.last_cursor = (cy as u16, cx as u16, vis);
     }
+}
+
+/// The cells held by the records in `out` (the accumulation the shipping
+/// bound measures): every ScrollOff row and every CellDiff entry.
+fn cells_in(out: &[Record]) -> usize {
+    out.iter()
+        .map(|r| match r {
+            Record::ScrollOff { rows } => rows.iter().map(|row| row.len()).sum(),
+            Record::CellDiff { changed, .. } => changed.len(),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Route a raw OSC payload (the bytes between the introducer and the terminator)
@@ -479,10 +517,15 @@ mod tests {
             400 * 36,
             "every scrolled row is delivered once"
         );
+        // The shipping contract: the sink fires once the held cells reach the
+        // accumulator bound, so it sees at most the bound plus the record
+        // that crossed it (one capped ScrollOff).
+        let bound_rows = SCROLL_ACC_BYTES / core::mem::size_of::<Cell>() / 8;
         assert!(
-            peak_rows_in_out <= cap,
-            "the sink saw {} rows at once; the per-record cap is {}",
+            peak_rows_in_out <= bound_rows + cap,
+            "the sink saw {} rows at once; the bound is {} rows plus one capped record ({})",
             peak_rows_in_out,
+            bound_rows,
             cap
         );
         assert!(shipped_rows > 0, "the sink ran (the chunk exceeds one cap)");
@@ -504,6 +547,86 @@ mod tests {
     }
 
     #[test]
+    fn feed_into_ships_alt_screen_full_diffs_too() {
+        // Round-3 F1: the shipping bound is per HELD CELLS, not per record
+        // class -- 256 alt-screen toggle pairs in ONE chunk are 512 full
+        // diffs, and each must leave the heap as it forms.
+        let mut vt = Vt::new(128, 36);
+        vt.set_capture_events(true);
+        let mut prod = Producer::new(&vt);
+        let screen = 128 * 36;
+        let bound = SCROLL_ACC_BYTES / core::mem::size_of::<Cell>();
+        let mut chunk = Vec::new();
+        for _ in 0..256 {
+            chunk.extend_from_slice(b"\x1b[?1049h\x1b[?1049l");
+        }
+        let mut out = Vec::new();
+        let mut peak = 0usize;
+        let mut shipped = 0usize;
+        prod.feed_into(&mut vt, &chunk, &mut out, &mut |o: &mut Vec<Record>| {
+            let held = cells_in(o);
+            peak = peak.max(held);
+            shipped += held;
+            o.clear();
+        });
+        let tail = cells_in(&out);
+        assert_eq!(
+            shipped + tail,
+            512 * screen,
+            "every full diff is delivered once"
+        );
+        assert!(
+            peak <= bound + screen,
+            "the sink saw {} cells at once; the bound is {} plus one screen ({})",
+            peak,
+            bound,
+            screen
+        );
+        // Control: plain `feed` accumulates all 512 screens.
+        let mut vt2 = Vt::new(128, 36);
+        vt2.set_capture_events(true);
+        let mut prod2 = Producer::new(&vt2);
+        let mut all = Vec::new();
+        prod2.feed(&mut vt2, &chunk, &mut all);
+        assert_eq!(cells_in(&all), 512 * screen);
+    }
+
+    #[test]
+    fn an_equal_count_resize_ships_no_stale_geometry_diff() {
+        // Round-3 F3: 80x24 -> 96x20 keeps the cell count, so a diff of the
+        // resized screen against the OLD shadow would pass the length guard
+        // and address the new cells at the old pitch. The drain must emit
+        // the scrolled rows and NOTHING else before the full diff.
+        let mut vt = Vt::new(80, 24);
+        vt.set_capture_events(true);
+        let mut prod = Producer::new(&vt);
+        let mut out = Vec::new();
+        let mut text = Vec::new();
+        for i in 0..24 {
+            text.extend_from_slice(alloc::format!("line {i}\r\n").as_bytes());
+        }
+        prod.feed(&mut vt, &text, &mut out);
+        out.clear();
+        vt.resize(96, 20);
+        prod.drain_pending(&mut vt, &mut out);
+        prod.resized(&vt, &mut out);
+        assert!(
+            matches!(out.first(), Some(Record::ScrollOff { .. })),
+            "the shrink's rows come first"
+        );
+        assert_eq!(
+            out.len(),
+            2,
+            "exactly [ScrollOff, CellDiff(full)], got {}",
+            out.len()
+        );
+        assert!(
+            matches!(out.last(), Some(Record::CellDiff { changed, .. }) if changed.len() == 96 * 20),
+            "the last record is the full 96x20 diff"
+        );
+    }
+
+    #[test]
     fn a_shrink_ships_its_scrolled_off_rows_before_the_full_celldiff() {
         // B2-F7: the rows a shrink pushes off the top are history that must
         // precede the resized screen on the wire, in the SAME emit -- not at
@@ -515,9 +638,9 @@ mod tests {
         prod.feed(&mut vt, b"one\r\ntwo\r\nthree\r\nfour", &mut out);
         out.clear();
         // The bin's `apply_resize` order: resize, drain the vt's pending
-        // boundaries through the producer, then the full diff.
+        // boundaries through the producer (no diff), then the full diff.
         vt.resize(8, 2);
-        prod.feed(&mut vt, &[], &mut out);
+        prod.drain_pending(&mut vt, &mut out);
         prod.resized(&vt, &mut out);
         assert!(
             matches!(out.first(), Some(Record::ScrollOff { rows }) if rows.len() == 2),

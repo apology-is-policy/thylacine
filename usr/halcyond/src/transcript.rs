@@ -284,6 +284,14 @@ pub struct Transcript {
 pub const DEFAULT_MAX_BLOCKS: usize = 1000;
 pub const DEFAULT_MAX_COST: usize = 32 << 20;
 pub const DEFAULT_MAX_LINES_PER_BLOCK: usize = 10_000;
+/// The open block freezes at the smaller of `max_cost / 8` and this: the
+/// open block is laid out WHOLE on every render (it is the one block no
+/// height cache can position), and a block straddling the view is laid out
+/// whole too, so the render transient is O(view + 2 x this), not O(share /
+/// 8) -- 4 MiB of cells at a 32 MiB share. It also bounds what a re-budget
+/// cannot evict (the newest frozen block, sized by the cap in force when it
+/// froze). 64 such blocks fill the default budget; the block cap holds 1000.
+pub const OPEN_BLOCK_MAX_COST: usize = 512 << 10;
 
 /// What one retained line costs beyond its cells: the `Item` slot, the
 /// `Line`'s vector header, and the allocator's per-block overhead. A cost
@@ -339,7 +347,7 @@ impl Transcript {
             max_blocks,
             max_cost,
             max_lines_per_block: max_lines.max(1),
-            max_open_cost: (max_cost / 8).max(1),
+            max_open_cost: open_cap(max_cost),
             seq: 0,
         }
     }
@@ -1129,7 +1137,7 @@ impl Transcript {
     /// the new open cap, so the eviction loop can reach it.
     pub fn set_max_cost(&mut self, max_cost: usize) {
         self.max_cost = max_cost;
-        self.max_open_cost = (max_cost / 8).max(1);
+        self.max_open_cost = open_cap(max_cost);
         self.enforce_block_cap();
         self.enforce_budget();
     }
@@ -1141,6 +1149,11 @@ impl Transcript {
 }
 
 // --- the chunk-boundary holdback -------------------------------------------
+
+/// The open block's byte cap for a budget (see `OPEN_BLOCK_MAX_COST`).
+fn open_cap(max_cost: usize) -> usize {
+    (max_cost / 8).clamp(1, OPEN_BLOCK_MAX_COST)
+}
 
 /// Find the safe parse cut: the start of the escape sequence still OPEN at
 /// the buffer end (or len when none is). A last-ESC heuristic is wrong
@@ -1698,6 +1711,44 @@ mod tests {
     // block must never exceed its byte cap, and the whole transcript must
     // stay within one open-cap of the budget.
     #[test]
+    fn a_re_budget_residue_is_bounded_by_the_constant_open_cap() {
+        // Round-3 F5: the eviction floor keeps the newest frozen block, sized
+        // by the open cap in force when it froze -- at a 32 MiB share that
+        // was 4 MiB, and across N re-budgeted tiles it summed to 4 MiB x H(N)
+        // over the budget. With a CONSTANT open cap the residue is <= that
+        // constant (+ the styles charged at freeze) whatever the old share.
+        let share = 32 << 20;
+        let mut t = Transcript::with_caps(daylight(), 1000, share, 10_000);
+        let row: Vec<vt::Cell> = (0..128)
+            .map(|_| vt::Cell {
+                ch: 'y',
+                fg: 0xFFFFFF,
+                bg: 0,
+                attrs: 0,
+            })
+            .collect();
+        let rows: Vec<Vec<vt::Cell>> = alloc::vec![row; 64];
+        // several cap-sized continuation blocks
+        while t.frozen_blocks().len() < 6 {
+            t.push_scrolled_rows(&rows);
+        }
+        let last = t.frozen_blocks().back().map_or(0, |b| b.cost);
+        assert!(
+            last <= OPEN_BLOCK_MAX_COST + 128 * 1024 + 64 * 1024,
+            "a frozen block is bounded by the constant cap (+ one row + styles), got {last}"
+        );
+        let small = 1 << 20;
+        t.set_max_cost(small);
+        assert!(
+            t.stored_cost()
+                <= small + OPEN_BLOCK_MAX_COST + 128 * 1024 + 64 * 1024 + open_cap(small),
+            "residue {} exceeds the new share {} plus the constant cap",
+            t.stored_cost(),
+            small
+        );
+    }
+
+    #[test]
     fn set_max_cost_evicts_a_quiet_transcript_at_once() {
         // B2-F2: lowering the share of a tile that receives no more output
         // must shrink its retained set NOW -- nothing else will ever push.
@@ -1729,7 +1780,7 @@ mod tests {
         t.set_max_cost(small);
         // At most the new cap plus one un-evictable block (the loop keeps the
         // newest frozen block) plus the new open cap.
-        let slack = t.frozen_blocks().back().map_or(0, |b| b.cost) + small / 8;
+        let slack = t.frozen_blocks().back().map_or(0, |b| b.cost) + open_cap(small);
         assert!(
             t.stored_cost() <= small + slack,
             "stored_cost {} still above the new share {} (+{} slack) after set_max_cost",

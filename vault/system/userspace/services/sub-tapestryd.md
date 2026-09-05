@@ -1204,20 +1204,27 @@ peer are E_PERM). `Comp.session_conns` holds at most one `(conn, principal)`;
 collect the sentinel-principal leaves. A user window never backgrounds
 anything; a session-less display is the empty set, byte-identical.
 
-**The seat is the principal's (round 2, C2-F1 + B2-F5).** Round 1 made the
-slot first-come with no takeover, and halcyond died on a refusal -- so any
-Session conn that had written `session on` (a same-user program; an orphan of
-a previous user, which the getty loop never kills) held the seat until it
-died, and login's "exit is logout" turned every later graphical login into
-the C-F12 re-prompt loop. Now `session on` takes the seat over from a holder
-of the SAME principal (a restarted compositor whose dead conn is not yet
-retired -- the B2-F5 race) and from ANY holder that hosts nothing (an idle
-declaration holds no display); only a holder hosting leaves for another
-principal keeps it, answering E_BUSY with a log line naming it. The client
-half: halcyond retries a refused declaration through `DECLARE_TRIES` (25 ms
-apart) and then runs UNDECLARED -- its tiles tile beside the console like any
-user window, the surface cap is the ordinary one, and `session up ...
-(undeclared)` says so -- never exiting into the login loop. The declaration
+**The seat is held while it hosts (round 2, C2-F1 + B2-F5; round 3, F6).**
+Round 1 made the slot first-come with no takeover, and halcyond died on a
+refusal -- so any Session conn that had written `session on` (a same-user
+program; an orphan of a previous user, which the getty loop never kills) held
+the seat until it died, and login's "exit is logout" turned every later
+graphical login into the C-F12 re-prompt loop. Now `session on` takes the
+seat over from ANY holder that hosts nothing (an idle declaration holds no
+display; a crashed compositor's conn is retired -- and un-declared -- as soon
+as its EOF is serviced, so a restart never needs more than halcyond's retry
+budget), and a holder hosting leaves keeps it against every newcomer, the
+user's own programs included (round 2 let a same-principal newcomer take a
+LIVE holder over; round 3 F6 showed that steals the user's own compositor's
+seat -- its mint cap drops, it hears no `TEV_LAYOUT`, and it never
+re-declares -- so the exception is gone), answering E_BUSY with a log line
+naming the holder. The client half: halcyond retries a refused declaration
+through `DECLARE_TRIES` (25 ms apart) and then runs UNDECLARED -- its tiles
+tile beside the console like any user window, the surface cap is the
+ordinary one, and `session up ... (undeclared)` says so -- never exiting into
+the login loop; and it re-issues `session on` once its first surface hosts,
+taking THAT verdict as `declared`, so an idle re-claimer in the declare ->
+first-mint window cannot leave it running undeclared while mislabelled. The declaration
 clears in `retire_conn` AFTER the retire loop (C2-F2): a crash with N tiles
 keeps the console backgrounded through the N-1 intermediate reconciles and
 lands one transition to `Direct(console)`; the last retire already sees a
@@ -1230,8 +1237,12 @@ touches no hosted surface -- a split of an EMPTY leaf -- fans no CONFIGURE
 conn that claims empties learned of them only at an unrelated event. The
 structural branch now pushes `TEV_LAYOUT` (`value` = the layout epoch) to ONE
 surface of the declared conn (`session_notify_surface`, the lowest slot it
-owns; one event per change, not one per tile); a wedged push retires that
-surface like any other fan target. Session-less displays emit none.
+owns; one event per change, not one per tile); it COALESCES in `push_event`
+like CONFIGURE and FOCUS (the newest epoch subsumes every unread one -- it is
+pushed at every structural pass whoever caused it, so a foreign client's
+window churn against a momentarily non-draining session must never fill the
+queue; round 3 F2); a wedged push retires that surface like any other fan
+target. Session-less displays emit none.
 
 **The compositor's other round-1 fixes.** `close` runs `actor_owns_subtree_all`
 -- a Session owns a subtree for the DESTRUCTIVE verb only if every hosted

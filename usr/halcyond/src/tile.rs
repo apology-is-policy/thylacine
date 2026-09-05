@@ -45,15 +45,23 @@ pub struct Tile {
     /// The frozen blocks' laid heights at `heights_width`, aligned to the
     /// scrollback's frozen deque (front-evicted, back-appended; block ids are
     /// strictly increasing along it). A frozen block's layout is width- and
-    /// content-deterministic, so 12 bytes per block is enough to position
+    /// content-deterministic, so a few bytes per block are enough to position
     /// every block without laying it out -- a render then lays out ONLY the
     /// blocks that intersect the view. The old whole-history layout was a
     /// transient of ~1.8x the retained bytes, outside every budget: one tile
     /// with ~20K rows of history ended the whole session at its next paint.
-    heights: VecDeque<(u64, i32)>,
+    /// The entry carries the block's `exit` too: it is the ONE field a frozen
+    /// block can still acquire (an exit mark floating in right after its
+    /// zone closed lands on the last frozen block), and a non-zero code adds
+    /// the badge line -- a height cached before it would misplace every block
+    /// below. Any new post-freeze mutation must join this key.
+    heights: VecDeque<(u64, Option<i64>, i32)>,
     heights_width: i32,
     /// Blocks laid out by the last `render` (the window's witness).
     pub laid_last: usize,
+    /// Visual lines laid out by the last `render` (the transient's witness:
+    /// bounded by the view plus the two whole blocks, never the history).
+    pub laid_lines_last: usize,
 }
 
 impl Tile {
@@ -79,6 +87,7 @@ impl Tile {
             heights: VecDeque::new(),
             heights_width: 0,
             laid_last: 0,
+            laid_lines_last: 0,
         }
     }
 
@@ -140,9 +149,13 @@ impl Tile {
     /// Layout is windowed: the frozen blocks' heights come from the cache
     /// (filled once per block per width), the exact content height and every
     /// block's screen-y follow from them, and only the blocks intersecting
-    /// the view (plus the open block, which changes) are laid out -- one
-    /// `LaidBlock` alive at a time, dropped after it renders. The transient
-    /// is O(view), whatever the history holds and wherever the view scrolled.
+    /// the view are laid out, each dropped after it renders. The open block
+    /// (the one block no cache can position: it changes) is laid out whole
+    /// every render and stays alive across the walk, so at most TWO laid
+    /// blocks exist at once, and a block that merely touches the view is
+    /// laid out whole -- the transient is O(view + 2 x the open-block cap),
+    /// `OPEN_BLOCK_MAX_COST` bounding both, whatever the history holds and
+    /// wherever the view scrolled.
     pub fn render(
         &mut self,
         cart: &mut Cartoon,
@@ -159,6 +172,7 @@ impl Tile {
         let (_cw, cell_h, _base) = gs.mono_cell();
         let grid_h = self.grid.dims().1 as i32 * cell_h;
         self.laid_last = 0;
+        self.laid_lines_last = 0;
 
         if self.mode == ScreenMode::AltScreen {
             paint_grid(cart, &self.grid, 0, 0, gs, sheet);
@@ -174,11 +188,12 @@ impl Tile {
         // newest, un-frozen history; no trailing gap -- the grid follows it
         // directly as the live tail).
         let mut total = sheet.block_gap;
-        for &(_, hgt) in self.heights.iter() {
+        for &(_, _, hgt) in self.heights.iter() {
             total += hgt + sheet.block_gap;
         }
         let open_lb = layout_block(self.scrollback.open_block(), widthi, sheet, gs);
         self.laid_last += 1;
+        self.laid_lines_last += open_lb.lines.len();
         total += open_lb.height;
 
         let content_h = total + grid_h;
@@ -192,7 +207,7 @@ impl Tile {
         // Bottom-anchor [scrollback][grid]: walk the blocks by their cached
         // heights, laying out + rendering only those that intersect the view.
         let mut y = y0 + sheet.block_gap;
-        for (b, &(_, hgt)) in self
+        for (b, &(_, _, hgt)) in self
             .scrollback
             .frozen_blocks()
             .iter()
@@ -203,6 +218,7 @@ impl Tile {
                 debug_assert_eq!(lb.height, hgt, "a frozen block's height is deterministic");
                 render_block(cart, &lb, y, gs);
                 self.laid_last += 1;
+                self.laid_lines_last += lb.lines.len();
             }
             y += hgt + sheet.block_gap;
         }
@@ -228,17 +244,18 @@ impl Tile {
         // Front eviction: ids are strictly increasing along the deque, so
         // every cached id below the oldest live block's is gone.
         if let Some(oldest) = frozen.front().map(|b| b.id) {
-            while self.heights.front().is_some_and(|&(id, _)| id < oldest) {
+            while self.heights.front().is_some_and(|&(id, _, _)| id < oldest) {
                 self.heights.pop_front();
             }
         } else {
             self.heights.clear();
         }
-        // Pairwise alignment (defensive: any disagreement truncates the
-        // cache there, and the tail is re-laid below).
+        // Pairwise alignment on (id, exit): any disagreement truncates the
+        // cache there, and the tail is re-laid below -- a floating exit mark
+        // landing on the last frozen block re-lays exactly that block.
         let mut keep = 0;
         for (cached, b) in self.heights.iter().zip(frozen.iter()) {
-            if cached.0 != b.id {
+            if cached.0 != b.id || cached.1 != b.exit {
                 break;
             }
             keep += 1;
@@ -247,7 +264,7 @@ impl Tile {
         let mut laid = 0;
         for b in frozen.iter().skip(self.heights.len()) {
             let lb = layout_block(b, width, sheet, gs);
-            self.heights.push_back((b.id, lb.height));
+            self.heights.push_back((b.id, b.exit, lb.height));
             laid += 1;
         }
         laid
@@ -524,6 +541,7 @@ mod tests {
             heights: VecDeque::new(),
             heights_width: 0,
             laid_last: 0,
+            laid_lines_last: 0,
         }
     }
 
@@ -585,6 +603,13 @@ mod tests {
             t.laid_last <= 4,
             "warm render laid out {} blocks for a 4-row view",
             t.laid_last
+        );
+        // The transient in LINES: the in-view blocks (3 lines each) plus the
+        // (empty) open block -- never the 600 lines of history.
+        assert!(
+            t.laid_lines_last <= 12,
+            "warm render laid out {} lines for a 4-row view",
+            t.laid_lines_last
         );
 
         // Scrolled to the very top: the window follows the scroll -- still a
@@ -649,6 +674,46 @@ mod tests {
         );
         assert_eq!(narrow, full_height(&t, w2, &mut gs, &sheet));
         assert_eq!(t.heights_width, w2 as i32);
+    }
+
+    #[test]
+    fn a_floating_exit_mark_re_lays_the_frozen_block_it_lands_on() {
+        // The one post-freeze mutation: an exit mark arriving right AFTER its
+        // output zone closed lands on the last FROZEN block (the floating
+        // order the transcript tolerates). A non-zero code adds the badge
+        // line, so a height cached before it would misplace every block below.
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let mut t = history_tile(20, 4, 1000);
+        t.apply(Record::Control(Control::Osc1936Raw(
+            b"\x1b]1936;v1;zone;k=output\x1b\\".to_vec(),
+        )));
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cell('a')], vec![cell('b')]],
+        });
+        t.apply(Record::Control(Control::Osc1936Raw(
+            b"\x1b]1936;v1;/zone\x1b\\".to_vec(),
+        )));
+        assert_eq!(t.scrollback.frozen_blocks().len(), 1);
+        let mut cart = Cartoon::new();
+        let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
+        let before = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        assert_eq!(t.heights.len(), 1);
+        assert_eq!(t.heights[0].1, None);
+        // the floating exit mark: the open block is an empty Foreign one, so
+        // the code lands on the frozen output block
+        t.apply(Record::Control(Control::Osc1936Raw(
+            b"\x1b]1936;v1;mark;k=exit;code=2\x1b\\".to_vec(),
+        )));
+        assert_eq!(t.scrollback.frozen_blocks()[0].exit, Some(2));
+        let after = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        assert_eq!(t.heights[0].1, Some(2), "the cache re-keyed on the exit");
+        assert!(
+            after > before,
+            "the badge line grew the content ({after} > {before})"
+        );
+        assert_eq!(after, full_height(&t, w, &mut gs, &sheet));
     }
 
     #[test]

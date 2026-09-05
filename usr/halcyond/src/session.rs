@@ -74,10 +74,15 @@ struct Geom {
 const SESSION_SCROLLBACK_BUDGET: usize = 32 << 20;
 
 /// The kernel's `POLL_MAX_NFDS` (poll.h): a larger set is refused -1 before
-/// any fd is looked at, and the loop reads -1 as "compositor gone". The ring
-/// plus one POLLIN per live tile fits (1 + 32); the POLLOUT entries are the
-/// ones that could cross it, so they stop at the ceiling.
+/// any fd is looked at, and the loop reads -1 as "compositor gone". At most
+/// 30 tiles exist (`MAX_PANES` 32 holds the root container + the console
+/// leaf), so the ring + one POLLIN + one POLLOUT per tile is 61 -- the
+/// ceiling below is a defence against a raised pane cap, not a live bound.
 const POLL_MAX_NFDS: usize = 64;
+
+/// The bounded wait when a tile's POLLOUT entry did not fit the poll set
+/// (unreachable at today's pane cap; the defence a raised cap would need).
+const DOWN_OMITTED_POLL_MS: i32 = 10;
 
 /// How many connect iterations tolerate a refused `session on` before the
 /// compositor runs UNDECLARED: the seat may be mid-handover (the previous
@@ -472,7 +477,19 @@ fn connect() -> Option<(EventRing, Surface, bool)> {
             }
         };
         match Surface::fullscreen_on(&r) {
-            Ok(s) => return Some((r, s, declared)),
+            Ok(s) => {
+                // Re-verify now that a surface hosts: between the
+                // declaration and this mint the conn held nothing, so an
+                // idle re-claimer could take the seat back in that window;
+                // a repeat `session on` is idempotent for the holder and a
+                // takeover of an idle usurper, and its verdict is the one
+                // that describes the session that actually runs.
+                let declared = declared && r.global_ctl("session on").is_ok();
+                if !declared && !undeclared_said {
+                    say!("halcyond: session declaration lost before the first surface -- running UNDECLARED");
+                }
+                return Some((r, s, declared));
+            }
             Err(e) => {
                 if i == CONNECT_TRIES - 1 {
                     say!("halcyond: FAIL session connect/create {:?}", e);
@@ -707,13 +724,17 @@ pub fn run(home: Option<String>) -> i64 {
         }
         // Undelivered input wakes the loop when its pipe has room. Appended
         // AFTER the up entries, so the up_leaves[i] <-> fds[i+1] map holds;
-        // capped at the kernel's set ceiling (a tile left out is drained at
-        // the next wake anyway).
+        // capped at the kernel's set ceiling. A tile left OUT has nothing
+        // watching its pipe, and a quiet session would park on it forever
+        // (a lost wake: readiness the set cannot see) -- so the wait is then
+        // bounded instead, and the omitted tile is drained on that tick.
+        let mut omitted = false;
         for t in tiles.values() {
-            if fds.len() >= POLL_MAX_NFDS {
-                break;
-            }
             if t.exit.is_none() && !t.down.is_empty() {
+                if fds.len() >= POLL_MAX_NFDS {
+                    omitted = true;
+                    break;
+                }
                 fds.push(TPollFd {
                     fd: t.down_fd as i32,
                     events: T_POLLOUT,
@@ -722,7 +743,8 @@ pub fn run(home: Option<String>) -> i64 {
             }
         }
         let nfds = fds.len();
-        if unsafe { t_poll(fds.as_mut_ptr(), nfds, -1) } < 0 {
+        let timeout = if omitted { DOWN_OMITTED_POLL_MS } else { -1 };
+        if unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) } < 0 {
             say!("halcyond: session poll failed (compositor gone); exiting");
             logout = Some(1);
             break;

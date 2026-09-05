@@ -65,19 +65,19 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**366 owned · 115 unowned · 481 files (76% owned) · ~38420 unswept lines.**
+**366 owned · 115 unowned · 481 files (76% owned) · ~38682 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30093 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/halcyond | 0 | 18 | 9434 |
+| usr/halcyond | 0 | 18 | 9572 |
 | usr/lib | 40 | 17 | 7415 |
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/ports | 0 | 18 | 4033 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/kaua-term | 0 | 3 | 1806 |
+| usr/kaua-term | 0 | 3 | 1930 |
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1028 |
 | arch | 34 | 4 | 971 |
@@ -122,18 +122,18 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30093 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/lib/vt/src/lib.rs | 2382 |
-| usr/halcyond/src/transcript.rs | 1921 |
+| usr/halcyond/src/transcript.rs | 1972 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/halcyond/src/main.rs | 1250 |
 | usr/quarry/src/main.rs | 1028 |
+| usr/kaua-term/src/lib.rs | 1022 |
 | usr/halcyond/src/layout.rs | 974 |
 | usr/lib/libhalcyon/src/layout.rs | 940 |
-| usr/kaua-term/src/lib.rs | 899 |
 | usr/halcyon/src/main.rs | 874 |
-| usr/halcyond/src/session.rs | 801 |
+| usr/halcyond/src/session.rs | 823 |
 | usr/halcyond/src/menu.rs | 790 |
+| usr/halcyond/src/tile.rs | 739 |
 | arch/arm64/uart.c | 674 |
-| usr/halcyond/src/tile.rs | 674 |
 | usr/lib/beacon/src/wire.rs | 638 |
 | usr/lib/cartoon/src/lib.rs | 616 |
 | usr/kaua-term/src/wire.rs | 554 |
@@ -147,7 +147,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30093 lin
 | usr/lib/libtapestry/src/ring.rs | 386 |
 | usr/halcyond/src/input.rs | 385 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
-| usr/kaua-term/src/main.rs | 353 |
+| usr/kaua-term/src/main.rs | 354 |
 | usr/halcyond/src/raster.rs | 350 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 336 |

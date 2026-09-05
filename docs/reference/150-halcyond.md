@@ -162,17 +162,24 @@ form; the finding records are `vault/record/audits/adt-kt1-r{1,2}.md`.
 **The declaration (`connect`).** Before its first surface, the compositor
 writes `session on` through `EventRing::global_ctl` on the conn every tile
 surface will share: that act, not its principal, is what backgrounds the
-console renderer (HALCYON.md §14.12 step 4). A refusal -- E_BUSY while the
-seat is held by another principal's live tiles, E_PERM for a conn without a
-session principal -- is retried through `DECLARE_TRIES` (40 x 25 ms; a seat
-mid-handover clears within milliseconds because tapestryd takes an idle or
-same-principal holder over) and then TOLERATED: `connect` returns
-`declared = false`, the session runs UNDECLARED (its tiles beside the console
-like any user window, the ordinary surface cap), says once `session declare
-refused ... running UNDECLARED beside the console`, and `session up NxN px
-(undeclared)` marks it. It never exits here: login treats halcyond's exit as
-logout regardless of status, so exiting would re-prompt the seat forever
-(C-F12, `seam-login-halcyond-fallback`).
+console renderer (HALCYON.md §14.12 step 4). The seat is held by a conn
+WHILE IT HOSTS: an idle declaration is taken over by anyone (a crashed
+compositor's conn is un-declared as soon as its EOF is serviced), and a
+holder with live tiles keeps it against every newcomer, the user's own
+programs included. A refusal -- E_BUSY while the seat is held by live tiles,
+E_PERM for a conn without a session principal -- is retried through
+`DECLARE_TRIES` (40 x 25 ms; a seat mid-handover clears within milliseconds)
+and then TOLERATED: `connect` returns `declared = false`, the session runs
+UNDECLARED (its tiles beside the console like any user window, the ordinary
+surface cap), says once `session declare refused ... running UNDECLARED
+beside the console`, and `session up NxN px (undeclared)` marks it. Once the
+first surface hosts, `connect` writes `session on` AGAIN and takes THAT
+verdict as `declared`: between the declaration and the mint the conn held
+nothing, so an idle re-claimer could take the seat back in that window; the
+repeat is idempotent for the holder, a takeover of an idle usurper, and the
+truth about the session that runs. It never exits here: login treats
+halcyond's exit as logout regardless of status, so exiting would re-prompt
+the seat forever (C-F12, `seam-login-halcyond-fallback`).
 
 **Identity.** login spawns halcyond with `.caps(SHELL_CAPS)` and halcyond
 spawns every kaua-term with `.caps(!T_CAP_SET_IDENTITY)`; the kernel
@@ -227,17 +234,26 @@ the old render laid out EVERY frozen block per paint, a transient of ~1.8x the
 retained bytes charged to nothing -- one tile with ~20K full-width rows of
 history, well under its share, OOM'd the whole session at its next paint
 (B2-F1, the round-2 P1; `vault/hazards/haz-budget-stored-not-derived.md`).
-`render` now keeps a per-block HEIGHT cache (`heights`: `(block id, laid
-height)`, 12 B/block, keyed by width, aligned to the front-evicted /
-back-appended frozen deque -- block ids are strictly increasing along it);
-the exact content height and every block's screen-y follow from the cache,
-and only the blocks intersecting the view (plus the open block, which
-changes) are laid out, one `LaidBlock` alive at a time, dropped after it
-renders. The transient is O(view) wherever the view scrolled; a width change
-re-lays every block once for its height (time, not memory). `laid_last`
-witnesses the window (host tests: a warm render lays out <= 4 blocks for 200
-in history; the cache follows eviction and width changes; the content height
-equals the whole-history computation).
+`render` now keeps a per-block HEIGHT cache (`heights`: `(block id, the
+block's exit, laid height)`, 32 B/block, keyed by width, aligned to the
+front-evicted / back-appended frozen deque -- block ids are strictly
+increasing along it; `exit` is in the key because it is the ONE field a
+frozen block can still acquire, a floating exit mark, and a non-zero code
+adds the badge line); the exact content height and every block's screen-y
+follow from the cache, and only the blocks intersecting the view are laid
+out, each dropped after it renders. The open block (the one no cache can
+position) is laid out whole every render and lives across the walk, so at
+most TWO laid blocks exist at once and a block that merely touches the view
+is laid out whole: the transient is O(view + 2 x `OPEN_BLOCK_MAX_COST`),
+the constant (512 KiB of cells) at which the open block now freezes whatever
+the share -- at a 32 MiB share it used to be 4 MiB, ~7 MiB laid per paint.
+The same constant bounds what a re-budget cannot evict (the newest frozen
+block). A width change re-lays every block once for its height (time, not
+memory). `laid_last` / `laid_lines_last` witness the window (host tests: a
+warm render lays out <= 4 blocks and <= 12 lines for 200 blocks in history,
+at the bottom and at the top; the cache follows eviction, width changes and
+a floating exit mark; the content height equals the whole-history
+computation).
 
 **Other round-1 fixes.** `--home <dir>` is forwarded from login through
 halcyond to every tile's `ut` (B-F9: `$home`, `cd`, history and the per-user

@@ -1629,13 +1629,15 @@ login already holds.
    KT-1.5d-1b below).** tapestryd's scanout follows the layout AND a **declared
    seat** (`Comp::reconcile`): the session compositor DECLARES the handoff by
    writing `session on` on its own ctl conn before its first surface hosts
-   (Session-principal-gated; one declared conn per display). The seat is the
-   PRINCIPAL's, held through a conn: a later conn of the same principal takes it
-   over (a restarted compositor whose dead conn is not yet retired), and so does
-   any Session conn while the holder hosts nothing (an idle declaration holds no
-   display); only a holder hosting leaves for ANOTHER principal keeps it, and the
-   newcomer then runs UNDECLARED -- its tiles beside the console like any user
-   window -- never a login loop. While the DECLARED conn hosts a leaf, the SYSTEM
+   (Session-principal-gated; one declared conn per display). The seat is held
+   by a conn WHILE IT HOSTS: any Session conn takes it over while the holder
+   hosts nothing (an idle declaration holds no display; a crashed compositor's
+   conn is un-declared the moment its EOF is serviced), and a holder hosting
+   leaves keeps it against every newcomer, the user's own programs included --
+   the newcomer then runs UNDECLARED, its tiles beside the console like any
+   user window, never a login loop. The compositor re-issues `session on` after
+   its first surface hosts and takes that verdict, closing the idle window
+   between its declaration and its first mint. While the DECLARED conn hosts a leaf, the SYSTEM
    leaves (a sentinel principal: the console renderer aurora, and any system
    client) are **BACKGROUNDED** -- excluded from the scanout decision, not
    composited, and not FRAME-ticked. So aurora + a per-user halcyond both
@@ -1717,11 +1719,14 @@ already held.
     that wrote `session on` -- a same-user program, an orphan of a previous
     user -- hold the seat until it died, and the compositor's fatal reaction
     to the refusal turned every later login into the C-F12 re-prompt loop.
-    Now a later conn of the same principal takes the seat over, so does any
-    Session conn while the holder hosts nothing, and a holder that hosts
-    leaves for another principal answers E_BUSY -- which halcyond retries
-    briefly (a seat mid-handover) and then TOLERATES: it runs undeclared,
-    beside the console, and says so. The declaration clears AFTER the dying
+    Now any Session conn takes the seat over while the holder hosts nothing,
+    and a holder that hosts leaves answers E_BUSY to every newcomer (round 3
+    F6 removed the same-principal exception: a user's own program stealing
+    the seat from the user's LIVE compositor degraded it for the session) --
+    which halcyond retries briefly (a seat mid-handover) and then TOLERATES:
+    it runs undeclared, beside the console, and says so; it re-declares after
+    its first surface hosts, so an idle usurper in that window cannot leave
+    it mislabelled. The declaration clears AFTER the dying
     conn's surfaces retire (one transition to `Direct(console)`, not N-1
     composed passes of dead tiles beside it). The declared conn also hears
     every structural layout change on one of its surfaces (`TEV_LAYOUT`,

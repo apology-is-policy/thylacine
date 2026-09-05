@@ -73,9 +73,18 @@ the rows a chunk yields are the VT's to decide, not the chunk size's -- `ESC [
 capped ScrollOff lands; `feed` is the sink-less form for tests. A resize
 (`apply_resize`, run before AND after the parked master read -- B-F6: the
 bytes that read returns are usually the app's SIGWINCH repaint at the new
-size) first drains the vt's pending boundaries through the producer, so a
-shrink's scrolled-off rows precede the resized screen's full diff in the same
-emit (B2-F7), then `resized` resyncs the shadow and emits the full diff.
+size) first drains the vt's pending boundaries through
+`Producer::drain_pending` -- rows only, NO screen diff, because the shadow
+still has the old geometry and a diff against it would address the new cells
+at the old pitch whenever the cell count is unchanged (round 3 F3: 80x24 ->
+96x20) -- so a shrink's scrolled-off rows precede the resized screen's full
+diff in the same emit (B2-F7), then `resized` resyncs the shadow and emits the
+full diff. The sink's trigger is the CELLS held in `out` (`cells_in`,
+ScrollOff rows + CellDiff entries) reaching `SCROLL_ACC_BYTES`, checked after
+every boundary: the alt-screen arms push a full screen per toggle, and eight
+bytes of `?1049h`/`?1049l` per toggle made a 4 KiB read 512 screens (45 MiB
+at 128x36, 32 MiB from 320 bytes at 4K) before round 3 F1 -- the bound is per
+record CLASS, or it is not a bound.
 
 ## Bounds
 
@@ -104,9 +113,14 @@ are benign: a late observation costs one frame and self-corrects.
 (28): the codec round-trips and the malformed/oversize/truncated frames; the
 producer's boundary order; `bulk_scroll_splits_into_bounded_scrolloffs`; the
 alt-screen full diffs; `feed_into_ships_each_capped_scrolloff_so_a_chunk_never_
-piles_them_up` (the sink never sees more than one cap's rows; the sink-less
-control accumulates everything); `a_shrink_ships_its_scrolled_off_rows_before_
-the_full_celldiff`. In-guest: `ls-gfx-session` (the tile spawn, the ingest,
+piles_them_up` (the sink never sees more than the bound plus one capped
+record; the sink-less control accumulates everything);
+`feed_into_ships_alt_screen_full_diffs_too` (256 toggle pairs in one chunk:
+the sink never holds more than the bound plus one screen); `a_shrink_ships_
+its_scrolled_off_rows_before_the_full_celldiff`;
+`an_equal_count_resize_ships_no_stale_geometry_diff` (exactly [ScrollOff,
+CellDiff(full)]). These pin the LIBRARY; the bin's use of the sink and the
+resize call order are guest-only. In-guest: `ls-gfx-session` (the tile spawn, the ingest,
 the caps-probe, the zoom survival, the lone-tile and 1264/1280 geometry legs).
 
 ## Caveats / footguns
@@ -114,8 +128,10 @@ the caps-probe, the zoom survival, the lone-tile and 1264/1280 geometry legs).
 - `feed` accumulates the whole chunk's records; only the bin may use the
   accumulating form through a shipping sink. A new caller that feeds bulk
   output through `feed` re-opens B2-F4.
-- The producer's shadow is `cols x rows` cells; a geometry mismatch in
-  `emit_celldiff` resyncs silently (it only ever happens through `resized`).
+- The producer's shadow is `cols x rows` cells; a LENGTH mismatch in
+  `emit_celldiff` resyncs silently -- a guard only: the bin's call order
+  (`drain_pending` without a diff, then `resized`) never diffs across a
+  geometry change, equal cell counts included.
 - fd 2 is inherited by the untrusted parser (B-F11, open: `Stdio::Null` is
   unimplemented in libthyla-rs).
 - The encode-straight-into-`out` refactor (one fewer copy per record) is

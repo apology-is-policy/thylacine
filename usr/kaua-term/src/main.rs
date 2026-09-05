@@ -159,10 +159,11 @@ fn apply_resize(
         vt.resize((packed >> 16) as usize, (packed & 0xffff) as usize);
         recs.clear();
         // A shrink pushes the rows that left the top into the vt's pending
-        // boundaries: drain them through the producer FIRST, so the history
-        // precedes the resized screen on the wire in this same emit (a quiet
-        // app would otherwise never surface them).
-        prod.feed(vt, &[], recs);
+        // boundaries: drain them through the producer FIRST (rows only -- a
+        // diff here would run against the old-geometry shadow), so the
+        // history precedes the resized screen on the wire in this same emit
+        // (a quiet app would otherwise never surface them).
+        prod.drain_pending(vt, recs);
         prod.resized(vt, recs);
         emit(recs, out);
     }

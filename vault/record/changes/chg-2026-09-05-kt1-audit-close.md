@@ -4,7 +4,7 @@ type: chg
 title: "KT-1 audit close, rounds 1-2: the identity mask, the declared seat (takeover, undeclared fallback, TEV_LAYOUT), the windowed tile layout, the never-dropped Resize, the shipped ScrollOffs"
 date: 2026-09-05
 arc: arc-tapestry
-commits: ["062efe18", "*(pending)*"]
+commits: ["062efe18", "cf499fe1"]
 touched: [sub-tapestryd, sub-libtapestry, sub-stratum-session, sub-mechanism-drivers, sub-kernel-poll, sub-kernel-loom, seam-tapestry-battery-unowned]
 established: [adt-kt1-r1, adt-kt1-r2, haz-budget-stored-not-derived]
 closed: [fnd-kt1-r1-c1, fnd-kt1-r1-c2, fnd-kt1-r1-c3, fnd-kt1-r1-c4, fnd-kt1-r1-c5, fnd-kt1-r1-c6, fnd-kt1-r1-c7, fnd-kt1-r1-c8, fnd-kt1-r1-c9, fnd-kt1-r1-c10, fnd-kt1-r1-c13, fnd-kt1-r1-a5, fnd-kt1-r1-b8, fnd-kt1-r2-c1, fnd-kt1-r2-c2, fnd-kt1-r2-c3, fnd-kt1-r2-c4, fnd-kt1-r2-b5]

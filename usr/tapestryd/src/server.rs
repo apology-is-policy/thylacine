@@ -6881,6 +6881,17 @@ impl Comp {
                 return true;
             }
         }
+        if ev.kind == TEV_LAYOUT {
+            // The layout epoch is a STATE too: the newest subsumes every
+            // unread one (the reader re-reads `layout` once per event). It
+            // is pushed at EVERY structural pass, whoever caused it, so a
+            // foreign client's window churn against a momentarily
+            // non-draining session must never fill this queue.
+            if let Some(c) = s.events.iter_mut().find(|e| e.kind == TEV_LAYOUT) {
+                *c = ev;
+                return true;
+            }
+        }
         if s.events.len() >= EVENT_QUEUE_CAP {
             // Evict one coalescible to make room for the non-droppable.
             if let Some(i) = s.events.iter().position(|e| e.coalescible()) {
@@ -15580,15 +15591,19 @@ impl Conn {
                         if other == self.conn_id {
                             return Ok(());
                         }
-                        // The seat is the PRINCIPAL's, held through a conn:
-                        // a later conn of the same principal (a restarted
-                        // compositor, its dead conn not yet retired) takes
-                        // it over, and so does anyone when the holder hosts
-                        // nothing (an idle declaration holds no display).
-                        // Only a holder that hosts leaves for ANOTHER
-                        // principal keeps it: the newcomer runs undeclared,
+                        // The seat is held by a conn WHILE IT HOSTS: an
+                        // idle declaration holds no display and is taken
+                        // over by anyone (a crashed compositor's conn is
+                        // retired -- and un-declared -- as soon as its EOF
+                        // is serviced, so a restart never needs more). A
+                        // holder that hosts leaves keeps it, whoever the
+                        // newcomer is: a same-principal newcomer is the
+                        // user's own program, and stealing the seat from
+                        // the user's live compositor would degrade it (the
+                        // mint cap, no TEV_LAYOUT, no re-declare) for the
+                        // rest of the session. The newcomer runs undeclared,
                         // beside the console -- never a login loop.
-                        if other_p != self.peer_principal && comp.conn_hosts(other) {
+                        if comp.conn_hosts(other) {
                             say!(
                                 "tapestryd: session declare refused: conn {} (principal {}) holds the seat",
                                 other,

@@ -133,11 +133,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
+- 2026-09-05 [[chg-2026-09-05-kt1-audit-close-r3]] — KT-1 audit close, round 3: the restructures re-read -- the held-cells sink, the constant open-block cap, the seat held while it hosts, TEV_LAYOUT coalesced
 - 2026-09-05 [[chg-2026-09-05-kt1-audit-close]] — KT-1 audit close, rounds 1-2: the identity mask, the declared seat (takeover, undeclared fallback, TEV_LAYOUT), the windowed tile layout, the never-dropped Resize, the shipped ScrollOffs
 - 2026-09-05 [[chg-2026-09-05-r6-grandfather]] — R6 grandfathers committed history: a grown mirror set stops failing past chgs
 - 2026-09-02 [[chg-2026-09-02-h4b1-claim]] — H-4b-1: the one-shot placement claim (pane/<id>/claim + create claim=) lands in tapestryd
 - 2026-09-02 [[chg-2026-09-02-h4b2-session-actor]] — H-4b-2: the Session(principal) actor -- session-wide mutual pane authority in tapestryd
 - 2026-09-02 [[chg-2026-09-02-h4b3a-autoclaim]] — H-4b-3a: libtapestry auto-consumes an inherited TAPESTRY_CLAIM on open
 - 2026-09-02 [[chg-2026-09-02-h4b3b-restore]] — H-4b-3b: the restore tool + PFK_OWNER + the H-4b arc audit close
-- 2026-08-24 [[chg-2026-08-24-v3b-1a]] — V-3b-1a HOST3D+MAP_BLOB substrate: sub-tapestryd mechanism section + the venus-ctx finding
 <!-- generated:end -->
