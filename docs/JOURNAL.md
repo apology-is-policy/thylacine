@@ -28,7 +28,7 @@ needed the operator.
 Same run as N-0, straight through the checkpoint: N-1 is the substrate every
 candidate design needs (a driver, a device file, a witness), so it did not
 wait for the operator's ratification of the design's open questions. Landed
-in one commit (the `nocturne: N-1` commit on aux-3): `usr/nocturned` (the
+in one commit (@562cbe50 on aux-3): `usr/nocturned` (the
 modern-PCI virtio-snd transport in `snd.rs`, the `/srv/nocturne` 9P tree in
 `server.rs`, one poll loop over listener + connections + the pollable IRQ fd
 in `main.rs`), `usr/nocturne-probe`, a one-entry `/dev/nocturne` mount stub

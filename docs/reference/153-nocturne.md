@@ -1,7 +1,6 @@
 # 153 — Nocturne N-1: `nocturned`, the virtio-snd driver + the Plan 9 audio file
 
-**Status:** N-1 AS-BUILT (2026-09-05; the hash is in the N-1 close row of
-`docs/AUX-ROADMAP.md`). The design is `docs/NOCTURNE.md`; this chapter is what
+**Status:** N-1 AS-BUILT (2026-09-05, @562cbe50). The design is `docs/NOCTURNE.md`; this chapter is what
 exists in the tree: one warden-bound daemon owning the `virtio-sound` function,
 one playback stream, one 9P tree (`/dev/nocturne/{audio,info,ctl}`), one boot
 probe, one host-side witness. The graph, the rings, voices/ears/descants, the
