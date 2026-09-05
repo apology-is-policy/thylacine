@@ -108,6 +108,10 @@ usage: halcyon layout save <name>
   At session start the per-user compositor runs $HOME/lib/halcyon.rc (a ut
   script) if it exists, else restores the device layout named `default`.
 
+  halcyon welcome
+  The first-launch tour (the device `default` layout's left tile): a short
+  live transcript of objects to try, then your shell in the same tile.
+
   halcyon --help
 ";
 
@@ -137,6 +141,7 @@ fn run() -> i64 {
         Ok(Cmd::LayoutRestore { name }) => layout_restore(name),
         Ok(Cmd::LayoutList) => layout_list(),
         Ok(Cmd::LayoutDelete { name }) => layout_delete(name),
+        Ok(Cmd::Welcome) => welcome(),
         Err(e) => {
             report_cmd_error(e);
             2
@@ -1114,6 +1119,125 @@ fn layout_list() -> i64 {
         }
     }
     0
+}
+
+/// `halcyon welcome`: the first-launch tour (HALCYON.md 13.7, H-4d) -- a
+/// live transcript that SHOWS the rich shell rather than describing it: a
+/// heading, two lines of how, a table of path objects whose verb menus do
+/// the demonstrating, the split/zoom/layout chords, the lineage. Emitted
+/// through the Beacon sink at the effective tier (rich in a session tile; a
+/// plain console gets the plain realization), then this process EXECS the
+/// user's shell so the tile becomes a prompt with the tour above it -- no
+/// wrapper stays behind to catch the shell's job-control signals. The tour's
+/// objects run in place (the menu's command lands in this tile); the pane
+/// beside it is the session's own shell.
+fn welcome() -> i64 {
+    let rich = stdout_is_rich();
+    let home = env::var("HOME")
+        .map(|h| String::from(h.trim()))
+        .filter(|h| !h.is_empty());
+    {
+        use beacon::sink::{Cell, Em, ObjType, Sink, Table};
+        let mut out = StdoutOut;
+        let tier = if rich {
+            beacon::Tier::Rich
+        } else {
+            beacon::Tier::None
+        };
+        let mut s = Sink::new(&mut out, tier);
+        s.hdr(1, "Welcome to Halcyon");
+        s.text("\n");
+        s.text(
+            "This is a live transcript, not a terminal emulator: what a command prints stays an \
+             object -- a path, a process, a saved layout -- and every object offers verbs.\n",
+        );
+        s.text("Press ");
+        s.em(Em::Code, "Esc");
+        s.text(" to leave the prompt; ");
+        s.em(Em::Code, "j");
+        s.text("/");
+        s.em(Em::Code, "k");
+        s.text(" move by row, ");
+        s.em(Em::Code, "w");
+        s.text("/");
+        s.em(Em::Code, "b");
+        s.text(" jump between objects, ");
+        s.em(Em::Code, "Enter");
+        s.text(" opens an object's verbs (or click one); ");
+        s.em(Em::Code, "i");
+        s.text(" returns to the prompt.\n");
+        s.rule();
+        s.hdr(2, "Try this");
+        s.text("\n");
+        let mut t = Table::new("ll").hdr();
+        t.push_row(alloc::vec![
+            Cell::plain("OBJECT"),
+            Cell::plain("WHAT ITS VERBS SHOW"),
+        ]);
+        t.push_row(alloc::vec![
+            Cell::obj(ObjType::Path, "/bin", "/bin"),
+            Cell::plain("every program, listed as objects (ls)"),
+        ]);
+        if let Some(h) = &home {
+            t.push_row(alloc::vec![
+                Cell::obj(ObjType::Path, h, h),
+                Cell::plain("your home; cd there from the menu"),
+            ]);
+        }
+        t.push_row(alloc::vec![
+            Cell::obj(
+                ObjType::Path,
+                "/dev/tapestry/layout",
+                "/dev/tapestry/layout"
+            ),
+            Cell::plain("the pane tree, as a file (cat)"),
+        ]);
+        t.push_row(alloc::vec![
+            Cell::obj(ObjType::Path, DEVICE_LAYOUTS_DIR, DEVICE_LAYOUTS_DIR),
+            Cell::plain("the layouts this image ships (halcyon layout list)"),
+        ]);
+        t.realize(&mut s);
+        s.rule();
+        s.text("The pane on the right is your shell: type ");
+        s.em(Em::Code, "ls");
+        s.text(" there and the listing comes back as objects. ");
+        s.em(Em::Code, "Super+H");
+        s.text(" / ");
+        s.em(Em::Code, "Super+V");
+        s.text(" split, ");
+        s.em(Em::Code, "Super+F");
+        s.text(" zooms, ");
+        s.em(Em::Code, "halcyon layout save <name>");
+        s.text(" keeps an arrangement, and ");
+        s.em(Em::Code, "$HOME/lib/halcyon.rc");
+        s.text(" runs at every login (an empty one skips this welcome).\n");
+        s.em(
+            Em::Dim,
+            "A Lisp Machine's presentations on a Plan 9 shell -- a thing thought gone, brought back.",
+        );
+        s.text("\n");
+        s.rule();
+    }
+    // The serial witness (the tile's own output is pixels): which tier the
+    // tour went out at.
+    let _ = libthyla_rs::t_putstr(&format!(
+        "halcyon: welcome shown (tier {})\n",
+        if rich { "rich" } else { "none" }
+    ));
+    // Become the shell (LINEAGE: the image is replaced in place; the pts,
+    // the pgrp and the pid stay the tile's).
+    let mut argv: Vec<u8> = b"/bin/ut\0".to_vec();
+    let mut argc: u64 = 1;
+    if let Some(h) = &home {
+        argv.extend_from_slice(b"--home\0");
+        argv.extend_from_slice(h.as_bytes());
+        argv.push(0);
+        argc += 2;
+    }
+    // SAFETY: SVC wrapper over two owned buffers; returns only on failure.
+    let rc = unsafe { libthyla_rs::t_execve(b"/bin/ut", &argv, argc) };
+    eprintln!("halcyon: welcome: exec /bin/ut failed ({})", rc);
+    1
 }
 
 /// `halcyon layout delete <name>`: unlink the session-tier file. A name that

@@ -32,6 +32,9 @@ pub enum Cmd<'a> {
     LayoutList,
     /// `halcyon layout delete <name>` -- remove a session-tier layout (H-4c).
     LayoutDelete { name: &'a str },
+    /// `halcyon welcome` -- the first-launch tour, then the user's shell
+    /// (the device `default` layout's left tile, H-4d).
+    Welcome,
     /// `halcyon`, `halcyon help`, `--help`, `-h`.
     Help,
 }
@@ -58,6 +61,13 @@ pub fn parse_cmd<'a>(tokens: &[&'a str]) -> Result<Cmd<'a>, CmdError> {
     match tokens.first().copied() {
         None | Some("help") | Some("--help") | Some("-h") => Ok(Cmd::Help),
         Some("layout") => parse_layout(&tokens[1..]),
+        Some("welcome") => {
+            if tokens.len() > 1 {
+                Err(CmdError::ExtraOperand)
+            } else {
+                Ok(Cmd::Welcome)
+            }
+        }
         Some(_) => Err(CmdError::UnknownCommand),
     }
 }
@@ -317,6 +327,12 @@ mod tests {
             ]
         );
         assert!(list_rows(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn parse_welcome() {
+        assert_eq!(parse_cmd(&["welcome"]), Ok(Cmd::Welcome));
+        assert_eq!(parse_cmd(&["welcome", "x"]), Err(CmdError::ExtraOperand));
     }
 
     #[test]
