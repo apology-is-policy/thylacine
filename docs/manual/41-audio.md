@@ -72,16 +72,48 @@ Drop whatever is queued (a stuck player, a wrong file):
 echo flush > /dev/nocturne/ctl
 ```
 
+## Multiple streams (voices)
+
+`/dev/nocturne/audio` is one *voice*. Two programs writing it at once would
+interleave their bytes, so a program that wants its own stream mints its own
+voice: open `nodes/new`, and its read gives you the new voice's id. Then write
+that voice's `audio`:
+
+```
+id=`cat /dev/nocturne/nodes/new`
+cat music.s16 > /dev/nocturne/nodes/$id/audio
+```
+
+Every voice is mixed into the one sink, so several can play at once — a game's
+effects over a music player, say. Each voice has its own gain (a percent, 100 =
+unity, Plan 9 `volume`-style):
+
+```
+echo gain 50 > /dev/nocturne/nodes/$id/ctl   # this voice at half volume
+echo flush   > /dev/nocturne/nodes/$id/ctl   # drop just this voice's queue
+echo remove  > /dev/nocturne/nodes/$id/ctl   # done with it
+```
+
+A voice you minted through the `/dev/nocturne` mount lives as long as the mount
+does; a program that connects to `/srv/nocturne` directly gets a voice that dies
+when it exits. `cat /dev/nocturne/nodes/$id/info` shows that voice's gain, queued
+bytes, and totals; the root `info` gains a `voices N` line.
+
 ## Reference
 
 | File | Mode | Read | Write |
 |---|---|---|---|
-| `audio` | `0666` | returns 0 bytes (an output-only device, per `audio(3)`) | S16LE stereo 48000 Hz; whole frames (4 bytes) are consumed, a trailing partial frame is dropped; blocks when the queue (64 KiB, ~340 ms) is full |
-| `info` | `0444` | the text above | not writable |
-| `ctl` | `0644` | a one-line description of the device | `flush` |
+| `audio` | `0666` | returns 0 bytes (an output-only device, per `audio(3)`) | S16LE stereo 48000 Hz into voice 0; whole frames (4 bytes) consumed, a trailing partial dropped; blocks when the queue (64 KiB, ~340 ms) is full |
+| `info` | `0444` | the device text above, plus `voices N` | not writable |
+| `ctl` | `0644` | a one-line description | `flush` |
+| `nodes/new` | `0666` | the id of the voice this open minted | opening it is the mint |
+| `nodes/<id>/audio` | `0666` | 0 bytes | S16LE stereo 48000 Hz into voice `<id>` |
+| `nodes/<id>/ctl` | `0644` | a one-line description | `gain <percent>` / `flush` / `remove` |
+| `nodes/<id>/info` | `0444` | that voice's gain, queued bytes, totals | not writable |
 
-The stream starts on the first write and stops on its own after about half a
-second of silence, so an idle machine pays no periodic interrupt.
+The stream starts on the first write to any voice and stops on its own after
+about half a second with every voice silent, so an idle machine pays no periodic
+interrupt. Up to 16 voices mix at once.
 
 ## Choosing the host backend (QEMU)
 

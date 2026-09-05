@@ -23,6 +23,82 @@ needed the operator.
 
 ---
 
+## 2026-09-05 (aux, Fable 5.1 -> Opus 4.8, effort max) -- the main merge + a quaestor merge-blind-spot fix, then Nocturne N-2a-1 (multi-voice mixing)
+
+Two things landed, and the first was an unplanned detour that turned into a real
+fix.
+
+**The merge, and the vault-lint wall (8b28327f).** Before opening N-2 I merged
+origin/main into aux-3 (292 commits: the fullscreen-zoom fix f25781ad, the KT-1
+session-compositor arc, the vault cutover). Four conflicts, all append-shaped,
+resolved by union -- the interesting one was the tapestryd G-3 audit row, which
+had diverged: aux carried a FRAME-INTENT addendum, main carried the KT-1.5d
+session-priority addenda, and *neither had the other's*. Factored the giant
+single-line cell into shared-prefix + aux-middle + main-middle + tail and
+rebuilt it as base + both addenda (bold markers rebalanced), so no prose was
+dropped. Then the commit was REFUSED: the merge brought the vault graph + the
+shared quaestor pre-commit hook into the aux worktree, and `vault-lint --staged`
+failed 9 ways. A merge stages every main-changed file, so `--staged` effectively
+lints the whole graph -- that is why a pure-code merge tripped it.
+
+Five of the nine were mine to fix (`quaestor render` regenerated 5 stale views;
+declared the 7 aux-authored `ls-gfx-dosbox*`/`ls-gfx-throttle` .exp gates as
+abi-boot-banner `mirrors` -- they match `EXTINCTION:` as failure-detectors, so
+they BREAK if it reworded: owed R6 debt aux incurred authoring them). That grew
+the mirror set 28->35 and surfaced the real wall: 4 committed HISTORICAL chg
+records now "under-cover" (mirrors-checked 15/28 < 35).
+
+The wrong turn I did NOT take: bumping those 4 records to 35. Vault ruled it
+would be a FALSE claim (the old author never checked mirrors that did not exist
+yet) plus an R3 violation -- the records correctly record their era's count and
+stay grandfathered. **This corrects my own merge commit message, which called
+the bump a "cosmetic future pass": it is NOT owed.**
+
+The root cause instead: quaestor's R6 grandfather (86ad7e8c) exempts a
+committed, unchanged chg via `gitDirtySet` = `git status --porcelain`. During a
+merge, HEAD is the first parent, so git-status marks EVERY merge-introduced path
+dirty -- defeating the grandfather at the one moment it matters, the exact case
+the check's own comment says "an upstream merge adds new consumers must not
+retroactively fail." `--no-verify` (which the operator separately sanctioned for
+merges) is CLASSIFIER-BLOCKED in this harness, so it was not even available to
+me -- which made the tooling fix not optional but *required* for aux. Fixed
+`validate.go`: during a merge, intersect the HEAD-dirty set with the
+MERGE_HEAD-diff set, so a chg taken UNCHANGED from the merged branch (== MERGE_
+HEAD) is grandfathered as it would be one commit later, while a hand-resolved
+path stays enforced. Regression `TestMirrorsCheckedGrandfathersMergedIn` (a real
+git-merge fixture; sabotage-verified -- it fails with the refinement disabled);
+full quaestor suite green; lint on the staged merge went 9 fails -> 0. Vault
+confirmed KEEP (aux can't `--no-verify`, reverting would diverge aux/main
+forever, and it is the correct root fix), will mark the bug fixed-by-8b28327f,
+and will report to the operator that their "B over A" choice rested on the false
+premise that aux could `--no-verify`. The fix flows to main via aux->main and
+unblocks EVERY mirror-set-growing merge for both tracks.
+
+**Nocturne N-2a-1: multi-voice mixing (the graph core's first half).** N-1
+played one voice; N-2a-1 proves the graph MIXES. `nocturned/src/server.rs` grew
+the single FIFO into a `Vec<Voice>` (cap 16), each an independent S16-stereo
+FIFO + gain, exposed via `nodes/new` (open = mint, read = the id) + per-voice
+`audio`/`ctl`/`info`; voice 0 stays the persistent root `audio` file.
+`next_period` mixes all voices in a float32 accumulator, gain-scaled, clamped
+once to S16 (the f32 accumulator makes N unity voices un-overflowable before the
+clamp -- the I-14 posture at the graph layer). Scoping named for the operator:
+this is the BYTE-COPY path (the designed fallback, NOCTURNE.md 6.5), the
+`nodes/` surface is deliberately minimal, and the ports/links/ring/descant ABI
+that NOCTURNE.md 9/10 leaves for the operator is NOT built -- N-2b (Weft ring),
+N-2a-2 (SDL backend), N-2c (thread split), N-4 (descants) follow.
+
+The witness is the reusable part. The probe mints two voices and plays 1 kHz +
+2 kHz SIMULTANEOUSLY (interleaved writes park on full FIFOs, pacing both to
+realtime so the mixer sums them every period), and `audio-verdict.py --chord`
+asserts BOTH tones in the SAME 20 ms windows. The control that makes it real: a
+SEQUENTIAL capture (each tone alone -- the N-1 shape) FAILS the chord check, so
+the witness cannot be satisfied by two voices that merely played at different
+times. Measured on the real boot: guest `voices 3`, both voices' bytes-in full,
+111 periods, `joey: nocturne-probe OK`; the captured wav judged
+`PASS(chord): 59 windows carry 1000+2000 Hz at once`. Full boot ladder green,
+0 EXTINCTION. holotype + SMP gate batched to the N-2 close (double-the-distance);
+one stale log string (joey still says "Nocturne N-1") rides N-2a-2's bake.
+
 ## 2026-09-05 (aux, Fable 5.1, effort max) -- Nocturne N-1: the virtio-snd driver, the Plan 9 audio file, the wav witness
 
 Same run as N-0, straight through the checkpoint: N-1 is the substrate every

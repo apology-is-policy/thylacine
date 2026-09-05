@@ -1,10 +1,17 @@
-# 153 — Nocturne N-1: `nocturned`, the virtio-snd driver + the Plan 9 audio file
+# 153 — Nocturne: `nocturned`, the virtio-snd driver + the mixed-voice graph core
 
-**Status:** N-1 AS-BUILT (2026-09-05, @562cbe50). The design is `docs/NOCTURNE.md`; this chapter is what
-exists in the tree: one warden-bound daemon owning the `virtio-sound` function,
-one playback stream, one 9P tree (`/dev/nocturne/{audio,info,ctl}`), one boot
-probe, one host-side witness. The graph, the rings, voices/ears/descants, the
-mixer and the policy are N-2 onward (`docs/NOCTURNE.md` §8).
+**Status:** N-1 AS-BUILT (2026-09-05, @562cbe50) + N-2a-1 AS-BUILT (2026-09-05).
+The design is `docs/NOCTURNE.md`; this chapter is what exists in the tree.
+**N-1**: one warden-bound daemon owning the `virtio-sound` function, one
+playback stream, one 9P tree, one boot probe, one host witness. **N-2a-1**: the
+graph core's first half — multiple **voices** (independent S16LE-stereo streams)
+**mixed** in float32 to the one sink, exposed through `nodes/new` + per-voice
+`audio`/`ctl`/`info`. The internal graph is byte-copy (the designed fallback
+below the Weft hybrid threshold, `docs/NOCTURNE.md` §6.5); the per-node Weft
+ring (`nodes/<id>/data`), ports, links, ears/descants and the policy are N-2b /
+N-3 / N-4. `nodes/` is a deliberately minimal voice surface — the ports/links/
+descant ABI that `docs/NOCTURNE.md` §9/§10 leaves for the operator is NOT built
+here.
 
 Source: `usr/nocturned/src/{main,snd,server}.rs`, `usr/nocturne-probe/src/main.rs`,
 `kernel/devdev.c` (the mount stub), `usr/joey/joey.c` (the mount + probe),
@@ -99,79 +106,98 @@ machine therefore pays no periodic interrupt.
 
 ## The server half (`server.rs`)
 
-The `/srv/nocturne` tree is a static three-file directory; framing + dispatch
-mirror `usr/ptyfs` (one `t_read` per readable event, every complete frame
-dispatched, `Disp::{Reply,Deferred,Fatal}`).
+Framing + dispatch mirror `usr/ptyfs` (one `t_read` per readable event, every
+complete frame dispatched, `Disp::{Reply,Deferred,Fatal}`). N-2a-1 grows the
+static N-1 tree into a voice graph:
 
 | Path | qid | Mode | Read | Write |
 |---|---|---|---|---|
-| `/` | 0 | `0555` dir | `Treaddir` lists the three | — |
-| `audio` | 3 | `0666` | 0 bytes (output-only, `audio(3)`) | S16LE stereo 48 kHz into the FIFO |
-| `info` | 2 | `0444` | the audiostat words + counters (offset-served text) | `EPERM` |
-| `ctl` | 1 | `0644` | one description line | `flush` (drops the FIFO); anything else `EINVAL` |
+| `/` | 0 | `0555` dir | `Treaddir` lists `ctl info audio nodes` | — |
+| `audio` | 3 | `0666` | 0 bytes (output-only, `audio(3)`) | S16 stereo 48 kHz into **voice 0** |
+| `info` | 2 | `0444` | device words + counters + `voices N` | `EPERM` |
+| `ctl` | 1 | `0644` | one description line | `flush` (drops voice 0); else `EINVAL` |
+| `nodes/` | 4 | `0555` dir | `Treaddir` lists `new` + each live voice id | — |
+| `nodes/new` | 5 | `0666` | the id of the voice this open minted | (open is the mint) |
+| `nodes/<id>/audio` | vpath | `0666` | 0 bytes | S16 stereo 48 kHz into voice `<id>` |
+| `nodes/<id>/ctl` | vpath | `0644` | one line | `gain <percent>` / `flush` / `remove` |
+| `nodes/<id>/info` | vpath | `0444` | that voice's stats | `EPERM` |
 
-**The FIFO + the parked write.** `Shared.fifo` is a `VecDeque<u8>` capped at
-`FIFO_CAP` = 64 KiB (≈340 ms). A `Twrite` to `audio` pushes what fits and, if
-anything remains, PARKS: the bytes are copied into a `PendingWrite {tag, fid,
-data, done}` on the connection, `Disp::Deferred` withholds the reply, and every
-serve-loop pass (`poll_writes`, after the device pump freed room) pushes more
-until the write completes, at which point `Rwrite(total)` is sent — Plan 9's
-blocking write. Order is preserved (a write behind a parked one queues behind
-it); `MAX_PENDING_WRITES` = 8 per connection bounds the park list (`ENOMEM`
-beyond); a clunk drops that fid's parked writes, `teardown` drops them all,
-and `Tflush(oldtag)` cancels exactly the parked write with that tag (bytes
-already accepted stay queued and play). `next_period` hands the device whole
-frames only and pads a partial period with silence.
+Voice paths encode `VBIT | (id << 4) | leaf` (leaf 0 = dir, 1/2/3 =
+audio/ctl/info) — the tapestry `surf_n`/`surf_fk` idiom, so one `u64` qid names
+both the voice and the file within it.
 
-`info` renders:
+**Voices + the mixer.** `Shared.voices` is a `Vec<Voice>` (cap `MAX_VOICES` =
+16). Voice 0 is persistent (`owner = -1`, the root `audio` file); every other
+voice is minted by opening `nodes/new` and is owned by that connection's handle.
+Each `Voice` carries its own `VecDeque<u8>` FIFO (cap `FIFO_CAP` = 64 KiB ≈
+340 ms), a linear `gain` (default 1.0, set via `ctl gain <percent>` — Plan 9
+`volume(3)` 0..100+ style, clamped to 1000 %), and byte/flush counters.
+`next_period` MIXES: for each voice it pops whole frames into a `[f32; 1024]`
+accumulator scaled by that voice's gain, then clamps the sum to the S16 range
+once (the only bound on a hot mix — the f32 accumulator makes N unity voices
+un-overflowable before the clamp, the I-14 posture at the graph layer). An empty
+voice contributes silence; the pass returns whether ANY voice supplied real
+data (the idle-stop counts silence).
 
-```
-device virtio-snd stream 0 playback
-format s16c2r48000
-bufsize 2048            # the preferred write unit (one period)
-buffered <fifo + device-reported latency_bytes>
-period-bytes 2048
-buffer-bytes 8192
-periods 4
-started 0|1
-periods-played N
-silence-periods N       # periods fed silence (an empty FIFO)
-tx-errors N
-bad-used N
-latency-bytes N
-bytes-in N
-flushes N
-```
+**The parked write** is unchanged from N-1 but per-voice: a `Twrite` to a
+voice's `audio` pushes what fits and PARKS the rest in a `PendingWrite {tag,
+fid, voice, data, done}`; `poll_writes` drains parked writes in order after the
+pump frees room and replies `Rwrite(total)` on completion (Plan 9's blocking
+write). `MAX_PENDING_WRITES` = 8 per connection; a clunk drops that fid's
+parked writes; `Tflush(oldtag)` cancels exactly that parked write (accepted
+bytes stay queued and play).
+
+**Voice lifetime.** A voice minted through `nodes/new` dies when the connection
+that made it closes (`teardown` → `drop_conn_voices`, the tapestry
+surface-lifetime idiom) or on an explicit `ctl remove`; voice 0 never dies. NB:
+the `/dev/nocturne` **mount** is joey's one shared connection, so voices minted
+via the mount are owned by the mount conn and persist — correct for the boot
+probe; a client wanting per-exit lifetime connects **directly** to
+`/srv/nocturne` (the libtapestry idiom), which is the SDL backend's path
+(N-2a-2).
+
+`info` renders `device`, `format`, `voices N`, `bufsize`, `buffered`,
+`period-bytes`, `buffer-bytes`, `periods`, `started`, `periods-played`,
+`silence-periods`, `tx-errors`, `bad-used`, `latency-bytes`; `nodes/<id>/info`
+renders `voice`, `gain` (percent), `buffered`, `bytes-in`, `flushes`, `owner`.
 
 ## The probe and the witness
 
-`/nocturne-probe` (native, libthyla-rs) opens `/dev/nocturne/audio` for write
-and streams 0.5 s of 1 kHz, 0.5 s of 2 kHz, then 0.2 s of silence in 8 KiB
-chunks (an exact 48-entry sine table: 1 kHz at 48 kHz is 48 samples per cycle;
-index step 2 is 2 kHz — no floating point), reads `info` back, and prints
-`NOCTURNE-PROBE PASS` iff `periods-played` is non-zero. joey runs it in the
-boot-probe ladder right after the mount, **fatal when the mount is up**
-(`joey: nocturne-probe OK (1 kHz + 2 kHz over /dev/nocturne/audio; Nocturne N-1)`).
+`/nocturne-probe` (native, libthyla-rs) is the N-2a-1 **mixing** witness: it
+mints two voices through `/dev/nocturne/nodes/new`, opens each voice's `audio`,
+and writes 1 kHz on one and 2 kHz on the other in **interleaved** 40 ms chunks
+(`CHUNK_FRAMES` = 1920 = 48×40 = 24×80, a whole number of both cycles so reused
+chunks splice seamlessly). Because each write parks when its voice's FIFO fills,
+the interleave paces both voices to realtime and keeps both FIFOs fed — so the
+mixer sums 1 kHz + 2 kHz into every device period. After ~1.2 s of the chord it
+writes a silent tail, reads both voices' `info` + the root `info`, and prints
+`NOCTURNE-PROBE PASS` iff both voices took all their bytes and `periods-played`
+is non-zero. joey runs it in the boot-probe ladder right after the mount,
+**fatal when the mount is up** (`joey: nocturne-probe OK`). The tone table is an
+exact 48-entry sine (1 kHz at 48 kHz is 48 samples/cycle; step 2 is 2 kHz — no
+floating point). The mint uses the shared mount, so the two voices persist past
+the probe (see Voice lifetime above); a boot smoke does not care.
 
-`tools/test-audio.sh` runs the verdict's 7-case selftest, boots once with
+`tools/test-audio.sh` runs the verdict selftest, boots once with
 `THYLACINE_AUDIODEV=wav` (QEMU's `wav` backend records everything the guest
-plays to `build/audio-tone.wav`; it is playback-only, hence `streams=1`),
-requires the guest-side `joey: nocturne-probe OK` line, and judges the FILE
-with `tools/audio-verdict.py`: 20 ms windows, RMS, a Goertzel per bin at the
-expected tones and four control bins; PASS iff the tone span is contiguous
-(≤ 10 % silent windows inside it), ≥ 15 windows are dominated 10:1 by 1 kHz
-and ≥ 15 by 2 kHz, the 1 kHz median index precedes the 2 kHz one (the positive
-control: a different tone lands in a different bin, in the right order), and
-the capture ENDS with ≥ 0.2 s of silence with nothing loud outside the span
-(the negative control: an empty FIFO yields silence, never a repeated buffer
-or noise). Two facts about QEMU's `wav` backend shaped this: it appends only
-while the guest's stream runs, so the file begins with the first period played
-(no silent prefix exists to check), and it patches the RIFF/data sizes only on
-a clean exit, which the harness never gives it — the reader ignores the header
-sizes and takes every frame after the `data` chunk header. The nine-case
-selftest proves discrimination: the signature passes with and without a
-prefix and at 44.1 kHz; the reversed order, silence, a single tone, a missing
-tail, noise after the tones and a gapped span all fail.
+plays to `build/audio-tone.wav`; playback-only, hence `streams=1`), requires the
+guest-side `joey: nocturne-probe OK` line, and judges the FILE with
+`tools/audio-verdict.py --chord`: 20 ms windows, RMS, a Goertzel per bin at the
+two expected tones and four control bins; PASS iff ≥ 15 windows carry **BOTH**
+tones at once (each expected bin 10:1 over every control bin, in the SAME
+window — the mixing proof), one contiguous active span (≤ 10 % gaps), and the
+capture ENDS with ≥ 0.2 s of silence, nothing loud outside (an empty mix yields
+silence, never a repeated buffer or noise). Two facts about QEMU's `wav` backend
+shaped the reader: it appends only while the guest's stream runs (so the file
+begins with the first period played — no silent prefix to check) and it patches
+the RIFF/data sizes only on a clean exit, which the harness never gives it (so
+the reader ignores the header sizes and takes every frame after the `data`
+header). The selftest proves discrimination on both verdicts: the chord passes
+with/without a prefix and at 44.1 kHz, while a **sequential** capture (each tone
+alone in its own windows — the N-1 shape), a single tone, silence, a missing
+tail, noise after the tones and a gapped span all FAIL — the sequential-fails-
+chord case is the control proving the witness checks *simultaneity* (mixing),
+not mere presence.
 
 ## QEMU wiring (`tools/run-vm.sh`)
 
@@ -230,9 +256,18 @@ single boot's wall time.
 
 - No cooperative quiesce-on-remove: the warden's `DeviceRemoved` is a forced
   group-terminate that skips `Drop` (the netdev precedent; MENAGERIE §10).
-- Concurrent writers interleave bytes (one stream; the N-2 mixer fixes this).
-- One format/rate; conversion arrives with the mixer (N-2).
+- Independent voices now MIX (N-2a-1); voice 0 (the root `audio` file) and every
+  `nodes/new` voice sum cleanly. What is NOT built: the zero-copy Weft ring
+  (`nodes/<id>/data`; N-2b), ports/links, ears/`source` (capture; N-3),
+  descants + the cadence lease (N-4), and per-format/rate conversion at voice
+  entry (D-3; N-2a-1 accepts only S16 stereo 48 kHz — a voice at another shape
+  is a future entry-conversion seam).
+- Voices minted through the shared `/dev/nocturne` mount persist for the mount's
+  life; per-exit lifetime needs a direct `/srv/nocturne` connection (N-2a-2).
+- `nodes/<id>/ctl gain` is Plan 9 `volume`-style percent, not the dB grammar the
+  design's `volume` file (N-3) will carry; the per-link/stage dB gains are N-3+.
 - The virtio-pci-modern constants are a private copy of netdev's (a hoist seam).
-- `eventq`/`rxq` unset; capture is N-3.
+- The serve loop is still single-threaded; the cycle/control thread split
+  (`docs/NOCTURNE.md` §6.2 D-1c) is N-2c.
 - The wav witness covers playback only (QEMU's `wav` backend has no capture
-  voice).
+  voice); the capture-side witness needs a non-wav backend (N-3).

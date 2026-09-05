@@ -2,15 +2,17 @@
 # tools/test-audio.sh -- the Nocturne wav witness gate (docs/NOCTURNE.md section 7, W-1).
 #
 # Boots the default build ONCE with QEMU's `wav` audio backend capturing what
-# the guest plays, lets joey's boot-probe ladder run /nocturne-probe (0.5 s of
-# 1 kHz, 0.5 s of 2 kHz, then silence, written to /dev/nocturne/audio), and
-# then judges the capture FILE with tools/audio-verdict.py: pre-tone silence
-# (the negative control), 1 kHz dominant, then 2 kHz dominant (the positive
-# control: a different tone lands in a different bin), in that order.
+# the guest plays, lets joey's boot-probe ladder run /nocturne-probe (N-2a-1:
+# mint two voices, play 1 kHz on one and 2 kHz on the other SIMULTANEOUSLY,
+# then silence), and judges the capture FILE with tools/audio-verdict.py
+# --chord: BOTH tones present in the SAME windows (the mixing proof), one
+# contiguous span, a silent tail. A sequential capture -- each tone alone --
+# FAILS the chord check, so the witness cannot be met by two voices that merely
+# played at different times.
 #
-# The verdict's own selftest runs FIRST (synthetic signals: the signature must
-# PASS; the reversed order, silence, a single tone and a noisy prefix must
-# FAIL) -- a checker that cannot fail proves nothing (#245).
+# The verdict's own selftest runs FIRST (synthetic signals: the chord must
+# PASS; a sequential capture, a single tone, silence, a gap and a noisy tail
+# must all FAIL) -- a checker that cannot fail proves nothing (#245).
 #
 # Needs no host audio hardware; runs on the mac and on thyla-pi. Not a
 # multi-boot: one capture is one verdict. Uses tools/test.sh for the boot
@@ -55,5 +57,5 @@ if [[ ! -s "$WAV" ]]; then
     echo "==> FAIL: no capture at $WAV"
     exit 1
 fi
-echo "==> judging $WAV ($(stat -f %z "$WAV" 2>/dev/null || stat -c %s "$WAV") bytes)"
-python3 "$REPO_ROOT/tools/audio-verdict.py" "$WAV" --expect 1000,2000
+echo "==> judging $WAV ($(stat -f %z "$WAV" 2>/dev/null || stat -c %s "$WAV") bytes) -- chord (mixing)"
+python3 "$REPO_ROOT/tools/audio-verdict.py" "$WAV" --chord --expect 1000,2000

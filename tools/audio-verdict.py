@@ -41,6 +41,7 @@ DOMINANCE = 10.0         # the expected bin must carry 10x the power of every co
 MIN_ACTIVE_WINDOWS = 15  # 0.3 s of each tone (the probe writes 0.5 s each)
 MIN_TAIL_WINDOWS = 10    # >= 0.2 s of silence AFTER the last tone (the probe's tail + the idle stop)
 MAX_GAP_FRACTION = 0.10  # inactive windows tolerated inside the tone span
+MIN_CHORD_WINDOWS = 15   # windows that must carry BOTH tones at once (mixing proof)
 CONTROL_BINS = (500.0, 1500.0, 3000.0, 4000.0)
 
 
@@ -158,18 +159,80 @@ def analyze(rate, mono, expect):
     return True, summary
 
 
+def analyze_chord(rate, mono, expect):
+    """Mixing witness: BOTH `expect` tones must be present in the SAME windows.
+    Each expected bin must carry DOMINANCE x the power of every control bin, in
+    the same 20 ms window, for >= MIN_CHORD_WINDOWS windows. A SEQUENTIAL
+    capture -- each tone alone in its own windows, the N-1 signature -- has no
+    window with both, so it FAILS here: that is the control proving this checks
+    simultaneity (mixing), not mere presence."""
+    win = max(16, int(rate * WINDOW_S))
+    nwin = len(mono) // win
+    if nwin < MIN_CHORD_WINDOWS + MIN_TAIL_WINDOWS:
+        return False, "capture too short: %d windows of %d ms" % (nwin, WINDOW_S * 1000)
+    ctrl = [b for b in CONTROL_BINS if b not in expect]
+    rms = []
+    active = []   # RMS above the active floor
+    chord = []    # every expected bin dominates every control bin, same window
+    for i in range(nwin):
+        x = mono[i * win:(i + 1) * win]
+        r = math.sqrt(sum(v * v for v in x) / len(x))
+        rms.append(r)
+        if dbfs(r) < ACTIVE_DBFS:
+            active.append(False)
+            chord.append(False)
+            continue
+        active.append(True)
+        pe = [goertzel(x, rate, f) for f in expect]
+        pc = [goertzel(x, rate, f) for f in ctrl]
+        cmax = max(pc) if pc else 0.0
+        chord.append(all(p > DOMINANCE * cmax for p in pe))
+    act = [i for i, a in enumerate(active) if a]
+    if not act:
+        return False, "no window above %g dBFS: nothing was played" % ACTIVE_DBFS
+    first, last = act[0], act[-1]
+    tail = nwin - 1 - last
+    if tail < MIN_TAIL_WINDOWS:
+        return False, "only %d silent windows after the last tone (< %d): no silent tail" % (tail, MIN_TAIL_WINDOWS)
+    loud_outside = [i for i in list(range(first)) + list(range(last + 1, nwin)) if dbfs(rms[i]) > FLOOR_DBFS]
+    if len(loud_outside) > max(2, (nwin - (last - first + 1)) // 20):
+        return False, "%d windows outside the active span above %g dBFS (not silent)" % (len(loud_outside), FLOOR_DBFS)
+    span = last - first + 1
+    gaps = sum(1 for i in range(first, last + 1) if not active[i])
+    if gaps > MAX_GAP_FRACTION * span:
+        return False, "%d silent windows inside the %d-window span (an underrun?)" % (gaps, span)
+    nchord = sum(1 for c in chord if c)
+    if nchord < MIN_CHORD_WINDOWS:
+        label = "+".join("%g" % f for f in expect)
+        return False, "only %d windows carry %s Hz SIMULTANEOUSLY (need %d): not a mix (sequential or single tone)" % (
+            nchord, label, MIN_CHORD_WINDOWS)
+    label = "+".join("%g" % f for f in expect)
+    summary = "PASS(chord): %d windows carry %s Hz at once; span %d; silent tail %d; rate %d; %d windows total" % (
+        nchord, label, span, tail, rate, nwin)
+    return True, summary
+
+
 def synth(rate, plan, amp=0.25, noise=0.0):
-    """plan: list of (freq_or_None, seconds)."""
+    """plan: list of (freq, seconds). freq is None (silence), a number (one
+    tone), or a tuple/list of numbers (a chord -- the tones summed). Each
+    frequency keeps its own continuous phase across segments so a spliced tone
+    never jumps."""
     out = []
-    phase = 0.0
+    phases = {}
     for f, secs in plan:
         n = int(rate * secs)
-        for i in range(n):
-            if f is None:
-                v = 0.0
-            else:
-                v = amp * math.sin(phase)
-                phase += 2 * math.pi * f / rate
+        if f is None:
+            freqs = ()
+        elif isinstance(f, (tuple, list)):
+            freqs = tuple(f)
+        else:
+            freqs = (f,)
+        for _ in range(n):
+            v = 0.0
+            for ff in freqs:
+                ph = phases.get(ff, 0.0)
+                v += amp * math.sin(ph)
+                phases[ff] = ph + 2 * math.pi * ff / rate
             out.append(v)
     return out
 
@@ -199,14 +262,45 @@ def selftest():
     return 0 if ok else 1
 
 
+def selftest_chord():
+    rate = 48000
+    C = (1000, 2000)  # the chord the probe plays
+    cases = [
+        ("chord (mixed)", [(C, 1.2), (None, 0.7)], True),
+        ("chord with a prefix", [(None, 0.5), (C, 1.2), (None, 0.4)], True),
+        ("sequential (N-1 shape)", [(1000, 0.6), (2000, 0.6), (None, 0.7)], False),
+        ("single tone", [(1000, 1.2), (None, 0.7)], False),
+        ("silent", [(None, 2.2)], False),
+        ("no silent tail", [(C, 1.2)], False),
+        ("chord then noise", [(C, 1.0), (None, 0.2), (700, 0.6)], False),
+        ("gap inside the chord", [(C, 0.5), (None, 0.4), (C, 0.6), (None, 0.7)], False),
+        ("chord at 44.1 kHz", [(C, 1.2), (None, 0.7)], True),
+    ]
+    ok = True
+    for name, plan, want in cases:
+        r = 44100 if "44.1" in name else rate
+        got, why = analyze_chord(r, synth(r, plan), (1000.0, 2000.0))
+        verdict = "ok" if got == want else "WRONG"
+        if got != want:
+            ok = False
+        print("selftest-chord %-22s expect %-5s got %-5s %s -- %s" % (name, want, got, verdict, why))
+    print("selftest-chord", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("wav", nargs="?", help="the QEMU wav capture")
-    ap.add_argument("--expect", default="1000,2000", help="tone order, Hz, comma-separated (default 1000,2000)")
+    ap.add_argument("--expect", default="1000,2000", help="tones, Hz, comma-separated (default 1000,2000)")
+    ap.add_argument("--chord", action="store_true",
+                    help="require the tones SIMULTANEOUSLY (the mixing witness); default is sequential order")
     ap.add_argument("--selftest", action="store_true", help="prove the verdict discriminates on synthetic signals")
     a = ap.parse_args()
     if a.selftest:
-        return selftest()
+        # Both discriminations must hold; the exit code is their OR of failure.
+        rc_seq = selftest()
+        rc_chord = selftest_chord()
+        return 0 if rc_seq == 0 and rc_chord == 0 else 1
     if not a.wav:
         ap.print_usage()
         return 2
@@ -216,7 +310,7 @@ def main():
     except Exception as e:  # noqa: BLE001
         print("FAIL: cannot read %s: %s" % (a.wav, e))
         return 2
-    ok, why = analyze(rate, mono, expect)
+    ok, why = (analyze_chord if a.chord else analyze)(rate, mono, expect)
     print(("PASS " if ok else "FAIL ") + why if not why.startswith(("PASS", "FAIL")) else why)
     return 0 if ok else 1
 
