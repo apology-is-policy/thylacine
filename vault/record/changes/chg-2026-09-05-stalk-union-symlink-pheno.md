@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-stalk brought current: union resolution, symlink expansion (D-1), the phenotype accumulator (Design D)"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["1659c529"]
 touched:
   - sub-kernel-stalk
 established: []
