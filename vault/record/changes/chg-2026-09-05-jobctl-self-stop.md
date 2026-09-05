@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-jobctl brought current: the #15/#240 self-stop (proc_job_stop_self + susp_stop_armed) -- a third stop source that predated the dossier; post-08-16 churn borrowed"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["e0ae7d07"]
 touched:
   - sub-kernel-jobctl
 established: []
