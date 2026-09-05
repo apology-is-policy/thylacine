@@ -42,7 +42,7 @@ lc_send "dosbox-x -conf /home/michael/dosbox-x.conf &"
 set timeout 30
 expect {
     -re {CONFIG: Can't open specified config file} { lc_fail "dosbox-x could not open the -conf file (staging/path?)" }
-    -re {Video thylacine}       { lc_step "SDL up: thylacine video + dummy audio" }
+    -re {Video thylacine}       { lc_step "SDL up: thylacine video + audio" }
     -re {E_Exit|Can't init SDL} { lc_fail "dosbox-x E_Exit during SDL init" }
     "snare:"                    { lc_fail "dosbox-x graphical faulted (snare)" }
     "user fault"                { lc_fail "dosbox-x graphical user fault" }

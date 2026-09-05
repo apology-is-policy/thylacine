@@ -4,10 +4,10 @@
  * prefix DX), adapted from the upstream vs/config.h template. Posture as of
  * DX-4: core=normal AND the portable dynamic recompiler (C_DYNREC, AArch64)
  * wired to CAP_JIT (I-42); software-surface video via the SDL_thylacine
- * Tapestry backend; sound stubbed to a null mixer; and the remaining
- * external-dep features (GL, D3D, TTF, libpng, SDL_net, fluidsynth, mt32,
- * libpcap, libslirp, curses debugger, and the x86-host dynarec C_DYNAMIC_X86)
- * OFF. Later DX sub-chunks light more of these up.
+ * Tapestry backend; sound via the SDL_thylacine audio backend (Nocturne);
+ * and the remaining external-dep features (GL, D3D, TTF, libpng, SDL_net,
+ * fluidsynth, mt32, libpcap, libslirp, curses debugger, and the x86-host
+ * dynarec C_DYNAMIC_X86) OFF. Later DX sub-chunks light more of these up.
  *
  * DELIBERATE INVARIANT: an OFF feature is left UNDEFINED, never "#define X 0".
  * DOSBox-X mixes "#if C_FOO" (value) and "#ifdef C_FOO" (definedness) checks;
@@ -57,8 +57,10 @@
 #define C_ATTRIBUTE_ALWAYS_INLINE 1
 /* #undef C_ATTRIBUTE_FASTCALL */   /* x86-only calling convention */
 
-/* --- Sound: hard v1.0 non-goal (no virtio-sound). The mixer still runs the
- * emulation into a null sink; the external MIDI synths are OFF. */
+/* --- Sound: served by Nocturne (virtio-sound). The built-in mixer feeds its
+ * emulation to SDL's audio device -- the thylacine driver when /srv/nocturne
+ * exists, else the auto-selected dummy fallback; only the external MIDI synths
+ * (FluidSynth/MT-32) are OFF. */
 /* #undef C_FLUIDSYNTH */
 /* #undef C_MT32 */
 

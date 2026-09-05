@@ -7,9 +7,9 @@ version bump, rather than a 300-line hand-transcribed list that would drift. We
 take the UNION of every .cpp/.c token in each subsystem's SOURCES (config.h gates
 the code inside the files that a disabled feature would skip), then remove a
 curated EXCLUDE set: macOS Objective-C++ (.mm), x86-only asm variants, and files
-that pull headers/deps a DX-1 (core=normal, software video, nosound, no-net,
-no-zlib) build does not carry. The exclude set grows as the compile-fix loop
-surfaces outliers; each entry is commented with why.
+that pull headers/deps a DX-1 (core=normal, software video, no external MIDI
+synths, no-net, no-zlib) build does not carry. The exclude set grows as the
+compile-fix loop surfaces outliers; each entry is commented with why.
 
 Usage:  dosbox-x-sources.py <vendored-src-dir>
 Prints newline-separated paths RELATIVE TO the src dir (e.g. cpu/cpu.cpp).

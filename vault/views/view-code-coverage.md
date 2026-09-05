@@ -65,13 +65,13 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 86 unowned · 491 files (82% owned) · ~22749 unswept lines.**
+**405 owned · 86 unowned · 491 files (82% owned) · ~22751 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **68 files, ~30585 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/ports | 0 | 23 | 4676 |
+| usr/ports | 0 | 23 | 4678 |
 | usr/warp-prove | 0 | 1 | 4349 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
@@ -146,7 +146,7 @@ Excluded as harness and counted here rather than dropped: **68 files, ~30585 lin
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
-| usr/ports/dosbox-x/config.h | 252 |
+| usr/ports/dosbox-x/config.h | 254 |
 | usr/ports/sdl2/thylacine/SDL_thylacineaudio.c | 231 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | kernel/extinction.c | 229 |

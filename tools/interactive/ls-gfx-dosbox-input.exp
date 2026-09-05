@@ -67,11 +67,11 @@ after 1500
 # DX3K.COM prints HITKEY and BLOCKS on the key read, holding the pane + focus.
 lc_send "dosbox-x -c \"mount c /home/michael\" -c \"c:\" -c \"DX3K.COM\" &"
 
-# SDL up (past the fatal combined SDL_Init the 0004 patch fixes).
+# SDL up (the combined SDL_Init clears -- sdl2 0003 DUMMY fallback).
 set timeout 30
 expect {
-    -re {Video thylacine}       { lc_step "SDL up: thylacine video + dummy audio" }
-    -re {E_Exit|Can't init SDL} { lc_fail "dosbox-x E_Exit during SDL init (0004 regressed?)" }
+    -re {Video thylacine}       { lc_step "SDL up: thylacine video + audio" }
+    -re {E_Exit|Can't init SDL} { lc_fail "dosbox-x E_Exit during SDL init (sdl2 0003 DUMMY fallback regressed?)" }
     "snare:"                    { lc_fail "dosbox-x graphical faulted (snare)" }
     "user fault"                { lc_fail "dosbox-x graphical user fault" }
     -re {EXTINCTION:}           { lc_extinction_fail "kernel extinction while dosbox-x ran" }

@@ -117,8 +117,8 @@ after 1500
 lc_send "dosbox-x -c \"mount c /home/michael\" -c \"c:\" -c \"DX2C.COM\" &"
 
 # Positive 1: "Video thylacine" proves the fatal combined SDL_Init succeeded
-# with our backend. Fail fast on E_Exit (the audio-backend gap the 0004 patch
-# closes), a crash, a kernel fault, or a no-show.
+# with our backend. Fail fast on E_Exit (SDL_INIT_AUDIO clears via the
+# sdl2 0003 DUMMY fallback), a crash, a kernel fault, or a no-show.
 # DX-8 rides the same window: with NO -conf on the line, the base layer (patch
 # 0008) must announce itself. Order-agnostic with the SDL line.
 set timeout 30
@@ -127,13 +127,13 @@ set seen_vid 0
 expect {
     -re {CONFIG: Loaded system config: /lib/dosbox-x/dosbox-x\.conf} { set seen_sys 1; if {!$seen_vid} exp_continue }
     -re {Video thylacine}       { set seen_vid 1; if {!$seen_sys} exp_continue }
-    -re {E_Exit|Can't init SDL} { lc_fail "dosbox-x E_Exit during SDL init -- audio/video backend gap (0004 patch missing/regressed?)" }
+    -re {E_Exit|Can't init SDL} { lc_fail "dosbox-x E_Exit during SDL init -- audio/video backend gap (sdl2 0003 DUMMY fallback regressed?)" }
     "snare:"                    { lc_fail "dosbox-x graphical faulted (snare)" }
     "user fault"                { lc_fail "dosbox-x graphical user fault" }
     -re {EXTINCTION:}           { lc_extinction_fail "kernel extinction while dosbox-x graphical ran" }
     timeout                     { lc_fail "dosbox-x did not come up within 30s (system config seen=$seen_sys, 'Video thylacine' seen=$seen_vid)" }
 }
-lc_step "SDL up: thylacine video + dummy audio (past the fatal SDL_Init)"
+lc_step "SDL up: thylacine video + audio (past the fatal SDL_Init)"
 lc_step "DX-8: the system base layer loaded on a launch with no -conf (patch 0008)"
 # Positive 2: DOSBox-X boots its INTERNAL DOS to the COMMAND.COM shell, which
 # runs the autoexec (-c) commands. This is the "the DOS is live" proof.
