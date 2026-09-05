@@ -452,6 +452,35 @@ repaint fully; a pure focus move redraws only the 1px frames
 (`paint_borders` — idle clients keep their pixels; the focus ring is
 `FOCUS_COLOR`).
 
+**What the signature folds — and the defect its first shape hid.** The
+signature is FNV-1a over every visible leaf's `(id, content rect,
+hosted-surface incarnation)`; the third term (KT-1.5 F2b, 2026-09-05)
+was missing from G-6 until then. It folds `(surface slot, gen)` — or a
+sentinel for an empty leaf — because *what a leaf shows is geometry
+too*: a hosting into an ALREADY-split empty leaf (an explicit `split`
+then a spawn; the H-4b `host_into` claim placement; `host()`'s
+focused-empty-leaf arm) changes no rect, and a signature over rects
+alone ran that pass NON-structural — the focus-only chrome branch —
+so the CONFIGURE fan never fired and the newly hosted surface had no
+standing offer (`offered == None`): it never learned its pane size,
+and its first `resize` ack answered E_INVAL. Every gate had hosted via
+`host()`'s SPLIT arm (a new rect, hence structural), and the production
+clients size their surface to the pane before `create`, which is why it
+stayed masked. The fold is the state-based fix: hosting, unhosting and
+a same-slot rehost are structural exactly when a leaf's content source
+changes, on every placement path present or future — unlike the
+action-based `frame_tick` poison (`geom_sig.wrapping_add(1)`), which
+each caller has to remember. The incarnation rather than the slot, so a
+retire-and-rehost of one slot inside a single pass still reads as a
+change. Witness: `ls-gfx-panes` hosts B into a pre-split empty leaf and
+its resize leg's stale-serial probe fails deterministically without the
+fold (`E_INVAL`, "no offer") and passes with it. In test-mode every
+resize-ack rejection now logs its discriminant and the deciding state
+(`tapestryd: resize-ack <n> WxH serial S refused Err(E) state
+Some((cfg_serial, offered, weave, draining))`) — the client sees one
+Rwrite error, and only that line separates "stale" from "no offer"
+from "echo mismatch" from "draining".
+
 **The CONFIGURE redraw wire** (the §18.3 emission half, pulled forward
 by chunk-completeness): aurora is an ACCUMULATOR client (row-damage
 renders — each weave slot is a patchwork; only the resource/screen

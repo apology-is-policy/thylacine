@@ -144,6 +144,44 @@ if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+h"} err]} {
     lc_fail "qmp-sendtext split chord failed: $err"
 }
 set timeout 60
+# The F2 geometry witness comes BEFORE the spawn line, deterministically:
+# `session-tiling active=2` fires when B's SURFACE is created (halcyond's
+# open_claim_on -> tapestryd reconcile), and halcyond logs "leaf B spawned"
+# only AFTER it then spawns the kaua-term. And expect matches by ARM ORDER,
+# NOT buffer position (the run-27 lesson, re-proven here in isolation): a spawn
+# arm listed in the same expect matches the LATER spawn line first and consumes
+# PAST the witness. So capture them SEQUENTIALLY in their real order -- the
+# witness first (looping over the active=1 transients), THEN the spawn.
+#
+# F2 (d-1b tiling completion): a BACKGROUNDED aurora leaf must not consume a
+# tiling column. Pre-F2 the flat [aurora, A, B] tiling gave each session tile a
+# THIRD (~418px, sum ~836 of 1280); post-F2 aurora is excluded so [A, B] each
+# get a HALF (~632px, sum ~1264). Assert the foreground tile widths SUM to >85%
+# of disp_w -- a leg that FAILS on the pre-F2 engine, a real discriminator.
+set act ""
+set sumw 0
+set minw 0
+set dispw 0
+expect {
+    -re {tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)} {
+        if {$expect_out(1,string) < 2} {
+            exp_continue
+        }
+        set act $expect_out(1,string)
+        set minw $expect_out(2,string)
+        set sumw $expect_out(3,string)
+        set dispw $expect_out(4,string)
+    }
+    -re {halcyond: session tile leaf=[0-9]+ spawn failed} { lc_fail "the split tile failed to spawn (claim refused, or kaua-term/pipes)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction awaiting the session-tiling geometry witness" }
+    timeout { lc_fail "no active>=2 session-tiling witness -- the split did not reach 2 foreground tiles (reconcile/claim/tiling broken)" }
+    eof { lc_fail "qemu exited awaiting the session-tiling geometry witness" }
+}
+if {$sumw < ($dispw * 85 / 100)} {
+    lc_fail "F2: the session tiles fill only ${sumw}px of ${dispw}px (a backgrounded leaf is stealing a column; active=$act min_w=$minw)"
+}
+lc_pass "d-3 F2: the two session tiles fill the display (active=$act sum_w=$sumw of $dispw, min_w=$minw)"
+# The spawn line followed the witness -- capture leaf B now.
 set B ""
 expect {
     -re {halcyond: session tile leaf=([0-9]+) spawned} {
@@ -152,8 +190,8 @@ expect {
     }
     -re {halcyond: session tile leaf=[0-9]+ spawn failed} { lc_fail "the split tile failed to spawn (claim refused, or kaua-term/pipes)" }
     -re {EXTINCTION:} { lc_extinction_fail "extinction during the split-tile spawn" }
-    timeout { lc_fail "Super+H produced no second tile -- split chord not delivered, or reconcile/claim broken" }
-    eof     { lc_fail "qemu exited during the split-tile spawn" }
+    timeout { lc_fail "Super+H produced no second tile spawn line after the geometry witness" }
+    eof { lc_fail "qemu exited during the split-tile spawn" }
 }
 if {$B eq $A} {
     lc_fail "the split reused the root leaf id ($A) -- no new leaf was created"

@@ -255,6 +255,18 @@ fn find_pane(layout: &str, surf: u32) -> Option<PaneInfo> {
     None
 }
 
+/// The surface a layout line's leaf hosts (None: not a hosted leaf line).
+/// Siblings print in child order, so the line index is the ORDER witness
+/// when rects cannot order two panes (a zero-rect backgrounded leaf).
+fn leaf_surface(line: &str) -> Option<u32> {
+    if !line.contains(" leaf ") {
+        return None;
+    }
+    line.split_ascii_whitespace()
+        .find_map(|t| t.strip_prefix("surface="))
+        .and_then(|v| v.parse().ok())
+}
+
 /// Parse `<key> <n>` from the ctl text.
 fn ctl_u64(ctl: &str, key: &str) -> Option<u64> {
     for line in ctl.lines() {
@@ -459,6 +471,30 @@ pub extern "C" fn rs_main() -> i64 {
         return 1;
     }
     say!("battery: focus event OK");
+
+    // Deterministic structure: pane::host() picks the auto-split direction
+    // from the focused leaf's shape, and F2's aurora-exclusion flips A from
+    // TALL (pre-F2, aurora took a column -> splitV) to WIDE (aurora excluded
+    // -> splitH). The mode-sensitive legs below (unzoom compares A's original
+    // geometry after a `mode splitv`; move escalates through the splitv)
+    // assume a NESTED splitV [A,B]. Force it independent of host(): split A's
+    // leaf splitv -- a mode different from the root splith NESTS a [A,B] splitv
+    // container, and B (hosted next) lands in the focused empty child.
+    {
+        let l = read_file(root, "layout").unwrap_or_default();
+        match find_pane(&l, a.id) {
+            Some(pa0) => {
+                if !write_file(root, "layout", &alloc::format!("split {} v", pa0.id)) {
+                    say!("tapestry-battery: FAIL split A splitv");
+                    return 1;
+                }
+            }
+            None => {
+                say!("tapestry-battery: FAIL find A pre-split");
+                return 1;
+            }
+        }
+    }
 
     // Client B: half-sized (fits its quarter-ish pane loosely).
     let mut b = match Surface::open(disp.0 / 2, disp.1 / 2) {
@@ -990,9 +1026,16 @@ pub extern "C" fn rs_main() -> i64 {
         // ring+tagbar below the container top.
         let inset = 4u32;
         let tagbar = 20u32; // METRICS.header_h
-        let cx = tb.x - inset;
+
+        // The tab strip sits at the container top. When aurora is excluded (F2
+        // structural transparency) the tabbed root's active child is the ONLY
+        // visible leaf, so it is borderless (no ring/tagbar) and sits at the
+        // display top-left (tb.x=0, tb.y=strip). saturating_sub keeps the strip
+        // coords valid there AND in the chromed >1-leaf case -- both land the
+        // strip row center; a raw subtraction underflowed u32 -> OOB probe.
+        let cx = tb.x.saturating_sub(inset);
         let cw = tb.w + 2 * inset;
-        let sy = tb.y - tagbar - inset - 5 + 2; // strip row center
+        let sy = tb.y.saturating_sub(tagbar + inset + 5) + 2; // strip row center
         let sax = cx + cw / 4;
         let sbx = cx + 3 * cw / 4;
         say!("battery: tabbed ready {} {} {}", sy, sax, sbx);
@@ -1120,13 +1163,28 @@ pub extern "C" fn rs_main() -> i64 {
                 return 1;
             }
         };
-        if mb.x >= ma.x || mb.x < disp.0 / 6 {
-            // B must sit BETWEEN aurora (the leftmost third) and A -- a
-            // B at the left edge means the pull-out landed wrong.
+        // B must sit BETWEEN the console leaf and A: left of A by rect, and
+        // AFTER the console leaf by child order. The console leaf is
+        // backgrounded (zero-rect) while the battery holds the display, so
+        // only the layout text's line order places B relative to it -- a
+        // pull-out landing BEFORE the console leaf would print B first.
+        let leaves: alloc::vec::Vec<Option<u32>> = fresh.lines().map(leaf_surface).collect();
+        let pos = |surf: u32| leaves.iter().position(|s| *s == Some(surf));
+        let console = leaves
+            .iter()
+            .position(|s| matches!(s, Some(n) if *n != a.id && *n != b.id));
+        let ordered = matches!(
+            (console, pos(b.id), pos(a.id)),
+            (Some(c), Some(bl), Some(al)) if c < bl && bl < al
+        );
+        if mb.x >= ma.x || !ordered {
             say!(
-                "tapestry-battery: FAIL move-left order (B.x={} A.x={})",
+                "tapestry-battery: FAIL move-left order (B.x={} A.x={} lines console={:?} B={:?} A={:?})",
                 mb.x,
-                ma.x
+                ma.x,
+                console,
+                pos(b.id),
+                pos(a.id)
             );
             return 1;
         }

@@ -23,6 +23,73 @@ needed the operator.
 
 ---
 
+## 2026-09-05 (runs 28-29, Fable 5.1) -- KT-1.5d-3 F2: the tiling exclusion, structural transparency, and the hosting-fan defect the battery dug up
+
+Run 28 owed three things in order: prove the d-3 chord-split owner-stamp (F1,
+in `402fbf0a`) inert on the console chord path, surface F2, then land it. F1
+verified on a DEFAULT bake -- and the first verification SKIPPED ls-gfx-chords
+(no cfg-4 bake); a SKIP is not coverage, so it was re-baked with
+`THYLACINE_AURORA_CFG4=1` and passed. The operator ratified "filter bg leaves":
+reconcile now decides backgrounding from the TREE before recompute (owner-based,
+visibility-independent) into `Pane.backgrounded`, and `layout_pane`'s Split arm
+zero-rects a backgrounded leaf while the foreground siblings take the full rect.
+Measured on ls-gfx-session: two session tiles now sum **1264 of 1280 px**
+(pre-F2 ~836), captured by a witness-then-spawn expect written sequentially
+because expect matches by ARM ORDER, not buffer position -- proven in
+isolation before it went into the gate.
+
+**Wrong turn #1, the visible one: F2 broke ls-gfx-panes, and the fix moved the
+ownership model.** Excluding aurora makes the battery's pane A WIDE, so
+`pane::host()`'s shape-keyed split picked SplitH and flattened `[aurora, A, B]`
+into the root; `mode A tabbed` then targeted a subtree containing aurora ->
+E_PERM. The operator's second vote: a backgrounded leaf is transparent to a
+session's structural ops (`actor_owns_subtree(Session)` skips it, guarded on at
+least one owned non-bg surface so a session can never close an aurora-only
+subtree; `tab_cycle` / `visible_strips` / the Tab arm skip it). Two residues
+closed by ground truth: a u32 underflow in the battery's strip arithmetic on
+the now-borderless tabbed-root child (an OOB probe crash reported as "never
+reached tabbed"), and `tab next` E_PERM'ing because the skip keyed on
+`Surface.backgrounded` -- visibility-derived, it CLEARS the moment a tab hides
+the leaf -- rather than the stable tree flag. Two flags, one name, different
+bases; the transparency must key on the tree.
+
+**Wrong turn #2, the expensive one: adapting the battery to the new geometry,
+leg by leg.** The third vote ("adapt the battery") added an explicit
+`split <A> v` before hosting B, restoring the nested splitV the mode legs
+assume. That fixed unzoom and then the RESIZE leg failed: the stale-serial probe
+(`resize 1 1 0`, expects E_AGAIN) got `Protocol`. Run 28 wrote it up as "the
+split's extra reconcile bumped B's serial" and handed off at the context
+wind-down. That theory was wrong on its face -- a bumped serial still makes 0
+STALE, which is E_AGAIN; only a MISSING offer is E_INVAL -- and it never
+consulted the error's own discriminant. The cost of not reading `resize_ack`'s
+error paths before theorizing was one compaction and a mis-aimed handoff.
+
+**The finding nobody planned (run 29): a pre-existing compositor defect.**
+Reading `resize_ack` gave four rejection causes and only one non-EAGAIN one
+that fit: `offered == None`. `offered` is set solely by the CONFIGURE fan, the
+fan runs only on a STRUCTURAL reconcile, and structural means `calc_geom_sig`
+changed -- a signature over each visible leaf's `(id, content rect)`. Hosting B
+into the pre-split EMPTY leaf changes no rect. So the pass ran non-structural,
+B never got its offer, and its first ack was E_INVAL. Reach: every
+host-into-an-existing-empty-leaf path -- an explicit split then a spawn, the
+H-4b claim placement, `host()`'s first arm -- masked since G-6 because every
+gate hosted through the SPLIT arm and the production clients pre-size their
+surface to the pane. The fix folds the hosted surface INCARNATION `(slot, gen)`
+into the signature (state-based, every placement path, no per-caller poison),
+and test-mode now logs each resize-ack rejection with its discriminant and the
+deciding state -- the witness run 28 lacked. ls-gfx-panes is the regression
+test: it fails 3/3 without the fold. With the fold in, and the battery's move leg re-keyed from "B must not sit at the left edge" (a discriminator that was really aurora's pre-F2 column) to the layout text's child order, ls-gfx-panes passed all 15 legs; restore, test.sh, session (**1264/1280**) and chords (cfg-4) passed on the same code. Landed as the F2 unit (hash: the status row in `docs/halcyon-status.md`).
+
+**Lessons, both reusable.** A state signature that omits a dimension makes every
+change along it invisible: the detector consumed (where, what) and hashed only
+(where). And read an error's discriminant before theorizing about it -- the code
+had already said which case it was. Open after this run: the aux-handed
+fullscreen-zoom bug (`bug_zoom_fullscreen_surface_not_scaled`, same geometry
+path; rebase on this commit first), then the batched KT-1 audit + SMP gate +
+push.
+
+---
+
 ## 2026-09-04 (run 27, Opus 4.8) -- KT-1.5d-3: multi-tile; the E2E hunt that surfaced two tapestryd bugs
 
 d-3 generalized the per-user compositor from one session tile to N. New

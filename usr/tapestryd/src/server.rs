@@ -4461,6 +4461,33 @@ impl Comp {
     /// E_INVAL; prior reweave still draining -> E_AGAIN (the <=2-gens
     /// bound: present a frame, then re-ack).
     fn resize_ack(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
+        let r = self.resize_ack_inner(n, w, h, serial);
+        if cfg!(feature = "test-mode") && r.is_err() {
+            // The client sees one Rwrite error; the state that decided it
+            // (stale vs no offer vs echo mismatch vs draining) is only
+            // visible here.
+            let st = self.surf(n).map(|s| {
+                (
+                    s.cfg_serial,
+                    s.offered,
+                    s.weave.is_some(),
+                    s.old_weave.is_some(),
+                )
+            });
+            say!(
+                "tapestryd: resize-ack {} {}x{} serial {} refused {:?} state {:?}",
+                n,
+                w,
+                h,
+                serial,
+                r,
+                st
+            );
+        }
+        r
+    }
+
+    fn resize_ack_inner(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
         let s = self.surf(n).ok_or(p9::E_BADF)?;
         if s.weave.is_none() {
             return Err(p9::E_INVAL); // no generation to reweave
@@ -5662,6 +5689,21 @@ impl Comp {
             let c = p.content;
             fold((c.x as u64) << 32 | c.y as u64);
             fold((c.w as u64) << 32 | c.h as u64);
+            if let pane::Kind::Leaf { surface } = &p.kind {
+                // What a leaf SHOWS is geometry too: a hosting into an
+                // already-split empty leaf changes no rect, and a signature
+                // over rects alone runs that pass non-structural -- the
+                // CONFIGURE fan the new surface needs never fires. The
+                // incarnation (slot, gen) rather than the slot, so a
+                // retire-and-rehost of one slot inside a single pass still
+                // reads as a change.
+                fold(match surface {
+                    Some(n) => {
+                        ((*n as u64) << 32) | self.surf(*n).map_or(u32::MAX, |s| s.gen) as u64
+                    }
+                    None => u64::MAX,
+                });
+            }
         }
         h
     }
@@ -5727,6 +5769,34 @@ impl Comp {
             Some(sr) => dh - sr.h,
             None => dh,
         };
+        // F2 (d-1b tiling completion): determine backgrounding from the TREE
+        // BEFORE recompute so layout_pane can exclude a backgrounded leaf from
+        // tiling. A leaf is backgrounded iff it hosts a NON-session surface AND
+        // some hosted leaf carries a session surface. Owner-based + visibility-
+        // independent (recompute has not run yet): the Split arm zero-rects
+        // these, the foreground siblings fill. This drives ONLY tiling; the
+        // visibility-based Surface.backgrounded below still drives compose, so a
+        // Tab-active backgrounded leaf (shown via the One path) is never
+        // blanked. On a session-less display the set is EMPTY -> no exclusion
+        // -> byte-identical tiling to the pre-F2 engine (the console path).
+        let hosted = self.layout.hosted_leaves();
+        let has_session_tree = hosted.iter().any(|&(_, n)| {
+            self.surf(n)
+                .is_some_and(|s| principal_is_session(s.owner_principal))
+        });
+        let bg_tiling: Vec<usize> = if has_session_tree {
+            hosted
+                .iter()
+                .filter(|&&(_, n)| {
+                    self.surf(n)
+                        .is_some_and(|s| !principal_is_session(s.owner_principal))
+                })
+                .map(|&(slot, _)| slot)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.layout.apply_backgrounded(&bg_tiling);
         self.layout.recompute(dw, layout_h, self.chords.gaps);
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
@@ -5806,6 +5876,26 @@ impl Comp {
             .cloned()
             .collect();
         let active_nleaves = nleaves.saturating_sub(bg_now.len());
+
+        // F2 witness (test-mode): the FOREGROUND (non-backgrounded) session
+        // tile widths when a session holds the display, so the ls-gfx-session
+        // E2E can assert the tiles FILL the width -- a backgrounded aurora leaf
+        // no longer steals a column. Fires every reconcile with a session up
+        // (unlike the per-placement letterbox latch), off `active_vis`, so a
+        // third-width tile (the pre-F2 sum_w ~= 2/3 disp_w) is a regression the
+        // E2E catches deterministically.
+        #[cfg(feature = "test-mode")]
+        if has_session {
+            let sum_w: u32 = active_vis.iter().map(|v| v.2.w).sum();
+            let min_w: u32 = active_vis.iter().map(|v| v.2.w).min().unwrap_or(0);
+            say!(
+                "tapestryd: session-tiling active={} min_w={} sum_w={} disp_w={}",
+                active_vis.len(),
+                min_w,
+                sum_w,
+                dw
+            );
+        }
 
         // H-3c round F2: a placed menu is a visible thing with nothing under
         // it too -- Off would leave an invisible grab.
@@ -6190,15 +6280,39 @@ impl Comp {
                 .subtree_surfaces(slot)
                 .iter()
                 .all(|&n| self.surf(n).map_or(false, |s| s.owner_peer == c)),
-            // H-4b-2: a session owns the subtree iff every hosted surface
-            // is its principal's (an all-empty subtree is vacuously true --
-            // "anyone's", same as Client; empty-leaf placement authority is
-            // the separate claim-mint gate, not this structural check).
-            Actor::Session(p) => self
-                .layout
-                .subtree_surfaces(slot)
-                .iter()
-                .all(|&n| self.surf(n).map_or(false, |s| s.owner_principal == p)),
+            // H-4b-2 + F2 structural transparency: a session owns the subtree
+            // iff every hosted surface is its principal's -- but a BACKGROUNDED
+            // leaf (a console renderer a session stepped back) is transparent
+            // and skipped, so a session's authority over its OWN panes is not
+            // blocked by a system leaf sharing their container (the flat
+            // [aurora, A, B] root a wide auto-host split produces). GUARD:
+            // require at least one owned, non-backgrounded surface -- a subtree
+            // that is ENTIRELY backgrounded system content is NOT the session's
+            // (else a session could close/mode the console renderer). An
+            // all-EMPTY subtree stays vacuously owned (empty-leaf placement is
+            // the separate claim-mint gate).
+            Actor::Session(p) => {
+                // The skip keys on the LEAF's tree flag (`is_bg_leaf`, owner-
+                // based, stable), NOT `Surface.backgrounded`: that one is
+                // visibility-derived and CLEARS once a tab hides the leaf
+                // (it drops out of `vis`), which would re-expose aurora to
+                // this walk exactly when `tab next` cycles the tabbed root.
+                let hosted = self.layout.subtree_hosted(slot);
+                if hosted.is_empty() {
+                    return true;
+                }
+                let mut owned_any = false;
+                for &(leaf, n) in &hosted {
+                    if self.layout.is_bg_leaf(leaf) {
+                        continue;
+                    }
+                    match self.surf(n) {
+                        Some(s) if s.owner_principal == p => owned_any = true,
+                        _ => return false,
+                    }
+                }
+                owned_any
+            }
         }
     }
 
