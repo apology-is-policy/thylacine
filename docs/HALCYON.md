@@ -1689,6 +1689,24 @@ already held.
     Touches tapestryd's scanout machine (audit-bearing); **aurora is unchanged** (no
     FRAME -> dormant; FRAME -> renders). No new primitive; backward-compatible (the
     priority is inert with no session leaf present).
+    **AMENDED 2026-09-05 (the KT-1 audit, C-F6; self-resolved under the standing
+    autonomy, recorded for the operator):** "a session leaf is present" is NOT
+    "a user-principal leaf is present". `principal_is_session` is true for every
+    real user, so the d-1b trigger put the console renderer to sleep whenever any
+    user program (DOSBox, tapestry-demo, the battery) drew a window from the
+    console shell -- a default-boot behaviour change shipped under a "byte-
+    identical console path" claim. The display handoff is an EXPLICIT act of the
+    session compositor: it writes `session on` on its own ctl conn before its
+    first surface (Session-principal-gated; one declared conn per display at a
+    time; cleared when the conn retires -> the console un-backgrounds). Only a
+    DECLARED session backgrounds the console; a user program that merely draws
+    never does (it tiles beside the console as before, and a zoom hides it the
+    old way). The declared conn also mints surfaces up to the renderer's cap (one
+    tile per pane), and a surface's backgrounded state derives from its leaf's
+    tree flag alone. The console renderer's DISPLAY-level chrome (a status bar,
+    a placed menu) is NOT backgrounded with it: aurora has none, and a renderer
+    that does (the retired halcyond-console lever) must dismiss/hide it on the
+    handoff (C-F11, open).
 - **KT-1.5d-2 -- one session tile.** the per-user halcyond spawns ONE kaua-term (as
   the user) hosting `ut`, folds its up-pipe into the unified poll, ingests via the
   ii-a `Tile` model, and renders it (normal = scrollback + grid tail; alt = grid only,

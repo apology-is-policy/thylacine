@@ -43,8 +43,8 @@ use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::{
     t_attach_9p_srv, t_close, t_explicit_bzero, t_mount, t_open, t_poll, t_putstr, t_read,
     t_readdir, t_set_dumpable, t_set_traceable, t_torpor_wait, t_unmount, t_walk_create,
-    t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES, T_MREPL, T_OPATH, T_OREAD,
-    T_ORDWR, T_OWRITE, T_POLLIN, T_SPAWN_PERM_CONSOLE_OWNER, T_SPAWN_PERM_MAY_POST_SERVICE,
+    t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES, T_MREPL, T_OPATH, T_ORDWR,
+    T_OREAD, T_OWRITE, T_POLLIN, T_SPAWN_PERM_CONSOLE_OWNER, T_SPAWN_PERM_MAY_POST_SERVICE,
     T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -65,7 +65,7 @@ const RECOVERY_SENTINEL: &[u8] = b"!recover";
 const FD_IN: i64 = 0; // the tty (or seeded creds pipe)
 const FD_OUT: i64 = 1; // the tty (or capture pipe)
 const MAX_LINE: usize = 256;
-const SHELL: &str = "/bin/ut";  // #58: resolved via joey's post-pivot /bin bind
+const SHELL: &str = "/bin/ut"; // #58: resolved via joey's post-pivot /bin bind
 
 // The user shell runs as the authenticated user with NO elevation/identity/grant
 // caps -- a shell is not an identity-stamper. It keeps the two benign
@@ -291,7 +291,10 @@ unsafe fn exchange(fd: i64, verb: u8, payload: &[u8]) -> Option<(u8, Vec<u8>)> {
 }
 
 fn rd_u32_le(b: &[u8], off: usize) -> u32 {
-    (b[off] as u32) | ((b[off + 1] as u32) << 8) | ((b[off + 2] as u32) << 16) | ((b[off + 3] as u32) << 24)
+    (b[off] as u32)
+        | ((b[off + 1] as u32) << 8)
+        | ((b[off + 2] as u32) << 16)
+        | ((b[off + 3] as u32) << 24)
 }
 
 // AUTH (verb 1): user_len(1) + user + pass_len(2 LE) + pass -> 33-byte token.
@@ -479,8 +482,7 @@ fn connect_corvus() -> i64 {
         // stalk-3b-β two-step (D5): open /srv/corvus (the connect; 9p-mode -> a
         // dev9p root), then open "ctl" relative to it. The walked ctl fid holds
         // the attach session, so the root fd is closed at once.
-        let root =
-            unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/corvus".as_ptr(), 11, T_OREAD) };
+        let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/corvus".as_ptr(), 11, T_OREAD) };
         if root >= 0 {
             let ctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_ORDWR) };
             let _ = unsafe { t_close(root) };
@@ -560,7 +562,12 @@ fn parse_u64(s: &[u8]) -> Option<u64> {
 fn attach_ctl() -> i64 {
     for _ in 0..64 {
         let conn = unsafe {
-            t_open(T_WALK_OPEN_FROM_ROOT, CTL_SRV_PATH.as_ptr(), CTL_SRV_PATH.len(), T_ORDWR)
+            t_open(
+                T_WALK_OPEN_FROM_ROOT,
+                CTL_SRV_PATH.as_ptr(),
+                CTL_SRV_PATH.len(),
+                T_ORDWR,
+            )
         };
         if conn < 0 {
             continue;
@@ -580,8 +587,13 @@ fn attach_ctl() -> i64 {
 // the corvus key path "users/<user>"; owner = the user's principal/gid (the
 // home root is born user-owned 0700). The coordinator folds EEXIST -> OK, so a
 // returning user is a no-op.
-unsafe fn provision_dek(ctl_root: i64, owner_uid: u32, owner_gid: u32,
-                        user: &[u8], token: &[u8; TOKEN_LEN]) -> bool {
+unsafe fn provision_dek(
+    ctl_root: i64,
+    owner_uid: u32,
+    owner_gid: u32,
+    user: &[u8],
+    token: &[u8; TOKEN_LEN],
+) -> bool {
     if user.is_empty() || user.len() > 255 {
         return false;
     }
@@ -792,8 +804,13 @@ struct HomeSession {
 // `parent_fd` is T_WALK_OPEN_FROM_ROOT or a prior O_PATH handle. Returns the dir
 // fd (>= 0) or -1.
 unsafe fn mkdir_or_open(parent_fd: i64, name: &[u8]) -> i64 {
-    let cf = t_walk_create(parent_fd, name.as_ptr(), name.len(), T_OREAD,
-                           T_WALK_CREATE_DMDIR | 0o755);
+    let cf = t_walk_create(
+        parent_fd,
+        name.as_ptr(),
+        name.len(),
+        T_OREAD,
+        T_WALK_CREATE_DMDIR | 0o755,
+    );
     if cf >= 0 {
         let _ = t_close(cf);
     }
@@ -810,7 +827,11 @@ unsafe fn drain_proxy_stderr(fd: i64) {
         return;
     }
     loop {
-        let mut pfd = TPollFd { fd: fd as i32, events: T_POLLIN, revents: 0 };
+        let mut pfd = TPollFd {
+            fd: fd as i32,
+            events: T_POLLIN,
+            revents: 0,
+        };
         let pr = t_poll(&mut pfd as *mut TPollFd, 1, 0);
         if pr <= 0 || (pfd.revents & T_POLLIN) == 0 {
             break;
@@ -847,14 +868,18 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
     // the proxy->coordinator SO_PEERCRED is the user; --datasets-allowed scopes
     // the Tattach to users/<user> (the I-1 boundary). stderr is captured for
     // boot-log diagnostics; stdin/stdout inherit login's.
-    let mut cmd = Command::new("/bin/stratumd");  // #58: post-pivot /bin bind
+    let mut cmd = Command::new("/bin/stratumd"); // #58: post-pivot /bin bind
     cmd.identity(pid, gid, supp)
         .caps(T_CAP_CSPRNG_READ)
         .perm(T_SPAWN_PERM_MAY_POST_SERVICE)
-        .arg("--role").arg("client")
-        .arg("--listen").arg(listen.clone())
-        .arg("--coordinator-socket").arg(COORD_FS_PATH)
-        .arg("--datasets-allowed").arg(allowed.clone())
+        .arg("--role")
+        .arg("client")
+        .arg("--listen")
+        .arg(listen.clone())
+        .arg("--coordinator-socket")
+        .arg(COORD_FS_PATH)
+        .arg("--datasets-allowed")
+        .arg(allowed.clone())
         .arg("--single-session")
         .stdin(Stdio::Inherit)
         .stdout(Stdio::Inherit)
@@ -866,7 +891,11 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
             return None;
         }
     };
-    let err_fd = proxy.stderr.as_ref().map(|f| f.as_raw_fd() as i64).unwrap_or(-1);
+    let err_fd = proxy
+        .stderr
+        .as_ref()
+        .map(|f| f.as_raw_fd() as i64)
+        .unwrap_or(-1);
 
     // Wait for the proxy to libsodium-init + dial the coordinator + post
     // /srv/home-<user>, then attach. Between retries, yield the vCPU via a 1 ms
@@ -878,7 +907,12 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
     let mut attach_root: i64 = -1;
     let pacer: u32 = 0;
     for _ in 0..3000 {
-        let conn = t_open(T_WALK_OPEN_FROM_ROOT, listen_b.as_ptr(), listen_b.len(), T_ORDWR);
+        let conn = t_open(
+            T_WALK_OPEN_FROM_ROOT,
+            listen_b.as_ptr(),
+            listen_b.len(),
+            T_ORDWR,
+        );
         if conn >= 0 {
             // attach the proxy's session via the `ds:<user>` child-dataset aname.
             let r = t_attach_9p_srv(conn, allowed_b.as_ptr(), allowed_b.len(), 0, 0);
@@ -951,7 +985,11 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
         }
     }
 
-    Some(HomeSession { proxy, attach_root, mount_path })
+    Some(HomeSession {
+        proxy,
+        attach_root,
+        mount_path,
+    })
 }
 
 // seed_session_env (Go Stage 6): write the session's ambient environment into
@@ -1244,6 +1282,7 @@ pub extern "C" fn rs_main() -> i64 {
         let mut push_cmd = Command::new("/bin/aurora-push");
         push_cmd
             .identity(pid, gid, &supp)
+            .caps(0)
             .stdin(Stdio::Inherit)
             .stdout(Stdio::Inherit)
             .stderr(Stdio::Inherit);
@@ -1310,15 +1349,22 @@ pub extern "C" fn rs_main() -> i64 {
     let mut child = if session_halcyon {
         // The per-user compositor: identity ONLY -- no CONSOLE_OWNER (the
         // Ctrl-C axis is each tile's pts fg pgrp, not the /dev/cons owner), no
-        // consctl fd (it is not the console renderer), no extra cap (connecting
-        // to tapestryd + spawning same-identity children is ungated). Its exit
-        // IS logout, exactly as the shell's is.
+        // consctl fd (it is not the console renderer), and the SHELL's cap mask
+        // (connecting to tapestryd + spawning same-identity children is
+        // ungated). The mask is load-bearing: the Command default inherits
+        // every cap, and login holds CAP_SET_IDENTITY -- unmasked, every
+        // program in every tile could spawn as any principal. Its exit IS
+        // logout, exactly as the shell's is.
         let mut hal = Command::new("/bin/halcyond");
         hal.arg("--session")
             .identity(pid, gid, &supp)
+            .caps(SHELL_CAPS)
             .stdin(Stdio::Inherit)
             .stdout(Stdio::Inherit)
             .stderr(Stdio::Inherit);
+        if let Ok(h) = core::str::from_utf8(&home_path) {
+            hal.arg("--home").arg(h);
+        }
         match hal.spawn() {
             Ok(c) => {
                 t_putstr("login: session compositor (halcyond) spawned\n");

@@ -1123,7 +1123,7 @@ impl Layout {
                     Some(Kind::Container { children, .. }) => children.clone(),
                     _ => return false,
                 };
-                let bg: Vec<bool> = kids.iter().map(|&c| self.is_bg_leaf(c)).collect();
+                let bg: Vec<bool> = kids.iter().map(|&c| self.is_bg_subtree(c)).collect();
                 let target = match self.get_mut(p).map(|q| &mut q.kind) {
                     Some(Kind::Container {
                         children, active, ..
@@ -1208,7 +1208,7 @@ impl Layout {
                     let eff: Vec<usize> = children
                         .iter()
                         .copied()
-                        .filter(|&c| !self.is_bg_leaf(c))
+                        .filter(|&c| !self.is_bg_subtree(c))
                         .collect();
                     if eff.is_empty() {
                         return None;
@@ -1257,6 +1257,27 @@ impl Layout {
             .count()
     }
 
+    /// Visible leaves that are not backgrounded: the count the chrome inset
+    /// keys on. A backgrounded leaf is visible with a zero rect, so counting
+    /// it would put a ring + tag bar on a lone foreground leaf the Direct
+    /// scanout then shows at the display origin.
+    pub fn foreground_leaf_count(&self) -> usize {
+        self.panes
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p,
+                    Some(Pane {
+                        kind: Kind::Leaf { .. },
+                        visible: true,
+                        backgrounded: false,
+                        ..
+                    })
+                )
+            })
+            .count()
+    }
+
     /// Recompute geometry + visibility for the whole tree.
     pub fn recompute(&mut self, disp_w: u32, disp_h: u32, gaps: u32) {
         // Pass 1: mark everything hidden, then walk the visible tree.
@@ -1298,14 +1319,15 @@ impl Layout {
             },
         );
         // Pass 2: the content inset -- the Daylight chrome ring per leaf iff
-        // >1 leaf visible. A single fullscreen leaf stays borderless (the
-        // stage-0 look). The ring = floor(`gaps`, the tunable gap) +
+        // >1 FOREGROUND leaf visible (a backgrounded zero-rect leaf does not
+        // count). A single fullscreen leaf stays borderless (the stage-0
+        // look). The ring = floor(`gaps`, the tunable gap) +
         // bevel(2) + hairline(1); the bevel+hairline is fixed structural
         // chrome (HALCYON-VISUAL section 2/2.4), the floor is the tunable
         // inter-pane gap (section 2.3 -- at gaps=1 the two abutting floors
         // give the 2px inter-pane floor).
         let chrome = (theme::METRICS.bevel + theme::METRICS.hairline) as u32;
-        let inset = if self.visible_leaf_count() > 1 {
+        let inset = if self.foreground_leaf_count() > 1 {
             gaps + chrome
         } else {
             0
@@ -1393,13 +1415,13 @@ impl Layout {
                 let eff: Vec<usize> = children
                     .iter()
                     .copied()
-                    .filter(|&c| !self.is_bg_leaf(c))
+                    .filter(|&c| !self.is_bg_subtree(c))
                     .collect();
                 let strip = Self::strip_h(mode, eff.len() as u32, rect);
                 let shown = children
                     .get(active)
                     .copied()
-                    .filter(|&a| !self.is_bg_leaf(a))
+                    .filter(|&a| !self.is_bg_subtree(a))
                     .or_else(|| eff.first().copied());
                 if let Some(a) = shown {
                     self.layout_pane(
@@ -1430,7 +1452,7 @@ impl Layout {
                     let fg: Vec<usize> = children
                         .iter()
                         .copied()
-                        .filter(|&c| !self.is_bg_leaf(c))
+                        .filter(|&c| !self.is_bg_subtree(c))
                         .collect();
                     if fg.is_empty() {
                         children.clone()
@@ -1544,6 +1566,25 @@ impl Layout {
     pub fn is_bg_leaf(&self, slot: usize) -> bool {
         self.get(slot)
             .is_some_and(|p| p.backgrounded && matches!(p.kind, Kind::Leaf { .. }))
+    }
+
+    /// Is `slot` backgrounded as a whole: a backgrounded leaf, or a container
+    /// whose every child is. The transparency predicate for a CHILD of a
+    /// division/tab/cycle -- a system-only container beside a session must
+    /// vanish exactly like a lone system leaf does.
+    pub fn is_bg_subtree(&self, slot: usize) -> bool {
+        match self.get(slot) {
+            Some(Pane {
+                kind: Kind::Leaf { .. },
+                backgrounded,
+                ..
+            }) => *backgrounded,
+            Some(Pane {
+                kind: Kind::Container { children, .. },
+                ..
+            }) => !children.is_empty() && children.iter().all(|&c| self.is_bg_subtree(c)),
+            None => false,
+        }
     }
 
     /// The focused leaf's hosted surface (input routing).

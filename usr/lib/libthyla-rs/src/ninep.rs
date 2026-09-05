@@ -117,6 +117,8 @@ pub const E_EXIST: u32 = 17;
 pub const E_NOTDIR: u32 = 20;
 pub const E_ISDIR: u32 = 21;
 pub const E_INVAL: u32 = 22;
+/// EBUSY (16): a resource another party holds -- a second session declaration while one is live.
+pub const E_BUSY: u32 = 16;
 pub const E_OPNOTSUPP: u32 = 95;
 pub const E_PROTO: u32 = 71;
 pub const E_NOSYS: u32 = 38;

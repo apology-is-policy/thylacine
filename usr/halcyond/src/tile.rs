@@ -26,7 +26,9 @@ use alloc::vec::Vec;
 use crate::grid::Grid;
 use crate::layout::{layout_block, render_block, LaidBlock, Sheet};
 use crate::raster::{GlyphSource, FACE_MONO};
-use crate::transcript::Transcript;
+use crate::transcript::{
+    Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, DEFAULT_MAX_LINES_PER_BLOCK,
+};
 use cartoon::{Cartoon, Op};
 use kaua_term::{Control, Record, ScreenMode};
 use vt::{Palette, ATTR_REVERSE, ATTR_UNDERLINE};
@@ -44,9 +46,20 @@ pub struct Tile {
 
 impl Tile {
     pub fn new(cols: usize, rows: usize, pal: Palette) -> Tile {
+        Tile::with_budget(cols, rows, pal, DEFAULT_MAX_COST)
+    }
+
+    /// A tile whose scrollback holds at most `max_cost` bytes -- a session's
+    /// tiles share ONE budget (their sum, not each, must fit the heap).
+    pub fn with_budget(cols: usize, rows: usize, pal: Palette, max_cost: usize) -> Tile {
         Tile {
             grid: Grid::new(cols, rows, pal.fg, pal.bg),
-            scrollback: Transcript::new(pal),
+            scrollback: Transcript::with_caps(
+                pal,
+                DEFAULT_MAX_BLOCKS,
+                max_cost,
+                DEFAULT_MAX_LINES_PER_BLOCK,
+            ),
             mode: ScreenMode::Normal,
             title: String::new(),
             exit: None,

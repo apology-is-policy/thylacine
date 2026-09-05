@@ -18,7 +18,8 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::vec::Vec;
 
-use halcyond::chrome::{parse_leaves, parse_rect};
+use alloc::string::String;
+use halcyond::chrome::{parse_leaves_all, parse_rect};
 use halcyond::input::map_key;
 use halcyond::layout::{daylight_sheet, Sheet};
 use halcyond::raster::GlyphSource;
@@ -29,8 +30,8 @@ use libhalcyon::theme::daylight_palette;
 use libthyla_rs::fs::File;
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::time::{sleep, Duration};
-use libthyla_rs::{t_poll, t_read, t_write, TPollFd, T_POLLHUP, T_POLLIN};
-use tapestry::{EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY};
+use libthyla_rs::{t_poll, t_read, t_write, TPollFd, T_POLLHUP, T_POLLIN, T_POLLOUT};
+use tapestry::{EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY};
 
 use crate::chromeset::read_file;
 
@@ -65,17 +66,14 @@ struct Geom {
     disp_h: u32,
 }
 
-fn write_all_fd(fd: i64, buf: &[u8]) {
-    let mut off = 0usize;
-    while off < buf.len() {
-        // SAFETY: SVC wrapper over this thread's own buffer.
-        let w = unsafe { t_write(fd, buf.as_ptr().add(off), buf.len() - off) };
-        if w <= 0 {
-            break;
-        }
-        off += w as usize;
-    }
-}
+/// The scrollback budget ONE session shares across all its tiles (their sum
+/// must fit the 64 MiB heap; each tile's share moves as tiles come and go).
+const SESSION_SCROLLBACK_BUDGET: usize = 32 << 20;
+
+/// Bytes of encoded input a tile may hold undelivered before the newest are
+/// dropped: a tile whose kaua-term stopped draining its down-pipe must not
+/// accumulate, and must never block the compositor (see `drain_down`).
+const DOWN_PENDING_MAX: usize = 4096;
 
 /// Write one layout verb (`close <leaf>`) to the compositor `layout` file,
 /// retried through the per-pass mutation budget. Best-effort: a wedged
@@ -134,6 +132,9 @@ struct SessionTile {
     _up: File,
     down_fd: i64,
     up_fd: i64,
+    /// Encoded Key/Resize input not yet delivered down the pipe (bounded).
+    pending_down: Vec<u8>,
+    drop_said: bool,
     tile: Tile,
     dec: FrameDecoder,
     cols: u16,
@@ -161,13 +162,27 @@ enum Ingested {
 
 impl SessionTile {
     /// Spawn a `kaua-term` on `ut` sized to `surf`, wired to the two pipes.
-    fn spawn(leaf: u32, surf: Surface, geom: Geom) -> Option<SessionTile> {
+    fn spawn(
+        leaf: u32,
+        surf: Surface,
+        geom: Geom,
+        home: Option<&str>,
+        budget: usize,
+    ) -> Option<SessionTile> {
         let cols = ((surf.w as i32 / geom.cell_w).max(1)) as u16;
         let rows = ((surf.h as i32 / geom.cell_h).max(1)) as u16;
-        let mut child = Command::new("/bin/kaua-term")
-            .arg(format!("{}", cols))
+        let mut cmd = Command::new("/bin/kaua-term");
+        cmd.arg(format!("{}", cols))
             .arg(format!("{}", rows))
-            .arg("/bin/ut")
+            .arg("/bin/ut");
+        if let Some(h) = home {
+            cmd.arg("--home").arg(h);
+        }
+        // The identity axis stops here whatever the parent holds: a tile's
+        // programs never spawn as another principal (login masks it too; this
+        // is the second hop's own guard).
+        let mut child = cmd
+            .caps(!libthyla_rs::T_CAP_SET_IDENTITY)
             .stdin(Stdio::Piped)
             .stdout(Stdio::Piped)
             .stderr(Stdio::Inherit)
@@ -200,7 +215,9 @@ impl SessionTile {
             _up: up,
             down_fd,
             up_fd,
-            tile: Tile::new(cols as usize, rows as usize, daylight_palette()),
+            pending_down: Vec::new(),
+            drop_said: false,
+            tile: Tile::with_budget(cols as usize, rows as usize, daylight_palette(), budget),
             dec: FrameDecoder::new(),
             cols,
             rows,
@@ -285,6 +302,48 @@ impl SessionTile {
     }
 
     /// Kill + reap the child so it never lingers as a zombie, then let the
+    /// Queue encoded input for the tile's kaua-term (delivered by
+    /// `drain_down`). Bounded: past the cap the NEWEST bytes drop, said once.
+    fn queue_down(&mut self, bytes: &[u8]) {
+        if self.pending_down.len() + bytes.len() > DOWN_PENDING_MAX {
+            if !self.drop_said {
+                self.drop_said = true;
+                say!("halcyond: session tile input dropped (its terminal is not draining)");
+            }
+            return;
+        }
+        self.pending_down.extend_from_slice(bytes);
+    }
+
+    /// Deliver queued input without ever blocking the compositor: natives
+    /// cannot mark a pipe non-blocking, and a whole-key write that does not
+    /// fit the ring parks the writer -- but POLLOUT means at least one free
+    /// byte and this thread is the pipe's only writer, so a one-byte write
+    /// after a ready POLLOUT can never block. Stops at the first "no room".
+    fn drain_down(&mut self) {
+        let mut off = 0usize;
+        while off < self.pending_down.len() {
+            let mut pfd = [TPollFd {
+                fd: self.down_fd as i32,
+                events: T_POLLOUT,
+                revents: 0,
+            }];
+            // SAFETY: SVC wrapper over this thread's own array.
+            if unsafe { t_poll(pfd.as_mut_ptr(), 1, 0) } <= 0 || pfd[0].revents & T_POLLOUT == 0 {
+                break;
+            }
+            // SAFETY: SVC wrapper over this thread's own buffer, one byte.
+            let w = unsafe { t_write(self.down_fd, self.pending_down.as_ptr().add(off), 1) };
+            if w <= 0 {
+                break;
+            }
+            off += 1;
+        }
+        if off > 0 {
+            self.pending_down.drain(..off);
+        }
+    }
+
     /// Surface + pipe ends drop (Surface::drop says `destroy`; the pipe fds
     /// close, EOFing the kaua-term's input pump if it still lives).
     fn teardown(mut self) {
@@ -302,12 +361,13 @@ fn reconcile(
     tiles: &mut BTreeMap<u32, SessionTile>,
     closed: &mut BTreeSet<u32>,
     geom: Geom,
+    home: Option<&str>,
 ) {
     let layout = match read_file(troot, "layout") {
         Some(s) => s,
         None => return,
     };
-    let leaves = parse_leaves(&layout);
+    let leaves = parse_leaves_all(&layout);
     let have: Vec<u32> = tiles.keys().copied().collect();
     let closed_v: Vec<u32> = closed.iter().copied().collect();
     let plan = plan_tiles(&leaves, &have, &closed_v);
@@ -330,14 +390,33 @@ fn reconcile(
         let (w, h) = leaf_geometry(troot, leaf).unwrap_or((geom.disp_w, geom.disp_h));
         let surf = match Surface::open_claim_on(ring, w, h, token) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(e) => {
+                // A leaf the compositor cannot host (the surface pool is at
+                // its cap) must not stay empty and focused with the keyboard
+                // routed into it: say once and close it.
+                say!(
+                    "halcyond: session tile leaf={} refused {:?} -- closing",
+                    leaf,
+                    e
+                );
+                let mut cmd = alloc::string::String::new();
+                let _ = core::fmt::write(&mut cmd, format_args!("close {}", leaf));
+                layout_verb(troot, &cmd);
+                continue;
+            }
         };
-        match SessionTile::spawn(leaf, surf, geom) {
+        let budget = SESSION_SCROLLBACK_BUDGET / (tiles.len() + 1);
+        match SessionTile::spawn(leaf, surf, geom, home, budget) {
             Some(t) => {
                 tiles.insert(leaf, t);
             }
             None => say!("halcyond: session tile leaf={} spawn failed", leaf),
         }
+    }
+    // Every tile's share of the ONE scrollback budget follows the tile count.
+    let share = SESSION_SCROLLBACK_BUDGET / tiles.len().max(1);
+    for t in tiles.values_mut() {
+        t.tile.scrollback.set_max_cost(share);
     }
 }
 
@@ -357,6 +436,13 @@ fn connect() -> Option<(EventRing, Surface)> {
                 continue;
             }
         };
+        // The display handoff is an explicit act of the session compositor,
+        // declared on its own conn BEFORE its first surface hosts: a program
+        // merely drawing a window never takes the display from the console.
+        if let Err(e) = r.global_ctl("session on") {
+            say!("halcyond: FAIL session declare {:?}", e);
+            return None;
+        }
         match Surface::fullscreen_on(&r) {
             Ok(s) => return Some((r, s)),
             Err(e) => {
@@ -375,13 +461,13 @@ fn connect() -> Option<(EventRing, Surface)> {
 /// keys on the same leaf id the reconcile diff uses.
 fn leaf_hosting(troot: i64, sid: u32) -> Option<u32> {
     let layout = read_file(troot, "layout")?;
-    parse_leaves(&layout)
+    parse_leaves_all(&layout)
         .into_iter()
         .find(|l| l.surface == Some(sid))
         .map(|l| l.id)
 }
 
-pub fn run() -> i64 {
+pub fn run(home: Option<String>) -> i64 {
     let (ring, root_surf) = match connect() {
         Some(x) => x,
         None => return 1,
@@ -416,7 +502,13 @@ pub fn run() -> i64 {
     };
     let mut tiles: BTreeMap<u32, SessionTile> = BTreeMap::new();
     let mut closed: BTreeSet<u32> = BTreeSet::new();
-    match SessionTile::spawn(root_leaf, root_surf, geom) {
+    match SessionTile::spawn(
+        root_leaf,
+        root_surf,
+        geom,
+        home.as_deref(),
+        SESSION_SCROLLBACK_BUDGET,
+    ) {
         Some(t) => {
             tiles.insert(root_leaf, t);
         }
@@ -492,7 +584,7 @@ pub fn run() -> i64 {
                                         &Input::Resize { cols: nc, rows: nr },
                                         &mut wire_out,
                                     );
-                                    write_all_fd(t.down_fd, &wire_out);
+                                    t.queue_down(&wire_out);
                                 }
                                 t.dirty = true;
                                 // A relayout may have added or removed leaves.
@@ -508,9 +600,13 @@ pub fn run() -> i64 {
                             if let Some(kev) = map_key(e.code, e.rune, e.value) {
                                 wire_out.clear();
                                 encode_input(&Input::Key(kev), &mut wire_out);
-                                write_all_fd(t.down_fd, &wire_out);
+                                t.queue_down(&wire_out);
                             }
                         }
+                        // A focus move may follow a split of an EMPTY leaf
+                        // (nothing hosted yet, so no CONFIGURE arrives): let
+                        // the reconcile see the new leaf now, not later.
+                        TEV_FOCUS => relayout = true,
                         _ => {}
                     },
                     Ok(None) => break,
@@ -542,7 +638,7 @@ pub fn run() -> i64 {
         // removed one). New tiles come up dirty; the loop re-renders below.
         if relayout {
             relayout = false;
-            reconcile(&ring, troot, &mut tiles, &mut closed, geom);
+            reconcile(&ring, troot, &mut tiles, &mut closed, geom, home.as_deref());
             if tiles.is_empty() {
                 break;
             }
@@ -574,11 +670,27 @@ pub fn run() -> i64 {
                 up_leaves.push(leaf);
             }
         }
+        // Undelivered input wakes the loop when its pipe has room. Appended
+        // AFTER the up entries, so the up_leaves[i] <-> fds[i+1] map holds.
+        for t in tiles.values() {
+            if t.exit.is_none() && !t.pending_down.is_empty() {
+                fds.push(TPollFd {
+                    fd: t.down_fd as i32,
+                    events: T_POLLOUT,
+                    revents: 0,
+                });
+            }
+        }
         let nfds = fds.len();
         if unsafe { t_poll(fds.as_mut_ptr(), nfds, -1) } < 0 {
             say!("halcyond: session poll failed (compositor gone); exiting");
             logout = Some(1);
             break;
+        }
+        for t in tiles.values_mut() {
+            if t.exit.is_none() && !t.pending_down.is_empty() {
+                t.drain_down();
+            }
         }
 
         // (5) Ingest each readable tile's records. up_leaves[i] <-> fds[i+1].
@@ -609,6 +721,7 @@ pub fn run() -> i64 {
                     t.exit = Some(code);
                     closed.insert(leaf);
                     layout_verb(troot, &format!("close {}", leaf));
+                    relayout = true;
                     reap.push(leaf);
                 }
                 Ingested::Crash => {

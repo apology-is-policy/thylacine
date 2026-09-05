@@ -850,6 +850,15 @@ impl Vt {
         };
         let ccols = if self.cols < ncols { self.cols } else { ncols };
         let (pfg, pbg) = (self.pal.fg, self.pal.bg);
+        // Rows a shrink pushes off the top are scrolled off, not lost: under
+        // capture each becomes a Scroll boundary so a consumer's scrollback
+        // keeps them (xterm's behaviour on a shrink).
+        if self.capture_events && !self.on_alt {
+            for r in 0..shift.min(self.rows) {
+                let row = self.cells[r * self.cols..(r + 1) * self.cols].to_vec();
+                self.pending.push(Boundary::Scroll(row));
+            }
+        }
         let mut cells = vec![Cell::blank(pfg, pbg); ncols * nrows];
         for r in 0..nrows {
             let or = r + shift;

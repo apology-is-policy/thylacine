@@ -81,6 +81,10 @@ pub enum Record {
 /// the last-emitted screen so each CellDiff carries only genuine changes, and a
 /// scroll accumulator so consecutive Scroll boundaries coalesce into one
 /// ScrollOff. Drive it with a `Vt` whose `set_capture_events(true)` is set.
+/// One coalesced ScrollOff holds at most this many cell bytes before it is
+/// flushed (see `scroll_cap`).
+const SCROLL_ACC_BYTES: usize = 256 * 1024;
+
 pub struct Producer {
     shadow: Vec<Cell>,
     cols: usize,
@@ -131,19 +135,23 @@ impl Producer {
                 Boundary::AltEnter(outgoing, (mcx, mcy)) => {
                     // Flush the pre-swap main against the outgoing buffer with the
                     // MAIN's cursor (cells is already the blank alt, cursor homed),
-                    // announce the mode, then reset the shadow to the blank alt.
+                    // announce the mode, then reset the shadow to the blank alt
+                    // AND send it whole: the consumer keeps one grid, so the
+                    // alt screen's blank rows must overwrite the main's text.
                     self.flush_scroll(out);
                     self.emit_celldiff(&outgoing, mcx, mcy, vt.cursor_visible, out);
                     out.push(Record::Mode(ScreenMode::AltScreen));
                     self.reset_shadow(&vt.cells, vt.cx, vt.cy, vt.cursor_visible);
+                    out.push(self.full_diff());
                 }
                 Boundary::AltLeave(restored) => {
-                    // The alt live grid is discarded; the restored main is
-                    // unchanged from before enter, so no diff -- just announce
-                    // the mode and reset the shadow to the restored main.
+                    // The alt live grid is discarded; announce the mode, reset
+                    // the shadow to the restored main and send it whole -- the
+                    // consumer's grid still shows the alt screen's last frame.
                     self.flush_scroll(out);
                     out.push(Record::Mode(ScreenMode::Normal));
                     self.reset_shadow(&restored, vt.cx, vt.cy, vt.cursor_visible);
+                    out.push(self.full_diff());
                 }
             }
         }
@@ -157,15 +165,26 @@ impl Producer {
         self.flush_scroll(out);
         self.cols = vt.cols;
         let cursor = (vt.cy as u16, vt.cx as u16, vt.cursor_visible);
-        let changed = vt
-            .cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| ((i / self.cols) as u16, (i % self.cols) as u16, *c))
-            .collect();
         self.shadow = vt.cells.clone();
         self.last_cursor = cursor;
-        out.push(Record::CellDiff { changed, cursor });
+        out.push(self.full_diff());
+    }
+
+    /// Every shadow cell as one CellDiff (the consumer redraws the whole
+    /// screen): the resize and the alt-screen boundaries, where the consumer's
+    /// single grid must be overwritten wholesale.
+    fn full_diff(&self) -> Record {
+        let cols = self.cols.max(1);
+        let changed = self
+            .shadow
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((i / cols) as u16, (i % cols) as u16, *c))
+            .collect();
+        Record::CellDiff {
+            changed,
+            cursor: self.last_cursor,
+        }
     }
 
     fn flush(&mut self, vt: &Vt, out: &mut Vec<Record>) {
@@ -185,7 +204,14 @@ impl Producer {
     // small header; half MAX_FRAME leaves ample headroom for the frame envelope.
     // At least 1 so a pathologically wide tile still makes progress.
     fn scroll_cap(&self) -> usize {
-        (crate::wire::MAX_FRAME / 2 / (self.cols.max(1) * 16 + 8)).max(1)
+        // The frame bound (the consumer's decoder) AND a heap bound (this
+        // producer's own): one ScrollOff is held as cells, then serialized,
+        // then framed -- three copies -- so its cell bytes stay well under
+        // the heap even at the widest tile.
+        let per_row = self.cols.max(1) * 16 + 8;
+        (crate::wire::MAX_FRAME / 2 / per_row)
+            .min(SCROLL_ACC_BYTES / per_row)
+            .max(1)
     }
 
     // Diff `current` against the shadow; emit a CellDiff iff a cell changed OR
@@ -236,7 +262,9 @@ fn classify_osc(payload: &[u8]) -> Option<Control> {
     let semi = payload.iter().position(|&b| b == b';')?;
     let (code, rest) = (&payload[..semi], &payload[semi + 1..]);
     match code {
-        b"0" | b"2" => core::str::from_utf8(rest).ok().map(|s| Control::Title(String::from(s))),
+        b"0" | b"2" => core::str::from_utf8(rest)
+            .ok()
+            .map(|s| Control::Title(String::from(s))),
         b"1936" => {
             let mut f = Vec::with_capacity(payload.len() + 3);
             f.extend_from_slice(b"\x1b]");
@@ -269,7 +297,12 @@ pub fn encode_key(ev: &KeyEvent, app_cursor: bool, out: &mut Vec<u8>) {
         KeyCode::Backspace => out.push(0x7f), // DEL, the xterm default
         KeyCode::Tab => out.push(b'\t'),
         KeyCode::BackTab => out.extend_from_slice(b"\x1b[Z"),
-        KeyCode::Up | KeyCode::Down | KeyCode::Right | KeyCode::Left | KeyCode::Home | KeyCode::End => {
+        KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Right
+        | KeyCode::Left
+        | KeyCode::Home
+        | KeyCode::End => {
             let f = match ev.code {
                 KeyCode::Up => b'A',
                 KeyCode::Down => b'B',
@@ -398,7 +431,10 @@ mod tests {
 
     fn cell_chars(rec: &Record) -> Vec<(u16, u16, char)> {
         match rec {
-            Record::CellDiff { changed, .. } => changed.iter().map(|(r, c, cell)| (*r, *c, cell.ch)).collect(),
+            Record::CellDiff { changed, .. } => changed
+                .iter()
+                .map(|(r, c, cell)| (*r, *c, cell.ch))
+                .collect(),
             other => panic!("expected CellDiff, got {other:?}"),
         }
     }
@@ -440,7 +476,10 @@ mod tests {
     #[test]
     fn title_becomes_a_control() {
         let recs = produce(6, 1, b"\x1b]0;win\x07");
-        assert_eq!(recs, vec![Record::Control(Control::Title(String::from("win")))]);
+        assert_eq!(
+            recs,
+            vec![Record::Control(Control::Title(String::from("win")))]
+        );
     }
 
     #[test]
@@ -506,7 +545,10 @@ mod tests {
         let mut p = Producer::new(&vt);
         let mut out = Vec::new();
         p.feed(&mut vt, b"main\x1b[?1049hX", &mut out); // ends on the alt screen
-        let alt_idx = out.iter().position(|r| *r == Record::Mode(ScreenMode::AltScreen)).unwrap();
+        let alt_idx = out
+            .iter()
+            .position(|r| *r == Record::Mode(ScreenMode::AltScreen))
+            .unwrap();
         // 'main' precedes the mode switch; 'X' (alt content) follows it.
         assert!(out[..alt_idx]
             .iter()
@@ -524,10 +566,16 @@ mod tests {
         // enter+paint+leave in ONE chunk: the alt content is transient (a real
         // terminal shows nothing), so the only records are the two mode flips.
         let recs = produce(6, 2, b"main\x1b[?1049hX\x1b[?1049l");
-        let modes: Vec<&Record> = recs.iter().filter(|r| matches!(r, Record::Mode(_))).collect();
+        let modes: Vec<&Record> = recs
+            .iter()
+            .filter(|r| matches!(r, Record::Mode(_)))
+            .collect();
         assert_eq!(
             modes,
-            vec![&Record::Mode(ScreenMode::AltScreen), &Record::Mode(ScreenMode::Normal)]
+            vec![
+                &Record::Mode(ScreenMode::AltScreen),
+                &Record::Mode(ScreenMode::Normal)
+            ]
         );
         // No CellDiff carries the transient 'X'.
         assert!(!recs
@@ -545,7 +593,10 @@ mod tests {
         let mut p = Producer::new(&vt);
         let mut out = Vec::new();
         p.feed(&mut vt, b"main\x1b[?1049h", &mut out);
-        let alt_idx = out.iter().position(|r| *r == Record::Mode(ScreenMode::AltScreen)).unwrap();
+        let alt_idx = out
+            .iter()
+            .position(|r| *r == Record::Mode(ScreenMode::AltScreen))
+            .unwrap();
         // The last CellDiff before the mode switch is the outgoing main.
         let main_cd = out[..alt_idx]
             .iter()
@@ -580,8 +631,15 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(sos.len() >= 2, "expected the cap to split the run: {} records", sos.len());
-        assert!(sos.iter().all(|rows| rows.len() <= cap), "a ScrollOff exceeded the cap");
+        assert!(
+            sos.len() >= 2,
+            "expected the cap to split the run: {} records",
+            sos.len()
+        );
+        assert!(
+            sos.iter().all(|rows| rows.len() <= cap),
+            "a ScrollOff exceeded the cap"
+        );
         let total: usize = sos.iter().map(|rows| rows.len()).sum();
         assert_eq!(total, scrolls, "no scrolled row may be lost");
     }
@@ -650,10 +708,22 @@ mod tests {
     fn encode_plain_and_control_chars() {
         assert_eq!(enc(KeyEvent::char('a'), false), b"a");
         assert_eq!(enc(KeyEvent::char('A'), false), b"A"); // Shift baked in
-        assert_eq!(enc(KeyEvent::with(KeyCode::Char('c'), Mods::CTRL), false), b"\x03"); // Ctrl-C
-        assert_eq!(enc(KeyEvent::with(KeyCode::Char('x'), Mods::ALT), false), b"\x1bx"); // Alt-x
-        // Alt+Ctrl-c -> ESC then the control byte.
-        assert_eq!(enc(KeyEvent::with(KeyCode::Char('c'), Mods::ALT | Mods::CTRL), false), b"\x1b\x03");
+        assert_eq!(
+            enc(KeyEvent::with(KeyCode::Char('c'), Mods::CTRL), false),
+            b"\x03"
+        ); // Ctrl-C
+        assert_eq!(
+            enc(KeyEvent::with(KeyCode::Char('x'), Mods::ALT), false),
+            b"\x1bx"
+        ); // Alt-x
+           // Alt+Ctrl-c -> ESC then the control byte.
+        assert_eq!(
+            enc(
+                KeyEvent::with(KeyCode::Char('c'), Mods::ALT | Mods::CTRL),
+                false
+            ),
+            b"\x1b\x03"
+        );
     }
 
     #[test]
@@ -679,9 +749,18 @@ mod tests {
     fn encode_modified_cursor_keys_are_csi_even_in_app_mode() {
         // A modifier forces the CSI form with the xterm modifier param, whatever
         // DECCKM says (1 + shift + alt*2 + ctrl*4).
-        assert_eq!(enc(KeyEvent::with(KeyCode::Up, Mods::SHIFT), true), b"\x1b[1;2A");
-        assert_eq!(enc(KeyEvent::with(KeyCode::Up, Mods::CTRL), true), b"\x1b[1;5A");
-        assert_eq!(enc(KeyEvent::with(KeyCode::Left, Mods::CTRL | Mods::ALT), false), b"\x1b[1;7D");
+        assert_eq!(
+            enc(KeyEvent::with(KeyCode::Up, Mods::SHIFT), true),
+            b"\x1b[1;2A"
+        );
+        assert_eq!(
+            enc(KeyEvent::with(KeyCode::Up, Mods::CTRL), true),
+            b"\x1b[1;5A"
+        );
+        assert_eq!(
+            enc(KeyEvent::with(KeyCode::Left, Mods::CTRL | Mods::ALT), false),
+            b"\x1b[1;7D"
+        );
     }
 
     #[test]
@@ -690,11 +769,17 @@ mod tests {
         assert_eq!(enc(KeyEvent::new(KeyCode::F(4)), false), b"\x1bOS");
         assert_eq!(enc(KeyEvent::new(KeyCode::F(5)), false), b"\x1b[15~");
         assert_eq!(enc(KeyEvent::new(KeyCode::F(12)), false), b"\x1b[24~");
-        assert_eq!(enc(KeyEvent::with(KeyCode::F(1), Mods::CTRL), false), b"\x1b[1;5P");
+        assert_eq!(
+            enc(KeyEvent::with(KeyCode::F(1), Mods::CTRL), false),
+            b"\x1b[1;5P"
+        );
         assert_eq!(enc(KeyEvent::new(KeyCode::Insert), false), b"\x1b[2~");
         assert_eq!(enc(KeyEvent::new(KeyCode::Delete), false), b"\x1b[3~");
         assert_eq!(enc(KeyEvent::new(KeyCode::PageUp), false), b"\x1b[5~");
         assert_eq!(enc(KeyEvent::new(KeyCode::PageDown), false), b"\x1b[6~");
-        assert_eq!(enc(KeyEvent::with(KeyCode::Delete, Mods::SHIFT), false), b"\x1b[3;2~");
+        assert_eq!(
+            enc(KeyEvent::with(KeyCode::Delete, Mods::SHIFT), false),
+            b"\x1b[3;2~"
+        );
     }
 }

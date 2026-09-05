@@ -107,8 +107,8 @@ impl MenuSet {
     /// selection or choose; a CONFIGURE repaints (the redraw request; a
     /// resize offer reweaves); a CLOSE or a dead stream means the compositor
     /// dismissed it. The menu lives on the renderer's one ring (the H-3c-2
-    /// event set), so the loop's `EventRing::wait` wakes for its keys like
-    /// the console's; before the event set this pump had to WAIT on the
+    /// event set), so the loop's unified poll on that ring wakes for its keys
+    /// like the console's; before the event set this pump had to WAIT on the
     /// menu's own ring while a menu was up, because a 9P session's replies
     /// are read only by a thread waiting on that session (the lever found
     /// the console-parked loop never saw a menu key).

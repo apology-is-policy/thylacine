@@ -219,7 +219,9 @@ enum Host {
 /// the next pass takes the rest.
 const LAYOUT_VERBS_PER_PASS: u32 = 4;
 const MAX_SURFACES_PER_RENDERER: usize = MAX_SURFACES_PER_CONN + pane::MAX_PANES;
-const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + pane::MAX_PANES;
+// One renderer and one declared session compositor may each hold a tile per
+// pane on top of the per-conn allowance.
+const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * pane::MAX_PANES;
 
 /// Warp-2c: the GPU-seam slot pools. ONE context per client (the I-45
 /// exposure bound, GPU-DESIGN section 8: no cross-context resource naming,
@@ -1586,6 +1588,12 @@ pub struct Comp {
     /// focus-only epoch bump redraws borders without blanking content
     /// (idle clients must not lose their pixels to a focus ring move).
     geom_sig: u64,
+    /// The conns that DECLARED themselves the display's session compositor
+    /// (`session on` on their own ctl). The display handoff keys on this,
+    /// never on a surface's principal: a user program drawing a window is
+    /// not a session, and must not put the console renderer to sleep. One
+    /// at a time (a display has one seat); cleared with the conn.
+    session_conns: Vec<u64>,
     /// The FRAME clock (section 18.4): a synthesized fixed-rate tick.
     pub tick: u64,
     pub clock_hz: u32,
@@ -2287,6 +2295,7 @@ impl Comp {
             pending_bind_refused_said: false,
             chrome_epoch: 0,
             geom_sig: 0,
+            session_conns: Vec::new(),
             tick: 0,
             clock_hz: 60,
             present_bucket_start: None,
@@ -3884,7 +3893,7 @@ impl Comp {
         }
         let leaf = self.layout.find_hosting(n)?;
         let p = self.layout.get(leaf)?;
-        if !p.visible {
+        if !p.visible || p.content.is_empty() {
             return None;
         }
         Some(p.content)
@@ -5782,7 +5791,7 @@ impl Comp {
         let hosted = self.layout.hosted_leaves();
         let has_session_tree = hosted.iter().any(|&(_, n)| {
             self.surf(n)
-                .is_some_and(|s| principal_is_session(s.owner_principal))
+                .is_some_and(|s| self.session_conns.contains(&s.owner_conn))
         });
         let bg_tiling: Vec<usize> = if has_session_tree {
             hosted
@@ -5802,30 +5811,24 @@ impl Comp {
         let nleaves = self.layout.visible_leaf_count();
 
         // d-1b (HALCYON 14.12 step 4): a user SESSION outranks SYSTEM content for
-        // the display. A leaf whose owner_principal is a real user principal is a
-        // session; SYSTEM leaves (the console renderer aurora + any system client)
-        // are BACKGROUNDED when a session leaf is visible -- excluded from the
+        // the display. A session is a conn that DECLARED itself the session
+        // compositor (`session on`) -- a user program drawing a window is not
+        // one; SYSTEM leaves (the console renderer aurora + any system client)
+        // are BACKGROUNDED while a declared session hosts a leaf -- excluded from the
         // decision below, skipped by the compose + CONFIGURE-fan sites, and skipped
         // by frame_tick, so the root collapses to the session (Direct) and aurora's
         // FRAME-driven loop goes dormant. Recomputed every reconcile; a transition
         // (either direction) is logged once as the fg/bg witness. BACKWARD-COMPAT:
         // no session leaf -> has_session false -> bg_now empty -> active_* equal the
         // raw vis/nleaves and the decision is byte-identical to the pre-d-1b logic.
-        let has_session = vis.iter().any(|v| {
-            self.surf(v.1)
-                .map_or(false, |s| principal_is_session(s.owner_principal))
-        });
-        let bg_now: Vec<usize> = if has_session {
-            vis.iter()
-                .filter(|v| {
-                    self.surf(v.1)
-                        .map_or(false, |s| !principal_is_session(s.owner_principal))
-                })
-                .map(|v| v.1)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let has_session = has_session_tree;
+        // ONE flag: a surface is backgrounded iff its leaf is (the tree flag
+        // stamped above) -- never re-derived from visibility, which flaps as a
+        // tab hides and shows the leaf.
+        let bg_now: Vec<usize> = bg_tiling
+            .iter()
+            .filter_map(|&slot| self.layout.leaf_surface(slot))
+            .collect();
         let mut bg_transitions: Vec<(usize, bool)> = Vec::new();
         for n in 0..MAX_SURFACES {
             let now = bg_now.contains(&n);
@@ -5875,7 +5878,8 @@ impl Comp {
             .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded))
             .cloned()
             .collect();
-        let active_nleaves = nleaves.saturating_sub(bg_now.len());
+        let bg_visible = vis.iter().filter(|v| bg_now.contains(&v.1)).count();
+        let active_nleaves = nleaves.saturating_sub(bg_visible);
 
         // F2 witness (test-mode): the FOREGROUND (non-backgrounded) session
         // tile widths when a session holds the display, so the ls-gfx-session
@@ -5919,7 +5923,18 @@ impl Comp {
             // H-3c: a placed menu is a second visible thing -- it composes
             // over the leaf, so Direct is off while one is up.
             let n = active_vis[0].1;
-            let full = self.surf(n).map_or(false, |s| s.w == dw && s.h == dh);
+            // Direct shows the surface at the display origin, so the layout
+            // must agree: a lone foreground leaf beside a zero-rect
+            // backgrounded one is borderless (recompute counts foreground
+            // leaves), and this conjunct is the guard that it stayed so.
+            let full = self.surf(n).is_some_and(|s| s.w == dw && s.h == dh)
+                && active_vis[0].2
+                    == (Rect {
+                        x: 0,
+                        y: 0,
+                        w: dw,
+                        h: dh,
+                    });
             if full {
                 Scanout::Direct(n)
             } else {
@@ -6316,6 +6331,21 @@ impl Comp {
         }
     }
 
+    /// Ownership with NO transparency: every hosted surface in the subtree is
+    /// the actor's. The predicate for a DESTRUCTIVE verb (`close` unhosts
+    /// every leaf it reaches, backgrounded or not), where a transparent
+    /// console leaf would be closed along with the session's own panes.
+    fn actor_owns_subtree_all(&self, actor: Actor, slot: usize) -> bool {
+        match actor {
+            Actor::Session(p) => self
+                .layout
+                .subtree_surfaces(slot)
+                .iter()
+                .all(|&n| self.surf(n).is_some_and(|s| s.owner_principal == p)),
+            other => self.actor_owns_subtree(other, slot),
+        }
+    }
+
     /// The actor may TAKE or NAME the tile at `slot`: a leaf hosting the
     /// actor's own surface. Focus and identity are a hosted tile's; an
     /// empty leaf is nobody's to focus (keystrokes to nowhere) or to name.
@@ -6495,7 +6525,7 @@ impl Comp {
                 return Err(p9::E_INVAL);
             }
         } else if cmd == "close" {
-            if !self.actor_owns_subtree(actor, slot) {
+            if !self.actor_owns_subtree_all(actor, slot) {
                 return Err(p9::E_PERM);
             }
             // Closing a pane strands its surfaces invisible BY DESIGN
@@ -6676,6 +6706,7 @@ impl Comp {
 
     /// Retire every surface owned by a dying conn (teardown / Tversion).
     fn retire_conn(&mut self, conn_id: u64) {
+        self.session_conns.retain(|&c| c != conn_id);
         for n in 0..MAX_SURFACES {
             if self.surf(n).map_or(false, |s| s.owner_conn == conn_id) {
                 self.retire(n);
@@ -7440,6 +7471,13 @@ impl Comp {
                     .and_then(|n| self.surf(n))
                     .map(|s| s.owner_principal)
                     .unwrap_or_else(|| self.layout.pane_owner_principal(f));
+                // The field's vocabulary is "0 = the environment's": a system
+                // surface's sentinel principal never lands on a leaf.
+                let owner = if principal_is_session(owner) {
+                    owner
+                } else {
+                    0
+                };
                 if let Some(new_leaf) = self.layout.split(f, mode) {
                     self.layout.set_owner_principal(new_leaf, owner);
                     self.reconcile();
@@ -13381,7 +13419,7 @@ impl Conn {
             // chrome surface per visible leaf on top of its own, so its cap
             // is widened by MAX_PANES; the global pool is sized so every
             // conn can reach its cap at once (nothing starves).
-            let cap = if self.peer_is_renderer() {
+            let cap = if self.peer_is_renderer() || comp.session_conns.contains(&self.conn_id) {
                 MAX_SURFACES_PER_RENDERER
             } else {
                 MAX_SURFACES_PER_CONN
@@ -15476,6 +15514,32 @@ impl Conn {
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
+        if let Some(rest) = s.strip_prefix("session ") {
+            // The display handoff is a DECLARATION, made by the session
+            // compositor on its own conn: a Session principal only (the
+            // renderer and SYSTEM clients never take the display this way),
+            // one declared conn per display at a time, cleared with the conn.
+            // Not renderer-gated: the declaring conn IS the user's seat.
+            if !principal_is_session(self.peer_principal) {
+                return Err(p9::E_PERM);
+            }
+            match rest.trim() {
+                "on" => {
+                    if let Some(&other) = comp.session_conns.first() {
+                        if other != self.conn_id {
+                            return Err(p9::E_BUSY);
+                        }
+                        return Ok(());
+                    }
+                    comp.session_conns.push(self.conn_id);
+                    say!("tapestryd: session declared by conn {}", self.conn_id);
+                }
+                "off" => comp.session_conns.retain(|&c| c != self.conn_id),
+                _ => return Err(p9::E_INVAL),
+            }
+            comp.reconcile();
+            return Ok(());
+        }
         // The apply-authority gate (cfg-3; the ARCH section 25.4 cfg-3
         // addendum is the prosecution list): every AUTHORITY-BEARING
         // global verb -- mode, clock-rate, and every future global

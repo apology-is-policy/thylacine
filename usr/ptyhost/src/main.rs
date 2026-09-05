@@ -45,11 +45,11 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use ptyhold::{HoldError, Master};
 use libthyla_rs::{
     env, t_burrow_attach, t_close, t_exit_group, t_putstr, t_read, t_thread_exit, t_wait_pid_for,
     t_write, thread,
 };
+use ptyhold::{HoldError, Master};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
@@ -71,13 +71,26 @@ extern "C" fn pump_in(arg: u64) {
             break;
         }
         let mut off = 0usize;
+        let mut zeros = 0u32;
         while off < n as usize {
             let w = unsafe { t_write(mfd, buf.as_ptr().add(off), n as usize - off) };
-            if w <= 0 {
+            if w < 0 {
                 // Master unusable: the main thread owns the teardown.
                 // SAFETY: `!`-returning SVC.
                 unsafe { t_thread_exit() }
             }
+            if w == 0 {
+                // A raw-mode master accepts what fits and answers 0 when its
+                // ring is full: back-pressure, not an error. Wait it out
+                // briefly; a ring full past the bound drops the rest.
+                zeros += 1;
+                if zeros > 200 {
+                    break;
+                }
+                let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(1));
+                continue;
+            }
+            zeros = 0;
             off += w as usize;
         }
     }
@@ -157,8 +170,15 @@ fn run() -> i64 {
     //    renders; it just cannot be typed at) -- reported, not fatal.
     let stack = unsafe { t_burrow_attach(PUMP_STACK) };
     if stack < 0
-        || unsafe { thread::spawn_raw(pump_in as *const () as u64, stack as u64 + PUMP_STACK, mfd as u64, 0) }
-            .is_err()
+        || unsafe {
+            thread::spawn_raw(
+                pump_in as *const () as u64,
+                stack as u64 + PUMP_STACK,
+                mfd as u64,
+                0,
+            )
+        }
+        .is_err()
     {
         t_putstr("ptyhost: input pump spawn failed (output-only)\n");
     }

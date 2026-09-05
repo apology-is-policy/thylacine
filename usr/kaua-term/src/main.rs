@@ -41,8 +41,12 @@ use libthyla_rs::{
     torpor,
 };
 
+// A lazy 32 MiB span: one capped ScrollOff is held as cells, serialized and
+// framed before the up-pipe write, and the 4 MiB default could not hold the
+// three copies of a wide bulk scroll (pages commit only as touched).
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 32 * 1024 * 1024 }> =
+    libthyla_rs::alloc::ThylaAllocN;
 
 const DOWN_FD: i64 = 0;
 const UP_FD: i64 = 1;
@@ -94,14 +98,30 @@ struct Shared {
     master_write: WriteLock,
 }
 
+/// A zero-count write is back-pressure, not an error: a raw-mode pts master
+/// accepts what fits and replies 0 when its ring is full. Retry briefly so a
+/// key's bytes stay whole; give up (and drop the rest) only when the ring
+/// stays full past the bound or the fd errors.
+const WRITE_ZERO_RETRIES: u32 = 200;
+
 fn write_all(fd: i64, buf: &[u8]) {
     let mut off = 0usize;
+    let mut zeros = 0u32;
     while off < buf.len() {
         // SAFETY: SVC wrapper over this thread's own buffer.
         let w = unsafe { t_write(fd, buf.as_ptr().add(off), buf.len() - off) };
-        if w <= 0 {
+        if w < 0 {
             break;
         }
+        if w == 0 {
+            zeros += 1;
+            if zeros > WRITE_ZERO_RETRIES {
+                break;
+            }
+            let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(1));
+            continue;
+        }
+        zeros = 0;
         off += w as usize;
     }
 }
@@ -126,6 +146,23 @@ fn emit(recs: &[Record], out: &mut Vec<u8>) {
     }
 }
 
+/// Apply a posted resize to the vt + producer and emit the full redraw.
+fn apply_resize(
+    sh: &Shared,
+    vt: &mut Vt,
+    prod: &mut Producer,
+    recs: &mut Vec<Record>,
+    out: &mut Vec<u8>,
+) {
+    let packed = sh.pending_resize.swap(0, Ordering::Relaxed);
+    if packed != 0 {
+        vt.resize((packed >> 16) as usize, (packed & 0xffff) as usize);
+        recs.clear();
+        prod.resized(vt, recs);
+        emit(recs, out);
+    }
+}
+
 // The INPUT thread: fd 0 -> Input -> the master / winsize.
 extern "C" fn pump_in(arg: u64) {
     // SAFETY: `arg` is the &'static Shared pointer the main thread passed.
@@ -133,7 +170,7 @@ extern "C" fn pump_in(arg: u64) {
     let mut dec = FrameDecoder::new();
     let mut rbuf = [0u8; 1024];
     let mut kbuf: Vec<u8> = Vec::new();
-    loop {
+    'down: loop {
         // SAFETY: SVC wrapper over this thread's own stack buffer.
         let n = unsafe { t_read(DOWN_FD, rbuf.as_mut_ptr(), rbuf.len()) };
         if n <= 0 {
@@ -160,8 +197,10 @@ extern "C" fn pump_in(arg: u64) {
                     // drop the record rather than tearing the tile down.
                     Err(_) => {}
                 },
-                // An oversize frame is unrecoverable stream desync: stop reading.
-                Some(Err(_)) => break,
+                // An oversize frame is unrecoverable stream desync: the channel
+                // is gone for good (reading on would only grow the buffer with
+                // every key dropped), so end the kaua-term as on EOF.
+                Some(Err(_)) => break 'down,
                 None => break,
             }
         }
@@ -255,18 +294,16 @@ fn run() -> i64 {
     loop {
         // Apply a pending resize before processing new output, so the CellDiff
         // is computed against the correct geometry.
-        let packed = sh.pending_resize.swap(0, Ordering::Relaxed);
-        if packed != 0 {
-            vt.resize((packed >> 16) as usize, (packed & 0xffff) as usize);
-            recs.clear();
-            prod.resized(&vt, &mut recs);
-            emit(&recs, &mut out);
-        }
+        apply_resize(sh, &mut vt, &mut prod, &mut recs, &mut out);
         // SAFETY: SVC wrapper over this thread's own stack buffer.
         let n = unsafe { t_read(mfd, buf.as_mut_ptr(), buf.len()) };
         if n <= 0 {
             break; // app exited: drain-then-EOF on the master
         }
+        // The resize is posted while this read is parked, and the bytes it
+        // returns are usually the app's SIGWINCH repaint at the NEW size: apply
+        // it again here, or that repaint is parsed at the old geometry.
+        apply_resize(sh, &mut vt, &mut prod, &mut recs, &mut out);
         recs.clear();
         prod.feed(&mut vt, &buf[..n as usize], &mut recs);
         sh.app_cursor.store(vt.app_cursor(), Ordering::Relaxed);

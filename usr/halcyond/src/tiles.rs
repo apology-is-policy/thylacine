@@ -33,11 +33,16 @@ pub struct SessionPlan {
 ///
 /// A leaf occupied by another actor's surface (`surface=Some`, not ours) is
 /// never a candidate: only empty leaves are claimable, and the claim would
-/// fail anyway. A leaf we host that vanished is a drop.
+/// fail anyway. A leaf we host that vanished is a drop -- vanished from the
+/// TREE, never merely hidden (a zoom or a tab hides a hosted leaf; its shell
+/// keeps running, and it is filled again when shown). A hidden empty leaf is
+/// not created either: it gets no geometry until it shows.
 pub fn plan_tiles(leaves: &[Leaf], have: &[u32], closed: &[u32]) -> SessionPlan {
     let create = leaves
         .iter()
-        .filter(|l| l.surface.is_none() && !have.contains(&l.id) && !closed.contains(&l.id))
+        .filter(|l| {
+            l.surface.is_none() && !l.hidden && !have.contains(&l.id) && !closed.contains(&l.id)
+        })
         .map(|l| l.id)
         .collect();
     let drop = have
@@ -58,6 +63,7 @@ mod tests {
             id,
             focused,
             surface,
+            hidden: false,
         }
     }
 
@@ -121,5 +127,33 @@ mod tests {
         let leaves = vec![leaf(1, false, None), leaf(2, true, None)];
         let plan = plan_tiles(&leaves, &[], &[]);
         assert_eq!(plan.create, vec![1, 2]);
+    }
+
+    #[test]
+    fn a_hidden_leaf_we_host_is_neither_created_nor_dropped() {
+        // A zoom (or a tab) hides leaf 2 -- its shell keeps running. Hidden
+        // is not vanished: dropping it here would kill that shell.
+        let mut hidden = leaf(2, false, Some(101));
+        hidden.hidden = true;
+        let leaves = vec![leaf(1, true, Some(100)), hidden];
+        let have = [1u32, 2u32];
+        let plan = plan_tiles(&leaves, &have, &[]);
+        assert!(plan.create.is_empty());
+        assert!(
+            plan.drop.is_empty(),
+            "a hidden hosted leaf must not be dropped"
+        );
+    }
+
+    #[test]
+    fn a_hidden_empty_leaf_is_not_created() {
+        // An empty leaf hidden under a zoom has no geometry to size a tile
+        // by; it is created once it shows.
+        let mut hidden = leaf(3, false, None);
+        hidden.hidden = true;
+        let leaves = vec![leaf(1, true, Some(100)), hidden];
+        let plan = plan_tiles(&leaves, &[1u32], &[]);
+        assert!(plan.create.is_empty());
+        assert!(plan.drop.is_empty());
     }
 }

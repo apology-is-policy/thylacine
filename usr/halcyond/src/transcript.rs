@@ -285,6 +285,12 @@ pub const DEFAULT_MAX_BLOCKS: usize = 1000;
 pub const DEFAULT_MAX_COST: usize = 32 << 20;
 pub const DEFAULT_MAX_LINES_PER_BLOCK: usize = 10_000;
 
+/// What one retained line costs beyond its cells: the `Item` slot, the
+/// `Line`'s vector header, and the allocator's per-block overhead. A cost
+/// model that charged only cells let an empty line be free, and a count cap
+/// alone is a budget the item count can spend past.
+const ITEM_OVERHEAD: usize = core::mem::size_of::<Item>() + core::mem::size_of::<Line>() + 16;
+
 impl Transcript {
     pub fn new(pal: Palette) -> Transcript {
         Transcript::with_caps(
@@ -745,7 +751,7 @@ impl Transcript {
             return;
         }
         let cells = core::mem::take(&mut self.line);
-        let cost = cells.len() * core::mem::size_of::<TCell>();
+        let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
         self.open.cost += cost;
         self.stored_cost += cost;
         self.open.items.push(Item::Line(Line { cells }));
@@ -1032,7 +1038,11 @@ impl Transcript {
             return; // row separation is structural, not textual
         }
         if self.line.is_empty() {
-            // A blank line is content: keep it as an empty Line item.
+            // A blank line is content: keep it as an empty Line item -- and
+            // charge it: a million empty lines is a million items.
+            let cost = ITEM_OVERHEAD;
+            self.open.cost += cost;
+            self.stored_cost += cost;
             self.open.items.push(Item::Line(Line { cells: Vec::new() }));
             self.col = 0;
             self.enforce_block_cap();
@@ -1102,12 +1112,20 @@ impl Transcript {
                 });
                 cells.push(TCell { ch: c.ch, style });
             }
-            let cost = cells.len() * core::mem::size_of::<TCell>();
+            let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
             self.open.cost += cost;
             self.stored_cost += cost;
             self.open.items.push(Item::Line(Line { cells }));
             self.enforce_block_cap();
         }
+    }
+
+    /// Re-budget a live transcript (a session shares one scrollback budget
+    /// across its tiles, so each tile's share moves as tiles come and go).
+    /// Enforced lazily at the next push, like the constructor's value.
+    pub fn set_max_cost(&mut self, max_cost: usize) {
+        self.max_cost = max_cost;
+        self.max_open_cost = (max_cost / 8).max(1);
     }
 }
 

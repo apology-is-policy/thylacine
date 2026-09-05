@@ -570,6 +570,22 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     }
+    // An UNDECLARED user client (this battery never writes `session on`) must
+    // not put the console renderer to sleep: its leaf keeps a real column.
+    if let Some(cid) = foreign_pane(&layout, &[a.id, b.id]) {
+        let g = read_file(root, &alloc::format!("pane/{}/geometry", cid)).unwrap_or_default();
+        let mut it = g.split_ascii_whitespace().skip(2);
+        let cw: u32 = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
+        let ch: u32 = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
+        if cw == 0 || ch == 0 {
+            say!(
+                "tapestry-battery: FAIL console leaf backgrounded by an undeclared client ('{}')",
+                g.trim()
+            );
+            return 1;
+        }
+        say!("battery: console leaf tiled {} {}", cw, ch);
+    }
     say!("tapestry-battery: structure OK");
     say!(
         "battery: stage1 centers {} {} {} {}",

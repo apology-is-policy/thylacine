@@ -80,6 +80,45 @@ and test-mode now logs each resize-ack rejection with its discriminant and the
 deciding state -- the witness run 28 lacked. ls-gfx-panes is the regression
 test: it fails 3/3 without the fold. With the fold in, and the battery's move leg re-keyed from "B must not sit at the left edge" (a discriminator that was really aurora's pre-F2 column) to the layout text's child order, ls-gfx-panes passed all 15 legs; restore, test.sh, session (**1264/1280**) and chords (cfg-4) passed on the same code. Landed as the F2 unit (hash: the status row in `docs/halcyon-status.md`).
 
+**Found while landing, not fixed: the vault is un-committable.** CLAUDE.md's
+doc step 0 routed the tapestryd prose into the vault (`quaestor owner` says
+it carries `server.rs` + `pane.rs`), and the vault's own pre-commit lint
+refused the commit on five items that predate it -- three 2026-08 change
+records whose `mirrors-checked` covers 15 of the boot-banner note's 28
+mirrors, and two stale generated views. Nobody has been able to commit
+there for about three weeks, which is the vault's coverage-is-not-currency
+lesson applied to its own gate. The section + record sit staged in
+`../thylacine-vault`; the vault track was rung (yip 0049) rather than the
+hook bypassed.
+
+**The batched KT-1 audit (three Fable prosecutors, in parallel) came back
+DIRTY -- 3 P0.** The poll substrate (A) was clean but for six P3s; the
+kaua-term seam (B) and the compositor + session (C) each found the same P0
+from two directions: login spawns the per-user compositor WITHOUT the cap
+mask it applies to the console shell, and `Command` inherits every cap by
+default -- so halcyond, every kaua-term and every program in every tile held
+CAP_SET_IDENTITY, and could spawn as any principal. The d-1a commit had
+asserted "no extra cap" and the reference doc repeated it; neither was
+evidence. The second P0 was a data-loss bug: the session reconcile parsed the
+layout with the CHROME parser, which skips hidden leaves, so a zoom read the
+hidden tile as vanished and killed its shell. Both are witnessed now: a
+`/bin/caps-probe` typed into a tile (plain spawn OK, identity spawn REFUSED)
+and a zoom/unzoom leg that fails if the hidden tile dies. C also showed the
+F2 commit's "session-less display -> byte-identical console path" claim was
+FALSE: `principal_is_session` is true for ANY user, so a DOSBox run from the
+console shell put the console to sleep. The display handoff is now an
+explicit act -- `session on`, declared by the compositor on its own conn --
+which is also what closes the per-conn surface cap for a session and lets the
+flag be derived from the tree alone (the two-flags trap dissolves). Every
+P0/P1/P2 is fixed on the branch; the kernel P3s from A are deferred with the
+kernel untouched, so the SMP gate's 40/40 on 53ee407f still stands.
+
+**The cutover, mid-close.** The vault track (operator-approved) asked for a
+hold on `main` at `2ceb606a` while the vault lands there; the audit-close
+work moved to a local branch and rebases after the push. The vault had
+already carried my staged F2 files into its resync, so the yip-0049 block
+resolved itself; reference docs retire to dossiers from here.
+
 **Lessons, both reusable.** A state signature that omits a dimension makes every
 change along it invisible: the detector consumed (where, what) and hashed only
 (where). And read an error's discriminant before theorizing about it -- the code

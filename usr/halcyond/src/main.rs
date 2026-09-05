@@ -284,7 +284,20 @@ pub extern "C" fn rs_main() -> i64 {
         .operands()
         .any(|a| a == b"--session")
     {
-        return session::run();
+        // `--home <dir>`: forwarded to every tile's shell (its $home, `cd`,
+        // history and the per-user /tmp bind all key on it).
+        let mut home: Option<alloc::string::String> = None;
+        let mut want = false;
+        for a in libthyla_rs::env::args().operands() {
+            if want {
+                home = core::str::from_utf8(a)
+                    .ok()
+                    .map(alloc::string::String::from);
+                break;
+            }
+            want = a == b"--home";
+        }
+        return session::run(home);
     }
     if !cornucopia::verify_all() {
         say!("halcyond: FAIL atlas magic/version");
@@ -731,10 +744,9 @@ pub extern "C" fn rs_main() -> i64 {
         // the expanded command into the console (the tag line's "executes
         // typed text" -- the gesture is the choice); the compositor's own
         // dismiss (Esc / click-away / a chord) arrives as a closed stream.
-        // While a menu is up this WAITS on the menu's ring (see
-        // `MenuSet::service`: its session is read only by a waiter on it;
-        // the menu's FRAME ticks bound the wait) and step (1) polls the
-        // console's stream instead of blocking on it.
+        // While a menu is up `MenuSet::service` drains the menu's events
+        // NON-blockingly off the one shared ring (the H-3c-2 event set);
+        // the loop's unified poll wakes for them like the console's own.
         match menus.service(&mut gs) {
             menuset::MenuEvent::Chosen(Action::Command(cmd)) => {
                 menus.close();

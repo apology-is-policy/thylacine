@@ -23,6 +23,9 @@ use crate::{Control, Record, ScreenMode};
 /// this is unrecoverable desync -> tear down the tile. Sized to hold a
 /// full-screen CellDiff for a generous tile (a 17-byte entry per cell); the
 /// ring transport (KT-1.4b) may pin it to the registered buffer size.
+/// The longest title a record may carry (matches the vt's OSC 0/2 cap).
+pub const MAX_TITLE: usize = 256;
+
 pub const MAX_FRAME: usize = 4 * 1024 * 1024;
 
 // One serialized CellDiff/ScrollOff entry is >= this many bytes (row u16 + col
@@ -248,7 +251,10 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
                 let cx = r.u16()?;
                 changed.push((rr, cx, r.cell()?));
             }
-            Record::CellDiff { changed, cursor: (cr, cc, cv) }
+            Record::CellDiff {
+                changed,
+                cursor: (cr, cc, cv),
+            }
         }
         T_SCROLLOFF => {
             let nrows = r.u32()?;
@@ -272,7 +278,13 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
                 }
                 C_BELL => Control::Bell,
                 C_TITLE => {
+                    // The vt caps a title at 256 bytes on the untrusted side;
+                    // the consumer retains it for the tile's life, so the cap
+                    // is enforced HERE too.
                     let n = r.u32()? as usize;
+                    if n > MAX_TITLE {
+                        return Err(WireError::Malformed);
+                    }
                     let s = core::str::from_utf8(r.take(n)?).map_err(|_| WireError::Malformed)?;
                     Control::Title(String::from(s))
                 }
@@ -327,7 +339,10 @@ pub fn parse_input(tag: u8, payload: &[u8]) -> Result<Input, WireError> {
             let mods = decode_mods(r.u8()?);
             Input::Key(KeyEvent::with(code, mods))
         }
-        T_RESIZE => Input::Resize { cols: r.u16()?, rows: r.u16()? },
+        T_RESIZE => Input::Resize {
+            cols: r.u16()?,
+            rows: r.u16()?,
+        },
         _ => return Err(WireError::Malformed),
     };
     if !r.done() {
@@ -363,7 +378,10 @@ pub struct FrameDecoder {
 
 impl FrameDecoder {
     pub fn new() -> FrameDecoder {
-        FrameDecoder { buf: Vec::new(), pos: 0 }
+        FrameDecoder {
+            buf: Vec::new(),
+            pos: 0,
+        }
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
@@ -419,7 +437,12 @@ mod tests {
     }
 
     fn cell(ch: char) -> Cell {
-        Cell { ch, fg: 0x11, bg: 0x22, attrs: vt::ATTR_BOLD }
+        Cell {
+            ch,
+            fg: 0x11,
+            bg: 0x22,
+            attrs: vt::ATTR_BOLD,
+        }
     }
 
     #[test]
@@ -428,8 +451,12 @@ mod tests {
             changed: vec![(0, 0, cell('a')), (3, 7, cell('Z'))],
             cursor: (2, 5, true),
         });
-        rt_record(Record::ScrollOff { rows: vec![vec![cell('x'), cell('y')], vec![cell('z')]] });
-        rt_record(Record::Control(Control::Osc1936Raw(b"\x1b]1936;v1;zone\x1b\\".to_vec())));
+        rt_record(Record::ScrollOff {
+            rows: vec![vec![cell('x'), cell('y')], vec![cell('z')]],
+        });
+        rt_record(Record::Control(Control::Osc1936Raw(
+            b"\x1b]1936;v1;zone\x1b\\".to_vec(),
+        )));
         rt_record(Record::Control(Control::Bell));
         rt_record(Record::Control(Control::Title(String::from("hi there"))));
         rt_record(Record::Control(Control::Exit(-7)));
@@ -450,10 +477,16 @@ mod tests {
     #[test]
     fn input_round_trips() {
         rt_input(Input::Key(KeyEvent::char('q')));
-        rt_input(Input::Key(KeyEvent::with(KeyCode::Up, Mods::CTRL | Mods::SHIFT)));
+        rt_input(Input::Key(KeyEvent::with(
+            KeyCode::Up,
+            Mods::CTRL | Mods::SHIFT,
+        )));
         rt_input(Input::Key(KeyEvent::new(KeyCode::F(9))));
         rt_input(Input::Key(KeyEvent::with(KeyCode::Char('c'), Mods::ALT)));
-        rt_input(Input::Resize { cols: 132, rows: 43 });
+        rt_input(Input::Resize {
+            cols: 132,
+            rows: 43,
+        });
     }
 
     #[test]
@@ -473,7 +506,10 @@ mod tests {
         }
         assert_eq!(
             got,
-            vec![Record::Control(Control::Bell), Record::Mode(ScreenMode::AltScreen)]
+            vec![
+                Record::Control(Control::Bell),
+                Record::Mode(ScreenMode::AltScreen)
+            ]
         );
     }
 
@@ -495,7 +531,7 @@ mod tests {
         put_u16(&mut p, 0);
         p.push(1);
         put_u32(&mut p, 100); // 100 changed cells...
-        // ...but nothing follows.
+                              // ...but nothing follows.
         assert_eq!(parse_record(T_CELLDIFF, &p), Err(WireError::Malformed));
     }
 

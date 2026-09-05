@@ -132,6 +132,34 @@ expect {
     eof     { lc_fail "qemu exited during tile ingest" }
 }
 
+# --- caps: a session tile's programs must NOT hold CAP_SET_IDENTITY ---
+#
+# login masks the compositor's caps (the shell's mask); halcyond masks the
+# tile spawn again. /bin/caps-probe, typed into the focused tile's ut, tries a
+# plain spawn (the control: the spawn path works) and then the same spawn with
+# an identity set, which the kernel refuses without the cap. Its lines ride
+# SYS_PUTS to the serial. ACCEPTED here is the round-1 P0 (an unmasked spawn
+# leaked login's CAP_SET_IDENTITY into every tile program).
+after 1500
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "/bin/caps-probe\n"} err]} {
+    lc_fail "qmp-sendtext caps-probe failed: $err"
+}
+set timeout 60
+expect {
+    -ex "caps-probe: plain spawn OK" { lc_step "caps: the control spawn from a session tile works" }
+    -ex "caps-probe: plain spawn FAILED" { lc_fail "caps-probe control broken: a plain spawn from the tile failed" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during caps-probe" }
+    timeout { lc_fail "caps-probe never ran in the tile (typed input did not reach ut, or /bin/caps-probe is missing)" }
+    eof { lc_fail "qemu exited during caps-probe" }
+}
+expect {
+    -ex "caps-probe: identity spawn REFUSED" { lc_pass "caps: an identity spawn from a session tile is REFUSED (CAP_SET_IDENTITY did not leak past login)" }
+    -ex "caps-probe: identity spawn ACCEPTED" { lc_fail "P0: a session tile holds CAP_SET_IDENTITY -- an identity spawn was ACCEPTED" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during caps-probe" }
+    timeout { lc_fail "caps-probe printed no identity verdict" }
+    eof { lc_fail "qemu exited during caps-probe" }
+}
+
 # --- d-3: SPLIT -- Super+H creates a SECOND tile (capture its leaf id B) ---
 #
 # Settle the root ut at a prompt, then Super+H over QMP. tapestryd's Super chord
@@ -197,6 +225,37 @@ if {$B eq $A} {
     lc_fail "the split reused the root leaf id ($A) -- no new leaf was created"
 }
 
+# --- zoom: a HIDDEN tile stays hosted (its shell survives the zoom) ---
+#
+# Super+F zooms the FOCUSED leaf (B): A is laid out hidden. The session
+# compositor must read a hidden leaf as still hosted -- the round-1 P0 read it
+# as vanished and killed A's shell. Witness: B alone at full width (the lone
+# foreground leaf is borderless), and NO exit/crash line for A across the
+# zoom; then the unzoom restores both tiles at the widths captured above.
+after 1500
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+f"} err]} {
+    lc_fail "qmp-sendtext zoom chord failed: $err"
+}
+set timeout 60
+expect {
+    -re "tapestryd: session-tiling active=1 min_w=$dispw sum_w=$dispw" { lc_step "zoom: B alone fills the display (borderless, $dispw wide)" }
+    -re "halcyond: session tile leaf=$A (exited|crashed)" { lc_fail "P0: the zoom killed the HIDDEN tile A (a hidden leaf read as vanished)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during zoom" }
+    timeout { lc_fail "no active=1 full-width witness after the zoom chord (zoom, or the lone-leaf borderless rule, broken)" }
+    eof { lc_fail "qemu exited during zoom" }
+}
+after 1500
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+f"} err]} {
+    lc_fail "qmp-sendtext unzoom chord failed: $err"
+}
+expect {
+    -re "tapestryd: session-tiling active=2 min_w=$minw sum_w=$sumw" { lc_pass "zoom: unzoom restored both tiles; A survived hidden (sum_w=$sumw)" }
+    -re "halcyond: session tile leaf=$A (exited|crashed)" { lc_fail "P0: tile A died across the zoom" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during unzoom" }
+    timeout { lc_fail "no active=2 witness after the unzoom chord" }
+    eof { lc_fail "qemu exited during unzoom" }
+}
+
 # --- d-3: FOCUS-ROUTED input + CONTAINMENT -- exit B (focused), A survives ---
 #
 # The new tile B is focused (split sets focused=new-leaf). QMP `exit\n` is
@@ -222,6 +281,19 @@ expect {
     -re {EXTINCTION:} { lc_extinction_fail "extinction closing the focused tile" }
     timeout { lc_fail "no close after `exit` -- input never reached the focused tile B" }
     eof     { lc_fail "qemu exited closing the focused tile" }
+}
+
+# --- lone tile: the survivor returns to borderless full width ---
+#
+# With B gone, A is the only foreground leaf beside the zero-rect console
+# leaf: the inset counts foreground leaves, so A is borderless and full width
+# (Direct-eligible) -- round-1 F4 had it keep a ring + tag bar forever.
+set timeout 30
+expect {
+    -re "tapestryd: session-tiling active=1 min_w=$dispw sum_w=$dispw" { lc_pass "lone tile: A is borderless + full width after B closed" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction after B closed" }
+    timeout { lc_fail "after B closed, A did not return to full width (the inset counted a zero-rect leaf)" }
+    eof { lc_fail "qemu exited after B closed" }
 }
 
 # --- d-3: focus re-home + last-tile logout -- exit A -> logout ---

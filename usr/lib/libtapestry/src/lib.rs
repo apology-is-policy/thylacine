@@ -59,13 +59,13 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 #[cfg(feature = "guest")]
+use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "guest")]
 use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, ENTER_GETEVENTS, SETUP_SQPOLL};
 #[cfg(feature = "guest")]
 use libthyla_rs::{
     t_close, t_open, t_read, t_weft_map, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
-#[cfg(feature = "guest")]
-use core::sync::atomic::{AtomicBool, Ordering};
 
 mod ring;
 
@@ -1056,6 +1056,22 @@ impl EventRing {
     /// the ring: never close it.
     pub fn root(&self) -> i64 {
         self.core.borrow().root.0
+    }
+
+    /// Write one global-ctl verb on THIS ring's conn (the conn-keyed verbs:
+    /// `session on` declares the session compositor). Opens ctl per write.
+    pub fn global_ctl(&self, cmd: &str) -> Result<(), TapError> {
+        let root = self.root();
+        let ctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OWRITE) };
+        if ctl < 0 {
+            return Err(TapError::Protocol);
+        }
+        let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
+        unsafe { t_close(ctl) };
+        if rc < 0 {
+            return Err(TapError::Protocol);
+        }
+        Ok(())
     }
 
     /// The ring's Loom fd, for `poll(2)`. Meaningful only on an SQPOLL ring
