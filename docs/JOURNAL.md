@@ -44,7 +44,7 @@ needed the operator.
 
 **A shell slip worth recording.** An unquoted heredoc (`<<PY`) carrying prose with backticked commands executed them: the working tree was checked out at `main` for a minute while the prosecutor was reading it, and a `git push origin main` went out — rejected only because the remote had moved. The prosecutor was told, re-read by md5 against the commit, and nothing was published; the lesson is a memory pin (always `<<'EOF'`).
 
-**Next**: the full gate set on the round-3 tree, the hash fixup, the rebase onto the vault peer's four absorption commits (only generated views overlap), the ff-merge to `main` and the push; then the aux-handed fullscreen-zoom bug on F2, then H-4c/H-4d.
+**Landed.** The full gate set passed on the round-3 tree (ls-gfx-panes with the declare controls, ls-gfx-restore, test.sh, ls-gfx-session, ls-gfx-chords; host tests halcyond 99 / kaua-term 30); the close is `65bb05b3`, its hash fixup `22293c3f`, and the vault peer's commits (`4134fc37`, vault-only) were merged in with the two generated views regenerated — `732a95c8` is `main` on both mirrors. One vault rule learned at the commit: a landed `chg` is append-only (R3) — the hook refused the round-3 edges appended to the round-2 note, so round 3 carries its own superseding `chg`. **Next**: the aux-handed fullscreen-zoom bug (instrument the zoomed leaf's placement before believing either root-cause theory), then H-4c/H-4d.
 
 ---
 
