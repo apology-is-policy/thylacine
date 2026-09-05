@@ -4,7 +4,7 @@ type: chg
 title: "The fullscreen-zoom fix folded into the dossiers: the #56-latch discriminator (sub-tapestryd), set_single_slot (sub-libtapestry), place.rs (sub-libhalcyon)"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["7ce2bb26"]
 touched:
   - sub-tapestryd
   - sub-libtapestry
