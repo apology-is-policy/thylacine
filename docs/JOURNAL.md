@@ -81,13 +81,31 @@ write). Each folded as a vault fold-chg citing main's record, verified against t
 landed code -- not a re-derivation. One fumble, caught by lint: `depth: standard`
 on the first fold-chg; the field takes only `rich`|`skeletal`.
 
-**What is open.** The remaining stale dossiers are fresh-subsystem or
-fresh-window work: `sub-stratum-boot` (joey.c, ~5659 churn, the biggest), the
-proc.c cluster (proc/jobctl/caps/death -- it will close the Design-D and
-fork-inherits-caps cross-refs this run's dispatch/vivarium dossiers point at),
-`sub-substrate-build`, and a NEW `sub-sdl-port` for aux's N-2a-2 SDL work. The
-stale backlog stands at 53 dossiers (from 56 at the run's start; four dossiers
-dropped off, and the folds touched already-current ones).
+**The run continued through two more of the proc.c cluster.** `sub-kernel-proc`
+(`63f91796`) closed the cross-refs the dispatch and vivarium de-stales opened:
+`rfork_forked_with_caps` (the Linux clone, `caps_mask = CAP_ALL`), the PHENO_LINUX
+note-mask inheritance (#127), and Design D's phenotype commit in
+`proc_exec_replace` (the ONE RELEASE store, in the infallible region -- the
+exec-replace section had the three resets but not this commit). `sub-kernel-caps`
+(`c2991edb`) was the cluster's capability sibling and its FIRST *earned* update:
+its own Provenance recorded two intervals where staleness was borrowed from
+co-tenant proc.c churn, and `830817c4` was the first caps-relevant one -- the
+fork-inherits-caps variant plus the resolved comment drift (caps.h's
+`CAP_ALL`/`CAP_ELEVATION_ONLY` comments, once four-and-omitting-DEBUG, now
+enumerate all six).
+
+**What is open, precisely classified.** The two remaining proc.c-cluster
+siblings split: `sub-kernel-death` is **earned** (`f557beb2` #91 exit-byte -> `$?`,
+plus the vfork audit -- a real de-stale), while `sub-kernel-jobctl` looks
+**borrowed** (no `setsid`/`setpgid`/`notes_post_pgrp`/`job_stop` token changed)
+but a substring scan hit noisy `sid`/`session`/`pgrp`, so confirming it needs a
+*word-bounded* token diff in context before a borrowed-re-verify (the caps
+`stale-by-cotenancy` pattern) -- not assumed. Beyond the cluster: `sub-stratum-boot`
+(joey.c, ~5659, biggest), `sub-substrate-build`, and a NEW `sub-sdl-port` for
+aux's N-2a-2 SDL work. Backlog: 51 dossiers (from 56 at the run's start).
+
+Six kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
+vivarium, proc, caps), the two H-arc folds, and this entry.
 
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
