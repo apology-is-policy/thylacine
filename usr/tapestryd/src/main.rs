@@ -129,7 +129,14 @@ const GPU_FLANE_VA: u64 = 0x0220_0000;
 // wakes 4x. Disabled under test-mode (the frozen clock is ctl-driven). See
 // docs/reference/139-tapestryd.md "Idle throttle".
 const IDLE_HZ: u32 = 15;
-const IDLE_AFTER_MS: u64 = 250;
+// Raised from 250ms: at 250ms the compositor clock dropped to IDLE_HZ in the gaps
+// between keystrokes (a >250ms gap is ordinary in interactive typing), so every
+// keystroke churned the clock 60<->15 -- and emitted a transition log line per
+// keystroke that interfered with typing in the console. 1s keeps the clock at the
+// ctl rate through normal typing and only throttles on a genuine idle, killing
+// both the churn and the log flood at the root (the log stays per-transition, so
+// ls-gfx-throttle's 60->15 witness still fires deterministically on real idle).
+const IDLE_AFTER_MS: u64 = 1000;
 
 const _: () = {
     assert!(GPU_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= KBD_BAR_WINDOW_VA);
