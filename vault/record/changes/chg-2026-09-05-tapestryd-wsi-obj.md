@@ -4,7 +4,7 @@ type: chg
 title: "sub-tapestryd brought current: the WSI presentable + present-source (W-3c/W-4) and the obj surfaces (H-3c menu, fid_clunk, H-3d status)"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["704cc652"]
 touched:
   - sub-tapestryd
 established: []
