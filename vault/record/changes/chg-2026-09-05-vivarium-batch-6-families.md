@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-vivarium brought current: the 6.25-6.27 syscall batch, the D-3 mmap + #50 path-mutation shapes, the ceiling to 109"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["22394d92"]
 touched:
   - sub-kernel-vivarium
 established: []
