@@ -22,7 +22,7 @@
 #                               run). 14 gfx scenarios override this to hvf in
 #                               the .exp itself; the timings table reports what
 #                               actually BOOTED, not this.
-#   LS_CI_JOBS=N                scenarios to run at once (default 1). RAM-bound,
+#   LS_CI_JOBS=N                scenarios to run at once (default 3). RAM-bound,
 #                               not core-bound -- each VM takes
 #                               THYLACINE_MEM_MIB. Boot/cmd budgets scale by N.
 #   LS_CI_BOOT_TIMEOUT=N        seconds to reach the shell (300 with a staged

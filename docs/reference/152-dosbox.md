@@ -362,7 +362,7 @@ Two dynrec-vs-interpreter attempts, both instructive:
 
 DX-1..DX-4 + DX-5a AS-BUILT (`core=normal` floor, `core=dynamic_rec` via CAP_JIT,
 Duke3D showcase). DX-5 (the cycles-auto oscillation fix + telemetry) landed.
-DX-7 software Voodoo/Glide AS-BUILT (Tomb Raider). DX-8 AS-BUILT (2026-09-05): the
+DX-7 software Voodoo/Glide AS-BUILT (Tomb Raider). DX-8 AS-BUILT (2026-09-05, @1c054bdf): the
 system base-layer config (patch 0008) + `DOSBOX_CPU_PRESET` + the per-game configs
 (mouse-look on by default, gate-proven) + `build_tombraider_fixture` + the
 manifest/forage/configurator registration. DX-6 (Win9x) + DX-7 GL-accelerated

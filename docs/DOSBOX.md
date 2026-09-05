@@ -275,7 +275,7 @@ server + virtio-sound (post-v1.0) lights it up.
     DYNAMIC and pin the clock -- its own graphics-arc chunk (scripture ->
     libtapestry + tapestryd + SDL_thylacine -> audit).
 
-- **DX-8 LANDED** (2026-09-05) -- **defaults, presets, per-game configs + the
+- **DX-8 LANDED** (2026-09-05, @1c054bdf) -- **defaults, presets, per-game configs + the
   build inputs** (operator-asked: "autolock default + the tick rate / multiple
   presets", and "add DOSBox and the two shareware games to Forage and the build
   configurator"). Upstream DOSBox-X has NO system-wide config location and its
