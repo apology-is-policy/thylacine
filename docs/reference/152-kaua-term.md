@@ -20,7 +20,7 @@ process whose death is a held affordance, not a dead environment.
 ```rust
 pub enum Record { CellDiff { changed: Vec<(u16,u16,Cell)>, cursor: (u16,u16,bool) },
                   ScrollOff { rows: Vec<Vec<Cell>> }, Control(Control), Mode(ScreenMode) }
-pub enum Control { Osc1936Raw(Vec<u8>), Title(String), Bell, Exit(i32), WinsizeAck }
+pub enum Control { Osc1936Raw { serial: u32, frame: Vec<u8> }, Title(String), Bell, Exit(i32), WinsizeAck }
 pub struct Producer;               // vt bytes -> records, with a shadow screen
 impl Producer {
     pub fn new(vt: &Vt) -> Producer;
@@ -34,7 +34,8 @@ pub mod wire {                     // the framed codec, both directions
     pub const MAX_TITLE: usize = 256;
     pub fn encode_record(r: &Record, out: &mut Vec<u8>);
     pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError>;
-    pub enum Input { Key(KeyEvent), Resize { cols: u16, rows: u16 } }
+    pub enum Input { Key(KeyEvent), Resize { cols: u16, rows: u16 }, Text(Vec<u8>) }
+                                   // Text (H-4d-2): bytes typed as ONE record
     pub fn encode_input(i: &Input, out: &mut Vec<u8>);
     pub struct FrameDecoder;       // length-prefixed frames, TooLarge past MAX_FRAME
 }
@@ -48,6 +49,42 @@ spawns `prog` (default `/bin/ut`, `--home` forwarded verbatim) on the slave,
 and runs two threads: the INPUT thread (fd 0 -> keys re-encoded to the
 master, `Resize` -> `pending_resize` + the pts winsize) and the OUTPUT thread
 (master -> `Vt` -> `Producer` -> records -> fd 1).
+
+**The tier advertisement (`--beacon`, H-4d-2a).** The tile's host renders the
+transcript, so the kaua-term -- the pts master -- declares the tier to the
+program it hosts: `--beacon <tier>` is written to this process's own
+`/env/BEACON` (`write_env_beacon`) BEFORE `spawn_on_slave`, so the app's env,
+a deep copy at that instant, carries it. Absent = `none`, always written
+(fail-closed: a host that declared nothing renders no frames, so the app must
+not emit them; a caller's inherited `BEACON=rich` never leaks through). The
+pts SLAVE answers `'t'` to `SYS_FD_DEVCLASS` (the kernel's pts registry), and
+the Beacon gate reads the pair (BEACON.md 12.4 as amended): `ut` arms its
+zones, coreutils color + present objects, `halcyon welcome` goes out rich --
+inside a tile. halcyond's session compositor passes `--beacon rich`. A bad
+tier word is a usage error (exit 2, `kaua-term: --beacon takes
+none|cells|rich`).
+
+**The `Text` record (H-4d-2).** A chosen verb's command line arrives from
+halcyond as one `Input::Text(bytes)` (tag 2; the payload is the bytes,
+possibly empty) and is written to the master verbatim (`write_master`, under
+the same lock as keys) -- the compositor's `^E ^U <cmd>\n`, one record so the
+bounded down-queue drops it whole or not at all. Host test:
+`input_round_trips` covers a command line and an empty `Text`.
+
+**The cell span (H-4d-2b).** Every cell on the wire carries `vt::Cell.span`
+(the wire cell is 17 bytes: ch, fg, bg, attrs, span): the serial of the last
+Beacon frame the VT forwarded before the cell was written (0 = none; blanks
+from erase / scroll fill carry 0). The VT advances the serial on every OSC
+whose code is 1936 (a numeric selector -- no body is read, R5) and reports it
+on the boundary (`Boundary::Osc { serial, body }`), which the producer ships
+as `Control::Osc1936Raw { serial, frame }`. halcyond feeds the frames in
+stream order and notes the span state after each under that serial, so a
+cell resolves to its obj / em / hdr however late it scrolls off. Explicit on
+the wire so a dropped or oversize frame can never shift later cells onto the
+wrong span (a wrong span is the anti-clickjack class: a verb run on the wrong
+object). Host tests: vt's
+`beacon_frames_stamp_cells_with_the_span_serial`, the cell round-trip with a
+span.
 
 ## The record stream and its order
 

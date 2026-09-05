@@ -196,6 +196,8 @@ extern "C" fn pump_in(arg: u64) {
                         encode_key(&ev, sh.app_cursor.load(Ordering::Relaxed), &mut kbuf);
                         write_master(sh, &kbuf);
                     }
+                    // H-4d: a chosen verb's command line, as typed.
+                    Ok(Input::Text(b)) => write_master(sh, &b),
                     Ok(Input::Resize { cols, rows }) => {
                         // Flag the output thread BEFORE setting the winsize, so
                         // the app's SIGWINCH redraw is already processed at the
@@ -227,8 +229,6 @@ fn parse_dim(a: Option<&[u8]>) -> Option<u16> {
     s.parse::<u16>().ok().filter(|&d| d >= 1)
 }
 
-fn run() -> i64 {
-    // argv: kaua-term [--beacon TIER] <cols> <rows> [prog [args...]]
 fn write_env_beacon(tier: &str) -> bool {
     use libthyla_rs::io::Write as _;
     match libthyla_rs::fs::File::create("/env/BEACON") {
@@ -237,6 +237,8 @@ fn write_env_beacon(tier: &str) -> bool {
     }
 }
 
+fn run() -> i64 {
+    // argv: kaua-term [--beacon TIER] <cols> <rows> [prog [args...]]
     let mut args = env::args();
     let _argv0 = args.next();
     let mut next = args.next();
@@ -269,14 +271,14 @@ fn write_env_beacon(tier: &str) -> bool {
         argv.push(String::from("/bin/ut"));
     }
 
-    // Mint the pts, seed its size to the tile, host the app on the slave.
-    let master = match Master::mint() {
     // The advertisement precedes the spawn: the app's env is a deep copy of
     // ours at that instant.
     if !write_env_beacon(tier) {
         t_putstr("kaua-term: /env/BEACON write failed (the app inherits the caller's tier)\n");
     }
 
+    // Mint the pts, seed its size to the tile, host the app on the slave.
+    let master = match Master::mint() {
         Ok(m) => m,
         Err(_) => {
             t_putstr("kaua-term: pts mint failed\n");

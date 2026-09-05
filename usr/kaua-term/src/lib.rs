@@ -45,7 +45,12 @@ pub enum Control {
     /// A Beacon frame (OSC 1936), re-synthesized as the complete `ESC ] ... ST`
     /// frame that `beacon::wire` parses -- forwarded RAW, uninterpreted, because
     /// halcyond keeps the Beacon parser (and its format-fuzz surface), R5.
-    Osc1936Raw(Vec<u8>),
+    /// `serial` is the span serial the vt advanced to at this frame: the
+    /// cells written after it carry it (`vt::Cell.span`, H-4d), so the
+    /// consumer maps a cell to the span state after feeding this frame.
+    /// Explicit on the wire (not counted at both ends) so a dropped or
+    /// oversize frame can never shift every later cell onto the wrong span.
+    Osc1936Raw { serial: u32, frame: Vec<u8> },
     /// BEL.
     Bell,
     /// OSC 0 / OSC 2 window title.
@@ -169,9 +174,12 @@ impl Producer {
                     self.flush(vt, out);
                     out.push(Record::Control(Control::Bell));
                 }
-                Boundary::Osc(payload) => {
+                Boundary::Osc {
+                    serial,
+                    body: payload,
+                } => {
                     self.flush(vt, out);
-                    if let Some(c) = classify_osc(&payload) {
+                    if let Some(c) = classify_osc(serial, &payload) {
                         out.push(Record::Control(c));
                     }
                 }
@@ -317,7 +325,7 @@ fn cells_in(out: &[Record]) -> usize {
 /// re-synthesized as the full `ESC ] <payload> ST` frame for `beacon::wire`;
 /// every other OSC is dropped. The vt parser already consumes the 7770 aurora-
 /// config channel, so it never reaches here.
-fn classify_osc(payload: &[u8]) -> Option<Control> {
+fn classify_osc(serial: u32, payload: &[u8]) -> Option<Control> {
     let semi = payload.iter().position(|&b| b == b';')?;
     let (code, rest) = (&payload[..semi], &payload[semi + 1..]);
     match code {
@@ -329,7 +337,7 @@ fn classify_osc(payload: &[u8]) -> Option<Control> {
             f.extend_from_slice(b"\x1b]");
             f.extend_from_slice(payload);
             f.extend_from_slice(b"\x1b\\");
-            Some(Control::Osc1936Raw(f))
+            Some(Control::Osc1936Raw { serial, frame: f })
         }
         _ => None,
     }
@@ -725,9 +733,10 @@ mod tests {
         // The full ESC ] ... ST frame, exactly what beacon::wire::parse consumes.
         assert_eq!(
             recs,
-            vec![Record::Control(Control::Osc1936Raw(
-                b"\x1b]1936;v1;zone;k=prompt\x1b\\".to_vec()
-            ))]
+            vec![Record::Control(Control::Osc1936Raw {
+                serial: 1,
+                frame: b"\x1b]1936;v1;zone;k=prompt\x1b\\".to_vec()
+            })]
         );
     }
 

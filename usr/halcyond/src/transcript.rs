@@ -130,6 +130,71 @@ impl Block {
     }
 }
 
+/// H-4d: the span state a tile's cell was written under -- the block that
+/// was open (its obj table is the one `obj` indexes), the obj (idx+1; 0 =
+/// none), em, hdr. A cell reaches it through its `vt::Cell.span` serial and
+/// the tile's `SpanMap`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SpanTag {
+    pub block: u64,
+    pub obj: u16,
+    pub em: u8,
+    pub hdr: u8,
+}
+
+/// The ring holds the last `SPAN_MAP_ENTRIES` frames' tags, validated by
+/// the full serial (a serial that fell off resolves to no span). A cell
+/// keeps its serial while it stays on the grid, so the bound is reached
+/// only by more frames written OVER a still-visible cell than the ring
+/// holds without it scrolling off -- a repainting TUI, which lives on the
+/// alt screen where no span is read.
+pub const SPAN_MAP_ENTRIES: usize = 8192;
+
+/// serial (`vt::Cell.span`) -> the span state after feeding that frame.
+/// The producer stamps cells with the serial of the last Beacon frame it
+/// forwarded (parser-free, R5); the consumer, feeding the same frames in
+/// order, notes the state after each -- so a cell knows its presentation
+/// however late it scrolls off, and across the grid's zone straddle.
+pub struct SpanMap {
+    ring: Vec<(u32, SpanTag)>,
+}
+
+impl Default for SpanMap {
+    fn default() -> SpanMap {
+        SpanMap::new()
+    }
+}
+
+impl SpanMap {
+    pub fn new() -> SpanMap {
+        SpanMap {
+            ring: alloc::vec![(0u32, SpanTag::default()); SPAN_MAP_ENTRIES],
+        }
+    }
+
+    /// Record the state after frame `serial` (0 = no frame; ignored).
+    pub fn note(&mut self, serial: u32, tag: SpanTag) {
+        if serial == 0 {
+            return;
+        }
+        let i = serial as usize % SPAN_MAP_ENTRIES;
+        self.ring[i] = (serial, tag);
+    }
+
+    /// The state a cell stamped `serial` was written under.
+    pub fn get(&self, serial: u32) -> Option<SpanTag> {
+        if serial == 0 {
+            return None;
+        }
+        let e = self.ring[serial as usize % SPAN_MAP_ENTRIES];
+        if e.0 == serial {
+            Some(e.1)
+        } else {
+            None
+        }
+    }
+}
+
 // --- the feed-side scanners ------------------------------------------------
 
 /// The OSC body bound (aurora's `osc_buf` size): an oversize body is dropped
@@ -1106,17 +1171,32 @@ impl Transcript {
     /// here: a zone cut arrives as a separate `Control(Osc1936Raw)` record fed
     /// through `feed`, and stream order (guaranteed by the producer) lands each
     /// scroll-off in the block that was open when it happened.
-    pub fn push_scrolled_rows(&mut self, rows: &[Vec<vt::Cell>]) {
+    ///
+    /// H-4d: each cell's span (`vt::Cell.span` -> `spans`) gives the em / obj
+    /// / hdr it was WRITTEN under -- the grid's rows straddle zone cuts, so
+    /// a row may land in a later block than the one its objs index; the obj
+    /// is then COPIED into the landing block (`local_obj`), keeping every
+    /// block self-contained (its Line styles index its own obj table, the
+    /// console's invariant every run/menu consumer relies on).
+    pub fn push_scrolled_rows(&mut self, rows: &[Vec<vt::Cell>], spans: &SpanMap) {
+        // (source block, obj) -> the index in the CURRENT open block; reset
+        // when the open block changes under us (the per-block line cap).
+        let mut remap: (u64, Vec<((u64, u16), u16)>) = (self.open.id, Vec::new());
         for row in rows {
             let mut cells: Vec<TCell> = Vec::with_capacity(row.len());
             for c in row {
+                let tag = spans.get(c.span).unwrap_or_default();
+                if remap.0 != self.open.id {
+                    remap = (self.open.id, Vec::new());
+                }
+                let obj = self.local_obj(tag, &mut remap.1);
                 let style = self.intern_style(Style {
                     fg: c.fg,
                     bg: c.bg,
                     attrs: c.attrs,
-                    em: EM_NONE,
-                    obj: 0,
-                    hdr: 0,
+                    em: tag.em,
+                    obj,
+                    hdr: tag.hdr,
                 });
                 cells.push(TCell { ch: c.ch, style });
             }
@@ -1126,6 +1206,70 @@ impl Transcript {
             self.open.items.push(Item::Line(Line { cells }));
             self.enforce_block_cap();
         }
+    }
+
+    /// The open block's index for a tagged obj: its own when the tag's block
+    /// IS the open block; else the obj is copied in once (the remap cache)
+    /// at the same cost the wire's obj-open charges. An evicted source block
+    /// or a full table yields 0 -- a run that lost its object, never a wrong
+    /// one.
+    fn local_obj(&mut self, tag: SpanTag, remap: &mut Vec<((u64, u16), u16)>) -> u16 {
+        if tag.obj == 0 {
+            return 0;
+        }
+        if tag.block == self.open.id {
+            return tag.obj;
+        }
+        if let Some(&(_, idx)) = remap.iter().find(|(k, _)| *k == (tag.block, tag.obj)) {
+            return idx;
+        }
+        let src = self
+            .frozen
+            .iter()
+            .find(|b| b.id == tag.block)
+            .and_then(|b| b.objs.get((tag.obj as usize).wrapping_sub(1)))
+            .map(|o| (o.ty.clone(), o.refv.clone()));
+        let idx = match src {
+            None => 0,
+            Some(_) if self.open.objs.len() >= MAX_OBJS_PER_BLOCK => 0,
+            Some((ty, refv)) => {
+                let bytes = ty.len() + refv.len();
+                self.open.cost += bytes;
+                self.stored_cost += bytes;
+                self.open.objs.push(Obj { ty, refv });
+                self.open.objs.len() as u16
+            }
+        };
+        remap.push(((tag.block, tag.obj), idx));
+        idx
+    }
+
+    /// H-4d: the span state after the last feed, as the tag for the cells
+    /// the producer writes next (the tile notes it under the frame's serial).
+    pub fn span_tag(&self) -> SpanTag {
+        SpanTag {
+            block: self.open.id,
+            obj: self.obj_stack.last().copied().unwrap_or(0),
+            em: self.em_stack.last().copied().unwrap_or(EM_NONE),
+            hdr: self.hdr,
+        }
+    }
+
+    /// The block with id `id` -- the open one or a frozen one; None once
+    /// evicted.
+    pub fn block_by_id(&self, id: u64) -> Option<&Block> {
+        if self.open.id == id {
+            Some(&self.open)
+        } else {
+            self.frozen.iter().find(|b| b.id == id)
+        }
+    }
+
+    /// The (type, resolved ref) of obj `obj` (idx+1) in block `id`.
+    pub fn obj_in_block(&self, id: u64, obj: u16) -> Option<(&str, &str)> {
+        let b = self.block_by_id(id)?;
+        let o = b.objs.get((obj as usize).checked_sub(1)?)?;
+        Some((o.ty.as_str(), o.refv.as_str()))
     }
 
     /// Re-budget a live transcript (a session shares one scrollback budget
@@ -1725,12 +1869,13 @@ mod tests {
                 fg: 0xFFFFFF,
                 bg: 0,
                 attrs: 0,
+                span: 0,
             })
             .collect();
         let rows: Vec<Vec<vt::Cell>> = alloc::vec![row; 64];
         // several cap-sized continuation blocks
         while t.frozen_blocks().len() < 6 {
-            t.push_scrolled_rows(&rows);
+            t.push_scrolled_rows(&rows, &SpanMap::new());
         }
         let last = t.frozen_blocks().back().map_or(0, |b| b.cost);
         assert!(
@@ -1760,11 +1905,12 @@ mod tests {
                 fg: 0xFFFFFF,
                 bg: 0,
                 attrs: 0,
+                span: 0,
             })
             .collect();
         let rows: Vec<Vec<vt::Cell>> = alloc::vec![row; 64];
         while t.stored_cost() < big - (big / 8) {
-            t.push_scrolled_rows(&rows);
+            t.push_scrolled_rows(&rows, &SpanMap::new());
         }
         let before = t.stored_cost();
         assert!(

@@ -465,6 +465,13 @@ pub struct Cell {
     pub fg: u32,
     pub bg: u32,
     pub attrs: u8,
+    /// H-4d: the serial of the last Beacon frame (OSC 1936) the parser
+    /// forwarded before this cell was written -- 0 = none. A consumer that
+    /// parses the forwarded frames in order maps the serial to the span
+    /// state after that frame (obj / em / hdr), so a cell knows its
+    /// presentation without the parser ever reading a Beacon body (R5:
+    /// one parser, in the consumer). Blanks (erase / scroll fill) carry 0.
+    pub span: u32,
 }
 
 impl Cell {
@@ -474,6 +481,7 @@ impl Cell {
             fg,
             bg,
             attrs: 0,
+            span: 0,
         }
     }
 }
@@ -497,8 +505,12 @@ pub enum Boundary {
     /// introducer and the terminator (e.g. `b"0;title"` or `b"1936;v1;..."`).
     /// The consumer routes by the leading numeric code; vt stays agnostic of
     /// title/Beacon semantics. The 7770 aurora-config channel is consumed
-    /// in-parser (settings_req) and never surfaces here.
-    Osc(Vec<u8>),
+    /// in-parser (settings_req) and never surfaces here. `serial` is the
+    /// span serial this frame advanced to (a Beacon frame, code 1936) or 0
+    /// (any other OSC): the cells written after it carry that serial
+    /// (`Cell.span`), so the consumer maps them to the span state after
+    /// feeding THIS frame.
+    Osc { serial: u32, body: Vec<u8> },
     /// Entered the alt screen. Carries the OUTGOING main buffer AND its cursor
     /// `(cx, cy)` (the swap has already happened, so `cells` is the fresh blank
     /// alt and the live cursor is homed) -- the consumer flushes the main's
@@ -666,6 +678,9 @@ pub struct Vt {
     fg: u32,
     bg: u32,
     attrs: u8,
+    /// H-4d: the current span serial (see `Cell.span`) + the counter.
+    span: u32,
+    span_serial: u32,
     state: State,
     params: [u32; MAX_PARAMS],
     nparams: usize,
@@ -769,6 +784,8 @@ impl Vt {
             fg: pal.fg,
             bg: pal.bg,
             attrs: 0,
+            span: 0,
+            span_serial: 0,
             state: State::Ground,
             params: [0; MAX_PARAMS],
             nparams: 0,
@@ -1326,6 +1343,7 @@ impl Vt {
             },
             bg: self.bg,
             attrs,
+            span: self.span,
         };
         self.mark(cy);
     }
@@ -1594,7 +1612,24 @@ impl Vt {
         // ...) as a boundary; the consumer routes by leading code. The 7770
         // aurora-config channel is consumed above and never surfaced.
         if self.capture_events && !is_config {
-            self.pending.push(Boundary::Osc(self.osc_buf.clone()));
+            // H-4d: a Beacon frame advances the span serial; every cell
+            // written from here to the next frame carries it (`Cell.span`).
+            // A numeric OSC selector, as for titles -- the body is never
+            // read (R5). The serial skips 0 on wrap (0 = no frame yet).
+            let serial = if self.osc_buf.starts_with(b"1936;") {
+                self.span_serial = self.span_serial.wrapping_add(1);
+                if self.span_serial == 0 {
+                    self.span_serial = 1;
+                }
+                self.span = self.span_serial;
+                self.span_serial
+            } else {
+                0
+            };
+            self.pending.push(Boundary::Osc {
+                serial,
+                body: self.osc_buf.clone(),
+            });
         }
         self.osc_buf.clear();
     }
@@ -2255,13 +2290,67 @@ mod tests {
         vt.set_capture_events(true);
         assert_eq!(
             drive(&mut vt, b"\x1b]0;hi\x07"),
-            vec![Boundary::Osc(b"0;hi".to_vec())]
+            vec![Boundary::Osc {
+                serial: 0,
+                body: b"0;hi".to_vec()
+            }]
         );
         // OSC 2 (title) via ST terminator.
         assert_eq!(
             drive(&mut vt, b"\x1b]2;t\x1b\\"),
-            vec![Boundary::Osc(b"2;t".to_vec())]
+            vec![Boundary::Osc {
+                serial: 0,
+                body: b"2;t".to_vec()
+            }]
         );
+    }
+
+    #[test]
+    fn beacon_frames_stamp_cells_with_the_span_serial() {
+        // H-4d: cells before any frame carry 0; a Beacon frame advances the
+        // serial and every later cell carries it; a title OSC does not
+        // advance it; a scroll keeps the stamp on the scrolled row.
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        let b = drive(
+            &mut vt,
+            b"ab\x1b]1936;v1;obj;type=path;ref=/x\x1b\\cd\x1b]0;t\x1b\\",
+        );
+        assert_eq!(
+            b,
+            vec![
+                Boundary::Osc {
+                    serial: 1,
+                    body: b"1936;v1;obj;type=path;ref=/x".to_vec()
+                },
+                Boundary::Osc {
+                    serial: 0,
+                    body: b"0;t".to_vec()
+                }
+            ]
+        );
+        let row0: Vec<u32> = vt.cells[..4].iter().map(|c| c.span).collect();
+        assert_eq!(
+            row0,
+            vec![0, 0, 1, 1],
+            "a, b before the frame; c, d after it"
+        );
+        // The close frame is serial 2; `e` wraps onto row 1, the line feed
+        // scrolls row 0 off (its stamps ride along), `f` lands on row 1.
+        let b = drive(&mut vt, b"\x1b]1936;v1;/obj\x1b\\e\r\nf");
+        assert!(matches!(b[0], Boundary::Osc { serial: 2, .. }));
+        let scrolled: Vec<u32> = b
+            .iter()
+            .filter_map(|x| match x {
+                Boundary::Scroll(cells) => Some(cells.iter().map(|c| c.span).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .next()
+            .expect("row 0 scrolled off");
+        assert_eq!(scrolled, vec![0, 0, 1, 1]);
+        assert_eq!(vt.cells[0].span, 2, "e (after the close frame)");
+        assert_eq!(vt.cells[4].span, 2, "f (no frame between)");
+        assert_eq!(vt.cells[1].span, 0, "a fill blank carries no span");
     }
 
     #[test]
@@ -2270,7 +2359,10 @@ mod tests {
         vt.set_capture_events(true);
         assert_eq!(
             drive(&mut vt, b"\x1b]1936;v1;zone;k=prompt\x1b\\"),
-            vec![Boundary::Osc(b"1936;v1;zone;k=prompt".to_vec())]
+            vec![Boundary::Osc {
+                serial: 1,
+                body: b"1936;v1;zone;k=prompt".to_vec()
+            }]
         );
     }
 
@@ -2377,6 +2469,12 @@ mod tests {
         assert!(vt.feed_until(b"\x1b]0;h", &mut pos).is_none()); // slice 1: no terminator yet
         let mut pos2 = 0;
         let got = vt.feed_until(b"i\x07", &mut pos2).unwrap();
-        assert_eq!(got, Boundary::Osc(b"0;hi".to_vec()));
+        assert_eq!(
+            got,
+            Boundary::Osc {
+                serial: 0,
+                body: b"0;hi".to_vec()
+            }
+        );
     }
 }

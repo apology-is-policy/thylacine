@@ -41,7 +41,8 @@ impl Grid {
                     ch: ' ',
                     fg,
                     bg,
-                    attrs: 0
+                    attrs: 0,
+                    span: 0,
                 };
                 cols * rows
             ],
@@ -58,6 +59,7 @@ impl Grid {
             fg: self.fg,
             bg: self.bg,
             attrs: 0,
+            span: 0,
         }
     }
 
@@ -140,6 +142,7 @@ mod tests {
             fg: 0x00FF00,
             bg: 0x000000,
             attrs: 0,
+            span: 0,
         }
     }
 

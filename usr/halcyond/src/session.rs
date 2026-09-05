@@ -19,15 +19,23 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use alloc::string::String;
+use beacon::verbs::{parse as parse_verbs, Rule};
 use halcyond::chrome::{parse_leaves_all, parse_rect};
 use halcyond::downq::DownQueue;
-use halcyond::input::map_key;
+use halcyond::input::{map_key, normal_key, Mode, NormalAct};
+use halcyond::layout::layout_block;
 use halcyond::layout::{daylight_sheet, Sheet};
+use halcyond::menu::{
+    build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run_with, Action, Menu, ObjRun,
+};
 use halcyond::raster::GlyphSource;
+use halcyond::select::{flatten_with_grid, FlatRow, Sel, GRID_BLOCK};
 use halcyond::session_init;
 use halcyond::tile::Tile;
+use halcyond::tile::{Mark, GRID_KEY};
 use halcyond::tiles::{plan_tiles, tile_command};
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
+use kaua_term::ScreenMode;
 use libhalcyon::theme::daylight_palette;
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Write;
@@ -36,9 +44,24 @@ use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_poll, t_read, t_write, TPollFd, T_POLLHUP, T_POLLIN, T_POLLOUT};
 use tapestry::{
     EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_LAYOUT,
+    TEV_PTR_BTN, TEV_PTR_MOVE,
 };
 
 use crate::chromeset::read_file;
+use crate::menuset::{self, MenuEvent};
+
+/// evdev BTN_LEFT (the tapestry PTR_BTN `code`).
+const BTN_LEFT: u16 = 0x110;
+
+/// H-4d: a request to summon the verb menu over one tile: the built menu,
+/// the anchor point and the obj run's rect, all in the tile's SURFACE
+/// coordinates (the loop adds the tile's content origin).
+struct MenuReq {
+    model: Menu,
+    ax: i32,
+    ay: i32,
+    run: (i32, i32, i32, i32),
+}
 
 macro_rules! say {
     ($($arg:tt)*) => {{
@@ -169,6 +192,20 @@ struct SessionTile {
     dirty: bool,
     /// The one-shot "this tile presents objects" witness (test builds).
     objs_said: bool,
+    /// H-4d: the Helix-modal transcript mode (HALCYON.md 4): Esc leaves
+    /// Insert for Normal, where the cursor walks the rows and `w`/`b` walk
+    /// the obj runs; Enter opens the run's verb menu; `i` returns.
+    mode: Mode,
+    /// The flat row list + the cursor, live only in Normal mode (rebuilt
+    /// when the transcript moved: `flat_seq` vs `scrollback.seq`).
+    flat: Vec<FlatRow>,
+    flat_seq: u64,
+    sel: Option<Sel>,
+    /// The view's offset from the content bottom (pixels); the cursor drags
+    /// it in Normal mode, Insert re-anchors at 0.
+    scroll_up: i32,
+    /// The pointer's last surface position (a BTN event carries none).
+    ptr: (i32, i32),
     /// None = live; Some(code) = the child is gone. A clean exit closes the
     /// leaf immediately (reaped there); a crash keeps the tile as a frozen
     /// affordance (14.11.10) -- its pipe skipped, its last frame held -- reaped
@@ -203,6 +240,10 @@ impl SessionTile {
         let cols = ((surf.w as i32 / geom.cell_w).max(1)) as u16;
         let rows = ((surf.h as i32 / geom.cell_h).max(1)) as u16;
         let mut cmd = Command::new("/bin/kaua-term");
+        // The tile renders RICH (halcyond rasterizes the transcript, fontdue):
+        // the kaua-term declares it to the hosted program (KAUA-TERM.md R1),
+        // which is what arms a tile shell's zones and a tool's objects.
+        cmd.arg("--beacon").arg("rich");
         cmd.arg(format!("{}", cols)).arg(format!("{}", rows));
         for a in argv {
             cmd.arg(a.clone());
@@ -258,7 +299,374 @@ impl SessionTile {
             rows,
             dirty: true,
             objs_said: false,
+            mode: Mode::Insert,
+            flat: Vec::new(),
+            flat_seq: u64::MAX,
+            sel: None,
+            scroll_up: 0,
+            ptr: (0, 0),
             exit: None,
+        })
+    }
+
+    /// The Normal-mode cursor as `Tile::render` paints it.
+    fn mark(&self) -> Option<Mark> {
+        if self.mode != Mode::Normal {
+            return None;
+        }
+        let s = self.sel.as_ref()?;
+        let fr = self.flat.get(s.cursor)?;
+        let block = if fr.block == GRID_BLOCK {
+            GRID_KEY
+        } else if fr.block == usize::MAX {
+            u64::MAX
+        } else {
+            self.tile.scrollback.frozen_blocks().get(fr.block)?.id
+        };
+        Some(Mark {
+            block,
+            item: fr.item,
+            row: fr.row,
+            obj: s.obj,
+        })
+    }
+
+    /// Keep the flat row list current: new output moves the rows.
+    fn refresh_flat(&mut self) {
+        let sb = &self.tile.scrollback;
+        if self.flat_seq != sb.seq {
+            self.flat_seq = sb.seq;
+            // The live grid's rows trail the transcript's (14.11.5).
+            self.flat = flatten_with_grid(sb, self.tile.grid.dims().1);
+            if let Some(s) = self.sel.as_mut() {
+                s.clamp(self.flat.len());
+            }
+        }
+    }
+
+    /// A row's obj runs: the transcript's for its rows, the cell spans' for
+    /// a live-grid row.
+    fn runs_for(&self, fr: FlatRow) -> Vec<ObjRun> {
+        if fr.block == GRID_BLOCK {
+            self.tile.grid_runs(fr.item)
+        } else {
+            runs_on_row(&self.tile.scrollback, fr)
+        }
+    }
+
+    /// Back to Insert: the prompt, re-anchored at the bottom.
+    fn leave_normal(&mut self) {
+        self.mode = Mode::Insert;
+        self.sel = None;
+        self.scroll_up = 0;
+        self.dirty = true;
+        #[cfg(feature = "test-mode")]
+        say!("halcyond: session tile leaf={} insert mode", self.leaf);
+    }
+
+    /// The block index (usize::MAX = the open block) for a frame key.
+    fn block_index(&self, key: u64) -> Option<usize> {
+        if key == u64::MAX {
+            Some(usize::MAX)
+        } else {
+            self.tile
+                .scrollback
+                .frozen_blocks()
+                .iter()
+                .position(|b| b.id == key)
+        }
+    }
+
+    /// Lay out the block at `index` (the open block for usize::MAX).
+    fn lay(
+        &self,
+        index: usize,
+        sheet: &Sheet,
+        gs: &mut GlyphSource,
+    ) -> Option<halcyond::layout::LaidBlock> {
+        let sb = &self.tile.scrollback;
+        let b = if index == usize::MAX {
+            sb.open_block()
+        } else {
+            sb.frozen_blocks().get(index)?
+        };
+        Some(layout_block(b, self.surf.w as i32, sheet, gs))
+    }
+
+    /// A KEY in Normal mode, or the Esc that enters it (the caller gates on
+    /// the VT being in its normal screen -- a full-screen app owns Esc).
+    /// Some(req) = Enter on an obj run: the verb menu to summon.
+    fn normal_input(
+        &mut self,
+        e: &tapestry::Event,
+        rules: &[Rule],
+        sheet: &Sheet,
+        gs: &mut GlyphSource,
+    ) -> Option<MenuReq> {
+        if self.mode == Mode::Insert {
+            // Esc enters Normal (the Helix-modal boundary); the cursor
+            // starts on the newest row.
+            if e.rune == 0x1b && e.value == 1 {
+                self.mode = Mode::Normal;
+                self.flat_seq = u64::MAX;
+                self.refresh_flat();
+                // The cursor starts on the grid's cursor row -- the prompt --
+                // not the screen's last (usually blank) row.
+                let n = self.flat.len();
+                let (crow, _, _) = self.tile.grid.cursor();
+                let grid_rows = self.tile.grid.dims().1;
+                let cursor = (n.saturating_sub(grid_rows) + crow).min(n.saturating_sub(1));
+                self.sel = Some(Sel {
+                    cursor,
+                    anchor: None,
+                    obj: None,
+                });
+                self.dirty = true;
+                #[cfg(feature = "test-mode")]
+                say!(
+                    "halcyond: session tile leaf={} normal mode ({} rows)",
+                    self.leaf,
+                    self.flat.len()
+                );
+            }
+            return None;
+        }
+        self.refresh_flat();
+        let (_, cell_h, _) = gs.mono_cell();
+        let page_rows = ((self.surf.h as i32 / cell_h) / 2).max(1);
+        let act = normal_key(e.code, e.rune);
+        let n = self.flat.len();
+        match act {
+            NormalAct::ScrollLines(k) => {
+                if let Some(s) = self.sel.as_mut() {
+                    s.mv(-k, n);
+                }
+                self.dirty = true;
+            }
+            NormalAct::ScrollHalfPage(k) => {
+                if let Some(s) = self.sel.as_mut() {
+                    s.mv(-k * page_rows, n);
+                }
+                self.dirty = true;
+            }
+            NormalAct::Top => {
+                if let Some(s) = self.sel.as_mut() {
+                    s.cursor = 0;
+                    s.obj = None;
+                }
+                self.dirty = true;
+            }
+            NormalAct::Bottom => {
+                if let Some(s) = self.sel.as_mut() {
+                    s.cursor = n.saturating_sub(1);
+                    s.obj = None;
+                }
+                self.dirty = true;
+            }
+            NormalAct::ToggleSelect if e.value == 1 => {
+                if let Some(s) = self.sel.as_mut() {
+                    s.toggle_anchor();
+                }
+                self.dirty = true;
+            }
+            NormalAct::Collapse => {
+                if let Some(s) = self.sel.as_mut() {
+                    s.anchor = None;
+                }
+                self.dirty = true;
+            }
+            // The yank register is the console renderer's; a tile pastes
+            // nothing (`p`) and `y` only collapses the selection. A tile's
+            // register lands with the pts clipboard work (KT-4).
+            NormalAct::ToInsert | NormalAct::Paste => self.leave_normal(),
+            NormalAct::Yank => {
+                if let Some(s) = self.sel.as_mut() {
+                    s.anchor = None;
+                }
+                self.dirty = true;
+            }
+            NormalAct::NextRun | NormalAct::PrevRun => {
+                let fwd = act == NormalAct::NextRun;
+                let stepped = self.sel.as_ref().map(|s| {
+                    (
+                        s.cursor,
+                        step_run_with(&self.flat, s.cursor, s.obj, fwd, |fr| self.runs_for(fr)),
+                    )
+                });
+                if let (Some(s), Some((from, stepped))) = (self.sel.as_mut(), stepped) {
+                    match stepped {
+                        Some((row, obj)) => {
+                            s.cursor = row;
+                            s.anchor = None;
+                            s.obj = Some(obj);
+                            #[cfg(feature = "test-mode")]
+                            say!(
+                                "halcyond: session tile leaf={} run -> row {} obj {}",
+                                self.leaf,
+                                row,
+                                obj
+                            );
+                        }
+                        None => {
+                            #[cfg(feature = "test-mode")]
+                            say!(
+                                "halcyond: session tile leaf={} no run {} from row {}",
+                                self.leaf,
+                                if fwd { "forward" } else { "back" },
+                                from
+                            );
+                        }
+                    }
+                }
+                self.dirty = true;
+            }
+            NormalAct::Act if e.value == 1 => {
+                // The verb menu for the selected run (the row's first when
+                // none is), anchored under the run as the last frame laid it.
+                let at = self
+                    .sel
+                    .as_ref()
+                    .and_then(|s| self.flat.get(s.cursor).map(|fr| (*fr, s.obj)));
+                let (fr, cur) = match at {
+                    Some(v) => v,
+                    None => {
+                        #[cfg(feature = "test-mode")]
+                        say!(
+                            "halcyond: session tile leaf={} act: no cursor row",
+                            self.leaf
+                        );
+                        return None;
+                    }
+                };
+                let obj = cur.or_else(|| self.runs_for(fr).first().map(|r| r.obj));
+                let obj = match obj {
+                    Some(o) => o,
+                    None => {
+                        #[cfg(feature = "test-mode")]
+                        say!(
+                            "halcyond: session tile leaf={} act: no obj run on row {}",
+                            self.leaf,
+                            self.sel.as_ref().map_or(0, |s| s.cursor)
+                        );
+                        return None;
+                    }
+                };
+                if let Some(s) = self.sel.as_mut() {
+                    s.obj = Some(obj);
+                }
+                self.dirty = true;
+                // Where the run sits in the last frame, and what it presents:
+                // a grid row from the cells + the frame's grid origin, a
+                // transcript row from its laid block.
+                let placed: Option<((i32, i32, i32, i32), (String, String))> =
+                    if fr.block == GRID_BLOCK {
+                        let (cw, ch, _) = gs.mono_cell();
+                        let gy = self
+                            .tile
+                            .frame
+                            .iter()
+                            .find(|f| f.0 == GRID_KEY)
+                            .map(|f| f.1);
+                        let run = self.tile.grid_run(fr.item, obj);
+                        let o = self
+                            .tile
+                            .grid_run_obj(fr.item, obj)
+                            .map(|(t, r)| (String::from(t), String::from(r)));
+                        match (gy, run, o) {
+                            (Some(gy), Some((c0, n, _)), Some(o)) => Some((
+                                (
+                                    c0 as i32 * cw,
+                                    gy + fr.item as i32 * ch,
+                                    (n as i32 * cw).max(1),
+                                    ch,
+                                ),
+                                o,
+                            )),
+                            _ => None,
+                        }
+                    } else {
+                        let key = if fr.block == usize::MAX {
+                            Some(u64::MAX)
+                        } else {
+                            self.tile
+                                .scrollback
+                                .frozen_blocks()
+                                .get(fr.block)
+                                .map(|b| b.id)
+                        };
+                        let by = key
+                            .and_then(|k| self.tile.frame.iter().find(|f| f.0 == k).map(|f| f.1));
+                        let rect = self
+                            .lay(fr.block, sheet, gs)
+                            .and_then(|l| run_rect(&l, fr.item, fr.row, obj));
+                        let o = obj_of(&self.tile.scrollback, fr.block, obj)
+                            .map(|(t, r)| (String::from(t), String::from(r)));
+                        match (by, rect, o) {
+                            (Some(by), Some((rx, ry, rw, rh)), Some(o)) => {
+                                Some(((rx, by + ry, rw, rh), o))
+                            }
+                            _ => None,
+                        }
+                    };
+                let ((rx, ry, rw, rh), (ty, refv)) = match placed {
+                    Some(v) => v,
+                    None => {
+                        #[cfg(feature = "test-mode")]
+                        say!(
+                            "halcyond: session tile leaf={} act: obj {} unplaced",
+                            self.leaf,
+                            obj
+                        );
+                        return None;
+                    }
+                };
+                let model = build_menu(rules, &ty, &refv);
+                return Some(MenuReq {
+                    model,
+                    ax: rx,
+                    ay: ry + rh,
+                    run: (rx, ry, rw, rh),
+                });
+            }
+            // An autorepeat of a one-shot is not another press.
+            NormalAct::None | NormalAct::Act | NormalAct::ToggleSelect => {}
+        }
+        None
+    }
+
+    /// A left press at the pointer: the obj run under it -- as the last
+    /// frame laid it -- gets its verb menu at the pointer.
+    fn click(&mut self, rules: &[Rule], sheet: &Sheet, gs: &mut GlyphSource) -> Option<MenuReq> {
+        let (key, by) = self.tile.hit(self.ptr.1)?;
+        let (rect, (ty, refv)) = if key == GRID_KEY {
+            // The live grid: the run under the cell at the pointer.
+            let (cw, ch, _) = gs.mono_cell();
+            let (r, k) = self.tile.grid_hit(self.ptr.0, self.ptr.1 - by, cw, ch)?;
+            let (c0, n, _) = self.tile.grid_run(r, k)?;
+            let (t, rf) = self.tile.grid_run_obj(r, k)?;
+            (
+                (
+                    c0 as i32 * cw,
+                    by + r as i32 * ch,
+                    (n as i32 * cw).max(1),
+                    ch,
+                ),
+                (String::from(t), String::from(rf)),
+            )
+        } else {
+            let bi = self.block_index(key)?;
+            let laid = self.lay(bi, sheet, gs)?;
+            let (i, r, o) = hit_run(&laid, self.ptr.0, self.ptr.1 - by)?;
+            let (rx, ry, rw, rh) = run_rect(&laid, i, r, o)?;
+            let (t, rf) = obj_of(&self.tile.scrollback, bi, o)?;
+            ((rx, by + ry, rw, rh), (String::from(t), String::from(rf)))
+        };
+        let model = build_menu(rules, &ty, &refv);
+        Some(MenuReq {
+            model,
+            ax: self.ptr.0,
+            ay: self.ptr.1,
+            run: rect,
         })
     }
 
@@ -275,7 +683,12 @@ impl SessionTile {
         }
         self.dirty = false;
         let (sw, sh) = (self.surf.w as usize, self.surf.h as usize);
-        self.tile.render(cart, sw, sh, gs, sheet, 0);
+        if self.mode == Mode::Normal {
+            self.refresh_flat();
+        }
+        let mark = self.mark();
+        self.tile
+            .render(cart, sw, sh, gs, sheet, &mut self.scroll_up, mark);
         {
             let px = self.surf.pixels();
             cartoon::execute(
@@ -622,6 +1035,18 @@ pub fn run(home: Option<String>) -> i64 {
         }
     }
 
+    // H-4d: the verb table (BEACON.md 7, the system tier, read once) + the
+    // one menu on this session's ring (the H-3c-2 event set: its keys wake
+    // the unified poll like a tile's), and the tile it was opened over.
+    let rules: Vec<Rule> = match read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, "/lib/beacon/verbs")
+    {
+        Some(text) => parse_verbs(&text, cfg!(feature = "test-mode")),
+        None => Vec::new(),
+    };
+    say!("halcyond: {} verb rules loaded", rules.len());
+    let mut menus = menuset::MenuSet::new(ring.clone());
+    let mut menu_leaf: Option<u32> = None;
+
     let mut cart = cartoon::Cartoon::new();
     let mut inbuf = [0u8; INGEST_BUF];
     let mut wire_out: Vec<u8> = Vec::new();
@@ -646,6 +1071,41 @@ pub fn run(home: Option<String>) -> i64 {
                 );
                 init = None;
             }
+        }
+
+        // (0b) H-4d: the menu. A choice closes it from this side and types
+        // the expanded command into the tile it was opened over (the tag
+        // line's "executes typed text" -- the gesture is the choice); the
+        // compositor's own dismiss (Esc / click-away / a chord) arrives as a
+        // closed stream. `^E ^U` first (SA-8): ut's line editor takes them as
+        // CursorEnd + KillToStart, so a half-typed draft moves to the kill
+        // buffer instead of being run INTO. One Text record: the down-queue
+        // drops it whole or not at all, never half a command.
+        match menus.service(&mut gs) {
+            MenuEvent::Chosen(Action::Command(cmd)) => {
+                menus.close();
+                say!("halcyond: menu ran: {}", cmd);
+                if let Some(t) = menu_leaf.take().and_then(|l| tiles.get_mut(&l)) {
+                    t.leave_normal();
+                    let mut bytes: Vec<u8> = b"\x05\x15".to_vec();
+                    bytes.extend_from_slice(cmd.as_bytes());
+                    bytes.push(b'\n');
+                    wire_out.clear();
+                    encode_input(&Input::Text(bytes), &mut wire_out);
+                    t.queue_key(&wire_out);
+                }
+            }
+            MenuEvent::Chosen(Action::Internal(act)) => {
+                menus.close();
+                menu_leaf = None;
+                say!("halcyond: internal action {} ignored (session)", act);
+            }
+            MenuEvent::Closed => {
+                if let Some(t) = menu_leaf.take().and_then(|l| tiles.get_mut(&l)) {
+                    t.dirty = true;
+                }
+            }
+            MenuEvent::None => {}
         }
 
         // (1) Render dirty tiles at the TOP: the root's first present precedes
@@ -695,6 +1155,7 @@ pub fn run(home: Option<String>) -> i64 {
         // drain is inherently focus-routed (14.11.9). A CLOSE (the user closed
         // the leaf, or a leaf collapse) marks the tile for reap.
         let mut reap: Vec<u32> = Vec::new();
+        let mut menu_req: Option<(u32, MenuReq)> = None;
         for (&leaf, t) in tiles.iter_mut() {
             loop {
                 match t.surf.poll_event() {
@@ -726,10 +1187,38 @@ pub fn run(home: Option<String>) -> i64 {
                         // tile only ever sees KEY when focused (compositor
                         // routing), so this is the focus-routed input path.
                         TEV_KEY if t.exit.is_none() => {
-                            if let Some(kev) = map_key(e.code, e.rune, e.value) {
+                            // H-4d: on the VT's normal screen, Esc enters the
+                            // transcript's Normal mode and Normal keeps every
+                            // key (the Helix-modal boundary, HALCYON.md 4); a
+                            // full-screen app (the alt screen) owns Esc.
+                            let modal = t.tile.mode == ScreenMode::Normal
+                                && e.value >= 1
+                                && (t.mode == Mode::Normal || e.rune == 0x1b);
+                            if modal {
+                                if let Some(req) = t.normal_input(&e, &rules, &sheet, &mut gs) {
+                                    menu_req = Some((leaf, req));
+                                }
+                            } else if let Some(kev) = map_key(e.code, e.rune, e.value) {
                                 wire_out.clear();
                                 encode_input(&Input::Key(kev), &mut wire_out);
                                 t.queue_key(&wire_out);
+                            }
+                        }
+                        TEV_PTR_MOVE => {
+                            t.ptr = (
+                                (e.value >> 16) as u16 as i32,
+                                (e.value & 0xffff) as u16 as i32,
+                            );
+                        }
+                        // H-4d click-a-path (HALCYON.md 5/6): a left press on
+                        // an obj run's glyphs opens its verb menu at the
+                        // pointer (the compositor focused the tile on the
+                        // press; the menu grabs input while placed).
+                        TEV_PTR_BTN if t.exit.is_none() => {
+                            if e.code == BTN_LEFT && e.value == 1 {
+                                if let Some(req) = t.click(&rules, &sheet, &mut gs) {
+                                    menu_req = Some((leaf, req));
+                                }
                             }
                         }
                         // A focus move may follow a split of an EMPTY leaf
@@ -763,6 +1252,25 @@ pub fn run(home: Option<String>) -> i64 {
         }
         if tiles.is_empty() {
             break;
+        }
+        // (2b) H-4d: summon the requested menu at display coordinates -- the
+        // tile's content origin (its pane's `geometry`) plus the surface
+        // point; the run's display rect rides the say line for the witnesses.
+        if let Some((leaf, req)) = menu_req.take() {
+            let (gx, gy) = read_file(troot, &format!("pane/{}/geometry", leaf))
+                .and_then(|s| parse_rect(&s))
+                .map(|r| (r.0 as i32, r.1 as i32))
+                .unwrap_or((0, 0));
+            let d = |v: i32, o: i32| (v + o).max(0) as u32;
+            let run_d = (
+                d(req.run.0, gx),
+                d(req.run.1, gy),
+                req.run.2.max(0) as u32,
+                req.run.3.max(0) as u32,
+            );
+            if menus.open(req.model, d(req.ax, gx), d(req.ay, gy), run_d, &mut gs) {
+                menu_leaf = Some(leaf);
+            }
         }
 
         // (3) Reconcile if a relayout happened (a split added a leaf; a close

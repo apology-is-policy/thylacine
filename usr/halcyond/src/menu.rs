@@ -106,12 +106,24 @@ pub fn step_run(
     cur: Option<u16>,
     forward: bool,
 ) -> Option<(usize, u16)> {
+    step_run_with(flat, cursor, cur, forward, |fr| runs_on_row(t, fr))
+}
+
+/// `step_run` over any row source: `runs` gives a row's obj runs (a tile's
+/// grid rows have theirs in the cell spans, not the transcript -- H-4d).
+pub fn step_run_with(
+    flat: &[FlatRow],
+    cursor: usize,
+    cur: Option<u16>,
+    forward: bool,
+    runs: impl Fn(FlatRow) -> Vec<ObjRun>,
+) -> Option<(usize, u16)> {
     if flat.is_empty() {
         return None;
     }
     let cursor = cursor.min(flat.len() - 1);
     // Within the cursor row first.
-    let here = runs_on_row(t, flat[cursor]);
+    let here = runs(flat[cursor]);
     let at = cur.and_then(|o| here.iter().position(|r| r.obj == o));
     let next_here = match (at, forward) {
         (Some(i), true) => here.get(i + 1),
@@ -125,13 +137,13 @@ pub fn step_run(
     // Then the following rows, in the step direction.
     if forward {
         for row in cursor + 1..flat.len() {
-            if let Some(r) = runs_on_row(t, flat[row]).first() {
+            if let Some(r) = runs(flat[row]).first() {
                 return Some((row, r.obj));
             }
         }
     } else {
         for row in (0..cursor).rev() {
-            if let Some(r) = runs_on_row(t, flat[row]).last() {
+            if let Some(r) = runs(flat[row]).last() {
                 return Some((row, r.obj));
             }
         }

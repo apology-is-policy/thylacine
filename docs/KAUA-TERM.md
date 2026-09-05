@@ -135,13 +135,28 @@ halcyond -> kaua-term:
   xterm-encodes honoring DECCKM/keypad -> the pts master.
 - `Resize { cols, rows }` -- the kaua-term sets the pts winsize (TIOCSWINSZ) + the
   hosted app gets SIGWINCH.
+- `Text { bytes }` (H-4d-2) -- a chosen verb's command line, written to the master
+  verbatim as ONE record (the compositor's `^E ^U <cmd>\n`): a bounded down-queue
+  drops it whole, never half a command.
+- H-4d-2b: `Osc1936Raw { serial, frame }` carries the span serial the frame
+  advanced the VT to; every cell record's `Cell.span` refers to one of these
+  (explicit on the wire, never counted at both ends).
 
-WIRE CELL = the shared `usr/lib/vt::Cell` (self-contained `ch` + inline style);
+WIRE CELL = the shared `usr/lib/vt::Cell` (self-contained `ch` + inline style,
++ `span` since H-4d-2b: the serial of the last Beacon frame the VT forwarded, 0 =
+none -- the consumer maps it to the span state after that frame, so a cell knows
+its obj / em / hdr without the producer ever parsing a Beacon body);
 halcyond interns per-block internally (its `TCell`) on ingest. IPC = a
 halcyond-owned Loom ring per tile (H-3c-2 EventRing reuse; main's side; the kernel
 primitive firms at KT-1); the contract itself is transport-agnostic. TIER = RICH
 per Halcyon tile (halcyond rasterizes with fontdue); the pts advertises `BEACON=`
 at kaua-term spawn (the aux producer side; no dynamic per-tile tier switch at v1.0).
+AS-BUILT (H-4d-2a, 2026-09-05): `kaua-term --beacon <none|cells|rich>` writes the
+tier into its own `/env/BEACON` before `spawn_on_slave`, so the hosted app inherits
+it; the pts SLAVE answers `'t'` to `SYS_FD_DEVCLASS` (the kernel's pts registry,
+never a qid bit) and the Beacon gate admits `'t'` beside the console's `'c'`; `ut`'s
+pts branch arms its transcript zones from the inheritance iff rich AND its stdout
+is that terminal. Absent = none, fail-closed. Until this every tile was plain.
 
 Main records the same contract in HALCYON 14.3 (its scripture half).
 

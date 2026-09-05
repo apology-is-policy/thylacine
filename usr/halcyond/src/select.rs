@@ -22,6 +22,12 @@ pub struct FlatRow {
     pub row: usize,
 }
 
+/// H-4d: the `FlatRow.block` of a LIVE GRID row -- the virtual trailing
+/// block (HALCYON 14.11.5); `item` is the grid row, `row` is `usize::MAX`.
+/// Its runs come from the tile's cell spans (`Tile::grid_runs`), not the
+/// transcript.
+pub const GRID_BLOCK: usize = usize::MAX - 1;
+
 /// Flatten the transcript's current text rows, oldest first.
 pub fn flatten(t: &Transcript) -> Vec<FlatRow> {
     let mut out = Vec::new();
@@ -29,6 +35,20 @@ pub fn flatten(t: &Transcript) -> Vec<FlatRow> {
         push_block_rows(&mut out, bi, &b.items);
     }
     push_block_rows(&mut out, usize::MAX, &t.open_block().items);
+    out
+}
+
+/// The transcript's rows followed by `grid_rows` live-grid rows (the
+/// virtual trailing block): a tile's Normal mode walks both.
+pub fn flatten_with_grid(t: &Transcript, grid_rows: usize) -> Vec<FlatRow> {
+    let mut out = flatten(t);
+    for r in 0..grid_rows {
+        out.push(FlatRow {
+            block: GRID_BLOCK,
+            item: r,
+            row: usize::MAX,
+        });
+    }
     out
 }
 

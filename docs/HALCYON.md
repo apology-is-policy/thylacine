@@ -778,6 +778,19 @@ tiles. The seat is one conn per display, held only while it hosts, so no
 other same-user program reaches the arm past a live compositor; the
 per-process owner check on the placed surface is unchanged.
 
+**The menu inside a session tile (H-4d-2 AS-BUILT, 2026-09-05).** The
+console renderer's Helix-modal transcript + obj verb menu are ported into
+the session compositor's tiles (150-halcyond.md "The menu in a session
+tile"): on the VT's normal screen Esc enters Normal (a full-screen app on
+the alt screen owns Esc), the console's Normal keys minus yank/paste walk
+the rows and the obj runs, Enter or a left click on a run summons its menu
+-- placed by the session compositor at display coordinates -- and a choice
+is typed into the tile it was opened over as ONE `Text` record
+`^E^U<cmd>\n` (the `^E^U` prefix moves a half-typed draft to ut's kill
+buffer instead of running into it; one record so the bounded down-queue
+drops it whole). The view follows the cursor (the marked row drags the
+scroll offset). A tile's yank register lands with the pts clipboard work.
+
 **Menus (H-3c — THE GATE).** ONE ephemeral `Role::Chrome` surface, summoned by
 halcyond via the gated global-ctl verb `menu place <x> <y> <w> <h>` /
 `menu dismiss` (names provisional; the default-deny gate). Compositor-placed at
@@ -1526,6 +1539,27 @@ waking promptly on any -- a byte on a tile pipe, a surface event, or console out
 On a tile pipe -> drain records -> that tile's `FrameDecoder` -> its grid; on the
 loom-fd -> reap the CQ in userspace + route surface events; on consdrain -> the
 existing console drain. Pipes and `/dev/consdrain` are already pollable
+**AS-BUILT at H-4d-2b (2026-09-05): the span state reaches the cells.** The
+zone/block cut is as above, but the SPAN state (obj / em / hdr) had never
+reached the grid's cells or the scrolled-off rows (interned with no obj), so
+no row in a tile ever carried an obj run -- the tile menu (H-4d-2) landed
+hollow on its first gate (Esc entered Normal mode with zero rows: the `ls`
+output was still on the 36-row grid, and the grid was invisible to the row
+machinery). Now the PRODUCER stamps every cell with the serial of the last
+Beacon frame its VT forwarded (`vt::Cell.span`; the kaua-term reads no body --
+a numeric OSC selector, R5 kept), the record carries that serial
+(`Control::Osc1936Raw { serial, frame }` -- explicit on the wire, never
+counted at both ends, so a dropped or oversize frame can never shift every
+later cell onto the wrong span), and halcyond, feeding the same frames in
+order, notes the state AFTER each under its serial (`SpanMap`, an 8192-entry
+ring validated by the full serial). A grid cell therefore resolves to
+(block, obj, em, hdr) however late it scrolls off, and `push_scrolled_rows`
+interns em / obj / hdr -- COPYING an obj from its source block into the
+landing block when the grid straddled a zone cut, so every block stays
+self-contained (its Line styles index its own obj table). Genera/CLIM-shaped:
+presentations are recorded on the output stream at output time, never
+reconstructed by the display.
+
 (`kernel/pipe.c`; `cons_drain_poll`); the **new** piece is making the Loom ring
 pollable (§14.11.7a). This also eliminates a pre-existing **FRAME-coupled** console
 latency: halcyond/aurora block on the ring and drain consdrain only per frame ->
@@ -1533,6 +1567,16 @@ latency: halcyond/aurora block on the ring and drain consdrain only per frame ->
 (`tapestryd/src/main.rs:124`, `aurora/src/main.rs:21`). With a pollable ring the wait
 is byte-driven, not frame-driven -- the fix lands system-wide (aurora shares
 `EventRing`).
+**AS-BUILT at H-4d-2b (2026-09-05):** the grid IS the virtual trailing block.
+`select::GRID_BLOCK` rows follow the transcript's in a tile's flat list
+(`flatten_with_grid`); Normal mode starts on the grid's cursor row (the
+prompt), `w` / `b` step obj runs across both (`Tile::grid_runs` -- a grid run
+is keyed by its start column + 1, the grid's analogue of a block's obj
+index), Enter and a click resolve a grid run through its cell span to the
+owning block's obj (`grid_run_obj`), and the render bands the marked grid row
+and underlines its run under `GRID_KEY`. Yank in a tile is still owed (the
+pts clipboard work).
+
 
 **14.11.7a The kernel enabler -- `KObj_Loom` pollable + the compositor ring runs
 SQPOLL (operator-ratified live 2026-09-03).** Two pieces, both small and

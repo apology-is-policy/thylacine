@@ -113,17 +113,7 @@ fn write_ctl(fd: i64, s: &str) -> bool {
 /// its (possibly wrapped) lines as (y, h). None when the item laid no line
 /// (evicted / empty).
 fn laid_line_for(laid: &LaidBlock, item: usize, row: usize) -> Option<(i32, i32)> {
-    let mut y0: Option<i32> = None;
-    let mut y1 = 0;
-    for l in laid.lines.iter() {
-        if l.src_item == item && l.src_row == row {
-            if y0.is_none() {
-                y0 = Some(l.y);
-            }
-            y1 = l.y + l.h;
-        }
-    }
-    y0.map(|y| (y, y1 - y))
+    halcyond::layout::laid_line_for(laid, item, row)
 }
 
 /// Drain the console mirror, non-blocking, bounded: at most 8 reads per

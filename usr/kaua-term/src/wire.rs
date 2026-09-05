@@ -32,7 +32,7 @@ pub const MAX_FRAME: usize = 4 * 1024 * 1024;
 // u16 + one Cell = 2 + 2 + 13). Used only to cap a decode pre-allocation so a
 // hostile count cannot force a huge Vec before the byte under-run is caught.
 const MIN_CELL_ENTRY: usize = 2 + 2 + CELL_BYTES;
-const CELL_BYTES: usize = 4 + 4 + 4 + 1; // ch:u32 fg:u32 bg:u32 attrs:u8
+const CELL_BYTES: usize = 4 + 4 + 4 + 1 + 4; // ch:u32 fg:u32 bg:u32 attrs:u8 span:u32
 
 // Up-record tags.
 const T_CELLDIFF: u8 = 0;
@@ -42,6 +42,7 @@ const T_MODE: u8 = 3;
 // Down-input tags.
 const T_KEY: u8 = 0;
 const T_RESIZE: u8 = 1;
+const T_TEXT: u8 = 2;
 // Control subtags.
 const C_OSC1936: u8 = 0;
 const C_BELL: u8 = 1;
@@ -53,7 +54,15 @@ const C_WINSIZE_ACK: u8 = 4;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Input {
     Key(KeyEvent),
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    /// H-4d: bytes typed as one record -- a chosen verb's command line (the
+    /// compositor's `^E ^U <cmd>\n`), written to the pts master verbatim.
+    /// One record, so a bounded down-queue drops it whole, never half a
+    /// command.
+    Text(Vec<u8>),
 }
 
 /// A wire decode failure.
@@ -78,6 +87,7 @@ fn put_cell(o: &mut Vec<u8>, c: &Cell) {
     put_u32(o, c.fg);
     put_u32(o, c.bg);
     o.push(c.attrs);
+    put_u32(o, c.span);
 }
 fn frame(tag: u8, payload: &[u8], out: &mut Vec<u8>) {
     out.push(tag);
@@ -113,10 +123,11 @@ pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
         }
         Record::Control(c) => {
             match c {
-                Control::Osc1936Raw(b) => {
+                Control::Osc1936Raw { serial, frame } => {
                     p.push(C_OSC1936);
-                    put_u32(&mut p, b.len() as u32);
-                    p.extend_from_slice(b);
+                    put_u32(&mut p, *serial);
+                    put_u32(&mut p, frame.len() as u32);
+                    p.extend_from_slice(frame);
                 }
                 Control::Bell => p.push(C_BELL),
                 Control::Title(s) => {
@@ -176,6 +187,10 @@ pub fn encode_input(inp: &Input, out: &mut Vec<u8>) {
             p.push(ev.mods.bits());
             T_KEY
         }
+        Input::Text(b) => {
+            p.extend_from_slice(b);
+            T_TEXT
+        }
         Input::Resize { cols, rows } => {
             put_u16(&mut p, *cols);
             put_u16(&mut p, *rows);
@@ -223,7 +238,14 @@ impl<'a> Reader<'a> {
         let fg = self.u32()?;
         let bg = self.u32()?;
         let attrs = self.u8()?;
-        Ok(Cell { ch, fg, bg, attrs })
+        let span = self.u32()?;
+        Ok(Cell {
+            ch,
+            fg,
+            bg,
+            attrs,
+            span,
+        })
     }
     // A count capped for pre-allocation: never trust it beyond what the
     // remaining bytes could hold (min `unit` bytes each).
@@ -273,8 +295,12 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
             let sub = r.u8()?;
             let c = match sub {
                 C_OSC1936 => {
+                    let serial = r.u32()?;
                     let n = r.u32()? as usize;
-                    Control::Osc1936Raw(r.take(n)?.to_vec())
+                    Control::Osc1936Raw {
+                        serial,
+                        frame: r.take(n)?.to_vec(),
+                    }
                 }
                 C_BELL => Control::Bell,
                 C_TITLE => {
@@ -343,6 +369,7 @@ pub fn parse_input(tag: u8, payload: &[u8]) -> Result<Input, WireError> {
             cols: r.u16()?,
             rows: r.u16()?,
         },
+        T_TEXT => Input::Text(r.take(payload.len())?.to_vec()),
         _ => return Err(WireError::Malformed),
     };
     if !r.done() {
@@ -442,6 +469,7 @@ mod tests {
             fg: 0x11,
             bg: 0x22,
             attrs: vt::ATTR_BOLD,
+            span: 7,
         }
     }
 
@@ -454,9 +482,10 @@ mod tests {
         rt_record(Record::ScrollOff {
             rows: vec![vec![cell('x'), cell('y')], vec![cell('z')]],
         });
-        rt_record(Record::Control(Control::Osc1936Raw(
-            b"\x1b]1936;v1;zone\x1b\\".to_vec(),
-        )));
+        rt_record(Record::Control(Control::Osc1936Raw {
+            serial: 3,
+            frame: b"\x1b]1936;v1;zone\x1b\\".to_vec(),
+        }));
         rt_record(Record::Control(Control::Bell));
         rt_record(Record::Control(Control::Title(String::from("hi there"))));
         rt_record(Record::Control(Control::Exit(-7)));
@@ -487,6 +516,8 @@ mod tests {
             cols: 132,
             rows: 43,
         });
+        rt_input(Input::Text(b"\x05\x15ls -l -- '/bin'\n".to_vec()));
+        rt_input(Input::Text(Vec::new()));
     }
 
     #[test]
