@@ -513,6 +513,13 @@ fi
 if [[ "${THYLACINE_NOSTORM:-0}" == "1" ]]; then
     append_tokens+=("thylacine.nostorm")
 fi
+# N-2a-2 (docs/NOCTURNE.md section 6.5): run the SDL audio backend witness
+# (/sdl-audio-probe) INSTEAD of the N-1 nocturne-probe, so the wav capture is a
+# clean SDL tone (the chord verdict forbids a second tone in one capture). Same
+# "1" convention as THYLACINE_NOSTORM. tools/test-sdl-audio.sh sets it.
+if [[ "${THYLACINE_SDLAUDIO:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.sdlaudio")
+fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends

@@ -52,7 +52,8 @@ copies OUR `thylacine/` driver in as `src/video/thylacine/`.
 
 The pruned tree IS the compile list (every `.c` under `src/` except
 `src/main`). Driver selections: **video** = thylacine + dummy; **audio** =
-dummy (no virtio-sound at v1.0 — §10 item 4); **thread** = pthread (pouch
+thylacine (the Nocturne backend, N-2a-2) + dummy (the soundless fallback,
+selected when `/srv/nocturne` is absent); **thread** = pthread (pouch
 patch 0004); **timer** = unix (`clock_gettime` = 75; `nanosleep` = torpor,
 patch 0022); everything else = dummy/disabled stubs.
 
@@ -196,7 +197,8 @@ elapsed → re-measure the deadline on the requested clock; chunked under the
 `build_sdl2()`: copy → patch → config-overwrite → glob-compile the pruned
 tree (130 TUs, zero warnings) → `libSDL2.a` (1.5 MB) + headers →
 `sysroot/include/SDL2/`. Then `/sdl-probe`. `tools/build.sh sdl2` builds it
-standalone; `build_all` calls it before the ramfs bake.
+standalone; `build_all` calls it before the ramfs bake. The audio witness
+`/sdl-audio-probe` links the same way, right after `/sdl-probe`.
 
 ## Proof: `/sdl-probe`
 
@@ -208,6 +210,59 @@ pattern + an animated sweep, pumps events, tears down. On the first live
 run the compositor tiled the probe beside aurora and CONFIGURE-resized it,
 so the reweave/generation path was exercised on run one; the screendump
 pixel-count asserts all four quadrant colors on the scanout.
+
+## Audio: the Nocturne backend (`SDL_thylacineaudio`, N-2a-2)
+
+The audio peer of the video backend. `SDL_Init(AUDIO)` resolves
+`THYLACINEAUDIO_bootstrap` (registered ahead of `DUMMYAUDIO` by patch
+`0002-sdl2-thylacine-audio.patch`), `SDL_OpenAudioDevice` mints a private
+Nocturne voice, and SDL's audio thread streams the callback's PCM to it --
+the whole audio path through stock SDL API. The source lives beside the video
+backend in `usr/ports/sdl2/thylacine/`; `build_sdl2` stages it into
+`src/audio/thylacine/` (where its `../SDL_sysaudio.h` include resolves) rather
+than the video dir.
+
+The design mirrors `thyla_tap.c` exactly one layer over: plain blocking file
+ops, no Loom ring (the byte-copy path; the Weft ring is N-2b). Four entry
+points, the rest SDL's no-op defaults:
+
+- **`Init`** probes `/srv/nocturne` (open OREAD, close) and returns `FALSE`
+  when it is absent, so a soundless machine (`THYLACINE_NO_AUDIO`, no
+  virtio-sound function) falls through to `DUMMY` rather than failing every
+  `SDL_OpenAudioDevice`. `demand_only = SDL_FALSE`: auto-selected when present.
+- **`OpenDevice`** forces the device format Nocturne dictates
+  (S16LE / 48000 / stereo, `manual/41-audio.md`) and calls
+  `SDL_CalculateAudioSpec`, so SDL's core builds a conversion stream from
+  whatever rate/format the app asked for. It then opens `/srv/nocturne`
+  DIRECTLY -- a fresh per-client connection, NOT joey's shared
+  `/dev/nocturne` mount -- mints a voice via `nodes/new` (open mints, read
+  yields the decimal id), and opens `nodes/<id>/audio` OWRITE. The connection
+  IS the voice's lifetime: `CloseDevice` (or the app simply exiting) tears the
+  connection down and nocturned's `drop_conn_voices` reaps the voice. No
+  explicit `remove` on the happy path.
+- **`PlayDevice`** writes the filled period to the voice in <=8 KiB chunks
+  (well under the server's 32 KiB msize). A voice's `audio` write BLOCKS
+  (nocturned parks the `Twrite` until the mixer drains room -- Plan 9's
+  blocking `audio(3)` write), so once the 64 KiB voice FIFO fills, each
+  `PlayDevice` returns at exactly the device drain rate. `WaitDevice` is
+  therefore SDL's no-op default; adding a delay would underrun. A `t_write`
+  that returns <= 0 (the connection died) reports
+  `SDL_OpenedAudioDeviceDisconnected` so SDL retires the device instead of
+  spinning.
+
+The ~340 ms FIFO depth is the byte-copy path's latency ceiling; N-2b's ring
+trims it. Capture ("ears") is Nocturne N-3; `HasCaptureSupport` is false.
+
+**Proof `/sdl-audio-probe`** (`usr/sdl-audio-probe/`): an SDL app that opens
+audio through `SDL_OpenAudioDevice` and streams a 1 kHz + 2 kHz chord from its
+callback. joey runs it INSTEAD of the N-1 `/nocturne-probe` under the
+`thylacine.sdlaudio` boot arg (the two never share a wav capture -- the chord
+verdict's silent-tail check forbids a second tone), so the wav is a clean SDL
+capture. `tools/test-sdl-audio.sh` boots with `THYLACINE_AUDIODEV=wav
+THYLACINE_SDLAUDIO=1` and judges the capture with `audio-verdict.py --chord`:
+BOTH tones in the SAME windows. This proves the SDL byte path delivers complex
+PCM; it does not re-prove nocturned's mixer (that is N-1 -- the app pre-mixes
+both tones into one voice).
 
 ## Known caveats / seams
 

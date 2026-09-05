@@ -153,8 +153,9 @@ surface-lifetime idiom) or on an explicit `ctl remove`; voice 0 never dies. NB:
 the `/dev/nocturne` **mount** is joey's one shared connection, so voices minted
 via the mount are owned by the mount conn and persist — correct for the boot
 probe; a client wanting per-exit lifetime connects **directly** to
-`/srv/nocturne` (the libtapestry idiom), which is the SDL backend's path
-(N-2a-2).
+`/srv/nocturne` (the libtapestry idiom) -- the SDL audio backend does exactly
+this (N-2a-2, `docs/reference/142-sdl-port.md` "Audio: the Nocturne backend"):
+its `CloseDevice`, or the program's death, drops the connection and the voice.
 
 `info` renders `device`, `format`, `voices N`, `bufsize`, `buffered`,
 `period-bytes`, `buffer-bytes`, `periods`, `started`, `periods-played`,
@@ -263,7 +264,8 @@ single boot's wall time.
   entry (D-3; N-2a-1 accepts only S16 stereo 48 kHz — a voice at another shape
   is a future entry-conversion seam).
 - Voices minted through the shared `/dev/nocturne` mount persist for the mount's
-  life; per-exit lifetime needs a direct `/srv/nocturne` connection (N-2a-2).
+  life; per-exit lifetime needs a direct `/srv/nocturne` connection -- what the
+  SDL backend does (N-2a-2, reference 142).
 - `nodes/<id>/ctl gain` is Plan 9 `volume`-style percent, not the dB grammar the
   design's `volume` file (N-3) will carry; the per-link/stage dB gains are N-3+.
 - The virtio-pci-modern constants are a private copy of netdev's (a hoist seam).

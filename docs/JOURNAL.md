@@ -23,6 +23,75 @@ needed the operator.
 
 ---
 
+## 2026-09-05 (aux) -- Nocturne N-2a-2: the SDL audio backend
+
+**Landed** (aux-3, on 72d4240d): `usr/ports/sdl2/thylacine/SDL_thylacineaudio.{c,h}`
+-- SDL's audio driver for Nocturne -- plus its witness `/sdl-audio-probe`,
+`tools/test-sdl-audio.sh`, and the `thylacine.sdlaudio` boot arg. Effort max
+(`effort-report.sh`: `max (this session)`).
+
+**What it is.** Four SDL entry points over plain blocking file ops, the audio
+twin of `thyla_tap.c`: `Init` probes `/srv/nocturne` and declines when absent
+(DUMMY wins on a soundless boot); `OpenDevice` forces the device format
+(S16LE/48 kHz/stereo, SDL's core converts), opens `/srv/nocturne` DIRECTLY,
+mints a voice via `nodes/new`, opens `nodes/<id>/audio`; `PlayDevice` writes
+the period in <= 8 KiB chunks; `CloseDevice` closes the connection, which is
+what reaps the voice (`drop_conn_voices`). `WaitDevice` is SDL's no-op --
+pacing rides the voice's BLOCKING write (nocturned parks the Twrite until the
+mixer drains room), so once the 64 KiB FIFO fills each `PlayDevice` returns
+at the drain rate. A driver that also slept would underrun.
+
+**Measured.** `sdl-audio-probe: PASS driver=thylacine freq=48000 ch=2`;
+`joey: sdl-audio-probe OK`; the wav (491520 B) judged
+`PASS(chord): 78 windows carry 1000+2000 Hz at once; span 78; silent tail 47;
+127 windows total`. The N-1 witness re-run unchanged: `PASS(chord): 59
+windows`. Backend compiled into `libSDL2.a` (`THYLACINEAUDIO_bootstrap` D +
+referenced U by `SDL_audio.c`), `sdl-audio-probe` 1002064 B linked.
+
+**The design decision worth recording.** The witness could not simply be a
+second boot probe. `audio-verdict.py --chord` demands ONE contiguous span and a
+SILENT TAIL, and its `loud_outside`/gap checks fail on any second tone in the
+same capture -- so the SDL probe and the N-1 chord probe cannot share a wav.
+Rather than weaken the verdict, joey runs the SDL probe INSTEAD of the N-1
+probe under a boot arg (`thylacine.sdlaudio`, the `bootarg_has` idiom
+`thylacine.nostorm` already uses), and `test-sdl-audio.sh` passes it. Default
+boots keep the N-1 witness byte-for-byte; the regression run above proves it.
+
+**A wrong turn caught before it compiled.** My first header omitted the
+`#define _THIS SDL_AudioDevice *_this` re-definition. `SDL_sysaudio.h` defines
+`_THIS` for its own struct and `#undef`s it at its end, so every driver header
+re-defines it (cf. `SDL_dummyaudio.h`). Caught by reading the dummy driver's
+include order before the first build, not by the compiler -- the cheap kind.
+
+**Scope, exactly.** This is the backend + its proof. The GAME-SOUND FLIP --
+retiring DOSBox patch `0004-thylacine-force-dummy-audio` and the `-nosound`
+in the play scenarios (quarry `BASE_ARGS`, tyrquake's nosound-guard) -- is
+SPLIT OUT as N-2a-3 (`NOCTURNE.md` section 8). Why: it touches ~10 scenario
+files, several of which (`glq-bench`, the wedge probes) keep `-nosound`
+deliberately for perf isolation, and it re-enables tyrquake/DOSBox audio-init
+paths that have never run on Thylacine -- a separable surface with its own
+bake budget and its own W-4 gate (RMS floor + spectral flatness). Games still
+run soundless today; the manual says so.
+
+**Also in this bake (owed since N-2a-1).** joey's nocturne section still said
+"1 kHz then 2 kHz written to /dev/nocturne/audio; N-1" while the probe has
+mixed two voices since N-2a-1; the comment and the OK/FAILED lines now say
+what runs. The gates grep the stable `joey: nocturne-probe OK` prefix, so
+this is cosmetic -- re-baked and re-booted regardless.
+
+**Vault.** `quaestor owner`: the sdl2 audio paths + `sdl-audio-probe` +
+`test-sdl-audio.sh` are UNOWNED (reference written in `142-sdl-port.md`, the
+sweep filed with vault); `joey.c` / `build.sh` / `run-vm.sh` are OWNED but
+already STALE from main's churn (+1351 / +3089 / +115 lines) -- my additions
+are small and noted for the de-stale, not a de-stale of main's work.
+
+**Open.** Holotype (Fable, max) on N-1 + N-2a-1 + N-2a-2 and the SMP gate
+are BATCHED to the N-2 close (double-the-distance). The ~340 ms FIFO latency
+ceiling is the byte-copy path's; N-2b's ring trims it. The DOSBox fullscreen
+re-run (owed to main) now rides N-2a-3's bake.
+
+---
+
 ## 2026-09-05 (aux, Fable 5.1 -> Opus 4.8, effort max) -- the main merge + a quaestor merge-blind-spot fix, then Nocturne N-2a-1 (multi-voice mixing)
 
 Two things landed, and the first was an unplanned detour that turned into a real

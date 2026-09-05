@@ -1,9 +1,11 @@
 # Audio — Nocturne
 
-**Status: N-1 (2026-09-05).** The audio system is being built (`docs/NOCTURNE.md`).
-What exists today is the heritage floor: a Plan 9-shaped audio device file you
-can write PCM to. Mixing several programs, volume control, capture, the graph,
-and game sound arrive in the following chunks; this page grows with them.
+**Status: N-2a-2 (2026-09-05).** The audio system is being built (`docs/NOCTURNE.md`).
+What exists today: a Plan 9-shaped audio device file you can write PCM to,
+several programs mixing at once through their own *voices*, per-voice gain, and
+SDL programs playing through it automatically. Capture, the graph's ports and
+links, and the games' sound switch-on arrive in the following chunks; this
+page grows with them.
 
 ## Overview
 
@@ -115,6 +117,28 @@ The stream starts on the first write to any voice and stops on its own after
 about half a second with every voice silent, so an idle machine pays no periodic
 interrupt. Up to 16 voices mix at once.
 
+## Programs: SDL
+
+A program built on the SDL2 port gets sound with no code of its own: SDL's
+`thylacine` audio driver (`usr/ports/sdl2/thylacine/SDL_thylacineaudio.c`) is
+selected automatically whenever `/srv/nocturne` exists, and `SDL_OpenAudioDevice`
+mints the program a private voice. Ask SDL for any rate and format you like —
+it converts to the device's 48 kHz S16 stereo on the way out. The voice lives
+exactly as long as the program: it is reaped the instant the program exits,
+even by a crash, so nothing lingers in `nodes/`.
+
+```
+SDL_AUDIODRIVER=thylacine   # the default when sound exists; `dummy` to silence a program
+```
+
+Latency is up to ~340 ms (the voice's queue depth) on this first, byte-copy
+path; fine for music and effects, noticeable for tight rhythm games. A later
+chunk (the zero-copy ring, N-2b) trims it.
+
+The ported games (DOSBox-X, Quake) still start with sound OFF (`-nosound` /
+their dummy-audio build) — switching them on is the next chunk (N-2a-3), not a
+configuration you can make today.
+
 ## Choosing the host backend (QEMU)
 
 The guest always has the device; the host decides where the sound goes.
@@ -136,8 +160,8 @@ The guest always has the device; the host decides where the sound goes.
   chunk (`docs/NOCTURNE.md` §6.11).
 - One format, one rate at N-1. Sample-rate and format conversion at the device
   boundary arrive with the mixer (N-2); until then convert on the way in.
-- Only one program's writes are meaningful at a time: two writers interleave
-  their bytes in the queue. The mixer (N-2) makes concurrent writers mix.
+- Two programs writing the SAME file (`audio`, or one voice's `audio`)
+  interleave their bytes; give each program its own voice (above) and they mix.
 
 ## Troubleshooting
 
@@ -146,6 +170,9 @@ The guest always has the device; the host decides where the sound goes.
   boot log then says `joey: /srv/nocturne absent`.
 - **Nothing is heard on the host.** `THYLACINE_AUDIODEV` is `none` (the
   default). Use `coreaudio` on the mac or `pipewire` on thyla-pi.
+- **An SDL program says it has no audio device.** `/srv/nocturne` was absent
+  when it started (see the first item): SDL fell back to its `dummy` driver.
+  Sound cannot be added to a running program; restart it once the device exists.
 - **The writer stalls forever.** The device stopped consuming; `info` will show
   `tx-errors` or `bad-used` growing. Report it with the boot log's
   `nocturned:` lines.
@@ -153,4 +180,5 @@ The guest always has the device; the host decides where the sound goes.
 ## See also
 
 `docs/NOCTURNE.md` (the design), `docs/reference/153-nocturne.md` (the
-as-built driver and server), `tools/test-audio.sh` (the wav witness).
+as-built driver and server), `docs/reference/142-sdl-port.md` (the SDL audio
+backend), `tools/test-audio.sh` + `tools/test-sdl-audio.sh` (the wav witnesses).

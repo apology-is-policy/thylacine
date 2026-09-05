@@ -592,7 +592,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "tyr-glquake" "make" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -3999,12 +3999,13 @@ build_sdl2() {
     local gl_mode="nogl"
     [[ -n "$gl_hdr" ]] && gl_mode="gl"
 
-    if [[ -f "$archive" && -f "$progs_out/sdl-probe" ]] &&
+    if [[ -f "$archive" && -f "$progs_out/sdl-probe" && -f "$progs_out/sdl-audio-probe" ]] &&
        [[ -z "$gl_needed" || -f "$gl_prove" ]] &&
        [[ -f "$gl_mode_file" ]] &&
        [[ "$(cat "$gl_mode_file" 2>/dev/null)" == "$gl_mode" ]]; then
         local stale
         stale="$(find "$sdl_vendor" "$port_dir" "$REPO_ROOT/usr/sdl-probe" \
+                      "$REPO_ROOT/usr/sdl-audio-probe" \
                       "$REPO_ROOT/usr/gl-sdl-prove" \
                       "$REPO_ROOT/usr/lib/thylajit" \
                       -type f -newer "$archive" -print -quit 2>/dev/null)"
@@ -4037,9 +4038,13 @@ build_sdl2() {
         patch -s -p1 -t -d "$sdl_src" -i "$p"
     done
     cp "$port_dir/SDL_config.h" "$sdl_src/include/SDL_config.h"
-    mkdir -p "$sdl_src/src/video/thylacine"
+    mkdir -p "$sdl_src/src/video/thylacine" "$sdl_src/src/audio/thylacine"
     cp "$port_dir"/thylacine/*.c "$port_dir"/thylacine/*.h \
         "$sdl_src/src/video/thylacine/"
+    # The audio backend belongs in the audio tree (it includes ../SDL_sysaudio.h);
+    # the port keeps every thylacine backend in one source dir, so re-home it.
+    mv "$sdl_src/src/video/thylacine/SDL_thylacineaudio."* \
+        "$sdl_src/src/audio/thylacine/"
 
     # #239: swap the GL backend in the COPY, so the glob below stays the
     # compile list and exactly one of the two is ever compiled. Announced, not
@@ -4099,6 +4104,18 @@ build_sdl2() {
         -o "$progs_out/sdl-probe"
     rm -f "$progs_out/sdl-probe.o"
     echo "    sdl-probe: $(wc -c < "$progs_out/sdl-probe" | tr -d ' ') bytes (ET_EXEC, static)"
+
+    # The audio witness: /sdl-audio-probe (usr/sdl-audio-probe/) -- an SDL app
+    # streaming a 1 kHz + 2 kHz chord through SDL_thylacineaudio -> a Nocturne
+    # voice. Baked by build_ramfs; joey runs it under thylacine.sdlaudio.
+    "$clang" "${cflags[@]}" -Wall -Wextra -I"$sysroot/include/SDL2" \
+        -c "$REPO_ROOT/usr/sdl-audio-probe/sdl-audio-probe.c" -o "$progs_out/sdl-audio-probe.o"
+    POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+        "$REPO_ROOT/tools/pouch-ld" "$progs_out/sdl-audio-probe.o" \
+        -L"$sysroot/lib" -lSDL2 \
+        -o "$progs_out/sdl-audio-probe"
+    rm -f "$progs_out/sdl-audio-probe.o"
+    echo "    sdl-audio-probe: $(wc -c < "$progs_out/sdl-audio-probe" | tr -d ' ') bytes (ET_EXEC, static)"
 
     # #109: the GL API surface, asserted rather than assumed. LLVM-DESIGN
     # section 9 step 2 promises "stock SDL-GL programs recompile"; this

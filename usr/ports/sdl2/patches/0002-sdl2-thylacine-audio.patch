@@ -1,0 +1,38 @@
+N-2a-2 (the Nocturne audio backend, docs/NOCTURNE.md section 6.5) --
+register the thylacine audio driver in SDL's compile-time bootstrap
+list, mirroring the 0001 video-bootstrap patch. Two hunks against the
+pristine vendored tree:
+
+  - SDL_sysaudio.h: the THYLACINEAUDIO_bootstrap extern.
+  - SDL_audio.c: the #ifdef'd bootstrap array entry, placed just ahead
+    of DUMMYAUDIO so SDL_AudioInit picks thylacine first when the driver
+    makes itself available (its Init probes /srv/nocturne and returns
+    FALSE on a soundless machine, so DUMMY still wins there). Every other
+    entry is #ifdef'd out on this target, so ahead-of-DUMMY is ahead of
+    all.
+
+The driver itself lives OUTSIDE the vendored tree at
+usr/ports/sdl2/thylacine/SDL_thylacineaudio.{c,h}, staged by build_sdl2
+into src/audio/thylacine/.
+
+--- a/src/audio/SDL_sysaudio.h
++++ b/src/audio/SDL_sysaudio.h
+@@ -198,5 +198,6 @@
+ extern AudioBootStrap HAIKUAUDIO_bootstrap;
+ extern AudioBootStrap COREAUDIO_bootstrap;
+ extern AudioBootStrap DISKAUDIO_bootstrap;
++extern AudioBootStrap THYLACINEAUDIO_bootstrap;
+ extern AudioBootStrap DUMMYAUDIO_bootstrap;
+ extern AudioBootStrap FUSIONSOUND_bootstrap;
+--- a/src/audio/SDL_audio.c
++++ b/src/audio/SDL_audio.c
+@@ -132,6 +132,9 @@
+ #ifdef SDL_AUDIO_DRIVER_DISK
+     &DISKAUDIO_bootstrap,
+ #endif
++#ifdef SDL_AUDIO_DRIVER_THYLACINE
++    &THYLACINEAUDIO_bootstrap,
++#endif
+ #ifdef SDL_AUDIO_DRIVER_DUMMY
+     &DUMMYAUDIO_bootstrap,
+ #endif

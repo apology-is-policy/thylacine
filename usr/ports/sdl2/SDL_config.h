@@ -142,6 +142,9 @@
 #define SDL_HIDAPI_DISABLED 1
 
 /* Subsystem drivers (each names a kept src/ dir — PRUNE-MANIFEST.md). */
+/* Audio: the Nocturne voice backend (usr/ports/sdl2/thylacine/), auto-
+ * selected when /srv/nocturne is present; DUMMY is the soundless fallback. */
+#define SDL_AUDIO_DRIVER_THYLACINE 1
 #define SDL_AUDIO_DRIVER_DUMMY 1
 #define SDL_JOYSTICK_DUMMY 1
 #define SDL_HAPTIC_DUMMY 1

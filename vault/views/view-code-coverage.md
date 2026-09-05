@@ -65,13 +65,13 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 84 unowned · 489 files (82% owned) · ~22481 unswept lines.**
+**405 owned · 86 unowned · 491 files (82% owned) · ~22738 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **67 files, ~30474 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **68 files, ~30585 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/ports | 0 | 21 | 4413 |
+| usr/ports | 0 | 23 | 4670 |
 | usr/warp-prove | 0 | 1 | 4349 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
@@ -149,13 +149,14 @@ Excluded as harness and counted here rather than dropped: **67 files, ~30474 lin
 | usr/ports/dosbox-x/config.h | 252 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | kernel/extinction.c | 229 |
+| usr/ports/sdl2/thylacine/SDL_thylacineaudio.c | 227 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
 | kernel/include/thylacine/devcap.h | 208 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/nocturned/src/main.rs | 198 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
-| usr/ports/sdl2/SDL_config.h | 186 |
+| usr/ports/sdl2/SDL_config.h | 189 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
@@ -202,6 +203,7 @@ Excluded as harness and counted here rather than dropped: **67 files, ~30474 lin
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
+| usr/ports/sdl2/thylacine/SDL_thylacineaudio.h | 27 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.h | 21 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents_c.h | 14 |
 | usr/ports/dosbox-x/config_package.h | 9 |
