@@ -11,6 +11,11 @@
 // /bin/ut) on the slave as fd 0/1/2, and holds the master. The app never sees
 // the halcyond channels -- spawn installs only the three slave slots (the same
 // non-inheritance ptyhost relies on for drain-then-EOF).
+// The pts ADVERTISES its host's render tier (KAUA-TERM.md R1; H-4d): `--beacon
+// <none|cells|rich>` is written to this process's /env/BEACON before the spawn,
+// so the app inherits it and (with its stdout answering 't' to SYS_FD_DEVCLASS)
+// emits the markup its host renders. Absent = none, fail-closed: a host that
+// declared nothing renders no frames, so the app must not emit them.
 //
 // Two blocking threads, like ptyhost, because the pts master is non-QTPOLL:
 //   - OUTPUT (this thread): master -> the vt parser -> the record producer ->
@@ -191,6 +196,8 @@ extern "C" fn pump_in(arg: u64) {
                         encode_key(&ev, sh.app_cursor.load(Ordering::Relaxed), &mut kbuf);
                         write_master(sh, &kbuf);
                     }
+                    // H-4d: a chosen verb's command line, as typed.
+                    Ok(Input::Text(b)) => write_master(sh, &b),
                     Ok(Input::Resize { cols, rows }) => {
                         // Flag the output thread BEFORE setting the winsize, so
                         // the app's SIGWINCH redraw is already processed at the
@@ -222,11 +229,33 @@ fn parse_dim(a: Option<&[u8]>) -> Option<u16> {
     s.parse::<u16>().ok().filter(|&d| d >= 1)
 }
 
+fn write_env_beacon(tier: &str) -> bool {
+    use libthyla_rs::io::Write as _;
+    match libthyla_rs::fs::File::create("/env/BEACON") {
+        Ok(mut f) => f.write_all(tier.as_bytes()).is_ok(),
+        Err(_) => false,
+    }
+}
+
 fn run() -> i64 {
-    // argv: kaua-term <cols> <rows> [prog [args...]]
+    // argv: kaua-term [--beacon TIER] <cols> <rows> [prog [args...]]
     let mut args = env::args();
     let _argv0 = args.next();
-    let cols = parse_dim(args.next()).unwrap_or(80);
+    let mut next = args.next();
+    let mut tier = "none";
+    if next == Some(b"--beacon".as_slice()) {
+        tier = match args.next() {
+            Some(b"rich") => "rich",
+            Some(b"cells") => "cells",
+            Some(b"none") => "none",
+            _ => {
+                t_putstr("kaua-term: --beacon takes none|cells|rich\n");
+                return 2;
+            }
+        };
+        next = args.next();
+    }
+    let cols = parse_dim(next).unwrap_or(80);
     let rows = parse_dim(args.next()).unwrap_or(24);
     let mut argv: Vec<String> = Vec::new();
     for a in args {
@@ -240,6 +269,12 @@ fn run() -> i64 {
     }
     if argv.is_empty() {
         argv.push(String::from("/bin/ut"));
+    }
+
+    // The advertisement precedes the spawn: the app's env is a deep copy of
+    // ours at that instant.
+    if !write_env_beacon(tier) {
+        t_putstr("kaua-term: /env/BEACON write failed (the app inherits the caller's tier)\n");
     }
 
     // Mint the pts, seed its size to the tile, host the app on the slave.

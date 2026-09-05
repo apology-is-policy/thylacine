@@ -2264,11 +2264,13 @@ pub unsafe fn t_fd2path(fd: i32, buf: *mut u8, buf_len: usize) -> i64 {
 
 // t_fd_devclass -- the Dev class char backing `fd` (H-1;
 // docs/SYS-FD-DEVCLASS-SPEC.md). Returns a positive byte ('c' = the console --
-// a SYS_CONSOLE_OPEN fd or a walked /dev/cons fd; '|' = a pipe; '9' = a dev9p
-// file; ...), or a negative errno for a closed / non-Spoor fd. Read-only
-// introspection: no access right required, confers nothing. The Beacon
-// emission gate (BEACON.md 12.4) and --color=auto both key on exactly
-// (t_fd_devclass(1) == 'c').
+// a SYS_CONSOLE_OPEN fd or a walked /dev/cons fd; 't' = a pts SLAVE the
+// kernel's pts registry knows (H-4d: a terminal its host renders -- a Halcyon
+// tile); '|' = a pipe; '9' = a dev9p file, a pts MASTER included; ...), or a
+// negative errno for a closed / non-Spoor fd. Read-only introspection: no
+// access right required, confers nothing. The Beacon emission gate
+// (BEACON.md 12.4) and --color=auto both key on stdout_is_terminal() --
+// exactly (t_fd_devclass(1) == 'c' || == 't').
 #[inline(always)]
 pub unsafe fn t_fd_devclass(fd: i32) -> i64 {
     let mut x0: i64 = fd as i64;
@@ -2290,7 +2292,7 @@ pub fn fd_devclass(fd: i32) -> Option<u8> {
 }
 
 pub fn stdout_is_terminal() -> bool {
-    fd_devclass(1) == Some(b'c')
+    matches!(fd_devclass(1), Some(b'c') | Some(b't'))
 }
 
 // t_getpid / t_getuid / t_getgid -- the calling Proc's pid / principal_id /

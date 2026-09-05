@@ -53,6 +53,7 @@ From the kernel today (`grep '\.dc =' kernel/*.c`):
 | `d` | devdev         | `/dev` aggregating dir           |
 | `C` | (consctl)      | console control                  |
 | `9` | dev9p          | Stratum-backed disk FS           |
+| `t` | dev9p (a pts SLAVE) | a registered pts slave -- a terminal its host renders (H-4d-2a); the MASTER stays `9` |
 | `r` | devramfs       | the boot ramfs                   |
 | `p` | devproc        | `/proc`                          |
 | `s` | devsrv         | `/srv`                           |
@@ -97,6 +98,13 @@ the #57b single-impl share. Decide one: simplest is that BOTH `c` and `d`-cons
 report `'c'` (normalize the `/dev/cons` leaf), so `is_terminal == (dc == 'c')` is
 exact. Document whichever you pick.
 
+**pts normalization (H-4d-2a, 2026-09-05; AS-BUILT):** a dev9p Spoor the
+kernel's pts registry knows as a SLAVE (`pts_resolve_spoor` -- the tty
+seam's own resolve: a ref-held (conn, qid) binding, pointer-compared, never a
+server-settable qid bit) answers `'t'`; the MASTER side and every other dev9p
+file stay `'9'`. `is_terminal == (dc == 'c' || dc == 't')`;
+`spoor_is_console` (the I-27 gate) is untouched -- `'t'` confers nothing.
+
 ## libthyla-rs wrapper (main-track, with the syscall)
 
 ```rust
@@ -135,6 +143,12 @@ impl Stdout { pub fn is_terminal(&self) -> bool {
   Dev's char; `fd_devclass(a dev9p file fd) == '9'`; `fd_devclass(99) < 0` (bad
   fd). A boot E2E: `ls` colored interactive, `ls | cat` clean (once the default
   flips to Auto).
+- H-4d-2a: `fd_devclass(a pts SLAVE fd) == 't'` -- in-guest only (no kernel-test
+  fixture builds a dev9p Spoor over a live SrvConn): a session tile's `ut` says
+  `beacon rich (transcript zones armed)` over a real ptyfs slave
+  (ls-gfx-session), which only the `'t'` answer produces; `devdev.fd_devclass`
+  pins `spoor_devclass` on devcons / devdev / devsrv Spoors so `'t'` reaches no
+  other Dev.
 
 ## Status
 
@@ -186,3 +200,24 @@ against the tree at implementation time:
 - **The sibling landed with it**: the consctl `beacon <tier>` verb
   (ARCH 23.5.4) -- the other half of the Beacon emission gate this syscall
   serves.
+
+## AS-BUILT addendum (H-4d-2a, 2026-09-05 -- the pts slave class)
+
+- **`'t'` for a registered pts slave.** `spoor_devclass` (kernel/syscall.c,
+  the syscall's body, non-static for the tests) applies two normalizations
+  over the Dev's own char: the devdev `/dev/cons` leaf -> `'c'` (H-1), and a
+  dev9p Spoor `pts_resolve_spoor` reports as a SLAVE -> `'t'`. The master
+  stays `'9'`. The resolve is the tty seam's (`dev9p_client_fid` -> the
+  SrvConn transport downcast -> a pointer-compare against ref-held bindings
+  under `g_pts_lock`, a leaf lock), so a freed / stale pts fails closed and a
+  Spoor on another server's connection cannot match.
+- **Why a class, not the env alone.** The Beacon gate's Auto arm exists so
+  frames never land in a pipe or a file (BEACON.md 12.4); a pts is a terminal
+  something renders, so it belongs on the terminal side of that line -- but
+  WHICH tier is the host's to say, hence the env half (`kaua-term --beacon`).
+  Both halves are required: a tile shell whose env says rich but whose stdout
+  is redirected emits nothing, and a pts whose host declared nothing is plain.
+- **Consumers moved with it**: `beacon::effective_tier` (+ `DC_PTS`),
+  `libthyla_rs::stdout_is_terminal()` (`--color=auto` in every coreutil now
+  colors inside a tile), `ut`'s pts branch (`env_beacon_tier`), the `halcyon`
+  tool's `stdout_is_rich`.

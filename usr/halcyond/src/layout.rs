@@ -702,6 +702,23 @@ pub fn cursor_pos(laid: &LaidBlock, col: usize, sheet: &Sheet) -> (i32, i32, i32
 
 /// Emit a laid block into the cartoon at (0, y0): background rects first,
 /// then glyph runs (paint order is the op order).
+/// The visual span (block-relative y, height) of one source row -- a Line
+/// item, or one row of a table -- across its (possibly wrapped) laid lines.
+/// None when the row laid nothing.
+pub fn laid_line_for(laid: &LaidBlock, item: usize, row: usize) -> Option<(i32, i32)> {
+    let mut y0: Option<i32> = None;
+    let mut y1 = 0;
+    for l in laid.lines.iter() {
+        if l.src_item == item && l.src_row == row {
+            if y0.is_none() {
+                y0 = Some(l.y);
+            }
+            y1 = l.y + l.h;
+        }
+    }
+    y0.map(|y| (y, y1 - y))
+}
+
 pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &GlyphSource) {
     for r in laid.rects.iter() {
         cart.ops.push(Op::Rect {

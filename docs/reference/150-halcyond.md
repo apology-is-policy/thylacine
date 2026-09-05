@@ -652,6 +652,115 @@ tags its leaves and exits. Test builds say `session tile leaf=N presents
 objs (K)` the first time a tile's transcript holds a Beacon object — the
 witness that a tagged program's rich frames reached the model.
 
+**Rich tiles (H-4d-2a).** Before this every session tile was PLAIN, by
+construction: `ut` resolved its tier only inside its console branch (the
+pts-hosted shell "takes this branch never"), the console's `/dev/beacon`
+describes the console renderer, and a pts slave answered dev9p's `'9'` to
+`SYS_FD_DEVCLASS`, so no shell or tool in a tile ever emitted a Beacon frame
+(the d-1 gate log carries no `ut: beacon` line for any tile). Three pieces
+close it: the kernel answers `'t'` for a registered pts SLAVE
+(`spoor_devclass`, the pts registry's own resolve; the master stays `'9'`;
+SYS-FD-DEVCLASS-SPEC.md), `beacon::effective_tier` + `stdout_is_terminal()`
+admit `'t'`, and the pts HOST declares the tier: `SessionTile::spawn` passes
+`kaua-term --beacon rich`, the kaua-term writes it into its own `/env/BEACON`
+before the spawn, and `ut`'s pts branch (`env_beacon_tier`) arms its zones
+iff the inheritance says rich AND its stdout is that terminal. Witness lines
+from the tile shell: `ut: beacon rich inherited (pts host)` then `ut: beacon
+rich (transcript zones armed)`; ls-gfx-session asserts the armed line beside
+`session tile ingest live` (one alternation; both cross-process).
+
+**The menu in a session tile (H-4d-2).** The console renderer's Helix-modal
+transcript and obj verb menu (the sections above) are ported into the
+session compositor's tiles: a `SessionTile` carries `Mode` / the flat row
+list + `Sel` / `scroll_up` / the pointer; on the VT's normal screen Esc
+enters Normal (a full-screen app on the alt screen owns Esc), `normal_input`
+is the console's Normal key set minus yank/paste (a tile has no register
+until the pts clipboard work), `w`/`b` step obj runs, Enter (`Act`) or a
+left click on a run (`click`, via the `Tile.frame` hit map -- the last
+render's block placement, and `Tile::hit`) builds the run's menu
+(`build_menu`, the same verb table read once from `/lib/beacon/verbs`) and
+the loop summons it at display coordinates (the tile's pane `geometry` origin
+plus the surface point) through the H-3c-2 `MenuSet` on the session's ring
+-- the menu role + `menu place` admit the declared seat (H-4d-1). `Tile::render`
+now takes `&mut scroll_up` + an optional `Mark` (block, item, row, obj): the
+mark's row drags the view so the cursor stays visible (Helix: the view follows
+the cursor; the clamped offset is written back), paints the row's `sel_bg`
+band and the selected run's ember underline; Insert re-anchors at 0. A choice
+closes the menu from this side, leaves Normal, and types the expanded command
+into the tile it was opened over as ONE `Input::Text` record `^E^U<cmd>\n`
+(SA-8: ut's line editor takes `^E`/`^U` as CursorEnd + KillToStart, so a
+half-typed draft moves to the kill buffer instead of being run into; one
+record so the bounded down-queue drops it whole). The compositor-side dismiss
+(Esc / click-away / a chord) arrives as `MenuEvent::Closed` and re-renders the
+tile. Test-mode lines: `session tile leaf=N normal mode (R rows)` / `insert
+mode`, `run -> row R obj O` / `no run back|forward from row R`, `act: no
+cursor row` / `act: no obj run on row R` / `act: obj O unplaced` / `act: obj O
+not in its block`, `menu ran: <cmd>`, `N verb rules loaded` -- the gate paces
+its Esc / `b` / Enter on the mode and run lines rather than on fixed waits.
+Host test (tile.rs):
+`a_mark_drags_the_view_to_its_row_and_the_frame_maps_every_block`.
+
+**The grid as the virtual trailing block + the cell spans (H-4d-2b).** The
+port above landed HOLLOW on its first gate: Esc entered Normal mode with zero
+rows. A session tile's content is cells -- the live grid, and scrolled-off
+rows `push_scrolled_rows` interned with no obj -- so the console's row / run
+machinery (transcript items only) saw nothing, and the `ls` output was still
+on the 36-row grid anyway. HALCYON 14.11.4/14.11.5 had specified both halves
+(the frames drive the same span state; the grid is a virtual trailing block);
+neither had been built. Now: (1) the PRODUCER stamps every cell with the
+serial of the last Beacon frame it forwarded (`vt::Cell.span`; the record
+carries the serial explicitly, `Control::Osc1936Raw { serial, frame }`) and
+`Tile::apply` notes the transcript's state after feeding each frame under
+that serial (`Transcript::span_tag` -> `SpanMap`, an 8192-entry ring
+validated by the full serial: a serial that fell off resolves to no span --
+reached only by a TUI repainting over a still-visible cell, which lives on
+the alt screen where no span is read). (2) `push_scrolled_rows(rows,
+&spans)` interns em / obj / hdr from the tags and COPIES an obj from its
+source block into the landing block (`local_obj`, dedup per call, the wire's
+obj-open cost; an evicted source or a full table yields 0 -- a run that lost
+its object, never a wrong one) because the grid's rows straddle zone cuts
+and a block's Line styles must index its own obj table (the invariant
+`runs_on_row` / `obj_of` / every menu consumer relies on). (3) The grid's
+rows are `select::GRID_BLOCK` rows after the transcript's
+(`flatten_with_grid`); `Tile::grid_runs` (runs keyed by start column + 1),
+`grid_run`, `grid_run_obj` (the span's block + obj), `grid_hit` are the
+grid's `runs_on_row` / `run_rect` / `obj_of` / `hit_run`; `step_run_with`
+takes the row source as a closure (`SessionTile::runs_for` dispatches); the
+render lists the grid in the frame under `GRID_KEY`, bands the marked grid
+row under the cells and underlines the selected run over them; Normal mode
+starts on the grid's cursor row (the prompt). Host tests:
+`grid_cells_carry_their_obj_runs_and_scroll_them_into_the_landing_block`
+(the stamp resolves to the frame's state; runs / hit / rect on the grid; a
+zone cut then a scroll-off copies the obj into the landing block and the
+scrolled row's run resolves there), vt's stamping test, the wire's span
+round-trip.
+
+**The welcome (H-4d-3).** The image's device-tier `default` layout (baked by
+`tools/build.sh` under the session lever, readback-verified:
+`splith n=2 active=1 / leaf tag="halcyon welcome" / leaf env`) is what the
+init restores for a user with no rc (HALCYON.md 13.7). The tool tags the
+built leaf and exits; the compositor hosts `/bin/halcyon welcome` in a
+kaua-term (H-4d-1's rules); the anchor rules put the tour LEFT of the
+session's own shell and focus the shell. `halcyon welcome` emits a Beacon
+transcript at the effective tier (rich in a tile: a heading, two lines of
+how, a `ll` table of path objects whose verb menus do the demonstrating --
+`/bin`, `$HOME`, `/dev/tapestry/layout`, `/lib/halcyon/layouts` -- the
+split/zoom/layout chords, the lineage line), says `halcyon: welcome shown
+(tier rich|none)` on the serial console, then EXECs `/bin/ut --home <home>`
+in place (LINEAGE: the pts, the pgrp and the pid stay the tile's; no wrapper
+remains to catch job-control signals), so the tile becomes a prompt with the
+tour above it. The tour's objects run IN PLACE (a verb's command lands in the
+tour's own tile) -- the ratified "runnable objs targeting the RIGHT pane" is
+v1.x (it needs a cross-tile command channel). Gate: ls-gfx-session's first
+login (the init line, the tag, the focus to the shell's leaf, the release,
+the spawn of `/bin/halcyon welcome` -- asserted to follow the release, the
+creator reservation's invariant; the refusal line reported when the
+compositor tried while the tool lived -- the rich tier, the objs witness,
+the clean init exit, two tiles filling the width) and its menu leg (`ls
+/lib/halcyon` -> objects; Esc -> Normal mode over the grid rows; `b` -> a
+run; Enter -> the menu placed by the session compositor; Enter -> `menu ran:
+ls -l -- '<path>'` typed into the tile).
+
 ## Tests
 
 - Host: 55 lib tests (the table above; H-3c added `menu.rs`'s six: runs per
@@ -706,15 +815,24 @@ witness that a tagged program's rich frames reached the model.
   bogus` → E_PERM with `menu none` in the ctl read after.
 - The default image's suite (1435/1435) pins the joey default arm
   (`aurora spawned`, no config).
+- H-4d-2: `tile.rs`'s
+  `a_mark_drags_the_view_to_its_row_and_the_frame_maps_every_block` (the
+  frame covers every block in order without overlap, `hit` answers the block
+  under a y and nothing in the gaps, a mark on the oldest block scrolls the
+  view up to it and paints the band, a mark on the newest scrolls back, the
+  written-back offset is clamped); `tiles.rs`'s two `tile_command` cases;
+  kaua-term's `input_round_trips` gained `Text`.
 
 ## Status
 
 H-2 (the transcript MVP on the CPU floor) as of the H-2d close; H-3b-3
 added the per-leaf tag-bar chrome, H-3b-4 the live-tile keys + the status
 feed, H-3c the obj verb menu (keyboard + click; the compositor-owned dismiss
-proven against a wedged owner). Not yet: raw-VT panes (H-3; `raw_vt_intent`
-latches today), the status bar (H-3d), the session-tier verbs (the settings
-push), layouts (H-4), compose (H-5), the vk executor + the display-list wire
+proven against a wedged owner), H-4 the layouts arc through H-4d-3 (the
+per-user session compositor's init, the creator reservation, rich tiles, the
+tile menu, the welcome -- the `--session` sections above). Not yet: raw-VT
+panes (H-3; `raw_vt_intent` latches today), the session-tier verbs (the
+settings push), compose (H-5), the vk executor + the display-list wire
 (H-6), images/`Embed` (H-7). Damage-rect presents are a recorded
 optimization (v0 presents full frames).
 

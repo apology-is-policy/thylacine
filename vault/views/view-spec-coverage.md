@@ -33,18 +33,29 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**34 dossiered · 0 missing · 34 modules.**
+**34 dossiered · 77 missing · 111 modules.**
 
 | module | spec note | state |
 |---|---|---|
 | 9p_client.tla | [[spec-9p-client]] | dossiered |
+| 9p_client_TTrace_1786457018.tla | `spec-9p-client-TTrace-1786457018` | **missing** |
+| 9p_client_TTrace_1786457019.tla | `spec-9p-client-TTrace-1786457019` | **missing** |
 | allowance.tla | [[spec-allowance]] | dossiered |
+| allowance_TTrace_1786128281.tla | `spec-allowance-TTrace-1786128281` | **missing** |
+| allowance_TTrace_1786128282.tla | `spec-allowance-TTrace-1786128282` | **missing** |
+| allowance_TTrace_1786214937.tla | `spec-allowance-TTrace-1786214937` | **missing** |
+| allowance_TTrace_1786214938.tla | `spec-allowance-TTrace-1786214938` | **missing** |
 | asid.tla | [[spec-asid]] | dossiered |
 | burrow.tla | [[spec-burrow]] | dossiered |
+| burrow_TTrace_1786128280.tla | `spec-burrow-TTrace-1786128280` | **missing** |
+| burrow_TTrace_1786128281.tla | `spec-burrow-TTrace-1786128281` | **missing** |
+| burrow_TTrace_1786214938.tla | `spec-burrow-TTrace-1786214938` | **missing** |
+| burrow_TTrace_1786214939.tla | `spec-burrow-TTrace-1786214939` | **missing** |
 | cons_poll.tla | [[spec-cons-poll]] | dossiered |
 | corvus.tla | [[spec-corvus]] | dossiered |
 | cow.tla | [[spec-cow]] | dossiered |
 | death_wake.tla | [[spec-death-wake]] | dossiered |
+| death_wake_TTrace_1786214939.tla | `spec-death-wake-TTrace-1786214939` | **missing** |
 | debug_step.tla | [[spec-debug-step]] | dossiered |
 | debug_stop.tla | [[spec-debug-stop]] | dossiered |
 | fs_cache.tla | [[spec-fs-cache]] | dossiered |
@@ -56,6 +67,9 @@ reads as missing, which is the intended pressure.
 | net_poll.tla | [[spec-net-poll]] | dossiered |
 | net_poll_teardown.tla | [[spec-net-poll-teardown]] | dossiered |
 | pipe.tla | [[spec-pipe]] | dossiered |
+| pipe_TTrace_1788428603.tla | `spec-pipe-TTrace-1788428603` | **missing** |
+| pipe_TTrace_1788428604.tla | `spec-pipe-TTrace-1788428604` | **missing** |
+| pipe_TTrace_1788428605.tla | `spec-pipe-TTrace-1788428605` | **missing** |
 | poll.tla | [[spec-poll]] | dossiered |
 | pty.tla | [[spec-pty]] | dossiered |
 | pty_stop.tla | [[spec-pty-stop]] | dossiered |
@@ -63,12 +77,75 @@ reads as missing, which is the intended pressure.
 | sched_alpha.tla | [[spec-sched-alpha]] | dossiered |
 | sched_ctxsw.tla | [[spec-sched-ctxsw]] | dossiered |
 | sched_oncpu.tla | [[spec-sched-oncpu]] | dossiered |
+| sched_oncpu_TTrace_1786640339.tla | `spec-sched-oncpu-TTrace-1786640339` | **missing** |
+| sched_oncpu_TTrace_1786640341.tla | `spec-sched-oncpu-TTrace-1786640341` | **missing** |
+| sched_oncpu_TTrace_1786732504.tla | `spec-sched-oncpu-TTrace-1786732504` | **missing** |
 | sched_rebalance.tla | [[spec-sched-rebalance]] | dossiered |
 | sched_tickless.tla | [[spec-sched-tickless]] | dossiered |
 | scheduler.tla | [[spec-scheduler]] | dossiered |
 | tapestry_present.tla | [[spec-tapestry-present]] | dossiered |
+| tapestry_present_TTrace_1786890598.tla | `spec-tapestry-present-TTrace-1786890598` | **missing** |
+| tapestry_present_TTrace_1786890599.tla | `spec-tapestry-present-TTrace-1786890599` | **missing** |
+| tapestry_present_TTrace_1786890949.tla | `spec-tapestry-present-TTrace-1786890949` | **missing** |
+| tapestry_present_TTrace_1786890950.tla | `spec-tapestry-present-TTrace-1786890950` | **missing** |
+| tapestry_present_TTrace_1786890975.tla | `spec-tapestry-present-TTrace-1786890975` | **missing** |
+| tapestry_present_TTrace_1786890976.tla | `spec-tapestry-present-TTrace-1786890976` | **missing** |
+| tapestry_present_TTrace_1786890977.tla | `spec-tapestry-present-TTrace-1786890977` | **missing** |
+| tapestry_present_TTrace_1786891070.tla | `spec-tapestry-present-TTrace-1786891070` | **missing** |
+| tapestry_present_TTrace_1786891071.tla | `spec-tapestry-present-TTrace-1786891071` | **missing** |
+| tapestry_present_TTrace_1786891072.tla | `spec-tapestry-present-TTrace-1786891072` | **missing** |
+| tapestry_present_TTrace_1786891073.tla | `spec-tapestry-present-TTrace-1786891073` | **missing** |
+| tapestry_present_TTrace_1786891083.tla | `spec-tapestry-present-TTrace-1786891083` | **missing** |
+| tapestry_present_TTrace_1786891092.tla | `spec-tapestry-present-TTrace-1786891092` | **missing** |
+| tapestry_present_TTrace_1786891385.tla | `spec-tapestry-present-TTrace-1786891385` | **missing** |
+| tapestry_present_TTrace_1786891386.tla | `spec-tapestry-present-TTrace-1786891386` | **missing** |
+| tapestry_present_TTrace_1786891387.tla | `spec-tapestry-present-TTrace-1786891387` | **missing** |
+| tapestry_present_TTrace_1786891417.tla | `spec-tapestry-present-TTrace-1786891417` | **missing** |
+| tapestry_present_TTrace_1786891418.tla | `spec-tapestry-present-TTrace-1786891418` | **missing** |
+| tapestry_present_TTrace_1786891419.tla | `spec-tapestry-present-TTrace-1786891419` | **missing** |
+| tapestry_present_TTrace_1786891655.tla | `spec-tapestry-present-TTrace-1786891655` | **missing** |
+| tapestry_present_TTrace_1786891656.tla | `spec-tapestry-present-TTrace-1786891656` | **missing** |
+| tapestry_present_TTrace_1786891657.tla | `spec-tapestry-present-TTrace-1786891657` | **missing** |
+| tapestry_present_TTrace_1787756625.tla | `spec-tapestry-present-TTrace-1787756625` | **missing** |
+| tapestry_present_TTrace_1787756626.tla | `spec-tapestry-present-TTrace-1787756626` | **missing** |
+| tapestry_present_TTrace_1787756627.tla | `spec-tapestry-present-TTrace-1787756627` | **missing** |
+| tapestry_present_TTrace_1787756628.tla | `spec-tapestry-present-TTrace-1787756628` | **missing** |
+| tapestry_present_TTrace_1787763497.tla | `spec-tapestry-present-TTrace-1787763497` | **missing** |
+| tapestry_present_TTrace_1787763498.tla | `spec-tapestry-present-TTrace-1787763498` | **missing** |
+| tapestry_present_TTrace_1787763499.tla | `spec-tapestry-present-TTrace-1787763499` | **missing** |
+| tapestry_present_TTrace_1787763500.tla | `spec-tapestry-present-TTrace-1787763500` | **missing** |
+| tapestry_present_TTrace_1787764360.tla | `spec-tapestry-present-TTrace-1787764360` | **missing** |
+| tapestry_present_TTrace_1787764361.tla | `spec-tapestry-present-TTrace-1787764361` | **missing** |
+| tapestry_present_TTrace_1787764362.tla | `spec-tapestry-present-TTrace-1787764362` | **missing** |
+| tapestry_present_TTrace_1787764363.tla | `spec-tapestry-present-TTrace-1787764363` | **missing** |
+| tapestry_present_TTrace_1787764364.tla | `spec-tapestry-present-TTrace-1787764364` | **missing** |
+| tapestry_present_TTrace_1787764393.tla | `spec-tapestry-present-TTrace-1787764393` | **missing** |
+| tapestry_present_TTrace_1787764394.tla | `spec-tapestry-present-TTrace-1787764394` | **missing** |
+| tapestry_present_TTrace_1787764395.tla | `spec-tapestry-present-TTrace-1787764395` | **missing** |
+| tapestry_present_TTrace_1787765026.tla | `spec-tapestry-present-TTrace-1787765026` | **missing** |
+| tapestry_present_TTrace_1787765034.tla | `spec-tapestry-present-TTrace-1787765034` | **missing** |
+| tapestry_present_TTrace_1787765043.tla | `spec-tapestry-present-TTrace-1787765043` | **missing** |
+| tapestry_present_TTrace_1787765392.tla | `spec-tapestry-present-TTrace-1787765392` | **missing** |
 | territory.tla | [[spec-territory]] | dossiered |
+| territory_TTrace_1788428597.tla | `spec-territory-TTrace-1788428597` | **missing** |
+| territory_TTrace_1788428598.tla | `spec-territory-TTrace-1788428598` | **missing** |
+| territory_TTrace_1788428599.tla | `spec-territory-TTrace-1788428599` | **missing** |
+| territory_TTrace_1788428600.tla | `spec-territory-TTrace-1788428600` | **missing** |
+| territory_TTrace_1788428601.tla | `spec-territory-TTrace-1788428601` | **missing** |
+| territory_TTrace_1788428602.tla | `spec-territory-TTrace-1788428602` | **missing** |
 | tsleep.tla | [[spec-tsleep]] | dossiered |
 | weft.tla | [[spec-weft]] | dossiered |
+| weft_TTrace_1786121694.tla | `spec-weft-TTrace-1786121694` | **missing** |
+| weft_TTrace_1786121695.tla | `spec-weft-TTrace-1786121695` | **missing** |
+| weft_TTrace_1786121696.tla | `spec-weft-TTrace-1786121696` | **missing** |
+| weft_TTrace_1786121725.tla | `spec-weft-TTrace-1786121725` | **missing** |
+| weft_TTrace_1786121726.tla | `spec-weft-TTrace-1786121726` | **missing** |
+| weft_TTrace_1786121727.tla | `spec-weft-TTrace-1786121727` | **missing** |
+| weft_TTrace_1786128279.tla | `spec-weft-TTrace-1786128279` | **missing** |
+| weft_TTrace_1786128280.tla | `spec-weft-TTrace-1786128280` | **missing** |
+| weft_TTrace_1786214940.tla | `spec-weft-TTrace-1786214940` | **missing** |
+| weft_TTrace_1786214941.tla | `spec-weft-TTrace-1786214941` | **missing** |
 | weft_readiness.tla | [[spec-weft-readiness]] | dossiered |
+| weft_readiness_TTrace_1786121698.tla | `spec-weft-readiness-TTrace-1786121698` | **missing** |
+| weft_readiness_TTrace_1786214941.tla | `spec-weft-readiness-TTrace-1786214941` | **missing** |
 <!-- generated:end -->

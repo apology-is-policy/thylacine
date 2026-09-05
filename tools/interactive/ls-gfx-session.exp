@@ -30,6 +30,20 @@
 #         (code 0) -- closing" -> "session logout".
 #   d-1b  resume: login's wait() returns -> getty -> the session leaf is retired
 #         -> aurora un-backgrounds, its FRAME loop resumes -> Direct(console).
+#   H-4d  the WELCOME (first login, no rc): the init runs `halcyon layout
+#         restore default`; the tool builds a leaf beside the root shell and
+#         TAGS it `halcyon welcome`; the compositor's own mints on that leaf
+#         are REFUSED while the tool lives (the creator-conn reservation:
+#         "claim on pane N reserved by conn C") and the tool moves the shell
+#         past the built leaf + focuses it; the tool exits -> tapestryd
+#         releases the reservation + fans TEV_LAYOUT -> the compositor hosts
+#         the tag in a kaua-term ("spawned ... /bin/halcyon welcome"); the
+#         tour goes out RICH ("welcome shown (tier rich)") and lands in the
+#         tile's transcript as objects ("presents objs"); two tiles.
+#   H-4d  the MENU in a session tile: `ls /lib/halcyon` typed into the shell
+#         -> objects; Esc, `b` (the previous obj run), Enter -> the verb menu
+#         is placed by the SESSION compositor ("menu N placed ... for path");
+#         Enter picks `ls` -> "menu ran: ls -l -- '...'" typed into the tile.
 #
 # GATED ON THE BAKED LEVER (the cfg-4 / ls-halcyon precedent): the pool carries
 # /lib/halcyon/session = "on" only under THYLACINE_HALCYON_SESSION=1. On a
@@ -122,15 +136,152 @@ expect {
     timeout { lc_fail "halcyond: session up never appeared (no successful present)" }
     eof     { lc_fail "qemu exited during session bringup" }
 }
-expect {
-    -ex "halcyond: session tile ingest live" {
-        lc_step "d-2: the root tile ingested its kaua-term's record stream"
-    }
-    -re {halcyond: session tile leaf=[0-9]+ crashed} { lc_fail "the root tile crashed (the ingest trust boundary tripped)" }
-    -re {EXTINCTION:} { lc_extinction_fail "extinction during tile ingest" }
-    timeout { lc_fail "the root tile never ingested (no kaua-term output reached halcyond)" }
-    eof     { lc_fail "qemu exited during tile ingest" }
+# --- d-2 + H-4d: the root tile ARMS + INGESTS, and the first login's WELCOME ---
+#
+# RICH TILES (H-4d-2a): the tile's shell arms its transcript zones -- the
+# kaua-term declared `--beacon rich` into the shell's env AND the pts slave
+# answered 't' to SYS_FD_DEVCLASS (the kernel's pts registry, not a qid bit).
+# Either half missing leaves the tile PLAIN (no objects, no menus, no welcome)
+# -- the state every session gate before this one silently ran in.
+#
+# THE WELCOME (H-4d-3): the compositor spawns the init (`halcyon layout restore
+# default`) after the root tile's first present -- BEFORE or AFTER the root
+# tile's ingest witness, and its markers interleave with the tool's, tapestryd's
+# and the compositor's freely (the first run lost all three attempts to the
+# init line landing before "ingest live" and being consumed there). So: ONE
+# alternation over every marker, looped until all are seen (the run-27
+# arm-order lesson; the logout triple is the precedent). The reservation line
+# witnesses that the compositor DID try to fill the tool's leaf while the tool
+# lived and was refused -- that interleaving is not guaranteed (the tool can
+# finish before the compositor's reconcile runs), so it is reported, not
+# required; the invariant asserted EVERY run is that the compositor hosts the
+# welcome leaf only AFTER the release. The tiling lines are recorded as they
+# pass (they are frequent and unordered against the markers); the two-tile
+# witness below prefers a fresh line and falls back to the last one seen.
+set timeout 90
+set W ""
+set act ""
+set sumw 0
+set dispw 0
+set saw_armed 0
+set saw_ingest 0
+set saw_init 0
+set saw_reserved 0
+set saw_tagged 0
+set saw_focus 0
+set saw_released 0
+set saw_wspawn 0
+set saw_tier 0
+set saw_objs 0
+set saw_exit 0
+set tries 0
+proc h4d_flags {} {
+    global saw_armed saw_ingest saw_init saw_reserved saw_tagged saw_focus saw_released saw_wspawn saw_tier saw_objs saw_exit
+    return "armed=$saw_armed ingest=$saw_ingest init=$saw_init reserved=$saw_reserved tagged=$saw_tagged focus=$saw_focus released=$saw_released spawned=$saw_wspawn tier=$saw_tier objs=$saw_objs exit=$saw_exit"
 }
+while {(!$saw_armed || !$saw_ingest || !$saw_init || !$saw_tagged || !$saw_focus || !$saw_released || !$saw_wspawn || !$saw_tier || !$saw_objs || !$saw_exit) && $tries < 80} {
+    incr tries
+    expect {
+        -re {ut: beacon rich \(transcript zones armed\)|halcyond: session tile ingest live|halcyond: session init: /bin/halcyon layout restore default \(pid \d+\)|tapestryd: claim on pane [0-9]+ reserved by conn [0-9]+ \(E_AGAIN\)|halcyon: tagged 1 pane\(s\) for the session compositor|halcyon: focus -> pane ([0-9]+)|tapestryd: conn [0-9]+ released [0-9]+ reserved empty leaf/leaves|halcyond: session tile leaf=([0-9]+) spawned pid=[0-9]+ [0-9]+x[0-9]+ /bin/halcyon welcome|halcyon: welcome shown \(tier (rich|none)\)|halcyond: session tile leaf=([0-9]+) presents objs \(([0-9]+)\)|halcyond: session init exited \(code ([0-9-]+)\)|tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)} {
+            # ONE alternation: the leftmost marker in the buffer is the one
+            # consumed, so a chunk carrying several markers yields them in
+            # arrival order, one per iteration. Groups: 1 focus pane, 2 the
+            # welcome leaf, 3 the tier, 4+5 the objs leaf + count, 6 the init
+            # exit code, 7-10 the tiling reading.
+            set m $expect_out(0,string)
+            if {[string match "ut: beacon rich*" $m]} {
+                if {!$saw_armed} { lc_step "H-4d: a tile's shell armed its zones (pts host rich + stdout is a pts terminal)" }
+                set saw_armed 1
+            } elseif {[string match "*ingest live" $m]} {
+                set saw_ingest 1
+                lc_step "d-2: the root tile ingested its kaua-term's record stream"
+            } elseif {[string match "*session init: /bin/halcyon*" $m]} {
+                set saw_init 1
+                lc_step "H-4d: the init runs the device default restore (no rc yet)"
+            } elseif {[string match "*reserved by conn*" $m]} {
+                if {!$saw_reserved} { lc_step "H-4d: the compositor's mint on the tool's leaf was REFUSED while the tool lived (the reservation)" }
+                set saw_reserved 1
+            } elseif {[string match "*tagged 1 pane*" $m]} {
+                set saw_tagged 1
+                lc_step "H-4d: the tool tagged the welcome leaf and left it to the compositor"
+            } elseif {[string match "*focus -> pane*" $m]} {
+                set saw_focus 1
+                if {$expect_out(1,string) ne $A} {
+                    lc_fail "H-4d: the tool focused pane $expect_out(1,string), not the shell's leaf $A (active=env must hand focus to the anchor)"
+                }
+                lc_step "H-4d: the saved active=env focused the shell (leaf $A)"
+            } elseif {[string match "*released*" $m]} {
+                set saw_released 1
+                lc_step "H-4d: the tool's exit released its reservation (tapestryd fanned the release)"
+            } elseif {[string match "*spawned*" $m]} {
+                set saw_wspawn 1
+                set W $expect_out(2,string)
+                if {$W eq $A} { lc_fail "H-4d: the welcome was hosted into the shell's own leaf" }
+                if {!$saw_released} { lc_fail "H-4d: the compositor hosted the welcome leaf $W BEFORE the tool released it -- the creator reservation did not hold" }
+                lc_step "H-4d: the compositor hosted the tag in a terminal tile (leaf $W runs /bin/halcyon welcome)"
+            } elseif {[string match "*welcome shown*" $m]} {
+                set saw_tier 1
+                if {$expect_out(3,string) ne "rich"} {
+                    lc_fail "H-4d: the tour went out PLAIN (tier $expect_out(3,string)) -- the tile's pts did not advertise BEACON, or the pts slave did not read as a terminal"
+                }
+                lc_step "H-4d: the tour went out at the rich tier"
+            } elseif {[string match "*presents objs*" $m]} {
+                # The count is whatever the ingest batch held when the FIRST
+                # object landed (a read-batching artifact), so the witness is
+                # >= 1: the tour's rich frames reached the model at all.
+                set saw_objs 1
+                if {$expect_out(5,string) < 1} {
+                    lc_fail "H-4d: the tour's transcript presents no object (the table's path objects did not land)"
+                }
+                lc_step "H-4d: the tour's objects reached the tile's transcript ($expect_out(5,string) obj(s) in leaf $expect_out(4,string))"
+            } elseif {[string match "*session init exited*" $m]} {
+                set saw_exit 1
+                if {$expect_out(6,string) ne "0"} { lc_fail "H-4d: the init (the restore tool) exited $expect_out(6,string)" }
+                lc_step "H-4d: the restore tool exited clean and was reaped"
+            } else {
+                set act $expect_out(7,string)
+                set sumw $expect_out(9,string)
+                set dispw $expect_out(10,string)
+            }
+        }
+        -re {ut: beacon (none|cells) inherited \(pts host\)} { lc_fail "H-4d: a tile's kaua-term declared tier $expect_out(1,string), not rich" }
+        -ex "ut: beacon tier not advertised by the pts host" { lc_fail "H-4d: a tile's kaua-term declared no tier (--beacon missing / the /env write failed)" }
+        -re {halcyon: [^\n]*(refused|malformed|unreachable|no layout|diverged)} { lc_fail "H-4d: the restore tool errored: $expect_out(0,string)" }
+        -re {halcyond: session tile leaf=[0-9]+ spawn failed} { lc_fail "H-4d: a tile failed to spawn" }
+        -re {halcyond: session tile leaf=[0-9]+ crashed} { lc_fail "a tile crashed (the ingest trust boundary tripped)" }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction during the root tile / the welcome" }
+        timeout { lc_fail "H-4d: markers missing after the root tile spawned ([h4d_flags])" }
+        eof     { lc_fail "qemu exited during the root tile / the welcome" }
+    }
+}
+if {!$saw_armed || !$saw_ingest || !$saw_init || !$saw_tagged || !$saw_focus || !$saw_released || !$saw_wspawn || !$saw_tier || !$saw_objs || !$saw_exit} {
+    lc_fail "H-4d: markers missing ([h4d_flags])"
+}
+if {!$saw_reserved} { lc_step "H-4d: (the compositor did not try to mint while the tool lived this run -- the refusal was not exercised; the ordering invariant held)" }
+# Two foreground tiles now: the tour + the shell, filling the width. The
+# tour tile's open + present reconcile AFTER the spawn line, so a fresh
+# tiling line normally follows the loop; the loop's last recorded one is the
+# fallback when the reconcile beat the last marker.
+set timeout 15
+expect {
+    -re {tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)} {
+        if {$expect_out(1,string) < 2} {
+            exp_continue
+        }
+        set act $expect_out(1,string)
+        set sumw $expect_out(3,string)
+        set dispw $expect_out(4,string)
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction awaiting the welcome tiling witness" }
+    timeout {
+        if {$act eq "" || $act < 2} { lc_fail "H-4d: no active>=2 tiling witness after the welcome hosted (last seen: active=$act)" }
+    }
+    eof { lc_fail "qemu exited awaiting the welcome tiling witness" }
+}
+set timeout 90
+if {$act != 2} { lc_fail "H-4d: the welcome left $act foreground tiles, not two (tour + shell)" }
+if {$sumw < ($dispw * 85 / 100)} { lc_fail "H-4d: the two tiles fill only ${sumw}px of ${dispw}px" }
+lc_pass "H-4d: the welcome came up as two tiles (the tour beside the shell; sum_w=$sumw of $dispw)"
 
 # --- caps: a session tile's programs must NOT hold CAP_SET_IDENTITY ---
 #
@@ -160,6 +311,81 @@ expect {
     eof { lc_fail "qemu exited during caps-probe" }
 }
 
+# --- H-4d: the obj verb MENU inside a session tile ---
+#
+# The shell tile (A, focused) lists /lib/halcyon: its path objects land in
+# its transcript ("presents objs", A's first -- the prompt presents none). Esc enters the transcript's
+# Normal mode, `b` selects the previous obj run (the last listed entry), Enter
+# summons its verb menu -- placed by the SESSION compositor (the menu role +
+# the place verb now admit the declared seat) -- and Enter on the menu's first
+# item (`ls`) types `ls -l -- '<path>'` into the tile as ONE Text record.
+after 1500
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "ls /lib/halcyon\n"} err]} {
+    lc_fail "qmp-sendtext ls failed: $err"
+}
+set timeout 60
+expect {
+    -re "halcyond: session tile leaf=$A presents objs \\((\[0-9\]+)\\)" {
+        lc_step "H-4d menu: the shell's ls landed $expect_out(1,string) path objects in tile $A"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during the ls" }
+    timeout { lc_fail "H-4d menu: the shell tile presented no objects after `ls /lib/halcyon` (the tile's beacon tier, or the transcript ingest)" }
+    eof { lc_fail "qemu exited during the ls" }
+}
+after 1200
+# Paced by the tile's own mode lines (test builds), not by fixed waits: each
+# key's effect is a witness before the next key goes in.
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k esc} err]} {
+    lc_fail "qmp-sendtext menu key esc failed: $err"
+}
+expect {
+    -re "halcyond: session tile leaf=$A normal mode \\((\[0-9\]+) rows\\)" {
+        lc_step "H-4d menu: Esc entered the shell tile's Normal mode ($expect_out(1,string) rows)"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction on Esc" }
+    timeout { lc_fail "H-4d menu: Esc did not enter Normal mode in tile $A (the key never reached the tile, or its VT is on the alt screen)" }
+    eof { lc_fail "qemu exited on Esc" }
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k b} err]} {
+    lc_fail "qmp-sendtext menu key b failed: $err"
+}
+expect {
+    -re "halcyond: session tile leaf=$A run -> row (\[0-9\]+) obj (\[0-9\]+)" {
+        lc_step "H-4d menu: b selected obj $expect_out(2,string) on row $expect_out(1,string)"
+    }
+    -re "halcyond: session tile leaf=$A no run back" { lc_fail "H-4d menu: b found no obj run before the cursor (the ls objects are not in the flat rows)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction on b" }
+    timeout { lc_fail "H-4d menu: no run-step line after b (Normal mode did not take the key)" }
+    eof { lc_fail "qemu exited on b" }
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k ret} err]} {
+    lc_fail "qmp-sendtext menu key ret failed: $err"
+}
+expect {
+    -re {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for path (/lib/halcyon/[^ ]*) run at} {
+        lc_step "H-4d menu: the session compositor placed the verb menu for $expect_out(1,string)"
+    }
+    -re {halcyond: menu (surface failed|place refused)} { lc_fail "H-4d menu: the session compositor could not summon a menu: $expect_out(0,string) (the menu role / place verb refused the declared seat)" }
+    -re {halcyond: session tile leaf=[0-9]+ act: } { lc_fail "H-4d menu: Enter found no obj run to act on: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction summoning the menu" }
+    timeout { lc_fail "H-4d menu: no menu placement after Esc, b, Enter in the shell tile" }
+    eof { lc_fail "qemu exited summoning the menu" }
+}
+after 800
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "ret"} err]} {
+    lc_fail "qmp-sendtext menu choose failed: $err"
+}
+expect {
+    -re {halcyond: menu ran: ls -l -- '/lib/halcyon/[^']*'} {
+        lc_pass "H-4d menu: the chosen verb was typed into the tile ($expect_out(0,string))"
+    }
+    -re {tapestryd: menu [0-9]+ dismissed} { lc_fail "H-4d menu: the menu was dismissed before a choice (the Enter did not reach the menu surface)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction choosing the verb" }
+    timeout { lc_fail "H-4d menu: Enter on the menu ran nothing" }
+    eof { lc_fail "qemu exited choosing the verb" }
+}
+after 1500
+
 # --- d-3: SPLIT -- Super+H creates a SECOND tile (capture its leaf id B) ---
 #
 # Settle the root ut at a prompt, then Super+H over QMP. tapestryd's Super chord
@@ -183,16 +409,19 @@ set timeout 60
 #
 # F2 (d-1b tiling completion): a BACKGROUNDED aurora leaf must not consume a
 # tiling column. Pre-F2 the flat [aurora, A, B] tiling gave each session tile a
-# THIRD (~418px, sum ~836 of 1280); post-F2 aurora is excluded so [A, B] each
-# get a HALF (~632px, sum ~1264). Assert the foreground tile widths SUM to >85%
-# of disp_w -- a leg that FAILS on the pre-F2 engine, a real discriminator.
+# THIRD (~418px, sum ~836 of 1280); post-F2 aurora is excluded so the
+# foreground tiles share the whole width. Assert the foreground tile widths
+# SUM to >85% of disp_w -- a leg that FAILS on the pre-F2 engine, a real
+# discriminator. With the welcome's tour tile present the split makes THREE
+# (tour + shell + the new one), so the witness is active=3 -- a stale active=2
+# line from the welcome must not satisfy it.
 set act ""
 set sumw 0
 set minw 0
 set dispw 0
 expect {
     -re {tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)} {
-        if {$expect_out(1,string) < 2} {
+        if {$expect_out(1,string) < 3} {
             exp_continue
         }
         set act $expect_out(1,string)
@@ -202,13 +431,13 @@ expect {
     }
     -re {halcyond: session tile leaf=[0-9]+ spawn failed} { lc_fail "the split tile failed to spawn (claim refused, or kaua-term/pipes)" }
     -re {EXTINCTION:} { lc_extinction_fail "extinction awaiting the session-tiling geometry witness" }
-    timeout { lc_fail "no active>=2 session-tiling witness -- the split did not reach 2 foreground tiles (reconcile/claim/tiling broken)" }
+    timeout { lc_fail "no active>=3 session-tiling witness -- the split did not reach 3 foreground tiles (reconcile/claim/tiling broken)" }
     eof { lc_fail "qemu exited awaiting the session-tiling geometry witness" }
 }
 if {$sumw < ($dispw * 85 / 100)} {
     lc_fail "F2: the session tiles fill only ${sumw}px of ${dispw}px (a backgrounded leaf is stealing a column; active=$act min_w=$minw)"
 }
-lc_pass "d-3 F2: the two session tiles fill the display (active=$act sum_w=$sumw of $dispw, min_w=$minw)"
+lc_pass "d-3 F2: the session tiles fill the display (active=$act sum_w=$sumw of $dispw, min_w=$minw)"
 # The spawn line followed the witness -- capture leaf B now.
 set B ""
 expect {
@@ -221,8 +450,8 @@ expect {
     timeout { lc_fail "Super+H produced no second tile spawn line after the geometry witness" }
     eof { lc_fail "qemu exited during the split-tile spawn" }
 }
-if {$B eq $A} {
-    lc_fail "the split reused the root leaf id ($A) -- no new leaf was created"
+if {$B eq $A || $B eq $W} {
+    lc_fail "the split reused an existing leaf id ($B) -- no new leaf was created"
 }
 
 # --- zoom: a HIDDEN tile stays hosted (its shell survives the zoom) ---
@@ -249,7 +478,7 @@ if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+f"} err]} {
     lc_fail "qmp-sendtext unzoom chord failed: $err"
 }
 expect {
-    -re "tapestryd: session-tiling active=2 min_w=$minw sum_w=$sumw" { lc_pass "zoom: unzoom restored both tiles; A survived hidden (sum_w=$sumw)" }
+    -re "tapestryd: session-tiling active=3 min_w=$minw sum_w=$sumw" { lc_pass "zoom: unzoom restored all three tiles; A survived hidden (sum_w=$sumw)" }
     -re "halcyond: session tile leaf=$A (exited|crashed)" { lc_fail "P0: tile A died across the zoom" }
     -re {EXTINCTION:} { lc_extinction_fail "extinction during unzoom" }
     timeout { lc_fail "no active=2 witness after the unzoom chord" }
@@ -299,23 +528,26 @@ expect {
     eof     { lc_fail "qemu exited closing the focused tile" }
 }
 
-# --- lone tile: the survivor returns to borderless full width ---
-#
-# With B gone, A is the only foreground leaf beside the zero-rect console
-# leaf: the inset counts foreground leaves, so A is borderless and full width
-# (Direct-eligible) -- round-1 F4 had it keep a ring + tag bar forever.
+# --- two tiles again: the tour + the shell share the width ---
 set timeout 30
 expect {
-    -re "tapestryd: session-tiling active=1 min_w=$dispw sum_w=$dispw" { lc_pass "lone tile: A is borderless + full width after B closed" }
+    -re {tapestryd: session-tiling active=2 min_w=[0-9]+ sum_w=([0-9]+) disp_w=([0-9]+)} {
+        if {$expect_out(1,string) < ($expect_out(2,string) * 85 / 100)} {
+            lc_fail "after B closed, the tour + the shell fill only $expect_out(1,string) of $expect_out(2,string)"
+        }
+        lc_pass "after B closed, the tour + the shell share the width again (sum_w=$expect_out(1,string))"
+    }
     -re {EXTINCTION:} { lc_extinction_fail "extinction after B closed" }
-    timeout { lc_fail "after B closed, A did not return to full width (the inset counted a zero-rect leaf)" }
+    timeout { lc_fail "after B closed, no active=2 witness (the tour or the shell vanished)" }
     eof { lc_fail "qemu exited after B closed" }
 }
 
-# --- d-3: focus re-home + last-tile logout -- exit A -> logout ---
+# --- d-3: focus re-home -- exit A; the tour tile is then alone ---
 #
 # Closing B re-homed focus to A (compositor close_inner). A second `exit\n` now
-# reaches A; A closes, no tiles remain, halcyond logs out.
+# reaches A; A closes; the tour tile (W) is the lone foreground leaf, so it is
+# borderless and full width (Direct-eligible) -- round-1 F4 had a lone tile
+# keep a ring + tag bar forever.
 after 2000
 if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "exit\n"} err]} {
     lc_fail "qmp-sendtext exit (A) failed: $err"
@@ -325,11 +557,42 @@ expect {
     -re "halcyond: session tile leaf=$A exited \\(code 0\\) -- closing" {
         lc_step "d-3: focus re-homed to A (leaf $A); `exit` reached it -> A closed"
     }
+    -re "halcyond: session tile leaf=$W exited" {
+        lc_fail "`exit` closed the TOUR tile (leaf $W), not the shell A -- focus did not re-home to A after B closed"
+    }
     -re {halcyond: session tile leaf=[0-9]+ exited \(code [1-9]} {
-        lc_fail "the last tile exited non-zero (ut did not run `exit` cleanly)"
+        lc_fail "a tile exited non-zero (ut did not run `exit` cleanly)"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction closing the shell tile" }
+    timeout { lc_fail "no close after the second `exit` -- focus did not re-home to A after B closed" }
+    eof     { lc_fail "qemu exited closing the shell tile" }
+}
+set timeout 30
+expect {
+    -re "tapestryd: session-tiling active=1 min_w=$dispw sum_w=$dispw" { lc_pass "lone tile: the tour (leaf $W) is borderless + full width after A closed" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction after A closed" }
+    timeout { lc_fail "after A closed, the tour tile did not return to full width" }
+    eof { lc_fail "qemu exited after A closed" }
+}
+
+# --- last-tile logout -- exit the tour's shell -> logout ---
+#
+# `halcyon welcome` EXECed the shell in its tile, so a third `exit\n` ends it
+# like any shell tile: W closes, no tiles remain, halcyond logs out.
+after 2000
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "exit\n"} err]} {
+    lc_fail "qmp-sendtext exit (W) failed: $err"
+}
+set timeout 90
+expect {
+    -re "halcyond: session tile leaf=$W exited \\(code 0\\) -- closing" {
+        lc_step "H-4d: `exit` reached the tour tile's shell (leaf $W) -> W closed"
+    }
+    -re {halcyond: session tile leaf=[0-9]+ exited \(code [1-9]} {
+        lc_fail "the last tile exited non-zero (the tour's shell did not run `exit` cleanly)"
     }
     -re {EXTINCTION:} { lc_extinction_fail "extinction closing the last tile" }
-    timeout { lc_fail "no close after the second `exit` -- focus did not re-home to A after B closed" }
+    timeout { lc_fail "no close after the third `exit` -- the tour tile's shell did not take input" }
     eof     { lc_fail "qemu exited closing the last tile" }
 }
 # The last tile is gone. THREE terminal markers now appear, ALL cross-process
@@ -370,7 +633,7 @@ if {!$saw_logout || !$saw_fg || !$saw_direct} {
     lc_fail "logout/foreground/Direct not all seen (logout=$saw_logout fg=$saw_fg direct=$saw_direct)"
 }
 
-lc_pass "KT-1.5d-3: root tile -> split -> 2 tiles -> focus-routed exit (contained) -> last-tile logout -> console resumes"
+lc_pass "KT-1.5d-3 + H-4d: welcome -> menu -> split -> 3 tiles -> focus-routed exits (contained) -> last-tile logout -> console resumes"
 
 # --- H-4c: the startup script runs at the NEXT login (rio's `-i`) ---
 #
@@ -414,53 +677,57 @@ expect {
     timeout { lc_fail "H-4c: no session init line (no rc on disk, or the runner did not fire)" }
     eof     { lc_fail "qemu exited awaiting the session init" }
 }
-expect {
-    -re {halcyon: restored 0 of 0 program\(s\)} { lc_pass "H-4c: the rc restored the saved layout through the session tool" }
-    -re {halcyon: [^\n]*(refused|malformed|unreachable|no layout|diverged)} { lc_fail "H-4c: the rc's restore errored: $expect_out(0,string)" }
-    -re {halcyond: session init exited \(code [1-9]} { lc_fail "H-4c: the rc exited non-zero before restoring" }
-    -re {EXTINCTION:} { lc_extinction_fail "extinction during the rc restore" }
-    timeout { lc_fail "H-4c: the rc's restore never reported" }
-    eof     { lc_fail "qemu exited during the rc restore" }
-}
-# H-4d: the tool's leaves are RESERVED to it while it lives (the compositor's
-# mints answer E_AGAIN -- the positive control that the race this exists for
-# was refused, not merely won), released at its exit, and only then filled:
-# the init's exit line and the three-tile witness arrive in EITHER order, so
-# match the set with one alternation (the logout triple's pattern). The
-# reservation token is matched by its tail: a daemon line landing mid-write
-# on the shared console has torn the prefix before.
+# H-4d: the tool's tally, the compositor's REFUSED mints (E_AGAIN -- seen when
+# the compositor tried while the tool lived; that interleaving is not
+# guaranteed, so it is reported, not required), the release, the fills and
+# the init's exit arrive in EITHER order across four processes: ONE regex
+# alternation (the leftmost marker in the buffer wins), dispatched on the
+# matched text -- this run's refusals landed BEFORE the tally, and a separate
+# tally expect had consumed them unseen. The invariant asserted every run: no
+# tile is hosted in a restore-built leaf BEFORE the release; a host that
+# precedes it means the creator reservation did not hold.
+set saw_restored 0
 set saw_reserved 0
 set saw_released 0
 set saw_three 0
 set saw_exit 0
 set tries 0
-while {(!$saw_reserved || !$saw_released || !$saw_three || !$saw_exit) && $tries < 10} {
+while {(!$saw_restored || !$saw_released || !$saw_three || !$saw_exit) && $tries < 40} {
     incr tries
     expect {
-        -re {reserved by conn [0-9]+ \(E_AGAIN\)|released [0-9]+ reserved empty leaf/leaves|tapestryd: session-tiling active=3 |halcyond: session init exited \(code ([0-9-]+)\)} {
+        -re {halcyon: restored 0 of 0 program\(s\)|reserved by conn [0-9]+ \(E_AGAIN\)|released [0-9]+ reserved empty leaf/leaves|halcyond: session tile leaf=([0-9]+) spawned pid|tapestryd: session-tiling active=3 |halcyond: session init exited \(code ([0-9-]+)\)} {
             set m $expect_out(0,string)
-            if {[string match "*E_AGAIN*" $m]} {
+            if {[string match "*restored 0 of 0*" $m]} {
+                set saw_restored 1
+                lc_pass "H-4c: the rc restored the saved layout through the session tool"
+            } elseif {[string match "*E_AGAIN*" $m]} {
+                if {!$saw_reserved} { lc_step "H-4d: the compositor's mint on a restore-built leaf was REFUSED while the tool lived (the race was exercised this run)" }
                 set saw_reserved 1
-                lc_step "H-4d: the compositor's mint on a restore-built leaf was REFUSED while the tool lived"
             } elseif {[string match "*released*" $m]} {
                 set saw_released 1
                 lc_step "H-4d: the tool's exit released its reservations"
+            } elseif {[string match "*spawned pid*" $m]} {
+                if {!$saw_released} {
+                    lc_fail "H-4d: the compositor hosted a tile in leaf $expect_out(1,string) BEFORE the tool released its leaves -- the creator reservation did not hold"
+                }
+                lc_step "H-4d: the compositor filled leaf $expect_out(1,string) after the release"
             } elseif {[string match "*active=3*" $m]} {
                 set saw_three 1
                 lc_pass "H-4c: the compositor filled the two restored leaves -- three tiles"
             } else {
                 set saw_exit 1
-                if {$expect_out(1,string) ne "0"} { lc_fail "H-4c: the init child exited $expect_out(1,string)" }
+                if {$expect_out(2,string) ne "0"} { lc_fail "H-4c: the init child exited $expect_out(2,string)" }
                 lc_pass "H-4c: the init child exited clean and was reaped"
             }
         }
-        -re {EXTINCTION:} { lc_extinction_fail "extinction filling the restored leaves" }
-        timeout { lc_fail "H-4c/H-4d: rc-leg markers missing (reserved=$saw_reserved released=$saw_released three=$saw_three exit=$saw_exit)" }
-        eof     { lc_fail "qemu exited awaiting the rc-leg markers" }
+        -re {halcyon: [^\n]*(refused|malformed|unreachable|no layout|diverged)} { lc_fail "H-4c: the rc's restore errored: $expect_out(0,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction during the rc restore" }
+        timeout { lc_fail "H-4c/H-4d: rc-leg markers missing (restored=$saw_restored released=$saw_released three=$saw_three exit=$saw_exit; refusal witnessed=$saw_reserved)" }
+        eof     { lc_fail "qemu exited during the rc restore" }
     }
 }
-if {!$saw_reserved || !$saw_released || !$saw_three || !$saw_exit} {
-    lc_fail "H-4c/H-4d: rc-leg markers missing (reserved=$saw_reserved released=$saw_released three=$saw_three exit=$saw_exit)"
+if {!$saw_restored || !$saw_released || !$saw_three || !$saw_exit} {
+    lc_fail "H-4c/H-4d: rc-leg markers missing (restored=$saw_restored released=$saw_released three=$saw_three exit=$saw_exit; refusal witnessed=$saw_reserved)"
 }
 
 lc_quit

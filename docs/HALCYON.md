@@ -778,6 +778,19 @@ tiles. The seat is one conn per display, held only while it hosts, so no
 other same-user program reaches the arm past a live compositor; the
 per-process owner check on the placed surface is unchanged.
 
+**The menu inside a session tile (H-4d-2 AS-BUILT, 2026-09-05).** The
+console renderer's Helix-modal transcript + obj verb menu are ported into
+the session compositor's tiles (150-halcyond.md "The menu in a session
+tile"): on the VT's normal screen Esc enters Normal (a full-screen app on
+the alt screen owns Esc), the console's Normal keys minus yank/paste walk
+the rows and the obj runs, Enter or a left click on a run summons its menu
+-- placed by the session compositor at display coordinates -- and a choice
+is typed into the tile it was opened over as ONE `Text` record
+`^E^U<cmd>\n` (the `^E^U` prefix moves a half-typed draft to ut's kill
+buffer instead of running into it; one record so the bounded down-queue
+drops it whole). The view follows the cursor (the marked row drags the
+scroll offset). A tile's yank register lands with the pts clipboard work.
+
 **Menus (H-3c — THE GATE).** ONE ephemeral `Role::Chrome` surface, summoned by
 halcyond via the gated global-ctl verb `menu place <x> <y> <w> <h>` /
 `menu dismiss` (names provisional; the default-deny gate). Compositor-placed at
@@ -1123,6 +1136,36 @@ authority) is not audit-bearing on its own.
   therefore open BESIDE their terminal tile (focus placement) — the
   rio-shaped refinement (a tile's graphical child stacking over its
   terminal) is v1.x.
+- **Rich tiles (H-4d-2a AS-BUILT, 2026-09-05) -- the dependency the welcome
+  surfaced.** Every session tile had been PLAIN by construction: `ut`
+  resolved its tier only on the console branch, the console's `/dev/beacon`
+  names the console renderer, and a pts slave answered dev9p's `'9'` to
+  `SYS_FD_DEVCLASS`, so no tool in a tile ever emitted a frame (and no KT-1
+  gate had asserted one). Now the kernel answers `'t'` for a registered pts
+  SLAVE (the pts registry's own resolve, never a qid bit; the master stays
+  `'9'`), the Beacon gate admits `'t'` beside `'c'`, and the pts HOST
+  declares the tier it renders: the session compositor spawns
+  `kaua-term --beacon rich`, the kaua-term writes it into the hosted
+  program's inherited `/env/BEACON` before the spawn (absent = none,
+  fail-closed), and `ut`'s pts branch arms its zones iff rich AND its stdout
+  is that terminal (§14.3/§14.6 AS-BUILT; BEACON.md 12.4 amended;
+  SYS-FD-DEVCLASS-SPEC.md). ls-gfx-session asserts a tile shell's
+  `beacon rich (transcript zones armed)`.
+- **The welcome AS-BUILT (H-4d-3, 2026-09-05).** The image ships
+  `/lib/halcyon/layouts/default` = `splith n=2 active=1 / leaf tag="halcyon
+  welcome" / leaf env` (baked under the session lever, readback-verified).
+  A first login with no rc restores it: the tool tags the left leaf and
+  exits, the compositor hosts `halcyon welcome` there (the H-4d-1 rules), the
+  anchor rules put the tour LEFT of the session's own shell and focus the
+  shell. `halcyon welcome` is a Beacon transcript at the tile's tier -- a
+  heading, two lines of how, a "try this" table of PATH objects whose verb
+  menus do the demonstrating (`/bin`, `$HOME`, `/dev/tapestry/layout`,
+  `/lib/halcyon/layouts`), the split/zoom/layout chords, the lineage line --
+  then it EXECs the user's shell in the same tile, so the tour sits above a
+  live prompt. DELTA from the ratified pitch: the tour's objects run IN
+  PLACE (a chosen verb's command lands in the tour's own tile), not in the
+  right pane -- "runnable objs targeting the RIGHT pane" needs a cross-tile
+  command channel and is v1.x. An empty rc still opts out.
 
 ### 13.8 Audit + scripture-sync obligations (the §18.10 pattern; owed at
 ### each chunk's close)
@@ -1280,7 +1323,9 @@ pollable (§14.11.7 / §14.11.7a). The record set:
   to reach the aux tree (a build-prep sync at KT-2; §14.10).
 - **Tier**: under B halcyond renders, so the render tier is RICH for every Halcyon
   tile; the pts advertises `BEACON=rich` (set at kaua-term spawn — §14.6's advertise
-  side), so a tier-aware program in the tile emits rich markup.
+  side), so a tier-aware program in the tile emits rich markup. AS-BUILT at
+  H-4d-2a (2026-09-05): `kaua-term --beacon rich` from the session compositor,
+  the pts slave's `'t'` class from the kernel; §13.7 "Rich tiles".
 
 The native-`ut` VT-round-trip (a native Kaua app feeding cells more directly than
 emitting VT to be re-parsed) stays a **v1.x optimization**; v1.0 native `ut` emits VT
@@ -1343,6 +1388,13 @@ read to choose output. Under multi-console **both** relocate to the per-tile pts
   stale `BEACON=rich` would emit TTF-assuming output the tile cannot honor — so the
   advertisement is per-tile, not global. Retiring the `CCONSWINSZONLY` console
   special-case for tiles moves winsize **and** beacon onto the per-tile pts ctl.
+  **AS-BUILT (H-4d-2a, 2026-09-05):** the advertise side rides the SPAWN
+  (`kaua-term --beacon <tier>` -> the hosted program's inherited
+  `/env/BEACON`) rather than a pts ctl verb -- per-tile as required, no
+  dynamic switch at v1.0 -- and the kernel's part is the pts SLAVE's `'t'`
+  class (`SYS_FD_DEVCLASS`; the Beacon gate reads `'c'` or `'t'`). The render
+  side is halcyond's rasterizer, RICH for every tile. The console
+  special-case remains for the non-tile fallback.
 
 ### 14.7 Inline media — native, out-of-band
 
@@ -1480,12 +1532,43 @@ transcript. The grid is not zoned; the "current zone" is simply whichever block
 ScrollOff is currently appending to. A zone-open freezes the current block and
 starts a new one; subsequent ScrollOff lines land there.
 
+**AS-BUILT at H-4d-2b (2026-09-05): the span state reaches the cells.** The
+zone/block cut is as above, but the SPAN state (obj / em / hdr) had never
+reached the grid's cells or the scrolled-off rows (interned with no obj), so
+no row in a tile ever carried an obj run -- the tile menu (H-4d-2) landed
+hollow on its first gate (Esc entered Normal mode with zero rows: the `ls`
+output was still on the 36-row grid, and the grid was invisible to the row
+machinery). Now the PRODUCER stamps every cell with the serial of the last
+Beacon frame its VT forwarded (`vt::Cell.span`; the kaua-term reads no body --
+a numeric OSC selector, R5 kept), the record carries that serial
+(`Control::Osc1936Raw { serial, frame }` -- explicit on the wire, never
+counted at both ends, so a dropped or oversize frame can never shift every
+later cell onto the wrong span), and halcyond, feeding the same frames in
+order, notes the state AFTER each under its serial (`SpanMap`, an 8192-entry
+ring validated by the full serial). A grid cell therefore resolves to
+(block, obj, em, hdr) however late it scrolls off, and `push_scrolled_rows`
+interns em / obj / hdr -- COPYING an obj from its source block into the
+landing block when the grid straddled a zone cut, so every block stays
+self-contained (its Line styles index its own obj table). Genera/CLIM-shaped:
+presentations are recorded on the output stream at output time, never
+reconstructed by the display.
+
 **14.11.5 Selection + inline media.** Helix-modal selection addresses
 `(block, item, col)` over the scrollback AND the live grid (the grid is selectable
 as the live region -- a virtual trailing block; yank re-derives cell text as
 today). Inline media (`Image`/`Embed`) stays the **out-of-band native seam**
 (§14.7): the grid is text-only; a graphical app in a tile promotes to a Tapestry
 surface (§14.8), it does not paint pixels through the cell stream.
+
+**AS-BUILT at H-4d-2b (2026-09-05):** the grid IS the virtual trailing block.
+`select::GRID_BLOCK` rows follow the transcript's in a tile's flat list
+(`flatten_with_grid`); Normal mode starts on the grid's cursor row (the
+prompt), `w` / `b` step obj runs across both (`Tile::grid_runs` -- a grid run
+is keyed by its start column + 1, the grid's analogue of a block's obj
+index), Enter and a click resolve a grid run through its cell span to the
+owning block's obj (`grid_run_obj`), and the render bands the marked grid row
+and underlines its run under `GRID_KEY`. Yank in a tile is still owed (the
+pts clipboard work).
 
 **14.11.6 Spawn.** halcyond spawns one `kaua-term` per **leaf tile**. The
 enumeration hook already exists: `ChromeSet::reconcile` (`chromeset.rs:129`)

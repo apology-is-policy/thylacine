@@ -94,16 +94,25 @@ impl BeaconMode {
 /// kernel guarantees, docs/SYS-FD-DEVCLASS-SPEC.md AS-BUILT).
 pub const DC_CONSOLE: u8 = b'c';
 
+/// The Dev class char of a pts SLAVE (`SYS_FD_DEVCLASS` answers `'t'` for a
+/// fd the kernel's pts registry knows as a slave, H-4d): a terminal its pts
+/// host renders -- a Halcyon tile's shell prints onto one. The host declares
+/// the tier it renders in the hosted program's `BEACON` at spawn
+/// (KAUA-TERM.md R1: `kaua-term --beacon`), so for a pts the advertisement
+/// is the host's word exactly as the console's is the renderer's.
+pub const DC_PTS: u8 = b't';
+
 /// The two-condition emission gate (BEACON.md 12.4): emit above None iff the
-/// sink is the interactive console AND the advertised tier says it renders.
-/// `dc_of_stdout` is `t_fd_devclass(1)` (None when the syscall errs -- a
-/// closed or pre-H-1 fd reads as not-a-terminal, never as one).
+/// sink is a terminal something renders -- the interactive console, or a pts
+/// slave whose host declared its tier -- AND the advertised tier says it
+/// renders. `dc_of_stdout` is `t_fd_devclass(1)` (None when the syscall errs
+/// -- a closed or pre-H-1 fd reads as not-a-terminal, never as one).
 pub fn effective_tier(env_tier: Tier, dc_of_stdout: Option<u8>, flag: BeaconMode) -> Tier {
     match flag {
         BeaconMode::Never => Tier::None,
         BeaconMode::Always => env_tier,
         BeaconMode::Auto => {
-            if dc_of_stdout == Some(DC_CONSOLE) {
+            if dc_of_stdout == Some(DC_CONSOLE) || dc_of_stdout == Some(DC_PTS) {
                 env_tier
             } else {
                 Tier::None
@@ -144,6 +153,22 @@ mod tests {
         // A failed probe reads as not-a-terminal, never as one.
         assert_eq!(
             effective_tier(Tier::Rich, None, BeaconMode::Auto),
+            Tier::None
+        );
+        // H-4d: a pts slave is a terminal its host renders -- the host's
+        // advertisement decides, in both directions.
+        assert_eq!(
+            effective_tier(Tier::Rich, Some(DC_PTS), BeaconMode::Auto),
+            Tier::Rich
+        );
+        assert_eq!(
+            effective_tier(Tier::None, Some(DC_PTS), BeaconMode::Auto),
+            Tier::None
+        );
+        // A plain 9P file -- the class a pts MASTER also answers -- never
+        // gets frames: printing onto a master is typing into the terminal.
+        assert_eq!(
+            effective_tier(Tier::Rich, Some(b'9'), BeaconMode::Auto),
             Tier::None
         );
     }

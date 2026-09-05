@@ -433,9 +433,31 @@ effective_tier(env_tier, dc_of_stdout, flag) =
                                   //  "floor Cells" clause is DROPPED -- an absent
                                   //  advertisement means no renderer reads frames, so
                                   //  always trusts the advertised tier, never invents one)
-    else (auto, the default)   -> if dc_of_stdout == 'c' then env_tier else None
+    else (auto, the default)   -> if dc_of_stdout in {'c', 't'} then env_tier else None
+                                  // ('t' = a pts SLAVE the kernel's pts registry knows -- H-4d-2a,
+                                  //  2026-09-05: a terminal its host renders; the host declares the
+                                  //  tier in the hosted program's BEACON at spawn, KAUA-TERM.md R1)
 ```
 
+- **AMENDED at H-4d-2a (2026-09-05): a pts slave is a terminal.**
+  `SYS_FD_DEVCLASS` answers `'t'` for a fd the kernel's pts registry knows
+  as a SLAVE (`spoor_devclass`, kernel/syscall.c: the same
+  `pts_resolve_spoor` the tty seam uses -- a ref-held (conn, qid) binding,
+  never a server-settable qid bit; the MASTER stays `'9'`, since printing
+  onto a master is typing into the terminal), and `effective_tier` admits
+  `'t'` beside `'c'` under Auto (`libthyla_rs::stdout_is_terminal()` is
+  the same pair). For a pts the advertisement is the HOST's word:
+  `kaua-term --beacon <tier>` writes the tier it renders into its own
+  `/env/BEACON` before the spawn, the hosted program inherits it, and `ut`'s
+  pts branch arms its zones from that inheritance iff the tier is rich AND
+  its stdout answers `'t'` (a redirected shell emits nothing; no per-prompt
+  re-read -- a tile's tier is fixed for its host's life). Absent = none,
+  fail-closed. Until this every session tile was PLAIN: `ut` resolved its
+  tier only inside the console branch, the console's `/dev/beacon`
+  describes the console renderer, and a pts answered dev9p's `'9'` -- so no
+  tool in a tile ever emitted a frame, and no KT-1 gate had asserted one.
+  ls-gfx-session now asserts a tile shell's `beacon rich (transcript zones
+  armed)`, the line only the `'t'` answer + the rich inheritance produce.
 - Per-tool flag: `--beacon=auto|always|never`, mirroring `--color=WHEN`
   (COREUTILS-THYLACINE-DESIGN.md). **`--color` keeps governing color; at
   `cells` tier the two gates compose** (color off ⇒ the cells realization

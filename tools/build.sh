@@ -3298,7 +3298,12 @@ populate_stratum_pool() {
     local cm_manifest="$REPO_ROOT/tools/corvus-mint/Cargo.toml"
     local cm_bin="$REPO_ROOT/tools/corvus-mint/target/release/corvus-mint"
     echo "==> populate pool: building corvus-mint (host system-identity minter)"
-    cargo build --manifest-path "$cm_manifest" --release \
+    # From the REPO ROOT, whatever the caller's cwd: cargo discovers its config
+    # from the cwd, and usr/.cargo/config.toml replaces crates-io with the
+    # vendored tree (aegis 0.9.8) while this host tool's lock wants the
+    # registry's 0.9.12 -- a bake launched from usr/ failed exactly here
+    # (H-4d, 2026-09-05) while the same bake from the root passed.
+    (cd "$REPO_ROOT" && cargo build --manifest-path "$cm_manifest" --release) \
         || { echo "==> populate pool: corvus-mint BUILD FAILED" >&2; exit 1; }
 
     echo "==> populate pool: starting stratumd on $sock_path"
@@ -3686,6 +3691,25 @@ populate_stratum_pool() {
             || { echo "==> populate pool: /lib/halcyon/session readback MISMATCH" >&2; rm -f "$halsess"; kill -TERM "$stratumd_pid"; exit 1; }
         rm -f "$halsess"
         echo "==> populate pool: HALCYON session lever ENABLED (/lib/halcyon/session = on)"
+
+        # H-4d: the first-launch WELCOME -- the device-tier `default` layout
+        # the per-user compositor restores for a user with no halcyon.rc
+        # (HALCYON.md 13.7): the tour (`halcyon welcome`, hosted by the
+        # compositor in a terminal tile) on the LEFT, the session's own shell
+        # (the `env` leaf: the tile already there) on the RIGHT and focused
+        # (active=1). Rides the session lever: the welcome is a session
+        # feature, and ls-gfx-session's first login is its witness.
+        local hallay=/tmp/thyla-halcyon-default-layout.$$
+        printf 'halcyon-layout v1\nsplith n=2 active=1\n  leaf tag="halcyon welcome"\n  leaf env\n' > "$hallay"
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon/layouts 2>/dev/null || true
+        "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/layouts/default < "$hallay" \
+            || { echo "==> populate pool: write /lib/halcyon/layouts/default FAILED" >&2; rm -f "$hallay"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (halcyon default layout) FAILED" >&2; rm -f "$hallay"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/layouts/default | cmp -s - "$hallay" \
+            || { echo "==> populate pool: /lib/halcyon/layouts/default readback MISMATCH" >&2; rm -f "$hallay"; kill -TERM "$stratumd_pid"; exit 1; }
+        rm -f "$hallay"
+        echo "==> populate pool: HALCYON welcome layout baked + readback-verified (/lib/halcyon/layouts/default)"
     fi
 
     # cfg-3 F1 (the OSC-laundering regression): a file of RAW bytes carrying

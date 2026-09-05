@@ -437,3 +437,16 @@ pane(s) for the session compositor`); no claim, no /env token, no spawn.
 The focus replay still runs over landed tiles, and `active_is_env(saved)`
 focuses the anchor at the end (`focus -> pane <anchor>`). The
 `restored 0 of 0 program(s)` tally is unchanged (the gates key on it).
+
+### Consumer: `halcyon welcome` (H-4d-3)
+
+`Cmd::Welcome` (`halcyon welcome`; an extra operand is `ExtraOperand`; host
+test `parse_welcome`) is the first-launch tour the device `default` layout
+tags into its left leaf (HALCYON.md 13.7; 150-halcyond.md "The welcome"). It
+composes a Beacon transcript through the tool's `StdoutOut` at the effective
+tier (`stdout_is_rich`: the same `effective_tier` gate as every tool -- rich
+only when `BEACON=rich` AND stdout is a terminal, the console `'c'` or a pts
+slave `'t'`), says `halcyon: welcome shown (tier rich|none)` on the serial
+console (the tile's own output is pixels), then `t_execve`s `/bin/ut --home
+<HOME>` in place; a failed exec says so and exits 1. Everything up to the
+exec is the same sink a `layout list` uses; nothing here is load-bearing.
