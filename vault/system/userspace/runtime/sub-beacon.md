@@ -119,6 +119,13 @@ Two security properties are load-bearing:
 The parse is bounded throughout (type 16, label 32, template 256, 256 rules)
 because the rules file may one day arrive from a session tier.
 
+The shipped `verbs.default` gained the H-4c **layout** verbs —
+`restore`/`save`/`delete` on an `obj type=layout` whose ref is the saved
+layout's name (`halcyon layout {}`) — so `halcyon layout list` presents each
+saved layout as a menu-actionable object with **no renderer code**: `layout` is
+a new value of the existing `type` key (BEACON.md 12.2), handled by string in
+halcyond, not a new frame op.
+
 **The cells tier is the coreutils colour language, relocated verbatim**
 (2026-09-01, BEACON.md 12.5): `boxd` (box furniture computed on plain text,
 coloured at emit), `color` (the `col(code, on)` single-path gate), `palette`
@@ -132,9 +139,10 @@ a data payload a pipe consumes stays byte-clean at *every* tier.
 frame opcodes), `Arg` (a decoded key=value), and `Event` (the parse output:
 open/close/point/payload). `sink` carries `Zone` (Prompt/Command/Output,
 shell-only), `Em` (Emph/Strong/Dim/Code -- emphasis by class, never by face),
-`ObjType` (Path/Pid/Url/Commit/User -- a presentation canonically named by
-its ref, a cleaned absolute 9P path for Path), the `Sink<'a>` emitter over a
-`dyn Out` byte shim, and `Cell`/`Table` for listings. `verbs` carries `Rule`.
+`ObjType` (Path/Pid/Url/Commit/User/Layout -- a presentation canonically named
+by its ref: a cleaned absolute 9P path for Path, a saved layout's NAME for
+Layout), the `Sink<'a>` emitter over a `dyn Out` byte shim, and `Cell`/`Table`
+for listings. `verbs` carries `Rule`.
 The cells modules carry the palette + card-row types relocated from coreutils.
 
 ## Concurrency
