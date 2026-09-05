@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-08-16
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -35,10 +35,13 @@ one flag — is wrong in a way no single-owner test can detect.
 | `proc_job_stop_proc(m)` / `proc_job_cont_proc(m)` | the single-target `/proc` verbs — **unconditional**, no note, no gate |
 | `proc_orphan_rule_locked(dying)` | at every death, hangup-then-continue any group this death newly orphans |
 | `proc_pgrp_in_session(pgid, sid)` | the membership gate the terminal calls run *before* locking |
+| `proc_job_stop_self(m)` | the **self-stop**: apply a *caught* suspend's default STOP to the caller — no note, no re-run of the catchability gate, gated instead on freshness + not-orphaned |
 
 The two fans are called from the terminal seam ([[sub-kernel-pts]]); the two
 single-target calls from `/proc/<pid>/ctl` ([[sub-kernel-devproc]]); the orphan
-rule from the zombie chokepoint ([[sub-kernel-death]]).
+rule from the zombie chokepoint ([[sub-kernel-death]]); the self-stop from the
+note path ([[sub-kernel-notes]]) — both `SYS_NOTED(NDFLT)` on a suspend note and
+the delivery of a `tty:susp` a masking process opted to receive.
 
 ## Mechanism
 
@@ -138,6 +141,40 @@ They share the per-member primitives with the terminal fan, so the report
 latches still fire and the parent still sees the edge — correct, because
 whoever stops a process, it is the *parent* whose wait reports it.
 
+### The self-stop — a process that caught the suspend and asked for it anyway
+
+The catchability gate's *caught* branch posts the suspend note and stops
+nothing; the process now holds the note and decides. A shell that catches it to
+save terminal state, having saved it, then wants the default action — the stop
+it dodged. It gets there by `SYS_NOTED(NDFLT)` (or, for a process that merely
+masks the family and opted to receive the note, the note's own delivery), and
+that lands in `proc_job_stop_self` — a **third stop source** distinct from both
+the terminal fan and the `/proc` verbs, called from [[sub-kernel-notes]].
+
+Its defining property is what it must *not* do: **it does not re-run the
+catchability gate.** The gate's question — "does this process catch the note?" —
+is already answered *yes*; re-asking it here would read the handler address,
+conclude "caught", and refuse the very stop the handler just requested. That is
+the ignore bug the `#15` work names explicitly.
+
+So the self-stop replaces the gate with two premises of its own, both read under
+the process-table lock so a continue cannot land between the check and the stop:
+
+- **Freshness** (`susp_stop_armed`, the `#240` guard): a continue that overtook
+  this suspend cleared the flag, so a stale `NDFLT` arriving after the job was
+  already resumed stops nothing. This is the self-path analog of the report
+  latches' mutual supersession — a disposition decided at *post* time, applied
+  at *noted* time, and the world may have moved in between.
+- **Not orphaned** (`pgrp_orphaned_locked`): the same POSIX stop-suppression the
+  fan applies, re-checked here because the fan's check was at post time and the
+  group may have been orphaned since — carrier loss (the terminal gone though
+  the shell lives) as well as shell death.
+
+If it stops, it reuses `proc_job_stop_one_locked` — so the report latches fire
+exactly as the fan's do — and issues the one reschedule broadcast for peers
+running at EL0 on other CPUs (the caller itself parks a few instructions later,
+at its own EL0-return tail).
+
 ### The orphan rule
 
 POSIX 2.4.3: when a process group becomes newly orphaned and has stopped
@@ -173,10 +210,12 @@ would hang forever.
 
 ## Data structures
 
-No structures of its own. Three fields on the Proc — the job stop flag and the
-two report latches — plus five small stack-allocated walk contexts. Every walk
-is a callback over the process tree under one lock hold, with no allocation
-anywhere on the path.
+No structures of its own. Four fields on the Proc — the job stop flag, the
+freshness guard the self-stop reads (`susp_stop_armed`), and the two report
+latches — plus five small stack-allocated walk contexts. All four sit in the
+same tail-pad region as the debugger's stop flag, so the second stop owner cost
+the structure nothing. Every walk is a callback over the process tree under one
+lock hold, with no allocation anywhere on the path.
 
 ## Concurrency
 
@@ -267,10 +306,15 @@ kill-authority continue.
 See [[sub-kernel-pts]]'s caveats and task #68 — the orphan rule is what exists,
 and it is narrower than the POSIX rule the design cites.
 
-**Only the terminal path consults the catchability gate.** The `/proc` verbs
-bypass it by design and say so. Anything that grows a third stop *source* must
-decide which of the two shapes it is, and the decision is not derivable from
-the primitives — both call the same per-member helper.
+**Only the terminal path consults the catchability gate.** The other two stop
+sources bypass it, for opposite reasons. The `/proc` verb never asks because a
+`/proc` stop is unconditional by design. The self-stop never asks because the
+gate was *already* asked and answered yes — re-asking would read the live
+handler, conclude "caught", and refuse the very stop the caller requested via
+`NDFLT`. All three reuse the same per-member helper, so the choice of shape is
+not derivable from the primitives: a fourth stop source would have to make it
+afresh, exactly as the self-stop did when it chose freshness-plus-orphan over
+the gate.
 
 ## Provenance
 
@@ -331,3 +375,30 @@ hunk landed in `proc_exec_alone` / `proc_exec_replace` /
 ([[chg-2026-08-16-proc-exec-ledger]]). The same disposition
 [[chg-2026-08-15-stale-by-cotenancy]] recorded for the capability surface,
 which shares the same file.
+
+**2026-09-05: post-08-16 churn borrowed; a pre-existing self-stop gap closed
+([[chg-2026-09-05-jobctl-self-stop]]).** `proc.c` moved ~1097 lines since and the
+dossier was flagged again. The owned entry-point set was checked function by
+function against the current tree with git's function-aware `-L`: all six are
+unchanged since 2026-08-14, predating the last update. The one adjacent
+post-08-16 change is `proc_mark_self_managing_notes` gaining a Design-D
+exec-clear (the mark is the image's, dropped at every execve) — that is the
+mark's *lifecycle*, owned by [[sub-kernel-proc]] / [[sub-kernel-exec]]; this
+dossier describes only the *read polarity* of the query, which is unchanged.
+Borrowed, exactly as the two entries above.
+
+But the surface review found a gap that *predated* the dossier: the `#15`/`#240`
+self-stop (`proc_job_stop_self` + the `susp_stop_armed` freshness guard) landed
+2026-08-13/14, days before this dossier's first write, and was never captured —
+the Contract listed six entry points where there were seven, and Data-structures
+read "three fields" for four. The dossier's own third-stop-source caveat
+anticipated it abstractly while the source already existed. Added the entry
+point, the field, a Mechanism subsection, and rewrote the caveat. A coverage gap,
+not drift — but the currency bar is the same.
+
+One code-comment drift was surfaced and left for its owner: `proc.h` still reads
+"struct Proc stays 352" beside `debug_exitkill`, while the live
+`_Static_assert(sizeof(struct Proc) == 392)` is correct — VIVARIUM's phenotype
+fields grew the struct after that comment was written. The compile-time assert is
+sound; only the prose comment drifted, so this is a [[sub-kernel-vivarium]]-arc
+code fix, not a vault edit.
