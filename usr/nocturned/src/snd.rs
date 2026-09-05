@@ -338,6 +338,32 @@ impl VirtioSnd {
         self.pool.paddr()
     }
 
+    /// Drain any control completion still outstanding from a prior timed-out rpc,
+    /// so the next request's completion is unambiguously its own (the control
+    /// used id is always 0, so a stale completion is otherwise indistinguishable
+    /// from a fresh one). Returns true once ctrl_used_idx has caught up to
+    /// ctrl_avail_idx (nothing outstanding), false if the device did not return
+    /// the stale completion within CTRL_WAIT_STEPS (the controlq is wedged).
+    fn ctrl_drain_stale(&mut self) -> bool {
+        let used = self.pool_va() + CTRLQ_USED_OFF as u64;
+        let mut steps = 0u32;
+        while self.ctrl_avail_idx != self.ctrl_used_idx {
+            let cur = unsafe { r16(used + 2) };
+            virtio_rmb();
+            if cur != self.ctrl_used_idx {
+                self.ctrl_used_idx = self.ctrl_used_idx.wrapping_add(1);
+                let _ = unsafe { r8(self.isr_va) };
+                continue;
+            }
+            steps += 1;
+            if steps > CTRL_WAIT_STEPS {
+                return false;
+            }
+            let _ = libthyla_rs::time::sleep(Duration::from_millis(1));
+        }
+        true
+    }
+
     // ---- control queue ------------------------------------------------------
 
     /// One control round-trip: `req` bytes in, the response into the response
@@ -345,6 +371,14 @@ impl VirtioSnd {
     /// has used the chain, or Err after CTRL_WAIT_STEPS ms.
     fn ctrl_rpc(&mut self, req: &[u8], resp_max: usize) -> Result<usize, Error> {
         if req.is_empty() || req.len() > 2048 || resp_max == 0 || resp_max > 2048 {
+            return Err(Error::Hardware);
+        }
+        // Resync before posting: a prior rpc that timed out left its request
+        // outstanding (ctrl_avail_idx advanced, no completion consumed). Drain
+        // that stale completion first so THIS request's completion is not
+        // mis-attributed to it; if the device never returns it, the controlq is
+        // wedged -- fail WITHOUT posting, rather than compounding the desync.
+        if !self.ctrl_drain_stale() {
             return Err(Error::Hardware);
         }
         let pv = self.pool_va();
@@ -543,6 +577,19 @@ impl VirtioSnd {
     pub fn start<F: FnMut(&mut [u8]) -> bool>(&mut self, mut next_period: F) -> Result<(), Error> {
         if self.started {
             return Ok(());
+        }
+        // Do not prime while the device still owns TX entries from a prior stream:
+        // a late completion for an old post would land on a freshly primed slot
+        // (its in-flight bit re-set) and double-post it. The posted-minus-reaped
+        // count (avail vs used), not the in-flight bitmask, is the ground truth.
+        // Drain the used ring; if it cannot be cleared, refuse rather than prime
+        // into a dirty ring.
+        if self.tx_avail_idx != self.tx_used_idx {
+            self.reap_without_repost();
+            if self.tx_avail_idx != self.tx_used_idx {
+                say!("nocturned: TX ring not drained before start (avail {} used {})", self.tx_avail_idx, self.tx_used_idx);
+                return Err(Error::Hardware);
+            }
         }
         let mut buf = [0u8; PERIOD_BYTES];
         for s in 0..PERIODS {
