@@ -4,7 +4,7 @@ type: chg
 title: "H-4d-1 folded into the dossiers: the creator reservation (sub-tapestryd) + the println one-write form (sub-libthyla-rs)"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["d1a4b8e4"]
 touched:
   - sub-tapestryd
   - sub-libthyla-rs
