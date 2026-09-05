@@ -528,6 +528,44 @@ if (( ${#append_tokens[@]} > 0 )); then
     append_flags=(-append "${append_tokens[*]}")
 fi
 
+# Nocturne N-1 (docs/NOCTURNE.md section 4.3): the virtio-sound function
+# (virtio device id 25 -> the warden's `virtio-pci:25` bind -> nocturned).
+# PRESENT ON EVERY BOOT so the driver path rides the boot-probe ladder; the
+# HOST BACKEND is the switch:
+#   THYLACINE_AUDIODEV=none      (default) no host sound; the guest still plays
+#   THYLACINE_AUDIODEV=wav       capture what the guest played into
+#                                THYLACINE_AUDIO_WAV (default build/audio-capture.wav)
+#                                -- the deterministic gate witness. PLAYBACK-ONLY
+#                                (QEMU's wav backend has no capture voice), so
+#                                the device is declared with one stream.
+#   THYLACINE_AUDIODEV=coreaudio the mac's speakers (a human listening)
+#   THYLACINE_AUDIODEV=pipewire  thyla-pi's PipeWire -> HDMI (pa/alsa/sdl/dbus
+#                                pass through likewise)
+#   THYLACINE_NO_AUDIO=1         no device at all: the warden finds no
+#                                virtio-pci:25, joey logs "/srv/nocturne absent"
+# ORDER IS LOAD-BEARING (the INTx rule above): this function CLAIMS a line
+# (nocturned irq-waits on it), so it sits after gpu0 + rng_pci0 -- the next PCI
+# slot -- and before the poll-mode mouse. The guest's "nocturned: ... intid=N"
+# line witnesses the line it got; an exclusivity clash with the NIC or the GPU
+# fails the IRQ claim loudly at probe.
+audio_flags=()
+if [[ "${THYLACINE_NO_AUDIO:-0}" != "1" ]]; then
+    audiodev="${THYLACINE_AUDIODEV:-none}"
+    case "$audiodev" in
+        none)
+            audio_flags=(-audiodev "none,id=snd0") ;;
+        wav)
+            audio_wav="${THYLACINE_AUDIO_WAV:-$REPO_ROOT/build/audio-capture.wav}"
+            audio_flags=(-audiodev "wav,id=snd0,path=$audio_wav,out.fixed-settings=on,out.frequency=48000,out.channels=2,out.format=s16") ;;
+        coreaudio|pipewire|pa|alsa|sdl|dbus|oss|jack)
+            audio_flags=(-audiodev "$audiodev,id=snd0") ;;
+        *)
+            echo "run-vm.sh: unknown THYLACINE_AUDIODEV '$audiodev' (none|wav|coreaudio|pipewire|pa|alsa|sdl|dbus|oss|jack)" >&2
+            exit 2 ;;
+    esac
+    audio_flags+=(-device "virtio-sound-pci,id=snd-pci0,audiodev=snd0,streams=1,disable-legacy=on")
+fi
+
 # Canonical QEMU flags per TOOLING.md §3.
 #
 # disk_flags (P4-Ic5b2) comes BEFORE virtio-rng-device because QEMU
@@ -549,6 +587,7 @@ exec qemu-system-aarch64 \
     ${gpu_flags[@]+"${gpu_flags[@]}"} \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
+    ${audio_flags[@]+"${audio_flags[@]}"} \
     ${mouse_flags[@]+"${mouse_flags[@]}"} \
     ${display_flags[@]+"${display_flags[@]}"} \
     -serial "${THYLACINE_SERIAL:-mon:stdio}" \

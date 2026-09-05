@@ -68,6 +68,7 @@ are added deliberately, not mandated per-commit, until the surface set settles.)
 | 12-halcyon.md (planned) | Halcyon usage; scroll buffer; image display; video; customization | End users | Phase 8 |
 | 13-keyboard-shortcuts.md (planned) | Halcyon keybindings, terminal-mode keybindings | End users | Phase 8 |
 | [40-dosbox.md](manual/40-dosbox.md) | DOSBox-X: DOS + 3dfx/Glide games — settings, cycle presets, mouse capture | Users | **Available now** |
+| [41-audio.md](manual/41-audio.md) | Audio (Nocturne): the `/dev/nocturne` device file, playing PCM, the info/ctl files, choosing the host backend | Users | **Available now** (N-1 floor; grows per chunk) |
 
 (OS-topic pages are 00–13; ported **applications** start at 40. Pages appear as their surfaces stabilise; the DOSBox chapter is the first grown under the revived manual.)
 

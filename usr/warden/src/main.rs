@@ -134,6 +134,20 @@ driver "netd" {
     lifecycle = persistent
 }
 "#,
+    r#"
+driver "nocturned" {
+    abi   = 1
+    binds = ["virtio-pci:25"]
+    needs {
+        pci = "node"
+        irq = "node:interrupts"
+        dma = "pool: 256 KiB"
+    }
+    serves    = "/dev/nocturne"
+    restart   = on-crash
+    lifecycle = persistent
+}
+"#,
 ];
 
 // The TEST FIXTURES: bound only when the caller passes `--with-fixtures`

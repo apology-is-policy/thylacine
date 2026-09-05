@@ -60,6 +60,9 @@ enum {
                              // joey never mounts it globally, audit F1)
     DEV_KIND_BEACON    = 14, // H-1 audit F1: the UNGATED read-only Beacon-tier
                              // leaf (`beacon <tier>\n`; the winsize precedent)
+    DEV_KIND_NOCTURNE  = 15, // the /dev/nocturne mount-stub DIRECTORY (Nocturne
+                             // N-1): EMPTY pre-mount, joey MREPL-mounts nocturned's
+                             // tree over it -- the pts/tapestry shape
 };
 
 #define DEV_QID_ROOT_PATH  0ULL
@@ -237,6 +240,14 @@ static bool walk_one(u64 cur_path, const char *name, struct Qid *out_qid) {
             out_qid->type = QTDIR;
             return true;
         }
+        // /dev/nocturne: the audio-daemon mount stub (Nocturne N-1,
+        // docs/NOCTURNE.md section 6.4) -- the pts/tapestry shape: EMPTY
+        // pre-mount, joey MREPL-mounts nocturned's tree over it.
+        if (name_eq("nocturne", name)) {
+            out_qid->path = (u64)DEV_KIND_NOCTURNE;
+            out_qid->type = QTDIR;
+            return true;
+        }
         for (size_t i = 0; i < DEV_LEAF_COUNT; i++) {
             if (name_eq(g_dev_leaves[i].name, name)) {
                 out_qid->path = (u64)g_dev_leaves[i].kind;
@@ -338,6 +349,7 @@ static int devdev_stat_native(struct Spoor *c, struct t_stat *out) {
     case DEV_KIND_PTS:
     case DEV_KIND_TAPESTRY:
     case DEV_KIND_WARP:
+    case DEV_KIND_NOCTURNE:
         // /dev itself + the mount-point stub dirs. World-searchable, matching
         // the devramfs synth dirs -- the X bit is what lets the resolver
         // traverse onto the mount point and cross.

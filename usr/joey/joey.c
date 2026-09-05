@@ -11296,6 +11296,44 @@ int main(void) {
         }
     }
 
+    // === Nocturne N-1: mount /dev/nocturne + the tone probe ===
+    // nocturned is WARDEN-spawned (persistent; the virtio-pci:25 bind) long
+    // before this point; joey's job is the mount (the /dev/tapestry idiom:
+    // /srv/nocturne absence is environment-dependent -- THYLACINE_NO_AUDIO
+    // boots have no sound function -- so absent is SOFT; a mount error on a
+    // present service is FATAL) and, under THYLA_BOOT_PROBES, the tone probe:
+    // 1 kHz then 2 kHz then silence written to /dev/nocturne/audio, the info
+    // file read back. FATAL once the mount is up -- a driver that cannot play a
+    // period is a regression, never an environment. The host-side half of the
+    // witness is tools/test-audio.sh (the wav capture + tools/audio-verdict.py).
+    {
+        long noc_root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/nocturne", 13, T_OREAD);
+        if (noc_root >= 0) {
+            if (t_mount("/dev/nocturne", 13, noc_root, T_MREPL) != 0) {
+                t_putstr("joey: t_mount(/dev/nocturne) FAILED\n");
+                return 1;
+            }
+            (void)t_close(noc_root);
+            t_putstr("joey: /dev/nocturne mounted (nocturned tree)\n");
+#if THYLA_BOOT_PROBES
+            {
+                // POST-PIVOT: bare ramfs names no longer resolve; the ramfs
+                // root is bound at /bin (#58), like /bin/corvus and /bin/login.
+                static const char np_name[]   = "/bin/nocturne-probe";
+                static const char np_expect[] = "NOCTURNE-PROBE PASS";
+                if (pouch_smoke_one(np_name, sizeof(np_name) - 1,
+                                    np_expect, sizeof(np_expect) - 1) != 0) {
+                    t_putstr("joey: nocturne-probe FAILED (the tone did not play; Nocturne N-1)\n");
+                    return 1;
+                }
+                t_putstr("joey: nocturne-probe OK (1 kHz + 2 kHz over /dev/nocturne/audio; Nocturne N-1)\n");
+            }
+#endif
+        } else {
+            t_putstr("joey: /srv/nocturne absent (no virtio-sound function); skipping\n");
+        }
+    }
+
     // === Warp-2: the GPU seam (/srv/warp; GPU-DESIGN.md sec 4.1) ===
     // joey deliberately does NOT mount it globally (Warp-2 audit F1).
     // A shared mount is ONE server-side connection, and the warp tree's

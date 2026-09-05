@@ -267,12 +267,16 @@ libopusint is a DX-3 (audio) concern". The SDL port directory
   `audio: Could not create a backend for voice 'virtio-sound.in'` — **the wav
   backend is playback-only**, so wav-witnessed gates run `streams=1` (or
   tolerate that exact line).
-- `tools/run-vm.sh` today adds no audio device; the natural addition is a
-  `-device virtio-sound-pci,id=snd-pci0,audiodev=snd0,disable-legacy=on` next
-  to the other `virtio-*-pci` devices (virtio device id **25**, so the warden
-  bind is `virtio-pci:25`) and a `THYLACINE_AUDIODEV` switch between
-  `none` (default, no host sound), `wav` (gates), `coreaudio` (a human
-  listening).
+- `tools/run-vm.sh` (AS-BUILT at N-1): `-device virtio-sound-pci,id=snd-pci0,
+  audiodev=snd0,streams=1,disable-legacy=on` on every boot, placed after
+  `rng_pci0` so its INTx line is distinct from the NIC's and the GPU's
+  (measured: the function lands at PCI (0,6,0) on INTID 37 and the IRQ claim
+  succeeds); `THYLACINE_AUDIODEV` = `none` (default) | `wav` (+
+  `THYLACINE_AUDIO_WAV`) | `coreaudio` | `pipewire`/`pa`/`alsa`/`sdl`/`dbus`/
+  `oss`/`jack`; `THYLACINE_NO_AUDIO=1` removes the device. The warden bind is
+  `virtio-pci:25`. QEMU's device offers features lo=0x79000000 hi=0x101, one
+  stream, no jacks, no chmaps; the stream reports formats 0xe0078 (S8/U8/S16/
+  U16/S32/U32/FLOAT), rates 0x3fff (all fourteen), channels 1..2.
 
 ### 4.4 QEMU + PipeWire on thyla-pi (the real-silicon host)
 
@@ -1066,7 +1070,19 @@ transcript class).
   (positive, one variable away); a silent guest must fail the RMS floor
   (negative); the verdict is keyed on the *file*, never on a guest log line
   (the #186 lesson). Deterministic; no host audio hardware; runs on the mac
-  and the Pi.
+  and the Pi. **AS-BUILT at N-1 (2026-09-05), with two corrections the subject
+  taught the instrument:** QEMU's `wav` backend appends only while the guest's
+  stream runs, so the capture BEGINS with the first period played -- there is
+  no silent prefix to check -- and it patches the RIFF/data sizes only on a
+  clean exit, which the harness never gives it (it kills QEMU), so the reader
+  ignores the header sizes. The negative control is therefore the silent
+  **tail** (the probe's 0.2 s + the driver's idle-stop silence: an empty FIFO
+  must yield silence, never a repeated buffer or noise); the probe plays
+  1 kHz then 2 kHz (the positive control + the order), the span must be
+  contiguous (an underrun shows as a gap), and `tools/audio-verdict.py
+  --selftest` proves the discrimination on nine synthetic cases. First real
+  capture: 319488 bytes = 1.66 s, `PASS: 1000 Hz x 25 windows (median 12),
+  2000 Hz x 25 windows (median 37); silent tail 33 windows; ambiguous 0`.
 - **W-2 The no-stall witness.** Two voices + one descant whose owner is
   deliberately slow (sleeps a period every third cycle) and one whose owner
   is killed mid-stream: the wav still carries the tone unbroken (a DFT per
@@ -1097,7 +1113,7 @@ transcript class).
 | Chunk | Delivers | Gate | Effort-gate |
 |---|---|---|---|
 | **N-0** (this) | `docs/NOCTURNE.md`; the scripture reconciliations (§2); I-46 reserved; the NOVEL candidate | — | design; no question |
-| **N-1** virtio-snd driver + the wav witness | the `virtio-pci:25` bind + a stub `nocturned` that owns the device and plays a tone from a probe; `tools/audio-verdict.py`; run-vm.sh's `THYLACINE_AUDIODEV`; the device-response bounding | W-1 (+ controls) | a driver with DMA + IRQ + untrusted device input: **ASK unless max** |
+| **N-1** virtio-snd driver + the wav witness — **LANDED 2026-09-05 (aux-3; the hash is in the AUX-ROADMAP row)** | the `virtio-pci:25` bind + `nocturned` owning the device (`usr/nocturned`: the modern-PCI transport, the control/TX queues in one 40 KiB DMA pool, PCM_INFO/SET_PARAMS/PREPARE/START/STOP/RELEASE, 4 x 2048 B periods in flight, the device-controlled used id validated before it steers a slot, the idle STOP), the `/srv/nocturne` tree `{audio,info,ctl}` with the bounded FIFO + the deferred (blocking) Rwrite, `/nocturne-probe` in the boot ladder (FATAL when the mount is up), `kernel/devdev.c`'s `/dev/nocturne` stub, run-vm.sh's `THYLACINE_AUDIODEV`, `tools/audio-verdict.py` + `tools/test-audio.sh`; `docs/reference/153-nocturne.md` + `docs/manual/41-audio.md` | W-1 GREEN (boot probe: 77 periods played, 0 silence, 0 errors; the wav capture judged PASS) | ran at max; the focused holotype + the SMP gate are batched to the N-2 close (the double-the-distance rule) |
 | **N-2** the graph core + voices + SDL | `nocturned` (two threads), the tree, the ring, voices, mixing, gains, `audio`/`volume`, libnocturne, `SDL_thylacineaudio.c`; patch 0004 + `-nosound` retired; DOSBox/Quake sound | W-1, W-4, LS-CI | the ring consumer + the two-thread daemon: **ASK unless max** |
 | **N-3** ears, policy, sinks | capture (`ear`, `source`), the conductor files, `sinks/`, hot-plug via the warden, the user tier, the Halcyon volume hook | W-1 capture arm (needs a non-wav backend: `coreaudio` loopback or the Pi's PipeWire null-sink), LS-CI | routine unless the tap authority changes |
 | **N-4** descants + the cadence lease | the descant contract, substitute/bypass, latency accounting, `specs/nocturne_cycle.tla`; **the kernel lift**: `specs/cadence.tla` → `KObj_Cadence`/allowance + scheduler demotion; the convolution-filter demo (a native descant with a Gardner head; the operator's example) | W-2 (+ the sabotage arm), W-3, SMP gate, the focused audit (P0/P1 → dirty-close discipline) | scheduler + a new kobj: **max, spec-first, no exceptions** |

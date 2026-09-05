@@ -23,6 +23,70 @@ needed the operator.
 
 ---
 
+## 2026-09-05 (aux, Fable 5.1, effort max) -- Nocturne N-1: the virtio-snd driver, the Plan 9 audio file, the wav witness
+
+Same run as N-0, straight through the checkpoint: N-1 is the substrate every
+candidate design needs (a driver, a device file, a witness), so it did not
+wait for the operator's ratification of the design's open questions. Landed
+in one commit (the `nocturne: N-1` commit on aux-3): `usr/nocturned` (the
+modern-PCI virtio-snd transport in `snd.rs`, the `/srv/nocturne` 9P tree in
+`server.rs`, one poll loop over listener + connections + the pollable IRQ fd
+in `main.rs`), `usr/nocturne-probe`, a one-entry `/dev/nocturne` mount stub
+in `kernel/devdev.c`, the joey mount + probe, the warden manifest, run-vm.sh's
+`THYLACINE_AUDIODEV`, and `tools/audio-verdict.py` + `tools/test-audio.sh`.
+
+**What worked first time.** The device bound and negotiated on the first
+boot: PCI (0,6,0) on INTID 37 (a line distinct from the NIC's and the GPU's --
+the run-vm.sh placement after `rng_pci0` was right), features lo=0x79000000
+hi=0x101, one stream offering S8..FLOAT and all fourteen rates, SET_PARAMS at
+QEMU's own defaults (2048/8192, S16, 48 kHz), PREPARE, `/srv/nocturne` served,
+READY. The transport was written from the netdev crate's constants and the
+GPU's queue-setup shape; the 9P server from ptyfs's framing and its parked-
+read idiom turned into a parked WRITE (the blocking `audio` write of
+audio(3)).
+
+**Wrong turns, caught.** (1) The probe's first run failed with `joey:
+pouch-smoke spawn FAILED`: I spawned it by its bare ramfs name, but the
+probe block sits POST-PIVOT (joey line ~11300 vs the pivot at ~7130), where
+programs resolve as `/bin/<name>` through the post-pivot bind -- exactly how
+`net-echo` and `jc-probe` are spawned two screens up. One string, one re-bake.
+(2) The wav witness's first real run failed in the READER: QEMU's `wav`
+backend patches the RIFF/data sizes only on a clean exit and the harness
+kills QEMU at teardown, so the file said RIFF size 0 and Python's `wave`
+refused it. A lenient reader (ignore the sizes; take every frame after the
+`data` header) fixed that -- and the header's samples showed the real
+surprise: the file BEGINS with the 1 kHz sine (0, 1069, 2120, 3135 ... =
+8192*sin(2pi k/48)). The backend appends only while the guest's stream runs.
+My negative control -- "the capture starts with >= 0.5 s of silence" -- was
+therefore unsatisfiable by construction, and had it been written more loosely
+it would have passed vacuously (the verdict's OWN selftest had already caught
+that vacuous-prefix shape once, on a synthetic case). The control was
+re-founded on the silent TAIL: the probe's 0.2 s plus the driver's idle-stop
+silence, with nothing loud outside the tone span. That is a better control
+anyway -- it is the property "an empty FIFO yields silence, never a repeated
+buffer or noise", which a driver bug could actually violate. The instrument's
+window is measured from the subject, not assumed from a layout
+([[bug-dx8-fixed-band-blind-to-moderate-yaw]] again, in a different domain).
+
+**Numbers.** Boot probe: 77 periods played, 0 silence periods, 0 TX errors,
+0 bad used ids, `latency_bytes` always 0 from QEMU's device (recorded, not
+relied on). Capture: 319488 bytes = 1.66 s (the probe's 1.2 s + ~0.5 s of
+idle-stop silence); verdict `PASS: 1000 Hz x 25 windows (median 12), 2000 Hz
+x 25 windows (median 37); silent tail 33 windows; ambiguous 0`. The verdict's
+selftest: nine synthetic cases (two PASS shapes incl. 44.1 kHz; reversed,
+silent, single tone, no tail, noise after, gapped span all FAIL).
+
+**Open / owed.** The focused holotype on the driver (an audit-bearing
+surface: DMA + IRQ + untrusted device responses) and the SMP gate for the
+devdev delta are BATCHED to the N-2 close per the double-the-distance rule;
+until then N-1 is landed-not-audited on aux-3 (not merged). The design's
+section 9/10 residue still awaits the operator. Seams recorded in the
+reference chapter: no cooperative quiesce-on-remove (netdev's inherited
+MENAGERIE section 10 hazard), the private copy of the virtio-pci constants,
+no capture/eventq, concurrent writers interleave until the N-2 mixer.
+
+---
+
 ## 2026-09-05 (aux, Fable 5.1, effort max) -- Nocturne N-0: the audio research pass + the design candidate
 
 The far side of the DX-8 self-compaction. The resume note's one item was the

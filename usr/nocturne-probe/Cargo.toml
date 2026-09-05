@@ -1,0 +1,9 @@
+[package]
+name = "nocturne-probe"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }

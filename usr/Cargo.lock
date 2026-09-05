@@ -1006,6 +1006,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nocturne-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "nocturned"
+version = "0.1.0"
+dependencies = [
+ "libdriver",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "nora"
 version = "0.1.0"
 dependencies = [
