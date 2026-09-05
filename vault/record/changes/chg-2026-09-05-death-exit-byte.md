@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-death brought current: #91 -- the ZOMBIE chokepoint captures the real exit byte, not the 0/1 collapse"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["669aad97"]
 touched:
   - sub-kernel-death
 established: []
