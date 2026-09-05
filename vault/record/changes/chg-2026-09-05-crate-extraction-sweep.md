@@ -4,7 +4,7 @@ type: chg
 title: "The crate extractions -- the refactor the 2026-08-04 sweep named finally landed"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["553d5dd7"]
 touched:
   - sub-lib-vt
   - sub-beacon
