@@ -133,10 +133,10 @@ Generated — do not edit between the markers (`quaestor render`).
 
 - 2026-09-05 [[chg-2026-09-05-beacon-layout-fold]] — The H-4c layout gesture folded into sub-beacon: ObjType::Layout (type=layout) + the three verbs.default layout rules
 - 2026-09-05 [[chg-2026-09-05-boot-banner-mirror-recount]] — abi-boot-banner recount: the prose caught up to the twenty-eight-mirror set
+- 2026-09-05 [[chg-2026-09-05-caps-fork-inherit]] — sub-kernel-caps brought current: the Linux-clone fork-inherits-caps (rfork_forked_with_caps) + the resolved comment drift -- its first EARNED update
 - 2026-09-05 [[chg-2026-09-05-crate-extraction-sweep]] — The crate extractions -- the refactor the 2026-08-04 sweep named finally landed
 - 2026-09-05 [[chg-2026-09-05-exec-phenotype]] — sub-kernel-exec brought current: the phenotype threaded, the interpreter rewrite, the pheno-mount resolver
 - 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
 - 2026-09-05 [[chg-2026-09-05-fullscreen-zoom]] — The fullscreen-zoom fix: the #56 patchwork latch re-keyed on slot rotation; the letterboxed compose clips to the damage's projection
 - 2026-09-05 [[chg-2026-09-05-h4c-layout-gesture]] — H-4c: the layout gesture rides the verb menu (obj type=layout), halcyon layout list/delete, and the session startup script (halcyon.rc or the device default) run by the per-user compositor
-- 2026-09-05 [[chg-2026-09-05-h4d1-creator-reservation]] — H-4d-1: a peer-split empty leaf is reserved to its creator conn until the conn goes; the session compositor hosts a tagged leaf as a terminal tile; the restore tool defers to a present compositor; print!/println! write one statement per syscall
 <!-- generated:end -->
