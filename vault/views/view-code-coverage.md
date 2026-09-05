@@ -65,18 +65,16 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**383 owned · 98 unowned · 481 files (79% owned) · ~31564 unswept lines.**
+**404 owned · 77 unowned · 481 files (83% owned) · ~20062 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30093 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/halcyond | 0 | 18 | 9572 |
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/ports | 0 | 18 | 4033 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/kaua-term | 0 | 3 | 1930 |
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1028 |
 | arch | 34 | 4 | 971 |
@@ -91,9 +89,11 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30093 lin
 | usr/corvus | 1 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
+| usr/halcyond | 18 | 0 | 0 |
 | usr/httpd | 1 | 0 | 0 |
 | usr/https | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
+| usr/kaua-term | 3 | 0 | 0 |
 | usr/libthyla-rs | 29 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
@@ -121,27 +121,15 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30093 lin
 | file | lines |
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
-| usr/halcyond/src/transcript.rs | 1972 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/halcyond/src/main.rs | 1250 |
 | usr/quarry/src/main.rs | 1028 |
-| usr/kaua-term/src/lib.rs | 1022 |
-| usr/halcyond/src/layout.rs | 974 |
 | usr/halcyon/src/main.rs | 874 |
-| usr/halcyond/src/session.rs | 823 |
-| usr/halcyond/src/menu.rs | 790 |
-| usr/halcyond/src/tile.rs | 739 |
 | arch/arm64/uart.c | 674 |
-| usr/kaua-term/src/wire.rs | 554 |
 | kernel/joey.c | 478 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
-| usr/halcyond/src/status.rs | 445 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 390 |
 | kernel/include/thylacine/errno.h | 388 |
-| usr/halcyond/src/input.rs | 385 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
-| usr/kaua-term/src/main.rs | 354 |
-| usr/halcyond/src/raster.rs | 350 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 336 |
 | kernel/fault_test.c | 332 |
@@ -150,30 +138,22 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30093 lin
 | usr/ports/sdl2/thylacine/thyla_tap.c | 320 |
 | usr/lib/thylajit/thyla_capjit.h | 318 |
 | usr/coreutils/src/bin/ps.rs | 297 |
-| usr/halcyond/src/chromeset.rs | 293 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | kernel/include/thylacine/smp.h | 282 |
-| usr/halcyond/src/chrome.rs | 278 |
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
-| usr/halcyond/src/select.rs | 250 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | kernel/extinction.c | 229 |
-| usr/halcyond/src/statusset.rs | 224 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
-| usr/halcyond/src/menuset.rs | 219 |
-| usr/halcyond/src/grid.rs | 213 |
 | kernel/include/thylacine/devcap.h | 208 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/ports/sdl2/SDL_config.h | 186 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
-| usr/halcyond/src/downq.rs | 174 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
-| usr/halcyond/src/tiles.rs | 159 |
 | kernel/cpio.c | 152 |
 | arch/arm64/uart.h | 151 |
 | usr/susp-mask-child/src/main.rs | 139 |
@@ -213,7 +193,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30093 lin
 | usr/ports/vkquake/thy_vkloader.c | 47 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
-| usr/halcyond/src/lib.rs | 34 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.h | 21 |
