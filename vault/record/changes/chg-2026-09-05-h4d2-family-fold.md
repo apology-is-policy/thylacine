@@ -4,7 +4,7 @@ type: chg
 title: "H-4d-2/2a/3 fold: the rich session tile -- beacon-tier plumbing (DC_PTS, stdout_is_terminal, env_beacon_tier) + the span-serial Beacon threading + the tile Normal mode / menu / selection"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["83ce0206"]
 touched:
   - sub-beacon
   - sub-kernel-syscall-abi
