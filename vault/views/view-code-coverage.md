@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**404 owned · 77 unowned · 481 files (83% owned) · ~20062 unswept lines.**
+**404 owned · 78 unowned · 482 files (83% owned) · ~20232 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **66 files, ~30093 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **66 files, ~30236 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -78,8 +78,8 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30093 lin
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1028 |
 | arch | 34 | 4 | 971 |
+| usr/lib | 55 | 3 | 560 |
 | usr/stratumd-stub | 0 | 1 | 453 |
-| usr/lib | 55 | 2 | 390 |
 | usr/coreutils | 59 | 1 | 297 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/susp-mask-child | 0 | 1 | 139 |
@@ -152,6 +152,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30093 lin
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/ports/sdl2/SDL_config.h | 186 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
+| usr/lib/libhalcyon/src/place.rs | 170 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
