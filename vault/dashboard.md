@@ -130,11 +130,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-05 [[chg-2026-09-05-crate-extraction-sweep]] — The crate extractions -- the refactor the 2026-08-04 sweep named finally landed
+- 2026-09-05 [[chg-2026-09-05-exec-phenotype]] — sub-kernel-exec brought current: the phenotype threaded, the interpreter rewrite, the pheno-mount resolver
 - 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
 - 2026-09-05 [[chg-2026-09-05-halcyon-libs-sweep]] — The Halcyon graphics libs -- the three crates the handoff did not name
 - 2026-09-05 [[chg-2026-09-05-r6-grandfather]] — R6 grandfathers committed history: a grown mirror set stops failing past chgs
 - 2026-09-02 [[chg-2026-09-02-h4b1-claim]] — H-4b-1: the one-shot placement claim (pane/<id>/claim + create claim=) lands in tapestryd
 - 2026-09-02 [[chg-2026-09-02-h4b2-session-actor]] — H-4b-2: the Session(principal) actor -- session-wide mutual pane authority in tapestryd
 - 2026-09-02 [[chg-2026-09-02-h4b3a-autoclaim]] — H-4b-3a: libtapestry auto-consumes an inherited TAPESTRY_CLAIM on open
-- 2026-09-02 [[chg-2026-09-02-h4b3b-restore]] — H-4b-3b: the restore tool + PFK_OWNER + the H-4b arc audit close
 <!-- generated:end -->

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-08-18
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -53,6 +53,18 @@ All five share the same failure contract: **on any error the target is left
 partially built and the caller must dispose of it.** Nothing here unwinds — and
 for the detached-target loader that is not a caveat but the design: the caller's
 only reference is the one it is about to release.
+
+**Since Design D (VIVARIUM 13.10) the phenotype is a parameter, not a Proc
+field this file reads.** `exec_load_into` takes a `u32 pheno` — the phenotype
+the image being loaded was *decided* to have (`phenotype_decide` at the
+resolve, before the load) — and threads it to `exec_load_body`. The spawn
+wrapper `exec_setup_from_spoor` passes `p->phenotype` (the spawn thunk stamped
+it before EL0); `execve` passes a value decided into a local and never reads
+`nsp->phenotype` (see Mechanism). The resolver has a phenotype-reporting twin:
+`exec_resolve_from_namespace_ex` reports, via an optional `*pheno_out`, whether
+the resolution walk crossed an `MPHENO_LINUX` mount (`/viv/bin`) — the
+by-location half of the decision. Only `SYS_SPAWN_FULL_ARGV` passes non-NULL;
+the plain `exec_resolve_from_namespace` passes NULL.
 
 ## Mechanism
 
@@ -160,6 +172,40 @@ is what makes the coupling checkable.
 Either way `[filesz, size)` reads as zero. Only *when* the page is allocated
 differs.
 
+### The phenotype shapes the load, threaded as a parameter and never read from the Proc
+
+Since Design D (VIVARIUM 13.10.4) the phenotype that gates the PT_INTERP
+rewrite arrives as `exec_load_into`/`exec_load_body`'s `pheno` parameter,
+decided at the resolver *before* the load; the loader consults it and never
+reads `nsp->phenotype`. The review found three consumers of the phenotype
+during `execve`, each unsound in a different way if it read the live field —
+and one of the three is this file's:
+
+- **Leg C is here.** `exec_load_body` decides the PT_INTERP dispatch on the
+  parameter (`if r == ELF_LOAD_HAS_INTERP && pheno == PHENO_LINUX`). A native
+  caller `execve`ing a *dynamic* `/viv/bin` binary is decided Linux at the
+  resolver; had the dispatch read `nsp->phenotype` (still native before the
+  commit) it would fall through to the "dynamic Linux binary rejected" refusal
+  — D's symmetry unmet for exactly the case [DISTRO D-4] exists to serve.
+  Reading `pheno` takes the rewrite path.
+- **Leg B is why the loader never *writes* `nsp->phenotype`.** A failed load
+  returns to the surviving old image (built detached), and an already-flipped
+  phenotype would leave that image decoding its own calls under the wrong ABI.
+  The `p->phenotype` commit lives one layer up in [[sub-kernel-proc]], a RELEASE
+  store inside the infallible region after the address-space swap.
+- Leg A (the signal-state reset) is also [[sub-kernel-proc]]'s.
+
+**The PT_INTERP rewrite (DISTRO D-4)** is what that dispatch enables: a
+`PHENO_LINUX` exec of a binary carrying `PT_INTERP` rewrites the argv to run
+the interpreter, so a stock dynamic musl binary runs by name. The
+interpreter's *own* resolution stays phenotype-agnostic — it inherits the
+program's decided `pheno`; re-deciding by the interpreter's location (a rootfs
+`ld-musl`, crossing no pheno-mount) would flip it native and break every
+dynamic Linux binary. One asymmetry (F5): the register-argument spawn variants
+thread no program name, which the rewrite needs, so a *dynamic* pheno-mount
+binary loads through `SYS_SPAWN_FULL_ARGV` and refuses loudly on the others —
+every shipped pheno-mount binary is static, so no caller meets it today.
+
 ## Data structures
 
 No types of its own. It consumes `struct elf_image` from [[sub-kernel-elf]] and
@@ -220,6 +266,15 @@ allocation failure leaves it empty. Neither fails an exec.
 
 [[inv-i32]] — page charging happens in the map layer, not here.
 
+[[inv-i43]] — exec is a *consumer* of the phenotype decision, never its
+enforcer. The load's shape (the PT_INTERP rewrite) follows the decided `pheno`
+threaded in, and the file confers no authority from it and reads none — the
+"shape, never authority" half of I-43 realized as "the image loads the way its
+decided phenotype says, and nothing more." The enforcement that a phenotype
+grants no extra privilege lives at the fork cap-strip ([[sub-kernel-proc]]);
+this file's obligation is only that it reads the *parameter*, not
+`nsp->phenotype` (Leg C above).
+
 ## Error paths
 
 Every failure is `-1` with the Proc partially built. Three classes: argument
@@ -272,7 +327,11 @@ the assert does not enforce this).
   removes most of the same waste. What remains owed is sharing a *written* data
   page between parent and child, which is the fork arc's business, not this
   file's.
-- **Dynamic linking is refused permanently**, not deferred.
+- **Dynamic linking**: a `PHENO_LINUX` binary carrying `PT_INTERP` is admitted
+  via the interpreter rewrite (DISTRO D-4 — see Mechanism), so a stock dynamic
+  musl binary runs by name. What stays refused is a dynamic *interpreter* (one
+  that itself carries `PT_INTERP`) and any dynamic *native* binary. The blanket
+  "refused permanently" this seam once stated was overtaken by D-4.
 
 ## Caveats
 
@@ -327,7 +386,13 @@ non-writable segments. #107 fixed the I-cache span. The name and exe-path
 stamps arrived with prowl and [[arc-vivarium]]. The fork arc added the
 detached-target loader that closed the replace-in-place seam, the environment
 vector in the frame, the page-floor mapping geometry, and sparse backing for
-non-executable segments: [[chg-2026-08-15-exec-lineage]].
+non-executable segments: [[chg-2026-08-15-exec-lineage]]. DISTRO D-4 added the
+`PT_INTERP` interpreter rewrite that admits a dynamic Linux binary by name; the
+`/viv/bin` pheno-mount gave `exec_resolve_from_namespace_ex` its optional
+`*pheno_out` crossing report; and Design D (VIVARIUM 13.10) threaded the
+phenotype as `exec_load_into`'s `pheno` parameter — the Leg-C dispatch reads
+the parameter, never `nsp->phenotype`, and the loader never writes it (the
+commit is [[sub-kernel-proc]]'s): [[chg-2026-09-05-exec-phenotype]].
 
 ## Tests
 
