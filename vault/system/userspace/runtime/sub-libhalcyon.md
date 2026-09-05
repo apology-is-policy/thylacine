@@ -8,6 +8,7 @@ code:
   - usr/lib/libhalcyon/src/theme.rs
   - usr/lib/libhalcyon/src/layout.rs
   - usr/lib/libhalcyon/src/skeleton.rs
+  - usr/lib/libhalcyon/src/place.rs
   - usr/lib/libhalcyon/Cargo.toml
 audit: light
 guarded-by: []
@@ -23,8 +24,8 @@ updated: 2026-09-05
 
 The Halcyon environment library (HALCYON.md 13): the shared pieces of the
 graphical environment that must not fork between the compositor and its
-clients. Three modules, three reasons to be a library rather than code in one
-of the consumers:
+clients. Four modules, each a thing that must not fork between the compositor
+and a client:
 
 - `theme` is the Daylight visual scripture as code (HALCYON-VISUAL.md) --
   the SINGLE token source the ratified H-3 split names, so halcyond's
@@ -35,6 +36,11 @@ of the consumers:
   save/restore, the H-4b "D decision"), so it lives in neither.
 - `skeleton` is the pure restore planner -- a model of the compositor's split
   rule that turns a saved tree back into a sequence of compositor verbs.
+- `place` (2026-09-05) is the placement + scale math -- `letterbox`,
+  `scaled_clip`, `nearest_src` -- shared by [[sub-tapestryd]]'s scaled compose
+  and the tapestry-battery's sample points, so a letterboxed present and its
+  test's expected pixels derive from ONE function (the fullscreen-zoom fix; see
+  its section below).
 
 It depends only on [[sub-lib-vt]] (for `vt::Palette`, which `theme` produces);
 everything else is pure `no_std` + `alloc`.
@@ -187,6 +193,25 @@ at 256 nodes. No hot path.
   `daylight_palette()`'s `vt::Palette` return -- when the palette source
   consolidated here; the manifest is the ground truth (a minor doc-vs-code
   drift, noted for a future touch).
+
+## `place` -- the shared placement + scale math (2026-09-05, the fullscreen-zoom fix)
+
+`place.rs` is the fourth module: the placement geometry the compositor and the
+tapestry-battery must agree on to the pixel. `letterbox(sw, sh, cw, ch)`
+aspect-fits a source into a container (the existing letterbox policy, moved
+here from tapestryd so the battery's expected sample points derive from the
+compositor's own function, not a re-derivation). `nearest_src(d, s, dw)` is the
+exact source coordinate a nearest-neighbour scaled compose samples for a given
+destination coordinate; `scaled_clip(...)` is the destination-rect PROJECTION
+of a damage rect through that scale -- the clip [[sub-tapestryd]]'s `compose_cpu`
+uses so a partial present of a letterboxed surface redraws only its damage, not
+the whole scaled rect. Because `scaled_clip` is built on the same `nearest_src`
+the compose samples by, a clipped compose is pixel-identical to a whole one with
+no seam -- the host tests prove exactly that (`scaled_clip_covers_every_pixel_
+the_damage_reaches`, the letterbox identity/pillarbox/never-empty cases).
+Pure math, host-tested; the drift it exists to prevent is a compositor that
+scales one way and a test that expects another. See [[sub-tapestryd]]'s
+fullscreen-zoom section and [[haz-latch-keyed-on-proxy]].
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

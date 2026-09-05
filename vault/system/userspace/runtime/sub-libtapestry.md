@@ -370,5 +370,19 @@ declared session conn receives on one of its surfaces at every structural
 layout pass, `value` the layout epoch: re-read `layout`. Other clients never
 see it.
 
+## `set_single_slot` — the single-slot discipline (2026-09-05, the fullscreen-zoom fix)
+
+`Surface::set_single_slot(on)` sets `Surface.single_slot`, and when on the
+present path stops rotating the draw slot (`if !self.single_slot { rotate }`):
+every present redraws and pushes slot 0, the app's own framebuffer, complete by
+construction. It is the client-side DECLARATION that answers the compositor's
+#56 patchwork latch honestly -- a native single-slot client (thyla_tap's
+discipline; the tapestry-battery's `singleslot` leg) declares it, so partial
+damage from it is a hint, not a rotating accumulator's patchwork, and
+[[sub-tapestryd]] letterboxes rather than crops it. The compositor's own
+`slots_presented` bitmask is the belt (it never sees a second slot from such a
+client); this is the brace. See [[sub-tapestryd]]'s fullscreen-zoom section and
+[[haz-latch-keyed-on-proxy]].
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

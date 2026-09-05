@@ -1472,3 +1472,57 @@ bar N retired; the display returns`). The global `statusbar` file
 The halcyond-side chrome (`status.rs`/`statusset.rs`, OSC 7 + the cmd mark)
 and libutopia's `cwd_report`/`mark_cmd` are not vault-owned here.
 
+## The #56 patchwork latch re-keyed on slot rotation (2026-09-05, the fullscreen-zoom fix)
+
+The operator's Cmd+F report (aux 0048), run to ground at `adt-zoom-r1`
+([[fnd-zoom-r1-f1]], P1). The #56 patchwork latch keyed on damage COVERAGE --
+`if !rects_cover_full(&rects, w, h) { s.patchwork = true }` (one-way) -- as a
+PROXY for the property it exists for: a client that ROTATES weave slots leaves
+a slot stale outside its damage, so scaling one slot composes half-stale
+frames. Aurora satisfies both. DOSBox-X (an SDL single-slot client: slot 0 IS
+its framebuffer, complete by construction) presents partial rects as a matter
+of course (the menu bar, the four overscan borders, changed scanline bands),
+satisfied only the proxy, and was latched an accumulator -> `placement_rect`
+CROPPED it at the content origin instead of letterboxing: native at the pane's
+top-left in its tile, native at the display corner on black when zoomed. The
+class is [[haz-latch-keyed-on-proxy]] -- a latch keyed on a proxy fires on every
+class the proxy covers and the property does not, permanently (the latch is
+one-way), and the doc even named the exemption ("the SDL class never latches")
+the predicate never checked.
+
+The fix keys the latch on the PROPERTY, observed directly: `Surface.slots_
+presented` is a bitmask of the slots ever presented (surviving reweaves, never
+cleared), and the latch trips only on partial damage AND `slots_presented`
+naming two or more (aurora latches at exactly the same present as before -- its
+second present is always a second slot; a single-slot client never trips). It
+says `surface N patchwork latched (...)` once when it does. Because a
+letterboxed compose then serves partial presents, each partial present redraws
+only its damage's PROJECTION through the scale rather than the whole scaled
+rect per rect (a 70 Hz cursor blink, or DOSBox's four overscan rects, would
+otherwise rescale a display-sized rect per rect): `ComposeOp.clip` carries the
+projection (`libhalcyon::place::scaled_clip`, host-tested against
+`nearest_src`, the exact mapping `compose_cpu` samples by, so a clipped compose
+is pixel-identical to a whole one with no seam); `compose_cpu` composes and
+pushes only `op.clip.intersect(op.dst)`, while the GPU path keeps its whole-op
+blit. `letterbox` moved to `libhalcyon::place` so the battery's sample points
+derive from the compositor's own function ([[sub-libhalcyon]]); the client-side
+single-slot declaration is `Surface::set_single_slot` ([[sub-libtapestry]]).
+FIT vs FILL was not a fork -- aspect-fit is the existing letterbox policy
+(640x417 -> 1227x800, 26 px pillars).
+
+**Prosecution.** The bitmask surviving a reweave (a resized surface keeps its
+rotation history, so a rotating client re-latches correctly after a resize);
+the one-way latch vs a client that presents one slot then rotates (it latches
+at the first second-slot partial present, not before); the clip's pixel-identity
+to a whole compose (the `nearest_src` host test); the GPU path unchanged (whole
+blit). **Tests.** `ls-gfx-panes` `singleslot`: a single-slot client
+(`set_single_slot` + thyla_tap's discipline) zoomed shows the compositor's own
+`letterbox 640x400 -> 1280x800 @(0,0)` line (the latch line a FAIL arm), the
+partial present's pixel through the 2x scale, the untouched frame's pixel at
+three-quarters (black under the bug); then the one-variable control (rotation
+on -> the second partial present latches at `slot 1 of slots 0b11`). The
+real-DOSBox re-run (aux's `dx-fullscreen-repro.exp`, the fixture on aux-3) is
+owed to aux after the merge. Landed `f25781ad` ([[chg-2026-09-05-fullscreen-zoom]]);
+the prosecution notes ride AUDIT-TRIGGERS row 42 for the next tapestryd round
+(the double-the-distance deferral).
+
