@@ -217,6 +217,46 @@ func TestMirrorsCheckedRequired(t *testing.T) {
 	wantClean(t, fails, warns)
 }
 
+// R6 must not retroactively fail a committed, unchanged chg when the abi's
+// mirror set later grows (an upstream merge adds consumers): Record notes are
+// append-only, so the chg checked what existed at its commit and cannot be
+// re-checked. Only a chg being authored now (dirty vs HEAD) is held to the
+// current set.
+func TestMirrorsCheckedGrandfathersCommitted(t *testing.T) {
+	root := fixtureGit(t)
+	writeNote(t, root, "vault/abis/abi-t.md",
+		"---\nid: abi-t\ntype: abi\nkind: struct\nstability: append-only\n"+
+			"pinned-by: []\nmirrors: [usr/lib/a.rs, usr/lib/b.rs]\n---\nAn ABI.\n")
+	mutate(t, root, "vault/record/changes/chg-2026-01-01-t.md",
+		"touched: []", "touched: [abi-t]")
+	mutate(t, root, "vault/record/changes/chg-2026-01-01-t.md",
+		"depth: skeletal\n",
+		"depth: skeletal\nmirrors-checked: [usr/lib/a.rs, usr/lib/b.rs]\n")
+	gitT(t, root, "add", "-A")
+	gitT(t, root, "commit", "-qm", "abi-t + a chg that checks both mirrors")
+
+	// The abi's mirror set grows to 3 -- edit the abi note only; the chg
+	// stays committed and clean.
+	mutate(t, root, "vault/abis/abi-t.md",
+		"mirrors: [usr/lib/a.rs, usr/lib/b.rs]",
+		"mirrors: [usr/lib/a.rs, usr/lib/b.rs, usr/lib/c.rs]")
+	fails, _ := runLint(root, false)
+	for _, f := range fails {
+		if strings.Contains(f, "chg-2026-01-01-t") &&
+			strings.Contains(f, "mirrors-checked covers") {
+			t.Fatalf("committed+clean chg must be grandfathered; got %v", fails)
+		}
+	}
+
+	// Control: once the chg is itself edited it is dirty, so the current
+	// (grown) set applies again and the shortfall is caught.
+	mutate(t, root, "vault/record/changes/chg-2026-01-01-t.md",
+		"Change body.", "Change body (edited).")
+	fails2, _ := runLint(root, false)
+	wantFailContaining(t, fails2,
+		"chg-2026-01-01-t.md: touched abi has 3 mirrors; mirrors-checked covers 2")
+}
+
 func TestFileLineCitationWarnsOnPresentOnly(t *testing.T) {
 	root := fixture(t)
 	mutate(t, root, "vault/system/t/sub-t-x.md",

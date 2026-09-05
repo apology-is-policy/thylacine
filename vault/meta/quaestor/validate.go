@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -142,6 +143,10 @@ var sectionRe = regexp.MustCompile(`(?m)^##\s+(.+?)\s*$`)
 func validate(reg *Registry, preErrors []string) (fails, warns []string) {
 	fails = append(fails, preErrors...)
 	amap := aliasMap(reg)
+	// R6 grandfathering (see the chg block below): the set of notes that
+	// differ from HEAD right now, so an abi-touching chg being authored is
+	// held to the abi's CURRENT mirror set while committed history is not.
+	dirty := gitDirtySet(vaultRoot(reg))
 	for _, n := range reg.ByRel() {
 		f := n.Front
 		t := f.Str("type")
@@ -264,7 +269,15 @@ func validate(reg *Registry, preErrors []string) (fails, warns []string) {
 				}
 			}
 			checked := len(edgeVals(f, "mirrors-checked"))
-			if mirrorsNeeded > 0 && checked < mirrorsNeeded {
+			// A committed, unchanged chg was validated against the mirror
+			// set that existed AT ITS COMMIT; a later growth of that set
+			// (an upstream merge adds new consumers) must not retroactively
+			// fail it, because Record notes are append-only and cannot be
+			// re-checked. So enforce only on a chg being authored now --
+			// one that differs from HEAD. dirty==nil (git unavailable)
+			// falls back to enforcing every chg, the original behaviour.
+			authoredNow := dirty == nil || dirty[n.Rel]
+			if authoredNow && mirrorsNeeded > 0 && checked < mirrorsNeeded {
 				fails = append(fails, fmt.Sprintf(
 					"%s: touched abi has %d mirrors; mirrors-checked "+
 						"covers %d", n.Rel, mirrorsNeeded, checked))
@@ -311,6 +324,34 @@ func validate(reg *Registry, preErrors []string) (fails, warns []string) {
 // The lesson is narrower than "check everything". Both fields hold
 // repo-relative paths, both are resolvable, and only one was checked — the same
 // arbitrary line `models:`-vs-`mirrors:` drew.
+// gitDirtySet returns the repo-relative paths that differ from HEAD --
+// staged, unstaged, or untracked -- via `git status --porcelain`. R6 uses it
+// to tell a chg being authored now (dirty) from committed history (clean):
+// the former is held to the touched abi's CURRENT mirror set, the latter was
+// already validated against the set that existed at its commit. Returns nil
+// when git is unavailable, which makes the caller enforce on every chg (the
+// pre-grandfather behaviour) rather than silently grandfather everything.
+func gitDirtySet(root string) map[string]bool {
+	if root == "" {
+		return nil
+	}
+	cmd := exec.Command("git", "status", "--porcelain", "-z", "--no-renames")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	m := map[string]bool{}
+	// porcelain -z: each record is "XY <path>" then a NUL. Two status
+	// columns, a space, then the repo-relative path at offset 3.
+	for _, rec := range strings.Split(string(out), "\x00") {
+		if len(rec) > 3 {
+			m[rec[3:]] = true
+		}
+	}
+	return m
+}
+
 func checkCodePaths(reg *Registry) []string {
 	root := vaultRoot(reg)
 	if root == "" {
