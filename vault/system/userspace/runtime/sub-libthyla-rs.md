@@ -293,6 +293,13 @@ spuriously. A program that must know whether its output landed has to use the
 write methods directly. This is documented at the macros and is easy to miss at
 a call site, since the macro looks exactly like the one it is modelled on.
 
+Since H-4d-1 the family also writes each statement in a **single** write:
+`write_fmt` formats the whole line — and `println!`/`eprintln!` its trailing
+newline — into one buffer before the one `SYS_PUTS`, rather than one syscall per
+format fragment. This is not a performance tidy: the console's writer role is
+claimed PER WRITE, so the fragment-per-syscall form let a concurrent console
+writer interleave mid-line (the torn-line the session gate's rc leg first hit).
+
 ## Performance
 
 **The single largest read the library will issue is 8 KiB, against a kernel

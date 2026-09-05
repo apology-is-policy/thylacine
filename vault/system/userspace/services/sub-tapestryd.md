@@ -1079,6 +1079,27 @@ leaf, both "this placement is not available to you". A claim stays strictly
 weaker than the close every peer holds: it can never take a tile that holds a
 surface.
 
+### The creator reservation -- H-4d closes the claim race (2026-09-05, H-4d-1)
+
+Owner-gating the claim still left a SAME-principal race: under a session the
+compositor is the user's rio and fills every empty leaf it owns, while the
+restore tool -- the *same* principal -- is mid-build splitting a skeleton. Last
+mint wins, and no mark made AFTER the split (a tag, a claim) can close it,
+because the compositor's reconcile runs per `TEV_LAYOUT`, per split. H-4d-1 marks
+the leaf AT the split: `Pane.creator_conn`, stamped on BOTH empties by a ctl
+split (a chord split stamps none), released at that conn's `retire_conn`. The
+claim mint then answers **E_AGAIN** -- not E_PERM -- to any OTHER conn of the
+same principal while the creator lives ("the leaf IS its principal's, just not
+yet"); the Renderer (the environment) is never held off. The release fans ONE
+`TEV_LAYOUT` to the declared session so the retry is prompt (no geometry change
+at a release). rio's rule: a window a program creates is that program's, not the
+menu's -- so a restore tool's skeleton is never filled by its own session
+compositor mid-build. The paired decision -- a session's tagged empty leaf
+becomes a terminal tile whose tag IS its command line (`kaua-term cols rows
+<argv>`), the compositor being the user's rio since KT-1 -- lives on the halcyon
+side (docs/reference/150/151); the tapestryd half is the reservation + the menu
+authority checks' `Session(p)` arms admitting the declared session.
+
 **The reap.** `reap_session_empties(principal)` closes a departed session's
 empty scaffolding when the principal's LAST live conn is gone. `retire_conn`
 (at teardown) already closed the dying conn's OCCUPIED leaves (`retire` closes
