@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-08-18
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -25,8 +25,8 @@ takes it across — the dispatch switch, the user-pointer validator, the staging
 buffers, and the split between the layer that talks to userspace and the layer
 that does the work.
 
-**What this dossier covers, precisely.** The file is 11138 lines and holds all
-103 handlers. Most of a handler is *policy belonging to its own subsystem* — a
+**What this dossier covers, precisely.** The file is 14731 lines and holds all
+107 handlers. Most of a handler is *policy belonging to its own subsystem* — a
 Burrow handler is described by [[sub-kernel-burrow]], a pts handler by
 [[sub-kernel-pts]], and so on across roughly thirty dossiers. The subject here
 is what surrounds them: dispatch, marshalling, validation, staging, error
@@ -63,8 +63,8 @@ called, never what the caller is allowed to do.
 
 ### The dispatch is exactly as wide as the ABI says
 
-103 syscall numbers are live and the switch has exactly 103 distinct arms;
-neither set has a member the other lacks. (A grep for case labels finds 106 —
+107 syscall numbers are live and the switch has exactly 107 distinct arms;
+neither set has a member the other lacks. (A grep for case labels finds 110 —
 three of them belong to a second, inner switch that routes the three pts control
 calls to their tty backends, not to the dispatcher.) Almost every arm reads only
 `x0` through `x5` and `x8`, the argument window the ABI declares; the three
@@ -81,7 +81,8 @@ The width claim itself is still a measurement rather than a mechanism.
 
 ### The phenotype prologue: what a Linux-shaped call meets before the switch
 
-A process declares a phenotype at spawn. `PHENO_NATIVE` is the default and
+A process declares a phenotype at spawn and re-decides it at every execve (the
+Design D re-decision under execve, below). `PHENO_NATIVE` is the default and
 every process outside a declared vivarium; the branch is one predictable test on
 an already-hot cache line and the native path is byte-unchanged. A
 `PHENO_LINUX` process goes through `viv_linux_dispatch`, which lives in this
@@ -152,10 +153,10 @@ store is unconditional and safe for the reason above; noted's arm stores nothing
 
 ### Two layers, and the rule about which one may hold a gate
 
-Forty-nine syscalls are split in two. A `_handler` takes raw register values,
+Fifty syscalls are split in two. A `_handler` takes raw register values,
 resolves the current thread, validates user pointers, stages buffers, and calls
 a `_for_proc` inner that takes an explicit process and kernel-side buffers.
-Forty-one of those inners are non-static, and that is what makes them the
+Forty-five of those inners are non-static, and that is what makes them the
 testable half — most are called from the kernel's own test suite, and several
 from production kernel code that needs the operation without a syscall frame.
 
@@ -222,6 +223,16 @@ source:
   which is legal at that point and would not be earlier. It runs *before* the
   frame rewrite so no instruction of the new image can observe a descriptor that
   was supposed to be gone.
+- **The phenotype is re-decided at the resolve, not inherited from the caller.**
+  The new image's ABI shape is `phenotype_decide(crossed_pheno,
+  territory_root_pheno)` — the `MPHENO_LINUX` flag the resolver crossed on the way
+  to the binary, OR-ed with the territory's declared root phenotype ([[sub-kernel-territory]]) —
+  and it is committed in `proc_exec_replace`'s single infallible region alongside
+  the address-space swap, so the number space the next instruction meets and the
+  memory it runs in flip together or not at all. This is [[inv-i43]]'s Design D:
+  a native binary exec'd inside a Linux vivarium comes out native, because the
+  shape follows the *image*, never the caller. It remains shape and not authority
+  — the decision picks a syscall numbering, never a capability.
 
 The frontier this exposes: the native execve **preserves the environment** and
 takes no envp argument at all. That is the ABI meaning rather than a shortcut —
@@ -367,7 +378,7 @@ and there the charge must stay); and **claim before drop**, not after.
 
 **[[inv-i13]]** — the user-pointer validator is the boundary. It rejects null,
 rejects anything at or above the user-VA top, and rejects a length that would
-wrap or cross that top. Sixty-nine call sites use it. It validates a *range*,
+wrap or cross that top. Eighty-eight call sites use it. It validates a *range*,
 not a pointer: a zero length passes unconditionally, which is correct because
 nothing is dereferenced, and is why every caller pairs it with the length it
 will actually touch.
@@ -389,7 +400,10 @@ is where the two steps are written.
 **[[inv-i43]]** — the phenotype prologue is where "shape, never authority" is
 kept. It renumbers and remaps arguments; it reads the capability word nowhere and
 writes it nowhere. A phenotyped process meets exactly the same gates in exactly
-the same handlers as a native one.
+the same handlers as a native one. Design D adds a second place the invariant
+lives: execve re-decides the phenotype from the resolved image (above), which
+changes the ABI numbering the process will present and nothing about what it may
+do — shape re-chosen at each image load, authority never touched.
 
 **[[inv-i44]]** — execve's detached build and rfork's frame copy are this file's
 half of address-space integrity under sharing. The decisions live here; the
@@ -559,6 +573,9 @@ threshold so small transfers never pay the extra handle lookup.
 [[chg-2026-08-15-syscall-dispatch-lineage]] is the re-sweep after ~3500 lines
 moved: the phenotype prologue, the three frame-taking handlers, the core/front-end
 split, and the payer attribution.
+[[chg-2026-09-05-syscall-dispatch-census]] re-derives the census after ~4300
+more lines (14731 total): 107 live/107 arms, 50 split (45 non-static inners), 88
+validator sites, and adds execve's Design-D phenotype re-decision.
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 
