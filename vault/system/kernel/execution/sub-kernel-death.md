@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -108,6 +108,19 @@ The wake-under-lock is the R5-H F75 close: between releasing the lock and
 waking, the parent could be reaped and freed by the *grandparent*'s
 `wait_pid`, and the wake would touch freed memory.
 
+**The exit byte is the real one now (#91).** The ZOMBIE chokepoint captures
+`exit_status` **verbatim** — the byte a userspace `t_exits(42)` or a phenotype
+`exit_group(42)` passed — not the 0/1 collapse it was before #91, which lost every
+real status at two kernel points (`sys_exits_handler`, `sys_exit_group_handler`).
+The collapse survives only for the ~dozen in-kernel `exits("msg")` callers,
+through a deliberate split: `exits(msg)` maps `"ok"`→0 / else→1 and calls
+`exits_code(code, msg)`, while the syscall entries call `exits_code` directly with
+the real byte. So `group_exit_msg` still gates the death and carries the msg,
+while the numeric status lives in the separate `exit_status` field the parent's
+wait packs (`WAIT_STATUS_EXITED`, in [[sub-kernel-proc]]'s `wait_pid_for`). The
+two-field split is the point: the flag that says "die" and the byte that says
+"with what status" are no longer one datum.
+
 **The close-at-exit window** (#926, completed by #68). A Proc's fds must
 close when the *process* terminates, not when its parent later reaps it —
 otherwise a shell draining `$(cmd)`'s stdout to EOF hangs forever, because
@@ -189,9 +202,13 @@ fans are [[sub-kernel-jobctl]]; [[spec-pty-stop]] is the composition.
 
 ## Data structures
 
-`Proc.group_exit_msg` — NULL means no termination; non-NULL is both the die
-flag and the last-out status source (`"ok"` → 0, else 1). Set once by CAS,
-never cleared. Read ACQUIRE at every die-check.
+`Proc.group_exit_msg` — NULL means no termination; non-NULL is the die flag
+**and** the last-out msg string. Set once by CAS, never cleared. Read ACQUIRE at
+every die-check. Since #91 the numeric status is a **separate** field,
+`Proc.exit_status` (int): the real exit byte, stored verbatim, no longer the
+`"ok"`→0/else→1 collapse derived from the msg. `group_exit_msg` decides *whether*
+the Proc dies and carries the msg; `exit_status` decides *what status* the
+parent's wait reads.
 
 `Proc.debug_stop_req` / `job_stop_req` — the two stop owners, deliberately
 in the same cache line so the tail's fast path reads both in two ACQUIRE
@@ -345,3 +362,7 @@ The group-termination cascade, the zombie transition and the death-wake legs are
 untouched. Checked by hunk context, not by reading the diff for anything
 familiar; the exec-side content is on [[sub-kernel-proc]] and
 [[sub-kernel-vivarium]].
+
+[[chg-2026-09-05-death-exit-byte]] is the next earned interval: #91 (`f557beb2`)
+made the ZOMBIE chokepoint capture the real exit byte in `exit_status` verbatim
+instead of collapsing it to 0/1 — the exit-status half of self-hosting's C1 floor.

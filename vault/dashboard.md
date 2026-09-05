@@ -135,8 +135,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-05 [[chg-2026-09-05-boot-banner-mirror-recount]] — abi-boot-banner recount: the prose caught up to the twenty-eight-mirror set
 - 2026-09-05 [[chg-2026-09-05-caps-fork-inherit]] — sub-kernel-caps brought current: the Linux-clone fork-inherits-caps (rfork_forked_with_caps) + the resolved comment drift -- its first EARNED update
 - 2026-09-05 [[chg-2026-09-05-crate-extraction-sweep]] — The crate extractions -- the refactor the 2026-08-04 sweep named finally landed
+- 2026-09-05 [[chg-2026-09-05-death-exit-byte]] — sub-kernel-death brought current: #91 -- the ZOMBIE chokepoint captures the real exit byte, not the 0/1 collapse
 - 2026-09-05 [[chg-2026-09-05-exec-phenotype]] — sub-kernel-exec brought current: the phenotype threaded, the interpreter rewrite, the pheno-mount resolver
 - 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
 - 2026-09-05 [[chg-2026-09-05-fullscreen-zoom]] — The fullscreen-zoom fix: the #56 patchwork latch re-keyed on slot rotation; the letterboxed compose clips to the damage's projection
-- 2026-09-05 [[chg-2026-09-05-h4c-layout-gesture]] — H-4c: the layout gesture rides the verb menu (obj type=layout), halcyon layout list/delete, and the session startup script (halcyon.rc or the device default) run by the per-user compositor
 <!-- generated:end -->
