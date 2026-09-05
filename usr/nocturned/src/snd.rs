@@ -187,7 +187,11 @@ impl VirtioSnd {
             return Err(Error::Hardware);
         }
         let (notify_base, notify_len) = pci.region(PciRegion::Notify).ok_or(Error::Hardware)?;
-        let isr_va = pci.region(PciRegion::Isr).ok_or(Error::Hardware)?.0;
+        let (isr_va, isr_len) = pci.region(PciRegion::Isr).ok_or(Error::Hardware)?;
+        if isr_len < 1 {
+            say!("nocturned: isr region too small ({})", isr_len);
+            return Err(Error::Hardware);
+        }
         let (dev_va, dev_len) = pci.region(PciRegion::Device).ok_or(Error::Hardware)?;
         if dev_len < SND_CFG_MIN_LEN {
             say!("nocturned: device-cfg region too small ({})", dev_len);
@@ -584,10 +588,18 @@ impl VirtioSnd {
         let _ = unsafe { r8(self.isr_va) };
         let pv = self.pool_va();
         let used = pv + TXQ_USED_OFF as u64;
+        let mut passes = 0usize;
         loop {
             let cur = unsafe { r16(used + 2) };
             virtio_rmb();
             if cur == self.tx_used_idx {
+                break;
+            }
+            // Bounded per pass (the pump's livelock guard): a device that keeps
+            // advancing used.idx cannot spin this drain forever.
+            passes += 1;
+            if passes > QUEUE_SIZE_USZ {
+                self.stats.bad_used = self.stats.bad_used.saturating_add(1);
                 break;
             }
             let slot = (self.tx_used_idx % QUEUE_SIZE) as u64;
@@ -615,10 +627,19 @@ impl VirtioSnd {
         let used = pv + TXQ_USED_OFF as u64;
         let mut reaped = 0usize;
         let mut buf = [0u8; PERIOD_BYTES];
+        let mut passes = 0usize;
         loop {
             let cur = unsafe { r16(used + 2) };
             virtio_rmb();
             if cur == self.tx_used_idx {
+                break;
+            }
+            // A hostile device that keeps advancing used.idx must not livelock
+            // this single serve thread (I-46 no-stall): only QUEUE_SIZE chains
+            // can ever be outstanding, so anything beyond is device misbehaviour.
+            passes += 1;
+            if passes > QUEUE_SIZE_USZ {
+                self.stats.bad_used = self.stats.bad_used.saturating_add(1);
                 break;
             }
             let slot = (self.tx_used_idx % QUEUE_SIZE) as u64;

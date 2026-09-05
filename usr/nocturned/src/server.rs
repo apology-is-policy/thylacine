@@ -61,9 +61,11 @@ const P_NODES: u64 = 4;
 const P_NODES_NEW: u64 = 5;
 
 // Voice paths: VBIT | (id << 4) | leaf. Leaf 0 = the voice dir; 1/2/3 = the
-// audio/ctl/info files. VBIT is above the 6 fixed root paths and clear of any
-// realistic voice id (id < 2^28).
-const VBIT: u64 = 1 << 32;
+// audio/ctl/info files. VBIT (bit 40) is above the 6 fixed root paths AND above
+// the full u32 id shifted into bits 4..35, so a large id can neither set VBIT
+// (aliasing a different path) nor be truncated by vid() -- the static assert
+// below pins it.
+const VBIT: u64 = 1 << 40;
 const VLEAF_DIR: u64 = 0;
 const VLEAF_AUDIO: u64 = 1;
 const VLEAF_CTL: u64 = 2;
@@ -76,11 +78,16 @@ fn is_voice(path: u64) -> bool {
     path & VBIT != 0
 }
 fn vid(path: u64) -> u32 {
-    ((path & 0xFFFF_FFFF) >> 4) as u32
+    ((path >> 4) & 0xFFFF_FFFF) as u32
 }
 fn vleaf(path: u64) -> u64 {
     path & 0xF
 }
+
+// VBIT must sit above the full u32 id shifted into bits 4..35, so no voice id
+// can set VBIT (which would alias a fixed path or a different voice) and vid()
+// recovers every id bit.
+const _: () = assert!(VBIT > ((u32::MAX as u64) << 4));
 
 // Root directory children (name, path, mode).
 const ROOT_CHILDREN: [(&[u8], u64, u32); 4] = [
@@ -232,8 +239,9 @@ impl Shared {
     /// voices cannot integer-overflow the sink sample; the clamp is the only
     /// place a hot mix is bounded, exactly once.
     pub fn next_period(&mut self, buf: &mut [u8]) -> bool {
-        let nsamp = buf.len() / 2; // i16 samples (2 per frame)
-        // A fixed scratch sized to the period; buf is always PERIOD_BYTES.
+        // buf is always PERIOD_BYTES; bound nsamp to the fixed scratch anyway so
+        // an over-long buf can never slice-panic mix[..nsamp].
+        let nsamp = (buf.len() / 2).min(PERIOD_BYTES / 2); // i16 samples (2 per frame)
         let mut mix = [0f32; PERIOD_BYTES / 2];
         let mix = &mut mix[..nsamp];
         let mut any = false;
