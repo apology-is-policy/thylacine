@@ -84,7 +84,7 @@ Per `VISION.md §9` non-goals:
 
 - Graphical windowing system (compositor, window manager, display server). Ever.
 - Web browser, multi-pane IDE, Office-suite-class applications. By design — Halcyon doesn't host them.
-- Audio at v1.0. Deferred to post-v1.0.
+- Audio: the Nocturne audio system is being built (design 2026-09-05, `docs/NOCTURNE.md`); no user-visible sound yet — this line flips when the first chapter lands.
 - Bluetooth, USB peripherals beyond keyboard/mouse, hardware sensors at v1.0. Deferred.
 - Distributed / clustered OS. 9P over network is supported; OS doesn't manage clusters.
 - `setuid` binaries — Plan 9 didn't have them; Thylacine doesn't either. Capability elevation via factotum is post-v1.0.

@@ -109,7 +109,7 @@ Cells use:
 | Spec-first for invariant changes | ✗ | ✗ | ✗ | ○ | ✓ | ✗ | ✗ | ★ |
 | **Out-of-band** |
 | In-kernel filesystem driver | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ | ◇ (v2.0 hook) |
-| Sound at v1.0 | ✓ | ✓ | ✓ | ✓ | ✗ | ○ | ✗ | ✗ (deferred) |
+| Sound at v1.0 | ✓ | ✓ | ✓ | ✓ | ✗ | ○ | ✗ | ○ (in progress: the Nocturne arc, `docs/NOCTURNE.md`; design 2026-09-05) |
 | Bluetooth / USB beyond HID | ~ | ✓ | ✓ | ✓ | ✗ | ○ | ✗ | ✗ (deferred) |
 | Multiplatform (x86 + ARM) | ~ | ✓ | ✓ | ✓ | ✓ | ~ | ~ | ✗ (ARM only at v1.0) |
 
@@ -326,7 +326,7 @@ We do *not* lead on raw throughput. We trade throughput for the architectural in
 - **x86-64 at v1.0.** ARM64 only. x86 is v2.x.
 - **Distributed / clustered OS.** Single machine. 9P can be used across a network; Thylacine itself doesn't manage a cluster.
 - **Real-time scheduling at v1.0.** EEVDF gives soft latency bounds; hard RT is v2.x.
-- **Sound at v1.0, Bluetooth, USB beyond HID, hardware sensors.** Deferred.
+- **Bluetooth, USB beyond HID, hardware sensors.** Deferred. *(Sound left this list 2026-09-05: the Nocturne arc, `docs/NOCTURNE.md`.)*
 - **In-kernel filesystem driver at v1.0.** 9P-client mount is the path; in-kernel driver is a v2.0 hook.
 - **setuid binaries.** No capability-elevation mechanism at v1.0; designed for v2.0 via factotum.
 - **glibc-dynamic Linux binary compat.** Best-effort; musl is the target.
@@ -342,7 +342,7 @@ We do *not* lead on raw throughput. We trade throughput for the architectural in
 
 - **No bare-metal hardware**. v1.0 ships in QEMU. Real-hardware is post-v1.0 (Pi 5 first; Apple Silicon later).
 - **No GPU 3D acceleration**. Halcyon uses VirtIO-GPU virgl for 2D framebuffer; 3D / OpenGL ES is post-v1.0.
-- **No sound, no Bluetooth, no USB beyond keyboard/mouse**. Deferred to post-v1.0.
+- **No Bluetooth, no USB beyond keyboard/mouse**. Deferred to post-v1.0. *(Sound: in progress as of 2026-09-05 — the Nocturne arc, `docs/NOCTURNE.md`; not yet user-visible.)*
 - **Limited Linux binary coverage**. Static binaries work; glibc-dynamic + io_uring + epoll-dependent programs don't at v1.0.
 - **Halcyon is a deliberately narrow UI**. Browsers, multi-pane IDEs, and Office apps don't run. By design — but it's a real cost for users.
 - **In-kernel Stratum driver isn't there yet**. 9P-client mount is fast enough for development, but root FS operations have one extra round-trip vs an in-kernel driver. Post-v1.0 closes this.

@@ -23,6 +23,95 @@ needed the operator.
 
 ---
 
+## 2026-09-05 (aux, Fable 5.1, effort max) -- Nocturne N-0: the audio research pass + the design candidate
+
+The far side of the DX-8 self-compaction. The resume note's one item was the
+operator's "start fresh on the audio arc"; the operator had named the system
+(Nocturne) and given one requirement verbatim -- permissioned programs must be
+able to hook onto the graph and add their own DSP modules (a convolution
+filter) -- and had asked that the known PipeWire and PulseAudio quirks be
+designed around, not inherited. Under the standing Fable rule this pass ran
+autonomously and produced `docs/NOCTURNE.md` (1236 lines: the prior-art
+digest with sources, the ground truth on both hosts, the candidate design, the
+reserved invariant I-46, the gates, the sequencing N-0..N-7, eleven named
+decisions, nine open questions) plus the scripture reconciliations. No code.
+**The candidate is NOT ratified**: every decision is listed for the operator
+to overturn, and the sub-names are held for signoff.
+
+**What the research settled (evidence in the doc).** Plan 9's `audio(3)` is one
+writer on one file with a one-number latency interface (`stat` length =
+bytes buffered); 9front's `mixfs` is a file server layered over it that mixes,
+resamples to the device format, proxies `volume`, and exports for free -- the
+shape to keep. PipeWire's scheduling page gave the exact mechanism to copy
+(activation records with `pending`/`required` counters, eventfd wakes, remote
+nodes waking peers directly, "mark xrun on unfinished nodes" at cycle start);
+its filter-chain loads plugins into the daemon -- the thing to shed, with
+WASAPI's APOs-in-`audiodg` (a crash kills the engine; a watchdog) and
+CoreAudio's in-process AUs. JACK2 sync vs async gave the never-wait discipline
+and its cost (one period), which the design applies PER NODE so the JACK
+whole-graph desync disappears. Genode 24.02 gave the inversion (the mixer is the
+multiplexer; drivers and apps are both clients) and policy-as-XML; Fuchsia's
+`fuchsia.audio.effects` gave the out-of-process processor contract (VMO ranges,
+`latency_frames`, `block_size`, per-call metrics) that became the descant
+contract almost verbatim, and Zircon's deadline profiles the scheduler
+precedent for the cadence lease; sDDF's sound class matched virtio-snd's
+pre-buffer protocol exactly.
+
+**Substrate findings, all measured this pass.** Both QEMUs (10.0.2 mac, 10.0.11
+Pi) ship `virtio-sound-pci`; the mac's backends are none/coreaudio/dbus/wav,
+the Pi's add alsa/jack/oss/pa/pipewire/sdl/spice. QEMU's device advertises
+FLOAT and 5512..384000 Hz, defaults to 8192/2048-byte buffer/period at 48 kHz
+S16, returns a TX status only when the whole buffer is consumed, has **no
+state gating** on the PCM verbs, and its **eventq is unimplemented** -- so the
+TX completion IRQ is the period clock, there is no xrun event to lean on, and
+device responses are untrusted input (a 2026 QEMU virtio-snd heap-overflow
+write-up is the reminder). The `wav` backend is **playback-only** -- found by
+the warning line QEMU logs when `streams=2` is combined with it -- which makes
+it the deterministic gate witness for playback and no witness at all for
+capture. The Pi 400 has two `vc4-hdmi` playback-only ALSA cards and no
+headphone card (measured), the Pi 500 spec page lists no jack, and the one
+review summary claiming a jack was describing the Raspberry Pi Monitor -- a
+wrong answer caught by going to the product page. In the tree: no
+nanosleep-class syscall exists (torpor's `timeout_us` is the finest wait), no
+native daemon uses a second thread today, INTERACTIVE promotion is reachable
+only via `kobj_irq_wait` and the trusted console, and the `SYS_WEFT_SHARE`/
+`SYS_WEFT_MAP` grant-is-the-share path is already answered by two userspace
+servers (netd, tapestryd's Warp ring) -- so Nocturne's ring needs no kernel work.
+
+**Wrong turns, caught.** The 9front and cat-v man pages and the IWP9 paper all
+refused WebFetch (402/403/a broken TLS chain); the man pages came from the
+GitHub raw mirrors and the paper via thyla-pi with `curl -k` + `pdftotext`,
+which also read the two PDFs (Letz 2009, the sDDF design) the mac cannot render
+(no poppler). The `t_thread_spawn` grep returned nothing because zsh expanded
+`--include=*.rs` -- an empty result that would have read as "no threads" had
+the error line not been visible; re-run quoted. The first scripture-edit
+script aborted on its first anchor (a quoted sentence that wrapped across a
+line) and, because it exits on the first mismatch, applied nothing -- the
+right failure shape; the rerun applied all fifteen edits.
+
+**Decisions taken provisionally (the doc's section 9):** the driver lives inside
+`nocturned` behind the node ring protocol (splittable later; Genode's
+inversion kept as a seam); policy is two files, not a process; float32 planar
+at the sink's rate with server-side conversion at voice entry; async by
+construction per node (bypass/hold/mute, auto-bypass after N misses); the
+cadence lease as the ONE kernel lift, last, spec-first; authority = namespace
++ (owner OR `nocturne-graph` clearance), taps clearance-gated; Plan 9's
+`audio`/`volume` kept; the PulseAudio native protocol for Linux binaries; the
+`wav` backend as the gate witness with positive + negative controls; the
+sub-names held. I-46 reserved in ARCH section 28 AND CLAUDE.md (the I-41
+lesson). Scripture reconciled: VISION section 9, ROADMAP 12.3/12.5, COMPARISON
+(three lines), TAPESTRY sections 9/10, the manual overview, NOVEL (a candidate
+bullet), AUX-ROADMAP (a row). The vault carries none of the touched paths
+(`quaestor owner`, 10 paths, all UNOWNED).
+
+**Open.** The nine questions in NOCTURNE.md section 10 -- above all whether
+sub-10 ms in-cycle DSP (the kernel lift) is on the critical path -- and the
+sub-names. NEXT after ratification: N-1, the virtio-snd driver + the wav
+witness (a driver with DMA + IRQ + untrusted device input: the effort gate
+fires there if the session is not at max).
+
+---
+
 ## 2026-09-05 (aux, Fable 5.1, effort max) -- DX-8: DOSBox defaults, presets, per-game configs, the build inputs; Nocturne named
 
 Resumed from a self-compaction with one queued item the resume note called

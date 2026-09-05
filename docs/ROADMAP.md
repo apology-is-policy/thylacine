@@ -1429,7 +1429,7 @@ These are explicitly *not in v1.0*; they're tracked for post-v1.0 work.
 - **Rust kernel components**: selected modules (9P client, ELF loader, handle table) ported from C99 to Rust.
 - **Full POSIX ACLs / xattrs at the territory level**: complement Stratum's existing xattr/ACL with territory-level semantics.
 - **MAC (mandatory access control)**: SELinux-equivalent for multi-tenant deployments. Post-v2.0; territory isolation suffices for v1.0/v1.x.
-- **Audio stack**: VirtIO sound device + userspace audio server.
+- **Audio stack** — *pulled forward 2026-09-05 (operator-directed): the **Nocturne** arc, `docs/NOCTURNE.md` (VirtIO sound driver + a userspace audio-graph server; sequencing N-0..N-7 there). No longer a v2.0 item.*
 
 ### 12.4 v3.0 horizon
 
@@ -1444,8 +1444,8 @@ These are explicitly *not in v1.0*; they're tracked for post-v1.0 work.
 - **Distributed / clustered OS**. 9P over network is supported; the OS doesn't manage clusters.
 - **Windows binary compatibility**. Not in scope, ever.
 - **Backward compatibility with Linux kernel modules**. Not in scope.
-- **Sound / Bluetooth / hardware sensors at v1.0**. Deferred to v1.x.
-- **Real-time scheduling at v1.0**. EEVDF gives soft latency bounds; hard RT is v2.x.
+- **Bluetooth / hardware sensors at v1.0**. Deferred to v1.x. *(Sound was on this line until 2026-09-05; it is now the Nocturne arc, `docs/NOCTURNE.md` — the v1.0-vs-v1.1 ship call is made at the design ratification.)*
+- **Real-time scheduling at v1.0**. EEVDF gives soft latency bounds; hard RT is v2.x. *(Nocturne's proposed cadence lease — `docs/NOCTURNE.md` §6.7 — is a bounded, revocable, warden-budgeted periodic promotion, not a hard-RT class; this line stands.)*
 
 ---
 

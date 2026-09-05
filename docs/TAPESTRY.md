@@ -203,9 +203,9 @@ Per session:
 
 A Thylacine SDL **video backend** (`SDL_thylacine`) targets libtapestry:
 `CreateWindowFramebuffer` -> `new_tapestry`; `UpdateWindowFramebuffer` ->
-`present`; `PumpEvents` -> the multishot event stream; `SDL_audio` -> a future
-audio server (the same shape; **no virtio-sound driver exists yet** — a
-prerequisite for game audio). Software-rendered Quake / Chocolate-Doom / PrBoom
+`present`; `PumpEvents` -> the multishot event stream; `SDL_audio` ->
+**Nocturne** (`docs/NOCTURNE.md` §6.11 — the same shape, designed 2026-09-05;
+its virtio-sound driver is Nocturne N-1, the SDL audio backend N-2). Software-rendered Quake / Chocolate-Doom / PrBoom
 land on this; GZDoom stays gated on a GL stack (Mesa swrast via Pouch is the
 realistic route, not a hand-rolled GL).
 
@@ -222,8 +222,8 @@ In dependency order:
    `TRANSFER_TO_HOST_2D` / `RESOURCE_FLUSH` (the deferred half of
    `usr/virtio-gpu`; the controlq probe already exists).
 3. **`tapestryd`** — the server above (`CAP_HW_CREATE`; the 9P protocol §8).
-4. **virtio-sound** (for audio) — does not exist; scope alongside the audio
-   server when game audio is in view.
+4. **virtio-sound** (for audio) — scoped 2026-09-05 as **Nocturne N-1**
+   (`docs/NOCTURNE.md` §8); the audio server is `nocturned` (N-2).
 
 Items 2-4 are the **post-Loom graphics phase** (NOVEL #2 + #4 territory;
 Halcyon, the graphical shell, is the eventual consumer above `tapestryd`). The
