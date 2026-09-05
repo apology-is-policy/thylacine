@@ -23,6 +23,105 @@ needed the operator.
 
 ---
 
+## 2026-09-05 (aux) -- Nocturne N-2a-3: the Quake sound flip
+
+**Landed** (aux-3, on 348d9780): TyrQuake has sound. Its software build's
+object list selects `snd_sdl` over `snd_null` (the GL build already used
+`snd_sdl`), the three play scenarios run without `-nosound` and assert Quake's
+`Sound Initialized: 16 bits @ NHz`, quarry splits `PLAY_ARGS` (sound) from
+`BENCH_ARGS` (`-nosound` kept), sdl2 patch `0003` makes DUMMY an auto-selectable
+fallback, and `tools/test-game-audio.sh` + `audio-verdict.py --music` are the
+W-4 witness. Effort max.
+
+**Scope narrowed mid-chunk, on a verifiability finding.** N-2a-3 was planned
+to flip DOSBox-X too. But DOSBox-X builds ONLY through the clade C++ fork
+(`build_clade`/`stage_clade`, `THYLACINE_BAKE_CLADE=1`) -- a dev-host
+`build all` does not build it (`build/clade/bin/clang++` absent), and its DX-1
+config compiles `nosound` (`dosbox-x-sources.py`). So retiring its `0004`
+patch on this host would (a) have no local effect -- the stale binary, still
+forcing `SDL_AUDIODRIVER=dummy`, is what gets baked -- and (b) be unverifiable.
+That is exactly the deferred-verification hazard the discipline forbids, so
+the DOSBox flip (0004 + the `nosound` build config + tyr-glquake, which needs
+clade GL) is split to **N-2a-4**, to be built and verified on thyla-pi. `0004`
+was restored to the tree. The Quake flip stands alone and is fully verified
+on the dev host.
+
+**A wrong claim caught -- mine, from the previous run.** N-2a-2's backend,
+docs, commit message and patch preamble all said a soundless boot "falls
+through to DUMMY". Reading `SDL_AudioInit` for this chunk: the auto-selection
+loop `continue`s past every `demand_only` driver, and upstream marks DUMMY
+`demand_only`. So as landed at 348d9780 a soundless boot did NOT reach DUMMY;
+`SDL_Init(SDL_INIT_AUDIO)` failed "No available audio device" -- harmless to
+the probe (never run without the device), fatal to DOSBox-X's combined
+`SDL_Init`, which is precisely what its old 0004 `setenv(SDL_AUDIODRIVER=dummy)`
+papered over. Had I retired 0004 on that claim, every soundless DOSBox boot
+would have `E_Exit`ed. The mechanism is now real: sdl2 patch `0003` flips
+DUMMY's `demand_only` to `SDL_FALSE` under `__thylacine__` (last in
+`bootstrap[]`, so reached exactly when thylacine declined). Every copy of the
+claim was rewritten to name 0003 (`SDL_thylacineaudio.c`, `SDL_config.h`, the
+0002 preamble, reference 142, manual 41); AUDIT-TRIGGERS point (22) records
+it. The catch came from re-deriving a load-bearing claim from the code before
+building on it -- the thing a prosecutor is told to do, done to my own work.
+
+**A second ordering catch, before it ran.** Quake's `Host_Init` calls
+`VID_Init` (944) before `S_Init` (947), so in the GL scenario the
+`sdl-gl: CAP_JIT acquired` and `GL_RENDERER` lines print BEFORE
+`Sound Initialized`. My first insertion put the sound `expect` right after
+`lc_send`, which would have consumed past the capability line the scenario
+expects next and failed a gate that had nothing to do with audio. Moved after
+the renderer leg. The software scenarios print nothing the gate wants between
+launch and the sound line, so their order (sound, then `Quake Initialized`)
+stands. Same lesson as the expect-residue pin: an expect placed after a later
+token silently discards the earlier one.
+
+**The witness design.** A game-audio verdict must not be satisfiable by the
+boot probe, and the obvious fix -- window the capture -- does not work: QEMU's
+wav backend appends only while the guest stream runs, so a boot chord and the
+game sit ADJACENT in the file. joey therefore DECLINES the probe under
+`thylacine.noaudioprobe` (announced in the log; the wrapper greps it), and
+the wav is the game's alone. `--music` itself: >= 2 s of windows above -40
+dBFS; median spectral flatness over quarter-octave bins 150 Hz..4 kHz below
+0.45 (one-bin white noise measures ~0.56, e^-gamma -- measured, then pinned
+by the selftest, not assumed); >= 4 distinct dominant bins (a buzz has 1, an
+alarm 2, the chord 1-2). Ten synthetic cases both ways, and the two real N-1
+/ N-2a-2 chord captures fail it (78 and 63 active windows < 100). A 3 s chord
+is pinned to fail on distinct bins, so a future longer probe cannot pass.
+
+**Scope, exactly.** The bench/wedge/venus scenarios (`glq-bench`,
+`glq-wedge-probe`, `glq-decomp`, `glq-virgl`, `vkq-venus`, `ls-gfx-mp`) keep
+`-nosound` deliberately: an fps figure with an audio thread's blocking writes
+under it is a property of the sound path. tyrquake's 0001 guard patch stays
+load-bearing (`-nosound` is still a user flag and the bench legs pass it);
+only its `snd_null.c` `S_UnblockSound` hunk went inert (the software build no
+longer compiles `snd_null.c`; the GL build never did). DOSBox = N-2a-4.
+
+**Measured.** GATE 1 (device present, `tools/test-game-audio.sh ls-gfx-quake`):
+the 5.1 MB capture judged `PASS(music): 749 active windows of 1339; median
+flatness 0.20; 18 distinct dominant bins` -- Quake's demo1 audio, neither
+noise nor a buzz -- and the guest reached `Sound Initialized: 16 bits @
+48000Hz`. The wav is the driver proof (DUMMY plays to nowhere -> a silent
+capture -> `--music` fails). GATE 2 (`THYLACINE_NO_AUDIO=1`): `/srv/nocturne
+absent` then `Sound Initialized: 16 bits @ 48000Hz` -- 0003 carried tyr-quake
+to the DUMMY fallback rather than "Couldn't init SDL audio", the 0003 witness.
+The `--music` selftest holds ten synthetic cases both ways, and the two real
+N-1/N-2a-2 chord captures fail it (78 and 63 active windows < 100) -- the
+negative controls on real data. The 0003 SABOTAGE control (the same
+NO_AUDIO boot WITHOUT 0003 must fail) was NOT run -- it needs a
+rebuild-without-0003; the mechanism is read from SDL_AudioInit's demand_only
+skip and the positive boot stands with that.
+
+**A gate that failed its own first run -- mine.** GATE 1 first came back FAIL
+"audio init did not run" while writing a 5.1 MB wav (audio plainly played).
+The bug was in the gate: it grepped the transcript for the `lc_step` MESSAGE
+text ("sound init: ...") which goes to the `.steps` file, not the raw guest
+line ("Sound Initialized: 16 bits @ 48000Hz", no space before Hz) that lands
+in the transcript. Fixed to the raw line, rate-agnostic (both driver and
+fallback print 48000, so the line cannot identify the driver -- the wav
+does). The two-halves lesson: a gate's capture half and its grep half are
+different, and only a real boot exercises the grep against real output.
+
+---
+
 ## 2026-09-05 (aux) -- Nocturne N-2a-2: the SDL audio backend
 
 **Landed** (aux-3, on 72d4240d): `usr/ports/sdl2/thylacine/SDL_thylacineaudio.{c,h}`

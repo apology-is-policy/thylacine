@@ -22,7 +22,10 @@
  * Nocturne dictates one format (S16LE stereo 48000 Hz, manual/41-audio.md);
  * OpenDevice forces it and lets SDL's core build the conversion stream from
  * whatever the app asked for. Init probes /srv/nocturne and declines the
- * driver when it is absent, so a soundless machine falls through to DUMMY.
+ * driver when it is absent; a soundless machine then reaches SDL's dummy
+ * driver ONLY because patch 0003 makes it auto-selectable on Thylacine (SDL
+ * keeps it demand-only upstream, and auto-selection skips demand-only
+ * drivers -- without 0003 the init fails "No available audio device").
  */
 #include "../../SDL_internal.h"
 
@@ -201,7 +204,8 @@ static SDL_bool THYLACINEAUDIO_Init(SDL_AudioDriverImpl *impl)
 {
     /* Offer this driver only when nocturne is actually present, so a
      * soundless machine (THYLACINE_NO_AUDIO / no virtio-sound function)
-     * falls through to the DUMMY driver rather than failing every open. */
+     * falls through to the DUMMY driver (auto-selectable here via sdl2
+     * patch 0003) rather than failing every open. */
     long probe = t_open(T_WALK_OPEN_FROM_ROOT, NOC_SRV, NOC_SRV_LEN, T_OREAD);
     if (probe < 0) {
         return SDL_FALSE;

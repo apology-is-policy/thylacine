@@ -7,7 +7,9 @@ pristine vendored tree:
   - SDL_audio.c: the #ifdef'd bootstrap array entry, placed just ahead
     of DUMMYAUDIO so SDL_AudioInit picks thylacine first when the driver
     makes itself available (its Init probes /srv/nocturne and returns
-    FALSE on a soundless machine, so DUMMY still wins there). Every other
+    FALSE on a soundless machine; DUMMY then wins there only because patch
+    0003 makes it auto-selectable -- upstream keeps it demand-only, which
+    the auto-selection loop skips). Every other
     entry is #ifdef'd out on this target, so ahead-of-DUMMY is ahead of
     all.
 

@@ -30,6 +30,7 @@ single-tone file must all FAIL. A verdict that cannot fail proves nothing.
 Exit 0 = PASS, 1 = FAIL (the reason on stdout), 2 = usage/unreadable file.
 """
 import argparse
+import random
 import math
 import struct
 import sys
@@ -43,6 +44,15 @@ MIN_TAIL_WINDOWS = 10    # >= 0.2 s of silence AFTER the last tone (the probe's 
 MAX_GAP_FRACTION = 0.10  # inactive windows tolerated inside the tone span
 MIN_CHORD_WINDOWS = 15   # windows that must carry BOTH tones at once (mixing proof)
 CONTROL_BINS = (500.0, 1500.0, 3000.0, 4000.0)
+
+# --- the game-audio ("music") verdict: real sound, neither noise nor a buzz ---
+MUSIC_ACTIVE_DBFS = -40.0   # game audio idles quieter than a test tone
+MUSIC_MIN_WINDOWS = 100     # >= 2.0 s of active audio, anywhere in the capture
+MUSIC_FLAT_MAX = 0.45       # median spectral flatness; one-bin white noise sits at ~0.56 (e^-gamma)
+MUSIC_MIN_DISTINCT = 4      # distinct dominant bins over the active windows (a buzz has 1, an alarm 2)
+# quarter-octave bins 150 Hz .. ~4 kHz: inside every game's band, so a band-
+# limited garbage stream still reads as noise here
+MUSIC_BINS = tuple(150.0 * (2 ** (i / 4.0)) for i in range(20))
 
 
 def read_wav(path):
@@ -212,6 +222,52 @@ def analyze_chord(rate, mono, expect):
     return True, summary
 
 
+def analyze_music(rate, mono):
+    """The game-audio witness: sound reached the sink -- ENOUGH of it (>= 2 s
+    active), NOT noise (median spectral flatness over quarter-octave bins: white
+    noise measures ~0.56 per window, tones and music far lower), and NOT a
+    stationary buzz (the dominant bin must move: >= MUSIC_MIN_DISTINCT distinct
+    bins). No silent-tail or contiguity demand: a game's audio has gaps and the
+    capture ends when the VM is killed. The boot-time probe chord (1.5 s of two
+    fixed tones) fails on length and on distinct bins -- but the gate does not
+    lean on that: it boots with thylacine.noaudioprobe so the wav is the game's
+    alone."""
+    win = max(16, int(rate * WINDOW_S))
+    nwin = len(mono) // win
+    if nwin < MUSIC_MIN_WINDOWS:
+        return False, "capture too short: %d windows of %d ms (need %d active)" % (
+            nwin, WINDOW_S * 1000, MUSIC_MIN_WINDOWS)
+    bins = [b for b in MUSIC_BINS if b < rate / 2.0]
+    flats = []
+    doms = []
+    for i in range(nwin):
+        x = mono[i * win:(i + 1) * win]
+        r = math.sqrt(sum(v * v for v in x) / len(x))
+        if dbfs(r) < MUSIC_ACTIVE_DBFS:
+            continue
+        p = [goertzel(x, rate, f) for f in bins]
+        am = sum(p) / len(p)
+        if am <= 0:
+            continue
+        gm = math.exp(sum(math.log(v + 1e-30) for v in p) / len(p))
+        flats.append(gm / am)
+        doms.append(max(range(len(p)), key=lambda j: p[j]))
+    nact = len(flats)
+    if nact < MUSIC_MIN_WINDOWS:
+        return False, "only %d windows above %g dBFS (need %d): not enough audio" % (
+            nact, MUSIC_ACTIVE_DBFS, MUSIC_MIN_WINDOWS)
+    med = sorted(flats)[nact // 2]
+    if med > MUSIC_FLAT_MAX:
+        return False, "median spectral flatness %.2f > %.2f over %d active windows: noise, not sound" % (
+            med, MUSIC_FLAT_MAX, nact)
+    distinct = len(set(doms))
+    if distinct < MUSIC_MIN_DISTINCT:
+        return False, "only %d distinct dominant bins over %d active windows (need %d): a stationary buzz, not game audio" % (
+            distinct, nact, MUSIC_MIN_DISTINCT)
+    return True, "PASS(music): %d active windows of %d; median flatness %.2f; %d distinct dominant bins; rate %d" % (
+        nact, nwin, med, distinct, rate)
+
+
 def synth(rate, plan, amp=0.25, noise=0.0):
     """plan: list of (freq, seconds). freq is None (silence), a number (one
     tone), or a tuple/list of numbers (a chord -- the tones summed). Each
@@ -288,19 +344,60 @@ def selftest_chord():
     return 0 if ok else 1
 
 
+def synth_noisy(rate, plan, amp=0.25, noise_amp=0.0, seed=1):
+    """synth() plus deterministic uniform white noise of peak `noise_amp`."""
+    out = synth(rate, plan, amp)
+    if noise_amp > 0:
+        rnd = random.Random(seed)
+        out = [v + noise_amp * (2.0 * rnd.random() - 1.0) for v in out]
+    return out
+
+
+def selftest_music():
+    rate = 48000
+    melody = [(220, 0.5), (330, 0.5), (440, 0.5), (587, 0.5), (880, 0.5), (1175, 0.5)]
+    short = [(f, 0.25) for f, _ in melody]
+    alarm = [(1000, 0.3), (2000, 0.3)] * 5
+    cases = [
+        ("melody (6 tones, 3 s)", melody, 0.0, True),
+        ("melody at 44.1 kHz", melody, 0.0, True),
+        ("melody over -40 dB noise", melody, 0.01, True),
+        ("white noise (3 s)", [(None, 3.0)], 0.25, False),
+        ("buzz (1 kHz, 3 s)", [(1000, 3.0)], 0.0, False),
+        ("alarm (1k/2k alternating)", alarm, 0.0, False),
+        ("the boot chord (1.5 s)", [((1000, 2000), 1.5)], 0.0, False),
+        ("a long chord (3 s; a future probe)", [((1000, 2000), 3.0)], 0.0, False),
+        ("silent (3 s)", [(None, 3.0)], 0.0, False),
+        ("melody too short (1.5 s)", short, 0.0, False),
+    ]
+    ok = True
+    for name, plan, noise_amp, want in cases:
+        r = 44100 if "44.1" in name else rate
+        got, why = analyze_music(r, synth_noisy(r, plan, noise_amp=noise_amp))
+        verdict = "ok" if got == want else "WRONG"
+        if got != want:
+            ok = False
+        print("selftest-music %-26s expect %-5s got %-5s %s -- %s" % (name, want, got, verdict, why))
+    print("selftest-music", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("wav", nargs="?", help="the QEMU wav capture")
     ap.add_argument("--expect", default="1000,2000", help="tones, Hz, comma-separated (default 1000,2000)")
     ap.add_argument("--chord", action="store_true",
                     help="require the tones SIMULTANEOUSLY (the mixing witness); default is sequential order")
+    ap.add_argument("--music", action="store_true",
+                    help="the game-audio witness: enough sound that is neither noise nor a stationary buzz (no --expect)")
     ap.add_argument("--selftest", action="store_true", help="prove the verdict discriminates on synthetic signals")
     a = ap.parse_args()
     if a.selftest:
         # Both discriminations must hold; the exit code is their OR of failure.
         rc_seq = selftest()
         rc_chord = selftest_chord()
-        return 0 if rc_seq == 0 and rc_chord == 0 else 1
+        rc_music = selftest_music()
+        return 0 if rc_seq == 0 and rc_chord == 0 and rc_music == 0 else 1
     if not a.wav:
         ap.print_usage()
         return 2
@@ -310,7 +407,10 @@ def main():
     except Exception as e:  # noqa: BLE001
         print("FAIL: cannot read %s: %s" % (a.wav, e))
         return 2
-    ok, why = (analyze_chord if a.chord else analyze)(rate, mono, expect)
+    if a.music:
+        ok, why = analyze_music(rate, mono)
+    else:
+        ok, why = (analyze_chord if a.chord else analyze)(rate, mono, expect)
     print(("PASS " if ok else "FAIL ") + why if not why.startswith(("PASS", "FAIL")) else why)
     return 0 if ok else 1
 

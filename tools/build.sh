@@ -4471,7 +4471,7 @@ build_tyrquake() {
         > "$tq_obj/gen/tyrquake_icon_128.h"
 
     # The curated object lists (upstream Makefile groups; VID/IN=sdl,
-    # SND/CD=null; UNIX common; no x86 asm on aarch64).
+    # SND=sdl, CD=null; UNIX common; no x86 asm on aarch64).
     #
     # Upstream's nqsw-list and nqgl-list are
     #   COMMON + CL + SV + NQCL + <renderer group> + <video driver>
@@ -4489,8 +4489,10 @@ build_tyrquake() {
         console developer keys menu pcx r_lerp r_efrag r_light r_model
         r_part sbar screen snd_dma snd_mem snd_mix snd_music sprite_model
         vid_mode view wad
-        # driver selections (IN=sdl, SND/CD=null)
-        cd_null snd_null in_sdl sdl_common
+        # driver selections (IN=sdl, SND=sdl since N-2a-3 -- SDL's thylacine
+        # audio driver, or its dummy fallback; CD=null). snd_sdl.c defines the
+        # S_BlockSound/S_UnblockSound pair vid_sgl.c needs, so tyr-glquake links.
+        cd_null snd_sdl in_sdl sdl_common
         # SV_OBJS
         pr_cmds pr_edict pr_exec sv_main sv_move sv_phys sv_user
         # NQCL_OBJS (+ net_bsd)

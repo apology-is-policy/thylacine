@@ -143,7 +143,9 @@
 
 /* Subsystem drivers (each names a kept src/ dir — PRUNE-MANIFEST.md). */
 /* Audio: the Nocturne voice backend (usr/ports/sdl2/thylacine/), auto-
- * selected when /srv/nocturne is present; DUMMY is the soundless fallback. */
+ * selected when /srv/nocturne is present; DUMMY is the soundless fallback
+ * (auto-selectable on this target only via patch 0003 -- upstream keeps it
+ * demand-only, which SDL's auto-selection skips). */
 #define SDL_AUDIO_DRIVER_THYLACINE 1
 #define SDL_AUDIO_DRIVER_DUMMY 1
 #define SDL_JOYSTICK_DUMMY 1

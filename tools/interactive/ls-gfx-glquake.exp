@@ -80,7 +80,7 @@ if {![file exists $glq]} {
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
-lc_send "/clade/bin/tyr-glquake -window -nosound +timedemo demo1"
+lc_send "/clade/bin/tyr-glquake -window +timedemo demo1"
 
 set timeout 240
 
@@ -140,6 +140,19 @@ expect {
     "user fault" { lc_fail "tyr-glquake segv during GL init" }
     "Sys_Error"  { lc_fail "tyr-glquake Sys_Error during GL init" }
     timeout      { lc_fail "no GL_RENDERER line within 240s" }
+}
+
+# N-2a-3: sound is ON. Host_Init runs VID_Init (the CAP_JIT + GL_RENDERER
+# lines above) BEFORE S_Init, and "Sound Initialized" prints BEFORE the
+# "Quake Initialized" banner -- so it is expected exactly here, after the
+# renderer leg and before the banner (an expect placed later would have
+# discarded it). The rate reads 48000 either way (Quake requests 48000 =
+# the device rate); which driver ran is the wav's business.
+expect {
+    -re {Sound Initialized: 16 bits @ ([0-9]+)Hz} { lc_step "sound init: 16 bits @ $expect_out(1,string) Hz (snd_sdl over SDL_thylacineaudio)" }
+    "Couldn't init SDL audio" { lc_fail "tyr-glquake: SDL audio init failed (no thylacine driver AND no dummy fallback?)" }
+    "Couldn't open SDL audio" { lc_fail "tyr-glquake: SDL_OpenAudio failed" }
+    timeout { lc_fail "no Sound Initialized line within 240s" }
 }
 
 expect {

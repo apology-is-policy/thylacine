@@ -135,9 +135,12 @@ Latency is up to ~340 ms (the voice's queue depth) on this first, byte-copy
 path; fine for music and effects, noticeable for tight rhythm games. A later
 chunk (the zero-copy ring, N-2b) trims it.
 
-The ported games (DOSBox-X, Quake) still start with sound OFF (`-nosound` /
-their dummy-audio build) — switching them on is the next chunk (N-2a-3), not a
-configuration you can make today.
+Quake has sound: `tyr-quake` (and `tyr-glquake`) play through the SDL driver,
+so the game's effects come out of whatever host backend you chose below. Pass
+`-nosound` to silence it; `quarry`'s bench lanes do that themselves so a
+benchmark's frame rate is not a property of the sound path. DOSBox-X does not
+have sound yet -- it is built through a separate toolchain and arrives a chunk
+later (N-2a-4).
 
 ## Choosing the host backend (QEMU)
 
@@ -170,9 +173,10 @@ The guest always has the device; the host decides where the sound goes.
   boot log then says `joey: /srv/nocturne absent`.
 - **Nothing is heard on the host.** `THYLACINE_AUDIODEV` is `none` (the
   default). Use `coreaudio` on the mac or `pipewire` on thyla-pi.
-- **An SDL program says it has no audio device.** `/srv/nocturne` was absent
-  when it started (see the first item): SDL fell back to its `dummy` driver.
-  Sound cannot be added to a running program; restart it once the device exists.
+- **An SDL program is silent.** `/srv/nocturne` was absent when it started
+  (see the first item): SDL fell back to its `dummy` driver, so the program
+  runs without sound. Sound cannot be added to a running program; restart it
+  once the device exists.
 - **The writer stalls forever.** The device stopped consuming; `info` will show
   `tx-errors` or `bad-used` growing. Report it with the boot log's
   `nocturned:` lines.

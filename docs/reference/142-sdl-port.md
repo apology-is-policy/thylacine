@@ -53,7 +53,9 @@ copies OUR `thylacine/` driver in as `src/video/thylacine/`.
 The pruned tree IS the compile list (every `.c` under `src/` except
 `src/main`). Driver selections: **video** = thylacine + dummy; **audio** =
 thylacine (the Nocturne backend, N-2a-2) + dummy (the soundless fallback,
-selected when `/srv/nocturne` is absent); **thread** = pthread (pouch
+selected when `/srv/nocturne` is absent -- auto-selectable on this target
+only via patch `0003`, N-2a-3; upstream keeps it demand-only, which SDL's
+auto-selection skips); **thread** = pthread (pouch
 patch 0004); **timer** = unix (`clock_gettime` = 75; `nanosleep` = torpor,
 patch 0022); everything else = dummy/disabled stubs.
 
@@ -230,6 +232,14 @@ points, the rest SDL's no-op defaults:
   when it is absent, so a soundless machine (`THYLACINE_NO_AUDIO`, no
   virtio-sound function) falls through to `DUMMY` rather than failing every
   `SDL_OpenAudioDevice`. `demand_only = SDL_FALSE`: auto-selected when present.
+  **The fallback half needs patch `0003` (N-2a-3):** upstream marks the dummy
+  driver `demand_only`, and `SDL_AudioInit`'s auto-selection `continue`s past
+  every such driver, so as landed at N-2a-2 a soundless boot did NOT reach
+  DUMMY -- `SDL_Init(AUDIO)` failed "No available audio device" (harmless to
+  the probe, fatal to DOSBox-X's combined init, which its old `0004` patch
+  papered over). `0003` flips `demand_only` to `SDL_FALSE` under
+  `__thylacine__`; DUMMY is last in `bootstrap[]`, so it is reached exactly
+  when thylacine declined.
 - **`OpenDevice`** forces the device format Nocturne dictates
   (S16LE / 48000 / stereo, `manual/41-audio.md`) and calls
   `SDL_CalculateAudioSpec`, so SDL's core builds a conversion stream from
@@ -263,6 +273,42 @@ THYLACINE_SDLAUDIO=1` and judges the capture with `audio-verdict.py --chord`:
 BOTH tones in the SAME windows. This proves the SDL byte path delivers complex
 PCM; it does not re-prove nocturned's mixer (that is N-1 -- the app pre-mixes
 both tones into one voice).
+
+**The Quake flip (N-2a-3).** With the backend proven, TyrQuake stopped opting
+out: the software build's shared object list selects `snd_sdl` in place of
+`snd_null` (the GL build already used `snd_sdl`; `snd_sdl.c` defines the
+`S_BlockSound`/`S_UnblockSound` pair `vid_sgl.c` needs), the play scenarios
+(`ls-gfx-quake`, `ls-gfx-play`, `ls-gfx-glquake`) run without `-nosound` and
+assert Quake's `Sound Initialized: 16 bits @ NHz` line -- expected BEFORE the
+later banners, since `Host_Init` runs `S_Init` early (after `VID_Init`, so in
+the GL scenario after the CAP_JIT/`GL_RENDERER` legs) and a later `expect`
+would have discarded it -- and quarry splits `PLAY_ARGS` (sound on) from
+`BENCH_ARGS` (`-nosound` kept: an audio thread's blocking writes would make an
+fps figure a property of the sound path). The benchmark/wedge/venus scenarios
+keep `-nosound` deliberately.
+
+**DOSBox-X sound is N-2a-4, not this chunk.** DOSBox-X builds only through the
+clade C++ fork (`build_clade`/`stage_clade`, `THYLACINE_BAKE_CLADE=1`), which
+a default `build all` does not run, and its DX-1 config is compiled `nosound`
+(`tools/dosbox-x-sources.py`) -- so giving it sound needs a build-config
+change AND a clade rebuild, none of it buildable or verifiable on the dev
+host. Retiring its `0004-thylacine-force-dummy-audio` patch there would bake
+the stale dummy-forcing binary and hide the change until a clade rebuild, so
+that flip waits for N-2a-4 on a clade-capable host (thyla-pi). `0004` stands
+until then.
+
+**Proof: `tools/test-game-audio.sh [scenario]`** (W-4): runs one interactive
+scenario (default `ls-gfx-quake`, ~17 s of demo1 gunfire) with the wav
+backend and `thylacine.noaudioprobe` -- joey declines its boot-time probe, so
+the capture is the game's alone (QEMU's wav backend appends only while the
+guest stream runs, so a boot chord and the game would sit ADJACENT in the
+file and no skip/tail window could separate them) -- then judges it with
+`audio-verdict.py --music`: >= 2 s of windows above -40 dBFS whose median
+spectral flatness over quarter-octave bins (150 Hz .. 4 kHz) is below 0.45
+(one-bin white noise measures ~0.56, e^-gamma) and whose dominant bin takes
+>= 4 distinct values (a buzz has 1, an alarm 2, the boot chord 1-2). Its
+selftest pins nine synthetic cases both ways, and the two real N-1/N-2a-2
+chord captures FAIL it (the negative controls on real data).
 
 ## Known caveats / seams
 

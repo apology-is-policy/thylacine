@@ -65,19 +65,19 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 86 unowned · 491 files (82% owned) · ~22738 unswept lines.**
+**405 owned · 86 unowned · 491 files (82% owned) · ~22749 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **68 files, ~30585 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/ports | 0 | 23 | 4670 |
+| usr/ports | 0 | 23 | 4676 |
 | usr/warp-prove | 0 | 1 | 4349 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
 | usr/nocturned | 0 | 3 | 1955 |
 | usr/halcyon | 0 | 2 | 1202 |
-| usr/quarry | 0 | 1 | 1028 |
+| usr/quarry | 0 | 1 | 1033 |
 | arch | 34 | 4 | 971 |
 | usr/lib | 56 | 3 | 474 |
 | usr/stratumd-stub | 0 | 1 | 453 |
@@ -124,7 +124,7 @@ Excluded as harness and counted here rather than dropped: **68 files, ~30585 lin
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/nocturned/src/server.rs | 1056 |
-| usr/quarry/src/main.rs | 1028 |
+| usr/quarry/src/main.rs | 1033 |
 | usr/halcyon/src/main.rs | 874 |
 | usr/nocturned/src/snd.rs | 701 |
 | arch/arm64/uart.c | 674 |
@@ -147,16 +147,16 @@ Excluded as harness and counted here rather than dropped: **68 files, ~30585 lin
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/ports/dosbox-x/config.h | 252 |
+| usr/ports/sdl2/thylacine/SDL_thylacineaudio.c | 231 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | kernel/extinction.c | 229 |
-| usr/ports/sdl2/thylacine/SDL_thylacineaudio.c | 227 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
 | kernel/include/thylacine/devcap.h | 208 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/nocturned/src/main.rs | 198 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
-| usr/ports/sdl2/SDL_config.h | 189 |
+| usr/ports/sdl2/SDL_config.h | 191 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |

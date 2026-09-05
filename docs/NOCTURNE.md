@@ -149,10 +149,13 @@ that can be double-allocated).
 
 - R-4 **Game audio first**: DOSBox-X (its SDL mixer wants 48 kHz, 1024-frame
   blocks, 25 ms prebuffer — `third_party/dosbox-x/src/dosbox.cpp:3509–3519`)
-  and TyrQuake (`-nosound` today) get sound through the SDL seam with no game
-  changes. This retires `usr/ports/dosbox-x/patches/0004-thylacine-force-dummy-audio.patch`,
-  the `-nosound` in `usr/quarry/src/main.rs:253`, and `SDL_AUDIO_DRIVER_DUMMY`
-  as the only driver (`usr/ports/sdl2/SDL_config.h:145`).
+  and TyrQuake get sound through the SDL seam with no game changes. N-2a-3
+  gave TyrQuake sound (the software build's `snd_null` -> `snd_sdl`; the play
+  scenarios' `-nosound` dropped; quarry's PLAY vs BENCH split) and made
+  `SDL_AUDIO_DRIVER_DUMMY` an auto-selectable fallback rather than the only
+  driver. DOSBox-X sound is **N-2a-4** (it builds only through the clade C++
+  fork and compiles `nosound`, so retiring `0004-thylacine-force-dummy-audio`
+  needs a clade rebuild + a build-config change -- deferred to a clade host).
 - R-5 **Multiple simultaneous voices** mixed to one sink, per-voice gain, a
   system volume, mute; **capture** (an ear) for the same reasons in mirror.
 - R-6 **Glitch-free under load**: a busy console, a compile, another program's
@@ -243,7 +246,7 @@ Everything in this section was read or run in this pass (2026-09-05).
 
 `SDL_config.h:11` — "audio = dummy (no virtio-sound yet — TAPESTRY.md §10 item
 4)"; patch 0004 forces `SDL_AUDIODRIVER=dummy` so DOSBox-X's combined
-`SDL_Init` does not `E_Exit`; TyrQuake runs `-nosound` and carries a guard
+`SDL_Init` does not `E_Exit` (0004 stands until N-2a-4 -- DOSBox is not built on the dev host); TyrQuake ran `-nosound` until N-2a-3 and carries a guard
 patch for an upstream NULL deref that only `-nosound` exposes
 (`usr/ports/tyrquake/patches/0001`); DX-1 stubs opusfile/speexdsp
 (`usr/ports/dosbox-x/glue/thylacine-audio-stubs.c`) — "Building real
@@ -1118,7 +1121,8 @@ transcript class).
 | &nbsp;&nbsp;**N-2a-1** multi-voice mixing (byte-copy) -- **LANDED 2026-09-05 (aux-3)** | `nocturned` multiple **voices** (per-voice bounded FIFO + gain) MIXED in float32 to the one sink; `nodes/new` + per-voice `audio`/`ctl`/`info`; voice 0 = the root `audio` file; the byte-copy fallback (section 6.5), NOT the Weft ring. The `nodes/` surface is minimal -- ports/links/descant ABI (section 9/10, operator's) NOT built | W-1 chord (both tones SAME window; `audio-verdict.py --chord`; sequential FAILS it) GREEN + full boot ladder green | ran at max; holotype + SMP gate batched to the N-2 close |
 | &nbsp;&nbsp;**N-2b** the Weft zero-copy ring voice | `nodes/<id>/data` + SYS_WEFT_SHARE -> Tweft (the netd/tapestryd precedent); the poke/period protocol; the descant substrate | a ring-voice witness | ring consumer: **ASK unless max** |
 | &nbsp;&nbsp;**N-2a-2** the SDL audio backend -- **LANDED 2026-09-05 (aux-3)** | `usr/ports/sdl2/thylacine/SDL_thylacineaudio.{c,h}` (SDL's `THYLACINEAUDIO_bootstrap`, registered ahead of DUMMY by patch 0002, auto-selected when `/srv/nocturne` is present; a voice minted over a DIRECT `/srv/nocturne` conn so it reaps on exit; the device format forced and SDL converts; pacing rides the voice's blocking write, no timer) + `/sdl-audio-probe` + `tools/test-sdl-audio.sh` (joey runs the SDL probe INSTEAD of the N-1 probe under `thylacine.sdlaudio`, so the wav is a clean SDL capture) | the SDL chord witness GREEN (`PASS(chord): 78 windows`, driver=thylacine) + the N-1 witness unchanged GREEN | ran at max; the game-sound flip split out as N-2a-3 |
-| &nbsp;&nbsp;**N-2a-3** the game-sound flip | retire DOSBox patch `0004-thylacine-force-dummy-audio` + the `-nosound` in the PLAY scenarios (quarry `BASE_ARGS`, tyrquake's `0001-nosound-guard`); the benchmark/wedge scenarios KEEP `-nosound` (perf isolation); the owed DOSBox fullscreen re-run rides its bake | W-4 (the DOSBox/Quake audio arm: RMS floor + spectral flatness so a buzz != music), LS-CI | re-enables game audio-init paths never run on Thylacine; routine unless max |
+| &nbsp;&nbsp;**N-2a-3** the Quake sound flip -- **LANDED 2026-09-05 (aux-3)** | TyrQuake's software build selects `snd_sdl` over `snd_null` (the GL build already had it); the play scenarios (`ls-gfx-quake`/`play`/`glquake`) drop `-nosound` + assert `Sound Initialized`; `quarry` splits `PLAY_ARGS` (sound) from `BENCH_ARGS` (`-nosound` kept); sdl2 patch `0003` makes DUMMY an auto-selectable fallback; `audio-verdict.py --music` + `tools/test-game-audio.sh` the W-4 witness (energy that is neither noise nor a buzz). Bench/wedge/venus KEEP `-nosound` | W-4 `--music` on `ls-gfx-quake` GREEN + the `--music` selftest + the two real chord captures as negative controls | ran at max |
+| &nbsp;&nbsp;**N-2a-4** DOSBox-X sound (clade host) | retire `usr/ports/dosbox-x/patches/0004-thylacine-force-dummy-audio` AND flip the DX build's `nosound` config (`tools/dosbox-x-sources.py`); verify on a clade-capable host (thyla-pi) -- DOSBox builds only via `build_clade`/`stage_clade`, not a dev-host `build all`; + tyr-glquake sound (needs clade GL) + the owed DOSBox fullscreen re-run | W-4 `--music` on `ls-gfx-dosbox`/`duke3d` | re-enables DOSBox audio-init never run on Thylacine; ASK/max on the clade host |
 | &nbsp;&nbsp;**N-2c** the cycle/control thread split | the two-thread daemon (D-1c): the IRQ-clocked cycle thread + the 9P control thread, a try-locked graph | a multi-thread self-audit surface | **ASK unless max** |
 | **N-3** ears, policy, sinks | capture (`ear`, `source`), the conductor files, `sinks/`, hot-plug via the warden, the user tier, the Halcyon volume hook | W-1 capture arm (needs a non-wav backend: `coreaudio` loopback or the Pi's PipeWire null-sink), LS-CI | routine unless the tap authority changes |
 | **N-4** descants + the cadence lease | the descant contract, substitute/bypass, latency accounting, `specs/nocturne_cycle.tla`; **the kernel lift**: `specs/cadence.tla` → `KObj_Cadence`/allowance + scheduler demotion; the convolution-filter demo (a native descant with a Gardner head; the operator's example) | W-2 (+ the sabotage arm), W-3, SMP gate, the focused audit (P0/P1 → dirty-close discipline) | scheduler + a new kobj: **max, spec-first, no exceptions** |

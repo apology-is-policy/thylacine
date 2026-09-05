@@ -520,6 +520,11 @@ fi
 if [[ "${THYLACINE_SDLAUDIO:-0}" == "1" ]]; then
     append_tokens+=("thylacine.sdlaudio")
 fi
+# N-2a-3: no boot-time audio probe at all, so a wav capture carries ONLY what
+# the session plays (the game-audio witness, tools/test-game-audio.sh).
+if [[ "${THYLACINE_NOAUDIOPROBE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.noaudioprobe")
+fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends

@@ -11356,7 +11356,13 @@ int main(void) {
             // capture -- the chord verdict's silent-tail check forbids a second
             // tone after the first -- so a clean SDL capture needs the N-1 probe
             // to stand down. Default boots keep the N-1 witness unchanged.
-            if (bootarg_has("thylacine.sdlaudio", 18)) {
+            if (bootarg_has("thylacine.noaudioprobe", 22)) {
+                // N-2a-3: the game-audio witness (tools/test-game-audio.sh)
+                // judges a wav that must carry ONLY the game's sound -- QEMU's
+                // wav backend elides silent gaps, so a boot-time chord cannot
+                // be separated from the game by position. Declined out loud.
+                t_putstr("joey: audio probe DECLINED (thylacine.noaudioprobe; the wav is the game's alone)\n");
+            } else if (bootarg_has("thylacine.sdlaudio", 18)) {
                 static const char sa_name[]   = "/bin/sdl-audio-probe";
                 static const char sa_expect[] = "sdl-audio-probe: PASS";
                 if (pouch_smoke_one(sa_name, sizeof(sa_name) - 1,
