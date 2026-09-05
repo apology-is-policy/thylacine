@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-08-16
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -53,6 +53,11 @@ touches EL0.
 | `vivarium_{pipe2,dup3,fcntl,writev}_decide` | verdict + params | #150/#151/#155/#157 |
 | `vivarium_{socket,listen}_decide`, the sockaddr/ctl codecs | bool + errno | V-5 |
 | `vivarium_{sigaction,sigprocmask}_decide`, the note maps | verdict / mask | V-6 |
+| `vivarium_{openat_create,mkdirat,unlinkat,renameat}_decide` | verdict + params | #50 path-mutation family (the create/remove decisions) |
+| `vivarium_{mmap_file,mmap_fixed_file,mmap_fixed_anon}_decide` | verdict | DISTRO D-3 file-backed mmap; PROT_WRITE **refused** to keep I-36 |
+| `vivarium_{ppoll,pselect6}_decide` | verdict + params | the poll family; `exceptfds`/POLLPRI is the load-bearing decline (Error paths) |
+| `vivarium_{recvfrom,recvmsg,sendto}_decide` | bool + errno | V-5 socket data path |
+| `vivarium_{faccessat,ioctl,futex,getsockopt}_decide` | verdict | the 6.26 git batch + misc |
 | `vivarium_stat_to_linux`, `vivarium_build_sigframe`, `vivarium_uname_fill` | void | fully write `out`, pads included |
 
 Every `_decide` **fails closed on a NULL out-param** — returning FORWARD or
@@ -164,6 +169,28 @@ two different places, and the difference is not stylistic:
 
 `dup` and `close_range` are still FORWARD and still owe it, and each still
 looks like a trivial renumber.
+
+**The mmap decision fanned into four arms at D-3, and the file arms are an
+allow-list guarding I-36.** `vivarium_mmap_decide` once judged a purely-anonymous
+map; the phenotype now also serves file-backed and fixed maps through
+`vivarium_mmap_file_decide` / `_fixed_file_decide` / `_fixed_anon_decide`. The
+file arms admit a read/exec map that rides a shared `BURROW_TYPE_FILE` Burrow
+demand-paged from the file (the I-36 generalization to phenotype mmap-time), and
+**refuse `PROT_WRITE` outright** — that Burrow has no write-back path, so a
+writable file map would either lose the guest's writes or leak them into the file
+and into every other Proc sharing the Image. The refusal keeps "no userspace
+writable file mapping exists" true by construction, and it is an allow-list
+(`PROT_BTI`/`PROT_MTE`/`PROT_GROWSDOWN` fall outside it unenumerated) for the
+same reason the anon arm is; `len` is still deliberately unjudged.
+
+**The #50 path-mutation family is the create/remove half of the layer.**
+`openat`'s `O_CREAT` (`vivarium_openat_create_decide`), `mkdirat`, `unlinkat` and
+`renameat` each map the Linux flag/mode word onto the native create/remove parent
+resolution — the same "total or decline" bar as every other row, now applied to
+the mutation verbs the coreutils and git issue. They are ordinary instances of
+the admission rule, called out here only because the Contract table would
+otherwise look frozen at the read-only surface it had before the
+git-under-VIVARIUM work.
 
 ## Data structures
 
@@ -376,6 +403,13 @@ states.
   allow-list of two bits rather than "everything except PROT_EXEC"
   (measured: aarch64 musl also defines PROT_BTI/PROT_MTE, and generic musl
   PROT_GROWSDOWN/GROWSUP, none honourable either).
+- [[inv-i36]] — the D-3 file-backed mmap arms refuse `PROT_WRITE`, which is what
+  keeps "no userspace writable file mapping exists" true on the phenotype path:
+  the shared `BURROW_TYPE_FILE` Burrow they ride is demand-paged from the file
+  with no write-back, so a writable map would lose or leak the guest's writes
+  (and corrupt every other Proc sharing the Image). Read/exec file maps are
+  admitted (I-36 generalized to mmap-time); the refusal is by allow-list, not by
+  naming `PROT_WRITE`.
 - [[inv-i13]] — every struct copied to a guest is zeroed whole before
   fill. The signal frame's 4088 untouched `__reserved` bytes are the
   guest's *own* stack below its own sp, so nothing crosses a boundary.
@@ -412,7 +446,7 @@ as an exception. Both dishonest options are worse than the error.
 
 ## Performance
 
-Two linear scans over small constant tables (6 T1 rows, ~50 reject rows)
+Two linear scans over small constant tables (11 T1 rows, 73 reject rows)
 per translated syscall; no allocation, no lock, no memory access outside
 the caller's frame. The socktab scan is bounded by `VIV_SOCK_MAX` (64,
 chosen to keep the table under a page while staying generous against
@@ -483,14 +517,16 @@ its reasoning fails a test rather than passing quietly.
   I-43-bearing file is told the surface is unreachable dead code. Tracked
   as task #163.
 - **`VIV_NATIVE_CEILING`'s declaration comment repeats the number the
-  symbol exists to stop repeating — and it is already stale.** The
-  constant is 105 (`SYS_RFORK`); the paragraph declaring it says "a new
-  native syscall above **102**". The enum block a few lines up explains
-  that the ceiling had already moved 100 → 102 while *four separate
-  comments still said 100*, "which is why VIV_NATIVE_CEILING below exists
-  as a symbol rather than as a number repeated in prose". The same
-  paragraph also says "the two rows below it (pselect6 72, ppoll 73)";
-  there are **seventeen** rows below 105. Tracked as task #164.
+  symbol exists to stop repeating — and it stays stale as the ceiling
+  climbs.** The constant tracks the highest assigned native number and is now
+  **109** (`SYS_OPEN_CREATE`, the #50 family); the paragraph declaring it still
+  narrates only the 100 → 102 move (`SYS_EXECVE`/`SYS_RFORK` at L-2a/L-3b) and
+  the four comments that had lagged at 100 — never the later climb to 105 and
+  then 109. The same paragraph's "the two rows below it (pselect6 72, ppoll 73)"
+  is farther off than ever: there are **forty-two** `VIV_LINUX_*` enum values
+  below 109. Tracked as task #164 — the symbol does its job (nothing downstream
+  repeats the number), only its own prose lags, and the lag has widened twice
+  since the dossier first recorded it at 105.
 - **A dossier's file-level claims about wiring should be read against
   `syscall.c`, not against this file's prose.** Two of the three
   discrepancies above are of the same kind — a V-2-era snapshot preserved
