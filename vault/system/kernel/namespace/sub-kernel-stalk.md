@@ -10,9 +10,9 @@ validated-by: [gate-smp]
 locks: []
 hazards: []
 abis: []
-design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md"]
+design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -27,19 +27,38 @@ mount-point naming. It generalizes the audited single-hop
 identity, and since POUNCE batches runs of components through one fused
 walk+getattr RPC with the per-component checks preserved kernel-side.
 
+Three features have since widened it, each documented below: **union
+resolution** (a mount point with several grafted members, first-hit walk +
+writable-member create + holder-member remove — the `STALK_CREATE`/`STALK_REMOVE`
+parent amodes the path-mutation family #50 added), **symlink expansion** (DISTRO
+D-1 — `QTSYMLINK` targets spliced into the component stream, absolute targets
+re-anchored inside the caller's own container), and the **phenotype accumulator**
+(VIVARIUM Design D — the exec resolver learns whether the binary was reached
+through an `MPHENO_LINUX` mount).
+
 ## Contract
 
 ```c
-#define STALK_WALK  0   // resolve only (O_PATH / navigation base); quarry crossed
-#define STALK_OPEN  1   // resolve + Dev.open(quarry, omode); quarry crossed
-#define STALK_MOUNT 2   // mount point's OWN identity (final NOT crossed); no open
-#define STALK_STAT  3   // metadata only; final run may be the no-fid walk-QUERY
-#define STALK_MAX_DEPTH 40
+#define STALK_WALK   0  // resolve only (O_PATH / navigation base); quarry crossed
+#define STALK_OPEN   1  // resolve + Dev.open(quarry, omode); quarry crossed
+#define STALK_MOUNT  2  // mount point's OWN identity (final NOT crossed); no open
+#define STALK_STAT   3  // metadata only; final run may be the no-fid walk-QUERY
+#define STALK_CREATE 4  // create PARENT; at a UNION quarry -> first MCREATE member
+#define STALK_REMOVE 5  // remove PARENT; at a UNION quarry -> UNCROSSED (holder-select)
+#define STALK_NOFOLLOW   0x100  // don't follow a FINAL symlink (lstat/O_NOFOLLOW/mount)
+#define STALK_AMODE_MASK 0xFF
+#define STALK_MAX_FOLLOWS 40    // per-resolution symlink budget (Linux SYMLOOP)->T_E_LOOP
+#define STALK_MAX_DEPTH   40
 
-struct Spoor *stalk    (p, start, path, pathlen, amode, omode);
-struct Spoor *stalk_err(p, start, path, pathlen, amode, omode, int *errp);
-int           stalk_stat(p, start, path, pathlen, struct t_stat *out, int *errp);
-int           stalk_cross_mounts(p, probe, struct Spoor **out);
+struct Spoor *stalk     (p, start, path, pathlen, amode, omode);
+struct Spoor *stalk_err (p, start, path, pathlen, amode, omode, int *errp);
+struct Spoor *stalk_exec(p, start, path, pathlen, amode, omode, errp, bool *crossed_pheno);
+int           stalk_stat(p, start, path, pathlen, u32 flags, struct t_stat *out, int *errp);
+int           stalk_cross_mounts(p, probe, struct Spoor **out, bool *crossed_pheno);
+// union helpers (UM), exposed for the fd/rename create-dest and remove-parent:
+struct Spoor *stalk_union_member_holding(p, point, const char *leaf, int *errp);
+struct Spoor *stalk_union_create_member (p, point, int *errp);
+bool          stalk_union_has_child(p, dir, const char *name, u32 namelen);
 ```
 
 - `start` is **BORROWED** — stalk never refs or clunks it. Since #844 every
@@ -59,14 +78,22 @@ int           stalk_cross_mounts(p, probe, struct Spoor **out);
   The ER-1 keystone: `SYS_OPEN` returns `-*errp`, so a missing path is
   `-T_E_NOENT` (Go `os.IsNotExist`) instead of a bare `-1` (which Go's
   Linux-shaped decode renders EPERM).
-- The `amode` guard is **fail-closed**: anything outside
-  {WALK, OPEN, MOUNT, STAT} returns NULL at entry (stalk-1 F1). A new amode
-  MUST be added to the guard AND given its final-hop dispatch arm.
+- The `amode` guard is **fail-closed**: after masking off `STALK_NOFOLLOW`
+  with `STALK_AMODE_MASK`, anything outside {WALK, OPEN, MOUNT, STAT, CREATE,
+  REMOVE} returns NULL at entry, and any bit outside
+  `(STALK_AMODE_MASK | STALK_NOFOLLOW)` is rejected loudly (stalk-1 F1). A new
+  amode MUST be added to the guard AND given its final-hop dispatch arm.
 - `stalk_cross_mounts` is public (since #957) so the single-hop
   `SYS_WALK_OPEN` crosses identically: at the SOURCE (before X-search +
   walk) and the RESULT (before open). `probe` is never consumed; `*out`
   is owned when non-NULL; `-1` means "is a mount point but the cross
-  failed" — the caller fails the walk.
+  failed" — the caller fails the walk. Its `crossed_pheno` out-param (NULL for
+  non-exec callers) accumulates the pheno-mount flag; see the phenotype
+  accumulator below.
+- `stalk_exec` is `stalk_err` plus the phenotype report: the only caller is the
+  exec resolver, which needs to know whether the resolved binary was reached
+  through an `MPHENO_LINUX` mount. `stalk_stat` gained a `flags` word
+  (`STALK_NOFOLLOW` = the lstat shape; any other bit `T_E_INVAL`).
 
 ## Mechanism
 
@@ -198,6 +225,112 @@ returns a **ref-held** source under the Territory `ns_lock` (RW-4 SA-F1,
 crossed clone takes the MOUNT-POINT's namespace name via
 `spoor_path_transplant` (I-33, cosmetic).
 
+### Union resolution (the UM arc)
+
+A mount point with >= 2 grafted members is a **union**, and the resolver does
+not cross it the way it crosses a single mount — it leaves the mount POINT as
+the trail tip (so a later `..` lands on the union, and the recorded parent stays
+accurate) and iterates the members itself. `mount_member_at(_, 1) != NULL` at
+the descent cross is the detection; a union DIRFD used as a base carries
+`union_snap->point` and routes its first component the same way (UM-8c F5).
+
+Per real component, `stalk_union_child` does what one member's walk does, once
+per member in declared order, and returns the **first hit**:
+
+- **Snapshot the members ATOMICALLY** (`mount_members_snapshot`, one `ns_lock`
+  hold — UM-8 F4), then cross the *exact* snapshot source, never a re-derived
+  index: a concurrent unmount between snapshot and cross would otherwise shift a
+  different member into slot k and cross the wrong tree.
+- **Plan 9 union-skip on every non-fatal outcome.** A member that fails to cross
+  (a dead 9P session, a transient clone OOM — UM-8 F8), is not a directory,
+  denies X-search, or simply lacks the component is **skipped**, not an error —
+  unlike a lone directory, where an X denial is `EACCES`. Only exhausting all
+  members is a miss (`ENOENT`); `*errp` is set only on a clone OOM. This is the
+  correction for the bug where an earlier member's fault hid a name a later
+  member held.
+- **First-hit wins**, in declared order, mirroring the readdir dedup —
+  `stalk_union_has_child` is the name-presence probe that merge uses (no perm
+  check, no symlink follow, because dedup is about presence, not access).
+- The crossed member leaf takes the **mount POINT's** namespace name
+  (`spoor_path_transplant`, I-33), so `/bin/<x>` reports as `/bin/<x>` whichever
+  member served it.
+
+Two amodes exist because create and remove must pick *different* members:
+
+- **`STALK_CREATE`** crosses a union quarry to the **first `MCREATE` member**
+  (`stalk_union_create_member`) — a create lands in the union's writable mount;
+  a union with no `MCREATE` member is `-T_E_ACCES` (no writable target).
+- **`STALK_REMOVE`** returns a union quarry **uncrossed** (like `STALK_MOUNT`),
+  and the caller then calls `stalk_union_member_holding` to act on the member
+  that actually **holds** the leaf (UM-7 F3) — not member 0, not the writable
+  member. Both helpers snapshot atomically and cross the exact source, the same
+  F4 discipline as `stalk_union_child`.
+
+I-3 acyclicity and I-1 isolation stay the territory's to keep (a union is a
+member SET at one identity, added under `ns_lock`); stalk only *resolves* across
+it. `union_snap_point_only` (UM-8c R2-F2) is the point-only retained snapshot a
+union DIRFD holds so the union can be re-reached off the handle.
+
+### Symlink expansion (DISTRO D-1)
+
+A walked component whose qid carries `QTSYMLINK` (dev9p maps `P9_QTSYMLINK`;
+native Devs never mint it) and whose disposition says FOLLOW is expanded by
+`stalk_expand_link`, which reads the target and splices it into the component
+stream. Three dispositions, and the split between "splice in place" and "restart
+the whole resolution" is a **soundness** decision, not an optimization:
+
+- **Absolute target -> RESTART, re-anchored at the caller's OWN Territory
+  root.** Never a global root — so a confined Proc's `/bin/sh -> /bin/busybox`
+  resolves *inside its container by construction*, not by a call-site audit
+  (I-28). The root is taken with `territory_root_ref` (the RW-4 SA-F1 atomic
+  read+ref, so a concurrent `pivot_root` cannot free it mid-expansion) and held
+  for the rest of the resolution. The restart is free of re-walk cost: the
+  rebuilt buffer is exactly `target ++ remaining` resolved from the anchor.
+- **Relative target bearing `..` -> RESTART.** The load-bearing case: a `..` pop
+  must land on a 1:1 trail entry, and only a fresh resolution — POUNCE disabled
+  by the `..` now in the path — guarantees the whole trail is 1:1. Compressed
+  (pounced) trail entries and `..` pops can **never coexist**, which is
+  *precisely why* a `..`-bearing target cannot be spliced in place.
+- **Relative, `..`-free -> splice in place**, trail intact, resolution
+  continues at the spliced target.
+
+Guards, all of the hostile-Dev-defense class this file already runs elsewhere:
+the `readlink` return is bounded (`> SYS_OPEN_PATH_MAX` rejected *before* it is
+used as a length — a Dev returning more than it was handed would read past the
+buffer at the NUL scan otherwise); an embedded NUL in the target is `T_E_INVAL`
+(the namebuf is NUL-terminated, so a NUL would silently truncate a component
+into a different name); the follow count is bounded at `STALK_MAX_FOLLOWS` (40,
+Linux SYMLOOP parity) -> `T_E_LOOP`, and cycles simply burn the budget with no
+visited-set, exactly like Linux. Intermediate symlinks are ALWAYS followed (they
+are directory positions); `STALK_NOFOLLOW` governs only the FINAL component, and
+a trailing slash overrides it (POSIX 4.13: `link/` names the directory the link
+resolves to). **Mount membership wins over a symlink** at a component that is
+both.
+
+### The phenotype accumulator (Design D)
+
+`crossed_pheno` is a **set-only** boolean the exec resolver threads through the
+crossing path: true iff the resolution crossed an `MPHENO_LINUX` mount (the
+`/viv/bin` subtree — VIVARIUM section 13's second phenotype-declaration
+channel). It is recorded **before the cross can fail**, so the *fact* that a
+pheno-mount lay on the path is never lost to a cross failure (the cross fails
+closed; the flag does not). In a union, only the **winning** member's phenotype
+is OR'd — a losing member's Linux mount must not stamp a resolution that landed
+elsewhere.
+
+The seed is the subtle part. The accumulator is initialized at the `restart:`
+label to `territory_root_pheno` — the *resolving* Territory's own declaration
+(the container's, since chroot swaps `root_spoor` and no crossing ever fires
+from inside a container) — NOT to false. It must sit at the shared label, not
+above it: a seed hoisted to the first pass only would let an absolute symlink
+inside a container (`/viv/bin/helper -> /bin/ut`) drop the declaration and
+revert its target to native. Both outcomes are then preserved — in the user
+namespace the same symlink lands native; in a container it stays Linux. This is
+I-43's shape-not-authority kept at the resolver: stalk decides which ABI
+numbering the exec'd image will present, never what it may do; the enforcement
+half is [[sub-kernel-syscall-dispatch]]'s execve re-decision and
+[[sub-kernel-proc]]'s commit.
+
 ### The POUNCE (fused component batching)
 
 When the path has no `..` (`path_has_dotdot` — a pop into a compressed run
@@ -295,7 +428,13 @@ born-"/" name).
 None persistent. Per call: `struct Spoor *trail[STALK_MAX_DEPTH]` (40
 pointers), `char namebuf[SYS_WALK_OPEN_NAME_MAX + 1]` per component, and
 the POUNCE run arrays (`names`/`lens`/`ends[16]` + `struct t_stat sts[16]`
-≈ 1.6 KiB) — all on the 16 KiB kernel stack. The mount-table entry
+≈ 1.6 KiB) — all on the 16 KiB kernel stack. Symlink expansion allocates a
+`struct stalk_expand` on demand (`kmalloc`; the double path buffer it flips
+between, a target scratch, a consumed-prefix record, the follow counter, and
+the ref-held `owned_base` re-anchor root) — freed at `stalk_expand_free`;
+resolutions that never cross a symlink allocate nothing. A union component
+snapshots its member sources into a stack `struct Spoor *srcs[PGRP_MAX_MOUNTS]`.
+The mount-table entry
 (`struct PgrpMount`: source + `mp_path` + the `(mp_dc, mp_devno,
 mp_qid_path)` key, 40 B since #66b) and `Spoor.devno` (Plan 9 `Chan.dev`,
 minted per attach session by `spoor_next_devno`) belong to the territory
@@ -308,12 +447,14 @@ concurrent sessions' mount points are indistinguishable without it.
 stalk itself takes NO locks and keeps all resolution state on the stack.
 Its two shared-state touchpoints:
 
-- **The mount table** — read via `mount_lookup` (ref-held return) and
-  `mount_is_point_id` (membership only), both under the per-Territory
+- **The mount table** — read via `mount_lookup` (ref-held return),
+  `mount_is_point_id` (membership only), and `mount_members_snapshot` (the
+  whole union set + flags, atomically — UM-8 F4), all under the per-Territory
   `ns_lock` (RW-4 SA-F1; the lock lives territory-side and is never held
   across `clone_walk_zero` or a walk). Any new `mounts[]`/`root_spoor`
-  reader MUST go through `mount_lookup`/`territory_root_ref` — a bare
-  lock-free read reopens the multi-thread UAF the P6 lift exposed.
+  reader MUST go through these — a bare lock-free read reopens the multi-thread
+  UAF the P6 lift exposed. The symlink re-anchor's `territory_root_ref` is the
+  same accessor, so an absolute-target expansion cannot race a `pivot_root`.
 - **The borrowed `start`** — pinned by the CALLER's ref since #844
   (`sys_lookup_spoor` transfers one; `territory_root_ref` for FROM_ROOT).
   stalk's borrow is safe exactly because the callers hold it.
@@ -327,11 +468,25 @@ The X-search is open-time-only: perms are snapshotted at resolve time;
   `start`; the cwd join is convenience, not authority — stalk re-clamps),
   the per-component X-search on every hop including crossed roots, the
   POUNCE fail-ordering equivalence, and mount-cross by full Spoor
-  identity.
+  identity. **Symlink expansion is contained by the same machinery** (D-1):
+  an absolute target re-anchors at the caller's OWN Territory root, never a
+  global one, so a confined Proc's absolute link resolves inside its container
+  by construction; expanded components re-enter the per-component gate family;
+  follows are bounded at 40.
 - **[[inv-i33]]** — the resolver is WRITE-ONLY to `Spoor.path`
   (`spoor_path_extend` / `spoor_path_transplant` at the walk/cross/adopt
   hooks); no resolution or permission decision reads it; a path-alloc
   failure leaves it NULL and the walk still succeeds.
+- **I-1 / I-3** (composed, union) — a union is a member SET at one mount
+  identity; acyclicity and per-Proc isolation are the territory's to enforce
+  (`would_create_mount_cycle` at `mount()`; the set added under `ns_lock`).
+  stalk only *resolves* across it, atomically snapshotting the set so a
+  concurrent unmount cannot cross a member it did not inspect (UM-8 F4).
+- **I-43** (composed, pheno-mount) — stalk THREADS the phenotype (`crossed_pheno`
+  set-only, seeded from `territory_root_pheno` at `restart:`, OR'd on a winning
+  cross), deciding which ABI numbering the exec'd image will present. It reads
+  no capability and confers no authority; the shape-not-authority enforcement is
+  [[sub-kernel-syscall-dispatch]]'s and [[sub-kernel-proc]]'s.
 - **I-3** (consumed) — cycle-freedom is enforced at `mount()`
   (`would_create_mount_cycle`); the cross loop's bound is a backstop, not
   the proof.
@@ -344,7 +499,9 @@ The X-search is open-time-only: perms are snapshotted at resolve time;
 miss — dev9p NULL, devramfs `nqid != 1`, partial-run miss, split re-walk
 race), `T_E_ACCES` (any X-search or final R/W `perm_check` denial),
 `T_E_INVAL` (unknown amode, NULL start/path, over-long component, trail /
-logical-depth overflow, Dev without walk/open), a propagated stat errno
+logical-depth overflow, Dev without walk/open, a NUL-bearing symlink target),
+`T_E_LOOP` (D-1: the symlink follow budget of 40 exhausted, or `O_NOFOLLOW`
+meeting a final symlink under `STALK_OPEN`), a propagated stat errno
 via `err_code` (magnitude of `[-4095,-2]`; `-1` and out-of-range collapse
 to `T_E_IO` — never errno 1), or `T_E_IO` (OOM, cross failure, transport).
 `stalk_stat` additionally returns `-1` with `*errp` on a NULL `out`.
@@ -426,6 +583,35 @@ authoritative audit-trigger copy):
   lives at three sites for exactly this reason — two of the three exits
   never reach the ordinary `return quarry`, and they read the leaf's fused
   record instead.
+- **A union crosses the EXACT snapshot source, never a re-derived index.** The
+  member set is snapshot atomically under one `ns_lock` hold; crossing member
+  `srcs[k]` (not "member k, looked up again") is what makes a concurrent unmount
+  unable to cross a member the walk never inspected (UM-8 F4). Any new union
+  operation snapshots the same way.
+- **Union resolution SKIPS a faulting member; it does not fail the walk.** A
+  member that fails to cross, is not a directory, denies X, or lacks the
+  component is skipped (Plan 9 union semantics) so a later member's entry is not
+  hidden behind an earlier member's fault (UM-8 F8). Only all-miss is `ENOENT`;
+  only a clone OOM sets `*errp`. An X denial in a *union* member is a skip; an X
+  denial in a *lone* directory is `EACCES` — do not conflate them.
+- **Create and remove pick DIFFERENT union members.** Create routes to the first
+  `MCREATE` member (`-T_E_ACCES` if none); remove returns the point uncrossed and
+  the caller selects the member that HOLDS the leaf. A change that unifies them
+  breaks one (UM-7 F3).
+- **A symlink target's `readlink` is bounded before it is used as a length, and
+  an embedded NUL is rejected.** Both are hostile-Dev defenses of the same class
+  as the reuse-nc and walk-shape checks — an over-long return reads past the
+  buffer at the NUL scan; a NUL truncates a component into a different name.
+- **An absolute symlink target re-anchors at the caller's OWN Territory root**,
+  and a `..`-bearing relative target MUST take the restart, never the in-place
+  splice — because a `..` pop requires a 1:1 trail, and only a POUNCE-disabled
+  fresh resolution guarantees it. Splicing a `..`-bearing target in place is the
+  soundness bug the restart exists to prevent. Follows are bounded at 40.
+- **The `crossed_pheno` seed lives AT the `restart:` label**, not above it, and
+  is `territory_root_pheno`, not false. A seed hoisted to the first pass only
+  lets an absolute symlink inside a container drop the declaration and revert its
+  target to native — over-declaration is I-43-safe, but under-declaration
+  silently changes an image's ABI shape.
 
 ## Seams
 
