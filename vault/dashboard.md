@@ -129,6 +129,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-05 [[chg-2026-09-05-boot-banner-mirror-recount]] — abi-boot-banner recount: the prose caught up to the twenty-eight-mirror set
 - 2026-09-05 [[chg-2026-09-05-crate-extraction-sweep]] — The crate extractions -- the refactor the 2026-08-04 sweep named finally landed
 - 2026-09-05 [[chg-2026-09-05-exec-phenotype]] — sub-kernel-exec brought current: the phenotype threaded, the interpreter rewrite, the pheno-mount resolver
 - 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
@@ -136,5 +137,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-05 [[chg-2026-09-05-r6-grandfather]] — R6 grandfathers committed history: a grown mirror set stops failing past chgs
 - 2026-09-02 [[chg-2026-09-02-h4b1-claim]] — H-4b-1: the one-shot placement claim (pane/<id>/claim + create claim=) lands in tapestryd
 - 2026-09-02 [[chg-2026-09-02-h4b2-session-actor]] — H-4b-2: the Session(principal) actor -- session-wide mutual pane authority in tapestryd
-- 2026-09-02 [[chg-2026-09-02-h4b3a-autoclaim]] — H-4b-3a: libtapestry auto-consumes an inherited TAPESTRY_CLAIM on open
 <!-- generated:end -->
