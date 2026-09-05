@@ -158,6 +158,11 @@ fn apply_resize(
     if packed != 0 {
         vt.resize((packed >> 16) as usize, (packed & 0xffff) as usize);
         recs.clear();
+        // A shrink pushes the rows that left the top into the vt's pending
+        // boundaries: drain them through the producer FIRST, so the history
+        // precedes the resized screen on the wire in this same emit (a quiet
+        // app would otherwise never surface them).
+        prod.feed(vt, &[], recs);
         prod.resized(vt, recs);
         emit(recs, out);
     }
@@ -305,7 +310,18 @@ fn run() -> i64 {
         // it again here, or that repaint is parsed at the old geometry.
         apply_resize(sh, &mut vt, &mut prod, &mut recs, &mut out);
         recs.clear();
-        prod.feed(&mut vt, &buf[..n as usize], &mut recs);
+        // Each capped ScrollOff is shipped as it lands: the rows one read can
+        // yield are the VT's to decide (a five-byte `ESC [ 36 S` is 36 rows),
+        // so records must leave the heap as they form, not after the chunk.
+        prod.feed_into(
+            &mut vt,
+            &buf[..n as usize],
+            &mut recs,
+            &mut |r: &mut Vec<Record>| {
+                emit(r, &mut out);
+                r.clear();
+            },
+        );
         sh.app_cursor.store(vt.app_cursor(), Ordering::Relaxed);
         // The terminal's own replies (CPR etc.) go back to the app on the master,
         // under the lock so they never interleave with an input-thread key write.

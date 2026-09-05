@@ -1122,10 +1122,21 @@ impl Transcript {
 
     /// Re-budget a live transcript (a session shares one scrollback budget
     /// across its tiles, so each tile's share moves as tiles come and go).
-    /// Enforced lazily at the next push, like the constructor's value.
+    /// Enforced NOW, not at the next push: a QUIET tile never pushes, so a
+    /// lazy cap would let it keep its whole old share indefinitely and the
+    /// session's retained sum would grow as the budget times the harmonic
+    /// number of the tile count. The open block freezes if it alone exceeds
+    /// the new open cap, so the eviction loop can reach it.
     pub fn set_max_cost(&mut self, max_cost: usize) {
         self.max_cost = max_cost;
         self.max_open_cost = (max_cost / 8).max(1);
+        self.enforce_block_cap();
+        self.enforce_budget();
+    }
+
+    /// The retained cost the budget bounds (frozen blocks + the open one).
+    pub fn stored_cost(&self) -> usize {
+        self.stored_cost
     }
 }
 
@@ -1686,6 +1697,49 @@ mod tests {
     // eviction can reach any of it. Small caps make the test cheap: the open
     // block must never exceed its byte cap, and the whole transcript must
     // stay within one open-cap of the budget.
+    #[test]
+    fn set_max_cost_evicts_a_quiet_transcript_at_once() {
+        // B2-F2: lowering the share of a tile that receives no more output
+        // must shrink its retained set NOW -- nothing else will ever push.
+        let big = 1 << 20;
+        let mut t = Transcript::with_caps(daylight(), 1000, big, 10_000);
+        let row: Vec<vt::Cell> = (0..128)
+            .map(|_| vt::Cell {
+                ch: 'x',
+                fg: 0xFFFFFF,
+                bg: 0,
+                attrs: 0,
+            })
+            .collect();
+        let rows: Vec<Vec<vt::Cell>> = alloc::vec![row; 64];
+        while t.stored_cost() < big - (big / 8) {
+            t.push_scrolled_rows(&rows);
+        }
+        let before = t.stored_cost();
+        assert!(
+            before > big / 2,
+            "the fill reached the old share ({before})"
+        );
+        assert!(
+            t.frozen_blocks().len() > 1,
+            "several frozen blocks to evict"
+        );
+
+        let small = big / 4;
+        t.set_max_cost(small);
+        // At most the new cap plus one un-evictable block (the loop keeps the
+        // newest frozen block) plus the new open cap.
+        let slack = t.frozen_blocks().back().map_or(0, |b| b.cost) + small / 8;
+        assert!(
+            t.stored_cost() <= small + slack,
+            "stored_cost {} still above the new share {} (+{} slack) after set_max_cost",
+            t.stored_cost(),
+            small,
+            slack
+        );
+        assert!(t.stored_cost() < before, "the re-budget evicted something");
+    }
+
     #[test]
     fn open_block_freezes_on_bytes_so_the_budget_can_evict_it() {
         // 1 MiB budget -> a 128 KiB open cap (4 soft-wrapped lines per block);

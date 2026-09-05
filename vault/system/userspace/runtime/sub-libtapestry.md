@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-08-16
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -236,3 +236,17 @@ no finding.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+## `global_ctl` and `TEV_LAYOUT` (2026-09-05, the KT-1 audit)
+
+`EventRing::global_ctl(cmd)` writes one verb to the compositor's root `ctl` on
+the ring's own conn -- the conn every surface minted through `open_on_bound`
+shares -- so a `session on` written before the first `fullscreen_on` declares
+exactly the conn the surfaces will belong to. Any refusal collapses to
+`TapError::Protocol` (E_PERM for a non-session principal, E_BUSY for a seat
+held by another principal's live tiles); the caller decides whether to retry
+or degrade -- halcyond does both. `TEV_LAYOUT` (kind 10) is the event a
+declared session conn receives on one of its surfaces at every structural
+layout pass, `value` the layout epoch: re-read `layout`. Other clients never
+see it.
+

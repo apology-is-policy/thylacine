@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 
 use alloc::string::String;
 use halcyond::chrome::{parse_leaves_all, parse_rect};
+use halcyond::downq::DownQueue;
 use halcyond::input::map_key;
 use halcyond::layout::{daylight_sheet, Sheet};
 use halcyond::raster::GlyphSource;
@@ -31,7 +32,9 @@ use libthyla_rs::fs::File;
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_poll, t_read, t_write, TPollFd, T_POLLHUP, T_POLLIN, T_POLLOUT};
-use tapestry::{EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY};
+use tapestry::{
+    EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_LAYOUT,
+};
 
 use crate::chromeset::read_file;
 
@@ -70,10 +73,16 @@ struct Geom {
 /// must fit the 64 MiB heap; each tile's share moves as tiles come and go).
 const SESSION_SCROLLBACK_BUDGET: usize = 32 << 20;
 
-/// Bytes of encoded input a tile may hold undelivered before the newest are
-/// dropped: a tile whose kaua-term stopped draining its down-pipe must not
-/// accumulate, and must never block the compositor (see `drain_down`).
-const DOWN_PENDING_MAX: usize = 4096;
+/// The kernel's `POLL_MAX_NFDS` (poll.h): a larger set is refused -1 before
+/// any fd is looked at, and the loop reads -1 as "compositor gone". The ring
+/// plus one POLLIN per live tile fits (1 + 32); the POLLOUT entries are the
+/// ones that could cross it, so they stop at the ceiling.
+const POLL_MAX_NFDS: usize = 64;
+
+/// How many connect iterations tolerate a refused `session on` before the
+/// compositor runs UNDECLARED: the seat may be mid-handover (the previous
+/// compositor's conn not yet retired), which clears within milliseconds.
+const DECLARE_TRIES: u32 = 40;
 
 /// Write one layout verb (`close <leaf>`) to the compositor `layout` file,
 /// retried through the per-pass mutation budget. Best-effort: a wedged
@@ -133,7 +142,7 @@ struct SessionTile {
     down_fd: i64,
     up_fd: i64,
     /// Encoded Key/Resize input not yet delivered down the pipe (bounded).
-    pending_down: Vec<u8>,
+    down: DownQueue,
     drop_said: bool,
     tile: Tile,
     dec: FrameDecoder,
@@ -215,7 +224,7 @@ impl SessionTile {
             _up: up,
             down_fd,
             up_fd,
-            pending_down: Vec::new(),
+            down: DownQueue::new(),
             drop_said: false,
             tile: Tile::with_budget(cols as usize, rows as usize, daylight_palette(), budget),
             dec: FrameDecoder::new(),
@@ -302,17 +311,19 @@ impl SessionTile {
     }
 
     /// Kill + reap the child so it never lingers as a zombie, then let the
-    /// Queue encoded input for the tile's kaua-term (delivered by
-    /// `drain_down`). Bounded: past the cap the NEWEST bytes drop, said once.
-    fn queue_down(&mut self, bytes: &[u8]) {
-        if self.pending_down.len() + bytes.len() > DOWN_PENDING_MAX {
-            if !self.drop_said {
-                self.drop_said = true;
-                say!("halcyond: session tile input dropped (its terminal is not draining)");
-            }
-            return;
+    /// Queue an encoded key record for the tile's kaua-term (delivered by
+    /// `drain_down`). Bounded: past the cap the NEWEST keys drop, said once.
+    fn queue_key(&mut self, bytes: &[u8]) {
+        if !self.down.push_key(bytes) && !self.drop_said {
+            self.drop_said = true;
+            say!("halcyond: session tile input dropped (its terminal is not draining)");
         }
-        self.pending_down.extend_from_slice(bytes);
+    }
+
+    /// Queue the geometry record: never dropped, delivered before any
+    /// further key (see `DownQueue`).
+    fn queue_resize(&mut self, bytes: &[u8]) {
+        self.down.push_resize(bytes);
     }
 
     /// Deliver queued input without ever blocking the compositor: natives
@@ -321,8 +332,7 @@ impl SessionTile {
     /// byte and this thread is the pipe's only writer, so a one-byte write
     /// after a ready POLLOUT can never block. Stops at the first "no room".
     fn drain_down(&mut self) {
-        let mut off = 0usize;
-        while off < self.pending_down.len() {
+        while let Some(b) = self.down.next_byte() {
             let mut pfd = [TPollFd {
                 fd: self.down_fd as i32,
                 events: T_POLLOUT,
@@ -332,15 +342,13 @@ impl SessionTile {
             if unsafe { t_poll(pfd.as_mut_ptr(), 1, 0) } <= 0 || pfd[0].revents & T_POLLOUT == 0 {
                 break;
             }
+            let byte = [b];
             // SAFETY: SVC wrapper over this thread's own buffer, one byte.
-            let w = unsafe { t_write(self.down_fd, self.pending_down.as_ptr().add(off), 1) };
+            let w = unsafe { t_write(self.down_fd, byte.as_ptr(), 1) };
             if w <= 0 {
                 break;
             }
-            off += 1;
-        }
-        if off > 0 {
-            self.pending_down.drain(..off);
+            self.down.advance();
         }
     }
 
@@ -422,8 +430,15 @@ fn reconcile(
 
 /// Connect to tapestryd as the user + take a fullscreen surface (d-2's proven
 /// bootstrap, with the console path's bounded connect retry). SQPOLL from the
-/// start: the unified poll needs the ring pollable off-thread.
-fn connect() -> Option<(EventRing, Surface)> {
+/// start: the unified poll needs the ring pollable off-thread. Returns whether
+/// the display handoff was DECLARED: a refused declaration (the seat held by
+/// another principal's live tiles, or a conn without a session principal) is
+/// retried through `DECLARE_TRIES` and then tolerated -- the session runs
+/// UNDECLARED, its tiles beside the console like any user window. Degraded,
+/// but a session; exiting here would hand login a non-zero status and the
+/// seat a re-prompt loop.
+fn connect() -> Option<(EventRing, Surface, bool)> {
+    let mut undeclared_said = false;
     for i in 0..CONNECT_TRIES {
         let r = match EventRing::connect_sqpoll() {
             Ok(r) => r,
@@ -439,12 +454,25 @@ fn connect() -> Option<(EventRing, Surface)> {
         // The display handoff is an explicit act of the session compositor,
         // declared on its own conn BEFORE its first surface hosts: a program
         // merely drawing a window never takes the display from the console.
-        if let Err(e) = r.global_ctl("session on") {
-            say!("halcyond: FAIL session declare {:?}", e);
-            return None;
-        }
+        let declared = match r.global_ctl("session on") {
+            Ok(()) => true,
+            Err(e) => {
+                if i + 1 < DECLARE_TRIES {
+                    let _ = sleep(Duration::from_millis(CONNECT_DELAY_MS));
+                    continue;
+                }
+                if !undeclared_said {
+                    undeclared_said = true;
+                    say!(
+                        "halcyond: session declare refused {:?} -- running UNDECLARED beside the console",
+                        e
+                    );
+                }
+                false
+            }
+        };
         match Surface::fullscreen_on(&r) {
-            Ok(s) => return Some((r, s)),
+            Ok(s) => return Some((r, s, declared)),
             Err(e) => {
                 if i == CONNECT_TRIES - 1 {
                     say!("halcyond: FAIL session connect/create {:?}", e);
@@ -468,7 +496,7 @@ fn leaf_hosting(troot: i64, sid: u32) -> Option<u32> {
 }
 
 pub fn run(home: Option<String>) -> i64 {
-    let (ring, root_surf) = match connect() {
+    let (ring, root_surf, declared) = match connect() {
         Some(x) => x,
         None => return 1,
     };
@@ -544,7 +572,12 @@ pub fn run(home: Option<String>) -> i64 {
                 // first tile that presents.
                 if !up_announced {
                     up_announced = true;
-                    say!("halcyond: session up {}x{} px", disp_w, disp_h);
+                    say!(
+                        "halcyond: session up {}x{} px{}",
+                        disp_w,
+                        disp_h,
+                        if declared { "" } else { " (undeclared)" }
+                    );
                 }
             } else {
                 present_fails += 1;
@@ -584,7 +617,7 @@ pub fn run(home: Option<String>) -> i64 {
                                         &Input::Resize { cols: nc, rows: nr },
                                         &mut wire_out,
                                     );
-                                    t.queue_down(&wire_out);
+                                    t.queue_resize(&wire_out);
                                 }
                                 t.dirty = true;
                                 // A relayout may have added or removed leaves.
@@ -600,13 +633,15 @@ pub fn run(home: Option<String>) -> i64 {
                             if let Some(kev) = map_key(e.code, e.rune, e.value) {
                                 wire_out.clear();
                                 encode_input(&Input::Key(kev), &mut wire_out);
-                                t.queue_down(&wire_out);
+                                t.queue_key(&wire_out);
                             }
                         }
                         // A focus move may follow a split of an EMPTY leaf
-                        // (nothing hosted yet, so no CONFIGURE arrives): let
-                        // the reconcile see the new leaf now, not later.
-                        TEV_FOCUS => relayout = true,
+                        // (nothing hosted yet, so no CONFIGURE arrives), and
+                        // a structural change with no hosted surface in it
+                        // fans only TEV_LAYOUT to the declared conn: let the
+                        // reconcile see the new leaves now, not later.
+                        TEV_FOCUS | TEV_LAYOUT => relayout = true,
                         _ => {}
                     },
                     Ok(None) => break,
@@ -671,9 +706,14 @@ pub fn run(home: Option<String>) -> i64 {
             }
         }
         // Undelivered input wakes the loop when its pipe has room. Appended
-        // AFTER the up entries, so the up_leaves[i] <-> fds[i+1] map holds.
+        // AFTER the up entries, so the up_leaves[i] <-> fds[i+1] map holds;
+        // capped at the kernel's set ceiling (a tile left out is drained at
+        // the next wake anyway).
         for t in tiles.values() {
-            if t.exit.is_none() && !t.pending_down.is_empty() {
+            if fds.len() >= POLL_MAX_NFDS {
+                break;
+            }
+            if t.exit.is_none() && !t.down.is_empty() {
                 fds.push(TPollFd {
                     fd: t.down_fd as i32,
                     events: T_POLLOUT,
@@ -688,7 +728,7 @@ pub fn run(home: Option<String>) -> i64 {
             break;
         }
         for t in tiles.values_mut() {
-            if t.exit.is_none() && !t.pending_down.is_empty() {
+            if t.exit.is_none() && !t.down.is_empty() {
                 t.drain_down();
             }
         }

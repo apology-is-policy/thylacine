@@ -1624,23 +1624,34 @@ login already holds.
    - the session `ut`s run in the tiles (pts job control -- the Ctrl-C axis is the
      pts fg pgrp, not the `/dev/cons` owner), never on `/dev/cons`.
 4. **The display handoff -- the compositor backgrounds the console renderer
-   (operator-ratified 2026-09-04; the Plan 9 rio / Fuchsia-Wayland idiom).**
-   tapestryd's scanout follows the layout AND an actor priority (`Comp::reconcile`):
-   a **SESSION** leaf (its `owner_principal` a real user principal -- the `actor()`
-   test) outranks **SYSTEM** leaves (a sentinel principal: the console renderer
-   aurora, and any system client). When a session leaf is visible, the SYSTEM leaves
-   are **BACKGROUNDED** -- excluded from the scanout decision, not composited, and
-   not FRAME-ticked. So aurora + a per-user halcyond both presenting fullscreen do
-   NOT tile: the root collapses to the session (`Direct(halcyond)`), and aurora's own
-   FRAME-driven loop goes dormant (no FRAME -> it blocks in `wait_event`; it keeps its
-   surface + ring the whole time, staying observable). On logout (halcyond exits),
-   reconcile re-runs, aurora is no longer backgrounded, the FRAME clock ticks it
-   again, and it resumes + repaints -> `Direct(aurora)`, rendering the next login.
+   (operator-ratified 2026-09-04; the Plan 9 rio / Fuchsia-Wayland idiom; the
+   trigger AMENDED 2026-09-05 by the KT-1 audit, C-F6 -- the record is under
+   KT-1.5d-1b below).** tapestryd's scanout follows the layout AND a **declared
+   seat** (`Comp::reconcile`): the session compositor DECLARES the handoff by
+   writing `session on` on its own ctl conn before its first surface hosts
+   (Session-principal-gated; one declared conn per display). The seat is the
+   PRINCIPAL's, held through a conn: a later conn of the same principal takes it
+   over (a restarted compositor whose dead conn is not yet retired), and so does
+   any Session conn while the holder hosts nothing (an idle declaration holds no
+   display); only a holder hosting leaves for ANOTHER principal keeps it, and the
+   newcomer then runs UNDECLARED -- its tiles beside the console like any user
+   window -- never a login loop. While the DECLARED conn hosts a leaf, the SYSTEM
+   leaves (a sentinel principal: the console renderer aurora, and any system
+   client) are **BACKGROUNDED** -- excluded from the scanout decision, not
+   composited, and not FRAME-ticked. So aurora + a per-user halcyond both
+   presenting fullscreen do NOT tile: the root collapses to the session
+   (`Direct(halcyond)`), and aurora's own FRAME-driven loop goes dormant (no FRAME
+   -> it blocks in `wait_event`; it keeps its surface + ring the whole time,
+   staying observable). On logout (halcyond exits; its conn retires, which clears
+   the declaration), reconcile re-runs, aurora is no longer backgrounded, the
+   FRAME clock ticks it again, and it resumes + repaints -> `Direct(aurora)`,
+   rendering the next login. A user program that merely draws a window never
+   takes the display (it tiles beside the console as before).
    **NO new primitive, NO drain-poll.** The "emergent, drain-idle resume" of the
    earlier draft was WRONG: `SYS_PUTS`/`say!` routes through `cons_emit` (kernel #76),
    so the console drain carries ALL daemon diagnostic output and is NEVER idle during
    a session -- a drain-based resume flaps (relinquish -> tapestryd logs -> drain ->
-   resume -> ...). The priority is **backward-compatible**: with no session leaf
+   resume -> ...). The declaration is **backward-compatible**: with no declared conn
    present (every pre-session + gfx-test path) nothing backgrounds and the pre-existing
    `Direct(n)` iff one display-sized leaf else `Composed` logic is byte-identical.
    **aurora is UNCHANGED** -- the whole mechanism lives in tapestryd's reconcile +
@@ -1701,7 +1712,21 @@ already held.
     time; cleared when the conn retires -> the console un-backgrounds). Only a
     DECLARED session backgrounds the console; a user program that merely draws
     never does (it tiles beside the console as before, and a zoom hides it the
-    old way). The declared conn also mints surfaces up to the renderer's cap (one
+    old way). **The seat is the principal's, not the conn's (the round-2
+    finding C2-F1):** a first-come slot with no takeover let ANY Session conn
+    that wrote `session on` -- a same-user program, an orphan of a previous
+    user -- hold the seat until it died, and the compositor's fatal reaction
+    to the refusal turned every later login into the C-F12 re-prompt loop.
+    Now a later conn of the same principal takes the seat over, so does any
+    Session conn while the holder hosts nothing, and a holder that hosts
+    leaves for another principal answers E_BUSY -- which halcyond retries
+    briefly (a seat mid-handover) and then TOLERATES: it runs undeclared,
+    beside the console, and says so. The declaration clears AFTER the dying
+    conn's surfaces retire (one transition to `Direct(console)`, not N-1
+    composed passes of dead tiles beside it). The declared conn also hears
+    every structural layout change on one of its surfaces (`TEV_LAYOUT`,
+    kind 10): a split of an EMPTY leaf fans no CONFIGURE and no FOCUS, and
+    the empties it must claim have no other channel. The declared conn also mints surfaces up to the renderer's cap (one
     tile per pane), and a surface's backgrounded state derives from its leaf's
     tree flag alone. The console renderer's DISPLAY-level chrome (a status bar,
     a placed menu) is NOT backgrounded with it: aurora has none, and a renderer

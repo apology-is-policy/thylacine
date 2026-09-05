@@ -105,8 +105,28 @@ impl Producer {
     }
 
     /// Process one feed chunk (the caller must have set `vt.set_capture_events(true)`)
-    /// and append records to `out` in VT-stream order.
+    /// and append records to `out` in VT-stream order. Every record the chunk
+    /// yields accumulates in `out` -- fine for a test, and for the bin ONLY
+    /// through `feed_into`, whose sink bounds the accumulation.
     pub fn feed(&mut self, vt: &mut Vt, bytes: &[u8], out: &mut Vec<Record>) {
+        self.feed_into(vt, bytes, out, &mut |_| {});
+    }
+
+    /// `feed`, with `sink` called each time a capped ScrollOff lands in `out`
+    /// so the caller can ship (serialize + write + clear) what has accumulated
+    /// so far. The per-RECORD cap (`scroll_cap`) bounds one ScrollOff; this
+    /// bounds how many of them one chunk can pile up before anything is
+    /// written: the rows per chunk are the VT's to decide, not the chunk
+    /// size's -- `ESC [ 36 S` is five bytes and thirty-six rows, so a 4 KiB
+    /// read can yield ~30K rows, tens of MiB of cells held at once. A sink
+    /// that leaves `out` untouched degrades to plain accumulation.
+    pub fn feed_into(
+        &mut self,
+        vt: &mut Vt,
+        bytes: &[u8],
+        out: &mut Vec<Record>,
+        sink: &mut dyn FnMut(&mut Vec<Record>),
+    ) {
         let mut pos = 0;
         while let Some(b) = vt.feed_until(bytes, &mut pos) {
             match b {
@@ -120,6 +140,7 @@ impl Producer {
                     self.scroll_acc.push(row);
                     if self.scroll_acc.len() >= self.scroll_cap() {
                         self.flush_scroll(out);
+                        sink(out);
                     }
                 }
                 Boundary::Bell => {
@@ -417,6 +438,99 @@ fn push_num(out: &mut Vec<u8>, n: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feed_into_ships_each_capped_scrolloff_so_a_chunk_never_piles_them_up() {
+        // B2-F4: `ESC [ 36 S` x N in ONE chunk. With a shipping sink, `out`
+        // never holds more than one capped ScrollOff (plus the small records
+        // between); with the plain `feed` everything accumulates.
+        let mut vt = Vt::new(8, 36);
+        vt.set_capture_events(true);
+        let mut prod = Producer::new(&vt);
+        let cap = prod.scroll_cap();
+        let mut chunk = Vec::new();
+        for _ in 0..400 {
+            chunk.extend_from_slice(b"\x1b[36S");
+        }
+        let mut out = Vec::new();
+        let mut shipped_rows = 0usize;
+        let mut peak_rows_in_out = 0usize;
+        prod.feed_into(&mut vt, &chunk, &mut out, &mut |o: &mut Vec<Record>| {
+            let held: usize = o
+                .iter()
+                .map(|r| match r {
+                    Record::ScrollOff { rows } => rows.len(),
+                    _ => 0,
+                })
+                .sum();
+            peak_rows_in_out = peak_rows_in_out.max(held);
+            shipped_rows += held;
+            o.clear();
+        });
+        let tail: usize = out
+            .iter()
+            .map(|r| match r {
+                Record::ScrollOff { rows } => rows.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(
+            shipped_rows + tail,
+            400 * 36,
+            "every scrolled row is delivered once"
+        );
+        assert!(
+            peak_rows_in_out <= cap,
+            "the sink saw {} rows at once; the per-record cap is {}",
+            peak_rows_in_out,
+            cap
+        );
+        assert!(shipped_rows > 0, "the sink ran (the chunk exceeds one cap)");
+
+        // Control: plain `feed` accumulates the whole chunk in `out`.
+        let mut vt2 = Vt::new(8, 36);
+        vt2.set_capture_events(true);
+        let mut prod2 = Producer::new(&vt2);
+        let mut all = Vec::new();
+        prod2.feed(&mut vt2, &chunk, &mut all);
+        let held: usize = all
+            .iter()
+            .map(|r| match r {
+                Record::ScrollOff { rows } => rows.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(held, 400 * 36);
+    }
+
+    #[test]
+    fn a_shrink_ships_its_scrolled_off_rows_before_the_full_celldiff() {
+        // B2-F7: the rows a shrink pushes off the top are history that must
+        // precede the resized screen on the wire, in the SAME emit -- not at
+        // the next feed (never, for a quiet app).
+        let mut vt = Vt::new(8, 4);
+        vt.set_capture_events(true);
+        let mut prod = Producer::new(&vt);
+        let mut out = Vec::new();
+        prod.feed(&mut vt, b"one\r\ntwo\r\nthree\r\nfour", &mut out);
+        out.clear();
+        // The bin's `apply_resize` order: resize, drain the vt's pending
+        // boundaries through the producer, then the full diff.
+        vt.resize(8, 2);
+        prod.feed(&mut vt, &[], &mut out);
+        prod.resized(&vt, &mut out);
+        assert!(
+            matches!(out.first(), Some(Record::ScrollOff { rows }) if rows.len() == 2),
+            "first record is the two scrolled-off rows, got {:?}",
+            out.first().map(|r| core::mem::discriminant(r))
+        );
+        assert!(
+            matches!(out.last(), Some(Record::CellDiff { changed, .. }) if changed.len() == 8 * 2),
+            "last record is the full diff of the 8x2 screen"
+        );
+        assert_eq!(out.len(), 2, "exactly [ScrollOff, CellDiff]: {}", out.len());
+    }
+
     use alloc::vec; // the vec! macro (no_std crate; host tests only)
 
     // Convenience: drive one chunk through a fresh capture-on vt + producer.

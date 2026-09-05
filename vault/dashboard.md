@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 88
+## Open seams: 91
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -61,6 +61,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-buddy-bulk-op]] (sub-kernel-mm-phys)
 - [[seam-close-flush-unbounded]] (sub-kernel-death)
 - [[seam-co-fidless-wstat]] (sub-kernel-ninep-dev9p)
+- [[seam-console-chrome-on-handoff]] (sub-tapestryd)
 - [[seam-cwg-parenthetical-refuted]] (sub-kernel-boot-sequence)
 - [[seam-death-cascade-smp-harness]] (sub-kernel-death)
 - [[seam-devcap-plain-caps-read]] (sub-kernel-caps)
@@ -86,7 +87,9 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-larder-shrinker]] (sub-kernel-larder)
 - [[seam-larder-stale-child-attr]] (sub-kernel-larder)
 - [[seam-legate-member-sweep-race]] (sub-kernel-proc)
+- [[seam-login-halcyond-fallback]] (sub-stratum-session)
 - [[seam-loom-rearm-needs-blocking-enter]] (sub-kernel-loom)
+- [[seam-loom-sqpoll-p3s]] (sub-kernel-loom, sub-kernel-poll)
 - [[seam-mm-directmap-cap-absolute]] (sub-kernel-mm-phys)
 - [[seam-mount-graph-unmodeled]] (sub-kernel-territory)
 - [[seam-netd-host-tests]] (sub-netd-server, sub-netd-nic)
@@ -130,11 +133,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
+- 2026-09-05 [[chg-2026-09-05-kt1-audit-close]] — KT-1 audit close, rounds 1-2: the identity mask, the declared seat (takeover, undeclared fallback, TEV_LAYOUT), the windowed tile layout, the never-dropped Resize, the shipped ScrollOffs
 - 2026-09-05 [[chg-2026-09-05-r6-grandfather]] — R6 grandfathers committed history: a grown mirror set stops failing past chgs
 - 2026-09-02 [[chg-2026-09-02-h4b1-claim]] — H-4b-1: the one-shot placement claim (pane/<id>/claim + create claim=) lands in tapestryd
 - 2026-09-02 [[chg-2026-09-02-h4b2-session-actor]] — H-4b-2: the Session(principal) actor -- session-wide mutual pane authority in tapestryd
 - 2026-09-02 [[chg-2026-09-02-h4b3a-autoclaim]] — H-4b-3a: libtapestry auto-consumes an inherited TAPESTRY_CLAIM on open
 - 2026-09-02 [[chg-2026-09-02-h4b3b-restore]] — H-4b-3b: the restore tool + PFK_OWNER + the H-4b arc audit close
 - 2026-08-24 [[chg-2026-08-24-v3b-1a]] — V-3b-1a HOST3D+MAP_BLOB substrate: sub-tapestryd mechanism section + the venus-ctx finding
-- 2026-08-24 [[chg-2026-08-24-v3b-1b]] — V-3b-1b hostmem guest-map: sub-tapestryd guest-map section + the SYS_BURROW_FROM_HOSTMEM client wrapper
 <!-- generated:end -->

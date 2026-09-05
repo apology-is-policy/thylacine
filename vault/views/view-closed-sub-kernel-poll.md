@@ -24,10 +24,11 @@ Read it WITH two standing facts about this surface:
   found the seam, not a new bug.
 
 <!-- generated:begin -->
-6 closed findings on [[sub-kernel-poll]] — do NOT re-report
+7 closed findings on [[sub-kernel-poll]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
+- [[fnd-kt1-r1-a5]] [P3] the two audit-trigger surfaces' as-built references and the trigger table do not carry the new arm; two loop comments describe the mechanism that was removed (fixed) — Fixed in 062efe18: the three stale comments (poll.h's registering-path list, halcyond main.rs's menu-wait comment, menuset.rs) rewritten; the two AUDIT-TRIGGERS rows (the pollable Loom; the kaua-term seam + the session compositor) appended with the CLAUDE.md index lines.
 - [[fnd-poll-r1-f1]] [P2] A client polling its own srv connection got the SERVER endpoint's revents (fixed)
 - [[fnd-poll-r1-f2]] [P2] Teardown latched the two EOF flags under separate locks — a poll between saw half a hangup (fixed)
 - [[fnd-poll-r1-f3]] [P1] The handle-slot borrow across the scan — doc-fixed on a precondition the lift later voided (fixed)

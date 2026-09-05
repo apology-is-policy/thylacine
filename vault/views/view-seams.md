@@ -41,6 +41,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-buddy-bulk-op]] | open | sub-kernel-mm-phys | chg-2026-05-04-p1d-phys-allocator | HT11.R1-F6 |
 | [[seam-close-flush-unbounded]] | open | sub-kernel-death | fnd-68-r2-f3 | unfiled |
 | [[seam-co-fidless-wstat]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-fid-lifecycle |  |
+| [[seam-console-chrome-on-handoff]] | open | sub-tapestryd | fnd-kt1-r1-c11 | the KT-1 audit round 1 (C-F11) |
 | [[seam-cwg-parenthetical-refuted]] | open | sub-kernel-boot-sequence | chg-2026-08-16-boot-cwg-parenthetical | unfiled -- yip to main 2026-08-16 |
 | [[seam-death-cascade-smp-harness]] | open | sub-kernel-death | chg-2026-06-01-811-death-interruptible | unfiled |
 | [[seam-devcap-plain-caps-read]] | open | sub-kernel-caps | chg-2026-08-02-authority-sweep | task #15 |
@@ -66,7 +67,9 @@ Generated from note fields — do not edit between the markers
 | [[seam-larder-shrinker]] | open | sub-kernel-larder | fnd-29-r1-f1 |  |
 | [[seam-larder-stale-child-attr]] | open | sub-kernel-larder | fnd-l1f-r1-f3 |  |
 | [[seam-legate-member-sweep-race]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
+| [[seam-login-halcyond-fallback]] | open | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
 | [[seam-loom-rearm-needs-blocking-enter]] | open | sub-kernel-loom | chg-2026-08-02-async-sweep |  |
+| [[seam-loom-sqpoll-p3s]] | open | sub-kernel-loom, sub-kernel-poll | fnd-kt1-r1-a1 | memory bug_loom_poll_substrate_p3s.md; the KT-1 audit round 1 (A-F1..A-F4) |
 | [[seam-mm-directmap-cap-absolute]] | open | sub-kernel-mm-phys | chg-2026-05-31-808-directmap-pagemap | #808 audit F2; Lazarus board bringup |
 | [[seam-mount-graph-unmodeled]] | open | sub-kernel-territory | fnd-stalk2-r1-f1 | unfiled |
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |

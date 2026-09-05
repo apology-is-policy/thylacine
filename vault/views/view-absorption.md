@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**46 absorbed · 110 live · 156 total.**
+**46 absorbed · 111 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -111,6 +111,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 150-halcyond.md | live | — |
 | 150-vt.md | live | — |
 | 151-libhalcyon.md | live | — |
+| 152-kaua-term.md | live | — |
 | 16-rendez.md | absorbed | [[lock-wait]], [[sub-kernel-rendez]] |
 | 17-smp-bringup.md | absorbed | [[seam-sparse-mpidr]], [[sub-kernel-sched-smp]] |
 | 18-territory.md | absorbed | [[inv-i1]], [[lock-territory-ns-lock]], [[spec-territory]], [[sub-kernel-territory]] |

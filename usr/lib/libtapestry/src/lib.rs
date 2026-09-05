@@ -134,6 +134,13 @@ pub const TEV_FRAME: u16 = 5;
 pub const TEV_CONFIGURE: u16 = 6;
 pub const TEV_FOCUS: u16 = 7;
 pub const TEV_CLOSE: u16 = 8;
+/// The layout tree changed structurally (a split, a close, a tab flip, a
+/// backgrounding): re-read `layout`. Sent to ONE surface of the DECLARED
+/// session conn (`session on`), which owns leaves it hosts nothing in yet
+/// -- a split of an EMPTY leaf fans no CONFIGURE and no FOCUS to anyone, so
+/// without this the new empties waited for an unrelated event. `value` is
+/// the layout epoch.
+pub const TEV_LAYOUT: u16 = 10;
 
 /// A decoded tevent record (section 18.4; 24 bytes on the wire).
 #[derive(Clone, Copy, Debug)]

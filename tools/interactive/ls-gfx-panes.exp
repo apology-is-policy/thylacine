@@ -96,6 +96,12 @@ expect {
 }
 
 expect {
+    -ex "battery: console leaf tiled" { lc_pass "panes: the console leaf keeps a real column under an UNDECLARED client" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the undeclared-client control failed" }
+    timeout { lc_fail "the undeclared-client control never reported" }
+    eof { lc_fail "qemu exited during the battery" }
+}
+expect {
     -ex "tapestry-battery: structure OK" { lc_pass "panes: in-guest structure asserts OK" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "battery structure legs failed" }
     timeout { lc_fail "battery never reached structure OK" }
@@ -402,9 +408,28 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the claim leg failed" }
     timeout { lc_fail "the claim leg never finished" }
 }
+# The declared-handoff control (the KT-1 audit's round-2 C-F3): the SAME
+# console leaf the undeclared control found tiled goes to the ZERO rect when
+# the battery's conn declares `session on`, and comes back on `session off`
+# -- the one-variable pair that proves the backgrounding is real AND gated.
+expect {
+    -ex "battery: console leaf backgrounded by the declaration" { lc_pass "panes: a declared session backgrounds the console leaf" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the declare control failed" }
+    timeout { lc_fail "the declare control never backgrounded the console leaf" }
+}
+expect {
+    -ex "battery: declared session cannot close the console's container" { lc_pass "panes: the destructive close sees the transparent console leaf (E_PERM)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the declared-close control failed" }
+    timeout { lc_fail "the declared-close control never reported" }
+}
+expect {
+    -ex "battery: console leaf restored" { lc_pass "panes: session off restores the console leaf's column" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the undeclare control failed" }
+    timeout { lc_fail "session off never restored the console leaf" }
+}
 expect {
     -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }
-    -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the claim leg" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the declare control" }
     timeout { lc_fail "battery never finished" }
 }
 

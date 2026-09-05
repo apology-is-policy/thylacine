@@ -267,6 +267,27 @@ fn leaf_surface(line: &str) -> Option<u32> {
         .and_then(|v| v.parse().ok())
 }
 
+/// The root container's pane id: the first pane line after the `epoch` header.
+fn layout_root_id(layout: &str) -> Option<u32> {
+    let line = layout.lines().nth(1)?;
+    line.split_ascii_whitespace()
+        .next()?
+        .trim_end_matches('*')
+        .parse()
+        .ok()
+}
+
+/// A pane's content size from its `geometry` file (`x y w h`); (0, 0) when
+/// unreadable -- callers treat that as the backgrounded ZERO rect, so a
+/// parse failure fails closed.
+fn pane_wh(root: i64, id: u32) -> (u32, u32) {
+    let g = read_file(root, &alloc::format!("pane/{}/geometry", id)).unwrap_or_default();
+    let mut it = g.split_ascii_whitespace().skip(2);
+    let w: u32 = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
+    let h: u32 = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
+    (w, h)
+}
+
 /// Parse `<key> <n>` from the ctl text.
 fn ctl_u64(ctl: &str, key: &str) -> Option<u64> {
     for line in ctl.lines() {
@@ -570,21 +591,32 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     }
-    // An UNDECLARED user client (this battery never writes `session on`) must
-    // not put the console renderer to sleep: its leaf keeps a real column.
-    if let Some(cid) = foreign_pane(&layout, &[a.id, b.id]) {
-        let g = read_file(root, &alloc::format!("pane/{}/geometry", cid)).unwrap_or_default();
-        let mut it = g.split_ascii_whitespace().skip(2);
-        let cw: u32 = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
-        let ch: u32 = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
-        if cw == 0 || ch == 0 {
-            say!(
-                "tapestry-battery: FAIL console leaf backgrounded by an undeclared client ('{}')",
-                g.trim()
-            );
-            return 1;
+    // An UNDECLARED user client (this battery has not written `session on`)
+    // must not put the console renderer to sleep: its leaf keeps a real
+    // column. A None here while the layout carries a foreign surface is the
+    // parser drifting, not a headless run -- fail, never skip.
+    match foreign_pane(&layout, &[a.id, b.id]) {
+        Some(cid) => {
+            let (cw, ch) = pane_wh(root, cid);
+            if cw == 0 || ch == 0 {
+                say!(
+                    "tapestry-battery: FAIL console leaf backgrounded by an undeclared client ({} {})",
+                    cw,
+                    ch
+                );
+                return 1;
+            }
+            say!("battery: console leaf tiled {} {}", cw, ch);
         }
-        say!("battery: console leaf tiled {} {}", cw, ch);
+        None => {
+            if layout
+                .lines()
+                .any(|l| leaf_surface(l).is_some_and(|n| n != a.id && n != b.id))
+            {
+                say!("tapestry-battery: FAIL foreign_pane found no console leaf in a layout that hosts one");
+                return 1;
+            }
+        }
     }
     say!("tapestry-battery: structure OK");
     say!(
@@ -1580,6 +1612,87 @@ pub extern "C" fn rs_main() -> i64 {
         drop(c2);
         drop(c1);
         say!("battery: claim OK");
+    }
+
+    // The declared-handoff control, one variable away from the undeclared
+    // check above: the SAME console leaf goes to the ZERO rect the moment the
+    // conn HOSTING A declares `session on` (a standalone Surface owns its own
+    // conn; `root` here is a separate, idle one -- an idle declaration holds
+    // no display, by design), and gets its column back on `session off`.
+    // Without it, "tiled because undeclared" is indistinguishable from
+    // "backgrounding is absent".
+    {
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        let Some(cid) = foreign_pane(&fresh, &[a.id]) else {
+            say!("tapestry-battery: FAIL declare control: no console leaf to background");
+            return 1;
+        };
+        let (w0, h0) = pane_wh(root, cid);
+        if w0 == 0 || h0 == 0 {
+            say!("tapestry-battery: FAIL declare control: console leaf not tiled beforehand");
+            return 1;
+        }
+        if let Err(e) = a.global_ctl("session on") {
+            say!(
+                "tapestry-battery: FAIL declare control: session on refused {:?}",
+                e
+            );
+            return 1;
+        }
+        let (w1, h1) = pane_wh(root, cid);
+        if w1 != 0 || h1 != 0 {
+            say!(
+                "tapestry-battery: FAIL declare control: console leaf still tiled {} {} under a declared session",
+                w1,
+                h1
+            );
+            return 1;
+        }
+        say!("battery: console leaf backgrounded by the declaration");
+        // The round-1 C-F2 regression: a DECLARED session's `close` on the
+        // container holding the (transparent, backgrounded) console leaf is
+        // refused -- the destructive verb sees the whole subtree, not the
+        // session's view of it. Pre-fix the close succeeded and the console
+        // renderer received TEV_CLOSE.
+        let Some(rid) = layout_root_id(&fresh) else {
+            say!("tapestry-battery: FAIL declare control: no root container in the layout");
+            return 1;
+        };
+        let rc = raw_write(root, &alloc::format!("pane/{}/ctl", rid), "close");
+        if rc != -1 {
+            say!(
+                "tapestry-battery: FAIL declare control: close of the console's container rc {} want -1 (E_PERM)",
+                rc
+            );
+            return 1;
+        }
+        let (wc, hc) = pane_wh(root, cid);
+        if (wc, hc) != (0, 0)
+            || foreign_pane(&read_file(root, "layout").unwrap_or_default(), &[a.id]).is_none()
+        {
+            say!("tapestry-battery: FAIL declare control: the refused close still disturbed the console leaf");
+            return 1;
+        }
+        say!("battery: declared session cannot close the console's container");
+        if let Err(e) = a.global_ctl("session off") {
+            say!(
+                "tapestry-battery: FAIL declare control: session off refused {:?}",
+                e
+            );
+            return 1;
+        }
+        let (w2, h2) = pane_wh(root, cid);
+        if (w2, h2) != (w0, h0) {
+            say!(
+                "tapestry-battery: FAIL declare control: console leaf {} {} after session off, want {} {}",
+                w2,
+                h2,
+                w0,
+                h0
+            );
+            return 1;
+        }
+        say!("battery: console leaf restored {} {}", w2, h2);
     }
 
     // Focus returns to the console's pane by the CLOSE path, not by a write

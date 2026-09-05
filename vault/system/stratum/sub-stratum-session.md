@@ -15,7 +15,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -193,3 +193,21 @@ for on a single vCPU.
 [[chg-2026-08-02-stratum-sweep]].
 
 [[chg-2026-08-16-seven-small-surfaces]] records this interval.
+
+## login masks the identity capability on every session spawn (2026-09-05, KT-1 C-F1/C-F7)
+
+`Command` defaults to `cap_mask: !0` -- a child inherits every capability its
+parent holds -- and login holds `CAP_SET_IDENTITY` (it is the one principal-
+stamping act on the seat). Until 062efe18 login masked only its `ut` spawn,
+so `halcyond --session`, every kaua-term it spawned, every shell in every
+tile, and `aurora-push` (which parses a user-controlled file) ran with the
+setuid-equivalent: a program in any tile could spawn as any user. Now every
+`Command::new` under login carries a mask: stratumd `T_CAP_CSPRNG_READ`,
+aurora-push `0`, `ut` and `halcyond --session` `SHELL_CAPS` (LOCK_PAGES |
+CSPRNG_READ); the session compositor masks `!T_CAP_SET_IDENTITY` again on
+each tile spawn (the second hop's own guard), and the kernel intersects, so
+both hops are monotone. Witness: `/bin/caps-probe` in a session tile -- a
+plain spawn succeeds, the same spawn with an identity request is REFUSED.
+Open here: [[seam-login-halcyond-fallback]] (a lever-on image whose
+compositor cannot start re-prompts forever).
+

@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md", "docs/LOOM.md"]
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -155,3 +155,15 @@ best-effort with a measured margin rather than as a guarantee.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+## ptyhost: a zero-count master write is back-pressure, not death (2026-09-05, KT-1 B-F8)
+
+A raw-mode app that stops reading its master fills the m2s ring, and the
+master write of the next key returns 0 -- not an error. ptyhost's input pump
+exited on it for good (and the kaua-term, sharing the shape, tore the key
+sequence). Both now retry a zero count up to 200 x 1 ms, parked in torpor,
+before dropping the remainder; ptyhost exits its pump only on a negative
+count. The master-write lock is held across the nap, so a terminal reply
+(CPR) can wait <= 200 ms and then itself retry <= 200 ms -- a bounded 400 ms
+stall, never a deadlock, because the holder always gives up.
+

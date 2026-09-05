@@ -153,6 +153,98 @@ held` (a contained crash), and `session logout (code C)` (the last tile gone).
 §14.12). Baked under `THYLACINE_HALCYON_SESSION=1`; the `ls-gfx-session`
 scenario probes the post-login markers + SKIPs cleanly on a default image.
 
+## The session compositor after the KT-1 audit (rounds 1-2, 2026-09-05)
+
+The batched KT-1 holotype (three prosecutors on 53ee407f, two on the fixes)
+reshaped the `--session` loop in seven places. This section is the as-built
+form; the finding records are `vault/record/audits/adt-kt1-r{1,2}.md`.
+
+**The declaration (`connect`).** Before its first surface, the compositor
+writes `session on` through `EventRing::global_ctl` on the conn every tile
+surface will share: that act, not its principal, is what backgrounds the
+console renderer (HALCYON.md §14.12 step 4). A refusal -- E_BUSY while the
+seat is held by another principal's live tiles, E_PERM for a conn without a
+session principal -- is retried through `DECLARE_TRIES` (40 x 25 ms; a seat
+mid-handover clears within milliseconds because tapestryd takes an idle or
+same-principal holder over) and then TOLERATED: `connect` returns
+`declared = false`, the session runs UNDECLARED (its tiles beside the console
+like any user window, the ordinary surface cap), says once `session declare
+refused ... running UNDECLARED beside the console`, and `session up NxN px
+(undeclared)` marks it. It never exits here: login treats halcyond's exit as
+logout regardless of status, so exiting would re-prompt the seat forever
+(C-F12, `seam-login-halcyond-fallback`).
+
+**Identity.** login spawns halcyond with `.caps(SHELL_CAPS)` and halcyond
+spawns every kaua-term with `.caps(!T_CAP_SET_IDENTITY)`; the kernel
+intersects, so no tile program can spawn as another principal (C-F1, a P0:
+`Command` inherits every capability by default and login had masked only its
+`ut` path). `/bin/caps-probe` is the two-arm witness ls-gfx-session types into
+a tile: a plain spawn succeeds, the same spawn with an identity request is
+REFUSED.
+
+**Hidden leaves.** `parse_leaves_all` keeps every leaf with `Leaf.hidden`
+(the layout line ends in `hidden`: a zoom, a Tab sibling); `plan_tiles` never
+creates a tile for a hidden leaf and never drops one whose leaf is merely
+hidden -- only a leaf ABSENT from the tree is vanished (B-F2, a P0: the zoom
+chord killed every non-visible tile's shell and jobs). A hidden tile receives
+no CONFIGURE (the fans iterate visible leaves), so its grid keeps its size
+until it shows again.
+
+**Reconcile triggers.** `TEV_CONFIGURE` on any tile, `TEV_FOCUS`, a tile's
+clean exit, and `TEV_LAYOUT` (tapestryd event kind 10, sent to one surface of
+the DECLARED conn at every structural layout pass) all set `relayout`. The
+last exists because a split of an EMPTY leaf fans no CONFIGURE and no FOCUS to
+anyone, and the empties are exactly what the session must claim (B-F10 /
+B2-F6). A refused claim (the surface pool at its cap) says once and CLOSES the
+leaf rather than leaving a focused empty leaf with the keyboard routed into it
+(C-F5).
+
+**The down channel (`halcyond::downq::DownQueue`).** halcyond is a tile's
+pipe's only writer and must never block on it (a parked compositor is a dead
+seat; natives cannot mark a pipe non-blocking). Input is queued and delivered
+one byte per ready POLLOUT (`drain_down`: POLLOUT means >= 1 free byte and a
+one-byte write from the sole writer cannot block). Two record classes, two
+policies: KEYS are bounded to `DOWN_PENDING_MAX` (4096 B) and the NEWEST drop
+past it, said once; the GEOMETRY record is never dropped -- one waits
+(latest-wins), it goes out ahead of any further key, and a record in flight
+is never split by another (B2-F3: a Resize dropped at the cap was never
+re-sent, no later CONFIGURE at the same size re-queues it, and nothing acks
+it -- the tile stayed at the old size for life). The unified poll registers a
+POLLOUT entry per tile with pending input, stopping at the kernel's
+`POLL_MAX_NFDS` (64; B2-F8: 1 + 32 + 32 = 65 would have returned -1, which
+the loop reads as "compositor gone").
+
+**The scrollback budget.** ONE `SESSION_SCROLLBACK_BUDGET` (32 MiB) shared by
+tile count: every reconcile calls `Transcript::set_max_cost(budget / N)` on
+every tile, and `set_max_cost` now evicts AT ONCE (freezing an over-cap open
+block so the loop can reach it) -- a quiet tile never pushes, so a lazy cap
+let it keep its whole old share and the retained sum grew as 32 MiB x H(N)
+(B2-F2). Every retained line is charged `ITEM_OVERHEAD` on top of its cells
+(B-F5: empty lines were free). `Tile::with_budget` seeds a new tile's share.
+
+**The windowed render (`Tile::render`).** The budget bounds what is STORED;
+the old render laid out EVERY frozen block per paint, a transient of ~1.8x the
+retained bytes charged to nothing -- one tile with ~20K full-width rows of
+history, well under its share, OOM'd the whole session at its next paint
+(B2-F1, the round-2 P1; `vault/hazards/haz-budget-stored-not-derived.md`).
+`render` now keeps a per-block HEIGHT cache (`heights`: `(block id, laid
+height)`, 12 B/block, keyed by width, aligned to the front-evicted /
+back-appended frozen deque -- block ids are strictly increasing along it);
+the exact content height and every block's screen-y follow from the cache,
+and only the blocks intersecting the view (plus the open block, which
+changes) are laid out, one `LaidBlock` alive at a time, dropped after it
+renders. The transient is O(view) wherever the view scrolled; a width change
+re-lays every block once for its height (time, not memory). `laid_last`
+witnesses the window (host tests: a warm render lays out <= 4 blocks for 200
+in history; the cache follows eviction and width changes; the content height
+equals the whole-history computation).
+
+**Other round-1 fixes.** `--home <dir>` is forwarded from login through
+halcyond to every tile's `ut` (B-F9: `$home`, `cd`, history and the per-user
+`/tmp` bind were skipped in every tile). A refused `session on` and a
+compositor crash with several tiles are the unconstructed arms (see the
+tapestryd dossier's Tests).
+
 ## The tile model (KT-1.5b-ii): the live grid + the scrollback ingest
 
 The data flow above is halcyond's **console** path (one `/dev/consdrain` byte

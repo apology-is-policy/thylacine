@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-02
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -1187,3 +1187,89 @@ cannot be ordered by rect. `ls-gfx-session` carries the F2 geometry leg (two
 session tiles must sum >= 85% of the display width; witness captured THEN
 spawn, in sequence -- expect matches by arm ORDER). The battery + scenarios
 remain [[seam-tapestry-battery-unowned]].
+
+## The declared seat: the display handoff as an act, the takeover rule, and the KT-1 audit's compositor fixes (2026-09-05, rounds 1-2)
+
+**The trigger was wrong (round 1, C-F6).** d-1b backgrounded the console
+renderer whenever a leaf's `owner_principal` was a real user -- and
+`principal_is_session` is true for EVERY logged-in user, so any user program
+that drew a window from the console shell (DOSBox, tapestry-demo, the
+battery) put the console to sleep: a default-boot behaviour change shipped
+under a "byte-identical console path" claim. The handoff is now an ACT of the
+session compositor: `session on` on its own ctl conn before its first surface
+hosts (`global_ctl`, Session-principal-gated; the renderer and every sentinel
+peer are E_PERM). `Comp.session_conns` holds at most one `(conn, principal)`;
+`has_session_tree` is true iff the declared conn hosts a leaf
+(`hosted_leaves`, visibility-independent), and only then does `bg_tiling`
+collect the sentinel-principal leaves. A user window never backgrounds
+anything; a session-less display is the empty set, byte-identical.
+
+**The seat is the principal's (round 2, C2-F1 + B2-F5).** Round 1 made the
+slot first-come with no takeover, and halcyond died on a refusal -- so any
+Session conn that had written `session on` (a same-user program; an orphan of
+a previous user, which the getty loop never kills) held the seat until it
+died, and login's "exit is logout" turned every later graphical login into
+the C-F12 re-prompt loop. Now `session on` takes the seat over from a holder
+of the SAME principal (a restarted compositor whose dead conn is not yet
+retired -- the B2-F5 race) and from ANY holder that hosts nothing (an idle
+declaration holds no display); only a holder hosting leaves for another
+principal keeps it, answering E_BUSY with a log line naming it. The client
+half: halcyond retries a refused declaration through `DECLARE_TRIES` (25 ms
+apart) and then runs UNDECLARED -- its tiles tile beside the console like any
+user window, the surface cap is the ordinary one, and `session up ...
+(undeclared)` says so -- never exiting into the login loop. The declaration
+clears in `retire_conn` AFTER the retire loop (C2-F2): a crash with N tiles
+keeps the console backgrounded through the N-1 intermediate reconciles and
+lands one transition to `Direct(console)`; the last retire already sees a
+declared conn hosting nothing, so the end state is identical to `session
+off`'s.
+
+**`TEV_LAYOUT` (kind 10; round 2, B2-F6).** A structural pass whose change
+touches no hosted surface -- a split of an EMPTY leaf -- fans no CONFIGURE
+(nothing hosted changed size) and no FOCUS (no surface gained it), so the
+conn that claims empties learned of them only at an unrelated event. The
+structural branch now pushes `TEV_LAYOUT` (`value` = the layout epoch) to ONE
+surface of the declared conn (`session_notify_surface`, the lowest slot it
+owns; one event per change, not one per tile); a wedged push retires that
+surface like any other fan target. Session-less displays emit none.
+
+**The compositor's other round-1 fixes.** `close` runs `actor_owns_subtree_all`
+-- a Session owns a subtree for the DESTRUCTIVE verb only if every hosted
+surface in it is its own, so the transparent (backgrounded, SYSTEM) console
+leaf blocks a `close` of any container holding it (C-F2, a P1: the console
+renderer received TEV_CLOSE and exited); `split`/`focus`/`zoom`/`tab`/`move`
+keep the guarded transparency. `foreground_leaf_count` (visible AND not
+backgrounded) drives the inset decision and the Direct predicate additionally
+requires the lone foreground leaf's CONTENT rect to equal the display rect
+(C-F3/C-F4: Direct was chosen against an inset layout because the zero-rect
+leaf counted; a session going 2 -> 1 kept a ring). `is_bg_subtree` (a leaf:
+its flag; a container: non-empty and all children bg) replaces the one-level
+`is_bg_leaf` at every child filter (C-F8). `Surface.backgrounded` is DERIVED
+from the tree flag each pass (`bg_now` = the surfaces of `bg_tiling` leaves;
+C-F10 -- the two-flags trap the F2 section names is dissolved). A declared
+conn mints up to `MAX_SURFACES_PER_RENDERER`, the pool grew by `2 *
+MAX_PANES` so the bound is exact (C-F5: the 4-surface cap dead-keyboarded the
+fifth tile). `exec_chord` stamps a chord-split leaf with the focused leaf's
+owner only when that is a real Session principal, else 0 (C-F9);
+`surface_target` is None for an empty content rect (C-F13).
+
+**Prosecution.** The declaration's authority (Session-principal only; `off`
+clears only the caller's entry; a repeat `on` is idempotent); the takeover
+rule's two arms vs a holder mid-teardown (its surfaces retiring while the
+newcomer declares -- `conn_hosts` reads the live tree); the intermediate
+retire passes with the conn still declared (a wedge-retire re-entering
+`reconcile`); `TEV_LAYOUT`'s target when the declared conn's lowest slot is a
+surface being retired in the same pass; `actor_owns_subtree_all`'s vacuous
+all-empty subtree (the H-4b F1 deviation, unchanged); the Direct conjunct vs
+the status carve; `session_conns` never exceeding one entry on any path.
+
+**Tests.** ls-gfx-panes: the undeclared control (the console leaf keeps a real
+column while a user client hosts two surfaces) and the declared control (the
+battery's own conn writes `session on`: the same leaf reads the ZERO rect, a
+`close` on the container holding it answers E_PERM with the leaf undisturbed,
+`session off` restores its column) -- the one-variable pair. ls-gfx-session:
+`session declared by conn N` precedes the first present; caps-probe; the zoom
+survival, lone-tile and 1264/1280 geometry legs. Unconstructed: the takeover
+arms (a second conn of one principal; a foreign holder), a crash with >= 2
+tiles, a Tab container of only backgrounded leaves.
+

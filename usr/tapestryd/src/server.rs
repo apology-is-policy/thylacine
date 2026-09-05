@@ -822,6 +822,13 @@ pub const TEV_FOCUS: u16 = 7;
 // stream-END is still the event-fid EOF (poll_events' dead-surface arm +
 // h_read's gone-surface arm). Request and end are distinct on purpose.
 pub const TEV_CLOSE: u16 = 8;
+/// The layout tree changed structurally: re-read `layout`. Sent to ONE
+/// surface of the DECLARED session conn (section 18.4 kind 10; `value` =
+/// the layout epoch). A split of an EMPTY leaf fans no CONFIGURE (nothing
+/// hosted changes size) and no FOCUS (no surface gains it), so the conn
+/// that claims empties would otherwise learn of them only at an unrelated
+/// event.
+pub const TEV_LAYOUT: u16 = 10;
 
 #[derive(Clone, Copy)]
 pub struct Tevent {
@@ -1593,7 +1600,9 @@ pub struct Comp {
     /// never on a surface's principal: a user program drawing a window is
     /// not a session, and must not put the console renderer to sleep. One
     /// at a time (a display has one seat); cleared with the conn.
-    session_conns: Vec<u64>,
+    /// The DECLARED session conn (`session on`) with its principal: the seat.
+    /// At most one entry; cleared when the conn retires.
+    session_conns: Vec<(u64, u32)>,
     /// The FRAME clock (section 18.4): a synthesized fixed-rate tick.
     pub tick: u64,
     pub clock_hz: u32,
@@ -5791,7 +5800,7 @@ impl Comp {
         let hosted = self.layout.hosted_leaves();
         let has_session_tree = hosted.iter().any(|&(_, n)| {
             self.surf(n)
-                .is_some_and(|s| self.session_conns.contains(&s.owner_conn))
+                .is_some_and(|s| self.session_declared(s.owner_conn))
         });
         let bg_tiling: Vec<usize> = if has_session_tree {
             hosted
@@ -6098,6 +6107,23 @@ impl Comp {
                     // relayout hook their owner repaints or resizes on.
                     for (n, t) in self.visible_chrome() {
                         if !self.emit_configure_to(n, t.w, t.h) {
+                            wedged.push(n);
+                        }
+                    }
+                    // The declared session conn hears every structural
+                    // change on one of its surfaces (TEV_LAYOUT): the
+                    // empties it owns fan nothing else.
+                    if let Some(n) = self.session_notify_surface() {
+                        let ev = Tevent {
+                            kind: TEV_LAYOUT,
+                            code: 0,
+                            value: self.layout.epoch as u32,
+                            rune: 0,
+                            mods: 0,
+                            flags: 0,
+                            tick: self.tick,
+                        };
+                        if !self.push_event(n, ev) {
                             wedged.push(n);
                         }
                     }
@@ -6705,13 +6731,38 @@ impl Comp {
     }
 
     /// Retire every surface owned by a dying conn (teardown / Tversion).
+    /// The declaration clears AFTER the retires: each retire reconciles, and
+    /// with the conn still declared the console stays backgrounded through
+    /// the intermediate passes (a crash with N tiles is one transition to
+    /// `Direct(console)`, not N-1 composed passes of dead tiles beside it);
+    /// the last retire already sees a declared conn hosting nothing.
     fn retire_conn(&mut self, conn_id: u64) {
-        self.session_conns.retain(|&c| c != conn_id);
         for n in 0..MAX_SURFACES {
             if self.surf(n).map_or(false, |s| s.owner_conn == conn_id) {
                 self.retire(n);
             }
         }
+        self.session_conns.retain(|&(c, _)| c != conn_id);
+    }
+
+    /// Is `conn` the declared session conn (the seat)?
+    fn session_declared(&self, conn: u64) -> bool {
+        self.session_conns.iter().any(|&(c, _)| c == conn)
+    }
+
+    /// The lowest-slot surface of the declared session conn, if any -- the
+    /// one TEV_LAYOUT rides (one event per change, not one per tile).
+    fn session_notify_surface(&self) -> Option<usize> {
+        let &(conn, _) = self.session_conns.first()?;
+        (0..MAX_SURFACES).find(|&n| self.surf(n).is_some_and(|s| s.owner_conn == conn))
+    }
+
+    /// Does `conn` host a leaf (any hosted surface it owns)?
+    fn conn_hosts(&self, conn: u64) -> bool {
+        self.layout
+            .hosted_leaves()
+            .iter()
+            .any(|&(_, n)| self.surf(n).is_some_and(|s| s.owner_conn == conn))
     }
 
     /// H-4b-2: reap a departed session's empty scaffolding. `retire_conn`
@@ -13419,7 +13470,7 @@ impl Conn {
             // chrome surface per visible leaf on top of its own, so its cap
             // is widened by MAX_PANES; the global pool is sized so every
             // conn can reach its cap at once (nothing starves).
-            let cap = if self.peer_is_renderer() || comp.session_conns.contains(&self.conn_id) {
+            let cap = if self.peer_is_renderer() || comp.session_declared(self.conn_id) {
                 MAX_SURFACES_PER_RENDERER
             } else {
                 MAX_SURFACES_PER_CONN
@@ -15525,16 +15576,37 @@ impl Conn {
             }
             match rest.trim() {
                 "on" => {
-                    if let Some(&other) = comp.session_conns.first() {
-                        if other != self.conn_id {
+                    if let Some(&(other, other_p)) = comp.session_conns.first() {
+                        if other == self.conn_id {
+                            return Ok(());
+                        }
+                        // The seat is the PRINCIPAL's, held through a conn:
+                        // a later conn of the same principal (a restarted
+                        // compositor, its dead conn not yet retired) takes
+                        // it over, and so does anyone when the holder hosts
+                        // nothing (an idle declaration holds no display).
+                        // Only a holder that hosts leaves for ANOTHER
+                        // principal keeps it: the newcomer runs undeclared,
+                        // beside the console -- never a login loop.
+                        if other_p != self.peer_principal && comp.conn_hosts(other) {
+                            say!(
+                                "tapestryd: session declare refused: conn {} (principal {}) holds the seat",
+                                other,
+                                other_p
+                            );
                             return Err(p9::E_BUSY);
                         }
-                        return Ok(());
+                        say!(
+                            "tapestryd: session takeover: conn {} -> conn {}",
+                            other,
+                            self.conn_id
+                        );
+                        comp.session_conns.clear();
                     }
-                    comp.session_conns.push(self.conn_id);
+                    comp.session_conns.push((self.conn_id, self.peer_principal));
                     say!("tapestryd: session declared by conn {}", self.conn_id);
                 }
-                "off" => comp.session_conns.retain(|&c| c != self.conn_id),
+                "off" => comp.session_conns.retain(|&(c, _)| c != self.conn_id),
                 _ => return Err(p9::E_INVAL),
             }
             comp.reconcile();
