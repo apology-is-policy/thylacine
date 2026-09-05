@@ -1,8 +1,8 @@
-From 84880481c7516be14048b888c059291a8a66cd97 Mon Sep 17 00:00:00 2001
+From 3dfa3ce2497a33841a9ca1849d5fb07bc6412823 Mon Sep 17 00:00:00 2001
 From: clade <clade@thylacine>
 Date: Thu, 30 Jul 2026 12:07:44 +0000
-Subject: [PATCH 1/4] CL-7 spike: graft the 25.0.7 gallium OSMesa frontend onto
- 26.1.6
+Subject: [PATCH 01/23] CL-7 spike: graft the 25.0.7 gallium OSMesa frontend
+ onto 26.1.6
 
 Zero C source changes; three build-graph fixes (inc_mapi retired,
 glapi/glapi.h moved, two retired glapi symbols). Uncommitted work on a

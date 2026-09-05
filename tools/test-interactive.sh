@@ -98,6 +98,33 @@ if pgrep -f "qemu-system-aarch64.*$BUILD_DIR/" >/dev/null 2>&1; then
     exit 2
 fi
 reap_qemu() { pkill -9 -f "qemu-system-aarch64.*$BUILD_DIR/" 2>/dev/null || true; }
+
+# #224: the 2026-07-21 fix above narrowed this reaper from cross-tree to
+# TREE-WIDE, which closed the cross-tree half of the bug and left the intra-tree
+# half live. It still SIGKILLs every VM in this tree, including boots it did not
+# start -- so an SMP gate running concurrently here loses a boot to a signal it
+# cannot see the source of, presenting as exactly the symptom the comment above
+# already names: "qemu GONE, guest healthy".
+#
+# Narrowing the pattern further is the wrong fix, because concurrency in one
+# tree is unsafe for a SECOND, independent reason: this gate and the SMP gate
+# both restore the same build/fixtures/pool.img, and pool_restore overwriting an
+# image under a live VM manufactures the corruption this gate exists to detect.
+# A narrower reaper would leave that collision in place and merely stop
+# announcing it. So REFUSE instead of killing: turn a silent mutual-corruption
+# race into an operator error with a name.
+#
+# This check MUST precede `trap reap_qemu EXIT` -- installing the trap first
+# would make the refusal itself kill the VM it is refusing to disturb.
+foreign_vms="$(pgrep -f "qemu-system-aarch64.*$BUILD_DIR/" 2>/dev/null | tr '\n' ' ')"
+if [[ -n "${foreign_vms// /}" ]]; then
+    echo "test-interactive: REFUSING to start -- a VM from this tree is already running (pid(s): ${foreign_vms% })." >&2
+    echo "  This gate's reaper is tree-wide, so starting would SIGKILL a boot it does not own," >&2
+    echo "  and both gates restore the same $BUILD_DIR/fixtures/pool.img." >&2
+    echo "  Wait for the other run to finish, or use a separate worktree." >&2
+    exit 2
+fi
+
 trap reap_qemu EXIT
 
 # G-2: the SLOT-scoped reaper. reap_qemu above kills every VM in this tree,
@@ -448,6 +475,16 @@ run_one_scenario() {
     export THYLACINE_POOL_IMG="$slot/pool.img"
     export THYLACINE_DISK_IMG="$slot/disk.img"
     export THYLACINE_QMP_SOCK="$slot/qmp.sock"
+    # The SECOND monitor #230 gave run-vm.sh for the console screendump gate
+    # (`build/qmp-gate.sock` by default) is a fixed path too, and it arrived
+    # AFTER the paragraph above was written -- so at JOBS=3 the first batch's
+    # three VMs raced on it: run-vm.sh's `rm -f` then bind, interleaved, and
+    # the loser died at t=0 with "Failed to bind socket ... File exists"
+    # (three attempt-1 INFRA failures in one 37-scenario run, each retried
+    # green -- exactly the deterministic-collision-read-as-flake this comment
+    # warns about). Per-slot like its sibling; run-vm.sh reads the same
+    # variable test.sh's gate does.
+    export THYLACINE_QMP_SOCK2="$slot/qmp-gate.sock"
     # Spread the VNC probe's starting point per slot. lc_pick_vnc_display derives
     # its base from the REPO PATH, which separates trees but gives every scenario
     # in THIS tree the same base -- fine when one runs at a time, a race between
@@ -610,7 +647,7 @@ run_one_scenario() {
 # (verdict, timings) stays until the parent has merged it, and every artifact a
 # failure needs -- transcripts, steps, per-attempt archives -- lives in build/
 # and is not touched here.
-slot_release() { rm -f "$1/pool.img" "$1/disk.img" "$1/qmp.sock" 2>/dev/null || true; }
+slot_release() { rm -f "$1/pool.img" "$1/disk.img" "$1/qmp.sock" "$1/qmp-gate.sock" 2>/dev/null || true; }
 
 # --- G-2: run the scenarios, up to $JOBS at a time ----------------------------
 #

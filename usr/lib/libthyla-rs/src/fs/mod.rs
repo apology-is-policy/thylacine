@@ -85,17 +85,20 @@ pub fn is_dir<P: AsRef<Path>>(path: P) -> bool {
 }
 
 // =============================================================================
-// Mutation free functions (mirror std::fs). Each splits `path` lexically at
-// its LAST component (`file::split_parent_leaf` -- nothing else is resolved
-// in userspace, #87), opens the parent prefix through the kernel stalk
-// resolver (`file::with_parent_fd`, T_OPATH, so the parent carries the
-// RIGHT_WRITE the SYS_WALK_CREATE / SYS_UNLINK / SYS_RENAME handlers gate
-// on and every `.` / `..` / non-directory prefix is gated kernel-side),
-// applies its POSIX leaf row (trailing slash / `.` / `..` -- Linux-shaped,
-// the #86 per-caller table one layer up), and drives the raw syscall on the
-// (parent_fd, leaf) pair. NB: devramfs (the read-only boot FS) leaves the
-// .create / .unlink / .rename Dev slots NULL, so these succeed only on the
-// Stratum-backed (dev9p) FS reachable after the pivot.
+// Mutation free functions (mirror std::fs). `create_dir` is one
+// SYS_OPEN_CREATE since #50 (the kernel splits + applies the leaf rows).
+// The others each split `path` lexically at its LAST component
+// (`file::split_parent_leaf` -- nothing else is resolved in userspace, #87),
+// open the parent prefix through the kernel stalk resolver
+// (`file::with_parent_fd`, T_OPATH, so the parent carries the RIGHT_WRITE
+// the SYS_UNLINK / SYS_RENAME handlers gate on and every `.` / `..` /
+// non-directory prefix is gated kernel-side), apply their POSIX leaf row
+// (trailing slash / `.` / `..` -- Linux-shaped, the #86 per-caller table one
+// layer up; FINER than the kernel path-shells' rows, which is why these are
+// not #50-rewired), and drive the raw syscall on the (parent_fd, leaf)
+// pair. NB: devramfs (the read-only boot FS) leaves the .create / .unlink /
+// .rename Dev slots NULL, so these succeed only on the Stratum-backed
+// (dev9p) FS reachable after the pivot.
 // =============================================================================
 
 use self::file::Leaf;
@@ -118,35 +121,34 @@ const CREATE_DIR_MODE: u32 = 0o755;
 /// if a parent component is not a directory; `PermissionDenied` (or another
 /// kernel error) when the parent denies creation or the FS is read-only.
 pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<()> {
-    let sp = file::split_parent_leaf(path.as_ref())?;
-    file::with_parent_fd(sp.parent, |parent| {
-        let name = match sp.leaf {
-            Leaf::Root | Leaf::Dot | Leaf::DotDot => return Err(Error::Exists),
-            Leaf::Name(n) => n,
-        };
-        // A trailing slash needs no probe: the leaf being created IS a
-        // directory (sp.dir_required strips silently).
-        // SAFETY: name is a valid &str (ptr+len); parent is FROM_ROOT or an
-        // owned dir handle carrying RIGHT_WRITE (T_OPATH). DMDIR selects a
-        // directory; OREAD is the create-time omode for a directory (the
-        // kernel SYS_WALK_CREATE contract + joey's mkdir_or_open idiom).
-        let rc = unsafe {
-            crate::t_walk_create(
-                parent,
-                name.as_ptr(),
-                name.len(),
-                crate::T_OREAD,
-                crate::T_WALK_CREATE_DMDIR | CREATE_DIR_MODE,
-            )
-        };
-        let fd = Error::from_syscall_return(rc)?;
-        // mkdir does not keep the new directory open; close the returned fd.
-        // SAFETY: fd is a live KOBJ_SPOOR handle this Proc just received.
-        unsafe {
-            let _ = crate::t_close(fd);
-        }
-        Ok(())
-    })
+    // #50: one SYS_OPEN_CREATE with DMDIR replaces the split + parent-T_OPATH
+    // + t_walk_create dance. The kernel's own leaf rows match this function's
+    // documented ones exactly: a root / `.` / `..` leaf answers EEXIST (the
+    // Linux filename_create row), a trailing slash strips (the created leaf
+    // IS a directory), and DMDIR is create-only (exclusive) opened OREAD.
+    let p = path.as_ref();
+    if p.is_empty() {
+        return Err(Error::InvalidArgument);
+    }
+    let s = p.as_str();
+    // SAFETY: s is a valid &str (ptr+len); FROM_ROOT joins a relative path
+    // against the cwd exactly as SYS_OPEN; DMDIR selects a directory.
+    let rc = unsafe {
+        crate::t_open_create(
+            crate::T_WALK_OPEN_FROM_ROOT,
+            s.as_ptr(),
+            s.len(),
+            crate::T_OREAD,
+            crate::T_WALK_CREATE_DMDIR | CREATE_DIR_MODE,
+        )
+    };
+    let fd = Error::from_syscall_return(rc)?;
+    // mkdir does not keep the new directory open; close the returned fd.
+    // SAFETY: fd is a live KOBJ_SPOOR handle this Proc just received.
+    unsafe {
+        let _ = crate::t_close(fd);
+    }
+    Ok(())
 }
 
 /// Remove the file `path` (a non-directory). Mirrors `std::fs::remove_file`.

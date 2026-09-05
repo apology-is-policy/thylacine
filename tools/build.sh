@@ -72,6 +72,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$REPO_ROOT/build"
 KERNEL_BUILD="$BUILD_DIR/kernel"
+
+# Detect-and-instruct (docs/BUILD-CONFIG-DESIGN.md 5.3): when a bake chunk's
+# input is absent, NAME the remedy rather than leaving the user to guess why a
+# chunk silently did not land. The pinned details live in tools/build-manifest.toml;
+# tools/forage.sh reads it and gathers what it can. The <target> passed here must
+# be a real forage target -- tools/test-detect-instruct.sh enforces that contract.
+forage_hint() {   # <forage-target> <human-name> <absent-path>
+    echo "    -> $2 absent ($3);  fetch it:  tools/forage.sh $1   ('tools/forage.sh status' = all inputs)"
+}
 USR_BUILD="$BUILD_DIR/usr"
 USR_RS_BUILD="$BUILD_DIR/usr-rs"
 # Generated build artifacts (e.g. the A-5c-c system-recovery-phrase header that
@@ -93,78 +102,79 @@ LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
 # lld as a package separate from llvm). Mirrors the cmake toolchains.
 LLD_PREFIX="${LLD_PREFIX:-/opt/homebrew/opt/lld}"
 
-target="${1:-all}"
-shift || true
+# The first positional is the build target; a LEADING option (e.g.
+# `build.sh --config <name>`, which the configurator prints) means "no explicit
+# target" -> default to `all` and leave the option for the loop below. Without
+# this, `--config` was consumed AS the target and its argument fell through to
+# "Unknown option: <name>".
+if [[ "${1:-}" == -* ]]; then
+    target="all"
+else
+    target="${1:-all}"
+    shift || true
+fi
 
-build_type="Debug"
-hardening_full="OFF"
-kaslr="OFF"
-sanitize=""
-no_tickless="OFF"
-# #61 (RW-11 R4-F1/F2): production boot shape. ON (default) keeps the in-kernel
-# test suite + joey's boot-test probe ladder (dev/CI); --production flips both
-# OFF for the lean V1.0 boot-to-getty.
-kernel_tests="ON"
-boot_probes="ON"
+# --- build configuration (tools/build-config.sh: the typed config artifact) ----
+# docs/BUILD-CONFIG-DESIGN.md. The old flag-bundles + scattered THYLACINE_* env
+# vars are now orthogonal axes resolved here; bc_export threads them onto the knobs
+# this script reads (build_type/kernel_tests/boot_probes/dev_accounts/hardening_full/
+# kaslr/sanitize/no_tickless + the bake env vars). Legacy flags stay as sugar; a bare
+# invocation applies the `default` preset -- the historical dev/CI shape (in-kernel
+# tests + boot-probe ladder ON) that make/tools/test.sh/the SMP gate rely on.
+BC_DIR_CONFIGS="$REPO_ROOT/configs"
+# shellcheck disable=SC1090
+. "$REPO_ROOT/tools/build-config.sh"
+bc_reset
 build_dir_override=""
 verbose=""
 extra_cmake_args=()
+config_selected=0      # did a --config/--production/--dev/--set flag run?
+show_config=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --release)
-            build_type="Release"
-            shift
-            ;;
-        --hardening-full)
-            hardening_full="ON"
-            shift
-            ;;
-        --kaslr)
-            kaslr="ON"
-            shift
-            ;;
-        --production)
-            # #61 (RW-11 R4-F1/F2): the V1.0 production boot shape. Drops both
-            # the in-kernel test suite (KERNEL_TESTS=OFF) and joey's boot-test
-            # probe ladder (THYLA_BOOT_PROBES=OFF), so the lean image boots
-            # straight to the login getty.
-            kernel_tests="OFF"
-            boot_probes="OFF"
-            shift
-            ;;
-        --sanitize=*)
-            # P1-I: opt-in sanitizer build. Currently supports
-            # --sanitize=undefined (UBSan trapping). KASAN deferred.
-            sanitize="${1#--sanitize=}"
-            shift
-            ;;
-        --no-tickless)
-            # TI-4e tickful-baseline capture: force the old 1 kHz-always idle
-            # (sched_idle_park go_tickless=false). Diagnostic-only; uses its own
-            # build dir so it never clobbers the production tickless kernel.
-            no_tickless="ON"
-            shift
-            ;;
-        --build-dir=*)
-            build_dir_override="${1#--build-dir=}"
-            shift
-            ;;
-        --verbose)
-            verbose="--verbose"
-            shift
-            ;;
-        --)
-            shift
-            extra_cmake_args+=("$@")
-            break
-            ;;
-        *)
-            echo "Unknown option: $1" >&2
-            exit 1
-            ;;
+        # -- the configurator interface (docs/BUILD-CONFIG-DESIGN.md) --
+        --config=*)    bc_apply_preset "${1#--config=}"; config_selected=1; shift ;;
+        --config)      bc_apply_preset "$2"; config_selected=1; shift 2 ;;
+        --with=*)      bc_apply_fragment "${1#--with=}"; shift ;;
+        --with)        bc_apply_fragment "$2"; shift 2 ;;
+        --set=*)       bc_set "${1#--set=}"; config_selected=1; shift ;;
+        --set)         bc_set "$2"; config_selected=1; shift 2 ;;
+        --show-config) show_config=1; shift ;;
+        # -- legacy sugar; preserved behavior (BUILD-CONFIG-DESIGN.md 4.3) --
+        --release)         bc_set BUILD_TYPE=release; shift ;;
+        --hardening-full)  bc_set HARDENING_FULL=y;   shift ;;
+        --kaslr)           bc_set KASLR=y;            shift ;;
+        --no-tickless)     bc_set TICKLESS=n;         shift ;;
+        --sanitize=*)      bc_set "SANITIZE=$(bc__san_alias "${1#--sanitize=}")"; shift ;;
+        --production)      # exact old lean shape: tests + probes OFF. Accounts now
+                           # stay on (DEV_ACCOUNTS default y) -- the finding-#1 fix.
+                           # `--config production` is the separate hardened preset.
+                           bc_set TESTS=n; bc_set BOOT_PROBES=n; config_selected=1; shift ;;
+        --dev)             bc_apply_preset dev; config_selected=1; shift ;;
+        # -- non-config passthroughs (unchanged) --
+        --build-dir=*)     build_dir_override="${1#--build-dir=}"; shift ;;
+        --verbose)         verbose="--verbose"; shift ;;
+        --)                shift; extra_cmake_args+=("$@"); break ;;
+        *)                 echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+# A bare invocation (no config-selecting flag) keeps the historical dev/CI shape.
+if [[ "$config_selected" == 0 ]]; then bc_apply_preset default; fi
+bc_resolve
+bc_export                 # -> build_type/kernel_tests/boot_probes/dev_accounts/
+                          #    hardening_full/kaslr/sanitize/no_tickless + bake env vars
+mkdir -p "$BUILD_DIR"
+bc_emit_config "$BUILD_DIR/.config"
+if [[ "$show_config" == 1 ]]; then
+    echo "== resolved build config ($BUILD_DIR/.config) =="
+    bc_show
+    echo "== -> build.sh knobs =="
+    echo "build_type=$build_type kernel_tests=$kernel_tests boot_probes=$boot_probes dev_accounts=$dev_accounts hardening=$hardening_full kaslr=$kaslr sanitize='$sanitize' no_tickless=$no_tickless"
+    if [[ ${#extra_cmake_args[@]} -gt 0 ]]; then printf 'cmake extra:'; printf ' %s' "${extra_cmake_args[@]}"; echo; fi
+    exit 0
+fi
 
 # Translate user-friendly --sanitize values to the CMake variable.
 sanitize_cmake=""
@@ -212,6 +222,11 @@ sysroot_is_stale() {
     local libc="$BUILD_DIR/sysroot/lib/libc.a"
     [[ -f "$libc" ]] || return 0
     [[ -f "$BUILD_DIR/sysroot/lib/libclang_rt.builtins.a" ]] || return 0
+    # The completion sentinel: build_sysroot rm -rf's the tree first and
+    # touches this LAST, so a build that died mid-way (after libc.a +
+    # builtins landed, before libsodium/GL/thyla headers) cannot read as
+    # fresh. libc.a + builtins alone under-cover the artifact set.
+    [[ -f "$BUILD_DIR/sysroot/.complete" ]] || return 0
     # Every in-tree SOURCE the sysroot is built from. `patches/` is the musl
     # boundary-line series; `compiler-rt/` is the Thylacine arm of the builtins
     # (W1u-b, #71) -- it was NOT watched when it landed, so a `build.sh all`
@@ -243,6 +258,11 @@ stratum_host_tools_stale() {
     [[ -x "$hb/src/cmd/stratum-mkfs/stratum-mkfs" ]] || return 0
     [[ -x "$sd" ]]                                   || return 0
     [[ -x "$hb/src/cmd/stratum-fs/stratum-fs" ]]     || return 0
+    # Completion sentinel: cmake --build writes binaries in place, so a
+    # killed link leaves a fresh-mtime truncated binary all three -x
+    # checks accept -- and with nothing newer in the source tree that
+    # state is otherwise STUCK as "fresh" until someone hand-deletes it.
+    [[ -f "$hb/.complete" ]] || return 0
     if [[ -n "$(find "$stratum_src/src" "$stratum_src/include" \
                      "$stratum_src/CMakeLists.txt" -newer "$sd" 2>/dev/null)" ]]; then
         return 0
@@ -285,6 +305,9 @@ build_kernel() {
     # G-7b: cross-build TyrQuake + stage the shareware pak BEFORE the pool
     # fixture (populate_stratum_pool puts the stage at /quake).
     build_tyrquake
+    # Warp W-4: cross-build vkQuake over venus + the W-3e SDL Vulkan glue.
+    # Self-skips (announced) without the fetched venus link set.
+    build_vkquake
     # Clade CL-1c: cross-build GNU make (the first parallel-spawner port;
     # drives CL-1b's posix_spawn/wait4). Baked into the ramfs as /make.
     build_gnumake
@@ -445,7 +468,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "kaua-term" "kaua-term-probe" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -454,6 +477,75 @@ EOF
             chmod 0755 "$ramfs_src/$bin"
         fi
     done
+
+    # Warp V-3b-3a (WARP-V3-DESIGN section 0.14): the Mesa Venus vn_renderer
+    # backend loader-less ICD proof. A pouch/musl static ET_EXEC cross-built by
+    # Mesa's meson (not a Thylacine crate, so it is not in the curated lists
+    # above); fetched to build/clade/gl/ like the other Mesa prove bins, but
+    # staged into the RAMFS ROOT (not the /clade pool tree) because the ICD
+    # dispatch it exercises needs no GL/pool/FS -- so it rides a pool-less boot.
+    # Optional + announced on the same terms as osmesa-prove: a tree without it
+    # bakes fine and joey's venus smoke reports the binary absent.
+    if [[ -f "$BUILD_DIR/clade/gl/thylacine-venus-prove" ]]; then
+        local vp_src="$BUILD_DIR/clade/gl/thylacine-venus-prove"
+        # STRIP into the ramfs (16.5 MiB unstripped -> the cpio each boot re-reads
+        # + guest-resident RAM), keeping the unstripped source in build/clade/gl/
+        # for fault-PC resolution -- the exact osmesa-prove posture. Fall back to a
+        # raw copy if llvm-strip is absent: unlike the TLS bins, venus-prove needs
+        # no strip to SPAWN (REVENANT R-4 retired the blob cap; exec demand-pages),
+        # so this is pure economy, not correctness.
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_src/thylacine-venus-prove" "$vp_src" 2>/dev/null \
+            || cp "$vp_src" "$ramfs_src/thylacine-venus-prove"
+        chmod 0755 "$ramfs_src/thylacine-venus-prove"
+        # Witness the SOURCE artifact's identity (size + short sha) so a STALE
+        # stage is visible in the bake log: this binary is fetched from the
+        # in-flux mesa fork and is covered by NO freshness check (the #120/#139
+        # stale-fetch trap -- a re-fetch that did not happen stages old bytes and
+        # announces green).
+        local vp_sz vp_sha
+        vp_sz=$(wc -c < "$vp_src" | tr -d ' ')
+        vp_sha=$(shasum -a 256 "$vp_src" 2>/dev/null | cut -c1-12)
+        echo "    ramfs: staged thylacine-venus-prove (Warp V-3b-3a; src ${vp_sz} B sha256:${vp_sha})"
+    else
+        echo "    ramfs: no thylacine-venus-prove at $BUILD_DIR/clade/gl/ -- staging without it (V-3b-3a venus smoke will report absent)"
+    fi
+
+    # Warp W-3e: the SDL2 Vulkan first-frame witness (SDL_thylacinevulkan glue
+    # + the W-3d swapchain + presents that DIRECT-bind). Same terms as
+    # venus-prove above in every respect: mesa-fork-fetched, ramfs root,
+    # stripped, optional + announced, identity-witnessed against the stale-fetch
+    # trap.
+    if [[ -f "$BUILD_DIR/clade/gl/thylacine-vk-sdl-prove" ]]; then
+        local vkp_src="$BUILD_DIR/clade/gl/thylacine-vk-sdl-prove"
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_src/thylacine-vk-sdl-prove" "$vkp_src" 2>/dev/null \
+            || cp "$vkp_src" "$ramfs_src/thylacine-vk-sdl-prove"
+        chmod 0755 "$ramfs_src/thylacine-vk-sdl-prove"
+        local vkp_sz vkp_sha
+        vkp_sz=$(wc -c < "$vkp_src" | tr -d ' ')
+        vkp_sha=$(shasum -a 256 "$vkp_src" 2>/dev/null | cut -c1-12)
+        echo "    ramfs: staged thylacine-vk-sdl-prove (Warp W-3e; src ${vkp_sz} B sha256:${vkp_sha})"
+    else
+        echo "    ramfs: no thylacine-vk-sdl-prove at $BUILD_DIR/clade/gl/ -- staging without it (W-3e vk-sdl smoke will report absent)"
+    fi
+
+    # Warp W-4: the vkQuake binary itself. Ramfs-resident (stripped it is
+    # ~7 MB -- the venus ICD without any LLVM, so no /clade/bin launcher
+    # detour); its DATA comes from the /quake pool bake (pak0.pak +
+    # vkquake.pak), so a ramfs-only boot runs the engine to the "couldn't
+    # load pak" error and no further. Optional + announced on the same
+    # terms as the witnesses above.
+    if [[ -f "$BUILD_DIR/clade/gl/vkquake" ]]; then
+        local vkq_src="$BUILD_DIR/clade/gl/vkquake"
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_src/vkquake" "$vkq_src" 2>/dev/null \
+            || cp "$vkq_src" "$ramfs_src/vkquake"
+        chmod 0755 "$ramfs_src/vkquake"
+        local vkq_sz vkq_sha
+        vkq_sz=$(wc -c < "$vkq_src" | tr -d ' ')
+        vkq_sha=$(shasum -a 256 "$vkq_src" 2>/dev/null | cut -c1-12)
+        echo "    ramfs: staged vkquake (Warp W-4; src ${vkq_sz} B sha256:${vkq_sha})"
+    else
+        echo "    ramfs: no vkquake at $BUILD_DIR/clade/gl/ -- staging without it (the W-4 FPS gate will skip)"
+    fi
 
     # GOOS=thylacine Stage 1: bake the Go boot probe (build_go_probes produced it
     # under $BUILD_DIR/go/). Shipped UNSTRIPPED (~1.5 MiB) -- the REVENANT
@@ -500,7 +592,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "tyr-glquake" "make" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "tyr-glquake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -677,6 +769,7 @@ build_go_goroot() {
     local go_bin="$GOFORK/bin/go"
     if [[ ! -x "$go_bin" ]]; then
         echo "==> Go GOROOT bake: fork toolchain not found at $go_bin -- skipping (set GOFORK)"
+        forage_hint go "the Go toolchain fork" "$go_bin"
         # Drop any stale stage from an earlier build: baking a tree the current
         # fork can no longer rebuild would ship outdated toolchain bytes.
         rm -rf "$BUILD_DIR/go/goroot"
@@ -913,6 +1006,7 @@ build_userspace() {
         -DCMAKE_BUILD_TYPE="$build_type" \
         -DTHYLA_GENERATED_DIR="$GEN_DIR" \
         -DTHYLA_BOOT_PROBES="$boot_probes" \
+        -DTHYLA_DEV_ACCOUNTS="$dev_accounts" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$USR_BUILD" $verbose
     echo "==> Userspace C built under $USR_BUILD"
@@ -1039,16 +1133,32 @@ VIVEOF
     # The second is not a convenience. MEASURED 2026-08-03: the minirootfs
     # contains exactly two ELF binaries (bin/busybox, sbin/apk) and BOTH are
     # ET_DYN PIE linked against /lib/ld-musl-aarch64.so.1 -- there is not one
-    # statically-linked file in the image. `kernel/elf.c` rejects ET_DYN
-    # (:83), PT_INTERP (:180) and PT_DYNAMIC (:185) by deliberate v1.0 policy,
-    # so the stock shell cannot load. Alpine's own busybox-static package is
-    # ET_EXEC with neither dynamic segment -- exactly the shape the loader
-    # accepts. See task #145 (dynamic linking) -- a separate deferred axis,
-    # NOT a LINEAGE gap.
+    # statically-linked file in the image.
     #
-    # /bin/sh is also a SYMLINK to /bin/busybox in the stock image, and the
-    # resolver does not follow symlinks (task #146), so the static binary is
-    # installed at BOTH paths as a real file rather than relinked.
+    # FULLY CLEARED as of DISTRO D-4 (2026-08-10). elf.c accepted neither
+    # ET_DYN nor PT_DYNAMIC when this was written; D-2 accepted both, and D-4
+    # made PT_INTERP dispatch to the interpreter instead of refusing -- so the
+    # stock dynamic busybox in this tarball IS runnable now, and the D4 legs in
+    # the gate script below prove it on a stock dynamic getconf named without
+    # its interpreter.
+    #
+    # busybox-static NEVERTHELESS STAYS the /bin/sh here, deliberately, and the
+    # reason is now blast radius rather than capability: /bin/sh is what every
+    # L6C-* leg runs through, so flipping it to the dynamic binary would make
+    # the entire leg list depend on D-4 and turn any D-4 hiccup into "the shell
+    # did not run" with no first-missing signal. Task #145 is closed by D-4.
+    #
+    # AND D-5 DID NOT FLIP IT. The flip was this comment's plan; D-5 measured the
+    # trade and rejected it, staging a SECOND bundle (/vivarium/alpine-stock,
+    # below) from the same tarball instead. Keeping the two apart is what buys
+    # the discrimination: a red stock gate beside a green L6C-A..I isolates the
+    # fault to the stock-dynamic path, where one flipped bundle would only have
+    # said "the shell did not run". The cost is a second 8.1 MiB pool copy.
+    #
+    # /bin/sh is also a SYMLINK to /bin/busybox in the stock image. D-1 made
+    # the resolver follow symlinks (task #146), but the static binary is still
+    # installed at BOTH paths as a real file: what /bin/sh must point AT here
+    # is the substitute, not the stock PIE the link names.
     local tarball="${THYLACINE_ALPINE_TARBALL:-}"
     if [[ -z "$tarball" ]]; then
         tarball="$(ls "$REPO_ROOT/build/cache"/alpine-minirootfs-*-aarch64.tar.gz 2>/dev/null | head -1 || true)"
@@ -1056,6 +1166,46 @@ VIVEOF
     local bbapk="${THYLACINE_BUSYBOX_STATIC_APK:-}"
     if [[ -z "$bbapk" ]]; then
         bbapk="$(ls "$REPO_ROOT/build/cache"/busybox-static-*.apk 2>/dev/null | head -1 || true)"
+    fi
+
+    # DISTRO D-5: both external inputs are sha256-PINNED.
+    #
+    # Discovery stays a GLOB on purpose. Pinning the filename instead would turn
+    # a wrong-version drop into "no tarball found" -- a silent hermetic skip of
+    # the arc gate, which is the failure mode this project keeps re-learning. A
+    # glob plus a hash check gives the three outcomes we actually want: absent is
+    # a skip (the default build stays hermetic), present-and-matching proceeds,
+    # and present-but-different is a LOUD build failure.
+    #
+    # A mismatch has to be fatal because every expected value downstream was
+    # derived from these exact bytes -- the D2/D3/D4 legs' output strings, and
+    # D-5's in-guest VERSION_ID assertion. A different image would quietly move
+    # what "PASS" means. To adopt one, change the pin here AND the stock bundle's
+    # VERSION_ID leg below, together, in one reviewable edit.
+    local alpine_sha="f31202c4070c4ef7de9e157e1bd01cb4da3a2150035d74ea5372c5e86f1efac1"
+    local bbapk_sha="6fd7ea97062beb51fa785ba858f823e1dfe4daf6bfa91ff4d5359b1061988c69"
+    local got_sha
+    if [[ -n "$tarball" && -f "$tarball" ]]; then
+        got_sha="$(shasum -a 256 "$tarball" | awk '{print $1}')"
+        if [[ "$got_sha" != "$alpine_sha" ]]; then
+            echo "==> viv bundles: Alpine minirootfs sha256 MISMATCH -- refusing to stage" >&2
+            echo "      file     $tarball" >&2
+            echo "      got      $got_sha" >&2
+            echo "      expected $alpine_sha (alpine-minirootfs-3.21.0-aarch64)" >&2
+            echo "    The gate legs' expected output was measured against the pinned image;" >&2
+            echo "    update the pin in tools/build.sh AND the stock bundle's VERSION_ID leg." >&2
+            exit 1
+        fi
+    fi
+    if [[ -n "$bbapk" && -f "$bbapk" ]]; then
+        got_sha="$(shasum -a 256 "$bbapk" | awk '{print $1}')"
+        if [[ "$got_sha" != "$bbapk_sha" ]]; then
+            echo "==> viv bundles: busybox-static apk sha256 MISMATCH -- refusing to stage" >&2
+            echo "      file     $bbapk" >&2
+            echo "      got      $got_sha" >&2
+            echo "      expected $bbapk_sha (busybox-static-1.37.0-r14)" >&2
+            exit 1
+        fi
     fi
     if [[ -n "$tarball" && -f "$tarball" ]]; then
         local ab="$vstage/alpine"
@@ -1097,8 +1247,46 @@ echo L6C-A-shell-runs
 sub=$(/bin/busybox echo captured); [ "$sub" = captured ] && echo L6C-F-substitution
 i=0; for w in a b c; do i=$(/bin/busybox expr $i + 1); done; [ "$i" = 3 ] && echo L6C-G-loop
 /bin/busybox sh -c '/bin/busybox echo nested' && echo L6C-H-nested-shell
+err=$( { /bin/busybox yes 2>&3 | /bin/busybox head -n 1 >&3; } 3>&1 ); [ "$err" = y ] && echo L6C-J-sigpipe-kills-silently
+err2=$( { { trap "" PIPE; i=0; while [ $i -lt 4000 ]; do echo yyyyyyyyyyyyyyyy || break; i=$((i+1)); done; } 2>&3 | /bin/busybox head -n 1 >&3; } 3>&1 ); case "$err2" in *"write error"*) echo L6C-K-sigign-epipe-message ;; esac
+echo L6C-K-RAW:$err2
+err3=$( { { i=0; while [ $i -lt 4000 ]; do echo yyyyyyyyyyyyyyyy || break; i=$((i+1)); done; } 2>&3 | /bin/busybox head -n 1 >&3; } 3>&1 ); [ "$err3" = yyyyyyyyyyyyyyyy ] && echo L6C-L-dfl-writer-killed-silently
 /bin/busybox false; echo L6C-I-exitcode=$?
+echo D2-LDSO-BEGIN
+/lib/ld-musl-aarch64.so.1 2>&1
+echo D2-LDSO-END-rc=$?
+ldso_out=$(/lib/ld-musl-aarch64.so.1 2>&1)
+case "$ldso_out" in *"Dynamic Program Loader"*) echo D2-A-stock-ldso-usage ;; esac
+case "$ldso_out" in *"musl libc (aarch64)"*) echo D2-B-stock-ldso-arch ;; esac
+echo D3-GETCONF-BEGIN
+/lib/ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE 2>&1
+echo D3-GETCONF-END-rc=$?
+d3_out=$(/lib/ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE 2>&1); d3_rc=$?
+[ "$d3_rc" = 0 ] && [ "$d3_out" = 4096 ] && echo D3-A-getconf-pagesize-4096
+echo D4-BYNAME-BEGIN
+/usr/bin/getconf PAGESIZE 2>&1
+echo D4-BYNAME-END-rc=$?
+d4_out=$(/usr/bin/getconf PAGESIZE 2>&1); d4_rc=$?
+[ "$d4_rc" = 0 ] && [ "$d4_out" = 4096 ] && echo D4-A-byname-getconf-4096
+d4b=$(/usr/bin/getconf 2>&1)
+echo D4-USAGE-RAW:$d4b
+case "$d4b" in "Usage: /usr/bin/getconf system_var"*) echo D4-B-argv0-is-the-program ;; esac
 echo L6C-DONE
+# #213 regression -- emitted AFTER L6C-DONE, on purpose, and asserted by joey on
+# the BYTE COUNT rather than a marker. joey's acc buffer is 2048 bytes, so
+# nothing past it is reachable to a marker check; the only honest assertion is
+# the counter. 16*8*8 = 1024 per $L, five of them = 5120 bytes, comfortably past
+# the 4096-byte pipe ring. Under a reap-before-drain joey the container blocks
+# in write() here on a full ring while joey waits for it to exit, and the boot
+# hangs -- which is the defect's true symptom. It lives in THIS bundle and not
+# the stock one for two reasons: this bundle is OURS (a mechanism gate, which is
+# what a pipe-drain regression is), and the stock bundle drives its script
+# through `sh -c`, whose whole string viv bounds at PATH_MAX=512 -- measured, it
+# had 81 bytes of headroom and this needs more. A script FILE has no such cap.
+L=0123456789abcdef
+L=$L$L$L$L$L$L$L$L
+L=$L$L$L$L$L$L$L$L
+echo $L$L$L$L$L
 GATEEOF
             chmod 0644 "$ab/rootfs/gate/run.sh"
             cat > "$ab/config.json" <<'VIVEOF'
@@ -1117,18 +1305,892 @@ GATEEOF
 VIVEOF
             if [[ "$bb_ok" == 1 ]]; then
                 echo "==> viv bundles: Alpine bundle staged from $tarball (/bin/sh <- $(basename "$bbapk"))"
+                # The INTERACTIVE twin: the same rootfs, no gate script, args
+                # ["/bin/sh", "-i"] -- for expect scenarios that drive a
+                # phenotype ash at its prompt from a session shell
+                # (tools/interactive/viv-run.exp: the interactive `viv run`
+                # path no boot gate runs, and the R5-F9 experiment). A COPY of
+                # the rootfs, not a symlink: viv requires root.path == "rootfs"
+                # literally, and the pool put's symlink handling is not
+                # something a fixture should be the first test of (~4 MB).
+                local ib="$vstage/alpine-ash"
+                rm -rf "$ib"; mkdir -p "$ib"
+                cp -R "$ab/rootfs" "$ib/rootfs"
+                rm -rf "$ib/rootfs/gate"
+                cat > "$ib/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "-i"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux"
+    }
+}
+VIVEOF
+                echo "==> viv bundles: Alpine INTERACTIVE twin staged at $ib (args /bin/sh -i -- ioctl is unserved, so isatty() is false and ash needs the flag to be interactive)"
+
+                # X-2 (AUX-ROADMAP Stream 0): the /viv/abin PRODUCTION busybox
+                # tree -- the applet twin of the viv-bin git tree, staged as a
+                # PLAIN pool tree for joey to bind at /viv/abin with
+                # MPHENO_LINUX. Puts `tar`, `gzip`, `find`, `sed` and ~80 more
+                # on ut's PATH, running under the Linux phenotype BY LOCATION,
+                # usable anywhere in the Thylacine namespace rather than only
+                # inside a container rootfs.
+                #
+                # THE WHOLE POINT IS THAT THESE LINKS ARE **RELATIVE**. Alpine
+                # ships its applets as absolute `-> /bin/busybox`, and `stalk`
+                # re-anchors an absolute target at the CALLER's own root
+                # (kernel/stalk.c:383 -- I-28 working as designed, and exactly
+                # why they resolve inside a chroot'd container and dangle
+                # outside one). `-> busybox` resolves relative to the containing
+                # directory, so the same tree works from both sides. This is why
+                # the tree is BUILT here rather than copied from the rootfs.
+                #
+                # Deliberately NOT a mutation of $ab/rootfs: alpine-stock is a
+                # sha256-pinned image behind a boot-fatal DISTRO gate (D-5), and
+                # a fixture that a gate asserts is stock must stay stock.
+                if [[ "$bb_ok" == 1 ]]; then
+                    local vabin="$vstage/viv-abin"
+                    rm -rf "$vabin"; mkdir -p "$vabin"
+                    cp "$ab/rootfs/bin/busybox" "$vabin/busybox"
+                    chmod 0755 "$vabin/busybox"
+                    # The applet roster comes from what Alpine itself installed
+                    # -- every name in the stock tree that points at busybox --
+                    # so the set tracks the pinned image instead of a hand list
+                    # here that would rot the first time the pin moves.
+                    local abin_n=0 appdir app appname apptgt
+                    for appdir in bin sbin usr/bin usr/sbin; do
+                        [[ -d "$ab/rootfs/$appdir" ]] || continue
+                        for app in "$ab/rootfs/$appdir"/*; do
+                            [[ -L "$app" ]] || continue
+                            apptgt="$(readlink "$app")"
+                            [[ "$(basename "$apptgt")" == busybox ]] || continue
+                            appname="$(basename "$app")"
+                            [[ -e "$vabin/$appname" ]] && continue
+                            ln -s busybox "$vabin/$appname"
+                            abin_n=$((abin_n + 1))
+                        done
+                    done
+                    # `sh` is a real copy in the stock tree (not a link), so the
+                    # roster above misses it; it is the one name most worth
+                    # having, so add it explicitly as a relative link too.
+                    [[ -e "$vabin/sh" ]] || { ln -s busybox "$vabin/sh"; abin_n=$((abin_n + 1)); }
+                    if [[ "$abin_n" -lt 20 ]]; then
+                        echo "==> viv bundles: /viv/abin roster is only $abin_n applets -- the stock tree's layout changed; refusing to stage a crippled tree" >&2
+                        exit 1
+                    fi
+                    echo "==> viv bundles: /viv-abin production busybox tree staged at $vabin ($abin_n applets as RELATIVE links -> busybox, so they resolve from outside a container too; joey binds it at /viv/abin MPHENO_LINUX)"
+
+                    # UM-6 (X-11): the /bin/sh compat shim. A DEDICATED pool dir
+                    # holding one ABSOLUTE symlink `sh -> /viv/abin/sh`. joey
+                    # grafts it MAFTER onto the devramfs /bin (making /bin a
+                    # union), so execve("/bin/sh") misses devramfs (no native sh)
+                    # and hits this symlink; Design D re-anchors the absolute
+                    # target at the caller's root and the walk crosses /viv/abin's
+                    # MPHENO_LINUX mount -> busybox ash, LINUX. This unblocks
+                    # git's local transports (file:// / --no-local build one
+                    # quoted command handed to SHELL_PATH /bin/sh), config
+                    # scripts, make recipes, any system()/popen(). Staged INSIDE
+                    # the bb_ok guard because the symlink target /viv/abin/sh
+                    # exists only when the busybox tree is staged; the link is
+                    # dangling at host-stage time (the target is a runtime mount
+                    # path) but stratum-fs put carries it verbatim.
+                    local shcompat="$BUILD_DIR/shcompat"
+                    rm -rf "$shcompat"; mkdir -p "$shcompat"
+                    ln -s /viv/abin/sh "$shcompat/sh"
+                    echo "==> viv bundles: /bin/sh compat shim staged at $shcompat (sh -> /viv/abin/sh; joey grafts it MAFTER at /bin -- UM-6/X-11)"
+                fi
+                # The CONSOLE ^C twin (item 12): the same rootfs, a
+                # non-interactive entrypoint that PRE-INSTALLS a SIGINT trap and
+                # then blocks. This is the vehicle for the console-^C-forward
+                # regression (tools/interactive/viv-console-ctrlc.exp): the bare
+                # console has no job-control fan, so a container's ^C arrives as
+                # the OWNER-routed `interrupt` note that ut forwards to viv and
+                # viv forwards to this entrypoint -- a path that needs NO console
+                # input to the container (the interactive-ash-on-console input
+                # path is racy and is not what item 12 exercises). The trap fires
+                # GOTINT-CONSOLE only if viv forwarded the interrupt; without the
+                # fix viv masks it on the console and the trap never runs. `sh -c`
+                # inline (viv bounds the whole string at PATH_MAX=512; this is ~85).
+                local tb="$vstage/alpine-trap"
+                rm -rf "$tb"; mkdir -p "$tb"
+                cp -R "$ab/rootfs" "$tb/rootfs"
+                rm -rf "$tb/rootfs/gate"
+                cat > "$tb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "-c", "trap 'echo GOTINT-CONSOLE; exit 0' INT; echo READY-FOR-CTRLC; while :; do sleep 1; done"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux"
+    }
+}
+VIVEOF
+                echo "==> viv bundles: Alpine CONSOLE-^C twin staged at $tb (args sh -c 'trap ... INT; echo READY; sleep-loop' -- the item-12 console-^C-forward regression vehicle)"
+                # The NET-GRANTED twin: the same rootfs, an interactive ash, but
+                # the manifest sets org.thylacine.net=granted so viv binds /net
+                # into the container -- without it socket() is ENOENT (network is
+                # an opt-in per-container capability). Plus /etc/resolv.conf
+                # (slirp DNS 10.0.2.3) and an /etc/hosts pin for example.com so a
+                # by-IP connect can be tested without depending on DNS. For
+                # probing whether a real Linux binary reaches the network under
+                # the phenotype (curl/wget/git).
+                local nb="$vstage/alpine-net"
+                rm -rf "$nb"; mkdir -p "$nb"
+                cp -R "$ab/rootfs" "$nb/rootfs"
+                rm -rf "$nb/rootfs/gate"
+                printf 'nameserver 10.0.2.3\n' > "$nb/rootfs/etc/resolv.conf"
+                printf '172.66.147.243 example.com\n' >> "$nb/rootfs/etc/hosts"
+                # A REAL curl (stunnel/static-curl release: musl static-PIE,
+                # aarch64 -- ET_DYN with no PT_INTERP, the D-2 direct-load
+                # shape). Same absent/matching/different trichotomy as the
+                # rootfs pins above: absent skips (bundle stays busybox-only),
+                # matching stages /usr/bin/curl, different is a LOUD failure --
+                # the demo gate's PASS strings were derived from these bytes.
+                local curltar="${THYLACINE_STATIC_CURL_TAR:-}"
+                if [[ -z "$curltar" ]]; then
+                    curltar="$(ls "$REPO_ROOT/build/cache"/curl-linux-aarch64-musl-*.tar.xz 2>/dev/null | head -1 || true)"
+                fi
+                local curltar_sha="4df5282b8ef0e336c64faa52b546272b421146d522733606ae5343b416b646b2"
+                if [[ -n "$curltar" && -f "$curltar" ]]; then
+                    got_sha="$(shasum -a 256 "$curltar" | awk '{print $1}')"
+                    if [[ "$got_sha" != "$curltar_sha" ]]; then
+                        echo "==> viv bundles: static-curl tarball sha256 MISMATCH -- refusing to stage" >&2
+                        echo "      file     $curltar" >&2
+                        echo "      got      $got_sha" >&2
+                        echo "      expected $curltar_sha (curl-linux-aarch64-musl-8.18.0)" >&2
+                        exit 1
+                    fi
+                    local cx="$vstage/.curlx"
+                    rm -rf "$cx"; mkdir -p "$cx"
+                    if tar -xJf "$curltar" -C "$cx" curl 2>/dev/null && [[ -f "$cx/curl" ]]; then
+                        mkdir -p "$nb/rootfs/usr/bin"
+                        cp "$cx/curl" "$nb/rootfs/usr/bin/curl"
+                        chmod 0755 "$nb/rootfs/usr/bin/curl"
+                        echo "==> viv bundles: static curl 8.18.0 staged at $nb/rootfs/usr/bin/curl (the ROADMAP 9.2 curl-fetches-a-URL vehicle)"
+                    else
+                        echo "==> viv bundles: static-curl tarball extract FAILED -- alpine-net stays busybox-only" >&2
+                    fi
+                    rm -rf "$cx"
+                else
+                    echo "==> viv bundles: no static-curl tarball -- alpine-net stages busybox-only (drop curl-linux-aarch64-musl-*.tar.xz in build/cache/ or set THYLACINE_STATIC_CURL_TAR)"
+                    forage_hint static-curl "the static-curl tarball" "build/cache/curl-linux-aarch64-musl-*.tar.xz"
+                fi
+                # OPENSSL_armcap=0: OpenSSL's aarch64 armcap init SIGILL-probes
+                # CPU features (sha512su0/eor3/sve/xar/sm3 + mrs MIDR_EL1) under
+                # a SIGILL handler it expects to catch. Thylacine's phenotype
+                # cannot deliver a catchable SIGILL (snare notes are terminal;
+                # sigaction(SIGILL) is honestly refused), so the probe is fatal
+                # -- curl died snare:ill at _armv8_sve_probe before any output.
+                # The env var is OpenSSL's own documented probe-skip. The
+                # underlying gap (Linux binaries that SIGILL-probe features die
+                # under viv) is tracked as mission work, not fixed by this.
+                cat > "$nb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "-i"],
+        "env": ["OPENSSL_armcap=0"],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.net": "granted"
+    }
+}
+VIVEOF
+                echo "==> viv bundles: Alpine NET-GRANTED twin staged at $nb (org.thylacine.net=granted + resolv.conf + hosts pin + OPENSSL_armcap=0 -- the phenotype-network probe vehicle)"
+                # The GIT twin (the git-under-VIVARIUM mission, milestone A):
+                # the same rootfs plus a REAL static git (built on thyla-pi:
+                # git 2.51.2, musl-gcc -static, WITH curl [static OpenSSL +
+                # libcurl for milestone B https], keeping NO_OPENSSL [https via
+                # libcurl] / NO_PTHREADS / NO_EXPAT / NO_ICONV / NO_UNIX_SOCKETS
+                # / NO_REGEX=NeedsStartEnd; source tarballs sha-pinned in the
+                # commit message). Staged at /usr/bin/git with dashed
+                # upload/receive-pack SYMLINKS beside it: `clone file://`
+                # spawns `sh -c "git-upload-pack '<path>'"` (connect.c
+                # use_shell=1), so the dashed name must resolve on PATH --
+                # git's main() dispatches dashed argv[0] to the builtin.
+                # /etc/gitconfig (the system file; no HOME dependency)
+                # carries the milestone-A posture: single-threaded
+                # (pack.threads=1 + checkout.workers=1; the binary is also
+                # NO_PTHREADS so no code path can reach clone(CLONE_THREAD)),
+                # core.fsync=none (the native fsync gate wants RIGHT_WRITE
+                # while Linux allows rdonly-fsync), core.createObject=rename
+                # (no linkat). The probe FORCES reflogs ON (gitprobe.sh) so the
+                # git 6.27 O_APPEND path is exercised. Local-only: NO net grant.
+                # Same absent/matching/different trichotomy as curl.
+                #
+                # It runs as a BOOT PROBE spawned by joey (PRINCIPAL_SYSTEM),
+                # NOT interactively: the pool 9P mount is system-owned, so a
+                # container's files are stamped PRINCIPAL_SYSTEM, and git's
+                # config write chmods its own lockfile (chmod requires
+                # ownership). A SYSTEM-principal container OWNS those files, so
+                # the chmod succeeds. Running git as a real non-SYSTEM USER
+                # needs per-principal 9P ownership (A-3, unbuilt at v1.0) --
+                # tracked as a separate arc; this bundle proves git init / add
+                # / commit / clone WORK under the phenotype. The entrypoint is
+                # a baked /gitprobe.sh emitting GITPROBE-* markers the joey gate
+                # asserts.
+                local gb="$vstage/git-probe"
+                local gittar="${THYLACINE_STATIC_GIT_TAR:-}"
+                if [[ -z "$gittar" ]]; then
+                    gittar="$(ls "$REPO_ROOT/build/cache"/git-static-*-curl-aarch64-musl.tar.gz 2>/dev/null | head -1 || true)"
+                fi
+                local gittar_sha="cea4a1d1712905f457509b0941108451d6b43576888aa9ca714f726eae374329"
+                if [[ -n "$gittar" && -f "$gittar" ]]; then
+                    got_sha="$(shasum -a 256 "$gittar" | awk '{print $1}')"
+                    if [[ "$got_sha" != "$gittar_sha" ]]; then
+                        echo "==> viv bundles: static-git tarball sha256 MISMATCH -- refusing to stage" >&2
+                        echo "      file     $gittar" >&2
+                        echo "      got      $got_sha" >&2
+                        echo "      expected $gittar_sha (git-static-2.51.2-curl-aarch64-musl)" >&2
+                        exit 1
+                    fi
+                    local gx="$vstage/.gitx"
+                    rm -rf "$gx"; mkdir -p "$gx"
+                    if tar -xzf "$gittar" -C "$gx" 2>/dev/null && [[ -f "$gx/viv-bin/git" ]]; then
+                        rm -rf "$gb"; mkdir -p "$gb"
+                        cp -R "$ab/rootfs" "$gb/rootfs"
+                        rm -rf "$gb/rootfs/gate"
+                        mkdir -p "$gb/rootfs/usr/bin" \
+                                 "$gb/rootfs/usr/share/git-core/templates"
+                        cp "$gx/viv-bin/git" "$gb/rootfs/usr/bin/git"
+                        chmod 0755 "$gb/rootfs/usr/bin/git"
+                        ln -sf git "$gb/rootfs/usr/bin/git-upload-pack"
+                        ln -sf git "$gb/rootfs/usr/bin/git-receive-pack"
+                        # The boot-probe script. Each step emits a GITPROBE-*
+                        # marker the joey gate scans for; a failure emits
+                        # GITPROBE-FAIL-<step> and stops. rm -rf first for
+                        # fixture freshness (the pool is PRESERVEd across boots,
+                        # so a stale /tmp/repo would fail `git init`). git's own
+                        # stdout is quieted; stderr stays live for diagnosis.
+                        cat > "$gb/rootfs/gitprobe.sh" <<'VIVEOF'
+#!/bin/sh
+rm -rf /tmp/repo /tmp/clone1 2>/dev/null
+cd /tmp || { echo GITPROBE-FAIL-CD; exit 1; }
+git init repo >/dev/null && echo GITPROBE-INIT || { echo GITPROBE-FAIL-INIT; exit 1; }
+cd /tmp/repo || { echo GITPROBE-FAIL-CD2; exit 1; }
+# Force reflogs ON in THIS repo (explicit, not relying on git init's non-bare
+# default -- which the system /etc/gitconfig can suppress). A ref update
+# (commit) then creates + appends the reflog .git/logs/HEAD with O_CREAT|O_APPEND
+# -> the git 6.27 O_APPEND path, positioned server-side by Stratum at EOF. This
+# is what makes the gate ACTUALLY exercise O_APPEND (R1-F2: without a written
+# reflog, commit/clone pass without the append path ever running).
+git config core.logallrefupdates true
+echo hello > f.txt
+git add f.txt && echo GITPROBE-ADD || { echo GITPROBE-FAIL-ADD; exit 1; }
+# COMMIT: writes the commit object, updates refs/heads, and appends the reflog
+# (the O_APPEND path). The author/committer identity comes from /etc/gitconfig.
+git commit -m first >/dev/null 2>&1 && echo GITPROBE-COMMIT || { echo GITPROBE-FAIL-COMMIT; exit 1; }
+git log --oneline >/dev/null 2>&1 && echo GITPROBE-LOG || { echo GITPROBE-FAIL-LOG; exit 1; }
+# The append-at-EOF CONTROL (R1-F2): the FIRST commit created a fresh
+# .git/logs/HEAD (cursor 0 == EOF 0), so it lands correctly even if the O_APPEND
+# EOF-override chain is broken. A SECOND commit opens the now-NONEMPTY reflog
+# with cursor 0 != EOF, so its append fails (overwrites entry 1 at offset 0) iff
+# the override regressed. Assert the reflog carries BOTH entries in order.
+git commit --allow-empty -m second >/dev/null 2>&1 && echo GITPROBE-COMMIT2 || { echo GITPROBE-FAIL-COMMIT2; exit 1; }
+# The reflog FILE line count is the direct O_APPEND witness: one line per ref
+# update, so TWO commits == 2 lines iff the second append landed at EOF. A broken
+# EOF-override overwrites entry 1 at offset 0 -> 1 line (or corrupt) -> the gate
+# reddens. This is the control the single-commit chain lacked (R1-F2).
+[ "$(wc -l < .git/logs/HEAD 2>/dev/null | tr -d ' ')" = "2" ] && echo GITPROBE-REFLOG2 || { echo GITPROBE-FAIL-REFLOG2; exit 1; }
+# CLONE file:// -- a fresh repo built from the first (git spawns git-upload-pack
+# via the dashed symlink + sh), itself updating refs + reflog in the clone.
+cd /tmp || { echo GITPROBE-FAIL-CD3; exit 1; }
+git clone file:///tmp/repo clone1 >/dev/null 2>&1 && echo GITPROBE-CLONE || { echo GITPROBE-FAIL-CLONE; exit 1; }
+# VERIFY: the cloned working tree actually carries the committed file.
+test -f /tmp/clone1/f.txt && echo GITPROBE-VERIFY || { echo GITPROBE-FAIL-VERIFY; exit 1; }
+# Full chain proven under the phenotype: init + add + commit + log + clone +
+# verify, reflogs ON (the O_APPEND path live), as SYSTEM.
+echo GITPROBE-DONE
+VIVEOF
+                        chmod 0755 "$gb/rootfs/gitprobe.sh"
+                        cat > "$gb/rootfs/etc/gitconfig" <<'VIVEOF'
+[user]
+	name = Thylacine
+	email = thyla@extinct.local
+[init]
+	defaultBranch = main
+[core]
+	fsync = none
+	createObject = rename
+	logAllRefUpdates = true
+[pack]
+	threads = 1
+[checkout]
+	workers = 1
+[safe]
+	directory = *
+VIVEOF
+                        cat > "$gb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "/gitprobe.sh"],
+        "env": ["PATH=/usr/bin:/bin:/sbin:/usr/sbin", "HOME=/tmp", "GIT_EXEC_PATH=/usr/bin"],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.csprng": "granted"
+    }
+}
+VIVEOF
+                        echo "==> viv bundles: git-probe staged at $gb (static git 2.51.2 + /gitprobe.sh boot script -- joey spawns it as SYSTEM; the git-under-VIVARIUM milestone-A gate)"
+
+                        # The /viv/bin PRODUCTION git tree (VIVARIUM section 13,
+                        # the resolver-subtree-scope channel). The SAME static
+                        # git, staged as a PLAIN pool tree -- NOT a container
+                        # bundle -- for joey to bind at /viv/bin with
+                        # MPHENO_LINUX: ship git on ut's PATH, run under the
+                        # Linux phenotype BY LOCATION (docs/VIVARIUM.md 13). The
+                        # dashed upload/receive-pack symlinks ride beside it (git
+                        # spawns `git-upload-pack` on PATH for clone). A gitconfig
+                        # sits alongside; the joey gate points GIT_CONFIG_SYSTEM
+                        # here (no dependency on an /etc in the pool root). It is
+                        # deliberately separate from the git-probe BUNDLE above:
+                        # that is a test container (config.json + gitprobe.sh),
+                        # this is the product mount source.
+                        local vbin="$vstage/viv-bin"
+                        rm -rf "$vbin"; mkdir -p "$vbin"
+                        cp -R "$gx/viv-bin/"* "$vbin/"
+                        chmod 0755 "$vbin/git" "$vbin/git-remote-http"
+                        cat > "$vbin/gitconfig" <<'VIVEOF'
+[user]
+	name = Thylacine
+	email = thyla@extinct.local
+[init]
+	defaultBranch = main
+	templateDir = /viv/bin/templates
+[core]
+	fsync = none
+	createObject = rename
+	pager = cat
+	editor = nora
+[sequence]
+	editor = nora
+[http]
+	sslCAInfo = /etc/ssl/certs/ca-certificates.crt
+[safe]
+	directory = *
+VIVEOF
+                        echo "==> viv bundles: /viv-bin production git tree staged at $vbin (static git 2.51.2 WITH curl -- git + git-remote-http[s] + git-http-fetch + dashed pack symlinks + templates + gitconfig[http.sslCAInfo]; joey binds it at /viv/bin MPHENO_LINUX; the phenotype-BY-LOCATION product mount, https-capable on git's default protocol v2 -- N-5 served readv)"
+
+                        # The git-NET bundle (milestone B3): the SAME curl-git,
+                        # NET-GRANTED, running a clone-https boot script. It
+                        # proves `git clone https://` end to end under the
+                        # phenotype -- DNS (github.com via netd -> slirp 10.0.2.3;
+                        # git's libcurl uses the SYNCHRONOUS resolver because the
+                        # build set --disable-threaded-resolver, so a by-name
+                        # clone needs no --resolve pin the way curl-the-binary did
+                        # to dodge its resolver thread's CLONE_THREAD refusal) +
+                        # TLS (OpenSSL over the socket, the server cert validated
+                        # against the baked Mozilla CA bundle) + smart-http + pack.
+                        #
+                        # HERMETICITY: staged ONLY under THYLACINE_BAKE_GITNET=1.
+                        # The default image OMITS it, so joey's do_git_https_gate
+                        # SOFT-SKIPS the absent bundle and every hermetic boot
+                        # (test.sh, the SMP gate, LS-CI) stays internet-free. The
+                        # gate is BOOT-FATAL only when the bundle is present --
+                        # i.e. only on an explicit tools/test-git-https.sh bake on
+                        # a networked host, which OWNS that network dependency.
+                        # This is the git-probe SKIP-if-absent / FATAL-if-present
+                        # idiom carried to a network test (the NP-3 precedent for
+                        # keeping a real-NIC probe out of the hermetic ladder).
+                        if [[ "${THYLACINE_BAKE_GITNET:-0}" == "1" ]]; then
+                            local gnb="$vstage/git-net"
+                            rm -rf "$gnb"; mkdir -p "$gnb"
+                            cp -R "$ab/rootfs" "$gnb/rootfs"
+                            rm -rf "$gnb/rootfs/gate"
+                            mkdir -p "$gnb/rootfs/usr/bin" \
+                                     "$gnb/rootfs/usr/share/git-core"
+                            # The FLAT git tree (git + the real git-remote-http
+                            # ELF + the git-remote-https symlink + git-http-fetch +
+                            # the dashed pack symlinks) into /usr/bin, with
+                            # GIT_EXEC_PATH pointed there so git finds
+                            # git-remote-https (NOT a builtin, unlike the
+                            # upload/receive-pack symlinks). templates ride at the
+                            # compiled default (/usr/share/git-core/templates,
+                            # prefix=/usr) so a clone installs hooks with no
+                            # "templates not found" noise + no config.
+                            cp -R "$gx/viv-bin/"* "$gnb/rootfs/usr/bin/"
+                            mv "$gnb/rootfs/usr/bin/templates" \
+                               "$gnb/rootfs/usr/share/git-core/templates"
+                            chmod 0755 "$gnb/rootfs/usr/bin/git" \
+                                       "$gnb/rootfs/usr/bin/git-remote-http"
+                            # resolv.conf: the slirp DNS (10.0.2.3). Since net-4d
+                            # LANDED, musl's getaddrinfo queries it over the
+                            # phenotype UDP path (unconnected sendto + non-blocking
+                            # recvmsg) and the clone RESOLVES github.com by name --
+                            # no /etc/hosts pin needed (the git-https gate's default).
+                            printf 'nameserver 10.0.2.3\n' \
+                                > "$gnb/rootfs/etc/resolv.conf"
+                            # /etc/hosts: an OPTIONAL host->IP pin, passed in
+                            # THYLACINE_GITNET_HOSTS (getaddrinfo checks /etc/hosts
+                            # BEFORE any DNS query). No longer the default -- it
+                            # exists only to RE-ISOLATE the transport proof (TLS +
+                            # netd TCP + smart-http + pack) from the resolver when
+                            # debugging one independently of the other. Absent (the
+                            # default) -> the clone resolves by name, as it should.
+                            if [[ -n "${THYLACINE_GITNET_HOSTS:-}" ]]; then
+                                printf '%s\n' "$THYLACINE_GITNET_HOSTS" \
+                                    >> "$gnb/rootfs/etc/hosts"
+                                echo "==> viv bundles: git-net /etc/hosts pinned ($THYLACINE_GITNET_HOSTS -- optional transport isolation; DNS-by-name works by default since net-4d)"
+                            fi
+                            cat > "$gnb/rootfs/etc/gitconfig" <<'VIVEOF'
+[user]
+	name = Thylacine
+	email = thyla@extinct.local
+[core]
+	fsync = none
+	createObject = rename
+	pager = cat
+[http]
+	sslCAInfo = /etc/ssl/certs/ca-certificates.crt
+[pack]
+	threads = 1
+[checkout]
+	workers = 1
+[safe]
+	directory = *
+VIVEOF
+                            cat > "$gnb/rootfs/githttps.sh" <<'VIVEOF'
+#!/bin/sh
+# B3: prove `git clone https://` under the Linux phenotype through netd + the
+# baked Mozilla CA bundle. NET-GRANTED + CSPRNG-GRANTED, run as SYSTEM. Each step
+# emits a GITHTTPS-* marker the joey gate scans; a failure emits
+# GITHTTPS-FAIL-<step> and stops, so a DNS failure, a TLS failure and a pack
+# failure are distinct diagnoses. stderr stays LIVE -- the resolver/TLS error is
+# the diagnostic when a step reddens.
+rm -rf /tmp/hw 2>/dev/null
+cd /tmp || { echo GITHTTPS-FAIL-CD; exit 1; }
+git version >/dev/null 2>&1 && echo GITHTTPS-GIT-OK || { echo GITHTTPS-FAIL-GIT; exit 1; }
+# net-4d DNS-by-name: prove musl's getaddrinfo resolves a name over the vivarium
+# UDP path (unconnected sendto + non-blocking recvmsg -> netd -> slirp 10.0.2.3).
+# getent ahostsv4 is single-threaded getaddrinfo (res_msend), the EXACT path git's
+# THREADED resolver cannot use -- so this isolates the kernel DNS capability from
+# the orthogonal pthread gap. example.com is NEVER in this bundle's /etc/hosts
+# (only github.com may be pinned), so a printed IPv4 is a real resolver round-trip.
+getent ahostsv4 example.com 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ' && echo GITHTTPS-DNS || { echo GITHTTPS-FAIL-DNS; exit 1; }
+# This clone runs git's DEFAULT protocol v2: the [protocol] version=0 force was
+# retired at N-5 once the kernel served readv (the syscall the v2 stateless-connect
+# path reads the helper response through). So this gate is now the end-to-end v2
+# regression net -- a readv regression re-breaks it here, while the hermetic
+# suite's phenotype routing test asserts readv is served (T2).
+git clone --depth 1 https://github.com/octocat/Hello-World.git hw && echo GITHTTPS-CLONE || { echo GITHTTPS-FAIL-CLONE; exit 1; }
+test -d /tmp/hw/.git && echo GITHTTPS-VERIFY || { echo GITHTTPS-FAIL-VERIFY; exit 1; }
+cd /tmp/hw || { echo GITHTTPS-FAIL-CD2; exit 1; }
+# --unshallow, not --depth 1: the clone above is shallow (tip only), so a second
+# --depth 1 fetch would ask git to traverse the tip's absent parents and fail
+# ("remote did not send all necessary objects") -- a shallow-repo quirk, native
+# too, not a phenotype gap. --unshallow is the correct op AND it downloads a REAL
+# pack (the parent history) over https, so it proves the fetch path in full.
+git fetch --unshallow origin >/dev/null 2>&1 && echo GITHTTPS-FETCH || { echo GITHTTPS-FAIL-FETCH; exit 1; }
+# N-6: push over https. Runs ONLY when the bake provisioned a push target
+# (THYLACINE_GITNET_PUSH_URL + a PAT) -- absent by default, so the standard
+# git-net gate stays clone+fetch only and the hermetic suite never pushes. The
+# token reaches the guest as /tmp/.gitnet-push-token, a 0600 file the bake wrote
+# from the operator's env (a gitignored build artifact -- NEVER a tracked file).
+# The remote URL is CLEAN: the token is supplied by an inline credential helper
+# (git never echoes helper output), so it appears in NO git output and NO boot
+# log. The push proves the smart-push path (git-remote-https POST
+# git-receive-pack) end to end -- the helper-pipe I/O rides readv (served at
+# N-5) + writev, the SAME transport the clone above proved.
+if [ -f /tmp/.gitnet-push-url ] && [ -f /tmp/.gitnet-push-token ]; then
+	GITNET_PUSH_URL=$(cat /tmp/.gitnet-push-url)
+	GITNET_TOK=$(cat /tmp/.gitnet-push-token)
+	export GITNET_TOK
+	git config --global credential.helper \
+		'!f() { test "$1" = get && printf "username=x-access-token\npassword=%s\n" "$GITNET_TOK"; }; f' \
+		|| { echo GITHTTPS-FAIL-PUSHCRED; exit 1; }
+	rm -rf /tmp/pushrepo
+	mkdir -p /tmp/pushrepo && cd /tmp/pushrepo || { echo GITHTTPS-FAIL-PUSHDIR; exit 1; }
+	git init -q || { echo GITHTTPS-FAIL-PUSHINIT; exit 1; }
+	echo "pushed by the thylacine linux phenotype" > witness.txt
+	git add witness.txt || { echo GITHTTPS-FAIL-PUSHADD; exit 1; }
+	git commit -q -m "thylacine phenotype push witness" || { echo GITHTTPS-FAIL-PUSHCOMMIT; exit 1; }
+	# A unique branch per run: re-runs never collide (non-ff) and the sandbox
+	# stays tidy. $$ (shell pid) + a wall-clock second if the phenotype date works.
+	PUSHREF="thylacine-push-$$-$(date +%s 2>/dev/null || echo 0)"
+	git push "$GITNET_PUSH_URL" "HEAD:refs/heads/$PUSHREF" \
+		&& echo "GITHTTPS-PUSH $PUSHREF" || { echo GITHTTPS-FAIL-PUSH; exit 1; }
+fi
+echo GITHTTPS-DONE
+VIVEOF
+                            chmod 0755 "$gnb/rootfs/githttps.sh"
+                            cat > "$gnb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "/githttps.sh"],
+        "env": ["PATH=/usr/bin:/bin:/sbin:/usr/sbin", "HOME=/tmp", "GIT_EXEC_PATH=/usr/bin", "OPENSSL_armcap=0"],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.net": "granted",
+        "org.thylacine.csprng": "granted"
+    }
+}
+VIVEOF
+                            # N-6 push witness: when a push target + PAT are in the
+                            # env, provision them into the guest as files (a gitignored
+                            # build artifact under build/, NEVER a tracked file). The
+                            # token is written in a subshell with trace OFF + umask 077
+                            # so it cannot reach a build log, and this (tracked) script
+                            # holds only the env var NAME, never the secret. Absent ->
+                            # the gate is clone+fetch only (the default).
+                            if [[ -n "${THYLACINE_GITNET_PUSH_URL:-}" && -n "${THYLACINE_GITNET_PAT:-}" ]]; then
+                                mkdir -p "$gnb/rootfs/tmp"
+                                printf '%s\n' "$THYLACINE_GITNET_PUSH_URL" \
+                                    > "$gnb/rootfs/tmp/.gitnet-push-url"
+                                ( set +x 2>/dev/null; umask 077
+                                  printf '%s\n' "$THYLACINE_GITNET_PAT" \
+                                      > "$gnb/rootfs/tmp/.gitnet-push-token" )
+                                echo "==> viv bundles: git-net PUSH target provisioned (URL ${THYLACINE_GITNET_PUSH_URL}; token in the gitignored guest artifact only, never a tracked file or log)"
+                            fi
+                            echo "==> viv bundles: git-net staged at $gnb (THYLACINE_BAKE_GITNET=1: net-granted clone-https boot vehicle -- the B3 gate; default bakes OMIT it, so the hermetic suite stays internet-free)"
+                        fi
+
+                        # The git-WORKFLOW bundle (milestone C1): the SAME static
+                        # git, HERMETIC (no net), running the non-interactive
+                        # developer workflow a real self-hosting user hits --
+                        # branch / checkout / diff / status / merge (fast-forward
+                        # AND a 3-way with a real CONFLICT resolved by editing the
+                        # marked file, no editor spawned) / rebase (non-interactive)
+                        # / reset / stash / worktree / manual gc. Every verb rides
+                        # ALREADY-PROVEN primitives (O_CREAT|O_EXCL, rename,
+                        # O_APPEND, fork+exec, stat/readdir), so this is the C1
+                        # "verify" half: it should be GREEN today, and whatever
+                        # reddens is the precise "fill" work. It is deliberately
+                        # INSENSITIVE to #91 (the exit(N) boolean collapse): every
+                        # leg branches on 0-vs-nonzero (which the collapse
+                        # preserves) or on file content, never on a specific exit
+                        # code -- exit-code FIDELITY stays owned by the L-6c leg-I
+                        # measurement, and its fix promotes THAT leg to an assertion.
+                        #
+                        # HERMETICITY: staged ONLY under THYLACINE_BAKE_GITWF=1 while
+                        # the arc is in flight, so it does not redden the default
+                        # suite / SMP gate before it is proven green; once green it
+                        # promotes to always-stage (a pure local git test belongs in
+                        # every boot, like git-probe). Driven by
+                        # tools/test-git-workflow.sh -- no network preflight (unlike
+                        # git-net); it is the git-probe SKIP-if-absent / FATAL-if-
+                        # present idiom on a hermetic local fixture.
+                        if [[ "${THYLACINE_BAKE_GITWF:-0}" == "1" ]]; then
+                            local gwb="$vstage/git-workflow"
+                            rm -rf "$gwb"; mkdir -p "$gwb"
+                            cp -R "$ab/rootfs" "$gwb/rootfs"
+                            rm -rf "$gwb/rootfs/gate"
+                            mkdir -p "$gwb/rootfs/usr/bin" \
+                                     "$gwb/rootfs/usr/share/git-core"
+                            # The flat git tree (git + the dashed pack symlinks +
+                            # templates). No network is exercised, but the whole
+                            # tree is harmless and keeps this identical to the other
+                            # git bundles; GIT_EXEC_PATH points at /usr/bin. The
+                            # templates ride at the compiled default so `git init`
+                            # installs hooks with no "templates not found" noise.
+                            cp -R "$gx/viv-bin/"* "$gwb/rootfs/usr/bin/"
+                            mv "$gwb/rootfs/usr/bin/templates" \
+                               "$gwb/rootfs/usr/share/git-core/templates"
+                            chmod 0755 "$gwb/rootfs/usr/bin/git"
+                            # gc.auto=0: correctness FIRST (no automatic self-fork
+                            # gc mid-script surprising the many commits below); the
+                            # gate then exercises MANUAL `git gc` explicitly, which
+                            # drives the same machinery (fork-self -> repack/prune,
+                            # opendir/readdir on the object fanout, the gc.pid lock).
+                            # If manual gc is green, auto-gc is a config flip.
+                            cat > "$gwb/rootfs/etc/gitconfig" <<'VIVEOF'
+[user]
+	name = Thylacine
+	email = thyla@extinct.local
+[init]
+	defaultBranch = main
+[core]
+	fsync = none
+	createObject = rename
+	pager = cat
+	symlinks = false
+[gc]
+	auto = 0
+[pack]
+	threads = 1
+[checkout]
+	workers = 1
+[safe]
+	directory = *
+VIVEOF
+                            cat > "$gwb/rootfs/gitworkflow.sh" <<'VIVEOF'
+#!/bin/sh
+# C1 git-workflow gate: verify the NON-INTERACTIVE developer workflow under the
+# VIVARIUM phenotype. ALL git output is quieted -- the joey gate keeps only the
+# FIRST 4 KiB of stdout, so ONLY the GITWF-* markers may reach it. Each verb test
+# is self-contained + NON-FATAL: one boot surfaces the COMPLETE gap picture
+# (verify-then-fill). Only the structural prerequisites (cd/init/base) are fatal.
+# A leg emits GITWF-<STEP> on success or GITWF-FAIL-<STEP> on failure; the joey
+# gate scans for the positive markers in order and reports the first missing one.
+# No scanned marker is a substring of another (the substring-pollution trap).
+rm -rf /tmp/wf 2>/dev/null
+mkdir -p /tmp/wf && cd /tmp/wf || { echo GITWF-FAIL-CD; exit 1; }
+
+# exit(N) fidelity DIAGNOSTIC (#91) -- NOT a scanned marker (WF-DIAG-* prefix so
+# it can never collide with a GITWF-* scan). Linux prints 42; the #91 collapse
+# prints 1. Owned as an ASSERTION by L-6c leg I; here it is a context readout.
+sh -c 'exit 42'; ec=$?
+echo WF-DIAG-exit=$ec
+
+# Reliable multi-line file writer. busybox `printf` is a shell BUILTIN that writes
+# via musl stdio, whose fully-buffered output to a redirected file is NEVER
+# flushed under the phenotype (busybox ash _exit()s without an atexit flush, and
+# its per-builtin flush does not reach the file) -- so `printf ... > f` produces
+# an EMPTY file. `echo` is a direct write() and works. This gate tests GIT verbs,
+# not printf, and git's own file I/O is direct write() (unaffected); the printf/
+# stdio gap is tracked separately. wl f a b c -> "a\nb\nc\n" (first '>' truncates,
+# rest append; both direct/write-through and reliable).
+wl() { _f="$1"; shift; _fst=1; for _ln in "$@"; do
+         if [ "$_fst" = 1 ]; then echo "$_ln" > "$_f"; _fst=0;
+         else echo "$_ln" >> "$_f"; fi; done; }
+
+# --- structural spine (FATAL) ---
+git init -q repo && echo GITWF-INIT || { echo GITWF-FAIL-INIT; exit 1; }
+cd repo || { echo GITWF-FAIL-CD2; exit 1; }
+git config core.logallrefupdates true
+wl f.txt a b c
+git add f.txt && git commit -qm base && echo GITWF-BASE || { echo GITWF-FAIL-BASE; exit 1; }
+
+# --- branch + checkout ---
+git branch feat 2>/dev/null && git checkout -q feat 2>/dev/null && echo GITWF-BRANCH || echo GITWF-FAIL-BRANCH
+
+# --- diff (piped, non-interactive): same-size line edit (b -> B) ---
+wl f.txt a B c
+git diff > /tmp/wf/d 2>/dev/null
+grep -q '^+B$' /tmp/wf/d && echo GITWF-DIFF || echo GITWF-FAIL-DIFF
+
+# --- status --porcelain ---
+git status --porcelain > /tmp/wf/s 2>/dev/null
+grep -q 'f.txt' /tmp/wf/s && echo GITWF-STATUS || echo GITWF-FAIL-STATUS
+
+# commit the feat edit (so merge has divergence)
+git commit -qam featedit 2>/dev/null && echo GITWF-FCOMMIT || echo GITWF-FAIL-FCOMMIT
+
+# --- log --oneline --graph ---
+git log --oneline --graph > /tmp/wf/l 2>/dev/null && [ -s /tmp/wf/l ] && echo GITWF-LOG || echo GITWF-FAIL-LOG
+
+# --- merge fast-forward (main <- feat) ---
+git checkout -q main 2>/dev/null
+git merge -q feat 2>/dev/null && grep -q '^B$' f.txt && echo GITWF-MERGEFF || echo GITWF-FAIL-MERGEFF
+
+# --- 3-way merge WITH conflict (git writes markers, spawns NOTHING; the user
+#     edits the marked file + git add -- no editor is ever needed) ---
+git checkout -q -b ca main 2>/dev/null
+echo x > g.txt; git add g.txt; git commit -qm ca 2>/dev/null
+git checkout -q -b cb main 2>/dev/null
+echo y > g.txt; git add g.txt; git commit -qm cb 2>/dev/null
+git merge ca > /tmp/wf/m 2>&1
+grep -q '^<<<<<<<' g.txt && grep -q '^>>>>>>>' g.txt && echo GITWF-CONFLICT || echo GITWF-FAIL-CONFLICT
+echo z > g.txt; git add g.txt; git commit -qm resolved 2>/dev/null && echo GITWF-RESOLVE || echo GITWF-FAIL-RESOLVE
+
+# --- rebase (non-interactive): rt(q) onto rb(p,r) ---
+git checkout -q -b rb main 2>/dev/null
+echo p > p.txt; git add p.txt; git commit -qm p 2>/dev/null
+git checkout -q -b rt rb 2>/dev/null
+echo q > q.txt; git add q.txt; git commit -qm q 2>/dev/null
+git checkout -q rb 2>/dev/null
+echo r > r.txt; git add r.txt; git commit -qm r 2>/dev/null
+git checkout -q rt 2>/dev/null
+git rebase rb > /tmp/wf/rb 2>&1 && [ -f p.txt ] && [ -f q.txt ] && [ -f r.txt ] && echo GITWF-REBASE || echo GITWF-FAIL-REBASE
+
+# --- reset --hard ---
+git checkout -q main 2>/dev/null
+echo dirt >> f.txt
+git reset -q --hard HEAD 2>/dev/null
+grep -q dirt f.txt && echo GITWF-FAIL-RESET || echo GITWF-RESET
+
+# --- stash save + pop (the non-blocking-pipe fill, C1) ---
+# git stash's async pump sets its subprocess pipe non-blocking via fcntl(F_SETFL,
+# O_NONBLOCK), served since the CNONBLOCK devpipe fill (kernel/pipe.c). A round-
+# trip witness, not a bare exit code: save must REVERT the change (clean tree),
+# pop must RESTORE it -- an exit code alone would pass a stash that silently
+# dropped the edit.
+echo stashline >> f.txt
+git stash > /tmp/wf/st 2>/tmp/wf/sterr && ! grep -q stashline f.txt \
+    && echo GITWF-STASHSV || echo GITWF-FAIL-STASHSV
+git stash pop > /tmp/wf/sp 2>/tmp/wf/sperr && grep -q stashline f.txt \
+    && echo GITWF-STASHPOP || echo GITWF-FAIL-STASHPOP
+git checkout -q -- f.txt 2>/dev/null; git stash clear 2>/dev/null
+
+# --- worktree (pointer FILES, no symlinks -> works) ---
+git worktree add /tmp/wf/wt feat > /tmp/wf/wtl 2>&1 && test -f /tmp/wf/wt/f.txt && echo GITWF-WORKTREE || echo GITWF-FAIL-WORKTREE
+
+# --- manual gc (fork-self -> repack/prune, opendir/readdir, gc.pid lock) ---
+git gc > /tmp/wf/gc 2>&1 && git log --oneline >/dev/null 2>&1 && echo GITWF-GC || echo GITWF-FAIL-GC
+
+echo GITWF-DONE
+VIVEOF
+                            chmod 0755 "$gwb/rootfs/gitworkflow.sh"
+                            cat > "$gwb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "/gitworkflow.sh"],
+        "env": ["PATH=/usr/bin:/bin:/sbin:/usr/sbin", "HOME=/tmp", "GIT_EXEC_PATH=/usr/bin"],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.csprng": "granted"
+    }
+}
+VIVEOF
+                            echo "==> viv bundles: git-workflow staged at $gwb (THYLACINE_BAKE_GITWF=1: HERMETIC C1 verify -- branch/checkout/diff/status/merge/conflict/rebase/reset/stash/worktree/gc; no net; the self-hosting-floor gate)"
+                        fi
+                    else
+                        echo "==> viv bundles: static-git tarball extract FAILED -- git-probe skipped" >&2
+                    fi
+                    rm -rf "$gx"
+                else
+                    echo "==> viv bundles: no static-git tarball -- git-probe skipped (drop git-static-*-aarch64-musl.tar.gz in build/cache/ or set THYLACINE_STATIC_GIT_TAR)"
+                    forage_hint static-git "the static-git tarball" "build/cache/git-static-*-aarch64-musl.tar.gz"
+                fi
             else
                 rm -rf "$ab"
                 echo "==> viv bundles: Alpine bundle SKIPPED -- the minirootfs is present but no busybox-static apk is (every stock Alpine ELF is dynamic PIE, which the loader rejects; task #145). Drop busybox-static-*.apk in build/cache/ or set THYLACINE_BUSYBOX_STATIC_APK." >&2
+                forage_hint alpine "the Alpine busybox-static apk" "build/cache/busybox-static-*.apk" >&2
             fi
         else
             rm -rf "$ab"
             echo "==> viv bundles: untar of $tarball FAILED -- Alpine bundle skipped" >&2
         fi
     else
-        echo "==> viv bundles: no Alpine minirootfs tarball -- Alpine bundle skipped (the ARC gate's fixture, not the V-7 probe gate's; set THYLACINE_ALPINE_TARBALL or drop one in build/cache/)"
+        echo "==> viv bundles: no Alpine minirootfs tarball -- Alpine + stock bundles skipped (the L-6c and DISTRO ARC gate fixtures, not the V-7 probe gate's; set THYLACINE_ALPINE_TARBALL or drop one in build/cache/)"
+        forage_hint alpine "the Alpine minirootfs" "build/cache/alpine-minirootfs-*-aarch64.tar.gz"
     fi
-    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" ))"
+
+    # DISTRO D-5, THE ARC GATE fixture: the SAME tarball, staged UNMODIFIED.
+    #
+    # "Unmodified" is the whole point and it is meant literally: no stock file is
+    # replaced, removed or edited. The bundle above substitutes busybox-static
+    # over /bin/sh and /bin/busybox, so whatever else it proves, it does not
+    # prove that a stock distro runs. This one changes nothing, which is why
+    # /bin/sh is still the image's own SYMLINK to a stock ET_DYN PIE busybox --
+    # and following it is the D-1..D-4 chain end to end, on a rootfs nobody
+    # prepared for us.
+    #
+    # The only additions are the mount ANCHORS the recipe structurally requires
+    # (a bind needs an existing mount point). /proc, /sys and /dev are already
+    # in the image; /net and /env are Thylacine-shaped and are not. Nothing is
+    # written into the rootfs to carry the gate itself: the script rides in
+    # process.args, so the staged tree is the tarball plus anchors and nothing
+    # else. Measured: 520 entries, 335 of them symlinks, ZERO device nodes -- so
+    # there is no privileged tar operation here and no node-skipping to do.
+    #
+    # It stages WITHOUT the busybox-static apk, unlike the bundle above. That is
+    # the D-5 dependency inversion: needing a substitute shell was exactly the
+    # condition D-4 removed.
+    #
+    # #126 applies VERBATIM: this bundle is pool-resident, so a PRESERVE=1 build
+    # runs the OLD rootfs. The in-guest VERSION_ID leg is the detector -- it is
+    # the one assertion here that a stale bake cannot satisfy.
+    if [[ -n "$tarball" && -f "$tarball" ]]; then
+        local sb="$vstage/alpine-stock"
+        mkdir -p "$sb/rootfs"
+        if tar -xzf "$tarball" -C "$sb/rootfs" 2>/dev/null; then
+            mkdir -p "$sb/rootfs/proc" "$sb/rootfs/sys" "$sb/rootfs/dev" \
+                     "$sb/rootfs/net" "$sb/rootfs/env"
+            for leaf in null zero full random urandom tty; do
+                : > "$sb/rootfs/dev/$leaf"
+                chmod 0666 "$sb/rootfs/dev/$leaf"
+            done
+            # The gate script, inline in the manifest. Five legs, each adding
+            # EXACTLY ONE mechanism to the one before it, so a first-missing
+            # marker names a cause instead of a symptom:
+            #
+            #   A  the stock shell starts AT ALL -- /bin/sh (absolute pool
+            #      symlink) -> stock ET_DYN PIE busybox -> PT_INTERP -> stock
+            #      ldso -> applet dispatch on basename(argv[0]). Printed by a
+            #      BUILTIN echo, so no second exec is in the way of the signal.
+            #   B  fork+exec of a stock dynamic binary FROM a stock dynamic
+            #      parent, in busybox's multiplexer form: a real file, and
+            #      argv[0]-independent, so B isolates exec from both symlinks
+            #      and argv[0].
+            #   C  a second absolute pool symlink resolved for EXEC, plus argv[0]
+            #      applet dispatch. C is the leg that reddens if the kernel ever
+            #      leaks the symlink-RESOLVED path into argv[0]: busybox would
+            #      then see basename == "busybox", treat the filename as an
+            #      applet name, and emit nothing. (It does NOT discriminate
+            #      --argv0 from passing the path alone -- nothing on this rootfs
+            #      can produce a vector where those differ; that claim stays at
+            #      the unit level in exec.interp_argv_shape.)
+            #
+            #      C READS A REAL FILE THROUGH A SYMLINKED APPLET, and the target
+            #      being real is the point. The first version ran `/bin/ls /`,
+            #      which needs directory ENUMERATION on top of applet dispatch --
+            #      two mechanisms in one leg, against this file's own rule. It
+            #      failed on the second: openat declines O_DIRECTORY by design
+            #      (kernel/vivarium.c:470) and getdents64 has no row at all, so
+            #      no Linux program can list a directory here (task #209). The
+            #      dispatch it was actually testing had WORKED -- busybox printed
+            #      "ls: can't open '/'", naming itself by applet -- but the
+            #      marker could not fire, so the leg reported a mechanism that
+            #      was fine. Reading /usr/lib/os-release (a plain file) through
+            #      /bin/cat (a symlink) leaves argv[0] dispatch as the only
+            #      untested variable.
+            #   D  a RELATIVE pool symlink crossing `..` (/etc/os-release ->
+            #      ../usr/lib/os-release), read through B's already-proven
+            #      multiplexer form so the link is the only new variable. C and D
+            #      are now INDEPENDENT: C is symlinked-applet + real target, D is
+            #      multiplexer + symlinked target, so neither can mask the other.
+            #      The loader path cannot cover D's class:
+            #      libc.musl-aarch64.so.1 matches the "c." entry of musl's
+            #      reserved list (dynlink.c:1074-1082), so load_library
+            #      short-circuits it to &ldso and never opens the file.
+            #   E  the pool holds the PINNED image, asserted from inside the
+            #      guest. This is the #126 stale-bake detector.
+            #
+            # NO `>` REDIRECTION ANYWHERE. When this leg was written that was
+            # forced (#201: openat refused ALL O_CREAT until #50 landed the
+            # create arm); it STAYS by choice -- these legs assert loader/
+            # dispatch/symlink mechanisms, and a redirect would splice the
+            # unrelated create machinery (own gates: viv-run.exp's mutation
+            # legs) into every one of them. Every assertion is a $( ) capture
+            # (a pipe) or a 2>&1 dup.
+            #
+            # The RAW line is diagnostics, never the assertion, and it cannot
+            # forge one (#186): os-release contains no "DISTRO-" string.
+            cat > "$sb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "-c", "echo DISTRO-A-stock-sh\nb=$(/bin/busybox echo bb-ok); [ \"$b\" = bb-ok ] && echo DISTRO-B-stock-exec\nc=$(/bin/cat /usr/lib/os-release); echo DISTRO-RAW-C:$c\ncase \"$c\" in *\"Alpine Linux\"*) echo DISTRO-C-applet-by-symlink ;; esac\no=$(/bin/busybox cat /etc/os-release); echo DISTRO-RAW-OSREL:$o\ncase \"$o\" in *\"Alpine Linux\"*) echo DISTRO-D-relative-symlink ;; esac\ncase \"$o\" in *VERSION_ID=3.21.0*) echo DISTRO-E-pinned-image ;; esac\necho DISTRO-DONE"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux"
+    }
+}
+VIVEOF
+            echo "==> viv bundles: STOCK Alpine bundle staged at $sb (3.21.0 UNMODIFIED -- /bin/sh is the image's own symlink to its own dynamic busybox)"
+        else
+            rm -rf "$sb"
+            echo "==> viv bundles: untar of $tarball into the stock bundle FAILED -- DISTRO ARC gate bundle skipped" >&2
+        fi
+    fi
+    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-ash" ]] && echo " + alpine-ash" )$( [[ -d "$vstage/alpine-trap" ]] && echo " + alpine-trap" )$( [[ -d "$vstage/alpine-net" ]] && echo " + alpine-net" )$( [[ -d "$vstage/git-probe" ]] && echo " + git-probe" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
 }
 
 build_sysroot() {
@@ -1344,6 +2406,9 @@ build_sysroot() {
     echo "    CRT       crt1.o crti.o crtn.o"
     echo "    headers   $(find "$sysroot/include" -name '*.h' | wc -l | tr -d ' ') files"
     echo "    seam      syscall table retargeted to the Thylacine ABI"
+    # Completion sentinel, LAST: the rm -rf at step 1 removed it, so its
+    # presence certifies every install step above ran to the end.
+    touch "$sysroot/.complete"
     ledger "sysroot: REBUILT (pristine musl + pouch patch series + libc.a + compiler-rt + libsodium)"
 }
 
@@ -1969,6 +3034,7 @@ build_stratum_host_tools() {
     mkdir -p "$host_build"
     # No --toolchain — use the host's default compiler. The host tools
     # run on Darwin/Linux x86_64/arm64, not on Thylacine.
+    rm -f "$host_build/.complete"
     cmake -S "$stratum_src" -B "$host_build" \
         -DCMAKE_BUILD_TYPE=Release \
         -DSTM_ENABLE_PQ=OFF \
@@ -1992,6 +3058,7 @@ build_stratum_host_tools() {
         echo "==> stratum host tools: build did not produce:$missing" >&2
         exit 1
     fi
+    touch "$host_build/.complete"
     echo "==> stratum host tools built: $mkfs_bin, $stratumd_bin, $stratum_fs_bin"
 }
 
@@ -2092,6 +3159,14 @@ build_stratum_pool_fixture() {
     local bake_clade=0
     if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$BUILD_DIR/clade/stage/bin" ]]; then
         bake_clade=1
+    fi
+    # #101's sibling (detect-and-instruct, BUILD-CONFIG-DESIGN.md 5.3): the flag
+    # is SET but no toolchain is staged, so this pool is being minted WITHOUT
+    # /clade -- exactly the silent gap that costs a weekend. Name the remedy.
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && "$bake_clade" != "1" ]]; then
+        echo "==> WARNING: THYLACINE_BAKE_CLADE=1 but no toolchain is staged --"
+        echo "    minting this pool WITHOUT /clade (the on-device C/C++ toolchain)."
+        forage_hint clade "the Clade toolchain" "$BUILD_DIR/clade/stage/bin"
     fi
     if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
         # Sized against MEASURED consumption (2026-07-03, task #39): the bake
@@ -2396,6 +3471,24 @@ populate_stratum_pool() {
         echo "==> populate pool: baking viv bundles ($viv_stage -> /vivarium, $(du -sh "$viv_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$viv_stage" /vivarium \
             || { echo "==> populate pool: put /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        # #50: `put` preserves only the exec bit (dirs bake 0755), so the
+        # containers' /tmp loses its 1777 and a NON-system principal running
+        # `viv run` cannot write anywhere in the rootfs -- the A-2d W|X check
+        # denies the phenotype's openat(O_CREAT)/mkdirat legs (measured:
+        # "can't create /tmp/f50: Permission denied" from the viv-run
+        # scenario's user shell). Re-stamp each staged bundle's /tmp 1777
+        # after the put (stratum-fs chmod -> Tsetattr; the parser admits
+        # 4-digit octal). The kernel enforces no sticky bit at v1.0, so
+        # today 1777 behaves as 0777 -- baking the REAL Linux mode now means
+        # the fixture needs no revisit on the day sticky enforcement lands
+        # (the #50 holotype's F4). A bundle without a rootfs/tmp skips.
+        local vb
+        for vb in "$viv_stage"/*/rootfs/tmp; do
+            [[ -d "$vb" ]] || continue
+            local vrel="/vivarium${vb#"$viv_stage"}"
+            "$stratum_fs_bin" -s "$sock_path" chmod 1777 "$vrel" \
+                || { echo "==> populate pool: chmod $vrel FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: viv bundles baked at /vivarium"
@@ -2419,10 +3512,17 @@ populate_stratum_pool() {
         kill -TERM "$stratumd_pid"; exit 1
     fi
     echo "==> populate pool: system recovery phrase (hostowner-c): $sys_recovery_phrase"
-    # Create /var/lib/corvus top-down (stratum-fs mkdir is single-level, no -p);
-    # joey's runtime mkdir_or_open of the same chain then no-ops (idempotent).
+    # Skeleton dirs (stratum-fs mkdir is single-level, no -p; joey's runtime
+    # mkdir_or_open of the same chain then no-ops, idempotent):
+    #   /tmp            -- ut MREPL-binds each user's private <home>/tmp over it
+    #                      at session start (bind_user_tmp, usr/utopia/shell); the
+    #                      MREPL needs the target to pre-exist, else the bind fails
+    #                      and a hardcoded-/tmp consumer (clang's mktemp) gets
+    #                      ENOENT. A 0755 SYSTEM stub suffices -- the bind replaces
+    #                      it, so the base mode never shows through on success.
+    #   /var/lib/corvus -- the system-identity wraps live here (baked just below).
     local d
-    for d in /var /var/lib /var/lib/corvus; do
+    for d in /tmp /var /var/lib /var/lib/corvus; do
         "$stratum_fs_bin" -s "$sock_path" mkdir "$d" \
             || { echo "==> populate pool: mkdir $d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     done
@@ -2490,7 +3590,103 @@ populate_stratum_pool() {
     "$stratum_fs_bin" -s "$sock_path" read /lib/aurora/config | cmp -s - "$aurcfg_baked" \
         || { echo "==> populate pool: /lib/aurora/config readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /lib/aurora/config baked + readback-verified (aurora-config cfg-2a)"
+
+    # UM-6 (X-11): the /bin/sh compat shim -> /lib/shcompat. Placed HERE, after
+    # the ndb + aurora bakes, because /lib already exists by now (the ndb block
+    # created it) -- stratum-fs put does NOT create intermediate parents, and a
+    # pre-emptive `mkdir /lib` earlier collides EEXIST with ndb's own. joey
+    # grafts /lib/shcompat MAFTER onto the devramfs /bin (a union), so
+    # execve("/bin/sh") misses devramfs and hits `sh -> /viv/abin/sh`, which
+    # Design D re-anchors LINUX at /viv/abin's MPHENO_LINUX busybox. Guarded on
+    # -L (not -e): the shim is a DANGLING symlink at host-stage time (target
+    # /viv/abin/sh is a runtime mount path), and -e is false for a dangling link;
+    # -L tests symlink-ness. Staged only when the busybox tree is (the target
+    # exists at runtime only then), so a busybox-less pool bakes unchanged.
+    if [[ -L "$BUILD_DIR/shcompat/sh" ]]; then
+        "$stratum_fs_bin" -s "$sock_path" put "$BUILD_DIR/shcompat" /lib/shcompat \
+            || { echo "==> populate pool: put /lib/shcompat FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (shcompat) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: /bin/sh compat shim baked (/lib/shcompat/sh -> /viv/abin/sh; joey grafts MAFTER at /bin -- UM-6/X-11)"
+    fi
     [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
+
+    # H-3c: bake the presentation verb table at /lib/beacon/verbs (BEACON.md
+    # 7; the system tier of the plumber-style rules halcyond's obj menu
+    # offers). /lib exists from the ndb bake above. Under the HALCYON lever
+    # the baked file also carries the test rule `path wedge-test #wedge 6000`
+    # -- an INTERNAL action only a test-mode halcyond interprets (it freezes
+    # the renderer for 6 s with the menu up: THE GATE's wedged-owner proof;
+    # a production halcyond drops `#` rules at parse, the #880 strip class).
+    local verbs_src="$REPO_ROOT/usr/lib/beacon/verbs.default"
+    local verbs_baked="$verbs_src"
+    if [[ "${THYLACINE_HALCYON:-0}" != "0" ]]; then
+        verbs_baked=/tmp/thyla-beacon-verbs.$$
+        # FIRST in the file (= first in the menu), so the lever's proof
+        # reaches it with one Enter.
+        printf 'path   wedge-test   #wedge 6000\n' > "$verbs_baked"
+        cat "$verbs_src" >> "$verbs_baked"
+    fi
+    "$stratum_fs_bin" -s "$sock_path" mkdir /lib/beacon \
+        || { echo "==> populate pool: mkdir /lib/beacon FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" write /lib/beacon/verbs < "$verbs_baked" \
+        || { echo "==> populate pool: write /lib/beacon/verbs FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (beacon verbs) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" read /lib/beacon/verbs | cmp -s - "$verbs_baked" \
+        || { echo "==> populate pool: /lib/beacon/verbs readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    if [[ "$verbs_baked" != "$verbs_src" ]]; then
+        rm -f "$verbs_baked"
+        echo "==> populate pool: /lib/beacon/verbs baked + readback-verified (BEACON 7; + the HALCYON lever's wedge-test rule)"
+    else
+        echo "==> populate pool: /lib/beacon/verbs baked + readback-verified (BEACON 7 system tier)"
+    fi
+
+    # H-2: the renderer-choice lever (the cfg-4 gated-bake precedent). Under
+    # THYLACINE_HALCYON=1 the device boots halcyond (joey reads the one-token
+    # /lib/halcyon/renderer file post-pivot; absent = aurora, fail-safe).
+    # NOT baked by default: every other scenario + the suite assume the
+    # aurora fbcon; the ls-halcyon scenario probes the boot line and SKIPs
+    # cleanly on a default image.
+    if [[ "${THYLACINE_HALCYON:-0}" != "0" ]]; then
+        local halrend=/tmp/thyla-halcyon-renderer.$$
+        printf 'halcyond\n' > "$halrend"
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon \
+            || { echo "==> populate pool: mkdir /lib/halcyon FAILED" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/renderer < "$halrend" \
+            || { echo "==> populate pool: write /lib/halcyon/renderer FAILED" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (halcyon renderer) FAILED" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/renderer | cmp -s - "$halrend" \
+            || { echo "==> populate pool: /lib/halcyon/renderer readback MISMATCH" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
+        rm -f "$halrend"
+        echo "==> populate pool: HALCYON renderer lever ENABLED (/lib/halcyon/renderer = halcyond)"
+    fi
+
+    # KT-1.5d-1a (HALCYON 14.12): the per-user session lever. Under
+    # THYLACINE_HALCYON_SESSION=1 the device boots the per-user Halcyon
+    # SESSION -- login reads the one-token /lib/halcyon/session file and, when
+    # it is "on", spawns /bin/halcyond --session AS the user instead of ut on
+    # /dev/cons (aurora stays the pre-login console renderer). Distinct from
+    # THYLACINE_HALCYON (joey's system-renderer lever, being retired 14.12):
+    # absent = the proven ut path, fail-safe. NOT baked by default; the
+    # ls-gfx-session scenario probes the post-login markers + SKIPs on a
+    # default image (login spawns ut -> "Thylacine textual shell").
+    # The mkdir is EEXIST-tolerant (the renderer block above may have made the
+    # dir); the write's readback is the real bake-verify (verify by CONTENT).
+    if [[ "${THYLACINE_HALCYON_SESSION:-0}" != "0" ]]; then
+        local halsess=/tmp/thyla-halcyon-session.$$
+        printf 'on\n' > "$halsess"
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon 2>/dev/null || true
+        "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/session < "$halsess" \
+            || { echo "==> populate pool: write /lib/halcyon/session FAILED" >&2; rm -f "$halsess"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (halcyon session) FAILED" >&2; rm -f "$halsess"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/session | cmp -s - "$halsess" \
+            || { echo "==> populate pool: /lib/halcyon/session readback MISMATCH" >&2; rm -f "$halsess"; kill -TERM "$stratumd_pid"; exit 1; }
+        rm -f "$halsess"
+        echo "==> populate pool: HALCYON session lever ENABLED (/lib/halcyon/session = on)"
+    fi
 
     # cfg-3 F1 (the OSC-laundering regression): a file of RAW bytes carrying
     # a crafted settings-channel OSC whose value embeds a NEWLINE
@@ -2680,7 +3876,7 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.
@@ -2781,8 +3977,32 @@ build_sdl2() {
     local gl_prove="$BUILD_DIR/clade/gl/gl-sdl-prove"
     local gl_needed=""
     [[ -f "$BUILD_DIR/clade/gl/lib/libOSMesa.a" ]] && gl_needed=1
+
+    # #239: which GL backend this archive gets compiled with. The Mesa headers
+    # are fetched, not vendored, AND they land inside build/sysroot/include --
+    # a directory build_sysroot recreates. So their absence is the normal state
+    # of a fresh checkout and the eventual state of every machine that rebuilds
+    # its sysroot, not an exceptional one. Absent them, the nogl backend
+    # compiles in place of SDL_thylacineopengl.c (usr/ports/sdl2/thylacine-nogl)
+    # and the archive is GL-less rather than unbuildable.
+    #
+    # It is a THIRD term of the cache key, not a build-time detail: the mode is
+    # an INPUT the archive consumed, and nothing in the timestamp comparison can
+    # see it change. Fetching the headers into an up-to-date tree moves no file
+    # this guard stats, so without the sentinel the next build would report
+    # REUSED and keep serving the GL-less archive -- and worse, a later
+    # gl-sdl-prove would link the real libOSMesa.a against it. Same lesson as
+    # the two above, third axis.
+    local gl_hdr=""
+    [[ -f "$sysroot/include/GL/osmesa.h" ]] && gl_hdr=1
+    local gl_mode_file="$sysroot/lib/.libSDL2.gl-mode"
+    local gl_mode="nogl"
+    [[ -n "$gl_hdr" ]] && gl_mode="gl"
+
     if [[ -f "$archive" && -f "$progs_out/sdl-probe" ]] &&
-       [[ -z "$gl_needed" || -f "$gl_prove" ]]; then
+       [[ -z "$gl_needed" || -f "$gl_prove" ]] &&
+       [[ -f "$gl_mode_file" ]] &&
+       [[ "$(cat "$gl_mode_file" 2>/dev/null)" == "$gl_mode" ]]; then
         local stale
         stale="$(find "$sdl_vendor" "$port_dir" "$REPO_ROOT/usr/sdl-probe" \
                       "$REPO_ROOT/usr/gl-sdl-prove" \
@@ -2796,12 +4016,17 @@ build_sdl2() {
         [[ -n "$gl_needed" && "$BUILD_DIR/clade/gl/lib/libOSMesa.a" -nt "$gl_prove" ]] \
             && gl_stale=1
         if [[ -z "$stale" && -z "$gl_stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
-            ledger "libSDL2.a: REUSED (cached + up-to-date)"
+            ledger "libSDL2.a: REUSED (cached + up-to-date, $gl_mode)"
             return 0
         fi
     fi
 
     echo "==> building SDL2 2.32.10 (aarch64-thylacine)"
+    # Invalidate the sentinel BEFORE the first artifact write. Writing it
+    # last (below) only covers the fresh-checkout case; on a REBUILD the
+    # old sentinel would survive a build killed mid-ar and vouch for the
+    # partial archive.
+    rm -f "$gl_mode_file"
     rm -rf "$sdl_src" "$sdl_obj"
     mkdir -p "$sdl_src" "$sdl_obj"
     cp -R "$sdl_vendor/src" "$sdl_src/src"
@@ -2815,6 +4040,19 @@ build_sdl2() {
     mkdir -p "$sdl_src/src/video/thylacine"
     cp "$port_dir"/thylacine/*.c "$port_dir"/thylacine/*.h \
         "$sdl_src/src/video/thylacine/"
+
+    # #239: swap the GL backend in the COPY, so the glob below stays the
+    # compile list and exactly one of the two is ever compiled. Announced, not
+    # silent: this is a real capability the archive will not have, and a build
+    # that quietly drops one reads exactly like a build that has it.
+    if [[ -z "$gl_hdr" ]]; then
+        rm -f "$sdl_src/src/video/thylacine/SDL_thylacineopengl.c"
+        cp "$port_dir"/thylacine-nogl/*.c "$sdl_src/src/video/thylacine/"
+        echo "    NO GL: $sysroot/include/GL/osmesa.h is absent -- building the"
+        echo "           GL-less backend (#239). SDL programs build and run;"
+        echo "           SDL_GL_CreateContext reports no OSMesa. Fetch the Mesa"
+        echo "           headers per usr/ports/mesa/README.md for a GL archive."
+    fi
 
     local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
                    -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
@@ -2899,7 +4137,14 @@ build_sdl2() {
 
     build_gl_sdl_prove "$sysroot" "$sdl_obj"
 
-    ledger "libSDL2.a: BUILT (+ sdl-probe)"
+    # LAST, deliberately. The archive is written well before this point, so a
+    # build that dies in between leaves no sentinel -- and the guard above then
+    # declines to reuse it. That is the #138 output-half lesson applied to the
+    # mode: the sentinel records a COMPLETED build in a known mode, not an
+    # attempted one.
+    printf '%s\n' "$gl_mode" > "$gl_mode_file"
+
+    ledger "libSDL2.a: BUILT ($gl_mode, + sdl-probe)"
 }
 
 build_gl_sdl_prove() {
@@ -3164,10 +4409,23 @@ build_tyrquake() {
        [[ -z "$glq_needed" || -f "$glq_out" ]]; then
         local stale
         stale="$(find "$tq_vendor" "$port_dir" -type f -newer "$progs_out/tyr-quake" -print -quit 2>/dev/null)"
+        # Staleness must hold against BOTH outputs, not one representative:
+        # tyr-quake publishes before tyr-glquake links, so a build killed
+        # between them leaves a fresh tyr-quake shadowing a glquake still
+        # built from the previous sources.
+        if [[ -z "$stale" && -n "$glq_needed" ]]; then
+            stale="$(find "$tq_vendor" "$port_dir" -type f -newer "$glq_out" -print -quit 2>/dev/null)"
+        fi
         # The FETCHED archive is a link input of the glquake half (#204; the
         # #139 class): a refreshed libOSMesa.a must invalidate tyr-glquake.
         local glq_stale=""
         [[ -n "$glq_needed" && "$BUILD_DIR/clade/gl/lib/libOSMesa.a" -nt "$glq_out" ]] \
+            && glq_stale=1
+        # libSDL2.a x tyr-glquake (round-10 F3): glquake links -lSDL2 too,
+        # and the term below compares libSDL2.a against tyr-quake ONLY -- so
+        # an SDL2-triggered rebuild killed after the sw link published left
+        # a stale glquake the fresh tyr-quake's mtime then absorbed forever.
+        [[ -n "$glq_needed" && "$sysroot/lib/libSDL2.a" -nt "$glq_out" ]] \
             && glq_stale=1
         if [[ -z "$stale" && -z "$glq_stale" && ! "$sysroot/lib/libSDL2.a" -nt "$progs_out/tyr-quake" ]]; then
             ledger "tyr-quake + tyr-glquake: REUSED (cached + up-to-date)"
@@ -3276,10 +4534,13 @@ build_tyrquake() {
     }
 
     TQ_EXTRA_CFLAGS="" tq_compile "$tq_obj/sw" "${objs_common[@]}" "${objs_sw[@]}"
+    # Publish atomically: a killed link would otherwise leave a fresh-mtime
+    # partial binary the reuse gate above trusts.
     POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
         "$REPO_ROOT/tools/pouch-ld" "$tq_obj/sw"/*.o \
         -L"$sysroot/lib" -lSDL2 \
-        -o "$progs_out/tyr-quake"
+        -o "$progs_out/tyr-quake.tmp"
+    mv "$progs_out/tyr-quake.tmp" "$progs_out/tyr-quake"
     echo "    tyr-quake: $(wc -c < "$progs_out/tyr-quake" | tr -d ' ') bytes (ET_EXEC, static)"
     ledger "tyr-quake: BUILT (+ shareware pak staged for the pool)"
 
@@ -3306,14 +4567,217 @@ build_tyrquake() {
     TQ_EXTRA_CFLAGS="-DGLQUAKE" \
         tq_compile "$tq_obj/gl" "${objs_common[@]}" "${objs_gl[@]}"
     local glq="$BUILD_DIR/clade/gl/tyr-glquake"
-    if ! gl_link_program "$glq" "$tq_obj/gl"/*.o; then
+    # Link + verify on a temp name, publish by rename: only a binary that
+    # passed the resolution assert ever appears under the gated name.
+    if ! gl_link_program "$glq.tmp" "$tq_obj/gl"/*.o; then
         echo "==> tyr-glquake: LINK FAILED against libOSMesa.a" >&2
         exit 1
     fi
-    gl_assert_resolved "$glq" tyr-glquake
+    gl_assert_resolved "$glq.tmp" tyr-glquake
+    mv "$glq.tmp" "$glq"
     echo "    tyr-glquake: $(wc -c < "$glq" | tr -d ' ') bytes (ET_EXEC, static,"
     echo "                 OSMesa entry points resolved)"
     ledger "tyr-glquake: BUILT (GL acceptance gate, section 9 step 3)"
+}
+
+build_vkquake() {
+    # Warp W-4 (the vkQuake FPS gate; docs/WARP-WSI-DESIGN.md section 7,
+    # GPU-DESIGN section 8) -- cross-build vkQuake 1.05.3 (QuakeSpasm
+    # lineage, the exact vintage v3dv validated its own bring-up against)
+    # over the pouch sysroot + libSDL2.a (the W-3e SDL_thylacinevulkan
+    # glue) + the venus static ICD archive set fetched from thyla-keep.
+    #
+    # The vendored tree (third_party/vkquake, pruned-pristine per its
+    # PRUNE-MANIFEST.md) compiles via a curated object list mirroring the
+    # upstream Quake/Makefile OBJS groups (IN=sdl, SND=sdl+wave-only
+    # codec, CDA upstream cd_sdl, VID=gl_vidsdl over Vulkan) -- the
+    # tyrquake idiom. The loader story is the port's whole difference:
+    # NO Vulkan loader and NO dlopen exist, so every core vk* call
+    # resolves through vendored volk (third_party/volk) initialized with
+    # usr/ports/vkquake/thy_vkloader.c's filter (patch 0001; the W-1
+    # trampoline caveat: vkCreateDevice + vkGetDeviceProcAddr go DIRECT
+    # to vn_* symbols, all device-level loads ride the real
+    # vkGetDeviceProcAddr), and the link carries
+    # -u vk_icdGetInstanceProcAddr -- a weak ref extracts NO archive
+    # member, and this link is the closure-from-u-alone proof point the
+    # r6-F5 record named.
+    #
+    # The venus link set (build/clade/venus/{include,lib,venus-libs.list})
+    # is FETCHED -- mesa 26.1.6 headers + the exact static archive closure
+    # of the mesa-fork witness link on thyla-keep. Optional and ANNOUNCED
+    # on tyr-glquake's terms: a checkout without it builds everything else
+    # fine and the W-4 gate skips.
+    local sysroot="$BUILD_DIR/sysroot"
+    local vq_vendor="$REPO_ROOT/third_party/vkquake"
+    local port_dir="$REPO_ROOT/usr/ports/vkquake"
+    local volk_dir="$REPO_ROOT/third_party/volk"
+    local vq_src="$BUILD_DIR/pouch/vkquake-src"
+    local vq_obj="$BUILD_DIR/pouch/vkquake-obj"
+    local venus="$BUILD_DIR/clade/venus"
+    local out="$BUILD_DIR/clade/gl/vkquake"
+    local clang="$LLVM_PREFIX/bin/clang"
+    local stage="$BUILD_DIR/quake/stage"
+
+    if [[ ! -f "$vq_vendor/Quake/host.c" ]]; then
+        echo "==> vkquake: vendored source missing at $vq_vendor" >&2
+        exit 1
+    fi
+    if [[ ! -f "$venus/venus-libs.list" || ! -f "$venus/venus-whole.list" || ! -f "$venus/include/vulkan/vulkan_core.h" ]]; then
+        echo "    vkquake: no venus link set at $venus -- skipping (W-4;"
+        echo "             fetch it per usr/ports/mesa/README.md 'The venus link set')"
+        return 0
+    fi
+    if [[ ! -f "$sysroot/lib/libSDL2.a" ]]; then
+        build_sdl2
+    fi
+    # The vk glue lives in the GL-mode SDL backend; a nogl-mode sysroot
+    # archive would leave THYLACINE_Vulkan_* undefined at link. Fail loud
+    # here, where the cause is nameable, not at the link.
+    # CAPTURE FIRST, then filter -- `llvm-nm | grep -q` is the SIGPIPE race
+    # gl_assert_resolved documents (grep -q exits at the first match, nm dies
+    # on SIGPIPE, pipefail reports a symbol MISSING that is present).
+    local sdl_syms
+    sdl_syms="$("$LLVM_PREFIX/bin/llvm-nm" "$sysroot/lib/libSDL2.a" 2>/dev/null || true)"
+    if ! grep -q "T THYLACINE_Vulkan_CreateSurface" <<< "$sdl_syms"; then
+        echo "==> vkquake: libSDL2.a lacks the W-3e Vulkan glue (nogl-mode SDL build?)" >&2
+        exit 1
+    fi
+
+    # The engine's own content pak rides the /quake bake beside id1/
+    # (common.c looks for <basedir>/vkquake.pak). The stage itself is
+    # build_tyrquake's; without it the pool bake skips /quake entirely.
+    if [[ -d "$stage" ]]; then
+        if [[ ! -f "$stage/vkquake.pak" || "$vq_vendor/Quake/vkquake.pak" -nt "$stage/vkquake.pak" ]]; then
+            cp "$vq_vendor/Quake/vkquake.pak" "$stage/vkquake.pak"
+            chmod 0644 "$stage/vkquake.pak"
+            echo "    vkquake.pak staged for the /quake bake"
+        fi
+    else
+        echo "    vkquake: no quake stage at $stage (run build_tyrquake) -- the game data half is absent"
+    fi
+
+    # Staleness: reuse when newer than the tree + port + volk + libSDL2.a +
+    # the fetched venus set (the #204/#139 class: a refreshed venus set must
+    # invalidate the binary). The ARCHIVES + HEADERS are in the sweep, not
+    # just the list file: a keep cycle that changes only libvulkan_virtio.a
+    # leaves the list's mtime alone, and this check once said REUSED for
+    # exactly that -- the stale binary would have measured the OLD driver.
+    # The venus INPUTS are ALSO gated by CONTENT (round-8 F2; widened at
+    # round-9 F2 to the headers + BOTH list files -- venus-whole.list was
+    # covered by no tier at all, and its whole/libs split is exactly the
+    # closure-correctness input): -newer is mtime, and a fetch that
+    # preserves an older source mtime slips it; the stamp written at build
+    # time is compared by hash, which cannot. `|| true` + the empty check
+    # (round-9 F1): an empty/partial lib/ must force the rebuild -- which
+    # then fails loud at the link -- not kill the whole invocation
+    # silently under set -e with the shasum error eaten by 2>/dev/null.
+    local vstamp="$BUILD_DIR/pouch/vkquake-venus.sha"
+    local vcur=""
+    vcur="$(cd "$venus" && { find lib include -type f 2>/dev/null; ls venus-libs.list venus-whole.list 2>/dev/null; } | LC_ALL=C sort | xargs shasum -a 256 2>/dev/null | shasum -a 256 | cut -d' ' -f1)" || true
+    if [[ -f "$out" && -n "$vcur" ]]; then
+        local stale
+        stale="$(find "$vq_vendor" "$port_dir" "$volk_dir" "$venus/lib" "$venus/include" -type f -newer "$out" -print -quit 2>/dev/null)"
+        if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$out" && ! "$venus/venus-libs.list" -nt "$out" \
+              && -f "$vstamp" && "$vcur" == "$(cat "$vstamp")" ]]; then
+            ledger "vkquake: REUSED (cached + up-to-date; venus inputs hash-matched)"
+            return 0
+        fi
+    fi
+
+    echo "==> building vkquake 1.05.3 (Vulkan renderer over venus, aarch64-thylacine)"
+    rm -rf "$vq_src" "$vq_obj"
+    mkdir -p "$vq_src" "$vq_obj" "$BUILD_DIR/clade/gl"
+    cp -R "$vq_vendor/Quake" "$vq_vendor/Shaders" "$vq_src/"
+    local qp
+    for qp in "$port_dir"/patches/*.patch; do
+        patch -s -p1 -t -d "$vq_src" -i "$qp"
+    done
+
+    # The curated object list (upstream Quake/Makefile OBJS; codecs
+    # wave-only so the disabled snd_* stay vendored-but-unbuilt).
+    local objs=(
+        # SHADER_OBJS (SPIR-V-as-C, upstream-committed under Shaders/Compiled)
+        alias_frag alias_alphatest_frag alias_vert basic_alphatest_frag
+        screen_warp_comp screen_warp_rgba8_comp cs_tex_warp_comp basic_frag
+        basic_notex_frag basic_vert sky_layer_frag sky_layer_vert
+        postprocess_frag postprocess_vert world_frag world_vert
+        showtris_frag showtris_vert
+        # GLOBJS
+        gl_refrag gl_rlight gl_rmain gl_fog gl_rmisc r_part r_world
+        gl_screen gl_sky gl_warp gl_vidsdl gl_draw image gl_texmgr gl_mesh
+        gl_heap r_sprite r_alias r_brush gl_model
+        # input + sound (SDL driver; wave codec only) + cd
+        in_sdl snd_dma snd_mix snd_mem bgmusic snd_codec snd_wave snd_sdl
+        cd_sdl
+        # net (unix)
+        net_bsd net_udp net_dgrm net_loop net_main
+        # client + common + server
+        strlcat strlcpy chase cl_demo cl_input cl_main cl_parse cl_tent
+        console keys menu sbar view wad cmd common crc cvar cfgfile host
+        host_cmd mathlib pr_cmds pr_edict pr_exec sv_main sv_move sv_phys
+        sv_user world zone
+        # platform
+        pl_linux sys_sdl_unix main_sdl
+    )
+
+    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
+                   -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
+                   -fno-stack-protector -fcommon
+                   -nostdlibinc -isystem "$sysroot/include"
+                   -isystem "$sysroot/include/SDL2"
+                   -isystem "$venus/include"
+                   -iquote "$vq_src/Quake" -iquote "$volk_dir"
+                   -D_GNU_SOURCE=1 -D__thylacine__=1
+                   -DPLATFORM_UNIX=1 -DUSE_SDL2 -DUSE_CODEC_WAVE -DNDEBUG )
+
+    local n=0 f src
+    for f in "${objs[@]}"; do
+        if [[ -f "$vq_src/Quake/$f.c" ]]; then
+            src="$vq_src/Quake/$f.c"
+        elif [[ -f "$vq_src/Shaders/Compiled/$f.c" ]]; then
+            src="$vq_src/Shaders/Compiled/$f.c"
+        else
+            echo "==> vkquake: source for $f not found" >&2
+            exit 1
+        fi
+        "$clang" "${cflags[@]}" -c "$src" -o "$vq_obj/$f.o"
+        n=$((n + 1))
+    done
+    "$clang" "${cflags[@]}" -c "$volk_dir/volk.c" -o "$vq_obj/volk.o"
+    "$clang" "${cflags[@]}" -c "$port_dir/thy_vkloader.c" -o "$vq_obj/thy_vkloader.o"
+    echo "    compiled $((n + 2)) objects"
+
+    # The venus closure links exactly as mesa's own witness link does
+    # (the thylacine-vk-sdl-prove LINK_ARGS on thyla-keep, the recorded
+    # authority): the three runtime archives under --whole-archive (their
+    # entrypoint/dispatch tables must be fully present), the rest grouped,
+    # -u forcing the ICD member (a weak ref extracts NO archive member --
+    # this link is the closure-from-u-alone proof point, r6-F5). The lists
+    # are READ from what the keep fetch recorded, never typed here (the
+    # gl_link_program discipline: a hardcoded list can only drift from the
+    # one known to close).
+    local venus_whole=() venus_libs=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && venus_whole+=( "$venus/lib/$f" )
+    done < "$venus/venus-whole.list"
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && venus_libs+=( "$venus/lib/$f" )
+    done < "$venus/venus-libs.list"
+    POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+        "$REPO_ROOT/tools/pouch-ld" "$vq_obj"/*.o \
+        -Wl,-u,vk_icdGetInstanceProcAddr \
+        -Wl,--start-group \
+        -Wl,--whole-archive "${venus_whole[@]}" -Wl,--no-whole-archive \
+        "${venus_libs[@]}" \
+        -L"$sysroot/lib" -lSDL2 -lm \
+        -Wl,--end-group \
+        -o "$out.tmp"
+    # Atomic publish (round-9 F3): an interrupted link must never leave a
+    # fresh-mtime partial $out that every staleness tier then REUSES.
+    mv "$out.tmp" "$out"
+    echo "    vkquake: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static, venus ICD linked)"
+    printf '%s' "$vcur" > "$vstamp"
+    ledger "vkquake: BUILT (W-4; ramfs-staged, data from /quake)"
 }
 
 # --- the GNU make port's source-prep + object census, shared by the host
@@ -3427,7 +4891,8 @@ build_gnumake() {
 
     POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
         "$REPO_ROOT/tools/pouch-ld" "$mk_obj"/*.o \
-        -o "$progs_out/make"
+        -o "$progs_out/make.tmp"
+    mv "$progs_out/make.tmp" "$progs_out/make"
     echo "    make: $(wc -c < "$progs_out/make" | tr -d ' ') bytes (ET_EXEC, static)"
     ledger "make (GNU make 4.4.1): BUILT"
 }
@@ -3577,8 +5042,14 @@ build_libcxx() {
                 echo "    libcxx: expected archive $a not produced" >&2
                 exit 1
             fi
-            cp "$bdir/install/lib/$a" "$sysroot/lib/$a"
         done
+        # Publish order is the reuse contract: the gate above keys on
+        # libc++.a, so it lands LAST (atomically, after the completeness
+        # gate below). A staging pass killed part-way then leaves the old
+        # libc++.a, still older than whatever triggered this rebuild -- the
+        # next run rebuilds instead of serving a mixed or truncated set.
+        cp "$bdir/install/lib/libc++abi.a" "$sysroot/lib/libc++abi.a"
+        cp "$bdir/install/lib/libunwind.a" "$sysroot/lib/libunwind.a"
         # F4: clear the destination first -- cp -R MERGES, so a header removed or
         # renamed across a fork bump would survive as a stale ghost that could
         # shadow/misdirect a later include.
@@ -3600,6 +5071,8 @@ build_libcxx() {
         # is int64 -- identical to libc++/consumers. The CL-2 int32/int64 ODR
         # split is ELIMINATED (not merely inert), and the old atomic-wait-symbol
         # tripwire that pinned its inertness retires with it (LLVM-DESIGN 16.15).
+        cp "$bdir/install/lib/libc++.a" "$sysroot/lib/libc++.a.tmp"
+        mv "$sysroot/lib/libc++.a.tmp" "$sysroot/lib/libc++.a"
         ledger "libcxx (libunwind+libc++abi+libc++): BUILT"
     fi
 
@@ -3698,9 +5171,33 @@ build_clade() {
     local outd="$bdir/bin/clangd"
     if [[ -x "$out" && -x "$outd" \
           && "$out" -nt "${BASH_SOURCE[0]}" \
-          && "$out" -nt "$fork/llvm/lib/Support/Unix/Path.inc" ]]; then
-        ledger "clade (clang+lld multicall + clangd): REUSED (cached + up-to-date)"
-        return 0
+          && "$out" -nt "$fork/llvm/lib/Support/Unix/Path.inc" \
+          && "$outd" -nt "${BASH_SOURCE[0]}" \
+          && "$outd" -nt "$fork/llvm/lib/Support/Unix/Path.inc" ]]; then
+        # A killed ninja link leaves a fresh-mtime truncated ELF here, and
+        # nothing downstream stats it before the guest build storm. -S walks
+        # the section header table, which lld places at EOF, so it fails on
+        # any short-truncation (-h reads only the first 64 bytes and passes
+        # on a file 99% gone -- measured). NOT caught: a killed mmap writer
+        # leaving a full-size file with unflushed middles; the guest storm
+        # is the backstop for that class. A failure here falls through to
+        # the (incremental) rebuild, which relinks fast.
+        #
+        # An absent readelf is the INSTRUMENT missing, not the subject
+        # failing (round-10 F4): reading it as a failed verify would discard
+        # a valid multi-hour artifact on exactly the host least able to
+        # rebuild it. Skip the verify loudly and trust the mtime gate.
+        if [[ ! -x "$readelf" ]]; then
+            echo "==> clade: host llvm-readelf missing at $readelf -- structural verify SKIPPED"
+            ledger "clade (clang+lld multicall + clangd): REUSED (cached + up-to-date; UNVERIFIED)"
+            return 0
+        fi
+        if "$readelf" -S "$out" >/dev/null 2>&1 \
+           && "$readelf" -S "$outd" >/dev/null 2>&1; then
+            ledger "clade (clang+lld multicall + clangd): REUSED (cached + up-to-date)"
+            return 0
+        fi
+        echo "==> clade: cached bin/llvm or bin/clangd fails ELF verify -- rebuilding"
     fi
 
     echo "==> building the device toolchain (clang+lld multicall, aarch64-thylacine)"
@@ -3711,6 +5208,19 @@ build_clade() {
     local cxxflags="-march=armv8-a -moutline-atomics -fno-pic -nostdlibinc -isystem $sysroot/include/c++/v1 -isystem $sysroot/include -D_GNU_SOURCE=1"
     local cflags="-march=armv8-a -moutline-atomics -fno-pic -nostdlibinc -isystem $sysroot/include -D_GNU_SOURCE=1"
     if [[ ! -f "$bdir/CMakeCache.txt" || "${BASH_SOURCE[0]}" -nt "$bdir/CMakeCache.txt" ]]; then
+        # The reconfigure-from-scratch arm exists for stale local cmake
+        # state -- but a PULLED tree also carries CMakeCache.txt, so a mere
+        # recipe edit armed this rm against 185 MB of certified builder
+        # artifacts, and it ate them twice in one day (JOURNAL run-11).
+        # A structurally-valid multicall is never destroyed implicitly:
+        # refuse loudly and require the explicit override.
+        if [[ -x "$out" ]] && [[ ! -x "$readelf" || $("$readelf" -S "$out" >/dev/null 2>&1; echo $?) -eq 0 ]] \
+           && [[ "${CLADE_FORCE_RECONFIGURE:-0}" != 1 ]]; then
+            echo "==> clade: REFUSING to rm -rf $bdir -- it holds a structurally-valid bin/llvm" >&2
+            echo "    (pulled builder artifacts; a recipe edit does not invalidate them)." >&2
+            echo "    To rebuild locally from scratch: CLADE_FORCE_RECONFIGURE=1 tools/build.sh clade" >&2
+            exit 1
+        fi
         rm -rf "$bdir"
         mkdir -p "$bdir"
         local cmake_args=(
@@ -3758,6 +5268,22 @@ build_clade() {
             # rather than a second tree.
             -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra"
             -DLLVM_TOOL_LLVM_DRIVER_BUILD=ON
+            # On-device driver defaults so `clang++ hello.cpp -o hello` just works,
+            # retiring the mandatory --sysroot=/clade/sysroot. DEFAULT_SYSROOT is the
+            # LOAD-BEARING one: it sets Driver::SysRoot, which the CL-3 Thylacine
+            # ToolChain reads for the bare include/ + include/c++/v1 + lib search
+            # (an explicit --sysroot still overrides it, so existing callers are
+            # unaffected). The other four ALIGN with -- and are already hardcoded by
+            # -- the CL-3 driver (ld.lld / libc++ / compiler-rt / -lunwind for the
+            # aarch64-thylacine target), so they are belt-and-suspenders, mattering
+            # only if a non-Thylacine target were ever selected. This is the DEVICE
+            # clang; the host clang (clade-stage1.sh) must NEVER get an absolute
+            # /clade/sysroot default -- /clade does not exist on the build host.
+            -DDEFAULT_SYSROOT=/clade/sysroot
+            -DCLANG_DEFAULT_LINKER=lld
+            -DCLANG_DEFAULT_CXX_STDLIB=libc++
+            -DCLANG_DEFAULT_RTLIB=compiler-rt
+            -DCLANG_DEFAULT_UNWINDLIB=libunwind
             # clangd trim (CL-6). TIDY_CHECKS=OFF drops ALL_CLANG_TIDY_CHECKS --
             # a large slab of code the CL-6 gate (diagnostics/hover/definition)
             # does not use; clangd still links clangTidy/clangTidyUtils, which
@@ -4198,6 +5724,7 @@ case "$target" in
     pouch-progs) build_pouch_progs ;;
     sdl2)        build_sdl2        ;;
     tyrquake)    build_tyrquake    ;;
+    vkquake)     build_vkquake     ;;
     gnumake)     build_gnumake     ;;
     libcxx)      build_libcxx      ;;
     quake-host)  build_quake_host  ;;

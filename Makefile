@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive smp-gate idle-gate check-floor test-a72 run run-tcg gdb specs help
+.PHONY: all kernel production everything sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify check-arc-gates check-production smp-gate idle-gate check-floor test-a72 test-fault verify-kaslr test-venus-verdict run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -16,6 +16,14 @@ kernel:
 # boot-test probe ladder. Boots straight to the login getty.
 production:
 	@tools/build.sh all --production
+
+# A COMPLETE, quick-to-boot image: every bake chunk ON (/goroot, /clade + /storm,
+# /chase-w2, the viv + Alpine bundles, /quake) + --production (no boot tests ->
+# straight to login). Optional chunks with an absent input skip with a warning.
+# SKIP_CLADE=1 skips the slow LLVM device-toolchain build. See
+# docs/BUILD-HARNESS.md and tools/build-everything.sh.
+everything:
+	@tools/build-everything.sh
 
 sysroot:
 	@tools/build.sh sysroot
@@ -52,6 +60,26 @@ test-interactive:
 smp-gate:
 	@tools/ci-smp-gate.sh
 
+# The SMP gate's failure classifier, exercised without booting anything (#222).
+# Fast, so there is no excuse for the ladder to go untested again -- the
+# EXTERNAL-KILL bucket was structurally unable to see SIGKILL for as long as
+# nobody drove it.
+test-classify:
+	@tools/test-smp-classify.sh
+
+# The arc-gate verdict checker, exercised without booting anything (#212). Its
+# load-bearing case is a PRE-#212 boot log: a check that passed one of those
+# would be decorative, since that is what every boot looked like while the
+# D-5/L-6c skip was invisible.
+check-arc-gates:
+	@tools/check-arc-gates.sh --selftest
+
+# #228: prove the lean production shape still BUILDS. It had stopped -- joey
+# failed with 11 errors at THYLA_BOOT_PROBES=OFF -- and nothing noticed for as
+# long as nothing built it. ~2 s for joey; --all adds the full production build.
+check-production:
+	@tools/check-production.sh
+
 idle-gate:
 	@tools/ci-idle-gate.sh
 
@@ -68,6 +96,30 @@ check-floor:
 # no enforcer until this target existed.
 test-a72:
 	@THYLACINE_ACCEL=tcg THYLACINE_CPU=cortex-a72 tools/test.sh
+
+# #245: the deliberate-fault harness -- build one kernel per provoker and PASS
+# iff each EXTINCTIONs with its expected message. It is the ONLY witness that
+# the seven hardening protections (canary, W^X, BTI, the two stack guards, the
+# idle guard, the recursion arm) actually FIRE; the suite proves only that they
+# are compiled in. It was invoked by NOTHING for the project's life, which is
+# how #244 -- recursive_kernel_fault printing nothing at all -- sat undetected
+# for about a month. 7 builds + 7 boots.
+test-fault:
+	@tools/test-fault.sh
+
+# #245: ROADMAP section 4.2's exit criterion for I-16 -- the kernel base must
+# differ across boots -- and this is that invariant's only runtime witness. It
+# had no caller either. `make test` accepts any SINGLE boot, so it is
+# structurally blind to a slide that never moves. N=10 boots.
+verify-kaslr:
+	@tools/verify-kaslr.sh
+
+# Warp-6 V-0: the venus gate's verdict, without booting. `warp-host.sh venus`
+# costs two ~220 s remote guest boots, which makes its verdict the least
+# affordable thing in the tree to test by running -- and #245 is the standing
+# lesson that a checker reachable only by hand is a checker that rots. Instant.
+test-venus-verdict:
+	@tools/test-venus-verdict.sh
 
 run:
 	@tools/run-vm.sh
@@ -151,6 +203,8 @@ help:
 	@echo "Thylacine OS — make targets:"
 	@echo "  kernel     — build the kernel ELF (build/kernel/thylacine.elf)"
 	@echo "  all        — kernel + sysroot + userspace + disk (as available per phase)"
+	@echo "  everything — COMPLETE + quick-to-boot: every bake chunk ON + --production"
+	@echo "               (no boot tests). SKIP_CLADE=1 skips the slow LLVM build."
 	@echo "  pool       — re-bake build/fixtures/pool.img (clean Stratum boot pool)"
 	@echo "  test       — run-vm + boot-banner verify (HVF on a capable host; W3.5)"
 	@echo "  test-tcg   — same, forced to full-emulation TCG (-cpu max + GICv3) compat run"
@@ -159,10 +213,23 @@ help:
 	@echo "               optional gate, SKIPs without 'expect'. THYLACINE_ACCEL=tcg default."
 	@echo "  smp-gate   — SMP soundness CI gate: multi-boot the smp4/smp8 x default/UBSan"
 	@echo "               matrix N>=10 (single boots lie). SMP_GATE_N / SMP_GATE_CONFIGS env."
+	@echo "  check-arc-gates — #212: the D-5/L-6c arc-gate verdict checker, over"
+	@echo "               synthetic logs. No boots; seconds."
+	@echo "  check-production — #228: prove the production shape still COMPILES (~2 s)."
+	@echo "               --all also runs the full production build."
 	@echo "  check-floor— #91: full ARMv8.0 floor scan incl. /clade + /goroot (~6 min)."
 	@echo "               build.sh already runs the fast ramfs scan on every bake."
 	@echo "  test-a72   — boot on -cpu cortex-a72 (ARMv8.0-only): the floor's"
 	@echo "               verification bar, PORTABILITY.md section 3."
+	@echo "  test-fault — #245: deliberate-fault harness; the only proof the"
+	@echo "               hardening protections FIRE (canary/W^X/BTI/guards/recursion)."
+	@echo "               One build+boot per variant; ALL_VARIANTS in the script is"
+	@echo "               the authoritative set (it was 'seven' against eight)."
+	@echo "  verify-kaslr — #245: I-16's only runtime witness -- the slide must vary"
+	@echo "               across N=10 boots; a single boot cannot see a fixed slide."
+	@echo "  test-venus-verdict — Warp-6 V-0: the venus gate discriminates (no boot)."
+	@echo "               Proves capset id=4 present WITH venus=on and ABSENT without,"
+	@echo "               plus the positive control -- the real verdict verb, sabotaged."
 	@echo "  run        — launch a dev VM (interactive UART)"
 	@echo "  gdb        — launch dev VM with GDB stub on :1234, halted at entry"
 	@echo "  specs      — run all TLA+ specs under specs/"

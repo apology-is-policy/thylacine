@@ -242,7 +242,7 @@ The gate mechanism — **RESOLVED at cfg-3 (2026-07-23; ground-truth-driven)**:
   *session-leader* admission (a session-side environment pushing compositor
   config) is the Halcyon-era extension, landing with the task-#42
   multi-untrusted-client model — the gate grows an admitted set, it does not
-  change shape.
+  change shape. **REALIZED at H-4 (D, ratified 2026-09-02): the session-leader is a login-spawned, user-authority session tool; the compositor admits it as a `Session(principal)` actor keyed on the kernel-stamped principal (HALCYON.md 13.6), no new kernel grant.**
 - **Namespace-only confirmed insufficient — and the shared mount is denied by
   construction**: the `/dev/tapestry` mount is joey's own `/srv/tapestry` conn
   MREPL-mounted, so any session write through it arrives with JOEY as the

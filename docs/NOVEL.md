@@ -119,6 +119,19 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   cost lives. Worth recording even though v1.0 exercises only the virgl half:
   the claim is that a single-trusted-server GPU stack makes an entire category
   of compositor protocol unnecessary rather than merely cheaper.
+  **The Vulkan swapchain instantiation was ratified 2026-08-26**
+  (`docs/WARP-WSI-DESIGN.md`, the vkQuake-arc W-2): a full `VK_KHR_swapchain`
+  whose image is a shape-declared-at-registration "presentable" named to the
+  compositor over the same 9P service that scoped its creation — **no dma-buf,
+  no buffer-passing protocol, no format-modifier negotiation, zero guest
+  copies on both present arms** (direct blob scanout fullscreen; host-side
+  GPU blit / fenced readback windowed), under a formally-specified
+  no-torn-scanout invariant (the fourth `tapestry_present.tla` in-flight
+  class). Where Wayland's answer to "a Vulkan client presents" is
+  linux-dmabuf + drm_syncobj and Fuchsia's is sysmem + Flatland channels,
+  Thylacine's is one registration verb and one present verb on a namespace
+  the client already holds — designed as the Halcyon-on-Vulkan substrate,
+  proven first by vkQuake.
 
 - **Loom — a shared-memory ring transport for 9P** (`docs/LOOM.md`). The
   inversion of Linux's io_uring: rather than import io_uring's opcode zoo, expose
@@ -166,10 +179,11 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   boundary by I-29/I-30, which neither io_uring (no capability model) nor a raw
   shared-memory ring (no safety) can claim. The kernel/transport half is the Loom
   arc; the graphics half (virtio-gpu scanout + `tapestryd` + an SDL backend that
-  ports Quake/DOSBox) is a post-Loom graphics phase feeding Halcyon (Angle #4). The
-  native proof-of-concept was PROMOTED into `main` and now runs -- `usr/lib/libtapestry`
-  + `usr/tapestry-demo` + `usr/tapestryd`, all Cargo workspace members (the aux
-  `usr/apps/*` paths this once named are stale; aux#237). **Deepened 2026-06-08**: TAPESTRY.md §13-17 elevate
+  ports Quake/DOSBox) is a post-Loom graphics phase feeding Halcyon (Angle #4). A
+  native proof-of-concept RUNS in-tree -- `usr/lib/libtapestry` +
+  `usr/tapestry-demo` + `usr/tapestryd`, all Cargo workspace members (promoted
+  off the auxiliary track, where it merely compiled; the aux `usr/apps/*` paths
+  this once named are stale -- corrected 2026-08-16, aux#237). **Deepened 2026-06-08**: TAPESTRY.md §13-17 elevate
   `tapestryd` to the compositor (placement-transparent surfaces + live promotion),
   give Halcyon its anti-window UX model + layout-as-9P, add the agentic-enablement
   ABI, and fix the graphics sequencing (fbcon = stage 0 -> compositor + SDL /
@@ -269,6 +283,47 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   + Tflush + reply-serialization discipline). Measured motivation: the go-build
   mission's exit bar (2026-07-05) — device `-p 4` builds execute at serial
   wall-clock because every FS op funnels through one serial server loop.
+
+- **Mycelium — a native universal IPC substrate that Linux local sockets are a
+  *view* onto** (**design session OWED — not yet specified**; captured
+  2026-08-31 at the N-4/AF_UNIX sequencing fork). Invert the "how do we implement
+  AF_UNIX" question: rather than translate Unix-domain sockets onto an ad-hoc
+  backend, build the *right* native IPC — a namespace-named, capability-scoped
+  channel carrying **bytes, framed messages, AND handles** — and make AF_UNIX
+  (and the rest of POSIX local IPC) one downstream view, the way Fuchsia's `fdio`
+  presents POSIX onto zircon channels. The prior-art anchor is exact: **Fuchsia's
+  zircon channel (bytes + handle-passing) + `fdio` on top** is almost precisely
+  this shape; seL4 endpoints / Genode sessions are the same capability-IPC
+  family; the heritage side is pure Plan 9 — `/srv` + pipes + 9P *is* "post a
+  channel to a name, a peer connects." The novel square is the fusion: a Plan 9
+  `/srv`-named, namespace-scoped channel with zircon-style message+handle
+  transport that *complements* 9P (a Mycelium channel can carry a 9P session)
+  rather than competing with it. **Honest delta**: the substrate is already
+  substantially in-tree — SrvConn byte-mode (`kernel/devsrv.c` + `kernel/srvconn.c`;
+  ARCH names it "SrvConn-as-AF_UNIX") gives a bidirectional byte stream with
+  listen/accept over `/srv`, and pouch's musl AF_UNIX SOCK_STREAM already rides
+  it. What is *new*, and where the value sits: message framing, a coherent native
+  API, arbitrary-pathname (not just `/srv/<name>`) naming via the per-Proc
+  namespace, and — the hard, valuable part — **handle-passing over the channel**,
+  i.e. building I-4's positive path (handles transfer between Procs only via 9P
+  sessions, "still future"). That handle-passing is exactly SCM_RIGHTS, so the
+  one real AF_UNIX driver — a Wayland client (ROADMAP W4-5: AF_UNIX + SCM_RIGHTS
+  fd-passing + a client shared-memory object) — falls out of Mycelium cleanly
+  instead of as a bespoke hack. **Design discipline (why it is owed, not sketched
+  here)**: design Mycelium **native-first** — for what Thylacine's own programs
+  (`ut`, netd, tapestryd, corvus, ptyfs) want from IPC — with AF_UNIX a
+  *validated consumer*, never the driver; letting `sockaddr_un`'s warts (108-byte
+  paths, the abstract namespace, exact SCM ordering) shape a native substrate
+  would overfit it. **Why parked**: neither Mycelium nor AF_UNIX has a forcing
+  near-term driver (npxf runs over AF_INET loopback; only the optional Wayland
+  W4-5 needs AF_UNIX, and it needs the whole cluster), so AF_UNIX/N-4 was deferred
+  *to* Mycelium here rather than hacked in — and Mycelium is a deliberate
+  architecture arc for a real design session, not a quick socket backend.
+  Composes I-1/I-28 (namespace-scoped access) + I-4 (the handle-transfer positive
+  path it would build) + I-5/I-6 (non-transferable, rights-attenuated channel
+  handles). Name: the mycelial network, the underground substrate connecting
+  everything (the "wood wide web") — fitting the bushland palette and the
+  universal-connective-tissue role.
 
 ---
 
@@ -502,6 +557,32 @@ The model:
 > that forbade splits/tabs; overlapping / floating / z-ordered windows remain out —
 > that *is* the thesis. The risk profile (medium-high, last-phase, fallback to a
 > textual v1.0-rc) is unchanged and re-affirmed.
+
+> **EVOLVED 2026-09-01 — the Genera layer (the Halcyon kickoff;
+> `docs/HALCYON.md` + `docs/BEACON.md` authoritative).** The phase opened with a
+> third source joining i3 (the compositor layer, largely as-built) and acme (the
+> chrome layer, ratified): **Symbolics Genera** supplies the pane-content layer —
+> a rich textual shell render (proportional + monospace mixed; DejaVu Sans
+> Condensed + Cornucopia; paper-light default) over **Beacon**, a semantic
+> output markup in which programs annotate *meaning* (tables, zones, typed
+> object runs) and renderers own typography. The sharpest new novel claim:
+> **Genera-class presentations in a POSIX-compatible OS** — the presented
+> object's reference is a *9P path*, verbs are a plumber-style rules file, and
+> acme's executable text, Genera's presentation menus, and the pane tag line
+> dispatch through one mechanism, with graceful two-tier degradation (Aurora /
+> serial) that Genera never had to solve. Also retired here: "Halcyon is pure
+> 2D" — Halcyon renders **Vulkan** on the measured venus substrate (the W-4
+> inversion). Fallback posture unchanged.
+>
+> **ADDENDUM 2026-09-02 (H-4 layouts, the D decision):** the executable
+> layout -- acme `Dump`/`Load` + rio `riostart` -- on a compositor SHARED
+> between the persistent SYSTEM console renderer (halcyond, I-27) and the
+> user's session, partitioned by the kernel-attested PRINCIPAL (a
+> `Session(principal)` actor, no new grant) with a startup CLAIM token for
+> placement (the Wayland `xdg_activation` / Fuchsia `ViewCreationToken`
+> shape). The Plan 9 idiom (layout-as-executable-text run as the user) fused
+> with the capability-microkernel session-scope; the shipped default layout is
+> the self-demonstrating first-launch welcome. HALCYON.md 13.6/13.7.
 
 **Why it's novel**: every modern OS uses some compositor / window manager / display server (Wayland, X11, Scenic, AppKit, DWM). Plan 9's Rio + 8½ is the closest comparison — a tile-based windowing system without compositing — but it's still a windowing system, with its own protocol and event loop. **No production OS uses a scroll buffer with inline graphics as the sole UI primitive.** Smalltalk environments and some Lisp machines came close in the 1980s but never with modern hardware acceleration. Notebook UIs (Jupyter, Mathematica) achieve something similar but inside another OS's windowing system.
 

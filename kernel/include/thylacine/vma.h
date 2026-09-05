@@ -138,6 +138,13 @@ void vma_free(struct Vma *v);
 // VMA with no Burrow.
 bool vma_free_freed(struct Vma *v);
 
+// D-3c F1: vma_free that DEFERS the Burrow free. Frees the Vma struct and drops
+// the mapping ref, but returns the Burrow still owing a free (or NULL) instead
+// of freeing it inline -- so a caller holding as->lock can free it AFTER the
+// unlock (the FILE arm's spoor_clunk may sleep). *out_freed reports the same
+// event vma_free_freed's bool does. See burrow_free_deferred + deferred_free_next.
+struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed);
+
 // Insert `v` into Proc `p`'s sorted VMA list. Rejects overlap with
 // any existing VMA in the list. Returns 0 on success, -1 on overlap
 // (caller must vma_free the rejected VMA themselves; this function
@@ -182,6 +189,72 @@ int vma_find_gap(struct Proc *p, u64 length,
 // closure of BURROW handles independently decrements burrow->handle_count.
 void vma_drain(struct Proc *p);
 
+// DISTRO D-3b: place a mapping at a CHOSEN address, splitting whatever is
+// already there around it. The MAP_FIXED primitive: musl's map_library reserves
+// a whole-span mapping and then overlays each PT_LOAD onto it (dynlink.c:842 /
+// :851), which is precisely "swap the backing of a sub-range and keep the rest".
+//
+// THE DOMAIN IS TWO SHAPES, and the second one is not optional:
+//   (a) [vaddr, vaddr+length) lies WHOLLY INSIDE one existing VMA -> split it.
+//   (b) the range is entirely FREE -> plain insert, nothing to split.
+// Anything else -- spanning two VMAs, or partially overlapping one -- is
+// refused. Linux serves that third shape by unmapping the overlapped part;
+// partial unmap is post-v1.0, so the divergence is stated rather than faked.
+//
+// Shape (b) exists because Linux MAP_FIXED does NOT require the target to be
+// mapped already. Omitting it made an unmapped-address request answer ENOMEM,
+// which is a worse reply than the ENOSYS it replaced -- ENOMEM cannot be told
+// apart from real memory pressure, so an allocator reads it as OOM. (#196.)
+//
+// Neither existing primitive can express it: burrow_map_in has no burrow_offset
+// parameter (it hardcodes 0), and burrow_unmap demands an EXACT (vaddr, length)
+// match because partial unmap is post-v1.0. So this is new surgery, and it is
+// the audit-bearing half of D-3b.
+//
+// NO HOLE CAN EXIST, on any path. The old Vma struct is REUSED as the surviving
+// remainder -- shrunk in place, never removed -- so an insert failure restores a
+// bound and frees an un-inserted piece rather than having to put back a mapping
+// it already tore out. Only the exact-cover case (no remainder at all) removes
+// the old VMA, and there the restoring re-insert is provably infallible: it runs
+// under the same as->lock hold, into the range it just vacated (so no overlap),
+// with the VMA count strictly below its value at entry (so no cap refusal).
+//
+// The survivor keeps its (burrow, offset) relationship EXACTLY: for any VA it
+// still covers, `burrow_offset + (va - vaddr_start)` is unchanged by the split.
+// That is what lets the caller uninstall only the REPLACED window's PTEs and
+// leave the remainder's resident pages installed -- and it is also what makes
+// the file-fault arm's post-sleep geometry check (arch/arm64/fault.c, the #190
+// verify-and-bail) come out right against a concurrent split: the check passes
+// exactly when the bytes read before the sleep still belong at that slot.
+//
+// Constraints (all rejected with -1, nothing mutated):
+//   - vaddr/length page-aligned, length > 0, vaddr+length does not wrap.
+//   - either no VMA covers vaddr and the range is free (shape b), or one VMA
+//     covers vaddr and the range lies wholly within it (shape a).
+//   - that VMA has flags == 0 and a non-NULL Burrow. A SHARED_IN VMA is another
+//     Proc's memory carrying a per-span budget charge, and a COW VMA's per-page
+//     share counts would have to be reasoned about across the cut; both are
+//     refused rather than handled, since neither is reachable from the ldso
+//     overlay this exists to serve.
+//   - `nb` non-NULL; `prot` whatever vma_alloc accepts (W+X and W-without-R are
+//     rejected there, so I-12 needs no separate gate here).
+//
+// CALLER MUST HOLD as->lock across the call, and MUST have already uninstalled
+// the leaf PTEs for [vaddr, vaddr+length) -- see burrow_map_fixed_in, which is
+// the wrapper that does both and is what callers outside vma.c should use.
+//
+// D-3c re-audit F5 [P1]: the exact-cover arm frees the REPLACED old VMA's Burrow,
+// which can be a 9P-backed FILE Burrow whose free reaches a possibly-sleeping
+// spoor_clunk -- and this runs under as->lock, so an inline free is the
+// lock-across-sleep extinction (the identical hazard F1 deferred at the three
+// teardown sites; this was the fourth). `*out_free` (non-NULL) receives the dead
+// Burrow (or NULL) instead of freeing it inline; the caller frees it with
+// burrow_free_deferred AFTER dropping as->lock. Written on every return path.
+int vma_replace_range_in(struct AddrSpace *as, bool exempt,
+                         u64 vaddr, u64 length,
+                         struct Burrow *nb, u32 prot, u64 nb_offset,
+                         struct Burrow **out_free);
+
 // LINEAGE L-2: the same four operations, addressed by AddrSpace instead of by
 // Proc. The Proc-taking forms above are thin wrappers over these -- they resolve
 // p->as and, where a cap is involved, ask proc_resource_exempt for the policy
@@ -199,6 +272,13 @@ void vma_drain(struct Proc *p);
 int         vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v);
 void        vma_remove_in(struct AddrSpace *as, struct Vma *v);
 struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
+
+// #199: lowest-addressed VMA overlapping [lo, hi), or NULL. Caller holds
+// as->lock. The point probe (vma_lookup) is blind to a VMA lying strictly
+// inside a range; this is the range scan the phenotype munmap row needs to
+// tell "nothing mapped here" (Linux: success) from a boundary-straddling
+// partial overlap (refused: partial unmap is post-v1.0).
+struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi);
 void        vma_drain_in(struct AddrSpace *as);
 
 // Diagnostic accessors.

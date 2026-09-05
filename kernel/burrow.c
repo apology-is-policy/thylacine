@@ -51,6 +51,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/mmio_handle.h>   // P4-Ic1: kobj_mmio_ref/unref for MMIO Burrows
 #include <thylacine/dma_handle.h>    // P4-Ic5b1b: kobj_dma_ref/unref for DMA Burrows
+#include <thylacine/pci_handle.h>    // V-2: kobj_pci_ref/unref for HOSTMEM Burrows
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>        // REVENANT: spoor_ref/clunk + SPOOR_MAGIC + qid for BURROW_TYPE_FILE
@@ -234,6 +235,52 @@ struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma) {
     return v;
 }
 
+// V-2 (Warp-6 Venus / GPU-DESIGN 6.2.1): wrap a subrange of a PCI hostmem BAR
+// in a Burrow. Holds a reference on the owning KObj_PCI so the claim -- and
+// thus the BAR PA -- survives the server's own handle_close while a client
+// mapping is live (the #847 dual-lifetime, on KObj_PCI here). Mirrors
+// burrow_create_mmio's construction-reference pattern.
+struct Burrow *burrow_create_hostmem(struct KObj_PCI *kobj_pci, u64 pa,
+                                     size_t len, u8 mair_idx) {
+    if (!g_vmo_cache) extinction("burrow_create_hostmem before burrow_init");
+    if (!kobj_pci) return NULL;
+    if (kobj_pci->magic != KOBJ_PCI_MAGIC)
+        extinction("burrow_create_hostmem: kobj_pci has bad magic (UAF?)");
+    if (len == 0) return NULL;
+    // Page-aligned base + length: the fault arm adds page-aligned offsets.
+    if ((pa & (PAGE_SIZE - 1)) || (len & (PAGE_SIZE - 1))) return NULL;
+    // Host-visible memory is Normal -- cacheable WB or non-cacheable NC. Device
+    // and Write-Through are never correct here; reject rather than store a
+    // nonsense index the fault arm would then install.
+    if (mair_idx != MAIR_IDX_NORMAL_WB && mair_idx != MAIR_IDX_NORMAL_NC)
+        return NULL;
+
+    struct Burrow *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
+    if (!v) return NULL;
+
+    // Hold a ref on the kobj_pci for the Burrow's lifetime. Released in
+    // burrow_free_internal when both counts reach 0.
+    kobj_pci_ref(kobj_pci);
+    // V-2 (audit F1): count this live hostmem mapping so owner-death does a
+    // DMA-only quiesce (BUS_MASTER cleared, MEM_SPACE kept) while any hostmem
+    // burrow over the claim lives -- the client never sees a decode-disabled BAR.
+    __atomic_fetch_add(&kobj_pci->hostmem_burrows, 1u, __ATOMIC_RELAXED);
+
+    v->magic         = VMO_MAGIC;
+    v->type          = BURROW_TYPE_HOSTMEM;
+    v->size          = len;
+    v->page_count    = len / PAGE_SIZE;
+    v->handle_count  = 1;            // construction reference
+    v->mapping_count = 0;
+    v->pages         = NULL;         // HOSTMEM: no struct page backing
+    v->order         = 0;
+    v->kobj_pci      = kobj_pci;
+    v->pa            = pa;
+    v->hostmem_mair  = mair_idx;
+    g_vmo_created++;
+    return v;
+}
+
 // REVENANT / I-36: file-backed demand-paged text Burrow (the Plan 9 Image as
 // BURROW_TYPE_FILE; docs/REVENANT.md §4). ADOPTS one ref on `spoor` — the store
 // is the last step, so every error path below returns NULL having taken NO ref
@@ -280,6 +327,9 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
     // spoor_clunks it on the last unref (the I-30 pin held for the Burrow's life).
     v->spoor         = spoor;
     v->file_offset   = file_offset;
+    // KP_ZERO zeroed the struct, and 0 is a REAL size (an empty file, where
+    // every page is past EOF) -- the no-bound default must be explicit (#194).
+    v->file_limit    = BURROW_FILE_LIMIT_UNKNOWN;
     v->file_dc       = spoor->dc;
     v->file_devno    = spoor->devno;
     v->file_qid_path = spoor->qid.path;
@@ -594,6 +644,24 @@ static void burrow_free_internal(struct Burrow *v) {
         kobj_dma_unref(v->kobj_dma);
         v->kobj_dma = NULL;
         break;
+    case BURROW_TYPE_HOSTMEM:
+        if (!v->kobj_pci)
+            extinction("burrow_free_internal(HOSTMEM) with kobj_pci already NULL (double-free)");
+        // Drop this hostmem mapping from the claim's live count FIRST (F1). The
+        // server's KObj_PCI handle ref and this Burrow's ref are independent;
+        // whichever drops last quiesces the claim (the last kobj_pci_unref ->
+        // pci_release_bars_and_claim clears MEM_SPACE + releases each BAR's
+        // KObj_MMIO). A live client mapping holds this ref, so the claim stays
+        // alive across the server's handle_close.
+        // F1 (FIXED): owner-DEATH quiesces DMA-only while hostmem_burrows > 0
+        // (BUS_MASTER cleared, MEM_SPACE kept), so a client's live mapping never
+        // observes a MEM-decode-disabled BAR. MEM_SPACE clears HERE, at the last
+        // unref -- i.e. AFTER the mapping is gone. Decrement before the unref so
+        // a concurrent owner-death sees the true count.
+        __atomic_fetch_sub(&v->kobj_pci->hostmem_burrows, 1u, __ATOMIC_RELAXED);
+        kobj_pci_unref(v->kobj_pci);
+        v->kobj_pci = NULL;
+        break;
     case BURROW_TYPE_FILE:
         // REVENANT / I-36: free every resident demand-paged page (order 0
         // each), then the sparse array, then clunk the adopted backing Spoor.
@@ -751,6 +819,12 @@ void burrow_acquire_mapping(struct Burrow *v) {
             extinction("burrow_acquire_mapping of DMA BURROW with NULL kobj_dma (UAF)");
         }
         break;
+    case BURROW_TYPE_HOSTMEM:
+        if (!v->kobj_pci) {
+            spin_unlock(&v->lock);
+            extinction("burrow_acquire_mapping of HOSTMEM BURROW with NULL kobj_pci (UAF)");
+        }
+        break;
     case BURROW_TYPE_FILE:
         // REVENANT / I-36: liveness is the pinned backing Spoor. filepages MAY
         // be all-NULL (no page faulted in yet) -- the normal fresh-mapping
@@ -801,6 +875,39 @@ bool burrow_release_mapping_freed(struct Burrow *v) {
 }
 
 void burrow_release_mapping(struct Burrow *v) { (void)burrow_release_mapping_freed(v); }
+
+// D-3c F1: the deferred twin of burrow_release_mapping_freed. Drops the mapping
+// ref under v->lock and, if that was the last ref, returns the now-dead Burrow
+// WITHOUT freeing it -- the caller (holding as->lock) pushes it onto a local
+// stack and calls burrow_free_deferred after the unlock, so the FILE arm's
+// possibly-sleeping spoor_clunk never runs under a spinlock. Returns NULL when
+// the Burrow survives (a handle or another mapping still holds it).
+struct Burrow *burrow_release_mapping_deferred(struct Burrow *v) {
+    if (!v)                       extinction("burrow_release_mapping(NULL)");
+    if (v->magic != VMO_MAGIC)
+        extinction("burrow_release_mapping of corrupted BURROW (use-after-free?)");
+    spin_lock(&v->lock);
+    if (v->mapping_count <= 0) {
+        spin_unlock(&v->lock);
+        extinction("burrow_release_mapping of zero-mapping BURROW");
+    }
+    v->mapping_count--;
+    bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
+    spin_unlock(&v->lock);
+    return should_free ? v : NULL;
+}
+
+// D-3c F1: free a Burrow the caller took off a deferred-free stack. Runs the
+// same burrow_free_internal every unref/release-mapping funnels into -- but at
+// a point where NO lock is held, so a sleeping teardown is legal. The {0,0}
+// state was established under v->lock by burrow_release_mapping_deferred and
+// nothing else can reach the Burrow, so no re-check is needed.
+void burrow_free_deferred(struct Burrow *v) {
+    if (!v) return;
+    if (v->magic != VMO_MAGIC)
+        extinction("burrow_free_deferred of corrupted BURROW (double free?)");
+    burrow_free_internal(v);
+}
 
 // =============================================================================
 // #131/#132: the I-32 charge record. See burrow.h for the contract + the
@@ -930,9 +1037,64 @@ int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
     return 0;
 }
 
+// DISTRO D-3b: burrow_map_fixed -- install `v` over [vaddr, vaddr+length),
+// which must lie wholly inside one existing VMA, splitting that VMA around the
+// window. The MAP_FIXED half of the phenotype mmap; see vma.h's
+// vma_replace_range_in for the surgery's contract and its hole-free argument.
+//
+// This wrapper owns exactly two things the surgery does not: the address
+// arithmetic (the same bounds burrow_map_in enforces) and the PTE teardown.
+//
+// The teardown comes FIRST, and the order is load-bearing. Hardware resolves a
+// leaf PTE without taking as->lock, so a thread already in EL0 could read the
+// window through a stale PTE at any instant -- the only thing that stops it is
+// the PTE being gone and the TLB invalidated, after which the access faults and
+// blocks on the lock we hold. Mutating first and clearing second would leave a
+// window in which the new mapping is live but old bytes are still reachable.
+//
+// A REFUSED surgery therefore costs one wasted teardown of a window we did not
+// modify. That is benign -- every page refaults from backing that never changed
+// -- and it is the deliberate price of keeping the VMA-shape rules in ONE place
+// (the surgery) instead of mirroring them here to predict the refusal.
+int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                        u64 vaddr, size_t length, u32 prot, u64 burrow_offset,
+                        struct Burrow **out_free) {
+    // D-3c re-audit F5: the surgery may free a sleeping-free FILE Burrow on its
+    // exact-cover arm; defer it to the caller past as->lock (see vma.h). NULL on
+    // every path but that free.
+    // F7 (re-audit round 3): out_free MANDATORY -- a NULL would leak the replaced
+    // Burrow (vma_free_deferred does not free). Fail loud at entry, F6 parity.
+    if (!out_free) extinction("burrow_map_fixed_in without out_free (would leak the replaced Burrow)");
+    *out_free = NULL;
+    if (!as || !v) return -1;
+    if (length == 0) return -1;
+    if (vaddr  & (PAGE_SIZE - 1)) return -1;
+    if (length & (PAGE_SIZE - 1)) return -1;
+    if (vaddr + length < vaddr) return -1;
+    if (vaddr + length > USER_VA_TOP) return -1;
+
+    // RW-1 B-F1: the asid arg is vestigial (all-ASID `tlbi vaae1is`); pass 0.
+    (void)mmu_uninstall_user_range(as->pgtable_root, 0, vaddr, vaddr + length);
+
+    return vma_replace_range_in(as, exempt, vaddr, (u64)length,
+                                v, prot, burrow_offset, out_free);
+}
+
+int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
+                     u32 prot, u64 burrow_offset, struct Burrow **out_free) {
+    // F7 (re-audit round 3): out_free MANDATORY (F6 parity; a NULL leaks the
+    // replaced Burrow). Fail loud at the first entry rather than deep in the surgery.
+    if (!out_free) extinction("burrow_map_fixed without out_free (would leak the replaced Burrow)");
+    *out_free = NULL;
+    if (!p) return -1;
+    return burrow_map_fixed_in(p->as, proc_resource_exempt(p), v, vaddr, length,
+                               prot, burrow_offset, out_free);
+}
+
 int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
-                           bool *out_freed) {
+                           bool *out_freed, struct Burrow **out_free) {
     if (out_freed) *out_freed = false;
+    if (out_free)  *out_free  = NULL;
     if (!p) return -1;
     if (length == 0) return -1;
     if (vaddr & (PAGE_SIZE - 1)) return -1;
@@ -988,13 +1150,24 @@ int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
         proc_shared_map_uncharge(p, (u32)(length / PAGE_SIZE));
 
     vma_remove(p, vma);
-    bool freed = vma_free_freed(vma);
+    // D-3c F1: DEFER the Burrow free when the caller asked for it (out_free
+    // non-NULL) -- the caller holds as->lock, and a FILE Burrow's free reaches
+    // a possibly-sleeping spoor_clunk. `vma_free_deferred` hands back the
+    // dead Burrow; the caller frees it after the unlock. When out_free is NULL
+    // (the burrow_unmap wrapper: JIT / Loom / weft / cons -- all ANON/CODE/DMA,
+    // whose free never sleeps) the inline free is kept.
+    bool freed;
+    if (out_free) {
+        *out_free = vma_free_deferred(vma, &freed);
+    } else {
+        freed = vma_free_freed(vma);
+    }
     if (out_freed) *out_freed = freed;
     return 0;
 }
 
 int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
-    return burrow_unmap_reporting(p, vaddr, length, NULL);
+    return burrow_unmap_reporting(p, vaddr, length, NULL, NULL);
 }
 
 // =============================================================================
@@ -1186,7 +1359,22 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot) {
     // remain structurally unshareable.
     bool admissible_dma = (v->type == BURROW_TYPE_DMA && v->kobj_dma != NULL &&
                            (v->kobj_dma->weave || v->kobj_dma->gpu_bo));
-    if (v->type != BURROW_TYPE_ANON && !admissible_dma) return -1;
+    // V-2 (GPU-DESIGN 6.2.1): BURROW_TYPE_HOSTMEM is share-admissible, on the
+    // SAME I-45 argument the weave/gpu_bo bits carry -- but for a distinct
+    // class. A hostmem BAR subrange is device-PASSIVE shared memory
+    // (VIRTIO_PCI_CAP_SHARED_MEMORY_CFG, cfg_type 8), NOT the command/register
+    // surface that keeps MMIO structurally unshareable: the device never
+    // INTERPRETS what the client writes here (commands ride virtqueues the
+    // client cannot reach). So the client's cacheable/NC RW mapping conveys
+    // zero hardware authority. The type is create-immutable and settable ONLY
+    // by SYS_BURROW_FROM_HOSTMEM, which proves the caller owns the PCI claim and
+    // resolves a real cfg_type=8 window -- a client cannot forge a hostmem
+    // Burrow over a device-register MMIO. And the client receives only this
+    // mapping, never the KObj_PCI handle (I-5, non-transferable).
+    bool admissible_hostmem = (v->type == BURROW_TYPE_HOSTMEM &&
+                               v->kobj_pci != NULL);
+    if (v->type != BURROW_TYPE_ANON && !admissible_dma && !admissible_hostmem)
+        return -1;
 
     // R2-F3: charge the CLIENT's shared-in budget (the I-32 fifth axis) BEFORE
     // mapping. The pages are the SHARER's commit (netd's page_count /
@@ -1285,6 +1473,29 @@ int burrow_mapping_count(const struct Burrow *v) {
     if (!v) return 0;
     if (v->magic != VMO_MAGIC) return 0;
     return __atomic_load_n(&v->mapping_count, __ATOMIC_ACQUIRE);
+}
+
+// V-3b-1c-2b round-2 F1: the ATOMIC sum of both #847 counts, read under v->lock
+// so the pair is a COHERENT SNAPSHOT -- not two separately-ACQUIRE'd loads whose
+// relative order (unspecified for the operands of `+`) would otherwise decide
+// soundness against a peer CPU mutating either count between them: a mapping-first
+// read could see mapping==1 in the claim window, then handle==0 after the claimant
+// (on another CPU) maps + releases the pin, summing to 1 and reclaiming under a
+// live client map. The hazard is SMP cross-CPU, not local IRQ preemption -- the
+// production caller (SYS_HOSTMEM_REFCOUNT) runs IRQ-masked end-to-end, and masking
+// cannot serialize two CPUs; only v->lock can. Under v->lock every count mutation
+// is excluded, so both reads reflect one instant. The sole caller holds the target
+// Proc's as->lock, and vma_lock/as->lock -> v->lock is the established nesting
+// (burrow_map -> vma_alloc -> burrow_acquire_mapping), so this cannot deadlock.
+// Takes v (non-const): it locks. Returns 0 for a NULL/dead Burrow (never a
+// reclaim-safe 1).
+int burrow_total_refs(struct Burrow *v) {
+    if (!v) return 0;
+    if (v->magic != VMO_MAGIC) return 0;
+    spin_lock(&v->lock);
+    int refs = v->handle_count + v->mapping_count;
+    spin_unlock(&v->lock);
+    return refs;
 }
 
 u64 burrow_total_created(void)    { return g_vmo_created; }

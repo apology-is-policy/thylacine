@@ -12,7 +12,7 @@
 // Config can never break the fbcon.
 
 use crate::osd::{Mode, Settings};
-use crate::vt::THEMES;
+use vt::THEMES;
 use alloc::format;
 use alloc::string::String;
 use libthyla_rs::fs::{self, File};

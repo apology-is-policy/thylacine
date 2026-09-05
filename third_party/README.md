@@ -111,3 +111,44 @@ under `build/pouch/libsodium-obj/`, with the `HAVE_*` configuration macros
 that `./configure` would normally generate supplied via `-D` flags on the
 compile command line. `version.h` is generated at build time from
 `version.h.in` (placeholder substitution); the vendored tree stays clean.
+
+### DejaVu fonts 2.37 (pruned) — `third_party/dejavu-fonts/`
+
+Halcyon's proportional face (HALCYON.md §3: **DejaVu Sans Condensed**,
+operator-chosen; the transcript body renders in it, with Cornucopia as the
+monospace counterpart). Vendored PRUNED: only the four Condensed faces plus
+the license documents — see `third_party/dejavu-fonts/PRUNE-MANIFEST.md`
+for the exact kept/pruned split and the re-vendor recipe.
+
+| Field | Value |
+|---|---|
+| Version | 2.37 (released 2016-04-25; the current upstream release) |
+| Source | `https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2` |
+| sha256 | `fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7` (the full tarball; kept files byte-identical to its contents) |
+| License | Bitstream Vera + Arev public-domain terms — see `third_party/dejavu-fonts/LICENSE` |
+| Patch series | none — font data is consumed as-is |
+| Consumed by | `usr/halcyond` (`include_bytes!` at build; rasterized by the vendored fontdue) |
+
+### Rust registry vendor — `third_party/rust/`
+
+The **entire crates.io closure of the `usr/` workspace**, vendored via
+`cargo vendor` (139 crates at creation). Landed at H-2c, whose scripture
+(HALCYON.md §13.5) requires fontdue vendored "like every remote input" —
+and cargo source replacement is all-or-nothing per registry, so the
+honest mechanism vendors the whole closure: the workspace's pre-existing
+registry deps (the RustCrypto family under `corvus-crypto`, smoltcp's
+`defmt`, platform stubs) become hermetic in the same motion. Builds are
+offline + reproducible; `usr/.cargo/config.toml` pins the source
+replacement.
+
+| Field | Value |
+|---|---|
+| Contents | one directory per crate release, exactly as `cargo vendor` wrote it |
+| Integrity | per-crate `.cargo-checksum.json` (per-file sha256; cargo REFUSES a tampered tree) |
+| Licenses | per-crate (each carries its upstream license files) |
+| Patch series | none — **never hand-edit a vendored crate**; any edit is a checksum failure by design |
+| Regenerate | edit the consumer's `Cargo.toml`, then from `usr/`: `cargo vendor ../third_party/rust` (network); commit the regenerated tree + `Cargo.lock` |
+
+Unlike the tarball vendors above there is no single upstream checksum:
+`usr/Cargo.lock` is the pin (crate versions + registry checksums), and
+the `.cargo-checksum.json` files carry the byte-level integrity.

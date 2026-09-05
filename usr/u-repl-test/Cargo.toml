@@ -18,3 +18,4 @@ path = "src/main.rs"
 # Redraw rendering, and parse-error survival (interactive, scripture 8.9).
 libthyla-rs = { path = "../lib/libthyla-rs" }
 libutopia = { path = "../utopia/libutopia" }
+beacon = { path = "../lib/beacon" }

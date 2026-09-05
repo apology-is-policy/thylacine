@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**97 declared surfaces · 94 covered by a hard-audit dossier · 3 soft-owned · 0 unowned · 0 unparsed · 12 cited path(s) that do not resolve.**
+**129 declared surfaces · 125 covered by a hard-audit dossier · 3 soft-owned · 1 unowned · 0 unparsed · 16 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -54,10 +54,14 @@ changed on main? — is the next increment, tracked as task #169.
 | Page fault + COW + W^X | `mm/vm.c` | **possibly a documented NEGATIVE — read the claim** |
 | Page fault + COW + W^X | `mm/wxe.c` | no such file in the tree |
 | Syscall byte-I/O staging + bulk uaccess + the per-service bulk ring (C… | `kernel/user` | no such file in the tree |
+| VIVARIUM O_APPEND (FS pass-through) + pread64/pwrite64 (67/68): git co… | `init/add/commit/log/clone/verify` | no such file in the tree |
 | VMO / BURROW | `mm/vmo_pages.c` | no such file in the tree |
+| W-3e: the SDL2 Vulkan glue + the img poke-completion + the first-Vulka… | `usr/ports/mesa/patches/0020` | no such file in the tree |
 | `thread_spawn` / `thread_exit` / multi-thread exit | `specs/pthread.tla` | **possibly a documented NEGATIVE — read the claim** |
 | `torpor_wait` / `torpor_wake` | `specs/futex.tla` | **possibly a documented NEGATIVE — read the claim** |
+| mesa W-3d: the WSI DIRECT path -- vn_wsi_thylacine + the no-eager-mint… | `usr/ports/mesa/patches/0018` | no such file in the tree |
 | pouch pthread boundary-line | `specs/pthread.tla` | **possibly a documented NEGATIVE — read the claim** |
+| tapestryd + halcyond + ut: the status bar -- the display-level chrome … | `usr/halcyond/src/{status.rs` | no such file in the tree |
 
 ### Ownership gaps
 
@@ -66,4 +70,5 @@ changed on main? — is the next increment, tracked as task #169.
 | Host-side pool populate via existing `stratumd + stratum-fs` (host build infra) | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
 | Kaua console-TUI substrate: the cons/consctl backend + the ut raw-mode dance (LS-7) | soft-owned | owned by [[sub-kaua]], [[sub-nora-engine]], [[sub-nora-host]], [[sub-nora-view]] (+2 more), none `audit: hard` |
 | Thylacine mkfs RNG seed pinning | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
+| mesa W-3d: the WSI DIRECT path -- vn_wsi_thylacine + the no-eager-mint marker + the img cl… | **unowned** | no dossier names `usr/ports/mesa/patches/0018`, `tools/warp-host.sh`, `tools/test-venus-verdict.sh` |
 <!-- generated:end -->

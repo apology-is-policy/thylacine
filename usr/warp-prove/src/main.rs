@@ -72,6 +72,15 @@ const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
 // gallium p_defines.h values the virgl wire carries verbatim (vrend decodes
 // them against the same constants; frozen with the protocol).
 const PIPE_TEXTURE_2D: u32 = 2;
+/// A BUFFER resource, as the server mints its probe pairs (`PIPE_BUFFER`,
+/// one byte per texel in `R8_UNORM`, width = the byte length, a vertex-buffer
+/// bind): the C0-F1 attacker's source since the C-0d Fable round, because the
+/// probe under attack is a buffer pair now and a texture->buffer copy is not
+/// a legal copy -- the leg would "defend" for the wrong reason.
+const PIPE_BUFFER: u32 = 0;
+const VIRGL_FORMAT_R8_UNORM: u32 = 64;
+const VIRGL_BIND_VERTEX_BUFFER: u32 = 1 << 4;
+const PROBE_BUF_BYTES: u32 = 4096;
 const PIPE_CLEAR_COLOR0: u32 = 1 << 2;
 
 const W: u32 = 64;
@@ -109,6 +118,27 @@ fn read_string(fd: i64) -> String {
         return String::new();
     }
     String::from_utf8_lossy(&buf[..n as usize]).into_owned()
+}
+
+/// Read to EOF (round-7 F6). The 512-byte single read above IS the warp
+/// ctl's documented snapshot contract; the TAPESTRY ctl has no such
+/// discipline -- its 19 ever-growing cost rows pass 512 bytes on a
+/// long-lived boot, and a row cut mid-number parses as a SMALLER,
+/// arithmetically possible value (strictly worse than the impossible
+/// splice this mode was built to fix).
+fn read_string_all(fd: i64) -> String {
+    let mut out = String::new();
+    loop {
+        let mut buf = [0u8; 512];
+        let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+        if n <= 0 {
+            return out;
+        }
+        out.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
+        if (n as usize) < buf.len() {
+            return out;
+        }
+    }
 }
 
 fn open_read_string(root: i64, path: &str) -> String {
@@ -183,6 +213,56 @@ pub extern "C" fn rs_main() -> i64 {
         return 0;
     }
 
+    // W-4: the TAPESTRY-side census twin. The C-4 cost rows (`cost
+    // present-poke-img` among them) live on the tapestry tree's ctl, not
+    // warp's -- the vkq gate's poke census read the wrong ctl for three
+    // runs and reported "unreadable" every time. Same two-step attach,
+    // other root.
+    //
+    // An optional second arg FILTERS to rows containing it, printed in one
+    // short write. The full dump streamed through the cons ring under
+    // console pressure (aurora repainting at ~50 presents/s) SPLICED once:
+    // the drop-OLDEST ring is unit-atomic per WRITE, so a mid-dump drop
+    // glues two distant fragments into one plausible-looking row -- the
+    // first poke census read back n=980 sum=20.45s max=318us, an
+    // arithmetically impossible triple through cost_add's shared-ns feed.
+    if libthyla_rs::env::args().get_str(1) == Some("tctl") {
+        let root = unsafe {
+            t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD)
+        };
+        if root < 0 {
+            t_putstr("warp-prove: tctl: open /srv/tapestry failed\n");
+            unsafe { t_exits(1) };
+        }
+        let cfd = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OREAD) };
+        if cfd < 0 {
+            t_putstr("warp-prove: tctl: open ctl failed\n");
+            unsafe { t_exits(1) };
+        }
+        let ctl = read_string_all(cfd);
+        unsafe { t_close(cfd) };
+        unsafe { t_close(root) };
+        if let Some(key) = libthyla_rs::env::args().get_str(2) {
+            let mut out = String::new();
+            for line in ctl.lines() {
+                if line.contains(key) {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            if out.is_empty() {
+                out.push_str("tctl: no row matches\n");
+            }
+            t_putstr(&out);
+            return 0;
+        }
+        t_putstr(&ctl);
+        if !ctl.ends_with('\n') {
+            t_putstr("\n");
+        }
+        return 0;
+    }
+
     // #240 observation mode. Its own argv verb rather than a leg of the
     // battery: it spends 45 s waiting on a 30 s timeout, and the Warp-2
     // gate's whole value is being fast enough to run every time.
@@ -196,11 +276,62 @@ pub extern "C" fn rs_main() -> i64 {
         unsafe { t_close(probe) };
         if !ctl.starts_with("virgl 1") {
             t_putstr("warp-prove: C0-REJECT SKIP -- no virgl on this device\n");
-            t_putstr("warp-prove: C0-REJECT DONE\n");
+            // Not a pass: the arms never ran (F6 -- DONE is a verdict).
+            t_putstr("warp-prove: C0-REJECT INCOMPLETE(no-virgl)\n");
             return 0;
         }
         observe_rejection();
         return 0;
+    }
+
+    // Warp-C C-6 (GPU-DESIGN 4.5.13): the compositor readback arm under a
+    // deep client queue. Its own verb for the same reason as `reject`: it
+    // deliberately stalls the device for seconds, twice, and the Warp-2
+    // gate must stay cheap.
+    if libthyla_rs::env::args().get_str(1) == Some("readback") {
+        let probe = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+        if probe < 0 {
+            t_putstr("warp-prove: readback: open /srv/warp failed\n");
+            unsafe { t_exits(1) };
+        }
+        let ctl = open_read_string(probe, "ctl");
+        unsafe { t_close(probe) };
+        if !ctl.starts_with("virgl 1") {
+            t_putstr("warp-prove: C6-READBACK SKIP -- no virgl on this device\n");
+            t_putstr("warp-prove: C6-READBACK INCOMPLETE(no-virgl)\n");
+            return 0;
+        }
+        observe_readback();
+        return 0;
+    }
+
+    // V-3a: the coherent-ring gate. Needs NO virgl (the ring is coherent
+    // shmem + a doorbell), so it runs on the local 2D device.
+    if libthyla_rs::env::args().get_str(1) == Some("ring") {
+        return ring_prove();
+    }
+
+    // V-3b-2 (WARP-V3-DESIGN 0.12): the HOST3D ring witness. A host3d ring lives
+    // under a capset-4 (venus) ctx, so this needs a VENUS device; it SKIPs on 2D
+    // (no ctx) and on a virgl-without-venus device (the mint refuses).
+    if libthyla_rs::env::args().get_str(1) == Some("ring-host3d") {
+        return ring_host3d_prove();
+    }
+
+    // V-3b-2 cross-Proc E2E: the host3d-ring park->reclaim lifecycle + cross-conn
+    // ring-ownership isolation. Venus-gated (SKIPs on 2D / virgl-without-venus).
+    if libthyla_rs::env::args().get_str(1) == Some("ring-xproc") {
+        return ring_xproc_prove();
+    }
+
+    // W-3c-1: the presentable ABI over the wire (walk/write/read/destroy/
+    // re-register). Venus-gated like ring-host3d; the shape gate runs even on
+    // the SKIP path, since it needs no venus.
+    if libthyla_rs::env::args().get_str(1) == Some("img") {
+        return img_prove();
+    }
+    if libthyla_rs::env::args().get_str(1) == Some("img-direct") {
+        return img_direct_prove();
     }
 
     t_putstr("warp-prove: starting (the Warp-2 gate)\n");
@@ -418,6 +549,924 @@ pub extern "C" fn rs_main() -> i64 {
 /// context ownership on `owner_conn`, so two roots in ONE process are two
 /// clients -- which is what makes this harness sequential and deterministic
 /// instead of a race between two spawned processes.
+// === V-3a: the coherent-ring gate (`warp-prove ring`) ======================
+// The ring blob control-header offsets (must match server.rs WARP_RING_OFF_*).
+const R_HEAD: u64 = 0x00;
+const R_IDLE: u64 = 0x10;
+const R_SEQ: u64 = 0x18;
+const R_HDR: u64 = 0x40;
+
+unsafe fn rld(va: u64, off: u64) -> u64 {
+    core::ptr::read_volatile((va + off) as *const u64)
+}
+unsafe fn rst(va: u64, off: u64, v: u64) {
+    core::ptr::write_volatile((va + off) as *mut u64, v);
+}
+
+fn ring_fail(msg: &str) -> ! {
+    t_putstr("WARP-RING FAIL -- ");
+    t_putstr(msg);
+    t_putstr("\n");
+    unsafe { t_exits(1) }
+}
+
+fn ring_prove() -> i64 {
+    t_putstr("warp-prove: ring gate (V-3a) starting\n");
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+    if root < 0 {
+        ring_fail("open /srv/warp (is tapestryd serving?)");
+    }
+    t_putstr("warp-prove: ring connected; minting ctx (needs a virgl device)\n");
+    let ctx = match try_open_read(root, "ctx/new").and_then(|s| parse_u32_prefix(&s)) {
+        Some(v) => v,
+        None => {
+            // No virgl on this device: ctx creation is not available, so the
+            // ring (which lives under a ctx) cannot be minted here. This is
+            // the 2D-local case; the gate runs on a virgl device (the GL host).
+            t_putstr("warp-prove: RING SKIP -- no virgl on this device (ctx mint unavailable)\n");
+            unsafe { t_exits(2) }
+        }
+    };
+    t_putstr("warp-prove: ring ctx minted\n");
+
+    // 1. Mint a 4096-byte ring for ring_idx 0; check its info.
+    if !write_ctl(root, &format!("ctx/{}/ring/new", ctx), "4096 0") {
+        ring_fail("ring/new mint (4096 0)");
+    }
+    let info = open_read_string(root, &format!("ctx/{}/ring/0/info", ctx));
+    if parse_field(&info, "bytes") != Some(4096) {
+        ring_fail("ring info bytes != 4096");
+    }
+    if parse_field(&info, "ridx") != Some(0) {
+        ring_fail("ring info ridx != 0");
+    }
+    if parse_field(&info, "hdr").is_none() {
+        ring_fail("ring info missing hdr");
+    }
+
+    // 2. Map the ring; the host starts idle, seq 0.
+    let map_fd = unsafe {
+        let pth = format!("ctx/{}/ring/0/map", ctx);
+        t_open(root, pth.as_ptr(), pth.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        ring_fail("ring/0/map open");
+    }
+    let va = unsafe { t_weft_map(map_fd as u64, 0) };
+    if va < 0 {
+        ring_fail("ring t_weft_map claim");
+    }
+    let va = va as u64;
+    if unsafe { rld(va, R_IDLE) } != 1 {
+        ring_fail("ring idle != 1 at mint (host should start parked)");
+    }
+    if unsafe { rld(va, R_SEQ) } != 0 {
+        ring_fail("ring seq != 0 at mint");
+    }
+
+    // 3. Doorbell: advance head (a CS marker), read idle, kick.
+    unsafe { rst(va, R_HEAD, R_HDR + 16) };
+    if unsafe { rld(va, R_IDLE) } != 1 {
+        ring_fail("ring idle flipped before kick");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ring/0/kick", ctx), "1") {
+        ring_fail("ring/0/kick");
+    }
+    // 4a. Feedback-slot poll (zero-syscall). 4b. The blocking fence agrees.
+    if unsafe { rld(va, R_SEQ) } != 1 {
+        ring_fail("ring feedback seq != 1 after kick");
+    }
+    let fseq = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/ring/0/fence", ctx))) {
+        Some(v) => v,
+        None => ring_fail("ring/0/fence read"),
+    };
+    if fseq != 1 {
+        ring_fail("ring fence file seq != 1");
+    }
+    t_putstr("warp-prove: ring round-trip OK (map + doorbell + feedback + fence)\n");
+
+    // 5. F2 rejection legs -- refused, never clamped.
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx), "0 1") {
+        ring_fail("F2: zero-byte ring accepted");
+    }
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx), "5000 2") {
+        ring_fail("F2: unaligned ring accepted");
+    }
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx), "2097152 3") {
+        ring_fail("F2: over-max ring accepted (WARP_RING_MAX is 1 MiB)");
+    }
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx), "4096 64") {
+        ring_fail("F2: ring_idx 64 accepted (out of range)");
+    }
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx), "4096 0") {
+        ring_fail("F2: duplicate ring_idx 0 accepted");
+    }
+    t_putstr("warp-prove: ring F2 rejections OK\n");
+
+    // 6. I-45: OWNERSHIP, not liveness (audit F4). A SECOND conn mints a LIVE
+    // ctx + ring; this conn must not resolve it -- the ownership gate tested
+    // with the positive control (a live foreign ring) one variable away, so a
+    // regression that ignored owner_conn would be caught. The non-existent-ctx
+    // (liveness) leg is retained as a second, weaker check.
+    let conn2 = warp_connect("i45-owner");
+    let ctx2 = mint_ctx(conn2, "i45-owner");
+    if !write_ctl(conn2, &format!("ctx/{}/ring/new", ctx2), "4096 0") {
+        ring_fail("I-45 setup: conn2 ring/new mint");
+    }
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx2), "4096 1") {
+        ring_fail("I-45: minted a ring under a FOREIGN-owned ctx");
+    }
+    if try_open_read(root, &format!("ctx/{}/ring/0/info", ctx2)).is_some() {
+        ring_fail("I-45: read a FOREIGN-owned ring's info");
+    }
+    let alien = ctx2.wrapping_add(1000);
+    if write_ctl(root, &format!("ctx/{}/ring/new", alien), "4096 0") {
+        ring_fail("I-45: ring mint under a non-existent ctx accepted");
+    }
+    unsafe { t_close(conn2) };
+    t_putstr("warp-prove: ring I-45 ownership + liveness gate OK\n");
+
+    // 7. I-9 re-scan discrimination (WARP-V3-DESIGN 3.5): an armed mid-drain
+    // inject models a guest advancing head in the idle-publish window.
+    // Positive: with re-scan (default), it produces an extra completion.
+    let base = unsafe { rld(va, R_SEQ) };
+    if !write_ctl(root, "ctl", "ring-inject 0") {
+        ring_fail("ring-inject arm");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ring/0/kick", ctx), "1") {
+        ring_fail("ring kick (inject, re-scan)");
+    }
+    let after_pos = unsafe { rld(va, R_SEQ) };
+    if after_pos != base + 1 {
+        ring_fail("I-9: re-scan did not deliver the injected advance");
+    }
+    // Negative (buggy arm): with noscan, the same inject is LOST.
+    if !write_ctl(root, "ctl", "ring-noscan 0 on") {
+        ring_fail("ring-noscan 0 on");
+    }
+    if !write_ctl(root, "ctl", "ring-inject 0") {
+        ring_fail("ring-inject arm (noscan)");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ring/0/kick", ctx), "1") {
+        ring_fail("ring kick (inject, noscan)");
+    }
+    let after_neg = unsafe { rld(va, R_SEQ) };
+    if after_neg != after_pos {
+        ring_fail("I-9: noscan still delivered -- the test does NOT discriminate");
+    }
+    // Recovery: re-enable the re-scan; the stranded advance drains.
+    if !write_ctl(root, "ctl", "ring-noscan 0 off") {
+        ring_fail("ring-noscan 0 off");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ring/0/kick", ctx), "1") {
+        ring_fail("ring kick (recover)");
+    }
+    if unsafe { rld(va, R_SEQ) } != after_neg + 1 {
+        ring_fail("I-9: re-enabled re-scan did not recover the stranded advance");
+    }
+    t_putstr("warp-prove: ring I-9 re-scan discrimination OK (delivered / lost / recovered)\n");
+
+    // 8. Audit round-2 F1: the per-kick drain is BOUNDED. `head` is client-
+    //    writable shared memory, so a multi-threaded client can advance it
+    //    faster than the single serve thread drains and pin it forever (a
+    //    box-wide DoS). A large ring + a multi-advance inject (count > the
+    //    server's per-kick cap) drives ONE kick's drain past the cap; the fix
+    //    caps it and yields (idle republished, the guest re-kicks), so no one
+    //    kick monopolizes. Without the cap, one kick drains all `flood`
+    //    advances. The single-threaded prover cannot build real client
+    //    concurrency, so the multi-advance inject stands in for it -- same
+    //    drain loop, same bound.
+    // COUPLING (round-3 F2): big + flood are tied to the server-private cap
+    // WARP_RING_MAX_DRAIN_PER_KICK (4096, not visible here). Discrimination needs
+    // flood > cap (one capped kick drains < flood) AND big/WARP_RING_HDR(64) >
+    // flood (so the min(tail+HDR, size) clamp never truncates the advance count).
+    // If the server cap changes, raise both here or the leg fails misleadingly
+    // ("not bounded"); server.rs pins this assumption at the const.
+    let big: u64 = 512 * 1024; // 8192 advance-slots, > flood
+    let flood: u64 = 5000; // > the server drain cap (WARP_RING_MAX_DRAIN_PER_KICK = 4096)
+    if !write_ctl(root, &format!("ctx/{}/ring/new", ctx), &format!("{} 1", big)) {
+        ring_fail("F1: large ring/1 mint");
+    }
+    let map_fd1 = unsafe {
+        let pth = format!("ctx/{}/ring/1/map", ctx);
+        t_open(root, pth.as_ptr(), pth.len(), T_OREAD)
+    };
+    if map_fd1 < 0 {
+        ring_fail("F1: ring/1/map open");
+    }
+    let va1 = unsafe { t_weft_map(map_fd1 as u64, 0) };
+    if va1 < 0 {
+        ring_fail("F1: ring/1 weft_map");
+    }
+    let va1 = va1 as u64;
+    let f1base = unsafe { rld(va1, R_SEQ) };
+    if !write_ctl(root, "ctl", &format!("ring-inject 1 {}", flood)) {
+        ring_fail("F1: ring-inject arm (count)");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ring/1/kick", ctx), "1") {
+        ring_fail("F1: first kick");
+    }
+    let delta1 = unsafe { rld(va1, R_SEQ) } - f1base;
+    if delta1 == 0 || delta1 >= flood {
+        ring_fail("F1: one kick was NOT bounded (need 0 < delta < flood)");
+    }
+    // The cap DEFERS work, it must not DROP it: re-kick until stable, then
+    // assert the full `flood` eventually drained.
+    let mut guard = 0;
+    loop {
+        let before = unsafe { rld(va1, R_SEQ) };
+        if !write_ctl(root, &format!("ctx/{}/ring/1/kick", ctx), "1") {
+            ring_fail("F1: drain kick");
+        }
+        if unsafe { rld(va1, R_SEQ) } == before {
+            break; // stable -- all advances consumed
+        }
+        guard += 1;
+        if guard > 16 {
+            ring_fail("F1: drain did not converge in 16 kicks");
+        }
+    }
+    if unsafe { rld(va1, R_SEQ) } - f1base != flood {
+        ring_fail("F1: the cap dropped work (total drained != flood)");
+    }
+    unsafe { t_close(map_fd1) };
+    t_putstr("warp-prove: ring F1 drain-cap bound OK (one kick capped; no work lost)\n");
+
+    // Cleanup: retire the ctx (its rings tear down with it).
+    if !write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy") {
+        ring_fail("ctx destroy");
+    }
+    unsafe { t_close(map_fd) };
+    unsafe { t_close(root) };
+    t_putstr("WARP-RING PASS (transport + doorbell + feedback + fence + F2 + I-45 + I-9 re-scan + F1 drain-cap)\n");
+    0
+}
+
+// === V-3b-2: the HOST3D ring witness (`warp-prove ring-host3d`) =============
+// The Venus SUBMIT_CMD forward proof (WARP-V3-DESIGN 0.12). Mint a HOST3D ring,
+// submit a hand-built vkCreateRingMESA naming the ring's virtio-gpu res_id, and
+// observe virglrenderer set status&IDLE -- proof the host mapped the shmem and
+// runs its poll thread, with NO Mesa. The bytes are venus-protocol e94b12f3
+// (Mesa main's pin), byte-verified against Mesa's generated
+// vn_encode_vkCreateRingMESA; the witness mechanism against virglrenderer
+// vkr_ring.c:270-278 (poll thread sets IDLE) + vkr_ring.c:53 (create requires
+// *head==0 && *status==0).
+
+// The Venus ring layout (vn_ring.c), DISTINCT from the V-3a WARP_RING_OFF_*:
+// head@0 / tail@64 / status@128 (each a bare u32 on its own 64-byte line),
+// buffer@192 (128 KiB pow2), extra@192+128KiB (4B). The tight region is 131268;
+// the mint page-aligns up from it. size (declared to the host) is the tight
+// region -- Mesa-consistent and <= the page-rounded blob resource.
+const VN_STATUS: u64 = 128;
+const VN_BUFFER: u64 = 192;
+const VN_BUFFER_SIZE: u64 = 128 * 1024;
+const VN_EXTRA_SIZE: u64 = 4;
+const VN_RING_TOTAL: u64 = VN_BUFFER + VN_BUFFER_SIZE + VN_EXTRA_SIZE; // 131268
+const RING_PAGE: u64 = 4096;
+
+// venus-protocol e94b12f3 (vn_protocol_driver_defines.h).
+const VK_CMD_CREATE_RING: u32 = 188;
+const VK_STYPE_RING_CREATE_INFO: u32 = 1000384000;
+// virglrenderer vkr_ring.c status bits (VK_MESA_venus_protocol.xml:138-142).
+const VK_RING_STATUS_IDLE: u32 = 0x1;
+const VK_RING_STATUS_FATAL: u32 = 0x2;
+
+unsafe fn rld32(va: u64, off: u64) -> u32 {
+    core::ptr::read_volatile((va + off) as *const u32)
+}
+
+// A fixed encode buffer for the 124-byte bare (NULL-pNext) command.
+struct RingCmd {
+    b: [u8; 128],
+    n: usize,
+}
+impl RingCmd {
+    fn new() -> Self {
+        RingCmd { b: [0u8; 128], n: 0 }
+    }
+    fn w32(&mut self, v: u32) {
+        self.b[self.n..self.n + 4].copy_from_slice(&v.to_le_bytes());
+        self.n += 4;
+    }
+    fn w64(&mut self, v: u64) {
+        self.b[self.n..self.n + 8].copy_from_slice(&v.to_le_bytes());
+        self.n += 8;
+    }
+}
+
+/// Encode a bare (NULL-pNext) vkCreateRingMESA SUBMIT_CMD for a ring at
+/// virtio-gpu `res_id`, whole-region `size`, `idle_ns` idleTimeout. Byte layout
+/// per Mesa's generated vn_encode_vkCreateRingMESA: framing [cmd_type=188]
+/// [cmd_flags=0][ring u64][pCreateInfo present u64=1], then VkRingCreateInfoMESA
+/// {sType, pNext=NULL(8B 0), flags, resourceId, offset, size, idleTimeout,
+/// headOffset, tailOffset, statusOffset, bufferOffset, bufferSize, extraOffset,
+/// extraSize}. All words host-LE; size_t fields are 8 bytes on the wire. The
+/// bare form is accepted by vkr_dispatch_vkCreateRingMESA (the monitor pNext
+/// only starts the separate ALIVE watchdog, unneeded here). Total = 124 bytes.
+fn encode_vk_create_ring(res_id: u32, size: u64, idle_ns: u64) -> RingCmd {
+    let mut c = RingCmd::new();
+    c.w32(VK_CMD_CREATE_RING); // cmd_type
+    c.w32(0); // cmd_flags (0 = async, no reply)
+    c.w64(0xDEAD_BEEF); // ring handle cookie (any unique u64)
+    c.w64(1); // pCreateInfo present marker
+    c.w32(VK_STYPE_RING_CREATE_INFO); // sType
+    c.w64(0); // pNext = NULL
+    c.w32(0); // flags
+    c.w32(res_id); // resourceId
+    c.w64(0); // offset
+    c.w64(size); // size (whole region)
+    c.w64(idle_ns); // idleTimeout (ns)
+    c.w64(0); // headOffset
+    c.w64(64); // tailOffset
+    c.w64(VN_STATUS); // statusOffset
+    c.w64(VN_BUFFER); // bufferOffset
+    c.w64(VN_BUFFER_SIZE); // bufferSize (pow2)
+    c.w64(VN_BUFFER + VN_BUFFER_SIZE); // extraOffset
+    c.w64(VN_EXTRA_SIZE); // extraSize
+    c
+}
+
+fn ring_host3d_fail(msg: &str) -> ! {
+    t_putstr("WARP-RING-HOST3D FAIL -- ");
+    t_putstr(msg);
+    t_putstr("\n");
+    unsafe { t_exits(1) }
+}
+
+fn img_fail(msg: &str) -> ! {
+    t_putstr(&format!("warp-prove: IMG FAIL -- {}\n", msg));
+    unsafe { t_exits(1) }
+}
+
+/// W-3c-1: the PRESENTABLE gate -- drives the `img/` ABI over the WIRE.
+///
+/// The compositor's own boot self-test exercises the presentable's INTERNALS
+/// (mint, bind, the display-safe teardown) but reaches none of them through
+/// 9P. This leg is the ABI's driver: walk, write, read-back, destroy,
+/// re-register. Without it the whole namespace surface -- the img dir, the
+/// info file, the ctl verb, the handle-frees-on-destroy contract -- would
+/// have no caller until mesa arrives at W-3d, and a gate with no driver is
+/// not a gate (the "BOOT OK does not prove a gate is wired" rule).
+///
+/// Venus-gated: a presentable is a venus-ctx object, so this SKIPs on a 2D
+/// device (no ctx) and on virgl-without-venus (the mint refuses), exactly
+/// like its ring-host3d sibling.
+fn img_prove() -> i64 {
+    t_putstr("warp-prove: img gate (W-3c-1, the presentable ABI) starting\n");
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+    if root < 0 {
+        img_fail("open /srv/warp (is tapestryd serving?)");
+    }
+    let ctx = match try_open_read(root, "ctx/new").and_then(|s| parse_u32_prefix(&s)) {
+        Some(v) => v,
+        None => {
+            t_putstr("warp-prove: IMG SKIP -- no virgl on this device (ctx mint unavailable)\n");
+            unsafe { t_exits(2) }
+        }
+    };
+    const W: u32 = 64;
+    const H: u32 = 64;
+    const FMT: u32 = VIRGL_FORMAT_B8G8R8A8_UNORM; // == VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM
+    const STRIDE: u32 = W * 4;
+    let newp = format!("ctx/{}/img/new", ctx);
+    let good = format!("0 {} {} {} {} 0", W, H, FMT, STRIDE);
+
+    // NEGATIVES FIRST, and through the WIRE rather than the internals: three
+    // declarations one variable away from the accepted one. They must all be
+    // refused BEFORE the positive runs, so a device that refuses everything
+    // cannot read as a pass -- the positive below is what separates the two.
+    // u32::MAX, not FMT+1: the neighbouring virtio format is XRGB8, which the
+    // ratified stage-0 accept set ADMITS (audit F7). A negative control must
+    // sit outside every accept set the design may legitimately grow into, or
+    // it pins a decision rather than testing a gate.
+    let n_fmt = !write_ctl(root, &newp, &format!("0 {} {} {} {} 0", W, H, u32::MAX, STRIDE));
+    let n_stride = !write_ctl(root, &newp, &format!("0 {} {} {} {} 0", W, H, FMT, STRIDE - 4));
+    let n_dim = !write_ctl(root, &newp, &format!("0 0 {} {} {} 0", H, FMT, STRIDE));
+    // A handle past the row must be refused too -- the slot-bound gate, which
+    // no other arm touches.
+    let n_handle = !write_ctl(root, &newp, &format!("9999 {} {} {} {} 0", W, H, FMT, STRIDE));
+    if !(n_fmt && n_stride && n_dim && n_handle) {
+        img_fail(&format!(
+            "a malformed registration was ACCEPTED (fmt-refused={} stride-refused={} dim-refused={} handle-refused={})",
+            n_fmt, n_stride, n_dim, n_handle
+        ));
+    }
+
+    // The positive. A virgl-without-venus device refuses the venus-ctx create
+    // -> SKIP (the shape gate above already ran, so the skip still carries
+    // its result).
+    if !write_ctl(root, &newp, &good) {
+        t_putstr("warp-prove: IMG SKIP -- presentable mint refused (no venus device); shape gate PASSED\n");
+        unsafe { t_exits(2) }
+    }
+
+    // The registration's RECORD: info must echo the shape that was declared,
+    // which is what makes "the declaration is the negotiation" a checkable
+    // claim rather than a slogan.
+    let info = open_read_string(root, &format!("ctx/{}/img/0/info", ctx));
+    let res = parse_field(&info, "res").unwrap_or_else(|| img_fail("img info missing res"));
+    let gw = parse_field(&info, "w").unwrap_or_else(|| img_fail("img info missing w"));
+    let gh = parse_field(&info, "h").unwrap_or_else(|| img_fail("img info missing h"));
+    let gs = parse_field(&info, "stride").unwrap_or_else(|| img_fail("img info missing stride"));
+    let gsz = parse_field(&info, "size").unwrap_or_else(|| img_fail("img info missing size"));
+    let gb = parse_field(&info, "bound").unwrap_or_else(|| img_fail("img info missing bound"));
+    // round-2 F10: `format` and `mem` were reported and read by NOTHING.
+    // `mem` in particular is the client's only way to confirm the compositor
+    // bound the allocation it MEANT, which is the whole point of echoing it.
+    let gf = parse_field(&info, "format").unwrap_or_else(|| img_fail("img info missing format"));
+    let gm = parse_field(&info, "mem").unwrap_or_else(|| img_fail("img info missing mem"));
+    if gf != FMT as u64 {
+        img_fail(&format!("img info format {} != declared {}", gf, FMT));
+    }
+    if gm != 0 {
+        img_fail(&format!("img info mem {} != declared 0", gm));
+    }
+    if res == 0 {
+        img_fail("img info res is 0 (no host resource)");
+    }
+    if gw != W as u64 || gh != H as u64 || gs != STRIDE as u64 {
+        img_fail(&format!("img info shape {}x{} stride {} != declared {}x{} stride {}", gw, gh, gs, W, H, STRIDE));
+    }
+    if gsz != (STRIDE as u64) * (H as u64) {
+        img_fail(&format!("img info size {} != stride*h {}", gsz, (STRIDE as u64) * (H as u64)));
+    }
+    if gb != 0 {
+        img_fail("a freshly-registered presentable reports bound != 0");
+    }
+
+    // A DUPLICATE handle must be refused while the slot is live -- and it must
+    // be refused for being taken, not for anything about the shape (the same
+    // declaration that just succeeded).
+    if write_ctl(root, &newp, &good) {
+        img_fail("re-registering a LIVE handle was accepted (the slot is not exclusive)");
+    }
+
+    // The cross-conn I-45 leg (round-2 F10's one undriven property): a
+    // SECOND connection must not resolve this conn's img -- not its info,
+    // and not a consent naming it. Which layer refuses (the walk or the
+    // verb) is not the property; that NOTHING is granted is.
+    let alien = warp_connect("img-xproc");
+    if try_open_read(alien, &format!("ctx/{}/img/0/info", ctx)).is_some() {
+        img_fail("a FOREIGN conn read another client's img info (I-45)");
+    }
+    if write_ctl(alien, &format!("ctx/{}/ctl", ctx), "present-to 0 img 0") {
+        img_fail("a FOREIGN conn consented another client's img to display (I-45)");
+    }
+    // And the probe must not have DAMAGED the owner's object (the #250
+    // shape: a gate that mutates the fixture it shares).
+    if try_open_read(root, &format!("ctx/{}/img/0/info", ctx)).is_none() {
+        img_fail("the alien-conn probe damaged the owner's img");
+    }
+
+    // TWO LIVE PRESENTABLES (round-2 F10). Every arm above drives handle 0
+    // alone, so the multi-slot row, the per-handle namespace and the I-32
+    // sum across imgs had no runtime witness at all -- the ABI supports 16
+    // and exactly one had ever been built.
+    let second = format!("1 {} {} {} {} 0", W, H, FMT, STRIDE);
+    if !write_ctl(root, &newp, &second) {
+        img_fail("a SECOND presentable was refused while the first was live");
+    }
+    let info1 = open_read_string(root, &format!("ctx/{}/img/1/info", ctx));
+    let res1 = parse_field(&info1, "res").unwrap_or_else(|| img_fail("second img info missing res"));
+    if res1 == res {
+        img_fail(&format!("two live presentables share res_id {}", res));
+    }
+    // The first must be UNDISTURBED by the second -- a slot row that aliased
+    // would show up here and nowhere else.
+    let info0b = open_read_string(root, &format!("ctx/{}/img/0/info", ctx));
+    if parse_field(&info0b, "res") != Some(res) {
+        img_fail("registering img 1 changed img 0's res_id");
+    }
+    if !write_ctl(root, &format!("ctx/{}/img/1/ctl", ctx), "destroy") {
+        img_fail("second img ctl destroy refused");
+    }
+    if try_open_read(root, &format!("ctx/{}/img/0/info", ctx)).is_none() {
+        img_fail("destroying img 1 also removed img 0");
+    }
+
+    // Destroy through the ctl verb, then prove BOTH halves of what destroy
+    // means: the object is gone from the namespace, AND its handle is free
+    // again. Checking only the first would pass on an implementation that
+    // leaks the slot forever.
+    if !write_ctl(root, &format!("ctx/{}/img/0/ctl", ctx), "destroy") {
+        img_fail("img ctl destroy refused");
+    }
+    if try_open_read(root, &format!("ctx/{}/img/0/info", ctx)).is_some() {
+        img_fail("img info still resolves AFTER destroy");
+    }
+    if !write_ctl(root, &newp, &good) {
+        img_fail("the handle did not free on destroy (re-registration refused)");
+    }
+    let info2 = open_read_string(root, &format!("ctx/{}/img/0/info", ctx));
+    let res2 = parse_field(&info2, "res").unwrap_or_else(|| img_fail("re-registered img info missing res"));
+    if res2 == res {
+        img_fail(&format!("re-registration reused res_id {} -- ids must be monotonic", res));
+    }
+    let _ = write_ctl(root, &format!("ctx/{}/img/0/ctl", ctx), "destroy");
+    let _ = write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy");
+    t_putstr(&format!(
+        "warp-prove: IMG PASS (shape gate 4/4 refused; declared {}x{} stride {} fmt {} mem 0 echoed; xproc info+consent refused; two live imgs res {}/{} distinct + independent; res {} -> {} monotonic; handle freed on destroy)\n",
+        W, H, STRIDE, FMT, res, res1, res, res2
+    ));
+    0
+}
+
+fn img_direct_fail(msg: &str) -> ! {
+    t_putstr(&format!("warp-prove: IMG-DIRECT FAIL: {}\n", msg));
+    unsafe { t_exits(1) }
+}
+
+/// W-3c-2: the presentable DIRECT arm, end-to-end over the wire -- the
+/// generalized `present-to <surface> img <n>` consent, the F16 pending
+/// switch completing on SET_SCANOUT_BLOB, and the display-safe
+/// destroy-while-bound. The zoom chord that makes the surface fullscreen
+/// comes from the expect harness (warp-img.exp), which also watches the
+/// compositor's say lines; this side drives presents and observes `bound`
+/// through `img/0/info` -- the guest-visible half of the same event.
+fn img_direct_prove() -> i64 {
+    use tapestry::Surface;
+    let args = libthyla_rs::env::args();
+    let dw: u32 = args.get_str(2).and_then(|s| s.parse().ok()).unwrap_or(1280);
+    let dh: u32 = args.get_str(3).and_then(|s| s.parse().ok()).unwrap_or(800);
+    t_putstr(&format!(
+        "warp-prove: img-direct gate (W-3c-2, the presentable Direct arm) starting ({}x{})\n",
+        dw, dh
+    ));
+
+    // The surface half of the mutual adoption, DISPLAY-sized: reconcile
+    // takes a surface Direct only when the one visible leaf matches the
+    // head, so the zoom can only complete on this shape.
+    let mut surf = match Surface::open(dw, dh) {
+        Ok(s) => s,
+        Err(_) => img_direct_fail("tapestry surface open"),
+    };
+    for px in surf.pixels().iter_mut() {
+        *px = 0xFF10_4020; // the weave content the restore leg falls back to
+    }
+    if surf.present(None).is_err() {
+        img_direct_fail("first 2D present");
+    }
+
+    let warp = warp_connect("img-direct");
+    let ctx = mint_ctx(warp, "img-direct");
+    let stride = dw * 4;
+    if !write_ctl(
+        warp,
+        &format!("ctx/{}/img/new", ctx),
+        &format!("0 {} {} {} {} 0", dw, dh, VIRGL_FORMAT_B8G8R8A8_UNORM, stride),
+    ) {
+        t_putstr("warp-prove: IMG-DIRECT SKIP -- presentable mint refused (no venus device)\n");
+        unsafe { t_exits(2) }
+    }
+    let info = open_read_string(warp, &format!("ctx/{}/img/0/info", ctx));
+    let res = parse_field(&info, "res").unwrap_or_else(|| img_direct_fail("img info missing res"));
+
+    if surf.surface_ctl(&format!("glsrc {}", ctx)).is_err() {
+        img_direct_fail("glsrc");
+    }
+    if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), &format!("present-to {} img 0", surf.id)) {
+        img_direct_fail("present-to img refused");
+    }
+    t_putstr(&format!(
+        "warp-prove: IMG-DIRECT armed (ctx {} res {} surf {})\n",
+        ctx, res, surf.id
+    ));
+
+    // Present until the display binds the presentable. `bound` in info is
+    // `bound_res == res` -- the guest-visible witness of the standing
+    // SET_SCANOUT_BLOB binding (the spec's pbound). The zoom arrives from
+    // the harness; F16 completes the switch only at a present-COMPLETE, so
+    // keep presenting.
+    let t0 = libthyla_rs::time::Instant::now();
+    let mut bound = false;
+    while (t0.elapsed().as_millis() as u64) < 120_000 {
+        if surf.present(None).is_err() {
+            img_direct_fail("present during the bind wait");
+        }
+        let now = open_read_string(warp, &format!("ctx/{}/img/0/info", ctx));
+        if parse_field(&now, "bound") == Some(1) {
+            bound = true;
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(100));
+    }
+    if !bound {
+        img_direct_fail("bound never reached 1 within 120s (zoom missing? head size mismatch?)");
+    }
+    t_putstr(&format!("warp-prove: IMG-DIRECT bound observed (res {})\n", res));
+
+    // Destroy WHILE BOUND -- the display-safe teardown's first client-driven
+    // execution: consent must clear server-side, the display must survive
+    // the unbind, and the surface's own weave arm takes the scanout back at
+    // a later present (the harness watches for `scanout direct N slot`).
+    if !write_ctl(warp, &format!("ctx/{}/img/0/ctl", ctx), "destroy") {
+        img_direct_fail("destroy-while-bound refused");
+    }
+    if try_open_read(warp, &format!("ctx/{}/img/0/info", ctx)).is_some() {
+        img_direct_fail("img info still resolves after destroy");
+    }
+    for _ in 0..20 {
+        if surf.present(None).is_err() {
+            img_direct_fail("present during the restore");
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+    }
+    // The destroy cleared the consent server-side; `off` must now be a
+    // clean no-op, not an error.
+    let _ = write_ctl(warp, &format!("ctx/{}/ctl", ctx), "present-to off");
+    let _ = write_ctl(warp, &format!("ctx/{}/ctl", ctx), "destroy");
+    t_putstr(&format!(
+        "warp-prove: IMG-DIRECT PASS (armed -> bound -> destroyed-while-bound -> restored; ctx {} res {} {}x{})\n",
+        ctx, res, dw, dh
+    ));
+    0
+}
+
+fn ring_host3d_prove() -> i64 {
+    t_putstr("warp-prove: ring-host3d gate (V-3b-2) starting\n");
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+    if root < 0 {
+        ring_host3d_fail("open /srv/warp (is tapestryd serving?)");
+    }
+    // No virgl -> the ctx mint is unavailable (2D device) -> SKIP, like `ring`.
+    let ctx = match try_open_read(root, "ctx/new").and_then(|s| parse_u32_prefix(&s)) {
+        Some(v) => v,
+        None => {
+            t_putstr("warp-prove: RING-HOST3D SKIP -- no virgl on this device (ctx mint unavailable)\n");
+            unsafe { t_exits(2) }
+        }
+    };
+
+    // Mint the HOST3D ring: a venus-ctx-backed hostmem blob virglrenderer can
+    // poll. Page-align the mint up from the Venus tight layout. A virgl-without-
+    // venus device refuses the venus-ctx create (E_IO) -> the mint fails -> SKIP.
+    let mint_bytes = (VN_RING_TOTAL + RING_PAGE - 1) & !(RING_PAGE - 1);
+    if !write_ctl(root, &format!("ctx/{}/ring/new", ctx), &format!("{} 0 host3d", mint_bytes)) {
+        t_putstr("warp-prove: RING-HOST3D SKIP -- host3d mint refused (no venus device)\n");
+        unsafe { t_exits(2) }
+    }
+
+    // The res_id virglrenderer resolves vkCreateRingMESA.resourceId against.
+    let info = open_read_string(root, &format!("ctx/{}/ring/0/info", ctx));
+    let res_id = match parse_field(&info, "res") {
+        Some(v) if v != 0 => v as u32,
+        _ => ring_host3d_fail("host3d ring info missing/zero res_id"),
+    };
+
+    // Map the ring to read the status word. The ring is zeroed at install
+    // (wring_install_host3d), and the host REQUIRES *head==0 && *status==0 at
+    // create (vkr_ring.c:53); assert the zeroing holds before submitting.
+    let map_fd = unsafe {
+        let pth = format!("ctx/{}/ring/0/map", ctx);
+        t_open(root, pth.as_ptr(), pth.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        ring_host3d_fail("host3d ring/0/map open");
+    }
+    let va = unsafe { t_weft_map(map_fd as u64, 0) };
+    if va < 0 {
+        ring_host3d_fail("host3d ring t_weft_map claim");
+    }
+    let va = va as u64;
+    if unsafe { rld32(va, VN_STATUS) } != 0 {
+        ring_host3d_fail("host3d ring status != 0 at mint (host would reject the create)");
+    }
+
+    // Bootstrap: submit a bare vkCreateRingMESA. virglrenderer maps the same
+    // res_id shmem, vkr_ring_create + vkr_ring_start it, and its poll thread sets
+    // status&IDLE. idleTimeout=0 -> IDLE on the host's first poll iteration.
+    let cmd = encode_vk_create_ring(res_id, VN_RING_TOTAL, 0);
+    let submit_fd = unsafe {
+        let p = format!("ctx/{}/submit", ctx);
+        t_open(root, p.as_ptr(), p.len(), T_OWRITE)
+    };
+    if submit_fd < 0 {
+        ring_host3d_fail("submit open");
+    }
+    let n = unsafe { t_write(submit_fd, cmd.b.as_ptr(), cmd.n) };
+    unsafe { t_close(submit_fd) };
+    if n < 0 {
+        ring_host3d_fail("submit write (vkCreateRingMESA queue refused)");
+    }
+
+    // Witness: poll statusOffset for IDLE (0x1) set AND FATAL (0x2) clear. FATAL
+    // is the host's decode/layout rejection of the hand-built bytes -- fail LOUD
+    // + distinctly from a non-polling host. Bounded (~2 s): a host that never
+    // maps+polls the ring FAILS, it does not hang.
+    let mut idle = false;
+    for _ in 0..200 {
+        let st = unsafe { rld32(va, VN_STATUS) };
+        if st & VK_RING_STATUS_FATAL != 0 {
+            ring_host3d_fail("host set status&FATAL -- vkCreateRingMESA decode/layout rejected");
+        }
+        if st & VK_RING_STATUS_IDLE != 0 {
+            idle = true;
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(10));
+    }
+    if !idle {
+        ring_host3d_fail("host never set status&IDLE -- virglrenderer did not map+poll the ring");
+    }
+
+    unsafe { t_close(map_fd) };
+    unsafe { t_close(root) };
+    t_putstr(
+        "WARP-RING-HOST3D PASS (host3d mint + vkCreateRingMESA submit + host status&IDLE -- virglrenderer polls, no Mesa)\n",
+    );
+    0
+}
+
+fn ring_xproc_fail(msg: &str) -> ! {
+    t_putstr("WARP-RING-XPROC FAIL: ");
+    t_putstr(msg);
+    t_putstr("\n");
+    unsafe { t_exits(1) }
+}
+
+fn xproc_sleep_ms(ms: u64) {
+    let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(ms));
+}
+
+/// Read the gpu-side host3d-ring reap ledger (park/reap) from the global warp ctl.
+fn xproc_ledger(root: i64) -> (u64, u64) {
+    // F4: a mid-poll ctl open failure must ride the WARP-RING-XPROC FAIL channel
+    // (fast, scenario-named), not open_read_string's generic `fail`.
+    let ctl = match try_open_read(root, "ctl") {
+        Some(s) => s,
+        None => ring_xproc_fail("ctl open refused mid-poll"),
+    };
+    let parked = parse_field(&ctl, "hostmem-ring-parked")
+        .unwrap_or_else(|| ring_xproc_fail("ctl `hostmem-ring-parked` field missing"));
+    let reaped = parse_field(&ctl, "hostmem-ring-reaped")
+        .unwrap_or_else(|| ring_xproc_fail("ctl `hostmem-ring-reaped` field missing"));
+    (parked, reaped)
+}
+
+/// Mint a fresh ctx + one HOST3D ring under it (ring index 0). Returns the ctx id,
+/// or None if the device lacks virgl (no ctx) or venus (the host3d mint refuses)
+/// -> the caller SKIPs. Minting a host3d ring runs `reap_hostmem_parked`
+/// (reclaim-before-alloc), so this is also the lever that drives a reap pass.
+fn xproc_mint_ring_ctx(root: i64) -> Option<u32> {
+    let ctx = try_open_read(root, "ctx/new").and_then(|s| parse_u32_prefix(&s))?;
+    let mint_bytes = (VN_RING_TOTAL + RING_PAGE - 1) & !(RING_PAGE - 1);
+    if !write_ctl(root, &format!("ctx/{}/ring/new", ctx), &format!("{} 0 host3d", mint_bytes)) {
+        return None;
+    }
+    Some(ctx)
+}
+
+/// V-3b-2 cross-Proc E2E: the host3d-ring park->reclaim LIFECYCLE (option d) plus
+/// the cross-conn ring-ownership ISOLATION (option b). This is the only leg that
+/// drives tapestryd's `retire_host3d_ring`/`reap_hostmem_parked` under a REAL
+/// cross-Proc refcount (warp-prove's weft map is a genuine second-Proc ref on the
+/// ring's hostmem burrow). Venus-gated: SKIPs on a 2D or virgl-without-venus
+/// device, like `ring_host3d_prove`. The literal "cross-client-alias" race is
+/// kernel-internal (t_weft_map claims+maps atomically) and is covered by the
+/// white-box kernel test `weft.hostmem_refcount`, not here.
+fn ring_xproc_prove() -> i64 {
+    t_putstr("warp-prove: ring-xproc gate (V-3b-2 park->reclaim + isolation) starting\n");
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+    if root < 0 {
+        ring_xproc_fail("open /srv/warp (is tapestryd serving?)");
+    }
+
+    // === Phase 1: park -> reclaim lifecycle (option d) ===
+    // Mint ctx A + ring R1 and MAP it: the map is a real cross-Proc ref that keeps
+    // the ring's hostmem refcount > 1 across the retire below.
+    let ctx_a = match xproc_mint_ring_ctx(root) {
+        Some(c) => c,
+        None => {
+            t_putstr("warp-prove: RING-XPROC SKIP -- no venus device (host3d ctx/ring mint unavailable)\n");
+            unsafe { t_exits(2) }
+        }
+    };
+    let map_fd = unsafe {
+        let p = format!("ctx/{}/ring/0/map", ctx_a);
+        t_open(root, p.as_ptr(), p.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        ring_xproc_fail("R1 ring/0/map open");
+    }
+    if unsafe { t_weft_map(map_fd as u64, 0) } < 0 {
+        ring_xproc_fail("R1 t_weft_map claim");
+    }
+    let (park0, reap0) = xproc_ledger(root);
+
+    // PARK: destroy ctx A while R1 is still mapped. tapestryd disarms the weft
+    // share then retires R1; the live client map keeps refcount > 1, so it must
+    // PARK (keep the offset), never free it under the client's PTEs.
+    if !write_ctl(root, &format!("ctx/{}/ctl", ctx_a), "destroy") {
+        ring_xproc_fail("ctx A destroy");
+    }
+    let mut parked = false;
+    for _ in 0..200 {
+        let (p, r) = xproc_ledger(root);
+        if r != reap0 {
+            ring_xproc_fail("ring RECLAIMED on a mapped retire -- reap fired under a live client map (I-45/I-7 alias)");
+        }
+        if p >= park0 + 1 {
+            parked = true;
+            break;
+        }
+        xproc_sleep_ms(10);
+    }
+    if !parked {
+        ring_xproc_fail("ring did not PARK on a mapped retire (park count never advanced)");
+    }
+
+    // PARK-HELD: a fresh mint runs reap_hostmem_parked, but R1 is still mapped
+    // (refcount > 1), so it must NOT be reclaimed -- the refcount GATES the reap.
+    // tapestryd allows ONE ctx per conn (wctx_mint, counting retiring ones), so
+    // capture this ctx: it must be destroyed before the reclaim mint below can
+    // install its own on the same conn (audit F1).
+    let ctx_b = match xproc_mint_ring_ctx(root) {
+        Some(c) => c,
+        None => ring_xproc_fail("park-held mint refused (no free ctx slot on this conn, or venus gone)"),
+    };
+    let (_, reap_mid) = xproc_ledger(root);
+    if reap_mid != reap0 {
+        ring_xproc_fail("parked ring RECLAIMED while still mapped -- the refcount did not gate the reap");
+    }
+    // Free the one-per-conn ctx slot. ctx B's ring is unmapped (refcount 1), so
+    // its retire is an immediate drop -- neither ledger counter moves, and the
+    // negative control just asserted stays valid.
+    if !write_ctl(root, &format!("ctx/{}/ctl", ctx_b), "destroy") {
+        ring_xproc_fail("park-held ctx B destroy");
+    }
+
+    // RELEASE: close R1's map fd. dev9p_close unmaps the client VA AND drops the
+    // transferred registration pin (weft_binding_release), so the ring's total
+    // refcount falls to 1 (tapestryd's own map alone).
+    unsafe { t_close(map_fd) };
+
+    // RECLAIM: the next mint's reap now finds R1 at refcount 1 -> reclaims it.
+    // The conn's ctx slot is free again (ctx B destroyed). KEEP this ctx: phase 2
+    // reuses it as the isolation target rather than minting a 4th on this conn.
+    let ctx_c = match xproc_mint_ring_ctx(root) {
+        Some(c) => c,
+        None => ring_xproc_fail("reclaim mint refused (no free ctx slot on this conn, or venus gone)"),
+    };
+    let mut reaped = false;
+    for _ in 0..200 {
+        let (_, r) = xproc_ledger(root);
+        if r >= reap0 + 1 {
+            reaped = true;
+            break;
+        }
+        xproc_sleep_ms(10);
+    }
+    if !reaped {
+        ring_xproc_fail("parked ring not RECLAIMED after the client released it (reap count never advanced)");
+    }
+
+    // === Phase 2: cross-conn ring-ownership isolation (option b) ===
+    // A hard tapestryd seam gate (wctx(id, conn) ownership), distinct from the
+    // trusted-host res-scope the BO cross-ctx-blit probe reports. Pub-ids are
+    // global + monotonic; a ctx is owned by its minting conn. ctx C is the still-
+    // live RECLAIM ctx, reused (one ctx per conn).
+    // Positive control (RESOURCE axis): the OWNER (conn A) reads its own ring
+    // info, so a conn-B refusal below is ISOLATION, not the resource being absent.
+    if try_open_read(root, &format!("ctx/{}/ring/0/info", ctx_c)).is_none() {
+        ring_xproc_fail("isolation control: owner conn A could not read its OWN ring info");
+    }
+    let conn_b = warp_connect("ring-isolation B");
+    // Positive control (CONN axis, audit F2): conn B can read the OWNERSHIP-FREE
+    // global ctl, so a refusal below is the ownership GATE, not a wholesale-dead
+    // second connection (aux#215: a negative satisfied by a broken fixture needs
+    // a positive control one variable -- here the CONN -- away).
+    let b_ctl = match try_open_read(conn_b, "ctl") {
+        Some(s) => s,
+        None => {
+            unsafe { t_close(conn_b) };
+            ring_xproc_fail("isolation control: conn B ctl open refused -- second conn is dead, not a gate test");
+        }
+    };
+    if parse_field(&b_ctl, "hostmem-ring-parked").is_none() {
+        unsafe { t_close(conn_b) };
+        ring_xproc_fail("isolation control: conn B read an unparseable global ctl -- second conn is broken, not a gate test");
+    }
+    if try_open_read(conn_b, &format!("ctx/{}/ring/0/info", ctx_c)).is_some() {
+        unsafe { t_close(conn_b) };
+        ring_xproc_fail("ISOLATION BREACH: conn B READ conn A's ring info (ownership gate did not refuse)");
+    }
+    let b_submit = unsafe {
+        let p = format!("ctx/{}/submit", ctx_c);
+        t_open(conn_b, p.as_ptr(), p.len(), T_OWRITE)
+    };
+    if b_submit >= 0 {
+        unsafe { t_close(b_submit) };
+        unsafe { t_close(conn_b) };
+        ring_xproc_fail("ISOLATION BREACH: conn B OPENED conn A's submit file (ownership gate did not refuse)");
+    }
+    unsafe { t_close(conn_b) };
+    unsafe { t_close(root) };
+    t_putstr(
+        "WARP-RING-XPROC PASS (park-on-mapped-retire + park-held-under-refcount + reclaim-on-release + cross-conn ring isolation)\n",
+    );
+    0
+}
+
 fn warp_connect(what: &str) -> i64 {
     let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
     if fd < 0 {
@@ -463,10 +1512,11 @@ fn fenced_free(root: i64) -> u64 {
 /// ABSENT, so the whole reject run aborted on the first read instead of
 /// reaching the INSTRUMENT arm written for exactly that case.
 ///
-/// Names the missing key, closes the scenario with its DONE marker so the
-/// harness is not left waiting, and exits 0. The host gate then fails on
-/// the ABSENT verdict terms -- which is the honest way for this to fail,
-/// and (since F8) a way that actually fails.
+/// Names the missing key, closes the scenario with its completion token so
+/// the harness is not left waiting -- INCOMPLETE, since the C-0d Fable round
+/// (F6) made DONE mean "every arm passed" -- and exits 0. The scenario
+/// hard-fails on the token wherever it runs; the host gate additionally
+/// fails on the ABSENT verdict terms.
 fn ctx_field_soft(root: i64, ctx: u32, key: &str) -> u64 {
     match parse_field(&open_read_string(root, &format!("ctx/{}/ctl", ctx)), key) {
         Some(v) => v,
@@ -477,7 +1527,7 @@ fn ctx_field_soft(root: i64, ctx: u32, key: &str) -> u64 {
                  downstream could have meant anything.\n",
                 key
             ));
-            t_putstr("warp-prove: C0-REJECT DONE\n");
+            t_putstr(&format!("warp-prove: C0-REJECT INCOMPLETE(instrument:{})\n", key));
             unsafe { t_exits(0) }
         }
     }
@@ -1076,19 +2126,28 @@ fn observe_rejection() {
          stream-rejected(bad {} ok {}) rejected-at(bad {})\n",
         wrote_bad as u32, wrote_ok as u32, vs_bad_0, vs_bad, vs_ok_0, vs_ok, sr_bad, sr_ok, at_bad
     ));
-    let _ = if vs_bad <= vs_bad_0 || vs_ok <= vs_ok_0 {
+    // Every C0 arm records whether it PASSED (C-0d Fable round F6): the
+    // scenario's completion token used to print unconditionally, so a
+    // FAIL(vacuous) / FAIL(blind) arm reached the prompt with the same
+    // `C0-REJECT DONE` a green run prints, and only the host-side 5-term
+    // grep stood between a blind detector and a pass. Now DONE means every
+    // arm passed; anything else prints INCOMPLETE(<arm>) and the scenario
+    // hard-fails on it wherever it runs.
+    let detect_pass = if vs_bad <= vs_bad_0 || vs_ok <= vs_ok_0 {
         t_putstr(
             "warp-prove: C0-DETECT INSTRUMENT -- `verify-seq` did not advance on one or both \
              ctxs, so the probe did not run and neither reading below means anything. \
              (A pre-C-0d tapestryd cannot reach here at all: the field is ABSENT and \
              `ctx_field_soft` reports that separately.)\n",
-        )
+        );
+        false
     } else if sr_bad == 1 && sr_ok == 0 && vok_ok == 0 {
         t_putstr(
             "warp-prove: C0-DETECT FAIL(control unproven) -- the healthy ctx reports \
              stream-rejected 0 but `verify-ok` never advanced, so its probe returned \
              UNKNOWN rather than finding health. The control is vacuous (F2).\n",
-        )
+        );
+        false
     } else if sr_bad == 1 && sr_ok == 0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT PASS -- the REJECTED ctx reports stream-rejected 1 \
@@ -1096,23 +2155,27 @@ fn observe_rejection() {
              recorded a healthy verdict (verify-ok {}). The detector discriminates; \
              #240 is observable in-guest.\n",
             at_bad, vok_ok
-        ))
+        ));
+        true
     } else if sr_bad == 1 && sr_ok == 1 {
         t_putstr(
             "warp-prove: C0-DETECT FAIL(vacuous) -- BOTH ctxs report stream-rejected 1. \
              The detector latches on health too, so its positive reading proves nothing.\n",
-        )
+        );
+        false
     } else if sr_bad == 0 && sr_ok == 0 {
         t_putstr(
             "warp-prove: C0-DETECT FAIL(blind) -- the rejected ctx reports 0 after a verify \
              that DID run. The probe's copy reached the host on a ctx vrend had latched, \
              or the seed/readback is not landing where the compare reads.\n",
-        )
+        );
+        false
     } else {
         t_putstr(
             "warp-prove: C0-DETECT FAIL(inverted) -- the HEALTHY ctx reports rejected and the \
              refused one does not. The two arms are crossed.\n",
-        )
+        );
+        false
     };
     // Sticky is the contract (recreate, never retry): a second verify on the
     // healthy ctx must not drift, and on the rejected one must not clear.
@@ -1150,13 +2213,14 @@ fn observe_rejection() {
     let vok_bad = ctx_field_soft(bad, ctx_bad, "verify-ok");
     let vok_ok = ctx_field_soft(ok, ctx_ok, "verify-ok");
     let at_bad = ctx_field_soft(bad, ctx_bad, "rejected-at");
-    if rv_bad <= rv_bad_0 || rv_ok <= rv_ok_0 {
+    let sticky_pass = if rv_bad <= rv_bad_0 || rv_ok <= rv_ok_0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY NOT TESTED -- the re-verify was rate-limited \
              (verify-seq bad {}->{} ok {}->{}), so the second reading is the first one's \
              cache and proves nothing about stickiness.\n",
             rv_bad_0, rv_bad, rv_ok_0, rv_ok
         ));
+        false
     } else if sr2_bad == 1 && sr2_ok == 0 && vok_bad == vok_bad_0 && vok_ok > vok_ok_0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY PASS -- a SECOND real probe (verify-seq bad {} ok \
@@ -1165,12 +2229,14 @@ fn observe_rejection() {
              rejected-at pinned at {}.\n",
             rv_bad, rv_ok, vok_bad, vok_ok_0, vok_ok, at_bad
         ));
+        true
     } else if at_bad != at_bad_0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY FAIL(re-latched) -- `rejected-at` moved {}->{}, so \
              the ctx was re-detected rather than staying latched at first detection.\n",
             at_bad_0, at_bad
         ));
+        false
     } else if vok_bad > vok_bad_0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY FAIL(healed) -- a second real probe found the \
@@ -1178,13 +2244,15 @@ fn observe_rejection() {
              The flag is sticky but the probe is not: the two now disagree.\n",
             vok_bad_0, vok_bad, sr2_bad
         ));
+        false
     } else {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY FAIL -- a second real probe reads (bad {} ok {}), \
              want (1 0); verify-ok bad {}->{} ok {}->{} (want still / moved).\n",
             sr2_bad, sr2_ok, vok_bad_0, vok_bad, vok_ok_0, vok_ok
         ));
-    }
+        false
+    };
 
     // ===== F1: CAN A CLIENT BLIND ITS OWN DETECTOR? =====
     //
@@ -1204,17 +2272,27 @@ fn observe_rejection() {
     // F2 (UNKNOWN has no ctl representation) that reads as HEALTHY forever.
     //
     // Uses a THIRD connection so neither arm above is disturbed.
+    //
+    // THE SOURCE IS A BUFFER (C-0d Fable round F1). The probe pair under
+    // attack is minted as BUFFER resources now (`warp_hprobe_build`; the
+    // texture pair only where that mint fails), and a texture->buffer
+    // `RESOURCE_COPY_REGION` is not a legal copy: with a texture source the
+    // renderer would drop the copy on its own and this leg would read
+    // DEFENDED for the wrong reason -- a control the operation erases. So
+    // the attacker mints a buffer of the probe's own shape, fills its first
+    // 4 bytes with its own value, pushes them to the host, and copies 4
+    // BYTES over the guessed mark: the same command the server's own verify
+    // issues, exactly as the finding filed it.
     let f1 = warp_connect("f1/blind");
     let ctx_f1 = mint_ctx(f1, "f1/blind");
-    let (f1_bo, f1_res, _f1_va) = mint_sized_bo(f1, ctx_f1, "f1/blind");
-    let _ = f1_bo;
+    let (f1_bo, f1_res, f1_va) = mint_buffer_bo(f1, ctx_f1, "f1/blind");
     // Derive the probe ids from OUR OWN first resource id, exactly as an
     // attacker would -- do not hardcode, or the leg stops tracking the
     // server's allocation order and silently tests nothing.
     let guess_mark = f1_res.wrapping_sub(2);
     let guess_sent = f1_res.wrapping_sub(1);
     t_putstr(&format!(
-        "warp-prove: C0-F1 our first res {} -> guessing mark {} sentinel {}\n",
+        "warp-prove: C0-F1 our first res {} (a buffer) -> guessing mark {} sentinel {}\n",
         f1_res, guess_mark, guess_sent
     ));
     // Baseline: the ctx must be HEALTHY and the probe must WORK before the
@@ -1223,14 +2301,68 @@ fn observe_rejection() {
     let f1_sr0 = ctx_field_soft(f1, ctx_f1, "stream-rejected");
     let f1_vs0 = ctx_field_soft(f1, ctx_f1, "verify-seq");
     let f1_ok0 = ctx_field_soft(f1, ctx_f1, "verify-ok");
-    // Paint our own BO green, then copy IT over the guessed mark.
-    let mut sf: Vec<u32> = Vec::new();
-    subctx_preamble(&mut sf);
-    clear_stream(&mut sf, f1_res, 1, 0.0, 1.0, 0.0);
-    submit_stream(f1, ctx_f1, &sf, "f1 paint own bo");
+    // Fill our own buffer with the client's green, push it to the host
+    // (the fenced transfer verb; it decodes ahead of the submit that
+    // follows, one in-order controlq), then copy IT over the guessed mark.
+    unsafe { core::ptr::write_volatile(f1_va as *mut u32, 0xFF00_FF00) };
+    if !write_ctl(
+        f1,
+        &format!("ctx/{}/bo/{}/ctl", ctx_f1, f1_bo),
+        "transfer_to 0 0 0 0 4 1 1 0 0 0",
+    ) {
+        fail("f1: transfer_to of the attacker's 4 bytes");
+    }
     let mut sc2: Vec<u32> = Vec::new();
-    rcr_stream(&mut sc2, f1_res, guess_mark);
+    subctx_preamble(&mut sc2);
+    rcr_stream(&mut sc2, f1_res, guess_mark, 4);
     submit_stream(f1, ctx_f1, &sc2, "f1 overwrite the probe MARK");
+    // THE POSITIVE CONTROL (added when the source became a buffer): DEFENDED
+    // below is "verify-ok still advanced", which an attack that never landed
+    // satisfies just as well (aux#215 -- a negative assertion is satisfied
+    // by a broken fixture). The texture-era leg leaned on a one-time
+    // host-log measurement for that; the buffer form re-earns it IN-GUEST:
+    // copy the mark BACK into our own buffer (the same command the other
+    // way), read our buffer back, and require the client's green -- so the
+    // leg proves a client can WRITE the probe's mark AND READ it, exactly as
+    // the finding filed it, before it claims the repaint held. The
+    // readback rides the same in-order controlq behind both copies. If the
+    // mark reads PROBE_MARK the attack did not land and nothing after it is
+    // attributable; a stale SENTINEL means the readback itself never landed.
+    unsafe { core::ptr::write_volatile(f1_va as *mut u32, SENTINEL) };
+    let mut sc3: Vec<u32> = Vec::new();
+    rcr_stream(&mut sc3, guess_mark, f1_res, 4);
+    submit_stream(f1, ctx_f1, &sc3, "f1 read the probe MARK back into our buffer");
+    let f1_sig0 = ctx_field_soft(f1, ctx_f1, "fence-signaled");
+    if !write_ctl(
+        f1,
+        &format!("ctx/{}/bo/{}/ctl", ctx_f1, f1_bo),
+        "transfer_from 0 0 0 0 4 1 1 0 0 0",
+    ) {
+        fail("f1: transfer_from of our own buffer");
+    }
+    for _ in 0..200 {
+        if ctx_field_soft(f1, ctx_f1, "fence-signaled") > f1_sig0 {
+            break;
+        }
+    }
+    let f1_mark_seen = unsafe { core::ptr::read_volatile(f1_va as *const u32) };
+    let f1_landed = f1_mark_seen == 0xFF00_FF00;
+    if f1_landed {
+        t_putstr(&format!(
+            "warp-prove: C0-F1 ATTACK LANDED -- the mark read back through our own buffer as \
+             {:#010x}: a client can both WRITE and READ the probe's resources (the finding, \
+             re-measured in-guest on the buffer pair)\n",
+            f1_mark_seen
+        ));
+    } else {
+        t_putstr(&format!(
+            "warp-prove: C0-F1 INSTRUMENT -- the mark read back as {:#010x} through our own \
+             buffer (want the client's green {:#010x}; PROBE_MARK = the copy did not land, \
+             SENTINEL {:#010x} = the readback did not land), so a DEFENDED reading below would \
+             be vacuous.\n",
+            f1_mark_seen, 0xFF00_FF00u32, SENTINEL
+        ));
+    }
     let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(100));
     let _ = write_ctl(f1, &format!("ctx/{}/ctl", ctx_f1), "verify");
     let f1_sr = ctx_field_soft(f1, ctx_f1, "stream-rejected");
@@ -1244,17 +2376,22 @@ fn observe_rejection() {
     // the reading an UNKNOWN produces -- the round's own F2 lesson, not
     // applied here when it was learned. `verify-ok` is the only predicate
     // that means "asked and found healthy", so the baseline requires it.
-    let _ = if f1_vs0 == 0 || f1_sr0 != 0 || f1_ok0 == 0 {
+    let f1_defended = if f1_vs0 == 0 || f1_sr0 != 0 || f1_ok0 == 0 {
         t_putstr(
             "warp-prove: C0-F1 INSTRUMENT -- the ctx was not verifiably healthy BEFORE the \
              attack (needs verify-seq moved AND verify-ok moved AND stream-rejected 0), so \
              nothing after it is attributable.\n",
-        )
+        );
+        false
+    } else if !f1_landed {
+        // Reported above; an unlanded attack proves nothing about the defence.
+        false
     } else if f1_vs <= f1_vs0 {
         t_putstr(
             "warp-prove: C0-F1 INSTRUMENT -- the post-attack verify did not run (rate limit?), \
              so this says nothing.\n",
-        )
+        );
+        false
     } else {
         // Decided IN-GUEST off `verify-ok`, which advances ONLY on a healthy
         // verdict. Blinding shows up as verify-seq advancing while verify-ok
@@ -1267,17 +2404,119 @@ fn observe_rejection() {
                 "warp-prove: C0-F1 DEFENDED -- after a client wrote the probe's mark, the \
                  next verify still reached a HEALTHY verdict (verify-ok advanced). The \
                  per-verify repaint holds: corruption cannot outlive one verify.\n",
-            )
+            );
+            true
         } else {
             t_putstr(
                 "warp-prove: C0-F1 BLINDED -- verify-seq advanced but verify-ok did NOT, so \
                  the probe returned UNKNOWN after the client wrote its mark. The detector is \
                  blindable for the ctx's life and a dead ctx would read as healthy.\n",
-            )
+            );
+            false
         }
     };
 
-    t_putstr("warp-prove: C0-REJECT DONE\n");
+    // FOLLOW-UP ROUND F1 [P1] regression, and it is the INVERSE of what this
+    // leg asserted when it was written. The C-6b close added a create-time
+    // lower bound on a B8G8R8A8 backing and this leg proved it refused
+    // `512 512 ... 4096`. The follow-up round found that shape is what THIS
+    // PROJECT'S OWN Mesa winsys emits for a legitimate texture --
+    // `usr/ports/mesa/patches/0006-*.patch:1511`, at the line that picks the
+    // size: "the driver's staging-path textures legitimately ask for size 1".
+    // Mesa declares one byte on two paths that keep the real width/height
+    // (the staging path, and MSAA which asks for no guest backing at all),
+    // the winsys rounds it to one page, and the result is byte-for-byte the
+    // "attack" this leg demanded be refused. There was nothing to tell apart.
+    //
+    // So the door must ADMIT it, and this leg now proves that -- the
+    // regression it guards is a compositor that refuses ordinary GL
+    // allocations. The MSAA arm needed no host capability, so before the
+    // removal every multisampled BGRA target above 32x32 was refused outright.
+    //
+    // The CONTROL is the other direction, one variable away: a genuinely
+    // malformed declaration (unaligned backing) must still be REFUSED, so
+    // "admitted" cannot pass against a create3d that admits everything.
+    //
+    // The P0's real guard is the READ gate in `gl_adoption`, which is exact,
+    // re-checked at retire, and on the only path that reads a backing with
+    // foreign geometry. Its runtime regression test is OWED, not landed here:
+    // it needs a surface + `glsrc` + `present-to` and an assertion that
+    // `rb-issued` does NOT move for an undersized adoption while it DOES for
+    // a correctly-sized twin -- machinery that lives in the C-6 readback
+    // scenario, and a thyla-pi run to certify. Tracked, not dropped.
+    let staging_pass = {
+        let mut passed = false;
+        // try_open_read, not open_read_string: a starved mint refuses at the
+        // OPEN, and open_read_string fail()s the whole scenario there -- so the
+        // "bo/new failed; the arm never ran" INSTRUMENT arm below was
+        // unreachable for the one failure it names (follow-up round F5).
+        let bo = try_open_read(ok, &format!("ctx/{}/bo/new", ctx_ok)).and_then(|s| parse_u32_prefix(&s));
+        let bo2 = try_open_read(ok, &format!("ctx/{}/bo/new", ctx_ok)).and_then(|s| parse_u32_prefix(&s));
+        match (bo, bo2) {
+            (Some(a), Some(b)) => {
+                // What Mesa actually emits for a staged / MSAA 512x512 BGRA
+                // texture: true geometry, one page of declared backing.
+                let staging = format!(
+                    "create3d {} {} {} 512 512 1 1 0 0 0 4096",
+                    PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET
+                );
+                // Malformed for a reason the seam still owns: not page-aligned.
+                let malformed = format!(
+                    "create3d {} {} {} 512 512 1 1 0 0 0 4095",
+                    PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET
+                );
+                let took_staging = write_ctl(ok, &format!("ctx/{}/bo/{}/ctl", ctx_ok, a), &staging);
+                let took_malformed =
+                    write_ctl(ok, &format!("ctx/{}/bo/{}/ctl", ctx_ok, b), &malformed);
+                if !took_staging {
+                    t_putstr(
+                        "warp-prove: C0-STAGING FAIL -- create3d REFUSED a 512x512 B8G8R8A8 BO \
+                         declaring one page, which is exactly what Mesa's staging and MSAA \
+                         paths emit for a legitimate texture; GL allocation is broken\n",
+                    );
+                } else if took_malformed {
+                    t_putstr(
+                        "warp-prove: C0-STAGING INSTRUMENT -- the CONTROL was admitted too; \
+                         create3d is admitting an unaligned backing, so \"the staging shape \
+                         was admitted\" means nothing\n",
+                    );
+                } else {
+                    passed = true;
+                    t_putstr(
+                        "warp-prove: C0-STAGING PASS -- one page for 512x512 ADMITTED (the \
+                         Mesa staging/MSAA shape), an unaligned backing still REFUSED (the \
+                         arm discriminates; it does not merely admit)\n",
+                    );
+                }
+            }
+            _ => {
+                t_putstr(
+                    "warp-prove: C0-STAGING INSTRUMENT -- bo/new failed; the arm never ran\n",
+                );
+            }
+        }
+        passed
+    };
+
+    // The completion token is a VERDICT now (F6): DONE iff every arm above
+    // passed; otherwise the first arm that did not, by name. The #240
+    // measurement (`ANSWER=`) is data, not an arm -- it has no pass/fail --
+    // and the host gate still requires it separately.
+    let incomplete = if !detect_pass {
+        Some("detect")
+    } else if !sticky_pass {
+        Some("sticky")
+    } else if !f1_defended {
+        Some("f1")
+    } else if !staging_pass {
+        Some("staging")
+    } else {
+        None
+    };
+    match incomplete {
+        None => t_putstr("warp-prove: C0-REJECT DONE\n"),
+        Some(arm) => t_putstr(&format!("warp-prove: C0-REJECT INCOMPLETE({})\n", arm)),
+    };
 
     unsafe {
         t_close(bad);
@@ -1286,11 +2525,12 @@ fn observe_rejection() {
     }
 }
 
-/// A stateless 1x1 `RESOURCE_COPY_REGION` (opcode 17, 13 payload dwords).
-/// Mirrors the server's own probe stream -- deliberately, since the F1
-/// question is whether a CLIENT can issue the same command against the
-/// server's resources.
-fn rcr_stream(st: &mut Vec<u32>, src_res: u32, dst_res: u32) {
+/// A stateless `RESOURCE_COPY_REGION` (opcode 17, 13 payload dwords) of a
+/// box `w` wide (BYTES on a buffer, texels on a texture), 1 high, 1 deep,
+/// origin to origin. Mirrors the server's own probe stream -- deliberately,
+/// since the F1 question is whether a CLIENT can issue the same command
+/// against the server's resources.
+fn rcr_stream(st: &mut Vec<u32>, src_res: u32, dst_res: u32, w: u32) {
     st.push(cmd0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RCR_SIZE));
     st.push(dst_res);
     st.push(0); // dst level
@@ -1302,9 +2542,39 @@ fn rcr_stream(st: &mut Vec<u32>, src_res: u32, dst_res: u32) {
     st.push(0); // src x
     st.push(0); // src y
     st.push(0); // src z
-    st.push(1); // src w
+    st.push(w); // src w
     st.push(1); // src h
     st.push(1); // src d
+}
+
+/// Mint a BUFFER BO of `PROBE_BUF_BYTES` -- the shape the server's probe
+/// pairs have -- and return `(bo_id, res_id, mapped_va)`.
+fn mint_buffer_bo(root: i64, ctx: u32, what: &str) -> (u32, u32, u64) {
+    let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+        Some(v) => v,
+        None => fail(&format!("{}: bo/new", what)),
+    };
+    let create = format!(
+        "create3d {} {} {} {} 1 1 1 0 0 0 {}",
+        PIPE_BUFFER, VIRGL_FORMAT_R8_UNORM, VIRGL_BIND_VERTEX_BUFFER, PROBE_BUF_BYTES, PROBE_BUF_BYTES
+    );
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &create) {
+        fail(&format!("{}: buffer create3d", what));
+    }
+    let res = parse_field(&open_read_string(root, &format!("ctx/{}/bo/{}/info", ctx, bo)), "res")
+        .unwrap_or_else(|| fail(&format!("{}: info `res`", what))) as u32;
+    let map_fd = unsafe {
+        let p = format!("ctx/{}/bo/{}/map", ctx, bo);
+        t_open(root, p.as_ptr(), p.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        fail(&format!("{}: map open", what));
+    }
+    let va = unsafe { t_weft_map(map_fd as u64, 0) };
+    if va < 0 {
+        fail(&format!("{}: weft_map", what));
+    }
+    (bo, res, va as u64)
 }
 
 /// A readback that REPORTS instead of failing -- `resample` aborts the run
@@ -2070,4 +3340,1010 @@ fn prove_corpse_reclaim(root: i64) {
         2 * (cap + 1),
         cap
     ));
+}
+
+// --- Warp-C C-6: the compositor readback arm (GPU-DESIGN 4.5.13) -----------
+//
+// `warp-prove readback`. The composed-GL present's READBACK arm -- taken for
+// every adopted BO the blit arm cannot compose -- used to pull the frame
+// host->guest SYNCHRONOUSLY on the console's dispatch thread, so the console
+// waited for everything the client had queued ahead of it (C-0d Fable F2).
+// C-6 makes it a fenced readback with a DEFERRED completion. This leg
+// constructs the state F2 named (a non-composable BO adopted by a hosted
+// surface; the owning ctx with a DEEP queue) and asserts what C-6 actually
+// changes, each arm named so INCOMPLETE(<arm>) can say which:
+//
+//   ARM       the arm is the one under test: a present of the adoption on an
+//             idle queue ISSUES a compositor readback and it LANDS (`comp-rb`
+//             on the warp ctl); a composable BO would take the blit arm and
+//             prove nothing (`composed gpu` moving instead is INCOMPLETE).
+//   DEEP      the positive control that the queue was deep, per round: the
+//             readback the device paid waited >= RB_DEEP_MS (`cost
+//             readback-wait`) AND observed the queue's LAST draw (the BLUE
+//             byte of the pixel it landed names the draw index). Without it
+//             LIVE below is satisfied by a light queue.
+//   LIVE      the console's dispatch did not wait for the readback: per
+//             round, the present that ISSUES the compositor readback of a
+//             deep queue returns inside RB_LIVE_MS. Under the pre-C-6 arm
+//             that present returns after the whole wait. The presents and
+//             ctl reads DURING the flight are REPORTED (FLIGHT REPORT), not
+//             judged: another client's sync step in that window inherits the
+//             device stall on QEMU/virgl and the single-threaded loop waits
+//             there for everyone (4.5.13 consequence 2 -- the console
+//             renderer's cursor blink is one such step; run 4 measured it).
+//   DEADLINE  F2b's guest-side half: with a client's OWN fenced readback of
+//             its busy BO in flight, the console's next sync steps inherit
+//             the device stall (QEMU processes the controlq inline; the
+//             readback is a synchronous GL wait) -- and that stall must be
+//             read as BUSY, never as dead: every present of the bystander
+//             surface B queued behind it SUCCEEDS, and the engine is alive
+//             after. Under the 500 ms deadline a stall past it latched
+//             `dead` and lost the console's GPU.
+//   F2B       REPORTED, not judged: B's present latency behind that stall
+//             (max / mean over the presents), the number that Venus / v3d
+//             will remove and that no guest-side change can (4.5.13).
+//
+// Prints `C6-READBACK DONE` iff every verdict arm passed, else
+// `C6-READBACK INCOMPLETE(<arm>)`; warp-readback.exp hard-fails on the
+// latter and on the prover's own `FAIL --`.
+
+const VIRGL_RESOURCE_Y_0_TOP: u32 = 1 << 0;
+const RB_W: u32 = 512;
+const RB_H: u32 = 512;
+/// Why the heavy load is DRAWS on the client's context -- three Pi runs'
+/// worth of finding. Run 1 queued 800 1:1 NEAREST full-frame blits: they
+/// "retired" in 16 ms -- vrend takes the `glCopyImageSubData` shortcut for
+/// that shape (1.1.0 `vrend_renderer_blit`), not GPU work the readback
+/// waits on. Run 2 made them SCALED: 8 submits retired in 1335 ms, real
+/// work -- and the compositor readback of the same BO waited 84 ms, because
+/// a scaled blit runs on vrend's separate BLITTER GL context
+/// (`vrend_blitter.c`) and neither the client-context fences nor a
+/// client-context `glReadPixels` are ordered behind another context. Run 3
+/// alternated full-surface CLEARS between two framebuffers: the readback
+/// observed the LAST clear (the mechanism is right) but 1280 clears retired
+/// in 122 ms -- mesa v3d keys jobs by framebuffer (`v3d_get_job`), an FBO
+/// switch does not flush, and the clears folded into two jobs. Only draws
+/// cannot be elided, folded, or moved off the context -- and a real
+/// client's queue IS draws.
+/// The deep-queue witness floor (ms): a compositor readback that waited less
+/// than this read a queue that was not deep, and LIVE proved nothing.
+const RB_DEEP_MS: u64 = 100;
+/// The dispatch budget (ms) while a readback is in flight: a present or a
+/// ctl read answered slower than this WAITED for the device.
+const RB_LIVE_MS: u64 = 50;
+/// Full-screen-triangle DRAWS per heavy submit (SET_CONSTANT_BUFFER + DRAW_VBO
+/// = 20 dwords each; 300 = 24 KiB, inside one Twrite) and the submits per
+/// phase. `WARP_CTX_FENCE_MAX` = 8 is the share, so LIVE queues 8 (the
+/// compositor readback rides the reserved slot, outside the share) and
+/// DEADLINE queues 7 + the client's own readback.
+const RB_DRAWS_PER_SUBMIT: usize = 300;
+/// Full-screen triangles per draw (see the vertex-buffer comment). Six, and
+/// FOUR submits rather than eight: the same GPU depth (~1.2 s on V3D) with
+/// half the Twrites -- the send phase is the leg's exposure to another
+/// client's present landing while the queue is deep (see `constructed`).
+const RB_TRIS: usize = 6;
+/// The draw-state object handles (surfaces 1 and 2 are the clear legs').
+const RB_H_VS: u32 = 10;
+const RB_H_FS: u32 = 11;
+const RB_H_VE: u32 = 12;
+const RB_H_BLEND: u32 = 13;
+const RB_H_DSA: u32 = 14;
+const RB_H_RS: u32 = 15;
+const VIRGL_CCMD_BIND_OBJECT: u32 = 2;
+const VIRGL_CCMD_SET_VIEWPORT_STATE: u32 = 4;
+const VIRGL_CCMD_SET_VERTEX_BUFFERS: u32 = 6;
+const VIRGL_CCMD_DRAW_VBO: u32 = 8;
+const VIRGL_CCMD_SET_CONSTANT_BUFFER: u32 = 12;
+const VIRGL_CCMD_BIND_SHADER: u32 = 31; // SET_SUB_CTX 28, CREATE 29, DESTROY 30, BIND_SHADER 31
+const VIRGL_OBJECT_BLEND: u32 = 1;
+const VIRGL_OBJECT_RASTERIZER: u32 = 2;
+const VIRGL_OBJECT_DSA: u32 = 3;
+const VIRGL_OBJECT_SHADER: u32 = 4;
+const VIRGL_OBJECT_VERTEX_ELEMENTS: u32 = 5;
+const VIRGL_SHADER_VERTEX: u32 = 0;
+const VIRGL_SHADER_FRAGMENT: u32 = 1;
+const VIRGL_FORMAT_R32G32B32A32_FLOAT: u32 = 31;
+const MESA_PRIM_TRIANGLES: u32 = 4;
+const RB_LIVE_SUBMITS: usize = 4;
+/// LIVE/DEEP rounds: one issuing present per deep queue, repeated; a round
+/// whose sends were blocked (the readback issued with less than the floor
+/// of queue left) is UNCONSTRUCTED and retried, up to RB_LIVE_ATTEMPTS.
+const RB_LIVE_ROUNDS: usize = 3;
+const RB_LIVE_ATTEMPTS: usize = 7;
+const RB_DEADLINE_SUBMITS: usize = 4;
+/// Bound on waiting for a readback to land: FENCE_ABANDON_MS is 30 s.
+const RB_LAND_BOUND_MS: u64 = 35_000;
+
+/// Read a ctl file whole (offset-continued): the tapestry ctl's cost census
+/// runs past the 512-byte single read the other legs take.
+fn open_read_all(root: i64, path: &str) -> String {
+    let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OREAD) };
+    if fd < 0 {
+        fail(&format!("readback: open {} for read", path));
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 512];
+    for _ in 0..16 {
+        let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+        if n <= 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+        if (n as usize) < buf.len() {
+            break;
+        }
+    }
+    unsafe { t_close(fd) };
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `cost <kind> n sum_us max_us` off the tapestry ctl.
+fn cost_line(s: &str, kind: &str) -> Option<(u64, u64, u64)> {
+    let key = format!("cost {} ", kind);
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix(key.as_str()) {
+            let mut it = rest.split_ascii_whitespace();
+            let n = it.next()?.parse().ok()?;
+            let sum = it.next()?.parse().ok()?;
+            let max = it.next()?.parse().ok()?;
+            return Some((n, sum, max));
+        }
+    }
+    None
+}
+
+/// The two-token census `composed gpu N cpu M`.
+fn composed_census(s: &str) -> Option<(u64, u64)> {
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("composed gpu ") {
+            let mut it = rest.split_ascii_whitespace();
+            let g = it.next()?.parse().ok()?;
+            if it.next()? != "cpu" {
+                return None;
+            }
+            let c = it.next()?.parse().ok()?;
+            return Some((g, c));
+        }
+    }
+    None
+}
+
+/// The tapestry cost census counts that name OTHER console work: presents
+/// by arm (slot / cpu / bo), transfers, pushes, flushes, health steps.
+fn others_census(s: &str) -> [u64; 7] {
+    let n = |k: &str| cost_line(s, k).map_or(0, |(n, _, _)| n);
+    [
+        n("present-composed-slot"),
+        n("present-composed-cpu"),
+        n("present-composed-bo"),
+        n("xfer"),
+        n("push"),
+        n("flush"),
+        n("health"),
+    ]
+}
+
+struct RbCensus {
+    issued: u64,
+    landed: u64,
+    coalesced: u64,
+    abandoned: u64,
+    slot: u64,
+}
+
+fn rb_census(warp: i64) -> Option<RbCensus> {
+    let s = open_read_all(warp, "ctl");
+    Some(RbCensus {
+        issued: parse_field(&s, "rb-issued")?,
+        landed: parse_field(&s, "rb-landed")?,
+        coalesced: parse_field(&s, "rb-coalesced")?,
+        abandoned: parse_field(&s, "rb-abandoned")?,
+        slot: parse_field(&s, "rb-slot")?,
+    })
+}
+
+fn rb_incomplete(arm: &str) -> ! {
+    t_putstr(&format!("warp-prove: C6-READBACK INCOMPLETE({})\n", arm));
+    unsafe { t_exits(0) }
+}
+
+/// Mint a W x H B8G8R8A8 render-target BO with `flags` (Y_0_TOP makes it
+/// NON-composable -- the readback arm's shape) and return (bo, res, va).
+/// Mint a BO declaring `w`x`h` but backed by `size` bytes -- the shape the
+/// follow-up round's F1 turned on. The create-time door has NO lower bound
+/// (deliberately: Mesa's staging and MSAA paths declare one page for a real
+/// texture), so this SUCCEEDS at create3d. The refusal that matters happens
+/// later, at the READ gate in `gl_adoption`.
+///
+/// Deliberately does NOT open `map`: `b.dma_fd` is set SERVER-side inside
+/// `wbo_create`, not by the client's map, so this BO still passes
+/// `gl_adoption`'s `dma_fd >= 0` arm and the ONLY difference from the control
+/// is `b.size`. If it refused on `dma_fd` instead, the leg would pass for the
+/// wrong reason. (`gl_adoption` also pins `b.w == s.w && b.h == s.h`; if the
+/// surface geometry ever diverges from RB_W/RB_H the CONTROL fails too and the
+/// leg reports INSTRUMENT rather than a false PASS.)
+fn mint_bo_wh_sized(root: i64, ctx: u32, w: u32, h: u32, flags: u32, size: u32, what: &str) -> u32 {
+    let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+        Some(v) => v,
+        None => fail(&format!("readback: bo/new for {}", what)),
+    };
+    let create = format!(
+        "create3d {} {} {} {} {} 1 1 0 0 {} {}",
+        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET, w, h, flags, size
+    );
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &create) {
+        fail(&format!("readback: create3d for {} (the door must ADMIT this)", what));
+    }
+    bo
+}
+
+fn mint_bo_wh(root: i64, ctx: u32, w: u32, h: u32, flags: u32, what: &str) -> (u32, u32, u64) {
+    let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+        Some(v) => v,
+        None => fail(&format!("readback: bo/new for {}", what)),
+    };
+    let create = format!(
+        "create3d {} {} {} {} {} 1 1 0 0 {} {}",
+        PIPE_TEXTURE_2D,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+        VIRGL_BIND_RENDER_TARGET,
+        w,
+        h,
+        flags,
+        w * h * 4
+    );
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &create) {
+        fail(&format!("readback: create3d for {}", what));
+    }
+    let res = parse_field(&open_read_string(root, &format!("ctx/{}/bo/{}/info", ctx, bo)), "res")
+        .unwrap_or_else(|| fail(&format!("readback: info `res` for {}", what))) as u32;
+    let map_fd = unsafe {
+        let p = format!("ctx/{}/bo/{}/map", ctx, bo);
+        t_open(root, p.as_ptr(), p.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        fail(&format!("readback: map open for {}", what));
+    }
+    let va = unsafe { t_weft_map(map_fd as u64, 0) };
+    if va < 0 {
+        fail(&format!("readback: weft_map for {}", what));
+    }
+    (bo, res, va as u64)
+}
+
+/// SET_FRAMEBUFFER_STATE(cbuf0 = `surf`) -- the surface object must exist.
+fn fb_state_stream(st: &mut Vec<u32>, surf: u32) {
+    st.push(cmd0(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, 3));
+    st.push(1); // nr_cbufs
+    st.push(0); // zsurf
+    st.push(surf);
+}
+
+/// CREATE_OBJECT(SHADER): the header + the TGSI text, encoded exactly as
+/// Mesa's `virgl_encode_shader_state` does for a shader that fits one
+/// packet (offset field = the whole text length incl. NUL, no CONT bit;
+/// zero stream-out outputs; the text zero-padded to dwords).
+fn shader_stream(st: &mut Vec<u32>, handle: u32, stage: u32, text: &str, num_tokens: u32) {
+    let bytes = text.len() + 1; // incl. NUL
+    let ndw = (bytes + 3) / 4;
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_SHADER, (5 + ndw) as u32));
+    st.push(handle);
+    st.push(stage);
+    st.push(bytes as u32); // VIRGL_OBJ_SHADER_OFFSET_VAL(total len)
+    st.push(num_tokens);
+    st.push(0); // so num outputs
+    let mut buf: Vec<u8> = text.as_bytes().to_vec();
+    buf.push(0);
+    while buf.len() % 4 != 0 {
+        buf.push(0);
+    }
+    for c in buf.chunks(4) {
+        st.push(u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+    }
+}
+
+/// The draw state, once per ctx: shaders + vertex elements + blend / dsa /
+/// rasterizer objects, bound; the vertex buffer (a full-screen triangle in
+/// clip space, uploaded by the caller); the viewport. Layouts per
+/// `virgl_protocol.h` and Mesa's `virgl_encode.c` (the tree at
+/// ../mesa-thylacine), field for field.
+fn draw_state_stream(st: &mut Vec<u32>, vbo_res: u32, w: u32, h: u32) {
+    shader_stream(
+        st,
+        RB_H_VS,
+        VIRGL_SHADER_VERTEX,
+        "VERT\nDCL IN[0]\nDCL OUT[0], POSITION\n  0: MOV OUT[0], IN[0]\n  1: END\n",
+        64,
+    );
+    shader_stream(
+        st,
+        RB_H_FS,
+        VIRGL_SHADER_FRAGMENT,
+        "FRAG\nDCL OUT[0], COLOR\nDCL CONST[0]\n  0: MOV OUT[0], CONST[0]\n  1: END\n",
+        64,
+    );
+    // vertex elements: one vec4 float attribute from buffer 0
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 5));
+    st.push(RB_H_VE);
+    st.push(0); // src_offset
+    st.push(0); // instance_divisor
+    st.push(0); // vertex_buffer_index
+    st.push(VIRGL_FORMAT_R32G32B32A32_FLOAT);
+    // blend: rt0 colormask RGBA, nothing else
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_BLEND, 8 + 3));
+    st.push(RB_H_BLEND);
+    st.push(0); // S0
+    st.push(0); // S1
+    st.push(0xf << 27); // S2 rt0: colormask 0xf
+    for _ in 1..8 {
+        st.push(0);
+    }
+    // dsa: everything off
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5));
+    st.push(RB_H_DSA);
+    st.push(0); // S0
+    st.push(0); // S1 stencil 0
+    st.push(0); // S1 stencil 1
+    st.push(0); // alpha ref
+    // rasterizer: fill, no cull, half-pixel-center + bottom-edge-rule (GL)
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_RASTERIZER, 9));
+    st.push(RB_H_RS);
+    st.push((1 << 1) | (1 << 29) | (1 << 30)); // S0: depth_clip, half_pixel_center, bottom_edge_rule
+    st.push(1.0f32.to_bits()); // point size
+    st.push(0); // sprite coord enable
+    st.push(0); // S3
+    st.push(1.0f32.to_bits()); // line width
+    st.push(0); // offset units
+    st.push(0); // offset scale
+    st.push(0); // offset clamp
+    // bind
+    st.push(cmd0(VIRGL_CCMD_BIND_SHADER, 0, 2));
+    st.push(RB_H_VS);
+    st.push(VIRGL_SHADER_VERTEX);
+    st.push(cmd0(VIRGL_CCMD_BIND_SHADER, 0, 2));
+    st.push(RB_H_FS);
+    st.push(VIRGL_SHADER_FRAGMENT);
+    st.push(cmd0(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 1));
+    st.push(RB_H_VE);
+    st.push(cmd0(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_BLEND, 1));
+    st.push(RB_H_BLEND);
+    st.push(cmd0(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_DSA, 1));
+    st.push(RB_H_DSA);
+    st.push(cmd0(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_RASTERIZER, 1));
+    st.push(RB_H_RS);
+    // vertex buffer 0: stride 16, offset 0, the raw device-global res id
+    st.push(cmd0(VIRGL_CCMD_SET_VERTEX_BUFFERS, 0, 3));
+    st.push(16);
+    st.push(0);
+    st.push(vbo_res);
+    // viewport 0: scale (w/2, h/2, 0.5) translate (w/2, h/2, 0.5)
+    st.push(cmd0(VIRGL_CCMD_SET_VIEWPORT_STATE, 0, 7));
+    st.push(0); // start slot
+    st.push((w as f32 / 2.0).to_bits());
+    st.push((h as f32 / 2.0).to_bits());
+    st.push(0.5f32.to_bits());
+    st.push((w as f32 / 2.0).to_bits());
+    st.push((h as f32 / 2.0).to_bits());
+    st.push(0.5f32.to_bits());
+}
+
+/// One full-screen draw: the FS colour from an inline constant buffer
+/// (SET_CONSTANT_BUFFER stage FS index 0, 4 floats), then DRAW_VBO of 3
+/// vertices, TRIANGLES.
+fn draw_stream(st: &mut Vec<u32>, r: f32, g: f32, b: f32) {
+    st.push(cmd0(VIRGL_CCMD_SET_CONSTANT_BUFFER, 0, 6));
+    st.push(VIRGL_SHADER_FRAGMENT);
+    st.push(0); // index
+    st.push(r.to_bits());
+    st.push(g.to_bits());
+    st.push(b.to_bits());
+    st.push(1.0f32.to_bits());
+    st.push(cmd0(VIRGL_CCMD_DRAW_VBO, 0, 12));
+    st.push(0); // start
+    st.push((RB_TRIS * 3) as u32); // count
+    st.push(MESA_PRIM_TRIANGLES);
+    st.push(0); // indexed
+    st.push(1); // instance count
+    st.push(0); // index bias
+    st.push(0); // start instance
+    st.push(0); // primitive restart
+    st.push(0); // restart index
+    st.push(0); // min index
+    st.push(0xffff_ffff); // max index
+    st.push(0); // count from so
+}
+
+/// The draw index encoded in the adopted BO's colour: draw `idx` of `total`
+/// paints A (0, 1, (idx+1)/total) -- so the BLUE byte of any later readback
+/// of A names the LAST draw that readback observed. `rb_index_of` decodes
+/// it (B8G8R8A8: blue is the low byte).
+fn rb_clear_color(idx: usize, total: usize) -> f32 {
+    ((idx + 1) as f32) / (total as f32)
+}
+fn rb_index_of(px: u32, total: usize) -> i64 {
+    let b = (px & 0xff) as f32 / 255.0;
+    (b * total as f32 + 0.5) as i64 - 1
+}
+
+/// Queue `n` heavy submits on `ctx`: each RB_DRAWS_PER_SUBMIT full-screen
+/// draws into the adopted BO (the framebuffer re-set at the head of each
+/// submit), the colour index-encoded -- real rasterization on the CLIENT's
+/// GL context that WRITES the adopted resource, ordered before any fence or
+/// readback on that context, and nothing the driver can fold. Returns
+/// (fence-signaled before the first submit, the Instant of the first).
+fn rb_queue_heavy(
+    root: i64,
+    ctx: u32,
+    n: usize,
+    what: &str,
+) -> (u64, libthyla_rs::time::Instant) {
+    let before = ctx_field(root, ctx, "fence-signaled");
+    let t0 = libthyla_rs::time::Instant::now();
+    let total = n * RB_DRAWS_PER_SUBMIT;
+    for i in 0..n {
+        let mut st: Vec<u32> = Vec::new();
+        fb_state_stream(&mut st, 1);
+        for k in 0..RB_DRAWS_PER_SUBMIT {
+            let idx = i * RB_DRAWS_PER_SUBMIT + k;
+            draw_stream(&mut st, 0.0, 1.0, rb_clear_color(idx, total));
+        }
+        submit_stream(root, ctx, &st, &format!("{} heavy submit {}", what, i));
+    }
+    guard_not_poisoned(root, what);
+    (before, t0)
+}
+
+/// Wait until this ctx's fence-signaled has advanced by `n` (bounded);
+/// returns the wall since `t0` when it did -- the queue's own retire time,
+/// the diagnostic that says whether a queue existed at all.
+fn rb_wait_signaled(
+    root: i64,
+    ctx: u32,
+    before: u64,
+    n: u64,
+    t0: libthyla_rs::time::Instant,
+    what: &str,
+) -> u64 {
+    let tw = libthyla_rs::time::Instant::now();
+    loop {
+        if ctx_field(root, ctx, "fence-signaled") >= before + n {
+            return t0.elapsed().as_millis() as u64;
+        }
+        if ctx_field(root, ctx, "poisoned") != 0 {
+            rb_incomplete(&format!("poisoned:{}", what));
+        }
+        if tw.elapsed().as_millis() as u64 > RB_LAND_BOUND_MS {
+            rb_incomplete(&format!("fences-never-landed:{}", what));
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+    }
+}
+
+fn observe_readback() {
+    use tapestry::Surface;
+    t_putstr("warp-prove: C6-READBACK starting (the compositor readback arm under a deep queue)\n");
+
+    // The two console-side surfaces. A hosts the GL adoption (the readback
+    // arm's target); B is the plain 2D bystander whose presents queue behind
+    // the device. Both are ordinary tapestry clients of this process (one
+    // conn each -- libtapestry opens per surface).
+    let mut a = match Surface::open(RB_W, RB_H) {
+        Ok(s) => s,
+        Err(_) => rb_incomplete("instrument:surface-a"),
+    };
+    let mut b = match Surface::open(256, 256) {
+        Ok(s) => s,
+        Err(_) => rb_incomplete("instrument:surface-b"),
+    };
+    for px in b.pixels().iter_mut() {
+        *px = 0xFF20_4060;
+    }
+    if b.present(None).is_err() {
+        rb_incomplete("instrument:present-b");
+    }
+
+    // The warp side: one ctx, the adopted BO (Y_0_TOP: NOT composable, so
+    // the blit arm cannot take it -- `composable` in tapestryd) and a
+    // same-shape scratch partner for the heavy blits.
+    let warp = warp_connect("readback");
+    let ctx = mint_ctx(warp, "readback");
+    let (bo, res, va) = mint_bo_wh(warp, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "adopted");
+    // The vertex buffer: one clip-space full-screen triangle, uploaded
+    // through the fenced transfer verb (the C0-F1 leg's buffer shape).
+    let (vbo, vbo_res, vbo_va) = mint_buffer_bo(warp, ctx, "readback vbo");
+    {
+        // RB_TRIS full-screen triangles per draw (the same clip-space
+        // triangle RB_TRIS times): RB_TRIS x the fill per DRAW_VBO at the
+        // same stream size, so the queue is deep enough that the stall
+        // remaining when the readback is issued -- after the ~130-290 ms
+        // the eight 24 KiB Twrites themselves take -- clears the DEEP floor
+        // with margin (run 5: a 415 ms queue left 88 ms once).
+        let tri: [f32; 12] = [-1.0, -1.0, 0.0, 1.0, 3.0, -1.0, 0.0, 1.0, -1.0, 3.0, 0.0, 1.0];
+        for t in 0..RB_TRIS {
+            for (i, v) in tri.iter().enumerate() {
+                unsafe {
+                    core::ptr::write_volatile((vbo_va + ((t * 12 + i) as u64) * 4) as *mut u32, v.to_bits())
+                };
+            }
+        }
+        let before = ctx_field(warp, ctx, "fence-signaled");
+        let up = format!("transfer_to 0 0 0 0 {} 1 1 0 0 0", RB_TRIS * 48);
+        if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, vbo), &up) {
+            rb_incomplete("instrument:vbo-upload");
+        }
+        let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "vbo-upload");
+    }
+    let tap = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
+    if tap < 0 {
+        rb_incomplete("instrument:tapestry-ctl");
+    }
+    if rb_census(warp).is_none() {
+        // A pre-C-6 tapestryd carries no `rb-*` census: ABSENT, not 0.
+        rb_incomplete("instrument:comp-rb");
+    }
+    if cost_line(&open_read_all(tap, "ctl"), "readback-wait").is_none() {
+        rb_incomplete("instrument:readback-wait");
+    }
+
+    // The mutual adoption: the surface names the ctx, the ctx consents
+    // naming the surface incarnation + BO back.
+    if a.surface_ctl(&format!("glsrc {}", ctx)).is_err() {
+        rb_incomplete("instrument:glsrc");
+    }
+    if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), &format!("present-to {} {}", a.id, bo)) {
+        rb_incomplete("instrument:present-to");
+    }
+
+    // FOLLOW-UP ROUND F1's owed regression, at the gate that actually carries
+    // it. The C-6b close guarded the read-overrun at the create-time DOOR and
+    // that brace was removed -- it refused legitimate Mesa staging/MSAA
+    // resources, which declare one page for a real texture. The bound lives at
+    // the READ gate (`gl_adoption`: `b.size >= b.w * b.h * 4`), so that is
+    // where the test has to look.
+    //
+    // Asserting the door would prove nothing now, and asserting "it did not
+    // crash" proves nothing ever. The observable is `rb-issued`: an adoption
+    // the read gate refuses issues NO compositor readback. The CONTROL is the
+    // correctly-backed BO one variable away -- without it this leg passes just
+    // as well against a compositor that never issues a readback at all, and
+    // "the undersized one was refused" would be true for the wrong reason.
+    let guard_pass = {
+        let short_bo = mint_bo_wh_sized(
+            warp, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, 4096, "undersized",
+        );
+        let i0 = match rb_census(warp) { Some(c) => c.issued, None => rb_incomplete("instrument:guard-census") };
+        if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), &format!("present-to {} {}", a.id, short_bo)) {
+            rb_incomplete("instrument:guard-present-to");
+        }
+        if a.present(None).is_err() {
+            rb_incomplete("instrument:guard-present");
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(200));
+        let i1 = match rb_census(warp) { Some(c) => c.issued, None => rb_incomplete("instrument:guard-census") };
+
+        // Restore the correctly-backed adoption and prove the SAME sequence
+        // does move it -- so the negative above is about the SIZE and not
+        // about presents being inert here.
+        if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), &format!("present-to {} {}", a.id, bo)) {
+            rb_incomplete("instrument:guard-restore");
+        }
+        if a.present(None).is_err() {
+            rb_incomplete("instrument:guard-present2");
+        }
+        let mut i2 = i1;
+        for _ in 0..40 {
+            let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+            i2 = match rb_census(warp) { Some(c) => c.issued, None => rb_incomplete("instrument:guard-census") };
+            if i2 > i1 { break; }
+        }
+        if i1 != i0 {
+            t_putstr(&format!(
+                "warp-prove: C6-RB GUARD FAIL -- the compositor issued a readback ({}->{}) of a \
+                 BO declaring {}x{} backed by 4096 bytes; the read gate did not refuse it and \
+                 the compose would read {} bytes out of one page (round F1)\n",
+                i0, i1, RB_W, RB_H, RB_W * RB_H * 4
+            ));
+            false
+        } else if i2 <= i1 {
+            t_putstr(
+                "warp-prove: C6-RB GUARD INSTRUMENT -- the CONTROL never issued either; presents \
+                 are not reaching the readback arm at all, so the refusal above means nothing\n",
+            );
+            false
+        } else {
+            // QUIESCE before returning. The control above leaves a readback IN
+            // FLIGHT, and the ARM leg that runs next asserts `landed >
+            // c0.landed` after its own present -- which OUR readback landing
+            // would satisfy. A leg that leaves work in flight makes the next
+            // leg pass for the wrong reason; drain it here rather than hope
+            // the ordering holds.
+            for _ in 0..40 {
+                let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+                // `rb-slot` IS the in-flight signal (0 free / 1 busy / 2
+                // poisoned) -- a terminal-count comparison would need
+                // `rb-dropped`, which this census struct does not carry.
+                match rb_census(warp) {
+                    Some(c) if c.slot == 0 => break,
+                    Some(_) => {}
+                    None => rb_incomplete("instrument:guard-census"),
+                }
+            }
+            t_putstr(&format!(
+                "warp-prove: C6-RB GUARD PASS -- an undersized adoption issued NO readback \
+                 (rb-issued {} unchanged) while the correctly-backed twin issued one ({}->{}) \
+                 through the SAME present: the read gate discriminates on SIZE\n",
+                i0, i1, i2
+            ));
+            true
+        }
+    };
+    if !guard_pass {
+        rb_incomplete("guard");
+    }
+
+    // Prime the stream (sub-ctx + a surface over the BO + one clear + the
+    // whole draw state), so the BO holds a frame and vrend's context state
+    // exists before the heavy draws. Then ask the #240 detector: a stream
+    // vrend REJECTS is accepted, its fences retire, and nothing runs -- so
+    // an illegal prime would read as a light queue three arms later
+    // instead of naming itself here.
+    {
+        let before = ctx_field(warp, ctx, "fence-signaled");
+        let mut st: Vec<u32> = Vec::new();
+        subctx_preamble(&mut st);
+        clear_stream(&mut st, res, 1, 1.0, 0.0, 0.0);
+        draw_state_stream(&mut st, vbo_res, RB_W, RB_H);
+        submit_stream(warp, ctx, &st, "readback prime");
+        guard_not_poisoned(warp, "readback prime");
+        let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "prime");
+        if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), "verify") {
+            rb_incomplete("instrument:verify-refused");
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        let c = open_read_string(warp, &format!("ctx/{}/ctl", ctx));
+        let rejected = parse_field(&c, "stream-rejected").unwrap_or(99);
+        let ok = parse_field(&c, "verify-ok").unwrap_or(0);
+        if rejected != 0 || ok == 0 {
+            t_putstr(&format!(
+                "warp-prove: C6-RB PRIME -- stream-rejected {} verify-ok {}: the draw-state stream was refused by vrend (illegal encoding), nothing downstream can run\n",
+                rejected, ok
+            ));
+            rb_incomplete("prime-rejected");
+        }
+    }
+    // Let the compositor settle: B's present may have issued a deferred
+    // health read (HEALTH_PERIOD ticks later); a sync step of the console's
+    // own during LIVE would inherit the stall and be read as the console
+    // waiting.
+    let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(2000));
+
+    let mut verdict_ok = true;
+    let mut first_bad: Option<&'static str> = None;
+    let mut record = |ok: bool, arm: &'static str| {
+        if !ok {
+            verdict_ok = false;
+            if first_bad.is_none() {
+                first_bad = Some(arm);
+            }
+        }
+    };
+
+    // ---- ARM: a present of the adoption on an IDLE queue issues + lands.
+    let c0 = rb_census(warp).unwrap();
+    let (g0, _cpu0) = composed_census(&open_read_all(tap, "ctl")).unwrap_or((0, 0));
+    if a.present(None).is_err() {
+        rb_incomplete("instrument:present-a");
+    }
+    let t0 = libthyla_rs::time::Instant::now();
+    let mut arm_ok = false;
+    let mut composable = false;
+    while t0.elapsed().as_millis() < 5000 {
+        let c = rb_census(warp).unwrap();
+        if c.landed > c0.landed {
+            arm_ok = true;
+            break;
+        }
+        let (g, _) = composed_census(&open_read_all(tap, "ctl")).unwrap_or((0, 0));
+        if g > g0 && c.issued == c0.issued {
+            composable = true;
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+    }
+    if composable {
+        t_putstr("warp-prove: C6-RB ARM FAIL -- the adopted BO was GPU-composed (blit arm), not read back\n");
+        rb_incomplete("bo-composable");
+    }
+    let c1 = rb_census(warp).unwrap();
+    t_putstr(&format!(
+        "warp-prove: C6-RB ARM {} -- idle-queue present: comp-rb issued {}->{} landed {}->{}\n",
+        if arm_ok { "PASS" } else { "FAIL" },
+        c0.issued, c1.issued, c0.landed, c1.landed
+    ));
+    if !arm_ok {
+        rb_incomplete("arm-never-landed");
+    }
+    record(true, "arm");
+
+    // ---- LIVE + DEEP, RB_LIVE_ROUNDS times: a deep queue, then the present
+    // that ISSUES the compositor readback -- timed -- then the flight
+    // watched until the readback lands. LIVE is the issuing present's own
+    // latency: under the pre-C-6 arm it IS the wait (the whole queue);
+    // under C-6 it publishes a fenced command and returns. The presents and
+    // ctl reads DURING the flight are reported, not judged: any other
+    // client's sync step in that window (the console renderer's ~2 Hz
+    // cursor blink is one) inherits the device stall on QEMU/virgl and the
+    // single-threaded loop waits there for everyone -- consequence 2 of
+    // GPU-DESIGN 4.5.13, F2b's territory, and run 4 of this leg measured
+    // exactly that (a 140 ms second present inside a 168 ms flight).
+    let mut deep_ok = true;
+    let mut live_ok = true;
+    let mut flight_present_max = 0u64;
+    let mut flight_ctl_max = 0u64;
+    let mut rounds_done = 0usize;
+    let mut unconstructed = 0usize;
+    let total = RB_LIVE_SUBMITS * RB_DRAWS_PER_SUBMIT;
+    for attempt in 0..RB_LIVE_ATTEMPTS {
+        if rounds_done >= RB_LIVE_ROUNDS {
+            break;
+        }
+        let round = attempt;
+        // Sentinel the pixel the compositor readback will overwrite: after
+        // it lands, the BLUE byte names the last draw the readback observed.
+        unsafe { core::ptr::write_volatile(va as *mut u32, SENTINEL) };
+        let tap0 = open_read_all(tap, "ctl");
+        let (rw_n0, rw_sum0, _) = cost_line(&tap0, "readback-wait").unwrap();
+        let others0 = others_census(&tap0);
+        let (live_before, live_t0) = rb_queue_heavy(warp, ctx, RB_LIVE_SUBMITS, "live");
+        let cl = rb_census(warp).unwrap();
+        // The issue time is stamped BEFORE the present: the issue is the
+        // dispatch's first act, and a present that WAITS for the readback
+        // (the pre-C-6 arm; sabotage S1) must read as a slow issuing
+        // present, not as a readback issued late into a drained queue.
+        let issued_at_ms = live_t0.elapsed().as_millis() as u64;
+        let tp = libthyla_rs::time::Instant::now();
+        if a.present(None).is_err() {
+            rb_incomplete("instrument:present-a-live");
+        }
+        let first_ms = tp.elapsed().as_millis() as u64;
+        let mut max_present_ms = 0u64;
+        let mut max_ctl_ms = 0u64;
+        let mut presents = 0u64;
+        let mut slot_poisoned = false;
+        let tl = libthyla_rs::time::Instant::now();
+        let mut landed_seen = false;
+        let mut abandoned = false;
+        let mut fence_ms: [u64; RB_LIVE_SUBMITS] = [0; RB_LIVE_SUBMITS];
+        let mut fences_seen = 0usize;
+        let mut landed_at_ms = 0u64;
+        while (tl.elapsed().as_millis() as u64) < RB_LAND_BOUND_MS {
+            let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+            let t = libthyla_rs::time::Instant::now();
+            if a.present(None).is_err() {
+                rb_incomplete("instrument:present-a-loop");
+            }
+            let ms = t.elapsed().as_millis() as u64;
+            presents += 1;
+            if ms > max_present_ms {
+                max_present_ms = ms;
+            }
+            let t = libthyla_rs::time::Instant::now();
+            let c = rb_census(warp).unwrap();
+            let sig = ctx_field(warp, ctx, "fence-signaled");
+            let ms = t.elapsed().as_millis() as u64;
+            if ms > max_ctl_ms {
+                max_ctl_ms = ms;
+            }
+            let now_ms = live_t0.elapsed().as_millis() as u64;
+            while fences_seen < RB_LIVE_SUBMITS && sig >= live_before + fences_seen as u64 + 1 {
+                fence_ms[fences_seen] = now_ms;
+                fences_seen += 1;
+            }
+            if c.slot == 2 {
+                slot_poisoned = true;
+            }
+            if c.abandoned > cl.abandoned {
+                abandoned = true;
+                break;
+            }
+            if c.landed > cl.landed {
+                landed_seen = true;
+                landed_at_ms = now_ms;
+                break;
+            }
+        }
+        let observed_px = unsafe { core::ptr::read_volatile(va as *const u32) };
+        let observed_idx = if observed_px == SENTINEL { -2 } else { rb_index_of(observed_px, total) };
+        // The queue must be fully retired before the next round (and before
+        // any verdict that reads readback-wait, which is written at retire).
+        let queue_ms = rb_wait_signaled(warp, ctx, live_before, RB_LIVE_SUBMITS as u64, live_t0, "live");
+        let tap1 = open_read_all(tap, "ctl");
+        let (rw_n1, rw_sum1, _) = cost_line(&tap1, "readback-wait").unwrap();
+        let round_wait_ms = rw_sum1.saturating_sub(rw_sum0) / 1000;
+        let others1 = others_census(&tap1);
+        if abandoned {
+            t_putstr("warp-prove: C6-RB LIVE FAIL -- the compositor readback was ABANDONED (30 s)\n");
+            rb_incomplete("abandoned");
+        }
+        if !landed_seen {
+            t_putstr("warp-prove: C6-RB LIVE FAIL -- the compositor readback never landed inside the bound\n");
+            rb_incomplete("live-never-landed");
+        }
+        // CONSTRUCTED: the readback was issued while at least the floor of
+        // queue (plus slack) still lay ahead of it, by the queue's own
+        // retire clock. The sends can be blocked for the queue's remainder
+        // by another client's present landing behind it (its egl-headless
+        // flush is a screen readback queued behind the compositor's blit,
+        // behind the client's draws on V3D's one FIFO -- run 6 measured
+        // 478 / 794 / 1062 ms to send eight Twrites); a readback issued
+        // into a drained queue tests nothing and is retried, never judged.
+        let constructed = issued_at_ms + RB_DEEP_MS + 50 <= queue_ms;
+        if !constructed {
+            unconstructed += 1;
+            t_putstr(&format!(
+                "warp-prove: C6-RB ROUND {} UNCONSTRUCTED -- the readback was issued {} ms into a {} ms queue (sends blocked behind another client's present); retrying\n",
+                round, issued_at_ms, queue_ms
+            ));
+            continue;
+        }
+        rounds_done += 1;
+        // ROUND F8 [P3]: `round_wait_ms` was a SUM over `rw_n1 - rw_n0`
+        // retires asserted against a per-readback threshold -- a figure no
+        // single readback earned could satisfy it.
+        //
+        // The first cut of this fix required EXACTLY ONE retire per round and
+        // the gate went RED on a healthy build: measured here, every round
+        // retires TWO (`comp-rb landed 1->7` across three rounds). The flight
+        // loop's later presents each request a readback, and the pump issues
+        // the next the moment the first lands, so a second lands inside the
+        // same window. Requiring one was a claim about the mechanism's
+        // scheduling, not about the property under test -- and it was wrong.
+        //
+        // The MEAN is the honest statistic: a mean at or above the threshold
+        // implies at least one readback reached it, whatever the count, and
+        // it correctly rejects the case the sum admitted (one long readback
+        // plus one instant one averages below). The pixel witness stays --
+        // it is what proves the wait was on the queue's LAST draw rather than
+        // merely long.
+        let round_n = rw_n1.saturating_sub(rw_n0);
+        let round_mean_ms = if round_n > 0 { round_wait_ms / round_n } else { 0 };
+        let round_deep = round_n > 0 && round_mean_ms >= RB_DEEP_MS && observed_idx >= total as i64 - 2;
+        let round_live = first_ms < RB_LIVE_MS && !slot_poisoned;
+        deep_ok &= round_deep;
+        live_ok &= round_live;
+        if max_present_ms > flight_present_max {
+            flight_present_max = max_present_ms;
+        }
+        if max_ctl_ms > flight_ctl_max {
+            flight_ctl_max = max_ctl_ms;
+        }
+        t_putstr(&format!(
+            "warp-prove: C6-RB ROUND {} -- issuing present {} ms; readback issued at {} landed at {} (ms since the first heavy submit), observed draw {} of {} (pixel {:#010x}); readback-wait +{} ms over {} retires (mean {} ms); the {} heavy submits retired in {} ms, fences at {:?}; during the flight: {} presents max {} ms, ctl reads max {} ms; other console work this round: slot-presents +{} cpu-presents +{} bo-presents +{} xfers +{} pushes +{} flushes +{} health +{}; deep {} live {}\n",
+            round, first_ms, issued_at_ms, landed_at_ms, observed_idx, total, observed_px, round_wait_ms,
+            round_n, round_mean_ms,
+            RB_LIVE_SUBMITS, queue_ms, fence_ms, presents, max_present_ms, max_ctl_ms,
+            others1[0] - others0[0], others1[1] - others0[1], others1[2] - others0[2],
+            others1[3] - others0[3], others1[4] - others0[4], others1[5] - others0[5], others1[6] - others0[6],
+            round_deep as u32, round_live as u32
+        ));
+    }
+    let (_, _, rw_max_all) = cost_line(&open_read_all(tap, "ctl"), "readback-wait").unwrap();
+    let c2 = rb_census(warp).unwrap();
+    if rounds_done < RB_LIVE_ROUNDS {
+        t_putstr(&format!(
+            "warp-prove: C6-RB DEEP INSTRUMENT -- only {} of {} rounds could be constructed in {} attempts ({} unconstructed: the sends kept landing behind another client's present)\n",
+            rounds_done, RB_LIVE_ROUNDS, RB_LIVE_ATTEMPTS, unconstructed
+        ));
+        rb_incomplete("deep-unconstructed");
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB DEEP {} -- {} constructed rounds ({} unconstructed retried): the round's MEAN readback wait was >= {} ms -- so at least one readback in each round waited that long for its queue (readback-wait max {} ms) and observed the queue's LAST draw: the device paid the queue\n",
+        if deep_ok { "PASS" } else { "FAIL" },
+        rounds_done, unconstructed, RB_DEEP_MS, rw_max_all / 1000
+    ));
+    if !deep_ok {
+        // Diagnose the light queue: did vrend latch the stream off (#240 --
+        // submits accepted, fences retiring, nothing running), or did the
+        // work simply cost nothing? The detector answers the first.
+        let _ = write_ctl(warp, &format!("ctx/{}/ctl", ctx), "verify");
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        let c = open_read_string(warp, &format!("ctx/{}/ctl", ctx));
+        t_putstr(&format!(
+            "warp-prove: C6-RB DEEP diagnosis -- stream-rejected {} verify-seq {} verify-ok {} (a rejected stream retires its fences without running)\n",
+            parse_field(&c, "stream-rejected").unwrap_or(99),
+            parse_field(&c, "verify-seq").unwrap_or(99),
+            parse_field(&c, "verify-ok").unwrap_or(99)
+        ));
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB LIVE {} -- {} constructed rounds: the present that ISSUES the compositor readback of a deep queue returned inside {} ms every time (the pre-C-6 arm returns after the whole wait); comp-rb coalesced {}->{} landed {}->{}\n",
+        if live_ok { "PASS" } else { "FAIL" },
+        rounds_done, RB_LIVE_MS, c1.coalesced, c2.coalesced, c1.landed, c2.landed
+    ));
+    t_putstr(&format!(
+        "warp-prove: C6-RB FLIGHT REPORT -- while a compositor readback of a deep queue was in flight: the adopting surface's later presents max {} ms, warp ctl reads max {} ms (data: another client's sync step in that window inherits the device stall on this host and the loop waits there -- 4.5.13 consequence 2)\n",
+        flight_present_max, flight_ctl_max
+    ));
+    record(deep_ok, "deep");
+    record(live_ok, "live");
+
+    // ---- DEADLINE + F2B: the CLIENT's own fenced readback of its busy BO,
+    // then B's presents behind it. Every present must succeed (busy is not
+    // dead); their latency is REPORTED.
+    let (dl_before, dl_t0) = rb_queue_heavy(warp, ctx, RB_DEADLINE_SUBMITS, "deadline");
+    let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
+    if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &xfer) {
+        rb_incomplete("instrument:f2b-transfer-refused");
+    }
+    let mut b_ok = true;
+    let mut b_max_ms = 0u64;
+    let mut b_sum_ms = 0u64;
+    let b_n = 10u64;
+    for i in 0..b_n {
+        for px in b.pixels().iter_mut() {
+            *px = 0xFF00_0000 | (0x20 + 8 * i as u32);
+        }
+        let t = libthyla_rs::time::Instant::now();
+        let r = b.present(None);
+        let ms = t.elapsed().as_millis() as u64;
+        b_sum_ms += ms;
+        if ms > b_max_ms {
+            b_max_ms = ms;
+        }
+        if r.is_err() {
+            b_ok = false;
+            t_putstr(&format!("warp-prove: C6-RB DEADLINE -- B present {} FAILED after {} ms\n", i, ms));
+            break;
+        }
+    }
+    // The client's readback + the 7 submits retire; the engine must be alive.
+    let dl_queue_ms =
+        rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline");
+    let landed_px = unsafe { core::ptr::read_volatile(va as *const u32) };
+    let landed_idx = rb_index_of(landed_px, RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT);
+    let alive = b.present(None).is_ok();
+    let poisoned_after = parse_field(&open_read_string(warp, "ctl"), "poisoned").unwrap_or(99);
+    let deadline_ok = b_ok && alive && poisoned_after == 0;
+    t_putstr(&format!(
+        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback all succeeded: {}; engine alive after: {}; poisoned {}\n",
+        if deadline_ok { "PASS" } else { "FAIL" },
+        b_n, b_ok as u32, alive as u32, poisoned_after
+    ));
+    t_putstr(&format!(
+        "warp-prove: C6-RB F2B REPORT -- bystander present latency behind a client readback of a busy BO: max {} ms mean {} ms over {} presents; the {} heavy submits + the readback retired in {} ms (the client's readback observed draw index {} of {}, pixel {:#010x})\n",
+        b_max_ms, b_sum_ms / b_n, b_n, RB_DEADLINE_SUBMITS, dl_queue_ms, landed_idx, RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT, landed_px
+    ));
+    record(deadline_ok, "deadline");
+
+    // ---- Teardown: withdraw the adoption, destroy the ctx, drop the
+    // surfaces; the seam must be clean.
+    let _ = write_ctl(warp, &format!("ctx/{}/ctl", ctx), "present-to off");
+    let _ = a.surface_ctl("glsrc off");
+    if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), "destroy") {
+        fail("readback: ctx destroy");
+    }
+    let c_end = rb_census(warp).unwrap();
+    let poisoned_end = parse_field(&open_read_string(warp, "ctl"), "poisoned").unwrap_or(99);
+    drop(a);
+    drop(b);
+    unsafe {
+        t_close(tap);
+        t_close(warp);
+    }
+    if poisoned_end != 0 || c_end.slot == 2 {
+        t_putstr(&format!(
+            "warp-prove: C6-RB CLEAN FAIL -- poisoned {} rb-slot {} after teardown\n",
+            poisoned_end, c_end.slot
+        ));
+        record(false, "clean");
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB census at end -- issued {} landed {} coalesced {} rb-abandoned {} rb-slot {}\n",
+        c_end.issued, c_end.landed, c_end.coalesced, c_end.abandoned, c_end.slot
+    ));
+    if verdict_ok {
+        t_putstr("warp-prove: C6-READBACK DONE\n");
+    } else {
+        rb_incomplete(first_bad.unwrap_or("unknown"));
+    }
 }

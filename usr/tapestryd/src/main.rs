@@ -81,6 +81,12 @@ use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_W
 const GPU_BAR_WINDOW_VA: u64 = 0x0080_0000;
 const KBD_BAR_WINDOW_VA: u64 = 0x00E0_0000;
 const GPU_RING_VA: u64 = 0x0150_0000;
+// Warp-6 V-1: the one-page backing for the guest-blob probe, in the gap
+// between the ring's end and the keyboard DMA. Mapped only transiently inside
+// Gpu::probe (created, the blob unref'd, the page unmapped, all before probe
+// returns), so it never coexists with a steady-state mapping -- but it still
+// gets a non-overlapping fixed VA, asserted below.
+const GPU_BLOB_PROBE_VA: u64 = 0x0151_0000;
 const KBD_DMA_VA: u64 = 0x0152_0000;
 // The tablet's windows (G-7c): its eventq page above the keyboard's, its
 // 6-BAR window above the whole DMA region (the KBD-window..GPU-ring gap
@@ -128,7 +134,8 @@ const IDLE_AFTER_MS: u64 = 250;
 const _: () = {
     assert!(GPU_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= KBD_BAR_WINDOW_VA);
     assert!(KBD_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= GPU_RING_VA);
-    assert!(GPU_RING_VA + (gpu::RING_DMA_SIZE as u64) <= KBD_DMA_VA);
+    assert!(GPU_RING_VA + (gpu::RING_DMA_SIZE as u64) <= GPU_BLOB_PROBE_VA);
+    assert!(GPU_BLOB_PROBE_VA + 0x1000 <= KBD_DMA_VA); // one page
     assert!(KBD_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_DMA_VA);
     assert!(TAB_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= MOUSE_DMA_VA);
     assert!(MOUSE_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_BAR_WINDOW_VA);
@@ -198,7 +205,12 @@ impl Driver for Tapestryd {
         );
 
         // The GPU function is mandatory.
-        let g = gpu::Gpu::probe(GPU_BAR_WINDOW_VA, GPU_RING_VA, GPU_FLANE_VA)?;
+        let g = gpu::Gpu::probe(
+            GPU_BAR_WINDOW_VA,
+            GPU_RING_VA,
+            GPU_FLANE_VA,
+            GPU_BLOB_PROBE_VA,
+        )?;
 
         // The input functions are best-effort: an environment without them
         // (or without their functions in the gathered allowance) yields an
@@ -281,10 +293,38 @@ impl Driver for Tapestryd {
             }
         };
 
+        // V-3b-1c-2a: prove the server host3d-ring path (venus-gated,
+        // self-skipping) as bring-up evidence, before READY like the gpu probes.
+        self.comp.warp_host3d_selftest();
+
+        // V-3b-3c F1: prove a destroyed ring's ridx is re-mintable (the interim
+        // monotonic-ridx could not reuse). Venus-gated + self-skipping like above.
+        self.comp.warp_ring_recreate_selftest();
+
+        // V-3b-3c-2: prove the device-memory (mem/<handle>) lifecycle -- alloc,
+        // sentinel round-trip, destroy, handle-reuse. Venus-gated + self-skipping.
+        self.comp.warp_mem_selftest();
+
+        // vkQuake-arc W-3a (WARP-WSI-DESIGN section 7): the WSI host-capability
+        // probe -- SET_SCANOUT_BLOB vocabulary + cross-ctx attach, shmem-class,
+        // paired negatives. Venus-gated + self-skipping like the siblings; a
+        // measurement, not a witness (either verdict is a valid boot).
+        self.comp.warp_scanout_blob_probe();
+
+        // vkQuake-arc W-3c-1 (WARP-WSI-DESIGN sections 4-6): the PRESENTABLE
+        // lifecycle -- registration accept-set discrimination, the
+        // `USE_MAPPABLE`-and-never-mapped HOST3D mint (4.1 as AMENDED: the
+        // host refuses USE_SHAREABLE, and guest-invisibility is the absence
+        // of any map, not the flag), the Direct bind, and the display-safe
+        // teardown's ordering witness (destroy WHILE BOUND). Unlike the W-3a
+        // probe above this is a WITNESS, not a measurement: its arms assert.
+        self.comp.warp_img_selftest();
+
         // READY last: all bring-up console output precedes it; the warden's
         // readiness pipe waits on exactly this line.
         let mut out = libthyla_rs::io::stdout();
         let _ = out.write_all(b"READY\n");
+        self.comp.report_composed_posture();
         say!(
             "tapestryd: serving /srv/tapestry + /srv/warp ({}x{})",
             self.comp.gpu.width,
@@ -350,19 +390,18 @@ impl Driver for Tapestryd {
                 let mask = self.mods.mask();
                 let (dw, dh) = (self.comp.gpu.width, self.comp.gpu.height);
                 let mut moved = false;
-                let commit =
-                    |c: &mut Comp, ax: u32, ay: u32, moved: &mut bool| {
-                        if !*moved {
-                            return;
-                        }
-                        *moved = false;
-                        let (mx, my) = self.tab_max;
-                        let px = (ax.min(mx) as u64 * dw.saturating_sub(1) as u64
-                            / mx.max(1) as u64) as u32;
-                        let py = (ay.min(my) as u64 * dh.saturating_sub(1) as u64
-                            / my.max(1) as u64) as u32;
-                        c.ptr_move(px, py, mask);
-                    };
+                let commit = |c: &mut Comp, ax: u32, ay: u32, moved: &mut bool| {
+                    if !*moved {
+                        return;
+                    }
+                    *moved = false;
+                    let (mx, my) = self.tab_max;
+                    let px =
+                        (ax.min(mx) as u64 * dw.saturating_sub(1) as u64 / mx.max(1) as u64) as u32;
+                    let py =
+                        (ay.min(my) as u64 * dh.saturating_sub(1) as u64 / my.max(1) as u64) as u32;
+                    c.ptr_move(px, py, mask);
+                };
                 for ev in &raw_events {
                     match ev.etype {
                         EV_ABS if ev.code == ABS_X => {
@@ -478,11 +517,21 @@ impl Driver for Tapestryd {
             let mut i = conns.len();
             while i > 0 {
                 i -= 1;
-                let ok =
-                    conns[i].poll_events(&mut self.comp) && conns[i].poll_fences(&mut self.comp);
+                let ok = conns[i].poll_events(&mut self.comp)
+                    && conns[i].poll_fences(&mut self.comp)
+                    && conns[i].poll_ring_fences(&mut self.comp);
                 if !ok {
                     let mut c = conns.remove(i);
                     c.teardown(&mut self.comp);
+                    // H-4b-2: on the LAST conn of a real user principal, reap
+                    // its empty layout scaffolding (occupied tiles are already
+                    // gone via teardown's retire_conn). `conns` no longer holds
+                    // `c`, so this scans only the survivors; reap_session_empties
+                    // itself no-ops for the environment / system / unknown.
+                    let gone_principal = c.peer_principal();
+                    if conns.iter().all(|o| o.peer_principal() != gone_principal) {
+                        self.comp.reap_session_empties(gone_principal);
+                    }
                     unsafe { t_close(c.raw_fd()) };
                 }
             }
@@ -527,8 +576,15 @@ impl Driver for Tapestryd {
             // -- in the console renderer, bypassing the whole idle
             // throttle. Each listener is armed iff its own accept can run.
             let warp_conns = conns.iter().filter(|c| c.root() == ROOT_WARP).count();
-            let arm_tapestry = conns.len() < MAX_CONNS;
-            let arm_warp = arm_tapestry && warp_conns < MAX_WARP_CONNS;
+            // Both listeners stay armed when the pool is FULL: the accept
+            // below then refuses the connect at once (accept + close), so
+            // the backlog entry is consumed (no spin) and the caller sees
+            // EOF immediately instead of blocking on the kernel handshake
+            // deadline (5 s) inside its own loop -- the H-3b round R2-F2's
+            // renderer stall. The warp arm still gates on ITS budget
+            // (audit F7: it must never starve the tapestry listener).
+            let arm_tapestry = true;
+            let arm_warp = warp_conns < MAX_WARP_CONNS;
             let mut pollfds: Vec<TPollFd> = Vec::new();
             if arm_tapestry {
                 pollfds.push(TPollFd {
@@ -583,17 +639,26 @@ impl Driver for Tapestryd {
                 if pollfds[idx].revents & T_POLLIN != 0 {
                     let h = unsafe { t_srv_accept(listener) };
                     if h >= 0 {
-                        let id = self.comp.next_conn_id();
-                        conns.push(Conn::new(h, id, ROOT_TAPESTRY));
+                        if conns.len() < MAX_CONNS {
+                            let id = self.comp.next_conn_id();
+                            conns.push(Conn::new(h, id, ROOT_TAPESTRY));
+                        } else {
+                            // Refuse fast: the pool is full.
+                            unsafe { t_close(h) };
+                        }
                     }
                 }
                 idx += 1;
             }
-            if arm_warp && pollfds[idx].revents & T_POLLIN != 0 && conns.len() < MAX_CONNS {
+            if arm_warp && pollfds[idx].revents & T_POLLIN != 0 {
                 let h = unsafe { t_srv_accept(warp_listener) };
                 if h >= 0 {
-                    let id = self.comp.next_conn_id();
-                    conns.push(Conn::new(h, id, ROOT_WARP));
+                    if conns.len() < MAX_CONNS {
+                        let id = self.comp.next_conn_id();
+                        conns.push(Conn::new(h, id, ROOT_WARP));
+                    } else {
+                        unsafe { t_close(h) };
+                    }
                 }
             }
 
@@ -606,6 +671,15 @@ impl Driver for Tapestryd {
                 if re & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(&mut self.comp) {
                     let mut c = conns.remove(i);
                     c.teardown(&mut self.comp);
+                    // H-4b-2: on the LAST conn of a real user principal, reap
+                    // its empty layout scaffolding (occupied tiles are already
+                    // gone via teardown's retire_conn). `conns` no longer holds
+                    // `c`, so this scans only the survivors; reap_session_empties
+                    // itself no-ops for the environment / system / unknown.
+                    let gone_principal = c.peer_principal();
+                    if conns.iter().all(|o| o.peer_principal() != gone_principal) {
+                        self.comp.reap_session_empties(gone_principal);
+                    }
                     unsafe { t_close(c.raw_fd()) };
                 }
             }

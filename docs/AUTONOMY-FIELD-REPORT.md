@@ -361,6 +361,32 @@ an opinion, and it settled it in one command.
     QEMU from its `-kernel` path. A rule that three independent parties derive
     the same day is one the environment is actively teaching.
 
+17. **"POLL THE RESOURCE, NOT THE ANNOUNCEMENT" IS HALF A RULE, AND I FALSIFIED
+    IT MYSELF AN HOUR AFTER STATING IT.** The first half is sound: a resource
+    handoff announced on one call is invisible to the agent blocked on it (aux
+    released cores by telling vault, not me), so never wait *solely* on an
+    announcement. But the converse failed the same day. aux said "B2 running,
+    ETA 12-16 min, I will announce the free". My waiter — already hardened past
+    the qemu-only blind spot to also require zero build processes and low load —
+    fired at 12:18:32Z on two consecutive quiet samples, and I ran three builds
+    into the middle of their sequence.
+
+    **It caught a gap BETWEEN their cycles: build finished, boot not yet
+    started. That is observationally IDENTICAL to "done" on every axis a machine
+    exposes** — zero qemu, zero builds, low load. Adding axes could never have
+    fixed it, because the difference between "finished" and "between phases" is
+    *intent*, and intent is not on the machine.
+
+    The corrected rule: **poll the resource to know when to ASK; only the
+    OWNER's release ends the claim.** A quiet machine permits you to enquire; it
+    does not transfer possession. I let an instrument overrule a peer's stated
+    plan — the same error as trusting a confident comment over a downstream
+    guard: *the party who knows is authoritative over the party who measures.*
+
+    Cost: aux's B2 may need re-running, and I told them immediately with the
+    exact window rather than waiting to see whether it mattered. A contaminated
+    control that nobody flags is worse than a lost one, because it gets believed.
+
 ### The payoff was measured, not assumed
 
 Standing down was not merely polite. aux's LS-CI on the freed host: **33/35,

@@ -55,6 +55,10 @@ struct p9_loopback {
     // Stats.
     u32                    sends;
     u32                    recvs;
+    // #50: whole staged Rclunks a subsequent send discarded (the modeled
+    // fire-and-forget async-clunk drain -- see loopback_send). A test can
+    // assert on it; every other unread-reply send still refuses.
+    u32                    dropped_rclunks;
     bool                   closed;
     // Deadline test knob (Loom-4). A real transport blocks recv on an
     // empty pipe until data / the deadline; the synchronous loopback has

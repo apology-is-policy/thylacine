@@ -102,12 +102,13 @@ enum {
     T_SYS_CHDIR             = 69,  // LS-4: set the per-Proc cwd (dot_path)
     T_SYS_GETCWD            = 70,  // LS-4: read the per-Proc cwd (dot_path)
     T_SYS_FD2PATH           = 71,  // #66: fd -> namespace name (Plan 9 fd2path)
-    // 72..74 = getpid/uid/gid (native libthyla-rs only).
+    T_SYS_GETPID            = 72,  // LS-K: the caller's own pid (73/74 = uid/gid: native libthyla-rs only)
     T_SYS_CLOCK_GETTIME     = 75,  // LS-K: read CLOCK_REALTIME / CLOCK_MONOTONIC
     T_SYS_PCI_CLAIM         = 76,  // pci-1c: claim a VirtIO-PCI function -> KOBJ_PCI
     T_SYS_PCI_MAP_BAR       = 77,  // pci-1c: map a KObj_PCI BAR into user VA
     T_SYS_PCI_INFO          = 78,  // pci-1c: read a KObj_PCI's resolved topology
     T_SYS_CLOCK_SETTIME     = 79,  // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
+    T_SYS_FD_DEVCLASS       = 80,  // H-1: fd -> Dev class char ('c' = console)
     // 80 reserved (SYS_FD_DEVCLASS); 81 = SYS_WEFT_SHARE (CAP_HW_CREATE
     // server-side only; native libthyla-rs).
     T_SYS_WEFT_MAP          = 82,  // Weft-6a: map a flow/weave fid's shared ring -> VA
@@ -235,6 +236,17 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_ORDWR    2u
 #define T_OEXEC    3u
 #define T_OTRUNC   0x10u
+// The git 6.27 append bit: dev9p forwards it to the 9P Tlopen as O_APPEND and
+// Stratum positions each write at EOF server-side (the kernel has no append mode).
+#define T_OAPPEND  0x40u
+// DISTRO D-1: do not expand a symlink FINAL component. What that yields depends
+// on the rest of the omode, which is why it is a flag and not an access mode:
+// with T_OPATH the returned handle IS the link (the v1.0 lstat spelling --
+// t_fstat it for the link's own record); without it the open answers -T_E_LOOP,
+// Linux O_NOFOLLOW. Non-final components expand regardless -- the flag scopes to
+// the quarry. A trailing '/' OVERRIDES it (POSIX 4.13: the path asserts a
+// directory, so the link must be followed to check).
+#define T_ONOFOLLOW 0x20u
 // FS-delta (IDENTITY-DESIGN.md §9.4): walk-without-open (Linux O_PATH /
 // Plan 9 walk). SYS_WALK_OPEN with this flag returns a NON-OPENED, walkable
 // KObj_Spoor -- the valid base for creating/walking/renaming/unlinking
@@ -270,11 +282,17 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // a live renderer holds the role). joey grants it to /bin/aurora.
 #define T_SPAWN_PERM_CONSOLE_RENDERER  (1u << 3)
 
-// VIVARIUM V-1b: t_sys_spawn_args.pheno_flags bits (mirror SPAWN_PHENO_* in
-// the kernel header). T_SPAWN_PHENO_LINUX declares the child's ABI to be Linux
-// aarch64 -- its syscall numbers are decoded through the translation table.
-// UNGATED, unlike every T_SPAWN_PERM_* bit above: a phenotype confers ABI
-// SHAPE, never AUTHORITY (I-43), so a mis-declared child breaks only itself.
+// VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
+// SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM
+// THE NAMESPACE at every image load -- every spawn variant and execve: Linux
+// iff the resolution crosses a pheno-linux mount (/viv/bin) or the resolving
+// Territory declares Linux; default native. T_SPAWN_PHENO_LINUX declares the
+// CHILD's Territory Linux (a container: viv sets it after chroot, before the
+// entrypoint), so every image the child loads -- and every execve after it --
+// decodes through the translation table. A 0 here declares nothing: the
+// child's ABI is whatever its images' locations say. UNGATED, unlike every
+// T_SPAWN_PERM_* bit above: a phenotype confers ABI SHAPE, never AUTHORITY
+// (I-43), so a mis-declared child breaks only itself.
 #define T_SPAWN_PHENO_LINUX            (1u << 0)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
@@ -457,6 +475,13 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
 #define T_MBEFORE  0x0002u
 #define T_MAFTER   0x0004u
 #define T_MCREATE  0x0008u
+
+// MPHENO_LINUX (mirror kernel/include/thylacine/territory.h): a per-mount-point
+// declaration that a binary whose exec RESOLUTION crosses this mount is a Linux
+// phenotype (VIVARIUM.md section 13, the resolver-subtree-scope channel). Rides
+// t_mount's flag word; settable since the SYS_MOUNT valid-flag widening. It
+// confers ABI SHAPE, never AUTHORITY (I-43).
+#define T_MPHENO_LINUX  0x0020u
 
 // VMA prot bits — MUST mirror kernel/include/thylacine/vma.h's
 // VMA_PROT_* values. Used as the 3rd argument to t_mmio_map.
@@ -1639,6 +1664,20 @@ static inline long t_walk_open(long spoor_fd, const char *name,
     return x0;
 }
 
+// t_getpid — the caller's own pid (LS-K; SYS_GETPID). Always > 0.
+__attribute__((always_inline))
+static inline long t_getpid(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_GETPID;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
 // t_fd2path — copy the namespace name `fd` was reached by into `buf`
 // (NUL-terminated) (#66; the Plan 9 fd2path(2)). Returns the path length
 // (excluding NUL), 0 if the name is unknown (a real path begins with '/', so 0
@@ -1657,6 +1696,25 @@ static inline long t_fd2path(long fd, char *buf, size_t buf_len) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_fd_devclass — the Dev class char backing `fd` (H-1;
+// docs/SYS-FD-DEVCLASS-SPEC.md). Returns a positive byte ('c' = the console --
+// a SYS_CONSOLE_OPEN fd or a walked /dev/cons fd; '|' = a pipe; '9' = a dev9p
+// file; ...), or a negative errno for a closed / non-Spoor fd. Read-only
+// introspection: no access right required, confers nothing. is-a-terminal is
+// exactly (t_fd_devclass(fd) == 'c').
+__attribute__((always_inline))
+static inline long t_fd_devclass(long fd) {
+    register long x0 __asm__("x0") = fd;
+    register long x8 __asm__("x8") = T_SYS_FD_DEVCLASS;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

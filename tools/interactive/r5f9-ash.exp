@@ -1,0 +1,88 @@
+#!/usr/bin/expect -f
+# r5f9-ash.exp -- item 8 GATE (aux, 11b-9p): a caught ^C must interrupt a
+# phenotype ash's BLOCKED pts read PROMPTLY (reprompt), not deliver the note a
+# line late (the "^C eats the next line" bug). Pre-11b-9p every leg below is 0
+# (the ^C is delivered only when the read completes, i.e. after the NEXT line);
+# post-11b-9p the caught note unwinds the dev9p read with -EINTR while the ash
+# lives -> ash's SIGINT handler runs -> reprompt.
+#
+# Drives an interactive Alpine ash (/vivarium/alpine-ash) under viv from a
+# ptyhost'ed ut. The FIRST prompt-^C is the hard item-8 gate. The rest also
+# gate the holotype R5-F9 longjmp wedge: busybox ash's onsig() -> raise_interrupt
+# -> longjmp OUT of the SIGINT handler could leave the kernel in_handler latch
+# set (never rt_sigreturn'd), so every later note but kill queues forever -- a
+# second ^C would then do nothing. All legs reprompting proves no such wedge.
+
+source [file join [file dirname [info script]] lib.exp]
+
+proc r5_prompt {phase secs} {
+    global timeout
+    set timeout $secs
+    expect {
+        -re {/ [#$] } { lc_step "saw: ash prompt after '$phase'" ; return 1 }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        eof     { lc_fail "unexpected EOF during '$phase'" }
+        timeout { lc_step "NO PROMPT within ${secs}s after '$phase' <-- the witness" ; return 0 }
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "ptyhost"
+lc_expect "job control active" "the hosted ut's session dance"
+sleep 1
+
+lc_send "viv run /vivarium/alpine-ash"
+set p0 [r5_prompt "viv run (first prompt)" 30]
+
+# CONTROL 0: the shell answers.
+lc_send "echo ash-alive-0 | tr a-z A-Z"
+lc_expect "ASH-ALIVE-0" "control 0: ash answers"
+r5_prompt "control 0" 10
+
+# A: ^C at the PROMPT, twice.
+send "\x03"; sleep 1
+set a1 [r5_prompt "^C #1 at the prompt" 10]
+send "\x03"; sleep 1
+set a2 [r5_prompt "^C #2 at the prompt" 10]
+lc_send "echo ash-alive-a | tr a-z A-Z"
+lc_expect "ASH-ALIVE-A" "control A: ash still answers"
+r5_prompt "control A" 10
+
+# B: ^C inside the read builtin (a cooked read; SIGINT -> onsig -> raise_interrupt -> longjmp).
+lc_send "read x"; sleep 1
+send "\x03"; sleep 1
+set b1 [r5_prompt "^C inside read #1" 10]
+lc_send "read x"; sleep 1
+send "\x03"; sleep 1
+set b2 [r5_prompt "^C inside read #2" 15]
+if {!$b2} {
+    # Unwedge for the remaining legs: Enter satisfies the read.
+    send "\r"; sleep 1
+    r5_prompt "Enter to satisfy the stuck read" 10
+}
+lc_send "echo ash-alive-b | tr a-z A-Z"
+lc_expect "ASH-ALIVE-B" "control B: ash still answers"
+r5_prompt "control B" 10
+
+# C: a foreground sleep + ^C (sleep dies SIG_DFL either way -- a sanity leg).
+lc_send "sleep 20"; sleep 1
+send "\x03"; sleep 1
+set c1 [r5_prompt "^C on a foreground sleep" 10]
+lc_send "echo ash-alive-c | tr a-z A-Z"
+lc_expect "ASH-ALIVE-C" "control C: ash still answers"
+r5_prompt "control C" 10
+
+lc_step "RESULT: first-prompt=$p0 | prompt-^C #1=$a1 #2=$a2 | read-^C #1=$b1 #2=$b2 | sleep-^C=$c1  (1 = prompt returned, 0 = no prompt within the window)"
+# item 8 (11b-9p) hard gates. The first prompt-^C is the headline; the rest also
+# gate the R5-F9 longjmp wedge (a second ^C after a longjmp'd handler must still
+# be delivered). Pre-11b-9p any of these is 0 (the note delivers a line late).
+if {!$p0} { lc_fail "viv never gave an interactive ash prompt" }
+if {!$a1} { lc_fail "item 8 REGRESSED: first prompt-^C did not reprompt -- the caught note did not interrupt the blocked dev9p read" }
+if {!$a2} { lc_fail "R5-F9 wedge: second prompt-^C not delivered (in_handler stuck after ash's longjmp)" }
+if {!$b1 || !$b2} { lc_fail "^C inside the read builtin not delivered (item 8 / R5-F9 wedge)" }
+if {!$c1} { lc_fail "^C on a foreground sleep did not reprompt" }
+lc_send "exit"
+sleep 1
+lc_run_expect "echo r5f9-outer | tr a-z A-Z" "R5F9-OUTER"
+lc_pass "R5F9-ASH: item 8 closed -- prompt-^C + read-^C reprompt, no longjmp wedge"

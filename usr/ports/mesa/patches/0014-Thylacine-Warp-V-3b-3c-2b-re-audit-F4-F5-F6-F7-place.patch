@@ -1,0 +1,308 @@
+From d7f4ef1071fe74705b168f72ced4c00ca7d8bd3a Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Wed, 26 Aug 2026 10:54:13 +0200
+Subject: [PATCH 14/23] Thylacine Warp V-3b-3c-2b re-audit (F4/F5/F6/F7):
+ placed-map + errno discrimination
+
+The dirty-close re-audit (holotype Fable 5, I-45 client, on the 2c742991 fix
+state) returned 0 P0 / 1 P1 / 2 P2 / 1 P3. All fixed; the E2E re-witnessed GREEN
+on real V3D (thyla-pi/KVM, Venus V3D 4.2.14): device-memory sentinel OK ->
+THYLACINE-VENUS-PROVE PASS, with the logical device created against the now
+de-advertised placed-map extension.
+
+- F4 [P1]: VK_EXT_map_memory_placed was advertised (memoryMapPlaced=true)
+  unconditionally, but thylacine_bo_map discarded pPlacedAddress (weft picks the
+  VA) -> a placed map would silently succeed at the WRONG address (app
+  corruption). Fix: a new vn_renderer_info.cannot_map_placed bit (Thylacine sets
+  it) suppresses the extension + feature in vn_physical_device; plus a defensive
+  refuse in thylacine_bo_map (a caller that sets the PLACED bit without the
+  feature gets a clean VK_ERROR_MEMORY_MAP_FAILED, never the wrong VA).
+
+- F5 [P2] + F6 [P2] invariant-break: warp_mem_new's rc=1 ("free the handle") was
+  "the write failed", not "the server refused". Two ways that frees a handle
+  whose server slot IS installed -> a re-handed handle collides -> the instance-
+  wide vkAllocateMemory wedge F2 was meant to close: (F5) an -EINTR after the
+  Twrite committed (LATENT until native readers become caught-interruptible, the
+  planned 11c); (F6) a concurrent-alloc race loser's duplicate -EINVAL. Fix:
+  warp_mem_new inspects the real errno (dev9p propagates the Rlerror ecode) and
+  frees ONLY on provably-not-installed -- an open failure or the routine -ENOMEM
+  holistic-cap refusal; every other failure (-EINVAL/-EINTR/short/unknown) keeps
+  the handle marked. This closes F5 and F6's invariant-break; F6's residual
+  torn-RMW on the bitmap is the owed per-renderer mutex (comment re-scoped: the
+  trigger is ANY concurrent vkAllocateMemory, not multi-queue).
+
+  NOTE the divergence from the round-2 remedy: the prosecutor's suggested F5 fix
+  put -EINVAL in the free set. That reproduces F6 (a duplicate -EINVAL means the
+  slot IS installed, so freeing frees the winner's slot). The reconciled
+  predicate frees ONLY on provably-not-installed (open-fail / -ENOMEM) and keeps
+  on everything else -- the conservative direction that closes both F5 and F6's
+  invariant-break. The prosecutor is authoritative about the smell, not the
+  remedy.
+
+- F7 [P3]: the bo-create comment misdocumented the binding as
+  VkImportMemoryResourceInfoMESA (unreachable here); reworded to the real
+  mechanism (host resolves blob_id=mem_id; wait_alloc's WaitRingSeqno orders it).
+
+Re-witnessed: build rc=0 on thyla-keep, prove md5 c0ccddda -> e386bc27, ramfs
+sha verified on the pi, THYLACINE-VENUS-PROVE PASS. The fix PROOFS (F4 placed-
+refusal, F5 EINTR-keep, F6 concurrent-alloc, F5 ENOMEM-still-frees) need error-
+path witnesses owed at the GPU-submit chunk; this E2E confirms the happy path +
+device creation with the de-advertised extension.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../winsys/virgl/thylacine/warp_client.c      | 36 +++++++--
+ .../winsys/virgl/thylacine/warp_client.h      | 22 ++++--
+ src/virtio/vulkan/vn_physical_device.c        |  6 +-
+ src/virtio/vulkan/vn_renderer.h               |  8 ++
+ src/virtio/vulkan/vn_renderer_thylacine.c     | 76 ++++++++++++-------
+ 5 files changed, 104 insertions(+), 44 deletions(-)
+
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index 095919b..224d28f 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -530,12 +530,22 @@ int warp_mem_new(struct warp_conn *w, uint32_t handle, uint32_t bytes,
+ 
+    /* Three-valued failure so the caller frees the handle iff the server slot is
+     * provably NOT installed (F2): the server installs the mem slot ONLY on the
+-    * Ok path of the mem/new Twrite, so a wedged/ctx-less conn OR a refused Twrite
+-    * (the routine E_NOMEM at the holistic ctx cap is exactly this) leaves NO slot
+-    * -> return 1 = not-installed, free the handle. A Twrite that SUCCEEDED but
+-    * whose info read failed MAY have a live slot -> return -1 = maybe-installed,
+-    * keep the handle marked (the bounded-leak posture; converging it with a
+-    * destroy is the ring/mem F2 follow-on). 0 = success. */
++    * Ok path of the mem/new Twrite. The decision turns on WHICH failure it was
++    * (V-3b-3c-2b F5/F6 -- the round-1 "refused Twrite -> free" was too coarse):
++    *   rc=1  (free)  = provably not installed: a wedged/ctx-less conn, an open
++    *                   failure (the Twrite never reached the server), or the
++    *                   routine -ENOMEM holistic-cap refusal (Rlerror = nothing
++    *                   installed; keeping F2's "cap loop must not burn slots").
++    *   rc=-1 (keep)  = MAYBE installed: a duplicate handle -EINVAL (the slot IS
++    *                   installed -- e.g. a concurrent-alloc race loser, F6), an
++    *                   -EINTR whose Twrite may have committed before the ack
++    *                   (F5), an info-read failure, any unrecognized errno. NEVER
++    *                   free a handle whose server slot may be live (re-handing it
++    *                   collides with the still-installed slot, the ring-F1 wedge).
++    *   rc=0          = success.
++    * Converging the rc<0 arm with a destroy is the ring/mem F2 follow-on. This
++    * relies on dev9p propagating the real Rlerror ecode (t_write returns the
++    * negative errno, never a collapsed -1). */
+    if (w->wedged || w->ctx == 0)
+       return 1;
+ 
+@@ -547,8 +557,18 @@ int warp_mem_new(struct warp_conn *w, uint32_t handle, uint32_t bytes,
+    snprintf(path, sizeof(path), "ctx/%u/mem/new", w->ctx);
+    snprintf(verb, sizeof(verb), "%u %u %llu", bytes, handle,
+             (unsigned long long)mem_id);
+-   if (write_verb(w->root, path, verb) != 0)
+-      return 1; /* refused Twrite -> no slot installed -> free the handle */
++   /* Open+write inline (not write_verb) to inspect the failure errno for the
++    * F5/F6 install-state decision above. */
++   {
++      long fd = open_at(w->root, path, T_OWRITE);
++      if (fd < 0)
++         return 1; /* never reached the server -> nothing installed -> free */
++      size_t vlen = strlen(verb);
++      long n = t_write(fd, verb, vlen);
++      t_close(fd);
++      if (n != (long)vlen)
++         return (n == -ENOMEM) ? 1 : -1;
++   }
+ 
+    /* res_id (the value the vkAllocateMemory command names in resourceId) reads
+     * back from mem/<handle>/info: "res <id> size <sz>". */
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index cd71a2c..062cdca 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -168,14 +168,20 @@ int warp_ring_destroy(struct warp_conn *w, uint32_t ridx);
+  * the backing server-side (the disclosure floor), so the caller MUST mint at
+  * vkAllocateMemory time, before any device write to mem_id -- a lazy mint after
+  * a GPU copy INTO the memory would zero the results (server audit F4).
+- * Three-valued return (V-3b-3c-2b F2): 0 = success (+ *res_id_out); 1 = failed,
+- * server slot provably NOT installed (a wedged/ctx-less conn or a refused
+- * mem/new Twrite -- the routine E_NOMEM at the holistic cap) -> the caller
+- * SHOULD free its handle; -1 = failed, slot MAYBE installed (Twrite ok, info
+- * read failed) -> the caller MUST keep the handle marked, else a re-handed
+- * handle collides with the still-installed slot (the ring-F1 wedge). Freeing on
+- * 1 keeps a memory-pressure loop from burning the 256-slot space on routine cap
+- * refusals. */
++ * Three-valued return (V-3b-3c-2b F2, refined F5/F6): 0 = success
++ * (+ *res_id_out). 1 = failed, server slot provably NOT installed -> the caller
++ * SHOULD free its handle: a wedged/ctx-less conn, an open failure (the Twrite
++ * never reached the server), or the routine -ENOMEM holistic-cap refusal (the
++ * Rlerror means nothing was installed). -1 = failed, slot MAYBE installed -> the
++ * caller MUST keep the handle marked (else a re-handed handle collides with the
++ * still-installed slot, the ring-F1 wedge): a duplicate handle -EINVAL (the slot
++ * IS installed -- e.g. a concurrent-alloc race loser, F6), an -EINTR whose
++ * Twrite may have committed before the ack (F5 -- LATENT until native readers
++ * become caught-interruptible, the planned 11c), an info-read failure, or any
++ * unrecognized errno. Freeing on 1 keeps a memory-pressure loop from burning the
++ * 256-slot space on routine cap refusals; keeping on everything else preserves
++ * the two-sided guest-handle <-> server-slot invariant. Requires dev9p to
++ * propagate the real Rlerror ecode (t_write returns the negative errno). */
+ int warp_mem_new(struct warp_conn *w, uint32_t handle, uint32_t bytes,
+                  uint64_t mem_id, uint32_t *res_id_out);
+ 
+diff --git a/src/virtio/vulkan/vn_physical_device.c b/src/virtio/vulkan/vn_physical_device.c
+index e325199..cc88fb1 100644
+--- a/src/virtio/vulkan/vn_physical_device.c
++++ b/src/virtio/vulkan/vn_physical_device.c
+@@ -1250,7 +1250,11 @@ vn_physical_device_get_native_extensions(
+       physical_dev->ray_tracing && renderer_exts->KHR_acceleration_structure;
+    exts->KHR_map_memory2 = true;
+ #if !DETECT_OS_WINDOWS
+-   exts->EXT_map_memory_placed = true;
++   /* Not advertised on a backend that cannot map at a caller-chosen address
++    * (Thylacine weft picks the VA); advertising it there would report
++    * memoryMapPlaced and then silently map at the wrong VA (V-3b-3c-2b F4). */
++   exts->EXT_map_memory_placed =
++      !physical_dev->instance->renderer->info.cannot_map_placed;
+    exts->EXT_physical_device_drm = true;
+ #endif
+    /* use common implementation */
+diff --git a/src/virtio/vulkan/vn_renderer.h b/src/virtio/vulkan/vn_renderer.h
+index c4c97c9..046e583 100644
+--- a/src/virtio/vulkan/vn_renderer.h
++++ b/src/virtio/vulkan/vn_renderer.h
+@@ -72,6 +72,14 @@ struct vn_renderer_info {
+     * deferred first-map mint would be zeroed (V-3b-3c-2b F1). */
+    bool bo_must_init_at_alloc;
+ 
++   /* The backend cannot honor VK_EXT_map_memory_placed: its map VA is chosen by
++    * the host/kernel, not the caller (the Thylacine weft map picks the VA), so a
++    * pPlacedAddress request cannot be satisfied. Set by such a backend to
++    * SUPPRESS advertising the extension + memoryMapPlaced -- otherwise the driver
++    * would report the feature and then silently map at the wrong address
++    * (V-3b-3c-2b F4). Default false: backends that MAP_FIXED (vtest) keep it. */
++   bool cannot_map_placed;
++
+    uint32_t max_timeline_count;
+ 
+    /* hw capset */
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+index 230553a..8e08ff1 100644
+--- a/src/virtio/vulkan/vn_renderer_thylacine.c
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -115,11 +115,16 @@ struct thylacine {
+     * wedge) and ring_bitmap are unguarded. The bring-up path (vkCreateInstance
+     * -> enumerate -> vkDestroyInstance) is single-threaded and the prove
+     * harness is the only caller of this backend today, so no concurrency
+-    * reaches here. Multi-threaded use arrives with VkQueues (V-3b-3c): the ops
+-    * that touch warp (shmem_create/destroy, bo_create/map/destroy, submit,
+-    * wait, sync_read/write) and the two bitmaps must then serialize under a
+-    * per-renderer mutex (the vtest sock_mutex analog). Tracked for V-3b-3c; do
+-    * NOT ship a multi-queue driver on this backend without it. */
++    * reaches here. The real trigger is NOT a second queue -- vkAllocateMemory is
++    * not externally synchronized, so ANY two app threads allocating concurrently
++    * race thylacine_mem_alloc's plain RMW (V-3b-3c-2b F6). The ops that touch
++    * warp (shmem_create/destroy, bo_create/map/destroy, submit, wait,
++    * sync_read/write) and the two bitmaps must serialize under a per-renderer
++    * mutex (the vtest sock_mutex analog) before ANY concurrent-capable consumer
++    * -- do NOT ship one without it. The F2 free-on-refusal arm's invariant-break
++    * (a race-loser freeing the winner's handle) is already closed by warp_mem_
++    * new's errno discrimination (a duplicate -EINVAL keeps the handle marked, it
++    * does not free); the torn-RMW residual is what this mutex owes. */
+    struct warp_conn warp;
+    bool connected;
+ 
+@@ -128,7 +133,8 @@ struct thylacine {
+ 
+    /* allocated device-memory slots (handle 0..255); one bit per mem/<handle>.
+     * Same SINGLE-THREAD assumption as ring_bitmap (see the warp field): the
+-    * per-renderer mutex owed at multi-queue V-3b-3c covers this too. */
++    * owed per-renderer mutex (any concurrent vkAllocateMemory, not multi-queue)
++    * covers this too. */
+    uint64_t mem_bitmap[THY_MEM_WORDS];
+ 
+    uint32_t next_sync_id;
+@@ -321,10 +327,15 @@ thylacine_shmem_destroy(struct vn_renderer *renderer,
+ /*
+  * Mint a device-memory blob for a VkDeviceMemory (V-3b-3c-2b). The driver calls
+  * this at vkAllocateMemory time for a HOST_VISIBLE type (vn_device_memory.c:
+- * create_from_device_memory -> the VkImportMemoryResourceInfoMESA carries the
+- * res_id we return, so the host binds the allocation to our blob). `mem_id` is
+- * the memory's Venus object id; the server uses it as the blob_id, so the host's
+- * virglrenderer maps THAT allocation's pages into the shared backing.
++ * alloc_export's eager tail runs alloc_simple -- a plain VkMemoryAllocateInfo,
++ * no VkImportMemoryResourceInfoMESA -- then this bo-init). `mem_id` is the
++ * memory's Venus object id; we mint with blob_id = mem_id, and the HOST binds
++ * the blob to that already-executed allocation at RESOURCE_CREATE_BLOB, so its
++ * pages back the shared blob. The import-resource path (VkImportMemoryResource-
++ * InfoMESA) is the OTHER direction and is unreachable here (import_dma_buf +
++ * alloc_guest_vram only; create_from_dma_buf=NULL, has_guest_vram=false). The
++ * ordering (host allocate before the blob mint) comes from wait_alloc's
++ * WaitRingSeqno, not from a resource-id handshake (V-3b-3c-2b F7).
+  *
+  * F4 (server audit, load-bearing): the mint zeroes the backing, so it must run
+  * BEFORE any device write to mem_id. The driving Venus flow (vn_device_memory.c)
+@@ -366,17 +377,18 @@ thylacine_bo_create_from_device_memory(
+    int rc = warp_mem_new(&tly->warp, (uint32_t)handle, (uint32_t)rounded, mem_id,
+                          &res_id);
+    if (rc != 0) {
+-      /* F2: free the handle IFF the server slot is provably not installed
+-       * (rc > 0: a wedged/ctx-less conn or a refused mem/new Twrite -- the
+-       * server installs the slot only on the Ok path, so a refused Twrite leaves
+-       * none). The routine E_NOMEM at the holistic ctx cap is this arm, so a
+-       * memory-pressure loop that refuses + retries does NOT burn the 256-slot
+-       * handle space (the old unconditional leak wedged vkAllocateMemory for the
+-       * instance's life). rc < 0 (Twrite ok, info read failed) MAY have a live
+-       * slot -> keep the handle marked (bounded leak, ctx-death reaped; a
+-       * re-handed handle would otherwise collide with the still-installed slot,
+-       * the ring-F1 wedge class). Converging the rc<0 arm with a destroy is the
+-       * ring/mem F2 follow-on. */
++      /* F2: free the handle IFF the server slot is provably not installed --
++       * warp_mem_new returns rc>0 ONLY then (a wedged/ctx-less conn, an open
++       * failure that never reached the write, or the routine -ENOMEM holistic-
++       * cap refusal, whose Rlerror means the server installed nothing). That
++       * keeps a memory-pressure loop from burning the 256-slot space (the old
++       * unconditional leak wedged vkAllocateMemory for the instance's life).
++       * rc<0 is the MAYBE-installed set (a duplicate -EINVAL -- e.g. a
++       * concurrent-alloc race loser, F6; an interrupted -EINTR whose Twrite may
++       * have committed, F5; an info-read failure; any unrecognized errno) ->
++       * keep the handle marked (bounded leak, ctx-death reaped; NEVER free a
++       * handle whose server slot may be live -> the ring-F1 wedge class).
++       * Converging the rc<0 arm with a destroy is the ring/mem F2 follow-on. */
+       if (rc > 0)
+          thylacine_mem_free(tly, (uint32_t)handle);
+       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+@@ -434,12 +446,17 @@ thylacine_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *_bo,
+    struct thylacine *tly = (struct thylacine *)renderer;
+    struct thylacine_bo *bo = (struct thylacine_bo *)_bo;
+ 
+-   /* placed_addr is the guest-vram fixed-VA path (has_guest_vram); this backend
+-    * advertises has_guest_vram=false, so the driver never places -- weft picks
+-    * the VA. Map lazily + cache, like vtest: vkMapMemory may be called more than
+-    * once, and the second returns the cached ptr. Not thread-safe (the bo_ops
+-    * map contract), covered by the owed multi-queue mutex. */
+-   (void)placed_addr;
++   /* A non-NULL placed_addr requests VK_EXT_map_memory_placed (map at exactly
++    * this VA). This backend cannot place -- the weft map picks the VA -- and we
++    * suppress the extension so the feature is not advertised (info.cannot_map_
++    * placed, V-3b-3c-2b F4). Refuse defensively anyway: a caller that sets the
++    * PLACED bit without the feature must get a clean VK_ERROR_MEMORY_MAP_FAILED,
++    * never a silent map at the WRONG address (the F4 corruption). */
++   if (placed_addr)
++      return NULL;
++   /* Map lazily + cache, like vtest: vkMapMemory may be called more than once,
++    * and the second returns the cached ptr. Not thread-safe (the bo_ops map
++    * contract), covered by the owed per-renderer mutex (see the warp field). */
+    if (!bo->base.mmap_ptr) {
+       long map_fd = -1;
+       void *ptr = warp_mem_map(&tly->warp, bo->handle, &map_fd);
+@@ -705,6 +722,11 @@ thylacine_init_renderer_info(struct thylacine *tly)
+     * vkAllocateMemory, not lazily at first map (V-3b-3c-2b F1). */
+    info->bo_must_init_at_alloc = true;
+ 
++   /* The weft map picks the VA (thylacine_bo_map passes t_weft_map's hint = 0),
++    * so a caller-chosen pPlacedAddress cannot be honored -- suppress
++    * VK_EXT_map_memory_placed rather than map at the wrong VA (V-3b-3c-2b F4). */
++   info->cannot_map_placed = true;
++
+    /* The two load-bearing gate fields (vn_instance_init_renderer):
+     * wire_format_version must equal 1 and vk_xml_version must be >= 1.1 or
+     * the driver produces a device-less stub instance. They come from the
+-- 
+2.43.0
+

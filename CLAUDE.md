@@ -1,5 +1,13 @@
 # CLAUDE.md
 
+> ## ⛔ THE EFFORT GATE — settle this BEFORE the first line of code
+>
+> **Is the chunk in front of you crypto, security-critical, load-bearing kernel (a §28 invariant or an audit-trigger surface), or complicated enough that MAX effort is advisable — and you are not CERTAIN you are already at max? STOP. Raise a direct `AskUserQuestion` offering `/effort max`, and do not touch the work until the user answers.** The user deliberately runs reduced effort to conserve the weekly budget, and will NOT have load-bearing work built at less than max. This is never a line in a closing summary — it is a blocking question you raise the instant such work comes into view.
+>
+> **Certainty is one command away — run `~/.claude/effort-report.sh` FIRST.** It prints this session's LIVE effort (the transcript-stamped value `/effort` actually set; `settings.json`'s `effortLevel` is only the new-session default, and the two drift). Reports `max` → proceed, no question. Anything else — a lower level, UNKNOWN, or a stale-transcript warning (or the script absent on a fresh machine) → you cannot confirm max, so the question fires.
+>
+> **Bias hard toward asking; false positives beat false negatives.** Asking when it turns out fine costs one keystroke. NOT asking ships a soundness bug at reduced effort — a corrupt kernel, a broken crypto path, a race a max prosecutor would have caught. So: **rather safe than sorry — issue the question WITHOUT HESITATION.** `AskUserQuestion` blocks in-turn and never ends the run: the cost of asking is a moment, the cost of guessing wrong is a chunk done wrong. **This gate fires REGARDLESS of `.no-stop-nudge` / autonomous mode — it is the one escalation autonomy never suppresses.** Already at max, or the work is genuinely routine (mechanical edits, docs, orchestration)? Proceed — asking there is noise. Everywhere near the load-bearing surfaces, the burden of proof is on NOT asking. (Full trigger list + mechanics: [When to recommend `/effort max`](#when-to-recommend-effort-max).)
+
 Operating notes for Claude Code instances working on Thylacine OS.
 
 This document is binding scripture for every implementation session. It encodes the operational framework, the discipline expected, the build commands, the audit-trigger surfaces, and the invariants that must hold. Read this before doing anything else; refer back to it often.
@@ -92,7 +100,9 @@ in `ARCHITECTURE.md §25.2`): `scheduler` / `territory` / `handles` / `burrow`
 `loom_multishot` / `loom_order` / `cons_poll` / `loom_devgone` / `allowance` /
 `net_poll` / `net_poll_teardown` / `weft` / `weft_readiness` /
 `sched_tickless` / `sched_rebalance` / `fs_cache` / `debug_stop`, each with clean
-cfg(s) + buggy-cfg counterexamples (100 buggy cfgs total). Three of the Phase-0 planned nine
+cfg(s) + buggy-cfg counterexamples (121 buggy cfgs as of 2026-08-16 -- re-derive
+with `ls specs/*buggy*.cfg | wc -l` rather than trusting this; it read 100 for
+long enough to be off by 21). Three of the Phase-0 planned nine
 (`futex.tla`, `notes.tla`, `pty.tla`) were dropped per the 2026-05-23
 suspension — torpor + notes are prose-validated; PTY is unbuilt (LS-8, #952).
 
@@ -237,6 +247,18 @@ The index (one line per row; refresh with the table):
 - **VMO / BURROW** -- `kernel/burrow.c`, `kernel/include/thylacine/burrow.h`
 - **Weft cross-Proc Burrow-share (the I-37 dataplane substrate)** -- `kernel/burrow.c` (NEW `burrow_share_into(dst, v, vaddr, prot)` -- map an existing Burrow ...
 - **tapestryd: the compositor + the orphaned-weave reaper (Tapestry G-3; I-40 present half)** -- `usr/tapestryd/` (the warden gather-bound persistent compositor: `gpu.rs` the synchronous ...
+- **tapestryd V-3a coherent ring (I-9 kick + I-45 ring scope + the drain-cap DoS bound; Warp-6 V-3a)** -- `usr/tapestryd/src/server.rs` (the `ctx/<id>/ring/<ridx>/{info,map,kick,fence}` subtree: `WARP_RING`=1<<43 + the disjointness assert; `wring_mint`/`wring_kick` [I-9 re-scan + the `WARP_RING_MAX_DRAIN_PER_KICK` cap]; the fence park + `poll_ring_fences`; `wring_teardown`; the ring test levers), `usr/tapestryd/src/gpu.rs` (`create_ring_blob`), `usr/warp-prove/src/main.rs` (`ring_prove`) ...
+- **tapestryd V-3b-1a HOST3D + MAP_BLOB ring substrate (Model B; venus-ctx scope; I-45/I-32; Warp-6 V-3b-1a)** -- `usr/tapestryd/src/gpu.rs` (`create_host3d_blob` [HOST3D nr_entries=0 -> HDR+32] + `map_blob` [MAP_BLOB -> hostmem_base+offset, `RESP_OK_MAP_INFO` residue-guarded] + `unmap_blob` + the `host3d_probe` 2-arm venus-ctx/device-global self-test + the `HOST3D_PROBE_*` static-assert), `tools/warp-host.sh` + `tools/test-venus-verdict.sh` (the venus-verdict host3d gate) ...
+- **tapestryd V-3b-1b hostmem guest-map + the SYS_BURROW_FROM_HOSTMEM client binding (Model B; I-45/I-32/I-37; Warp-6 V-3b-1b)** -- `usr/lib/libthyla-rs/src/lib.rs` (`t_burrow_from_hostmem` FFI + `T_CACHE_*` consts, the V-3 client wrapper V-2 left unbuilt) + `usr/lib/libthyla-rs/src/hardware.rs` (`PciDev::burrow_from_hostmem`) + `usr/tapestryd/src/gpu.rs` (`HostmemAllocator` + `hostmem_map_probe` [host-dictated cache via `map_info_to_cache`; sentinel round-trip; `t_burrow_detach`] + the `HOSTMEM_PROBE_*` static-assert), `tools/warp-host.sh` + `tools/test-venus-verdict.sh` (the venus-verdict hostmem gate) ...
+- **tapestryd V-3b-1c-1 persistent hostmem ring engine (Model B; I-45/I-32/I-7; Warp-6 V-3b-1c-1)** -- `usr/tapestryd/src/gpu.rs` (`HostmemAllocator` first-fit free-list + oob/overlap double-free guard, hoisted into a persistent `Gpu.hostmem`; the reusable `mint_host3d_ring`/`drop_host3d_ring` lifecycle [`HostRing` non-Copy single-use token, by-value drop, full error-unwind, host-dictated cache, `u32::try_from` size guard] + the 2-ring/physical-reread/re-mint-reuse `hostmem_ring_probe` + `HOSTMEM_PROBE_RES_2`), `tools/warp-host.sh` + `tools/test-venus-verdict.sh` (the venus-verdict hostmem-RING gate, 24/24) ...
+- **tapestryd V-3b-1c-2a server host3d-ring path (Model B; I-45/I-32/I-7; Warp-6 V-3b-1c-2a)** -- `usr/tapestryd/src/server.rs` (`WarpCtx.venus_ctx` lazy per-client capset-4 ctx [`wctx_venus_ensure`, id=`WARP_VENUS_CTX_BASE`+slot, disjoint-band static assert -- the conv-probe alias catch]; the `host3d` ring flavor [`wring_mint`/`wring_install_host3d` via the 1c-1 engine, shared I-32 budget]; `wring_teardown` host3d arm [non-Copy move + early-return, no double-unref]; `wctx_finish` venus destroy [both arms, F1]; `wring_kick` host3d fail-closed guard; `warp_host3d_selftest`), `usr/tapestryd/src/gpu.rs` (`ctx_create_venus`), `usr/tapestryd/src/main.rs` (serve() self-test call), `tools/warp-host.sh` + `tools/test-venus-verdict.sh` (28/28) + `tools/warp/boot-probe.sh` (capture filter for the `warp host3d-ring` line) ...
+- **tapestryd V-3b-1c-2b client-claimable host3d ring: F1 weft arm + SYS_HOSTMEM_REFCOUNT + F2 observe-and-reap (Model B; I-7/I-37/I-45/I-32; Warp-6 V-3b-1c-2b)** -- NEW `SYS_HOSTMEM_REFCOUNT`=108 (`kernel/syscall.c` `hostmem_refcount_query` [va->hostmem VMA->handle+mapping sum, leak-closed] + `syscall.h` + `libthyla-rs` `t_hostmem_refcount`); F1 `kernel/weft.c` `weft_binding_alloc_maponly` HOSTMEM arm; F2 `usr/tapestryd/src/gpu.rs` (`retire_host3d_ring` reap-at-refcount==1-else-PARK + `reap_hostmem_parked` mint-reclaim + cap) + `server.rs` (`wring_weft_ensure` host3d share + `wring_teardown` disarm-then-retire); tests `weft.hostmem_share` + `weft.hostmem_refcount` (the F1 in-flight-claim window). Fable audit round-1 0/1P1/1P2/1P3 all-fixed (F1 = mapping_count missed the transferred claim pin -> the SUM); DIRTY -> round-2 on the fix ...
+- **tapestryd multi-queue submit-fence (the F3 seam): per-timeline venus fences + the timelines file + the non-parking submit (I-45/I-9/I-7; Warp-6 GPU-submit chunk)** -- `usr/tapestryd/src/gpu.rs` (`FenceTag.ring_idx` + INFO_RING_IDX + the vindication lane retention), `server.rs` (`timeline_signaled[4]` + `ctx/<id>/timelines` + `submit1..3` + `poll_fences` DELIVER-TO-ALL), mesa patch 0015 (per-timeline ledgers + the transport mutex + the one-parker protocol + `max_timeline_count`=4), `tools/warp/boot-probe.sh` ...
+- **tapestryd W-3c-1: the PRESENTABLE object -- the `img/` subtree + the display-safe teardown (I-40 fourth class / I-45 / I-32 / I-7; Warp-WSI W-3c-1)** -- `usr/tapestryd/src/server.rs` (`WarpImg` + the `ctx/<id>/img/{new,<n>/{info,ctl}}` ABI + `wimg_teardown` unbind-BEFORE-unref) + `gpu.rs` (`create_presentable` USE_MAPPABLE never-mapped + `set_scanout_blob`), the capture/verdict/driver tools ...
+- **tapestryd W-3c-2: the generalized `present-to` (bo | img) + the presentable DIRECT arm (I-40 pbound / I-45 / I-7; Warp-WSI W-3c-2)** -- `usr/tapestryd/src/server.rs` (`PresentSrc`/`AdoptSrc` + `gl_adoption` img arm + `direct_bind_adopted` [PPresentBind] + composed machinery HARD-GATED to Bo [the va-0 DMA class] + `wimg_destroy` consent-clear), `usr/warp-prove/src/main.rs` (img-xproc + `img_direct_prove`), `tools/warp/warp-img.exp` + `tools/warp-host.sh` ...
+- **tapestryd W-3d slice 1a: the one-shot REAL-class compose probe (SET_TYPE; I-45/I-7; Warp-WSI W-3d-1a)** -- `usr/tapestryd/src/server.rs` (`set_type_request` + the `settype` probe param + `real_class_compose_probe_maybe` at the first mem mint), `tools/warp-host.sh` + `tools/test-venus-verdict.sh` (the two-token grammar gates). MEASURED: `settype=latched` on thyla-pi (opaque-fd blobs; composed arm host-unavailable) ...
+- **mesa W-3d: the WSI DIRECT path (patch 0018; I-40 stage-0 / I-45 / I-7; Warp-WSI W-3d)** -- mesa `vn_wsi_thylacine.c` (NEW: headless-slot wsi_interface; marked no-bo dedicated allocs; img registration; the throttle-fence stage-0 bracket) + `vn_device_memory.{c,h}` (the THLW marker + routing) + `vn_renderer_thylacine.c` (img family + poke + the bo-create counter) + `warp_client.{c,h}` + `meson.build` (VN_USE_WSI_PLATFORM now ON) + `thylacine_prove.c` step 10, `tools/warp-host.sh` + `tools/test-venus-verdict.sh` (the `wsi swapchain OK` witness, 83 checks) ...
+- **W-3e: the SDL2 Vulkan glue + the img poke-completion + the first-Vulkan-frame witness (I-40 pbound / I-45 / I-7; Warp-WSI W-3e)** -- `usr/ports/sdl2/thylacine/SDL_thylacinevulkan.{c,h}` (the 5 hooks; WEAK venus externs; the arming CreateSurface: glsrc surface-half THEN set_surface ctx-half; the `-u vk_icdGetInstanceProcAddr` linking model) + `SDL_thylacinevideo.c` (slots wired), `usr/tapestryd/src/server.rs` (`img_poke_complete` -- the img family's present-COMPLETE rides the poke; `flip_in_place`), mesa patch 0020 (`vn_renderer_thylacine_warp_ctx_pub` + `thylacine-vk-sdl-prove`), `usr/joey/joey.c` + `tools/build.sh` (the boot probe + staging), `tools/warp/boot-probe.sh` + `tools/warp-host.sh` + `tools/test-venus-verdict.sh` (both witness halves: app PASS + `scanout direct N img res R`; 89 checks) ...
 - **MMU user-PTE clear + TLBI** -- `arch/arm64/mmu.c::mmu_uninstall_user_pte / mmu_uninstall_user_range`, `kernel/burrow.c::b ...
 - **Errno ABI surface + `snare:*` fault-note family** -- `kernel/include/thylacine/errno.h` (T_E_* registry; ABI-pinned by `_Static_assert`s to POS ...
 - **Memory-model defense-in-depth (F3 + F4 + F5)** -- `mm/phys.c::phys_init` (RAM cap), `mm/phys.c::alloc_pages` (KP_ZERO barrier), `arch/arm64/ ...
@@ -247,6 +269,7 @@ The index (one line per row; refresh with the table):
 - **Capability checks** -- All syscall entry points
 - **KASLR / ASLR** -- `arch/arm64/start.S`, `arch/arm64/kaslr.c`
 - **ELF loader** -- `kernel/elf.c`
+- **ELF loader: ET_DYN placement + AT_ENTRY (DISTRO D-2)** -- `kernel/elf.c` (the `e_type` gate + the one-place PIE bias), `kernel/inclu ...
 - **`AT_HWCAP` exec-auxv CPU-feature word (the CF-4 A AEAD lever)** -- `arch/arm64/hwfeat.{c,h}` (`g_hw_features.linux_hwcap` — the Linux-uapi-numbered word deri ...
 - **`burrow_attach` / `burrow_detach`** -- `kernel/syscall.c` handlers, `kernel/burrow.c`, `kernel/vma.c`
 - **Overcommit memory: lazy-anon demand-zero + decommit + the I-32 VMA-count axis** -- `kernel/syscall.c` (a NEW `sys_burrow_attach_lazy_for_proc` + handler — eager `sys_burrow_ ...
@@ -284,6 +307,8 @@ The index (one line per row; refresh with the table):
 - **A-5c RECOVER recovery keyslot (corvus)** -- `usr/corvus/src/main.rs` (the new `VERB_RECOVER`=8 handler [`subject_kind` 0=system / 1=us ...
 - **`SPAWN_PERM_MAY_POST_SERVICE` one-hop delegation (A-5b #827b)** -- `kernel/syscall.c` (the `SYS_SPAWN_*` perm-grant gate, now PER-BIT: `SPAWN_PERM_CONSOLE_TR ...
 - **Pathname resolution (`stalk`) + namespace-resident `/srv`** -- the resolver (`stalk` + `cross_mounts`/`domount` + the in-call `trail`; folds in / superse ...
+- **Symlink expansion in `stalk` (DISTRO D-1; the I-28 refinement)** -- `kernel/stalk.c` (`stalk_expand_link` + the `restart:` label + the `base` re-anchor), `k ...
+- **Union mounts (walk/readdir/create/remove/fd-base; I-1/I-3/I-28)** -- `kernel/territory.c` (mount MBEFORE/MAFTER/MREPL ordering + `mount_members_snapshot`), `kernel/stalk.c` (`STALK_CREATE`/`STALK_REMOVE` amodes; `stalk_union_child`/`_create_member`/`_member_holding`; `stalk_build_union_snap`/`union_snap_point_only`; base + descent cross), `kernel/syscall.c` (`union_readdir_run` + `viv_mutation_parent`/`sys_union_dirfd_member` + the fd unlink/rename/create handlers), `kernel/spoor.c` (`union_snap {point,n,m[]}` w/ `union_member {opened,walkable}`); `specs/territory.tla` (`WalkFirstHit`/`ReaddirDedupFirstWins`/`CreateTargetCorrect`/`RemoveTargetCorrect`/`OrderCorrect`) ...
 - **Exec from the namespace (spawn binary resolution)** -- `kernel/syscall.c` (`exec_load_from_namespace` -- the new helper: resolve the program name ...
 - **Namespace layout: /proc + /ctl mounts (#57a)** -- `kernel/devramfs.c` (the synthetic `/ctl` mount-point dir added to `g_ramfs_synth_dirs[]` ...
 - **Per-Proc cwd (`SYS_CHDIR` / `SYS_GETCWD` + the `SYS_OPEN` relative->cwd join)** -- `kernel/include/thylacine/territory.h` + `kernel/territory.c` (`Territory.dot_path` -- the ...
@@ -310,8 +335,25 @@ The index (one line per row; refresh with the table):
 - **Process creation: `execve` + shared address spaces + COW `fork` (the LINEAGE arc, L-1..L-7; I-44)** -- **L-1 through L-5 LANDED (stock `fork()` works); L-6 NEXT (the VIVARIUM clone/execve/wait4 ...
 - **VIVARIUM: the syscall-entry phenotype branch + the spawn-time declaration (V-1b; I-43)** -- `kernel/syscall.c` (`syscall_dispatch`'s phenotype branch -> `viv_linux_dispatch`; the TIE ...
 - **Warp: the GPU seam -- the GPU-BO subtype + the `/dev/warp` tree + the fenced controlq (Warp-2; I-45)** -- `kernel/dma_handle.{c,h}` (the subtype enum + the 64 MiB envelope), `kernel/syscall.c` (`SYS_DMA_CRE ...
+- **File-backed EL0 mmap: the phenotype FILE arm (DISTRO D-3; I-36 GENERALIZES, I-12 + I-32 on the line)** -- **D-3a + D-3b + D-3c AS-BUILT.** `kernel/include/thylacine/viv ...
+- **DISTRO D-4: the PT_INTERP rewrite to the interpreter (exec dispatch)** -- `kernel/exec.c` (NEW `exec_interp_argv` + the rewrite block ...
+- **Per-mount `MNOEXEC`: the executable-mapping vouching gate (#217; I-12 PROVENANCE half)** -- `kernel/include/thylacine/territory.h` (`MNOEXEC` 0x0010 in the existing ` ...
 - **Initial bringup** -- `kernel/main.c`, `usr/joey/joey.c`
+- **Warp-6 V-2: host-visible BAR mapping (`SYS_BURROW_FROM_HOSTMEM` + `BURROW_TYPE_HOSTMEM` + the mmu attr-index widening + the F1 death-quiesce; I-45/I-32/I-37)** -- `kernel/syscall.c` (`sys_burrow_from_hostmem_handler` + `hostmem_resolve_subrange` + the `sys_weft_share_for_proc` gate), `kernel/burrow.{c,h}` (`burrow_create_hostmem` + the 3 type arms + share admission), `arch/arm64/mmu.{c,h}` + `arch/arm64/fault.c` (`mmu_install_user_pte_attr`), `kernel/pci_handle.{c,h}` + `kernel/proc.c` (the `hostmem_burrows` counter + `kobj_pci_quiesce_dma_only` + the death-path branch), `kernel/weft.{c,h}` (`WEFT_BIND_HOSTMEM`) ...
+- **`SYS_FD_DEVCLASS` fd-class introspection + the Beacon emission layer (H-1)** -- `kernel/syscall.c` (`sys_fd_devclass_handler` = 80; rights=0, ref-transfer discipline), `kernel/devdev.c` (`devdev_fd_de ...
+- **halcyond: the Halcyon transcript renderer + the shared VT core + the renderer-choice spawn (H-2)** -- `usr/halcyond/` (transcript.rs THE PARSER of untrusted OSC 1936 frames [format-fuzz class] + la ...
+- **tapestryd + halcyond: the Daylight chrome path -- the renderer-gated chrome surface + the gated tile-status verb + the status feed (H-3b)** -- `usr/tapestryd/src/server.rs` (the `create ... role=chrome bind=<id>` gate; `surface_target`; the CONFIGURE fans; `paint_borders` the live hairline; `tag <id> status` + `PFK_STATUS`), `usr/tapestryd/src/pane.rs` (`Status` + the resets), `usr/halcyond/src/{chrome,chromeset,main,transcript}.rs` (the rules / the surfaces / the status feed / the exit latch) ...
+- **tapestryd + halcyond: the obj verb menu -- the renderer-gated menu surface, the input GRAB, the compositor-owned dismiss, click-to-focus (H-3c, THE GATE)** -- `usr/tapestryd/src/server.rs` (`role=menu` create; `menu place`/`menu dismiss`; the grab in `key_event`/`ptr_route`/`ptr_btn`/`ptr_rel_emit`/`chord_key`; `retire`'s menu arm + `menu_heal` + `menu_reassert`), `usr/lib/libtapestry/src/lib.rs` (`menu_on_shared`; `Drop` writes `destroy` on a shared session), `usr/lib/beacon/src/verbs.rs` (the rules engine), `usr/halcyond/src/{menu,menuset,main}.rs` ...
+- **libtapestry: THE EVENT SET -- one 9P session + one Loom ring per client, shared by every surface; the ring-slot lifecycle; the synchronous present (H-3c-2)** -- `usr/lib/libtapestry/src/lib.rs` (`EventRing`: `connect`/`adopt`/`wait`/`poll`; `RingCore::join`/`leave`/`reregister`/`arm_all`/`pump`/`route`; `Surface::{fullscreen_on,open_on,chrome_on,menu_on}`; `Drop` = destroy -> leave -> fds), `usr/halcyond/src/{main,chromeset,menuset}.rs` ...
+- **tapestryd + halcyond + ut: the status bar -- the display-level chrome carve + `role=status` + OSC 7 / the cmd mark (H-3d)** -- `usr/tapestryd/src/server.rs` (`Comp.status`, the carve in `reconcile`, `status_rect`, the `statusbar` file), `usr/halcyond/src/{status,statusset,transcript}.rs`, `usr/utopia/libutopia/src/repl.rs` (`cwd_report`, `mark_cmd`) ...
+- **tapestryd + halcyon: the Session(principal) pane-authority actor + the one-shot placement claim + the restore tool (H-4b; layout save/restore, the D decision)** -- `usr/tapestryd/src/server.rs` (`Actor::Session`; the 3-way `actor()`; `owner_principal`; the claim mint owner-gate + `create claim=`; `PFK_OWNER`; `reap_session_empties`), `usr/tapestryd/src/{pane,main}.rs` (the both-empty split stamp; the last-conn reap sites), `usr/lib/libtapestry/src/lib.rs` (`take_env_claim` + the spent-token unlink), `usr/lib/libhalcyon/src/{layout,skeleton}.rs` (the `env` marker + `prune_env`; the pure restore planner), `usr/halcyon/src/{main,lib}.rs` (the restore tool; `resolve_prog`), the H-4b-1 csprng cap chain (warden/libdriver/joey), `tools/interactive/ls-gfx-restore.exp` ...
+- **#50 path-mutation family (`SYS_OPEN_CREATE`=109 + the phenotype openat-O_CREAT/mkdirat/unlinkat/renameat rows)** -- `kernel/syscall.c` (`sys_open_create_kpath_for_proc` + the extracted `spoor_create_install`/`spoor_unl ...
+- **VIVARIUM getdents64(61) + fsync(82)/fdatasync(83) + the O_DIRECTORY admission (6.25)** -- `kernel/syscall.c` (`spoor_readdir_run` [no-offset-advance] + `viv_dirent64_encode_run` + the 61/82/83 arms + the `dir_r ...
+- **VIVARIUM the git chunk: faccessat(48)/chdir(49)/fchmodat(53)/readlinkat(78) + geteuid(175)/getegid(177) + getrandom(278) + the PHENOTYPE-FORK-INHERITS-CAPS change (6.26)** -- `kernel/proc.c` (`rfork_forked_with_caps`) + `kernel/syscall.c` (`sys_rfork_core` PHENO_LINUX cap branch [`child->caps = (parent_caps & CAP_ALL) & ~CAP_ELEVATION_ONLY`, I-2/I-43] + 7 T2 arms + `sys_readlink_for_proc` [copy-out validated]) + `kernel/vivarium.c`/`vivarium.h` (`vivarium_faccessat_de ...
+- **VIVARIUM O_APPEND (FS pass-through) + pread64/pwrite64 (67/68): git commit + clone (6.27)** -- `kernel/include/thylacine/syscall.h` (`SYS_WALK_OPEN_OAPPEND` 0x40 + OMODE_VALID 0xB3->0xF3 + the delegated-append stance note) + `kernel/dev9p.c` (OAPPEND->O_APPEND in dev9p_open + dev9p_create; c->offset advisory, Stratum positions writes at EOF) + `kernel/vivarium.c`/`vivarium.h` (VIV_OMODE_APPEND + both openat decides admit O_APPEND + the PREAD64/PWRITE64 T1 renumbers) -- the kernel DELEGATES append to the FS (no append mode); pread64/pwrite64 = pure renumbers to SYS_PREAD/PWRITE ...
 - **Boot banner** -- `kernel/main.c`
+- **VIVARIUM 13: the `/viv/bin` phenotype mount (`MPHENO_LINUX` resolver subtree-scope; I-43 second declaration channel; I-28)** -- `kernel/include/thylacine/territory.h` (`MPHENO_LINUX` 0x0020), `kernel/territory.c` (`mount_lookup` `flags_out` + ns-render), `kernel/stalk.{c,h}` (`stalk_cross_mounts` `crossed_pheno` + `stalk_core`/`stalk_exec` threading), `kernel/syscall.c` + `kernel/include/thylacine/exec.h` (`exec_resolve_from_namespace_ex` + the SYS_SPAWN_FULL_ARGV `sa->pheno_linux` OR) ...
+- **VIVARIUM Design D: the phenotype re-decided at EVERY image load (execve re-decides; `Territory.root_pheno`; the commit-region store; I-43 amended, I-19/I-28/I-12 on the line)** -- `kernel/syscall.c` (`sys_execve_core` decide-local -> threaded; the three spawn thunks' `phenotype_decide` stamp + `territory_declare_linux`; the four resolve sites on `_ex`), `kernel/proc.c` (`proc_exec_replace(p, nas, new_pheno)`: the ONE RELEASE store + the reset on the PARAMETER), `kernel/exec.{c,h}` (`exec_load_into`/`_body` take `pheno`; the PT_INTERP dispatch on it), `kernel/stalk.c` (the `restart:` SEED), `kernel/territory.{c,h}` (`flags` in the old `_pad`, `territory_root_pheno`/`_declare_linux`, the clone copy), `proc.h` (`phenotype_decide`) ...
 
 The trigger list is *cumulative*: a chunk that adds an audit-bearing surface appends its full row to `docs/AUDIT-TRIGGERS.md` and a one-line entry to the index above, in the same PR that introduces it.
 
@@ -321,7 +363,15 @@ The prosecutor is a **dedicated agent definition**, not an inlined general-purpo
 
 **The rule: run every review on the highest available FABLE at max effort; fall back to the highest available OPUS at max effort when Fable is unavailable.** As of 2026-07-28 that reads **Fable 5 primary, Opus 5 fallback** — but the rule is the *highest available version of each family*, not those version numbers, so a later Fable/Opus supersedes them automatically without editing this row. (Fable was re-enabled by the user 2026-07-04 after the 2026-06-13..07-04 US-Government-policy restriction; `memory/feedback_reviewer_model.md` is the single home for this decision.)
 
-**Why Fable is preferred, and why the fallback tier matters:** Opus is the primary IMPLEMENTATION agent on this project. A prosecutor drawn from the same family shares its blind spots — the same priors about what "looks fine", the same habits of reading past a given construction. Family diversity is the point of the review, so the reviewer should come from a *fundamentally different* lineage than the author. Falling back to Opus is therefore a real degradation, not a neutral substitution: it buys max-effort rigor but forfeits the independence. Note it in the close (as prior rounds did) rather than treating an Opus round as equivalent, and prefer re-spawning on Fable when a load-bearing surface was reviewed under the fallback.
+**Why Fable is preferred:** Opus is the primary IMPLEMENTATION agent on this project. A prosecutor drawn from the same family shares its blind spots — the same priors about what "looks fine", the same habits of reading past a given construction. Family diversity is *one* axis of the review's value, so the reviewer should ideally come from a *fundamentally different* lineage than the author. Note the tier in the close (as prior rounds did) rather than silently treating an Opus round as identical.
+
+**NEVER SKIP A ROUND FOR WANT OF FABLE (user, 2026-08-14).** When Fable is unavailable for ANY reason — credits exhausted, capacity, a classifier false positive — **run the highest available model below it, even though it matches the implementation agent's family.** Do not defer the round and do not leave the surface unreviewed.
+
+The reasoning corrects an over-narrow reading of the paragraph above: family diversity is only ONE of the two things a subagent review buys. The other is **context independence** — the reviewer has not read the author's reasoning, did not watch it talk itself into anything, and is not anchored by the justifications the author wrote as it went. A same-family prosecutor keeps that second property *in full*. So a same-family round is not near-worthless; it is a genuinely independent read that shares one axis with the author. **A same-family review beats no review, every time** — the cost of an unreviewed soundness surface dwarfs the cost of being independent on one axis instead of two.
+
+When the fallback engages, exploit what it does have: tell the prosecutor in its prompt that (a) family diversity is not what it brings this round, (b) context independence is — so it must RE-DERIVE load-bearing claims from the code rather than accept comments, commit messages, or prior self-audit arms as evidence, and (c) the one reflex it must consciously fight is agreeing with a construction *because it is the construction it would also have written*.
+
+A fallback round that FINISHES is closed — no Fable re-run is owed (user, 2026-08-03). Only a round that DIED without producing a report gets re-spawned; if it died of credit exhaustion, go straight to the fallback tier rather than retrying Fable. Full record + the superseded clauses: `memory/feedback_reviewer_model.md`.
 
 The agent reports `MODEL(start)` as its first output line and `MODEL(end)` as its last, independently — both should name the same Fable; a `start != end` mismatch flags a mid-run model fallback, so weigh the affected portion and re-spawn if a key surface was reviewed after it. An on-disk agent definition loads at session START: after creating/editing the `.md`, start a fresh session (or open the `/agents` UI) before `subagent_type: holotype-reviewer` resolves — in the SAME session, pass the Agent tool's per-call `model` override instead.
 
@@ -414,14 +464,14 @@ names).
 | I-9 | No wakeup lost between cond-check and sleep, incl. the death-wake (#811; frame-atomic for the elected 9P reader recv -- a mid-frame death defers its unwind to the next frame boundary, §8.8.1.1/#90) + terminate-`interrupt` (LS-5) generalizations + the Weft-4 readiness-ring single-cache-line poke (the store-buffer register-then-observe) | `scheduler.tla`, `poll.tla`, `cons_poll.tla`, `net_poll.tla`, `weft_readiness.tla`, `tsleep.tla`, `death_wake.tla`, `reader_frame.tla` (#90); torpor leg prose |
 | I-10 | Per-9P-session tag uniqueness (tag==table index; no reuse until reply/Rflush, #845) | `9p_client.tla` |
 | I-11 | Per-9P-session fid identity stable for the fid's open lifetime | `9p_client.tla` |
-| I-12 | W^X: every page writable XOR executable (PTE checks + ELF reject + no prot-mutation syscall exists; W1.5 transient RW+XN alias) | runtime + `_Static_assert` |
+| I-12 | W^X: every page writable XOR executable (PTE checks + ELF reject + no prot-mutation syscall exists; W1.5 transient RW+XN alias) + the #217 PROVENANCE half: a file-backed executable mapping requires BOTH a Dev with `may_back_exec` set (the allowlist floor) AND a mount not marked `MNOEXEC` | runtime + `_Static_assert` |
 | I-13 | Kernel-userspace isolation: TTBR0/TTBR1 split | runtime |
 | I-14 | Stratum block integrity (Merkle); OS observes via 9P, bounds hostile Rlerror ecodes | Stratum-side + `9p_client.rlerror_hostile_ecode_bounded` |
 | I-15 | Hardware view derives entirely from DTB (documented PL011 QEMU-virt fallbacks are the argued exceptions) | code review + audit |
 | I-16 | KASLR randomizes kernel base at boot (never-zero slide) | runtime + `/ctl/kernel-base` |
 | I-17 | EEVDF quantitative latency bound — DESIGN TARGET; needs the deferred EEVDF math (2A-F6 → RW-13) | `scheduler.tla` (qualitative only) |
 | I-18 | IPIs from CPU A to B processed in send order | `scheduler.tla` |
-| I-19 | Note delivery causal order; non-`kill` consumed exactly once; `kill` non-catchable; uncaught `interrupt` default-terminates (LS-5) | prose §7.6.7 + tests (notes.tla dropped) |
+| I-19 | Note delivery causal order; non-`kill` consumed exactly once; `kill` non-catchable; uncaught `interrupt` default-terminates (LS-5); each note has ONE default action, held in the `g_known_notes` `dfl` column -- TERMINATE / STOP (`tty:susp`) / IGNORE (#15). PARTIAL unification: the terminate-class latch + `SYS_NOTED(NDFLT)` read the column; the uncaught STOP is still decided by `job_stop_cb` at POST time and the IGNORE class has no uncaught reader (the note is retained, not ignored) -- unifying those is OWED (#15 F5) | prose §7.6.7 + tests (notes.tla dropped) |
 | I-20 | PTY master↔slave atomicity — ENFORCED (PTY-1 kernel seam + the PTY-2 userspace ptyfs data path; byte conservation + SignalXorByte + drain-then-EOF + HupAtMostOnce-by-construction; the 2e openpty E2E proves the signal/teardown legs live) | `pty.tla` + `pty_stop.tla` + the §25.4 PTY rows + the 2e audit |
 | I-21 | Kernel uniformly EL1h (`SPSel=1`); `SP_EL0` exclusively the user stack | `sched_ctxsw.tla` + `test_smp` |
 | I-22 | No identity carries ambient super-authority; elevation only via the legate | IDENTITY-DESIGN §3.3/§8.2 prose + tests |
@@ -430,7 +480,7 @@ names).
 | I-25 | Legate authority scope-bounded + fully revoked on scope exit | IDENTITY-DESIGN §3.1/§9.8 prose + tests |
 | I-26 | Cross-Proc kill is explicit two-axis (owner-identity OR CAP_HOSTOWNER/CAP_KILL) | IDENTITY-DESIGN §9.8 prose + tests |
 | I-27 | Trusted path: SAK unspoofable; console-ATTACH (elevation gate) distinct from console-OWNER (Ctrl-C target) per `@2608c88` (the SAK revokes ATTACH + sets `owner=NULL` + attaches corvus, NEVER owns corvus); the `/dev/cons` namespace front-door gates at `devdev.open` identically to `SYS_CONSOLE_OPEN` (#57b). **MEDIUM-INDEPENDENT** (`TRUSTED-PATH.md`, 2026-06-15): generalized off serial -- same SAK+ATTACH-to-corvus rides any renderer; framebuffer = corvus cell-grid -> kernel trusted sink (sole painter, renderer suspended); graphical SAK = kernel-scanned key-combo via the MENAGERIE trusted-tier keyboard; framebuffer enforcement reserved-then-enforced (at impl); serial live (A-4c) | IDENTITY-DESIGN §9.8 + ARCH §17.1/§9.4 + `docs/TRUSTED-PATH.md` prose + tests |
-| I-28 | Path resolution contained at `root_spoor` + per-component X-search; mount-cross keyed by full Spoor identity | ARCH §9.6.7 + STALK-DESIGN prose + tests |
+| I-28 | Path resolution contained at `root_spoor` + per-component X-search; mount-cross keyed by full Spoor identity; symlink expansion contained by the SAME machinery (DISTRO D-1, AS-BUILT: absolute targets re-anchor at the caller's CURRENT `root_spoor`, expanded components re-enter the gate family, follows bounded at 40; the re-anchor is only witnessable through a non-root base, i.e. `SYS_OPEN` with a dirfd -- the `SYS_WALK_OPEN` twin does not expand, #184) | ARCH §9.6.7 + STALK-DESIGN prose + `docs/DISTRO.md` + tests |
 | I-29 | Loom completion integrity: exactly-one terminal CQE; no stale; CQ never overfilled | `loom.tla` + `loom_multishot.tla` + `loom_order.tla` |
 | I-30 | Loom submit-time capability pin; kernel never re-reads a shared-ring field post-check | `loom.tla` buggy cfgs |
 | I-31 | ASID rollover safety: no cross-generation ASID aliasing; rollover never yanks an active/reserved ASID | `asid.tla` (clean + 5 buggy cfgs) |
@@ -438,11 +488,11 @@ names).
 | I-33 | Namespace name retention is non-load-bearing: every Spoor carries a refcounted copy-on-walk `Path` (its cleaned namespace name -- the Plan 9 `Chan.path`), but the resolver is WRITE-ONLY to it (stalk/walk/create append; nothing reads `->path` to resolve/perm-check/cross), so a wrong/stale/absent/failed Path changes only the cosmetic content of the introspection readers (`SYS_FD2PATH`/`/proc/fd`/`/proc/ns`), never a resolution/permission/syscall result; a path-alloc failure leaves Path NULL and the WALK SUCCEEDS. Path lifetime is subordinate to its Spoor's (one ref/Spoor, atomic, freed with the last Spoor); the string is immutable once built (only `path->ref` is concurrent) | prose ARCH §9.6.9 + `docs/reference/30-dev-spoor.md` + STALK-DESIGN + the focused audit + tests + the SMP gate |
 | I-34 | Driver authority bound (ENFORCED -- Menagerie build-arc 2): a driver's hardware authority is exactly its warden-granted **allowance** -- a per-Proc set of MMIO PA windows / IRQ INTIDs / a DMA per-buffer cap / **PCI `(bus,dev,fn)` functions** (the 4th axis, build-arc step 6a). NARROWED (`p->allowance != NULL`) bounds `SYS_MMIO/IRQ/DMA_CREATE` **+ `SYS_PCI_CLAIM`** (gated on the resolved `(bus,dev,fn)` via `kobj_pci_resolve_bdf` + `HW_RES_PCI`) to the conferred set; BROAD (`allowance == NULL` -- the warden + the existing trusted servers) is bounded only by the I-5 reservation (the as-built v1.0 path, unchanged). Never widened (windows immutable post-confer; a forked child inherits an equally-narrow copy via `allowance_clone_into` -- the I-2 hardware-axis analog); fully revoked on unbind/removal/crash (`proc_revoke_allowance` + `proc_group_terminate`). A narrowed driver also CANNOT spawn a child Proc (drivers are leaves -- MENAGERIE §13.2 "sources, not spawners; one auditable chokepoint"; `rfork_internal` fail-closed denies a narrowed parent a child, 5e-4 F2), so no hw-capable grandchild can inherit/be-conferred an allowance that survives the per-Proc revoke + thread-group-scoped terminate. The central hazard -- an in-flight `SYS_*_CREATE` racing a `DeviceRemoved` revoke -- is closed by the two-step create (the lock-free `allowance_permits` gate then the `allowance_handle_alloc` install under a `revoked` re-check under `allowance->lock`). The I-25 analog for hardware; generalizes pci-1b (a PCI device's allowance IS its claimed BARs -- the per-`(bus,dev,fn)` PCI axis enforced at `SYS_PCI_CLAIM` since step 6a); preserves I-5 (the bounded authority-to-create passed down, never pre-minted handles) | `specs/allowance.tla` (clean cfg TLC-green + the 4 buggy cfgs: revoke_race / revoke_leak / confer_widen / self_widen; the PCI axis is the runtime-tested per-kind predicate -- no spec change, the 4 cfgs re-run green) + prose `docs/MENAGERIE.md` §4 + `docs/reference/117-allowance.md` + the focused audit + the `allowance.*` tests (incl. `handle_alloc_revoked_aborts` + `narrowed_proc_cannot_spawn` + `pci_membership`) + the SMP gate |
 | I-35 | Mandate attenuation + revocation (persistent attenuated delegation, `docs/MANDATE-DESIGN.md`): a standing grant confers <= its issuer's held authority, never widened, revocable — RESERVED; OWED at the MA arc (Phase 8, after net) | `specs/mandate.tla` (reserved, spec-first re-enabled) + prose MANDATE-DESIGN.md |
-| I-36 | File-backed demand-paged exec soundness (REVENANT): the kernel demand-pages an executable's read-only segments (text + R-only rodata since #45) from the FS iff the 7 conditions hold jointly (install-once, death-interruptible page-in, fail-close on I/O error, W^X, I-cache sync, Image-cache eviction safety, pin-at-exec). AS-BUILT (R-5 CLOSED CLEAN + the #45/read-ahead addenda) | prose EXEC-LOAD-DESIGN.md + ARCH §6.5 + the R-5 audit + tests + the SMP gate |
+| I-36 | File-backed demand-paged exec soundness (REVENANT): the kernel demand-pages an executable's read-only segments (text + R-only rodata since #45) from the FS iff the 7 conditions hold jointly (install-once, death-interruptible page-in, fail-close on I/O error, W^X, I-cache sync, Image-cache eviction safety, pin-at-exec). AS-BUILT (R-5 CLOSED CLEAN + the #45/read-ahead addenda). DISTRO D-3 (design 2026-08-05) generalizes the 7 conditions to phenotype mmap-time library maps — read-only/exec userspace file maps admitted, writable stays banned (a writable MAP_PRIVATE request terminates in a private eager copy) | prose EXEC-LOAD-DESIGN.md + ARCH §6.5 + `docs/DISTRO.md` §6 + the R-5 audit + tests + the SMP gate |
 | I-37 | Capability network dataplane integrity (Weft): the per-flow zero-copy shared-Burrow path is sound — registration-is-the-capability, no per-op mediation, the F_NOTIF buffer lifetime (no in-flight-page UAF), ring TOCTOU closed, the share bounded by the flow. AS-BUILT (the Weft arc COMPLETE at Weft-7) | `weft.tla` + `weft_readiness.tla` (clean + liveness + buggy cfgs) + the Weft-7 audit |
 | I-38 | Larder cache coherence (the guest-side FS cache): a hit returns exactly what a fresh RPC would under close-to-open — Open-revalidate + Read-serve + OwnWrite-invalidate; incl. the write-behind staged legs. AS-BUILT (the L1 arc COMPLETE at L1f + the F1 wb / term-4 addenda) | `fs_cache.tla` (clean + external + liveness + 5 buggy cfgs) + prose LARDER-DESIGN.md + the L1f audit |
 | I-39 | Debug authority bounded: debug = namespace-names-the-target + the two-axis gate (owner OR `CAP_HOSTOWNER`/`CAP_DEBUG`; `CAP_DAC_OVERRIDE` NOT an axis); user reads/writes + all execution control stopped-only (fully-stopped rejects a pending `group_exit_msg` — death wins); a read-only inspect of a SETTLED (`on_cpu==false`) thread's KERNEL stack (`/proc/<pid>/kstack`, the Linux `/proc/stack` tier, 8b) is I-39-authorized but NOT debug-stop-gated (memory-safe: bounded to the thread's own kstack + the `g_proc_table_lock` lifetime pin; best-effort-consistent; controls no execution) -- raw slid kernel addrs (which reveal the KASLR slide, an I-16 secret) go ONLY to the CAP_DEBUG/CAP_HOSTOWNER tier, the owner axis gets the KASLR-independent symbolic form (8b-1d F1); no debug op writes text (I-12/I-36 — breakpoints are hardware), escapes the target's `pgtable_root`, or strands the quarry (detach/close/debugger-death resumes an ATTACHED target — but a debugger-LAUNCHED `exitkill`-marked target is TERMINATED on debugger death, die-with-launcher / `PTRACE_O_EXITKILL`, the EXITKILL refinement [designed 2026-07-23, §5d + `debug_stop.tla::EventuallyLaunchedDies`]: `devproc_debug_release_cb` `proc_group_terminate`s a marked ALIVE target instead of `proc_debug_resume`, closing the debugger-launched-orphan leak — an explicit `detach` still resumes; AND a hardware fire racing a detach delivers only while owned — SA-1); kproc + NOTRACE refused. AS-BUILT at 8a-1 (software-checkpoint tier) + 8a-2 (the HW-breakpoint/single-step/watchpoint tier: DBGB*/DBGW* per-Proc install + `MDSCR.SS` + EC 0x30/0x32/0x34); 8b = the settled-thread inspect + the cross-boundary unified stitch (kernel DWARF deferred to 8c); 8c-2 = the stop-of-a-sleeper (a nested stop-detour inside `sleep()`/`tsleep()` so a multi-thread Go target -- whose idle futex-parked Ms never reach the tail -- becomes fully-stoppable; DEATH still wins [die-check-first]; #88 records a detour-parked thread's EL0-entry frame at the EL0-sync choke point so `/proc/regs` works for a syscall-blocked head; **8c-3** (#89) releases the elected-9P-reader role on a stop -- the reader's recv *primitive* is FRAME-ATOMIC [`reader_recv_frame` sets `Thread.stop_unwinds = (got==0)` per-chunk + holds `stop_no_park`: a stop UNWINDS only at a frame boundary -> the detour returns `SLEEP_INTR` and BLOCKS THROUGH mid-frame (else it would desync the shared stream -- the holotype F1 correction)] so `client_wait` can hand the role to a runnable survivor [the handoff skips debug-stopped owners] before parking role-free, while the *syscall* is still preserved [re-elect + re-block on resume] -- so a stop never freezes the shared FS client for survivor Procs; the identical death-path mid-frame unwind is task #90 -- the #90 block-through design [ARCH §8.8.1.1 + `specs/reader_frame.tla`, signed off 2026-07-19]) | `specs/debug_stop.tla` (clean + 6 buggy cfgs incl. `fault_stop_ungated` + `BUGGY_STOP_SKIPS_SLEEPER`, model-first; the `sleep` PC + `StopWakesSleeper` added at 8c-2; 8c-3 is below the model -- no change) + `specs/debug_step.tla` (the step machine) + `docs/reference/134-debug-fs.md` + the 8a-1c/8a-2c/8c-2/8c-3 holotypes + the in-guest `/debug-probe` + `/hwbp-verify` + `/ambush-probe` E2Es + the SMP gate |
-| I-40 | T-1 no torn scanout / surface-share integrity (TAPESTRY §18.8; STAGED per the I-20 RESERVED→ENFORCED precedent): every page of a weave stays backed + mapped-membership-immutable from first client map to retire; a present op's lifetime brackets its `TRANSFER_TO_HOST_2D`; a weave retires only after quiesce + scanout-composition release. **KERNEL SHARE HALF ENFORCED at G-2** (ABI user-signed-off) | `tapestry_present.tla` (model-first, clean + liveness + 4 buggy cfgs) |
+| I-40 | T-1 no torn scanout / surface-share integrity (TAPESTRY §18.8; STAGED per the I-20 RESERVED→ENFORCED precedent): every page of a weave stays backed + mapped-membership-immutable from first client map to retire; a present op's lifetime brackets its `TRANSFER_TO_HOST_2D`; a weave retires only after quiesce + scanout-composition release. **KERNEL SHARE HALF ENFORCED at G-2** (ABI user-signed-off) | `tapestry_present.tla` (model-first; 4 clean + 8 buggy cfgs, gated by `specs/check-tapestry.sh`). Since **Warp-C C-1** (2026-08-16) the module also carries the GPU-COMPOSED present behind `ALLOW_COMPOSE` -- `NoTornCompose` (the composed drain) + `NoStaleCompose` (the P2 cross-context ordering hazard) -- and since **C-6's spec (2026-08-18)** the compositor READBACK class behind the same switch: `ComposeReadbackIssue`/`Complete` (a fenced host DMA-WRITE into the client BO's pages) + `NoTornReadback` with `DrainedOfReadbacks` on retire (`buggy_readback_free`). Both extensions are ADDITIVE by measurement, not by assertion: with the switch off the six pre-existing cfgs reproduce 5413 distinct states exactly. Since **Warp-WSI W-3b (2026-08-26)** the module also carries the PRESENTABLE class behind its own `ALLOW_PRESENTABLE` — a venus swapchain image as a HOST3D blob the server never maps (§4.1 as AMENDED by measurement at W-3c-1: virglrenderer REFUSES `USE_SHAREABLE` on a HOST3D blob, so the mint is `USE_MAPPABLE` and the guest-invisibility comes from never mapping it) (`NoTornPresentable`: the display never observes a retired presentable; `PGoneClean`: I-7/I-37 extended by the two observer arms; the display-safe teardown's `PUnbound`+`PDrained` conjuncts on `PServerRelease`/`PFree`; `buggy_punbind_skipped`/`buggy_pdrain_skipped`) — same additivity bar: all four pre-existing clean counts reproduced exactly (5413/5413/94680/94680, the composed pair now pinned in the gate) |
 | I-41 | **NOT ALLOCATED in §28.** `ADVANCED-GO-DESIGN.md` AG-2's software-breakpoint isolation reserves the number in its own doc and has never been promoted to a §28 row. Cite it as AG-2's, never as a §28 invariant | (reserved in ADVANCED-GO-DESIGN.md only) |
 | I-42 | JIT-as-a-capability: executable code emission is a capability (`CAP_JIT`), not an ambient power; W^X holds across the publish (`docs/LLVM-DESIGN.md` §8, the Clade arc). **ENFORCED at CL-7k** | prose + the CL-7k focused audit (W^X-adjacent — prosecute hard) |
 | I-43 | A phenotype confers ABI **SHAPE**, never **AUTHORITY** (`docs/VIVARIUM.md` §8/§12.1): a Linux-phenotype Proc gets Linux syscall *numbering/semantics* and not one bit of extra privilege | prose + the V-8 audit + `vivarium.*` tests + `sys_spawn_full_argv.validate_req_pheno_flags` + the two-vantage in-guest gate |
@@ -546,6 +596,8 @@ For Thylacine: kernel panic during ramfs → Stratum transition; driver process 
 - Anything visible to others (pushes to shared branches, PR creation, external API calls, Slack/email posting).
 - Spending significant compute or external budget.
 - Halcyon-related decisions that might change the v1.0-vs-v1.1 ship calculus (per ROADMAP §11.5 — Halcyon is final phase; v1.0-rc.1 is the shippable fallback).
+
+**Surface an escalation or decision as a BLOCKING question, not a passive summary (autonomous mode; user-directed 2026-08-19).** When autonomy is active (no `.claude/.no-stop-nudge` dotfile), put any escalation above, any genuine decision you need from the user, any *accumulated* pending votes, or any vote that is *blocking your intended path*, via **`AskUserQuestion`** — never buried in a closing summary a user who may be away for hours never reads. `AskUserQuestion` is a tool call, not a turn-end: it blocks for the answer and keeps you IN-TURN, which is *more* aligned with the no-unearned-yield rule, not less. Pure waits (a running gate, quota, hardware — nothing to decide) and already-answered questions stay clean stops, not blocking questions. This is enforced at turn-end by `tools/stop-hook.sh`; the `.no-stop-nudge` dotfile suppresses the hook and this directive together.
 
 **Deviation tracking**: If implementation diverges from ARCH / ROADMAP, surface it explicitly:
 
@@ -709,6 +761,35 @@ Keep it to one line. The purpose is orientation — the user should be able to s
 where the current chunk sits in the arc without opening the tracker.
 
 ---
+
+## The run journal (`docs/JOURNAL.md`) — binding, user-requested 2026-08-16
+
+After a long autonomous run the user has to reconstruct what happened, and doing
+that from `git log` + six status rows + a memory directory is work they should
+not have to do. **`docs/JOURNAL.md` is the single narrative thread**: what
+landed, in order, why, what it cost, what it left open.
+
+**Append an entry per autonomous run**, newest run first, as part of the run —
+not reconstructed at the end from memory, which is how the interesting parts get
+lost. A checkpoint you run *through* still earns its paragraph.
+
+What belongs there, and what does not:
+
+- **NOT a changelog.** `git log` owns the commits; duplicating them here rots.
+  **NOT a status doc** — `docs/phaseN-status.md` owns per-chunk rows.
+- **The reasoning, the wrong turns, and the findings nobody planned.** A wrong
+  turn that got caught is worth more than a win, because the catch is the
+  reusable part. Record what caught it — a control, a sabotage, a measurement —
+  not just that it was caught.
+- **Evidence on every claim**: a hash, a measured number, a file:line.
+- **Exactness about what "fixed" covers.** Half a defect closed is written as a
+  half, with the other halves named. A run that reads as uniformly successful is
+  usually a run that was written up carelessly.
+- **Decisions that needed the user**, and what they chose — so the next session
+  can tell a ratified decision from an assumed one.
+
+This is the operator's window into an unattended run. Treat a missing entry the
+same as a missing status row: the work is not finished without it.
 
 ## Reference documentation discipline (load-bearing)
 
@@ -875,11 +956,56 @@ tools/test.sh
 
 # SMP soundness gate (single boots lie -- multi-boot or it didn't happen).
 # Builds default + UBSan kernels, multi-boots smp4/smp8 x default/UBSan N>=10,
-# classifies CORRUPTION vs EXTERNAL-KILL (#88: QEMU's own 'terminating on
-# signal' report -- someone outside killed the VM) vs benign host-TIMING vs
-# OTHER. Fails iff any boot corrupts, is externally killed, or is unclassified.
+# classifies CORRUPTION vs EXTERNAL-KILL vs benign host-TIMING vs OTHER. Fails
+# iff any boot corrupts, is externally killed, or is unclassified.
+# EXTERNAL-KILL has TWO detectors (#222): QEMU's own 'terminating on signal'
+# report (#88) sees only CATCHABLE signals -- SIGKILL is uncatchable, so the
+# arm that most needed the bucket could not reach it, and the #200 sightings
+# landed in OTHER. The second reads the shell's job notification from the
+# HARNESS log, gated on test.sh's qemu_alive_at_teardown=0 so the harness's own
+# teardown kill cannot trip it. Captures are ARCHIVED, never deleted (#223) --
+# re-running a label to investigate it must not destroy the evidence.
 tools/ci-smp-gate.sh                    # full matrix, N=10 (or: make smp-gate)
 SMP_GATE_CONFIGS="default-smp4 ubsan-smp4" tools/ci-smp-gate.sh   # amplifier subset
+
+# The gate's classifier, tested without booting (fast; sources the real ladder).
+tools/test-smp-classify.sh
+
+# Hardening witnesses (#245). Both of these were invoked by NOTHING until
+# 2026-08-18 -- and both were already named in this file, inside the boot-banner
+# paragraph below, purely as CONSUMERS of the ABI strings (things that would
+# break if you reworded one), never as gates to run. That is the entire
+# difference between a mention and a command, and it is why they rotted while
+# `test-a72` and `check-v80-floor` -- one screen down, in this block -- did not.
+# test-fault builds one kernel per provoker and PASSes iff each EXTINCTIONs with
+# its expected message: the ONLY proof that the canary / W^X / BTI / the two
+# stack guards / the idle guard / the recursion arm actually FIRE, as opposed to
+# merely being compiled in. Its absence from every gate is how #244 --
+# recursive_kernel_fault emitting nothing at all -- hid for about a month.
+tools/test-fault.sh                 # all 7 variants    (or: make test-fault)
+tools/test-fault.sh canary_smash    # one variant       (-v for log dumps)
+
+# verify-kaslr multi-boots and PASSes iff the slide varies across N: ROADMAP
+# section 4.2's exit criterion for I-16, and that invariant's ONLY runtime
+# witness. `make test` accepts any SINGLE boot, so it is structurally blind to a
+# slide that never moves -- the same shape as test.sh being blind to LSE above.
+tools/verify-kaslr.sh               # 10 boots          (or: make verify-kaslr)
+tools/verify-kaslr.sh -n 25 -v      # more boots, print each offset
+
+# Warp-6 V-0 (the Venus gate). `warp-host.sh venus` boots the remote GL host
+# TWICE -- once with `venus=on,blob=on,hostmem=256M` and once WITHOUT -- and
+# passes only if capset id=4 (VENUS) is present in the first and ABSENT in the
+# second. The control leg is not a bonus: a one-directional check is satisfied
+# by a host that advertises the capset unconditionally. venus needs blob AND
+# hostmem together, and QEMU refuses the device otherwise rather than degrading.
+# BOTH GL hosts pass it: thyla-pi (KVM/V3D, ~220 s per boot) and thyla-gl
+# (Parallels/TCG/lavapipe, ~350 s), and they report byte-identical feature
+# words. test-venus-verdict drives the SAME verdict verb against crafted logs,
+# so the discrimination is testable without paying two boots at all (#245: a
+# checker reachable only by hand rots).
+WARP_HOST=thyla-pi WARP_ACCEL=kvm tools/warp-host.sh venus   # certify (2 boots)
+WARP_HOST=thyla-gl tools/warp-host.sh venus                  # iterate (2 boots)
+tools/test-venus-verdict.sh         # its verdict, no boot  (or: make test-venus-verdict)
 
 # ARMv8.0 floor guard (#91). The SOURCE + BINARY checks run automatically at the
 # tail of every ramfs bake; these are the extras. `check-floor` adds the big pool
@@ -894,8 +1020,25 @@ make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
 # login + assert rendered command output (the test that would have caught LS-1).
 # Optional gate (SKIPs without `expect`). THYLACINE_ACCEL=tcg default; bounded
 # retry (LS_CI_ATTEMPTS=3) tolerates host-timing flakes.
+# REFUSES to start (exit 2) if a VM from this tree is already running (#224):
+# its reaper is tree-wide `pkill -9`, so it would SIGKILL a boot it does not
+# own -- presenting to the other gate as "qemu GONE, guest healthy" -- and both
+# gates restore the same build/fixtures/pool.img. Do not run it alongside the
+# SMP gate in one tree; use a separate worktree.
 tools/test-interactive.sh               # full set (or: make test-interactive)
 tools/test-interactive.sh ls-ci         # one scenario by name
+
+# Signal witness (#200): NAME the sender of the SIGKILL that makes a QEMU vanish
+# with a healthy guest. SIGKILL is uncatchable, so the victim can never report
+# it -- smp-multiboot's arm-2 detector proves THAT it happened but prints
+# "sender NOT RECOVERABLE". macOS Endpoint Security observes signals from
+# OUTSIDE the victim, so it names both ends; needs root, but NOT a SIP change.
+# Watch mode REFUSES until --selftest has proven the capture can see a kill --
+# an unproven watcher logs nothing and reads exactly like a quiet host.
+# Routine teardown kills appear on every boot: the finding is a sender that is
+# NOT ours, never the mere presence of records.
+sudo tools/sigwatch.sh --selftest       # prove it, then
+sudo tools/sigwatch.sh                  # watch -> build/sigwatch.jsonl
 
 # Launch a dev VM
 tools/run-vm.sh
@@ -1164,6 +1307,23 @@ performing by hand at every boundary. Three things follow from that:
   with what was attempted and what it needs. Do not clear the state file to get
   moving again; that is disabling the one guard standing between a long run and
   an expensive one.
+- **A queued self-compaction is NOT yours to cancel — only the operator's.**
+  The script types `/compact` + Enter into the pane the instant you invoke it,
+  so the submission is queued in the client immediately. You CANNOT retract it
+  from inside your own turn: `tmux send-keys C-u` clears only the *live input
+  box*, never an already-Enter-queued command — a `/compact` you "cancel" that
+  way survives and fires later against whatever session is up. (Worked failure,
+  2026-08-19: a self-compact invoked early at 560k, then countermanded by the
+  Stop hook, was "cancelled" with `C-u`; the stray `/compact` rode the input
+  queue for ~4 hours and submitted right after the *real* compaction — harmless
+  only by luck, because a spurious `/compact` no-ops with "Not enough messages
+  to compact.") Two rules follow. **(1) Invoke `thyla-selfcompact.sh` only on
+  the real 600k signal, never in anticipation of it** — that is the one moment
+  nothing will countermand you, so there is nothing to cancel. **(2) If you must
+  abort a queued self-compaction anyway, you cannot do it yourself: raise a
+  blocking question to the operator** (`AskUserQuestion` — it interrupts the
+  turn without ending it) asking them to cancel it. The operator is the only
+  actor who can clear the client's input queue; your keystrokes cannot.
 
 Where the script is absent (a worktree that has not merged it), the hook says
 "recommend `/compact`" instead and the old behaviour stands — the two arms are
@@ -1213,6 +1373,65 @@ Recommendation format: short, includes rationale. "Working tree clean at tip X; 
 
 Do NOT recommend compaction mid-chunk or with uncommitted state.
 
+### A checkpoint is not a stopping point (the 600k line)
+
+**Under granted autonomy, land a chunk, report it, and start the next one IN
+THE SAME RUN.** Do not yield after every chunk waiting to be told to continue;
+do not compact "to be safe" at 300k. Stopping early is not free — a fresh
+context re-derives subsystem knowledge the current one already holds, and the
+re-derivation is where wrong turns come from.
+
+**The signal that ends the run is the `600k CHECKPOINT WINDOW` line** emitted by
+the user-level `~/.claude/ctx-hook.sh` PostToolUse hook. It has three levels
+that mean three DIFFERENT things, and collapsing them into one "context is
+getting high" warning is how the 600k line turns back into an alarm:
+
+| Level | Fires | Means |
+|---|---|---|
+| 600k CHECKPOINT WINDOW | once per crossing | the intended compaction point — carry the current step to a clean boundary, then recommend `/compact` |
+| 750k approaching | every call | wind down; start no new arc |
+| 880k AT THE WRAP LINE | every call | commit, hand off, yield |
+
+Two conditions make this safe rather than merely faster, and adopting the
+run-longer half without them is **strictly worse than not adopting it**:
+
+1. **The checkpoint contract still fires at every checkpoint**, including the
+   ones you run straight through. Account for running processes, keep the
+   handoff current, say what is next. A continuously-current handoff is what
+   makes compaction free at any moment — which is what lets 600k be a
+   recommendation instead of a scramble.
+2. **If the hook is absent, the rule has no brake.** "Run until the signal
+   fires" degrades into "run past the wrap line", because a signal that never
+   arrives is indistinguishable from one that has not arrived YET. A run two
+   thirds through its budget having seen NO `CONTEXT` line should treat the
+   hook as absent and fall back to judgement.
+
+   **The wiring is CONFIRMED for aux** (2026-08-15), which was worth checking
+   because this worktree defines its own `PostToolUse` (the yip line-hook) in
+   `.claude/settings.local.json` — so whether the user-level hook *also* runs
+   was a question about hook merging, not something to assume. It does:
+   **hooks MERGE across the user and project/local layers**, and aux runs
+   both. Observed the awkward way — the hook announced itself by reporting a
+   shell parse error mid-edit (`PostToolUse:Bash hook blocking error ...
+   ctx-hook.sh: line 52`), and a hook that errors is still a hook that ran.
+   Never having seen a `CONTEXT` line is explained by this context sitting far
+   below 600k, not by an override.
+
+   **A user-level hook is executed by every live session on every tool call**,
+   so editing one in place opens a window where other sessions run a partial
+   file. Write to a temp path and `mv` it over (a same-filesystem rename is
+   atomic; an in-place write is not).
+
+This is autonomy over SEQUENCING only. The escalation list is untouched —
+format breaks, destructive operations and scripture forks still stop the run.
+
+**Host holds are the cost, and they land on the other tracks.** Longer runs
+mean longer exclusive holds on the one machine (an SMP gate is ~20 min, LS-CI
+~30). Check `yip presence` before committing to a timed measurement, keep the
+refuse-up-front gates (`849d85fc`), and say on the line when you want a quiet
+host. Named here so a contention-shaped failure is never attributed to
+something else later.
+
 **The handoff is ready before you recommend anything.** Per the checkpoint
 contract, a compactable state means the handoff docs are ALREADY written — so
 this section is only about whether to *suggest* compacting, never about whether
@@ -1225,15 +1444,52 @@ compactable and you are not recommending it, still say so in a clause
 
 ## When to recommend `/effort max`
 
-For sessions involving:
+This is the detail behind **THE EFFORT GATE** at the top of this file — the same
+rule, with the full trigger list. **The disposition is a BLOCKING
+`AskUserQuestion`, not a passive suggestion** (user-directed 2026-08-31): before
+starting a chunk in a category below, unless you can confirm you are already at
+max, raise a direct `AskUserQuestion` offering `/effort max` (the recommended
+option first), and do not proceed on the qualifying work without the go-ahead.
 
-- Multi-step audit roundtrips with triage + fixes + re-audit.
-- Composition-heavy chunks crossing 3+ modules.
-- Format-break work (on-disk version bumps, ABI changes, syscall interface changes).
-- Spec-first work where the spec needs careful invariant design.
-- Recovery from an audit P0/P1 that requires deep tracing.
+The categories where max is advisable — the judgment trigger:
 
-Suggest the user run `/effort max` if not already set. Quality over speed in these contexts is non-negotiable.
+- **Crypto / security-critical** — Stratum integrity, janus / key handling, the
+  kernel CSPRNG (`chacha20` / `random`), corvus, capability checks, any
+  AEAD / MAC / keyslot path.
+- **Load-bearing kernel** — anything touching a §28 invariant or an
+  `AUDIT-TRIGGERS.md` surface (concurrency, commit ordering, handle / VMO /
+  BURROW lifecycle, note delivery, W^X, ASID, the scheduler, ...).
+- **Composition-heavy** chunks crossing 3+ modules, where many constraints must
+  be held at once.
+- **Format-break** work (on-disk version bumps, ABI / wire changes, syscall
+  interface changes).
+- **Spec-first** work where the invariant design is the hard part.
+- **Deep tracing** — audit P0/P1 recovery, or an elusive-bug hunt.
+
+Mechanics:
+
+- **Fires regardless of `.no-stop-nudge` / autonomous mode.** It is a quality
+  gate on the *work*, not a turn-end yield nudge, and `AskUserQuestion` blocks
+  in-turn without ending the run. It is the one escalation `.no-stop-nudge` does
+  NOT suppress.
+- **Check before asking: `~/.claude/effort-report.sh`** prints the session's
+  live effort from the transcript tail (the same session-discovery + staleness
+  honesty as `ctx-report.sh`; `settings.json` is only what a NEW session starts
+  at — measured drift day one: settings `high`, session `max`). **Reports
+  `max` → proceed**, no question. **Anything else — a lower level, UNKNOWN, a
+  stale-transcript warning, or the script absent → treat it as reduced and
+  ASK** — false positives beat false negatives, so when in doubt, ask without
+  hesitation.
+- **Ask once per qualifying arc, then carry the answer for the session** — do not
+  re-ask on every chunk; re-ask only when the work moves to a genuinely different
+  surface, or the user has changed effort.
+- **The routine majority does NOT trigger it** — mechanical edits, docs, status,
+  orchestration, well-scoped implementation against a clear spec are fine at
+  reduced effort; asking there is noise.
+
+Quality over speed on the qualifying surfaces is non-negotiable; the gate exists
+to make the effort choice *visible and deliberate* exactly where getting it wrong
+is expensive.
 
 ---
 
@@ -1353,7 +1609,39 @@ This protects against audit findings being lost across session boundaries. The n
 
 **The tell:** if you are writing a `Key` table, an `Arc state` field, or an `Ahead` line, you are writing a hand-back. Stop and ask whether you actually intend to stop. If you do not, delete it and make the next tool call instead.
 
-(This is behavioural, so it is only as good as your remembering it -- the mechanism that would make it structural is a `Stop` hook, deliberately not built: see §"The 600k checkpoint line". Until one exists, a turn that ends is a turn the user must restart, so ending one is a decision, never a default.)
+**The `Stop` hook now exists** (`tools/stop-hook.sh`, user-requested
+2026-08-16 after a run stopped at a checkpoint it should have run through --
+having written the very `Ahead` line named above as the tell). This paragraph
+used to say the hook was "deliberately not built"; it was built precisely
+because behaviour that is only as good as remembering it was not good enough.
+
+What it does, so you recognize it rather than argue with it: on a stop it
+computes the same budget `ctx-hook.sh` does, and if you are **between 120k and
+the 600k checkpoint line** and have taken **>= 6 assistant turns since the user
+last spoke** -- i.e. an autonomous run, not a reply -- it blocks ONCE and asks
+which of four cases applies. Three of them (an §"Autonomy + escalation" item, a
+question you have now answered, a genuine block) make stopping CORRECT: name it
+in a clause and stop, and it will not ask again. The fourth is the one it exists
+for -- **open the chunk you just named on your own `Next` line instead of
+yielding.**
+
+It is a question, not a veto, because only you can tell an earned yield from an
+unearned one. It stays silent below 120k (conversational), at/above 600k
+(stopping is what scripture wants there, and a second voice contradicting
+`ctx-hook.sh` would be worse than silence), and whenever `stop_hook_active` is
+already set. **It fails OPEN on every error path** -- a Stop hook that failed
+closed could trap a session in a loop it cannot talk its way out of, which is
+far worse than a missed nudge. Discrimination-tested across all seven
+conditions, including the two legs most likely to be silently wrong: a
+tool-result and a system notification must NOT count as "the user spoke", or the
+counter resets constantly and the hook goes quiet during exactly the runs it is
+for.
+
+It lives IN THE REPO rather than in `~/.claude/` (where `ctx-hook.sh` sits, and
+whose absence §"The 600k checkpoint line" already flags as leaving that rule
+with no brake). One copy, no sync obligation, and it survives a fresh clone;
+`~/.claude/settings.json` points its `Stop` event at this path. Install on a new
+machine is that one settings entry.
 
 End-of-iteration summaries (the response to a completed audit / chunk) follow a consistent structure for fast review.
 

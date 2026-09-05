@@ -68,11 +68,31 @@ const KEY_DOWN: u16 = 108;
 fn key_code(name: &str) -> Option<u16> {
     Some(match name {
         // Letters (evdev codes per linux/input-event-codes.h + keymap.rs).
-        "a" => 30, "b" => 48, "c" => 46, "d" => 32, "e" => 18,
-        "f" => 33, "g" => 34, "h" => 35, "i" => 23, "j" => 36,
-        "k" => 37, "l" => 38, "m" => 50, "n" => 49, "o" => 24,
-        "p" => 25, "q" => 16, "r" => 19, "s" => 31, "t" => 20,
-        "u" => 22, "v" => 47, "w" => 17, "x" => 45, "y" => 21,
+        "a" => 30,
+        "b" => 48,
+        "c" => 46,
+        "d" => 32,
+        "e" => 18,
+        "f" => 33,
+        "g" => 34,
+        "h" => 35,
+        "i" => 23,
+        "j" => 36,
+        "k" => 37,
+        "l" => 38,
+        "m" => 50,
+        "n" => 49,
+        "o" => 24,
+        "p" => 25,
+        "q" => 16,
+        "r" => 19,
+        "s" => 31,
+        "t" => 20,
+        "u" => 22,
+        "v" => 47,
+        "w" => 17,
+        "x" => 45,
+        "y" => 21,
         "z" => 44,
         "tab" => KEY_TAB,
         "up" => KEY_UP,
@@ -168,7 +188,11 @@ impl Chords {
         // Drop any existing entry for this (key, shift) first.
         self.binds.retain(|b| !(b.key == key && b.shift == shift));
         if let Some(a) = act {
-            self.binds.push(Bind { key, shift, action: a });
+            self.binds.push(Bind {
+                key,
+                shift,
+                action: a,
+            });
         }
         Ok(())
     }
@@ -224,11 +248,26 @@ mod tests {
         let c = Chords::new();
         // The i3-flavored defaults (the pre-cfg-4 hardcoded match).
         assert!(matches!(c.lookup(KEY_F, false), Some(ChordAction::Zoom)));
-        assert!(matches!(c.lookup(KEY_LEFT, false), Some(ChordAction::FocusDir(Dir::Left))));
-        assert!(matches!(c.lookup(KEY_LEFT, true), Some(ChordAction::MoveDir(Dir::Left))));
-        assert!(matches!(c.lookup(KEY_H, false), Some(ChordAction::Split(Mode::SplitH))));
-        assert!(matches!(c.lookup(KEY_TAB, false), Some(ChordAction::TabCycle(true))));
-        assert!(matches!(c.lookup(KEY_TAB, true), Some(ChordAction::TabCycle(false))));
+        assert!(matches!(
+            c.lookup(KEY_LEFT, false),
+            Some(ChordAction::FocusDir(Dir::Left))
+        ));
+        assert!(matches!(
+            c.lookup(KEY_LEFT, true),
+            Some(ChordAction::MoveDir(Dir::Left))
+        ));
+        assert!(matches!(
+            c.lookup(KEY_H, false),
+            Some(ChordAction::Split(Mode::SplitH))
+        ));
+        assert!(matches!(
+            c.lookup(KEY_TAB, false),
+            Some(ChordAction::TabCycle(true))
+        ));
+        assert!(matches!(
+            c.lookup(KEY_TAB, true),
+            Some(ChordAction::TabCycle(false))
+        ));
         assert!(matches!(c.lookup(KEY_Q, true), Some(ChordAction::Close)));
         // An unbound key (no default) -> plane-reserved, no action.
         assert!(c.lookup(34 /* g */, false).is_none());
@@ -252,7 +291,10 @@ mod tests {
         // leaves super+shift+left intact.
         assert!(c.bind("super+left", "none").is_ok());
         assert!(c.lookup(KEY_LEFT, false).is_none());
-        assert!(matches!(c.lookup(KEY_LEFT, true), Some(ChordAction::MoveDir(Dir::Left))));
+        assert!(matches!(
+            c.lookup(KEY_LEFT, true),
+            Some(ChordAction::MoveDir(Dir::Left))
+        ));
         // reset restores the full default table.
         c.reset();
         assert!(matches!(c.lookup(KEY_F, false), Some(ChordAction::Zoom)));
@@ -265,13 +307,22 @@ mod tests {
         assert!(c.bind("f", "zoom").is_err(), "super required");
         assert!(c.bind("super+", "zoom").is_err(), "empty key token");
         assert!(c.bind("super+f+g", "zoom").is_err(), "two keys");
-        assert!(c.bind("super+f+shift", "zoom").is_err(), "F4: modifier after key");
+        assert!(
+            c.bind("super+f+shift", "zoom").is_err(),
+            "F4: modifier after key"
+        );
         assert!(c.bind("super+nope", "zoom").is_err(), "unknown key");
         assert!(c.bind("super+f", "fly").is_err(), "unknown action");
-        assert!(c.bind("ctrl+f", "zoom").is_err(), "non-super modifier only, no super");
+        assert!(
+            c.bind("ctrl+f", "zoom").is_err(),
+            "non-super modifier only, no super"
+        );
         // shift+super order is accepted (modifiers commute; key is last).
         assert!(c.bind("super+shift+right", "move-right").is_ok());
-        assert!(matches!(c.lookup(KEY_RIGHT, true), Some(ChordAction::MoveDir(Dir::Right))));
+        assert!(matches!(
+            c.lookup(KEY_RIGHT, true),
+            Some(ChordAction::MoveDir(Dir::Right))
+        ));
     }
 
     #[test]

@@ -13,3 +13,4 @@ path = "src/main.rs"
 libthyla-rs = { path = "../lib/libthyla-rs" }
 libtapestry = { path = "../lib/libtapestry" }
 cornucopia = { path = "../lib/cornucopia" }
+vt = { path = "../lib/vt" }

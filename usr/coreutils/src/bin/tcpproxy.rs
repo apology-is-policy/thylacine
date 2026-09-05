@@ -37,7 +37,7 @@ pub extern "C" fn rs_main() -> i64 {
 const USAGE: &str = "\
 usage: tcpproxy [--color[=WHEN]] LPORT HOST PORT
   Forward each inbound connection on LPORT to HOST:PORT (one at a time).
-  --color[=WHEN]  colorize status: always (default) | never | auto
+  --color[=WHEN]  colorize status: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -53,7 +53,7 @@ fn run(args: Args) -> i64 {
         return rc;
     }
 
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut pos: [&str; 3] = [""; 3];
     let mut npos = 0usize;
     let mut i = 1;
@@ -148,7 +148,8 @@ fn parse_port(s: &str) -> Option<u16> {
     }
 }
 
-/// `--color=auto` stub; true until a kernel TTY check lands.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

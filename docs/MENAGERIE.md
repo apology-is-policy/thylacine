@@ -250,6 +250,7 @@ driver "rp1-eth" {
     serves    = "/dev/net/%instance"
     restart   = on-crash          # supervisor policy (section 5)
     lifecycle = persistent        # standing service; default: transient (section 5)
+    caps      = ["csprng"]        # optional; fork-grantable caps conferred by name
     sig       = "<ed25519 over the package>"       # optional; drives section 9
 }
 ```
@@ -259,7 +260,15 @@ resources, so a manifest cannot widen a driver's reach beyond its device. That
 intersection is the auditable-grant property (I-34) in one line. `lifecycle`
 (optional, default `transient`) declares whether the warden leaves the driver
 resident on `READY` — `persistent` for a standing service like `netd`, `transient`
-for a one-shot/demo the warden tears down (§5).
+for a one-shot/demo the warden tears down (§5). `caps` (optional, default none;
+added at H-4b-1) names the fork-grantable capabilities the warden confers on the
+driver beyond `CAP_HW_CREATE` — today only `csprng` (`CAP_CSPRNG_READ`, for a
+driver that must mint unguessable tokens: tapestryd's one-shot placement claims,
+HALCYON.md 13.7). The names are the whole vocabulary: an unknown name is a
+manifest parse error, so a typo can neither widen nor silently narrow a driver.
+The warden must itself hold every bit it confers (I-2: joey grants the warden
+exactly the set it may pass down), so the chain joey → warden → driver stays
+monotone and each hop is one auditable line.
 
 ---
 
@@ -877,7 +886,10 @@ early-console `chosen/stdout-path` selection is kernel.
   enforced) -- then exits, and the warden reaps it. Proven in joey's
   `THYLA_BOOT_PROBES` ladder: `45 /hw nodes discovered -> bind arm,pl061 ->
   1 bound, 1 up -> joey: warden ok -> Thylacine boot OK`, 0 EXTINCTION, + the SMP
-  gate (default + UBSan x smp4/smp8). One notable bring-up find: a boot-probe Proc
+  gate (default + UBSan x smp4/smp8). **The PROBE stays ladder-gated; the WARDEN
+  no longer is (#230)** -- `menagerie-probe` is one of the two fixture manifests
+  the warden binds only when joey passes `--with-fixtures`, while the warden
+  itself runs in every build shape, since netd and tapestryd are bound by it. One notable bring-up find: a boot-probe Proc
   has no stdio fds, so `Command`'s default `Stdio::Inherit` (which bumps the
   parent's fd 0/1/2) fails before the kernel even resolves the binary -- the
   warden hands each driver `/dev/null` for the three slots (the driver logs via

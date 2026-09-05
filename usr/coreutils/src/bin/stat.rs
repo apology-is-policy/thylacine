@@ -1,7 +1,13 @@
-// stat [--color[=WHEN]] FILE... -- display file metadata (via SYS_FSTAT), the
-// Thylacine way: the familiar GNU-shaped block, colored, with the Realm + the
-// full 9P Qid foregrounded (COREUTILS-THYLACINE-DESIGN.md). A presentation tool
-// -> color on by default; `--color=never` for a plain block.
+// stat [--color[=WHEN]] [--beacon=WHEN] FILE... -- display file metadata (via
+// SYS_FSTAT), the Thylacine way: the familiar GNU-shaped block, colored, with
+// the Realm + the full 9P Qid foregrounded (COREUTILS-THYLACINE-DESIGN.md). A
+// presentation tool -> color on the console (auto); `--color=never` for a plain block.
+//
+// Beacon (docs/BEACON.md): at the Rich tier the SAME plain block goes out with
+// an `obj type=path` frame on the subject (the File: value; cleaned absolute
+// ref) and SGR off -- strip(rich) == the plain block byte-exactly. (12.7's
+// `table` op for stat is deferred: the GNU block is deliberately NOT tabular;
+// a table would break the strip identity. Recorded in BEACON.md 12.5.)
 //
 // atime/mtime/ctime are 0 at v1.0 (most Devs don't track timestamps).
 
@@ -23,10 +29,11 @@ use libthyla_rs::fs::{self, Metadata};
 use libthyla_rs::io;
 
 const USAGE: &str = "\
-usage: stat [--color[=WHEN]] FILE...
+usage: stat [--color[=WHEN]] [--beacon=WHEN] FILE...
   Show file metadata: perms, owner, size, the namespace REALM, and the full
   9P QID (type:version:path). A graft has no introspectable metadata.
-  --color[=WHEN]  colorize: always (default) | never | auto
+  --color[=WHEN]  colorize: always | never | auto (default)
+  --beacon=WHEN   semantic markup: auto (default) | always | never
   --help  show this help
 
 Examples:
@@ -51,7 +58,7 @@ fn type_word(m: &Metadata) -> &'static str {
     }
 }
 
-fn print_one(out: &mut io::OutSink, path: &str, m: &Metadata, on: bool) {
+fn print_one(out: &mut io::OutSink, path: &str, m: &Metadata, on: bool, rich: bool) {
     let dim = color::col(palette::DIM, on);
     let rst = color::reset(on);
     // Kind / realm / perms / owner / qid presentation are shared via meta.
@@ -59,7 +66,22 @@ fn print_one(out: &mut io::OutSink, path: &str, m: &Metadata, on: bool) {
     let kc = kind.color();
     let ps = meta::perms_string(m);
 
-    let _ = write!(out, "{}  File:{} {}{}{}\n", dim, rst, color::col(kc, on), path, rst);
+    if rich {
+        // The subject presentation: same plain bytes, obj-framed (no SGR --
+        // `on` is false whenever `rich` holds; the gate in run() forces it).
+        out.put(b"  File: ");
+        {
+            let mut sout = coreutils::beacon_gate::SinkOut(out);
+            let mut s = beacon::sink::Sink::new(&mut sout, beacon::Tier::Rich);
+            match coreutils::path::abs(path) {
+                Some(r) => s.obj(beacon::sink::ObjType::Path, &r, path),
+                None => s.text(path),
+            }
+        }
+        out.put(b"\n");
+    } else {
+        let _ = write!(out, "{}  File:{} {}{}{}\n", dim, rst, color::col(kc, on), path, rst);
+    }
     let _ = write!(
         out,
         "{}  Size:{} {}   {}Blocks:{} {}   {}IO Block:{} {}   {}{}{}\n",
@@ -95,13 +117,14 @@ fn run(args: Args) -> i64 {
     if let Some(rc) = usage::help_if_requested(args, USAGE) {
         return rc;
     }
-    let mut mode = ColorMode::Always; // a presentation tool
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
+    let mut bmode = beacon::BeaconMode::Auto;
     let mut status = 0;
     let mut out = io::OutSink::new();
     let mut had = false;
     let mut opts_done = false;
 
-    // Collect operands, honoring --color and --.
+    // Collect operands, honoring --color / --beacon and --.
     let mut paths: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
     let mut i = 1;
     while let Some(a) = args.get_str(i) {
@@ -126,16 +149,33 @@ fn run(args: Args) -> i64 {
                 }
                 continue;
             }
+            if a == "--beacon" {
+                bmode = beacon::BeaconMode::Always;
+                continue;
+            }
+            if let Some(when) = a.strip_prefix("--beacon=") {
+                match beacon::BeaconMode::parse_when(when) {
+                    Some(m) => bmode = m,
+                    None => {
+                        eprintln!("stat: invalid --beacon value -- '{}'", when);
+                        usage::hint("stat");
+                        return 2;
+                    }
+                }
+                continue;
+            }
         }
         paths.push(a);
     }
 
-    let on = mode.resolve(stdout_is_console);
+    // The emission gate (BEACON.md 12.4); SGR is off inside rich output.
+    let rich = coreutils::beacon_gate::resolve(bmode) == beacon::Tier::Rich;
+    let on = !rich && mode.resolve(stdout_is_console);
 
     for path in &paths {
         had = true;
         match fs::metadata(path) {
-            Ok(m) => print_one(&mut out, path, &m, on),
+            Ok(m) => print_one(&mut out, path, &m, on, rich),
             Err(e) => {
                 // An unstattable path is very likely a graft (a live kernel
                 // namespace with no stat_native) -- name that, don't just errno.
@@ -154,8 +194,8 @@ fn run(args: Args) -> i64 {
     status
 }
 
-/// `--color=auto` stub (see the SYS_FD_DEVCLASS spec); true until a kernel TTY
-/// check lands.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

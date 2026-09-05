@@ -49,7 +49,7 @@ usage: nettest -s [-p PORT] [--color[=WHEN]]
   -c HOST         source: send to HOST and report MB/s
   -p PORT         port (default 5555)
   -n MB           source: megabytes to send (default 64)
-  --color[=WHEN]  colorize the report: always (default) | never | auto
+  --color[=WHEN]  colorize the report: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -67,7 +67,7 @@ fn run(args: Args) -> i64 {
         return rc;
     }
 
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut server = false;
     let mut host: Option<&str> = None;
     let mut port = DEFAULT_PORT;
@@ -230,7 +230,8 @@ fn parse_port(s: &str) -> Option<u16> {
     }
 }
 
-/// `--color=auto` stub; true until a kernel TTY check lands.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

@@ -98,11 +98,22 @@ void image_cache_init(void);
 // non-executable one with an otherwise-identical file window (see the key note
 // above); pass `(seg->flags & PF_X) != 0`.
 //
+// `file_limit` (#194) is the backing file's size in bytes, stamped onto a
+// freshly created Burrow so the fault arm can refuse pages wholly past EOF
+// (Linux SIGBUS semantics; closes the uncharged demand-zero mint). The CALLER
+// obtains it -- spoor_stat_native -- because the failure policy is the
+// caller's: the phenotype mmap arm refuses to map at all without a size
+// (fail-closed, guest-facing), exec passes BURROW_FILE_LIMIT_UNKNOWN when the
+// backing Dev has no stat (the baked ramfs, immutable -- no guest can author a
+// lying ELF there, so the pre-#194 unbounded behavior is sound for it). On a
+// cache HIT the entry keeps its creation-time limit and the caller's value is
+// ignored (close-to-open: one sample per cached image).
+//
 // SMP: serialized by the global cache lock; the blocking burrow_create_file runs
 // OUTSIDE the lock with a re-search-on-reacquire (the create race — two Procs
 // exec'ing the same binary concurrently; the loser frees its surplus Burrow).
 struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
-                                      size_t length, bool exec);
+                                      size_t length, bool exec, u64 file_limit);
 
 #ifdef KERNEL_TESTS
 // Number of live (used) cache entries. Snapshot under the cache lock.

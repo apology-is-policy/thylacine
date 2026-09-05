@@ -58,6 +58,8 @@ enum {
     DEV_KIND_WINSIZE   = 12, // #55: the UNGATED read-only console-geometry leaf
     DEV_KIND_WARP      = 13, // the /dev/warp mount POINT (Warp-2; PER-CLIENT --
                              // joey never mounts it globally, audit F1)
+    DEV_KIND_BEACON    = 14, // H-1 audit F1: the UNGATED read-only Beacon-tier
+                             // leaf (`beacon <tier>\n`; the winsize precedent)
 };
 
 #define DEV_QID_ROOT_PATH  0ULL
@@ -78,6 +80,7 @@ static const struct dev_leaf g_dev_leaves[] = {
     { "consdrain", DEV_KIND_CONSDRAIN },
     { "consfeed",  DEV_KIND_CONSFEED  },
     { "winsize",   DEV_KIND_WINSIZE   },   // #55: trivial-leaf class (ungated)
+    { "beacon",    DEV_KIND_BEACON    },   // H-1: trivial-leaf class (ungated)
 };
 
 #define DEV_LEAF_COUNT  (sizeof(g_dev_leaves) / sizeof(g_dev_leaves[0]))
@@ -96,6 +99,30 @@ static bool dev_kind_is_console(u32 kind) {
 // deliberately NOT in this set -- see devdev_console_gate_ok (#94-B).
 static bool dev_kind_is_cons_io(u32 kind) {
     return kind == DEV_KIND_CONS;
+}
+
+// H-1 (SYS_FD_DEVCLASS): the effective class of a devdev-backed Spoor. Only
+// the cons DATA leaf normalizes to 'c' -- it IS the console, and a walked
+// /dev/cons fd must be indistinguishable from a SYS_CONSOLE_OPEN fd to the
+// is-a-terminal predicate (dc == 'c'). consctl/consdrain/consfeed/winsize are
+// control-plane files, not the terminal; they (and every other leaf) answer
+// devdev's own 'd'. A directory Spoor (kind 0) is 'd' too.
+int devdev_fd_devclass(const struct Spoor *c) {
+    if (!c) return '-';
+    return ((u32)c->qid.path == DEV_KIND_CONS) ? 'c' : devdev.dc;
+}
+
+// C2-k1b F1: is this Spoor the kernel console, by UNFORGEABLE device identity?
+// The phenotype ioctl shell must decide "is this fd the console?" without
+// trusting a qid bit -- a dev9p-backed Spoor's qid_path is copied verbatim from
+// the 9P server (dev9p_stat_native), and tapestryd's PANE_FLAG is the same bit
+// (41) as CONS_STAT_QID_FLAG, so a server-backed pane fd would pass a bit-only
+// test. Device identity is server-unforgeable: only the kernel installs devcons
+// (the SYS_CONSOLE_OPEN door) and the devdev /dev/cons leaf. Both are covered.
+bool spoor_is_console(struct Spoor *sp) {
+    if (!sp) return false;
+    return sp->dev == &devcons
+        || (sp->dev == &devdev && (u32)sp->qid.path == DEV_KIND_CONS);
 }
 
 // The I-27 console-attach gate, enforced at two tiers:
@@ -345,6 +372,15 @@ static int devdev_stat_native(struct Spoor *c, struct t_stat *out) {
         out->qid_type = QTFILE;
         out->mode     = T_S_IFCHR | 0666u;
         return 0;
+    case DEV_KIND_WINSIZE:
+    case DEV_KIND_BEACON:
+        // #55 / H-1: the ungated read-only report leaves. Adding the beacon
+        // leaf surfaced that winsize was absent from this switch since #55
+        // (fstat on it fell to the -1 default) -- both now stat as the
+        // world-readable character files they are.
+        out->qid_type = QTFILE;
+        out->mode     = T_S_IFCHR | 0444u;
+        return 0;
     default:
         // An unknown kind means the qid decode and this switch disagree; fail
         // rather than invent a shape.
@@ -379,7 +415,8 @@ static struct Spoor *devdev_open(struct Spoor *c, int omode) {
         if (!((u32)c->qid.path == DEV_KIND_CONSCTL &&
               devdev_renderer_gate_ok()))
             return NULL;
-        // The renderer-minted (non-attached) consctl: winsize-verb-only.
+        // The renderer-minted (non-attached) consctl: winsize + beacon
+        // verbs only (both renderer self-descriptions; never termios flags).
         struct Spoor *o = dev_simple_open(c, omode);
         if (o) o->flag |= CCONSWINSZONLY;
         return o;
@@ -448,9 +485,12 @@ static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {
     case DEV_KIND_CONS:                         // the shared console-input drain
         return cons_input_read(buf, n);
     case DEV_KIND_CONSCTL: {                     // LS-8b: read back the mode line
-        // #55: the render now ends "... winsize <cols> <rows>\n" (the ptyfs
-        // ctl_render shape) -- max 34 + " 65535 65535"-class tail = 54.
-        char tmp[64];
+        // #55 + H-1: the render ends "... winsize <cols> <rows> beacon
+        // <tier>\n" -- max 34 (flags) + 19 (winsize worst case) + 13
+        // (" beacon cells") + 1 = 67; cons_render_mode's fixed reserve floor
+        // is exactly that, so this staging buffer must be >= 67 or every
+        // consctl read EOFs (the H-1a suite catch: the old tmp[64] did).
+        char tmp[96];
         long len = cons_render_mode(tmp, (long)sizeof(tmp));
         if (off < 0 || off >= len) return 0;     // EOF (and bad offset reads empty)
         long avail = len - (long)off;
@@ -462,6 +502,16 @@ static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {
     case DEV_KIND_WINSIZE: {                     // #55: `winsize <cols> <rows>\n`
         char tmp[24];                            // max 21 incl. NL
         long len = cons_render_winsize(tmp, (long)sizeof(tmp));
+        if (off < 0 || off >= len) return 0;
+        long avail = len - (long)off;
+        long cnt = (n < avail) ? n : avail;
+        u8 *out = (u8 *)buf;
+        for (long i = 0; i < cnt; i++) out[i] = (u8)tmp[(long)off + i];
+        return cnt;
+    }
+    case DEV_KIND_BEACON: {                      // H-1: `beacon <tier>\n`
+        char tmp[16];                            // max 13 incl. NL
+        long len = cons_render_beacon(tmp, (long)sizeof(tmp));
         if (off < 0 || off >= len) return 0;
         long avail = len - (long)off;
         long cnt = (n < avail) ? n : avail;
@@ -509,14 +559,16 @@ static long devdev_write(struct Spoor *c, const void *buf, long n, s64 off) {
         return cons_output_write(buf, n);
     case DEV_KIND_CONSCTL:                      // LS-8b: stty-style +/-flag parse
         // #55 audit F2: a renderer-minted consctl (CCONSWINSZONLY) is
-        // restricted to the winsize verb; the attached chain gets full flags.
+        // restricted to the winsize + beacon verbs (allow_flags=false --
+        // never a termios flag); the attached chain gets the full grammar.
         return cons_set_mode_cmd(buf, n, !(c->flag & CCONSWINSZONLY));
     case DEV_KIND_CONSFEED:                     // G-4: renderer input injection
         if (!devdev_renderer_gate_ok()) return -1;
         return cons_feed_write(buf, n);
     case DEV_KIND_CONSDRAIN:                    // read-only
     case DEV_KIND_WINSIZE:                      // #55: read-only (the writer is
-        return -1;                              // the consctl verb, renderer-held)
+    case DEV_KIND_BEACON:                       // the consctl verb, renderer-held;
+        return -1;                              // H-1: the beacon leaf likewise
     case DEV_KIND_ROOT:
     default:
         return -1;

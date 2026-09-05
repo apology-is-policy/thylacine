@@ -1,0 +1,1767 @@
+From c1c5e9a36eae711528c3a1341f05ddd145007223 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Mon, 31 Aug 2026 11:59:28 +0200
+Subject: [PATCH 18/23] Thylacine Warp vkQuake-arc W-3d: the WSI DIRECT path
+ (vn_wsi_thylacine)
+
+Venus swapchains whose images are Thylacine compositor PRESENTABLES
+(WARP-WSI-DESIGN section 5): the guest half of the model tapestryd's
+img/new landed at W-3c-1, riding mesa's own swapchain machinery.
+
+The surface class is stock VK_EXT_headless_surface -- Thylacine has no
+window-system handle, and a headless ICD surface is exactly "a surface
+with no intrinsic identity". vn_wsi_init replaces the interface behind
+wsi[VK_ICD_WSI_PLATFORM_HEADLESS] with the Thylacine one
+(vn_wsi_thylacine.c); wsi_common keeps the entire swapchain state
+machine. Only the two designed wsi_image_info hooks are ours:
+
+- create_mem: a MARKED dedicated vkAllocateMemory. The chain-head
+  driver-internal pNext (VN_STRUCTURE_TYPE_THYLACINE_WSI_MEMORY_INFO,
+  'THLW', stripped in vn_device_memory_alloc before anything is
+  encoded) routes the allocation to alloc_simple: venus-side memory,
+  NO renderer bo. The memory's ONE vkr blob export (mem->exported is
+  one-shot) is deliberately left for the compositor's img/new. That
+  one-export rule makes both wrong orders fail loudly rather than
+  tear: an eagerly-minted bo consumes the export and registration
+  refuses (swapchain creation fails); a later vkMapMemory needs a bo
+  whose mint the consumed export refuses (the presentable is
+  never-map by design).
+- finish_create: vn_device_memory_wait_alloc (host-allocate before
+  the registration names mem->base.id -- the V-3b-3c-2b F7 ordering,
+  wait_alloc de-static'd for it) then vn_renderer_thylacine_img_new
+  with the LINEAR stride vkGetImageSubresourceLayout reported.
+
+The I-40 stage-0 present bracket holds on BOTH paths: venus's own
+vtest-class drain (has_external_sync = has_implicit_fencing = false,
+so every vn_QueueSubmit* tail runs vn_wsi_fence_wait, which detects
+the async-present tid and does the empty-submit + fence + synchronous
+wait) AND the vtable queue_present's own wait on the per-image
+throttle fence, so the bracket survives VN_PERF=no_async_present.
+The present poke (present-to <surface> img <n>, consent-dedup'd; the
+surface named by the vn_renderer_thylacine_set_surface +1-encoded
+process global) stays DORMANT until the W-3e SDL glue -- a
+surfaceless swapchain is a pure headless rotation.
+
+vn_renderer_thylacine grows the img handle family: a 16-slot
+img_bitmap (MAX_WARP_IMGS_PER_CTX) under the transport mutex with the
+mem family's two-sided invariant, plus vn_thylacine_bo_create_count
+(the prove's no-eager-mint witness). warp_client grows warp_img_new /
+warp_img_destroy / warp_present_to_img -- the mem family's
+three-valued contract with two arms re-derived rather than copied:
+E_INVAL keeps the handle (duplicate and validation refusals are
+indistinguishable at the client, so the caller keeps its inputs
+client-valid and the validation arm unreachable); E_IO resolves via
+warp_img_reclaim (the server's clean one-export refusal installs
+nothing, but the client cannot distinguish it from a transport EIO
+after a commit -- the F9 shape).
+
+meson: the thylacine branch now compiles vn_wsi.c + the new file and
+defines VN_USE_WSI_PLATFORM -- every prior build ran the stub inlines.
+The define also flips KHR_swapchain and can_sync2 onto
+renderer_sync_fd.semaphore_importable, a HOST property queried through
+the ring (v3dv answers SYNC_FD importable via vkr's passthrough).
+
+thylacine_prove step 10: probe KHR_swapchain (FAIL, never skip, on
+absence); headless surface -> 3-image 640x400 BGRA8 FIFO swapchain;
+the bo-create counter's delta across creation must be ZERO with a
+NONZERO baseline (the positive control -- a dead counter cannot
+satisfy the negative); a GPU clear-to-red INTO presentable 0 +
+vkCmdCopyImageToBuffer + pixel-exact readback (the registered memory
+is a real, GPU-writable render target); acquire/present x3 through
+the async-present path. Witness line "venus-prove: wsi swapchain OK".
+
+Self-audit SA-1 (folded): the create-loop failure path destroyed the
+failed image twice -- wsi_create_image's own fail arm already ran
+wsi_destroy_image, which does not null the struct's handles; the
+cleanup now excludes the failed index (which can never be registered:
+finish_create is the last fallible step and sets the flag only on
+success).
+
+Alternative considered: a hand-rolled image path (vkCreateImage +
+bind + register without wsi_create_image). Rejected -- the
+create_mem/finish_create hooks are the designed injection points, and
+wants_linear exists precisely to pin the CPU-image config to the
+NO_BLIT LINEAR arm; less code and the stock error discipline.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../winsys/virgl/thylacine/warp_client.c      |  95 +++
+ .../winsys/virgl/thylacine/warp_client.h      |  42 ++
+ src/virtio/vulkan/meson.build                 |  12 +-
+ src/virtio/vulkan/thylacine_prove.c           | 421 +++++++++++-
+ src/virtio/vulkan/vn_device_memory.c          |  17 +-
+ src/virtio/vulkan/vn_device_memory.h          |  32 +
+ src/virtio/vulkan/vn_renderer.h               |  33 +
+ src/virtio/vulkan/vn_renderer_thylacine.c     | 123 ++++
+ src/virtio/vulkan/vn_wsi.c                    |  16 +
+ src/virtio/vulkan/vn_wsi.h                    |   7 +
+ src/virtio/vulkan/vn_wsi_thylacine.c          | 649 ++++++++++++++++++
+ 11 files changed, 1442 insertions(+), 5 deletions(-)
+ create mode 100644 src/virtio/vulkan/vn_wsi_thylacine.c
+
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index 857bb8e..03c05e0 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -136,6 +136,17 @@ int warp_present_to(struct warp_conn *w, uint32_t surface_id, uint32_t bo_pub)
+    return write_verb(w->root, path, verb);
+ }
+ 
++int warp_present_to_img(struct warp_conn *w, uint32_t surface_id,
++                        uint32_t img_handle)
++{
++   char path[64], verb[64];
++   if (w->wedged || w->ctx == 0)
++      return -1;
++   snprintf(path, sizeof(path), "ctx/%u/ctl", w->ctx);
++   snprintf(verb, sizeof(verb), "present-to %u img %u", surface_id, img_handle);
++   return write_verb(w->root, path, verb);
++}
++
+ int warp_present_off(struct warp_conn *w)
+ {
+    char path[64];
+@@ -677,6 +688,90 @@ int warp_mem_destroy(struct warp_conn *w, uint32_t handle)
+    return write_verb(w->root, path, "destroy");
+ }
+ 
++/* The img-family reclaim twin of warp_mem_reclaim: resolve a maybe-installed
++ * img/new failure by a best-effort img/<h>/ctl destroy. Same open-leg caveat
++ * (dev9p_walk collapses walk failures to -ENOENT, so the -ENOENT arm is
++ * exact on the write leg, best-effort on the open leg -- the residue is a
++ * self-healing spurious registration failure, never a live-slot free). */
++static int warp_img_reclaim(struct warp_conn *w, uint32_t handle)
++{
++   char path[64];
++   static const char verb[] = "destroy";
++   long fd, n;
++
++   snprintf(path, sizeof(path), "ctx/%u/img/%u/ctl", w->ctx, handle);
++   fd = open_at(w->root, path, T_OWRITE);
++   if (fd < 0)
++      return (fd == -ENOENT) ? 1 : -1;
++   n = t_write(fd, verb, sizeof(verb) - 1);
++   t_close(fd);
++   if (n == (long)(sizeof(verb) - 1) || n == -ENOENT)
++      return 1;
++   return -1;
++}
++
++int warp_img_new(struct warp_conn *w, uint32_t handle, uint32_t width,
++                 uint32_t height, uint32_t format, uint32_t stride,
++                 uint64_t mem_id, uint32_t *res_id_out)
++{
++   char path[64];
++   char verb[96];
++   char info[192];
++   long long rid;
++
++   /* The mem-family three-valued contract, transplanted (see the header for
++    * the one img-specific caveat: E_INVAL covers duplicate AND validation,
++    * so the caller must keep its inputs client-valid and E_INVAL is treated
++    * as the duplicate -- keep). */
++   if (w->wedged || w->ctx == 0)
++      return 1;
++
++   snprintf(path, sizeof(path), "ctx/%u/img/new", w->ctx);
++   snprintf(verb, sizeof(verb), "%u %u %u %u %u %llu", handle, width, height,
++            format, stride, (unsigned long long)mem_id);
++   {
++      long fd = open_at(w->root, path, T_OWRITE);
++      if (fd < 0)
++         return 1; /* never reached the server -> nothing installed -> free */
++      size_t vlen = strlen(verb);
++      long n = t_write(fd, verb, vlen);
++      t_close(fd);
++      if (n != (long)vlen) {
++         if (n == -ENOMEM)
++            return 1;  /* backing-cap refusal: provably nothing installed
++                        * (the server checks taken BEFORE over, F8) */
++         if (n == -EINVAL)
++            return -1; /* duplicate (or a validation refusal the caller's
++                        * client-valid inputs make unreachable): keep */
++         /* -EIO includes the server's clean create_presentable refusal
++          * (the one-export refusal lands there; nothing installed) -- but
++          * the client cannot distinguish it from a transport EIO after a
++          * commit, so it resolves via the reclaim like every other
++          * maybe-installed failure (the mem family's F9 shape). */
++         return warp_img_reclaim(w, handle);
++      }
++   }
++
++   snprintf(path, sizeof(path), "ctx/%u/img/%u/info", w->ctx, handle);
++   if (open_read_snapshot(w->root, path, info, sizeof(info)) <= 0)
++      return warp_img_reclaim(w, handle); /* installed but unreadable */
++   rid = parse_field(info, "res");
++   if (rid <= 0)
++      return warp_img_reclaim(w, handle); /* installed but info malformed */
++
++   *res_id_out = (uint32_t)rid;
++   return 0;
++}
++
++int warp_img_destroy(struct warp_conn *w, uint32_t handle)
++{
++   char path[64];
++   if (w->wedged || w->ctx == 0)
++      return -1;
++   snprintf(path, sizeof(path), "ctx/%u/img/%u/ctl", w->ctx, handle);
++   return write_verb(w->root, path, "destroy");
++}
++
+ uint64_t warp_venus_submit(struct warp_conn *w, const void *bytes, uint32_t len,
+                            uint32_t timeline, bool *again)
+ {
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index 7e43f94..dd854d0 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -248,6 +248,39 @@ void warp_mem_unmap(long map_fd);
+  * handle marked; a stale server slot is bounded by ctx death). */
+ int warp_mem_destroy(struct warp_conn *w, uint32_t handle);
+ 
++/* Register a venus device memory as a compositor PRESENTABLE (W-3d, the
++ * WSI-DESIGN 4.1 declaration): "<handle> <w> <h> <format> <stride> <mem_id>"
++ * -> ctx/<id>/img/new, then read the accepted shape back from
++ * img/<handle>/info ("res <id> w .. bound .. mem .."). The server validates
++ * the DECLARED shape against its structural limits and mints the never-mapped
++ * HOST3D blob bound to mem_id -- consuming that memory's ONE vkr blob export,
++ * which is why the caller's allocation path must not have minted a mem blob
++ * for it (the no-eager-mint marker; a consumed export makes this refuse).
++ * `format` is the virtio-gpu format code (BGRA8=1 / BGRX8=2 -- the stage-0
++ * accept set); `stride` covers a row at 4 B/px.
++ *
++ * Same three-valued contract as warp_mem_new, with one caveat this family
++ * adds: the server's img/new returns E_INVAL for BOTH a duplicate handle
++ * (slot LIVE -- must keep) and a validation refusal (nothing installed --
++ * could free), indistinguishable at the client. The caller keeps its inputs
++ * client-valid (dims/stride from a successfully created LINEAR image, handles
++ * from its own bitmap under its own lock), so the validation arm is
++ * unreachable and E_INVAL is treated as the duplicate: -1 (keep). E_IO --
++ * which includes the server's clean create_presentable refusal, where the
++ * ONE-EXPORT violation lands (nothing installed: the img record inserts only
++ * after the blob mint succeeds) -- is indistinguishable from a transport EIO
++ * after a commit, so it and every other maybe-committed failure resolve via
++ * the img/<h>/ctl destroy reclaim, exactly as the mem family (F9). */
++int warp_img_new(struct warp_conn *w, uint32_t handle, uint32_t width,
++                 uint32_t height, uint32_t format, uint32_t stride,
++                 uint64_t mem_id, uint32_t *res_id_out);
++
++/* Retire a presentable server-side ("destroy" -> img/<handle>/ctl; the
++ * display-safe teardown -- unbind + consent-clear before unref -- rides the
++ * server's wimg_destroy). Returns 0 on success (free the handle), -1 on
++ * refusal (keep it marked; bounded by ctx death). */
++int warp_img_destroy(struct warp_conn *w, uint32_t handle);
++
+ /* Submit one opaque Venus command stream (raw SUBMIT_CMD/execbuffer bytes) on
+  * `timeline` (0 = the ctx-global lane -> the ctx's submit file; 1..3 = a
+  * VkQueue lane -> submit<t>, so the server fences it on that virtio-gpu
+@@ -291,6 +324,15 @@ int warp_fence_park(struct warp_conn *w);
+  * resize reallocation mints a new BO). Returns 0 / -1. */
+ int warp_present_to(struct warp_conn *w, uint32_t surface_id, uint32_t bo_pub);
+ 
++/* The img-family present consent (W-3c-2's generalized verb): "present-to
++ * <surface> img <handle>" names a PRESENTABLE by its handle (the server
++ * resolves handle -> pub id at the verb, so a freed handle's later tenant
++ * can never inherit the consent). Same standing-consent semantics as
++ * warp_present_to: re-issue when the FRONT buffer changes (every present in
++ * a rotating swapchain), not per frame of the same buffer. 0 / -1. */
++int warp_present_to_img(struct warp_conn *w, uint32_t surface_id,
++                        uint32_t img_handle);
++
+ /* Withdraw the consent ("present-to off"). Best-effort; 0 / -1. */
+ int warp_present_off(struct warp_conn *w);
+ 
+diff --git a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
+index 91ab7f1..93dc32a 100644
+--- a/src/virtio/vulkan/meson.build
++++ b/src/virtio/vulkan/meson.build
+@@ -111,8 +111,8 @@ if with_thylacine
+   # Thylacine (Warp V-3b-3, WARP-V3-DESIGN section 0.14): the /srv/warp
+   # backend (tapestryd) is the sole transport -- no DRM device (so no
+   # vn_renderer_virtgpu.c + no libdrm dep, which the cross-file's
+-  # system='linux' would otherwise pull in), no vtest socket, no WSI
+-  # platform. The backend speaks 9P file ops on /srv/warp via <thyla/*>.
++  # system='linux' would otherwise pull in), no vtest socket. The WSI
++  # platform is Thylacine's own (below, W-3d). The backend speaks 9P file ops on /srv/warp via <thyla/*>.
+   # It reuses the Warp-3 transport (warp_client.c, shared with the virgl
+   # winsys): warp_open + the fence model, plus the V-3b-3 host3d-ring and
+   # venus-submit verbs. <thyla/syscall.h> rides the cross-file c_args;
+@@ -120,6 +120,14 @@ if with_thylacine
+   libvn_files += files('vn_renderer_thylacine.c')
+   libvn_files += files('../../gallium/winsys/virgl/thylacine/warp_client.c')
+   vn_incs += include_directories('../../gallium/winsys/virgl/thylacine')
++
++  # W-3d: the Thylacine WSI backend. vn_wsi.c is the stock venus WSI layer
++  # (present routing, fence_wait, the swapchain entrypoints); the Thylacine
++  # interface (vn_wsi_thylacine.c) replaces the headless platform slot at
++  # vn_wsi_init, so VK_EXT_headless_surface is the surface class and the
++  # images are compositor presentables (ctx/<id>/img over /srv/warp).
++  libvn_files += files('vn_wsi.c', 'vn_wsi_thylacine.c')
++  vn_c_args += '-DVN_USE_WSI_PLATFORM'
+ else
+   if not with_platform_windows
+     libvn_files += files('vn_renderer_vtest.c')
+diff --git a/src/virtio/vulkan/thylacine_prove.c b/src/virtio/vulkan/thylacine_prove.c
+index 522b1bc..0d09f18 100644
+--- a/src/virtio/vulkan/thylacine_prove.c
++++ b/src/virtio/vulkan/thylacine_prove.c
+@@ -25,6 +25,7 @@
+  * the PASS string, so an absent GL host degrades cleanly.
+  */
+ 
++#include <stdbool.h>
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -113,6 +114,41 @@ vn_WaitForFences(VkDevice, uint32_t, const VkFence *, VkBool32, uint64_t);
+ extern VKAPI_ATTR VkResult VKAPI_CALL
+ vn_EnumerateDeviceExtensionProperties(VkPhysicalDevice, const char *,
+                                       uint32_t *, VkExtensionProperties *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_ResetFences(VkDevice, uint32_t, const VkFence *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags,
++                      VkPipelineStageFlags, VkDependencyFlags, uint32_t,
++                      const VkMemoryBarrier *, uint32_t,
++                      const VkBufferMemoryBarrier *, uint32_t,
++                      const VkImageMemoryBarrier *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdClearColorImage(VkCommandBuffer, VkImage, VkImageLayout,
++                      const VkClearColorValue *, uint32_t,
++                      const VkImageSubresourceRange *);
++/* The W-3d WSI witness: the swapchain entrypoints live in vn_wsi.c (now
++ * compiled -- VN_USE_WSI_PLATFORM) and the surface/swapchain-images ones in
++ * common wsi; all direct symbols, same trampoline workaround as above. */
++extern VKAPI_ATTR VkResult VKAPI_CALL
++wsi_CreateHeadlessSurfaceEXT(VkInstance, const VkHeadlessSurfaceCreateInfoEXT *,
++                             const VkAllocationCallbacks *, VkSurfaceKHR *);
++extern VKAPI_ATTR void VKAPI_CALL
++wsi_DestroySurfaceKHR(VkInstance, VkSurfaceKHR, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateSwapchainKHR(VkDevice, const VkSwapchainCreateInfoKHR *,
++                      const VkAllocationCallbacks *, VkSwapchainKHR *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroySwapchainKHR(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++wsi_GetSwapchainImagesKHR(VkDevice, VkSwapchainKHR, uint32_t *, VkImage *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_AcquireNextImage2KHR(VkDevice, const VkAcquireNextImageInfoKHR *,
++                        uint32_t *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_QueuePresentKHR(VkQueue, const VkPresentInfoKHR *);
++/* The no-eager-mint counter (vn_renderer_thylacine.c): renderer bos minted
++ * from device memories.  The swapchain step asserts its delta is ZERO. */
++extern uint64_t vn_thylacine_bo_create_count;
+ /* The W-1 offscreen-pipeline witness (vkQuake arc): the graphics-class
+  * entrypoints. Every one below is a defined T symbol in libvulkan_virtio.a
+  * (nm census on the built archive -- the link is the census; the flat
+@@ -445,11 +481,20 @@ main(void)
+       return 1;
+    }
+ 
++   /* W-3d: the WSI step needs the surface class.  Both are guest-side
++    * extensions venus advertises unconditionally under VN_USE_WSI_PLATFORM
++    * (vn_instance.c), so enabling them cannot fail on this build. */
++   static const char *inst_exts[] = {
++      "VK_KHR_surface",
++      "VK_EXT_headless_surface",
++   };
+    const VkInstanceCreateInfo ci = {
+       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+       /* NULL pApplicationInfo => apiVersion 1.0: keeps bring-up off the
+        * loader-negotiated >=1.1 feature paths (no loader here to negotiate)
+        * while still driving the full ring + reply + capset path. */
++      .enabledExtensionCount = 2,
++      .ppEnabledExtensionNames = inst_exts,
+    };
+    VkInstance instance = VK_NULL_HANDLE;
+    VkResult r = create_instance(&ci, NULL, &instance);
+@@ -556,10 +601,36 @@ main(void)
+       .queueCount = 1,
+       .pQueuePriorities = &prio,
+    };
++   /* W-3d: VK_KHR_swapchain rides a HOST-dependent gate
++    * (renderer_sync_fd.semaphore_importable -- venus queries the host
++    * driver's SYNC_FD external-semaphore support through the ring), so probe
++    * rather than assume.  The WSI step below FAILS if it is absent: on this
++    * arc's certified host class (v3dv via vkr) it must be present, and a
++    * silent skip would be a #212 skip-reported-as-pass. */
++   bool has_swapchain_ext = false;
++   {
++      uint32_t n = 0;
++      static VkExtensionProperties dexts[256];
++      if (vn_EnumerateDeviceExtensionProperties(pds[0], NULL, &n, NULL) ==
++             VK_SUCCESS &&
++          n <= 256) {
++         VkResult er = vn_EnumerateDeviceExtensionProperties(pds[0], NULL, &n,
++                                                             dexts);
++         if (er == VK_SUCCESS || er == VK_INCOMPLETE) {
++            for (uint32_t i = 0; i < n; i++) {
++               if (!strcmp(dexts[i].extensionName, "VK_KHR_swapchain"))
++                  has_swapchain_ext = true;
++            }
++         }
++      }
++   }
++   static const char *dev_exts[] = { "VK_KHR_swapchain" };
+    const VkDeviceCreateInfo dci = {
+       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+       .queueCreateInfoCount = 1,
+       .pQueueCreateInfos = &qci,
++      .enabledExtensionCount = has_swapchain_ext ? 1u : 0u,
++      .ppEnabledExtensionNames = dev_exts,
+    };
+    VkDevice device = VK_NULL_HANDLE;
+    printf("venus-prove: qf_count=%u; creating logical device (direct vn_CreateDevice)...\n",
+@@ -1666,6 +1737,351 @@ main(void)
+              counts[0], counts[1], counts[2]);
+    }
+ 
++   /* Step 10 (vkQuake-arc W-3d): the WSI DIRECT path.  A headless-surface
++    * swapchain whose images are compositor PRESENTABLES: LINEAR venus images
++    * on MARKED dedicated allocations (no renderer bo -- the no-eager-mint
++    * seam) registered via ctx/<id>/img/new.  Witnesses, in order:
++    *   - VK_KHR_swapchain advertised (the host semaphore-importable gate);
++    *   - swapchain creation itself: every image's registration succeeded,
++    *     which one-export makes a PROOF the marker routed (an eager mem-blob
++    *     mint would have consumed the export and img/new would refuse);
++    *   - the counter: vn_thylacine_bo_create_count moved ZERO across the
++    *     creation (its baseline is nonzero from the earlier mem steps -- the
++    *     positive control one variable away, so a dead counter cannot
++    *     satisfy the negative);
++    *   - a GPU clear INTO presentable 0 + copy-out + pixel check: the
++    *     registered memory is a real, GPU-writable render target;
++    *   - acquire/present x3 through vn_QueuePresentKHR: the async-present
++    *     thread, the per-image throttle fences, and the queue_present
++    *     bracket all execute (the present poke stays dormant -- no tapestry
++    *     surface is set; that seam is the W-3e SDL glue's). */
++   {
++      if (!has_swapchain_ext) {
++         printf("THYLACINE-VENUS-PROVE FAIL: VK_KHR_swapchain not advertised "
++                "(the renderer_sync_fd.semaphore_importable gate -- did the "
++                "host's SYNC_FD external-semaphore query fail?)\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkHeadlessSurfaceCreateInfoEXT hsci = {
++         .sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT,
++      };
++      VkSurfaceKHR surface = VK_NULL_HANDLE;
++      r = wsi_CreateHeadlessSurfaceEXT(instance, &hsci, NULL, &surface);
++      if (r != VK_SUCCESS || surface == VK_NULL_HANDLE) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateHeadlessSurfaceEXT "
++                "rc=%d\n", r);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const uint64_t bo0 = vn_thylacine_bo_create_count;
++      if (bo0 == 0) {
++         printf("THYLACINE-VENUS-PROVE FAIL: bo-create counter 0 after the "
++                "mem steps -- the no-mint witness's positive control is dead "
++                "(the counter does not count)\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      enum { SW = 640, SH = 400, SC_IMGS_MAX = 8 };
++      const VkSwapchainCreateInfoKHR sci = {
++         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
++         .surface = surface,
++         .minImageCount = 3,
++         .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
++         .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
++         .imageExtent = { SW, SH },
++         .imageArrayLayers = 1,
++         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
++                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
++                       VK_IMAGE_USAGE_TRANSFER_DST_BIT,
++         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
++         .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
++         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
++         .presentMode = VK_PRESENT_MODE_FIFO_KHR,
++         .clipped = VK_FALSE,
++      };
++      VkSwapchainKHR sc = VK_NULL_HANDLE;
++      r = vn_CreateSwapchainKHR(device, &sci, NULL, &sc);
++      if (r != VK_SUCCESS || sc == VK_NULL_HANDLE) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateSwapchainKHR rc=%d "
++                "(a refused img registration lands here -- one-export means "
++                "an eagerly-minted bo, a dead marker, or the compositor "
++                "refusing the declared shape)\n", r);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      uint32_t sc_count = 0;
++      static VkImage sc_imgs[SC_IMGS_MAX];
++      r = wsi_GetSwapchainImagesKHR(device, sc, &sc_count, NULL);
++      if (r != VK_SUCCESS || sc_count < 3 || sc_count > SC_IMGS_MAX) {
++         printf("THYLACINE-VENUS-PROVE FAIL: swapchain image count %u "
++                "rc=%d (want 3..%u)\n", sc_count, r, (unsigned)SC_IMGS_MAX);
++         vn_DestroySwapchainKHR(device, sc, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      r = wsi_GetSwapchainImagesKHR(device, sc, &sc_count, sc_imgs);
++      if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
++         printf("THYLACINE-VENUS-PROVE FAIL: swapchain images rc=%d\n", r);
++         vn_DestroySwapchainKHR(device, sc, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const uint64_t bo1 = vn_thylacine_bo_create_count;
++      if (bo1 != bo0) {
++         printf("THYLACINE-VENUS-PROVE FAIL: swapchain creation minted %llu "
++                "renderer bo(s) (want 0 -- the no-eager-mint marker did not "
++                "route)\n", (unsigned long long)(bo1 - bo0));
++         vn_DestroySwapchainKHR(device, sc, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      VkQueue wq = VK_NULL_HANDLE;
++      const VkDeviceQueueInfo2 wqi = {
++         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2,
++         .queueFamilyIndex = 0,
++         .queueIndex = 0,
++      };
++      vk_common_GetDeviceQueue2(device, &wqi, &wq);
++      const VkFenceCreateInfo wfci = {
++         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
++      };
++      VkFence wfence = VK_NULL_HANDLE;
++      if (wq == VK_NULL_HANDLE ||
++          vn_CreateFence(device, &wfci, NULL, &wfence) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: wsi queue/fence\n");
++         vn_DestroySwapchainKHR(device, sc, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      /* Readback buffer for the pixel witness. */
++      const VkDeviceSize wrb_size = (VkDeviceSize)SW * SH * 4;
++      VkBuffer wrb_buf = VK_NULL_HANDLE;
++      VkDeviceMemory wrb_mem = VK_NULL_HANDLE;
++      if (mk_copybuf(device, &mem, wrb_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++                     &wrb_buf, &wrb_mem) != 0) {
++         printf("THYLACINE-VENUS-PROVE FAIL: wsi readback buffer\n");
++         vn_DestroySwapchainKHR(device, sc, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkCommandPoolCreateInfo wcpci = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
++         .queueFamilyIndex = 0,
++      };
++      VkCommandPool wpool = VK_NULL_HANDLE;
++      VkCommandBuffer wcmd = VK_NULL_HANDLE;
++      if (vn_CreateCommandPool(device, &wcpci, NULL, &wpool) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: wsi command pool\n");
++         vn_DestroySwapchainKHR(device, sc, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkCommandBufferAllocateInfo wcbai = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++         .commandPool = wpool,
++         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++         .commandBufferCount = 1,
++      };
++      const VkCommandBufferBeginInfo wcbbi = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
++      };
++
++      uint32_t presented = 0;
++      uint32_t first_idx = UINT32_MAX;
++      for (int round = 0; round < 3; round++) {
++         const VkAcquireNextImageInfoKHR ai = {
++            .sType = VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR,
++            .swapchain = sc,
++            .timeout = 10ull * 1000 * 1000 * 1000,
++            .fence = wfence,
++            .deviceMask = 1,
++         };
++         uint32_t idx = UINT32_MAX;
++         r = vn_AcquireNextImage2KHR(device, &ai, &idx);
++         if (r != VK_SUCCESS || idx >= sc_count) {
++            printf("THYLACINE-VENUS-PROVE FAIL: acquire round %d rc=%d "
++                   "idx=%u\n", round, r, idx);
++            break;
++         }
++         /* the fence import is fd=-1 pre-signaled on this backend */
++         r = vn_WaitForFences(device, 1, &wfence, VK_TRUE,
++                              10ull * 1000 * 1000 * 1000);
++         if (r != VK_SUCCESS ||
++             vn_ResetFences(device, 1, &wfence) != VK_SUCCESS) {
++            printf("THYLACINE-VENUS-PROVE FAIL: acquire fence round %d "
++                   "rc=%d\n", round, r);
++            break;
++         }
++
++         if (round == 0) {
++            /* GPU-write the presentable + read it back: clear to RED
++             * (exact in UNORM), copy out, verify. */
++            first_idx = idx;
++            if (vn_AllocateCommandBuffers(device, &wcbai, &wcmd) !=
++                   VK_SUCCESS ||
++                vn_BeginCommandBuffer(wcmd, &wcbbi) != VK_SUCCESS) {
++               printf("THYLACINE-VENUS-PROVE FAIL: wsi command buffer\n");
++               break;
++            }
++            const VkImageSubresourceRange range = {
++               .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++               .levelCount = 1,
++               .layerCount = 1,
++            };
++            const VkImageMemoryBarrier to_general = {
++               .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++               .srcAccessMask = 0,
++               .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++               .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++               .newLayout = VK_IMAGE_LAYOUT_GENERAL,
++               .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++               .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++               .image = sc_imgs[idx],
++               .subresourceRange = range,
++            };
++            vn_CmdPipelineBarrier(wcmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
++                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL,
++                                  0, NULL, 1, &to_general);
++            const VkClearColorValue red = {
++               .float32 = { 1.0f, 0.0f, 0.0f, 1.0f },
++            };
++            vn_CmdClearColorImage(wcmd, sc_imgs[idx],
++                                  VK_IMAGE_LAYOUT_GENERAL, &red, 1, &range);
++            const VkImageMemoryBarrier clear_to_read = {
++               .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++               .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++               .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++               .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
++               .newLayout = VK_IMAGE_LAYOUT_GENERAL,
++               .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++               .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++               .image = sc_imgs[idx],
++               .subresourceRange = range,
++            };
++            vn_CmdPipelineBarrier(wcmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL,
++                                  0, NULL, 1, &clear_to_read);
++            const VkBufferImageCopy wbic = {
++               .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++               .imageExtent = { SW, SH, 1 },
++            };
++            vn_CmdCopyImageToBuffer(wcmd, sc_imgs[idx],
++                                    VK_IMAGE_LAYOUT_GENERAL, wrb_buf, 1,
++                                    &wbic);
++            if (vn_EndCommandBuffer(wcmd) != VK_SUCCESS) {
++               printf("THYLACINE-VENUS-PROVE FAIL: wsi end cmd\n");
++               break;
++            }
++            const VkSubmitInfo wsi_si = {
++               .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++               .commandBufferCount = 1,
++               .pCommandBuffers = &wcmd,
++            };
++            r = vn_QueueSubmit(wq, 1, &wsi_si, wfence);
++            if (r != VK_SUCCESS ||
++                vn_WaitForFences(device, 1, &wfence, VK_TRUE,
++                                 10ull * 1000 * 1000 * 1000) != VK_SUCCESS ||
++                vn_ResetFences(device, 1, &wfence) != VK_SUCCESS) {
++               printf("THYLACINE-VENUS-PROVE FAIL: wsi clear submit "
++                      "rc=%d\n", r);
++               break;
++            }
++            const VkMemoryMapInfo wmmi = {
++               .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
++               .memory = wrb_mem,
++               .size = wrb_size,
++            };
++            void *wptr = NULL;
++            if (vn_MapMemory2(device, &wmmi, &wptr) != VK_SUCCESS || !wptr) {
++               printf("THYLACINE-VENUS-PROVE FAIL: wsi readback map\n");
++               break;
++            }
++            const volatile uint8_t *px = (const volatile uint8_t *)wptr;
++            const uint32_t mid = ((SH / 2) * SW + SW / 2) * 4;
++            const uint32_t last = (SW * SH - 1) * 4;
++            /* BGRA8 red = 00 00 FF FF, exact in UNORM */
++            if (px[0] != 0 || px[1] != 0 || px[2] != 255 || px[3] != 255 ||
++                px[mid] != 0 || px[mid + 1] != 0 || px[mid + 2] != 255 ||
++                px[last + 2] != 255) {
++               printf("THYLACINE-VENUS-PROVE FAIL: presentable pixels "
++                      "%u,%u,%u,%u / mid %u,%u,%u / last-r %u (want "
++                      "0,0,255,255 -- the clear did not land in the "
++                      "registered memory)\n",
++                      px[0], px[1], px[2], px[3], px[mid], px[mid + 1],
++                      px[mid + 2], px[last + 2]);
++               const VkMemoryUnmapInfo wumi_f = {
++                  .sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
++                  .memory = wrb_mem,
++               };
++               vn_UnmapMemory2(device, &wumi_f);
++               break;
++            }
++            const VkMemoryUnmapInfo wumi = {
++               .sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
++               .memory = wrb_mem,
++            };
++            vn_UnmapMemory2(device, &wumi);
++         }
++
++         const VkPresentInfoKHR pi = {
++            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
++            .swapchainCount = 1,
++            .pSwapchains = &sc,
++            .pImageIndices = &idx,
++         };
++         r = vn_QueuePresentKHR(wq, &pi);
++         if (r != VK_SUCCESS) {
++            printf("THYLACINE-VENUS-PROVE FAIL: present round %d rc=%d\n",
++                   round, r);
++            break;
++         }
++         presented++;
++      }
++
++      vn_DestroyCommandPool(device, wpool, NULL);
++      vn_DestroyBuffer(device, wrb_buf, NULL);
++      free_mem(device, wrb_mem, NULL);
++      vn_DestroyFence(device, wfence, NULL);
++      vn_DestroySwapchainKHR(device, sc, NULL);
++      wsi_DestroySurfaceKHR(instance, surface, NULL);
++
++      if (presented != 3) {
++         printf("THYLACINE-VENUS-PROVE FAIL: %u/3 presents completed\n",
++                presented);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      printf("venus-prove: wsi swapchain OK (headless surface -> %u "
++             "presentables %ux%u BGRA8, clear-to-red GPU-landed in image %u "
++             "+ read back, acquire/present x3 through the async-present "
++             "path, bo-creates %llu -> %llu (swapchain minted 0 -- the "
++             "W-3d no-eager-mint proof))\n",
++             sc_count, (unsigned)SW, (unsigned)SH, first_idx,
++             (unsigned long long)bo0, (unsigned long long)bo1);
++   }
++
+    destroy_device(device, NULL);
+ 
+    destroy_instance(instance, NULL);
+@@ -1677,8 +2093,9 @@ main(void)
+           "fenced round-trip with first-map pattern survival (F1), placed-map "
+           "de-advertised (F4), cap-exhaustion recovery (F2), two-timeline "
+           "interleave (F3), offscreen SPIR-V triangle rendered + read back, "
+-          "slot-exhaustion steady-state -- the vkQuake-arc W-1 pipeline "
+-          "witness)\n",
++          "slot-exhaustion steady-state, WSI swapchain of never-mapped "
++          "presentables minted no renderer bo + GPU clear read back + 3 "
++          "presents -- the vkQuake-arc W-1+W-3d pipeline witness)\n",
+           pd_count, props.deviceName);
+    return 0;
+ }
+diff --git a/src/virtio/vulkan/vn_device_memory.c b/src/virtio/vulkan/vn_device_memory.c
+index 7274a63..016a5a0 100644
+--- a/src/virtio/vulkan/vn_device_memory.c
++++ b/src/virtio/vulkan/vn_device_memory.c
+@@ -56,7 +56,7 @@ vn_device_memory_free_simple(struct vn_device *dev,
+    vn_async_vkFreeMemory(dev->primary_ring, dev_handle, mem_handle, NULL);
+ }
+ 
+-static VkResult
++VkResult
+ vn_device_memory_wait_alloc(struct vn_device *dev,
+                             struct vn_device_memory *mem)
+ {
+@@ -296,6 +296,21 @@ vn_device_memory_alloc(struct vn_device *dev,
+       mem_type->propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    const bool export_alloc = mem_vk->export_handle_types;
+ 
++#ifdef __thylacine__
++   /* Thylacine WSI (W-3d): a marked swapchain-image allocation must not mint
++    * a renderer bo -- see the marker's contract in vn_device_memory.h.  The
++    * marker is chain-HEAD by construction (our own create_mem builds the
++    * chain); strip it and take alloc_simple regardless of memory-type
++    * visibility. */
++   if (alloc_info->pNext &&
++       ((const VkBaseInStructure *)alloc_info->pNext)->sType ==
++          VN_STRUCTURE_TYPE_THYLACINE_WSI_MEMORY_INFO) {
++      VkMemoryAllocateInfo local = *alloc_info;
++      local.pNext = ((const VkBaseInStructure *)alloc_info->pNext)->pNext;
++      return vn_device_memory_alloc_simple(dev, mem, &local);
++   }
++#endif
++
+    const VkExternalMemoryHandleTypeFlagBits renderer_handle_type =
+       dev->physical_device->external_memory.renderer_handle_type;
+    struct vn_device_memory_alloc_info local_info;
+diff --git a/src/virtio/vulkan/vn_device_memory.h b/src/virtio/vulkan/vn_device_memory.h
+index d2b74b2..5dec454 100644
+--- a/src/virtio/vulkan/vn_device_memory.h
++++ b/src/virtio/vulkan/vn_device_memory.h
+@@ -57,6 +57,38 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(vn_device_memory,
+                                VkDeviceMemory,
+                                VK_OBJECT_TYPE_DEVICE_MEMORY)
+ 
++/* Block until the host-side vkAllocateMemory for `mem` is renderer-visible
++ * (WaitRingSeqno on the alloc's ring seqno).  Anything that names the memory
++ * host-side OUTSIDE the ring -- a renderer bo mint, a compositor presentable
++ * registration -- must order itself after the allocation through this
++ * (V-3b-3c-2b F7). */
++VkResult
++vn_device_memory_wait_alloc(struct vn_device *dev,
++                            struct vn_device_memory *mem);
++
++#ifdef __thylacine__
++/* Thylacine WSI (W-3d): the no-eager-mint marker.  Chained at the HEAD of a
++ * swapchain-image allocation's pNext by vn_wsi_thylacine.c's create_mem and
++ * stripped by vn_device_memory_alloc before anything is encoded -- it never
++ * reaches the wire.  A marked allocation routes to alloc_simple: venus-side
++ * memory only, NO renderer bo, so the memory's ONE vkr blob export (vkr's
++ * mem->exported is one-shot) stays available for the compositor's img
++ * registration.  Both wrong orders fail loudly: an eagerly-minted bo consumes
++ * the export and img/new refuses (swapchain creation fails); a later
++ * vkMapMemory needs a bo whose mint the registration's export refuses (map
++ * fails -- the presentable is never-map by design).
++ *
++ * The sType value is arbitrary-but-pinned ('THLW'); driver-internal, so the
++ * only collision that matters is against structs this driver ever walks, and
++ * none carries it. */
++#define VN_STRUCTURE_TYPE_THYLACINE_WSI_MEMORY_INFO ((VkStructureType)0x54484c57)
++
++struct vn_thylacine_wsi_memory_info {
++   VkStructureType sType;
++   const void *pNext;
++};
++#endif /* __thylacine__ */
++
+ VkResult
+ vn_device_memory_import_dma_buf(struct vn_device *dev,
+                                 struct vn_device_memory *mem,
+diff --git a/src/virtio/vulkan/vn_renderer.h b/src/virtio/vulkan/vn_renderer.h
+index 046e583..a2dc91a 100644
+--- a/src/virtio/vulkan/vn_renderer.h
++++ b/src/virtio/vulkan/vn_renderer.h
+@@ -257,6 +257,39 @@ VkResult
+ vn_renderer_create_thylacine(struct vn_instance *instance,
+                              const VkAllocationCallbacks *alloc,
+                              struct vn_renderer **renderer);
++
++/* The Thylacine WSI backend's registration surface (W-3d): a venus device
++ * memory registered as / retired from a compositor presentable
++ * (ctx/<id>/img).  Serialized on the renderer's transport mutex internally;
++ * thylacine-only, called from vn_wsi_thylacine.c. */
++VkResult
++vn_renderer_thylacine_img_new(struct vn_renderer *renderer,
++                              uint64_t mem_id,
++                              uint32_t width,
++                              uint32_t height,
++                              uint32_t virtio_format,
++                              uint32_t stride,
++                              uint32_t *img_handle_out);
++
++void
++vn_renderer_thylacine_img_destroy(struct vn_renderer *renderer,
++                                  uint32_t img_handle);
++
++/* The present-consent poke: names img_handle as the surface's front buffer
++ * ("present-to <surface> img <n>") iff a surface has been set, deduplicated
++ * against the last consent issued.  The surface id is a process global set
++ * by the window glue (SDL, W-3e) -- until then this is a no-op and the
++ * swapchain is a pure headless rotation. */
++void
++vn_renderer_thylacine_present_poke(struct vn_renderer *renderer,
++                                   uint32_t img_handle);
++
++void
++vn_renderer_thylacine_set_surface(uint32_t surface_id);
++
++/* Count of renderer bos minted from device memories -- the prove's witness
++ * that swapchain allocations minted NONE (the no-eager-mint proof). */
++extern uint64_t vn_thylacine_bo_create_count;
+ #endif
+ 
+ VkResult
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+index 85be8fe..2765aba 100644
+--- a/src/virtio/vulkan/vn_renderer_thylacine.c
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -77,6 +77,7 @@
+ #define THY_MEM_SLOTS 256u /* MAX_WARP_MEMS_PER_CTX */
+ #define THY_MEM_WORDS (THY_MEM_SLOTS / 64u)
+ #define THY_MEM_MAX (64u * 1024u * 1024u) /* WARP_CTX_BACKING_MAX */
++#define THY_IMG_SLOTS 16u /* MAX_WARP_IMGS_PER_CTX */
+ 
+ struct thylacine_shmem {
+    struct vn_renderer_shmem base;
+@@ -143,6 +144,17 @@ struct thylacine {
+     * Guarded by the transport mutex (see the warp field), like ring_bitmap. */
+    uint64_t mem_bitmap[THY_MEM_WORDS];
+ 
++   /* allocated presentable slots (handle 0..15, W-3d); one bit per
++    * img/<handle>.  Guarded by the transport mutex, like mem_bitmap. */
++   uint16_t img_bitmap;
++
++   /* the last present consent issued (dedup: the consent is standing, so a
++    * re-present of the same front buffer needs no ctl write).  img is
++    * handle+1 (0 = none); sid is surface+1 as stored by set_surface.
++    * Guarded by the transport mutex. */
++   uint32_t last_present_img;
++   uint32_t last_present_sid;
++
+    uint32_t next_sync_id;
+    uint32_t max_timeline_count;
+ 
+@@ -228,6 +240,28 @@ thylacine_mem_free(struct thylacine *tly, uint32_t handle)
+       tly->mem_bitmap[handle / 64u] &= ~(1ull << (handle % 64u));
+ }
+ 
++/* Presentable (img) handles: same two-sided invariant as the mem family --
++ * freed on rc==1 (provably not installed / reclaim-resolved), kept marked on
++ * rc==-1 (maybe live; bounded, ctx-death reaped).  Caller holds tly->mutex. */
++static int
++thylacine_img_alloc(struct thylacine *tly)
++{
++   for (uint32_t b = 0; b < THY_IMG_SLOTS; b++) {
++      if (!(tly->img_bitmap & (1u << b))) {
++         tly->img_bitmap |= (1u << b);
++         return (int)b;
++      }
++   }
++   return -1; /* all 16 presentable slots live on this ctx */
++}
++
++static void
++thylacine_img_free(struct thylacine *tly, uint32_t handle)
++{
++   if (handle < THY_IMG_SLOTS)
++      tly->img_bitmap &= (uint16_t)~(1u << handle);
++}
++
+ /* ---- shmem: the coherent HOST3D ring the Venus driver lays its ring in ---- */
+ 
+ /* Caller holds tly->mutex (audit F1): this mutates ring_bitmap (an unguarded
+@@ -454,6 +488,9 @@ thylacine_bo_create_from_device_memory(
+    };
+ 
+    *out_bo = &bo->base;
++   /* The W-3d no-eager-mint witness: every device-memory bo mint counts, so
++    * the prove can assert a swapchain creation minted NONE. */
++   vn_thylacine_bo_create_count++;
+    result = VK_SUCCESS;
+ 
+ out:
+@@ -461,6 +498,92 @@ out:
+    return result;
+ }
+ 
++/* ---- presentables (W-3d): the WSI registration surface ---- */
++
++uint64_t vn_thylacine_bo_create_count;
++
++/* The tapestry surface consent target, +1-encoded (0 = unset; tapestry
++ * surface slots start at 0).  Written by the window glue's set_surface,
++ * read under the transport mutex at present time. */
++static uint32_t thylacine_present_surface_plus1;
++
++void
++vn_renderer_thylacine_set_surface(uint32_t surface_id)
++{
++   p_atomic_set(&thylacine_present_surface_plus1, surface_id + 1);
++}
++
++VkResult
++vn_renderer_thylacine_img_new(struct vn_renderer *renderer,
++                              uint64_t mem_id,
++                              uint32_t width,
++                              uint32_t height,
++                              uint32_t virtio_format,
++                              uint32_t stride,
++                              uint32_t *img_handle_out)
++{
++   struct thylacine *tly = (struct thylacine *)renderer;
++   VkResult result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
++
++   mtx_lock(&tly->mutex);
++   int handle = thylacine_img_alloc(tly);
++   if (handle >= 0) {
++      uint32_t res_id = 0;
++      int rc = warp_img_new(&tly->warp, (uint32_t)handle, width, height,
++                            virtio_format, stride, mem_id, &res_id);
++      if (rc == 0) {
++         *img_handle_out = (uint32_t)handle;
++         result = VK_SUCCESS;
++      } else if (rc > 0) {
++         thylacine_img_free(tly, (uint32_t)handle);
++      }
++      /* rc < 0: keep the handle marked -- the slot may be live (the
++       * mem-family two-sided invariant; bounded, ctx-death reaped). */
++   }
++   mtx_unlock(&tly->mutex);
++   return result;
++}
++
++void
++vn_renderer_thylacine_img_destroy(struct vn_renderer *renderer,
++                                  uint32_t img_handle)
++{
++   struct thylacine *tly = (struct thylacine *)renderer;
++
++   mtx_lock(&tly->mutex);
++   /* A dying presentable must not stay the consent target: the server
++    * clears the consent itself (wimg_destroy's consent-clear arm), so only
++    * the local dedup latch needs dropping -- a later present of a NEW
++    * front buffer must re-issue rather than read as "unchanged". */
++   if (tly->last_present_img == img_handle + 1)
++      tly->last_present_img = 0;
++   if (warp_img_destroy(&tly->warp, img_handle) == 0)
++      thylacine_img_free(tly, img_handle);
++   /* refusal: keep marked (bounded, ctx-death reaped) */
++   mtx_unlock(&tly->mutex);
++}
++
++void
++vn_renderer_thylacine_present_poke(struct vn_renderer *renderer,
++                                   uint32_t img_handle)
++{
++   struct thylacine *tly = (struct thylacine *)renderer;
++   const uint32_t sid_plus = p_atomic_read(&thylacine_present_surface_plus1);
++
++   if (!sid_plus)
++      return; /* no window glue has named a surface (W-3e's seam) */
++
++   mtx_lock(&tly->mutex);
++   if (tly->last_present_img != img_handle + 1 ||
++       tly->last_present_sid != sid_plus) {
++      if (warp_present_to_img(&tly->warp, sid_plus - 1, img_handle) == 0) {
++         tly->last_present_img = img_handle + 1;
++         tly->last_present_sid = sid_plus;
++      }
++   }
++   mtx_unlock(&tly->mutex);
++}
++
+ static bool
+ thylacine_bo_destroy(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
+ {
+diff --git a/src/virtio/vulkan/vn_wsi.c b/src/virtio/vulkan/vn_wsi.c
+index eb290cb..801e6b0 100644
+--- a/src/virtio/vulkan/vn_wsi.c
++++ b/src/virtio/vulkan/vn_wsi.c
+@@ -189,6 +189,22 @@ vn_wsi_init(struct vn_physical_device *physical_dev)
+    physical_dev->wsi_device.supports_scanout = false;
+    physical_dev->wsi_device.supports_modifiers =
+       physical_dev->base.vk.supported_extensions.EXT_image_drm_format_modifier;
++
++#ifdef __thylacine__
++   /* Thylacine (W-3d): the presentable path rides the HEADLESS platform slot
++    * -- VK_EXT_headless_surface is the surface class (stock entrypoint), and
++    * the interface behind it becomes the Thylacine one (venus device
++    * memories registered as compositor presentables; wsi_common keeps the
++    * swapchain state machine).  wants_linear pins the CPU-image config to
++    * the NO_BLIT linear arm the Thylacine create_mem override requires. */
++   physical_dev->wsi_device.wants_linear = true;
++   result = vn_wsi_thylacine_init(physical_dev);
++   if (result != VK_SUCCESS) {
++      wsi_device_finish(&physical_dev->wsi_device, alloc);
++      return result;
++   }
++#endif
++
+    physical_dev->base.vk.wsi_device = &physical_dev->wsi_device;
+ 
+    return VK_SUCCESS;
+diff --git a/src/virtio/vulkan/vn_wsi.h b/src/virtio/vulkan/vn_wsi.h
+index 7edf6af..fdf258d 100644
+--- a/src/virtio/vulkan/vn_wsi.h
++++ b/src/virtio/vulkan/vn_wsi.h
+@@ -20,6 +20,13 @@
+ VkResult
+ vn_wsi_init(struct vn_physical_device *physical_dev);
+ 
++#ifdef __thylacine__
++/* Replace the stock headless interface with the Thylacine presentable one
++ * (vn_wsi_thylacine.c) -- called by vn_wsi_init after wsi_device_init. */
++VkResult
++vn_wsi_thylacine_init(struct vn_physical_device *physical_dev);
++#endif
++
+ void
+ vn_wsi_fini(struct vn_physical_device *physical_dev);
+ 
+diff --git a/src/virtio/vulkan/vn_wsi_thylacine.c b/src/virtio/vulkan/vn_wsi_thylacine.c
+new file mode 100644
+index 0000000..196c3f7
+--- /dev/null
++++ b/src/virtio/vulkan/vn_wsi_thylacine.c
+@@ -0,0 +1,649 @@
++/*
++ * Copyright 2026 The Thylacine Authors
++ * SPDX-License-Identifier: MIT
++ *
++ * The Thylacine WSI backend (Warp vkQuake-arc W-3d, WARP-WSI-DESIGN
++ * section 5): venus swapchain images as compositor PRESENTABLES.
++ *
++ * The surface class is stock VK_EXT_headless_surface -- Thylacine has no
++ * window-system handle to put in a surface, and the headless ICD surface is
++ * exactly "a surface with no intrinsic identity".  What changes is the
++ * interface BEHIND the platform slot: vn_wsi_init replaces
++ * wsi[VK_ICD_WSI_PLATFORM_HEADLESS] with this one, so swapchains created on
++ * a headless surface get Thylacine presentables instead of CPU images.
++ *
++ * wsi_common keeps the entire swapchain state machine (wsi_swapchain_init,
++ * the per-image throttle fences, the present submit that waits the app's
++ * semaphores, present_id).  Only the IMAGE PATH is ours, injected through
++ * the designed wsi_image_info hooks:
++ *
++ *   create_mem    -- a MARKED dedicated vkAllocateMemory (the chain-head
++ *                    pNext marker routes vn_device_memory_alloc to
++ *                    alloc_simple: venus-side memory, NO renderer bo, never
++ *                    mappable).  The ONE blob export of the memory (vkr's
++ *                    mem->exported is one-shot) is deliberately left for the
++ *                    compositor's img registration.
++ *   finish_create -- registers the memory as a presentable
++ *                    (ctx/<id>/img/new via the renderer) with the LINEAR
++ *                    stride vkGetImageSubresourceLayout reported.
++ *
++ * One-export makes both wrong orders fail loudly rather than tear: an
++ * eagerly-minted bo consumes the export and img/new refuses (swapchain
++ * creation fails); a later vkMapMemory needs a bo whose mint the
++ * registration's export refuses (map fails -- the presentable is never-map
++ * by design, W-3c-1 4.1 as amended).
++ *
++ * The I-40 stage-0 bracket: on the designed path venus itself drains the
++ * queue before the vtable queue_present runs (vn_wsi_fence_wait at the tail
++ * of every vn_QueueSubmit* detects the async-present tid and does the
++ * empty-submit + fence + wait -- the vtest-class flow; our renderer reports
++ * has_external_sync = has_implicit_fencing = false).  queue_present still
++ * waits the per-image throttle fence itself so the bracket also holds under
++ * VN_PERF=no_async_present, where that drain never runs.
++ *
++ * Present is a CONSENT poke, not a copy: `present-to <surface> img <n>` on
++ * the warp ctx names the new front buffer; the display binds it DIRECT
++ * (SET_SCANOUT_BLOB) server-side.  The surface id comes from the process
++ * global vn_renderer_thylacine_set_surface -- the W-3e SDL glue's seam;
++ * until something sets it the poke is a no-op and the swapchain behaves as
++ * a headless rotation (which is exactly what thylacine-venus-prove
++ * exercises).
++ */
++
++#include "vn_wsi.h"
++
++#include "vk_util.h"
++#include "wsi_common_private.h"
++
++#include "util/bitscan.h"
++#include "util/timespec.h"
++
++#include "vn_device.h"
++#include "vn_device_memory.h"
++#include "vn_instance.h"
++#include "vn_physical_device.h"
++#include "vn_renderer.h"
++
++/* The compositor holds MAX_WARP_IMGS_PER_CTX = 16 img slots per warp ctx,
++ * shared by every swapchain on the connection.  8 per swapchain lets a lazy
++ * old-chain retire overlap a full recreate without exhausting the table. */
++#define VN_THYLACINE_WSI_MAX_IMAGES 8
++
++struct vn_thylacine_wsi {
++   struct wsi_interface base;
++};
++
++struct vn_thylacine_wsi_image {
++   struct wsi_image base;
++
++   /* the ctx/<id>/img/<handle> slot; valid iff registered */
++   uint32_t img_handle;
++   bool registered;
++
++   /* the headless free-list pattern: host ownership + a one-present
++    * avoidance flag so acquire steers away from the just-presented image */
++   bool busy_on_host;
++   bool busy_on_device;
++};
++
++struct vn_thylacine_swapchain {
++   struct wsi_swapchain base;
++
++   struct vn_thylacine_wsi_image images[];
++};
++
++static VkResult
++vn_thylacine_surface_get_support(VkIcdSurfaceBase *surface,
++                                 struct wsi_device *wsi_device,
++                                 uint32_t queueFamilyIndex,
++                                 VkBool32 *pSupported)
++{
++   *pSupported = true;
++   return VK_SUCCESS;
++}
++
++/* FIFO only at stage 0: the DIRECT scanout has no queue to run MAILBOX
++ * against, and an honest small set beats an aspirational one. */
++static const VkPresentModeKHR vn_thylacine_present_modes[] = {
++   VK_PRESENT_MODE_FIFO_KHR,
++};
++
++static VkResult
++vn_thylacine_surface_get_capabilities(VkIcdSurfaceBase *surface,
++                                      struct wsi_device *wsi_device,
++                                      VkSurfaceCapabilitiesKHR *caps)
++{
++   caps->minImageCount = 2;
++   caps->maxImageCount = VN_THYLACINE_WSI_MAX_IMAGES;
++
++   /* No intrinsic extent -- the surface is sized by the swapchain (the SDL
++    * glue passes the tapestry surface geometry).  The compositor's
++    * registration gate re-validates against its own structural limits. */
++   caps->currentExtent = (VkExtent2D){ -1, -1 };
++   caps->minImageExtent = (VkExtent2D){ 1, 1 };
++   caps->maxImageExtent = (VkExtent2D){ 8192, 8192 };
++
++   caps->supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
++   caps->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
++   caps->maxImageArrayLayers = 1;
++   caps->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
++   caps->supportedUsageFlags = wsi_caps_get_image_usage();
++
++   return VK_SUCCESS;
++}
++
++static VkResult
++vn_thylacine_surface_get_capabilities2(VkIcdSurfaceBase *surface,
++                                       struct wsi_device *wsi_device,
++                                       const void *info_next,
++                                       VkSurfaceCapabilities2KHR *caps)
++{
++   assert(caps->sType == VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR);
++
++   const VkSurfacePresentModeKHR *present_mode =
++      vk_find_struct_const(info_next, SURFACE_PRESENT_MODE_EXT);
++
++   VkResult result = vn_thylacine_surface_get_capabilities(
++      surface, wsi_device, &caps->surfaceCapabilities);
++
++   vk_foreach_struct(ext, caps->pNext) {
++      switch (ext->sType) {
++      case VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR: {
++         VkSurfaceProtectedCapabilitiesKHR *protected = (void *)ext;
++         protected->supportsProtected = VK_FALSE;
++         break;
++      }
++      case VK_STRUCTURE_TYPE_SURFACE_PRESENT_SCALING_CAPABILITIES_KHR: {
++         VkSurfacePresentScalingCapabilitiesKHR *scaling = (void *)ext;
++         scaling->supportedPresentScaling = 0;
++         scaling->supportedPresentGravityX = 0;
++         scaling->supportedPresentGravityY = 0;
++         scaling->minScaledImageExtent = caps->surfaceCapabilities.minImageExtent;
++         scaling->maxScaledImageExtent = caps->surfaceCapabilities.maxImageExtent;
++         break;
++      }
++      case VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_KHR: {
++         VkSurfacePresentModeCompatibilityKHR *compat = (void *)ext;
++         if (compat->pPresentModes == NULL) {
++            if (!present_mode) {
++               wsi_common_vk_warn_once(
++                  "Use of VkSurfacePresentModeCompatibilityKHR without a "
++                  "VkSurfacePresentModeKHR set. This is an application bug.\n");
++            }
++            compat->presentModeCount = 1;
++         } else if (compat->presentModeCount) {
++            assert(present_mode);
++            compat->presentModeCount = 1;
++            compat->pPresentModes[0] = present_mode->presentMode;
++         }
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PRESENT_TIMING_SURFACE_CAPABILITIES_EXT: {
++         VkPresentTimingSurfaceCapabilitiesEXT *wait = (void *)ext;
++         wait->presentStageQueries = 0;
++         wait->presentTimingSupported = VK_FALSE;
++         wait->presentAtAbsoluteTimeSupported = VK_FALSE;
++         wait->presentAtRelativeTimeSupported = VK_FALSE;
++         break;
++      }
++      default:
++         break;
++      }
++   }
++
++   return result;
++}
++
++static const struct {
++   VkFormat format;
++   VkColorSpaceKHR color_space;
++} vn_thylacine_formats[] = {
++   /* Both map to virtio BGRA8 (= 1): the 4-byte layout is identical and the
++    * scanout applies no transfer function, so SRGB here means "the app's
++    * rendering is sRGB-encoded", which is what a scanned-out framebuffer
++    * carries anyway. */
++   { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
++   { VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
++};
++
++static VkResult
++vn_thylacine_surface_get_formats(VkIcdSurfaceBase *surface,
++                                 struct wsi_device *wsi_device,
++                                 uint32_t *pSurfaceFormatCount,
++                                 VkSurfaceFormatKHR *pSurfaceFormats)
++{
++   VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormatKHR, out, pSurfaceFormats,
++                          pSurfaceFormatCount);
++
++   for (unsigned i = 0; i < ARRAY_SIZE(vn_thylacine_formats); i++) {
++      vk_outarray_append_typed(VkSurfaceFormatKHR, &out, f) {
++         f->format = vn_thylacine_formats[i].format;
++         f->colorSpace = vn_thylacine_formats[i].color_space;
++      }
++   }
++
++   return vk_outarray_status(&out);
++}
++
++static VkResult
++vn_thylacine_surface_get_formats2(VkIcdSurfaceBase *surface,
++                                  struct wsi_device *wsi_device,
++                                  const void *info_next,
++                                  uint32_t *pSurfaceFormatCount,
++                                  VkSurfaceFormat2KHR *pSurfaceFormats)
++{
++   VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormat2KHR, out, pSurfaceFormats,
++                          pSurfaceFormatCount);
++
++   for (unsigned i = 0; i < ARRAY_SIZE(vn_thylacine_formats); i++) {
++      vk_outarray_append_typed(VkSurfaceFormat2KHR, &out, f) {
++         assert(f->sType == VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR);
++         f->surfaceFormat.format = vn_thylacine_formats[i].format;
++         f->surfaceFormat.colorSpace = vn_thylacine_formats[i].color_space;
++      }
++   }
++
++   return vk_outarray_status(&out);
++}
++
++static VkResult
++vn_thylacine_surface_get_present_modes(VkIcdSurfaceBase *surface,
++                                       struct wsi_device *wsi_device,
++                                       uint32_t *pPresentModeCount,
++                                       VkPresentModeKHR *pPresentModes)
++{
++   if (pPresentModes == NULL) {
++      *pPresentModeCount = ARRAY_SIZE(vn_thylacine_present_modes);
++      return VK_SUCCESS;
++   }
++
++   *pPresentModeCount =
++      MIN2(*pPresentModeCount, ARRAY_SIZE(vn_thylacine_present_modes));
++   typed_memcpy(pPresentModes, vn_thylacine_present_modes, *pPresentModeCount);
++
++   return *pPresentModeCount < ARRAY_SIZE(vn_thylacine_present_modes)
++             ? VK_INCOMPLETE
++             : VK_SUCCESS;
++}
++
++static VkResult
++vn_thylacine_surface_get_present_rectangles(VkIcdSurfaceBase *surface,
++                                            struct wsi_device *wsi_device,
++                                            uint32_t *pRectCount,
++                                            VkRect2D *pRects)
++{
++   VK_OUTARRAY_MAKE_TYPED(VkRect2D, out, pRects, pRectCount);
++
++   vk_outarray_append_typed(VkRect2D, &out, rect) {
++      *rect = (VkRect2D){
++         .offset = { 0, 0 },
++         .extent = { UINT32_MAX, UINT32_MAX },
++      };
++   }
++
++   return vk_outarray_status(&out);
++}
++
++static uint32_t
++vn_thylacine_virtio_format(VkFormat format)
++{
++   switch (format) {
++   case VK_FORMAT_B8G8R8A8_UNORM:
++   case VK_FORMAT_B8G8R8A8_SRGB:
++      return 1; /* VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM */
++   default:
++      return 0;
++   }
++}
++
++static VkResult
++vn_thylacine_wsi_create_image_mem(const struct wsi_swapchain *chain,
++                                  const struct wsi_image_info *info,
++                                  struct wsi_image *image)
++{
++   const struct wsi_device *wsi = chain->wsi;
++
++   VkMemoryRequirements reqs;
++   wsi->GetImageMemoryRequirements(chain->device, image->image, &reqs);
++
++   VkSubresourceLayout layout;
++   wsi->GetImageSubresourceLayout(chain->device, image->image,
++                                  &(VkImageSubresource){
++                                     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++                                  },
++                                  &layout);
++   assert(layout.offset == 0);
++
++   /* Any admitted memory type works: the memory is never mapped guest-side
++    * (never-map presentable), so HOST_VISIBLE buys nothing and constrains
++    * nothing -- take the first admitted type. */
++   assert(reqs.memoryTypeBits);
++   const uint32_t mt = ffs(reqs.memoryTypeBits) - 1;
++
++   const VkMemoryDedicatedAllocateInfo dedicated = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
++      .image = image->image,
++   };
++   /* Chain-HEAD marker: vn_device_memory_alloc strips it and routes to
++    * alloc_simple (no renderer bo -- the one export is the registration's).
++    * The dedicated info stays on the stripped chain: the host allocator gets
++    * it, and vn_wsi_memory_info_init reads it to set mem->dedicated_img,
++    * which vn_AcquireNextImage2KHR's sync_fd arm dereferences. */
++   const struct vn_thylacine_wsi_memory_info marker = {
++      .sType = VN_STRUCTURE_TYPE_THYLACINE_WSI_MEMORY_INFO,
++      .pNext = &dedicated,
++   };
++   const VkMemoryAllocateInfo memory_info = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++      .pNext = &marker,
++      .allocationSize = reqs.size,
++      .memoryTypeIndex = mt,
++   };
++   VkResult result = wsi->AllocateMemory(chain->device, &memory_info,
++                                         &chain->alloc, &image->memory);
++   if (result != VK_SUCCESS)
++      return result;
++
++   image->num_planes = 1;
++   image->sizes[0] = reqs.size;
++   image->row_pitches[0] = layout.rowPitch;
++   image->offsets[0] = 0;
++
++   return VK_SUCCESS;
++}
++
++static VkResult
++vn_thylacine_wsi_finish_create(const struct wsi_swapchain *chain,
++                               const struct wsi_image_info *info,
++                               struct wsi_image *image)
++{
++   struct vn_device *dev = vn_device_from_handle(chain->device);
++   struct vn_thylacine_wsi_image *timage =
++      container_of(image, struct vn_thylacine_wsi_image, base);
++   struct vn_device_memory *mem = vn_device_memory_from_handle(image->memory);
++
++   /* The host-side vkAllocateMemory rides the ring asynchronously and the
++    * compositor's img/new names mem->base.id host-side -- order the
++    * registration after the allocation the same way the mem-blob path
++    * orders its mint (wait_alloc's WaitRingSeqno, V-3b-3c-2b F7). */
++   VkResult result = vn_device_memory_wait_alloc(dev, mem);
++   if (result != VK_SUCCESS)
++      return result;
++
++   const uint32_t fmt = vn_thylacine_virtio_format(info->create.format);
++   if (fmt == 0)
++      return VK_ERROR_FORMAT_NOT_SUPPORTED;
++
++   result = vn_renderer_thylacine_img_new(
++      dev->renderer, mem->base.id, info->create.extent.width,
++      info->create.extent.height, fmt, image->row_pitches[0],
++      &timage->img_handle);
++   if (result != VK_SUCCESS)
++      return result;
++
++   timage->registered = true;
++   return VK_SUCCESS;
++}
++
++static struct wsi_image *
++vn_thylacine_swapchain_get_wsi_image(struct wsi_swapchain *wsi_chain,
++                                     uint32_t image_index)
++{
++   struct vn_thylacine_swapchain *chain =
++      (struct vn_thylacine_swapchain *)wsi_chain;
++   return &chain->images[image_index].base;
++}
++
++static VkResult
++vn_thylacine_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
++                                          const VkAcquireNextImageInfoKHR *info,
++                                          uint32_t *image_index)
++{
++   struct vn_thylacine_swapchain *chain =
++      (struct vn_thylacine_swapchain *)wsi_chain;
++   struct timespec start_time, end_time, rel_timeout;
++
++   timespec_from_nsec(&rel_timeout, info->timeout);
++   clock_gettime(CLOCK_MONOTONIC, &start_time);
++   timespec_add(&end_time, &rel_timeout, &start_time);
++
++   while (1) {
++      for (uint32_t i = 0; i < chain->base.image_count; i++) {
++         if (!chain->images[i].busy_on_host) {
++            if (chain->images[i].busy_on_device) {
++               /* steer away from the just-presented image */
++               chain->images[i].busy_on_device = false;
++               continue;
++            }
++            *image_index = i;
++            chain->images[i].busy_on_host = true;
++            chain->images[i].busy_on_device = true;
++            return VK_SUCCESS;
++         }
++      }
++
++      struct timespec current_time;
++      clock_gettime(CLOCK_MONOTONIC, &current_time);
++      if (timespec_after(&current_time, &end_time))
++         return VK_NOT_READY;
++   }
++}
++
++static VkResult
++vn_thylacine_swapchain_release_images(struct wsi_swapchain *wsi_chain,
++                                      uint32_t count, const uint32_t *indices)
++{
++   struct vn_thylacine_swapchain *chain =
++      (struct vn_thylacine_swapchain *)wsi_chain;
++
++   for (uint32_t i = 0; i < count; i++) {
++      uint32_t index = indices[i];
++      assert(index < chain->base.image_count);
++      chain->images[index].busy_on_device = false;
++      chain->images[index].busy_on_host = false;
++   }
++
++   return VK_SUCCESS;
++}
++
++static VkResult
++vn_thylacine_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
++                                     uint32_t image_index,
++                                     uint64_t present_id,
++                                     const VkPresentRegionKHR *damage)
++{
++   struct vn_thylacine_swapchain *chain =
++      (struct vn_thylacine_swapchain *)wsi_chain;
++   struct vn_thylacine_wsi_image *image = &chain->images[image_index];
++   const struct wsi_device *wsi = chain->base.wsi;
++
++   assert(image_index < chain->base.image_count);
++
++   /* The I-40 stage-0 bracket, independent of the async-present drain: the
++    * per-image throttle fence was submitted by the generic present submit
++    * (which waited the app's present semaphores), so waiting it here means
++    * every GPU write to this image has retired before the display is poked.
++    * On the designed async path vn_wsi_fence_wait has already drained the
++    * queue and this returns immediately. */
++   if (chain->base.fences[image_index] != VK_NULL_HANDLE) {
++      VkResult result =
++         wsi->WaitForFences(chain->base.device, 1,
++                            &chain->base.fences[image_index], true, UINT64_MAX);
++      if (result != VK_SUCCESS)
++         return result;
++   }
++
++   if (image->registered) {
++      struct vn_device *dev = vn_device_from_handle(chain->base.device);
++      vn_renderer_thylacine_present_poke(dev->renderer, image->img_handle);
++   }
++
++   image->busy_on_host = false;
++   return VK_SUCCESS;
++}
++
++static VkResult
++vn_thylacine_swapchain_wait_for_present(struct wsi_swapchain *wsi_chain,
++                                        uint64_t waitValue,
++                                        uint64_t timeout)
++{
++   return wsi_swapchain_wait_for_present_semaphore(wsi_chain, waitValue,
++                                                   timeout);
++}
++
++static void
++vn_thylacine_swapchain_destroy_image(struct vn_thylacine_swapchain *chain,
++                                     struct vn_thylacine_wsi_image *image)
++{
++   /* Unregister BEFORE freeing the memory: the compositor's wimg_destroy is
++    * the display-safe teardown (unbind-before-unref server-side), and the
++    * venus memory must outlive the presentable that names it.  A refused
++    * unregister keeps the img handle marked renderer-side (bounded,
++    * ctx-death reaped) -- the memory free is still safe: the server's blob
++    * holds its own reference. */
++   if (image->registered) {
++      struct vn_device *dev = vn_device_from_handle(chain->base.device);
++      vn_renderer_thylacine_img_destroy(dev->renderer, image->img_handle);
++      image->registered = false;
++   }
++   if (image->base.image != VK_NULL_HANDLE)
++      wsi_destroy_image(&chain->base, &image->base);
++}
++
++static VkResult
++vn_thylacine_swapchain_destroy(struct wsi_swapchain *wsi_chain,
++                               const VkAllocationCallbacks *pAllocator)
++{
++   struct vn_thylacine_swapchain *chain =
++      (struct vn_thylacine_swapchain *)wsi_chain;
++
++   for (uint32_t i = 0; i < chain->base.image_count; i++)
++      vn_thylacine_swapchain_destroy_image(chain, &chain->images[i]);
++
++   wsi_swapchain_finish(&chain->base);
++   vk_free(pAllocator, chain);
++
++   return VK_SUCCESS;
++}
++
++static VkResult
++vn_thylacine_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
++                                      VkDevice device,
++                                      struct wsi_device *wsi_device,
++                                      const VkSwapchainCreateInfoKHR *pCreateInfo,
++                                      const VkAllocationCallbacks *pAllocator,
++                                      struct wsi_swapchain **swapchain_out)
++{
++   struct vn_thylacine_swapchain *chain;
++   VkResult result;
++
++   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
++
++   uint32_t num_images = pCreateInfo->minImageCount;
++   if (num_images > VN_THYLACINE_WSI_MAX_IMAGES)
++      num_images = VN_THYLACINE_WSI_MAX_IMAGES;
++
++   size_t size = sizeof(*chain) + num_images * sizeof(chain->images[0]);
++   chain = vk_zalloc(pAllocator, size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++   if (chain == NULL)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++   /* CPU image params: with wants_linear pinned at vn_wsi_init this
++    * configures the NO_BLIT arm -- LINEAR tiling, no blit buffers, no
++    * command pools -- whose create_mem we then replace. */
++   const struct wsi_cpu_image_params cpu_params = {
++      .base.image_type = WSI_IMAGE_TYPE_CPU,
++   };
++
++   result = wsi_swapchain_init(wsi_device, &chain->base, device, pCreateInfo,
++                               &cpu_params.base, pAllocator);
++   if (result != VK_SUCCESS) {
++      vk_free(pAllocator, chain);
++      return result;
++   }
++
++   /* wants_linear is set unconditionally for this renderer; a BUFFER_BLIT
++    * chain here would mean OPTIMAL tiling under our LINEAR-stride
++    * registration -- refuse loudly rather than register garbage. */
++   if (chain->base.blit.type != WSI_SWAPCHAIN_NO_BLIT) {
++      wsi_swapchain_finish(&chain->base);
++      vk_free(pAllocator, chain);
++      return VK_ERROR_INITIALIZATION_FAILED;
++   }
++
++   /* The image path is ours: venus device memories registered as compositor
++    * presentables (see the file header). */
++   chain->base.image_info.create_mem = vn_thylacine_wsi_create_image_mem;
++   chain->base.image_info.finish_create = vn_thylacine_wsi_finish_create;
++
++   chain->base.destroy = vn_thylacine_swapchain_destroy;
++   chain->base.get_wsi_image = vn_thylacine_swapchain_get_wsi_image;
++   chain->base.acquire_next_image = vn_thylacine_swapchain_acquire_next_image;
++   chain->base.release_images = vn_thylacine_swapchain_release_images;
++   chain->base.queue_present = vn_thylacine_swapchain_queue_present;
++   chain->base.wait_for_present = vn_thylacine_swapchain_wait_for_present;
++   chain->base.wait_for_present2 = vn_thylacine_swapchain_wait_for_present;
++   chain->base.present_mode =
++      wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
++   chain->base.image_count = num_images;
++
++   uint32_t image = 0;
++   for (; image < chain->base.image_count; image++) {
++      result = wsi_create_image(&chain->base, &chain->base.image_info,
++                                &chain->images[image].base);
++      if (result != VK_SUCCESS)
++         goto fail_destroy_images;
++
++      /* wsi_create_image ran finish_create (registration) on success; the
++       * busy flags start clear. */
++   }
++
++   *swapchain_out = &chain->base;
++
++   return VK_SUCCESS;
++
++fail_destroy_images:
++   /* Only the images BEFORE the failed index: wsi_create_image's own fail
++    * path already wsi_destroy_image'd the partial one, and it cannot have
++    * registered (finish_create is the last fallible step, and a failed
++    * finish_create never sets `registered`) -- destroying it again here
++    * would double-free the stale handles the destroy does not null. */
++   for (uint32_t i = 0; i < image; i++)
++      vn_thylacine_swapchain_destroy_image(chain, &chain->images[i]);
++   wsi_swapchain_finish(&chain->base);
++   vk_free(pAllocator, chain);
++
++   return result;
++}
++
++VkResult
++vn_wsi_thylacine_init(struct vn_physical_device *physical_dev)
++{
++   const VkAllocationCallbacks *alloc =
++      &physical_dev->instance->base.vk.alloc;
++   struct wsi_device *wsi_device = &physical_dev->wsi_device;
++
++   struct vn_thylacine_wsi *wsi =
++      vk_alloc(alloc, sizeof(*wsi), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
++   if (!wsi)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++   wsi->base.get_support = vn_thylacine_surface_get_support;
++   wsi->base.get_capabilities2 = vn_thylacine_surface_get_capabilities2;
++   wsi->base.get_formats = vn_thylacine_surface_get_formats;
++   wsi->base.get_formats2 = vn_thylacine_surface_get_formats2;
++   wsi->base.get_present_modes = vn_thylacine_surface_get_present_modes;
++   wsi->base.get_present_rectangles =
++      vn_thylacine_surface_get_present_rectangles;
++   wsi->base.create_swapchain = vn_thylacine_surface_create_swapchain;
++
++   /* Replace the stock headless interface.  Ours is a vk_alloc'd struct
++    * whose first member is the wsi_interface, allocated with the same
++    * instance allocator -- so wsi_headless_finish_wsi's blind vk_free of
++    * whatever sits in the slot (wsi_device_finish) frees ours identically
++    * and vn_wsi_fini needs no special arm. */
++   vk_free(alloc, wsi_device->wsi[VK_ICD_WSI_PLATFORM_HEADLESS]);
++   wsi_device->wsi[VK_ICD_WSI_PLATFORM_HEADLESS] = &wsi->base;
++
++   return VK_SUCCESS;
++}
+-- 
+2.43.0
+

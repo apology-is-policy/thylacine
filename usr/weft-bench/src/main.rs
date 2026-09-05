@@ -47,7 +47,7 @@ usage: weft-bench [-n MB] [--color[=WHEN]]
   Reports the memcpy copy-tax baseline -- the per-byte copy cost the byte-copy
   ring pays, the ceiling Weft's zero-copy path removes.
   -n MB           megabytes to copy in the baseline (default 256)
-  --color[=WHEN]  colorize the report: always (default) | never | auto
+  --color[=WHEN]  colorize the report: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -63,7 +63,7 @@ fn run(args: Args) -> i64 {
         return rc;
     }
 
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut mb = DEFAULT_MB;
     let mut i = 1;
     while let Some(a) = args.get_str(i) {
@@ -141,7 +141,8 @@ fn staged_zero_copy_note(on: bool) {
     );
 }
 
-/// `--color=auto` stub; true until a kernel TTY check lands.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

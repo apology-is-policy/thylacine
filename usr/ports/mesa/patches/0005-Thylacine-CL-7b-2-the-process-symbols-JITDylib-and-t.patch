@@ -1,7 +1,7 @@
-From 5082e9263b1b8af4f7498d6d86334a99b2ba543c Mon Sep 17 00:00:00 2001
+From 26bd80817429d0dabc63419540ee5f272204638b Mon Sep 17 00:00:00 2001
 From: Thylacine Clade <claude@thylacine.local>
 Date: Fri, 31 Jul 2026 16:34:30 +0200
-Subject: [PATCH] Thylacine CL-7b-2: the process-symbols JITDylib and the
+Subject: [PATCH 05/23] Thylacine CL-7b-2: the process-symbols JITDylib and the
  CAP_JIT clearance
 
 Two independent things stood between an osmesa-prove that links and a JIT that

@@ -82,6 +82,66 @@ fn print_banner() {
 /// `Command::inherit_fd` (so it lands at ut's fd 3) and passes its number here.
 /// A bare-spawned ut (the boot check) is given no such arg -> -1 -> ut runs
 /// unchanged. N is parsed generically (always 3 in the trusted login->ut chain).
+// H-1c: read the renderer's tier advertisement off the ungated /dev/beacon
+// leaf (`beacon <tier>\n`; ARCH 23.5.4). Returns the tier word, or None on
+// an open/read failure / a missing token (both mean: leave /env/BEACON
+// alone -- an inherited value survives).
+//
+// Why the LEAF and not the inherited consctl fd (audit H-1 F1): that fd is
+// ONE Spoor threaded joey -> login -> ut whose offset every non-positioned
+// mode WRITE advances -- by this point login's three writes + ut's own
+// PROMPT_MODE have pushed it past the <=67-byte line, so a plain t_read
+// returned EOF every session and the tier transport was dead on arrival
+// (the original comment here considered competing READS and missed the
+// writes). Nor can ut recover the offset: devdev is non-seekable (pread/
+// lseek gate on dev->seekable, the RW-4 R2-F2 narrowing) and a fresh
+// consctl open fails the I-27 attach gate (attach never propagates --
+// that is WHY the fd is inherited). The /dev/beacon leaf is the winsize-
+// leaf precedent: a fresh ungated open at offset 0, world-readable, since
+// a renderer self-description is not a secret.
+fn read_beacon_tier() -> Option<&'static str> {
+    use libthyla_rs::io::Read as _;
+    let mut f = libthyla_rs::fs::File::open("/dev/beacon").ok()?;
+    let mut buf = [0u8; 32];
+    let n = f.read(&mut buf).ok()?;
+    if n == 0 {
+        return None;
+    }
+    let line = &buf[..n];
+    let needle = b"beacon ";
+    let at = line
+        .windows(needle.len())
+        .position(|w| w == needle)?;
+    let word = &line[at + needle.len()..];
+    if word.starts_with(b"rich") {
+        Some("rich")
+    } else if word.starts_with(b"cells") {
+        Some("cells")
+    } else if word.starts_with(b"none") {
+        Some("none")
+    } else {
+        None
+    }
+}
+
+// H-1c: export the session tier the Plan 9 way -- /env/BEACON, deep-copied
+// to every child at spawn (kernel env_clone_into; children read it via
+// libthyla_rs::env::var). Best-effort: a failed export leaves children at
+// tier none, degraded never broken.
+fn export_beacon(tier: &str) {
+    use libthyla_rs::io::Write as _;
+    match libthyla_rs::fs::File::create("/env/BEACON") {
+        Ok(mut f) => {
+            if f.write_all(tier.as_bytes()).is_err() {
+                t_putstr("ut: /env/BEACON write failed (children see none)\n");
+            }
+        }
+        Err(_) => {
+            t_putstr("ut: /env/BEACON create failed (children see none)\n");
+        }
+    }
+}
+
 fn parse_consctl_fd() -> i64 {
     let mut it = env::args().operands();
     while let Some(a) = it.next() {
@@ -308,6 +368,11 @@ pub extern "C" fn rs_main() -> i64 {
     // A bare-spawned `ut` parses -1 and runs unchanged. A pts-hosted `ut` is
     // never given --consctl-fd; the !jc gate keeps a stray one from clobbering
     // the dance's pts ctl.
+    // H-2 F10: the per-prompt tier re-read's session state (armed by the
+    // consctl block below iff the initial read succeeded -- i.e. this is a
+    // console session that owns the advertisement chain).
+    let mut beacon_tier: Option<&'static str> = None;
+    let mut beacon_console = false;
     let consctl_fd = parse_consctl_fd();
     if !jc && consctl_fd >= 0 {
         repl.set_consctl_fd(consctl_fd as i32);
@@ -315,6 +380,39 @@ pub extern "C" fn rs_main() -> i64 {
             t_putstr("ut: consctl ok (console line discipline via inherited fd)\n");
         } else {
             t_putstr("ut: consctl unavailable (mode-set rejected)\n");
+        }
+
+        // H-1c (BEACON.md 12.3/12.6): resolve the session's Beacon tier from
+        // the renderer's consctl advertisement and export it. The session ut
+        // is the ONLY writer of /env/BEACON (it read the advertisement off
+        // the console it owns); a consctl-less / pts-hosted / bare-spawned ut
+        // takes this branch never, so an INHERITED /env/BEACON from a parent
+        // session is left alone. Zones arm iff the tier is rich AND ut's own
+        // stdout is the console (a redirected session emits nothing).
+        let tier = read_beacon_tier();
+        if let Some(t) = tier {
+            export_beacon(t);
+            // The transport canary (audit H-1 F1): fires EVERY session, any
+            // tier -- a regression back to the dead-read shape (which
+            // returned None) silences this line, so a scenario asserting it
+            // is the fix's standing witness.
+            t_putstr("ut: beacon ");
+            t_putstr(t);
+            t_putstr(" exported\n");
+            let stdout_is_cons = unsafe { libthyla_rs::t_fd_devclass(1) } == b'c' as i64;
+            if t == "rich" && stdout_is_cons {
+                repl.set_beacon_rich(true);
+                t_putstr("ut: beacon rich (transcript zones armed)\n");
+            }
+            // H-2 F10: arm the per-prompt re-read (below) with this
+            // session's baseline.
+            beacon_tier = Some(t);
+            beacon_console = stdout_is_cons;
+        } else {
+            // Absent token / failed read: the inherited /env/BEACON (if any)
+            // survives; children resolve none. Loud so the chain never fails
+            // silently again.
+            t_putstr("ut: beacon tier unreadable (env untouched)\n");
         }
     }
 
@@ -339,6 +437,18 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     let mut out = io::stdout();
+    // DISPLAY-MODES.md section 3.4: learn the terminal width so the line editor
+    // wraps at the real column count. Session-only (same live-stdout gate as
+    // open_notes / install_completion): reads the pts ctl winsize on a pts, else
+    // /dev/winsize, else a CPR probe whose reply arrives on the input path. Must
+    // run AFTER the pts/consctl dance (it keys on job_control / consctl_fd) and
+    // BEFORE the first prompt draw (a corner-probe's cursor motion is undone by
+    // the prompt's own \r+clear). A width that only resolves via the async CPR
+    // reply is applied on the next redraw -- the first prompt is correct on the
+    // /dev/winsize + pts fast paths and self-corrects on the probe path.
+    if io::stdout_is_live() {
+        repl.probe_winsize(&mut out);
+    }
     // Draw the first prompt (no-op to the UART if fd 1 is absent).
     repl.draw_prompt(&mut out);
 
@@ -352,9 +462,18 @@ pub extern "C" fn rs_main() -> i64 {
     // command's interrupt forwarding stays in `wait_pids_interruptible` (the
     // shell is not in THIS loop while a child runs).
     let cons_fd = io::stdin().as_raw_fd();
+    let mut beacon_cycles: u64 = 0;
+    // item 10: the fd to POLL for stdin readiness. When pts-hosted this is the
+    // `/dev/pts/<n>ready` file, NOT fd 0 -- the pts slave is not directly
+    // pollable (dev9p.poll is always-ready for it), so polling fd 0 would return
+    // at once and the shell would block in read(), where a caught `interrupt`
+    // note cannot wake it. On the console (or a degraded ready open) this is
+    // cons_fd itself (pollable via LS-8a) -- the loop is then byte-identical to
+    // pre-item-10. The READ is always fd 0.
+    let poll_in_fd = repl.poll_in_fd().unwrap_or(cons_fd);
     let mut notes_fd = repl.notes_fd();
     let mut poll = PollSet::new();
-    poll.add_raw(cons_fd, PollEvents::READ);
+    poll.add_raw(poll_in_fd, PollEvents::READ);
     if let Some(nfd) = notes_fd {
         poll.add_raw(nfd, PollEvents::READ);
     }
@@ -367,10 +486,13 @@ pub extern "C" fn rs_main() -> i64 {
         match poll.poll(PollTimeout::Block) {
             Ok(results) => {
                 for ev in results {
-                    if ev.fd == cons_fd {
-                        // Any cons event (READ / HUP / ERR) -> attempt the read,
+                    if ev.fd == poll_in_fd {
+                        // Any readiness event (READ / HUP / ERR on the pts ready
+                        // file, or on cons_fd itself) -> attempt the fd-0 read,
                         // which resolves data (feed) or EOF/error (break). A bare
-                        // HUP MUST set this or a closed stdin would spin the loop.
+                        // HUP MUST set this or a closed stdin would spin the loop
+                        // (item 10: the ready file reports POLLHUP on master-gone,
+                        // and the fd-0 read then returns EOF -> clean teardown).
                         cons_ready = true;
                     } else if Some(ev.fd) == notes_fd {
                         if ev.is_readable() {
@@ -421,6 +543,24 @@ pub extern "C" fn rs_main() -> i64 {
                 Ok(n) => {
                     if let Some(code) = repl.feed(&buf[..n], &mut out) {
                         break code;
+                    }
+                    // H-2 F10: a completed command cycle drew a fresh prompt
+                    // -- re-read the renderer's tier so a renderer swap's
+                    // reset (the kernel clears the tier when a drain closes)
+                    // reaches /env/BEACON at the NEXT prompt, not never. One
+                    // leaf read per command; silent unless the tier CHANGED.
+                    if beacon_tier.is_some() && repl.prompt_cycles() != beacon_cycles {
+                        beacon_cycles = repl.prompt_cycles();
+                        if let Some(t2) = read_beacon_tier() {
+                            if Some(t2) != beacon_tier {
+                                beacon_tier = Some(t2);
+                                export_beacon(t2);
+                                repl.set_beacon_rich(t2 == "rich" && beacon_console);
+                                t_putstr("ut: beacon ");
+                                t_putstr(t2);
+                                t_putstr(" re-exported (renderer change)\n");
+                            }
+                        }
                     }
                 }
             }

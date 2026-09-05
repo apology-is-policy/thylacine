@@ -1,0 +1,1011 @@
+# WARP-WSI-DESIGN — the Vulkan present path (the vkQuake arc W-2; the Halcyon-on-vk substrate)
+
+**Status: RATIFIED — operator signoff 2026-08-26 (the direction §0 by explicit
+vote; the full design by signoff on this doc). Binding scripture; W-3
+implements against it. Amendments follow the scripture-first pattern.**
+
+Chunk lineage: the vkQuake arc (operator-voted 2026-08-26; W-1 = the offscreen
+pipeline witness, CLOSED at `4efe9bc4`/mesa `150990a`). W-2 is this design.
+W-3 = the implementation. W-4 = vkQuake as the E2E proof.
+
+---
+
+## 0. The ratified direction (operator, 2026-08-26)
+
+Two operator statements bind this design:
+
+1. **The standard**: "we want to build our system to the highest extent and
+   standard possible, and will accept no workarounds or less proper
+   implementations of our subsystems — we don't need to move fast, we need to
+   build quality for the future and not look at cost. Even if you think some of
+   our architecture that we've already built on was not right, there is no
+   problem at all going back and redoing it better. **Halcyon might even run on
+   vk at one point, or from the beginning.**"
+2. **The vote**: of the three candidate architectures (§0.2), **Option B built
+   fully** — the zero-copy render↔present capability unification — ratified
+   with **Halcyon-on-Vulkan as a first-class design requirement**, not a
+   door-left-open.
+
+### 0.1 What this design must produce
+
+A Venus-rendered `VkImage` becomes a **first-class presentable resource**:
+scanned out directly (fullscreen, zero-copy) or fenced-composed (windowed) by
+tapestryd, with a proper acquire/release fence on the I-40 bracket — the
+general, continuous compositor substrate Halcyon-on-vk would run on, proven
+first by vkQuake.
+
+### 0.2 The alternatives, and why they were rejected (the record)
+
+- **A — CPU/prime-blit into a tapestry weave** (mesa wsi_common's CPU-image
+  path; render → `vkCmdCopyImageToBuffer` → host-visible buffer → copy into a
+  weave → the existing `/srv/tapestry` present). Every mechanism proven (W-1
+  step 8 + the thyla_tap path); no tapestryd ABI change; fastest to vkQuake.
+  **REJECTED as a workaround**: the per-frame CPU copy is negligible at
+  vkQuake's 320×240 and a *permanent tax* at Halcyon's full-resolution
+  continuous compositing — the property that made it cheap is exactly the
+  property that does not hold for the real target.
+- **C — dma-buf export + mesa's `vn_wsi.c` native path** (the most
+  upstream-faithful shape). **REJECTED for paradigm, not effort**: dma-buf +
+  DRM/KMS is Linux's ambient-authority answer — exported handles into a global
+  compositor protocol — and does not map onto Thylacine's per-Proc,
+  capability-scoped model. `thylacine_bo_export_dma_buf` returning -1 is not
+  an omission to fix; it is the correct absence of a concept we do not have.
+- **B — the zero-copy unification** (this design): the Fuchsia
+  (sysmem + Flatland) / Genode (Gpu + Gui session) SOTA shape — **render
+  authority and present authority are separate capabilities; the handoff is a
+  shared buffer both sides already map, scanned out directly**. Thylacine's
+  Warp hostmem/host3d substrate already shares the host pages between the
+  guest (the venus render target) and the host (virglrenderer); what is
+  missing is only the present half's recognition of those resources.
+  **RATIFIED.**
+
+What B *reuses* and what it *replaces* — because "built fully" must not mean
+"rebuilt needlessly": mesa's `wsi_common` swapchain/acquire/present **state
+machine** is kept (well-tested upstream infrastructure; reimplementing it
+would be the anti-quality move). What is replaced is only the **image path**:
+a Thylacine `wsi_interface` whose swapchain image is a native shared Venus
+resource registered for scanout — no dma-buf, no CPU blit.
+
+---
+
+## 1. Prior art (the homework behind the fork)
+
+### 1.1 The heritage: Plan 9
+
+Plan 9 has no swapchain and no GPU present protocol. Its model: the display is
+a **file server** (`/dev/draw`); a window is a file-shaped image resource; the
+window system (rio) **owns the screen** and composites client images — a
+client hands rio a finished image and rio decides when it reaches glass.
+The inheritances this design keeps:
+- **tapestryd is rio**: the compositor owns the scanout (I-27's trusted-sink
+  posture); a client never programs the display.
+- **Present is "hand the compositor your image"**, named through the
+  namespace — not a client-programmed flip.
+- The swapchain's N-image round-robin is *mesa's* abstraction; the Thylacine
+  side owes only "accept a finished image, composite it under I-40, signal
+  when the buffer is reusable."
+
+### 1.2 The capability-microkernel SOTA
+
+Not Linux (dma-buf/DRM/Wayland is the ambient-authority shape rejected in
+§0.2-C). The relevant peers converged on one answer:
+
+- **Fuchsia (Magma + Flatland/Scenic)**: the GPU channel (render) and the
+  Flatland channel (present) are **separate capabilities**; the handoff is a
+  **sysmem buffer collection** — a shared buffer whose format/tiling both
+  producer and consumer negotiated up front, so the compositor scans out the
+  exact pages the GPU wrote. Zero-copy by construction.
+- **Genode (Gpu session + Gui/Framebuffer session)**: the same split, sharper —
+  two sessions from two servers, a shared dataspace as the handoff, present as
+  "flip/blit this dataspace."
+
+The convergent principle: **render authority and present authority are
+distinct capabilities; the handoff is a shared buffer with a release fence.**
+Mapped onto Thylacine: the `/srv/warp` venus ctx is the render capability
+(built, W-1); the present capability is tapestryd's present path; the shared
+buffer is the hostmem/host3d substrate (built, V-2/V-3b); the release fence is
+the I-40 bracket surfaced as a poll-able completion.
+
+### 1.3 The synthesis (the NOVEL candidate)
+
+The fusion of §1.1 and §1.2 — **a capability-scoped, namespace-named,
+zero-copy swapchain with no dma-buf and no global compositor protocol**: the
+swapchain image is a shared Venus resource, presented by naming it to the
+compositor over the same 9P service that scoped its creation, composited under
+a formally-specified no-torn-scanout invariant. If the direct scanout of a
+venus resource is genuinely new on this class of stack, this is a NOVEL.md
+candidate — to be recorded at signoff.
+
+---
+
+## 2. Design requirements (binding once signed off)
+
+R1. **Zero-copy on the steady-state path.** A fullscreen presentable image's
+    pages are scanned out directly; no per-frame CPU copy anywhere in the
+    present path. Windowed composition may touch pages only host-side
+    (the fenced compose), never a guest CPU blit.
+R2. **Halcyon-scale**: the path is sized and specified for continuous
+    full-resolution compositing (the Halcyon-on-vk substrate), not for the
+    vkQuake demo. vkQuake (W-4) is the *proof*, not the *target*.
+R3. **Capability separation**: render authority (the venus ctx) and present
+    authority are distinct; holding one never implies the other; both are
+    namespace-named and I-45-scoped (a client presents only surfaces it owns,
+    only resources its ctx owns).
+R4. **I-40 holds, formally**: the no-torn-scanout invariant extends to
+    venus-resource presents, and `specs/tapestry_present.tla` is extended to
+    model the new present class BEFORE the implementation lands (the spec-first
+    re-enablement point (a) — an invariant-bearing feature that genuinely
+    benefits from machine-checked exploration; the I-40 spec already exists
+    and gates additively, the C-1/C-6 precedent).
+R5. **Proper fencing**: `vkAcquireNextImageKHR` blocks on a real
+    release-completion (the compositor is done with that image), never a
+    sleep/poll workaround; `vkQueuePresentKHR` orders render-complete before
+    compose/scanout via a real fence (the multi-queue timelines), never a
+    CPU-synchronization stand-in.
+R6. **Reuse upstream where it is the quality path**: mesa `wsi_common`'s
+    swapchain state machine is the implementation substrate for the Vulkan
+    semantics; only the image/present backend is Thylacine-native.
+R7. **The two-tree debt is resolved, not worked around** (§3): a presentable
+    GPU resource is first-class in the present ABI — not bolted onto the
+    virgl-only `present-to` bridge by another special case.
+
+---
+
+## 3. The architectural debt this design resolves
+
+tapestryd serves two disjoint worlds today:
+
+- `/srv/tapestry` — surfaces/weaves: 2D, weave-backed
+  (`RESOURCE_CREATE_2D` + `TRANSFER_TO_HOST_2D`), the proven present path
+  (thyla_tap / libtapestry), I-40-enforced.
+- `/srv/warp` — GPU contexts and resources: virgl BOs (`bos[]`, `create3d`,
+  `dma_fd`-carrying) and venus device memory (`mems[]`, HOST3D-blob-backed,
+  no `dma_fd`).
+
+The only bridge is Warp-4's mutual adoption (`glsrc` / `present-to`), and it
+is **narrow by construction**: `present-to` resolves its argument against
+`bos[]` only, keyed on `dma_fd >= 0` — a virgl-shaped test that no venus
+resource can pass. Extending that test case-by-case is exactly the
+"less-proper implementation" the ratified standard forbids. This design makes
+presentability a **property of a shared GPU resource**, with one validation
+model covering both resource families — the redo the operator explicitly
+invited.
+
+### 3.1 The measured gaps (mechanism research, 2026-08-26; file:line-cited)
+
+What a venus image would need to be presented that does not exist today —
+each a design obligation below, none a reason to fall back to a workaround:
+
+1. **A `WarpMem`'s `res_id` is not scanout-shaped.** It is minted by
+   `RESOURCE_CREATE_BLOB(HOST3D)` (`gpu.rs:2377-2410`), whose wire format
+   carries no format/width/height/target at all; `SET_SCANOUT`
+   (`gpu.rs:2791-2802`) "fetches the host GL texture id" (GPU-DESIGN §4.4) —
+   a blob has none. `SET_SCANOUT(mem.res_id, …)` has nothing to fetch.
+2. **`SET_SCANOUT_BLOB` — the virtio-gpu command that scans out a blob
+   directly — is absent from our wire vocabulary** (not defined, not
+   negotiated anywhere in `gpu.rs`). A structural gap, not a validation gap.
+3. **`present-to` and `gl_adoption` are typed to `bos[]`** (`server.rs:
+   10627-10635`, `5479-5483`); `WarpCtx.present_to` carries a `bo_pub`; no
+   path resolves a `mems[]` entry.
+4. **`WarpMem` carries no geometry** (`server.rs:1739-1748` — by design), so
+   none of the eligibility gates (`w/h` match, `w*h*4 <= size`) have a field
+   to check.
+5. **Venus resources live under a different device ctx** (`venus_ctx =
+   WARP_VENUS_CTX_BASE + slot`) than everything the scanout/compose machinery
+   has ever bound (virgl `dev_ctx` / `COMPOSITOR_CTX`).
+6. **The I-40 spec models exactly three in-flight host-work classes**
+   (transfer / blit / readback), each with a `NoTorn*` + `Drained*` pair
+   (`specs/tapestry_present.tla:361-391, 453-461, 718-726, 760-766,
+   863-905`); a venus-image scanout is a fourth class with no state variable,
+   no invariant, and no drain conjunct yet.
+7. **`WarpMem` teardown has no display-safety ordering**: `gl_evict_res`'s
+   "unbind the scanout BEFORE the unref — the one order the display cannot
+   survive" (`server.rs:5539-5562`) has no analog on the
+   `wmem_destroy`/`retire_host3d_ring` path, because no mem has ever been a
+   scanout target.
+
+---
+
+## 4. The present-path mechanism
+
+### 4.1 The presentable-image model (the sysmem lesson, made Thylacine-shaped)
+
+The Fuchsia lesson (§1.2) is that zero-copy present works when producer and
+consumer agree on the buffer's shape **up front** — not when a raw allocation
+is retrofitted into a display. The design therefore does NOT bolt geometry
+onto `WarpMem` (a `VkDeviceMemory` is correctly geometry-less — gap 4 is a
+feature of the memory model, not a bug). Instead:
+
+**A swapchain image is a first-class `presentable` object**: a venus-created
+`VkImage` whose backing the server minted as a **HOST3D blob it never maps**
+(bound by `blob_id` to the venus allocation, exactly the existing
+`mint_host3d_ring` binding — `gpu.rs:2481-2536`; this said *shareable* until
+§4.1 was amended by measurement — see §4.1 — and the correction matters here
+too: what withholds the image from the guest is the absence of any map, not a
+flag) and whose **display shape
+(width, height, format, stride) is declared at registration**, validated
+against what mesa's WSI negotiated. Three consequences:
+
+- The declaration is the negotiation: the compositor accepts the registration
+  only for shapes it can scan out / compose (BGRA8/XRGB8 at stage 0 — the
+  formats the console path composes today), so eligibility is decided ONCE at
+  create, not re-derived per frame. (The sysmem "buffer collection
+  constraint" idea, without a new protocol: the constraint set is the accept
+  set of one registration verb.)
+- A **DEVICE_LOCAL** swapchain image never needs a guest mapping: it exists
+  to be *named* (scanout, compose), not mapped. The mappable path
+  (HOST_VISIBLE) stays what it is today. This splits gap 1 correctly:
+  scanout needs a nameable host resource with a declared shape, not a
+  guest-visible one.
+
+  **AMENDED at W-3c-1 (2026-08-26, operator-ratified) — the mechanism, not
+  the property.** This bullet originally specified the mint as a *shareable*
+  blob created **without** `USE_MAPPABLE`, on the reasoning that omitting the
+  flag is what keeps the image out of the guest. The W-3c-1 self-test
+  measured that mint on the real chain (thyla-pi, QEMU 10.0.11 +
+  virglrenderer 1.1.0 + v3dv) and the host refused it. Isolated cleanly —
+  same size, same venus ctx, `blob_id` 0, only the flag varying:
+
+  | `blob_flags` | verdict |
+  |---|---|
+  | `USE_SHAREABLE` alone (as specified here) | **refused** (`RESP_ERR_UNSPEC`) |
+  | `USE_MAPPABLE \| USE_SHAREABLE` | **refused** |
+  | `USE_MAPPABLE` alone | **accepted** |
+
+  So `USE_SHAREABLE` is refused outright on a HOST3D blob by this
+  virglrenderer — it is not that `USE_MAPPABLE` is *additionally* required.
+
+  The correction is that the original text **conflated a FLAG with an
+  ACTION**. `USE_MAPPABLE` declares that the host *may* place the blob in the
+  hostmem BAR; it is `RESOURCE_MAP_BLOB` + `SYS_BURROW_FROM_HOSTMEM` that
+  actually expose bytes to the guest. The property this design wants — a
+  swapchain image the guest cannot touch — is therefore secured by **never
+  mapping it**, not by omitting the flag. So the as-built mint is
+  `create_host3d_blob(USE_MAPPABLE)` and the presentable path calls neither
+  `map_blob` nor `burrow_from_hostmem`: no hostmem offset, no weft share, no
+  guest VA, no reclaim park, no #847 dual count. Every consequence the
+  original bullet claimed still holds; only the mechanism that delivers them
+  changed.
+
+  **What this measurement does NOT establish** (the W-3a class-scoping rule):
+  it was taken with `blob_id = 0`, the self-test's stand-in for a venus
+  allocation, and virglrenderer's blob-id-0 path is its own plain-memory arm.
+  Whether `USE_SHAREABLE` is accepted for a **real** venus allocation
+  (`blob_id != 0`) is unmeasured and unmeasurable without a client; it lands
+  with W-3d. If it turns out to be accepted there, revisiting this bullet is
+  optional — the mapped-never property is delivered either way — so the
+  amendment is not contingent on that answer.
+- The presentable's lifetime is the swapchain's: `wsi_common` creates the
+  `VkImage`s at `vkCreateSwapchainKHR`; the backend registers each once;
+  `vkDestroySwapchainKHR` retires them. No per-frame create/destroy anywhere.
+
+### 4.2 The Direct arm (fullscreen, zero-copy)
+
+The steady-state Halcyon path. The surface↔ctx adoption generalizes (§5.1);
+when the adopted source is a presentable and the surface is fullscreen,
+tapestryd binds the display to the presentable's resource:
+
+- **The wire mechanism is `SET_SCANOUT_BLOB`** (gap 2): the virtio-gpu
+  command whose argument set (res_id + format + width/height/stride +
+  offsets) exists precisely because a blob resource carries no implicit
+  shape. tapestryd's `gpu.rs` grows the command + its feature check; the
+  registration's declared shape supplies the arguments. Per-frame, a present
+  is then **`RESOURCE_FLUSH` only** — the same zero-guest-transfer steady
+  state the Warp-4 GL Direct arm already proved (`server.rs:11207-11289`).
+- **Host capability is verified, never assumed** (the V-0 discipline): W-3's
+  FIRST sub-chunk is a host-capability probe — does this QEMU + virglrenderer
+  + v3dv chain accept `SET_SCANOUT_BLOB` on a venus-bound HOST3D blob, with a
+  paired negative control? The probe's verdict gates the arm. If the real
+  host chain refuses (the export bridge between the venus render-server and
+  the display is a host-internal question we cannot legislate), **the
+  fallback is the Composed arm (§4.3) — host-side GPU work, still zero guest
+  copies** — and the Direct arm lands when the host chain supports it. The
+  fallback is explicitly NOT a guest CPU blit; R1 holds on both arms.
+- Ordering: render-complete precedes scanout CLIENT-side at stage 0 — the
+  backend waits the frame's fence (the multi-queue per-timeline ledgers)
+  before issuing the present RPC (§4.4), so the compositor never needs to
+  observe a client fence. A server-side observe ("present names a timeline
+  point") is the async evolution's shape, recorded with the §4.4 seam.
+
+### 4.3 The Composed arm (windowed; host-side only)
+
+The windowed case (and the Direct fallback) reuses the Warp-C machinery,
+extended across the ctx boundary (gap 5):
+
+- Preferred: the **C-3 GPU blit** — import the presentable's resource into
+  the compositor's context and blit into the screen resource
+  (`submit_blits`, `server.rs:11417-11437`). Whether a venus-ctx-created
+  resource is blittable by the virgl compositor ctx is the same
+  host-capability question as §4.2 and rides the same probe.
+- Fallback: the **C-6 fenced readback** (`rb_issue`/`comp_readback_retired`,
+  `server.rs:8075-8212`) — a fenced host DMA read of the presentable into
+  the weave, completing off the fence pump. Host-side work only; the guest
+  never copies. The C-6 bookkeeping (the reserved fenced slot, the
+  double-counted in-flight, abandon-poisons-the-ctx) carries over unchanged.
+
+### 4.4 Acquire/release fencing (I-9 + R5)
+
+Stage 0 keeps the **synchronous present bracket** that is load-bearing for
+I-40 today (`server.rs:9-79`: the in-flight window opens and closes inside
+one dispatch): `vkQueuePresentKHR` → the backend's present RPC blocks until
+tapestryd has composited/bound the image → the reply IS the release of the
+*previous* image on that surface. Consequences:
+
+- `vkAcquireNextImageKHR` = take the next free image from the swapchain's
+  free list; block (on the present RPC's completion, via the wsi_common
+  serialization) only when all images are in flight — with N>=2 images the
+  render of frame K+1 overlaps the compose of frame K, which is the
+  double-buffering the swapchain contract wants. No polling, no sleeps.
+- Render-before-present ordering: the backend submits the present only after
+  the rendering queue's fence timeline reaches the frame's point (the
+  multi-queue ledgers; the wsi_common present-wait machinery drives this).
+- The async evolution (a fenced, non-blocking present with an explicit
+  release event) is a recorded seam, NOT stage 0: it follows the C-6
+  precedent — a new in-flight class goes async only WITH its own fence tag,
+  drain conjunct, and spec extension (GPU-DESIGN §4.5.6: "I-40 does not
+  mandate synchrony; it mandates quiesce-before-retire").
+
+## 5. The ABI (the two-tree reconciliation, R7)
+
+### 5.1 One adoption model, two resource families
+
+The mutual-adoption shape (surface names ctx, ctx names resource,
+incarnation-pinned, re-resolved per use — `server.rs:11052-11086`,
+`10586-10666`, `5448-5522`) is CORRECT and is kept. What changes: the ctx
+half's argument becomes a **presentable id**, and the resolver
+(`gl_adoption`'s successor) resolves it against ONE eligibility model:
+
+    presentable = a WarpBo (virgl; shape = its create3d w/h/format)
+                | a registered venus image (shape = its registration)
+
+with one shared gate: owned by the naming ctx (I-45), alive, not retiring,
+shape matches the surface, backing sufficient, fence-clean. The `bos[]`-only
+`present-to` (gap 3) is superseded — the virgl arm becomes one family of the
+general model rather than the special case the venus arm bolts onto. The
+`dma_fd >= 0` test dissolves into the per-family "built" predicate.
+
+### 5.2 The registration verbs (sketch; exact wire format at W-3)
+
+Under the client's own ctx (all I-45-scoped, all namespace-named):
+
+- `ctx/<id>/img/new` — register a presentable. **AS BUILT at W-3c-1**
+  (this bullet was labelled a sketch; W-3 has now landed the format):
+  write `"<handle> <w> <h> <format> <stride> <mem_id>"`. The handle space is
+  the CLIENT's (0..15, the `ring`/`mem` discipline), which is what removes
+  the need to return an id — the sketch's "returns the presentable id" is
+  superseded. `format` is the stage-0 accept set (BGRA8/XRGB8); `stride`
+  must cover `w*4`; the mint is `create_host3d_blob(USE_MAPPABLE)` and the
+  path never maps it (§4.1 as amended). A duplicate live handle is
+  `E_INVAL`; over the I-32 byte cap is `E_NOMEM`.
+- `ctx/<id>/img/<n>/info` — the accepted shape (the negotiation's record).
+- `ctx/<id>/img/<n>/ctl` — `destroy` (display-safe: the §6 unbind-first
+  ordering).
+
+  > **THE CLIENT-ORDERING CONTRACT — binding on the WSI backend (W-3d).**
+  > **Destroy the registration BEFORE freeing the venus allocation it names.**
+  > In wsi terms: `vkDestroySwapchainKHR` retires the images, and each one's
+  > `img/<n>/ctl destroy` must precede the `vkFreeMemory` of its backing.
+  >
+  > This discharges the fourth holder in `tapestry_present.tla`'s `PFree`
+  > (`~venusRef`). Three holders are the server's and are enforced there — the
+  > registration slot, and the two observer arms (`PUnbound`/`PDrained` in
+  > `wimg_teardown`). The fourth is the client's own `VkDeviceMemory`, live in
+  > its address space and **invisible to the server**, so it can only be a
+  > contract, and it is stated here because the party bound by it reads this
+  > document and not `server.rs` (round-2 F9).
+  >
+  > Getting it backwards — free-then-destroy — leaves the host holding a
+  > binding to freed memory. Nothing guest-side can detect it: `mem_id` is
+  > opaque to the server, and by the time the destroy arrives the damage is
+  > host-side. It is bounded by the same trusted-host posture as every other
+  > `blob_id` claim (GPU-DESIGN §9.2) and becomes ours to enforce at the v3d
+  > fork. What the server guarantees regardless of client ordering is its own
+  > half: the display never keeps a reference across the unref.
+- `ctx/<id>/ctl` — `present-to <surface> img <n>` (the generalized arm).
+- The surface half (`surface/<id>/ctl glsrc <ctx>`) is unchanged — consent
+  stays mutual and incarnation-pinned.
+
+### 5.3 The mesa backend
+
+A Thylacine `wsi_interface` (the 7-entry vtable: 6 queries +
+`create_swapchain`) registered into `wsi_device.wsi[]`; `wsi_common` keeps
+the swapchain state machine (R6). The image path: `create_swapchain` creates
+the VkImages via the driver as usual, then registers each as a presentable
+(§5.2) instead of exporting a dma-buf; `queue_present` = the present RPC;
+`acquire` = the free-list + serialization of §4.4. `vn_wsi.c`'s
+dma-buf-assuming native path stays off; the Thylacine backend is the
+platform. Surface enumeration: one surface class ("the tapestry surface"),
+created from the SDL glue below.
+
+### 5.4 The SDL2 Vulkan glue (W-3's second half)
+
+The inert 5-hook `Vulkan_*` vtable (`SDL_sysvideo.h:296-300`) gets a
+Thylacine arm: `Vulkan_CreateSurface` wraps the tapestry surface the video
+backend already owns (`thyla_tap` / `SDL_thylacinevideo.c`) into the
+`VkSurfaceKHR` the mesa backend defined; `GetInstanceExtensions` reports the
+Thylacine surface extension; the khronos Vulkan headers the vendored SDL
+expects are restored for the build. vkQuake then runs unmodified through
+`SDL_Vulkan_*` — the W-4 proof.
+
+## 6. Invariants + the spec extension (R4)
+
+- **I-40**: the venus-image scanout/compose is the FOURTH in-flight class.
+  `specs/tapestry_present.tla` grows — additively, behind its own `ALLOW_*`
+  switch with measured no-drift on the existing cfgs (the C-1/C-6
+  precedent) — a presentable-bound state, its `NoTorn*` invariant (the
+  display never observes a retired presentable), its `Drained*` conjunct on
+  `ServerRelease`/`Free`, and a `BUGGY_*` counterexample cfg. The spec lands
+  TLC-green BEFORE the W-3 implementation (spec-first re-enablement point
+  (a)).
+- **The display-safe teardown** (gap 7): a presentable's destroy/ctx-death
+  path gains the `gl_evict_res` ordering — unbind (`SET_SCANOUT(0)` /
+  evict from the compose set) BEFORE the resource unref — plus the fence
+  drain (no in-flight compose names it). This is the `WarpMem`-side analog
+  that never needed to exist before.
+- **I-45**: the registration + present verbs resolve only under the owning
+  conn's ctx (the existing owner-scan shape); a ctx presents only its own
+  presentables to only surfaces that named it back.
+- **I-7/I-37**: the presentable's blob lives until the last of {the venus
+  allocation, the registration, an in-flight compose/scanout} releases —
+  the dual-count discipline extended by one holder class.
+- **I-9**: the acquire path's block rides the present RPC (a parked 9P
+  reply), which is already lost-wakeup-proof; no new wait/wake primitive is
+  introduced at stage 0.
+
+## 7. The W-3 sub-chunk plan
+
+1. **W-3a — the host-capability probe** (the V-0 discipline): does the real
+   QEMU 10 + virglrenderer 1.1.0 + v3dv chain accept `SET_SCANOUT_BLOB` on a
+   venus-bound HOST3D blob, and can the compositor ctx blit a venus-ctx
+   resource? Paired positive/negative controls; the verdict selects §4.2
+   Direct vs §4.3-only, recorded in this doc.
+   **MEASURED (thyla-pi/KVM, 2026-08-26):** `dispatch=present neg=0x1203
+   pos=0x1100 attach=0x1100 attach-neg=0x1100`. Meaning: (a) the
+   `SET_SCANOUT_BLOB` vocabulary EXISTS and discriminates — the bogus id drew
+   exactly `INVALID_RESOURCE_ID`, and the shmem-class positive was ACCEPTED
+   (`OK_NODATA`; acceptance, not pixels — the pixel truth stays with W-3e's
+   witness, and the venus-IMAGE class stays open per the probe's class
+   scoping). The §4.2 Direct arm proceeds. (b) The cross-ctx ATTACH leg is
+   **BLIND** — the bogus id was ALSO accepted, so attach-acceptance proves
+   nothing at this layer; the compose-arm capability question moves to the
+   blit-USE, observable at W-3c/W-3e. The paired negative catching its own
+   instrument is the probe working as designed. Control leg (no blob)
+   witnessed the positive skip on the local 2D suite the same day.
+   **Audit + re-measure (same day):** the round-1 holotype found the first
+   attach measurement itself unconstructed — `COMPOSITOR_CTX` did not exist
+   at probe time (its creator ran after READY), so the original values
+   measured indifference to a nonexistent context. Fixed
+   (`ensure_comp_ctx` before the attach legs) and RE-MEASURED: byte-identical
+   values against the now-existing ctx — so the blindness claim is valid as
+   stated: even with the target ctx present, a bogus RESOURCE id draws OK,
+   i.e. the host defers *resource* resolution past attach. On a future
+   validating host (the v3d fork re-run) the fixed probe measures attach
+   semantics rather than manufacturing `INVALID_CONTEXT_ID` from its own
+   ordering.
+2. **W-3b — the spec extension** (the fourth class; TLC-green + the buggy
+   cfg + measured additivity) — BEFORE the server code.
+   **LANDED (2026-08-26):** `tapestry_present.tla` grows the presentable
+   behind its own `ALLOW_PRESENTABLE` switch — 6 variables (a 4-state
+   `pstate` lifecycle, the host-resource liveness `pbacked`, the I-7/I-37
+   holders `venusRef`+`regRef`, the two observer arms `pbound` standing +
+   `pinflight` transient), 9 actions, and the §6 obligations exactly:
+   `NoTornPresentable` (the display never observes a retired presentable —
+   both observer arms), the `PUnbound`+`PDrained` conjuncts on
+   `PServerRelease`/`PFree` (the display-safe teardown; each omission its
+   own `BUGGY_*` cfg per the per-direction-sabotage discipline), `PGoneClean`
+   + `PObserverScoped`, and `PresentableEventuallyRetired` (the ordered
+   teardown terminates). Modeling decisions on the record IN the module: the
+   compose arm is ONE read class (blit + readback source — the readback's
+   write side stays the existing `inread` class per §4.3); no content leg at
+   stage 0 (client-side fence + wsi acquire; re-opens with the async seam);
+   one presentable models the N-image class; the I-45 adoption gate is
+   verb-resolution with no lifetime edge (prosecuted at W-3c);
+   `ServerDeath` is atomic totality for this class (device-side backing AND
+   observers die in one reset — unlike the weave arms, whose guest pages
+   have an observer that outlives the reap window). **Additivity measured**:
+   all four pre-existing clean cfgs reproduce exactly (5413/5413/94680/94680
+   — the composed pair now PINNED in `check-tapestry.sh`, which the C-6
+   close had left unpinned); the all-features presentable cfg explores
+   1557073 distinct states green.
+3. **W-3c — tapestryd**: the presentable object (`img/` subtree), the
+   generalized adoption/eligibility model, the wire command(s), the
+   display-safe teardown. Audit-bearing (I-40/I-45; a new AUDIT-TRIGGERS
+   row). **Split into two sub-chunks so each lands with its own witness:**
+   - **W-3c-1 — the OBJECT and its lifetime.** The `img/` ABI
+     (`new` / `info` / `ctl destroy`), the `WarpImg` slot row folded into
+     the I-32 holistic cap, the **`USE_MAPPABLE`, never-mapped** HOST3D mint
+     (`create_presentable`; §4.1 as AMENDED -- this line said *shareable
+     non-mappable* until measurement refuted it), the Direct bind (`set_scanout_blob`, the
+     verdict wrapper over W-3a's raw-resp probe — one wire implementation),
+     and the **display-safe teardown**: unbind before unref, reusing
+     `gl_evict_res` rather than re-implementing an ordering rule, and
+     issued *unconditionally* so a stale per-object flag cannot skip it.
+     Witness: `warp_img_selftest`, four arms — `shape=` (three refusals one
+     variable away, so the accept set is shown to be a gate rather than a
+     rubber stamp), `mint=`, `bind=`, and `unbind=`, which destroys the
+     presentable **while the display is bound to it** and observes the
+     binding dropped first. That last arm is the runtime twin of
+     `tapestry_present_buggy_punbind_skipped.cfg`: it witnesses the modeled
+     bug's absence, not a generic teardown success.
+   - **W-3c-2 — the CLIENT-FACING present path.** The generalized
+     adoption/eligibility model (`presentable = WarpBo | registered venus
+     image`, superseding the `bos[]`-only `present-to`) and `present-to
+     <surface> img <n>`.
+     **LANDED (2026-08-31), with the Composed arm RESEQUENCED to W-3d
+     slice 1** per the run-6 fork resolution (`docs/JOURNAL.md` 2026-08-31):
+     the W-3c-2a probe's `noreadback` was the blob_id=0 STAND-IN being
+     categorically untypeable (SHM `fd_type`; virglrenderer's
+     `pipe_resource_set_type` takes DMABUF only), not a host refusal — the
+     REAL class (a `blob_id`-named VkDeviceMemory, which vkr force-exports
+     as a dmabuf on HOST_VISIBLE allocations) has the designed
+     attach→SET_TYPE→EGLImage→C-3-blit path, host conditions verified on
+     the Pi. So the compose arm is built where the first real-class blob
+     exists (W-3d), gated by re-running the compose probe against it — and
+     the `PDrained` drain lands in that same commit (the W-3c-2 Direct
+     adoption reads `imgs` but creates NO `pinflight` member: the bind is a
+     standing binding tracked by `Comp.bound_res`, completed inside one
+     dispatch, so the conjunct stays vacuously discharged exactly as at
+     W-3c-1).
+     As built: `PresentSrc {Bo, Img}` (both families PUB-keyed — an img
+     handle resolves to its pub id at the verb, so a freed handle's later
+     tenant can never inherit a consent); `gl_adoption`'s img arm carries
+     the display-MODE half of the accept set (geometry vs the CURRENT
+     surface incarnation — round-2 F13 discharged; no `dma_fd`/`va`/size
+     analogues, that absence being I-7); `direct_bind_adopted` is the ONE
+     copy of the family dispatch (`SET_SCANOUT` | `SET_SCANOUT_BLOB` at the
+     declared shape — the spec's `PPresentBind`); every composed-machinery
+     consumer is HARD-GATED to the Bo family (`rb_issue` DMA-writes into
+     `g.va`, and an img adoption's `va` is 0); `wimg_destroy` gains the
+     consent-clear arm; a composed-mode img consent says so once per ctx
+     and shows the surface's own 2D weave until W-3d. Driver: `warp-prove
+     img-direct` (mutual adoption → zoom → `scanout direct N img res R` →
+     `bound` observed through `img/0/info` → destroy-WHILE-BOUND → the
+     weave arm re-takes) + the img-xproc I-45 leg; gate: the four-witness
+     conjunction in `warp-host.sh img`.
+     **W-3d slice 1a (2026-08-31), AS CORRECTED BY ROUND-5 F1 (same
+     day): the REAL-class compose capability is AVAILABLE on this host —
+     `settype=ok blit=landed`.** The slice's first verdict
+     (`settype=latched`, recorded here as a real-class measurement) was
+     of the WRONG SUBJECT: the probe fired unconditionally at the first
+     `wmem_mint` of the boot, which is the pre-READY self-test's
+     `mem_id=0` mint — the blob_id=0 SHM STAND-IN, the exact class the
+     probe existed to escape — and its one-shot was thereby consumed
+     before any client blob existed (the #95 disarmed-by-its-own-test
+     class, recurring on the stand-in lesson's own remediation; the
+     accompanying vkr-mechanism story about v3dv answering
+     exportable-as-opaque-only was inference stacked on that voided
+     measurement, and is wrong). Round-5 F1 added the class gate (skip
+     WITHOUT consuming on `mem_id == 0`, and on a too-small first client
+     mint) and the re-measured probe — now genuinely against the first
+     client VkDeviceMemory blob — reports **`settype=ok blit=landed`**:
+     vkr exports the allocation as a dma_buf (v3dv answers the
+     TRANSFER_SRC-buffer export query EXPORTABLE), vrend's SET_TYPE
+     types it, and the compositor's blit FROM it lands, measured with
+     the control legs green. **The §4.3 host-capability question is
+     answered YES for this host stack**: the designed composed path
+     (untyped attach → SET_TYPE → EGLImage → C-3 blit) works end-to-end
+     on thyla-pi, and the COMPOSED ARM IS BUILDABLE here — no v3d-fork
+     export lift and no Halcyon-era option B needed for windowed
+     presentables on this host. The probe remains the per-boot per-host
+     gate. The composed arm lands as its own audit-bearing chunk (the
+     SET_TYPE at the img's declared shape + the blit + THE PDrained
+     DRAIN IN THE SAME COMMIT — the landmine rule stands); the Direct
+     arm and the W-3d mesa path are unaffected. One caveat carried from
+     round-5 F7: SET_TYPE types its subject GLOBALLY and one-shot
+     (vrend_renderer.c:13452), which is why the probe's subject is a
+     client MEM blob (a class never legitimately typed again) and why
+     the composed arm must type each presentable at its OWN declared
+     shape, in the compositor's ctx, exactly once.
+4. **W-3d — mesa**: the Thylacine `wsi_interface` + the swapchain image
+   path + acquire/present. Audit-bearing (the Warp mesa row).
+
+   **LANDED (2026-08-31, mesa patch 0018) — the as-built record.** The
+   surface class is stock `VK_EXT_headless_surface`; `vn_wsi_init` replaces
+   `wsi[VK_ICD_WSI_PLATFORM_HEADLESS]` with the Thylacine interface
+   (`vn_wsi_thylacine.c`), so §5's registration model rides the standard
+   swapchain machinery unchanged — `wsi_swapchain_init` + the stock
+   `wsi_create_image` flow with only the two designed hooks replaced:
+
+   - **`create_mem`** — a MARKED dedicated `vkAllocateMemory`: a chain-head
+     driver-internal pNext (`'THLW'`, stripped before encode) routes
+     `vn_device_memory_alloc` to `alloc_simple`, so NO renderer bo is
+     minted and the memory's ONE vkr blob export (vkr `mem->exported` is
+     one-shot) is deliberately left for the compositor's `img/new`.
+     One-export makes both wrong orders fail loudly: an eager bo consumes
+     the export and registration refuses (swapchain creation fails); a
+     later `vkMapMemory` needs a bo whose mint the consumed export refuses
+     (the presentable is never-map, §4.1 as amended).
+   - **`finish_create`** — `vn_device_memory_wait_alloc` (the F7
+     host-allocate-before-naming ordering) then the registration
+     (`vn_renderer_thylacine_img_new` → `warp_img_new` → `ctx/<id>/img/new`
+     with the LINEAR stride `vkGetImageSubresourceLayout` reported).
+
+   The §4.2 stage-0 bracket lands twice over: venus's own vtest-class drain
+   (`vn_wsi_fence_wait` at the tail of `vn_QueueSubmit2` — the entrypoint
+   wsi_common's present submit uses via `wsi_queue_submit2_unordered`; the
+   v1 `vn_QueueSubmit` has no such tail, so the drain depends on that
+   routing — round-5 F5) AND the vtable `queue_present`'s own wait on the
+   per-image throttle fence — so the bracket holds even under
+   `VN_PERF=no_async_present`, where the drain never runs. The present
+   poke (`present-to <surface> img <n>`, consent-dedup'd) stays DORMANT
+   until the W-3e SDL glue names a tapestry surface via
+   `vn_renderer_thylacine_set_surface`; until then a swapchain is a pure
+   headless rotation, which is exactly what the prove witnesses.
+
+   Turning `VN_USE_WSI_PLATFORM` on for the thylacine build flips
+   `KHR_swapchain` + `can_sync2` onto
+   `renderer_sync_fd.semaphore_importable` — a HOST property (the guest
+   queries the host driver's SYNC_FD external-semaphore support through
+   the ring; v3dv answers importable). The prove FAILS rather than skips
+   when the gate is absent. Witness: `venus-prove: wsi swapchain OK`
+   (3 presentables, zero bo-mints across creation with a nonzero-baseline
+   counter as the positive control, a GPU clear landed in presentable
+   memory and read back pixel-exact, 3 presents through the async path);
+   gates in `tools/warp-host.sh` (venus TEST leg) +
+   `tools/test-venus-verdict.sh` (83 checks, both directions).
+
+   Known caveat (round-5 F8, upstream-inherited): venus wraps acquire and
+   present in per-chain locks but has no wrapper for
+   `vkReleaseSwapchainImagesKHR` (swapchain_maintenance1), so a conformant
+   app calling Release concurrently with an in-flight async present would
+   race the busy flags lock-free — the identical composition exists in
+   stock headless + venus. No Thylacine client uses maintenance1; a fork
+   wrapper is owed if one ever does (W-4's vkQuake does not).
+5. **W-3e — SDL2 Vulkan glue** + a prove extension (an offscreen→present
+   witness: render the W-1 triangle INTO a swapchain image and present it —
+   the first Vulkan frame on the Thylacine display).
+
+   **LANDED (2026-08-31) — the as-built record.** Three pieces:
+
+   - **The SDL glue** (`usr/ports/sdl2/thylacine/SDL_thylacinevulkan.{c,h}`
+     + the vtable wiring): the five `Vulkan_*` hooks over stock
+     `VK_EXT_headless_surface`, no config or vendored-tree change —
+     SDL's public `SDL_Vulkan_*` entrypoints are unguarded and the vtable
+     slots + `vulkan_config` exist unconditionally via the stub typedefs,
+     so `SDL_VIDEO_VULKAN` stays OFF (it would `#error` under
+     `SDL_LOADSO_DUMMY`). Loader-less: `LoadLibrary` resolves
+     `vk_icdGetInstanceProcAddr` BY SYMBOL. All three venus externs are
+     WEAK so GL-only programs still link — and the flip side is the
+     archive-extraction rule: **a weak ref does not extract archive
+     members, so an SDL-only Vulkan app (vkQuake's shape) must link
+     `-u vk_icdGetInstanceProcAddr`** (the witness's own link exercises
+     exactly this after hitting exactly this — the ICD symbol resolved
+     `w`/NULL until the flag was added).
+   - **The arming CreateSurface** — the §5 two-sided consent, ordered so
+     no poke can ever name a surface that has not named the ctx back:
+     `thyla_tap_glsrc(tap, vn_renderer_thylacine_warp_ctx_pub())` (the
+     surface half; the new mesa getter carries the minted ctx pub as a
+     process-global, raw since the server never mints pub 0) and only on
+     its success `vn_renderer_thylacine_set_surface(tap.id)` (the ctx
+     half — this is what W-3d left dormant). A failed/skipped consent is
+     not a surface-creation failure: the vk surface is real and every vk
+     call works; the presents are display-inert and an `SDL_LogWarn`
+     names it.
+   - **The img poke-completion** (`img_poke_complete`, tapestryd): the
+     gap W-3c-2 left invisible — the Direct bind completes at the
+     surface's *next present-COMPLETE* (F16), and a pure-Vulkan client
+     never sends a weave tpresent, so nothing completed it. The poke IS
+     the img family's present-COMPLETE: mesa's `queue_present` issues it
+     after the per-image throttle-fence wait, so the §4.2 stage-0 bracket
+     orders it behind the frame's GPU work. The arm completes a pending
+     switch exactly as the weave arm does (same `scanout direct N img
+     res R` say line = the gate's bind witness; same once-per-episode
+     REFUSED line) and thereafter flips the scanout to each newly-poked
+     presentable silently (a say per swapchain frame would be the C-0d
+     storm) + flushes; the completion tail advances the surface
+     lifecycle (`note_present`, presents, Woven→Live) because the poke
+     is a real present. The handler-tail `flip_in_place` gate keeps
+     img→img-while-Direct out of the pending soft-Off route (which would
+     re-run the switch at frame rate); every other shape keeps the
+     uniform F16 pending route.
+
+   Witness (`thylacine-vk-sdl-prove`, mesa-side, linking the pouch
+   `libSDL2.a` — the mesa cross env IS the pouch sysroot): SDL window
+   sized to the display → the glue → instance through the SDL-handed
+   gipa → the W-3d swapchain → the W-1 SPIR-V triangle rendered INTO a
+   presentable through a real render pass → copy-out pixel-pair check
+   (center red / corner blue — the control pair) → 3 presents, each
+   poking. Pre-window failures degrade ABSENT (the probe rides every
+   `THYLA_BOOT_PROBES` boot); the venus TEST leg requires BOTH witness
+   halves — the app `THYLACINE-VK-SDL-PROVE PASS` line AND the
+   compositor's `scanout direct N img res R` bind line (attributable:
+   the pre-READY self-test binds via raw `set_scanout_blob` and cannot
+   emit it) — with the REFUSED form excluded by an end-anchored,
+   CR-tolerant grep and the ABSENT form a #212 sabotage (89 verdict
+   checks).
+6. **W-4 — vkQuake** (its own chunk; the E2E proof).
+   **MEASURED (thyla-pi/KVM, 2026-08-31; commits `64db3f54`..`9bca8899`):**
+   the E2E proof holds — vkQuake 1.05.3 loader-less over the venus link
+   set, full init, DIRECT bind, and the ratified comparison on the same
+   host/day/demo (969 frames both): **GL (tyrquake/virgl) 44.7 fps; VK
+   (vkQuake/venus) 32.5–32.6 fps** (reproduced). vk = 73% of GL, and the
+   composed-stretch asymmetry biases FOR vk (the GL average includes its
+   slower composed phase), so the honest direct-vs-direct gap is wider.
+   Per the charter the composed arm stays GATED until the lag is hunted.
+   Server-side present cost is bounded cheap (the poke's census max
+   318 µs; the sum leg re-reads at the next boot — the full-ctl dump
+   spliced once in the cons drop-OLDEST ring, hence the filtered
+   `warp-prove tctl <key>` read). The chunk's non-graphics findings (the
+   shareware `+command` drop, the fenced-free denominator phantom) live
+   in the phase7-status W-4 row and `docs/JOURNAL.md` run 9.
+
+## 8. The W-4 lag question: LINEAR presentables on a tiled GPU (ANSWERED — see 8.1)
+
+The 8.3 ms/frame gap has a shaped structural suspect. §4.1's presentable
+is **LINEAR by design** (`wants_linear` unconditional; the registration's
+linear-stride scanout contract — the display scans the blob directly, so
+the layout must be scanout-legal). vkQuake renders its scene into its OWN
+optimal-tiled color buffer, then its postprocess fullscreen pass writes
+the swapchain image — **~4 MB/frame into a LINEAR target on a tiled
+renderer (V3D)**, the one place our WSI differs materially from an
+upstream chain (whose swapchain images are tiled, with the
+scanout-side handling conversion).
+
+The designed A/B, NOT yet built (scripture-first; this section is the
+seam record):
+
+- **The BUFFER_BLIT chain variant**: `wsi_common`'s own second arm —
+  swapchain images OPTIMAL-tiled (the postprocess pass pays tiled-target
+  cost), plus a per-present resolve-blit into a LINEAR buffer, which is
+  what the compositor registers as the presentable. The blit rides the
+  present submit, so **the I-40 stage-0 bracket already covers it** (the
+  throttle fence waits the whole submit). Registration changes from the
+  image's memory to the blit buffer's — `finish_create` re-targets; the
+  one-export discipline moves with it.
+- **What decides**: the same ratified comparison re-run on the variant.
+  If the blit variant closes most of the gap, LINEAR-direct was the cost
+  and the variant becomes the default (with the direct-LINEAR form kept
+  for hosts where the blit is the greater cost). If it does not, the
+  remaining suspects are the per-frame venus marshaling and the
+  throttle-bracket serialization (measurable via `VN_PERF` toggles).
+- **What does NOT change either way**: the presentable ABI (the
+  registration still names a linear-stride HOST3D blob; only WHOSE
+  memory it is changes), the display-safe teardown, and the I-40
+  bracket.
+
+### 8.1 AS-BUILT + MEASURED (2026-08-31, mesa patch 0023; thyla-pi KVM/V3D, 1280x800, demo1 x969 frames)
+
+The variant landed as designed (one build, both arms; `THY_WSI_BLIT=1`
+selects BUFFER_BLIT) with one correction the first flight forced: wsi's
+CPU create_mem maps the blit buffer for its CPU-copy present, and under
+venus a first map lazily mints the memory's renderer bo — spending the
+memory's ONE blob export before the registration's mint, exactly the
+"eager bo consumes the export and registration refuses" failure mode §7's
+W-3d record documents. The blit arm therefore carries its own
+`create_mem`: `wsi_create_buffer_blit_context` alone, no map (nothing
+CPU-reads the buffer; `cpu_map == NULL` is destroy-guarded). The
+blit-dst memory-type default (`wsi_select_host_memory_type`) is KEPT —
+the mappable presentable mint requires a host-visible type.
+
+**The measured triple** (same boot, same demo, gate VERIFIED with the
+per-leg direct-scanout witness):
+
+| Arm | Displayed | fps | ms/frame |
+|---|---|---|---|
+| LINEAR direct (default) | yes | 32.1 (5th consistent sample: 32.1–32.7) | 31.2 |
+| BUFFER_BLIT | yes | **34.4** | 29.1 |
+| BUFFER_BLIT | no (unpromoted surface, run-2 accident) | **79.9** | 12.5 |
+| LINEAR direct, double-paint fixed (run 6) | yes | **47.6** | 21.0 |
+| BUFFER_BLIT, double-paint fixed (run 6) | yes | **51.3** | 19.5 |
+
+**The decision, per this section's own rule** (pre-fix): the blit variant
+did NOT close most of the gap (+7% vs the 44.7 GL figure) → **no default
+flip**; the LINEAR-target hypothesis REFUTED as the dominant cost.
+**Post-double-paint-fix (run 6)**: the tiling win holds proportionally
+(+7.8%, 51.3 vs 47.6) and both arms now clear the GL baseline. The flip
+question is re-framed by §8.2's resolution — the blit arm is simply the
+faster arm on this host — but the flip remains its OWN chunk: it must
+first resolve the eager-bo caveat (the blit chain's unmarked tiled-image
+allocs break venus-prove's no-eager-mint counter on UMA; the likely
+shape is an image-side chain-head marker symmetric with
+`blit_mem_pnext`). LINEAR stays the default until then.
+
+**What the accident measured**: the undisplayed leg ran the identical
+pipeline — render, blit, venus marshaling, the I-40 throttle-fence wait,
+the poke send — at 79.9 fps; displaying the same pipeline costs ~17
+ms/frame more. The dominant cost is therefore the **direct-arm
+per-present display work** (the server's bind/flush + the host display
+update behind `img_poke_complete`), not the render-target layout, not
+venus marshaling, and not the throttle bracket (all present in the 79.9
+run).
+
+**The decomposition (run 4, the split census)**: the per-present cost is
+**poke-bind avg 11.6 ms + poke-flush avg 10.5 ms ≈ 22 ms/frame, split
+almost evenly** — two synchronous display roundtrips per present (the
+SET_SCANOUT-class flip, which a rotating swapchain pays every frame, and
+the RESOURCE_FLUSH display update), each alone larger than the 12.5 ms
+full render pipeline; poke max 36.3 ms, avg 21.3 ms, both runs agreeing
+on the sum to 0.3%. The open design question is whether the flip already
+implies the display update the flush then repeats — QEMU's
+scanout/flush contract — and whether either step can be made
+asynchronous without breaking I-40's no-torn-scanout.
+
+### 8.2 The display-wall seam: both games are display-bound, and the fork is a pacing question (seam record)
+
+The residual analysis reframes the whole comparison: **GL 44.7 fps =
+22.4 ms/frame ≈ the same ~22 ms display wall + ~0.4 ms render** (the GL
+direct arm pays the equivalent per-present pair — Xfer + FlushDirect —
+through the same synchronous `.step`s), and vk 34.4 = 29 ms ≈ 22 + ~7 ms
+of venus residual. **Both engines are display-wall-bound**; the GL-vs-VK
+gap is mostly the residual, and lifting the wall lifts both toward their
+render speeds (vk's measured render ceiling: 79.9 fps undisplayed).
+
+**The suspect for the wall itself**: ~10-11 ms per step is not a
+plausible cost for a scanout-source rebind (a pointer swap host-side),
+and QEMU's virgl processing is paced by main-loop machinery (the display
+refresh timer's ~30 ms default cadence and the ~10 ms virgl fence poll
+both live in that neighborhood). If the per-step wall is **pacing
+quantization** — the command completing at the next tick, not after real
+work — then two commands queued before one wait complete in ONE quantum,
+and the wall halves without touching any contract.
+
+**The discriminator, built before any mechanism** (measure, don't
+assume): a test-mode per-step latency histogram on `poke-bind` /
+`poke-flush` (8 buckets to ≥30 ms). Quantized (mass clustered at ~10 ms
+multiples with near-empty low buckets) → the pacing theory holds and the
+mechanism work is justified. Spread (mass across the low buckets scaling
+with scene weight) → the cost is real host-side work (the egl-headless
+update path) and the direction changes.
+
+**The mechanism fork, pre-researched for the operator** (the pacing arm):
+
+- **C — batch the pair under one wait** (no contract change): the
+  steady-state poke sends bind then flush before waiting either (virtio
+  ctrl-queue FIFO preserves order; the current bind-verdict gate is
+  preserved by checking both replies before completing — a refused bind
+  makes the already-sent flush a harmless no-op on a non-scanout
+  resource, and the refusal still latches). Requires a second in-flight
+  slot on the synchronous ctrl ring (today: single REQ/RESP + one
+  2-descriptor chain — a real but bounded layout change). Expected win
+  if quantized: the wall halves (~11 ms → both games near 60+ fps under
+  FIFO).
+- **B — async-under-FIFO** (server-side pacing, no WSI change): the poke
+  reply returns before the display steps; a server-side FIFO queue
+  displays in order at its own cadence. FIFO semantics hold; the client
+  pipelines to acquire-depth. Ceiling: display cadence + pipelining.
+- **A — advertise + implement MAILBOX** (the Halcyon-grade answer): the
+  WSI today advertises **FIFO only** (`vn_thylacine_present_modes`), so
+  vkQuake had no choice. A latest-wins pending-present slot server-side
+  + an immediate poke reply gives render-speed fps with the display
+  consuming the newest frame at its own pace; FIFO stays the synchronous
+  path. Spec-visible (a new advertised mode) and the pacing model is a
+  present-semantics amendment — **operator signoff before building**.
+
+C composes with A/B later and is the cheapest test of the theory; the
+histogram gates C. All three leave I-40 intact structurally (the client
+throttle bracket is untouched; the display-safe teardown drains
+whatever queue exists — B/A add a drain obligation to `wimg_teardown`
+that their design must carry explicitly).
+
+**MEASURED (runs 5–6).** The histogram was decisive for pacing: **zero
+of 3,796 steps under 8 ms** (bind massed 8–14, flush 8–11) — a hard
+floor under an idle-menu-to-full-scene workload is quantization, not
+work. Reading the bind with that lens then surfaced what the census had
+been pointing at: `direct_bind_adopted` already flushes internally on
+success, so the rotated poke was paying the ~10 ms roundtrip TWICE (the
+once-per-switch bind arm having become the per-frame steady state). The
+double-paint fix alone removed ~10 ms/frame — run 6: linear 47.6, blit
+51.3, the pre-registered prediction (45–48 / 50–53) landing inside its
+bands, and the census confirming the mechanism exactly (poke sum
+41.8 s → 22.8 s; flush n 1958 → 144, re-pokes only; bind unchanged,
+carrying the paint at 11.6 ms avg). **The remaining wall is the single
+~10 ms quantized flush inside the bind** — that is what options C/B/A
+now target, with A (MAILBOX) still operator-gated. With the fresh
+same-day GL baseline (44.8 — the prior day's 44.7 reproducing to
+0.2%), the ratified comparison closed INVERTED: VK linear +6.3%, VK
+blit +14.5% over GL. The lag was never venus. (Instrument
+provenance, because it was earned twice: the census read is coherent
+only because the ctl pins a per-fid generation at the offset-0 read, and
+the census CAPTURE is coherent only because every cost-row expect is
+anchored to a complete line — an unanchored `(\d+)` fires on a partial
+serial chunk and the exp's own output severs the row; both defects
+produced the same impossible-triple signature before being fixed.)
+
+---
+
+**C AS-BUILT + MEASURED (2026-09-01, `e31378bb`; the falsifier fired).**
+The operator picked C; the mechanism landed exactly as this section
+specified (a second sync chain -- descriptor pair 34/35, request/response
+tail carves -- `submit_pair_and_wait` queuing bind+flush before waiting
+either; the console's screen_push/screen_flush_full pair converted too --
+though the round-10 close measured that those are COMPOSED-mode paths, so
+no local direct-mode boot reaches a batched op through them; the local
+witness is instead the boot-time pair-protocol selftest, two batched
+GET_DISPLAY_INFOs firing the engagement say on every test-mode boot). The prediction was
+pre-registered (linear 50-55, blit 54-60, histogram mass shifting to
+8-11) WITH its falsifier -- and **the falsifier is what fired**: linear
+47.5 (was 47.6), blit 51.3 (identical), PokeBind avg 11.55 ms (was
+11.6), histogram mass unmoved (0/548/1278 across <8/<11/<14). Both
+verdict halves PASS; the resize driver and the 3 s console restore rode
+along green.
+
+**What the failed prediction bought -- the refined wall model.** The
+only story consistent with runs 4-6 AND this run: `SET_SCANOUT_BLOB`
+completes ~immediately (a host-side pointer swap), and the ~10-11 ms
+quantum lives ENTIRELY in `RESOURCE_FLUSH`'s completion (the display
+update path). The pre-fix bind (scanout wait + flush wait, sequential)
+already cost one flush-quantum plus ~1 ms -- there was never a second
+steady-state quantum for batching to reclaim; §8.2's original "the wall
+halves" expectation described the pre-double-paint state, and the
+double-paint fix had already consumed the only removable quantum.
+Batching's theoretical win was the scanout's ~1 ms, inside run noise.
+
+**Disposition**: C is RETAINED -- sound (zero anomalies across the local
+suite and the Pi run), free, and the pair primitive is exactly what
+§8.3's GL item 1 needs, where BOTH commands measure paced (Xfer ~11 +
+FlushDirect ~11, the run-4 GL split) and batching should truly halve.
+The vk wall now has one honest shape: a per-frame `RESOURCE_FLUSH`
+whose completion the host paces at ~10-11 ms, which no synchronous
+client-side arrangement removes -- the remaining directions are B
+(reply before the flush retires, a server-side FIFO queue) and A
+(MAILBOX), both parked with the operator per §0's sequencing (compose
+first, under the Halcyon phase). A QEMU-side question rides along for
+whichever is taken: whether the flush completion's pacing is the virgl
+fence poll, the display refresh timer, or egl-headless vsync -- worth
+one host-side measurement before building either mechanism.
+
+### 8.3 The GL-parity ledger (deferred arc; operator-directed 2026-09-01)
+
+**The direction** (operator, 2026-09-01): document the GL/VK display-path
+asymmetry as its own later chunk/arc on the roadmap — "ensure all of the
+performance goodness is backported to GL as well" — and do NOT take it up
+now: compose etc. comes first, under the Halcyon phase. This section is
+that record; `ROADMAP.md` §11 carries the scheduling note. Nothing here
+blocks compose or Halcyon.
+
+**The asymmetry, precisely.** The W-4 inversion (§8.1) is a statement
+about the two lanes' PRESENT PATHS, not about the APIs: at Quake's scene
+complexity both engines' render legs are small against the display wall,
+and the lanes pay the wall differently. The vk lane pays ONE quantized
+wait per frame since the double-paint fix (`69ff4cdd`) — shortened
+further by the fork-C batch (`e31378bb`). The GL lane still pays TWO
+(`Cost::Xfer` ~11 ms + `Cost::FlushDirect` ~11 ms, sequential
+synchronous `.step`s in the weave-direct per-rect loop), plus a
+structural cost vk does not have: its pixels cross the guest<->host
+boundary twice (virgl renders host-side -> readback into the guest
+weave -> TRANSFER_TO_HOST_2D back up -> flush), where the vk presentable
+is rendered host-side into the very blob the display scans out —
+zero crossings. "vk beats GL" therefore reads: the lane whose present
+path we optimized beats the lane whose present path we have not touched.
+
+**The backport ledger** (the arc's work items, in dependency order):
+
+1. **Batch the GL pair** (`transfer` + `flush` in the weave-direct
+   per-rect loop) on the fork-C primitive (`submit_pair_and_wait`).
+   BLOCKED ON an instrumentation decision, which is why fork C
+   deliberately skipped it: the loop's census splits `Cost::Xfer` from
+   `Cost::FlushDirect`, and under a shared wait that attribution is
+   meaningless — the arc must either add a fused census row or retire
+   the split, and re-baseline the §8.2 analysis that consumed those
+   rows. Expected win: ~one quantum/frame (~10 ms), the double-paint-fix
+   class of saving.
+2. **The double-paint-class audit of the GL steady state**: re-read the
+   GL present arms (the #57 post-bind full flush, the per-rect flush
+   loop, the hold/release accumulation) with the `69ff4cdd` lens — does
+   any arm pay a paint the previous step already implied? Unaudited
+   with that lens; the vk instance hid for the arc's whole life.
+3. **Kill the double pixel-crossing** (the big one): a virgl-native
+   scanout path — scan out the client's virgl-rendered resource
+   directly, the Bo analog of the presentable's zero-copy path, removing
+   both the readback and the re-upload. REAL DESIGN WORK, I-40-bearing:
+   the weave's role changes for GL clients (today the weave IS the
+   guest-pixel truth the present brackets), so the no-torn-scanout
+   argument needs its GL restatement before code. Prior art: exactly the
+   PRESENTABLE class (§4) built for vk — the design question is what the
+   equivalent object is for a virgl context's framebuffer.
+4. **The wall-mechanism analog**: whatever the ~10 ms pacing fork
+   ultimately lands beyond C (async-under-FIFO / MAILBOX, §8.2, both
+   still operator-gated) gets its GL-side statement in the same arc, so
+   the lanes do not drift apart again.
+
+**The arc's measurement bar**: re-run the §8.1 comparison after parity.
+The expected honest outcome is NOT "GL wins" — it is that the lanes
+finally measure their engines and transports rather than our plumbing:
+the venus residual becomes vk's visible price, the zero-copy present its
+visible advantage, and the delta between them becomes a statement about
+venus-vs-virgl efficiency worth having.
+
+*Prior-art working notes: `scratchpad/w2-wsi-priorart.md`,
+`scratchpad/w2-wsi-synthesis.md` (session-local). The tree-fact research and
+the mechanism research are reproduced in the relevant sections above at
+completion.*

@@ -39,6 +39,7 @@ void test_elf_header_rejection(void);
 void test_elf_rwx_rejected(void);
 void test_elf_bounds_rejection(void);
 void test_elf_policy_rejection(void);
+void test_elf_pie_load_bias(void);
 
 #define TEST_ELF_BLOB_SIZE 4096
 // R5-G F71 close: explicit alignment so the cast `(struct Elf64_Ehdr *)
@@ -197,11 +198,18 @@ void test_elf_header_rejection(void) {
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
         ELF_LOAD_BAD_TYPE, "ET_REL rejected");
 
-    // ET_DYN (PIE) rejected at v1.0.
+    // D-2: ET_DYN is now ACCEPTED (it was ELF_LOAD_BAD_TYPE until then).
+    // ET_CORE is the remaining third type and stays refused, so this pair
+    // shows the gate narrowed rather than opened.
     size = build_elf(flags, 1);
     blob_ehdr()->e_type = ET_DYN;
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
-        ELF_LOAD_BAD_TYPE, "ET_DYN rejected at v1.0 (PIE deferred)");
+        ELF_LOAD_OK, "ET_DYN accepted (D-2)");
+
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_type = ET_CORE;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_BAD_TYPE, "ET_CORE still rejected");
 
     // Bad machine.
     size = build_elf(flags, 1);
@@ -433,6 +441,116 @@ void test_elf_policy_rejection(void) {
         ELF_LOAD_OK, "valid blob still parses after the rejection matrix");
 }
 
+// DISTRO D-2: ET_DYN placement.
+//
+// The design's claim is that a PIE differs from an executable in exactly one
+// way -- position -- so the whole change is one bias applied at one place.
+// That claim is only worth anything if BOTH halves are checked: the PIE moves,
+// and the ET_EXEC does NOT. The ET_EXEC leg here is the control; without it a
+// bias accidentally applied to every image would still pass the PIE leg.
+void test_elf_pie_load_bias(void) {
+    const u32 flags[3] = { PF_R | PF_X, PF_R, PF_R | PF_W };
+    size_t size;
+    struct elf_image img;
+
+    // build_elf lays segments at 0x10000 + i * 0x10000 with entry 0x10000.
+    // As ET_DYN every one of those is an OFFSET from the load base.
+    size = build_elf(flags, 3);
+    blob_ehdr()->e_type = ET_DYN;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "PIE parses");
+    TEST_EXPECT_EQ(img.load_bias, ELF_PIE_LOAD_BIAS, "load_bias recorded");
+    TEST_EXPECT_EQ((u64)img.type, (u64)ET_DYN, "e_type recorded");
+    TEST_EXPECT_EQ(img.entry, ELF_PIE_LOAD_BIAS + 0x10000ull,
+        "entry biased");
+    TEST_EXPECT_EQ(img.segments[0].vaddr, ELF_PIE_LOAD_BIAS + 0x10000ull,
+        "segment 0 biased");
+    TEST_EXPECT_EQ(img.segments[1].vaddr, ELF_PIE_LOAD_BIAS + 0x20000ull,
+        "segment 1 biased");
+    TEST_EXPECT_EQ(img.segments[2].vaddr, ELF_PIE_LOAD_BIAS + 0x30000ull,
+        "segment 2 biased");
+    // The bias is POSITIONAL only: file offsets, sizes and permission bits
+    // are untouched, which is why every downstream gate keeps working.
+    TEST_EXPECT_EQ(img.segments[0].file_offset, 0ull, "file_offset unbiased");
+    TEST_EXPECT_EQ(img.segments[2].flags, (u32)(PF_R | PF_W), "flags intact");
+
+    // THE CONTROL: the identical blob as ET_EXEC is unbiased.
+    size = build_elf(flags, 3);
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "ET_EXEC parses");
+    TEST_EXPECT_EQ(img.load_bias, 0ull, "ET_EXEC load_bias is 0");
+    TEST_EXPECT_EQ(img.entry, 0x10000ull, "ET_EXEC entry unbiased");
+    TEST_EXPECT_EQ(img.segments[0].vaddr, 0x10000ull, "ET_EXEC vaddr unbiased");
+
+    // PT_DYNAMIC: legal on a PIE (every one carries it), still refused on an
+    // ET_EXEC. Both directions, because accepting it everywhere would pass
+    // the first assertion alone.
+    size = build_elf(flags, 3);
+    blob_ehdr()->e_type = ET_DYN;
+    blob_phdrs()[2].p_type  = PT_DYNAMIC;
+    blob_phdrs()[2].p_flags = PF_R | PF_W;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "PT_DYNAMIC accepted on ET_DYN");
+
+    size = build_elf(flags, 3);
+    blob_phdrs()[2].p_type  = PT_DYNAMIC;
+    blob_phdrs()[2].p_flags = PF_R | PF_W;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_HAS_DYNAMIC, "PT_DYNAMIC still rejected on ET_EXEC");
+
+    // PT_INTERP stays rejected on a PIE too -- D-2 does not run interpreters.
+    // (Stock ld-musl-aarch64.so.1 has no PT_INTERP, which is why the D-2 gate
+    // binary loads through this unchanged.)
+    size = build_elf(flags, 3);
+    blob_ehdr()->e_type = ET_DYN;
+    blob_phdrs()[1].p_type = PT_INTERP;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_HAS_INTERP, "PT_INTERP rejected on ET_DYN too");
+
+    // e_entry == 0 means two different things by type. On an ET_EXEC it is a
+    // null entry (refused, unchanged). On a PIE it means "entry at the load
+    // base", a real address once biased -- so it must be ACCEPTED, and the
+    // zero-check has to run on the biased value to tell them apart.
+    size = build_elf(flags, 3);
+    blob_ehdr()->e_type  = ET_DYN;
+    blob_ehdr()->e_entry = 0;
+    blob_phdrs()[0].p_vaddr = 0;         // make segment 0 cover offset 0
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "PIE with e_entry 0 loads (entry at the load base)");
+    TEST_EXPECT_EQ(img.entry, ELF_PIE_LOAD_BIAS, "its entry IS the load base");
+
+    size = build_elf(flags, 3);
+    blob_ehdr()->e_entry = 0;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_BAD_ENTRY, "ET_EXEC with e_entry 0 still refused");
+
+    // The window bound. A p_vaddr that would carry the biased segment past
+    // ELF_PIE_LOAD_LIMIT is refused BY THE LOADER, not left to the mapper.
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_type = ET_DYN;
+    blob_phdrs()[0].p_vaddr = ELF_PIE_LOAD_LIMIT;   // biased: way past the top
+    blob_ehdr()->e_entry    = ELF_PIE_LOAD_LIMIT;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_PIE_OOB, "PIE segment past the window refused");
+
+    // ...and the same vaddr is fine as an ET_EXEC, since the window is a
+    // property of the PIE placement and not a new rule for fixed images.
+    size = build_elf(flags, 1);
+    blob_phdrs()[0].p_vaddr = ELF_PIE_LOAD_LIMIT;
+    blob_ehdr()->e_entry    = ELF_PIE_LOAD_LIMIT;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "the window binds PIEs only");
+
+    // A p_vaddr near the top of the VA space must not wrap into a small
+    // (apparently in-window) address once biased.
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_type = ET_DYN;
+    blob_phdrs()[0].p_vaddr = (u64)-1 - 0x800ull;
+    blob_ehdr()->e_entry    = blob_phdrs()[0].p_vaddr;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_PIE_OOB, "a biased vaddr that would wrap is refused");
+}
+
 // VIVARIUM V-1: the ADVISORY brand hint (docs/VIVARIUM.md §12.1).
 //
 // The load-bearing property under test is a NEGATIVE one: the hint must
@@ -520,4 +638,194 @@ void test_elf_brand_hint(void) {
     blob_ehdr()->e_ident[EI_MAG0] = 0x00;        // not an ELF at all
     TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, size), ELF_BRAND_UNKNOWN,
         "a non-ELF blob hints UNKNOWN");
+}
+
+// elf.read_interp -- DISTRO D-4. The brand hint above is now a CALLER of this
+// walk, so these cases cover the shared bounds logic from the side that ACTS on
+// its answer: D-4 resolves the returned path and execs it, which makes every
+// "absent" case a refusal-to-run rather than a missing diagnostic. The bar is
+// therefore stricter than the hint's -- a partial or truncated path must be
+// reported as ABSENT and never as a shorter path, because a shorter path names
+// a DIFFERENT file that the kernel would then load.
+// Plant `s` as this blob's PT_INTERP just past the headers. `extent` overrides
+// p_filesz when non-zero (the unterminated case). Returns the size a caller
+// must hand elf_read_interp for the whole string to be present.
+static size_t plant_interp(const char *s, size_t extent) {
+    const u32 flags[1] = { PF_R | PF_X };
+    size_t at = build_elf(flags, 1);
+    size_t n = 0;
+    while (s[n] != '\0') n++;
+    for (size_t i = 0; i <= n; i++) g_test_elf_blob[at + i] = (u8)s[i];
+    struct Elf64_Phdr *ph = blob_phdrs();
+    ph[0].p_type   = PT_INTERP;
+    ph[0].p_offset = at;
+    ph[0].p_filesz = extent ? (u64)extent : (u64)(n + 1);
+    return at + n + 1;
+}
+
+void test_elf_read_interp(void) {
+    const u32 flags[1] = { PF_R | PF_X };
+    char out[ELF_INTERP_MAX + 1];
+    size_t size;
+
+    // (1) The real thing, byte for byte.
+    {
+        static const char ld[] = "/lib/ld-musl-aarch64.so.1";
+        size_t whole = plant_interp(ld, 0);
+        size_t got = elf_read_interp(g_test_elf_blob, whole, out, sizeof(out));
+        TEST_EXPECT_EQ((u64)got, (u64)(sizeof(ld) - 1),
+            "read_interp returns the interpreter path's length");
+        int same = 1;
+        for (size_t i = 0; i < sizeof(ld); i++) if (out[i] != ld[i]) same = 0;
+        TEST_ASSERT(same, "read_interp copies the path NUL-terminated + verbatim");
+
+        // The hint still agrees -- it is a caller of this now, so a refactor
+        // that broke one silently would have to break both.
+        TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, whole),
+            ELF_BRAND_LINUX_LIKELY, "the brand hint reads through read_interp");
+
+        // (2) A bounded PREFIX that stops before the string: ABSENT. `out` must
+        // be left EMPTY, not holding the previous call's answer -- a caller
+        // that checked only the return value and reused the buffer would
+        // otherwise resolve a stale path.
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole - 1,
+                                            out, sizeof(out)), 0ull,
+            "an interp not wholly inside the handed prefix is ABSENT");
+        TEST_EXPECT_EQ((u64)out[0], 0ull, "the absent case clears the buffer");
+    }
+
+    // (3) Unterminated within its own extent: ABSENT, never scanned past.
+    {
+        static const char part[] = "/lib/ld-musl";
+        size_t whole = plant_interp(part, sizeof(part) - 1);  // extent drops the NUL
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole,
+                                            out, sizeof(out)), 0ull,
+            "an unterminated interp extent is ABSENT");
+    }
+
+    // (4) An EMPTY but terminated interp names nothing -- it must not resolve
+    // as the empty path (which a namespace walk would answer for the root).
+    {
+        static const char empty[] = "";
+        size_t whole = plant_interp(empty, 0);
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole,
+                                            out, sizeof(out)), 0ull,
+            "an empty interp string is ABSENT, not the empty path");
+    }
+
+    // (5) Longer than the bound: ABSENT, and specifically NOT truncated. This
+    // is the case that would be a live defect rather than a missed feature --
+    // a truncated "/lib/ld-musl-aarch64.so.1" is "/lib/ld" or "/lib", both of
+    // which could exist and neither of which is the interpreter.
+    {
+        char longp[ELF_INTERP_MAX + 8];
+        longp[0] = '/';
+        for (size_t i = 1; i < sizeof(longp) - 1; i++) longp[i] = 'a';
+        longp[sizeof(longp) - 1] = '\0';
+        size_t whole = plant_interp(longp, 0);
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole,
+                                            out, sizeof(out)), 0ull,
+            "an over-long interp is ABSENT, never truncated");
+        TEST_EXPECT_EQ((u64)out[0], 0ull, "and leaves no partial path behind");
+    }
+
+    // (6) A caller's buffer smaller than the path is the same answer: absent,
+    // empty. The bound that rejects is whichever is tighter.
+    {
+        static const char ld[] = "/lib/ld-musl-aarch64.so.1";
+        size_t whole = plant_interp(ld, 0);
+        char small[8];
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole,
+                                            small, sizeof(small)), 0ull,
+            "a too-small caller buffer is ABSENT, never a partial copy");
+        TEST_EXPECT_EQ((u64)small[0], 0ull, "and is left empty");
+    }
+
+    // (7) No PT_INTERP at all -- the static binary, the v1.0 native shape.
+    size = build_elf(flags, 1);
+    TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, size,
+                                        out, sizeof(out)), 0ull,
+        "a static ELF has no interpreter");
+
+    // (8) Degenerate inputs never produce a path.
+    TEST_EXPECT_EQ((u64)elf_read_interp(NULL, 4096, out, sizeof(out)), 0ull,
+        "NULL blob is ABSENT");
+    size = build_elf(flags, 1);
+    TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, size, out, 0), 0ull,
+        "a zero-capacity buffer is ABSENT");
+
+    // (9) #215 -- the two alignment guards elf_load has carried since R5-G
+    // F61/F62 and this walk did not, from the day D-4 promoted it into a second
+    // public parser of the same bytes.
+    //
+    // Both cases plant a WHOLLY VALID interpreter and differ from case (1) only
+    // in alignment, which is what makes them discriminate: on the pre-fix code
+    // each returns the path's length (the loads are merely undefined, and
+    // aarch64 happens to service them), so each assertion below FAILS. Verified
+    // red before the fix, not assumed -- an alignment test that passes either
+    // way would be the exact "assertion satisfiable by a broken system" shape.
+    {
+        static const char ld[] = "/lib/ld-musl-aarch64.so.1";
+
+        // (9a) A misaligned BUFFER. The blob is the kernel's own, so only a
+        // caller can produce this -- but the cast is undefined all the same.
+        size_t whole = plant_interp(ld, 0);
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole,
+                                            out, sizeof(out)),
+            (u64)(sizeof(ld) - 1), "control: the aligned blob still reads");
+        {
+            static _Alignas(struct Elf64_Ehdr) u8 shifted[512];
+            size_t n = whole < sizeof(shifted) - 1 ? whole : sizeof(shifted) - 1;
+            for (size_t i = 0; i < n; i++) shifted[i + 1] = g_test_elf_blob[i];
+            TEST_EXPECT_EQ((u64)elf_read_interp(shifted + 1, n,
+                                                out, sizeof(out)), 0ull,
+                "#215: a misaligned blob is ABSENT, never a path off a UB cast");
+            TEST_EXPECT_EQ((u64)out[0], 0ull, "and leaves the buffer empty");
+        }
+
+        // (9b) An odd e_phoff -- the ATTACKER-controlled half. The buffer is
+        // perfectly aligned here; only the on-wire field moves, which is why
+        // (9a)'s guard cannot stand in for this one.
+        //
+        // Relocate the phdr table to a high offset rather than nudging it one
+        // byte in place. The first attempt did nudge it, and the sabotage run
+        // PASSED: build_elf hands back `at == phoff + span`, so plant_interp
+        // puts the interp string immediately after the table, and shifting the
+        // table up a byte overwrote the string's leading '/' with a Phdr's
+        // p_align high byte (zero) -- the walk then answered 0 through the
+        // EMPTY-INTERP arm and the assertion held with the guard removed.
+        //
+        // Hence the pair below. Relocating to an EVEN offset must still find
+        // the path; only the ODD one may answer absent. The even leg is what
+        // makes a 0 attributable to the alignment and to nothing else.
+        // The two destinations are far apart and copied one at a time. Writing
+        // both in one loop is what broke the second attempt: 1024+i and 1025+i
+        // overlap, so the even branch at i+1 clobbered the odd branch's byte
+        // from i, shifting the "odd" table by a whole element into garbage --
+        // which again answered 0 for a reason that was not the alignment.
+        {
+            const u64 span = (u64)sizeof(struct Elf64_Phdr);
+            const u64 even = 1024, odd = 2049;   // odd % _Alignof(Phdr) == 1
+            const u64 blob_len = odd + span;
+
+            plant_interp(ld, 0);
+            const u64 src = blob_ehdr()->e_phoff;   // still the original 64
+
+            for (u64 i = 0; i < span; i++)
+                g_test_elf_blob[even + i] = g_test_elf_blob[src + i];
+            blob_ehdr()->e_phoff = even;
+            TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, blob_len,
+                                                out, sizeof(out)),
+                (u64)(sizeof(ld) - 1),
+                "control: the relocated table still reads at an ALIGNED phoff");
+
+            for (u64 i = 0; i < span; i++)
+                g_test_elf_blob[odd + i] = g_test_elf_blob[src + i];
+            blob_ehdr()->e_phoff = odd;
+            TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, blob_len,
+                                                out, sizeof(out)), 0ull,
+                "#215: an odd e_phoff is ABSENT, never a path off a UB cast");
+            TEST_EXPECT_EQ((u64)out[0], 0ull, "and leaves the buffer empty");
+        }
+    }
 }

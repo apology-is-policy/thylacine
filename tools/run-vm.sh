@@ -302,8 +302,13 @@ fi
 # gpu lands beside kbd/net/blk in the top slot page. gpu0 (PCI) takes
 # the next free PCI slot alongside net1/rng_pci0. THYLACINE_NO_GPU=1
 # disables both.
+# THYLACINE_DISPLAY=console (DISPLAY-MODES.md mode 1) is serial-primary: it
+# drops the whole GPU stack exactly as THYLACINE_NO_GPU=1 does, so the warden
+# finds no virtio-pci:16, tapestryd never starts, and joey skips aurora. The
+# guest learns it is console-primary from the thylacine.display=console bootarg
+# appended below (aurora, absent here, is the thing that would silence serial).
 gpu_flags=()
-if [[ "${THYLACINE_NO_GPU:-0}" != "1" ]]; then
+if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "console" ]]; then
     # THYLACINE_GPU_DEV overrides gpu0's device MODEL (default virtio-gpu-pci).
     # The Warp arc boots virtio-gpu-gl-pci on a Linux GL host (paired with
     # THYLACINE_DISPLAY=egl-headless -- the -gl models refuse to realise
@@ -320,7 +325,14 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" ]]; then
     # the resident boot) would squat it -- the client must land on gpu0's
     # head (the ls-gfx-live #31 leg). cocoa keeps the canonical device set
     # (its View menu switches consoles interactively).
-    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" ]]; then
+    # Drop the vestigial MMIO gpu ONLY when a real display backend binds
+    # QemuConsole 0 (vnc/egl-headless/dbus-gl, and gpu->cocoa): there gpu0 must
+    # take console 0, and gpu-mmio0 would squat it. gpu-headless is -nographic
+    # (NO backend), so QEMU only maintains a console surface for a BOUND scanout
+    # -- keep gpu-mmio0 (exactly the default -nographic device set) or gpu0's
+    # scanout gets no surface and aurora waits forever for its first present.
+    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
+       || "${THYLACINE_DISPLAY:-none}" == "dbus-gl" || "${THYLACINE_DISPLAY:-none}" == "gpu" ]]; then
         gpu_flags=(
             -device "$gpu_dev,id=gpu0,disable-legacy=on"
         )
@@ -337,12 +349,28 @@ fi
 # Disabled by THYLACINE_NO_QMP=1. The socket path lives under build/
 # alongside other build artifacts; it's overwritten per run (server
 # mode), so stale sockets from a previous run don't accumulate.
+#
+# TWO monitors, not one (#230). A QMP chardev in `server,nowait` mode serves
+# ONE client at a time: while the key-injector holds the monitor for the whole
+# boot (it connects at launch by design, #362), a second connect is REFUSED.
+# That is invisible whenever the injector finishes early -- it sends its key on
+# the AWAITING_QMP_KEY sentinel and exits -- and it bites the moment the
+# sentinel never comes: the lean production shape does not build that probe, so
+# the injector held the socket to teardown and the G-4 console gate failed with
+# `ConnectionRefusedError`, reported as "the Aurora scanout did not verify".
+# A gate blaming the renderer for a socket it could not open sends the reader to
+# the wrong subsystem entirely.
+#
+# So the gate gets its own monitor. Ordering between the two consumers stops
+# mattering, rather than being relied upon.
 qmp_flags=()
 if [[ "${THYLACINE_NO_QMP:-0}" != "1" ]]; then
     qmp_sock="${THYLACINE_QMP_SOCK:-$REPO_ROOT/build/qmp.sock}"
+    qmp_sock2="${THYLACINE_QMP_SOCK2:-$REPO_ROOT/build/qmp-gate.sock}"
     mkdir -p "$(dirname "$qmp_sock")"
-    rm -f "$qmp_sock"
-    qmp_flags=(-qmp "unix:$qmp_sock,server,nowait")
+    rm -f "$qmp_sock" "$qmp_sock2"
+    qmp_flags=(-qmp "unix:$qmp_sock,server,nowait"
+               -qmp "unix:$qmp_sock2,server,nowait")
 fi
 
 # 9P host share — appears at /host inside the guest once the 9P client lands
@@ -402,6 +430,20 @@ accel="${THYLACINE_ACCEL:-$(detect_accel)}"
 #                             QemuConsole 0, see gpu_flags above)
 case "${THYLACINE_DISPLAY:-none}" in
     none)  display_flags=(-nographic) ;;
+    # DISPLAY-MODES.md the two production postures. console (mode 1): serial is
+    # the sole console, GPU dropped above, -nographic. gpu (mode 1a): aurora
+    # owns a real window (cocoa on this host) and silences serial (1b) once it
+    # reads thylacine.display=gpu. Bare cocoa/vnc/egl-headless/dbus-gl stay
+    # testing-hybrid (serial LIVE, no bootarg) -- ls-gfx-live.exp logs in and
+    # sweeps desync diagnostics over serial under vnc, so those must not silence.
+    console) display_flags=(-nographic) ;;
+    gpu)   display_flags=(-display cocoa) ;;
+    # gpu-headless: gpu DEPLOYMENT (GPU present, aurora primary, serial silenced
+    # by 1b) on a HEADLESS backend -- QEMU maintains the scanout surface under
+    # -nographic (see the gpu_flags note), so aurora runs + screendump captures
+    # it, and the serial-silence is assertable on -serial. The CI/E2E shape of
+    # mode 1a; cocoa is the operator-facing one.
+    gpu-headless) display_flags=(-nographic) ;;
     cocoa) display_flags=(-display cocoa) ;;
     vnc:*) display_flags=(-display "vnc=127.0.0.1:${THYLACINE_DISPLAY#vnc:}") ;;
     # Headless GL for the Warp arc: needs a Linux host with an openable DRM
@@ -409,7 +451,17 @@ case "${THYLACINE_DISPLAY:-none}" in
     # the substrate witness). Serial stays on -serial below -- only
     # `none` implies -nographic.
     egl-headless) display_flags=(-display egl-headless) ;;
-    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|cocoa|vnc:N|egl-headless)" >&2
+    # Headless GL WITHOUT the display readback (Warp-C C-4): the dbus display
+    # in peer-to-peer mode with no listener attached gives the -gl models the
+    # same render-node EGL context egl-headless does, but a RESOURCE_FLUSH
+    # then updates nobody -- egl-headless's flush is a full-frame
+    # glReadPixels into the console surface on every flush (measured 11-17 ms
+    # of every frame on thyla-pi/V3D, GPU-DESIGN 4.5.12), which is a cost of
+    # the INSTRUMENT, not of the guest. Nothing can look at this display
+    # (no screendump, no VNC): it is the lane for measuring the guest's own
+    # present costs, and only that.
+    dbus-gl) display_flags=(-display dbus,p2p=on,gl=on) ;;
+    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|console|gpu|gpu-headless|cocoa|vnc:N|egl-headless|dbus-gl)" >&2
            exit 2 ;;
 esac
 
@@ -461,6 +513,16 @@ fi
 if [[ "${THYLACINE_NOSTORM:-0}" == "1" ]]; then
     append_tokens+=("thylacine.nostorm")
 fi
+# DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
+# the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
+# two EXPLICIT production values emit it -- the testing-hybrid backends
+# (cocoa/vnc/egl-headless/dbus-gl) and the -nographic default stay tokenless so
+# serial keeps flowing and no existing gate churns. Substring-matched by both
+# readers, so the full key=value token discriminates console from gpu.
+case "${THYLACINE_DISPLAY:-none}" in
+    console)            append_tokens+=("thylacine.display=console") ;;
+    gpu|gpu-headless)   append_tokens+=("thylacine.display=gpu") ;;
+esac
 append_flags=()
 if (( ${#append_tokens[@]} > 0 )); then
     append_flags=(-append "${append_tokens[*]}")

@@ -73,6 +73,32 @@ const SHELL: &str = "/bin/ut";  // #58: resolved via joey's post-pivot /bin bind
 // them down, so joey grants login CAP_SET_IDENTITY | LOCK_PAGES | CSPRNG_READ.
 const SHELL_CAPS: u64 = T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ;
 
+/// KT-1.5d-1a (HALCYON 14.12): the session lever. `/lib/halcyon/session` ==
+/// "on" selects the per-user Halcyon session -- login spawns
+/// `/bin/halcyond --session` AS the user instead of `ut` on /dev/cons. Absent
+/// / a read error / any other token -> the proven ut path. Fail-safe by
+/// construction, exactly as joey's renderer lever: a corrupt config can only
+/// name the default. Read as SYSTEM (pre-auth) from a system pool path.
+fn read_session_lever() -> bool {
+    let path = "/lib/halcyon/session";
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
+    if fd < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 8];
+    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    let _ = unsafe { t_close(fd) };
+    if n < 2 {
+        return false;
+    }
+    let s = &buf[..n as usize];
+    let end = s
+        .iter()
+        .position(|&c| c == b'\n' || c == b'\r' || c == b' ')
+        .unwrap_or(s.len());
+    &s[..end] == b"on"
+}
+
 // ── LS-6 / #94-B: the console line discipline via the inherited consctl fd ──
 //
 // joey's getty (and the seeded do_login_e2e) pass "--consctl-fd 3" + an inherited
@@ -946,11 +972,36 @@ unsafe fn seed_session_env(user: &[u8]) {
     let mut home_val: Vec<u8> = Vec::with_capacity(6 + user.len());
     home_val.extend_from_slice(b"/home/");
     home_val.extend_from_slice(user);
-    let path_val: &[u8] = b"/bin:/goroot/bin";
-    let pairs: [(&[u8], &[u8]); 3] = [
+    // Mirrors the shell's static $path (eval/stmt.rs resolve_command) so `which`
+    // and POSIX/Go tools agree with what `ut` runs; drift is a bug. /clade/bin is
+    // the Clade C/C++ toolchain (absent when that chunk is off -- a harmless miss).
+    // The two /viv entries are the phenotype-BY-LOCATION mounts (git, then the
+    // busybox applets): they were the drift this comment warned about -- `git`
+    // ran because ut's static list had /viv/bin while `which git` failed because
+    // this one did not.
+    let path_val: &[u8] = b"/bin:/goroot/bin:/clade/bin:/viv/bin:/viv/abin";
+    // W1-a (AUX-ROADMAP Stream 0): the shipped Linux git lives at /viv/bin and
+    // finds NOTHING without these -- its helpers (git-remote-https,
+    // git-upload-pack: the exec closure Design D 13.10.8 requires to sit
+    // behind the pheno-mount) resolve through GIT_EXEC_PATH, and the system
+    // config (identity, templateDir, sslCAInfo, core.editor=nora, pager) is
+    // read only through GIT_CONFIG_SYSTEM. Until now only the container
+    // bundles' manifests set them, so an interactive `git clone https://...`
+    // from a shell could not exec its transport helper at all.
+    // OPENSSL_armcap=0: the shipped git-remote-https (and the static curl)
+    // bundle OpenSSL, whose armcap init SIGILL-probes CPU features -- fatal
+    // under the phenotype (a snare:ill note is terminal; the 2026-08-25 curl
+    // census, wall 1). The container bundles carry this in their manifests;
+    // an interactive `git clone https://` from a shell needs it in the
+    // session env for exactly the same reason. OpenSSL's own documented
+    // override: pure-C crypto paths, no probing.
+    let pairs: [(&[u8], &[u8]); 6] = [
         (b"HOME", &home_val),
         (b"USER", user),
         (b"PATH", path_val),
+        (b"GIT_EXEC_PATH", b"/viv/bin"),
+        (b"GIT_CONFIG_SYSTEM", b"/viv/bin/gitconfig"),
+        (b"OPENSSL_armcap", b"0"),
     ];
     let mut ok = true;
     for (key, val) in pairs.iter() {
@@ -1201,6 +1252,24 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // KT-1.5d-1a (HALCYON 14.12): the per-user session compositor. When the
+    // device selects the Halcyon session (the /lib/halcyon/session lever),
+    // login spawns /bin/halcyond --session AS the user instead of ut on
+    // /dev/cons -- a per-user compositor that hosts the session's terminals as
+    // kaua-term tiles it spawns as itself (zero identity delegation, I-22
+    // clean). Default (absent / any other token) is the proven ut path; the
+    // lever gates the in-development session path off the shippable default.
+    //
+    // --no-session forces the ut path regardless of the lever: joey's seeded
+    // boot-test login (do_login_e2e) passes it because that non-interactive
+    // login MUST spawn a shell that EXITS so the boot-test completes -- the
+    // session halcyond never exits, so a seeded login that entered the session
+    // would hang the boot before the interactive getty ever runs. The session
+    // is thus reserved for the interactive getty login (which passes no such
+    // flag), exactly as the session is an interactive, non-terminating thing.
+    let session_halcyon =
+        read_session_lever() && !env::args().operands().any(|a| a == b"--no-session");
+
     // Spawn the shell AS the user. fd 0/1/2 inherit login's (the tty), so the
     // shell reads + writes the same console. The shell gets the user's identity
     // (SPAWN_IDENTITY_SET) but NOT CAP_SET_IDENTITY. It inherits the /home/<user>
@@ -1238,16 +1307,45 @@ pub extern "C" fn rs_main() -> i64 {
             .arg("--consctl-fd")
             .arg("3");
     }
-    let mut child = match shell_cmd.spawn() {
-        Ok(c) => c,
-        Err(_) => {
-            write_out(b"login: shell spawn failed\n");
-            unsafe { unbind_home(home) };
-            let _ = unsafe { evict_dek(ctl, dsid) };
-            let _ = unsafe { t_close(ctl) };
-            unsafe { session_close(conn, &token) };
-            let _ = unsafe { t_close(conn) };
-            return 1;
+    let mut child = if session_halcyon {
+        // The per-user compositor: identity ONLY -- no CONSOLE_OWNER (the
+        // Ctrl-C axis is each tile's pts fg pgrp, not the /dev/cons owner), no
+        // consctl fd (it is not the console renderer), no extra cap (connecting
+        // to tapestryd + spawning same-identity children is ungated). Its exit
+        // IS logout, exactly as the shell's is.
+        let mut hal = Command::new("/bin/halcyond");
+        hal.arg("--session")
+            .identity(pid, gid, &supp)
+            .stdin(Stdio::Inherit)
+            .stdout(Stdio::Inherit)
+            .stderr(Stdio::Inherit);
+        match hal.spawn() {
+            Ok(c) => {
+                t_putstr("login: session compositor (halcyond) spawned\n");
+                c
+            }
+            Err(_) => {
+                write_out(b"login: session halcyond spawn failed\n");
+                unsafe { unbind_home(home) };
+                let _ = unsafe { evict_dek(ctl, dsid) };
+                let _ = unsafe { t_close(ctl) };
+                unsafe { session_close(conn, &token) };
+                let _ = unsafe { t_close(conn) };
+                return 1;
+            }
+        }
+    } else {
+        match shell_cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => {
+                write_out(b"login: shell spawn failed\n");
+                unsafe { unbind_home(home) };
+                let _ = unsafe { evict_dek(ctl, dsid) };
+                let _ = unsafe { t_close(ctl) };
+                unsafe { session_close(conn, &token) };
+                let _ = unsafe { t_close(conn) };
+                return 1;
+            }
         }
     };
 

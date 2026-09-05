@@ -158,12 +158,155 @@ void test_pipe_write_short_when_partially_full(void) {
                    (long)(PIPE_BUF_SIZE - 10),
         "partial fill");
 
-    // Ask to write 100; only 10 fit.
-    u8 more[100];
-    for (size_t i = 0; i < 100; i++) more[i] = 0xDD;
-    TEST_EXPECT_EQ(dev_write(wr, more, 100L), 10L,
-        "short write returns space-available");
+    // Ask to write n > PIPE_BUF; only the 10 free bytes fit and the write
+    // returns short. Since the 2026-09-02 PIPE_BUF-atomicity fix, ONLY a write
+    // of n > PIPE_BUF partials -- a blocking write of n <= PIPE_BUF that does
+    // not wholly fit now WAITS for the whole fit (POSIX atomicity), so the old
+    // 100-byte form would sleep forever on this single-threaded boot path.
+    static u8 more[PIPE_BUF_SIZE + 50];
+    for (size_t i = 0; i < sizeof(more); i++) more[i] = 0xDD;
+    TEST_EXPECT_EQ(dev_write(wr, more, (long)sizeof(more)), 10L,
+        "short write (n > PIPE_BUF) returns space-available");
 
+    spoor_clunk(rd);
+    spoor_clunk(wr);
+}
+
+void test_pipe_nonblock_returns_eagain(void) {
+    // CNONBLOCK (per-Spoor POSIX O_NONBLOCK, the git-stash fill): a would-block
+    // read/write returns -T_E_AGAIN instead of sleeping. The guard is a
+    // pre-sleep early return placed AFTER the data / EOF / space checks, so this
+    // test pins BOTH that the would-block case converts AND that a ready op,
+    // EPIPE, and EOF are all untouched -- the placement is the load-bearing
+    // half (a guard before the write_eof check would spin a reader forever at
+    // EOF). The blocking path never registers on the rendez for an EAGAIN
+    // caller, so I-9 (pipe.tla NoStuckReader/NoStuckWriter) is byte-unchanged.
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
+    rd->flag |= CNONBLOCK;
+    wr->flag |= CNONBLOCK;
+
+    // (1) empty + both ends open: a blocking read would sleep -> EAGAIN.
+    static u8 got[PIPE_BUF_SIZE];
+    TEST_EXPECT_EQ(dev_read(rd, got, 64L), (long)(-T_E_AGAIN),
+        "non-blocking read on empty (not EOF) returns -T_E_AGAIN");
+
+    // (2) data present: the guard sits AFTER the drain, so a ready read serves.
+    const u8 payload[] = { 0xA1, 0xB2, 0xC3, 0xD4 };
+    TEST_EXPECT_EQ(dev_write(wr, payload, (long)sizeof(payload)),
+                   (long)sizeof(payload), "write payload (space available)");
+    TEST_EXPECT_EQ(dev_read(rd, got, 64L), (long)sizeof(payload),
+        "non-blocking read still drains available data");
+    for (size_t i = 0; i < sizeof(payload); i++)
+        TEST_ASSERT(got[i] == payload[i], "FIFO order preserved");
+
+    // (3) completely full: a blocking write would sleep -> EAGAIN.
+    static u8 fill[PIPE_BUF_SIZE];
+    for (size_t i = 0; i < PIPE_BUF_SIZE; i++) fill[i] = 0xEE;
+    TEST_EXPECT_EQ(dev_write(wr, fill, (long)PIPE_BUF_SIZE),
+                   (long)PIPE_BUF_SIZE, "fill the ring completely");
+    u8 one = 0x5A;
+    TEST_EXPECT_EQ(dev_write(wr, &one, 1L), (long)(-T_E_AGAIN),
+        "non-blocking write on full returns -T_E_AGAIN");
+
+    // (4) not stranded: draining frees space; the next write serves.
+    static u8 drain[PIPE_BUF_SIZE];
+    TEST_EXPECT_EQ(dev_read(rd, drain, 100L), 100L, "drain 100 bytes");
+    TEST_EXPECT_EQ(dev_write(wr, &one, 1L), 1L,
+        "non-blocking write serves once space frees");
+
+    // (5) the guard sits AFTER the write_eof check: a non-blocking read at EOF
+    // returns 0, NOT EAGAIN (else a reader would spin forever at EOF).
+    (void)dev_read(rd, drain, (long)PIPE_BUF_SIZE);   // fully drain the ring
+    spoor_clunk(wr);                                  // write_eof = true
+    TEST_EXPECT_EQ(dev_read(rd, drain, (long)PIPE_BUF_SIZE), 0L,
+        "non-blocking read at EOF returns 0 (not EAGAIN)");
+
+    spoor_clunk(rd);
+}
+
+// CNBFRAME (the byte-pipe 9P transport's tx end): frame-atomic + non-blocking.
+// The round-B F1 regression: a 9P frame is n <= msize <= PIPE_BUF, and since
+// the 2026-09-02 PIPE_BUF-atomicity fix a NON-CNBFRAME blocking write of
+// n <= PIPE_BUF that does not wholly fit BLOCKS (sleeps) until it does -- not a
+// partial. Taken under the 9P client's held c->lock, that sleep is the #360
+// lock-across-sleep extinction. (Even before the atomicity fix it was fatal:
+// then the non-fitting frame partial-wrote and stranded a fragment, desyncing
+// the shared stream, #349.) With CNBFRAME a write commits the WHOLE frame or
+// returns -T_E_AGAIN having written NOTHING, and never sleeps -- so the client
+// drops c->lock and retries. The contrast test
+// test_pipe_write_short_when_partially_full now uses n > PIPE_BUF (the only
+// size that still partials); a frame-sized non-fitting write there would block,
+// which is exactly the hazard this flag exists to avoid.
+void test_pipe_cnbframe_atomic_nonblocking(void) {
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
+    wr->flag |= CNBFRAME;
+
+    static u8 frame[1000];
+    for (size_t i = 0; i < sizeof(frame); i++) frame[i] = 0xA5;
+
+    // (1) A frame FITS in an empty pipe -> the whole frame commits.
+    TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), 1000L,
+        "CNBFRAME: a fitting frame commits whole");
+    // (2) Three more -> 4000 buffered, 96 free (< 1000).
+    for (int k = 0; k < 3; k++)
+        TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), 1000L,
+            "CNBFRAME: fitting frames commit whole");
+
+    // (3) The frame no longer fits (96 free < 1000) -> -T_E_AGAIN, ATOMIC.
+    //     The non-CNBFRAME path would BLOCK on a frame this size (n <= PIPE_BUF
+    //     waits for the whole fit since the 2026-09-02 atomicity fix; before it
+    //     it partial-wrote the 96 free bytes); CNBFRAME writes NOTHING and
+    //     never sleeps -- that is the whole point of the flag.
+    TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), (long)(-T_E_AGAIN),
+        "CNBFRAME: a non-fitting frame -> -T_E_AGAIN, nothing written");
+
+    // (4) Prove atomicity: exactly 4000 readable, not 4096 (no partial byte).
+    static u8 drain[PIPE_BUF_SIZE];
+    TEST_EXPECT_EQ(dev_read(rd, drain, (long)PIPE_BUF_SIZE), 4000L,
+        "CNBFRAME: the rejected frame left the ring at 4000, no partial byte");
+
+    // (5) Drained -> the frame fits again (progress is guaranteed since a
+    //     frame <= PIPE_BUF_SIZE always fits an empty pipe).
+    TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), 1000L,
+        "CNBFRAME: fits again once drained");
+
+    // (6) A read-closed pipe still yields -T_E_PIPE under CNBFRAME (unchanged).
+    spoor_clunk(rd);   // close the read end -> read_eof
+    TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), (long)(-T_E_PIPE),
+        "CNBFRAME: a read-closed pipe -> -T_E_PIPE");
+
+    spoor_clunk(wr);
+}
+
+// The follow-up round's F1: SYS_ATTACH_9P admits pipe pairs ONLY. The spoor
+// transport is sound solely over a NON-BLOCKING tx -- CNBFRAME is honored by
+// devpipe alone, and a /srv byte-conn (devsrv_write tsleeps) or a dev9p file tx
+// driven under the 9P client's held c->lock is the #360 lock-across-sleep
+// extinction. This exercises the handler's ACTUAL gate predicate
+// (sys_attach_9p_ends_are_pipes): a pipe pair passes, any non-pipe / NULL end is
+// refused. p9_spoor_transport_init itself stays Dev-generic (the transport tests
+// drive it over a non-blocking mock), so the pipe-only constraint lives at the
+// EL0 boundary, which is what this checks.
+void test_pipe_attach_9p_admits_pipes_only(void) {
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe");
+    struct Spoor *nonpipe = spoor_alloc(&devnull);
+    TEST_ASSERT(nonpipe != NULL, "non-pipe Spoor (devnull)");
+
+    TEST_ASSERT(sys_attach_9p_ends_are_pipes(wr, rd),
+        "a pipe tx + pipe rx is admitted");
+    TEST_ASSERT(!sys_attach_9p_ends_are_pipes(nonpipe, rd),
+        "a non-pipe tx is refused -- the extinction vector");
+    TEST_ASSERT(!sys_attach_9p_ends_are_pipes(wr, nonpipe),
+        "a non-pipe rx is refused too");
+    TEST_ASSERT(!sys_attach_9p_ends_are_pipes(NULL, rd),
+        "a NULL tx is refused");
+    TEST_ASSERT(!sys_attach_9p_ends_are_pipes(wr, NULL),
+        "a NULL rx is refused");
+
+    spoor_clunk(nonpipe);
     spoor_clunk(rd);
     spoor_clunk(wr);
 }

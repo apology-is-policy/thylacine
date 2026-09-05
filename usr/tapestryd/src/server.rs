@@ -11,8 +11,10 @@
 //
 //   WeaveFirst  = `create W H` on the surface ctl: t_dma_create_weave (the
 //                 G-2 kernel-minted share-admissible subtype) + map + zero +
-//                 RESOURCE_CREATE_2D + whole-weave ATTACH_BACKING
-//                 (backed := TRUE, serverRef := TRUE). `armed` becomes real
+//                 one RESOURCE_CREATE_2D per slot, each ATTACH_BACKING'd to
+//                 its own slot (C-2d-b), then -- on a GL host -- the C-2c
+//                 import of every slot resource into COMPOSITOR_CTX,
+//                 witnessed (backed := TRUE, serverRef := TRUE). `armed` becomes real
 //                 LAZILY at the first Tweft (weft_ensure below) -- the
 //                 netd precedent; the Map guard is indifferent to when the
 //                 registration happens, only that retire disarms it.
@@ -37,8 +39,19 @@
 //                 the in-flight present set is EMPTY at every retire
 //                 decision point: the tapestry_present.tla quiesce
 //                 obligation (ServerRelease's "intransfer = 0") holds BY
-//                 CONSTRUCTION at stage 0. A pipelined controlq (G-6+) must
-//                 implement the real drain before touching retire.
+//                 CONSTRUCTION at stage 0. Warp-C C-3 keeps that shape for
+//                 GPU composition: a Composed present on a GL host is
+//                 transfer (into the presented slot's own resource) ->
+//                 VIRGL_CCMD_BLIT slot -> screen on the compositor
+//                 context's SYNC slot -> RESOURCE_FLUSH, each step's
+//                 response before the next, so ComposeBlit/ComposeComplete
+//                 (the spec's ALLOW_COMPOSE actions) close inside the same
+//                 dispatch and DrainedOfBlits holds at every retire point
+//                 the way "intransfer = 0" does -- nothing is in flight past
+//                 a response. A pipelined controlq (fenced blits with the
+//                 flush riding fence completion) must implement the real
+//                 drain before touching retire; that is the C-4+ evolution
+//                 the spec is already cut for.
 //   Complete's displayed update = scanout_take(): on a present completion,
 //                 a surface with no scanout owner takes scanout (the F16
 //                 switch-at-first-present-COMPLETE alignment; never before
@@ -53,7 +66,11 @@
 //                     closed; on an already-claimed share the unshare is a
 //                     harmless miss);
 //                 (3) scanout release (SET_SCANOUT 0 if displayed);
-//                 (4) DETACH_BACKING + RESOURCE_UNREF (the GPU resource
+//                 (4) the compositor's import is revoked (Warp-C C-2c:
+//                     CTX_DETACH_RESOURCE from COMPOSITOR_CTX, GPU-DESIGN
+//                     4.5.10 -- BEFORE the unref, per slot resource; and
+//                     the GL adoption's consented BO the same way), then
+//                     DETACH_BACKING + RESOURCE_UNREF (the GPU resource
 //                     dies before its backing);
 //                 (5) unmap + close the weave DMA (serverRef := FALSE; the
 //                     pages free when the client's mapping ref also drops,
@@ -83,10 +100,10 @@ use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_srv_peer,
-    t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM,
-    T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
-    T_SRV_PEER_FLAG_CONSOLE_RENDERER,
+    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map,
+    t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM,
+    T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE,
+    T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 
 /// Present-pressure window for the idle throttle (#164): two adjacent
@@ -102,8 +119,9 @@ const PRESENT_BURST_WINDOW_MS: u64 = 250;
 const PRESENT_BURST_MIN: u32 = 4;
 
 use crate::chords::{ChordAction, Chords};
-use crate::gpu::{FencedErr, Gpu};
-use crate::pane::{self, Dir, Layout, Mode, Rect, Role};
+use crate::gpu::{FenceTag, FencedErr, Gpu};
+use crate::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
+use libdriver::Error;
 
 pub const MAX_CONNS: usize = 8;
 /// Of those, at most this many may be WARP conns (audit F7). Warp-2c fed
@@ -126,16 +144,89 @@ const MAX_FIDS: usize = 512;
 pub const SRV_MSIZE: u32 = 32768;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 
-/// F9: the per-client surface-count cap + the global slot pool.
-const MAX_SURFACES: usize = 8;
+/// F9: the per-client surface-count cap + the global slot pool. The pool
+/// is sized so every conn can reach its cap at once -- the renderer's cap
+/// includes one chrome surface per pane (H-3b: the per-leaf tag bars ride
+/// the renderer's conn; the H-3b round R2-F2 found a conn-per-bar design
+/// exhausting an 8-slot pool at three windows).
 const MAX_SURFACES_PER_CONN: usize = 4;
+
+/// Who is driving a layout mutation (the pane tree's trust model,
+/// HALCYON.md 13.6): the console renderer is the environment and may act
+/// on any pane; any other PROCESS acts only on what it OWNS -- rio's line
+/// (a client drives its own window's wctl; the window manager drives the
+/// rest). Resolved per write from the conn's kernel-stamped peer.
+///
+/// THREE identities (H-4b-2, HALCYON.md 13.7 -- the ratified D decision):
+/// - `Renderer`: the console renderer; the environment, acts anywhere.
+/// - `Client(stripes)`: a per-PROCESS peer keyed on the kernel `stripes`
+///   tag (a process holds several sessions -- one per Surface plus a
+///   driver session -- all one owner). Client(0) = an unknown peer: owns
+///   nothing. This is what a SYSTEM daemon / an unauthenticated / an
+///   unknown peer stays -- mutually walled, owning only what it mints.
+/// - `Session(principal)`: an ORDINARY USER peer, keyed on the kernel
+///   principal, NOT stripes. The ratified consequence: same-principal
+///   peers gain rio-style mutual pane authority (a program running as you
+///   may close/refocus/rename your OTHER tiles) -- strictly weaker than
+///   the same-owner process kill I-26 already grants. The console (SYSTEM
+///   principal) and other users (another principal) stay protected.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Actor {
+    Renderer,
+    Client(u64),
+    Session(u32),
+}
+
+/// H-4b-2: the principal to STAMP on an empty leaf this actor creates at
+/// split -- the key that later gates who may mint a placement claim on it.
+/// A session stamps its own principal; the renderer AND a Client
+/// (system/none) stamp 0 (the environment), so no user session can claim
+/// their empties and the reap (which only touches real user principals)
+/// never disturbs them.
+fn actor_owner_principal(actor: Actor) -> u32 {
+    match actor {
+        Actor::Renderer => 0,
+        Actor::Session(p) => p,
+        Actor::Client(_) => 0,
+    }
+}
+
+/// d-1b (HALCYON 14.12 step 4): is `p` a real user principal (a SESSION), as
+/// opposed to a sentinel (SYSTEM / unauthenticated / unknown -- the console
+/// renderer + system clients)? This is exactly the discriminator `actor()`
+/// applies to a conn's peer_principal, read here off a leaf's stamped
+/// `owner_principal`. A SESSION leaf outranks SYSTEM leaves for the display.
+fn principal_is_session(p: u32) -> bool {
+    p != T_PRINCIPAL_INVALID && p != T_PRINCIPAL_SYSTEM && p != T_PRINCIPAL_NONE
+}
+
+/// What a `create` hosts (the surface_ctl arm's parse, typed): a content
+/// surface -- optionally steered by an H-4b placement claim -- or one of
+/// the never-hosted renderer classes. The claim rides ONLY the content
+/// arm, so a claim on chrome/menu/status is unrepresentable past the
+/// syntax gate rather than re-checked downstream.
+#[derive(Clone, Copy)]
+enum Host {
+    Content { claim: Option<u128> },
+    Chrome { bind: u32 },
+    Menu,
+    Status,
+}
+
+/// Layout mutations one conn may land per service pass (the H-3b round
+/// R2-F1 (d): every structural verb is a full repaint + flush, and a
+/// pipelined batch could land ~1000 in one pass). Beyond it: E_AGAIN --
+/// the next pass takes the rest.
+const LAYOUT_VERBS_PER_PASS: u32 = 4;
+const MAX_SURFACES_PER_RENDERER: usize = MAX_SURFACES_PER_CONN + pane::MAX_PANES;
+const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + pane::MAX_PANES;
 
 /// Warp-2c: the GPU-seam slot pools. ONE context per client (the I-45
 /// exposure bound, GPU-DESIGN section 8: no cross-context resource naming,
 /// one ctx per conn); BOs bounded per ctx (each is a kernel GPU-BO mint the
 /// client's shared-map budget also bounds -- this cap is the server's own
 /// bookkeeping bound, not the resource authority).
-const MAX_WARP_CTXS: usize = 8;
+pub(crate) const MAX_WARP_CTXS: usize = 8;
 /// Lifted 16 -> 128 at Warp-3 (st/mesa alone mints ~8 hw_res before the
 /// first draw; a GL app's textures are one hw_res each), then 128 -> 1024
 /// at #204: GLQuake's map load holds MORE than 128 textures live at once,
@@ -157,6 +248,48 @@ const MAX_WARP_CTXS: usize = 8;
 /// than hardcoding).
 const MAX_WARP_BOS_PER_CTX: usize = 1024;
 
+/// V-3b-3c-2: per-ctx live HOST_VISIBLE device-memory (`mem/<handle>`) slots.
+/// A Venus app allocates a VkDeviceMemory per HOST_VISIBLE mapping (staging /
+/// uniform buffers), far fewer than textures -- 256 covers a bring-up and
+/// typical apps with headroom, and the real authority is the shared byte cap
+/// (WARP_CTX_BACKING_MAX, holistic across bos+rings+mems+imgs), so overflow is a
+/// clean E_NOMEM (-> the app's VK_ERROR_OUT_OF_DEVICE_MEMORY), never a crash
+/// (I-32). Raisable; the row is a HEAP allocation per minted ctx.
+const MAX_WARP_MEMS_PER_CTX: usize = 256;
+
+/// W-3c: per-ctx live PRESENTABLE (`img/<handle>`) slots. A swapchain is
+/// 2-4 images (mesa's wsi_common asks for `minImageCount`, typically 2-3;
+/// MAILBOX wants 3-4), and a client may hold a second swapchain briefly
+/// across a resize/recreate -- so 16 covers every realistic composition with
+/// headroom while staying far below the byte cap's reach. The real authority
+/// is WARP_CTX_HOSTMEM_MAX (mems + imgs, the W-4 family split -- this block's
+/// own forward constraint, discharged when vkQuake's first texture heap hit
+/// the old holistic 64 MiB), and the BYTE cap binds long before this count
+/// does at any real resolution. Spelled out, because the numbers decide
+/// whether the arc's own target fits (audit F14): 1080p BGRA8 = 7.91 MiB, so
+/// 24 images meet the 192 MiB budget; 4K = 31.64 MiB, so SIX fit -- the
+/// 3-image MAILBOX swapchain at 4K that the pre-split cap refused is now
+/// admissible, with the game's own working set beside it.
+/// Exhaustion is clean either way, never a crash (I-32) -- but the two axes
+/// answer DIFFERENT codes, and the difference is a client contract, not a
+/// nicety: the BYTE cap answers E_NOMEM ("provably not installed, free your
+/// guest handle") while a handle at or past this row answers E_INVAL
+/// ("installed, keep it") -- the wmem round-3 F8 convention. So a client that
+/// exhausts its SLOTS is told to keep a handle that was never installed.
+/// Inherited from the mem sibling and left deliberately symmetric with it
+/// (audit F13); if either is changed, change both, because the client's
+/// errno discrimination is shared. Raisable; the row is a HEAP allocation
+/// per ctx.
+const MAX_WARP_IMGS_PER_CTX: usize = 16;
+
+/// W-3c: the accepted presentable shape bound. A declared width/height must
+/// fit this, and `stride * h` must fit the blob -- the registration-time
+/// eligibility decision (WARP-WSI-DESIGN 4.1) rather than a per-frame check.
+/// 8192 is two 4K displays wide: past anything the stage-0 compositor scans
+/// out, and chosen so `stride * h` cannot overflow a u32 at the format's
+/// 4 bytes/pixel (8192*4 * 8192 = 2^28 -- computed in u64, checked into u32).
+const WARP_IMG_MAX_DIM: u32 = 8192;
+
 /// The read width a client is entitled to assume covers the WHOLE per-ctx
 /// `ctl` (audit F11). Not a server buffer bound -- the file is composed at
 /// full length and `read_str` honours any offset; it is the CONTRACT the
@@ -166,13 +299,23 @@ const WCTX_CTL_SNAPSHOT: usize = 255;
 
 /// The same contract for the GLOBAL warp `ctl` (round-3 F4). Its in-tree
 /// readers take a 512-byte snapshot; measured through the last fixed-size
-/// line, the current prefix is ~336 at type-max, so the headroom is real
-/// but unguarded until this check.
+/// line (`w210`), the W-4 prefix is ~380 at type-max (hostmem-bytes-cap +
+/// fenced-pool grew it from the ~336 this comment used to record), so the
+/// headroom is real but unguarded until this check. Growing content --
+/// the fenced-held rows and the per-ctx wctx rows -- sits BELOW `w210`
+/// (round-7 F1: two to three held rows above it pushed the custody mirror
+/// past the snapshot exactly when a wedge hunt would read it).
 const W_CTL_SNAPSHOT: usize = 511;
 /// One ctx's share of the process-wide fenced lane (round-5 F4). Half, so
 /// a second client can always make progress and no single client can drive
 /// every slot into the abandonment poison.
 const WARP_CTX_FENCE_MAX: usize = crate::gpu::FENCED_SLOTS / 2;
+
+/// W-4 stall-watch cadence: one ledger say-line per live warp ctx at this
+/// period. Matches `FENCE_ABANDON_MS` deliberately -- anything wedged has
+/// been named at least once before the abandonment machinery could touch it.
+#[cfg(feature = "test-mode")]
+const WARP_WATCH_MS: u64 = 30_000;
 const _: () = {
     // Round-6 F2: the share is a DIVISION, so it silently degenerates.
     // At FENCED_SLOTS = 1 the cap is 0 and `fences_in_flight >= 0` is
@@ -191,6 +334,46 @@ const _: () = {
 /// laundered through the TCB driver. 64 MiB/ctx (512 MiB total worst case)
 /// covers a 4K RGBA render target with room over.
 const WARP_CTX_BACKING_MAX: u64 = 64 * 1024 * 1024;
+
+/// W-4: the HOSTMEM-family budget (mems + imgs) -- split from the guest
+/// cap above when the first real game hit the old holistic 64 MiB at its
+/// first 32 MiB texture heap (vkQuake, run 3; the forward constraint the
+/// MAX_WARP_IMGS_PER_CTX rationale recorded in advance). The two families
+/// charge DIFFERENT physical pools, which is why one holistic cap was the
+/// wrong shape: bos + rings pin GUEST kernel memory (the exposure I-32
+/// exists for -- their cap stays 64 MiB above). Round-7 F4 corrected this
+/// block's own mechanism claims: MEMS are HOST3D blobs mapped into QEMU's
+/// hostmem window (256 M), whose physical size bounds their worst case;
+/// IMGS stop at the blob (create_presentable takes no window offset -- no
+/// map, no guest VA), so the window does NOT bound the img half and this
+/// constant is the imgs' only bound (behind the trusted host). Past the
+/// window the host refuses a MEM mint and the seam surfaces E_IO (the
+/// maybe-installed arm; the client resolves it via warp_img_reclaim /
+/// the mem three-valued contract), NOT the clean E_NOMEM this comment
+/// used to claim. So this cap is per-ctx FAIRNESS inside the window (one
+/// game cannot starve a second client's swapchain -- though the PARKED
+/// hostage bound widens with it: a dead ctx's maps can pin up to this
+/// many window bytes against every client's HOST_VISIBLE staging until
+/// the holder Proc dies, was 64 MiB -- round-7 F8, weighed + accepted),
+/// not the resource floor itself. 192 MiB = three quarters of the
+/// window: a real game's working set (vkQuake: ~35 MB fixed + 32 MiB
+/// texture heaps) with a second client's swapchain still admissible
+/// beside it.
+const WARP_CTX_HOSTMEM_MAX: u64 = 192 * 1024 * 1024;
+
+/// V-3b-2 (WARP-V3-DESIGN 0.12): the byte cap on one venus SUBMIT_CMD stream
+/// (I-32). The venus ring-bootstrap commands are ~124 bytes; this bounds a
+/// client-supplied stream well under the fenced slot (`gpu::FREQ_LEN`), which
+/// `gpu.submit_3d`'s `fenced_begin` independently enforces -- this is the
+/// defense-in-depth client-facing bound.
+const WARP_SUBMIT_MAX: usize = 32 * 1024;
+// F3: the cap is SUBSUMED today -- a Twrite payload is already bounded by
+// SRV_MSIZE (minus the p9 header), so the check never fires through the seam.
+// Kept as defense-in-depth; this assert makes a SRV_MSIZE lift ABOVE the cap a
+// compile error, so the cap becoming the binding venus-submit bound is a
+// deliberate decision, not a silent one (#230). The check itself lives inside
+// warp_venus_submit's accounted closure so if it ever arms it shows as fenced_err.
+const _: () = assert!(WARP_SUBMIT_MAX >= SRV_MSIZE_USIZE);
 /// The widest plausible bytes-per-pixel for the geometry sanity check
 /// (RGBA32F is 16); the host owns real format validity per section 2.1.
 const WARP_BO_MAX_BPP: u64 = 16;
@@ -218,9 +401,46 @@ const VIRGL_CCMD_RESOURCE_COPY_REGION: u32 = 17;
 /// From `#define VIRGL_CMD_RESOURCE_COPY_REGION_SIZE 13` -- a real #define
 /// with a real value, unlike the opcode above.
 const VIRGL_CMD_RCR_SIZE: u32 = 13;
+/// VIRGL_CCMD_BLIT: enum ordinal 16, ONE BELOW RESOURCE_COPY_REGION above
+/// (the same counted-not-grepped derivation; warp-prove's C-0 leg and
+/// tools/warp/p1b-cross-ctx-blit.c encode it identically). The composition
+/// blit of Warp-C C-3 (GPU-DESIGN 4.5.2): 21 payload dwords, scaling and
+/// format-converting, filter in S0. `#define VIRGL_CMD_BLIT_SIZE 21`.
+const VIRGL_CCMD_BLIT: u32 = 16;
+const VIRGL_CMD_BLIT_SIZE: u32 = 21;
+/// PIPE_MASK_RGBA in BLIT S0 bits 0..7; PIPE_TEX_FILTER_NEAREST (0) in bits
+/// 8..9 -- nearest, like the CPU path's letterbox (crisp for the retro-game
+/// case; the two paths must look the same from outside, 4.5.9).
+const PIPE_MASK_RGBA: u32 = 0xF;
 const PIPE_TEXTURE_2D: u32 = 2;
+/// The OSMesa gallium frontend mints its framebuffer textures
+/// `PIPE_TEXTURE_RECT` (every SDL/OSMesa GL client's presented BO on this
+/// system -- GLQuake's `res 84` read exactly this at the C-5 close); the
+/// C-2c witness and the C-3 blit have composed such BOs on the reference
+/// host since C-3, so RECT is part of the composable shape alongside 2D.
+/// gallium's enum: BUFFER 0, 1D 1, 2D 2, 3D 3, CUBE 4, RECT 5 (the first
+/// cut of this constant said 3 -- 3D -- and the SKIPPED say line's tuple,
+/// `target 5`, is what corrected it).
+const PIPE_TEXTURE_RECT: u32 = 5;
 const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
+/// A BUFFER resource (Warp-C C-4): `PIPE_BUFFER`, one byte per texel in
+/// `R8_UNORM`, width = the byte length. The compositor's health verify
+/// pair is minted this way (`warp_probe_res_kind`), because on a tiled
+/// renderer every TEXTURE upload and readback is a blit job appended to the
+/// GPU queue, so touching a 1x1 texture waits for everything the client has
+/// in flight; buffer transfers and copies are CPU-side there.
+const PIPE_BUFFER: u32 = 0;
+const VIRGL_FORMAT_R8_UNORM: u32 = 64;
+const VIRGL_BIND_VERTEX_BUFFER: u32 = 1 << 4;
+/// The resource-create flag QEMU sets on EVERY 2D create (`virgl_cmd_create_
+/// resource_2d`) and that a 3D create may carry: row 0 is the TOP row, and
+/// the display flips such a resource at SET_SCANOUT where it shows a flags-0
+/// (GL-native, row 0 = bottom) resource unflipped. Warp-C C-3 mints the
+/// composed screen with it so slot -> screen blits are same-convention and
+/// the CPU-painted chrome reaches a 3D screen exactly as it reaches the 2D
+/// one (4.5.11).
+const VIRGL_RESOURCE_Y_0_TOP: u32 = 1 << 0;
 /// What `mark` holds. Arbitrary but FIXED, and deliberately not 0 or an
 /// all-ones word: a zeroed or untouched page must never read as a healthy
 /// verify.
@@ -246,6 +466,7 @@ const P_SURF_DIR: u64 = 2; // surface/
 const P_SURF_NEW: u64 = 3; // surface/new
 const P_LAYOUT: u64 = 4; // the container tree (G-6)
 const P_PANE_DIR: u64 = 5; // pane/
+const P_STATUSBAR: u64 = 6; // the status bar's rect, "x y w h" (H-3d)
 
 const SURF_FLAG: u64 = 1 << 40;
 const PANE_FLAG: u64 = 1 << 41; // pane qids (G-6): PANE_FLAG | id<<8 | fk
@@ -274,6 +495,14 @@ const PFK_ROLE: u64 = 3;
 const PFK_TAG: u64 = 4;
 const PFK_SURFACE: u64 = 5;
 const PFK_GEOMETRY: u64 = 6;
+const PFK_TAGBAR: u64 = 7;
+const PFK_STATUS: u64 = 8;
+/// H-4b: the one-shot placement claim (read mints; `create claim=` spends).
+const PFK_CLAIM: u64 = 9;
+/// H-4b-3: the tile's owner principal (read-only) -- the hosted surface's,
+/// or an empty leaf's recorded owner (0 = the environment). The session
+/// tool's `layout save` reads it to mark the tiles it must never respawn.
+const PFK_OWNER: u64 = 10;
 
 fn make_surf(n: usize, fk: u64) -> u64 {
     SURF_FLAG | ((n as u64 & N_MASK) << 8) | (fk & FK_MASK)
@@ -290,19 +519,18 @@ fn is_surf(path: u64) -> bool {
 
 /// Pane qids name the pane's PUBLIC id (monotonic, never reused -- the
 /// net-3d discipline structurally: a stale pane fid resolves to nothing).
-/// PIN (G-6d F4): the qid carries only the low N_MASK (24) bits of the id,
-/// while the `layout` file parses the FULL u32 from its command string. The
-/// two agree for the first 2^24 pane allocations; past that the pane-ctl-file
-/// path (truncated qid) and the layout-file path (full id) would diverge for
-/// the same pane (a miss -> E_NOENT, never a crash or a cross-pane alias --
-/// ids stay unique). ~16.7M split+close cycles over the wire: unreachable.
-/// Widen the pane-id field (bits 8..40 are free below PANE_FLAG) before that
-/// assumption can bite.
+/// The FULL u32 id rides bits 8..40 (below SURF_FLAG at bit 40), so the
+/// pane-file path and the `layout`-file path name the same pane for every
+/// id the allocator can issue. (G-6d F4 pinned a 24-bit field here and
+/// claimed a past-2^24 miss could never alias; the H-3b round R2-F4 showed
+/// the truncated id DID alias a live pane -- the root, alive for the
+/// process lifetime -- so the field is now the id's own width.)
+const PANE_ID_MASK: u64 = 0xffff_ffff;
 fn make_pane(id: u32, fk: u64) -> u64 {
-    PANE_FLAG | ((id as u64 & N_MASK) << 8) | (fk & FK_MASK)
+    PANE_FLAG | ((id as u64 & PANE_ID_MASK) << 8) | (fk & FK_MASK)
 }
 fn pane_id(path: u64) -> u32 {
-    ((path >> 8) & N_MASK) as u32
+    ((path >> 8) & PANE_ID_MASK) as u32
 }
 fn pane_fk(path: u64) -> u64 {
     path & FK_MASK
@@ -326,6 +554,26 @@ fn is_pane(path: u64) -> bool {
 const WARP_FLAG: u64 = 1 << 42;
 const WARP_CTX: u64 = 1 << 39; // a ctx/<id> node (below the tag bits)
 const WARP_BO: u64 = 1 << 38; // a ctx bo/<id> node
+const WARP_RING: u64 = 1 << 43; // a ctx ring/<ridx> node (V-3a). Its bit must
+                                // be DISJOINT from every other qid tag AND from the id field. The id field is
+                                // (WARP_N_MASK << 8) = bits 8..37, so a tag must be bit >= 38; and bits 38..42
+                                // are ALL taken -- WARP_BO=38, WARP_CTX=39, SURF_FLAG=40, PANE_FLAG=41,
+                                // WARP_FLAG=42. Two earlier picks were wrong for this exact reason: 1<<37 sat
+                                // INSIDE the id field (leaked into warp_id -> no ring resolved), and 1<<40
+                                // aliased SURF_FLAG (is_surf(ring)=true -> the walk misrouted to the surface
+                                // arm). 1<<43 is the first free bit above the whole tag block. A ring path
+                                // still carries WARP_FLAG (is_warp), so is_warp/is_surf/is_pane/is_wctx/is_wbo
+                                // all read it correctly. The _Static_assert below now guards ALL of these.
+
+const WARP_MEM: u64 = 1 << 44; // a ctx mem/<handle> node (V-3b-3c-2, a
+                               // HOST_VISIBLE VkDeviceMemory blob). The first free bit above WARP_RING=43 --
+                               // same disjointness rule: a tag bit >= 44, clear of the id field (bits 8..37)
+                               // and of every other tag; the _Static_assert below guards it with the rest.
+
+const WARP_IMG: u64 = 1 << 45; // a ctx img/<handle> node (W-3c: a PRESENTABLE
+                               // -- a venus swapchain image's HOST3D blob, minted MAPPABLE and NEVER
+                               // mapped; see WARP-WSI-DESIGN 4.1 AS AMENDED). Next free
+                               // bit above WARP_MEM=44, same disjointness rule, same assert.
 
 const W_ROOT: u64 = WARP_FLAG;
 /// The attach roots by listener (main.rs hands the accepting listener's
@@ -336,6 +584,9 @@ const W_CTL: u64 = WARP_FLAG | 1;
 const W_CAPS: u64 = WARP_FLAG | 2;
 const W_CTX_DIR: u64 = WARP_FLAG | 3;
 const W_CTX_NEW: u64 = WARP_FLAG | 4;
+/// V-3b-3 (Model B): the VENUS capset, served separately from `caps` (which
+/// serves the ranked virgl capset the OpenGL winsys reads).
+const W_CAPS_VENUS: u64 = WARP_FLAG | 5;
 
 // Ctx-level file kinds (ctx/<id>/*).
 const WFK_DIR: u64 = 0;
@@ -348,6 +599,40 @@ const WFK_BO_NEW: u64 = 5;
 const WFK_BO_CTL: u64 = 1;
 const WFK_BO_MAP: u64 = 2;
 const WFK_BO_INFO: u64 = 3;
+// Ctx-level ring kinds (ctx/<id>/ring/*), V-3a.
+const WFK_RING_DIR: u64 = 6;
+const WFK_RING_NEW: u64 = 7;
+// Ring-level file kinds (ctx/<id>/ring/<ridx>/*), under WARP_RING.
+const WFK_RING_MAP: u64 = 1;
+const WFK_RING_KICK: u64 = 2;
+const WFK_RING_FENCE: u64 = 3;
+const WFK_RING_INFO: u64 = 4;
+const WFK_RING_CTL: u64 = 5;
+// Ctx-level mem kinds (ctx/<id>/mem/*), V-3b-3c-2 -- distinct ctx-FK values.
+const WFK_MEM_DIR: u64 = 8;
+const WFK_MEM_NEW: u64 = 9;
+// Multi-queue F3 (WARP-MULTIQUEUE-DESIGN): the read-only per-timeline
+// counters file + the per-timeline submit family. submit<t> carries the venus
+// timeline in the NAME because the submit payload is opaque bytes (an in-band
+// index would change the byte format) and a Twrite offset cannot carry it
+// (t_write's implicit offset already arrives nonzero at this file). fk =
+// WFK_SUBMIT_T_BASE + t for t in 1..WARP_TIMELINES; `submit` = timeline 0.
+const WFK_TIMELINES: u64 = 10;
+const WFK_SUBMIT_T_BASE: u64 = 10; // +1..=3 -> 11,12,13 = submit1..submit3
+                                   // Ctx-level img kinds (ctx/<id>/img/*), W-3c. 14/15 are the first ctx-FK
+                                   // values above the submit<t> family's 11..=13.
+const WFK_IMG_DIR: u64 = 14;
+const WFK_IMG_NEW: u64 = 15;
+// Mem-level file kinds (ctx/<id>/mem/<handle>/*), under WARP_MEM (WFK_DIR=0
+// is the dir node, shared with the other levels).
+const WMFK_MAP: u64 = 1;
+const WMFK_INFO: u64 = 2;
+const WMFK_CTL: u64 = 3;
+// Img-level file kinds (ctx/<id>/img/<handle>/*), under WARP_IMG. NO `map`
+// slot, and that absence is the design (WARP-WSI-DESIGN 4.1): a presentable
+// is never guest-mapped, so the namespace offers no way to ask.
+const WIFK_INFO: u64 = 1;
+const WIFK_CTL: u64 = 2;
 
 fn make_wctx(id: u32, fk: u64) -> u64 {
     WARP_FLAG | WARP_CTX | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
@@ -370,6 +655,94 @@ fn is_wctx(path: u64) -> bool {
 fn is_wbo(path: u64) -> bool {
     is_warp(path) && path & WARP_BO != 0
 }
+fn make_wring(id: u32, fk: u64) -> u64 {
+    WARP_FLAG | WARP_RING | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
+}
+fn is_wring(path: u64) -> bool {
+    is_warp(path) && path & WARP_RING != 0
+}
+fn make_wimg(id: u32, fk: u64) -> u64 {
+    WARP_FLAG | WARP_IMG | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
+}
+fn is_wimg(path: u64) -> bool {
+    is_warp(path) && path & WARP_IMG != 0
+}
+fn make_wmem(id: u32, fk: u64) -> u64 {
+    WARP_FLAG | WARP_MEM | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
+}
+fn is_wmem(path: u64) -> bool {
+    is_warp(path) && path & WARP_MEM != 0
+}
+
+// V-3a ring blob layout (the tapestryd<->client control-header contract; the
+// CS region past the header is Venus's to lay out, V-3b). Each control word
+// sits on its own 8-byte slot; the guest and host pair acquire/release on
+// head/idle/tail/seq (the I-9 register-then-observe, WARP-V3-DESIGN 3.5).
+const WARP_RING_HDR: u64 = 0x40; // CS region base
+const WARP_RING_OFF_HEAD: u64 = 0x00; // guest-written producer index
+const WARP_RING_OFF_TAIL: u64 = 0x08; // host-written consumer index
+const WARP_RING_OFF_IDLE: u64 = 0x10; // host-written: 1 = pump parked; kick iff 1
+const WARP_RING_OFF_SEQ: u64 = 0x18; // host-written monotone completed-seq feedback
+const WARP_RING_MAX: u64 = 1 << 20; // 1 MiB single-ring cap (F2)
+                                    // HOST3D ring slots (ridx 0-63): shmem command rings (the instance ring, the
+                                    // reply/TLS pools). NOT VkQueue timelines -- a queue is a pure fence lane with
+                                    // no memory ring behind it (WARP-MULTIQUEUE-DESIGN section E.1); the old
+                                    // "(Venus: one per VkQueue)" note here was that exact conflation in a comment.
+const WARP_RINGS_PER_CTX: usize = 64;
+// Venus fence TIMELINES (multi-queue F3): 0 = the ctx-global lane, 1..=3 =
+// VkQueue lanes (mesa max_timeline_count = 4, the ratified v1.0 bound). Sizes
+// `timeline_signaled` and bounds the submit<t> file family + FenceTag.ring_idx.
+const WARP_TIMELINES: usize = 4;
+// Bound one kick's drain passes (audit round-2 F1). WARP_RING_OFF_HEAD is
+// client-writable shared memory (the ring maps RW into the client via weft), so
+// a multi-threaded client can advance head faster than the single serve thread
+// drains it -- without a cap the drain loop spins forever and freezes every
+// conn (a box-wide DoS). A legitimate V-3a kick drains in ONE pass, so this cap
+// is the adversarial backstop only: on hitting it we publish idle and yield (a
+// doc-conformant client MUST then re-kick -- round-3 F1's I-9 contract term,
+// documented at the cap-break in wring_kick). NOTE (round-3 F2): warp-prove
+// leg 8's F1 regression assumes flood(5000) > this AND big/WARP_RING_HDR(8192)
+// > flood; raise all three together or the test's discrimination breaks.
+const WARP_RING_MAX_DRAIN_PER_KICK: u32 = 4096;
+
+// A warp path packs three disjoint fields: the fk byte (FK_MASK), the id field
+// (WARP_N_MASK << 8), and the tag bits (WARP_FLAG | WARP_CTX | WARP_BO |
+// WARP_RING). They MUST NOT overlap, or warp_id/warp_fk read a tag bit back as
+// id/fk -- exactly the bug that made WARP_RING = 1<<37 (bit 37, inside the
+// 30-bit id field's bits 8..37) corrupt every ring id so no ring resolved. This
+// fails the BUILD if any future tag/mask drift reintroduces it (audit F1).
+const _: () = assert!(
+    // every qid tag bit is distinct (a set bit-count check): WARP_BO 38,
+    // WARP_CTX 39, SURF_FLAG 40, PANE_FLAG 41, WARP_FLAG 42, WARP_RING 43,
+    // WARP_MEM 44, WARP_IMG 45.
+    (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | WARP_IMG | SURF_FLAG | PANE_FLAG).count_ones() == 8
+        // and no tag overlaps the id field or the fk byte.
+        && (WARP_N_MASK << 8) & FK_MASK == 0
+        && (WARP_N_MASK << 8)
+            & (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | WARP_IMG | SURF_FLAG | PANE_FLAG)
+            == 0
+        && (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | WARP_IMG | SURF_FLAG | PANE_FLAG) & FK_MASK == 0,
+    "qid tag bits (warp + surf + pane) must be mutually disjoint and clear of the id/fk fields",
+);
+
+// The ring control words are SeqCst (audit F2). The doorbell elision is the
+// store-buffer litmus: the host publishes idle=1 THEN re-reads head
+// (`wring_kick`), and the V-3b guest must publish head THEN read idle -- and
+// correctness requires NEITHER side to observe the other's stale value. Plain
+// Acquire/Release do NOT forbid that reordering in the abstract model (only
+// AArch64's STLR->LDAR happens to); SeqCst forbids it in-model, so the barrier
+// no longer leans on a target detail a maintainer or the V-3b guest author
+// could silently break. The cost is one kick -- negligible on a compositor ring.
+#[inline]
+fn ring_load(va: u64, off: u64) -> u64 {
+    unsafe { &*((va + off) as *const core::sync::atomic::AtomicU64) }
+        .load(core::sync::atomic::Ordering::SeqCst)
+}
+#[inline]
+fn ring_store(va: u64, off: u64, v: u64) {
+    unsafe { &*((va + off) as *const core::sync::atomic::AtomicU64) }
+        .store(v, core::sync::atomic::Ordering::SeqCst);
+}
 
 fn is_dir(path: u64) -> bool {
     path == P_ROOT
@@ -380,7 +753,13 @@ fn is_dir(path: u64) -> bool {
         || path == W_ROOT
         || path == W_CTX_DIR
         || (is_wctx(path) && (warp_fk(path) == WFK_DIR || warp_fk(path) == WFK_BO_DIR))
+        || (is_wctx(path) && warp_fk(path) == WFK_RING_DIR)
+        || (is_wctx(path) && warp_fk(path) == WFK_MEM_DIR)
+        || (is_wctx(path) && warp_fk(path) == WFK_IMG_DIR)
         || (is_wbo(path) && warp_fk(path) == WFK_DIR)
+        || (is_wring(path) && warp_fk(path) == WFK_DIR)
+        || (is_wmem(path) && warp_fk(path) == WFK_DIR)
+        || (is_wimg(path) && warp_fk(path) == WFK_DIR)
 }
 
 // Mode constants (the ptyfs set).
@@ -388,6 +767,7 @@ const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const DIR_MODE: u32 = S_IFDIR | 0o555;
 const FILE_RW: u32 = S_IFREG | 0o666;
+const FILE_RO: u32 = S_IFREG | 0o444;
 const P9_GETATTR_SIZE: u64 = 0x200;
 
 // =============================================================================
@@ -493,6 +873,26 @@ enum SurfState {
 struct Surface {
     gen: u32,        // the slot-reuse guard (net-3d); fids capture it at bind
     owner_conn: u64, // F2: the minting conn's id
+    /// The minting conn's peer PROCESS (the kernel's per-Proc `stripes`
+    /// tag: monotonic, never 0, never reused -- an rfork child gets a fresh
+    /// one). The pane tree's ownership key: a client holds SEVERAL sessions
+    /// (one per Surface + a driver session), so "mine" is the process, not
+    /// the conn. 0 = unknown peer, owns nothing.
+    owner_peer: u64,
+    /// H-4b-2: the minting conn's peer PRINCIPAL (the kernel's durable
+    /// per-Proc identity, immutable for a running Proc). The `Session`
+    /// actor's ownership key: an ordinary user's surfaces across all its
+    /// processes share this, so a same-principal peer may act on them
+    /// (mutual pane authority). SYSTEM / unauthenticated / unknown peers
+    /// carry their sentinel principal here but are Client(stripes) actors,
+    /// so this is inert for them.
+    owner_principal: u32,
+    /// d-1b (HALCYON 14.12 step 4): this SYSTEM leaf (console renderer / system
+    /// client) is backgrounded by a visible SESSION leaf -- excluded from the
+    /// scanout decision, not composited, not FRAME-ticked. Set + cleared per
+    /// reconcile; false whenever no session leaf is present (so it is inert on
+    /// every pre-session + gfx-test path).
+    backgrounded: bool,
     state: SurfState,
     w: u32,
     h: u32,
@@ -513,16 +913,24 @@ struct Surface {
     /// the geometry reads, and every post-fence present serve/validate
     /// against THIS one.
     weave: Option<Weave>,
-    /// The CURRENT generation's GPU resource (per-generation ids minted
-    /// from Comp.res_seq -- a reweave's fresh resource never aliases the
-    /// old one or SCREEN_RES).
-    resource_id: u32,
+    /// The CURRENT generation's GPU resources, ONE PER SLOT (GPU-DESIGN
+    /// 4.5.8, operator-voted). Ids stay per-generation, minted from
+    /// Comp.res_seq, so a reweave's fresh mints never alias the old ones or
+    /// SCREEN_RES -- a generation simply mints `WEAVE_SLOTS` of them, each
+    /// backed by its own slot at `slot_stride`.
+    ///
+    /// Slot <-> host resource is 1:1 so a compositor blit of slot i and a
+    /// client fill of slot j (i != j) cannot collide: the collision does not
+    /// exist rather than being scheduled around. The cost is that nothing
+    /// accumulates frames on the host any more, which is what 4.5.8b's
+    /// buffer age replaces.
+    res_ids: [u32; WEAVE_SLOTS as usize],
     /// The DISPLACED generation draining after a resize ack (weave + its
     /// resource id). At most one -- the spec's <=2-gens bound: a second
     /// ack while this drains is E_AGAIN (busy). Retired by the first
     /// post-fence present (RetireDisplaced + ServerRelease) or the
     /// surface retire.
-    old_weave: Option<(Weave, u32)>,
+    old_weave: Option<(Weave, [u32; WEAVE_SLOTS as usize])>,
     /// The CONFIGURE serial counter (section 18.3; low 16 bits ride the
     /// tevent `code`).
     cfg_serial: u16,
@@ -530,11 +938,28 @@ struct Surface {
     /// echo exactly this; a newer emission overwrites it (only the
     /// latest offer is ackable -- the wayland serial dance).
     offered: Option<(u16, u32, u32)>,
-    /// The client 2D resource's host-side content is stale (presents were
-    /// composed, not transferred to it -- or the resource is a reweave's
-    /// fresh mint). A deferred direct-scanout switch must expand its
-    /// first transfer to the full surface (G-6).
-    res_stale: bool,
+    /// PER SLOT: this slot's host resource has no valid content -- presents
+    /// were composed rather than transferred to it, or the generation is a
+    /// fresh mint. A deferred direct-scanout switch expands its first
+    /// transfer to the full surface (G-6).
+    ///
+    /// Per-slot since C-2d-b, and it must be: one resource per slot makes
+    /// staleness a property of the SLOT, and a single flag would report slot
+    /// 0's history for slot 2's resource.
+    res_stale: [bool; WEAVE_SLOTS as usize],
+    /// Warp-C C-2c (GPU-DESIGN 4.5.10): the CURRENT generation's slot
+    /// resources are imported into COMPOSITOR_CTX AND that import was
+    /// witnessed by a pixel copy through the compositor's context. False on
+    /// a non-GL host, on a device-refused attach, and on an unwitnessed one
+    /// -- fail closed, because a composition blit that names a resource the
+    /// renderer does not hold in the compositor's context latches that
+    /// context off for the process lifetime (4.5.4a). C-3 blits from a
+    /// surface only while this is true; otherwise it composes the CPU way.
+    comp_attached: bool,
+    /// Warp-C C-3 one-shot: the first present of this surface the GPU
+    /// composed said so (`surface N composed via GPU blit`); the census in
+    /// the global ctl carries the rate.
+    gpu_said: bool,
     /// A TPRESENT_HOLD's deferred scanout push (section 18.6/F13, G-6c):
     /// the region whose device-visible flush waits for `release`. Held
     /// presents union in (most-recent bytes win where they overlap); a
@@ -549,6 +974,32 @@ struct Surface {
     /// at every use, never cached, so either side's death is inert here.
     gl_src: Option<u32>,
     presents: u64, // diagnostic counter
+    /// H-3b-2: a Role::Chrome surface's binding -- the PUBLIC id of the pane
+    /// whose Daylight tag bar it paints. None = a content surface (hosted in
+    /// a leaf by `layout.host`). A chrome surface is never hosted: it is
+    /// placed at the bound pane's `tagbar` strip by `surface_target`, so it
+    /// is non-focusable and excluded from the Direct count and from pointer
+    /// routing by construction (none of those paths see an unhosted
+    /// surface). Pane ids are never reused (the net-3d discipline), so a
+    /// binding to a closed pane resolves to nothing and the surface is
+    /// simply invisible until its owner destroys it.
+    chrome_bind: Option<u32>,
+    /// H-3c: a Role::Menu surface -- the ephemeral verb menu (HALCYON.md
+    /// 13.6). Never hosted; showable only while it is THE placed menu
+    /// (`Comp.menu`), so it is non-focusable and outside the Direct count
+    /// by construction, like chrome. Retired by the compositor on every
+    /// dismiss path.
+    is_menu: bool,
+    /// H-3d: the Role::Status surface -- the screen-bottom status bar
+    /// (HALCYON.md 13.6). Never hosted, bound to the DISPLAY: showable only
+    /// while it is THE registered bar (`Comp.status`, gen-pinned), placed
+    /// at the bottom strip the layout carves for it. Renderer-gated at
+    /// create, one per display.
+    is_status: bool,
+    /// The slot of this surface's last accepted present: what
+    /// `menu_reassert` re-composes when a screen write lands under a placed
+    /// menu. None until the first present.
+    shown_slot: Option<u32>,
 }
 
 /// The deferred flush a held present leaves behind. The pixel work
@@ -560,10 +1011,31 @@ struct Surface {
 /// superseded the held region).
 #[derive(Clone, Copy)]
 enum Held {
-    /// Direct mode: the surface-space region awaiting RESOURCE_FLUSH.
-    Direct(Rect),
-    /// Composed mode: the SCREEN-space region awaiting transfer + flush.
-    Composed(Rect),
+    /// Direct mode: the surface-space regions awaiting RESOURCE_FLUSH, ONE
+    /// PER SLOT (C-2d-b). Entry `i` is slot `i`'s pending region, empty when
+    /// that slot has none.
+    ///
+    /// This was a single `Rect` union, which is well-defined only while every
+    /// held present lands on ONE host resource. Per-slot resources break that:
+    /// a present rotates the slot, so two held presents sit on DIFFERENT
+    /// resources and there is no single resource for a union to be flushed
+    /// against. Bounded by construction -- a client cannot hold more presents
+    /// than it has slots -- so this is an array, not a growable list.
+    ///
+    /// Unioning still happens, but PER SLOT: a second held present on the same
+    /// slot merges, which is the case the old union actually served.
+    Direct([Rect; WEAVE_SLOTS as usize]),
+    /// Composed mode: the SCREEN-space regions awaiting their device-visible
+    /// step. Unaffected by the per-slot split -- the screen is one resource
+    /// regardless of which client slot fed it. Split by HOW the pixels got
+    /// there (Warp-C C-3): a CPU-composed present wrote the screen BUFFER
+    /// and owes an upload + flush; a GPU-composed present already blitted
+    /// the screen RESOURCE and owes only the flush -- uploading its region
+    /// would paint the stale buffer over the blit. A surface's held presents
+    /// are all one kind in practice (the kind is per generation); should the
+    /// two overlap across a reweave or a mid-hold GPU latch, the upload runs
+    /// first and wins in the overlap.
+    Composed { cpu: Rect, gpu: Rect },
 }
 
 fn rect_union(a: Rect, b: Rect) -> Rect {
@@ -577,7 +1049,12 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
     let y1 = a.y.min(b.y);
     let x2 = (a.x + a.w).max(b.x + b.w);
     let y2 = (a.y + a.h).max(b.y + b.h);
-    Rect { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
+    Rect {
+        x: x1,
+        y: y1,
+        w: x2 - x1,
+        h: y2 - y1,
+    }
 }
 
 /// The compositor's own screen buffer (Composed mode). A WEAVE-subtype
@@ -596,11 +1073,275 @@ struct Screen {
     va: u64,
     size: u64,
     res: u32,
+    /// Warp-C C-2b: this is a 3D resource attached to COMPOSITOR_CTX rather
+    /// than a plain 2D one. Only ever true where virgl negotiated; the
+    /// capability gate (4.5.9) keeps the 2D path alive everywhere else, and
+    /// BOTH must keep working -- the CPU path is permanent.
+    is3d: bool,
 }
 
 /// The res_seq base: per-generation resource ids (surface weaves + the
 /// screen since cfg-3) mint strictly above this -- no id ever aliases.
-const SCREEN_RES: u32 = 0x40;
+pub(crate) const SCREEN_RES: u32 = 0x40;
+
+/// Warp-C C-2: the COMPOSITOR's own virgl context. Client warp ctxs take ids
+/// `slot + 1` over `0..MAX_WARP_CTXS`, so this sits far above that range and
+/// can never alias one -- a compositor ctx colliding with a client's would let
+/// a client's stream author commands against the screen.
+///
+/// CAPABILITY-GATED (GPU-DESIGN 4.5.9). It exists only where VIRTIO_GPU_F_VIRGL
+/// negotiated. Measured: the dev loop reports `virgl=0` on the default
+/// `virtio-gpu-pci`, thyla-pi reports `virgl=1 capsets=2` on real V3D -- so the
+/// composed GPU path is reachable ONLY on a GL host and the CPU path stays the
+/// universal one. A tapestryd that assumed GL here would take the console dark
+/// on the default device, which is what everything else boots under.
+pub(crate) const COMPOSITOR_CTX: u32 = 0x100;
+
+/// Warp-C C-3: the throwaway contexts the bring-up CONVENTION PROBE runs on
+/// (`comp_measure_conventions`), one fresh id per attempt above the
+/// compositor's own -- a request the renderer refuses latches the context it
+/// ran on (4.5.4a), and the probe deliberately tries requests it does not
+/// know the host honours (a row-mirroring blit). Latching a throwaway is the
+/// point; latching COMPOSITOR_CTX would take GPU composition down before it
+/// began. Destroyed after each attempt; never re-minted.
+const CONV_PROBE_CTX_BASE: u32 = COMPOSITOR_CTX + 1;
+
+/// V-3b-1c-2 (Model B): the per-client VENUS device-ctx ids -- `WARP_VENUS_CTX_BASE
+/// + slot`, one per warp slot (`0..MAX_WARP_CTXS`). A dedicated band chosen to
+/// clear, by construction, every other ctx id in this daemon: dev_ctx
+/// (`1..=MAX_WARP_CTXS`), the gpu probe ids (all `< COMPOSITOR_CTX`, i.e. <= 203),
+/// `COMPOSITOR_CTX` (0x100) itself, and the conv-probe throwaways
+/// (`CONV_PROBE_CTX_BASE + seq`). The GUARANTEE against the conv range is
+/// STRUCTURAL: `seq` is a function-local counter reset per `comp_measure_conventions`
+/// run and bumped once per bring-up blit attempt (~a dozen), so conv ids stay near
+/// `0x101..0x110` -- far below this 0x200 base, with the +64 gap in the assert as
+/// wide margin. (The `debug_assert` in `conv_attempt` is a DEBUG-build belt only --
+/// `[profile.release]` compiles it out of the shipped daemon, so it is not the
+/// witness in production; the structural bound is.) The venus ctxs are also lazily
+/// minted at client ring-mint time, long after the conv throwaways are destroyed,
+/// so the separation is temporal as well as numeric.
+const WARP_VENUS_CTX_BASE: u32 = 0x200;
+const _: () = assert!(
+    WARP_VENUS_CTX_BASE > COMPOSITOR_CTX
+        && (WARP_VENUS_CTX_BASE as usize) > (COMPOSITOR_CTX as usize) + 64
+        && MAX_WARP_CTXS < 0x100,
+    "venus ctx band must clear COMPOSITOR_CTX + the conv-probe range and not wrap"
+);
+
+/// The renderer's MEASURED blit-box conventions (Warp-C C-3, GPU-DESIGN
+/// 4.5.11): how a box named in guest rows must be issued so the rows land
+/// where the guest means -- PER SOURCE SHAPE (a Y_0_TOP slot, a flags-0 BO)
+/// AND PER SIZE CLASS (unscaled, scaled). Measured at bring-up on throwaway
+/// contexts with seeded probes of each resource kind, never assumed. The two
+/// size classes are measured separately because the renderer routes them
+/// differently: the first Pi run of C-3 found an UNSCALED same-format blit
+/// (vrend redirects it to the texel-exact copy-image path) wanting the
+/// boxes flipped on both Y_0_TOP sides, while the SCALED blit of the very
+/// same pair (the glBlitFramebuffer path with its own per-side flip) wanted
+/// the raw boxes -- one convention applied to both composed the battery's
+/// panes vertically swapped. Any (shape, class) the probe cannot establish
+/// is `None`: that class composes the CPU way (fail closed, 4.5.9).
+#[derive(Clone, Copy)]
+struct BlitConv {
+    slot_u: Option<ClassConv>,
+    slot_s: Option<ClassConv>,
+    bo_u: Option<ClassConv>,
+    bo_s: Option<ClassConv>,
+}
+
+/// One (shape, size class)'s measured convention: the request variant that
+/// lands the rows in the ORDER that shape needs (straight for a slot,
+/// mirrored for a BO -- a BO's GL row H-1 is its visual top), and the box
+/// flips to apply on top of it (`y' = h - y - box_h` when set).
+#[derive(Clone, Copy)]
+struct ClassConv {
+    variant: BlitVariant,
+    src_flip: bool,
+    dst_flip: bool,
+}
+
+/// The request shape: plain positive boxes, or the gallium flip idiom of a
+/// negative box height on one side (what Mesa itself sends for a flipped
+/// glBlitFramebuffer).
+#[derive(Clone, Copy, PartialEq)]
+enum BlitVariant {
+    Plain,
+    SrcNeg,
+    DstNeg,
+}
+
+/// The convention probe's three seeded resources + their backings.
+struct ConvProbe {
+    /// The slot kind: `resource_create_2d` (Y_0_TOP by QEMU), 1x4, rows T0..T3.
+    slot_res: u32,
+    slot_fd: i64,
+    slot_va: u64,
+    /// The BO kind: `resource_create_3d` flags 0, 1x4, rows U0..U3.
+    bo_res: u32,
+    bo_fd: i64,
+    bo_va: u64,
+    /// The screen kind: `resource_create_3d` flags Y_0_TOP, 1x16, the target.
+    scr_res: u32,
+    scr_fd: i64,
+    scr_va: u64,
+}
+
+/// What one probe request did: the run of source rows it landed, where.
+#[derive(Clone, Copy)]
+struct Landing {
+    /// First guest row of the run in the 16-row target.
+    first: usize,
+    /// The lowest source-row index the run carried (0 or 2 -- the source
+    /// flip: a box at y=0 named rows {0,1} or {2,3}).
+    src_lo: usize,
+    /// Rows in ascending source order (true) or descending (false).
+    straight: bool,
+}
+
+const CONV_ROWS: usize = 16;
+
+/// The compositor-context health verify's period, in ticks (Warp-C C-4): a
+/// copy issued at tick k is read at k+PERIOD, and the next issued then. Four
+/// ticks at the 60 Hz active clock is 67 ms -- past the client's fence
+/// throttle depth (8 frames) at the measured direct-arm frame times, so the
+/// read finds the copy executed and does not drain the client's queue; the
+/// verdict lags a latch by at most two periods (`comp_health_tick`).
+const HEALTH_PERIOD: u64 = 4;
+
+/// One composition op (Warp-C C-3): the surface-space source rect and the
+/// screen-space destination rect it lands on, source-agnostic -- the same
+/// geometry drives the CPU copy and the GPU blit, so the two paths place
+/// pixels identically (4.5.9). Scaled iff the two sizes differ (the
+/// letterbox arm); the crop arm is same-size.
+#[derive(Clone, Copy)]
+struct ComposeOp {
+    src: Rect,
+    dst: Rect,
+}
+
+/// The present-path cost census (Warp-C C-4): one cell per op class, wall
+/// time cumulative since boot, read as `cost <kind> <n> <sum_us> <max_us>`
+/// in the global ctl. It exists so the composed arm's residual over the
+/// direct arm is DECOMPOSED by measurement (GPU-DESIGN 4.5.12), never
+/// inferred from the frame rate: every synchronous device step the present
+/// path issues is timed where it is issued, and each present dispatch is
+/// timed whole and attributed to the arm it took. Guest-side wall time of a
+/// sync step includes the host's work on it -- each `.step` waits its
+/// response -- so a step that drains the GPU shows the drain here.
+#[derive(Clone, Copy, PartialEq)]
+#[repr(usize)]
+enum Cost {
+    /// A whole present dispatch, by arm.
+    PresentDirectGl,
+    PresentDirect2d,
+    PresentComposedBo,
+    PresentComposedSlot,
+    PresentComposedCpu,
+    PresentOther,
+    /// The img family's poke-completion device work (round-6 F7): the
+    /// per-frame flip/bind + flush `img_poke_complete` performs inside a
+    /// ctl-write dispatch, which the FK_PRESENT frame cannot see -- and
+    /// which is the steady-state Vulkan present path, the census's whole
+    /// reason to exist. Its own row (not PresentDirectGl) so the n/sum
+    /// population stays one kind of event.
+    PresentPokeImg,
+    /// TRANSFER_TO_HOST_2D of a present's damage (per present, all rects).
+    Xfer,
+    /// The composition blit run (`submit_blits`, per present).
+    Blit,
+    /// The compositor context's health step (`comp_health_tick`, per call),
+    /// and its two halves when they ran: the issue (uploads + copy) and the
+    /// readback.
+    Health,
+    HealthIssue,
+    HealthRead,
+    /// RESOURCE_FLUSH of a composed region (`screen_flush_rect`).
+    Flush,
+    /// The direct arms' RESOURCE_FLUSH (per present, all rects).
+    FlushDirect,
+    /// SET_SCANOUT + its post-bind full flush (a direct rebind).
+    Scanout,
+    /// The readback fallback's TRANSFER_FROM_HOST_3D of a GL frame -- since
+    /// Warp-C C-6 the ISSUE of the fenced readback (the console's own cost),
+    /// not the wait.
+    Readback,
+    /// C-6: issue-to-retire wall per COMPLETED compositor readback -- the
+    /// stall the device paid for the frame's backlog, which the console no
+    /// longer pays but the census must still see (GPU-DESIGN 4.5.13).
+    ReadbackWait,
+    /// The CPU compose pass (`blit_composed_pixels`, per rect).
+    Cpu,
+    /// A CPU-composed region's upload + flush (`screen_push`).
+    Push,
+    /// The poke path's rebind arm (both the promotion switch and the
+    /// steady-state per-poke flip -- a swapchain rotates presentables, so
+    /// every poke rebinds): SET_SCANOUT-class + the bind's own internal
+    /// flush, i.e. the whole paint for a rotated poke.
+    PokeBind,
+    /// The same-image re-poke's RESOURCE_FLUSH (new content in the
+    /// already-bound res). The rotated arm does NOT run this -- its paint
+    /// rides the bind (the run-5 double-paint fix).
+    PokeFlush,
+}
+
+impl Cost {
+    const COUNT: usize = Cost::PokeFlush as usize + 1;
+    const ALL: [Cost; Cost::COUNT] = [
+        Cost::PresentDirectGl,
+        Cost::PresentDirect2d,
+        Cost::PresentComposedBo,
+        Cost::PresentComposedSlot,
+        Cost::PresentComposedCpu,
+        Cost::PresentOther,
+        Cost::PresentPokeImg,
+        Cost::Xfer,
+        Cost::Blit,
+        Cost::Health,
+        Cost::HealthIssue,
+        Cost::HealthRead,
+        Cost::Flush,
+        Cost::FlushDirect,
+        Cost::Scanout,
+        Cost::Readback,
+        Cost::ReadbackWait,
+        Cost::Cpu,
+        Cost::Push,
+        Cost::PokeBind,
+        Cost::PokeFlush,
+    ];
+    fn name(self) -> &'static str {
+        match self {
+            Cost::PresentDirectGl => "present-direct-gl",
+            Cost::PresentDirect2d => "present-direct-2d",
+            Cost::PresentComposedBo => "present-composed-bo",
+            Cost::PresentComposedSlot => "present-composed-slot",
+            Cost::PresentComposedCpu => "present-composed-cpu",
+            Cost::PresentOther => "present-other",
+            Cost::PresentPokeImg => "present-poke-img",
+            Cost::Xfer => "xfer",
+            Cost::Blit => "blit",
+            Cost::Health => "health",
+            Cost::HealthIssue => "health-issue",
+            Cost::HealthRead => "health-read",
+            Cost::Flush => "flush",
+            Cost::FlushDirect => "flush-direct",
+            Cost::Scanout => "scanout",
+            Cost::Readback => "readback",
+            Cost::ReadbackWait => "readback-wait",
+            Cost::Cpu => "cpu",
+            Cost::Push => "push",
+            Cost::PokeBind => "poke-bind",
+            Cost::PokeFlush => "poke-flush",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct CostCell {
+    n: u64,
+    sum_ns: u64,
+    max_ns: u64,
+}
 
 /// cfg-3 display-mode bounds (AURORA-CONFIG.md section 3.4): base
 /// virtio-gpu reports one preferred rect, not a mode list, so `mode W H`
@@ -621,13 +1362,68 @@ const WEAVE_MAX_SIZE: u64 = 64 * 1024 * 1024;
 
 /// What scanout 0 references (G-6). `Boot` = untouched since startup (the
 /// kernel test pattern stays until a first present -- the stage-0 look);
-/// `Off` = explicitly disabled after content went away.
+/// `Off` = explicitly disabled after content went away. NOTE (W-3a, sharpened
+/// at W-3c-1): on a blob-capable host `Boot` DOES mean "disabled placeholder",
+/// not the retained kernel pattern -- the W-3a probe may bind-then-disable
+/// scanout 0, and the W-3c-1 presentable self-test disables it
+/// UNCONDITIONALLY on every blob+venus boot (twice: once inside its
+/// teardown's unbind, once on its own exit path). The tracking is restored to
+/// `Boot` afterwards while the device is disabled, which is the honest state:
+/// behaviorally identical (both reconcile arms treat Boot as nothing-bound,
+/// and `bound_res = 0` agrees with the device), cosmetically not.
 #[derive(Clone, Copy, PartialEq)]
 enum Scanout {
     Boot,
     Off,
     Direct(usize),
     Composed,
+}
+
+/// H-3c: the ONE placed menu -- its surface slot, the slot's generation pin,
+/// and the display rect it was clamped into (the grab region + its compose
+/// target).
+#[derive(Clone, Copy)]
+struct MenuState {
+    n: usize,
+    gen: u32,
+    rect: Rect,
+}
+
+/// H-3d: the registered status bar -- the surface the display's bottom
+/// strip is carved for (gen-pinned against slot reuse).
+#[derive(Clone, Copy)]
+struct StatusState {
+    n: usize,
+    gen: u32,
+}
+
+/// evdev KEY_ESC -- the compositor's own key while a menu is placed.
+const KEY_ESC: u16 = 1;
+/// The key-code tables span evdev KEY_MAX (0x2ff) rounded to a power of two;
+/// a code is masked into it (`key_idx`), so nothing indexes out of range.
+const KEYCODE_SPAN: usize = 0x400;
+/// The button tables span BTN_MISC (0x100) .. BTN_MISC + 0x80 (the mouse,
+/// joystick, touch and tool buttons), masked likewise (`btn_idx`).
+const BTNCODE_SPAN: usize = 0x80;
+const BTN_BASE: u16 = 0x100;
+/// `btn_owner` state: the press was consumed by the compositor (a
+/// click-away dismiss); its release is consumed too.
+const OWNER_SWALLOWED: u64 = 0xffff;
+fn key_idx(code: u16) -> usize {
+    (code as usize) & (KEYCODE_SPAN - 1)
+}
+fn btn_idx(code: u16) -> usize {
+    (code.wrapping_sub(BTN_BASE) as usize) & (BTNCODE_SPAN - 1)
+}
+fn owner_pack(n: usize, gen: u32) -> u64 {
+    ((gen as u64) << 16) | (n as u64 + 1)
+}
+fn owner_unpack(v: u64) -> Option<(usize, u32)> {
+    let slot = v & 0xffff;
+    if slot == 0 || slot == OWNER_SWALLOWED {
+        return None;
+    }
+    Some((slot as usize - 1, (v >> 16) as u32))
 }
 
 pub struct Comp {
@@ -651,6 +1447,114 @@ pub struct Comp {
     /// GPU resource ids are PER-GENERATION (a reweave mints a fresh one);
     /// pre-incremented, so the first id is SCREEN_RES + 1.
     res_seq: u32,
+    /// Warp-C C-2: is COMPOSITOR_CTX live? False on a non-GL host, where the
+    /// composed path stays the CPU one. Never torn down -- like `screen`, it is
+    /// held for the process lifetime and reclaimed by the RW-7 crash contract.
+    comp_ctx: bool,
+    /// W-3d 1a: the one-shot real-class compose measurement fired (armed at
+    /// the first post-READY mem mint).
+    real_compose_probed: bool,
+    /// One-shot say guard for the probe's non-consuming skip arms (round-5
+    /// F1): the stand-in-class and too-small gates defer WITHOUT consuming
+    /// the probe, and say so once rather than per mint.
+    real_compose_skip_said: bool,
+    /// Warp-C C-2c: the compositor context's OWN #240 mark/sentinel pair,
+    /// minted with the context. It is the instrument behind every
+    /// `comp-attach` verdict: the health check copies mark -> sentinel to
+    /// prove the context still executes commands, and each import witness
+    /// copies the imported resource -> sentinel and reads the sentinel back.
+    /// A device's OK to CTX_ATTACH_RESOURCE attests nothing about the
+    /// renderer (4.5.4c), so without this pair the import would be a claim
+    /// with no witness. `None` = the pair could not be built; every import
+    /// then reports SKIPPED and stays unattached (fail closed).
+    comp_probe: Option<CtxProbe>,
+    /// Warp-C C-4: the compositor's HEALTH-verify pair, minted as BUFFERS
+    /// (`warp_hprobe_build`) so the per-period verify enqueues no GPU work.
+    /// `None` = the texture pair above carries the verify.
+    comp_hprobe: Option<CtxProbe>,
+    /// Varies the witness sentinel per probe (the verify token discipline:
+    /// "unchanged" must never be satisfied by a value a previous probe left).
+    comp_probe_seq: u32,
+    /// C-2c census, readable in the global warp ctl: imports witnessed vs.
+    /// refused/skipped, so a silent degradation to the CPU path is visible.
+    comp_attach_witnessed: u64,
+    comp_attach_refused: u64,
+    /// W-4 section-8.2 discriminator: per-step latency histograms for the
+    /// poke path's two display roundtrips. Buckets (ms): <2, <5, <8, <11,
+    /// <14, <20, <30, >=30. Quantized mass at ~10 ms multiples = pacing;
+    /// spread across the low buckets = real host work. Test boots only.
+    #[cfg(feature = "test-mode")]
+    poke_hist_bind: [u32; 8],
+    #[cfg(feature = "test-mode")]
+    poke_hist_flush: [u32; 8],
+    /// Warp-C C-3: the renderer's measured blit conventions (see BlitConv).
+    /// `None` = GPU composition unavailable; every composed present takes
+    /// the CPU path. Set once at bring-up by `comp_measure_conventions`.
+    comp_conv: Option<BlitConv>,
+    /// Warp-C C-3: the compositor context stopped executing command
+    /// buffers AFTER a composition blit (the per-tick health copy failed) --
+    /// vrend's sticky latch (4.5.4a), seen from the compositor's own side.
+    /// STICKY like the latch: GPU composition is OFF for the process
+    /// lifetime; the CPU path takes every present from then on and a
+    /// structural repaint heals the screen. Read as `composed-gpu-dead` in
+    /// the global ctl.
+    comp_gpu_dead: bool,
+    /// A latch asked for a structural repaint; `frame_tick` performs it.
+    comp_repaint_pending: bool,
+    /// The tick the compositor context's health was last attended to: at
+    /// most ONE health step per tick, run after the first GPU-composed
+    /// present of that tick (`comp_health_tick`).
+    comp_verify_tick: u64,
+    /// Warp-C C-4: a health copy has been ISSUED and not yet READ (the
+    /// deferred verify -- issued at `comp_verify_issue_tick`, read no
+    /// earlier than `HEALTH_PERIOD` ticks later, so the read never drains
+    /// the client's queue behind which the copy sits; GPU-DESIGN 4.5.12).
+    comp_verify_pending: bool,
+    comp_verify_issue_tick: u64,
+    /// The composed-present census by path (readable in the global ctl):
+    /// how many presents the GPU composed vs the CPU. Both paths must stay
+    /// live everywhere the seam exists (4.5.9), so which one is being taken
+    /// has to be countable, not inferred from a boot log.
+    composed_gpu: u64,
+    composed_cpu: u64,
+    /// Warp-C C-6 (GPU-DESIGN 4.5.13): the ONE compositor readback in
+    /// flight -- the composed-GL present's readback arm, issued on the fenced
+    /// lane's reserved slot and completed by the fence pump
+    /// (`comp_readback_retired`), so the console's dispatch never waits on
+    /// a length the client chooses. One in flight compositor-wide is the
+    /// reserved slot's bound, and it loses nothing against a device that
+    /// executes readbacks serially anyway.
+    comp_rb: Option<CompRb>,
+    /// Surface incarnations (slot, gen) owed a readback once the reserved
+    /// slot frees, FIFO, at most ONE entry per surface slot with the latest
+    /// generation overwriting in place -- genuinely bounded by MAX_SURFACES
+    /// (round F6 corrected the dedup key, which had included `gen`): a present
+    /// that arrived while a readback was in flight, or found the slot
+    /// poisoned. Latest wins -- the issue reads whatever the BO holds THEN,
+    /// so a client's present rate cannot pile readbacks behind each other.
+    /// The gen pin keeps a slot's next tenant from inheriting the previous
+    /// one's request. ONE structure for the decision and its consumption (a
+    /// `wanted` flag beside a queue would be two predicates for one thing).
+    rb_wanted: VecDeque<(usize, u32)>,
+    /// The C-6 census (global ctl `comp-readback`): issued; landed (composed
+    /// at completion); dropped (the surface moved on -- retired, resized,
+    /// re-adopted -- between issue and completion, or the engine died);
+    /// coalesced (presents that enqueued instead of issuing); abandoned
+    /// (never retired in FENCE_ABANDON_MS -- the client's ctx poisoned, its
+    /// backing possibly still being written).
+    rb_issued: u64,
+    rb_landed: u64,
+    rb_dropped: u64,
+    rb_coalesced: u64,
+    rb_abandoned: u64,
+    /// Warp-C C-4: the present-path cost census (see `Cost`).
+    cost: [CostCell; Cost::COUNT],
+    /// The arm the present being dispatched took -- set inside `present`,
+    /// read by the dispatch timer at its call site.
+    cost_arm: Cost,
+    /// `probe-screen` rate limit: probes admitted this tick (test-mode).
+    probe_tick: u64,
+    probe_count: u32,
     /// The container tree (G-6): hosting, geometry, focus.
     layout: Layout,
     screen: Option<Screen>,
@@ -663,9 +1567,19 @@ pub struct Comp {
     /// scanned-out resource is the one order the display cannot survive,
     /// and only the device truth can name which resource that is.
     bound_res: u32,
+    /// How many times the DEVICE refused a display unbind (round-2 F1).
+    /// The self-test's `unbind=` arm consumes this: round-1 F5 rebuilt the
+    /// witness to observe the ISSUE ORDER and round-1 F8 exposed the
+    /// SUCCESS, and nothing read the second -- so a refused unbind, which
+    /// is the very state F8 exists to catch, satisfied all three of the
+    /// arm's conjuncts and reported `unbind=ok`.
+    unbind_refused: u32,
     /// The F16 deferred direct switch: SET_SCANOUT to this surface's
     /// resource rides its next present-COMPLETE, never earlier.
     pending_direct: Option<usize>,
+    /// Round-4 F4: the pending-switch bind-REFUSED say fired once per
+    /// episode (retries run at present rate on a refusing device).
+    pending_bind_refused_said: bool,
     /// The layout epoch the chrome (bg + borders) was last painted at.
     chrome_epoch: u64,
     /// The visible-geometry signature at the last STRUCTURAL repaint: a
@@ -686,13 +1600,41 @@ pub struct Comp {
     /// compares against the layout's focused surface and emits the
     /// lost/gained pair on every change.
     last_focus: Option<usize>,
+    /// H-3c: THE placed menu (one at a time). While Some, input is GRABBED
+    /// (every key and pointer event routes to it) and the scanout is
+    /// Composed. Cleared on every dismiss path through `retire`, which
+    /// carries the unplace + the heal -- so a wedged or dead owner cannot
+    /// strand it.
+    menu: Option<MenuState>,
+    /// H-3d: the one status bar on the display, if any. While Some the
+    /// layout is recomputed on the display MINUS the bottom strip (the
+    /// carve), `paint_borders` fills the strip `status_bg`, and no leaf is
+    /// Direct-scanned (a leaf is smaller than the display).
+    status: Option<StatusState>,
+    /// H-3c round F1: where each pressed KEY went -- packed (slot+1) |
+    /// gen<<16, 0 = none -- so a release or a repeat FOLLOWS ITS PRESS (the
+    /// chord layer's rule): to the leaf that saw the press across a grab
+    /// that began after it, to a dismissed menu's retired slot (dropped),
+    /// never to whoever holds focus now. Indexed like `chord_down`.
+    key_owner: [u64; KEYCODE_SPAN],
+    /// The same for the pointer BUTTONS (evdev BTN_* -- their own table:
+    /// BTN_LEFT & 0xff aliases KEY_Q in the key table), plus one more
+    /// state: `OWNER_SWALLOWED` -- the press was a click-away dismiss the
+    /// compositor consumed, so its release is consumed too (rio: a click
+    /// outside a menu cancels, never acts -- on either edge).
+    btn_owner: [u64; BTNCODE_SPAN],
+    /// Why the placed menu is being retired (the diagnostic's word); set by
+    /// `menu_dismiss`, read + reset by the retire arm.
+    menu_reason: &'static str,
     /// Keys whose PRESS was swallowed by the Super chord layer (section
     /// 18.4: reserved chords never reach a surface); their release /
     /// repeat swallow too, even if Super lifted first (no stray release
-    /// reaches a client). evdev codes are < 256. INDEPENDENT of `chords`
-    /// (cfg-4): the swallow-set tracks physical key state, so a live
-    /// rebind never leaks a half key-pair.
-    chord_down: [u64; 4],
+    /// reaches a client). One bit per evdev key code up to KEY_MAX (the
+    /// H-3c round F6: a `& 0xff` index aliased the codes past 255 --
+    /// KEY_FN, the media keys -- onto the first page). INDEPENDENT of
+    /// `chords` (cfg-4): the swallow-set tracks physical key state, so a
+    /// live rebind never leaks a half key-pair.
+    chord_down: [u64; KEYCODE_SPAN / 64],
     /// The runtime chord binding table (cfg-4): (key, shift) -> action,
     /// seeded with the stage-0 defaults, remapped by the gated `chord`
     /// ctl verb. Also holds the inter-pane `gaps` inset.
@@ -769,8 +1711,16 @@ pub struct Comp {
     /// The pub id whose poison condemned each slot, so a later
     /// vindication can release it (round-3 F2). 0 = none.
     warp_ctx_vindicate: [u32; MAX_WARP_CTXS],
+    /// V-3b-2 F1: for a poisoned (wedged) slot, whether the leak arm DEFERRED a
+    /// venus_ctx destroy -- the ctx had an armed venus_ctx that may carry a live
+    /// abandoned chain. The vindication destroys WARP_VENUS_CTX_BASE+slot once
+    /// the device is proven finished, exactly as dev_ctx is deferred.
+    warp_ctx_venus_vindicate: [bool; MAX_WARP_CTXS],
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
+    warp_ring_seq: u32,
+    warp_mem_seq: u32,
+    warp_img_seq: u32,
     /// #204 census, the global half: max `bo_backed_peak` over every ctx
     /// that ever lived -- readable AFTER a workload's ctx is gone (the
     /// per-ctx field dies with the ctx). Read via global ctl `bo-peak`.
@@ -795,6 +1745,14 @@ pub struct Comp {
     /// and without it silencing the storm would have destroyed the only
     /// evidence that UNKNOWN is happening at all.
     warp_verify_unknown: u32,
+    /// Client ctx mints whose #240 probe fell back to the TEXTURE pair
+    /// because the buffer pair could not be minted (C-0d Fable round F1),
+    /// monotonic since boot. On such a ctx a verify's transfers and readback
+    /// are GPU jobs behind whatever the DEVICE has queued -- the exposure the
+    /// buffer pair removes -- so a nonzero here says some ctx carried it.
+    /// Counted, not said per mint: a mint failure at ctx-create rate would
+    /// be a say storm. Read as `probe-texture` on the global ctl.
+    warp_probe_texture: u32,
     /// #210 custody mirror: parked reads + request-buffer residue across
     /// ALL conns, folded per tick by main's conns walk (the ctl reader's
     /// conn cannot see its siblings). fparked/rparked = pending fence /
@@ -811,15 +1769,34 @@ pub struct Comp {
     pub w210_f_ctx: u32,
     #[cfg(feature = "test-mode")]
     pub w210_f_fid: u32,
+    /// W-4 stall watch: while any warp ctx lives, one say-line per ctx every
+    /// `WARP_WATCH_MS` names the fence ledger MID-FLIGHT -- the park-side twin
+    /// of the `fenced-held` census rows, which a post-mortem read can never
+    /// supply because a wedged ctx's ledger dies with the ctx at teardown.
+    /// `watch_pass` counts serve-loop passes; its delta between prints is the
+    /// loop-liveness proof (a wedged loop prints nothing, and THAT absence is
+    /// only evidence because the cadence here is otherwise unconditional).
+    #[cfg(feature = "test-mode")]
+    watch_last: Option<Instant>,
+    #[cfg(feature = "test-mode")]
+    watch_pass: u64,
 }
 
-/// A GPU-seam rendering context (Warp-2c). Owned by one conn; the DEVICE
-/// ctx id is its slot + 1 (reused only after the synchronous CTX_DESTROY).
 /// The #240 health probe's two server-owned resources (GPU-DESIGN 4.5.4b).
-/// `mark` is painted once at ctx create and never written again; `sentinel`
-/// is seeded per verify and then copied into. Both are 1x1 B8G8R8A8, so the
-/// whole probe moves 4 bytes each way.
+/// `mark` is repainted at the top of every verify; `sentinel` is seeded per
+/// verify and then copied into. Either a BUFFER pair (`buffer`: `PIPE_BUFFER`
+/// / `R8_UNORM`, 4 bytes copied by a byte-wide `RESOURCE_COPY_REGION`; the
+/// form every ctx gets when the mint succeeds -- Warp-C C-4 measured that a
+/// texture transfer or readback is a blit job on a tiled renderer, queued
+/// behind everything the DEVICE has in flight, while buffer transfers and
+/// copies are CPU-side there) or the 1x1 B8G8R8A8 TEXTURE pair (the
+/// fallback where a buffer pair cannot be minted, and the compositor's
+/// import-witness pair, whose sentinel must be a texture because slot and
+/// BO texels are copied into it). Either way the whole probe moves 4 bytes
+/// each way; the transfer form and the copy width follow `buffer`
+/// (`probe_upload` / `probe_readback` / `probe_copy_region`).
 struct CtxProbe {
+    buffer: bool,
     mark_res: u32,
     mark_fd: i64,
     mark_va: u64,
@@ -829,10 +1806,18 @@ struct CtxProbe {
     size: u64,
 }
 
+/// A GPU-seam rendering context (Warp-2c). Owned by one conn; the DEVICE
+/// ctx id is its slot + 1 (reused only after the synchronous CTX_DESTROY).
 struct WarpCtx {
     owner_conn: u64,
     pub_id: u32,
     dev_ctx: u32,
+    /// V-3b-1c-2 (Model B): the per-client VENUS (capset-4) device-ctx that
+    /// owns this client's HOST3D command rings. Lazily created on the first
+    /// host3d ring mint (`wctx_venus_ensure`) so a client that mints only
+    /// V-3a guest-blob rings pays no venus ctx; destroyed with the warp ctx in
+    /// `wctx_finish`. Id = `WARP_VENUS_CTX_BASE + slot` (disjoint band).
+    venus_ctx: Option<u32>,
     /// The client's declared capset + ring count (`ctl` writes). Recorded
     /// at the seam from day one; the device sees them when
     /// F_CONTEXT_INIT / per-ring fencing are negotiated (Venus).
@@ -843,8 +1828,26 @@ struct WarpCtx {
     /// device-global fence id); the newest count the fence file has
     /// reported. signaled > reported = one unread record.
     fences_in_flight: u32,
+    /// Warp-C C-6: how many of `fences_in_flight` are the COMPOSITOR's own
+    /// readbacks of this ctx's BOs (at most one, the reserved slot). Counted
+    /// in `fences_in_flight` so every quiesce predicate (`wctx_retire`,
+    /// `warp_pump_retires`, `wbo_destroy`'s leak posture) holds the backing
+    /// the device is writing; SUBTRACTED at admission (`warp_fenced_admit`)
+    /// so the client's share is not shortened by a fence it did not issue,
+    /// and never counted in `fence_signaled` (the client's #210 ledger).
+    comp_rb_in_flight: u32,
     fence_signaled: u64,
     fence_reported: u64,
+    /// Multi-queue F3: the dense per-TIMELINE completion counts. A
+    /// retirement bumps BOTH its `timeline_signaled[ring_idx]` and the
+    /// ctx-wide `fence_signaled` total above, so the park file and every
+    /// pre-multi-queue consumer are unbroken (additive). [0] is the
+    /// ctx-global lane (timeline-0 submits + transfers); [1..=3] are VkQueue
+    /// lanes. Served by the read-only `ctx/<id>/timelines` file; the park
+    /// primitive stays the single ctx fence file (the client runs ONE parker
+    /// -- the server's single reported cursor would let two parked readers
+    /// steal each other's wakes).
+    timeline_signaled: [u64; WARP_TIMELINES],
     /// #210 ledger reconciliation: every fenced write that REACHED the
     /// dispatch funnel (rx), split by outcome (minted / E_AGAIN refused /
     /// other error). The client's `issued` counts its successful fenced
@@ -920,6 +1923,23 @@ struct WarpCtx {
     /// designs for, so it costs the intended use nothing, and it caps the
     /// whole box at MAX_WARP_CTXS probes per frame no matter what clients do.
     verify_tick: u64,
+    /// The compositor tick the last IMPORT WITNESS ran on for this ctx
+    /// (`comp_import_bo`: `comp_ctx_health` + `comp_witness_bo`, up to a
+    /// dozen synchronous device ops on the SHARED compositor context, the
+    /// witness readbacks on its texture sentinel among them). C-0d Fable
+    /// round F5: `present-to N bo` / `present-to off` / `present-to N bo`
+    /// re-ran the whole witness per cycle at 9P-write rate. The same shape
+    /// as `verify_tick`: one witness per ctx per tick; a second consent in
+    /// the same tick is DEFERRED to the next tick's replay (`frame_tick`),
+    /// never dropped -- the winsys re-consents only when its front buffer
+    /// changes, so a legitimate second write in one frame is a resize
+    /// storm, and coalescing those onto ticks costs it nothing.
+    /// `u64::MAX` = never (tick 0 is a real tick).
+    import_tick: u64,
+    /// A consent arrived while this tick's witness was already spent
+    /// (`import_tick == tick`); `frame_tick` replays the import of the
+    /// CURRENT `present_to` on the next tick and clears this.
+    import_pending: bool,
     /// One-shot latch per UNKNOWN arm (audit F5), the `build_diag_arms`
     /// shape. Both unknown arms used to `say!` unconditionally, and after
     /// F1 EVERY verify on a blinded ctx took one -- 8 ctxs at the per-frame
@@ -929,16 +1949,32 @@ struct WarpCtx {
     /// comp-global `verify-unknown` count instead, so silencing the storm
     /// costs no information (#95: latch the REPORT, never the counting).
     verify_diag_arms: u32,
+    /// FOLLOW-UP ROUND F2 [P2]: the one-shot half of the same remedy, for the
+    /// `!composable` comp-attach skip. F5 rate-limited that arm to one `say!`
+    /// per ctx per TICK, which at `clock_hz` 60 x `MAX_WARP_CTXS` 8 is still
+    /// ~480 synchronous console lines a second from ordinary unprivileged
+    /// clients -- the exact magnitude, in this file, that `verify_diag_arms`
+    /// above exists to answer, where the fix was a rate limit AND a latch.
+    /// Only the rate limit landed here. `comp_attach_refused` already carries
+    /// the rate, so latching the REPORT costs no information (#95).
+    import_skip_said: bool,
     /// The last VERDICT this tick's probe reached, `None` for unknown
     /// (round-2 F2). The rate limit answers from this rather than from
     /// `!stream_rejected`, which cannot represent "asked, no answer".
     verify_last: Option<bool>,
-    /// Warp-4: the GL adoption's CTX half -- `present-to <surface> <bo>`:
-    /// this ctx consents to displaying its BO `bo_pub` on surface
-    /// (slot, gen). The gen pin makes a consent die with the surface
-    /// incarnation it named -- slot reuse cannot re-arm it against a
-    /// future tenant.
-    present_to: Option<(usize, u32, u32)>,
+    /// Warp-4 + W-3c-2: the adoption's CTX half -- `present-to <surface>
+    /// <bo>` / `present-to <surface> img <n>`: this ctx consents to
+    /// displaying one of its sources on surface (slot, gen). The gen pin
+    /// makes a consent die with the surface incarnation it named -- slot
+    /// reuse cannot re-arm it against a future tenant. The source is
+    /// PUB-keyed for BOTH families (an img handle is resolved to its pub id
+    /// at the verb): pub ids are monotonic and never reused, so a consent
+    /// can never re-attach to a later tenant of a freed handle slot.
+    present_to: Option<(usize, u32, PresentSrc)>,
+    /// W-3c-2 one-shot: a composed-mode surface whose consent names a
+    /// presentable has no compose arm until W-3d -- said once per ctx, not
+    /// per frame.
+    img_composed_said: bool,
     /// #204 census: the most BACKED BOs this ctx ever held at once -- the
     /// quantity the creation-time cap gates, so it is the number the cap
     /// width must be sized against. Read via ctl `bo-peak`.
@@ -961,6 +1997,14 @@ struct WarpCtx {
     create_refused: u64,
     /// Heap row (#204): MAX_WARP_BOS_PER_CTX slots, allocated at mint.
     bos: alloc::boxed::Box<[Option<WarpBo>]>,
+    /// V-3a: per-ridx coherent ring slots (0-63), allocated at mint.
+    ring_slots: alloc::boxed::Box<[Option<WarpRing>]>,
+    /// V-3b-3c-2: per-handle HOST_VISIBLE device-memory slots
+    /// (0..MAX_WARP_MEMS_PER_CTX), allocated at mint.
+    mems: alloc::boxed::Box<[Option<WarpMem>]>,
+    /// W-3c: per-handle PRESENTABLE slots (0..MAX_WARP_IMGS_PER_CTX),
+    /// allocated at mint.
+    imgs: alloc::boxed::Box<[Option<WarpImg>]>,
 }
 
 /// A GPU buffer object: a kernel-minted GPU-BO DMA chunk attached as the
@@ -981,18 +2025,214 @@ struct WarpBo {
     /// unresolvable to the client; the pump frees it when the ctx
     /// quiesces (or leaks it if a fence was abandoned).
     retiring: bool,
+    /// Warp-C C-2c: this BO is imported into COMPOSITOR_CTX (the ctx's
+    /// `present-to` consent handed it to the compositor) and the import was
+    /// witnessed by a copy through that context. Cleared by every detach:
+    /// consent withdrawn/replaced, the consented surface's retire, and the
+    /// BO's own retire (which detaches BEFORE the unref).
+    comp_imported: bool,
+    /// The client's declared virgl format (create3d), recorded for the C-3
+    /// composition blit, whose source-format word must name the resource's
+    /// own format (the renderer reinterprets on mismatch).
+    format: u32,
+    /// C-5 F1/F3: the BO has the ONE shape the compositor ever composes by
+    /// GPU and the bring-up probe measured -- a flags-0 `PIPE_TEXTURE_2D`
+    /// `B8G8R8A8_UNORM`, one layer, one level, unsampled. Only such a BO is
+    /// imported into COMPOSITOR_CTX (a witness copy from any other shape is
+    /// a command the renderer may refuse, and a refusal latches the SHARED
+    /// compositor context for the process lifetime -- a client-reachable
+    /// all-client degradation to the CPU path) or blitted (a `Y_0_TOP` BO
+    /// would compose mirrored under the flags-0 convention). Everything
+    /// else takes the readback arm, which was already the destination of
+    /// every non-`B8G8R8A8` BO.
+    composable: bool,
+    /// The declared target + flags, kept so a refused import names its
+    /// shape (the SKIPPED say line) instead of leaving it to be guessed.
+    target: u32,
+    flags: u32,
+}
+
+/// V-3a: a coherent shmem ring -- a weft-shared GUEST blob addressed per
+/// ring_idx (0-63, Venus allocates one per VkQueue). The control header
+/// (head/tail/idle/seq) lives at the blob start; Venus lays its CS ring in the
+/// region past WARP_RING_HDR. tapestryd keeps host-authoritative shadows of
+/// the drained tail + the completion seq.
+struct WarpRing {
+    pub_id: u32,
+    /// 0 = unregistered (a 2D device without the blob feature): the ring is a
+    /// pure coherent-shmem transport. The device never DMAs a ring blob at
+    /// V-3a, so an unregistered ring is fully valid; V-3b's Venus path is
+    /// where the registration becomes load-bearing.
+    res_id: u32,
+    ridx: u8,
+    dma_fd: i64,
+    va: u64,
+    size: u64,
+    /// The lazy Tweft mint (the weft_ensure precedent); disarmed at teardown
+    /// BEFORE any backing free (I-7 #847: a client's live mapping survives).
+    share_id: Option<u64>,
+    /// Host shadow of the drained-to index (mirrors the blob's tail word).
+    tail: u64,
+    /// Monotone ring completion count (host-authoritative; mirrored into the
+    /// blob's seq slot for the guest's poll fast-path).
+    completed_seq: u64,
+    /// Newest completed_seq the fence file reported (the coalesce watermark).
+    reported_seq: u64,
+    retiring: bool,
+    /// Test lever (test-mode `ring-inject <ridx> [count]`): arm `count` mid-drain
+    /// head advances (default 1), one consumed per kick re-scan pass. count==1 is
+    /// the I-9 re-scan witness (the single-threaded server cannot produce the
+    /// concurrent-advance window naturally); count>WARP_RING_MAX_DRAIN_PER_KICK is
+    /// the audit round-2 F1 regression -- it drives one kick's drain past the cap
+    /// so the bound is witnessed (one-kick delta < count).
+    inject_count: u32,
+    /// Test lever (test-mode `ring-noscan`): disable THIS ring's kick re-scan so
+    /// `inject_count`'s advance is otherwise lost -- the discrimination proof
+    /// (M-PIN). Per-RING (audit F3): the global Comp flag was an unprivileged
+    /// box-wide I-9 kill-switch, the #178 anti-pattern its sibling `ring-inject`
+    /// was already bounded against.
+    noscan: bool,
+    /// V-3b-1c-2 (Model B): the persistent-engine HOST3D ring backing, if this
+    /// is a host3d-flavored ring; `None` = the V-3a guest-blob ring. Non-Copy
+    /// single-use token -- `wring_teardown` MOVES it into `drop_host3d_ring`,
+    /// which does the ENTIRE teardown (detach -> unmap -> unref -> reclaim the
+    /// hostmem offset), so the guest-blob res_unref / dma_fd path must be
+    /// skipped for it; the type system forbids a second drop.
+    host3d: Option<crate::gpu::HostRing>,
+}
+
+/// V-3b-3c-2 (Model B): a HOST_VISIBLE VkDeviceMemory allocation -- a lean
+/// hostmem-backed blob (blob_id = the Venus mem_id) mapped to the client by
+/// Tweft. Addressed per client-chosen `handle` (0..MAX_WARP_MEMS_PER_CTX, the
+/// ring/<ridx> discipline: the backend owns the handle space) and carrying a
+/// monotonic `pub_id` in its qid (resolve scans by pub_id, so a stale fid
+/// resolves to nothing). Unlike a ring it has no control header / doorbell /
+/// fence -- the device memory is the client's to write; unlike a bo it has no
+/// geometry. The `host3d` backing is minted in ONE step at `mem/new` (there is
+/// no unbuilt state), so it is OWNED, not Option: teardown TAKES the WarpMem
+/// out of its slot by value and MOVES `host3d` into `retire_host3d_ring`
+/// (non-Copy -> a double-drop is a compile error). The mint zeroes the backing,
+/// which imposes a client-ordering contract -- see `wmem_mint` (audit F4).
+struct WarpMem {
+    pub_id: u32,
+    /// The persistent-engine hostmem backing (res_id / va / size / cache live
+    /// inside the HostRing).
+    host3d: crate::gpu::HostRing,
+    /// The lazy Tweft mint (the weft_ensure precedent); disarmed at teardown
+    /// BEFORE the backing reclaim (I-7 #847: a client's live map survives via
+    /// the retire_host3d_ring park).
+    share_id: Option<u64>,
+}
+
+/// W-3c (WARP-WSI-DESIGN 4.1): a PRESENTABLE -- a venus swapchain image's
+/// backing, minted as a HOST3D blob the server NEVER MAPS (WARP-WSI-DESIGN
+/// 4.1 as AMENDED by measurement: virglrenderer REFUSES USE_SHAREABLE on a
+/// HOST3D blob, so the mint is USE_MAPPABLE and guest-invisibility comes from
+/// the ABSENCE of any map -- there is no `map` file, no weft share and no
+/// hostmem offset -- never from the flag)
+/// whose `blob_id` names the venus allocation, with its DISPLAY SHAPE
+/// declared at registration and validated against what the compositor can
+/// actually scan out. Three consequences distinguish it from every other
+/// warp object, and each one deletes a hazard class rather than adding one:
+///
+/// - **No guest mapping.** No hostmem offset, no MAP_BLOB, no burrow, no
+///   weft share -- so no #847 dual count, no claim race, no reclaim park.
+///   The client never touches these bytes from the guest; the GPU writes
+///   them and the display reads them, both host-side.
+/// - **Shape is declared, not derived.** A blob carries no geometry (the
+///   gap SET_SCANOUT_BLOB exists to fill), and a `VkDeviceMemory` is
+///   correctly geometry-less -- so the shape arrives once, at registration,
+///   and eligibility is decided THERE rather than re-derived per frame (the
+///   Fuchsia sysmem constraint-negotiation, as one 9P verb).
+/// - **The display can hold a reference.** `bound` records that scanout 0
+///   currently names this resource. That is the whole reason the teardown is
+///   ordered: an unref under a live binding leaves the display scanning a
+///   destroyed resource (`gl_evict_res`'s "the one order the display cannot
+///   survive", now reachable for a venus object). The spec's `pbound` arm of
+///   `NoTornPresentable` is exactly this field.
+struct WarpImg {
+    pub_id: u32,
+    res_id: u32,
+    /// The venus allocation this blob binds (the client's `mem_id`; opaque
+    /// to us and to the kernel, meaningful to virglrenderer).
+    blob_id: u64,
+    /// The declared display shape, accepted at registration.
+    w: u32,
+    h: u32,
+    format: u32,
+    stride: u32,
+    /// Backing bytes charged to the ctx's I-32 HOSTMEM-family cap
+    /// (`WARP_CTX_HOSTMEM_MAX` via `ctx_hostmem_backing` -- round-7 F4:
+    /// this line named the guest family, introduced by the split itself).
+    size: u64,
+}
+
+/// W-3c-2: the consented present source, by family (WARP-WSI-DESIGN 5.1's
+/// "one adoption model, two resource families"). Both variants carry the
+/// PUB id, never a handle index.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PresentSrc {
+    Bo(u32),
+    Img(u32),
+}
+
+/// W-3c-2: which family a resolved adoption is, plus what the Direct bind
+/// needs that only that family carries. A blob resource has no implicit
+/// shape, so the presentable's bind (SET_SCANOUT_BLOB) rides the
+/// registration's declared stride.
+#[derive(Clone, Copy)]
+enum AdoptSrc {
+    Bo,
+    Img { stride: u32 },
 }
 
 /// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
 /// device ctx + 3D resource + tapestryd's own mapping of its backing.
 /// A value is valid for the single dispatch that resolved it.
 #[derive(Clone, Copy)]
-struct GlAdopt {
-    dev_ctx: u32,
+/// The compositor readback in flight (Warp-C C-6): what was read, for whom,
+/// and where it lands -- everything the completion needs to re-validate that
+/// the surface still shows the SAME incarnation (gen) of the SAME adoption
+/// (ctx/BO/resource/backing/geometry) it read. A surface that moved on since
+/// drops the frame: a stale composition is worse than none.
+struct CompRb {
+    fence_id: u64,
+    surf: usize,
+    gen: u32,
+    ctx_pub: u32,
+    bo_pub: u32,
     res_id: u32,
     va: u64,
     w: u32,
     h: u32,
+    issued: Instant,
+}
+
+struct GlAdopt {
+    /// The family, and the family-specific bind argument (W-3c-2). Every
+    /// composed-arm consumer MUST gate on `Bo`: an Img adoption has no
+    /// guest mapping (`va` below is 0 -- I-7), no compositor import, and
+    /// takes no blit/readback until the W-3d compose arm.
+    kind: AdoptSrc,
+    dev_ctx: u32,
+    /// The seam identity of the adoption -- ctx pub id + BO pub id -- so a
+    /// deferred readback's completion (C-6) can re-validate that the surface
+    /// still shows the SAME ctx/BO it read, not merely some adoption.
+    ctx_pub: u32,
+    bo_pub: u32,
+    res_id: u32,
+    va: u64,
+    w: u32,
+    h: u32,
+    /// C-2c: the BO is imported into COMPOSITOR_CTX, witnessed -- the C-3
+    /// blit's precondition (a blit naming an unimported resource latches the
+    /// compositor context).
+    comp_imported: bool,
+    /// The BO's declared virgl format (the blit's source-format word).
+    format: u32,
+    /// C-5 F1/F3: the composable shape (see `WarpBo.composable`); the
+    /// import gate implies it, the blit gate re-checks it.
+    composable: bool,
 }
 
 const NO_SURFACE: Option<Surface> = None;
@@ -1007,11 +2247,44 @@ impl Comp {
             warp_diag_noctx_arms: 0,
             warp_create_refused_noctx: 0,
             res_seq: SCREEN_RES,
+            comp_ctx: false,
+            real_compose_probed: false,
+            real_compose_skip_said: false,
+            comp_probe: None,
+            comp_hprobe: None,
+            comp_probe_seq: 0,
+            comp_attach_witnessed: 0,
+            comp_attach_refused: 0,
+            #[cfg(feature = "test-mode")]
+            poke_hist_bind: [0; 8],
+            #[cfg(feature = "test-mode")]
+            poke_hist_flush: [0; 8],
+            comp_conv: None,
+            comp_gpu_dead: false,
+            comp_repaint_pending: false,
+            comp_verify_tick: u64::MAX,
+            comp_verify_pending: false,
+            comp_verify_issue_tick: u64::MAX,
+            composed_gpu: 0,
+            composed_cpu: 0,
+            comp_rb: None,
+            rb_wanted: VecDeque::new(),
+            rb_issued: 0,
+            rb_landed: 0,
+            rb_dropped: 0,
+            rb_coalesced: 0,
+            rb_abandoned: 0,
+            cost: [CostCell::default(); Cost::COUNT],
+            cost_arm: Cost::PresentOther,
+            probe_tick: u64::MAX,
+            probe_count: 0,
             layout: Layout::new(),
             screen: None,
             scanout: Scanout::Boot,
             bound_res: 0,
+            unbind_refused: 0,
             pending_direct: None,
+            pending_bind_refused_said: false,
             chrome_epoch: 0,
             geom_sig: 0,
             tick: 0,
@@ -1021,7 +2294,12 @@ impl Comp {
             present_prev_count: 0,
             weave_va_next: WEAVE_VA_BASE,
             last_focus: None,
-            chord_down: [0; 4],
+            menu: None,
+            status: None,
+            key_owner: [0; KEYCODE_SPAN],
+            btn_owner: [0; BTNCODE_SPAN],
+            menu_reason: "retire",
+            chord_down: [0; KEYCODE_SPAN / 64],
             chords: Chords::new(),
             ptr_x: 0,
             abs_last: None,
@@ -1033,8 +2311,12 @@ impl Comp {
             warp_ctx_leaked: core::array::from_fn(|_| Vec::new()),
             warp_ctx_leaked_probe: core::array::from_fn(|_| None),
             warp_ctx_vindicate: [0; MAX_WARP_CTXS],
+            warp_ctx_venus_vindicate: [false; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
+            warp_ring_seq: 0,
+            warp_mem_seq: 0,
+            warp_img_seq: 0,
             warp_bo_peak: 0,
             warp_bo_bytes_peak: 0,
             warp_probe_parked: 0,
@@ -1042,6 +2324,7 @@ impl Comp {
             warp_ctl_wide_said: false,
             warp_gctl_wide_said: false,
             warp_verify_unknown: 0,
+            warp_probe_texture: 0,
             #[cfg(feature = "test-mode")]
             w210_fparked: 0,
             #[cfg(feature = "test-mode")]
@@ -1052,6 +2335,10 @@ impl Comp {
             w210_f_ctx: 0,
             #[cfg(feature = "test-mode")]
             w210_f_fid: 0,
+            #[cfg(feature = "test-mode")]
+            watch_last: None,
+            #[cfg(feature = "test-mode")]
+            watch_pass: 0,
         }
     }
 
@@ -1106,12 +2393,15 @@ impl Comp {
     }
 
     /// Mint a surface slot for `conn_id` (F9 caps enforced by the caller).
-    fn mint(&mut self, conn_id: u64) -> Option<usize> {
+    fn mint(&mut self, conn_id: u64, peer: u64, principal: u32) -> Option<usize> {
         let n = self.surfaces.iter().position(|s| s.is_none())?;
         self.gen_seq = self.gen_seq.wrapping_add(1);
         self.surfaces[n] = Some(Surface {
             gen: self.gen_seq,
             owner_conn: conn_id,
+            owner_peer: peer,
+            owner_principal: principal,
+            backgrounded: false,
             state: SurfState::Minted,
             w: 0,
             h: 0,
@@ -1119,9 +2409,15 @@ impl Comp {
             patchwork: false,
             slot_stride: 0,
             weave: None,
-            resource_id: 0, // minted with the first generation (create)
+            res_ids: [0; WEAVE_SLOTS as usize], // minted with the first generation
             old_weave: None,
-            res_stale: false,
+            res_stale: [false; WEAVE_SLOTS as usize],
+            chrome_bind: None,
+            is_menu: false,
+            is_status: false,
+            shown_slot: None,
+            comp_attached: false,
+            gpu_said: false,
             held: None,
             cfg_serial: 0,
             offered: None,
@@ -1138,12 +2434,21 @@ impl Comp {
         self.res_seq
     }
 
-    /// Allocate one weave GENERATION: DMA chunk + map + zero + a fresh 2D
-    /// resource with the whole weave attached as backing. The shared body
-    /// of the spec's WeaveFirst (create) and Reweave (resize ack).
-    /// Returns (weave, slot_stride, resource_id); every failure path
-    /// rolls back fully.
-    fn alloc_weave(&mut self, w: u32, h: u32) -> Result<(Weave, u64, u32), u32> {
+    /// Allocate one weave GENERATION: DMA chunk + map + zero + one 2D
+    /// resource PER SLOT, each backed by its slot, then -- on a GL host --
+    /// the C-2c import of every slot resource into the compositor's own
+    /// context, witnessed. The shared body of the spec's WeaveFirst (create)
+    /// and Reweave (resize ack); `n` names the surface for the import's
+    /// say line only. Returns (weave, slot_stride, per-slot resource ids,
+    /// comp_attached); every failure path rolls back fully. An import
+    /// failure is NOT a failure of the generation (4.5.10): the surface
+    /// works on the CPU/2D arms and only `comp_attached` reads false.
+    fn alloc_weave(
+        &mut self,
+        n: usize,
+        w: u32,
+        h: u32,
+    ) -> Result<(Weave, u64, [u32; WEAVE_SLOTS as usize], bool), u32> {
         let stride = (w as u64) * 4;
         let slot_bytes = stride * (h as u64);
         let slot_stride = (slot_bytes + PAGE - 1) & !(PAGE - 1);
@@ -1169,18 +2474,48 @@ impl Comp {
         // occupant's bytes into a client mapping.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
 
-        let res = self.next_res_id();
-        if self.gpu.resource_create_2d(res, w, h).is_err() {
-            unsafe { t_burrow_detach(va, size) };
-            unsafe { t_close(handle) };
-            return Err(p9::E_NOMEM);
+        // ONE RESOURCE PER SLOT (4.5.8), each backed by its own slot at
+        // `pa + i*slot_stride` rather than by the whole weave -- that is what
+        // makes slot <-> resource 1:1. The weave's PA is contiguous (the
+        // whole-weave attach this replaces relied on exactly that), so the
+        // per-slot offsets are sound.
+        let mut res_ids = [0u32; WEAVE_SLOTS as usize];
+        for i in 0..WEAVE_SLOTS as usize {
+            let res = self.next_res_id();
+            let ok = self.gpu.resource_create_2d(res, w, h).is_ok()
+                && self
+                    .gpu
+                    .attach_backing(
+                        res,
+                        pa as u64 + (i as u64) * slot_stride,
+                        slot_stride as u32,
+                    )
+                    .is_ok();
+            if !ok {
+                // Roll back THIS mint (a create that succeeded with a failed
+                // attach leaves a resource behind) and every earlier one, so
+                // a partial generation never escapes.
+                let _ = self.gpu.resource_unref(res);
+                for &prev in &res_ids[..i] {
+                    let _ = self.gpu.detach_backing(prev);
+                    let _ = self.gpu.resource_unref(prev);
+                }
+                unsafe { t_burrow_detach(va, size) };
+                unsafe { t_close(handle) };
+                return Err(p9::E_NOMEM);
+            }
+            res_ids[i] = res;
         }
-        if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
-            let _ = self.gpu.resource_unref(res);
-            unsafe { t_burrow_detach(va, size) };
-            unsafe { t_close(handle) };
-            return Err(p9::E_NOMEM);
-        }
+        // Warp-C C-2c: the compositor imports the generation it will
+        // compose from, at import time and never lazily in a blit path
+        // (4.5.10). Runs BEFORE any client mapping of this weave exists --
+        // the Tweft that maps it is answered after this returns -- which is
+        // what lets the witness borrow one guest pixel per slot unseen.
+        let comp_attached = if self.comp_ctx {
+            self.comp_import_slots(n, &res_ids, va, slot_stride, w, h)
+        } else {
+            false
+        };
         Ok((
             Weave {
                 handle,
@@ -1189,33 +2524,1796 @@ impl Comp {
                 share_id: None,
             },
             slot_stride,
-            res,
+            res_ids,
+            comp_attached,
         ))
     }
 
     /// Tear down one weave generation's server side, in the R2-F5 order:
-    /// unshare (registry-removal-before-page-free) -> the GPU resource
-    /// dies before its backing -> unmap + close (serverRef -> FALSE; #847
-    /// keeps the pages until the client's mapping ref drops too). The
-    /// caller has already ensured no scanout references `res` (the mode
-    /// machine + force-away in retire; the present-tail old drop runs
-    /// after the current generation's content took the display).
-    fn release_gen(&mut self, w: &Weave, res: u32) {
+    /// unshare (registry-removal-before-page-free) -> the compositor's
+    /// import is revoked (C-2c: detach from COMPOSITOR_CTX BEFORE the
+    /// unref -- 4.5.10's ordering, and unconditional under a live
+    /// compositor ctx since a detach of a never-imported resource is a
+    /// no-op at the renderer) -> the GPU resource dies before its backing
+    /// -> unmap + close (serverRef -> FALSE; #847 keeps the pages until the
+    /// client's mapping ref drops too). The caller has already ensured no
+    /// scanout references `res` (the mode machine + force-away in retire;
+    /// the present-tail old drop runs after the current generation's
+    /// content took the display).
+    /// Release surface `n`'s displaced weave generation, if one is
+    /// parked -- the duty EVERY present-COMPLETE tail carries (round-6
+    /// F1: a reweave parks at most one displaced generation, and
+    /// `resize_ack` refuses a new offer while `old_weave` stands, so a
+    /// completion path that never drains it wedges the surface's resize
+    /// protocol permanently -- the poke path was exactly that).
+    ///
+    /// GUARDED rather than unconditional (round-6 F2): `release_gen`
+    /// unrefs resources, and an unref of the resource the display still
+    /// scans is the one order the display cannot survive. The reason the
+    /// unconditional tails were safe is a MODE-MACHINE argument, not a
+    /// local one -- every reachable resize transits Composed (Direct
+    /// implies display-sized implies same-size offers), where bound_res
+    /// is the screen resource -- so the guard carries the safety locally
+    /// against the day display-resize work changes the mode machine: a
+    /// displaced generation still naming bound_res stays parked
+    /// (pinned-but-safe) for a later completion to drain.
+    fn release_displaced_gen(&mut self, n: usize) {
+        let scanned = self.bound_res != 0
+            && self
+                .surf(n)
+                .and_then(|s| s.old_weave.as_ref())
+                .map_or(false, |(_, old_res)| old_res.contains(&self.bound_res));
+        if scanned {
+            return;
+        }
+        if let Some((oldw, old_res)) = self.surf_mut(n).and_then(|s| s.old_weave.take()) {
+            self.release_gen(&oldw, &old_res);
+        }
+    }
+
+    fn release_gen(&mut self, w: &Weave, res_ids: &[u32; WEAVE_SLOTS as usize]) {
         if let Some(id) = w.share_id {
             let rc = unsafe { t_weft_unshare(id) };
             if rc < 0 {
                 // Already claimed (consumed at Map) -- expected.
             }
         }
-        let _ = self.gpu.detach_backing(res);
-        let _ = self.gpu.resource_unref(res);
+        for &res in res_ids.iter() {
+            self.comp_detach_res(res);
+            let _ = self.gpu.detach_backing(res);
+            let _ = self.gpu.resource_unref(res);
+        }
         unsafe { t_burrow_detach(w.va, w.size) };
         unsafe { t_close(w.handle) };
     }
 
+    /// Revoke the compositor's import of `res` (C-2c). Ordered by every
+    /// caller BEFORE the resource's unref; harmless when nothing was
+    /// imported (the renderer's detach of an unattached resource is a
+    /// lookup miss, not a context error), and skipped without a compositor
+    /// context, where the CTX commands are not even valid on the device.
+    fn comp_detach_res(&mut self, res: u32) {
+        if self.comp_ctx && res != 0 {
+            let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, res);
+        }
+    }
+
+    /// The C-2c import of one generation's slot resources into
+    /// COMPOSITOR_CTX, witnessed. Attach every slot; prove the compositor
+    /// context still executes commands (the mark -> sentinel health copy);
+    /// then, per slot, prove the renderer holds THAT resource in the
+    /// compositor's context by copying a pixel out of it into the sentinel
+    /// and reading the sentinel back. One say line per generation carries
+    /// the verdict. Returns the `comp_attached` value for the generation:
+    /// true only when every step held. Attaches that the device accepted are
+    /// left in place on a witness failure (revoked with the generation as
+    /// usual); an unwitnessed import simply never becomes a blit source.
+    ///
+    /// The health check runs FIRST so a slot's REFUSED is attributable to
+    /// that slot's import and not to a context an earlier refusal already
+    /// latched -- after the first genuine refusal every later generation
+    /// reads `SKIPPED (compositor ctx unhealthy)`, which is the measured
+    /// state, not an inference from the first line.
+    fn comp_import_slots(
+        &mut self,
+        n: usize,
+        res_ids: &[u32; WEAVE_SLOTS as usize],
+        va: u64,
+        slot_stride: u64,
+        w: u32,
+        h: u32,
+    ) -> bool {
+        let (r0, rl) = (res_ids[0], res_ids[WEAVE_SLOTS as usize - 1]);
+        for (i, &res) in res_ids.iter().enumerate() {
+            if self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_err() {
+                for &prev in &res_ids[..i] {
+                    let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, prev);
+                }
+                self.comp_attach_refused += 1;
+                say!(
+                    "tapestryd: comp-attach surface {} res {}..{}: attach failed (device, slot {})",
+                    n,
+                    r0,
+                    rl,
+                    i
+                );
+                return false;
+            }
+        }
+        if self.comp_probe.is_none() {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach surface {} res {}..{}: SKIPPED (no witness probe)",
+                n,
+                r0,
+                rl
+            );
+            return false;
+        }
+        if !self.comp_ctx_health() {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach surface {} res {}..{}: SKIPPED (compositor ctx unhealthy)",
+                n,
+                r0,
+                rl
+            );
+            return false;
+        }
+        let mut rows = [0u32; WEAVE_SLOTS as usize];
+        for (i, &res) in res_ids.iter().enumerate() {
+            let slot_va = va + (i as u64) * slot_stride;
+            match self.comp_witness_slot(res, slot_va, w, h) {
+                Some(row) => rows[i] = row,
+                None => {
+                    self.comp_attach_refused += 1;
+                    say!(
+                        "tapestryd: comp-attach surface {} res {}..{}: REFUSED (slot {} copy did not land)",
+                        n, r0, rl, i
+                    );
+                    return false;
+                }
+            }
+        }
+        self.comp_attach_witnessed += 1;
+        // The row the copy read is REPORTED (measured, not assumed): it is
+        // the renderer's answer to which texel a box at y=0 names on a
+        // Y_0_TOP source, and C-3's blit boxes inherit that answer.
+        if rows.iter().all(|&r| r == rows[0]) {
+            say!(
+                "tapestryd: comp-attach surface {} res {}..{}: witnessed {}/{} (copy read texel row {})",
+                n, r0, rl, WEAVE_SLOTS, WEAVE_SLOTS, rows[0]
+            );
+        } else {
+            say!(
+                "tapestryd: comp-attach surface {} res {}..{}: witnessed {}/{} (copy read texel rows {:?})",
+                n, r0, rl, WEAVE_SLOTS, WEAVE_SLOTS, rows
+            );
+        }
+        true
+    }
+
+    /// A per-probe sentinel: never PROBE_MARK, never a value the previous
+    /// probe left, alpha byte forced so no B8G8R8X8 round trip can be
+    /// mistaken for a comparison on the alpha channel (which an X8 hop
+    /// drops -- the witnesses compare RGB only, see `comp_witness_slot`).
+    fn comp_probe_token(&mut self) -> u32 {
+        self.comp_probe_seq = self.comp_probe_seq.wrapping_add(1);
+        let mut t = (PROBE_TOKEN_BASE ^ self.comp_probe_seq.rotate_left(8)) | 0x5A00_0000;
+        if (t & 0x00FF_FFFF) == (PROBE_MARK & 0x00FF_FFFF) {
+            t ^= 0x0000_00FF;
+        }
+        t
+    }
+
+    /// The compositor context's health copy (the #240 triple on the
+    /// compositor's own pair): repaint the mark, poison the sentinel with a
+    /// fresh token, copy mark -> sentinel INSIDE the compositor context,
+    /// read the sentinel back. True iff it now holds the mark -- i.e. the
+    /// context executed a command buffer just now. A latched context (a
+    /// prior ILLEGAL_RESOURCE, 4.5.4a) drops the copy silently and the
+    /// poison survives.
+    fn comp_ctx_health(&mut self) -> bool {
+        // A deferred verify in flight is superseded: this synchronous copy
+        // overwrites the pair it was going to read (`comp_health_tick`).
+        self.comp_verify_pending = false;
+        self.comp_health_issue() && self.comp_health_read()
+    }
+
+    /// The ISSUE half of the health copy: repaint the mark, poison the
+    /// sentinel with a fresh token, copy mark -> sentinel inside the
+    /// compositor context. Three sync steps, none of which waits for the GPU
+    /// unless the pair still has a job pending on it -- which is why the
+    /// per-tick verify (`comp_health_tick`) always READS the previous copy
+    /// before issuing the next: a texture upload onto a resource a queued
+    /// job still reads or writes waits for that job, and the job sits
+    /// behind everything the client has in flight.
+    fn comp_health_issue(&mut self) -> bool {
+        let (buf, mark_res, mark_va, sent_res, sent_va) = match self.health_pair() {
+            Some(v) => v,
+            None => return false,
+        };
+        let token = self.comp_probe_token();
+        unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
+        if self.health_upload(buf, mark_res).is_err() {
+            return false;
+        }
+        unsafe { core::ptr::write_volatile(sent_va as *mut u32, token) };
+        if self.health_upload(buf, sent_res).is_err() {
+            return false;
+        }
+        // The poison is READ BACK before the copy is asked for: the verdict
+        // "the sentinel holds the mark" is satisfied by a token upload that
+        // never reached the host (the previous copy's mark would still be
+        // there), so the negative needs its positive control one step
+        // earlier -- the sentinel must be seen holding the token first. On
+        // the buffer pair this is one CPU-side round trip; on the texture
+        // fallback it is a second drain, and that pair is the slow path
+        // anyway.
+        unsafe { core::ptr::write_volatile(sent_va as *mut u32, !token) };
+        if self.health_readback(buf, sent_res).is_err() {
+            return false;
+        }
+        if unsafe { core::ptr::read_volatile(sent_va as *const u32) } != token {
+            return false;
+        }
+        // A buffer copy names BYTES: 4 of them (the texture form's 1x1
+        // texel is the same 4 bytes) -- `probe_copy_region` keys the width.
+        self.probe_copy_region(COMPOSITOR_CTX, buf, mark_res, sent_res)
+            .is_ok()
+    }
+
+    /// The READ half: the sentinel back, true iff it holds the mark. On a
+    /// texture pair this is the step that waits for the copy to have
+    /// EXECUTED -- and on a tiled renderer the readback itself is a blit job
+    /// behind whatever the client has queued NOW (measured 8-15 ms on
+    /// thyla-pi/V3D whichever tick it ran on); on the buffer pair it is a
+    /// mapped read.
+    fn comp_health_read(&mut self) -> bool {
+        let (buf, _, _, sent_res, sent_va) = match self.health_pair() {
+            Some(v) => v,
+            None => return false,
+        };
+        if self.health_readback(buf, sent_res).is_err() {
+            return false;
+        }
+        let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) };
+        got == PROBE_MARK
+    }
+
+    /// Read the first 4 bytes of a health resource back into its backing.
+    fn health_readback(&mut self, buf: bool, res: u32) -> Result<(), Error> {
+        self.probe_readback(COMPOSITOR_CTX, buf, res)
+    }
+
+    /// The probe transfer + copy forms, keyed on the pair's kind and issued
+    /// on `dev_ctx` -- ONE definition for the compositor's health pair and
+    /// every client ctx's probe (C-0d Fable round F1: the compositor's
+    /// helpers hardcoded COMPOSITOR_CTX, so the client verify kept its own
+    /// texture-only transfers and stayed on the GPU queue after C-4 had
+    /// moved the compositor's off it). A 4-byte box at offset 0 on a
+    /// buffer; the 1x1 texel on a texture. All three ride the synchronous
+    /// slot, so they are ordered against each other and against every
+    /// client submit by construction (one controlq, one slot).
+    fn probe_upload(&mut self, dev_ctx: u32, buf: bool, res: u32) -> Result<(), Error> {
+        if buf {
+            self.gpu
+                .transfer_to_3d_box_sync(dev_ctx, res, 0, 0, 4, 1, 0, 0)
+        } else {
+            self.gpu.transfer_to_3d_sync(dev_ctx, res, 1, 1, 4)
+        }
+    }
+
+    fn probe_readback(&mut self, dev_ctx: u32, buf: bool, res: u32) -> Result<(), Error> {
+        if buf {
+            self.gpu
+                .transfer_from_3d_box_sync(dev_ctx, res, 0, 0, 4, 1, 0, 0)
+        } else {
+            self.gpu.transfer_from_3d_sync(dev_ctx, res, 1, 1, 4)
+        }
+    }
+
+    /// One `VIRGL_CCMD_RESOURCE_COPY_REGION` of the probe's 4 bytes, `src`
+    /// -> `dst`, submitted on `dev_ctx`'s synchronous slot: a box 4 BYTES
+    /// wide on a buffer pair, 1 texel on a texture pair (the same 4 bytes).
+    fn probe_copy_region(
+        &mut self,
+        dev_ctx: u32,
+        buf: bool,
+        src: u32,
+        dst: u32,
+    ) -> Result<(), Error> {
+        let mut st: [u32; 14] = [0; 14];
+        st[0] = (VIRGL_CCMD_RESOURCE_COPY_REGION & 0xff) | (VIRGL_CMD_RCR_SIZE << 16);
+        st[1] = dst; // dst handle; level, x, y, z = 0
+        st[6] = src; // src handle; level, x, y, z = 0
+        st[11] = if buf { 4 } else { 1 }; // src w
+        st[12] = 1; // src h
+        st[13] = 1; // src d
+        let mut bytes = [0u8; 56];
+        for (i, w) in st.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        self.gpu.submit_3d_sync(dev_ctx, &bytes)
+    }
+
+    /// The pair the health verify runs on: the buffer pair (`comp_hprobe`)
+    /// where it could be minted, else the texture pair. `(is_buffer,
+    /// mark_res, mark_va, sent_res, sent_va)`.
+    fn health_pair(&self) -> Option<(bool, u32, u64, u32, u64)> {
+        if let Some(p) = self.comp_hprobe.as_ref() {
+            return Some((true, p.mark_res, p.mark_va, p.sent_res, p.sent_va));
+        }
+        self.comp_probe
+            .as_ref()
+            .map(|p| (false, p.mark_res, p.mark_va, p.sent_res, p.sent_va))
+    }
+
+    /// Upload the first 4 bytes of a health resource's backing to the host:
+    /// a 4-byte box on a buffer, the 1x1 texel on a texture.
+    fn health_upload(&mut self, buf: bool, res: u32) -> Result<(), Error> {
+        self.probe_upload(COMPOSITOR_CTX, buf, res)
+    }
+
+    /// One VIRGL_CCMD_RESOURCE_COPY_REGION of pixel (0,0) `src` -> (0,0)
+    /// `dst` (texture form), submitted on the compositor context's
+    /// synchronous slot -- the import witnesses' copy of a slot / BO texel
+    /// into the compositor's texture sentinel. Ordered after every earlier
+    /// sync transfer and before every later one by construction: one
+    /// controlq, one slot, each `.step` waits its response.
+    fn comp_copy_px(&mut self, src: u32, dst: u32) -> Result<(), Error> {
+        self.probe_copy_region(COMPOSITOR_CTX, false, src, dst)
+    }
+
+    /// Witness one slot resource's import (C-2c's gate, 4.5.10, in the
+    /// direction C-3 will use it -- the slot as a copy SOURCE): seed tokens
+    /// into the slot's own host copy through the 2D transfer the present
+    /// path uses, poison the compositor's sentinel resource, copy slot (0,0)
+    /// -> sentinel inside COMPOSITOR_CTX, read the sentinel back. The copy
+    /// lands only if the renderer holds the slot resource in the
+    /// compositor's context; without the import it is `Illegal resource`
+    /// and the poison survives (P1b, measured; the device answers OK to
+    /// every step either way, which is why the pixel is the witness).
+    /// Returns the texel row the copy read (0 or h-1), None if it did not
+    /// land.
+    ///
+    /// TWO seeds, in guest rows 0 and h-1, with DISTINCT tokens: a slot is a
+    /// Y_0_TOP resource and the sentinel is not, and which texel a copy box
+    /// at y=0 names on such a source (row 0 through the texel-exact copy-
+    /// image path, or row h-1 through the FBO path, which measures Y_0_TOP
+    /// boxes from the bottom) is the renderer's to answer, not this code's
+    /// to assume. Either token witnesses the import; WHICH one came back is
+    /// reported, so C-3's blit boxes start from a measured convention.
+    ///
+    /// The seeds ride the GUEST slot pixels for the duration of the
+    /// transfers and are zeroed again: the weave has no client mapping yet
+    /// (see `alloc_weave`), so the client maps the zeroed weave it is owed.
+    /// The HOST copy keeps the tokens at those two texels, which is
+    /// unobservable: in Composed mode the slot host copies are never scanned
+    /// out, and every Direct-mode present of a never-presented slot carries
+    /// full damage (buffer age 0, 4.5.8b), overwriting them before the slot
+    /// is first bound. Compares RGB only -- alpha is not part of the claim.
+    fn comp_witness_slot(&mut self, res: u32, slot_va: u64, w: u32, h: u32) -> Option<u32> {
+        let (sent_res, sent_va) = match self.comp_probe.as_ref() {
+            Some(p) => (p.sent_res, p.sent_va),
+            None => return None,
+        };
+        let seed0 = self.comp_probe_token();
+        let seed1 = self.comp_probe_token();
+        let mut poison = !seed0 | 0x5A00_0000;
+        if (poison & 0x00FF_FFFF) == (seed1 & 0x00FF_FFFF) {
+            poison ^= 0x0000_00FF;
+        }
+        let last = h.saturating_sub(1);
+        let off_last = (last as u64) * (w as u64) * 4;
+        let px0 = slot_va as *mut u32;
+        let px1 = (slot_va + off_last) as *mut u32;
+        unsafe { core::ptr::write_volatile(px0, seed0) };
+        let mut up = self.gpu.transfer(res, 0, 0, 0, 1, 1).is_ok();
+        if last > 0 {
+            unsafe { core::ptr::write_volatile(px1, seed1) };
+            up = up && self.gpu.transfer(res, off_last, 0, last, 1, 1).is_ok();
+        }
+        unsafe { core::ptr::write_volatile(px0, 0) };
+        if last > 0 {
+            unsafe { core::ptr::write_volatile(px1, 0) };
+        }
+        if !up {
+            return None;
+        }
+        unsafe { core::ptr::write_volatile(sent_va as *mut u32, poison) };
+        if self
+            .gpu
+            .transfer_to_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4)
+            .is_err()
+        {
+            return None;
+        }
+        if self.comp_copy_px(res, sent_res).is_err() {
+            return None;
+        }
+        if self
+            .gpu
+            .transfer_from_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4)
+            .is_err()
+        {
+            return None;
+        }
+        let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) } & 0x00FF_FFFF;
+        if got == (seed0 & 0x00FF_FFFF) {
+            Some(0)
+        } else if last > 0 && got == (seed1 & 0x00FF_FFFF) {
+            Some(last)
+        } else {
+            None
+        }
+    }
+
+    /// C-2c for the GL adoption (Warp-4): a ctx's `present-to <n> <bo>` is
+    /// the client handing its buffer to the compositor -- the whole grant,
+    /// as in every compositor with prior art (4.5.10) -- so the compositor
+    /// imports THAT BO into its own context here, witnessed, and records it
+    /// on the BO. Idempotent per BO (a re-consent of an imported BO is not
+    /// re-witnessed). Everything short of a witnessed import leaves the BO
+    /// `comp_imported == false`: it composes through the readback arm.
+    fn comp_import_bo(&mut self, ctx_pub: u32, conn: u64, bo_pub: u32, sn: usize) {
+        if !self.comp_ctx {
+            return;
+        }
+        let (res_id, already, composable, shape) = match self
+            .wctx(ctx_pub, conn)
+            .and_then(|c| c.bos.iter().flatten().find(|b| b.pub_id == bo_pub))
+        {
+            Some(b) => (
+                b.res_id,
+                b.comp_imported,
+                b.composable,
+                (b.target, b.format, b.flags),
+            ),
+            None => return,
+        };
+        if already || res_id == 0 {
+            return;
+        }
+        // C-5 F1: only the shape the compositor composes is imported. The
+        // witness copies texel (0,0) of the BO into the compositor's
+        // B8G8R8A8 texture sentinel; from a buffer, a depth/compressed/other
+        // format, a mip level or an array the renderer may REFUSE that copy,
+        // and a refused command latches the shared context for the process
+        // lifetime (4.5.4a) -- a client-reachable degradation of EVERY
+        // client's composition to the CPU path. Such a BO was never going
+        // to be blitted (`compose_gpu_bo_words` refuses it), so skipping the
+        // import loses nothing: it composes through the readback arm.
+        // One import witness per ctx per compositor tick (C-0d Fable round
+        // F5; the `verify_tick` shape): everything below is synchronous
+        // device work on the SHARED compositor context -- the attach, the
+        // health copy, up to two witness rounds with texture-sentinel
+        // readbacks -- and `present-to N bo` / `present-to off` in a loop
+        // drove all of it at 9P-write rate. A second consent in the same
+        // tick is DEFERRED, not dropped: `frame_tick` replays the import of
+        // whatever `present_to` names by then. Pinned BEFORE the device
+        // work, like `verify_tick`.
+        //
+        // ROUND F5 [P2]: and ABOVE the `!composable` skip below, not under
+        // it. The skip was added later, so the limit landed one arm DOWN
+        // from where it protects: `comp_imported` is never set for a
+        // non-composable BO, so the `already` short-circuit above can never
+        // damp it, and `present-to` in a loop was an unrate-limited `say!` +
+        // counter storm at 9P-write rate. Costs nothing on the composable
+        // path, which `already` short-circuits before reaching here.
+        let tick = self.tick;
+        let mut say_skip = false;
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) if c.import_tick == tick => {
+                c.import_pending = true;
+                return;
+            }
+            Some(c) => {
+                c.import_tick = tick;
+                // ROUND F2 [P2]: latch the REPORT in the SAME borrow that
+                // takes the tick, so the first non-composable present per ctx
+                // still names itself and the rest are carried by the counter.
+                if !composable && !c.import_skip_said {
+                    c.import_skip_said = true;
+                    say_skip = true;
+                }
+            }
+            None => return,
+        }
+        if !composable {
+            self.comp_attach_refused += 1;
+            if !say_skip {
+                return;
+            }
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED (not a composable BO shape: target {} format {} flags {:#x})",
+                ctx_pub, bo_pub, res_id, sn, shape.0, shape.1, shape.2
+            );
+            return;
+        }
+        if self
+            .gpu
+            .ctx_attach_resource(COMPOSITOR_CTX, res_id)
+            .is_err()
+        {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: attach failed (device)",
+                ctx_pub,
+                bo_pub,
+                res_id,
+                sn
+            );
+            return;
+        }
+        if self.comp_probe.is_none() {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED (no witness probe)",
+                ctx_pub, bo_pub, res_id, sn
+            );
+            return;
+        }
+        if !self.comp_ctx_health() {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED (compositor ctx unhealthy)",
+                ctx_pub, bo_pub, res_id, sn
+            );
+            return;
+        }
+        let ok = self.comp_witness_bo(res_id);
+        if ok {
+            if let Some(b) = self
+                .wctx_mut(ctx_pub, conn)
+                .and_then(|c| c.bos.iter_mut().flatten().find(|b| b.pub_id == bo_pub))
+            {
+                b.comp_imported = true;
+            }
+            self.comp_attach_witnessed += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: witnessed",
+                ctx_pub,
+                bo_pub,
+                res_id,
+                sn
+            );
+        } else {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: REFUSED (copy did not land)",
+                ctx_pub, bo_pub, res_id, sn
+            );
+        }
+    }
+
+    /// Witness a BO import. The BO's host texel (0,0) is the client's own
+    /// rendering -- unknown to us, so the test is CHANGE, not equality:
+    /// poison the sentinel, copy BO (0,0) -> sentinel in COMPOSITOR_CTX,
+    /// read back; a value other than the poison means the copy landed. Two
+    /// rounds with two distinct poisons make it exact: the client's texel
+    /// can equal at most one of them, so an unattached BO (both reads still
+    /// the poison) is never confused with an unlucky match. The BO is only
+    /// READ, and only one texel of it. Never touches the BO's backing.
+    fn comp_witness_bo(&mut self, res: u32) -> bool {
+        let (sent_res, sent_va) = match self.comp_probe.as_ref() {
+            Some(p) => (p.sent_res, p.sent_va),
+            None => return false,
+        };
+        for _ in 0..2 {
+            let poison = self.comp_probe_token();
+            unsafe { core::ptr::write_volatile(sent_va as *mut u32, poison) };
+            if self
+                .gpu
+                .transfer_to_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4)
+                .is_err()
+            {
+                return false;
+            }
+            if self.comp_copy_px(res, sent_res).is_err() {
+                return false;
+            }
+            if self
+                .gpu
+                .transfer_from_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4)
+                .is_err()
+            {
+                return false;
+            }
+            let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) };
+            if (got & 0x00FF_FFFF) != (poison & 0x00FF_FFFF) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Revoke one BO's import (consent withdrawn or replaced). Detach
+    /// BEFORE anything else happens to the resource; a no-op unless the BO
+    /// was imported.
+    fn comp_release_bo(&mut self, ctx_pub: u32, conn: u64, bo_pub: u32) {
+        let res_id = match self
+            .wctx_mut(ctx_pub, conn)
+            .and_then(|c| c.bos.iter_mut().flatten().find(|b| b.pub_id == bo_pub))
+        {
+            Some(b) if b.comp_imported => {
+                b.comp_imported = false;
+                b.res_id
+            }
+            _ => return,
+        };
+        self.comp_detach_res(res_id);
+    }
+
+    /// Replay the import witnesses the per-tick bound deferred (C-0d Fable
+    /// round F5): for every ctx flagged `import_pending`, import whatever
+    /// its CURRENT consent names -- a consent replaced since the deferral is
+    /// the one that matters, and one withdrawn since leaves nothing to do.
+    /// Runs at the tick, so `import_tick != tick` holds again and one
+    /// witness per ctx runs; a consent that arrives later this same tick is
+    /// deferred once more. The flag is cleared unconditionally: a ctx that
+    /// died between the deferral and the tick is simply not here.
+    fn comp_replay_deferred_imports(&mut self) {
+        if !self.comp_ctx {
+            return;
+        }
+        let due: Vec<(u32, u64, Option<(usize, u32, PresentSrc)>)> = self
+            .warp_ctxs
+            .iter_mut()
+            .flatten()
+            .filter(|c| c.import_pending)
+            .map(|c| {
+                c.import_pending = false;
+                (c.pub_id, c.owner_conn, c.present_to)
+            })
+            .collect();
+        for (ctx_pub, conn, consent) in due {
+            // Bo only: the compositor import exists for the composed blit,
+            // which takes no presentable until W-3d.
+            if let Some((sn, _, PresentSrc::Bo(bo))) = consent {
+                self.comp_import_bo(ctx_pub, conn, bo, sn);
+            }
+        }
+    }
+
+    /// Surface `n` (incarnation `gen`) is retiring: every ctx whose consent
+    /// names it loses the compositor's import of its consented BO. The
+    /// consent record itself is left to its gen pin (inert), as before.
+    fn comp_release_consents_for(&mut self, n: usize, gen: u32) {
+        if !self.comp_ctx {
+            return;
+        }
+        let mut to_detach: Vec<u32> = Vec::new();
+        for c in self.warp_ctxs.iter_mut().flatten() {
+            if let Some((sl, g, PresentSrc::Bo(bp))) = c.present_to {
+                if sl == n && g == gen {
+                    if let Some(b) = c.bos.iter_mut().flatten().find(|b| b.pub_id == bp) {
+                        if b.comp_imported {
+                            b.comp_imported = false;
+                            to_detach.push(b.res_id);
+                        }
+                    }
+                }
+            }
+        }
+        for res in to_detach {
+            self.comp_detach_res(res);
+        }
+    }
+
+    // --- Warp-C C-3: GPU composition -- the blit, its measured conventions,
+    //     and the compose ops (GPU-DESIGN 4.5.2 / 4.5.11) ---------------------
+
+    /// The 22-dword VIRGL_CCMD_BLIT: box `(sx, sy, sw, sh)` of `src_res`
+    /// (format `src_fmt`) -> box `(dx, dy, dw, dh)` of `dst_res` (B8G8R8A8),
+    /// RGBA mask, nearest filter, no scissor, level 0, depth 1. The boxes are
+    /// the RENDERER'S -- convention-corrected by the caller from `BlitConv`
+    /// -- and a height may be NEGATIVE (the gallium flip idiom Mesa itself
+    /// sends for a flipped glBlitFramebuffer), which is why heights are i32.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_words(
+        dst_res: u32,
+        dx: u32,
+        dy: i32,
+        dw: u32,
+        dh: i32,
+        src_res: u32,
+        src_fmt: u32,
+        sx: u32,
+        sy: i32,
+        sw: u32,
+        sh: i32,
+    ) -> [u32; 22] {
+        let mut st = [0u32; 22];
+        st[0] = (VIRGL_CCMD_BLIT & 0xff) | (VIRGL_CMD_BLIT_SIZE << 16);
+        st[1] = PIPE_MASK_RGBA; // filter NEAREST (0) in bits 8..9
+        st[4] = dst_res;
+        st[6] = VIRGL_FORMAT_B8G8R8A8_UNORM;
+        st[7] = dx;
+        st[8] = dy as u32;
+        st[10] = dw;
+        st[11] = dh as u32;
+        st[12] = 1;
+        st[13] = src_res;
+        st[15] = src_fmt;
+        st[16] = sx;
+        st[17] = sy as u32;
+        st[19] = sw;
+        st[20] = sh as u32;
+        st[21] = 1;
+        st
+    }
+
+    /// Submit a run of blits on `ctx`'s SYNCHRONOUS slot, chunked at the
+    /// slot's stream bound. Each chunk's response arrives before the next is
+    /// staged, so the run is ordered end to end, and after every earlier
+    /// sync transfer -- the same construction the C-2c witness rests on.
+    fn submit_blits(&mut self, ctx: u32, blits: &[[u32; 22]]) -> Result<(), Error> {
+        const BLIT_BYTES: usize = 22 * 4;
+        let t0 = Instant::now();
+        let per = (Gpu::sync_stream_max() / BLIT_BYTES).max(1);
+        for chunk in blits.chunks(per) {
+            let mut bytes: Vec<u8> = Vec::with_capacity(chunk.len() * BLIT_BYTES);
+            for st in chunk {
+                for w in st.iter() {
+                    bytes.extend_from_slice(&w.to_le_bytes());
+                }
+            }
+            self.gpu.submit_3d_sync(ctx, &bytes)?;
+        }
+        self.cost_add(Cost::Blit, t0);
+        Ok(())
+    }
+
+    /// Charge the wall time since `t0` to census cell `k` (Warp-C C-4).
+    fn cost_add(&mut self, k: Cost, t0: Instant) {
+        self.cost_add_ns(k, t0.elapsed().as_nanos() as u64);
+    }
+
+    fn cost_add_ns(&mut self, k: Cost, ns: u64) {
+        let c = &mut self.cost[k as usize];
+        c.n += 1;
+        c.sum_ns = c.sum_ns.saturating_add(ns);
+        if ns > c.max_ns {
+            c.max_ns = ns;
+        }
+    }
+
+    #[cfg(feature = "test-mode")]
+    fn poke_hist_slot(ns: u64) -> usize {
+        const MS: u64 = 1_000_000;
+        match ns {
+            n if n < 2 * MS => 0,
+            n if n < 5 * MS => 1,
+            n if n < 8 * MS => 2,
+            n if n < 11 * MS => 3,
+            n if n < 14 * MS => 4,
+            n if n < 20 * MS => 5,
+            n if n < 30 * MS => 6,
+            _ => 7,
+        }
+    }
+
+    /// The renderer's answer, at bring-up, to how blit boxes must be issued
+    /// (`BlitConv`). Runs on throwaway contexts (`CONV_PROBE_CTX_BASE`+),
+    /// never on COMPOSITOR_CTX: a request the renderer refuses latches the
+    /// context it ran on, and this probe deliberately tries requests whose
+    /// acceptance is the thing being measured. Three seeded resources -- one
+    /// of each kind the compositor blits between (a Y_0_TOP slot, a flags-0
+    /// BO, the Y_0_TOP screen) -- and a fresh context per attempt, so a
+    /// latch from one attempt cannot make the next read as "dropped".
+    ///
+    /// Per (shape, size class): try the request variants in order and take
+    /// the first whose landing has the ORDER the shape needs (a slot lands
+    /// straight; a BO, whose GL row H-1 is its visual top, lands mirrored),
+    /// read the box flips off WHERE it landed and WHICH rows it read, then
+    /// CONFIRM the derived convention with corrected boxes at an asymmetric
+    /// offset -- exact rows, nothing else touched. Every landing is SAID, so
+    /// one boot log answers what the host does even where the decode did
+    /// not anticipate it; anything the decode cannot place fails CLOSED for
+    /// that class.
+    fn comp_measure_conventions(&mut self) -> Option<BlitConv> {
+        let p = self.conv_probe_build()?;
+        let mut seq = 0u32;
+        let r = self.conv_measure(&p, &mut seq);
+        self.conv_probe_undo(p);
+        r
+    }
+
+    fn conv_measure(&mut self, p: &ConvProbe, seq: &mut u32) -> Option<BlitConv> {
+        // Tokens: distinct RGB, alpha forced, never zero (the target's rest
+        // state) and never equal to one another.
+        let mut tok = [0u32; 8];
+        for t in tok.iter_mut() {
+            *t = self.comp_probe_token();
+        }
+        let mut t = [0u32; 4];
+        let mut u = [0u32; 4];
+        t.copy_from_slice(&tok[0..4]);
+        u.copy_from_slice(&tok[4..8]);
+        // Seed the sources ONCE through the transfers the real paths use:
+        // the slot kind by TRANSFER_TO_HOST_2D (the present path's); the BO
+        // kind by TRANSFER_TO_HOST_3D inside each attempt's context (a BO's
+        // texels are what its client rendered; here, what we uploaded --
+        // texel-exact for a flags-0 resource, Mesa's own contract).
+        for i in 0..4 {
+            unsafe {
+                core::ptr::write_volatile((p.slot_va as *mut u32).add(i), t[i]);
+                core::ptr::write_volatile((p.bo_va as *mut u32).add(i), u[i]);
+            }
+        }
+        if self.gpu.transfer(p.slot_res, 0, 0, 0, 1, 4).is_err() {
+            say!("tapestryd: blit-conv: slot seed transfer failed");
+            return None;
+        }
+        let slot_u = self.conv_measure_class(p, seq, false, false, &t);
+        let slot_s = self.conv_measure_class(p, seq, false, true, &t);
+        let bo_u = self.conv_measure_class(p, seq, true, false, &u);
+        let bo_s = self.conv_measure_class(p, seq, true, true, &u);
+        if slot_u.is_none() && slot_s.is_none() && bo_u.is_none() && bo_s.is_none() {
+            return None;
+        }
+        Some(BlitConv {
+            slot_u,
+            slot_s,
+            bo_u,
+            bo_s,
+        })
+    }
+
+    /// Measure + confirm one (shape, size class). `bo` selects the flags-0
+    /// source (mirrored landing wanted) over the Y_0_TOP slot (straight);
+    /// `scaled` selects the 2x-vertical class (each source row lands twice)
+    /// over the same-size one. Source box = rows 0..2 of the 4-row source
+    /// (asymmetric, so a source flip shows as rows {2,3} coming instead of
+    /// {0,1}); destination y = 1 raw (so a destination flip shows as the run
+    /// landing at 16-1-dh instead of 1). Then the confirmation: source rows
+    /// 1..4 into destination row 3.., with the derived corrections, must
+    /// land those exact rows in the wanted order and touch nothing else.
+    fn conv_measure_class(
+        &mut self,
+        p: &ConvProbe,
+        seq: &mut u32,
+        bo: bool,
+        scaled: bool,
+        toks: &[u32; 4],
+    ) -> Option<ClassConv> {
+        let (src_res, src_name) = if bo {
+            (p.bo_res, "bo")
+        } else {
+            (p.slot_res, "slot")
+        };
+        let cls = if scaled { "S" } else { "U" };
+        let mult: usize = if scaled { 2 } else { 1 };
+        let mut found: Option<ClassConv> = None;
+        for variant in [BlitVariant::Plain, BlitVariant::SrcNeg, BlitVariant::DstNeg] {
+            let dh = 2 * mult as u32;
+            let words = Self::conv_words(p.scr_res, src_res, variant, false, false, 4, 0, 2, 1, dh);
+            let rows = match self.conv_attempt(p, seq, |c, ctx| c.submit_blits(ctx, &[words])) {
+                Some(r) => r,
+                None => continue,
+            };
+            let landing = Self::conv_decode(&rows, toks, mult);
+            say!(
+                "tapestryd: blit-conv {} {} {}: rows {} -> {}",
+                src_name,
+                cls,
+                Self::variant_name(variant),
+                Self::conv_rows_str(&rows, toks),
+                match landing {
+                    Some(l) => alloc::format!(
+                        "run at row {} src rows {}..{} {}",
+                        l.first,
+                        l.src_lo,
+                        l.src_lo + 2,
+                        if l.straight { "straight" } else { "mirrored" }
+                    ),
+                    None => String::from("no clean run"),
+                }
+            );
+            let l = match landing {
+                Some(l) => l,
+                None => continue,
+            };
+            // A slot needs its rows straight; a BO needs them mirrored.
+            if l.straight == bo {
+                continue;
+            }
+            let src_flip = l.src_lo == 2;
+            let dst_flip = match l.first {
+                1 => false,
+                f if f == CONV_ROWS - 1 - dh as usize => true,
+                _ => continue,
+            };
+            found = Some(ClassConv {
+                variant,
+                src_flip,
+                dst_flip,
+            });
+            break;
+        }
+        let conv = found?;
+        // Confirmation with the corrections applied: source rows 1..4 ->
+        // destination row 3.. (3 rows, or 6 scaled). Expected: exactly those
+        // rows, in the wanted order, at rows 3..3+3*mult, and zero elsewhere.
+        let dh = 3 * mult as u32;
+        let words = Self::conv_words(
+            p.scr_res,
+            src_res,
+            conv.variant,
+            conv.src_flip,
+            conv.dst_flip,
+            4,
+            1,
+            3,
+            3,
+            dh,
+        );
+        let rows = self.conv_attempt(p, seq, |c, ctx| c.submit_blits(ctx, &[words]))?;
+        let rgb = |v: u32| v & 0x00FF_FFFF;
+        let mut ok = true;
+        for (i, &r) in rows.iter().enumerate() {
+            let want = if (3..3 + dh as usize).contains(&i) {
+                let k = (i - 3) / mult; // 0..3 = the k-th landed source row
+                let src_row = if bo { 3 - k } else { 1 + k }; // BO mirrored: rows 3,2,1; slot straight: 1,2,3
+                rgb(toks[src_row])
+            } else {
+                0
+            };
+            if rgb(r) != want {
+                ok = false;
+            }
+        }
+        say!(
+            "tapestryd: blit-conv {} {} confirm ({} sf{} df{}): rows {} -> {}",
+            src_name,
+            cls,
+            Self::variant_name(conv.variant),
+            conv.src_flip as u32,
+            conv.dst_flip as u32,
+            Self::conv_rows_str(&rows, toks),
+            if ok {
+                "CONFIRMED"
+            } else {
+                "FAILED -- class OFF"
+            }
+        );
+        if ok {
+            Some(conv)
+        } else {
+            None
+        }
+    }
+
+    fn variant_name(v: BlitVariant) -> &'static str {
+        match v {
+            BlitVariant::Plain => "plain",
+            BlitVariant::SrcNeg => "src-neg",
+            BlitVariant::DstNeg => "dst-neg",
+        }
+    }
+
+    /// The target rows as a compact string: `.` for zero, `Tk` for the k-th
+    /// token of the source under test, `?` for anything else.
+    fn conv_rows_str(rows: &[u32; CONV_ROWS], toks: &[u32; 4]) -> String {
+        let rgb = |v: u32| v & 0x00FF_FFFF;
+        let mut out = String::new();
+        for &r in rows.iter() {
+            if r == 0 {
+                out.push('.');
+            } else if let Some(k) = toks.iter().position(|&t| rgb(t) == rgb(r)) {
+                out.push(char::from(b'0' + k as u8));
+            } else {
+                out.push('?');
+            }
+        }
+        out
+    }
+
+    /// Decode a landing: a run of `2*mult` rows carrying two distinct source
+    /// tokens (each repeated `mult` times, the 2x nearest scale), consecutive
+    /// source rows in either order, everything else zero. None otherwise.
+    fn conv_decode(rows: &[u32; CONV_ROWS], toks: &[u32; 4], mult: usize) -> Option<Landing> {
+        let rgb = |v: u32| v & 0x00FF_FFFF;
+        let idx = |v: u32| toks.iter().position(|&t| rgb(t) == rgb(v));
+        let first = rows.iter().position(|&r| r != 0)?;
+        let len = 2 * mult;
+        if first + len > CONV_ROWS {
+            return None;
+        }
+        // Everything outside the run must be zero.
+        if rows
+            .iter()
+            .enumerate()
+            .any(|(i, &r)| !(first..first + len).contains(&i) && r != 0)
+        {
+            return None;
+        }
+        let a = idx(rows[first])?;
+        let b = idx(rows[first + mult])?;
+        for j in 0..len {
+            let want = if j < mult { a } else { b };
+            if idx(rows[first + j]) != Some(want) {
+                return None;
+            }
+        }
+        let (lo, straight) = if b == a + 1 {
+            (a, true)
+        } else if a == b + 1 {
+            (b, false)
+        } else {
+            return None;
+        };
+        if lo != 0 && lo != 2 {
+            return None;
+        }
+        Some(Landing {
+            first,
+            src_lo: lo,
+            straight,
+        })
+    }
+
+    /// Build one probe/composition request from GUEST boxes and a class
+    /// convention: apply the flips (`y' = h - y - box_h`), then the variant
+    /// (a negative height on the source or the destination side). `hs` is
+    /// the source's height; the target's is CONV_ROWS here and the screen's
+    /// in the compose path (`blit_request`).
+    #[allow(clippy::too_many_arguments)]
+    fn conv_words(
+        dst_res: u32,
+        src_res: u32,
+        variant: BlitVariant,
+        src_flip: bool,
+        dst_flip: bool,
+        hs: u32,
+        sy: u32,
+        sh: u32,
+        dy: u32,
+        dh: u32,
+    ) -> [u32; 22] {
+        Self::blit_request(
+            dst_res,
+            CONV_ROWS as u32,
+            0,
+            dy,
+            1,
+            dh,
+            src_res,
+            VIRGL_FORMAT_B8G8R8A8_UNORM,
+            hs,
+            0,
+            sy,
+            1,
+            sh,
+            ClassConv {
+                variant,
+                src_flip,
+                dst_flip,
+            },
+        )
+    }
+
+    /// The general request: source box (sx, sy, sw, sh) of `src_res` (height
+    /// `hs`) -> destination box (dx, dy, dw, dh) of `dst_res` (height `hd`),
+    /// both in GUEST rows, under `conv`.
+    #[allow(clippy::too_many_arguments)]
+    /// VIRGL_CCMD_PIPE_RESOURCE_SET_TYPE (cmd 49; 10 payload dwords at one
+    /// plane): type an UNTYPED fd-backed resource inside a vrend ctx --
+    /// format/bind/geometry/modifier/stride -- so the renderer imports its
+    /// dmabuf as an EGLImage texture (vrend_renderer.c
+    /// `pipe_resource_set_type`; the run-6 fork resolution's mechanism,
+    /// verified against the vendored 1.1.0 source). Modifier LINEAR (0),
+    /// one plane, plane offset 0. The bind asks for both faces a compose
+    /// source/destination can wear (SAMPLER_VIEW | RENDER_TARGET).
+    fn set_type_request(res: u32, format: u32, w: u32, h: u32, stride: u32) -> [u32; 11] {
+        const CCMD_PIPE_RESOURCE_SET_TYPE: u32 = 49;
+        const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
+        const VIRGL_BIND_SAMPLER_VIEW: u32 = 1 << 3;
+        // Round-5 F6: the header's word count is the one field vrend uses to
+        // slice the buffer -- a field added below without bumping it (or vice
+        // versa) would misparse EVERY later word and read as `settype=latched`
+        // (a renderer refusal and an encoder regression produce the same leg-2
+        // token; the discrimination lives only in the HOST log's error line).
+        // Pin the relation the compiler can see; the residue -- field ORDER --
+        // is attributable only jointly with the host log, stated at the probe.
+        const SET_TYPE_WORDS: usize = 11;
+        const _: () = assert!(SET_TYPE_WORDS == 1 + 10, "hdr count != payload");
+        [
+            (10 << 16) | CCMD_PIPE_RESOURCE_SET_TYPE,
+            res,
+            format,
+            VIRGL_BIND_SAMPLER_VIEW | VIRGL_BIND_RENDER_TARGET,
+            w,
+            h,
+            0, // usage
+            0, // modifier lo (LINEAR)
+            0, // modifier hi
+            stride,
+            0, // plane 0 offset
+        ]
+    }
+
+    fn blit_request(
+        dst_res: u32,
+        hd: u32,
+        dx: u32,
+        dy: u32,
+        dw: u32,
+        dh: u32,
+        src_res: u32,
+        src_fmt: u32,
+        hs: u32,
+        sx: u32,
+        sy: u32,
+        sw: u32,
+        sh: u32,
+        conv: ClassConv,
+    ) -> [u32; 22] {
+        let syp = (if conv.src_flip { hs - sy - sh } else { sy }) as i32;
+        let dyp = (if conv.dst_flip { hd - dy - dh } else { dy }) as i32;
+        let (fsy, fsh, fdy, fdh) = match conv.variant {
+            BlitVariant::Plain => (syp, sh as i32, dyp, dh as i32),
+            BlitVariant::SrcNeg => (syp + sh as i32, -(sh as i32), dyp, dh as i32),
+            BlitVariant::DstNeg => (syp, sh as i32, dyp + dh as i32, -(dh as i32)),
+        };
+        Self::blit_words(
+            dst_res, dx, fdy, dw, fdh, src_res, src_fmt, sx, fsy, sw, fsh,
+        )
+    }
+
+    /// One convention-probe attempt on a FRESH throwaway context: create it,
+    /// attach the three probe resources, zero the target and re-seed the BO
+    /// kind through that context, run `body` (the request under test), read
+    /// the target's guest rows back, destroy the context. `None` = a
+    /// device-level failure of the scaffolding, never a verdict about the
+    /// request (a refused request reads as an untouched -- all-zero --
+    /// target, which the decode reports as "no clean run").
+    fn conv_attempt<F>(&mut self, p: &ConvProbe, seq: &mut u32, body: F) -> Option<[u32; CONV_ROWS]>
+    where
+        F: FnOnce(&mut Self, u32) -> Result<(), Error>,
+    {
+        let ctx = CONV_PROBE_CTX_BASE + *seq;
+        // The conv throwaways must never climb into the venus ctx band
+        // (V-3b-1c-2); if this ever fires the WARP_VENUS_CTX_BASE gap is too
+        // small and the two families could alias.
+        debug_assert!(
+            ctx < WARP_VENUS_CTX_BASE,
+            "conv probe ctx climbed into the venus band"
+        );
+        *seq += 1;
+        if self.gpu.ctx_create(ctx, b"tapestry-conv").is_err() {
+            return None;
+        }
+        let ok = self.gpu.ctx_attach_resource(ctx, p.slot_res).is_ok()
+            && self.gpu.ctx_attach_resource(ctx, p.bo_res).is_ok()
+            && self.gpu.ctx_attach_resource(ctx, p.scr_res).is_ok();
+        let mut out: Option<[u32; CONV_ROWS]> = None;
+        if ok {
+            for i in 0..CONV_ROWS {
+                unsafe { core::ptr::write_volatile((p.scr_va as *mut u32).add(i), 0) };
+            }
+            let staged = self
+                .gpu
+                .transfer_to_3d_box_sync(ctx, p.scr_res, 0, 0, 1, CONV_ROWS as u32, 0, 4)
+                .is_ok()
+                && self
+                    .gpu
+                    .transfer_to_3d_box_sync(ctx, p.bo_res, 0, 0, 1, 4, 0, 4)
+                    .is_ok();
+            if staged && body(self, ctx).is_ok() {
+                for i in 0..CONV_ROWS {
+                    unsafe {
+                        core::ptr::write_volatile((p.scr_va as *mut u32).add(i), 0xDEAD_BEEF)
+                    };
+                }
+                if self
+                    .gpu
+                    .transfer_from_3d_box_sync(ctx, p.scr_res, 0, 0, 1, CONV_ROWS as u32, 0, 4)
+                    .is_ok()
+                {
+                    let mut rows = [0u32; CONV_ROWS];
+                    for (i, r) in rows.iter_mut().enumerate() {
+                        *r = unsafe { core::ptr::read_volatile((p.scr_va as *const u32).add(i)) };
+                    }
+                    // A readback that never landed leaves the clobber; that
+                    // is a scaffolding failure, not a measurement.
+                    if rows.iter().any(|&r| r != 0xDEAD_BEEF) {
+                        out = Some(rows);
+                    }
+                }
+            }
+        }
+        let _ = self.gpu.ctx_destroy(ctx);
+        out
+    }
+
+    /// Mint the three convention-probe resources (1x4 slot kind, 1x4 BO
+    /// kind, 1x16 screen kind), each with its own page as backing, attached
+    /// to no context yet (each attempt attaches them to its own). Rolls
+    /// back fully on any failure.
+    fn conv_probe_build(&mut self) -> Option<ConvProbe> {
+        let (slot_res, slot_fd, slot_va) = self.conv_probe_res(0)?;
+        let (bo_res, bo_fd, bo_va) = match self.conv_probe_res(1) {
+            Some(v) => v,
+            None => {
+                self.conv_probe_res_undo(slot_res, slot_va, slot_fd);
+                return None;
+            }
+        };
+        let (scr_res, scr_fd, scr_va) = match self.conv_probe_res(2) {
+            Some(v) => v,
+            None => {
+                self.conv_probe_res_undo(bo_res, bo_va, bo_fd);
+                self.conv_probe_res_undo(slot_res, slot_va, slot_fd);
+                return None;
+            }
+        };
+        Some(ConvProbe {
+            slot_res,
+            slot_fd,
+            slot_va,
+            bo_res,
+            bo_fd,
+            bo_va,
+            scr_res,
+            scr_fd,
+            scr_va,
+        })
+    }
+
+    /// One probe resource of `kind` (0 = slot: `resource_create_2d`, the
+    /// Y_0_TOP QEMU stamps on every 2D create; 1 = BO: 3D flags 0; 2 =
+    /// screen: 3D flags Y_0_TOP, CONV_ROWS rows), backed by a fresh page.
+    fn conv_probe_res(&mut self, kind: u32) -> Option<(u32, i64, u64)> {
+        let size = PAGE;
+        let fd = unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        if fd < 0 {
+            return None;
+        }
+        let va = self.weave_va_next;
+        self.weave_va_next += size;
+        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
+        if pa < 0 {
+            unsafe { t_close(fd) };
+            return None;
+        }
+        unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
+        let res = self.next_res_id();
+        let h = if kind == 2 { CONV_ROWS as u32 } else { 4 };
+        let created = if kind == 0 {
+            self.gpu.resource_create_2d(res, 1, h).is_ok()
+        } else {
+            let flags = if kind == 2 { VIRGL_RESOURCE_Y_0_TOP } else { 0 };
+            self.gpu
+                .resource_create_3d(
+                    res,
+                    PIPE_TEXTURE_2D,
+                    VIRGL_FORMAT_B8G8R8A8_UNORM,
+                    VIRGL_BIND_RENDER_TARGET,
+                    1,
+                    h,
+                    1,
+                    1,
+                    0,
+                    0,
+                    flags,
+                )
+                .is_ok()
+        };
+        if !created {
+            unsafe { t_burrow_detach(va, size) };
+            unsafe { t_close(fd) };
+            return None;
+        }
+        if self
+            .gpu
+            .attach_backing(res, pa as u64, size as u32)
+            .is_err()
+        {
+            let _ = self.gpu.resource_unref(res);
+            unsafe { t_burrow_detach(va, size) };
+            unsafe { t_close(fd) };
+            return None;
+        }
+        Some((res, fd, va))
+    }
+
+    fn conv_probe_res_undo(&mut self, res: u32, va: u64, fd: i64) {
+        let _ = self.gpu.detach_backing(res);
+        let _ = self.gpu.resource_unref(res);
+        unsafe { t_burrow_detach(va, PAGE) };
+        unsafe { t_close(fd) };
+    }
+
+    fn conv_probe_undo(&mut self, p: ConvProbe) {
+        self.conv_probe_res_undo(p.scr_res, p.scr_va, p.scr_fd);
+        self.conv_probe_res_undo(p.bo_res, p.bo_va, p.bo_fd);
+        self.conv_probe_res_undo(p.slot_res, p.slot_va, p.slot_fd);
+    }
+
+    /// Is the GPU composed path available right now? Every conjunct is a
+    /// measured fact, none a capability bit: a compositor context that came
+    /// up, a witness probe to verify it with, blit conventions the probe
+    /// could establish, and no latch since.
+    fn gpu_compose_ready(&self) -> bool {
+        self.comp_ctx
+            && self.comp_probe.is_some()
+            && self.comp_conv.is_some()
+            && !self.comp_gpu_dead
+    }
+
+    /// Is surface `n` hosted in a VISIBLE pane with a screen to compose
+    /// into? The GPU path checks this BEFORE transferring, so a hidden
+    /// surface's present costs no guest->host traffic (the C-2d redraw
+    /// contract heals it on reveal: the reveal is structural and fans the
+    /// redraw CONFIGURE).
+    fn compose_visible(&self, n: usize) -> bool {
+        self.screen.is_some() && self.surface_target(n).is_some()
+    }
+
+    /// H-3b-2: the ONE placement authority's target rect for surface `n` --
+    /// a hosted content surface's visible pane CONTENT rect, or a chrome
+    /// surface's bound pane TAG-BAR strip (visible + carved). None = not
+    /// showable (hidden pane, unhosted, a stale binding, a bar-free leaf).
+    fn surface_target(&self, n: usize) -> Option<Rect> {
+        let s = self.surf(n)?;
+        if s.is_menu {
+            // H-3c: a menu shows exactly where `menu place` clamped it, and
+            // only while it is the placed one (gen-pinned against slot reuse).
+            return match self.menu {
+                Some(m) if m.n == n && m.gen == s.gen => Some(m.rect),
+                _ => None,
+            };
+        }
+        if s.is_status {
+            // H-3d: the status bar shows at the bottom strip, and only while
+            // it is the registered one (gen-pinned against slot reuse).
+            return match self.status {
+                Some(st) if st.n == n && st.gen == s.gen => self.status_rect(),
+                _ => None,
+            };
+        }
+        if let Some(pid) = s.chrome_bind {
+            let slot = self.layout.slot_of_id(pid)?;
+            let p = self.layout.get(slot)?;
+            if !p.visible || p.tagbar.is_empty() {
+                return None;
+            }
+            return Some(p.tagbar);
+        }
+        let leaf = self.layout.find_hosting(n)?;
+        let p = self.layout.get(leaf)?;
+        if !p.visible {
+            return None;
+        }
+        Some(p.content)
+    }
+
+    /// H-3d: the status strip -- the display's bottom `status_h` rows
+    /// (Daylight 6/8: == the tag bar's height, one vertical unit) -- while a
+    /// status bar is registered. The layout is recomputed above it.
+    fn status_rect(&self) -> Option<Rect> {
+        self.status?;
+        let unit = libhalcyon::theme::METRICS.status_h as u32;
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        if dh <= unit || dw == 0 {
+            return None;
+        }
+        Some(Rect {
+            x: 0,
+            y: dh - unit,
+            w: dw,
+            h: unit,
+        })
+    }
+
+    /// Every showable NON-HOSTED surface with its target -- chrome at its
+    /// strip, the placed menu at its rect (H-3c), the status bar at the
+    /// bottom strip (H-3d) -- the second half of the CONFIGURE + frame fans
+    /// (`visible_hosted` is the first).
+    fn visible_chrome(&self) -> Vec<(usize, Rect)> {
+        let mut out = Vec::new();
+        for n in 0..MAX_SURFACES {
+            if self.surf(n).map_or(false, |s| {
+                s.chrome_bind.is_some() || s.is_menu || s.is_status
+            }) {
+                if let Some(r) = self.surface_target(n) {
+                    out.push((n, r));
+                }
+            }
+        }
+        out
+    }
+
+    /// The per-tick health verify of the compositor context, run right
+    /// after a composition blit was submitted, at most one step per tick.
+    /// Returns true when the context is known or assumed healthy; false
+    /// when THIS call found it latched -- in which case GPU composition is
+    /// already OFF (`comp_gpu_latch`) and the caller composes the present it
+    /// just blitted the CPU way instead, so no frame is lost to the
+    /// discovery.
+    ///
+    /// DEFERRED (Warp-C C-4, GPU-DESIGN 4.5.12): the copy is issued now and
+    /// READ `HEALTH_PERIOD` ticks later. C-3 read it back in the same call,
+    /// and that read waited for the copy to execute -- behind every frame the
+    /// client had queued, up to its fence throttle's depth: measured 8.3-8.9
+    /// ms per verify on thyla-pi, a per-frame drain that was the whole
+    /// composed residual (a `glFinish` the direct arm never pays). Read a
+    /// period later the copy has long executed and the read costs a round
+    /// trip; issued only after the previous read, the uploads never touch a
+    /// resource with a job still pending. What is bought: the verdict lags
+    /// by up to two periods (a latched context shows stale composed panes
+    /// for that long, then the CPU path heals them) -- freeze-and-report on
+    /// a ~130 ms clock instead of a 16 ms one, and the compositor's context
+    /// latches only on our own defect or a host reset, never by a client's
+    /// hand (contexts are separate). Fail closed: an errored step is a latch.
+    fn comp_health_tick(&mut self) -> bool {
+        if self.comp_verify_tick == self.tick {
+            return true;
+        }
+        self.comp_verify_tick = self.tick;
+        let t0 = Instant::now();
+        let mut ok = true;
+        let due = self.comp_verify_pending
+            && self.tick.wrapping_sub(self.comp_verify_issue_tick) >= HEALTH_PERIOD;
+        if due {
+            self.comp_verify_pending = false;
+            let t1 = Instant::now();
+            ok = self.comp_health_read();
+            self.cost_add(Cost::HealthRead, t1);
+        }
+        if ok && !self.comp_verify_pending {
+            let t1 = Instant::now();
+            let issued = self.comp_health_issue();
+            self.cost_add(Cost::HealthIssue, t1);
+            if issued {
+                self.comp_verify_pending = true;
+                self.comp_verify_issue_tick = self.tick;
+            } else {
+                ok = false;
+            }
+        }
+        self.cost_add(Cost::Health, t0);
+        if ok {
+            return true;
+        }
+        self.comp_gpu_latch("health copy failed after a composition blit");
+        false
+    }
+
+    /// One-shot per surface: the first present the GPU composed says so.
+    fn say_gpu_once(&mut self, n: usize, kind: &str, src_res: u32, scr_res: u32) {
+        let first = match self.surf_mut(n) {
+            Some(s) if !s.gpu_said => {
+                s.gpu_said = true;
+                true
+            }
+            _ => false,
+        };
+        if first {
+            say!(
+                "tapestryd: surface {} composed via GPU blit ({} res {} -> screen res {})",
+                n,
+                kind,
+                src_res,
+                scr_res
+            );
+        }
+    }
+
+    /// The composed screen's pixel oracle (Warp-C C-3): read texel (x, y) of
+    /// the SCREEN back and say it. On the 3D screen the value comes from the
+    /// resource by TRANSFER_FROM_HOST_3D through the compositor context --
+    /// the only place GPU-composed pixels exist -- landed at the pixel's own
+    /// offset in the buffer (idempotent where the buffer mirrors the host;
+    /// a don't-care the next structural repaint rewrites where it does not);
+    /// on the 2D screen the buffer IS what was transferred. Says which,
+    /// with the scanout mode (a Direct scanout does not display the screen,
+    /// so a probe then describes an undisplayed resource) and the census.
+    #[cfg(feature = "test-mode")]
+    pub fn probe_screen(&mut self, x: u32, y: u32) -> Result<(), u32> {
+        if x >= self.gpu.width || y >= self.gpu.height {
+            return Err(p9::E_INVAL);
+        }
+        if self.probe_tick != self.tick {
+            self.probe_tick = self.tick;
+            self.probe_count = 0;
+        }
+        if self.probe_count >= 64 {
+            return Err(E_AGAIN);
+        }
+        self.probe_count += 1;
+        let (res, is3d, va) = match &self.screen {
+            Some(s) => (s.res, s.is3d, s.va),
+            None => {
+                say!("tapestryd: screen-probe ({},{}) = none (no screen)", x, y);
+                return Ok(());
+            }
+        };
+        let dw = self.gpu.width;
+        let off = ((y as u64) * (dw as u64) + x as u64) * 4;
+        let via = if is3d && self.comp_ctx {
+            if self
+                .gpu
+                .transfer_from_3d_box_sync(COMPOSITOR_CTX, res, x, y, 1, 1, off, dw * 4)
+                .is_ok()
+            {
+                "readback"
+            } else {
+                "readback FAILED (backing shown)"
+            }
+        } else {
+            "backing"
+        };
+        let v = unsafe { core::ptr::read_volatile((va + off) as *const u32) };
+        say!(
+            "tapestryd: screen-probe ({},{}) = #{:06x} via {} [scanout {}; composed gpu {} cpu {}]",
+            x,
+            y,
+            v & 0x00FF_FFFF,
+            via,
+            self.scanout_name(),
+            self.composed_gpu,
+            self.composed_cpu
+        );
+        Ok(())
+    }
+
+    /// The compositor context stopped executing after a composition blit:
+    /// GPU composition goes OFF, sticky, and the screen is repainted
+    /// structurally (chrome + the CONFIGURE fan) so every pane heals through
+    /// the CPU path. Freeze-and-report, never freeze-and-lie (4.5.4b).
+    fn comp_gpu_latch(&mut self, why: &str) {
+        if self.comp_gpu_dead {
+            return;
+        }
+        self.comp_gpu_dead = true;
+        say!(
+            "tapestryd: composed pixels = CPU (compositor ctx latched: {}) -- GPU composition OFF, sticky",
+            why
+        );
+        // A structural repaint at the next tick (`frame_tick`): the geometry
+        // signature is forced stale so the Composed arm of reconcile repaints
+        // chrome and fans the redraw CONFIGUREs (the C-2d redraw contract does
+        // the rest). Deferred, because this runs inside a present dispatch.
+        self.comp_repaint_pending = true;
+    }
+
+    /// The compose GEOMETRY for a present of surface `n`: the source rect
+    /// (surface space) and the screen-space destination it lands on, or
+    /// None when nothing is composed (hidden, unhosted, no screen, fully
+    /// clipped). Shared by the CPU copy and the GPU blit so both place
+    /// pixels identically. Fork 2 + the #56 patchwork latch decide the arm:
+    /// a full-frame presenter (patchwork never latched) whose size differs
+    /// from its pane LETTERBOXES (aspect-preserving scale, centered; damage
+    /// rects ignored -- the whole scaled rect redraws); an accumulator, or
+    /// a same-size surface, takes the damage-clipped CROP.
+    fn compose_geometry(
+        &mut self,
+        n: usize,
+        x: u32,
+        y: u32,
+        pw: u32,
+        ph: u32,
+    ) -> Option<ComposeOp> {
+        let (sw, sh_full, patchwork, chrome) = match self.surf(n) {
+            Some(s) if s.weave.is_some() => (
+                s.w,
+                s.h,
+                s.patchwork,
+                s.chrome_bind.is_some() || s.is_menu || s.is_status,
+            ),
+            _ => return None,
+        };
+        let content = self.surface_target(n)?; // hidden / unhosted / stale bind: no target
+        self.screen.as_ref()?;
+        // A chrome surface never letterboxes: its owner sizes it to the strip,
+        // and a transient mismatch (a relayout mid-resize) CROPS.
+        if (sw != content.w || sh_full != content.h) && !patchwork && !chrome {
+            if content.w == 0 || content.h == 0 || sh_full == 0 || sw == 0 {
+                return None;
+            }
+            let (ox, oy, dw2, dh2) = Self::letterbox(sw, sh_full, content.w, content.h);
+            // One-shot geometry diagnostic (per distinct placement).
+            if let Some(su) = self.surf_mut(n) {
+                let sig = (ox, oy, dw2, dh2);
+                if su.lb_logged != Some(sig) {
+                    su.lb_logged = Some(sig);
+                    say!(
+                        "tapestryd: surface {} letterbox {}x{} -> {}x{} @({},{}) in {}x{}",
+                        n,
+                        sw,
+                        sh_full,
+                        dw2,
+                        dh2,
+                        ox,
+                        oy,
+                        content.w,
+                        content.h
+                    );
+                }
+            }
+            return Some(ComposeOp {
+                src: Rect {
+                    x: 0,
+                    y: 0,
+                    w: sw,
+                    h: sh_full,
+                },
+                dst: Rect {
+                    x: content.x + ox,
+                    y: content.y + oy,
+                    w: dw2,
+                    h: dh2,
+                },
+            });
+        }
+        // Same-size fast path: damage-clipped.
+        let inter = Rect { x, y, w: pw, h: ph }.intersect(Rect {
+            x: 0,
+            y: 0,
+            w: content.w,
+            h: content.h,
+        });
+        if inter.is_empty() {
+            return None;
+        }
+        Some(ComposeOp {
+            src: inter,
+            dst: Rect {
+                x: content.x + inter.x,
+                y: content.y + inter.y,
+                w: inter.w,
+                h: inter.h,
+            },
+        })
+    }
+
+    /// The measured convention for one (shape, size class), or None when
+    /// that class composes the CPU way on this host.
+    fn class_conv(&self, bo: bool, scaled: bool) -> Option<ClassConv> {
+        let c = self.comp_conv?;
+        match (bo, scaled) {
+            (false, false) => c.slot_u,
+            (false, true) => c.slot_s,
+            (true, false) => c.bo_u,
+            (true, true) => c.bo_s,
+        }
+    }
+
+    /// The GPU compose of one op from a SLOT resource (Y_0_TOP source):
+    /// one VIRGL_CCMD_BLIT under the measured convention of the op's size
+    /// class. The caller has transferred the damage into `src_res` and holds
+    /// `comp_attached` for its generation; the screen is the 3D one. None =
+    /// this class is CPU-composed on this host.
+    fn compose_gpu_slot_words(
+        &self,
+        op: ComposeOp,
+        src_res: u32,
+        sh_full: u32,
+        scr_res: u32,
+    ) -> Option<[u32; 22]> {
+        let scaled = op.src.w != op.dst.w || op.src.h != op.dst.h;
+        let conv = self.class_conv(false, scaled)?;
+        Some(Self::blit_request(
+            scr_res,
+            self.gpu.height,
+            op.dst.x,
+            op.dst.y,
+            op.dst.w,
+            op.dst.h,
+            src_res,
+            VIRGL_FORMAT_B8G8R8A8_UNORM,
+            sh_full,
+            op.src.x,
+            op.src.y,
+            op.src.w,
+            op.src.h,
+            conv,
+        ))
+    }
+
+    /// The GPU compose of one op from a BO (flags-0, GL-native source): the
+    /// FULL BO, row-mirrored into the destination by the request the probe
+    /// found this renderer honours for the op's size class. None = readback
+    /// arm (no measured request for the class, or a partial/foreign-format
+    /// source the probe did not measure).
+    fn compose_gpu_bo_words(
+        &self,
+        op: ComposeOp,
+        bo_res: u32,
+        bo_fmt: u32,
+        bo_h: u32,
+        scr_res: u32,
+    ) -> Option<[u32; 22]> {
+        // Measured for the FULL source only (a GL frame is whole-frame by
+        // nature; the GL arms present full damage) and for the probe's own
+        // format: a partial source op, or another format, is not something
+        // this code has a measured request for -- readback arm.
+        if op.src.x != 0
+            || op.src.y != 0
+            || op.src.h != bo_h
+            || op.src.w == 0
+            || bo_fmt != VIRGL_FORMAT_B8G8R8A8_UNORM
+        {
+            return None;
+        }
+        let scaled = op.src.w != op.dst.w || op.src.h != op.dst.h;
+        let conv = self.class_conv(true, scaled)?;
+        Some(Self::blit_request(
+            scr_res,
+            self.gpu.height,
+            op.dst.x,
+            op.dst.y,
+            op.dst.w,
+            op.dst.h,
+            bo_res,
+            bo_fmt,
+            bo_h,
+            0,
+            0,
+            op.src.w,
+            bo_h,
+            conv,
+        ))
+    }
+
+    /// The CPU compose of one op: copy `op.src` of the source image (`src_base`,
+    /// tight stride `sw`, `sh_full` rows) into the screen BUFFER at
+    /// `op.dst`, nearest-neighbour when scaled. Client bytes are read ONLY
+    /// here, inside the present dispatch (the G-6 tearing-freedom
+    /// invariant); the caller pushes `op.dst` device-side or defers it.
+    fn compose_cpu(&mut self, op: ComposeOp, src_base: u64, sw: u32, sh_full: u32) {
+        let screen_va = match &self.screen {
+            Some(s) => s.va,
+            None => return,
+        };
+        let dw = self.gpu.width as u64;
+        if op.src.w != op.dst.w || op.src.h != op.dst.h {
+            // SAFETY: src reads stay inside the source image (sx < sw, sy <
+            // sh_full by the ratio bound: lx < dst.w => lx*sw/dst.w < sw --
+            // valid for scale-down and up); dst rows stay inside the screen
+            // buffer (letterbox() bounds the scaled rect inside content, and
+            // content inside the display by the geometry pass).
+            unsafe {
+                for row in 0..op.dst.h as u64 {
+                    let sy = (row * sh_full as u64) / op.dst.h as u64;
+                    let dy = op.dst.y as u64 + row;
+                    let srow = (src_base + sy * sw as u64 * 4) as *const u32;
+                    let drow = (screen_va + (dy * dw + op.dst.x as u64) * 4) as *mut u32;
+                    for col in 0..op.dst.w as u64 {
+                        let sx = (col * sw as u64) / op.dst.w as u64;
+                        *drow.add(col as usize) = *srow.add(sx as usize);
+                    }
+                }
+            }
+            return;
+        }
+        // SAFETY: src rows lie within the source image (damage was validated
+        // against the surface geometry; the op only shrinks it); dst rows
+        // lie within the screen buffer (content is inside the display by the
+        // geometry pass; the op is inside content).
+        unsafe {
+            for row in 0..op.src.h as u64 {
+                let sy = op.src.y as u64 + row;
+                let dy = op.dst.y as u64 + row;
+                let src = (src_base + (sy * sw as u64 + op.src.x as u64) * 4) as *const u8;
+                let dst = (screen_va + (dy * dw + op.dst.x as u64) * 4) as *mut u8;
+                core::ptr::copy_nonoverlapping(src, dst, op.src.w as usize * 4);
+            }
+        }
+    }
+
     /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
     /// create the 2D resource, attach the whole weave as its backing.
-    fn create(&mut self, n: usize, w: u32, h: u32) -> Result<(), u32> {
+    fn create(&mut self, n: usize, w: u32, h: u32, host: Host) -> Result<(), u32> {
+        let (chrome_bind, is_menu, is_status, claim) = match host {
+            Host::Content { claim } => (None, false, false, claim),
+            Host::Chrome { bind } => (Some(bind), false, false, None),
+            Host::Menu => (None, true, false, None),
+            Host::Status => (None, false, true, None),
+        };
         let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
         let s = self.surf(n).ok_or(p9::E_BADF)?;
         if s.state != SurfState::Minted {
@@ -1225,21 +4323,105 @@ impl Comp {
         if w == 0 || h == 0 || w > disp_w || h > disp_h {
             return Err(p9::E_INVAL);
         }
-        let (weave, slot_stride, res) = self.alloc_weave(w, h)?;
+        // H-3d: ONE status bar per display, exactly the strip's size -- the
+        // display width by the one vertical unit -- never cropped or
+        // letterboxed (HALCYON.md 13.6). Judged before the weave allocation.
+        if is_status {
+            let unit = libhalcyon::theme::METRICS.status_h as u32;
+            if self.status.is_some() || w != disp_w || h != unit || disp_h <= unit {
+                return Err(p9::E_INVAL);
+            }
+        }
+        // H-3b-2: a chrome binding names a LIVE LEAF (E_NOENT otherwise),
+        // judged BEFORE the weave allocation so a bad bind leaks nothing.
+        if let Some(pid) = chrome_bind {
+            match self.layout.slot_of_id(pid) {
+                Some(slot) if self.layout.is_leaf(slot) => {}
+                _ => return Err(p9::E_NOENT),
+            }
+        }
+        let (weave, slot_stride, res_ids, comp_attached) = self.alloc_weave(n, w, h)?;
 
+        let comp_ctx = self.comp_ctx;
         let s = self.surf_mut(n).unwrap();
         s.w = w;
         s.h = h;
         s.slot_stride = slot_stride;
         s.weave = Some(weave);
-        s.resource_id = res;
+        s.res_ids = res_ids;
+        s.comp_attached = comp_attached;
+        // C-2c: the import witness leaves its tokens in the slots' HOST
+        // copies (never the guest's), so under a compositor ctx a fresh
+        // generation's host copies are stale in the flag's own sense -- a
+        // deferred direct switch expands its first transfer to the full
+        // surface. Same bytes as the client's own first present of a fresh
+        // slot (buffer age 0 = full damage), so nothing visible changes;
+        // the flag just says what is true. Untouched without a compositor
+        // ctx: the CPU path stays byte-identical to what the pixel gates
+        // measured.
+        if comp_ctx {
+            s.res_stale = [true; WEAVE_SLOTS as usize];
+        }
         s.state = SurfState::Woven;
+        s.chrome_bind = chrome_bind;
+        s.is_menu = is_menu;
+        s.is_status = is_status;
+        let gen = s.gen;
+        if is_status {
+            // H-3d: the status bar is neither hosted nor pane-bound -- its
+            // bind is the display. Registering it carves the layout
+            // (reconcile recomputes on disp_h - status_h: every leaf and tag
+            // bar moves up, structural) and surface_target places it at the
+            // strip, where reconcile fans it its CONFIGURE.
+            self.status = Some(StatusState { n, gen });
+            #[cfg(feature = "test-mode")]
+            say!(
+                "tapestryd: status bar {} created ({}x{}); the display carves {}",
+                n,
+                w,
+                h,
+                libhalcyon::theme::METRICS.status_h
+            );
+            self.reconcile();
+            return Ok(());
+        }
+        if is_menu {
+            // H-3c: a menu is neither hosted nor placed at create -- it is
+            // invisible until its owner's `menu place`, which reconciles.
+            return Ok(());
+        }
+        if chrome_bind.is_some() {
+            // H-3b-2: chrome is NOT hosted -- surface_target places it at its
+            // bound pane's tag-bar strip; reconcile fans it a CONFIGURE with
+            // the strip size whenever that strip is showable.
+            self.reconcile();
+            return Ok(());
+        }
         // G-6: host at create -- the focused empty leaf takes it, else the
         // focused leaf splits. A pane-table-exhausted surface stays
         // unhosted (invisible; presents complete without pixels). Hosting
         // is structural: a zoomed layout restores first (the tmux rule).
         self.layout.unzoom();
-        if self.layout.host(n).is_none() {
+        // H-4b: a claim steers the surface into the empty leaf it was minted
+        // on, spending the token (one-shot). A token that names no live
+        // empty leaf -- stale (re-minted under it, or the leaf hosted or
+        // closed since), already spent, or never minted -- FALLS BACK to the
+        // focus placement (HALCYON.md 13.7): the child passes an opaque
+        // cookie and must never fail to create because its placement hint
+        // went stale under it. Said, so a restore whose claims miss shows in
+        // the log rather than silently landing everything on focus.
+        let claimed = claim.and_then(|tok| self.layout.consume_claim(tok));
+        if claim.is_some() && claimed.is_none() {
+            say!("tapestryd: surface {} claim unmatched; focus placement", n);
+        }
+        let hosted = match claimed {
+            Some(slot) => self
+                .layout
+                .host_into(n, slot)
+                .or_else(|| self.layout.host(n)),
+            None => self.layout.host(n),
+        };
+        if hosted.is_none() {
             say!("tapestryd: surface {} unhosted (pane table full)", n);
         }
         self.reconcile();
@@ -1279,6 +4461,33 @@ impl Comp {
     /// E_INVAL; prior reweave still draining -> E_AGAIN (the <=2-gens
     /// bound: present a frame, then re-ack).
     fn resize_ack(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
+        let r = self.resize_ack_inner(n, w, h, serial);
+        if cfg!(feature = "test-mode") && r.is_err() {
+            // The client sees one Rwrite error; the state that decided it
+            // (stale vs no offer vs echo mismatch vs draining) is only
+            // visible here.
+            let st = self.surf(n).map(|s| {
+                (
+                    s.cfg_serial,
+                    s.offered,
+                    s.weave.is_some(),
+                    s.old_weave.is_some(),
+                )
+            });
+            say!(
+                "tapestryd: resize-ack {} {}x{} serial {} refused {:?} state {:?}",
+                n,
+                w,
+                h,
+                serial,
+                r,
+                st
+            );
+        }
+        r
+    }
+
+    fn resize_ack_inner(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
         let s = self.surf(n).ok_or(p9::E_BADF)?;
         if s.weave.is_none() {
             return Err(p9::E_INVAL); // no generation to reweave
@@ -1288,7 +4497,11 @@ impl Comp {
             // u16 compare; serial spaces are tiny per surface lifetime.
             // A wrap-straddling stale reads as "unknown" -- fail-closed
             // either way (both are rejections).
-            return Err(if serial < s.cfg_serial { E_AGAIN } else { p9::E_INVAL });
+            return Err(if serial < s.cfg_serial {
+                E_AGAIN
+            } else {
+                p9::E_INVAL
+            });
         }
         if w != ow || h != oh {
             return Err(p9::E_INVAL); // the ack must echo the offer
@@ -1304,17 +4517,18 @@ impl Comp {
 
         // Reweave: mint the new generation FIRST (a failure leaves the
         // current one untouched and the offer standing for a retry).
-        let (weave, slot_stride, res) = self.alloc_weave(w, h)?;
+        let (weave, slot_stride, res_ids, comp_attached) = self.alloc_weave(n, w, h)?;
         let s = self.surf_mut(n).unwrap();
         let old = s.weave.take().unwrap();
-        let old_res = s.resource_id;
+        let old_res = s.res_ids;
         s.old_weave = Some((old, old_res));
         s.weave = Some(weave);
-        s.resource_id = res;
+        s.res_ids = res_ids;
+        s.comp_attached = comp_attached;
         s.w = w;
         s.h = h;
         s.slot_stride = slot_stride;
-        s.res_stale = true; // the fresh resource has no content yet
+        s.res_stale = [true; WEAVE_SLOTS as usize]; // the fresh resource has no content yet
         s.offered = None;
         // Defensive (mode-machine-unreachable: Direct(n) implies the
         // surface was display-sized, which implies any outstanding offer
@@ -1325,11 +4539,139 @@ impl Comp {
         if self.scanout == Scanout::Direct(n) {
             self.scanout = Scanout::Off;
             self.pending_direct = Some(n);
+            // Round-5 F3: a pending episode starts HERE too -- without the
+            // reset, a flag latched by a prior episode silences this one's
+            // refusal say (the round-4 F4 rule: reset at EVERY episode
+            // start). Mode-machine-unreachable today (display geometry is
+            // read once at gpu init); live the day display resize lands.
+            self.pending_bind_refused_said = false;
         }
         // The new size feeds the scanout-mode predicate (a letterboxed
         // single leaf acking up to display size becomes Direct-eligible).
         self.reconcile();
         Ok(())
+    }
+
+    /// Warp-C C-2: mint the compositor's own virgl context, once, if the host
+    /// has GL. Returns whether it is live.
+    ///
+    /// Deliberately NOT fatal when absent or when CTX_CREATE fails: 4.5.9 makes
+    /// the CPU-composed path permanent, so "no compositor context" is a normal
+    /// operating state (every non-GL host, and bare metal, where virgl is a
+    /// virtualization transport with nothing to negotiate) rather than an error
+    /// to report. The one thing it must never do is leave `comp_ctx` true on a
+    /// failed create -- a later blit against a context the host never built is
+    /// the failure this whole arc is trying to make impossible to reach
+    /// silently, since a refused stream reports SUCCESS (4.5.4a).
+    /// Report the composed-path posture once at startup, and mint the context
+    /// if the host has GL.
+    ///
+    /// This is deliberately NOT hung off the composed-scanout path where the
+    /// other display resources are built. It was, and the line never printed:
+    /// `ensure_screen` runs only under `Scanout::Composed`, a state a normal
+    /// boot does not enter, so the report sat behind an unconstructed state and
+    /// said nothing on the one host whose posture most needed saying. Which
+    /// composition path is AVAILABLE is a property of the host, fixed at
+    /// feature negotiation -- so it is reported where the host is brought up.
+    pub fn report_composed_posture(&mut self) {
+        if self.ensure_comp_ctx() {
+            say!(
+                "tapestryd: composed path = GPU (compositor ctx {})",
+                COMPOSITOR_CTX
+            );
+            // C-2c: the context's own mark/sentinel pair -- the instrument
+            // every import verdict is read through. Built once, held for the
+            // process lifetime like the context itself; a failed build
+            // degrades every import to SKIPPED (fail closed), never the
+            // composed path. Built AFTER the posture line, and reported on
+            // its OWN line: the mint costs device round trips, and the first
+            // measured run showed the posture line -- a gate anchor -- torn
+            // byte-wise by the kernel's `proc: orphan` burst at warden's
+            // exit when it was printed after the mint (the console TX ring
+            // is byte-atomic, not line-atomic; every concurrent writer pair
+            // tears). Printing the anchor first keeps the timing the anchor
+            // had; the armed line is a record, and a witnessed import
+            // implies it anyway.
+            self.comp_probe = self.warp_probe_build(COMPOSITOR_CTX);
+            match self.comp_probe.as_ref() {
+                Some(p) => say!(
+                    "tapestryd: comp-attach witness armed (probe res {},{})",
+                    p.mark_res, p.sent_res
+                ),
+                None => say!(
+                    "tapestryd: comp-attach witness UNAVAILABLE (probe build failed) -- imports stay unattached"
+                ),
+            }
+            // Warp-C C-3: measure the renderer's blit conventions on
+            // throwaway contexts, then say which composed-PIXEL path this
+            // host gets. Its own line, after the anchors, like the witness.
+            self.comp_conv = if self.comp_probe.is_some() {
+                self.comp_measure_conventions()
+            } else {
+                None
+            };
+            let cc = |c: Option<ClassConv>| -> String {
+                match c {
+                    Some(c) => alloc::format!(
+                        "{} sf{} df{}",
+                        Self::variant_name(c.variant),
+                        c.src_flip as u32,
+                        c.dst_flip as u32
+                    ),
+                    None => String::from("CPU"),
+                }
+            };
+            match self.comp_conv {
+                Some(c) => say!(
+                    "tapestryd: composed pixels = GPU (blit conv: slot U {}, S {}; bo U {}, S {})",
+                    cc(c.slot_u),
+                    cc(c.slot_s),
+                    cc(c.bo_u),
+                    cc(c.bo_s)
+                ),
+                None => say!(
+                    "tapestryd: composed pixels = CPU (blit conventions not established) -- GPU composition OFF"
+                ),
+            }
+            // Warp-C C-4: the health verify's own BUFFER pair (see
+            // `warp_hprobe_build`), after the anchors like everything else
+            // that costs round trips.
+            if self.comp_conv.is_some() {
+                self.comp_hprobe = self.warp_hprobe_build(COMPOSITOR_CTX);
+                match self.comp_hprobe.as_ref() {
+                    Some(p) => say!(
+                        "tapestryd: comp-health verify on buffer pair (res {},{}), period {} ticks",
+                        p.mark_res, p.sent_res, HEALTH_PERIOD
+                    ),
+                    None => say!(
+                        "tapestryd: comp-health verify on the TEXTURE pair (buffer pair mint failed), period {} ticks",
+                        HEALTH_PERIOD
+                    ),
+                }
+            }
+        } else {
+            say!(
+                "tapestryd: composed path = CPU (virgl={}); comp-attach: skipped (no compositor ctx)",
+                self.gpu.virgl as u32
+            );
+            say!("tapestryd: composed pixels = CPU (no compositor ctx)");
+        }
+    }
+
+    fn ensure_comp_ctx(&mut self) -> bool {
+        if self.comp_ctx {
+            return true;
+        }
+        if !self.gpu.virgl {
+            return false;
+        }
+        if self.gpu.ctx_create(COMPOSITOR_CTX, b"tapestry").is_err() {
+            say!("tapestryd: compositor ctx create failed -- staying on the CPU composed path");
+            return false;
+        }
+        self.comp_ctx = true;
+        say!("tapestryd: compositor ctx {} up (virgl)", COMPOSITOR_CTX);
+        true
     }
 
     /// Allocate the compositor's screen buffer + resource (lazy; replaced
@@ -1357,7 +4699,11 @@ impl Comp {
         let handle =
             unsafe { t_dma_create_weave(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if handle < 0 {
-            say!("tapestryd: screen t_dma_create_weave({}) failed {}", size, handle);
+            say!(
+                "tapestryd: screen t_dma_create_weave({}) failed {}",
+                size,
+                handle
+            );
             return None;
         }
         let va = self.weave_va_next;
@@ -1371,18 +4717,155 @@ impl Comp {
         // mode change -- never a prior occupant's bytes.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
         let res = self.next_res_id();
-        if self.gpu.resource_create_2d(res, dw, dh).is_err() {
-            unsafe { t_burrow_detach(va, size) };
-            unsafe { t_close(handle) };
-            return None;
+        // Warp-C C-2b: where the host has GL, the screen becomes a 3D resource
+        // owned by the compositor's own context -- the object C-3's per-frame
+        // VIRGL_CCMD_BLITs will compose INTO. Same shape as the audited
+        // warp_probe_res mint (create_3d -> ctx_attach -> attach_backing).
+        //
+        // The guest backing stays on BOTH paths. At C-2b the screen is still
+        // CPU-filled by blit_composed_pixels; only its host-side representation
+        // changes, so the pixels must still have somewhere to land. C-3 is what
+        // deletes the CPU fill.
+        //
+        // A 3D failure is NOT fatal -- it falls back to the 2D resource. 4.5.9:
+        // the CPU path is permanent, so every GL step degrades into it rather
+        // than failing the display.
+        //
+        // THE DEVICE'S OK IS NOT THE RENDERER'S VERDICT. QEMU's virgl path
+        // (v10.0.0 hw/display/virtio-gpu-virgl.c) answers RESP_OK_NODATA for
+        // CTX_CREATE, RESOURCE_CREATE_3D, CTX_ATTACH_RESOURCE and
+        // ATTACH_BACKING whatever virgl_renderer_* returned -- those returns
+        // are ignored -- so `.is_ok()` on each of them says only "the device
+        // parsed it". A 3D resource the renderer refused would reach the say
+        // line below as "3D" and fail SILENTLY later, at the composed bind
+        // (SET_SCANOUT is the one command whose response does consult vrend),
+        // leaving the previous scanout on the display. So the 3D word is
+        // earned by a pixel round trip through the renderer (below), the
+        // same technique as the #240 detector: the only witness a virtio-gpu
+        // response cannot fake.
+        let mut is3d = false;
+        let mut why = "";
+        if self.comp_ctx {
+            // Y_0_TOP (Warp-C C-3, 4.5.11): the screen is filled top-down --
+            // by the CPU chrome upload on every path and by same-convention
+            // slot blits on the GPU one -- and displayed like the 2D screen,
+            // which the ls-gfx pixel gates verify. C-2b minted it flags 0,
+            // the GL-native (row 0 = bottom, unflipped at scanout)
+            // convention, and a top-down CPU fill of THAT displays inverted
+            // on a GL display -- a state no gate could see (#195: no host
+            // pixel capture on the GL host). The convention probe measures
+            // what the flag actually did on this renderer.
+            let created = self
+                .gpu
+                .resource_create_3d(
+                    res,
+                    PIPE_TEXTURE_2D,
+                    VIRGL_FORMAT_B8G8R8A8_UNORM,
+                    VIRGL_BIND_RENDER_TARGET,
+                    dw,
+                    dh,
+                    1,
+                    1,
+                    0,
+                    0,
+                    VIRGL_RESOURCE_Y_0_TOP,
+                )
+                .is_ok();
+            let attached = created && self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_ok();
+            let backed = attached && self.gpu.attach_backing(res, pa as u64, size as u32).is_ok();
+            if backed && self.screen_3d_roundtrip(res, va, dw) {
+                is3d = true;
+            } else {
+                why = if !created {
+                    " -- 3D refused: create"
+                } else if !attached {
+                    " -- 3D refused: ctx attach"
+                } else if !backed {
+                    " -- 3D refused: attach backing"
+                } else {
+                    " -- 3D refused: renderer round trip"
+                };
+                // Unwind whatever the device accepted, in reverse, then
+                // fall back. A create the device accepted and a later step
+                // it did not would leave a resource behind; an unref of a
+                // never-created id is a harmless error on the device.
+                if backed {
+                    let _ = self.gpu.detach_backing(res);
+                }
+                if attached {
+                    let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, res);
+                }
+                let _ = self.gpu.resource_unref(res);
+            }
         }
-        if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
-            let _ = self.gpu.resource_unref(res);
-            unsafe { t_burrow_detach(va, size) };
-            unsafe { t_close(handle) };
-            return None;
+        if !is3d {
+            if self.gpu.resource_create_2d(res, dw, dh).is_err() {
+                unsafe { t_burrow_detach(va, size) };
+                unsafe { t_close(handle) };
+                return None;
+            }
+            if self
+                .gpu
+                .attach_backing(res, pa as u64, size as u32)
+                .is_err()
+            {
+                let _ = self.gpu.resource_unref(res);
+                unsafe { t_burrow_detach(va, size) };
+                unsafe { t_close(handle) };
+                return None;
+            }
         }
-        Some(Screen { handle, va, size, res })
+        say!(
+            "tapestryd: screen res {} {} ({}x{}){}",
+            res,
+            if is3d { "3D (compositor ctx)" } else { "2D" },
+            dw,
+            dh,
+            why
+        );
+        Some(Screen {
+            handle,
+            va,
+            size,
+            res,
+            is3d,
+        })
+    }
+
+    /// The witness behind the screen's "3D" word: a sentinel written into
+    /// the first pixels of the guest backing, TRANSFER_TO_HOST_3D'd through
+    /// the compositor context, clobbered in the backing, TRANSFER_FROM_HOST_
+    /// 3D'd back, and compared. It succeeds only if virglrenderer really
+    /// holds the resource, has it attached to COMPOSITOR_CTX, and moves
+    /// pixels through it -- none of which the device's OK responses attest.
+    /// A refused create or attach makes both transfers no-ops at the
+    /// renderer (their returns are ignored by QEMU too), so the clobber
+    /// survives and the compare fails. Restores the zeroed backing after.
+    fn screen_3d_roundtrip(&mut self, res: u32, va: u64, dw: u32) -> bool {
+        const N: usize = 16;
+        let stride = dw * 4;
+        let px = va as *mut u32;
+        let seed = |i: usize| 0xA5A5_0000u32 ^ ((i as u32) * 0x0101_0101);
+        for i in 0..N {
+            unsafe { px.add(i).write_volatile(seed(i)) };
+        }
+        let up = self
+            .gpu
+            .transfer_to_3d_sync(COMPOSITOR_CTX, res, N as u32, 1, stride)
+            .is_ok();
+        for i in 0..N {
+            unsafe { px.add(i).write_volatile(!seed(i)) };
+        }
+        let down = up
+            && self
+                .gpu
+                .transfer_from_3d_sync(COMPOSITOR_CTX, res, N as u32, 1, stride)
+                .is_ok();
+        let ok = down && (0..N).all(|i| unsafe { px.add(i).read_volatile() } == seed(i));
+        for i in 0..N {
+            unsafe { px.add(i).write_volatile(0) };
+        }
+        ok
     }
 
     /// Tear down a displaced screen generation (the release_gen order,
@@ -1392,6 +4875,9 @@ impl Comp {
     /// Composed scanout to the NEW screen first; Direct/Boot/Off never
     /// referenced it).
     fn free_screen(&mut self, s: Screen) {
+        if s.is3d {
+            let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, s.res);
+        }
         let _ = self.gpu.detach_backing(s.res);
         let _ = self.gpu.resource_unref(s.res);
         unsafe { t_burrow_detach(s.va, s.size) };
@@ -1438,12 +4924,16 @@ impl Comp {
         // stands, the OSD apply is refused (never persisted), and a
         // startup push of a too-big persisted mode is rejected so aurora
         // comes up at the default (the self-heal in aurora clears it).
-        let probe = unsafe {
-            t_dma_create_weave(surf_size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP)
-        };
+        let probe =
+            unsafe { t_dma_create_weave(surf_size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if probe < 0 {
-            say!("tapestryd: mode {}x{} refused -- surface weave {} unallocatable ({})",
-                 w, h, surf_size, probe);
+            say!(
+                "tapestryd: mode {}x{} refused -- surface weave {} unallocatable ({})",
+                w,
+                h,
+                surf_size,
+                probe
+            );
             return Err(p9::E_NOMEM);
         }
         unsafe { t_close(probe) };
@@ -1515,21 +5005,437 @@ impl Comp {
                 *px.add(i) = pane::BG_COLOR;
             }
         }
-        self.paint_borders();
-        self.paint_strips();
+        let _ = self.paint_borders(true);
+        let _ = self.paint_strips();
         self.chrome_epoch = self.layout.epoch;
     }
 
-    /// Redraw ONLY the 1px leaf frames (focus ring moves must not blank
-    /// idle clients' content).
-    fn paint_borders(&mut self) {
-        let dw = self.gpu.width as u64;
+    /// Redraw the Daylight pane chrome (HALCYON-VISUAL section 2) for every
+    /// visible leaf: the NNW single-light-source 2px four-value bevel + the
+    /// 1px inner hairline + the outer floor gap, all in the `inset`-wide ring
+    /// between `rect` and `content`, plus the cast shadow under the focused
+    /// leaf (section 5.4). Returns the ring rects it painted so a focus-only
+    /// repaint can upload exactly those (Warp-C C-3): on the GPU composed
+    /// path the screen BUFFER holds chrome but not client pixels, so a
+    /// whole-buffer push here would blank every pane. The bevel is UNIFORM
+    /// (section 2.1/5.1 -- it marks a pane, never a focused one); focus shows
+    /// only in the cast shadow here and the strip highlight (paint_strips).
+    /// H-3b-4: record a tile's status and, when it is the live tile on the
+    /// composed screen, repaint the rings (the status-keyed content
+    /// hairline + the cast shadow) and push just those rects -- the
+    /// focus-only discipline (a whole-buffer push would blank the
+    /// GPU-composed panes). A status on a tile that is not live changes
+    /// nothing on screen: the key is shown by focus, and the next focus
+    /// epoch's repaint reads it.
+    fn set_tile_status(&mut self, slot: usize, st: Status) {
+        match self.layout.get_mut(slot) {
+            Some(p) if p.status != st => p.status = st,
+            _ => return,
+        }
+        if self.scanout == Scanout::Composed && slot == self.layout.focused {
+            let rects = self.paint_borders(false);
+            for r in rects {
+                self.screen_push(r);
+            }
+        }
+    }
+
+    // ---- H-3c: the menu (HALCYON.md 13.6 "Menus -- THE GATE") -------------
+
+    /// Place menu surface `n` at display point (x, y): clamp its rect into
+    /// the display, make it THE menu (a previously placed one is dismissed
+    /// first -- one at a time), force Composed, and ask the owner for its
+    /// frame (a present before the place composed nowhere).
+    fn menu_place(&mut self, n: usize, x: u32, y: u32) -> Result<(), u32> {
+        let (sw, sh, gen) = match self.surf(n) {
+            Some(s) if s.is_menu && s.weave.is_some() => (s.w, s.h, s.gen),
+            _ => return Err(p9::E_NOENT),
+        };
+        // The same surface placed again (a move): its old rect is healed
+        // below, after the new placement composes (SA-1).
+        let old_rect = match self.menu {
+            Some(m) if m.n == n => Some(m.rect),
+            _ => None,
+        };
+        if self.menu.map_or(false, |m| m.n != n) {
+            self.menu_dismiss("replaced");
+        }
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let w = sw.min(dw);
+        let h = sh.min(dh);
+        let x = x.min(dw - w);
+        let y = y.min(dh - h);
+        let rect = Rect { x, y, w, h };
+        self.menu = Some(MenuState { n, gen, rect });
+        say!("tapestryd: menu {} placed at {},{} {}x{}", n, x, y, w, h);
+        self.reconcile();
+        if !self.emit_configure_to(n, sw, sh) {
+            self.retire(n);
+        }
+        if let Some(o) = old_rect {
+            self.menu_heal(o);
+        }
+        Ok(())
+    }
+
+    /// Compositor-owned dismiss: retire the placed menu's surface. `retire`
+    /// carries the unplace + the heal, so every dismiss path -- this one
+    /// (Esc / click-away / a chord / the owner's verb / a replacement), the
+    /// owner's ctl `destroy`, its conn's death, a WEDGE -- converges on the
+    /// one mechanism, and none of them needs the owner to cooperate.
+    fn menu_dismiss(&mut self, reason: &'static str) -> bool {
+        let m = match self.menu {
+            Some(m) => m,
+            None => return false,
+        };
+        self.menu_reason = reason;
+        self.retire(m.n);
+        if self.menu.map_or(false, |x| x.n == m.n) {
+            // The slot was already empty (retire returned before its arm):
+            // unplace + heal here so the grab can never outlive the surface.
+            self.menu = None;
+            self.menu_reason = "retire";
+            self.menu_heal(m.rect);
+        }
+        true
+    }
+
+    /// Fill a screen-BUFFER rect (clipped to the display). Buffer only; the
+    /// caller pushes.
+    fn fill_rect(&mut self, r: Rect, color: u32) {
         let va = match &self.screen {
             Some(s) => s.va,
             None => return,
         };
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let r = r.intersect(Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        });
+        if r.is_empty() {
+            return;
+        }
+        let px = va as *mut u32;
+        // SAFETY: clipped to the display; the buffer covers the display.
+        unsafe {
+            for y in r.y..r.y + r.h {
+                for x in r.x..r.x + r.w {
+                    *px.add((y as u64 * dw as u64 + x as u64) as usize) = color;
+                }
+            }
+        }
+    }
+
+    /// Heal the screen under a dismissed menu's rect `r` WITHOUT a structural
+    /// repaint (which blanks every pane until each re-presents -- a whole-
+    /// screen flash per menu). The compositor's own pixels are repainted and
+    /// pushed within the rect (rings + strips via the painters; the resting
+    /// tag-bar fill; the floor under an empty leaf), and every surface whose
+    /// target intersects the rect gets the same-size CONFIGURE -- the redraw
+    /// request every reveal already heals by. Rio's save-under was rejected:
+    /// on the GPU composed path the screen BUFFER holds no client pixels, so
+    /// a save-under would restore chrome and blank content there, and both
+    /// paths must behave identically from outside (GPU-DESIGN 4.5.9).
+    fn menu_heal(&mut self, r: Rect) {
+        if r.is_empty() {
+            return;
+        }
+        if self.screen.is_some() {
+            let mut rects = self.paint_borders(false);
+            rects.extend(self.paint_strips());
+            for pr in rects {
+                let i = pr.intersect(r);
+                if !i.is_empty() {
+                    self.screen_push(i);
+                }
+            }
+            let mut fills: Vec<(Rect, u32)> = Vec::new();
+            for (slot, _id) in self.layout.live_ids() {
+                let p = match self.layout.get(slot) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if !p.visible || !self.layout.is_leaf(slot) {
+                    continue;
+                }
+                let tb = p.tagbar.intersect(r);
+                if !tb.is_empty() {
+                    fills.push((tb, libhalcyon::theme::DAYLIGHT.header));
+                }
+                match &p.kind {
+                    pane::Kind::Leaf { surface: None } => {
+                        let c = p.content.intersect(r);
+                        if !c.is_empty() {
+                            fills.push((c, pane::BG_COLOR));
+                        }
+                    }
+                    // The bars around a letterboxed or cropped surface are
+                    // the compositor's floor, which its client can never
+                    // repaint (SA-7); the placement itself heals by the
+                    // client's redraw CONFIGURE below.
+                    pane::Kind::Leaf { surface: Some(n) } => {
+                        let c = p.content;
+                        let inner = self.placement_rect(*n, c).unwrap_or(Rect::ZERO);
+                        for bar in Self::bars_around(c, inner) {
+                            let b = bar.intersect(r);
+                            if !b.is_empty() {
+                                fills.push((b, pane::BG_COLOR));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // H-3d: the menu clamp uses the full display, so a menu can overlap
+            // the status strip. The tag bars above heal immediately (a fill +
+            // push); the strip must too, or the dismissed menu's pixels linger
+            // there until the bar's own redraw CONFIGURE lands a pass later.
+            // status_bg is the bar's Clear colour, so the strip reads
+            // correct-minus-glyphs at once; the CONFIGURE fan below repaints the
+            // glyphs (visible_chrome includes the bar).
+            if let Some(sr) = self.status_rect() {
+                let i = sr.intersect(r);
+                if !i.is_empty() {
+                    fills.push((i, libhalcyon::theme::DAYLIGHT.status_bg));
+                }
+            }
+            for (fr, color) in fills {
+                self.fill_rect(fr, color);
+                self.screen_push(fr);
+            }
+        }
+        let mut wedged: Vec<usize> = Vec::new();
+        for (_, n, c) in self.layout.visible_hosted() {
+            // d-1b: a backgrounded SYSTEM leaf is not composited/reconfigured.
+            if self.surf(n).map_or(false, |s| s.backgrounded) {
+                continue;
+            }
+            if !c.intersect(r).is_empty() && !self.emit_configure_to(n, c.w, c.h) {
+                wedged.push(n);
+            }
+        }
+        for (n, t) in self.visible_chrome() {
+            if !t.intersect(r).is_empty() && !self.emit_configure_to(n, t.w, t.h) {
+                wedged.push(n);
+            }
+        }
+        for n in wedged {
+            self.retire(n);
+        }
+    }
+
+    /// A hosted surface's placement inside its pane's content rect -- THE
+    /// SAME map `compose_geometry` composes by: the crop (content origin,
+    /// surface extent) for a same-size or accumulator client, the letterbox
+    /// rect otherwise. None = nothing showable.
+    fn placement_rect(&self, n: usize, content: Rect) -> Option<Rect> {
+        let s = self.surf(n)?;
+        if s.w == 0 || s.h == 0 || content.w == 0 || content.h == 0 {
+            return None;
+        }
+        if s.patchwork || (s.w == content.w && s.h == content.h) {
+            return Some(Rect {
+                x: content.x,
+                y: content.y,
+                w: s.w.min(content.w),
+                h: s.h.min(content.h),
+            });
+        }
+        let (ox, oy, dw2, dh2) = Self::letterbox(s.w, s.h, content.w, content.h);
+        Some(Rect {
+            x: content.x + ox,
+            y: content.y + oy,
+            w: dw2,
+            h: dh2,
+        })
+    }
+
+    /// The four bands of `outer` around `inner` (top, bottom, left, right;
+    /// empty ones included) -- the floor a client's placement leaves bare.
+    fn bars_around(outer: Rect, inner: Rect) -> [Rect; 4] {
+        if inner.is_empty() {
+            return [outer, Rect::ZERO, Rect::ZERO, Rect::ZERO];
+        }
+        let ox1 = outer.x + outer.w;
+        let oy1 = outer.y + outer.h;
+        let ix1 = inner.x + inner.w;
+        let iy1 = inner.y + inner.h;
+        [
+            Rect {
+                x: outer.x,
+                y: outer.y,
+                w: outer.w,
+                h: inner.y.saturating_sub(outer.y),
+            },
+            Rect {
+                x: outer.x,
+                y: iy1.min(oy1),
+                w: outer.w,
+                h: oy1.saturating_sub(iy1),
+            },
+            Rect {
+                x: outer.x,
+                y: inner.y,
+                w: inner.x.saturating_sub(outer.x),
+                h: inner.h,
+            },
+            Rect {
+                x: ix1.min(ox1),
+                y: inner.y,
+                w: ox1.saturating_sub(ix1),
+                h: inner.h,
+            },
+        ]
+    }
+
+    /// Compose every visible hosted surface's last-presented slot into the
+    /// screen BUFFER at its current placement -- the structural repaint's
+    /// pre-fill (SA-6), so the display shows each client's last frame at
+    /// the bind instead of a blank pane until its redraw CONFIGURE lands.
+    /// Reads a slot outside its present dispatch: the one the client
+    /// presented last, which the direct-scanout contract already forbids it
+    /// to write until a later present moves on -- a client that breaks it
+    /// shows itself torn for one frame, nobody else. A GL adoption has no
+    /// guest-visible pixels (its frame is host-side) and a held (test-mode
+    /// HOLD) slot stays unshown, as `release` promises.
+    fn prefill_from_shown(&mut self) {
+        for (_, n, _) in self.layout.visible_hosted() {
+            // d-1b: a backgrounded SYSTEM leaf contributes no composed pixels.
+            if self.surf(n).map_or(false, |s| s.backgrounded) {
+                continue;
+            }
+            if self.gl_adoption(n).is_some() {
+                continue;
+            }
+            let (slot, w, h) = match self.surf(n) {
+                Some(s) if s.held.is_none() => match (s.shown_slot, &s.weave) {
+                    (Some(sl), Some(_)) => (sl, s.w, s.h),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let _ = self.blit_composed_pixels(n, slot, 0, 0, w, h, None);
+        }
+    }
+
+    /// The menu composes LAST: re-compose the placed menu's shown slot into
+    /// the screen buffer wherever a screen write `r` lands under it, and
+    /// return the intersection for the caller to push. Called by every
+    /// device-visible step (`screen_push` before its upload, the GPU path's
+    /// flush, the full flush), so a client present or a chrome repaint under
+    /// the menu can never paint over it -- on either path, by one mechanism.
+    fn menu_reassert(&mut self, r: Rect) -> Option<Rect> {
+        let m = self.menu?;
+        let inter = r.intersect(m.rect);
+        if inter.is_empty() {
+            return None;
+        }
+        let (sw, sh, slot_stride, va, slot) = match self.surf(m.n) {
+            Some(s) if s.gen == m.gen => match (&s.weave, s.shown_slot) {
+                (Some(w), Some(slot)) => (s.w, s.h, s.slot_stride, w.va, slot),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // Menu-relative source: the rect may be smaller than the surface
+        // (a menu larger than the display crops).
+        let src = Rect {
+            x: inter.x - m.rect.x,
+            y: inter.y - m.rect.y,
+            w: inter.w,
+            h: inter.h,
+        }
+        .intersect(Rect {
+            x: 0,
+            y: 0,
+            w: sw,
+            h: sh,
+        });
+        if src.is_empty() {
+            return None;
+        }
+        let op = ComposeOp {
+            src,
+            dst: Rect {
+                x: m.rect.x + src.x,
+                y: m.rect.y + src.y,
+                w: src.w,
+                h: src.h,
+            },
+        };
+        self.compose_cpu(op, va + (slot as u64) * slot_stride, sw, sh);
+        Some(op.dst)
+    }
+
+    /// The `ctl` read's menu line: `none` or `<n> <x> <y> <w> <h>`.
+    fn menu_text(&self) -> String {
+        match self.menu {
+            None => String::from("none"),
+            Some(m) => alloc::format!(
+                "{} {} {} {} {}",
+                m.n,
+                m.rect.x,
+                m.rect.y,
+                m.rect.w,
+                m.rect.h
+            ),
+        }
+    }
+
+    fn paint_borders(&mut self, fill_tagbars: bool) -> Vec<Rect> {
+        use libhalcyon::theme::{DAYLIGHT as D, METRICS as M};
+        let mut painted: Vec<Rect> = Vec::new();
+        let dw = self.gpu.width as u64;
+        let va = match &self.screen {
+            Some(s) => s.va,
+            None => return painted,
+        };
         let px = va as *mut u32;
         let focused = self.layout.focused;
+        let bevel = M.bevel as u32;
+        let hair = M.hairline as u32;
+        // H-3d: the status strip's resting fill (`status_bg`, Daylight 6):
+        // the bar is dark from the carve on, before and between the
+        // renderer's presents (its OPAQUE Role::Status surface composites on
+        // top). STRUCTURAL repaints only, as the tag bars: a focus-only
+        // repaint must not paint over the bar's pixels (the strip is its
+        // target rect).
+        if fill_tagbars {
+            if let Some(sr) = self.status_rect() {
+                for y in sr.y..sr.y + sr.h {
+                    for x in sr.x..sr.x + sr.w {
+                        unsafe {
+                            *px.add((y as u64 * dw + x as u64) as usize) = D.status_bg;
+                        }
+                    }
+                }
+                painted.push(sr);
+            }
+        }
+        // The ring colour, given the four per-edge distances of a ring pixel.
+        // The bevel band mitres by the NEAREST edge, horizontal winning ties
+        // -- the top-weighted 45deg corner (section 2.1/2.2). `floor_w` = the
+        // outer floor band; then 2px bevel; then the 1px hairline.
+        let ring_color = |dl: u32, dr: u32, dt: u32, db: u32, floor_w: u32| -> u32 {
+            let d = dl.min(dr).min(dt).min(db);
+            if d < floor_w {
+                D.floor
+            } else if d < floor_w + bevel {
+                if dt == d {
+                    D.bevel_top
+                } else if db == d {
+                    D.bevel_bottom
+                } else if dl == d {
+                    D.bevel_left
+                } else {
+                    D.bevel_right
+                }
+            } else {
+                D.header // the inner hairline (section 2.4, == header)
+            }
+        };
         for (slot, _id) in self.layout.live_ids() {
             let p = match self.layout.get(slot) {
                 Some(p) => p,
@@ -1538,45 +5444,159 @@ impl Comp {
             if !p.visible || !self.layout.is_leaf(slot) || p.rect == p.content {
                 continue;
             }
-            let color = if slot == focused {
-                pane::FOCUS_COLOR
-            } else {
-                pane::BORDER_COLOR
-            };
             let r = p.rect;
-            // SAFETY: the geometry pass bounds every visible rect inside
-            // the display; the buffer covers the display.
-            unsafe {
-                for x in r.x..r.x + r.w {
-                    *px.add((r.y as u64 * dw + x as u64) as usize) = color;
-                    *px.add(((r.y + r.h - 1) as u64 * dw + x as u64) as usize) = color;
+            // The ring width is symmetric (content is inset equally on all
+            // four sides); floor_w = ring - bevel - hairline = the `gaps`.
+            let inset = p.content.x.saturating_sub(r.x);
+            let floor_w = inset.saturating_sub(bevel + hair);
+            let x1 = r.x + r.w; // exclusive
+            let y1 = r.y + r.h;
+            // Paint the four ring bands (corners double-covered by adjacent
+            // bands -- idempotent, ring_color depends only on absolute
+            // position). SAFETY: the geometry pass bounds every visible rect
+            // inside the display; the buffer covers the display.
+            // H-3b-4 (HALCYON-VISUAL 5.3): the LIVE tile -- the focused
+            // leaf, the one tile holding input -- gets its inner hairline
+            // re-keyed by its recorded status: sage (exit 0, or nothing has
+            // run yet), cinnabar (last exit non-zero). The key runs alongside
+            // the CONTENT: left, right, and the bottom row, which is the cast
+            // shadow's dark half (5.4) above H-3a-2's lighter `border` row.
+            // Alongside the TAG BAR (the top row + the flanks of the strip)
+            // the hairline takes the bar's tint instead, so it still vanishes
+            // into the bar as 2.4 intends: the bar is tinted, the content is
+            // outlined, and the separator between them (the bar owner's
+            // bottom row) is the key. A bar-less live tile (too small to
+            // carve) is outlined on all four sides. Every other tile keeps
+            // the uniform `header` hairline: no status shows where input is
+            // not.
+            let live: Option<(u32, u32)> = if slot == focused {
+                let k = match p.status {
+                    Status::Err => &D.cinnabar,
+                    _ => &D.sage,
+                };
+                Some((k.key, k.tint))
+            } else {
+                None
+            };
+            let hair_d = floor_w + bevel;
+            let tb = p.tagbar;
+            let content_y = p.content.y;
+            let band = |bx0: u32, by0: u32, bx1: u32, by1: u32| {
+                for y in by0..by1 {
+                    let dt = y - r.y;
+                    let db = (y1 - 1) - y;
+                    for x in bx0..bx1 {
+                        let dl = x - r.x;
+                        let dr = (x1 - 1) - x;
+                        let d = dl.min(dr).min(dt).min(db);
+                        let c = match live {
+                            Some((key, tint)) if d == hair_d => {
+                                if !tb.is_empty() && y < content_y {
+                                    tint
+                                } else {
+                                    key
+                                }
+                            }
+                            _ => ring_color(dl, dr, dt, db, floor_w),
+                        };
+                        unsafe {
+                            *px.add((y as u64 * dw + x as u64) as usize) = c;
+                        }
+                    }
                 }
-                for y in r.y..r.y + r.h {
-                    *px.add((y as u64 * dw + r.x as u64) as usize) = color;
-                    *px.add((y as u64 * dw + (r.x + r.w - 1) as u64) as usize) = color;
+            };
+            band(r.x, r.y, x1, r.y + inset); // top
+            band(r.x, y1 - inset, x1, y1); // bottom
+            band(r.x, r.y, r.x + inset, y1); // left
+            band(x1 - inset, r.y, x1, y1); // right
+                                           // The cast shadow (section 5.4): a 1px `border` line at the
+                                           // focused leaf's innermost bottom floor row, spanning the pane
+                                           // body, downward only. Overpaints that floor row -> the two-tone
+                                           // (dark bevel_bottom above, this lighter line, then floor). Owned
+                                           // by the tile (its own ring), so last-in-stack is handled and no
+                                           // neighbour border is borrowed. Needs a floor row (floor_w >= 1);
+                                           // a zero-gap config skips it (focus still shows in the strip +
+                                           // the H-3b status key).
+            if slot == focused && floor_w >= 1 {
+                let sy = y1 - floor_w; // innermost floor row (d == floor_w-1)
+                for x in (r.x + floor_w)..(x1 - floor_w) {
+                    unsafe {
+                        *px.add((sy as u64 * dw + x as u64) as usize) = D.border;
+                    }
                 }
             }
+            // The Daylight tag bar (HALCYON-VISUAL section 4): the resting
+            // fallback -- fill the `header_h` strip at the leaf's content top
+            // with the tag-bar background (`header`, == the hairline colour, so
+            // hairline+strip read as one header band). halcyond's OPAQUE
+            // Role::Chrome surface composites ON TOP when present (H-3b-3);
+            // absent it (aurora, or before halcyond binds) the strip is never
+            // bare BG_COLOR. Inside the ring, above `content` -- disjoint from
+            // the bands and the shadow. STRUCTURAL repaints only
+            // (`fill_tagbars`): a focus-only repaint changes nothing in the
+            // strip, and refilling + pushing it there would paint over a
+            // chrome surface's pixels (the strip is its target rect).
+            let tb = p.tagbar;
+            if fill_tagbars && !tb.is_empty() {
+                for y in tb.y..tb.y + tb.h {
+                    for x in tb.x..tb.x + tb.w {
+                        unsafe {
+                            *px.add((y as u64 * dw + x as u64) as usize) = D.header;
+                        }
+                    }
+                }
+                painted.push(tb);
+            }
+            painted.push(Rect {
+                x: r.x,
+                y: r.y,
+                w: r.w,
+                h: inset,
+            });
+            painted.push(Rect {
+                x: r.x,
+                y: y1 - inset,
+                w: r.w,
+                h: inset,
+            });
+            painted.push(Rect {
+                x: r.x,
+                y: r.y,
+                w: inset,
+                h: r.h,
+            });
+            painted.push(Rect {
+                x: x1 - inset,
+                y: r.y,
+                w: inset,
+                h: r.h,
+            });
         }
+        painted
     }
 
     /// Paint the tab/stack indicator strips (G-6c; D7 glyph-free -- pure
-    /// colored segments, never text, never client memory). Tabbed: one
-    /// strip row split into per-child segments (1px gap); stacked: one
-    /// full-width row per child. The active child's segment lights
-    /// FOCUS_COLOR when the focused leaf is inside it, ACTIVE_COLOR
-    /// otherwise; the rest are BORDER_COLOR. Repainted with the borders
-    /// on focus-only epochs (the highlight follows focus).
-    fn paint_strips(&mut self) {
+    /// colored segments, never text, never client memory; H-3b replaces this
+    /// placeholder with halcyond's real Daylight tag bar). Tabbed: one strip
+    /// row split into per-child segments (1px gap); stacked: one full-width
+    /// row per child. The active child's segment lights the Daylight ember
+    /// when the focused leaf is inside it, ember_deep otherwise (HALCYON-VISUAL
+    /// section 4.2 active-tile keys); the rest are `header` (resting tag-bar
+    /// background). Repainted with the borders on focus-only epochs (the
+    /// highlight follows focus).
+    fn paint_strips(&mut self) -> Vec<Rect> {
+        let mut painted: Vec<Rect> = Vec::new();
         let dw = self.gpu.width as u64;
         let va = match &self.screen {
             Some(s) => s.va,
-            None => return,
+            None => return painted,
         };
         let px = va as *mut u32;
-        let fill = |r: Rect, color: u32| {
+        let mut fill = |r: Rect, color: u32| {
             if r.is_empty() {
                 return;
             }
+            painted.push(r);
             // SAFETY: strip areas lie inside their container's rect,
             // which the geometry pass bounds inside the display.
             unsafe {
@@ -1594,14 +5614,15 @@ impl Comp {
                 continue;
             }
             let seg_color = |i: usize| {
+                use libhalcyon::theme::DAYLIGHT as D;
                 if i == active {
                     if hot == Some(children[i]) {
-                        pane::FOCUS_COLOR
+                        D.ember
                     } else {
-                        pane::ACTIVE_COLOR
+                        D.ember_deep
                     }
                 } else {
-                    pane::BORDER_COLOR
+                    D.header
                 }
             };
             match mode {
@@ -1609,14 +5630,26 @@ impl Comp {
                     let each = area.w / n;
                     let mut x = area.x;
                     for (i, _) in children.iter().enumerate() {
-                        let w = if i as u32 == n - 1 { area.x + area.w - x } else { each };
+                        let w = if i as u32 == n - 1 {
+                            area.x + area.w - x
+                        } else {
+                            each
+                        };
                         let gap = if i as u32 == n - 1 || w == 0 { 0 } else { 1 };
-                        fill(Rect { x, y: area.y, w: w - gap, h: area.h }, seg_color(i));
+                        fill(
+                            Rect {
+                                x,
+                                y: area.y,
+                                w: w - gap,
+                                h: area.h,
+                            },
+                            seg_color(i),
+                        );
                         x += w;
                     }
                 }
                 Mode::Stacked => {
-                    let row_h = pane::TAB_STRIP_H;
+                    let row_h = libhalcyon::theme::METRICS.tab_strip_h as u32;
                     for (i, _) in children.iter().enumerate() {
                         fill(
                             Rect {
@@ -1632,6 +5665,8 @@ impl Comp {
                 _ => {}
             }
         }
+        drop(fill);
+        painted
     }
 
     /// A signature of the visible leaf geometry (FNV-1a over id + content
@@ -1654,6 +5689,21 @@ impl Comp {
             let c = p.content;
             fold((c.x as u64) << 32 | c.y as u64);
             fold((c.w as u64) << 32 | c.h as u64);
+            if let pane::Kind::Leaf { surface } = &p.kind {
+                // What a leaf SHOWS is geometry too: a hosting into an
+                // already-split empty leaf changes no rect, and a signature
+                // over rects alone runs that pass non-structural -- the
+                // CONFIGURE fan the new surface needs never fires. The
+                // incarnation (slot, gen) rather than the slot, so a
+                // retire-and-rehost of one slot inside a single pass still
+                // reads as a change.
+                fold(match surface {
+                    Some(n) => {
+                        ((*n as u64) << 32) | self.surf(*n).map_or(u32::MAX, |s| s.gen) as u64
+                    }
+                    None => u64::MAX,
+                });
+            }
         }
         h
     }
@@ -1665,8 +5715,13 @@ impl Comp {
             Some(s) => s.res,
             None => return,
         };
-        let _ = self.gpu.transfer(res, 0, 0, 0, dw, dh);
-        let _ = self.gpu.flush(res, 0, 0, dw, dh);
+        self.menu_reassert(Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        });
+        let _ = self.gpu.transfer_then_flush(res, 0, 0, 0, dw, dh);
     }
 
     /// Reconcile scanout + chrome with the layout (run after every layout
@@ -1677,22 +5732,194 @@ impl Comp {
     ///   - anything else visible (splits, letterbox, empty panes) ->
     ///     Composed (the screen resource scans out; presents blit);
     ///   - nothing at all -> Off (Boot stays untouched pre-first-content).
+    /// The H-3b round R2-F3: a chrome surface whose bound pane closed is
+    /// TOLD (TEV_CLOSE, the request a hosted surface gets) and unbound, so
+    /// its owner learns through the surface's own stream instead of the
+    /// compositor silently holding the fact; unbound, it composes nowhere.
+    fn reap_orphan_chrome(&mut self) {
+        let mut orphans: Vec<usize> = Vec::new();
+        for n in 0..MAX_SURFACES {
+            if let Some(s) = self.surf(n) {
+                if let Some(pid) = s.chrome_bind {
+                    if self.layout.slot_of_id(pid).is_none() {
+                        orphans.push(n);
+                    }
+                }
+            }
+        }
+        for n in orphans {
+            if let Some(s) = self.surf_mut(n) {
+                s.chrome_bind = None;
+            }
+            self.send_close(n);
+        }
+    }
+
     fn reconcile(&mut self) {
+        self.reap_orphan_chrome();
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        self.layout.recompute(dw, dh, self.chords.gaps);
+        // H-3d: the carve -- a registered status bar takes the bottom strip
+        // and the layout lives above it (a zoomed leaf too: the bar is the
+        // system's, never a pane's). ONLY the layout: every other use of the
+        // height below (the Direct test, the scanout bind, the CONFIGURE
+        // offers, the reassert rect) is the DISPLAY's -- shadowing `dh` with
+        // the carved height bound the display at 1280x780 and the strip was
+        // never scanned out (the lever's first pixel read).
+        let layout_h = match self.status_rect() {
+            Some(sr) => dh - sr.h,
+            None => dh,
+        };
+        // F2 (d-1b tiling completion): determine backgrounding from the TREE
+        // BEFORE recompute so layout_pane can exclude a backgrounded leaf from
+        // tiling. A leaf is backgrounded iff it hosts a NON-session surface AND
+        // some hosted leaf carries a session surface. Owner-based + visibility-
+        // independent (recompute has not run yet): the Split arm zero-rects
+        // these, the foreground siblings fill. This drives ONLY tiling; the
+        // visibility-based Surface.backgrounded below still drives compose, so a
+        // Tab-active backgrounded leaf (shown via the One path) is never
+        // blanked. On a session-less display the set is EMPTY -> no exclusion
+        // -> byte-identical tiling to the pre-F2 engine (the console path).
+        let hosted = self.layout.hosted_leaves();
+        let has_session_tree = hosted.iter().any(|&(_, n)| {
+            self.surf(n)
+                .is_some_and(|s| principal_is_session(s.owner_principal))
+        });
+        let bg_tiling: Vec<usize> = if has_session_tree {
+            hosted
+                .iter()
+                .filter(|&&(_, n)| {
+                    self.surf(n)
+                        .is_some_and(|s| !principal_is_session(s.owner_principal))
+                })
+                .map(|&(slot, _)| slot)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.layout.apply_backgrounded(&bg_tiling);
+        self.layout.recompute(dw, layout_h, self.chords.gaps);
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
-        let want = if vis.is_empty() && nleaves <= 1 {
+        // d-1b (HALCYON 14.12 step 4): a user SESSION outranks SYSTEM content for
+        // the display. A leaf whose owner_principal is a real user principal is a
+        // session; SYSTEM leaves (the console renderer aurora + any system client)
+        // are BACKGROUNDED when a session leaf is visible -- excluded from the
+        // decision below, skipped by the compose + CONFIGURE-fan sites, and skipped
+        // by frame_tick, so the root collapses to the session (Direct) and aurora's
+        // FRAME-driven loop goes dormant. Recomputed every reconcile; a transition
+        // (either direction) is logged once as the fg/bg witness. BACKWARD-COMPAT:
+        // no session leaf -> has_session false -> bg_now empty -> active_* equal the
+        // raw vis/nleaves and the decision is byte-identical to the pre-d-1b logic.
+        let has_session = vis.iter().any(|v| {
+            self.surf(v.1)
+                .map_or(false, |s| principal_is_session(s.owner_principal))
+        });
+        let bg_now: Vec<usize> = if has_session {
+            vis.iter()
+                .filter(|v| {
+                    self.surf(v.1)
+                        .map_or(false, |s| !principal_is_session(s.owner_principal))
+                })
+                .map(|v| v.1)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut bg_transitions: Vec<(usize, bool)> = Vec::new();
+        for n in 0..MAX_SURFACES {
+            let now = bg_now.contains(&n);
+            if let Some(s) = self.surf_mut(n) {
+                if s.backgrounded != now {
+                    s.backgrounded = now;
+                    bg_transitions.push((n, now));
+                }
+            }
+        }
+        for (n, now) in bg_transitions {
+            say!(
+                "tapestryd: {} surface {} ({})",
+                if now { "background" } else { "foreground" },
+                n,
+                if now {
+                    "session took the display"
+                } else {
+                    "session gone"
+                }
+            );
+        }
+        // A backgrounded leaf is invisible + dormant, so it must not keep input
+        // focus: the user's keystrokes would vanish into a renderer they cannot
+        // see. When a session leaf takes the display, move focus off a now-
+        // backgrounded leaf (the console renderer) onto a visible session leaf --
+        // the input twin of the scanout priority (14.11.9), so a session tile
+        // actually receives keys. On logout the session leaf retires and `retire`
+        // re-homes focus to what remains. Gated by has_session, so every
+        // pre-session + session-less path is untouched (byte-identical focus).
+        if has_session
+            && self
+                .layout
+                .focused_surface()
+                .map_or(false, |f| bg_now.contains(&f))
+        {
+            if let Some(slot) = vis.iter().find_map(|v| {
+                self.surf(v.1)
+                    .filter(|s| principal_is_session(s.owner_principal))
+                    .map(|_| v.0)
+            }) {
+                self.layout.focus(slot);
+            }
+        }
+        let active_vis: Vec<(usize, usize, Rect)> = vis
+            .iter()
+            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded))
+            .cloned()
+            .collect();
+        let active_nleaves = nleaves.saturating_sub(bg_now.len());
+
+        // F2 witness (test-mode): the FOREGROUND (non-backgrounded) session
+        // tile widths when a session holds the display, so the ls-gfx-session
+        // E2E can assert the tiles FILL the width -- a backgrounded aurora leaf
+        // no longer steals a column. Fires every reconcile with a session up
+        // (unlike the per-placement letterbox latch), off `active_vis`, so a
+        // third-width tile (the pre-F2 sum_w ~= 2/3 disp_w) is a regression the
+        // E2E catches deterministically.
+        #[cfg(feature = "test-mode")]
+        if has_session {
+            let sum_w: u32 = active_vis.iter().map(|v| v.2.w).sum();
+            let min_w: u32 = active_vis.iter().map(|v| v.2.w).min().unwrap_or(0);
+            say!(
+                "tapestryd: session-tiling active={} min_w={} sum_w={} disp_w={}",
+                active_vis.len(),
+                min_w,
+                sum_w,
+                dw
+            );
+        }
+
+        // H-3c round F2: a placed menu is a visible thing with nothing under
+        // it too -- Off would leave an invisible grab.
+        // H-3d: a status bar is a visible thing too (Off would hide it), and a
+        // leaf above the carve is smaller than the display (Direct is a
+        // display-sized weave): both arms need no bar.
+        let want = if active_vis.is_empty()
+            && active_nleaves <= 1
+            && self.menu.is_none()
+            && self.status.is_none()
+        {
             match self.scanout {
                 Scanout::Boot => Scanout::Boot,
                 _ => Scanout::Off,
             }
-        } else if vis.len() == 1 && nleaves == 1 {
-            let n = vis[0].1;
-            let full = self
-                .surf(n)
-                .map_or(false, |s| s.w == dw && s.h == dh);
+        } else if active_vis.len() == 1
+            && active_nleaves == 1
+            && self.menu.is_none()
+            && self.status.is_none()
+        {
+            // H-3c: a placed menu is a second visible thing -- it composes
+            // over the leaf, so Direct is off while one is up.
+            let n = active_vis[0].1;
+            let full = self.surf(n).map_or(false, |s| s.w == dw && s.h == dh);
             if full {
                 Scanout::Direct(n)
             } else {
@@ -1710,8 +5937,7 @@ impl Comp {
                 }
                 self.pending_direct = None;
                 if self.scanout != Scanout::Off && self.scanout != Scanout::Boot {
-                    let _ = self.gpu.set_scanout(0, dw, dh);
-                    self.bound_res = 0;
+                    self.display_disable(); // round-4 F1: condemn-on-refusal
                     self.scanout = Scanout::Off;
                 }
             }
@@ -1730,12 +5956,16 @@ impl Comp {
                     // requires the surface display-sized.
                     say!("tapestryd: scanout pending-direct {} ({}x{})", n, dw, dh);
                     self.pending_direct = Some(n);
+                    self.pending_bind_refused_said = false; // new episode
                     if !self.emit_configure_to(n, dw, dh) {
                         self.retire(n); // wedged; retire clears pending
                     }
                 }
             }
             Scanout::Composed => {
+                if self.pending_direct.is_some() {
+                    say!("tapestryd: scanout composed clears pending-direct");
+                }
                 self.pending_direct = None;
                 if !self.ensure_screen() {
                     return; // degraded: keep the current scanout; retried
@@ -1744,24 +5974,80 @@ impl Comp {
                 let sig = self.calc_geom_sig();
                 let structural = entering || sig != self.geom_sig;
                 if structural {
-                    // Structural: full repaint (content blanks; panes heal
-                    // by the redraw CONFIGUREs below).
+                    // Structural: full repaint, then every visible pane
+                    // pre-filled from its client's last-presented slot
+                    // (SA-6: the repaint used to show every pane BLANK until
+                    // its redraw CONFIGURE landed -- a blink per menu open on
+                    // a Direct console, per split); the fan below still
+                    // makes each client repaint at the new geometry.
                     self.paint_chrome();
+                    self.prefill_from_shown();
                     self.geom_sig = sig;
                     self.screen_flush_full();
+                    // C-5 SA-1: every held region is superseded by this
+                    // repaint (the same rule `set_mode` applies): a
+                    // Held::Composed `cpu` region released later would
+                    // upload the buffer's chrome bytes over whatever pane
+                    // the new layout put under it -- on the GPU path a live
+                    // GPU-composed pane, blanked until its next present.
+                    // On the CPU path the held pixels were equally lost at
+                    // this repaint (paint_chrome overwrote them), so
+                    // dropping is behaviour-preserving there; the fan below
+                    // makes every client repaint either way.
+                    for n in 0..MAX_SURFACES {
+                        if let Some(s) = self.surf_mut(n) {
+                            s.held = None;
+                        }
+                    }
                 } else if self.chrome_epoch != self.layout.epoch {
                     // Focus-only: redraw the frames + strip highlights,
-                    // keep the content.
-                    self.paint_borders();
-                    self.paint_strips();
+                    // keep the content -- and push ONLY those rects (Warp-C
+                    // C-3): on the GPU composed path the screen buffer does
+                    // not hold client pixels, so a whole-buffer push here
+                    // would blank every pane; on the CPU path the buffer
+                    // mirrors the host and the rect push is the same pixels
+                    // (both paths behave identically from outside, 4.5.9).
+                    let mut rects = self.paint_borders(false);
+                    rects.extend(self.paint_strips());
                     self.chrome_epoch = self.layout.epoch;
-                    self.screen_flush_full();
+                    for r in rects {
+                        self.screen_push(r);
+                    }
+                    // H-3b-3: a focus move re-keys the tag bars ("resting,
+                    // active tile" moves), so the chrome surfaces get a
+                    // same-size CONFIGURE -- the redraw request, coalesced
+                    // by replacement -- and their owner re-reads the layout.
+                    let mut wedged: Vec<usize> = Vec::new();
+                    for (n, t) in self.visible_chrome() {
+                        if !self.emit_configure_to(n, t.w, t.h) {
+                            wedged.push(n);
+                        }
+                    }
+                    for n in wedged {
+                        self.retire(n);
+                    }
                 }
                 if entering {
                     let sres = self.screen.as_ref().map(|s| s.res).unwrap_or(0);
-                    say!("tapestryd: scanout composed ({}x{})", dw, dh);
+                    // Report the bind's VERDICT, after the bind. SET_SCANOUT is
+                    // the one virtio-gpu command whose response consults the
+                    // renderer (an unknown resource is INVALID_RESOURCE_ID),
+                    // so it is the witness that the screen the display is
+                    // being handed exists; printing "composed" before it, as
+                    // this line once did, reported an intent as an event.
                     if self.gpu.set_scanout(sres, dw, dh).is_ok() {
                         self.bound_res = sres;
+                        say!(
+                            "tapestryd: scanout composed ({}x{}) res {} bound",
+                            dw,
+                            dh,
+                            sres
+                        );
+                    } else {
+                        say!(
+                            "tapestryd: scanout composed ({}x{}) res {} BIND FAILED -- display keeps the previous scanout",
+                            dw, dh, sres
+                        );
                     }
                     // Flush AFTER the bind (#57): a RESOURCE_FLUSH reaches
                     // only scanouts bound to the resource, so the
@@ -1785,7 +6071,18 @@ impl Comp {
                     // cropped/letterboxed by the blit clip.
                     let mut wedged: Vec<usize> = Vec::new();
                     for (_, n, c) in self.layout.visible_hosted() {
+                        // d-1b: a backgrounded SYSTEM leaf gets no redraw offer.
+                        if self.surf(n).map_or(false, |s| s.backgrounded) {
+                            continue;
+                        }
                         if !self.emit_configure_to(n, c.w, c.h) {
+                            wedged.push(n);
+                        }
+                    }
+                    // H-3b-2: chrome surfaces get their STRIP size -- the
+                    // relayout hook their owner repaints or resizes on.
+                    for (n, t) in self.visible_chrome() {
+                        if !self.emit_configure_to(n, t.w, t.h) {
                             wedged.push(n);
                         }
                     }
@@ -1837,18 +6134,15 @@ impl Comp {
         }
     }
 
-    /// Blit a presented damage rect from the client's weave slot into the
-    /// screen buffer at its pane's content rect (clipped both ways),
-    /// returning the SCREEN-space region written (None: hidden /
-    /// unhosted / fully clipped). Client weave bytes are read ONLY here,
-    /// inside the present dispatch, for the slot the client just
-    /// presented -- the G-6 tearing-freedom invariant. The caller pushes
-    /// the region device-side (`screen_push`) -- or defers it (HOLD).
-    /// Warp-4 (`gl_src`): a GL adoption composes from the BO backing
-    /// tapestryd itself mapped -- same geometry as the surface (the
-    /// adoption gate), full-image tight stride -- instead of a weave
-    /// slot. Every rect/letterbox/crop path below is source-agnostic;
-    /// only the base pointer changes.
+    /// Compose a presented damage rect the CPU way: read the client's slot
+    /// (or a GL adoption's BO backing, `gl_src`) into the screen BUFFER at
+    /// the geometry `compose_geometry` decides, returning the SCREEN-space
+    /// region written (None: hidden / unhosted / fully clipped). Client
+    /// bytes are read ONLY here, inside the present dispatch, for the slot
+    /// the client just presented -- the G-6 tearing-freedom invariant. The
+    /// caller pushes the region device-side (`screen_push`) -- or defers it
+    /// (HOLD). The universal path (4.5.9): every non-GL host, and every
+    /// surface the GPU path cannot take on a GL one.
     fn blit_composed_pixels(
         &mut self,
         n: usize,
@@ -1859,132 +6153,36 @@ impl Comp {
         ph: u32,
         gl_src: Option<u64>,
     ) -> Option<Rect> {
-        let (sw, slot_stride, weave_va) = match self.surf(n) {
+        let (sw, sh_full, slot_stride, weave_va) = match self.surf(n) {
             Some(s) => match &s.weave {
-                Some(w) => (s.w, s.slot_stride, w.va),
+                Some(w) => (s.w, s.h, s.slot_stride, w.va),
                 None => return None,
             },
             None => return None,
         };
-        let content = match self.layout.find_hosting(n) {
-            Some(leaf) => match self.layout.get(leaf) {
-                Some(p) if p.visible => p.content,
-                _ => return None, // hidden: no compose target
-            },
-            None => return None, // unhosted
-        };
-        let screen_va = match &self.screen {
-            Some(s) => s.va,
-            None => return None,
-        };
-        let dw = self.gpu.width as u64;
+        let op = self.compose_geometry(n, x, y, pw, ph)?;
+        // Orientation: a GL source needs NO flip on this path. The
+        // guest-visible readback contract is gallium top-down --
+        // osmesa_read_buffer's y_up=FALSE arm copies STRAIGHT and is the
+        // shipping llvmpipe path, and the same frontend readback works
+        // unchanged on virgl (virglrenderer compensates host-side), so row
+        // 0 of the BO backing is the scene TOP exactly like a weave row 0.
         let src_base = match gl_src {
             Some(va) => va,
             None => weave_va + (slot as u64) * slot_stride,
         };
-        // Orientation: a GL source needs NO flip. The guest-visible
-        // transfer contract is gallium top-down -- osmesa_read_buffer's
-        // y_up=FALSE arm copies STRAIGHT and is the shipping llvmpipe
-        // path, and the same frontend readback works unchanged on virgl
-        // (virglrenderer compensates host-side), so row 0 of the BO
-        // backing is the scene TOP exactly like a weave row 0.
-        let (sh_full, patchwork) = match self.surf(n) {
-            Some(s) => (s.h, s.patchwork),
-            None => return None,
-        };
-        if (sw != content.w || sh_full != content.h) && !patchwork {
-            // Fork 2 + the #56 patchwork latch (both user-voted
-            // 2026-07-21): a FULL-FRAME presenter (patchwork never
-            // latched) LETTERBOXES into its pane -- aspect-preserving
-            // scale, up OR down, centered, nearest-neighbor (crisp for
-            // the retro-game case; cheap integer math). Damage
-            // sub-rects are ignored: any present redraws the FULL
-            // scaled rect -- sound exactly BECAUSE the latch is clear:
-            // every present so far carried whole-frame bytes. A LATCHED
-            // surface is an accumulator (aurora's cell-diff over
-            // rotating weave slots): its slots are PATCHWORK, and
-            // scaling a full slot composes alternating half-stale
-            // frames -- the live-play "utopia pane flipping" bug -- so
-            // any size mismatch takes the damage-clipped CROP path
-            // below instead. (The pre-#56 discriminator was fit-inside
-            // BY SIZE, which cropped a 2px-overflowing split Quake; the
-            // present style is the property that actually matters, and
-            // it is protocol-observable.) Aurora's pane-tracking resize
-            // is the real close (#55). The bars around a letterboxed
-            // rect are the pane background, painted by the chrome pass.
-            // The geometry comes from the SAME letterbox() ptr_hit
-            // inverts -- one authority, no drift.
-            if content.w == 0 || content.h == 0 || sh_full == 0 || sw == 0 {
-                return None;
-            }
-            let (ox, oy, dw2, dh2) = Self::letterbox(sw, sh_full, content.w, content.h);
-            // One-shot geometry diagnostic (per distinct placement).
-            if let Some(su) = self.surf_mut(n) {
-                let sig = (ox, oy, dw2, dh2);
-                if su.lb_logged != Some(sig) {
-                    su.lb_logged = Some(sig);
-                    say!(
-                        "tapestryd: surface {} letterbox {}x{} -> {}x{} @({},{}) in {}x{}",
-                        n, sw, sh_full, dw2, dh2, ox, oy, content.w, content.h
-                    );
-                }
-            }
-            // SAFETY: src reads stay inside the weave slot (sx < sw,
-            // sy < sh by the division bound: lx < dw2 => lx*sw/dw2 <
-            // sw -- ratio math, valid for scale-down as well as up);
-            // dst rows stay inside the screen buffer (letterbox()
-            // bounds dw2 <= cw and dh2 <= ch by construction in BOTH
-            // directions, so the scaled rect is inside content, and
-            // content inside the display by the geometry pass).
-            unsafe {
-                for row in 0..dh2 as u64 {
-                    let sy = (row * sh_full as u64) / dh2 as u64;
-                    let dy = content.y as u64 + oy as u64 + row;
-                    let srow = (src_base + sy * sw as u64 * 4) as *const u32;
-                    let drow = (screen_va
-                        + (dy * dw + (content.x + ox) as u64) * 4)
-                        as *mut u32;
-                    for col in 0..dw2 as u64 {
-                        let sx = (col * sw as u64) / dw2 as u64;
-                        *drow.add(col as usize) = *srow.add(sx as usize);
-                    }
-                }
-            }
-            return Some(Rect {
-                x: content.x + ox,
-                y: content.y + oy,
-                w: dw2,
-                h: dh2,
-            });
-        }
-        // Same-size fast path: the byte-copy blit, damage-clipped.
-        let inter = Rect { x, y, w: pw, h: ph }
-            .intersect(Rect { x: 0, y: 0, w: content.w, h: content.h });
-        if inter.is_empty() {
-            return None;
-        }
-        // SAFETY: src rows lie within the weave slot (damage was validated
-        // against the surface geometry; inter only shrinks it); dst rows
-        // lie within the screen buffer (content is inside the display by
-        // the geometry pass; inter is inside content).
-        unsafe {
-            for row in 0..inter.h as u64 {
-                let sy = inter.y as u64 + row;
-                let dy = content.y as u64 + inter.y as u64 + row;
-                let src = (src_base + (sy * sw as u64 + inter.x as u64) * 4) as *const u8;
-                let dst = (screen_va + (dy * dw + (content.x + inter.x) as u64) * 4) as *mut u8;
-                core::ptr::copy_nonoverlapping(src, dst, inter.w as usize * 4);
-            }
-        }
-        Some(Rect {
-            x: content.x + inter.x,
-            y: content.y + inter.y,
-            w: inter.w,
-            h: inter.h,
-        })
+        self.compose_cpu(op, src_base, sw, sh_full);
+        Some(op.dst)
     }
 
-    /// Push a screen-buffer region to the host resource + display.
+    /// Push a screen-BUFFER region to the host resource + display: the CPU
+    /// composed path's device-visible step, and the chrome's on every path.
+    /// TRANSFER_TO_HOST_2D on both screen kinds (Warp-C C-3): the command
+    /// names a resource, not a kind -- QEMU hands it to
+    /// `virgl_renderer_transfer_write_iov` with the RESOURCE stride, and the
+    /// 3D screen's structural repaints (`screen_flush_full`) have always
+    /// landed through it. The C-2b special case that re-uploaded the WHOLE
+    /// frame per rect on the 3D screen is gone with the CPU fill it served.
     fn screen_push(&mut self, r: Rect) {
         if r.is_empty() {
             return;
@@ -1993,10 +6191,36 @@ impl Comp {
             Some(s) => s.res,
             None => return,
         };
+        // H-3c: the menu composes last -- re-assert it in the buffer under
+        // this push before the upload carries the region.
+        self.menu_reassert(r);
         let dw = self.gpu.width as u64;
         let off = ((r.y as u64) * dw + r.x as u64) * 4;
-        let _ = self.gpu.transfer(res, off, r.x, r.y, r.w, r.h);
+        let t0 = Instant::now();
+        let _ = self.gpu.transfer_then_flush(res, off, r.x, r.y, r.w, r.h);
+        self.cost_add(Cost::Push, t0);
+    }
+
+    /// The GPU composed path's device-visible step (Warp-C C-3): the pixels
+    /// are already in the screen RESOURCE (the blit landed there), so only
+    /// the display flush is owed -- an upload here would paint the buffer's
+    /// stale bytes over them.
+    fn screen_flush_rect(&mut self, r: Rect) {
+        if r.is_empty() {
+            return;
+        }
+        let res = match &self.screen {
+            Some(s) => s.res,
+            None => return,
+        };
+        let t0 = Instant::now();
         let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+        self.cost_add(Cost::Flush, t0);
+        // H-3c: a GPU-composed region under the placed menu -- put the menu
+        // back on top (buffer + push of just the intersection).
+        if let Some(i) = self.menu_reassert(r) {
+            self.screen_push(i);
+        }
     }
 
     /// Flush surface `n`'s held region (F13 release; also the implicit
@@ -2009,16 +6233,30 @@ impl Comp {
             None => return,
         };
         match held {
-            Held::Direct(r) => {
+            Held::Direct(rects) => {
                 if self.scanout == Scanout::Direct(n) {
-                    if let Some(res) = self.surf(n).map(|s| s.resource_id) {
-                        let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+                    // Flush EVERY slot that has a pending region, each against
+                    // its own resource. Flushing only "the current slot" would
+                    // silently drop the others -- a flush the client was
+                    // promised by `release`.
+                    let ids = match self.surf(n).map(|s| s.res_ids) {
+                        Some(ids) => ids,
+                        None => return,
+                    };
+                    for (i, r) in rects.iter().enumerate() {
+                        if !r.is_empty() {
+                            let _ = self.gpu.flush(ids[i], r.x, r.y, r.w, r.h);
+                        }
                     }
                 }
             }
-            Held::Composed(r) => {
+            Held::Composed { cpu, gpu } => {
                 if self.scanout == Scanout::Composed {
-                    self.screen_push(r);
+                    // The CPU-composed region owes upload + flush; the
+                    // GPU-composed one only the flush (its pixels are already
+                    // in the resource, and the buffer's are stale there).
+                    self.screen_push(cpu);
+                    self.screen_flush_rect(gpu);
                 }
             }
         }
@@ -2028,7 +6266,107 @@ impl Comp {
     /// `split <id> h|v`, `close <id>`, `focus <id>`, `mode <id> <mode>`,
     /// `move <id> <dir>`, `zoom <id>` -- plus the id-less verbs acting on
     /// the focused leaf (G-6c): `focusdir <dir>`, `tab next|prev`.
-    pub fn layout_cmd(&mut self, s: &str) -> Result<(), u32> {
+    /// The pane tree's trust model (HALCYON.md 13.6; the H-3b round F2 /
+    /// R2-F1): the actor may MUTATE the subtree at `slot` iff every hosted
+    /// surface in it is its own -- empty leaves belong to nobody and never
+    /// block, an all-empty subtree is anyone's. The renderer is the
+    /// environment and may act anywhere.
+    fn actor_owns_subtree(&self, actor: Actor, slot: usize) -> bool {
+        match actor {
+            Actor::Renderer => true,
+            Actor::Client(0) => false,
+            Actor::Client(c) => self
+                .layout
+                .subtree_surfaces(slot)
+                .iter()
+                .all(|&n| self.surf(n).map_or(false, |s| s.owner_peer == c)),
+            // H-4b-2 + F2 structural transparency: a session owns the subtree
+            // iff every hosted surface is its principal's -- but a BACKGROUNDED
+            // leaf (a console renderer a session stepped back) is transparent
+            // and skipped, so a session's authority over its OWN panes is not
+            // blocked by a system leaf sharing their container (the flat
+            // [aurora, A, B] root a wide auto-host split produces). GUARD:
+            // require at least one owned, non-backgrounded surface -- a subtree
+            // that is ENTIRELY backgrounded system content is NOT the session's
+            // (else a session could close/mode the console renderer). An
+            // all-EMPTY subtree stays vacuously owned (empty-leaf placement is
+            // the separate claim-mint gate).
+            Actor::Session(p) => {
+                // The skip keys on the LEAF's tree flag (`is_bg_leaf`, owner-
+                // based, stable), NOT `Surface.backgrounded`: that one is
+                // visibility-derived and CLEARS once a tab hides the leaf
+                // (it drops out of `vis`), which would re-expose aurora to
+                // this walk exactly when `tab next` cycles the tabbed root.
+                let hosted = self.layout.subtree_hosted(slot);
+                if hosted.is_empty() {
+                    return true;
+                }
+                let mut owned_any = false;
+                for &(leaf, n) in &hosted {
+                    if self.layout.is_bg_leaf(leaf) {
+                        continue;
+                    }
+                    match self.surf(n) {
+                        Some(s) if s.owner_principal == p => owned_any = true,
+                        _ => return false,
+                    }
+                }
+                owned_any
+            }
+        }
+    }
+
+    /// The actor may TAKE or NAME the tile at `slot`: a leaf hosting the
+    /// actor's own surface. Focus and identity are a hosted tile's; an
+    /// empty leaf is nobody's to focus (keystrokes to nowhere) or to name.
+    fn actor_hosts(&self, actor: Actor, slot: usize) -> bool {
+        match actor {
+            Actor::Renderer => true,
+            Actor::Client(0) => false,
+            Actor::Client(c) => self
+                .layout
+                .leaf_surface(slot)
+                .and_then(|n| self.surf(n))
+                .map_or(false, |s| s.owner_peer == c),
+            // H-4b-2: a session takes a tile hosting one of its principal's
+            // surfaces (the ratified mutual authority -- any of the user's
+            // processes may refocus/zoom any of the user's tiles).
+            Actor::Session(p) => self
+                .layout
+                .leaf_surface(slot)
+                .and_then(|n| self.surf(n))
+                .map_or(false, |s| s.owner_principal == p),
+        }
+    }
+
+    /// `tag` / `role` on a pane: a leaf is named by its host, a container
+    /// by whoever owns its whole subtree.
+    fn actor_names(&self, actor: Actor, slot: usize) -> bool {
+        if self.layout.is_leaf(slot) {
+            if self.actor_hosts(actor, slot) {
+                return true;
+            }
+            // H-4b-2: a session may NAME an empty leaf it OWNS -- the
+            // restore tool writes a leaf's tag at claim time, before the
+            // child it spawns hosts a surface (acme's tag-before-`win`).
+            // An empty leaf hosts no surface, so actor_hosts is false; an
+            // empty leaf's owner is its recorded owner_principal (stamped
+            // at split), not a hosted surface. The renderer names anything
+            // (the environment, incl. an empty leaf); a Client (system/
+            // none) owns no empty leaf to name.
+            match actor {
+                Actor::Renderer => true,
+                Actor::Session(p) => {
+                    self.layout.is_empty_leaf(slot) && self.layout.pane_owner_principal(slot) == p
+                }
+                Actor::Client(_) => false,
+            }
+        } else {
+            self.actor_owns_subtree(actor, slot)
+        }
+    }
+
+    pub fn layout_cmd(&mut self, actor: Actor, s: &str) -> Result<(), u32> {
         let s = s.trim();
         let mut it = s.splitn(2, ' ');
         let verb = it.next().ok_or(p9::E_INVAL)?;
@@ -2037,9 +6375,15 @@ impl Comp {
             "focusdir" => {
                 let d = Dir::parse(rest).ok_or(p9::E_INVAL)?;
                 // A miss (screen edge; zoomed) is a no-op, not an error --
-                // the chord ergonomic.
-                if self.layout.focus_dir(d) {
-                    self.reconcile();
+                // the chord ergonomic. The destination must be the
+                // actor's own tile (a client walks focus only onto itself).
+                if let Some(dest) = self.layout.neighbor_dir(d) {
+                    if !self.actor_hosts(actor, dest) {
+                        return Err(p9::E_PERM);
+                    }
+                    if self.layout.focus(dest) {
+                        self.reconcile();
+                    }
                 }
                 return Ok(());
             }
@@ -2049,6 +6393,13 @@ impl Comp {
                     "prev" => false,
                     _ => return Err(p9::E_INVAL),
                 };
+                // Cycling reveals another child of the tab container: the
+                // actor must own that whole container.
+                if let Some(anc) = self.layout.tab_ancestor(self.layout.focused) {
+                    if !self.actor_owns_subtree(actor, anc) {
+                        return Err(p9::E_PERM);
+                    }
+                }
                 // Revealing another tab is meaningless zoomed: restore
                 // the layout first (the tmux rule).
                 self.layout.unzoom();
@@ -2080,16 +6431,19 @@ impl Comp {
             }
             _ => return Err(p9::E_INVAL),
         };
-        self.pane_cmd(id, &cmd)
+        self.pane_cmd(actor, id, &cmd)
     }
 
     /// One layout mutation targeting pane `id` (shared by the layout file
     /// and each pane's ctl). Every successful mutation reconciles.
     /// Structural verbs restore a zoomed layout first (the tmux rule);
     /// `focus` keeps zoom only when it names the zoomed pane itself.
-    pub fn pane_cmd(&mut self, id: u32, cmd: &str) -> Result<(), u32> {
+    pub fn pane_cmd(&mut self, actor: Actor, id: u32, cmd: &str) -> Result<(), u32> {
         let slot = self.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
         let cmd = cmd.trim();
+        // The trust model, per verb (syntax first, then authority): a
+        // subtree mutation needs the subtree; taking focus (focus, zoom)
+        // needs the tile itself.
         if let Some(rest) = cmd.strip_prefix("split ") {
             let mode = match rest.trim() {
                 "h" => Mode::SplitH,
@@ -2099,19 +6453,51 @@ impl Comp {
             if !self.layout.is_leaf(slot) {
                 return Err(p9::E_INVAL);
             }
+            if !self.actor_owns_subtree(actor, slot) {
+                return Err(p9::E_PERM);
+            }
             self.layout.unzoom();
-            self.layout.split(slot, mode).ok_or(p9::E_NOMEM)?;
+            let new_leaf = self.layout.split(slot, mode).ok_or(p9::E_NOMEM)?;
+            // H-4b-2: the new empty leaf records its creator's principal, so
+            // the creator (and only it, or the renderer) may later mint a
+            // placement claim on it -- "placement is a capability".
+            let owner = actor_owner_principal(actor);
+            self.layout.set_owner_principal(new_leaf, owner);
+            // Scripture 13.7's PLURAL "empty leaves record an owner_principal
+            // at split": splitting an EMPTY leaf yields TWO empty children,
+            // and both are the splitter's -- so a session that builds a whole
+            // tree from the environment root (owner 0) can claim EVERY leaf it
+            // built (layout restore's precondition), not just the new sibling
+            // of each split. Bounded to empties: an OCCUPIED original keeps
+            // its surface's ownership (this field is inert there), and an
+            // empty leaf is already anyone's to mutate (13.6), so re-stamping
+            // one confers nothing beyond the close every peer already holds.
+            if self.layout.is_empty_leaf(slot) {
+                self.layout.set_owner_principal(slot, owner);
+            }
         } else if let Some(rest) = cmd.strip_prefix("move ") {
             let d = Dir::parse(rest.trim()).ok_or(p9::E_INVAL)?;
+            if !self.actor_owns_subtree(actor, slot) {
+                return Err(p9::E_PERM);
+            }
             self.layout.unzoom();
             if !self.layout.move_dir(slot, d) {
                 return Err(p9::E_INVAL);
             }
         } else if cmd == "zoom" {
+            if !self.layout.is_leaf(slot) {
+                return Err(p9::E_INVAL);
+            }
+            if !self.actor_hosts(actor, slot) {
+                return Err(p9::E_PERM);
+            }
             if !self.layout.zoom_toggle(slot) {
                 return Err(p9::E_INVAL);
             }
         } else if cmd == "close" {
+            if !self.actor_owns_subtree(actor, slot) {
+                return Err(p9::E_PERM);
+            }
             // Closing a pane strands its surfaces invisible BY DESIGN
             // (hosting is once-per-life, at create) and asks each
             // stranded client to exit via the queued TEV_CLOSE (G-6b).
@@ -2125,6 +6511,10 @@ impl Comp {
                 self.send_close(n);
             }
         } else if cmd == "focus" {
+            let leaf = self.layout.first_leaf(slot).ok_or(p9::E_INVAL)?;
+            if !self.actor_hosts(actor, leaf) {
+                return Err(p9::E_PERM);
+            }
             if self.layout.zoom_id() != Some(id) {
                 self.layout.unzoom();
             }
@@ -2133,6 +6523,10 @@ impl Comp {
             }
         } else if let Some(m) = cmd.strip_prefix("mode ") {
             let mode = Mode::parse(m.trim()).ok_or(p9::E_INVAL)?;
+            let target = self.layout.mode_target(slot).ok_or(p9::E_INVAL)?;
+            if !self.actor_owns_subtree(actor, target) {
+                return Err(p9::E_PERM);
+            }
             self.layout.unzoom();
             if !self.layout.set_mode(slot, mode) {
                 return Err(p9::E_INVAL);
@@ -2152,6 +6546,26 @@ impl Comp {
             None => return,
         };
         say!("tapestryd: retire surface {}", n);
+        // H-3c: the placed menu dies with its surface, on EVERY path (the
+        // owner's verb, Esc, click-away, a chord, ctl `destroy`, the conn's
+        // death, a WEDGE): unplace first so no routing or target names it
+        // while it goes, heal the screen under it at the tail.
+        let menu_heal: Option<Rect> = match self.menu {
+            Some(m) if m.n == n => {
+                self.menu = None;
+                say!("tapestryd: menu {} dismissed ({})", n, self.menu_reason);
+                self.menu_reason = "retire";
+                Some(m.rect)
+            }
+            _ => None,
+        };
+        // H-3d: the registered status bar dies with its surface: the carve
+        // is released (the reconcile below recomputes on the full display,
+        // structural) and the strip is floor again.
+        if self.status.map_or(false, |st| st.n == n) {
+            self.status = None;
+            say!("tapestryd: status bar {} retired; the display returns", n);
+        }
         // A stale last_focus naming this slot would suppress the gained
         // event for a FUTURE surface minted into it -- clear it (the
         // reconcile below re-emits for whatever takes focus).
@@ -2188,9 +6602,7 @@ impl Comp {
             }
             self.reconcile();
             if self.scanout == Scanout::Direct(n) {
-                let (dw, dh) = (self.gpu.width, self.gpu.height);
-                let _ = self.gpu.set_scanout(0, dw, dh);
-                self.bound_res = 0;
+                self.display_disable(); // round-4 F1: condemn-on-refusal
                 self.scanout = Scanout::Off;
             }
             // Warp-4: a GL-adopted scanout can survive the arms above --
@@ -2202,33 +6614,53 @@ impl Comp {
             // binding is ours.)
             let gl_bound = self.bound_res != 0
                 && self.warp_ctxs.iter().flatten().any(|c| match c.present_to {
-                    Some((sl, g, bp)) if sl == n && g == s.gen => c
-                        .bos
-                        .iter()
-                        .flatten()
-                        .any(|b| b.pub_id == bp && b.res_id == self.bound_res),
+                    Some((sl, g, src)) if sl == n && g == s.gen => match src {
+                        PresentSrc::Bo(bp) => c
+                            .bos
+                            .iter()
+                            .flatten()
+                            .any(|b| b.pub_id == bp && b.res_id == self.bound_res),
+                        // W-3c-2: a display-bound presentable dies with the
+                        // surface it was granted to, same as a BO.
+                        PresentSrc::Img(ip) => c
+                            .imgs
+                            .iter()
+                            .flatten()
+                            .any(|i| i.pub_id == ip && i.res_id == self.bound_res),
+                    },
                     _ => false,
                 });
             if gl_bound {
-                let (dw, dh) = (self.gpu.width, self.gpu.height);
-                let _ = self.gpu.set_scanout(0, dw, dh);
-                self.bound_res = 0;
+                self.display_disable(); // round-4 F1: condemn-on-refusal
             }
-            // (4) The GPU resource dies before its backing.
-            let _ = self.gpu.detach_backing(s.resource_id);
-            let _ = self.gpu.resource_unref(s.resource_id);
+            // (4) The GPU resources die before their backing -- all
+            // WEAVE_SLOTS of them (C-2d-b), or a retire leaks every slot but
+            // one, in the process that IS the console. The compositor's
+            // import goes first (C-2c: detach BEFORE unref).
+            for &res in s.res_ids.iter() {
+                self.comp_detach_res(res);
+                let _ = self.gpu.detach_backing(res);
+                let _ = self.gpu.resource_unref(res);
+            }
             // (5) Drop the server refs: unmap our own mapping, close the
             // weave handle (serverRef -> FALSE; #847 keeps the pages until
             // the client's mapping ref drops too).
             unsafe { t_burrow_detach(w.va, w.size) };
             unsafe { t_close(w.handle) };
         }
+        // Warp-4 x C-2c: a GL adoption consented to THIS surface incarnation
+        // imported its BO into the compositor's context; the surface is
+        // going, so the import goes with it (bounded by hosting, 4.5.10).
+        // The consent record itself stays inert on the ctx behind its gen
+        // pin, exactly as before. Outside the weave block: a consent can
+        // name a surface that never wove.
+        self.comp_release_consents_for(n, s.gen);
         // A displaced generation still draining (resize acked, no present
         // yet) dies with the surface -- same per-generation order; its
         // resource was never scanned out (only a post-fence present could
         // have made it visible, and that present would have retired it).
         if let Some((oldw, old_res)) = s.old_weave {
-            self.release_gen(&oldw, old_res);
+            self.release_gen(&oldw, &old_res);
         }
         // No diagnostic (#55b): a surface retire is routine steady-state
         // traffic (every client exit / pane close), and with a live-acking
@@ -2237,6 +6669,9 @@ impl Comp {
         // byte patterns mid-line (it split `/home/michael` in the panes
         // post-battery assert). The error/edge prints above stay.
         let _ = s.presents;
+        if let Some(r) = menu_heal {
+            self.menu_heal(r);
+        }
     }
 
     /// Retire every surface owned by a dying conn (teardown / Tversion).
@@ -2246,6 +6681,61 @@ impl Comp {
                 self.retire(n);
             }
         }
+    }
+
+    /// H-4b-2: reap a departed session's empty scaffolding. `retire_conn`
+    /// (called first, at teardown) already closed the dying conn's OCCUPIED
+    /// leaves -- `retire` closes the leaf that hosted each retired surface.
+    /// What survives is the empty leaves the session built (via `split`) but
+    /// never hosted -- the restore skeleton. When the principal's LAST live
+    /// conn is gone (main confirms no sibling shares it), those are closed:
+    /// a logged-out user's layout should not persist as dead empty tiles.
+    /// Only a real user principal reaches here; the environment's leaves
+    /// (owner_principal 0) and other principals' tiles are untouched. The
+    /// root never leaves -- a reaped root-leaf is handed back to the
+    /// environment (owner 0) instead of closed.
+    pub fn reap_session_empties(&mut self, principal: u32) {
+        // Only a real user principal owns reapable empties (INVALID == 0 is
+        // the environment's; SYSTEM/NONE are per-process, never a session).
+        if principal == T_PRINCIPAL_INVALID
+            || principal == T_PRINCIPAL_SYSTEM
+            || principal == T_PRINCIPAL_NONE
+        {
+            return;
+        }
+        // Collect victim IDS first: `close` restructures slots (single-child
+        // containers dissolve), but ids are stable, so re-resolve per id.
+        let victims: Vec<u32> = self
+            .layout
+            .live_ids()
+            .into_iter()
+            .filter(|&(slot, _)| {
+                self.layout.is_empty_leaf(slot)
+                    && self.layout.pane_owner_principal(slot) == principal
+            })
+            .map(|(_, id)| id)
+            .collect();
+        if victims.is_empty() {
+            return;
+        }
+        #[cfg(feature = "test-mode")]
+        say!(
+            "tapestryd: reaped {} empty leaf/leaves of principal {}",
+            victims.len(),
+            principal
+        );
+        for id in victims {
+            let slot = match self.layout.slot_of_id(id) {
+                Some(s) => s,
+                None => continue, // freed by an earlier close's collapse
+            };
+            if slot == self.layout.root {
+                self.layout.set_owner_principal(slot, 0);
+            } else {
+                let _ = self.layout.close(slot);
+            }
+        }
+        self.reconcile();
     }
 
     /// Queue an event on surface `n` under the R2-F4 policy. Returns false
@@ -2277,8 +6767,8 @@ impl Comp {
             // record, preserving order). Overflow falls through to the
             // droppable class below.
             if let Some(t) = s.events.back_mut().filter(|e| e.kind == TEV_PTR_REL) {
-                let sx = (t.value >> 16) as u16 as i16 as i32
-                    + (ev.value >> 16) as u16 as i16 as i32;
+                let sx =
+                    (t.value >> 16) as u16 as i16 as i32 + (ev.value >> 16) as u16 as i16 as i32;
                 let sy = (t.value & 0xFFFF) as u16 as i16 as i32
                     + (ev.value & 0xFFFF) as u16 as i16 as i32;
                 let sx = sx.clamp(-32768, 32767) as i16 as u16 as u32;
@@ -2297,6 +6787,17 @@ impl Comp {
                 return true;
             }
             // Falls through to the non-droppable push below.
+        }
+        if ev.kind == TEV_FOCUS {
+            // Focus is a STATE, like CONFIGURE: an unread queued FOCUS is
+            // superseded by the newest wholesale (the H-3b round R2-F1: a
+            // focus flap storm within one service pass filled a victim's
+            // queue with non-droppable FOCUS records and wedge-retired it;
+            // a client that never read the transient gain lost nothing).
+            if let Some(c) = s.events.iter_mut().find(|e| e.kind == TEV_FOCUS) {
+                *c = ev;
+                return true;
+            }
         }
         if s.events.len() >= EVENT_QUEUE_CAP {
             // Evict one coalescible to make room for the non-droppable.
@@ -2352,11 +6853,7 @@ impl Comp {
     pub fn note_present(&mut self, n: usize) {
         let visible = self.pending_direct == Some(n)
             || self.scanout == Scanout::Direct(n)
-            || self
-                .layout
-                .find_hosting(n)
-                .and_then(|leaf| self.layout.get(leaf))
-                .map_or(false, |p| p.visible);
+            || self.surface_target(n).is_some();
         if !visible {
             return;
         }
@@ -2388,7 +6885,29 @@ impl Comp {
     pub fn frame_tick(&mut self) {
         self.tick += 1;
         let t = self.tick;
-        let vis: Vec<usize> = self.layout.visible_hosted().iter().map(|v| v.1).collect();
+        // Warp-C C-3: a GPU-composition latch asked for a structural repaint
+        // (chrome + the redraw CONFIGURE fan). Run it HERE, at the tick,
+        // never inline in the present dispatch that found the latch: the
+        // fan can wedge-retire a surface, and retiring the surface whose
+        // present is mid-dispatch would leave that dispatch holding a
+        // record that is gone.
+        if self.comp_repaint_pending {
+            self.comp_repaint_pending = false;
+            self.geom_sig = self.geom_sig.wrapping_add(1);
+            self.reconcile();
+        }
+        self.comp_replay_deferred_imports();
+        // d-1b: a backgrounded SYSTEM leaf (a session holds the display) gets no
+        // FRAME -- that is exactly what makes the console renderer's FRAME-driven
+        // loop go dormant while the session owns the display.
+        let mut vis: Vec<usize> = self
+            .layout
+            .visible_hosted()
+            .iter()
+            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded))
+            .map(|v| v.1)
+            .collect();
+        vis.extend(self.visible_chrome().iter().map(|v| v.0));
         for n in vis {
             let ev = Tevent {
                 kind: TEV_FRAME,
@@ -2457,10 +6976,60 @@ impl Comp {
 
     /// Deliver a key to the FOCUSED leaf's surface (G-6 routing).
     pub fn key_event(&mut self, code: u16, value: u32, rune: u32, mods: u16) {
-        let n = match self.layout.focused_surface() {
-            Some(n) => n,
-            None => return, // no focused surface; input drops
+        let ki = key_idx(code);
+        // A release or a repeat FOLLOWS ITS PRESS (the H-3c round F1; the
+        // chord layer's rule): the surface that saw the press gets them --
+        // across a grab that began after it (no stuck key in the leaf), and
+        // a dismissed menu's retired slot drops them (no stray release in
+        // the leaf) -- never whoever holds focus now. A press with no record
+        // (older than the compositor's memory) takes the live routing below.
+        if value != 1 {
+            let v = self.key_owner[ki];
+            if value == 0 {
+                self.key_owner[ki] = 0;
+            }
+            if let Some((n, gen)) = owner_unpack(v) {
+                if self.surf(n).map_or(false, |s| s.gen == gen) {
+                    self.push_key(n, code, value, rune, mods);
+                }
+                return;
+            }
+        }
+        // H-3c: the grab -- a placed menu takes every key. Esc is the
+        // compositor's: its press dismisses and is swallowed, with its
+        // release + repeats through the chord swallow-set, so no stray Esc
+        // reaches the leaf that keeps logical focus underneath.
+        let n = match self.menu {
+            Some(m) => {
+                if value >= 1 && (code == KEY_ESC || rune == 0x1b) {
+                    self.chord_bit_set(code, true);
+                    self.menu_dismiss("esc");
+                    return;
+                }
+                m.n
+            }
+            None => match self.layout.focused_surface() {
+                Some(n) => n,
+                None => {
+                    // No focused surface: input drops. Said in test builds
+                    // (a key that vanishes is otherwise undiagnosable on a
+                    // lever run; the #880 strip class).
+                    #[cfg(feature = "test-mode")]
+                    if value == 1 {
+                        say!("tapestryd: key {} dropped (no focused surface)", code);
+                    }
+                    return;
+                }
+            },
         };
+        if value == 1 {
+            let gen = self.surf(n).map_or(0, |s| s.gen);
+            self.key_owner[ki] = owner_pack(n, gen);
+        }
+        self.push_key(n, code, value, rune, mods);
+    }
+
+    fn push_key(&mut self, n: usize, code: u16, value: u32, rune: u32, mods: u16) {
         let ev = Tevent {
             kind: TEV_KEY,
             code,
@@ -2490,9 +7059,15 @@ impl Comp {
         // Width-bound iff cw/sw <= ch/sh  <=>  cw*sh <= ch*sw (u64: no
         // overflow for display-scale dims).
         let (dw2, dh2) = if (cw as u64) * (sh as u64) <= (ch as u64) * (sw as u64) {
-            (cw, (((sh as u64) * (cw as u64)) / (sw as u64).max(1)) as u32)
+            (
+                cw,
+                (((sh as u64) * (cw as u64)) / (sw as u64).max(1)) as u32,
+            )
         } else {
-            ((((sw as u64) * (ch as u64)) / (sh as u64).max(1)) as u32, ch)
+            (
+                (((sw as u64) * (ch as u64)) / (sh as u64).max(1)) as u32,
+                ch,
+            )
         };
         let (dw2, dh2) = (dw2.max(1), dh2.max(1));
         ((cw - dw2) / 2, (ch - dh2) / 2, dw2, dh2)
@@ -2566,8 +7141,12 @@ impl Comp {
         // `+` here overflows for any ptr_x >= 1 and, under
         // overflow-checks + panic=abort, kills the console. Round 3's
         // commit message claimed this line was fixed; it was not.
-        let px = (self.ptr_x as i32).saturating_add(dx).clamp(0, dw.max(1) - 1) as u32;
-        let py = (self.ptr_y as i32).saturating_add(dy).clamp(0, dh.max(1) - 1) as u32;
+        let px = (self.ptr_x as i32)
+            .saturating_add(dx)
+            .clamp(0, dw.max(1) - 1) as u32;
+        let py = (self.ptr_y as i32)
+            .saturating_add(dy)
+            .clamp(0, dh.max(1) - 1) as u32;
         self.ptr_commit(px, py, mods);
     }
 
@@ -2575,7 +7154,13 @@ impl Comp {
     /// a focus companion like keys, decoupled from the pointer position;
     /// PTR_MOVE keeps the under-pointer rule). Deltas clamp to i16.
     fn ptr_rel_emit(&mut self, dx: i32, dy: i32, mods: u16) {
-        let n = match self.layout.focused_surface() {
+        // H-3c: the grab takes the deltas too (a menu ignores them; the
+        // leaf underneath must not see motion it cannot act on).
+        let n = match self
+            .menu
+            .map(|m| m.n)
+            .or_else(|| self.layout.focused_surface())
+        {
             Some(n) => n,
             None => return,
         };
@@ -2598,10 +7183,30 @@ impl Comp {
     /// The shared position commit: MOVE is the coalescible class (R2-F4):
     /// an overflowing queue evicts it, never a control event, so a motion
     /// burst cannot WEDGE a surface.
+    /// H-3c: where pointer events go -- the placed menu (menu-relative,
+    /// clamped: the grab owns the whole display while it is up) or the
+    /// surface under the pointer.
+    fn ptr_route(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
+        match self.menu {
+            Some(m) => {
+                let sx = px
+                    .saturating_sub(m.rect.x)
+                    .min(m.rect.w.saturating_sub(1))
+                    .min(0xFFFF) as u16;
+                let sy = py
+                    .saturating_sub(m.rect.y)
+                    .min(m.rect.h.saturating_sub(1))
+                    .min(0xFFFF) as u16;
+                Some((m.n, sx, sy))
+            }
+            None => self.ptr_hit(px, py),
+        }
+    }
+
     fn ptr_commit(&mut self, px: u32, py: u32, mods: u16) {
         self.ptr_x = px;
         self.ptr_y = py;
-        if let Some((n, sx, sy)) = self.ptr_hit(px, py) {
+        if let Some((n, sx, sy)) = self.ptr_route(px, py) {
             let ev = Tevent {
                 kind: TEV_PTR_MOVE,
                 code: 0,
@@ -2620,26 +7225,112 @@ impl Comp {
     /// Pointer button (evdev BTN_*) at the current pointer position.
     /// Non-droppable (a lost release strands a drag).
     pub fn ptr_btn(&mut self, code: u16, pressed: bool, mods: u16) {
-        if let Some((n, _, _)) = self.ptr_hit(self.ptr_x, self.ptr_y) {
-            let ev = Tevent {
-                kind: TEV_PTR_BTN,
-                code,
-                value: pressed as u32,
-                rune: 0,
-                mods,
-                flags: 0,
-                tick: self.tick,
-            };
-            if !self.push_event(n, ev) {
-                self.retire(n);
+        let bi = btn_idx(code);
+        // A release FOLLOWS ITS PRESS (the H-3c round F1): the surface that
+        // saw the press -- a menu that has since been dismissed drops it --
+        // or, for a click-away's, the compositor, which consumed the press
+        // and consumes this edge too. An unrecorded release takes the live
+        // routing.
+        if !pressed {
+            let v = self.btn_owner[bi];
+            self.btn_owner[bi] = 0;
+            if v == OWNER_SWALLOWED {
+                #[cfg(feature = "test-mode")]
+                {
+                    say!(
+                        "tapestryd: menu click-away release swallowed (btn {})",
+                        code
+                    );
+                }
+                return;
             }
+            if let Some((n, gen)) = owner_unpack(v) {
+                if self.surf(n).map_or(false, |s| s.gen == gen) {
+                    self.push_btn(n, code, false, mods);
+                }
+                return;
+            }
+        }
+        // H-3c: the grab. A press OUTSIDE the placed menu is the click-away:
+        // the compositor dismisses and swallows the press AND its release
+        // (rio: a click outside a menu cancels, never acts -- it must not
+        // reach the pane under the pointer, where it would act). A press
+        // inside routes to the menu.
+        let target = match self.menu {
+            Some(m) => {
+                if pressed && !m.rect.contains(self.ptr_x, self.ptr_y) {
+                    self.menu_dismiss("click-away");
+                    self.btn_owner[bi] = OWNER_SWALLOWED;
+                    #[cfg(feature = "test-mode")]
+                    {
+                        say!("tapestryd: menu click-away press swallowed (btn {})", code);
+                    }
+                    return;
+                }
+                Some(m.n)
+            }
+            None => {
+                let hit = self.ptr_hit(self.ptr_x, self.ptr_y).map(|(n, _, _)| n);
+                // Click-to-focus (HALCYON.md 6): a press in a hosted leaf
+                // that is not the focused one focuses it -- and still
+                // reaches the client (i3 passes the click through). A pane
+                // marked non-focusable keeps its input without taking focus.
+                if pressed {
+                    if let Some(leaf) = hit.and_then(|n| self.layout.find_hosting(n)) {
+                        let focusable = self.layout.get(leaf).map_or(false, |p| p.focusable);
+                        if focusable && leaf != self.layout.focused && self.layout.focus(leaf) {
+                            self.reconcile();
+                        }
+                    }
+                }
+                hit
+            }
+        };
+        if let Some(n) = target {
+            if pressed {
+                let gen = self.surf(n).map_or(0, |s| s.gen);
+                self.btn_owner[bi] = owner_pack(n, gen);
+            }
+            self.push_btn(n, code, pressed, mods);
+        }
+    }
+
+    fn push_btn(&mut self, n: usize, code: u16, pressed: bool, mods: u16) {
+        let ev = Tevent {
+            kind: TEV_PTR_BTN,
+            code,
+            value: pressed as u32,
+            rune: 0,
+            mods,
+            flags: 0,
+            tick: self.tick,
+        };
+        if !self.push_event(n, ev) {
+            self.retire(n);
         }
     }
 
     /// Wheel scroll (signed delta) at the current pointer position.
     /// Non-droppable (discrete steps; losing one skips content).
     pub fn ptr_scroll(&mut self, delta: i32, mods: u16) {
-        if let Some((n, _, _)) = self.ptr_hit(self.ptr_x, self.ptr_y) {
+        if let Some((n, _, _)) = self.ptr_route(self.ptr_x, self.ptr_y) {
+            // The H-3c round F4: wheel deltas to the placed MENU sum at the
+            // back of its queue (the REL discipline): its owner reads the
+            // delta (the list scrolls by it), and a frozen owner's queue
+            // must not wedge under a scroll storm -- the wedge would be a
+            // dismiss, but by the wrong mechanism and past the WEDGED
+            // control. Content surfaces keep the discrete-step class.
+            if self.menu.map_or(false, |m| m.n == n) {
+                let t = self.tick;
+                if let Some(s) = self.surf_mut(n) {
+                    if let Some(e) = s.events.back_mut().filter(|e| e.kind == TEV_SCROLL) {
+                        e.value = (e.value as i32).saturating_add(delta) as u32;
+                        e.mods = mods;
+                        e.tick = t;
+                        return;
+                    }
+                }
+            }
             let ev = Tevent {
                 kind: TEV_SCROLL,
                 code: 0,
@@ -2656,11 +7347,11 @@ impl Comp {
     }
 
     fn chord_bit(&self, code: u16) -> bool {
-        let i = (code as usize) & 0xff;
+        let i = key_idx(code);
         self.chord_down[i / 64] & (1 << (i % 64)) != 0
     }
     fn chord_bit_set(&mut self, code: u16, on: bool) {
-        let i = (code as usize) & 0xff;
+        let i = key_idx(code);
         if on {
             self.chord_down[i / 64] |= 1 << (i % 64);
         } else {
@@ -2697,6 +7388,9 @@ impl Comp {
             return false;
         }
         self.chord_bit_set(code, true);
+        // H-3c: a chord dismisses a placed menu first, then acts -- the
+        // environment's plane outranks a modal.
+        self.menu_dismiss("chord");
         self.chord_action(code, mods & crate::keymap::MOD_SHIFT != 0);
         true
     }
@@ -2733,7 +7427,21 @@ impl Comp {
             ChordAction::Split(mode) => {
                 self.layout.unzoom();
                 let f = self.layout.focused;
-                if self.layout.split(f, mode).is_some() {
+                // The new empty leaf must record the owner of the leaf being
+                // split (its hosted surface's principal), so a SESSION that
+                // Super+H-splits its own tile can later mint the placement
+                // claim on the new leaf (HALCYON.md 13.7). The client `split`
+                // verb (pane_cmd) already stamps this; the chord path must
+                // match, else a session-driven split yields an environment-
+                // owned (0) leaf its own compositor cannot claim -- KT-1.5d-3.
+                let owner = self
+                    .layout
+                    .leaf_surface(f)
+                    .and_then(|n| self.surf(n))
+                    .map(|s| s.owner_principal)
+                    .unwrap_or_else(|| self.layout.pane_owner_principal(f));
+                if let Some(new_leaf) = self.layout.split(f, mode) {
+                    self.layout.set_owner_principal(new_leaf, owner);
                     self.reconcile();
                 }
             }
@@ -2753,13 +7461,12 @@ impl Comp {
             ChordAction::SplitToggle => {
                 // Split-orientation toggle on the focused leaf's parent.
                 let f = self.layout.focused;
-                let parent_mode = self
-                    .layout
-                    .get(f)
-                    .and_then(|p| p.parent)
-                    .and_then(|pi| match self.layout.get(pi).map(|p| &p.kind) {
-                        Some(pane::Kind::Container { mode, .. }) => Some(*mode),
-                        _ => None,
+                let parent_mode =
+                    self.layout.get(f).and_then(|p| p.parent).and_then(|pi| {
+                        match self.layout.get(pi).map(|p| &p.kind) {
+                            Some(pane::Kind::Container { mode, .. }) => Some(*mode),
+                            _ => None,
+                        }
                     });
                 let want = match parent_mode {
                     Some(Mode::SplitH) => Mode::SplitV,
@@ -2779,7 +7486,7 @@ impl Comp {
             ChordAction::Close => {
                 let f = self.layout.focused;
                 if let Some(id) = self.layout.id_of(f) {
-                    let _ = self.pane_cmd(id, "close");
+                    let _ = self.pane_cmd(Actor::Renderer, id, "close");
                 }
             }
         }
@@ -2827,6 +7534,15 @@ struct PendingFence {
     tag: u16,
 }
 
+/// A parked ring-fence read (V-3a): delivered by poll_ring_fences when the
+/// ring's completed-seq advances past the reported one (or EOF on ring death).
+#[derive(Clone, Copy)]
+struct PendingRingFence {
+    fid: u32,
+    ring_pub: u32,
+    tag: u16,
+}
+
 /// The largest fence record ("<u64 max>\n" = 21 bytes): the park guard's
 /// floor, like FK_EVENT's TEVENT_LEN.
 const FENCE_REC_MAX: usize = 21;
@@ -2844,6 +7560,81 @@ fn warp_bo_row() -> Option<alloc::boxed::Box<[Option<WarpBo>]>> {
     }
     v.resize_with(MAX_WARP_BOS_PER_CTX, || None);
     Some(v.into_boxed_slice())
+}
+
+fn warp_ring_row() -> Option<alloc::boxed::Box<[Option<WarpRing>]>> {
+    let mut v: Vec<Option<WarpRing>> = Vec::new();
+    if v.try_reserve_exact(WARP_RINGS_PER_CTX).is_err() {
+        return None;
+    }
+    v.resize_with(WARP_RINGS_PER_CTX, || None);
+    Some(v.into_boxed_slice())
+}
+
+fn warp_mem_row() -> Option<alloc::boxed::Box<[Option<WarpMem>]>> {
+    let mut v: Vec<Option<WarpMem>> = Vec::new();
+    if v.try_reserve_exact(MAX_WARP_MEMS_PER_CTX).is_err() {
+        return None;
+    }
+    v.resize_with(MAX_WARP_MEMS_PER_CTX, || None);
+    Some(v.into_boxed_slice())
+}
+
+fn warp_img_row() -> Option<alloc::boxed::Box<[Option<WarpImg>]>> {
+    let mut v: Vec<Option<WarpImg>> = Vec::new();
+    if v.try_reserve_exact(MAX_WARP_IMGS_PER_CTX).is_err() {
+        return None;
+    }
+    v.resize_with(MAX_WARP_IMGS_PER_CTX, || None);
+    Some(v.into_boxed_slice())
+}
+
+/// The per-ctx live GPU backing, split by PHYSICAL POOL since W-4 (one
+/// holistic sum until then; V-3b-3c-2 had made it holistic to close the
+/// bo-mint-ignores-rings accounting hole, and the holistic shape then
+/// conflated two different I-32 axes): the GUEST family (bos + rings +
+/// leaked -- pinned guest kernel memory, WARP_CTX_BACKING_MAX) and the
+/// HOSTMEM family (mems + imgs -- QEMU-window blobs, WARP_CTX_HOSTMEM_MAX).
+/// Every backing-allocating path (wbo_create, wring_mint, wmem_mint,
+/// wimg_mint) gates on its family's sum. Saturating: the sums are over
+/// client-chosen sizes and must never panic (the round-2 F1 rule).
+fn ctx_guest_backing(c: &WarpCtx) -> u64 {
+    // The GUEST family (WARP_CTX_BACKING_MAX): bos + rings pin guest kernel
+    // memory; leaked_bytes is bo-retire leakage, same pool. A host3d-flavored
+    // ring is physically hostmem, but rings are <= WARP_RING_MAX (1 MiB) each
+    // and charging them here is conservative in the direction that can never
+    // widen the guest exposure -- documented, not accidental (W-4 split).
+    let bo: u64 = c
+        .bos
+        .iter()
+        .flatten()
+        .map(|b| b.size)
+        .fold(0u64, u64::saturating_add);
+    let ring: u64 = c
+        .ring_slots
+        .iter()
+        .flatten()
+        .map(|r| r.size)
+        .fold(0u64, u64::saturating_add);
+    bo.saturating_add(ring).saturating_add(c.leaked_bytes)
+}
+
+fn ctx_hostmem_backing(c: &WarpCtx) -> u64 {
+    // The HOSTMEM family (WARP_CTX_HOSTMEM_MAX): mems + imgs are HOST3D
+    // blobs in QEMU's hostmem window (W-4 split; see the const's rationale).
+    let mem: u64 = c
+        .mems
+        .iter()
+        .flatten()
+        .map(|m| m.host3d.size)
+        .fold(0u64, u64::saturating_add);
+    let img: u64 = c
+        .imgs
+        .iter()
+        .flatten()
+        .map(|i| i.size)
+        .fold(0u64, u64::saturating_add);
+    mem.saturating_add(img)
 }
 
 // --- Warp-2c: the GPU-seam object lifecycle -------------------------------
@@ -2934,10 +7725,42 @@ impl Comp {
         if c.fence_poisoned {
             return None;
         }
-        let (slot, gen, bo_pub) = c.present_to?;
+        let (slot, gen, src) = c.present_to?;
         if slot != n || gen != s.gen {
             return None;
         }
+        let bo_pub = match src {
+            PresentSrc::Bo(bp) => bp,
+            PresentSrc::Img(img_pub) => {
+                // W-3c-2, the presentable family. The display-MODE half of
+                // the accept set lands HERE (W-3c-1 round-2 F13):
+                // registration is structural only; the fit against the
+                // CURRENT surface incarnation is checked per use, where the
+                // bind is chosen, so a mode change under a live consent
+                // degrades to inactive instead of wedging either side.
+                // No dma_fd / va / size-vs-geometry bound has an img
+                // analogue: a presentable has no guest mapping at all --
+                // that absence is I-7, and `size >= stride*h >= w*h*4` is
+                // already pinned at registration (`wimg_mint`).
+                let i = c.imgs.iter().flatten().find(|i| i.pub_id == img_pub)?;
+                if i.w != s.w || i.h != s.h {
+                    return None;
+                }
+                return Some(GlAdopt {
+                    kind: AdoptSrc::Img { stride: i.stride },
+                    dev_ctx: c.dev_ctx,
+                    ctx_pub: c.pub_id,
+                    bo_pub: i.pub_id,
+                    res_id: i.res_id,
+                    va: 0,
+                    w: i.w,
+                    h: i.h,
+                    comp_imported: false,
+                    format: i.format,
+                    composable: false,
+                });
+            }
+        };
         let b = c
             .bos
             .iter()
@@ -2946,13 +7769,94 @@ impl Comp {
         if b.w != s.w || b.h != s.h {
             return None;
         }
+        // ROUND F1 [P0]: the client DECLARES its backing size and `wbo_create`
+        // bounds it only from ABOVE (`geom_max` refuses "a 1x1 texture asking
+        // for 64 MiB"); nothing tied it to the geometry from BELOW. The
+        // compose reads `sw * sh_full * 4` from this `va` with sw/sh taken
+        // from the SURFACE -- so a 512x512 BO declared with size 4096 (page
+        // aligned, under both caps, admitted) made the compositor read 1 MiB
+        // out of a 4 KiB mapping. `weave_va_next` is a bump allocator, so the
+        // overrun is a neighbouring allocation (another client's pixels,
+        // painted onto the attacker's own pane) or unmapped VA -- a fault in
+        // the process that IS the console.
+        //
+        // This is the EXACT bound for the read that happens: adoption already
+        // pins `b.w == s.w && b.h == s.h`, and both compose arms walk rows of
+        // `sw * 4`. A legitimate B8G8R8A8 target needs exactly this at level 0
+        // and is page-rounded up, so nothing real is refused. Belt to the
+        // create-time brace below; this one is the load-bearing half, because
+        // it sits on the only path that reads the backing with foreign
+        // geometry (`comp_readback_retired` -- the sole `Some(va)` caller of
+        // `blit_composed_pixels`).
+        let need = (b.w as u64).saturating_mul(b.h as u64).saturating_mul(4);
+        if b.size < need {
+            return None;
+        }
         Some(GlAdopt {
+            kind: AdoptSrc::Bo,
             dev_ctx: c.dev_ctx,
+            ctx_pub: c.pub_id,
+            bo_pub: b.pub_id,
             res_id: b.res_id,
             va: b.va,
             w: b.w,
             h: b.h,
+            comp_imported: b.comp_imported,
+            format: b.format,
+            composable: b.composable,
         })
+    }
+
+    /// W-3c-2: a composed-mode present whose consent names a presentable --
+    /// said once per ctx (the `import_skip_said` precedent: a per-frame say
+    /// at present rate is a console storm).
+    fn note_img_composed_deferred(&mut self, ctx_pub: u32) {
+        if let Some(c) = self
+            .warp_ctxs
+            .iter_mut()
+            .flatten()
+            .find(|c| c.pub_id == ctx_pub)
+        {
+            if !c.img_composed_said {
+                c.img_composed_said = true;
+                say!(
+                    "tapestryd: warp display img composed-arm deferred (ctx {}): the pane shows the 2D weave until the W-3d compose arm",
+                    ctx_pub
+                );
+            }
+        }
+    }
+
+    /// W-3c-2: bind the display to an adopted source, by family -- ONE copy
+    /// of the dispatch (the #230 by-meaning rule), used by the pending
+    /// switch and the steady-state defensive rebind. A BO scans out via
+    /// SET_SCANOUT (its resource carries an implicit shape); a presentable
+    /// via SET_SCANOUT_BLOB at the registration's declared shape -- the
+    /// spec's `PPresentBind` (specs/tapestry_present.tla). Post-bind full
+    /// flush per #57 on both: a flush issued before the bind is dropped by
+    /// spec, and cocoa's same-size surface replace renders nothing.
+    fn direct_bind_adopted(&mut self, g: &GlAdopt, w: u32, h: u32) -> bool {
+        let ok = match g.kind {
+            AdoptSrc::Bo => {
+                let k = self.gpu.set_scanout(g.res_id, w, h).is_ok();
+                if k {
+                    let _ = self.gpu.flush(g.res_id, 0, 0, w, h);
+                }
+                k
+            }
+            // W-4 C: the Img arm IS the vk steady state (a rotating
+            // swapchain makes this the per-frame path), so its bind+flush
+            // pair rides one wait. The Bo arm stays sequential -- it runs
+            // once per source switch, never per frame.
+            AdoptSrc::Img { stride } => self
+                .gpu
+                .set_scanout_blob_then_flush(g.res_id, w, h, g.format, stride)
+                .is_ok(),
+        };
+        if ok {
+            self.bound_res = g.res_id;
+        }
+        ok
     }
 
     /// Warp-4: an adoption half changed for surface `n` (glsrc write,
@@ -2967,6 +7871,124 @@ impl Comp {
         if self.scanout == Scanout::Direct(n) {
             self.scanout = Scanout::Off;
             self.pending_direct = Some(n);
+            self.pending_bind_refused_said = false; // new episode
+        }
+    }
+
+    /// W-3e: the img family's present-COMPLETE. A pure-Vulkan client
+    /// presents through `present-to ... img` pokes alone -- its window's
+    /// weave never carries a tpresent -- so the poke IS the moment the
+    /// named presentable is a complete frame (the mesa queue_present
+    /// issues it after the per-image throttle-fence wait: the I-40
+    /// stage-0 bracket orders it behind the frame's GPU work). Completes
+    /// a pending direct switch exactly as the weave-present arm does
+    /// (same say line -- the venus gate's bind witness -- and the same
+    /// once-per-episode REFUSED line), and thereafter flips the scanout
+    /// to each newly-poked presentable SILENTLY (a say per swapchain
+    /// frame would be the C-0d storm; the flip is the steady state).
+    /// The completion tail mirrors the weave path's: the poke is a real
+    /// present, so the surface's lifecycle (Woven -> Live, presents
+    /// count, the #164 clock) advances the same way.
+    ///
+    /// Bo consents never route here: the weave present remains that
+    /// family's frame signal (GL clients present the weave every swap).
+    fn img_poke_complete(&mut self, n: usize) {
+        // The displaced-generation drain comes FIRST, before the adoption
+        // gate (round-6 F1): the poke is the client's present signal in
+        // EVERY scanout mode, and the pinning arises precisely where the
+        // arms below do not run -- a resize transits Composed, and a
+        // post-reweave geometry mismatch makes gl_adoption return None
+        // until re-registration. Without this drain a pure-Vulkan
+        // resizable window pins its old generation forever and
+        // resize_ack's in-flight gate (E_AGAIN, read client-side as a
+        // stale serial) wedges every later resize of that window.
+        self.release_displaced_gen(n);
+        let g = match self.gl_adoption(n) {
+            Some(g) => g,
+            None => return, // inactive pairing: reconcile/geometry gate it
+        };
+        if !matches!(g.kind, AdoptSrc::Img { .. }) {
+            return;
+        }
+        let (w, h) = (g.w, g.h); // == the surface's (gl_adoption pins it)
+        let mut presented = false;
+        // Timed as its own census row (round-6 F7): this is the
+        // steady-state Vulkan present path's device work, invisible to
+        // the FK_PRESENT frame because it rides a ctl-write dispatch.
+        let t0 = Instant::now();
+        if self.pending_direct == Some(n) {
+            let tb = Instant::now();
+            let bound = self.direct_bind_adopted(&g, w, h);
+            let bns = tb.elapsed().as_nanos() as u64;
+            self.cost_add_ns(Cost::PokeBind, bns);
+            #[cfg(feature = "test-mode")]
+            {
+                self.poke_hist_bind[Self::poke_hist_slot(bns)] += 1;
+            }
+            if bound {
+                say!(
+                    "tapestryd: scanout direct {} img res {} ({}x{})",
+                    n,
+                    g.res_id,
+                    w,
+                    h
+                );
+                self.scanout = Scanout::Direct(n);
+                self.pending_direct = None;
+                self.pending_bind_refused_said = false;
+                presented = true;
+            } else if !self.pending_bind_refused_said {
+                self.pending_bind_refused_said = true;
+                say!(
+                    "tapestryd: scanout direct {} img res {} ({}x{}) bind REFUSED -- pending retried at each present",
+                    n, g.res_id, w, h
+                );
+            }
+        } else if self.scanout == Scanout::Direct(n) {
+            // The steady state is one PAINT per poke. A rotating swapchain
+            // makes bound_res never match, so the bind arm runs per frame
+            // -- and direct_bind_adopted already flushes internally on
+            // success (its switch-case contract), so an outer flush after
+            // it would paint the SAME res at the SAME geometry twice: the
+            // run-5 histogram measured each flush as a ~10 ms quantized
+            // display roundtrip, so the double-paint was ~half the whole
+            // display wall. The outer flush now runs ONLY on the
+            // same-image re-poke arm (new content in the bound res).
+            // PokeBind therefore brackets scanout+flush (the paint
+            // included); PokeFlush counts re-pokes alone.
+            if self.bound_res != g.res_id {
+                let tb = Instant::now();
+                let ok = self.direct_bind_adopted(&g, w, h);
+                let bns = tb.elapsed().as_nanos() as u64;
+                self.cost_add_ns(Cost::PokeBind, bns);
+                #[cfg(feature = "test-mode")]
+                {
+                    self.poke_hist_bind[Self::poke_hist_slot(bns)] += 1;
+                }
+                if !ok {
+                    return; // refused flip: keep the old frame on screen
+                }
+            } else {
+                let tf = Instant::now();
+                let _ = self.gpu.flush(g.res_id, 0, 0, w, h);
+                let fns = tf.elapsed().as_nanos() as u64;
+                self.cost_add_ns(Cost::PokeFlush, fns);
+                #[cfg(feature = "test-mode")]
+                {
+                    self.poke_hist_flush[Self::poke_hist_slot(fns)] += 1;
+                }
+            }
+            presented = true;
+        }
+        if presented {
+            self.cost_add(Cost::PresentPokeImg, t0);
+            self.note_present(n);
+            if let Some(s) = self.surf_mut(n) {
+                s.presents += 1;
+                if s.state == SurfState::Woven {
+                    s.state = SurfState::Live;
+                }
+            }
         }
     }
 
@@ -2976,23 +7998,90 @@ impl Comp {
     /// display cannot survive -- then re-arm the owning surface's own
     /// switch through reconcile (its next present restores the display
     /// from the weave, stale but bounded).
-    fn gl_evict_res(&mut self, res_id: u32) {
-        if res_id == 0 || self.bound_res != res_id {
-            return;
-        }
+    ///
+    /// RETURNS whether the device actually accepted the unbind (W-3c-1 audit
+    /// F8). `Ctrl::step` answers Err on two different outcomes: a submission
+    /// death (which latches `dead`, so a following unref no-ops too) and a
+    /// PLAIN REFUSAL BY A LIVE DEVICE -- and the second is the reachable one.
+    /// On that path the display keeps scanning `res_id` while the caller's
+    /// unref succeeds, which is precisely the `punbind_skipped` outcome
+    /// reached with the unbind nominally "done". The result was discarded
+    /// here, so it was silent. Callers that are about to unref MUST report a
+    /// false; W-3a F2 already ruled that this residue deserves a loud line
+    /// rather than a generic step, and W-3c-1 removes that finding's
+    /// "no client exists pre-READY" mitigation -- the presentable path is
+    /// client-driven, post-READY, and repeatable.
+    /// Round-4 F1: EVERY post-READY display DISABLE routes here, making the
+    /// condemn net's PRODUCER side as centralised as `resource_unref`'s
+    /// defer side. Before this, the refusal leg was wired at exactly ONE of
+    /// four disable sites; the three raw ones (reconcile's Off arm, both
+    /// `retire` arms) discarded the verdict and zeroed `bound_res` -- which
+    /// also BLINDED the guarded path behind them, because conn teardown
+    /// retires surfaces BEFORE warp ctxs, so the later eviction scans
+    /// compared against the already-zeroed field, and `wimg_teardown`'s
+    /// unref then went raw against a resource the display might still be
+    /// scanning: `punbind_skipped` reached silently on the most ordinary
+    /// teardown path in the system (a client dying with a bound source).
+    ///
+    /// A refused disable CONDEMNS the still-scanned resource BEFORE
+    /// `bound_res` is zeroed, so any later unref -- any owner, any path --
+    /// defers instead of handing the display freed memory. `bound_res` is
+    /// cleared either way: safety rests on the condemn, not the field, and
+    /// the stale scanout is harmless (old pixels until `reconcile`
+    /// establishes a new one). Reported HERE rather than at any caller
+    /// (round-2 F2's rule): a report the callee emits is one no caller can
+    /// forget.
+    fn display_disable(&mut self) -> bool {
+        let old = self.bound_res;
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        let _ = self.gpu.set_scanout(0, dw, dh);
+        let ok = self.gpu.set_scanout(0, dw, dh).is_ok();
+        if !ok && old != 0 {
+            self.unbind_refused = self.unbind_refused.saturating_add(1);
+            self.gpu.condemn(old);
+            // Distinguish the self-test's DRILL from a real device refusal.
+            // The code path is identical for both -- that is what makes the
+            // drill worth running -- but the gate keys on a real refusal
+            // being ABSENT, and the self-test produces one every venus boot.
+            // The lever is armed only inside the pre-READY self-test, whose
+            // next disable is deterministic, so a consumed injection here IS
+            // the drill's own path.
+            if self.gpu.take_injected_refusal() {
+                say!(
+                    "tapestryd: warp display unbind refusal INJECTED (self-test drill) \
+                     for res {} -- condemned, unref deferred, drain expected at the \
+                     next accepted scanout",
+                    old
+                );
+            } else {
+                say!(
+                    "tapestryd: warp display UNBIND REFUSED by the device for res {} -- \
+                     condemned, unref deferred; the display keeps naming it until the \
+                     next accepted scanout",
+                    old
+                );
+            }
+        }
         self.bound_res = 0;
+        ok
+    }
+
+    fn gl_evict_res(&mut self, res_id: u32) -> bool {
+        if res_id == 0 || self.bound_res != res_id {
+            return true; // nothing bound to this resource: vacuously unbound
+        }
+        let unbound = self.display_disable();
         if let Scanout::Direct(n) = self.scanout {
             self.scanout = Scanout::Off;
             self.pending_direct = Some(n);
+            self.pending_bind_refused_said = false; // new episode
             if let Some(s) = self.surf_mut(n) {
-                s.res_stale = true;
+                s.res_stale = [true; WEAVE_SLOTS as usize];
             }
         } else {
             self.scanout = Scanout::Off;
         }
         self.reconcile();
+        unbound
     }
 
     /// Mint a context for `conn` (one per client -- the I-45 exposure
@@ -3003,7 +8092,12 @@ impl Comp {
         // conn's resources until they finish, and excluding them let one
         // connection mint-poison-destroy in a loop, burning a ctx slot
         // per abandoned fence.
-        if self.warp_ctxs.iter().flatten().any(|c| c.owner_conn == conn) {
+        if self
+            .warp_ctxs
+            .iter()
+            .flatten()
+            .any(|c| c.owner_conn == conn)
+        {
             return None; // one ctx per client
         }
         let slot = (0..MAX_WARP_CTXS)
@@ -3015,6 +8109,9 @@ impl Comp {
         // mintable slot's row is empty (parked records exist only while
         // the slot is poisoned, and poisoned slots are skipped above).
         let bos = warp_bo_row()?;
+        let ring_slots = warp_ring_row()?;
+        let mems = warp_mem_row()?;
+        let imgs = warp_img_row()?;
         // The row is empty (len 0), so this guarantees capacity >= the
         // full cap -- a no-op when a reused slot's row kept its capacity.
         debug_assert!(self.warp_ctx_leaked[slot].is_empty());
@@ -3047,11 +8144,14 @@ impl Comp {
             owner_conn: conn,
             pub_id,
             dev_ctx,
+            venus_ctx: None,
             capset: 0,
             rings: 1,
             fences_in_flight: 0,
+            comp_rb_in_flight: 0,
             fence_signaled: 0,
             fence_reported: 0,
+            timeline_signaled: [0; WARP_TIMELINES],
             fenced_rx: 0,
             fenced_minted: 0,
             fenced_again: 0,
@@ -3071,25 +8171,64 @@ impl Comp {
             verify_seq: 0,
             verify_ok: 0,
             verify_tick: 0,
+            import_tick: u64::MAX,
+            import_pending: false,
             verify_diag_arms: 0,
+            import_skip_said: false,
             verify_last: None,
             present_to: None,
+            img_composed_said: false,
             bo_backed_peak: 0,
             bo_bytes_peak: 0,
             build_diag_arms: 0,
             create_refused: 0,
             bos,
+            ring_slots,
+            mems,
+            imgs,
         });
         // #240: the probe is built AFTER the row exists so its failure is
         // recoverable -- a ctx with no probe still serves, it just answers
         // "unknown" to every verify. Making a diagnostic's failure fail the
         // whole mint would hand a client a new way to be denied a context.
-        let probe = self.warp_probe_build(dev_ctx);
+        // The BUFFER pair first (C-0d Fable round F1 -- see
+        // `warp_hprobe_build`), the texture pair only where that mint fails,
+        // counted on the global ctl (`probe-texture`) rather than said: a
+        // per-mint line at ctx-create rate would be a say storm.
+        let mut probe = self.warp_hprobe_build(dev_ctx);
         if probe.is_none() {
-            say!("tapestryd: warp ctx {} has no #240 health probe (mint failed)", pub_id);
+            probe = self.warp_probe_build(dev_ctx);
+            if probe.is_some() {
+                self.warp_probe_texture = self.warp_probe_texture.saturating_add(1);
+            }
+        }
+        if probe.is_none() {
+            say!(
+                "tapestryd: warp ctx {} has no #240 health probe (mint failed)",
+                pub_id
+            );
         }
         if let Some(c) = self.wctx_mut(pub_id, conn) {
             c.probe = probe;
+        }
+        // Identity for the watch's reader: which conn owns the ctx it is
+        // about to report on. Gated like the watch itself -- one line per
+        // client mint, test boots only. u64::MAX is the self-test
+        // sentinel, named instead of printed raw.
+        #[cfg(feature = "test-mode")]
+        if conn == u64::MAX {
+            say!(
+                "tapestryd: warp ctx {} minted conn=selftest slot={}",
+                pub_id,
+                slot
+            );
+        } else {
+            say!(
+                "tapestryd: warp ctx {} minted conn={} slot={}",
+                pub_id,
+                conn,
+                slot
+            );
         }
         Some(pub_id)
     }
@@ -3101,6 +8240,28 @@ impl Comp {
     /// before `t_close`, since I-7's dual count frees nothing while a
     /// mapping ref survives.
     fn warp_probe_res(&mut self, dev_ctx: u32, size: u64) -> Option<(u32, i64, u64)> {
+        self.warp_probe_res_kind(dev_ctx, size, false)
+    }
+
+    /// The same mint as a BUFFER resource of `size` bytes (`buffer` = true;
+    /// Warp-C C-4, see `PIPE_BUFFER`) or the 1x1 render target (false).
+    ///
+    /// The mapping VA rides the shared `weave_va_next` bump and is NEVER
+    /// rewound: `warp_probe_undo_guest` detaches the mapping (the pages and
+    /// the handle are freed) but the VA range stays consumed, so every ctx
+    /// mint/destroy cycle burns 2 pages of tapestryd's VA window for its
+    /// probe pair on top of the weave allocations #171 already tracks (C-0d
+    /// Fable round F3, the same monotonic-VA class with a second, ctx-churn
+    /// driver; the reclaim #171 owes must cover these pages too). Note also
+    /// that the detach names `size` while the bump rounds it up to pages --
+    /// equal today (`size` is PAGE), and a probe of any other size would
+    /// need the detach to name the rounded length.
+    fn warp_probe_res_kind(
+        &mut self,
+        dev_ctx: u32,
+        size: u64,
+        buffer: bool,
+    ) -> Option<(u32, i64, u64)> {
         let fd = unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if fd < 0 {
             return None;
@@ -3124,9 +8285,22 @@ impl Comp {
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(fd) };
         };
-        if self
-            .gpu
-            .resource_create_3d(
+        let created = if buffer {
+            self.gpu.resource_create_3d(
+                res_id,
+                PIPE_BUFFER,
+                VIRGL_FORMAT_R8_UNORM,
+                VIRGL_BIND_VERTEX_BUFFER,
+                size as u32,
+                1,
+                1,
+                1,
+                0,
+                0,
+                0,
+            )
+        } else {
+            self.gpu.resource_create_3d(
                 res_id,
                 PIPE_TEXTURE_2D,
                 VIRGL_FORMAT_B8G8R8A8_UNORM,
@@ -3139,8 +8313,8 @@ impl Comp {
                 0,
                 0,
             )
-            .is_err()
-        {
+        };
+        if created.is_err() {
             undo(&mut self.gpu, 0, res_id);
             return None;
         }
@@ -3148,7 +8322,11 @@ impl Comp {
             undo(&mut self.gpu, 1, res_id);
             return None;
         }
-        if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
+        if self
+            .gpu
+            .attach_backing(res_id, pa as u64, size as u32)
+            .is_err()
+        {
             undo(&mut self.gpu, 2, res_id);
             return None;
         }
@@ -3196,11 +8374,7 @@ impl Comp {
             }
         };
         unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
-        if self
-            .gpu
-            .transfer_to_3d_sync(dev_ctx, mark_res, 1, 1, 4)
-            .is_err()
-        {
+        if self.probe_upload(dev_ctx, false, mark_res).is_err() {
             // The mark never reached the host, so a verify could not tell
             // "the copy ran" from "the copy ran and copied garbage".
             // Better no probe than a probe that answers wrongly.
@@ -3217,6 +8391,48 @@ impl Comp {
             return None;
         }
         Some(CtxProbe {
+            buffer: false,
+            mark_res,
+            mark_fd,
+            mark_va,
+            sent_res,
+            sent_fd,
+            sent_va,
+            size,
+        })
+    }
+
+    /// The BUFFER-pair probe (Warp-C C-4): the same mark / sentinel
+    /// discipline as `warp_probe_build`, minted as BUFFER resources (see
+    /// `PIPE_BUFFER`) so that a verify's uploads, copy and readback never
+    /// enqueue GPU work behind anyone's frames. The compositor's HEALTH pair
+    /// (`comp_hprobe`; distinct from `comp_probe`, which stays a TEXTURE pair
+    /// because the C-2c import witnesses copy slot textures into it) and,
+    /// since the C-0d Fable round (F1), EVERY client ctx's #240 probe: on a
+    /// texture pair the client verify's transfers and readback ran on the
+    /// synchronous slot as blit jobs behind everything the DEVICE had queued
+    /// -- client A's verify blocked the console behind client B's frames,
+    /// while the `verify` admission gate reads only the CALLER's fence
+    /// gauges. `None` = could not be built; the caller falls back to the
+    /// texture pair (correct, and slower) and counts it.
+    fn warp_hprobe_build(&mut self, dev_ctx: u32) -> Option<CtxProbe> {
+        let size = PAGE;
+        let (mark_res, mark_fd, mark_va) = self.warp_probe_res_kind(dev_ctx, size, true)?;
+        let (sent_res, sent_fd, sent_va) = match self.warp_probe_res_kind(dev_ctx, size, true) {
+            Some(v) => v,
+            None => {
+                self.warp_probe_res_undo(dev_ctx, mark_res, mark_va, mark_fd, size);
+                return None;
+            }
+        };
+        unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
+        if self.probe_upload(dev_ctx, true, mark_res).is_err() {
+            self.warp_probe_res_undo(dev_ctx, sent_res, sent_va, sent_fd, size);
+            self.warp_probe_res_undo(dev_ctx, mark_res, mark_va, mark_fd, size);
+            return None;
+        }
+        Some(CtxProbe {
+            buffer: true,
             mark_res,
             mark_fd,
             mark_va,
@@ -3291,7 +8507,7 @@ impl Comp {
 
     fn warp_ctx_verify_probe(&mut self, ctx_pub: u32, conn: u64) -> Option<bool> {
         let tick = self.tick;
-        let (dev_ctx, mark_res, mark_va, sent_res, sent_va) = {
+        let (dev_ctx, buf, mark_res, mark_va, sent_res, sent_va) = {
             let c = self.wctx(ctx_pub, conn)?;
             // One probe per ctx per compositor tick (see `verify_tick`). A
             // second write in the same frame is answered from the state the
@@ -3328,7 +8544,9 @@ impl Comp {
                 }
             }
             let p = c.probe.as_ref()?;
-            (c.dev_ctx, p.mark_res, p.mark_va, p.sent_res, p.sent_va)
+            (
+                c.dev_ctx, p.buffer, p.mark_res, p.mark_va, p.sent_res, p.sent_va,
+            )
         };
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
             c.verify_seq += 1;
@@ -3364,49 +8582,28 @@ impl Comp {
         // copy, and the readback all run inside a single dispatch, on one
         // in-order controlq, so no client submit can be published between
         // them. It is a virtio-gpu command, so it lands even on a latched ctx.
+        //
+        // The transfer form and the copy width follow the pair's kind
+        // (`probe_upload` / `probe_copy_region` / `probe_readback`): on the
+        // BUFFER pair every step is CPU-side on a tiled renderer; on the
+        // texture fallback each is a blit job behind whatever the device has
+        // queued (C-0d Fable round F1 -- the exposure the buffer pair
+        // removes, gauged by `probe-texture` on the global ctl).
         unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
-        if self
-            .gpu
-            .transfer_to_3d_sync(dev_ctx, mark_res, 1, 1, 4)
-            .is_err()
-        {
+        if self.probe_upload(dev_ctx, buf, mark_res).is_err() {
             return None;
         }
         unsafe { core::ptr::write_volatile(sent_va as *mut u32, token) };
+        if self.probe_upload(dev_ctx, buf, sent_res).is_err() {
+            return None;
+        }
         if self
-            .gpu
-            .transfer_to_3d_sync(dev_ctx, sent_res, 1, 1, 4)
+            .probe_copy_region(dev_ctx, buf, mark_res, sent_res)
             .is_err()
         {
             return None;
         }
-        let mut st: [u32; 14] = [0; 14];
-        st[0] = (VIRGL_CCMD_RESOURCE_COPY_REGION & 0xff) | (VIRGL_CMD_RCR_SIZE << 16);
-        st[1] = sent_res; // dst handle
-        st[2] = 0; // dst level
-        st[3] = 0; // dst x
-        st[4] = 0; // dst y
-        st[5] = 0; // dst z
-        st[6] = mark_res; // src handle
-        st[7] = 0; // src level
-        st[8] = 0; // src x
-        st[9] = 0; // src y
-        st[10] = 0; // src z
-        st[11] = 1; // src w
-        st[12] = 1; // src h
-        st[13] = 1; // src d
-        let mut bytes = [0u8; 56];
-        for (i, w) in st.iter().enumerate() {
-            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
-        }
-        if self.gpu.submit_3d_sync(dev_ctx, &bytes).is_err() {
-            return None;
-        }
-        if self
-            .gpu
-            .transfer_from_3d_sync(dev_ctx, sent_res, 1, 1, 4)
-            .is_err()
-        {
+        if self.probe_readback(dev_ctx, buf, sent_res).is_err() {
             return None;
         }
         let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) };
@@ -3434,7 +8631,7 @@ impl Comp {
                 .map(|p| p.mark_va);
             match mv {
                 Some(va) => {
-                    if self.gpu.transfer_from_3d_sync(dev_ctx, mark_res, 1, 1, 4).is_err() {
+                    if self.probe_readback(dev_ctx, buf, mark_res).is_err() {
                         None
                     } else {
                         Some(unsafe { core::ptr::read_volatile(va as *const u32) })
@@ -3449,7 +8646,10 @@ impl Comp {
                     "tapestryd: warp ctx {} verify {} -- the MARK reads {:?}, not {:#x}, so the \
                      probe cannot judge the copy. UNKNOWN, not a verdict. (first only; \
                      the rate is global `verify-unknown`)",
-                    ctx_pub, seq, mark_now, PROBE_MARK
+                    ctx_pub,
+                    seq,
+                    mark_now,
+                    PROBE_MARK
                 );
             }
             return None;
@@ -3462,7 +8662,9 @@ impl Comp {
                 say!(
                     "tapestryd: warp ctx {} verify {} read {:#x} (neither mark nor token) \
                      -- unknown (first only; the rate is global `verify-unknown`)",
-                    ctx_pub, seq, got
+                    ctx_pub,
+                    seq,
+                    got
                 );
             }
             return None;
@@ -3474,7 +8676,8 @@ impl Comp {
                 say!(
                     "tapestryd: warp ctx {} STREAM REJECTED -- the host refused a submit \
                      in (prev verify, {}]; the ctx is dead, recreate it (#240)",
-                    ctx_pub, seq
+                    ctx_pub,
+                    seq
                 );
             }
         }
@@ -3499,6 +8702,11 @@ impl Comp {
             w: 0,
             h: 0,
             retiring: false,
+            comp_imported: false,
+            format: 0,
+            composable: false,
+            target: 0,
+            flags: 0,
         });
         Some(pub_id)
     }
@@ -3548,7 +8756,14 @@ impl Comp {
                 c.build_diag_arms |= 1 << arm;
                 say!(
                     "tapestryd: warp create3d refused ({} {}) fmt={} {}x{} lvl={} size={} ctx={}",
-                    why, detail, format, w, h, last_level, size, ctx_pub
+                    why,
+                    detail,
+                    format,
+                    w,
+                    h,
+                    last_level,
+                    size,
+                    ctx_pub
                 );
             }
         } else {
@@ -3594,7 +8809,18 @@ impl Comp {
         size: u64,
     ) -> bool {
         if size == 0 || size % PAGE != 0 {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_SIZE_ALIGN, "size-align", size as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_SIZE_ALIGN,
+                "size-align",
+                size as i64,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         // The backing is CLIENT-DECLARED, and nothing downstream charges
@@ -3614,7 +8840,18 @@ impl Comp {
         // step is checked anyway (belt AND braces: the round-1 version
         // checked only the multiplications and panicked on `v + v/2`).
         if size > WARP_CTX_BACKING_MAX {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_SIZE_CAP, "size-cap", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_SIZE_CAP,
+                "size-cap",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         let px = (w as u64)
@@ -3632,44 +8869,99 @@ impl Comp {
             None => WARP_CTX_BACKING_MAX, // geometry alone is unbounded; the cap rules
         };
         if size > geom_max {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_GEOMETRY, "geometry", geom_max as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_GEOMETRY,
+                "geometry",
+                geom_max as i64,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
+        // NO create-time lower bound on the backing, and this is deliberate --
+        // a brace here was added with the F1 [P0] fix and REMOVED by the
+        // follow-up round, which found its premise contradicted by this
+        // project's OWN Mesa winsys, in a comment at the line that chooses
+        // the size (`usr/ports/mesa/patches/0006-*.patch:1511`):
+        //
+        //     /* The seam refuses unaligned or zero backings; the driver's
+        //      * staging-path textures legitimately ask for size 1. */
+        //     size = *size_inout ? *size_inout : 1;
+        //
+        // So a REAL 512x512 BGRA texture legitimately arrives declaring one
+        // page. Mesa's virgl driver does this on two paths that keep the true
+        // width/height: the staging path (`alloc_size = 1`) and MSAA (`don't
+        // create guest backing store for MSAA` -> total_size 0). The brace
+        // refused both, byte-for-byte indistinguishable from the attack shape
+        // -- because there is nothing to distinguish: the declaration IS
+        // identical. Only the READER can tell them apart, by whether it is
+        // about to read the backing.
+        //
+        // The MSAA arm needed no host capability, so every multisampled BGRA
+        // target above 32x32 was refused outright; the staging arm hung on a
+        // virglrenderer capset bit nothing in this tree measures, which is why
+        // the gates stayed green. A guard whose activation no gate can see is
+        // worse than the hole it closes.
+        //
+        // The lower bound lives at the READ gate (`gl_adoption`) instead, and
+        // that is the load-bearing half regardless: it is exact rather than
+        // conservative, it is re-evaluated at retire via `same_adoption`, and
+        // it sits on the only path that reads a BO backing with foreign
+        // geometry. A host-only resource simply never adopts.
         // The c-borrowing checks compute into locals first so the failure
         // arms can reach the (&mut self) one-shot diagnostic (#218).
         let (byte_fail, byte_live, count_fail, no_mint, already_built, dev_ctx) = {
             let c = match self.wctx(ctx_pub, conn) {
                 Some(c) => c,
                 None => {
-                    self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_CTX_GONE, "ctx-gone", 0, format, w, h, last_level, size);
+                    self.wbo_diag_once(
+                        ctx_pub,
+                        conn,
+                        Self::WDIAG_CTX_GONE,
+                        "ctx-gone",
+                        0,
+                        format,
+                        w,
+                        h,
+                        last_level,
+                        size,
+                    );
                     return false;
                 }
             };
-            // Saturating, not `+` (round-2 F1's second witness): `live` sums
-            // client-chosen sizes and the sum itself must never panic.
-            let live: u64 =
-                c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
-            let leaked = c.leaked_bytes;
-        // Round-6 F1: the byte cap does NOT bound the leak COUNT. The
-        // minimum accepted size is PAGE, so 16384 backings fit inside the
-        // 64 MiB budget -- and since `bos[]` slots are reused across
-        // mint/build/destroy, a poisoned-yet-live ctx could park all of
-        // them into a 16-wide graveyard. The overflow then dropped each
-        // surplus `WarpBo` by value, leaking a handle AND a mapping
-        // (`WarpBo` has no `Drop`).
-        //
-        // The quantity that must be bounded is every backing this ctx will
-        // EVER have to park, which is the ones already parked plus the ones
-        // still live -- a live backing is parked wholesale by the leak arm
-        // of `wctx_finish`. Bounding `leaked_count` alone would still admit
-        // 15 parked + 16 live = 31 parks into a 16-wide graveyard. Only
-        // BACKED BOs can be parked (`wbo_retire` returns 0, and so parks
-        // nothing, when `dma_fd < 0`), so an unbacked mint is correctly not
-        // counted here.
+            // I-32 guest-family cap (bos + rings + leaked; see
+            // ctx_guest_backing -- the W-4 split moved mems + imgs to their own
+            // hostmem budget): V-3b-3c-2 closes the pre-existing hole where a
+            // bo mint summed bos + leaked ONLY and did not count existing rings
+            // against WARP_CTX_BACKING_MAX. Saturating: the sum is over
+            // client-chosen sizes and must never panic (round-2 F1). The bo-only
+            // high-water census below stays bo-scoped (bo_bytes_peak).
+            let total: u64 = ctx_guest_backing(c);
+            // Round-6 F1: the byte cap does NOT bound the leak COUNT. The
+            // minimum accepted size is PAGE, so 16384 backings fit inside the
+            // 64 MiB budget -- and since `bos[]` slots are reused across
+            // mint/build/destroy, a poisoned-yet-live ctx could park all of
+            // them into a 16-wide graveyard. The overflow then dropped each
+            // surplus `WarpBo` by value, leaking a handle AND a mapping
+            // (`WarpBo` has no `Drop`).
+            //
+            // The quantity that must be bounded is every backing this ctx will
+            // EVER have to park, which is the ones already parked plus the ones
+            // still live -- a live backing is parked wholesale by the leak arm
+            // of `wctx_finish`. Bounding `leaked_count` alone would still admit
+            // 15 parked + 16 live = 31 parks into a 16-wide graveyard. Only
+            // BACKED BOs can be parked (`wbo_retire` returns 0, and so parks
+            // nothing, when `dma_fd < 0`), so an unbacked mint is correctly not
+            // counted here.
             let live_backed = c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count();
             (
-                live.saturating_add(leaked).saturating_add(size) > WARP_CTX_BACKING_MAX,
-                live,
+                total.saturating_add(size) > WARP_CTX_BACKING_MAX,
+                total,
                 c.leaked_count as usize + live_backed >= MAX_WARP_BOS_PER_CTX,
                 !c.bos.iter().flatten().any(|b| b.pub_id == bo_pub),
                 c.bos
@@ -3680,15 +8972,48 @@ impl Comp {
             )
         };
         if byte_fail {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_BYTE_CAP, "byte-cap", byte_live as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_BYTE_CAP,
+                "byte-cap",
+                byte_live as i64,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         if count_fail {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_COUNT_CAP, "count-cap", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_COUNT_CAP,
+                "count-cap",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         if no_mint {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_NO_MINT, "no-mint-record", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_NO_MINT,
+                "no-mint-record",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         // Already built? create3d is once per BO -- benign, but SAY so:
@@ -3696,14 +9021,35 @@ impl Comp {
         // the #198 hunt lost a session to a contradiction it could not
         // name (client saw a refusal, server named nothing).
         if already_built {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_ALREADY_BUILT, "already-built", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_ALREADY_BUILT,
+                "already-built",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
 
-        let fd =
-            unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        let fd = unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if fd < 0 {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DMA_CREATE, "dma-create", fd, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_DMA_CREATE,
+                "dma-create",
+                fd,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         let va = self.weave_va_next;
@@ -3711,7 +9057,18 @@ impl Comp {
         let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
         if pa < 0 {
             unsafe { t_close(fd) };
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DMA_MAP, "dma-map", pa, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_DMA_MAP,
+                "dma-map",
+                pa,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
 
@@ -3739,21 +9096,60 @@ impl Comp {
         let res_id = self.res_seq;
         if self
             .gpu
-            .resource_create_3d(res_id, target, format, bind, w, h, d, array, last_level, samples, flags)
+            .resource_create_3d(
+                res_id, target, format, bind, w, h, d, array, last_level, samples, flags,
+            )
             .is_err()
         {
             unwind(&mut self.gpu, 0, res_id);
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_CREATE, "dev-create", target as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_DEV_CREATE,
+                "dev-create",
+                target as i64,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
             unwind(&mut self.gpu, 1, res_id);
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_ATTACH_CTX, "dev-attach-ctx", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_DEV_ATTACH_CTX,
+                "dev-attach-ctx",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
-        if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
+        if self
+            .gpu
+            .attach_backing(res_id, pa as u64, size as u32)
+            .is_err()
+        {
             unwind(&mut self.gpu, 2, res_id);
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_ATTACH_BACKING, "dev-attach-backing", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_DEV_ATTACH_BACKING,
+                "dev-attach-backing",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
 
@@ -3768,6 +9164,16 @@ impl Comp {
                 b.size = size;
                 b.w = w;
                 b.h = h;
+                b.format = format;
+                b.composable = (target == PIPE_TEXTURE_2D || target == PIPE_TEXTURE_RECT)
+                    && format == VIRGL_FORMAT_B8G8R8A8_UNORM
+                    && (flags & VIRGL_RESOURCE_Y_0_TOP) == 0
+                    && d == 1
+                    && array == 1
+                    && last_level == 0
+                    && samples == 0;
+                b.target = target;
+                b.flags = flags;
                 built = true;
                 break;
             }
@@ -3779,7 +9185,18 @@ impl Comp {
             // built for it, and must NAME itself (audit F2: this was the
             // one refusal arm still silent).
             unwind(&mut self.gpu, 3, res_id);
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_RECORD_VANISHED, "record-vanished", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_RECORD_VANISHED,
+                "record-vanished",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         // #204 census: track the backed high-water on BOTH axes -- count
@@ -3791,8 +9208,12 @@ impl Comp {
         if live > c.bo_backed_peak {
             c.bo_backed_peak = live;
         }
-        let live_bytes: u64 =
-            c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
+        let live_bytes: u64 = c
+            .bos
+            .iter()
+            .flatten()
+            .map(|b| b.size)
+            .fold(0u64, u64::saturating_add);
         if live_bytes > c.bo_bytes_peak {
             c.bo_bytes_peak = live_bytes;
         }
@@ -3863,6 +9284,1452 @@ impl Comp {
         None
     }
 
+    // === V-3a: the coherent shmem ring (ctx/<id>/ring/<ridx>) ===============
+    //
+    // A ring is a weft-shared, coherently-mapped GUEST blob addressed per
+    // ring_idx (0-63). It carries a control header (head/tail/idle/seq -- the
+    // tapestryd<->client contract) and a CS region Venus lays out. V-3a
+    // validates the transport + doorbell + fence signal + F2 without a Venus
+    // driver; the device submit of the drained CS is V-3b's (marked in
+    // `wring_kick`). res ids and pub ids are monotone, never reused.
+
+    /// Resolve a live ring the caller owns (its ctx + the ring). The I-45
+    /// gate: a foreign conn never resolves another client's ring.
+    fn wring(&self, ring_pub: u32, conn: u64) -> Option<(&WarpCtx, &WarpRing)> {
+        for c in self.warp_ctxs.iter().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for r in c.ring_slots.iter().flatten() {
+                if r.pub_id == ring_pub && !r.retiring {
+                    return Some((c, r));
+                }
+            }
+        }
+        None
+    }
+
+    fn wring_mut(&mut self, ring_pub: u32, conn: u64) -> Option<&mut WarpRing> {
+        for c in self.warp_ctxs.iter_mut().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for r in c.ring_slots.iter_mut().flatten() {
+                if r.pub_id == ring_pub && !r.retiring {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+
+    /// V-3b-3c (F1 full fix): retire ONE ring the caller owns and FREE its ctx
+    /// slot, so the ridx becomes re-mintable. The per-ring analog of the
+    /// wctx_finish ring loop: TAKE the WarpRing out of its slot (which frees the
+    /// slot -- a None slot re-mints via wring_mint's `taken` check), then
+    /// wring_teardown it (disarm the weft share + observe-and-reap the hostmem
+    /// backing). Taking the ring by value first makes self.gpu and warp_ctxs
+    /// borrow disjointly for the teardown (the wctx_finish borrow pattern). I-45:
+    /// only the ctx owner (conn) can name the ring -- the ownership scan is the
+    /// gate. The V-3b-3b interim left ridx alloc monotonic precisely because
+    /// there was no way to retire ONE ring short of ctx death; this closes it.
+    fn wring_destroy(&mut self, ring_pub: u32, conn: u64) -> Result<(), u32> {
+        let mut found: Option<(usize, usize)> = None;
+        for (si, slot) in self.warp_ctxs.iter().enumerate() {
+            let c = match slot.as_ref() {
+                Some(c) => c,
+                None => continue,
+            };
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            if let Some(ri) = c.ring_slots.iter().position(|r| {
+                r.as_ref()
+                    .map_or(false, |r| r.pub_id == ring_pub && !r.retiring)
+            }) {
+                found = Some((si, ri));
+                break;
+            }
+        }
+        let (si, ri) = found.ok_or(p9::E_NOENT)?;
+        // take() frees the slot; the warp_ctxs borrow ends with this statement,
+        // so self.gpu is free to borrow for the teardown below.
+        let taken = self.warp_ctxs[si]
+            .as_mut()
+            .and_then(|c| c.ring_slots[ri].take());
+        if let Some(mut r) = taken {
+            Self::wring_teardown(&mut self.gpu, &mut r);
+        }
+        Ok(())
+    }
+
+    /// The ring Tweft mint (the weft_ensure precedent): share once, echo the
+    /// stored id thereafter. Lazy, exactly like `wbo_weft_ensure`.
+    fn wring_weft_ensure(&mut self, ring_pub: u32, conn: u64) -> Option<(u64, u32)> {
+        let (va, size, have) = {
+            let r = self.wring_mut(ring_pub, conn)?;
+            // A guest-blob ring shares its DMA backing (dma_fd >= 0). A Model B
+            // HOST3D ring has dma_fd == -1 but a live `host3d` token, and its
+            // (va, size) name the hostmem burrow -- t_weft_share routes that to
+            // WEFT_BIND_HOSTMEM (weft.c, F1 arm), delivering the ring to the
+            // client at the host-dictated cache. A ring with neither is
+            // unshareable (nothing minted).
+            if r.dma_fd < 0 && r.host3d.is_none() {
+                return None;
+            }
+            (r.va, r.size, r.share_id)
+        };
+        if let Some(id) = have {
+            return Some((id, size as u32));
+        }
+        let id = unsafe { t_weft_share(va, size) };
+        if id <= 0 {
+            say!("tapestryd: warp ring t_weft_share failed {}", id);
+            return None;
+        }
+        self.wring_mut(ring_pub, conn).unwrap().share_id = Some(id as u64);
+        Some((id as u64, size as u32))
+    }
+
+    /// The `ring/new` write verb: `"<bytes> <ring_idx>"` (the V-3a guest-blob
+    /// ring) or `"<bytes> <ring_idx> host3d"` (the Model B HOST3D ring under the
+    /// client's venus device-ctx). ADD, not replace: a bare form stays the
+    /// coherent guest-blob ring; an unknown third token is rejected.
+    fn wring_mint_verb(&mut self, ctx_pub: u32, conn: u64, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let mut it = s.split_ascii_whitespace();
+        let bytes: u64 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let ridx: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let host3d = match it.next() {
+            None => false,
+            Some("host3d") => true,
+            Some(_) => return Err(p9::E_INVAL),
+        };
+        self.wring_mint(ctx_pub, conn, bytes, ridx, host3d)
+    }
+
+    /// Lazily create + return this warp ctx's VENUS device-ctx (Model B). The
+    /// id is `WARP_VENUS_CTX_BASE + slot` -- a band disjoint by construction
+    /// from dev_ctx, the gpu probe ids, COMPOSITOR_CTX, and the conv probes. A
+    /// venus-ctx create failure (a 2D / non-venus device) returns E_IO and
+    /// leaves `venus_ctx` None, so the host3d ring mint fails clean.
+    fn wctx_venus_ensure(&mut self, ctx_pub: u32, conn: u64) -> Result<u32, u32> {
+        // Ownership + liveness via wctx; the copy ends the borrow before the
+        // mutable device call below.
+        let existing = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?.venus_ctx;
+        if let Some(v) = existing {
+            return Ok(v);
+        }
+        let slot = self.wctx_slot(ctx_pub).ok_or(p9::E_NOENT)?;
+        let v = WARP_VENUS_CTX_BASE + slot as u32;
+        if self.gpu.ctx_create_venus(v).is_err() {
+            return Err(E_IO);
+        }
+        self.warp_ctxs[slot].as_mut().unwrap().venus_ctx = Some(v);
+        Ok(v)
+    }
+
+    /// Mint + install a Model B HOST3D ring (`bytes`/`ridx` already validated +
+    /// budget-checked by `wring_mint`). Lazily creates the ctx's venus
+    /// device-ctx, mints the hostmem-backed ring through the persistent engine
+    /// (`mint_host3d_ring`), and installs it with `host3d: Some` so teardown
+    /// routes through `drop_host3d_ring`. A venus-ctx or engine failure fails
+    /// the mint clean -- nothing is installed and the engine unwinds its own
+    /// partial state, so no offset / resource leaks.
+    fn wring_install_host3d(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        bytes: u64,
+        ridx: u32,
+    ) -> Result<(), u32> {
+        let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
+        // The engine's len is a u32 (the blob size crosses the wire as one);
+        // WARP_RING_MAX is 1 MiB so this never truncates, but guard at the
+        // boundary rather than rely on the cap.
+        let len = u32::try_from(bytes).map_err(|_| p9::E_INVAL)?;
+        self.res_seq = self.res_seq.wrapping_add(1);
+        if self.res_seq == 0 {
+            self.res_seq = 1;
+        }
+        let res_id = self.res_seq;
+        let hr = match self.gpu.mint_host3d_ring(res_id, venus_ctx, len, 0) {
+            Ok(hr) => hr,
+            Err(_) => return Err(E_IO),
+        };
+        self.warp_ring_seq = self.warp_ring_seq.wrapping_add(1);
+        if self.warp_ring_seq == 0 {
+            self.warp_ring_seq = 1;
+        }
+        let pub_id = self.warp_ring_seq;
+        let (hva, hsize, hres) = (hr.va, hr.size, hr.res_id);
+        // V-3b-1c-2 F2: the hostmem free-list reclaims a retired ring's offset
+        // and hands it back VERBATIM (drop_host3d_ring reclaims but does not
+        // scrub), so a fresh ring can carry a prior client's leftover command
+        // stream. Zero it before install -- tapestryd holds the RW mapping --
+        // so the client that maps it (1c-2b) sees a defined, disclosure-free
+        // ring, the way the guest-blob path gets from kernel-zeroed DMA pages.
+        // One memset, not a per-word SeqCst loop (audit V-3b-3c-2a F3): the
+        // codebase's disclosure-zero method (alloc_weave et al., which zero
+        // client-mappable weave memory the same way). Not elided -- the backing
+        // escaped through burrow_from_hostmem, so the compiler cannot prove it
+        // dead; per-word SeqCst bought nothing the path needs (the install below,
+        // and the client's LATER Tweft syscall, are the barrier to client
+        // visibility) while its cost scaled with the size.
+        unsafe { core::ptr::write_bytes(hva as *mut u8, 0, hsize as usize) };
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) => {
+                c.ring_slots[ridx as usize] = Some(WarpRing {
+                    pub_id,
+                    res_id: hres,
+                    ridx: ridx as u8,
+                    dma_fd: -1,
+                    va: hva,
+                    size: hsize,
+                    share_id: None,
+                    tail: 0,
+                    completed_seq: 0,
+                    reported_seq: 0,
+                    retiring: false,
+                    inject_count: 0,
+                    noscan: false,
+                    host3d: Some(hr),
+                });
+                Ok(())
+            }
+            None => {
+                // Single-threaded -> unreachable; unwind the engine's ring
+                // rather than strand a hostmem offset + host resource.
+                self.gpu.drop_host3d_ring(hr);
+                Err(p9::E_NOENT)
+            }
+        }
+    }
+
+    /// Mint a coherent ring blob of `bytes` for `ridx` under `ctx_pub`. F2:
+    /// the geometry is validated against the mint, refused-not-clamped. I-32:
+    /// charged to the ctx backing cap alongside bos + existing rings. I-45:
+    /// the caller must own the ctx (`wctx`).
+    fn wring_mint(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        bytes: u64,
+        ridx: u32,
+        host3d: bool,
+    ) -> Result<(), u32> {
+        if bytes == 0 || bytes % PAGE != 0 || bytes > WARP_RING_MAX {
+            return Err(p9::E_INVAL);
+        }
+        if (ridx as usize) >= WARP_RINGS_PER_CTX {
+            return Err(p9::E_INVAL);
+        }
+        let (over, taken) = {
+            let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+            // I-32 guest-family cap (bos + rings + leaked); see ctx_guest_backing.
+            (
+                ctx_guest_backing(c).saturating_add(bytes) > WARP_CTX_BACKING_MAX,
+                c.ring_slots[ridx as usize].is_some(),
+            )
+        };
+        if over {
+            return Err(p9::E_NOMEM);
+        }
+        if taken {
+            return Err(p9::E_INVAL); // ring_idx already minted for this ctx
+        }
+        // Model B (V-3b-1c-2): a host3d-flavored ring is hostmem-backed under
+        // the client's venus ctx via the persistent engine -- a different
+        // backing than the V-3a guest-blob path below, same budget + bounds.
+        if host3d {
+            return self.wring_install_host3d(ctx_pub, conn, bytes, ridx);
+        }
+        let fd = unsafe { t_dma_create_gpu_bo(bytes, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        if fd < 0 {
+            return Err(p9::E_NOMEM);
+        }
+        let va = self.weave_va_next;
+        self.weave_va_next += (bytes + PAGE - 1) & !(PAGE - 1);
+        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
+        if pa < 0 {
+            self.weave_va_next = va; // audit F5: nothing mapped here -- reclaim the VA
+            unsafe { t_close(fd) };
+            return Err(p9::E_NOMEM);
+        }
+        // Zero the control header; the host starts idle (the guest kicks on
+        // its first submit). Release-ordered so a client that maps and polls
+        // immediately observes the initialized header.
+        ring_store(va, WARP_RING_OFF_HEAD, 0);
+        ring_store(va, WARP_RING_OFF_TAIL, 0);
+        ring_store(va, WARP_RING_OFF_SEQ, 0);
+        ring_store(va, WARP_RING_OFF_IDLE, 1);
+        let res_id = if self.gpu.blob {
+            self.res_seq = self.res_seq.wrapping_add(1);
+            let rid = self.res_seq;
+            if self
+                .gpu
+                .create_ring_blob(rid, pa as u64, bytes as u32)
+                .is_err()
+            {
+                unsafe { t_burrow_detach(va, bytes) };
+                self.weave_va_next = va; // audit F5: mapping detached -- reclaim the VA
+                unsafe { t_close(fd) };
+                return Err(E_IO);
+            }
+            rid
+        } else {
+            0
+        };
+        self.warp_ring_seq = self.warp_ring_seq.wrapping_add(1);
+        if self.warp_ring_seq == 0 {
+            self.warp_ring_seq = 1;
+        }
+        let pub_id = self.warp_ring_seq;
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) => {
+                c.ring_slots[ridx as usize] = Some(WarpRing {
+                    pub_id,
+                    res_id,
+                    ridx: ridx as u8,
+                    dma_fd: fd,
+                    va,
+                    size: bytes,
+                    share_id: None,
+                    tail: 0,
+                    completed_seq: 0,
+                    reported_seq: 0,
+                    retiring: false,
+                    inject_count: 0,
+                    noscan: false,
+                    host3d: None,
+                });
+                Ok(())
+            }
+            None => {
+                // The ctx vanished between the checks and here (single-
+                // threaded -> unreachable) -- unwind rather than strand.
+                if res_id != 0 {
+                    let _ = self.gpu.resource_unref(res_id);
+                }
+                unsafe { t_burrow_detach(va, bytes) };
+                unsafe { t_close(fd) };
+                Err(p9::E_NOENT)
+            }
+        }
+    }
+
+    /// The doorbell (`ring/<ridx>/kick`). Host role (WARP-V3-DESIGN 3.5):
+    /// publish idle=0, drain to head; on exit publish idle=1 then RE-SCAN head
+    /// (the I-9 register-then-observe) -- a concurrent guest advance in the
+    /// idle-publish window is caught by the re-read, so no doorbell is lost.
+    /// In V-3a's single-threaded server the guest is blocked on this RPC, so
+    /// the window is empty; the re-scan is exercised only by `ring-inject`,
+    /// which fills it deterministically. V-3b replaces the echo drain with
+    /// gpu.submit_3d(dev_ctx, ctx_pub, cs) carrying ridx. The per-kick drain is
+    /// bounded HERE (round-2 F1), NOT deferred to V-3b: WARP_RING_OFF_HEAD is
+    /// client-writable shared memory, so a multi-threaded client can advance it
+    /// faster than we drain and pin this single serve thread -- reachable at
+    /// V-3a (the earlier "guest blocked on the kick RPC so head is fixed"
+    /// premise was wrong: the KICK caller is blocked, but the CLIENT's other
+    /// threads own the head mapping). The warp_ring_seq/res_seq u32 wrap (2^32 mints
+    /// -> a stale fid resolving a reused id) is the SAME shared class as
+    /// warp_ctx_seq/warp_bo_seq, not ring-specific; unreachable in a compositor
+    /// lifetime.
+    fn wring_kick(&mut self, ring_pub: u32, conn: u64) -> Result<(), u32> {
+        let (va, size, noscan, is_host3d) = {
+            let (_, r) = self.wring(ring_pub, conn).ok_or(p9::E_NOENT)?;
+            (r.va, r.size, r.noscan, r.host3d.is_some())
+        };
+        // V-3b-1c-2a fail-closed: a HOST3D ring's memory is Venus's format, not
+        // the V-3a WARP_RING_OFF_* control header the echo-drain below reads, so
+        // driving it as a V-3a ring would write V-3a control words into a Venus
+        // page. Model B (V-3b-2): virglrenderer POLLS a host3d ring, so its kick
+        // verb is PERMANENTLY E_OPNOTSUPP -- the doorbell is `vkNotifyRingMESA`
+        // submitted via `ctx/<id>/submit` -> `warp_venus_submit` on venus_ctx
+        // (NOT dev_ctx; the res_id resolves only on the venus decoder, 0.12).
+        // (The ring flavor IS client-reachable via ring/new, so this guard is
+        // load-bearing.)
+        if is_host3d {
+            return Err(p9::E_OPNOTSUPP);
+        }
+        ring_store(va, WARP_RING_OFF_IDLE, 0);
+        let mut drained: u32 = 0;
+        loop {
+            let head = ring_load(va, WARP_RING_OFF_HEAD);
+            let tail = ring_load(va, WARP_RING_OFF_TAIL);
+            if head > tail {
+                if drained >= WARP_RING_MAX_DRAIN_PER_KICK {
+                    // audit round-2 F1: the client can advance head (shared RW
+                    // memory) faster than we drain, so cap the passes -- no one
+                    // kick may pin this serve thread. Both the direct drain and
+                    // the re-scan `continue` re-enter here, so this one gate
+                    // bounds every path.
+                    //
+                    // audit round-3 F1 (the I-9 contract term this cap adds):
+                    // breaking HERE skips the post-drain re-scan below, so it
+                    // drops the host's half of the register-then-observe promise
+                    // for any advance still pending (head>tail) at the cap. A
+                    // ring client that blocks on `ring/<ridx>/fence` therefore
+                    // MUST re-check idle after its last head advance and re-kick
+                    // if idle==1 -- the host does NOT rescue a capped-out
+                    // advance (the fence read/poll deliver on completed_seq,
+                    // frozen at the cap). The V-3a prover honors this (its
+                    // drain-to-stable loop, warp-prove leg 8).
+                    //
+                    // V-3b-2 resolution (WARP-V3-DESIGN 0.12 sub-step B): Model
+                    // B's real Venus ring is the HOST3D ring, which never enters
+                    // this echo drain (a host3d kick returns E_OPNOTSUPP above;
+                    // virglrenderer polls the ring). Its submits go via
+                    // warp_venus_submit -> gpu.submit_3d, whose completion IS
+                    // retired by a bounded self-rescheduling serve-loop drain --
+                    // warp_service_fences, every iteration, <=FENCED_SLOTS/pass.
+                    // So the "robust host-side rescue" the fenced-submit path
+                    // needs already exists. THIS echo drain is retained only for
+                    // the superseded V-3a WARP ring ("not Venus's ring",
+                    // 34dbe5d3); the re-kick contract above stands (prover-
+                    // honored), and a serve-loop rescue for IT is a
+                    // robustness-not-soundness item (self-inflicted client
+                    // liveness; the cap bounds the serve thread) -- tracked,
+                    // deferred, not owed by V-3b-2.
+                    ring_store(va, WARP_RING_OFF_IDLE, 1);
+                    break;
+                }
+                // Drain [tail, head): V-3a acknowledges (echo). Advance the
+                // consumer index and complete.
+                ring_store(va, WARP_RING_OFF_TAIL, head);
+                self.wring_complete(ring_pub, conn, head);
+                drained += 1;
+                continue;
+            }
+            // Nothing new: publish idle, then re-scan.
+            ring_store(va, WARP_RING_OFF_IDLE, 1);
+            let inject = match self.wring_mut(ring_pub, conn) {
+                Some(r) if r.inject_count > 0 => {
+                    r.inject_count -= 1;
+                    true
+                }
+                _ => false,
+            };
+            if inject {
+                // Simulate a guest advancing head in the idle-publish window.
+                // saturating_add: head/tail are client-influenced (audit r2 F2);
+                // an overflow-checked build must not abort on tail near u64::MAX.
+                let h2 = core::cmp::min(tail.saturating_add(WARP_RING_HDR), size);
+                ring_store(va, WARP_RING_OFF_HEAD, h2);
+            }
+            if noscan {
+                break; // BUGGY ARM (test lever): skip the re-scan.
+            }
+            let head2 = ring_load(va, WARP_RING_OFF_HEAD);
+            if head2 > tail {
+                ring_store(va, WARP_RING_OFF_IDLE, 0);
+                continue; // the re-scan caught an advance
+            }
+            break;
+        }
+        Ok(())
+    }
+
+    /// One ring completion: advance the host tail shadow, bump the monotone
+    /// completed-seq, and publish it into the blob's seq slot (the guest's
+    /// zero-syscall poll fast-path). The blocking `ring/<ridx>/fence` reader
+    /// learns the same value via `poll_ring_fences`.
+    fn wring_complete(&mut self, ring_pub: u32, conn: u64, drained_to: u64) {
+        if let Some(r) = self.wring_mut(ring_pub, conn) {
+            r.tail = drained_to;
+            r.completed_seq += 1;
+            let (va, seq) = (r.va, r.completed_seq);
+            ring_store(va, WARP_RING_OFF_SEQ, seq);
+        }
+    }
+
+    /// Advance the fence-file report watermark (the coalesce point).
+    fn wring_report(&mut self, ring_pub: u32, conn: u64, v: u64) {
+        if let Some(r) = self.wring_mut(ring_pub, conn) {
+            if v > r.reported_seq {
+                r.reported_seq = v;
+            }
+        }
+    }
+
+    /// Test lever: arm `count` mid-drain head advances on the caller's ring
+    /// (one consumed per kick re-scan pass).
+    fn wring_arm_inject(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        ridx: u32,
+        count: u32,
+    ) -> Result<(), u32> {
+        if (ridx as usize) >= WARP_RINGS_PER_CTX {
+            return Err(p9::E_INVAL);
+        }
+        let c = self.wctx_mut(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+        match c
+            .ring_slots
+            .get_mut(ridx as usize)
+            .and_then(|slot| slot.as_mut())
+        {
+            Some(r) => {
+                r.inject_count = count;
+                Ok(())
+            }
+            None => Err(p9::E_INVAL),
+        }
+    }
+
+    /// Test lever: set the per-ring re-scan-disable flag (audit F3 -- per-ring,
+    /// not a global box-wide I-9 kill switch). Caller-ctx-bounded.
+    fn wring_set_noscan(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        ridx: u32,
+        on: bool,
+    ) -> Result<(), u32> {
+        if (ridx as usize) >= WARP_RINGS_PER_CTX {
+            return Err(p9::E_INVAL);
+        }
+        let c = self.wctx_mut(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+        match c
+            .ring_slots
+            .get_mut(ridx as usize)
+            .and_then(|slot| slot.as_mut())
+        {
+            Some(r) => {
+                r.noscan = on;
+                Ok(())
+            }
+            None => Err(p9::E_INVAL),
+        }
+    }
+
+    /// Retire one ring backing. Disarm the weft share BEFORE the backing free
+    /// (I-7 #847 dual count: a client's live mapping survives past this via its
+    /// own ref until it unmaps).
+    ///
+    /// Wedge-path safety (V-3b-2, R-2 F2). This header used to claim "rings
+    /// issue no device fences -- the device never DMAs a ring blob, so freeing
+    /// is safe". Since 836855da that is FALSE for a HOST3D ring: warp_venus_submit
+    /// posts a fenced venus chain (`vkCreateRingMESA`) that NAMES this ring's
+    /// res_id, and the renderer polls/writes the ring memory on its behalf. So on
+    /// the wedge path this backing can be reclaimed while an abandoned chain may
+    /// still be device-live -- yet that reclaim stays guest-safe via a DIFFERENT
+    /// chain than the dead V-3a premise stated: (a) a HOST3D ring's backing is
+    /// HOST memory (the QEMU hostmem subregion), never guest DMA pages, so a late
+    /// renderer write cannot corrupt guest memory (contrast a BO, whose
+    /// leak-park in wbo_retire exists for exactly that); (b) an offset re-mint
+    /// maps a FRESH blob (new resource; controlq teardown is a synchronous
+    /// `step`, unmap-before-remap) -- no guest-visible cross-client alias;
+    /// (c) renderer-internal robustness against a vn_ring polling unref'd memory
+    /// is the documented-TRUSTED host half (GPU-DESIGN section 9.2 / the I-45
+    /// row); (d) res_id is monotonic, never re-minted into the abandoned stream's
+    /// view. WHEN THE RENDERER BECOMES OURS (the v3d fork, I-45 "where it becomes
+    /// ours to keep"), chain (c) stops being someone else's guarantee: the
+    /// host3d-ring unref must then defer to in-flight completion rather than free
+    /// here -- and the RIGHT deferral depends on the caller. From wctx_finish
+    /// (ctx death) that is the vindication (like venus_ctx -- F1), which exists
+    /// on that path. From wring_destroy (V-3b-3c-1, a client retiring ONE ring
+    /// mid-ctx-life) there is NO vindication to defer to; its v3d-era shape is
+    /// the wbo_destroy one (defer on `fences_in_flight != 0`, pump-finish on
+    /// quiesce), NOT a vindication. Today both are doc-only: legs (a),(b),(d)
+    /// hold identically for the verb path and a guest-blob ring's resource is
+    /// never ctx-attached (never CS-reachable), so the wedge chain above already
+    /// covers the mid-life caller. The client-mapping case is already deferred
+    /// below: retire_host3d_ring PARKS (never frees) while any client still
+    /// references the ring.
+    fn wring_teardown(gpu: &mut Gpu, r: &mut WarpRing) {
+        if let Some(id) = r.share_id.take() {
+            let _ = unsafe { t_weft_unshare(id) };
+        }
+        // Model B (V-3b-1c-2b F2): a HOST3D ring's backing is a hostmem burrow
+        // whose HOST bytes (the QEMU subregion) live OUTSIDE the kernel #847
+        // count. The share was disarmed above (I-7 #847), so no NEW client can
+        // claim -- retire_host3d_ring then reads the TOTAL ref count (handle +
+        // mapping, via SYS_HOSTMEM_REFCOUNT) and reclaims the offset only if no
+        // client still references the ring (count == 1 = our own map: no client
+        // map AND no claimed-but-unmapped pin), else PARKS the ring for the
+        // reaper. Reclaiming unconditionally
+        // here would re-hand the offset under a client's live PTEs (a cross-
+        // client alias). Take the token BY VALUE (non-Copy -> a double drop is a
+        // compile error) and RETURN so the guest-blob path below cannot touch it.
+        if let Some(hr) = r.host3d.take() {
+            gpu.retire_host3d_ring(hr);
+            return;
+        }
+        if r.res_id != 0 {
+            let _ = gpu.resource_unref(r.res_id);
+        }
+        if r.dma_fd >= 0 {
+            unsafe { t_burrow_detach(r.va, r.size) };
+            unsafe { t_close(r.dma_fd) };
+            r.dma_fd = -1;
+        }
+    }
+
+    // === V-3b-3c-2: HOST_VISIBLE device memory (ctx/<id>/mem/<handle>) =========
+    //
+    // A device-memory blob is a lean hostmem-backed blob mapped to the client by
+    // Tweft -- the persistent HOST3D engine (mint_host3d_ring / retire_host3d_ring)
+    // with blob_id = the Venus mem_id, so virglrenderer binds the VkDeviceMemory's
+    // host pages. Ring-shaped addressing (the backend owns a client-chosen handle
+    // 0..MAX_WARP_MEMS_PER_CTX; the qid carries a monotonic pub_id) but with no
+    // control header / doorbell / fence -- it is memory, not a command ring.
+
+    /// Resolve a live device-memory blob the caller owns (its ctx + the mem).
+    /// The I-45 gate: a foreign conn never resolves another client's mem.
+    fn wmem(&self, mem_pub: u32, conn: u64) -> Option<(&WarpCtx, &WarpMem)> {
+        for c in self.warp_ctxs.iter().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for m in c.mems.iter().flatten() {
+                if m.pub_id == mem_pub {
+                    return Some((c, m));
+                }
+            }
+        }
+        None
+    }
+
+    fn wmem_mut(&mut self, mem_pub: u32, conn: u64) -> Option<&mut WarpMem> {
+        for c in self.warp_ctxs.iter_mut().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for m in c.mems.iter_mut().flatten() {
+                if m.pub_id == mem_pub {
+                    return Some(m);
+                }
+            }
+        }
+        None
+    }
+
+    /// The mem Tweft mint (the weft_ensure precedent): share once, echo the
+    /// stored id thereafter. A device-memory blob is ALWAYS hostmem-backed, so
+    /// t_weft_share routes it to WEFT_BIND_HOSTMEM (weft.c F1 arm), delivering
+    /// it to the client at the host-dictated cache.
+    fn wmem_weft_ensure(&mut self, mem_pub: u32, conn: u64) -> Option<(u64, u32)> {
+        let (va, size, have) = {
+            let m = self.wmem_mut(mem_pub, conn)?;
+            (m.host3d.va, m.host3d.size, m.share_id)
+        };
+        if let Some(id) = have {
+            return Some((id, size as u32));
+        }
+        let id = unsafe { t_weft_share(va, size) };
+        if id <= 0 {
+            say!("tapestryd: warp mem t_weft_share failed {}", id);
+            return None;
+        }
+        self.wmem_mut(mem_pub, conn).unwrap().share_id = Some(id as u64);
+        Some((id as u64, size as u32))
+    }
+
+    /// The `mem/new` write verb: `"<bytes> <handle> <mem_id>"`. One-step mint
+    /// (ring-shaped: the client owns the handle, so no id is returned).
+    fn wmem_mint_verb(&mut self, ctx_pub: u32, conn: u64, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let mut it = s.split_ascii_whitespace();
+        let bytes: u64 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let handle: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let mem_id: u64 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        if it.next().is_some() {
+            return Err(p9::E_INVAL);
+        }
+        self.wmem_mint(ctx_pub, conn, bytes, handle, mem_id)
+    }
+
+    /// Mint a HOST_VISIBLE device-memory blob at `handle` under `ctx_pub`,
+    /// backed by the persistent hostmem engine with blob_id = `mem_id` (the
+    /// Venus VkDeviceMemory the host binds). I-45: the caller must own the ctx.
+    /// I-32: charged to the hostmem-family ctx budget (W-4 split). ONE step
+    /// (unlike bo/create3d): the backing is minted here and the WarpMem is inserted only
+    /// on success, so there is no unbuilt corpse to starve the slot row -- the
+    /// #218 minted-but-unbuilt hazard has no analog here. Arms the ctx's venus
+    /// device-ctx (a device-memory blob is a Venus object -- see wctx_has_venus).
+    ///
+    /// CLIENT CONTRACT (audit V-3b-3c-2a F4): the client MUST mint at
+    /// `vkAllocateMemory` time, BEFORE any device use of `mem_id`. The mint
+    /// zeroes the backing (the disclosure floor), so a lazy mint at first
+    /// `vkMapMemory` -- after a GPU copy INTO the memory (the legal Vulkan
+    /// allocate -> bind -> GPU-write -> map readback pattern) -- would zero away
+    /// the GPU-written results. NOTE (V-3b-3c-2b F1, corrects a false premise
+    /// here): upstream Mesa Venus does NOT allocate the renderer bo at allocation
+    /// time for a plain HOST_VISIBLE type -- it defers bo creation to first
+    /// `vkMapMemory` (need_bo), which would let this zeroing destroy a GPU write.
+    /// The 3c-2b client is conformant only because its vn_renderer sets
+    /// `info.bo_must_init_at_alloc`, forcing vn_device_memory to reify the bo (and
+    /// so this mint) at allocate time. It is NOT naturally conformant. (For
+    /// blob_id 0, the self-test path, there is no bound VkDeviceMemory and the
+    /// point is moot.)
+    fn wmem_mint(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        bytes: u64,
+        handle: u32,
+        mem_id: u64,
+    ) -> Result<(), u32> {
+        if bytes == 0 || bytes % PAGE != 0 {
+            return Err(p9::E_INVAL);
+        }
+        if (handle as usize) >= MAX_WARP_MEMS_PER_CTX {
+            return Err(p9::E_INVAL);
+        }
+        let (over, taken) = {
+            let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+            (
+                ctx_hostmem_backing(c).saturating_add(bytes) > WARP_CTX_HOSTMEM_MAX,
+                c.mems[handle as usize].is_some(),
+            )
+        };
+        // Order matters (V-3b-3c-2b round-3 F8): a DUPLICATE handle must answer
+        // E_INVAL even when the ctx is ALSO over the hostmem budget. The mesa
+        // client frees its guest handle on E_NOMEM (provably-not-installed) and
+        // keeps it on E_INVAL (installed). If `over` were checked first, a
+        // concurrent-alloc race loser (two threads race the unguarded mem_bitmap
+        // RMW -> same handle) landing on the winner's already-minted slot at a
+        // cap-adjacent ctx would get E_NOMEM and FREE the winner's live slot --
+        // the two-sided invariant break the client's errno discrimination exists
+        // to prevent. So: taken before over. E_NOMEM then provably implies the
+        // slot is empty, making the client's free-set claim exact.
+        if taken {
+            return Err(p9::E_INVAL); // handle already minted for this ctx
+        }
+        // Round-5 F2 (the img twin's rationale, applied here too): the
+        // per-object bytes cap is a RESOURCE verdict reachable from an
+        // ordinary large vkAllocateMemory -- E_INVAL would leak the client's
+        // handle (keep-arm); E_NOMEM after `taken` keeps the F8 rule.
+        if bytes > WARP_CTX_HOSTMEM_MAX || over {
+            return Err(p9::E_NOMEM);
+        }
+        let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
+        let len = u32::try_from(bytes).map_err(|_| p9::E_INVAL)?;
+        self.res_seq = self.res_seq.wrapping_add(1);
+        if self.res_seq == 0 {
+            self.res_seq = 1;
+        }
+        let res_id = self.res_seq;
+        let hr = match self.gpu.mint_host3d_ring(res_id, venus_ctx, len, mem_id) {
+            Ok(hr) => hr,
+            Err(_) => return Err(E_IO),
+        };
+        // Disclosure floor (the alloc_weave rule): the hostmem free-list hands a
+        // reclaimed offset back VERBATIM, so a fresh blob can carry a prior
+        // client's bytes. Zero it -- tapestryd holds the RW map -- before the
+        // client can map it. ONE memset, not a per-word SeqCst loop (audit
+        // V-3b-3c-2a F3): at up to WARP_CTX_HOSTMEM_MAX (192 MiB) the loop's ~25M
+        // barriered stores on the single serve thread were a client-repeatable
+        // latency lever. write_bytes is the codebase's disclosure-zero method
+        // (alloc_weave, which zeroes client-mappable memory identically) and is
+        // not elided -- the backing escaped through burrow_from_hostmem, so the
+        // compiler cannot prove it dead. The install below + the client's LATER
+        // Tweft syscall are the barrier to visibility, so no per-word ordering is
+        // needed. NOTE (audit F4): this zeroing bakes a client-ordering contract
+        // -- see wmem_mint's doc: mint at vkAllocateMemory time, before any device
+        // use of mem_id, or the mint zeroes GPU-written results.
+        let (hva, hsize) = (hr.va, hr.size);
+        unsafe { core::ptr::write_bytes(hva as *mut u8, 0, hsize as usize) };
+        self.warp_mem_seq = self.warp_mem_seq.wrapping_add(1);
+        if self.warp_mem_seq == 0 {
+            self.warp_mem_seq = 1;
+        }
+        let pub_id = self.warp_mem_seq;
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) => {
+                c.mems[handle as usize] = Some(WarpMem {
+                    pub_id,
+                    host3d: hr,
+                    share_id: None,
+                });
+            }
+            None => {
+                // Single-threaded -> unreachable; unwind the engine's blob
+                // rather than strand a hostmem offset + host resource.
+                self.gpu.drop_host3d_ring(hr);
+                return Err(p9::E_NOENT);
+            }
+        }
+        // W-3d slice 1a: the one-shot REAL-class measurement, AFTER the
+        // install and read-only -- a probe outcome must not affect the
+        // mint's verdict, and the mint-time disclosure-zero above makes the
+        // blit-landed discrimination deterministic (source bytes are
+        // guaranteed zeros, never the staged PAT).
+        self.real_class_compose_probe_maybe(res_id, bytes, mem_id);
+        Ok(())
+    }
+
+    /// Retire ONE device-memory blob the caller owns and FREE its slot (the
+    /// handle becomes re-mintable). TAKE the WarpMem out of its slot (freeing
+    /// it), then wmem_teardown it. Taking by value first makes self.gpu and
+    /// warp_ctxs borrow disjointly for the teardown (the wring_destroy pattern).
+    /// I-45: only the ctx owner (conn) can name the mem -- the scan is the gate.
+    fn wmem_destroy(&mut self, mem_pub: u32, conn: u64) -> Result<(), u32> {
+        let mut found: Option<(usize, usize)> = None;
+        for (si, slot) in self.warp_ctxs.iter().enumerate() {
+            let c = match slot.as_ref() {
+                Some(c) => c,
+                None => continue,
+            };
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            if let Some(mi) = c
+                .mems
+                .iter()
+                .position(|m| m.as_ref().map_or(false, |m| m.pub_id == mem_pub))
+            {
+                found = Some((si, mi));
+                break;
+            }
+        }
+        let (si, mi) = found.ok_or(p9::E_NOENT)?;
+        let taken = self.warp_ctxs[si].as_mut().and_then(|c| c.mems[mi].take());
+        if let Some(m) = taken {
+            Self::wmem_teardown(&mut self.gpu, m);
+        }
+        Ok(())
+    }
+
+    /// Tear down one device-memory blob: disarm the weft share BEFORE the
+    /// backing reclaim (I-7 #847: a live client map survives via the retire
+    /// park), then retire the hostmem backing (reap-if-safe-else-park). Consumes
+    /// the WarpMem by value -- the non-Copy HostRing moves into
+    /// retire_host3d_ring exactly once (a double-drop is a compile error).
+    fn wmem_teardown(gpu: &mut Gpu, m: WarpMem) {
+        let WarpMem {
+            host3d, share_id, ..
+        } = m;
+        if let Some(id) = share_id {
+            let _ = unsafe { t_weft_unshare(id) };
+        }
+        gpu.retire_host3d_ring(host3d);
+    }
+
+    // === W-3c: the PRESENTABLE (ctx/<id>/img/<handle>) ========================
+    //
+    // A venus swapchain image registered for display (WARP-WSI-DESIGN 4.1): a
+    // HOST3D blob -- minted USE_MAPPABLE and never mapped (4.1 as AMENDED;
+    // the flag is not what withholds it from the guest) -- whose blob_id names the venus
+    // allocation, carrying the display shape DECLARED at registration. The
+    // handle space is the client's (the ring/mem discipline); the qid carries a
+    // monotonic pub_id, so a stale fid resolves to nothing.
+    //
+    // What makes this class different from its siblings is what it does NOT
+    // have: no guest mapping, hence no weft share, no hostmem offset, no
+    // reclaim park, no #847 dual count. Its whole lifetime hazard is the
+    // opposite direction -- the DISPLAY holds a reference, and an unref under
+    // that reference is `gl_evict_res`'s "the one order the display cannot
+    // survive". Hence `wimg_teardown`'s unbind-BEFORE-unref, which is the
+    // spec's PUnbound conjunct as code (specs/tapestry_present.tla, the
+    // W-3b presentable class).
+
+    /// Resolve a live presentable the caller owns. The I-45 gate: a foreign
+    /// conn never resolves another client's img.
+    fn wimg(&self, img_pub: u32, conn: u64) -> Option<(&WarpCtx, &WarpImg)> {
+        for c in self.warp_ctxs.iter().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for i in c.imgs.iter().flatten() {
+                if i.pub_id == img_pub {
+                    return Some((c, i));
+                }
+            }
+        }
+        None
+    }
+
+    /// The `img/new` write verb: `"<handle> <w> <h> <format> <stride> <mem_id>"`.
+    fn wimg_mint_verb(&mut self, ctx_pub: u32, conn: u64, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let mut it = s.split_ascii_whitespace();
+        let handle: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let w: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let h: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let format: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let stride: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let mem_id: u64 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        if it.next().is_some() {
+            return Err(p9::E_INVAL);
+        }
+        self.wimg_mint(ctx_pub, conn, handle, w, h, format, stride, mem_id)
+    }
+
+    /// Register a presentable at `handle` under `ctx_pub`: validate the
+    /// DECLARED display shape against the compositor's STRUCTURAL limits, then
+    /// mint the never-mapped HOST3D blob (USE_MAPPABLE per 4.1 as AMENDED)
+    /// with blob_id = `mem_id`.
+    ///
+    /// THE DECLARATION IS THE NEGOTIATION (WARP-WSI-DESIGN 4.1). Eligibility
+    /// is decided HERE, once, rather than re-derived per frame: a shape this
+    /// compositor cannot scan out is refused at registration, so the present
+    /// path never has to ask.
+    ///
+    /// EXACTLY WHAT IS CHECKED, since the sentence above is broader than the
+    /// code (round-2 F13): the format accept set, `stride >= w*4`, and both
+    /// dimensions bounded above by `WARP_IMG_MAX_DIM` and the stride by
+    /// `WARP_IMG_MAX_DIM*4` (= 32768, round-3 F6 -- the first draft of this
+    /// very correction said `WARP_IMG_MAX_DIM`, 4x off, in the sentence
+    /// written to be exact) so `stride*h <= 2^28` cannot outrun the u32
+    /// `len`, plus the I-32 byte cap. These
+    /// are STRUCTURAL limits, not the CURRENT display mode -- a 4096x4096
+    /// presentable is accepted on a 1024x768 display today. That is deliberate
+    /// rather than overlooked: a presentable is legitimately larger or smaller
+    /// than the scanout for the COMPOSED arm, and the mode can change under a
+    /// live registration, so mode-matching belongs at the point Direct binding
+    /// is CHOSEN (W-3c-2's `present-to`), not at registration where it would
+    /// have to be re-validated on every mode set anyway. The design's "the
+    /// present path never has to ask" is therefore earned for the structural
+    /// half only, and W-3c-2 owes the mode half at the bind. That is the Fuchsia sysmem constraint-negotiation
+    /// idea expressed as one verb's accept set, and it is why the per-frame
+    /// path can be RESOURCE_FLUSH alone.
+    ///
+    /// I-45: the caller must own the ctx. I-32: charged to the hostmem-family
+    /// ctx budget (W-4 split). ONE step (the wmem_mint precedent): the backing is minted
+    /// here and the WarpImg is inserted only on success, so no unbuilt corpse
+    /// can strand a slot.
+    ///
+    /// WHAT BOUNDS `mem_id`, since it is client-supplied and opaque to us
+    /// (the I-45 question a reviewer should ask first): the blob is created
+    /// under the caller's OWN venus device-ctx (`wctx_venus_ensure`), so the
+    /// host resolves the name within THAT context's resource space -- the
+    /// same scoping the device-memory path already rests on. Guest-side we
+    /// cannot validate the value at all, and pretending otherwise would be
+    /// the worse posture; the honest statement is that cross-client naming
+    /// is refused by the host's per-context scope, which is the documented
+    /// trusted-host half (GPU-DESIGN 9.2) and becomes ours to keep at the
+    /// v3d fork.
+    #[allow(clippy::too_many_arguments)]
+    fn wimg_mint(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        handle: u32,
+        w: u32,
+        h: u32,
+        format: u32,
+        stride: u32,
+        mem_id: u64,
+    ) -> Result<(), u32> {
+        if (handle as usize) >= MAX_WARP_IMGS_PER_CTX {
+            return Err(p9::E_INVAL);
+        }
+        // The stage-0 accept set, verbatim from WARP-WSI-DESIGN 4.1: "BGRA8/
+        // XRGB8 -- the formats the console path composes today". Both are the
+        // same 4-byte layout differing only in whether alpha is meaningful,
+        // so every size/stride bound below is identical for them and the
+        // scanout takes either. W-3c-1 audit F7: an earlier draft admitted
+        // only BGRA8 -- a narrowing from ratified scripture that nothing
+        // recorded, and worse, one that both witnesses had already pinned as
+        // a REQUIRED REFUSAL, so widening the set to match the design would
+        // have turned two gates red and read as a regression.
+        if format != crate::gpu::VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM
+            && format != crate::gpu::VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM
+        {
+            return Err(p9::E_INVAL);
+        }
+        if w == 0 || h == 0 || w > WARP_IMG_MAX_DIM || h > WARP_IMG_MAX_DIM {
+            return Err(p9::E_INVAL);
+        }
+        // The stride must cover the row at the format's 4 bytes/pixel and is
+        // bounded from ABOVE by the same dimension cap, so `stride * h` cannot
+        // outrun a u32 (the #204 lesson: a declared size bounded only from one
+        // side is not bounded -- #248). Computed in u64, checked into u32.
+        let min_stride = (w as u64).saturating_mul(4);
+        if (stride as u64) < min_stride || stride > WARP_IMG_MAX_DIM.saturating_mul(4) {
+            return Err(p9::E_INVAL);
+        }
+        let bytes = (stride as u64).saturating_mul(h as u64);
+        let len = u32::try_from(bytes).map_err(|_| p9::E_INVAL)?;
+        if bytes == 0 {
+            return Err(p9::E_INVAL);
+        }
+        let (over, taken) = {
+            let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+            (
+                ctx_hostmem_backing(c).saturating_add(bytes) > WARP_CTX_HOSTMEM_MAX,
+                c.imgs[handle as usize].is_some(),
+            )
+        };
+        // Round-5 F2: the PER-OBJECT bytes cap is a RESOURCE verdict, not a
+        // malformed-request one, and it is reachable from caps-conformant
+        // client input (the WSI surface caps advertise extents whose 4 B/px
+        // bytes exceed 64 MiB). E_INVAL here would hit the client's keep-arm
+        // and leak one img slot per attempt -- a resize-loop app could wedge
+        // all 16. E_NOMEM after `taken` keeps the F8 rule (E_NOMEM =>
+        // provably nothing installed => the client frees its handle).
+        // taken BEFORE over -- the V-3b-3c-2b round-3 F8 ordering: E_NOMEM must
+        // provably imply "nothing was installed", so a client freeing its
+        // guest-side handle on E_NOMEM can never free a live slot.
+        if taken {
+            return Err(p9::E_INVAL);
+        }
+        if bytes > WARP_CTX_HOSTMEM_MAX || over {
+            return Err(p9::E_NOMEM);
+        }
+        let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
+        self.res_seq = self.res_seq.wrapping_add(1);
+        if self.res_seq == 0 {
+            self.res_seq = 1;
+        }
+        let res_id = self.res_seq;
+        if self
+            .gpu
+            .create_presentable(res_id, venus_ctx, len, mem_id)
+            .is_err()
+        {
+            return Err(E_IO);
+        }
+        self.warp_img_seq = self.warp_img_seq.wrapping_add(1);
+        if self.warp_img_seq == 0 {
+            self.warp_img_seq = 1;
+        }
+        let pub_id = self.warp_img_seq;
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) => {
+                c.imgs[handle as usize] = Some(WarpImg {
+                    pub_id,
+                    res_id,
+                    blob_id: mem_id,
+                    w,
+                    h,
+                    format,
+                    stride,
+                    size: bytes,
+                });
+                Ok(())
+            }
+            None => {
+                // Single-threaded -> unreachable; unref rather than strand a
+                // host resource. Nothing else was acquired (no offset, no
+                // mapping, no share -- the never-mapped lifecycle's payoff).
+                let _ = self.gpu.resource_unref(res_id);
+                Err(p9::E_NOENT)
+            }
+        }
+    }
+
+    /// W-3d slice 1a: the REAL-class compose-capability measurement -- the
+    /// question the W-3c-2a probe could not answer, because its presentable
+    /// was the blob_id=0 SHM stand-in (categorically untypeable:
+    /// `pipe_resource_set_type` takes DMABUF only). A client DEVICE-MEMORY
+    /// blob (blob_id = a live VkDeviceMemory) is the real class: on a
+    /// dmabuf-exporting host vkr force-exports it
+    /// (vkr_device_memory.c:274-356), and vrend's designed path (untyped
+    /// attach -> PIPE_RESOURCE_SET_TYPE -> EGLImage) should make it
+    /// blittable -- the run-6 fork resolution's mechanism, measured
+    /// end-to-end here instead of inferred from source.
+    ///
+    /// ONE-SHOT on the first post-READY mem mint (a diagnostic, not a
+    /// per-alloc tax; the existing V-3b-3c-2b prove is the driver on every
+    /// venus boot, zero mesa changes). READ-ONLY on the client's resource:
+    /// the blit reads FROM it, and SET_TYPE creates a typed view inside the
+    /// THROWAWAY ctx only, destroyed with it -- the client's venus-side use
+    /// of the memory is untouched. Legs, interpreted HERE (the probe's
+    /// tokens are per-leg):
+    ///   1. control (no settype, no blit): ctlok, or the instrument failed.
+    ///   2. settype-only: ctlok = the renderer accepted the typing (its
+    ///      readback survived); noreadback = SET_TYPE latched the ctx.
+    ///   3. settype + blit: landed / refused / poisoned.
+    /// The W-3d-1b composed arm proceeds only on `settype=ok blit=landed`;
+    /// anything else lands us at direct-only-with-proof at zero wasted
+    /// work (the fork resolution's own contingency).
+    ///
+    /// Round-5 F6/F7 caveats. `settype=latched` is attributable to the
+    /// renderer's refusal only JOINTLY with the host log's dispatch-error
+    /// line -- an encoder regression produces the same token (the header
+    /// word-count relation is compiler-pinned in `set_type_request`; field
+    /// order is not). And "read-only" is exact only on the REFUSING path:
+    /// on a capable host, SET_TYPE types the subject GLOBALLY
+    /// (vrend_renderer.c:13452 installs `res->pipe_resource` on the global
+    /// resource, one-shot; the per-ctx hash entry alone dies with the
+    /// throwaway ctx) -- which is why the subject is a client MEM blob,
+    /// never a presentable: mem blobs are never legitimately typed, so a
+    /// probe-shaped global typing costs a bounded host-side GL import and
+    /// nothing else, while typing a presentable would poison its future
+    /// compose bind.
+    fn real_class_compose_probe_maybe(&mut self, src_res: u32, bytes: u64, mem_id: u64) {
+        if self.real_compose_probed {
+            return;
+        }
+        // THE CLASS GATE (round-5 F1). The first mint of every boot is the
+        // pre-READY self-test's, whose mem_id=0 blob is the SHM STAND-IN --
+        // the exact class this probe exists to escape (its SET_TYPE draws
+        // the same silent fd_type EINVAL as the opaque-fd mechanism would,
+        // so measuring it says nothing about real client blobs). Probing it
+        // consumed the one-shot and wedged the per-host gate to the
+        // stand-in verdict on every boot -- the #95 class recurring on the
+        // stand-in lesson's own remediation. Skip WITHOUT consuming; the
+        // subject is the first REAL client VkDeviceMemory blob. (On a
+        // capable host the probe's SET_TYPE types that blob GLOBALLY at the
+        // probe shape, one-shot -- vrend_renderer.c:13452 installs
+        // res->pipe_resource on the global resource -- which is why the
+        // subject must stay a MEM blob: that class is never legitimately
+        // typed again, unlike a presentable, whose future compose bind the
+        // typing would poison.)
+        if mem_id == 0 {
+            if !self.real_compose_skip_said {
+                self.real_compose_skip_said = true;
+                say!(
+                    "tapestryd: warp display real-class compose probe DEFERRED (stand-in mint, mem_id=0 -- waiting for a client blob)"
+                );
+            }
+            return;
+        }
+        const W: u32 = 64;
+        const H: u32 = CONV_ROWS as u32;
+        const STRIDE: u32 = W * 4;
+        if bytes < (STRIDE as u64) * (H as u64) {
+            // Also non-consuming (round-5 F1's latch placement): a small
+            // first client mint must not burn the shot.
+            if !self.real_compose_skip_said {
+                self.real_compose_skip_said = true;
+                say!(
+                    "tapestryd: warp display real-class compose probe DEFERRED (first client mem {} bytes < probe shape {})",
+                    bytes,
+                    (STRIDE as u64) * (H as u64)
+                );
+            }
+            return;
+        }
+        self.real_compose_probed = true;
+        let shape = Some((W, H, VIRGL_FORMAT_B8G8R8A8_UNORM, STRIDE));
+        let c1 = self.warp_present_compose_probe(src_res, H, false, None);
+        if c1 != "ctlok" {
+            say!(
+                "tapestryd: warp display real-class compose probe: settype=- blit=- (control {}: instrument, not a verdict)",
+                c1
+            );
+            return;
+        }
+        let (st, blit) = match self.warp_present_compose_probe(src_res, H, false, shape) {
+            "ctlok" => (
+                "ok",
+                self.warp_present_compose_probe(src_res, H, true, shape),
+            ),
+            "noreadback" => ("latched", "skipped"),
+            other => {
+                say!(
+                    "tapestryd: warp display real-class compose probe: settype-leg {} (unclassified: instrument suspect, not a verdict)",
+                    other
+                );
+                return;
+            }
+        };
+        say!(
+            "tapestryd: warp display real-class compose probe (first mem mint, res {}): settype={} blit={} (one-shot; throwaway ctx; read-only on the client resource)",
+            src_res, st, blit
+        );
+    }
+
+    /// W-3c-2a: CAN THE COMPOSITOR BLIT **FROM** A PRESENTABLE?
+    ///
+    /// WARP-WSI-DESIGN section 4 specifies the composed present arm as "the
+    /// Warp-C GPU blit falling back to the C-6 fenced readback". For a
+    /// PRESENTABLE the fallback is **structurally impossible**: `rb_issue`
+    /// host-DMA-writes into the resource's guest BACKING and
+    /// `comp_readback_retired` then reads it through `va` -- and a
+    /// presentable has neither, by construction (I-7, the absence W-3c-1
+    /// exists to establish). So for this class the composed arm reduces to
+    /// GPU-BLIT-ONLY, and whether this renderer ACCEPTS a blit whose source
+    /// is a venus-created HOST3D blob is a host capability nobody has
+    /// measured.
+    ///
+    /// Measured, not assumed. Twice now on this arc a probe has changed the
+    /// design rather than confirmed it (W-3a's attach blindness; W-3c-1's
+    /// flag refutation), and a composed arm built on an assumed capability
+    /// would be the third.
+    ///
+    /// RUNS ON A THROWAWAY CTX, NEVER `COMPOSITOR_CTX` -- a request the
+    /// renderer REFUSES latches the context it ran on, and acceptance is
+    /// exactly what this measures. That is `conv_attempt`'s rule and it
+    /// applies with more force here, because a latched compositor context
+    /// would take the display down for the whole boot.
+    ///
+    /// Verdict, four-way and never collapsed to a boolean: the destination
+    /// is staged with a PATTERN host-side, then its guest page is clobbered
+    /// with `0xDEAD_BEEF` before the readback, so "the readback never landed"
+    /// splits by LEG -- on the control it is `noreadback` (scaffolding, the
+    /// gates reject it), on the test it is `poisoned` (round-4 F2: the
+    /// control's ctlok already proved the readback machinery, so all-clobber
+    /// after a blit attributes the ctx latch to the blit -- a REAL verdict,
+    /// and the measured stand-in-class outcome) -- distinguishable from "the
+    /// blit did not land" (`refused`) and from "it landed" (`landed`).
+    /// `do_blit == false` is the CONTROL: identical scaffolding, one variable
+    /// removed. Without it a `noreadback` is unattributable -- it reads the
+    /// same whether the instrument is broken or the blit latched the context
+    /// out from under the readback, and those demand opposite responses.
+    fn warp_present_compose_probe(
+        &mut self,
+        src_res: u32,
+        src_h: u32,
+        do_blit: bool,
+        settype: Option<(u32, u32, u32, u32)>,
+    ) -> &'static str {
+        const PAT: u32 = 0xA5A5_A5A5;
+        // Destination kind 2 and CONV_ROWS, matching `conv_attempt`'s
+        // `scr_res` EXACTLY. That is not decoration: kind 2 is the one this
+        // renderer is already known to round-trip through
+        // `transfer_to/from_3d_box_sync` (the conv probe reads it back every
+        // boot), so copying the proven configuration keeps an unknown in the
+        // INSTRUMENT from being read as an answer about the SUBJECT. The
+        // first draft used kind 1 and returned `noreadback`.
+        const ROWS: usize = CONV_ROWS;
+        let (dst_res, dst_fd, dst_va) = match self.conv_probe_res(2) {
+            Some(t) => t,
+            None => return "noscaffold",
+        };
+        let ctx = CONV_PROBE_CTX_BASE + 900;
+        debug_assert!(
+            ctx < WARP_VENUS_CTX_BASE,
+            "compose probe ctx climbed into the venus band"
+        );
+        let mut verdict = "noscaffold";
+        if self.gpu.ctx_create(ctx, b"tapestry-cmp").is_ok() {
+            // The presentable must attach at all. W-3a measured this layer
+            // BLIND (a bogus id was accepted), so acceptance here is not the
+            // measurement -- the blit below is.
+            let attached = self.gpu.ctx_attach_resource(ctx, src_res).is_ok()
+                && self.gpu.ctx_attach_resource(ctx, dst_res).is_ok();
+            // W-3d 1a: the real-class typing step. Declare the untyped
+            // blob's shape (w, h, format, stride) in the THROWAWAY ctx so
+            // the renderer imports its dmabuf as a texture. The submit's
+            // response is NOT the renderer's verdict -- a rejected SET_TYPE
+            // latches this ctx, so the caller reads the outcome from the
+            // legs that follow (a settype-only leg's dead readback means
+            // "latched"). A transport-level submit failure is scaffolding.
+            let type_ok = if attached {
+                match settype {
+                    None => true,
+                    Some((tw, th, tf, ts)) => {
+                        let st = Self::set_type_request(src_res, tf, tw, th, ts);
+                        let mut bytes = [0u8; 44];
+                        for (i, w) in st.iter().enumerate() {
+                            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+                        }
+                        self.gpu.submit_3d_sync(ctx, &bytes).is_ok()
+                    }
+                }
+            } else {
+                false
+            };
+            if attached && type_ok {
+                for i in 0..ROWS {
+                    unsafe { core::ptr::write_volatile((dst_va as *mut u32).add(i), PAT) };
+                }
+                if self
+                    .gpu
+                    .transfer_to_3d_box_sync(ctx, dst_res, 0, 0, 1, ROWS as u32, 0, 4)
+                    .is_ok()
+                {
+                    let w = if do_blit {
+                        Self::blit_request(
+                            dst_res,
+                            ROWS as u32,
+                            0,
+                            0,
+                            1,
+                            ROWS as u32,
+                            src_res,
+                            VIRGL_FORMAT_B8G8R8A8_UNORM,
+                            src_h,
+                            0,
+                            0,
+                            1,
+                            ROWS as u32,
+                            ClassConv {
+                                variant: BlitVariant::Plain,
+                                src_flip: false,
+                                dst_flip: false,
+                            },
+                        )
+                    } else {
+                        [0u32; 22]
+                    };
+                    let submitted = if do_blit {
+                        self.submit_blits(ctx, &[w]).is_ok()
+                    } else {
+                        true
+                    };
+                    for i in 0..ROWS {
+                        unsafe {
+                            core::ptr::write_volatile((dst_va as *mut u32).add(i), 0xDEAD_BEEF)
+                        };
+                    }
+                    if self
+                        .gpu
+                        .transfer_from_3d_box_sync(ctx, dst_res, 0, 0, 1, ROWS as u32, 0, 4)
+                        .is_ok()
+                    {
+                        let mut rows = [0u32; ROWS];
+                        for (i, r) in rows.iter_mut().enumerate() {
+                            *r = unsafe { core::ptr::read_volatile((dst_va as *const u32).add(i)) };
+                        }
+                        verdict = if rows.iter().all(|&r| r == 0xDEAD_BEEF) {
+                            // Round-4 F2: on the TEST leg this outcome is
+                            // ATTRIBUTABLE -- it can only print after the
+                            // control returned ctlok, so the readback
+                            // machinery is proven and the blit latched the
+                            // ctx out from under it (the run-6 mechanism:
+                            // ILLEGAL_RESOURCE -> ctx in_error). That is a
+                            // REAL verdict about the source class, and the
+                            // measured outcome for every blob_id=0 stand-in.
+                            // On the CONTROL leg the same bytes mean the
+                            // instrument itself failed -- scaffolding, and
+                            // the gates reject it.
+                            if do_blit {
+                                "poisoned"
+                            } else {
+                                "noreadback"
+                            }
+                        } else if rows.iter().all(|&r| r == PAT) {
+                            // The destination still holds what was staged: on
+                            // the CONTROL that is the CORRECT outcome (nothing
+                            // was asked to write it), on the TEST it means the
+                            // blit did not land.
+                            if do_blit {
+                                "refused"
+                            } else {
+                                "ctlok"
+                            }
+                        } else if submitted && do_blit {
+                            "landed"
+                        } else {
+                            "changed-unexpectedly"
+                        };
+                    }
+                }
+            } else if !attached {
+                verdict = "noattach";
+            } // !type_ok: verdict stays noscaffold (a transport failure)
+            let _ = self.gpu.ctx_destroy(ctx);
+        }
+        self.conv_probe_res_undo(dst_res, dst_va, dst_fd);
+        verdict
+    }
+
+    /// Retire ONE presentable the caller owns and FREE its slot (the handle
+    /// becomes re-registerable). I-45: only the ctx owner can name it -- the
+    /// scan is the gate.
+    ///
+    /// TAKE-THEN-TEARDOWN, and the order is load-bearing rather than
+    /// stylistic: `wimg_teardown` reaches `gl_evict_res`, which calls
+    /// `reconcile` -- so the compositor re-derives what to display INSIDE
+    /// the teardown. Removing the presentable from its slot first makes it
+    /// unresolvable to that re-derivation, so nothing can re-bind the
+    /// display to a resource that is about to be unref'd. Today no path
+    /// could (nothing adopts a presentable until W-3c-2), which is exactly
+    /// why the ordering is worth establishing NOW, while it is free.
+    fn wimg_destroy(&mut self, img_pub: u32, conn: u64) -> Result<(), u32> {
+        let mut found: Option<(usize, usize)> = None;
+        for (si, slot) in self.warp_ctxs.iter().enumerate() {
+            let c = match slot.as_ref() {
+                Some(c) => c,
+                None => continue,
+            };
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            if let Some(ii) = c
+                .imgs
+                .iter()
+                .position(|i| i.as_ref().map_or(false, |i| i.pub_id == img_pub))
+            {
+                found = Some((si, ii));
+                break;
+            }
+        }
+        let (si, ii) = found.ok_or(p9::E_NOENT)?;
+        // W-3c-2, the consent-clear arm (mirroring `wbo_destroy`): a consent
+        // naming the dying img must not survive it. The pub id is never
+        // reused, so a dangling consent could not re-attach -- but it would
+        // keep `gl_adoption` scanning for a source that cannot return and
+        // hold the surface's own switch un-re-armed. Clear + retarget FIRST;
+        // the display unbind itself rides `wimg_teardown` unconditionally.
+        let dying = self.warp_ctxs[si]
+            .as_ref()
+            .and_then(|c| c.imgs[ii].as_ref())
+            .map(|i| i.pub_id);
+        let consent_sl = self.warp_ctxs[si]
+            .as_ref()
+            .and_then(|c| match (c.present_to, dying) {
+                (Some((sl, _, PresentSrc::Img(ip))), Some(dp)) if ip == dp => Some(sl),
+                _ => None,
+            });
+        if let Some(sl) = consent_sl {
+            if let Some(c) = self.warp_ctxs[si].as_mut() {
+                c.present_to = None;
+            }
+            if let Some(s) = self.surf_mut(sl) {
+                s.res_stale = [true; WEAVE_SLOTS as usize];
+            }
+            self.gl_retarget(sl);
+        }
+        let taken = self.warp_ctxs[si].as_mut().and_then(|c| c.imgs[ii].take());
+        if let Some(i) = taken {
+            self.wimg_teardown(i);
+        }
+        Ok(())
+    }
+
+    /// THE DISPLAY-SAFE TEARDOWN (WARP-WSI-DESIGN section 6 "gap 7"; the spec's
+    /// PUnbound conjunct as code). Order, and the order is the whole point:
+    ///
+    ///   (1) If the display currently names this resource, REBIND AWAY FIRST.
+    ///       `gl_evict_res` is the existing discipline for exactly this and
+    ///       already does the full job -- device rebind to the boot scanout,
+    ///       `bound_res` cleared, the owning surface re-armed through
+    ///       reconcile. Reusing it rather than open-coding a second unbind is
+    ///       deliberate: two copies of an ordering rule is how one of them
+    ///       rots (#230, by meaning).
+    ///   (2) THEN unref the blob.
+    ///
+    /// Inverting these leaves the display scanning a destroyed resource -- on
+    /// the documented-trusted host that is host-side UAF with cross-client
+    /// blast radius, and it is precisely what
+    /// `tapestry_present_buggy_punbind_skipped.cfg` proves violates
+    /// NoTornPresentable.
+    ///
+    /// The compose-drain half (the spec's PDrained) has no in-flight class to
+    /// drain YET. W-3c-2's Direct adoption reads `imgs` but creates no
+    /// pinflight member: the bind is a STANDING binding tracked by
+    /// `Comp.bound_res` (the spec's pbound, unbound below), completed inside
+    /// one dispatch -- no transient compose READ of the presentable exists
+    /// anywhere. The W-3d compose arm (the blit-import path) is the FIRST
+    /// pinflight producer and MUST add the drain here in the same commit;
+    /// the spec already carries the conjunct so the obligation cannot be
+    /// forgotten.
+    ///
+    /// A REFUSED unbind does not reach the unref: `gl_evict_res` condemns the
+    /// resource and `Gpu::resource_unref` defers on it until an accepted
+    /// scanout proves the display has moved on (round-2 F3).
+    ///
+    /// The unbind is issued UNCONDITIONALLY, never gated on the per-object
+    /// `bound` flag. `gl_evict_res` already self-guards on `Comp.bound_res`,
+    /// which is the AUTHORITATIVE record of what the device scans out, so the
+    /// call is a no-op when this resource is not bound -- while gating on the
+    /// per-object copy would make a stale FALSE (the one direction that
+    /// matters) skip the unbind and unref a live binding. A redundant no-op
+    /// costs nothing; trusting the second copy of a fact costs the display.
+    fn wimg_teardown(&mut self, i: WarpImg) {
+        // The unbind can be REFUSED by a LIVE device. Round 1 (F8) made that
+        // audible; round 2 (F3) observed that audibility is not safety -- the
+        // unref still ran, so the implementation deliberately TOOK the
+        // `buggy_punbind_skipped` transition and announced it.
+        //
+        // It no longer does. A refusal CONDEMNS the resource inside
+        // `gl_evict_res`, and `Gpu::resource_unref` defers on a condemned id,
+        // so the call below is a no-op exactly when freeing would hand the
+        // display released memory. Withholding the free is entirely ours to
+        // do, even though the refusal is not: one leaked resource id beats a
+        // host-side UAF with cross-client blast radius.
+        let _ = self.gl_evict_res(i.res_id);
+        let _ = self.gpu.resource_unref(i.res_id);
+    }
+
     /// Retire one BO: the I-40/R2-F5 order -- (1) disarm the un-claimed
     /// share BEFORE any backing free (a Tweft claim racing the retire fails
     /// closed; an already-claimed share is a harmless miss and the CLIENT's
@@ -3881,6 +10748,13 @@ impl Comp {
             let _ = unsafe { t_weft_unshare(id) };
         }
         if b.dma_fd >= 0 {
+            // C-2c: the compositor's import dies with the BO, BEFORE the
+            // unref (4.5.10's ordering); it exists only where the compositor
+            // ctx does, so the flag alone gates the CTX command.
+            if b.comp_imported {
+                let _ = gpu.ctx_detach_resource(COMPOSITOR_CTX, b.res_id);
+                b.comp_imported = false;
+            }
             let _ = gpu.detach_backing(b.res_id);
             let _ = gpu.ctx_detach_resource(dev_ctx, b.res_id);
             let _ = gpu.resource_unref(b.res_id);
@@ -3904,7 +10778,8 @@ impl Comp {
                 // orphan a use in another function.
                 say!(
                     "tapestryd: warp bo res {} leak-parked {} bytes (fence wedge)",
-                    b.res_id, b.size
+                    b.res_id,
+                    b.size
                 );
                 return b.size;
             }
@@ -3983,6 +10858,54 @@ impl Comp {
                     self.warp_park_leaked(slot, b);
                 }
             }
+            // Retire every ring backing on BOTH postures (no `leak` branch here,
+            // unlike the BOs above). A HOST3D ring can carry live venus work on
+            // the wedge path since 836855da, but its reclaim stays guest-safe
+            // without the leak-park -- host-memory backing, fresh-blob re-mint,
+            // trusted-host renderer robustness, monotonic res_id; the full chain
+            // (and the v3d-fork obligation to defer it) is at wring_teardown. The
+            // client-mapping case is deferred inside retire_host3d_ring (park,
+            // not free).
+            for j in 0..WARP_RINGS_PER_CTX {
+                if let Some(mut r) = c.ring_slots[j].take() {
+                    Self::wring_teardown(&mut self.gpu, &mut r);
+                }
+            }
+            // V-3b-3c-2: retire every device-memory backing, the SAME guest-safe
+            // posture as the rings above (host-memory backing, fresh-blob re-mint,
+            // trusted-host renderer, monotonic res_id; the client-map case deferred
+            // inside retire_host3d_ring's park). No `leak` branch: device memory
+            // carries no tapestryd-tracked fence (the client frees it under Vulkan
+            // valid-usage, i.e. after its GPU work is idle).
+            for j in 0..MAX_WARP_MEMS_PER_CTX {
+                if let Some(m) = c.mems[j].take() {
+                    Self::wmem_teardown(&mut self.gpu, m);
+                }
+            }
+            // W-3c: retire every presentable through the SAME display-safe
+            // teardown the client-facing destroy uses -- unbind-before-unref,
+            // never a second open-coded ordering. A ctx dying while one of its
+            // presentables is the scanned-out source is the ordinary case (a
+            // client crashing mid-frame), not the exotic one, so this arm is
+            // where the ordering earns its keep.
+            //
+            // No `leak` branch, and round-2 F14 corrected WHY. The old reason
+            // -- "a presentable carries no tapestryd-tracked fence" -- is a
+            // fact about `WarpImg`'s FIELDS, not about whether the device
+            // still references the resource, and on a wedge it is precisely
+            // an abandoned venus chain that might. The load-bearing reason is
+            // the one the `ctl` verb states: the unref drops the BLOB -- the
+            // host-side object BINDING the allocation -- not the venus
+            // allocation itself, which stays alive under the client's own
+            // VkDeviceMemory until it frees it. So there is no guest page to
+            // strand and nothing for a graveyard to reclaim later. A reader
+            // who checked the old reason would have found it insufficient;
+            // one who trusted it would have learned the wrong rule.
+            for j in 0..MAX_WARP_IMGS_PER_CTX {
+                if let Some(i) = c.imgs[j].take() {
+                    self.wimg_teardown(i);
+                }
+            }
             // #240: the probe's two resources follow the SAME leak posture
             // as the BOs above -- which audit F3 caught this arm getting
             // WRONG IN BOTH HALVES. `wbo_retire` runs the device-side
@@ -4052,6 +10975,23 @@ impl Comp {
                 // with live work (that is what makes the host's
                 // behaviour undefined in the first place).
                 self.warp_ctx_slot_poisoned[slot] = true;
+                // V-3b-2 F1: DEFER the venus_ctx destroy to the vindication,
+                // exactly as dev_ctx is deferred here. Since 836855da,
+                // warp_venus_submit posts fenced chains on venus_ctx (counted in
+                // the SAME fences_in_flight), so a wedge may leave a venus chain
+                // "still live device-side" (the abandon tag's own warning) --
+                // destroying venus_ctx now would breach the very
+                // destroy-with-live-work contract dev_ctx is deferred to avoid
+                // (the 1c-2a "quiesced by construction" premise this replaces died
+                // the moment a submit path targeted venus_ctx). The vindication's
+                // `ctx_has_poisoned_slot` proof covers venus chains too -- they tag
+                // with the WarpCtx's pub_id, like dev_ctx -- so BOTH ctxs are
+                // provably finished before either is destroyed. Record the venus
+                // half; the vindication destroys WARP_VENUS_CTX_BASE+slot with the
+                // same condemn-on-refuse posture.
+                if c.venus_ctx.is_some() {
+                    self.warp_ctx_venus_vindicate[slot] = true;
+                }
                 self.warp_ctx_vindicate[slot] = c.pub_id;
                 say!("tapestryd: warp ctx slot {} POISONED (fence wedge)", slot);
                 return;
@@ -4072,6 +11012,25 @@ impl Comp {
             // ever dropped, so there is no condemnation left to clear and
             // no way for the ceiling to be re-armed.
             self.warp_free_leaked(slot);
+            // V-3b-1c-2: destroy the per-client venus device-ctx before the
+            // dev_ctx, SAME condemn-on-refuse pattern -- else its id
+            // (WARP_VENUS_CTX_BASE + slot) could be re-minted into a still-live
+            // host context when this slot is reused. Eager destroy here is safe
+            // because THIS is the CLEAN arm: it is reached only on
+            // `fences_in_flight == 0 && !fence_poisoned`, which since 836855da
+            // covers venus chains too (they share the counter), so venus_ctx has
+            // no live device work. (The WEDGE arm above defers the venus destroy
+            // to the vindication -- F1.) A refused destroy condemns the slot
+            // exactly as dev_ctx does.
+            if let Some(v) = c.venus_ctx {
+                if self.gpu.ctx_destroy(v).is_err() {
+                    self.warp_ctx_slot_poisoned[slot] = true;
+                    say!(
+                        "tapestryd: warp ctx slot {} venus-ctx destroy REFUSED on clean retire -- condemned",
+                        slot
+                    );
+                }
+            }
             // Round-5 F3, the same shape at the clean-retire site: the ctx
             // was already taken above, so the slot -- and with it dev_ctx =
             // slot+1 -- is free the moment this returns. A refused destroy
@@ -4087,6 +11046,687 @@ impl Comp {
                 );
             }
         }
+    }
+
+    /// V-3b-1c-2a boot self-test (venus-gated, self-skipping like the gpu
+    /// probes; runs in the production image so the venus-verdict gate sees its
+    /// line -- no client, no test-mode build). Proves the SERVER host3d-ring
+    /// path end to end: mint a warp ctx, mint a HOST3D ring under it (lazily
+    /// creating the venus device-ctx via `wctx_venus_ensure` + the persistent
+    /// engine), round-trip a sentinel at the mapped ring VA, then finish the
+    /// ctx -- exercising `wring_teardown`'s host3d arm (`drop_host3d_ring`) and
+    /// the venus-ctx destroy. A 2D / no-blob / no-venus device skips cleanly.
+    /// (The 1c-1 `hostmem_ring_probe` already proves PHYSICAL host-backing at
+    /// the gpu level; this line asserts the server wiring, not host distinctness.)
+    pub fn warp_host3d_selftest(&mut self) {
+        if !self.gpu.blob {
+            say!("tapestryd: warp host3d-ring skipped (blob feature not offered)");
+            return;
+        }
+        // Synthetic owner: the accept loop has not run, so no real conn id
+        // exists; the ctx is minted and finished entirely within this call,
+        // before any client can resolve it, and its slot is freed on finish.
+        const SELFTEST_CONN: u64 = u64::MAX;
+        let ctx_pub = match self.wctx_mint(SELFTEST_CONN) {
+            Some(p) => p,
+            None => {
+                say!("tapestryd: warp host3d-ring skipped (no virgl ctx -- 2D device)");
+                return;
+            }
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return, // just minted -> unreachable
+        };
+        if let Err(e) = self.wring_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, true) {
+            self.wctx_finish(slot, false);
+            say!(
+                "tapestryd: warp host3d-ring skipped (host3d mint refused e={}) -- non-venus device",
+                e
+            );
+            return;
+        }
+        let (va, venus) = {
+            let c = self.wctx(ctx_pub, SELFTEST_CONN).unwrap();
+            let r = c.ring_slots[0].as_ref().unwrap();
+            (r.va, c.venus_ctx.unwrap_or(0))
+        };
+        // Round-trip a sentinel PAST the ring control header, at the host-
+        // dictated cache the engine mapped (CACHED on KVM): the guest-visible
+        // proof the hostmem-backed ring is mapped + writable. Read BEFORE the
+        // finish -- drop_host3d_ring detaches this VA.
+        const SENT_OFF: u64 = 0x800;
+        let sentinel: u64 = 0x5657_3348_0000_0000 ^ va;
+        ring_store(va, SENT_OFF, sentinel);
+        let got = ring_load(va, SENT_OFF);
+        // V-3b-1c-2b F2: exercise SYS_HOSTMEM_REFCOUNT on this ring's backing.
+        // No client has claimed it (the self-test shares nothing), so the ONLY
+        // reference is tapestryd's own map (the ring burrow is {handle:0,
+        // mapping:1}) -> the total ref count MUST read exactly 1. That is the
+        // reap-if-safe precondition retire_host3d_ring checks below, so the
+        // wctx_finish that follows takes the immediate-reclaim arm (count==1),
+        // not the park arm -- the tapestryd-side witness of the syscall + the
+        // common teardown path. The claim + park + cross-client legs need a real
+        // client Proc and live in the warp-prove ring-host3d cross-Proc gate.
+        let refs = unsafe { t_hostmem_refcount(va, PAGE) };
+        self.wctx_finish(slot, false);
+        // F4: "teardown OK" must be OBSERVED, not assumed. wctx_finish poisons
+        // the slot iff a venus-ctx or dev-ctx CTX_DESTROY was refused (the
+        // teardown's only failure signal on a clean finish), so a poisoned slot
+        // means the teardown leg did NOT complete -- the gate must not read "OK".
+        let teardown_ok = !self.warp_ctx_slot_poisoned[slot];
+        if got == sentinel && refs == 1 && teardown_ok {
+            say!(
+                "tapestryd: warp host3d-ring venus-ctx={} MAPPED+ROUNDTRIP refcount=1 teardown OK",
+                venus
+            );
+        } else {
+            say!(
+                "tapestryd: warp host3d-ring FAIL (sentinel wrote {:#x} read {:#x} refcount={} teardown_ok={})",
+                sentinel,
+                got,
+                refs,
+                teardown_ok
+            );
+        }
+    }
+
+    /// V-3b-3c (F1 full-fix regression): prove a host3d ring's ridx is
+    /// RE-MINTABLE after wring_destroy. The V-3b-3b interim made the backend's
+    /// ridx alloc monotonic because a retired ring's server slot stayed
+    /// installed until ctx death, so a re-mint at the same ridx collided
+    /// (wring_mint's `taken` check -> E_INVAL). This mints at ridx 0, destroys
+    /// via the per-ring verb (freeing the slot + observe-and-reaping the hostmem
+    /// backing), asserts the slot is free, then re-mints at ridx 0 -- which MUST
+    /// now succeed. The bring-up witness (a single alloc, no re-mint) is
+    /// structurally blind to this, so the guard lives here.
+    pub fn warp_ring_recreate_selftest(&mut self) {
+        if !self.gpu.blob {
+            return; // warp_host3d_selftest already reported no-blob
+        }
+        const SELFTEST_CONN: u64 = u64::MAX;
+        let ctx_pub = match self.wctx_mint(SELFTEST_CONN) {
+            Some(p) => p,
+            None => return, // 2D device -- warp_host3d_selftest reported it
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return, // just minted -> unreachable
+        };
+        if self
+            .wring_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, true)
+            .is_err()
+        {
+            self.wctx_finish(slot, false);
+            return; // non-venus device -- warp_host3d_selftest reported it
+        }
+        let ring_pub = self
+            .wctx(ctx_pub, SELFTEST_CONN)
+            .and_then(|c| c.ring_slots[0].as_ref())
+            .map_or(0, |r| r.pub_id);
+        let destroyed = self.wring_destroy(ring_pub, SELFTEST_CONN).is_ok();
+        let slot_freed = self
+            .wctx(ctx_pub, SELFTEST_CONN)
+            .map_or(false, |c| c.ring_slots[0].is_none());
+        // The load-bearing assertion: ridx 0 re-mints now that the slot is free
+        // (E_INVAL "already minted" here is the exact F1 divergence).
+        let remint_ok = self
+            .wring_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, true)
+            .is_ok();
+        self.wctx_finish(slot, false);
+        if destroyed && slot_freed && remint_ok {
+            say!("tapestryd: warp ring-recreate ridx-reuse OK (destroy -> re-mint ridx 0)");
+        } else {
+            say!(
+                "tapestryd: warp ring-recreate FAIL (destroyed={} slot_freed={} remint_ok={})",
+                destroyed,
+                slot_freed,
+                remint_ok
+            );
+        }
+    }
+
+    /// V-3b-3c-2: witness the device-memory (mem/<handle>) lifecycle -- mint a
+    /// blob at handle 0 (blob_id 0, so no VkDeviceMemory binds, like the ring
+    /// self-test), write+read a sentinel through tapestryd's own RW map (proving
+    /// the hostmem BAR backing is live + writable, not merely bookkept), destroy
+    /// it, assert the slot freed, and re-mint at handle 0 (the "guest handle free
+    /// <=> server slot free" property, the ridx-reuse analog). Gate-wired
+    /// (boot-probe + venus gate + test-venus-verdict, #245) -- a witness no gate
+    /// reads rots. The client device-memory MAP path is the E2E's to prove
+    /// (3c-2b: vkAllocateMemory + vkMapMemory).
+    pub fn warp_mem_selftest(&mut self) {
+        if !self.gpu.blob {
+            return; // warp_host3d_selftest already reported no-blob
+        }
+        const SELFTEST_CONN: u64 = u64::MAX;
+        let ctx_pub = match self.wctx_mint(SELFTEST_CONN) {
+            Some(p) => p,
+            None => return, // 2D device -- warp_host3d_selftest reported it
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return, // just minted -> unreachable
+        };
+        if self.wmem_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, 0).is_err() {
+            self.wctx_finish(slot, false);
+            return; // non-venus device -- warp_host3d_selftest reported it
+        }
+        // Sentinel round-trip through tapestryd's own RW map of the hostmem
+        // backing (zeroed at mint): proves it is mapped + writable, so a pass is
+        // a real backing, not bookkeeping-only.
+        const SENTINEL: u64 = 0x00C0_FFEE_5EED_5EED;
+        let va = self
+            .wctx(ctx_pub, SELFTEST_CONN)
+            .and_then(|c| c.mems[0].as_ref())
+            .map_or(0, |m| m.host3d.va);
+        let sentinel_ok = va != 0 && {
+            ring_store(va, 0, SENTINEL);
+            ring_load(va, 0) == SENTINEL
+        };
+        let mem_pub = self
+            .wctx(ctx_pub, SELFTEST_CONN)
+            .and_then(|c| c.mems[0].as_ref())
+            .map_or(0, |m| m.pub_id);
+        let destroyed = self.wmem_destroy(mem_pub, SELFTEST_CONN).is_ok();
+        let slot_freed = self
+            .wctx(ctx_pub, SELFTEST_CONN)
+            .map_or(false, |c| c.mems[0].is_none());
+        // The load-bearing assertion: handle 0 re-mints now that the slot is
+        // free (E_INVAL "already minted" here would be the divergence).
+        let remint_ok = self.wmem_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, 0).is_ok();
+        self.wctx_finish(slot, false);
+        if sentinel_ok && destroyed && slot_freed && remint_ok {
+            say!("tapestryd: warp mem-recreate handle-reuse OK (alloc -> sentinel -> destroy -> re-alloc handle 0)");
+        } else {
+            say!(
+                "tapestryd: warp mem-recreate FAIL (sentinel={} destroyed={} slot_freed={} remint_ok={})",
+                sentinel_ok, destroyed, slot_freed, remint_ok
+            );
+        }
+    }
+
+    /// W-3a (WARP-WSI-DESIGN section 7): the host-capability probe for the
+    /// ratified WSI Direct arm. Measures -- never assumes -- whether THIS
+    /// host chain dispatches SET_SCANOUT_BLOB and accepts a cross-ctx
+    /// attach: the two capabilities the presentable's zero-copy scanout
+    /// (section 4.2) and GPU-blit compose (section 4.3) rest on.
+    ///
+    /// CLASS-SCOPED ON PURPOSE (the #212/#247 class-vs-property lesson): a
+    /// self-test can only mint a blob_id=0 vkr-SHMEM blob, so the positive
+    /// legs here are the SHMEM-class verdicts; the venus-IMAGE class (a blob
+    /// bound to a real VkDeviceMemory) needs a mesa client and its verdict
+    /// lands with W-3e's first present witness. What the NEGATIVE leg
+    /// answers unconditionally is VOCABULARY: a bogus resource id draws
+    /// INVALID_RESOURCE_ID from a host that dispatches the command, and
+    /// ERR_UNSPEC from one that does not know it. A host that ACCEPTS the
+    /// bogus id makes the probe BLIND -- reported as such, never as
+    /// supported (a probe that cannot see a refusal proves nothing by
+    /// succeeding).
+    pub fn warp_scanout_blob_probe(&mut self) {
+        if !self.gpu.blob {
+            say!("tapestryd: warp scanout-blob probe skipped (blob feature not offered)");
+            return;
+        }
+        const SELFTEST_CONN: u64 = u64::MAX;
+        const BOGUS_RES: u32 = 0x7fff_ffff;
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let ctx_pub = match self.wctx_mint(SELFTEST_CONN) {
+            Some(p) => p,
+            None => {
+                say!("tapestryd: warp scanout-blob probe skipped (no virgl ctx -- 2D device)");
+                return;
+            }
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return, // just minted -> unreachable
+        };
+        // A 64x64 BGRA8-sized backing (16 KiB, page-multiple): the probe blob.
+        if let Err(e) = self.wring_mint(ctx_pub, SELFTEST_CONN, 4 * PAGE, 0, true) {
+            self.wctx_finish(slot, false);
+            say!(
+                "tapestryd: warp scanout-blob probe skipped (host3d mint refused e={}) -- non-venus device",
+                e
+            );
+            return;
+        }
+        let res_id = {
+            let c = self.wctx(ctx_pub, SELFTEST_CONN).unwrap();
+            c.ring_slots[0].as_ref().unwrap().res_id
+        };
+        let fmt = crate::gpu::VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+        // Negative FIRST: the vocabulary discriminator needs no valid blob,
+        // and a device that dies here gets reported as dead rather than as
+        // any capability verdict.
+        let neg = match self.gpu.set_scanout_blob_probe(BOGUS_RES, 64, 64, fmt, 256) {
+            Ok(code) => code,
+            Err(()) => {
+                self.wctx_finish(slot, false);
+                say!("tapestryd: warp scanout-blob probe FAIL (negative-leg submission died -- device wedged)");
+                return;
+            }
+        };
+        let dispatch = if neg == crate::gpu::GPU_RESP_ERR_INVALID_RESOURCE_ID {
+            "present"
+        } else if neg == crate::gpu::GPU_RESP_OK_NODATA {
+            "BLIND"
+        } else if neg == crate::gpu::GPU_RESP_ERR_UNSPEC {
+            "absent" // QEMU's unknown-command shape
+        } else {
+            "unknown"
+        };
+        // The positive (shmem-class) leg, recorded verbatim, then an
+        // unconditional unbind -- an accepted probe bound scanout 0 to the
+        // probe blob, and the boot flow's reconcile expects to find the
+        // scanout its own state machine last set.
+        let pos = match self.gpu.set_scanout_blob_probe(res_id, 64, 64, fmt, 256) {
+            Ok(code) => code,
+            Err(()) => {
+                self.wctx_finish(slot, false);
+                say!("tapestryd: warp scanout-blob probe FAIL (positive-leg submission died -- device wedged)");
+                return;
+            }
+        };
+        // F2 (W-3a audit; widened r2-F1): a host that ACCEPTED either
+        // scanout-blob leg -- the POSITIVE, or the NEGATIVE on a BLIND host
+        // (accepting a bogus id may still bind) -- and then REFUSES the
+        // restore leaves scanout 0 in probe residue; for the positive case
+        // that residue is a blob this probe is about to unref, the order
+        // bound_res's own contract names as display-fatal. Bounded (needs a
+        // doubly-broken host; no client exists pre-READY; the first content
+        // reconcile rebinds unconditionally) but it must be LOUD, not a
+        // generic step line.
+        let restore_ok = self.gpu.set_scanout(0, dw, dh).is_ok();
+        if (pos == crate::gpu::GPU_RESP_OK_NODATA || neg == crate::gpu::GPU_RESP_OK_NODATA)
+            && !restore_ok
+        {
+            say!("tapestryd: warp scanout-blob probe: RESTORE REFUSED with probe state still bound -- scanout residue until the first reconcile rebind");
+        }
+        // F1 (W-3a audit, P1): COMPOSITOR_CTX does not exist yet at probe
+        // time -- its only bring-up creator is report_composed_posture,
+        // which runs AFTER READY. An attach probed against an ABSENT ctx
+        // measures the response's indifference to a nonexistent context,
+        // not attach semantics (the unconstructed-state class, applied to
+        // the instrument itself). Create it here -- idempotent;
+        // report_composed_posture finds comp_ctx already true -- and skip
+        // the attach legs (reported, not silent) when creation refuses.
+        if !self.ensure_comp_ctx() {
+            self.wctx_finish(slot, false);
+            say!(
+                "tapestryd: warp scanout-blob probe: dispatch={} neg={:#x} pos={:#x} attach=skipped (compositor ctx refused) (shmem-class; the venus-image-class verdict lands at W-3e)",
+                dispatch, neg, pos
+            );
+            return;
+        }
+        // The cross-ctx attach legs (the compose-arm capability): can the
+        // COMPOSITOR ctx attach a resource created under a different device
+        // ctx? Detach on acceptance so the probe leaves no residue; the
+        // bogus-id negative proves this leg too can see a refusal.
+        let att = match self.gpu.ctx_attach_resource_probe(COMPOSITOR_CTX, res_id) {
+            Ok(code) => code,
+            Err(()) => {
+                self.wctx_finish(slot, false);
+                say!("tapestryd: warp scanout-blob probe FAIL (attach-leg submission died -- device wedged)");
+                return;
+            }
+        };
+        if att == crate::gpu::GPU_RESP_OK_NODATA {
+            let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, res_id);
+        }
+        let att_neg = match self
+            .gpu
+            .ctx_attach_resource_probe(COMPOSITOR_CTX, BOGUS_RES)
+        {
+            Ok(code) => code,
+            Err(()) => {
+                self.wctx_finish(slot, false);
+                say!("tapestryd: warp scanout-blob probe FAIL (attach-negative submission died -- device wedged)");
+                return;
+            }
+        };
+        self.wctx_finish(slot, false);
+        say!(
+            "tapestryd: warp scanout-blob probe: dispatch={} neg={:#x} pos={:#x} attach={:#x} attach-neg={:#x} (shmem-class; the venus-image-class verdict lands at W-3e)",
+            dispatch, neg, pos, att, att_neg
+        );
+    }
+
+    /// W-3c-1: the PRESENTABLE self-test -- the object's whole lifecycle
+    /// driven server-side at boot, on the real device, with no client.
+    ///
+    /// SIX measurements, four of them reported as verdict arms. The two that
+    /// are not arms exist because the first draft could not read its own
+    /// result: `venus ctx` is established and reported SEPARATELY (a bare
+    /// `E_IO` from the mint named both a refused venus ctx and a refused
+    /// blob -- two causes behind one reading), and `flags=` measures WHICH
+    /// blob-flag combination this host accepts, which is what turned a mute
+    /// "mint refused" into the finding that corrected WARP-WSI-DESIGN 4.1.
+    /// The four arms, each answering a question the others cannot:
+    ///
+    ///   `shape=`   the registration accept set DISCRIMINATES: a declared
+    ///              shape the compositor cannot scan out is refused, and the
+    ///              one it can is accepted. Without the refusal arm, "accept"
+    ///              proves only that the verb ran (the negative-control rule
+    ///              -- an accept-everything gate passes a one-directional
+    ///              check).
+    ///   `mint=`    the HOST3D blob is created and its DERIVED size matches
+    ///              stride*h. (It does not read `info` -- that echo is
+    ///              `warp-prove img`'s job, over the wire where it means
+    ///              something. Comparing the struct's own `w`/`h` here would
+    ///              be a tautology: they are the mint's arguments.)
+    ///   `bind=`    the Direct arm binds the display to the presentable
+    ///              (SET_SCANOUT_BLOB at the declared shape). Acceptance is
+    ///              NOT a pixel claim -- what it establishes is that the
+    ///              display now REFERENCES the resource, which is the
+    ///              precondition the next arm needs to mean anything.
+    ///   `unbind=`  THE ORDERING WITNESS. Destroy the presentable WHILE THE
+    ///              DISPLAY IS BOUND TO IT and observe that the binding was
+    ///              dropped first (`bound_res` back to 0). This is exactly
+    ///              the state `tapestry_present_buggy_punbind_skipped.cfg`
+    ///              reaches when the PUnbound conjunct is omitted -- the
+    ///              display left naming a destroyed resource -- so the arm
+    ///              witnesses the modeled bug's ABSENCE, not a generic
+    ///              teardown success.
+    ///
+    /// Runs before READY like its siblings, on a self-test ctx no client can
+    /// name, and DISABLES scanout 0 on every exit path (not "restores": a
+    /// `set_scanout(0)` disables, and the kernel test pattern is gone from
+    /// that point on -- see `Scanout::Boot`'s note).
+    pub fn warp_img_selftest(&mut self) {
+        if !self.gpu.blob {
+            say!("tapestryd: warp presentable self-test skipped (blob feature not offered)");
+            return;
+        }
+        const SELFTEST_CONN: u64 = u64::MAX;
+        const IW: u32 = 64;
+        const IH: u32 = 64;
+        let fmt = crate::gpu::VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+        let stride = IW * 4;
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        // SELF-AUDIT: unlike the W-3a probe -- which only ever issues raw
+        // device commands -- this self-test drives the REAL teardown, and
+        // `gl_evict_res` mutates the compositor's own scanout state machine
+        // (Boot -> Off) on its way through. Both resting states are stable
+        // (reconcile's no-surface arm is a no-op under either), so nothing
+        // breaks either way; but a witness that silently leaves the machine
+        // in a different state than it found is a witness that has changed
+        // its subject. Snapshot and restore, so the only thing this proves
+        // about the compositor is what its arms actually assert.
+        let scanout_before = self.scanout;
+        let ctx_pub = match self.wctx_mint(SELFTEST_CONN) {
+            Some(p) => p,
+            None => {
+                say!("tapestryd: warp presentable self-test skipped (no virgl ctx -- 2D device)");
+                return;
+            }
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return, // just minted -> unreachable
+        };
+        // ARM 1, the DISCRIMINATOR, first: three refusals one variable away
+        // from the accepted registration -- a format outside the accept set,
+        // a stride too small for the declared width, and a zero dimension.
+        // Each must fail; if any is admitted the accept set is not a gate.
+        // The format negative uses a value outside EVERY plausible accept set,
+        // not `fmt + 1` (audit F7): the neighbouring virtio format is XRGB8,
+        // which 4.1's stage-0 set ADMITS -- so pinning its refusal made the
+        // discriminator go red the moment the code was corrected to match
+        // scripture. A control must not encode a decision the design is
+        // still free to make.
+        const BOGUS_FMT: u32 = u32::MAX;
+        let bad_fmt = self
+            .wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, BOGUS_FMT, stride, 0)
+            .is_err();
+        let bad_stride = self
+            .wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, fmt, stride - 4, 0)
+            .is_err();
+        let bad_dim = self
+            .wimg_mint(ctx_pub, SELFTEST_CONN, 0, 0, IH, fmt, stride, 0)
+            .is_err();
+        let shape_ok = bad_fmt && bad_stride && bad_dim;
+        // ARM 2, on TWO axes, because the first version of this arm had one
+        // axis and could not read its own result. `wimg_mint` answers E_IO
+        // for BOTH a refused venus-ctx create and a refused blob create, so
+        // a bare "mint refused e=5" named two different worlds at once (the
+        // two-causes-one-reading trap). Split them: establish the venus ctx
+        // FIRST and report it, then measure the blob create separately.
+        let venus_ctx = match self.wctx_venus_ensure(ctx_pub, SELFTEST_CONN) {
+            Ok(v) => v,
+            Err(e) => {
+                self.wctx_finish(slot, false);
+                say!(
+                    "tapestryd: warp presentable self-test skipped (venus ctx refused e={}) -- non-venus device; shape={}",
+                    e, u32::from(shape_ok)
+                );
+                return;
+            }
+        };
+        // WHICH BLOB FLAGS DOES THIS HOST ACCEPT? 4.1 ORIGINALLY claimed a
+        // presentable is SHAREABLE and NOT mappable: it exists to be named,
+        // never guest-mapped. This probe MEASURED that claim and REFUTED it,
+        // and 4.1 now records the amendment -- so read the present tense
+        // carefully: the accept-set question below is still live on every
+        // boot, but the design no longer asserts the answer. The V-0
+        // discipline says a capability is measured,
+        // not assumed. Three combinations, most-desired first, each on its
+        // own res_id and unref'd immediately -- the answer feeds the design
+        // rather than being silently worked around.
+        //
+        // Read the result with the blob_id in mind: this probe passes
+        // blob_id 0 (no VkDeviceMemory exists at boot), and virglrenderer's
+        // blob-id-0 path is its plain-memory/shmem arm, which may itself
+        // require MAPPABLE regardless of what a REAL venus allocation would
+        // accept. So `shareable` refused here does NOT by itself refute the
+        // design -- it bounds what this self-test can establish, and the
+        // venus-allocation-backed answer lands with the first real client
+        // (W-3d). Reporting the distinction is the point; guessing it is not.
+        let mut flags_word = "none";
+        for (name, fl) in [
+            ("shareable", crate::gpu::BLOB_FLAG_SHAREABLE),
+            (
+                "mappable+shareable",
+                crate::gpu::BLOB_FLAG_MAPPABLE | crate::gpu::BLOB_FLAG_SHAREABLE,
+            ),
+            ("mappable", crate::gpu::BLOB_FLAG_MAPPABLE),
+        ] {
+            self.res_seq = self.res_seq.wrapping_add(1);
+            if self.res_seq == 0 {
+                self.res_seq = 1;
+            }
+            let probe_res = self.res_seq;
+            if self
+                .gpu
+                .create_host3d_blob(probe_res, venus_ctx, fl, stride * IH, 0)
+                .is_ok()
+            {
+                let _ = self.gpu.resource_unref(probe_res);
+                flags_word = name;
+                break;
+            }
+        }
+        // The accepted registration. blob_id 0 is the self-test's stand-in
+        // for a venus allocation; the flag measurement above is what says
+        // whether a refusal here is about the FLAGS or about that stand-in.
+        if let Err(e) = self.wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, fmt, stride, 0) {
+            self.wctx_finish(slot, false);
+            say!(
+                "tapestryd: warp presentable self-test skipped (mint refused e={}) -- venus ctx OK, host3d-blob flags accepted: {}; shape={}",
+                e, flags_word, u32::from(shape_ok)
+            );
+            return;
+        }
+        let (img_pub, res_id, got_size) = {
+            let c = self.wctx(ctx_pub, SELFTEST_CONN).unwrap();
+            let i = c.imgs[0].as_ref().unwrap();
+            (i.pub_id, i.res_id, i.size)
+        };
+        // DERIVED, not moved-in-verbatim (audit F9). Comparing `i.w == IW`
+        // was a tautology: field-init shorthand binds `w` from the same
+        // argument, so the check reduced to `IW == IW` and could not fail.
+        // `size` is COMPUTED from stride*h inside the mint, so this one can.
+        // `res_id != 0` was the residue of the F9 de-tautologising and is
+        // ITSELF one (round-2 F8): res_seq skips zero on every increment, so
+        // it cannot fail. `size` is COMPUTED from stride*h inside the mint,
+        // so that conjunct can, and it is the whole arm.
+        let mint_ok = got_size == (stride as u64) * (IH as u64);
+        // ARM 3: the Direct bind at the DECLARED shape.
+        let bind_ok = self
+            .gpu
+            .set_scanout_blob(res_id, IW, IH, fmt, stride)
+            .is_ok();
+        if bind_ok {
+            self.bound_res = res_id;
+        }
+        // W-3c-2a: measure the composed arm's ONLY possible implementation for
+        // this class while a presentable actually exists (see the helper).
+        let compose = if bind_ok {
+            // CONTROL FIRST. If the identical scaffolding cannot round-trip a
+            // staged pattern with NO blit in it, then nothing this instrument
+            // says about a blit means anything, and the honest report is that
+            // the instrument failed -- not a verdict about the host.
+            match self.warp_present_compose_probe(res_id, IH, false, None) {
+                "ctlok" => self.warp_present_compose_probe(res_id, IH, true, None),
+                other => {
+                    say!(
+                        "tapestryd: warp presentable compose-probe CONTROL failed ({}) -- \
+                         the blit arm is unattributable and is not reported as a verdict",
+                        other
+                    );
+                    "noscaffold"
+                }
+            }
+        } else {
+            "n/a"
+        };
+        let seq_before = self.gpu.cmd_seq;
+        let refused_before = self.unbind_refused;
+        // ARM 4: destroy WHILE BOUND -- the ordering witness. On a host that
+        // refused the bind this degrades to a plain destroy and is reported
+        // as `unbind=n/a`, never as a pass: an arm that cannot run has not
+        // succeeded (the #212 class).
+        let destroy_ok = self.wimg_destroy(img_pub, SELFTEST_CONN).is_ok();
+        // THE ORDER ITSELF, not merely the end state (audit F5). Checking
+        // `bound_res == 0` alone catches an OMITTED unbind but passes an
+        // INVERTED one -- unref-then-unbind clears `bound_res` just the same,
+        // and inversion is the display-fatal arrangement. The device-command
+        // ticks make the relative order observable: the unbind must have been
+        // ISSUED BEFORE the unref, and both must have been issued by THIS
+        // teardown (a tick from an earlier boot step would pass vacuously).
+        let (sseq, useq) = (self.gpu.last_scanout_seq, self.gpu.last_unref_seq);
+        let ordered = sseq > seq_before && useq > sseq;
+        // AND THE DEVICE MUST HAVE ACCEPTED IT (round-2 F1 [P1]). Order is not
+        // success: `set_scanout` stamps its tick at ISSUE, before the wire
+        // response, and `gl_evict_res` clears `bound_res` either way -- so on
+        // a REFUSED unbind `destroy_ok`, `bound_res == 0` and `ordered` were
+        // ALL satisfied and this arm reported `ok` for the exact state
+        // `buggy_punbind_skipped` models. Round 1 produced both halves of the
+        // observation (F5 the order, F8 the verdict) and wired only the first
+        // into the witness.
+        let refused = self.unbind_refused > refused_before;
+        let unbind = if !bind_ok {
+            "n/a"
+        } else if refused {
+            "REFUSED"
+        } else if destroy_ok && self.bound_res == 0 && ordered {
+            "ok"
+        } else {
+            "FAIL"
+        };
+        // ARM 5: THE REFUSAL PATH, DRIVEN (round-3 SA-6). Everything above
+        // exercises the ACCEPTING device. The condemn/defer/drain machinery
+        // -- the round-2 F3 fix guarding an I-40 display UAF -- had NO driver
+        // at all: `condemn`, the deferral branch and `drain_condemned` had
+        // never executed anywhere, and `unbind=REFUSED` was a token only a
+        // `sed` in the verdict suite had ever produced. A safety mechanism
+        // whose sole evidence is a crafted log has been described, not
+        // tested; this chunk has already been bitten twice by exactly that
+        // (a prover with no caller, three undriven ABI arms).
+        //
+        // The lever fails the DISABLE without issuing it, so the refusal is
+        // indistinguishable downstream from a real one. It is reachable only
+        // from here -- pre-READY, before any connection exists -- so unlike
+        // its `ring-inject` sibling it needs no client verb and cannot become
+        // the #178 box-wide kill-switch.
+        //
+        // ONE STRUCTURAL DEPENDENCY, stated so a future change trips loudly:
+        // the `parked`/`deferred` conjuncts assume the `reconcile()` inside
+        // `gl_evict_res` issues NO accepted scanout in the self-test's
+        // configuration (no surfaces exist pre-READY, so the mode-machine's
+        // want is Off and `gl_evict_res` has already set it). If reconcile
+        // ever binds here, the entry is legitimately un-parked before this
+        // reads it and the arm reports FAIL -- a false alarm, but a LOUD one
+        // that lands on whoever changed reconcile, which is the right
+        // direction for a witness to fail in.
+        let refuse = if bind_ok {
+            let mut ok = false;
+            if self
+                .wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, fmt, stride, 0)
+                .is_ok()
+            {
+                let r2 = self
+                    .wctx(ctx_pub, SELFTEST_CONN)
+                    .and_then(|c| c.imgs[0].as_ref())
+                    .map(|i| (i.pub_id, i.res_id));
+                if let Some((pub2, res2)) = r2 {
+                    if self.gpu.set_scanout_blob(res2, IW, IH, fmt, stride).is_ok() {
+                        self.bound_res = res2;
+                        let refused_at = self.unbind_refused;
+                        let unref_at = self.gpu.last_unref_seq;
+                        self.gpu.arm_scanout_disable_refusal();
+                        let d2 = self.wimg_destroy(pub2, SELFTEST_CONN).is_ok();
+                        // The refusal was OBSERVED, the resource PARKED, and
+                        // -- the conjunct that actually matters -- the free
+                        // was NOT ISSUED. Checking the park alone would pass
+                        // an implementation that parked and freed anyway; the
+                        // unref tick is the direct witness that no
+                        // RESOURCE_UNREF reached the device while it said it
+                        // was still scanning this resource.
+                        let observed = self.unbind_refused == refused_at + 1;
+                        let parked = self.gpu.condemned_count() == 1;
+                        let deferred = parked && self.gpu.last_unref_seq == unref_at;
+                        // ...and the next ACCEPTED scanout drains it FOR REAL
+                        // -- the list empties AND the free finally issues.
+                        // Both halves: an implementation that just forgot the
+                        // entry would empty the list without ever freeing.
+                        let drained = self.gpu.set_scanout(0, dw, dh).is_ok()
+                            && self.gpu.condemned_count() == 0
+                            && self.gpu.last_unref_seq > unref_at;
+                        ok = d2 && observed && deferred && drained;
+                    }
+                }
+            }
+            if ok {
+                "ok"
+            } else {
+                "FAIL"
+            }
+        } else {
+            "n/a"
+        };
+        self.bound_res = 0;
+        // DISABLE scanout 0 on every path (audit F10: this is not a
+        // "restore" -- `set_scanout` with resource_id 0 DISABLES the scanout,
+        // per its own contract; the kernel test pattern does not come back).
+        // gl_evict_res already issued the same disable during the teardown,
+        // so this covers the arms that never bound.
+        let unbind_ok = self.gpu.set_scanout(0, dw, dh).is_ok();
+        self.bound_res = 0;
+        self.scanout = scanout_before;
+        self.wctx_finish(slot, false);
+        say!(
+            "tapestryd: warp presentable self-test: shape={} mint={} bind={} unbind={} refuse={} disable={} flags={} compose={} ({}x{} BGRA8 stride {})",
+            u32::from(shape_ok),
+            u32::from(mint_ok),
+            u32::from(bind_ok),
+            unbind,
+            refuse,
+            u32::from(unbind_ok),
+            flags_word,
+            compose,
+            IW, IH, stride
+        );
     }
 
     /// Retire one ctx. Quiesced (no fences in flight) -> finish NOW, the
@@ -4121,12 +11761,20 @@ impl Comp {
         // chokepoint for the same reason the hold release does: every ctx
         // death passes through here, and the deferred finish only frees
         // what was already evicted now.
+        // EVERY display-bindable family of this dying ctx, not just BOs
+        // (round-2 F6). W-3c-1 added presentables -- a second family the
+        // scanout can name -- and this chokepoint kept scanning only the
+        // first, so a dead client's bound presentable stayed on the display
+        // for the whole deferred-finish window with nothing able to re-route.
+        // Chained rather than duplicated so a third family is one clause, and
+        // so the two lists cannot drift apart.
         let (evict_res, consent_sl) = self.warp_ctxs[slot].as_ref().map_or((None, None), |c| {
             (
                 c.bos
                     .iter()
                     .flatten()
                     .map(|b| b.res_id)
+                    .chain(c.imgs.iter().flatten().map(|i| i.res_id))
                     .find(|&r| r != 0 && r == self.bound_res),
                 c.present_to.map(|(sl, _, _)| sl),
             )
@@ -4136,7 +11784,7 @@ impl Comp {
         }
         if let Some(sl) = consent_sl {
             if let Some(s) = self.surf_mut(sl) {
-                s.res_stale = true;
+                s.res_stale = [true; WEAVE_SLOTS as usize];
             }
             self.gl_retarget(sl);
         }
@@ -4224,7 +11872,7 @@ impl Comp {
                     .map(|b| b.res_id)
                     .filter(|&r| r != 0 && r == self.bound_res),
                 match c.present_to {
-                    Some((sl, _, bp)) if bp == bo_pub => Some(sl),
+                    Some((sl, _, PresentSrc::Bo(bp))) if bp == bo_pub => Some(sl),
                     _ => None,
                 },
             )
@@ -4234,7 +11882,7 @@ impl Comp {
                 c.present_to = None;
             }
             if let Some(s) = self.surf_mut(sl) {
-                s.res_stale = true;
+                s.res_stale = [true; WEAVE_SLOTS as usize];
             }
             self.gl_retarget(sl);
         }
@@ -4250,7 +11898,9 @@ impl Comp {
                 continue;
             }
             if quiesced {
-                let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j].take().unwrap();
+                let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j]
+                    .take()
+                    .unwrap();
                 let leaked = Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
                 if leaked > 0 {
                     self.warp_park_leaked(slot, b);
@@ -4298,7 +11948,219 @@ impl Comp {
     /// retiring ctx is addressable by nobody, so counting it made a
     /// correct system report a stale number (and the gate FAIL).
     fn warp_live_ctxs(&self) -> usize {
-        self.warp_ctxs.iter().flatten().filter(|c| !c.retiring).count()
+        self.warp_ctxs
+            .iter()
+            .flatten()
+            .filter(|c| !c.retiring)
+            .count()
+    }
+
+    // --- Warp-C C-6: the compositor readback (GPU-DESIGN 4.5.13) -----------
+
+    /// The composed-GL present's readback arm asks for surface `n`'s frame:
+    /// issue now if the reserved slot is ours to take, else queue `n` for
+    /// the next completion / vindication (latest wins: the issue then reads
+    /// whatever the BO holds at that moment). Never waits.
+    fn rb_request(&mut self, n: usize, g: &GlAdopt) {
+        if self.comp_rb.is_some() {
+            self.rb_enqueue(n);
+            return;
+        }
+        match self.rb_issue(n, g) {
+            Ok(()) => {}
+            // The engine is dead or the lane absent: nothing will ever
+            // retire, so nothing to wait for -- the frame is lost either
+            // way (the CPU arm had no readback to compose from before C-6
+            // either; `gl_adoption` keeps resolving, so the next present
+            // asks again and is refused just as cheaply).
+            Err(FencedErr::Dead) => self.rb_dropped += 1,
+            // The reserved slot is poisoned (an abandoned readback the
+            // device has not yet proved finished): park until the late
+            // retire vindicates it. `Again` with `comp_rb == None` can mean
+            // nothing else -- the slot is ours alone.
+            Err(_) => self.rb_enqueue(n),
+        }
+    }
+
+    /// ROUND F6 [P2]: keyed on the SLOT, with the latest generation
+    /// overwriting in place. The predecessor deduped on `(n, gen)` and
+    /// claimed "bounded by MAX_SURFACES" -- but `gen` comes from the
+    /// monotonic `gen_seq`, so MAX_SURFACES bounds `n` and NOT the pair: a
+    /// create/glsrc/present/destroy loop appended a fresh entry per cycle,
+    /// `contains()` is a linear scan, and the console's per-present cost grew
+    /// quadratically while the reserved slot was held or poisoned (the pump
+    /// only runs `while comp_rb.is_none()`, so nothing drained it). Keying on
+    /// the slot IS what "latest wins" already meant, and it makes the stated
+    /// bound true: at most one entry per surface slot, ever.
+    fn rb_enqueue(&mut self, n: usize) {
+        let gen = match self.surf(n) {
+            Some(s) => s.gen,
+            None => return,
+        };
+        match self.rb_wanted.iter_mut().find(|(sl, _)| *sl == n) {
+            Some(e) => e.1 = gen,
+            None => self.rb_wanted.push_back((n, gen)),
+        }
+        self.rb_coalesced += 1;
+    }
+
+    /// Issue the fenced readback of `n`'s adopted BO on the reserved slot
+    /// and record it. Counted on the CLIENT's ctx as a fence in flight (the
+    /// retire-safety counter every quiesce predicate reads) AND as a
+    /// compositor readback (subtracted at admission).
+    fn rb_issue(&mut self, n: usize, g: &GlAdopt) -> Result<(), FencedErr> {
+        let gen = match self.surf(n) {
+            Some(s) => s.gen,
+            None => return Err(FencedErr::Dead), // no surface: nothing to read for
+        };
+        let t0 = Instant::now();
+        let r = self
+            .gpu
+            .transfer_from_3d_comp(g.dev_ctx, g.ctx_pub, g.res_id, g.w, g.h, g.w * 4);
+        self.cost_add(Cost::Readback, t0);
+        let fence_id = r?;
+        if let Some(c) = self
+            .warp_ctxs
+            .iter_mut()
+            .flatten()
+            .find(|c| c.pub_id == g.ctx_pub)
+        {
+            c.fences_in_flight += 1;
+            c.comp_rb_in_flight += 1;
+        }
+        self.comp_rb = Some(CompRb {
+            fence_id,
+            surf: n,
+            gen,
+            ctx_pub: g.ctx_pub,
+            bo_pub: g.bo_pub,
+            res_id: g.res_id,
+            va: g.va,
+            w: g.w,
+            h: g.h,
+            issued: t0,
+        });
+        self.rb_issued += 1;
+        Ok(())
+    }
+
+    /// Issue the next wanted readback while the reserved slot is free. Run
+    /// by the fence pump after completions AND after vindications -- both
+    /// are the events that free the slot. A queued surface whose adoption
+    /// no longer resolves has moved on: nothing to read.
+    fn comp_rb_pump(&mut self) {
+        while self.comp_rb.is_none() {
+            let (n, gen) = match self.rb_wanted.pop_front() {
+                Some(e) => e,
+                None => return,
+            };
+            if self.surf(n).map_or(true, |s| s.gen != gen) {
+                continue; // that incarnation is gone
+            }
+            let g = match self.gl_adoption(n) {
+                // Bo only (W-3c-2): `rb_issue` host-DMA-writes into `g.va`,
+                // which an Img adoption does not have (I-7). Presentables
+                // reach the composed machinery only at the W-3d compose arm.
+                Some(g) if matches!(g.kind, AdoptSrc::Bo) => g,
+                _ => continue,
+            };
+            match self.rb_issue(n, &g) {
+                Ok(()) => return,
+                Err(FencedErr::Dead) => {
+                    self.rb_dropped += 1;
+                    continue;
+                }
+                Err(_) => {
+                    // Slot still poisoned: keep the head where it was and
+                    // try again at the next pump pass (bounded: one attempt
+                    // per pass, one refused admission per attempt).
+                    self.rb_wanted.push_front((n, gen));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The compositor readback retired (`FenceTag.comp`): the frame's pixels
+    /// are in the BO backing (or, abandoned, may still be landing there --
+    /// the ctx was poisoned in the pump's common arm, nothing is composed).
+    /// Re-validate the surface -- alive, same gen, the scanout still
+    /// composed, the adoption resolving to the SAME ctx/BO/resource/backing/
+    /// geometry that was read -- then compose those pages and push, exactly
+    /// as the synchronous arm did inside the present. Runs BEFORE
+    /// `warp_pump_retires` in the pass: the pump's decrement may have just
+    /// quiesced a retiring BO, and this must read `va` before that free.
+    /// (`gl_adoption` refuses a retiring BO or ctx, so a BO destroyed since
+    /// the issue drops the frame rather than reading its backing.)
+    fn comp_readback_retired(&mut self, tag: FenceTag) {
+        let rec = match self.comp_rb.take() {
+            Some(r) if r.fence_id == tag.fence_id => r,
+            Some(r) => {
+                // One in flight is the reserved slot's bound, so a comp tag
+                // that is not the record's is a lane inconsistency: say it,
+                // keep the record (its own retire is still owed).
+                say!(
+                    "tapestryd: comp readback fence {} retired but {} is in flight",
+                    tag.fence_id,
+                    r.fence_id
+                );
+                self.comp_rb = Some(r);
+                return;
+            }
+            None => {
+                say!(
+                    "tapestryd: comp readback fence {} retired with none in flight",
+                    tag.fence_id
+                );
+                return;
+            }
+        };
+        // ROUND F9 [P3]: charge the stall only for a readback that ACTUALLY
+        // retired. This ran before the early return, so every abandonment
+        // added ~30 s to a metric both the enum doc and 149-warp.md define as
+        // "per COMPLETED readback" -- an abandoned one measured a stall that
+        // never ended, which is a different quantity wearing the same units.
+        if tag.abandoned {
+            self.rb_abandoned += 1;
+            return;
+        }
+        // The stall the device paid for this frame's backlog (F2b's
+        // measurement): `cost readback-wait` carries n / sum / max.
+        self.cost_add(Cost::ReadbackWait, rec.issued);
+        // ROUND F2 [P1]: the device REFUSED this transfer. The pre-C-6b
+        // synchronous arm gated its compose on `.is_ok()`; the fenced form
+        // dropped that gate because the tag carried no verdict. Composing
+        // here paints whatever the backing happens to hold -- zeros on a
+        // fresh BO, so the pane BLANKS -- and counts it as landed.
+        if !tag.ok {
+            self.rb_dropped += 1;
+            return;
+        }
+        let same_gen = self.surf(rec.surf).map_or(false, |s| s.gen == rec.gen);
+        let same_adoption = self.gl_adoption(rec.surf).map_or(false, |g| {
+            // The kind pin (W-3c-2): img and bo pub ids are separate
+            // monotonic sequences, so a bare pub compare could false-match
+            // across families after the consent changed under the readback.
+            matches!(g.kind, AdoptSrc::Bo)
+                && g.ctx_pub == rec.ctx_pub
+                && g.bo_pub == rec.bo_pub
+                && g.res_id == rec.res_id
+                && g.va == rec.va
+                && g.w == rec.w
+                && g.h == rec.h
+        });
+        if !same_gen || !same_adoption || self.scanout != Scanout::Composed {
+            self.rb_dropped += 1;
+            return;
+        }
+        let t1 = Instant::now();
+        let r = self.blit_composed_pixels(rec.surf, 0, 0, 0, rec.w, rec.h, Some(rec.va));
+        self.cost_add(Cost::Cpu, t1);
+        if let Some(r) = r {
+            self.screen_push(r);
+            self.composed_cpu += 1;
+            self.rb_landed += 1;
+        }
     }
 
     // --- Warp-2d: the fenced lane at the seam -----------------------------
@@ -4306,7 +12168,9 @@ impl Comp {
     /// The per-pass fence pump: drain retired fenced chains off the device
     /// and post each on its owning ctx (poll_fences delivers them). A tag
     /// whose ctx is gone is dropped -- every retire path drains first, so
-    /// only the wedge-leak path can orphan one.
+    /// only the wedge-leak path can orphan one. A compositor-owned tag
+    /// (C-6) is ALSO routed to `comp_readback_retired`, before the retire
+    /// pump below can free the backing it read into.
     pub fn warp_service_fences(&mut self) {
         self.gpu.poll_completions();
         for tag in self.gpu.take_completions() {
@@ -4315,13 +12179,18 @@ impl Comp {
                     continue;
                 }
                 c.fences_in_flight = c.fences_in_flight.saturating_sub(1);
+                if tag.comp {
+                    c.comp_rb_in_flight = c.comp_rb_in_flight.saturating_sub(1);
+                }
                 if tag.abandoned {
                     // NOT a completion: the chain may still be live
                     // device-side, so the ctx's backings can never be
                     // freed again (leak-on-wedge), and the fence must
-                    // NOT be reported as signaled.
+                    // NOT be reported as signaled. A compositor readback
+                    // poisons the client's ctx the same way -- the device
+                    // may still be writing that client's BO backing.
                     c.fence_poisoned = true;
-                } else {
+                } else if !tag.comp {
                     // #210 ROOT CAUSE FIX: count completions DENSELY per
                     // ctx instead of publishing the device-GLOBAL max
                     // fence id. The winsys counts fenced ops it ISSUED
@@ -4339,10 +12208,31 @@ impl Comp {
                     // decrement above. The fence-file record's CONTENT
                     // moves to count-space too -- the winsys never parses
                     // it (the read is a doorbell; the counter is the
-                    // authority).
+                    // authority). A compositor readback (C-6) is a fence
+                    // the client did NOT issue, so it is never counted here.
                     c.fence_signaled += 1;
+                    // Multi-queue F3: the per-timeline dense count, bumped
+                    // ALONGSIDE the total (additive -- the park file rides
+                    // the total). ring_idx is server-minted at submit, so
+                    // the bound holds by construction; an out-of-range value
+                    // means a corrupted tag, and it is DROPPED LOUD (audit
+                    // F5) -- folding it into timeline 3 would return a
+                    // timeline-3 wait early, the silent wrong direction for
+                    // an integrity counter.
+                    let t = tag.ring_idx as usize;
+                    if t < WARP_TIMELINES {
+                        c.timeline_signaled[t] += 1;
+                    } else {
+                        say!(
+                            "tapestryd: warp fence tag ring_idx {} out of range (ctx {}) -- per-timeline count dropped",
+                            tag.ring_idx, tag.ctx_pub
+                        );
+                    }
                 }
                 break;
+            }
+            if tag.comp {
+                self.comp_readback_retired(tag);
             }
         }
         // A late retire proves the host finished an abandoned chain, so
@@ -4360,13 +12250,39 @@ impl Comp {
             // SIBLING slot is still poisoned would otherwise lose its
             // count permanently. The gate guards only the RECLAMATION
             // (un-poison + free), not the arithmetic.
-            if let Some(c) = self
-                .warp_ctxs
-                .iter_mut()
-                .flatten()
-                .find(|c| c.pub_id == v.ctx_pub)
-            {
-                c.fence_signaled += 1;
+            // ROUND F3 [P1] / main#242: NOT for the compositor's own readback.
+            // The completion arm guards its bump on `!tag.comp`; a vindication
+            // is produced after the tag was taken by abandonment, so the bit
+            // has to ride the vindication or the CLIENT (whose ctx the tag
+            // names, AS-BUILT 1) is credited with a fence it never issued.
+            // `warp_fence_wait` returns on `signaled >= seq`, so one ahead
+            // means every wait returns ONE FENCE EARLY for the ctx's life.
+            if !v.comp {
+                if let Some(c) = self
+                    .warp_ctxs
+                    .iter_mut()
+                    .flatten()
+                    .find(|c| c.pub_id == v.ctx_pub)
+                {
+                    c.fence_signaled += 1;
+                    // Multi-queue F3: the vindication carries the lane
+                    // (FenceVindication.ring_idx, retained per-slot at
+                    // abandonment) for the same reason it carries `comp` --
+                    // the tag is gone, and without it this count is one
+                    // short forever on that timeline (the per-timeline
+                    // replay of the #210 silent post-recovery park). An
+                    // out-of-range lane is dropped loud, never folded into
+                    // timeline 3 (audit F5).
+                    let t = v.ring_idx as usize;
+                    if t < WARP_TIMELINES {
+                        c.timeline_signaled[t] += 1;
+                    } else {
+                        say!(
+                            "tapestryd: warp vindication ring_idx {} out of range (ctx {}) -- per-timeline count dropped",
+                            v.ring_idx, v.ctx_pub
+                        );
+                    }
+                }
             }
             // ONE retired chain is not proof for a ctx that abandoned
             // SEVERAL (round-4 F1): a ctx can hold every fenced slot, and
@@ -4415,20 +12331,122 @@ impl Comp {
             // HEALTHY engine (a resp-type mismatch does not latch `dead`),
             // and the un-poison ran regardless. A refused destroy leaves
             // the slot condemned instead.
-            if self.gpu.ctx_destroy((slot as u32) + 1).is_err() {
+            //
+            // R-2 F1: attempt BOTH destroys before deciding recovery, mirroring
+            // the CLEAN arm (7178/7194) -- the old code `continue`d on a dev
+            // refuse and never reached the venus arm, so a healthy-engine dev
+            // mismatch stranded venus_ctx too (both host ctxs leaked where the
+            // venus one could have been reclaimed). Each id is independently
+            // condemn-on-refuse; the slot recovers only when BOTH are gone.
+            let dev_ok = self.gpu.ctx_destroy((slot as u32) + 1).is_ok();
+            if !dev_ok {
                 say!(
-                    "tapestryd: warp ctx slot {} destroy REFUSED -- slot stays condemned",
+                    "tapestryd: warp ctx slot {} dev-ctx destroy REFUSED at vindication -- slot stays condemned",
                     slot
                 );
+            }
+            // V-3b-2 F1: destroy the venus_ctx the leak arm deferred, now that
+            // the device is provably finished (the poisoned-slot gate above
+            // covers venus chains -- same pub_id). The flag clears on success, so
+            // this is idempotent under the multi-chain vindication that reaches
+            // here only once no poisoned slot for this ctx remains; a refused
+            // venus destroy leaves the flag set for the next retry. dev_ctx =
+            // slot+1 needs no such flag -- the `warp_ctx_vindicate` stamp is its
+            // own "owed" marker, cleared only at the recovery below.
+            let mut venus_ok = true;
+            if self.warp_ctx_venus_vindicate[slot] {
+                if self
+                    .gpu
+                    .ctx_destroy(WARP_VENUS_CTX_BASE + slot as u32)
+                    .is_ok()
+                {
+                    self.warp_ctx_venus_vindicate[slot] = false;
+                } else {
+                    venus_ok = false;
+                    say!(
+                        "tapestryd: warp ctx slot {} venus-ctx destroy REFUSED at vindication -- slot stays condemned",
+                        slot
+                    );
+                }
+            }
+            // A refused destroy on EITHER id leaves the slot poisoned (never
+            // recycled, so neither derived id can re-mint into a live host ctx);
+            // a later vindication retries whatever remains. Recover only when
+            // both host ctxs are provably gone.
+            if !dev_ok || !venus_ok {
                 continue;
             }
             // Only now are the parked backings provably free of the device.
             self.warp_free_leaked(slot);
             self.warp_ctx_slot_poisoned[slot] = false;
             self.warp_ctx_vindicate[slot] = 0;
-            say!("tapestryd: warp ctx slot {} recovered (device finished)", slot);
+            say!(
+                "tapestryd: warp ctx slot {} recovered (device finished)",
+                slot
+            );
         }
         self.warp_pump_retires();
+        // C-6: a completion or a vindication may have freed the reserved
+        // slot; issue the next wanted readback (after the retires above, so
+        // a BO retired in this pass is not read for).
+        self.comp_rb_pump();
+        #[cfg(feature = "test-mode")]
+        self.warp_stall_watch();
+    }
+
+    /// The mid-stall observer (W-4): while any warp ctx is live, one
+    /// say-line per ctx names the fence ledger in flight -- first at ctx
+    /// appearance (the healthy-baseline control), then every
+    /// `WARP_WATCH_MS`. Silent with no warp ctx (the console's normal
+    /// state), so the log cost is bounded to active GPU sessions. The
+    /// triage this line exists for: `inflight` splits device-outstanding
+    /// from retired; `sig` vs `rep` splits delivered-to-ledger from
+    /// consumed-by-client; `fparked` says whether a wait is even parked
+    /// here; and a MISSING line while a run is stalled says the serve loop
+    /// itself stopped iterating.
+    #[cfg(feature = "test-mode")]
+    fn warp_stall_watch(&mut self) {
+        self.watch_pass = self.watch_pass.wrapping_add(1);
+        if self.warp_ctxs.iter().flatten().next().is_none() {
+            self.watch_last = None;
+            return;
+        }
+        let due = match self.watch_last {
+            None => true,
+            Some(t) => t.elapsed().as_millis() as u64 >= WARP_WATCH_MS,
+        };
+        if !due {
+            return;
+        }
+        self.watch_last = Some(Instant::now());
+        for c in self.warp_ctxs.iter().flatten() {
+            // The ctx's adopted surface, if any pane names it back: the
+            // WHO of a churning ctx (an orphan reports surf=-).
+            let surf = self
+                .surfaces
+                .iter()
+                .position(|s| s.as_ref().map_or(false, |s| s.gl_src == Some(c.pub_id)))
+                .map(|i| i as i64)
+                .unwrap_or(-1);
+            say!(
+                "tapestryd: warp-watch pass={} fparked={} rparked={} | ctx={} conn={} surf={} inflight={} sig={} rep={} again={} tl=[{},{},{},{}] poisoned={}",
+                self.watch_pass,
+                self.w210_fparked,
+                self.w210_rparked,
+                c.pub_id,
+                c.owner_conn,
+                surf,
+                c.fences_in_flight,
+                c.fence_signaled,
+                c.fence_reported,
+                c.fenced_again,
+                c.timeline_signaled[0],
+                c.timeline_signaled[1],
+                c.timeline_signaled[2],
+                c.timeline_signaled[3],
+                c.fence_poisoned as u32
+            );
+        }
     }
 
     /// Does the serve loop need its 1 ms fence pace? A DEAD engine never
@@ -4454,12 +12472,19 @@ impl Comp {
     /// the lane is the share: it leaves room for a second client always, and
     /// still admits the submit+transfer pair a single client needs in
     /// flight together.
+    ///
+    /// **Warp-C C-6**: the compositor's own readback of this ctx's BO is
+    /// counted in `fences_in_flight` (retire safety) but is NOT the client's
+    /// to be throttled by -- it is subtracted here, so the share the winsys
+    /// discovered (`fence-lane`) is exactly what it can have in flight, and
+    /// its issued-minus-signaled model never sees a fence it did not issue.
     fn warp_fenced_admit(&mut self, ctx_pub: u32, conn: u64) -> Result<u32, u32> {
         let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
         if c.fence_poisoned {
             return Err(E_IO);
         }
-        if c.fences_in_flight as usize >= WARP_CTX_FENCE_MAX {
+        let own = c.fences_in_flight.saturating_sub(c.comp_rb_in_flight);
+        if own as usize >= WARP_CTX_FENCE_MAX {
             return Err(E_AGAIN);
         }
         Ok(c.dev_ctx)
@@ -4467,11 +12492,11 @@ impl Comp {
 
     fn warp_submit(&mut self, ctx_pub: u32, conn: u64, stream: &[u8]) -> Result<u64, u32> {
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
-            c.fenced_rx += 1;      // #210: arrived at the fenced funnel
+            c.fenced_rx += 1; // #210: arrived at the fenced funnel
         }
         let r = (|| {
             let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
-            match self.gpu.submit_3d(dev_ctx, ctx_pub, stream) {
+            match self.gpu.submit_3d(dev_ctx, ctx_pub, stream, 0) {
                 Ok(f) => {
                     self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
                     Ok(f)
@@ -4481,6 +12506,70 @@ impl Comp {
         })();
         self.warp_fenced_account(ctx_pub, conn, &r);
         r
+    }
+
+    /// V-3b-2 (WARP-V3-DESIGN 0.12): forward a raw venus SUBMIT_CMD (EXECBUFFER)
+    /// stream on the ctx's VENUS device-ctx. Distinct from `warp_submit` (which
+    /// targets `dev_ctx`, the virgl ctx): a host3d ring's resource is created
+    /// under `venus_ctx` (`wring_install_host3d` -> `mint_host3d_ring`), so
+    /// `vkr_context_get_resource` resolves the ring's res_id -- named by the
+    /// `vkCreateRingMESA` in the stream -- only on the venus context's decoder.
+    /// tapestryd never parses the stream (opaque bytes; the venus ctx is the host
+    /// resource SCOPE, not command parsing). Reuses the fenced lane + admission +
+    /// accounting.
+    fn warp_venus_submit(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        stream: &[u8],
+        timeline: u8,
+    ) -> Result<u64, u32> {
+        // F3: fenced_rx FIRST (matching warp_submit), and EVERY refusal
+        // (WARP_SUBMIT_MAX, venus_ensure, admit) inside the accounted closure --
+        // so no funnel outcome is invisible to the #210 ledger
+        // (rx - minted - again - err). The routing (wctx_has_venus) guarantees
+        // venus_ensure takes its existing fast path here, so its error arm is
+        // unreachable through the seam; it stays inside for accounting parity.
+        //
+        // `timeline` (multi-queue F3) is derived from the FILE the write
+        // arrived on (submit = 0, submit<t> = t), never from client bytes --
+        // the WFK dispatch bounds it below WARP_TIMELINES by construction.
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            c.fenced_rx += 1;
+        }
+        let r = (|| {
+            if stream.len() > WARP_SUBMIT_MAX {
+                return Err(p9::E_INVAL);
+            }
+            // The budget gate is ctx-scoped (fence_poisoned + the per-ctx fence
+            // share), identical for either device ctx; its returned dev_ctx is
+            // unused here -- the venus stream submits on venus_ctx instead.
+            let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
+            let _ = self.warp_fenced_admit(ctx_pub, conn)?;
+            match self.gpu.submit_3d(venus_ctx, ctx_pub, stream, timeline) {
+                Ok(f) => {
+                    self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
+                    Ok(f)
+                }
+                Err(e) => Err(map_fenced_err(e)),
+            }
+        })();
+        self.warp_fenced_account(ctx_pub, conn, &r);
+        r
+    }
+
+    /// V-3b-2: a ctx has an armed venus device-ctx iff it minted a host3d ring
+    /// OR a device-memory blob (both go through `wctx_venus_ensure`; V-3b-3c-2
+    /// added the second armer) -- either mint marks the client Venus, which is
+    /// correct: a HOST_VISIBLE VkDeviceMemory blob IS a Venus object. The
+    /// WFK_SUBMIT handler routes on this: a Venus client's submit targets
+    /// venus_ctx, a virgl client's targets dev_ctx. A client is one or the other;
+    /// a virgl client that errantly pokes `mem/new` would route its GL stream to
+    /// the venus decoder -- self-harm only (own ctx, trusted-host refusal), no
+    /// authority change.
+    fn wctx_has_venus(&self, ctx_pub: u32, conn: u64) -> bool {
+        self.wctx(ctx_pub, conn)
+            .map_or(false, |c| c.venus_ctx.is_some())
     }
 
     /// #210: classify one fenced-funnel outcome on the ctx ledger.
@@ -4521,12 +12610,24 @@ impl Comp {
             return Err(p9::E_INVAL);
         }
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
-            c.fenced_rx += 1;      // #210: arrived at the fenced funnel
+            c.fenced_rx += 1; // #210: arrived at the fenced funnel
         }
         let r = (|| {
             let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
             match self.gpu.transfer_3d(
-                to_host, dev_ctx, ctx_pub, res_id, level, x, y, z, w, h, d, offset, stride,
+                to_host,
+                dev_ctx,
+                ctx_pub,
+                res_id,
+                level,
+                x,
+                y,
+                z,
+                w,
+                h,
+                d,
+                offset,
+                stride,
                 layer_stride,
             ) {
                 Ok(f) => {
@@ -4552,6 +12653,19 @@ fn map_fenced_err(e: FencedErr) -> u32 {
 pub struct Conn {
     handle: i64,
     pub conn_id: u64,
+    /// The connecting PROCESS's kernel `stripes` tag (0 = unknown): the
+    /// identity the pane tree's ownership is keyed on, fixed for the conn's
+    /// life (the connector never changes; its death flips `alive`, not this).
+    peer_stripes: u64,
+    /// H-4b-2: the connecting peer's kernel PRINCIPAL (durable identity;
+    /// T_PRINCIPAL_NONE for a dead/unknown peer). Cached ONCE at
+    /// `Conn::new` -- unlike renderer-status (which `peer_is_renderer`
+    /// re-reads per write because it is dynamic: the SAK can revoke it),
+    /// a running Proc's principal is immutable, so a single read is sound.
+    /// The `Session` actor's key; drives the claim-mint gate and the reap.
+    peer_principal: u32,
+    /// Layout mutations landed in the current service pass.
+    layout_verbs: u32,
     /// Which tree this conn serves: P_ROOT (/srv/tapestry) or W_ROOT
     /// (/srv/warp) -- set by which listener accepted it (Warp-2c). One Conn
     /// type for both; the qid spaces are disjoint, so a warp conn simply
@@ -4569,6 +12683,18 @@ pub struct Conn {
     defer: bool,
     pending_reads: Vec<PendingRead>,
     pending_fences: Vec<PendingFence>,
+    pending_ring_fences: Vec<PendingRingFence>,
+    /// Per-fid generation pins for the regenerating text files (ctl,
+    /// layout, warp ctl): the offset-0 read composes AND stores the
+    /// text; later offsets on the same fid serve the STORED bytes, so a
+    /// reader looping to EOF sees one coherent generation. Without the
+    /// pin each read() composes fresh and a multi-read consumer splices
+    /// generations -- digit-length drift in EARLIER lines shifts every
+    /// later row's offset window, and the assembled row can violate the
+    /// writer's own invariants (measured: a cost row with avg > max).
+    /// Entries die at clunk and at session reset (Tversion) and conn
+    /// death; a fresh offset-0 read replaces the pin.
+    text_snaps: Vec<(u32, u64, Vec<u8>)>,
 }
 
 const NO_FID: Option<Fid> = None;
@@ -4586,7 +12712,10 @@ const NO_FID: Option<Fid> = None;
 fn rects_cover_full(rects: &[(u32, u32, u32, u32)], w: u32, h: u32) -> bool {
     // Fast path: a single full-surface rect (the dominant shape --
     // rect_count 0, SDL_UpdateWindowSurface, present(None)).
-    if rects.iter().any(|&(x, y, pw, ph)| x == 0 && y == 0 && pw == w && ph == h) {
+    if rects
+        .iter()
+        .any(|&(x, y, pw, ph)| x == 0 && y == 0 && pw == w && ph == h)
+    {
         return true;
     }
     let mut ys: Vec<u32> = Vec::with_capacity(rects.len() * 2 + 2);
@@ -4623,9 +12752,24 @@ fn rects_cover_full(rects: &[(u32, u32, u32, u32)], w: u32, h: u32) -> bool {
 
 impl Conn {
     pub fn new(handle: i64, conn_id: u64, root: u64) -> Conn {
+        let mut info = TSrvPeerInfo::default();
+        // One read, two fields: stripes (per-process) and principal (durable
+        // identity). A dead/unknown peer is stripes 0 (owns nothing) and
+        // principal NONE (an unauthenticated nobody -> Client(0), never a
+        // Session), so both fail closed.
+        let ok = unsafe { t_srv_peer(handle, &mut info) } == 0 && info.alive == 1;
+        let peer_stripes = if ok { info.stripes } else { 0 };
+        let peer_principal = if ok {
+            info.principal_id
+        } else {
+            T_PRINCIPAL_NONE
+        };
         Conn {
             handle,
             conn_id,
+            peer_stripes,
+            peer_principal,
+            layout_verbs: 0,
             root,
             version_done: false,
             msize: SRV_MSIZE,
@@ -4636,6 +12780,8 @@ impl Conn {
             defer: false,
             pending_reads: Vec::new(),
             pending_fences: Vec::new(),
+            pending_ring_fences: Vec::new(),
+            text_snaps: Vec::new(),
         }
     }
 
@@ -4676,18 +12822,46 @@ impl Conn {
             self.fid_full_said = true;
             say!(
                 "tapestryd: 9p fid table FULL (cap {}) conn={} -- walks refuse E_NOMEM",
-                MAX_FIDS, self.conn_id
+                MAX_FIDS,
+                self.conn_id
             );
         }
     }
 
-    fn fid_clunk(&mut self, fid: u32) {
+    fn fid_clunk(&mut self, comp: &mut Comp, fid: u32) {
+        let mut gone: Option<Fid> = None;
         if let Some(i) = self.fid_find(fid) {
-            self.fids[i] = None;
+            gone = self.fids[i].take();
         }
         // Cancel site 2 (clunk): this fid's held replies die with it.
         self.pending_reads.retain(|pr| pr.fid != fid);
         self.pending_fences.retain(|pf| pf.fid != fid);
+        self.pending_ring_fences.retain(|pf| pf.fid != fid);
+        self.text_snaps.retain(|t| t.0 != fid);
+        // A surface minted (surface/new) and never created, whose last ctl
+        // fid just clunked, can never be created -- the verb rides that fid
+        // -- and nothing but `destroy` or the conn's death would reap it: a
+        // client that mints and closes (a refused create; a crash between
+        // the two) would pin its own pool for the session's life (the
+        // H-3c-2 round F2). The accounting is the server's, not the
+        // client's courtesy: retire it here.
+        if let Some(f) = gone {
+            if is_surf(f.path) && surf_fk(f.path) == FK_CTL {
+                let n = surf_n(f.path);
+                let minted = comp.surf_owned(n, self.conn_id, f.gen)
+                    && comp
+                        .surf(n)
+                        .map_or(false, |s| matches!(s.state, SurfState::Minted));
+                let another = self.fids.iter().flatten().any(|o| o.path == f.path);
+                if minted && !another {
+                    say!(
+                        "tapestryd: surface {} minted, never created, its ctl clunked: retired",
+                        n
+                    );
+                    comp.retire(n);
+                }
+            }
+        }
     }
 
     fn drop_all_fids(&mut self, comp: &mut Comp) {
@@ -4702,6 +12876,8 @@ impl Conn {
         self.fid_full_said = false;
         self.pending_reads.clear();
         self.pending_fences.clear();
+        self.pending_ring_fences.clear();
+        self.text_snaps.clear();
     }
 
     pub fn teardown(&mut self, comp: &mut Comp) {
@@ -4712,6 +12888,8 @@ impl Conn {
         comp.warp_retire_conn(self.conn_id);
         self.pending_reads.clear();
         self.pending_fences.clear();
+        self.pending_ring_fences.clear();
+        self.text_snaps.clear();
     }
 
     pub fn raw_fd(&self) -> i64 {
@@ -4746,6 +12924,7 @@ impl Conn {
     // --- frame pump (the ptyfs bodies, verbatim shape) -----------------------
 
     pub fn service(&mut self, comp: &mut Comp) -> bool {
+        self.layout_verbs = 0;
         let cur = self.in_buf.len();
         if cur >= SRV_MSIZE_USIZE {
             return false;
@@ -4802,7 +12981,7 @@ impl Conn {
             p9::P9_TWRITE => self.h_write(comp, tmsg, tag),
             p9::P9_TREADDIR => self.h_readdir(comp, tmsg, tag),
             p9::P9_TGETATTR => self.h_getattr(comp, tmsg, tag),
-            p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
+            p9::P9_TCLUNK => self.h_clunk(comp, tmsg, tag),
             p9::P9_TFLUSH => self.h_flush(tmsg, tag),
             p9::P9_TWEFT => self.h_weft(comp, tmsg, tag),
             _ => self.err(tag, p9::E_NOSYS),
@@ -4904,6 +13083,8 @@ impl Conn {
                     Some((P_LAYOUT, 0))
                 } else if name == b"pane" {
                     Some((P_PANE_DIR, 0))
+                } else if name == b"statusbar" {
+                    Some((P_STATUSBAR, 0))
                 } else {
                     None
                 }
@@ -4927,6 +13108,10 @@ impl Conn {
                     b"tag" => PFK_TAG,
                     b"surface" => PFK_SURFACE,
                     b"geometry" => PFK_GEOMETRY,
+                    b"tagbar" => PFK_TAGBAR,
+                    b"status" => PFK_STATUS,
+                    b"claim" => PFK_CLAIM,
+                    b"owner" => PFK_OWNER,
                     _ => return None,
                 };
                 Some((make_pane(id, fk), 0))
@@ -4968,6 +13153,7 @@ impl Conn {
                 b".." => Some((W_ROOT, 0)),
                 b"ctl" => Some((W_CTL, 0)),
                 b"caps" => Some((W_CAPS, 0)),
+                b"caps-venus" => Some((W_CAPS_VENUS, 0)),
                 b"ctx" => Some((W_CTX_DIR, 0)),
                 _ => None,
             },
@@ -4989,8 +13175,16 @@ impl Conn {
                     b".." => return Some((W_CTX_DIR, 0)),
                     b"ctl" => WFK_CTL,
                     b"submit" => WFK_SUBMIT,
+                    // multi-queue F3: the timeline rides the file name
+                    b"submit1" => WFK_SUBMIT_T_BASE + 1,
+                    b"submit2" => WFK_SUBMIT_T_BASE + 2,
+                    b"submit3" => WFK_SUBMIT_T_BASE + 3,
+                    b"timelines" => WFK_TIMELINES,
                     b"fence" => WFK_FENCE,
                     b"bo" => WFK_BO_DIR,
+                    b"ring" => WFK_RING_DIR,
+                    b"mem" => WFK_MEM_DIR,
+                    b"img" => WFK_IMG_DIR,
                     _ => return None,
                 };
                 Some((make_wctx(id, fk), 0))
@@ -5023,6 +13217,97 @@ impl Conn {
                     _ => return None,
                 };
                 Some((make_wbo(bid, fk), 0))
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_RING_DIR => {
+                let cid = warp_id(d);
+                let c = comp.wctx(cid, self.conn_id)?;
+                if name == b".." {
+                    return Some((make_wctx(cid, WFK_DIR), 0));
+                }
+                if name == b"new" {
+                    return Some((make_wctx(cid, WFK_RING_NEW), 0));
+                }
+                let ridx = parse_u32(name)?;
+                if ridx as usize >= WARP_RINGS_PER_CTX {
+                    return None;
+                }
+                let r = c.ring_slots[ridx as usize].as_ref()?;
+                if r.retiring {
+                    return None;
+                }
+                Some((make_wring(r.pub_id, WFK_DIR), 0))
+            }
+            d if is_wring(d) && warp_fk(d) == WFK_DIR => {
+                let rp = warp_id(d);
+                let (c, _) = comp.wring(rp, self.conn_id)?;
+                let parent = make_wctx(c.pub_id, WFK_RING_DIR);
+                let fk = match name {
+                    b".." => return Some((parent, 0)),
+                    b"info" => WFK_RING_INFO,
+                    b"map" => WFK_RING_MAP,
+                    b"kick" => WFK_RING_KICK,
+                    b"fence" => WFK_RING_FENCE,
+                    b"ctl" => WFK_RING_CTL,
+                    _ => return None,
+                };
+                Some((make_wring(rp, fk), 0))
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_MEM_DIR => {
+                let cid = warp_id(d);
+                let c = comp.wctx(cid, self.conn_id)?;
+                if name == b".." {
+                    return Some((make_wctx(cid, WFK_DIR), 0));
+                }
+                if name == b"new" {
+                    return Some((make_wctx(cid, WFK_MEM_NEW), 0));
+                }
+                let handle = parse_u32(name)?;
+                if handle as usize >= MAX_WARP_MEMS_PER_CTX {
+                    return None;
+                }
+                let m = c.mems[handle as usize].as_ref()?;
+                Some((make_wmem(m.pub_id, WFK_DIR), 0))
+            }
+            d if is_wmem(d) && warp_fk(d) == WFK_DIR => {
+                let mp = warp_id(d);
+                let (c, _) = comp.wmem(mp, self.conn_id)?;
+                let parent = make_wctx(c.pub_id, WFK_MEM_DIR);
+                let fk = match name {
+                    b".." => return Some((parent, 0)),
+                    b"info" => WMFK_INFO,
+                    b"map" => WMFK_MAP,
+                    b"ctl" => WMFK_CTL,
+                    _ => return None,
+                };
+                Some((make_wmem(mp, fk), 0))
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_IMG_DIR => {
+                let cid = warp_id(d);
+                let c = comp.wctx(cid, self.conn_id)?;
+                if name == b".." {
+                    return Some((make_wctx(cid, WFK_DIR), 0));
+                }
+                if name == b"new" {
+                    return Some((make_wctx(cid, WFK_IMG_NEW), 0));
+                }
+                let handle = parse_u32(name)?;
+                if handle as usize >= MAX_WARP_IMGS_PER_CTX {
+                    return None;
+                }
+                let i = c.imgs[handle as usize].as_ref()?;
+                Some((make_wimg(i.pub_id, WFK_DIR), 0))
+            }
+            d if is_wimg(d) && warp_fk(d) == WFK_DIR => {
+                let ip = warp_id(d);
+                let (c, _) = comp.wimg(ip, self.conn_id)?;
+                let parent = make_wctx(c.pub_id, WFK_IMG_DIR);
+                let fk = match name {
+                    b".." => return Some((parent, 0)),
+                    b"info" => WIFK_INFO,
+                    b"ctl" => WIFK_CTL,
+                    _ => return None,
+                };
+                Some((make_wimg(ip, fk), 0))
             }
             _ => None,
         }
@@ -5092,11 +13377,20 @@ impl Conn {
         // The mint idiom (netd clone / ptyfs ptmx): opening surface/new
         // allocates a surface in THIS conn and rebinds the fid onto its ctl.
         if f.path == P_SURF_NEW {
-            if comp.owned_count(self.conn_id) >= MAX_SURFACES_PER_CONN {
-                return self.err(tag, p9::E_NOMEM); // F9 per-conn cap
+            // F9 per-conn cap. The renderer (the environment) owns one
+            // chrome surface per visible leaf on top of its own, so its cap
+            // is widened by MAX_PANES; the global pool is sized so every
+            // conn can reach its cap at once (nothing starves).
+            let cap = if self.peer_is_renderer() {
+                MAX_SURFACES_PER_RENDERER
+            } else {
+                MAX_SURFACES_PER_CONN
+            };
+            if comp.owned_count(self.conn_id) >= cap {
+                return self.err(tag, p9::E_NOMEM);
             }
             let conn_id = self.conn_id;
-            let n = match comp.mint(conn_id) {
+            let n = match comp.mint(conn_id, self.peer_stripes, self.peer_principal) {
                 Some(n) => n,
                 None => return self.err(tag, p9::E_NOMEM),
             };
@@ -5126,7 +13420,12 @@ impl Conn {
                 None => return self.err(tag, p9::E_NOMEM),
             };
             let path = make_wctx(id, WFK_CTL);
-            self.fids[i] = Some(Fid { fid: a.fid, path, gen: 0, opened: true });
+            self.fids[i] = Some(Fid {
+                fid: a.fid,
+                path,
+                gen: 0,
+                opened: true,
+            });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
         }
@@ -5141,7 +13440,12 @@ impl Conn {
                 None => return self.err(tag, p9::E_NOMEM),
             };
             let path = make_wbo(id, WFK_BO_CTL);
-            self.fids[i] = Some(Fid { fid: a.fid, path, gen: 0, opened: true });
+            self.fids[i] = Some(Fid {
+                fid: a.fid,
+                path,
+                gen: 0,
+                opened: true,
+            });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
         }
@@ -5154,6 +13458,15 @@ impl Conn {
             return self.err(tag, p9::E_NOENT);
         }
         if is_wbo(f.path) && comp.wbo(warp_id(f.path), self.conn_id).is_none() {
+            return self.err(tag, p9::E_NOENT);
+        }
+        if is_wring(f.path) && comp.wring(warp_id(f.path), self.conn_id).is_none() {
+            return self.err(tag, p9::E_NOENT);
+        }
+        if is_wmem(f.path) && comp.wmem(warp_id(f.path), self.conn_id).is_none() {
+            return self.err(tag, p9::E_NOENT);
+        }
+        if is_wimg(f.path) && comp.wimg(warp_id(f.path), self.conn_id).is_none() {
             return self.err(tag, p9::E_NOENT);
         }
 
@@ -5195,16 +13508,58 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "display {} {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\n",
+                    "display {} {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\nmenu {}\n",
                     comp.gpu.width,
                     comp.gpu.height,
                     comp.live_count(),
                     comp.clock_hz,
                     comp.tick,
                     comp.layout.live_ids().len(),
-                    comp.layout.id_of(comp.layout.focused).unwrap_or(0)
+                    comp.layout.id_of(comp.layout.focused).unwrap_or(0),
+                    comp.menu_text()
                 ),
             );
+            // Warp-C C-3: which composed-pixel path presents are taking,
+            // and whether the GPU one latched off. Both paths must stay
+            // live wherever the seam exists (4.5.9), so a silent slide to
+            // the CPU one has to be a number, not a boot-log grep.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "composed gpu {} cpu {}\ncomposed-gpu-dead {}\n",
+                    comp.composed_gpu, comp.composed_cpu, comp.comp_gpu_dead as u32
+                ),
+            );
+            // Warp-C C-4: the present-path cost census, one line per op
+            // class -- `cost <kind> <n> <sum_us> <max_us>`, cumulative since
+            // boot (a reader diffs snapshots). Every kind is printed, zero or
+            // not, so a parser never has to infer a missing line.
+            for k in Cost::ALL {
+                let c = comp.cost[k as usize];
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "cost {} {} {} {}\n",
+                        k.name(),
+                        c.n,
+                        c.sum_ns / 1000,
+                        c.max_ns / 1000
+                    ),
+                );
+            }
+            #[cfg(feature = "test-mode")]
+            for (name, h) in [
+                ("poke-bind-hist", &comp.poke_hist_bind),
+                ("poke-flush-hist", &comp.poke_hist_flush),
+            ] {
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "{} {} {} {} {} {} {} {} {}\n",
+                        name, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
+                    ),
+                );
+            }
             #[cfg(feature = "test-mode")]
             {
                 let _ = core::fmt::write(
@@ -5212,15 +13567,82 @@ impl Conn {
                     format_args!("test-mode {}\n", if comp.test_mode { "on" } else { "off" }),
                 );
             }
-            return self.read_str(tag, &s, a.offset, cap);
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
         }
         if f.path == P_LAYOUT {
-            // The container tree as text (G-6). Reads regenerate the
-            // string; a multi-read straddling a mutation can tear -- the
-            // text fits one frame at every realistic size (the stage-0
-            // ctl posture).
+            // The container tree as text (G-6). The offset-0 read pins
+            // the composed string to the fid (text_snaps), so a
+            // multi-read cannot straddle a mutation.
             let s = comp.layout.render_text();
-            return self.read_str(tag, &s, a.offset, cap);
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
+        }
+        if f.path == P_STATUSBAR {
+            // H-3d: the status strip the layout is carved for -- "x y w h",
+            // zeros when no bar is registered (the file always exists).
+            let r = comp.status_rect().unwrap_or(Rect::ZERO);
+            let mut s = String::new();
+            let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", r.x, r.y, r.w, r.h));
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
+        }
+        if is_pane(f.path) && pane_fk(f.path) == PFK_CLAIM {
+            // H-4b: the one-shot placement claim (HALCYON.md 13.7 --
+            // "PLACEMENT is itself a capability"). The offset-0 read MINTS a
+            // fresh 128-bit token on the leaf (last mint wins) and pins it
+            // to the fid (text_snaps), so a read-to-EOF spends one mint, not
+            // two; a seeked first read (no pin) mints nothing and reads EOF,
+            // and a later offset serves the pin whatever the leaf holds by
+            // then. Only a LIVE EMPTY leaf is claimable at mint: a container
+            // is E_NOENT (no tile), an occupied leaf E_PERM (its placement
+            // is taken). WHO may mint (H-4b-2, HALCYON.md 13.7 -- "a
+            // session-owned empty leaf's claim"): the leaf's OWNER only.
+            // The renderer acts anywhere (the environment); a session owns
+            // an empty leaf stamped with its principal at split; a Client
+            // (system/none) owns no empty leaf. A claim is still strictly
+            // weaker than the close every peer holds over the same leaf --
+            // it can never take a tile that holds a surface (the create
+            // path hosts only into a still-empty leaf).
+            let id = pane_id(f.path);
+            let slot = match comp.layout.slot_of_id(id) {
+                Some(s) => s,
+                None => return self.err(tag, p9::E_NOENT),
+            };
+            let mut s = String::new();
+            if a.offset == 0 {
+                if !comp.layout.is_leaf(slot) {
+                    return self.err(tag, p9::E_NOENT);
+                }
+                if comp.layout.leaf_surface(slot).is_some() {
+                    return self.err(tag, p9::E_PERM);
+                }
+                // Placement is a capability: mint only on a leaf the reader
+                // owns. E_PERM (as for an occupied leaf) -- both are "this
+                // placement is not available to you".
+                let owns = match self.actor() {
+                    Actor::Renderer => true,
+                    Actor::Session(p) => comp.layout.pane_owner_principal(slot) == p,
+                    Actor::Client(_) => false,
+                };
+                if !owns {
+                    return self.err(tag, p9::E_PERM);
+                }
+                let mut raw = [0u8; 16];
+                if libthyla_rs::rand::fill_bytes(&mut raw).is_err() {
+                    // SYS_GETRANDOM needs CAP_CSPRNG_READ; a mint that cannot
+                    // draw entropy must SAY so -- the client sees only a
+                    // failed read, and this class hid behind that once.
+                    say!(
+                        "tapestryd: claim mint on pane {}: csprng unavailable (E_IO)",
+                        id
+                    );
+                    return self.err(tag, E_IO);
+                }
+                let tok = u128::from_le_bytes(raw);
+                if !comp.layout.mint_claim(slot, tok) {
+                    return self.err(tag, p9::E_PERM);
+                }
+                let _ = core::fmt::write(&mut s, format_args!("{:032x}\n", tok));
+            }
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
         }
         if is_pane(f.path) {
             return self.pane_read(comp, f.path, tag, a.offset, cap);
@@ -5235,7 +13657,7 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\npoisoned {}\nbo-cap {}\nfence-lane {}\nbo-peak {}\n",
+                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\npoisoned {}\nbo-cap {}\nhostmem-bytes-cap {}\nfence-lane {}\nbo-peak {}\n",
                     comp.gpu.virgl as u32,
                     comp.gpu.num_capsets,
                     comp.gpu.capset_id,
@@ -5248,6 +13670,11 @@ impl Conn {
                     // the constant in (#187: a claimed cross-file sync needs
                     // a CHECK; reading it here IS the check).
                     MAX_WARP_BOS_PER_CTX,
+                    // W-4: the hostmem-family BYTE budget, published for the
+                    // same reason -- the prove's cap-exhaustion leg loops
+                    // until refusal instead of baking the value in (#230:
+                    // a lifted constant voids every proof that named it).
+                    WARP_CTX_HOSTMEM_MAX,
                     // #204: the per-ctx fenced-lane share, for the same
                     // reason -- the winsys throttles its in-flight depth to
                     // this, and a hardcoded client mirror is what held the
@@ -5258,7 +13685,11 @@ impl Conn {
                     comp.warp_bo_peak
                 ),
             );
-            // The BYTES axis (what WARP_CTX_BACKING_MAX actually gates).
+            // The BYTES axis -- the BO SHARE of the guest backing cap
+            // (WARP_CTX_BACKING_MAX gates bos + rings + leaked since the W-4
+            // family split); this global peak stays bo-scoped, and the live
+            // family totals are the per-ctx `backing-bytes` +
+            // `hostmem-bytes` keys (audit F1).
             let _ = core::fmt::write(
                 &mut s,
                 format_args!("bo-bytes-peak {}\n", comp.warp_bo_bytes_peak),
@@ -5270,12 +13701,37 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "probe-parked {}\nprobe-freed {}\nverify-unknown {}\n",
-                    comp.warp_probe_parked, comp.warp_probe_freed, comp.warp_verify_unknown
+                    "probe-parked {}\nprobe-freed {}\nverify-unknown {}\nprobe-texture {}\n",
+                    comp.warp_probe_parked,
+                    comp.warp_probe_freed,
+                    comp.warp_verify_unknown,
+                    comp.warp_probe_texture
                 ),
             );
-            // Round-3 F4: where the FIXED-size prefix ends. Re-set below in
-            // the test-mode block, whose `w210` line is also fixed size.
+            // V-3b-2 xproc-E2E: the host3d-ring reap ledger (gpu-side). Like
+            // probe-parked above, a real leak-shape ledger -- readable on
+            // production, not test-mode: `parked` counts client-mapped retires
+            // that PARKED, `reaped` counts parked rings later RECLAIMED once the
+            // client released. Bounded-width u64s -> in the fixed-size prefix.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "hostmem-ring-parked {}\nhostmem-ring-reaped {}\n",
+                    comp.gpu.hostmem_park_count(),
+                    comp.gpu.hostmem_reap_count()
+                ),
+            );
+            // Round-3 F4: where the FIXED-size prefix ends. Re-set below --
+            // after the `rb-*` census (fixed size) on EVERY build, and again
+            // in the test-mode block whose `w210` line is also fixed size.
+            //
+            // FOLLOW-UP ROUND F3: it used to be taken ONLY here and re-set only
+            // inside `#[cfg(test-mode)]`, so on a production build the guard
+            // measured a prefix that excluded every line below -- including the
+            // census -- and could not report a truncation of the thing it was
+            // cited as protecting. A width guard that is blind on the shipping
+            // build is not a mitigation, and it was the stated reason for
+            // declining to move this line.
             let mut gcrit_end = s.len();
             // Audit F3/F4: the ctx-less refusal ledger + the comp-global
             // one-shot mask -- both are spendable/bumpable by ANY conn, so
@@ -5288,6 +13744,73 @@ impl Conn {
                     comp.warp_create_refused_noctx, comp.warp_diag_noctx_arms
                 ),
             );
+            // Warp-C C-6 census: the compositor readback arm. EVERY key is
+            // `rb-`-prefixed (main#247): the first cut shipped four of six
+            // BARE while its comment claimed all were "prefixed/distinct on
+            // purpose" -- true of the two it was thinking about, false of the
+            // four it was not. `parse_field` returns the FIRST whole-token
+            // hit, so a bare `issued` anywhere else in this file would feed
+            // the gate's verdict arms the wrong counter WITHOUT erroring: the
+            // arms would simply decide differently. The claim is now true as
+            // written, and the redundant leading `comp-rb` token is gone.
+            //
+            // It is NOT shorter, and an earlier comment here claimed it was:
+            // dropping `comp-rb ` saves 8 bytes and prefixing four bare keys
+            // with `rb-` costs 12, so the line grew by 4 (67 -> 71 fixed
+            // bytes, measured). The disposition that rested on the shortening
+            // is corrected above -- the guard now measures this line on every
+            // build, which is the mitigation that was claimed and absent.
+            //
+            // Round F10 [P3] asked for this to sit after the `w210` custody
+            // mirror. It stays here instead, deliberately: `w210` and the
+            // unbounded per-ctx tail are BOTH inside the `test-mode` block,
+            // so moving down would drop the census out of a production
+            // tapestryd entirely -- trading a bounded-prefix risk the runtime
+            // guard already reports for a diagnostic that simply is not there
+            // when the console misbehaves in the field. Shortening was F10's
+            // own second option and it is the one that costs nothing.
+            // `rb-slot`: 0 free, 1 a compositor readback in flight, 2
+            // poisoned. The stall each readback paid is `cost readback-wait`
+            // (n / sum / max) on the tapestry ctl.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "rb-issued {} rb-landed {} rb-dropped {} rb-coalesced {} rb-abandoned {} rb-slot {}\n",
+                    comp.rb_issued,
+                    comp.rb_landed,
+                    comp.rb_dropped,
+                    comp.rb_coalesced,
+                    comp.rb_abandoned,
+                    comp.gpu.comp_slot_state()
+                ),
+            );
+            // C-2c census: imports witnessed vs refused/skipped. A silent
+            // degradation to the CPU composition path -- every import
+            // REFUSED after a latched compositor ctx -- must be countable,
+            // not only greppable in a boot log that may be gone.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "comp-attach witnessed {} refused {}\n",
+                    comp.comp_attach_witnessed, comp.comp_attach_refused
+                ),
+            );
+            // Every line above is FIXED size, so this is where the guarded
+            // prefix genuinely ends on EVERY build -- follow-up round F3: it
+            // used to be taken far above and re-set only inside the test-mode
+            // block, so a production build measured a prefix that excluded the
+            // ctx-less ledgers, the `rb-*` census and `comp-attach`, and could
+            // not report a truncation of any of them. The test-mode block
+            // below re-sets it again past its own fixed `w210` line.
+            //
+            // `cfg(not(test-mode))` because the test-mode block below re-sets
+            // it past its own fixed `w210` line, and `default = ["test-mode"]`
+            // -- so without the gate this assignment is dead in every default
+            // build and warns. Production is exactly the build it exists for.
+            #[cfg(not(feature = "test-mode"))]
+            {
+                gcrit_end = s.len();
+            }
             // #175: the anti-vacuous counter. A prover that submits and
             // then abandons is racing the drain; if the completion won,
             // nothing was in flight, the abandon was a no-op, and every
@@ -5308,6 +13831,16 @@ impl Conn {
                 let _ = core::fmt::write(
                     &mut s,
                     format_args!("fenced-free {}\n", comp.gpu.test_fenced_free()),
+                );
+                // The denominator `fenced-free` is against (the CLIENT pool;
+                // the reserved compositor slot reports through `rb-slot`).
+                // W-4: `fenced-free 15` read as one-slot-held for two runs
+                // because the gauge never named its own full-scale value --
+                // a NEW key rather than a `15/15` reformat, because
+                // warp-prove parses the existing key numerically (#91).
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!("fenced-pool {}\n", crate::gpu::COMP_FSLOT),
                 );
                 // #210: the per-ctx fence ledger, readable from ANY conn. The
                 // signaled/reported pair splits a wedged fence wait three
@@ -5342,6 +13875,24 @@ impl Conn {
                 // The fixed-size prefix ends HERE; everything below grows
                 // with the live-ctx count and is deliberately non-critical.
                 gcrit_end = s.len();
+                // W-4 stall observability: one row per HELD fenced slot, so a
+                // wedged chain is NAMED (op class + owner + age), not just a
+                // missing count. Empty when all slots are free. BELOW the
+                // fixed prefix (round-7 F1): up to 16 growing rows exist
+                // exactly when a wedge hunt runs, and placing them above
+                // `w210` pushed the custody mirror past the in-tree readers'
+                // 512-byte snapshot -- the round-2 F6 blindness, reintroduced
+                // by rows built for the same hunt. The unbounded thing goes
+                // last.
+                for (i, fid, cpub, ridx, rb, cm, age) in comp.gpu.fenced_held() {
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!(
+                            "fenced-held slot={} fence={} ctx={} ring={} rb={} comp={} age_ms={}\n",
+                            i, fid, cpub, ridx, rb as u32, cm as u32, age
+                        ),
+                    );
+                }
                 for c in comp.warp_ctxs.iter().flatten() {
                     let _ = core::fmt::write(
                         &mut s,
@@ -5377,11 +13928,20 @@ impl Conn {
                     W_CTL_SNAPSHOT
                 );
             }
-            return self.read_str(tag, &s, a.offset, cap);
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
         }
         if f.path == W_CAPS {
             // The raw capset blob (decode with the ctl `capset` line).
             let b = &comp.gpu.capset_blob;
+            let off = (a.offset as usize).min(b.len());
+            let take = (b.len() - off).min(cap);
+            let slice = b[off..off + take].to_vec();
+            return p9::build_rread(&mut self.out_buf, tag, &slice);
+        }
+        if f.path == W_CAPS_VENUS {
+            // V-3b-3 (Model B): the raw VENUS capset blob for the vn_renderer
+            // backend's instance gate (empty on a non-venus host).
+            let b = &comp.gpu.venus_capset_blob;
             let off = (a.offset as usize).min(b.len());
             let take = (b.len() - off).min(cap);
             let slice = b[off..off + take].to_vec();
@@ -5447,8 +14007,7 @@ impl Conn {
                     // put it here). A production client cannot depend on a
                     // test-mode field.
                     {
-                        let signaled =
-                            comp.wctx(id, self.conn_id).map_or(0, |c| c.fence_signaled);
+                        let signaled = comp.wctx(id, self.conn_id).map_or(0, |c| c.fence_signaled);
                         let _ = core::fmt::write(
                             &mut s,
                             format_args!(
@@ -5470,16 +14029,15 @@ impl Conn {
                         crit_end = s.len();
                         // #204 census (per-ctx): live = backed right now
                         // (what the creation cap counts); peak = the
-                        // high-water the cap width must be sized against;
-                        // the bytes twins gate WARP_CTX_BACKING_MAX.
+                        // high-water the cap width must be sized against.
+                        // The bo-bytes twins are the BO SHARE; the holistic
+                        // quantity WARP_CTX_BACKING_MAX actually gates
+                        // (bos + rings + mems + leaked) is `backing-bytes`,
+                        // emitted just below (audit V-3b-3c-2a F1).
                         let (live, peak, live_b, peak_b) =
                             comp.wctx(id, self.conn_id).map_or((0, 0, 0, 0), |c| {
                                 (
-                                    c.bos
-                                        .iter()
-                                        .flatten()
-                                        .filter(|b| b.dma_fd >= 0)
-                                        .count() as u32,
+                                    c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count() as u32,
                                     c.bo_backed_peak,
                                     c.bos
                                         .iter()
@@ -5496,16 +14054,28 @@ impl Conn {
                                 live, peak, live_b, peak_b
                             ),
                         );
+                        // The numbers the two byte-cap refusals compare, made
+                        // observable when the cap became holistic (audit
+                        // V-3b-3c-2a F1) and split by family at W-4:
+                        // backing-bytes = the guest sum WARP_CTX_BACKING_MAX
+                        // gates (bos + rings + leaked); hostmem-bytes = the
+                        // sum WARP_CTX_HOSTMEM_MAX gates (mems + imgs). Census
+                        // keys (after the client-critical fence-signaled
+                        // prefix).
+                        let (guest_b, host_b) = comp
+                            .wctx(id, self.conn_id)
+                            .map_or((0, 0), |c| (ctx_guest_backing(c), ctx_hostmem_backing(c)));
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!("backing-bytes {}\nhostmem-bytes {}\n", guest_b, host_b),
+                        );
                         // The #198-hunt storm scale: the one-shots name only
                         // the FIRST refusal per family; this counts them all.
                         // Appended LAST so the client-critical keys
                         // (fence-signaled) stay inside a 255-byte snapshot.
-                        let refused =
-                            comp.wctx(id, self.conn_id).map_or(0, |c| c.create_refused);
-                        let _ = core::fmt::write(
-                            &mut s,
-                            format_args!("create-refused {}\n", refused),
-                        );
+                        let refused = comp.wctx(id, self.conn_id).map_or(0, |c| c.create_refused);
+                        let _ =
+                            core::fmt::write(&mut s, format_args!("create-refused {}\n", refused));
                     }
                     // Audit F11: the "keep the client-critical keys inside a
                     // 255-byte snapshot" discipline above was a comment with
@@ -5544,6 +14114,21 @@ impl Conn {
                 // single ring, so count N retires everything <= N); parks
                 // when nothing is unreported (the FK_EVENT netd leg).
                 // Offset is ignored: a stream, not a file image.
+                WFK_TIMELINES => {
+                    // Multi-queue F3: the per-timeline dense completion
+                    // counts (timeline 0 = the ctx-global lane). Its own
+                    // file rather than ctl rows: the ctl's client-critical
+                    // prefix is a guarded 255-byte budget (F11) with no room
+                    // for four more parsed rows. The park primitive stays
+                    // the ctx fence file below; this is the counter the
+                    // woken parker re-reads.
+                    let c = comp.wctx(id, self.conn_id).unwrap();
+                    let mut s = String::new();
+                    for (t, n) in c.timeline_signaled.iter().enumerate() {
+                        let _ = core::fmt::write(&mut s, format_args!("timeline {} {}\n", t, n));
+                    }
+                    self.read_str(tag, &s, a.offset, cap)
+                }
                 WFK_FENCE => {
                     if cap < FENCE_REC_MAX {
                         // Too small for a whole record: answer empty rather
@@ -5586,6 +14171,9 @@ impl Conn {
                     self.defer = true;
                     Ok(0)
                 }
+                WFK_RING_NEW => p9::build_rread(&mut self.out_buf, tag, &[]),
+                WFK_MEM_NEW => p9::build_rread(&mut self.out_buf, tag, &[]),
+                WFK_IMG_NEW => p9::build_rread(&mut self.out_buf, tag, &[]),
                 _ => self.err(tag, p9::E_INVAL),
             };
         }
@@ -5614,6 +14202,131 @@ impl Conn {
                             bo.res_id, bo.size, bo.w, bo.h
                         ),
                     );
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                _ => self.err(tag, p9::E_INVAL),
+            };
+        }
+        if is_wring(f.path) {
+            let id = warp_id(f.path);
+            if comp.wring(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WFK_RING_INFO => {
+                    let (res, ridx, size) = comp
+                        .wring(id, self.conn_id)
+                        .map(|(_, r)| (r.res_id, r.ridx, r.size))
+                        .unwrap();
+                    let mut s = String::new();
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!(
+                            "res {} ridx {} bytes {} hdr {}\n",
+                            res, ridx, size, WARP_RING_HDR
+                        ),
+                    );
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                // The ring's completion count (coalescing, like ctx/<id>/fence);
+                // parks when nothing is unreported. The guest may instead poll
+                // the blob seq slot (zero-syscall); both carry the same value.
+                WFK_RING_FENCE => {
+                    if cap < FENCE_REC_MAX {
+                        return p9::build_rread(&mut self.out_buf, tag, &[]);
+                    }
+                    let (sig, rep) = comp
+                        .wring(id, self.conn_id)
+                        .map(|(_, r)| (r.completed_seq, r.reported_seq))
+                        .unwrap();
+                    if sig > rep {
+                        comp.wring_report(id, self.conn_id, sig);
+                        let mut s = String::new();
+                        let _ = core::fmt::write(&mut s, format_args!("{}\n", sig));
+                        return p9::build_rread(&mut self.out_buf, tag, s.as_bytes());
+                    }
+                    if self.pending_ring_fences.len() >= MAX_FIDS {
+                        return self.err(tag, p9::E_PROTO);
+                    }
+                    self.pending_ring_fences.push(PendingRingFence {
+                        fid: a.fid,
+                        ring_pub: id,
+                        tag,
+                    });
+                    self.defer = true;
+                    Ok(0)
+                }
+                _ => self.err(tag, p9::E_INVAL),
+            };
+        }
+        if is_wmem(f.path) {
+            let id = warp_id(f.path);
+            let (res, size) = match comp.wmem(id, self.conn_id) {
+                Some((_, m)) => (m.host3d.res_id, m.host3d.size),
+                None => return self.err(tag, p9::E_NOENT),
+            };
+            return match warp_fk(f.path) {
+                WMFK_INFO => {
+                    // `res` is the device-global blob resource id; `size` the
+                    // page-rounded backing (the client sized the request).
+                    let mut s = String::new();
+                    let _ = core::fmt::write(&mut s, format_args!("res {} size {}\n", res, size));
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                _ => self.err(tag, p9::E_INVAL),
+            };
+        }
+        if is_wimg(f.path) {
+            let id = warp_id(f.path);
+            // `bound` is DERIVED from `Comp.bound_res`, the authoritative
+            // record of what the device scans out -- never from a per-object
+            // copy. W-3c-1 audit F4: the field this replaced was written in
+            // exactly one place and cleared in none, so every route by which
+            // the display moves away (reconcile's Off arm, the composed
+            // rebind, a surface retire) left it latched stale-TRUE. A fact
+            // with one writer and no clearer is not a cache; it is a lie with
+            // a delay.
+            let info = match comp.wimg(id, self.conn_id) {
+                Some((_, i)) => (i.res_id, i.w, i.h, i.format, i.stride, i.size, i.blob_id),
+                None => return self.err(tag, p9::E_NOENT),
+            };
+            let bound_now = info.0 != 0 && comp.bound_res == info.0;
+            return match warp_fk(f.path) {
+                WIFK_INFO => {
+                    // The ACCEPTED shape -- the negotiation's record
+                    // (WARP-WSI-DESIGN 5.2). A client reads this back to
+                    // confirm what the compositor agreed to display, which is
+                    // the whole point of declaring at registration: the answer
+                    // is a fact from then on, not a per-frame maybe. `bound`
+                    // reports whether the display currently names it.
+                    // `mem` echoes the venus allocation this blob was bound
+                    // to -- the client's way to confirm the compositor bound
+                    // the allocation it MEANT, rather than inferring it from
+                    // the registration having succeeded.
+                    let (res, w, h, format, stride, size, mem) = info;
+                    let bound = bound_now;
+                    let mut s = String::new();
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!(
+                            "res {} w {} h {} format {} stride {} size {} bound {} mem {}\n",
+                            res,
+                            w,
+                            h,
+                            format,
+                            stride,
+                            size,
+                            u32::from(bound),
+                            mem
+                        ),
+                    );
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                WIFK_CTL => {
+                    // The netd clone idiom, as `bo`/`ctl` does: reading the
+                    // ctl names the object.
+                    let mut s = String::new();
+                    let _ = core::fmt::write(&mut s, format_args!("{}\n", id));
                     self.read_str(tag, &s, a.offset, cap)
                 }
                 _ => self.err(tag, p9::E_INVAL),
@@ -5664,10 +14377,7 @@ impl Conn {
             FK_GEOMETRY => {
                 let surf = comp.surf(n).unwrap();
                 let mut s = String::new();
-                let _ = core::fmt::write(
-                    &mut s,
-                    format_args!("0 0 {} {} 0 0\n", surf.w, surf.h),
-                );
+                let _ = core::fmt::write(&mut s, format_args!("0 0 {} {} 0 0\n", surf.w, surf.h));
                 self.read_str(tag, &s, a.offset, cap)
             }
             FK_EVENT => {
@@ -5726,6 +14436,41 @@ impl Conn {
         p9::build_rread(&mut self.out_buf, tag, &slice)
     }
 
+    /// read_str for the REGENERATING text files (see `text_snaps`): the
+    /// offset-0 read pins the freshly-composed text to the fid; every
+    /// later offset serves the pinned generation. A mid-file first read
+    /// (no pin) serves the fresh compose -- 9P readers start at 0, so
+    /// that arm is reachable only by a client that seeked, which gets
+    /// exactly the old per-read-compose behavior.
+    fn read_text_snapped(
+        &mut self,
+        fid: u32,
+        path: u64,
+        tag: u16,
+        s: String,
+        offset: u64,
+        cap: usize,
+    ) -> Result<usize, ()> {
+        if offset == 0 {
+            self.text_snaps.retain(|t| !(t.0 == fid && t.1 == path));
+            self.text_snaps.push((fid, path, s.into_bytes()));
+        } else if !self.text_snaps.iter().any(|t| t.0 == fid && t.1 == path) {
+            return self.read_str(tag, &s, offset, cap);
+        }
+        let slice = {
+            let b = &self
+                .text_snaps
+                .iter()
+                .find(|t| t.0 == fid && t.1 == path)
+                .unwrap()
+                .2;
+            let off = (offset as usize).min(b.len());
+            let take = (b.len() - off).min(cap);
+            b[off..off + take].to_vec()
+        };
+        p9::build_rread(&mut self.out_buf, tag, &slice)
+    }
+
     /// Pane file reads (G-6). A stale id (the pane closed) is E_NOENT --
     /// ids are never reused, so there is nothing it could alias.
     fn pane_read(
@@ -5776,10 +14521,37 @@ impl Conn {
             },
             PFK_GEOMETRY => {
                 let c = comp.layout.get(slot).unwrap().content;
-                let _ = core::fmt::write(
-                    &mut s,
-                    format_args!("{} {} {} {}\n", c.x, c.y, c.w, c.h),
-                );
+                let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", c.x, c.y, c.w, c.h));
+            }
+            PFK_TAGBAR => {
+                let t = comp.layout.get(slot).unwrap().tagbar;
+                let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", t.x, t.y, t.w, t.h));
+            }
+            PFK_STATUS => {
+                // The RECORDED status (resting|ok|err), not the display key:
+                // whether it shows is the compositor's focus fact.
+                let st = comp.layout.get(slot).unwrap().status;
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", st.name()));
+            }
+            PFK_OWNER => {
+                // H-4b-3: whose tile this is, as the kernel PRINCIPAL the
+                // authority checks key on (HALCYON.md 13.6): a hosted leaf's
+                // surface owner, an empty leaf's recorded owner (0 = the
+                // environment's). A container owns nothing (E_NOENT, like
+                // `claim`). Ungated like every pane read -- a principal id is
+                // no secret (`ps` prints it) -- and it is what lets `layout
+                // save` tell the session's tiles from the console's, so a
+                // session restore never tries to respawn the environment.
+                let owner = match comp.layout.get(slot).map(|p| &p.kind) {
+                    Some(pane::Kind::Leaf { surface: Some(n) }) => {
+                        comp.surf(*n).map_or(0, |sf| sf.owner_principal)
+                    }
+                    Some(pane::Kind::Leaf { surface: None }) => {
+                        comp.layout.pane_owner_principal(slot)
+                    }
+                    _ => return self.err(tag, p9::E_NOENT),
+                };
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", owner));
             }
             _ => return self.err(tag, p9::E_INVAL),
         }
@@ -5793,11 +14565,20 @@ impl Conn {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
         let id = pane_id(path);
+        let actor = self.actor();
         match pane_fk(path) {
-            PFK_CTL => comp.pane_cmd(id, s),
+            PFK_CTL => {
+                self.layout_verb_budget()?;
+                comp.pane_cmd(actor, id, s)
+            }
             PFK_MODE => {
                 let mode = Mode::parse(s).ok_or(p9::E_INVAL)?;
                 let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+                let target = comp.layout.mode_target(slot).ok_or(p9::E_INVAL)?;
+                if !comp.actor_owns_subtree(actor, target) {
+                    return Err(p9::E_PERM);
+                }
+                self.layout_verb_budget()?;
                 if !comp.layout.set_mode(slot, mode) {
                     return Err(p9::E_INVAL);
                 }
@@ -5806,11 +14587,19 @@ impl Conn {
             }
             PFK_TAG => {
                 let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+                // The name is a RENDERED identity claim (the tag bar): only
+                // the tile's host or the environment may make it.
+                if !comp.actor_names(actor, slot) {
+                    return Err(p9::E_PERM);
+                }
                 comp.layout.get_mut(slot).unwrap().tag = String::from(s);
                 Ok(())
             }
             PFK_ROLE => {
                 let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+                if !comp.actor_names(actor, slot) {
+                    return Err(p9::E_PERM);
+                }
                 let mut it = s.split_ascii_whitespace();
                 let role = Role::parse(it.next().ok_or(p9::E_INVAL)?).ok_or(p9::E_INVAL)?;
                 let focusable = match it.next() {
@@ -5852,9 +14641,11 @@ impl Conn {
             };
         }
         if f.path == P_LAYOUT {
+            let actor = self.actor();
             return match core::str::from_utf8(a.data)
                 .map_err(|_| p9::E_INVAL)
-                .and_then(|s| comp.layout_cmd(s))
+                .and_then(|s| self.layout_verb_budget().map(|_| s))
+                .and_then(|s| comp.layout_cmd(actor, s))
             {
                 Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                 Err(e) => self.err(tag, e),
@@ -5877,6 +14668,55 @@ impl Conn {
         #[cfg(feature = "test-mode")]
         if f.path == W_CTL {
             let s = core::str::from_utf8(a.data).unwrap_or("").trim();
+            if let Some(rest) = s.strip_prefix("ring-inject ") {
+                // Arm `count` mid-drain head advances (default 1) on the caller's
+                // ring <ridx> -- one consumed per kick re-scan pass. count==1 is
+                // the I-9 re-scan witness (WARP-V3-DESIGN 3.5): a concurrent guest
+                // advance in the idle-publish window the single-threaded server
+                // cannot produce naturally. count>WARP_RING_MAX_DRAIN_PER_KICK
+                // drives the audit round-2 F1 regression (the drain-cap bound).
+                // Caller-ctx-bounded (#178): acts only on the caller's own ring.
+                // wctx_of_conn is unambiguous (audit F7): one ctx per conn.
+                let ctx_pub = match comp.wctx_of_conn(self.conn_id) {
+                    Some(v) => v,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                let mut it = rest.split_ascii_whitespace();
+                let ridx: u32 = match it.next().and_then(|t| t.parse().ok()) {
+                    Some(v) => v,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                let count: u32 = it.next().and_then(|t| t.parse().ok()).unwrap_or(1);
+                return match comp.wring_arm_inject(ctx_pub, self.conn_id, ridx, count) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                };
+            }
+            if let Some(rest) = s.strip_prefix("ring-noscan ") {
+                // The BUGGY ARM: disable THIS ring's kick re-scan so
+                // `ring-inject`'s advance is LOST -- proves the re-scan
+                // discriminates (M-PIN). Per-RING + caller-ctx-bounded (audit
+                // F3 / #178): the old global Comp flag was an unprivileged
+                // box-wide I-9 kill switch. `ring-noscan <ridx> on|off`.
+                let ctx_pub = match comp.wctx_of_conn(self.conn_id) {
+                    Some(v) => v,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                let mut it = rest.split_ascii_whitespace();
+                let ridx: u32 = match it.next().and_then(|t| t.parse().ok()) {
+                    Some(v) => v,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                let on = match it.next() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return self.err(tag, p9::E_INVAL),
+                };
+                return match comp.wring_set_noscan(ctx_pub, self.conn_id, ridx, on) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                };
+            }
             if s == "warp-hold on" || s == "warp-hold off" || s == "warp-abandon" {
                 // #178: both levers act ONLY on the caller's own ctx. They
                 // ship (`default = ["test-mode"]`) and this ctl is mode
@@ -5941,11 +14781,46 @@ impl Conn {
                     if !comp.gpu.virgl {
                         return self.err(tag, p9::E_OPNOTSUPP);
                     }
-                    match comp.warp_submit(id, self.conn_id, a.data) {
+                    // V-3b-2: a Venus client (armed venus_ctx from minting a host3d
+                    // ring) submits its SUBMIT_CMD stream on venus_ctx; a virgl
+                    // client on dev_ctx. Per-client-unambiguous (0.12).
+                    let res = if comp.wctx_has_venus(id, self.conn_id) {
+                        comp.warp_venus_submit(id, self.conn_id, a.data, 0)
+                    } else {
+                        comp.warp_submit(id, self.conn_id, a.data)
+                    };
+                    match res {
                         Ok(_fence) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                         Err(e) => self.err(tag, e),
                     }
                 }
+                fk if fk > WFK_SUBMIT_T_BASE && fk < WFK_SUBMIT_T_BASE + WARP_TIMELINES as u64 => {
+                    // Multi-queue F3: submit<t> -- the venus timeline rides the
+                    // FILE NAME (the payload is opaque bytes; see the WFK
+                    // constants). Venus-only: a virgl stream has no timeline,
+                    // so a GL client writing here is refused rather than
+                    // silently mis-fenced on the global lane.
+                    if !comp.gpu.virgl || !comp.wctx_has_venus(id, self.conn_id) {
+                        return self.err(tag, p9::E_OPNOTSUPP);
+                    }
+                    let t = (fk - WFK_SUBMIT_T_BASE) as u8;
+                    match comp.warp_venus_submit(id, self.conn_id, a.data, t) {
+                        Ok(_fence) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                        Err(e) => self.err(tag, e),
+                    }
+                }
+                WFK_RING_NEW => match comp.wring_mint_verb(id, self.conn_id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                WFK_MEM_NEW => match comp.wmem_mint_verb(id, self.conn_id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                WFK_IMG_NEW => match comp.wimg_mint_verb(id, self.conn_id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
                 _ => self.err(tag, p9::E_PERM),
             };
         }
@@ -5956,6 +14831,49 @@ impl Conn {
             }
             return match warp_fk(f.path) {
                 WFK_BO_CTL => match self.wbo_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                _ => self.err(tag, p9::E_PERM),
+            };
+        }
+        if is_wring(f.path) {
+            let id = warp_id(f.path);
+            if comp.wring(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WFK_RING_KICK => match comp.wring_kick(id, self.conn_id) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                WFK_RING_CTL => match self.wring_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                _ => self.err(tag, p9::E_PERM),
+            };
+        }
+        if is_wmem(f.path) {
+            let id = warp_id(f.path);
+            if comp.wmem(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WMFK_CTL => match self.wmem_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                _ => self.err(tag, p9::E_PERM),
+            };
+        }
+        if is_wimg(f.path) {
+            let id = warp_id(f.path);
+            if comp.wimg(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WIFK_CTL => match self.wimg_ctl(comp, id, a.data) {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
                 },
@@ -5974,10 +14892,19 @@ impl Conn {
                 Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                 Err(e) => self.err(tag, e),
             },
-            FK_PRESENT => match self.present(comp, n, a.data) {
-                Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
-                Err(e) => self.err(tag, e),
-            },
+            FK_PRESENT => {
+                // Warp-C C-4: the whole dispatch is timed and charged to
+                // the arm it took (`present` records the arm).
+                let t0 = Instant::now();
+                comp.cost_arm = Cost::PresentOther;
+                let r = self.present(comp, n, a.data);
+                let arm = comp.cost_arm;
+                comp.cost_add(arm, t0);
+                match r {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                }
+            }
             _ => self.err(tag, p9::E_PERM),
         }
     }
@@ -6025,15 +14952,34 @@ impl Conn {
             //
             // Audit F7: refused while this ctx has fenced work outstanding.
             // The probe rides the SYNCHRONOUS `.step` slot on the client's
-            // own ctx, so it queues behind that client's GL work; past
-            // SUBMIT_DEADLINE_MS the engine latches `dead`, which is
-            // terminal for the whole compositor -- the process that IS the
-            // console. A client could reach that with nothing but a ctx and
-            // a deep queue. E_AGAIN (not E_IO) is the honest code: the ctx
-            // may be perfectly healthy, the question is merely unanswerable
-            // right now, and an ERROR on the write is what keeps that
-            // distinct from "asked and healthy" without the client having
-            // to infer it from an unmoved counter.
+            // own ctx; past SUBMIT_DEADLINE_MS the engine latches `dead`,
+            // which is terminal for the whole compositor -- the process that
+            // IS the console. A client could reach that with nothing but a
+            // ctx and a deep queue. E_AGAIN (not E_IO) is the honest code:
+            // the ctx may be perfectly healthy, the question is merely
+            // unanswerable right now, and an ERROR on the write is what
+            // keeps that distinct from "asked and healthy" without the
+            // client having to infer it from an unmoved counter.
+            //
+            // WHAT THIS GATE BOUNDS, exactly (C-0d Fable round F1). It reads
+            // only the CALLER's gauges, so it can only ever bound waits on
+            // the caller's OWN queue. On the BUFFER probe pair that is the
+            // whole exposure: every step is CPU-side on a tiled renderer,
+            // and the one way a job can sit on the probe's resources is the
+            // client copying over them itself (audit F1's measured attack)
+            // -- its own work, which this gate sees. On the TEXTURE fallback
+            // (`probe-texture` on the global ctl) each step is a blit job
+            // behind whatever the DEVICE has queued, client B's frames
+            // included, and no per-ctx gauge can see those: that is why the
+            // buffer pair is minted first and the texture pair only where
+            // it cannot be.
+            //
+            // Warp-C C-6: `fences_in_flight` also counts the COMPOSITOR's
+            // own readback of this ctx's adopted BO while it is in flight,
+            // so a verify during it answers E_AGAIN -- device work IS
+            // outstanding on the ctx's resources (the readback reads them),
+            // the answer is true, and it is the one client-visible change
+            // C-6 makes (GPU-DESIGN 4.5.13; documented in 149-warp.md).
             //
             // ROUND-2 F1: `fences_in_flight` ALONE admitted the
             // maximum-hazard state. `reap_abandoned` takes the fenced slot
@@ -6067,6 +15013,12 @@ impl Conn {
                 if a1 == "off" {
                     let c = comp.wctx_mut(id, self.conn_id).ok_or(p9::E_NOENT)?;
                     let old = c.present_to.take();
+                    if let Some((_, _, PresentSrc::Bo(old_bo))) = old {
+                        // C-2c: consent withdrawn -> the compositor's import
+                        // of the consented BO goes with it (Bo only: an img
+                        // consent imported nothing).
+                        comp.comp_release_bo(id, self.conn_id, old_bo);
+                    }
                     if let Some((sl, _, _)) = old {
                         // Only perturb the surface if it actually names THIS
                         // ctx (Warp-5 F1): present-to's surface lives on
@@ -6077,7 +15029,7 @@ impl Conn {
                         // leave it; its owner's glsrc drives its own switch.
                         if comp.surf(sl).map_or(false, |s| s.gl_src == Some(id)) {
                             if let Some(s) = comp.surf_mut(sl) {
-                                s.res_stale = true;
+                                s.res_stale = [true; WEAVE_SLOTS as usize];
                             }
                             comp.gl_retarget(sl);
                         }
@@ -6085,11 +15037,35 @@ impl Conn {
                     return Ok(());
                 }
                 let sn: usize = a1.parse().map_err(|_| p9::E_INVAL)?;
-                let bo: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
-                if it.next().is_some() {
-                    return Err(p9::E_INVAL);
-                }
-                {
+                // W-3c-2, the generalized arm (WARP-WSI-DESIGN 5.2):
+                // `present-to <surface> <bo>` names a BO by PUB id;
+                // `present-to <surface> img <n>` names a presentable by its
+                // HANDLE, resolved to the PUB id HERE so a freed handle's
+                // later tenant can never inherit the consent (pub ids are
+                // monotonic, never reused -- the same pin the gen gives the
+                // surface half).
+                let a2 = it.next().ok_or(p9::E_INVAL)?;
+                let src = if a2 == "img" {
+                    let handle: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+                    if it.next().is_some() {
+                        return Err(p9::E_INVAL);
+                    }
+                    let c = comp.wctx(id, self.conn_id).ok_or(p9::E_NOENT)?;
+                    let ip = c
+                        .imgs
+                        .get(handle as usize)
+                        .and_then(|o| o.as_ref())
+                        .map(|i| i.pub_id)
+                        .ok_or(p9::E_NOENT)?;
+                    // The per-family "built" predicate (5.1): an img is
+                    // built by registration alone -- it has no dma_fd to
+                    // test, and that absence is I-7, not a gap.
+                    PresentSrc::Img(ip)
+                } else {
+                    let bo: u32 = a2.parse().map_err(|_| p9::E_INVAL)?;
+                    if it.next().is_some() {
+                        return Err(p9::E_INVAL);
+                    }
                     let c = comp.wctx(id, self.conn_id).ok_or(p9::E_NOENT)?;
                     if !c
                         .bos
@@ -6099,13 +15075,33 @@ impl Conn {
                     {
                         return Err(p9::E_NOENT);
                     }
-                }
+                    PresentSrc::Bo(bo)
+                };
                 let gen = match comp.surf(sn) {
                     Some(s) => s.gen,
                     None => return Err(p9::E_NOENT),
                 };
+                let prev = comp
+                    .wctx(id, self.conn_id)
+                    .and_then(|c| c.present_to)
+                    .map(|(_, _, s)| s);
                 if let Some(c) = comp.wctx_mut(id, self.conn_id) {
-                    c.present_to = Some((sn, gen, bo));
+                    c.present_to = Some((sn, gen, src));
+                }
+                // C-2c: the consent IS the grant (4.5.10) -- for the Bo
+                // family the compositor imports the consented BO into its
+                // own context here, witnessed, and releases the one a
+                // replaced consent named. The Img family imports NOTHING
+                // until the W-3d compose arm: there is no compositor-side
+                // representation to witness yet, and attaching one would be
+                // an unread grant.
+                if let Some(PresentSrc::Bo(pb)) = prev {
+                    if src != PresentSrc::Bo(pb) {
+                        comp.comp_release_bo(id, self.conn_id, pb);
+                    }
+                }
+                if let PresentSrc::Bo(bo) = src {
+                    comp.comp_import_bo(id, self.conn_id, bo, sn);
                 }
                 // Re-arm the surface's direct switch only if it names THIS
                 // ctx (Warp-5 F1). If the surface has not yet glsrc'd us the
@@ -6113,7 +15109,21 @@ impl Conn {
                 // retarget when it lands -- so a foreign surface is never
                 // touched by our present-to.
                 if comp.surf(sn).map_or(false, |s| s.gl_src == Some(id)) {
-                    comp.gl_retarget(sn);
+                    // W-3e: an img->img consent change on a surface this ctx
+                    // already direct-feeds is the swapchain FLIP, not an
+                    // adoption change -- the pending soft-Off route would
+                    // re-run the switch (and its say line) at frame rate.
+                    // Every other shape keeps the uniform F16 pending route.
+                    let flip_in_place = comp.scanout == Scanout::Direct(sn)
+                        && matches!(src, PresentSrc::Img(_))
+                        && matches!(prev, Some(PresentSrc::Img(_)));
+                    if !flip_in_place {
+                        comp.gl_retarget(sn);
+                    }
+                    // The img family's present-COMPLETE rides the poke
+                    // itself (a pure-vk client sends no tpresent): complete
+                    // a pending switch, or flip+flush the steady state.
+                    comp.img_poke_complete(sn);
                 }
                 Ok(())
             }
@@ -6171,11 +15181,44 @@ impl Conn {
                     }
                     let cp = ctx_pub.unwrap_or(0);
                     if e == p9::E_INVAL {
-                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_PARSE, "ctl-parse", data.len() as i64, 0, 0, 0, 0, 0);
+                        comp.wbo_diag_once(
+                            cp,
+                            self.conn_id,
+                            Comp::WDIAG_CTL_PARSE,
+                            "ctl-parse",
+                            data.len() as i64,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        );
                     } else if e == p9::E_NOENT {
-                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_NO_RECORD, "ctl-no-record", id as i64, 0, 0, 0, 0, 0);
+                        comp.wbo_diag_once(
+                            cp,
+                            self.conn_id,
+                            Comp::WDIAG_CTL_NO_RECORD,
+                            "ctl-no-record",
+                            id as i64,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        );
                     } else if e == p9::E_OPNOTSUPP {
-                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_NOT_VIRGL, "ctl-not-virgl", 0, 0, 0, 0, 0, 0);
+                        comp.wbo_diag_once(
+                            cp,
+                            self.conn_id,
+                            Comp::WDIAG_CTL_NOT_VIRGL,
+                            "ctl-not-virgl",
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        );
                     }
                 }
                 r
@@ -6189,6 +15232,81 @@ impl Conn {
                     Err(p9::E_NOENT)
                 }
             }
+            _ => Err(p9::E_INVAL),
+        }
+    }
+
+    /// V-3b-3c (F1 full fix): the ring ctl verb. Only `destroy` today -- a
+    /// client-invocable per-ring teardown so the backend can retire ONE ring
+    /// (and free its ridx) short of ctx death. Parsed, not "any write =
+    /// destroy", so an errant write can never silently reclaim a live ring.
+    fn wring_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        match s.split_ascii_whitespace().next() {
+            Some("destroy") => comp.wring_destroy(id, self.conn_id),
+            _ => Err(p9::E_INVAL),
+        }
+    }
+
+    /// V-3b-3c-2: the mem ctl verb. `destroy` only -- a client-invocable
+    /// per-mem teardown (the backend's vkFreeMemory). Parsed, not "any write =
+    /// destroy", so an errant write can never silently reclaim a live blob.
+    fn wmem_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        match s.split_ascii_whitespace().next() {
+            Some("destroy") => comp.wmem_destroy(id, self.conn_id),
+            _ => Err(p9::E_INVAL),
+        }
+    }
+
+    /// W-3c: `img/<n>/ctl` -- `destroy` only. The teardown it reaches is the
+    /// display-safe one (unbind before unref); there is deliberately no verb
+    /// to mutate a registered shape, because the shape IS the negotiation
+    /// (WARP-WSI-DESIGN 4.1) -- a client wanting a different one registers a
+    /// different presentable, which is exactly what a swapchain recreate is.
+    ///
+    /// THE CLIENT-ORDERING CONTRACT, and why `PFree`'s `~venusRef` conjunct
+    /// has no server-side check (W-3c-1 audit F1; the W-3b closed list handed
+    /// this forward). The spec models FOUR holders -- the venus allocation,
+    /// the registration, and the two observer arms -- and forbids the blob's
+    /// unref until all four release. Three of them are ours and are enforced
+    /// here: `regRef` is the slot (taken before any device work), and the two
+    /// observers are `PUnbound`/`PDrained` in `wimg_teardown`. `venusRef` is
+    /// NOT ours to observe: it is the client's own `VkDeviceMemory`, live in
+    /// its address space, invisible to this server. So it is discharged the
+    /// only honest way -- as a CONTRACT the client must keep, stated here the
+    /// way `wmem_mint` states its own:
+    ///
+    ///   **Destroy the registration BEFORE freeing the venus allocation it
+    ///   names.** In wsi terms: `vkDestroySwapchainKHR` retires the images,
+    ///   and each one's `img/<n>/ctl destroy` must precede the `vkFreeMemory`
+    ///   of its backing.
+    ///
+    /// Both orderings are worth stating because they fail differently. Taking
+    /// them in turn:
+    ///
+    /// - **Destroy-then-free (the contract, correct).** The unref drops the
+    ///   BLOB -- the host-side object that BINDS the allocation -- not the
+    ///   allocation itself, which the client still owns and then frees. The
+    ///   spec's `PFree` state is reached with `venusRef` released a moment
+    ///   later, which is the order it models.
+    /// - **Free-then-destroy (the violation).** The client frees the venus
+    ///   allocation while our blob still names it, so the host holds a
+    ///   binding to freed memory. Nothing guest-side can detect this: the
+    ///   `mem_id` is opaque to us, and by the time the destroy arrives the
+    ///   damage is host-side. It is bounded by the same trusted-host posture
+    ///   as every other `blob_id` claim (GPU-DESIGN 9.2) and becomes ours to
+    ///   enforce at the v3d fork.
+    ///
+    /// What this server DOES guarantee, unconditionally and regardless of the
+    /// client's ordering, is the half that is ours: the display never keeps a
+    /// reference across the unref (`wimg_teardown`). A client that breaks the
+    /// contract above damages its own context's host state; it cannot reach
+    /// another client's, and it cannot reach the display.
+    fn wimg_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        match s.split_ascii_whitespace().next() {
+            Some("destroy") => comp.wimg_destroy(id, self.conn_id),
             _ => Err(p9::E_INVAL),
         }
     }
@@ -6223,8 +15341,20 @@ impl Conn {
             .map(|(c, _)| c.pub_id)
             .ok_or(p9::E_NOENT)?;
         if comp.wbo_create(
-            ctx_pub, id, self.conn_id, target, format, bind, w, h, d, array,
-            last_level, samples, flags, size,
+            ctx_pub,
+            id,
+            self.conn_id,
+            target,
+            format,
+            bind,
+            w,
+            h,
+            d,
+            array,
+            last_level,
+            samples,
+            flags,
+            size,
         ) {
             Ok(())
         } else {
@@ -6258,7 +15388,19 @@ impl Conn {
         let stride = arg("stride")? as u32;
         let layer_stride = arg("layer_stride")? as u32;
         comp.warp_transfer(
-            id, self.conn_id, to_host, level, x, y, z, w, h, d, offset, stride, layer_stride,
+            id,
+            self.conn_id,
+            to_host,
+            level,
+            x,
+            y,
+            z,
+            w,
+            h,
+            d,
+            offset,
+            stride,
+            layer_stride,
         )
         .map(|_| ())
     }
@@ -6284,11 +15426,51 @@ impl Conn {
     /// CONSTRUCTION, realizing the scripture's "a new global verb defaults
     /// to GATED" (an allowlist would silently ungate a verb added without
     /// touching the gate line).
+    /// The pane-tree actor this conn is, for this write (per write:
+    /// revocation-correct for the renderer axis, like the global-ctl gate;
+    /// the principal axis is immutable so its cache is sound).
+    fn actor(&self) -> Actor {
+        if self.peer_is_renderer() {
+            Actor::Renderer
+        } else if self.peer_principal == T_PRINCIPAL_SYSTEM
+            || self.peer_principal == T_PRINCIPAL_NONE
+            || self.peer_principal == T_PRINCIPAL_INVALID
+        {
+            // System daemons (aurora, warp-prove, the battery-as-system),
+            // the unauthenticated, and unknown peers stay per-PROCESS:
+            // keyed on stripes, mutually walled, owning only what they
+            // mint. Keeping SYSTEM per-process is deliberate -- the boot
+            // chain must not become one mutually-authoritative session
+            // (HALCYON.md 13.7). Only an ordinary user principal earns
+            // session-wide mutual authority.
+            Actor::Client(self.peer_stripes)
+        } else {
+            Actor::Session(self.peer_principal)
+        }
+    }
+
+    /// This conn's kernel principal (for main's session reap on the last
+    /// conn of a principal). Cached at Conn::new; see the `peer_principal`
+    /// field.
+    pub fn peer_principal(&self) -> u32 {
+        self.peer_principal
+    }
+
+    /// One layout mutation's per-pass budget (see LAYOUT_VERBS_PER_PASS).
+    fn layout_verb_budget(&mut self) -> Result<(), u32> {
+        if self.layout_verbs >= LAYOUT_VERBS_PER_PASS {
+            return Err(p9::E_AGAIN);
+        }
+        self.layout_verbs += 1;
+        Ok(())
+    }
+
     fn is_ungated_ctl(s: &str) -> bool {
         s == "test-mode on"
             || s == "test-mode off"
             || s == "tick"
             || s.starts_with("release")
+            || s.starts_with("probe-screen ")
     }
 
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
@@ -6317,8 +15499,16 @@ impl Conn {
         }
         if let Some(rest) = s.strip_prefix("mode ") {
             let mut it = rest.split_ascii_whitespace();
-            let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-            let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let w: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
+            let h: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
             if it.next().is_some() {
                 return Err(p9::E_INVAL);
             }
@@ -6359,6 +15549,96 @@ impl Conn {
             comp.reconcile();
             return Ok(());
         }
+        // H-3c: the menu verbs (HALCYON.md 13.6 "Menus -- THE GATE"). The
+        // renderer summons ONE ephemeral Role::Menu surface at a display
+        // point; the compositor owns it from there: input is redirected to
+        // it while it is up, and Esc / a click outside it / a chord / the
+        // owner's death all tear it down HERE, without the owner's
+        // cooperation. Authority first (the default-deny gate above), then
+        // syntax (E_INVAL), then the surface must be a menu surface owned by
+        // the CALLER'S PROCESS (E_NOENT if it is no menu, E_PERM if it is
+        // another process's -- the pane tree's ownership key).
+        if let Some(rest) = s.strip_prefix("menu ") {
+            let mut it = rest.split_ascii_whitespace();
+            match it.next() {
+                Some("place") => {
+                    let id: usize = it
+                        .next()
+                        .ok_or(p9::E_INVAL)?
+                        .parse()
+                        .map_err(|_| p9::E_INVAL)?;
+                    let x: u32 = it
+                        .next()
+                        .ok_or(p9::E_INVAL)?
+                        .parse()
+                        .map_err(|_| p9::E_INVAL)?;
+                    let y: u32 = it
+                        .next()
+                        .ok_or(p9::E_INVAL)?
+                        .parse()
+                        .map_err(|_| p9::E_INVAL)?;
+                    if it.next().is_some() {
+                        return Err(p9::E_INVAL);
+                    }
+                    let owner = comp
+                        .surf(id)
+                        .filter(|s| s.is_menu)
+                        .map(|s| s.owner_peer)
+                        .ok_or(p9::E_NOENT)?;
+                    if self.peer_stripes == 0 || owner != self.peer_stripes {
+                        return Err(p9::E_PERM);
+                    }
+                    return comp.menu_place(id, x, y);
+                }
+                Some("dismiss") => {
+                    if it.next().is_some() {
+                        return Err(p9::E_INVAL);
+                    }
+                    let m = comp.menu.ok_or(p9::E_NOENT)?;
+                    let owner = comp.surf(m.n).map(|s| s.owner_peer).unwrap_or(0);
+                    if self.peer_stripes == 0 || owner != self.peer_stripes {
+                        return Err(p9::E_PERM);
+                    }
+                    comp.menu_dismiss("owner");
+                    return Ok(());
+                }
+                _ => return Err(p9::E_INVAL),
+            }
+        }
+        // H-3b-4: the tile status (HALCYON.md 13.6; HALCYON-VISUAL 1.4 /
+        // 5.3 / 5.4). `tag <pane-id> status ok|err|resting` records the
+        // exit of the last command completed in that tile. The renderer is
+        // the one party that knows it (the transcript's exit mark), so the
+        // verb rides the default-deny gate above with the other authority
+        // verbs. The compositor keeps FOCUS as its own fact: a recorded
+        // status is displayed only on the live (focused) tile -- the
+        // status-keyed content hairline + the cast shadow's dark half -- so
+        // a stale or wedged renderer can never leave a key on a tile that
+        // does not hold input. Syntax first (E_INVAL), then the id must
+        // name a live LEAF -- a tile -- else E_NOENT (a container has no
+        // status; the create-bind precedent). Read back via the pane's
+        // `status` file.
+        if let Some(rest) = s.strip_prefix("tag ") {
+            let mut it = rest.split_ascii_whitespace();
+            let id: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
+            if it.next() != Some("status") {
+                return Err(p9::E_INVAL);
+            }
+            let st = Status::parse(it.next().ok_or(p9::E_INVAL)?).ok_or(p9::E_INVAL)?;
+            if it.next().is_some() {
+                return Err(p9::E_INVAL);
+            }
+            let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+            if !comp.layout.is_leaf(slot) {
+                return Err(p9::E_NOENT);
+            }
+            comp.set_tile_status(slot, st);
+            return Ok(());
+        }
         // Section 18.6 determinism mode (G-6c) -- compiled only into
         // dev/test builds (the `test-mode` cargo feature; the #880
         // strip-for-production class). `test-mode on` freezes the FRAME
@@ -6387,6 +15667,30 @@ impl Conn {
                 }
                 comp.frame_tick();
                 return Ok(());
+            }
+            // Warp-C C-3: the composed screen's PIXEL ORACLE -- read one
+            // texel of the screen back and say it. Test-mode only (a
+            // client-triggered sync round trip; #880 strip class), ungated
+            // like the other determinism verbs (the in-guest battery is not
+            // the renderer), rate-limited per tick. Not gated on
+            // `test_mode` being ON: the battery's pixel stages run before it
+            // enters determinism mode.
+            if let Some(rest) = s.strip_prefix("probe-screen ") {
+                let mut it = rest.split_ascii_whitespace();
+                let x: u32 = it
+                    .next()
+                    .ok_or(p9::E_INVAL)?
+                    .parse()
+                    .map_err(|_| p9::E_INVAL)?;
+                let y: u32 = it
+                    .next()
+                    .ok_or(p9::E_INVAL)?
+                    .parse()
+                    .map_err(|_| p9::E_INVAL)?;
+                if it.next().is_some() {
+                    return Err(p9::E_INVAL);
+                }
+                return comp.probe_screen(x, y);
             }
             // #178: the warp poisoned-path levers used to ALSO live here,
             // and #175 called them "unreachable" once they moved to the
@@ -6419,6 +15723,7 @@ impl Conn {
         if s.starts_with("test-mode")
             || s == "tick"
             || s.starts_with("release")
+            || s.starts_with("probe-screen ")
         {
             return Err(p9::E_OPNOTSUPP); // stripped for production (#880)
         }
@@ -6430,12 +15735,88 @@ impl Conn {
         let s = s.trim();
         if let Some(rest) = s.strip_prefix("create ") {
             let mut it = rest.split_ascii_whitespace();
-            let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-            let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-            if it.next().is_some() {
+            let w: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
+            let h: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
+            // H-3b-2: optional `role=<content|chrome>` + `bind=<pane-id>`
+            // (HALCYON.md 13.6 -- a ctl TEXT extension, not a wire break).
+            // Syntax is judged before authority, so a malformed line is
+            // E_INVAL for every peer; a well-formed `role=chrome` is then
+            // RENDERER-GATED (E_PERM): an ungated chrome role would let any
+            // client overlay fake chrome on another client's pane -- the
+            // cfg-3 default-deny, the same class as the gated global verbs.
+            let mut role = Role::Content;
+            let mut bind: Option<u32> = None;
+            let mut claim: Option<u128> = None;
+            for tok in it {
+                if let Some(r) = tok.strip_prefix("role=") {
+                    role = match Role::parse(r) {
+                        Some(Role::Content) => Role::Content,
+                        Some(Role::Chrome) => Role::Chrome,
+                        Some(Role::Menu) => Role::Menu,
+                        Some(Role::Status) => Role::Status,
+                        _ => return Err(p9::E_INVAL), // pin-target is a pane role
+                    };
+                } else if let Some(b) = tok.strip_prefix("bind=") {
+                    bind = Some(b.parse().map_err(|_| p9::E_INVAL)?);
+                } else if let Some(c) = tok.strip_prefix("claim=") {
+                    // H-4b: the one-shot placement token `pane/<id>/claim`
+                    // minted -- exactly 32 hex digits (a 128-bit token as
+                    // `{:032x}`), so a signed/short/garbage form is E_INVAL.
+                    if c.len() != 32 || !c.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(p9::E_INVAL);
+                    }
+                    claim = Some(u128::from_str_radix(c, 16).map_err(|_| p9::E_INVAL)?);
+                } else {
+                    return Err(p9::E_INVAL);
+                }
+            }
+            // H-4b: a claim steers a HOSTED (content) surface only -- chrome,
+            // menu and status are never hosted in a leaf, so `claim=` beside
+            // any other role is a malformed line: E_INVAL for every peer,
+            // judged BEFORE the renderer gate below (syntax before
+            // authority); past here the Host type cannot carry one.
+            if claim.is_some() && !matches!(role, Role::Content) {
                 return Err(p9::E_INVAL);
             }
-            return comp.create(n, w, h);
+            let host = match (role, bind) {
+                (Role::Content, None) => Host::Content { claim },
+                (Role::Chrome, Some(pid)) => {
+                    if !self.peer_is_renderer() {
+                        return Err(p9::E_PERM);
+                    }
+                    Host::Chrome { bind: pid }
+                }
+                // H-3d: the status bar takes no bind (its bind is the
+                // display); renderer-gated like every chrome -- an ungated
+                // status role would let any client carve the display and
+                // own the one bar that speaks for the system.
+                (Role::Status, None) => {
+                    if !self.peer_is_renderer() {
+                        return Err(p9::E_PERM);
+                    }
+                    Host::Status
+                }
+                // H-3c: a menu takes no bind (the compositor places it at
+                // `menu place`); renderer-gated like chrome -- an ungated
+                // menu role would let any client float a surface over
+                // another client's pane and take its input.
+                (Role::Menu, None) => {
+                    if !self.peer_is_renderer() {
+                        return Err(p9::E_PERM);
+                    }
+                    Host::Menu
+                }
+                _ => return Err(p9::E_INVAL), // chrome needs a bind; content, menu + status take none
+            };
+            return comp.create(n, w, h, host);
         }
         if s == "destroy" {
             comp.retire(n);
@@ -6452,10 +15833,21 @@ impl Conn {
             // CONFIGURE offer; a successful Rwrite IS the generation
             // fence (see resize_ack).
             let mut it = rest.split_ascii_whitespace();
-            let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-            let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-            let serial: u16 =
-                it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let w: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
+            let h: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
+            let serial: u16 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
             if it.next().is_some() {
                 return Err(p9::E_INVAL);
             }
@@ -6477,7 +15869,7 @@ impl Conn {
                     surf.gl_src = None;
                     // The weave never saw the GL frames; the 2D machinery
                     // heals from stale on its next switch.
-                    surf.res_stale = true;
+                    surf.res_stale = [true; WEAVE_SLOTS as usize];
                 }
                 comp.gl_retarget(n);
                 return Ok(());
@@ -6546,9 +15938,12 @@ impl Conn {
             return Err(p9::E_INVAL);
         }
 
-        let (w, h, slot_stride, res, state) = {
+        // No `slot_stride` here since C-2d-b: the slot IS the resource, so no
+        // transfer on this path needs a slot base any more. The composed arm
+        // still needs one and reads it off the surface itself.
+        let (w, h, res_ids, state) = {
             let s = comp.surf(n).ok_or(p9::E_BADF)?;
-            (s.w, s.h, s.slot_stride, s.resource_id, s.state)
+            (s.w, s.h, s.res_ids, s.state)
         };
         if state == SurfState::Minted {
             return Err(p9::E_INVAL); // no weave yet
@@ -6563,7 +15958,11 @@ impl Conn {
             rects.push((0, 0, w, h));
         } else {
             for i in 0..rect_count as usize {
-                let o = if i == 0 { 16 } else { TPRESENT_LEN + (i - 1) * TRECT_LEN };
+                let o = if i == 0 {
+                    16
+                } else {
+                    TPRESENT_LEN + (i - 1) * TRECT_LEN
+                };
                 rects.push((word(o), word(o + 4), word(o + 8), word(o + 12)));
             }
         }
@@ -6582,6 +15981,21 @@ impl Conn {
         // so it cannot hold the clock awake; hidden-surface presents are
         // filtered inside (audit F1).
         comp.note_present(n);
+        if let Some(s) = comp.surf_mut(n) {
+            s.shown_slot = Some(slot);
+            // Test builds: a menu present's slot + whether it can compose
+            // (the lever's black-menu hunt needed exactly this line).
+            #[cfg(feature = "test-mode")]
+            if s.is_menu {
+                let vis = comp.compose_visible(n);
+                say!(
+                    "tapestryd: menu {} present slot {} visible {}",
+                    n,
+                    slot,
+                    vis
+                );
+            }
+        }
 
         // The #56 present-style latch: a present whose damage does not
         // cover the full surface marks the client an ACCUMULATOR --
@@ -6614,27 +16028,60 @@ impl Conn {
             // is forced TRUE -- the 2D machinery heals from it whenever
             // the adoption later ends.
             if let Some(g) = comp.gl_adoption(n) {
-                say!("tapestryd: scanout direct {} GL res {} ({}x{})", n, g.res_id, w, h);
-                if comp.gpu.set_scanout(g.res_id, w, h).is_ok() {
-                    comp.bound_res = g.res_id;
-                    let _ = comp.gpu.flush(g.res_id, 0, 0, w, h);
+                // The family rides the say line; the GL form is
+                // byte-identical to Warp-4's, so every consumer of
+                // `scanout direct N GL res R` still matches (a prefix
+                // change is a capture change -- the W-3c-1 round-3 F1
+                // lesson, third recurrence).
+                let fam = match g.kind {
+                    AdoptSrc::Bo => "GL",
+                    AdoptSrc::Img { .. } => "img",
+                };
+                if comp.direct_bind_adopted(&g, w, h) {
+                    // Verdict-gated (round-4 F4): this line is the gate's
+                    // bind WITNESS, so it reports the EVENT -- SET_SCANOUT's
+                    // response consults the renderer, and a refusal used to
+                    // print it anyway (an attempt-report sold as an
+                    // event-report).
+                    say!(
+                        "tapestryd: scanout direct {} {} res {} ({}x{})",
+                        n,
+                        fam,
+                        g.res_id,
+                        w,
+                        h
+                    );
                     comp.scanout = Scanout::Direct(n);
                     comp.pending_direct = None;
+                    comp.pending_bind_refused_said = false;
+                } else if !comp.pending_bind_refused_said {
+                    // Once per pending episode (the C-0d F5 storm rule): the
+                    // retry runs at present rate on a refusing device.
+                    comp.pending_bind_refused_said = true;
+                    say!(
+                        "tapestryd: scanout direct {} {} res {} ({}x{}) bind REFUSED -- pending retried at each present",
+                        n, fam, g.res_id, w, h
+                    );
                 }
                 if let Some(s) = comp.surf_mut(n) {
-                    s.res_stale = true;
+                    s.res_stale = [true; WEAVE_SLOTS as usize];
                 }
             } else {
                 // The deferred direct switch (F16: SET_SCANOUT only at a
                 // present-COMPLETE). A stale client resource (composed-era
                 // presents never transferred to it) expands this transfer
                 // to the full surface first.
-                let stale = comp.surf(n).map_or(false, |s| s.res_stale);
-                let xfer: Vec<(u32, u32, u32, u32)> =
-                    if stale { alloc::vec![(0, 0, w, h)] } else { rects.clone() };
+                let stale = comp.surf(n).map_or(false, |s| s.res_stale[slot as usize]);
+                let xfer: Vec<(u32, u32, u32, u32)> = if stale {
+                    alloc::vec![(0, 0, w, h)]
+                } else {
+                    rects.clone()
+                };
+                // C-2d-b: the slot IS the resource now, so the transfer
+                // offset loses its slot base and carries only the rect origin.
+                let res = res_ids[slot as usize];
                 for &(tx, ty, tw, th) in &xfer {
-                    let offset = (slot as u64) * slot_stride
-                        + ((ty as u64) * (w as u64) + tx as u64) * 4;
+                    let offset = ((ty as u64) * (w as u64) + tx as u64) * 4;
                     if comp.gpu.transfer(res, offset, tx, ty, tw, th).is_err() {
                         return Err(E_IO);
                     }
@@ -6642,8 +16089,20 @@ impl Conn {
                         return Err(E_IO);
                     }
                 }
-                say!("tapestryd: scanout direct {} ({}x{})", n, w, h);
                 if comp.gpu.set_scanout(res, w, h).is_ok() {
+                    // Verdict-gated (round-7 F3 -- the round-4 F4 shape at
+                    // its THIRD site; the img arms were fixed, this one
+                    // still attempt-reported): the line is the console
+                    // restore/retake WITNESS for three gated captures
+                    // (vkq-venus / glq-virgl / warp-img), so it reports the
+                    // EVENT, byte-identical on success.
+                    say!(
+                        "tapestryd: scanout direct {} slot {} ({}x{})",
+                        n,
+                        slot,
+                        w,
+                        h
+                    );
                     // Post-bind full flush (#57): the per-rect flushes
                     // above targeted a not-yet-scanned-out resource
                     // (dropped by spec), and cocoa's same-size surface
@@ -6654,9 +16113,22 @@ impl Conn {
                     comp.bound_res = res;
                     comp.scanout = Scanout::Direct(n);
                     comp.pending_direct = None;
+                    comp.pending_bind_refused_said = false;
                     if let Some(s) = comp.surf_mut(n) {
-                        s.res_stale = false;
+                        // Only the slot just transferred is clean; the others
+                        // still hold whatever the composed era left them.
+                        s.res_stale[slot as usize] = false;
                     }
+                } else if !comp.pending_bind_refused_said {
+                    // Once per pending episode (the C-0d F5 storm rule --
+                    // absent here until round-7 F3: a refusing device drew
+                    // one false success line PER PRESENT, and silence on
+                    // the refusal itself).
+                    comp.pending_bind_refused_said = true;
+                    say!(
+                        "tapestryd: scanout direct {} slot {} ({}x{}) bind REFUSED -- pending retried at each present",
+                        n, slot, w, h
+                    );
                 }
             }
         } else if comp.scanout == Scanout::Direct(n) {
@@ -6674,22 +16146,34 @@ impl Conn {
                 if hold {
                     return Err(p9::E_OPNOTSUPP);
                 }
+                // The img family shares this arm verbatim: same flush-only
+                // cost shape, so it rides the same census row rather than
+                // hollowing the battery's arm-name table with a twin.
+                comp.cost_arm = Cost::PresentDirectGl;
                 if comp.bound_res != g.res_id {
                     // Defensive (mode-machine-unreachable: every adoption
                     // change routes through the pending switch): rebind
                     // rather than flush a non-scanned-out resource, which
-                    // the spec drops silently.
-                    say!("tapestryd: GL direct rebind {} -> {}", comp.bound_res, g.res_id);
-                    if comp.gpu.set_scanout(g.res_id, w, h).is_err() {
+                    // the spec drops silently. Family-dispatched (W-3c-2):
+                    // an img rebind must be SET_SCANOUT_BLOB.
+                    say!(
+                        "tapestryd: direct rebind {} -> {}",
+                        comp.bound_res,
+                        g.res_id
+                    );
+                    let t0 = Instant::now();
+                    if !comp.direct_bind_adopted(&g, w, h) {
                         return Err(E_IO);
                     }
-                    comp.bound_res = g.res_id;
+                    comp.cost_add(Cost::Scanout, t0);
                 }
+                let t0 = Instant::now();
                 if comp.gpu.flush(g.res_id, 0, 0, w, h).is_err() {
                     return Err(E_IO);
                 }
+                comp.cost_add(Cost::FlushDirect, t0);
                 if let Some(s) = comp.surf_mut(n) {
-                    s.res_stale = true;
+                    s.res_stale = [true; WEAVE_SLOTS as usize];
                 }
                 if !hold {
                     comp.release_held(n);
@@ -6707,37 +16191,74 @@ impl Conn {
                         s.state = SurfState::Live;
                     }
                 }
-                if let Some((oldw, old_res)) =
-                    comp.surf_mut(n).and_then(|s| s.old_weave.take())
-                {
-                    comp.release_gen(&oldw, old_res);
-                }
+                comp.release_displaced_gen(n);
                 return Ok(());
             }
             // The stage-0 direct path, byte-identical for the single-rect
             // form: damage transfer + flush on the client's own
             // scanned-out resource (the zero-copy fullscreen case). A
             // held present transfers but defers every flush to release.
+            // C-2d-b: bind the PRESENTED slot's resource. A client rotates
+            // slots every present, so steady-state Direct now rebinds per
+            // frame -- a KMS page flip with a per-buffer framebuffer, which is
+            // what every display stack does. The offset loses its slot base.
+            let res = res_ids[slot as usize];
+            comp.cost_arm = Cost::PresentDirect2d;
+            if comp.bound_res != res {
+                let t0 = Instant::now();
+                if comp.gpu.set_scanout(res, w, h).is_err() {
+                    return Err(E_IO);
+                }
+                comp.bound_res = res;
+                // The #57 post-bind full flush: a same-size surface REPLACE
+                // renders nothing under the cocoa frontend, so a per-rect
+                // flush after a rebind would show the previous slot's frame.
+                if comp.gpu.flush(res, 0, 0, w, h).is_err() {
+                    return Err(E_IO);
+                }
+                comp.cost_add(Cost::Scanout, t0);
+            }
             let mut acc: Option<Rect> = None;
+            let (mut xfer_ns, mut flush_ns) = (0u64, 0u64);
             for &(x, y, pw, ph) in &rects {
-                let offset =
-                    (slot as u64) * slot_stride + ((y as u64) * (w as u64) + x as u64) * 4;
+                let offset = ((y as u64) * (w as u64) + x as u64) * 4;
+                let t0 = Instant::now();
                 if comp.gpu.transfer(res, offset, x, y, pw, ph).is_err() {
                     return Err(E_IO);
                 }
+                xfer_ns += t0.elapsed().as_nanos() as u64;
                 if hold {
                     acc = Some(rect_union(
                         acc.unwrap_or(Rect::ZERO),
                         Rect { x, y, w: pw, h: ph },
                     ));
-                } else if comp.gpu.flush(res, x, y, pw, ph).is_err() {
-                    return Err(E_IO);
+                } else {
+                    let t1 = Instant::now();
+                    if comp.gpu.flush(res, x, y, pw, ph).is_err() {
+                        return Err(E_IO);
+                    }
+                    flush_ns += t1.elapsed().as_nanos() as u64;
                 }
             }
+            comp.cost_add_ns(Cost::Xfer, xfer_ns);
+            if !hold {
+                comp.cost_add_ns(Cost::FlushDirect, flush_ns);
+            }
             if let Some(r) = acc {
+                // Merge into THIS SLOT's entry (C-2d-b). Other slots' pending
+                // regions are untouched: they sit on different resources and
+                // are owed their own flush at release.
                 let held = match comp.surf(n).and_then(|s| s.held) {
-                    Some(Held::Direct(prev)) => Held::Direct(rect_union(prev, r)),
-                    _ => Held::Direct(r), // a stale Composed hold is superseded
+                    Some(Held::Direct(mut prev)) => {
+                        prev[slot as usize] = rect_union(prev[slot as usize], r);
+                        Held::Direct(prev)
+                    }
+                    // A stale Composed hold is superseded (unchanged).
+                    _ => {
+                        let mut fresh = [Rect::ZERO; WEAVE_SLOTS as usize];
+                        fresh[slot as usize] = r;
+                        Held::Direct(fresh)
+                    }
                 };
                 if let Some(s) = comp.surf_mut(n) {
                     s.held = Some(held);
@@ -6749,29 +16270,101 @@ impl Conn {
                 comp.release_held(n);
             }
         } else if comp.scanout == Scanout::Composed {
-            // Warp-4 composed GL (the ladder's readback fallback): pull
-            // the adopted frame host->guest into the BO's own backing --
-            // synchronously, so the present stays one dispatch (the I-40
-            // premise) -- then compose those pages like any weave.
-            // Full-frame always: GL damage is whole-frame by nature, and
-            // the transfer cost dwarfs any rect bookkeeping.
-            if let Some(g) = comp.gl_adoption(n) {
+            let scr = comp.screen.as_ref().map(|s| (s.res, s.is3d));
+            // Warp-4 composed GL. Warp-C C-3 (GPU-DESIGN 4.5.11): where the
+            // BO is imported into the compositor's context (C-2c) and the
+            // renderer honours a row-mirroring blit for a GL-native source
+            // (the bring-up probe), the frame is composed by ONE blit BO ->
+            // screen inside COMPOSITOR_CTX -- no guest pixel traffic at all.
+            // Otherwise the ladder's readback fallback: pull the adopted
+            // frame host->guest into the BO's own backing -- synchronously,
+            // so the present stays one dispatch (the I-40 premise) -- then
+            // compose those pages like any weave. Full-frame always: GL
+            // damage is whole-frame by nature.
+            //
+            // W-3c-2: BOTH arms are Bo-only. An Img adoption has no
+            // compositor import (no blit source) and no guest backing for
+            // the readback to DMA into (`va == 0` -- I-7), so a composed-
+            // mode surface whose consent names a presentable falls through
+            // to the software path below: the pane shows the surface's own
+            // 2D weave, LOUDLY once per ctx, until the W-3d compose arm
+            // (the blit-import path) lands. Silently composing nothing is
+            // not a real answer; neither is DMA into va 0.
+            if let Some(cp) = comp
+                .gl_adoption(n)
+                .and_then(|g| matches!(g.kind, AdoptSrc::Img { .. }).then_some(g.ctx_pub))
+            {
+                comp.note_img_composed_deferred(cp);
+            }
+            if let Some(g) = comp
+                .gl_adoption(n)
+                .filter(|g| matches!(g.kind, AdoptSrc::Bo))
+            {
                 if hold {
                     return Err(p9::E_OPNOTSUPP); // no GL deferral (see the direct arm)
                 }
-                if comp
-                    .gpu
-                    .transfer_from_3d_sync(g.dev_ctx, g.res_id, g.w, g.h, g.w * 4)
-                    .is_ok()
-                {
-                    if let Some(r) =
-                        comp.blit_composed_pixels(n, 0, 0, 0, w, h, Some(g.va))
-                    {
-                        comp.screen_push(r);
+                let mut done = false;
+                let bo_gpu = comp.gpu_compose_ready()
+                    && g.comp_imported
+                    && g.composable
+                    && g.format != 0
+                    && scr.map_or(false, |(_, is3d)| is3d)
+                    && comp
+                        .comp_conv
+                        .map_or(false, |c| c.bo_u.is_some() || c.bo_s.is_some());
+                if bo_gpu {
+                    match comp.compose_geometry(n, 0, 0, w, h) {
+                        None => done = true, // hidden / unhosted: nothing to compose either way
+                        Some(op) => {
+                            let scr_res = scr.map(|(r, _)| r).unwrap_or(0);
+                            if let Some(b) =
+                                comp.compose_gpu_bo_words(op, g.res_id, g.format, g.h, scr_res)
+                            {
+                                if comp.submit_blits(COMPOSITOR_CTX, &[b]).is_err() {
+                                    return Err(E_IO);
+                                }
+                                if comp.comp_health_tick() {
+                                    comp.screen_flush_rect(op.dst);
+                                    comp.composed_gpu += 1;
+                                    comp.cost_arm = Cost::PresentComposedBo;
+                                    comp.say_gpu_once(n, "BO", g.res_id, scr_res);
+                                    done = true;
+                                }
+                                // A latch here fell through: the readback
+                                // arm below composes THIS present the CPU way.
+                            }
+                        }
                     }
                 }
+                if !done {
+                    // The readback arm (Warp-C C-6, GPU-DESIGN 4.5.13; was
+                    // C-0d Fable round F2 [P1]): runs for every BO the blit
+                    // arm cannot compose (not `composable`, unwitnessed
+                    // import, latched compositor ctx, no 3D screen). It used
+                    // to be a SYNCHRONOUS TRANSFER_FROM_HOST_3D of the frame
+                    // under the client's ctx on the console's dispatch thread
+                    // -- and a readback's response is written only after the
+                    // frame is rendered, i.e. after everything the client has
+                    // queued ahead of it, a length the client chooses; the
+                    // 500 ms sync deadline could latch `dead` on a merely busy
+                    // device. `fence_poisoned` structurally cannot guard it
+                    // (the poison is produced by `reap_abandoned` on the loop
+                    // that was blocked here), and gating the arm on
+                    // `fences_in_flight == 0` was REJECTED: it turns the CPU
+                    // safety net 4.5.9 keeps into a still image for every
+                    // single-buffered client. Now: the readback is ISSUED on
+                    // the fenced lane's reserved slot, tagged compositor-
+                    // owned, the present is answered, and the fence pump
+                    // completes it (`comp_readback_retired`: re-validate the
+                    // surface, compose those pages, push). One in flight;
+                    // latest wins. The dispatch never waits. The PIXELS are
+                    // unchanged -- same transfer, same compose -- only WHEN
+                    // the console waits: never.
+                    comp.cost_arm = Cost::PresentComposedCpu;
+                    comp.rb_request(n, &g);
+                }
                 if let Some(s) = comp.surf_mut(n) {
-                    s.res_stale = true;
+                    s.res_stale = [true; WEAVE_SLOTS as usize];
                 }
                 if !hold {
                     comp.release_held(n);
@@ -6784,32 +16377,130 @@ impl Conn {
                         s.state = SurfState::Live;
                     }
                 }
-                if let Some((oldw, old_res)) =
-                    comp.surf_mut(n).and_then(|s| s.old_weave.take())
-                {
-                    comp.release_gen(&oldw, old_res);
-                }
+                comp.release_displaced_gen(n);
                 return Ok(());
             }
-            // Composed: blit the damage into the screen buffer at the
-            // pane's content rect (a hidden/unhosted surface skips); the
-            // client resource is now stale for a future direct switch.
-            // Held presents blit NOW (weave bytes read only inside this
-            // dispatch) and defer only the screen push.
-            let mut acc: Option<Rect> = None;
-            for &(x, y, pw, ph) in &rects {
-                if let Some(r) = comp.blit_composed_pixels(n, slot, x, y, pw, ph, None) {
-                    if hold {
-                        acc = Some(rect_union(acc.unwrap_or(Rect::ZERO), r));
-                    } else {
-                        comp.screen_push(r);
+            // Composed, a software surface. Warp-C C-3: where the screen is
+            // the 3D one and this generation's slot resources are imported
+            // into the compositor's context (C-2c, `comp_attached`), the
+            // damage is TRANSFERRED into the presented slot's own resource
+            // (the direct arm's transfer, no slot base since C-2d-b) and
+            // composed by BLITs slot -> screen inside COMPOSITOR_CTX; the
+            // screen buffer is never touched. Otherwise -- no compositor ctx,
+            // an unimported generation, a latched context, a hidden surface
+            // -- the CPU way: blit the damage into the screen buffer at the
+            // pane's content rect and push it. Held presents do their pixel
+            // work NOW (weave bytes read only inside this dispatch) and defer
+            // only the device-visible step, per kind.
+            let mut acc_cpu: Option<Rect> = None;
+            let mut acc_gpu: Option<Rect> = None;
+            let mut took_gpu = false;
+            let gpu_path = comp.gpu_compose_ready()
+                && scr.map_or(false, |(_, is3d)| is3d)
+                && comp.surf(n).map_or(false, |s| s.comp_attached)
+                && comp.compose_visible(n);
+            if gpu_path {
+                let scr_res = scr.map(|(r, _)| r).unwrap_or(0);
+                let res = res_ids[slot as usize];
+                let t0 = Instant::now();
+                for &(x, y, pw, ph) in &rects {
+                    let offset = ((y as u64) * (w as u64) + x as u64) * 4;
+                    if comp.gpu.transfer(res, offset, x, y, pw, ph).is_err() {
+                        return Err(E_IO);
+                    }
+                }
+                comp.cost_add(Cost::Xfer, t0);
+                let mut ops: Vec<ComposeOp> = Vec::new();
+                for &(x, y, pw, ph) in &rects {
+                    if let Some(op) = comp.compose_geometry(n, x, y, pw, ph) {
+                        let scaled = op.src.w != op.dst.w || op.src.h != op.dst.h;
+                        ops.push(op);
+                        if scaled {
+                            break; // the letterbox arm redraws the whole scaled rect ONCE
+                        }
+                    }
+                }
+                let mut blits: Vec<[u32; 22]> = Vec::with_capacity(ops.len());
+                for op in &ops {
+                    if let Some(b) = comp.compose_gpu_slot_words(*op, res, h, scr_res) {
+                        blits.push(b);
+                    }
+                }
+                if !blits.is_empty() {
+                    if comp.submit_blits(COMPOSITOR_CTX, &blits).is_err() {
+                        // C-5 F2: the slot's host copy now holds only this
+                        // present's partial damage and the flag would say
+                        // otherwise; a failed compose leaves it undefined.
+                        if let Some(s) = comp.surf_mut(n) {
+                            s.res_stale[slot as usize] = true;
+                        }
+                        return Err(E_IO);
+                    }
+                    if comp.comp_health_tick() {
+                        took_gpu = true;
+                        for op in &ops {
+                            acc_gpu = Some(rect_union(acc_gpu.unwrap_or(Rect::ZERO), op.dst));
+                        }
+                    }
+                    // A latch: the CPU arm below composes THIS present.
+                }
+                if took_gpu {
+                    if !hold {
+                        if let Some(r) = acc_gpu {
+                            comp.screen_flush_rect(r);
+                        }
+                    }
+                    comp.composed_gpu += 1;
+                    comp.cost_arm = Cost::PresentComposedSlot;
+                    comp.say_gpu_once(n, "slot", res, scr_res);
+                    // The slot's host copy now holds exactly what was
+                    // transferred: valid in full iff this present's damage
+                    // covered the surface (the direct arm's own rule); a
+                    // damage-only present leaves it partial and a later direct
+                    // switch expands its first transfer (4.5.8c's decision:
+                    // explicit, not ported by reflex).
+                    let full = rects_cover_full(&rects, w, h);
+                    if let Some(s) = comp.surf_mut(n) {
+                        s.res_stale[slot as usize] = !full;
                     }
                 }
             }
-            if let Some(r) = acc {
+            if !took_gpu {
+                let mut composed = false;
+                for &(x, y, pw, ph) in &rects {
+                    let t0 = Instant::now();
+                    let r = comp.blit_composed_pixels(n, slot, x, y, pw, ph, None);
+                    comp.cost_add(Cost::Cpu, t0);
+                    if let Some(r) = r {
+                        composed = true;
+                        if hold {
+                            acc_cpu = Some(rect_union(acc_cpu.unwrap_or(Rect::ZERO), r));
+                        } else {
+                            comp.screen_push(r);
+                        }
+                    }
+                }
+                // The census counts presents that COMPOSED (a hidden or
+                // fully clipped present composes nothing on either path).
+                if composed {
+                    comp.composed_cpu += 1;
+                    comp.cost_arm = Cost::PresentComposedCpu;
+                }
+                if let Some(s) = comp.surf_mut(n) {
+                    s.res_stale = [true; WEAVE_SLOTS as usize];
+                }
+            }
+            if acc_cpu.is_some() || acc_gpu.is_some() {
+                let (ncpu, ngpu) = (acc_cpu.unwrap_or(Rect::ZERO), acc_gpu.unwrap_or(Rect::ZERO));
                 let held = match comp.surf(n).and_then(|s| s.held) {
-                    Some(Held::Composed(prev)) => Held::Composed(rect_union(prev, r)),
-                    _ => Held::Composed(r), // a stale Direct hold is superseded
+                    Some(Held::Composed { cpu, gpu }) => Held::Composed {
+                        cpu: rect_union(cpu, ncpu),
+                        gpu: rect_union(gpu, ngpu),
+                    },
+                    _ => Held::Composed {
+                        cpu: ncpu,
+                        gpu: ngpu,
+                    }, // a stale Direct hold is superseded
                 };
                 if let Some(s) = comp.surf_mut(n) {
                     s.held = Some(held);
@@ -6817,15 +16508,12 @@ impl Conn {
             } else if !hold {
                 comp.release_held(n);
             }
-            if let Some(s) = comp.surf_mut(n) {
-                s.res_stale = true;
-            }
         } else {
             // Boot / Off / another surface's Direct: the present completes
             // without pixels (D1 contract kept; content heals on later
             // presents once visible).
             if let Some(s) = comp.surf_mut(n) {
-                s.res_stale = true;
+                s.res_stale = [true; WEAVE_SLOTS as usize];
             }
         }
 
@@ -6837,15 +16525,17 @@ impl Conn {
             }
         }
         // The first post-fence present retires the displaced generation
-        // (the spec's RetireDisplaced + ServerRelease): the display now
-        // shows current-generation content -- composed blits COPY (the
-        // screen resource references no client weave) and the direct arms
-        // target the current resource -- and quiesce holds by construction
-        // (presents complete inside one dispatch), so the old weave's
-        // server refs drop here. The client's own old mapping drains via
-        // its weave-fid clunk (ClunkMap; #847 keeps the pages until then).
-        if let Some((oldw, old_res)) = comp.surf_mut(n).and_then(|s| s.old_weave.take()) {
-            comp.release_gen(&oldw, old_res);
+        // (the spec's RetireDisplaced + ServerRelease). The old claim
+        // that "the direct arms target the current resource" was true
+        // only by the mode-machine argument (round-6 F2: the 2D pending
+        // arm's REFUSED bind leaves bound_res on the OLD generation, and
+        // only Composed-transit reachability kept that state away from
+        // this release) -- the helper now carries the guard locally.
+        // Quiesce holds by construction (presents complete inside one
+        // dispatch); the client's own old mapping drains via its
+        // weave-fid clunk (ClunkMap; #847 keeps the pages until then).
+        {
+            comp.release_displaced_gen(n);
             // No diagnostic here (#55b): a generation retire is now ROUTINE
             // steady-state traffic -- the fbcon acks every pane resize, so
             // this fires per split/unsplit while the SESSION is printing,
@@ -6880,6 +16570,7 @@ impl Conn {
                 names.push((b"ctl".to_vec(), P_CTL));
                 names.push((b"surface".to_vec(), P_SURF_DIR));
                 names.push((b"layout".to_vec(), P_LAYOUT));
+                names.push((b"statusbar".to_vec(), P_STATUSBAR));
                 names.push((b"pane".to_vec(), P_PANE_DIR));
             }
             P_PANE_DIR => {
@@ -6899,6 +16590,10 @@ impl Conn {
                         (&b"tag"[..], PFK_TAG),
                         (&b"surface"[..], PFK_SURFACE),
                         (&b"geometry"[..], PFK_GEOMETRY),
+                        (&b"tagbar"[..], PFK_TAGBAR),
+                        (&b"status"[..], PFK_STATUS),
+                        (&b"claim"[..], PFK_CLAIM),
+                        (&b"owner"[..], PFK_OWNER),
                     ] {
                         names.push((nm.to_vec(), make_pane(id, fk)));
                     }
@@ -6933,6 +16628,7 @@ impl Conn {
             W_ROOT => {
                 names.push((b"ctl".to_vec(), W_CTL));
                 names.push((b"caps".to_vec(), W_CAPS));
+                names.push((b"caps-venus".to_vec(), W_CAPS_VENUS));
                 names.push((b"ctx".to_vec(), W_CTX_DIR));
             }
             W_CTX_DIR => {
@@ -6954,8 +16650,15 @@ impl Conn {
                     for (nm, fk) in [
                         (&b"ctl"[..], WFK_CTL),
                         (&b"submit"[..], WFK_SUBMIT),
+                        (&b"submit1"[..], WFK_SUBMIT_T_BASE + 1),
+                        (&b"submit2"[..], WFK_SUBMIT_T_BASE + 2),
+                        (&b"submit3"[..], WFK_SUBMIT_T_BASE + 3),
+                        (&b"timelines"[..], WFK_TIMELINES),
                         (&b"fence"[..], WFK_FENCE),
                         (&b"bo"[..], WFK_BO_DIR),
+                        (&b"ring"[..], WFK_RING_DIR),
+                        (&b"mem"[..], WFK_MEM_DIR),
+                        (&b"img"[..], WFK_IMG_DIR),
                     ] {
                         names.push((nm.to_vec(), make_wctx(id, fk)));
                     }
@@ -6984,6 +16687,81 @@ impl Conn {
                     }
                 }
             }
+            d if is_wctx(d) && warp_fk(d) == WFK_RING_DIR => {
+                let cid = warp_id(d);
+                if let Some(c) = comp.wctx(cid, self.conn_id) {
+                    names.push((b"new".to_vec(), make_wctx(cid, WFK_RING_NEW)));
+                    for r in c.ring_slots.iter().flatten().filter(|r| !r.retiring) {
+                        let mut nm = String::new();
+                        let _ = core::fmt::write(&mut nm, format_args!("{}", r.ridx));
+                        names.push((nm.into_bytes(), make_wring(r.pub_id, WFK_DIR)));
+                    }
+                }
+            }
+            d if is_wring(d) && warp_fk(d) == WFK_DIR => {
+                let rp = warp_id(d);
+                if comp.wring(rp, self.conn_id).is_some() {
+                    for (nm, fk) in [
+                        (&b"info"[..], WFK_RING_INFO),
+                        (&b"map"[..], WFK_RING_MAP),
+                        (&b"kick"[..], WFK_RING_KICK),
+                        (&b"fence"[..], WFK_RING_FENCE),
+                        (&b"ctl"[..], WFK_RING_CTL),
+                    ] {
+                        names.push((nm.to_vec(), make_wring(rp, fk)));
+                    }
+                }
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_MEM_DIR => {
+                let cid = warp_id(d);
+                if let Some(c) = comp.wctx(cid, self.conn_id) {
+                    names.push((b"new".to_vec(), make_wctx(cid, WFK_MEM_NEW)));
+                    // The handle is the array INDEX (WarpMem does not store it);
+                    // the mem-dir walk parses this name back to that index.
+                    for (handle, slot) in c.mems.iter().enumerate() {
+                        if let Some(m) = slot {
+                            let mut nm = String::new();
+                            let _ = core::fmt::write(&mut nm, format_args!("{}", handle));
+                            names.push((nm.into_bytes(), make_wmem(m.pub_id, WFK_DIR)));
+                        }
+                    }
+                }
+            }
+            d if is_wmem(d) && warp_fk(d) == WFK_DIR => {
+                let mp = warp_id(d);
+                if comp.wmem(mp, self.conn_id).is_some() {
+                    for (nm, fk) in [
+                        (&b"info"[..], WMFK_INFO),
+                        (&b"map"[..], WMFK_MAP),
+                        (&b"ctl"[..], WMFK_CTL),
+                    ] {
+                        names.push((nm.to_vec(), make_wmem(mp, fk)));
+                    }
+                }
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_IMG_DIR => {
+                let cid = warp_id(d);
+                if let Some(c) = comp.wctx(cid, self.conn_id) {
+                    names.push((b"new".to_vec(), make_wctx(cid, WFK_IMG_NEW)));
+                    // The handle is the array INDEX (WarpImg does not store
+                    // it); the img-dir walk parses this name back to it.
+                    for (handle, slot) in c.imgs.iter().enumerate() {
+                        if let Some(i) = slot {
+                            let mut nm = String::new();
+                            let _ = core::fmt::write(&mut nm, format_args!("{}", handle));
+                            names.push((nm.into_bytes(), make_wimg(i.pub_id, WFK_DIR)));
+                        }
+                    }
+                }
+            }
+            d if is_wimg(d) && warp_fk(d) == WFK_DIR => {
+                let ip = warp_id(d);
+                if comp.wimg(ip, self.conn_id).is_some() {
+                    for (nm, fk) in [(&b"info"[..], WIFK_INFO), (&b"ctl"[..], WIFK_CTL)] {
+                        names.push((nm.to_vec(), make_wimg(ip, fk)));
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -7004,7 +16782,11 @@ impl Conn {
                 break;
             }
             let q = self.qid_of(*path);
-            let dtype = if is_dir(*path) { p9::DT_DIR } else { p9::DT_REG };
+            let dtype = if is_dir(*path) {
+                p9::DT_DIR
+            } else {
+                p9::DT_REG
+            };
             let mut tmp = alloc::vec![0u8; need];
             let n = p9::pack_dirent(&mut tmp, 0, &q, ord, dtype, nm)?;
             data.extend_from_slice(&tmp[..n]);
@@ -7023,8 +16805,18 @@ impl Conn {
         };
         let f = self.fids[i].unwrap();
         let _ = comp;
+        // The read-only pane leaves say so (the H-3b round R2-F6): the
+        // kernel's rwx layer reads the mode, so a write-open fails at the
+        // open, not only at the Twrite.
+        let ro = is_pane(f.path)
+            && matches!(
+                pane_fk(f.path),
+                PFK_SURFACE | PFK_GEOMETRY | PFK_TAGBAR | PFK_STATUS | PFK_CLAIM | PFK_OWNER
+            );
         let (mode, nlink) = if is_dir(f.path) {
             (DIR_MODE, 2u64)
+        } else if ro {
+            (FILE_RO, 1u64)
         } else {
             (FILE_RW, 1u64)
         };
@@ -7049,7 +16841,7 @@ impl Conn {
         )
     }
 
-    fn h_clunk(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_clunk(&mut self, comp: &mut Comp, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_tclunk(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -7057,7 +16849,7 @@ impl Conn {
         if self.fid_find(a.fid).is_none() {
             return self.err(tag, p9::E_BADF);
         }
-        self.fid_clunk(a.fid);
+        self.fid_clunk(comp, a.fid);
         p9::build_rclunk(&mut self.out_buf, tag)
     }
 
@@ -7070,6 +16862,7 @@ impl Conn {
         // the client reuses oldtag only after this Rflush.
         self.pending_reads.retain(|pr| pr.tag != a.oldtag);
         self.pending_fences.retain(|pf| pf.tag != a.oldtag);
+        self.pending_ring_fences.retain(|pf| pf.tag != a.oldtag);
         p9::build_rflush(&mut self.out_buf, tag)
     }
 
@@ -7089,9 +16882,27 @@ impl Conn {
         // Warp-2c: the BO map fid is the second Tweft anchor (the weave
         // shape verbatim: lazy share, ring_entries 0 = the map-only kind
         // the kernel cross-checks).
+        if f.opened && is_wring(f.path) && warp_fk(f.path) == WFK_RING_MAP {
+            let id = warp_id(f.path);
+            return match comp.wring_weft_ensure(id, self.conn_id) {
+                Some((share_id, size)) => {
+                    p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0)
+                }
+                None => self.err(tag, p9::E_NOMEM),
+            };
+        }
         if f.opened && is_wbo(f.path) && warp_fk(f.path) == WFK_BO_MAP {
             let id = warp_id(f.path);
             return match comp.wbo_weft_ensure(id, self.conn_id) {
+                Some((share_id, size)) => {
+                    p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0)
+                }
+                None => self.err(tag, p9::E_NOMEM),
+            };
+        }
+        if f.opened && is_wmem(f.path) && warp_fk(f.path) == WMFK_MAP {
+            let id = warp_id(f.path);
+            return match comp.wmem_weft_ensure(id, self.conn_id) {
                 Some((share_id, size)) => {
                     p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0)
                 }
@@ -7106,9 +16917,7 @@ impl Conn {
             return self.err(tag, p9::E_NOENT);
         }
         match comp.weft_ensure(n) {
-            Some((share_id, size)) => {
-                p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0)
-            }
+            Some((share_id, size)) => p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0),
             None => self.err(tag, p9::E_NOMEM),
         }
     }
@@ -7146,7 +16955,18 @@ impl Conn {
 
     /// Deliver held fence reads whose ctxs have unreported completions
     /// (or died: EOF the stream). False = the conn's transport failed.
+    ///
+    /// Multi-queue F3: `fence_reported` advances AFTER the sweep, so one
+    /// retirement wakes EVERY parked reader of the ctx, not just the first
+    /// in the list. The client's one-parker protocol makes a second parked
+    /// reader a client bug -- but the old first-match-consumes shape turned
+    /// that bug into a permanent strand (reader B parked past its own event
+    /// because reader A consumed the report), and the doorbell contract
+    /// ("content coalesced, never parsed") is exactly as satisfied by
+    /// waking all. The constraint belongs at the boundary that admits the
+    /// vector.
     pub fn poll_fences(&mut self, comp: &mut Comp) -> bool {
+        let mut advanced: Vec<(u32, u64)> = Vec::new();
         let mut i = 0;
         while i < self.pending_fences.len() {
             let pf = self.pending_fences[i];
@@ -7166,13 +16986,46 @@ impl Conn {
             };
             let mut s = String::new();
             if let Some(v) = rec {
-                comp.wctx_mut(pf.ctx_pub, self.conn_id).unwrap().fence_reported = v;
+                advanced.push((pf.ctx_pub, v));
                 let _ = core::fmt::write(&mut s, format_args!("{}\n", v));
             }
             if !self.deliver_read(pf.tag, s.as_bytes()) {
                 return false;
             }
             self.pending_fences.remove(i);
+        }
+        for (ctx, v) in advanced {
+            if let Some(c) = comp.wctx_mut(ctx, self.conn_id) {
+                if v > c.fence_reported {
+                    c.fence_reported = v;
+                }
+            }
+        }
+        true
+    }
+
+    /// Deliver parked ring-fence reads whose rings advanced (or died: EOF).
+    pub fn poll_ring_fences(&mut self, comp: &mut Comp) -> bool {
+        let mut i = 0;
+        while i < self.pending_ring_fences.len() {
+            let pf = self.pending_ring_fences[i];
+            let rec = match comp.wring(pf.ring_pub, self.conn_id) {
+                None => None, // the ring died with this read parked: EOF
+                Some((_, r)) if r.completed_seq > r.reported_seq => Some(r.completed_seq),
+                Some(_) => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let mut s = String::new();
+            if let Some(v) = rec {
+                comp.wring_report(pf.ring_pub, self.conn_id, v);
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", v));
+            }
+            if !self.deliver_read(pf.tag, s.as_bytes()) {
+                return false;
+            }
+            self.pending_ring_fences.remove(i);
         }
         true
     }

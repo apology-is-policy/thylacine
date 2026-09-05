@@ -1,8 +1,8 @@
-From be63d45ce669b366a306a79ce23abc9aa048d5a1 Mon Sep 17 00:00:00 2001
+From 862bdf6a4a1b345f30768d0ac53b1bea07664ca6 Mon Sep 17 00:00:00 2001
 From: Thylacine Clade <clade@thylacine.invalid>
 Date: Thu, 30 Jul 2026 14:47:04 +0000
-Subject: [PATCH 4/4] Thylacine CL-7b-1: JIT through the I-42 dual-mapped code
- Burrow
+Subject: [PATCH 04/23] Thylacine CL-7b-1: JIT through the I-42 dual-mapped
+ code Burrow
 
 Three edits, one of which was found only by checking a symbol.
 

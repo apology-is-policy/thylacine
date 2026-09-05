@@ -17,12 +17,17 @@
 (*                                                                         *)
 (* Modeling decisions:                                                     *)
 (*                                                                         *)
-(*   - Single-waiter-per-direction. At most one thread sleeps on the read  *)
-(*     side at a time; at most one sleeps on the write side. Mirrors the   *)
-(*     impl's use of `struct Rendez` (single-waiter; see rendez.h).        *)
-(*     Multi-waiter wait queues are Phase 5+ (poll / futex); when they     *)
-(*     land at this layer, the spec extends with a set of waiters and the *)
-(*     wake action becomes "wake one chosen waiter" or "wake all."         *)
+(*   - Multi-waiter-per-direction, wake-ALL. Any number of threads may     *)
+(*     sleep on either side at once, and every enabling mutation wakes     *)
+(*     EVERY sleeper on the pipe (the impl's poll_waiter_list_wake walks   *)
+(*     each blocker's per-call hook). A woken thread re-samples and may    *)
+(*     sleep again. This replaced the single-waiter model when pipe ends   *)
+(*     became EL0 objects shared across fork/dup/threads: the impl's       *)
+(*     per-direction Rendez EXTINCTED on a second sleeper, which no state  *)
+(*     invariant here could express -- the runtime witness is the          *)
+(*     pipe_blocking.two_*_share_one_* tests. What this model DOES pin is  *)
+(*     that wake-all is the obligation: BUGGY_WAKE_ONE_READER wakes a      *)
+(*     single chosen reader and leaves a second stuck while CanRead holds. *)
 (*                                                                         *)
 (*   - Atomic actions. ReadDrain / WriteAppend / CloseRead / CloseWrite    *)
 (*     each atomically mutate state + perform the wake-if-applicable.      *)
@@ -35,10 +40,8 @@
 (*     once set, never unset. Mirrors the impl: close hooks set the flag   *)
 (*     and never clear it (the pipe is freed when both ends close).        *)
 (*                                                                         *)
-(*   - Sleep is gated on "single-waiter": a thread that would sleep when  *)
-(*     a sleeper is already present is disabled in the model (would       *)
-(*     extinct in the impl per rendez.h). This is a structural constraint, *)
-(*     not an invariant violation.                                         *)
+(*   - Sleep is never gated: a second (third, ...) sleeper on a side is a  *)
+(*     legal state. (The old model disabled it, mirroring the extinction.) *)
 (*                                                                         *)
 (* Buggy-config matrix (one buggy flag per cfg; executable documentation): *)
 (*                                                                         *)
@@ -59,12 +62,19 @@
 (*   pipe_buggy_close_read_no_wake_writer.cfg  CloseRead skips waking a    *)
 (*     sleeping writer.                                                    *)
 (*                                                                         *)
+(*   pipe_buggy_wake_one_reader.cfg            WriteAppend wakes ONE       *)
+(*     chosen reader instead of all. With three threads (two readers      *)
+(*     asleep), the other stays in WAITING_READ while ringCount > 0.       *)
+(*                                                                         *)
+(*   pipe_multi.cfg                            all flags FALSE, THREE      *)
+(*     threads -- two can wait on one side; TLC proves NoStuck* under      *)
+(*     wake-all with re-sleeping.                                          *)
+(*                                                                         *)
 (* Invariants enforced (TLC-checked):                                      *)
 (*                                                                         *)
 (*   TypeOk         — type-safety of the state variables.                  *)
-(*   SingleWaiter   — at most one thread in WAITING_READ; at most one in   *)
-(*                    WAITING_WRITE. Sanity check on the model + a         *)
-(*                    structural property of single-waiter rendez.         *)
+(*   (SingleWaiter was an invariant of the single-waiter model; retired   *)
+(*    with it -- two waiters per side is now the point.)                   *)
 (*   EofMonotonic   — readEof and writeEof are monotonic (set TRUE never  *)
 (*                    flips back to FALSE).                                *)
 (*   NoStuckReader  — no thread is in WAITING_READ while CanRead. This is *)
@@ -83,7 +93,8 @@ CONSTANTS
     BUGGY_WRITE_NO_WAKE_READER,
     BUGGY_READ_NO_WAKE_WRITER,
     BUGGY_CLOSE_WRITE_NO_WAKE_READER,
-    BUGGY_CLOSE_READ_NO_WAKE_WRITER
+    BUGGY_CLOSE_READ_NO_WAKE_WRITER,
+    BUGGY_WAKE_ONE_READER
 
 ASSUME Cardinality(Threads) >= 1
 ASSUME CAP \in Nat /\ CAP > 0
@@ -91,6 +102,7 @@ ASSUME BUGGY_WRITE_NO_WAKE_READER \in BOOLEAN
 ASSUME BUGGY_READ_NO_WAKE_WRITER \in BOOLEAN
 ASSUME BUGGY_CLOSE_WRITE_NO_WAKE_READER \in BOOLEAN
 ASSUME BUGGY_CLOSE_READ_NO_WAKE_WRITER \in BOOLEAN
+ASSUME BUGGY_WAKE_ONE_READER \in BOOLEAN
 
 VARIABLES
     ringCount,     \* 0..CAP
@@ -124,23 +136,23 @@ WaitingWriters == { t \in Threads : threadState[t] = "WAITING_WRITE" }
 CanRead  == ringCount > 0 \/ writeEof
 CanWrite == ringCount < CAP \/ readEof
 
+\* Wake EVERY waiter on one side (poll_waiter_list_wake): each returns to
+\* RUNNING and re-attempts; a waiter that finds its condition false again
+\* simply sleeps again (ReadSleep / WriteSleep are never gated).
+WakeAllReaders(ts) == [t \in Threads |-> IF ts[t] = "WAITING_READ"  THEN "RUNNING" ELSE ts[t]]
+WakeAllWriters(ts) == [t \in Threads |-> IF ts[t] = "WAITING_WRITE" THEN "RUNNING" ELSE ts[t]]
+
 (***************************************************************************)
 (* Clean actions.                                                          *)
 (***************************************************************************)
 
-\* ReadDrain — a thread reads one byte from a non-empty buffer + wakes any
-\* sleeping writer (the only blocker that's relieved by draining: full
-\* buffer → space available).
+\* ReadDrain — a thread reads one byte from a non-empty buffer + wakes EVERY
+\* sleeping writer (the blockers relieved by draining: full buffer → space).
 ReadDrain(t) ==
     /\ threadState[t] = "RUNNING"
     /\ ringCount > 0
     /\ ringCount' = ringCount - 1
-    /\ \* Atomically wake the (single) waiting writer if any. The wake
-       \* transitions the writer to RUNNING; it will then re-attempt.
-       IF WaitingWriters /= {}
-       THEN \E w \in WaitingWriters :
-              threadState' = [threadState EXCEPT ![w] = "RUNNING"]
-       ELSE threadState' = threadState
+    /\ threadState' = WakeAllWriters(threadState)
     /\ UNCHANGED <<readEof, writeEof>>
 
 \* ReadEof — read on empty buffer with writeEof returns 0 (no state change).
@@ -150,26 +162,22 @@ ReadEof(t) ==
     /\ writeEof
     /\ UNCHANGED vars
 
-\* ReadSleep — read on empty buffer without writeEof: sleep. Single-waiter
-\* discipline: only one thread may sleep on the read side at a time.
+\* ReadSleep — read on empty buffer without writeEof: sleep. Any number of
+\* readers may sleep at once (each has its own hook + Rendez in the impl).
 ReadSleep(t) ==
     /\ threadState[t] = "RUNNING"
     /\ ringCount = 0
     /\ ~writeEof
-    /\ Cardinality(WaitingReaders) = 0
     /\ threadState' = [threadState EXCEPT ![t] = "WAITING_READ"]
     /\ UNCHANGED <<ringCount, readEof, writeEof>>
 
-\* WriteAppend — append one byte + wake any sleeping reader.
+\* WriteAppend — append one byte + wake EVERY sleeping reader.
 WriteAppend(t) ==
     /\ threadState[t] = "RUNNING"
     /\ ringCount < CAP
     /\ ~readEof                       \* if read end closed, EPIPE instead
     /\ ringCount' = ringCount + 1
-    /\ IF WaitingReaders /= {}
-       THEN \E r \in WaitingReaders :
-              threadState' = [threadState EXCEPT ![r] = "RUNNING"]
-       ELSE threadState' = threadState
+    /\ threadState' = WakeAllReaders(threadState)
     /\ UNCHANGED <<readEof, writeEof>>
 
 \* WriteEpipe — write while readEof set returns -1 (no state change).
@@ -178,34 +186,27 @@ WriteEpipe(t) ==
     /\ readEof
     /\ UNCHANGED vars
 
-\* WriteSleep — write on full buffer without readEof: sleep.
+\* WriteSleep — write on full buffer without readEof: sleep (never gated).
 WriteSleep(t) ==
     /\ threadState[t] = "RUNNING"
     /\ ringCount = CAP
     /\ ~readEof
-    /\ Cardinality(WaitingWriters) = 0
     /\ threadState' = [threadState EXCEPT ![t] = "WAITING_WRITE"]
     /\ UNCHANGED <<ringCount, readEof, writeEof>>
 
-\* CloseWrite — set writeEof + wake any sleeping reader (so they see EOF).
+\* CloseWrite — set writeEof + wake EVERY sleeping reader (so they see EOF).
 \* Monotonic: only fires if writeEof is currently FALSE.
 CloseWrite ==
     /\ ~writeEof
     /\ writeEof' = TRUE
-    /\ IF WaitingReaders /= {}
-       THEN \E r \in WaitingReaders :
-              threadState' = [threadState EXCEPT ![r] = "RUNNING"]
-       ELSE threadState' = threadState
+    /\ threadState' = WakeAllReaders(threadState)
     /\ UNCHANGED <<ringCount, readEof>>
 
-\* CloseRead — set readEof + wake any sleeping writer (so they see EPIPE).
+\* CloseRead — set readEof + wake EVERY sleeping writer (so they see EPIPE).
 CloseRead ==
     /\ ~readEof
     /\ readEof' = TRUE
-    /\ IF WaitingWriters /= {}
-       THEN \E w \in WaitingWriters :
-              threadState' = [threadState EXCEPT ![w] = "RUNNING"]
-       ELSE threadState' = threadState
+    /\ threadState' = WakeAllWriters(threadState)
     /\ UNCHANGED <<ringCount, writeEof>>
 
 (***************************************************************************)
@@ -242,6 +243,21 @@ BuggyCloseReadNoWake ==
     /\ readEof' = TRUE
     /\ UNCHANGED <<ringCount, writeEof, threadState>>
 
+\* The multi-waiter-specific bug: an append that wakes ONE chosen reader (the
+\* old single-waiter wakeup) instead of every hook. With two readers asleep,
+\* the un-woken one is stuck while CanRead holds -- NoStuckReader violated.
+BuggyWriteAppendWakeOne(t) ==
+    /\ BUGGY_WAKE_ONE_READER
+    /\ threadState[t] = "RUNNING"
+    /\ ringCount < CAP
+    /\ ~readEof
+    /\ ringCount' = ringCount + 1
+    /\ IF WaitingReaders /= {}
+       THEN \E r \in WaitingReaders :
+              threadState' = [threadState EXCEPT ![r] = "RUNNING"]
+       ELSE threadState' = threadState
+    /\ UNCHANGED <<readEof, writeEof>>
+
 (***************************************************************************)
 (* Next-state relation.                                                    *)
 (***************************************************************************)
@@ -259,16 +275,13 @@ Next ==
     \/ \E t \in Threads : BuggyReadDrainNoWake(t)
     \/ BuggyCloseWriteNoWake
     \/ BuggyCloseReadNoWake
+    \/ \E t \in Threads : BuggyWriteAppendWakeOne(t)
 
 Spec == Init /\ [][Next]_vars
 
 (***************************************************************************)
 (* ============================== INVARIANTS ============================== *)
 (***************************************************************************)
-
-SingleWaiter ==
-    /\ Cardinality(WaitingReaders) <= 1
-    /\ Cardinality(WaitingWriters) <= 1
 
 \* NoStuckReader: ARCH §28 I-9 specialized to the pipe's read side.
 \* If the read-side wait condition holds, no thread is stuck in
@@ -292,7 +305,6 @@ EofMonotonic ==
 
 Invariants ==
     /\ TypeOk
-    /\ SingleWaiter
     /\ EofMonotonic
     /\ NoStuckReader
     /\ NoStuckWriter

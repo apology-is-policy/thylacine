@@ -149,7 +149,7 @@ user-voted 2026-06-12) gate the cooking:
 |---|---|---|
 | `CONS_ICANON` | line mode: assemble a line, deliver on Enter, handle erase (BS/DEL) | `cons_rx_input` |
 | `CONS_ECHO` | echo each input byte to output (HARD off-guarantee: the password mask) | `cons_rx_input` |
-| `CONS_ISIG` | Ctrl-C (0x03) → the `interrupt` note (LS-5); off → a `0x03` data byte | `cons_rx_input` |
+| `CONS_ISIG` | Ctrl-C (0x03) → the `interrupt` note (LS-5); off → a `0x03` data byte. In canonical mode the consumed Ctrl-C also DISCARDS the pending assembly (POSIX NOFLSH-clear; PTY-DESIGN "ISIG characters DISCARD the pending line", 2026-08-17) — a disposition like an erase, not a counted drop; the ring (committed lines) and the TX side are never flushed | `cons_rx_input` |
 | `CONS_ICRNL` | input CR (0x0d) → NL (0x0a) | `cons_rx_input` |
 | `CONS_ONLCR` | output (and echoed) NL → CR NL | `cons_output_write` + echo |
 
@@ -249,13 +249,30 @@ stdin `Piped`→`Inherit` + restore `ut`'s mode after) is **LS-7** — the edito
 where the child's mode needs are known; `Repl::console_apply_default` is the
 primitive it builds on.
 
-A consctl write that applies a mode also **discards any half-assembled canonical
-line** (resets `g_cons.line_len` under `g_cons.lock` — the `tcsetattr` TCSAFLUSH
-discipline). So a `canonical → raw → canonical` flip can never strand a fragment
-that then prepends the next line, and the production path matches the test hook
-`cons_test_set_termios` ("a mode flip starts a fresh line"). No v1.0 consumer
-flips mid-line (login flips between completed reads; `ut` at prompt boundaries),
-but the kernel is unambiguous against any consctl writer (LS-8 audit F1).
+A consctl write that **clears ICANON delivers the half-assembled canonical
+line** to the input ring as raw bytes, no newline appended
+(`cons_deliver_partial_line_locked`, under `g_cons.lock`, then the same
+reader/mgr wakes an RX push performs); a write that leaves ICANON as it was
+leaves the assembly alone; a raw→canonical write has nothing pending by
+construction. This is PTY-DESIGN "Mode writes deliver, never discard"
+(2026-08-17): the previous posture zeroed `line_len` on ANY mode write ("a mode
+flip starts a fresh line", the LS-8 audit-F1 remedy — TCSAFLUSH), on the
+premise that no consumer flips mid-line; the pts job-control shell does, around
+every foreground job, and the head of a type-ahead line was cooked-echoed and
+then dropped while its tail ran as a different command (LS-CI `pty-4`, the
+`11173762` probe). Plan 9's `devcons` `rawon` and Linux's `n_tty_set_termios`
+both deliver on this transition and discard on none. The F1 hazard — a fragment
+stranded across `canonical → raw → canonical` and prepending the next line —
+stays closed, because canonical→raw now delivers it. What does not fit the ring
+at that instant is a real drop under its own counter, `rx_drop_modeflush`
+(`/ctl/cons`; a mode write cannot back-pressure, and the #95 rule gives a new
+drop site its own name). The test hook `cons_test_set_termios` carries the same
+rule so the production path and the cooking tests cannot diverge. Regression
+`cons.cook_mode_flip_delivers`: canonical→canonical `+echo` keeps `abc` (Enter
+delivers `abc\n`); canonical→raw `-icanon` delivers `de` at once and `f`
+follows in order; the F1 shape (`gh` → raw → canonical → `ij\n`) yields exactly
+`ij\n`. Every drain is guarded by the non-blocking depth first — `devcons.read`
+parks on an empty ring, and a regression must read as a red line, not a hang.
 
 ## The console winsize + `tty:winch` — #55 (as-built)
 
@@ -372,6 +389,11 @@ malformed-batch atomicity), `cons.winsize_winch_iff_changed` (counter: change
   line echoes **zero** bytes yet still delivers to the reader (the password mask).
 - (LS-8b) `cons.cook_isig_toggle` — ISIG set → Ctrl-C is the note; clear → `0x03`
   is ring data.
+- (PTY-DESIGN F5, 2026-08-17) `cons.cook_isig_discards_pending_line` — canonical
+  `+isig`: `ab` ^C `cd\n` → the ring gets exactly `cd\n`, the interrupt is
+  pending, no drop counter moved; the CONTROL `-isig` (one variable away): the
+  same `0x03` is data and `ab 03 cd NL` (6 bytes) all deliver; a committed
+  `x\n` already in the ring survives a later ^C.
 - (LS-8b) `cons.cook_icrnl` — input CR → NL when set; verbatim when clear.
 - (LS-8b) `cons.cook_onlcr_output` — output NL → CR NL when set; bare LF when
   clear (via the `cons_emit` capture sink).
@@ -381,9 +403,15 @@ malformed-batch atomicity), `cons.winsize_winch_iff_changed` (counter: change
   too-small buffer renders nothing.
 - (LS-8b) `cons.cook_line_overflow` — a pathologically long line is bounded (the
   line buffer never overflows past `CONS_LINE_MAX`; ASAN-clean).
-- (LS-8 audit F1) `cons.cook_mode_flip_fresh_line` — drives the **production**
-  `cons_set_mode_cmd`: a buffered fragment is discarded by a mode change, so only
-  the post-flip line delivers (pre-fix it prepended `"abc\n"`).
+- (LS-8 audit F1 → PTY-DESIGN "Mode writes deliver, never discard", 2026-08-17)
+  `cons.cook_mode_flip_delivers` — drives the **production** `cons_set_mode_cmd`
+  in three legs: A canonical→canonical `+echo` KEEPS the assembled `abc` (Enter
+  delivers `abc\n`); B canonical→raw `-icanon` DELIVERS the pending `de` at once,
+  no drop counted, the next raw byte follows in order; C the F1 shape (`gh` →
+  raw → canonical → `ij\n`) yields exactly `ij\n` — the fragment was delivered,
+  not stranded, so nothing prepends. (It replaced `cook_mode_flip_fresh_line`,
+  which pinned the discard this reversed.) The fifth drop site's positive
+  control is legs (d)/(e) of `cons.rx_drop_counters`, below.
 - (LS-8 audit F2a) `cons.cook_canonical_poll_edge` — a multi-byte canonical line
   arms the empty→non-empty poll edge **once** on the Enter flush (the chars buffer
   with the ring empty → no edge while assembling); the deferred mgr walk then makes
@@ -434,10 +462,11 @@ This asymmetry is **load-bearing** — a change that blurs it is a bug:
 
 - `cons_output_write` runs in **process context** (`spoor_write_common` holds no
   lock across `dev->write` and documents it as *blocking*), so it **may** sleep
-  for room, and does (`cons_emit_wait`).
+  for room, and does (`cons_emit_bulk_wait`: a staged chunk pushes what fits,
+  then room-waits for the rest).
 - Echo from `cons_rx_input` runs in **IRQ context**, so it must **never** sleep:
-  it pushes non-blocking and **drops** on a full ring (a tty overrun — the same
-  disposition the drain ring uses).
+  it pushes non-blocking (`cons_emit_bulk`) and **drops** a unit that does not
+  fit WHOLE (a tty overrun — the same disposition the drain ring uses).
 
 Exactly **one** thread can ever wait on `g_cons_tx_room`, because only the role
 holder pushes-with-wait and the role is exclusive. That is what makes a
@@ -461,10 +490,17 @@ single-waiter `Rendez` sound here where the role itself needs a waiter list.
 - **The ring lock is a pure irqsave leaf.** The IRQ drain wakes *after* releasing
   it (the `cons_drain_tap` discipline), and `wakeup()` is the only IRQ-safe wake
   primitive (LS-8a).
-- **Halls / extinction bypass the ring** (`cons_tx_flush_for_dump`): a dying
-  machine runs IRQ-masked and cannot depend on an interrupt to drain, so the dump
-  flushes by **trylock only** (a dying CPU may already hold the lock) and then
-  falls back to the direct bounded `uart_putc`.
+- **Halls / extinction TAKE the ring lock and keep it** (`cons_tx_claim_for_dump`,
+  2026-08-18): a dying machine runs IRQ-masked and cannot depend on an interrupt
+  to drain, so the winner masks IRQs, acquires `g_cons_tx.lock` by a **bounded
+  raw try-spin** (20 ms / `1<<20` iterations; a healthy peer holds it only for one
+  push or one FIFO-depth drain), flushes the pre-crash ring to the wire under it,
+  and then emits the `EXTINCTION:` line and the dump through the direct bounded
+  `uart_putc` **while still holding the lock, forever** — so no peer's push or
+  drain can land inside the banner (every producer pushes and every drain pops
+  under that lock). Past the bound it emits unserialized and says so after the
+  dump. The predecessor flushed by one trylock and released. Full rationale +
+  the residual (direct-UART kernel diagnostics, main#243): `04-extinction.md`.
 - **Arming.** The ring arms at `cons_tx_arm()`, after `gic_attach` +
   `gic_enable_irq` for the UART SPI. Every pre-GIC print takes the direct path;
   the ring is empty at arm time so the transition cannot reorder output. The
@@ -518,8 +554,8 @@ case §23.5.2 named. SYS_PUTS is not a niche channel: **83 binaries** reach it v
 `libthyla_rs::t_putstr` / `libt::t_puts`, making it *the* native diagnostic
 stream. A role only some writers take excludes nobody.
 
-**The unstated cost was the worse one.** `cons_drain_tap` fires from `cons_emit`
-and `cons_emit_wait` only, so nothing written via SYS_PUTS ever reached the G-4
+**The unstated cost was the worse one.** `cons_drain_tap` fired from the two emits
+(today `cons_emit_bulk` / `cons_emit_bulk_wait`) only, so nothing written via SYS_PUTS ever reached the G-4
 renderer. Under a graphical console the seam's own justification inverts: the
 direct path did not make the diagnostic channel *more* reliably available, it
 made it available **never** — perfectly normal on serial, absent on the
@@ -529,7 +565,7 @@ framebuffer.
 is the shared cons-layer function (#57b), not the Dev: reaching it needs no fd,
 Spoor, handle, namespace or open. SYS_PUTS keeps every bit of its independence by
 calling it. Pre-GIC boot still falls through to the direct bounded `uart_putc`
-inside `cons_tx_push_nowait`, and extinction/Halls are untouched (they use
+inside `cons_tx_push_bulk`, and extinction/Halls are untouched (they use
 `uart_puts` / HX-I paths, and a dying kernel issues no EL0 syscall).
 
 Three deliberate consequences:
@@ -551,46 +587,97 @@ this output to aurora, whose VT does not synthesize CR on LF (#36), so bare-LF
 writes would staircase the moment they became visible. Routing through
 `cons_output_write` fixes the visibility and the line endings in one stroke.
 
-### Kernel diagnostics join the shared path (#126, as-built)
+### Every producer pushes a UNIT (the byte-atomic tear, 2026-08-17)
 
-`cons_diag_puts` / `cons_diag_putdec` / `cons_diag_puthex64` are the
-**non-blocking** kernel emitters: for any steady-state diagnostic issued from a
-context that can neither sleep nor spin — IRQ context, or under a spinlock.
+The role serializes role *clients*; it cannot serialize the producers that
+cannot take it. Measured on thyla-pi (KVM, `warp-host.sh composed`): the
+kernel's `proc: orphan` burst at warden's exit -- eleven `cons_diag_puts`
+calls, one ring-lock hold PER BYTE -- and tapestryd's SYS_PUTS posture line
+on another CPU came out as
+`proc: orphan pid=2119 name="ttaappeessttrryydd" (parent pid=:2110 c onmapmoes=e"d ...`
+and a gate anchored on that line sat 900 s red. Every lock release was an
+interleave point.
 
-    void cons_diag_puts(const char *s);      // ONLCR-translating, NULL-safe
-    void cons_diag_putdec(u64 v);
-    void cons_diag_puthex64(u64 v);
+The rule now: **a producer pushes one UNIT under ONE `g_cons_tx.lock` hold**
+(`cons_tx_push_bulk`) and taps that unit under ONE `g_cons_drain.lock` hold
+(`cons_drain_tap_bulk`). The two leaf locks are never nested -- tap, release,
+push, release -- so no ordering edge is added; a unit is contiguous in each
+ring, and the two rings may order two units differently (harmless).
 
-Each byte goes `cons_drain_tap` → `cons_tx_push_nowait` (drop + count on a full
-ring, the echo disposition), then one `cons_tx_kick` per call rather than per
-byte. They never sleep, never spin, take only leaf locks, and wake outside them
-— the same path `cons_emit` takes for echo from the UART RX IRQ, which is the
-strongest available precedent for "legal in a constrained context". Pre-arm they
-fall through to the direct bounded `uart_putc`, so boot output is byte-identical.
+| producer | context | unit | when the ring cannot take it |
+|---|---|---|---|
+| kernel diagnostic (`struct cons_diag_line`) | IRQ / under a spinlock irqsave | one line, <= `CONS_DIAG_LINE_MAX` (256; over-length cut, terminator forced) | dropped **whole**; `dropped += len` |
+| echo (`cons_rx_input`'s staged `echo[]`) | UART RX IRQ | the staged bytes (<= `CONS_ECHO_MAX`, e.g. `\b \b`) | dropped whole; counted |
+| `cons_output_write` (role held; `/dev/cons` + SYS_PUTS) | process | a staged chunk <= `CONS_TX_STAGE` (512) cooked bytes, cut back to the last NL when the input continues | pushes what fits under one hold, then the #67 room-wait (deadline -> short write) for the rest |
 
-**Why they exist.** `uart_putc`'s #67 bound is 20 ms *per byte*, and it does not
-compose. `proc_reparent_children` emitted the ~90-byte #80 orphan line while
-holding `g_proc_table_lock` (taken irqsave 40 times in `proc.c`, plain 0 times),
-so a stalled host consumer pinned the global process-table lock IRQ-masked for
-~1.8 s per adoption — the interrupt-dead stall #67's bound exists to prevent,
-reconstituted by iterating it. **A per-item bound is not a per-operation bound.**
+**Delivered:** two producers never interleave *inside* a unit. A diagnostic
+line or an echo unit lands between two of a writer's chunks, never within
+one; a ring-fitting write (a console line against an 8 KiB ring -- the common
+case) is one chunk, so it is whole against *every* producer, including the
+ones the role cannot park. This is also ARCH 23.5.2's #79 (echo exclusion for
+a ring-fitting write), closed as a corollary.
 
-**Ordering.** `cons_diag_*` is callable under any lock ordered above the cons
-locks. It takes `g_cons_drain.lock` and `g_cons_tx.lock` (both leaves;
-`g_cons_tx.lock` nests only `g_uart_imsc_lock`) and wakes after releasing them.
-It does **not** touch `g_cons.lock`, so the standing "never hold `g_cons.lock`
-across `g_proc_table_lock`" obligation (see `cons_service_deferred` and the #55
-winch post) is untouched — that edge runs the other way.
+**Residual, named** (Linux-equivalent: `printk` records are atomic, a tty
+write is chunked, a record can land between chunks): a write longer than one
+stage spans chunks; under a FULL ring the writer's chunk is whatever fits, so
+a stalled/slow sink can still split a line at a chunk boundary -- progress
+beats atomicity under congestion; the #67 short-write discipline is unchanged.
+And because the tap fires FIRST and unconditionally (a serial-less board's only
+sink), a deadline short-write leaves the renderer up to one chunk ahead of the
+serial line where it used to be one byte -- a mirror divergence under a
+stalled consumer, not a defect.
 
-**Deliberately NOT capture-aware.** Unlike `cons_emit`, these skip
-`g_cons_echo_capture`: that 128-byte buffer exists so a test can assert exactly
-what was *echoed*, and a kernel diagnostic landing in it would corrupt the
-assertions it exists for.
+**The short-write mapping.** `cons_output_write` returns INPUT bytes accepted.
+Staging is prefix-closed and deterministic (`cons_stage_chunk`), so a short
+accept of `acc` cooked bytes is mapped back by re-staging with cap = `acc`: an
+input NL whose CR went out but whose LF did not counts as unwritten, exactly as
+the old per-byte loop counted it.
 
-Converted callers: `proc_reparent_children` and `proc_fault_terminate`.
-`kernel/proc.c` now has zero direct `uart_*` calls.
+### Kernel diagnostics: one line, one push (#126 -> the unit rule)
+
+    struct cons_diag_line { u8 buf[CONS_DIAG_LINE_MAX]; u32 len; bool truncated; };
+    void cons_diag_line_init(struct cons_diag_line *l);
+    void cons_diag_line_puts(struct cons_diag_line *l, const char *s);   // ONLCR-translating, NULL-safe
+    void cons_diag_line_putdec(struct cons_diag_line *l, u64 v);
+    void cons_diag_line_puthex64(struct cons_diag_line *l, u64 v);
+    void cons_diag_line_emit(struct cons_diag_line *l);                  // one push; all-or-nothing
+
+The line is assembled on the CALLER's stack and pushed once. A caller-owned
+object rather than a per-CPU accumulator is what makes it nesting-safe: an IRQ
+handler's diagnostic on the same CPU cannot splice into a process-context line
+half-assembled below it. #126's contract is unchanged: never sleeps, never
+spins, takes only leaf locks (`g_cons_drain.lock`; `g_cons_tx.lock`, which
+nests only `g_uart_imsc_lock`) and wakes outside them -- legal from IRQ context
+and under any lock ordered above those (every `g_proc_table_lock` acquisition
+in `proc.c` is irqsave). Pre-arm the push falls through to the direct bounded
+`uart_putc`, so boot output is byte-identical. Deliberately NOT capture-aware
+(unlike the emits): the 128-byte echo-capture buffer exists so a test can
+assert exactly what was *echoed*.
+
+**Why #126 exists (unchanged).** `uart_putc`'s #67 bound is 20 ms *per byte*
+and does not compose: `proc_reparent_children` emitted the ~90-byte #80 orphan
+line while holding `g_proc_table_lock`, so a stalled host consumer pinned the
+global process-table lock IRQ-masked for ~1.8 s per adoption. **A per-item
+bound is not a per-operation bound** -- and the unit rule is the same lesson
+on the atomicity axis: a per-BYTE lock hold is not a per-LINE one.
+
+Converted callers: `proc_reparent_children` and `proc_fault_terminate`
+(`kernel/proc.c` has zero direct `uart_*` calls and no per-token diagnostic
+calls).
 
 ### Coverage
+
+`cons.tx_unit_diag_line_atomic` -- a line lands contiguous and byte-exact; with
+room = len - 1 it is dropped WHOLE (count unchanged, nothing partial, `dropped`
+grows by exactly len); with room = len it lands whole. `cons.tx_unit_echo_atomic`
+-- the cooked-erase unit `\b \b` lands whole at room 3 and is dropped whole at
+room 2 (capture OFF, the real ring). `cons.tx_unit_smp_no_tear` -- a diag-line
+kthread and a role-writer kthread hammer a STALLED ring from two CPUs with
+64-byte units; the ring is read back (`cons_test_tx_ring_peek`) and parsed as
+frames: every frame is entirely one producer's unit and each producer's
+sequence ascends; SKIP-noted on one CPU; an overlap witness reports whether the
+interleave was exercised. Sabotages (each -> one named red): S1 diag emit per
+byte, S2 writer per byte, S3 echo per byte.
 
 `proc.orphan_diag_uses_cons_path` pins #126, by the #76 method: arm the drain,
 force a real orphan adoption, require the line verbatim in the tap. The
@@ -629,8 +716,8 @@ runtime witness.
 
 Its **back-pressure** path is a different matter, and `cons.tx_room_wait_and_deadline`
 (the #75-audit F2 item, owed at the close and now discharged) covers it. The role
-test above runs under echo capture, which short-circuits `cons_emit_wait` *before*
-`cons_tx_push_nowait` — so it never reaches the ring, and the two legs that only
+test above runs under echo capture, which short-circuits the writer's emit *before*
+`cons_tx_push_bulk` — so it never reaches the ring, and the two legs that only
 run when the ring fills had no deterministic proof at all:
 
 - **(A) the #67 deadline.** `uart_test_tx_stall(true)` emulates a stalled host
@@ -646,8 +733,8 @@ run when the ring fills had no deterministic proof at all:
   those two. The wake under test is therefore production's own `freed`-gated
   `wakeup()`, not a re-implementation in the test.
 
-Both legs are **revert-probed against production code**: making `cons_emit_wait`
-drop instantly instead of parking fails (A)'s elapsed assertion, and deleting the
+Both legs are **revert-probed against production code**: making the writer's emit
+(then `cons_emit_wait`, now `cons_emit_bulk_wait`) drop instantly instead of parking fails (A)'s elapsed assertion, and deleting the
 `if (freed) wakeup(...)` from `cons_tx_drain_from_irq` fails (B).
 
 Two properties of the test are deliberate rather than incidental. It **discards**
@@ -688,8 +775,9 @@ pointing at data loss that did not happen.
 | `rx_bp_flush` | `cons_rx_input`, cooked Enter-flush | the whole `line_len + 1` flush did not fit, so it was refused **as a unit** with the line left intact. Re-offering the terminator after a drain delivers the whole line. |
 | `rx_drop_line` | `cons_rx_input`, line assembly | **a real drop:** a byte past `CONS_LINE_MAX`, un-echoed. Deliberately still a drop -- back-pressuring a fixed-size line buffer would wedge on a user who never presses Enter. |
 | `rx_drop_ring` | `cons_ring_push` after the room check | **must stay zero.** A push failed after the under-lock room check authorized it, i.e. `cons_ring_room()` disagrees with the ring. An invariant *witness*, not a diagnostic: it has no reachable driver by construction, and that is the claim it exists to falsify. |
+| `rx_drop_modeflush` | `cons_deliver_partial_line_locked` (a consctl write clearing ICANON) | **a real drop:** bytes of the half-assembled canonical line that the mode write delivered but the ring could not take. A mode write cannot back-pressure (no producer holds the bytes). Reachable by ordinary type-ahead volume — the shell re-arms PROMPT_MODE before it drains, so a ring's worth of pasted complete lines into a non-reading job plus a trailing partial line meets a full ring at the re-arm — not only by a wedged reader. Note the shape: the fragment's TAIL is lost and the terminator then arrives as a raw byte, so a truncated command RUNS — #95's exact shape, now counted and named. Positive control: `cons.rx_drop_counters` legs (d) (512 filler + 10 pending → 10 counted here, `rx_drop_ring` 0, filler intact) and (e) (507 + 10 → the 5-byte PREFIX delivered in order, 5 counted). |
 
-Read them at `/ctl/cons` (`cons_rx_counters` / `cons_tx_drops`).
+Read them at `/ctl/cons` (`cons_rx_counters` + `cons_rx_drop_modeflush` / `cons_tx_drops`).
 
 ### The one-shot report
 
@@ -700,7 +788,7 @@ relay -- the drop sites run in IRQ context under `g_cons.lock` and must not
 emit themselves):
 
 ```
-cons: INPUT DROP (#95) line=3 ring=0 (bp raw=0 flush=12) -- further drops counted silently at /ctl/cons
+cons: INPUT DROP (#95) line=3 ring=0 modeflush=0 (bp raw=0 flush=12) -- further drops counted silently at /ctl/cons
 ```
 
 **Only a real loss arms the latch (#129).** The two back-pressure counters ride

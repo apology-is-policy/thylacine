@@ -115,8 +115,11 @@ impl Stdout { pub fn is_terminal(&self) -> bool {
 1. **ls `--color=auto`** (the motivating case): `ls::stdout_is_console()` becomes
    `io::stdout().is_terminal()`. Then **flip the ls default from `Always` to
    `Auto`** -- interactive `ls` is colored+boxed, `ls | cat` and `ls > f` are
-   byte-clean automatically. (Today `stdout_is_console()` is a `true` stub; this
-   is the exact swap point.)
+   byte-clean automatically. **LANDED at H-1c-2 (2026-09-01)**: every
+   `stdout_is_console()` stub in the tree (18 bins) now calls
+   `libthyla_rs::stdout_is_terminal()`; ls's default flipped to `Auto` (the
+   new `ps` is born `Auto`); the in-guest proof is coreutil-smoke's
+   `ls auto pipe clean` legs (piped `ls` asserts zero ESC bytes).
 2. **The ls REALM column, sharper** (optional, costs an `open` per entry): label
    `disk` (`9`) / `boot` (`r`) / `dev` (`c`/`d`) / `graft` (`p`/`s`/`H`/...)
    precisely from the entry's `dc`, instead of inferring `graft` from an fstat
@@ -138,3 +141,48 @@ impl Stdout { pub fn is_terminal(&self) -> bool {
 Spec only (aux). The kernel syscall + the libthyla-rs wrapper are main-track; the
 ls + tool wiring is aux (trivial, gated on the wrapper). Until it lands, ls is
 color-on by default with `--color=never` for a clean pipe.
+
+## AS-BUILT (H-1, 2026-09-01 -- the Beacon arc pulled this forward; BEACON.md 12.4)
+
+Landed as specified, with the following deltas and decisions, each verified
+against the tree at implementation time:
+
+- **Number 80 held.** The table gap between `SYS_CLOCK_SETTIME` (79) and
+  `SYS_WEFT_SHARE` (81) was still reserved; `SYS_FD_DEVCLASS = 80`
+  (`kernel/include/thylacine/syscall.h`).
+- **The handler is simpler than the sketch**: `struct Spoor` carries a cached
+  `int dc` ("matches dev->dc; cached for cheap dispatch", set at
+  `spoor_alloc`), so no `c->dev` indirection is needed. The C-2 lesson holds
+  by construction: the dc is the KERNEL's field, never a server-supplied
+  stat/qid bit -- a 9P server cannot forge "I am the console."
+- **The June dc table above is STALE in two rows -- the as-built bestiary**
+  (from `kernel/include/thylacine/dev.h`): `c` devcons, `0` devnull, `z`
+  devzero, `f` devfull, **`r` devrandom** (NOT ramfs), `n` devnotes, `p`
+  devproc, **`C` devctl** (NOT consctl -- consctl is a devdev LEAF), **`m`
+  devramfs**, `d` devdev, `H` devhw, `P` devpci, `E` devenv, `9` dev9p,
+  **`|` devpipe** (`DEVPIPE_DC`, `kernel/include/thylacine/pipe.h`) -- so the
+  test plan's `pipe != 'c'` holds structurally, `-` devnone.
+- **The console normalization, DECIDED + BUILT**: every `/dev` leaf is a
+  devdev Spoor (dc `'d'`, leaf kind in `qid.path`), so the handler routes
+  `'d'` through `devdev_fd_devclass()` (`kernel/devdev.c`), which answers
+  `'c'` for the cons DATA leaf ONLY. consctl/consdrain/consfeed/winsize and
+  every other leaf stay `'d'` (control-plane files are not the terminal).
+  `is_terminal == (dc == 'c')` is exact across both mint paths
+  (`SYS_CONSOLE_OPEN` and a walked `/dev/cons`).
+- **O_PATH visibility (deliberate)**: a `T_OPATH` open never calls `Dev.open`
+  (both the single-hop and stalk paths guard on `SYS_WALK_OPEN_OPATH`), so an
+  unattached Proc can query `/dev/cons`'s class through an OPATH fd. This is
+  introspection only -- the fd is `CWALKONLY` (#81: byte I/O rejected) and the
+  I-27 gate still guards every open-for-I/O -- so nothing is conferred; noted
+  so the audit does not rediscover it.
+- **Errno**: `-T_E_BADF` (9, POSIX-pinned) rather than the bare `-1` of the
+  fd2path era.
+- **Wrappers**: `t_fd_devclass` in BOTH `usr/lib/libt/include/thyla/syscall.h`
+  (C; joey) and `usr/lib/libthyla-rs/src/lib.rs` (+ safe `fd_devclass(fd) ->
+  Option<u8>` and `stdout_is_terminal()`).
+- **Tests**: `devdev.fd_devclass` (kernel: the normalization + the 'd'
+  control one variable away) + the joey `probe H1` E2E (cons 'c' / null 'd' /
+  pipe '|' / ramfs 'm' / closed-fd negative) through the REAL syscall.
+- **The sibling landed with it**: the consctl `beacon <tier>` verb
+  (ARCH 23.5.4) -- the other half of the Beacon emission gate this syscall
+  serves.

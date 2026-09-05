@@ -1,0 +1,50 @@
+#!/usr/bin/expect -f
+# Warp-6 V-3a gate run on the GL host: boot the virtio-gpu-gl (virgl) device,
+# log in, run `warp-prove ring` -- the coherent-ring mechanism proof:
+#   - the ring round-trip: mint (ring/new) + weft-map + doorbell (kick) + the
+#     feedback slot (guest poll) + the blocking ring/<ridx>/fence;
+#   - F2 geometry: zero/unaligned/over-max/out-of-range/duplicate ring_idx are
+#     refused, never clamped;
+#   - I-45: a ctx id this conn does not own resolves nothing;
+#   - I-9: an injected mid-drain head advance is DELIVERED with the re-scan and
+#     LOST without it (the ring-noscan buggy arm), then recovered.
+# The prover's own asserts carry the verdict; this script delivers a virgl
+# console and requires its PASS line.
+#
+# WHY the GL host and not local: minting a warp ctx (which the ring lives
+# under) requires virgl; the local 2D device returns E_OPNOTSUPP and the prover
+# SKIPs. The mechanism can only be exercised on a virgl device.
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport there).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+set ::env(THYLACINE_DISPLAY) egl-headless
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+file mkdir $work
+file delete -force $work/pool-ring.img $work/disk-ring.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-ring.img
+exec cp $repo/build/disk.img $work/disk-ring.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-ring.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-ring.img
+
+source $repo/tools/interactive/lib.exp
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# The ring battery parks on the fence file and drives several kick round trips;
+# give it a real window. Floor, not stomp (a caller's larger value passes).
+if {$lc_cmd_timeout < 180} { set lc_cmd_timeout 180 }
+lc_run_expect_hardfail "warp-prove ring" "WARP-RING PASS" "WARP-RING FAIL"
+
+lc_pass "warp-ring: coherent-ring round-trip + F2 + I-45 + I-9 re-scan (the V-3a gate)"

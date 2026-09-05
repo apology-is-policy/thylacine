@@ -1,0 +1,1211 @@
+From 150990af6e2cabf46f060250c2974f1b28269c0b Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Wed, 26 Aug 2026 15:45:22 +0200
+Subject: [PATCH 17/23] Thylacine Warp vkQuake-arc W-1: offscreen pipeline
+ witness + F9 mem-reclaim convergence
+
+The multi-queue chunk left four items tracked to the vkQuake arc's first
+sub-chunk (W-1, operator-voted 2026-08-26). This lands the mesa half of
+three, plus the first pipeline-class traffic through the venus transport.
+
+thylacine_prove.c (test only) gains three witness steps:
+  - Step 6b: the F3 two-timeline interleave. Fenced pattern copies on two
+    logical devices (V3D is 1 queue family x 1 queue, so timeline 2 is only
+    reachable via a second logical device), waited in REVERSE submit order.
+    The multi-queue chunk shipped the per-timeline retirement arithmetic
+    sound-by-POLICY (the copy proof rode one timeline; the lift leg never
+    submitted); this makes it sound-by-WITNESS -- a misrouted retirement
+    leaves the stranded lane's timeline ledger short and its park unfillable
+    (a hang caught by the gate timeout).
+  - Step 8: the offscreen SPIR-V triangle -- the FIRST render-pass / pipeline
+    / draw traffic through venus (everything prior is transfer-class). A
+    64x64 R8G8B8A8 attachment is cleared blue, an embedded triangle is
+    rasterized red, the attachment is copied to a host-visible buffer, and
+    BOTH pixel classes are asserted (center red AND corner blue -- the pair
+    is the control: all-red = clear lost, all-blue = draw lost).
+  - Step 9: the discriminating slot-exhaustion witness. Step 7's 3-slot cap
+    cycle cannot see a burned handle in a 256-slot space (the tracked F2
+    gap). Allocate 4 KiB memories until refusal, three cycles with full frees
+    between; cycles 2 and 3 must refuse at EQUAL counts.
+
+warp_client.c: the F9 convergence. warp_mem_new's maybe-installed failure arm
+(-EINTR maybe-commits, info-read failures, and E_IO device faults under
+GLOBAL hostmem pressure -- the tracked F9 wedge) previously kept the handle
+marked, a bounded leak a cross-client E_IO loop could drive to the 256-slot
+ceiling. It now resolves the ambiguity with a best-effort mem/<handle>/ctl
+destroy (warp_mem_reclaim): a full write confirms teardown, -ENOENT asserts
+absence, either freeing the handle; only a reclaim whose own transport fails
+keeps it. The duplicate -EINVAL arm NEVER reclaims -- there the slot is a
+live earlier mint, and a destroy would tear down real memory (the ring-F1
+wedge's data-loss twin). ENOENT==2 pinned kernel-registry == p9::E_NOENT ==
+musl sysroot. Scoped to the conn's own ctx, under the transport mutex.
+
+vn_renderer_thylacine.c: comment only.
+
+Every graphics entrypoint the prove adds is a defined T symbol in
+libvulkan_virtio.a (nm census -- the loader-less direct-symbol link holds).
+Built clean on thyla-keep; witnessed GREEN on thyla-pi/KVM real V3D 4.2.14
+(offscreen triangle center-red/corner-blue, two-timeline interleave, slot-
+exhaustion 255/255/255, PASS).
+
+Audit (holotype-reviewer Fable 5 max, MODEL start==end, the F9 device-memory
+surface / I-45): 0 P0 / 0 P1 / 0 P2 / 4 P3 -- CLEAN. Three P3s were
+comment-accuracy fixes folded into this commit (F1 the reclaim open-leg
+-ENOENT is kernel-manufactured hence best-effort, residue bounded +
+self-healing; F2 a stale sibling doc block; F4 a misroute is a park-hang not
+a 10 s FAIL). F3 (the reclaim path has no discriminating witness) stays
+OWED -- a test-mode mem-inject lever is the follow-on. All three fixes are
+comment-only, so the witnessed binary is unchanged.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../winsys/virgl/thylacine/warp_client.c      |  83 +-
+ .../winsys/virgl/thylacine/warp_client.h      |  36 +-
+ src/virtio/vulkan/thylacine_prove.c           | 881 +++++++++++++++++-
+ src/virtio/vulkan/vn_renderer_thylacine.c     |  43 +-
+ 4 files changed, 992 insertions(+), 51 deletions(-)
+
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index 7b4d60a..857bb8e 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -520,6 +520,53 @@ int warp_ring_destroy(struct warp_conn *w, uint32_t ridx)
+ 
+ /* ---- Warp-6 V-3b-3c device memory (HOST_VISIBLE VkDeviceMemory) ---- */
+ 
++/* The F9 convergence (vkQuake-arc W-1): on a MAYBE-installed mint failure,
++ * resolve the ambiguity with a best-effort destroy instead of leaking the
++ * handle. Returns 1 (free) iff the server CONFIRMED the teardown (a full
++ * "destroy" write -- the server's success Rwrite always carries the full
++ * count, and wmem_destroy is the only reachable verb) OR asserted absence.
++ *
++ * The two -ENOENT legs are NOT equally exact, and only the write leg matters
++ * for correctness. The WRITE-leg -ENOENT is exact: dev9p_write propagates the
++ * raw Rlerror ecode, so it is genuinely wmem_destroy's owner-scan miss. The
++ * OPEN-leg -ENOENT is BEST-EFFORT: the kernel's Dev.walk vtable has no errno
++ * channel, so dev9p_walk collapses EVERY walk failure (a server Rlerror of any
++ * ecode, a dead transport, a kernel OOM) to NULL, which stalk reports as
++ * T_E_NOENT. So a mint that installed the slot, then failed its info read for
++ * an environmental reason (server fid-table full, transport pressure), can see
++ * reclaim's open fail for the SAME reason and manufacture a -ENOENT -> free a
++ * bit whose slot IS installed. That residue is BOUNDED and self-healing, not a
++ * leak-to-wedge: the freed bit is the lowest free index, so the next
++ * vkAllocateMemory re-hands it, the mint hits `taken` FIRST (the F8 order) ->
++ * E_INVAL -> rc=-1 -> the bit re-marks, costing exactly one spurious
++ * VK_ERROR_OUT_OF_DEVICE_MEMORY. The DESTRUCTIVE direction stays closed
++ * regardless (below).
++ *
++ * NEVER call this on the duplicate -EINVAL arm: there the slot is LIVE and
++ * belongs to an earlier successful mint, and this destroy would tear down real
++ * memory under it (the ring-F1 wedge's data-loss twin). The reclaim sites
++ * (info-read-fail / malformed-info / non-ENOMEM-non-EINVAL write failure) can
++ * only ever name the just-minted orphan's own handle -- a live earlier mint at
++ * the same handle would have failed THIS mint with E_INVAL before reaching
++ * here -- so a confirmed teardown tears down only the failed allocation's own
++ * slot. */
++static int warp_mem_reclaim(struct warp_conn *w, uint32_t handle)
++{
++   char path[64];
++   static const char verb[] = "destroy";
++   long fd, n;
++
++   snprintf(path, sizeof(path), "ctx/%u/mem/%u/ctl", w->ctx, handle);
++   fd = open_at(w->root, path, T_OWRITE);
++   if (fd < 0)
++      return (fd == -ENOENT) ? 1 : -1; /* best-effort: see the open-leg note */
++   n = t_write(fd, verb, sizeof(verb) - 1);
++   t_close(fd);
++   if (n == (long)(sizeof(verb) - 1) || n == -ENOENT)
++      return 1;
++   return -1;
++}
++
+ int warp_mem_new(struct warp_conn *w, uint32_t handle, uint32_t bytes,
+                  uint64_t mem_id, uint32_t *res_id_out)
+ {
+@@ -533,17 +580,22 @@ int warp_mem_new(struct warp_conn *w, uint32_t handle, uint32_t bytes,
+     * Ok path of the mem/new Twrite. The decision turns on WHICH failure it was
+     * (V-3b-3c-2b F5/F6 -- the round-1 "refused Twrite -> free" was too coarse):
+     *   rc=1  (free)  = provably not installed: a wedged/ctx-less conn, an open
+-    *                   failure (the Twrite never reached the server), or the
++    *                   failure (the Twrite never reached the server), the
+     *                   routine -ENOMEM holistic-cap refusal (Rlerror = nothing
+-    *                   installed; keeping F2's "cap loop must not burn slots").
+-    *   rc=-1 (keep)  = MAYBE installed: a duplicate handle -EINVAL (the slot IS
+-    *                   installed -- e.g. a concurrent-alloc race loser, F6), an
+-    *                   -EINTR whose Twrite may have committed before the ack
+-    *                   (F5), an info-read failure, any unrecognized errno. NEVER
+-    *                   free a handle whose server slot may be live (re-handing it
+-    *                   collides with the still-installed slot, the ring-F1 wedge).
++    *                   installed; keeping F2's "cap loop must not burn slots"),
++    *                   OR a maybe-installed failure RESOLVED by warp_mem_reclaim
++    *                   (the F9 convergence: server asserted absence or confirmed
++    *                   the teardown -- covers E_IO device faults under global
++    *                   hostmem pressure, -EINTR maybe-commits, info-read fails).
++    *   rc=-1 (keep)  = the residue: the duplicate handle -EINVAL (the slot IS
++    *                   installed and LIVE -- a reclaim there would destroy an
++    *                   earlier mint's real memory, so it is never attempted;
++    *                   the transport mutex makes this arm defense-in-depth
++    *                   only, F6/F8), or a reclaim whose own transport failed
++    *                   (bounded leak, ctx-death reaped).
+     *   rc=0          = success.
+-    * Converging the rc<0 arm with a destroy is the ring/mem F2 follow-on. This
++    * The ring twin (warp_ring_create_host3d) is NOT converged -- its failures
++    * are device faults, its leak stays documented-bounded (tracked). This
+     * relies on dev9p propagating the real Rlerror ecode (t_write returns the
+     * negative errno, never a collapsed -1). */
+    if (w->wedged || w->ctx == 0)
+@@ -566,18 +618,23 @@ int warp_mem_new(struct warp_conn *w, uint32_t handle, uint32_t bytes,
+       size_t vlen = strlen(verb);
+       long n = t_write(fd, verb, vlen);
+       t_close(fd);
+-      if (n != (long)vlen)
+-         return (n == -ENOMEM) ? 1 : -1;
++      if (n != (long)vlen) {
++         if (n == -ENOMEM)
++            return 1;  /* holistic-cap refusal: provably nothing installed */
++         if (n == -EINVAL)
++            return -1; /* duplicate: the slot is LIVE -- never reclaim */
++         return warp_mem_reclaim(w, handle); /* F9: resolve maybe-installed */
++      }
+    }
+ 
+    /* res_id (the value the vkAllocateMemory command names in resourceId) reads
+     * back from mem/<handle>/info: "res <id> size <sz>". */
+    snprintf(path, sizeof(path), "ctx/%u/mem/%u/info", w->ctx, handle);
+    if (open_read_snapshot(w->root, path, info, sizeof(info)) <= 0)
+-      return -1; /* slot installed but unreadable -> keep the handle marked */
++      return warp_mem_reclaim(w, handle); /* installed but unreadable */
+    rid = parse_field(info, "res");
+    if (rid <= 0)
+-      return -1;
++      return warp_mem_reclaim(w, handle); /* installed but info malformed */
+ 
+    *res_id_out = (uint32_t)rid;
+    return 0;
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index 29c9c3e..7e43f94 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -203,20 +203,28 @@ int warp_ring_destroy(struct warp_conn *w, uint32_t ridx);
+  * the backing server-side (the disclosure floor), so the caller MUST mint at
+  * vkAllocateMemory time, before any device write to mem_id -- a lazy mint after
+  * a GPU copy INTO the memory would zero the results (server audit F4).
+- * Three-valued return (V-3b-3c-2b F2, refined F5/F6): 0 = success
+- * (+ *res_id_out). 1 = failed, server slot provably NOT installed -> the caller
+- * SHOULD free its handle: a wedged/ctx-less conn, an open failure (the Twrite
+- * never reached the server), or the routine -ENOMEM holistic-cap refusal (the
+- * Rlerror means nothing was installed). -1 = failed, slot MAYBE installed -> the
+- * caller MUST keep the handle marked (else a re-handed handle collides with the
+- * still-installed slot, the ring-F1 wedge): a duplicate handle -EINVAL (the slot
+- * IS installed -- e.g. a concurrent-alloc race loser, F6), an -EINTR whose
+- * Twrite may have committed before the ack (F5 -- LATENT until native readers
+- * become caught-interruptible, the planned 11c), an info-read failure, or any
+- * unrecognized errno. Freeing on 1 keeps a memory-pressure loop from burning the
+- * 256-slot space on routine cap refusals; keeping on everything else preserves
+- * the two-sided guest-handle <-> server-slot invariant. Requires dev9p to
+- * propagate the real Rlerror ecode (t_write returns the negative errno). */
++ * Three-valued return (V-3b-3c-2b F2, refined F5/F6; F9-converged at the
++ * vkQuake-arc W-1): 0 = success (+ *res_id_out). 1 = failed, server slot
++ * provably NOT installed -> the caller SHOULD free its handle: a wedged/
++ * ctx-less conn, an open failure (the Twrite never reached the server), the
++ * routine -ENOMEM holistic-cap refusal (the Rlerror means nothing was
++ * installed), or a maybe-installed failure RESOLVED by the internal reclaim
++ * (a best-effort mem/<h>/ctl destroy whose FULL WRITE confirms the teardown,
++ * or whose -ENOENT asserts absence -- exact on the write leg, best-effort on
++ * the open leg since dev9p_walk collapses any walk failure to a manufactured
++ * -ENOENT; the residue there is one self-healing spurious alloc failure, NEVER
++ * a live-slot free -- see warp_mem_reclaim; covers E_IO device faults under
++ * global hostmem pressure [F9], -EINTR maybe-commits [F5], info-read failures).
++ * -1 = failed, keep the handle marked (else a re-handed handle collides with
++ * the still-installed slot, the ring-F1 wedge). The -1 set is now only: the
++ * duplicate handle -EINVAL (the slot IS installed and LIVE -- reclaiming it
++ * would destroy an earlier mint's memory, so it is never attempted; with the
++ * transport mutex this arm is defense-in-depth, F6/F8), or a reclaim whose
++ * own transport failed (bounded leak, ctx-death reaped). Freeing on 1 keeps
++ * a memory-pressure loop from burning the 256-slot space; keeping on -1
++ * preserves the two-sided guest-handle <-> server-slot invariant. Requires
++ * dev9p to propagate the real Rlerror ecode (t_write returns the negative
++ * errno). */
+ int warp_mem_new(struct warp_conn *w, uint32_t handle, uint32_t bytes,
+                  uint64_t mem_id, uint32_t *res_id_out);
+ 
+diff --git a/src/virtio/vulkan/thylacine_prove.c b/src/virtio/vulkan/thylacine_prove.c
+index 79e5072..522b1bc 100644
+--- a/src/virtio/vulkan/thylacine_prove.c
++++ b/src/virtio/vulkan/thylacine_prove.c
+@@ -113,6 +113,303 @@ vn_WaitForFences(VkDevice, uint32_t, const VkFence *, VkBool32, uint64_t);
+ extern VKAPI_ATTR VkResult VKAPI_CALL
+ vn_EnumerateDeviceExtensionProperties(VkPhysicalDevice, const char *,
+                                       uint32_t *, VkExtensionProperties *);
++/* The W-1 offscreen-pipeline witness (vkQuake arc): the graphics-class
++ * entrypoints. Every one below is a defined T symbol in libvulkan_virtio.a
++ * (nm census on the built archive -- the link is the census; the flat
++ * CreateRenderPass / CmdBeginRenderPass / CmdCopyImageToBuffer forms exist
++ * here, unlike the buffer/memory family above). */
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateImage(VkDevice, const VkImageCreateInfo *,
++               const VkAllocationCallbacks *, VkImage *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyImage(VkDevice, VkImage, const VkAllocationCallbacks *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_GetImageMemoryRequirements2(VkDevice,
++                               const VkImageMemoryRequirementsInfo2 *,
++                               VkMemoryRequirements2 *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_BindImageMemory2(VkDevice, uint32_t, const VkBindImageMemoryInfo *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateImageView(VkDevice, const VkImageViewCreateInfo *,
++                   const VkAllocationCallbacks *, VkImageView *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyImageView(VkDevice, VkImageView, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateRenderPass(VkDevice, const VkRenderPassCreateInfo *,
++                    const VkAllocationCallbacks *, VkRenderPass *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyRenderPass(VkDevice, VkRenderPass, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateFramebuffer(VkDevice, const VkFramebufferCreateInfo *,
++                     const VkAllocationCallbacks *, VkFramebuffer *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyFramebuffer(VkDevice, VkFramebuffer, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateShaderModule(VkDevice, const VkShaderModuleCreateInfo *,
++                      const VkAllocationCallbacks *, VkShaderModule *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyShaderModule(VkDevice, VkShaderModule,
++                       const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreatePipelineLayout(VkDevice, const VkPipelineLayoutCreateInfo *,
++                        const VkAllocationCallbacks *, VkPipelineLayout *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyPipelineLayout(VkDevice, VkPipelineLayout,
++                         const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateGraphicsPipelines(VkDevice, VkPipelineCache, uint32_t,
++                           const VkGraphicsPipelineCreateInfo *,
++                           const VkAllocationCallbacks *, VkPipeline *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyPipeline(VkDevice, VkPipeline, const VkAllocationCallbacks *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdBeginRenderPass(VkCommandBuffer, const VkRenderPassBeginInfo *,
++                      VkSubpassContents);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdEndRenderPass(VkCommandBuffer);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdBindPipeline(VkCommandBuffer, VkPipelineBindPoint, VkPipeline);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdDraw(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdCopyImageToBuffer(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer,
++                        uint32_t, const VkBufferImageCopy *);
++
++/* The W-1 triangle shaders, embedded as spirv-val-clean words. Generated
++ * once with glslangValidator -V --vn (regenerate by pasting the GLSL from
++ * the comments into tri.vert/tri.frag):
++ *   vert: gl_Position = vec4(pos[gl_VertexIndex], 0, 1) over the const
++ *         array {(0,-0.5), (0.5,0.5), (-0.5,0.5)} -- a centered triangle
++ *         spanning x in [-0.25, 0.25] at y=0, so NDC (0,0) is inside and
++ *         every framebuffer corner is outside.
++ *   frag: location-0 out = vec4(1, 0, 0, 1) -- solid red. */
++static const uint32_t prove_tri_vs[] = {
++   0x07230203,0x00010000,0x0008000b,0x00000028,0x00000000,0x00020011,0x00000001,0x0006000b,
++   0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
++   0x0007000f,0x00000000,0x00000004,0x6e69616d,0x00000000,0x0000000d,0x0000001b,0x00030003,
++   0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,0x00000000,0x00060005,0x0000000b,
++   0x505f6c67,0x65567265,0x78657472,0x00000000,0x00060006,0x0000000b,0x00000000,0x505f6c67,
++   0x7469736f,0x006e6f69,0x00070006,0x0000000b,0x00000001,0x505f6c67,0x746e696f,0x657a6953,
++   0x00000000,0x00070006,0x0000000b,0x00000002,0x435f6c67,0x4470696c,0x61747369,0x0065636e,
++   0x00070006,0x0000000b,0x00000003,0x435f6c67,0x446c6c75,0x61747369,0x0065636e,0x00030005,
++   0x0000000d,0x00000000,0x00060005,0x0000001b,0x565f6c67,0x65747265,0x646e4978,0x00007865,
++   0x00050005,0x0000001e,0x65646e69,0x6c626178,0x00000065,0x00030047,0x0000000b,0x00000002,
++   0x00050048,0x0000000b,0x00000000,0x0000000b,0x00000000,0x00050048,0x0000000b,0x00000001,
++   0x0000000b,0x00000001,0x00050048,0x0000000b,0x00000002,0x0000000b,0x00000003,0x00050048,
++   0x0000000b,0x00000003,0x0000000b,0x00000004,0x00040047,0x0000001b,0x0000000b,0x0000002a,
++   0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,
++   0x00040017,0x00000007,0x00000006,0x00000004,0x00040015,0x00000008,0x00000020,0x00000000,
++   0x0004002b,0x00000008,0x00000009,0x00000001,0x0004001c,0x0000000a,0x00000006,0x00000009,
++   0x0006001e,0x0000000b,0x00000007,0x00000006,0x0000000a,0x0000000a,0x00040020,0x0000000c,
++   0x00000003,0x0000000b,0x0004003b,0x0000000c,0x0000000d,0x00000003,0x00040015,0x0000000e,
++   0x00000020,0x00000001,0x0004002b,0x0000000e,0x0000000f,0x00000000,0x00040017,0x00000010,
++   0x00000006,0x00000002,0x0004002b,0x00000008,0x00000011,0x00000003,0x0004001c,0x00000012,
++   0x00000010,0x00000011,0x0004002b,0x00000006,0x00000013,0x00000000,0x0004002b,0x00000006,
++   0x00000014,0xbf000000,0x0005002c,0x00000010,0x00000015,0x00000013,0x00000014,0x0004002b,
++   0x00000006,0x00000016,0x3f000000,0x0005002c,0x00000010,0x00000017,0x00000016,0x00000016,
++   0x0005002c,0x00000010,0x00000018,0x00000014,0x00000016,0x0006002c,0x00000012,0x00000019,
++   0x00000015,0x00000017,0x00000018,0x00040020,0x0000001a,0x00000001,0x0000000e,0x0004003b,
++   0x0000001a,0x0000001b,0x00000001,0x00040020,0x0000001d,0x00000007,0x00000012,0x00040020,
++   0x0000001f,0x00000007,0x00000010,0x0004002b,0x00000006,0x00000022,0x3f800000,0x00040020,
++   0x00000026,0x00000003,0x00000007,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,
++   0x000200f8,0x00000005,0x0004003b,0x0000001d,0x0000001e,0x00000007,0x0004003d,0x0000000e,
++   0x0000001c,0x0000001b,0x0003003e,0x0000001e,0x00000019,0x00050041,0x0000001f,0x00000020,
++   0x0000001e,0x0000001c,0x0004003d,0x00000010,0x00000021,0x00000020,0x00050051,0x00000006,
++   0x00000023,0x00000021,0x00000000,0x00050051,0x00000006,0x00000024,0x00000021,0x00000001,
++   0x00070050,0x00000007,0x00000025,0x00000023,0x00000024,0x00000013,0x00000022,0x00050041,
++   0x00000026,0x00000027,0x0000000d,0x0000000f,0x0003003e,0x00000027,0x00000025,0x000100fd,
++   0x00010038
++};
++static const uint32_t prove_tri_fs[] = {
++   0x07230203,0x00010000,0x0008000b,0x0000000d,0x00000000,0x00020011,0x00000001,0x0006000b,
++   0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
++   0x0006000f,0x00000004,0x00000004,0x6e69616d,0x00000000,0x00000009,0x00030010,0x00000004,
++   0x00000007,0x00030003,0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,0x00000000,
++   0x00030005,0x00000009,0x0000006f,0x00040047,0x00000009,0x0000001e,0x00000000,0x00020013,
++   0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,0x00040017,
++   0x00000007,0x00000006,0x00000004,0x00040020,0x00000008,0x00000003,0x00000007,0x0004003b,
++   0x00000008,0x00000009,0x00000003,0x0004002b,0x00000006,0x0000000a,0x3f800000,0x0004002b,
++   0x00000006,0x0000000b,0x00000000,0x0007002c,0x00000007,0x0000000c,0x0000000a,0x0000000b,
++   0x0000000b,0x0000000a,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,
++   0x00000005,0x0003003e,0x00000009,0x0000000c,0x000100fd,0x00010038
++};
++
++/* Create a host-visible|coherent copy buffer: buffer + memory + bind. On
++ * failure, -1 with partially-created objects left standing -- every caller
++ * FAILs the whole prove there, and the instance teardown (ctx death) reaps
++ * server-side (the prove's standing failure-arm posture). */
++static int
++mk_copybuf(VkDevice dev, const VkPhysicalDeviceMemoryProperties *mp,
++           VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buf,
++           VkDeviceMemory *mem)
++{
++   const VkBufferCreateInfo bci = {
++      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++      .size = size,
++      .usage = usage,
++      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
++   };
++   *buf = VK_NULL_HANDLE;
++   *mem = VK_NULL_HANDLE;
++   if (vn_CreateBuffer(dev, &bci, NULL, buf) != VK_SUCCESS)
++      return -1;
++   const VkBufferMemoryRequirementsInfo2 bmri = {
++      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
++      .buffer = *buf,
++   };
++   VkMemoryRequirements2 req2 = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
++   };
++   vn_GetBufferMemoryRequirements2(dev, &bmri, &req2);
++   int t = -1;
++   for (uint32_t i = 0; i < mp->memoryTypeCount; i++) {
++      if (!(req2.memoryRequirements.memoryTypeBits & (1u << i)))
++         continue;
++      const VkMemoryPropertyFlags pf = mp->memoryTypes[i].propertyFlags;
++      if ((pf & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++          (pf & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
++         t = (int)i;
++         break;
++      }
++   }
++   if (t < 0)
++      return -1;
++   const VkDeviceSize asize = req2.memoryRequirements.size > size
++                                 ? req2.memoryRequirements.size
++                                 : size;
++   const VkMemoryAllocateInfo mai = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++      .allocationSize = asize,
++      .memoryTypeIndex = (uint32_t)t,
++   };
++   if (vn_AllocateMemory(dev, &mai, NULL, mem) != VK_SUCCESS)
++      return -1;
++   const VkBindBufferMemoryInfo bind = {
++      .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
++      .buffer = *buf,
++      .memory = *mem,
++      .memoryOffset = 0,
++   };
++   if (vn_BindBufferMemory2(dev, 1, &bind) != VK_SUCCESS)
++      return -1;
++   return 0;
++}
++
++/* One timeline lane of the F3 interleave witness: a 4 KiB fenced pattern
++ * copy on `queue`, submitted by lane_submit and waited + verified + torn
++ * down by lane_finish. Two lanes on two logical devices ride two fence
++ * timelines; waiting them in reverse submit order is what discriminates a
++ * misrouted per-timeline retirement (the stranded lane's fence times out). */
++struct copy_lane {
++   VkDevice dev;
++   VkQueue queue;
++   uint32_t base; /* pattern word i = base | i */
++   VkBuffer src, dst;
++   VkDeviceMemory src_mem, dst_mem;
++   VkCommandPool pool;
++   VkFence fence;
++};
++
++static int
++lane_submit(struct copy_lane *ln, const VkPhysicalDeviceMemoryProperties *mp)
++{
++   const VkDeviceSize sz = 4096;
++   if (mk_copybuf(ln->dev, mp, sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
++                  &ln->src, &ln->src_mem) != 0 ||
++       mk_copybuf(ln->dev, mp, sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++                  &ln->dst, &ln->dst_mem) != 0)
++      return -1;
++
++   const VkMemoryMapInfo mmi = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
++      .memory = ln->src_mem,
++      .offset = 0,
++      .size = sz,
++   };
++   void *p = NULL;
++   if (vn_MapMemory2(ln->dev, &mmi, &p) != VK_SUCCESS || !p)
++      return -1;
++   for (uint32_t i = 0; i < sz / 4; i++)
++      ((uint32_t *)p)[i] = ln->base | i;
++   const VkMemoryUnmapInfo umi = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
++      .memory = ln->src_mem,
++   };
++   vn_UnmapMemory2(ln->dev, &umi);
++
++   const VkCommandPoolCreateInfo cpci = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
++      .queueFamilyIndex = 0,
++   };
++   if (vn_CreateCommandPool(ln->dev, &cpci, NULL, &ln->pool) != VK_SUCCESS)
++      return -1;
++   const VkCommandBufferAllocateInfo cbai = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++      .commandPool = ln->pool,
++      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++      .commandBufferCount = 1,
++   };
++   VkCommandBuffer cmd = VK_NULL_HANDLE;
++   const VkCommandBufferBeginInfo cbbi = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
++   };
++   const VkBufferCopy region = { .srcOffset = 0, .dstOffset = 0, .size = sz };
++   if (vn_AllocateCommandBuffers(ln->dev, &cbai, &cmd) != VK_SUCCESS ||
++       vn_BeginCommandBuffer(cmd, &cbbi) != VK_SUCCESS)
++      return -1;
++   vn_CmdCopyBuffer(cmd, ln->src, ln->dst, 1, &region);
++   if (vn_EndCommandBuffer(cmd) != VK_SUCCESS)
++      return -1;
++
++   const VkFenceCreateInfo fci = {
++      .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
++   };
++   if (vn_CreateFence(ln->dev, &fci, NULL, &ln->fence) != VK_SUCCESS)
++      return -1;
++   const VkSubmitInfo si = {
++      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++      .commandBufferCount = 1,
++      .pCommandBuffers = &cmd,
++   };
++   return vn_QueueSubmit(ln->queue, 1, &si, ln->fence) == VK_SUCCESS ? 0 : -1;
++}
++
++static int
++lane_finish(struct copy_lane *ln)
++{
++   const VkDeviceSize sz = 4096;
++   if (vn_WaitForFences(ln->dev, 1, &ln->fence, VK_TRUE,
++                        10ull * 1000 * 1000 * 1000) != VK_SUCCESS)
++      return -1;
++   const VkMemoryMapInfo mmi = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
++      .memory = ln->dst_mem,
++      .offset = 0,
++      .size = sz,
++   };
++   void *p = NULL;
++   if (vn_MapMemory2(ln->dev, &mmi, &p) != VK_SUCCESS || !p)
++      return -1;
++   int ok = 0;
++   for (uint32_t i = 0; i < sz / 4; i++)
++      if (((volatile uint32_t *)p)[i] != (ln->base | i)) {
++         ok = -1;
++         break;
++      }
++   const VkMemoryUnmapInfo umi = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
++      .memory = ln->dst_mem,
++   };
++   vn_UnmapMemory2(ln->dev, &umi);
++   vn_DestroyFence(ln->dev, ln->fence, NULL);
++   vn_DestroyCommandPool(ln->dev, ln->pool, NULL);
++   vn_DestroyBuffer(ln->dev, ln->src, NULL);
++   vn_DestroyBuffer(ln->dev, ln->dst, NULL);
++   vn_FreeMemory(ln->dev, ln->src_mem, NULL);
++   vn_FreeMemory(ln->dev, ln->dst_mem, NULL);
++   return ok;
++}
+ 
+ int
+ main(void)
+@@ -723,9 +1020,74 @@ main(void)
+          destroy_instance(instance, NULL);
+          return 1;
+       }
+-      destroy_device(dev2, NULL);
+       printf("venus-prove: second logical device + queue OK (timeline 2 "
+              "acquired -- the multi-queue lift)\n");
++
++      /* Step 6b (vkQuake-arc W-1, the tracked-F3 witness): REAL work on
++       * both timelines, interleaved. Submit a fenced pattern copy on dev1
++       * (timeline 1) WITHOUT waiting, then one on dev2 (timeline 2), then
++       * wait them in REVERSE order (t2 first). V3D is 1 queue family x 1
++       * queue, so the second timeline is only reachable through the second
++       * logical device. The multi-queue chunk shipped the per-timeline
++       * retirement arithmetic sound-by-POLICY (the copy proof rides one
++       * timeline; the lift leg never submitted); this makes it sound-by-
++       * WITNESS: a retirement misrouted onto one counter leaves the other
++       * lane's timeline ledger short, so its lane_finish parks on a fence file
++       * with nothing left in flight -- an UNFILLABLE park. thylacine_wait does
++       * not honor the ns timeout precisely (it is only tested != 0), so the
++       * failure mode is a HANG, not a clean 10 s VK_TIMEOUT: the prove prints
++       * nothing further, the boot-probe's overall timeout goes red, and the
++       * venus-verdict "two-timeline interleave OK" absence arm fires. A
++       * cross-lane data mix-up instead fails the per-lane pattern check
++       * (a clean FAIL line). Both directions are caught; only the misroute's
++       * shape is a hang rather than an in-band failure. */
++      VkQueue q1 = VK_NULL_HANDLE;
++      vk_common_GetDeviceQueue2(device, &qi2, &q1);
++      if (q1 == VK_NULL_HANDLE) {
++         printf("THYLACINE-VENUS-PROVE FAIL: dev1 queue re-fetch NULL\n");
++         destroy_device(dev2, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      struct copy_lane l1 = { .dev = device, .queue = q1,
++                              .base = 0xB1000000u };
++      struct copy_lane l2 = { .dev = dev2, .queue = q2,
++                              .base = 0xB2000000u };
++      if (lane_submit(&l1, &mem) != 0) {
++         printf("THYLACINE-VENUS-PROVE FAIL: timeline-1 lane submit\n");
++         destroy_device(dev2, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      if (lane_submit(&l2, &mem) != 0) {
++         printf("THYLACINE-VENUS-PROVE FAIL: timeline-2 lane submit\n");
++         destroy_device(dev2, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      if (lane_finish(&l2) != 0) {
++         printf("THYLACINE-VENUS-PROVE FAIL: timeline-2 lane (fence wait or "
++                "pattern) -- per-timeline retirement misrouted?\n");
++         destroy_device(dev2, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      if (lane_finish(&l1) != 0) {
++         printf("THYLACINE-VENUS-PROVE FAIL: timeline-1 lane (fence wait or "
++                "pattern) after the t2 wait\n");
++         destroy_device(dev2, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      destroy_device(dev2, NULL);
++      printf("venus-prove: two-timeline interleave OK (fenced copies on t1 "
++             "then t2, waited t2 before t1, both patterns intact -- the F3 "
++             "per-timeline retirement witness)\n");
+    }
+ 
+    /* Step 7 (multi-queue chunk, the F2 witness): drive vkAllocateMemory past
+@@ -793,6 +1155,517 @@ main(void)
+              "ctx cap, freed, realloc'd -- the F2 no-burn proof)\n");
+    }
+ 
++   /* Step 8 (vkQuake-arc W-1): the offscreen PIPELINE witness -- the first
++    * render-pass / SPIR-V / draw traffic through the venus transport.
++    * Everything before this step is transfer-class; vkQuake is pipeline-
++    * class, and generic serialization is an expectation, not a measurement,
++    * until a pipeline crosses. A 64x64 R8G8B8A8 color attachment is cleared
++    * BLUE, the embedded shader pair rasterizes a centered RED triangle, the
++    * attachment is copied to a host-visible buffer (the subpass dependency
++    * orders raster before transfer; finalLayout TRANSFER_SRC), and BOTH
++    * pixel classes are asserted: center = red AND corner = blue. The pair
++    * is the control structure -- an all-red readback (clear lost), an
++    * all-blue one (draw lost), or garbage each fail exactly one arm. */
++   {
++      const uint32_t W = 64, H = 64;
++      const VkImageCreateInfo ici = {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
++         .imageType = VK_IMAGE_TYPE_2D,
++         .format = VK_FORMAT_R8G8B8A8_UNORM,
++         .extent = { W, H, 1 },
++         .mipLevels = 1,
++         .arrayLayers = 1,
++         .samples = VK_SAMPLE_COUNT_1_BIT,
++         .tiling = VK_IMAGE_TILING_OPTIMAL,
++         .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
++                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
++         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
++         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++      };
++      VkImage img = VK_NULL_HANDLE;
++      if (vn_CreateImage(device, &ici, NULL, &img) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateImage\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkImageMemoryRequirementsInfo2 imri = {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
++         .image = img,
++      };
++      VkMemoryRequirements2 ireq2 = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
++      };
++      vn_GetImageMemoryRequirements2(device, &imri, &ireq2);
++      int imt = -1;
++      for (uint32_t i = 0; i < mem.memoryTypeCount; i++)
++         if (ireq2.memoryRequirements.memoryTypeBits & (1u << i)) {
++            imt = (int)i; /* any backing type: the readback crosses via the
++                           * buffer, never a CPU view of the image */
++            break;
++         }
++      if (imt < 0) {
++         printf("THYLACINE-VENUS-PROVE FAIL: no memory type backs the "
++                "color attachment\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkMemoryAllocateInfo imai = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++         .allocationSize = ireq2.memoryRequirements.size,
++         .memoryTypeIndex = (uint32_t)imt,
++      };
++      VkDeviceMemory img_mem = VK_NULL_HANDLE;
++      if (alloc_mem(device, &imai, NULL, &img_mem) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: attachment vkAllocateMemory\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkBindImageMemoryInfo ibind = {
++         .sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,
++         .image = img,
++         .memory = img_mem,
++         .memoryOffset = 0,
++      };
++      if (vn_BindImageMemory2(device, 1, &ibind) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkBindImageMemory2\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkImageViewCreateInfo vci = {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
++         .image = img,
++         .viewType = VK_IMAGE_VIEW_TYPE_2D,
++         .format = VK_FORMAT_R8G8B8A8_UNORM,
++         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
++      };
++      VkImageView view = VK_NULL_HANDLE;
++      if (vn_CreateImageView(device, &vci, NULL, &view) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateImageView\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkAttachmentDescription att = {
++         .format = VK_FORMAT_R8G8B8A8_UNORM,
++         .samples = VK_SAMPLE_COUNT_1_BIT,
++         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
++         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
++         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
++         .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
++         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++         .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++      };
++      const VkAttachmentReference att_ref = {
++         .attachment = 0,
++         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
++      };
++      const VkSubpassDescription subpass = {
++         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
++         .colorAttachmentCount = 1,
++         .pColorAttachments = &att_ref,
++      };
++      const VkSubpassDependency dep = {
++         .srcSubpass = 0,
++         .dstSubpass = VK_SUBPASS_EXTERNAL,
++         .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
++         .dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
++         .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
++         .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++      };
++      const VkRenderPassCreateInfo rpci = {
++         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
++         .attachmentCount = 1,
++         .pAttachments = &att,
++         .subpassCount = 1,
++         .pSubpasses = &subpass,
++         .dependencyCount = 1,
++         .pDependencies = &dep,
++      };
++      VkRenderPass rp = VK_NULL_HANDLE;
++      if (vn_CreateRenderPass(device, &rpci, NULL, &rp) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateRenderPass\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkFramebufferCreateInfo fbci = {
++         .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
++         .renderPass = rp,
++         .attachmentCount = 1,
++         .pAttachments = &view,
++         .width = W,
++         .height = H,
++         .layers = 1,
++      };
++      VkFramebuffer fb = VK_NULL_HANDLE;
++      if (vn_CreateFramebuffer(device, &fbci, NULL, &fb) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateFramebuffer\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkShaderModuleCreateInfo vs_ci = {
++         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
++         .codeSize = sizeof(prove_tri_vs),
++         .pCode = prove_tri_vs,
++      };
++      const VkShaderModuleCreateInfo fs_ci = {
++         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
++         .codeSize = sizeof(prove_tri_fs),
++         .pCode = prove_tri_fs,
++      };
++      VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
++      if (vn_CreateShaderModule(device, &vs_ci, NULL, &vs) != VK_SUCCESS ||
++          vn_CreateShaderModule(device, &fs_ci, NULL, &fs) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateShaderModule (SPIR-V "
++                "rejected?)\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkPipelineLayoutCreateInfo plci = {
++         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
++      };
++      VkPipelineLayout layout = VK_NULL_HANDLE;
++      if (vn_CreatePipelineLayout(device, &plci, NULL, &layout) !=
++          VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreatePipelineLayout\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkPipelineShaderStageCreateInfo stages[2] = {
++         {
++            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
++            .stage = VK_SHADER_STAGE_VERTEX_BIT,
++            .module = vs,
++            .pName = "main",
++         },
++         {
++            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
++            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
++            .module = fs,
++            .pName = "main",
++         },
++      };
++      const VkPipelineVertexInputStateCreateInfo vin = {
++         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
++      };
++      const VkPipelineInputAssemblyStateCreateInfo ia = {
++         .sType =
++            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
++         .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
++      };
++      const VkViewport vp = {
++         .x = 0.0f, .y = 0.0f,
++         .width = (float)W, .height = (float)H,
++         .minDepth = 0.0f, .maxDepth = 1.0f,
++      };
++      const VkRect2D sc = { .offset = { 0, 0 }, .extent = { W, H } };
++      const VkPipelineViewportStateCreateInfo vps = {
++         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
++         .viewportCount = 1,
++         .pViewports = &vp,
++         .scissorCount = 1,
++         .pScissors = &sc,
++      };
++      const VkPipelineRasterizationStateCreateInfo rs = {
++         .sType =
++            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
++         .polygonMode = VK_POLYGON_MODE_FILL,
++         .cullMode = VK_CULL_MODE_NONE,
++         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
++         .lineWidth = 1.0f,
++      };
++      const VkPipelineMultisampleStateCreateInfo ms = {
++         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
++         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
++      };
++      const VkPipelineColorBlendAttachmentState cba = {
++         .blendEnable = VK_FALSE,
++         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
++                           VK_COLOR_COMPONENT_G_BIT |
++                           VK_COLOR_COMPONENT_B_BIT |
++                           VK_COLOR_COMPONENT_A_BIT,
++      };
++      const VkPipelineColorBlendStateCreateInfo cb = {
++         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
++         .attachmentCount = 1,
++         .pAttachments = &cba,
++      };
++      const VkGraphicsPipelineCreateInfo gpci = {
++         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
++         .stageCount = 2,
++         .pStages = stages,
++         .pVertexInputState = &vin,
++         .pInputAssemblyState = &ia,
++         .pViewportState = &vps,
++         .pRasterizationState = &rs,
++         .pMultisampleState = &ms,
++         .pColorBlendState = &cb,
++         .layout = layout,
++         .renderPass = rp,
++         .subpass = 0,
++      };
++      VkPipeline pipe = VK_NULL_HANDLE;
++      r = vn_CreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, NULL,
++                                     &pipe);
++      if (r != VK_SUCCESS || pipe == VK_NULL_HANDLE) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateGraphicsPipelines "
++                "rc=%d\n", r);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkDeviceSize rb_size = (VkDeviceSize)W * H * 4;
++      VkBuffer rb_buf = VK_NULL_HANDLE;
++      VkDeviceMemory rb_mem = VK_NULL_HANDLE;
++      if (mk_copybuf(device, &mem, rb_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++                     &rb_buf, &rb_mem) != 0) {
++         printf("THYLACINE-VENUS-PROVE FAIL: readback buffer\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkCommandPoolCreateInfo t_cpci = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
++         .queueFamilyIndex = 0,
++      };
++      VkCommandPool t_pool = VK_NULL_HANDLE;
++      VkCommandBuffer t_cmd = VK_NULL_HANDLE;
++      const VkCommandBufferBeginInfo t_cbbi = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
++      };
++      if (vn_CreateCommandPool(device, &t_cpci, NULL, &t_pool) !=
++          VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: triangle command pool\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkCommandBufferAllocateInfo t_cbai = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++         .commandPool = t_pool,
++         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++         .commandBufferCount = 1,
++      };
++      if (vn_AllocateCommandBuffers(device, &t_cbai, &t_cmd) != VK_SUCCESS ||
++          vn_BeginCommandBuffer(t_cmd, &t_cbbi) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: triangle command buffer\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkClearValue clear = { .color = { .float32 =
++                                                 { 0.0f, 0.0f, 1.0f, 1.0f } } };
++      const VkRenderPassBeginInfo rpbi = {
++         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
++         .renderPass = rp,
++         .framebuffer = fb,
++         .renderArea = { .offset = { 0, 0 }, .extent = { W, H } },
++         .clearValueCount = 1,
++         .pClearValues = &clear,
++      };
++      vn_CmdBeginRenderPass(t_cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
++      vn_CmdBindPipeline(t_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
++      vn_CmdDraw(t_cmd, 3, 1, 0, 0);
++      vn_CmdEndRenderPass(t_cmd);
++      const VkBufferImageCopy bic = {
++         .bufferOffset = 0,
++         .bufferRowLength = 0,
++         .bufferImageHeight = 0,
++         .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++         .imageOffset = { 0, 0, 0 },
++         .imageExtent = { W, H, 1 },
++      };
++      vn_CmdCopyImageToBuffer(t_cmd, img,
++                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb_buf,
++                              1, &bic);
++      if (vn_EndCommandBuffer(t_cmd) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: triangle vkEndCommandBuffer\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkDeviceQueueInfo2 t_qi = {
++         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2,
++         .queueFamilyIndex = 0,
++         .queueIndex = 0,
++      };
++      VkQueue t_q = VK_NULL_HANDLE;
++      vk_common_GetDeviceQueue2(device, &t_qi, &t_q);
++      const VkFenceCreateInfo t_fci = {
++         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
++      };
++      VkFence t_fence = VK_NULL_HANDLE;
++      if (t_q == VK_NULL_HANDLE ||
++          vn_CreateFence(device, &t_fci, NULL, &t_fence) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: triangle queue/fence\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkSubmitInfo t_si = {
++         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++         .commandBufferCount = 1,
++         .pCommandBuffers = &t_cmd,
++      };
++      r = vn_QueueSubmit(t_q, 1, &t_si, t_fence);
++      if (r != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: triangle vkQueueSubmit rc=%d\n",
++                r);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      r = vn_WaitForFences(device, 1, &t_fence, VK_TRUE,
++                           10ull * 1000 * 1000 * 1000);
++      if (r != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: triangle vkWaitForFences "
++                "rc=%d\n", r);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkMemoryMapInfo rb_mmi = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
++         .memory = rb_mem,
++         .offset = 0,
++         .size = rb_size,
++      };
++      void *rb_ptr = NULL;
++      if (vn_MapMemory2(device, &rb_mmi, &rb_ptr) != VK_SUCCESS || !rb_ptr) {
++         printf("THYLACINE-VENUS-PROVE FAIL: readback map\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const volatile uint8_t *px = (const volatile uint8_t *)rb_ptr;
++      const uint32_t c_off = ((H / 2) * W + (W / 2)) * 4; /* center: inside */
++      const uint32_t k_off = 0;                           /* corner: outside */
++      const uint8_t cr = px[c_off], cg = px[c_off + 1], cb2 = px[c_off + 2],
++                    ca = px[c_off + 3];
++      const uint8_t kr = px[k_off], kg = px[k_off + 1], kb = px[k_off + 2],
++                    ka = px[k_off + 3];
++      if (cr != 255 || cg != 0 || cb2 != 0 || ca != 255) {
++         printf("THYLACINE-VENUS-PROVE FAIL: center pixel %u,%u,%u,%u (want "
++                "255,0,0,255 -- the triangle did not rasterize)\n",
++                cr, cg, cb2, ca);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      if (kr != 0 || kg != 0 || kb != 255 || ka != 255) {
++         printf("THYLACINE-VENUS-PROVE FAIL: corner pixel %u,%u,%u,%u (want "
++                "0,0,255,255 -- the clear did not land or the triangle "
++                "covers everything)\n", kr, kg, kb, ka);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkMemoryUnmapInfo rb_umi = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
++         .memory = rb_mem,
++      };
++      vn_UnmapMemory2(device, &rb_umi);
++      printf("venus-prove: offscreen triangle OK (render pass + SPIR-V "
++             "pipeline + draw + copy-out 64x64; center red, corner blue -- "
++             "the W-1 pipeline-class witness)\n");
++
++      vn_DestroyFence(device, t_fence, NULL);
++      vn_DestroyCommandPool(device, t_pool, NULL);
++      vn_DestroyPipeline(device, pipe, NULL);
++      vn_DestroyPipelineLayout(device, layout, NULL);
++      vn_DestroyShaderModule(device, vs, NULL);
++      vn_DestroyShaderModule(device, fs, NULL);
++      vn_DestroyFramebuffer(device, fb, NULL);
++      vn_DestroyRenderPass(device, rp, NULL);
++      vn_DestroyImageView(device, view, NULL);
++      vn_DestroyImage(device, img, NULL);
++      free_mem(device, img_mem, NULL);
++      vn_DestroyBuffer(device, rb_buf, NULL);
++      free_mem(device, rb_mem, NULL);
++   }
++
++   /* Step 9 (vkQuake-arc W-1): the DISCRIMINATING slot-exhaustion witness.
++    * Step 7's 3-slot cap cycle proved the refusal path frees, but in a
++    * 256-slot space it structurally cannot see a burned handle (the
++    * multi-queue audit's tracked F2 gap). Allocate 4 KiB HOST_VISIBLE
++    * memories until refusal, three cycles with full frees between: cycle 1
++    * warms venus-internal state (reply-shmem growth is one-time) and is
++    * logged, not asserted; cycles 2 and 3 must refuse at EQUAL counts. A
++    * mint path that burns a handle on any refusal, or a free path that
++    * leaks a slot, shrinks cycle 3 below cycle 2. The floor guard catches
++    * a pre-burned space, the ceiling guard a cap that never engages. */
++   {
++      enum { SLOT_MAX = 300 };
++      static VkDeviceMemory slots[SLOT_MAX];
++      const VkMemoryAllocateInfo smai = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++         .allocationSize = 4096,
++         .memoryTypeIndex = (uint32_t)mt,
++      };
++      uint32_t counts[3] = { 0, 0, 0 };
++      for (int cyc = 0; cyc < 3; cyc++) {
++         uint32_t n = 0;
++         VkResult rr = VK_SUCCESS;
++         while (n < SLOT_MAX) {
++            rr = alloc_mem(device, &smai, NULL, &slots[n]);
++            if (rr != VK_SUCCESS)
++               break;
++            n++;
++         }
++         if (n >= SLOT_MAX) {
++            printf("THYLACINE-VENUS-PROVE FAIL: %u x 4 KiB all admitted -- "
++                   "the slot space did not exhaust (cap not engaged)\n",
++                   (unsigned)SLOT_MAX);
++            destroy_device(device, NULL);
++            destroy_instance(instance, NULL);
++            return 1;
++         }
++         if (rr != VK_ERROR_OUT_OF_DEVICE_MEMORY) {
++            printf("THYLACINE-VENUS-PROVE FAIL: slot-exhaustion refusal "
++                   "rc=%d at %u (want OUT_OF_DEVICE_MEMORY)\n", rr, n);
++            destroy_device(device, NULL);
++            destroy_instance(instance, NULL);
++            return 1;
++         }
++         counts[cyc] = n;
++         for (uint32_t i = 0; i < n; i++)
++            free_mem(device, slots[i], NULL);
++      }
++      if (counts[1] < 100) {
++         printf("THYLACINE-VENUS-PROVE FAIL: slot space exhausted at %u "
++                "(< 100 -- pre-burned or mis-capped)\n", counts[1]);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      if (counts[1] != counts[2]) {
++         printf("THYLACINE-VENUS-PROVE FAIL: slot count shrank across "
++                "cycles (%u -> %u) -- refusals or frees burn handles (F2)\n",
++                counts[1], counts[2]);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      printf("venus-prove: slot-exhaustion cycles OK (%u/%u/%u to refusal, "
++             "steady-state equal -- the F2 discriminating no-burn proof)\n",
++             counts[0], counts[1], counts[2]);
++   }
++
+    destroy_device(device, NULL);
+ 
+    destroy_instance(instance, NULL);
+@@ -802,8 +1675,10 @@ main(void)
+           "physical device(s), dev0 '%s', HOST_VISIBLE VkDeviceMemory "
+           "allocated + mapped + sentinel round-tripped, vkCmdCopyBuffer "
+           "fenced round-trip with first-map pattern survival (F1), placed-map "
+-          "de-advertised (F4), cap-exhaustion recovery (F2), timeline lift "
+-          "witnessed -- the multi-queue GPU-submit chunk)\n",
++          "de-advertised (F4), cap-exhaustion recovery (F2), two-timeline "
++          "interleave (F3), offscreen SPIR-V triangle rendered + read back, "
++          "slot-exhaustion steady-state -- the vkQuake-arc W-1 pipeline "
++          "witness)\n",
+           pd_count, props.deviceName);
+    return 0;
+ }
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+index 471ff97..85be8fe 100644
+--- a/src/virtio/vulkan/vn_renderer_thylacine.c
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -193,13 +193,17 @@ thylacine_ridx_free(struct thylacine *tly, uint32_t ridx)
+ /* ---- device-memory (mem/<handle>) slot allocation ---- */
+ 
+ /*
+- * Same free-on-destroy discipline as ridx (see thylacine_ridx_alloc's note):
+- * a handle is freed ONLY on a confirmed server retire (warp_mem_destroy == 0),
+- * never on a create error. A create-error handle stays MARKED -- the bit is
+- * never re-handed-out, so a leaked slot can never collide with a still-installed
+- * server slot (the ring-F1 wedge class). The leak is bounded (one slot, reaped
+- * at ctx death); converging it (retire the server slot on the info-read-fail
+- * create arm) is the shared ring/mem F2 follow-on.
++ * Free-on-destroy discipline (compare thylacine_ridx_alloc's note): a handle is
++ * freed on a confirmed server retire (warp_mem_destroy == 0) OR on a create
++ * failure resolved provably-not-installed (warp_mem_new's three-valued return
++ * rc==1: the routine -ENOMEM cap refusal, an open failure, OR -- since the F9
++ * convergence at W-1 -- a maybe-installed failure that warp_mem_reclaim
++ * resolved by a best-effort destroy). It is NEVER freed while the slot may be
++ * live (rc==-1: the duplicate -EINVAL, or a reclaim whose own transport
++ * failed), so a re-handed bit can never collide with a still-installed server
++ * slot (the ring-F1 wedge class). The mem half of the old "F2 follow-on" is
++ * thus landed; only the RING twin (thylacine_ridx_alloc) stays unconverged --
++ * its failures are device faults, its bounded leak documented there.
+  */
+ static int
+ thylacine_mem_alloc(struct thylacine *tly)
+@@ -421,20 +425,17 @@ thylacine_bo_create_from_device_memory(
+                          &res_id);
+    if (rc != 0) {
+       /* F2: free the handle IFF the server slot is provably not installed --
+-       * warp_mem_new returns rc>0 ONLY then (a wedged/ctx-less conn, an open
+-       * failure that never reached the write, or the routine -ENOMEM holistic-
+-       * cap refusal, whose Rlerror means the server installed nothing). That
+-       * keeps a memory-pressure loop from burning the 256-slot space (the old
+-       * unconditional leak wedged vkAllocateMemory for the instance's life).
+-       * rc<0 is the MAYBE-installed set (a duplicate -EINVAL -- e.g. a
+-       * concurrent-alloc race loser, F6; an interrupted -EINTR whose Twrite may
+-       * have committed, F5; an info-read failure; any unrecognized errno) ->
+-       * keep the handle marked (bounded leak, ctx-death reaped; NEVER free a
+-       * handle whose server slot may be live -> the ring-F1 wedge class).
+-       * Converging the rc<0 arm with a destroy is the ring/mem F2 follow-on.
+-       * (The F6 race-loser arm is now doubly closed: the transport mutex
+-       * serializes the RMW itself, and the errno discrimination stays as the
+-       * defense-in-depth below it.) */
++       * warp_mem_new returns rc>0 ONLY then. Since the F9 convergence
++       * (vkQuake-arc W-1) that set includes maybe-installed failures the
++       * client RESOLVED via a best-effort destroy (server asserted absence
++       * or confirmed the teardown), so an E_IO fault loop under global
++       * hostmem pressure no longer burns the 256-slot space (F9's wedge).
++       * rc<0 is now only the residue: the duplicate -EINVAL (the slot is
++       * LIVE -- never destroyed; defense-in-depth under the transport
++       * mutex, F6/F8) or a reclaim whose own transport failed -> keep the
++       * handle marked (bounded leak, ctx-death reaped; NEVER free a handle
++       * whose server slot may be live -> the ring-F1 wedge class). The ring
++       * twin stays unconverged (device-fault-only failures; tracked). */
+       if (rc > 0)
+          thylacine_mem_free(tly, (uint32_t)handle);
+       goto out;
+-- 
+2.43.0
+

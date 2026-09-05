@@ -44,10 +44,42 @@ lc_run_expect "echo pty-inner | tr a-z A-Z" "PTY-INNER"
 # prints the Stopped line (emit_line -> the pts -> the host -> here). The
 # settle covers spawn + pgrp + terminal handoff; the 30 s deadline can never
 # expire inside the ladder.
+# THE FAILURE-TIME PROBE for this leg (lib.exp `lc_fail_probe`). 2026-08-16
+# this leg burned a retry: echo stopped at `sleep `, `Stopped` never came,
+# guest ALIVE -- and the capture alone cannot say why (see lib.exp). If it
+# misses again, lc_fail asks the guest, in this order, and logs every byte:
+#
+#   1. listen 2 s              -- is anything STILL arriving?
+#   2. "\r", 2 s               -- does the editor answer? (a shell is reading)
+#   3. "jobs\r", 3 s           -- `Stopped ... sleep 30` here => the stop
+#                                 HAPPENED and the earlier line was LOST on
+#                                 the way out (OUTPUT loss). A prompt and no
+#                                 job => `sleep` ran with no arg / the line
+#                                 never arrived whole (INPUT truncation).
+#                                 Silence => nobody is reading the terminal.
+#   4. "\x03", 3 s             -- if sleep 30 was RUNNING in the foreground
+#                                 (the ^Z byte itself lost, not the `30`),
+#                                 this ends it and the prompt returns.
+#   5. "jobs\r", 3 s           -- ...and then jobs is empty.
+#   6. "echo diag-alive | tr a-z A-Z\r", 3 s -- DIAG-ALIVE => the channel is
+#                                 alive end to end; silence => a stall class,
+#                                 read vm-at-fail / bridge-at-fail.
+#
+# It records; it asserts nothing; it costs nothing on the passing path.
+set ::lc_fail_probe {
+    lc_probe_capture ""     2 "listen"
+    lc_probe_capture "\r"   2 "CR"
+    lc_probe_capture "jobs\r" 3 "jobs"
+    lc_probe_capture "\x03" 3 "Ctrl-C"
+    lc_probe_capture "jobs\r" 3 "jobs after Ctrl-C"
+    lc_probe_capture "echo diag-alive | tr a-z A-Z\r" 3 "channel alive?"
+}
+
 lc_send "sleep 30"
 sleep 1
 send "\x1a"
 lc_expect "Stopped" "^Z stops the foreground sleep"
+set ::lc_fail_probe {}
 
 lc_send "jobs"
 lc_expect "Stopped" "jobs lists the stopped sleep"
@@ -75,6 +107,38 @@ sleep 1
 send "\x03"
 sleep 1
 lc_run_expect "echo pty-fg | tr a-z A-Z" "PTY-FG"
+
+# THE TYPE-AHEAD LEG (PTY-DESIGN "Mode writes deliver, never discard",
+# 2026-08-17). A line typed WHILE a foreground job runs is assembled by the
+# COOKED pts (ut hands the job CHILD_MODE) and must survive ut's PROMPT-mode
+# re-arm at the next prompt: the mode write that clears ICANON DELIVERS the
+# pending fragment to the raw editor. This is the exact shape that burned this
+# scenario's retries -- `sleep 30` typed right after PTY-INNER landed as `sle`
+# (cooked-echoed, then DISCARDED by the mode write) + `ep 30` (delivered,
+# executed) -- made DETERMINISTIC: type the line WITHOUT Enter one second into
+# a `sleep 2` (CHILD_MODE is certainly on; the bytes certainly arrive before
+# the sleep exits), wait until the editor HOLDS all 31 chars (its redraw ends
+# with cursor-forward 4 + len = 35 -- unique in this scenario), then Enter.
+# Pre-fix the fragment was zeroed: the cursor never reached 35 and the command
+# never ran (a 30 s timeout here, not a flake). Regression: sabotage-verified.
+#
+# THE ARMED WITNESS (the ccb597b8 round, F8): the cursor-35 anchor proves the
+# 31 chars REACHED the editor, not that the mode-write delivery carried them.
+# If they landed before ut wrote CHILD_MODE (raw, un-echoed, into m2s) or after
+# the PROMPT-mode re-arm, the editor shows them just the same and the leg is
+# green with the delivery path unexercised -- under the OLD posture too. So
+# first require the pts's COOKED ECHO of the line as PLAIN text directly after
+# the accepted line's CRLF: only bytes cooked in CHILD_MODE are echoed there
+# (raw bytes are not echoed at all, and the editor's own redraw shows the text
+# behind the prompt after `\r\x1b[K`, never after a CRLF). A `sleep 4` widens
+# the window the send must land in.
+lc_send "sleep 4"
+sleep 1
+send "echo type-ahead-ok | tr a-z A-Z"
+lc_expect_re {\r\necho type-ahead-ok \| tr a-z A-Z} "the pts COOKED-ECHOED the type-ahead right after the CRLF (CHILD_MODE was on: the delivery path is ARMED)"
+lc_expect "\x1b\[35C" "the editor holds the 31-char type-ahead delivered by the mode write"
+send "\r"
+lc_expect "TYPE-AHEAD-OK" "the type-ahead line ran WHOLE (nothing dropped at the head)"
 
 # Leave the inner session: ut exits -> the master drains-then-EOFs -> ptyhost
 # reaps + exits -> the outer ut restores its prompt mode + screen. The outer

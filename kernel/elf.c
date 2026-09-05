@@ -80,9 +80,17 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
     // -----------------------------------------------------------------
     // Stage 2: e_type / e_machine / e_version.
     // -----------------------------------------------------------------
-    if (eh->e_type    != ET_EXEC)     return ELF_LOAD_BAD_TYPE;
+    // D-2: ET_DYN joins ET_EXEC. The difference is entirely positional --
+    // a PIE's p_vaddr are offsets from a base the loader picks -- so it is
+    // captured by one bias applied below and nothing else in this function
+    // branches on the type again.
+    if (eh->e_type != ET_EXEC && eh->e_type != ET_DYN)
+        return ELF_LOAD_BAD_TYPE;
     if (eh->e_machine != EM_AARCH64)  return ELF_LOAD_BAD_MACHINE;
     if (eh->e_version != EV_CURRENT)  return ELF_LOAD_BAD_FILE_VER;
+
+    const bool is_pie = (eh->e_type == ET_DYN);
+    const u64  bias   = is_pie ? ELF_PIE_LOAD_BIAS : 0;
 
     // -----------------------------------------------------------------
     // Stage 3: program-header table validation.
@@ -115,7 +123,11 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
     // collect PT_LOAD entries, enforce W^X + bounds + interp/stack
     // policy.
     // -----------------------------------------------------------------
+    // Biased below, once the segments are collected -- keep the raw value
+    // here so the in-segment search compares like with like.
     out->entry      = eh->e_entry;
+    out->load_bias  = bias;
+    out->type       = eh->e_type;
     // Program-header table location — consumed by exec_setup to build the
     // AT_PHDR / AT_PHENT / AT_PHNUM auxv entries. All three are already
     // validated above (phentsize == sizeof(Elf64_Phdr); phoff + phnum *
@@ -165,7 +177,28 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
 
             {
                 struct elf_load_segment *seg = &out->segments[out->n_segments];
-                seg->vaddr       = p->p_vaddr;
+                // D-2: the ONE place the PIE bias enters. Everything that
+                // reads seg->vaddr afterwards -- here, in exec.c's mapper, in
+                // the AT_PHDR translation -- sees a final address and needed
+                // no change. `bias` is 0 for ET_EXEC, so that path is byte-
+                // identical to before.
+                //
+                // Bound the biased span inside the PIE window. Without this a
+                // hostile p_vaddr could place a segment past the window and
+                // into (or beyond) the burrow-attach range; vma_insert and
+                // burrow_map would still refuse to break isolation, but the
+                // refusal would come from a general allocator rule rather than
+                // from the loader saying what it will and will not place.
+                if (bias != 0) {
+                    u64 seg_top;
+                    if (u64_add_overflow(p->p_vaddr, p->p_memsz, &seg_top))
+                        return ELF_LOAD_PIE_OOB;
+                    if (u64_add_overflow(seg_top, bias, &seg_top))
+                        return ELF_LOAD_PIE_OOB;
+                    if (seg_top > ELF_PIE_LOAD_LIMIT)
+                        return ELF_LOAD_PIE_OOB;
+                }
+                seg->vaddr       = p->p_vaddr + bias;
                 seg->file_offset = p->p_offset;
                 seg->filesz      = p->p_filesz;
                 seg->memsz       = p->p_memsz;
@@ -178,17 +211,29 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
             break;
 
         case PT_INTERP:
-            // Dynamic binaries / PIE deferred to Phase 5+. v1.0 only
-            // accepts statically-linked ET_EXEC.
+            // The kernel loads exactly ONE image per exec and runs no
+            // interpreter. DISTRO D-4's rewrite-to-ldso route reads this
+            // segment at the vivarium exec chokepoint and restarts
+            // resolution on the interpreter, so what reaches elf_load is
+            // the interpreter itself -- which has no PT_INTERP of its own
+            // (measured: stock ld-musl-aarch64.so.1 carries none). This
+            // reject therefore stays correct on both sides of D-4.
             return ELF_LOAD_HAS_INTERP;
 
         case PT_DYNAMIC:
-            // R5-G F63 close: PT_DYNAMIC is the dynamic-link table —
-            // a stronger indicator of a dynamic binary than PT_INTERP
-            // (which is just the loader path). Static-only policy at
-            // v1.0 rejects PT_DYNAMIC explicitly. Phase 5+ dynamic-
-            // linker support flips this to "process the dynamic table."
-            return ELF_LOAD_HAS_DYNAMIC;
+            // R5-G F63 rejected this outright as the stronger dynamic-binary
+            // indicator (PT_INTERP is only the loader path). D-2 narrows the
+            // rejection to ET_EXEC, because every PIE carries a PT_DYNAMIC --
+            // a static-PIE for its self-applied RELA table, stock ldso for its
+            // own. The table is still never PROCESSED here: both self-relocate
+            // from their entry point before executing anything that depends on
+            // it, so accepting the segment costs the loader nothing.
+            //
+            // An ET_EXEC with a PT_DYNAMIC is still refused, unchanged: it
+            // wants an interpreter this loader does not run, and its
+            // relocations have no self-applying startup path.
+            if (!is_pie) return ELF_LOAD_HAS_DYNAMIC;
+            break;
 
         case PT_GNU_STACK:
             // The stack permissions segment. Linkers emit this with
@@ -204,8 +249,13 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
         case PT_PHDR:
         case PT_TLS:
         case PT_GNU_RELRO:
-            // Skipped at v1.0. PT_TLS + PT_GNU_RELRO need dynamic-linker
-            // support. PT_PHDR is auxv-relevant only.
+            // Skipped -- all three describe memory some PT_LOAD already
+            // covers. PT_GNU_RELRO asks for a post-relocation re-protect
+            // the phenotype answers with ENOSYS (musl tolerates that
+            // specifically, dynlink.c:855,1428 -- RELRO degrades, which is
+            // no loss against a status quo that had none). PT_PHDR is
+            // auxv-relevant only; AT_PHDR is derived from e_phoff instead,
+            // so a PIE without one (stock ldso) still resolves.
             break;
 
         default:
@@ -223,7 +273,14 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
     // -----------------------------------------------------------------
     // Stage 5: e_entry within some PT_LOAD segment's vaddr range.
     // -----------------------------------------------------------------
-    if (eh->e_entry == 0)
+    // D-2: bias the entry here so the comparison below is against the
+    // already-biased segment vaddrs, and so the zero-check tests the
+    // address control actually transfers to. For ET_EXEC bias is 0, so
+    // this is the old `eh->e_entry == 0` unchanged; for a PIE, e_entry 0
+    // is a legitimate "entry at the load base" and the biased value is
+    // never 0, which is the correct reading of the same rule.
+    out->entry = eh->e_entry + bias;
+    if (out->entry == 0)
         return ELF_LOAD_BAD_ENTRY;
     {
         bool entry_in_segment = false;
@@ -237,7 +294,7 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
             u64 seg_end;
             if (u64_add_overflow(s->vaddr, s->memsz, &seg_end))
                 continue;
-            if (eh->e_entry >= s->vaddr && eh->e_entry < seg_end) {
+            if (out->entry >= s->vaddr && out->entry < seg_end) {
                 entry_in_segment = true;
                 break;
             }
@@ -285,29 +342,61 @@ static bool brand_contains(const char *hay, size_t hay_len, const char *needle) 
     return false;
 }
 
-enum elf_brand elf_brand_hint(const void *blob, size_t size) {
-    if (!blob || size < sizeof(struct Elf64_Ehdr)) return ELF_BRAND_UNKNOWN;
+// DISTRO D-4: the bounded PT_INTERP walk, now the SHARED one -- elf_brand_hint
+// below reads its answer out of this rather than repeating the bounds logic.
+// Splitting it was not a tidiness move: the D-4 rewrite ACTS on the extracted
+// path (it resolves and execs it), so a second copy of "is this offset inside
+// the prefix, is this string terminated" would be a second place for that
+// judgement to be subtly weaker. #140 is the standing demonstration of what
+// two copies of one walk cost.
+size_t elf_read_interp(const void *blob, size_t size, char *out, size_t out_cap) {
+    if (!out || out_cap == 0) return 0;
+    out[0] = '\0';
+    if (!blob || size < sizeof(struct Elf64_Ehdr)) return 0;
+
+    // The precondition elf_load enforces at R5-G F61, inherited here because
+    // D-4 promoted this from a private helper into a second PUBLIC parser of
+    // the same hostile bytes -- and inheriting the bounds without the alignment
+    // left the cast below undefined for an unaligned buffer (UBSan traps it;
+    // production codegen may assume alignment in LDP / vector loads).
+    //
+    // Note this one is unlike every other 0 here: those describe the DATA,
+    // whereas `blob` is the kernel's own buffer, so only a CALLER can trip it.
+    // It still answers 0 rather than shouting, to keep this file a pure parser
+    // with no console dependency -- the same reason elf_load returns
+    // ELF_LOAD_BAD_ALIGN instead of printing. A caller that trips it sees every
+    // dynamic binary read as static, and this comment is where they land.
+    if (((uintptr_t)blob) % _Alignof(struct Elf64_Ehdr) != 0) return 0;
 
     const u8 *bytes = (const u8 *)blob;
     const struct Elf64_Ehdr *eh = (const struct Elf64_Ehdr *)blob;
 
     // Only inspect something that is plausibly an aarch64 ELF64 at all; a
-    // non-ELF blob has no brand to report (never a verdict from garbage).
+    // non-ELF blob has no interpreter to report (never a verdict from garbage).
     if (eh->e_ident[EI_MAG0] != ELFMAG0 || eh->e_ident[EI_MAG1] != ELFMAG1 ||
         eh->e_ident[EI_MAG2] != ELFMAG2 || eh->e_ident[EI_MAG3] != ELFMAG3)
-        return ELF_BRAND_UNKNOWN;
-    if (eh->e_ident[EI_CLASS] != ELFCLASS64) return ELF_BRAND_UNKNOWN;
-    if (eh->e_ident[EI_DATA]  != ELFDATA2LSB) return ELF_BRAND_UNKNOWN;
+        return 0;
+    if (eh->e_ident[EI_CLASS] != ELFCLASS64) return 0;
+    if (eh->e_ident[EI_DATA]  != ELFDATA2LSB) return 0;
 
-    if (eh->e_phentsize != sizeof(struct Elf64_Phdr)) return ELF_BRAND_UNKNOWN;
-    if (eh->e_phnum == 0 || eh->e_phnum > ELF_MAX_PHNUM) return ELF_BRAND_UNKNOWN;
+    if (eh->e_phentsize != sizeof(struct Elf64_Phdr)) return 0;
+    if (eh->e_phnum == 0 || eh->e_phnum > ELF_MAX_PHNUM) return 0;
 
     // The phdr table must lie wholly inside the buffer we were handed. The
     // buffer may be a bounded PREFIX of the file (REVENANT's header read), so
     // "not present" is a legitimate, common answer -- never an error.
     u64 ph_off   = eh->e_phoff;
     u64 ph_bytes = (u64)eh->e_phnum * (u64)sizeof(struct Elf64_Phdr);
-    if (ph_off > size || ph_bytes > (u64)size - ph_off) return ELF_BRAND_UNKNOWN;
+    if (ph_off > size || ph_bytes > (u64)size - ph_off) return 0;
+
+    // elf_load's R5-G F62 guard, and here it is the ATTACKER-controlled half:
+    // `blob` above is ours, but e_phoff comes straight off the wire, so an odd
+    // one misaligns the Phdr cast below however well-aligned the buffer is.
+    // Both checks are needed -- neither implies the other. Absent, not an
+    // error: real linkers emit phoff == sizeof(Ehdr) == 64, so anything else
+    // is malformed, and "no interpreter" is already this walk's answer for
+    // malformed.
+    if (ph_off % _Alignof(struct Elf64_Phdr) != 0) return 0;
 
     const struct Elf64_Phdr *ph = (const struct Elf64_Phdr *)(bytes + ph_off);
     for (u16 i = 0; i < eh->e_phnum; i++) {
@@ -316,20 +405,38 @@ enum elf_brand elf_brand_hint(const void *blob, size_t size) {
         u64 off = ph[i].p_offset;
         u64 fsz = ph[i].p_filesz;
         if (fsz == 0 || off > size || fsz > (u64)size - off)
-            return ELF_BRAND_UNKNOWN;   // interp not in our prefix
+            return 0;                   // interp not in our prefix
 
         const char *interp = (const char *)(bytes + off);
         size_t n = 0;
         while (n < (size_t)fsz && interp[n] != '\0') n++;
-        if (n == (size_t)fsz) return ELF_BRAND_UNKNOWN; // unterminated: untrusted
+        if (n == (size_t)fsz) return 0; // unterminated: untrusted
 
-        // Both the glibc and musl aarch64 loaders, by substring so a distro's
-        // /lib64 or multiarch path still matches.
-        if (brand_contains(interp, n, "ld-linux") ||
-            brand_contains(interp, n, "ld-musl"))
-            return ELF_BRAND_LINUX_LIKELY;
-        return ELF_BRAND_UNKNOWN;       // some other interpreter: no verdict
+        // An EMPTY interp ("" -- a zero-length but terminated string) names
+        // nothing; treat it as absent rather than resolving the empty path.
+        if (n == 0) return 0;
+        // Longer than we will carry: absent, not truncated. A truncated
+        // interpreter path resolves to a DIFFERENT file, which is the one
+        // outcome worse than refusing.
+        if (n > ELF_INTERP_MAX || n + 1 > out_cap) return 0;
+
+        for (size_t j = 0; j < n; j++) out[j] = interp[j];
+        out[n] = '\0';
+        return n;
     }
 
-    return ELF_BRAND_UNKNOWN;           // static: the v1.0 target, by design
+    return 0;                           // static: the v1.0 target, by design
+}
+
+enum elf_brand elf_brand_hint(const void *blob, size_t size) {
+    char interp[ELF_INTERP_MAX + 1];
+    size_t n = elf_read_interp(blob, size, interp, sizeof(interp));
+    if (n == 0) return ELF_BRAND_UNKNOWN;
+
+    // Both the glibc and musl aarch64 loaders, by substring so a distro's
+    // /lib64 or multiarch path still matches.
+    if (brand_contains(interp, n, "ld-linux") ||
+        brand_contains(interp, n, "ld-musl"))
+        return ELF_BRAND_LINUX_LIKELY;
+    return ELF_BRAND_UNKNOWN;           // some other interpreter: no verdict
 }

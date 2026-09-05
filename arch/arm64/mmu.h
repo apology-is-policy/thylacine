@@ -436,15 +436,25 @@ void    proc_pgtable_destroy(paddr_t root);
 // that need an ASID-targeted TLB invalidate.
 // =============================================================================
 
-// P4-Ic2: device_memory selects the PTE MAIR attribute index —
-// MAIR_IDX_NORMAL_WB for cacheable RAM (anonymous Burrows) vs
-// MAIR_IDX_DEVICE (device-nGnRnE) for MMIO device registers. False
-// for BURROW_TYPE_ANON; true for BURROW_TYPE_MMIO. The flag also
-// disables instruction-fetch-meaningfulness (device-memory PTEs
-// shouldn't be EXEC; the VMA layer rejects W^X violations already).
+// mmu_install_user_pte installs a leaf L3 PTE. The bool selects the MAIR
+// attribute index: false -> MAIR_IDX_NORMAL_WB (cacheable RAM: BURROW_TYPE_ANON
+// /CODE/DMA), true -> MAIR_IDX_DEVICE (device-nGnRnE: BURROW_TYPE_MMIO device
+// registers). It is a thin wrapper over mmu_install_user_pte_attr; the bool is
+// kept as the common case so the index cannot be fat-fingered (MAIR_IDX_DEVICE
+// == 0, the same bit pattern a bare `false` supplies to an index parameter).
+//
+// mmu_install_user_pte_attr is the index-aware form (V-2): the final arg is a
+// MAIR attribute index (MAIR_IDX_*) directly, so a mapping can request
+// NORMAL_NC (write-combining / non-cacheable host-visible memory,
+// BURROW_TYPE_HOSTMEM) which the bool cannot express. EXEC is permitted ONLY
+// with NORMAL_WB -- make_user_pte_l3 hard-rejects EXEC on Device/NC (W^X/I-12);
+// the VMA layer rejects W^X violations already.
 int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
                          u64 vaddr, paddr_t pa, u32 prot,
                          bool device_memory);
+int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
+                              u64 vaddr, paddr_t pa, u32 prot,
+                              u32 mair_idx);
 
 // P6 hardening #2 / F1: clear a single leaf PTE at `vaddr` in the
 // per-Proc TTBR0 tree rooted at `pgtable_root` AND issue tlbi vaae1is

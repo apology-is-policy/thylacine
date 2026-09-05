@@ -5,7 +5,6 @@ title: "aurora — the console renderer, and eighteen tests that cannot compile"
 parent: moc-userspace-shell-tui
 code:
   - usr/aurora/src/main.rs
-  - usr/aurora/src/vt.rs
   - usr/aurora/src/render.rs
   - usr/aurora/src/osd.rs
   - usr/aurora/src/config.rs

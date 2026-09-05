@@ -36,6 +36,12 @@ snapshots/
 
 # Log files
 *.log
+# ...except committed test fixtures. Several of these ARE real captured logs
+# (tools/testdata/smp-classify holds a genuine passing harness log and a
+# genuinely externally-SIGKILLed one), and the blanket rule above would drop
+# them silently -- shipping tools/test-smp-classify.sh without the artifacts
+# its two real-sample cases rest on.
+!tools/testdata/**
 
 # Generated docs
 docs/_build/
@@ -61,3 +67,16 @@ vault/**/*.canvas
 
 # quaestor build artifact (go build ./... drops the binary in-package)
 vault/meta/quaestor/quaestor
+
+# --- Vendored third_party/rust: track the precompiled subset ---
+# The broad *.o / *.a / *.bin / target/ rules above would exclude files the
+# vendored crates SHIP: ring's precompiled crypto objects + test fixtures, the
+# windows/aegis static libs, and the cc crate's `src/target` SOURCE module.
+# Excluding them breaks a FRESH checkout's userspace build (Cargo's per-crate
+# vendored checksum fails one file at a time). Track them so a clean clone / CI /
+# thyla-pi sync is reproducible. Build output stays under build/ (unaffected).
+!third_party/rust/**/*.a
+!third_party/rust/**/*.bin
+!third_party/rust/**/*.o
+!third_party/rust/cc/src/target/
+!third_party/rust/cc/src/target/**

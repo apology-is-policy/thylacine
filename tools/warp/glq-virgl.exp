@@ -26,7 +26,11 @@
 #           surface, the stale zoom self-clears, the BO eviction
 #           (set-scanout-away-BEFORE-unref) runs live, and the console's
 #           next present completes the switch back -- the 2D
-#           "scanout direct N (WxH)" line is the eviction evidence.
+#           "scanout direct N slot S (WxH)" line is the eviction evidence
+#           (the `slot S` token since C-2d-b, one host resource per slot;
+#           the eviction regexp here and in glq-decomp / glq-wedge-probe
+#           took it as optional after all three silently failed on it --
+#           found by the C-2c quake run, the first since that change).
 #
 # Verdict lines (the #186 discipline: each is printed by THIS script only
 # on its own positive evidence; no failure text contains a success
@@ -40,6 +44,9 @@
 #   GLQ-VIRGL STRIPS-k: ...           top/bottom strip means per dump
 #                                     (orientation evidence; calibrated
 #                                     look-first before any gating)
+#   GLQ-VIRGL COMP-ATTACH: witnessed W refused R
+#                                     the C-2c import census (GATED where
+#                                     readable: R must be 0, W >= 1)
 #   GLQ-VIRGL PASS                    all gated legs held
 #
 # Runs ON the GL host (Linux; lib.exp takes the direct-pty transport).
@@ -252,7 +259,7 @@ for {set i 0} {$i < 6 && !$restored} {incr i} {
     lc_send "echo glq-tick-$i"
     set timeout 20
     expect {
-        -re {scanout direct (\d+) \((\d+)x(\d+)\)} { set restored 1 }
+        -re {scanout direct (\d+) (?:slot \d+ )?\((\d+)x(\d+)\)} { set restored 1 }
         "glq-tick-$i" { }
         timeout { }
     }
@@ -292,6 +299,35 @@ expect {
             }
             timeout {
                 puts "\nGLQ-VIRGL BO-BYTES-PEAK: absent (pre-bytes-census server)\n"
+            }
+        }
+        # Warp-C C-2c census (GPU-DESIGN 4.5.10): the compositor's imports
+        # over this run -- every console/game surface generation's slot
+        # resources AND the game's adopted BO (its `present-to` is the
+        # grant), each WITNESSED by a pixel copy through the compositor ctx.
+        # GATED where readable: on the GL device nothing may have been
+        # REFUSED (a refusal means the renderer does not hold a hosted
+        # resource in the compositor's context -- and it latches that
+        # context, so it is never a local event), and at least the game's
+        # imports must have been witnessed. The say lines print at import
+        # time, i.e. inside the expects above whose match discards them, so
+        # the census is the order-independent witness here.
+        set timeout 10
+        expect {
+            -re {comp-attach witnessed (\d+) refused (\d+)} {
+                set cw $expect_out(1,string)
+                set cr $expect_out(2,string)
+                puts "\nGLQ-VIRGL COMP-ATTACH: witnessed $cw refused $cr\n"
+                if {$cr != 0} {
+                    lc_fail "C-2c: $cr compositor import(s) REFUSED/SKIPPED on the GL device (witnessed $cw)"
+                }
+                if {$cw < 1} {
+                    lc_fail "C-2c: no compositor import witnessed on the GL device -- the game's surface + BO imports never ran"
+                }
+                lc_step "C-2c: $cw compositor imports witnessed, 0 refused"
+            }
+            timeout {
+                puts "\nGLQ-VIRGL COMP-ATTACH: absent (pre-C-2c server; census missed, not gated)\n"
             }
         }
     }

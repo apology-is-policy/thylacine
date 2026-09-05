@@ -29,6 +29,7 @@
 #ifndef THYLACINE_EXEC_H
 #define THYLACINE_EXEC_H
 
+#include <thylacine/elf.h>
 #include <thylacine/types.h>
 
 struct Proc;
@@ -81,6 +82,15 @@ struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 #define EXEC_USER_STACK_BASE         (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
 #define EXEC_USER_STACK_GUARD_SIZE   0x1000ull
 #define EXEC_USER_STACK_GUARD_BASE   (EXEC_USER_STACK_BASE - EXEC_USER_STACK_GUARD_SIZE)
+
+// DISTRO D-2: the PIE window (elf.h) is part of THIS plan, so the two
+// constants are pinned against each other here rather than trusted to stay
+// consistent. elf_load refuses any ET_DYN segment whose biased top passes
+// ELF_PIE_LOAD_LIMIT, so this inequality is what makes "a PIE can never be
+// placed into the stack guard, the stack, or anything above it" a build-time
+// fact instead of an arithmetic argument about particular binaries.
+_Static_assert(ELF_PIE_LOAD_LIMIT <= EXEC_USER_STACK_GUARD_BASE,
+               "the PIE window must end below the user stack guard");
 
 // P6-pouch-mem: the burrow-attach window — the user-VA range SYS_BURROW_
 // ATTACH places anonymous Burrows into (ARCHITECTURE.md §6.5, Tier 1).
@@ -140,7 +150,7 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 //                                                        × Elf64_auxv_t (AT_PHDR,
 //                                                        AT_PHENT, AT_PHNUM,
 //                                                        AT_PAGESZ, AT_HWCAP,
-//                                                        AT_RANDOM,
+//                                                        AT_RANDOM, AT_ENTRY,
 //                                                        [AT_VDSO_CLOCK], AT_NULL)
 //   sp + ...                      (pad to the next 16-align)
 //   sp + R                        AT_RANDOM entropy     16 kernel-CSPRNG bytes
@@ -170,13 +180,18 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 // that arithmetic), so nothing that used to take Shape A can observe the
 // change; what it buys is that envp now has exactly one place to be wrong.
 //
-// 8 = AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM,
-// AT_VDSO_CLOCK, AT_NULL. The frame ALWAYS reserves room for all 8 (so the
-// AT_RANDOM block + strings region offsets are stable); when the vDSO page
-// is absent the builder writes the AT_NULL terminator after 6 entries and
+// 9 = AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM,
+// AT_ENTRY, AT_VDSO_CLOCK, AT_NULL. The frame ALWAYS reserves room for all 9
+// (so the AT_RANDOM block + strings region offsets are stable); when the vDSO
+// page is absent the builder writes the AT_NULL terminator after 7 entries and
 // the AT_VDSO_CLOCK slot stays unused (zeroed) padding before the random
 // block. AT_HWCAP is unconditional (the hwcap word exists on every boot).
-#define EXEC_INIT_AUXV_COUNT   8
+//
+// AT_ENTRY joined at DISTRO D-2, placed after AT_RANDOM and BEFORE the
+// optional AT_VDSO_CLOCK. Every reader scans for its tag, so position is free;
+// what the placement buys is that the seven MANDATORY entries keep the frame
+// indices they had, and only the optional tail shifts by one 16-byte slot.
+#define EXEC_INIT_AUXV_COUNT   9
 
 // Environment bounds (#140). The env block is packed exactly like argv: a
 // run of NUL-terminated strings, here "NAME=VALUE" records, with envc equal
@@ -368,7 +383,15 @@ int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
 // Same `*entry_out` / `*sp_out` contract + same partial-state-on-failure
 // disposal contract as exec_setup. argv threads through exactly as
 // exec_setup_with_argv (argc==0 + argv_data==NULL is the no-argv shape).
+// `prog_name` is the DISTRO D-4 parameter: the name the CALLER used for this
+// program, carried down so the PT_INTERP rewrite can put it on the
+// interpreter's command line. It is NOT `exe->path` deliberately -- I-33 says
+// the Spoor's Path is cosmetic and no syscall result may turn on it, and an
+// exec that failed because a path-alloc OOM'd would be exactly that. NULL/0 is
+// legal and means "this entry cannot produce a dynamic image", which is the
+// honest answer for the two native-only spawn thunks.
 int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
+                          const char *prog_name, u32 prog_name_len,
                           const char *argv_data, u32 argv_data_len, u32 argc,
                           u64 *entry_out, u64 *sp_out);
 
@@ -397,12 +420,86 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
 // at this moment the Proc still has it: L-2a builds the new image detached and
 // commits only after everything failable has succeeded. `exec_stage_env`
 // projects a Proc's own /env into this shape for the callers that want it.
+// `nsp` is the DISTRO D-4 parameter and is READ-ONLY here, in the strict sense:
+// this function never writes a field of it. It supplies exactly two things --
+// the phenotype that gates the PT_INTERP rewrite, and the namespace the
+// interpreter path resolves through. NULL disables the rewrite entirely (the
+// kernel test entries pass it), which restores the pre-D-4 behaviour exactly:
+// a PT_INTERP binary is refused. Passing the Proc rather than a
+// `bool pheno_linux` + a Territory keeps the two halves of one decision from
+// being supplied by two arguments that a caller could disagree about.
+//
+// It is deliberately NOT the "Proc being modified" -- that is `as`'s owner, and
+// on the execve path the two are the same Proc while `as` is still detached.
+// Nothing below may start writing through `nsp`; the whole reason this entry
+// takes an AddrSpace is that the Proc-side mutations are the caller's.
 struct AddrSpace;
-int exec_load_into(struct AddrSpace *as, bool exempt,
+struct Proc;
+// Design D (VIVARIUM 13.10.4): `pheno` is the phenotype the image being loaded
+// was DECIDED to have (phenotype_decide at the resolve). The loader consults
+// the parameter -- never nsp->phenotype -- wherever the phenotype shapes the
+// load (the PT_INTERP dispatch), because for execve the field is not updated
+// until the commit AFTER this returns: a native caller execve'ing a dynamic
+// /viv/bin binary decides Linux at the resolve while its field still says
+// native (review F1 Leg C). The loader never writes nsp->phenotype (Leg B).
+int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
+                   u32 pheno,
                    struct Spoor *exe, size_t exe_size,
+                   const char *prog_name, u32 prog_name_len,
                    const char *argv_data, u32 argv_data_len, u32 argc,
                    const char *env_data, u32 env_data_len, u32 envc,
                    u64 *entry_out, u64 *sp_out);
+
+// The argv bounds, MIRRORED from syscall.h (SYS_SPAWN_ARGV_MAX /
+// SYS_SPAWN_ARGV_DATA_MAX). exec.c deliberately does not include syscall.h --
+// it includes back into this surface -- and until D-4 the mirror was two bare
+// literals inside exec_build_init_stack with a comment saying what they
+// mirrored. #178 tracks the absence of a tool that cross-checks the ABI
+// mirrors; naming them here does one better than another comment, because
+// syscall.c sees BOTH spellings and carries a _Static_assert that they agree.
+#define EXEC_ARGV_MAX       512u
+#define EXEC_ARGV_DATA_MAX  65536u
+
+// exec_interp_argv -- the DISTRO D-4 argv block for the interpreter route:
+//
+//     [interp, "--argv0", orig_argv0, "--", orig_path, orig argv[1..]]
+//
+// Returns a kmalloc'd block (caller kfree's) packed exactly like every other
+// argv here -- concatenated NUL-terminated strings, `*out_argc` of them, the
+// last byte a NUL -- or NULL if it does not fit the argv bounds, the input is
+// mis-packed, or the allocation fails.
+//
+// Exported ONLY so the kernel test can assert the block byte-for-byte. That
+// assertion is not optional coverage: exec_build_init_stack EXTINCTS when the
+// NUL count disagrees with argc, so an off-by-one in the slot arithmetic is a
+// dead kernel rather than a failed exec. It is also the only place the
+// `--argv0` claim can be discriminated at all -- nothing in a container can
+// produce a vector whose argv[0] differs from the path it resolved.
+char *exec_interp_argv(const char *interp, u32 interp_len,
+                       const char *path, u32 path_len,
+                       const char *argv_data, u32 argv_data_len, u32 argc,
+                       u32 *out_len, u32 *out_argc);
+
+// exec_resolve_from_namespace (#58 / REVENANT R-4) -- resolve `name` in `p`'s
+// namespace and PIN the resulting executable Spoor (the ref transfers to the
+// caller, which spoor_clunks it). OEXEC-gated: a per-component X-search on
+// every directory hop and PERM_R|PERM_X on the leaf (I-28).
+//
+// DEFINED IN syscall.c, next to the SYS_SPAWN_* family that is its main caller
+// -- it needs stalk + Territory + the LS-4 cwd join, all of which live there.
+// Declared here because DISTRO D-4 made exec.c a caller: the interpreter path
+// resolves through exactly the same gate the program did, so there is one
+// answer to "what is executable from this namespace" and not two.
+struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
+                                          size_t name_len, size_t *size_out);
+
+// _ex variant (VIVARIUM section 13): also reports, via *pheno_out (OPTIONAL),
+// whether the resolution crossed an MPHENO_LINUX mount -- the /viv/bin subtree
+// phenotype declaration channel. Only the SYS_SPAWN_FULL_ARGV path (the sole
+// fresh-phenotype declarer) passes non-NULL; the plain wrapper above passes NULL.
+struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *name,
+                                             size_t name_len, size_t *size_out,
+                                             bool *pheno_out);
 
 // exec_stage_env -- project `p`'s /env into the packed "NAME=VALUE\0" block
 // exec_load_into takes (#140). The one place a Proc's environment becomes an

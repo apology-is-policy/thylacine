@@ -4,11 +4,17 @@
 #
 # Separate from warp-prove.exp because the leg spends 45 s waiting out a 30 s
 # timeout, and the Warp-2 gate's value is being cheap enough to run every time.
-# This scenario MEASURES -- it has no red path of its own beyond "the leg never
-# ran". The verdict lives in the ANSWER= line the leg prints; warp-host.sh reads
-# it. Do NOT key a pass on "C0-REJECT DONE": lc_expect writes its own pattern
-# into its timeout message ("waiting for [C0-REJECT DONE]"), so that token
-# appears in the FAILURE text too (#186).
+# The #240 MEASUREMENT (the ANSWER= line) is data, and warp-host.sh reads it;
+# the FOUR C-0d DETECTOR arms (DETECT / STICKY / F1 / STAGING) are verdicts,
+# and since
+# the C-0d Fable round (F6) the leg's completion token carries them: it prints
+# "C0-REJECT DONE" ONLY when every arm passed, else "C0-REJECT INCOMPLETE(<arm>)"
+# -- so this scenario is self-gating wherever it runs, instead of passing on a
+# blind detector and leaving the host-side 5-term grep as the only gate. The
+# #186 caveat still holds for READERS of the transcript: lc_expect writes its
+# own pattern into its timeout message ("waiting for [C0-REJECT DONE]"), so
+# that token appears in the FAILURE text too; warp-host.sh keys completion on
+# lc_pass's line, which only the success path prints.
 #
 # Runs ON the GL host (Linux; lib.exp takes the direct-pty transport there).
 # env: WARP_REPO (default ~/projects/thylacine), WARP_WORK (default ~/warp).
@@ -45,10 +51,12 @@ lc_login michael correct-horse-battery-staple-v1
 if {$lc_cmd_timeout < 180} { set lc_cmd_timeout 180 }
 # Wait on the LAST line the leg prints, not on ANSWER=: expect stops consuming
 # at its match, so anchoring on ANSWER= truncated the answer's own text out of
-# the transcript. Waiting for DONE lets every measured line land first. The
-# host-side verdict then greps ANSWER= -- which this timeout message cannot
-# contain, so the #186 direction still holds (a timeout can never read as a
-# pass).
-lc_run_expect "warp-prove reject" "C0-REJECT DONE"
+# the transcript. Waiting for the completion token lets every measured line
+# land first. INCOMPLETE(<arm>) -- and the prover's own `FAIL --` on an
+# instrument fault -- fail the scenario at once instead of at the timeout. The
+# host-side verdict then greps ANSWER= and the three PASS terms as well -- which
+# this timeout message cannot contain, so the #186 direction still holds (a
+# timeout can never read as a pass).
+lc_run_expect_hardfail_re "warp-prove reject" "C0-REJECT DONE" {warp-prove: (FAIL --|C0-REJECT INCOMPLETE)}
 
 lc_pass "warp-prove reject: the #240 observation leg ran to completion"

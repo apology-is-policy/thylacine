@@ -110,6 +110,9 @@ pub const T_SYS_PIPE: u64            = 8;
 pub const T_SYS_READ: u64            = 9;
 pub const T_SYS_WRITE: u64           = 10;
 pub const T_SYS_CLOSE: u64           = 11;
+// P5-attach-syscall: a 9P attach over a byte-pipe pair (tx, rx). Backs
+// t_attach_9p; the byte-mode /srv twin is T_SYS_ATTACH_9P_SRV (52).
+pub const T_SYS_ATTACH_9P: u64       = 13;
 // P5-spawn-wait: reap one zombie child + return its (pid, status). Backs
 // t::process::Child::wait (U-2d).
 pub const T_SYS_WAIT_PID: u64        = 22;
@@ -245,6 +248,13 @@ pub const T_SYS_READDIR: u64          = 56;
 // FS-gamma (IDENTITY-DESIGN.md section 9.3): atomic rename/move + remove.
 pub const T_SYS_RENAME: u64           = 57;
 pub const T_SYS_UNLINK: u64           = 58;
+// #50 (VIVARIUM.md section 6.24): path-based open-or-create -- the ARCH
+// section 11.2 create(name, mode, perm) row, minted. One syscall replaces the
+// userspace split + parent-T_OPATH + WALK_CREATE dance (and its cwd
+// handling): the kernel joins the cwd exactly as SYS_OPEN, stalks the parent,
+// and composes create-else-open bounded (T_OEXCL / DMDIR are the exclusive
+// arms, server-atomic).
+pub const T_SYS_OPEN_CREATE: u64      = 109;
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
@@ -268,12 +278,24 @@ pub const T_SYS_PCI_CLAIM: u64        = 76;     // pci-1c: claim a VirtIO-PCI fu
 pub const T_SYS_PCI_MAP_BAR: u64      = 77;     // pci-1c: map a KObj_PCI BAR
 pub const T_SYS_PCI_INFO: u64         = 78;     // pci-1c: read KObj_PCI topology
 pub const T_SYS_CLOCK_SETTIME: u64    = 79;     // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
-// 80 reserved for SYS_FD_DEVCLASS (Menagerie; not yet built).
+pub const T_SYS_FD_DEVCLASS: u64      = 80;     // H-1: fd -> Dev class char ('c' = console)
 pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flow ring -> share_id
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
 pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible DMA weave
 pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
 pub const T_SYS_DMA_CREATE_GPU_BO: u64 = 106;   // Warp-2: mint a share-admissible GPU BO
+pub const T_SYS_BURROW_FROM_HOSTMEM: u64 = 107; // Warp-6 V-2: map a PCI hostmem BAR subrange -> client VA
+pub const T_SYS_HOSTMEM_REFCOUNT: u64 = 108;    // Warp-6 V-3b-1c-2b F2: read a hostmem burrow's total ref count (handle+mapping)
+// SYS_BURROW_FROM_HOSTMEM cache_policy -- mirrors the kernel enum t_cache_policy
+// (kernel/include/thylacine/syscall.h); ABI-pinned. The host DICTATES the
+// attribute (map_blob returns it as map_info); the guest must pass the MATCHING
+// T_CACHE_* -- GPU-DESIGN 6.2 "honored exactly". A guest attribute that disagrees
+// with the host's (e.g. guest NC vs host WB) is the ARM64 mismatched-alias hazard
+// and loses coherency; do NOT guess. On KVM the host maps a HOST3D ring CACHED,
+// so the guest ring is CACHED too.
+pub const T_CACHE_CACHED: u64   = 0; // Normal Write-Back (host-coherent)
+pub const T_CACHE_WC: u64       = 1; // Normal Non-Cacheable (write-combining)
+pub const T_CACHE_UNCACHED: u64 = 2; // Normal Non-Cacheable (host non-coherent)
 pub const T_SYS_EXECVE: u64           = 104;    // LINEAGE L-2: replace this Proc's image in place
 pub const T_SYS_RFORK: u64            = 105;    // LINEAGE L-3b: fork sharing the address space
 // SYS_RFORK flags (kernel/include/thylacine/proc.h). Only RFPROC|RFMEM is
@@ -302,18 +324,34 @@ pub const T_WSTAT_MODE_MASK: u32      = 0o777;
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
 // kernel/include/thylacine/syscall.h. Plan 9 OREAD/OWRITE/ORDWR/OEXEC
 // in the low two bits; OTRUNC (truncate-on-open for write-shaped opens)
-// in bit 4. Bits outside 0x13 are rejected by the kernel.
+// in bit 4. Bits outside SYS_WALK_OPEN_OMODE_VALID are rejected by the kernel.
 pub const T_OREAD: u32                = 0;
 pub const T_OWRITE: u32               = 1;
 pub const T_ORDWR: u32                = 2;
 pub const T_OEXEC: u32                = 3;
 pub const T_OTRUNC: u32               = 0x10;
+/// The git 6.27 append bit: dev9p forwards it to the 9P Tlopen as O_APPEND and
+/// Stratum positions each write at EOF server-side (the kernel has no append mode).
+pub const T_OAPPEND: u32              = 0x40;
+// DISTRO D-1: do not expand a symlink FINAL component. What that yields depends
+// on the rest of the omode, which is why it is a flag and not an access mode:
+// with T_OPATH the returned handle IS the link (the v1.0 lstat spelling --
+// fstat it for the link's own record); without it the open answers T_E_LOOP,
+// Linux O_NOFOLLOW. Non-final components expand regardless -- the flag scopes to
+// the quarry. A trailing '/' OVERRIDES it (POSIX 4.13: the path asserts a
+// directory, so the link must be followed to check).
+pub const T_ONOFOLLOW: u32            = 0x20;
 // FS-delta (IDENTITY-DESIGN.md §9.4): walk-without-open (Linux O_PATH / Plan 9
 // walk). SYS_WALK_OPEN with T_OPATH returns a NON-OPENED, walkable KObj_Spoor --
 // the valid base for creating/walking/renaming/unlinking children + a valid
 // SYS_CHROOT target (a normally-opened handle is not: 9P forbids Twalk from an
 // opened fid). Access bits are ignored when set.
 pub const T_OPATH: u32                = 0x80;
+// #50 (VIVARIUM.md section 6.24): EXCLUSIVE create, meaningful ONLY to
+// SYS_OPEN_CREATE (create-first, once; an existing leaf answers EEXIST --
+// atomic at the server, the lockfile primitive). The other omode-taking
+// syscalls reject the bit. Mirrors SYS_WALK_OPEN_OEXCL.
+pub const T_OEXCL: u32                = 0x1000;
 
 // SYS_WALK_CREATE perm: low 9 bits = POSIX mode; DMDIR selects a directory.
 // Must mirror SYS_WALK_CREATE_PERM_VALID / SYS_WALK_CREATE_DMDIR in the kernel.
@@ -347,12 +385,16 @@ pub const T_SEEK_END: u32             = 2;
 
 // POSIX-shaped mode bits returned in struct t_stat.mode — must mirror
 // kernel/include/thylacine/syscall.h. Subset that v1.0 Devs populate
-// (regular file / directory / character device). T_S_IFMT is the mask
-// for extracting the type.
+// (regular file / directory / character device / symlink). T_S_IFMT is
+// the mask for extracting the type.
 pub const T_S_IFMT:  u32              = 0o170000;
 pub const T_S_IFREG: u32              = 0o100000;
 pub const T_S_IFDIR: u32              = 0o040000;
 pub const T_S_IFCHR: u32              = 0o020000;
+// DISTRO D-1. Only ever observed through a NON-EXPANDING stat -- an ordinary
+// stat of a link reports the TARGET's type, so a caller that sees this asked
+// not to follow (T_ONOFOLLOW + T_OPATH, then fstat).
+pub const T_S_IFLNK: u32              = 0o120000;
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
@@ -567,6 +609,13 @@ pub const T_MREPL:   u32              = 0x0001;
 pub const T_MBEFORE: u32              = 0x0002;
 pub const T_MAFTER:  u32              = 0x0004;
 pub const T_MCREATE: u32              = 0x0008;
+// #217: the mounted device instance may not back an executable mapping --
+// refuses exec resolution AND the file-backed PROT_EXEC phenotype mmap arm.
+pub const T_MNOEXEC: u32              = 0x0010;
+// VIVARIUM section 13: a binary whose exec resolution CROSSES this mount runs the
+// Linux phenotype (the /viv/bin subtree-scope declaration channel). Ungated: an
+// ABI-shape declaration, never authority (I-43).
+pub const T_MPHENO_LINUX: u32        = 0x0020;
 
 // path_id_t — abstract path token used by the mount/unmount/bind
 // surface at v1.0. The kernel comment is the canonical reference:
@@ -594,12 +643,25 @@ pub const T_NOTE_BIT_KILL:       u8 = 1;
 pub const T_NOTE_BIT_PIPE:       u8 = 2;
 pub const T_NOTE_BIT_CHILD_EXIT: u8 = 3;
 pub const T_NOTE_BIT_SNARE:      u8 = 4;
+// The tty:* family -- ONE bit for winch / susp / cont / quit / hup. Unlike
+// SNARE (bit 4, reserved for v1.x) this one is LOAD-BEARING at v1.0: the
+// tty:* names are in the kernel's g_known_notes, so masking the bit really
+// does defer a ^Z, and the kernel routes an all-masked pgrp's tty:susp to a
+// note POST whose stop is applied later at the EL0-return tail.
+pub const T_NOTE_BIT_TTY:        u8 = 5;
 
 // NOTE_MASK_SUPPORTED — the union of every NOTE_BIT_* the kernel knows
 // about today. Setting bits outside this is tolerated (no-op) so future
 // note additions don't break old userspace; SYS_POSTNOTE with an
 // unsupported note NAME returns -1.
-pub const T_NOTE_MASK_SUPPORTED: u64 = 0x1f;
+//
+// MIRROR of NOTE_MASK_SUPPORTED in <thylacine/notes.h>. It sat at 0x1f from
+// before PTY-1b through every chunk that made the tty bit live -- nothing
+// consumed it, so nothing could notice. The const assertion in notes.rs now
+// ties it to the NoteClass set at compile time, which catches a variant added
+// without the bit; it CANNOT catch the kernel growing a bit this file never
+// hears about, because both sides of that check live here.
+pub const T_NOTE_MASK_SUPPORTED: u64 = 0x3f;
 
 // SYS_POSTNOTE sentinel for "send to my own Proc" (kernel maps pid == 0
 // to the calling Proc's pid; matches POSIX kill(0, sig) "send to my
@@ -919,6 +981,61 @@ pub unsafe fn t_pci_map_bar(handle: i64, vaddr: u64, bar_index: u64, prot: u32) 
         in("x2") bar_index,
         in("x3") prot as u64,
         in("x8") T_SYS_PCI_MAP_BAR,
+        options(nostack)
+    );
+    x0
+}
+
+// t_burrow_from_hostmem — Warp-6 V-3b: map a subrange of the PCI hostmem BAR
+// (device PA = bar.pa + shm-window offset + `offset`, `length` bytes) into this
+// Proc's burrow-attach window and return the guest VA. `handle` is the caller's
+// KObj_PCI claim (RIGHT_MAP required -- holding it IS the authority, I-5).
+// `cache_policy` is a T_CACHE_* value. Returns the VA, or < 0 on a bad
+// handle / missing right / OOB subrange / unknown cache policy.
+//
+// Safety: makes a raw syscall; the returned VA aliases device memory (the
+// hostmem BAR), so the caller owns its lifetime until proc exit / unmap.
+#[inline(always)]
+pub unsafe fn t_burrow_from_hostmem(
+    handle: i64,
+    shmid: u64,
+    offset: u64,
+    length: u64,
+    cache_policy: u64,
+) -> i64 {
+    let mut x0: i64 = handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") shmid,
+        in("x2") offset,
+        in("x3") length,
+        in("x4") cache_policy,
+        in("x8") T_SYS_BURROW_FROM_HOSTMEM,
+        options(nostack)
+    );
+    x0
+}
+
+// t_hostmem_refcount -- Warp-6 V-3b-1c-2b F2: read the TOTAL #847 reference count
+// (handle_count + mapping_count) of the BURROW_TYPE_HOSTMEM burrow that backs
+// `[va, va+len)` in THIS Proc's address space (a hostmem ring minted by
+// t_burrow_from_hostmem). Returns >= 1 (the caller maps it, so its own mapping
+// always counts) -- EVERY live ref: the caller's map plus any weft-shared
+// client's map AND its transferred registration pin -- or < 0 (-errno) if the
+// range does not resolve to a single hostmem VMA the caller owns. Read-only. The
+// reclaim discipline lives in the caller: disarm the weft share FIRST, then a
+// count of 1 means the caller's own map is the ONLY reference (no client map and
+// no client that has claimed-but-not-yet-mapped -- the pin makes the sum >= 2),
+// so the host-side offset is safe to reclaim (WARP-V3-DESIGN 0.11.3).
+#[inline(always)]
+pub unsafe fn t_hostmem_refcount(va: u64, len: u64) -> i64 {
+    let mut x0: i64 = va as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") len,
+        in("x8") T_SYS_HOSTMEM_REFCOUNT,
         options(nostack)
     );
     x0
@@ -1262,7 +1379,7 @@ pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
 // by the absolute `path` (`path_len` bytes) in the calling Proc's territory
 // (stalk-2: path-keyed; was an abstract target_path_id). The kernel `stalk`s
 // `path` to the mount point's (dc, devno, qid.path) identity. `flags` is a
-// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE; bits outside that union
+// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC; bits outside that union
 // are rejected. The mount point MUST EXIST as a walkable directory.
 //
 // Returns 0 on success, -1 on:
@@ -1342,6 +1459,32 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
         "svc #0",
         inlateout("x0") x0,
         in("x8") T_SYS_PIVOT_ROOT,
+        options(nostack)
+    );
+    x0
+}
+
+/// t_attach_9p -- drive a 9P attach over a byte-pipe PAIR (SYS_ATTACH_9P):
+/// `tx_fd` carries client->server bytes (needs RIGHT_WRITE), `rx_fd`
+/// server->client bytes (needs RIGHT_READ) -- two Plan 9 pipes from `t_pipe`
+/// with the matching ends handed to the server (the stub-driver shape), or one
+/// duplex Spoor passed as both. The kernel runs Tversion + Tattach (asserting
+/// the caller's kernel-stamped principal as `n_uname`; the value passed here
+/// is vestigial) and returns a KOBJ_SPOOR rooting the attached tree
+/// (R|W|TRANSFER). The attach holds its own refs on both transport Spoors, so
+/// the pipe fds may be closed afterwards. Returns the new fd (>= 0) or -1.
+#[inline(always)]
+pub unsafe fn t_attach_9p(tx_fd: i64, rx_fd: i64, aname: *const u8, aname_len: usize,
+                          n_uname: u64) -> i64 {
+    let mut x0: i64 = tx_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") rx_fd as u64,
+        in("x2") aname as u64,
+        in("x3") aname_len as u64,
+        in("x4") n_uname,
+        in("x8") T_SYS_ATTACH_9P,
         options(nostack)
     );
     x0
@@ -2119,6 +2262,37 @@ pub unsafe fn t_fd2path(fd: i32, buf: *mut u8, buf_len: usize) -> i64 {
     x0
 }
 
+// t_fd_devclass -- the Dev class char backing `fd` (H-1;
+// docs/SYS-FD-DEVCLASS-SPEC.md). Returns a positive byte ('c' = the console --
+// a SYS_CONSOLE_OPEN fd or a walked /dev/cons fd; '|' = a pipe; '9' = a dev9p
+// file; ...), or a negative errno for a closed / non-Spoor fd. Read-only
+// introspection: no access right required, confers nothing. The Beacon
+// emission gate (BEACON.md 12.4) and --color=auto both key on exactly
+// (t_fd_devclass(1) == 'c').
+#[inline(always)]
+pub unsafe fn t_fd_devclass(fd: i32) -> i64 {
+    let mut x0: i64 = fd as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_FD_DEVCLASS,
+        options(nostack)
+    );
+    x0
+}
+
+// fd_devclass -- the safe wrapper: Some(dc byte) for a live Spoor fd, None
+// otherwise. stdout_is_terminal() is the isatty(3)-shaped convenience the
+// emission gates use.
+pub fn fd_devclass(fd: i32) -> Option<u8> {
+    let r = unsafe { t_fd_devclass(fd) };
+    if r > 0 && r <= 0x7e { Some(r as u8) } else { None }
+}
+
+pub fn stdout_is_terminal() -> bool {
+    fd_devclass(1) == Some(b'c')
+}
+
 // t_getpid / t_getuid / t_getgid -- the calling Proc's pid / principal_id /
 // primary_gid (LS-K). No args; the value is the return (always >= 0, < 2^32).
 // See the `identity` module for the safe u32 wrappers.
@@ -2381,6 +2555,32 @@ pub unsafe fn t_walk_create(parent_fd: i64, name: *const u8, name_len: usize,
         in("x3") omode as u64,
         in("x4") perm as u64,
         in("x8") T_SYS_WALK_CREATE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_open_create — path-based open-or-create (#50; SYS_OPEN_CREATE = 109).
+// `start_fd` is a RIGHT_READ navigation base or T_WALK_OPEN_FROM_ROOT (a
+// relative path then joins the cwd EXACTLY as SYS_OPEN — the parity the
+// syscall exists for). `omode` admits access + T_OTRUNC + T_ONOFOLLOW +
+// T_OEXCL (T_OPATH rejected); `perm` is the low-9 mode, plus
+// T_WALK_CREATE_DMDIR for mkdir-by-path (create-only, opened OREAD).
+// Plain create is open-first / create-on-NOENT / bounded-retry in the
+// KERNEL; T_OEXCL and DMDIR are one server-atomic create. Returns the new
+// fd (>= 0) or -T_E_* (a real errno, not a bare -1).
+#[inline(always)]
+pub unsafe fn t_open_create(start_fd: i64, path: *const u8, path_len: usize,
+                            omode: u32, perm: u32) -> i64 {
+    let mut x0: i64 = start_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") path as u64,
+        in("x2") path_len as u64,
+        in("x3") omode as u64,
+        in("x4") perm as u64,
+        in("x8") T_SYS_OPEN_CREATE,
         options(nostack)
     );
     x0
@@ -2918,6 +3118,21 @@ unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) ->
     RT_ARGC.store(argc, Ordering::Release);
     RT_ARGV.store(argv as *mut *const u8, Ordering::Release);
     capture_auxv(argc, argv);
+    // #237: mask the `pipe` note by default -- a native Rust program that writes
+    // to a closed pipe gets EPIPE, not death (the kernel's I-19 default is now
+    // TERMINATE; a program unmasks T_NOTE_BIT_PIPE to opt into Plan 9 pipe-death).
+    // A native Proc resets note_mask to 0 at exec, so a plain SET is correct. The
+    // libt (C) _start carries the identical mask for C-native bins.
+    //
+    // SCOPE: the MAIN thread only. note_mask is per-thread and native thread-spawn
+    // does NOT inherit it (the kernel rfork rule), so a thread started via
+    // thread::spawn_raw begins PIPE-unmasked and would take the proc-wide pipe
+    // latch on a closed-pipe write. No shipping multi-threaded libthyla-rs program
+    // writes a closed pipe on a spawned thread (the spawners are all benchmarks /
+    // torture tests over sockets or CPU/memory), so this is a latent limitation,
+    // not a regression -- the Go runtime, which IS such a writer, masks per-M in
+    // minit. A spawned thread that needs EPIPE-not-death masks NOTE_BIT_PIPE itself.
+    let _ = t_note_mask(1u64 << T_NOTE_BIT_PIPE, core::ptr::null_mut());
     rs_main()
 }
 

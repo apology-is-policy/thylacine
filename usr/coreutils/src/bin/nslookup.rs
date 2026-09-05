@@ -33,7 +33,7 @@ pub extern "C" fn rs_main() -> i64 {
 const USAGE: &str = "\
 usage: nslookup [--color[=WHEN]] HOST
   Resolve HOST to an IPv4 address via /net/cs (numeric -> ndb -> DNS).
-  --color[=WHEN]  colorize: always (default) | never | auto
+  --color[=WHEN]  colorize: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -47,7 +47,7 @@ fn run(args: Args) -> i64 {
         return rc;
     }
 
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut host: Option<&str> = None;
     let mut i = 1;
     while let Some(a) = args.get_str(i) {
@@ -109,8 +109,8 @@ fn run(args: Args) -> i64 {
     }
 }
 
-/// `--color=auto` stub; true until a kernel TTY check lands (matches the
-/// coreutils presentation tools).
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

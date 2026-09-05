@@ -5,7 +5,7 @@
 // is a path `readdir` lists but `fstat` cannot cross (no stat_native) -- the
 // distinction Unix has no word for. Sharpens to the exact Dev class once a kernel
 // SYS_FD_DEVCLASS lands (COREUTILS-THYLACINE-DESIGN.md). A presentation tool ->
-// color on by default.
+// color on the console (auto).
 
 #![no_std]
 #![no_main]
@@ -30,7 +30,7 @@ usage: realm [--color[=WHEN]] PATH...
   Print each PATH's namespace realm: fs (a filesystem object), dev (a
   device), or graft (a live kernel-served namespace mount, which fstat
   cannot cross).
-  --color[=WHEN]  colorize: always (default) | never | auto
+  --color[=WHEN]  colorize: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -89,7 +89,7 @@ fn run(args: Args) -> i64 {
     if let Some(rc) = usage::help_if_requested(args, USAGE) {
         return rc;
     }
-    let mut mode = ColorMode::Always; // presentation tool
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut paths: Vec<&str> = Vec::new();
     let mut opts_done = false;
     let mut i = 1;
@@ -149,8 +149,8 @@ fn run(args: Args) -> i64 {
     status
 }
 
-/// `--color=auto` stub (no cooked-mode TTY check yet; see the SYS_FD_DEVCLASS
-/// spec). True so an explicit `--color=auto` colorizes.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

@@ -1848,8 +1848,12 @@ two-axis fusion.**
 - `/proc/<pid>/ctl` ALREADY exists + is writable (`devproc.c`; today a stub whose own
   comment anticipates "parses the verb kill / stop / start / notepg + dispatches via the
   notes layer"). A-4b makes it real: a write of `kill\n` / `killgrp\n` resolves `<pid>` ->
-  `struct Proc` and posts the kill (single-thread: `notes_post`; multi-thread:
-  `proc_group_terminate` -- both built + audited, #809/#811). `stop`/`start` stay stubbed
+  `struct Proc` and terminates it. *(AS-BUILT correction: this line described a
+  design-time split -- "single-thread: `notes_post`; multi-thread:
+  `proc_group_terminate`" -- that the implementation never had. `devproc.c`
+  dispatches BOTH verbs through `proc_group_terminate` uniformly, and its own
+  comment says so. Task #241 made `SYS_POSTNOTE`'s cross-Proc arm agree, so the
+  two kill surfaces now share one mechanism; #809/#811 built + audited it.)* `stop`/`start` stay stubbed
   (scheduler integration, ARCH [OPEN Q 7.6.D], Phase 7). No `/proc/<pid>/note` file at v1.0
   -- kill rides `ctl` (Plan 9 idiom; the note-file is ARCH [OPEN Q 7.6.A]'s later form).
 - *Ownership model + enforcement SITE for `/proc`* (RECONCILED 2026-06-01, user vote --

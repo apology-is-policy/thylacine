@@ -133,7 +133,26 @@ fn mkdir_p(path: &str, verbose: bool) -> Result<()> {
                 }
             }
             Err(Error::Exists) => {}
-            Err(e) => return Err(e),
+            // An ancestor that ALREADY EXISTS but sits in a directory this
+            // user cannot write answers PermissionDenied, not Exists -- the
+            // kernel's create path checks the parent's write bit before it
+            // discovers the child is already there. Since `mkdir -p` walks the
+            // chain from `/`, that describes almost every path a person types:
+            // `mkdir -p a/b` from /tmp tries to create `/tmp` (inside the
+            // system-owned `/`), and `-p` in a home tries `/home`. Both existed
+            // all along. Treating only Exists as benign therefore broke `-p`
+            // essentially everywhere outside `/`.
+            //
+            // So the benign case is "the component is now a directory",
+            // whatever error said so. Re-checking AFTER the failed create
+            // (rather than testing existence first) keeps this race-tolerant:
+            // a concurrent creator that beat us here is exactly the situation
+            // `-p` is supposed to absorb.
+            Err(e) => {
+                if !fs::is_dir(acc.as_str()) {
+                    return Err(e);
+                }
+            }
         }
     }
     Ok(())

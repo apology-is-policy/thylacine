@@ -138,6 +138,13 @@ cmd_sync() {
     # The WORKING COPY of build.sh -- it may carry uncommitted recipe edits, and
     # running the exact file under review is the whole anti-drift story.
     cp "$REPO_ROOT/tools/build.sh"        "$payload/build.sh"
+    # build.sh sources build-config.sh and applies the `default` preset on EVERY
+    # invocation (docs/BUILD-CONFIG-DESIGN.md), so the configurator core + the
+    # configs/ presets are build inputs on this machine as much as build.sh is.
+    # (Before this, a synced post-configurator build.sh died at line ~117 with
+    # "build-config.sh: No such file or directory" the moment stage2 ran.)
+    cp "$REPO_ROOT/tools/build-config.sh" "$payload/build-config.sh"
+    cp -R "$REPO_ROOT/configs"            "$payload/configs"
     cp "$REPO_ROOT/tools/clade-stage1.sh" "$payload/clade-stage1.sh"
     # CL-7a: the Mesa cross-build inputs. The shim llvm-config is not a
     # convenience -- meson RUNS it during configure, so it is as much a build
@@ -146,8 +153,8 @@ cmd_sync() {
     cp "$REPO_ROOT/tools/clade-mesa-cross.sh"        "$payload/clade-mesa-cross.sh"
     write_remote_driver > "$payload/keep-stage.sh"
 
-    tar -C "$payload" -czf "$payload/payload.tgz" patches build.sh clade-stage1.sh \
-        clade-llvm-config-cross.sh clade-mesa-cross.sh keep-stage.sh
+    tar -C "$payload" -czf "$payload/payload.tgz" patches build.sh build-config.sh configs \
+        clade-stage1.sh clade-llvm-config-cross.sh clade-mesa-cross.sh keep-stage.sh
     gc compute scp "$payload/payload.tgz" "$INSTANCE:~/payload.tgz" \
         --zone="$ZONE" --strict-host-key-checking=no >/dev/null
 
@@ -156,6 +163,8 @@ cmd_sync() {
         chmod +x payload/keep-stage.sh payload/clade-stage1.sh payload/build.sh
         mkdir -p $THYLA_SRC/tools
         cp payload/build.sh                    $THYLA_SRC/tools/build.sh
+        cp payload/build-config.sh             $THYLA_SRC/tools/build-config.sh
+        rm -rf $THYLA_SRC/configs && cp -R payload/configs $THYLA_SRC/configs
         cp payload/clade-stage1.sh             $THYLA_SRC/tools/clade-stage1.sh
         cp payload/clade-llvm-config-cross.sh  $THYLA_SRC/tools/clade-llvm-config-cross.sh
         cp payload/clade-mesa-cross.sh         $THYLA_SRC/tools/clade-mesa-cross.sh

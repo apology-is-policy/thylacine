@@ -1123,3 +1123,67 @@ at v1.0 (one session; trusted system daemons; a hostile same-user program is
 `Session(self)` which owns its own empties); no escalation, no hosted-tile
 degradation, no crash. The fix (block a subtree containing a FOREIGN-owned
 empty leaf) refines the ratified 13.6 rule and lands with the multi-seat seam.
+
+## Backgrounded-leaf tiling, structural transparency, and the hosting-fan defect (2026-09-05, KT-1.5d-3 F2)
+
+**Context the dossier lacked.** Since KT-1.5d-1b a SESSION (a logged-in
+principal's per-user halcyond, `Actor::Session`) taking the display
+BACKGROUNDS the console renderer's leaf (aurora): no FRAME, no composite, no
+CONFIGURE, no scanout. d-1b decided that from VISIBILITY (`vis -> bg_now`)
+AFTER `recompute`, so the backgrounded leaf still consumed a tiling column --
+a multi-tile session tiled into N+1 columns (ls-gfx-session measured two
+session tiles summing ~836 of 1280 px).
+
+**F2 (i), tiling exclusion.** `reconcile` decides backgrounding from the TREE
+before `recompute` (`hosted_leaves`, owner-based, visibility-independent)
+into `Pane.backgrounded` (`apply_backgrounded` clears stale flags each pass);
+`layout_pane`'s Split arm zero-rects a backgrounded leaf -- KEPT visible so
+the post-recompute vis/bg/scanout accounting is untouched -- and the
+foreground siblings divide the full rect (all-bg container guard). A
+session-less display yields the empty set: the console path is byte-identical.
+Two tiles now sum 1264/1280.
+
+**F2 (ii), structural transparency (operator-ratified).** A backgrounded leaf
+is transparent to a session's structural ops: `actor_owns_subtree(Session)`
+skips it -- GUARDED on >= 1 owned non-backgrounded surface, else a session
+could close an aurora-only subtree; an all-empty subtree stays vacuously
+owned -- and `tab_cycle` / `visible_strips` / the `layout_pane` Tab arm
+(`Next::Tab`, resolved outside the `&mut` borrow) skip it: never a segment,
+a cycle stop, or the shown child. THE TWO-FLAGS TRAP: the skip keys on the
+LEAF tree flag (`is_bg_leaf`, via `subtree_hosted`), never on
+`Surface.backgrounded`, which is visibility-derived and CLEARS the moment a
+tab hides the leaf (that re-exposure E_PERM'd `tab next` until re-keyed).
+
+**F2b, the pre-existing hosting-fan defect (found 2026-09-05).** A reconcile
+is structural iff `calc_geom_sig` changed, and the signature folded only each
+visible leaf's `(id, content rect)` -- WHERE, never WHAT the leaf shows. A
+hosting into an ALREADY-split empty leaf (an explicit `split` then a spawn;
+the H-4b `host_into` claim placement; `host()`'s focused-empty-leaf arm)
+changes no rect, so the pass ran NON-structural (the focus-only chrome
+branch), the CONFIGURE fan never fired, and the new surface had no standing
+offer (`offered == None`): it never learned its pane size and its first
+`resize` ack answered E_INVAL. Masked since G-6 because every gate hosted via
+`host()`'s SPLIT arm (a new rect) and the production clients pre-size to the
+pane. FIX (state-based): the signature folds the hosted surface INCARNATION
+`(slot, gen)` (sentinel for empty), so hosting / unhosting / a same-slot
+rehost are structural on every placement path with no per-caller poison
+(the `frame_tick` `geom_sig.wrapping_add(1)` is the action-based shape this
+avoids). Test-mode logs every resize-ack rejection with its discriminant and
+the deciding state -- the client sees one Rwrite error; only that line
+separates stale / no-offer / echo-mismatch / draining.
+
+**Prosecution.** Any reconcile-consumed input the signature still omits (a
+leaf's role/status/tab-visibility that changes what the pass must do); the
+incarnation's `gen` read racing a retire inside one pass; the sentinel
+`u64::MAX` colliding with a real `(slot, gen)` (slot 0xffffffff, unreachable);
+the transparency guard's vacuous-empty edge; the Split arm's all-bg
+fallback; `host()`'s shape-keyed split flipping SplitH once aurora is
+excluded (the flat `[aurora, A, B]` root that exposed the ownership model).
+
+**Tests.** `ls-gfx-panes` is the regression test for F2b (the battery's
+explicit pre-split + B's resize leg fail 3/3 without the fold); its move leg
+now orders panes by the layout text's child order, because a zero-rect leaf
+cannot be ordered by rect. `ls-gfx-session` carries the F2 geometry leg (two
+session tiles must sum >= 85% of the display width; witness captured THEN
+spawn, in sequence -- expect matches by arm ORDER). The battery + scenarios
+remain [[seam-tapestry-battery-unowned]].

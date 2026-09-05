@@ -20,6 +20,27 @@ if(THYLA_BOOT_PROBES)
     target_compile_definitions(joey PRIVATE THYLA_BOOT_PROBES)
 endif()
 
+# BUILD-CONFIG-DESIGN.md 4.5: DEV_ACCOUNTS is the account-provisioning axis, split from
+# BOOT_PROBES so a lean image (no probe ladder) is still loginnable. When ON and
+# BOOT_PROBES is OFF, joey runs the minimal provision_dev_accounts (create michael);
+# when BOOT_PROBES is ON its full ladder provisions instead (see the #if in joey.c).
+if(THYLA_DEV_ACCOUNTS)
+    target_compile_definitions(joey PRIVATE THYLA_DEV_ACCOUNTS)
+endif()
+
+# #229: the tripwire on that gate. A probe helper typed OUTSIDE the region above
+# is dead code in the lean image, and the only signal was a warning in a build
+# log nothing reads -- eleven had accumulated before anyone looked, because the
+# lean shape is built by nothing in the normal loop. -Werror makes the build
+# REFUSE, which is the form of the signal that cannot be scrolled past.
+#
+# This is what actually prevents a recurrence. Moving the helpers into their own
+# region (or their own file) does not: the next person still types the new one
+# wherever they happen to be editing. The compiler is the only reader that is
+# always present. A function genuinely meant to be uncalled says so with
+# __attribute__((unused)); silence is not one of the options.
+target_compile_options(joey PRIVATE -Werror=unused-function)
+
 # A-5c-c: the build generates the host-baked system recovery phrase header here
 # (tools/build.sh emit_corvus_recovery_header). joey #includes it (guarded by
 # __has_include) to drive the live RECOVER(system) boot E2E. Absent header ->

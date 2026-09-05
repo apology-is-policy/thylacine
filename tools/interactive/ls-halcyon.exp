@@ -1,0 +1,784 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-halcyon.exp -- the H-2 transcript MVP, end to end
+# (HALCYON.md sections 4 + 13; the ROADMAP section-11.1 H-2 gate row).
+#
+# GATED ON THE BAKED LEVER (the cfg-4 precedent): the pool carries
+# /lib/halcyon/renderer = "halcyond" only under THYLACINE_HALCYON=1, because
+# every sibling scenario and the suite assume the aurora fbcon. On a default
+# image joey spawns aurora and this scenario SKIPs cleanly (the go5/chords
+# idiom: lc_quit + exit 0); on a lever image it proves:
+#
+#   render  : joey chose halcyond; the rich advertisement landed; login ->
+#             ut flows through the transcript; the screendump's dominant
+#             color is the PARCHMENT ground (paper-light -- aurora never
+#             paints it: its default is the Bonfire dark) with real ink on
+#             top (the discriminating pixel pair).
+#   rich    : the H-1 canary now reads RICH ("ut: beacon rich exported" +
+#             "transcript zones armed" -- the F7 transport half through a
+#             REAL advertisement), and `ls -l` emits the rich TABLE frames
+#             on the wire ("1936;v1;table" in the transcript -- output-only:
+#             no typed command contains it). F10's silence is pinned too:
+#             no "re-exported" line (the tier never changed mid-session).
+#   reflow  : /dev/winsize reads the full mono grid; a compositor SPLIT
+#             (the default Super+H chord over the REAL QMP keyboard path)
+#             halves the width -> halcyond reflows + re-reports winsize;
+#             ZOOM (Super+F) restores it. The resize E2E of the gate row.
+#
+# HVF like the gfx siblings (bare TCG hangs at the pre-existing 8a-2b
+# hwwatch E2E -- task #27). Serial discipline: typed commands stay short;
+# assertion tokens are output-only.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+# The whole-session transcript (the ls-3a idiom): tail greps are
+# buffer-order-immune where expect's cursor has already moved past a line.
+set transcript /tmp/ls-halcyon-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
+
+proc hkey {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} err]} {
+        lc_fail "qmp-sendtext -k $chord failed: $err"
+    }
+    after 1500 ;# split/zoom -> CONFIGURE -> reflow -> winsize re-report
+}
+
+# Screendump + region verdict: "<off> <total> <dom_r> <dom_g> <dom_b>".
+proc region {x0 y0 x1 y1 {r 242} {g 235} {b 224}} {
+    global repo qmp
+    set out /tmp/ls-halcyon-[pid].png
+    file delete -force $out
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} {
+        return "DUMP-ERR $err"
+    }
+    if {![file exists $out]} { return "DUMP-MISSING" }
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $out $x0 $y0 $x1 $y1 $r $g $b} verdict]} {
+        return "REGION-ERR $verdict"
+    }
+    return $verdict
+}
+
+proc strip_want {x0 y0 x1 y1 r g b what want_ink} {
+    set v ""
+    for {set i 0} {$i < 12} {incr i} {
+        set v [region $x0 $y0 $x1 $y1 $r $g $b]
+        if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot dr dg db]} {
+            if {$dr == $r && $dg == $g && $db == $b && (!$want_ink || $off > 0)} {
+                return "$off $tot"
+            }
+        }
+        after 500
+    }
+    lc_fail "$what: region $x0,$y0-$x1,$y1 never read dominant $r,$g,$b (want_ink=$want_ink; last: $v)"
+}
+
+lc_boot
+
+# The renderer probe: joey names its choice in the boot stream. Aurora =>
+# the lever is not baked => SKIP (never a red on a default image).
+set timeout $lc_boot_timeout
+expect {
+    -ex "joey: halcyond spawned" { lc_step "joey chose halcyond (lever image)" }
+    -ex "joey: aurora spawned" {
+        puts "\nLS-CI SKIP: default image (aurora fbcon) -- the halcyon lever\
+ is not baked. Bake with THYLACINE_HALCYON=1 to run this scenario."
+        lc_quit
+        # 77 = the harness's SKIP code: scored SKIP and summarized as "NOT
+        # coverage". exit 0 here was scored PASS, and three H-3b runs read that
+        # PASS as a bevel/tag-bar witness the scenario never executed.
+        exit 77
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the renderer spawn" }
+    timeout { lc_fail "no renderer spawn line within ${lc_boot_timeout}s" }
+    eof     { lc_fail "qemu exited before the renderer spawn" }
+}
+
+# halcyond bring-up (the rich advertisement + the transcript surface) is
+# asserted at the END via tgrep, NOT inline here: an inline lc_expect consumes
+# the stream up through "console up", but "Thylacine login: " races ahead of
+# "console up" on some boots (login and halcyond print on the SAME serial from
+# different procs, so their order is non-deterministic) -- swallowing the login
+# prompt and hanging lc_login for the whole boot timeout. tgrep is
+# order-independent (it greps the whole transcript at the end).
+lc_login michael correct-horse-battery-staple-v1
+
+# The session leg: real output through the transcript (frames bracket the
+# payload; the payload bytes are intact on serial -- the strip identity).
+# Sequencing markers are OUTPUT-ONLY (`; pwd` -> /home/michael): a token
+# from the ls arguments would match its own typed echo (the #60 class).
+# The CONTENT proof is the transcript's frame greps below + the pixels.
+# OPERANDS MUST EXIST POST-PIVOT: /version//welcome are BOOT-ramfs paths
+# and vanish at the pivot -- pointing ls at them made every leg pass
+# hollowly through `; pwd` while ls errored to stderr (the hunt that
+# found it: ps framed, ls never did; the gate was innocent).
+lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
+lc_run_expect "ls -l /lib/aurora; pwd" "/home/michael"
+
+# The pixel proof: the dominant color of a center rect IS the parchment
+# ground (242,235,224) -- aurora's Bonfire dark can never produce it -- and
+# ink exists on top (off > 0 alone would pass an unpainted buffer; require
+# real text mass).
+set v [region 200 150 1080 650]
+if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off total dr dg db]} {
+    lc_fail "gfx_region verdict unparseable: $v"
+}
+if {$dr != 242 || $dg != 235 || $db != 224} {
+    lc_fail "dominant color ($dr,$dg,$db) is not the Daylight surface (242,235,224) -- halcyond is not painting"
+}
+if {$off < 300} {
+    lc_fail "only $off/$total non-ground pixels -- no ink on the transcript"
+}
+lc_pass "halcyon: parchment ground + ink ($off/$total non-ground px, dom $dr,$dg,$db)"
+
+# The reflow E2E: full grid -> compositor split (REAL Super+H over QMP) ->
+# halcyond reflows + re-reports -> zoom restores. The winsize read is the
+# kernel-visible witness of the CONFIGURE path end to end.
+lc_run_expect "cat /dev/winsize" "winsize 128 "
+lc_pass "halcyon: full-width mono grid reported (128 cols)"
+
+# H-3d: THE STATUS BAR (HALCYON.md 13.6; Daylight 6). halcyond mints ONE
+# Role::Status surface once the console is up; the compositor carves the
+# display's bottom 20 rows for it and places it there. The compositor's
+# `statusbar` file is the rect (its own fact, read off ctl's display size);
+# halcyond's `painted` line says where the four slots landed (it reaches the
+# serial like every say line; the transcript mirror is harmless -- the bar
+# is outside the transcript). Pixels: the strip's left end is the bar's own
+# dark (status_bg 26,18,10) and the active workspace indicator is ember
+# (224,120,64) -- colours nothing else on this screen is painted -- and the
+# condition dot follows the console's last exit: cinnabar (152,40,24) after
+# a failing command (a quiet `grep -q` miss: exit 1 with no operand error --
+# the sanity control below greps for that wording), sage (30,88,68) after a
+# passing one, in step with the live tile. The context slot carries the console's directory (ut's OSC 7)
+# and its running-or-last command (ut's cmd mark) -- checked at the end by
+# tgrep, order-independent.
+lc_send "cat /dev/tapestry/ctl"
+set dispw 0; set disph 0
+expect {
+    -re {display (\d+) (\d+)[\r\n]} { set dispw $expect_out(1,string); set disph $expect_out(2,string) }
+    timeout { lc_fail "no display line from the tapestry ctl" }
+}
+lc_send "cat /dev/tapestry/statusbar"
+expect {
+    -re {[\r\n\\](\d+) (\d+) (\d+) (\d+)[\r\n]} {
+        set sx $expect_out(1,string); set sy $expect_out(2,string); set sw $expect_out(3,string); set sh $expect_out(4,string)
+    }
+    timeout { lc_fail "no rect from the statusbar file" }
+}
+if {$sx != 0 || $sw != $dispw || $sh != 20 || $sy != $disph - 20} {
+    lc_fail "statusbar rect $sx $sy $sw $sh is not the bottom strip of ${dispw}x${disph}"
+}
+lc_pass "halcyon: the compositor carved the status strip ($sx $sy $sw $sh of ${dispw}x${disph})"
+# H-3d (F4): the carve is not just the statusbar rect -- it must shrink the
+# LAYOUT. The single console leaf's content height in the compositor's
+# `layout` file must equal the display MINUS the strip. A regression that
+# registered the bar (rect correct) but skipped `layout.recompute(dw,
+# layout_h, ..)` would leave the leaf full-height -- its bottom 20px hidden
+# behind the opaque bar -- and still pass the rect check above. Cell-height
+# independent (reads the compositor's own geometry, not a derived grid).
+lc_send "cat /dev/tapestry/layout"
+set leaf_h 0
+expect {
+    -re {leaf surface=\d+ \[\d+,\d+,\d+,(\d+)\]} { set leaf_h $expect_out(1,string) }
+    timeout { lc_fail "no console leaf row in the layout file" }
+}
+if {$leaf_h != $disph - 20} {
+    lc_fail "the console leaf height $leaf_h is not the carved region [expr {$disph - 20}] (the layout was not recomputed above the bar)"
+}
+lc_pass "halcyon: the carve shrank the layout -- the console leaf is $leaf_h of the ${disph}px display (strip 20)"
+set smid [expr {$sy + 10}]
+strip_want 1 [expr {$sy + 2}] 6 [expr {$sy + 18}] 26 18 10 "status bar left end (status_bg)" 0
+strip_want [expr {$dispw - 6}] [expr {$sy + 2}] [expr {$dispw - 1}] [expr {$sy + 18}] 26 18 10 "status bar right end (status_bg)" 0
+strip_want 9 [expr {$sy + 5}] 13 [expr {$sy + 15}] 224 120 64 "the active workspace indicator (ember)" 0
+lc_pass "halcyon: the status bar is dark at both ends with the ember workspace indicator at the left"
+# A failing command -> the live tile AND the bar's condition go cinnabar
+# (the same record); a passing one -> sage. The painted line carries the
+# condition slot's rect (the dot is its left 8px).
+proc status_painted {want_cond what} {
+    global timeout lc_cmd_timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -re "halcyond: status bar (\\d+) painted ws \\\[(\\d+) (\\d+)\\\] ctx \\\[(\\d+) (\\d+)\\\] cond \\\[(\\d+) (\\d+)\\\] clock \\\[(\\d+) (\\d+)\\\] context \"(\[^\"\]*)\" condition $want_cond" {
+            return [list $expect_out(6,string) $expect_out(7,string) $expect_out(10,string)]
+        }
+        timeout { lc_fail "$what: no status bar painted line with condition $want_cond" }
+    }
+}
+lc_send "grep -q h3d-not-there /lib/beacon/verbs"
+set p [status_painted Err "after a failing command"]
+set cx [lindex $p 0]
+strip_want [expr {$cx + 1}] [expr {$smid - 3}] [expr {$cx + 7}] [expr {$smid + 3}] 152 40 24 "condition dot after a failing command (cinnabar)" 0
+lc_pass "halcyon: the bar's condition went cinnabar with the failing command (context \"[lindex $p 2]\")"
+lc_send "cd /lib/aurora; ls; pwd"
+set p [status_painted Ok "after a passing command"]
+# F3: the dot's x moves with the condition label ("ok" is narrower than
+# "err"), so re-extract cx from THIS (Ok) painted line -- reusing the Err
+# line's cx read the sage dot ~2px off, passing only by pixel overlap.
+set cx [lindex $p 0]
+strip_want [expr {$cx + 1}] [expr {$smid - 3}] [expr {$cx + 7}] [expr {$smid + 3}] 30 88 68 "condition dot after a passing command (sage)" 0
+lc_pass "halcyon: the bar's condition went sage with the passing command (context \"[lindex $p 2]\")"
+lc_run_expect "pwd" "/lib/aurora"
+lc_run_expect "cd; pwd" "/home/michael"
+
+# H-3c: THE KEYBOARD PATH (HALCYON.md 13.6 "obj interaction"; 5/6). `ls
+# /lib/aurora; pwd` leaves a path obj run on the row above the newest; Esc
+# enters Normal at the newest row, k moves onto the ls row, Enter opens the
+# verb menu for its first run. halcyond says the placement + the run's
+# DISPLAY rect (the coordinates every later leg keys on); the compositor
+# says its own placement. The menu ground is Daylight `raised` (189,176,160)
+# -- a colour nothing else on this screen is painted -- so the placed rect's
+# DOMINANT colour is the proof it composed on top. Esc then dismisses it
+# COMPOSITOR-SIDE (its `dismissed (esc)` line: nothing else emits it), and
+# the rect reads transcript parchment again once the console re-presented
+# under the heal's redraw request.
+# Returns {id x y w h ref} -- the COMPOSITOR's clamped rect (its own
+# `placed` line, printed inside the `menu place` write, before halcyond's;
+# halcyond's line carries the REQUESTED point, which the compositor clamps
+# into the display) + the ref halcyond displayed.
+proc menu_placed {what} {
+    global timeout lc_cmd_timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -re {tapestryd: menu (\d+) placed at (\d+),(\d+) (\d+)x(\d+)[\r\n]} {
+            set id $expect_out(1,string); set x $expect_out(2,string); set y $expect_out(3,string)
+            set w $expect_out(4,string); set h $expect_out(5,string)
+        }
+        -re {halcyond: menu (surface failed|place refused)[^\r\n]*} {
+            lc_fail "$what: the menu was refused: $expect_out(0,string)"
+        }
+        timeout { lc_fail "$what: no compositor placement line" }
+        eof     { lc_fail "$what: EOF waiting for the menu" }
+    }
+    expect {
+        -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for path (\S+) run at (\d+) (\d+) (\d+) (\d+)[\r\n]} {
+            if {$expect_out(1,string) != $id} { lc_fail "$what: halcyond placed menu $expect_out(1,string), the compositor $id" }
+            return [list $id $x $y $w $h $expect_out(6,string)]
+        }
+        timeout { lc_fail "$what: no halcyond placement line" }
+        eof     { lc_fail "$what: EOF waiting for halcyond's placement line" }
+    }
+}
+proc menu_open_kbd {what} {
+    hkey "esc"
+    hkey "k"
+    hkey "ret"
+    return [menu_placed $what]
+}
+proc menu_want_raised {mx my mw mh what} {
+    set v ""
+    for {set i 0} {$i < 12} {incr i} {
+        set v [region $mx $my [expr {$mx + $mw}] [expr {$my + $mh}] 189 176 160]
+        if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot dr dg db] \
+                && $dr == 189 && $dg == 176 && $db == 160} {
+            return "$off $tot"
+        }
+        after 500
+    }
+    lc_fail "$what: the menu rect $mx,$my ${mw}x$mh never read Daylight raised (189,176,160): $v"
+}
+proc menu_want_gone {mx my mw mh what} {
+    set v ""
+    for {set i 0} {$i < 12} {incr i} {
+        set v [region $mx $my [expr {$mx + $mw}] [expr {$my + $mh}]]
+        if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot dr dg db] \
+                && $dr == 242 && $dg == 235 && $db == 224} {
+            return "$off $tot"
+        }
+        after 500
+    }
+    lc_fail "$what: the menu rect $mx,$my ${mw}x$mh never read parchment again after the dismiss: $v"
+}
+proc menu_expect_dismissed {reason what} {
+    global timeout lc_cmd_timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -re "tapestryd: menu (\\d+) dismissed \\($reason\\)\[\r\n\]" {}
+        timeout { lc_fail "$what: no compositor `dismissed ($reason)` line" }
+        eof     { lc_fail "$what: EOF waiting for the dismiss" }
+    }
+}
+# The tablet's absolute axis is 0..32767 over the display (px = v*(dim-1)/
+# 32767, ls-gfx-panes' measured rule), so v = px*32767/(dim-1) at 1280x800.
+proc ptr_abs {px py} {
+    global repo qmp
+    set vx [expr {int($px * 32767 / 1279)}]
+    set vy [expr {int($py * 32767 / 799)}]
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "abs $vx $vy"} err]} {
+        lc_fail "qmp abs failed: $err"
+    }
+    after 300
+}
+proc ptr_click {} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "btn left down"} err]} {
+        lc_fail "qmp btn down failed: $err"
+    }
+    after 150
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "btn left up"} err]} {
+        lc_fail "qmp btn up failed: $err"
+    }
+    after 1500
+}
+
+lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
+lassign [menu_open_kbd "keyboard menu"] mid mx my mw mh mref
+if {![string match "/lib/aurora/*" $mref]} {
+    lc_fail "the menu names ref '$mref', not a resolved /lib/aurora/ path (the anti-clickjack line)"
+}
+menu_want_raised $mx $my $mw $mh "keyboard menu"
+lc_pass "halcyon: Enter on a path run opened its verb menu (raised ground at $mx,$my ${mw}x$mh; ref $mref)"
+hkey "esc"
+menu_expect_dismissed "esc" "keyboard menu"
+menu_want_gone $mx $my $mw $mh "keyboard menu"
+lc_pass "halcyon: Esc dismissed the menu compositor-side and the transcript healed under it"
+hkey "i"
+
+# H-3b-3 control: the tag-bar strip does not exist on a single fullscreen
+# leaf -- the region the left pane's strip will occupy after the split is
+# transcript parchment now, not Daylight header (the strip APPEARS with the
+# split; the name ink appears with halcyond's paint).
+set vpre [region 8 6 300 22 206 196 182]
+if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vpre -> p_off p_tot pr pg pb]} { lc_fail "pre-split strip region unparseable: $vpre" }
+if {$pr == 206 && $pg == 196 && $pb == 182} { lc_fail "pre-split: the strip region already reads header on a single leaf (the >1-leaf gate is broken)" }
+lc_pass "halcyon: pre-split control -- no tag-bar strip on a single leaf (dom $pr,$pg,$pb)"
+
+hkey "meta_l+h"
+lc_send "cat /dev/winsize"
+set timeout $lc_cmd_timeout
+expect {
+    -re {winsize (\d+) (\d+)[\r\n]} {
+        set c $expect_out(1,string)
+        if {$c >= 100 || $c < 40} {
+            lc_fail "post-split cols $c (want a halved grid in \[40,100))"
+        }
+        lc_pass "halcyon: split reflow re-reported winsize ($c cols)"
+    }
+    timeout { lc_fail "no winsize line after the split" }
+    eof     { lc_fail "EOF after the split" }
+}
+
+# The Daylight bevel (HALCYON-VISUAL section 2): the split put two leaves on
+# screen, so each pane now carries the NNW single-light-source 2px four-value
+# bevel. Sample the left (halcyond) pane's edges away from the corner -- x=1,2
+# is its left bevel, y=1,2 its top bevel -- and assert BOTH the scripture
+# values AND that they differ (four-value NNW, not the Win95 two-value
+# diagonal). Origin-anchored (x/y start at 0) so it is independent of the
+# split geometry.
+set vl [region 1 120 3 560]
+if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vl -> l_off l_tot lr lg lb]} {
+    lc_fail "bevel_left region unparseable: $vl"
+}
+if {$lr != 226 || $lg != 214 || $lb != 192} {
+    lc_fail "left-edge dominant ($lr,$lg,$lb) is not Daylight bevel_left (226,214,192) -- the pane bevel is not painting"
+}
+set vt [region 120 1 560 3]
+if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vt -> t_off t_tot tr tg tb]} {
+    lc_fail "bevel_top region unparseable: $vt"
+}
+if {$tr != 248 || $tg != 242 || $tb != 230} {
+    lc_fail "top-edge dominant ($tr,$tg,$tb) is not Daylight bevel_top (248,242,230) -- the pane bevel is not painting"
+}
+if {$lr == $tr && $lg == $tg && $lb == $tb} {
+    lc_fail "bevel_left == bevel_top -- the NNW four-value bevel collapsed to a two-value diagonal (section 2.1 broken)"
+}
+lc_pass "halcyon: Daylight NNW bevel painted (left 226,214,192 != top 248,242,230 -- four-value)"
+
+# H-3b-3/H-3b-4: the per-leaf tag bar, painted by halcyond -- the POSITIVE
+# twin of ls-gfx-panes' E_PERM probes (the same `role=chrome` create and
+# the same `tag status` verb from the renderer). At gaps=1 the strip is y
+# 4..24 (floor 1 + bevel 2 + hairline 1 above it); the left pane's hairline
+# column is x=3. HALCYON-VISUAL 4.2 states: the split focused the NEW
+# (right, empty) leaf, so IT is the live tile -- nothing has run in it, so
+# its strip is the sage tint with the sage separator; the left (halcyond)
+# tile is a resting pane's sole tile ("resting, active tile"): header bg
+# WITH INK (the name "halcyon" in fg) and the ember_deep separator; its
+# hairline stays header (no status shows where input is not). Retried: the
+# chrome lands a relayout after the split's CONFIGURE.
+set ink [strip_want 8 6 300 22 206 196 182 "left strip interior" 1]
+lc_pass "halcyon: left tag bar is Daylight header with name ink ($ink off/total)"
+strip_want 8 23 300 24 200 96 48 "left strip separator (resting, active tile -> ember_deep)" 0
+strip_want 700 6 1200 22 184 204 196 "right strip interior (live, nothing has run -> sage tint)" 0
+strip_want 700 23 1200 24 30 88 68 "right strip separator (live -> sage key)" 0
+strip_want 3 120 4 560 206 196 182 "left hairline (not live -> header)" 0
+lc_pass "halcyon: tag-bar keys follow focus (left resting ember_deep, right live sage; left hairline header)"
+
+# A chord split moves focus to the NEW (empty) leaf (pane.rs split:
+# `self.focused = new_leaf` -- caught when zoom targeted the empty pane
+# and halcyond, hidden, never got the restore CONFIGURE). Focus back to
+# halcyond first; THEN zoom it to full width.
+hkey "meta_l+left"
+# Focus back on halcyond: the keys swap. A focus-only epoch reaches the
+# chrome as a same-size CONFIGURE; halcyond re-reads the layout's `*` and
+# the pane's `status` (its last command, `cat /dev/winsize`, exited 0 ->
+# `ok` -> sage). The compositor re-keys the LIVE tile's hairline from the
+# same record (5.3): the left column reads the sage key alongside the
+# content, and the top row alongside the bar reads the bar's TINT -- the
+# 2.4 vanish, kept under a live bar.
+strip_want 8 6 300 22 184 204 196 "left strip interior after focus-back (live ok -> sage tint)" 1
+strip_want 8 23 300 24 30 88 68 "left strip separator after focus-back (sage key)" 0
+strip_want 700 6 1200 22 206 196 182 "right strip interior after focus-back (resting -> header)" 0
+strip_want 700 23 1200 24 200 96 48 "right strip separator after focus-back (ember_deep)" 0
+strip_want 3 120 4 560 30 88 68 "left hairline after focus-back (live ok -> sage key)" 0
+strip_want 120 3 560 4 184 204 196 "left top hairline alongside the live bar (sage tint)" 0
+lc_pass "halcyon: focus move re-keyed the tiles (left live sage: strip + content hairline; right resting ember_deep)"
+
+# H-3c-2 (THE EVENT SET): a focus move between two panes NEITHER of which
+# is the console re-keys their tag bars. Before the event set a tile's
+# events landed only at the next pane-tree RPC, and this move sends the
+# console nothing (no FOCUS, no CONFIGURE -- the focus-only fan is chrome-
+# only), so the bars stayed stale until some later relayout; the 2-pane
+# legs above never exercised it (every move touched the console). Split the
+# right leaf again (Super+Right onto it, Super+H): three leaves -- the
+# console, A (the middle, resting) and B (the new right, live). Then
+# Super+Left (B -> A) and Super+Right (A -> B): the strips' interiors +
+# separators must swap live/resting each time. The strip rects come off the
+# pane tree through the console (ids depend on the layout history; the
+# observer effect scrolls the transcript, harmless at the strips).
+hkey "meta_l+right"
+hkey "meta_l+h"
+lc_send "cat /dev/tapestry/layout"
+set timeout $lc_cmd_timeout
+set ev_leaves {}
+set ev_console -1
+set ev_focused -1
+expect {
+    -re {[\r\n] *(\d+)(\*?) leaf([^\r\n]*)[\r\n]} {
+        set lid $expect_out(1,string)
+        lappend ev_leaves $lid
+        if {$expect_out(2,string) eq "*"} { set ev_focused $lid }
+        if {[string match "*surface=*" $expect_out(3,string)]} { set ev_console $lid }
+        if {[llength $ev_leaves] < 3} { exp_continue }
+    }
+    timeout { lc_fail "the layout did not list three leaves after the second split (got: $ev_leaves)" }
+    eof     { lc_fail "EOF reading the layout" }
+}
+if {$ev_console < 0 || $ev_focused < 0 || $ev_focused == $ev_console} {
+    lc_fail "event set: leaves $ev_leaves, console $ev_console, focused $ev_focused -- the second split did not focus a new non-console leaf"
+}
+set ev_b $ev_focused
+set ev_a -1
+foreach lid $ev_leaves { if {$lid != $ev_console && $lid != $ev_b} { set ev_a $lid } }
+if {$ev_a < 0} { lc_fail "event set: no third leaf among $ev_leaves" }
+# The "x y w h" text follows the output zone's frame on the SAME line (no
+# newline before its first digit), so the match anchors on the trailing
+# newline only.
+proc bar_rect {id what} {
+    global timeout lc_cmd_timeout
+    lc_send "cat /dev/tapestry/pane/$id/tagbar"
+    set timeout $lc_cmd_timeout
+    expect {
+        -re {(\d+) (\d+) (\d+) (\d+)[\r\n]} {
+            return [list $expect_out(1,string) $expect_out(2,string) $expect_out(3,string) $expect_out(4,string)]
+        }
+        timeout { lc_fail "$what: no tagbar rect for pane $id" }
+        eof     { lc_fail "$what: EOF reading pane $id's tagbar" }
+    }
+}
+lassign [bar_rect $ev_a "pane A"] ax ay aw ah
+lassign [bar_rect $ev_b "pane B"] bx by bw bh
+if {$aw < 40 || $bw < 40 || $ah < 8 || $bh < 8} { lc_fail "event set: degenerate bars A ${aw}x$ah B ${bw}x$bh" }
+proc bar_want {x y w h live what} {
+    if {$live} {
+        strip_want [expr {$x + 6}] [expr {$y + 2}] [expr {$x + $w - 6}] [expr {$y + $h - 2}] 184 204 196 "$what interior (live -> sage tint)" 0
+        strip_want [expr {$x + 6}] [expr {$y + $h - 1}] [expr {$x + $w - 6}] [expr {$y + $h}] 30 88 68 "$what separator (live -> sage key)" 0
+    } else {
+        strip_want [expr {$x + 6}] [expr {$y + 2}] [expr {$x + $w - 6}] [expr {$y + $h - 2}] 206 196 182 "$what interior (resting -> header)" 0
+        strip_want [expr {$x + 6}] [expr {$y + $h - 1}] [expr {$x + $w - 6}] [expr {$y + $h}] 200 96 48 "$what separator (resting -> ember_deep)" 0
+    }
+}
+bar_want $ax $ay $aw $ah 0 "A after the split (B focused)"
+bar_want $bx $by $bw $bh 1 "B after the split (B focused)"
+hkey "meta_l+left"
+bar_want $ax $ay $aw $ah 1 "A after B->A"
+bar_want $bx $by $bw $bh 0 "B after B->A"
+lc_pass "halcyon: THE EVENT SET -- a focus move between two non-console panes re-keyed both tag bars (A live sage, B resting ember_deep) with no event to the console"
+hkey "meta_l+right"
+bar_want $ax $ay $aw $ah 0 "A after A->B"
+bar_want $bx $by $bw $bh 1 "B after A->B"
+lc_pass "halcyon: THE EVENT SET -- and back (A resting, B live)"
+# Restore the two-pane layout the legs below were written against: close B
+# (Super+Shift+Q, the chord table's close; focus lands on a neighbour), then
+# lefts back to the console (a left at the edge is a no-op).
+hkey "meta_l+shift+q"
+hkey "meta_l+left"
+hkey "meta_l+left"
+strip_want 8 23 300 24 30 88 68 "console separator after returning focus (sage key)" 0
+
+# H-3c: CLICK-A-PATH + CLICK-AWAY (the mouse door to the same menu), in the
+# split: the console is the LEFT pane now, so its run rects carry the pane's
+# content origin. The keyboard path first, to learn the run's display rect
+# from its say line; then a REAL QMP tablet click on that rect opens the
+# menu at the pointer (the same ref -- the same run), and a click OUTSIDE
+# the menu dismisses it compositor-side WITHOUT reaching the console: the
+# press is swallowed, so a run under a click-away can never open a second
+# menu (the negative arm below is that proof).
+lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
+lassign [menu_open_kbd "split keyboard menu"] mid mx my mw mh mref
+menu_want_raised $mx $my $mw $mh "split keyboard menu"
+hkey "esc"
+menu_expect_dismissed "esc" "split keyboard menu"
+menu_want_gone $mx $my $mw $mh "split keyboard menu"
+lc_pass "halcyon: in the split, the keyboard menu opened under the left pane's run (clamped to $mx,$my ${mw}x$mh) and Esc dismissed it"
+# THE OBSERVER EFFECT: every diagnostic line the compositor or halcyond
+# prints is mirrored into the console transcript and scrolls it, so a run
+# rect reported earlier no longer holds. The click aims at a FRESH report:
+# Esc, k onto the ls row, `w` selects its run and (test builds) says the
+# run's CURRENT display rect + the mono row height -- that one line then
+# scrolls the transcript by exactly one such row, which the click subtracts.
+hkey "i"
+lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
+hkey "esc"
+hkey "k"
+hkey "w"
+set timeout $lc_cmd_timeout
+expect {
+    -re {halcyond: run at (\d+) (\d+) (\d+) (\d+) rowh (\d+)[\r\n]} {
+        set rx $expect_out(1,string); set ry $expect_out(2,string)
+        set rw $expect_out(3,string); set rh $expect_out(4,string); set rowh $expect_out(5,string)
+    }
+    timeout { lc_fail "no run report after w (test-mode halcyond?)" }
+    eof     { lc_fail "EOF waiting for the run report" }
+}
+after 800 ;# the report line lands in the transcript and re-renders before the click
+ptr_abs [expr {$rx + $rw / 2}] [expr {$ry + $rh / 2 - $rowh}]
+ptr_click
+lassign [menu_placed "click menu"] cid cx cy cw ch cref
+if {$cref ne $mref} {
+    lc_fail "the click opened a menu for '$cref', the keyboard for '$mref' -- not the same run"
+}
+menu_want_raised $cx $cy $cw $ch "click menu"
+lc_pass "halcyon: a click on the run opened the same menu at the pointer (clamped to $cx,$cy; ref $cref)"
+ptr_abs [expr {$cx + $cw / 2}] [expr {max($cy - 40, 30)}]
+ptr_click
+menu_expect_dismissed "click-away" "click menu"
+# The H-3c round F1: BOTH edges of the click-away are the compositor's -- the
+# press and its release (a release with no press would reach the pane under
+# the pointer, where a release-activated widget acts; the first cut set the
+# swallow record and then let the retire arm clear it). Each line is printed
+# from inside its swallow branch: a compositor that delivered either edge
+# prints neither. halcyond ignores releases, so no other witness can see it.
+set timeout $lc_cmd_timeout
+expect {
+    -re {tapestryd: menu click-away press swallowed \(btn (\d+)\)[\r\n]} {}
+    timeout { lc_fail "the click-away press was not swallowed (no compositor line)" }
+    eof     { lc_fail "EOF waiting for the press swallow" }
+}
+expect {
+    -re {tapestryd: menu click-away release swallowed \(btn (\d+)\)[\r\n]} {}
+    timeout { lc_fail "the click-away RELEASE was not swallowed (the H-3c round F1: it reached the pane under the pointer)" }
+    eof     { lc_fail "EOF waiting for the release swallow" }
+}
+menu_want_gone $cx $cy $cw $ch "click menu"
+set timeout 3
+expect {
+    -re {halcyond: menu (\d+) placed[^\r\n]*} {
+        lc_fail "the click-away press reached the console (a second menu opened)"
+    }
+    timeout {}
+}
+lc_pass "halcyon: a click outside the menu dismissed it compositor-side; neither its press nor its release reached the console"
+
+# THE GATE PROOF (HALCYON.md 13.6; ROADMAP 11.1's H-3 row: "menu-dismiss-
+# by-compositor proven against a wedged client"). The lever bake put a test
+# rule FIRST in /lib/beacon/verbs (`wedge-test` = the internal action
+# `#wedge 6000`, admitted only by a test-mode halcyond): choosing it FREEZES
+# halcyond for 6 s with the menu still placed -- a wedged owner holding a
+# modal. While it is frozen: Esc must dismiss the menu (the compositor's
+# line; nothing else can produce it), and keys typed over the REAL keyboard
+# must route to the CONSOLE surface, not to the (gone) menu: they queue
+# there, and when halcyond wakes it runs them -- `i` (Insert) then `pwd`,
+# whose output-only path is the witness. Had the grab stood, the keys would
+# have sat on the menu surface and pwd would never run; had the compositor
+# wedge-retired the CONSOLE instead, no output could follow at all (and a
+# WEDGED line would be in the transcript -- checked at the end).
+hkey "i"
+lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
+lassign [menu_open_kbd "wedged owner's menu"] wid wx wy ww wh wref
+menu_want_raised $wx $wy $ww $wh "wedged owner's menu"
+hkey "ret"
+set timeout $lc_cmd_timeout
+expect {
+    -ex "halcyond: wedge-test: frozen" { lc_step "halcyond frozen with the menu up" }
+    timeout { lc_fail "the wedge-test rule did not fire (lever verbs not baked, or test-mode off?)" }
+    eof     { lc_fail "EOF waiting for the wedge" }
+}
+hkey "esc"
+menu_expect_dismissed "esc" "wedged owner's menu"
+lc_pass "halcyon: THE GATE -- the compositor dismissed the menu while its owner was frozen"
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "ipwd\n"} err]} {
+    lc_fail "qmp-sendtext ipwd failed: $err"
+}
+set timeout 20
+expect {
+    -ex "halcyond: wedge-test: woke" { lc_step "halcyond woke" }
+    timeout { lc_fail "halcyond never woke from the wedge test" }
+    eof     { lc_fail "EOF waiting for the wake" }
+}
+set timeout $lc_cmd_timeout
+expect {
+    -ex "halcyond: menu closed by the compositor" {}
+    timeout { lc_fail "the woken owner never found its menu closed" }
+}
+expect {
+    -ex "/home/michael" {
+        lc_pass "halcyon: THE GATE -- keys typed during the freeze reached the console (routing restored by the compositor alone)"
+    }
+    timeout { lc_fail "pwd typed during the freeze never ran: the keys did not reach the console" }
+    eof     { lc_fail "EOF waiting for the queued pwd" }
+}
+menu_want_gone $wx $wy $ww $wh "wedged owner's menu"
+lc_pass "halcyon: the transcript healed under the menu once its owner woke"
+
+# H-3c round (SA-8 + F5): THE COMMAND PATH -- a chosen verb runs on exactly
+# the displayed ref, as its OWN command line. A draft half-typed at the
+# prompt (`echo half`, no Enter) must not be run INTO: halcyond feeds ^E ^U
+# before the command (ut's editor: the draft moves to the kill buffer), so
+# the transcript never shows `halfls` -- the token the concatenation would
+# print twice (the echoed line, then echo's own output). The verb chosen is
+# `ls` (the lever table: wedge-test first, then ls = `ls -l -- {}`) on an
+# `ls /lib/aurora` row's run (pwd's own output is plain text, no obj): the
+# `menu ran:` line carries the exact command (the `--` guard + the rc
+# quoting of the ref the placement line named); the global operand-error
+# control at the end proves ls took `--` (a rejected `--` errors on it).
+# The mode is Insert here (the `i` typed during the freeze).
+lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "echo half"} err]} {
+    lc_fail "qmp-sendtext draft failed: $err"
+}
+after 500
+lassign [menu_open_kbd "command-path menu"] vid vx vy vw vh vref
+if {![string match "/lib/aurora/*" $vref]} { lc_fail "the command-path menu opened on '$vref', want a /lib/aurora/ path" }
+menu_want_raised $vx $vy $vw $vh "command-path menu"
+hkey "j"
+hkey "ret"
+# The owner's dismiss (`menu dismiss` from halcyond's close) precedes the
+# `menu ran:` line in the stream -- expect them in that order.
+menu_expect_dismissed "owner" "command-path menu"
+set timeout $lc_cmd_timeout
+expect {
+    -ex "halcyond: menu ran: ls -l -- '$vref'" { lc_step "the verb ran on the quoted ref behind --" }
+    -re {halcyond: menu ran: [^\r\n]*} { lc_fail "the verb ran the wrong command: $expect_out(0,string)" }
+    timeout { lc_fail "no `menu ran:` line after choosing ls" }
+    eof     { lc_fail "EOF waiting for the verb to run" }
+}
+menu_want_gone $vx $vy $vw $vh "command-path menu"
+lc_run_expect "pwd" "/home/michael"
+lc_pass "halcyon: a chosen verb ran `ls -l -- '$vref'` as its own command line (the draft killed first, the ref rc-quoted behind --)"
+
+# H-3b-4: the status feed end to end. A line whose LAST status is non-zero
+# (`pwd; false` -> \$? = 1; the exit mark carries the shell's status, the
+# sequencing token is pwd's output-only path) turns the live tile
+# cinnabar: strip tint + separator + the content hairline. Then a clean
+# command turns it back to sage -- the state is the LAST exit, never
+# sticky. `false` prints nothing, so the operand-error control below is
+# untouched.
+lc_run_expect "pwd; false" "/home/michael"
+strip_want 8 6 300 22 220 184 176 "left strip after a failing command (cinnabar tint)" 1
+strip_want 8 23 300 24 152 40 24 "left strip separator after a failing command (cinnabar key)" 0
+strip_want 3 120 4 560 152 40 24 "left hairline after a failing command (cinnabar key)" 0
+strip_want 120 3 560 4 220 184 176 "left top hairline alongside the cinnabar bar (tint)" 0
+lc_pass "halcyon: a non-zero exit keyed the live tile cinnabar (strip + separator + content hairline)"
+lc_run_expect "pwd" "/home/michael"
+strip_want 8 6 300 22 184 204 196 "left strip after recovery (sage tint)" 1
+strip_want 8 23 300 24 30 88 68 "left strip separator after recovery (sage key)" 0
+strip_want 3 120 4 560 30 88 68 "left hairline after recovery (sage key)" 0
+lc_pass "halcyon: a zero exit re-keyed the live tile sage (the status is the last exit)"
+hkey "meta_l+f"
+lc_run_expect "cat /dev/winsize" "winsize 128 "
+lc_pass "halcyon: zoom restored the full grid (reflow round-trip)"
+# Zoomed = one visible leaf: the strips are ZERO and halcyond drops its
+# chrome tiles; the region reads the transcript's parchment again -- not
+# header, and not the live tint it read a moment ago (a "not header" test
+# would pass on the tint before the zoom lands).
+set gone 0
+set v ""
+for {set i 0} {$i < 12} {incr i} {
+    set v [region 8 6 300 22]
+    if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> zo zt zr zg zb] && $zr == 242 && $zg == 235 && $zb == 224} { set gone 1; break }
+    after 500
+}
+if {!$gone} { lc_fail "zoomed: the left strip region never read the transcript parchment (chrome not dropped / strip not ZERO): $v" }
+lc_pass "halcyon: zoom dropped the tag bars (single leaf, strip ZERO, parchment at the top)"
+
+# H-3c: the surface census after the zoom. The tag-bar surfaces the zoom
+# dropped live on the renderer's SHARED session, whose Drop must say
+# `destroy` -- a bare fd close leaked them (the H-3b close's shared-chrome
+# regression, found at the H-3c survey), and the renderer's 36-surface cap
+# then filled after ~17 zoom cycles. `surfaces 1` = the console alone: the
+# two bars and every menu this scenario opened are gone server-side.
+set census -1
+for {set i 0} {$i < 6} {incr i} {
+    lc_send "cat /dev/tapestry/ctl"
+    set timeout $lc_cmd_timeout
+    expect {
+        -re {surfaces (\d+)[\r\n]} { set census $expect_out(1,string) }
+        timeout { lc_fail "no `surfaces N` line from /dev/tapestry/ctl" }
+        eof     { lc_fail "EOF reading the ctl census" }
+    }
+    if {$census == 2} break
+    after 1000
+}
+# H-3d: the status bar is the second surface (the console + the bar); a
+# leaked tag bar or menu would make it 3.
+if {$census != 2} {
+    lc_fail "surfaces $census after the zoom: dropped shared-session surfaces leaked server-side (want 2 = the console + the status bar)"
+}
+lc_pass "halcyon: the zoom's dropped tag bars + every menu retired server-side (surfaces 2: the console + the status bar)"
+
+lc_quit
+
+# Transcript greps (output-only tokens; buffer-order-immune).
+log_file
+proc tgrep {pat what} {
+    global transcript
+    if {[catch {exec grep -q -- $pat $transcript}]} {
+        lc_fail "transcript missing: $what ($pat)"
+    }
+    lc_pass "halcyon: $what"
+}
+tgrep "halcyond: beacon rich advertised" "halcyond advertised the rich tier (the surface bring-up)"
+tgrep "halcyond: console up" "halcyond brought up the transcript surface"
+tgrep "ut: beacon rich exported" "the rich canary (the F7 transport half, real advertisement)"
+tgrep "transcript zones armed" "ut armed the transcript zones"
+tgrep "1936;v1;table" "ls -l emitted the rich table frames on the wire"
+tgrep "7;file://localhost/lib/aurora" "ut reported the working directory as OSC 7 (H-3d)"
+tgrep "1936;v1;mark;k=cmd;text=grep -q h3d-not-there /lib/beacon/verbs" "ut marked the accepted command as the output zone's first child (H-3d)"
+tgrep "context \"halcyon.*/lib/aurora.*pwd\" condition Ok" "the status bar showed the console's directory and last command (H-3d)"
+tgrep "1936;v1;obj" "ls emitted obj presentation frames on the wire"
+tgrep "1936;v1;zone" "ut emitted zone frames on the wire (the F7 zone half)"
+# The Thylacine wording, NOT the generic "no such file": the boot-time
+# ambush probe prints delve's Unix-worded history-file complaint, which
+# is noise this control must not trip on.
+if {![catch {exec grep -q -- "no such file or namespace entry" $transcript}]} {
+    lc_fail "a session command errored on its operand (a hollow `; pwd` pass -- fix the operand)"
+}
+lc_pass "halcyon: no session command errored on its operand"
+if {![catch {exec grep -q -- "re-exported" $transcript}]} {
+    lc_fail "an unexpected tier re-export fired (F10 must be silent without a renderer change)"
+}
+lc_pass "halcyon: F10 stayed silent (no renderer change, no re-export)"
+# H-3c: no surface was wedge-retired -- the menu is force-RETIRED on a
+# dismiss (never WEDGED), and the frozen console must never be either.
+if {![catch {exec grep -q -- "WEDGED" $transcript}]} {
+    lc_fail "a surface was WEDGED during the run (the frozen console, or a menu, was wedge-retired)"
+}
+lc_pass "halcyon: no surface was wedge-retired (the frozen owner's console survived the gate)"
+# The command path's draft control: the draft WAS typed (its echo is in the
+# transcript) and was never run into (`halfls` would appear twice if the
+# ^E ^U had not killed it).
+# ut's editor redraws the line per key with per-token SGR sequences, so the
+# echoed draft is "echo" + SGR + "half": grep the token, not the phrase.
+tgrep "half" "the half-typed draft was echoed before the verb ran (the positive arm of the draft control)"
+if {![catch {exec grep -q -- "halfls" $transcript}]} {
+    lc_fail "the chosen verb was appended to the half-typed draft (halfls): the ^E ^U kill did not land"
+}
+lc_pass "halcyon: the chosen verb never ran into the half-typed draft (no halfls)"
+tgrep "verb rules loaded" "halcyond loaded the verb table (/lib/beacon/verbs)"
+
+lc_pass "ls-halcyon: the H-2 transcript MVP + the H-3b tag bar + the H-3c menus verified (halcyond render + rich chain + parchment pixels + split/zoom reflow + live-tile keys + keyboard/click menus + the compositor-owned dismiss against a wedged owner + both click-away edges swallowed + the command path behind --)"
+exit 0

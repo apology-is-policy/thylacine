@@ -1,0 +1,192 @@
+From 561b8ae431fed2fc930636f73dfeea66b3e1fd54 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Mon, 31 Aug 2026 14:44:32 +0200
+Subject: [PATCH 21/23] Thylacine Warp W-3 round-6 close (mesa half):
+ poke-per-present + claim corrections
+
+F3 [P3]: the present-poke dedup latch removed. W-3d's latch was correct
+when the poke was pure consent naming; W-3e promoted the poke to the img
+family's present-COMPLETE (the server's flip + flush + lifecycle event),
+so a suppressed poke became a suppressed FRAME -- a repeat present of
+the same image returned VK_SUCCESS while the display froze (reachable
+via a caps-violating minImageCount=1 request the create accepted). Every
+present now pokes (the server flip arm is built for frame-rate pokes),
+and num_images is clamped from below to the advertised minimum.
+
+F4 [P3]: the witness's "display consent armed" line reworded to
+"attempted" -- CreateSurface deliberately succeeds on a failed consent,
+so the app must not claim the half it cannot see (the round-4 F4
+attempt-report class, client-side).
+
+F5 [P3]: two comments corrected that were wrong in opposite directions
+about one link -- the .c header claimed "needs no -u" in a binary whose
+meson entry passes -u; the meson comment claimed the app reaches Vulkan
+only through SDL_Vulkan_* when it carries ~50 strong vn_* externs. Both
+now state what was measured (vn_icd.o extraction necessity) vs what is
+structurally argued (closure-from-u-alone; W-4's link is the proof
+point).
+
+F6 [P3]: the swapchain unwind's "finish_create is the last fallible
+step" stated as the configuration-conditional truth it is (wsi_common's
+explicit_sync arm is unreachable under CPU-image params on a no-libdrm
+build; re-verify on wsi_common merges).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/virtio/vulkan/meson.build              | 14 ++++++-----
+ src/virtio/vulkan/thylacine_vk_sdl_prove.c | 16 ++++++++++---
+ src/virtio/vulkan/vn_renderer_thylacine.c  | 28 +++++++---------------
+ src/virtio/vulkan/vn_wsi_thylacine.c       | 18 +++++++++++---
+ 4 files changed, 44 insertions(+), 32 deletions(-)
+
+diff --git a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
+index 71256c6..220cff7 100644
+--- a/src/virtio/vulkan/meson.build
++++ b/src/virtio/vulkan/meson.build
+@@ -220,12 +220,14 @@ if with_thylacine
+       files('thylacine_vk_sdl_prove.c'),
+       include_directories : vn_incs,
+       c_args : ['-I' + thy_sdl2_dir + '/include/SDL2'],
+-      # -u: the app reaches Vulkan only through SDL_Vulkan_* (the honest
+-      # app shape), whose venus references are WEAK -- and a weak ref does
+-      # not extract archive members, so without this the ICD entry stays
+-      # NULL and LoadLibrary reports no-ICD at run time. This is the same
+-      # link line every SDL-only Vulkan app (vkQuake) needs; the witness
+-      # exercising it is the recipe's proof.
++      # -u: a weak ref does not extract archive members, and vn_icd.o (the
++      # ICD entry's home) is referenced by nothing else -- without this the
++      # entry stays NULL and LoadLibrary reports no-ICD at run time
++      # (measured on this binary's first link). Every SDL-only Vulkan app
++      # (vkQuake) needs the same flag; note this witness also carries
++      # strong vn_* externs that extract most of the closure themselves,
++      # so the full closure-from-u-alone proof point is W-4's own link
++      # (round-6 F5).
+       link_args : ['-Wl,-u,vk_icdGetInstanceProcAddr'],
+       link_with : libvulkan_virtio,
+       dependencies : [vn_deps, thy_sdl2_lib],
+diff --git a/src/virtio/vulkan/thylacine_vk_sdl_prove.c b/src/virtio/vulkan/thylacine_vk_sdl_prove.c
+index bba1f01..01043a6 100644
+--- a/src/virtio/vulkan/thylacine_vk_sdl_prove.c
++++ b/src/virtio/vulkan/thylacine_vk_sdl_prove.c
+@@ -28,8 +28,13 @@
+  * SDL_Vulkan_GetVkGetInstanceProcAddr -- proving SDL's handoff), device-
+  * parented ones as direct vn_/wsi_/vk_common symbols (the gipa trampolines
+  * for those load loader-populated dispatch slots this static link never
+- * fills).  The SDL link needs no -u: this file's direct vn_* references
+- * extract the driver archive members themselves.
++ * fills).  Because of those direct externs this binary is NOT the pure
++ * SDL-only link shape: its strong vn_* references extract most of the
++ * driver closure themselves, so its link proves less about -u than a
++ * vkQuake-shaped app's would (round-6 F5).  The meson entry passes
++ * -Wl,-u,vk_icdGetInstanceProcAddr anyway -- measured necessary here for
++ * vn_icd.o specifically, which nothing else references -- and the
++ * full-closure-from-u-alone proof point is W-4's own link.
+  */
+ 
+ #include <stdbool.h>
+@@ -362,7 +367,12 @@ main(int argc, char **argv)
+    if (!SDL_Vulkan_CreateSurface(win, instance, &surface) ||
+        surface == VK_NULL_HANDLE)
+       FAIL("SDL_Vulkan_CreateSurface: %s", SDL_GetError());
+-   printf("vk-sdl-prove: surface created + display consent armed\n");
++   /* "attempted", not "armed" (round-6 F4): CreateSurface deliberately
++    * succeeds on a failed/skipped consent, so this line must not claim
++    * the half the app cannot see -- tapestryd's bind line is the
++    * consent witness. */
++   printf("vk-sdl-prove: surface created (display consent attempted; the "
++          "compositor's bind line is the witness)\n");
+ 
+    /* ---- device with VK_KHR_swapchain (probe, then FAIL-not-skip) ---- */
+    bool has_swapchain_ext = false;
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+index 06effcb..5c14e42 100644
+--- a/src/virtio/vulkan/vn_renderer_thylacine.c
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -148,13 +148,6 @@ struct thylacine {
+     * img/<handle>.  Guarded by the transport mutex, like mem_bitmap. */
+    uint16_t img_bitmap;
+ 
+-   /* the last present consent issued (dedup: the consent is standing, so a
+-    * re-present of the same front buffer needs no ctl write).  img is
+-    * handle+1 (0 = none); sid is surface+1 as stored by set_surface.
+-    * Guarded by the transport mutex. */
+-   uint32_t last_present_img;
+-   uint32_t last_present_sid;
+-
+    uint32_t next_sync_id;
+    uint32_t max_timeline_count;
+ 
+@@ -565,12 +558,6 @@ vn_renderer_thylacine_img_destroy(struct vn_renderer *renderer,
+    struct thylacine *tly = (struct thylacine *)renderer;
+ 
+    mtx_lock(&tly->mutex);
+-   /* A dying presentable must not stay the consent target: the server
+-    * clears the consent itself (wimg_destroy's consent-clear arm), so only
+-    * the local dedup latch needs dropping -- a later present of a NEW
+-    * front buffer must re-issue rather than read as "unchanged". */
+-   if (tly->last_present_img == img_handle + 1)
+-      tly->last_present_img = 0;
+    if (warp_img_destroy(&tly->warp, img_handle) == 0)
+       thylacine_img_free(tly, img_handle);
+    /* refusal: keep marked (bounded, ctx-death reaped) */
+@@ -588,13 +575,14 @@ vn_renderer_thylacine_present_poke(struct vn_renderer *renderer,
+       return; /* no window glue has named a surface (W-3e's seam) */
+ 
+    mtx_lock(&tly->mutex);
+-   if (tly->last_present_img != img_handle + 1 ||
+-       tly->last_present_sid != sid_plus) {
+-      if (warp_present_to_img(&tly->warp, sid_plus - 1, img_handle) == 0) {
+-         tly->last_present_img = img_handle + 1;
+-         tly->last_present_sid = sid_plus;
+-      }
+-   }
++   /* Every present pokes -- no dedup (round-6 F3). W-3d's latch was
++    * correct when the poke was pure consent naming; W-3e made the poke
++    * the img family's present-COMPLETE (the server's flip + flush +
++    * lifecycle event), so a suppressed poke is a suppressed FRAME: a
++    * repeat present of the same image would return VK_SUCCESS while the
++    * display froze. The server's flip arm is built for frame-rate pokes
++    * (silent flips; one bind-or-flush per poke). */
++   (void)warp_present_to_img(&tly->warp, sid_plus - 1, img_handle);
+    mtx_unlock(&tly->mutex);
+ }
+ 
+diff --git a/src/virtio/vulkan/vn_wsi_thylacine.c b/src/virtio/vulkan/vn_wsi_thylacine.c
+index dfbf67d..dbaeacc 100644
+--- a/src/virtio/vulkan/vn_wsi_thylacine.c
++++ b/src/virtio/vulkan/vn_wsi_thylacine.c
+@@ -555,6 +555,12 @@ vn_thylacine_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
+ 
+    uint32_t num_images = pCreateInfo->minImageCount;
++   /* Clamp from below to the advertised minImageCount (round-6 F3): a
++    * caps-violating minImageCount=1 request would otherwise yield forced
++    * same-image presents. Presents poke unconditionally now, so this is
++    * belt-and-suspenders on the caps contract, not load-bearing. */
++   if (num_images < 2)
++      num_images = 2;
+    if (num_images > VN_THYLACINE_WSI_MAX_IMAGES)
+       num_images = VN_THYLACINE_WSI_MAX_IMAGES;
+ 
+@@ -620,9 +626,15 @@ vn_thylacine_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+ fail_destroy_images:
+    /* Only the images BEFORE the failed index: wsi_create_image's own fail
+     * path already wsi_destroy_image'd the partial one, and it cannot have
+-    * registered (finish_create is the last fallible step, and a failed
+-    * finish_create never sets `registered`) -- destroying it again here
+-    * would double-free the stale handles the destroy does not null. */
++    * registered -- destroying it again here would double-free the stale
++    * handles the destroy does not null. "finish_create is the last
++    * fallible step" is a CONFIGURATION-conditional truth, not a
++    * structural one (round-6 F6): wsi_common's create has a later
++    * fallible explicit_sync arm that our CPU-image params never set and
++    * this no-libdrm build cannot reach -- an upstream wsi_common merge
++    * that adds a post-finish_create step under these params would make a
++    * registered image reachable here. Re-verify this premise on any
++    * wsi_common merge. */
+    for (uint32_t i = 0; i < image; i++)
+       vn_thylacine_swapchain_destroy_image(chain, &chain->images[i]);
+    wsi_swapchain_finish(&chain->base);
+-- 
+2.43.0
+

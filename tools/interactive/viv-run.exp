@@ -1,0 +1,128 @@
+#!/usr/bin/expect -f
+# tools/interactive/viv-run.exp -- `viv run` from a SESSION SHELL runs a
+# container (the interactive path every boot gate used to bypass).
+#
+# Until 2026-08-17 an interactive `viv run` never ran anything: viv asked
+# SPAWN_PERM_MAY_POST_SERVICE for its per-container diorama (which posted the
+# fixed /srv/viv-dio) and nothing past login holds that bit, so the diorama
+# spawn was refused and viv printed `viv: spawn /bin/diorama` -- its ERROR
+# line, misread as progress for eighteen days. Every boot gate spawned viv
+# WITH the bit, so no gate ran the path a person runs. The diorama channel is
+# a private pipe pair now (VIVARIUM 7.2.1) and this scenario is the regression
+# net for the path itself: a plain user shell, no privilege, a container that
+# provably assembles and runs.
+#
+# Two vantages, because their stdio substrates differ:
+#   1. the CONSOLE ut (fds = the cons handle): `viv run /vivarium/probe`. The
+#      probe bundle is always baked; its manifest expects the JOEY gate's
+#      principal (VIV_EXPECT_UID = SYSTEM), so from a user the FIRST failing
+#      leg is #6, "principal is not the invoker's" -- and that exact line is
+#      the witness: legs 1-5 (rootfs is /, /proc + /sys serve from the
+#      diorama, pid view == {self}, host /srv unreachable, /net absent) held
+#      under a user principal from a plain shell before it was reached. A
+#      viv that cannot spawn its diorama never prints a probe line at all.
+#   2. the PTS (a ptyhost'ed ut): `viv run /vivarium/alpine-ash` -- the
+#      interactive phenotype ash (args /bin/sh -i; ioctl is unserved so
+#      isatty() is false and ash needs the flag). Its prompt on the pts, a
+#      command answered through stdin/stdout, `exit` back to ut. SKIPs when
+#      the bundle is not staged (it needs the Alpine minirootfs + busybox
+#      apk in build/cache, like the L-6c gate).
+#
+# Echo discipline: the pts ldisc echoes typed text, so every control matches
+# an UPPERCASE token only a `| tr a-z A-Z` pipeline can produce (pty-4).
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set ash_bundle "$repo/build/vivarium/alpine-ash/config.json"
+set have_ash [file exists $ash_bundle]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# --- 1. the console ut ------------------------------------------------------
+lc_send "viv run /vivarium/probe"
+lc_expect "viv-probe: FAIL: principal is not the invoker's" \
+    "the probe container ran from the console shell (legs 1-5 held; leg 6 is the fixture's SYSTEM expectation)"
+sleep 1
+lc_run_expect "echo viv-console | tr a-z A-Z" "VIV-CONSOLE"
+
+# --- 2. the pts (ptyhost) --------------------------------------------------
+if {$have_ash} {
+    lc_send "ptyhost"
+    lc_expect "job control active" "the hosted ut's session dance"
+    sleep 1
+    lc_run_expect "echo pts-up | tr a-z A-Z" "PTS-UP"
+
+    lc_send "viv run /vivarium/alpine-ash"
+    lc_expect_re {/ [#$] } "the phenotype ash prompt on the pts"
+    # `uname -s` inside the container answers LINUX (the phenotype's uname row);
+    # the outer ut's coreutil answers THYLACINE -- so the token names WHICH
+    # shell answered, not just that one did.
+    lc_send "uname -s | tr a-z A-Z"
+    lc_expect "LINUX" "ash answers through the pts (stdin in, stdout out; the phenotype's uname)"
+
+    # --- #50: the path-mutation family, end-to-end from EL0 (VIVARIUM.md
+    # 6.24). One pipeline per row, each witnessed by an UPPERCASE token only
+    # the pipeline can produce (the echo discipline above). /tmp is 1777 in
+    # the Alpine minirootfs, so the writes clear A-2d for any principal.
+    #   >file        = openat(O_CREAT|O_WRONLY|O_TRUNC) -- the keystone
+    #   mkdir        = mkdirat
+    #   mv           = renameat (busybox mv -> musl rename -> renameat(38))
+    #   rm / rmdir   = unlinkat (0 / AT_REMOVEDIR)
+    lc_send "echo mut-created > /tmp/f50 && cat /tmp/f50 | tr a-z A-Z"
+    lc_expect "MUT-CREATED" "openat(O_CREAT) created the file and wrote through it"
+    lc_send "mkdir /tmp/d50 && mv /tmp/f50 /tmp/d50/g50 && cat /tmp/d50/g50 | tr a-z A-Z"
+    lc_expect "MUT-CREATED" "mkdirat made the dir; renameat moved the file INTO it with content intact"
+    #   ls           = getdents64 (busybox ls -> musl readdir; the 61 row)
+    lc_send "ls /tmp/d50 | tr a-z A-Z"
+    lc_expect "G50" "getdents64 lists the moved name (dirent64 encode + cursor from EL0)"
+    lc_send "rm /tmp/d50/g50 && rmdir /tmp/d50 && ls /tmp/d50 2>&1 | tr a-z A-Z"
+    lc_expect "NO SUCH FILE" "unlinkat removed the file and (AT_REMOVEDIR) the dir; the name is gone"
+    # `>/dev/null` inside a container (the curl-demo census item, 2026-08-25:
+    # ash's `>` is openat(O_WRONLY|O_CREAT|O_TRUNC); the openat then refused
+    # O_CREAT outright and the staged /dev/null was a plain file). Two things
+    # closed it since: #50's open-create core is OPEN-FIRST (an existing
+    # target is opened, never re-created -- no parent-write permission needed
+    # on the read-only rootfs), and viv binds the kernel's real /dev/null leaf
+    # over the rootfs anchor. The witness is the redirect's own rc: DN=0 only
+    # if the open succeeded; a failed redirect makes ash print "can't create
+    # /dev/null" and $? = 1, so DN=1 and this leg times out.
+    lc_send "echo dn-probe >/dev/null; echo DN=\$? | tr a-z A-Z"
+    lc_expect "DN=0" ">/dev/null works inside the container (open-first create on the bound null leaf)"
+    # ^C at the ash prompt: the pts's `interrupt` reaches the whole foreground
+    # pgrp -- viv, its diorama and ash. Before 2026-08-18 the two NATIVE members
+    # died of it (LS-5's uncaught-interrupt default), orphaning ash into a
+    # terminal it then shared with the outer ut; now viv masks `interrupt` and
+    # the diorama masks it plus the tty family, and only ash decides what ^C
+    # means (a fresh prompt). The witness is the shell still ANSWERING through
+    # the same viv afterwards -- a dead runner returns the terminal to ut, whose
+    # own `uname` would answer THYLACINE (if the orphaned ash let it answer at
+    # all).
+    #
+    # The settle below is LOAD-BEARING, not politeness (counter-instrumented
+    # 2026-08-26): a ^C sent the instant the prior leg's output matches lands
+    # inside busybox-ash's reap window, where a job-control shell still holds
+    # SIGINT=SIG_IGN -- and the kernel's V-6b ignore-drop then discards the
+    # note AT POST TIME, exactly as Linux would (POSIX: a signal ignored at
+    # generation is discarded). The leg's claim is "^C at the ash PROMPT";
+    # the settle enforces that precondition. At the prompt the full chain is
+    # live and was measured end-to-end: fan -> caught-note arm -> wake of the
+    # parked elected 9P reader -> SLEEP_NOTEINTR unwind -> CLIENT_WAIT_NOTEINTR
+    # -> EINTR -> handler -> fresh prompt (5/5 with this shape).
+    sleep 1
+    send "\x03"
+    sleep 1
+    lc_send "uname -s | tr a-z A-Z"
+    lc_expect "LINUX" "ash still answers after ^C (the runner survived it; ut would say THYLACINE)"
+    lc_send "exit"
+    sleep 1
+    lc_run_expect "echo pts-after | tr a-z A-Z" "PTS-AFTER"
+    lc_send "exit"
+    sleep 1
+    lc_run_expect "echo viv-outer | tr a-z A-Z" "VIV-OUTER"
+    lc_pass "VIV-RUN: a plain user shell runs a container on the console and on a pts, and ^C reaches the container, not the runner"
+} else {
+    lc_step "alpine-ash bundle not staged ($ash_bundle) -- the pts half is skipped"
+    lc_pass "VIV-RUN: console half PASS; the pts half needs the Alpine bundle staged"
+}

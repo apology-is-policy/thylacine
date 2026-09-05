@@ -358,6 +358,13 @@ everything" -- realized as a reusable gate, plus the §7d soft-warn:
   (or a since-fixed-buggy) run persist and masquerade as current findings -- exactly the failure
   the gate exists to prevent (the old classifier's bare-`canary` false-positive against the
   `canaries` hardening banner had once tagged every clean boot as CORRUPT, and those logs lingered).
+  **AMENDED 2026-08-12 (#223): it ARCHIVES rather than deletes them.** The rationale above is
+  sound but the implementation was `rm -f`, and the standard response to a RARE failure is to
+  re-run that same label in isolation -- so the diagnostic act itself destroyed the only copy of
+  what was being diagnosed. It cost us the #200 sighting-2 harness log, whose SIGKILL line now
+  survives only as a quotation in a commit message. Prior captures move to
+  `build/multiboot-fails/archive/<label>-<utc>/`; the masquerade hazard is equally closed by a
+  rename, at the price of a rename.
 - **Verified: the full-matrix `tools/ci-smp-gate.sh` at N=10 -- default-smp4 10/10 + default-smp8
   10/10 + ubsan-smp4 10/10 (the #860 amplifier) + ubsan-smp8 10/10 = 40/40 PASS, 0 corruption** --
   plus default smp4 714/714 + the soft-warn proof above (`714/714 PASS (1 soft-warn)`, boot

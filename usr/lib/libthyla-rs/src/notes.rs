@@ -36,7 +36,8 @@ use crate::poll::AsFd;
 use crate::{
     t_note_mask, t_note_open, t_postnote, t_read, t_poll, TNoteRecord, TPollFd,
     T_NOTE_BIT_CHILD_EXIT, T_NOTE_BIT_INTERRUPT, T_NOTE_BIT_KILL, T_NOTE_BIT_PIPE,
-    T_NOTE_BIT_SNARE, T_NOTE_NAME_MAX, T_POLLIN, T_POSTNOTE_SELF_PID,
+    T_NOTE_BIT_SNARE, T_NOTE_BIT_TTY, T_NOTE_MASK_SUPPORTED, T_NOTE_NAME_MAX,
+    T_POLLIN, T_POSTNOTE_SELF_PID,
 };
 use alloc_crate::string::String;
 use core::mem;
@@ -135,6 +136,12 @@ pub enum NoteClass {
     /// is reserved at v1.0 (proc_fault_terminate bypasses notes_post)
     /// and becomes load-bearing in v1.x.
     Snare,
+    /// `tty:*` family — winch / susp / cont / quit / hup, ONE bit for
+    /// all five (per-kind masking is a v1.x extension). Masking it
+    /// defers `^Z`: the kernel's post-time decider sees no thread
+    /// willing to take the stop, so it POSTS the note instead, and the
+    /// deferred stop lands at the EL0-return tail once the mask lifts.
+    Tty,
 }
 
 impl NoteClass {
@@ -148,9 +155,47 @@ impl NoteClass {
             NoteClass::Pipe => T_NOTE_BIT_PIPE,
             NoteClass::ChildExit => T_NOTE_BIT_CHILD_EXIT,
             NoteClass::Snare => T_NOTE_BIT_SNARE,
+            NoteClass::Tty => T_NOTE_BIT_TTY,
         }
     }
+
+    /// Every class, in bit order. The one place a new variant has to be
+    /// added for `MASK_SUPPORTED_COVERS_EVERY_CLASS` below to see it.
+    pub const ALL: [NoteClass; 6] = [
+        NoteClass::Interrupt,
+        NoteClass::Kill,
+        NoteClass::Pipe,
+        NoteClass::ChildExit,
+        NoteClass::Snare,
+        NoteClass::Tty,
+    ];
 }
+
+/// Compile-time: the class set and `T_NOTE_MASK_SUPPORTED` agree.
+///
+/// What it catches: a `NoteClass` variant added without widening the mask
+/// constant, or the constant widened past the classes. That is the drift
+/// that actually happened -- the tty bit went live in the kernel, the enum
+/// never grew a variant, and the constant sat at 0x1f with no consumer to
+/// notice.
+///
+/// What it CANNOT catch, stated so the check is not read as more than it is:
+/// the kernel adding a bit this crate has never heard of. Both operands live
+/// in this crate, so it only reports INTERNAL disagreement -- a checker that
+/// derives its reference from the thing under test. The kernel side of that
+/// gap is a real hole with no guard today.
+const _: () = {
+    let mut bits = 0u64;
+    let mut i = 0;
+    while i < NoteClass::ALL.len() {
+        bits |= 1u64 << NoteClass::ALL[i].bit() as u32;
+        i += 1;
+    }
+    assert!(
+        bits == T_NOTE_MASK_SUPPORTED,
+        "NoteClass set and T_NOTE_MASK_SUPPORTED disagree"
+    );
+};
 
 // =============================================================================
 // NoteMask — bitflag set of NoteClass.

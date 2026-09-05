@@ -137,6 +137,15 @@ struct KObj_PCI {
     struct pci_shm    shm[PCI_SHM_COUNT];   // cfg_type 8, discovery order
     u32 notify_off_multiplier;   // from the NOTIFY_CFG cap
 
+    // V-2 (audit F1): count of live BURROW_TYPE_HOSTMEM burrows mapping this
+    // claim's BARs. On owner DEATH, a claim with a live hostmem burrow gets a
+    // DMA-only quiesce (BUS_MASTER cleared, MEM_SPACE KEPT) so a client's live
+    // mapping never observes a MEM-decode-disabled BAR; MEM_SPACE clears at the
+    // last kobj_pci_unref (pci_release_bars_and_claim), once every mapping is
+    // gone. Atomic: bumped in burrow_create_hostmem, dropped in
+    // burrow_free_internal's HOSTMEM arm.
+    u32 hostmem_burrows;
+
     u32  intid;        // GIC INTID from dtb_pci_intx_route(dev, INTA)
     bool intid_valid;  // false if the DTB interrupt-map didn't resolve
 };
@@ -176,6 +185,11 @@ int kobj_pci_resolve_bdf(u32 virtio_device_id, u32 nth, u8 *bus, u8 *dev, u8 *fn
 // Proc-death quiesce (a PCI driver's registers are BAR-decoded, so the
 // virtio-MMIO reset sweep cannot reach them) and implied by release.
 bool kobj_pci_quiesce(struct KObj_PCI *k);
+// V-2 (audit F1): quiesce only BUS_MASTER (stop the device's DMA), LEAVING
+// MEM_SPACE so a live client HOSTMEM mapping keeps a decoding BAR. Used on owner
+// death for a claim with a live hostmem burrow; the last kobj_pci_unref clears
+// MEM_SPACE. Returns true iff BUS_MASTER was set (a state change occurred).
+bool kobj_pci_quiesce_dma_only(struct KObj_PCI *k);
 
 void kobj_pci_ref(struct KObj_PCI *k);
 

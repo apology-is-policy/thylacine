@@ -192,6 +192,57 @@ void test_pgtable_install_user_pte_smoke(void) {
     drop_proc(p);
 }
 
+// V-2: the attr-index widening. mmu_install_user_pte_attr selects the MAIR
+// index directly, so a mapping can be Normal-NC (write-combining host memory),
+// which the old bool device-flag could not express. The bool wrapper must
+// preserve the old semantics EXACTLY -- false -> WB, true -> Device -- which is
+// the guard against the false==0==MAIR_IDX_DEVICE inversion.
+void test_pgtable_install_user_pte_attr_index(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    // _attr with NORMAL_NC: the new capability -- an AttrIndx == 1 (NC) PTE.
+    paddr_t nc_pa = page_to_pa(alloc_pages(0, KP_ZERO));
+    TEST_ASSERT(nc_pa != 0, "alloc NC backing");
+    TEST_EXPECT_EQ(mmu_install_user_pte_attr(p->as->pgtable_root, 0, USER_VA,
+                       nc_pa, VMA_PROT_RW, MAIR_IDX_NORMAL_NC), 0,
+        "install NC PTE via _attr");
+    u64 nc = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
+    TEST_ASSERT(nc != 0, "walk to NC L3 entry");
+    TEST_EXPECT_EQ((nc >> 2) & 0x7u, (u64)MAIR_IDX_NORMAL_NC,
+        "AttrIndx == NORMAL_NC (the write-combining index the bool could not reach)");
+
+    // _attr with NORMAL_WB.
+    paddr_t wb_pa = page_to_pa(alloc_pages(0, KP_ZERO));
+    TEST_ASSERT(wb_pa != 0, "alloc WB backing");
+    TEST_EXPECT_EQ(mmu_install_user_pte_attr(p->as->pgtable_root, 0,
+                       USER_VA + ONE_PAGE, wb_pa, VMA_PROT_RW, MAIR_IDX_NORMAL_WB), 0,
+        "install WB PTE via _attr");
+    u64 wb = walk_to_l3_entry(p->as->pgtable_root, USER_VA + ONE_PAGE);
+    TEST_EXPECT_EQ((wb >> 2) & 0x7u, (u64)MAIR_IDX_NORMAL_WB, "AttrIndx == NORMAL_WB");
+
+    // The bool wrapper preserves the old semantics -- the inversion guard:
+    // false is NOT MAIR_IDX_DEVICE (== 0), it maps to NORMAL_WB.
+    paddr_t w2_pa = page_to_pa(alloc_pages(0, KP_ZERO));
+    TEST_ASSERT(w2_pa != 0, "alloc wrapper-WB backing");
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
+                       USER_VA + 2u * ONE_PAGE, w2_pa, VMA_PROT_RW, false), 0,
+        "install via bool wrapper (false)");
+    u64 w2 = walk_to_l3_entry(p->as->pgtable_root, USER_VA + 2u * ONE_PAGE);
+    TEST_EXPECT_EQ((w2 >> 2) & 0x7u, (u64)MAIR_IDX_NORMAL_WB,
+        "bool false -> NORMAL_WB (NOT Device -- the inversion guard)");
+
+    paddr_t dev_pa = page_to_pa(alloc_pages(0, KP_ZERO));
+    TEST_ASSERT(dev_pa != 0, "alloc Device backing");
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
+                       USER_VA + 3u * ONE_PAGE, dev_pa, VMA_PROT_RW, true), 0,
+        "install via bool wrapper (true)");
+    u64 dv = walk_to_l3_entry(p->as->pgtable_root, USER_VA + 3u * ONE_PAGE);
+    TEST_EXPECT_EQ((dv >> 2) & 0x7u, (u64)MAIR_IDX_DEVICE, "bool true -> DEVICE");
+
+    drop_proc(p);
+}
+
 void test_pgtable_install_user_pte_constraints(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -417,9 +468,21 @@ static s64  g_rev_read_eof   = -1;   // <0 = no EOF; >=0 = absolute file offset 
                                      // which the backing "file" ends (a read at or
                                      // past it returns 0; a straddling read clamps)
 
+// DISTRO D-3 / #190: the mid-fault geometry shift. The FILE slow path drops
+// vma_lock across dev->read precisely so the read can block -- which makes the
+// stub read the one deterministic place a test can stand in for "a sibling
+// thread re-shaped the mapping while we slept". Set g_rev_shift_vma to a live
+// VMA and its burrow_offset moves by one page on the next read, exactly as a
+// MAP_FIXED split would move it.
+static struct Vma *g_rev_shift_vma = NULL;
+
 static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)c;
     g_rev_read_calls++;
+    if (g_rev_shift_vma) {
+        g_rev_shift_vma->burrow_offset += PAGE_SIZE;
+        g_rev_shift_vma = NULL;          // shift ONCE, so a re-fault can settle
+    }
     if (g_rev_read_fail) return -1;
     long m = n;
     if (g_rev_read_eof >= 0) {
@@ -490,6 +553,152 @@ void test_demand_page_file_smoke(void) {
     r = userland_demand_page(p, &fi);
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "second fault to resident page resolves");
     TEST_EXPECT_EQ(g_rev_read_calls, 1, "fast-hit must NOT re-read (still 1)");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// DISTRO D-3 / #190: a FILE fault whose VMA GEOMETRY MOVES while the page-in
+// sleeps must BAIL, not install.
+//
+// The R-5 audit filed this as F2 [P3, unreachable at v1.0] on the premise that a
+// FILE Burrow "is created only by exec and mapped exactly once at burrow_offset
+// 0". D-3 retires that premise -- userspace mmap creates FILE Burrows, and its
+// MAP_FIXED replacement splits a FILE VMA so a tail piece carries a non-zero
+// burrow_offset. This is the regression test for the retirement.
+//
+// It fails on the pre-fix code and passes on the post-fix code. Pre-fix, the
+// install trusted freq->slot: with the geometry shifted one page, the bytes read
+// for slot 0 were filed under slot 0 while the faulting VA now names slot 1 --
+// so the fault "succeeded" and EL0 got the WRONG FILE PAGE at that address. The
+// only re-validation was `vma->burrow == freq->burrow`, which a shifted VMA over
+// the same Burrow satisfies, so nothing caught it.
+//
+// Note what is asserted: NOT that the fault fails forever, but that it refuses
+// to install STALE bytes. The re-fault below is the other half -- a bail must
+// leave the mapping usable, since a real racing split ends with a valid
+// geometry that the next fault resolves against.
+//
+// THIS TEST COVERS THE CLUSTER INSTALL ONLY, and the split is not cosmetic. The
+// two install paths carry SEPARATE copies of the check, so one test cannot
+// cover both -- and which path a fault takes is not a knob but a consequence of
+// page_count: file_demand_page_cluster degrades to the single path only when
+// ncluster <= 1, which needs a ONE-page Burrow. Hence the sibling test
+// file_geometry_shift_bails_single, whose Burrow is one page for exactly that
+// reason. Sabotaging one check must redden one test and not the other; if a
+// single sabotage reddens both, they are not covering what they claim.
+void test_demand_page_file_geometry_shift_bails(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    g_rev_read_eof   = -1;
+    g_rev_shift_vma  = NULL;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    // TWO pages: enough for a slot 1 to exist, and enough that ncluster == 2 so
+    // the fault takes the CLUSTER path.
+    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+
+    int rc = burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_READ);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map R-only 2 pages");
+
+    struct Vma *vma = vma_lookup(p, USER_VA);
+    TEST_ASSERT(vma != NULL, "the VMA is findable");
+    TEST_EXPECT_EQ((u64)vma->burrow_offset, 0ull, "starts at burrow_offset 0");
+
+    // Arm the shift, then fault. The read runs with vma_lock DROPPED, moves the
+    // VMA's burrow_offset by a page, and returns its bytes; the install then
+    // finds the faulting VA naming a different slot than the one those bytes
+    // belong to.
+    g_rev_shift_vma = vma;
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/false);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER,
+        "a mid-fault geometry shift must BAIL, not install stale bytes");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "the read did happen (the bail is post-read)");
+
+    // Nothing was filed. This is the assertion that separates the fix from the
+    // bug: pre-fix, slot 0 held the read page and the PTE was live.
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) == NULL, "slot 0 still empty");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 1) == NULL, "slot 1 still empty");
+    TEST_EXPECT_EQ(walk_to_l3_entry(p->as->pgtable_root, USER_VA), 0ull,
+        "no PTE installed on the bail");
+
+    // The shift already fired and disarmed. A re-fault now sees a SETTLED
+    // geometry (burrow_offset one page in) and must resolve normally -- proving
+    // the bail is a retry, not a wedge, and that the check is not simply
+    // rejecting every non-zero burrow_offset.
+    r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the re-fault resolves against the new geometry");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 1) != NULL,
+        "the settled geometry files the faulting VA under slot 1");
+
+    // Slot 0 is ALSO filled here, and that is read-ahead doing its job rather
+    // than the stale page reappearing: the faulting slot is 1, so the cluster is
+    // [0, 2) and one batched read fills both. (An earlier draft asserted slot 0
+    // stayed empty and FAILED for exactly this reason -- the test was asserting
+    // a property the design never promised.) Content cannot discriminate the two
+    // stories, since both would put file-offset-0 bytes here; what discriminates
+    // is the BAIL assertions above, which are the ones that redden pre-fix.
+
+    // The faulting slot holds the RIGHT file window -- the stub's pattern is
+    // offset-keyed, so this proves the shifted burrow_offset was honoured rather
+    // than merely that SOME page arrived.
+    u8 *bytes = (u8 *)pa_to_kva(page_to_pa(burrow_file_slot_for_test(v, 1)));
+    TEST_EXPECT_EQ((u64)bytes[0], (u64)(u8)(ONE_PAGE & 0xff),
+        "slot 1 holds file offset ONE_PAGE's bytes, not slot 0's");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// DISTRO D-3 / #190, the SINGLE-page install path. Same defect, different copy
+// of the check (file_install_locked vs file_install_cluster_locked), so it needs
+// its own test -- see the sibling above for why one cannot reach both.
+//
+// A ONE-page Burrow is what forces the single path: ncluster == 1 makes
+// file_demand_page_cluster degrade immediately. And a one-page Burrow is what
+// makes this leg sharpest, because the pre-existing `freq->slot >= page_count`
+// guard reads the CACHED slot (0, in range) and therefore does NOT catch the
+// shift -- it is the geometry check or nothing.
+void test_demand_page_file_geometry_shift_bails_single(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    g_rev_read_eof   = -1;
+    g_rev_shift_vma  = NULL;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+
+    int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map R-only 1 page");
+
+    struct Vma *vma = vma_lookup(p, USER_VA);
+    TEST_ASSERT(vma != NULL, "the VMA is findable");
+
+    g_rev_shift_vma = vma;
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/false);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER,
+        "single-path: a mid-fault geometry shift must BAIL");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "exactly one read (the single path)");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) == NULL,
+        "single-path: slot 0 not filled with the stale page");
+    TEST_EXPECT_EQ(walk_to_l3_entry(p->as->pgtable_root, USER_VA), 0ull,
+        "single-path: no PTE installed on the bail");
 
     drop_proc(p);
     burrow_unref(v);
@@ -1031,4 +1240,211 @@ void test_demand_page_lazy_detach_uncharges_resident(void) {
     TEST_ASSERT(vma_lookup(p, va) == NULL, "VMA gone after detach");
 
     drop_proc(p);
+}
+
+// #197: mmap_eager_copy must return its I-32 page charge on EVERY failure past
+// the populate. burrow_lazy_populate charges the whole run on SUCCESS and the
+// caller owns it from then on -- nothing in the Burrow free path gives it back
+// (grep addrspace_uncharge_pages: only populate's own failure arm and
+// burrow_decommit). Without the unwind, as->page_count inflates permanently
+// while the pages themselves are freed, so it stops meaning true RSS
+// (ARCH section 6.5) and a guest that can drive a read error walks its own
+// counter to PROC_PAGE_MAX.
+//
+// The POSITIVE control comes first and is what stops this passing vacuously: a
+// test that only watched the failure path would pass identically against a
+// mmap_eager_copy that charged nothing at all.
+extern struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
+                                               struct Spoor *sp, u64 offset,
+                                               u64 length);
+
+void test_mmap_eager_copy_charge_pairing(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    const u64 LEN    = 4 * PAGE_SIZE;
+    const u32 NPAGES = 4;
+
+    g_rev_read_fail  = false;
+    g_rev_read_eof   = -1;
+    g_rev_read_chunk = 0;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+
+    u32 before = p->as->page_count;
+
+    // CONTROL: a SUCCEEDING copy charges, and HOLDS the charge -- the caller
+    // (or the mapping that adopts the Burrow) owns it now.
+    struct Burrow *ok = mmap_eager_copy_for_test(p->as, false, s, 0, LEN);
+    TEST_ASSERT(ok != NULL, "a clean eager copy must succeed");
+    TEST_EXPECT_EQ(p->as->page_count, before + NPAGES,
+                   "a successful copy CHARGES every page it populated");
+    // Dropping the Burrow frees the pages but NOT the counter -- that asymmetry
+    // is the whole reason the unwind has to be explicit, so assert it rather
+    // than leave it as an assumption.
+    burrow_unref(ok);
+    TEST_EXPECT_EQ(p->as->page_count, before + NPAGES,
+                   "burrow_unref frees pages but does NOT uncharge");
+    // Hand the control's charge back so the failure case starts from `before`.
+    spin_lock(&p->as->lock);
+    addrspace_uncharge_pages(p->as, NPAGES);
+    spin_unlock(&p->as->lock);
+    TEST_EXPECT_EQ(p->as->page_count, before, "control unwound");
+
+    // THE REGRESSION: a read error partway through must leave the counter
+    // exactly where it started.
+    g_rev_read_fail = true;
+    struct Burrow *bad = mmap_eager_copy_for_test(p->as, false, s, 0, LEN);
+    g_rev_read_fail = false;
+    TEST_ASSERT(bad == NULL, "a failing read must fail the copy");
+    TEST_EXPECT_EQ(p->as->page_count, before,
+                   "a FAILED eager copy returns its whole page charge (#197)");
+
+    spoor_clunk(s);
+    drop_proc(p);
+}
+
+// =============================================================================
+// #194 (D-3c): the file_limit bound -- Linux SIGBUS past the last file page.
+//
+// A FILE Burrow stamped with a KNOWN backing size must REFUSE to demand-page a
+// page wholly past round_up(file_limit): no page allocated, no read issued, the
+// fault answers FAULT_USER_BUS (snare:bus). Without the bound (the pre-#194
+// state, preserved under BURROW_FILE_LIMIT_UNKNOWN -- see file_eof_tail_zero
+// above, which pins THAT posture), every such fault minted an uncharged
+// demand-zero page: anonymous in effect, accounted as FILE, i.e. not at all --
+// an I-32 bypass bounded only by BURROW_ATTACH_MAX x PROC_VMA_MAX.
+// =============================================================================
+
+void test_demand_page_file_past_limit_bus(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    g_rev_read_eof   = (s64)ONE_PAGE;        // the "file" is exactly one page
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, 4 * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file 4-page");
+    v->file_limit = ONE_PAGE;                // the image.c stamp, done by hand
+
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 4 * ONE_PAGE, VMA_PROT_RX), 0,
+                   "burrow_map 4-page FILE RX");
+
+    // Slot 0 holds file bytes: serves normally. (The cluster clamp bounds the
+    // fill to slot_lim=1, so this also proves a clamped 1-slot cluster
+    // degrades to the single path and still makes progress.)
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED,
+                   "in-file slot 0 serves under a known limit");
+    struct page *pg0 = burrow_file_slot_for_test(v, 0);
+    TEST_ASSERT(pg0 != NULL, "slot 0 resident");
+    u8 *b0 = (u8 *)pa_to_kva(page_to_pa(pg0));
+    TEST_EXPECT_EQ((u64)b0[5], 5ull, "slot 0 carries file bytes (pattern)");
+
+    // Slot 2 is WHOLLY past the file: refused before any allocation or read.
+    int calls_before = g_rev_read_calls;
+    make_fi(&fi, USER_VA + 2 * ONE_PAGE + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_USER_BUS,
+                   "wholly-past-limit page answers BUS (Linux SIGBUS past EOF)");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 2) == NULL,
+                "no page minted for the refused slot");
+    TEST_EXPECT_EQ(g_rev_read_calls, calls_before,
+                   "refused BEFORE any read was issued");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+void test_demand_page_file_partial_page_zero_with_limit(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    const u64 LIMIT  = ONE_PAGE + 0x10;      // 16 bytes into page 1
+    g_rev_read_eof   = (s64)LIMIT;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, 4 * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file 4-page");
+    v->file_limit = LIMIT;
+
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 4 * ONE_PAGE, VMA_PROT_RX), 0,
+                   "burrow_map 4-page FILE RX");
+
+    // Slot 1 STRADDLES the limit (holds 16 file bytes): admitted, data then
+    // zero -- the read-short path, byte-identical to Linux's partial last page.
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + ONE_PAGE + 0x8, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED,
+                   "the partial final page is admitted under the limit");
+    struct page *pg1 = burrow_file_slot_for_test(v, 1);
+    TEST_ASSERT(pg1 != NULL, "slot 1 resident");
+    u8 *b1 = (u8 *)pa_to_kva(page_to_pa(pg1));
+    TEST_EXPECT_EQ((u64)b1[0xf], (u64)(u8)((ONE_PAGE + 0xf) & 0xff),
+                   "pre-EOF byte 15 is file data");
+    TEST_EXPECT_EQ((u64)b1[0x10], 0ull, "byte 16 (EOF) is ZERO");
+    TEST_EXPECT_EQ((u64)b1[PAGE_SIZE - 1], 0ull, "page tail stays ZERO");
+
+    // Slot 2 (the first page with NO file byte) refuses.
+    make_fi(&fi, USER_VA + 2 * ONE_PAGE, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_USER_BUS,
+                   "first wholly-past page refuses");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+void test_demand_page_file_cluster_clamps_at_limit(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    const u64 LIMIT  = 3 * ONE_PAGE;         // exactly three pages of data
+    g_rev_read_eof   = (s64)LIMIT;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, 8 * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file 8-page");
+    v->file_limit = LIMIT;
+
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 8 * ONE_PAGE, VMA_PROT_RX), 0,
+                   "burrow_map 8-page FILE RX");
+
+    // Fault slot 0: read-ahead runs, CLAMPED to the 3 in-file slots. Without
+    // the clamp, slots 3..7 would be pre-filled as resident ZERO pages -- and
+    // the resident fast path installs those with NO limit check, so the mint
+    // would return through the side door. The two assertions below redden in
+    // exactly that revert.
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED,
+                   "clamped cluster fault serves the in-file slots");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) != NULL, "slot 0 resident");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 2) != NULL,
+                "read-ahead reached the last in-file slot");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 3) == NULL,
+                "read-ahead did NOT pre-fill past the limit");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 7) == NULL,
+                "the cluster tail stays empty past the limit");
+
+    // The past-limit slot then refuses on its own fault (it cannot ride the
+    // fast path, because nothing resident exists for it).
+    make_fi(&fi, USER_VA + 3 * ONE_PAGE, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_USER_BUS,
+                   "past-limit slot refuses after the clamped cluster");
+
+    drop_proc(p);
+    burrow_unref(v);
 }

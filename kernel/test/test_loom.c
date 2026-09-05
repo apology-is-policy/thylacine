@@ -43,6 +43,7 @@ void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
 void test_loom_cq_waiter_wake(void);
 void test_loom_cq_waiter_no_spurious_wake_on_full(void);
+void test_loom_poll(void);
 void test_loom_enter_inline_min_complete(void);
 void test_loom_enter_min_complete_no_inflight(void);
 void test_loom_sqpoll_setup_and_teardown(void);
@@ -714,6 +715,45 @@ void test_loom_cq_waiter_no_spurious_wake_on_full(void) {
 
     poll_waiter_list_unregister(&pw);
     pw.magic = 0;
+    loom_unref(l);
+}
+
+// KT-1.5: the KObj_Loom .poll hook (loom_poll), driven directly (white-box).
+// An empty CQ reports not-ready AND registers the waiter (register-then-observe);
+// a CQE post then sets that waiter's flag (the same NoMissedCqWake / cq_waiters
+// path test_loom_cq_waiter_wake pins) and a re-poll reports POLLIN. A POLLOUT-only
+// request registers nothing and reports nothing (SQ-space is unmodelled at v1.0).
+void test_loom_poll(void) {
+    struct Loom *l = loom_create(4, 8);
+    TEST_ASSERT(l != NULL, "loom_create(4,8)");
+
+    struct Rendez r;
+    rendez_init(&r);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &r);
+
+    short re = loom_poll(l, POLLIN, &pw);
+    TEST_EXPECT_EQ((int)re, 0, "empty ring: loom_poll reports not-ready");
+    TEST_ASSERT(pw.list != NULL, "loom_poll REGISTERED the waiter on cq_waiters");
+    TEST_ASSERT(pw.ready == false, "fresh waiter not ready before any post");
+
+    TEST_EXPECT_EQ(loom_post_cqe(l, 0xF00Du, 0, 0), 0, "CQE post succeeds");
+    TEST_ASSERT(pw.ready == true, "post sets the loom_poll-registered waiter flag (I-9)");
+    poll_waiter_list_unregister(&pw);
+
+    struct poll_waiter pw2;
+    poll_waiter_init(&pw2, &r);
+    short re2 = loom_poll(l, POLLIN, &pw2);
+    TEST_ASSERT((re2 & POLLIN) != 0, "ready ring: loom_poll reports POLLIN");
+    poll_waiter_list_unregister(&pw2);
+
+    struct poll_waiter pw3;
+    poll_waiter_init(&pw3, &r);
+    short re3 = loom_poll(l, POLLOUT, &pw3);
+    TEST_EXPECT_EQ((int)re3, 0, "POLLOUT-only: loom_poll reports nothing (v1.0)");
+    TEST_ASSERT(pw3.list == NULL, "POLLOUT-only: no registration");
+
+    pw.magic = 0; pw2.magic = 0; pw3.magic = 0;
     loom_unref(l);
 }
 

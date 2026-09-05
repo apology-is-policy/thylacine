@@ -439,7 +439,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
     //      (Phase 5+ real platforms) will introduce a flag at create
     //      time to select Device attrs.
     paddr_t page_pa;
-    bool    device_memory;
+    u32     mair_idx;   // MAIR_IDX_* per burrow type; NORMAL_NC for HOSTMEM (V-2)
     // LINEAGE L-4b: what step 5 actually installs. Defaults to the VMA's own prot
     // and is narrowed by exactly one arm -- a read fault on a COW-shared page,
     // which must land READ-ONLY so the next write comes back here to break. The
@@ -460,19 +460,29 @@ static enum fault_result demand_page_locked(struct Proc *p,
         if (!vma->burrow->pages)            return FAULT_UNHANDLED_USER;
         page_pa = page_to_pa(vma->burrow->pages) +
                   (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
-        device_memory = false;
+        mair_idx = MAIR_IDX_NORMAL_WB;
         break;
     case BURROW_TYPE_MMIO:
         if (!vma->burrow->kobj_mmio)        return FAULT_UNHANDLED_USER;
         page_pa = vma->burrow->pa +
                   (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
-        device_memory = true;
+        mair_idx = MAIR_IDX_DEVICE;
         break;
     case BURROW_TYPE_DMA:
         if (!vma->burrow->kobj_dma)         return FAULT_UNHANDLED_USER;
         page_pa = vma->burrow->pa +
                   (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
-        device_memory = false;
+        mair_idx = MAIR_IDX_NORMAL_WB;
+        break;
+    case BURROW_TYPE_HOSTMEM:
+        // V-2: a subrange of a PCI hostmem BAR. Physical backing like MMIO/DMA
+        // (pa + page offset), but the attribute is the create-time host-dictated
+        // MAIR index (NORMAL_WB for CACHED, NORMAL_NC for WC) rather than a fixed
+        // Device/WB choice. kobj_pci non-NULL is the liveness guard.
+        if (!vma->burrow->kobj_pci)         return FAULT_UNHANDLED_USER;
+        page_pa = vma->burrow->pa +
+                  (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
+        mair_idx = vma->burrow->hostmem_mair;
         break;
     case BURROW_TYPE_FILE: {
         // REVENANT R-2 / I-36: the page comes from the sparse filepages[] array,
@@ -488,7 +498,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
             // Fast path: resident hit. Each FILE slot is its own order-0 page,
             // so page_pa is the slot page's PA (no contiguous-chunk offset).
             page_pa = page_to_pa(resident);
-            device_memory = false;
+            mair_idx = MAIR_IDX_NORMAL_WB;
             break;                      // -> step-5 PTE install (R+X for text)
         }
         // Miss: pin the Burrow across the lockless read (so freq->burrow cannot
@@ -524,7 +534,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
         if (resident) {
             // Resident hit (a re-fault, or a sibling faulter filled it): the page was
             // charged when it was allocated -- do NOT charge again.
-            device_memory = false;
+            mair_idx = MAIR_IDX_NORMAL_WB;
 
             // LINEAGE L-4b: the copy-on-write break. Reached only through a VMA
             // addrspace_clone flagged, so a mapping that never forked runs the
@@ -664,7 +674,7 @@ if (cow_page_put(resident))
             proc_page_uncharge(p, 1);       // we double-charged; give it back
         }
         page_pa = page_to_pa(winner);
-        device_memory = false;
+        mair_idx = MAIR_IDX_NORMAL_WB;
         break;                              // -> step-5 PTE install (RW/XN, W^X-clean)
     }
     case BURROW_TYPE_INVALID:
@@ -675,9 +685,9 @@ if (cow_page_put(resident))
     // 5. Install the leaf PTE in the per-Proc TTBR0 tree. The asid arg is
     // vestigial (the install does an all-ASID `tlbi vaae1is`); pass 0 -- the
     // Proc's rolling ASID is resolved at context switch, not here (RW-1 B-F1).
-    int rc = mmu_install_user_pte(p->as->pgtable_root, 0,
-                                  page_va, page_pa, install_prot,
-                                  device_memory);
+    int rc = mmu_install_user_pte_attr(p->as->pgtable_root, 0,
+                                       page_va, page_pa, install_prot,
+                                       mair_idx);
     if (rc != 0)                         return FAULT_UNHANDLED_USER;
 
     return FAULT_HANDLED;
@@ -725,15 +735,39 @@ static enum fault_result file_install_locked(struct Proc *p,
         return FAULT_UNHANDLED_USER;
     }
     struct Burrow *v = vma->burrow;
-    // freq->slot was computed pre-sleep from the original VMA's geometry; it stays
-    // valid against this re-looked-up VMA because a BURROW_TYPE_FILE Burrow is
-    // created only by exec, mapped exactly once at burrow_offset 0 (burrow_map's
-    // fixed offset arg), and never handed to userspace to re-map -- so a FILE
-    // Burrow has ONE fixed VMA over its life and freq->page_va -> freq->slot is
-    // stable. (R-5 audit F2 [P3, unreachable at v1.0]: if a future path ever maps a
-    // FILE Burrow at a chosen offset/VA, recompute slot here from
-    // vma->burrow_offset + (freq->page_va - vma->vaddr_start) rather than trusting
-    // the cached freq->slot.)
+    // VERIFY the pre-sleep geometry still holds. The R-5 audit F2 filed this
+    // cached-slot re-use as unreachable "unless a future path maps a FILE Burrow
+    // at a chosen offset/VA" -- and DISTRO D-3's userspace file mmap IS that
+    // path, on every count: it creates FILE Burrows from EL0, its MAP_FIXED
+    // replacement SPLITS a FILE VMA (so a tail piece carries a non-zero
+    // burrow_offset), and one Image-cached Burrow is reachable from several
+    // address spaces at once. So the premise is retired, not merely re-argued.
+    //
+    // The re-validation above cannot substitute: it asks whether this VA still
+    // maps the SAME Burrow, and a split VMA over that same Burrow answers yes.
+    //
+    // NOTE F2 prescribed "recompute slot from vma->burrow_offset ...", and that
+    // remedy is WRONG -- it fixes the half of the problem that is visible from
+    // here and silently worsens the other half. freq->file_offset was ALSO
+    // derived from the pre-sleep geometry, and `newpg` already holds the bytes
+    // read at it; recomputing only the index would file those stale bytes under
+    // a FRESH slot number -- a correctly-indexed slot holding the wrong page,
+    // which is the same corruption wearing a tidier address.
+    //
+    // The bytes and the index have to agree, and the only thing that guarantees
+    // that is the mapping which produced them still being in place. So verify
+    // and BAIL: a re-fault re-resolves everything against the new geometry,
+    // which is exactly what the raced-teardown arm above already does.
+    if (freq->page_va < vma->vaddr_start || freq->page_va >= vma->vaddr_end) {
+        free_pages(newpg, 0);
+        return FAULT_UNHANDLED_USER;     // the VA left this VMA while we slept
+    }
+    size_t slot_now = (size_t)((vma->burrow_offset +
+                                (freq->page_va - vma->vaddr_start)) / PAGE_SIZE);
+    if (slot_now != freq->slot) {
+        free_pages(newpg, 0);
+        return FAULT_UNHANDLED_USER;     // geometry moved -> our bytes are stale
+    }
 
     struct page *resident;
     spin_lock(&v->lock);                 // vma_lock -> v->lock (established order)
@@ -871,15 +905,16 @@ out:
 // single-page loser-free discipline). Consumes every clpages[] entry on every
 // path (adopted into a slot, or freed by the caller).
 //
-// The pre-sleep [cstart, cstart+ncluster) slot RANGE (and the file bytes read
-// for it) stays valid against the re-looked-up VMA for the same reason the
-// single path's cached freq->slot does (the R-5 F2 justification at
-// file_install_locked): a FILE Burrow is created only by exec and mapped
-// exactly once at burrow_offset 0, never handed to userspace to re-map, and
-// its geometry scalars (page_count / file_offset / size) are immutable
-// post-create. The range install leans HARDER on that invariant than the
-// single slot did -- a future chosen-offset FILE map must recompute cstart
-// from vma->burrow_offset here, not just freq->slot.
+// The pre-sleep [cstart, cstart+ncluster) slot RANGE, and the file bytes read
+// for it, are verified against the re-looked-up VMA by the SAME check the single
+// path uses (see file_install_locked for why the premise that once made this
+// free -- "a FILE Burrow has ONE fixed VMA at burrow_offset 0" -- is retired by
+// DISTRO D-3, and why VERIFYING beats the recompute F2 prescribed).
+//
+// This path leans HARDER on the check than the single one: cstart determined
+// which FILE BYTES were read as well as which slots receive them, so a moved
+// geometry invalidates the cluster's whole contents at once. Since cstart is
+// derived from freq->slot, re-proving freq->slot re-proves the range.
 static enum fault_result file_install_cluster_locked(struct Proc *p,
                                                      const struct fault_info *fi,
                                                      struct file_fault_req *freq,
@@ -891,6 +926,11 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
         vma->burrow->type != BURROW_TYPE_FILE) {
         return FAULT_UNHANDLED_USER;     // raced teardown/remap; caller frees clpages
     }
+    if (freq->page_va < vma->vaddr_start || freq->page_va >= vma->vaddr_end)
+        return FAULT_UNHANDLED_USER;     // the VA left this VMA while we slept
+    if ((size_t)((vma->burrow_offset +
+                  (freq->page_va - vma->vaddr_start)) / PAGE_SIZE) != freq->slot)
+        return FAULT_UNHANDLED_USER;     // geometry moved -> the cluster is stale
     struct Burrow *v = vma->burrow;
 
     struct page *fault_pg = NULL;
@@ -939,6 +979,20 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
     size_t cstart = freq->slot & ~(size_t)(REVENANT_READAHEAD_PAGES - 1u);
     size_t cend   = cstart + REVENANT_READAHEAD_PAGES;
     if (cend > v->page_count) cend = v->page_count;
+    // #194: never PRE-READ a slot wholly past the file's last data page. The
+    // faulting slot itself was admitted by the entry check, but a past-limit
+    // NEIGHBOR filled here would become a resident zero page that the fast
+    // path (demand_page_locked's FILE resident-hit) later installs with no
+    // check -- the uncharged mint sneaking back in through read-ahead. slot s
+    // holds file bytes iff file_offset + s*PAGE < file_limit, so the first
+    // inadmissible slot is ceil((file_limit - file_offset) / PAGE).
+    if (burrow_file_limit_known(v->file_limit)) {
+        u64 slot_lim = (v->file_limit > v->file_offset)
+            ? (v->file_limit - v->file_offset + (PAGE_SIZE - 1)) / PAGE_SIZE
+            : 0;
+        if (slot_lim < (u64)cend) cend = (size_t)slot_lim;
+        if (cend <= cstart) cend = cstart + 1;   // entry-admitted slot always served
+    }
     size_t ncluster = cend - cstart;
     if (ncluster <= 1)
         return file_demand_page_single(p, fi, freq);
@@ -1016,7 +1070,24 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
 static enum fault_result file_demand_page_slow(struct Proc *p,
                                                const struct fault_info *fi,
                                                struct file_fault_req *freq) {
-    enum fault_result r = file_demand_page_cluster(p, fi, freq);
+    enum fault_result r;
+    // #194 / Linux fidelity: a page WHOLLY past the backing file's last page is
+    // SIGBUS on Linux, and demand-zeroing it here would mint real memory the
+    // I-32 page axis never sees (anonymous in effect, accounted as FILE, i.e.
+    // not at all -- the R-5 uncharged posture is justified by SHARED FILE BYTES,
+    // which these pages are not). Refuse BEFORE any allocation: nothing is
+    // minted, so nothing needs charging. The file's final PARTIAL page still
+    // zero-fills past EOF (the read-short path), matching Linux. file_limit is
+    // creation-time (close-to-open posture); UNKNOWN -- only the immutable
+    // baked ramfs, argued at the image.c stamp -- keeps the pre-#194 behavior.
+    // The faulting offset is page-floored at the fill site, so >= round_up(lim)
+    // is exactly "no byte of this page is a file byte".
+    if (burrow_file_limit_known(freq->burrow->file_limit) &&
+        freq->file_offset >=
+            ((freq->burrow->file_limit + (u64)(PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1)))
+        r = FAULT_USER_BUS;
+    else
+        r = file_demand_page_cluster(p, fi, freq);
     burrow_unref(freq->burrow);
     return r;
 }

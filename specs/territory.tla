@@ -1,182 +1,181 @@
 ---- MODULE territory ----
 (***************************************************************************)
-(* Thylacine territory — P2-E + P5-attach-mount spec.                      *)
+(* Thylacine territory — P2-E + P5-attach-mount + UM (union mounts) spec. *)
 (*                                                                         *)
 (* Models the Plan 9 territory primitives — `bind` + `mount` + the         *)
 (* corresponding cycle-freedom + isolation + mount-refcount invariants per *)
 (* ARCHITECTURE.md §9.1 + §9.6 + §28 I-1 (territory operations don't       *)
 (* affect other procs' territories) + I-3 (mount points form a DAG, never  *)
-(* a cycle) + the mount-lifecycle invariants from §9.6.6.                  *)
+(* a cycle) + the mount-lifecycle invariants from §9.6.6 — AND, since the  *)
+(* union-mounts arc (UM, 2026-09-02), the union WALK / READDIR / CREATE /   *)
+(* ORDERING semantics that ARCH §9.6 (line 1785) declares but the v1.0     *)
+(* walk never grew.                                                        *)
 (*                                                                         *)
-(* Two state layers:                                                       *)
+(* State layers:                                                           *)
 (*                                                                         *)
 (*   bindings: the bind graph. `bindings[p][dst]` is the SET of source     *)
 (*   paths bound at `dst` in proc p's territory. Plan 9 `bind(old, new)`   *)
 (*   makes `old`'s contents visible at `new`; we model `new`'s binding     *)
 (*   LIST since unions stack multiple bindings at one mount point. Walking *)
-(*   `dst` yields each `src \in bindings[p][dst]`.                         *)
+(*   `dst` yields each `src \in bindings[p][dst]`. NoCycle guards it.      *)
 (*                                                                         *)
-(*   mounts: the mount table. `mounts[p]` is a SET of <<path, Spoor>>      *)
-(*   pairs — each pair grafts a Spoor's tree at that path in proc p's      *)
-(*   territory. Per ARCH §9.6, every filesystem entity is a Spoor; mount   *)
-(*   is the operation that places one in the namespace. Multiple Spoors    *)
-(*   can be mounted at the same path (union mounts, MBEFORE/MAFTER).       *)
+(*   morder: the ORDERED mount table (UM). `morder[p][pt]` is a SEQUENCE   *)
+(*   of member records `[s |-> Spoor, mb |-> BOOLEAN, mc |-> BOOLEAN]`     *)
+(*   grafted at mount point `pt` in proc p's territory, IN DECLARED SEARCH *)
+(*   ORDER (index 1 searched first). This REPLACES the prior unordered     *)
+(*   `mounts` set: the union walk needs order, and one representation      *)
+(*   avoids a set/seq consistency gap. Per ARCH §9.6, every filesystem     *)
+(*   entity is a Spoor; mount grafts one at a point. `mb` records that the *)
+(*   member was mounted MBEFORE (else MAFTER); `mc` records MCREATE.       *)
+(*   MBEFORE prepends (searched earlier), MAFTER appends, MREPL replaces   *)
+(*   the whole sequence with a single member. The mounted-ON directory's   *)
+(*   own contents are NOT an implicit member (ARCH §9.6: "check the mount  *)
+(*   table" — grafted sources only; this also sidesteps the self-mount     *)
+(*   cycle check).                                                         *)
 (*                                                                         *)
-(*   refcount: per-Spoor contribution from the mount tables (across all    *)
-(*   procs). MountRefcountConsistency relates refcount to the actual       *)
-(*   cardinality of entries.                                               *)
+(*   holds: member CONTENTS. `holds[s]` is the set of component Names the  *)
+(*   directory-Spoor s contains. Fixed at Init (a member's contents don't  *)
+(*   change in this model) and explored over all assignments for coverage. *)
+(*   Drives the union walk (first member holding the name) and readdir     *)
+(*   (merge + dedup).                                                      *)
 (*                                                                         *)
-(* Edge interpretation (bind graph): an edge `dst -> src` exists iff       *)
-(* src \in bindings[p][dst]. Walking dst in p's territory produces src;    *)
-(* the transitive walk produces Reachable(p, {dst}).                       *)
+(*   root_spoor: name-resolution root per proc (SYS_WALK_OPEN spoor_fd==-1 *)
+(*   sentinel). NONE before the first Chroot. Contributes one refcount.    *)
 (*                                                                         *)
-(* Cycle-freedom (I-3) is enforced at every Bind: the action's             *)
-(* precondition is `~WouldCreateCycle`.                                    *)
+(*   refcount: per-Spoor kernel refcount = member occurrences across all   *)
+(*   morder sequences + root_spoor contributions. MountRefcountConsistency *)
+(*   relates it to the true count.                                         *)
 (*                                                                         *)
-(* Isolation (I-1) is structural: bindings[p] / mounts[p] for p # q are    *)
-(* independent function values. No action updates two procs' slots         *)
-(* simultaneously. RFNAMEG-shared territories are NOT modeled — at v1.0    *)
-(* impl, RFNAMEG is unsupported (rfork extincts on non-RFPROC flags); the  *)
-(* spec mirrors the impl's "private territory per Proc" semantics. Phase   *)
-(* 5+ when RFNAMEG lands the spec extends with a Territory indirection     *)
-(* layer.                                                                  *)
+(* Isolation (I-1) is structural: morder[p] / bindings[p] for p # q are   *)
+(* independent function values; no action updates two procs' slots at once.*)
+(* RFNAMEG-shared territories are NOT modeled (v1.0 impl: rfork extincts   *)
+(* on non-RFPROC flags).                                                   *)
+(*                                                                         *)
+(* Union semantics (UM — the new load-bearing content of this arc):        *)
+(*   - WalkSel(p, pt, nm)   — the member walk `pt/nm` resolves to: the     *)
+(*                            FIRST member (declared order) whose holds     *)
+(*                            contains nm, else NONE. WalkFirstHit proves   *)
+(*                            it is the earliest holder. BUGGY_WALK_LAST_   *)
+(*                            HIT selects the last holder -> counterexample.*)
+(*   - ReaddirSel(p, pt)    — the union directory listing: one <<nm, mbr>> *)
+(*                            per name held by ANY member, mbr = the FIRST  *)
+(*                            holder (Plan 9 dedup, first-member-wins).     *)
+(*                            ReaddirDedupFirstWins proves it. BUGGY_       *)
+(*                            READDIR_LAST_WINS keeps the last holder.      *)
+(*   - CreateSel(p, pt)     — where a create at the union lands: the FIRST  *)
+(*                            member with mc=TRUE (MCREATE), else NONE      *)
+(*                            (no writable member -> create fails, never    *)
+(*                            silently in a read-only member). BUGGY_       *)
+(*                            CREATE_ANY_MEMBER picks the first member      *)
+(*                            regardless of mc.                             *)
+(*   - OrderCorrect         — every MBEFORE member precedes every MAFTER    *)
+(*                            member in the sequence. BuggyMountOrder       *)
+(*                            appends an MBEFORE member -> violated.        *)
 (*                                                                         *)
 (* Mount lifecycle (§9.6.6):                                               *)
-(*   - Mount(p, S, path)         — adds <<path, S>> to mounts[p];          *)
-(*                                  bumps refcount[S].                     *)
-(*   - Unmount(p, S, path)       — removes one entry; drops refcount[S].   *)
-(*   - ForkClone(parent, child)  — deep-copies mounts[parent] into         *)
-(*                                  mounts[child]; bumps refcount for each *)
-(*                                  cloned entry (each clone contributes   *)
-(*                                  one new reference per entry).          *)
-(*   - DestroyTerritory(p)       — modeled as the contract that mounts[p]  *)
-(*                                  must be {} before destroy; the impl is *)
-(*                                  obliged to unmount every entry first.  *)
-(*                                  Buggy destroy (`BUGGY_DESTROY_LEAK`)   *)
-(*                                  clears entries WITHOUT decrementing    *)
-(*                                  refcounts — produces a leak.           *)
+(*   - MountBefore/After/Repl(p, s, pt, mc) — graft s at pt; bump          *)
+(*     refcount[s] (Repl first drops the replaced members' refs).          *)
+(*   - Unmount(p, s, pt)     — remove member s at pt; drop refcount[s].     *)
+(*   - ForkClone(parent,child)— deep-copy morder[parent]; bump refcount    *)
+(*                              per cloned member + cloned root.            *)
+(*   - BuggyDestroyLeak(p)    — clears morder[p] WITHOUT dropping refs.     *)
 (*                                                                         *)
 (* Buggy-config matrix (executable documentation per CLAUDE.md spec-first  *)
 (* policy):                                                                *)
+(*   territory.cfg                       all flags FALSE — invariants hold. *)
+(*   territory_buggy.cfg                 BUGGY_CYCLE — cyclic bind graph.    *)
+(*   territory_buggy_mount_no_refbump.cfg BUGGY_MOUNT_NO_REFBUMP.           *)
+(*   territory_buggy_unmount_no_refdrop.cfg BUGGY_UNMOUNT_NO_REFDROP.       *)
+(*   territory_buggy_destroy_leak.cfg    BUGGY_DESTROY_LEAK.                *)
+(*   territory_buggy_chroot_no_refbump.cfg BUGGY_CHROOT_NO_REFBUMP.         *)
+(*   territory_buggy_mount_order.cfg     BUGGY_MOUNT_ORDER — MBEFORE after  *)
+(*                                       MAFTER; OrderCorrect fails.        *)
+(*   territory_buggy_walk_last_hit.cfg   BUGGY_WALK_LAST_HIT — walk returns *)
+(*                                       the last holder; WalkFirstHit fails.*)
+(*   territory_buggy_readdir_last_wins.cfg BUGGY_READDIR_LAST_WINS — dedup  *)
+(*                                       keeps the last holder; fails.      *)
+(*   territory_buggy_create_any_member.cfg BUGGY_CREATE_ANY_MEMBER — create *)
+(*                                       ignores MCREATE; CreateTargetCorrect*)
+(*                                       fails.                             *)
 (*                                                                         *)
-(*   territory.cfg                  all flags FALSE — TLC proves invariants*)
-(*   territory_buggy.cfg            BUGGY_CYCLE=TRUE — counterexample      *)
-(*                                  where BuggyBind skips the cycle check  *)
-(*                                  and produces a cyclic graph.           *)
-(*   territory_buggy_mount_no_refbump.cfg                                  *)
-(*                                  BUGGY_MOUNT_NO_REFBUMP=TRUE —          *)
-(*                                  counterexample where Mount adds the    *)
-(*                                  entry but skips refcount bump.         *)
-(*   territory_buggy_unmount_no_refdrop.cfg                                *)
-(*                                  BUGGY_UNMOUNT_NO_REFDROP=TRUE —        *)
-(*                                  counterexample where Unmount removes   *)
-(*                                  the entry but doesn't decrement.       *)
-(*   territory_buggy_destroy_leak.cfg                                      *)
-(*                                  BUGGY_DESTROY_LEAK=TRUE — counter-     *)
-(*                                  example where BuggyDestroy clears      *)
-(*                                  mounts[p] without dropping refcounts.  *)
-(*                                                                         *)
-(* Invariants enforced (TLC-checked):                                      *)
-(*                                                                         *)
-(*   NoCycle    — for every (proc, path) the path is not reachable from   *)
-(*                its own bindings via the transitive closure. ARCH §28   *)
-(*                I-3, §9.1 cycle-freedom guarantee.                       *)
-(*                                                                         *)
-(*   MountRefcountConsistency                                              *)
-(*              — for every Spoor s, refcount[s] equals the total          *)
-(*                cardinality of (p, path) pairs across all procs such    *)
-(*                that <<path, s>> \in mounts[p]. ARCH §9.6.6: "every      *)
-(*                Spoor in the table has refcount ≥ 1 contributed by the   *)
-(*                table"; the kernel's refcount counter must agree with    *)
-(*                the actual entries.                                      *)
-(*                                                                         *)
-(*   MountRefcountNonNegative                                              *)
-(*              — refcount never goes negative.                            *)
-(*                                                                         *)
-(* See ARCHITECTURE.md §9 (territory) + §9.6 (mount) + §28 invariants      *)
-(* I-1, I-3.                                                               *)
+(* See ARCHITECTURE.md §9 (territory) + §9.6 (mount + union) + §28 I-1,I-3.*)
 (***************************************************************************)
-EXTENDS Naturals, FiniteSets
+EXTENDS Naturals, FiniteSets, Sequences
 
 CONSTANTS
     Procs,                     \* set of process identifiers
-    Paths,                     \* set of path identifiers (abstract — order is irrelevant)
-    Spoors,                    \* set of Spoor identifiers
-    BUGGY_CYCLE,               \* BOOLEAN — BuggyBind skips cycle check
-    BUGGY_MOUNT_NO_REFBUMP,    \* BOOLEAN — BuggyMount skips refcount bump
-    BUGGY_UNMOUNT_NO_REFDROP,  \* BOOLEAN — BuggyUnmount skips refcount drop
-    BUGGY_DESTROY_LEAK,        \* BOOLEAN — BuggyDestroy clears mounts[p]
-                               \*           without dropping refcounts.
-    BUGGY_CHROOT_NO_REFBUMP    \* BOOLEAN — BuggyChroot stamps root_spoor[p]
-                               \*           without bumping refcount[s] (or
-                               \*           dropping the previous root's
-                               \*           refcount). P5-stratumd-stub-
-                               \*           bringup-e2.
+    Paths,                     \* set of path identifiers (bind nodes + mount points)
+    Spoors,                    \* set of Spoor (member / source) identifiers
+    Names,                     \* set of component names (for union walk / readdir)
+    BUGGY_CYCLE,               \* BuggyBind skips cycle check
+    BUGGY_MOUNT_NO_REFBUMP,    \* BuggyMount skips refcount bump
+    BUGGY_UNMOUNT_NO_REFDROP,  \* BuggyUnmount skips refcount drop
+    BUGGY_DESTROY_LEAK,        \* BuggyDestroy clears morder[p] w/o ref drop
+    BUGGY_CHROOT_NO_REFBUMP,   \* BuggyChroot stamps root w/o ref adjust
+    BUGGY_MOUNT_ORDER,         \* BuggyMountOrder appends an MBEFORE member
+    BUGGY_WALK_LAST_HIT,       \* WalkSel returns the LAST holder
+    BUGGY_READDIR_LAST_WINS,   \* ReaddirSel dedups to the LAST holder
+    BUGGY_CREATE_ANY_MEMBER,   \* CreateSel ignores MCREATE (first member)
+    BUGGY_REMOVE_MCREATE_MEMBER \* RemoveSel picks the MCREATE member, not the holder
 
 ASSUME Cardinality(Procs) >= 1
 ASSUME Cardinality(Paths) >= 2
 ASSUME Cardinality(Spoors) >= 1
+ASSUME Cardinality(Names) >= 1
 ASSUME BUGGY_CYCLE \in BOOLEAN
 ASSUME BUGGY_MOUNT_NO_REFBUMP \in BOOLEAN
 ASSUME BUGGY_UNMOUNT_NO_REFDROP \in BOOLEAN
 ASSUME BUGGY_DESTROY_LEAK \in BOOLEAN
 ASSUME BUGGY_CHROOT_NO_REFBUMP \in BOOLEAN
+ASSUME BUGGY_MOUNT_ORDER \in BOOLEAN
+ASSUME BUGGY_WALK_LAST_HIT \in BOOLEAN
+ASSUME BUGGY_READDIR_LAST_WINS \in BOOLEAN
+ASSUME BUGGY_CREATE_ANY_MEMBER \in BOOLEAN
+ASSUME BUGGY_REMOVE_MCREATE_MEMBER \in BOOLEAN
 
 (***************************************************************************)
-(* NONE — sentinel for "this Proc has no pivoted root_spoor" (the Init    *)
-(* state, before any Chroot). Modeled as a string so it is guaranteed     *)
-(* distinct from the symbolic Spoor model values (s1, s2, ...) passed in  *)
-(* via the cfg. Maps to the impl's `root_spoor = NULL`                    *)
-(* (P5-stratumd-stub-bringup-e2). Encoded as a string rather than via an  *)
-(* unbounded CHOOSE because TLC cannot evaluate `CHOOSE x : x \notin S`   *)
-(* for unbounded x.                                                       *)
+(* NONE — sentinel for "no value" (a Proc's un-pivoted root_spoor, or a    *)
+(* walk/readdir/create with no matching member). A string, guaranteed      *)
+(* distinct from the symbolic Spoor model values (s1, s2, ...).            *)
 (***************************************************************************)
 NONE == "NONE"
 
+(***************************************************************************)
+(* A mount-table member: the grafted Spoor `s`, `mb` = mounted MBEFORE     *)
+(* (else MAFTER), `mc` = MCREATE (creates may land here).                  *)
+(***************************************************************************)
+Member == [s : Spoors, mb : BOOLEAN, mc : BOOLEAN]
+
 VARIABLES
     bindings,      \* [Procs -> [Paths -> SUBSET Paths]]
-                   \*   bindings[p][dst] = set of `src` paths bound at `dst`
-                   \*   in proc p's territory.
-    mounts,        \* [Procs -> SUBSET (Paths \X Spoors)]
-                   \*   mounts[p] = set of <<path, Spoor>> grafts in
-                   \*   proc p's territory.
+    morder,        \* [Procs -> [Paths -> Seq(Member)]]  — ordered mount table
     root_spoor,    \* [Procs -> Spoors \cup {NONE}]
-                   \*   root_spoor[p] = the Spoor at which name resolution
-                   \*   starts in proc p's territory (the impl uses this
-                   \*   when SYS_WALK_OPEN is called with the spoor_fd ==
-                   \*   -1 sentinel). NONE before the first Chroot. Each
-                   \*   non-NONE root_spoor[p] contributes one to
-                   \*   refcount[root_spoor[p]] (in addition to any
-                   \*   mount-table contributions).
-                   \*   P5-stratumd-stub-bringup-e2.
-    refcount       \* [Spoors -> Nat]
-                   \*   refcount[s] = kernel's mount-contribution +
-                   \*   root_spoor-contribution refcount for Spoor s.
-                   \*   Should equal Cardinality(MountEntriesForSpoor(s)) +
-                   \*   |{p : root_spoor[p] = s}|; tracked separately so
-                   \*   the impl bug "forgot to bump/drop refcount" is
-                   \*   catchable on either contribution.
+    refcount,      \* [Spoors -> Nat]
+    holds          \* [Spoors -> SUBSET Names]  — member contents (fixed at Init)
 
-vars == <<bindings, mounts, root_spoor, refcount>>
+vars == <<bindings, morder, root_spoor, refcount, holds>>
 
 TypeOk ==
     /\ bindings \in [Procs -> [Paths -> SUBSET Paths]]
-    /\ mounts \in [Procs -> SUBSET (Paths \X Spoors)]
+    /\ morder \in [Procs -> [Paths -> Seq(Member)]]
     /\ root_spoor \in [Procs -> Spoors \cup {NONE}]
     /\ refcount \in [Spoors -> Nat]
+    /\ holds \in [Spoors -> SUBSET Names]
 
 (***************************************************************************)
-(* Reachable(p, S) — transitive closure of S through proc p's bind graph: *)
-(* the set of paths reachable from any starting node in S by following    *)
-(* zero-or-more bind edges.                                                *)
-(*                                                                         *)
-(* Edge interpretation: an edge `dst -> src` exists iff src \in           *)
-(* bindings[p][dst]. Walking dst in p's territory produces src; following *)
-(* the transitive walk produces Reachable(p, {dst}).                       *)
-(*                                                                         *)
-(* Implemented as a fixed-point iteration. Termination: Paths is finite,  *)
-(* and S is monotonically growing; the loop stops when no new paths are   *)
-(* added.                                                                  *)
+(* Set min / max over naturals (TLA+ has no built-ins).                    *)
+(***************************************************************************)
+SetMin(S) == CHOOSE x \in S : \A y \in S : x <= y
+SetMax(S) == CHOOSE x \in S : \A y \in S : x >= y
+
+(***************************************************************************)
+(* Member helpers over morder[p][pt].                                      *)
+(***************************************************************************)
+MemberSpoors(p, pt) == { morder[p][pt][i].s : i \in DOMAIN morder[p][pt] }
+HasMember(p, pt, s) == \E i \in DOMAIN morder[p][pt] : morder[p][pt][i].s = s
+
+(***************************************************************************)
+(* Reachable(p, S) — transitive closure of S through proc p's bind graph.  *)
 (***************************************************************************)
 RECURSIVE ReachableImpl(_, _)
 ReachableImpl(p, S) ==
@@ -185,160 +184,143 @@ ReachableImpl(p, S) ==
 
 Reachable(p, S) == ReachableImpl(p, S)
 
-(***************************************************************************)
-(* WouldCreateCycle(p, src, dst) — predicate: would adding the edge       *)
-(* `dst -> src` to proc p's bind graph create a cycle?                     *)
-(*                                                                         *)
-(* Trivially yes if src = dst (self-loop = cycle of length 1).            *)
-(* Otherwise, a cycle forms iff dst is already reachable from src via     *)
-(* existing edges — then adding `dst -> src` closes the loop:             *)
-(*   src -> ... -> dst -> (new) -> src.                                   *)
-(***************************************************************************)
 WouldCreateCycle(p, src, dst) ==
     \/ src = dst
     \/ dst \in Reachable(p, {src})
 
 (***************************************************************************)
-(* MountEntriesForSpoor(s) — set of (p, path) pairs across all procs      *)
-(* with <<path, s>> \in mounts[p]. Cardinality gives the true count of    *)
-(* mount entries referencing s; refcount[s] should equal this cardinality.*)
-(*                                                                         *)
-(* Cartesian-product filter form (TLA+ requires the bound-variable to be  *)
-(* a simple identifier in a filter comprehension, so we destructure       *)
-(* manually via pair[1] / pair[2]).                                       *)
+(* MountEntriesForSpoor(s) — (p, pt) pairs where s is a member. Cardinality*)
+(* gives the true mount-contribution count for refcount[s].                *)
 (***************************************************************************)
 MountEntriesForSpoor(s) ==
-    { pair \in Procs \X Paths : <<pair[2], s>> \in mounts[pair[1]] }
+    { pair \in Procs \X Paths : HasMember(pair[1], pair[2], s) }
 
 (***************************************************************************)
-(* Init: every proc starts with an empty territory (no bindings, no       *)
-(* mounts). Refcount is 0 for every Spoor.                                 *)
+(* Init: empty territories; refcount 0; holds any fixed assignment.        *)
 (***************************************************************************)
 Init ==
     /\ bindings = [p \in Procs |-> [path \in Paths |-> {}]]
-    /\ mounts = [p \in Procs |-> {}]
+    /\ morder = [p \in Procs |-> [pt \in Paths |-> << >>]]
     /\ root_spoor = [p \in Procs |-> NONE]
     /\ refcount = [s \in Spoors |-> 0]
+    /\ holds \in [Spoors -> SUBSET Names]
 
 (***************************************************************************)
 (* ================================= BIND ================================== *)
 (***************************************************************************)
 
-(***************************************************************************)
-(* Bind(p, src, dst) — CORRECT bind. Adds the edge `dst -> src` to proc p *)
-(* iff (a) src # dst, (b) the edge doesn't already exist, (c) cycle check  *)
-(* passes. Maps to `kernel/territory.c::bind`.                             *)
-(***************************************************************************)
 Bind(p, src, dst) ==
     /\ ~WouldCreateCycle(p, src, dst)
     /\ src \notin bindings[p][dst]
     /\ bindings' = [bindings EXCEPT ![p][dst] = @ \cup {src}]
-    /\ UNCHANGED <<mounts, root_spoor, refcount>>
+    /\ UNCHANGED <<morder, root_spoor, refcount, holds>>
 
-(***************************************************************************)
-(* BuggyBind(p, src, dst) — bug class: cycle check elided.                *)
-(***************************************************************************)
 BuggyBind(p, src, dst) ==
     /\ BUGGY_CYCLE
     /\ src # dst
     /\ src \notin bindings[p][dst]
     /\ bindings' = [bindings EXCEPT ![p][dst] = @ \cup {src}]
-    /\ UNCHANGED <<mounts, root_spoor, refcount>>
+    /\ UNCHANGED <<morder, root_spoor, refcount, holds>>
 
-(***************************************************************************)
-(* Unbind(p, src, dst) — removes the edge `dst -> src` from proc p. Maps  *)
-(* to `kernel/territory.c::unbind` (renamed from `unmount` at              *)
-(* P5-attach-mount to free the verb `unmount` for the mount-table         *)
-(* primitive; the existing call removes a bind edge, not a mount entry).  *)
-(***************************************************************************)
 Unbind(p, src, dst) ==
     /\ src \in bindings[p][dst]
     /\ bindings' = [bindings EXCEPT ![p][dst] = @ \ {src}]
-    /\ UNCHANGED <<mounts, root_spoor, refcount>>
+    /\ UNCHANGED <<morder, root_spoor, refcount, holds>>
 
 (***************************************************************************)
 (* ================================ MOUNT ================================== *)
 (***************************************************************************)
 
 (***************************************************************************)
-(* Mount(p, s, path) — CORRECT mount. Adds <<path, s>> to mounts[p]; bumps*)
-(* refcount[s]. Idempotent at the action level: re-mounting the same      *)
-(* (path, s) is a no-op (precondition <<path, s>> \notin mounts[p]).      *)
-(*                                                                         *)
-(* Maps to `kernel/territory.c::mount` (lands at P5-attach-mount).         *)
-(*                                                                         *)
-(* The spec models a single Spoor per mount entry; union semantics        *)
-(* (multiple Spoors at one path) are expressed by multiple Mount calls    *)
-(* with different `s`. MBEFORE/MAFTER ordering is below the spec's        *)
-(* granularity (set semantics in mounts[p]) — at the impl, the order is   *)
-(* maintained in the mount array.                                          *)
+(* MountBefore(p, s, pt, mc) — graft s at pt, MBEFORE: PREPEND (searched   *)
+(* earliest). Idempotent: no-op if s is already a member (the impl         *)
+(* converges flags without a new ref; the spec models the no-op as "does   *)
+(* not fire" via the ~HasMember precondition). Bumps refcount[s].          *)
+(* Maps to `kernel/territory.c::mount` with MBEFORE.                        *)
 (***************************************************************************)
-Mount(p, s, path) ==
-    /\ <<path, s>> \notin mounts[p]
-    /\ mounts' = [mounts EXCEPT ![p] = @ \cup {<<path, s>>}]
+MountBefore(p, s, pt, mc) ==
+    /\ ~HasMember(p, pt, s)
+    /\ morder' = [morder EXCEPT ![p][pt] =
+                    <<[s |-> s, mb |-> TRUE, mc |-> mc]>> \o @]
     /\ refcount' = [refcount EXCEPT ![s] = @ + 1]
-    /\ UNCHANGED <<bindings, root_spoor>>
+    /\ UNCHANGED <<bindings, root_spoor, holds>>
 
 (***************************************************************************)
-(* BuggyMountNoRefbump(p, s, path) — bug class: mount adds the entry but  *)
-(* skips the refcount bump. After this fires, refcount[s] is less than    *)
-(* the cardinality of entries referencing s; subsequent unref drops the   *)
-(* count below zero or frees the Spoor while entries still reference it.  *)
-(*                                                                         *)
-(* TLC catches this via MountRefcountConsistency.                          *)
+(* MountAfter(p, s, pt, mc) — graft s at pt, MAFTER: APPEND (searched last).*)
 (***************************************************************************)
-BuggyMountNoRefbump(p, s, path) ==
+MountAfter(p, s, pt, mc) ==
+    /\ ~HasMember(p, pt, s)
+    /\ morder' = [morder EXCEPT ![p][pt] =
+                    Append(@, [s |-> s, mb |-> FALSE, mc |-> mc])]
+    /\ refcount' = [refcount EXCEPT ![s] = @ + 1]
+    /\ UNCHANGED <<bindings, root_spoor, holds>>
+
+(***************************************************************************)
+(* MountRepl(p, s, pt) — MREPL: replace the whole sequence at pt with the  *)
+(* single member s. Drops one ref for each replaced member, then bumps s.  *)
+(* The functional refcount update handles s possibly being a replaced      *)
+(* member (net delta then +1). Precondition: not already the sole member   *)
+(* (the impl's no-op re-mount), else the step is a non-event.              *)
+(***************************************************************************)
+MountRepl(p, s, pt) ==
+    /\ morder[p][pt] # <<[s |-> s, mb |-> FALSE, mc |-> FALSE]>>
+    /\ morder' = [morder EXCEPT ![p][pt] =
+                    <<[s |-> s, mb |-> FALSE, mc |-> FALSE]>>]
+    /\ refcount' = [x \in Spoors |->
+                       refcount[x]
+                       - (IF \E i \in DOMAIN morder[p][pt] :
+                                morder[p][pt][i].s = x THEN 1 ELSE 0)
+                       + (IF x = s THEN 1 ELSE 0)]
+    /\ UNCHANGED <<bindings, root_spoor, holds>>
+
+(***************************************************************************)
+(* BuggyMountNoRefbump(p, s, pt) — MAFTER without the refcount bump.       *)
+(***************************************************************************)
+BuggyMountNoRefbump(p, s, pt) ==
     /\ BUGGY_MOUNT_NO_REFBUMP
-    /\ <<path, s>> \notin mounts[p]
-    /\ mounts' = [mounts EXCEPT ![p] = @ \cup {<<path, s>>}]
-    /\ UNCHANGED <<bindings, root_spoor, refcount>>
+    /\ ~HasMember(p, pt, s)
+    /\ morder' = [morder EXCEPT ![p][pt] =
+                    Append(@, [s |-> s, mb |-> FALSE, mc |-> FALSE])]
+    /\ UNCHANGED <<bindings, root_spoor, refcount, holds>>
 
 (***************************************************************************)
-(* Unmount(p, s, path) — CORRECT unmount. Removes <<path, s>> from        *)
-(* mounts[p]; drops refcount[s]. The impl's `unmount(territory,           *)
-(* target_path)` finds an entry by path; the spec's `path, s` are both    *)
-(* arguments because at the spec level the entry is a (path, s) pair.     *)
-(*                                                                         *)
-(* Maps to `kernel/territory.c::unmount` (lands at P5-attach-mount).       *)
+(* BuggyMountOrder(p, s, pt) — bug class: an MBEFORE member is APPENDED    *)
+(* instead of prepended. If an MAFTER member already sits ahead of it, the *)
+(* sequence then has an mb=TRUE member AFTER an mb=FALSE one -> OrderCorrect*)
+(* violated (an MBEFORE source that should be searched first is searched   *)
+(* last). Refcount is still bumped (only the ORDER is wrong).              *)
 (***************************************************************************)
-Unmount(p, s, path) ==
-    /\ <<path, s>> \in mounts[p]
-    /\ mounts' = [mounts EXCEPT ![p] = @ \ {<<path, s>>}]
+BuggyMountOrder(p, s, pt) ==
+    /\ BUGGY_MOUNT_ORDER
+    /\ ~HasMember(p, pt, s)
+    /\ morder' = [morder EXCEPT ![p][pt] =
+                    Append(@, [s |-> s, mb |-> TRUE, mc |-> FALSE])]
+    /\ refcount' = [refcount EXCEPT ![s] = @ + 1]
+    /\ UNCHANGED <<bindings, root_spoor, holds>>
+
+(***************************************************************************)
+(* Unmount(p, s, pt) — remove member s at pt; drop refcount[s]. SelectSeq  *)
+(* filters the one matching member (>=1 by HasMember; exactly 1 by the     *)
+(* mount idempotency preconditions).                                       *)
+(***************************************************************************)
+Unmount(p, s, pt) ==
+    /\ HasMember(p, pt, s)
+    /\ morder' = [morder EXCEPT ![p][pt] =
+                    SelectSeq(@, LAMBDA m : m.s # s)]
     /\ refcount' = [refcount EXCEPT ![s] = @ - 1]
-    /\ UNCHANGED <<bindings, root_spoor>>
+    /\ UNCHANGED <<bindings, root_spoor, holds>>
 
-(***************************************************************************)
-(* BuggyUnmountNoRefdrop(p, s, path) — bug class: unmount removes the     *)
-(* entry but doesn't decrement refcount[s]. After this fires, refcount[s] *)
-(* exceeds the cardinality of remaining entries; the Spoor's storage is   *)
-(* never freed (memory leak).                                              *)
-(***************************************************************************)
-BuggyUnmountNoRefdrop(p, s, path) ==
+BuggyUnmountNoRefdrop(p, s, pt) ==
     /\ BUGGY_UNMOUNT_NO_REFDROP
-    /\ <<path, s>> \in mounts[p]
-    /\ mounts' = [mounts EXCEPT ![p] = @ \ {<<path, s>>}]
-    /\ UNCHANGED <<bindings, root_spoor, refcount>>
+    /\ HasMember(p, pt, s)
+    /\ morder' = [morder EXCEPT ![p][pt] =
+                    SelectSeq(@, LAMBDA m : m.s # s)]
+    /\ UNCHANGED <<bindings, root_spoor, refcount, holds>>
 
 (***************************************************************************)
 (* ================================ CHROOT ================================= *)
 (***************************************************************************)
 
-(***************************************************************************)
-(* Chroot(p, s) — CORRECT chroot. Stamp root_spoor[p] to s; bump          *)
-(* refcount[s]. If p already had a (different) root_spoor, drop that      *)
-(* refcount as part of the same atomic step. Maps to                      *)
-(* `kernel/territory.c::territory_chroot` (P5-stratumd-stub-bringup-e2).  *)
-(*                                                                         *)
-(* Precondition `root_spoor[p] # s` keeps the action away from the no-op  *)
-(* re-chroot to the same Spoor (the impl returns 0 without ref-bumping;   *)
-(* the spec mirrors by simply not firing — a non-event in the model).     *)
-(*                                                                         *)
-(* The refcount update fires in a single TLA+ EXCEPT step:                *)
-(*   - if old was NONE: just bump refcount[s].                            *)
-(*   - if old was some s' # s: drop refcount[s'] AND bump refcount[s].    *)
-(* The two-key EXCEPT relies on s # s' (guaranteed by                     *)
-(* `root_spoor[p] # s` + `old = root_spoor[p]`).                          *)
-(***************************************************************************)
 Chroot(p, s) ==
     /\ root_spoor[p] # s
     /\ root_spoor' = [root_spoor EXCEPT ![p] = s]
@@ -346,95 +328,137 @@ Chroot(p, s) ==
                    THEN [refcount EXCEPT ![s] = @ + 1]
                    ELSE [refcount EXCEPT ![s] = @ + 1,
                                         ![root_spoor[p]] = @ - 1]
-    /\ UNCHANGED <<bindings, mounts>>
+    /\ UNCHANGED <<bindings, morder, holds>>
 
-(***************************************************************************)
-(* BuggyChrootNoRefbump(p, s) — bug class: chroot stamps root_spoor[p]    *)
-(* but skips the refcount bump (AND the drop-of-old, if applicable). The  *)
-(* impl pattern that violates this:                                       *)
-(*                                                                         *)
-(*   p->root_spoor = src;       // missing spoor_ref(src); missing        *)
-(*                              // spoor_clunk(old)                       *)
-(*                                                                         *)
-(* After this fires, refcount[s] is less than the kernel's actual         *)
-(* root_spoor + mount-table contribution; subsequent unref drops the      *)
-(* Spoor's storage while root_spoor[p] still points at it (UAF on next    *)
-(* root-relative walk_open). MountRefcountConsistency catches it at the   *)
-(* spec level.                                                            *)
-(***************************************************************************)
 BuggyChrootNoRefbump(p, s) ==
     /\ BUGGY_CHROOT_NO_REFBUMP
     /\ root_spoor[p] # s
     /\ root_spoor' = [root_spoor EXCEPT ![p] = s]
-    /\ UNCHANGED <<bindings, mounts, refcount>>
+    /\ UNCHANGED <<bindings, morder, refcount, holds>>
 
 (***************************************************************************)
-(* ForkClone(parent, child) — copies parent's territory (bindings AND     *)
-(* mounts AND root_spoor) into child's. Each cloned mount entry           *)
-(* contributes a new reference; refcount is bumped for every Spoor that   *)
-(* appears in mounts[parent]. The cloned root_spoor (if non-NONE) ALSO    *)
-(* contributes one new reference — each cloned territory is its own       *)
-(* holder of the parent's root_spoor.                                     *)
-(*                                                                         *)
-(* The refcount update bumps `refcount[s] += k + r` where k is the number *)
-(* of mount entries in parent referencing s and r is 1 iff                *)
-(* root_spoor[parent] = s (else 0). Models the impl's                     *)
-(* `territory_clone`: iterate over parent's mount entries, spoor_ref      *)
-(* each, then spoor_ref the parent's root_spoor if non-NULL.              *)
-(*                                                                         *)
-(* Precondition: child's territory must be in Init state (empty bindings, *)
-(* empty mounts, NONE root_spoor). This mirrors the impl: territory_clone *)
-(* is called on a freshly-allocated Territory; cloning over a live one    *)
-(* would overwrite without decrementing refcounts (leak) AND lose the     *)
-(* bindings + root_spoor. The impl never does this — the kernel calls     *)
-(* territory_alloc to get a fresh slot, then territory_clone to populate. *)
-(*                                                                         *)
-(* Maps to `kernel/territory.c::territory_clone`. RFNAMEG (shared         *)
-(* territory) is NOT modeled — see preamble.                              *)
+(* ForkClone(parent, child) — deep-copy parent's territory into child's.   *)
+(* Each cloned member contributes a new ref; the cloned root_spoor (if     *)
+(* non-NONE) contributes one. Precondition: child in Init state.           *)
 (***************************************************************************)
+ChildMemberCount(parent, s) ==
+    Cardinality({ pt \in Paths : HasMember(parent, pt, s) })
+
 ForkClone(parent, child) ==
     /\ parent # child
     /\ bindings[child] = [path \in Paths |-> {}]
-    /\ mounts[child] = {}
+    /\ morder[child] = [pt \in Paths |-> << >>]
     /\ root_spoor[child] = NONE
     /\ bindings' = [bindings EXCEPT ![child] = bindings[parent]]
-    /\ mounts' = [mounts EXCEPT ![child] = mounts[parent]]
+    /\ morder' = [morder EXCEPT ![child] = morder[parent]]
     /\ root_spoor' = [root_spoor EXCEPT ![child] = root_spoor[parent]]
     /\ refcount' = [s \in Spoors |->
                        refcount[s]
-                       + Cardinality({path \in Paths : <<path, s>> \in mounts[parent]})
+                       + ChildMemberCount(parent, s)
                        + (IF root_spoor[parent] = s THEN 1 ELSE 0)]
+    /\ UNCHANGED holds
 
 (***************************************************************************)
-(* BuggyDestroyLeak(p) — bug class: Territory destruction clears mounts[p]*)
-(* without dropping refcounts. After this fires, refcount[s] for every s  *)
-(* that was referenced by mounts[p] exceeds the cardinality of remaining  *)
-(* entries; the Spoor's storage is never freed.                            *)
-(*                                                                         *)
-(* This is the catch for the impl's `territory_unref` final-release path: *)
-(* must iterate over mounts[] and call spoor_unref for each entry BEFORE  *)
-(* kmem_cache_free.                                                        *)
-(*                                                                         *)
-(* Modeled as: clear mounts[p] without updating refcount. The clean       *)
-(* equivalent ("DestroyTerritory") is not a distinct action — the impl    *)
-(* model is "Unmount every entry, then free." TLC explores Unmount        *)
-(* sequences directly; no clean Destroy action is needed.                  *)
+(* BuggyDestroyLeak(p) — clears morder[p] + root_spoor[p] WITHOUT dropping *)
+(* refcounts. Catches the territory_unref final-release leak.              *)
 (***************************************************************************)
 BuggyDestroyLeak(p) ==
     /\ BUGGY_DESTROY_LEAK
-    /\ (mounts[p] # {} \/ root_spoor[p] # NONE)
-    /\ mounts' = [mounts EXCEPT ![p] = {}]
+    /\ (\E pt \in Paths : morder[p][pt] # << >>) \/ root_spoor[p] # NONE
+    /\ morder' = [morder EXCEPT ![p] = [pt \in Paths |-> << >>]]
     /\ root_spoor' = [root_spoor EXCEPT ![p] = NONE]
-    /\ UNCHANGED <<bindings, refcount>>
+    /\ UNCHANGED <<bindings, refcount, holds>>
+
+(***************************************************************************)
+(* ========================= UNION SEMANTICS (UM) ========================= *)
+(***************************************************************************)
+
+(***************************************************************************)
+(* HolderIdxs(p, pt, nm) — sequence indices of members whose directory     *)
+(* holds component `nm`.                                                   *)
+(***************************************************************************)
+HolderIdxs(p, pt, nm) ==
+    { i \in DOMAIN morder[p][pt] : nm \in holds[morder[p][pt][i].s] }
+
+FirstHolder(p, pt, nm) ==
+    LET idxs == HolderIdxs(p, pt, nm)
+    IN  IF idxs = {} THEN NONE ELSE morder[p][pt][SetMin(idxs)].s
+
+LastHolder(p, pt, nm) ==
+    LET idxs == HolderIdxs(p, pt, nm)
+    IN  IF idxs = {} THEN NONE ELSE morder[p][pt][SetMax(idxs)].s
+
+(***************************************************************************)
+(* WalkSel — where walk `pt/nm` lands. Correct: the first holder. Buggy    *)
+(* (BUGGY_WALK_LAST_HIT): the last holder.                                 *)
+(***************************************************************************)
+WalkSel(p, pt, nm) ==
+    IF BUGGY_WALK_LAST_HIT THEN LastHolder(p, pt, nm)
+                           ELSE FirstHolder(p, pt, nm)
+
+(***************************************************************************)
+(* Names held by ANY member at pt.                                         *)
+(***************************************************************************)
+NamesAt(p, pt) == UNION { holds[morder[p][pt][i].s] : i \in DOMAIN morder[p][pt] }
+
+(***************************************************************************)
+(* ReaddirSel — the union directory listing: one <<nm, member>> per name   *)
+(* held by any member. Correct: member = first holder (dedup, first-wins). *)
+(* Buggy (BUGGY_READDIR_LAST_WINS): member = last holder.                  *)
+(***************************************************************************)
+ReaddirSel(p, pt) ==
+    { <<nm, IF BUGGY_READDIR_LAST_WINS THEN LastHolder(p, pt, nm)
+                                       ELSE FirstHolder(p, pt, nm)>>
+      : nm \in NamesAt(p, pt) }
+
+ReaddirCorrect(p, pt) ==
+    { <<nm, FirstHolder(p, pt, nm)>> : nm \in NamesAt(p, pt) }
+
+(***************************************************************************)
+(* CreateSel — where a create at the union lands. Correct: the first       *)
+(* member with mc=TRUE, else NONE. Buggy (BUGGY_CREATE_ANY_MEMBER): the    *)
+(* first member regardless of mc (NONE only if there are no members).      *)
+(***************************************************************************)
+McIdxs(p, pt) == { i \in DOMAIN morder[p][pt] : morder[p][pt][i].mc }
+
+FirstCreateMember(p, pt) ==
+    LET idxs == McIdxs(p, pt)
+    IN  IF idxs = {} THEN NONE ELSE morder[p][pt][SetMin(idxs)].s
+
+CreateSel(p, pt) ==
+    IF BUGGY_CREATE_ANY_MEMBER
+    THEN IF morder[p][pt] = << >> THEN NONE ELSE morder[p][pt][1].s
+    ELSE FirstCreateMember(p, pt)
+
+(***************************************************************************)
+(* RemoveSel — where a REMOVE (unlink / rmdir / rename source) at a union  *)
+(* lands. Correct: the FIRST HOLDER (the member whose directory holds nm)  *)
+(* -- the entry is removed from the member that actually has it. This is   *)
+(* identical to WalkSel: a remove first RESOLVES the leaf (first-hit), then *)
+(* mutates that member. Buggy (BUGGY_REMOVE_MCREATE_MEMBER): the create    *)
+(* target (FirstCreateMember) -- the UM-7 F3 bug, which routed remove       *)
+(* through STALK_CREATE and so acted on the writable member instead of the *)
+(* holder (`rm foo && test -e foo` could be TRUE, or a shadow was unlinked).*)
+(***************************************************************************)
+RemoveSel(p, pt, nm) ==
+    IF BUGGY_REMOVE_MCREATE_MEMBER THEN FirstCreateMember(p, pt)
+                                   ELSE FirstHolder(p, pt, nm)
+
+(***************************************************************************)
+(* ============================== ACTIONS ================================= *)
+(***************************************************************************)
 
 Next ==
     \/ \E p \in Procs, src \in Paths, dst \in Paths : Bind(p, src, dst)
     \/ \E p \in Procs, src \in Paths, dst \in Paths : BuggyBind(p, src, dst)
     \/ \E p \in Procs, src \in Paths, dst \in Paths : Unbind(p, src, dst)
-    \/ \E p \in Procs, s \in Spoors, path \in Paths : Mount(p, s, path)
-    \/ \E p \in Procs, s \in Spoors, path \in Paths : BuggyMountNoRefbump(p, s, path)
-    \/ \E p \in Procs, s \in Spoors, path \in Paths : Unmount(p, s, path)
-    \/ \E p \in Procs, s \in Spoors, path \in Paths : BuggyUnmountNoRefdrop(p, s, path)
+    \/ \E p \in Procs, s \in Spoors, pt \in Paths, mc \in BOOLEAN : MountBefore(p, s, pt, mc)
+    \/ \E p \in Procs, s \in Spoors, pt \in Paths, mc \in BOOLEAN : MountAfter(p, s, pt, mc)
+    \/ \E p \in Procs, s \in Spoors, pt \in Paths                 : MountRepl(p, s, pt)
+    \/ \E p \in Procs, s \in Spoors, pt \in Paths : BuggyMountNoRefbump(p, s, pt)
+    \/ \E p \in Procs, s \in Spoors, pt \in Paths : BuggyMountOrder(p, s, pt)
+    \/ \E p \in Procs, s \in Spoors, pt \in Paths : Unmount(p, s, pt)
+    \/ \E p \in Procs, s \in Spoors, pt \in Paths : BuggyUnmountNoRefdrop(p, s, pt)
     \/ \E p \in Procs, s \in Spoors                 : Chroot(p, s)
     \/ \E p \in Procs, s \in Spoors                 : BuggyChrootNoRefbump(p, s)
     \/ \E parent, child \in Procs                   : ForkClone(parent, child)
@@ -447,58 +471,91 @@ Spec == Init /\ [][Next]_vars
 (***************************************************************************)
 
 (***************************************************************************)
-(* NoCycle — the bind graph in every proc's territory is acyclic. ARCH §28*)
-(* I-3 (mount points form a DAG, never a cycle).                          *)
+(* NoCycle — the bind graph in every proc's territory is acyclic (I-3).    *)
 (***************************************************************************)
 NoCycle ==
     \A p \in Procs, x \in Paths :
         x \notin Reachable(p, bindings[p][x])
 
 (***************************************************************************)
-(* MountRefcountConsistency — for every Spoor s, the kernel's refcount[s] *)
-(* equals the cardinality of mount entries referencing s across all       *)
-(* procs.                                                                  *)
-(*                                                                         *)
-(* ARCH §9.6.6: "every Spoor in the table has refcount ≥ 1 contributed by *)
-(* the table" — and the kernel's counter must agree with the actual       *)
-(* entries. A bug that bumps without entry (refcount > entries) leaks     *)
-(* storage; a bug that decrements without removing entry (refcount <      *)
-(* entries) eventually frees a Spoor that's still referenced.             *)
+(* MountRefcountConsistency — refcount[s] equals member occurrences across *)
+(* all morder sequences + root_spoor contributions.                        *)
 (***************************************************************************)
 MountRefcountConsistency ==
     \A s \in Spoors :
         refcount[s] = Cardinality(MountEntriesForSpoor(s))
                     + Cardinality({p \in Procs : root_spoor[p] = s})
 
-(***************************************************************************)
-(* MountRefcountNonNegative — refcount never underflows. Buggy variants   *)
-(* that decrement without bumping in a previous step would surface here.  *)
-(* (Type-check of `refcount \in [Spoors -> Nat]` enforces this at         *)
-(* TypeOk, but having an explicit invariant gives a clearer counterexample*)
-(* than a TypeOk violation.)                                              *)
-(***************************************************************************)
 MountRefcountNonNegative ==
     \A s \in Spoors : refcount[s] >= 0
 
 (***************************************************************************)
-(* Isolation (ARCH §28 I-1) — structural property of the spec's data      *)
-(* model: bindings[p] / mounts[p] and bindings[q] / mounts[q] for p # q   *)
-(* are independent function values. Every action only modifies ONE proc's *)
-(* slot per step (Mount/Unmount/Bind/Unbind/BuggyDestroyLeak); ForkClone  *)
-(* copies parent's bindings/mounts into child's slot but leaves parent's  *)
-(* slot unchanged.                                                        *)
-(*                                                                         *)
-(* No state invariant is needed — isolation is encoded by the data       *)
-(* model. A buggy variant that updated multiple procs in one step would   *)
-(* require a temporal property to detect; we don't model it here. When    *)
-(* RFNAMEG lands (Phase 5+ with the syscall surface), the spec extends    *)
-(* with a Territory layer and Isolation becomes a state invariant.        *)
+(* WalkFirstHit (UM, I-28 union walk) — a union walk lands on the earliest *)
+(* member holding the name. Stated as: WalkSel = FirstHolder always. The   *)
+(* correct action makes them equal; BUGGY_WALK_LAST_HIT makes WalkSel the  *)
+(* last holder, which differs whenever >=2 members hold the name.          *)
 (***************************************************************************)
+WalkFirstHit ==
+    \A p \in Procs, pt \in Paths, nm \in Names :
+        WalkSel(p, pt, nm) = FirstHolder(p, pt, nm)
+
+(***************************************************************************)
+(* ReaddirDedupFirstWins (UM) — the union listing is complete, deduplicated*)
+(* by name, and each name resolves to its first holder.                    *)
+(***************************************************************************)
+ReaddirDedupFirstWins ==
+    \A p \in Procs, pt \in Paths :
+        ReaddirSel(p, pt) = ReaddirCorrect(p, pt)
+
+(***************************************************************************)
+(* CreateTargetCorrect (UM) — a create at a union lands in the first       *)
+(* MCREATE member (or nowhere if none is MCREATE).                         *)
+(***************************************************************************)
+CreateTargetCorrect ==
+    \A p \in Procs, pt \in Paths :
+        CreateSel(p, pt) = FirstCreateMember(p, pt)
+
+(***************************************************************************)
+(* RemoveTargetCorrect (UM, UM-7 F3) — a remove of nm at a union acts on   *)
+(* the FIRST member holding nm, never the MCREATE member by virtue of      *)
+(* being writable. Stated as RemoveSel = FirstHolder always; the correct   *)
+(* action makes them equal, BUGGY_REMOVE_MCREATE_MEMBER makes RemoveSel    *)
+(* the create target, which differs whenever the first holder is not the   *)
+(* first MCREATE member (the F3 mis-selection).                            *)
+(***************************************************************************)
+RemoveTargetCorrect ==
+    \A p \in Procs, pt \in Paths, nm \in Names :
+        RemoveSel(p, pt, nm) = FirstHolder(p, pt, nm)
+
+(***************************************************************************)
+(* OrderCorrect (UM) — in every mount sequence, every MBEFORE member       *)
+(* precedes every MAFTER member (declared search order).                   *)
+(***************************************************************************)
+OrderCorrect ==
+    \A p \in Procs, pt \in Paths :
+        \A i, j \in DOMAIN morder[p][pt] :
+            (i < j /\ ~morder[p][pt][i].mb) => ~morder[p][pt][j].mb
 
 Invariants ==
     /\ TypeOk
     /\ NoCycle
     /\ MountRefcountConsistency
     /\ MountRefcountNonNegative
+    /\ WalkFirstHit
+    /\ ReaddirDedupFirstWins
+    /\ CreateTargetCorrect
+    /\ RemoveTargetCorrect
+    /\ OrderCorrect
+
+(***************************************************************************)
+(* StateConstraint — a TLC exploration bound (NOT part of the spec's      *)
+(* meaning). Caps the number of non-empty mount points so the ordered-    *)
+(* member state space stays finite-and-small; every buggy counterexample  *)
+(* needs at most two non-empty points (one point with two members for the *)
+(* walk/readdir/order/create bugs, plus a fork target), so the bound does *)
+(* not hide any modeled defect.                                            *)
+(***************************************************************************)
+StateConstraint ==
+    Cardinality({ pp \in Procs \X Paths : Len(morder[pp[1]][pp[2]]) > 0 }) <= 2
 
 ====

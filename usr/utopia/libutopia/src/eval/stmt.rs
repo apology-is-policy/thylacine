@@ -135,7 +135,7 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::parser::ast::{
-    AssignStmt, CaseStmt, Command, CommandKind, Expr, FnDecl, ForStmt, IfStmt, LetStmt,
+    AndOrList, AndOrOp, AssignStmt, CaseStmt, Command, CommandKind, Expr, FnDecl, ForStmt, IfStmt, LetStmt,
     MaskNoteStmt, OnNoteStmt, Pipeline, Redirect, RedirectKind, Script, Statement,
     StatementKind, TraceStmt, TryStmt, WhileStmt, Word,
 };
@@ -249,7 +249,40 @@ pub fn eval_statement(env: &mut Env, stmt: &Statement) -> EvalResult<StatementFl
         StatementKind::Trace(trace_stmt) => eval_trace(env, trace_stmt),
         StatementKind::OnNote(on_note) => eval_on_note(env, on_note),
         StatementKind::MaskNote(mask_note) => eval_mask_note(env, mask_note),
+        StatementKind::AndOr(list) => eval_and_or(env, list),
     }
+}
+
+// ---------------------------------------------------------------------
+// AND-OR list (scripture 8.6)
+// ---------------------------------------------------------------------
+
+/// Evaluate a short-circuit `&&` / `||` list. The first pipeline always
+/// runs; each later pipeline runs only if its connector is satisfied by
+/// the running $status (`&&` -> status == 0, `||` -> status != 0). An
+/// operand's non-zero exit is NOT propagated between links -- the connector
+/// consumes it -- so only the list's FINAL $status is left in `env` for the
+/// block loop's implicit-fail check. Hence `a || b` tolerates a's failure
+/// when b succeeds (scripture 8.6). A control-flow escape (return / break /
+/// continue) from any operand wins immediately.
+fn eval_and_or(env: &mut Env, list: &AndOrList) -> EvalResult<StatementFlow> {
+    let flow = eval_pipeline(env, &list.first)?;
+    if !matches!(flow, StatementFlow::Normal) {
+        return Ok(flow);
+    }
+    for (op, pipe) in &list.rest {
+        let run = match op {
+            AndOrOp::And => env.status() == 0,
+            AndOrOp::Or => env.status() != 0,
+        };
+        if run {
+            let flow = eval_pipeline(env, pipe)?;
+            if !matches!(flow, StatementFlow::Normal) {
+                return Ok(flow);
+            }
+        }
+    }
+    Ok(StatementFlow::Normal)
 }
 
 // ---------------------------------------------------------------------
@@ -264,11 +297,16 @@ pub fn eval_statement(env: &mut Env, stmt: &Statement) -> EvalResult<StatementFl
 ///     try-block (`implicit_fail_suppressed == 0`) (scripture 8.3 +
 ///     8.9 -- implicit-fail).
 fn should_propagate_failure(env: &Env, stmt: &Statement) -> bool {
-    let explicit = matches!(
-        &stmt.kind,
-        StatementKind::Pipeline(p)
-            if !p.elements.is_empty() && p.elements[0].command.fail_propagate
-    );
+    // A visible `?` postfix on the leading command forces propagation even at
+    // the interactive prompt (scripture 8.2) -- for a plain Pipeline OR for the
+    // first pipeline of an AndOr list (`a? && b`).
+    let leads_with_fail_propagate =
+        |p: &Pipeline| !p.elements.is_empty() && p.elements[0].command.fail_propagate;
+    let explicit = match &stmt.kind {
+        StatementKind::Pipeline(p) => leads_with_fail_propagate(p),
+        StatementKind::AndOr(list) => leads_with_fail_propagate(&list.first),
+        _ => false,
+    };
     let implicit = !env.interactive && env.implicit_fail_suppressed == 0;
     explicit || implicit
 }
@@ -530,13 +568,18 @@ fn out_stdio(inherit: bool) -> Stdio {
 /// resolves the spawn name through the caller's namespace (stalk + X-search),
 /// so the shell does the `$path` search. A name containing `/` is used as-is
 /// (absolute or relative). A bare command is searched on
-/// `$path = ["/bin", "/", "/goroot/bin"]`: `/bin` is the post-pivot installed
-/// location (joey binds the initrd binary tree there); `/` is the pre-pivot
-/// initrd root (where the boot-test shell runs); `/goroot/bin` is the Go
-/// toolchain shipped in the default image (Stage 6 -- `go` and `gofmt` resolve
-/// bare; last so `/bin` stays authoritative, and reachability remains
-/// namespace-governed: the probe only finds what the Territory already
-/// exposes). The first existing candidate wins; a miss defaults to
+/// `$path = ["/bin", "/", "/goroot/bin", "/clade/bin", "/viv/bin"]`: `/bin` is the
+/// post-pivot installed location (joey binds the initrd binary tree there); `/`
+/// is the pre-pivot initrd root (where the boot-test shell runs); `/goroot/bin`
+/// is the Go toolchain and `/clade/bin` the Clade C/C++ toolchain
+/// (`clang++`/`ld.lld`); `/viv/bin` is the shipped **Linux** binaries (git), which
+/// the kernel runs under the Linux phenotype because `/viv/bin` is an
+/// `MPHENO_LINUX` mount (VIVARIUM section 13 -- ut needs NO phenotype logic, the
+/// declaration is the mount, so `git ...` from ut is seamless). All shipped in
+/// optional bake chunks (`clang++` / `git` resolve bare; the extra dirs come LAST
+/// so `/bin` stays authoritative, and reachability stays namespace-governed: the
+/// probe only finds what the Territory already exposes, so an absent chunk misses).
+/// The first existing candidate wins; a miss defaults to
 /// `/bin/<name>` for a clean spawn error. (The Plan 9 / Unix split -- the
 /// kernel resolves a path, the shell does `$path`; a multi-entry user-settable
 /// `$path` is v1.x.)
@@ -544,7 +587,7 @@ fn resolve_command(name: &str) -> String {
     if name.contains('/') {
         return String::from(name);
     }
-    for dir in ["/bin/", "/", "/goroot/bin/"] {
+    for dir in ["/bin/", "/", "/goroot/bin/", "/clade/bin/", "/viv/bin/", "/viv/abin/"] {
         let mut cand = String::with_capacity(dir.len() + name.len());
         cand.push_str(dir);
         cand.push_str(name);
@@ -1691,6 +1734,8 @@ fn eval_word(env: &Env, word: &Word) -> EvalResult<Value> {
 fn eval_value_token(env: &Env, tok: &Token) -> EvalResult<Value> {
     match &tok.kind {
         TokenKind::Word(s) => Ok(Value::scalar(s.clone())),
+        // A `=` glued into a word (e.g. `-std=c++20`) is a literal character.
+        TokenKind::Equal => Ok(Value::scalar(String::from("="))),
         TokenKind::SingleQuoted(s) => Ok(Value::scalar(s.clone())),
         TokenKind::DoubleQuoted(parts) => eval_dq_in_word(env, parts, tok),
         TokenKind::Var(name) => Ok(env.get(name)),
@@ -2257,6 +2302,16 @@ fn eval_trace(env: &mut Env, stmt: &TraceStmt) -> EvalResult<StatementFlow> {
 
 fn eval_on_note(env: &mut Env, stmt: &OnNoteStmt) -> EvalResult<StatementFlow> {
     let name = eval_expr(env, &stmt.note_name)?.as_scalar();
+    // #237: registering a handler UNMASKS its note so the handler can actually
+    // receive it. `pipe` is masked by the process default (libthyla-rs rt_start:
+    // EPIPE-not-death), so without this an `on note 'pipe'` handler could never
+    // fire -- the note would sit masked in the queue. Mirrors pouch's
+    // sigaction(SIGPIPE, handler) clearing NOTE_BIT_PIPE. For a note that is not
+    // default-masked this leaves the model unchanged; the kernel re-sync (when
+    // the note fd is open) merely re-asserts the current mask.
+    if let Some(c) = note_class_for_name(&name) {
+        env.note_mask_remove(c);
+    }
     env.note_handler_set(name, stmt.body.clone());
     env.status_set(0);
     Ok(StatementFlow::Normal)
@@ -2289,11 +2344,23 @@ fn eval_mask_note(env: &mut Env, stmt: &MaskNoteStmt) -> EvalResult<StatementFlo
 /// rather than enqueue), and user-defined names return `None` -- a
 /// `mask note` over those is a body-only no-op (they either cannot be
 /// deferred or cannot arrive at a userspace queue).
-fn note_class_for_name(name: &str) -> Option<NoteClass> {
+///
+/// The `tty:*` family (`tty:susp`, `tty:winch`, `tty:hup`, `tty:quit`,
+/// `tty:cont`) is ONE kernel class (`NOTE_BIT_TTY`), so any `tty:`-prefixed
+/// name masks the whole family -- exactly what the kernel mask bit means, and
+/// the same class granularity `interrupt` already has. Matched by prefix, not
+/// by enumerating the five, so a sixth tty name cannot silently regress to
+/// the no-op this arm replaced: before it existed, `mask note 'tty:susp'`
+/// parsed, ran its body, and masked nothing.
+///
+/// `pub` so the boot probe can pin the mapping (u-job-test); the shell calls
+/// it only from `eval_mask_note`.
+pub fn note_class_for_name(name: &str) -> Option<NoteClass> {
     match name {
         "interrupt" => Some(NoteClass::Interrupt),
         "pipe" => Some(NoteClass::Pipe),
         "child_exit" => Some(NoteClass::ChildExit),
+        _ if name.starts_with("tty:") => Some(NoteClass::Tty),
         _ => None,
     }
 }

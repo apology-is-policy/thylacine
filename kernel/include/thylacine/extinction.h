@@ -11,9 +11,12 @@
 //    agent to: record the message, restore the last good snapshot, and
 //    report to the human before retrying."
 //
-// Don't change the prefix without coordinated updates to
-// tools/run-vm.sh, tools/test.sh, tools/agent-protocol.md, CLAUDE.md,
-// and TOOLING.md.
+// Don't change the prefix without updating everything that mirrors it.
+// The authority for that set is the vault's abi-boot-banner note, reached
+// via `quaestor owner` -- not a list transcribed here. The list that used
+// to sit on this line named tools/agent-protocol.md, planned in Phase 1
+// and never written, and tools/run-vm.sh, which matches neither literal
+// because it only launches QEMU and never reads boot output.
 
 #ifndef THYLACINE_EXTINCTION_H
 #define THYLACINE_EXTINCTION_H
@@ -27,6 +30,24 @@ void extinction(const char *msg) __attribute__((noreturn));
 // handler callers that want to include a faulting address.
 void extinction_with_addr(const char *msg, uintptr_t addr)
     __attribute__((noreturn));
+
+// Has the extinction console been claimed? FALSE on a clean boot, and it must
+// STAY false: a spurious claim would silence every later extinction's banner --
+// the same fail-open the claim exists to close, arriving from the other side.
+// Guarded by the `extinction.console_unclaimed_on_clean_boot` test.
+int extinction_console_claimed(void);
+
+// For exception.c's el1_sync_runaway -- the one OTHER emitter of the ABI line.
+// Claims the console, or confirms this CPU already owns it (the runaway is
+// reached from a chain that may have claimed it at depth 1). Returns 0 iff a
+// PEER holds it: the caller must then park WITHOUT emitting (it is counted as a
+// suppressed peer). Not for any other caller.
+int extinction_console_claim_or_own(void);
+
+// The pure exactly-one-winner core, exported so a test can exercise it on its
+// OWN word. Deliberately not reachable against the live console word: a test
+// that claimed THAT would disable extinction reporting for the rest of the boot.
+int extinction_claim_word(uint32_t *word);
 
 // Convenience macro for assert-style checks. The expression that fails
 // shows up in the message verbatim so a developer can grep the source.

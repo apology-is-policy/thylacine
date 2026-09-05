@@ -74,8 +74,8 @@ use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
 use crate::poll::AsFd;
 use crate::{
-    t_dma_create, t_dma_map, t_irq_create, t_irq_wait, t_mmio_create, t_mmio_map, t_pci_claim,
-    t_pci_info, t_pci_map_bar, TPciInfo, T_PROT_READ, T_PROT_WRITE,
+    t_burrow_from_hostmem, t_dma_create, t_dma_map, t_irq_create, t_irq_wait, t_mmio_create,
+    t_mmio_map, t_pci_claim, t_pci_info, t_pci_map_bar, TPciInfo, T_PROT_READ, T_PROT_WRITE,
 };
 
 // =============================================================================
@@ -650,7 +650,9 @@ pub enum PciError {
     Claim,
     /// `SYS_PCI_INFO` failed (bad handle -- should not happen post-claim).
     Info,
-    /// `SYS_PCI_MAP_BAR` failed for a present BAR (overlap / bad VA / prot).
+    /// A BAR/hostmem mapping syscall failed: `SYS_PCI_MAP_BAR` (overlap / bad VA
+    /// / prot) or `SYS_BURROW_FROM_HOSTMEM` (bad shmid, out-of-bounds or
+    /// non-page-aligned subrange, missing `RIGHT_MAP`, or an unknown cache policy).
     MapBar,
 }
 
@@ -812,6 +814,41 @@ impl PciDev {
             return Some((bar.pa + s.offset, s.length));
         }
         None
+    }
+
+    /// Warp-6 V-3b: map a subrange of the hostmem BAR into this Proc's VA and
+    /// return the guest VA. `shmid` selects the shared-memory region (1 = gpu
+    /// hostmem), `offset` is relative to that region's window base -- the SAME
+    /// base a HOST3D `map_blob(res, offset)` places its blob at, so a blob mapped
+    /// host-side at offset O is reached in the guest at this `offset` O. `cache`
+    /// is the `T_CACHE_*` the host DICTATED for the region (from `map_blob`'s
+    /// `map_info`) -- pass the MATCHING attribute, GPU-DESIGN 6.2 "honored
+    /// exactly"; a mismatched host/guest alias loses coherency on ARM64. `offset`
+    /// and `length` must be page-aligned (the kernel refuses otherwise). The
+    /// KObj_PCI claim this `PciDev` holds is the authority (I-5-non-transferable,
+    /// RIGHT_MAP-gated). Errs `MapBar` on a bad/unaligned subrange / missing right
+    /// / unknown cache policy (the bare syscall gives no errno).
+    pub fn burrow_from_hostmem(
+        &self,
+        shmid: u8,
+        offset: u64,
+        length: u64,
+        cache: u64,
+    ) -> core::result::Result<u64, PciError> {
+        let rc = unsafe {
+            t_burrow_from_hostmem(
+                i64::from(self.handle.raw()),
+                u64::from(shmid),
+                offset,
+                length,
+                cache,
+            )
+        };
+        if rc < 0 {
+            Err(PciError::MapBar)
+        } else {
+            Ok(rc as u64)
+        }
     }
 
     /// The VirtIO device id (1 = net, 4 = rng, ...).

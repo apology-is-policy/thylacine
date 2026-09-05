@@ -54,6 +54,48 @@ The Thylacine (abstractly depicted in the logo above) is an extinct (though I be
 
 ## Latest
 
+### LLVM/Clang: Compiling/Linking C++ against Clade/Pouch:
+
+An example C++ program showcasing a toy function I once made up in high school out of boredom, "filling" missing inverse functions on my Casio scientific calculator. The program is shown open in Nora, the Helix-like modal text editor I named after my daughter. It doesn't have syntax highlighting for CXX yet, but it __uses clangd to provide real-time diagnostics__:
+
+![](readme_assets/llvm/defac1.png)
+
+Here is building via `build.ut` -- a Utopia script. Utopia (`ut`) is Thylacine's own shell:
+
+```sh
+#!/bin/ut
+/clade/bin/clang++ @flags.rsp main.cpp -o app
+```
+
+Flags (see below). The LLVM toolchain is built for the Thylacine triple and sits in `/clade/`; clang still looks in the standard POSIX sysroot by default (will fix), so it needs to be pointed to the _Clade_ sysroot.
+
+```sh
+--ld-path=/clade/bin/ld.lld
+--sysroot=/clade/sysroot
+-B/clade/sysroot/lib
+-nostdinc++
+-isystem
+/clade/sysroot/include/c++/v1
+-nostdlib++
+-L/clade/sysroot/lib
+-lc++
+-lc++abi
+-lunwind
+-lc
+-lm
+-v
+```
+
+And here is the beautiful in-Thylacine build:
+
+![](readme_assets/llvm/defac2.png)
+
+The program runs without issue, having linked against Pouch, the Thylacine POSIX compatibility environment (Thylacine itself is non-POSIX, same as Plan9):
+
+![](readme_assets/llvm/defac3.png)
+
+Next up: Rust (our primary userspace Language -- all system daemons and coreutils are written in Rust).
+
 ### Running Quake!
 
 A Pouch port of TyrQuake: Almost effortless, just works. Mouse look, multiplayer via UDP coming.

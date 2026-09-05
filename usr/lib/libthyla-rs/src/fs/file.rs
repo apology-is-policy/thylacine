@@ -14,16 +14,23 @@
 //     path (#83, verbatim), real `.` / `..` resolution with I-28
 //     containment, the #79/#81/#82 ENOTDIR gates, per-component X-search
 //     (#84), and the real -errno all come from the kernel.
-//   - The CREATE legs and the fs:: mutations must hand the kernel a
-//     (parent_fd, leaf) pair (SYS_WALK_CREATE / SYS_UNLINK / SYS_RENAME
-//     are parent-fd + leaf-name primitives), so the path is split
-//     LEXICALLY AT THE LAST COMPONENT ONLY (`split_parent_leaf`): the
-//     parent prefix -- verbatim, slash-terminated by construction -- is
-//     opened via the same stalk resolver (`with_parent_fd`, T_OPATH), and
-//     the leaf rows (trailing slash, `.`, `..`) are applied per POSIX by
-//     each caller. Nothing in userspace pops a `..` or drops a dot:
-//     pre-resolving here bypassed the kernel gates (#87 -- the userspace
-//     twin of the kernel #83 join fix and the pouch #86 splitter fix).
+//   - The CREATE legs hand the kernel the WHOLE path too, since #50:
+//     SYS_OPEN_CREATE (t_open_create) joins the cwd, splits the leaf, and
+//     applies the Linux O_CREAT leaf rows kernel-side (the same
+//     kpath_split_leaf discipline: classify, never resolve). `create_dir`
+//     rides the same syscall (DMDIR). The remaining fs:: mutations
+//     (remove_file / remove_dir / rename) still hand the kernel a
+//     (parent_fd, leaf) pair (SYS_UNLINK / SYS_RENAME are parent-fd +
+//     leaf-name primitives), so THEIR paths are split LEXICALLY AT THE
+//     LAST COMPONENT ONLY (`split_parent_leaf`): the parent prefix --
+//     verbatim, slash-terminated by construction -- is opened via the same
+//     stalk resolver (`with_parent_fd`, T_OPATH), and the leaf rows
+//     (trailing slash, `.`, `..`) are applied per POSIX by each caller,
+//     whose rows are FINER than the kernel path-shells' (remove_dir's
+//     Busy/EINVAL/ENOTEMPTY trio). Nothing in userspace pops a `..` or
+//     drops a dot: pre-resolving here bypassed the kernel gates (#87 --
+//     the userspace twin of the kernel #83 join fix and the pouch #86
+//     splitter fix).
 //   - The parent is opened T_OPATH -- the navigation / capability base,
 //     born RIGHT_READ | RIGHT_WRITE (kernel A-3b). Two reasons it must be
 //     T_OPATH and not T_OREAD: (1) traversal is the POSIX X-search
@@ -34,16 +41,15 @@
 //     would fail.
 //   - Empty path -> Error::InvalidArgument.
 //
-// CREATE SEMANTICS (U-6d-b: create-or-open + append landed):
+// CREATE SEMANTICS (U-6d-b create-or-open + append; #50 one-syscall):
 //   - `File::create` is create-or-open-with-truncate (std::fs::File::create
 //     semantics): the file is created if absent (0644), truncated if
-//     present. Backed by SYS_WALK_CREATE (t_walk_create) -- the FS-alpha
-//     kernel surface -- via the open-existing-first / create-on-NotFound
-//     dance in `open_create_at_path` (semantics-independent of whether the
-//     server's create is exclusive). NB: devramfs is read-only at v1.0
-//     (its `.create` returns NULL), so creation only succeeds on the
-//     dev9p (Stratum-backed) FS; on devramfs the create leg returns an
-//     error, matching the read-only boot FS.
+//     present. Backed by SYS_OPEN_CREATE (t_open_create) since #50 -- the
+//     open-first / create-on-NOENT / bounded-retry composition runs in the
+//     KERNEL, and `create_new` is a single server-atomic T_OEXCL create.
+//     NB: devramfs is read-only at v1.0 (its `.create` returns NULL), so
+//     creation only succeeds on the dev9p (Stratum-backed) FS; on devramfs
+//     the create leg returns an error, matching the read-only boot FS.
 //   - `OpenOptions::create` / `create_new` / `append` are honored (see
 //     options.rs). `append` is a seek-to-end-at-open approximation (Plan 9
 //     omode has no O_APPEND; the single-writer shell-redirect case is
@@ -60,8 +66,8 @@ use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
 use crate::io::{Read, Seek, SeekFrom, Write};
 use crate::{
-    t_close, t_lseek, t_open, t_read, t_walk_create, t_walk_open, t_write, T_OPATH, T_OREAD,
-    T_OTRUNC, T_OWRITE, T_SEEK_CUR, T_SEEK_END, T_SEEK_SET, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_lseek, t_open, t_read, t_write, T_ONOFOLLOW, T_OPATH,
+    T_OREAD, T_OTRUNC, T_OWRITE, T_SEEK_CUR, T_SEEK_END, T_SEEK_SET, T_WALK_OPEN_FROM_ROOT,
     T_WALK_OPEN_NAME_MAX,
 };
 use super::path::Path;
@@ -92,6 +98,46 @@ impl File {
     #[inline]
     pub fn open<P: AsRef<Path>>(path: P) -> Result<File> {
         Self::open_with_omode(path.as_ref(), T_OREAD)
+    }
+
+    /// Open the LINK named by `path` rather than what it points at -- the v1.0
+    /// `lstat` spelling (DISTRO D-1). `T_OPATH | T_ONOFOLLOW`: the walk expands
+    /// every intermediate component as usual and stops at the final one, so
+    /// `.metadata()` on the result reports the link's own record
+    /// (`is_symlink()` true, `len()` the target string's length).
+    ///
+    /// On a path whose last component is NOT a link this is an ordinary O_PATH
+    /// open -- the flag narrows what the quarry may be, it does not require one.
+    /// A trailing '/' defeats it (POSIX 4.13 asserts a directory, which can only
+    /// be checked by following).
+    #[inline]
+    pub fn open_link<P: AsRef<Path>>(path: P) -> Result<File> {
+        Self::open_with_omode(path.as_ref(), T_OPATH | T_ONOFOLLOW)
+    }
+
+    /// Open `path` as a NAVIGATION handle (`T_OPATH`): walked, never opened.
+    ///
+    /// Not a byte-I/O channel -- read/write/readdir on it are refused. It is the
+    /// base for creating/walking/renaming/unlinking children, a valid
+    /// `t_chroot` target, and the handle a Loom ring registers for the
+    /// directory-child ops. Born `READ | WRITE` and exempt from the R/W
+    /// permission gate, because traversal authority is the X-search on the path,
+    /// not R or W on the directory.
+    #[inline]
+    pub fn open_with_opath<P: AsRef<Path>>(path: P) -> Result<File> {
+        Self::open_with_omode(path.as_ref(), T_OPATH)
+    }
+
+    /// Open `path` for reading, refusing a symlink as the FINAL component
+    /// (`T_OREAD | T_ONOFOLLOW`) -- Linux `O_NOFOLLOW`, which answers
+    /// `Error::SymlinkLoop` rather than opening the link.
+    ///
+    /// Intermediate components still expand: the flag says "the thing I name
+    /// must not be a link", not "resolve nothing". To open the link ITSELF, use
+    /// [`File::open_link`]. A trailing '/' defeats it (POSIX 4.13).
+    #[inline]
+    pub fn open_nofollow<P: AsRef<Path>>(path: P) -> Result<File> {
+        Self::open_with_omode(path.as_ref(), T_OREAD | T_ONOFOLLOW)
     }
 
     /// Create-or-open `path` for writing, truncating on open
@@ -198,19 +244,22 @@ impl File {
     /// gates are all kernel-side, so `File::open("a/../f")` resolves for
     /// real and `File::open("f/")` answers `NotADirectory` (#87).
     ///
-    /// The CREATE legs split the path at its last component
-    /// (`split_parent_leaf`), open the parent prefix through the same
-    /// resolver (`with_parent_fd`, T_OPATH), and apply the Linux O_CREAT
-    /// leaf rows: a trailing slash or a `.` / `..` final component answers
-    /// `IsADirectory` unconditionally (Linux `open_last_lookups`: O_CREAT
-    /// with a non-NORM or slash-terminated last component -> EISDIR,
-    /// existing or not); creating the root is the same row. The final
-    /// component is then opened at `base_omode`, creating it (mode `perm`)
-    /// when requested. `create_new` is exclusive (it always uses
-    /// `t_walk_create` and fails if the file exists). `create`
-    /// (non-exclusive) is create-first with an open-existing fallback --
-    /// correct whether or not the underlying server's create is exclusive,
-    /// and it never truncates a freshly-created (already-empty) file.
+    /// The CREATE legs are ONE syscall since #50 (`t_open_create`,
+    /// SYS_OPEN_CREATE): the kernel joins the cwd (SYS_OPEN parity), splits
+    /// the leaf, applies the Linux O_CREAT leaf rows (a trailing slash or a
+    /// `.` / `..` / root final component answers `IsADirectory`, existing
+    /// or not -- Linux `open_last_lookups`), and composes create-else-open
+    /// bounded. This retired the userspace split + parent-`T_OPATH` +
+    /// `t_walk_create` dance AND its create-first rationale, which had gone
+    /// stale ("walk_open does not return a distinguishable not-found code"
+    /// -- false since the errno rollout gave stalk `T_E_NOENT`).
+    ///
+    /// `create_new` maps to `T_OEXCL`: ONE create, atomic at the server --
+    /// real exclusivity, which the old create-first dance could not promise
+    /// (its EEXIST and its open-fallback raced). `create` (non-exclusive)
+    /// is kernel-side open-first / create-on-NOENT / bounded-retry; OTRUNC
+    /// is stripped on the create leg kernel-side, so a freshly-created
+    /// (already-empty) file is still never truncated.
     pub(crate) fn open_create_at_path(
         path: &Path,
         base_omode: u32,
@@ -225,18 +274,15 @@ impl File {
             return Self::open_stalk(path, base_omode);
         }
 
-        let sp = split_parent_leaf(path)?;
-        let name = match sp.leaf {
-            Leaf::Root | Leaf::Dot | Leaf::DotDot => return Err(Error::IsADirectory),
-            Leaf::Name(n) => n,
+        let s = path.as_str();
+        let omode = if create_new { base_omode | crate::T_OEXCL } else { base_omode };
+        // SAFETY: s is a valid &str (ptr+len); FROM_ROOT joins a relative
+        // path against the cwd exactly as SYS_OPEN; omode is within the
+        // SYS_OPEN_CREATE mask; perm's low 9 bits are the POSIX mode.
+        let rc = unsafe {
+            crate::t_open_create(T_WALK_OPEN_FROM_ROOT, s.as_ptr(), s.len(), omode, perm)
         };
-        if sp.dir_required {
-            return Err(Error::IsADirectory);
-        }
-
-        let fd = with_parent_fd(sp.parent, |parent| {
-            last_open_or_create(parent, name, base_omode, create, create_new, perm)
-        })?;
+        let fd = Error::from_syscall_return(rc)?;
 
         // The final fd is a live KOBJ_SPOOR slot in this Proc; rights
         // match SYS_WALK_OPEN / SYS_WALK_CREATE's documented envelope
@@ -248,60 +294,6 @@ impl File {
         );
         Ok(File { handle })
     }
-}
-
-/// Open-or-create a single component `last` inside the already-opened
-/// directory `parent`. Returns the raw fd. See `open_create_at_path`
-/// for the create / create_new contract.
-///
-/// The create path is CREATE-FIRST (mirroring joey's `mkdir_or_open`):
-/// `SYS_WALK_CREATE` is exclusive (it fails if the target exists), and
-/// the kernel's walk_open does not return a distinguishable "not found"
-/// code, so the robust create-or-open is "try create; on failure open
-/// the existing file". This never depends on a missing-file error code.
-fn last_open_or_create(
-    parent: i64,
-    last: &str,
-    base_omode: u32,
-    create: bool,
-    create_new: bool,
-    perm: u32,
-) -> Result<i64> {
-    // A new file is created empty, so OTRUNC is meaningless on the
-    // create leg (the truncate only matters when opening an existing
-    // file below).
-    let create_omode = base_omode & !T_OTRUNC;
-
-    if create_new {
-        // Exclusive create: always go through t_walk_create; it fails
-        // if the file already exists.
-        // SAFETY: last is a valid &str (ptr+len); parent is FROM_ROOT
-        // or a Spoor this Proc owns; create_omode is OREAD/OWRITE/ORDWR.
-        let rc = unsafe {
-            t_walk_create(parent, last.as_ptr(), last.len(), create_omode, perm)
-        };
-        return Error::from_syscall_return(rc);
-    }
-
-    if create {
-        // Create-first. On success the (absent) file is created + opened
-        // empty. On failure (it already exists, OR the parent denies
-        // creation) fall back to opening the existing file -- with
-        // truncate when requested. If the file genuinely cannot be
-        // reached, the open carries the real error.
-        let cf = unsafe {
-            t_walk_create(parent, last.as_ptr(), last.len(), create_omode, perm)
-        };
-        if cf >= 0 {
-            return Ok(cf);
-        }
-        let rc = unsafe { t_walk_open(parent, last.as_ptr(), last.len(), base_omode) };
-        return Error::from_syscall_return(rc);
-    }
-
-    // Plain open (no create).
-    let rc = unsafe { t_walk_open(parent, last.as_ptr(), last.len(), base_omode) };
-    Error::from_syscall_return(rc)
 }
 
 /// The final component of a split path (`split_parent_leaf`).

@@ -312,13 +312,29 @@ it and read the lifecycle status.
 
 ---
 
-## Boot-probe placement
+## Boot placement (UNCONDITIONAL since #230)
 
-joey spawns the warden in the `THYLA_BOOT_PROBES` ladder (`usr/joey/joey.c`),
-PRE-pivot (so `/menagerie-probe` resolves in devramfs by absolute path), PRE-
-stratumd, with `CAP_HW_CREATE` (which the warden, broad-allowance, confers a
-narrowed slice of onto each driver). joey reaps it and fails the boot if the
-warden exits non-zero. The observed boot output:
+joey spawns the warden **in every build shape** (`usr/joey/joey.c`), PRE-pivot
+(so the driver binaries resolve in devramfs by absolute path), PRE-stratumd,
+with `CAP_HW_CREATE` (which the warden, broad-allowance, confers a narrowed
+slice of onto each driver). joey reaps it and fails the boot if the warden exits
+non-zero.
+
+**It used to sit inside the `THYLA_BOOT_PROBES` ladder, and that was a defect
+(#230).** The warden entered at 5c as the bind-loop *proof*, which is what the
+ladder is for; `netd` landed a day later and `tapestryd` after it, quietly
+making the warden the thing that brings up the network and the display. Nothing
+revisited the gate, so the lean `--production` image had no drivers at all — no
+`/net`, no GPU, no input. The production shape was defined five days BEFORE the
+warden existed, so it never decided to exclude it. A hardware broker is not a
+test.
+
+What IS a test is the fixture half of the bind database — `menagerie-probe`
+(the 5c grant proof) and `crash-probe` (the 5e-2 restart loop). Those are now
+opt-in: joey passes `--with-fixtures` only from inside its probe ladder, so a
+shipped box binds real hardware only. The warden reports which database it used
+(`warden: bind database N manifests (3 production...)`) rather than leaving the
+reader to infer it. The observed boot output:
 
 ```
 warden: /hw discovered 45 device nodes
@@ -377,8 +393,10 @@ joey: warden ok (5c Menagerie bind-loop: discover -> grant -> spawn narrowed)
   the warden binds NARROWED (by `virtio:1`) is the netdev retrofit (**5d-3**),
   which retires `usr/lib/netdev`'s hardcoded `virtio.rs:51` base. At 5d-2 the
   discovered `virtio:<id>` nodes are logged-but-unbound (no virtio manifest yet).
-- **The boot probe is `THYLA_BOOT_PROBES`-gated** (off in `--production`), like
-  the netdev probes. The persistent warden is a 5e+ service.
+- **The warden itself is NOT gated** (#230): it runs in `--production` too, and
+  must, since netd and tapestryd are bound by it. Only the two FIXTURE
+  manifests are probe-gated, via joey's `--with-fixtures` argv. The persistent
+  warden is a 5e+ service.
 
 ---
 

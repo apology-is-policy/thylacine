@@ -26,7 +26,7 @@
 #include "uaccess.h"                  // R12-uaccess: kernel-mode user-VA fault-fixup
 #include "uart.h"                     // #214: raw banner in the recursion-guard runaway path
 
-#include <thylacine/cons.h>           // #214: cons_tx_flush_for_dump in the runaway path
+#include <thylacine/cons.h>           // #214: cons_tx_claim_for_dump in the runaway path
 #include <thylacine/extinction.h>
 #include <thylacine/notes.h>          // P6 #3a: NOTE_NAME_SNARE_* constants for proc_fault_terminate
 #include <thylacine/proc.h>           // R12-uaccess: struct Proc for demand-page synth; P6 #3a: proc_fault_terminate
@@ -134,12 +134,20 @@ static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_
 // corruption.
 //
 // The runaway path deliberately does NOT halls_dump (the dump machinery
-// is the likely faulting amplifier): flush the staged cons ring (trylock,
-// bounded — so diagnostics stranded there reach the wire), print one raw
-// banner with the frame that killed the handler, and park THIS CPU with
-// the stack corpse intact for a debugger/QMP autopsy. The banner prints
-// only at exactly DEPTH_MAX: if the banner itself faults, the next entry
-// parks silently instead of looping through the print.
+// is the likely faulting amplifier): print one raw banner with the frame
+// that killed the handler, and park THIS CPU with the stack corpse intact
+// for a debugger/QMP autopsy. The banner prints only at exactly DEPTH_MAX:
+// if the banner itself faults, the next entry parks silently instead of
+// looping through the print. It IS the "EXTINCTION: " ABI line, so it is
+// subject to the same two serializers as extinction()'s (extinction.c):
+// exactly one emitter per boot -- a PEER holding the console word is
+// already dumping, so this CPU parks silent like any loser, while the
+// classic seed (extinction -> halls_dump faults -> ... -> here, on the
+// SAME cpu) already OWNS the word and may print -- and the console TX
+// ring lock (cons_tx_claim_for_dump: bounded raw try-spin, flushes the
+// staged ring so stranded diagnostics reach the wire, then HELD FOREVER),
+// so a peer's normal write cannot land inside the banner. Both are
+// lock-free-or-bounded and never park, per HX-I.
 #define EL1_SYNC_DEPTH_MAX 3u
 static volatile u8 g_el1_sync_depth[DTB_MAX_CPUS];
 
@@ -152,7 +160,11 @@ void exception_sync_depth_reset_this_cpu(void) {
 
 __attribute__((noreturn))
 static void el1_sync_runaway(unsigned cpu, const struct exception_context *ctx) {
-    cons_tx_flush_for_dump();
+    if (!extinction_console_claim_or_own()) _torpor();   // a peer is dumping: park silent
+    // Held forever on success; on a miss emit anyway (torn beats silent) and
+    // say so AFTER the line, on extinction()'s exact terms -- the note must not
+    // precede the ABI line and must carry no EXTINCTION token at column 0.
+    bool ring = cons_tx_claim_for_dump();
     uart_puts("\nEXTINCTION: el1-sync recursion, cpu ");
     uart_putdec((u64)cpu);
     uart_puts(" elr ");
@@ -162,6 +174,8 @@ static void el1_sync_runaway(unsigned cpu, const struct exception_context *ctx) 
     uart_puts(" far ");
     uart_puthex64(ctx->far);
     uart_puts(" (parked; corpse intact)\n");
+    if (!ring)
+        uart_puts("  console-ring: NOT held (a peer kept it past the bound; the line above may be torn)\n");
     _torpor();
 }
 

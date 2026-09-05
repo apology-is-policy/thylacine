@@ -248,6 +248,231 @@ pub extern "C" fn rs_main() -> i64 {
         t_putstr("u-repl-test: D4 menu completion OK\n");
     }
 
+    // H-1c (BEACON.md 12.6): the transcript zone frames -- the REAL driver of
+    // the rich arm (nothing advertises rich until Halcyon, so without this
+    // leg the gated path would be green-by-vacancy, the wired-gate trap).
+    // The discrimination pair: the SAME script through a rich and a plain
+    // repl -- frames present in one, absent in the other, and strip(rich)
+    // byte-identical to plain (the P1 property over the live REPL).
+    {
+        let script: &[u8] = b"let zz = 7\n";
+        let mut plain = Repl::new();
+        let mut plain_out: Vec<u8> = Vec::new();
+        plain.draw_prompt(&mut plain_out);
+        if plain.feed(script, &mut plain_out).is_some() {
+            return fail("beacon: the plain repl ended unexpectedly");
+        }
+        let mut rich = Repl::new();
+        rich.set_beacon_rich(true);
+        let mut rich_out: Vec<u8> = Vec::new();
+        rich.draw_prompt(&mut rich_out);
+        if rich.feed(script, &mut rich_out).is_some() {
+            return fail("beacon: the rich repl ended unexpectedly");
+        }
+        let has = |h: &[u8], needle: &[u8]| h.windows(needle.len()).any(|w| w == needle);
+        if has(&plain_out, b"\x1b]1936;") {
+            return fail("beacon: frames leaked into the plain tier");
+        }
+        if !has(&rich_out, b"\x1b]1936;v1;zone;k=prompt\x1b\\") {
+            return fail("beacon: no prompt zone frame at rich");
+        }
+        if !has(&rich_out, b"\x1b]1936;v1;zone;k=output\x1b\\") {
+            return fail("beacon: no output zone frame at rich");
+        }
+        if !has(&rich_out, b"\x1b]1936;v1;mark;k=exit;code=0\x1b\\") {
+            return fail("beacon: no exit mark at rich");
+        }
+        if beacon::wire::strip(&rich_out) != plain_out {
+            return fail("beacon: strip(rich) != plain (the P1 property broke)");
+        }
+        t_putstr("u-repl-test: beacon zones OK\n");
+    }
+    // 8. AND-OR list (scripture 8.6): short-circuit + final-status. The status
+    //    is the discriminator against "ran the RHS anyway": if `&&` did NOT
+    //    short-circuit, `false && true` would run `true` and leave 0; if `||`
+    //    did not, `true || false` would run `false` and leave 1.
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        repl.feed(b"false && true\n", &mut sink);
+        if repl.env().status() == 0 {
+            return fail("`false && true` ran the RHS -- && did not short-circuit");
+        }
+    }
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        repl.feed(b"true || false\n", &mut sink);
+        if repl.env().status() != 0 {
+            return fail("`true || false` ran the RHS -- || did not short-circuit");
+        }
+    }
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        // `||` runs the RHS when the LHS failed; the final status is the RHS's 0.
+        repl.feed(b"false || true\n", &mut sink);
+        if repl.env().status() != 0 {
+            return fail("`false || true` did not run the RHS to success");
+        }
+    }
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        // Left-associative: the chain reaches the final `true`.
+        repl.feed(b"false || false || true\n", &mut sink);
+        if repl.env().status() != 0 {
+            return fail("`false || false || true` did not reach the final true");
+        }
+    }
+    t_putstr("u-repl-test: AND-OR (&& / ||) short-circuit OK\n");
+
+    // 9. `=` in a command ARGUMENT is a literal (was UnexpectedEqualInCommand):
+    //    `-std=c++20` / `--foo=bar` glue into single argv words. Test the parser
+    //    directly -- a parse error here is the exact pre-fix failure -- and
+    //    confirm a statement-start assignment (a different path) still parses.
+    {
+        use libutopia::parser::parse;
+        if parse("clang -std=c++20 -O2 main.cpp -o main.o").is_err() {
+            return fail("`clang -std=c++20 ...` still fails to parse a =-bearing arg");
+        }
+        if parse("let x = 5").is_err() {
+            return fail("`let x = 5` assignment regressed");
+        }
+    }
+    t_putstr("u-repl-test: = in argument position parses OK\n");
+
+    // 9b. An echo'd C-source one-liner (the 5th ut-parser-findings item): a
+    //     SINGLE-quoted body -- so its interior ; ( ) { } " are LITERAL -- then a
+    //     `>` redirect to a .c path. The whole thing is one simple command:
+    //     echo <SingleQuoted> > <path>. Each construct is exercised separately so
+    //     a failure pins the exact culprit rather than "the one-liner is bad".
+    {
+        use libutopia::parser::parse;
+        if parse("echo 'hi' > /tmp/hc.c").is_err() {
+            return fail("single-quote arg + `>` redirect to a .c path does not parse");
+        }
+        if parse("echo 'a;b(){}c'").is_err() {
+            return fail("shell metachars ; ( ) { } inside single-quotes do not parse");
+        }
+        if parse("echo 'a\"b\"c'").is_err() {
+            return fail("double-quotes inside single-quotes do not parse");
+        }
+        if parse("echo 'int main(){return 0;}'").is_err() {
+            return fail("C-ish single-quoted content (no redirect) does not parse");
+        }
+        if parse("echo 'int main(){__builtin_puts(\"CLADE_C_OK\");return 0;}' > /tmp/hc.c")
+            .is_err()
+        {
+            return fail("the echo'd-C-source one-liner does not parse");
+        }
+    }
+    t_putstr("u-repl-test: echo'd C-source one-liner parses OK\n");
+
+    // 10. winsize / line-wrap: the CPR width handshake + the visual-wrapped-row
+    //     render. The bug: a command that wraps past the terminal edge, when
+    //     the cursor is moved, re-clears only ONE physical row and re-emits ->
+    //     the line duplicates on every keystroke. The fix needs (a) the editor
+    //     to learn the width and (b) render to move up to the block TOP before
+    //     clearing. Both are pure logic -- driven directly on the LineEditor.
+    {
+        use libutopia::line_editor::LineEditor;
+
+        // (a) A CPR reply ESC[<rows>;<cols>R sets the width (cols = 2nd param).
+        let mut le = LineEditor::new();
+        if le.cols().is_some() {
+            return fail("winsize: a fresh editor already claims a width");
+        }
+        let _ = le.feed_bytes(b"\x1b[24;80R");
+        if le.cols() != Some(80) {
+            return fail("winsize: a CPR reply did not set cols to 80");
+        }
+        // A CPR reply must NOT surface as a keystroke (buffer stays empty).
+        if !le.buffer().is_empty() {
+            return fail("winsize: the CPR reply leaked into the buffer as keys");
+        }
+
+        // (b) A reply dribbled across reads (the HVF serial split) reassembles
+        //     -- the byte-at-a-time CSI parser handles chunking for free.
+        let mut split = LineEditor::new();
+        let _ = split.feed_bytes(b"\x1b[40");
+        let _ = split.feed_bytes(b";132R");
+        if split.cols() != Some(132) {
+            return fail("winsize: a split CPR reply did not reassemble to 132");
+        }
+
+        // A non-CPR CSI final (one param) and a zero-size report leave cols
+        // unset -- never a spurious width.
+        let mut nope = LineEditor::new();
+        let _ = nope.feed_bytes(b"\x1b[80R"); // one param -> not a CPR
+        let _ = nope.feed_bytes(b"\x1b[0;0R"); // zero size -> rejected
+        if nope.cols().is_some() {
+            return fail("winsize: a non-CPR / zero-size report set a width");
+        }
+
+        // Width UNKNOWN: render is byte-preserved (the pre-fix newline-only
+        // path). It starts with the single-line clear "\r\x1b[K".
+        let mut unknown = LineEditor::new();
+        let _ = unknown.feed_bytes(b"hello");
+        let s = unknown.render("> ");
+        if !s.starts_with("\r\x1b[K") {
+            return fail("winsize: cols=None render regressed the byte-preserved fallback");
+        }
+
+        // Width known, short line (no wrap): the wrapped path erases to end of
+        // screen ("\r\x1b[J") and shows the buffer -- a single physical row.
+        let mut wide = LineEditor::new();
+        wide.set_cols(80);
+        let _ = wide.feed_bytes(b"hi");
+        let s = wide.render("> ");
+        if !s.starts_with("\r\x1b[J") || !s.contains("> hi") {
+            return fail("winsize: cols=Some single-row render has the wrong shape");
+        }
+
+        // THE DISCRIMINATOR. cols=20, prompt "> " (width 2) + 30 chars = 32
+        // cells -> 2 physical rows; the cursor ends on row 1. A first render
+        // records that row; after a cursor move, the SECOND render must move
+        // UP to the block top ("\x1b[1A") before clearing. The buggy
+        // newline-only render treats the wrapped line as ONE line and emits NO
+        // up-move -- so this assertion fails without the fix.
+        let mut wrap = LineEditor::new();
+        wrap.set_cols(20);
+        let _ = wrap.feed_bytes(&[b'a'; 30]);
+        let _ = wrap.render("> "); // establishes prev_cursor_row = 1
+        let _ = wrap.feed_byte(0x02); // Ctrl-B: cursor left, still on row 1
+        let s = wrap.render("> ");
+        if !s.starts_with("\x1b[1A\r\x1b[J") {
+            return fail("winsize: wrapped re-render did not move up to the block top (the dup bug)");
+        }
+
+        // (c) DISPLAY-MODES.md 3.4: parse_winsize -- the ONE parser that reads
+        //     both the console `/dev/winsize` line and the pts ldisc ctl line
+        //     (they share the "winsize C R" token by design). This is what the
+        //     shell's width source feeds set_cols; a wrong parse would silently
+        //     mis-wrap, so prove it total: both formats, and rejection of every
+        //     malformed shape rather than a guessed width.
+        use libutopia::repl::parse_winsize;
+        if parse_winsize(b"winsize 80 24\n") != Some((80, 24)) {
+            return fail("winsize: parse_winsize missed the console line");
+        }
+        if parse_winsize(b"+icanon +echo +isig +icrnl +onlcr winsize 132 43\n") != Some((132, 43)) {
+            return fail("winsize: parse_winsize missed the pts ctl line");
+        }
+        if parse_winsize(b"winsize 0 0\n") != Some((0, 0)) {
+            return fail("winsize: parse_winsize mishandled the serial 0 0 posture");
+        }
+        // Malformed -> None (never a guessed width): no token, non-digit,
+        // empty field, u32 overflow.
+        if parse_winsize(b"+icanon +echo\n").is_some()
+            || parse_winsize(b"winsize 80 x\n").is_some()
+            || parse_winsize(b"winsize  24\n").is_some()
+            || parse_winsize(b"winsize 99999999999 24\n").is_some()
+        {
+            return fail("winsize: parse_winsize guessed a width on malformed input");
+        }
+    }
+    t_putstr("u-repl-test: winsize / line-wrap OK\n");
+
     t_putstr("u-repl-test: all OK\n");
     0
 }

@@ -33,7 +33,27 @@ git am <thylacine-repo>/usr/ports/mesa/patches/*.patch
 
 This is **verified, not asserted**: applying the series with `git am` to a
 pristine `mesa-26.1.6` worktree reproduces the fork tip's tree hash exactly
-(`b117c8e52774ba3b85082e7a9004d8dc0387c4f8` at 0009; 0008 was
+(`150990a` at 0017, verified on the vkQuake-arc W-1 close by `git am
+0001..0017` onto a fresh `mesa-26.1.6` worktree -- the reconstructed tree
+`9dd555ae986afc0afc9e94a135b3d0cc71a254f9` equalled the W-1 commit's tree
+exactly; `5f9d0ce226057e7ef17aa29e963fada67c9ed72f` at 0016, verified on the
+multi-queue audit close by `git am 0001..0016` onto a fresh `mesa-26.1.6`
+worktree -- the reconstructed tree `85031d88de67` equalled the audit-close
+commit's tree exactly; `deed314a45fa093b53e6f2008e11a70456ec8831` at 0015,
+verified on the multi-queue chunk by `git am 0001..0015` --
+the reconstructed tree `0575a6189666` equalled the multi-queue commit's tree
+exactly; `d7f4ef1071fe74705b168f72ced4c00ca7d8bd3a` at 0014, verified on the V-3b-3c-2b
+re-audit close by `git am 0014` onto the 2c742991 tip -- the reconstructed tree
+`a403ed08ceba33756149e27729788238406d5246` equalled the re-audit commit's tree
+exactly; `2c742991466c06129a014171faaa7b7a9f121e3a` at 0013, verified on the
+V-3b-3c-2b close by `git am 0013` onto the 0012 tip -- the reconstructed tree
+`41ee62527e878369f1bf1637c1e482b13977d3af` equalled the V-3b-3c-2b commit's tree
+exactly; `c317dd6346ea09220a14862610f0d6589af348b3` at 0012, verified on the
+V-3b-3c-1 close by `git am 0001..0012` of the emitted files onto a fresh
+`mesa-26.1.6` worktree -- the reconstructed tree equalled the V-3b-3c-1 commit's
+tree exactly; `b1bc565f29f2908762fc0e91f13eaf14443e1752` at 0011;
+`21d8eef749eea16177403c48fd32310b564a04ef` at 0010;
+`b117c8e52774ba3b85082e7a9004d8dc0387c4f8` at 0009; 0008 was
 `88ade8b2af3d48b0ca3873e5fa955ef179895b44`, 0007
 `cd00196c85cea3d92fe87351563b2c60d14d76cd`, 0006
 `d302f50eb931bef25c8deab034093292adcc39ae`, 0005
@@ -180,6 +200,23 @@ the builder once and stay in `build/`:
 | 73 `libLLVM*.a` | `/build/src/thylacine/build/clade/llvm-build/lib` | `build/clade/llvm-build/lib/` | 160 MB |
 | `GL/` + `KHR/` headers | `/build/src/mesa/include` | `build/sysroot/include/` | 1.4 MB |
 | the archive list | derived (below) | `build/clade/gl/llvm-libs.list` | — |
+
+**None of this is required to build the tree (#239).** It used to be, by
+accident: `SDL_thylacineopengl.c` includes `<GL/osmesa.h>`, so a checkout
+without the headers could not build `libSDL2.a` — and SDL2 is built before the
+ramfs bake, so a missing *optional* GPU stage took out the kernel image with
+it. `build_sdl2` now compiles `usr/ports/sdl2/thylacine-nogl/` instead when
+`build/sysroot/include/GL/osmesa.h` is absent, announces it, and records the
+mode in `build/sysroot/lib/.libSDL2.gl-mode` so that fetching the headers later
+invalidates the archive (no timestamp would). See `docs/reference/142-sdl-port.md`,
+"The headers are optional too".
+
+Note the trap in the destination column while you are here: the headers land
+**inside** `build/sysroot/include/`, which `build_sysroot` recreates. Fetching
+them once is not permanent — any pouch-patch edit rebuilds the sysroot and
+takes them with it, and the next SDL build silently drops to `nogl` (loudly, as
+of #239, but it still drops). Re-fetch after a sysroot rebuild, or expect a
+GL-less `libSDL2.a`.
 
 **Derive the archive list, never type it.** It is exactly what meson computed
 for `osmesa-prove`'s own link, so a list written by hand can only drift from
@@ -432,3 +469,66 @@ commits on `usr/ports/llvm` in the same arc.
 The cost of refreshing early is a patch file that gets superseded. The cost of
 refreshing late is measured in builder rounds, and once, nearly in the work
 itself.
+
+## The venus link set (`build/clade/venus/` — W-4's vkQuake link inputs)
+
+`build_vkquake()` links the venus static ICD locally and skips (announced)
+when this set is absent. It is FETCHED from thyla-keep's mesa-venus build,
+never built here:
+
+- `include/` — mesa's own `include/vulkan` + `include/vk_video`
+  (`vulkan_core.h` pulls the vk_video std headers), copied from the mesa
+  checkout AT THE SAME COMMIT the archives were built from. The headers must
+  be the driver's own: they define the structs the archives were compiled
+  against.
+- `lib/` + `venus-whole.list` + `venus-libs.list` — the archive closure of
+  the `thylacine-vk-sdl-prove` witness link (read its `LINK_ARGS` out of
+  `/build/mesa-venus/build.ninja`; the lists are recorded there so the
+  build script never hardcodes a set that can drift from the one known to
+  close).
+
+Fetch recipe (on keep; one ssh):
+
+```bash
+cd /build/mesa-venus
+# Meson emits THIN archives (pathnames into the build tree, meaningless
+# off-box). Repack each fat from its member list; only subproject zlib is
+# already fat.
+for a in <the LINK_ARGS archives>; do
+  b=$(basename $a)
+  [ "$(head -c7 $a)" = "!<thin>" ] && ar crs /build/venus-stage/lib/$b $(ar t $a) \
+                                   || cp $a /build/venus-stage/lib/$b
+done
+```
+
+**The whole-archive split is LOAD-BEARING and differs from the witness's own
+link.** `venus-whole.list` holds `libvulkan_virtio.a` ALONE; the seven
+support archives (`mesa_util`, `mesa_util_simd`, `z`, `blake3`,
+`mesa_util_c11`, `vulkan_util`, `xmlconfig`) go in `venus-libs.list`
+(grouped, normal extraction). Two measured facts force this shape:
+
+1. **The generated dispatch tables reference every `vn_*` entrypoint as a
+   WEAK undefined** (`vn_entrypoints.c.o`), and a weak undefined extracts
+   NO archive member — the same ELF rule the `-u vk_icdGetInstanceProcAddr`
+   line exists for. Without `--whole-archive`, any driver object nothing
+   else strongly references (first casualty: `vn_pipeline.o`) is silently
+   dropped; its table slots link as NULL, the COMMON runtime fallback fills
+   them, and common code misreads vn-native objects — hit live as
+   `vk_pipeline_layout_init: layout->push_descriptor_idx == UINT32_MAX`
+   asserting under vkQuake's first pipeline layout, while every witness
+   binary stayed green (their ~50 hand-declared strong externs covered
+   their own use sets; upstream never sees it because the normal build is a
+   DSO with no extraction semantics).
+2. **The fat repack FLATTENS meson's nesting**: the thin
+   `libvulkan_virtio.a` member list already includes the runtime + wsi
+   objects, so the fat repack is a strict superset of
+   `libvulkan_lite_runtime.a` + `libvulkan_lite_instance.a` +
+   `libvulkan_wsi.a` (80 members ⊇ 49+1+3, same objects, same build).
+   Whole-archiving it ALONGSIDE those three (the witness link's own split)
+   collides on every duplicated member; whole-archiving it ALONE both
+   avoids the collision and makes the three redundant — they are fetched
+   but unlisted.
+
+Cost of the whole-archive: ~100 KB on the stripped binary. The unimplemented
+extension slots (RT, CUDA, …) stay weak-NULL — that is the table's design,
+not a defect.

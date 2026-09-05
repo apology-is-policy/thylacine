@@ -416,6 +416,30 @@ invoke or spoof it.
   pinning `wait_is_bounded` to `false` (the pre-fix always-block
   behaviour) fails all 3 attempts deterministically on exactly that
   line, with the CL-4 / osmesa / CL-7b GL gates still passing.
+- **`tools/interactive/ls-gfx-age.exp`** + `gfx_region.py` — the C-2d
+  buffer-age gate (`GPU-DESIGN.md` §4.5.8c/d): since every weave slot has
+  its own host resource (Warp-C C-2d-b), a damage-only present must
+  repaint the union of everything that changed since the slot it draws
+  into was last presented (`libtapestry::age()`), or the screen shows
+  what that slot held `nslots` presents ago. Aurora is the tree's
+  Direct-scanout accumulator, so it is the vehicle (composed scanout
+  cannot show a stale client slot — the screen is the accumulator there).
+  Shape: three `yes … | head -n 200` fills; a POSITIVE control (four
+  keystroke-rotated dumps must show glyphs in a cell-region rows
+  6..rows-3 × cols 2..cols/2, read off aurora's `console up` line);
+  `clear` (one all-rows present into ONE slot); then eight rounds of
+  1,1,2,1,1,2,1,1 keystrokes (row-0-only presents into successive slots)
+  each followed by a dump whose region must be EXACTLY Bonfire — every
+  pixel read, `off == 0`. The 1,1,2 pattern visits all three slot
+  residues for any constant blink rate, which is what makes the
+  one-stale-slot class (an off-by-one in the union) catchable
+  deterministically rather than at (2/3)^8. Measured 2026-08-17: green
+  0/368280 on 8/8; sabotage S1 (`stale_slot = false`, `back = 0`) red
+  3/3 attempts (rounds 2,1,2); sabotage S2 (`back` off by one) red 3/3
+  (rounds 2,5,2). Building it found and fixed the C-2d-a history record
+  (the WIDENED repaint range was recorded instead of the dirty span, a
+  fixed point at full rows that killed the damage path — the vault's
+  `sub-aurora` carries that mechanism).
 
 ## Known caveats / seams
 

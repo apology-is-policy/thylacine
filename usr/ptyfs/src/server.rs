@@ -64,7 +64,14 @@ use libthyla_rs::{
 pub const MAX_CONNS: usize = 8;
 
 /// Per-connection fid-table size: one fid per open file/dir the client holds.
-const MAX_FIDS: usize = 32;
+/// joey's single /dev/pts mount is ONE kernel-client session, so this table caps
+/// the TOTAL fids across every Proc sharing the mount. A live pts holds four
+/// (master + slave + ctl + the item-10 ready file), so the ceiling must cover
+/// PTS_MAX pts at four fids each plus the attach root and transient walk fids --
+/// otherwise the fid table, not PTS_MAX, becomes the binding concurrent-pts limit
+/// and a ready-open failure would silently degrade a native poller back to
+/// blocking on fd 0 (the item-10 F1/F3 cluster). Scales with PTS_MAX.
+const MAX_FIDS: usize = PTS_MAX * 4 + 16;
 
 /// Max live pts pairs. A bound, not headroom: an unbounded pts table is a DoS
 /// vector (#65 resource floor), so clone-minting fails (ENFILE) past this.
@@ -213,6 +220,20 @@ const N_MASK: u64 = 0x00ff_ffff; // 24-bit pts number
 const FK_MASTER: u64 = 1;
 const FK_SLAVE: u64 = 2;
 const FK_CTL: u64 = 3;
+// The per-pts poll-readiness file /dev/pts/<n>ready (item 10; the netd
+// /net/<proto>/N/ready precedent, net-6b-2b). A QTPOLL node: dev9p.poll probes
+// it with a Tread(offset = the poll mask, count = 4) and it replies a 4-byte LE
+// revents bitmap (or defers until satisfiable). A native poller (ut) polls THIS
+// file for its SLAVE fd's readiness -- the slave DATA file stays non-QTPOLL
+// (its reads park server-side), so a data read is never misread as a probe. Not
+// an EOF-counted endpoint; a hidden companion (walkable, not in readdir).
+const FK_READY: u64 = 4;
+
+// The poll event bits the `<n>ready` file speaks (item 10; the kernel poll.h
+// values, so the 4-byte revents bitmap is what dev9p_poll_revents_of parses).
+const POLLIN: u16 = 0x001;
+const POLLOUT: u16 = 0x004;
+const POLLHUP: u16 = 0x010;
 
 fn is_pts(path: u64) -> bool {
     path & PTS_FLAG != 0
@@ -236,6 +257,10 @@ fn is_master_path(path: u64) -> bool {
 
 fn is_ctl_path(path: u64) -> bool {
     is_pts(path) && pts_filekind(path) == FK_CTL
+}
+
+fn is_ready_path(path: u64) -> bool {
+    is_pts(path) && pts_filekind(path) == FK_READY
 }
 
 /// A master/slave DATA endpoint -- the opened-fd EOF counts (n_master/n_slave)
@@ -313,9 +338,17 @@ struct Pts {
     /// assembly overflow past LINE_MAX; `drop_echo` is the deliberate
     /// best-effort echo drop toward the master (documented at `echo`), counted
     /// separately precisely so it can never be mistaken for the other two.
+    /// `drop_modeflush` is the fourth site (the ccb597b8 round, F2): a ctl
+    /// write clearing ICANON delivers the pending line into m2s, and what a
+    /// full m2s cannot take is a real drop with ITS OWN counter -- folded into
+    /// `drop_flush` it would falsify that counter's meaning (a short cooked
+    /// flush loses the tail AND the newline, so the line never runs; a short
+    /// mode-flush loses the tail and the terminator then arrives raw, so the
+    /// truncated command RUNS -- #95's exact shape).
     drop_flush: u32,
     drop_line: u32,
     drop_echo: u32,
+    drop_modeflush: u32,
 }
 
 /// #95: the loud-report gate + one-shot latch.
@@ -388,6 +421,7 @@ impl Ptys {
             drop_flush: 0,
             drop_line: 0,
             drop_echo: 0,
+            drop_modeflush: 0,
         });
         Some(n)
     }
@@ -541,6 +575,16 @@ impl Ptys {
                 };
                 if class != 0 {
                     p.sig_set |= sig_class_bit(class); // dedup-on-collect; never overflows
+                    // POSIX NOFLSH-clear: INTR/QUIT/SUSP discard the pending
+                    // canonical assembly (PTY-DESIGN "ISIG characters DISCARD
+                    // the pending line" -- an I-20 disposition like an erase,
+                    // not a counted drop; the ring and s2m are NOT flushed).
+                    // The old mode-write reset masked this: type-ahead + ^C
+                    // was thrown away by the shell's re-arm by accident, and
+                    // delivery made `rm -rf x` + ^C arrive as pre-typed input.
+                    if p.tio & TIO_ICANON != 0 {
+                        p.line_len = 0;
+                    }
                     consumed += 1;
                     continue;
                 }
@@ -630,11 +674,11 @@ impl Ptys {
     /// raises the set members via the pts-scoped SYS_TTY_SIGNAL AFTER the ring
     /// work (the syscall stays out of the pure cook, so the selftest asserts
     /// the set directly -- its local pts has no kernel entry to signal).
-    /// #95: this pts's (flush, line, echo) drop counts. Selftest-only.
-    fn drops(&mut self, n: u32) -> (u32, u32, u32) {
+    /// #95: this pts's (flush, line, echo, modeflush) drop counts. Selftest-only.
+    fn drops(&mut self, n: u32) -> (u32, u32, u32, u32) {
         match self.slot_mut(n) {
-            Some(p) => (p.drop_flush, p.drop_line, p.drop_echo),
-            None => (0, 0, 0),
+            Some(p) => (p.drop_flush, p.drop_line, p.drop_echo, p.drop_modeflush),
+            None => (0, 0, 0, 0),
         }
     }
 
@@ -649,13 +693,39 @@ impl Ptys {
         }
     }
 
-    /// Set the per-pts termios word (the 2c ctl surface + the selftest). A mode
-    /// change resets the ICANON assembly line (the TCSAFLUSH posture the kernel
-    /// consctl apply carries).
+    /// Deliver the half-assembled canonical line to the slave, as raw bytes,
+    /// no newline appended -- what a mode write that CLEARS ICANON owes the
+    /// reader (PTY-DESIGN "Mode writes deliver, never discard": Plan 9's rawon
+    /// pushes kbd.line to the reader, Linux's n_tty makes the partial line
+    /// readable as-is; the previous posture zeroed it -- TCSAFLUSH -- and
+    /// dropped the head of a type-ahead line, echoed, while its tail ran as a
+    /// different command). A short push into a full m2s is a real drop under
+    /// its OWN counter, `drop_modeflush` (PTY-DESIGN: "a mode-change delivery
+    /// into a full ring is a real drop and gets its own counter" -- the #95
+    /// rule; the kernel twin is `rx_drop_modeflush`).
+    fn deliver_partial_line(p: &mut Pts) {
+        let len = p.line_len;
+        if len == 0 {
+            return;
+        }
+        let took = Ptys::ring_push(&mut p.m2s, &p.line[..len]);
+        if took < len {
+            note_drop(&mut p.drop_modeflush, (len - took) as u32, "mode-change flush (m2s full)");
+        }
+        p.line_len = 0;
+    }
+
+    /// Set the per-pts termios word (the 2c ctl surface + the selftest). A
+    /// change that CLEARS ICANON delivers the pending line to the slave; any
+    /// other change leaves the assembly alone (a raw->canonical change has
+    /// nothing pending by construction).
     fn set_tio(&mut self, n: u32, tio: u32) {
         if let Some(p) = self.slot_mut(n) {
+            let was_canon = p.tio & TIO_ICANON != 0;
             p.tio = tio;
-            p.line_len = 0;
+            if was_canon && tio & TIO_ICANON == 0 {
+                Ptys::deliver_partial_line(p);
+            }
         }
     }
 
@@ -690,8 +760,9 @@ impl Ptys {
     /// write with the mode unchanged, the kernel consctl contract). Grammar:
     /// whitespace-separated tokens; "+name"/"-name" over the five LS-8 flags;
     /// "winsize <cols> <rows>" (decimal, <= 65535; canonical -- no leading
-    /// zeros). Ops apply in order; a flag change resets the ICANON assembly
-    /// (TCSAFLUSH). Returns Ok(winsize_changed) -- the caller raises
+    /// zeros). Ops apply in order; a write that CLEARS ICANON delivers the
+    /// pending line to the slave (deliver_partial_line), any other write leaves
+    /// the assembly untouched. Returns Ok(winsize_changed) -- the caller raises
     /// TTY_SIG_WINCH iff the size actually changed (the Linux TIOCSWINSZ
     /// behavior); Err(()) on any malformed token.
     fn ctl_apply(&mut self, n: u32, data: &[u8]) -> Result<bool, ()> {
@@ -751,7 +822,7 @@ impl Ptys {
         }
         // Pass 2: apply in order.
         let p = self.slot_mut(n).ok_or(())?;
-        let mut flags_touched = false;
+        let was_canon = p.tio & TIO_ICANON != 0;
         let mut winch = false;
         for op in ops.iter().take(nops) {
             match *op {
@@ -761,7 +832,6 @@ impl Ptys {
                     } else {
                         p.tio &= !bit;
                     }
-                    flags_touched = true;
                 }
                 CtlOp::Winsize(c, r) => {
                     if (c, r) != (p.winsz_cols, p.winsz_rows) {
@@ -772,8 +842,12 @@ impl Ptys {
                 }
             }
         }
-        if flags_touched {
-            p.line_len = 0; // TCSAFLUSH: a mode change resets the assembly
+        // The one thing a mode write does to the assembly: canonical->raw hands
+        // the reader what was typed. It used to zero line_len on ANY flag write
+        // (TCSAFLUSH) -- and lost the head of every type-ahead line that landed
+        // between a foreground job's last output and ut's PROMPT-mode re-arm.
+        if was_canon && p.tio & TIO_ICANON == 0 {
+            Ptys::deliver_partial_line(p);
         }
         Ok(winch)
     }
@@ -821,6 +895,40 @@ impl Ptys {
         }
     }
 
+    /// The poll revents for a SLAVE poller of pts `n` (item 10; the netd
+    /// check_ready convention -- POLLIN/POLLOUT masked to the request, POLLHUP
+    /// always reported). Non-consuming: it only reads ring state. POLLIN mirrors
+    /// read_ready (a line queued OR the master gone => the slave read is
+    /// non-blocking, EOF-as-readable included); POLLOUT is s2m room; POLLHUP is
+    /// carrier loss (n_master == 0).
+    fn ready_revents(&self, n: u32, mask: u16) -> u16 {
+        let mut revents = 0u16;
+        if mask & POLLIN != 0 && self.read_ready(n, false) {
+            revents |= POLLIN;
+        }
+        if mask & POLLOUT != 0 && self.slave_writable(n) {
+            revents |= POLLOUT;
+        }
+        if self.master_gone(n) {
+            revents |= POLLHUP;
+        }
+        revents
+    }
+
+    fn slave_writable(&self, n: u32) -> bool {
+        match self.slot(n) {
+            Some(p) => p.s2m.len() < RING_CAP,
+            None => false, // slot gone: nothing to write into
+        }
+    }
+
+    fn master_gone(&self, n: u32) -> bool {
+        match self.slot(n) {
+            Some(p) => p.n_master == 0,
+            None => true, // slot gone: the peer is definitively gone
+        }
+    }
+
     fn ring_drain(ring: &mut VecDeque<u8>, buf: &mut [u8], other_open: u32) -> RecvOutcome {
         if !ring.is_empty() {
             let k = buf.len().min(ring.len());
@@ -853,6 +961,16 @@ impl Ptys {
             let n = parse_dec(&name[..name.len() - 3])?;
             return if self.live(n) {
                 Some(make_pts(n, FK_CTL))
+            } else {
+                None
+            };
+        }
+        // "<n>ready" resolves to the live per-pts poll-readiness file (item 10;
+        // the netd ready-sibling idiom). Disjoint from the "ctl" suffix.
+        if name.len() > 5 && name.ends_with(b"ready") {
+            let n = parse_dec(&name[..name.len() - 5])?;
+            return if self.live(n) {
+                Some(make_pts(n, FK_READY))
             } else {
                 None
             };
@@ -957,6 +1075,13 @@ struct PendingRead {
     master: bool, // reading the master endpoint (drain s2m) vs the slave (m2s)
     tag: u16,
     cap: usize,
+    // A NON-consuming poll-readiness probe (item 10), not a data read. When true,
+    // poll_reads recomputes the revents bitmap (never drains) and delivers a
+    // 4-byte reply once (revents & effective_mask) != 0; `mask` is the requested
+    // poll events (POLLIN|POLLOUT) from the probe Tread's offset. Sharing the one
+    // Vec means the clunk/Tflush/teardown cancel sites cover a parked probe too.
+    probe: bool,
+    mask: u16,
 }
 
 pub struct Conn {
@@ -1190,11 +1315,17 @@ impl Conn {
     }
 
     fn qid_of(&self, ptys: &Ptys, path: u64) -> p9::Qid {
-        let kind = if ptys.is_dir(path) {
+        let mut kind = if ptys.is_dir(path) {
             p9::P9_QTDIR
         } else {
             p9::P9_QTFILE
         };
+        // The poll-readiness file carries P9_QTPOLL so dev9p caches QTPOLL on the
+        // Spoor -> dev9p.poll probes it (item 10). Single source for walk +
+        // getattr qids, so both agree.
+        if is_ready_path(path) {
+            kind |= p9::P9_QTPOLL;
+        }
         p9::Qid {
             kind,
             version: 0,
@@ -1364,10 +1495,12 @@ impl Conn {
                     Err(())
                 }
             }
-        } else if is_ctl_path(f.path) {
-            // The per-pts ctl (/pts/<n>ctl): opens plainly -- no registration,
-            // no EOF count (a ctl fid is not an endpoint); the bound fid
-            // already holds the slot ref.
+        } else if is_ctl_path(f.path) || is_ready_path(f.path) {
+            // The per-pts ctl (/pts/<n>ctl) and the poll-readiness file
+            // (/pts/<n>ready, item 10): both open plainly -- no registration, no
+            // EOF count (neither is a data endpoint); the bound fid already holds
+            // the slot ref. Must precede the slave branch (a ready path is
+            // is_pts && !master, which would otherwise register as a slave).
             let q = self.qid_of(ptys, f.path);
             let mut nf = f;
             nf.opened = true;
@@ -1430,6 +1563,34 @@ impl Conn {
             let k = (len - off).min(a.count as usize);
             return p9::build_rread(&mut self.out_buf, tag, &lb[off..off + k]);
         }
+        if is_ready_path(f.path) {
+            // The NON-consuming poll-readiness probe (item 10; the netd ready-file
+            // shape). dev9p.poll encodes the wanted poll mask in the Tread OFFSET
+            // (count = 4). Reply the 4-byte LE revents once satisfiable; else park
+            // (poll_reads re-evaluates -- level-triggered, so a native poller that
+            // requested POLLIN wakes exactly when the slave becomes readable, and
+            // a ^C -- which posts a NOTE, not data -- never spuriously wakes it).
+            let n = pts_n(f.path);
+            let mask = a.offset as u16;
+            let revents = ptys.ready_revents(n, mask);
+            if revents != 0 {
+                return p9::build_rread(&mut self.out_buf, tag, &(revents as u32).to_le_bytes());
+            }
+            if self.pending_reads.len() >= MAX_FIDS {
+                return self.err(tag, p9::E_PROTO);
+            }
+            self.pending_reads.push(PendingRead {
+                fid: a.fid,
+                slot_n: n,
+                master: false, // a ready file reports SLAVE readiness (item 10)
+                tag,
+                cap: 4,
+                probe: true,
+                mask,
+            });
+            self.defer = true;
+            return Ok(0); // ignored: dispatch returns Disp::Deferred
+        }
         if !is_pts(f.path) {
             return self.err(tag, p9::E_INVAL); // no readable static file (ptmx is open-only)
         }
@@ -1464,6 +1625,8 @@ impl Conn {
                     master,
                     tag,
                     cap,
+                    probe: false,
+                    mask: 0,
                 });
                 self.defer = true;
                 Ok(0) // ignored: dispatch returns Disp::Deferred
@@ -1652,6 +1815,22 @@ impl Conn {
         let mut i = 0;
         while i < self.pending_reads.len() {
             let pr = self.pending_reads[i];
+            if pr.probe {
+                // A poll-readiness probe (item 10): recompute revents (no drain,
+                // no consume) and deliver the 4-byte reply once satisfiable.
+                // ready_revents already masks to the request + always-report HUP,
+                // so a non-zero value is exactly "deliver now" (else keep parked).
+                let revents = ptys.ready_revents(pr.slot_n, pr.mask);
+                if revents != 0 {
+                    self.pending_reads.remove(i);
+                    if !self.deliver_read(pr.tag, &(revents as u32).to_le_bytes()) {
+                        return false;
+                    }
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
             if !ptys.read_ready(pr.slot_n, pr.master) {
                 i += 1;
                 continue; // still WouldBlock -- do not allocate a drain buffer
@@ -1789,7 +1968,9 @@ pub fn selftest() -> Result<(), &'static str> {
     }
 
     // ---- The COOKED battery (PTY-2b: the ldisc truth table vs the cons.c
-    // reference). set_tio resets the assembly line (the TCSAFLUSH posture).
+    // reference). Nothing is pending here (the raw battery drained), so this
+    // raw->canonical set_tio touches no assembly (a mode write delivers on
+    // ICANON-clear and otherwise leaves the line alone).
     ptys.set_tio(n, TIO_DEFAULT);
 
     // (1) ICRNL + ICANON flush + ECHO + ONLCR in one stroke: "hi\r" -> the CR
@@ -1964,11 +2145,11 @@ pub fn selftest() -> Result<(), &'static str> {
         // future zero reading meaningless. And it must NOT have reported: the
         // arm gate exists so the selftest's deliberate drop cannot cry wolf, nor
         // spend the one-shot latch that a real drop needs.
-        let (df, dl, de) = ptys.drops(n);
+        let (df, dl, de, dm) = ptys.drops(n);
         if dl != 1 {
             return Err("overflow-not-counted");
         }
-        if df != 0 || de != 0 {
+        if df != 0 || de != 0 || dm != 0 {
             return Err("overflow-miscounted");
         }
         if drop_reported() {
@@ -2036,28 +2217,174 @@ pub fn selftest() -> Result<(), &'static str> {
         return Err("ctl-restore");
     }
 
-    // (e) A flag apply resets the assembly (TCSAFLUSH): a half-typed line is
-    // discarded by the mode change; the following NL flushes an EMPTY line.
+    // (e) A mode write DELIVERS the pending line, never discards it (PTY-DESIGN
+    // "Mode writes deliver, never discard"; the TCSAFLUSH posture this leg
+    // used to pin dropped the head of a type-ahead line -- LS-CI pty-4).
+    // (e1) canonical->canonical (+echo, ICANON untouched) leaves "zz" assembled:
+    // the following NL flushes "zz\n", not an empty line.
     if ptys.master_write(n, b"zz") != 2 {
-        return Err("tcsaflush-type");
+        return Err("modeflush-type");
     }
     match ptys.master_read(n, &mut buf) {
         RecvOutcome::Data(2) => {} // drain the "zz" echo
-        _ => return Err("tcsaflush-echo"),
+        _ => return Err("modeflush-echo"),
     }
     if ptys.ctl_apply(n, b"+icanon").is_err() {
-        return Err("tcsaflush-apply");
-    }
-    if ptys.master_write(n, b"\n") != 1 {
-        return Err("tcsaflush-nl");
+        return Err("modeflush-apply-canon");
     }
     match ptys.slave_read(n, &mut buf) {
-        RecvOutcome::Data(1) if buf[0] == b'\n' => {} // just the NL: "zz" gone
-        _ => return Err("tcsaflush-reset"),
+        RecvOutcome::WouldBlock => {} // still assembling: NOTHING delivered yet
+        _ => return Err("modeflush-canon-leaked"),
+    }
+    if ptys.master_write(n, b"\n") != 1 {
+        return Err("modeflush-nl");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(3) if &buf[..3] == b"zz\n" => {} // the WHOLE line
+        _ => return Err("modeflush-canon-kept"),
     }
     match ptys.master_read(n, &mut buf) {
         RecvOutcome::Data(2) if &buf[..2] == b"\r\n" => {}
-        _ => return Err("tcsaflush-nl-echo"),
+        _ => return Err("modeflush-nl-echo"),
+    }
+    // (e2) canonical->raw (-icanon) DELIVERS the pending "yy" to the slave at
+    // once, as raw bytes, no newline appended -- the type-ahead case: the head
+    // of the next line, typed while the previous job's cooked mode was still
+    // on, reaches the raw editor instead of vanishing.
+    if ptys.master_write(n, b"yy") != 2 {
+        return Err("modeflush-type2");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(2) => {} // drain the "yy" echo
+        _ => return Err("modeflush-echo2"),
+    }
+    let (_, _, _, dm0) = ptys.drops(n);
+    if ptys.ctl_apply(n, b"-icanon").is_err() {
+        return Err("modeflush-apply-raw");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(2) if &buf[..2] == b"yy" => {} // delivered, no NL
+        _ => return Err("modeflush-raw-delivered"),
+    }
+    let (_, _, _, dm1) = ptys.drops(n);
+    if dm1 != dm0 {
+        return Err("modeflush-counted-a-drop"); // it fit; nothing was lost
+    }
+    // ...and the next raw byte follows in order, after the delivered fragment.
+    if ptys.master_write(n, b"q") != 1 {
+        return Err("modeflush-raw-type");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(1) if buf[0] == b'q' => {}
+        _ => return Err("modeflush-raw-order"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(1) if buf[0] == b'q' => {} // raw echo of q
+        _ => return Err("modeflush-raw-echo"),
+    }
+    // (e3) raw->canonical (+icanon) has nothing pending: nothing is delivered
+    // and nothing prepends the next line -- the LS-8b F1 hazard, closed by
+    // delivery rather than by discard: type "cd\n" and get exactly "cd\n".
+    if ptys.ctl_apply(n, b"+icanon").is_err() {
+        return Err("modeflush-apply-canon2");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::WouldBlock => {}
+        _ => return Err("modeflush-canon2-leaked"),
+    }
+    if ptys.master_write(n, b"cd\n") != 3 {
+        return Err("modeflush-type3");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(3) if &buf[..3] == b"cd\n" => {} // no stranded prefix
+        _ => return Err("modeflush-no-prepend"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(4) if &buf[..4] == b"cd\r\n" => {}
+        _ => return Err("modeflush-echo3"),
+    }
+
+    // (e4) An ISIG character DISCARDS the pending canonical line (PTY-DESIGN,
+    // the ccb597b8 round's F5, operator-voted): a committed "x\n" (unread, in
+    // m2s), then "ab" (pending, in line[]), then VINTR, then "cd\n" -> the
+    // slave reads exactly "x\ncd\n" (the COMMITTED line survived, the pending
+    // "ab" did not); the INT class was raised; the ^C itself was neither
+    // delivered nor echoed (SignalXorByte); the two earlier echoes are still
+    // sitting unread in s2m afterwards (s2m is NOT flushed -- the d3a11c8e
+    // round's F5: without the committed line and the unread echo, an
+    // over-broad discard that also cleared m2s/s2m passed this leg); no drop
+    // counter moved (a disposition, not a loss). Then the CONTROL one variable
+    // away (-isig): the same 0x03 is a data byte, buffered, echoed and
+    // delivered -- "ab\x03cd\n" -- so the discard is gated on ISIG-consumption,
+    // not on the byte value.
+    if ptys.ctl_apply(n, b"+isig +icanon").is_err() {
+        return Err("isigflush-apply");
+    }
+    let _ = ptys.take_sigs(n); // clear any class collected by earlier legs
+    if ptys.master_write(n, b"x\n") != 2 {
+        return Err("isigflush-commit"); // "x\n" committed into m2s, echo "x\r\n" left in s2m
+    }
+    if ptys.master_write(n, b"ab") != 2 {
+        return Err("isigflush-type"); // "ab" pending in line[], echo "ab" left in s2m
+    }
+    let (df0, dl0, de0, dm0) = ptys.drops(n);
+    if ptys.master_write(n, &[CH_INTR]) != 1 {
+        return Err("isigflush-intr");
+    }
+    if ptys.take_sigs(n) & sig_class_bit(T_TTY_SIG_INT) == 0 {
+        return Err("isigflush-not-raised");
+    }
+    match ptys.master_read(n, &mut buf) {
+        // The two earlier echoes, intact and in order; NOTHING for the ^C.
+        RecvOutcome::Data(5) if &buf[..5] == b"x\r\nab" => {}
+        _ => return Err("isigflush-s2m-flushed-or-intr-echoed"),
+    }
+    if ptys.master_write(n, b"cd\n") != 3 {
+        return Err("isigflush-type2");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        // The committed line survived the discard; the pending "ab" did not.
+        RecvOutcome::Data(5) if &buf[..5] == b"x\ncd\n" => {}
+        _ => return Err("isigflush-not-discarded-or-m2s-flushed"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(4) if &buf[..4] == b"cd\r\n" => {}
+        _ => return Err("isigflush-echo2"),
+    }
+    if ptys.drops(n) != (df0, dl0, de0, dm0) {
+        return Err("isigflush-counted"); // a disposition, never a drop
+    }
+    // The control: ISIG clear, same bytes, nothing lost.
+    if ptys.ctl_apply(n, b"-isig").is_err() {
+        return Err("isigflush-ctl-apply");
+    }
+    if ptys.master_write(n, b"ab") != 2 {
+        return Err("isigflush-ctl-type");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(2) => {}
+        _ => return Err("isigflush-ctl-echo"),
+    }
+    if ptys.master_write(n, &[CH_INTR]) != 1 {
+        return Err("isigflush-ctl-byte");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(1) if buf[0] == CH_INTR => {} // echoed as an ordinary byte
+        _ => return Err("isigflush-ctl-byte-echo"),
+    }
+    if ptys.master_write(n, b"cd\n") != 3 {
+        return Err("isigflush-ctl-type2");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(6) if &buf[..6] == b"ab\x03cd\n" => {} // kept, in order
+        _ => return Err("isigflush-ctl-kept"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(4) => {}
+        _ => return Err("isigflush-ctl-echo2"),
+    }
+    if ptys.ctl_apply(n, b"+isig").is_err() {
+        return Err("isigflush-restore");
     }
 
     // (f) The walk grammar: "<n>ctl" resolves while live; degenerate shapes do
@@ -2090,6 +2417,59 @@ pub fn selftest() -> Result<(), &'static str> {
         ptys.ref_path(make_pts(b, FK_SLAVE));
         if ptys.unref_path(make_pts(b, FK_SLAVE)) != Some(0) {
             return Err("backpressure-free");
+        }
+    }
+
+    // ---- The mode-flush drop site, DRIVEN (the ccb597b8 round, F1/F2), on a
+    // third fresh pts: a canonical->raw ctl write delivering into a FULL m2s
+    // is a real drop, counted under drop_modeflush and under nothing else,
+    // and the report gate holds (the selftest is not armed). Without this
+    // the site's counter had only a negative -- an instrument that cannot be
+    // shown to fire makes a later zero meaningless (the #95 rule).
+    {
+        let c = ptys.mint().ok_or("mint3")? as u32;
+        ptys.open_inc(c, true); // master open: an empty m2s reads WouldBlock, not Eof
+        ptys.set_tio(c, 0); // raw, no echo
+        let fill = alloc::vec![0x5bu8; RING_CAP + 8];
+        // Raw into an empty m2s: back-pressure at RING_CAP -- the ring is now
+        // exactly full and nothing was dropped.
+        if ptys.master_write(c, &fill) != RING_CAP {
+            return Err("modeflush-fill");
+        }
+        ptys.set_tio(c, TIO_ICANON); // raw->canonical: nothing pending
+        if ptys.master_write(c, b"yy") != 2 {
+            return Err("modeflush-full-type"); // assembled in line[], not in the ring
+        }
+        let (df0, dl0, de0, dm0) = ptys.drops(c);
+        ptys.set_tio(c, 0); // canonical->raw: deliver "yy" into a full ring
+        let (df1, dl1, de1, dm1) = ptys.drops(c);
+        if dm1 != dm0 + 2 {
+            return Err("modeflush-drop-not-counted");
+        }
+        if df1 != df0 || dl1 != dl0 || de1 != de0 {
+            return Err("modeflush-drop-miscounted");
+        }
+        if drop_reported() {
+            return Err("modeflush-drop-reported-too-early");
+        }
+        // The ring held exactly the filler: RING_CAP bytes, then WouldBlock --
+        // no delivered byte overwrote anything, none is stranded.
+        let mut dbuf = alloc::vec![0u8; 512];
+        let mut drained = 0usize;
+        loop {
+            match ptys.slave_read(c, &mut dbuf) {
+                RecvOutcome::Data(k) => drained += k,
+                RecvOutcome::WouldBlock => break,
+                RecvOutcome::Eof => return Err("modeflush-drain-eof"),
+            }
+        }
+        if drained != RING_CAP {
+            return Err("modeflush-drain-count");
+        }
+        let _ = ptys.open_dec(c, true);
+        ptys.ref_path(make_pts(c, FK_SLAVE));
+        if ptys.unref_path(make_pts(c, FK_SLAVE)) != Some(0) {
+            return Err("modeflush-free");
         }
     }
 
@@ -2136,6 +2516,56 @@ pub fn selftest() -> Result<(), &'static str> {
     }
     if ptys.live(n) {
         return Err("slot-not-freed");
+    }
+
+    // ---- The poll-readiness battery (item 10; ready_revents = read_ready +
+    // request-masking + the always-reported POLLHUP, non-consuming). A fresh
+    // raw pts so the accumulated state above cannot color it.
+    {
+        let r = ptys.mint().ok_or("ready-mint")? as u32;
+        ptys.open_inc(r, true); // master open (n_master 0 -> 1)
+        ptys.open_inc(r, false); // slave open
+        ptys.set_tio(r, 0); // raw: a byte lands in m2s without cooking
+
+        // Empty + both open: a POLLIN poller sees no POLLIN (it would park).
+        if ptys.ready_revents(r, POLLIN) & POLLIN != 0 {
+            return Err("ready-empty-pollin-set");
+        }
+        // A master write makes the slave readable -> POLLIN.
+        if ptys.master_write(r, b"x") != 1 {
+            return Err("ready-mw");
+        }
+        if ptys.ready_revents(r, POLLIN) & POLLIN == 0 {
+            return Err("ready-data-pollin-clear");
+        }
+        // POLLIN is masked to the request: a POLLOUT-only poll never reports it.
+        if ptys.ready_revents(r, POLLOUT) & POLLIN != 0 {
+            return Err("ready-pollin-not-masked");
+        }
+        // Drain -> POLLIN clears (level-triggered; a re-poll re-parks).
+        let mut d = [0u8; 8];
+        match ptys.slave_read(r, &mut d) {
+            RecvOutcome::Data(1) => {}
+            _ => return Err("ready-drain"),
+        }
+        if ptys.ready_revents(r, POLLIN) & POLLIN != 0 {
+            return Err("ready-drained-pollin-set");
+        }
+        // POLLOUT: s2m has room -> set when requested.
+        if ptys.ready_revents(r, POLLOUT) & POLLOUT == 0 {
+            return Err("ready-pollout-clear");
+        }
+        // Master gone: POLLHUP always reported, and the slave read is then
+        // EOF-readable (POLLIN set even on an empty ring). This is the ^C-idle
+        // teardown edge -- ut wakes on the ready file and its fd-0 read EOFs.
+        ptys.open_dec(r, true); // n_master 1 -> 0
+        let rv = ptys.ready_revents(r, POLLIN);
+        if rv & POLLHUP == 0 {
+            return Err("ready-hup-clear-on-master-gone");
+        }
+        if rv & POLLIN == 0 {
+            return Err("ready-eof-not-readable");
+        }
     }
 
     Ok(())

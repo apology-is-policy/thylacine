@@ -56,6 +56,7 @@
 #ifndef THYLACINE_VMO_H
 #define THYLACINE_VMO_H
 
+#include <thylacine/page.h>         // #194: PAGE_SIZE (burrow_file_limit_known)
 #include <thylacine/spinlock.h>     // #847: per-Burrow lock (spin_lock_t)
 #include <thylacine/types.h>
 
@@ -148,6 +149,17 @@ enum burrow_type {
     // the range — the D-cache-clean / I-cache-invalidate sequence the architecture
     // requires between a data write and an instruction fetch of the same address.
     BURROW_TYPE_CODE    = 6,
+    // V-2 (Warp-6 Venus / GPU-DESIGN 6.2.1): backing is a subrange of a PCI
+    // hostmem BAR -- host-visible shared memory (VIRTIO_PCI_CAP_SHARED_MEMORY_
+    // CFG, cfg_type 8), NOT device registers. `pages` is NULL (no alloc_pages
+    // backing); `kobj_pci` pins the owning claim for the Burrow's lifetime;
+    // `pa` is bars[shm.bar].pa + shm.offset + the caller's offset; `hostmem_mair`
+    // is the create-time MAIR index (host-dictated CACHED -> WB / WC -> NC).
+    // Unlike BURROW_TYPE_MMIO it is share-admissible (burrow_share_into): the
+    // client's cacheable/NC RW mapping conveys zero hardware authority (I-45) --
+    // a shared-memory window is device-passive DATA, not a command/register
+    // surface the device interprets.
+    BURROW_TYPE_HOSTMEM = 7,
 };
 
 struct page;
@@ -159,6 +171,7 @@ struct AddrSpace;      // <thylacine/addrspace.h> — LINEAGE L-1; burrow_lazy_p
                        //   real one). Pre-existing since L-4a; noticed at L-4b.
 struct KObj_MMIO;
 struct KObj_DMA;
+struct KObj_PCI;       // V-2: BURROW_TYPE_HOSTMEM pins the owning PCI claim
 struct Spoor;          // <thylacine/spoor.h> — REVENANT: the pinned backing Chan
 
 struct Burrow {
@@ -184,12 +197,16 @@ struct Burrow {
     // (page-aligned, matches kobj_mmio->pa). For BURROW_TYPE_DMA:
     // kobj_dma is the underlying KObj_DMA whose pinned page chunk this
     // Burrow wraps; pa is the buddy-chosen PA (matches kobj_dma->pa).
-    // Exactly one of kobj_mmio / kobj_dma is non-NULL for hw types; both
-    // are NULL for BURROW_TYPE_ANON. The non-NULL hw ref is released at
+    // For BURROW_TYPE_HOSTMEM (V-2): kobj_pci is the owning PCI claim whose
+    // hostmem BAR subrange this Burrow maps; pa is that subrange's absolute PA.
+    // Exactly one of kobj_mmio / kobj_dma / kobj_pci is non-NULL for hw types;
+    // all are NULL for BURROW_TYPE_ANON. The non-NULL hw ref is released at
     // burrow_free_internal via the type-dispatched switch.
     struct KObj_MMIO *kobj_mmio;   // NULL except for BURROW_TYPE_MMIO
     struct KObj_DMA  *kobj_dma;    // NULL except for BURROW_TYPE_DMA
+    struct KObj_PCI  *kobj_pci;    // NULL except for BURROW_TYPE_HOSTMEM (V-2)
     u64               pa;           // 0 except for hw-backed types
+    u8                hostmem_mair; // HOSTMEM only: create-time MAIR_IDX_* (V-2)
 
     // REVENANT / I-36: BURROW_TYPE_FILE fields. Zero/NULL for every other type.
     // The Burrow ADOPTS one ref on `spoor` at burrow_create_file (the I-30 pin:
@@ -208,6 +225,15 @@ struct Burrow {
     // it, so no concurrent faulter touches filepages).
     struct Spoor     *spoor;        // NULL except FILE: the adopted+pinned backing Chan
     u64               file_offset;  // FILE: segment base byte offset in the backing file
+    // #194 (I-32): bytes in the backing file, sampled ONCE when the Burrow is
+    // created (image_lookup_or_create stamps it from the caller's stat; the
+    // close-to-open posture makes creation-time the honest sample point). The
+    // fault arm refuses to demand-page a page WHOLLY past round_up(file_limit)
+    // -- Linux's SIGBUS-past-EOF -- so no anonymous-in-effect page is ever
+    // minted against the uncharged FILE posture. BURROW_FILE_LIMIT_UNKNOWN
+    // disables the bound (a backing Dev with no stat_native: the baked,
+    // immutable ramfs -- argued at the image.c stamp site).
+    u64               file_limit;   // FILE: backing file size in bytes at create
     int               file_dc;      // FILE: cache key — backing dc       (sampled at create)
     u32               file_devno;   // FILE: cache key — backing devno    (sampled at create)
     u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
@@ -241,6 +267,22 @@ struct Burrow {
     // e.g. a Loom registered-buffer pin (keep it -- that claim's own drop
     // refunds). Read under `lock`.
     bool             shared_out;
+
+    // D-3c F1: a single-linked stack for DEFERRED free. A teardown that runs
+    // under as->lock cannot free a Burrow inline -- the FILE arm's spoor_clunk
+    // may sleep (a 9P Tclunk), and sleeping under a plain spinlock is the
+    // lock-across-sleep extinction. So the locked teardown decrements the
+    // mapping ref (burrow_release_mapping_deferred), and if that was the last
+    // ref it pushes the dead Burrow onto a caller-local stack via this link and
+    // frees the whole chain (burrow_free_deferred) AFTER dropping as->lock.
+    // Meaningful ONLY while a Burrow sits on such a stack -- {handle:0,map:0},
+    // unreachable by any other path, so the write needs no lock; NULL always
+    // otherwise. This is the teardown twin of #193 (which hoisted the mmap
+    // success-path construction-handle unref outside the lock for the same
+    // reason). Freeing inline was the pre-D-3 norm because every detachable
+    // Burrow's free was non-sleeping (ANON free_pages); D-3 put a 9P-backed
+    // FILE Burrow at a guest-detachable address, which is what made it live.
+    struct Burrow   *deferred_free_next;
 };
 
 _Static_assert(__builtin_offsetof(struct Burrow, magic) == 0,
@@ -293,6 +335,14 @@ struct Burrow *burrow_create_anon(size_t size);
 // arch/arm64/fault.c (handling the MMIO PA + device-memory PTE attrs)
 // lands at P4-Ic2.
 struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio);
+// V-2: wrap a subrange of a PCI hostmem BAR in a share-admissible Burrow.
+// `pa` is the absolute CPU PA of the subrange base (page-aligned), `len` its
+// byte length (page multiple, non-zero), `mair_idx` the host-dictated MAIR
+// attribute index (MAIR_IDX_NORMAL_WB / _NORMAL_NC). Takes one kobj_pci_ref
+// for the Burrow's lifetime (released in burrow_free_internal). Returns NULL
+// on OOM or bad args.
+struct Burrow *burrow_create_hostmem(struct KObj_PCI *kobj_pci, u64 pa,
+                                     size_t len, u8 mair_idx);
 
 // P4-Ic5b1b: burrow_create_dma — wrap a KObj_DMA in a Burrow so the
 // VMA + page-fault dispatch path can install user-VA mappings backed
@@ -343,6 +393,15 @@ struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma);
 //   - NULL spoor / corrupted spoor magic, burrow_init not run, length == 0,
 //     length overflow, SLUB OOM, or filepages-array OOM.
 struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t length);
+
+// #194: `file_limit` sentinel + validity predicate. A limit in the top page's
+// worth of u64 values would wrap the fault arm's round-up, so the predicate
+// excludes the whole band -- a hostile server reporting a near-2^64 size gets
+// the UNBOUNDED (pre-#194) behavior, never a wrapped false-BUS window.
+#define BURROW_FILE_LIMIT_UNKNOWN ((u64)-1)
+static inline bool burrow_file_limit_known(u64 lim) {
+    return lim < (u64)-1 - (u64)(PAGE_SIZE - 1);
+}
 
 // Overcommit / I-32: burrow_create_anon_lazy — the demand-ZERO anonymous Burrow
 // (ARCH §6.5 "The overcommit model"; SYS_BURROW_ATTACH_LAZY). Reserves a `size`-byte
@@ -520,6 +579,14 @@ void burrow_release_mapping(struct Burrow *v);
 bool burrow_unref_freed(struct Burrow *v);
 bool burrow_release_mapping_freed(struct Burrow *v);
 
+// D-3c F1: the DEFERRED teardown pair. `_deferred` drops the mapping ref under
+// v->lock and returns the dead Burrow (or NULL) WITHOUT freeing; the caller,
+// once it has dropped as->lock, frees it with burrow_free_deferred. Together
+// they keep the FILE arm's sleeping spoor_clunk off the locked teardown path
+// (the twin of #193). See the deferred_free_next field + the burrow.c bodies.
+struct Burrow *burrow_release_mapping_deferred(struct Burrow *v);
+void           burrow_free_deferred(struct Burrow *v);
+
 // #131/#132: the I-32 charge record -- WHO paid, so a refund is attributed
 // instead of inferred from the region's shape (see struct Burrow above).
 //
@@ -594,6 +661,38 @@ struct AddrSpace;
 int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
                   u64 vaddr, size_t length, u32 prot);
 
+// DISTRO D-3b: burrow_map_fixed -- the MAP_FIXED analog. Install `v` at the
+// CALLER'S address rather than wherever a gap search lands it. Two shapes: a
+// window wholly inside one existing VMA (split that VMA around it, the survivor
+// keeping its backing, its prot, and -- exactly -- its byte identity for every
+// VA it still covers), or an entirely free range (plain insert).
+//
+// Two things burrow_map cannot express, both needed by musl's map_library
+// overlay: a caller-CHOSEN address that replaces existing mapping, and a
+// non-zero burrow_offset for the piece left over on the right of the cut.
+//
+// Refuses (returning -1, having mutated no VMA) when: the window neither fits
+// inside one VMA nor lies free (it spans two, or partially overlaps one), the
+// covering VMA carries any flag (SHARED_IN is another Proc's memory; COW would
+// need its per-page share counts reasoned across the cut), or the I-32
+// VMA-count headroom for the split is absent. See vma.h's vma_replace_range_in
+// for the full contract and the hole-free argument.
+//
+// Clears the leaf PTEs for the replaced window before the surgery -- necessarily
+// so, since hardware resolves a PTE without taking as->lock. Caller holds
+// as->lock, exactly as for burrow_map.
+//
+// D-3c re-audit F5 [P1]: `out_free` (non-NULL) receives the REPLACED old Burrow
+// when the exact-cover surgery drops its last ref (or NULL) -- the caller frees it
+// with burrow_free_deferred AFTER dropping as->lock, because a 9P FILE Burrow's
+// free may sleep (spoor_clunk) and this runs under the lock. The fourth
+// inline-free-under-lock site F1 missed. Written on every return path.
+int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
+                     u32 prot, u64 burrow_offset, struct Burrow **out_free);
+int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                        u64 vaddr, size_t length, u32 prot, u64 burrow_offset,
+                        struct Burrow **out_free);
+
 // burrow_unmap: remove the VMA at user-VA range [vaddr, vaddr + length)
 // from Proc `p`. Calls vma_remove + vma_free (which calls
 // burrow_release_mapping; mapping_count--).
@@ -621,8 +720,15 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
 // burrow_unmap, additionally reporting whether removing this mapping was the
 // drop that freed the Burrow's pages (see burrow_unref_freed above). *out_freed
 // is written on every path, including the -1 ones (false).
+// D-3c F1: `out_free`, when non-NULL, DEFERS the Burrow free: the function
+// removes the VMA + drops the mapping ref under the caller's as->lock but
+// returns the dead Burrow (or NULL) via *out_free instead of freeing it inline;
+// the caller frees it with burrow_free_deferred after the unlock (the FILE arm's
+// spoor_clunk may sleep). NULL keeps the inline free (non-sleeping ANON/CODE/DMA
+// callers via burrow_unmap). *out_free is written whenever it is non-NULL,
+// including the -1 paths (NULL).
 int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
-                           bool *out_freed);
+                           bool *out_freed, struct Burrow **out_free);
 
 // =============================================================================
 // Overcommit / I-32: lazy-anon decommit + resident-page accounting (ARCH §6.5).
@@ -719,6 +825,9 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot);
 size_t burrow_get_size(const struct Burrow *v);
 int    burrow_handle_count(const struct Burrow *v);
 int    burrow_mapping_count(const struct Burrow *v);
+// handle_count + mapping_count read ATOMICALLY under v->lock (a coherent
+// snapshot, not two separately-ACQUIRE'd loads). Non-const: it locks.
+int    burrow_total_refs(struct Burrow *v);
 
 // Cumulative diagnostic counters. Tests use these to verify lifecycle
 // transitions:

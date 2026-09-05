@@ -16,3 +16,7 @@ path = "src/lib.rs"
 # its #[global_allocator]); it does NOT call kernel surfaces directly --
 # the consumer handles syscalls.
 libthyla-rs = { path = "../../lib/libthyla-rs" }
+# H-1c: the Beacon zone frames (wire emission only -- pure bytes, no
+# syscalls; the ut binary resolves the tier and hands Repl the flag, so
+# the no-kernel-surfaces layering above holds).
+beacon = { path = "../../lib/beacon" }

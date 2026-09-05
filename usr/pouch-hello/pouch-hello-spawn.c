@@ -10,8 +10,8 @@
 // The binary is BOTH the parent and the child (self-respawn via argv[0]):
 //   no args        -> PARENT: runs the test battery.
 //   argv[1]=="ok"  -> CHILD:  writes "SPAWNCHILD-OK\n" to fd 1, exit 0.
-//   argv[1]=="fail"-> CHILD:  exit 3 (the kernel collapses any non-zero exit
-//                             to exit_status 1 at v1.0 -> WEXITSTATUS == 1).
+//   argv[1]=="fail"-> CHILD:  exit 3 (#91: the child's real exit byte survives
+//                             to the parent -> WEXITSTATUS == 3, no collapse).
 // The child reading its own argv[1] also proves argv pass-through end to end.
 //
 // On success: "pouch-hello-spawn: ... ALL SPAWN TESTS PASS" + exit 0. Any
@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
 			return 0;
 		}
 		if (!strcmp(argv[1], "fail"))
-			return 3;   // -> WEXITSTATUS 1 (v1.0 non-zero collapse)
+			return 3;   // -> WEXITSTATUS 3 (#91: the real exit byte survives)
 		return 99;
 	}
 
@@ -102,7 +102,8 @@ int main(int argc, char **argv) {
 	if (WEXITSTATUS(st) != 0) return fail("WEXITSTATUS(ok)!=0", WEXITSTATUS(st));
 
 	// === test 2: posix_spawn("fail") inheriting std streams; reap via a
-	//     WNOHANG poll; expect WIFEXITED + WEXITSTATUS 1 (status translation) ===
+	//     WNOHANG poll; expect WIFEXITED + WEXITSTATUS 3 (#91: the child's real
+	//     exit byte survives to the parent, no longer collapsed to 1) ===
 	char *failargv[] = { (char *)self, (char *)"fail", NULL };
 	pid_t pid2 = -1;
 	int rc2 = posix_spawn(&pid2, self, NULL, NULL, failargv, environ);
@@ -118,9 +119,9 @@ int main(int argc, char **argv) {
 	}
 	if (r2 != pid2) return fail("fail child never reaped", 0);
 	if (!WIFEXITED(st2)) return fail("fail child not WIFEXITED", st2);
-	if (WEXITSTATUS(st2) != 1) return fail("WEXITSTATUS(fail)!=1", WEXITSTATUS(st2));
+	if (WEXITSTATUS(st2) != 3) return fail("WEXITSTATUS(fail)!=3", WEXITSTATUS(st2));
 
-	printf("pouch-hello-spawn: pipe+spawn+wait ok; WEXITSTATUS ok=0 fail=1 "
+	printf("pouch-hello-spawn: pipe+spawn+wait ok; WEXITSTATUS ok=0 fail=3 "
 	       "-- ALL SPAWN TESTS PASS\n");
 	return 0;
 }

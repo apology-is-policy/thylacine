@@ -64,6 +64,13 @@ _Static_assert(sizeof(struct Qid) == 16,
 #define QTEXCL    0x20      // exclusive use (only one open allowed)
 #define QTAUTH    0x08      // authentication file
 #define QTTMP     0x04      // not-backed-up temporary file
+#define QTSYMLINK 0x02      // is a symbolic link (DISTRO D-1). Matches the wire's
+                            // P9_QTSYMLINK bit value; carried through
+                            // qid_type_p9_to_kernel so the resolver can expand
+                            // (docs/DISTRO.md section 4). Only dev9p mints it at
+                            // v1.0 -- native Devs have no symlink surface, so
+                            // native behavior changes only on dev9p trees that
+                            // actually contain symlinks.
 #define QTPOLL    0x01      // Thylacine ext (net-6b-2b): pollable file -- dev9p.poll
                             // probes it (a netd `ready` file); P9_QTPOLL on the wire
 #define QTFILE    0x00      // plain file
@@ -99,12 +106,77 @@ _Static_assert(sizeof(struct Qid) == 16,
                                // Set on the Spoor devsrv_open returns for a byte-
                                // mode connect; clear = server endpoint (from
                                // SYS_SRV_ACCEPT, read c2s / write s2c). stalk-3b-β.
+#define CNBFRAME  (1u << 6)    // frame-atomic NON-BLOCKING write: a write commits the
+                               // WHOLE buffer or returns -T_E_AGAIN having written
+                               // NOTHING -- never partial, never sleeps. Honored by the
+                               // pipe Dev (devpipe_write) only; set on the tx Spoor of
+                               // the byte-pipe 9P transport (p9_spoor_transport_init).
+                               // Why it exists: the 9P client holds c->lock across
+                               // p9_transport_send (9p_client.h "never held across a
+                               // blocking wait") and recovers from a full transport via
+                               // P9_TRANSPORT_EAGAIN (client_pump_or_park_locked drops
+                               // c->lock). A BLOCKING pipe write under that lock is the
+                               // #360 lock-across-sleep extinction, and a PARTIAL write
+                               // strands a 9P-frame fragment + desyncs the shared stream
+                               // (do_send treats a mid-frame EAGAIN as fatal, #349). A
+                               // frame <= msize <= PIPE_BUF_SIZE always fits an empty
+                               // pipe, so progress is guaranteed once the reader drains.
+#define CNONBLOCK (1u << 7)    // #91-follow: POSIX O_NONBLOCK on this open-file. Set/
+                               // cleared by the phenotype fcntl(F_SETFL) shell; read by
+                               // devpipe_read/devpipe_write, which return -T_E_AGAIN
+                               // instead of sleeping when the op would block. Standard
+                               // BYTE semantics (partial read/write is fine; EAGAIN only
+                               // when FULLY would-block) -- distinct from CNBFRAME's
+                               // frame-atomic 9P-tx mode above. Per-fd (per-Spoor =
+                               // per-open-file-description), copied on the Spoor clone.
 
 // SPOOR_MAGIC — sentinel set at spoor_alloc; checked at spoor_ref /
 // spoor_unref / spoor_clunk. SLUB's freelist write at free clobbers
 // offset 0; subsequent operations on a freed Spoor see magic != SPOOR_MAGIC
 // and extinct cleanly.
 #define SPOOR_MAGIC 0x53504F4F52BAD2EAULL    // 'SPOOR\0' || 0xBA 0xD2 0xEA
+
+// UM (union mounts): the opened-member snapshot retained on a union-directory
+// fd -- Plan 9's Chan.umh/umc. Built ONCE at STALK_OPEN of a union mount point
+// (>= 2 grafted members): every member is crossed to its leaf root, R-gated
+// (PERM_R; a denied member is SKIPPED, Plan 9 union semantics), and OPENED
+// (OREAD). The open is load-bearing, not incidental: a backend that gates
+// readdir on an opened fid (dev9p -> Stratum h_readdir's is_open check) EINVALs
+// a Treaddir on a clone-walked-but-unopened member, so an un-opened member is
+// silently dropped from the listing (UM-7 F1, the P0). `n` may be 0 (every
+// member denied/failed -> the union reads as empty). Immutable after the open;
+// each member clunked + the struct kfree'd with its Spoor. m[] is a snapshot
+// of the members that existed at open time (F4: taken atomically under one
+// ns_lock; F7: immune to later namespace edits) in declared search order.
+// UM-8c (R2-F1): each union member carries TWO fids. `opened` is OREAD-opened
+// for the per-member readdir (dev9p's Treaddir is accepted only on an opened
+// fid). `walkable` is an UNOPENED clone-walk minted BEFORE the open, used for
+// the readdir dedup Twalk -- a 9P server (Stratum h_walk) REJECTS a Twalk from
+// an OPENED fid (is_open -> EINVAL), so the dedup cannot reuse `opened`. For a
+// native Dev that opens in place both point at distinct Spoors; when Dev.open
+// returns a fresh Spoor, `opened` is that one and `walkable` is the pre-open clone.
+struct union_member {
+    struct Spoor *opened;      // OREAD-opened dir -- the per-member readdir source
+    struct Spoor *walkable;    // UNOPENED clone -- the dedup existence-probe source
+};
+
+struct union_snap {
+    struct Spoor *point;       // UM-8c (F5): the ref-held UNION MOUNT POINT this
+                               // snapshot was taken at. Lets an fd-relative
+                               // resolution / mutation off a union dirfd re-reach
+                               // the members via the mount table (the LIVE union;
+                               // readdir uses the m[] snapshot instead). NULL only
+                               // transiently while building; a POINT-ONLY snap
+                               // (n == 0, point set) tags an O_PATH union base
+                               // (R2-F2) -- the point without any member opens.
+    int           n;
+    struct union_member m[];   // (opened, walkable) per member, declared order
+};
+
+// union_snap_free -- clunk every opened member + kfree the array. NULL-safe.
+// Used by spoor_free_internal (a union fd's teardown) and by the STALK_OPEN
+// union path's error / no-cross cleanup.
+void union_snap_free(struct union_snap *snap);
 
 struct Spoor {
     u64           magic;       // SPOOR_MAGIC; clobbered by SLUB on free
@@ -141,11 +213,55 @@ struct Spoor {
                                // spoor_free_internal. Lifetime subset of the
                                // Spoor's; the field needs no lock (like qid/dev)
                                // -- only path->ref is concurrent (atomic).
+
+    struct union_snap *union_snap;  // UM (union mounts): NON-NULL iff this Spoor
+                               // was opened (STALK_OPEN) on a UNION mount point
+                               // (>= 2 grafted members). Holds the member
+                               // directories OPENED (OREAD) + R-gated + ref-held
+                               // AT OPEN TIME, in declared order (Plan 9's
+                               // Chan.umh/umc). ONLY spoor_readdir_run consults
+                               // it, to merge every member's entries (dedup
+                               // first-member-wins; specs/territory.tla
+                               // ReaddirDedupFirstWins). The opened Spoor's OWN
+                               // identity is member[0] (the final cross), so
+                               // fstat/type/every non-readdir op sees member[0].
+                               // Captured ONCE at open (UM-8 F1/F2/F7: dev9p
+                               // readdir needs an OPENED fid -- a clone-walked
+                               // member EINVALs Stratum's is_open gate; the
+                               // per-member R-gate; a stable snapshot immune to
+                               // later namespace edits), so a fork/dup-SHARED
+                               // union fd needs no lock. NEVER inherited by
+                               // spoor_clone (a clone is a walk position, not a
+                               // union open). Freed (clunk each member + kfree)
+                               // at spoor_free_internal.
 };
 
 _Static_assert(__builtin_offsetof(struct Spoor, magic) == 0,
                "magic must be at offset 0 — SLUB freelist write on free "
                "clobbers it (use-after-free defense)");
+
+// Spoor->flag carries independent bits mutated from DIFFERENT lock domains at
+// RUNTIME -- CNONBLOCK via the phenotype fcntl(F_SETFL) shell under the per-Proc
+// handle-table lock, CDEBUGOWNER via debug-attach under g_proc_table_lock -- on
+// a Spoor that fork SHARES between two Procs (fork refs the SAME object, it does
+// not copy it), so the two run concurrently on two CPUs. Two plain RMWs of one
+// word from two lock domains lost-update each other (a dropped CDEBUGOWNER leaks
+// the debug close-hook release gate), and the pipe fast path reads `flag`
+// locklessly. So every RUNTIME mutation and every LOCKLESS read of `flag` MUST
+// go through these atomics. One-time open/setup writes (COPEN/CSRVCLIENT/
+// CCONSWINSZONLY/CWALKONLY/CNBFRAME, set before the fd is installed and thus
+// before any peer Proc can reach the Spoor) may stay plain -- they cannot race a
+// runtime RMW. RELAXED is sufficient: the bits are independent and carry no
+// data-dependent ordering; atomicity, not ordering, is what a lost-update needs.
+static inline void spoor_flag_set(struct Spoor *c, u32 bits) {
+    __atomic_or_fetch(&c->flag, bits, __ATOMIC_RELAXED);
+}
+static inline void spoor_flag_clear(struct Spoor *c, u32 bits) {
+    __atomic_and_fetch(&c->flag, ~bits, __ATOMIC_RELAXED);
+}
+static inline u32 spoor_flag_get(const struct Spoor *c) {
+    return __atomic_load_n(&c->flag, __ATOMIC_RELAXED);
+}
 
 // Walkqid: the result of `dev->walk` — carries the Spoor positioned at
 // the deepest successful step plus the qids of every step that walked
@@ -254,6 +370,11 @@ void            walkqid_free(struct Walkqid *w);
 // open) and the stalk resolver (the per-component X-search stat fetch).
 struct t_stat;
 int spoor_stat_native(struct Spoor *c, struct t_stat *out);
+
+// #194: the backing file's size in bytes, or BURROW_FILE_LIMIT_UNKNOWN when
+// the Dev cannot answer (no stat_native / stat error). The caller owns the
+// failure policy -- see image.h's file_limit contract.
+u64 spoor_file_size(struct Spoor *c);
 
 // =============================================================================
 // Namespace name retention (#66 -- the Plan 9 Chan.path; I-33). The bridge

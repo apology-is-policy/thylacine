@@ -1,0 +1,211 @@
+From 77fc80a756e663541c5a3d14edf63f30119b5d7d Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Wed, 26 Aug 2026 00:37:29 +0200
+Subject: [PATCH 12/23] Thylacine Warp V-3b-3c-1: the host3d ring-destroy verb
+ (F1 full fix)
+
+The V-3b-3b audit's F1 [P1] interim made the backend's ridx alloc
+MONOTONIC because tapestryd retired a host3d ring only at ctx death, so a
+reused ridx collided with the still-installed server slot. V-3b-3c-1 adds
+the client-invocable ring/<ridx>/ctl destroy verb (tapestryd side); this
+is the backend half:
+
+- warp_ring_destroy(w, ridx): write "destroy" to ctx/<id>/ring/<ridx>/ctl,
+  running the server's per-ring teardown (disarm the weft share +
+  observe-and-reap the hostmem backing) and freeing the server ring slot.
+- thylacine_ridx_free re-added; ridx alloc is no longer monotonic.
+- thylacine_shmem_destroy_now: unmap -> destroy verb -> free the guest
+  ridx ONLY on the verb's success, preserving "guest ridx free <=> server
+  slot free" (a refused destroy leaves the ridx marked -- the interim's
+  leak-until-ctx-death for that one slot, fail-safe). The map fid t_close
+  drops the client mapping synchronously (dev9p close ->
+  weft_binding_release) before the destroy RPC, so the server reads
+  refcount==1 and reaps immediately.
+
+Witnessed on thyla-pi/KVM real V3D: warp ring-recreate ridx-reuse OK,
+THYLACINE-VENUS-PROVE PASS, Thylacine boot OK.
+
+Audit (holotype Fable 5): 0 P0 / 0 P1 / 1 P2 / 2 P3, not dirty. F2 [P3]:
+the two shmem_create error arms keep a bounded one-slot leak under
+now-false comments -- comments corrected; converging them (attempt
+destroy + free-on-success) is a V-3b-3c-2 follow-on.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../winsys/virgl/thylacine/warp_client.c      | 24 ++++++-
+ .../winsys/virgl/thylacine/warp_client.h      | 14 +++-
+ src/virtio/vulkan/vn_renderer_thylacine.c     | 66 ++++++++++++-------
+ 3 files changed, 79 insertions(+), 25 deletions(-)
+
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index 98fe5aa..8d902c2 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -493,7 +493,29 @@ void *warp_ring_map(struct warp_conn *w, uint32_t ridx, long *map_fd_out)
+ void warp_ring_unmap(long map_fd)
+ {
+    if (map_fd >= 0)
+-      t_close(map_fd); /* the clunk drops the mapping + pin -> ring reaps */
++      t_close(map_fd); /* the clunk drops only the client's MAPPING + pin; the
++                        * server ring is retired by warp_ring_destroy (or ctx
++                        * death), NOT by this clunk (V-3b-3b audit F1). */
++}
++
++/* V-3b-3c (F1 full fix): explicitly retire a host3d ring server-side. Closing
++ * the map fid (warp_ring_unmap) drops the client's MAPPING, but the server
++ * retires the ring only on this verb or at ctx death -- which is the whole
++ * reason the V-3b-3b interim had to allocate ridx monotonically (a re-minted
++ * ridx would collide with the still-installed slot). Writing "destroy" to
++ * ring/<ridx>/ctl runs the server's per-ring teardown (disarm the weft share +
++ * observe-and-reap the hostmem backing) and FREES the server ring slot, so the
++ * ridx becomes re-mintable. Call AFTER warp_ring_unmap so the server observes
++ * the client's mapping already gone and takes the immediate-reclaim arm.
++ * Best-effort (0 ok, <0 refused): a stale server slot is bounded by ctx death,
++ * and the guest frees its ridx regardless. */
++int warp_ring_destroy(struct warp_conn *w, uint32_t ridx)
++{
++   char path[64];
++   if (w->wedged || w->ctx == 0)
++      return -1;
++   snprintf(path, sizeof(path), "ctx/%u/ring/%u/ctl", w->ctx, ridx);
++   return write_verb(w->root, path, "destroy");
+ }
+ 
+ uint64_t warp_venus_submit(struct warp_conn *w, const void *bytes, uint32_t len)
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index 1b26a82..7ac8453 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -136,10 +136,20 @@ int warp_ring_create_host3d(struct warp_conn *w, uint32_t ridx, uint32_t bytes,
+ void *warp_ring_map(struct warp_conn *w, uint32_t ridx, long *map_fd_out);
+ 
+ /* Drop a host3d ring mapping: closes the map fid returned by warp_ring_map.
+- * The clunk drops the client's mapping AND the transferred pin, which lets
+- * tapestryd reclaim the ring slot server-side. Safe on a wedged connection. */
++ * The clunk drops the client's MAPPING AND the transferred pin -- but NOT the
++ * server ring, which is retired by warp_ring_destroy or at ctx death (V-3b-3b
++ * audit F1). Safe on a wedged connection. */
+ void warp_ring_unmap(long map_fd);
+ 
++/* V-3b-3c (F1 full fix): explicitly retire a host3d ring server-side and free
++ * its ridx for reuse. Writes "destroy" to ring/<ridx>/ctl, running the server's
++ * per-ring teardown (disarm the share + observe-and-reap the hostmem backing)
++ * and freeing the ring slot -- the piece warp_ring_unmap's clunk does NOT do.
++ * Call AFTER warp_ring_unmap so the server takes the immediate-reclaim arm.
++ * Returns 0 on success, -1 on refusal (best-effort: the guest frees the ridx
++ * regardless; a stale server slot is bounded by ctx death). */
++int warp_ring_destroy(struct warp_conn *w, uint32_t ridx);
++
+ /* Submit one opaque Venus command stream (raw SUBMIT_CMD/execbuffer bytes) to
+  * the ctx's submit file. With a host3d ring armed the server routes this to
+  * warp_venus_submit on the venus device-ctx; tapestryd never parses the
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+index c676b89..7422ebd 100644
+--- a/src/virtio/vulkan/vn_renderer_thylacine.c
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -128,17 +128,15 @@ struct thylacine {
+ /* ---- host3d ring-slot (ridx) allocation ---- */
+ 
+ /*
+- * ridx allocation is MONOTONIC (mark-only, never freed) on purpose. tapestryd
+- * retires a host3d ring ONLY at ctx death (there is no per-ring destroy verb
+- * yet, V-3b-3b audit F1) -- so a freed-then-reused ridx would collide with the
+- * still-installed server ring (`ring/new host3d <ridx>` returns E_INVAL for an
+- * occupied slot), permanently wedging shmem_create. Not freeing trades that
+- * deadlock for a bounded slot leak (<= 64 rings/ctx, reaped at ctx death),
+- * which is benign here: bring-up creates a handful of rings and the ctx dies
+- * right after teardown. OWED at V-3b-3c (where VkDeviceMemory + TLS-ring churn
+- * makes the 64-slot bound matter): a `ring/<ridx>/ctl destroy` verb that runs
+- * the existing per-ring `wring_teardown` + clears `ring_slots[ridx]`, called
+- * from shmem_destroy_now, freeing BOTH the guest ridx and the server ring.
++ * ridx allocation frees on destroy (V-3b-3c, F1 full fix). The V-3b-3b interim
++ * was MONOTONIC (never freed) because tapestryd retired a host3d ring only at
++ * ctx death, so a freed-then-reused ridx collided with the still-installed
++ * server ring (`ring/new host3d <ridx>` returns E_INVAL for an occupied slot),
++ * permanently wedging shmem_create. V-3b-3c added the per-ring destroy verb
++ * (`ring/<ridx>/ctl destroy`) that runs the server's per-ring teardown AND
++ * frees `ring_slots[ridx]`, so shmem_destroy_now can free BOTH the guest ridx
++ * (here) and the server ring -- reuse is now sound, and the 64-slot cap no
++ * longer leaks under VkDeviceMemory/TLS-ring churn.
+  */
+ static int
+ thylacine_ridx_alloc(struct thylacine *tly)
+@@ -149,7 +147,14 @@ thylacine_ridx_alloc(struct thylacine *tly)
+          return (int)i;
+       }
+    }
+-   return -1; /* all 64 ring slots consumed on this ctx (monotonic; F1) */
++   return -1; /* all 64 ring slots live on this ctx */
++}
++
++static void
++thylacine_ridx_free(struct thylacine *tly, uint32_t ridx)
++{
++   if (ridx < THY_RING_SLOTS)
++      tly->ring_bitmap &= ~(1ull << ridx);
+ }
+ 
+ /* ---- shmem: the coherent HOST3D ring the Venus driver lays its ring in ---- */
+@@ -158,15 +163,24 @@ static void
+ thylacine_shmem_destroy_now(struct vn_renderer *renderer,
+                             struct vn_renderer_shmem *shmem)
+ {
++   struct thylacine *tly = (struct thylacine *)renderer;
+    struct thylacine_shmem *ts = (struct thylacine_shmem *)shmem;
+-   (void)renderer;
+ 
+-   /* Closing the map fid drops the client's mapping + the transferred pin
+-    * (kernel-side). The server's host3d ring stays INSTALLED until ctx death
+-    * (there is no per-ring destroy verb yet -- V-3b-3b audit F1); the ridx is
+-    * deliberately NOT freed (monotonic alloc), so a later shmem_create can
+-    * never collide with the still-installed slot. See thylacine_ridx_alloc. */
++   /* Order (V-3b-3c, F1 full fix): (1) close the map fid -- drops the client's
++    * mapping + the transferred pin kernel-side, so tapestryd's ref count falls
++    * to its own map; (2) `ring/<ridx>/ctl destroy` -- retires the server ring
++    * (observe-and-reap the hostmem backing, immediate-reclaim arm since the
++    * mapping is already gone) and frees the server slot; (3) free the guest
++    * ridx so a later shmem_create can reuse it (sound now that the server slot
++    * is freed too). The V-3b-3b interim did only (1) + a monotonic ridx. */
+    warp_ring_unmap(ts->map_fd);
++   /* Free the guest ridx ONLY if the server retired its slot: that keeps the
++    * invariant "guest ridx free <=> server slot free", so a reused ridx never
++    * collides with a still-installed server ring. On a refused destroy (a
++    * wedged conn, or an already-gone ring) leave the ridx marked -- the
++    * V-3b-3b interim's leak-until-ctx-death posture, bounded to this one slot. */
++   if (warp_ring_destroy(&tly->warp, ts->ridx) == 0)
++      thylacine_ridx_free(tly, ts->ridx);
+ }
+ 
+ static struct vn_renderer_shmem *
+@@ -198,16 +212,24 @@ thylacine_shmem_create(struct vn_renderer *renderer, size_t size)
+    if (warp_ring_create_host3d(&tly->warp, (uint32_t)ridx, (uint32_t)rounded,
+                                &res_id) != 0) {
+       /* The mint may have installed the ring server-side before the info read
+-       * failed, so the ridx is NOT freed -- reusing it would collide with the
+-       * still-installed slot (F1). Monotonic; the ring reaps at ctx death. */
++       * failed; on this error path the ridx is NOT freed -- a bounded leak (one
++       * slot, reaped at ctx death), the conservative direction (never a
++       * collision). Converging it -- attempt `ring/<ridx>/ctl destroy` and free
++       * the ridx on success, as the happy path does -- is a V-3b-3c-2 follow-on
++       * (audit F2); the info-read failure is a device fault, not a client path. */
+       return NULL;
+    }
+ 
+    long map_fd = -1;
+    void *ptr = warp_ring_map(&tly->warp, (uint32_t)ridx, &map_fd);
+    if (!ptr) {
+-      /* The ring is minted (installed server-side) but unmapped. The ridx is
+-       * NOT freed -- the server retires the ring only at ctx death (F1). */
++      /* The ring is minted (installed server-side) but unmapped; on this error
++       * path the ridx is NOT freed -- a bounded leak (one slot, ctx-death
++       * reaped). The server DOES retire the ring on the destroy verb now, so
++       * converging this arm (issue `ring/<ridx>/ctl destroy` + free the ridx on
++       * success) is a V-3b-3c-2 follow-on (audit F2). It matters most for a
++       * client at its shared-map budget, whose every map fails here: 64 such
++       * leaks re-enter the F1 permanent-shmem_create-failure symptom. */
+       return NULL;
+    }
+ 
+-- 
+2.43.0
+

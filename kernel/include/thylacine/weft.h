@@ -352,16 +352,23 @@ struct Burrow;
 //                       with the distinct device-WRITTEN safety argument
 //                       recorded on KObj_DMA.gpu_bo. A separate kind so the
 //                       binding names what it binds.
+//   WEFT_BIND_HOSTMEM -- a Venus host-visible BAR subrange (BURROW_TYPE_HOSTMEM,
+//                       GPU-DESIGN §6.2.1): the same map-only binding SHAPE as
+//                       the weave/gpu_bo (no ring view, no Tweftio, clunk-unmap,
+//                       orphan-reaped) but backed by a PCI hostmem BAR rather
+//                       than RAM; the client maps host-visible memory directly.
 enum weft_bind_kind {
-    WEFT_BIND_RING   = 0,
-    WEFT_BIND_WEAVE  = 1,
-    WEFT_BIND_GPU_BO = 2,
+    WEFT_BIND_RING    = 0,
+    WEFT_BIND_WEAVE   = 1,
+    WEFT_BIND_GPU_BO  = 2,
+    WEFT_BIND_HOSTMEM = 3,
 };
 
 // True for the map-only kinds (WEAVE | GPU_BO) -- the bindings with no ring
 // view, whose clunk unmaps and whose orphans the reaper force-reclaims.
 static inline bool weft_kind_maponly(int kind) {
-    return kind == WEFT_BIND_WEAVE || kind == WEFT_BIND_GPU_BO;
+    return kind == WEFT_BIND_WEAVE || kind == WEFT_BIND_GPU_BO ||
+           kind == WEFT_BIND_HOSTMEM;
 }
 
 // The per-data-fd binding recorded in dev9p_priv once a flow's ring / a

@@ -32,6 +32,13 @@ set ::env(THYLACINE_ACCEL) hvf
 
 source [file join [file dirname [info script]] lib.exp]
 
+# H-1 (audit F1): full-session transcript so the Beacon transport canary --
+# which prints BEFORE the first prompt, inside the region lc_login consumes
+# -- can be asserted at the end (the ls-gfx-live log_file idiom).
+set transcript /tmp/ls-3a-[pid].log
+file delete -force $transcript
+log_file -a $transcript
+
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
@@ -59,6 +66,18 @@ lc_send "clear"
 lc_run_expect "echo ls3a-screen-ok-9461" "ls3a-screen-ok-9461"
 lc_pass "LS-3a(c): clear runs; shell alive afterwards"
 
+# H-1 (audit F1): the Beacon tier transport canary. ut fresh-opens the
+# ungated /dev/beacon leaf, exports /env/BEACON, and says so EVERY session
+# (the serial console advertises nothing -> none). A regression to the
+# dead-read shape (the shared-offset consctl read the round-1 P1 found)
+# silences this line. (log_file buffers; close before grepping.)
+log_file
+if {[catch {exec grep -q "ut: beacon none exported" $transcript}]} {
+    lc_fail "the Beacon tier transport canary is missing (ut: beacon none exported)"
+}
+lc_pass "LS-3a(d): the Beacon tier transport is alive (none exported)"
+file delete -force $transcript
+
 lc_quit
-lc_pass "LS-CI ls-3a: ls + stat + clear all verified"
+lc_pass "LS-CI ls-3a: ls + stat + clear + beacon-transport all verified"
 exit 0

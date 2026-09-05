@@ -5,7 +5,7 @@
 // host times out, it does not hang). RTT is measured with the LS-K monotonic
 // clock.
 //
-// A presentation tool -> the Bonfire palette by default (--color=never for
+// A presentation tool -> the Bonfire palette on the console (auto; --color=never for
 // plain), with the closing statistics in a boxed card. netd owns the NIC (I-5),
 // so ping touches no hardware and reaches only the `/net` its territory grants
 // (I-1/I-23/I-28). A loopback target (127.0.0.1) auto-answers in-guest (net-8a);
@@ -38,7 +38,7 @@ const USAGE: &str = "\
 usage: ping [-c COUNT] [--color[=WHEN]] HOST
   Send ICMP echo requests to HOST and report the round-trip time.
   -c COUNT        stop after COUNT requests (default 4)
-  --color[=WHEN]  colorize: always (default) | never | auto
+  --color[=WHEN]  colorize: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -61,7 +61,7 @@ fn run(args: Args) -> i64 {
 
     let mut count: u32 = 4;
     let mut host: Option<&str> = None;
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut i = 1;
     while let Some(a) = args.get_str(i) {
         i += 1;
@@ -218,7 +218,8 @@ impl core::fmt::Display for FmtMs {
     }
 }
 
-/// `--color=auto` stub; true until a kernel TTY check lands.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

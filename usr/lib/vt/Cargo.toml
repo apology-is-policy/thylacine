@@ -1,0 +1,22 @@
+# vt -- the shared VT interpreter core (HALCYON.md section 13.4; extracted
+# from usr/aurora/src/vt.rs at H-2a, behavior-preserving).
+#
+# A byte stream in, a cell grid out: the VT100-core + SGR/truecolor subset,
+# the Bonfire/parchment/spinifex palettes, and the cell grid aurora renders
+# and halcyond's raw-VT panes + transcript inline interpreter consume.
+#
+# PURE no_std + alloc, ZERO dependencies (the beacon-crate pattern): the
+# parser is host-tested (`cargo test -p vt --target aarch64-apple-darwin`).
+# The pixel side (atlas blit, damage) stays with each consumer.
+#
+# The name: `vt` is the reader-expected standard term (the naming
+# discipline's "don't force it" rule); section 13.9's held thematic slot is
+# resolved in favor of the standard name.
+[package]
+name = "vt"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]

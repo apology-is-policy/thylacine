@@ -19,7 +19,11 @@
  *   setsid + TIOCSCTTY + tcsetpgrp-> the kernel session dance (89/95/96/97)
  *   cooked ISIG ^C                -> SIGINT handler fires; the 0x03 is
  *                                    CONSUMED (never a slave byte) --
- *                                    SignalXorByte through the POSIX view
+ *                                    SignalXorByte through the POSIX view --
+ *                                    and it DISCARDS the pending canonical
+ *                                    line (POSIX NOFLSH-clear; PTY-DESIGN
+ *                                    "ISIG characters DISCARD the pending
+ *                                    line", 2026-08-17)
  *   close(master)                 -> SIGHUP handler fires + slave EOF
  *                                    (drain-then-EOF)
  *   kill/raise of a tty signum    -> EPERM (receive-only; the kernel
@@ -179,11 +183,17 @@ int main(int argc, char **argv)
 	CHECK(write(mfd, "x\x03y\r", 4) == 4, "master types x ^C y CR");
 	char buf[16];
 	long r = read(sfd, buf, sizeof(buf));
-	CHECK(r == 3 && buf[0] == 'x' && buf[1] == 'y' && buf[2] == '\n',
-	      "slave line is xy\\n (the ^C consumed, CR->NL)");
+	/* POSIX NOFLSH-clear (PTY-DESIGN "ISIG characters DISCARD the pending
+	 * line", 2026-08-17): the ^C is consumed AND it discards the pending "x",
+	 * so the slave line is "y\n" -- as on Linux. (It used to read "xy\n": the
+	 * old mode-write reset had masked the missing flush by accident.) */
+	CHECK(r == 2 && buf[0] == 'y' && buf[1] == '\n',
+	      "slave line is y\\n (the ^C consumed + it discarded the pending x, CR->NL)");
 	CHECK(wait_flag(&got_int, sfd), "SIGINT handler fired (ISIG)");
-	/* drain the echo so the master side is clean: "xy\r\n" (the ^C is
-	 * never echoed; the NL echo is ONLCR-expanded). */
+	/* drain the echo so the master side is clean: "xy\r\n" -- the x was
+	 * echoed when typed (the discard is of the assembly, not of the echo
+	 * already on the master side); the ^C is never echoed; the NL echo is
+	 * ONLCR-expanded. */
 	r = read(mfd, buf, sizeof(buf));
 	CHECK(r == 4 && buf[0] == 'x' && buf[1] == 'y' &&
 	      buf[2] == '\r' && buf[3] == '\n', "echo is xy CRNL (no ^C leak)");

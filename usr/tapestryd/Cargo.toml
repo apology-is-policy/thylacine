@@ -20,3 +20,4 @@ test-mode = []
 [dependencies]
 libdriver = { path = "../lib/libdriver" }
 libthyla-rs = { path = "../lib/libthyla-rs" }
+libhalcyon = { path = "../lib/libhalcyon" }

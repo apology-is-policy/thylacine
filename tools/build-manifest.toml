@@ -1,0 +1,161 @@
+# tools/build-manifest.toml -- the Thylacine build input manifest.
+#
+# The single pinned record of every input the build needs that does NOT already
+# travel in this repo: the sibling forks (by commit), the manual-drop cache
+# inputs (by URL + sha256), the network input, and the remotely-built Clade
+# artifacts. Design: docs/BUILD-CONFIG-DESIGN.md section 5.
+#
+# Consumed by tools/forage.sh (gathers what it can, instructs on the rest) and by
+# build.sh's detect-and-instruct (an absent chunk input prints the remedy here
+# instead of skipping silently). This is ALSO the payload definition the install
+# disc (docs/INSTALLER.md) will consume -- the shared foundation, not a side quest.
+#
+# TOML because the entries are structured (repo + commit + patch-series + hash);
+# the build CONFIG artifact (configs/*.config, section 4) stays flat KEY=value.
+# tools/forage.sh reads a controlled TOML SUBSET (this file): [section.name]
+# tables + `key = "value"` / `key = bareword` + `#` comments. Do not add arrays,
+# inline tables, or multi-line strings without extending the reader (manifest_get).
+#
+# The `forageable` field tells forage.sh what it can DO with each input:
+#   clone         git clone/fetch the repo + checkout `commit` into `path`
+#   download      curl `url` into `dir`/`file`, then verify `sha256`
+#   remote-pull   run `pull` (delegates to the Clade builder; needs it reachable)
+#   remote-source a source pin for a remotely-built artifact; not fetched locally
+#   manual        no public source; the operator must supply it at `path`
+#   auto-at-build build.sh fetches it itself at build time; no manual action
+
+[meta]
+schema  = "1"
+updated = "2026-08-24"
+
+# --- forks: sibling git trees, pinned by commit ------------------------------
+# `path` is where the build expects the tree (the `env` override points here too);
+# `clone_dest` (where given) is where `git clone` lands it when it differs.
+
+[fork.go]
+path       = "~/projects/go-thylacine"
+env        = "GOFORK"
+probe      = "bin/go"
+repo       = "https://github.com/apology-is-policy/go-thylacine.git"
+commit     = "4bb69d2"
+branch     = "master"
+feeds      = "the Go toolchain (/goroot), the go driver, gopls, the Go boot probes"
+forageable = "clone"
+
+[fork.ambush]
+path       = "~/projects/ambush"
+env        = "AMBUSHFORK"
+probe      = ".git"
+repo       = "https://github.com/apology-is-policy/ambush.git"
+commit     = "563bae9"
+branch     = "master"
+feeds      = "the ambush debugger (staged into the /goroot bake)"
+forageable = "clone"
+
+[fork.stratum]
+path       = "~/projects/stratum/v2"
+clone_dest = "~/projects/stratum"
+env        = "STRATUM_SRC"
+probe      = "CMakeLists.txt"
+repo       = "https://github.com/apology-is-policy/stratum.git"
+branch     = "thylacine-pouch-arm"
+feeds      = "stratumd (the Stratum FS daemon; every image needs it)"
+forageable = "clone"
+
+[fork.gopls]
+path       = "~/projects/gopls"
+env        = "GOPLSFORK"
+probe      = ".git"
+commit     = "f65d347"
+branch     = "master"
+feeds      = "gopls (the Go IDE server; staged into the /goroot bake)"
+forageable = "manual"
+
+[fork.llvm]
+path       = "~/projects/llvm-thylacine"
+repo       = "https://github.com/llvm/llvm-project.git"
+commit     = "251b5b5"
+branch     = "thylacine"
+base       = "llvmorg-22.1.8"
+patches    = "a 6-patch series over llvmorg-22.1.8"
+feeds      = "the Clade device toolchain (built on thyla-keep; source pin only)"
+forageable = "remote-source"
+
+[fork.mesa]
+path       = "~/projects/mesa-thylacine"
+repo       = "https://gitlab.freedesktop.org/mesa/mesa.git"
+commit     = "b7f9ed2"
+feeds      = "the Clade GL stack (virgl/V3D; built remotely; source pin only)"
+forageable = "remote-source"
+
+# --- cache: manual-drop inputs, sha256-pinned --------------------------------
+# The sha256 is the source of truth; the URL is the canonical Alpine mirror. If a
+# URL 404s (Alpine archives an old -rN when a newer one lands), the sha still
+# identifies the exact file -- fetch it from the Alpine archive and drop it in.
+
+[cache.alpine]
+file       = "alpine-minirootfs-3.21.0-aarch64.tar.gz"
+dir        = "build/cache"
+url        = "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.0-aarch64.tar.gz"
+sha256     = "f31202c4070c4ef7de9e157e1bd01cb4da3a2150035d74ea5372c5e86f1efac1"
+feeds      = "CHUNK_ALPINE (the VIVARIUM Alpine minirootfs bundle)"
+forageable = "download"
+
+[cache.busybox]
+file       = "busybox-static-1.37.0-r14.apk"
+dir        = "build/cache"
+url        = "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/busybox-static-1.37.0-r14.apk"
+sha256     = "6fd7ea97062beb51fa785ba858f823e1dfe4daf6bfa91ff4d5359b1061988c69"
+feeds      = "CHUNK_ALPINE (the static busybox shell -- stock Alpine ELFs are dynamic-PIE)"
+forageable = "download"
+
+[cache.static-curl]
+file       = "curl-linux-aarch64-musl-8.18.0.tar.xz"
+dir        = "build/cache"
+url        = "https://github.com/stunnel/static-curl/releases/download/8.18.0/curl-linux-aarch64-musl-8.18.0.tar.xz"
+sha256     = "4df5282b8ef0e336c64faa52b546272b421146d522733606ae5343b416b646b2"
+feeds      = "the alpine-net bundle's /usr/bin/curl (the ROADMAP 9.2 curl-fetches-a-URL vehicle)"
+forageable = "download"
+
+# --- network: build.sh fetches it itself at build time -----------------------
+
+[network.quake]
+file       = "quake106.zip"
+dir        = "build/tyrquake"
+url        = "https://ftp.gwdg.de/pub/misc/ftp.idsoftware.com/idstuff/quake/quake106.zip"
+sha256     = "ec6c9d34b1ae0252ac0066045b6611a7919c2a0d78a3a66d9387a8f597553239"
+pak_sha256 = "35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a946af"
+feeds      = "CHUNK_QUAKE (the tyrquake shareware pak0.pak)"
+forageable = "auto-at-build"
+
+# --- remote: Clade artifacts built on thyla-keep, pulled prebuilt ------------
+# These cannot be cheaply rebuilt on the Mac (the cross-LLVM is ~45 GiB of build
+# tree). forage delegates the pull to the Clade builder driver, which needs the
+# permanent builder reachable; otherwise it instructs.
+
+[remote.clade_llvm]
+path          = "build/clade/llvm-build"
+probe         = "build/clade/stage/bin"
+builder       = "thyla-keep"
+source_commit = "251b5b5 (llvm-thylacine, branch thylacine, over llvmorg-22.1.8)"
+pull          = "tools/clade-keep-build.sh fetch"
+rebuild       = "tools/clade-gcp-build.sh"
+feeds         = "CHUNK_CLADE (/clade + /storm: the on-device C/C++ toolchain)"
+forageable    = "remote-pull"
+
+[remote.clade_gl]
+path          = "build/clade/gl"
+probe         = "build/clade/gl/include/GL"
+builder       = "thyla-pi | thyla-keep"
+source_commit = "b7f9ed2 (mesa-thylacine)"
+pull          = "tools/clade-keep-build.sh fetch"
+feeds         = "the Clade GL stack (virgl on V3D)"
+forageable    = "remote-pull"
+
+# --- pairing policy: the crypto-paired atomic unit ---------------------------
+# Not an input to fetch -- a constraint on outputs. Recorded here because it is
+# the rule the installer payload logic must honor.
+
+[pairing.stratum_pool]
+files  = "build/fixtures/pool.img + build/fixtures/system.key + build/ramfs.cpio"
+policy = "one atomic unit: a fresh random key is minted per pool bake, so a pool and a ramfs from different bakes mismatch (STM_EBADTAG). Never promise a reproducible pool unless THYLACINE_MKFS_SEED is pinned; re-bake both paired, never one alone."

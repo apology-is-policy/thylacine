@@ -395,6 +395,11 @@ int weft_claimed_kind(const struct Burrow *v, u32 ring_entries) {
         return (ring_entries == 0u) ? WEFT_BIND_WEAVE : -1;
     if (v->type == BURROW_TYPE_DMA && v->kobj_dma != NULL && v->kobj_dma->gpu_bo)
         return (ring_entries == 0u) ? WEFT_BIND_GPU_BO : -1;
+    // V-2: a Venus host-visible BAR subrange. Map-only like weave/gpu_bo (no
+    // ring view); entries == 0 is the whole-region contract. kobj_pci non-NULL
+    // is the type's liveness witness (create-immutable, coherent lock-free).
+    if (v->type == BURROW_TYPE_HOSTMEM && v->kobj_pci != NULL)
+        return (ring_entries == 0u) ? WEFT_BIND_HOSTMEM : -1;
     // Anything else in the registry would be a register-gate breach; the
     // claim-side re-check keeps it unmappable regardless (defense-in-depth).
     return -1;
@@ -460,16 +465,26 @@ struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
 struct weft_binding *weft_binding_alloc_maponly(struct Burrow *burrow,
                                                 u64 guest_va, u32 size,
                                                 u32 map_pid) {
-    // Defense-in-depth: only a kernel-minted map-only subtype (weave / gpu_bo)
-    // reaches here (the caller derived the kind via weft_claimed_kind);
-    // re-check anyway so a future caller cannot mint a map-only binding over
-    // an inadmissible region. The recorded kind names the actual subtype.
-    if (!burrow || burrow->type != BURROW_TYPE_DMA || burrow->kobj_dma == NULL)
-        return NULL;
+    // Defense-in-depth: only a kernel-minted map-only subtype (weave / gpu_bo /
+    // hostmem) reaches here (the caller derived the kind via weft_claimed_kind);
+    // re-check anyway so a future caller cannot mint a map-only binding over an
+    // inadmissible region. The recorded kind names the actual subtype and MUST
+    // agree with weft_claimed_kind's admission -- the two widen TOGETHER. V-2
+    // added the HOSTMEM arm to weft_claimed_kind (line ~401) but not here, so a
+    // hostmem share registered + claimed fell through to NULL (the client's
+    // t_weft_map unwound to -1): the map-only claim path was a live-looking
+    // half-widen (V-3b-1c-2b F1). The HOSTMEM arm closes it.
+    if (!burrow) return NULL;
     u32 kind;
-    if (burrow->kobj_dma->weave)       kind = WEFT_BIND_WEAVE;
-    else if (burrow->kobj_dma->gpu_bo) kind = WEFT_BIND_GPU_BO;
-    else                               return NULL;
+    if (burrow->type == BURROW_TYPE_DMA && burrow->kobj_dma != NULL) {
+        if (burrow->kobj_dma->weave)       kind = WEFT_BIND_WEAVE;
+        else if (burrow->kobj_dma->gpu_bo) kind = WEFT_BIND_GPU_BO;
+        else                               return NULL;
+    } else if (burrow->type == BURROW_TYPE_HOSTMEM && burrow->kobj_pci != NULL) {
+        kind = WEFT_BIND_HOSTMEM;
+    } else {
+        return NULL;
+    }
 
     struct weft_binding *b = kmalloc(sizeof(*b), KP_ZERO);
     if (!b) return NULL;

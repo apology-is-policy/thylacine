@@ -17,6 +17,18 @@ immediately look that we're not in unix, but something far more exotic."*
 
 The discipline is not gone -- it is **relocated**. See "The color discipline".
 
+> **2026-09-01 — this visual language becomes Beacon's cells tier.** The Halcyon
+> kickoff adopted `docs/BEACON.md` (the semantic output markup): programs will
+> describe output once (tables, runs, typed objects) through a `libthyla-rs`
+> `beacon` module, which realizes it per capability tier — `rich` (Halcyon) as
+> Beacon frames, **`cells` as exactly the box+SGR emission this document
+> specifies** (the code path relocates into the library; behavior preserved
+> verbatim), `none`/`--color=never` as plain bytes. Three consequences here:
+> the color discipline below governs Beacon identically (payload tools emit
+> no frames at any tier, ever); `--color=WHEN` generalizes into the tier gate
+> (BEACON.md §4); and **the parked `auto` unparks** — the Beacon arc pulls
+> `SYS_FD_DEVCLASS` forward as a real dependency (H-1, HALCYON.md §11).
+
 ## The color discipline (load-bearing)
 
 Color belongs on **presentation** and **diagnostics**, NEVER on a data
@@ -131,6 +143,11 @@ defaults color-ON (you look at it; piping is rare); a **payload** tool (grep, an
 any future filter that gains optional color) defaults color-OFF (it is usually
 piped; `--color` opts in). Both unify to `auto` once `SYS_FD_DEVCLASS` makes TTY
 detection real -- then the default is simply "color iff a terminal."
+**UNIFIED at H-1c-2 (2026-09-01)**: every `stdout_is_console` stub now calls
+`libthyla_rs::stdout_is_terminal()` (dc == 'c') and every color-bearing tool
+defaults `Auto` -- interactive output keeps the exotic look, `tool | tool` is
+byte-clean by construction. In-guest proof: coreutil-smoke's piped-`ls`
+zero-ESC legs.
 - **stat / id / ns / which / env / date / uname**: labeled, lightly colored
   presentation (the label dim, the value in the kind color); a boxed form where a
   multi-field record warrants it.

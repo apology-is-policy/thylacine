@@ -2,7 +2,7 @@
 //
 // The Plan-9 identity the kernel knows an object by: type:version:path. Unix
 // hides the inode behind `ls -i`; Thylacine foregrounds the qid. A graft has no
-// qid (fstat cannot cross it). A presentation tool -> color on by default.
+// qid (fstat cannot cross it). A presentation tool -> color on the console (auto).
 
 #![no_std]
 #![no_main]
@@ -27,7 +27,7 @@ usage: qid [--color[=WHEN]] PATH...
   Print each PATH's 9P qid (type:version:path) -- the Plan-9 identity the
   kernel knows the object by (type d/f/c). A graft has no qid: fstat
   cannot cross a live kernel namespace.
-  --color[=WHEN]  colorize: always (default) | never | auto
+  --color[=WHEN]  colorize: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -66,7 +66,7 @@ fn run(args: Args) -> i64 {
     if let Some(rc) = usage::help_if_requested(args, USAGE) {
         return rc;
     }
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut paths: Vec<&str> = Vec::new();
     let mut opts_done = false;
     let mut i = 1;
@@ -143,8 +143,8 @@ fn run(args: Args) -> i64 {
     status
 }
 
-/// `--color=auto` stub (no cooked-mode TTY check yet; see the SYS_FD_DEVCLASS
-/// spec). True so an explicit `--color=auto` colorizes.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

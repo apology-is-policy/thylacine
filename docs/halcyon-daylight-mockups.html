@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Halcyon — Daylight · visual specification v1</title>
+<style>
+/* ============================================================
+   HALCYON — Daylight
+   Visual specification v1, token source.
+
+   Light source is NNW. Every bevel value derives from that one
+   fact. If you change the light direction, regenerate all four
+   bevel values together; never adjust a single edge.
+   ============================================================ */
+
+:root {
+  /* ---- typefaces ---------------------------------------- */
+  --hal-prop: "DejaVu Sans Condensed", "Arial Narrow", sans-serif;
+  --hal-mono: "Cornucopia", "Iosevka Term", "Fira Code", monospace;
+
+  /* ---- metrics ------------------------------------------ */
+  --hal-bevel: 2px;   /* pane bevel width */
+  --hal-gap: 2px;     /* inter-pane gap and workspace padding */
+  --hal-hair: 1px;    /* structural hairline */
+  --hal-header-h: 20px;
+  --hal-status-h: 20px;
+
+  /* ---- ground ------------------------------------------- */
+  --hal-floor: #8a7660;      /* workspace floor; bevel midpoint */
+  --hal-surface: #f2ebe0;    /* pane surface, parchment */
+  --hal-header: #cec4b6;     /* tag bar */
+  --hal-raised: #bdb0a0;     /* pill background */
+  --hal-border: #a89880;     /* explicit strokes, cast shadow */
+  --hal-hairline: #cec4b6;   /* inner hairline — matches header */
+
+  /* ---- ink ---------------------------------------------- */
+  --hal-fg: #1a120a;
+  --hal-fg-dim: #3a2e22;
+  --hal-fg-muted: #6a5a48;
+  --hal-fg-subtle: #9a8878;
+
+  /* ---- bevel, NNW --------------------------------------- */
+  --hal-bevel-top: #f8f2e6;     /* key light, near-perpendicular */
+  --hal-bevel-left: #e2d6c0;    /* grazing */
+  --hal-bevel-right: #362410;   /* facing away, some bounce */
+  --hal-bevel-bottom: #221405;  /* fully shadowed */
+
+  /* ---- accent ------------------------------------------- */
+  --hal-ember: #e07840;
+  --hal-ember-dim: #b85f2a;
+  --hal-ember-deep: #c86030;
+
+  /* ---- live tile: sage (exit 0) ------------------------- */
+  --hal-sage: #1e5844;
+  --hal-sage-tint: #b8ccc4;
+  --hal-sage-raised: #a6bdb4;
+  --hal-sage-border: #86a096;
+  --hal-sage-fg: #0c2820;
+  --hal-sage-fg-dim: #14342a;
+  --hal-sage-fg-muted: #33604f;
+
+  /* ---- live tile: cinnabar (exit non-zero) -------------- */
+  --hal-cinnabar: #982818;
+  --hal-cinnabar-tint: #dcb8b0;
+  --hal-cinnabar-raised: #d0a89e;
+  --hal-cinnabar-border: #b88c80;
+  --hal-cinnabar-fg: #3c1008;
+  --hal-cinnabar-fg-dim: #521a10;
+  --hal-cinnabar-fg-muted: #7a4034;
+
+  /* ---- syntax, light-shifted from Bonfire --------------- */
+  --hal-slate: #3a4878;
+  --hal-sage-syn: #1e5844;
+  --hal-sand: #7a5020;
+  --hal-moss: #3a5818;
+  --hal-ash: #6a3828;
+  --hal-dusk: #4a3868;
+  --hal-smoke: #6a7060;
+  --hal-fen: #1e5828;
+
+  /* ---- embedded terminal (Bonfire, unchanged) ----------- */
+  --bf-bg: #0e0c0c;
+  --bf-surface: #2a1f1c;
+  --bf-fg: #e4ddd8;
+  --bf-fg-subtle: #5a4e48;
+  --bf-path: #9a8f8a;
+  --bf-ember: #e07840;
+  --bf-slate: #8a9ac8;
+  --bf-sage: #8ab8a8;
+  --bf-sand: #c8a882;
+  --bf-moss: #b8d098;
+  --bf-ash: #b07060;
+  --bf-fen: #6a9a6a;
+  --bf-cinnabar: #c06050;
+
+  /* ---- status bar --------------------------------------- */
+  --hal-status-bg: #1a120a;
+  --hal-status-fg: #f2ebe0;
+  --hal-status-muted: #c8b89a;
+  --hal-status-idle: #3a2e22;
+}
+
+/* ============================================================
+   WORKSPACE
+   ============================================================ */
+
+.hal-wm {
+  display: grid;
+  grid-template-rows: 1fr var(--hal-status-h);
+  font-family: var(--hal-prop);
+  overflow: hidden;
+}
+
+.hal-workspace {
+  display: grid;
+  gap: var(--hal-gap);
+  padding: var(--hal-gap);
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--hal-floor);
+}
+
+.hal-col {
+  display: grid;
+  gap: var(--hal-gap);
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* ============================================================
+   PANE
+   Bevel is uniform across all panes. It says "this is a pane",
+   never "this pane is focused".
+   ============================================================ */
+
+.hal-pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  background: var(--hal-surface);
+  border-style: solid;
+  border-width: var(--hal-bevel);
+  border-top-color: var(--hal-bevel-top);
+  border-left-color: var(--hal-bevel-left);
+  border-right-color: var(--hal-bevel-right);
+  border-bottom-color: var(--hal-bevel-bottom);
+}
+
+/* Inner hairline. Must be a border, not a shadow: opaque children
+   paint over inset shadows. Matches the header background, so it
+   vanishes alongside tag bars and reads only against content. */
+.hal-pane-inner {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: var(--hal-hair) solid var(--hal-hairline);
+}
+
+/* ============================================================
+   TAG BAR
+   ============================================================ */
+
+.hal-tag {
+  display: flex;
+  align-items: center;
+  height: var(--hal-header-h);
+  padding: 0 6px;
+  gap: 5px;
+  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--hal-header);
+  border-bottom: var(--hal-hair) solid var(--hal-border);
+}
+
+/* Header sitting below its content, Acme-style. */
+.hal-tag--below {
+  border-bottom: none;
+  border-top: var(--hal-hair) solid var(--hal-border);
+}
+
+/* The tile a resting pane would return to. */
+.hal-tag--active { border-bottom-color: var(--hal-ember-deep); }
+.hal-tag--active.hal-tag--below {
+  border-bottom: none;
+  border-top-color: var(--hal-ember-deep);
+}
+
+/* The live tile — the one holding input. Takes the status key. */
+.hal-tag--live-ok {
+  background: var(--hal-sage-tint);
+  border-bottom-color: var(--hal-sage);
+}
+.hal-tag--live-ok.hal-tag--below {
+  border-bottom: none;
+  border-top-color: var(--hal-sage);
+}
+.hal-tag--live-err {
+  background: var(--hal-cinnabar-tint);
+  border-bottom-color: var(--hal-cinnabar);
+}
+.hal-tag--live-err.hal-tag--below {
+  border-bottom: none;
+  border-top-color: var(--hal-cinnabar);
+}
+
+.hal-tag-name {
+  font-size: 10.5px;
+  font-weight: 500;
+  flex-shrink: 0;
+  color: var(--hal-fg-muted);
+}
+.hal-tag--active .hal-tag-name { color: var(--hal-fg); }
+.hal-tag--live-ok .hal-tag-name { color: var(--hal-sage-fg); }
+.hal-tag--live-err .hal-tag-name { color: var(--hal-cinnabar-fg); }
+
+.hal-tag-rule {
+  font-size: 10px;
+  flex-shrink: 0;
+  color: var(--hal-border);
+}
+.hal-tag--live-ok .hal-tag-rule { color: var(--hal-sage-border); }
+.hal-tag--live-err .hal-tag-rule { color: var(--hal-cinnabar-border); }
+
+.hal-tag-trail {
+  margin-left: auto;
+  font-family: var(--hal-mono);
+  font-size: 9.5px;
+  flex-shrink: 0;
+  padding-left: 4px;
+  white-space: nowrap;
+  color: var(--hal-fg-dim);
+}
+.hal-tag--live-ok .hal-tag-trail { color: var(--hal-sage-fg-dim); }
+.hal-tag--live-err .hal-tag-trail { color: var(--hal-cinnabar-fg-dim); }
+
+/* Command pills. Executable text, not labels. */
+.hal-pill {
+  font-family: var(--hal-mono);
+  font-size: 9.5px;
+  padding: 0 4px;
+  line-height: 14px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--hal-fg-muted);
+  background: var(--hal-raised);
+  border: var(--hal-hair) solid var(--hal-border);
+}
+.hal-pill--fold {
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.hal-pill--on {
+  color: var(--hal-ember);
+  background: var(--hal-surface);
+  border-color: var(--hal-ember-dim);
+}
+.hal-tag--live-ok .hal-pill {
+  color: var(--hal-sage-fg-muted);
+  background: var(--hal-sage-raised);
+  border-color: var(--hal-sage-border);
+}
+.hal-tag--live-ok .hal-pill--on {
+  color: var(--hal-sage);
+  background: var(--hal-surface);
+  border-color: var(--hal-sage);
+}
+.hal-tag--live-err .hal-pill {
+  color: var(--hal-cinnabar-fg-muted);
+  background: var(--hal-cinnabar-raised);
+  border-color: var(--hal-cinnabar-border);
+}
+.hal-tag--live-err .hal-pill--on {
+  color: var(--hal-cinnabar);
+  background: var(--hal-surface);
+  border-color: var(--hal-cinnabar);
+}
+
+/* ============================================================
+   CONTENT REGION
+   ============================================================ */
+
+.hal-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Live content is bounded on three sides; the live tag bar's
+   own bottom edge closes the top. Header and content read as
+   one object. */
+.hal-body--lit-ok {
+  border-left: var(--hal-hair) solid var(--hal-sage);
+  border-right: var(--hal-hair) solid var(--hal-sage);
+  border-bottom: var(--hal-hair) solid var(--hal-sage);
+}
+.hal-body--lit-err {
+  border-left: var(--hal-hair) solid var(--hal-cinnabar);
+  border-right: var(--hal-hair) solid var(--hal-cinnabar);
+  border-bottom: var(--hal-hair) solid var(--hal-cinnabar);
+}
+
+/* When the tile's tag bar sits below its content, the unit does not
+   end at the content — the bar does. Leave the bottom open and let
+   the bar's top edge serve as the separator. */
+.hal-body--lit-ok-open {
+  border-left: var(--hal-hair) solid var(--hal-sage);
+  border-right: var(--hal-hair) solid var(--hal-sage);
+}
+.hal-body--lit-err-open {
+  border-left: var(--hal-hair) solid var(--hal-cinnabar);
+  border-right: var(--hal-hair) solid var(--hal-cinnabar);
+}
+
+/* Cast shadow. Owned by the live tile, never borrowed from a
+   neighbouring header — so it survives when the live tile is
+   last in the stack. NNW light means it falls below only. */
+.hal-cast {
+  height: var(--hal-hair);
+  background: var(--hal-border);
+  flex-shrink: 0;
+}
+
+/* ---- transcript ---------------------------------------- */
+
+.hal-transcript {
+  flex: 1;
+  padding: 5px 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--hal-surface);
+}
+
+.hal-block {
+  border-left: 2px solid var(--hal-raised);
+  padding: 3px 0 3px 8px;
+  margin-bottom: 6px;
+}
+.hal-block--current { border-left-color: var(--hal-ember); }
+
+.hal-prompt { display: flex; align-items: baseline; margin-bottom: 2px; }
+.hal-path {
+  font-family: var(--hal-mono);
+  font-size: 10px;
+  color: var(--hal-fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hal-turnstile {
+  font-family: var(--hal-mono);
+  font-size: 10px;
+  padding: 0 3px;
+  flex-shrink: 0;
+  color: var(--hal-ember);
+}
+.hal-cmd { font-family: var(--hal-mono); font-size: 10px; color: var(--hal-fg); }
+.hal-caret { border-right: 2px solid var(--hal-ember); padding-right: 1px; }
+
+.hal-out {
+  font-family: var(--hal-mono);
+  font-size: 10px;
+  line-height: 1.55;
+  padding: 2px 8px;
+  margin: 2px 0;
+  white-space: pre;
+  display: block;
+  border-left: 2px solid #7a6850;
+  background: var(--hal-header);
+  color: var(--hal-fg-dim);
+}
+.hal-prose {
+  font-family: var(--hal-prop);
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin: 2px 0;
+  color: var(--hal-fg);
+}
+.hal-obj {
+  padding: 0 4px;
+  font-size: 10px;
+  border: var(--hal-hair) solid var(--hal-border);
+  background: var(--hal-header);
+  color: var(--hal-slate);
+}
+.hal-exit {
+  font-family: var(--hal-mono);
+  font-size: 9px;
+  padding: 0 3px;
+  display: inline-block;
+  border: var(--hal-hair) solid;
+  margin-top: 2px;
+}
+.hal-exit--ok { color: var(--hal-fen); border-color: var(--hal-fen); }
+.hal-exit--err { color: var(--hal-cinnabar); border-color: var(--hal-cinnabar); }
+
+/* ---- embedded terminal --------------------------------- */
+
+.hal-vt {
+  flex: 1;
+  padding: 5px 10px;
+  font-family: var(--hal-mono);
+  font-size: 10px;
+  line-height: 1.6;
+  overflow: hidden;
+  background: var(--bf-bg);
+  color: var(--bf-fg);
+}
+
+/* ============================================================
+   STATUS BAR
+   ============================================================ */
+
+.hal-status {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  height: var(--hal-status-h);
+  font-family: var(--hal-mono);
+  font-size: 10px;
+  background: var(--hal-status-bg);
+}
+.hal-ws {
+  padding: 0 7px;
+  height: var(--hal-status-h);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--hal-status-idle);
+}
+.hal-ws--on {
+  background: var(--hal-ember);
+  color: var(--hal-status-bg);
+  font-weight: 500;
+}
+.hal-status-mid {
+  flex: 1;
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--hal-status-fg);
+}
+.hal-status-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  color: var(--hal-status-muted);
+}
+.hal-status-ok { color: var(--hal-ember); }
+.hal-status-err { color: var(--hal-cinnabar); }
+
+
+/* ---- specification sheet chrome ------------------------- */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--hal-surface);
+  color: var(--hal-fg);
+  font-family: var(--hal-prop);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.sheet { max-width: 1180px; margin: 0 auto; padding: 0 28px 96px; }
+
+header.masthead {
+  padding: 72px 0 40px;
+  border-bottom: 2px solid var(--hal-fg);
+  margin-bottom: 44px;
+}
+.masthead h1 {
+  font-size: 40px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0 0 6px;
+}
+.masthead .rule {
+  font-family: var(--hal-mono);
+  font-size: 13px;
+  color: var(--hal-fg-muted);
+  margin: 0 0 22px;
+}
+.masthead p {
+  max-width: 62ch;
+  margin: 0 0 12px;
+  color: var(--hal-fg-dim);
+}
+.masthead p:last-child { margin-bottom: 0; }
+
+.spec { margin-bottom: 58px; }
+.spec-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  border-bottom: 1px solid var(--hal-border);
+  padding-bottom: 5px;
+  margin-bottom: 10px;
+}
+.spec-head h2 { font-size: 19px; font-weight: 600; margin: 0; }
+.spec-sub {
+  font-family: var(--hal-mono);
+  font-size: 12px;
+  color: var(--hal-fg-muted);
+  margin-left: auto;
+}
+.spec-note {
+  max-width: 68ch;
+  margin: 0 0 16px;
+  font-size: 14px;
+  color: var(--hal-fg-dim);
+}
+
+.spec-stage { background: var(--hal-floor); padding: 14px; }
+.spec-stage--bare { background: none; padding: 0; }
+
+.sb-row { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+.sb-label {
+  font-family: var(--hal-mono);
+  font-size: 11px;
+  color: var(--hal-fg-muted);
+  width: 130px;
+  flex-shrink: 0;
+  text-align: right;
+}
+.sb-row .hal-status { flex: 1; }
+
+/* palette */
+.sw-group { margin-bottom: 26px; }
+.sw-group h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 9px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--hal-border);
+  color: var(--hal-fg-dim);
+}
+.sw-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
+  gap: 8px;
+}
+.sw { display: flex; align-items: stretch; gap: 9px; }
+.sw-chip {
+  width: 40px;
+  flex-shrink: 0;
+  border: 1px solid var(--hal-border);
+}
+.sw-meta { display: flex; flex-direction: column; min-width: 0; }
+.sw-meta b { font-size: 12px; font-weight: 600; }
+.sw-meta code {
+  font-family: var(--hal-mono);
+  font-size: 11px;
+  color: var(--hal-fg-muted);
+}
+.sw-meta span { font-size: 11px; color: var(--hal-fg-muted); }
+
+footer.colophon {
+  border-top: 1px solid var(--hal-border);
+  padding-top: 18px;
+  font-size: 13px;
+  color: var(--hal-fg-muted);
+  max-width: 68ch;
+}
+footer.colophon code { font-family: var(--hal-mono); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+<header class="masthead">
+  <h1>Halcyon — Daylight</h1>
+  <p class="rule">visual specification v1 · thylacine</p>
+  <p>Daylight is the paper-light theme for Halcyon, the graphical shell. It is
+  the calm-day counterpart to Bonfire, which lights the Utopia terminal at
+  night. The two meet inside every pane that hosts a console: Bonfire's
+  background sits unchanged inside Daylight's chrome.</p>
+  <p>Everything below derives from two commitments. Panes are physical objects
+  lit from the north-north-west. Focus is a property of a tile, not a pane, and
+  it carries the tile's condition at the same time.</p>
+</header>
+
+
+<section class="spec">
+  <div class="spec-head">
+    <h2>Canonical workspace</h2><span class="spec-sub">exit 0</span>
+  </div>
+  <p class="spec-note">Three panes, live tile mid-stack. This is the reference layout: everything else in this sheet is a departure from it.</p>
+  <div class="spec-stage"><div class="hal-wm" style="height:470px"><div class="hal-workspace" style="grid-template-columns:1fr 1fr"><div class="hal-col" style="grid-template-rows:1fr 1fr"><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag"><span class="hal-tag-name">helix</span><span class="hal-pill hal-pill--fold">hx eevdf.rs</span><span class="hal-tag-trail" style="">NORMAL · 221</span></div><div class="hal-tag hal-tag--live-ok"><span class="hal-tag-name">transcript</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">make check</span><span class="hal-pill hal-pill--fold">hx .</span><span class="hal-tag-trail" style="">~/kernel/sched</span></div><div class="hal-body hal-body--lit-ok">
+<div class="hal-transcript">
+  <div class="hal-block">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">make check</span></div>
+    <span class="hal-out"><span style="color:var(--hal-fen)">   RUSTC</span>  eevdf.rs
+<span style="color:var(--hal-sand)">warning</span>: unused `vruntime`
+<span style="color:var(--hal-fen)">Finished</span> 0.84s — passed</span>
+    <span class="hal-exit hal-exit--ok">exit 0</span>
+  </div>
+  <div class="hal-block hal-block--current">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">man EEVDF</span></div>
+    <p class="hal-prose"><strong>EEVDF</strong> — picks the task whose <span class="hal-obj">virtual deadline</span> falls earliest.</p>
+  </div>
+  <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd hal-caret"></span></div>
+</div></div><div class="hal-cast"></div><div class="hal-tag hal-tag--below"><span class="hal-tag-name">qemu</span><span class="hal-pill hal-pill--fold">qemu-system-aarch64</span><span class="hal-tag-trail" style="color:var(--hal-ember)">● running</span></div></div></div><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag hal-tag--active"><span class="hal-tag-name">helix</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">hx burrow.rs</span><span class="hal-pill hal-pill--fold">:w</span><span class="hal-tag-trail" style="">INSERT · 88</span></div><div class="hal-body">
+<div class="hal-vt">
+  <div style="color:var(--bf-fg-subtle);font-size:9px;margin-bottom:3px">burrow.rs [+] INSERT</div>
+  <div><span style="color:var(--bf-fg-subtle)">86 │ </span><span style="color:var(--bf-slate)">pub fn</span> <span style="color:var(--bf-ash)">alloc</span>(size: <span style="color:var(--bf-sage)">usize</span>) → <span style="color:var(--bf-sage)">Result</span>&lt;<span style="color:var(--bf-sage)">Vmo</span>&gt; {</div>
+  <div><span style="color:var(--bf-fg-subtle)">87 │ </span><span style="color:var(--bf-slate)">let</span> pages = size.<span style="color:var(--bf-ash)">div_ceil</span>(<span style="color:var(--bf-moss)">PAGE_SIZE</span>);</div>
+  <div><span style="color:var(--bf-fg-subtle)">88 │ </span><span style="background:var(--bf-surface)">    self.inner.<span style="color:var(--bf-sand)">free_list</span>.<span style="color:var(--bf-ash)">pop</span>(pages)</span></div>
+  <div><span style="color:var(--bf-fg-subtle)">89 │ </span>}</div>
+</div></div><div class="hal-tag hal-tag--below"><span class="hal-tag-name">transcript</span><span class="hal-pill hal-pill--fold">ut /mm</span><span class="hal-tag-trail" style="">~/kernel/mm</span></div><div class="hal-tag hal-tag--below"><span class="hal-tag-name">loom monitor</span><span class="hal-pill hal-pill--fold">loom-watch</span><span class="hal-tag-trail" style="">ring: 48%</span></div></div></div></div><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag"><span class="hal-tag-name">transcript</span><span class="hal-pill hal-pill--fold">ut /kernel</span><span class="hal-tag-trail" style="">~/thylacine</span></div><div class="hal-tag"><span class="hal-tag-name">helix</span><span class="hal-pill hal-pill--fold">hx ROADMAP.md</span><span class="hal-tag-trail" style="">NORMAL · 312</span></div><div class="hal-tag"><span class="hal-tag-name">cairn</span><span class="hal-pill hal-pill--fold">cairn query</span><span class="hal-tag-trail" style="">graph: ready</span></div><div class="hal-tag hal-tag--active"><span class="hal-tag-name">qemu</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">qemu-system-aarch64</span><span class="hal-pill hal-pill--fold">-monitor stdio</span><span class="hal-tag-trail" style="color:var(--hal-ember)">● running</span></div><div class="hal-body">
+<div class="hal-vt">
+  <div style="color:#7a6f6a;margin-bottom:3px;font-size:9px">thylacine v0.3.1-dev (aarch64)</div>
+  <div style="color:var(--bf-fen)">[  0.000]  memory: 512M at 0x40000000</div>
+  <div style="color:var(--bf-fen)">[  0.001]  EEVDF: initialised, 4 cpus</div>
+  <div style="color:var(--bf-fen)">[  0.002]  LOOM: ring buffer mapped (64K)</div>
+  <div style="color:var(--bf-sand);margin:2px 0">[  0.009]  PAC: using generated keys</div>
+  <div style="color:var(--bf-fen)">[  0.012]  init: Territory 1 spawned</div>
+  <div style="margin-top:8px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span>ls /dev</div>
+  <div style="margin-top:2px">cons  klog  loom  null  tapestry  zero</div>
+  <div style="margin-top:4px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span><span class="hal-caret"></span></div>
+</div></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~/thylacine/kernel/sched · make check</div><div class="hal-status-right"><span class="hal-status-ok">⊢ 1 warning</span><span>14:22</span></div></div></div></div>
+</section>
+<section class="spec">
+  <div class="spec-head">
+    <h2>Canonical workspace</h2><span class="spec-sub">exit 1</span>
+  </div>
+  <p class="spec-note">Identical geometry. Only the live tile's key changes — tag bar, separator, pill, and the hairline bounding the content.</p>
+  <div class="spec-stage"><div class="hal-wm" style="height:470px"><div class="hal-workspace" style="grid-template-columns:1fr 1fr"><div class="hal-col" style="grid-template-rows:1fr 1fr"><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag"><span class="hal-tag-name">helix</span><span class="hal-pill hal-pill--fold">hx eevdf.rs</span><span class="hal-tag-trail" style="">NORMAL · 221</span></div><div class="hal-tag hal-tag--live-err"><span class="hal-tag-name">transcript</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">make check</span><span class="hal-pill hal-pill--fold">hx .</span><span class="hal-tag-trail" style="">~/kernel/sched</span></div><div class="hal-body hal-body--lit-err">
+<div class="hal-transcript">
+  <div class="hal-block">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">make check</span></div>
+    <span class="hal-out"><span style="color:var(--hal-fen)">   RUSTC</span>  eevdf.rs
+<span style="color:var(--hal-cinnabar)">error[E0502]</span>: cannot borrow `self.rq` as mutable
+   <span style="color:var(--hal-fg-muted)">--&gt;</span> eevdf.rs:141:9
+<span style="color:var(--hal-cinnabar)">error</span>: could not compile `sched`</span>
+    <span class="hal-exit hal-exit--err">exit 1</span>
+  </div>
+  <div class="hal-block hal-block--current">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">man EEVDF</span></div>
+    <p class="hal-prose"><strong>EEVDF</strong> — picks the task whose <span class="hal-obj">virtual deadline</span> falls earliest.</p>
+  </div>
+  <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd hal-caret"></span></div>
+</div></div><div class="hal-cast"></div><div class="hal-tag hal-tag--below"><span class="hal-tag-name">qemu</span><span class="hal-pill hal-pill--fold">qemu-system-aarch64</span><span class="hal-tag-trail" style="color:var(--hal-ember)">● running</span></div></div></div><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag hal-tag--active"><span class="hal-tag-name">helix</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">hx burrow.rs</span><span class="hal-pill hal-pill--fold">:w</span><span class="hal-tag-trail" style="">INSERT · 88</span></div><div class="hal-body">
+<div class="hal-vt">
+  <div style="color:var(--bf-fg-subtle);font-size:9px;margin-bottom:3px">burrow.rs [+] INSERT</div>
+  <div><span style="color:var(--bf-fg-subtle)">86 │ </span><span style="color:var(--bf-slate)">pub fn</span> <span style="color:var(--bf-ash)">alloc</span>(size: <span style="color:var(--bf-sage)">usize</span>) → <span style="color:var(--bf-sage)">Result</span>&lt;<span style="color:var(--bf-sage)">Vmo</span>&gt; {</div>
+  <div><span style="color:var(--bf-fg-subtle)">87 │ </span><span style="color:var(--bf-slate)">let</span> pages = size.<span style="color:var(--bf-ash)">div_ceil</span>(<span style="color:var(--bf-moss)">PAGE_SIZE</span>);</div>
+  <div><span style="color:var(--bf-fg-subtle)">88 │ </span><span style="background:var(--bf-surface)">    self.inner.<span style="color:var(--bf-sand)">free_list</span>.<span style="color:var(--bf-ash)">pop</span>(pages)</span></div>
+  <div><span style="color:var(--bf-fg-subtle)">89 │ </span>}</div>
+</div></div><div class="hal-tag hal-tag--below"><span class="hal-tag-name">transcript</span><span class="hal-pill hal-pill--fold">ut /mm</span><span class="hal-tag-trail" style="">~/kernel/mm</span></div><div class="hal-tag hal-tag--below"><span class="hal-tag-name">loom monitor</span><span class="hal-pill hal-pill--fold">loom-watch</span><span class="hal-tag-trail" style="">ring: 48%</span></div></div></div></div><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag"><span class="hal-tag-name">transcript</span><span class="hal-pill hal-pill--fold">ut /kernel</span><span class="hal-tag-trail" style="">~/thylacine</span></div><div class="hal-tag"><span class="hal-tag-name">helix</span><span class="hal-pill hal-pill--fold">hx ROADMAP.md</span><span class="hal-tag-trail" style="">NORMAL · 312</span></div><div class="hal-tag"><span class="hal-tag-name">cairn</span><span class="hal-pill hal-pill--fold">cairn query</span><span class="hal-tag-trail" style="">graph: ready</span></div><div class="hal-tag hal-tag--active"><span class="hal-tag-name">qemu</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">qemu-system-aarch64</span><span class="hal-pill hal-pill--fold">-monitor stdio</span><span class="hal-tag-trail" style="color:var(--hal-ember)">● running</span></div><div class="hal-body">
+<div class="hal-vt">
+  <div style="color:#7a6f6a;margin-bottom:3px;font-size:9px">thylacine v0.3.1-dev (aarch64)</div>
+  <div style="color:var(--bf-fen)">[  0.000]  memory: 512M at 0x40000000</div>
+  <div style="color:var(--bf-fen)">[  0.001]  EEVDF: initialised, 4 cpus</div>
+  <div style="color:var(--bf-fen)">[  0.002]  LOOM: ring buffer mapped (64K)</div>
+  <div style="color:var(--bf-sand);margin:2px 0">[  0.009]  PAC: using generated keys</div>
+  <div style="color:var(--bf-fen)">[  0.012]  init: Territory 1 spawned</div>
+  <div style="margin-top:8px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span>ls /dev</div>
+  <div style="margin-top:2px">cons  klog  loom  null  tapestry  zero</div>
+  <div style="margin-top:4px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span><span class="hal-caret"></span></div>
+</div></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~/thylacine/kernel/sched · make check</div><div class="hal-status-right"><span class="hal-status-err">⊢ 1 error</span><span>14:22</span></div></div></div></div>
+</section>
+<section class="spec">
+  <div class="spec-head">
+    <h2>Single tile</h2><span class="spec-sub">minimum</span>
+  </div>
+  <p class="spec-note">One pane, one tile. The cast shadow still renders: it belongs to the live tile, not to whatever sits below it.</p>
+  <div class="spec-stage"><div class="hal-wm" style="height:300px"><div class="hal-workspace" style="grid-template-columns:1fr"><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag hal-tag--live-ok"><span class="hal-tag-name">transcript</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">ut ~</span><span class="hal-tag-trail" style="">~/thylacine</span></div><div class="hal-body hal-body--lit-ok">
+<div class="hal-transcript">
+  <div class="hal-block">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">make check</span></div>
+    <span class="hal-out"><span style="color:var(--hal-fen)">   RUSTC</span>  eevdf.rs
+<span style="color:var(--hal-sand)">warning</span>: unused `vruntime`
+<span style="color:var(--hal-fen)">Finished</span> 0.84s — passed</span>
+    <span class="hal-exit hal-exit--ok">exit 0</span>
+  </div>
+  <div class="hal-block hal-block--current">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">man EEVDF</span></div>
+    <p class="hal-prose"><strong>EEVDF</strong> — picks the task whose <span class="hal-obj">virtual deadline</span> falls earliest.</p>
+  </div>
+  <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd hal-caret"></span></div>
+</div></div><div class="hal-cast"></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~/thylacine · ut ~</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>14:22</span></div></div></div></div>
+</section>
+<section class="spec">
+  <div class="spec-head">
+    <h2>Deep stack</h2><span class="spec-sub">live tile last</span>
+  </div>
+  <p class="spec-note">Six tiles collapsed to their tag bars. The live tile is at the bottom of the stack, where there is no neighbouring header to borrow a shadow from.</p>
+  <div class="spec-stage"><div class="hal-wm" style="height:340px"><div class="hal-workspace" style="grid-template-columns:1fr"><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag"><span class="hal-tag-name">transcript</span><span class="hal-pill hal-pill--fold">ut /kernel</span><span class="hal-tag-trail" style="">~/thylacine</span></div><div class="hal-tag"><span class="hal-tag-name">helix</span><span class="hal-pill hal-pill--fold">hx ROADMAP.md</span><span class="hal-tag-trail" style="">NORMAL · 312</span></div><div class="hal-tag"><span class="hal-tag-name">cairn</span><span class="hal-pill hal-pill--fold">cairn query</span><span class="hal-tag-trail" style="">graph: ready</span></div><div class="hal-tag"><span class="hal-tag-name">loom monitor</span><span class="hal-pill hal-pill--fold">loom-watch</span><span class="hal-tag-trail" style="">ring: 48%</span></div><div class="hal-tag"><span class="hal-tag-name">hyades</span><span class="hal-pill hal-pill--fold">hyades --watch</span><span class="hal-tag-trail" style="">idle</span></div><div class="hal-tag hal-tag--live-ok"><span class="hal-tag-name">qemu</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">qemu-system-aarch64</span><span class="hal-pill hal-pill--fold">-monitor stdio</span><span class="hal-tag-trail" style="">● running</span></div><div class="hal-body hal-body--lit-ok">
+<div class="hal-vt">
+  <div style="color:#7a6f6a;margin-bottom:3px;font-size:9px">thylacine v0.3.1-dev (aarch64)</div>
+  <div style="color:var(--bf-fen)">[  0.000]  memory: 512M at 0x40000000</div>
+  <div style="color:var(--bf-fen)">[  0.001]  EEVDF: initialised, 4 cpus</div>
+  <div style="color:var(--bf-fen)">[  0.002]  LOOM: ring buffer mapped (64K)</div>
+  <div style="color:var(--bf-sand);margin:2px 0">[  0.009]  PAC: using generated keys</div>
+  <div style="color:var(--bf-fen)">[  0.012]  init: Territory 1 spawned</div>
+  <div style="margin-top:8px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span>ls /dev</div>
+  <div style="margin-top:2px">cons  klog  loom  null  tapestry  zero</div>
+  <div style="margin-top:4px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span><span class="hal-caret"></span></div>
+</div></div><div class="hal-cast"></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">qemu · ~/thylacine · qemu-system-aarch64</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>14:22</span></div></div></div></div>
+</section>
+<section class="spec">
+  <div class="spec-head">
+    <h2>Inverted tile</h2><span class="spec-sub">tag bar below content</span>
+  </div>
+  <p class="spec-note">Acme stacking puts some tag bars beneath their content. The separator moves to the bar's top edge; the cast shadow stays with the content, because the light does not move.</p>
+  <div class="spec-stage"><div class="hal-wm" style="height:380px"><div class="hal-workspace" style="grid-template-columns:1fr 1fr"><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag"><span class="hal-tag-name">transcript</span><span class="hal-pill hal-pill--fold">ut /kernel</span><span class="hal-tag-trail" style="">~/thylacine</span></div><div class="hal-body hal-body--lit-ok-open">
+<div class="hal-transcript">
+  <div class="hal-block">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">make check</span></div>
+    <span class="hal-out"><span style="color:var(--hal-fen)">   RUSTC</span>  eevdf.rs
+<span style="color:var(--hal-sand)">warning</span>: unused `vruntime`
+<span style="color:var(--hal-fen)">Finished</span> 0.84s — passed</span>
+    <span class="hal-exit hal-exit--ok">exit 0</span>
+  </div>
+  <div class="hal-block hal-block--current">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">man EEVDF</span></div>
+    <p class="hal-prose"><strong>EEVDF</strong> — picks the task whose <span class="hal-obj">virtual deadline</span> falls earliest.</p>
+  </div>
+  <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd hal-caret"></span></div>
+</div></div><div class="hal-tag hal-tag--live-ok hal-tag--below"><span class="hal-tag-name">helix</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">hx eevdf.rs</span><span class="hal-pill hal-pill--fold">:w</span><span class="hal-tag-trail" style="">NORMAL · 221</span></div><div class="hal-cast"></div></div></div><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag hal-tag--active"><span class="hal-tag-name">qemu</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">qemu-system-aarch64</span><span class="hal-tag-trail" style="color:var(--hal-ember)">● running</span></div><div class="hal-body">
+<div class="hal-vt">
+  <div style="color:#7a6f6a;margin-bottom:3px;font-size:9px">thylacine v0.3.1-dev (aarch64)</div>
+  <div style="color:var(--bf-fen)">[  0.000]  memory: 512M at 0x40000000</div>
+  <div style="color:var(--bf-fen)">[  0.001]  EEVDF: initialised, 4 cpus</div>
+  <div style="color:var(--bf-fen)">[  0.002]  LOOM: ring buffer mapped (64K)</div>
+  <div style="color:var(--bf-sand);margin:2px 0">[  0.009]  PAC: using generated keys</div>
+  <div style="color:var(--bf-fen)">[  0.012]  init: Territory 1 spawned</div>
+  <div style="margin-top:8px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span>ls /dev</div>
+  <div style="margin-top:2px">cons  klog  loom  null  tapestry  zero</div>
+  <div style="margin-top:4px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span><span class="hal-caret"></span></div>
+</div></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">helix · ~/thylacine/kernel/sched · hx eevdf.rs</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>14:22</span></div></div></div></div>
+</section>
+<section class="spec">
+  <div class="spec-head">
+    <h2>Monocle</h2><span class="spec-sub">one pane</span>
+  </div>
+  <p class="spec-note">A single pane filling the workspace. The floor survives as a 2px margin so the bevel still has ground to read against.</p>
+  <div class="spec-stage"><div class="hal-wm" style="height:380px"><div class="hal-workspace" style="grid-template-columns:1fr"><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag"><span class="hal-tag-name">helix</span><span class="hal-pill hal-pill--fold">hx eevdf.rs</span><span class="hal-tag-trail" style="">NORMAL · 221</span></div><div class="hal-tag hal-tag--live-ok"><span class="hal-tag-name">transcript</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">make check</span><span class="hal-pill hal-pill--fold">hx .</span><span class="hal-tag-trail" style="">~/kernel/sched</span></div><div class="hal-body hal-body--lit-ok">
+<div class="hal-transcript">
+  <div class="hal-block">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">make check</span></div>
+    <span class="hal-out"><span style="color:var(--hal-fen)">   RUSTC</span>  eevdf.rs
+<span style="color:var(--hal-sand)">warning</span>: unused `vruntime`
+<span style="color:var(--hal-fen)">Finished</span> 0.84s — passed</span>
+    <span class="hal-exit hal-exit--ok">exit 0</span>
+  </div>
+  <div class="hal-block hal-block--current">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">man EEVDF</span></div>
+    <p class="hal-prose"><strong>EEVDF</strong> — picks the task whose <span class="hal-obj">virtual deadline</span> falls earliest.</p>
+  </div>
+  <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd hal-caret"></span></div>
+</div></div><div class="hal-cast"></div><div class="hal-tag hal-tag--below"><span class="hal-tag-name">qemu</span><span class="hal-pill hal-pill--fold">qemu-system-aarch64</span><span class="hal-tag-trail" style="color:var(--hal-ember)">● running</span></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~/thylacine/kernel/sched · make check</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>14:22</span></div></div></div></div>
+</section>
+<section class="spec">
+  <div class="spec-head">
+    <h2>Four panes</h2><span class="spec-sub">density check</span>
+  </div>
+  <p class="spec-note">Bevel and gap under load. At 2px each, the chrome between two pane interiors totals 6px.</p>
+  <div class="spec-stage"><div class="hal-wm" style="height:470px"><div class="hal-workspace" style="grid-template-columns:1fr 1fr"><div class="hal-col" style="grid-template-rows:1fr 1fr"><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag hal-tag--live-ok"><span class="hal-tag-name">transcript</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on hal-pill--fold">make check</span><span class="hal-tag-trail" style="">~/sched</span></div><div class="hal-body hal-body--lit-ok">
+<div class="hal-transcript">
+  <div class="hal-block">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">make check</span></div>
+    <span class="hal-out"><span style="color:var(--hal-fen)">   RUSTC</span>  eevdf.rs
+<span style="color:var(--hal-sand)">warning</span>: unused `vruntime`
+<span style="color:var(--hal-fen)">Finished</span> 0.84s — passed</span>
+    <span class="hal-exit hal-exit--ok">exit 0</span>
+  </div>
+  <div class="hal-block hal-block--current">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">man EEVDF</span></div>
+    <p class="hal-prose"><strong>EEVDF</strong> — picks the task whose <span class="hal-obj">virtual deadline</span> falls earliest.</p>
+  </div>
+  <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd hal-caret"></span></div>
+</div></div><div class="hal-cast"></div></div></div><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag hal-tag--active"><span class="hal-tag-name">helix</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on hal-pill--fold">hx burrow.rs</span><span class="hal-tag-trail" style="">88</span></div><div class="hal-body">
+<div class="hal-vt">
+  <div style="color:var(--bf-fg-subtle);font-size:9px;margin-bottom:3px">burrow.rs [+] INSERT</div>
+  <div><span style="color:var(--bf-fg-subtle)">86 │ </span><span style="color:var(--bf-slate)">pub fn</span> <span style="color:var(--bf-ash)">alloc</span>(size: <span style="color:var(--bf-sage)">usize</span>) → <span style="color:var(--bf-sage)">Result</span>&lt;<span style="color:var(--bf-sage)">Vmo</span>&gt; {</div>
+  <div><span style="color:var(--bf-fg-subtle)">87 │ </span><span style="color:var(--bf-slate)">let</span> pages = size.<span style="color:var(--bf-ash)">div_ceil</span>(<span style="color:var(--bf-moss)">PAGE_SIZE</span>);</div>
+  <div><span style="color:var(--bf-fg-subtle)">88 │ </span><span style="background:var(--bf-surface)">    self.inner.<span style="color:var(--bf-sand)">free_list</span>.<span style="color:var(--bf-ash)">pop</span>(pages)</span></div>
+  <div><span style="color:var(--bf-fg-subtle)">89 │ </span>}</div>
+</div></div></div></div></div><div class="hal-col" style="grid-template-rows:1fr 1fr"><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag"><span class="hal-tag-name">qemu</span><span class="hal-pill hal-pill--fold">aarch64</span><span class="hal-tag-trail" style="">● running</span></div><div class="hal-body">
+<div class="hal-vt">
+  <div style="color:#7a6f6a;margin-bottom:3px;font-size:9px">thylacine v0.3.1-dev (aarch64)</div>
+  <div style="color:var(--bf-fen)">[  0.000]  memory: 512M at 0x40000000</div>
+  <div style="color:var(--bf-fen)">[  0.001]  EEVDF: initialised, 4 cpus</div>
+  <div style="color:var(--bf-fen)">[  0.002]  LOOM: ring buffer mapped (64K)</div>
+  <div style="color:var(--bf-sand);margin:2px 0">[  0.009]  PAC: using generated keys</div>
+  <div style="color:var(--bf-fen)">[  0.012]  init: Territory 1 spawned</div>
+  <div style="margin-top:8px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span>ls /dev</div>
+  <div style="margin-top:2px">cons  klog  loom  null  tapestry  zero</div>
+  <div style="margin-top:4px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span><span class="hal-caret"></span></div>
+</div></div></div></div><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag"><span class="hal-tag-name">cairn</span><span class="hal-pill hal-pill--fold">cairn query</span><span class="hal-tag-trail" style="">ready</span></div><div class="hal-body">
+<div class="hal-vt">
+  <div style="color:#7a6f6a;margin-bottom:3px;font-size:9px">thylacine v0.3.1-dev (aarch64)</div>
+  <div style="color:var(--bf-fen)">[  0.000]  memory: 512M at 0x40000000</div>
+  <div style="color:var(--bf-fen)">[  0.001]  EEVDF: initialised, 4 cpus</div>
+  <div style="color:var(--bf-fen)">[  0.002]  LOOM: ring buffer mapped (64K)</div>
+  <div style="color:var(--bf-sand);margin:2px 0">[  0.009]  PAC: using generated keys</div>
+  <div style="color:var(--bf-fen)">[  0.012]  init: Territory 1 spawned</div>
+  <div style="margin-top:8px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span>ls /dev</div>
+  <div style="margin-top:2px">cons  klog  loom  null  tapestry  zero</div>
+  <div style="margin-top:4px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span><span class="hal-caret"></span></div>
+</div></div></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~/thylacine/kernel/sched · make check</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>14:22</span></div></div></div></div>
+</section>
+<section class="spec">
+  <div class="spec-head"><h2>Tag bar</h2><span class="spec-sub">all states</span></div>
+  <p class="spec-note">Every state a tag bar can hold, stacked in one pane so the
+  steps between them are directly comparable. Resting, the tile a resting pane
+  would return to, the live tile in both status keys, and the two below-position
+  variants.</p>
+  <div class="spec-stage"><div class="hal-workspace" style="grid-template-columns:1fr"><div class="hal-pane" style=""><div class="hal-pane-inner"><div class="hal-tag"><span class="hal-tag-name">resting</span><span class="hal-pill hal-pill--fold">ut /kernel</span><span class="hal-tag-trail" style="">~/thylacine</span></div><div class="hal-tag hal-tag--active"><span class="hal-tag-name">resting · active tile</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">hx ROADMAP.md</span><span class="hal-pill hal-pill--fold">:w</span><span class="hal-tag-trail" style="">NORMAL · 312</span></div><div class="hal-tag hal-tag--live-ok"><span class="hal-tag-name">live · exit 0</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">make check</span><span class="hal-pill hal-pill--fold">hx .</span><span class="hal-tag-trail" style="">~/kernel/sched</span></div><div class="hal-tag hal-tag--live-err"><span class="hal-tag-name">live · exit 1</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">make check</span><span class="hal-pill hal-pill--fold">hx .</span><span class="hal-tag-trail" style="">~/kernel/sched</span></div><div class="hal-tag hal-tag--below"><span class="hal-tag-name">resting · below</span><span class="hal-pill hal-pill--fold">loom-watch</span><span class="hal-tag-trail" style="">ring: 48%</span></div><div class="hal-tag hal-tag--live-ok hal-tag--below"><span class="hal-tag-name">live · below</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">qemu-system-aarch64</span><span class="hal-tag-trail" style="">● running</span></div></div></div></div></div>
+</section>
+<section class="spec">
+  <div class="spec-head"><h2>Status bar</h2><span class="spec-sub">states</span></div>
+  <p class="spec-note">Workspace indicators left, focused context centre, the
+  live tile's condition and the clock right. The right-hand slot carries the
+  same sage/cinnabar distinction as the tile itself.</p>
+  <div class="spec-stage spec-stage--bare"><div class="sb-row"><span class="sb-label">clean</span><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~/thylacine · ut ~</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>14:22</span></div></div></div><div class="sb-row"><span class="sb-label">warnings</span><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~/thylacine/kernel/sched · make check</div><div class="hal-status-right"><span class="hal-status-ok">⊢ 1 warning</span><span>14:22</span></div></div></div><div class="sb-row"><span class="sb-label">error</span><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~/thylacine/kernel/sched · make check</div><div class="hal-status-right"><span class="hal-status-err">⊢ 1 error</span><span>14:22</span></div></div></div><div class="sb-row"><span class="sb-label">other workspace</span><div class="hal-status"><div class="hal-ws">1</div><div class="hal-ws hal-ws--on">2</div><div class="hal-ws">3</div><div class="hal-status-mid">qemu · ~/thylacine · qemu-system-aarch64</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>14:22</span></div></div></div></div>
+</section>
+<section class="spec">
+  <div class="spec-head"><h2>Palette</h2><span class="spec-sub">Daylight</span></div>
+  <p class="spec-note">Every value in the theme. The four bevel entries are
+  derived from a single light direction and must be regenerated together.</p>
+  <div class="spec-swatches"><div class="sw-group"><h3>Ground</h3><div class="sw-grid"><div class="sw"><div class="sw-chip" style="background:#8a7660"></div><div class="sw-meta"><b>floor</b><code>#8a7660</code><span>workspace floor, bevel midpoint</span></div></div><div class="sw"><div class="sw-chip" style="background:#f2ebe0"></div><div class="sw-meta"><b>surface</b><code>#f2ebe0</code><span>pane surface</span></div></div><div class="sw"><div class="sw-chip" style="background:#cec4b6"></div><div class="sw-meta"><b>header</b><code>#cec4b6</code><span>tag bar, inner hairline</span></div></div><div class="sw"><div class="sw-chip" style="background:#bdb0a0"></div><div class="sw-meta"><b>raised</b><code>#bdb0a0</code><span>pill background</span></div></div><div class="sw"><div class="sw-chip" style="background:#a89880"></div><div class="sw-meta"><b>border</b><code>#a89880</code><span>strokes, cast shadow</span></div></div></div></div><div class="sw-group"><h3>Ink</h3><div class="sw-grid"><div class="sw"><div class="sw-chip" style="background:#1a120a"></div><div class="sw-meta"><b>fg</b><code>#1a120a</code><span>primary</span></div></div><div class="sw"><div class="sw-chip" style="background:#3a2e22"></div><div class="sw-meta"><b>fg-dim</b><code>#3a2e22</code><span>trailing metadata</span></div></div><div class="sw"><div class="sw-chip" style="background:#6a5a48"></div><div class="sw-meta"><b>fg-muted</b><code>#6a5a48</code><span>tag names, paths</span></div></div><div class="sw"><div class="sw-chip" style="background:#9a8878"></div><div class="sw-meta"><b>fg-subtle</b><code>#9a8878</code><span>indent guides</span></div></div></div></div><div class="sw-group"><h3>Bevel — NNW</h3><div class="sw-grid"><div class="sw"><div class="sw-chip" style="background:#f8f2e6"></div><div class="sw-meta"><b>top</b><code>#f8f2e6</code><span>key light</span></div></div><div class="sw"><div class="sw-chip" style="background:#e2d6c0"></div><div class="sw-meta"><b>left</b><code>#e2d6c0</code><span>grazing</span></div></div><div class="sw"><div class="sw-chip" style="background:#362410"></div><div class="sw-meta"><b>right</b><code>#362410</code><span>bounce</span></div></div><div class="sw"><div class="sw-chip" style="background:#221405"></div><div class="sw-meta"><b>bottom</b><code>#221405</code><span>shadowed</span></div></div></div></div><div class="sw-group"><h3>Accent</h3><div class="sw-grid"><div class="sw"><div class="sw-chip" style="background:#e07840"></div><div class="sw-meta"><b>ember</b><code>#e07840</code><span>prompt, caret, running</span></div></div><div class="sw"><div class="sw-chip" style="background:#b85f2a"></div><div class="sw-meta"><b>ember-dim</b><code>#b85f2a</code><span>pill stroke</span></div></div><div class="sw"><div class="sw-chip" style="background:#c86030"></div><div class="sw-meta"><b>ember-deep</b><code>#c86030</code><span>active tile separator</span></div></div></div></div><div class="sw-group"><h3>Live — sage</h3><div class="sw-grid"><div class="sw"><div class="sw-chip" style="background:#1e5844"></div><div class="sw-meta"><b>sage</b><code>#1e5844</code><span>separator, hairline, pill</span></div></div><div class="sw"><div class="sw-chip" style="background:#b8ccc4"></div><div class="sw-meta"><b>sage-tint</b><code>#b8ccc4</code><span>tag bar</span></div></div><div class="sw"><div class="sw-chip" style="background:#a6bdb4"></div><div class="sw-meta"><b>sage-raised</b><code>#a6bdb4</code><span>pill background</span></div></div><div class="sw"><div class="sw-chip" style="background:#86a096"></div><div class="sw-meta"><b>sage-border</b><code>#86a096</code><span>rule, pill stroke</span></div></div></div></div><div class="sw-group"><h3>Live — cinnabar</h3><div class="sw-grid"><div class="sw"><div class="sw-chip" style="background:#982818"></div><div class="sw-meta"><b>cinnabar</b><code>#982818</code><span>separator, hairline, pill</span></div></div><div class="sw"><div class="sw-chip" style="background:#dcb8b0"></div><div class="sw-meta"><b>cinnabar-tint</b><code>#dcb8b0</code><span>tag bar</span></div></div><div class="sw"><div class="sw-chip" style="background:#d0a89e"></div><div class="sw-meta"><b>cinnabar-raised</b><code>#d0a89e</code><span>pill background</span></div></div><div class="sw"><div class="sw-chip" style="background:#b88c80"></div><div class="sw-meta"><b>cinnabar-border</b><code>#b88c80</code><span>rule, pill stroke</span></div></div></div></div><div class="sw-group"><h3>Syntax</h3><div class="sw-grid"><div class="sw"><div class="sw-chip" style="background:#3a4878"></div><div class="sw-meta"><b>slate</b><code>#3a4878</code><span>keyword, object</span></div></div><div class="sw"><div class="sw-chip" style="background:#7a5020"></div><div class="sw-meta"><b>sand</b><code>#7a5020</code><span>warning, member</span></div></div><div class="sw"><div class="sw-chip" style="background:#3a5818"></div><div class="sw-meta"><b>moss</b><code>#3a5818</code><span>constant</span></div></div><div class="sw"><div class="sw-chip" style="background:#6a3828"></div><div class="sw-meta"><b>ash</b><code>#6a3828</code><span>function</span></div></div><div class="sw"><div class="sw-chip" style="background:#4a3868"></div><div class="sw-meta"><b>dusk</b><code>#4a3868</code><span>string</span></div></div><div class="sw"><div class="sw-chip" style="background:#6a7060"></div><div class="sw-meta"><b>smoke</b><code>#6a7060</code><span>comment</span></div></div><div class="sw"><div class="sw-chip" style="background:#1e5828"></div><div class="sw-meta"><b>fen</b><code>#1e5828</code><span>success</span></div></div></div></div></div>
+</section>
+
+<footer class="colophon">
+  <p>Token source: <code>halcyon-daylight.css</code>. This sheet inlines a copy
+  of that file so it opens standalone; the standalone file is canonical.</p>
+  <p>The bevel is drawn with a real CSS <code>border</code>, not
+  <code>box-shadow</code>. Opaque children paint over inset shadows, and a
+  border reserves layout space that cannot be covered. The same rule applies to
+  the inner hairline and to the cast shadow beneath live content.</p>
+</footer>
+
+</div>
+</body>
+</html>

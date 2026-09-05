@@ -88,6 +88,8 @@ void test_gic_cpu_irq_counter_geometry(void);  // V-4c-3 F5 (#73)
 void test_timer_tick_increments(void);
 void test_timer_oneshot_tval_clamps(void);
 void test_timer_arm_oneshot_restores(void);
+void test_extinction_claim_word_exactly_one_winner(void);
+void test_extinction_console_unclaimed_on_clean_boot(void);
 void test_clock_monotonic_advances(void);
 void test_clock_realtime_anchored(void);
 void test_clock_wallclock_offset_math(void);
@@ -228,21 +230,32 @@ void test_proc_job_stop_park_report_cont_live(void);
 void test_proc_job_stop_recycle(void);
 void test_proc_job_stop_preserves_torpor_wait(void);
 void test_proc_job_stop_orphan_rule(void);
-void test_proc_exec_reset_dispositions(void);
+void test_proc_exec_reset_dispositions(void);      // #243 (main)
+void test_proc_exec_drops_image_note_state(void);   // #247
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
+void test_territory_clone_copies_root_pheno(void);   // Design D F2/SA-1
+void test_territory_render_root_pheno(void);         // Design D audit F6
 void test_territory_cwd_lexical(void);
 void test_territory_cwd_join(void);
 void test_territory_cwd_dot(void);
 void test_territory_mount_smoke(void);
 void test_territory_mount_idempotent_same_source(void);
+void test_territory_mount_idempotent_converges_flags(void);
 void test_territory_mount_mrepl_replaces(void);
+void test_territory_mount_mrepl_existing_replaces_group(void);   // UM-8 F6
+void test_territory_mount_mbefore_moves_existing(void);          // UM-8 F6
 void test_territory_mount_unmount_missing_returns_error(void);
 void test_territory_mount_table_full(void);
 void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
+void test_territory_mount_noexec_covers(void);
+void test_exec_ns_noexec_mount_denied(void);
+void test_exec_ns_pheno_mount_crossing(void);
+void test_mmap_file_noexec_mount_denied(void);
+void test_mmap_file_devenv_never_exec_backs(void);
 void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);
 void test_territory_mount_format_ns(void);
@@ -332,6 +345,9 @@ void test_weft_notif_copied_immediate(void);
 void test_weft_share_register_claim(void);
 void test_weft_share_full(void);
 void test_weft_share_owner_gc(void);
+void test_weft_hostmem_share(void);
+void test_weft_hostmem_refcount(void);
+void test_weft_hostmem_resolve(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
 void test_weft_share_cap_gate(void);
@@ -348,6 +364,7 @@ void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
+void test_pgtable_install_user_pte_attr_index(void);
 void test_pgtable_install_user_pte_idempotent(void);
 void test_demand_page_smoke(void);
 void test_demand_page_no_vma(void);
@@ -355,11 +372,16 @@ void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
 void test_demand_page_file_rodata_prot(void);
+void test_demand_page_file_geometry_shift_bails(void);   // DISTRO D-3 / #190
+void test_demand_page_file_geometry_shift_bails_single(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
 void test_demand_page_file_cluster_short_read(void);
 void test_demand_page_file_eof_tail_zero(void);
+void test_demand_page_file_past_limit_bus(void);              // #194 (D-3c)
+void test_demand_page_file_partial_page_zero_with_limit(void);
+void test_demand_page_file_cluster_clamps_at_limit(void);
 void test_demand_page_lazy_zero_fill(void);
 void test_demand_page_lazy_decommit_refault(void);
 void test_demand_page_lazy_charge_on_fault_oom(void);
@@ -371,6 +393,7 @@ void test_vdso_mono_matches_timer(void);
 void test_vdso_maps_ro_read(void);
 void test_vdso_maps_ro_write_faults(void);
 void test_exec_setup_smoke(void);
+void test_exec_interp_argv_shape(void);
 void test_exec_from_spoor_rodata_dispatch(void);
 void test_exec_unaligned_segment_loads(void);
 void test_exec_unaligned_lazy_segment_loads(void);
@@ -393,10 +416,15 @@ void test_exec_stack_is_sparse(void);
 void test_execve_load_into_detached(void);
 void test_execve_load_into_rejects_dirty(void);
 void test_execve_failed_load_leaves_target_drainable(void);
+void test_exec_native_rejects_dynamic_linux(void);
+void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
+void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A (+ audit F1 leg)
+void test_exec_interp_dispatch_follows_parameter(void); // Design D Leg C (audit F3)
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
+void test_syscall_dispatch_exit_group_code(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
 void test_syscall_dispatch_set_tid_address(void);
 void test_syscall_opath_walkonly_no_byte_io(void);
@@ -463,6 +491,23 @@ void test_sys_burrow_detach_window_confined(void);
 void test_sys_burrow_attach_lazy_window_va(void);
 void test_sys_burrow_attach_lazy_large(void);
 void test_sys_burrow_lazy_len_from_args(void);
+// DISTRO D-3b -- the MAP_FIXED split/replace surgery.
+void test_burrow_map_fixed_split_left(void);
+void test_burrow_map_fixed_split_right(void);
+void test_burrow_map_fixed_split_three_way(void);
+void test_burrow_map_fixed_exact_cover(void);
+void test_burrow_map_fixed_carries_offset(void);
+void test_burrow_map_fixed_refusals(void);
+void test_burrow_map_fixed_successive(void);
+void test_burrow_map_fixed_into_free_space(void);
+void test_burrow_munmap_range_tiled(void);                    // #199 (D-3c)
+void test_burrow_munmap_range_partial_refused(void);
+void test_burrow_munmap_range_empty_ok(void);
+void test_burrow_detach_file_frees_outside_lock(void);       // #F1 (D-3c round)
+void test_burrow_munmap_range_file_frees_outside_lock(void);
+void test_burrow_map_fixed_replace_file_frees_outside_lock(void);   // #F5 (D-3c re-audit)
+void test_burrow_map_fixed_refuses_code_alias(void);                 // #F8 (D-3c re-audit)
+void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
 void test_torpor_wake_rejects_bad_args(void);
@@ -493,6 +538,7 @@ void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
 void test_loom_cq_waiter_wake(void);
+void test_loom_poll(void);
 void test_loom_cq_waiter_no_spurious_wake_on_full(void);
 void test_loom_enter_inline_min_complete(void);
 void test_loom_enter_min_complete_no_inflight(void);
@@ -524,9 +570,25 @@ void test_notes_post_pipe_helper(void);
 void test_notes_proc_lifecycle(void);
 void test_notes_peek_does_not_pop(void);
 void test_notes_interrupt_terminate_gate(void);
+void test_notes_default_action_table(void);      // #15 / #236
+void test_notes_ndflt_dispatch(void);            // #15 / #236
+void test_notes_kill_terminates_single_thread(void);   // #241
+void test_notes_self_kill_through_full_ring(void);     // aux#253
+void test_notes_ndflt_stop_discarded_after_cont(void); // #240
+void test_notes_susp_gate_reads_phenotype_sigtab(void); // #251
+void test_notes_masked_susp_stops_at_delivery(void);   // #252
+void test_notes_stop_dequeue_picks_its_own_note(void);  // the class-blind pop
+void test_notes_class_scans_read_phenotype_sigtab(void); // c8ab2744 F1
+void test_notes_discard_name_purges_pending(void);      // the install-time SIG_IGN discard
+void test_notes_phenotype_sigreturn_restores_mask(void); // the mask half of sigreturn
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
+void test_notes_pipe_die_pending(void);
+void test_notes_caught_note_latch_lifecycle(void);
+void test_notes_caught_note_deliverable_predicate(void);
+void test_notes_handler_escape_predicate(void);
+void test_notes_caught_note_stop_dequeue_drains(void);
 void test_notes_fstat_reports_chr(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
@@ -539,6 +601,8 @@ void test_elf_rwx_rejected(void);
 void test_elf_bounds_rejection(void);
 void test_elf_policy_rejection(void);
 void test_elf_brand_hint(void);
+void test_elf_pie_load_bias(void);
+void test_elf_read_interp(void);
 void test_dev_boot_registration_smoke(void);
 void test_dev_lookup_unknown(void);
 void test_dev_devnone_ops_smoke(void);
@@ -603,6 +667,12 @@ void test_cons_blocking_read_wakeup(void);
 void test_cons_tx_role_serializes_writers(void);
 void test_cons_kernel_writer_bracket(void);              // #152
 void test_cons_tx_room_wait_and_deadline(void);
+void test_cons_tx_unit_diag_line_atomic(void);
+void test_cons_tx_unit_echo_atomic(void);
+void test_cons_tx_unit_smp_no_tear(void);
+void test_cons_ring_claim_core_returns_holding(void);
+void test_cons_ring_claim_core_bounded_when_held(void);
+void test_cons_ring_unclaimed_on_clean_boot(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_full_refuses(void);
 void test_cons_rx_can_accept_boundary(void);
@@ -610,6 +680,8 @@ void test_cons_full_line_fits_ring(void);
 void test_cons_full_ring_never_blocks_sak(void);
 void test_cons_feed_write_short_on_full(void);
 void test_cons_refused_byte_is_not_echoed(void);
+void test_cons_serial_silent_gate(void);
+void test_cons_serial_silent_sak_restores(void);
 void test_cons_rx_holdback_reoffer(void);
 void test_cons_rx_holdback_not_stranded(void);
 void test_cons_rx_drop_counters(void);
@@ -642,16 +714,20 @@ void test_cons_cook_onlcr_output(void);          // LS-8b
 void test_cons_consctl_parse(void);              // LS-8b
 void test_cons_consctl_render(void);             // LS-8b
 void test_cons_winsize_roundtrip(void);          // #55
+void test_cons_beacon_roundtrip(void);           // H-1 (BEACON.md 12.3)
 void test_cons_winsize_winch_iff_changed(void);  // #55
 void test_cons_stat_native_qid_contract(void);   // #55
 void test_cons_cook_line_overflow(void);         // LS-8b
-void test_cons_cook_mode_flip_fresh_line(void);  // LS-8b audit F1
+void test_cons_cook_mode_flip_delivers(void);    // PTY-DESIGN: mode writes deliver, never discard
+void test_cons_cook_isig_discards_pending_line(void); // PTY-DESIGN F5: an ISIG char discards the pending line
 void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
 void test_cons_drain_tap_mirrors_output(void);       // G-4
 void test_cons_sys_puts_uses_shared_console_path(void);  // #76
 void test_vivarium_t1_renumbers(void);                   // VIVARIUM V-2
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
+void test_vivarium_git_chunk_rows(void);
+void test_vivarium_faccessat_gate(void);
 void test_vivarium_fails_closed(void);
 void test_vivarium_no_wide_alias(void);
 void test_vivarium_openat_domain(void);                  // VIVARIUM V-2b
@@ -660,11 +736,22 @@ void test_vivarium_openat_build(void);
 void test_vivarium_stat_to_linux(void);
 void test_vivarium_fstatat_domain(void);                 // VIVARIUM V-2c
 void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
-void test_vivarium_clone_domain(void);                   // LINEAGE L-3d
+void test_vivarium_mmap_file_domain(void);               // DISTRO D-3
+void test_vivarium_mmap_fixed_domain(void);              // DISTRO D-3b
+void test_vivarium_mmap_arms_disjoint(void);             // DISTRO D-3
+void test_vivarium_clone_domain(void);                   // LINEAGE L-3d + N-3
+void test_vivarium_futex_decide(void);                   // N-3
 void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
 void test_vivarium_startup_batch_rows(void);             // #150 (LINEAGE L-6c)
 void test_vivarium_writev_domain(void);                  // #150
 void test_vivarium_fcntl_domain(void);                   // #151
+void test_vivarium_fcntl_dupfd_errnos(void);            // c8ab2744 close: EBADF vs EMFILE
+void test_vivarium_fcntl_nonblock_roundtrip(void);      // git-stash: fcntl->handle->Spoor
+void test_vivarium_ioctl_decide(void);                  // C2-k1a: terminal ioctl decode
+void test_vivarium_dup_arm(void);                      // git-remote-https: dup(23) TIER2
+void test_vivarium_exec_drops_cloexec_sockets(void);   // 6b: exec cloexec socktab sweep
+void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void); // 6b: fd-reuse misroute, runtime sequence
+void test_vivarium_sigtab_fork_exec_rule(void);          // #127: fork copies, exec keeps SIG_IGN
 void test_vivarium_pipe2_domain(void);
 void test_vivarium_dup3_domain(void);    // #157
 void test_vivarium_uname_fill(void);                     // #150
@@ -672,6 +759,7 @@ void test_vivarium_identity_map(void);                   // #150
 void test_vivarium_signal_map(void);                     // VIVARIUM V-6a
 void test_vivarium_sigaction_domain(void);               // VIVARIUM V-6a
 void test_vivarium_sigset_to_notemask(void);             // VIVARIUM V-6a
+void test_vivarium_handler_mask(void);                    // the handler-time mask
 void test_vivarium_signal_exclusivity(void);             // VIVARIUM V-6b
 void test_vivarium_signote_deliverable(void);            // VIVARIUM V-6b
 void test_vivarium_sigtab(void);                         // VIVARIUM V-6b
@@ -679,12 +767,34 @@ void test_vivarium_notemask_to_sigset(void);             // VIVARIUM V-6b
 void test_vivarium_signote_reverse(void);                 // VIVARIUM V-6c
 void test_vivarium_sigframe(void);
 void test_vivarium_socket_domain(void);
+void test_vivarium_getsockopt_domain(void);
+void test_vivarium_getsockopt_shell_guards_uaccess(void);
+void test_vivarium_openat_create_domain(void);
+void test_vivarium_mkdirat_domain(void);
+void test_vivarium_unlinkat_domain(void);
+void test_vivarium_renameat_domain(void);
+void test_vivarium_dirent64_encode(void);
+void test_vivarium_getdents64_guards_uaccess(void);
+void test_vivarium_readv_writev_guard_iovec_array(void);
+void test_vivarium_ioctl_termios_map(void);
+void test_vivarium_ioctl_grammar_roundtrip(void);
+void test_vivarium_ioctl_dispatch_ebadf(void);
+void test_vivarium_session_errno_remap(void);
+void test_vivarium_ioctl_cons_identity_and_gate(void);
+void test_vivarium_phenotype_decide(void);            // Design D 13.10.1
+void test_vivarium_sendrecv_domain(void);
 void test_vivarium_sockaddr(void);
 void test_vivarium_net_cmd(void);
 void test_vivarium_conn_n(void);
 void test_vivarium_socktab(void);
 void test_vivarium_socktab_close_hook(void);                        // VIVARIUM V-6c
 void test_vivarium_socktab_bind_fields(void);                       // VIVARIUM V-5b
+void test_vivarium_socktab_keyed_write_identity(void);              // N-3 socktab lock
+void test_vivarium_socktab_reset(void);                             // Design D audit F2
+void test_vivarium_socktab_clone_into(void);                        // socktab across images: fork
+void test_vivarium_socktab_alias(void);                             // socktab across images: alias
+void test_vivarium_dup3_alias(void);                                // ...at the dup3 arm
+void test_vivarium_socktab_arm_refusals(void);                      // ...the arms' refusals (holotype F4)
 void test_vivarium_listen_decide(void);
 void test_vivarium_timespec_to_ms(void);
 void test_vivarium_ppoll_decide(void);
@@ -728,6 +838,8 @@ void test_devdev_stat_native_leaves(void);       // CL-4 merge: all-leaf shapes
 void test_devdev_cons_gate(void);
 void test_devdev_consctl_renderer_mint(void);    // #55
 void test_devdev_winsize_leaf(void);             // #55
+void test_devdev_fd_devclass(void);              // H-1 (SYS_FD_DEVCLASS)
+void test_devdev_beacon_leaf(void);              // H-1 audit F1 (/dev/beacon)
 void test_devdev_renderer_gate(void);            // G-4
 void test_devhw_bestiary_smoke(void);
 void test_devhw_attach_returns_root(void);
@@ -852,6 +964,21 @@ void test_stalk_cross_mount_xsearch_deny(void);
 void test_stalk_mount_amode_no_cross(void);
 void test_stalk_cross_mount_chain(void);
 void test_stalk_cross_mount_no_leak(void);
+void test_stalk_union_walk(void);
+void test_stalk_union_order(void);
+void test_stalk_union_xskip(void);
+void test_stalk_union_readdir(void);
+void test_stalk_union_readdir_paginate(void);
+void test_stalk_union_readdir_nontagged(void);
+void test_stalk_union_create(void);
+void test_stalk_union_create_first_wins(void);
+void test_stalk_union_create_no_target(void);
+void test_stalk_union_member_holding(void);
+void test_stalk_union_remove_uncrossed(void);
+void test_stalk_union_fd_base(void);
+void test_stalk_union_opath_base(void);
+void test_stalk_union_zero_component(void);
+void test_stalk_pheno_symlink_reanchor(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
 void test_stalk_path_cross_transplant(void);
@@ -868,6 +995,17 @@ void test_stalk_pounce_unsupported_fallback(void);
 void test_stalk_cached_open_arm(void);
 void test_stalk_cached_open_denials(void);
 void test_stalk_cached_open_mount_fallback(void);
+void test_stalk_symlink_follow(void);
+void test_stalk_symlink_bounds(void);
+void test_stalk_symlink_nofollow(void);
+void test_stalk_symlink_stat_vs_lstat(void);
+void test_stalk_symlink_pounce_split(void);
+void test_stalk_symlink_lifetime(void);
+void test_stalk_open_create_cwd_parity(void);
+void test_stalk_open_create_open_if_present(void);
+void test_stalk_open_create_mkdir_and_nest(void);
+void test_stalk_open_create_leaf_rows(void);
+void test_stalk_open_create_containment_and_denials(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
@@ -1196,6 +1334,9 @@ void test_dev9p_create_file(void);
 void test_dev9p_create_errno_propagates_eexist(void);   // #99
 void test_dev9p_create_invalidates_reused_child(void);
 void test_dev9p_create_invalidates_reused_child_pages(void);
+void test_dev9p_open_create_noent_then_create(void);
+void test_dev9p_open_create_exists_race_retries_open(void);
+void test_dev9p_open_create_excl_eexist_exact(void);
 void test_dev9p_create_downgrades_parent_attr(void);
 void test_dev9p_dirfid_consume_and_recycle(void);
 void test_dev9p_dirfid_perm_only_leaf_consume(void);
@@ -1276,17 +1417,22 @@ void test_pipe_smoke(void);
 void test_pipe_read_on_empty_returns_zero(void);
 void test_pipe_write_to_full_returns_zero(void);
 void test_pipe_write_short_when_partially_full(void);
+void test_pipe_nonblock_returns_eagain(void);
 void test_pipe_wraparound(void);
 void test_pipe_read_on_write_end_rejected(void);
 void test_pipe_write_on_read_end_rejected(void);
 void test_pipe_close_one_end_keeps_other_alive(void);
 void test_pipe_close_both_ends_frees_ring(void);
 void test_pipe_compose_with_spoor_transport(void);
+void test_pipe_cnbframe_atomic_nonblocking(void);
+void test_pipe_attach_9p_admits_pipes_only(void);
 void test_pipe_fstat_reports_fifo(void);
 void test_pipe_blocking_write_wakes_sleeping_reader(void);
 void test_pipe_blocking_read_wakes_sleeping_writer(void);
 void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);
 void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void);
+void test_pipe_blocking_multi_readers_share_one_empty_pipe(void);
+void test_pipe_blocking_multi_writers_share_one_full_pipe(void);
 void test_poll_ready_immediately_pollin(void);
 void test_poll_ready_immediately_pollout(void);
 void test_poll_timeout_zero_not_ready(void);
@@ -1471,6 +1617,8 @@ struct test_case g_tests[] = {
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
     { "timer.oneshot_tval_clamps",     test_timer_oneshot_tval_clamps,     false, NULL },
     { "timer.arm_oneshot_restores",    test_timer_arm_oneshot_restores,    false, NULL },
+    { "extinction.claim_word_exactly_one_winner", test_extinction_claim_word_exactly_one_winner, false, NULL },
+    { "extinction.console_unclaimed_on_clean_boot", test_extinction_console_unclaimed_on_clean_boot, false, NULL },
     { "clock.monotonic_advances",      test_clock_monotonic_advances,      false, NULL },
     { "clock.realtime_anchored",       test_clock_realtime_anchored,       false, NULL },
     { "clock.wallclock_offset_math",   test_clock_wallclock_offset_math,   false, NULL },
@@ -1637,6 +1785,7 @@ struct test_case g_tests[] = {
                                        test_proc_job_stop_preserves_torpor_wait, false, NULL },
     { "proc.job_stop_orphan_rule",     test_proc_job_stop_orphan_rule,     false, NULL },
     { "proc.exec_reset_dispositions",  test_proc_exec_reset_dispositions,  false, NULL },
+    { "proc.exec_drops_image_note_state", test_proc_exec_drops_image_note_state, false, NULL },
     { "resource.exempt_only_system",   test_resource_exempt_only_system,   false, NULL },
     { "resource.page_charge_caps",     test_resource_page_charge_caps,     false, NULL },
     { "resource.page_peak_high_water", test_resource_page_peak_high_water,  false, NULL },
@@ -1652,6 +1801,10 @@ struct test_case g_tests[] = {
     { "exec_ns.resolve_relative_ok",   test_exec_ns_resolve_relative_ok,   false, NULL },
     { "exec_ns.miss_returns_null",     test_exec_ns_miss_returns_null,     false, NULL },
     { "exec_ns.non_executable_denied", test_exec_ns_non_executable_denied, false, NULL },
+    { "exec_ns.noexec_mount_denied",   test_exec_ns_noexec_mount_denied,   false, NULL },
+    { "exec_ns.pheno_mount_crossing",                   test_exec_ns_pheno_mount_crossing,                    false, NULL },
+    { "mmap_file.noexec_mount_denied", test_mmap_file_noexec_mount_denied, false, NULL },
+    { "mmap_file.devenv_never_exec_backs", test_mmap_file_devenv_never_exec_backs, false, NULL },
     { "namespace_layout.proc_ctl_cross", test_namespace_layout_proc_ctl_cross, false, NULL },
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
@@ -1687,17 +1840,23 @@ struct test_case g_tests[] = {
     { "territory.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
     { "territory.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
     { "territory.fork_isolated",       test_namespace_fork_isolated,       false, NULL },
+    { "territory.clone_copies_root_pheno", test_territory_clone_copies_root_pheno, false, NULL },
+    { "territory.render_root_pheno", test_territory_render_root_pheno, false, NULL },
     { "territory.cwd_lexical",         test_territory_cwd_lexical,         false, NULL },
     { "territory.cwd_join",            test_territory_cwd_join,            false, NULL },
     { "territory.cwd_dot",             test_territory_cwd_dot,             false, NULL },
     { "territory_mount.smoke",                            test_territory_mount_smoke,                            false, NULL },
     { "territory_mount.idempotent_same_source",           test_territory_mount_idempotent_same_source,           false, NULL },
+    { "territory_mount.idempotent_converges_flags",       test_territory_mount_idempotent_converges_flags,       false, NULL },
     { "territory_mount.mrepl_replaces",                   test_territory_mount_mrepl_replaces,                   false, NULL },
+    { "territory_mount.mrepl_existing_replaces_group",    test_territory_mount_mrepl_existing_replaces_group,    false, NULL },
+    { "territory_mount.mbefore_moves_existing",           test_territory_mount_mbefore_moves_existing,           false, NULL },
     { "territory_mount.unmount_missing_returns_error",    test_territory_mount_unmount_missing_returns_error,    false, NULL },
     { "territory_mount.table_full",                       test_territory_mount_table_full,                       false, NULL },
     { "territory_mount.clone_bumps_refs",                 test_territory_mount_clone_bumps_refs,                 false, NULL },
     { "territory_mount.destroy_drops_all_refs",           test_territory_mount_destroy_drops_all_refs,           false, NULL },
     { "territory_mount.devno_disambiguates",              test_territory_mount_devno_disambiguates,              false, NULL },
+    { "territory_mount.noexec_covers",                    test_territory_mount_noexec_covers,                    false, NULL },
     { "territory_mount.rejects_cycle",                    test_territory_mount_rejects_cycle,                    false, NULL },
     { "territory_mount.mp_path_lifecycle",                test_territory_mount_mp_path_lifecycle,                false, NULL },
     { "territory_mount.format_ns",                        test_territory_mount_format_ns,                        false, NULL },
@@ -1800,6 +1959,9 @@ struct test_case g_tests[] = {
     { "weft.share_register_claim",        test_weft_share_register_claim,     false, NULL },
     { "weft.share_full",                  test_weft_share_full,               false, NULL },
     { "weft.share_owner_gc",              test_weft_share_owner_gc,           false, NULL },
+    { "weft.hostmem_share",               test_weft_hostmem_share,            false, NULL },
+    { "weft.hostmem_refcount",            test_weft_hostmem_refcount,         false, NULL },
+    { "weft.hostmem_resolve",             test_weft_hostmem_resolve,          false, NULL },
     { "weft.syscall_share",               test_weft_syscall_share,            false, NULL },
     { "weft.map_binding_lifetime",        test_weft_map_binding_lifetime,     false, NULL },
     { "weft.share_cap_gate",              test_weft_share_cap_gate,           false, NULL },
@@ -1820,6 +1982,9 @@ struct test_case g_tests[] = {
     { "pgtable.install_user_pte_constraints",
                                        test_pgtable_install_user_pte_constraints,
                                                                            false, NULL },
+    { "pgtable.install_user_pte_attr_index",
+                                       test_pgtable_install_user_pte_attr_index,
+                                                                           false, NULL },
     { "pgtable.install_user_pte_idempotent",
                                        test_pgtable_install_user_pte_idempotent,
                                                                            false, NULL },
@@ -1831,6 +1996,8 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "demand_page.file_smoke",        test_demand_page_file_smoke,        false, NULL },
     { "demand_page.file_rodata_prot",  test_demand_page_file_rodata_prot,  false, NULL },
+    { "demand_page.file_geometry_shift_bails", test_demand_page_file_geometry_shift_bails, false, NULL },
+    { "demand_page.file_geometry_shift_bails_single", test_demand_page_file_geometry_shift_bails_single, false, NULL },
     { "demand_page.file_read_error_snare_bus",
                                        test_demand_page_file_read_error_snare_bus, false, NULL },
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
@@ -1839,6 +2006,9 @@ struct test_case g_tests[] = {
     { "demand_page.file_cluster_short_read",
                                        test_demand_page_file_cluster_short_read, false, NULL },
     { "demand_page.file_eof_tail_zero", test_demand_page_file_eof_tail_zero, false, NULL },
+    { "demand_page.file_past_limit_bus", test_demand_page_file_past_limit_bus, false, NULL },
+    { "demand_page.file_partial_page_zero_with_limit", test_demand_page_file_partial_page_zero_with_limit, false, NULL },
+    { "demand_page.file_cluster_clamps_at_limit", test_demand_page_file_cluster_clamps_at_limit, false, NULL },
     { "demand_page.lazy_zero_fill",    test_demand_page_lazy_zero_fill,    false, NULL },
     { "demand_page.lazy_decommit_refault",
                                        test_demand_page_lazy_decommit_refault, false, NULL },
@@ -1852,6 +2022,7 @@ struct test_case g_tests[] = {
     { "vdso.maps_ro_read",             test_vdso_maps_ro_read,             false, NULL },
     { "vdso.maps_ro_write_faults",     test_vdso_maps_ro_write_faults,     false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
+    { "exec.interp_argv_shape",        test_exec_interp_argv_shape,        false, NULL },
     { "exec.from_spoor_rodata_dispatch", test_exec_from_spoor_rodata_dispatch, false, NULL },
     // #149: a non-page-aligned PT_LOAD vaddr. One test per obligation, so no
     // single fix satisfies all four: the eager arm's bytes + zero slack, the
@@ -1878,6 +2049,12 @@ struct test_case g_tests[] = {
     { "execve.failed_load_leaves_target_drainable",
                                        test_execve_failed_load_leaves_target_drainable,
                                                                            false, NULL },
+    { "exec.native_rejects_dynamic_linux",
+                                       test_exec_native_rejects_dynamic_linux,
+                                                                           false, NULL },
+    { "exec.load_failure_leaves_phenotype", test_exec_load_failure_leaves_phenotype, false, NULL },
+    { "exec.reset_follows_decided_phenotype", test_exec_reset_follows_decided_phenotype, false, NULL },
+    { "exec.interp_dispatch_follows_parameter", test_exec_interp_dispatch_follows_parameter, false, NULL },
     { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
     { "exec.setup_lifecycle_round_trip",
                                        test_exec_setup_lifecycle_round_trip,
@@ -1905,6 +2082,7 @@ struct test_case g_tests[] = {
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },
+    { "syscall.dispatch_exit_group_code", test_syscall_dispatch_exit_group_code, false, NULL },
     { "syscall.dispatch_args_in_x0_to_x5",
                                        test_syscall_dispatch_args_in_x0_to_x5,
                                                                            false, NULL },
@@ -2011,6 +2189,22 @@ struct test_case g_tests[] = {
     { "sys_burrow.attach_lazy_window_va",     test_sys_burrow_attach_lazy_window_va,     false, NULL },
     { "sys_burrow.attach_lazy_large",         test_sys_burrow_attach_lazy_large,         false, NULL },
     { "sys_burrow.lazy_len_from_args",        test_sys_burrow_lazy_len_from_args,        false, NULL },
+    { "burrow.map_fixed_split_left",          test_burrow_map_fixed_split_left,          false, NULL },
+    { "burrow.map_fixed_split_right",         test_burrow_map_fixed_split_right,         false, NULL },
+    { "burrow.map_fixed_split_three_way",     test_burrow_map_fixed_split_three_way,     false, NULL },
+    { "burrow.map_fixed_exact_cover",         test_burrow_map_fixed_exact_cover,         false, NULL },
+    { "burrow.map_fixed_carries_offset",      test_burrow_map_fixed_carries_offset,      false, NULL },
+    { "burrow.map_fixed_refusals",            test_burrow_map_fixed_refusals,            false, NULL },
+    { "burrow.map_fixed_successive",          test_burrow_map_fixed_successive,          false, NULL },
+    { "burrow.map_fixed_into_free_space",     test_burrow_map_fixed_into_free_space,     false, NULL },
+    { "burrow.munmap_range_tiled",            test_burrow_munmap_range_tiled,            false, NULL },
+    { "burrow.munmap_range_partial_refused",  test_burrow_munmap_range_partial_refused,  false, NULL },
+    { "burrow.munmap_range_empty_ok",         test_burrow_munmap_range_empty_ok,         false, NULL },
+    { "burrow.detach_file_frees_outside_lock", test_burrow_detach_file_frees_outside_lock, false, NULL },
+    { "burrow.munmap_range_file_frees_outside_lock", test_burrow_munmap_range_file_frees_outside_lock, false, NULL },
+    { "burrow.map_fixed_replace_file_frees_outside_lock", test_burrow_map_fixed_replace_file_frees_outside_lock, false, NULL },
+    { "burrow.map_fixed_refuses_code_alias", test_burrow_map_fixed_refuses_code_alias, false, NULL },
+    { "demand_page.eager_copy_charge_pairing", test_mmap_eager_copy_charge_pairing,      false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
     { "torpor.wake_rejects_bad_args",          test_torpor_wake_rejects_bad_args,          false, NULL },
@@ -2041,6 +2235,7 @@ struct test_case g_tests[] = {
     { "loom.enter_flags_and_bad_index",  test_loom_enter_flags_and_bad_index,  false, NULL },
     { "loom.enter_cq_admission_backpressure", test_loom_enter_cq_admission_backpressure, false, NULL },
     { "loom.cq_waiter_wake",             test_loom_cq_waiter_wake,             false, NULL },
+    { "loom.poll",                       test_loom_poll,                       false, NULL },
     { "loom.cq_waiter_no_spurious_wake_on_full", test_loom_cq_waiter_no_spurious_wake_on_full, false, NULL },
     { "loom.enter_inline_min_complete",  test_loom_enter_inline_min_complete,  false, NULL },
     { "loom.enter_min_complete_no_inflight", test_loom_enter_min_complete_no_inflight, false, NULL },
@@ -2072,9 +2267,25 @@ struct test_case g_tests[] = {
     { "notes.proc_lifecycle",                  test_notes_proc_lifecycle,                  false, NULL },
     { "notes.peek_does_not_pop",               test_notes_peek_does_not_pop,               false, NULL },
     { "notes.interrupt_terminate_gate",        test_notes_interrupt_terminate_gate,        false, NULL },
+    { "notes.default_action_table",            test_notes_default_action_table,            false, NULL },
+    { "notes.ndflt_dispatch",                  test_notes_ndflt_dispatch,                  false, NULL },
+    { "notes.kill_terminates_single_thread",   test_notes_kill_terminates_single_thread,   false, NULL },
+    { "notes.self_kill_through_full_ring",     test_notes_self_kill_through_full_ring,     false, NULL },
+    { "notes.ndflt_stop_discarded_after_cont", test_notes_ndflt_stop_discarded_after_cont, false, NULL },
+    { "notes.susp_gate_reads_phenotype_sigtab", test_notes_susp_gate_reads_phenotype_sigtab, false, NULL },
+    { "notes.masked_susp_stops_at_delivery", test_notes_masked_susp_stops_at_delivery, false, NULL },
+    { "notes.stop_dequeue_picks_its_own_note", test_notes_stop_dequeue_picks_its_own_note, false, NULL },
+    { "notes.class_scans_read_phenotype_sigtab", test_notes_class_scans_read_phenotype_sigtab, false, NULL },
+    { "notes.discard_name_purges_pending",     test_notes_discard_name_purges_pending,     false, NULL },
+    { "notes.phenotype_sigreturn_restores_mask", test_notes_phenotype_sigreturn_restores_mask, false, NULL },
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
+    { "notes.pipe_die_pending",                test_notes_pipe_die_pending,                false, NULL },
+    { "notes.caught_note_latch_lifecycle",     test_notes_caught_note_latch_lifecycle,     false, NULL },
+    { "notes.caught_note_deliverable_predicate", test_notes_caught_note_deliverable_predicate, false, NULL },
+    { "notes.handler_escape_predicate", test_notes_handler_escape_predicate, false, NULL },
+    { "notes.caught_note_stop_dequeue_drains", test_notes_caught_note_stop_dequeue_drains, false, NULL },
     { "notes.fstat_reports_chr",               test_notes_fstat_reports_chr,               false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",
@@ -2089,6 +2300,8 @@ struct test_case g_tests[] = {
     { "elf.bounds_rejection",          test_elf_bounds_rejection,          false, NULL },
     { "elf.policy_rejection",          test_elf_policy_rejection,          false, NULL },
     { "elf.brand_hint",                test_elf_brand_hint,                false, NULL },
+    { "elf.read_interp",               test_elf_read_interp,               false, NULL },
+    { "elf.pie_load_bias",             test_elf_pie_load_bias,             false, NULL },
     { "dev.boot_registration_smoke",   test_dev_boot_registration_smoke,   false, NULL },
     { "dev.lookup_unknown",            test_dev_lookup_unknown,            false, NULL },
     { "dev.devnone_ops_smoke",         test_dev_devnone_ops_smoke,         false, NULL },
@@ -2164,6 +2377,12 @@ struct test_case g_tests[] = {
     { "cons.tx_role_serializes_writers", test_cons_tx_role_serializes_writers, false, NULL },
     { "cons.kernel_writer_bracket",    test_cons_kernel_writer_bracket,    false, NULL },
     { "cons.tx_room_wait_and_deadline", test_cons_tx_room_wait_and_deadline, false, NULL },
+    { "cons.tx_unit_diag_line_atomic", test_cons_tx_unit_diag_line_atomic, false, NULL },
+    { "cons.tx_unit_echo_atomic",      test_cons_tx_unit_echo_atomic,      false, NULL },
+    { "cons.tx_unit_smp_no_tear",      test_cons_tx_unit_smp_no_tear,      false, NULL },
+    { "cons.ring_claim_core_returns_holding",  test_cons_ring_claim_core_returns_holding,  false, NULL },
+    { "cons.ring_claim_core_bounded_when_held", test_cons_ring_claim_core_bounded_when_held, false, NULL },
+    { "cons.ring_unclaimed_on_clean_boot",     test_cons_ring_unclaimed_on_clean_boot,     false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_full_refuses",        test_cons_ring_full_refuses,        false, NULL },
     { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },
@@ -2171,6 +2390,8 @@ struct test_case g_tests[] = {
     { "cons.full_ring_never_blocks_sak", test_cons_full_ring_never_blocks_sak, false, NULL },
     { "cons.feed_write_short_on_full", test_cons_feed_write_short_on_full, false, NULL },
     { "cons.refused_byte_is_not_echoed", test_cons_refused_byte_is_not_echoed, false, NULL },
+    { "cons.serial_silent_gate",       test_cons_serial_silent_gate,       false, NULL },
+    { "cons.serial_silent_sak_restores", test_cons_serial_silent_sak_restores, false, NULL },
     { "cons.rx_holdback_reoffer",      test_cons_rx_holdback_reoffer,      false, NULL },
     { "cons.rx_holdback_not_stranded", test_cons_rx_holdback_not_stranded, false, NULL },
     { "cons.rx_drop_counters",         test_cons_rx_drop_counters,         false, NULL },
@@ -2205,16 +2426,20 @@ struct test_case g_tests[] = {
     { "cons.consctl_parse",            test_cons_consctl_parse,            false, NULL },
     { "cons.consctl_render",           test_cons_consctl_render,           false, NULL },
     { "cons.winsize_roundtrip",        test_cons_winsize_roundtrip,        false, NULL },
+    { "cons.beacon_roundtrip",         test_cons_beacon_roundtrip,         false, NULL },
     { "cons.winsize_winch_iff_changed", test_cons_winsize_winch_iff_changed, false, NULL },
     { "cons.stat_native_qid_contract", test_cons_stat_native_qid_contract, false, NULL },
     { "cons.cook_line_overflow",       test_cons_cook_line_overflow,       false, NULL },
-    { "cons.cook_mode_flip_fresh_line", test_cons_cook_mode_flip_fresh_line, false, NULL },
+    { "cons.cook_mode_flip_delivers", test_cons_cook_mode_flip_delivers, false, NULL },
+    { "cons.cook_isig_discards_pending_line", test_cons_cook_isig_discards_pending_line, false, NULL },
     { "cons.cook_canonical_poll_edge", test_cons_cook_canonical_poll_edge, false, NULL },
     { "cons.drain_tap_mirrors_output", test_cons_drain_tap_mirrors_output, false, NULL },
     { "cons.sys_puts_uses_shared_console_path", test_cons_sys_puts_uses_shared_console_path, false, NULL },
     { "vivarium.t1_renumbers",           test_vivarium_t1_renumbers,           false, NULL },
     { "vivarium.rejects_are_deliberate", test_vivarium_rejects_are_deliberate, false, NULL },
     { "vivarium.unknown_forwards",       test_vivarium_unknown_forwards,       false, NULL },
+    { "vivarium.git_chunk_rows",         test_vivarium_git_chunk_rows,         false, NULL },
+    { "vivarium.faccessat_gate",         test_vivarium_faccessat_gate,         false, NULL },
     { "vivarium.fails_closed",           test_vivarium_fails_closed,           false, NULL },
     { "vivarium.no_wide_alias",          test_vivarium_no_wide_alias,          false, NULL },
     { "vivarium.openat_domain",          test_vivarium_openat_domain,          false, NULL },
@@ -2223,7 +2448,11 @@ struct test_case g_tests[] = {
     { "vivarium.stat_to_linux",          test_vivarium_stat_to_linux,          false, NULL },
     { "vivarium.fstatat_domain",         test_vivarium_fstatat_domain,         false, NULL },
     { "vivarium.mmap_domain",            test_vivarium_mmap_domain,            false, NULL },
+    { "vivarium.mmap_file_domain",       test_vivarium_mmap_file_domain,       false, NULL },
+    { "vivarium.mmap_fixed_domain",      test_vivarium_mmap_fixed_domain,      false, NULL },
+    { "vivarium.mmap_arms_disjoint",     test_vivarium_mmap_arms_disjoint,     false, NULL },
     { "vivarium.clone_domain",           test_vivarium_clone_domain,           false, NULL },
+    { "vivarium.futex_decide",           test_vivarium_futex_decide,           false, NULL },
     { "vivarium.wait4_domain",           test_vivarium_wait4_domain,           false, NULL },
     // #150 -- the startup batch. One test per OBLIGATION rather than one per
     // syscall: the table classification (which rows are T1 vs T2 vs ENOSYS and
@@ -2232,6 +2461,13 @@ struct test_case g_tests[] = {
     { "vivarium.startup_batch_rows",     test_vivarium_startup_batch_rows,     false, NULL },
     { "vivarium.writev_domain",          test_vivarium_writev_domain,          false, NULL },
     { "vivarium.fcntl_domain",           test_vivarium_fcntl_domain,           false, NULL },
+    { "vivarium.fcntl_dupfd_errnos",     test_vivarium_fcntl_dupfd_errnos,     false, NULL },
+    { "vivarium.fcntl_nonblock_roundtrip", test_vivarium_fcntl_nonblock_roundtrip, false, NULL },
+    { "vivarium.ioctl_decide",           test_vivarium_ioctl_decide,           false, NULL },
+    { "vivarium.dup_arm",                test_vivarium_dup_arm,                false, NULL },
+    { "vivarium.exec_drops_cloexec_sockets", test_vivarium_exec_drops_cloexec_sockets, false, NULL },
+    { "vivarium.exec_sweep_prevents_fd_reuse_misroute", test_vivarium_exec_sweep_prevents_fd_reuse_misroute, false, NULL },
+    { "vivarium.sigtab_fork_exec_rule",  test_vivarium_sigtab_fork_exec_rule,  false, NULL },
     { "vivarium.dup3_domain",          test_vivarium_dup3_domain,          false, NULL },
     { "vivarium.pipe2_domain",           test_vivarium_pipe2_domain,           false, NULL },
     { "vivarium.uname_fill",             test_vivarium_uname_fill,             false, NULL },
@@ -2239,6 +2475,7 @@ struct test_case g_tests[] = {
     { "vivarium.signal_map",             test_vivarium_signal_map,             false, NULL },
     { "vivarium.sigaction_domain",       test_vivarium_sigaction_domain,       false, NULL },
     { "vivarium.sigset_to_notemask",     test_vivarium_sigset_to_notemask,     false, NULL },
+    { "vivarium.handler_mask",           test_vivarium_handler_mask,           false, NULL },
     { "vivarium.signal_exclusivity",     test_vivarium_signal_exclusivity,     false, NULL },
     { "vivarium.signote_deliverable",    test_vivarium_signote_deliverable,    false, NULL },
     { "vivarium.sigtab",                 test_vivarium_sigtab,                 false, NULL },
@@ -2246,12 +2483,34 @@ struct test_case g_tests[] = {
     { "vivarium.signote_reverse",       test_vivarium_signote_reverse,       false, NULL },
     { "vivarium.sigframe",              test_vivarium_sigframe,              false, NULL },
     { "vivarium.socket_domain",        test_vivarium_socket_domain,        false, NULL },
+    { "vivarium.getsockopt_domain",    test_vivarium_getsockopt_domain,    false, NULL },
+    { "vivarium.getsockopt_shell_guards_uaccess", test_vivarium_getsockopt_shell_guards_uaccess, false, NULL },
+    { "vivarium.sendrecv_domain",      test_vivarium_sendrecv_domain,      false, NULL },
+    { "vivarium.openat_create_domain", test_vivarium_openat_create_domain, false, NULL },
+    { "vivarium.mkdirat_domain",       test_vivarium_mkdirat_domain,       false, NULL },
+    { "vivarium.unlinkat_domain",      test_vivarium_unlinkat_domain,      false, NULL },
+    { "vivarium.renameat_domain",      test_vivarium_renameat_domain,      false, NULL },
+    { "vivarium.dirent64_encode",      test_vivarium_dirent64_encode,      false, NULL },
+    { "vivarium.getdents64_guards_uaccess", test_vivarium_getdents64_guards_uaccess, false, NULL },
+    { "vivarium.readv_writev_guard_iovec_array", test_vivarium_readv_writev_guard_iovec_array, false, NULL },
+    { "vivarium.ioctl_termios_map", test_vivarium_ioctl_termios_map, false, NULL },
+    { "vivarium.ioctl_grammar_roundtrip", test_vivarium_ioctl_grammar_roundtrip, false, NULL },
+    { "vivarium.ioctl_dispatch_ebadf", test_vivarium_ioctl_dispatch_ebadf, false, NULL },
+    { "vivarium.session_errno_remap", test_vivarium_session_errno_remap, false, NULL },
+    { "vivarium.ioctl_cons_identity_and_gate", test_vivarium_ioctl_cons_identity_and_gate, false, NULL },
+    { "vivarium.phenotype_decide", test_vivarium_phenotype_decide, false, NULL },
     { "vivarium.sockaddr",             test_vivarium_sockaddr,             false, NULL },
     { "vivarium.net_cmd",              test_vivarium_net_cmd,              false, NULL },
     { "vivarium.conn_n",               test_vivarium_conn_n,               false, NULL },
     { "vivarium.socktab",              test_vivarium_socktab,              false, NULL },
     { "vivarium.socktab_close_hook",   test_vivarium_socktab_close_hook,   false, NULL },
     { "vivarium.socktab_bind_fields",  test_vivarium_socktab_bind_fields,  false, NULL },
+    { "vivarium.socktab_keyed_write_identity", test_vivarium_socktab_keyed_write_identity, false, NULL },
+    { "vivarium.socktab_reset",        test_vivarium_socktab_reset,        false, NULL },
+    { "vivarium.socktab_clone_into",   test_vivarium_socktab_clone_into,   false, NULL },
+    { "vivarium.socktab_alias",        test_vivarium_socktab_alias,        false, NULL },
+    { "vivarium.dup3_alias",           test_vivarium_dup3_alias,           false, NULL },
+    { "vivarium.socktab_arm_refusals", test_vivarium_socktab_arm_refusals, false, NULL },
     { "vivarium.listen_decide",        test_vivarium_listen_decide,        false, NULL },
     { "vivarium.timespec_to_ms",       test_vivarium_timespec_to_ms,       false, NULL },
     { "vivarium.ppoll_decide",         test_vivarium_ppoll_decide,         false, NULL },
@@ -2298,6 +2557,8 @@ struct test_case g_tests[] = {
     { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
     { "devdev.consctl_renderer_mint",  test_devdev_consctl_renderer_mint,  false, NULL },
     { "devdev.winsize_leaf",           test_devdev_winsize_leaf,           false, NULL },
+    { "devdev.fd_devclass",            test_devdev_fd_devclass,            false, NULL },
+    { "devdev.beacon_leaf",            test_devdev_beacon_leaf,            false, NULL },
     { "devhw.bestiary_smoke",          test_devhw_bestiary_smoke,          false, NULL },
     { "devhw.attach_returns_root",     test_devhw_attach_returns_root,     false, NULL },
     { "devhw.walk_node_and_prop",      test_devhw_walk_node_and_prop,      false, NULL },
@@ -2898,6 +3159,15 @@ struct test_case g_tests[] = {
     { "dev9p.create_invalidates_reused_child_pages",
                                        test_dev9p_create_invalidates_reused_child_pages,
                                                                            false, NULL },
+    { "dev9p.open_create_noent_then_create",
+                                       test_dev9p_open_create_noent_then_create,
+                                                                           false, NULL },
+    { "dev9p.open_create_exists_race_retries_open",
+                                       test_dev9p_open_create_exists_race_retries_open,
+                                                                           false, NULL },
+    { "dev9p.open_create_excl_eexist_exact",
+                                       test_dev9p_open_create_excl_eexist_exact,
+                                                                           false, NULL },
     { "dev9p.create_downgrades_parent_attr",
                                        test_dev9p_create_downgrades_parent_attr,
                                                                            false, NULL },
@@ -3001,17 +3271,22 @@ struct test_case g_tests[] = {
     { "pipe.read_on_empty_returns_zero",                    test_pipe_read_on_empty_returns_zero,                    false, NULL },
     { "pipe.write_to_full_returns_zero",                    test_pipe_write_to_full_returns_zero,                    false, NULL },
     { "pipe.write_short_when_partially_full",               test_pipe_write_short_when_partially_full,               false, NULL },
+    { "pipe.nonblock_returns_eagain",                       test_pipe_nonblock_returns_eagain,                       false, NULL },
     { "pipe.wraparound",                                    test_pipe_wraparound,                                    false, NULL },
     { "pipe.read_on_write_end_rejected",                    test_pipe_read_on_write_end_rejected,                    false, NULL },
     { "pipe.write_on_read_end_rejected",                    test_pipe_write_on_read_end_rejected,                    false, NULL },
     { "pipe.close_one_end_keeps_other_alive",               test_pipe_close_one_end_keeps_other_alive,               false, NULL },
     { "pipe.close_both_ends_frees_ring",                    test_pipe_close_both_ends_frees_ring,                    false, NULL },
     { "pipe.compose_with_spoor_transport",                  test_pipe_compose_with_spoor_transport,                  false, NULL },
+    { "pipe.cnbframe_atomic_nonblocking",                   test_pipe_cnbframe_atomic_nonblocking,                   false, NULL },
+    { "pipe.attach_9p_admits_pipes_only",                   test_pipe_attach_9p_admits_pipes_only,                   false, NULL },
     { "pipe.fstat_reports_fifo",                            test_pipe_fstat_reports_fifo,                            false, NULL },
     { "pipe_blocking.write_wakes_sleeping_reader",          test_pipe_blocking_write_wakes_sleeping_reader,          false, NULL },
     { "pipe_blocking.read_wakes_sleeping_writer",           test_pipe_blocking_read_wakes_sleeping_writer,           false, NULL },
     { "pipe_blocking.close_write_end_wakes_reader_with_eof", test_pipe_blocking_close_write_end_wakes_reader_with_eof, false, NULL },
     { "pipe_blocking.close_read_end_wakes_writer_with_epipe", test_pipe_blocking_close_read_end_wakes_writer_with_epipe, false, NULL },
+    { "pipe_blocking.multi_readers_share_one_empty_pipe",  test_pipe_blocking_multi_readers_share_one_empty_pipe,  false, NULL },
+    { "pipe_blocking.multi_writers_share_one_full_pipe",   test_pipe_blocking_multi_writers_share_one_full_pipe,   false, NULL },
     { "poll.ready_immediately_pollin",          test_poll_ready_immediately_pollin,          false, NULL },
     { "poll.ready_immediately_pollout",         test_poll_ready_immediately_pollout,         false, NULL },
     { "poll.timeout_zero_not_ready",            test_poll_timeout_zero_not_ready,            false, NULL },
@@ -3281,6 +3556,21 @@ struct test_case g_tests[] = {
     { "stalk.mount_amode_no_cross",    test_stalk_mount_amode_no_cross,    false, NULL },
     { "stalk.cross_mount_chain",       test_stalk_cross_mount_chain,       false, NULL },
     { "stalk.cross_mount_no_leak",     test_stalk_cross_mount_no_leak,     false, NULL },
+    { "stalk.union_walk",              test_stalk_union_walk,              false, NULL },
+    { "stalk.union_order",             test_stalk_union_order,             false, NULL },
+    { "stalk.union_xskip",             test_stalk_union_xskip,             false, NULL },
+    { "stalk.union_readdir",           test_stalk_union_readdir,           false, NULL },
+    { "stalk.union_readdir_paginate",  test_stalk_union_readdir_paginate,  false, NULL },
+    { "stalk.union_readdir_nontagged", test_stalk_union_readdir_nontagged, false, NULL },
+    { "stalk.union_create",            test_stalk_union_create,            false, NULL },
+    { "stalk.union_create_first_wins", test_stalk_union_create_first_wins, false, NULL },
+    { "stalk.union_create_no_target",  test_stalk_union_create_no_target,  false, NULL },
+    { "stalk.union_member_holding",    test_stalk_union_member_holding,    false, NULL },
+    { "stalk.union_remove_uncrossed",  test_stalk_union_remove_uncrossed,  false, NULL },
+    { "stalk.union_fd_base",           test_stalk_union_fd_base,           false, NULL },
+    { "stalk.union_opath_base",        test_stalk_union_opath_base,        false, NULL },
+    { "stalk.union_zero_component",    test_stalk_union_zero_component,    false, NULL },
+    { "stalk.pheno_symlink_reanchor",  test_stalk_pheno_symlink_reanchor,  false, NULL },
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },
     { "stalk.path_cross_transplant",   test_stalk_path_cross_transplant,   false, NULL },
@@ -3296,6 +3586,17 @@ struct test_case g_tests[] = {
     { "stalk.cached_open_arm",           test_stalk_cached_open_arm,             false, NULL },
     { "stalk.cached_open_denials",       test_stalk_cached_open_denials,         false, NULL },
     { "stalk.cached_open_mount_fallback", test_stalk_cached_open_mount_fallback, false, NULL },
+    { "stalk.symlink_follow",          test_stalk_symlink_follow,          false, NULL },
+    { "stalk.symlink_bounds",          test_stalk_symlink_bounds,          false, NULL },
+    { "stalk.symlink_nofollow",        test_stalk_symlink_nofollow,        false, NULL },
+    { "stalk.symlink_stat_vs_lstat",   test_stalk_symlink_stat_vs_lstat,   false, NULL },
+    { "stalk.symlink_pounce_split",    test_stalk_symlink_pounce_split,    false, NULL },
+    { "stalk.symlink_lifetime",        test_stalk_symlink_lifetime,        false, NULL },
+    { "stalk.open_create_cwd_parity",  test_stalk_open_create_cwd_parity,  false, NULL },
+    { "stalk.open_create_open_if_present", test_stalk_open_create_open_if_present, false, NULL },
+    { "stalk.open_create_mkdir_and_nest", test_stalk_open_create_mkdir_and_nest, false, NULL },
+    { "stalk.open_create_leaf_rows",   test_stalk_open_create_leaf_rows,   false, NULL },
+    { "stalk.open_create_containment_and_denials", test_stalk_open_create_containment_and_denials, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

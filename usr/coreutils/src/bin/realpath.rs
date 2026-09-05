@@ -11,33 +11,17 @@
 
 extern crate alloc;
 use alloc::string::String;
-use alloc::vec::Vec;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use coreutils::path::normalize;
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::{eprintln, io};
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     run(env::args())
-}
-
-fn normalize(path: &str) -> String {
-    let mut stack: Vec<&str> = Vec::new();
-    for comp in path.split('/') {
-        match comp {
-            "" | "." => {}
-            ".." => {
-                stack.pop();
-            }
-            c => stack.push(c),
-        }
-    }
-    let mut out = String::from("/");
-    out.push_str(&stack.join("/"));
-    out
 }
 
 const USAGE: &str = "\

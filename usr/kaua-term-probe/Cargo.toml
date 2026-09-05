@@ -1,0 +1,12 @@
+[package]
+name = "kaua-term-probe"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kaua-term-probe"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }
+kaua-term = { path = "../kaua-term" }

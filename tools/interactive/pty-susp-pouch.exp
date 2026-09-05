@@ -1,0 +1,118 @@
+#!/usr/bin/expect -f
+# tools/interactive/pty-susp-pouch.exp -- ^Z a POUCH program in a pts foreground
+# group, and prove the stop by its EFFECT rather than by the shell's report.
+#
+# The gap this closes: pty-4.exp already drives the whole job-control ladder
+# through a real pts, but its subject is `sleep`, a NATIVE libthyla-rs coreutil.
+# So the pouch boundary-line's note path -- and the EL0 return tail's stop
+# WIRING -- were never on the line in-guest. The unit tests cannot reach that
+# tail at all: notes_deliver_at_el0_return takes no Thread argument (it reads
+# current_thread()), which is why test_notes.c:1732 records the identical hole
+# for its own decider and routes it here. This scenario is the only leg that
+# also exercises the lock order under real contention.
+#
+# WHY THE PROGRAM COUNTS ITS TICKS. The load-bearing claim is a NEGATIVE -- a
+# stopped process emits nothing -- and a negative assertion is satisfied by a
+# fixture that broke for any unrelated reason: a failed exec, a crash, a shell
+# that never moved it into the foreground, a pts that dropped the bytes. Every
+# one of those produces silence, and silence is exactly what "the stop worked"
+# looks like. So the quiet window is BRACKETED by two positives:
+#
+#   before ^Z   ticks ADVANCE          -- the fixture works and it is running
+#   after  ^Z   ticks ABSENT           -- the claim under test
+#   after  fg   ticks ADVANCE AGAIN    -- it was stopped, not dead
+#
+# and the post-resume leg demands a number STRICTLY GREATER than the last seen
+# before the stop. That is what makes it non-vacuous: a replay of pre-stop bytes
+# buffered somewhere in the pts would show OLD numbers and must not satisfy it.
+# (/pouch-hello-susp sets _IONBF for the same reason -- a stdio buffer flushing
+# on resume would forge the exact output that reads as "it never stopped".)
+
+source [file join [file dirname [info script]] lib.exp]
+
+# Assert no SUSP-TICK arrives for `secs`. Only meaningful between the two
+# positive legs above -- alone it passes against a dead guest.
+proc susp_expect_quiet {secs phase} {
+    global timeout
+    set timeout $secs
+    expect {
+        -re {SUSP-TICK ([0-9]+)} {
+            lc_fail "$phase: a stopped process emitted SUSP-TICK $expect_out(1,string)"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+        timeout           { lc_step "saw: $phase (${secs}s quiet, no ticks)" }
+    }
+}
+
+# Consume one tick and return its number.
+proc susp_next_tick {phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -re {SUSP-TICK ([0-9]+)} { return $expect_out(1,string) }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) waiting for a SUSP-TICK during '$phase'" }
+        eof     { lc_fail "unexpected EOF during '$phase'" }
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Enter the hosted session -- same entry as pty-4: the outer ut flips the
+# console to a byte pipe, the inner ut takes job control over a real pts.
+lc_send "ptyhost"
+lc_expect "job control active" "the hosted ut's session dance"
+sleep 1
+
+# The subject is a POUCH binary. Invoked by BARE NAME, not an absolute path:
+# that is the form ls-gfx.exp already proves works for a pouch binary from a
+# shell prompt in-guest ("pouch-hello-pty cons"). An absolute path might resolve
+# too, but no scenario demonstrates it, and this leg has no business also being
+# the first test of exec-by-absolute-path.
+lc_send "pouch-hello-susp"
+lc_expect "SUSP-READY" "the pouch program reached main"
+
+# POSITIVE 1: it is running, and the counter advances.
+set n1 [susp_next_tick "first tick"]
+set n2 [susp_next_tick "second tick"]
+if {$n2 <= $n1} {
+    lc_fail "ticks did not advance before the stop ($n1 -> $n2) -- the vehicle is broken, so nothing below this line would mean anything"
+}
+lc_step "saw: ticks advancing before the stop ($n1 -> $n2)"
+
+# ^Z: the pts cooks 0x1a (VSUSP) -> tty:susp -> the default STOP -> the inner
+# ut's job-control report.
+send "\x1a"
+lc_expect "Stopped" "^Z stops the foreground POUCH program"
+
+# Let at most one in-flight tick drain (250 ms cadence, unbuffered), then
+# demand real quiet. Without the drain this races a tick already on the wire
+# when the stop landed -- which would be a harness artifact, not a kernel bug.
+sleep 1
+
+# THE CLAIM: stopped means stopped.
+susp_expect_quiet 4 "the stopped pouch program stays silent"
+
+# POSITIVE 2: fg resumes it, and the counter has MOVED PAST where it stopped.
+lc_send "fg"
+set n3 [susp_next_tick "post-resume tick"]
+if {$n3 <= $n2} {
+    lc_fail "post-resume tick $n3 is not beyond the pre-stop $n2 -- this is replayed buffered output, not a resumed process"
+}
+lc_step "saw: ticks resumed and advanced past the stop ($n2 -> $n3)"
+
+# ^C -> interrupt -> the pouch program default-terminates (LS-5), fg returns.
+sleep 1
+send "\x03"
+sleep 1
+lc_run_expect "echo susp-fg | tr a-z A-Z" "SUSP-FG"
+
+# Unwind the hosted session, same as pty-4: proves the stop/resume left the
+# pts and the inner shell in a sane state rather than merely surviving.
+lc_send "exit"
+sleep 1
+lc_run_expect "echo susp-outer | tr a-z A-Z" "SUSP-OUTER"
+
+lc_pass "PTY-SUSP-POUCH: ^Z stops a POUCH program in a pts foreground group -- proven by tick absence bracketed by advancing ticks either side"

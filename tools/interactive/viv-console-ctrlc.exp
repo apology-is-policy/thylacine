@@ -1,0 +1,57 @@
+#!/usr/bin/expect -f
+# tools/interactive/viv-console-ctrlc.exp -- item 12: a container run from the
+# bare serial CONSOLE (not a pts) receives ^C.
+#
+# The console has no job-control pgroup fan: proc_console_post_interrupt routes
+# `interrupt` to the session OWNER (the login ut), which forwards it to viv by
+# pid (drain_fg_wait_notes). But the container entrypoint is viv's CHILD, which
+# ut cannot reach -- so before item 12 viv (which masks `interrupt` for the pts
+# case, #237) SWALLOWED the console ^C and the container never saw it. item 12
+# detects the console (fd 0 is not a pts), keeps `interrupt` UNMASKED +
+# self-managing, and poll-forwards it to the entrypoint (docker --sig-proxy).
+#
+# WHY A PRE-TRAPPED ENTRYPOINT, NOT A TYPED trap: item 12's mechanism delivers
+# ^C as the owner-routed NOTE (console -> ut -> viv -> entrypoint), which needs
+# NO console INPUT to reach the container. Driving an interactive ash's stdin on
+# the bare console is a separate, racy path (ut and the ash both read the
+# console with no job-control arbitration -- "the console is a degraded terminal
+# for job control", the v1.0 posture) and is NOT what item 12 fixes. So the
+# vehicle is the alpine-trap bundle: its entrypoint pre-installs `trap ... INT`
+# and blocks in a sleep-loop; the witness is GOTINT-CONSOLE, which the trap emits
+# ONLY when a forwarded interrupt fires it. Without the fix: no GOTINT-CONSOLE
+# (viv swallows the forwarded note on the console).
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set trap_bundle "$repo/build/vivarium/alpine-trap/config.json"
+if {![file exists $trap_bundle]} {
+    puts "LS-CI SKIP: no alpine-trap bundle staged at $trap_bundle -- the console\
+          ^C-forward test needs the trap container (build.sh stages it beside\
+          alpine-ash when the Alpine minirootfs + busybox apk are present)"
+    exit 77
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# The CONSOLE ut is the login shell itself (NOT ptyhost). Run the trap container
+# here, on the serial console -- the path with no pgroup fan. Its entrypoint
+# installs the SIGINT trap and blocks, then announces itself.
+lc_send "viv run /vivarium/alpine-trap"
+lc_expect "READY-FOR-CTRLC" "the trap container is up on the CONSOLE (trap installed, blocking)"
+
+# ^C at the console: proc_console_post_interrupt -> ut (owner) -> forwards to
+# viv (fg child) -> viv FORWARDS to the entrypoint (item 12) -> the SIGINT trap.
+# GOTINT-CONSOLE is baked into the trap body, so it can ONLY come from the trap
+# firing -- never from an echo. Without item 12 viv masks the forwarded note and
+# this times out.
+send "\x03"
+lc_expect "GOTINT-CONSOLE" "the console ^C reached the container's SIGINT trap (viv forwarded the owner-routed interrupt -- item 12)"
+
+# The trap did `exit 0`, so the container ended and viv reaped it and returned
+# the terminal to ut -- confirm the console ut is healthy (a viv that had died of
+# the ^C instead would have orphaned the container).
+sleep 1
+lc_run_expect "echo viv-console-after | tr a-z A-Z" "VIV-CONSOLE-AFTER"
+lc_pass "VIV-CONSOLE-CTRLC: a container run from the serial console receives ^C (item 12: viv forwards the owner-routed interrupt to the entrypoint)"

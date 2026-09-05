@@ -31,6 +31,7 @@
 #include "SDL_thylacinevideo.h"
 #include "SDL_thylacineevents_c.h"
 #include "SDL_thylacineopengl.h"
+#include "SDL_thylacinevulkan.h"
 
 #define THYLACINEVID_DRIVER_NAME "thylacine"
 
@@ -99,6 +100,18 @@ static SDL_VideoDevice *THYLACINE_CreateDevice(void)
     /* No GL_GetDrawableSize: the drawable IS the window (one surface, no
      * high-DPI scaling), which is exactly SDL's fallback. */
     data->gl_swap_interval = 1;
+
+    /* The Vulkan window glue (W-3e), wired unconditionally for the same
+     * reason as GL above: SDL keys "driver supports Vulkan" on
+     * Vulkan_CreateSurface being non-NULL, and a program that linked no
+     * venus archive should fail at Vulkan_LoadLibrary's specific message
+     * (missing LIBRARY), not be told the DRIVER cannot do Vulkan. The
+     * weak-symbol check lives inside the hooks (SDL_thylacinevulkan.c). */
+    device->Vulkan_LoadLibrary = THYLACINE_Vulkan_LoadLibrary;
+    device->Vulkan_UnloadLibrary = THYLACINE_Vulkan_UnloadLibrary;
+    device->Vulkan_GetInstanceExtensions = THYLACINE_Vulkan_GetInstanceExtensions;
+    device->Vulkan_CreateSurface = THYLACINE_Vulkan_CreateSurface;
+    device->Vulkan_GetDrawableSize = THYLACINE_Vulkan_GetDrawableSize;
 
     device->free = THYLACINE_DeleteDevice;
 

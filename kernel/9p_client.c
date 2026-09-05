@@ -98,6 +98,21 @@ static int map_error(int session_send_rc, int exchange_rc,
         // halt reachable by any Rlerror on any op), and an out-of-range ecode
         // would surface a nonsense errno. 4095 is the top of the pouch
         // boundary-line's [-4095,-2] errno passthrough window.
+        //
+        // NOTE THE ONE-VALUE MISMATCH, because it has already misled a reader.
+        // This clamp accepts ecode in [1,4095] and so yields [-4095,-1] -- one
+        // value WIDER at the bottom than the [-4095,-2] window named above.
+        // Ecode 1 (EPERM) therefore returns -1, which collides with the generic
+        // sentinel. That collision is DELIBERATE-BY-INHERITANCE rather than
+        // accidental: `stalk`'s `err_code` names the value and folds it to
+        // T_E_IO, and `dev9p_read` documents the same collision. It is not
+        // narrowed here because doing so would change what userspace observes
+        // for a server EPERM -- an ABI question, not a cleanup.
+        //
+        // Do not read the window text as a bound this code enforces. A comment
+        // stating a range one value off from the code beside it was read back
+        // as a fact by a second author, who then asserted in `dev9p_stat_native`
+        // that -1 could never arrive here.
         if (r->ecode == 0 || r->ecode > 4095u) return -P9_E_IO;
         return -(int)r->ecode;
     }
@@ -129,6 +144,8 @@ static int map_error(int session_send_rc, int exchange_rc,
 #define CLIENT_WAIT_DONE  0     // rpc->done; reply in rpc->reply_buf
 #define CLIENT_WAIT_DEAD  1     // session torn down; -P9_E_IO
 #define CLIENT_WAIT_DIED  2     // caller's Proc group-terminating; unwind
+#define CLIENT_WAIT_NOTEINTR 3  // 11b-9p: a caught note interrupted the wait; the
+                                // thread LIVES -> abandon the op, return -P9_E_INTR
 
 // Is the calling Thread dying (#811, widened by LS-5c per ARCH 8.8.2)? A
 // group-terminating Proc OR a pending terminate-disposition `interrupt` (a
@@ -333,15 +350,25 @@ static int do_reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle
 // Centralizing here gives all four reader_active-holding callers (the
 // client_wait election, the client_pump_or_park_locked self-pump, and both
 // p9_client_reader_pump_once variants) the block-through, closing F2.
-static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
+static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle,
+                             bool caught_ok) {
     struct Thread *self = current_thread();
-    // Reset stop_unwound at ENTRY (per-recv). The detour SETS it if this recv
-    // stop-unwinds at a boundary; the client classifier READS+clears it after we
-    // return (F1 re-audit -- a STABLE signal vs a racy debug_stop_req re-read).
-    // It is deliberately NOT cleared at exit (it must survive to the classifier).
-    if (self) { self->stop_no_park = true; self->stop_unwound = false; }
+    // Reset stop_unwound + note_unwound at ENTRY (per-recv). The detour /
+    // caught branch SET them if this recv unwinds at a boundary; the client
+    // classifier READS+clears them after we return (F1 re-audit -- a STABLE
+    // signal vs a racy re-read). Deliberately NOT cleared at exit (they must
+    // survive to the classifier).
+    //
+    // 11b-9p: caught_ok scopes the caught-note recv interrupt to the WAIT-path
+    // election (client_wait passes true). The send-path self-pump / drain and
+    // the SQPOLL/Loom pumps pass false: a caught-unwind there drains nothing, so
+    // the send retry would spin (the survey's livelock). recv_caught_ok routes
+    // it into srvconn_client_recv's tsleep_noteintr vs tsleep choice.
+    if (self) { self->stop_no_park = true; self->stop_unwound = false;
+                self->note_unwound = false; self->recv_caught_ok = caught_ok; }
     int r = do_reader_recv_frame(c, deadline_ns, idle);
-    if (self) { self->stop_no_park = false; self->stop_unwinds = false; }
+    if (self) { self->stop_no_park = false; self->stop_unwinds = false;
+                self->recv_caught_ok = false; }
     return r;
 }
 
@@ -546,11 +573,12 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             // role + park role-free below (the wrapper cleared both flags, so the
             // park PARKS), then re-elect on resume.
             bool stopped     = false;
+            bool noteintr    = false;
             for (;;) {
                 if (rpc->done || rpc->dead) break;
                 if (client_self_dying())    break;
                 spin_unlock(&c->lock);
-                int rr = reader_recv_frame(c, 0, NULL);
+                int rr = reader_recv_frame(c, 0, NULL, /*caught_ok=*/true);
                 spin_lock(&c->lock);
                 if (rr > 0) {
                     demux_frame_locked(c, (size_t)rr);
@@ -561,7 +589,7 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                     // leaves the latch set -- symmetric with the arms below (the
                     // reader_recv_frame entry reset already guards a later read;
                     // this is defense-in-depth on the dying path).
-                    if (t) t->stop_unwound = false;
+                    if (t) { t->stop_unwound = false; t->note_unwound = false; }
                     break;
                 } else if (t && t->stop_unwound) {
                     // 8c-3 (#89): my recv was stop-unwound at a frame boundary (the
@@ -577,6 +605,18 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                     t->stop_unwound = false;
                     stopped = true;
                     break;
+                } else if (t && t->note_unwound) {
+                    // 11b-9p: a CAUGHT note unwound my recv at a frame boundary
+                    // (the sched caught branch, frame-atomic via the #90 guard --
+                    // mid-frame it blocks through). Unlike a stop (which re-blocks
+                    // on resume), a caught note must UNWIND to the EL0-return tail
+                    // so the handler runs: hand off the reader role + return
+                    // CLIENT_WAIT_NOTEINTR (NOT re-loop). Survivors never freeze --
+                    // the handoff below elects a runnable survivor. Read+clear
+                    // (owner-only), a STABLE latch (the F1 re-audit shape).
+                    t->note_unwound = false;
+                    noteintr = true;
+                    break;
                 } else {
                     // rr == 0 (clean EOF = peer/server endpoint gone) -> device-
                     // gone; rr < 0 (recv error / malformed) -> transport.
@@ -587,6 +627,26 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             client_send_progress_signal(c);             // #349: I departed -- a
                                                         // parked sender may self-pump
             client_handoff_reader_locked(c, rpc);
+            if (noteintr) {
+                // 11b-9p: the reader role is handed to a survivor; unwind to my
+                // EL0-return tail where the caught note delivers. client_run maps
+                // CLIENT_WAIT_NOTEINTR to -P9_E_INTR + the op abandon (Tflush +
+                // tag reclaim), exactly as the DIED path.
+                //
+                // F1: re-check rpc->dead FIRST (the else-branch's guard analog).
+                // A peer's client_mark_dead_locked in the recv window sets
+                // rpc->dead but wakes rpc->rendez, NOT the ch->rendez this reader
+                // parked on -- and the sched caught branch's cond
+                // (chan_cond_readable) never observes rpc->dead -- so the
+                // loop-top rpc->dead check was bypassed (the note arm returns
+                // directly, unlike the stop arm which re-loops). A dead session
+                // returns DEAD (-EIO), not a futile Tflush + EINTR on a session
+                // client_run would wrongly believe OPEN. rpc->done cannot be set
+                // here (this thread WAS the parked reader; a prior demux of its
+                // own reply would have broken the inner loop at its top check).
+                if (rpc->dead) return CLIENT_WAIT_DEAD;
+                return CLIENT_WAIT_NOTEINTR;
+            }
             if (stopped) {
                 // Role released + handed to a survivor; park role-free, then
                 // re-loop to re-elect on resume. My reply may have been demuxed by
@@ -613,8 +673,24 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             // clear is observed by sleep's register-then-observe cond-check.
             rpc->be_reader = false;
             spin_unlock(&c->lock);
-            (void)sleep(&rpc->rendez, rpc_wait_cond, rpc);
+            // 11b-9p: a non-reader waiter (another thread holds the reader role)
+            // is caught-note-interruptible. sleep_noteintr returns SLEEP_NOTEINTR
+            // only when a caught note is deliverable AND cond was false (the sched
+            // !cond guard: data/role/death win over the note). Re-check under
+            // c->lock -- a reply may have demuxed, or the role been handed to me,
+            // in the unwind->relock window: rpc->done/dead -> fall through so the
+            // loop-top returns DONE/DEAD (the reply is preserved); be_reader ->
+            // re-hand-off so the role is not lost (the F6 death case), then unwind
+            // CLIENT_WAIT_NOTEINTR (client_run abandons the op + returns -P9_E_INTR).
+            int sr = sleep_noteintr(&rpc->rendez, rpc_wait_cond, rpc);
             spin_lock(&c->lock);
+            if (sr == SLEEP_NOTEINTR && !rpc->done && !rpc->dead) {
+                if (rpc->be_reader) {
+                    rpc->be_reader = false;
+                    client_handoff_reader_locked(c, rpc);
+                }
+                return CLIENT_WAIT_NOTEINTR;
+            }
         }
     }
 }
@@ -662,7 +738,11 @@ static void client_pump_or_park_locked(struct p9_client *c, struct p9_rpc *rpc) 
         c->reader_active = true;
         rpc->be_reader   = false;
         spin_unlock(&c->lock);
-        int rr = reader_recv_frame(c, 0, NULL);
+        // 11b-9p: caught_ok=false -- the send-path self-pump must NOT caught-unwind
+        // (it drains OTHER ops' replies to free a c2s slot for MY send; a caught
+        // unwind here drains nothing -> the send retry spins). A caught note on a
+        // back-pressured sender delivers at its EL0-return tail, as pre-item-11.
+        int rr = reader_recv_frame(c, 0, NULL, /*caught_ok=*/false);
         spin_lock(&c->lock);
         struct Thread *self = current_thread();
         if (rr > 0) {
@@ -916,8 +996,11 @@ static int client_run(struct p9_client *c, size_t built_len,
     }
 
     int wr = client_wait(c, &rpc);
-    if (wr == CLIENT_WAIT_DIED) {
-        // My Proc is dying. Abandon the op (#845): drop the inflight
+    if (wr == CLIENT_WAIT_DIED || wr == CLIENT_WAIT_NOTEINTR) {
+        // My Proc is dying (DIED), OR a caught note interrupted my wait and I
+        // unwind to deliver it while LIVING (NOTEINTR, 11b-9p) -- both ABANDON
+        // the op identically, returning -P9_E_IO / -P9_E_INTR at the tail.
+        // Abandon the op (#845): drop the inflight
         // registration (the reader must not touch reply_buf once freed) + free
         // reply_buf, then send a Tflush(oldtag=tag) so the server promptly
         // releases the request and the tag is reclaimed when the Rflush arrives
@@ -927,7 +1010,8 @@ static int client_run(struct p9_client *c, size_t built_len,
         // original reply can never be mis-attributed to a reused tag (I-10).
         // The Tflush send is a non-blocking ring write under c->lock (reusing
         // out_buf, whose prior frame was already pushed to the ring). Reaching
-        // DIED means rpc->dead was false (DEAD is checked first in client_wait),
+        // DIED/NOTEINTR both mean rpc->dead was false (DEAD is checked first in
+        // client_wait; NOTEINTR is guarded on !rpc->dead in both wait arms),
         // so c->dead is false and the session is OPEN here. If the flush cannot
         // be built/sent (pool full / send fail), fall back to the pre-#845
         // reclaim path -- outstanding[tag] stays active, reclaimed by the
@@ -959,7 +1043,7 @@ static int client_run(struct p9_client *c, size_t built_len,
                 client_mark_dead_locked(c, false);
             }
         }
-        return -P9_E_IO;
+        return (wr == CLIENT_WAIT_NOTEINTR) ? -P9_E_INTR : -P9_E_IO;
     }
     c->inflight[tag] = NULL;
     if (wr == CLIENT_WAIT_DEAD) {
@@ -1074,7 +1158,7 @@ int p9_client_reader_pump_once(struct p9_client *c) {
     c->reader_active = true;
     spin_unlock(&c->lock);
 
-    int rr = reader_recv_frame(c, 0, NULL); // blocks; c->lock dropped (single reader)
+    int rr = reader_recv_frame(c, 0, NULL, /*caught_ok=*/false); // blocks; c->lock dropped (single reader)
 
     spin_lock(&c->lock);
     int ret;
@@ -1127,7 +1211,7 @@ int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns) {
     spin_unlock(&c->lock);
 
     bool idle = false;
-    int rr = reader_recv_frame(c, deadline_ns, &idle); // blocks; c->lock dropped
+    int rr = reader_recv_frame(c, deadline_ns, &idle, /*caught_ok=*/false); // blocks; c->lock dropped
 
     spin_lock(&c->lock);
     int ret;

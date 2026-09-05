@@ -89,6 +89,30 @@ struct Dev {
     // flag decouples "can fstat" from "can seek".
     bool         seekable;
 
+    // May this Dev's files back EXECUTABLE pages -- exec resolution, or a
+    // file-backed PROT_EXEC mapping? An ALLOWLIST: devramfs + dev9p (the two
+    // Devs that serve real file content) set it true; every other Dev leaves the
+    // zero default and is refused. #217 F1.
+    //
+    // Why this is a FLOOR under the per-mount MNOEXEC flag rather than the same
+    // thing: MNOEXEC is consulted via the (dc, devno) a file shares with its
+    // mount source, which assumes devno names the MOUNTED INSTANCE. devenv
+    // breaks that assumption on purpose -- devenv_walk stamps the CALLING Proc's
+    // env devno (an I-1 fix: entry ids restart at 1 per Env, so without it two
+    // Procs' unrelated variables claim to be the same file and the REVENANT
+    // Image cache serves one the other's bytes). A container's /env files
+    // therefore never match the /env mount source that viv installed, and NO
+    // mount flag can ever cover them. An allowlist is immune to that whole class:
+    // a Dev is non-exec-backing until it deliberately says otherwise, so a device
+    // whose "files" are process state cannot become code however it is mounted.
+    //
+    // Allowlist and not a denylist, deliberately: a Dev added later is refused by
+    // default and must opt in, rather than being exec-capable until someone
+    // remembers to exclude it. Same discipline as SYS_MOUNT_VALID_FLAGS, and the
+    // same lesson `seekable` above learned when it was inferred from
+    // `.stat_native != NULL` and the inference turned out to be wrong.
+    bool         may_back_exec;
+
     // Lifecycle: called by the kernel.
     //   reset()    — re-initialize the dev (Plan 9 `dev->reset`);
     //                kernel-driven on hardware reset.
@@ -277,6 +301,21 @@ struct Dev {
                              struct Spoor *newdir, const char *newname);
     int            (*unlink)(struct Spoor *parent, const char *name, u32 flags);
 
+    // readlink(c, buf, n) -- read the symlink target of c (a WALKED, unopened
+    // Spoor whose qid carries QTSYMLINK) into buf (DISTRO D-1; docs/DISTRO.md
+    // section 4.1). Returns the target length (> 0) on success, or a specific
+    // -T_E_* on failure: -T_E_INVAL (the target exceeds n, or the node is not
+    // a symlink server-side), -T_E_NOENT (degenerate empty target), a bounded
+    // server errno otherwise (the dev9p_wire_errno discipline -- never a flat
+    // -1, per the #80 contract note above).
+    //
+    // NULL-permitted (like .fsync / .rename): a NULL slot means symlinks on
+    // this Dev are OPAQUE LEAVES -- the resolver does not expand them, so a
+    // mid-path link answers ENOTDIR (the #79 gate) and a final link is the
+    // quarry itself (T_E_LOOP under STALK_OPEN). Fail-closed by construction;
+    // only dev9p mints QTSYMLINK at v1.0, and it implements the slot.
+    long           (*readlink)(struct Spoor *c, char *buf, long n);
+
     // Readiness probe — the SYS_POLL plumbing (§23.3; specs/poll.tla).
     //   poll(c, events, pw)
     //     Returns the subset of `events` currently ready on c. If `pw`
@@ -334,9 +373,24 @@ extern struct Dev devproc;        // dc='p'  — /proc/<pid>/{status,cmdline,ctl
 extern struct Dev devctl;         // dc='C'  — /ctl/{procs,memory,devices,kernel-base,sched}
 extern struct Dev devramfs;       // dc='m'  — /ramfs/<file> from cpio newc initrd
 extern struct Dev devdev;         // dc='d'  — /dev char-device directory (#57b)
+
+// H-1 (SYS_FD_DEVCLASS): the effective device class of a devdev-backed Spoor.
+// The /dev/cons leaf answers 'c' (the console -- same as a SYS_CONSOLE_OPEN
+// fd, so is-a-terminal is exactly dc=='c'); every other leaf answers devdev's
+// own 'd'. Callers pass a Spoor whose dev IS devdev; the leaf kind is read
+// from the qid (devdev encodes kind in qid.path).
+int devdev_fd_devclass(const struct Spoor *c);
 extern struct Dev devhw;          // dc='H'  — DTB hardware inventory tree (Menagerie devhw)
 extern struct Dev devpci;         // dc='P'  — /hw/pci mediated PCI topology (Menagerie 6b)
 extern struct Dev devenv;         // dc='E'  — /env per-Proc environment (G15, Go Stage 4a)
+
+// C2-k1b: is this Spoor the kernel console, by UNFORGEABLE device identity? True
+// for both console doors -- devcons (the SYS_CONSOLE_OPEN Dev) and the devdev
+// /dev/cons leaf. A 9P server cannot forge either. This deliberately does NOT
+// key on CONS_STAT_QID_FLAG, which a dev9p-backed Spoor carries verbatim from
+// the server (e.g. tapestryd's PANE_FLAG is the same bit 41), so the qid-bit
+// test would let a server-backed fd impersonate the console.
+bool spoor_is_console(struct Spoor *sp);
 
 // devramfs diagnostics (used by tests).
 int  devramfs_file_count(void);

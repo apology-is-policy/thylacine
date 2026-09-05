@@ -38,10 +38,14 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/weft.h>
+#include <thylacine/pci_handle.h>   // V-2: synthetic KObj_PCI for the hostmem test
+#include "../../arch/arm64/mmu.h"   // V-2: MAIR_IDX_* for burrow_create_hostmem
+#include "../../mm/slub.h"          // V-2: kmalloc/kfree/KP_ZERO
 
 void test_weft_share_register_claim(void);
 void test_weft_share_full(void);
 void test_weft_share_owner_gc(void);
+void test_weft_hostmem_share(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
 void test_weft_share_cap_gate(void);
@@ -1045,4 +1049,233 @@ void test_weft_sharer_charge_released_at_detach(void) {
 
     drop_proc(client);
     drop_proc(sharer);
+}
+
+// V-2: BURROW_TYPE_HOSTMEM -- the mint primitive, the weft claim-kind, and the
+// share admission. Constructs a synthetic KObj_PCI (ref=1, one BAR + one shm
+// window) as test_pci_handle does, and frees it with kfree -- never
+// kobj_pci_unref, which would quiesce a device that does not exist -- by keeping
+// its ref >= 1 across the Burrow's own ref/unref.
+void test_weft_hostmem_share(void) {
+    struct KObj_PCI *k = kmalloc(sizeof(*k), KP_ZERO);
+    TEST_ASSERT(k != NULL, "kmalloc KObj_PCI");
+    k->magic = KOBJ_PCI_MAGIC;
+    k->ref   = 1;                          // a claimed KObj_PCI starts at 1
+    k->bars[0].present = true;
+    k->bars[0].pa      = 0x80000000ull;    // page-aligned synthetic BAR PA
+    k->bars[0].size    = 0x10000;
+    k->shm[0].present  = true;
+    k->shm[0].shmid    = 1;
+    k->shm[0].bar      = 0;
+    k->shm[0].offset   = 0x1000;           // window at +4 KiB in the BAR
+    k->shm[0].length   = 0x4000;           // 16 KiB window
+
+    u64 pa = k->bars[0].pa + k->shm[0].offset;   // 0x80001000, page-aligned
+    struct Burrow *v = burrow_create_hostmem(k, pa, 2u * PAGE_SIZE, MAIR_IDX_NORMAL_NC);
+    TEST_ASSERT(v != NULL, "burrow_create_hostmem");
+    TEST_EXPECT_EQ((u64)burrow_get_size(v), (u64)(2u * PAGE_SIZE), "size");
+    TEST_EXPECT_EQ((u64)k->ref, 2u, "the Burrow took its own kobj_pci ref");
+    TEST_EXPECT_EQ((u64)k->hostmem_burrows, 1u,
+        "F1: the live hostmem mapping is counted (drives DMA-only quiesce on death)");
+
+    // Weft claim-kind: HOSTMEM is a map-only kind, whole-region (entries == 0).
+    TEST_EXPECT_EQ(weft_claimed_kind(v, 0), (int)WEFT_BIND_HOSTMEM,
+        "hostmem + entries==0 -> the hostmem kind");
+    TEST_EXPECT_EQ(weft_claimed_kind(v, 8), -1,
+        "hostmem + a declared ring geometry -> mismatch, fail closed");
+    TEST_ASSERT(weft_kind_maponly(WEFT_BIND_HOSTMEM), "hostmem is map-only");
+
+    // Share admission: burrow_share_into ADMITS hostmem into a second Proc.
+    struct Proc *client = make_proc();
+    TEST_ASSERT(client != NULL, "proc_alloc client");
+    spin_lock(&client->as->lock);
+    TEST_EXPECT_EQ(burrow_share_into(client, v, WEFT_TEST_VA, VMA_PROT_RW), 0,
+        "burrow_share_into admits BURROW_TYPE_HOSTMEM");
+    spin_unlock(&client->as->lock);
+
+    // V-3b-1c-2b F1 regression: the map-only binding alloc records the ACTUAL
+    // kind. This is the leg the V-2 test was missing -- weft_binding_alloc_maponly
+    // had no HOSTMEM arm, so a REGISTERED + CLAIMED hostmem share fell through to
+    // NULL (the client's t_weft_map unwound to -1): a live-looking half-widen the
+    // create/kind/share asserts above could not see. It must now return a
+    // WEFT_BIND_HOSTMEM binding, and the Tweftio kind gate + the RING allocator
+    // both refuse it, exactly like the weave/gpu_bo siblings. Fails on pre-fix
+    // code (b == NULL).
+    //
+    // weft_binding_alloc_maponly is ref-NEUTRAL (it inherits the registration
+    // pin weft_share_claim holds in the real map path); weft_binding_release
+    // DROPS that pin. Take an explicit handle ref to stand in for the claim's
+    // pin, so the release balances it and leaves the construction handle for the
+    // burrow_unref below -- the gpu_bo sibling gets this pin from
+    // sys_weft_share_for_proc.
+    burrow_ref(v);
+    struct weft_binding *hb =
+        weft_binding_alloc_maponly(v, WEFT_TEST_VA, 2u * PAGE_SIZE, client->pid);
+    TEST_ASSERT(hb != NULL, "F1: map-only binding alloc over a hostmem burrow");
+    TEST_EXPECT_EQ((int)hb->kind, (int)WEFT_BIND_HOSTMEM,
+        "F1: the binding kind names the hostmem subtype");
+    u32 hoff = 0;
+    TEST_EXPECT_EQ(weft_binding_validate_rw(hb, WEFT_TEST_VA + 64, 128, &hoff), -1,
+        "a hostmem binding never validates a Tweftio drive (the kind gate)");
+    TEST_ASSERT(weft_binding_alloc(v, WEFT_TEST_VA, 2u * PAGE_SIZE, 8) == NULL,
+        "the RING allocator refuses a hostmem Burrow");
+    weft_binding_release(hb);   // drops the pin taken by burrow_ref above
+
+    vma_drain(client);                     // release the client mapping (m -> 0)
+    drop_proc(client);
+    burrow_unref(v);                       // {h:1,m:0} -> free; kobj_pci 2 -> 1
+    TEST_EXPECT_EQ((u64)k->ref, 1u, "the Burrow's kobj_pci ref was released at free");
+    TEST_EXPECT_EQ((u64)k->hostmem_burrows, 0u,
+        "F1: the count drops at free -- the last unref would then clear MEM_SPACE");
+    kfree(k);                              // ref stays 1: never kobj_pci_free_internal
+
+    // Reject paths (each returns NULL, taking no kobj_pci ref).
+    struct KObj_PCI *k2 = kmalloc(sizeof(*k2), KP_ZERO);
+    TEST_ASSERT(k2 != NULL, "kmalloc k2");
+    k2->magic = KOBJ_PCI_MAGIC;
+    k2->ref   = 1;
+    TEST_ASSERT(burrow_create_hostmem(k2, 0x80001000ull, 2u * PAGE_SIZE, MAIR_IDX_DEVICE) == NULL,
+        "reject Device MAIR (host memory is Normal WB/NC)");
+    TEST_ASSERT(burrow_create_hostmem(k2, 0x80001000ull, 0, MAIR_IDX_NORMAL_WB) == NULL,
+        "reject zero length");
+    TEST_ASSERT(burrow_create_hostmem(k2, 0x80001800ull, 2u * PAGE_SIZE, MAIR_IDX_NORMAL_WB) == NULL,
+        "reject non-page-aligned base PA");
+    TEST_EXPECT_EQ((u64)k2->ref, 1u, "rejected creates took no kobj_pci ref");
+    kfree(k2);
+}
+
+// V-3b-1c-2b F2: SYS_HOSTMEM_REFCOUNT's testable core -- resolve a hostmem VA to
+// its Burrow's TOTAL #847 ref count (handle_count + mapping_count), the value
+// tapestryd's reap-vs-park decision reads. The load-bearing leg is the audit-F1
+// window: a client that has CLAIMED the weft share holds the TRANSFERRED
+// registration pin (a handle ref) BEFORE burrow_share_into bumps mapping_count,
+// so a reclaim keyed on mapping_count ALONE would free the offset under a client
+// irrevocably about to map. The pin makes the SUM >= 2, so the reap parks. Proc A
+// holds the tapestryd-shape burrow {handle:0, mapping:1}. Exercises: clean==1 (reap-safe),
+// pin-not-mapped==2 (PARK -- the F1 window), pin+map==3, back to 1 after both
+// drop, and every reject path (-T_E_INVAL).
+s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len);
+void test_weft_hostmem_refcount(void) {
+    struct KObj_PCI *k = kmalloc(sizeof(*k), KP_ZERO);
+    TEST_ASSERT(k != NULL, "kmalloc KObj_PCI");
+    k->magic = KOBJ_PCI_MAGIC;
+    k->ref   = 1;
+    k->bars[0].present = true;
+    k->bars[0].pa      = 0x80000000ull;
+    k->bars[0].size    = 0x10000;
+    k->shm[0].present  = true;
+    k->shm[0].shmid    = 1;
+    k->shm[0].bar      = 0;
+    k->shm[0].offset   = 0x1000;
+    k->shm[0].length   = 0x4000;
+    u64 pa = k->bars[0].pa + k->shm[0].offset;
+    struct Burrow *v = burrow_create_hostmem(k, pa, 2u * PAGE_SIZE, MAIR_IDX_NORMAL_NC);
+    TEST_ASSERT(v != NULL, "burrow_create_hostmem");
+
+    // A is tapestryd's stand-in: map the ring, then DROP the construction handle
+    // (the SYS_BURROW_FROM_HOSTMEM shape) so A holds exactly {handle:0, mapping:1}
+    // like a real host3d ring -- total ref count 1.
+    struct Proc *a = make_proc();
+    TEST_ASSERT(a != NULL, "make_proc A");
+    spin_lock(&a->as->lock);
+    TEST_EXPECT_EQ(burrow_share_into(a, v, WEFT_TEST_VA, VMA_PROT_RW), 0, "share hostmem into A");
+    spin_unlock(&a->as->lock);
+    burrow_unref(v);                                  // drop construction -> {h:0, m:1}
+    TEST_EXPECT_EQ((int)burrow_handle_count(v), 0, "no construction handle (the ring shape)");
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 1,
+        "clean ring: total ref count 1 -- REAP-SAFE");
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, 2u * PAGE_SIZE), 1,
+        "whole-region len resolves the same VMA");
+
+    // The audit-F1 window: a client has CLAIMED (holds the transferred pin) but
+    // not yet mapped. mapping_count is STILL 1, but the pin makes the total 2 --
+    // the reap MUST park, not reclaim. burrow_ref stands in for weft_share_claim's
+    // pin transfer.
+    burrow_ref(v);                                    // the transferred claim pin -> {h:1, m:1}
+    TEST_EXPECT_EQ((int)burrow_mapping_count(v), 1, "mapping_count alone is still 1 -- the trap");
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 2,
+        "F1: claimed-not-yet-mapped -> total 2 -> PARK (mapping_count alone would miss it)");
+
+    // The client then maps (burrow_share_into into B): total 3.
+    struct Proc *b = make_proc();
+    TEST_ASSERT(b != NULL, "make_proc B");
+    spin_lock(&b->as->lock);
+    TEST_EXPECT_EQ(burrow_share_into(b, v, WEFT_TEST_VA, VMA_PROT_RW), 0, "client B maps the ring");
+    spin_unlock(&b->as->lock);
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 3,
+        "claimed + mapped -> total 3 -> PARK");
+
+    // The client releases its pin (weft_binding_release): still mapped, total 2.
+    burrow_unref(v);                                  // release the pin -> {h:0, m:2}
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 2,
+        "pin released but B still maps -> total 2 -> PARK");
+
+    // Reject paths: -T_E_INVAL, never a plausible count.
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA + 0x10000000ull, PAGE_SIZE),
+        (s64)(-T_E_INVAL), "an unmapped VA is refused");
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, 4u * PAGE_SIZE),
+        (s64)(-T_E_INVAL), "a len past the VMA is refused, not clamped");
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, 0),
+        (s64)(-T_E_INVAL), "zero len is refused");
+
+    // A non-hostmem VMA (an anon burrow) is refused -- no general introspection.
+    struct Burrow *anon = burrow_create_anon(PAGE_SIZE);
+    TEST_ASSERT(anon != NULL, "burrow_create_anon");
+    u64 anon_va = WEFT_TEST_VA + 0x1000000ull;
+    spin_lock(&a->as->lock);
+    TEST_EXPECT_EQ(burrow_share_into(a, anon, anon_va, VMA_PROT_RW), 0, "map anon into A");
+    spin_unlock(&a->as->lock);
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, anon_va, PAGE_SIZE), (s64)(-T_E_INVAL),
+        "a non-hostmem burrow is refused (the count is hostmem-only)");
+
+    vma_drain(a);              // drops A's hostmem map (m 2->1) + A's anon map (1->0)
+    vma_drain(b);              // drops B's hostmem map (m 1->0) -> v frees {h:0,m:0}
+    drop_proc(a);
+    drop_proc(b);
+    burrow_unref(anon);        // {h:1, m:0} -> free
+    TEST_EXPECT_EQ((u64)k->ref, 1u, "the hostmem Burrow's kobj_pci ref was released");
+    kfree(k);
+}
+
+// V-2 (audit F2): the pure subrange resolver behind SYS_BURROW_FROM_HOSTMEM --
+// the security-load-bearing shm-scan + OOB rejects + base_pa arithmetic, tested
+// without the syscall's Proc/handle setup.
+int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
+                             u64 length, u64 *base_pa_out);
+void test_weft_hostmem_resolve(void) {
+    struct KObj_PCI *k = kmalloc(sizeof(*k), KP_ZERO);
+    TEST_ASSERT(k != NULL, "kmalloc KObj_PCI");
+    k->magic = KOBJ_PCI_MAGIC;
+    k->ref   = 1;
+    k->bars[0].present = true;
+    k->bars[0].pa      = 0x80000000ull;
+    k->bars[0].size    = 0x10000;
+    k->shm[0].present  = true;
+    k->shm[0].shmid    = 1;
+    k->shm[0].bar      = 0;
+    k->shm[0].offset   = 0x1000;
+    k->shm[0].length   = 0x4000;   // window [bar.pa+0x1000, +0x5000)
+
+    u64 pa = 0;
+    // In-bounds: base_pa = bar.pa + window offset + caller offset.
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x1000, PAGE_SIZE, &pa), 0,
+        "in-bounds subrange resolves");
+    TEST_EXPECT_EQ(pa, 0x80000000ull + 0x1000 + 0x1000,
+        "base_pa = bar.pa + window offset + caller offset");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0, 0x4000, &pa), 0, "whole window");
+    TEST_EXPECT_EQ(pa, 0x80001000ull, "base_pa at the window base");
+    // Rejects (the I-45 bounds + the ABI guards).
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 2, 0, PAGE_SIZE, &pa), -1, "wrong shmid misses");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x4000, PAGE_SIZE, &pa), -1,
+        "offset == window length (no room) rejects");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x3000, 0x2000, &pa), -1,
+        "offset+length past the window rejects (no wrap)");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x800, PAGE_SIZE, &pa), -1,
+        "non-page-aligned offset rejects");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0, 0x800, &pa), -1,
+        "non-page-aligned length rejects");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0, 0, &pa), -1, "zero length rejects");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 0x100, 0, PAGE_SIZE, &pa), -1,
+        "shmid > 0xff rejects (the u8 truncation guard)");
+    kfree(k);
 }

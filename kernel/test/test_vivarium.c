@@ -37,6 +37,11 @@
 #include <thylacine/proc.h>         // L-6b: WAIT_*, so the collision is asserted
                                     //       against the REAL constants, not copies
 #include <thylacine/vivarium.h>
+#include <thylacine/cons.h>          // C2-k1b: CONS_* flags + the cons test hooks
+#include <thylacine/spoor.h>         // C2-k1b F1: struct Spoor for the identity test
+#include <thylacine/dev.h>           // C2-k1b F1: devcons/devramfs + spoor_is_console
+
+#include "../../mm/slub.h"          // #127: a real sigtab, so proc_free frees it
 
 void test_vivarium_t1_renumbers(void);
 void test_vivarium_rejects_are_deliberate(void);
@@ -84,7 +89,17 @@ void test_vivarium_t1_renumbers(void) {
     viv_expect_renumber(VIV_LINUX_WRITE,      SYS_WRITE,      "write -> SYS_WRITE");
     viv_expect_renumber(VIV_LINUX_CLOSE,      SYS_CLOSE,      "close -> SYS_CLOSE");
     viv_expect_renumber(VIV_LINUX_LSEEK,      SYS_LSEEK,      "lseek -> SYS_LSEEK");
+    // pread64/pwrite64 (the git 6.27 clone arm): 4-arg renumbers -- git's
+    // index-pack reads the cloned pack via pread, and the (fd, buf, count,
+    // offset) shape matches SYS_PREAD/SYS_PWRITE exactly, so no shell.
+    viv_expect_renumber(VIV_LINUX_PREAD64,    SYS_PREAD,      "pread64 -> SYS_PREAD");
+    viv_expect_renumber(VIV_LINUX_PWRITE64,   SYS_PWRITE,     "pwrite64 -> SYS_PWRITE");
     viv_expect_renumber(VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, "exit_group -> SYS_EXIT_GROUP");
+    // N-3: a musl THREAD exits via SYS_exit(93) -> SYS_THREAD_EXIT (thread_exit_
+    // self: last-out zombies, else this Thread retires + the CLEARTID handoff
+    // wakes a joiner). SUB-CEILING (93 == native PTY_REGISTER) but harmless --
+    // the phenotype rewrites regs[8] here before the native switch ever sees 93.
+    viv_expect_renumber(VIV_LINUX_EXIT,       SYS_THREAD_EXIT, "exit(93) -> SYS_THREAD_EXIT");
 
     // The lseek row's equivalence rests on the two enumerations coinciding. Pin
     // it here rather than only in a comment: if T_SEEK_* ever moves, this fails
@@ -173,6 +188,18 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_BRK, args, &out),
                    (int)VIV_ENOSYS, "brk is ENOSYS -- no counterpart, libc falls back");
 
+    // sigaltstack is ENOSYS -- and that ENOSYS is now LOAD-BEARING for the bug-2
+    // handler-escape detector (VIVARIUM.md 6.23 / notes.c
+    // thread_note_handler_escaped): it tells a live handler from a siglongjmp'd
+    // escape by comparing sp against the pre-handler sp ON THE SAME STACK, sound
+    // only while no handler can run on an alternate one. A _Static_assert at the
+    // detector pins the NUMBER (132); this pins the DISPOSITION (a table-row
+    // value cannot be _Static_asserted). If a future change serves sigaltstack,
+    // this fails and forces 6.23 to be revisited before it lands.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SIGALTSTACK, args, &out),
+                   (int)VIV_ENOSYS,
+                   "sigaltstack stays ENOSYS -- load-bearing for the 6.23 escape detector");
+
     // V-5c. ppoll carries the whole poll family on aarch64 (no plain poll(2)),
     // so this is what musl's poll() becomes.
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_PPOLL, args, &out),
@@ -209,10 +236,76 @@ void test_vivarium_unknown_forwards(void) {
     // exist when we merely have not reached it is a lie the guest cannot tell
     // apart from a real one -- it would make a libc take a permanent fallback
     // path for a call the supervisor could have served.
-    TEST_EXPECT_EQ((int)vivarium_translate(178 /* gettid */, args, &out),
+    //
+    // This example was `178 /* gettid */` until N-3 classified gettid (a NEW row
+    // hollows any old test that used its number as the still-unclassified
+    // example) -- so it moves to perf_event_open (241), a real aarch64 syscall
+    // Thylacine does not translate and has no plan to.
+    TEST_EXPECT_EQ((int)vivarium_translate(241 /* perf_event_open */, args, &out),
                    (int)VIV_FORWARD, "an unclassified number forwards, never ENOSYS");
     TEST_EXPECT_EQ((int)vivarium_translate(0, args, &out),
                    (int)VIV_FORWARD, "Linux 0 (io_setup) is unclassified -> forward");
+    // gettid IS classified now (N-3) -- the positive half, so the move above is
+    // not a silent weakening: 178 is a TIER2 row, not still-unclassified.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETTID, args, &out),
+                   (int)VIV_TIER2, "gettid is classified (N-3) -- no longer a forward");
+}
+
+void test_vivarium_git_chunk_rows(void) {
+    u64 args[VIV_NARGS];
+    struct viv_call out;
+    viv_fill_args(args);
+
+    // The git-under-VIVARIUM chunk's seven rows all TRANSLATE (T2), never
+    // forward. A missing row would send the number to the supervisor (ENOSYS
+    // today) and the corresponding git step would die -- the exact failure each
+    // was added to remove.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_FACCESSAT, args, &out),
+                   (int)VIV_TIER2, "faccessat is T2 (stat + perm_check)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_CHDIR, args, &out),
+                   (int)VIV_TIER2, "chdir is T2 (measure len -> SYS_CHDIR)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_FCHMODAT, args, &out),
+                   (int)VIV_TIER2, "fchmodat is T2 (open O_PATH -> wstat)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_READLINKAT, args, &out),
+                   (int)VIV_TIER2, "readlinkat is T2 (NOFOLLOW stalk -> .readlink)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETEUID, args, &out),
+                   (int)VIV_TIER2, "geteuid is T2 (one-principal twin of getuid)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETEGID, args, &out),
+                   (int)VIV_TIER2, "getegid is T2 (one-principal twin of getgid)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETRANDOM, args, &out),
+                   (int)VIV_TIER2, "getrandom is T2 (-> SYS_GETRANDOM, CAP-gated)");
+
+    // The sub-ceiling rows (48/49/53/78) owe per-number collision paragraphs;
+    // their known native collisions, made executable (the pselect6/ppoll
+    // precedent). None is reachable by either side: a PHENO_LINUX Proc cannot
+    // issue a native number, and a mis-declared native caller is refused by the
+    // AT_FDCWD / damage-envelope arguments in vivarium.h.
+    TEST_ASSERT(VIV_LINUX_FACCESSAT == SYS_NOTE_MASK,
+                "faccessat(48) collides with SYS_NOTE_MASK -- AT_FDCWD gate refuses it");
+    TEST_ASSERT(VIV_LINUX_CHDIR == SYS_SPAWN_FULL_ARGV,
+                "chdir(49) collides with SYS_SPAWN_FULL_ARGV -- damage-envelope bound");
+    TEST_ASSERT(VIV_LINUX_FCHMODAT == SYS_PIVOT_ROOT,
+                "fchmodat(53) collides with SYS_PIVOT_ROOT -- AT_FDCWD gate refuses it");
+    TEST_ASSERT(VIV_LINUX_READLINKAT == SYS_PCI_INFO,
+                "readlinkat(78) collides with SYS_PCI_INFO -- AT_FDCWD gate refuses it");
+}
+
+void test_vivarium_faccessat_gate(void) {
+    // The shared AT_FDCWD gate (faccessat/fchmodat/readlinkat all route through
+    // vivarium_faccessat_decide). It is BOTH the "only the cwd form is
+    // translated" contract AND the native-collision defense: a mis-declared
+    // native caller at 48/53/78 supplies a dirfd that is a small non-negative
+    // index or a sentinel, never AT_FDCWD (-100), so it FORWARDs to ENOSYS.
+    TEST_EXPECT_EQ((int)vivarium_faccessat_decide((u64)(s64)VIV_AT_FDCWD),
+                   (int)VIV_TRANSLATED, "AT_FDCWD (sign-extended) translates");
+    TEST_EXPECT_EQ((int)vivarium_faccessat_decide((u64)(u32)(s32)VIV_AT_FDCWD),
+                   (int)VIV_TRANSLATED, "AT_FDCWD (bare u32) translates");
+    TEST_EXPECT_EQ((int)vivarium_faccessat_decide(0),
+                   (int)VIV_FORWARD, "dirfd 0 forwards (a real fd is not the cwd form)");
+    TEST_EXPECT_EQ((int)vivarium_faccessat_decide(5),
+                   (int)VIV_FORWARD, "a small non-negative fd forwards");
+    TEST_EXPECT_EQ((int)vivarium_faccessat_decide((u64)(s64)-1),
+                   (int)VIV_FORWARD, "-1 (the FROM_ROOT sentinel) is not AT_FDCWD -> forward");
 }
 
 void test_vivarium_fails_closed(void) {
@@ -257,14 +350,16 @@ void test_vivarium_no_wide_alias(void) {
 // x0. The bare-u32 form is exercised separately -- both must be recognised.
 #define VIV_T_ATCWD ((u64)(s64)VIV_AT_FDCWD)
 
-static void viv_expect_open_cx(u64 dirfd, u64 flags, u32 want_omode,
-                               bool want_cloexec, const char *what) {
+static void viv_expect_open_full(u64 dirfd, u64 flags, u32 want_omode,
+                                 bool want_cloexec, bool want_dirreq,
+                                 const char *what) {
     u64  start_fd = 0xBADu;
     u32  omode    = 0xBADu;
     bool cloexec  = true;   // poison: every case below must OVERWRITE this
+    bool dirreq   = true;   // poison, same rule (the getdents64 chunk's output)
 
     TEST_EXPECT_EQ((int)vivarium_openat_decide(dirfd, flags, &start_fd, &omode,
-                                               &cloexec),
+                                               &cloexec, &dirreq),
                    (int)VIV_TRANSLATED, what);
     TEST_EXPECT_EQ(start_fd, SYS_WALK_OPEN_FROM_ROOT, "AT_FDCWD -> FROM_ROOT");
     TEST_EXPECT_EQ((u64)omode, (u64)want_omode, what);
@@ -273,12 +368,21 @@ static void viv_expect_open_cx(u64 dirfd, u64 flags, u32 want_omode,
     // of the resulting descriptor. Asserting it on every translated case is what
     // keeps a future flag admission from quietly turning the bit on or off.
     TEST_EXPECT_EQ((u64)(cloexec ? 1 : 0), (u64)(want_cloexec ? 1 : 0), what);
+    // The same per-case rule for O_DIRECTORY: every translated case pins the
+    // requirement bit, so an admission cannot quietly assert (or drop) it.
+    TEST_EXPECT_EQ((u64)(dirreq ? 1 : 0), (u64)(want_dirreq ? 1 : 0), what);
 
     // Whatever the map produces must be an omode SYS_OPEN will actually accept.
     // Asserting this for EVERY translated case (rather than eyeballing the
     // constants) is what makes a future flag admission safe to add.
     TEST_EXPECT_EQ((u64)(omode & ~SYS_WALK_OPEN_OMODE_VALID), (u64)0,
                    "the emitted omode is inside SYS_WALK_OPEN_OMODE_VALID");
+}
+
+static void viv_expect_open_cx(u64 dirfd, u64 flags, u32 want_omode,
+                               bool want_cloexec, const char *what) {
+    viv_expect_open_full(dirfd, flags, want_omode, want_cloexec,
+                         /*want_dirreq=*/false, what);
 }
 
 static void viv_expect_open(u64 dirfd, u64 flags, u32 want_omode,
@@ -290,9 +394,10 @@ static void viv_expect_open_forwards(u64 flags, const char *what) {
     u64  start_fd = 0xBADu;
     u32  omode    = 0xBADu;
     bool cloexec  = true;
+    bool dirreq   = true;
 
     TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, flags, &start_fd,
-                                               &omode, &cloexec),
+                                               &omode, &cloexec, &dirreq),
                    (int)VIV_FORWARD, what);
     // A declined call must leave the outputs alone: a caller that forwards but
     // reads them anyway must not find a plausible-looking omode waiting.
@@ -300,6 +405,8 @@ static void viv_expect_open_forwards(u64 flags, const char *what) {
     TEST_EXPECT_EQ((u64)omode, (u64)0xBADu, "a forwarded openat leaves omode alone");
     TEST_EXPECT_EQ((u64)(cloexec ? 1 : 0), (u64)1,
                    "a forwarded openat leaves cloexec alone");
+    TEST_EXPECT_EQ((u64)(dirreq ? 1 : 0), (u64)1,
+                   "a forwarded openat leaves dir_required alone");
 }
 
 void test_vivarium_openat_domain(void) {
@@ -340,18 +447,60 @@ void test_vivarium_openat_domain(void) {
     viv_expect_open_cx(VIV_T_ATCWD, VIV_O_PATH | VIV_O_CLOEXEC,
                        SYS_WALK_OPEN_OPATH, true,
                        "O_PATH|O_CLOEXEC keeps the descriptor flag");
+    // #50 close (SA-1): Linux's O_PATH IGNORES O_CREAT, so the composition
+    // TRANSLATES here with the bit stripped (bare OPATH out) -- served
+    // exactly, not declined. The stand-alone O_CREAT reject below is
+    // unchanged: without O_PATH this decide still forwards it (the create
+    // domain belongs to vivarium_openat_create_decide via the shell).
+    viv_expect_open(VIV_T_ATCWD, VIV_O_PATH | VIV_O_CREAT,
+                    SYS_WALK_OPEN_OPATH,
+                    "O_PATH|O_CREAT translates with O_CREAT stripped (Linux "
+                    "ignores O_CREAT under O_PATH)");
+    viv_expect_open(VIV_T_ATCWD, VIV_O_PATH | VIV_O_CREAT | VIV_O_RDWR,
+                    SYS_WALK_OPEN_OPATH,
+                    "O_PATH|O_CREAT|access: both stripped, bare OPATH");
 
     // The rejects. Each of these, if silently ignored, is a WRONG ANSWER rather
     // than a harmless no-op -- that asymmetry is the whole admission rule, so
     // each is pinned by name.
     viv_expect_open_forwards(VIV_O_WRONLY | VIV_O_CREAT,
                              "O_CREAT forwards (SYS_OPEN cannot create)");
-    viv_expect_open_forwards(VIV_O_RDONLY | VIV_O_DIRECTORY,
-                             "O_DIRECTORY forwards (no is-a-dir check to honour)");
-    viv_expect_open_forwards(VIV_O_WRONLY | VIV_O_APPEND,
-                             "O_APPEND forwards (no append mode in omode)");
-    viv_expect_open_forwards(VIV_O_RDONLY | VIV_O_NOFOLLOW,
-                             "O_NOFOLLOW forwards (correct only while symlinks are absent)");
+    // getdents64 chunk: O_DIRECTORY INVERTED from its V-2b reject (the
+    // O_NOFOLLOW precedent -- the blocker was real until the mechanism
+    // landed): it now TRANSLATES with dir_required reported for the SHELL's
+    // postcondition (ENOTDIR on a non-directory, checked on the minted
+    // handle's own qid). The bit itself must NOT reach the omode. musl
+    // opendir (O_RDONLY|O_CLOEXEC|O_DIRECTORY) is the forcing caller.
+    viv_expect_open_full(VIV_T_ATCWD, VIV_O_RDONLY | VIV_O_DIRECTORY, 0u,
+                         /*want_cloexec=*/false, /*want_dirreq=*/true,
+                         "O_DIRECTORY translates as the dir_required output");
+    viv_expect_open_full(VIV_T_ATCWD,
+                         VIV_O_RDONLY | VIV_O_CLOEXEC | VIV_O_DIRECTORY, 0u,
+                         /*want_cloexec=*/true, /*want_dirreq=*/true,
+                         "the exact musl-opendir flag set translates");
+    viv_expect_open_full(VIV_T_ATCWD, VIV_O_PATH | VIV_O_DIRECTORY,
+                         SYS_WALK_OPEN_OPATH,
+                         /*want_cloexec=*/false, /*want_dirreq=*/true,
+                         "O_PATH|O_DIRECTORY keeps the requirement (one of "
+                         "the three flags O_PATH does not ignore)");
+    // O_APPEND: the V-2b reject INVERTED at the git 6.27 arm -- it now
+    // TRANSLATES to SYS_WALK_OPEN_OAPPEND (OWRITE|OAPPEND == 0x41), which dev9p
+    // forwards to the 9P Tlopen so Stratum positions each write at EOF
+    // server-side (no kernel append mode). Mirrors the OTRUNC translate above.
+    viv_expect_open(VIV_T_ATCWD, VIV_O_WRONLY | VIV_O_APPEND,
+                    1u | SYS_WALK_OPEN_OAPPEND,
+                    "O_WRONLY|O_APPEND -> OWRITE|OAPPEND (git 6.27)");
+    // D-1: the V-2b reject INVERTED on the day its own rationale predicted --
+    // symlinks landed, so O_NOFOLLOW now TRANSLATES to the resolver's
+    // no-follow omode bit (real semantics: ELOOP on a final link; with O_PATH
+    // the handle IS the link).
+    viv_expect_open(VIV_T_ATCWD, VIV_O_RDONLY | VIV_O_NOFOLLOW,
+                    0u | SYS_WALK_OPEN_NOFOLLOW,
+                    "O_NOFOLLOW translates to the no-follow omode bit (D-1)");
+    viv_expect_open(VIV_T_ATCWD, VIV_O_PATH | VIV_O_NOFOLLOW,
+                    SYS_WALK_OPEN_OPATH | SYS_WALK_OPEN_NOFOLLOW,
+                    "O_PATH|O_NOFOLLOW keeps the flag (the lstat-fd idiom; "
+                    "one of the three flags O_PATH does not ignore)");
     viv_expect_open_forwards(VIV_O_RDONLY | VIV_O_NONBLOCK,
                              "O_NONBLOCK forwards");
     viv_expect_open_forwards(VIV_O_WRONLY | VIV_O_EXCL, "O_EXCL forwards");
@@ -362,18 +511,21 @@ void test_vivarium_openat_domain(void) {
                              "accmode 3 forwards (Linux EINVAL; not ours to mint)");
 
     // Fail toward the supervisor on a bad call site, never toward a dispatch.
-    // Each output is nulled in turn, not just all three at once: a guard that
-    // checked only the first two would pass an all-NULL test and then write
-    // through a NULL cloexec_out for a caller that supplied the other two.
-    u64  s = 0; u32 o = 0; bool cx = false;
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, NULL, NULL),
+    // Each output is nulled in turn, not just all four at once: a guard that
+    // checked only the first three would pass an all-NULL test and then write
+    // through a NULL dir_required_out for a caller that supplied the others.
+    u64  s = 0; u32 o = 0; bool cx = false, dr = false;
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, NULL, NULL,
+                                               NULL),
                    (int)VIV_FORWARD, "NULL outputs -> FORWARD, never TRANSLATED");
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, &o, &cx),
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, &o, &cx, &dr),
                    (int)VIV_FORWARD, "NULL start_fd_out alone -> FORWARD");
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, NULL, &cx),
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, NULL, &cx, &dr),
                    (int)VIV_FORWARD, "NULL omode_out alone -> FORWARD");
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, &o, NULL),
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, &o, NULL, &dr),
                    (int)VIV_FORWARD, "NULL cloexec_out alone -> FORWARD");
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, &o, &cx, NULL),
+                   (int)VIV_FORWARD, "NULL dir_required_out alone -> FORWARD");
 }
 
 void test_vivarium_openat_at_fdcwd(void) {
@@ -395,14 +547,15 @@ void test_vivarium_openat_at_fdcwd(void) {
     u64  start_fd = 0xBADu;
     u32  omode    = 0xBADu;
     bool cloexec  = false;
+    bool dirreq   = false;
     TEST_EXPECT_EQ((int)vivarium_openat_decide(3, VIV_O_RDONLY, &start_fd, &omode,
-                                               &cloexec),
+                                               &cloexec, &dirreq),
                    (int)VIV_FORWARD, "a real dirfd forwards (handle state, not a gap)");
 
     // Only the LOW 32 BITS are significant -- `dirfd` is an `int`. A high-half
     // value that is not AT_FDCWD in its low word must not be mistaken for one.
     TEST_EXPECT_EQ((int)vivarium_openat_decide(0x1234567800000003ull, VIV_O_RDONLY,
-                                               &start_fd, &omode, &cloexec),
+                                               &start_fd, &omode, &cloexec, &dirreq),
                    (int)VIV_FORWARD, "the high half of dirfd is not consulted");
 }
 
@@ -507,12 +660,14 @@ void test_vivarium_stat_to_linux(void) {
 // -----------------------------------------------------------------------------
 
 static void viv_expect_statat(u64 dirfd, u64 flags, const char *what) {
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(dirfd, flags),
+    u32 sf = 0xFFu;   // poison: a translate must WRITE it (0 or the lstat mark)
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(dirfd, flags, &sf),
                    (int)VIV_TRANSLATED, what);
 }
 
 static void viv_expect_statat_forwards(u64 flags, const char *what) {
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, flags),
+    u32 sf = 0;
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, flags, &sf),
                    (int)VIV_FORWARD, what);
 }
 
@@ -520,6 +675,12 @@ void test_vivarium_fstatat_domain(void) {
     // Plain stat() -- flags 0. This is the row that carries the value: on
     // aarch64, stat() compiles to newfstatat, not to a stat(2) of its own.
     viv_expect_statat(VIV_T_ATCWD, 0, "flags 0 (plain stat) translates");
+    {
+        u32 sf = 0xFFu;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, 0, &sf),
+                       (int)VIV_TRANSLATED, "plain stat translates (sf probe)");
+        TEST_EXPECT_EQ((u64)sf, (u64)0, "plain stat follows (sf == 0)");
+    }
 
     // The one no-op admission. A Thylacine namespace is composed explicitly, so
     // nothing mounts as a side effect of traversal -- the flag asks for what we
@@ -528,13 +689,33 @@ void test_vivarium_fstatat_domain(void) {
     viv_expect_statat(VIV_T_ATCWD, VIV_AT_NO_AUTOMOUNT,
                       "AT_NO_AUTOMOUNT is a no-op (nothing mounts on traversal)");
 
-    // The costly reject, pinned by name because it is the one a future reader
-    // will be tempted to admit: SYS_STAT's contract literally says "stat ==
-    // lstat" at v1.0. That equivalence holds only because SYMLINKS ARE ABSENT,
-    // so admitting it would silently return the target's metadata the day they
-    // land -- the O_NOFOLLOW trap, on the stat surface.
-    viv_expect_statat_forwards(VIV_AT_SYMLINK_NOFOLLOW,
-                               "AT_SYMLINK_NOFOLLOW forwards (lstat; correct only while symlinks are absent)");
+    // D-1: the V-2c reject INVERTED, on the day its own comment predicted
+    // ("the day symlinks land there is nothing ... that would fail" -- this
+    // leg is the something). lstat now TRANSLATES, with the out-param marking
+    // the no-follow shape for sys_stat_for_proc.
+    {
+        u32 sf = 0;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD,
+                                                    VIV_AT_SYMLINK_NOFOLLOW, &sf),
+                       (int)VIV_TRANSLATED,
+                       "AT_SYMLINK_NOFOLLOW translates (lstat; D-1)");
+        TEST_EXPECT_EQ((u64)(sf != 0), (u64)1, "lstat marks the no-follow shape");
+    }
+    {
+        // Both admitted bits together translate (the pre-D-1 leg asserted the
+        // combination FORWARDED; the mask grew, the whole-word check stands).
+        u32 sf = 0;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(
+                           VIV_T_ATCWD,
+                           VIV_AT_NO_AUTOMOUNT | VIV_AT_SYMLINK_NOFOLLOW, &sf),
+                       (int)VIV_TRANSLATED,
+                       "NO_AUTOMOUNT + SYMLINK_NOFOLLOW both admitted");
+        TEST_EXPECT_EQ((u64)(sf != 0), (u64)1, "the combination keeps the lstat mark");
+    }
+
+    // Fail toward the decline on a bad call site (the openat shape).
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, 0, NULL),
+                   (int)VIV_FORWARD, "NULL out-param forwards, never dispatches");
 
     // Serving this would mean synthesising a "." the caller never passed.
     viv_expect_statat_forwards(VIV_AT_EMPTY_PATH,
@@ -550,7 +731,7 @@ void test_vivarium_fstatat_domain(void) {
 
     // An unadmitted bit forwards even in combination with an admitted one --
     // the check is a whole-word mask, not a scan for known flags.
-    viv_expect_statat_forwards(VIV_AT_NO_AUTOMOUNT | VIV_AT_SYMLINK_NOFOLLOW,
+    viv_expect_statat_forwards(VIV_AT_EMPTY_PATH | VIV_AT_SYMLINK_NOFOLLOW,
                                "a rejected bit forwards even beside an admitted one");
     viv_expect_statat_forwards(0x80000000u, "an unknown high bit forwards");
 
@@ -562,12 +743,15 @@ void test_vivarium_fstatat_domain(void) {
     // SYS_STAT takes (path, len, out) and has no base argument at all, so there
     // is nowhere for a dirfd to go. Contrast openat, which at least HAS a
     // start_fd it could carry.
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(3, 0), (int)VIV_FORWARD,
-                   "a real dirfd forwards (SYS_STAT has no base argument)");
+    {
+        u32 sf = 0;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(3, 0, &sf), (int)VIV_FORWARD,
+                       "a real dirfd forwards (SYS_STAT has no base argument)");
 
-    // Only the low 32 bits of dirfd are significant.
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(0x1234567800000003ull, 0),
-                   (int)VIV_FORWARD, "the high half of dirfd is not consulted");
+        // Only the low 32 bits of dirfd are significant.
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(0x1234567800000003ull, 0, &sf),
+                       (int)VIV_FORWARD, "the high half of dirfd is not consulted");
+    }
 }
 
 // The mmap argument domain (V-2d). Each admitted argument and each decline is
@@ -676,6 +860,243 @@ void test_vivarium_mmap_domain(void) {
     // all -- this asserts the signature has not grown one by accident.
 }
 
+// The FILE mmap argument domain (DISTRO D-3). Measured off musl's map_library,
+// so the admitted case is asserted as THE CALL STOCK LDSO MAKES rather than as a
+// shape we thought reasonable -- and each decline is named, because this arm
+// hands a guest a mapping of a FILE and a widening here is an I-36 question, not
+// a fidelity one.
+void test_vivarium_mmap_file_domain(void) {
+    const u64 priv = (u64)VIV_MAP_PRIVATE;
+    const u64 rx   = (u64)(VIV_PROT_READ | VIV_PROT_EXEC);
+    const u64 fd   = 3;
+
+    // THE MEASURED CALL. dynlink.c:809 `mmap(addr_min, map_len, prot,
+    // MAP_PRIVATE, fd, off_start)`, read against the shipped Alpine libc whose
+    // lowest PT_LOAD is R+X at file offset 0: this exact tuple is what opening
+    // /lib/ld-musl-aarch64.so.1 produces.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 0),
+                   (int)VIV_TRANSLATED, "R+X private fd-backed is the measured shape");
+
+    // R-only: the same call against a library whose lowest PT_LOAD is R-only
+    // (a -z separate-code layout). Not hypothetical -- it is the OTHER shape the
+    // same line emits, decided by the linker rather than by the caller.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide((u64)VIV_PROT_READ, priv, fd, 0),
+                   (int)VIV_TRANSLATED, "R-only private fd-backed admitted too");
+
+    // PROT_WRITE is THE refusal that keeps I-36 intact: this arm's Burrow is
+    // shared and has no write-back path, so a writable file mapping would either
+    // lose the writes or leak them into every other Proc sharing the Image.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       (u64)(VIV_PROT_READ | VIV_PROT_WRITE), priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_WRITE declines -- I-36 has no write-back");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       (u64)(VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC),
+                       priv, fd, 0),
+                   (int)VIV_FORWARD, "W+X declines (I-12 too, two independent gates)");
+
+    // PROT_NONE declines HERE while the anon arm admits it -- the asymmetry is
+    // deliberate and is asserted so a future "make the arms consistent" tidy-up
+    // has to argue with a test. There is no degradation available: serving a
+    // PROT_NONE file map readably would hand over bytes the caller declined.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide((u64)VIV_PROT_NONE, priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_NONE declines on the FILE arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide((u64)VIV_PROT_EXEC, priv, fd, 0),
+                   (int)VIV_FORWARD, "X-without-R declines (no readable page to exec)");
+
+    // An allow-list, so the aarch64 extras fall out without being enumerated.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx | (u64)VIV_PROT_BTI, priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_BTI declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx | (u64)VIV_PROT_MTE, priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_MTE declines");
+
+    // MAP_SHARED is the write-back semantics arriving by a second door, and
+    // MAP_FIXED is the caller-chosen address D-3a does not serve (D-3b does,
+    // through its own arm). Exact equality refuses both without naming them.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, (u64)VIV_MAP_SHARED, fd, 0),
+                   (int)VIV_FORWARD, "MAP_SHARED declines -- write-back by another name");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       rx, priv | (u64)VIV_MAP_FIXED, fd, 0),
+                   (int)VIV_FORWARD, "MAP_FIXED declines on this arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       rx, priv | (u64)VIV_MAP_FIXED_NOREPLACE, fd, 0),
+                   (int)VIV_FORWARD, "MAP_FIXED_NOREPLACE declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       rx, priv | (u64)VIV_MAP_ANONYMOUS, fd, 0),
+                   (int)VIV_FORWARD, "MAP_ANONYMOUS declines -- that is the other arm");
+
+    // BOTH spellings of -1, the AT_FDCWD trap again: a caller may leave x4
+    // sign-extended or merely zero-extended, and neither is a real descriptor.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, (u64)-1, 0),
+                   (int)VIV_FORWARD, "sign-extended -1 fd declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, 0xFFFFFFFFull, 0),
+                   (int)VIV_FORWARD, "zero-extended -1 fd declines");
+
+    // A page-aligned offset is STRUCTURE, not fidelity: the FILE fault arm reads
+    // each page at file_offset + page-floored burrow offset, an identity that
+    // only holds when the Burrow's offset 0 is the mapping's start.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 0x1000),
+                   (int)VIV_TRANSLATED, "a page-aligned non-zero offset is admitted");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 1),
+                   (int)VIV_FORWARD, "a misaligned offset declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 0xFFF),
+                   (int)VIV_FORWARD, "one byte short of a page declines");
+
+    // prot/flags/fd are `int` in the Linux ABI, so their high halves are noise.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(0xDEADBEEF00000000ull | rx,
+                                                  0xCAFE000000000000ull | priv,
+                                                  0x1234567800000003ull, 0),
+                   (int)VIV_TRANSLATED, "the high half of prot/flags/fd is unread");
+}
+
+// The two MAP_FIXED argument domains (DISTRO D-3b). Measured off map_library's
+// overlay calls, so each admitted case is asserted as THE CALL STOCK LDSO MAKES.
+void test_vivarium_mmap_fixed_domain(void) {
+    const u64 pf   = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED);
+    const u64 pfa  = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED | VIV_MAP_ANONYMOUS);
+    const u64 rw   = (u64)(VIV_PROT_READ | VIV_PROT_WRITE);
+    const u64 rx   = (u64)(VIV_PROT_READ | VIV_PROT_EXEC);
+    const u64 addr = 0x40001000ull;                  // a real page
+    const u64 fd   = 3;
+
+    // ---- arm 2 (dynlink.c:842) -----------------------------------------------
+
+    // THE MEASURED CALL. All 18 ELFs in the stock Alpine rootfs are `R-X` then
+    // `RW-`, so the ONE arm-2 request any of them makes is this: the writable
+    // data segment, page-aligned file offset, MAP_PRIVATE|MAP_FIXED.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rw, pf, fd, 0x1000),
+                   (int)VIV_TRANSLATED, "RW private fixed fd-backed is the measured shape");
+
+    // R+X and R-only arm-2 requests. NO PRODUCER on this rootfs -- they need a
+    // `-z separate-code` four-segment layout. Admitted because the ELF format
+    // permits them and a Debian/Fedora toolchain emits them; asserted HERE
+    // because the in-guest gate cannot reach them, so this is their only cover.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rx, pf, fd, 0),
+                   (int)VIV_TRANSLATED, "R+X fixed fd-backed admitted (separate-code layout)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, (u64)VIV_PROT_READ,
+                                                        pf, fd, 0),
+                   (int)VIV_TRANSLATED, "R-only fixed fd-backed admitted");
+
+    // W+X declines at the domain edge. vma_alloc would reject it too, but I-12
+    // is worth failing closed on before anything has to argue about it.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(
+                       addr, (u64)(VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC),
+                       pf, fd, 0),
+                   (int)VIV_FORWARD, "W+X declines -- I-12 fails closed here too");
+
+    // PROT_NONE is a pure reservation; there is no honourable service for it.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, 0, pf, fd, 0),
+                   (int)VIV_FORWARD, "PROT_NONE declines");
+
+    // addr is a REQUIREMENT under MAP_FIXED, not the hint it is on the non-fixed
+    // arms. Zero and misaligned are separate mistakes and both must decline.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(0, rw, pf, fd, 0),
+                   (int)VIV_FORWARD, "a fixed map at NULL declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr + 1, rw, pf, fd, 0),
+                   (int)VIV_FORWARD, "a misaligned fixed addr declines");
+
+    // MAP_SHARED is the write-back semantics this whole arc refuses, arriving by
+    // another door. Exact flag equality is what excludes it.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(
+                       addr, rw, (u64)(VIV_MAP_SHARED | VIV_MAP_FIXED), fd, 0),
+                   (int)VIV_FORWARD, "MAP_SHARED declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(
+                       addr, rw, pf | (u64)VIV_MAP_ANONYMOUS, fd, 0),
+                   (int)VIV_FORWARD, "MAP_ANONYMOUS is the OTHER arm, not this one");
+
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rw, pf, (u64)-1, 0),
+                   (int)VIV_FORWARD, "fd == -1 declines on the fd-backed arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rw, pf, fd, 1),
+                   (int)VIV_FORWARD, "a misaligned offset declines");
+
+    // ---- arm 3 (dynlink.c:851) -----------------------------------------------
+
+    // THE MEASURED CALL: the bss tail, gated in musl on memsz > filesz && PF_W,
+    // so its prot always carries R|W and its offset is always 0.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rw, pfa, (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "RW private fixed anon is the measured shape");
+
+    // PROT_NONE declines HERE, and that DIVERGES from the non-fixed anon arm,
+    // which degrades it to writable. A fixed PROT_NONE over an existing mapping
+    // is a guard; answering it with a writable page is a hole, not a degradation.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(addr, 0, (u64)(VIV_MAP_PRIVATE |
+                                                            VIV_MAP_ANONYMOUS),
+                                             (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "the NON-fixed anon arm does admit PROT_NONE");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, 0, pfa, (u64)-1, 0),
+                   (int)VIV_FORWARD, "but the FIXED anon arm refuses it -- a guard");
+
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rx, pfa, (u64)-1, 0),
+                   (int)VIV_FORWARD, "PROT_EXEC declines on the anon arm (I-42/CAP_JIT)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rw, pfa, 3, 0),
+                   (int)VIV_FORWARD, "a real fd declines on the anonymous arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rw, pfa, (u64)-1, 0x1000),
+                   (int)VIV_FORWARD, "a nonzero offset declines on the anonymous arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(0, rw, pfa, (u64)-1, 0),
+                   (int)VIV_FORWARD, "a fixed anon map at NULL declines");
+}
+
+// The FOUR mmap arms are pairwise DISJOINT. Every decider's comment claims it;
+// without this they would only agree with each other. The dispatch site relies
+// on it to make its try-order free rather than load-bearing -- if some tuple
+// were admitted by two arms, the order would silently decide which semantics a
+// guest receives, and D-3b's arms differ in whether the guest gets shared
+// demand-paged file bytes or a private eager copy.
+void test_vivarium_mmap_arms_disjoint(void) {
+    // Sweep the cross product of every prot/flag/fd/offset value either arm
+    // reasons about. Cheap and exhaustive over the interesting space -- far more
+    // convincing than a handful of hand-picked tuples, and it is the shape that
+    // would catch a FUTURE widening of either arm colliding with the other.
+    const u64 prots[] = {
+        0, VIV_PROT_READ, VIV_PROT_WRITE, VIV_PROT_EXEC,
+        VIV_PROT_READ | VIV_PROT_WRITE, VIV_PROT_READ | VIV_PROT_EXEC,
+        VIV_PROT_WRITE | VIV_PROT_EXEC,
+        VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC,
+        VIV_PROT_BTI, VIV_PROT_MTE,
+    };
+    const u64 flags[] = {
+        0, VIV_MAP_SHARED, VIV_MAP_PRIVATE, VIV_MAP_FIXED, VIV_MAP_ANONYMOUS,
+        VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS,
+        VIV_MAP_PRIVATE | VIV_MAP_FIXED,
+        VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS | VIV_MAP_FIXED,
+        VIV_MAP_PRIVATE | VIV_MAP_FIXED_NOREPLACE,
+    };
+    const u64 fds[]  = { 0, 3, (u64)-1, 0xFFFFFFFFull };
+    const u64 offs[] = { 0, 1, 0x1000 };
+    // The FIXED arms judge `addr`, so it joins the sweep: 0 and a misaligned
+    // value must reach the two decliners, and a real page must reach admission.
+    const u64 addrs[] = { 0, 0x1000, 0x1001, 0x40000000ull };
+
+    int adm_file = 0, adm_anon = 0, adm_fixed_file = 0, adm_fixed_anon = 0;
+    for (unsigned ai = 0; ai < sizeof(addrs) / sizeof(addrs[0]); ai++)
+    for (unsigned pi = 0; pi < sizeof(prots) / sizeof(prots[0]); pi++)
+    for (unsigned fi = 0; fi < sizeof(flags) / sizeof(flags[0]); fi++)
+    for (unsigned di = 0; di < sizeof(fds)   / sizeof(fds[0]);   di++)
+    for (unsigned oi = 0; oi < sizeof(offs)  / sizeof(offs[0]);  oi++) {
+        u64 a = addrs[ai], pr = prots[pi], fl = flags[fi];
+        u64 fd = fds[di],  off = offs[oi];
+        TEST_ASSERT(vivarium_mmap_arms_disjoint(a, pr, fl, fd, off),
+                    "no tuple may be admitted by more than ONE mmap arm");
+        if (vivarium_mmap_file_decide(pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_file++;
+        if (vivarium_mmap_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_anon++;
+        if (vivarium_mmap_fixed_file_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_fixed_file++;
+        if (vivarium_mmap_fixed_anon_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_fixed_anon++;
+    }
+
+    // Disjointness is satisfiable by admitting NOTHING, so the sweep proves
+    // nothing until EVERY arm is shown to admit something inside it. These are
+    // the checks that keep the loop above from passing vacuously -- and they are
+    // per-arm rather than a total, because a total is satisfied by one arm
+    // admitting everything while another admits nothing at all.
+    TEST_ASSERT(adm_file       > 0, "the sweep must reach the FILE arm's domain");
+    TEST_ASSERT(adm_anon       > 0, "the sweep must reach the anon arm's domain");
+    TEST_ASSERT(adm_fixed_file > 0, "the sweep must reach the FIXED FILE domain");
+    TEST_ASSERT(adm_fixed_anon > 0, "the sweep must reach the FIXED anon domain");
+}
+
 // The clone argument domain (LINEAGE L-3d). This row hands a guest a second
 // PROCESS, so every decline is asserted by NAME and by REASON -- three distinct
 // classes of widening are being refused here and a mask test would admit all of
@@ -687,18 +1108,18 @@ void test_vivarium_clone_domain(void) {
     // just "a stack a caller might pass".
     const u64 sp = 0x0000004000010000ull;
 
-    // POISONED between uses. `share_mem` is only meaningful on VIV_TRANSLATED,
-    // so seeding it with the WRONG value before each admitted call is what makes
-    // the assertions below real rather than a reading of a leftover.
-    bool sm;
+    // POISONED between uses. `mode` is only meaningful on VIV_TRANSLATED, so
+    // seeding it with the WRONG mode before each admitted call is what makes the
+    // assertions below real rather than a reading of a leftover.
+    enum viv_clone_mode m;
 
     // The shape musl's posix_spawn sends. posix_spawn.c:198 --
     //   __clone(child, stack+sizeof stack, CLONE_VM|CLONE_VFORK|SIGCHLD, &args)
     const u64 ok = (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK | VIV_CLONE_SIGCHLD);
-    sm = false;
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, sp, &sm),
+    m = VIV_CLONE_MODE_FORK;
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, sp, &m),
                    (int)VIV_TRANSLATED, "CLONE_VM|CLONE_VFORK|SIGCHLD is the admitted shape");
-    TEST_ASSERT(sm, "the vfork shape SHARES the address space (RFMEM)");
+    TEST_ASSERT(m == VIV_CLONE_MODE_VFORK, "the vfork shape SHARES the address space (RFMEM)");
 
     // THE FORK SHAPE (L-6a). musl's fork() -> _Fork() emits exactly
     // clone(SIGCHLD, 0), and L-4/L-5 built the private copy-on-write address
@@ -706,19 +1127,19 @@ void test_vivarium_clone_domain(void) {
     // the second one wrong would hand a fork child a SHARED address space and
     // suspend its parent -- and the verdict alone cannot tell those apart.
     const u64 forkw = (u64)VIV_CLONE_FLAGS_FORK;
-    sm = true;
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(forkw, 0, &sm),
+    m = VIV_CLONE_MODE_VFORK;
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(forkw, 0, &m),
                    (int)VIV_TRANSLATED, "clone(SIGCHLD, 0) is fork() -- admitted since L-6a");
-    TEST_ASSERT(!sm, "the fork shape COPIES the address space (RFPROC alone)");
+    TEST_ASSERT(m == VIV_CLONE_MODE_FORK, "the fork shape COPIES the address space (RFPROC alone)");
 
     // The `stack` rule INVERTS between the shapes, so both arms are pinned:
     // zero is REQUIRED to decline under RFMEM (below) and REQUIRED to be served
     // here, because under RFPROC alone zero means INHERIT and that is what
     // fork() means. A single shared rule would have to be wrong for one of them.
-    sm = true;
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(forkw, sp, &sm),
+    m = VIV_CLONE_MODE_VFORK;
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(forkw, sp, &m),
                    (int)VIV_TRANSLATED, "fork with an explicit stack is still fork");
-    TEST_ASSERT(!sm, "an explicit stack does not make it a vfork");
+    TEST_ASSERT(m == VIV_CLONE_MODE_FORK, "an explicit stack does not make it a vfork");
 
     // THE DECISION THIS CHUNK HAD TO MAKE, and the reason it is not the same as
     // L-3c-2's. A caller that sets CLONE_VM and CLEARS CLONE_VFORK has said "do
@@ -728,66 +1149,104 @@ void test_vivarium_clone_domain(void) {
     // neither execs nor exits promptly. So it declines, and the guest gets an
     // answer it can act on instead of a hang with our name on it.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       (u64)(VIV_CLONE_VM | VIV_CLONE_SIGCHLD), sp, &sm),
+                       (u64)(VIV_CLONE_VM | VIV_CLONE_SIGCHLD), sp, &m),
                    (int)VIV_FORWARD,
                    "CLONE_VM without CLONE_VFORK declines -- never a suspend unasked");
 
-    // The thread set. A genuinely concurrent child has a correct target
-    // already -- SYS_THREAD_SPAWN -- and it is not this row.
+    // N-3: THE PTHREAD WORD is served now, as VIV_CLONE_MODE_THREAD. This is the
+    // exact word musl's pthread_create emits. Both the verdict AND the mode are
+    // pinned: a widening that returned FORK/VFORK here would route a thread
+    // through sys_rfork_core (a new Proc, a new pid) instead of a Thread in the
+    // caller's Proc, and the verdict alone cannot tell those apart.
+    m = VIV_CLONE_MODE_FORK;
+    TEST_EXPECT_EQ((int)vivarium_clone_decide((u64)VIV_CLONE_FLAGS_THREAD, sp, &m),
+                   (int)VIV_TRANSLATED, "the pthread word 0x007D0F00 is served (N-3)");
+    TEST_ASSERT(m == VIV_CLONE_MODE_THREAD, "the pthread word is a THREAD, not a fork/vfork");
+    TEST_ASSERT((u64)VIV_CLONE_FLAGS_THREAD == 0x007D0F00ull,
+                "and the word under test IS musl's clone flag word");
+
+    // A thread MUST carry its own stack -- two threads on one stack corrupt each
+    // other (the RFMEM child_sp invariant). A zero-stack thread word declines, so
+    // the crux never links a Thread with a null SP_EL0.
+    TEST_EXPECT_EQ((int)vivarium_clone_decide((u64)VIV_CLONE_FLAGS_THREAD, 0, &m),
+                   (int)VIV_FORWARD, "a thread with no stack declines -- SP_EL0 is mandatory");
+
+    // The thread word is EXACT too: one extra bit is a shape nobody has reasoned
+    // about. CLONE_CHILD_SETTID (which musl's word does NOT set) on top declines
+    // rather than riding along.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       ok | (u64)VIV_CLONE_THREAD, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_THREAD declines -- that is SYS_THREAD_SPAWN");
+                       (u64)VIV_CLONE_FLAGS_THREAD | (u64)VIV_CLONE_CHILD_SETTID, sp, &m),
+                   (int)VIV_FORWARD, "thread|CHILD_SETTID declines -- the thread word is exact");
+
+    // A stray CLONE_THREAD bit on the VFORK word is NOT the thread word (it lacks
+    // FS/FILES/SIGHAND/SYSVSEM/SETTLS/PARENT_SETTID/CHILD_CLEARTID/DETACHED), so
+    // it declines by exact-equality -- a fork-with-a-concurrency-bit is a shape
+    // nobody emits. This is why THREAD is a separate exact word, not a bit
+    // admitted into the fork/vfork words.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       ok | (u64)VIV_CLONE_FILES, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_FILES declines -- the table is COPIED, not shared");
+                       ok | (u64)VIV_CLONE_THREAD, sp, &m),
+                   (int)VIV_FORWARD, "vfork-word|CLONE_THREAD declines -- not the exact thread word");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(
+                       ok | (u64)VIV_CLONE_FILES, sp, &m),
+                   (int)VIV_FORWARD, "CLONE_FILES on the vfork word declines -- the table is COPIED");
 
     // The fork word is EXACT too -- L-6a widened the domain by one word, not
     // into a mask. CLONE_FILES on top of it would share the handle table, which
     // is a different Plan 9 flag (RFFDG) and still refused.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       forkw | (u64)VIV_CLONE_FILES, 0, &sm),
+                       forkw | (u64)VIV_CLONE_FILES, 0, &m),
                    (int)VIV_FORWARD, "fork|CLONE_FILES declines -- the fork word is exact");
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       forkw | (u64)VIV_CLONE_SETTLS, 0, &sm),
+                       forkw | (u64)VIV_CLONE_SETTLS, 0, &m),
                    (int)VIV_FORWARD, "fork|CLONE_SETTLS declines -- x3 is not read either");
 
-    // THE GARBAGE-REGISTER GUARD, asserted from the domain side. Each of these
-    // three bits makes one of x2/x3/x4 MEANINGFUL, and the shell's safety
-    // argument is that it never reads them: it passes a literal 0 for
-    // child_tls and ignores parent_tid/child_tid entirely. Admitting any of
-    // these would silently make that a lie -- musl's __clone leaves all three
-    // registers holding whatever posix_spawn's caller happened to have there.
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_SETTLS, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_SETTLS declines -- x3 is not read");
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_PARENT_SETTID, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_PARENT_SETTID declines -- x2 is not read");
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_CHILD_SETTID, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_CHILD_SETTID declines -- x4 is not read");
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_CHILD_CLEARTID, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_CHILD_CLEARTID declines -- x4 is not read");
+    // THE GARBAGE-REGISTER GUARD, asserted from the domain side, and scoped to
+    // the FORK/VFORK arms. Each of these bits makes one of x2/x3/x4 MEANINGFUL,
+    // and those arms' safety argument is that they never read them: a literal 0
+    // for child_tls, parent_tid/child_tid ignored. Adding one to the VFORK word
+    // must decline -- musl's __clone leaves all three registers holding
+    // posix_spawn's caller garbage. (The THREAD word carries SETTLS +
+    // PARENT_SETTID + CHILD_CLEARTID DELIBERATELY and is the separate exact arm,
+    // served above, that DOES read them; keeping the words separate is exactly
+    // what makes this fork-arm claim literally true.)
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_SETTLS, sp, &m),
+                   (int)VIV_FORWARD, "vfork|CLONE_SETTLS declines -- x3 not read on this arm");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_PARENT_SETTID, sp, &m),
+                   (int)VIV_FORWARD, "vfork|CLONE_PARENT_SETTID declines -- x2 not read on this arm");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_CHILD_SETTID, sp, &m),
+                   (int)VIV_FORWARD, "vfork|CLONE_CHILD_SETTID declines -- x4 not read on this arm");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_CHILD_CLEARTID, sp, &m),
+                   (int)VIV_FORWARD, "vfork|CLONE_CHILD_CLEARTID declines -- x4 not read on this arm");
 
     // The exit signal is the LOW BYTE, not a flag, and only SIGCHLD is
     // admitted: `exits()` posts `child_exit` unconditionally (I-19), so any
     // other request -- including 0, "no signal", which is what a detached child
     // asks for -- would get a note it did not ask for.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK), sp, &sm),
+                       (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK), sp, &m),
                    (int)VIV_FORWARD, "exit signal 0 declines -- child_exit posts regardless");
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK | 15u), sp, &sm),
+                       (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK | 15u), sp, &m),
                    (int)VIV_FORWARD, "a non-SIGCHLD exit signal declines");
     // The same rule on the fork word. clone(0, 0) is a detached child asking
     // for no exit signal at all, and `exits()` posts child_exit regardless.
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(0, 0, &sm),
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(0, 0, &m),
                    (int)VIV_FORWARD, "a bare clone(0) declines -- no exit signal is unservable");
 
-    // A ZERO stack is Linux's `vfork()` proper -- "share the parent's stack",
-    // which is safe there only because CLONE_VFORK suspends the parent.
-    // SYS_RFORK refuses a zero child_sp by contract, so this declines one layer
-    // above rather than weakening a landed kernel gate. LINEAGE.md §9's fourth
-    // question, second half.
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, 0, &sm),
-                   (int)VIV_FORWARD, "stack==0 declines -- vfork() proper is out of scope");
+    // A ZERO stack is `vfork()` proper, and option B SERVES it AS A FORK
+    // (2026-08-31; LINEAGE.md 3.1). Plan 9 has no two-Procs-one-stack shape, so
+    // rather than weaken SYS_RFORK's child_sp rule (option A, anti-lineage) the
+    // null-stack vfork maps to a private copy-on-write child -- conformant,
+    // since POSIX makes anything but _exit/exec after vfork undefined. The
+    // verdict AND mode are both pinned: a widening that returned VFORK here
+    // would hand a null child_sp to SYS_RFORK's RFMEM gate (which refuses it)
+    // OR, worse, share the parent's stack -- the exact hazard the fork mapping
+    // avoids. mode MUST be FORK, i.e. the SAME shape clone(SIGCHLD,0) yields two
+    // assertions above.
+    m = VIV_CLONE_MODE_VFORK;
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, 0, &m),
+                   (int)VIV_TRANSLATED, "stack==0 vfork is SERVED (option B) -- not declined");
+    TEST_ASSERT(m == VIV_CLONE_MODE_FORK, "null-stack vfork forks (private COW), never RFMEM");
 
     // THE HIGH HALF IS READ, unlike every other decide in this file -- and that
     // asymmetry is the point. mmap/openat narrow to 32 bits because their Linux
@@ -796,17 +1255,21 @@ void test_vivarium_clone_domain(void) {
     // that uncertainty the stricter reading wins, and it costs nothing: musl's
     // clone.s zero-extends (`uxtw x0,w2`), so the high half is always 0 from the
     // real consumer. Reverting to a `(u32)` cast fails HERE.
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(0xDEADBEEF00000000ull | ok, sp, &sm),
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(0xDEADBEEF00000000ull | ok, sp, &m),
                    (int)VIV_FORWARD,
                    "a high-half bit declines -- clone's flags word is 64-bit");
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(0xDEADBEEF00000000ull | forkw, 0, &sm),
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(0xDEADBEEF00000000ull | forkw, 0, &m),
                    (int)VIV_FORWARD,
                    "the fork word is full-width too -- a high-half bit declines");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(
+                       0xDEADBEEF00000000ull | (u64)VIV_CLONE_FLAGS_THREAD, sp, &m),
+                   (int)VIV_FORWARD,
+                   "the thread word is full-width too -- a high-half bit declines");
 
     // FAIL CLOSED on a NULL out-param. The shell cannot then read an
-    // uninitialised `share_mem` and choose RFMEM by accident.
+    // uninitialised `mode` and choose the wrong shape by accident.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, sp, NULL),
-                   (int)VIV_FORWARD, "a NULL share_mem_out declines");
+                   (int)VIV_FORWARD, "a NULL mode_out declines");
 
     // clone is a TIER-2 row -- it needs the exception frame, so it can never be
     // a renumber. Pinned here so a future edit cannot demote it to T1, which
@@ -821,6 +1284,66 @@ void test_vivarium_clone_domain(void) {
                        (int)VIV_TIER2, "clone is TIER2 -- never a renumber");
         TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_EXECVE, args, &out),
                        (int)VIV_TIER2, "execve is TIER2 -- never a renumber");
+    }
+}
+
+// vivarium.futex_decide -- the op classifier (N-3). musl's default pthread path
+// emits exactly WAIT/WAKE/REQUEUE; every other op forwards to a clean ENOSYS.
+// Dropping REQUEUE is the one that ships a green single-waiter demo and then
+// deadlocks pthread_cond_broadcast (>=2 waiters on a default mutex), so it is
+// pinned SERVED here -- a regression to ENOSYS on op 3 fails this test.
+void test_vivarium_futex_decide(void) {
+    enum viv_futex_op op;
+
+    // The three served ops. Poisoned between uses (the mode is only meaningful
+    // on VIV_TRANSLATED), so each assertion reads a fresh classification.
+    op = VIV_FUTEX_OP_REQUEUE;
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(0, &op), (int)VIV_TRANSLATED, "op 0 is served");
+    TEST_ASSERT(op == VIV_FUTEX_OP_WAIT, "op 0 is FUTEX_WAIT");
+    op = VIV_FUTEX_OP_WAIT;
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(1, &op), (int)VIV_TRANSLATED, "op 1 is served");
+    TEST_ASSERT(op == VIV_FUTEX_OP_WAKE, "op 1 is FUTEX_WAKE");
+    op = VIV_FUTEX_OP_WAIT;
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(3, &op), (int)VIV_TRANSLATED, "op 3 is served");
+    TEST_ASSERT(op == VIV_FUTEX_OP_REQUEUE, "op 3 is FUTEX_REQUEUE -- broadcast needs it");
+
+    // The flag bits are STRIPPED: PRIVATE (0x80), CLOCK_REALTIME (0x100). musl's
+    // private mutex/cond set PRIVATE, so the base op must survive the mask.
+    op = VIV_FUTEX_OP_REQUEUE;
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(0 | VIV_FUTEX_PRIVATE_FLAG, &op),
+                   (int)VIV_TRANSLATED, "WAIT|PRIVATE is served");
+    TEST_ASSERT(op == VIV_FUTEX_OP_WAIT, "the PRIVATE bit is stripped, not classified");
+    op = VIV_FUTEX_OP_WAIT;
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(
+                       1 | VIV_FUTEX_PRIVATE_FLAG | VIV_FUTEX_CLOCK_REALTIME, &op),
+                   (int)VIV_TRANSLATED, "WAKE|PRIVATE|CLOCK_REALTIME is served");
+    TEST_ASSERT(op == VIV_FUTEX_OP_WAKE, "both flag bits are stripped");
+
+    // The opt-in robust/PI ops FORWARD (a clean ENOSYS), never a wrong translate.
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(2 /* FD, deprecated */, &op),
+                   (int)VIV_FORWARD, "op 2 (FD) forwards");
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(4 /* CMP_REQUEUE */, &op),
+                   (int)VIV_FORWARD, "CMP_REQUEUE forwards -- musl uses plain REQUEUE");
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(5 /* WAKE_OP */, &op),
+                   (int)VIV_FORWARD, "WAKE_OP forwards");
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(6 /* LOCK_PI */, &op),
+                   (int)VIV_FORWARD, "LOCK_PI forwards -- PI is opt-in");
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(9 /* WAIT_BITSET */, &op),
+                   (int)VIV_FORWARD, "WAIT_BITSET forwards");
+
+    // Fail closed on a NULL out-param.
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(0, NULL),
+                   (int)VIV_FORWARD, "a NULL op_out forwards");
+
+    // The row is wired: 98 is TIER2. Sub-ceiling (98 == native TTY_CONT) but
+    // reached only through the phenotype dispatch, so the native twin is never
+    // dispatched for a phenotype caller.
+    {
+        u64 args[VIV_NARGS];
+        struct viv_call out;
+        viv_fill_args(args);
+        TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_FUTEX, args, &out),
+                       (int)VIV_TIER2, "futex is a TIER2 row (N-3)");
     }
 }
 
@@ -1164,6 +1687,55 @@ void test_vivarium_sigset_to_notemask(void) {
     TEST_ASSERT(vivarium_sigprocmask_decide(3, 8) == VIV_FORWARD, "bad how");
     TEST_ASSERT(vivarium_sigprocmask_decide(VIV_SIG_BLOCK, 16) == VIV_FORWARD,
                 "sigsetsize must be 8");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.handler_mask — the mask a handler runs under (Linux
+// signal_delivered: blocked |= sa_mask; blocked |= sig unless SA_NODEFER).
+// The delivery path stores this in note_mask for the handler's duration and
+// rt_sigreturn puts the pre-handler mask back (notes.phenotype_sigreturn_
+// restores_mask covers that half; the probe's L237-L244 the wiring).
+// -----------------------------------------------------------------------------
+void test_vivarium_handler_mask(void) {
+    const struct viv_notebit_map m = {
+        .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
+        .snare = 4, .tty = 5,
+    };
+    const u64 CHILD = 1ULL << 3, INTR = 1ULL << 0, PIPE = 1ULL << 2,
+              TTY = 1ULL << 5;
+
+    // mask | sa_mask | sig: the pre-handler mask is KEPT, sa_mask added, the
+    // delivered signal added.
+    u64 hm = vivarium_handler_mask(CHILD, 1ULL << (VIV_SIGINT - 1), 0,
+                                   VIV_SIGPIPE, &m);
+    TEST_ASSERT(hm == (CHILD | INTR | PIPE), "mask | sa_mask | sig");
+
+    // SA_NODEFER: sa_mask still applied, the signal itself NOT added.
+    hm = vivarium_handler_mask(CHILD, 1ULL << (VIV_SIGINT - 1), VIV_SA_NODEFER,
+                               VIV_SIGPIPE, &m);
+    TEST_ASSERT(hm == (CHILD | INTR), "SA_NODEFER omits the delivered signal");
+
+    // Both additions go through the forward translation: a tty-family sa_mask
+    // entry blocks the FAMILY bit (the coarseness the mask row reports), and
+    // SIGKILL in sa_mask is dropped, never a bit.
+    hm = vivarium_handler_mask(0, (1ULL << (VIV_SIGWINCH - 1)) |
+                                  (1ULL << (VIV_SIGKILL - 1)), 0,
+                               VIV_SIGINT, &m);
+    TEST_ASSERT(hm == (TTY | INTR), "sa_mask via the same coarse translation; SIGKILL dropped");
+
+    // An empty sa_mask still blocks the delivered signal (musl's plain signal()
+    // installs with sa_mask = 0): the common case.
+    hm = vivarium_handler_mask(0, 0, 0, VIV_SIGCHLD, &m);
+    TEST_ASSERT(hm == CHILD, "empty sa_mask: exactly the delivered signal");
+
+    // A signal with no note adds no bit (SIGUSR1 = 10); an out-of-range signum
+    // adds nothing rather than shifting by 64+.
+    hm = vivarium_handler_mask(0, 0, 0, 10, &m);
+    TEST_ASSERT(hm == 0, "a note-less signal adds no bit");
+    hm = vivarium_handler_mask(INTR, 0, 0, 0, &m);
+    TEST_ASSERT(hm == INTR, "signum 0 adds nothing (no shift by -1)");
+    hm = vivarium_handler_mask(INTR, 0, 0, 65, &m);
+    TEST_ASSERT(hm == INTR, "signum > VIV_NSIG adds nothing");
 }
 
 // -----------------------------------------------------------------------------
@@ -1561,14 +2133,20 @@ void test_vivarium_socket_domain(void) {
     TEST_ASSERT(!vivarium_socket_decide(1, 1, 0, &proto, &err), "AF_UNIX declines here");
     TEST_ASSERT(err == T_E_AFNOSUPPORT, "AF_UNIX -> EAFNOSUPPORT (the /srv path is pouch's)");
 
-    // The type-word flags are REFUSED, not masked off. This is the leg that
-    // matters: silently dropping SOCK_NONBLOCK gives the guest a blocking
-    // socket where it expected EAGAIN.
-    TEST_ASSERT(!vivarium_socket_decide(2, 1 | 04000, 0, &proto, &err),
-                "SOCK_NONBLOCK is refused, never ignored");
-    TEST_ASSERT(err == T_E_INVAL, "SOCK_NONBLOCK -> EINVAL");
-    TEST_ASSERT(!vivarium_socket_decide(2, 1 | 02000000, 0, &proto, &err),
-                "SOCK_CLOEXEC is refused, never ignored");
+    // N-1a: the SOCK_NONBLOCK/SOCK_CLOEXEC type-word flags are ADMITTED now
+    // (masked off before the base-type switch; the shell applies them to the ctl
+    // fd). musl's DNS socket -- socket(DGRAM|CLOEXEC|NONBLOCK) -- is the consumer
+    // that needs them; refusing them hung the resolver's recvmsg drain loop.
+    TEST_ASSERT(vivarium_socket_decide(2, 1 | 04000, 0, &proto, &err)
+                && proto == VIV_NET_TCP,
+                "SOCK_STREAM|SOCK_NONBLOCK is admitted (flag masked, base recognised)");
+    TEST_ASSERT(vivarium_socket_decide(2, 2 | 02000000 | 04000, 0, &proto, &err)
+                && proto == VIV_NET_UDP,
+                "SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK (the DNS socket) is admitted");
+    // An UNKNOWN high bit is still refused -- no honest translation exists.
+    TEST_ASSERT(!vivarium_socket_decide(2, 1 | 0x40000000, 0, &proto, &err),
+                "an unknown type-word flag is refused");
+    TEST_ASSERT(err == T_E_INVAL, "unknown type flag -> EINVAL");
 
     // No /net analogue.
     TEST_ASSERT(!vivarium_socket_decide(2, 5, 0, &proto, &err), "SOCK_SEQPACKET declines");
@@ -1584,6 +2162,93 @@ void test_vivarium_socket_domain(void) {
 
     TEST_ASSERT(vivarium_net_proto_dir(VIV_NET_TCP)[0] == 't', "tcp dir");
     TEST_ASSERT(vivarium_net_proto_dir(VIV_NET_UDP)[0] == 'u', "udp dir");
+}
+
+void test_vivarium_getsockopt_domain(void);
+void test_vivarium_getsockopt_domain(void) {
+    s32 err = -1;
+
+    // The one admitted point.
+    TEST_ASSERT(vivarium_getsockopt_decide(1, 4, &err) && err == 0,
+                "(SOL_SOCKET, SO_ERROR) is the served point");
+
+    // Every other option DECLINES to T_E_NOSYS -- the T2 "declined these
+    // arguments" path -- so the guest's fallback behaves exactly as it did
+    // under the blanket ENOSYS row. SO_REUSEADDR is the option a server
+    // actually issues; TCP_NODELAY (level 6) is the tuning knob curl issues.
+    TEST_ASSERT(!vivarium_getsockopt_decide(1, 2, &err), "SO_REUSEADDR declines");
+    TEST_ASSERT(err == T_E_NOSYS, "the decline errno is ENOSYS, not EINVAL");
+    TEST_ASSERT(!vivarium_getsockopt_decide(6, 1, &err), "IPPROTO_TCP level declines");
+    TEST_ASSERT(!vivarium_getsockopt_decide(0, 4, &err), "level 0 declines");
+
+    // Narrowed to 32 bits: both are C ints in the Linux ABI, so high-half
+    // garbage in the registers must not change the verdict (the openat
+    // narrowing precedent, not clone's full-width one).
+    TEST_ASSERT(vivarium_getsockopt_decide(0x100000001ull, 0xdead00000004ull, &err),
+                "high-half garbage is outside the int ABI and ignored");
+
+    // Fail closed on the NULL output.
+    TEST_ASSERT(!vivarium_getsockopt_decide(1, 4, NULL), "NULL err -> false");
+}
+
+void test_vivarium_sendrecv_domain(void);
+void test_vivarium_sendrecv_domain(void) {
+    s32 err = -1;
+    const u8 CONN = 2;   // VIV_SOCK_CONNECTED
+    const u8 FRESH = 1;  // VIV_SOCK_FRESH
+
+    const enum viv_net_proto TCP = VIV_NET_TCP;
+    const enum viv_net_proto UDP = VIV_NET_UDP;
+
+    // The served connected send() shape: NULL addr, flags 0 or MSG_NOSIGNAL.
+    TEST_ASSERT(vivarium_sendto_decide(TCP, CONN, 0, 0, 0, &err) && err == 0,
+                "connected send(flags=0) is the served point");
+    TEST_ASSERT(vivarium_sendto_decide(TCP, CONN, 0x4000, 0, 0, &err) && err == 0,
+                "MSG_NOSIGNAL is admitted (truthful no-op -- no SIGPIPE exists here)");
+
+    // N-2a: the UDP datagram sendto -- FRESH socket, non-NULL addr, MSG_NOSIGNAL
+    // -- is SERVED (this is the DNS path). The shell dials the addr on ctl.
+    TEST_ASSERT(vivarium_sendto_decide(UDP, FRESH, 0x4000, 0x1000, 16, &err) && err == 0,
+                "UDP sendto-with-address (the DNS datagram shape) is served");
+    // TCP has no connectionless send -> ENOSYS (census-visible unbuilt).
+    TEST_ASSERT(!vivarium_sendto_decide(TCP, FRESH, 0, 0x1000, 16, &err) && err == T_E_NOSYS,
+                "TCP sendto-with-address declines -> ENOSYS");
+    // A datagram send on an already-swapped fd has no ctl left to dial.
+    TEST_ASSERT(!vivarium_sendto_decide(UDP, CONN, 0, 0x1000, 16, &err) && err == T_E_ISCONN,
+                "UDP sendto-with-address on a CONNECTED fd -> EISCONN");
+    // Any non-NOSIGNAL flag would lie (checked before the address shape).
+    TEST_ASSERT(!vivarium_sendto_decide(UDP, FRESH, 0x40, 0x1000, 16, &err) && err == T_E_NOSYS,
+                "MSG_DONTWAIT declines -> ENOSYS");
+    // An unconnected send with NO addr is unbuilt -> ENOSYS, NOT a fabricated
+    // ENOTCONN (R2-F1: ENOTCONN mismatched Linux and hid the gap).
+    TEST_ASSERT(!vivarium_sendto_decide(UDP, FRESH, 0, 0, 0, &err) && err == T_E_NOSYS,
+                "send with no addr on an unconnected socket -> ENOSYS");
+
+    // recvfrom (unchanged): connected, NULL src-addr, flags 0.
+    TEST_ASSERT(vivarium_recvfrom_decide(CONN, 0, 0, &err) && err == 0,
+                "connected recv(flags=0) is the served point");
+    TEST_ASSERT(!vivarium_recvfrom_decide(CONN, 2, 0, &err),
+                "MSG_PEEK declines (no non-consuming 9P read)");
+    TEST_ASSERT(!vivarium_recvfrom_decide(CONN, 0, 0x1000, &err),
+                "a source-address out-pointer declines (recvmsg carries it, not recvfrom)");
+    TEST_ASSERT(!vivarium_recvfrom_decide(FRESH, 0, 0, &err) && err == T_E_NOSYS,
+                "recv on an unconnected socket -> ENOSYS");
+
+    // N-2b: recvmsg. Served for CONNECTED, or a FRESH socket with a recorded
+    // remote (a prior unconnected sendto -- the DNS path). flags must be 0.
+    TEST_ASSERT(vivarium_recvmsg_decide(CONN, 0, false, &err) && err == 0,
+                "recvmsg on a CONNECTED socket is served");
+    TEST_ASSERT(vivarium_recvmsg_decide(FRESH, 0, true, &err) && err == 0,
+                "recvmsg on a FRESH socket that was sendto'd (has_remote) is served");
+    TEST_ASSERT(!vivarium_recvmsg_decide(FRESH, 0, false, &err) && err == T_E_NOSYS,
+                "recvmsg on a never-sent FRESH socket -> ENOSYS (nothing to receive)");
+    TEST_ASSERT(!vivarium_recvmsg_decide(CONN, 2, false, &err) && err == T_E_NOSYS,
+                "recvmsg MSG_PEEK declines -> ENOSYS");
+
+    // Fail closed on the NULL output.
+    TEST_ASSERT(!vivarium_sendto_decide(TCP, CONN, 0, 0, 0, NULL), "NULL err -> false");
+    TEST_ASSERT(!vivarium_recvfrom_decide(CONN, 0, 0, NULL), "NULL err -> false");
+    TEST_ASSERT(!vivarium_recvmsg_decide(CONN, 0, false, NULL), "NULL err -> false");
 }
 
 void test_vivarium_sockaddr(void);
@@ -1659,6 +2324,9 @@ void test_vivarium_conn_n(void) {
     TEST_ASSERT(!vivarium_parse_conn_n(NULL, 1, &n), "NULL refused");
 }
 
+// The socktab is thread-safe since N-3 (peer threads share Proc.socktab). Its
+// API is snapshot-read (get) + identity-guarded keyed writes -- a returned entry
+// pointer no longer exists -- so these drive it through that surface.
 void test_vivarium_socktab(void);
 void test_vivarium_socktab(void) {
     static struct viv_socktab tab;
@@ -1667,40 +2335,101 @@ void test_vivarium_socktab(void) {
         tab.s[i].proto = 0; tab.s[i].n = 0;
     }
 
-    TEST_ASSERT(viv_socktab_find(&tab, 0) == NULL, "fd 0 does not match a free entry");
-    TEST_ASSERT(viv_socktab_find(NULL, 3) == NULL, "NULL table is safe");
+    struct viv_sock e;
+    TEST_ASSERT(!viv_socktab_get(&tab, 0, &e), "fd 0 does not match a free entry");
+    TEST_ASSERT(!viv_socktab_get(NULL, 3, &e), "NULL table is safe");
 
-    struct viv_sock *a = viv_socktab_claim(&tab, 0, VIV_NET_TCP, 5);
-    TEST_ASSERT(a != NULL && a->fd == 0 && a->n == 5, "fd 0 is a claimable socket");
-    TEST_ASSERT(a->state == VIV_SOCK_FRESH, "a new socket is FRESH, not CONNECTED");
-    TEST_ASSERT(viv_socktab_find(&tab, 0) == a, "found by fd");
-    TEST_ASSERT(viv_socktab_find(&tab, 1) == NULL, "a different fd does not match");
+    TEST_ASSERT(viv_socktab_claim(&tab, 0, VIV_NET_TCP, 5, VIV_SOCK_FRESH),
+                "fd 0 is a claimable socket");
+    TEST_ASSERT(viv_socktab_get(&tab, 0, &e) && e.fd == 0 && e.n == 5, "found by fd");
+    TEST_ASSERT(e.state == VIV_SOCK_FRESH, "a new socket is FRESH, not CONNECTED");
+    TEST_ASSERT(!viv_socktab_get(&tab, 1, NULL), "a different fd does not match");
 
-    struct viv_sock *b = viv_socktab_claim(&tab, 9, VIV_NET_UDP, 2);
-    TEST_ASSERT(b != NULL && b != a && b->proto == VIV_NET_UDP, "second, distinct");
+    TEST_ASSERT(viv_socktab_claim(&tab, 9, VIV_NET_UDP, 2, VIV_SOCK_FRESH),
+                "second, distinct");
+    TEST_ASSERT(viv_socktab_get(&tab, 9, &e) && e.proto == VIV_NET_UDP,
+                "the second is a distinct UDP entry");
 
     // Drop clears the WHOLE entry: a later claim must not inherit stale state.
     viv_socktab_drop(&tab, 0);
-    TEST_ASSERT(viv_socktab_find(&tab, 0) == NULL, "dropped");
-    TEST_ASSERT(viv_socktab_find(&tab, 9) == b, "the sibling survives the drop");
+    TEST_ASSERT(!viv_socktab_get(&tab, 0, NULL), "dropped");
+    TEST_ASSERT(viv_socktab_get(&tab, 9, &e) && e.n == 2,
+                "the sibling survives the drop");
     viv_socktab_drop(&tab, 0);              // idempotent
     viv_socktab_drop(&tab, 12345);          // an fd that was never a socket
     viv_socktab_drop(NULL, 9);              // NULL-safe
 
-    struct viv_sock *c = viv_socktab_claim(&tab, 0, VIV_NET_TCP, 77);
-    TEST_ASSERT(c != NULL && c->n == 77 && c->state == VIV_SOCK_FRESH,
+    TEST_ASSERT(viv_socktab_claim(&tab, 0, VIV_NET_TCP, 77, VIV_SOCK_FRESH),
+                "reclaim fd 0");
+    TEST_ASSERT(viv_socktab_get(&tab, 0, &e) && e.n == 77 && e.state == VIV_SOCK_FRESH,
                 "a reused slot carries no stale (proto, N) -- the close-hook "
                 "bug this table exists to prevent would show up here");
 
-    // Exhaustion is EMFILE-shaped (NULL), not a wrap or an overwrite.
-    u32 claimed = 2;
+    // Exhaustion is EMFILE-shaped (false), not a wrap or an overwrite.
+    u32 claimed = 2;   // fds 0 and 9 are live
     for (s32 fd = 100; claimed < VIV_SOCK_MAX; fd++) {
-        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1)) break;
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
         claimed++;
     }
     TEST_ASSERT(claimed == VIV_SOCK_MAX, "the table fills to exactly VIV_SOCK_MAX");
-    TEST_ASSERT(viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1) == NULL,
+    TEST_ASSERT(!viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1, VIV_SOCK_FRESH),
                 "a full table refuses rather than overwriting");
+}
+
+// Design D audit F2 (the constructed-states sweep): a Linux->native execve
+// leaves the socktab behind and native close() never drops a row, so the
+// native arm RESETS the table and a claim REPLACES any row already keyed on
+// its fd (the fd table is the truth). Both halves witnessed here, each with a
+// control one variable away: a sibling row survives the replace; the epoch
+// stays monotonic across the reset so a keyed write from before it lands
+// nowhere.
+void test_vivarium_socktab_reset(void);
+void test_vivarium_socktab_reset(void) {
+    static struct viv_socktab tab;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
+        tab.s[i].proto = 0; tab.s[i].n = 0; tab.s[i].epoch = 0;
+    }
+    tab.next_epoch = 0;
+    struct viv_sock e;
+
+    // Replace-on-claim: fd 5 claimed twice ends up as ONE row, the second.
+    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_TCP, 7, VIV_SOCK_FRESH), "claim fd 5 (tcp,7)");
+    TEST_ASSERT(viv_socktab_claim(&tab, 6, VIV_NET_TCP, 8, VIV_SOCK_FRESH), "claim fd 6 (sibling)");
+    TEST_ASSERT(viv_socktab_get(&tab, 5, &e) && e.proto == VIV_NET_TCP && e.n == 7,
+                "pre: fd 5 is (tcp,7)");
+    u64 stale_epoch = e.epoch;
+    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_UDP, 9, VIV_SOCK_FRESH), "re-claim fd 5 (udp,9)");
+    u32 rows = 0, rows_fd5 = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        if (tab.s[i].state != VIV_SOCK_FREE) { rows++; if (tab.s[i].fd == 5) rows_fd5++; }
+    }
+    TEST_ASSERT(viv_socktab_get(&tab, 5, &e) && e.proto == VIV_NET_UDP && e.n == 9,
+                "F2: the re-claim REPLACES the stale row (fd 5 reads (udp,9))");
+    TEST_EXPECT_EQ((u64)rows_fd5, 1ull, "exactly one row keyed on fd 5");
+    TEST_EXPECT_EQ((u64)rows, 2ull, "CONTROL: the sibling row survives the replace");
+    TEST_ASSERT(!viv_socktab_set_state(&tab, 5, stale_epoch, VIV_SOCK_CONNECTED),
+                "a keyed write with the replaced row's epoch lands nowhere");
+    TEST_ASSERT(viv_socktab_get(&tab, 5, &e) && e.state == VIV_SOCK_FRESH,
+                "...and the new row is untouched");
+
+    // Reset: every row gone, the object usable, the epoch still monotonic.
+    u64 epoch_before_reset = e.epoch;
+    viv_socktab_reset(&tab);
+    TEST_ASSERT(!viv_socktab_get(&tab, 5, NULL) && !viv_socktab_get(&tab, 6, NULL),
+                "F2: reset drops every row");
+    rows = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) if (tab.s[i].state != VIV_SOCK_FREE) rows++;
+    TEST_EXPECT_EQ((u64)rows, 0ull, "no slot left claimed");
+    TEST_ASSERT(viv_socktab_has_room(&tab), "the table is usable after the reset");
+    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_TCP, 1, VIV_SOCK_FRESH), "re-claim after the reset");
+    TEST_ASSERT(viv_socktab_get(&tab, 5, &e) && e.epoch > epoch_before_reset,
+                "the epoch stays monotonic across a reset");
+    TEST_ASSERT(!viv_socktab_set_state(&tab, 5, epoch_before_reset, VIV_SOCK_CONNECTED),
+                "a keyed write from before the reset lands nowhere");
+    viv_socktab_reset(NULL);   // NULL-safe (a Proc that was never Linux)
+    viv_socktab_reset(&tab);   // idempotent
+    TEST_ASSERT(!viv_socktab_get(&tab, 5, NULL), "idempotent");
 }
 
 // The close hook's regression (V-5). The hook lives in viv_linux_dispatch,
@@ -1720,25 +2449,28 @@ void test_vivarium_socktab_close_hook(void) {
         tab.s[i].proto = 0; tab.s[i].n = 0;
     }
 
-    // fd 4 is a TCP socket on connection 11, and gets connected.
-    struct viv_sock *s = viv_socktab_claim(&tab, 4, VIV_NET_TCP, 11);
-    TEST_ASSERT(s != NULL, "claim fd 4");
-    s->state = VIV_SOCK_CONNECTED;
+    // fd 4 is a TCP socket on connection 11, born CONNECTED (accept's shape).
+    struct viv_sock e;
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED),
+                "claim fd 4 connected");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_CONNECTED,
+                "an accepted fd is born CONNECTED, not FRESH");
 
     // close(4) -- the hook.
     viv_socktab_drop(&tab, 4);
 
     // The kernel hands index 4 back to an unrelated open(). A socket call on it
     // must now say "not a socket", NOT resolve to connection 11.
-    TEST_ASSERT(viv_socktab_find(&tab, 4) == NULL,
+    TEST_ASSERT(!viv_socktab_get(&tab, 4, NULL),
                 "a recycled fd index resolves to NO socket -- if this finds an "
                 "entry, connect() on an unrelated file would dial connection 11");
 
     // And when fd 4 legitimately becomes a socket again, it is a FRESH one.
-    struct viv_sock *s2 = viv_socktab_claim(&tab, 4, VIV_NET_UDP, 3);
-    TEST_ASSERT(s2 != NULL, "reclaim fd 4");
-    TEST_ASSERT(s2->state == VIV_SOCK_FRESH, "the new socket is FRESH, not CONNECTED");
-    TEST_ASSERT(s2->proto == VIV_NET_UDP && s2->n == 3,
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_UDP, 3, VIV_SOCK_FRESH),
+                "reclaim fd 4");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_FRESH,
+                "the new socket is FRESH, not CONNECTED");
+    TEST_ASSERT(e.proto == VIV_NET_UDP && e.n == 3,
                 "the new socket carries its OWN (proto, N) -- no bleed from the "
                 "previous tenant of this index");
 }
@@ -1758,36 +2490,107 @@ void test_vivarium_socktab_bind_fields(void) {
     TEST_ASSERT(viv_socktab_has_room(&tab), "an empty table has room");
     TEST_ASSERT(!viv_socktab_has_room(NULL), "NULL has no room (and does not fault)");
 
-    struct viv_sock *s = viv_socktab_claim(&tab, 7, VIV_NET_TCP, 3);
-    TEST_ASSERT(s != NULL, "claim fd 7");
-    TEST_ASSERT(s->bound_addr == 0 && s->bound_port == 0,
+    struct viv_sock e;
+    TEST_ASSERT(viv_socktab_claim(&tab, 7, VIV_NET_TCP, 3, VIV_SOCK_FRESH), "claim fd 7");
+    TEST_ASSERT(viv_socktab_get(&tab, 7, &e) && e.bound_addr == 0 && e.bound_port == 0,
                 "a fresh socket carries NO bind");
 
-    s->bound_addr = 0x7F000001u;   // 127.0.0.1
-    s->bound_port = 7789;
-    s->state      = VIV_SOCK_LISTENING;
+    // The keyed writers (bind + listen record through these), identity-guarded on
+    // the snapshotted epoch.
+    TEST_ASSERT(viv_socktab_set_bound(&tab, 7, e.epoch, 0x7F000001u, 7789),
+                "set_bound applies to the current entry");   // 127.0.0.1!7789
+    TEST_ASSERT(viv_socktab_set_state(&tab, 7, e.epoch, VIV_SOCK_LISTENING),
+                "set_state applies to the current entry");
 
     viv_socktab_drop(&tab, 7);
 
-    struct viv_sock *s2 = viv_socktab_claim(&tab, 7, VIV_NET_TCP, 4);
-    TEST_ASSERT(s2 != NULL, "reclaim fd 7");
-    TEST_ASSERT(s2->bound_port == 0 && s2->bound_addr == 0,
+    TEST_ASSERT(viv_socktab_claim(&tab, 7, VIV_NET_TCP, 4, VIV_SOCK_FRESH), "reclaim fd 7");
+    TEST_ASSERT(viv_socktab_get(&tab, 7, &e) && e.bound_port == 0 && e.bound_addr == 0,
                 "the recycled slot carries NO stale bind -- if it did, this "
                 "socket's listen() would announce 127.0.0.1!7789");
-    TEST_ASSERT(s2->state == VIV_SOCK_FRESH, "and it is FRESH, not LISTENING");
+    TEST_ASSERT(e.state == VIV_SOCK_FRESH, "and it is FRESH, not LISTENING");
 
     // has_room is the accept()-before-blocking check: it must go false exactly
     // when a claim would fail, or accept blocks, takes a real peer, and then
     // has to hang up on it.
     u32 claimed = 1;
     for (s32 fd = 200; claimed < VIV_SOCK_MAX; fd++) {
-        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1)) break;
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
         claimed++;
     }
     TEST_ASSERT(claimed == VIV_SOCK_MAX, "filled to VIV_SOCK_MAX");
     TEST_ASSERT(!viv_socktab_has_room(&tab), "a full table reports no room");
-    TEST_ASSERT(viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1) == NULL,
+    TEST_ASSERT(!viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1, VIV_SOCK_FRESH),
                 "and a claim on it does fail -- has_room agrees with claim");
+}
+
+// N-3's concurrency-fix core invariant: a keyed write to a slot that was closed
+// and RECYCLED lands nowhere. The deterministic unit form of the race a blocked
+// op runs when a peer thread close()s and re-socket()s the fd underneath it --
+// the [[bug-254]] / lock-across-sleep hazard the identity key closes. Before N-3
+// this table was lock-free and this write would corrupt the recycled socket.
+//
+// THE F1 DISCRIMINATOR (holotype, 2026-08-31): the recycle here reuses the SAME
+// netd connection number `n=5`, because netd mints `n` as the lowest-free slot
+// index -- a close()+socket() on one fd draws the same n by default. That is
+// exactly the case an n-keyed guard would silently PASS (5 == 5), corrupting the
+// recycled socket. The epoch key must refuse it: a fresh claim takes a strictly
+// greater monotonic epoch. A test that recycled to a DIFFERENT n would pass on
+// the broken n-key too, and prove nothing.
+void test_vivarium_socktab_keyed_write_identity(void);
+void test_vivarium_socktab_keyed_write_identity(void) {
+    static struct viv_socktab tab;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
+        tab.s[i].proto = 0; tab.s[i].n = 0; tab.s[i].epoch = 0;
+        tab.s[i].bound_addr = 0; tab.s[i].bound_port = 0;
+        tab.s[i].remote_addr = 0; tab.s[i].remote_port = 0;
+    }
+    tab.next_epoch = 0;
+
+    struct viv_sock e;
+
+    // fd 3 is connection n=5; a connect() on it snapshotted its epoch, then blocked.
+    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 5, VIV_SOCK_FRESH),
+                "claim fd 3 n=5");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e), "snapshot fd 3");
+    u64 stale_epoch = e.epoch;
+    TEST_ASSERT(stale_epoch != 0, "a claimed socket has a nonzero epoch");
+
+    // While it blocked, a peer close()d fd 3 and socket()ed a new one that netd
+    // handed the SAME n=5 (its lowest-free default) at the SAME fd number.
+    viv_socktab_drop(&tab, 3);
+    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 5, VIV_SOCK_FRESH),
+                "reclaim fd 3 with the SAME n=5 (netd's default recycle)");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e), "snapshot the recycled fd 3");
+    TEST_ASSERT(e.n == 5 && e.epoch > stale_epoch,
+                "the recycled socket has the SAME n but a STRICTLY GREATER epoch "
+                "-- which is exactly why n cannot be the identity key (F1)");
+    u64 fresh_epoch = e.epoch;
+
+    // The stale connect's commit, keyed on the epoch IT snapshotted, must be
+    // REFUSED even though n is unchanged -- the corruption an n-key would allow.
+    TEST_ASSERT(!viv_socktab_record_remote(&tab, 3, stale_epoch, 0x0A000001u, 53, true),
+                "a keyed write on a stale epoch is refused -- EVEN WITH THE SAME n");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e) &&
+                e.n == 5 && e.state == VIV_SOCK_FRESH && e.remote_port == 0,
+                "the recycled socket is UNCORRUPTED -- still fresh, no stranger's peer");
+
+    // set_state + set_bound honour the same epoch guard.
+    TEST_ASSERT(!viv_socktab_set_state(&tab, 3, stale_epoch, VIV_SOCK_LISTENING),
+                "set_state on a stale epoch is refused");
+    TEST_ASSERT(!viv_socktab_set_bound(&tab, 3, stale_epoch, 0x7F000001u, 22),
+                "set_bound on a stale epoch is refused");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e) && e.state == VIV_SOCK_FRESH &&
+                e.bound_port == 0, "the stale-epoch refusals changed nothing");
+
+    // The matching-epoch write (the non-raced common case) DOES apply.
+    TEST_ASSERT(viv_socktab_record_remote(&tab, 3, fresh_epoch, 0x0A000002u, 80, true),
+                "a keyed write on the CURRENT epoch applies");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e) &&
+                e.state == VIV_SOCK_CONNECTED && e.remote_port == 80 &&
+                e.remote_addr == 0x0A000002u,
+                "the current socket is now connected to its OWN peer");
 }
 
 // V-5b: the listen() decision table. Every arm is a REFUSAL a guest can
@@ -2313,9 +3116,12 @@ void test_vivarium_fd_freeing_rows_stay_unserved(void) {
     viv_fill_args(args);
 
     // STILL UNSERVED, and each still owes the socktab a drop of the entry keyed
-    // on the number it frees before it can be promoted.
+    // on the number it frees before it can be promoted. `dup` (23) LEFT this set:
+    // plain dup(oldfd) ALLOCATES the lowest free fd and frees NONE (only dup2/
+    // dup3 free their target), so it is fd-CREATING like pipe2, NOT fd-freeing --
+    // it owes no drop and is now served as TIER2 (asserted below). close_range
+    // (436) genuinely frees a RANGE and stays unserved until it pays the drop.
     static const struct { u64 nr; const char *what; } frees_an_fd[] = {
-        { VIV_LINUX_DUP,         "dup" },
         { VIV_LINUX_CLOSE_RANGE, "close_range" },
     };
 
@@ -2329,6 +3135,18 @@ void test_vivarium_fd_freeing_rows_stay_unserved(void) {
                        "a declined verdict leaves out untouched");
         (void)frees_an_fd[i].what;
     }
+
+    // dup (23) is SERVED as TIER2 -- fd-CREATING (lowest free fd, frees none), so
+    // unlike dup3 it owes no socktab drop; its shell ALIASES a socket SOURCE (the
+    // new number gets its own copy of the row -- the socktab-across-images vote),
+    // so no unregistered socket fd is ever minted. git's transport-helper dup()s
+    // the helper pipe, so the external-helper transports (git-remote-https) need it.
+    out.nr = 0xDEADu;
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_DUP, args, &out),
+                   (int)VIV_TIER2, "dup is served as TIER2 -- fd-creating, no drop owed");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu,
+                   "a TIER2 verdict leaves out untouched (no renumber): SYS_DUP's "
+                   "second arg is a RIGHTS MASK the shell supplies, not a guest fd");
 
     // THE TWO THAT ARE SERVED, and their CLASSIFICATION is the assertion --
     // because it is the classification that decides WHERE each pays the drop,
@@ -2413,6 +3231,18 @@ void test_vivarium_startup_batch_rows(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_WRITEV, args, &out),
                    (int)VIV_TIER2,
                    "writev is T2, never T1 -- arg1 is an array, arg2 a count");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
+
+    // readv (N-5): writev's read twin, T2 for the identical arity reason. It
+    // landed because git protocol v2's stateless-connect path reads the helper
+    // response through readv -- with no row it FORWARDed to ENOSYS and the v2
+    // clone aborted silently after reading the capability advertisement. A
+    // FORWARD verdict here re-breaks git v2; this is the disposition half of the
+    // regression (the git-net gate on v2 is the end-to-end half).
+    out.nr = 0xDEADu;
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_READV, args, &out),
+                   (int)VIV_TIER2,
+                   "readv is T2 (served) -- a FORWARD here re-breaks git protocol v2");
     TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
 
     // getcwd: arguments align exactly with SYS_GETCWD and it is still T2, for
@@ -2665,11 +3495,30 @@ void test_vivarium_fcntl_domain(void) {
                    (int)VIV_TRANSLATED, "the high half of cmd is not consulted");
     TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_GETFD, "still GETFD");
 
+    // F_GETFL(3) / F_SETFL(4): served since the git-stash non-blocking-pipe fill
+    // (git's async pump sets its subprocess pipe O_NONBLOCK via F_SETFL). The
+    // decider only CLASSIFIES; the shell reads O_NONBLOCK out of arg itself, so
+    // cloexec/min_fd stay irrelevant here -- what this pins is that the two cmds
+    // no longer fall to the FORWARD default (the counterpart to their removal
+    // from declined[] below).
+    op = VIV_FCNTL_UNSERVED; cx = true; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_GETFL, 0, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_GETFL is served");
+    TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_GETFL, "0x3 classifies as GETFL");
+
+    op = VIV_FCNTL_UNSERVED; cx = true; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_SETFL, 04000, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_SETFL is served");
+    TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_SETFL, "0x4 classifies as SETFL");
+
     // The declines. Each is a cmd that EXISTS on Linux and is simply not here --
-    // F_GETFL/F_SETFL (access + status flags), the locking family. A declined
-    // call must leave the outputs at their unserved values, so a caller that
-    // ignores the verdict cannot act on a plausible-looking op.
-    static const u64 declined[] = { 3, 4, 5, 6, 7, 8, 9, 1024, 1033 };
+    // the locking family (F_GETLK=5 / F_SETLK=6 / F_SETLKW=7) + F_{SET,GET}OWN
+    // (8/9) + the notify/lease range. F_GETFL=3 / F_SETFL=4 are NO LONGER here:
+    // the git-stash non-blocking-pipe fill SERVES them (see the GETFL/SETFL arms
+    // in vivarium_fcntl_decide). A declined call must leave the outputs at their
+    // unserved values, so a caller that ignores the verdict cannot act on a
+    // plausible-looking op.
+    static const u64 declined[] = { 5, 6, 7, 8, 9, 1024, 1033 };
     for (u32 i = 0; i < (u32)(sizeof(declined) / sizeof(declined[0])); i++) {
         op = VIV_FCNTL_DUPFD; cx = true; minfd = 0xBADu;
         TEST_EXPECT_EQ((int)vivarium_fcntl_decide(declined[i], 0, &op, &cx, &minfd),
@@ -2688,6 +3537,70 @@ void test_vivarium_fcntl_domain(void) {
                    (int)VIV_FORWARD, "NULL cloexec_out -> FORWARD");
     TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_GETFD, 0, &op, &cx, NULL),
                    (int)VIV_FORWARD, "NULL min_fd_out -> FORWARD");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.ioctl_decide (C2-k1a, interactive git: terminal control). The pure
+// request classifier -- the decode that lands before the shell (the V-6a
+// pattern). isatty()'s gate is TIOCGWINSZ, so its classification is the
+// load-bearing row; the three TCSETS* forms must collapse to one op.
+void test_vivarium_ioctl_decide(void);
+void test_vivarium_ioctl_decide(void) {
+    enum viv_ioctl_op op;
+
+    op = VIV_IOCTL_UNSERVED;
+    TEST_EXPECT_EQ((int)vivarium_ioctl_decide(VIV_TCGETS, &op),
+                   (int)VIV_TRANSLATED, "TCGETS translates");
+    TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_TCGETS, "TCGETS -> TCGETS op");
+
+    op = VIV_IOCTL_UNSERVED;
+    TEST_EXPECT_EQ((int)vivarium_ioctl_decide(VIV_TIOCGWINSZ, &op),
+                   (int)VIV_TRANSLATED, "TIOCGWINSZ translates -- isatty's probe");
+    TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_TIOCGWINSZ, "TIOCGWINSZ -> TIOCGWINSZ op");
+
+    op = VIV_IOCTL_UNSERVED;
+    TEST_EXPECT_EQ((int)vivarium_ioctl_decide(VIV_TIOCSWINSZ, &op),
+                   (int)VIV_TRANSLATED, "TIOCSWINSZ translates");
+    TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_TIOCSWINSZ, "TIOCSWINSZ -> TIOCSWINSZ op");
+
+    // All three TCSETS* forms collapse to the single VIV_IOCTL_TCSETS op.
+    static const u64 sets[] = { VIV_TCSETS, VIV_TCSETSW, VIV_TCSETSF };
+    for (u32 i = 0; i < 3; i++) {
+        op = VIV_IOCTL_UNSERVED;
+        TEST_EXPECT_EQ((int)vivarium_ioctl_decide(sets[i], &op),
+                       (int)VIV_TRANSLATED, "TCSETS* translates");
+        TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_TCSETS,
+                       "TCSETS/W/F all classify as the one TCSETS op (no drain/flush stage)");
+    }
+
+    // Only the low 32 bits are significant (Linux int request).
+    op = VIV_IOCTL_UNSERVED;
+    TEST_EXPECT_EQ((int)vivarium_ioctl_decide(0x1234567800005401ull, &op),
+                   (int)VIV_TRANSLATED, "the high half of request is not consulted");
+    TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_TCGETS, "still TCGETS");
+
+    // Unserved terminal requests forward, op left UNSERVED. TIOCGPGRP/TIOCSPGRP
+    // are the job-control ioctls deliberately deferred to C2-k3 -- they mark the
+    // current boundary; TCFLSH/TIOCEXCL are the long tail; 0 / ~0 are garbage.
+    static const u64 unserved[] = {
+        0x540F,  // TIOCGPGRP (C2-k3)
+        0x5410,  // TIOCSPGRP (C2-k3)
+        0x540B,  // TCFLSH
+        0x540C,  // TIOCEXCL
+        0x0,
+        0xFFFFFFFFu,
+    };
+    for (u32 i = 0; i < (u32)(sizeof(unserved) / sizeof(unserved[0])); i++) {
+        op = VIV_IOCTL_TCGETS;   // seed a served value to prove it is cleared
+        TEST_EXPECT_EQ((int)vivarium_ioctl_decide(unserved[i], &op),
+                       (int)VIV_FORWARD, "an unserved terminal request forwards");
+        TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_UNSERVED,
+                       "a forwarded request leaves op UNSERVED, never a stale one");
+    }
+
+    // NULL op_out fails toward the decline (the openat/fcntl shape).
+    TEST_EXPECT_EQ((int)vivarium_ioctl_decide(VIV_TCGETS, NULL),
+                   (int)VIV_FORWARD, "NULL op_out -> FORWARD, never a served verdict");
 }
 
 // -----------------------------------------------------------------------------
@@ -2808,4 +3721,1439 @@ void test_vivarium_dup3_domain(void) {
     // Fail toward the refusal on a bad call site.
     TEST_EXPECT_EQ((int)vivarium_dup3_decide(0, NULL), (int)VIV_FORWARD,
                    "NULL cloexec_out -> FORWARD");
+}
+
+// The phenotype's fork/exec signal-state rule (task #127; ARCH 7.6, POSIX;
+// operator-voted 2026-08-17): rfork COPIES the sigtab into the child's OWN
+// table; execve resets CAUGHT rows to SIG_DFL and KEEPS SIG_IGN rows. This
+// pins the two primitives where the table is directly observable (the in-guest
+// legs L217-L228 drive them through a real fork + execve). Each leg names the
+// row that would read wrong under the OLD behaviour (a full zero at exec; no
+// copy at fork).
+void test_vivarium_sigtab_fork_exec_rule(void);
+void test_vivarium_sigtab_fork_exec_rule(void) {
+    struct viv_sigtab *tab =
+        (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+    struct viv_ksigaction ign = { .handler = VIV_SIG_IGN, .flags = 0,
+                                  .restorer = 0, .mask = 0 };
+    struct viv_ksigaction hnd = { .handler = 0x400000ull, .flags = 0x14000000ull,
+                                  .restorer = 0x400100ull, .mask = 0x2ull };
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_PIPE, &ign);        // ignored
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &hnd);   // caught
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_TTY_HUP, &hnd);     // caught
+
+    // ---- exec: caught -> SIG_DFL (flags/restorer/mask too); ignored KEPT.
+    viv_sigtab_reset_caught(tab);
+    struct viv_ksigaction got;
+    TEST_ASSERT(!viv_sigtab_note_handler(tab, VIV_SIGNOTE_INTERRUPT, &got),
+                "exec: the caught interrupt row is no longer a handler");
+    TEST_ASSERT(tab->act[(u32)VIV_SIGNOTE_INTERRUPT].handler == VIV_SIG_DFL
+                && tab->act[(u32)VIV_SIGNOTE_INTERRUPT].flags == 0
+                && tab->act[(u32)VIV_SIGNOTE_INTERRUPT].restorer == 0
+                && tab->act[(u32)VIV_SIGNOTE_INTERRUPT].mask == 0,
+                "exec: the caught row is a clean SIG_DFL (flags/restorer/mask zeroed)");
+    TEST_ASSERT(!viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_HUP, &got),
+                "exec: the second caught row reset too");
+    TEST_ASSERT(viv_sigtab_note_ignored(tab, VIV_SIGNOTE_PIPE),
+                "exec: SIG_IGN SURVIVES execve (POSIX) -- the row the old full zero lost");
+    TEST_ASSERT(!viv_sigtab_note_ignored(tab, VIV_SIGNOTE_CHILD_EXIT),
+                "exec: an untouched SIG_DFL row stays SIG_DFL");
+    viv_sigtab_reset_caught(NULL);                             // NULL-safe
+
+    // ---- main#243 F5: the reset primitives at the TABLE level, with the LAST
+    // entry seeded in ALL FOUR fields. The exec-helper tests seed the middle of
+    // the table; a reset that stopped one entry short, or zeroed the gate
+    // field alone, passed everything above. Both arms: reset_caught must clear
+    // a caught COUNT-1 row completely; reset must leave NO byte standing.
+    _Static_assert(VIV_SIGNOTE_TTY_CONT + 1u == VIV_SIGNOTE_COUNT,
+                   "the last-entry seed must sit at COUNT-1");
+    struct viv_ksigaction lst = { .handler = 0x400200ull, .flags = 0x10000000ull,
+                                  .restorer = 0x400300ull, .mask = 0x4ull };
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_TTY_CONT, &lst);
+    TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_CONT, &got)
+                && got.flags == 0x10000000ull && got.restorer == 0x400300ull
+                && got.mask == 0x4ull,
+                "F5 pre: the COUNT-1 row is a live handler with every field set");
+    viv_sigtab_reset_caught(tab);
+    TEST_ASSERT(tab->act[(u32)VIV_SIGNOTE_TTY_CONT].handler == VIV_SIG_DFL
+                && tab->act[(u32)VIV_SIGNOTE_TTY_CONT].flags == 0
+                && tab->act[(u32)VIV_SIGNOTE_TTY_CONT].restorer == 0
+                && tab->act[(u32)VIV_SIGNOTE_TTY_CONT].mask == 0,
+                "F5: reset_caught reaches the LAST entry and clears all four fields");
+    TEST_ASSERT(viv_sigtab_note_ignored(tab, VIV_SIGNOTE_PIPE),
+                "F5: ...and still keeps SIG_IGN");
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_TTY_CONT, &lst);      // re-arm for the full reset
+    viv_sigtab_reset(tab);
+    {
+        const u8 *raw = (const u8 *)tab;
+        u32 nz = 0;
+        for (u32 i = 0; i < (u32)sizeof(*tab); i++) nz += (raw[i] != 0u);
+        TEST_EXPECT_EQ((long)nz, 0L,
+                       "F5: the full reset leaves no byte standing (SIG_IGN rows "
+                       "included -- the native rule)");
+    }
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_PIPE, &ign);   // the fork arm expects PIPE ignored
+
+    // ---- fork: the child gets its OWN equal copy; a NULL parent table -> NULL.
+    struct Proc *parent = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    TEST_ASSERT(parent != NULL && child != NULL, "proc_alloc x2");
+    parent->phenotype = PHENO_LINUX;
+    child->phenotype  = PHENO_LINUX;
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &hnd);   // re-arm a caught row
+    parent->sigtab = tab;
+    TEST_EXPECT_EQ(viv_sigtab_clone_into(child, parent), 0, "fork: clone succeeds");
+    TEST_ASSERT(child->sigtab != NULL && child->sigtab != parent->sigtab,
+                "fork: the child has its OWN table (never the parent's pointer)");
+    bool equal = true;
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
+        if (child->sigtab->act[i].handler  != tab->act[i].handler  ||
+            child->sigtab->act[i].flags    != tab->act[i].flags    ||
+            child->sigtab->act[i].restorer != tab->act[i].restorer ||
+            child->sigtab->act[i].mask     != tab->act[i].mask) equal = false;
+    }
+    TEST_ASSERT(equal, "fork: every row copied -- caught AND ignored (POSIX fork(2))");
+    TEST_ASSERT(viv_sigtab_note_ignored(child->sigtab, VIV_SIGNOTE_PIPE)
+                && viv_sigtab_note_handler(child->sigtab, VIV_SIGNOTE_INTERRUPT, &got)
+                && got.handler == 0x400000ull,
+                "fork: the child reads the ignored PIPE and the caught INTERRUPT");
+    // The copy is a SNAPSHOT: a later change on the parent does not reach the child.
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_PIPE, &hnd);
+    TEST_ASSERT(viv_sigtab_note_ignored(child->sigtab, VIV_SIGNOTE_PIPE),
+                "fork: the child's table is independent of later parent changes");
+    struct Proc *child2 = proc_alloc();
+    struct Proc *bare   = proc_alloc();
+    TEST_ASSERT(child2 != NULL && bare != NULL, "proc_alloc x2 (bare)");
+    bare->phenotype = PHENO_LINUX;
+    child2->phenotype = PHENO_LINUX;
+    TEST_EXPECT_EQ(viv_sigtab_clone_into(child2, bare), 0, "fork: a NULL parent table succeeds");
+    TEST_ASSERT(child2->sigtab == NULL, "fork: ...and leaves the child's NULL (all-SIG_DFL)");
+    TEST_EXPECT_EQ(viv_sigtab_clone_into(NULL, bare), -1, "fork: NULL child refused");
+
+    // proc_free owns each table (the immortal-per-Proc rule): parent frees tab.
+    parent->state = PROC_STATE_ZOMBIE; proc_free(parent);
+    child->state  = PROC_STATE_ZOMBIE; proc_free(child);
+    child2->state = PROC_STATE_ZOMBIE; proc_free(child2);
+    bare->state   = PROC_STATE_ZOMBIE; proc_free(bare);
+}
+
+extern s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
+extern s64 viv_dup_for_test(struct Proc *p, u64 fd);
+extern s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
+// The T2 fcntl SHELL's F_DUPFD errnos (found by the c8ab2744 close's L-6c legs).
+//
+// The decide half above is pure; this drives the arm that turns a decision into
+// an errno, because that is where the defect lived: handle_dup_posix folds
+// "no such fd" and "table full" into one -1, and the arm answered EMFILE for
+// both. busybox ash's redirect() probes the TARGET fd of every `N>&M` with
+// fcntl(N, F_DUPFD, 10) precisely to learn whether N is open -- EBADF means
+// "not open, nothing to save", ANY other errno is "strange" and aborts the
+// command. fd 3 is not open in the L-6c gate's shell, so every `3>&1` died with
+// `fcntl(3,F_DUPFD,10): No file descriptors available`, the command
+// substitution around it yielded "", and the two legs asserting an EMPTY
+// capture passed VACUOUSLY -- only the positive control (L6C-K) said no.
+//
+// Driven through viv_fcntl_for_test (the real arm, on a fresh Proc: no
+// exception frame, which the FCNTL case never reads).
+void test_vivarium_fcntl_dupfd_errnos(void);
+void test_vivarium_fcntl_dupfd_errnos(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    // ---- POSITIVE CONTROL: a live fd dups at or above the minimum. ------
+    // Every negative below is an errno; a shell whose DUPFD arm was wired to
+    // nothing would answer them all with the same wrong number. This proves the
+    // arm reaches handle_dup_posix and honours the minimum first.
+    hidx_t live = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    s64 ctl = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, 10);
+
+    // ---- LEG A: F_DUPFD on a CLOSED fd is EBADF -- the ash probe. ---------
+    // fd 3 is closed in a fresh Proc (the control's source took slot 0 and its
+    // dup landed at or above 10); asserted, not assumed.
+    int a_closed = handle_get_cloexec(p, 3);
+    s64 a = viv_fcntl_for_test(p, 3, VIV_F_DUPFD, 10);
+    // The CLOEXEC spelling is the same op with the flag on -- same answer.
+    s64 a2 = viv_fcntl_for_test(p, 3, VIV_F_DUPFD_CLOEXEC, 10);
+
+    // ---- LEG B: F_DUPFD on a LIVE fd with a FULL table is EMFILE. ---------
+    // Fill every free slot, prove fullness two ways (the count and a live
+    // alloc now refused), then ask.
+    int filled = 0;
+    while (handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL) >= 0) filled++;
+    int b_count = handle_table_count(p->handles);
+    hidx_t b_refused = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    s64 b = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, 0);
+    // (Leg A had to run BEFORE the fill: full means every index is live, so
+    // no closed fd exists to probe afterwards.)
+
+    // ---- LEG C: a minimum at or past the table is EINVAL (Linux: RLIMIT). --
+    s64 c = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, (u64)PROC_HANDLE_MAX);
+
+    // ---- TEARDOWN, then assert. ---------------------------------------
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);                       // closes every straggler handle
+
+    TEST_ASSERT(live >= 0, "control precondition: a live fd was allocated");
+    TEST_ASSERT(ctl >= 10,
+                "CONTROL: F_DUPFD(live, 10) lands at or above 10 -- the arm is "
+                "wired and honours the minimum");
+    TEST_EXPECT_EQ(a_closed, -1, "A precondition: fd 3 is CLOSED");
+    TEST_EXPECT_EQ(a, -(s64)T_E_BADF,
+                   "A: F_DUPFD on a closed fd is EBADF -- ash's `N>&M` probe "
+                   "reads any other errno as fatal (pre-fix: EMFILE)");
+    TEST_EXPECT_EQ(a2, -(s64)T_E_BADF,
+                   "A: F_DUPFD_CLOEXEC on a closed fd is EBADF too");
+    TEST_ASSERT(filled > 0, "B precondition: the fill allocated something");
+    TEST_EXPECT_EQ(b_count, PROC_HANDLE_MAX, "B precondition: the table is FULL");
+    TEST_EXPECT_EQ(b_refused, -1, "B precondition: a live alloc is now refused");
+    TEST_EXPECT_EQ(b, -(s64)T_E_MFILE,
+                   "B: F_DUPFD on a LIVE fd with a full table is EMFILE -- the "
+                   "two errnos are DISTINCT (a fix that always said EBADF "
+                   "would fail here)");
+    TEST_EXPECT_EQ(c, -(s64)T_E_INVAL,
+                   "C: a minimum at the table size is EINVAL, not EMFILE");
+}
+
+// F_GETFL / F_SETFL round-trip through the REAL fcntl shell -> handle_set_nonblock
+// / handle_get_status_flags on a live pipe fd (the git-stash non-blocking-pipe
+// path). devpipe's EAGAIN behavior is covered by pipe.nonblock_returns_eagain
+// (which sets CNONBLOCK directly); THIS covers the fcntl -> handle-helper -> Spoor
+// leg, which otherwise only the SKIPpable git-workflow E2E exercises. Also pins F2
+// (a pipe write end reports OWRITE, not a misleading OREAD).
+extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
+void test_vivarium_fcntl_nonblock_roundtrip(void);
+void test_vivarium_fcntl_nonblock_roundtrip(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    hidx_t rd = -1, wr = -1;
+    int pr = sys_pipe_for_proc(p, &rd, &wr);
+
+    // Round-trip on the READ end: GETFL(clear) -> SETFL(O_NONBLOCK) -> GETFL(set)
+    // -> SETFL(0) -> GETFL(clear). Then the WRITE end's access mode, and a bad fd.
+    s64 g0  = viv_fcntl_for_test(p, (u64)rd, VIV_F_GETFL, 0);
+    s64 s1  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_NONBLOCK);
+    s64 g1  = viv_fcntl_for_test(p, (u64)rd, VIV_F_GETFL, 0);
+    s64 s2  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, 0);
+    s64 g2  = viv_fcntl_for_test(p, (u64)rd, VIV_F_GETFL, 0);
+    s64 gw  = viv_fcntl_for_test(p, (u64)wr, VIV_F_GETFL, 0);
+    s64 bad = viv_fcntl_for_test(p, 5, VIV_F_SETFL, VIV_O_NONBLOCK);   // fd 5 is closed
+
+    // Observe -> teardown -> assert (TEST_* may early-return).
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(pr, 0, "pipe created");
+    TEST_ASSERT(g0 >= 0, "F_GETFL succeeds");
+    TEST_EXPECT_EQ((s64)(g0 & (s64)VIV_O_NONBLOCK), 0, "F_GETFL: O_NONBLOCK CLEAR initially");
+    TEST_EXPECT_EQ((s64)(g0 & 3), 0, "F_GETFL: read end reports OREAD (0)");
+    TEST_EXPECT_EQ(s1, 0, "F_SETFL O_NONBLOCK returns 0");
+    TEST_ASSERT((g1 & (s64)VIV_O_NONBLOCK) != 0,
+                "F_GETFL reads O_NONBLOCK back -- SETFL->handle_set_nonblock->GETFL round-trips");
+    TEST_EXPECT_EQ(s2, 0, "F_SETFL 0 returns 0");
+    TEST_EXPECT_EQ((s64)(g2 & (s64)VIV_O_NONBLOCK), 0, "F_SETFL 0 CLEARS O_NONBLOCK");
+    TEST_EXPECT_EQ((s64)(gw & 3), 1, "F_GETFL: write end reports OWRITE (1) -- the F2 mode fix");
+    TEST_EXPECT_EQ(bad, -(s64)T_E_BADF, "F_SETFL on a closed fd is EBADF, not silent success");
+}
+
+// The dup(2) arm (git-remote-https' helper pipe). Drives viv_dup_for_test on a
+// fresh phenotype Proc, proving the ARM is reached (not merely that the verdict
+// is TIER2): a live non-socket fd dups to a fresh number, a closed fd is EBADF,
+// and a SOCKET source is ALIASED (the socktab-across-images vote, VIVARIUM
+// 5.5.2): the new number carries its OWN copy of the row with a fresh epoch,
+// and the source row is untouched. (Until this vote landed the arm DECLINED a
+// socket source with ENOSYS.) The EBADF/EMFILE split itself rides the identical
+// handle_dup_posix primitive proven in test_vivarium_fcntl_dupfd_errnos above.
+void test_vivarium_dup_arm(void);
+void test_vivarium_dup_arm(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    // POSITIVE: a live, non-socket fd dups to a fresh number (slot 0 -> slot 1).
+    hidx_t live = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    s64 dup_ok = viv_dup_for_test(p, (u64)live);
+
+    // EBADF: fd 3 is closed in a fresh Proc (live took 0, its dup 1). Probed
+    // BEFORE the socket alloc below, which would otherwise take a low free slot.
+    int closed_bit = handle_get_cloexec(p, 3);
+    s64 dup_badf = viv_dup_for_test(p, 3);
+
+    // SOCKET ALIAS: an fd carrying a socktab row dups to a fresh number that
+    // carries its OWN copy of the row (same proto/n/state, a DIFFERENT epoch);
+    // the source row survives untouched.
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(p->socktab != NULL, "socktab alloc");
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) p->socktab->s[i].fd = -1;
+    hidx_t sockfd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 200, VIV_SOCK_FRESH);
+    struct viv_sock eo_pre;
+    bool sock_pre = viv_socktab_get(p->socktab, (s32)sockfd, &eo_pre);
+    s64 dup_sock = viv_dup_for_test(p, (u64)sockfd);
+    struct viv_sock ea, eo;
+    bool alias_row = dup_sock >= 0 && viv_socktab_get(p->socktab, (s32)dup_sock, &ea);
+    bool orig_row  = viv_socktab_get(p->socktab, (s32)sockfd, &eo);
+    u32 rows = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++)
+        if (p->socktab->s[i].state != VIV_SOCK_FREE) rows++;
+
+    // TEARDOWN, then assert (TEST_ASSERT returns; proc_free frees the socktab).
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(live >= 0, "precondition: a live fd was allocated");
+    TEST_ASSERT(dup_ok >= 0 && dup_ok != live,
+                "POSITIVE: dup of a live fd yields a fresh fd -- the arm reaches "
+                "handle_dup_posix, it is not a no-op verdict");
+    TEST_EXPECT_EQ(closed_bit, -1, "precondition: fd 3 is CLOSED");
+    TEST_EXPECT_EQ(dup_badf, -(s64)T_E_BADF, "dup of a closed fd is EBADF");
+    TEST_ASSERT(sock_pre, "precondition: the socktab entry exists");
+    TEST_ASSERT(dup_sock >= 0 && dup_sock != (s64)sockfd,
+                "SOCKET ALIAS: dup of a socktab-tracked fd yields a fresh fd");
+    TEST_ASSERT(alias_row && ea.proto == VIV_NET_TCP && ea.n == 200
+                && ea.state == VIV_SOCK_FRESH,
+                "the new number carries its OWN copy of the row (proto/n/state)");
+    TEST_ASSERT(orig_row && eo.epoch == eo_pre.epoch,
+                "the source row is untouched (same epoch)");
+    TEST_ASSERT(alias_row && orig_row && ea.epoch != eo.epoch,
+                "the alias has its OWN identity (fresh epoch) -- a keyed write "
+                "snapshotted on one cannot land on the other");
+    TEST_EXPECT_EQ((u64)rows, 2ull, "exactly two rows: the source and its alias");
+}
+
+// The socktab across images, the fork half (operator-voted A: COPY at fork),
+// driven exactly as rfork_internal drives it: prepare, then the snapshot AS
+// THE HOOK of handle_table_copy_into_hooked, then finish. The filter -- keep
+// only rows whose fd the CHILD holds -- is exercised against the REAL copy: fd
+// 0 is a transferable handle (copied), fd 7 is a row with NO handle behind it
+// (a hole in the child: the stale-row-in-a-hole case the filter exists to
+// prevent), and the parent's table is untouched. Each control one variable
+// away: a parent with no table leaves the child NULL; epochs and the counter
+// carry over.
+//
+// THE F1 WITNESS (the socktab holotype): the snapshot must run INSIDE the
+// handle copy's source-lock hold. The test wraps the real hook in one that
+// also records whether the parent's handle lock was held when it ran -- a
+// rewrite that snapshots after the copy returns (the two-hold shape that
+// handed a peer-raced child a mismatched handle/row pair) fails that record.
+struct socktab_fork_witness {
+    struct viv_socktab_fork  f;
+    const struct Proc       *parent;
+    bool                     lock_held;
+    u32                      calls;
+};
+static void socktab_fork_hook_witness(void *arg) {
+    struct socktab_fork_witness *w = (struct socktab_fork_witness *)arg;
+    w->calls++;
+    w->lock_held = (w->parent->handles->lock.value != 0);
+    viv_socktab_fork_snapshot(&w->f);
+}
+
+void test_vivarium_socktab_clone_into(void);
+void test_vivarium_socktab_clone_into(void) {
+    struct Proc *parent = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    TEST_ASSERT(parent != NULL && child != NULL, "proc_alloc x2");
+    parent->phenotype = PHENO_LINUX;
+    child->phenotype  = PHENO_LINUX;
+
+    // A socket-less parent (parent->socktab still NULL here): prepare allocates
+    // the carrier UNCONDITIONALLY since F3 (so a peer's socket() racing the copy
+    // is captured), and finish frees it as all-holes -> the child's table stays
+    // NULL. Before F3 prepare returned a NULL carrier and this leg asserted that;
+    // the unconditional allocation is exactly what closes the race, so the leg
+    // now checks the carrier is allocated THEN freed.
+    struct viv_socktab_fork f0 = { .parent = NULL, .dst = NULL };
+    int  rc_null    = viv_socktab_fork_prepare(&f0, parent);
+    bool prep_alloc = (f0.dst != NULL);
+    viv_socktab_fork_finish(child, &f0);
+    bool f0_freed   = (f0.dst == NULL);
+    bool child_null = (__atomic_load_n(&child->socktab, __ATOMIC_ACQUIRE) == NULL);
+
+    parent->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(parent->socktab != NULL, "socktab alloc");
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) parent->socktab->s[i].fd = -1;
+    hidx_t h0 = handle_alloc(parent, KOBJ_THREAD, RIGHT_READ, NULL);   // fd 0
+    viv_socktab_claim(parent->socktab, (s32)h0, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED);
+    viv_socktab_claim(parent->socktab, 7, VIV_NET_UDP, 12, VIV_SOCK_FRESH); // no handle
+    struct viv_sock p0;
+    viv_socktab_get(parent->socktab, (s32)h0, &p0);
+    u64 parent_next = parent->socktab->next_epoch;
+
+    // The real sequence, with the witness wrapped around the snapshot.
+    struct socktab_fork_witness w = { .parent = parent, .lock_held = false, .calls = 0 };
+    int rc = viv_socktab_fork_prepare(&w.f, parent);
+    bool prepared = (w.f.dst != NULL);
+    handle_table_copy_into_hooked(child, parent, socktab_fork_hook_witness, &w);
+    bool parent_lock_free_after = (parent->handles->lock.value == 0);
+    viv_socktab_fork_finish(child, &w.f);
+    struct viv_socktab *ct = __atomic_load_n(&child->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock c0;
+    bool child_has0 = ct && viv_socktab_get(ct, (s32)h0, &c0);
+    bool child_has7 = ct && viv_socktab_get(ct, 7, NULL);
+    u64  child_next = ct ? ct->next_epoch : 0;
+    bool child_lock_free = ct && (ct->lock.value == 0);
+    bool carrier_cleared = (w.f.dst == NULL);
+    // The parent is untouched: both rows still there.
+    bool parent_has0 = viv_socktab_get(parent->socktab, (s32)h0, NULL);
+    bool parent_has7 = viv_socktab_get(parent->socktab, 7, NULL);
+    // The child's table is its own: a drop in the child leaves the parent's row.
+    if (ct) viv_socktab_drop(ct, (s32)h0);
+    bool parent_still0 = viv_socktab_get(parent->socktab, (s32)h0, NULL);
+
+    // A parent whose rows are ALL holes for the child: nothing survives, the
+    // table is freed, the child's pointer stays NULL (lazily allocated later).
+    struct Proc *child2 = proc_alloc();
+    TEST_ASSERT(child2 != NULL, "proc_alloc child2");
+    child2->phenotype = PHENO_LINUX;
+    viv_socktab_drop(parent->socktab, (s32)h0);       // leave only the hole row (7)
+    struct viv_socktab_fork f2 = { .parent = NULL, .dst = NULL };
+    int  rc2 = viv_socktab_fork_prepare(&f2, parent);
+    handle_table_copy_into_hooked(child2, parent, viv_socktab_fork_snapshot, &f2);
+    viv_socktab_fork_finish(child2, &f2);
+    bool child2_null = (__atomic_load_n(&child2->socktab, __ATOMIC_ACQUIRE) == NULL);
+
+    child2->state = PROC_STATE_ZOMBIE; proc_free(child2);
+    child->state  = PROC_STATE_ZOMBIE; proc_free(child);
+    parent->state = PROC_STATE_ZOMBIE; proc_free(parent);
+
+    TEST_EXPECT_EQ(rc_null, 0, "prepare succeeds for a socket-less parent");
+    TEST_ASSERT(prep_alloc, "...and allocates the carrier UNCONDITIONALLY (F3: captures a peer socket() racing the copy)");
+    TEST_ASSERT(f0_freed && child_null, "...but finish frees the all-holes carrier -> child table NULL");
+    TEST_EXPECT_EQ(rc, 0, "prepare succeeds");
+    TEST_ASSERT(prepared, "...and allocated the carrier for a parent WITH a table");
+    TEST_EXPECT_EQ((u64)w.calls, 1ull, "the hook ran exactly once");
+    TEST_ASSERT(w.lock_held, "F1 WITNESS: the snapshot ran INSIDE the parent's handle-lock hold");
+    TEST_ASSERT(parent_lock_free_after, "...and the copy released that lock afterwards");
+    TEST_ASSERT(child_has0 && c0.proto == VIV_NET_TCP && c0.n == 11
+                && c0.state == VIV_SOCK_CONNECTED && c0.epoch == p0.epoch,
+                "a row whose fd the child HOLDS is copied whole, epoch included");
+    TEST_ASSERT(!child_has7, "a row whose fd the child does NOT hold is dropped "
+                             "(a hole must not carry a stale row)");
+    TEST_EXPECT_EQ(child_next, parent_next, "the epoch counter carries over");
+    TEST_ASSERT(child_lock_free, "the child's lock is fresh (not the parent's held word)");
+    TEST_ASSERT(carrier_cleared, "finish consumed the carrier (dst NULL)");
+    TEST_ASSERT(parent_has0 && parent_has7, "CONTROL: the parent's rows are untouched");
+    TEST_ASSERT(parent_still0, "the child's table is its OWN: a child drop leaves the parent");
+    TEST_EXPECT_EQ(rc2, 0, "second prepare succeeds");
+    TEST_ASSERT(child2_null, "no surviving row -> the table is freed and the child stays NULL");
+}
+
+// The alias rule AT THE dup / F_DUPFD / dup3 ARMS against the refusals the
+// holotype (F4) found untested: with the SOCKET TABLE full, dup(sock) and
+// F_DUPFD(sock) are EMFILE and the HANDLE table is untouched (the room check
+// precedes the install); a REFUSED dup3 (a closed source -> EBADF; old == new
+// -> EINVAL) leaves the live row at the target number alone; and F_DUPFD of a
+// socket mints the alias row (fresh epoch) at the number the arm chose.
+void test_vivarium_socktab_arm_refusals(void);
+void test_vivarium_socktab_arm_refusals(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(p->socktab != NULL, "socktab alloc");
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) p->socktab->s[i].fd = -1;
+
+    hidx_t sock = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);    // fd 0
+    hidx_t nine = -1;
+    while ((nine = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL)) >= 0 && nine < 9) { }
+    viv_socktab_claim(p->socktab, (s32)sock, VIV_NET_TCP, 300, VIV_SOCK_CONNECTED);
+    viv_socktab_claim(p->socktab, 9, VIV_NET_UDP, 301, VIV_SOCK_FRESH);   // a live row at 9
+    struct viv_sock e9_before;
+    viv_socktab_get(p->socktab, 9, &e9_before);
+
+    // ---- F_DUPFD of a socket: the alias row lands at the chosen number. ----
+    s64 fd_d = viv_fcntl_for_test(p, (u64)sock, VIV_F_DUPFD, 20);
+    struct viv_sock ed;
+    bool row_d = (fd_d >= 20) && viv_socktab_get(p->socktab, (s32)fd_d, &ed);
+    struct viv_sock es;
+    viv_socktab_get(p->socktab, (s32)sock, &es);
+
+    // ---- REFUSED dup3 keeps the live row at the target. ----
+    int  closed_fd = 500;
+    int  closed_pre = handle_get_cloexec(p, closed_fd);
+    s64  r_badf  = viv_dup3_for_test(p, (u64)closed_fd, 9, 0);
+    s64  r_inval = viv_dup3_for_test(p, 9, 9, 0);
+    struct viv_sock e9_after;
+    bool row9_kept = viv_socktab_get(p->socktab, 9, &e9_after)
+                  && e9_after.epoch == e9_before.epoch && e9_after.n == 301;
+
+    // ---- The socket table FULL: dup / F_DUPFD of a socket are EMFILE and the
+    // handle table is UNTOUCHED (room is checked before the install). ----
+    for (s32 fd = 100; ; fd++)
+        if (!viv_socktab_claim(p->socktab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
+    bool full = !viv_socktab_has_room(p->socktab);
+    int  handles_before = handle_table_count(p->handles);
+    s64  r_dup   = viv_dup_for_test(p, (u64)sock);
+    s64  r_dupfd = viv_fcntl_for_test(p, (u64)sock, VIV_F_DUPFD, 40);
+    int  handles_after = handle_table_count(p->handles);
+    // ...while a NON-socket source still dups (no row needed). fd 8, not 9:
+    // 9 carries the live row the refused-dup3 legs above protect, so it IS
+    // a socket to the table.
+    s64  r_file  = viv_dup_for_test(p, 8);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(sock == 0 && nine == 9, "precondition: fds 0 (socket) and 9 (a live file)");
+    TEST_ASSERT(row_d && ed.proto == VIV_NET_TCP && ed.n == 300 && ed.epoch != es.epoch,
+                "F_DUPFD(sock, 20) lands >= 20 with its OWN copy of the row (fresh epoch)");
+    TEST_EXPECT_EQ(closed_pre, -1, "precondition: fd 500 is closed");
+    TEST_EXPECT_EQ(r_badf,  -(s64)T_E_BADF,  "dup3(closed, 9) is EBADF");
+    TEST_EXPECT_EQ(r_inval, -(s64)T_E_INVAL, "dup3(9, 9) is EINVAL");
+    TEST_ASSERT(row9_kept, "...and both refusals leave the live row at 9 untouched (same epoch, same n)");
+    TEST_ASSERT(full, "precondition: the socket table is full");
+    TEST_EXPECT_EQ(r_dup,   -(s64)T_E_MFILE, "dup(sock) with no row free is EMFILE");
+    TEST_EXPECT_EQ(r_dupfd, -(s64)T_E_MFILE, "F_DUPFD(sock) with no row free is EMFILE");
+    TEST_EXPECT_EQ(handles_after, handles_before,
+                   "...and neither refusal installed a handle (room precedes the install)");
+    TEST_ASSERT(r_file >= 0, "CONTROL: a non-socket source still dups with the table full");
+}
+
+// The alias rule's table op, directly: copy-with-fresh-epoch, replace-on-claim
+// at the target, the non-socket no-op, and the full-table refusal.
+void test_vivarium_socktab_alias(void);
+void test_vivarium_socktab_alias(void) {
+    static struct viv_socktab tab;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
+        tab.s[i].proto = 0; tab.s[i].n = 0; tab.s[i].epoch = 0;
+    }
+    tab.next_epoch = 0;
+    tab.lock = SPIN_LOCK_INIT;
+    struct viv_sock e, a;
+
+    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 40, VIV_SOCK_CONNECTED), "claim fd 3");
+    TEST_ASSERT(viv_socktab_set_bound(&tab, 3, 1, 0x7f000001u, 8080)
+                || viv_socktab_get(&tab, 3, &e), "bound fields (epoch 1) or readable");
+    viv_socktab_get(&tab, 3, &e);
+    TEST_EXPECT_EQ(viv_socktab_alias(&tab, 3, 9), 1, "alias fd 3 -> 9");
+    TEST_ASSERT(viv_socktab_get(&tab, 9, &a) && a.proto == VIV_NET_TCP && a.n == 40
+                && a.state == VIV_SOCK_CONNECTED && a.bound_port == e.bound_port,
+                "the alias carries the row's fields");
+    TEST_ASSERT(a.epoch != e.epoch, "...with a FRESH epoch");
+    TEST_ASSERT(!viv_socktab_set_state(&tab, 9, e.epoch, VIV_SOCK_FRESH),
+                "a keyed write with the source's epoch lands nowhere on the alias");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e) && e.state == VIV_SOCK_CONNECTED,
+                "the source row is untouched");
+    TEST_EXPECT_EQ(viv_socktab_alias(&tab, 5, 10), 0, "a non-socket source is a no-op");
+    TEST_ASSERT(!viv_socktab_get(&tab, 10, NULL), "...and mints no row");
+    // Replace-on-claim at the target: a stale row keyed on 9 is REPLACED.
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_UDP, 41, VIV_SOCK_FRESH), "claim fd 4");
+    TEST_EXPECT_EQ(viv_socktab_alias(&tab, 4, 9), 1, "alias fd 4 -> 9 (over the old alias)");
+    u32 rows9 = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++)
+        if (tab.s[i].state != VIV_SOCK_FREE && tab.s[i].fd == 9) rows9++;
+    TEST_EXPECT_EQ((u64)rows9, 1ull, "exactly one row keyed on 9");
+    TEST_ASSERT(viv_socktab_get(&tab, 9, &a) && a.proto == VIV_NET_UDP, "...the new one");
+    TEST_ASSERT(viv_socktab_alias_fits(&tab, 3, 9), "fits: the target has a row to reuse");
+    TEST_ASSERT(viv_socktab_alias_fits(&tab, 5, 12), "fits: a non-socket source needs no row");
+    // Fill the table; then an alias onto a FRESH number has no room.
+    for (s32 fd = 100; ; fd++) {
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
+    }
+    TEST_ASSERT(!viv_socktab_alias_fits(&tab, 3, 200), "full: an alias onto a fresh number does not fit");
+    TEST_EXPECT_EQ(viv_socktab_alias(&tab, 3, 200), -1, "...and the alias refuses (-1)");
+    TEST_ASSERT(viv_socktab_alias_fits(&tab, 3, 9), "full: onto a number WITH a row still fits");
+    TEST_EXPECT_EQ(viv_socktab_alias(&tab, 3, 9), 1, "...and succeeds by reusing that slot");
+    TEST_EXPECT_EQ(viv_socktab_alias(NULL, 3, 9), 0, "NULL table: no-op");
+}
+
+// The alias rule AT THE dup3 ARM (the inetd idiom, dup2(connfd, 0)): a socket
+// source's row is copied onto the target number; a non-socket source onto a
+// socket number DROPS that number's row (the fd-freeing obligation).
+void test_vivarium_dup3_alias(void);
+void test_vivarium_dup3_alias(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(p->socktab != NULL, "socktab alloc");
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) p->socktab->s[i].fd = -1;
+
+    hidx_t sock = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);    // fd 0
+    hidx_t file = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p); // fd 1
+    viv_socktab_claim(p->socktab, (s32)sock, VIV_NET_TCP, 300, VIV_SOCK_CONNECTED);
+
+    s64 r1 = viv_dup3_for_test(p, (u64)sock, 9, 0);          // socket -> 9
+    struct viv_sock e9;
+    bool row9 = viv_socktab_get(p->socktab, 9, &e9);
+    bool row0 = viv_socktab_get(p->socktab, (s32)sock, NULL);
+    s64 r2 = viv_dup3_for_test(p, (u64)file, 9, 0);          // file -> 9 (a socket number)
+    bool row9_after = viv_socktab_get(p->socktab, 9, NULL);
+    bool row0_after = viv_socktab_get(p->socktab, (s32)sock, NULL);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(sock == 0 && file == 1, "precondition: fds 0 (socket) and 1 (file)");
+    TEST_EXPECT_EQ(r1, 9, "dup3(socket, 9) succeeds (no longer ENOSYS)");
+    TEST_ASSERT(row9 && e9.proto == VIV_NET_TCP && e9.n == 300 && e9.state == VIV_SOCK_CONNECTED,
+                "the target number carries its own copy of the row");
+    TEST_ASSERT(row0, "the source row survives");
+    TEST_EXPECT_EQ(r2, 9, "dup3(file, 9) onto the socket number succeeds");
+    TEST_ASSERT(!row9_after, "...and DROPS 9's row (the fd-freeing obligation)");
+    TEST_ASSERT(row0_after, "...while the original socket's row is untouched");
+}
+
+// 6b: execve drops the socktab entry of every close-on-exec socket, and ONLY
+// those. handle_close_on_exec frees a cloexec fd via the handle_close PRIMITIVE,
+// which -- unlike the close SYSCALL arm -- does not touch the socktab, so without
+// this sweep the freed fd number carries a stale (proto, n) row into the new
+// image. Drives viv_socktab_drop_cloexec directly on a fresh phenotype Proc.
+//
+// THREE entries, one per outcome, so a wrong predicate is caught:
+//   - a cloexec socket             -> DROPPED (the fix);
+//   - a plain (kept) socket        -> SURVIVES (a sweep that over-drops fails);
+//   - a stale entry at a CLOSED fd -> SURVIVES (handle_get_cloexec == -1; a sweep
+//     written `!= 0` instead of `== 1` would wrongly drop it).
+void test_vivarium_exec_drops_cloexec_sockets(void);
+void test_vivarium_exec_drops_cloexec_sockets(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(p->socktab != NULL, "socktab alloc");
+
+    // handle_alloc hands back the fd; the socktab entry is keyed on that same
+    // number, exactly as a phenotype socket() pairs the handle and the entry.
+    hidx_t cloexec_fd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    hidx_t plain_fd   = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    hidx_t stale_fd   = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(cloexec_fd >= 0 && plain_fd >= 0 && stale_fd >= 0,
+                "three handles allocated");
+    handle_set_cloexec(p, cloexec_fd, true);
+
+    viv_socktab_claim(p->socktab, (s32)cloexec_fd, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
+    viv_socktab_claim(p->socktab, (s32)plain_fd,   VIV_NET_TCP, 101, VIV_SOCK_FRESH);
+    viv_socktab_claim(p->socktab, (s32)stale_fd,   VIV_NET_TCP, 102, VIV_SOCK_FRESH);
+    // Close the stale fd's HANDLE via the primitive (not the close syscall), so
+    // its entry lingers at a now-closed fd -- the shape a pre-existing stale row
+    // has, and the case the sweep must NOT touch.
+    handle_close(p, stale_fd);
+
+    // ---- CONTROLS: the cloexec bits and the pre-drop entries are as set up. ----
+    int  cloexec_bit = handle_get_cloexec(p, cloexec_fd);   // expect 1
+    int  plain_bit   = handle_get_cloexec(p, plain_fd);     // expect 0
+    int  stale_bit   = handle_get_cloexec(p, stale_fd);     // expect -1 (closed)
+    bool pre_cloexec = viv_socktab_get(p->socktab, (s32)cloexec_fd, NULL);
+    bool pre_plain   = viv_socktab_get(p->socktab, (s32)plain_fd,   NULL);
+    bool pre_stale   = viv_socktab_get(p->socktab, (s32)stale_fd,   NULL);
+
+    // ---- THE SWEEP. ----
+    viv_socktab_drop_cloexec(p);
+
+    bool post_cloexec = viv_socktab_get(p->socktab, (s32)cloexec_fd, NULL);
+    bool post_plain   = viv_socktab_get(p->socktab, (s32)plain_fd,   NULL);
+    bool post_stale   = viv_socktab_get(p->socktab, (s32)stale_fd,   NULL);
+
+    // ---- TEARDOWN, then assert (TEST_ASSERT returns; proc_free frees socktab). --
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(cloexec_bit, 1, "control: the cloexec fd IS cloexec");
+    TEST_EXPECT_EQ(plain_bit,   0, "control: the plain fd is NOT cloexec");
+    TEST_EXPECT_EQ(stale_bit,  -1, "control: the stale fd is CLOSED");
+    TEST_ASSERT(pre_cloexec && pre_plain && pre_stale,
+                "control: all three entries exist before the sweep");
+
+    TEST_ASSERT(!post_cloexec,
+                "FIX: the cloexec socket's entry is DROPPED -- a sweep that skips "
+                "the drop leaves the stale (proto,n) row for the new image");
+    TEST_ASSERT(post_plain,
+                "the plain socket's entry SURVIVES -- a sweep that over-drops "
+                "every entry fails here");
+    TEST_ASSERT(post_stale,
+                "the closed-fd stale entry SURVIVES -- handle_get_cloexec == -1, "
+                "so a sweep written `!= 0` instead of `== 1` would wrongly drop it");
+}
+
+// The getsockopt SHELL (not the pure decide): the F1 regression. The shell
+// marshals two EL0-controlled addresses through the byte-wise uaccess helpers,
+// which assume a validated user VA -- so it MUST reject a kernel-range address
+// before touching memory. This drives the real shell through the T2
+// dispatcher and proves the guard fires. (The SUCCESS path -- a valid user
+// buffer receiving 0/4 -- needs a live EL0 mapping the kernel unit harness
+// cannot stage; it is the curl-demo E2E's job, where verifyconnect reads a 0
+// and the fetch completes.)
+extern s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level,
+                                   u64 optname, u64 optval_va, u64 optlen_va);
+void test_vivarium_getsockopt_shell_guards_uaccess(void);
+void test_vivarium_getsockopt_shell_guards_uaccess(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(p->socktab != NULL, "socktab alloc");
+
+    hidx_t sockfd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(sockfd >= 0, "a handle for the socket entry");
+    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
+
+    // A user-range address that PASSES sys_validate_user_buf (in range,
+    // non-NULL) without needing to be mapped -- the validate is pure, and it
+    // runs before any access. The kernel-range address is the first invalid
+    // VA (== UACCESS_USER_VA_TOP), which validate rejects.
+    const u64 user_ok = 0x40000ull;              // < USER_VA_TOP, non-NULL
+    const u64 kern_va = 0x0000800000000000ull;    // == 1<<47 == USER_VA_TOP, the
+                                                  // first rejected VA (the
+                                                  // test_syscall.c F210 literal)
+
+    // Control: the shell is REACHED and the socktab lookup works -- a LIVE fd
+    // with no row is ENOTSOCK, a CLOSED number is EBADF (viv_sock_row splits
+    // the two as Linux does; this control used the closed number for
+    // ENOTSOCK until the socktab holotype's F5 split them). Both return
+    // before any uaccess.
+    hidx_t plain = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    s64 r_notsock = viv_getsockopt_for_test(p, (u64)plain, 1, 4, user_ok, user_ok);
+    s64 r_badf    = viv_getsockopt_for_test(p, (u64)(sockfd + 70), 1, 4,
+                                            user_ok, user_ok);
+    // F1 leg A: a kernel-range optlen_va is rejected -- the FIRST validate.
+    s64 r_klen = viv_getsockopt_for_test(p, (u64)sockfd, 1, 4, user_ok, kern_va);
+    // F1 leg B: a kernel-range optval_va is rejected EFAULT. NOTE (R2-F3):
+    // this leg does NOT isolate the SECOND validate -- with optlen_va unmapped,
+    // a mutant that deletes the optval validate would still EFAULT at the
+    // optlen LOAD's fault fixup, so the EFAULT merely moves. The discriminating
+    // construction (readable optlen + kernel optval, so control reaches the
+    // optval store) needs a live EL0 mapping the kthread harness cannot stage
+    // -- it is the E2E's job. What this asserts truthfully: a kernel optval
+    // never reaches an unguarded store (EFAULT, not a write or a crash).
+    s64 r_kval = viv_getsockopt_for_test(p, (u64)sockfd, 1, 4, kern_va, user_ok);
+    // A DECLINED option still declines cleanly (SO_REUSEADDR=2, not SO_ERROR)
+    // -- proves the guard did not swallow the domain check.
+    s64 r_decline = viv_getsockopt_for_test(p, (u64)sockfd, 1, 2, user_ok, user_ok);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(plain >= 0, "control precondition: a live non-socket fd");
+    TEST_EXPECT_EQ(r_notsock, -(s64)T_E_NOTSOCK,
+                   "control: getsockopt on a live non-socket fd is ENOTSOCK -- the "
+                   "shell is reached and the lookup works");
+    TEST_EXPECT_EQ(r_badf, -(s64)T_E_BADF,
+                   "control: getsockopt on a CLOSED fd number is EBADF (the Linux split)");
+    TEST_EXPECT_EQ(r_klen, -(s64)T_E_FAULT,
+                   "F1: a kernel-range optlen_va is rejected EFAULT before any "
+                   "uaccess -- pre-fix this reached uaccess on a kernel VA");
+    TEST_EXPECT_EQ(r_kval, -(s64)T_E_FAULT,
+                   "F1: a kernel-range optval_va never reaches an unguarded "
+                   "store -- EFAULT, not a write (see leg-B note on isolation)");
+    TEST_EXPECT_EQ(r_decline, -(s64)T_E_NOSYS,
+                   "a non-SO_ERROR option still declines ENOSYS -- the guard did "
+                   "not disturb the domain screen");
+}
+
+// 6b ground-truth: reproduce the fd-reuse MISROUTE the exec sweep prevents, end
+// to end, through the REAL handle_alloc / handle_close_on_exec the exec path
+// runs -- not just the drop function in isolation. exec_drops_cloexec_sockets
+// above drives viv_socktab_drop_cloexec directly on hand-placed entries and
+// proves it drops the right ones; this proves the CONSEQUENCE the drop exists
+// for, by running the exact sequence sys_execve_core runs at its sweep site
+// (viv_socktab_drop_cloexec THEN handle_close_on_exec) and asking what a
+// post-exec socket() then sees through viv_socktab_get.
+//
+// The geometry a fresh-fork phenotype child actually has is clean: the socktab
+// starts NULL (it is never copied at fork; freed only at proc_free), so the
+// child's first socket() lands at socktab slot 0. The misroute, concretely: a
+// cloexec TCP socket at fd F, execve, then a fresh UDP socket that handle_alloc
+// hands the SAME F (the lowest free fd once the cloexec close frees it). WITHOUT
+// the sweep the stale TCP entry survives at slot 0 and SHADOWS the fresh UDP
+// entry that claim() is forced into slot 1, so viv_socktab_get(F) returns the
+// STALE TCP connection -- connect would dial /net/tcp/<n> for a number netd has
+// freed. WITH the sweep, slot 0 is cleared first, the fresh UDP entry claims it,
+// and find(F) returns UDP -- the correct one. Two Procs, identical up to the ONE
+// sweep line, so the observed delta is the sweep and nothing else.
+//
+// This is the runtime proof the guest different-proto probe was reaching for,
+// deterministic here because the socktab geometry is controlled rather than
+// inherited from a probe's prior socket history. It does NOT exercise the
+// sys_execve_core call site itself (it invokes the sweep helper directly), so it
+// is not the literal "delete line 8455 and watch a test go red" guard; it is the
+// proof that the sweep is load-bearing and that a real cloexec-exec+socket in a
+// fresh-fork child does surface the stale entry the fix removes.
+//
+// RE-AIMED at the Design D audit close (F2, 2026-09-01). viv_socktab_claim now
+// REPLACES any row already keyed on its fd, so the original control -- "without
+// the sweep, a fresh UDP socket() on the reused number reads the stale TCP
+// row" -- asserted a misroute that no longer exists: the bug arm went UDP for
+// the new reason and the assertion went red (the #240 shape: a new guard
+// hollows an old test of the same negative). What the sweep still UNIQUELY
+// prevents is the fd number recycled to a NON-socket: an open() takes the
+// freed number, no claim ever runs, and every socket arm in the dispatcher
+// looks the table up by number (ENOTSOCK on a miss) -- so a connect() on that
+// FILE fd would find the stale TCP row and dial /net/tcp/<n>. The control now
+// recycles the number as a plain handle first (the sweep's job: bug arm sees
+// the stale TCP row, fix arm sees no row), THEN claims a UDP socket on it (the
+// F2 witness through the real handle_alloc geometry: BOTH arms read UDP, the
+// bug arm because replace-on-claim evicted the stale row). Two negatives, each
+// with its positive one variable away.
+void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void);
+void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
+    // ---- ARM 1: WITH the sweep (the fix). ----
+    struct Proc *pf = proc_alloc();
+    TEST_ASSERT(pf != NULL, "proc_alloc (fix arm)");
+    pf->phenotype = PHENO_LINUX;
+    pf->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(pf->socktab != NULL, "socktab alloc (fix arm)");
+
+    hidx_t f_a = handle_alloc(pf, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(f_a >= 0, "socket_A handle (fix arm)");
+    viv_socktab_claim(pf->socktab, (s32)f_a, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
+    handle_set_cloexec(pf, f_a, true);
+
+    // the exec sweep, exactly as sys_execve_core orders it (syscall.c:8455 then
+    // :8467): drop the cloexec entries while the fds are still open, THEN close.
+    viv_socktab_drop_cloexec(pf);
+    handle_close_on_exec(pf);            // frees f_a
+
+    // The post-exec image's first fd-creating call is an open(): it is handed
+    // the freed number and claims NOTHING -- the case only the sweep covers.
+    hidx_t f_b = handle_alloc(pf, KOBJ_THREAD, RIGHT_READ, NULL);
+    bool fix_reused = (f_b == f_a);
+    struct viv_sock ef;
+    int fix_file_proto = viv_socktab_get(pf->socktab, (s32)f_b, &ef) ? (int)ef.proto : -1;
+    // Then a socket() claim on the same number (the replace-on-claim witness).
+    viv_socktab_claim(pf->socktab, (s32)f_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH);
+    int fix_sock_proto = viv_socktab_get(pf->socktab, (s32)f_b, &ef) ? (int)ef.proto : -1;
+
+    pf->state = PROC_STATE_ZOMBIE;
+    proc_free(pf);
+
+    // ---- ARM 2: WITHOUT the sweep (the bug -- the deleted-8455 world). ----
+    // Identical to ARM 1 but for the single missing viv_socktab_drop_cloexec.
+    struct Proc *pb = proc_alloc();
+    TEST_ASSERT(pb != NULL, "proc_alloc (bug arm)");
+    pb->phenotype = PHENO_LINUX;
+    pb->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(pb->socktab != NULL, "socktab alloc (bug arm)");
+
+    hidx_t b_a = handle_alloc(pb, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(b_a >= 0, "socket_A handle (bug arm)");
+    viv_socktab_claim(pb->socktab, (s32)b_a, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
+    handle_set_cloexec(pb, b_a, true);
+
+    // NO viv_socktab_drop_cloexec here -- this arm IS the missing-call world.
+    handle_close_on_exec(pb);            // frees b_a but leaves its stale entry
+
+    hidx_t b_b = handle_alloc(pb, KOBJ_THREAD, RIGHT_READ, NULL);
+    bool bug_reused = (b_b == b_a);
+    struct viv_sock eb;
+    int bug_file_proto = viv_socktab_get(pb->socktab, (s32)b_b, &eb) ? (int)eb.proto : -1;
+    viv_socktab_claim(pb->socktab, (s32)b_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH);
+    int bug_sock_proto = viv_socktab_get(pb->socktab, (s32)b_b, &eb) ? (int)eb.proto : -1;
+
+    pb->state = PROC_STATE_ZOMBIE;
+    proc_free(pb);
+
+    // ---- assert after teardown (TEST_ASSERT returns; proc_free freed both). ----
+    TEST_ASSERT(fix_reused,
+                "control: the post-exec open() reuses the cloexec-freed fd (fix arm)");
+    TEST_ASSERT(bug_reused,
+                "control: the post-exec open() reuses the cloexec-freed fd (bug arm)");
+    TEST_EXPECT_EQ(fix_file_proto, -1,
+                   "WITH the sweep: the recycled FILE fd has no socktab row");
+    TEST_EXPECT_EQ(bug_file_proto, (int)VIV_NET_TCP,
+                   "WITHOUT the sweep: the STALE tcp row shadows the recycled FILE fd -- "
+                   "a connect() on it would dial /net/tcp/<n>; the misroute only the "
+                   "exec sweep prevents");
+    TEST_EXPECT_EQ(fix_sock_proto, (int)VIV_NET_UDP,
+                   "WITH the sweep: a socket() on the number reads its own FRESH udp row");
+    TEST_EXPECT_EQ(bug_sock_proto, (int)VIV_NET_UDP,
+                   "WITHOUT the sweep: a socket() on the number ALSO reads udp -- "
+                   "replace-on-claim (Design D audit F2) evicted the stale row");
+}
+
+// =============================================================================
+// #50: the path-mutation family decides (VIVARIUM.md section 6.24). Pure
+// domain tests; the kernel-core semantics live in test_stalk.c (fixture) +
+// test_dev9p.c (loopback errno legs).
+// =============================================================================
+
+void test_vivarium_openat_create_domain(void);
+void test_vivarium_openat_create_domain(void) {
+    u32 omode = 0, perm = 0;
+    bool cx = false;
+    const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;   // sign-extended -100
+    const u64 FDCWD_ZX = 0x00000000FFFFFF9Cull;   // zero-extended -100
+
+    // The served shape git issues constantly: O_CREAT|O_WRONLY|O_TRUNC 0644.
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01 | 01000,
+                                              0644, &omode, &perm, &cx)
+                    == VIV_TRANSLATED,
+                "O_CREAT|O_WRONLY|O_TRUNC is served");
+    TEST_EXPECT_EQ((u64)omode, (u64)(1u | 0x10u), "OWRITE|OTRUNC");
+    TEST_EXPECT_EQ((u64)perm, (u64)0644, "mode passes as the low-9 perm");
+
+    // O_EXCL maps to the OEXCL omode bit (the lockfile shape:
+    // O_CREAT|O_EXCL|O_WRONLY 0600). Both AT_FDCWD encodings are one point.
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_ZX, 0100 | 0200 | 01,
+                                              0600, &omode, &perm, &cx)
+                    == VIV_TRANSLATED,
+                "the lockfile shape is served (zero-extended AT_FDCWD)");
+    TEST_ASSERT((omode & SYS_WALK_OPEN_OEXCL) != 0, "O_EXCL -> OEXCL");
+
+    // O_CLOEXEC reports through the third output, as the plain row.
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01 | 02000000,
+                                              0644, &omode, &perm, &cx)
+                    == VIV_TRANSLATED && cx,
+                "O_CLOEXEC reported for the shell to apply post-open");
+
+    // Declines: a real dirfd (handle state, 6.20 Correction 2); a mode with
+    // setuid bits (a silent strip would record less restrictive metadata);
+    // accmode 3 (Linux EINVAL); an O_PATH bit that leaked past the shell's
+    // routing (defensive: the admitted set excludes it). (O_APPEND MOVED to the
+    // admitted set at the git 6.27 arm -- asserted just below.)
+    TEST_ASSERT(vivarium_openat_create_decide(3, 0100 | 01, 0644,
+                                              &omode, &perm, &cx) == VIV_FORWARD,
+                "a real dirfd declines");
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01, 04644,
+                                              &omode, &perm, &cx) == VIV_FORWARD,
+                "setuid mode bits decline (never silently stripped)");
+    // O_CREAT|O_WRONLY|O_APPEND: the git 6.27 arm -- a fresh reflog is exactly
+    // this shape (git's first ref update creates + appends .git/logs/HEAD), so
+    // it is ADMITTED and sets the OAPPEND omode bit (was a V-2b decline before).
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01 | 02000,
+                                              0644, &omode, &perm, &cx) == VIV_TRANSLATED,
+                "O_CREAT|O_WRONLY|O_APPEND is admitted (git 6.27)");
+    TEST_EXPECT_EQ((u64)omode, (u64)(1u | SYS_WALK_OPEN_OAPPEND),
+                   "O_CREAT|O_APPEND -> OWRITE|OAPPEND omode");
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 03, 0644,
+                                              &omode, &perm, &cx) == VIV_FORWARD,
+                "accmode 3 declines");
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 010000000 | 01,
+                                              0644, &omode, &perm, &cx) == VIV_FORWARD,
+                "O_PATH in the flag word declines here (the shell routes it away)");
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01, 0644,
+                                              NULL, &perm, &cx) == VIV_FORWARD,
+                "NULL output fails toward the supervisor");
+
+    // The file-TYPE field is masked, not refused. busybox `tar` passes
+    // `file_header->mode` unnarrowed, so a regular file arrives as
+    // S_IFREG|0644 -- which the pre-mask gate refused, failing every
+    // extraction with ENOSYS ("tar: can't open ...: Function not implemented").
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01 | 01000,
+                                              0100644, &omode, &perm, &cx)
+                    == VIV_TRANSLATED,
+                "S_IFREG in the mode is masked, not refused (busybox tar)");
+    TEST_EXPECT_EQ((u64)perm, (u64)0644, "S_IFREG masked off; low-9 survives");
+
+    // The mask must not reach the 07000 field. Same S_IFREG, setuid added:
+    // still declines. (Without this the mask could be written as `& 0777`,
+    // which would silently strip setuid instead of refusing it.)
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01, 0104644,
+                                              &omode, &perm, &cx) == VIV_FORWARD,
+                "S_IFREG|setuid still declines -- the mask spares 07000");
+}
+
+void test_vivarium_mkdirat_domain(void);
+void test_vivarium_mkdirat_domain(void) {
+    u32 perm = 0;
+    const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
+
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 0755, &perm) == VIV_TRANSLATED,
+                "mkdirat(AT_FDCWD, 0755) is served");
+    TEST_EXPECT_EQ((u64)perm, (u64)(SYS_WALK_CREATE_DMDIR | 0755u),
+                   "perm = mode | DMDIR");
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 02755, &perm) == VIV_FORWARD,
+                "a setgid dir mode declines (git core.sharedRepository shape)");
+    TEST_ASSERT(vivarium_mkdirat_decide(5, 0755, &perm) == VIV_FORWARD,
+                "a real dirfd declines");
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 0755, NULL) == VIV_FORWARD,
+                "NULL output fails toward the supervisor");
+
+    // The tar shape: busybox selects its directory branch on S_IFMT and then
+    // passes the mode word unnarrowed, so mkdir arrives as S_IFDIR|0755. The
+    // pre-mask gate refused it -- "tar: can't make dir X: Function not
+    // implemented" -- which is the whole reason `tar -x` could not extract.
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 040755, &perm) == VIV_TRANSLATED,
+                "S_IFDIR in the mode is masked, not refused (busybox tar)");
+    TEST_EXPECT_EQ((u64)perm, (u64)(SYS_WALK_CREATE_DMDIR | 0755u),
+                   "S_IFDIR masked off; perm = low-9 | DMDIR");
+
+    // The mask spares 07000: the same S_IFDIR with setgid still declines, so
+    // git's core.sharedRepository shape keeps its census-visible refusal.
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 042755, &perm) == VIV_FORWARD,
+                "S_IFDIR|setgid still declines -- the mask spares 07000");
+
+    // Sticky is the third 07000 bit and was the only one left to inference.
+    // It is worth pinning explicitly because S_IFDIR|01777 is the `/tmp` entry
+    // every real rootfs tarball carries -- i.e. the exact shape a tar-extract
+    // of a distro image still declines on. Pinned, that residue is documented
+    // behaviour rather than a surprise the next extraction discovers.
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 041777, &perm) == VIV_FORWARD,
+                "S_IFDIR|sticky (the rootfs /tmp shape) still declines");
+}
+
+void test_vivarium_unlinkat_domain(void);
+void test_vivarium_unlinkat_domain(void) {
+    u32 tf = 0xdeadbeefu;
+    const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
+
+    TEST_ASSERT(vivarium_unlinkat_decide(FDCWD_SX, 0, &tf) == VIV_TRANSLATED,
+                "unlinkat(file) is served");
+    TEST_EXPECT_EQ((u64)tf, (u64)0, "flags 0 -> SYS_UNLINK 0");
+    TEST_ASSERT(vivarium_unlinkat_decide(FDCWD_SX, 0x200, &tf) == VIV_TRANSLATED,
+                "AT_REMOVEDIR is served");
+    TEST_EXPECT_EQ((u64)tf, (u64)SYS_UNLINK_REMOVEDIR,
+                   "AT_REMOVEDIR -> SYS_UNLINK_REMOVEDIR");
+    TEST_ASSERT(vivarium_unlinkat_decide(FDCWD_SX, 0x400, &tf) == VIV_FORWARD,
+                "AT_SYMLINK_FOLLOW declines");
+    TEST_ASSERT(vivarium_unlinkat_decide(7, 0, &tf) == VIV_FORWARD,
+                "a real dirfd declines");
+}
+
+void test_vivarium_renameat_domain(void);
+void test_vivarium_renameat_domain(void) {
+    const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
+    const u64 FDCWD_ZX = 0x00000000FFFFFF9Cull;
+
+    TEST_ASSERT(vivarium_renameat_decide(FDCWD_SX, FDCWD_ZX, 0) == VIV_TRANSLATED,
+                "renameat(AT_FDCWD, AT_FDCWD) is served (mixed encodings)");
+    TEST_ASSERT(vivarium_renameat_decide(FDCWD_SX, FDCWD_SX, 1) == VIV_FORWARD,
+                "renameat2 RENAME_NOREPLACE declines (census-visible)");
+    TEST_ASSERT(vivarium_renameat_decide(3, FDCWD_SX, 0) == VIV_FORWARD,
+                "a real old dirfd declines");
+    TEST_ASSERT(vivarium_renameat_decide(FDCWD_SX, 3, 0) == VIV_FORWARD,
+                "a real new dirfd declines");
+}
+
+// =============================================================================
+// The getdents64 chunk: the 9P-dirent -> linux_dirent64 re-encode, pinned as
+// a PURE byte transform (the format row a real busybox `ls` stands on; the
+// E2E witnesses the whole shell, this pins the layout math).
+// =============================================================================
+
+extern u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+                                   u8 *dst, u64 dst_cap, u64 *last_cookie_out);
+
+// Append one 9P2000.L dirent (qid.type/qid.path + cookie + d_type + name) at
+// *pos; qid.version is zeroed (the encode never reads it).
+static void gd_put(u8 *b, u64 *pos, u8 qtype, u64 qpath, u64 cookie,
+                   u8 dtype, const char *name) {
+    u64 p = *pos;
+    u32 nlen = 0; while (name[nlen]) nlen++;
+    b[p] = qtype;
+    for (int i = 0; i < 4; i++) b[p + 1 + i] = 0;
+    for (int i = 0; i < 8; i++) b[p + 5 + i]  = (u8)(qpath  >> (8 * i));
+    for (int i = 0; i < 8; i++) b[p + 13 + i] = (u8)(cookie >> (8 * i));
+    b[p + 21] = dtype;
+    b[p + 22] = (u8)(nlen & 0xFF);
+    b[p + 23] = (u8)(nlen >> 8);
+    for (u32 i = 0; i < nlen; i++) b[p + 24 + i] = (u8)name[i];
+    *pos = p + 24 + nlen;
+}
+
+static u64 gd_rd64(const u8 *b) {
+    u64 v = 0;
+    for (int i = 0; i < 8; i++) v |= (u64)b[i] << (8 * i);
+    return v;
+}
+
+void test_vivarium_dirent64_encode(void);
+void test_vivarium_dirent64_encode(void) {
+    u8 src[256]; u64 sl = 0;
+    // "notes" (5 chars) exercises the WORST alignment case (align8(20+5)=32,
+    // pad 7); "a" the short case. qid.path values are distinct sentinels.
+    gd_put(src, &sl, 0x00, 0x1111, 101, 8 /*DT_REG*/, "notes");
+    gd_put(src, &sl, 0x80, 0x2222, 102, 4 /*DT_DIR*/, "a");
+
+    u8 dst[128]; u64 ck = 0;
+    u64 n = viv_dirent64_encode_run(src, sl, dst, sizeof(dst), &ck);
+    // reclen("notes") = align8(19+5+1) = 32; reclen("a") = align8(19+1+1) = 24.
+    TEST_EXPECT_EQ(n, (u64)(32 + 24), "two records, aligned sizes");
+    TEST_EXPECT_EQ(ck, (u64)102, "last cookie = the second entry's");
+    TEST_EXPECT_EQ(gd_rd64(dst + 0), (u64)0x1111, "d_ino <- qid.path");
+    TEST_EXPECT_EQ(gd_rd64(dst + 8), (u64)101, "d_off <- the entry's cookie");
+    TEST_EXPECT_EQ((u64)(dst[16] | (dst[17] << 8)), (u64)32, "d_reclen");
+    TEST_EXPECT_EQ((u64)dst[18], (u64)8, "d_type passes through");
+    TEST_ASSERT(dst[19] == 'n' && dst[23] == 's' && dst[24] == '\0',
+                "d_name + NUL");
+    TEST_ASSERT(dst[25] == 0 && dst[31] == 0, "alignment pad is zeroed");
+    TEST_EXPECT_EQ(gd_rd64(dst + 32), (u64)0x2222, "second record follows");
+    TEST_EXPECT_EQ((u64)dst[32 + 18], (u64)4, "second d_type (DT_DIR)");
+
+    // Partial fit: room for record 1 only -> stops there, cookie anchors the
+    // resume at the FIRST UNCONSUMED entry (the caller commits the cursor to
+    // exactly this, so nothing is skipped and nothing re-delivered).
+    ck = 0;
+    n = viv_dirent64_encode_run(src, sl, dst, 40, &ck);
+    TEST_EXPECT_EQ(n, (u64)32, "partial fit emits whole records only");
+    TEST_EXPECT_EQ(ck, (u64)101, "partial-fit cookie = last EMITTED entry's");
+
+    // First record does not fit -> 0 emitted (the shell's EINVAL row).
+    n = viv_dirent64_encode_run(src, sl, dst, 31, &ck);
+    TEST_EXPECT_EQ(n, (u64)0, "no room for one record emits nothing");
+
+    // A truncated source tail is not emitted (the run guard's twin).
+    n = viv_dirent64_encode_run(src, sl - 1, dst, sizeof(dst), &ck);
+    TEST_EXPECT_EQ(n, (u64)32, "a truncated trailing source entry is dropped");
+    TEST_EXPECT_EQ(ck, (u64)101, "its cookie is not consumed");
+}
+
+// getdents64 holotype F1 [P0]: the shell must validate the user `dirp` BEFORE
+// any store -- the copy-out writes via uaccess_store_u8, whose fault fixup does
+// NOT engage for a kernel-half VA, so an unprivileged phenotype passing a
+// kernel dirp would extinct the kernel (or, at a writable kernel VA, corrupt
+// it). Driven through the REAL arm (viv_getdents64_for_test -> viv_tier2), the
+// same shape as the getsockopt uaccess-guard test. The guard runs before the
+// fd lookup, so this needs no live directory -- the FAULT is the buffer check.
+extern s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
+void test_vivarium_getdents64_guards_uaccess(void);
+void test_vivarium_getdents64_guards_uaccess(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    // Same VAs as the getsockopt guard test: user_ok passes the pure validate
+    // (in range, non-NULL, need not be mapped); kern_va is the first rejected
+    // VA (== UACCESS_USER_VA_TOP).
+    const u64 user_ok = 0x40000ull;
+    const u64 kern_va = 0x0000800000000000ull;
+
+    // F1: a kernel-range dirp is rejected -T_E_FAULT because the buffer guard
+    // runs BEFORE the fd lookup. Fails-without-fix (MEASURED, guard disabled):
+    // pre-fix the arm reaches the lookup with this unhandled fd 3 and returns
+    // -T_E_BADF, so this EFAULT assertion fails cleanly (the harness survives --
+    // the destructive store-path extinction needs a VALID directory fd, which
+    // the kthread harness cannot stage; the viv-run E2E's live `ls` covers it).
+    // So this leg pins the guard's PRESENCE and its position-before-lookup; the
+    // control below confirms a user-ok buffer passes the guard to the lookup.
+    s64 r_fault = viv_getdents64_for_test(p, 3, kern_va, 4096);
+    TEST_EXPECT_EQ(r_fault, -(s64)T_E_FAULT,
+                   "kernel-range dirp rejected EFAULT before the fd lookup");
+
+    // Control: a user_ok dirp with a nonexistent fd reaches the lookup and
+    // answers EBADF -- proving the EFAULT above came from the BUFFER guard
+    // (validation passed for user_ok) and the arm is genuinely reached.
+    s64 r_badf = viv_getdents64_for_test(p, 3, user_ok, 4096);
+    TEST_EXPECT_EQ(r_badf, -(s64)T_E_BADF,
+                   "a user-ok dirp with a bad fd reaches the lookup (EBADF)");
+
+    // Ordering: count==0 is EINVAL, decided before the buffer guard -- a
+    // kern_va dirp with count 0 still answers EINVAL, not EFAULT.
+    s64 r_zero = viv_getdents64_for_test(p, 3, kern_va, 0);
+    TEST_EXPECT_EQ(r_zero, -(s64)T_E_INVAL, "count==0 is EINVAL before the guard");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// N-5 F1: viv_readv AND viv_writev copy_in the iovec ARRAY at iov_va before
+// touching any entry, and the uaccess fault-fixup recovers ONLY a user-half
+// fault -- so an unvalidated kernel-range iov_va extincted the kernel (an
+// unprivileged DoS, the getdents64 P0 class on the array read). The fix is a
+// whole-span sys_validate_user_buf(iov_va, count*16) before pass 1, in BOTH
+// twins. Driven through the REAL arms (viv_readv_for_test / viv_writev_for_test
+// -> viv_tier2). Fails-without-fix is BOOT-FATAL: with the guard removed, the
+// count>=1 kern_va legs reach copy_in at 2^47 (unmapped, kernel-half) -> the
+// fixup gate (fi.vaddr < UACCESS_USER_VA_TOP) is false -> extinction, so the
+// harness dies rather than returning. The EFAULT here pins the guard's presence;
+// the count==0 control isolates it (same kern_va, EBADF not EFAULT).
+extern s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+extern s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+
+void test_vivarium_readv_writev_guard_iovec_array(void);
+void test_vivarium_readv_writev_guard_iovec_array(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    // Same VAs as the getdents/getsockopt guard tests: user_ok passes the pure
+    // validate (in range, non-NULL, need not be mapped); kern_va is the first
+    // rejected VA (== UACCESS_USER_VA_TOP).
+    const u64 user_ok = 0x40000ull;
+    const u64 kern_va = 0x0000800000000000ull;
+
+    // count>=1 so pass 1 runs and reaches the array copy_in. Kernel-range array
+    // -> the span guard rejects it -EFAULT before any copy_in, in BOTH twins.
+    s64 rd_fault = viv_readv_for_test(p, 3, kern_va, 1);
+    TEST_EXPECT_EQ(rd_fault, -(s64)T_E_FAULT,
+                   "readv: kernel-range iovec array rejected EFAULT before copy_in");
+    s64 wr_fault = viv_writev_for_test(p, 3, kern_va, 1);
+    TEST_EXPECT_EQ(wr_fault, -(s64)T_E_FAULT,
+                   "writev: kernel-range iovec array rejected EFAULT before copy_in");
+
+    // Discriminating control: the SAME kern_va with count==0 never reads the
+    // array -- it validates the fd instead (EBADF on the unhandled fd 3). So a
+    // kern_va yields EFAULT ONLY when count>=1, i.e. ONLY via the span guard;
+    // the guard is the cause, not a blanket kern_va reject. (Pre-fix this same
+    // count==0 leg already returned EBADF -- the array was never touched -- so
+    // it is the invariant half of the pair.)
+    s64 rd_zero = viv_readv_for_test(p, 3, kern_va, 0);
+    TEST_EXPECT_EQ(rd_zero, -(s64)T_E_BADF,
+                   "readv: count==0 validates the fd (EBADF), never reads the array");
+
+    // Positive: a user-range array PASSES the span guard and reaches the
+    // per-entry copy_in, which faults on the unmapped page and lands cleanly in
+    // the fixup -> EFAULT. Same code as the guard reject, but the guard admitted
+    // it (proving the fix does not reject a legitimate user-range array up
+    // front); the git-net v2 clone E2E exercises the mapped-array happy path.
+    s64 rd_user = viv_readv_for_test(p, 3, user_ok, 1);
+    TEST_EXPECT_EQ(rd_user, -(s64)T_E_FAULT,
+                   "readv: user-range array passes the span guard, faults at copy_in");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// C2-k1b: the phenotype terminal ioctl shell (interactive git + `viv sh`). The
+// error-prone logic is the two PURE helpers -- the cons 5-flag <-> Linux termios
+// map and the deterministic consctl grammar -- unit-tested here with plain
+// structs and a behavioral round-trip through the real setter (the
+// getdents64-transform precedent). The full cons SERVE (a uaccess copy of a live
+// termios/winsize to a MAPPED user buffer on a real cons fd) needs staging the
+// kthread harness cannot do -- like the readv serve path -- and is covered by
+// the in-guest viv-run E2E (isatty()/tcgetattr on /dev/cons).
+
+// F1: the pure cons-flags -> Linux termios map. Each cons flag lands in the right
+// Linux register and bit; ONLCR pulls OPOST (Linux translates NL only under it);
+// the c_cflag baseline + the c_cc control chars are present (a zero c_cflag reads
+// as B0/hang-up, and a zero VMIN/VINTR would break single-char input).
+void test_vivarium_ioctl_termios_map(void);
+void test_vivarium_ioctl_termios_map(void) {
+    struct viv_linux_termios tio;
+
+    // All cons flags clear -> all mode registers 0, baseline c_cflag, c_cc set.
+    viv_cons_to_linux_termios(0u, &tio);
+    TEST_EXPECT_EQ((int)tio.c_iflag, 0, "no ICRNL -> c_iflag 0");
+    TEST_EXPECT_EQ((int)tio.c_oflag, 0, "no ONLCR -> c_oflag 0");
+    TEST_EXPECT_EQ((int)tio.c_lflag, 0, "no lflags -> c_lflag 0");
+    TEST_EXPECT_EQ((int)tio.c_cflag,
+                   (int)(VIV_LINUX_B38400 | VIV_LINUX_CS8 | VIV_LINUX_CREAD),
+                   "c_cflag baseline B38400|CS8|CREAD");
+    TEST_EXPECT_EQ((int)tio.c_cc[0], 0x03, "VINTR ^C");
+    TEST_EXPECT_EQ((int)tio.c_cc[6], 0x01, "VMIN 1");
+    TEST_EXPECT_EQ((int)tio.c_cc[5], 0x00, "VTIME 0");
+    TEST_EXPECT_EQ((int)tio.c_cc[2], 0x7f, "VERASE DEL");
+    TEST_EXPECT_EQ((int)tio.c_line,  0,    "c_line N_TTY (0)");
+
+    // All five set -> the matching Linux bits; ONLCR pulls OPOST.
+    viv_cons_to_linux_termios(CONS_ICANON | CONS_ECHO | CONS_ISIG |
+                              CONS_ICRNL | CONS_ONLCR, &tio);
+    TEST_EXPECT_EQ((int)tio.c_lflag,
+                   (int)(VIV_LINUX_ICANON | VIV_LINUX_ECHO | VIV_LINUX_ISIG),
+                   "all lflags -> ICANON|ECHO|ISIG");
+    TEST_EXPECT_EQ((int)tio.c_iflag, (int)VIV_LINUX_ICRNL, "ICRNL -> c_iflag ICRNL");
+    TEST_EXPECT_EQ((int)tio.c_oflag, (int)(VIV_LINUX_OPOST | VIV_LINUX_ONLCR),
+                   "ONLCR -> c_oflag OPOST|ONLCR");
+
+    // Isolate each -> only its bit, no cross-register leak.
+    viv_cons_to_linux_termios(CONS_ECHO, &tio);
+    TEST_EXPECT_EQ((int)tio.c_lflag, (int)VIV_LINUX_ECHO, "ECHO alone");
+    viv_cons_to_linux_termios(CONS_ISIG, &tio);
+    TEST_EXPECT_EQ((int)tio.c_lflag, (int)VIV_LINUX_ISIG, "ISIG alone");
+    viv_cons_to_linux_termios(CONS_ICANON, &tio);
+    TEST_EXPECT_EQ((int)tio.c_lflag, (int)VIV_LINUX_ICANON, "ICANON alone");
+    viv_cons_to_linux_termios(CONS_ICRNL, &tio);
+    TEST_EXPECT_EQ((int)tio.c_iflag, (int)VIV_LINUX_ICRNL, "ICRNL alone -> c_iflag");
+    TEST_EXPECT_EQ((int)tio.c_lflag, 0, "ICRNL does not leak into c_lflag");
+}
+
+// F2: the Linux termios -> consctl grammar, proven BEHAVIORALLY by round-tripping
+// through the ONE production setter. A mode set on g_cons, mapped to a Linux
+// termios, turned into grammar, and applied back must reproduce the five flags --
+// so get->map->grammar->set composes. Plus the ONLCR-requires-OPOST gate, tested
+// by its effect on the applied mode (no string parsing).
+void test_vivarium_ioctl_grammar_roundtrip(void);
+void test_vivarium_ioctl_grammar_roundtrip(void) {
+    struct viv_linux_termios tio;
+    char g[64];
+    int n;
+
+    // This test MUTATES the global g_cons.termios. Per the shared-fixture lesson
+    // (ASSERT AFTER TEARDOWN): observe every leg into a local, RESTORE the saved
+    // mode, and only THEN assert -- so a failing leg cannot leave the live
+    // console in a wrong mode for the next cons test.
+    u32 saved = cons_test_termios();
+
+    // Round-trip two distinct values through the full pure pipeline + real setter.
+    const u32 want1 = CONS_ICANON | CONS_ISIG;         // cooked + signals, no echo
+    cons_test_set_termios(want1);
+    viv_cons_to_linux_termios(cons_termios_get(), &tio);
+    n = viv_linux_termios_to_grammar(&tio, g);
+    long apply1 = cons_set_mode_cmd(g, n, true);
+    u32 got1 = cons_termios_get();
+
+    const u32 want2 = CONS_TERMIOS_ALL;                // all five set
+    cons_test_set_termios(want2);
+    viv_cons_to_linux_termios(cons_termios_get(), &tio);
+    n = viv_linux_termios_to_grammar(&tio, g);
+    long apply2 = cons_set_mode_cmd(g, n, true);
+    u32 got2 = cons_termios_get();
+
+    // ONLCR requires OPOST: a Linux termios with ONLCR but NOT OPOST must NOT turn
+    // native ONLCR on; with both, it must. Proven by the applied mode, each leg
+    // started from a known state.
+    for (u64 i = 0; i < sizeof(tio); i++) ((u8 *)&tio)[i] = 0;
+    tio.c_oflag = VIV_LINUX_ONLCR;                      // ONLCR without OPOST
+    n = viv_linux_termios_to_grammar(&tio, g);
+    cons_test_set_termios(CONS_ONLCR);                 // start ON to prove it clears
+    (void)cons_set_mode_cmd(g, n, true);
+    u32 onlcr_off = cons_termios_get() & CONS_ONLCR;
+    tio.c_oflag = VIV_LINUX_OPOST | VIV_LINUX_ONLCR;
+    n = viv_linux_termios_to_grammar(&tio, g);
+    cons_test_set_termios(0u);                          // start OFF to prove it sets
+    (void)cons_set_mode_cmd(g, n, true);
+    u32 onlcr_on = cons_termios_get() & CONS_ONLCR;
+
+    cons_test_set_termios(saved);                       // RESTORE before any assert
+
+    TEST_ASSERT(apply1 >= 0, "grammar applies cleanly (want1)");
+    TEST_EXPECT_EQ((int)got1, (int)want1,
+                   "get->map->grammar->set round-trips (cooked+isig)");
+    TEST_ASSERT(apply2 >= 0, "grammar applies cleanly (want2)");
+    TEST_EXPECT_EQ((int)got2, (int)want2, "round-trips all five set");
+    TEST_ASSERT(onlcr_off == 0u, "ONLCR without OPOST leaves native ONLCR OFF");
+    TEST_ASSERT(onlcr_on  != 0u, "OPOST|ONLCR turns native ONLCR ON");
+}
+
+// F3: the ioctl shell dispatch, driven through the REAL viv_tier2 arm. The
+// kthread harness has no fds, so this pins the fd-first ordering: a served
+// request (TCGETS) on a bad fd is EBADF, and -- the discriminating leg -- an
+// UNKNOWN request on the SAME bad fd is STILL EBADF, not ENOTTY. Were the pure
+// classify done before the fd lookup, the unknown request would answer ENOTTY on
+// a bad fd; EBADF must beat ENOTTY (Linux checks the fd first). The full cons
+// serve (a real cons fd) is the in-guest E2E's job.
+void test_vivarium_ioctl_dispatch_ebadf(void);
+void test_vivarium_ioctl_dispatch_ebadf(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    const u64 user_ok = 0x40000ull;
+
+    s64 r_badf = viv_ioctl_for_test(p, 3, VIV_TCGETS, user_ok);
+    TEST_EXPECT_EQ(r_badf, -(s64)T_E_BADF, "TCGETS on a bad fd -> EBADF");
+
+    s64 r_ord = viv_ioctl_for_test(p, 3, 0xDEADBEEFull, user_ok);
+    TEST_EXPECT_EQ(r_ord, -(s64)T_E_BADF,
+                   "unknown request on a bad fd -> EBADF (fd checked before classify)");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// C2-k2: the phenotype session/pgrp shells (`viv sh` job control). setsid/setpgid
+// are TIER2 shells ONLY to remap the native T_E_ACCES "EPERM contour" to the
+// Linux EPERM a guest's errno check keys on; the INVAL/SRCH paths and the success
+// value pass through. getpgid/getsid are pure renumbers (no remap; the native
+// SYS_GETPGID/GETSID handlers + the E2E cover them). This drives the two shells
+// on an explicit Proc whose session/group state is staged to hit each contour.
+void test_vivarium_session_errno_remap(void);
+void test_vivarium_session_errno_remap(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->state = PROC_STATE_ALIVE;
+
+    // setsid on a group leader (pgid == pid) fails: native T_E_ACCES, which the
+    // shell must present as Linux EPERM.
+    p->pgid = (u32)p->pid;
+    s64 r_sid_perm = viv_session_for_test(p, VIV_LINUX_SETSID, 0, 0);
+    TEST_EXPECT_EQ(r_sid_perm, -(s64)T_E_PERM,
+                   "setsid on a group leader -> EPERM (native ACCES remapped)");
+
+    // setsid success: a non-leader gets a new session; the return is the new sid
+    // (== pid, positive), never touched by the remap -- proving it is
+    // failure-specific, not a blanket rewrite of the return.
+    p->pgid = (u32)p->pid + 1u;                 // not a group leader
+    s64 r_sid_ok = viv_session_for_test(p, VIV_LINUX_SETSID, 0, 0);
+    TEST_EXPECT_EQ(r_sid_ok, (s64)p->pid, "setsid success -> new sid (== pid)");
+
+    // setpgid EPERM contour: a session leader (pid == sid) cannot setpgid itself.
+    // Native T_E_ACCES -> EPERM.
+    p->sid   = (u32)p->pid;
+    p->pgid  = (u32)p->pid;
+    p->state = PROC_STATE_ALIVE;
+    s64 r_pgid_perm = viv_session_for_test(p, VIV_LINUX_SETPGID, 0, 0);
+    TEST_EXPECT_EQ(r_pgid_perm, -(s64)T_E_PERM,
+                   "setpgid by a session leader -> EPERM (native ACCES remapped)");
+
+    // setpgid INVAL passes through UNCHANGED (pgid < 0): the discriminating leg,
+    // proving the remap targets ACCES specifically and does not rewrite every
+    // negative into EPERM.
+    s64 r_pgid_inval = viv_session_for_test(p, VIV_LINUX_SETPGID, 0, (u64)-1);
+    TEST_EXPECT_EQ(r_pgid_inval, -(s64)T_E_INVAL,
+                   "setpgid pgid<0 -> EINVAL (not remapped to EPERM)");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// C2-k1b audit F1 + F2 (Fable 5). F1: the cons-fd predicate keys on UNFORGEABLE
+// device identity, not the CONS_STAT_QID_FLAG bit -- a dev9p server sets qid_path
+// verbatim, and tapestryd's PANE_FLAG is the same bit 41, so a bit-only test
+// would let a server-backed fd flip the global console. F2: a phenotype TCSETS
+// (the global-mode flip) is gated on the caller's session OWNING the console, so
+// a non-owner-session / post-SAK proc is refused -- while reads (isatty's
+// TIOCGWINSZ) stay ungated for any cons-fd holder.
+extern hidx_t sys_console_open_for_proc(struct Proc *p);
+void test_vivarium_ioctl_cons_identity_and_gate(void);
+void test_vivarium_ioctl_cons_identity_and_gate(void) {
+    // F1: spoor_is_console by device identity (spoor_is_console only reads
+    // sp->dev + sp->qid.path -- a zeroed stack Spoor is a valid probe).
+    struct Spoor s;
+    for (u64 i = 0; i < sizeof(s); i++) ((u8 *)&s)[i] = 0;
+    s.dev = &devcons;
+    TEST_ASSERT(spoor_is_console(&s), "devcons spoor -> is console (F1 true-path)");
+    // THE FORGERY: a foreign Dev with CONS_STAT_QID_FLAG (bit 41) forged in its
+    // qid must NOT be mistaken for the console (the tapestryd PANE_FLAG == bit 41
+    // case). Fails on the pre-fix bit-only predicate.
+    s.dev = &devramfs;
+    s.qid.path = CONS_STAT_QID_FLAG | 0x5u;
+    TEST_ASSERT(!spoor_is_console(&s),
+                "foreign Dev with forged bit 41 -> NOT console (F1 forgery closed)");
+    TEST_ASSERT(!spoor_is_console(NULL), "NULL spoor -> not console");
+
+    // F2: the pure session-gate logic. owner_sid 0 = no owner (post-SAK) -> never.
+    TEST_ASSERT(console_session_match(5u, 5u), "same sid -> in the owner's session");
+    TEST_ASSERT(!console_session_match(5u, 6u), "different sid -> not");
+    TEST_ASSERT(!console_session_match(0u, 0u), "no owner (sid 0) -> never a match");
+    TEST_ASSERT(!console_session_match(0u, 5u), "no owner -> not");
+
+    // F2 integration: a REAL devcons fd (proving F1's true-path end to end) held
+    // by a proc NOT in the console owner's session.
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->state = PROC_STATE_ALIVE;
+    p->sid = 0xDEADBEEFu;                       // guaranteed NOT the owner's session
+    hidx_t fd = sys_console_open_for_proc(p);
+    TEST_ASSERT(fd >= 0, "console open for the test proc");
+    const u64 user_ok = 0x40000ull;
+
+    // TCSETS from a non-owner-session proc -> EPERM, and the F2 gate fires BEFORE
+    // the copy_in, so the unmapped argp is never touched. Fails-without-fix: with
+    // no gate, TCSETS reaches copy_in on the unmapped user_ok and returns EFAULT,
+    // so this EPERM assertion is the discriminating regression for F2.
+    s64 r_set = viv_ioctl_for_test(p, (u64)fd, VIV_TCSETS, user_ok);
+    TEST_EXPECT_EQ(r_set, -(s64)T_E_PERM,
+                   "TCSETS from a non-owner-session proc -> EPERM (F2 gate before copy)");
+
+    // TIOCGWINSZ (isatty's probe) is a READ -- NOT session-gated. It passes the
+    // identity check (a real cons fd, F1 true-path) and reaches copy_out on the
+    // unmapped argp -> EFAULT. EFAULT (not EPERM) proves the read is ungated.
+    s64 r_get = viv_ioctl_for_test(p, (u64)fd, VIV_TIOCGWINSZ, user_ok);
+    TEST_EXPECT_EQ(r_get, -(s64)T_E_FAULT,
+                   "TIOCGWINSZ ungated: reaches copy_out (EFAULT), not EPERM");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// Design D (VIVARIUM 13.10.1): THE phenotype decision, the one function the
+// three spawn thunks and execve's commit share. The full truth table, so a
+// future 'simplification' to either input alone fails here.
+void test_vivarium_phenotype_decide(void);
+void test_vivarium_phenotype_decide(void) {
+    TEST_EXPECT_EQ((u64)phenotype_decide(false, false), (u64)PHENO_NATIVE,
+                   "no crossing + no declaration -> native (rule 3, the fail-safe)");
+    TEST_EXPECT_EQ((u64)phenotype_decide(true,  false), (u64)PHENO_LINUX,
+                   "an MPHENO_LINUX crossing -> Linux (by location, /viv/bin)");
+    TEST_EXPECT_EQ((u64)phenotype_decide(false, true),  (u64)PHENO_LINUX,
+                   "a declared Territory -> Linux (the container, no crossing)");
+    TEST_EXPECT_EQ((u64)phenotype_decide(true,  true),  (u64)PHENO_LINUX,
+                   "both -> Linux");
 }

@@ -1,0 +1,34 @@
+vkquake sdl versionnum: field-wise compares for the SDL >= 2.10 overflow
+
+The legacy SDL_VERSIONNUM encoding (X*1000 + Y*100 + Z) overflows its
+minor field at two digits: our SDL 2.32.10 encodes to 5210, above the
+SDL_NEW_VERSION_REJECT threshold SDL_VERSIONNUM(3,0,0) = 3000, so stock
+vkQuake 1.05.3 misreads a current SDL2 as SDL3 and refuses to start
+("Your version of SDL library is incompatible with me" -- hit live on
+the first W-4 boot). Replace both gates with field-wise compares: the
+minimum check walks major/minor/patch, the SDL3 reject keys on
+major >= 3 alone. Upstream vkQuake fixed the same class after SDL 2.24.
+
+--- a/Quake/main_sdl.c	2026-08-31 15:58:31
++++ b/Quake/main_sdl.c	2026-08-31 15:58:31
+@@ -48,11 +48,18 @@
+ 	SDL_GetVersion(&v);
+ 
+ 	Sys_Printf("Found SDL version %i.%i.%i\n",sdl_version->major,sdl_version->minor,sdl_version->patch);
+-	if (SDL_VERSIONNUM(sdl_version->major,sdl_version->minor,sdl_version->patch) < SDL_REQUIREDVERSION)
++	/* Field-wise compares: the legacy SDL_VERSIONNUM encoding
++	 * (X*1000 + Y*100 + Z) overflows the minor field at SDL >= 2.10 --
++	 * 2.32.10 encodes to 5210, which lands above the 3.0.0 reject
++	 * threshold (3000) and misreads a current SDL2 as SDL3. */
++	if (sdl_version->major < SDL_MIN_X ||
++	    (sdl_version->major == SDL_MIN_X &&
++	     (sdl_version->minor < SDL_MIN_Y ||
++	      (sdl_version->minor == SDL_MIN_Y && sdl_version->patch < SDL_MIN_Z))))
+ 	{	/*reject running under older SDL versions */
+ 		Sys_Error("You need at least v%d.%d.%d of SDL to run this game.", SDL_MIN_X,SDL_MIN_Y,SDL_MIN_Z);
+ 	}
+-	if (SDL_VERSIONNUM(sdl_version->major,sdl_version->minor,sdl_version->patch) >= SDL_NEW_VERSION_REJECT)
++	if (sdl_version->major >= 3)
+ 	{	/*reject running under newer (3.x) SDL */
+ 		Sys_Error("Your version of SDL library is incompatible with me.\n"
+ 			  "You need a library version in the line of %d.%d.%d\n", SDL_MIN_X,SDL_MIN_Y,SDL_MIN_Z);

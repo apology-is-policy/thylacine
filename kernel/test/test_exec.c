@@ -35,6 +35,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/thread.h>   // Design D Leg A: a fake execing Thread
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
@@ -193,7 +194,7 @@ static void drop_proc(struct Proc *p) {
 // address of byte `off` within the Burrow, or NULL if that slot is not resident.
 //
 // Every caller below reads a run that lies wholly inside ONE page (the init frame
-// is 176 bytes at the top of the stack; the data-segment checks are the first 256
+// is EXEC_INIT_STACK_SIZE bytes at the top of the stack; the data-segment checks are the first 256
 // bytes), so one lookup covers each. A run that spanned a page boundary would need
 // to re-look-up at the crossing -- separate pages are not contiguous in the direct
 // map, which is the whole point of the sparse representation.
@@ -224,7 +225,7 @@ void test_exec_from_spoor_rodata_dispatch(void) {
     exe->qid.vers = 7;
 
     u64 entry = 0, sp = 0;
-    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor");
     TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
 
@@ -300,7 +301,7 @@ void test_exec_unaligned_stays_off_image_cache(void) {
     exe->qid.vers = 1;
 
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp),
+    TEST_EXPECT_EQ(exec_setup_from_spoor(p, exe, size, NULL, 0, NULL, 0, 0, &entry, &sp),
                    0, "the unaligned rodata segment still loads");
 
     struct Vma *text = vma_lookup(p, 0x10000ull);
@@ -348,7 +349,7 @@ void test_exec_from_spoor_aliased_window_distinct(void) {
     exe->qid.vers = 3;
 
     u64 entry = 0, sp = 0;
-    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor (aliased window)");
 
     struct Vma *text = vma_lookup(p, 0x10000ull);
@@ -732,7 +733,7 @@ void test_exec_setup_auxv(void) {
     // Read the frame back from the stack BURROW via the direct map.
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
-    // L-4a: the stack is sparse; the frame lives in the last page (176 bytes).
+    // L-4a: the stack is sparse; the frame lives in the last page.
     u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
     TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
     u64 *w = (u64 *)fb;
@@ -742,9 +743,9 @@ void test_exec_setup_auxv(void) {
     TEST_EXPECT_EQ(w[1], 0ull, "argv[] terminator is NULL");
     TEST_EXPECT_EQ(w[2], 0ull, "envp[] terminator is NULL");
 
-    // auxv — eight (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ,
-    // AT_HWCAP, AT_RANDOM, AT_VDSO_CLOCK (the vDSO page maps at boot --
-    // vdso_init ran), AT_NULL last.
+    // auxv — nine (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ,
+    // AT_HWCAP, AT_RANDOM, AT_ENTRY (D-2), AT_VDSO_CLOCK (the vDSO page maps
+    // at boot -- vdso_init ran), AT_NULL last.
     TEST_EXPECT_EQ(w[3],  (u64)AT_PHDR,   "auxv[0].a_type == AT_PHDR");
     TEST_EXPECT_EQ(w[4],  0x10040ull,     "AT_PHDR == seg0 vaddr + e_phoff");
     TEST_EXPECT_EQ(w[5],  (u64)AT_PHENT,  "auxv[1].a_type == AT_PHENT");
@@ -763,10 +764,15 @@ void test_exec_setup_auxv(void) {
     TEST_ASSERT((w[12] & 0x3ull) == 0x3ull,
         "AT_HWCAP carries FP|ASIMD (the PFR0 decode)");
     TEST_EXPECT_EQ(w[13], (u64)AT_RANDOM, "auxv[5].a_type == AT_RANDOM");
-    TEST_EXPECT_EQ(w[15], (u64)AT_VDSO_CLOCK, "auxv[6].a_type == AT_VDSO_CLOCK");
-    TEST_EXPECT_EQ(w[16], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
-    TEST_EXPECT_EQ(w[17], (u64)AT_NULL,   "auxv[7].a_type == AT_NULL");
-    TEST_EXPECT_EQ(w[18], 0ull,           "AT_NULL.a_val == 0");
+    // D-2: AT_ENTRY carries the image's FINAL entry. This blob is ET_EXEC,
+    // so the final entry IS e_entry -- the bias is 0 and the tag must not
+    // have acquired one. The ET_DYN twin is elf.pie_load_bias.
+    TEST_EXPECT_EQ(w[15], (u64)AT_ENTRY,  "auxv[6].a_type == AT_ENTRY");
+    TEST_EXPECT_EQ(w[16], 0x10000ull,     "AT_ENTRY == e_entry (ET_EXEC: unbiased)");
+    TEST_EXPECT_EQ(w[17], (u64)AT_VDSO_CLOCK, "auxv[7].a_type == AT_VDSO_CLOCK");
+    TEST_EXPECT_EQ(w[18], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
+    TEST_EXPECT_EQ(w[19], (u64)AT_NULL,   "auxv[8].a_type == AT_NULL");
+    TEST_EXPECT_EQ(w[20], 0ull,           "AT_NULL.a_val == 0");
 
     // AT_RANDOM points at the 16-byte entropy block, which must lie
     // within the user stack region.
@@ -943,7 +949,7 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
 
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
-    // L-4a: the stack is sparse; the frame lives in the last page (176 bytes).
+    // L-4a: the stack is sparse; the frame lives in the last page.
     u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
     TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
     u64 *w = (u64 *)fb;
@@ -956,10 +962,10 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
     // a coherent "no phdrs" auxv (audit F1).
     TEST_EXPECT_EQ(w[6], 0ull, "AT_PHENT == 0 when AT_PHDR is unresolved");
     // The startup frame is otherwise well-formed. With the vDSO page mapped,
-    // AT_VDSO_CLOCK occupies the slot at w[15] and AT_NULL terminates at
-    // w[17] (AT_HWCAP shifted the tail by one entry).
+    // AT_ENTRY occupies w[15] and AT_VDSO_CLOCK w[17], so AT_NULL terminates
+    // at w[19] (AT_HWCAP and then D-2's AT_ENTRY each shifted the tail by one).
     TEST_EXPECT_EQ(w[0],  0ull,          "argc == 0");
-    TEST_EXPECT_EQ(w[17], (u64)AT_NULL,  "auxv terminated by AT_NULL");
+    TEST_EXPECT_EQ(w[19], (u64)AT_NULL,  "auxv terminated by AT_NULL");
 
     drop_proc(p);
 }
@@ -1073,7 +1079,7 @@ void test_exec_from_spoor_bss_only_text_icache_synced(void) {
     u64 calls0 = exec_icache_calls_for_test();
 
     u64 entry = 0, sp = 0;
-    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor (PF_X, filesz == 0)");
 
     struct Vma *text = vma_lookup(p, 0x10000ull);
@@ -1123,6 +1129,7 @@ void test_exec_from_spoor_bss_only_text_icache_synced(void) {
 void test_execve_load_into_detached(void);
 void test_execve_load_into_rejects_dirty(void);
 void test_execve_failed_load_leaves_target_drainable(void);
+void test_exec_native_rejects_dynamic_linux(void);
 
 void test_execve_load_into_detached(void) {
     struct Proc *p = make_proc();
@@ -1142,7 +1149,7 @@ void test_execve_load_into_detached(void) {
     TEST_ASSERT(nas != p->as, "the target is a DIFFERENT address space");
 
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, /*exempt=*/false, exe, size,
+    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, PHENO_NATIVE, exe, size, NULL, 0,
                             NULL, 0, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_load_into into a detached address space");
     TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
@@ -1198,13 +1205,13 @@ void test_execve_load_into_rejects_dirty(void) {
 
     // Load once -- succeeds and leaves the target populated.
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    0, "first load into a clean target");
 
     // Loading again into the SAME (now dirty) target must refuse rather than
     // overlay a second image on top of the first.
-    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    -1, "a second load into a dirty target is refused");
 
@@ -1244,7 +1251,7 @@ void test_execve_failed_load_leaves_target_drainable(void) {
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
 
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    -1, "a mid-load failure is reported");
     TEST_ASSERT(nas->vmas != NULL, "the target really is partially populated");
@@ -1260,6 +1267,288 @@ void test_execve_failed_load_leaves_target_drainable(void) {
     addrspace_unref(nas);
     spoor_clunk(exe);
     drop_proc(p);
+}
+
+// =============================================================================
+// A native exec of a dynamic Linux binary is refused, AND its diagnostic runs
+// =============================================================================
+
+// Closes the exec_say coverage gap the extinction round (5de6093f F2) named --
+// but the round's premise was half wrong. It claimed BOTH exec_report_fail and
+// exec_say were "compile-verified and never executed" because "no boot log
+// contains an exec: line". exec_report_fail is in fact covered: the drainable
+// test above drives a W+X-union failure and emits a real exec: line, and has
+// since 2026-08-01 (e47bfa31), 17 days before the round. exec_say alone was
+// genuinely never run -- the dynamic-Linux-binary / dynamic-PT_INTERP rejects
+// in exec_load_body had no test and appear in no boot log.
+//
+// The reject path: an ELF carrying PT_INTERP makes elf_load return
+// ELF_LOAD_HAS_INTERP, and when the interp names a Linux loader (brand_contains
+// "ld-musl") elf_brand_hint answers LINUX_LIKELY, so exec_load_body's native
+// arm calls exec_say and fails the load. The behaviour (dynamic binary -> -1)
+// is worth a regression on its own; running exec_say is the #244-class value --
+// a diagnostic whose only prior witness was that it compiled.
+//
+// A unit test cannot read the console ring, so this asserts the BEHAVIOUR (the
+// reject) and, by reaching the branch at all, proves exec_say executes without
+// faulting. It does not assert the emitted string.
+void test_exec_native_rejects_dynamic_linux(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // Two phdrs: a valid PT_LOAD, then a PT_INTERP naming a musl loader. The
+    // interp string sits at phdr[1].p_offset (build_elf packs it at 0x2000 --
+    // inside the EXEC_ELF_HEADER_MAX=16 KiB header read, so elf_brand_hint sees
+    // it).
+    u32 flags[2] = { PF_R | PF_X, PF_R };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+
+    static const char kInterp[] = "/lib/ld-musl-aarch64.so.1";
+    ph[1].p_type   = PT_INTERP;
+    ph[1].p_flags  = PF_R;
+    // p_offset was set to PAGE_SIZE*2 by build_elf; write the interp there.
+    for (size_t i = 0; i < sizeof(kInterp); i++)
+        g_elf_blob[ph[1].p_offset + i] = (u8)kInterp[i];
+    ph[1].p_filesz = sizeof(kInterp);   // includes the NUL
+    ph[1].p_memsz  = 0;                  // PT_INTERP is not loaded
+
+    g_blob_dev_size = size;
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1D7A11ull;
+    exe->qid.vers = 1;
+
+    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+
+    u64 entry = 0, sp = 0;
+    // The native exec rejects the dynamic binary (elf_load HAS_INTERP), and on
+    // the way out exec_say runs the LINUX_LIKELY diagnostic. Reaching this
+    // assertion means exec_say did not fault.
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
+                                  &entry, &sp),
+                   -1, "a dynamic Linux binary is refused by a native exec");
+    // Nothing was published into the address space.
+    TEST_EXPECT_EQ((u64)nas->vma_count, 0ull, "no segment mapped on the reject");
+
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+    drop_proc(p);
+}
+
+// =============================================================================
+// Design D (VIVARIUM 13.10.4): the execve re-decision's three legs (A, B, C).
+// =============================================================================
+
+// Leg B -- a FAILED load leaves the Proc's phenotype untouched. The loader is
+// handed the DECIDED phenotype as a parameter and must never write the field:
+// execve stores it only in proc_exec_replace's infallible commit region, so a
+// failed exec_load_into returns the caller to its old image with its old ABI.
+// Reuses the PT_INTERP fixture of the reject test: with the decided phenotype
+// LINUX and no program name the loader takes the Linux arm and refuses (the
+// "rewrite needs the program's own name" branch -- the one the nameless
+// register-variant spawn entries also reach, 13.10.6), with NATIVE it takes
+// the native reject; both fail, and in both the field must still read what
+// the Proc started with. This is NOT Leg C: both arms refuse, so it cannot
+// tell a field-reading dispatch from a parameter-reading one -- it witnesses
+// only "the loader never writes the field". Leg C's discriminating fixture is
+// test_exec_interp_dispatch_follows_parameter below (audit F3).
+extern void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t,
+                                                u32 pheno);
+void test_exec_load_failure_leaves_phenotype(void);
+void test_exec_load_failure_leaves_phenotype(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_ASSERT(p->phenotype == PHENO_NATIVE, "pre: a fresh Proc is native");
+
+    u32 flags[2] = { PF_R | PF_X, PF_R };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    static const char kInterp[] = "/lib/ld-musl-aarch64.so.1";
+    ph[1].p_type   = PT_INTERP;
+    ph[1].p_flags  = PF_R;
+    for (size_t i = 0; i < sizeof(kInterp); i++)
+        g_elf_blob[ph[1].p_offset + i] = (u8)kInterp[i];
+    ph[1].p_filesz = sizeof(kInterp);
+    ph[1].p_memsz  = 0;
+    g_blob_dev_size = size;
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1D7A12ull;
+    exe->qid.vers = 1;
+
+    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+    u64 entry = 0, sp = 0;
+
+    // The decided phenotype says LINUX; the load fails (no program name for the
+    // PT_INTERP rewrite). The field must NOT have moved.
+    int rc_linux = exec_load_into(nas, false, p, PHENO_LINUX, exe, size, NULL, 0,
+                                  NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    u32 after_linux = p->phenotype;
+    u64 vmas_linux  = (u64)nas->vma_count;
+    // And the native arm, for symmetry: the same fixture, decided NATIVE.
+    int rc_native = exec_load_into(nas, false, p, PHENO_NATIVE, exe, size, NULL, 0,
+                                   NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    u32 after_native = p->phenotype;
+
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+    drop_proc(p);
+
+    TEST_EXPECT_EQ(rc_linux, -1, "a nameless PT_INTERP load refuses under the Linux arm");
+    TEST_EXPECT_EQ(vmas_linux, 0ull, "no segment mapped on the refusal");
+    TEST_EXPECT_EQ(rc_native, -1, "a dynamic binary refuses under the native arm");
+    TEST_ASSERT(after_linux == PHENO_NATIVE,
+        "Leg B: a FAILED load with the decided phenotype LINUX leaves the field NATIVE");
+    TEST_ASSERT(after_native == PHENO_NATIVE,
+        "Leg B: a failed native-arm load leaves the field NATIVE");
+}
+
+// Leg A -- the phenotype-conditional exec signal reset follows the DECIDED
+// phenotype (the parameter), never the field. Set the FIELD to one ABI and
+// pass the OTHER: the arm that runs is the parameter's. The observable is the
+// note mask: the native arm clears it (Plan 9), the Linux arm keeps it (POSIX
+// "the signal mask is inherited"). Read the field instead and a Linux git
+// exec'ing the native nora keeps git's blocked-note mask across the exec.
+// The hook must also never write the field itself (only the commit does).
+void test_exec_reset_follows_decided_phenotype(void);
+void test_exec_reset_follows_decided_phenotype(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    static struct Thread th;            // BSS-zeroed; a fake execing thread
+    th.magic = THREAD_MAGIC;
+    th.proc  = p;
+
+    // (field LINUX, decided NATIVE): the Linux->native exec, the C2 editor path.
+    p->phenotype = PHENO_LINUX;
+    th.note_mask = 0xFu;
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_NATIVE);
+    u32 mask_l2n  = th.note_mask;
+    u32 field_l2n = p->phenotype;
+
+    // (field NATIVE, decided LINUX): the native->Linux exec.
+    p->phenotype = PHENO_NATIVE;
+    th.note_mask = 0xFu;
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_LINUX);
+    u32 mask_n2l  = th.note_mask;
+    u32 field_n2l = p->phenotype;
+
+    // Controls: field == decided, both ways.
+    p->phenotype = PHENO_NATIVE; th.note_mask = 0xFu;
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_NATIVE);
+    u32 mask_nn = th.note_mask;
+    p->phenotype = PHENO_LINUX;  th.note_mask = 0xFu;
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_LINUX);
+    u32 mask_ll = th.note_mask;
+
+    // Design D audit F1 (the constructed-states sweep): the self-managing-
+    // notes mark is the OLD image's; exec clears it in BOTH arms. Positive
+    // control first -- the mark reads back set before each hook -- so "false
+    // after" cannot be satisfied by a setter that never set it.
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_SELF_MANAGING_NOTES, __ATOMIC_RELAXED);
+    bool sm_before_linux = proc_is_self_managing_notes(p);
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_LINUX);
+    bool sm_after_linux = proc_is_self_managing_notes(p);
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_SELF_MANAGING_NOTES, __ATOMIC_RELAXED);
+    bool sm_before_native = proc_is_self_managing_notes(p);
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_NATIVE);
+    bool sm_after_native = proc_is_self_managing_notes(p);
+
+    th.proc = NULL;                     // the static outlives proc_free
+    drop_proc(p);
+
+    TEST_EXPECT_EQ((u64)mask_l2n, 0ull,
+        "Leg A: field LINUX + decided NATIVE -> the NATIVE arm runs (mask cleared)");
+    TEST_ASSERT(field_l2n == PHENO_LINUX,
+        "the reset never writes the field (only the commit does)");
+    TEST_EXPECT_EQ((u64)mask_n2l, 0xFull,
+        "Leg A: field NATIVE + decided LINUX -> the LINUX arm runs (mask kept)");
+    TEST_ASSERT(field_n2l == PHENO_NATIVE,
+        "the reset never writes the field (only the commit does)");
+    TEST_EXPECT_EQ((u64)mask_nn, 0ull,  "CONTROL: native/native clears");
+    TEST_EXPECT_EQ((u64)mask_ll, 0xFull, "CONTROL: linux/linux keeps");
+    TEST_ASSERT(sm_before_linux && sm_before_native,
+        "CONTROL: the self-managing mark reads set before each exec");
+    TEST_ASSERT(!sm_after_linux,
+        "F1: exec into a LINUX image clears the self-managing mark "
+        "(a Linux image carrying it has its delivery switched off)");
+    TEST_ASSERT(!sm_after_native,
+        "F1: exec into a NATIVE image clears it too (the mark is the image's)");
+}
+
+// Leg C -- the PT_INTERP dispatch follows the DECIDED phenotype (the
+// parameter), never the resolving Proc's FIELD. The impl commit claimed this
+// leg had no discriminating fixture in the tree; the audit (F3) refuted it: a
+// PT_INTERP naming `/hello` -- the static native ramfs binary kproc resolves
+// (exec_ns.resolve_absolute_ok) -- loaded with nsp = kproc, whose field is
+// NATIVE, is exactly the state Leg C describes (a native caller exec'ing a
+// dynamic pheno-mount binary: the resolve decided Linux while the field still
+// reads native). A loader dispatching on the field refuses the LINUX call; one
+// following the parameter loads the interpreter. The NATIVE call is the control
+// (a dynamic binary refuses under the native arm), and the field must not move
+// under either (Leg B).
+void test_exec_interp_dispatch_follows_parameter(void);
+void test_exec_interp_dispatch_follows_parameter(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    struct Proc *kp = t->proc;
+    TEST_ASSERT(kp->phenotype == PHENO_NATIVE, "pre: the resolving Proc's FIELD is native");
+
+    u32 flags[2] = { PF_R | PF_X, PF_R };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    static const char kInterp[] = "/hello";
+    ph[1].p_type   = PT_INTERP;
+    ph[1].p_flags  = PF_R;
+    for (size_t i = 0; i < sizeof(kInterp); i++)
+        g_elf_blob[ph[1].p_offset + i] = (u8)kInterp[i];
+    ph[1].p_filesz = sizeof(kInterp);
+    ph[1].p_memsz  = 0;
+    g_blob_dev_size = size;
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1D7A13ull;
+    exe->qid.vers = 1;
+
+    // Decided LINUX: the dispatch must follow the parameter and load /hello.
+    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+    u64 entry = 0, sp = 0;
+    int rc_linux = exec_load_into(nas, false, kp, PHENO_LINUX, exe, size, "x", 1,
+                                  NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    u64 entry_linux = entry;
+    u64 vmas_linux  = (u64)nas->vma_count;
+    u32 field_linux = kp->phenotype;
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+
+    // Decided NATIVE, same fixture, same Proc: the control refuses.
+    nas = addrspace_alloc(PROC_PAGE_MAX);
+    TEST_ASSERT(nas != NULL, "addrspace_alloc (control)");
+    entry = 0; sp = 0;
+    int rc_native = exec_load_into(nas, false, kp, PHENO_NATIVE, exe, size, "x", 1,
+                                   NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    u64 vmas_native  = (u64)nas->vma_count;
+    u32 field_native = kp->phenotype;
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+
+    TEST_EXPECT_EQ(rc_linux, 0,
+        "Leg C: decided LINUX loads the PT_INTERP interpreter although the FIELD is native");
+    TEST_ASSERT(entry_linux != 0, "the loaded image has an entry (the interpreter's)");
+    TEST_ASSERT(vmas_linux > 0, "the interpreter's segments were mapped");
+    TEST_EXPECT_EQ(rc_native, -1, "CONTROL: decided NATIVE refuses the dynamic binary");
+    TEST_EXPECT_EQ(vmas_native, 0ull, "no segment mapped on the refusal");
+    TEST_ASSERT(field_linux == PHENO_NATIVE && field_native == PHENO_NATIVE,
+        "Leg B: the loader never writes the field (only execve's commit does)");
 }
 
 // =============================================================================
@@ -1356,4 +1645,168 @@ void test_exec_stack_is_sparse(void) {
         "only the stack frame's page is charged (the eager text is not)");
 
     drop_proc(p);
+}
+
+// ---------------------------------------------------------------------------
+// exec.interp_argv_shape -- DISTRO D-4.
+//
+// The block exec_interp_argv builds is the whole of the D-4 ABI toward the
+// interpreter, and it is asserted BYTE FOR BYTE rather than by shape, for two
+// reasons that pull the same way:
+//
+//   1. exec_build_init_stack EXTINCTS when the NUL count disagrees with argc.
+//      An off-by-one in the slot arithmetic is therefore a dead kernel, not a
+//      failed exec, and no in-guest gate can survive to report it.
+//   2. This is the ONLY place the `--argv0` claim is discriminable. In a
+//      container, a caller's argv[0] always equals the path it resolved -- the
+//      shells pass the word they typed -- so the gate cannot tell "argv[0] was
+//      carried" from "the path happened to be the same string". Here the two
+//      are deliberately DIFFERENT strings.
+// ---------------------------------------------------------------------------
+
+// Compare `blob` against `n` expected strings laid out back-to-back, each
+// NUL-terminated. Returns the index of the first slot that differs, or -1.
+static int argv_blob_differs_at(const char *blob, u32 blob_len,
+                                const char *const *want, u32 n) {
+    u32 off = 0;
+    for (u32 i = 0; i < n; i++) {
+        u32 j = 0;
+        for (;;) {
+            if (off + j >= blob_len) return (int)i;      // ran off the end
+            char b = blob[off + j];
+            char w = want[i][j];
+            if (b != w) return (int)i;
+            if (b == '\0') break;
+            j++;
+        }
+        off += j + 1;
+    }
+    return (off == blob_len) ? -1 : (int)n;              // trailing junk
+}
+
+void test_exec_interp_argv_shape(void) {
+    static const char INTERP[] = "/lib/ld-musl-aarch64.so.1";
+    u32 len = 0, n = 0;
+
+    // (1) THE DISCRIMINATING CASE: argv[0] is NOT the path. A busybox applet
+    // invoked as `ls` out of `/bin/busybox` is exactly this, and it is the
+    // shape that separates --argv0 from handing over the path alone.
+    {
+        static const char argv[] = "ls\0-l";             // argc 2
+        char *b = exec_interp_argv(INTERP, sizeof(INTERP) - 1,
+                                   "/bin/busybox", 12,
+                                   argv, sizeof(argv), 2, &len, &n);
+        TEST_ASSERT(b != NULL, "the rewrite builds");
+        static const char *want[] = { INTERP, "--argv0", "ls", "--",
+                                      "/bin/busybox", "-l" };
+        TEST_EXPECT_EQ(argv_blob_differs_at(b, len, want, 6), -1,
+            "argv0 travels in --argv0 while the PATH stays the program slot");
+        TEST_EXPECT_EQ((u64)n, 6ull, "argc + 4");
+        kfree(b);
+    }
+
+    // (2) The frame builder's contract, stated as its own assertion: exactly
+    // `n` NULs, and the last byte is one. This is the extinction above.
+    {
+        static const char argv[] = "sh\0-c\0echo hi";     // argc 3
+        char *b = exec_interp_argv(INTERP, sizeof(INTERP) - 1, "/bin/sh", 7,
+                                   argv, sizeof(argv), 3, &len, &n);
+        TEST_ASSERT(b != NULL, "the rewrite builds");
+        u32 nuls = 0;
+        for (u32 i = 0; i < len; i++) if (b[i] == '\0') nuls++;
+        TEST_EXPECT_EQ((u64)nuls, (u64)n, "exactly argc NULs (the frame contract)");
+        TEST_EXPECT_EQ((u64)b[len - 1], 0ull, "the block ends in a NUL");
+        TEST_EXPECT_EQ((u64)n, 7ull, "argc 3 -> 7");
+        kfree(b);
+    }
+
+    // (3) argc == 0. Representable on both entries and unrepresentable through
+    // a loader that must name a pathname, so the program is handed an empty
+    // argv[0] and sees argc == 1 -- the DISTRO.md section 3.2 ledger row.
+    {
+        char *b = exec_interp_argv(INTERP, sizeof(INTERP) - 1, "/bin/true", 9,
+                                   NULL, 0, 0, &len, &n);
+        TEST_ASSERT(b != NULL, "the rewrite builds with no argv at all");
+        static const char *want[] = { INTERP, "--argv0", "", "--", "/bin/true" };
+        TEST_EXPECT_EQ(argv_blob_differs_at(b, len, want, 5), -1,
+            "argc 0 yields an EMPTY argv0 slot, never a missing one");
+        TEST_EXPECT_EQ((u64)n, 5ull, "argc 0 -> 5 slots (the app then sees 1)");
+        kfree(b);
+    }
+
+    // (4) The bounds REFUSE rather than truncate. An argv block already at the
+    // ABI ceiling cannot absorb four more slots, and the honest answer is a
+    // failed exec -- a silently shortened vector would run the program with
+    // arguments it never received.
+    {
+        static char big[EXEC_ARGV_DATA_MAX];
+        for (u32 i = 0; i < sizeof(big) - 1; i++) big[i] = 'x';
+        big[sizeof(big) - 1] = '\0';
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/x", 6,
+                           big, sizeof(big), 1, &len, &n), 0ull,
+            "an argv block at the ceiling REFUSES the rewrite");
+    }
+    {
+        // The COUNT ceiling, independently: one NUL per slot, argc at the max.
+        static char many[EXEC_ARGV_MAX];
+        for (u32 i = 0; i < sizeof(many); i++) many[i] = '\0';
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/x", 6,
+                           many, sizeof(many), EXEC_ARGV_MAX, &len, &n), 0ull,
+            "an argc at the ceiling REFUSES the rewrite");
+    }
+
+    // (5) A mis-packed input (argc > 0 but argv[0] unterminated within the
+    // block) is refused here rather than carried into the frame builder, whose
+    // answer to a bad count is an extinction.
+    {
+        static const char bad[] = { 'l', 's' };          // no NUL anywhere
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/ls", 7,
+                           bad, sizeof(bad), 1, &len, &n), 0ull,
+            "an unterminated argv[0] REFUSES the rewrite");
+    }
+    {
+        // ...and the same for the TAIL. Both production entries validate this
+        // before the rewrite runs, so this guards the EXPORTED surface rather
+        // than a live path -- which is precisely the case that would rot.
+        static const char bad[] = { 'l', 's', '\0', '-', 'l' };   // no final NUL
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/ls", 7,
+                           bad, sizeof(bad), 2, &len, &n), 0ull,
+            "an argv block not ending in a NUL REFUSES the rewrite");
+    }
+
+    // (6) SELF-AUDIT SA-1/SA-9. The rules that make the NUL-count identity hold
+    // for ANY input rather than only for the two production callers. Each of
+    // these desyncs argc from the block's NUL count, and the frame builder
+    // answers a desync with an EXTINCTION -- so each must be refused here.
+    {
+        static const char argv[] = "ls\0-l";              // 2 NULs
+        // argc that OVERSTATES the block.
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/ls", 7,
+                           argv, sizeof(argv), 3, &len, &n), 0ull,
+            "argc disagreeing with the block's NUL count REFUSES");
+        // an embedded NUL in the PATH would split one slot into two.
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin\0ls", 7,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an embedded NUL in the path REFUSES");
+        // ...and in the interpreter.
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           "/lib\0ld", 7, "/bin/ls", 7,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an embedded NUL in the interpreter REFUSES");
+        // A zero-length path would have the ldso open("").
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "", 0,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an empty program path REFUSES");
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           "", 0, "/bin/ls", 7,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an empty interpreter path REFUSES");
+    }
 }

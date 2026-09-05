@@ -20,27 +20,31 @@
 //     never removed (an empty root leaf is the blank screen).
 //   - pane PUBLIC ids are monotonic and never reused (the net-3d
 //     discipline for free: a stale pane fid resolves to nothing).
-//   - geometry: equal division (remainder to the last child), a 1px
-//     content inset per pane iff more than one pane is visible (the
+//   - geometry: equal division (remainder to the last child); the Daylight
+//     chrome ring per pane iff more than one pane is visible (the
 //     single-fullscreen root leaf keeps the stage-0 borderless look).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use libhalcyon::theme;
+
 pub const MAX_PANES: usize = 32;
 
-/// Border/background palette (compositor chrome; glyph-free per D7).
+/// The blank/empty-pane fill (compositor background before a client presents).
+/// The Daylight chrome colours (bevel/hairline/floor/strip) live in
+/// `libhalcyon::theme::DAYLIGHT` -- the single token source (HALCYON-VISUAL);
+/// server.rs's painters read them from there.
 pub const BG_COLOR: u32 = 0xFF10_1014;
-pub const BORDER_COLOR: u32 = 0xFF3A_3A44;
-pub const FOCUS_COLOR: u32 = 0xFF7A_9ECC;
-/// A tab/stack segment whose child is active but not on the focus path.
-pub const ACTIVE_COLOR: u32 = 0xFF5A_5A66;
 
 /// The tab/stack indicator strip height (G-6c; glyph-free per D7 -- the
 /// compositor paints colored segments, never titles). Carved from the TOP
 /// of a tabbed/stacked container's rect: tabbed = ONE row divided into
-/// per-child segments; stacked = one full-width row PER child.
-pub const TAB_STRIP_H: u32 = 5;
+/// per-child segments; stacked = one full-width row PER child. The value
+/// lives in `theme::METRICS.tab_strip_h` (the single chrome-token source).
+fn tab_strip_h() -> u32 {
+    theme::METRICS.tab_strip_h as u32
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Dir {
@@ -101,6 +105,11 @@ pub enum Role {
     Content,
     Chrome,
     PinTarget,
+    /// H-3c: the ephemeral verb menu (a SURFACE role only; never a pane's).
+    Menu,
+    /// H-3d: the screen-bottom status bar (a SURFACE role only): the one
+    /// piece of chrome bound to the DISPLAY, not to a pane.
+    Status,
 }
 
 impl Role {
@@ -109,6 +118,8 @@ impl Role {
             Role::Content => "content",
             Role::Chrome => "chrome",
             Role::PinTarget => "pin-target",
+            Role::Menu => "menu",
+            Role::Status => "status",
         }
     }
     pub fn parse(s: &str) -> Option<Role> {
@@ -116,6 +127,41 @@ impl Role {
             "content" => Some(Role::Content),
             "chrome" => Some(Role::Chrome),
             "pin-target" => Some(Role::PinTarget),
+            "menu" => Some(Role::Menu),
+            "status" => Some(Role::Status),
+            _ => None,
+        }
+    }
+}
+
+/// A tile's recorded status (HALCYON.md 13.6; HALCYON-VISUAL 1.4): the exit
+/// of the last command completed in it. `Resting` = none recorded (a fresh
+/// tile; "nothing has run yet"). The DISPLAY key is derived, never stored:
+/// the LIVE (focused) tile shows sage unless `Err` (cinnabar); a tile that
+/// is not live shows no key at all -- so a stale status can never mark a
+/// tile that does not hold input. Set only through the renderer-gated
+/// `tag <id> status` global verb; reset here whenever the tile's program
+/// changes (alloc / host / the root collapse).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Status {
+    Resting,
+    Ok,
+    Err,
+}
+
+impl Status {
+    pub fn name(self) -> &'static str {
+        match self {
+            Status::Resting => "resting",
+            Status::Ok => "ok",
+            Status::Err => "err",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Status> {
+        match s {
+            "resting" => Some(Status::Resting),
+            "ok" => Some(Status::Ok),
+            "err" => Some(Status::Err),
             _ => None,
         }
     }
@@ -130,7 +176,12 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub const ZERO: Rect = Rect { x: 0, y: 0, w: 0, h: 0 };
+    pub const ZERO: Rect = Rect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    };
 
     /// Intersection (empty rects collapse to ZERO).
     pub fn intersect(self, o: Rect) -> Rect {
@@ -141,16 +192,34 @@ impl Rect {
         if x2 <= x1 || y2 <= y1 {
             return Rect::ZERO;
         }
-        Rect { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
+        Rect {
+            x: x1,
+            y: y1,
+            w: x2 - x1,
+            h: y2 - y1,
+        }
     }
     pub fn is_empty(self) -> bool {
         self.w == 0 || self.h == 0
     }
+    /// Does the half-open rect contain display point (x, y)?
+    pub fn contains(self, x: u32, y: u32) -> bool {
+        x >= self.x
+            && x < self.x.saturating_add(self.w)
+            && y >= self.y
+            && y < self.y.saturating_add(self.h)
+    }
 }
 
 pub enum Kind {
-    Leaf { surface: Option<usize> },
-    Container { mode: Mode, children: Vec<usize>, active: usize },
+    Leaf {
+        surface: Option<usize>,
+    },
+    Container {
+        mode: Mode,
+        children: Vec<usize>,
+        active: usize,
+    },
 }
 
 pub struct Pane {
@@ -162,10 +231,46 @@ pub struct Pane {
     pub tag: String,
     /// The pane's outer rect (computed; ZERO when hidden).
     pub rect: Rect,
-    /// The content rect (outer minus the border inset; ZERO when hidden).
+    /// The content rect (outer minus the border inset AND the tag bar; ZERO
+    /// when hidden). This is the client's usable area.
     pub content: Rect,
+    /// The Daylight tag bar (HALCYON-VISUAL 3.2/4): the `header_h` strip at
+    /// the TOP of the leaf's inner rect, inside the ring, above `content`.
+    /// ZERO when none -- a single fullscreen leaf, a container, or a leaf too
+    /// small to carve. A Role::Chrome surface binds here (H-3b); the
+    /// compositor paints it `header`-bg as the resting fallback.
+    pub tagbar: Rect,
+    /// The tile's recorded last-command status (see `Status`).
+    pub status: Status,
     /// Visible under the current layout (tab-inactive subtrees are not).
     pub visible: bool,
+    /// H-4b: a one-shot placement claim (`pane/<id>/claim` mints it, a
+    /// `create ... claim=<tok>` consumes it). Set only on an EMPTY leaf and
+    /// cleared the instant the leaf is hosted or freed -- so a claim can
+    /// never steer a surface into a leaf that already holds one.
+    pub claim_token: Option<u128>,
+    /// H-4b-2: the principal that owns this pane when it is an EMPTY leaf --
+    /// recorded at SPLIT from the splitting actor (0 = the renderer's / the
+    /// environment; a user session stamps its own principal). Load-bearing
+    /// on EXACTLY two paths: the claim mint (a session mints a placement
+    /// token only on an empty leaf it owns) and the session reap (an empty
+    /// leaf is closed when its owning principal's last conn goes). It is
+    /// NOT consulted for structural authority (`actor_owns_subtree` keys on
+    /// the hosted SURFACES, and an all-empty subtree is vacuously anyone's
+    /// -- HALCYON.md 13.6); an occupied leaf's ownership is its surface's,
+    /// so this field is meaningful only while the leaf is empty.
+    pub owner_principal: u32,
+    /// F2 (d-1b tiling completion): this leaf hosts a BACKGROUNDED surface (a
+    /// non-session renderer while a session holds the display). Set by
+    /// reconcile BEFORE recompute from the tree (owner-based, visibility-
+    /// independent). Consulted ONLY by `layout_pane`'s Split arm, which
+    /// excludes a backgrounded leaf from its parent's division (zero rect) so
+    /// the foreground siblings fill the space. Orthogonal to
+    /// `Surface.backgrounded` (visibility-based, post-recompute, drives
+    /// compose/scanout): a Tab/Stack ACTIVE child is shown via the One path
+    /// regardless of this flag, so a backgrounded-but-active leaf is never
+    /// blanked.
+    pub backgrounded: bool,
 }
 
 pub struct Layout {
@@ -207,9 +312,13 @@ impl Layout {
         if live >= MAX_PANES {
             return None;
         }
-        self.id_seq += 1;
+        // Ids are never reused, so exhaustion REFUSES rather than wraps (a
+        // wrap would alias a live id); 2^32 allocations away, but the
+        // counter is driven by a client verb, so it fails clean.
+        let id = self.id_seq.checked_add(1)?;
+        self.id_seq = id;
         let p = Pane {
-            id: self.id_seq,
+            id,
             parent,
             kind,
             role: Role::Content,
@@ -217,7 +326,12 @@ impl Layout {
             tag: String::new(),
             rect: Rect::ZERO,
             content: Rect::ZERO,
+            tagbar: Rect::ZERO,
+            status: Status::Resting,
             visible: false,
+            claim_token: None,
+            owner_principal: 0,
+            backgrounded: false,
         };
         let slot = match self.panes.iter().position(|s| s.is_none()) {
             Some(i) => {
@@ -269,10 +383,39 @@ impl Layout {
         }
     }
 
+    /// H-4b-2: is `slot` an EMPTY leaf (a leaf hosting no surface)? The
+    /// unit the claim mint and the session reap both key on -- ownership
+    /// (`owner_principal`) is meaningful only for these.
+    pub fn is_empty_leaf(&self, slot: usize) -> bool {
+        matches!(
+            self.get(slot).map(|p| &p.kind),
+            Some(Kind::Leaf { surface: None })
+        )
+    }
+
+    /// H-4b-2: the recorded owner principal of `slot` (0 = the renderer's /
+    /// the environment, and the default for a missing slot). Meaningful for
+    /// an empty leaf; an occupied leaf's real owner is its surface's.
+    pub fn pane_owner_principal(&self, slot: usize) -> u32 {
+        self.get(slot).map_or(0, |p| p.owner_principal)
+    }
+
+    /// H-4b-2: stamp `slot`'s owner principal (called after `split` with
+    /// the splitting actor's principal, and by the reap to hand a reaped
+    /// root-leaf back to the environment).
+    pub fn set_owner_principal(&mut self, slot: usize, principal: u32) {
+        if let Some(p) = self.get_mut(slot) {
+            p.owner_principal = principal;
+        }
+    }
+
     /// The leaf hosting surface `n` (linear scan; the table is small).
     pub fn find_hosting(&self, n: usize) -> Option<usize> {
         self.panes.iter().enumerate().find_map(|(i, p)| match p {
-            Some(Pane { kind: Kind::Leaf { surface: Some(s) }, .. }) if *s == n => Some(i),
+            Some(Pane {
+                kind: Kind::Leaf { surface: Some(s) },
+                ..
+            }) if *s == n => Some(i),
             _ => None,
         })
     }
@@ -311,8 +454,9 @@ impl Layout {
                 Kind::Container { mode: m, .. } if m == mode);
             if same {
                 let new_leaf = self.alloc(Some(pi), Kind::Leaf { surface: None })?;
-                if let Some(Kind::Container { children, active, .. }) =
-                    self.get_mut(pi).map(|p| &mut p.kind)
+                if let Some(Kind::Container {
+                    children, active, ..
+                }) = self.get_mut(pi).map(|p| &mut p.kind)
                 {
                     let at = children.iter().position(|&c| c == slot).unwrap_or(0);
                     children.insert(at + 1, new_leaf);
@@ -324,11 +468,14 @@ impl Layout {
             }
         }
         // Nest: the leaf's position becomes a container [leaf, new-leaf].
-        let container = self.alloc(parent, Kind::Container {
-            mode,
-            children: Vec::new(),
-            active: 1,
-        })?;
+        let container = self.alloc(
+            parent,
+            Kind::Container {
+                mode,
+                children: Vec::new(),
+                active: 1,
+            },
+        )?;
         let new_leaf = match self.alloc(Some(container), Kind::Leaf { surface: None }) {
             Some(l) => l,
             None => {
@@ -349,8 +496,7 @@ impl Layout {
             None => self.root = container,
         }
         self.get_mut(slot).unwrap().parent = Some(container);
-        if let Some(Kind::Container { children, .. }) =
-            self.get_mut(container).map(|p| &mut p.kind)
+        if let Some(Kind::Container { children, .. }) = self.get_mut(container).map(|p| &mut p.kind)
         {
             children.push(slot);
             children.push(new_leaf);
@@ -365,21 +511,92 @@ impl Layout {
     /// Returns the hosting slot (None: pane table exhausted).
     pub fn host(&mut self, n: usize) -> Option<usize> {
         let f = self.focused;
-        if let Some(Kind::Leaf { surface: s @ None }) =
-            self.get_mut(f).map(|p| &mut p.kind)
-        {
-            *s = Some(n);
-            self.epoch += 1;
-            return Some(f);
+        if let Some(p) = self.get_mut(f) {
+            if let Kind::Leaf { surface: s @ None } = &mut p.kind {
+                *s = Some(n);
+                // A new program takes the tile: its status starts fresh.
+                p.status = Status::Resting;
+                p.claim_token = None;
+                self.epoch += 1;
+                return Some(f);
+            }
         }
         let r = self.get(f)?.content;
-        let mode = if r.w >= r.h { Mode::SplitH } else { Mode::SplitV };
+        let mode = if r.w >= r.h {
+            Mode::SplitH
+        } else {
+            Mode::SplitV
+        };
         let leaf = self.split(f, mode)?;
         if let Some(Kind::Leaf { surface }) = self.get_mut(leaf).map(|p| &mut p.kind) {
             *surface = Some(n);
         }
         self.epoch += 1;
         Some(leaf)
+    }
+
+    /// H-4b: host surface `n` into the SPECIFIC empty leaf `slot` (the
+    /// claim-token placement path) -- never splits, never moves focus (the
+    /// tool arranges the whole skeleton, then sets focus once). Returns
+    /// `slot` on success; None if `slot` is not an empty leaf (a container,
+    /// a bad slot, or a leaf hosted since the claim was minted). Clears the
+    /// leaf's claim regardless of the surface it now holds.
+    pub fn host_into(&mut self, n: usize, slot: usize) -> Option<usize> {
+        let p = self.get_mut(slot)?;
+        if let Kind::Leaf { surface: s @ None } = &mut p.kind {
+            *s = Some(n);
+            p.status = Status::Resting;
+            p.claim_token = None;
+            self.epoch += 1;
+            Some(slot)
+        } else {
+            None
+        }
+    }
+
+    /// H-4b: mint a placement claim on the empty leaf `slot`. Returns false
+    /// (nothing stored) unless `slot` is an EMPTY leaf -- an occupied leaf
+    /// or a container is not claimable. Last mint wins (a fresh read
+    /// re-tokens the leaf); a matching `create claim=` consumes it.
+    pub fn mint_claim(&mut self, slot: usize, token: u128) -> bool {
+        match self.get_mut(slot) {
+            Some(Pane {
+                kind: Kind::Leaf { surface: None },
+                claim_token,
+                ..
+            }) => {
+                *claim_token = Some(token);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// H-4b: the empty leaf whose live claim matches `token`, if any
+    /// (non-consuming; `consume_claim` spends it).
+    fn find_claim(&self, token: u128) -> Option<usize> {
+        self.panes.iter().position(|p| {
+            matches!(
+                p,
+                Some(Pane {
+                    kind: Kind::Leaf { surface: None },
+                    claim_token: Some(t),
+                    ..
+                }) if *t == token
+            )
+        })
+    }
+
+    /// H-4b: spend the claim `token` -- clear it (one-shot) and return the
+    /// empty leaf it named. None if no empty leaf carries it (a bad/stale
+    /// token, or the leaf was hosted since the mint). The caller hosts into
+    /// the returned slot; a replay of the same token lands nothing.
+    pub fn consume_claim(&mut self, token: u128) -> Option<usize> {
+        let slot = self.find_claim(token)?;
+        if let Some(p) = self.get_mut(slot) {
+            p.claim_token = None;
+        }
+        Some(slot)
     }
 
     /// Close a pane. A leaf is removed (root: stays as an empty leaf); a
@@ -399,6 +616,8 @@ impl Layout {
             // The root never leaves; it collapses back to an empty leaf.
             if let Some(p) = self.get_mut(slot) {
                 p.kind = Kind::Leaf { surface: None };
+                p.status = Status::Resting;
+                p.claim_token = None;
             }
             // Free every other pane (the subtree was the whole tree).
             for i in 0..self.panes.len() {
@@ -414,8 +633,9 @@ impl Layout {
             None => return,
         };
         self.free_subtree(slot);
-        if let Some(Kind::Container { children, active, .. }) =
-            self.get_mut(parent).map(|p| &mut p.kind)
+        if let Some(Kind::Container {
+            children, active, ..
+        }) = self.get_mut(parent).map(|p| &mut p.kind)
         {
             if let Some(at) = children.iter().position(|&c| c == slot) {
                 children.remove(at);
@@ -430,6 +650,37 @@ impl Layout {
             self.focused = f;
         }
         self.dissolve_if_single(parent);
+    }
+
+    /// Every hosted surface in the subtree at `slot` (the pane-tree trust
+    /// model's ownership question: a client owns a subtree iff every one of
+    /// these is its own).
+    pub fn subtree_surfaces(&self, slot: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.collect_surfaces(slot, &mut out);
+        out
+    }
+
+    /// F2: every hosted leaf in `slot`'s subtree as (leaf slot, surface) --
+    /// the ownership walk's input, so a caller can consult the LEAF's stable
+    /// tree `backgrounded` flag rather than the surface's visibility-derived
+    /// one (which clears the moment a tab hides the leaf).
+    pub fn subtree_hosted(&self, slot: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        self.collect_hosted(slot, &mut out);
+        out
+    }
+
+    fn collect_hosted(&self, slot: usize, out: &mut Vec<(usize, usize)>) {
+        match self.get(slot).map(|p| &p.kind) {
+            Some(Kind::Leaf { surface: Some(n) }) => out.push((slot, *n)),
+            Some(Kind::Container { children, .. }) => {
+                for &c in children.clone().iter() {
+                    self.collect_hosted(c, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn collect_surfaces(&self, slot: usize, out: &mut Vec<usize>) {
@@ -459,17 +710,16 @@ impl Layout {
     /// place (in the grandparent, or as root).
     fn dissolve_if_single(&mut self, slot: usize) {
         let (only, gp) = match self.get(slot) {
-            Some(Pane { kind: Kind::Container { children, .. }, parent, .. })
-                if children.len() == 1 =>
-            {
-                (children[0], *parent)
-            }
+            Some(Pane {
+                kind: Kind::Container { children, .. },
+                parent,
+                ..
+            }) if children.len() == 1 => (children[0], *parent),
             _ => return,
         };
         match gp {
             Some(g) => {
-                if let Some(Kind::Container { children, .. }) =
-                    self.get_mut(g).map(|p| &mut p.kind)
+                if let Some(Kind::Container { children, .. }) = self.get_mut(g).map(|p| &mut p.kind)
                 {
                     if let Some(at) = children.iter().position(|&c| c == slot) {
                         children[at] = only;
@@ -493,7 +743,9 @@ impl Layout {
     pub fn first_leaf(&self, slot: usize) -> Option<usize> {
         match self.get(slot).map(|p| &p.kind) {
             Some(Kind::Leaf { .. }) => Some(slot),
-            Some(Kind::Container { children, active, .. }) => {
+            Some(Kind::Container {
+                children, active, ..
+            }) => {
                 let mut order: Vec<usize> = Vec::new();
                 if *active < children.len() {
                     order.push(children[*active]);
@@ -527,8 +779,9 @@ impl Layout {
                 // tab/stack ancestor (revealing the focused leaf).
                 let mut cur = l;
                 while let Some(pi) = self.get(cur).and_then(|p| p.parent) {
-                    if let Some(Kind::Container { children, active, .. }) =
-                        self.get_mut(pi).map(|p| &mut p.kind)
+                    if let Some(Kind::Container {
+                        children, active, ..
+                    }) = self.get_mut(pi).map(|p| &mut p.kind)
                     {
                         if let Some(at) = children.iter().position(|&c| c == cur) {
                             if *active != at {
@@ -545,18 +798,23 @@ impl Layout {
         }
     }
 
-    /// Set a container's mode (a leaf targets its parent container --
-    /// the i3 shape). False = no container to act on.
-    pub fn set_mode(&mut self, slot: usize, mode: Mode) -> bool {
-        let target = match self.get(slot).map(|p| &p.kind) {
+    /// The container a `mode` on `slot` acts on: the pane itself, or a
+    /// leaf's parent (the i3 shape). None = nothing to act on.
+    pub fn mode_target(&self, slot: usize) -> Option<usize> {
+        match self.get(slot).map(|p| &p.kind) {
             Some(Kind::Container { .. }) => Some(slot),
             Some(Kind::Leaf { .. }) => self.get(slot).and_then(|p| p.parent),
             None => None,
-        };
+        }
+    }
+
+    /// Set a container's mode (a leaf targets its parent container --
+    /// the i3 shape). False = no container to act on.
+    pub fn set_mode(&mut self, slot: usize, mode: Mode) -> bool {
+        let target = self.mode_target(slot);
         match target {
             Some(t) => {
-                if let Some(Kind::Container { mode: m, .. }) =
-                    self.get_mut(t).map(|p| &mut p.kind)
+                if let Some(Kind::Container { mode: m, .. }) = self.get_mut(t).map(|p| &mut p.kind)
                 {
                     if *m != mode {
                         *m = mode;
@@ -610,9 +868,18 @@ impl Layout {
     /// orthogonal overlap. False = no candidate (edge of the screen, or
     /// zoomed -- only one leaf is visible then).
     pub fn focus_dir(&mut self, dir: Dir) -> bool {
+        match self.neighbor_dir(dir) {
+            Some(s) => self.focus(s),
+            None => false,
+        }
+    }
+
+    /// The leaf `focus_dir` would move to, without moving (the pane-tree
+    /// gate asks before it lets a client walk focus onto a tile).
+    pub fn neighbor_dir(&self, dir: Dir) -> Option<usize> {
         let fr = match self.get(self.focused) {
             Some(p) => p.rect,
-            None => return false,
+            None => return None,
         };
         let overlap = |a1: u32, l1: u32, a2: u32, l2: u32| -> u32 {
             let lo = a1.max(a2);
@@ -630,14 +897,26 @@ impl Layout {
             }
             let r = p.rect;
             let (ok, dist, ov) = match dir {
-                Dir::Left => (r.x + r.w <= fr.x, fr.x - (r.x + r.w).min(fr.x),
-                    overlap(r.y, r.h, fr.y, fr.h)),
-                Dir::Right => (fr.x + fr.w <= r.x, r.x.saturating_sub(fr.x + fr.w),
-                    overlap(r.y, r.h, fr.y, fr.h)),
-                Dir::Up => (r.y + r.h <= fr.y, fr.y - (r.y + r.h).min(fr.y),
-                    overlap(r.x, r.w, fr.x, fr.w)),
-                Dir::Down => (fr.y + fr.h <= r.y, r.y.saturating_sub(fr.y + fr.h),
-                    overlap(r.x, r.w, fr.x, fr.w)),
+                Dir::Left => (
+                    r.x + r.w <= fr.x,
+                    fr.x - (r.x + r.w).min(fr.x),
+                    overlap(r.y, r.h, fr.y, fr.h),
+                ),
+                Dir::Right => (
+                    fr.x + fr.w <= r.x,
+                    r.x.saturating_sub(fr.x + fr.w),
+                    overlap(r.y, r.h, fr.y, fr.h),
+                ),
+                Dir::Up => (
+                    r.y + r.h <= fr.y,
+                    fr.y - (r.y + r.h).min(fr.y),
+                    overlap(r.x, r.w, fr.x, fr.w),
+                ),
+                Dir::Down => (
+                    fr.y + fr.h <= r.y,
+                    r.y.saturating_sub(fr.y + fr.h),
+                    overlap(r.x, r.w, fr.x, fr.w),
+                ),
             };
             if !ok || ov == 0 {
                 continue;
@@ -650,9 +929,25 @@ impl Layout {
                 best = Some((slot, dist, ov));
             }
         }
-        match best {
-            Some((s, _, _)) => self.focus(s),
-            None => false,
+        best.map(|(s, _, _)| s)
+    }
+
+    /// The nearest tab/stack ancestor of `slot` (the container `tab_cycle`
+    /// acts on from there). None: no tabbed or stacked ancestor.
+    pub fn tab_ancestor(&self, slot: usize) -> Option<usize> {
+        let mut cur = slot;
+        loop {
+            let p = self.get(cur).and_then(|p| p.parent)?;
+            if matches!(
+                self.get(p).map(|q| &q.kind),
+                Some(Kind::Container {
+                    mode: Mode::Tabbed | Mode::Stacked,
+                    ..
+                })
+            ) {
+                return Some(p);
+            }
+            cur = p;
         }
     }
 
@@ -664,8 +959,9 @@ impl Layout {
             Some(p) => p,
             None => return,
         };
-        if let Some(Kind::Container { children, active, .. }) =
-            self.get_mut(parent).map(|p| &mut p.kind)
+        if let Some(Kind::Container {
+            children, active, ..
+        }) = self.get_mut(parent).map(|p| &mut p.kind)
         {
             if let Some(at) = children.iter().position(|&c| c == slot) {
                 children.remove(at);
@@ -712,11 +1008,14 @@ impl Layout {
                         return false;
                     }
                     let mode = if horiz { Mode::SplitH } else { Mode::SplitV };
-                    let c = match self.alloc(None, Kind::Container {
-                        mode,
-                        children: Vec::new(),
-                        active: 0,
-                    }) {
+                    let c = match self.alloc(
+                        None,
+                        Kind::Container {
+                            mode,
+                            children: Vec::new(),
+                            active: 0,
+                        },
+                    ) {
                         Some(c) => c,
                         None => return false, // pane table full: untouched
                     };
@@ -787,9 +1086,7 @@ impl Layout {
             // REPLACED in place at its own index).
             let at = if before { i } else { i + 1 };
             self.detach_leaf(slot);
-            if let Some(Kind::Container { children, .. }) =
-                self.get_mut(anc).map(|p| &mut p.kind)
-            {
+            if let Some(Kind::Container { children, .. }) = self.get_mut(anc).map(|p| &mut p.kind) {
                 let at = at.min(children.len());
                 children.insert(at, slot);
             }
@@ -812,16 +1109,41 @@ impl Layout {
             };
             let is_tab = matches!(
                 self.get(p).map(|q| &q.kind),
-                Some(Kind::Container { mode: Mode::Tabbed | Mode::Stacked, .. })
+                Some(Kind::Container {
+                    mode: Mode::Tabbed | Mode::Stacked,
+                    ..
+                })
             );
             if is_tab {
+                // F2 structural transparency: cycle over the NON-backgrounded
+                // children, so `tab next/prev` never lands on a stepped-back
+                // console leaf. Snapshot children first (releasing the borrow),
+                // flag bg-ness, then advance under the mut borrow.
+                let kids: Vec<usize> = match self.get(p).map(|q| &q.kind) {
+                    Some(Kind::Container { children, .. }) => children.clone(),
+                    _ => return false,
+                };
+                let bg: Vec<bool> = kids.iter().map(|&c| self.is_bg_leaf(c)).collect();
                 let target = match self.get_mut(p).map(|q| &mut q.kind) {
-                    Some(Kind::Container { children, active, .. }) => {
+                    Some(Kind::Container {
+                        children, active, ..
+                    }) => {
                         let n = children.len();
                         if n == 0 {
                             return false;
                         }
-                        *active = if forward { (*active + 1) % n } else { (*active + n - 1) % n };
+                        let mut next = *active;
+                        for _ in 0..n {
+                            next = if forward {
+                                (next + 1) % n
+                            } else {
+                                (next + n - 1) % n
+                            };
+                            if !bg.get(next).copied().unwrap_or(false) {
+                                break;
+                            }
+                        }
+                        *active = next;
                         children[*active]
                     }
                     _ => return false,
@@ -850,8 +1172,8 @@ impl Layout {
     /// to carve; children then get the full rect and no strip paints).
     fn strip_h(mode: Mode, n: u32, rect: Rect) -> u32 {
         let total = match mode {
-            Mode::Tabbed => TAB_STRIP_H,
-            Mode::Stacked => TAB_STRIP_H * n.max(1),
+            Mode::Tabbed => tab_strip_h(),
+            Mode::Stacked => tab_strip_h() * n.max(1),
             _ => 0,
         };
         if total == 0 || rect.h < total + 8 || rect.w < 8 {
@@ -870,21 +1192,46 @@ impl Layout {
             .enumerate()
             .filter_map(|(i, p)| match p {
                 Some(Pane {
-                    kind: Kind::Container { mode: m @ (Mode::Tabbed | Mode::Stacked), children, active },
+                    kind:
+                        Kind::Container {
+                            mode: m @ (Mode::Tabbed | Mode::Stacked),
+                            children,
+                            active,
+                        },
                     visible: true,
                     rect,
                     ..
                 }) => {
-                    let strip = Self::strip_h(*m, children.len() as u32, *rect);
+                    // F2 structural transparency: a BACKGROUNDED leaf is not a
+                    // strip segment. Filter to the effective children and remap
+                    // the active into that list (clamped in range).
+                    let eff: Vec<usize> = children
+                        .iter()
+                        .copied()
+                        .filter(|&c| !self.is_bg_leaf(c))
+                        .collect();
+                    if eff.is_empty() {
+                        return None;
+                    }
+                    let strip = Self::strip_h(*m, eff.len() as u32, *rect);
                     if strip == 0 {
                         return None;
                     }
+                    let eff_active = children
+                        .get(*active)
+                        .and_then(|&ac| eff.iter().position(|&c| c == ac))
+                        .unwrap_or(0);
                     Some((
                         i,
-                        Rect { x: rect.x, y: rect.y, w: rect.w, h: strip },
+                        Rect {
+                            x: rect.x,
+                            y: rect.y,
+                            w: rect.w,
+                            h: strip,
+                        },
                         *m,
-                        children.clone(),
-                        *active,
+                        eff,
+                        eff_active,
                     ))
                 }
                 _ => None,
@@ -898,7 +1245,14 @@ impl Layout {
         self.panes
             .iter()
             .filter(|p| {
-                matches!(p, Some(Pane { kind: Kind::Leaf { .. }, visible: true, .. }))
+                matches!(
+                    p,
+                    Some(Pane {
+                        kind: Kind::Leaf { .. },
+                        visible: true,
+                        ..
+                    })
+                )
             })
             .count()
     }
@@ -910,6 +1264,7 @@ impl Layout {
             p.visible = false;
             p.rect = Rect::ZERO;
             p.content = Rect::ZERO;
+            p.tagbar = Rect::ZERO;
         }
         // A zoomed leaf preempts the walk: it alone fills the display
         // (one visible leaf -> no inset -> borderless, the stage-0 look).
@@ -917,7 +1272,12 @@ impl Layout {
         if let Some(zid) = self.zoomed_id {
             match self.slot_of_id(zid) {
                 Some(z) if self.is_leaf(z) => {
-                    let full = Rect { x: 0, y: 0, w: disp_w, h: disp_h };
+                    let full = Rect {
+                        x: 0,
+                        y: 0,
+                        w: disp_w,
+                        h: disp_h,
+                    };
                     let p = self.get_mut(z).unwrap();
                     p.visible = true;
                     p.rect = full;
@@ -928,38 +1288,73 @@ impl Layout {
             }
         }
         let root = self.root;
-        self.layout_pane(root, Rect { x: 0, y: 0, w: disp_w, h: disp_h });
-        // Pass 2: the content inset -- `gaps` px per leaf iff >1 leaf
-        // visible (cfg-4; the stage-0 default is 1). A single fullscreen
-        // leaf stays borderless regardless.
-        let inset = if self.visible_leaf_count() > 1 { gaps } else { 0 };
+        self.layout_pane(
+            root,
+            Rect {
+                x: 0,
+                y: 0,
+                w: disp_w,
+                h: disp_h,
+            },
+        );
+        // Pass 2: the content inset -- the Daylight chrome ring per leaf iff
+        // >1 leaf visible. A single fullscreen leaf stays borderless (the
+        // stage-0 look). The ring = floor(`gaps`, the tunable gap) +
+        // bevel(2) + hairline(1); the bevel+hairline is fixed structural
+        // chrome (HALCYON-VISUAL section 2/2.4), the floor is the tunable
+        // inter-pane gap (section 2.3 -- at gaps=1 the two abutting floors
+        // give the 2px inter-pane floor).
+        let chrome = (theme::METRICS.bevel + theme::METRICS.hairline) as u32;
+        let inset = if self.visible_leaf_count() > 1 {
+            gaps + chrome
+        } else {
+            0
+        };
+        // The Daylight tag bar (HALCYON-VISUAL 3.2/4): every inset leaf carves a
+        // `header_h` strip off the TOP of its inner rect (inside the ring),
+        // above the client content. Gated with the ring (>1 leaf) -- a single
+        // fullscreen leaf stays borderless AND bar-free (stage-0). A leaf too
+        // short to spare the strip stays bar-free (the `+ tag_h` client floor,
+        // mirroring strip_h's `+ 8`).
+        let tag_h = theme::METRICS.header_h as u32;
         for p in self.panes.iter_mut().flatten() {
             if !p.visible {
                 continue;
             }
             let r = p.rect;
-            p.content = if inset > 0
+            if inset > 0
                 && matches!(p.kind, Kind::Leaf { .. })
                 && r.w > 2 * inset
                 && r.h > 2 * inset
             {
-                Rect {
+                let mut c = Rect {
                     x: r.x + inset,
                     y: r.y + inset,
                     w: r.w - 2 * inset,
                     h: r.h - 2 * inset,
+                };
+                if c.h > tag_h + tag_h {
+                    p.tagbar = Rect {
+                        x: c.x,
+                        y: c.y,
+                        w: c.w,
+                        h: tag_h,
+                    };
+                    c.y += tag_h;
+                    c.h -= tag_h;
                 }
+                p.content = c;
             } else {
-                r
-            };
+                p.content = r;
+            }
         }
     }
 
     fn layout_pane(&mut self, slot: usize, rect: Rect) {
         enum Next {
             Done,
-            One(usize, Rect),
             Split(Mode, Vec<usize>),
+            Tab(Mode, Vec<usize>, usize),
         }
         let next = {
             let p = match self.get_mut(slot) {
@@ -970,48 +1365,123 @@ impl Layout {
             p.rect = rect;
             match &p.kind {
                 Kind::Leaf { .. } => Next::Done,
-                Kind::Container { mode, children, active } => match mode {
+                Kind::Container {
+                    mode,
+                    children,
+                    active,
+                } => match mode {
                     // Tab/stack: only the active child is visible, in the
                     // rect below the indicator strip (G-6c; strip_h = 0
                     // when the rect is too small to carve).
-                    m @ (Mode::Tabbed | Mode::Stacked) => {
-                        let strip = Self::strip_h(*m, children.len() as u32, rect);
-                        match children.get(*active).copied() {
-                            Some(a) => Next::One(a, Rect {
-                                x: rect.x,
-                                y: rect.y + strip,
-                                w: rect.w,
-                                h: rect.h - strip,
-                            }),
-                            None => Next::Done,
-                        }
-                    }
+                    // The effective children (backgrounded leaves skipped) and
+                    // the strip carve are resolved OUTSIDE this `&mut p` borrow
+                    // -- `is_bg_leaf` needs `&self` -- so hand them to the
+                    // `Next::Tab` arm below.
+                    m @ (Mode::Tabbed | Mode::Stacked) => Next::Tab(*m, children.clone(), *active),
                     m => Next::Split(*m, children.clone()),
                 },
             }
         };
         match next {
             Next::Done => {}
-            Next::One(a, r) => self.layout_pane(a, r),
+            Next::Tab(mode, children, active) => {
+                // F2 structural transparency: a BACKGROUNDED leaf is not a
+                // tab/stack segment and never the shown child. Carve the strip
+                // for the EFFECTIVE count and show the effective active child
+                // (the raw active never lands on a backgrounded leaf after
+                // `tab_cycle`, but fall back to the first effective child).
+                let eff: Vec<usize> = children
+                    .iter()
+                    .copied()
+                    .filter(|&c| !self.is_bg_leaf(c))
+                    .collect();
+                let strip = Self::strip_h(mode, eff.len() as u32, rect);
+                let shown = children
+                    .get(active)
+                    .copied()
+                    .filter(|&a| !self.is_bg_leaf(a))
+                    .or_else(|| eff.first().copied());
+                if let Some(a) = shown {
+                    self.layout_pane(
+                        a,
+                        Rect {
+                            x: rect.x,
+                            y: rect.y + strip,
+                            w: rect.w,
+                            h: rect.h - strip,
+                        },
+                    );
+                }
+            }
             Next::Split(mode, children) => {
-                let n = children.len() as u32;
-                if n == 0 {
+                if children.is_empty() {
                     return;
                 }
+                // F2 (d-1b tiling completion): exclude a BACKGROUNDED leaf (a
+                // non-session renderer while a session holds the display) from
+                // the division -- it gets a ZERO rect (kept visible, so the
+                // post-recompute vis/bg accounting is untouched) and the
+                // foreground siblings divide the FULL rect. Guard: if EVERY
+                // child is backgrounded, divide among all (never blank a
+                // container). Only the Split arm consults `backgrounded`; a
+                // Tab/Stack ACTIVE child rides the One path above regardless,
+                // so a backgrounded-but-active leaf is shown, never blanked.
+                let divide: Vec<usize> = {
+                    let fg: Vec<usize> = children
+                        .iter()
+                        .copied()
+                        .filter(|&c| !self.is_bg_leaf(c))
+                        .collect();
+                    if fg.is_empty() {
+                        children.clone()
+                    } else {
+                        fg
+                    }
+                };
+                for &c in children.iter() {
+                    if !divide.contains(&c) {
+                        self.layout_pane(c, Rect::ZERO);
+                    }
+                }
+                let n = divide.len() as u32;
                 if mode == Mode::SplitH {
                     let each = rect.w / n;
                     let mut x = rect.x;
-                    for (i, &c) in children.iter().enumerate() {
-                        let w = if i as u32 == n - 1 { rect.x + rect.w - x } else { each };
-                        self.layout_pane(c, Rect { x, y: rect.y, w, h: rect.h });
+                    for (i, &c) in divide.iter().enumerate() {
+                        let w = if i as u32 == n - 1 {
+                            rect.x + rect.w - x
+                        } else {
+                            each
+                        };
+                        self.layout_pane(
+                            c,
+                            Rect {
+                                x,
+                                y: rect.y,
+                                w,
+                                h: rect.h,
+                            },
+                        );
                         x += w;
                     }
                 } else {
                     let each = rect.h / n;
                     let mut y = rect.y;
-                    for (i, &c) in children.iter().enumerate() {
-                        let h = if i as u32 == n - 1 { rect.y + rect.h - y } else { each };
-                        self.layout_pane(c, Rect { x: rect.x, y, w: rect.w, h });
+                    for (i, &c) in divide.iter().enumerate() {
+                        let h = if i as u32 == n - 1 {
+                            rect.y + rect.h - y
+                        } else {
+                            each
+                        };
+                        self.layout_pane(
+                            c,
+                            Rect {
+                                x: rect.x,
+                                y,
+                                w: rect.w,
+                                h,
+                            },
+                        );
                         y += h;
                     }
                 }
@@ -1036,6 +1506,46 @@ impl Layout {
             .collect()
     }
 
+    /// F2: every hosted leaf (leaf slot, surface index), regardless of
+    /// visibility -- the pre-recompute input for the backgrounding decision.
+    /// It must NOT depend on visibility (recompute has not run yet); the
+    /// visibility-filtered twin is `visible_hosted`.
+    pub fn hosted_leaves(&self) -> Vec<(usize, usize)> {
+        self.panes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| match p {
+                Some(Pane {
+                    kind: Kind::Leaf { surface: Some(n) },
+                    ..
+                }) => Some((i, *n)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// F2: stamp the backgrounded set on every pane (true iff its slot is in
+    /// `bg`), called by reconcile BEFORE recompute. One pass clears stale
+    /// flags and sets the current set, so a leaf that stops being backgrounded
+    /// (the session logs out) is un-stamped the same reconcile.
+    pub fn apply_backgrounded(&mut self, bg: &[usize]) {
+        for (i, p) in self.panes.iter_mut().enumerate() {
+            if let Some(p) = p {
+                p.backgrounded = bg.contains(&i);
+            }
+        }
+    }
+
+    /// F2: is `slot` a backgrounded LEAF (the structural-transparency
+    /// predicate)? Restricted to leaves: a container's backgrounding is its
+    /// leaves'. This is the TREE flag (owner-based, set before recompute),
+    /// stable across a tab hiding the leaf -- unlike `Surface.backgrounded`,
+    /// which is visibility-derived and clears once a tab hides the leaf.
+    pub fn is_bg_leaf(&self, slot: usize) -> bool {
+        self.get(slot)
+            .is_some_and(|p| p.backgrounded && matches!(p.kind, Kind::Leaf { .. }))
+    }
+
     /// The focused leaf's hosted surface (input routing).
     pub fn focused_surface(&self) -> Option<usize> {
         self.leaf_surface(self.focused)
@@ -1047,8 +1557,11 @@ impl Layout {
         let mut s = String::new();
         let _ = core::fmt::write(
             &mut s,
-            format_args!("epoch {} focused {}", self.epoch,
-                self.id_of(self.focused).unwrap_or(0)),
+            format_args!(
+                "epoch {} focused {}",
+                self.epoch,
+                self.id_of(self.focused).unwrap_or(0)
+            ),
         );
         if let Some(z) = self.zoomed_id {
             let _ = core::fmt::write(&mut s, format_args!(" zoomed {}", z));
@@ -1077,19 +1590,35 @@ impl Layout {
                     None => s.push_str(" empty"),
                 }
             }
-            Kind::Container { mode, children, active } => {
+            Kind::Container {
+                mode,
+                children,
+                active,
+            } => {
                 let _ = core::fmt::write(
                     s,
-                    format_args!("{}{} {} n={} active={}", p.id, star, mode.name(),
-                        children.len(), active),
+                    format_args!(
+                        "{}{} {} n={} active={}",
+                        p.id,
+                        star,
+                        mode.name(),
+                        children.len(),
+                        active
+                    ),
                 );
             }
         }
         let c = p.content;
         let _ = core::fmt::write(
             s,
-            format_args!(" [{},{},{},{}]{}\n", c.x, c.y, c.w, c.h,
-                if p.visible { "" } else { " hidden" }),
+            format_args!(
+                " [{},{},{},{}]{}\n",
+                c.x,
+                c.y,
+                c.w,
+                c.h,
+                if p.visible { "" } else { " hidden" }
+            ),
         );
         if let Kind::Container { children, .. } = &p.kind {
             for &c in children {

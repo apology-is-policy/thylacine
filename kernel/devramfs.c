@@ -618,6 +618,8 @@ static struct Spoor *devramfs_power(struct Spoor *c, int on) {
 }
 
 struct Dev devramfs = {
+    // #217 F1: serves real file content -- may back executable pages.
+    .may_back_exec = true,
     .dc       = 'm',
     .name     = "ramfs",
     // A-2d: system-owned, world-readable boot FS -> rwx enforcement is live

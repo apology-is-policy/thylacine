@@ -55,15 +55,29 @@
 //   N-5 (fd lifecycle): a closed note Spoor fd does not affect future
 //        SYS_NOTE_OPEN or queue state. The queue lives with the Proc.
 //
-// SYS_NOTED arg semantics (R4-F6 audit close):
+// SYS_NOTED arg semantics (R4-F6 audit close; rewritten by #15):
 //   - arg = 0 (NCONT): restore saved user context; resume pre-handler
 //     execution. Always succeeds while in_handler.
-//   - arg = 1 (NDFLT): take the note's default action (for the v1.0
-//     supported set, every default is exits(name)). Requires
-//     `live_peers == 0` -- exits extincts the kernel on live peer
-//     Threads (cross-thread shootdown is v1.x). NDFLT in a multi-
-//     thread Proc therefore returns -1; the handler must fall back to
-//     NCONT or explicit per-Thread teardown (SYS_THREAD_EXIT).
+//   - arg = 1 (NDFLT): take the note's TRUE default action -- the one
+//     `notes_default_action(name)` names, which is what would have happened
+//     had no handler been installed. THREE outcomes, not one:
+//       TERMINATE -- exits(name); noreturn. Single-thread goes ZOMBIE,
+//         multi-thread cascades via proc_group_terminate (#811).
+//       STOP      -- restore the pre-handler context exactly as NCONT does,
+//         then arm the job stop; the EL0-return tail parks the thread. The
+//         Proc resumes at the interrupted PC on tty:cont, which is what
+//         "as if uncaught" means for a suspend.
+//       IGNORE    -- restore and return. Identical to NCONT by construction:
+//         doing nothing IS the default action.
+//     Returns 0 for STOP/IGNORE (with ctx restored, so the EL0 x0 is the
+//     saved pre-handler value, not this 0), -1 if not in a handler.
+//
+//     HISTORY, because the removed rule outlived its removal in this comment:
+//     NDFLT once required `live_peers == 0` and returned -1 in a multi-thread
+//     Proc. RW-8 R5-F1 deleted that refusal after #809/#811 made exits()
+//     cascade instead of extinct -- the refusal had been silently swallowing
+//     SIGINT/SIGTERM in multi-thread pouch daemons. There is no live-peers
+//     gate today.
 //
 // Spec-to-code suspended (CLAUDE.md, broadened 2026-05-23) — no
 // specs/notes.tla module. The invariants above are pinned by the queue-lock
@@ -137,6 +151,31 @@ struct Thread;
 // family even though no v1.0 consumer exists; reserves the bit
 // position for v1.x. PTY-1b adds NOTE_BIT_TTY (bit 5), live.
 #define NOTE_MASK_SUPPORTED  0x3fu
+
+// #15: the DEFAULT ACTION of a note -- what happens when nobody catches it.
+// One value per row of `g_known_notes`, so a note's disposition is a property
+// OF the note rather than of whichever call site is asking. Before #15 the
+// kernel had no such notion: SYS_NOTED(NDFLT) took the same action (terminate)
+// for every name, which made ^Z under SIG_DFL a choice between dying and being
+// ignored, and would have made child_exit's default fatal.
+//
+// The values are the three POSIX default dispositions, minus "core dump"
+// (Thylacine has no core files at v1.0 -- tty:quit terminates without one).
+enum note_default {
+    NOTE_DFL_TERMINATE = 0,  // interrupt, kill, pipe, tty:quit, tty:hup
+    NOTE_DFL_STOP      = 1,  // tty:susp -- the job-control suspend (I-20)
+    NOTE_DFL_IGNORE    = 2,  // child_exit, tty:winch, tty:cont
+};
+
+// The default action for a supported note name; NOTE_DFL_TERMINATE for an
+// unknown one. PURE -- a table lookup with no side effects, which is the point:
+// the policy is unit-testable without driving the noreturn terminate leg.
+//
+// TERMINATE for an unknown name is deliberate. It is both what the kernel did
+// for every name before #15 (so no name's behaviour regresses) and the POSIX
+// majority disposition, and an unknown name cannot actually arrive: every
+// caller passes a name that came out of `g_known_notes` in the first place.
+enum note_default notes_default_action(const char *name);
 
 // In-kernel note record. The ring lives in `struct NoteQueue.ring` (inline
 // — the queue is heap-allocated once per Proc at proc_alloc).
@@ -249,10 +288,13 @@ struct NoteQueue {
 // them like any note (bash/vim/tmux install SIGTSTP handlers; SIGWINCH is
 // routinely caught). Uncaught defaults: tty:quit / tty:hup TERMINATE (the
 // LS-5 interrupt pattern -- fires only with no handler + not self-managing
-// + unmasked); tty:susp STOPS (LIVE since PTY-1f: an UNCAUGHT susp is
-// CONSUMED by the default stop at post time -- proc_job_stop_pgrp sets
-// job_stop_req and never queues the note, so nothing stays pending across
-// the stop; only a CAUGHT one is queued); tty:winch /
+// + unmasked); tty:susp STOPS (LIVE since PTY-1f: when some thread has the
+// family unmasked and nothing catches it, proc_job_stop_pgrp applies the
+// stop at POST time and queues nothing; the susp is QUEUED when a handler
+// or self-management catches it, when EVERY thread masks the family (POSIX
+// pending -- the EL0 tail's stop consumer takes it once the mask lifts), or
+// when the Proc has no thread yet, and the tail's stop arm applies the
+// deferred default for the last two); tty:winch /
 // tty:cont are informational (queue for the fd-read path, no default
 // action -- the pipe/child_exit shape; cont's RESUME side effect is the
 // kernel stop-clear -- proc_job_cont_pgrp -- not a note disposition).
@@ -372,6 +414,16 @@ int notes_peek_for_fd_locked(struct Proc *p, struct Thread *t,
 // past its end.
 int notes_name_is_kill(const char *name);
 
+// The install-time discard (POSIX 2.4.3 / Linux flush_sigqueue_mask): remove
+// every queued note named `name` from p's queue regardless of any thread's
+// mask, draining the class latch per removal; returns the count removed. Never
+// removes `kill` (N-4). Takes p->notes->lock itself -- call with NO note lock
+// held. The phenotype rt_sigaction shell calls it AFTER storing a disposition
+// that ignores (SIG_IGN, or SIG_DFL whose Linux default is ignore); the store-
+// then-lock order against notes_post's under-lock disposition read is what
+// makes "no stale ignored note survives" hold. See kernel/notes.c.
+u32 notes_discard_name(struct Proc *p, const char *name);
+
 // F5 + F6 audit close (sub-chunk 13a): re-enqueue a previously-dequeued
 // note at the HEAD of the queue. Used by devnotes_read on uaccess failure
 // and by notes_deliver_at_el0_return on user-stack-push failure to
@@ -391,6 +443,17 @@ int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
 // p->notes->lock.
 int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
 
+// Would `name` take its DEFAULT action on `p`? False iff something intercepts
+// it: a native handler (handler_va), a phenotype sigtab handler, or a phenotype
+// SIG_IGN. Pure; no lock required (each read is a single atomic load).
+//
+// Exists because a decider that runs INSTEAD of notes_post cannot rely on the
+// SIG_IGN drop inside it. proc_tty_susp_would_stop_locked is the caller that
+// needs this: its uncaught arm stops the Proc directly, generating no note, so
+// a phenotyped Proc's disposition has to be consulted before the decision
+// rather than during the post.
+bool notes_proc_default_applies(struct Proc *p, const char *name);
+
 // PTY-1b: the name-returning generalization of the above -- the canonical
 // (.rodata, program-lifetime) name of the first DELIVERABLE terminate-class
 // note (interrupt / tty:quit / tty:hup: queued AND its family bit unmasked
@@ -398,6 +461,44 @@ int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
 // tail passes the returned name to exits() so the exit_msg reports WHICH
 // signal terminated the Proc. Caller MUST hold p->notes->lock.
 const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t);
+
+// The STOP-class twin (round-2 F2): the canonical name of the first note whose
+// DEFAULT action is STOP and that is deliverable to `t` (queued AND its family
+// bit unmasked), or NULL. Same reader gates as the terminate twin, except the
+// disposition test goes through notes_proc_default_applies so a phenotyped
+// Proc's sigtab is consulted.
+//
+// A stop-class note is QUEUED whenever the post-time fan (job_stop_cb)
+// declined to apply the stop, and it posts on EVERY such reason: a handler or
+// self-management catches it, every thread masks the family (the POSIX "a
+// blocked stop signal becomes pending" case), or the Proc has no thread yet
+// (the spawn window). The reader gates plus the per-note disposition gate keep
+// the first out of this arm; this is where a pending stop lands once the mask
+// lifts, and where a spawn-window ^Z -- posted with susp_stop_armed set -- is
+// taken by the first thread's first EL0 return.
+//
+// PREDICATE ONLY, and NOT on the dispatcher's path -- the dispatcher calls
+// notes_stop_dequeue_locked below, which answers the same question and
+// consumes in one call. (It used to call this and then dequeue separately;
+// that is the split that let the two disagree.) This is kept because the
+// dispatcher takes no Thread argument, so a unit test can only drive the
+// DECISION here -- but a test that drives only this is testing a function
+// production no longer calls, so pair it with the consumer.
+// Caller MUST hold p->notes->lock.
+const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t);
+
+// Consume the note notes_stop_note_name_locked selected. Returns 1 and writes
+// `out` on a hit, 0 otherwise. Same gates, same class-filtered scan.
+//
+// It exists because the general notes_dequeue_locked is CLASS-BLIND: it pops
+// the first mask-permitted entry in FIFO order, which is the queue head, not
+// necessarily the note the stop decision was about. With [child_exit,
+// tty:susp] queued, the tail stopped correctly and popped the child_exit into
+// a stack local nobody reads -- destroying it -- while the tty:susp stayed
+// queued to re-fire. Never reach for the general dequeue from a path that
+// selected its note by class. Caller MUST hold p->notes->lock.
+int notes_stop_dequeue_locked(struct Proc *p, struct Thread *t,
+                              struct Note *out);
 
 // PTY-1b (PTY-DESIGN.md section 4): kernel-synthetic note fan-out to a
 // process group -- the pgrp generalization of proc_console_post_interrupt.
@@ -472,6 +573,43 @@ void notes_mark_self_managing(struct Proc *p);
 // reader-unwind decision. Replaces every direct group_exit_msg load at
 // those sites.
 bool thread_die_pending(struct Thread *t);
+
+// item 11 (ARCH §8.8.3): the NON-death sibling of thread_die_pending. True iff a
+// CAUGHT, deliverable note (a handler is installed OR the Proc self-manages its
+// notes fd) of a family UNMASKED for `t` is queued -- so `t`'s caught-note-
+// interruptible sleep should unwind SLEEP_NOTEINTR and return -T_E_INTR while
+// LIVING (the note delivers at the EL0-return tail). LOCK-FREE, same shape as
+// thread_die_pending; read only at the sleep sites' caught_ok arm, ALWAYS after
+// the die-check (death wins). Disjoint from thread_die_pending: the caught
+// latch and the terminate latch are never both set for one note.
+bool thread_caught_note_deliverable(struct Thread *t);
+
+// bug-2 (VIVARIUM 6.23): does `t` hold a PHENO_LINUX note handler that ESCAPED
+// its frame -- siglongjmp'd to an ancestor sigsetjmp point without rt_sigreturn,
+// so in_handler is stuck true and the N-3 re-entrancy guard would otherwise
+// refuse every future caught-note delivery for the life of the guest? True iff
+// in_handler is set, the Proc is PHENO_LINUX, and the current SP_EL0 (sp_el0,
+// the caller's ctx->sp) has unwound AT OR ABOVE the pre-handler sp captured at
+// delivery (note_saved_sp_el0). A live handler always runs BELOW that sp (the
+// sigframe is pushed below it; nested/deep handlers only go lower), and a
+// siglongjmp target must be an ANCESTOR frame ON THAT STACK (returned env is UB)
+// -- older, hence higher -- so the discrimination is total for a single-stack
+// guest, not a heuristic (the cross-stack swapcontext-to-a-higher-stack case is
+// the documented F1 exception -- VIVARIUM 6.23 + the section-9 DEGRADED row).
+// Both operands are the SP_EL0 bank. PURE: the caller clears in_handler on true.
+// LOAD-BEARING: sigaltstack(132) stays ENOSYS (else an alt-stack handler runs at
+// an unrelated sp and the compare is meaningless).
+bool thread_note_handler_escaped(const struct Thread *t, u64 sp_el0);
+
+// 11b-9p (item 11): does `p`'s reader handle -T_E_INTR? A caught-note wait unwind
+// returns EINTR to userspace, and a reader that does not expect it breaks (the
+// native ut $(cmd) capture, 11b-core's build bug). PHENO_LINUX programs go through
+// musl, which is EINTR-aware by construction (POSIX); native (libthyla-rs) readers
+// are NOT until they retry -T_E_INTR (11c). So the caught-note sleep unwind is gated
+// on this in the sched caught branch: only an EINTR-ready Proc unwinds; a native
+// reader's opted-in sleep degrades to death-only (the note delivers late, the
+// pre-item-11 behavior -- no regression). Widens to native per-reader at 11c.
+bool proc_caught_note_eintr_ready(struct Proc *p);
 
 // =============================================================================
 // Synthetic posters — kernel-internal callers (proc.c::exits, pipe.c write

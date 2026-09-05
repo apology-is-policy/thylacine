@@ -1,8 +1,8 @@
 From 1f6f36f0c85117299dd833cd44aa46bc1cc76745 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Sat, 8 Aug 2026 22:39:39 +0200
-Subject: [PATCH] Thylacine Warp-3: the virgl winsys over the /srv/warp GPU
- seam
+Subject: [PATCH 06/23] Thylacine Warp-3: the virgl winsys over the /srv/warp
+ GPU seam
 
 The unmodified virgl gallium driver, carried by a new winsys
 (src/gallium/winsys/virgl/thylacine/) whose transport is warp_client.c:

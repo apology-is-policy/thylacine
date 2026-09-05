@@ -46,7 +46,7 @@ usage: ipconfig [--color[=WHEN]] [add IP MASK [GW] | remove | renew]
   add IP MASK [GW]  assign a static address (MASK = 255.255.255.0, /24, or 24)
   remove            clear the address + default route
   renew             re-acquire the DHCP lease (force a fresh DISCOVER)
-  --color[=WHEN]    colorize headers/errors: always (default) | never | auto
+  --color[=WHEN]    colorize headers/errors: always | never | auto (default)
   --help            show this help
 
 Examples:
@@ -62,7 +62,7 @@ fn run(args: Args) -> i64 {
         return rc;
     }
 
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut ops: Vec<&str> = Vec::new();
     let mut i = 1;
     while let Some(a) = args.get_str(i) {
@@ -172,7 +172,8 @@ fn ctl(cmd: &str, on: bool) -> i64 {
     }
 }
 
-/// `--color=auto` stub; true until a kernel TTY check lands.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

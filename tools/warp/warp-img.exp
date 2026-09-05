@@ -1,0 +1,142 @@
+#!/usr/bin/expect -f
+# vkQuake-arc W-3c-1 + W-3c-2 gate on the GL host: boot the VENUS device
+# (venus=on,blob=on,hostmem), log in, run `warp-prove img` -- the PRESENTABLE
+# ABI proof (WARP-WSI-DESIGN sections 4-6) -- then `warp-prove img-direct`,
+# the generalized `present-to <surface> img <n>` DIRECT arm end-to-end: the
+# zoom chord (Super+F over QMP) takes the driver's display-sized surface
+# fullscreen, the F16 pending switch completes on SET_SCANOUT_BLOB
+# (`scanout direct N img res R`), the guest observes `bound 1` through
+# `img/0/info`, destroys the presentable WHILE BOUND (the display-safe
+# teardown's first client-driven execution), and the surface's own weave arm
+# re-takes the scanout (`scanout direct N slot S`) before the console heals.
+#
+# WHAT THIS COVERS THAT THE BOOT SELF-TEST DOES NOT. tapestryd's own
+# `warp_img_selftest` exercises the presentable's INTERNALS (mint, the Direct
+# bind, the display-safe teardown's ordering) but reaches none of them through
+# 9P. This prover is the ABI's only driver: it walks `ctx/<id>/img/`, refuses
+# four malformed registrations, registers a good one, reads the accepted shape
+# back out of `info`, is refused a duplicate handle, destroys through `ctl`,
+# and proves BOTH halves of what destroy means -- the object is gone from the
+# namespace AND its handle is re-registerable with a fresh (monotonic) res_id.
+# Without it the whole namespace surface has no caller until mesa arrives at
+# W-3d, and a gate with no driver is not a gate.
+#
+# WHY venus and not plain virgl: a presentable is a venus-ctx object, so a
+# virgl-only device refuses the mint and the prover SKIPs (exit 2). WHY the GL
+# host and not local: the local 2D device has no virgl at all, so `ctx/new` is
+# unavailable and the prover SKIPs earlier still. A SKIP is NOT a pass here --
+# this scenario runs on the device that can actually answer, so a skip means
+# the device was configured wrong (the #212 rule: an arm that could not run
+# has not succeeded).
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport there).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_SHARE) 1
+# venus needs blob AND hostmem together (QEMU refuses the device otherwise);
+# run-vm.sh passes THYLACINE_GPU_DEV verbatim as the -device model string.
+set ::env(THYLACINE_GPU_DEV) "virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M"
+set ::env(THYLACINE_DISPLAY) egl-headless
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+file mkdir $work
+file delete -force $work/pool-img.img $work/disk-img.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-img.img
+exec cp $repo/build/disk.img $work/disk-img.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-img.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-img.img
+
+source $repo/tools/interactive/lib.exp
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Registration + four refusals + destroy + re-registration: all namespace round
+# trips, no device wait. Floor, not stomp (a caller's larger value passes).
+if {$lc_cmd_timeout < 60} { set lc_cmd_timeout 60 }
+lc_run_expect_hardfail "warp-prove img" "IMG PASS" "IMG FAIL"
+
+lc_pass "warp-img: presentable ABI over the wire -- shape gate, info echo, xproc, destroy, handle reuse (the W-3c-1 gate)"
+
+# ---- W-3c-2: the Direct arm E2E ----------------------------------------
+# The GL device head (the glq-virgl pair; re-derive there first if a future
+# device changes it -- the driver's surface must be display-sized or the
+# zoom can never complete the switch).
+set DW 1280
+set DH 800
+set qmp [lc_qmp_sock]
+
+lc_send "warp-prove img-direct $DW $DH"
+set timeout 120
+expect {
+    -re {IMG-DIRECT armed \(ctx (\d+) res (\d+) surf (\d+)\)} {
+        lc_step "img-direct armed (mutual adoption named)"
+    }
+    "IMG-DIRECT SKIP" { lc_fail "img-direct SKIP on the venus device (the #212 rule: an arm that could not run has not succeeded)" }
+    "IMG-DIRECT FAIL" { lc_fail "img-direct failed before arming" }
+    timeout { lc_fail "no IMG-DIRECT armed line within 120s" }
+}
+
+# The zoom: the driver's surface holds focus from its arrival; Super+F makes
+# it the one visible leaf at head size, and the next present-COMPLETE (F16)
+# binds the presentable.
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
+    lc_fail "qmp zoom chord failed: $err"
+}
+set timeout 120
+expect {
+    -re {scanout direct (\d+) img res (\d+) \((\d+)x(\d+)\)} {
+        lc_step "direct switch fired -- SET_SCANOUT_BLOB of the presentable"
+    }
+    "IMG-DIRECT FAIL" { lc_fail "driver failed while waiting for the bind" }
+    "user fault" { lc_fail "segv around the zoom/direct switch" }
+    timeout { lc_fail "no img direct-switch say line within 120s of the zoom (head != ${DW}x${DH}?)" }
+}
+expect {
+    "IMG-DIRECT bound observed" { lc_step "guest observed bound=1 through img/0/info" }
+    "IMG-DIRECT FAIL" { lc_fail "driver failed after the bind" }
+    timeout { lc_fail "no bound-observed line within 120s" }
+}
+
+# Destroy-while-bound: the display must move OFF the presentable before the
+# unref (PUnbound as an observable order) -- the weave arm re-takes the same
+# fullscreen surface at a later present.
+set timeout 120
+expect {
+    -re {scanout direct (\d+) slot (\d+) \((\d+)x(\d+)\)} {
+        lc_step "weave arm re-took the scanout after destroy (display-safe teardown)"
+    }
+    "IMG-DIRECT FAIL" { lc_fail "driver failed during destroy/restore" }
+    "user fault" { lc_fail "segv during destroy-while-bound" }
+    timeout { lc_fail "no weave-arm restore line within 120s of the destroy" }
+}
+expect {
+    "IMG-DIRECT PASS" { lc_step "img-direct driver PASS" }
+    "IMG-DIRECT FAIL" { lc_fail "img-direct driver failed at the tail" }
+    timeout { lc_fail "no IMG-DIRECT PASS line within 120s" }
+}
+
+# The driver exited; its surface retires and the console heals through its
+# own present chain (the glq-virgl restore lesson: every hop needs console
+# OUTPUT, so drive it with echo ticks).
+set restored 0
+for {set i 0} {$i < 6 && !$restored} {incr i} {
+    lc_send "echo img-tick-$i"
+    set timeout 20
+    expect {
+        -re {scanout (?:direct \d+ (?:slot \d+ )?|composed )\((\d+)x(\d+)\)} { set restored 1 }
+        "img-tick-$i" { }
+        timeout { }
+    }
+}
+if {!$restored} {
+    lc_fail "console scanout not restored within 6 driven ticks of driver exit"
+}
+
+lc_pass "warp-img-direct: the presentable Direct arm E2E -- armed, SET_SCANOUT_BLOB, destroy-while-bound, weave restore (the W-3c-2 gate)"

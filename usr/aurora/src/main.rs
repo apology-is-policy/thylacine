@@ -45,14 +45,13 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 mod config;
 mod osd;
 mod render;
-mod vt;
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use cornucopia::Atlas;
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{
-    t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN,
+    t_close, t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN,
     T_WALK_OPEN_FROM_ROOT,
 };
 use render::{render_rows, Metrics};
@@ -369,6 +368,19 @@ pub extern "C" fn rs_main() -> i64 {
         say!("aurora: /dev/consctl open failed (winsize reporting off)");
     }
 
+    // H-1 (BEACON.md 12.3 / ARCH 23.5.4): advertise the cells tier -- aurora
+    // renders the Bonfire box+SGR language and swallows Beacon frames, so
+    // programs keep emitting exactly what they emit today. Once, at startup
+    // (the kernel resets the tier to none when the renderer's drain closes,
+    // so a respawn re-advertises here). Best-effort like winsize.
+    if consctl >= 0 {
+        let cmd = b"beacon cells";
+        let wr = unsafe { t_write(consctl, cmd.as_ptr(), cmd.len()) };
+        if wr != cmd.len() as i64 {
+            say!("aurora: beacon tier advertise failed (rich clients see none)");
+        }
+    }
+
     // cfg-2a/cfg-3: the system-tier config seeds settings BEFORE the
     // connect, so the compositor tier can push AHEAD of the surface create
     // -- the console surface is then born at the configured mode (no
@@ -563,6 +575,25 @@ pub extern "C" fn rs_main() -> i64 {
     // is silent by construction.
     write_winsize(consctl, cols, rows);
 
+    // DISPLAY-MODES.md 1b: when a graphical renderer is the PRIMARY display
+    // (run-vm.sh passed thylacine.display=gpu), silence EL0 program output on
+    // the serial UART now that the surface is up -- the framebuffer is the sole
+    // view and the sole CPR answerer. Done here, AFTER the first present, so no
+    // early EL0 output falls into a gap where neither serial nor framebuffer is
+    // showing. The default posture (no token -- the -nographic test harness, or
+    // a serial-primary console) leaves serial LOUD, so no existing gate churns.
+    // Say-then-silence: the announcement is the last EL0 line serial sees.
+    if bootarg_display_is_gpu() {
+        say!("aurora: display=gpu -- silencing EL0 serial output (1b)");
+        write_serialsilent(consctl, true);
+        // A state-transition log emitted immediately AFTER the silence. By the
+        // linear code above it is always reached once the "silencing" line
+        // printed, so its ABSENCE from serial (while it still reaches the
+        // framebuffer via the drain tap) is the runtime deny-path witness that
+        // 1b took effect -- the gpu-headless E2E keys on exactly that.
+        say!("aurora: serial silenced -- the framebuffer is the primary display");
+    }
+
     let mut frames: u64 = 0;
     let mut blink_on = true;
     let mut prev_cursor: Option<(usize, usize)> = Some((0, 0));
@@ -599,6 +630,14 @@ pub extern "C" fn rs_main() -> i64 {
     // Cleared only on a successful present (slots rotate per attempt, so a
     // retry must re-fill; the same discipline as the dirty rows).
     let mut full_fill = false;
+    // GPU-DESIGN 4.5.8b. Slots rotate and nothing copies content between them,
+    // so a damage-only present must repaint everything that changed since the
+    // slot it is about to draw into was last presented -- `surf.age()` says how
+    // far back that is. Ring of the row ranges already presented, newest last;
+    // a full-frame present records (0, rows), so any union reaching past one
+    // widens to the whole surface, which is conservative and correct.
+    let mut dmg_hist: [(usize, usize); tapestry::MAX_SLOTS] = [(0, 0); tapestry::MAX_SLOTS];
+    let mut dmg_seen: usize = 0;
 
     loop {
         // (0) #129: retry any input the console refused last pass. This must run
@@ -788,6 +827,17 @@ pub extern "C" fn rs_main() -> i64 {
                     let sub_floor =
                         ow / m.cell_w < 20 || oh / m.cell_h < 5;
                     if sub_floor && !(ow == w && oh == h) {
+                        // This arm declines the offer and keeps the current
+                        // generation, so it never reaches handle_configure --
+                        // and therefore would never reach the slot
+                        // invalidation living inside it (GPU-DESIGN 4.5.8b).
+                        // It IS an invalidation: this CONFIGURE can be the one
+                        // announcing a return to visibility, and while hidden
+                        // the compositor skips transfers. Marking rows dirty is
+                        // not enough on two counts -- it repaints ROWS, never
+                        // the margins outside the grid, and it repaints ONE
+                        // slot where every slot is suspect.
+                        surf.invalidate();
                         for d in term.dirty.iter_mut() {
                             *d = true;
                         }
@@ -989,7 +1039,12 @@ pub extern "C" fn rs_main() -> i64 {
         // could transfer stale panel pixels from an older slot), so an open
         // OSD routes every damaged pass through the full-frame branch.
         let osd_pass = ui.open && (ui.dirty || r0 < r1 || full_fill);
-        if full_fill || osd_pass {
+        // Age 0 = the slot we are about to draw into holds nothing usable
+        // (first use on this generation, or the compositor invalidated it).
+        // A damage-only present there would leave undefined pixels around the
+        // fresh rows, so it routes through the full-frame branch instead.
+        let stale_slot = r0 < r1 && surf.age() == 0;
+        if full_fill || osd_pass || stale_slot {
             // #55: the post-reweave full frame (the frame-0 pattern applied
             // through the single present site so the retry discipline holds).
             let (dw, dh) = (surf.w, surf.h);
@@ -1023,8 +1078,31 @@ pub extern "C" fn rs_main() -> i64 {
                     *d = false;
                 }
                 prev_cursor = cursor;
+                // A full frame covers every row (4.5.8b).
+                dmg_hist[dmg_seen % tapestry::MAX_SLOTS] = (0, rows);
+                dmg_seen += 1;
             }
         } else if r0 < r1 {
+            // Widen to everything this slot is missing (4.5.8b): its content
+            // is `age` presents old, so the union runs back over the `age - 1`
+            // presents that landed in the OTHER slots since. Row ranges union
+            // as (min, max) -- rows in the gap are repainted too, which costs
+            // a little redraw and cannot be wrong.
+            let (dirty0, dirty1) = (r0, r1);
+            let back = (surf.age() as usize).saturating_sub(1).min(dmg_seen).min(tapestry::MAX_SLOTS);
+            let (mut u0, mut u1) = (r0, r1);
+            for k in 0..back {
+                let (a, b) = dmg_hist[(dmg_seen - 1 - k) % tapestry::MAX_SLOTS];
+                if a < b {
+                    if a < u0 {
+                        u0 = a;
+                    }
+                    if b > u1 {
+                        u1 = b;
+                    }
+                }
+            }
+            let (r0, r1) = (u0, u1);
             {
                 let px = surf.pixels();
                 render_rows(&term, &m, px, w, r0, r1, cursor);
@@ -1052,6 +1130,18 @@ pub extern "C" fn rs_main() -> i64 {
                     *d = false;
                 }
                 prev_cursor = cursor;
+                // Record the DAMAGE (the originally-dirty span), not the
+                // widened repaint. The history answers "what changed since
+                // slot X was last presented", and what changed between two
+                // presents is exactly the dirty span -- the widening only
+                // says how much of it THIS slot had to catch up on. Recording
+                // the widened range instead is correct but never converges:
+                // one full-rows entry (any scroll) re-enters every later
+                // union, so every present after it repaints all rows forever
+                // and the damage path is dead. With the dirty span, a full
+                // entry falls out of the window after `nslots` presents.
+                dmg_hist[dmg_seen % tapestry::MAX_SLOTS] = (dirty0, dirty1);
+                dmg_seen += 1;
             }
         }
     }
@@ -1077,6 +1167,43 @@ fn write_winsize(fd: i64, cols: usize, rows: usize) {
     let wr = unsafe { t_write(fd, buf.as_ptr(), n) };
     if wr < n as i64 {
         say!("aurora: consctl winsize write short/failed ({} of {})", wr, n);
+    }
+}
+
+// DISPLAY-MODES.md 1b: is thylacine.display=gpu on the kernel cmdline? Read
+// /hw/chosen/bootargs (the /hw FDT mount, the same channel joey's bootarg_has
+// and debug-probe use) and substring-search for the FULL key=value token, so
+// `gpu` never matches `console`. Absent / unreadable / unmatched -> false (the
+// default LOUD posture). devhw is `.seekable = false`, so this is a single
+// sequential read.
+fn bootarg_display_is_gpu() -> bool {
+    let fd = open_path("/hw/chosen/bootargs", T_OREAD);
+    if fd < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 256];
+    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    unsafe { t_close(fd) };
+    if n <= 0 {
+        return false;
+    }
+    let hay = &buf[..n as usize];
+    let needle = b"thylacine.display=gpu";
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+// DISPLAY-MODES.md 1b: set/clear the serial-silence flag via the consctl
+// `serialsilent <0|1>` verb (renderer-writable, like winsize). Best-effort --
+// a short/failed write only leaves serial in its prior state; the renderer must
+// never die over it.
+fn write_serialsilent(fd: i64, on: bool) {
+    if fd < 0 {
+        return;
+    }
+    let msg: &[u8] = if on { b"serialsilent 1" } else { b"serialsilent 0" };
+    let wr = unsafe { t_write(fd, msg.as_ptr(), msg.len()) };
+    if wr < msg.len() as i64 {
+        say!("aurora: consctl serialsilent write short/failed ({} of {})", wr, msg.len());
     }
 }
 

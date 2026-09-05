@@ -1,0 +1,996 @@
+From 997e37142dbe1cc36f3c57b97803e5ed1bb4901d Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Mon, 31 Aug 2026 13:56:20 +0200
+Subject: [PATCH 20/23] Thylacine Warp vkQuake-arc W-3e: the warp-ctx-pub
+ getter + the SDL first-frame witness
+
+Two pieces of the SDL2 Vulkan glue chunk that live mesa-side:
+
+1. vn_renderer_thylacine_warp_ctx_pub() -- the connected renderer's warp
+   ctx public id as a process-global (set at warp_open, cleared at destroy
+   only if still ours; raw value, since the server never mints pub 0).
+   The SDL window glue needs it for the consent's SURFACE half: the
+   tapestry surface's `glsrc <ctx>` must name this ctx for the mutual
+   adoption to complete. Companion to the existing set_surface global
+   (the ctx half), same single-renderer deployment posture.
+
+2. thylacine-vk-sdl-prove -- the W-3e witness: an ordinary SDL2 Vulkan
+   app (SDL_CreateWindow(SDL_WINDOW_VULKAN) -> SDL_Vulkan_* -> headless
+   surface -> the W-3d swapchain) that renders the W-1 SPIR-V triangle
+   INTO a display-sized presentable through a real render pass, verifies
+   the pixels by copy-out (center red / corner blue -- the pair is the
+   control), and presents 3 frames whose pokes complete the two-sided
+   consent to a DIRECT scanout bind. Pre-window failures degrade to
+   ABSENT (the probe rides every boot; the venus gate requires PASS on
+   the leg with the capability). Links the pouch libSDL2.a (same musl
+   target as this cross env) found beside the build tree; the link
+   carries -Wl,-u,vk_icdGetInstanceProcAddr because the app's only venus
+   references are SDL's WEAK ones and a weak ref does not extract
+   archive members -- the same line every SDL-only Vulkan app (vkQuake)
+   needs, proven here rather than documented untested.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/virtio/vulkan/meson.build              |  28 +
+ src/virtio/vulkan/thylacine_vk_sdl_prove.c | 843 +++++++++++++++++++++
+ src/virtio/vulkan/vn_renderer.h            |   7 +
+ src/virtio/vulkan/vn_renderer_thylacine.c  |  23 +-
+ 4 files changed, 900 insertions(+), 1 deletion(-)
+ create mode 100644 src/virtio/vulkan/thylacine_vk_sdl_prove.c
+
+diff --git a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
+index 93dc32a..71256c6 100644
+--- a/src/virtio/vulkan/meson.build
++++ b/src/virtio/vulkan/meson.build
+@@ -204,4 +204,32 @@ if with_thylacine
+     dependencies : vn_deps,
+     install : false,
+   )
++
++  # W-3e: the SDL2 Vulkan-glue witness -- an ordinary SDL app driving the
++  # SDL_thylacinevulkan hooks into the W-3d swapchain (the first-Vulkan-frame
++  # witness). Links the pouch cross-built libSDL2.a shipped beside the build
++  # tree (the mesa cross env IS the pouch sysroot -- same musl target); built
++  # only when that archive is present, so a venus-prove-only build tree is
++  # unaffected.
++  thy_sdl2_dir = '/build/sdl2'
++  thy_sdl2_lib = meson.get_compiler('c').find_library(
++    'SDL2', dirs : [thy_sdl2_dir + '/lib'], required : false)
++  if thy_sdl2_lib.found()
++    thylacine_vk_sdl_prove = executable(
++      'thylacine-vk-sdl-prove',
++      files('thylacine_vk_sdl_prove.c'),
++      include_directories : vn_incs,
++      c_args : ['-I' + thy_sdl2_dir + '/include/SDL2'],
++      # -u: the app reaches Vulkan only through SDL_Vulkan_* (the honest
++      # app shape), whose venus references are WEAK -- and a weak ref does
++      # not extract archive members, so without this the ICD entry stays
++      # NULL and LoadLibrary reports no-ICD at run time. This is the same
++      # link line every SDL-only Vulkan app (vkQuake) needs; the witness
++      # exercising it is the recipe's proof.
++      link_args : ['-Wl,-u,vk_icdGetInstanceProcAddr'],
++      link_with : libvulkan_virtio,
++      dependencies : [vn_deps, thy_sdl2_lib],
++      install : false,
++    )
++  endif
+ endif
+diff --git a/src/virtio/vulkan/thylacine_vk_sdl_prove.c b/src/virtio/vulkan/thylacine_vk_sdl_prove.c
+new file mode 100644
+index 0000000..bba1f01
+--- /dev/null
++++ b/src/virtio/vulkan/thylacine_vk_sdl_prove.c
+@@ -0,0 +1,843 @@
++/*
++ * Copyright 2026 The Thylacine Authors
++ * SPDX-License-Identifier: MIT
++ *
++ * W-3e: the first-Vulkan-frame witness -- an SDL2 program.
++ *
++ * thylacine_prove.c drives the venus driver bare (step 10 proved the W-3d
++ * swapchain machinery with the present poke DORMANT -- no tapestry surface
++ * named).  This binary is the missing half: an ordinary SDL2 Vulkan app
++ * shape -- SDL_CreateWindow(SDL_WINDOW_VULKAN) -> SDL_Vulkan_* glue
++ * (SDL_thylacinevulkan.c) -> headless surface -> the W-3d swapchain -- that
++ * ARMS the two-sided display consent at SDL_Vulkan_CreateSurface (the
++ * window's tapestry surface accepts the warp ctx via glsrc; the renderer's
++ * present poke names the surface back), renders the W-1 triangle INTO a
++ * presentable through a real render pass, verifies the pixels by copy-out,
++ * and presents -- so every vkQueuePresentKHR pokes `present-to ... img` and
++ * the compositor DIRECT-binds the presentable to the scanout.  The app-side
++ * PASS line pairs with tapestryd's `scanout direct ... img res ...` line;
++ * TOGETHER they are the witness that a Vulkan frame reached the display.
++ *
++ * Window size = the display size (SDL desktop mode = the compositor's
++ * `display W H`): the DIRECT accept set admits a display-sized presentable,
++ * and a mismatch would leave the presents display-inert (the composed arm
++ * is not built), failing the compositor-line half of the gate.
++ *
++ * The loader-less pattern, same as thylacine_prove.c: instance-parented
++ * entrypoints via vk_icdGetInstanceProcAddr (here reached through
++ * SDL_Vulkan_GetVkGetInstanceProcAddr -- proving SDL's handoff), device-
++ * parented ones as direct vn_/wsi_/vk_common symbols (the gipa trampolines
++ * for those load loader-populated dispatch slots this static link never
++ * fills).  The SDL link needs no -u: this file's direct vn_* references
++ * extract the driver archive members themselves.
++ */
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <vulkan/vulkan.h>
++
++#include "SDL.h"
++#include "SDL_vulkan.h"
++
++/* ---- direct driver entrypoints (device-parented; the trampoline caveat) */
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_EnumerateDeviceExtensionProperties(VkPhysicalDevice, const char *,
++                                      uint32_t *, VkExtensionProperties *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateDevice(VkPhysicalDevice, const VkDeviceCreateInfo *,
++                const VkAllocationCallbacks *, VkDevice *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyDevice(VkDevice, const VkAllocationCallbacks *);
++extern VKAPI_ATTR void VKAPI_CALL
++vk_common_GetDeviceQueue2(VkDevice, const VkDeviceQueueInfo2 *, VkQueue *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateBuffer(VkDevice, const VkBufferCreateInfo *,
++                const VkAllocationCallbacks *, VkBuffer *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyBuffer(VkDevice, VkBuffer, const VkAllocationCallbacks *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_GetBufferMemoryRequirements2(VkDevice,
++                                const VkBufferMemoryRequirementsInfo2 *,
++                                VkMemoryRequirements2 *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_BindBufferMemory2(VkDevice, uint32_t, const VkBindBufferMemoryInfo *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_AllocateMemory(VkDevice, const VkMemoryAllocateInfo *,
++                  const VkAllocationCallbacks *, VkDeviceMemory *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_FreeMemory(VkDevice, VkDeviceMemory, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_MapMemory2(VkDevice, const VkMemoryMapInfo *, void **);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_UnmapMemory2(VkDevice, const VkMemoryUnmapInfo *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateFence(VkDevice, const VkFenceCreateInfo *,
++               const VkAllocationCallbacks *, VkFence *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyFence(VkDevice, VkFence, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_ResetFences(VkDevice, uint32_t, const VkFence *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_WaitForFences(VkDevice, uint32_t, const VkFence *, VkBool32, uint64_t);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateCommandPool(VkDevice, const VkCommandPoolCreateInfo *,
++                     const VkAllocationCallbacks *, VkCommandPool *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyCommandPool(VkDevice, VkCommandPool, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_AllocateCommandBuffers(VkDevice, const VkCommandBufferAllocateInfo *,
++                          VkCommandBuffer *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_BeginCommandBuffer(VkCommandBuffer, const VkCommandBufferBeginInfo *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_EndCommandBuffer(VkCommandBuffer);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_QueueSubmit(VkQueue, uint32_t, const VkSubmitInfo *, VkFence);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags,
++                      VkPipelineStageFlags, VkDependencyFlags, uint32_t,
++                      const VkMemoryBarrier *, uint32_t,
++                      const VkBufferMemoryBarrier *, uint32_t,
++                      const VkImageMemoryBarrier *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdBeginRenderPass(VkCommandBuffer, const VkRenderPassBeginInfo *,
++                      VkSubpassContents);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdEndRenderPass(VkCommandBuffer);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdBindPipeline(VkCommandBuffer, VkPipelineBindPoint, VkPipeline);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdDraw(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdCopyImageToBuffer(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer,
++                        uint32_t, const VkBufferImageCopy *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateImageView(VkDevice, const VkImageViewCreateInfo *,
++                   const VkAllocationCallbacks *, VkImageView *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyImageView(VkDevice, VkImageView, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateFramebuffer(VkDevice, const VkFramebufferCreateInfo *,
++                     const VkAllocationCallbacks *, VkFramebuffer *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyFramebuffer(VkDevice, VkFramebuffer, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateRenderPass(VkDevice, const VkRenderPassCreateInfo *,
++                    const VkAllocationCallbacks *, VkRenderPass *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyRenderPass(VkDevice, VkRenderPass, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateShaderModule(VkDevice, const VkShaderModuleCreateInfo *,
++                      const VkAllocationCallbacks *, VkShaderModule *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyShaderModule(VkDevice, VkShaderModule,
++                       const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreatePipelineLayout(VkDevice, const VkPipelineLayoutCreateInfo *,
++                        const VkAllocationCallbacks *, VkPipelineLayout *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyPipelineLayout(VkDevice, VkPipelineLayout,
++                         const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateGraphicsPipelines(VkDevice, VkPipelineCache, uint32_t,
++                           const VkGraphicsPipelineCreateInfo *,
++                           const VkAllocationCallbacks *, VkPipeline *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyPipeline(VkDevice, VkPipeline, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateSwapchainKHR(VkDevice, const VkSwapchainCreateInfoKHR *,
++                      const VkAllocationCallbacks *, VkSwapchainKHR *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroySwapchainKHR(VkDevice, VkSwapchainKHR,
++                       const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++wsi_GetSwapchainImagesKHR(VkDevice, VkSwapchainKHR, uint32_t *, VkImage *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_AcquireNextImage2KHR(VkDevice, const VkAcquireNextImageInfoKHR *,
++                        uint32_t *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_QueuePresentKHR(VkQueue, const VkPresentInfoKHR *);
++extern VKAPI_ATTR void VKAPI_CALL
++wsi_DestroySurfaceKHR(VkInstance, VkSurfaceKHR,
++                      const VkAllocationCallbacks *);
++
++/* The W-1 triangle shaders (thylacine_prove.c's pair, verbatim): a centered
++ * RED triangle over {(0,-0.5),(0.5,0.5),(-0.5,0.5)} -- NDC (0,0) inside,
++ * every framebuffer corner outside. */
++static const uint32_t prove_tri_vs[] = {
++   0x07230203,0x00010000,0x0008000b,0x00000028,0x00000000,0x00020011,0x00000001,0x0006000b,
++   0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
++   0x0007000f,0x00000000,0x00000004,0x6e69616d,0x00000000,0x0000000d,0x0000001b,0x00030003,
++   0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,0x00000000,0x00060005,0x0000000b,
++   0x505f6c67,0x65567265,0x78657472,0x00000000,0x00060006,0x0000000b,0x00000000,0x505f6c67,
++   0x7469736f,0x006e6f69,0x00070006,0x0000000b,0x00000001,0x505f6c67,0x746e696f,0x657a6953,
++   0x00000000,0x00070006,0x0000000b,0x00000002,0x435f6c67,0x4470696c,0x61747369,0x0065636e,
++   0x00070006,0x0000000b,0x00000003,0x435f6c67,0x446c6c75,0x61747369,0x0065636e,0x00030005,
++   0x0000000d,0x00000000,0x00060005,0x0000001b,0x565f6c67,0x65747265,0x646e4978,0x00007865,
++   0x00050005,0x0000001e,0x65646e69,0x6c626178,0x00000065,0x00030047,0x0000000b,0x00000002,
++   0x00050048,0x0000000b,0x00000000,0x0000000b,0x00000000,0x00050048,0x0000000b,0x00000001,
++   0x0000000b,0x00000001,0x00050048,0x0000000b,0x00000002,0x0000000b,0x00000003,0x00050048,
++   0x0000000b,0x00000003,0x0000000b,0x00000004,0x00040047,0x0000001b,0x0000000b,0x0000002a,
++   0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,
++   0x00040017,0x00000007,0x00000006,0x00000004,0x00040015,0x00000008,0x00000020,0x00000000,
++   0x0004002b,0x00000008,0x00000009,0x00000001,0x0004001c,0x0000000a,0x00000006,0x00000009,
++   0x0006001e,0x0000000b,0x00000007,0x00000006,0x0000000a,0x0000000a,0x00040020,0x0000000c,
++   0x00000003,0x0000000b,0x0004003b,0x0000000c,0x0000000d,0x00000003,0x00040015,0x0000000e,
++   0x00000020,0x00000001,0x0004002b,0x0000000e,0x0000000f,0x00000000,0x00040017,0x00000010,
++   0x00000006,0x00000002,0x0004002b,0x00000008,0x00000011,0x00000003,0x0004001c,0x00000012,
++   0x00000010,0x00000011,0x0004002b,0x00000006,0x00000013,0x00000000,0x0004002b,0x00000006,
++   0x00000014,0xbf000000,0x0005002c,0x00000010,0x00000015,0x00000013,0x00000014,0x0004002b,
++   0x00000006,0x00000016,0x3f000000,0x0005002c,0x00000010,0x00000017,0x00000016,0x00000016,
++   0x0005002c,0x00000010,0x00000018,0x00000014,0x00000016,0x0006002c,0x00000012,0x00000019,
++   0x00000015,0x00000017,0x00000018,0x00040020,0x0000001a,0x00000001,0x0000000e,0x0004003b,
++   0x0000001a,0x0000001b,0x00000001,0x00040020,0x0000001d,0x00000007,0x00000012,0x00040020,
++   0x0000001f,0x00000007,0x00000010,0x0004002b,0x00000006,0x00000022,0x3f800000,0x00040020,
++   0x00000026,0x00000003,0x00000007,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,
++   0x000200f8,0x00000005,0x0004003b,0x0000001d,0x0000001e,0x00000007,0x0004003d,0x0000000e,
++   0x0000001c,0x0000001b,0x0003003e,0x0000001e,0x00000019,0x00050041,0x0000001f,0x00000020,
++   0x0000001e,0x0000001c,0x0004003d,0x00000010,0x00000021,0x00000020,0x00050051,0x00000006,
++   0x00000023,0x00000021,0x00000000,0x00050051,0x00000006,0x00000024,0x00000021,0x00000001,
++   0x00070050,0x00000007,0x00000025,0x00000023,0x00000024,0x00000013,0x00000022,0x00050041,
++   0x00000026,0x00000027,0x0000000d,0x0000000f,0x0003003e,0x00000027,0x00000025,0x000100fd,
++   0x00010038
++};
++static const uint32_t prove_tri_fs[] = {
++   0x07230203,0x00010000,0x0008000b,0x0000000d,0x00000000,0x00020011,0x00000001,0x0006000b,
++   0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
++   0x0006000f,0x00000004,0x00000004,0x6e69616d,0x00000000,0x00000009,0x00030010,0x00000004,
++   0x00000007,0x00030003,0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,0x00000000,
++   0x00030005,0x00000009,0x0000006f,0x00040047,0x00000009,0x0000001e,0x00000000,0x00020013,
++   0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,0x00040017,
++   0x00000007,0x00000006,0x00000004,0x00040020,0x00000008,0x00000003,0x00000007,0x0004003b,
++   0x00000008,0x00000009,0x00000003,0x0004002b,0x00000006,0x0000000a,0x3f800000,0x0004002b,
++   0x00000006,0x0000000b,0x00000000,0x0007002c,0x00000007,0x0000000c,0x0000000a,0x0000000b,
++   0x0000000b,0x0000000a,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,
++   0x00000005,0x0003003e,0x00000009,0x0000000c,0x000100fd,0x00010038
++};
++
++#define FAIL(...)                                       \
++   do {                                                 \
++      printf("THYLACINE-VK-SDL-PROVE FAIL: " __VA_ARGS__); \
++      printf("\n");                                     \
++      return 1;                                         \
++   } while (0)
++
++int
++main(int argc, char **argv)
++{
++   (void)argc;
++   (void)argv;
++   /* Unbuffered: the guest console is not a TTY; a fault before exit must
++    * not eat the step that died (thylacine_prove.c's argument). */
++   setvbuf(stdout, NULL, _IONBF, 0);
++
++   /* ---- SDL bring-up: window sized to the display ----
++    * The pre-window failures degrade to ABSENT, not FAIL: this probe runs
++    * on every THYLA_BOOT_PROBES boot, including boots with no compositor
++    * or no GPU, and "no display to present to" is the same non-signal as
++    * venus-prove's device-less stub.  The venus gate closes the loophole:
++    * it asserts the PASS line on the venus boot, so a wrongly-ABSENT
++    * there still fails the gate (#212 -- a skip must not report as pass
++    * where the capability is required). */
++   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
++      printf("THYLACINE-VK-SDL-PROVE ABSENT (SDL_Init: %s)\n",
++             SDL_GetError());
++      return 0;
++   }
++
++   SDL_DisplayMode dm;
++   if (SDL_GetDesktopDisplayMode(0, &dm) != 0 || dm.w <= 0 || dm.h <= 0) {
++      printf("THYLACINE-VK-SDL-PROVE ABSENT (no display mode: %s)\n",
++             SDL_GetError());
++      SDL_Quit();
++      return 0;
++   }
++   const uint32_t W = (uint32_t)dm.w, H = (uint32_t)dm.h;
++   if (W > 4096 || H > 4096)
++      FAIL("display %ux%u exceeds the WSI extent cap (4096) -- a "
++           "display-sized DIRECT-bindable swapchain is impossible here",
++           W, H);
++
++   SDL_Window *win =
++      SDL_CreateWindow("thylacine-vk", SDL_WINDOWPOS_UNDEFINED,
++                       SDL_WINDOWPOS_UNDEFINED, (int)W, (int)H,
++                       SDL_WINDOW_VULKAN);
++   if (!win) {
++      printf("THYLACINE-VK-SDL-PROVE ABSENT (SDL_CreateWindow: %s)\n",
++             SDL_GetError());
++      SDL_Quit();
++      return 0;
++   }
++   if (!(SDL_GetWindowFlags(win) & SDL_WINDOW_VULKAN))
++      FAIL("window created without SDL_WINDOW_VULKAN");
++
++   int dw = 0, dh = 0;
++   SDL_Vulkan_GetDrawableSize(win, &dw, &dh);
++   if (dw != (int)W || dh != (int)H)
++      FAIL("drawable size %dx%d != window %ux%u", dw, dh, W, H);
++
++   PFN_vkGetInstanceProcAddr gipa =
++      (PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr();
++   if (!gipa)
++      FAIL("SDL_Vulkan_GetVkGetInstanceProcAddr: %s", SDL_GetError());
++
++   unsigned ext_count = 0;
++   if (!SDL_Vulkan_GetInstanceExtensions(win, &ext_count, NULL) ||
++       ext_count == 0 || ext_count > 8)
++      FAIL("SDL_Vulkan_GetInstanceExtensions(count) -> %u: %s", ext_count,
++           SDL_GetError());
++   const char *ext_names[8];
++   if (!SDL_Vulkan_GetInstanceExtensions(win, &ext_count, ext_names))
++      FAIL("SDL_Vulkan_GetInstanceExtensions(names): %s", SDL_GetError());
++   bool have_surface = false, have_headless = false;
++   for (unsigned i = 0; i < ext_count; i++) {
++      if (!strcmp(ext_names[i], "VK_KHR_surface"))
++         have_surface = true;
++      if (!strcmp(ext_names[i], "VK_EXT_headless_surface"))
++         have_headless = true;
++   }
++   if (!have_surface || !have_headless)
++      FAIL("instance extension set lacks the surface class "
++           "(surface=%d headless=%d of %u)",
++           (int)have_surface, (int)have_headless, ext_count);
++   printf("vk-sdl-prove: SDL window %ux%u SDL_WINDOW_VULKAN; %u instance "
++          "ext(s) via SDL_Vulkan_GetInstanceExtensions\n", W, H, ext_count);
++
++   /* ---- instance (via the SDL-handed gipa) ---- */
++   PFN_vkCreateInstance create_instance =
++      (PFN_vkCreateInstance)gipa(VK_NULL_HANDLE, "vkCreateInstance");
++   if (!create_instance)
++      FAIL("vkCreateInstance unresolved through the SDL-handed gipa");
++   const VkInstanceCreateInfo ici = {
++      .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
++      .enabledExtensionCount = ext_count,
++      .ppEnabledExtensionNames = ext_names,
++   };
++   VkInstance instance = VK_NULL_HANDLE;
++   VkResult r = create_instance(&ici, NULL, &instance);
++   if (r != VK_SUCCESS || instance == VK_NULL_HANDLE)
++      FAIL("vkCreateInstance rc=%d", r);
++
++   PFN_vkEnumeratePhysicalDevices enum_pd =
++      (PFN_vkEnumeratePhysicalDevices)gipa(instance,
++                                           "vkEnumeratePhysicalDevices");
++   PFN_vkGetPhysicalDeviceMemoryProperties get_mem =
++      (PFN_vkGetPhysicalDeviceMemoryProperties)gipa(
++         instance, "vkGetPhysicalDeviceMemoryProperties");
++   PFN_vkDestroyInstance destroy_instance =
++      (PFN_vkDestroyInstance)gipa(instance, "vkDestroyInstance");
++   if (!enum_pd || !get_mem || !destroy_instance)
++      FAIL("instance-level entrypoints unresolved");
++
++   uint32_t pd_count = 0;
++   r = enum_pd(instance, &pd_count, NULL);
++   if (r != VK_SUCCESS && r != VK_INCOMPLETE)
++      FAIL("vkEnumeratePhysicalDevices rc=%d", r);
++   if (pd_count == 0) {
++      /* Device-less stub: no venus on this host.  Mirror venus-prove's
++       * degrade -- the joey smoke asserts only the PASS string, so ABSENT
++       * must not read as a failure on a 2D host. */
++      printf("THYLACINE-VK-SDL-PROVE ABSENT (device-less stub instance: no "
++             "venus device on /srv/warp)\n");
++      destroy_instance(instance, NULL);
++      SDL_DestroyWindow(win);
++      SDL_Quit();
++      return 0;
++   }
++   if (pd_count > 1)
++      pd_count = 1;
++   VkPhysicalDevice pd = VK_NULL_HANDLE;
++   r = enum_pd(instance, &pd_count, &pd);
++   if ((r != VK_SUCCESS && r != VK_INCOMPLETE) || pd == VK_NULL_HANDLE)
++      FAIL("vkEnumeratePhysicalDevices(list) rc=%d", r);
++   VkPhysicalDeviceMemoryProperties mem;
++   memset(&mem, 0, sizeof(mem));
++   get_mem(pd, &mem);
++
++   /* ---- surface (THE ARMING MOVE: consent lands inside this call) ---- */
++   VkSurfaceKHR surface = VK_NULL_HANDLE;
++   if (!SDL_Vulkan_CreateSurface(win, instance, &surface) ||
++       surface == VK_NULL_HANDLE)
++      FAIL("SDL_Vulkan_CreateSurface: %s", SDL_GetError());
++   printf("vk-sdl-prove: surface created + display consent armed\n");
++
++   /* ---- device with VK_KHR_swapchain (probe, then FAIL-not-skip) ---- */
++   bool has_swapchain_ext = false;
++   {
++      uint32_t n = 0;
++      static VkExtensionProperties dexts[256];
++      if (vn_EnumerateDeviceExtensionProperties(pd, NULL, &n, NULL) ==
++             VK_SUCCESS &&
++          n <= 256) {
++         VkResult er =
++            vn_EnumerateDeviceExtensionProperties(pd, NULL, &n, dexts);
++         if (er == VK_SUCCESS || er == VK_INCOMPLETE) {
++            for (uint32_t i = 0; i < n; i++)
++               if (!strcmp(dexts[i].extensionName, "VK_KHR_swapchain"))
++                  has_swapchain_ext = true;
++         }
++      }
++   }
++   if (!has_swapchain_ext)
++      FAIL("VK_KHR_swapchain not advertised (the semaphore-importable "
++           "gate; #212 -- a skip here would report as pass)");
++
++   const float prio = 1.0f;
++   const VkDeviceQueueCreateInfo qci = {
++      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
++      .queueFamilyIndex = 0,
++      .queueCount = 1,
++      .pQueuePriorities = &prio,
++   };
++   static const char *dev_exts[] = { "VK_KHR_swapchain" };
++   const VkDeviceCreateInfo dci = {
++      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
++      .queueCreateInfoCount = 1,
++      .pQueueCreateInfos = &qci,
++      .enabledExtensionCount = 1,
++      .ppEnabledExtensionNames = dev_exts,
++   };
++   VkDevice dev = VK_NULL_HANDLE;
++   r = vn_CreateDevice(pd, &dci, NULL, &dev);
++   if (r != VK_SUCCESS || dev == VK_NULL_HANDLE)
++      FAIL("vkCreateDevice rc=%d", r);
++
++   const VkDeviceQueueInfo2 qi = {
++      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2,
++      .queueFamilyIndex = 0,
++      .queueIndex = 0,
++   };
++   VkQueue q = VK_NULL_HANDLE;
++   vk_common_GetDeviceQueue2(dev, &qi, &q);
++   if (q == VK_NULL_HANDLE)
++      FAIL("vkGetDeviceQueue2");
++
++   /* ---- the swapchain: display-sized presentables ---- */
++   enum { SC_IMGS_MAX = 8 };
++   const VkSwapchainCreateInfoKHR sci = {
++      .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
++      .surface = surface,
++      .minImageCount = 3,
++      .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
++      .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
++      .imageExtent = { W, H },
++      .imageArrayLayers = 1,
++      .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
++                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
++      .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
++      .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
++      .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
++      .presentMode = VK_PRESENT_MODE_FIFO_KHR,
++      .clipped = VK_FALSE,
++   };
++   VkSwapchainKHR sc = VK_NULL_HANDLE;
++   r = vn_CreateSwapchainKHR(dev, &sci, NULL, &sc);
++   if (r != VK_SUCCESS || sc == VK_NULL_HANDLE)
++      FAIL("vkCreateSwapchainKHR %ux%u rc=%d (a refused img registration "
++           "lands here)", W, H, r);
++   uint32_t sc_count = 0;
++   static VkImage sc_imgs[SC_IMGS_MAX];
++   r = wsi_GetSwapchainImagesKHR(dev, sc, &sc_count, NULL);
++   if (r != VK_SUCCESS || sc_count < 3 || sc_count > SC_IMGS_MAX)
++      FAIL("swapchain image count %u rc=%d", sc_count, r);
++   r = wsi_GetSwapchainImagesKHR(dev, sc, &sc_count, sc_imgs);
++   if (r != VK_SUCCESS && r != VK_INCOMPLETE)
++      FAIL("vkGetSwapchainImagesKHR rc=%d", r);
++   printf("vk-sdl-prove: swapchain %u presentables %ux%u BGRA8\n",
++          sc_count, W, H);
++
++   /* ---- render machinery: pass + pipeline + per-image view/fb ---- */
++   const VkAttachmentDescription att = {
++      .format = VK_FORMAT_B8G8R8A8_UNORM,
++      .samples = VK_SAMPLE_COUNT_1_BIT,
++      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
++      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
++      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
++      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
++      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++      /* TRANSFER_SRC, not PRESENT: every frame is copy-out-able (frame 0
++       * is verified); an explicit barrier moves it to PRESENT_SRC before
++       * each present. */
++      .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++   };
++   const VkAttachmentReference att_ref = {
++      .attachment = 0,
++      .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
++   };
++   const VkSubpassDescription subpass = {
++      .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
++      .colorAttachmentCount = 1,
++      .pColorAttachments = &att_ref,
++   };
++   const VkSubpassDependency dep = {
++      .srcSubpass = 0,
++      .dstSubpass = VK_SUBPASS_EXTERNAL,
++      .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
++      .dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
++      .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
++      .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++   };
++   const VkRenderPassCreateInfo rpci = {
++      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
++      .attachmentCount = 1,
++      .pAttachments = &att,
++      .subpassCount = 1,
++      .pSubpasses = &subpass,
++      .dependencyCount = 1,
++      .pDependencies = &dep,
++   };
++   VkRenderPass rp = VK_NULL_HANDLE;
++   if (vn_CreateRenderPass(dev, &rpci, NULL, &rp) != VK_SUCCESS)
++      FAIL("vkCreateRenderPass");
++
++   static VkImageView views[SC_IMGS_MAX];
++   static VkFramebuffer fbs[SC_IMGS_MAX];
++   for (uint32_t i = 0; i < sc_count; i++) {
++      const VkImageViewCreateInfo vci = {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
++         .image = sc_imgs[i],
++         .viewType = VK_IMAGE_VIEW_TYPE_2D,
++         .format = VK_FORMAT_B8G8R8A8_UNORM,
++         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
++      };
++      if (vn_CreateImageView(dev, &vci, NULL, &views[i]) != VK_SUCCESS)
++         FAIL("vkCreateImageView[%u]", i);
++      const VkFramebufferCreateInfo fbci = {
++         .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
++         .renderPass = rp,
++         .attachmentCount = 1,
++         .pAttachments = &views[i],
++         .width = W,
++         .height = H,
++         .layers = 1,
++      };
++      if (vn_CreateFramebuffer(dev, &fbci, NULL, &fbs[i]) != VK_SUCCESS)
++         FAIL("vkCreateFramebuffer[%u]", i);
++   }
++
++   const VkShaderModuleCreateInfo vs_ci = {
++      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
++      .codeSize = sizeof(prove_tri_vs),
++      .pCode = prove_tri_vs,
++   };
++   const VkShaderModuleCreateInfo fs_ci = {
++      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
++      .codeSize = sizeof(prove_tri_fs),
++      .pCode = prove_tri_fs,
++   };
++   VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
++   if (vn_CreateShaderModule(dev, &vs_ci, NULL, &vs) != VK_SUCCESS ||
++       vn_CreateShaderModule(dev, &fs_ci, NULL, &fs) != VK_SUCCESS)
++      FAIL("vkCreateShaderModule");
++   const VkPipelineLayoutCreateInfo plci = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
++   };
++   VkPipelineLayout layout = VK_NULL_HANDLE;
++   if (vn_CreatePipelineLayout(dev, &plci, NULL, &layout) != VK_SUCCESS)
++      FAIL("vkCreatePipelineLayout");
++
++   const VkPipelineShaderStageCreateInfo stages[2] = {
++      {
++         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
++         .stage = VK_SHADER_STAGE_VERTEX_BIT,
++         .module = vs,
++         .pName = "main",
++      },
++      {
++         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
++         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
++         .module = fs,
++         .pName = "main",
++      },
++   };
++   const VkPipelineVertexInputStateCreateInfo vin = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
++   };
++   const VkPipelineInputAssemblyStateCreateInfo ia = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
++      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
++   };
++   const VkViewport vp = {
++      .x = 0.0f, .y = 0.0f,
++      .width = (float)W, .height = (float)H,
++      .minDepth = 0.0f, .maxDepth = 1.0f,
++   };
++   const VkRect2D scis = { .offset = { 0, 0 }, .extent = { W, H } };
++   const VkPipelineViewportStateCreateInfo vps = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
++      .viewportCount = 1,
++      .pViewports = &vp,
++      .scissorCount = 1,
++      .pScissors = &scis,
++   };
++   const VkPipelineRasterizationStateCreateInfo rs = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
++      .polygonMode = VK_POLYGON_MODE_FILL,
++      .cullMode = VK_CULL_MODE_NONE,
++      .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
++      .lineWidth = 1.0f,
++   };
++   const VkPipelineMultisampleStateCreateInfo ms = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
++      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
++   };
++   const VkPipelineColorBlendAttachmentState cba = {
++      .blendEnable = VK_FALSE,
++      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
++                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
++   };
++   const VkPipelineColorBlendStateCreateInfo cb = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
++      .attachmentCount = 1,
++      .pAttachments = &cba,
++   };
++   const VkGraphicsPipelineCreateInfo gpci = {
++      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
++      .stageCount = 2,
++      .pStages = stages,
++      .pVertexInputState = &vin,
++      .pInputAssemblyState = &ia,
++      .pViewportState = &vps,
++      .pRasterizationState = &rs,
++      .pMultisampleState = &ms,
++      .pColorBlendState = &cb,
++      .layout = layout,
++      .renderPass = rp,
++      .subpass = 0,
++   };
++   VkPipeline pipe = VK_NULL_HANDLE;
++   r = vn_CreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpci, NULL, &pipe);
++   if (r != VK_SUCCESS || pipe == VK_NULL_HANDLE)
++      FAIL("vkCreateGraphicsPipelines rc=%d", r);
++
++   /* ---- readback buffer (host-visible; the certified host's one type) */
++   const VkDeviceSize rb_size = (VkDeviceSize)W * H * 4;
++   const VkBufferCreateInfo bci = {
++      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++      .size = rb_size,
++      .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
++   };
++   VkBuffer rb_buf = VK_NULL_HANDLE;
++   if (vn_CreateBuffer(dev, &bci, NULL, &rb_buf) != VK_SUCCESS)
++      FAIL("readback vkCreateBuffer");
++   const VkBufferMemoryRequirementsInfo2 bmri = {
++      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
++      .buffer = rb_buf,
++   };
++   VkMemoryRequirements2 breq = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
++   };
++   vn_GetBufferMemoryRequirements2(dev, &bmri, &breq);
++   int bt = -1;
++   for (uint32_t i = 0; i < mem.memoryTypeCount; i++)
++      if ((breq.memoryRequirements.memoryTypeBits & (1u << i)) &&
++          (mem.memoryTypes[i].propertyFlags &
++           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
++         bt = (int)i;
++         break;
++      }
++   if (bt < 0)
++      FAIL("no HOST_VISIBLE type for the readback buffer");
++   const VkMemoryAllocateInfo bmai = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++      .allocationSize = breq.memoryRequirements.size,
++      .memoryTypeIndex = (uint32_t)bt,
++   };
++   VkDeviceMemory rb_mem = VK_NULL_HANDLE;
++   if (vn_AllocateMemory(dev, &bmai, NULL, &rb_mem) != VK_SUCCESS)
++      FAIL("readback vkAllocateMemory");
++   const VkBindBufferMemoryInfo bbind = {
++      .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
++      .buffer = rb_buf,
++      .memory = rb_mem,
++      .memoryOffset = 0,
++   };
++   if (vn_BindBufferMemory2(dev, 1, &bbind) != VK_SUCCESS)
++      FAIL("readback vkBindBufferMemory2");
++
++   /* ---- command machinery ---- */
++   const VkCommandPoolCreateInfo cpci = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
++      .queueFamilyIndex = 0,
++   };
++   VkCommandPool pool = VK_NULL_HANDLE;
++   if (vn_CreateCommandPool(dev, &cpci, NULL, &pool) != VK_SUCCESS)
++      FAIL("vkCreateCommandPool");
++   const VkFenceCreateInfo fci = {
++      .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
++   };
++   VkFence fence = VK_NULL_HANDLE;
++   if (vn_CreateFence(dev, &fci, NULL, &fence) != VK_SUCCESS)
++      FAIL("vkCreateFence");
++
++   /* ---- the frame loop: render the W-1 triangle into the acquired
++    * presentable, present it; frame 0 additionally copy-out + verify. ---- */
++   enum { ROUNDS = 3 };
++   uint32_t presented = 0;
++   uint32_t checked_idx = UINT32_MAX;
++   for (int round = 0; round < ROUNDS; round++) {
++      const VkAcquireNextImageInfoKHR ai = {
++         .sType = VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR,
++         .swapchain = sc,
++         .timeout = 10ull * 1000 * 1000 * 1000,
++         .fence = fence,
++         .deviceMask = 1,
++      };
++      uint32_t idx = UINT32_MAX;
++      r = vn_AcquireNextImage2KHR(dev, &ai, &idx);
++      if (r != VK_SUCCESS || idx >= sc_count)
++         FAIL("acquire round %d rc=%d idx=%u", round, r, idx);
++      /* fd=-1 pre-signaled on this backend */
++      if (vn_WaitForFences(dev, 1, &fence, VK_TRUE,
++                           10ull * 1000 * 1000 * 1000) != VK_SUCCESS ||
++          vn_ResetFences(dev, 1, &fence) != VK_SUCCESS)
++         FAIL("acquire fence round %d", round);
++
++      VkCommandBuffer cmd = VK_NULL_HANDLE;
++      const VkCommandBufferAllocateInfo cbai = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++         .commandPool = pool,
++         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++         .commandBufferCount = 1,
++      };
++      const VkCommandBufferBeginInfo cbbi = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
++      };
++      if (vn_AllocateCommandBuffers(dev, &cbai, &cmd) != VK_SUCCESS ||
++          vn_BeginCommandBuffer(cmd, &cbbi) != VK_SUCCESS)
++         FAIL("command buffer round %d", round);
++
++      const VkClearValue clear = {
++         .color = { .float32 = { 0.0f, 0.0f, 1.0f, 1.0f } },
++      };
++      const VkRenderPassBeginInfo rpbi = {
++         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
++         .renderPass = rp,
++         .framebuffer = fbs[idx],
++         .renderArea = { .offset = { 0, 0 }, .extent = { W, H } },
++         .clearValueCount = 1,
++         .pClearValues = &clear,
++      };
++      vn_CmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
++      vn_CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
++      vn_CmdDraw(cmd, 3, 1, 0, 0);
++      vn_CmdEndRenderPass(cmd);
++
++      if (round == 0) {
++         checked_idx = idx;
++         const VkBufferImageCopy bic = {
++            .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++            .imageExtent = { W, H, 1 },
++         };
++         vn_CmdCopyImageToBuffer(cmd, sc_imgs[idx],
++                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                                 rb_buf, 1, &bic);
++      }
++      const VkImageMemoryBarrier to_present = {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++         .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++         .dstAccessMask = 0,
++         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++         .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
++         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .image = sc_imgs[idx],
++         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
++      };
++      vn_CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL,
++                            0, NULL, 1, &to_present);
++      if (vn_EndCommandBuffer(cmd) != VK_SUCCESS)
++         FAIL("vkEndCommandBuffer round %d", round);
++      const VkSubmitInfo si = {
++         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++         .commandBufferCount = 1,
++         .pCommandBuffers = &cmd,
++      };
++      r = vn_QueueSubmit(q, 1, &si, fence);
++      if (r != VK_SUCCESS ||
++          vn_WaitForFences(dev, 1, &fence, VK_TRUE,
++                           10ull * 1000 * 1000 * 1000) != VK_SUCCESS ||
++          vn_ResetFences(dev, 1, &fence) != VK_SUCCESS)
++         FAIL("render submit round %d rc=%d", round, r);
++
++      if (round == 0) {
++         const VkMemoryMapInfo mmi = {
++            .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
++            .memory = rb_mem,
++            .size = rb_size,
++         };
++         void *p = NULL;
++         if (vn_MapMemory2(dev, &mmi, &p) != VK_SUCCESS || !p)
++            FAIL("readback map");
++         const volatile uint8_t *px = (const volatile uint8_t *)p;
++         /* BGRA8 bytes: b,g,r,a.  Center inside the triangle = RED
++          * (0,0,255,255); corner (0,0) outside = the clear BLUE
++          * (255,0,0,255).  The pair is the control: all-red = clear
++          * lost, all-blue = draw lost. */
++         const uint32_t c_off = ((H / 2) * W + W / 2) * 4;
++         if (px[c_off] != 0 || px[c_off + 1] != 0 || px[c_off + 2] != 255 ||
++             px[c_off + 3] != 255)
++            FAIL("center pixel %u,%u,%u,%u (want 0,0,255,255 BGRA red -- "
++                 "the triangle did not rasterize into the presentable)",
++                 px[c_off], px[c_off + 1], px[c_off + 2], px[c_off + 3]);
++         if (px[0] != 255 || px[1] != 0 || px[2] != 0 || px[3] != 255)
++            FAIL("corner pixel %u,%u,%u,%u (want 255,0,0,255 BGRA blue -- "
++                 "the clear did not land)",
++                 px[0], px[1], px[2], px[3]);
++         const VkMemoryUnmapInfo umi = {
++            .sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
++            .memory = rb_mem,
++         };
++         vn_UnmapMemory2(dev, &umi);
++         printf("vk-sdl-prove: triangle rendered into presentable %u + "
++                "read back (center red, corner blue)\n", idx);
++      }
++
++      const VkPresentInfoKHR pi = {
++         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
++         .swapchainCount = 1,
++         .pSwapchains = &sc,
++         .pImageIndices = &idx,
++      };
++      r = vn_QueuePresentKHR(q, &pi);
++      if (r != VK_SUCCESS)
++         FAIL("present round %d rc=%d", round, r);
++      presented++;
++   }
++
++   /* ---- teardown (vk first, SDL last) ---- */
++   vn_DestroyFence(dev, fence, NULL);
++   vn_DestroyCommandPool(dev, pool, NULL);
++   vn_DestroyBuffer(dev, rb_buf, NULL);
++   vn_FreeMemory(dev, rb_mem, NULL);
++   vn_DestroyPipeline(dev, pipe, NULL);
++   vn_DestroyPipelineLayout(dev, layout, NULL);
++   vn_DestroyShaderModule(dev, vs, NULL);
++   vn_DestroyShaderModule(dev, fs, NULL);
++   for (uint32_t i = 0; i < sc_count; i++) {
++      vn_DestroyFramebuffer(dev, fbs[i], NULL);
++      vn_DestroyImageView(dev, views[i], NULL);
++   }
++   vn_DestroyRenderPass(dev, rp, NULL);
++   vn_DestroySwapchainKHR(dev, sc, NULL);
++   wsi_DestroySurfaceKHR(instance, surface, NULL);
++   vn_DestroyDevice(dev, NULL);
++   destroy_instance(instance, NULL);
++   SDL_DestroyWindow(win);
++   SDL_Quit();
++
++   printf("THYLACINE-VK-SDL-PROVE PASS (SDL window %ux%u SDL_WINDOW_VULKAN "
++          "-> SDL_Vulkan glue -> headless surface + display consent armed, "
++          "swapchain of %u presentables, W-1 SPIR-V triangle rendered INTO "
++          "presentable %u + read back (center red corner blue), %u presents "
++          "through vkQueuePresentKHR each poking present-to -- the "
++          "vkQuake-arc W-3e first-Vulkan-frame witness)\n",
++          W, H, sc_count, checked_idx, presented);
++   return 0;
++}
+diff --git a/src/virtio/vulkan/vn_renderer.h b/src/virtio/vulkan/vn_renderer.h
+index a2dc91a..3a4bb78 100644
+--- a/src/virtio/vulkan/vn_renderer.h
++++ b/src/virtio/vulkan/vn_renderer.h
+@@ -287,6 +287,13 @@ vn_renderer_thylacine_present_poke(struct vn_renderer *renderer,
+ void
+ vn_renderer_thylacine_set_surface(uint32_t surface_id);
+ 
++/* The connected renderer's warp ctx public id (0 = no venus renderer is
++ * connected).  The SDL window glue's consent surface half: thyla_tap's
++ * `glsrc <ctx>` must name this ctx for the mutual adoption to complete
++ * (W-3e).  Process-global like the surface consent above. */
++uint32_t
++vn_renderer_thylacine_warp_ctx_pub(void);
++
+ /* Count of renderer bos minted from device memories -- the prove's witness
+  * that swapchain allocations minted NONE (the no-eager-mint proof). */
+ extern uint64_t vn_thylacine_bo_create_count;
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+index 2765aba..06effcb 100644
+--- a/src/virtio/vulkan/vn_renderer_thylacine.c
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -513,6 +513,20 @@ vn_renderer_thylacine_set_surface(uint32_t surface_id)
+    p_atomic_set(&thylacine_present_surface_plus1, surface_id + 1);
+ }
+ 
++/* The minted warp ctx pub id, for the SDL glue's consent surface half
++ * (W-3e).  Raw value: the server never mints pub 0 (its vindication
++ * sentinel), so 0 = "no connected renderer" needs no +1 encoding.  One
++ * global for the same reason as the surface consent above: one venus
++ * renderer per process is the deployment shape; a second instance
++ * overwrites and the last connect wins. */
++static uint32_t thylacine_warp_ctx_pub_global;
++
++uint32_t
++vn_renderer_thylacine_warp_ctx_pub(void)
++{
++   return p_atomic_read(&thylacine_warp_ctx_pub_global);
++}
++
+ VkResult
+ vn_renderer_thylacine_img_new(struct vn_renderer *renderer,
+                               uint64_t mem_id,
+@@ -1004,8 +1018,14 @@ thylacine_destroy(struct vn_renderer *renderer,
+    util_sparse_array_finish(&tly->shmem_array);
+    util_sparse_array_finish(&tly->bo_array);
+ 
+-   if (tly->connected)
++   if (tly->connected) {
++      /* Clear only our own advertisement: a second instance may have
++       * overwritten it, and clearing another renderer's live pub would
++       * disarm a consent it still honors. */
++      if (p_atomic_read(&thylacine_warp_ctx_pub_global) == tly->warp.ctx)
++         p_atomic_set(&thylacine_warp_ctx_pub_global, 0);
+       warp_close(&tly->warp);
++   }
+ 
+    cnd_destroy(&tly->fence_cnd);
+    mtx_destroy(&tly->mutex);
+@@ -1079,6 +1099,7 @@ thylacine_init(struct thylacine *tly)
+    if (warp_open(&tly->warp) != 0)
+       return VK_ERROR_INITIALIZATION_FAILED;
+    tly->connected = true;
++   p_atomic_set(&thylacine_warp_ctx_pub_global, tly->warp.ctx);
+ 
+    /* Read the retained Venus capset (the V-3c authority-read, pulled forward
+     * because bring-up's gate needs it). Best-effort: a short/absent blob
+-- 
+2.43.0
+

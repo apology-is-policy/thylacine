@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**46 absorbed · 106 live · 152 total.**
+**46 absorbed · 110 live · 156 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -107,6 +107,10 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 148-fork.md | live | — |
 | 149-warp.md | live | — |
 | 15-scheduler.md | absorbed | [[seam-eevdf-math]], [[sub-kernel-rendez]], [[sub-kernel-sched-smp]], [[sub-kernel-sched]] |
+| 150-build-config.md | live | — |
+| 150-halcyond.md | live | — |
+| 150-vt.md | live | — |
+| 151-libhalcyon.md | live | — |
 | 16-rendez.md | absorbed | [[lock-wait]], [[sub-kernel-rendez]] |
 | 17-smp-bringup.md | absorbed | [[seam-sparse-mpidr]], [[sub-kernel-sched-smp]] |
 | 18-territory.md | absorbed | [[inv-i1]], [[lock-territory-ns-lock]], [[spec-territory]], [[sub-kernel-territory]] |

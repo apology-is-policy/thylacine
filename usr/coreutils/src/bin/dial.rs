@@ -8,7 +8,7 @@
 //   dial HOST PORT             -- tcp!HOST!PORT
 //   dial [tcp!]HOST!SERVICE    -- a Plan 9 dial string (proto defaults to tcp)
 //
-// A presentation tool -> the Bonfire palette is on by default (--color=never for
+// A presentation tool -> the Bonfire palette on the console (auto; --color=never for
 // a plain report). The connect is bounded (a few seconds), so an unreachable host
 // reports "unreachable" rather than hanging on netd's 15 s connect timeout. netd
 // owns the NIC (I-5); dial touches no hardware and reaches only the `/net` its
@@ -42,7 +42,7 @@ usage: dial [--color[=WHEN]] HOST PORT
        dial [--color[=WHEN]] [tcp!]HOST!SERVICE
   Resolve through /net/cs and open a TCP connection, reporting the address
   and the round-trip time to ESTABLISHED.
-  --color[=WHEN]  colorize: always (default) | never | auto
+  --color[=WHEN]  colorize: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -60,7 +60,7 @@ fn run(args: Args) -> i64 {
         return rc;
     }
 
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut pos: [&str; 2] = [""; 2];
     let mut npos = 0usize;
     let mut i = 1;
@@ -159,10 +159,10 @@ fn build_dialstring(operands: &[&str]) -> core::result::Result<String, &'static 
     }
 }
 
-/// `--color=auto` stub (see the SYS_FD_DEVCLASS spec); true until a kernel TTY
-/// check lands, matching the coreutils presentation tools.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }
 
 /// Format a `Duration` as `X.YYY ms` (the ping/dial convention); sub-millisecond

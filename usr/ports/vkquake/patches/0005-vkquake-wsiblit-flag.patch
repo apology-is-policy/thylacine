@@ -1,0 +1,33 @@
+W-4: the -wsiblit flag -- the tiling A/B lever rides argv.
+
+The shell (ut) has no env machinery at v1.0 (no export, no VAR= prefix,
+and the env coreutil cannot set-and-run), so THY_WSI_BLIT cannot reach
+the game from the harness as an environment variable. The mesa WSI
+reads it with getenv at instance creation IN THIS PROCESS, so an
+in-process setenv before Vulkan init is sufficient: -wsiblit on the
+command line selects the BUFFER_BLIT swapchain arm (OPTIMAL-tiled
+images + a per-present resolve-blit into the linear presentable);
+default stays the LINEAR arm. One binary carries both legs of the
+ratified comparison.
+
+--- a/Quake/main_sdl.c	2026-08-31 20:57:44
++++ b/Quake/main_sdl.c	2026-08-31 20:57:53
+@@ -82,6 +82,18 @@
+ 	host_parms = &parms;
+ 	parms.basedir = ".";
+ 
++	/* THYLACINE port (0005): the W-4 tiling A/B lever. The shell has no
++	 * env machinery at v1.0, so the flag rides argv: -wsiblit sets the
++	 * env var the mesa WSI reads at instance creation (same process, so
++	 * an in-process setenv is all it takes -- it just has to happen
++	 * before Vulkan init). Selects the BUFFER_BLIT swapchain arm
++	 * (tiled images + resolve-blit); default stays LINEAR. */
++	for (t = 1; t < argc; t++)
++	{
++		if (argv[t] && !strcmp(argv[t], "-wsiblit"))
++			setenv("THY_WSI_BLIT", "1", 1);
++	}
++
+ 	parms.argc = argc;
+ 	parms.argv = argv;
+ 

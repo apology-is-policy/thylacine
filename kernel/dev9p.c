@@ -517,6 +517,11 @@ static u8 qid_type_p9_to_kernel(u8 p9) {
     if (p9 & P9_QTDIR)     out |= QTDIR;
     if (p9 & P9_QTAUTH)    out |= QTAUTH;
     if (p9 & P9_QTTMP)     out |= QTTMP;
+    // DISTRO D-1: carry the symlink marker so the resolver can expand
+    // (stalk.c; docs/DISTRO.md section 4). A server that never sets it ->
+    // links are invisible, which is the pre-D-1 status quo (fail-safe).
+    // P9_QTSYMLINK == QTSYMLINK == 0x02.
+    if (p9 & P9_QTSYMLINK) out |= QTSYMLINK;
     // net-6b-2b: carry the readiness marker through so dev9p_poll's QTPOLL gate
     // (on the cached qid) sees it. A server that never sets it -> dev9p_poll is
     // POSIX always-ready (fail-safe). P9_QTPOLL == QTPOLL == 0x01.
@@ -748,6 +753,20 @@ static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr) 
     if (attr->valid & P9_GETATTR_MODE) out->mode = attr->mode;
     if (attr->valid & P9_GETATTR_UID)  out->uid  = attr->uid;
     if (attr->valid & P9_GETATTR_GID)  out->gid  = attr->gid;
+
+    // D-1: the qid is the authority on symlink-ness -- it is what the RESOLVER
+    // reads, so a server whose qid says QTSYMLINK gets its links expanded no
+    // matter what its Tgetattr.mode says. Carry that same answer into the mode's
+    // type field when the server left one out, so lstat cannot report a link as
+    // a regular file whose size happens to be the target string's length. The
+    // syscall.h registry claimed this derivation existed; it did not, and only a
+    // server that sets the qid bit but omits S_IFLNK could tell -- which is the
+    // I-14 case the claim was there to cover. Guarded on a ZERO type field: a
+    // server that reported a real type keeps it (we do not overrule a server
+    // that disagrees with itself -- that is its bug to surface, not ours to
+    // paper over).
+    if ((out->mode & T_S_IFMT) == 0 && (out->qid_type & QTSYMLINK))
+        out->mode |= T_S_IFLNK;
 }
 
 // Native fstat surface (A-2a; IDENTITY-DESIGN.md §9.5) -> Stratum Tgetattr.
@@ -783,10 +802,28 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
         return 0;
     }
     struct p9_attr attr;
-    // errno-rollout: propagate the server's POSIX errno (p9_client_getattr
-    // returns -ecode on Rlerror, e.g. -T_E_NOENT for a vanished file; I-14
-    // bounds it to [-4095,-2], so it is never the generic -1/-T_E_PERM). The
-    // caller (spoor_stat_native -> stalk/SYS_FSTAT) propagates it as -errno.
+    // errno-rollout: propagate the server's POSIX errno -- p9_client_getattr
+    // returns -ecode on Rlerror, e.g. -T_E_NOENT for a vanished file.
+    //
+    // IT IS NOT BOUNDED AWAY FROM -1. This comment claimed I-14 bounds the value
+    // to [-4095,-2] "so it is never the generic -1/-T_E_PERM", and that is
+    // false: `map_error` rejects only `ecode == 0 || ecode > 4095`, so a server
+    // EPERM (ecode 1) arrives here as -1, intact and indistinguishable from the
+    // generic sentinel. `stalk`'s `err_code` already handles exactly that value
+    // by name, and `dev9p_read`'s own comment already records the collision --
+    // so this file contradicted itself, and the frame BELOW knew better than the
+    // frame above. A guard is a load-bearing statement about reachability: when
+    // one frame handles a value explicitly and its caller asserts the value
+    // cannot occur, the guard wins, because somebody measured.
+    //
+    // (The likely origin: map_error's own comment names the passthrough window
+    // as [-4095,-2], one value narrower than the clamp it sits above actually
+    // implements. A mistake made once in a comment, read back as a fact.)
+    //
+    // AND ONLY ONE CALLER PROPAGATES IT. stalk converts it for `*errp` (ER-1, as
+    // designed); `sys_fstat_for_proc` collapses every non-zero to the flat -1
+    // sentinel, which is precisely the half ERRORS.md ER-2 still lists as owed.
+    // So do not read this as "the path already propagates" -- half of it does.
     int gr = p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr);
     if (gr != 0)
         return gr;
@@ -1251,6 +1288,14 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     // BEFORE this open -- so a dev9p OEXEC-open reads the bytes as O_RDONLY.
     if (flags == 3) flags = 0;
     if (omode & 0x10) flags |= 01000;       // OTRUNC → O_TRUNC
+    // O_APPEND (the git 6.27 arm): forward the bit to the Tlopen. Stratum stores
+    // it per-fid and, on every Twrite to this fid, ignores the client offset and
+    // writes at the file's current EOF (server.c h_write) -- so the kernel needs
+    // NO append mode of its own. c->offset stays advisory below (the server does
+    // not consult it for an append fd); this is correct for a write-only append
+    // (git's reflog), and a mixed read+append on the SAME fd sees the tracked
+    // cursor, best-effort. Value 02000 == Linux O_APPEND == Stratum STM_9P_O_APPEND.
+    if (omode & SYS_WALK_OPEN_OAPPEND) flags |= 02000;   // O_APPEND
     struct p9_qid qid;
     u32 iounit;
     int rc = p9_client_lopen(p->client, p->fid, flags, &qid, &iounit);
@@ -1269,10 +1314,20 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
         larder_attr_invalidate(&p->client->larder, c->qid.path);
         larder_page_invalidate(&p->client->larder, c->qid.path);
         // F1 write-behind eligibility: an OTRUNC-opened fd's end is KNOWN
-        // (0) -- the append anchor (the create twin; same gate).
+        // (0) -- the append anchor (the create twin; same gate). EXCLUDE an
+        // O_APPEND fd (git 6.27 R1-F1): its Twrites are RELOCATED to EOF by
+        // Stratum, so the kernel's wb_base anchor and the server's EOF are two
+        // independent "write at end" mechanisms. Under concurrent append they
+        // diverge, and the flush's larder_page_install_own would then install
+        // this fd's bytes at wb_base offsets the server filled with ANOTHER
+        // writer's bytes -- a fabricated own-page serve (I-38). Pure
+        // write-through is coherent for an append fd (per-write attr
+        // invalidate; append only extends, so the extension range was never
+        // cached and the range-invalidate is conservative).
         if (p->client->loose &&
             __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
-            c->qid.type == 0) {
+            c->qid.type == 0 &&
+            !(omode & SYS_WALK_OPEN_OAPPEND)) {
             p->wb_eligible = true;
             p->wb_known    = true;
             p->wb_base     = 0;
@@ -1356,6 +1411,11 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         // new file. Map Plan 9 omode -> Linux O_* (same shape as dev9p_open).
         u32 flags = (u32)(omode & 0x3);
         if (omode & 0x10) flags |= 01000u;        // OTRUNC -> O_TRUNC
+        // O_APPEND on the create-open (git 6.27): a fresh reflog is
+        // O_CREAT|O_APPEND, so this Tlcreate carries the append bit exactly like
+        // dev9p_open's Tlopen. Stratum enforces the append server-side; no kernel
+        // append mode. 02000 == Linux O_APPEND == Stratum STM_9P_O_APPEND.
+        if (omode & SYS_WALK_OPEN_OAPPEND) flags |= 02000u;   // O_APPEND
         int rc = p9_client_lcreate(p->client, p->fid, (const u8 *)name, name_len,
                                     flags, mode, gid, &qid, &iounit);
         if (rc != 0) {                            // p->fid still parent; caller clunks
@@ -1417,9 +1477,19 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     // entirely create-then-write). Gate: loose (the B1 I-38 opt-in) +
     // cacheable + plain file. Pre-share (no handle exists yet), so plain
     // stores; the dir arm never reaches (DMDIR-gated).
+    // EXCLUDE an O_APPEND create (git 6.27 R1-F1): a fresh reflog is
+    // O_CREAT|O_WRONLY|O_APPEND, and Stratum RELOCATES every Twrite on the fid
+    // to EOF -- so wb staging + the server's EOF override are two independent
+    // "write at end" mechanisms that diverge under concurrent append, at which
+    // point the flush's larder_page_install_own fabricates own-pages at wb_base
+    // offsets the server filled with another writer's bytes (I-38). Pure
+    // write-through is coherent for an append fd. (Single-writer git is correct
+    // either way -- cursor==EOF on a fresh file -- but the anchor makes the
+    // concurrent case, the canonical O_APPEND workload, unsound.)
     if ((perm & SYS_WALK_CREATE_DMDIR) == 0 && p->client->loose &&
         __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
-        c->qid.type == 0) {
+        c->qid.type == 0 &&
+        !(omode & SYS_WALK_OPEN_OAPPEND)) {
         p->wb_eligible = true;
         p->wb_known    = true;
         p->wb_base     = 0;
@@ -1918,7 +1988,15 @@ static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     u64 offset = (u64)off;
     u32 got = 0;
     int rc = p9_client_readdir(p->client, p->fid, offset, count, (u8 *)buf, &got);
-    if (rc != 0) return -1;
+    // Errno rollout (getdents64 chunk): the bare -1 crossed the viv boundary as
+    // a fabricated EPERM -- and, worse, flattened a caught-note EINTR (the ^C-
+    // during-ls path this chunk adds an E2E leg for) into a non-retryable error.
+    // Surface the real code exactly as dev9p_readlink/dev9p_fsync do: -P9_E_INTR
+    // -> EINTR (retryable), a transport drop -> EIO, a server Rlerror passed
+    // through. NOT fid_suspect: an interrupt/transport error does not indict the
+    // fid (the rename/fsync arms mark it because a mid-op failure there can
+    // desync the fid; a readdir cursor is re-read from c->offset, unchanged).
+    if (rc != 0) return dev9p_wire_errno(rc);
     return (long)got;
 }
 
@@ -1927,6 +2005,28 @@ static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
 // -- Trenameat operates on the dirfids by name without transitioning them, like
 // Tsync / Treaddir). The SYS_RENAME handler already required the same Dev; this
 // adds the same-SESSION guard (two dev9p mounts are distinct p9_clients, and a
+// DISTRO D-1: Dev.readlink -- Treadlink on the walked link fid. `c` is the
+// resolver's transient walked-link clone: never opened, never donated to the
+// G2 dir-fid cache (donation gates on QTDIR, and a link's qid never carries
+// it), clunked by the resolver right after this returns. No Larder surface
+// touches the target (the per-crossing RPC is the honest v1.0 cost --
+// DISTRO.md section 4.4; the link-target sub-cache is a recorded seam).
+static long dev9p_readlink(struct Spoor *c, char *buf, long n) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || !buf || n <= 0) return -T_E_INVAL;
+    if (p->fid == P9_NOFID) return -T_E_INVAL;   // fidless Spoor (cached open)
+    u16 cap = (n < 0xFFFF) ? (u16)n : 0xFFFFu;
+    u16 len = cap;
+    int rc = p9_client_readlink(p->client, p->fid, (u8 *)buf, &len);
+    // A truncated target comes back as the client's -P9_E_INVAL (the reply
+    // exceeded our cap); dev9p_wire_errno passes it through as -T_E_INVAL --
+    // the resolver treats it as the over-long-splice bound (fail clean, the
+    // #83 ENAMETOOLONG-class note).
+    if (rc != 0) { p->fid_suspect = true; return dev9p_wire_errno(rc); }
+    if (len == 0) return -T_E_NOENT;             // degenerate empty target
+    return (long)len;
+}
+
 // 9P renameat is within one session). Names are NUL-terminated by the handler.
 static int dev9p_rename(struct Spoor *olddir, const char *oldname,
                         struct Spoor *newdir, const char *newname) {
@@ -2148,6 +2248,8 @@ void dev9p_init(void) {
 // =============================================================================
 
 struct Dev dev9p = {
+    // #217 F1: serves real file content -- may back executable pages.
+    .may_back_exec = true,
     .dc       = DEV9P_DC,
     .name     = "9p",
     // A-3b: rwx enforcement ACTIVE. The reconciliation A-2d deferred is in place
@@ -2186,6 +2288,7 @@ struct Dev dev9p = {
     .readdir  = dev9p_readdir,
     .rename   = dev9p_rename,
     .unlink   = dev9p_unlink,
+    .readlink = dev9p_readlink,   // D-1: Treadlink (the resolver's expansion RPC)
 
     .remove   = dev9p_remove,
     .wstat    = dev9p_wstat,

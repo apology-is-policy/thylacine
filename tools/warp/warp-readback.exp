@@ -1,0 +1,59 @@
+#!/usr/bin/expect -f
+# Warp-C C-6 gate (GPU-DESIGN 4.5.13): the composed-GL present's READBACK arm
+# under a deep client queue -- the fenced, DEFERRED readback that replaced the
+# synchronous one the C-0d Fable round found waiting on the console's dispatch
+# thread for a length the client chooses (F2), and the sync-slot deadline that
+# reads a device stalled behind a readback as BUSY rather than dead (F2b's
+# guest-side half).
+#
+# Separate from warp-prove.exp for the same reason warp-reject.exp is: the leg
+# stalls the device for seconds, twice, by design, and the Warp-2 gate's value
+# is being cheap enough to run every time. `warp-prove readback` prints
+# `C6-READBACK DONE` ONLY when every verdict arm (ARM / DEEP / LIVE / DEADLINE
+# / CLEAN) passed, else `C6-READBACK INCOMPLETE(<arm>)`, so the scenario is
+# self-gating; the F2B line is a MEASUREMENT (data, not a verdict) and
+# warp-host.sh prints it. The #186 caveat holds for READERS of the transcript:
+# lc_expect writes its own pattern into its timeout text, so the DONE token
+# appears in the FAILURE text too; warp-host.sh keys completion on lc_pass's
+# line, which only the success path prints.
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport there).
+# env: WARP_REPO (default ~/projects/thylacine), WARP_WORK (default ~/warp).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+set ::env(THYLACINE_DISPLAY) egl-headless
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+file mkdir $work
+# Per-attempt fixture isolation (#78/#85): the synced images are never booted
+# directly.
+file delete -force $work/pool-readback.img $work/disk-readback.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-readback.img
+exec cp $repo/build/disk.img $work/disk-readback.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-readback.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-readback.img
+
+source $repo/tools/interactive/lib.exp
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Two device stalls of a few seconds each plus a 35 s landing bound per phase;
+# the floor covers the worst case. `set timeout` is dead here -- lc_expect
+# resets it from lc_cmd_timeout.
+if {$lc_cmd_timeout < 240} { set lc_cmd_timeout 240 }
+# Wait on the LAST line the leg prints (the completion token), so every
+# measured line lands in the transcript first. INCOMPLETE(<arm>) -- and the
+# prover's own `FAIL --` on an instrument fault -- fail the scenario at once.
+lc_run_expect_hardfail_re "warp-prove readback" "C6-READBACK DONE" {warp-prove: (FAIL --|C6-READBACK INCOMPLETE)}
+
+lc_pass "warp-prove readback: the compositor readback arm is fenced + deferred (ARM/DEEP/LIVE/DEADLINE/CLEAN)"

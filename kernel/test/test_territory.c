@@ -150,6 +150,93 @@ void test_namespace_fork_isolated(void) {
     territory_unref(child);
 }
 
+// Design D (VIVARIUM 13.10.3; review F2 = self-audit SA-1): the namespace-level
+// phenotype declaration is copied by territory_clone. territory_clone copies its
+// fields one by one, so an omitted copy would let a container child LOOK Linux
+// (the rfork phenotype inherit) and revert to native on its first execve.
+// Paired with the undeclared control (a clone of nothing declares nothing) and
+// the post-clone independence check (a later parent declaration stays the
+// parent's), so "the clone always reports true" cannot pass.
+void test_territory_clone_copies_root_pheno(void);
+void test_territory_clone_copies_root_pheno(void) {
+    struct Territory *undecl = territory_alloc();
+    struct Territory *decl   = territory_alloc();
+    TEST_ASSERT(undecl != NULL && decl != NULL, "territory_alloc");
+    if (!undecl || !decl) {
+        if (undecl) territory_unref(undecl);
+        if (decl)   territory_unref(decl);
+        return;
+    }
+    bool fresh_undecl = territory_root_pheno(undecl);
+    bool null_undecl  = territory_root_pheno(NULL);
+    territory_declare_linux(decl);
+    bool decl_set = territory_root_pheno(decl);
+    territory_declare_linux(decl);               // idempotent
+    bool decl_still = territory_root_pheno(decl);
+
+    struct Territory *cu = territory_clone(undecl);
+    struct Territory *cd = territory_clone(decl);
+    bool cu_pheno = cu ? territory_root_pheno(cu) : true;    // fail toward the wrong answer
+    bool cd_pheno = cd ? territory_root_pheno(cd) : false;
+    territory_declare_linux(undecl);            // AFTER the clone
+    bool cu_after = cu ? territory_root_pheno(cu) : true;
+
+    if (cu) territory_unref(cu);
+    if (cd) territory_unref(cd);
+    territory_unref(undecl);
+    territory_unref(decl);
+
+    TEST_ASSERT(cu != NULL && cd != NULL, "territory_clone");
+    TEST_ASSERT(fresh_undecl == false, "a fresh Territory declares nothing (KP_ZERO, fail-safe)");
+    TEST_ASSERT(null_undecl == false,  "NULL declares nothing");
+    TEST_ASSERT(decl_set && decl_still, "territory_declare_linux sets it, idempotently");
+    TEST_ASSERT(cu_pheno == false, "CONTROL: a clone of an undeclared Territory declares nothing");
+    TEST_ASSERT(cd_pheno == true,  "F2/SA-1: territory_clone copies the declaration");
+    TEST_ASSERT(cu_after == false, "a declaration made AFTER the clone stays the parent's");
+}
+
+// Design D audit F6: the Territory-level declaration is rendered into
+// /proc/<pid>/ns ("root: pheno-linux"), for the reason the per-mount suffix is
+// -- a declaration that cannot be observed cannot be audited. The undeclared
+// control renders no such line; declared renders it AFTER the binds line; a
+// cap that fits the binds line but not the root line renders binds alone
+// (whole lines or nothing, never a prefix).
+static bool ns_has(const char *buf, u64 len, const char *needle) {
+    u64 n = 0;
+    while (needle[n] != '\0') n++;
+    if (n > len) return false;
+    for (u64 i = 0; i + n <= len; i++) {
+        u64 j = 0;
+        while (j < n && buf[i + j] == needle[j]) j++;
+        if (j == n) return true;
+    }
+    return false;
+}
+
+void test_territory_render_root_pheno(void);
+void test_territory_render_root_pheno(void) {
+    struct Territory *t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory_alloc");
+    if (!t) return;
+    char buf[128];
+    u64 n0 = territory_format_ns(t, buf, sizeof(buf));
+    bool undecl_has_root  = ns_has(buf, n0, "root: pheno-linux");
+    bool undecl_has_binds = ns_has(buf, n0, "binds: 0\n");
+    territory_declare_linux(t);
+    u64 n1 = territory_format_ns(t, buf, sizeof(buf));
+    bool decl_has_root = ns_has(buf, n1, "binds: 0\nroot: pheno-linux\n");
+    bool decl_ends_nl  = (n1 > 0 && buf[n1 - 1] == '\n');
+    char tiny[12];   // "binds: 0\n" fits (9 bytes); "root: pheno-linux\n" (18) does not
+    u64 n2 = territory_format_ns(t, tiny, sizeof(tiny));
+    bool tiny_whole = (n2 == 9) && ns_has(tiny, n2, "binds: 0\n");
+    territory_unref(t);
+    TEST_ASSERT(undecl_has_binds, "CONTROL: an undeclared Territory renders its binds line");
+    TEST_ASSERT(!undecl_has_root,  "CONTROL: ...and no root line");
+    TEST_ASSERT(decl_has_root, "F6: a declared Territory renders 'root: pheno-linux' after binds");
+    TEST_ASSERT(decl_ends_nl,  "whole lines only");
+    TEST_ASSERT(tiny_whole, "a cap that fits binds but not the root line renders binds alone");
+}
+
 // --- LS-4: per-Proc cwd ("dot") --------------------------------------------
 
 static int cwd_streq(const char *a, const char *b) {

@@ -1,0 +1,19 @@
+# libhalcyon -- the Halcyon environment library (HALCYON.md section 13).
+#
+# H-3a lands the `theme` module: the Daylight visual-scripture token source
+# (docs/HALCYON-VISUAL.md), shared by BOTH consumers of the ratified split --
+# halcyond's transcript Sheet + chrome painter, and tapestryd's pane
+# bevel/hairline/cast-shadow constants. no_std + no deps: pure colour + metric
+# constants (the vt/cartoon crate pattern), host-testable.
+[package]
+name = "libhalcyon"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+vt = { path = "../vt" }

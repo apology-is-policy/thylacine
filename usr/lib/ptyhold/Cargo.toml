@@ -1,0 +1,11 @@
+[package]
+name = "ptyhold"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ptyhold"
+path = "src/lib.rs"
+
+[dependencies]
+libthyla-rs = { path = "../libthyla-rs" }

@@ -680,5 +680,8 @@ void p9_client_mark_devgone(struct p9_client *c);
 #define P9_E_BUSY    16       // EBUSY
 #define P9_E_IO       5       // EIO
 #define P9_E_NODEV   19       // ENODEV (the device-gone terminal; T_E_NODEV)
+#define P9_E_INTR     4       // EINTR (== T_E_INTR); item 11 caught-note unwind of a
+                              // blocked client read/wait -- the thread LIVES, the note
+                              // delivers at its EL0-return tail (11b-9p, ARCH 8.8.3)
 
 #endif  // THYLACINE_9P_CLIENT_H

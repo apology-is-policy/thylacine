@@ -192,6 +192,78 @@ TLC verdicts at `Procs = {p1, p2}, Paths = {a, b, c}, Spoors = {s1, s2}`:
 | `MountRefcountConsistency` (per-Spoor refcount equals cardinality of mount entries referencing it across all Territories) | spoor_ref / spoor_unref discipline at every mount-table mutation site: `mount` bumps before insert; `unmount` drops after remove; `territory_clone` bumps per cloned entry; `territory_unref` final-release drops per remaining entry BEFORE `kmem_cache_free`. |
 | `MountRefcountNonNegative` | `spoor_unref`'s underflow extinct guarantees the counter never drops below zero. |
 
+### UM (union mounts) extension — spec-first re-enabled (2026-09-02)
+
+> **Currency note (UM, 2026-09-02).** The Mount/Unmount rows above modeled an
+> UNORDERED `mounts: [Procs -> SUBSET (Paths X Spoors)]` set. The union-mounts
+> arc **upgraded `mounts` to an ordered `morder: [Procs -> [Paths -> Seq(Member)]]`**
+> where `Member == [s: Spoors, mb: BOOLEAN, mc: BOOLEAN]` (mb = mounted MBEFORE,
+> mc = MCREATE). One representation now, not a set beside a seq. The refcount +
+> NoCycle invariants are preserved (adapted to occurrence-counting over the
+> sequences); the config-table numbers above are the pre-UM bounds and are
+> superseded by the table below.
+
+Models the Plan 9 union semantics ARCH §9.5/§9.6 declares but the v1.0 walk never
+grew (`docs/reference/18-territory.md` had them "Phase 5+"): a union point's members
+are the GRAFTED sources in declared order (MBEFORE prepended = searched first,
+MAFTER appended = last, MREPL = replace the whole group); the mounted-on dir's own
+contents are NOT an implicit member (grafted-sources-only — this also sidesteps the
+`would_create_mount_cycle` self-mount check, so no original-as-member case). New
+`holds: [Spoors -> SUBSET Names]` (member contents, fixed at Init, explored for
+coverage) drives the five new union invariants:
+
+- `OrderCorrect` — every MBEFORE member precedes every MAFTER member in a point's
+  sequence (search order). `BuggyMountOrder` appends an MBEFORE member -> violated.
+- `WalkFirstHit` — walk `pt/nm` lands on the EARLIEST member holding `nm`
+  (`WalkSel = FirstHolder`). `BUGGY_WALK_LAST_HIT` returns the last holder.
+- `ReaddirDedupFirstWins` — the union listing is complete, deduplicated by name,
+  first-member-wins. `BUGGY_READDIR_LAST_WINS` keeps the last holder.
+- `CreateTargetCorrect` — a create lands in the first MCREATE member (or nowhere).
+  `BUGGY_CREATE_ANY_MEMBER` ignores MCREATE (picks the first member).
+- `RemoveTargetCorrect` (UM-7 F3) — a remove (unlink / rmdir / rename source)
+  acts on the first member HOLDING the leaf (`RemoveSel = FirstHolder`, the same
+  first-hit as walk), never the MCREATE member. `BUGGY_REMOVE_MCREATE_MEMBER`
+  routes remove through the create target -> violated whenever the holder is not
+  the first MCREATE member (the F3 mis-selection).
+
+TLC verdicts at `Procs = {p1, p2}, Paths = {a, b}, Spoors = {s1, s2}, Names = {n1}`
+(+ `CONSTRAINT StateConstraint`, non-empty points <= 2):
+
+| Config | Flag | Verdict | Distinct |
+|---|---|---|---|
+| `territory.cfg`                          | (all FALSE)                | clean (no error), diameter 9 | 2,032,452 |
+| `territory_buggy.cfg`                     | `BUGGY_CYCLE`              | NoCycle violated                  | (fast) |
+| `territory_buggy_mount_no_refbump.cfg`    | `BUGGY_MOUNT_NO_REFBUMP`  | MountRefcountConsistency violated | (fast) |
+| `territory_buggy_unmount_no_refdrop.cfg`  | `BUGGY_UNMOUNT_NO_REFDROP`| MountRefcountConsistency violated | (fast) |
+| `territory_buggy_destroy_leak.cfg`        | `BUGGY_DESTROY_LEAK`      | MountRefcountConsistency violated | (fast) |
+| `territory_buggy_chroot_no_refbump.cfg`   | `BUGGY_CHROOT_NO_REFBUMP` | MountRefcountConsistency violated | (fast) |
+| `territory_buggy_mount_order.cfg`         | `BUGGY_MOUNT_ORDER`       | OrderCorrect violated             | (fast) |
+| `territory_buggy_walk_last_hit.cfg`       | `BUGGY_WALK_LAST_HIT`     | WalkFirstHit violated             | (fast) |
+| `territory_buggy_readdir_last_wins.cfg`   | `BUGGY_READDIR_LAST_WINS` | ReaddirDedupFirstWins violated    | (fast) |
+| `territory_buggy_create_any_member.cfg`   | `BUGGY_CREATE_ANY_MEMBER` | CreateTargetCorrect violated      | (fast) |
+| `territory_buggy_remove_mcreate.cfg`      | `BUGGY_REMOVE_MCREATE_MEMBER` | RemoveTargetCorrect violated  | (fast) |
+
+**Rule-pin note (UM-7 R2-F8).** The union selectors (`WalkSel` / `CreateSel` /
+`RemoveSel`) are DEFINITIONAL invariants -- each states the SELECTION RULE
+(`= FirstHolder` / `= FirstCreateMember`) and its buggy cfg discriminates that
+rule. No `Next` action consumes them, so the model pins WHICH member an op
+picks, not the two-step IMPL mechanism (e.g. the R2-F4 uncrossed-point ->
+caller-re-probe path, fixed by probing member index 0). Treat these as rule
+pins, not mechanism models; the mechanism's rigor is the audit + the runtime
+tests.
+
+Each of the union buggy cfgs was ALSO checked against ONLY its target
+invariant (not the `Invariants` bundle) and violates exactly that one — the
+discrimination control (a bug hits its own check, not incidentally a refcount one).
+
+Impl mapping (lands at UM-3/UM-4/UM-5): `MountBefore`/`MountAfter`/`MountRepl` ->
+`kernel/territory.c::mount` (MBEFORE insert-at-group-front / MAFTER append / MREPL
+replace-whole-group); `Unmount` -> `::unmount` (shift-down, order-preserving);
+`morder` iteration -> new `::mount_members` (ordered ref-held sources); `WalkSel` /
+`ReaddirSel` / `CreateSel` -> `kernel/stalk.c` union walk + the union readdir merge;
+`RemoveSel` -> `kernel/stalk.c::stalk_union_member_holding` (UM-8c, the F3 remove
+member-selection) via the `STALK_REMOVE` amode + `syscall.c::viv_union_member`.
+
 ### P2-Ea landed (this chunk)
 
 - `bindings` variable + Reachable transitive-closure helper.
@@ -1762,12 +1834,215 @@ distinct states); the KERNEL SHARE HALF landed at G-2** (the DMA-weave
 `burrow_share_into` admission + the Weft generalization; the ABI
 `SYS_DMA_CREATE_WEAVE`/`SYS_WEFT_UNSHARE` user-signed-off 2026-07-19); **the
 SERVER HALF landed at G-3** (tapestryd stage 0 + the R2-F3 reaper — the map
-below). Clean cfg GREEN 5413 distinct (unperturbed across G-2 and G-3 —
-neither impl half changed the model); liveness GREEN (`EventuallyRetired`
-incl. across `ServerDeath`); the 4 buggy cfgs each fire their named
-invariant (`premature_reuse` → RecycleGate,
+below); **the GPU-COMPOSED path landed model-first at Warp-C C-1**
+(2026-08-16, GPU-DESIGN §4.5.6 — model BEFORE impl); **its impl sites landed
+at C-2c (Attach/Detach) and C-3 (ComposeBlit/ComposeComplete, 2026-08-17)**
+— the binding paragraph below.
+Clean cfg GREEN 5413 distinct (unperturbed across G-2 and G-3 — neither impl
+half changed the model — and unperturbed across C-1, C-6 AND the W-3b
+presentable extension, each re-measured as its additivity control); liveness
+GREEN (`EventuallyRetired` incl. across `ServerDeath`); the 10 buggy cfgs
+each fire their named invariant (`premature_reuse` → RecycleGate,
 `retire_during_transfer`/`reweave_without_quiesce` → NoTornScanout,
-`map_after_retire` → NoStaleMap).
+`map_after_retire` → NoStaleMap, `drain_skipped` → NoTornCompose,
+`blit_during_fill`/`fill_during_blit` → NoStaleCompose, `readback_free` →
+NoTornReadback, `punbind_skipped`/`pdrain_skipped` → NoTornPresentable).
+Gate: `specs/check-tapestry.sh` (6 clean + 10 buggy; the composed pair now
+pinned at 94680, the presentable pair at its first-measurement counts).
+
+### The C-1 composed extension (model-first; no impl site yet)
+
+Behind `ALLOW_COMPOSE`, so the direct path is bit-recoverable. New actions
+and the sites they will bind at C-2/C-3:
+
+- **`Attach(g)` / `Detach(g)`** ↔ the compositor-context attach verb C-2
+  builds. `ctx_attach_resource` is the I-45 AUTHORITY-CONFERRAL point, not a
+  formality: P1b measured that without it vrend refuses the cross-context
+  blit by name (`Illegal resource 1080`) and with it the blit runs. `Detach`
+  requires `~InBlit(g)`.
+- **`ComposeBlit(g)` / `ComposeComplete(g)`** ↔ the per-frame
+  `VIRGL_CCMD_BLIT` list in one fenced `submit_3d`, and the fence retiring →
+  `SET_SCANOUT`(screen) + `RESOURCE_FLUSH`. `ComposeBlit` requires
+  `filled[g]` — the resource has been populated at least once — which is
+  deliberately NOT the same as `intransfer = 0`, a condition equally true of
+  "the fill landed" and "no fill was ever issued".
+- **`DrainedOfBlits(g)` on `ServerRelease` + `Free`** ↔ the real drain the
+  §28 I-40 row pre-recorded as owed. Modeled as an OMITTED CONJUNCT under
+  `BUGGY_DRAIN_SKIPPED` rather than as a twin buggy action, so the buggy arm
+  differs from the correct one in exactly the conjunct under test.
+
+### The C-2c/C-3 binding (landed 2026-08-17; the composed actions have impl sites)
+
+- **`Attach(g)`** ↔ `Comp::comp_import_slots` (every slot resource of a
+  generation, at `alloc_weave`, WITNESSED by a slot→sentinel copy inside
+  `COMPOSITOR_CTX`, C-2c) and `Comp::comp_import_bo` (the GL adoption's
+  consented BO at `present-to`). The recorded fact is `Surface.comp_attached`
+  / `WarpBo.comp_imported`, false = fail closed. **`Detach(g)`** ↔
+  `Comp::comp_detach_res` from `release_gen`, `retire` step (4),
+  `wbo_retire`, `comp_release_bo`, `comp_release_consents_for` — always
+  BEFORE the resource's unref.
+- **`ComposeBlit(g)` / `ComposeComplete(g)`** ↔ C-3's Composed present arm
+  (`Conn::present`): TRANSFER_TO_HOST_2D of the damage into the presented
+  slot's own resource, then `Comp::submit_blits(COMPOSITOR_CTX, …)` — one
+  `VIRGL_CCMD_BLIT` per compose op, box-corrected by the measured
+  `BlitConv` — on the compositor context's **SYNCHRONOUS slot**
+  (`Gpu::submit_3d_sync`), then `RESOURCE_FLUSH`. The C-1 paragraph above
+  bound these to "one fenced `submit_3d` … the fence retiring"; the landed
+  form is the synchronous REFINEMENT of that: the blit's response arrives
+  inside the present dispatch, so `ComposeBlit` and `ComposeComplete` close
+  in one dispatch and the in-flight blit set is empty at every retire point
+  — the same by-construction shape as `intransfer = 0`. `filled[g]` ↔ the
+  transfer that precedes the blit in the same dispatch (a blit never names a
+  slot the present did not just fill, and never a resource without
+  `comp_attached`).
+- **`DrainedOfBlits(g)` on `ServerRelease` + `Free`** ↔ holds by
+  construction at C-3 (nothing is in flight past a response; the GL object
+  lifetime rules cover the host side of an issued blit). The **fenced,
+  pipelined** form — flush riding fence completion, the drain as a real wait
+  — was named the C-4+ evolution; **C-4 (2026-08-17, GPU-DESIGN §4.5.12)
+  measured that the sync round trips were NOT the residual** (the health
+  verify's GPU drain was, and it is gone) and left the sync form in place,
+  so the fenced form is unscheduled. Whoever builds it must implement the
+  drain before touching retire; `drain_skipped` stays its counterexample.
+  The C-4 health-verify change (a buffer pair, issued per period and read a
+  period later) is below the model: the verify is a witness, not an
+  ordering step, and no spec action names it.
+- The **exclusion** the obligation below asked for landed at C-2d-b as ONE
+  HOST RESOURCE PER SLOT (GPU-DESIGN 4.5.8): a fill of slot j and a blit of
+  slot i (i≠j) touch different objects; same-slot fill-vs-blit is separated
+  by the synchronous present (blit response before the CQE that recycles
+  the slot) — the GL-execution residual is P2, measured 0/500 (4.5.4).
+
+### The C-6 readback class (spec landed 2026-08-18, model-first; the impl BOUND at C-6b the same day)
+
+Behind the same `ALLOW_COMPOSE` switch (additive by measurement: the six
+direct-path cfgs reproduce **5413** distinct states exactly with the new
+variable never leaving FALSE; the composed clean cfgs grow to 94680):
+
+- **`ComposeReadbackIssue(g)`** ↔ `Comp::rb_request` → `Comp::rb_issue`
+  (`usr/tapestryd/src/server.rs`), called from the composed-GL present's
+  `!done` arm in `Conn::present`: a **fenced** `Gpu::transfer_from_3d_comp`
+  (`gpu.rs`; the reserved slot `COMP_FSLOT`, `FenceTag { comp: true,
+  readback: true, ctx_pub: <the client's> }` — the client's id, NOT 0, see
+  GPU-DESIGN §4.5.13 AS-BUILT 1), the record `Comp.comp_rb` written, the
+  tpresent replied immediately. Before C-6b this was a synchronous
+  `transfer_from_3d_sync` inside one dispatch (the I-40 by-construction
+  shape that needed no model). `~InRead(g)` on Issue ↔ ONE in flight
+  compositor-wide (`comp_rb.is_some()` → `rb_enqueue`, the gen-pinned
+  `rb_wanted` FIFO; latest wins at issue time). `filled[g]` ↔ the client
+  presented a frame that exists (`gl_adoption` resolves). NO `attached[g]`
+  (the readback runs under the CLIENT's ctx — the arm for the un-imported
+  BO) and NO `FillLanded(g)` (the device serializes the read against the
+  fill: the in-order controlq + the synchronous host read, verified against
+  virglrenderer 1.1.0 `vrend_renderer_transfer_send_iov`).
+- **`ComposeReadbackComplete(g)`** ↔ `Comp::comp_readback_retired`, reached
+  from `warp_service_fences` for every `tag.comp` retire BEFORE
+  `warp_pump_retires` in the same pass (the pump's decrement may have just
+  quiesced a retiring BO; the compose must read `va` before that free): the
+  re-validation (same surface gen, scanout still Composed, `gl_adoption`
+  still resolving to the same ctx/BO/res/va/w/h — a retiring BO/ctx fails
+  it) then `blit_composed_pixels(.., Some(va))` + `screen_push`; the frame
+  is DROPPED (`rb_dropped`) otherwise. `comp_rb_pump` at the end of the pass
+  issues the next wanted incarnation.
+- **`DrainedOfReadbacks(g)` on `ServerRelease` + `Free`** ↔ the readback is
+  counted in the owning ctx's `fences_in_flight` (`rb_issue` increments;
+  the pump's common arm decrements on the tag) so every quiesce predicate —
+  `wctx_retire`, `warp_pump_retires`, `wbo_destroy`'s leak posture — holds
+  the backing the device is writing into; abandonment at
+  `FENCE_ABANDON_MS` sets `fence_poisoned` on the client's ctx like a client
+  fence would (the device may still write that backing) — which is exactly
+  why the tag must carry the client's ctx_pub. Modeled as an OMITTED
+  CONJUNCT under `BUGGY_READBACK_FREE`
+  (`tapestry_present_buggy_readback_free.cfg`, `NoTornReadback` violated in
+  11 states: … `ClunkMap` → `ComposeReadbackIssue` → `Destroy` →
+  `ServerRelease` → `Free` with the readback still landing) — the graver
+  twin of `drain_skipped`: a device WRITING freed pages, not reading them.
+- **Below the model** (durations and bounds, not states): the reserved fenced
+  slot (`Controlq::alloc_comp_slot`; the client pool is `0..COMP_FSLOT`),
+  `WarpCtx.comp_rb_in_flight` subtracted in `warp_fenced_admit`, the
+  sync-slot deadline widened to `FENCE_ABANDON_MS` in
+  `Controlq::submit_and_wait` while `readback_in_flight()` (any tag with the
+  `readback` bit — a client `transfer_3d(to_host = false)` or ours; sticky
+  for the wait once observed) (F2b), and `Cost::ReadbackWait`. Gate:
+  `warp-prove readback` / `tools/warp-host.sh readback` (ARM / DEEP / LIVE
+  / DEADLINE verdict arms + the F2B measurement).
+
+### The W-3b presentable class (spec landed 2026-08-26, model-first; the impl sites land at W-3c)
+
+The Warp-WSI FOURTH in-flight class (`docs/WARP-WSI-DESIGN.md` §6): a venus
+swapchain image as a first-class **presentable** — a never-mapped
+HOST3D blob, display shape declared at registration. Behind its OWN switch,
+`ALLOW_PRESENTABLE` (C-1/C-6 shared `ALLOW_COMPOSE`; this is a new object,
+not a new arm of the weave), additive by measurement: with the switch off
+ALL FOUR pre-existing clean cfgs reproduce exactly (5413 / 5413 / 94680 /
+94680 — the composed pair is now PINNED in the gate, which the C-6 close
+left unpinned); with it on, the all-features clean cfg measures 1557073
+distinct states. The presentable has NO GUEST PAGES, so its invariant
+protects the HOST resource's lifetime against the display's observers — the
+`gl_evict_res` class, host-side UAF with cross-client blast radius on the
+documented-trusted host. Action ↔ site (registration/teardown landed at W-3c-1; the bind at W-3c-2; the compose class W-3d-owed):
+
+- **`PRegister`** ↔ `ctx/<id>/img/new` (venus alloc + registration
+  collapsed: between the two the blob is an ordinary venus resource nothing
+  display-side can name). **`PDestroy`** ↔ `img/<n>/ctl destroy`,
+  `vkDestroySwapchainKHR`, or the owning ctx's death sweep — one teardown
+  path.
+- **`PPresentBind` / `PUnbind`** ↔ the Direct arm's `SET_SCANOUT_BLOB` bind
+  and the binding ENDING however it ends (explicit disable, replaced by
+  another source's bind, the teardown's evict step). The standing observer.
+  **AS BUILT at W-3c-2**: `PPresentBind` = `Comp::direct_bind_adopted`
+  (`usr/tapestryd/src/server.rs` — the one family-dispatch site, reached
+  from the F16 pending switch and the steady-state defensive rebind);
+  `PUnbind` = `gl_evict_res` however reached (`wimg_teardown`, surface
+  teardown, retarget). The compose read class (`PComposeIssue`/`Complete`)
+  is RESEQUENCED to W-3d slice 1 with the drain (the run-6 fork
+  resolution): W-3c-2's Direct adoption creates no `pinflight` member, so
+  `PDrained` stays vacuously discharged.
+- **`PComposeIssue` / `PComposeComplete`** ↔ the Composed arm READING the
+  presentable: the C-3 cross-ctx blit or the C-6 readback's SOURCE side —
+  one class, because both only read it. The readback's WRITE side lands in
+  the destination weave's pages and is the EXISTING `inread` class ("the
+  C-6 bookkeeping carries over unchanged", WSI-DESIGN §4.3) — deliberately
+  NOT re-modeled as a coupling.
+- **`PClientRelease` / `PServerRelease` / `PFree`** ↔ the I-7/I-37 holder
+  discipline extended by one class: venus allocation + registration + the
+  two observer arms; the blob's UNREF only after ALL FOUR release. A client
+  destroying its VkImage under a live scanout binding is legal and is
+  exactly why the discipline is last-of-all, not client-decides.
+- **`PUnbound` + `PDrained` on `PServerRelease` + `PFree`** ↔ the
+  display-safe teardown ("gap 7"): unbind-BEFORE-unref + the compose drain.
+  OMITTED-CONJUNCT sabotage per direction: `BUGGY_PUNBIND_SKIPPED` →
+  `NoTornPresentable` (the display left scanning a destroyed resource),
+  `BUGGY_PDRAIN_SKIPPED` → `NoTornPresentable` (the compose reads one).
+- **`ServerDeath` is ATOMIC TOTALITY for this class** — deliberately unlike
+  the weave arms: the backing and its observers are all device-side, so the
+  reset that destroys the resource kills the binding and aborts the compose
+  in the same stroke; no cross-window exists (the host's internal reset
+  ordering is the trusted host half, GPU-DESIGN §9.2).
+- **NOT modeled, on the record**: the CONTENT leg (stage 0 discharges
+  render-vs-present ordering client-side — the backend fence-waits before
+  the present RPC + wsi_common acquire; a violation tears the violator's
+  own frame; the async evolution re-opens it WITH its own fence tag per
+  §4.4's seam); N>1 swapchain images (N independent instances of this
+  lifecycle; rotation is wsi_common bookkeeping; a bind of K+1 only ever
+  ENDS K's binding earlier); the I-45 adoption gate (a verb-resolution
+  guard with no lifetime edge — the ComposeNeedsAttach reasoning — enforced
+  by the impl's owner-scan, prosecuted at the W-3c audit).
+
+Liveness: `PresentableEventuallyRetired` (`retiring ~> gone`) — the ordered
+teardown does not deadlock; terminates because a retiring presentable
+admits no NEW observers and no holder re-arms.
+
+**A design obligation C-1 surfaced for C-2/C-3, before any code:** the D1
+recycle gate does not survive the composed path unchanged. tapestryd
+allocates ONE 2D resource per surface (whole-weave `ATTACH_BACKING`,
+per-present offset transfer — `usr/tapestryd/src/gpu.rs`), so guest-side
+slots buy no host-side concurrency and a fill of ANY slot collides with a
+blit. In the direct path a present's terminal CQE means the host has finished
+reading; once the compositor is a SECOND reader of that one resource, the CQE
+stops meaning the resource is free, and nothing in the old rule notices. The
+impl must supply the exclusion — fence ordering, or a double-buffered host
+resource.
 
 The G-3 action ↔ site map (the server half; `usr/tapestryd/src/server.rs`
 unless noted — a USERSPACE realization: the spec's server actions are
@@ -1988,3 +2263,5 @@ pty_stop, reader_frame, ...) are recorded per-row in
 **RE-ENABLED for the capability network dataplane (user-directed, 2026-06-20; NET-THROUGHPUT / the Weft arc, I-37).** The fifth instance of re-enabling point (a). The Weft dataplane (`docs/NET-THROUGHPUT.md`) gives a confined Proc a per-flow, capability-scoped, zero-copy shared-page path to its `/net` flows — netd does the control-plane setup at grant, the bytes then flow through a shared Burrow with **no per-op mediation** (the Snap-transport + Arrakis-framing + RDMA-registration-is-the-capability fusion the five-lineage literature pass confirms unoccupied: the closest *primitive*, Fuchsia's IOBuffer, is logging-only; the closest *property-set*, Arrakis, is NIC-hardware-enforced). Its central hazard is the famous io_uring `ubuf_info` buffer-lifetime race: a registered payload page reused before the LAST of {netd stack, NIC DMA, peer ACK} is done → in-flight-page UAF / cross-Proc corruption (the `F_NOTIF` two-CQE contract releases the I-30 pin at notification-terminal, not op-terminal) — exactly the subtle class that benefits from machine-checked exploration. **Model-first**: `specs/weft.tla` (clean + the buggy cfgs `premature_release` / `recheck_per_op` [the reviewer-attack per-packet re-check] / `ring_toctou` / `share_outlives_flow`) is **LANDED at Weft-1** (`d42e91b`+; TLC-green model-first: the clean cfg [13 invariants, 1412 distinct, depth 22] + the `EventuallyReleased` liveness witness + the four buggy cfgs, each a counterexample on its named invariant — `premature_release`->`PinHeldWhileInFlight`, `recheck_per_op`->`NoPerOpMediation`, `ring_toctou`->`DescPinnedToSnapshot`, `share_outlives_flow`->`ShareBoundedByFlow`); the impl is validated against it across Weft-2..7 (`specs/SPEC-TO-CODE.md::weft.tla`). Re-enabled for THIS surface only; the broader suspension stands elsewhere.
 
 **RE-ENABLED for the debugger stop/continue/step state machine (user-directed, 2026-07-14; Go IDE Stage 8a, I-39).** The sixth instance of re-enabling point (a). The kernel debug surface (`docs/DEBUG-FS-DESIGN.md`) lets a debugger stop an EL0 target at the EL0-return-tail checkpoint, read/write its registers + cross-Proc memory, single-step it, and walk its unified user->kernel stack — bounded by I-39 (debug authority = namespace + the owner-or-`CAP_DEBUG` two-axis gate). Its central hazard is an SMP wait/wake race on the **most bug-prone lineage in the tree** (#788/#806/#860/#809/#811/#68 — the death path): a stop request racing a group-terminate/kill, a resume racing a detach or the target's death, a lost or double wake of a parked thread — exactly the class the tests are structurally blind to and that machine-checked exploration catches (the deep-smp-review / death_wake precedent). The sharp correctness line — a stop is observed at the EL0-return tail for a RUNNING thread (parks-and-reparks, preserving an in-progress syscall) OR, **since 8c-2 (the stop-of-a-sleeper)**, via a nested stop-detour INSIDE `sleep()`/`tsleep()` for a SYSCALL-BLOCKED sleeper (the multi-thread-Go-target fix: an idle futex-parked M never reaches the tail on its own, so without the detour the target could never become fully-stopped and a blocking `stop` hangs) — in BOTH cases the `#811` death check PRECEDES the stop (the stop-detour is gated `r != &debug_rendez` and the die-check fires first on wake, so a death UNWINDS the syscall while a stop parks-and-reparks it), ordered AFTER `el0_return_die_check` so **death always wins over a stop** — is a model obligation, not a comment. **Model-first**: `specs/debug_stop.tla` (clean + the buggy cfgs `park_before_die` / `lost_stop` / `double_wake` / `strand_on_debugger_death`, each a counterexample on its named invariant — NoLostStop, DeathWinsOverStop, NoEL0AfterStopped, ExactlyOnceResume — plus the `EventuallyResumed` NoStrand liveness witness that a debugger's detach/close/death always resumes the target) is written + TLC-green BEFORE the 8a-1 impl; the impl is validated against it (`specs/SPEC-TO-CODE.md::debug_stop.tla`). **8a-2c added the 5th invariant `StopImpliesOwned == sflag => attached`** (the per-Proc stop flag is set only while a debugger owns the slot) + the `FaultStop` action + the `fault_stop_ungated` buggy cfg — the SA-1 fix (a hardware bp/wp/step fire must deliver the stop under `g_proc_table_lock` gated on `debug_owner != NULL`, via `proc_debug_fault_stop`, exactly `RequestStop`'s attach gate; the pre-fix EC path set the flag ungated → a fire racing a detach stranded the debuggee). Re-enabled for THIS surface only; the broader suspension stands elsewhere.
+
+**RE-ENABLED for union mounts (user-directed, 2026-09-02; the UM arc, I-28/I-3).** The seventh instance of re-enabling point (a). The union-mounts arc grows the v1.0 resolver's mount-table walk into the full Plan 9 union semantics ARCH 9.5/9.6 declares (`docs/reference/18-territory.md` had MBEFORE/MAFTER/MCREATE "recorded but treated as append; union walking Phase 5+"). Its central hazards are ORDERING (a mis-ordered union searches the wrong source first -> a shadowed binary or a wrong `/bin/sh`) and the resolver's per-component union walk on the most privilege-load-bearing surface in the tree (`kernel/stalk.c`, an I-28 boundary) -- exactly the class where a mis-modeled first-hit/dedup rule benefits from machine-checked exploration. **Model-first**: `specs/territory.tla` UPGRADED (mounts set -> ordered `morder` sequences + `holds` contents) with the four union invariants (`OrderCorrect`/`WalkFirstHit`/`ReaddirDedupFirstWins`/`CreateTargetCorrect`) + their buggy cfgs, TLC-green (clean 2,032,452 distinct, diameter 9; each buggy cfg a counterexample on its named invariant, discrimination-checked against the specific invariant) BEFORE the UM-3/4/5 impl; the impl (mount ordering + `mount_members` + the stalk union walk + union readdir) is validated against it. Re-enabled for THIS surface only; the broader suspension stands elsewhere.

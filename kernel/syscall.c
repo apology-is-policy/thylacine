@@ -26,6 +26,7 @@
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
+#include <thylacine/image.h>           // D-3: the FILE mmap arm shares exec's Image cache
 #include <thylacine/irqfwd.h>
 #include <thylacine/loom.h>
 #include <thylacine/mmio_handle.h>
@@ -34,6 +35,7 @@
 #include <thylacine/path.h>    // struct Path (SYS_FD2PATH reads ->s/->len; #66)
 #include <thylacine/pts.h>     // the pts registry (SYS_PTY_REGISTER; PTY-1c)
 #include <thylacine/pci_handle.h>   // KObj_PCI (SYS_PCI_CLAIM/MAP_BAR/INFO; pci-1c)
+#include "../arch/arm64/mmu.h"      // V-2: MAIR_IDX_* for SYS_BURROW_FROM_HOSTMEM
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/perm.h>
@@ -63,16 +65,18 @@
 // SYS_EXITS — terminate calling process.
 // =============================================================================
 //
-// AArch64 ABI: x0 = exit status (0 → "ok"; non-zero → "fail").
+// AArch64 ABI: x0 = exit status. Since #91 the low byte (x0 & 0xff)
+// becomes p->exit_status VERBATIM, so a native t_exits(N) reaches the
+// parent's wait as WEXITSTATUS == N -- matching Linux's (status & 0xff)
+// exit semantics. The display exit_msg still tracks the CODE via the
+// Plan 9 string convention (0 -> "ok", non-zero -> "fail"), kept for
+// /proc and the await string:
 //
-// At v1.0 P3-Ec we map the integer status to the existing kernel
-// exits() string-based convention:
+//   x0 & 0xff == 0  → exits_code(0, "ok")    → p->exit_status = 0
+//   x0 & 0xff == N  → exits_code(N, "fail")  → p->exit_status = N
 //
-//   x0 == 0  → exits("ok")    → p->exit_status = 0
-//   x0 != 0  → exits("fail")  → p->exit_status = 1
-//
-// Phase 5+ extends to a richer per-Proc exit_status u64 carrying the
-// full integer payload.
+// exits_code carries the byte; exits(msg) is the string-only wrapper the
+// ~dozen in-kernel exits("...") callers use (msg=="ok" -> 0, else 1).
 //
 // exits() is __attribute__((noreturn)); this helper inherits the
 // no-return semantics. The user thread context is abandoned (its
@@ -80,12 +84,14 @@
 // wait_pid reaps via thread_free).
 __attribute__((noreturn))
 static void sys_exits_handler(u64 status) {
-    if (status == 0) {
-        exits("ok");
-    } else {
-        exits("fail");
-    }
-    // Unreachable — exits() is noreturn.
+    // #91: carry the real low byte (0..255) so a native t_exits(N) -- and a
+    // phenotype exit(N) that routes here -- reaches the parent's wait as
+    // WEXITSTATUS == N, instead of the pre-#91 collapse to exit_status 0/1. The
+    // display msg tracks the CODE, not the raw arg: a status whose low byte is 0
+    // is a success even with high bits set, matching Linux (status & 0xff).
+    int code = (int)(status & 0xff);
+    exits_code(code, code ? "fail" : "ok");
+    // Unreachable -- exits_code() is noreturn.
     extinction("sys_exits returned");
 }
 
@@ -101,7 +107,11 @@ __attribute__((noreturn))
 static void sys_exit_group_handler(u64 status) {
     struct Thread *t = current_thread();
     struct Proc   *p = (t && t->magic == THREAD_MAGIC) ? t->proc : NULL;
-    const char *msg = (status == 0) ? "ok" : "fail";
+    // #91: the real low byte reaches the parent's wait as WEXITSTATUS == N (the
+    // load-bearing path -- busybox / musl exit via exit_group). The display msg
+    // tracks the code, not the raw arg (see sys_exits_handler).
+    int code = (int)(status & 0xff);
+    const char *msg = code ? "fail" : "ok";
     if (p && p->magic == PROC_MAGIC) {
         // proc_group_terminate's universal death-wake walks p->threads, which
         // requires g_proc_table_lock (#811, ARCH §8.8.1). Acquire it around the
@@ -109,7 +119,7 @@ static void sys_exit_group_handler(u64 status) {
         // re-acquires it for the last-out ZOMBIE transition (spinlocks are not
         // recursive).
         irq_state_t s = proc_table_lock_acquire();
-        proc_group_terminate(p, msg);
+        proc_group_terminate_code(p, code, msg);
         proc_table_lock_release(s);
     }
     // Exit the caller (a Thread of p). thread_exit_self validates current /
@@ -632,6 +642,186 @@ static s64 sys_dma_create_gpu_bo_handler(u64 size, u64 rights) {
     return (s64)h;
 }
 
+// V-2 (audit F2): resolve + bounds-check a hostmem BAR subrange. Pure (no Proc /
+// handle state) so the security-load-bearing shm-scan + OOB rejects + base_pa
+// arithmetic are unit-testable directly (test_weft_hostmem_resolve). Returns 0 +
+// *base_pa_out on success; -1 on a bad shmid, a zero/unaligned length, a miss, or
+// an OOB subrange. Non-wrapping bounds: offset <= shm.length and length <=
+// shm.length - offset, and discovery pins shm.offset + shm.length <= bar.size,
+// so base_pa + length never escapes the BAR (I-45).
+int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
+                             u64 length, u64 *base_pa_out);
+int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
+                             u64 length, u64 *base_pa_out) {
+    if (!k || !base_pa_out)                          return -1;
+    if (length == 0)                                 return -1;
+    if (shmid > 0xffu)                               return -1;   // shmid is a u8
+    if ((offset & (PAGE_SIZE - 1)) || (length & (PAGE_SIZE - 1))) return -1;
+    for (u32 s = 0; s < PCI_SHM_COUNT; s++) {
+        if (!k->shm[s].present || k->shm[s].shmid != (u8)shmid) continue;
+        u8 bar = k->shm[s].bar;
+        if (bar >= PCI_BAR_COUNT || !k->bars[bar].present)      return -1;  // malformed
+        if (offset > k->shm[s].length)                          return -1;  // OOB start
+        if (length > k->shm[s].length - offset)                 return -1;  // OOB extent
+        *base_pa_out = k->bars[bar].pa + k->shm[s].offset + offset;
+        return 0;
+    }
+    return -1;   // no window with this shmid
+}
+
+// =============================================================================
+// SYS_BURROW_FROM_HOSTMEM — mint a Burrow over a PCI hostmem BAR subrange and
+// map it into the caller (Warp-6 V-2; GPU-DESIGN §6.2.1).
+// =============================================================================
+//
+// Authority is owning the pci_handle claim: KOBJ_PCI is in KOBJ_KIND_HW_MASK
+// (I-5 non-transferable), so a KOBJ_PCI handle in p's table IS proof p owns the
+// claim -- no CAP_HW_CREATE (unlike the *_CREATE mints, which forge a NEW hw
+// object; this only re-exposes memory the claim already owns). I-45: the map
+// reaches only the named BAR subrange of the caller's own claim, at a
+// cacheable/NC attribute conveying zero hardware authority. I-32: the caller's
+// page-budget is NOT charged (BAR pages, not RAM); a CLIENT that later maps this
+// via burrow_share_into is charged its own shared_map_pages.
+static s64 sys_burrow_from_hostmem_handler(u64 pci_hraw, u64 shmid, u64 offset,
+                                           u64 length, u64 cache_policy) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // ABI cache policy -> kernel MAIR index (the boundary translation).
+    u8 mair_idx;
+    switch (cache_policy) {
+    case T_CACHE_CACHED:                mair_idx = MAIR_IDX_NORMAL_WB; break;
+    case T_CACHE_WC:
+    case T_CACHE_UNCACHED:              mair_idx = MAIR_IDX_NORMAL_NC; break;
+    default:                            return -1;
+    }
+
+    // Resolve + validate ownership of the PCI claim (the sys_pci_map_bar_handler
+    // block). The held handle keeps k alive across burrow_create_hostmem (which
+    // takes its OWN kobj_pci ref); handle_put balances every exit.
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)pci_hraw, &hh) < 0)    return -1;
+    if (hh.kind != KOBJ_PCI)            { handle_put(&hh); return -1; }
+    if ((hh.rights & RIGHT_MAP) == 0)   { handle_put(&hh); return -1; }
+    struct KObj_PCI *k = (struct KObj_PCI *)hh.obj;
+    if (!k)                             { handle_put(&hh); return -1; }
+    if (k->magic != KOBJ_PCI_MAGIC)     { handle_put(&hh); return -1; }
+
+    // Resolve + bounds-check the subrange (F2: the pure, unit-tested core --
+    // shmid select, page-align + OOB rejects, base_pa = bar.pa + window offset +
+    // caller offset, bounded within the BAR).
+    u64 base_pa;
+    if (hostmem_resolve_subrange(k, shmid, offset, length, &base_pa) != 0) {
+        handle_put(&hh);
+        return -1;
+    }
+
+    // Mint the hostmem Burrow (handle_count=1 construction ref). base_pa must be
+    // page-aligned (bars[].pa is; offset is; a non-page-aligned window offset is
+    // rejected inside create).
+    struct Burrow *b = burrow_create_hostmem(k, base_pa, (size_t)length, mair_idx);
+    if (!b)                             { handle_put(&hh); return -1; }
+
+    // Place + map into the caller's burrow-attach window (auto VA, the weft-map
+    // shape). burrow_map takes the mapping ref; drop the construction ref so the
+    // VMA owns the Burrow (mapping_count=1 keeps it alive). The whole
+    // find-gap -> map runs under p->as->lock (the #713 vmas-mutator rule).
+    spin_lock(&p->as->lock);
+    u64 va;
+    if (vma_find_gap(p, (size_t)length, EXEC_USER_BURROW_BASE,
+                     EXEC_USER_BURROW_TOP, &va) != 0) {
+        spin_unlock(&p->as->lock);
+        burrow_unref(b);
+        handle_put(&hh);
+        return -1;
+    }
+    if (burrow_map(p, b, va, (size_t)length, VMA_PROT_RW) != 0) {
+        spin_unlock(&p->as->lock);
+        burrow_unref(b);
+        handle_put(&hh);
+        return -1;
+    }
+    burrow_unref(b);                    // drop construction ref; VMA owns it
+    spin_unlock(&p->as->lock);
+    handle_put(&hh);
+    return (s64)va;
+}
+
+// =============================================================================
+// SYS_HOSTMEM_REFCOUNT — read a hostmem Burrow's TOTAL #847 reference count
+// (handle_count + mapping_count) (Warp-6 V-3b-1c-2b F2; WARP-V3-DESIGN.md 0.11.3).
+// =============================================================================
+//
+// Read-only. Resolves [va, va+len) to a SINGLE BURROW_TYPE_HOSTMEM VMA the
+// CALLER owns (vma_lookup searches only p's own AddrSpace, so ownership is
+// structural -- a caller can only count a hostmem burrow it maps) and returns
+// handle_count + mapping_count: EVERY live reference on the host-visible ring
+// backing -- the caller's own mapping PLUS any weft-shared client's mapping AND
+// its transferred registration pin (a handle_count ref). Because the caller maps
+// the burrow, the sum is always >= 1, and == 1 iff the ONLY reference is the
+// caller's single mapping. This is image.c's kernel-side eviction predicate
+// (handle_count==1 && mapping_count==0) folded to one value for the tapestryd
+// side, where the caller holds the mapping instead of the handle.
+//
+// Why the SUM, not mapping_count alone (the audit F1 correction): a client's map
+// is COMMITTED at weft_share_claim (weft.c), which consumes the share and
+// TRANSFERS the registration pin to the client -- a handle_count ref -- and
+// returns BEFORE burrow_share_into bumps mapping_count later in the same
+// SYS_WEFT_MAP. In that window a client is irrevocably going to map GPA(off) yet
+// mapping_count still reads 1. A reclaim keyed on mapping_count==1 would free the
+// offset under that pending map (a cross-client alias). The transferred pin makes
+// the sum >= 2, so the SUM excludes the in-flight claimant exactly as image.c's
+// handle_count half does.
+//
+// It leaks nothing but the number: no kernel address, no other Proc, no per-kind
+// breakdown. Refuses (-T_E_INVAL) a va that does not resolve, a VMA not fully
+// covering [va, va+len), or a non-HOSTMEM burrow.
+//
+// Still a racy snapshot: coherent at the instant it is read (both counts under
+// v->lock, round-2 F1), but a later claim could bump it. It is a SAFE reclaim
+// basis ONLY under tapestryd's ref-discipline: disarm the weft share FIRST (so no
+// NEW claim can consume it), then at sum==1 the only reference is the caller's
+// map, which cannot grow -- no share to claim, no existing client ref (map OR
+// pin) to fork. as->lock here pins the VMA->Burrow link against a concurrent
+// same-Proc detach mid-read; the count PAIR itself snapshots under v->lock.
+//
+// The core is separated from the current_thread() wrapper so the resolve +
+// type-gate + range logic is unit-testable with a synthetic Proc (the
+// hostmem_resolve_subrange precedent). NOT static: the test declares it.
+s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
+    if (!p || !p->as)       return -T_E_INVAL;
+    if (len == 0)           return -T_E_INVAL;
+    if (va + len < va)      return -T_E_INVAL;   // range wrap
+
+    spin_lock(&p->as->lock);
+    struct Vma *vma = vma_lookup(p, va);
+    if (!vma || va < vma->vaddr_start || va + len > vma->vaddr_end) {
+        spin_unlock(&p->as->lock);
+        return -T_E_INVAL;
+    }
+    struct Burrow *b = vma->burrow;
+    if (!b || b->type != BURROW_TYPE_HOSTMEM) {
+        spin_unlock(&p->as->lock);
+        return -T_E_INVAL;
+    }
+    // burrow_total_refs sums handle_count + mapping_count UNDER v->lock, so the
+    // pair is a coherent snapshot (round-2 F1): two separately-ACQUIRE'd loads
+    // would sum values from two instants, and a mapping-first read could reclaim
+    // under a client mapping the intervening claim installed. Holding as->lock
+    // here, the as->lock -> v->lock nesting is the established order.
+    s64 refs = (s64)burrow_total_refs(b);
+    spin_unlock(&p->as->lock);
+    return refs;
+}
+
+static s64 sys_hostmem_refcount_handler(u64 va, u64 len) {
+    struct Thread *t = current_thread();
+    if (!t) return -T_E_INVAL;
+    return hostmem_refcount_query(t->proc, va, len);
+}
+
 // =============================================================================
 // SYS_DMA_MAP — install a user-VA mapping for a KObj_DMA handle (P4-Ic5b1b).
 // =============================================================================
@@ -987,6 +1177,13 @@ int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
     struct Spoor *rd = NULL;
     struct Spoor *wr = NULL;
     if (pipe_create(&rd, &wr) < 0)                   return -1;
+
+    // Pipe endpoints never traverse open(), so `mode` (the F_GETFL access mode)
+    // stays 0 unless set here. Stamp each end's access mode (Plan 9 OREAD=0 /
+    // OWRITE=1, which share Linux's O_RDONLY/O_WRONLY encoding) so F_GETFL
+    // reports the write end as O_WRONLY rather than a misleading O_RDONLY.
+    rd->mode = 0;   // OREAD
+    wr->mode = 1;   // OWRITE
 
     rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
 
@@ -1592,6 +1789,17 @@ int spoor_stat_native(struct Spoor *c, struct t_stat *out) {
     return rc;
 }
 
+// #194: sample the backing file's size for the Image-cache file_limit stamp.
+// BURROW_FILE_LIMIT_UNKNOWN when the Dev cannot answer -- the CALLER owns the
+// failure policy (exec admits unknown for the immutable baked ramfs; the
+// guest-facing phenotype mmap arm refuses it).
+u64 spoor_file_size(struct Spoor *c) {
+    struct t_stat st;
+    if (spoor_stat_native(c, &st) != 0)
+        return BURROW_FILE_LIMIT_UNKNOWN;
+    return st.size;
+}
+
 // Inner — kernel-side core (the #37 *_for_proc testable shape): resolve `hraw`
 // in `p`'s handle table and fill a KERNEL `struct t_stat`. Extracted at V-1b so
 // the native handler and the VIVARIUM `fstat` translator share ONE body: the
@@ -1775,8 +1983,12 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
 // Inner — kernel-side core (the #37 *_for_proc testable shape): `path` is
 // kernel memory, NUL-terminated at path[path_len], already NUL-free within;
 // *out_k is kernel scratch. Returns 0 / -1 (structural) / -errno (resolution).
+// D-1: `stalk_flags` is 0 (follow a final symlink -- POSIX stat) or
+// STALK_NOFOLLOW (the lstat shape -- the final link's OWN record); the
+// vivarium newfstatat shell passes it for AT_SYMLINK_NOFOLLOW. Native SYS_STAT
+// always passes 0 (no native lstat surface at D-1 -- a recorded seam).
 s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
-                      struct t_stat *out_k) {
+                      u32 stalk_flags, struct t_stat *out_k) {
     if (!p || !path || !out_k)                       return -1;
     if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -1;
     if (!p->territory)                               return -1;
@@ -1802,10 +2014,83 @@ s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
     }
 
     int serr = T_E_NOENT;
-    int rc = stalk_stat(p, start, rpath, rlen, out_k, &serr);
+    int rc = stalk_stat(p, start, rpath, rlen, stalk_flags, out_k, &serr);
     spoor_clunk(start);
     if (rc != 0)                                     return -(s64)serr;
     return 0;
+}
+
+// readlink core (the git chunk; VIVARIUM.md section 6.26). Resolves `path` (the
+// SYS_STAT resolution: cwd-join for a relative path, containment at root_spoor)
+// with STALK_WALK|STALK_NOFOLLOW so the LINK ITSELF is the quarry, then reads
+// its target via the Dev's .readlink slot and copies min(target, bufsiz) bytes
+// out -- readlink(2) does NOT NUL-terminate and returns the byte count. The
+// caller has already copied `path` into kernel memory (NUL-free); buf_va/bufsiz
+// are the still-user destination and are validated HERE, before the copy-out.
+static s64 sys_readlink_for_proc(struct Proc *p, const char *path, u64 path_len,
+                                 u64 buf_va, u64 bufsiz) {
+    if (!p || !path)                                 return -1;
+    if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -1;
+    if (!p->territory)                               return -1;
+    // POSIX readlink(2): a zero-size buffer is EINVAL.
+    if (bufsiz == 0)                                 return -(s64)T_E_INVAL;
+
+    struct Spoor *start = territory_root_ref(p->territory);
+    if (!start)                                      return -1;
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    const char *rpath = path;
+    u64 rlen = path_len;
+    if (path[0] != '/') {
+        int jl = territory_join_cwd(p->territory, path, path_len,
+                                    joined, sizeof(joined));
+        if (jl < 0) { spoor_clunk(start); return -1; }
+        rpath = joined;
+        rlen  = (u64)jl;
+    }
+
+    // WALK|NOFOLLOW: stalk.h:70 -- the final symlink is NOT followed, so the
+    // returned Spoor IS the link (its qid carries QTSYMLINK). stalk_err (not
+    // stalk) so a walk failure keeps its CAUSE -- EACCES on a no-X-search
+    // component, ELOOP on an intermediate-link cycle -- rather than flattening
+    // to a bare ENOENT (the F3 note; the sibling faccessat/fchmodat resolvers
+    // already use the errno-aware form via sys_stat_for_proc / stalk_err).
+    int serr = T_E_NOENT;
+    struct Spoor *q = stalk_err(p, start, rpath, rlen,
+                                STALK_WALK | STALK_NOFOLLOW, 0, &serr);
+    spoor_clunk(start);
+    if (!q)                                          return -(s64)serr;
+
+    // EINVAL when the final component is not a symlink -- the POSIX contour git
+    // relies on to treat a path as a plain file. An opaque leaf (a Dev with no
+    // .readlink) is, from the caller's view, likewise not a readable link.
+    if (!(q->qid.type & QTSYMLINK) || !q->dev || !q->dev->readlink) {
+        spoor_clunk(q);
+        return -(s64)T_E_INVAL;
+    }
+
+    char tgt[SYS_OPEN_PATH_MAX + 1];
+    long tlen = q->dev->readlink(q, tgt, SYS_OPEN_PATH_MAX);
+    spoor_clunk(q);
+    // A NEGATIVE return is the Dev's REAL errno (dev9p_wire_errno bounds it:
+    // -T_E_INTR on a caught-note unwind, -T_E_IO on a transport drop, -T_E_NOENT
+    // on a degenerate empty target) -- preserve it. Flattening it to EINVAL (the
+    // F2 defect) would tell git's real_path "this component is NOT a symlink,
+    // treat it as a plain file" -- a silent wrong resolution on a merely
+    // interrupted RPC, since EINVAL is precisely readlink(2)'s not-a-symlink
+    // signal. The stalk.c:355 vtable-defense (a Dev must return 1..max) applies
+    // only to a NON-negative out-of-range length: 0 or > max is a malformed
+    // target, which IS EINVAL.
+    if (tlen < 0)                                    return (s64)tlen;
+    if (tlen == 0 || tlen > SYS_OPEN_PATH_MAX)       return -(s64)T_E_INVAL;
+
+    // THE COPY-OUT (the getdents64 P0 class): the destination is a raw user
+    // pointer, so validate the exact span before writing. uaccess_copy_out's
+    // fault fixup engages only for user-half VAs -- an unvalidated kernel-half
+    // buf would extinct or corrupt kernel memory.
+    u64 n = ((u64)tlen < bufsiz) ? (u64)tlen : bufsiz;
+    if (!sys_validate_user_buf(buf_va, n))           return -(s64)T_E_FAULT;
+    if (uaccess_copy_out(buf_va, tgt, n) != 0)       return -(s64)T_E_FAULT;
+    return (s64)n;
 }
 
 static s64 sys_stat_handler(u64 path_va, u64 path_len_raw, u64 stat_va) {
@@ -1831,7 +2116,7 @@ static s64 sys_stat_handler(u64 path_va, u64 path_len_raw, u64 stat_va) {
     path_scratch[path_len_raw] = '\0';
 
     struct t_stat ks;
-    s64 rc = sys_stat_for_proc(p, path_scratch, path_len_raw, &ks);
+    s64 rc = sys_stat_for_proc(p, path_scratch, path_len_raw, 0, &ks);
     if (rc != 0)                                     return rc;
 
     // Copy out to user-VA (per-byte, the SYS_FSTAT shape; a fault may leave
@@ -1886,6 +2171,16 @@ static inline s64 attach_err_to_ret(int aerr) {
     return (aerr <= -2 && aerr >= -4095) ? (s64)aerr : -1;
 }
 
+// The follow-up round's F1: SYS_ATTACH_9P's spoor transport is sound only over a
+// NON-BLOCKING tx (CNBFRAME is honored by devpipe alone; a /srv byte-conn or a
+// dev9p file BLOCKS under the 9P client's held c->lock -> the #360 extinction).
+// EL0's only sound tx is a real pipe, so the handler admits pipe pairs ONLY.
+// Non-static + declared in syscall.h so the regression exercises the ACTUAL
+// predicate the handler gates on, not a re-derivation.
+bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx) {
+    return tx && rx && tx->dev == &devpipe && rx->dev == &devpipe;
+}
+
 static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
                                  u64 aname_va, u64 aname_len, u64 n_uname) {
     struct Thread *t = current_thread();
@@ -1912,6 +2207,20 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     if (!tx)                                         return -1;
     struct Spoor *rx = sys_lookup_spoor(p, (hidx_t)rx_fd_raw, RIGHT_READ);
     if (!rx)                                       { spoor_clunk(tx); return -1; }
+    // The follow-up round's F1 (the round-B CNBFRAME fix left a hole). The spoor
+    // transport is sound only over a NON-BLOCKING tx -- CNBFRAME is honored by
+    // devpipe alone. EL0's only sound tx is a real pipe; a /srv byte-conn
+    // (devsrv_write -> srvconn_client_send_blocking tsleep) or a dev9p file
+    // (nested blocking RPC) driven under the 9P client's held c->lock is the #360
+    // lock-across-sleep extinction. Enforce pipe-only for BOTH ends at THIS EL0
+    // boundary (p9_spoor_transport_init stays Dev-generic -- kernel-internal
+    // callers, incl. the transport tests' non-blocking mock, are trusted). Both
+    // lookup refs are released on reject (each lookup ref'd, per #844).
+    if (!sys_attach_9p_ends_are_pipes(tx, rx)) {
+        spoor_clunk(tx);
+        spoor_clunk(rx);
+        return -1;
+    }
     // #844: tx + rx are REF-HELD (sys_lookup_spoor transferred a ref each). The
     // adapter takes its OWN independent ref below; we then release the two
     // lookup borrows here (UNCONDITIONAL -- each lookup ref'd, even when
@@ -2318,7 +2627,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // src's identity (dc/devno/qid), not src->dev, so it precedes the dev-check.
     {
         struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, src, &crossed) < 0)    { spoor_clunk(src); return -T_E_IO; }
+        if (stalk_cross_mounts(p, src, &crossed, NULL) < 0)    { spoor_clunk(src); return -T_E_IO; }
         if (crossed) { spoor_clunk(src); src = crossed; }
     }
     // #80: split what was one flat reject, so a caller learns which end was at
@@ -2485,7 +2794,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // installed handle's rights are derived from it.
     {
         struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, nc, &crossed) < 0)  { spoor_clunk(nc); return -T_E_IO; }
+        if (stalk_cross_mounts(p, nc, &crossed, NULL) < 0)  { spoor_clunk(nc); return -T_E_IO; }
         if (crossed) { spoor_clunk(nc); nc = crossed; }
     }
 
@@ -2495,6 +2804,32 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // creating/walking children + a valid chroot target. 9P forbids Twalk
     // from an opened fid, so a normally-opened handle cannot serve that
     // role. The access bits are irrelevant for an O_PATH handle.
+    // DISTRO D-1: the single-hop twin does not EXPAND a symlink (it is a walk
+    // primitive, not a resolution -- one hop cannot follow a multi-component
+    // target), but it must not hand one to Dev.open either. Two reasons, and
+    // the second is why this is a gate and not a nicety:
+    //
+    //   1. The DAC check below would read the LINK's mode, and a symlink is
+    //      minted 0777 by POSIX convention -- so `other` is rwx and the check
+    //      passes for every principal regardless of who owns the link or its
+    //      directory. The gate is vacuous on exactly this shape.
+    //   2. What Dev.open then does is a SERVER property. Stratum's h_lopen
+    //      rejects a symlink only under O_TRUNC, so a plain OREAD/OWRITE Tlopen
+    //      on a link fid SUCCEEDS; the resulting writes land in the link's own
+    //      inode (silent data loss, not a redirect). Against a path-based 9P
+    //      server that implements Tlopen as open(path, flags), the same call
+    //      opens the TARGET with only the link's 0777 checked -- a complete DAC
+    //      bypass. I-14 forbids resting a kernel gate on server behaviour.
+    //
+    // So: with O_PATH the handle IS the link (the v1.0 lstat spelling, and the
+    // base a caller needs to unlink or rename it); without it, T_E_LOOP --
+    // matching stalk's quarry gate exactly, and giving SYS_WALK_OPEN_NOFOLLOW
+    // its meaning here instead of admitting it as a silent no-op.
+    if ((nc->qid.type & QTSYMLINK) && !(omode_raw & SYS_WALK_OPEN_OPATH)) {
+        spoor_clunk(nc);
+        return -T_E_LOOP;
+    }
+
     if (!(omode_raw & SYS_WALK_OPEN_OPATH)) {
         // A-2d: R and/or W permission on the walked target per the open mode
         // (OREAD->R, OWRITE->W, ORDWR->R|W, OEXEC->X; OTRUNC adds W). O_PATH is
@@ -2523,7 +2858,12 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         // the connection endpoint + its SrvConn + a poster backlog slot. On
         // failure nc still has its own walk-allocated fid; spoor_clunk runs
         // dev->close -> p9_client_clunk on that fid + frees the priv.
-        struct Spoor *opened = nc->dev->open(nc, (int)omode_raw);
+        // D-1: strip the resolution flag -- it is consumed by the gate above
+        // and means nothing to a Dev (dev9p masks it off the wire anyway, but
+        // it would still be STORED in Spoor.mode). SYS_OPEN strips it at its
+        // own call site; the twins must not be the asymmetric ones.
+        u32 omode_dev = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
+        struct Spoor *opened = nc->dev->open(nc, (int)omode_dev);
         if (!opened) {
             spoor_clunk(nc);
             // #80 seam: Dev.open returns Spoor* with no errno channel -- the
@@ -2742,6 +3082,27 @@ static s64 sys_fd2path_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw, u64 a3) 
 
     spoor_clunk(c);
     return (s64)len;
+}
+
+// H-1 (docs/SYS-FD-DEVCLASS-SPEC.md): the fd -> Dev-class query. The dc is the
+// kernel's own Dev field cached on the Spoor at spoor_alloc -- never a
+// server-supplied stat/qid bit, so a 9P server cannot forge "I am the console"
+// (the C-2 forgeable-qid lesson: authority keys on the kernel Dev, not a
+// pass-through field). rights == 0 mirrors fd2path: read-only introspection on
+// any KOBJ_SPOOR handle, no authority conferred. The one normalization: a
+// /dev/cons leaf walked through devdev answers 'c' like a SYS_CONSOLE_OPEN fd
+// (devdev_fd_devclass), so is-a-terminal is exactly (dc == 'c').
+static s64 sys_fd_devclass_handler(u64 fd_raw) {
+    struct Thread *t = current_thread();             if (!t) return -T_E_BADF;
+    struct Proc *p = t->proc;                        if (!p) return -T_E_BADF;
+
+    // #844: sys_lookup_spoor TRANSFERS the ref -- spoor_clunk on every exit.
+    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, 0);
+    if (!c)                                          return -T_E_BADF;
+
+    int dc = (c->dc == devdev.dc) ? devdev_fd_devclass(c) : c->dc;
+    spoor_clunk(c);
+    return (s64)(u8)dc;
 }
 
 // =============================================================================
@@ -2972,9 +3333,9 @@ s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
     u64 sec  = ns / 1000000000ull;
     u32 nsec = (u32)(ns % 1000000000ull);
     // struct t_timespec { s64 tv_sec @0; s64 tv_nsec @8 }. aarch64 is
-    // little-endian, so each i64 is [low u32, high u32]. tv_sec fits ~33 bits
-    // (epoch ~1.7e9 s) so its high word is small but nonzero; tv_nsec < 1e9
-    // fits a u32 (high word 0). Stored via the audited uaccess_store_u32 (no
+    // little-endian, so each i64 is [low u32, high u32]. tv_sec's high word is 0
+    // until year 2106 (sec < 2^32), computed dynamically so the value is exact
+    // past then; tv_nsec < 1e9 fits a u32 (high word 0). Stored via the audited uaccess_store_u32 (no
     // uaccess_store_u64 exists); any store fault -> -EFAULT, nothing else
     // touched.
     if (uaccess_store_u32(ts_va + 0,  (u32)(sec & 0xFFFFFFFFu)) != 0) return -T_E_FAULT;
@@ -3049,6 +3410,33 @@ s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
 // the same stalk, the same per-component perm_check, and the same
 // omode-derived rights as any other open. A second copy would be a second
 // place for a gate to go missing.
+// LS-4 cwd join, shared VERBATIM by SYS_OPEN's core and the #50
+// SYS_OPEN_CREATE core so the FROM_ROOT-sentinel parity is structural, not
+// copied (VIVARIUM.md 6.20 blocker 3: two identical-looking sentinels
+// resolving differently -- SYS_WALK_CREATE's at the root, SYS_OPEN's through
+// the cwd -- is the silent wrong-directory hazard; one join helper makes the
+// divergence impossible to reintroduce in one caller only). A RELATIVE path
+// with the FROM_ROOT sentinel joins the Territory cwd; an absolute path or an
+// explicit start-fd passes through unchanged. #83: the join is VERBATIM --
+// "."/".."/trailing separators survive into the joined buffer so stalk gates
+// them exactly as it gates the absolute spelling. `joined` is caller-owned
+// scratch (SYS_OPEN_PATH_MAX + 1); on success *out_path/*out_len alias either
+// `path` or `joined`. Returns 0 on success, -1 on an overlong join.
+static int sys_join_cwd_if_relative(struct Proc *p, u64 start_fd_raw,
+                                    const char *path, u64 len,
+                                    char *joined, size_t joined_sz,
+                                    const char **out_path, u64 *out_len) {
+    *out_path = path;
+    *out_len  = len;
+    if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT && path[0] != '/') {
+        int jl = territory_join_cwd(p->territory, path, len, joined, joined_sz);
+        if (jl < 0) return -1;
+        *out_path = joined;
+        *out_len  = (u64)jl;
+    }
+    return 0;
+}
+
 static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
                                    const char *kpath, u64 klen, u64 omode_raw) {
     if (!p || !kpath)                                return -1;
@@ -3075,28 +3463,28 @@ static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
     const char *path_scratch = kpath;
 
     // LS-4: a RELATIVE path with the FROM_ROOT sentinel resolves against the
-    // Territory cwd (dot) -- POSIX openat(AT_FDCWD, ...). Join dot + path into
-    // an absolute path, then resolve from root (start is already root_spoor).
-    // An explicit start-fd (a dirfd) or an absolute path is unchanged. stalk
-    // still re-clamps ".." at root_spoor, so the join cannot escape containment
-    // (I-28 preserved; no new mechanism).
-    //
-    // #83: the join is VERBATIM -- "."/".."/a trailing separator survive into
-    // `joined` so stalk gates them exactly as it gates the absolute spelling.
-    // Collapsing them here popped never-walked components, so `f/..`, `f/.`,
-    // `f/` and even `nonexistent/..` opened successfully.
+    // Territory cwd (dot) -- POSIX openat(AT_FDCWD, ...). The join lives in
+    // sys_join_cwd_if_relative (shared with the #50 create core so the
+    // sentinel parity is structural); stalk still re-clamps ".." at
+    // root_spoor, so the join cannot escape containment (I-28 preserved).
     char joined[SYS_OPEN_PATH_MAX + 1];
-    const char *rpath = path_scratch;
-    u64 rlen = klen;
-    if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT && path_scratch[0] != '/') {
-        int jl = territory_join_cwd(p->territory, path_scratch, klen,
-                                    joined, sizeof(joined));
-        if (jl < 0) { spoor_clunk(start); return -1; }
-        rpath = joined;
-        rlen  = (u64)jl;
+    const char *rpath;
+    u64 rlen;
+    if (sys_join_cwd_if_relative(p, start_fd_raw, path_scratch, klen,
+                                 joined, sizeof(joined), &rpath, &rlen) != 0) {
+        spoor_clunk(start);
+        return -1;
     }
 
     int amode = (omode_raw & SYS_WALK_OPEN_OPATH) ? STALK_WALK : STALK_OPEN;
+    // D-1: thread the no-follow-final flag into the resolver, and STRIP it
+    // from the omode passed onward -- Dev.open / the Tlopen mode must never
+    // see it (a resolution directive, not an open mode). Composes with OPATH:
+    // STALK_WALK|STALK_NOFOLLOW returns the LINK itself as the navigation
+    // handle (the Linux O_PATH|O_NOFOLLOW lstat-fd idiom -- SYS_FSTAT on it
+    // reports the link's own metadata).
+    if (omode_raw & SYS_WALK_OPEN_NOFOLLOW) amode |= STALK_NOFOLLOW;
+    u32 omode_eff = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
     // errno-rollout (ER-1): stalk writes the cause (T_E_NOENT walk-miss,
     // T_E_ACCES perm denial, ...) so SYS_OPEN returns the real -errno. This is
     // the Go-build keystone: a missing path -> -T_E_NOENT (Go os.IsNotExist
@@ -3104,7 +3492,7 @@ static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
     // checks work) instead of the bare -1 (Go renders that EPERM).
     int serr = T_E_NOENT;
     struct Spoor *quarry = stalk_err(p, start, rpath, rlen,
-                                     amode, (u32)omode_raw, &serr);
+                                     amode, omode_eff, &serr);
     // #844: start (BORROWED by stalk -- it never refs/clunks it) is done now;
     // release the borrow. quarry owns its own ref from stalk.
     spoor_clunk(start);
@@ -3183,6 +3571,24 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
 // is the create MECHANISM (I-22 holds — nothing enforces rwx yet to bypass).
 // =============================================================================
 
+// #50 (VIVARIUM.md section 6.24): the create MECHANICS, extracted from
+// sys_walk_create_handler so the path-based SYS_OPEN_CREATE core and the
+// phenotype shells run the SAME dev-slot checks, the SAME A-2d parent W|X
+// gate, and the SAME clone-walk + dev->create + rights + install sequence as
+// the fd-based syscall -- extraction, not duplication (the I-43 rule).
+//
+// `src` is a REF-HELD parent-directory Spoor and is CONSUMED: exactly one
+// spoor_clunk runs on every path through here (mirroring the pre-extraction
+// handler body, where src's borrow ended at the clone-walk). `name_scratch`
+// is a validated kernel-space component (NUL-terminated, no '/', not "." /
+// ".."), name_len_raw <= SYS_WALK_OPEN_NAME_MAX. `srv_post_ok`: only the
+// fd-based SYS_WALK_CREATE admits the /srv service-post branch (it mints a
+// KObj_Srv listener, a different handle kind); the path-based callers answer
+// -T_E_OPNOTSUPP there -- a service post remains the fd-based shape.
+static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
+                                const char *name_scratch, u64 name_len_raw,
+                                u64 omode_raw, u32 perm, bool srv_post_ok);
+
 static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
                                      u64 name_len_raw, u64 omode_raw,
                                      u64 perm_raw) {
@@ -3206,6 +3612,25 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     if (perm_raw & ~(u64)SYS_WALK_CREATE_PERM_VALID)  return -T_E_INVAL;
     u32 perm = (u32)perm_raw;
 
+    // Copy + validate the component name (same strict shape as SYS_WALK_OPEN:
+    // reject '/' '\0' "." ".."; NUL-terminate for dev9p's strlen scan).
+    // #50 note: the copy moved AHEAD of the parent dev-slot checks when the
+    // mechanics were extracted (they now live in spoor_create_install), so a
+    // doubly-bad call (bad name AND uncreatable parent) reports the name
+    // error first -- the conventional POSIX precedence.
+    char name_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b;
+        // #80: bad caller page -> EFAULT; forbidden component byte -> EINVAL.
+        if (uaccess_load_u8(name_va + i, &b) != 0)    return -T_E_FAULT;
+        if (b == '/' || b == '\0')                    return -T_E_INVAL;
+        name_scratch[i] = (char)b;
+    }
+    if (name_len_raw == 1 && name_scratch[0] == '.')  return -T_E_INVAL;
+    if (name_len_raw == 2 && name_scratch[0] == '.' &&
+                              name_scratch[1] == '.') return -T_E_INVAL;
+    name_scratch[name_len_raw] = '\0';
+
     // Resolve the parent directory Spoor. RIGHT_WRITE is the gate: create
     // mutates the directory's contents. (SYS_WALK_OPEN uses RIGHT_READ; create
     // is the write-side op.) The FROM_ROOT sentinel walks from the caller's
@@ -3221,6 +3646,25 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         src = sys_lookup_spoor(p, (hidx_t)parent_fd_raw, RIGHT_WRITE);   // ref-held
         if (!src)                                     return -T_E_BADF;
     }
+
+    // UM-8c F5: a union dirfd holds member[0]; a create must land in the union's
+    // first MCREATE member, not member[0]. spoor_create_install CONSUMES the
+    // parent ref, so swap in the MCREATE member (clunking member[0]) first.
+    if (src->union_snap && src->union_snap->point) {
+        int e = 0;
+        struct Spoor *cm = stalk_union_create_member(p, src->union_snap->point, &e);
+        spoor_clunk(src);
+        if (!cm) return e ? -(s64)e : -(s64)T_E_ACCES;
+        src = cm;
+    }
+
+    return spoor_create_install(p, src, name_scratch, name_len_raw,
+                                omode_raw, perm, /*srv_post_ok=*/true);
+}
+
+static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
+                                const char *name_scratch, u64 name_len_raw,
+                                u64 omode_raw, u32 perm, bool srv_post_ok) {
     // #80: split the flat reject, as on the open side. The .walk arm is
     // DEFENSIVE (all 18 Devs fill the slot); the .create arm is LIVE -- a Dev
     // with no create slot genuinely cannot create, and OPNOTSUPP says so.
@@ -3248,21 +3692,6 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0)  { spoor_clunk(src); return -T_E_ACCES; }
     }
 
-    // Copy + validate the component name (same strict shape as SYS_WALK_OPEN:
-    // reject '/' '\0' "." ".."; NUL-terminate for dev9p's strlen scan).
-    char name_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
-    for (u64 i = 0; i < name_len_raw; i++) {
-        u8 b;
-        // #80: bad caller page -> EFAULT; forbidden component byte -> EINVAL.
-        if (uaccess_load_u8(name_va + i, &b) != 0)    { spoor_clunk(src); return -T_E_FAULT; }
-        if (b == '/' || b == '\0')                    { spoor_clunk(src); return -T_E_INVAL; }
-        name_scratch[i] = (char)b;
-    }
-    if (name_len_raw == 1 && name_scratch[0] == '.')  { spoor_clunk(src); return -T_E_INVAL; }
-    if (name_len_raw == 2 && name_scratch[0] == '.' &&
-                              name_scratch[1] == '.') { spoor_clunk(src); return -T_E_INVAL; }
-    name_scratch[name_len_raw] = '\0';
-
     // stalk-3b (STALK-DESIGN.md §5.3 / D2): a CREATE against a /srv directory
     // (a devsrv root Spoor: dc='s', aux = a SrvRegistry) is a service POST, not
     // a file create. It mints a KObj_Srv LISTENER -- a different handle kind
@@ -3272,6 +3701,11 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // 9P-mode; no other perm bit is meaningful for a service post.
     if (src->dc == 's' && src->aux &&
         *(const u64 *)src->aux == SRV_REGISTRY_MAGIC) {
+        // #50: only the fd-based SYS_WALK_CREATE may post a service. A
+        // path-based create whose parent resolved to a /srv registry answers
+        // OPNOTSUPP loudly -- the KObj_Srv listener is a different handle
+        // kind than the KOBJ_SPOOR contract the path callers install over.
+        if (!srv_post_ok)                               { spoor_clunk(src); return -T_E_OPNOTSUPP; }
         if (perm & ~(SYS_WALK_CREATE_DMSRVBYTE |
                      SYS_WALK_CREATE_DMSRVBULK))        { spoor_clunk(src); return -T_E_INVAL; }
         enum srv_mode mode = (perm & SYS_WALK_CREATE_DMSRVBYTE)
@@ -3353,7 +3787,10 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // Create + open the new object. dev->create returns nc (opened) on
     // success or NULL on failure; on NULL nc still owns its walked fid, so
     // spoor_clunk runs dev->close -> clunks it.
-    struct Spoor *opened = nc->dev->create(nc, name_scratch, (int)omode_raw,
+    // D-1: strip the resolution flag (vacuous for create -- a created child is
+    // never a symlink -- but it must not reach a Dev or be stored in Spoor.mode).
+    u32 omode_dev = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
+    struct Spoor *opened = nc->dev->create(nc, name_scratch, (int)omode_dev,
                                             perm, p->primary_gid);
     if (!opened) {
         // #99 (#102 errno-loss): propagate the real create errno the Dev
@@ -3406,6 +3843,229 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
 }
 
 // =============================================================================
+// SYS_OPEN_CREATE — the path-based open-or-create (#50; VIVARIUM.md section
+// 6.24; scripture b417b307). Plan 9's create(2) restored on the stalk
+// resolver: the parent PREFIX resolves through stalk (I-28 containment,
+// symlink expansion, mount-cross — inherited whole), the LEAF is classified
+// lexically (the split classifies, never resolves — the libthyla #87 rows),
+// and the create mechanics are spoor_create_install — byte-for-byte the code
+// the fd-based SYS_WALK_CREATE runs.
+// =============================================================================
+
+// The lexical last-component split (#50; the libthyla #87 rows brought
+// kernel-side: the split CLASSIFIES, it never resolves). Strips the trailing
+// separator run (*trailing_out reports it -- POSIX 4.13, the path asserts a
+// directory), locates the final component, classifies the dot/root shapes so
+// each caller applies its OWN POSIX row (EISDIR / EEXIST / EINVAL differ per
+// operation). Pure: no resolution, no allocation, no Proc.
+enum kpath_leaf_class {
+    KPATH_LEAF_NAME,     // an ordinary final component [leaf_start, leaf_len)
+    KPATH_LEAF_DOT,      // "."
+    KPATH_LEAF_DOTDOT,   // ".."
+    KPATH_LEAF_ROOT,     // all separators (or empty): the path names the root
+};
+static enum kpath_leaf_class kpath_split_leaf(const char *rpath, u64 rlen,
+                                              u64 *leaf_start_out,
+                                              u64 *leaf_len_out,
+                                              bool *trailing_out) {
+    u64 body = rlen;
+    while (body > 0 && rpath[body - 1] == '/') body--;
+    *trailing_out = (body != rlen);
+    if (body == 0) { *leaf_start_out = 0; *leaf_len_out = 0; return KPATH_LEAF_ROOT; }
+
+    u64 leaf_start = body;
+    while (leaf_start > 0 && rpath[leaf_start - 1] != '/') leaf_start--;
+    u64 leaf_len = body - leaf_start;
+    *leaf_start_out = leaf_start;
+    *leaf_len_out   = leaf_len;
+    if (leaf_len == 1 && rpath[leaf_start] == '.')      return KPATH_LEAF_DOT;
+    if (leaf_len == 2 && rpath[leaf_start] == '.' &&
+                          rpath[leaf_start + 1] == '.') return KPATH_LEAF_DOTDOT;
+    return KPATH_LEAF_NAME;
+}
+
+// Resolve the PARENT of a split path: stalk the prefix walk-only from
+// `start` (BORROWED -- stalk never refs/clunks it). Per-component X-search,
+// I-28 containment, symlink expansion, and the #82 ENOTDIR gate for
+// non-directory prefix components are all stalk's -- no new resolution
+// mechanism exists here. A bare leaf (empty prefix -- an explicit start fd
+// with "f") resolves its parent as ".", which runs stalk's #81 dot gate: the
+// base must BE a directory, so a file base answers ENOTDIR instead of
+// skipping the check via a special case. Returns a REF-HELD parent Spoor or
+// NULL with *err_out set.
+static struct Spoor *sys_stalk_parent(struct Proc *p, struct Spoor *start,
+                                      const char *rpath, u64 prefix_len,
+                                      int amode, int *err_out) {
+    const char *pp = (prefix_len == 0) ? "." : rpath;
+    u64 pl         = (prefix_len == 0) ? 1   : prefix_len;
+    int serr = T_E_NOENT;
+    // `amode` selects the union final-quarry rule: STALK_CREATE (a create parent
+    // -- a union crosses to its first MCREATE member, ARCH 9.5) or STALK_REMOVE
+    // (an unlink / rmdir / rename-source parent -- a union stays UNCROSSED so the
+    // caller selects the member that HOLDS the leaf, UM-7 F3). A non-union parent
+    // resolves identically to a walk under either.
+    struct Spoor *parent = stalk_err(p, start, pp, pl, amode, 0, &serr);
+    if (!parent) { *err_out = serr; return NULL; }
+    return parent;
+}
+
+// One create attempt: resolve the parent (sys_stalk_parent), then run the
+// shared mechanics on it. `start` is BORROWED; the parent ref is CONSUMED by
+// spoor_create_install.
+//
+// Authority envelope (the audit question, answered up front): an explicit
+// `start` handle is gated RIGHT_READ — a NAVIGATION base — and the resolved
+// parent has no handle to gate. That matches SYS_OPEN's established
+// envelope, where an R-only base already walks arbitrarily deep and OPENS
+// FOR WRITING below itself (rights_for_omode mints the W handle); the
+// write-side creation gates are the per-component X-search plus
+// spoor_create_install's A-2d W|X identity check on the parent — the same
+// two gates the two-step SYS_OPEN(OPATH) + SYS_WALK_CREATE composition ends
+// at. The fd-based SYS_WALK_CREATE's RIGHT_WRITE gate is the stricter
+// direct-use rule for handles PRESENTED as the parent; it is not part of the
+// walk envelope.
+static s64 open_create_try_create(struct Proc *p, struct Spoor *start,
+                                  const char *rpath, u64 prefix_len,
+                                  const char *leaf, u64 leaf_len,
+                                  u64 omode_raw, u32 perm) {
+    int serr = 0;
+    struct Spoor *parent = sys_stalk_parent(p, start, rpath, prefix_len,
+                                            STALK_CREATE, &serr);
+    if (!parent) return -(s64)serr;
+
+    return spoor_create_install(p, parent, leaf, leaf_len, omode_raw, perm,
+                                /*srv_post_ok=*/false);
+}
+
+// Inner — testable without a live EL0 thread (kernel path, no user buffer);
+// the handler thins to the path copy + this (the sys_wstat_for_proc pattern).
+s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                   const char *kpath, u64 klen,
+                                   u64 omode_raw, u64 perm_raw) {
+    if (!p || !kpath)                                   return -T_E_INVAL;
+    if (klen == 0 || klen > SYS_OPEN_PATH_MAX)          return -T_E_INVAL;
+    if (omode_raw & ~(u64)SYS_OPEN_CREATE_OMODE_VALID)  return -T_E_INVAL;
+    if (perm_raw & ~(u64)SYS_WALK_CREATE_PERM_VALID)    return -T_E_INVAL;
+    // The DMSRV* service-post bits are the fd-based SYS_WALK_CREATE's shape
+    // only (spoor_create_install re-refuses the /srv-registry parent too;
+    // this is the cheap loud reject before any resolution).
+    if (perm_raw & (SYS_WALK_CREATE_DMSRVBYTE |
+                    SYS_WALK_CREATE_DMSRVBULK))         return -T_E_INVAL;
+    u32  perm  = (u32)perm_raw;
+    bool excl  = (omode_raw & SYS_WALK_OPEN_OEXCL) != 0;
+    bool isdir = (perm & SYS_WALK_CREATE_DMDIR) != 0;
+
+    // ONE cwd read for both legs: join here, so every open attempt and the
+    // parent resolve see the same base. The joined path is absolute, so the
+    // open leg's own join no-ops — a concurrent chdir between the bounded
+    // retries CANNOT re-aim them (the cwd is pinned at this first join).
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    const char *rpath;
+    u64 rlen;
+    if (sys_join_cwd_if_relative(p, start_fd_raw, kpath, klen,
+                                 joined, sizeof(joined), &rpath, &rlen) != 0)
+        return -T_E_INVAL;
+
+    // Classify the leaf LEXICALLY (kpath_split_leaf). The create rows:
+    // - root / "." / ".." leaves name an existing directory by definition —
+    //   mkdir answers EEXIST (the Linux row), a FILE create answers EISDIR
+    //   (Linux open_last_lookups: O_CREAT with a non-NORM last component).
+    // - a trailing separator run asserts a directory (POSIX 4.13): EISDIR
+    //   for a FILE create existing-or-not; for DMDIR it is consistent and
+    //   simply strips — mkdir("d/") is legal everywhere.
+    u64 leaf_start, leaf_len;
+    bool trailing;
+    enum kpath_leaf_class lc = kpath_split_leaf(rpath, rlen,
+                                                &leaf_start, &leaf_len,
+                                                &trailing);
+    if (lc != KPATH_LEAF_NAME)
+        return isdir ? -T_E_EXIST : -T_E_ISDIR;
+    if (trailing && !isdir)                         return -T_E_ISDIR;
+    const char *leaf = rpath + leaf_start;
+    if (leaf_len > SYS_WALK_OPEN_NAME_MAX)          return -T_E_INVAL;
+
+    // NUL-terminated leaf copy (dev->create scans by strlen).
+    char leaf_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
+    for (u64 i = 0; i < leaf_len; i++) leaf_scratch[i] = leaf[i];
+    leaf_scratch[leaf_len] = '\0';
+
+    // Resolve the navigation base exactly as SYS_OPEN's core does (FROM_ROOT
+    // -> pivoted-root ref under ns_lock; else a KOBJ_SPOOR RIGHT_READ base —
+    // see open_create_try_create's envelope note for why READ is the gate).
+    struct Spoor *start;
+    if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
+        if (!p->territory)                          return -T_E_INVAL;
+        start = territory_root_ref(p->territory);
+        if (!start)                                 return -T_E_INVAL;
+    } else {
+        start = sys_lookup_spoor(p, (hidx_t)start_fd_raw, RIGHT_READ);
+        if (!start)                                 return -T_E_BADF;
+    }
+
+    s64 rc;
+    if (excl || isdir) {
+        // Exclusive create (and mkdir, which IS the exclusive arm with
+        // DMDIR): ONE create attempt, atomic at the server. EEXIST is the
+        // honest answer — the lockfile primitive. OTRUNC is meaningless on a
+        // fresh object and OEXCL is not a Plan 9 dev bit; both stripped.
+        rc = open_create_try_create(p, start, rpath, leaf_start,
+                                    leaf_scratch, leaf_len,
+                                    omode_raw & ~(u64)(SYS_WALK_OPEN_OEXCL |
+                                                       SYS_WALK_OPEN_OTRUNC),
+                                    perm);
+        spoor_clunk(start);
+        return rc;
+    }
+
+    // Plain create: open-first (the common existing-file case pays one RPC;
+    // OTRUNC applies on THIS leg), create on NOENT, retry the open when the
+    // create loses an exists-race. Bounded at 2 rounds, then the last real
+    // error — the Plan 9 namec(Acreate) / Linux v9fs idiom.
+    for (int attempt = 0; ; attempt++) {
+        rc = sys_open_kpath_for_proc(p, start_fd_raw, rpath, rlen,
+                                     omode_raw & ~(u64)SYS_WALK_OPEN_OEXCL);
+        if (rc >= 0 || rc != -(s64)T_E_NOENT) break;
+
+        rc = open_create_try_create(p, start, rpath, leaf_start,
+                                    leaf_scratch, leaf_len,
+                                    omode_raw & ~(u64)(SYS_WALK_OPEN_OEXCL |
+                                                       SYS_WALK_OPEN_OTRUNC),
+                                    perm);
+        if (rc >= 0 || rc != -(s64)T_E_EXIST) break;
+        if (attempt >= 1) { rc = -(s64)T_E_EXIST; break; }
+    }
+    spoor_clunk(start);
+    return rc;
+}
+
+static s64 sys_open_create_handler(u64 start_fd_raw, u64 path_va,
+                                   u64 path_len_raw, u64 omode_raw,
+                                   u64 perm_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (path_len_raw == 0)                           return -T_E_INVAL;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -T_E_INVAL;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -T_E_FAULT;
+
+    // Copy + reject embedded NUL; '/' is allowed (multi-component), exactly
+    // the SYS_OPEN front.
+    char path_scratch[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -T_E_FAULT;
+        if (b == '\0')                               return -T_E_INVAL;
+        path_scratch[i] = (char)b;
+    }
+    path_scratch[path_len_raw] = '\0';
+
+    return sys_open_create_kpath_for_proc(p, start_fd_raw, path_scratch,
+                                          path_len_raw, omode_raw, perm_raw);
+}
+
+// =============================================================================
 // SYS_FSYNC — durability barrier (FS-mutation foundation; IDENTITY-DESIGN.md
 // §9.2). RIGHT_WRITE (fsync is the write-side flush). NULL .fsync slot -> -1.
 // =============================================================================
@@ -3417,9 +4077,13 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
     if (!p)                                          return -1;
 
     // #844: c is REF-HELD (borrow); spoor_clunk on every exit (fsync may block).
+    // Errno rollout (the getdents64/fsync chunk): the two rejects flattened to
+    // -1 until the phenotype rows arrived, and a bare -1 crossing the viv
+    // boundary reads as Linux EPERM -- the wrong claim twice over. BADF for a
+    // missing/underqualified handle; OPNOTSUPP for a Dev with no .fsync slot.
     struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE);
-    if (!c)                                          return -1;
-    if (!c->dev || !c->dev->fsync)                 { spoor_clunk(c); return -1; }
+    if (!c)                                          return -T_E_BADF;
+    if (!c->dev || !c->dev->fsync)                 { spoor_clunk(c); return -T_E_OPNOTSUPP; }
 
     // Normalize datasync to 0/1 (any non-zero is "data only").
     u32 datasync = (datasync_raw != 0) ? 1u : 0u;
@@ -3443,34 +4107,168 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
 // in c->offset for the next call (mirrors Linux v9fs).
 // =============================================================================
 
-static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
-    struct Thread *t = current_thread();
-    if (!t)                                          return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                          return -1;
+// union_readdir_run (UM) -- readdir of a UNION directory (c->union_snap set):
+// merge every grafted member's entries into a single stream, DEDUPED by name
+// first-member-wins (matching the walk's first-hit; specs/territory.tla
+// ReaddirDedupFirstWins). The output is well-formed 9P2000.L dirents whose
+// 8-byte offset field is a 1-based ORDINAL into the merged-dedup sequence, so
+// the caller's cursor-parse + #955 bound + both copy-out paths treat it
+// identically to a single-Dev batch.
+//
+// CURSOR (load-bearing): `in_ordinal` is c->offset -- the count of merged
+// entries already delivered. The sequence is DETERMINISTIC (member declared
+// order, then each member's stable readdir order, then deterministic relookup
+// dedup), so the run re-drives from the start each call, SKIPS the first
+// `in_ordinal` kept entries, and emits the next batch (each with cookie
+// idx+1). This composes with the F3 property: the cursor advances only when a
+// handler commits the last EMITTED entry's ordinal AFTER its copy-out, so a
+// partial fit / faulted copy re-fetches, never skips. O(dir) per page; unions
+// are small. Cross-page snapshot-inconsistency under concurrent modification is
+// the standard POSIX readdir posture.
+//
+// A member that fails to cross (a HOLE), is not a directory, or lacks a
+// .readdir slot is SKIPPED (Plan 9 union skip semantics), never a hard failure
+// of the whole listing. `out` is filled with whole dirents up to `want`; the
+// return is the byte count (> 0), 0 at end-of-directory, or -T_E_NOMEM/-T_E_IO.
+enum { UNION_RD_TMP = 2048 };   // per-member read batch (kmalloc, off-stack)
 
-    if (buf_len_raw == 0 || buf_len_raw > SYS_RW_STACK) return -1;
-    if (!sys_validate_user_buf(buf_va, buf_len_raw))  return -1;
+// `p` is the resolving Proc (its Territory holds the union's mount table);
+// spoor_readdir_run passes current_thread()->proc. Non-static so the merge /
+// dedup / ordinal-pagination logic is unit-testable with a Proc + a mounted
+// union of readdir-capable Devs (kernel/test/test_stalk.c).
+s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+                      u64 in_ordinal) {
+    if (!p || !c->union_snap)                        return -T_E_IO;
+    // The members are the OPENED snapshot captured at STALK_OPEN (UM-8
+    // F1/F4/F7): each is already OREAD -- dev9p readdir issues Treaddir on the
+    // fid, which Stratum's h_readdir accepts only for an opened fid -- the set
+    // is immutable for the fd's life (a stable listing), and every entry is
+    // BORROWED (owned by the fd, freed at spoor_free_internal). So this runs no
+    // re-cross and no per-call ref work, and NEVER clunks a member.
+    struct union_snap  *snap    = c->union_snap;
+    const struct union_member *members = snap->m;
+    int                  nmembers = snap->n;
 
-    // #844: c is REF-HELD (borrow); spoor_clunk on every exit (readdir blocks).
-    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
-    if (!c)                                          return -1;
-    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject readdir
-    // too (listing a dir's entries is content the perm_check-exempt O_PATH open
-    // would otherwise leak for a non-readable dir). IDENTITY-DESIGN 9.4 #81.
-    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -1; }
-    if (!c->dev || !c->dev->readdir)               { spoor_clunk(c); return -1; }
+    u8 *tmp = kmalloc(UNION_RD_TMP, 0);
+    if (!tmp)                                        return -T_E_NOMEM;
 
-    u8 scratch[SYS_RW_STACK];
-    u64 in_cookie = (u64)c->offset;   // the opaque resume cookie we ask to resume FROM
-    long got = c->dev->readdir(c, scratch, (long)buf_len_raw, c->offset);
-    if (got < 0)                                   { spoor_clunk(c); return -1; }
-    if (got == 0)                                  { spoor_clunk(c); return 0; }   // EOD
+    u64  idx    = 0;      // 0-based index into the merged-dedup sequence
+    long outlen = 0;      // bytes written to `out`
+    bool full   = false;
+
+    for (int k = 0; k < nmembers && !full; k++) {
+        struct Spoor *m = members[k].opened;   // the OREAD fid -- readdir
+        if (!m)                               continue;   // (snapshot stores no NULLs; defensive)
+        if (!(m->qid.type & QTDIR))           continue;   // non-directory member
+        if (!m->dev || !m->dev->readdir)      continue;   // no readdir slot
+
+        s64 moff = 0;
+        for (;;) {
+            long got = m->dev->readdir(m, tmp, UNION_RD_TMP, moff);
+            if (got <= 0)                     break;       // member EOD / error
+            long pos = 0;
+            bool advanced = false;
+            while (pos + 24 <= got && !full) {
+                u64 cookie = 0;
+                for (int i = 0; i < 8; i++)
+                    cookie |= (u64)tmp[pos + 13 + i] << (8 * i);
+                u32  nlen  = (u32)tmp[pos + 22] | ((u32)tmp[pos + 23] << 8);
+                long entry = 24 + (long)nlen;
+                if (pos + entry > got)         break;       // truncated trailing entry
+                const char *nm = (const char *)&tmp[pos + 24];
+
+                // DEDUP first-member-wins: drop a member[k>0] entry whose name an
+                // earlier member already provides. Relookup (no seen-set state):
+                // deterministic, so re-drive resumes at the same idx.
+                bool dup = false;
+                for (int j = 0; j < k && !dup; j++) {
+                    // R2-F1: dedup Twalks the UNOPENED clone -- a 9P server
+                    // rejects a Twalk from the opened readdir fid.
+                    struct Spoor *mj = members[j].walkable;
+                    if (mj && (mj->qid.type & QTDIR))
+                        dup = stalk_union_has_child(p, mj, nm, nlen);
+                }
+
+                if (!dup) {
+                    if (idx >= in_ordinal) {
+                        if (outlen + entry > want) {
+                            full = true;                    // re-fetched next call
+                        } else {
+                            for (long b = 0; b < entry; b++)
+                                out[outlen + b] = tmp[pos + b];
+                            u64 ord = idx + 1;              // 1-based ordinal cookie
+                            for (int i = 0; i < 8; i++)
+                                out[outlen + 13 + i] = (u8)(ord >> (8 * i));
+                            outlen += entry;
+                        }
+                    }
+                    idx++;
+                }
+                moff = (s64)cookie;      // advance THIS member's own cursor
+                advanced = true;
+                pos += entry;
+            }
+            if (full || !advanced)            break;
+        }
+    }
+
+    kfree(tmp);
+    // members[] are the fd-owned opened snapshot (borrowed) -- NOT clunked here.
+    // `full` with nothing emitted means the FIRST eligible entry did not fit in
+    // `want` -- report EINVAL ("buffer can't hold one record", the getdents64
+    // stance) rather than 0, which a paginating reader would read as EOD and
+    // silently truncate the listing. Unreachable at want >= 2048 (a dirent is
+    // <= 24 + 255); the guard bounds a pathological tiny buffer.
+    if (full && outlen == 0)                         return -T_E_INVAL;
+    return (s64)outlen;   // 0 => nothing at/after in_ordinal => end-of-directory
+}
+
+// The readdir RUN, extracted from the handler so the phenotype getdents64
+// shell runs the SAME dev-op, malformed-stream guard and #955
+// non-advancing-cursor bound as the native SYS_READDIR -- extraction, not
+// duplication (the I-43 rule). `c` is BORROWED (the caller clunks) and its
+// offset is NOT advanced here: each caller commits
+// `c->offset = (s64)*last_cookie_out` only after ITS OWN copy-out succeeded
+// (the F3 property -- a faulted copy leaves the cursor unchanged so a retry
+// re-fetches, never skips). Returns the byte count of whole 9P dirents
+// written to `scratch` (> 0), 0 on end-of-directory (including the #955
+// stale-cursor bound), or a real -T_E_* (errno-rollout: the pre-extraction
+// handler flattened these to -1 -- BADF for the #81 O_PATH reject [Linux's
+// getdents answer for an fd that is not a data channel], OPNOTSUPP for a Dev
+// with no .readdir slot, IO for a malformed stream, and the Dev's own
+// negative propagated verbatim).
+static s64 spoor_readdir_run(struct Spoor *c, u8 *scratch, long want,
+                             u64 *last_cookie_out) {
+    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject
+    // readdir too (listing a dir's entries is content the perm_check-exempt
+    // O_PATH open would otherwise leak for a non-readable dir). An O_PATH open
+    // resolves STALK_WALK, which SINCE R2-F2 DOES carry a point-only union_snap
+    // (so a maintainer must not assume CWALKONLY implies union_snap==NULL) -- but
+    // every O_PATH fd is stamped CWALKONLY, so this reject still precedes the
+    // union branch below.
+    if (c->flag & CWALKONLY)                        return -T_E_BADF;
+
+    u64 in_cookie = (u64)c->offset;   // the opaque resume cookie we resume FROM
+    long got;
+    if (c->union_snap) {
+        // UM: union directory -- merge every member's entries (dedup first-
+        // wins), presented as 9P2000.L dirents with 1-based ordinal cookies.
+        // The parse + #955 bound + copy-out below are byte-identical to a
+        // single-Dev batch, so native SYS_READDIR and the getdents64 shell both
+        // resume correctly off the ordinal.
+        struct Thread *rt = current_thread();
+        got = union_readdir_run(rt ? rt->proc : NULL, c, scratch, want, in_cookie);
+    } else {
+        if (!c->dev || !c->dev->readdir)            return -T_E_OPNOTSUPP;
+        got = c->dev->readdir(c, scratch, want, c->offset);
+    }
+    if (got < 0)                                    return (s64)got;
+    if (got == 0)                                   return 0;      // EOD
 
     // Walk the returned dirents (bounded by `got`) to find the last complete
     // entry's offset cookie. The minimum entry is 24 bytes (qid+offset+type+
     // name_len) + a 0-length name. A run with no complete entry is a malformed
-    // stream -> -1 (also prevents a userspace re-read spin on a non-advancing
+    // stream (also prevents a userspace re-read spin on a non-advancing
     // offset).
     long pos = 0;
     u64 last_cookie = 0;
@@ -3486,7 +4284,7 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
         advanced = true;
         pos += entry;
     }
-    if (!advanced)                                 { spoor_clunk(c); return -1; }   // malformed run
+    if (!advanced)                                  return -T_E_IO;   // malformed run
 
     // Defense-in-depth (#955): a non-empty run whose last cookie == the cookie
     // we resumed from means the cursor did not advance -- a paginating reader
@@ -3506,13 +4304,35 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
     // (Stratum + devramfs both start at 1). A server that re-emits the resume
     // entry with an EQUAL cookie would have its listing truncated here -- that
     // is the untrusted-server seam, not a correct-server case.
-    if (last_cookie == in_cookie && in_cookie != 0) { spoor_clunk(c); return 0; }
+    if (last_cookie == in_cookie && in_cookie != 0)  return 0;
+
+    *last_cookie_out = last_cookie;
+    return (s64)got;
+}
+
+static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (buf_len_raw == 0 || buf_len_raw > SYS_RW_STACK) return -1;
+    if (!sys_validate_user_buf(buf_va, buf_len_raw))  return -1;
+
+    // #844: c is REF-HELD (borrow); spoor_clunk on every exit (readdir blocks).
+    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!c)                                          return -1;
+
+    u8 scratch[SYS_RW_STACK];
+    u64 last_cookie = 0;
+    s64 got = spoor_readdir_run(c, scratch, (long)buf_len_raw, &last_cookie);
+    if (got <= 0)                                   { spoor_clunk(c); return got; }
 
     // Copy the dirent bytes to user-VA FIRST, THEN advance the Spoor offset
     // (F3 audit). If a uaccess store faults, we return -1 with the offset
     // UNCHANGED, so the caller's retry re-fetches the same run rather than
     // silently skipping the entries it never received.
-    for (long i = 0; i < got; i++) {
+    for (s64 i = 0; i < got; i++) {
         if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) { spoor_clunk(c); return -1; }
     }
     c->offset = (s64)last_cookie;
@@ -3566,6 +4386,66 @@ static int sys_copy_component(u64 name_va, u64 name_len, char *scratch) {
     return 0;
 }
 
+// #50: the rename MECHANICS, extracted so the fd-based SYS_RENAME and the
+// phenotype renameat shell run the SAME dev-slot check, the SAME same-Dev
+// invariant, and the SAME A-2d W|X gates. `od`/`nd` are BORROWED (the caller
+// clunks); the names are validated kernel-space components.
+static s64 spoor_rename_in_dirs(struct Proc *p, struct Spoor *od,
+                                struct Spoor *nd, const char *old_name,
+                                const char *new_name) {
+    // #80: a Dev with no .rename slot cannot perform the operation at all --
+    // OPNOTSUPP, distinguishable from every verdict the slot itself can return
+    // (devramfs leaves it NULL, so `mv` inside the boot ramfs says so plainly
+    // instead of reporting a generic I/O error).
+    if (!od->dev || !od->dev->rename)                 return -T_E_OPNOTSUPP;
+    // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
+    // both directories MUST be on the same Dev (dev9p_rename adds the same-
+    // session guard). Rejected here before any Dev op.
+    //
+    // #80 seam: POSIX names this case EXDEV (18), which a caller like `mv` reads
+    // as "fall back to copy+unlink". EXDEV is not in the errno registry, and
+    // adding it is an ERRORS.md append needing signoff -- so this stays EINVAL
+    // for now and the cross-Dev copy fallback remains the caller's own policy.
+    if (od->dev != nd->dev)                           return -T_E_INVAL;
+
+    // A-3b (closes A-2d audit F2): rwx enforcement on dir mutation. POSIX
+    // rename needs write + search (W|X) on BOTH parent dirs. Gated on the
+    // Dev's perm_enforced (devramfs leaves .rename NULL; dev9p enforces from
+    // A-3b). od->dev == nd->dev here, so one flag governs both.
+    if (od->dev->perm_enforced) {
+        struct t_stat ost, nst;
+        if (spoor_stat_native(od, &ost) != 0)             return -T_E_IO;
+        if (perm_check(p, &ost, PERM_W | PERM_X) != 0)    return -T_E_ACCES;
+        if (spoor_stat_native(nd, &nst) != 0)             return -T_E_IO;
+        if (perm_check(p, &nst, PERM_W | PERM_X) != 0)    return -T_E_ACCES;
+    }
+
+    // #80: the Dev now returns a specific -T_E_* (see the .rename contract in
+    // <thylacine/dev.h>); forward it verbatim rather than flattening to -1.
+    return od->dev->rename(od, old_name, nd, new_name);
+}
+
+// UM-8c F5: forward decl (defined in the vivarium section) -- two Spoors name
+// the same mount-point identity, used to detect a within-union rename.
+static bool spoor_same_mount_identity(const struct Spoor *a, const struct Spoor *b);
+
+// UM-8c F5: if `c` is a union dirfd (its union_snap carries the point), return
+// the member the mutation should act on -- the holder of `leaf` (remove) or the
+// first MCREATE member (create) -- ref-held (caller clunks). Returns NULL when
+// `c` is not a union (caller acts on `c` directly, *err untouched) OR when a
+// union has no holder / MCREATE member (*err set to a negative -T_E_*).
+static struct Spoor *sys_union_dirfd_member(struct Proc *p, struct Spoor *c,
+                                            const char *leaf, bool want_create,
+                                            s64 *err) {
+    if (!c->union_snap || !c->union_snap->point) return NULL;
+    int e = 0;
+    struct Spoor *m = want_create
+        ? stalk_union_create_member(p, c->union_snap->point, &e)
+        : stalk_union_member_holding(p, c->union_snap->point, leaf, &e);
+    if (!m) *err = e ? -(s64)e : -(s64)(want_create ? T_E_ACCES : T_E_NOENT);
+    return m;
+}
+
 static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len_raw,
                                u64 newdir_fd_raw, u64 newname_va, u64 newname_len_raw) {
     struct Thread *t = current_thread();
@@ -3587,39 +4467,66 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
     if (!od)                                          return -T_E_BADF;
     struct Spoor *nd = sys_resolve_dir_wr(p, newdir_fd_raw);
     if (!nd)                                        { spoor_clunk(od); return -T_E_BADF; }
-    // #80: a Dev with no .rename slot cannot perform the operation at all --
-    // OPNOTSUPP, distinguishable from every verdict the slot itself can return
-    // (devramfs leaves it NULL, so `mv` inside the boot ramfs says so plainly
-    // instead of reporting a generic I/O error).
-    if (!od->dev || !od->dev->rename)              { spoor_clunk(od); spoor_clunk(nd); return -T_E_OPNOTSUPP; }
-    // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
-    // both directories MUST be on the same Dev (dev9p_rename adds the same-
-    // session guard). Rejected here before any Dev op.
-    //
-    // #80 seam: POSIX names this case EXDEV (18), which a caller like `mv` reads
-    // as "fall back to copy+unlink". EXDEV is not in the errno registry, and
-    // adding it is an ERRORS.md append needing signoff -- so this stays EINVAL
-    // for now and the cross-Dev copy fallback remains the caller's own policy.
-    if (od->dev != nd->dev)                        { spoor_clunk(od); spoor_clunk(nd); return -T_E_INVAL; }
 
-    // A-3b (closes A-2d audit F2): rwx enforcement on dir mutation. POSIX
-    // rename needs write + search (W|X) on BOTH parent dirs. Gated on the
-    // Dev's perm_enforced (devramfs leaves .rename NULL; dev9p enforces from
-    // A-3b). od->dev == nd->dev here, so one flag governs both.
-    if (od->dev->perm_enforced) {
-        struct t_stat ost, nst;
-        if (spoor_stat_native(od, &ost) != 0)             { spoor_clunk(od); spoor_clunk(nd); return -T_E_IO; }
-        if (perm_check(p, &ost, PERM_W | PERM_X) != 0)    { spoor_clunk(od); spoor_clunk(nd); return -T_E_ACCES; }
-        if (spoor_stat_native(nd, &nst) != 0)             { spoor_clunk(od); spoor_clunk(nd); return -T_E_IO; }
-        if (perm_check(p, &nst, PERM_W | PERM_X) != 0)    { spoor_clunk(od); spoor_clunk(nd); return -T_E_ACCES; }
+    // UM-8c F5: a union dirfd holds member[0]. A rename reaches the member that
+    // HOLDS the source (od) and lands the destination in the SAME member when
+    // both fds name one union (Plan 9 within-member rename), else the MCREATE
+    // member (nd). Non-union dirfds act on od/nd directly; a cross-member move
+    // then falls to spoor_rename_in_dirs's same-Dev guard (EXDEV -> EINVAL).
+    bool same_union = od->union_snap && od->union_snap->point &&
+                      nd->union_snap && nd->union_snap->point &&
+                      spoor_same_mount_identity(od->union_snap->point,
+                                                nd->union_snap->point);
+    s64 uerr = 0;
+    struct Spoor *od_m = sys_union_dirfd_member(p, od, old_scratch, false, &uerr);
+    if (!od_m && uerr) { spoor_clunk(od); spoor_clunk(nd); return uerr; }
+    struct Spoor *od_target = od_m ? od_m : od;
+    struct Spoor *nd_m = NULL;
+    struct Spoor *nd_target;
+    if (same_union) {
+        nd_target = od_target;   // within-member: borrow od_m (clunked once below)
+    } else {
+        nd_m = sys_union_dirfd_member(p, nd, new_scratch, true, &uerr);
+        if (!nd_m && uerr) {
+            if (od_m) spoor_clunk(od_m);
+            spoor_clunk(od); spoor_clunk(nd);
+            return uerr;
+        }
+        nd_target = nd_m ? nd_m : nd;
     }
 
-    // #80: the Dev now returns a specific -T_E_* (see the .rename contract in
-    // <thylacine/dev.h>); forward it verbatim rather than flattening to -1.
-    int rc = od->dev->rename(od, old_scratch, nd, new_scratch);
+    s64 rc = spoor_rename_in_dirs(p, od_target, nd_target, old_scratch, new_scratch);
+    if (od_m) spoor_clunk(od_m);
+    if (nd_m) spoor_clunk(nd_m);
     spoor_clunk(od);
     spoor_clunk(nd);
     return rc;
+}
+
+// #50: the unlink MECHANICS, extracted so the fd-based SYS_UNLINK and the
+// phenotype unlinkat shell run the SAME dev-slot check and the SAME A-2d W|X
+// gate. `c` is BORROWED (the caller clunks); `name` is a validated
+// kernel-space component; `flags` is pre-validated (0 or REMOVEDIR).
+static s64 spoor_unlink_in_dir(struct Proc *p, struct Spoor *c,
+                               const char *name, u32 flags) {
+    // #80: no .unlink slot => this Dev cannot remove at all (devramfs) --
+    // OPNOTSUPP, distinct from any verdict the slot itself returns.
+    if (!c->dev || !c->dev->unlink)                   return -T_E_OPNOTSUPP;
+
+    // A-3b (closes A-2d audit F2): W|X on the parent dir to remove an entry
+    // (POSIX). Gated on perm_enforced (dev9p enforces from A-3b; devramfs
+    // leaves .unlink NULL).
+    if (c->dev->perm_enforced) {
+        struct t_stat cst;
+        if (spoor_stat_native(c, &cst) != 0)              return -T_E_IO;
+        if (perm_check(p, &cst, PERM_W | PERM_X) != 0)    return -T_E_ACCES;
+    }
+
+    // #80: the Dev now returns a specific -T_E_* (see the .unlink contract in
+    // <thylacine/dev.h>); forward it verbatim. This is what lets a caller
+    // distinguish "that is a directory" from "that directory is not empty" from
+    // "you may not write here" -- all three were one flat -1 before.
+    return c->dev->unlink(c, name, flags);
 }
 
 static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
@@ -3641,24 +4548,16 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
     // possibly-blocking stat + unlink 9P ops).
     struct Spoor *c = sys_resolve_dir_wr(p, parent_fd_raw);
     if (!c)                                          return -T_E_BADF;
-    // #80: no .unlink slot => this Dev cannot remove at all (devramfs) --
-    // OPNOTSUPP, distinct from any verdict the slot itself returns.
-    if (!c->dev || !c->dev->unlink)                { spoor_clunk(c); return -T_E_OPNOTSUPP; }
 
-    // A-3b (closes A-2d audit F2): W|X on the parent dir to remove an entry
-    // (POSIX). Gated on perm_enforced (dev9p enforces from A-3b; devramfs
-    // leaves .unlink NULL).
-    if (c->dev->perm_enforced) {
-        struct t_stat cst;
-        if (spoor_stat_native(c, &cst) != 0)              { spoor_clunk(c); return -T_E_IO; }
-        if (perm_check(p, &cst, PERM_W | PERM_X) != 0)    { spoor_clunk(c); return -T_E_ACCES; }
-    }
+    // UM-8c F5: a union dirfd holds member[0]; unlink acts on the member that
+    // HOLDS the leaf, not member[0].
+    s64 uerr = 0;
+    struct Spoor *um = sys_union_dirfd_member(p, c, scratch, false, &uerr);
+    if (!um && uerr) { spoor_clunk(c); return uerr; }
+    struct Spoor *target = um ? um : c;
 
-    // #80: the Dev now returns a specific -T_E_* (see the .unlink contract in
-    // <thylacine/dev.h>); forward it verbatim. This is what lets a caller
-    // distinguish "that is a directory" from "that directory is not empty" from
-    // "you may not write here" -- all three were one flat -1 before.
-    int rc = c->dev->unlink(c, scratch, (u32)flags_raw);
+    s64 rc = spoor_unlink_in_dir(p, target, scratch, (u32)flags_raw);
+    if (um) spoor_clunk(um);
     spoor_clunk(c);
     return rc;
 }
@@ -3816,6 +4715,17 @@ static s64 sys_chroot_handler(u64 spoor_fd_raw) {
     // Mirrors SYS_MOUNT's source-rights gate exactly.
     struct Spoor *source = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);
     if (!source)                                     return -1;
+
+    // The root must be a DIRECTORY -- the #81 single-hop gate, applied to the
+    // one other place a Spoor becomes a resolution base. Installing a non-dir
+    // wedges the Territory: every later resolution answers T_E_NOTDIR at its
+    // first component, exec-from-namespace fails, and territory_root_ref hands
+    // the same node to D-1's absolute-target re-anchor. Contained (the Proc only
+    // wedges itself, I-1) but it is an unprivileged self-wedge with no use.
+    // Pre-existing -- t_chroot of an O_PATH handle on a FILE did this before
+    // D-1 too -- but D-1 shipped File::open_link, a documented API whose whole
+    // job is to hand back a non-directory, so the shape is now easy to reach.
+    if (!(source->qid.type & QTDIR))                 { spoor_clunk(source); return -1; }
 
     // territory_chroot handles: idempotent same-pointer (returns 0 without ref
     // bump), prior-root displacement (spoor_clunk the old), spoor_ref of the
@@ -3988,6 +4898,191 @@ static void sys_thread_exit_handler(void) {
     extinction("sys_thread_exit returned");
 }
 
+// VIVARIUM N-3: clone(CLONE_THREAD) -- a Thread in the CALLER's OWN Proc. The
+// crux of Linux-phenotype threading, and a TRANSLATOR onto machinery that
+// already works, not a new engine.
+//
+// The Linux thread contract, mapped:
+//   - the child resumes at the parent's trap frame with x0=0 on child_sp
+//     (fork_frame_init, inside thread_create_forked) -- a clone hands the kernel
+//     NO entry function, so this forked-frame shape is correct where
+//     SYS_THREAD_SPAWN's entry-va shape is wrong;
+//   - it shares the caller's AddrSpace / HandleTable / Territory / sigtab BY
+//     CONSTRUCTION, because thread_create_forked links it into the CALLER's Proc
+//     (cur->proc, NOT a fresh one). The fresh-Proc path is rfork's, and a new
+//     Proc means a new pid -- wrong: CLONE_THREAD peers share one pid;
+//   - it gets its own tid (the return value), publishes it into *ptid, and arms
+//     the CLONE_CHILD_CLEARTID exit-clear+wake so a joiner observes its death.
+//
+// The argument gates MIRROR sys_thread_spawn_handler (the native twin) exactly:
+// a misaligned child_sp/ptid extincts at the eret or the STR (the EL1 fixup
+// table catches translation faults, not alignment), so they become clean
+// -EINVAL here. The thread cap (I-32) is checked BEFORE the kstack alloc,
+// bounding a pthread_create storm to -EAGAIN.
+static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
+    u64 flags     = args[0];
+    u64 child_sp  = args[1];
+    u64 ptid_va   = args[2];
+    u64 child_tls = args[3];
+    u64 ctid_va   = args[4];
+
+    struct Thread *cur = current_thread();
+    if (!cur)                                        return -(s64)T_E_INVAL;
+    struct Proc *p = cur->proc;
+    if (!p)                                          return -(s64)T_E_INVAL;
+    if (p->magic != PROC_MAGIC)                      return -(s64)T_E_INVAL;
+    if (p == kproc())                                return -(s64)T_E_INVAL;
+    if (!p->as)                                      return -(s64)T_E_INVAL;
+
+    // child_sp: mandatory + 16-aligned + within user VA (AAPCS64 + the SP_EL0
+    // install at eret). The decide already refused a zero stack; re-gated here
+    // because the pure decide cannot see UACCESS_USER_VA_TOP.
+    if (child_sp == 0)                               return -(s64)T_E_INVAL;
+    if ((child_sp & 0xFu) != 0)                      return -(s64)T_E_INVAL;
+    if (child_sp >= UACCESS_USER_VA_TOP)             return -(s64)T_E_INVAL;
+
+    // child_tls: 0 permitted (no TLS); non-zero must be within user VA -- it is
+    // written to TPIDR_EL0 at the eret, so a TTBR1 value would fault the child's
+    // first thread-local access far from here.
+    if (child_tls != 0 && child_tls >= UACCESS_USER_VA_TOP)
+                                                     return -(s64)T_E_INVAL;
+
+    // ptid / ctid: 0 opts out; non-zero must be 4-aligned + user-VA, the
+    // SYS_SET_TID_ADDRESS gate, because each is consumed by uaccess_store_u32
+    // (an unaligned STR alignment-faults past the fixup table). Gated only when
+    // the corresponding CLONE_* flag is set -- musl's word sets both.
+    if ((flags & (u64)VIV_CLONE_PARENT_SETTID) && ptid_va != 0) {
+        if ((ptid_va & 0x3u) != 0)                   return -(s64)T_E_INVAL;
+        if (ptid_va >= UACCESS_USER_VA_TOP)          return -(s64)T_E_INVAL;
+    }
+    if ((flags & (u64)VIV_CLONE_CHILD_CLEARTID) && ctid_va != 0) {
+        if ((ctid_va & 0x3u) != 0)                   return -(s64)T_E_INVAL;
+        if (ctid_va >= UACCESS_USER_VA_TOP)          return -(s64)T_E_INVAL;
+    }
+
+    // I-32: the per-Proc thread cap, BEFORE the kstack alloc (mirrors
+    // sys_thread_spawn_handler). A pthread_create storm fails clean -EAGAIN.
+    if (!proc_thread_cap_ok(p))                      return -(s64)T_E_AGAIN;
+
+    // The crux. thread_create_forked copies `ctx` (the parent's trap frame) with
+    // x0=0 + sp=child_sp, sets tpidr_el0=child_tls, copies the parent's LIVE FP,
+    // and links the Thread into `p` -- the CALLER's Proc. Passing cur->proc (not
+    // a fresh Proc) is the single line that makes this a CLONE_THREAD rather than
+    // a fork: shared address space, one pid, one ASID (I-31).
+    struct Thread *nt = thread_create_forked(p, ctx, child_sp, child_tls);
+    if (!nt)                                         return -(s64)T_E_NOMEM;
+
+    // CLONE_PARENT_SETTID: publish the tid into the parent word BEFORE ready(),
+    // so the child can never observe a 0 tid, and read nt->tid HERE (pre-ready)
+    // so the load cannot race the child's first dispatch + eventual thread_free.
+    // Best-effort by contract (the sys_thread_spawn_handler rule): an
+    // align/bound-legal but unmapped ptid routes through the demand-page write,
+    // returns -1, and is SWALLOWED -- the tid is authoritative in x0, and a
+    // never-readied Thread must not be torn down on a transient uaccess fault.
+    if ((flags & (u64)VIV_CLONE_PARENT_SETTID) && ptid_va != 0)
+        (void)uaccess_store_u32(ptid_va, (u32)nt->tid);
+
+    // CLONE_CHILD_CLEARTID: arm the exit-time clear+wake. thread_clear_child_tid_
+    // handoff (fired from thread_exit_self at retirement) zeroes *ctid and
+    // torpor_wakes it -- musl points ctid at &__thread_list_lock, whose __tl_sync
+    // barrier a joiner blocks on. Armed AFTER create (nt exists) and BEFORE
+    // ready() (before the child can exit).
+    if ((flags & (u64)VIV_CLONE_CHILD_CLEARTID) && ctid_va != 0)
+        nt->clear_child_tid = ctid_va;
+
+    // ready() inserts the RUNNABLE Thread into the run tree. The link
+    // (thread_create_forked -> thread_link_into_proc, under g_proc_table_lock)
+    // already happened, so a proc_group_terminate racing this either saw the
+    // linked Thread (and marked it -- its EL0-return die-check fires before it
+    // reaches EL0) or has not run yet (and marks it when it does): the I-24
+    // shootdown covers every Thread linked into p, exactly as for a
+    // sys_thread_spawn_handler thread created the same way.
+    ready(nt);
+    return (s64)nt->tid;
+}
+
+// N-3: the futex shell -- FUTEX_WAIT/WAKE/REQUEUE onto torpor. `p` is the
+// caller's Proc (== current_thread()->proc, which torpor's user-VA load
+// requires -- viv_tier2 passes exactly that). vivarium_futex_decide classifies
+// the op; torpor validates uaddr (aligned, bound, load) so there is no pre-check
+// here -- one implementation of that gate, torpor's.
+//
+// futex(uaddr, op, val, timeout/val2, uaddr2, val3):
+//   x0 uaddr, x1 op, x2 val, x3 timeout-PTR (WAIT) or val2 (REQUEUE), x4 uaddr2.
+static s64 viv_futex(struct Proc *p, u64 uaddr, u64 op_raw, u64 val,
+                     u64 timeout_or_val2, u64 uaddr2) {
+    (void)uaddr2;   // REQUEUE's target -- see the wake-emulation note below
+
+    enum viv_futex_op op;
+    if (vivarium_futex_decide((u32)op_raw, &op) != VIV_TRANSLATED)
+        return -(s64)T_E_NOSYS;   // PI / WAKE_OP / WAIT_BITSET: not the musl path
+
+    switch (op) {
+    case VIV_FUTEX_OP_WAIT: {
+        // Block while *uaddr == val. x3 is a POINTER to a RELATIVE timespec, or 0
+        // = block indefinitely.
+        s64 timeout_us = -1;   // torpor: < 0 blocks with no deadline
+        if (timeout_or_val2 != 0) {
+            struct { s64 tv_sec; s64 tv_nsec; } ts;
+            // VALIDATE THE POINTER before uaccess_copy_in reads it -- that is the
+            // caller's half of uaccess_copy_in's contract (uaccess.S), and the
+            // ONLY reason it is safe: a raw copy_in of a kernel/non-canonical
+            // timeout VA faults with from_user=false + vaddr >= UACCESS_USER_VA_
+            // TOP, which the EL1 fixup DELIBERATELY does not rescue -> the kernel
+            // extincts on unprivileged EL0 input (the getdents64 copy-out P0
+            // class). timeout_or_val2 is x3, wholly guest-controlled. Mirrors the
+            // native timespec readers (sys_torpor's callers + the ppoll tmo).
+            if (!sys_validate_user_buf(timeout_or_val2, sizeof(ts)))
+                return -(s64)T_E_FAULT;
+            if (uaccess_copy_in(&ts, timeout_or_val2, sizeof(ts)) != 0)
+                return -(s64)T_E_FAULT;
+            if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000)
+                return -(s64)T_E_INVAL;
+            // us = sec*1e6 + nsec/1e3, clamped to torpor's 1-hour ceiling. The
+            // seconds bound is checked BEFORE the multiply so a huge tv_sec
+            // cannot overflow the u64 arithmetic.
+            if ((u64)ts.tv_sec >= TORPOR_MAX_TIMEOUT_US / 1000000ull) {
+                timeout_us = (s64)TORPOR_MAX_TIMEOUT_US;
+            } else {
+                u64 us = (u64)ts.tv_sec * 1000000ull + (u64)ts.tv_nsec / 1000ull;
+                if (us > TORPOR_MAX_TIMEOUT_US) us = TORPOR_MAX_TIMEOUT_US;
+                timeout_us = (s64)us;
+            }
+        }
+        // torpor returns Linux-numbered errnos (torpor.h): OK(0) on wake OR on a
+        // value-mismatch at entry (Linux's EAGAIN collapsed onto 0 -- musl
+        // re-checks the predicate either way), else ETIMEDOUT/EFAULT/EINVAL.
+        // Passed straight through; already the values a Linux caller expects.
+        return sys_torpor_wait_for_proc(p, uaddr, (u32)val, timeout_us);
+    }
+
+    case VIV_FUTEX_OP_WAKE:
+        // Wake up to `val` waiters on uaddr (musl: 1, or INT_MAX for broadcast).
+        return sys_torpor_wake_for_proc(p, uaddr, (u32)val);
+
+    case VIV_FUTEX_OP_REQUEUE: {
+        // FUTEX_REQUEUE(uaddr, val, val2, uaddr2): Linux wakes `val` on uaddr and
+        // REQUEUES up to `val2` from uaddr to uaddr2. torpor has no requeue, so
+        // this WAKES up to (val + val2) on uaddr -- a CORRECT implementation, not
+        // an approximation: FUTEX_WAIT is spurious-wake-tolerant by contract, so
+        // a woken-not-requeued waiter re-checks its userspace word and proceeds
+        // to contend on the real lock, exactly as it would after being requeued
+        // to that lock and then woken. musl's cond wake-chain calls this val=0,
+        // val2=1 (unlock_requeue hands off ONE waiter at a time), so the
+        // emulation wakes precisely the one waiter the requeue would have moved.
+        // The only cost is a bounded herd on pthread_cond_broadcast (O(waiters)
+        // wakes, not a chain-requeue); no wakeup is lost (pure wait/wake under
+        // I-9). uaddr2 is intentionally ignored; a v1.x torpor_requeue closes the
+        // perf gap. Without REQUEUE at all, a >=2-waiter broadcast on a DEFAULT
+        // mutex deadlocks -- so this arm is load-bearing, not a nicety.
+        u64 total = (u64)(u32)val + (u64)(u32)timeout_or_val2;
+        if (total > 0xFFFFFFFFull) total = 0xFFFFFFFFull;   // saturate the count
+        return sys_torpor_wake_for_proc(p, uaddr, (u32)total);
+    }
+    }
+    return -(s64)T_E_NOSYS;   // unreachable: the decide gated the op set
+}
+
 // =============================================================================
 // P6-pouch-signals-impl (sub-chunk 13a): note delivery syscalls.
 // =============================================================================
@@ -3997,8 +5092,9 @@ static void sys_thread_exit_handler(void) {
 
 extern int  notes_noted_restore(struct exception_context *ctx,
                                 struct Thread *t);
-__attribute__((noreturn))
-extern void notes_noted_default(struct Thread *t);
+// #15: no longer noreturn -- the STOP and IGNORE dispositions return.
+extern int  notes_noted_default(struct exception_context *ctx,
+                                struct Thread *t);
 
 // SYS_NOTE_OPEN — mint a fd to the calling Proc's note queue.
 //   (no args)
@@ -4083,19 +5179,28 @@ static void sys_noted_handler(struct exception_context *ctx, u64 arg) {
         return;
     }
     if (arg == 1) {
-        // NDFLT -- default action: exits(name). For the v1.0 supported set
-        // every uncaught default is process termination. Post-#811 (ARCH
-        // 8.8.1) exits() on a Proc with live peers CASCADES via
-        // proc_group_terminate (it no longer extincts), so a multi-thread
-        // Proc's uncaught default-terminate signal terminates the WHOLE Proc
-        // -- the POSIX default action. RW-8 R5-F1: the prior live-peers
-        // refusal (-1) predated #809/#811 and, with pouch's always-installed
-        // handler bypassing the LS-5 kernel default-terminate, silently
-        // swallowed SIGINT/SIGTERM in multi-thread pouch daemons (NDFLT
-        // refused -> bootstrap NCONT-resumes -> the signal evaporates). The
-        // cascade is the same #811 path a multi-thread exits() already takes.
-        notes_noted_default(t);
-        // unreachable
+        // NDFLT -- the note's TRUE default action, per-note since #15
+        // (notes_default_action + the g_known_notes `dfl` column). Three
+        // outcomes: TERMINATE never returns; STOP and IGNORE restore the
+        // pre-handler context (rewriting ctx, so regs[0] below is NOT what
+        // EL0 sees) and return 0. A STOP additionally arms job_stop_req; the
+        // thread parks at the EL0-return tail after the die-check, so a
+        // racing group-terminate still wins.
+        //
+        // The terminating arm's history, which the per-note table did not
+        // change: post-#811 (ARCH 8.8.1) exits() on a Proc with live peers
+        // CASCADES via proc_group_terminate rather than extincting, so a
+        // multi-thread Proc's uncaught default-terminate takes down the whole
+        // Proc -- the POSIX default action. RW-8 R5-F1 removed the prior
+        // live-peers refusal (-1), which predated #809/#811 and, with pouch's
+        // always-installed handler bypassing the LS-5 kernel default-
+        // terminate, silently swallowed SIGINT/SIGTERM in multi-thread pouch
+        // daemons (NDFLT refused -> bootstrap NCONT-resumes -> the signal
+        // evaporates).
+        if (notes_noted_default(ctx, t) != 0) {
+            ctx->regs[0] = (u64)(s64)-1;
+        }
+        return;
     }
     // Anything else — -EINVAL via -1.
     ctx->regs[0] = (u64)(s64)-1;
@@ -4116,6 +5221,28 @@ struct postnote_walk_ctx {
                                   //      (stop walk).
 };
 
+// N-4 in ONE place: `kill` terminates its target, whatever the target's thread
+// count and whatever state its note ring is in. Returns true iff `name` was
+// `kill` and the cascade ran, so a caller's remaining work is the not-a-kill
+// path only.
+//
+// It exists because the two SYS_POSTNOTE arms (self and cross) each carried
+// their own spelling of this rule and DRIFTED: aux#241 removed the cross arm's
+// `live_threads > 1` gate and left the self arm's, and round-2 F4 then found
+// the self arm failing a kill on a full ring. Two arms agreeing by inspection
+// is what produced both defects; sharing the decision is the fix that outlives
+// either one. A third spelling already exists in devproc.c's `/proc/<pid>/ctl`
+// kill verb -- fold it in here if that file is ever touched for this reason.
+//
+// CALLER MUST HOLD g_proc_table_lock: proc_group_terminate's universal
+// death-wake walks p->threads (#811, ARCH section 8.8.1). The cross arm holds
+// it via proc_for_each; the self arm takes it around this call.
+static bool postnote_kill_cascade_locked(struct Proc *target, const char *name) {
+    if (!notes_name_is_kill(name)) return false;
+    proc_group_terminate(target, "killed");
+    return true;
+}
+
 static int postnote_walk_cb(struct Proc *target, void *arg) {
     struct postnote_walk_ctx *w = (struct postnote_walk_ctx *)arg;
     if (target->pid != w->target_pid) return 0;     // keep walking
@@ -4135,24 +5262,47 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
         return 1;
     }
 
-    // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): a
-    // multi-thread target is no longer refused (the prior `kill -> -EIO in
-    // multi-thread Proc`, 13b R1-F9). Cascade-terminate the whole Proc --
-    // proc_group_terminate flags it + wakes/kicks its Threads so each
-    // self-exits at its EL0-return die-check; the last Thread out reaps the
-    // Proc. Safe under g_proc_table_lock (held by proc_for_each here):
-    // proc_group_terminate acquires only torpor / rendez / cs locks, all below
-    // proc_table_lock in the order, and the target is alive under this lock so
-    // there is no reap-UAF. A SINGLE-thread target falls through to the note
-    // post below -- the existing non-catchable-kill EL0-return delivery, left
-    // unchanged.
-    if (notes_name_is_kill(w->name)) {
-        int live_threads = proc_count_live_peers_locked(target, NULL);
-        if (live_threads > 1) {
-            proc_group_terminate(target, "killed");
-            w->result = 1;
-            return 1;
-        }
+    // `kill` cascade-terminates the whole Proc, whatever its thread count
+    // (ARCH §7.9.1, I-24). proc_group_terminate flags it + wakes/kicks its
+    // Threads so each self-exits at its EL0-return die-check; the last Thread
+    // out reaps the Proc. Safe under g_proc_table_lock (held by proc_for_each
+    // here): proc_group_terminate acquires only torpor / rendez / cs locks,
+    // all below proc_table_lock in the order, and the target is alive under
+    // this lock so there is no reap-UAF.
+    //
+    // #241: this used to be gated on `live_threads > 1`, letting a SINGLE-
+    // thread target fall through to the note post below "-- the existing
+    // non-catchable-kill EL0-return delivery, left unchanged". That sentence
+    // was true about the delivery and blind to the fact that a thread can be
+    // somewhere OTHER than on its way to EL0. `kill` arms no terminate latch
+    // (notes_name_terminate_latch returns 0 for NOTE_BIT_KILL), so the queued
+    // note woke NOTHING -- and a job-stopped target parked in
+    // el0_return_stop_check has exactly three exits (group_exit_msg,
+    // !proc_stop_requested, thread_die_pending), none of which a latchless
+    // queued kill satisfies. SYS_POSTNOTE returned SUCCESS and the Proc lived
+    // forever: the job stop had caught the uncatchable note, violating N-4.
+    //
+    // Routing through proc_group_terminate closes it at the root rather than
+    // per-park: group_exit_msg is the ONE signal every park and sleep
+    // predicate already honours, so this also covers a target merely blocked
+    // (where the latchless kill previously waited for some unrelated wake).
+    // Not a semantics change -- a kill routes through the proc_group_terminate
+    // STRING wrapper, which records group_exit_code 1 (msg "killed" != "ok")
+    // beside group_exit_msg; thread_exit_self's become_zombie arm reads that
+    // code (#91), so the observable outcome is exit_msg "killed" / status 1
+    // either way. It also makes SYS_POSTNOTE agree with the /proc/
+    // <pid>/ctl `kill` verb, which has always dispatched via
+    // proc_group_terminate uniformly (devproc.c).
+    //
+    // Round-2 F4 (aux#253): the SELF arm used to keep its thread-count gate,
+    // and the paragraph here used to argue that was deliberate. It named a real
+    // property (a self-kill cannot be SWALLOWED by a stop, since the tail
+    // delivers notes before el0_return_stop_check) and mistook it for the whole
+    // obligation -- a full note ring made the self-kill fail for want of space.
+    // Both arms now route through the ONE predicate below.
+    if (postnote_kill_cascade_locked(target, w->name)) {
+        w->result = 1;
+        return 1;
     }
 
     // Post. notes_post is safe under proc_table_lock -- see the lock-order
@@ -4164,9 +5314,73 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     // wake the target's blocked threads so the LS-5b terminate fires at
     // their EL0-return tails. Internally gated on the latch; the walk's
     // g_proc_table_lock contract is satisfied (proc_for_each holds it).
-    if (rc == 0) proc_interrupt_terminate_wake(target);
+    if (rc == 0) {
+        proc_interrupt_terminate_wake(target);
+        proc_caught_note_wake(target);   // item 11: caught-note twin
+    }
     w->result = (rc == 0) ? 1 : -1;
     return 1;
+}
+
+// Test support (the mmap_eager_copy_for_test convention). Deliberately absent
+// from any header -- the harness extern-declares it, and there is no
+// production caller. It runs the REAL cross-Proc post: proc_for_each +
+// postnote_walk_cb under g_proc_table_lock, exactly as sys_postnote_handler
+// does, rather than a reimplementation the test could quietly drift from.
+// Returns the walk's canonical result (+1 posted / -1 refused / 0 not found).
+int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                const char *name);
+int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                const char *name) {
+    struct postnote_walk_ctx wctx = {
+        .target_pid = target_pid,
+        .caller     = caller,
+        .name       = name,
+        .result     = 0,
+    };
+    (void)proc_for_each(postnote_walk_cb, &wctx);
+    return wctx.result;
+}
+
+// The SELF arm, extracted from sys_postnote_handler so it has a name a test can
+// call (aux#253). The handler resolves `p` from current_thread(); everything
+// after that resolution uses only `p` and the validated name, so the arm splits
+// cleanly here and the syscall keeps driving THIS function rather than a copy.
+//
+// Returns the syscall's own value: 0 posted-or-killed, -1 refused.
+static s64 postnote_self(struct Proc *p, const char *name) {
+    // Unlike the cross arm we are not already under g_proc_table_lock, so take
+    // it around the cascade. `p` is self and cannot be reaped while running it.
+    irq_state_t s = proc_table_lock_acquire();
+    bool killed = postnote_kill_cascade_locked(p, name);
+    proc_table_lock_release(s);
+    if (killed) return 0;
+
+    int rc = notes_post(p, name, 0u, p, false);
+    // LS-5c (P3-terminate): a self-post of `interrupt` in a multi-thread Proc
+    // may arm the terminate latch while a PEER thread is blocked in a rendez
+    // sleep -- wake the peers so they unwind to their tails (the posting thread
+    // itself is running and reaches its own tail at this syscall's return). The
+    // wake walks p->threads, so it needs g_proc_table_lock (the #811 contract);
+    // take it only when the latch armed (the read is a benign pre-check -- the
+    // wake re-validates under its own internal gate, and `p` is self, immune to
+    // reap here).
+    if (rc == 0 && (proc_intr_terminate_pending(p) || proc_caught_note_pending(p))) {
+        irq_state_t ws = proc_table_lock_acquire();
+        proc_interrupt_terminate_wake(p);
+        proc_caught_note_wake(p);   // item 11: caught-note twin
+        proc_table_lock_release(ws);
+    }
+    return (rc == 0) ? 0 : (s64)-1;
+}
+
+// Test support, the sys_postnote_cross_for_test twin: drives the REAL self arm
+// with an explicit caller, because the production entry takes its target from
+// current_thread() and a kernel unit test's current thread is the harness's.
+// Deliberately absent from any header; no production caller.
+s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
+s64 sys_postnote_self_for_test(struct Proc *caller, const char *name) {
+    return postnote_self(caller, name);
 }
 
 static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
@@ -4209,42 +5423,13 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     // kernel/include/thylacine/syscall.h (SYS_POSTNOTE docblock).
     //
     // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): a
-    // multi-thread self-kill cascades the whole Proc instead of being refused
-    // (the prior `kill -> -EIO`, 13b R1-F9). proc_group_terminate's universal
-    // death-wake walks p->threads and so MUST run UNDER g_proc_table_lock
-    // (#811, ARCH §8.8.1) -- the count AND the cascade run in the SAME lock
-    // acquisition (previously the lock was dropped before the cascade; that is
-    // now a contract violation). self cannot be reaped while running here; the
-    // caller returns success + self-exits at its own EL0-return die-check
-    // before userspace resumes. A single-thread self-post falls through to the
-    // note post below (unchanged).
-    if (target_pid == p->pid || pid_raw == 0) {
-        if (notes_name_is_kill(buf)) {
-            irq_state_t s = proc_table_lock_acquire();
-            int live_threads = proc_count_live_peers_locked(p, NULL);
-            if (live_threads > 1) {
-                proc_group_terminate(p, "killed");
-                proc_table_lock_release(s);
-                return 0;
-            }
-            proc_table_lock_release(s);
-        }
-        int rc = notes_post(p, buf, 0u, p, false);
-        // LS-5c (P3-terminate): a self-post of `interrupt` in a multi-thread
-        // Proc may arm the terminate latch while a PEER thread is blocked in
-        // a rendez sleep -- wake the peers so they unwind to their tails (the
-        // posting thread itself is running and reaches its own tail at this
-        // syscall's return). The wake walks p->threads, so it needs
-        // g_proc_table_lock (the #811 contract); take it only when the latch
-        // armed (the read is a benign pre-check -- the wake re-validates
-        // under its own internal gate, and `p` is self, immune to reap here).
-        if (rc == 0 && proc_intr_terminate_pending(p)) {
-            irq_state_t ws = proc_table_lock_acquire();
-            proc_interrupt_terminate_wake(p);
-            proc_table_lock_release(ws);
-        }
-        return (rc == 0) ? 0 : (s64)-1;
-    }
+    // self-kill cascades the whole Proc instead of being refused (the prior
+    // `kill -> -EIO`, 13b R1-F9). The caller returns success + self-exits at
+    // its own EL0-return die-check before userspace resumes. The arm's body and
+    // its lock discipline live on postnote_self; WHY the kill decision is
+    // shared with the cross arm (round-2 F4, aux#253) lives on
+    // postnote_kill_cascade_locked.
+    if (target_pid == p->pid || pid_raw == 0) return postnote_self(p, buf);
 
     // Cross-Proc post: walk the proc tree via proc_for_each, which runs
     // its callback under g_proc_table_lock. We do the find + permission-
@@ -4423,7 +5608,11 @@ static s64 sys_burrow_attach_handler(u64 length_raw) {
     return sys_burrow_attach_for_proc(t->proc, length_raw);
 }
 
-s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+// The shared argument gate for both detach entries (#199 factored it out): the
+// alignment/rounding rules and the window confinement are ONE set of rules, not
+// two. Writes *length_out only on success (0).
+static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                             u64 *length_out) {
     if (!p)                                          return -1;
     if (length_raw == 0)                             return -1;
     if (length_raw > BURROW_ATTACH_MAX)              return -1;
@@ -4446,7 +5635,30 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -1;
     if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
 
-    spin_lock(&p->as->lock);
+    *length_out = length;
+    return 0;
+}
+
+// The per-VMA detach body (#199 factored it from sys_burrow_detach_for_proc,
+// byte-identical semantics): exact-match [vaddr_raw, vaddr_raw+length) against
+// ONE installed VMA, remove it, settle the I-32 accounting. Caller holds
+// as->lock and has already run detach_args_check.
+//
+// D-3c F1: `*out_free` receives the Burrow whose mapping-drop was the last ref
+// (or NULL) -- the caller pushes it onto a local stack and frees it with
+// burrow_free_deferred AFTER dropping as->lock, because a FILE Burrow's free
+// reaches a possibly-sleeping spoor_clunk and a sleeping free under a spinlock
+// is the lock-across-sleep extinction. The I-32 uncharge stays here (under the
+// lock); only the physical free is deferred.
+static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
+                             struct Burrow **out_free) {
+    // D-3c re-audit F6: this ALWAYS runs under as->lock, so an inline
+    // (possibly-sleeping FILE) free here is the lock-across-sleep extinction.
+    // out_free is therefore MANDATORY -- the helper always DEFERS the physical
+    // free to the caller. A NULL out_free would silently reintroduce F1, so fail
+    // loud rather than take the inline-free arm.
+    if (!out_free) extinction("detach_one_locked without out_free (would free under as->lock)");
+    *out_free = NULL;
     // #65 (I-32): the uncharge must MATCH the charge. An EAGER attach charged
     // length/PAGE_SIZE at attach; a LAZY attach (SYS_BURROW_ATTACH_LAZY) charged only
     // the FAULTED-in pages (per-page, at fault time -- ARCH §6.5 overcommit). Read
@@ -4479,7 +5691,9 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     // bound.
     if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
         dvma->burrow->type == BURROW_TYPE_CODE) {
-        spin_unlock(&p->as->lock);
+        // Return WITH the lock held -- the caller owns the lock pair (#199
+        // factoring; the pre-factor body unlocked here, and leaving that in
+        // made the wrapper's unlock a preempt-underflow double).
         return -1;
     }
 
@@ -4580,7 +5794,13 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     // the Burrow's pages -- for an ANON_LAZY Burrow that is the resident
     // sparse slots (burrow_free_internal's ANON_LAZY arm).
     bool freed = false;
-    int rc = burrow_unmap_reporting(p, vaddr_raw, length, &freed);
+    // D-3c F1: hand `out_free` down so the FREE is deferred past as->lock. The
+    // dead Burrow (if any) rides back to the caller, which frees it after the
+    // unlock. `dv` here (the pre-drop snapshot) is only touched below for the
+    // charge-restore path, which by construction runs when the Burrow SURVIVED.
+    struct Burrow *tf = NULL;
+    int rc = burrow_unmap_reporting(p, vaddr_raw, length, &freed, &tf);
+    *out_free = tf;
     if (rc == 0 && lazy_uncharge)
         proc_page_uncharge(p, lazy_uncharge);
     if (paid) {
@@ -4598,9 +5818,95 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
             // was dropped at all.
             burrow_charge_restore(dv, p, paid);
     }
-    spin_unlock(&p->as->lock);
 
     return (s64)rc;
+}
+
+s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    u64 length;
+    if (detach_args_check(p, vaddr_raw, length_raw, &length) != 0)
+        return -1;
+    struct Burrow *to_free = NULL;
+    spin_lock(&p->as->lock);
+    s64 rc = detach_one_locked(p, vaddr_raw, length, &to_free);
+    spin_unlock(&p->as->lock);
+    // D-3c F1: free OUTSIDE as->lock -- a FILE Burrow's free reaches a
+    // possibly-sleeping spoor_clunk (a 9P Tclunk), and sleeping under a plain
+    // spinlock is the lock-across-sleep extinction.
+    if (to_free) burrow_free_deferred(to_free);
+    return rc;
+}
+
+// #199: the RANGE detach the phenotype munmap row needs -- D-3b's MAP_FIXED
+// split turns one library map into 2-3 VMAs, and musl's unmap_library then
+// munmaps the WHOLE span in one call (its error path and dlclose both do), so
+// an exact-match-only munmap leaks the entire library. Linux semantics over
+// the D-3 shapes: every VMA WHOLLY inside [vaddr, vaddr+len) is detached (each
+// one whole -- this is NOT partial unmap), holes are fine, an empty range
+// succeeds. Refused whole -- nothing detached -- when any VMA straddles a
+// boundary (true partial unmap, post-v1.0) or a CODE-alias region is inside
+// (the I-42 pair-lifetime rule detach_one_locked enforces; refusing UP FRONT
+// keeps the range atomic instead of stopping half-torn-down).
+//
+// NATIVE SYS_BURROW_DETACH deliberately keeps exact-match: this widening is a
+// LINUX semantic, and the native ABI does not change under a phenotype chunk.
+s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    u64 length;
+    if (detach_args_check(p, vaddr_raw, length_raw, &length) != 0)
+        return -1;
+    u64 end = vaddr_raw + length;
+
+    spin_lock(&p->as->lock);
+
+    // Validation pass -- ALL refusals decided before the first removal, under
+    // the same lock hold, so the detach loop below cannot stop midway.
+    for (struct Vma *v = vma_next_overlap_in(p->as, vaddr_raw, end); v;
+         v = vma_next_overlap_in(p->as, v->vaddr_end, end)) {
+        if (v->vaddr_start < vaddr_raw || v->vaddr_end > end) {
+            spin_unlock(&p->as->lock);
+            return -1;                   // boundary straddle: partial unmap
+        }
+        if (v->burrow && v->burrow->magic == VMO_MAGIC &&
+            v->burrow->type == BURROW_TYPE_CODE) {
+            spin_unlock(&p->as->lock);
+            return -1;                   // I-42 pair lifetime: JIT syscalls own it
+        }
+    }
+
+    // Detach loop. Each iteration removes the first remaining VMA whole, via
+    // the SAME per-VMA body the exact syscall uses (so the I-32 refund logic
+    // exists ONCE). Validation makes a failure unreachable; if one happens
+    // anyway, stop rather than spin -- the guard is against an infinite loop,
+    // not a real path.
+    //
+    // D-3c F1: the sleeping burrow frees are DEFERRED so the whole range removes
+    // under ONE continuous as->lock hold (the atomicity the straddle-refusal
+    // validation depends on), while the possibly-sleeping spoor_clunk frees run
+    // AFTER the unlock. Each detach hands back its dead Burrow (if any); they
+    // stack via deferred_free_next -- an uncapped chain that needs no allocation
+    // and no lock (each Burrow is at {0,0}, unreachable by any other path).
+    struct Burrow *dead = NULL;
+    struct Vma *v;
+    while ((v = vma_next_overlap_in(p->as, vaddr_raw, end)) != NULL) {
+        struct Burrow *tf = NULL;
+        if (detach_one_locked(p, v->vaddr_start,
+                              v->vaddr_end - v->vaddr_start, &tf) != 0) {
+            spin_unlock(&p->as->lock);
+            // Free what we already collected before returning the error --
+            // those VMAs are gone; leaking their Burrows would be worse.
+            while (dead) { struct Burrow *n = dead->deferred_free_next;
+                           dead->deferred_free_next = NULL;
+                           burrow_free_deferred(dead); dead = n; }
+            return -1;
+        }
+        if (tf) { tf->deferred_free_next = dead; dead = tf; }
+    }
+    spin_unlock(&p->as->lock);
+    // The sleeping frees, now with no lock held.
+    while (dead) { struct Burrow *n = dead->deferred_free_next;
+                   dead->deferred_free_next = NULL;
+                   burrow_free_deferred(dead); dead = n; }
+    return 0;                            // incl. the nothing-mapped no-op (Linux)
 }
 
 static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
@@ -4659,14 +5965,435 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     // burrow_map failure (overlap / vma-cap / OOM) the construction handle is the
     // only ref; burrow_unref frees the empty lazy Burrow (no pages committed).
     if (burrow_map(p, b, vaddr, length, VMA_PROT_RW) != 0) {
+        // The construction handle is the only ref; freeing an EMPTY anon-lazy
+        // Burrow never sleeps (no Spoor to clunk, no pages committed), so this
+        // one may stay under the lock.
         burrow_unref(b);
         spin_unlock(&p->as->lock);
         return -1;
     }
+    spin_unlock(&p->as->lock);
+    // #193: the success-path drop sits OUTSIDE as->lock to match the FILE arm --
+    // an anon-lazy free never sleeps today, but two success paths should not
+    // need two different safety arguments.
+    burrow_unref(b);
+    return (s64)vaddr;
+}
+
+// DISTRO D-3: the FILE mmap arm. A read-only / executable file-backed
+// MAP_PRIVATE mapping, demand-paged through the SAME BURROW_TYPE_FILE machinery
+// exec has used since REVENANT -- and through the same qid-keyed Image cache, so
+// one copy of a library's text serves every container that maps it. This is the
+// arc's headline composition: nothing new pages the file in, only a new door to
+// the machinery that already did.
+//
+// The I-36 conditions are re-satisfied here rather than inherited, because this
+// is a NEW entry to the fault arm and I-36's premise ("kernel-internal") is what
+// D-3 relaxes. Taking them in order: (1) install-once is filepages[]'s, unchanged;
+// (2) the page-in is death-interruptible by inheritance from dev9p's read, and
+// reachable from mmap now rather than only from exec -- the same unwind either
+// way, since the fault arm does not know which entry created the Burrow;
+// (3) fail-close on I/O error is file_demand_page_single's FAULT_USER_BUS;
+// (4) W^X holds because PROT_WRITE cannot reach here (vivarium_mmap_file_decide
+// refuses it) and vma_alloc rejects W+X independently; (5) I-cache sync is the
+// fault arm's, keyed on the VMA's own X bit; (6) Image-cache eviction safety is
+// unchanged; (7) pin-at-map replaces pin-at-exec -- the Burrow adopts a Spoor ref
+// for its whole life, so the guest closing the fd cannot pull the backing file
+// out from under a resident mapping.
+//
+// I-32: the demand-paged FILE pages keep the R-5 uncharged-at-v1.0 posture (they
+// are shared, so charging them per-mapper would count one physical page N times);
+// the VMA-count axis IS charged inside vma_insert. The `filepages` array is an
+// uncharged kernel allocation proportional to `length` -- task #191, which is the
+// PRE-EXISTING lazy-anon hazard this arm sits beside rather than widens: the cap
+// below is BURROW_ATTACH_MAX (256 MiB), 4x TIGHTER than the lazy path's
+// BURROW_RESERVE_MAX. Measured, the largest library in a stock Alpine rootfs is
+// libcrypto.so.3 at ~4.2 MiB of map span, so the cap is ~60x real need.
+//
+// exec_map_vouched (#217) -- may this file's bytes become EXECUTABLE pages?
+//
+// The one place the MNOEXEC rule is spelled, called by every site that turns a
+// file into executable pages: both phenotype mmap arms and exec's own name
+// resolution. It deliberately does NOT live inside image_lookup_or_create, the
+// shared chokepoint both mmap arms funnel through -- that cache is keyed on
+// (spoor identity, offset, length, exec) and NOT on the Territory, so a hit
+// seeded by a Proc that may exec-map would hand the same executable Burrow to a
+// Proc whose namespace forbids it. The verdict is per-namespace; the cache is
+// global; so the check belongs strictly before the cache, in the caller.
+static bool exec_map_vouched(struct Proc *p, const struct Spoor *sp) {
+    if (!p || !sp || !sp->dev) return false;
+    // THE FLOOR (#217 F1). Only a Dev that serves real file content may back
+    // executable pages at all. This is NOT redundant with the mount check below
+    // -- it is what catches the class the mount check structurally cannot:
+    // devenv stamps the CALLING Proc's env devno at walk time, so a container's
+    // /env files never share (dc, devno) with the /env mount source viv
+    // installed, and no MNOEXEC flag can ever cover them. An environment
+    // variable is not code; nor is a /proc field, a /srv endpoint or a console.
+    if (!sp->dev->may_back_exec) return false;
+    // THE REFINEMENT. Among Devs that may, a specific mount can still be marked
+    // MNOEXEC by whoever composed the namespace.
+    return !mount_noexec_covers(p->territory, sp->dc, sp->devno);
+}
+
+// Returns the mapped VA, or a negated T_E_* the caller passes straight out.
+s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+                           bool exec, u64 offset) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    if (length_raw == 0)                             return -(s64)T_E_INVAL;
+    if (length_raw > BURROW_ATTACH_MAX)              return -(s64)T_E_NOMEM;
+    if (offset & (u64)(PAGE_SIZE - 1))               return -(s64)T_E_INVAL;
+
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    // A mapping whose file window would wrap past the end of the address space
+    // cannot be described; refuse before it reaches the Burrow's own guards.
+    if (offset + length < offset)                    return -(s64)T_E_INVAL;
+
+    // T_RIGHT_READ, not T_RIGHT_EXEC, and deliberately: there is no per-handle
+    // execute right on a Spoor to demand, so requiring one would fail every
+    // mapping. READ is the right authority for the BYTES.
+    //
+    // What READ alone does not authorize is turning those bytes into CODE, and
+    // this comment used to claim otherwise -- "exactly the authority whose
+    // result the guest can already obtain with pread(2), so the mapping grants
+    // nothing new". That is false in the case that matters: pread yields the
+    // bytes as DATA, this yields them as an executable page, and exec (the
+    // other way to run them) walks OEXEC and REFUSES a file carrying no X bit.
+    // The mapping grants authority exec withholds. What closes the gap is the
+    // MNOEXEC vouching below (#217, ARCH 6.5); the wording is corrected here
+    // rather than left standing as the in-code twin of a premise the D-close
+    // arc round already falsified in scripture.
+    // #844: the ref is TRANSFERRED to us -- spoor_clunk on every path below.
+    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!sp)                                         return -(s64)T_E_BADF;
+
+    // A PLAIN FILE only. A directory has no byte stream to page from; a symlink
+    // must be followed, not mapped (the #184 discipline, where the twin's
+    // "a symlink fid is not byte-I/O-able" safety argument turned out FALSE
+    // against Stratum's h_lopen -- so this gate is explicit rather than assumed);
+    // an append-only file's byte positions are not stable under a concurrent
+    // writer, which is precisely what a demand-paged mapping assumes.
+    if (sp->qid.type & (QTDIR | QTSYMLINK | QTAPPEND)) {
+        spoor_clunk(sp);
+        return -(s64)T_E_INVAL;
+    }
+    // #81: an O_PATH handle is a NAVIGATION capability that deliberately carries
+    // no byte-I/O authority. Mapping through one would be byte I/O by another
+    // name -- the exact bypass CWALKONLY exists to prevent.
+    if (sp->flag & CWALKONLY) {
+        spoor_clunk(sp);
+        return -(s64)T_E_INVAL;
+    }
+    // #217: the MNOEXEC vouching. Only the EXEC request is gated -- a read-only
+    // file mapping off a noexec mount stays legal, exactly as on Linux, because
+    // noexec restricts what may become code and not what may be read. T_E_PERM
+    // matches what Linux answers for the same refusal (path_noexec + VM_EXEC).
+    if (exec && !exec_map_vouched(p, sp)) {
+        spoor_clunk(sp);
+        return -(s64)T_E_PERM;
+    }
+    // Positional reads are the whole mechanism: every page-in is a read at an
+    // explicit offset. A Dev with no read slot cannot serve one, and the fault
+    // arm's answer would be a snare:bus at first touch -- report it now, where
+    // the guest gets an errno instead of a fault.
+    if (!sp->dev || !sp->dev->read) {
+        spoor_clunk(sp);
+        return -(s64)T_E_INVAL;
+    }
+
+    // #194 (I-32): the backing size is REQUIRED on this guest-facing arm -- it
+    // is what lets the fault arm refuse pages wholly past EOF (Linux SIGBUS
+    // semantics) instead of minting uncharged demand-zero memory bounded only
+    // by BURROW_ATTACH_MAX x PROC_VMA_MAX. A Dev that cannot answer -- or a
+    // hostile near-2^64 size, which the predicate also excludes -- is refused
+    // outright; only exec (kernel-driven, over the immutable baked ramfs) may
+    // admit an unknown size, and that policy lives at ITS call site.
+    u64 file_limit = spoor_file_size(sp);
+    if (!burrow_file_limit_known(file_limit)) {
+        spoor_clunk(sp);
+        return -(s64)T_E_IO;
+    }
+
+    // image_lookup_or_create CONSUMES one Spoor ref on every success path
+    // (adopted into the new Burrow on a miss, clunk'd as redundant on a hit) and
+    // consumes NOTHING on a NULL return. Hand it a FRESH ref so our own stays
+    // ours to drop, exactly as map_file_backed does.
+    spoor_ref(sp);
+    struct Burrow *b = image_lookup_or_create(sp, offset, (size_t)length, exec,
+                                              file_limit);
+    if (!b) {
+        spoor_clunk(sp);                 // the fresh ref it did not consume
+        spoor_clunk(sp);                 // ours
+        return -(s64)T_E_NOMEM;
+    }
+    spoor_clunk(sp);                     // ours; the Burrow holds the pin now
+
+    // R for rodata, R+X for text. Never writable -- the decide arm refused
+    // PROT_WRITE, and vma_alloc would reject W+X anyway (I-12, two independent
+    // gates).
+    u32 prot = exec ? (u32)(VMA_PROT_READ | VMA_PROT_EXEC) : (u32)VMA_PROT_READ;
+
+    spin_lock(&p->as->lock);
+    u64 vaddr;
+    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
+                     EXEC_USER_BURROW_TOP, &vaddr) != 0) {
+        spin_unlock(&p->as->lock);
+        burrow_unref(b);                 // the cache's ref keeps it cached
+        return -(s64)T_E_NOMEM;
+    }
+    if (burrow_map(p, b, vaddr, length, prot) != 0) {
+        spin_unlock(&p->as->lock);
+        burrow_unref(b);
+        return -(s64)T_E_NOMEM;
+    }
+    spin_unlock(&p->as->lock);
+    // Drop the construction handle OUTSIDE as->lock (#193): mapping_count + the
+    // cache's own ref keep the image alive (I-7 dual count), so this is never
+    // the last ref today -- but if it ever were, burrow_free_internal ->
+    // spoor_clunk may sleep, the same leaf-lock rule file_demand_page_slow
+    // states. Dropping after the unlock removes the need for that non-local
+    // argument entirely; the failure paths above already did.
     burrow_unref(b);
 
-    spin_unlock(&p->as->lock);
+    // A user VA is below 2^47, so this can never be mistaken for the [-4095,-1]
+    // errno band a Linux caller checks.
     return (s64)vaddr;
+}
+
+// DISTRO D-3b: the shared front half of both MAP_FIXED arms -- validate the
+// window and convert the Linux prot word to VMA_PROT_*. Split out because the
+// two arms differ only in where the backing comes from, and duplicating the
+// bounds would be exactly the "the fix that exists on site N stops you asking
+// about site N+1" trap. `*prot_out` is written only on success.
+static s64 mmap_fixed_window(u64 addr, u64 length_raw, u32 pr,
+                             u64 *length_out, u32 *prot_out) {
+    if (length_raw == 0)                             return -(s64)T_E_INVAL;
+    if (length_raw > BURROW_ATTACH_MAX)              return -(s64)T_E_NOMEM;
+    if (addr == 0 || (addr & (u64)(PAGE_SIZE - 1)))  return -(s64)T_E_INVAL;
+
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    if (addr + length < addr)                        return -(s64)T_E_INVAL;
+
+    u32 prot = 0;
+    if (pr & VIV_PROT_READ)  prot |= (u32)VMA_PROT_READ;
+    if (pr & VIV_PROT_WRITE) prot |= (u32)VMA_PROT_WRITE;
+    if (pr & VIV_PROT_EXEC)  prot |= (u32)VMA_PROT_EXEC;
+
+    *length_out = length;
+    *prot_out   = prot;
+    return 0;
+}
+
+// DISTRO D-3b: the EAGER PRIVATE COPY -- a writable MAP_FIXED file window served
+// as anonymous memory pre-filled from the file. The alternative (copy-on-write
+// over the shared Image-cache pages) is rejected in the header: it would make
+// one container's writes a correctness question about another container's view
+// of the same library.
+//
+// Charged, unlike the demand-paged read-only arm (task #194): burrow_lazy_populate
+// takes the I-32 page charge for the whole run up front, so an over-cap request
+// is refused whole rather than half-populated, and a guest cannot mint free
+// pages here by naming a huge length.
+//
+// A SHORT READ IS NOT AN ERROR. The window legitimately extends past the file's
+// data -- arm 2's length comes from p_memsz, not p_filesz -- and those pages must
+// read as zero, which is exactly what the untouched KP_ZERO slots already are.
+// Only a NEGATIVE read (I/O error, or a death-interruptible unwind) fails.
+//
+// Give back a populate's I-32 page charge and drop the Burrow. The exec twin is
+// lazy_populate_unwind (kernel/exec.c); the pairing lives beside the populate
+// rather than in each caller for the same #106/#130 reason it does there.
+// `exempt` is deliberately absent: addrspace_charge_pages COUNTS regardless of
+// exemption (exemption bypasses the CAP, not the accounting), so the uncharge
+// must be unconditional to stay paired.
+static void mmap_eager_unwind(struct AddrSpace *as, struct Burrow *b,
+                              size_t npages) {
+    if (npages > 0) {
+        spin_lock(&as->lock);            // the stated precondition of the counter ops
+        addrspace_uncharge_pages(as, (u32)npages);
+        spin_unlock(&as->lock);
+    }
+    burrow_unref(b);
+}
+
+// THE CHARGE IS THE CALLER'S THE MOMENT POPULATE SUCCEEDS (#197, the L-7 F4
+// contract at a new call site). burrow_lazy_populate charges the whole run
+// against `as` on success and NOTHING gives it back later: the pages go with the
+// Burrow's last unref, but the counter does not -- there is no uncharge anywhere
+// in the Burrow free path (grep addrspace_uncharge_pages: only populate's own
+// failure arm and burrow_decommit). So every failure PAST the populate has to
+// unwind the counter by hand, exactly as exec's lazy_populate_unwind does, or
+// `as->page_count` stops meaning true RSS (ARCH section 6.5).
+//
+// Returns the Burrow with ONE handle ref for the caller, or NULL. Does not
+// consume `sp`. On NULL, the charge has been fully returned.
+#ifdef KERNEL_TESTS
+// #197's regression drives this directly: the leak lives entirely inside it,
+// and reaching it through the syscall shell would need a handle-table fixture
+// that tests the lookup rather than the charge pairing.
+struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
+                                        struct Spoor *sp, u64 offset, u64 length);
+#endif
+
+static struct Burrow *mmap_eager_copy(struct AddrSpace *as, bool exempt,
+                                      struct Spoor *sp, u64 offset, u64 length) {
+    struct Burrow *b = burrow_create_anon_lazy((size_t)length);
+    if (!b) return NULL;
+
+    size_t npages = (size_t)(length / PAGE_SIZE);
+    if (burrow_lazy_populate(as, exempt, b, 0, npages) != 0) {
+        burrow_unref(b);                 // populate self-unwinds its own charge
+        return NULL;
+    }
+
+    // burrow_lazy_slot_kva's precondition holds: this Burrow is not mapped into
+    // any address space and is unreachable from a second thread until the caller
+    // maps it, so the raw slot pointer cannot be freed under us.
+    for (size_t slot = 0; slot < npages; slot++) {
+        u8 *kva = (u8 *)burrow_lazy_slot_kva(b, slot);
+        if (!kva) { mmap_eager_unwind(as, b, npages); return NULL; }
+        size_t got = 0;
+        while (got < (size_t)PAGE_SIZE) {
+            long n = sp->dev->read(sp, kva + got, (long)(PAGE_SIZE - got),
+                                   (s64)(offset + slot * PAGE_SIZE + got));
+            // The reachable failure: a 9P I/O error, or a death-interruptible
+            // unwind partway through a multi-page copy.
+            if (n < 0) { mmap_eager_unwind(as, b, npages); return NULL; }
+            if (n == 0) goto eof;                          // past the data
+            got += (size_t)n;
+        }
+    }
+eof:
+    return b;
+}
+
+#ifdef KERNEL_TESTS
+struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
+                                        struct Spoor *sp, u64 offset, u64 length) {
+    return mmap_eager_copy(as, exempt, sp, offset, length);
+}
+#endif
+
+// DISTRO D-3b arm 2 (dynlink.c:842): a fd-backed MAP_FIXED overlay. Non-writable
+// windows ride the shared Image cache exactly as D-3a does; a writable one gets
+// the eager private copy above. Returns `addr` on success (MAP_FIXED's contract:
+// the requested address or nothing).
+s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+                                 u64 length_raw, u32 pr, u64 offset) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    if (offset & (u64)(PAGE_SIZE - 1))               return -(s64)T_E_INVAL;
+
+    u64 length; u32 prot;
+    s64 werr = mmap_fixed_window(addr, length_raw, pr, &length, &prot);
+    if (werr != 0)                                   return werr;
+    if (offset + length < offset)                    return -(s64)T_E_INVAL;
+
+    // The same gates as the D-3a arm, and for the same reasons: READ is the
+    // authority a mapping consumes; a directory has no byte stream; a symlink
+    // must be followed (#184); an append-only file has no stable byte positions;
+    // an O_PATH handle carries no byte-I/O authority (#81); a Dev with no read
+    // slot cannot serve a page-in.
+    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!sp)                                         return -(s64)T_E_BADF;
+    if ((sp->qid.type & (QTDIR | QTSYMLINK | QTAPPEND)) ||
+        (sp->flag & CWALKONLY) || !sp->dev || !sp->dev->read) {
+        spoor_clunk(sp);
+        return -(s64)T_E_INVAL;
+    }
+    // #217: the same MNOEXEC vouching as the non-fixed arm, and placed BEFORE
+    // the writable/demand-paged split rather than inside the demand-paged
+    // branch that is its only exec-capable producer today. Sited by prot alone,
+    // it cannot be walked past by a future branch: an arm added below inherits
+    // the gate instead of needing to remember it. (W+X cannot arrive here --
+    // vma_alloc refuses it -- so testing EXEC before the split loses nothing.)
+    if ((prot & (u32)VMA_PROT_EXEC) && !exec_map_vouched(p, sp)) {
+        spoor_clunk(sp);
+        return -(s64)T_E_PERM;
+    }
+
+    bool writable = (prot & (u32)VMA_PROT_WRITE) != 0;
+    struct Burrow *b;
+    if (writable) {
+        b = mmap_eager_copy(p->as, proc_resource_exempt(p), sp, offset, length);
+        spoor_clunk(sp);                 // the copy is done; nothing pins the file
+        if (!b)                                      return -(s64)T_E_NOMEM;
+    } else {
+        // #194: same guest-facing fail-closed rule as the non-fixed FILE arm --
+        // a demand-paged mapping needs the backing size or it can mint
+        // uncharged demand-zero pages past EOF. (The writable branch above
+        // needs none: its eager copy is CHARGED whole by populate, and a short
+        // read legitimately zero-fills.) NOTE this branch has no producer on
+        // the measured rootfs (#195: every arm-2 request is RW), so only unit
+        // tests and a future -z separate-code toolchain reach it.
+        u64 fx_limit = spoor_file_size(sp);
+        if (!burrow_file_limit_known(fx_limit)) {
+            spoor_clunk(sp);
+            return -(s64)T_E_IO;
+        }
+        // image_lookup_or_create CONSUMES a Spoor ref on success and none on
+        // NULL, so hand it a fresh one and keep ours to drop.
+        spoor_ref(sp);
+        b = image_lookup_or_create(sp, offset, (size_t)length,
+                                   (prot & (u32)VMA_PROT_EXEC) != 0, fx_limit);
+        if (!b) {
+            spoor_clunk(sp);             // the fresh ref it did not consume
+            spoor_clunk(sp);             // ours
+            return -(s64)T_E_NOMEM;
+        }
+        spoor_clunk(sp);                 // ours; the Burrow holds the pin now
+    }
+
+    // D-3c re-audit F5 [P1]: a MAP_FIXED exact-cover REPLACES an existing VMA,
+    // whose Burrow may be a 9P-backed FILE image (a bypassed mmap at {h:0,m:1})
+    // whose free reaches a possibly-sleeping spoor_clunk. burrow_map_fixed hands
+    // that dead Burrow back via `fx_free` instead of freeing it under as->lock;
+    // we free it here, past the unlock (the F1 deferred-free pattern).
+    struct Burrow *fx_free = NULL;
+    spin_lock(&p->as->lock);
+    int rc = burrow_map_fixed(p, b, addr, (size_t)length, prot, /*offset=*/0, &fx_free);
+    spin_unlock(&p->as->lock);
+    if (fx_free) burrow_free_deferred(fx_free);
+    // OUTSIDE the lock, unlike the D-3a arm (task #193): the mapping holds the
+    // Burrow alive on success, and on failure this is the last ref and dropping
+    // it can reach the allocator.
+    //
+    // #197: the eager arm's populate charge is OURS until the mapping takes it
+    // over. On a map failure the pages go with the unref but the counter would
+    // not, so the writable arm unwinds it here; the Image-cache arm populated
+    // nothing and owes nothing.
+    if (rc != 0 && writable) {
+        mmap_eager_unwind(p->as, b, (size_t)(length / PAGE_SIZE));
+        return -(s64)T_E_NOMEM;
+    }
+    burrow_unref(b);
+    if (rc != 0)                                     return -(s64)T_E_NOMEM;
+    return (s64)addr;
+}
+
+// DISTRO D-3b arm 3 (dynlink.c:851): the anonymous MAP_FIXED bss tail. Demand-
+// zero, so it charges per page at fault time exactly like every other lazy anon
+// mapping.
+s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+                                 u32 pr) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+
+    u64 length; u32 prot;
+    s64 werr = mmap_fixed_window(addr, length_raw, pr, &length, &prot);
+    if (werr != 0)                                   return werr;
+
+    struct Burrow *b = burrow_create_anon_lazy((size_t)length);
+    if (!b)                                          return -(s64)T_E_NOMEM;
+
+    // D-3c re-audit F5: even the anon arm can EXACT-COVER an existing FILE mapping
+    // (the old VMA at `addr` need not be anon), so its replaced Burrow is deferred
+    // and freed past the unlock exactly as the file arm does.
+    struct Burrow *fx_free = NULL;
+    spin_lock(&p->as->lock);
+    int rc = burrow_map_fixed(p, b, addr, (size_t)length, prot, /*offset=*/0, &fx_free);
+    spin_unlock(&p->as->lock);
+    if (fx_free) burrow_free_deferred(fx_free);
+    burrow_unref(b);
+    if (rc != 0)                                     return -(s64)T_E_NOMEM;
+    return (s64)addr;
 }
 
 // CL-4: pick the length out of SYS_BURROW_ATTACH_LAZY's two accepted calling
@@ -5194,7 +6921,12 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
     // (ring_size == the Burrow size).
     bool share_admissible = (v->type == BURROW_TYPE_DMA &&
                              v->kobj_dma != NULL &&
-                             (v->kobj_dma->weave || v->kobj_dma->gpu_bo));
+                             (v->kobj_dma->weave || v->kobj_dma->gpu_bo)) ||
+                            (v->type == BURROW_TYPE_HOSTMEM &&
+                             v->kobj_pci != NULL);
+    // V-2: BURROW_TYPE_HOSTMEM joins the register-side gate IN LOCKSTEP with the
+    // claim side (burrow_share_into). The two MUST widen together -- a hostmem
+    // Burrow admitted at claim but rejected here is the Warp-2b half-widen bug.
     if (v->type != BURROW_TYPE_ANON && !share_admissible) {
         spin_unlock(&p->as->lock);
         return -1;
@@ -5761,11 +7493,21 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 // drops the LAST reference.
 
 // MREPL / MBEFORE / MAFTER / MCREATE are 0x0001 / 0x0002 / 0x0004 /
-// 0x0008 per territory.h. Mask out everything else — userspace
-// supplying junk bits is rejected at the syscall layer (mount() in
-// territory.c is silent on extra bits, but we want a tight contract
-// at the boundary).
-#define SYS_MOUNT_VALID_FLAGS  ((u32)(MREPL | MBEFORE | MAFTER | MCREATE))
+// 0x0008 per territory.h; MNOEXEC (#217) is 0x0010; MPHENO_LINUX (section 13)
+// is 0x0020. Mask out everything else — userspace supplying junk bits is rejected
+// at the syscall layer (mount() in territory.c is silent on extra bits, but we
+// want a tight contract at the boundary).
+//
+// Adding a flag REQUIRES adding it here: this allowlist is why a new bit is
+// safe to introduce (an old caller's junk still fails) and equally why a new
+// bit that is not listed is silently unusable -- the mount would just fail
+// -1 with nothing naming the cause.
+//
+// MPHENO_LINUX is UNGATED here (like MNOEXEC): setting it is a namespace edit that
+// confers ABI shape, never authority (I-43; section 13.4) -- a user marking a mount
+// in their OWN namespace grants their own procs nothing `viv run` could not. The
+// phenotype it declares is bounded to binaries resolved THROUGH the mount.
+#define SYS_MOUNT_VALID_FLAGS  ((u32)(MREPL | MBEFORE | MAFTER | MCREATE | MNOEXEC | MPHENO_LINUX))
 
 // Inner — testable kernel-internally with a Proc handle + a RESOLVED
 // mount-point Spoor (stalk-2: the SVC wrapper stalk's the path; this inner
@@ -5778,6 +7520,13 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     if (!p->territory)                               return -1;
     if (!mountpoint)                                 return -1;
     if (flags & ~SYS_MOUNT_VALID_FLAGS)               return -1;
+    // UM-8 F10: MREPL / MBEFORE / MAFTER are mutually-exclusive placement modes
+    // (Plan 9; territory.tla models one `mb` boolean + a repl action). More than
+    // one set is a caller error -- mount()'s dispatch would silently take MREPL
+    // then MBEFORE -- so reject loudly rather than act on an ambiguous request.
+    // (place & (place-1)) != 0 iff more than one placement bit is set.
+    u32 place = flags & (u32)(MREPL | MBEFORE | MAFTER);
+    if (place & (place - 1))                          return -1;
 
     // RIGHT_READ on the source: a mount holder consumes the source's
     // tree (walks it, reads files through it). A handle without READ
@@ -6056,9 +7805,19 @@ static s64 sys_getrandom_handler(u64 buf_va, u64 len, u64 flags_raw) {
 // boundary, so it can't be on the caller's kernel stack — the caller may return
 // to userspace before the child's thunk runs).
 
+// The one place both spellings of the argv bounds are visible at once. exec.c
+// cannot include syscall.h (the include cycle), so it carries its own names;
+// this is where they are PROVEN equal rather than asserted to be by a comment.
+// #178's whole complaint is mirrors nothing checks -- these two now are.
+_Static_assert(EXEC_ARGV_MAX == SYS_SPAWN_ARGV_MAX,
+               "exec.h argv-count mirror drifted from the syscall ABI");
+_Static_assert(EXEC_ARGV_DATA_MAX == SYS_SPAWN_ARGV_DATA_MAX,
+               "exec.h argv-bytes mirror drifted from the syscall ABI");
+
 struct spawn_args {
     struct Spoor *exe;      // REVENANT R-4: the pinned executable; thunk clunks it
     size_t        exe_size; // stat'd file size (bounds the ELF segment-extent check)
+    bool          exe_pheno_linux; // Design D: the resolution decided Linux (13.10.6)
 };
 
 __attribute__((noreturn))
@@ -6066,6 +7825,7 @@ static void sys_spawn_thunk(void *arg) {
     struct spawn_args *sa = (struct spawn_args *)arg;
     struct Spoor *exe = sa->exe;
     size_t exe_size   = sa->exe_size;
+    bool exe_pheno_linux = sa->exe_pheno_linux;   // Design D: copy before kfree
     kfree(sa);
 
     struct Thread *t = current_thread();
@@ -6073,13 +7833,20 @@ static void sys_spawn_thunk(void *arg) {
     struct Proc *p = t->proc;
     if (!p) extinction("sys_spawn_thunk: no proc");
 
+    // Design D (VIVARIUM 13.10.1): the image-load decision, before exec and
+    // before EL0. This child's Territory is the parent's clone (root_pheno
+    // inherited); the register variant has no manifest bit to add.
+    p->phenotype = phenotype_decide(exe_pheno_linux, territory_root_pheno(p->territory));
+
     u64 entry = 0, sp = 0;
     // #359/#360: this thunk runs IRQ-ENABLED on a fresh thread (preemptible,
     // like a kthread). Its shared-lock holds (the REVENANT eager read + the
     // spoor_clunk on the dev9p pool client's c->lock) are safe because a plain
     // spin_lock hold now disables preemption per-THREAD (spinlock.h #360) --
     // the general rule that replaced the interim whole-thunk IRQ mask.
-    int rc = exec_setup_from_spoor(p, exe, exe_size, NULL, 0, 0, &entry, &sp);
+    int rc = exec_setup_from_spoor(p, exe, exe_size,
+                                   /*prog_name=*/NULL, 0,   // D-4/13.10.6: nameless entry
+                                   NULL, 0, 0, &entry, &sp);
     spoor_clunk(exe);
     if (rc != 0) {
         // Surfaces as exit_status=1 in the parent's SYS_WAIT_PID.
@@ -6140,8 +7907,15 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
 // stat'd size). Runs in the parent's context (its Territory), like Unix exec.
 // Returns the pinned Spoor (caller spoor_clunks) + *size_out, or NULL on any
 // failure. Exported for the kernel-internal #58 tests.
-struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
-                                          size_t name_len, size_t *size_out) {
+// _ex variant (VIVARIUM section 13): reports, via *pheno_out (OPTIONAL), whether
+// the binary's resolution crossed an MPHENO_LINUX mount -- the /viv/bin subtree
+// phenotype channel. The plain exec_resolve_from_namespace wrapper below passes
+// NULL, so its six non-declaring callers are untouched; only the
+// SYS_SPAWN_FULL_ARGV path (the sole fresh-phenotype declarer, ARCH I-43) reads it.
+struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *name,
+                                             size_t name_len, size_t *size_out,
+                                             bool *pheno_out) {
+    if (pheno_out) *pheno_out = false;
     if (!p || !name || !size_out)                  return NULL;
     *size_out = 0;
     if (name_len == 0 || name_len > SYS_OPEN_PATH_MAX) return NULL;
@@ -6163,10 +7937,23 @@ struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
         rlen  = (u64)jl;
     }
 
-    struct Spoor *quarry = stalk(p, start, rpath, rlen, STALK_OPEN, 3u /* OEXEC */);
+    // section 13: stalk_exec reports whether resolving the binary crossed an
+    // MPHENO_LINUX mount (the /viv/bin subtree). Written to *pheno_out only on the
+    // successful return below, so a failed walk leaves the caller's init (native).
+    bool crossed_pheno = false;
+    struct Spoor *quarry = stalk_exec(p, start, rpath, rlen, STALK_OPEN,
+                                      3u /* OEXEC */, NULL, &crossed_pheno);
     spoor_clunk(start);   // borrowed by stalk; release the ref we took
     if (!quarry)                                   return NULL;
     if (!quarry->dev || !quarry->dev->read)        { spoor_clunk(quarry); return NULL; }
+
+    // #217: MNOEXEC refuses exec as well as the R+X map, because a mount that
+    // still permits exec is not noexec -- and a half-enforced flag is worse
+    // than none, since it reads as a guarantee it does not make. Tested on the
+    // RESOLVED quarry, i.e. after every mount cross, so the verdict follows the
+    // device instance the bytes actually live on rather than the path spelling
+    // used to reach them.
+    if (!exec_map_vouched(p, quarry))              { spoor_clunk(quarry); return NULL; }
 
     // Size from stat -- bounds exec_setup_from_spoor's ELF segment-extent
     // validation + an EXEC_FILE_MAX sanity ceiling (the binary is NOT read here
@@ -6177,7 +7964,15 @@ struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
     if (st.size == 0 || (u64)st.size > EXEC_FILE_MAX) { spoor_clunk(quarry); return NULL; }
 
     *size_out = (size_t)st.size;
+    if (pheno_out) *pheno_out = crossed_pheno;   // section 13: reported on success only
     return quarry;        // ref transferred to the caller (the spawn thunk clunks it)
+}
+
+// The plain resolver: identical, phenotype-agnostic. The six exec paths that do
+// not declare a fresh phenotype (they inherit it via rfork) call this.
+struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
+                                          size_t name_len, size_t *size_out) {
+    return exec_resolve_from_namespace_ex(p, name, name_len, size_out, NULL);
 }
 
 // Kernel-side body: takes a kernel-resident NUL-terminated name and the
@@ -6199,7 +7994,14 @@ int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
     // namespace (was the flat devramfs_lookup + whole-binary slurp). The bytes
     // are read later (header in the child, text demand-paged) -- no size cap.
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    // Design D (VIVARIUM 13.10.6): every spawn variant resolves through the
+    // pheno-aware wrapper and decides by the same rule in its thunk. A register
+    // variant cannot DECLARE (no pheno_flags) but must not leave a hole: a
+    // /viv/bin binary spawned through one is Linux by location, and a child
+    // inside a declared Territory is Linux by the clone it inherits.
+    bool exe_pheno_linux = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
+                                                       &exe_pheno_linux);
     if (!exe)                                          return -1;
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
@@ -6209,6 +8011,7 @@ int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
     }
     sa->exe      = exe;
     sa->exe_size = exe_size;
+    sa->exe_pheno_linux = exe_pheno_linux;
 
     int pid = rfork(RFPROC, sys_spawn_thunk, sa);
     if (pid < 0) {
@@ -6274,6 +8077,7 @@ struct spawn_with_fds_args {
     // SYS_SPAWN_WITH_PERMS carries the parent's vetted permission flags
     // here. See SPAWN_PERM_* in <thylacine/syscall.h>.
     u32            perm_flags;
+    bool           exe_pheno_linux; // Design D: the resolution decided Linux (13.10.6)
 };
 
 // Both spawn thunks call apply_spawn_perms (defined below, next to the grant
@@ -6287,6 +8091,7 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     size_t  exe_size   = sa->exe_size;
     u32     fd_count   = sa->fd_count;
     u32     perm_flags = sa->perm_flags;
+    bool    exe_pheno_linux = sa->exe_pheno_linux;   // Design D: copy before kfree
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
     rights_t      rights_local[SYS_SPAWN_MAX_FDS];
     for (u32 i = 0; i < fd_count; i++) {
@@ -6308,6 +8113,11 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     // every bit (sys_spawn_with_perms_for_proc); apply_spawn_perms maps each
     // surviving bit to its one-way kernel mark.
     apply_spawn_perms(p, perm_flags);
+
+    // Design D (VIVARIUM 13.10.1): the image-load decision, before anything
+    // user-observable. Register variant: no manifest bit; the Territory is the
+    // parent's clone.
+    p->phenotype = phenotype_decide(exe_pheno_linux, territory_root_pheno(p->territory));
 
     // Install each Spoor in the child's handle table at the lowest
     // free slot. Post-rfork, the table is empty, so the first install
@@ -6338,7 +8148,9 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     u64 entry = 0, sp = 0;
     // #359/#360: preemptible fresh-thread exec; the c->lock holds are covered
     // by the spinlock preempt count (spinlock.h). See sys_spawn_thunk.
-    int rc = exec_setup_from_spoor(p, exe, exe_size, NULL, 0, 0, &entry, &sp);
+    int rc = exec_setup_from_spoor(p, exe, exe_size,
+                                   /*prog_name=*/NULL, 0,   // D-4/13.10.6: nameless entry
+                                   NULL, 0, 0, &entry, &sp);
     spoor_clunk(exe);
     if (rc != 0) {
         // Installed handles cleaned by proc_free.
@@ -6372,7 +8184,14 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
 
     // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    // Design D (VIVARIUM 13.10.6): every spawn variant resolves through the
+    // pheno-aware wrapper and decides by the same rule in its thunk. A register
+    // variant cannot DECLARE (no pheno_flags) but must not leave a hole: a
+    // /viv/bin binary spawned through one is Linux by location, and a child
+    // inside a declared Territory is Linux by the clone it inherits.
+    bool exe_pheno_linux = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
+                                                       &exe_pheno_linux);
     if (!exe) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
@@ -6386,6 +8205,7 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     }
     sa->exe      = exe;
     sa->exe_size = exe_size;
+    sa->exe_pheno_linux = exe_pheno_linux;
     sa->fd_count  = fd_count;
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
@@ -6425,7 +8245,14 @@ int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_l
 
     // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    // Design D (VIVARIUM 13.10.6): every spawn variant resolves through the
+    // pheno-aware wrapper and decides by the same rule in its thunk. A register
+    // variant cannot DECLARE (no pheno_flags) but must not leave a hole: a
+    // /viv/bin binary spawned through one is Linux by location, and a child
+    // inside a declared Territory is Linux by the clone it inherits.
+    bool exe_pheno_linux = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
+                                                       &exe_pheno_linux);
     if (!exe)                                          return -1;
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
@@ -6435,6 +8262,7 @@ int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_l
     }
     sa->exe      = exe;
     sa->exe_size = exe_size;
+    sa->exe_pheno_linux = exe_pheno_linux;
 
     int pid = rfork_with_caps(RFPROC, sys_spawn_thunk, sa, cap_mask);
     if (pid < 0) {
@@ -6516,7 +8344,14 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
 
     // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    // Design D (VIVARIUM 13.10.6): every spawn variant resolves through the
+    // pheno-aware wrapper and decides by the same rule in its thunk. A register
+    // variant cannot DECLARE (no pheno_flags) but must not leave a hole: a
+    // /viv/bin binary spawned through one is Linux by location, and a child
+    // inside a declared Territory is Linux by the clone it inherits.
+    bool exe_pheno_linux = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
+                                                       &exe_pheno_linux);
     if (!exe) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
@@ -6530,6 +8365,7 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     }
     sa->exe        = exe;
     sa->exe_size   = exe_size;
+    sa->exe_pheno_linux = exe_pheno_linux;
     sa->fd_count   = fd_count;
     sa->perm_flags = perm_flags;
     for (u32 i = 0; i < fd_count; i++) {
@@ -6898,10 +8734,26 @@ struct spawn_full_argv_args {
     // returns the inherited budget when the caller asked for none, and a 0 from
     // it means REFUSE, which fails the spawn before we ever get here.
     u32            page_budget;
-    // VIVARIUM V-1b: stamp the child PHENO_LINUX in the thunk (section 12.1
-    // rule 1 -- the vivarium's declaration). false -> the child keeps the
-    // phenotype rfork inherited (a native parent's child stays native).
-    bool pheno_linux;
+    // VIVARIUM V-1b + Design D (section 13.10.3): the manifest declaration
+    // (SPAWN_PHENO_LINUX) -- the thunk sets it on the CHILD's Territory
+    // (territory_declare_linux) before EL0, and the child's image is then
+    // decided by the same rule as every image load.
+    bool pheno_manifest;
+    // The resolution's own verdict (an MPHENO_LINUX crossing, seeded by the
+    // PARENT Territory's declaration): the mount channel, section 13.
+    bool exe_pheno_linux;
+    // DISTRO D-4: the name the caller spawned, carried into the child because
+    // the PT_INTERP rewrite has to put it on the interpreter's command line and
+    // the resolution that consumed it happened in the PARENT. Inline rather
+    // than a second heap block: it is bounded by SYS_SPAWN_NAME_MAX, and a
+    // pointer here would add a free path to five error interleavings that
+    // currently have exactly one heap object to worry about.
+    //
+    // NOT reconstructed from exe->path on the child side: I-33 makes the
+    // Spoor's Path cosmetic, so an exec whose success turned on it would be the
+    // invariant's own counterexample.
+    u32            name_len;
+    char           name[SYS_SPAWN_NAME_MAX + 1];
 };
 
 __attribute__((noreturn))
@@ -6918,7 +8770,13 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     u32     page_budget   = sa->page_budget;         // CL-5: copy before kfree
     struct spawn_allowance allowance;                // step 5: copy before kfree
     spawn_allowance_copy(&allowance, &sa->allowance);
-    bool    pheno_linux   = sa->pheno_linux;         // V-1b: copy before kfree
+    bool    pheno_manifest  = sa->pheno_manifest;    // V-1b/D: copy before kfree
+    bool    exe_pheno_linux = sa->exe_pheno_linux;   // section 13: copy before kfree
+    u32     name_len      = sa->name_len;            // D-4: copy before kfree
+    if (name_len > SYS_SPAWN_NAME_MAX) name_len = SYS_SPAWN_NAME_MAX;
+    char    name[SYS_SPAWN_NAME_MAX + 1];
+    for (u32 i = 0; i < name_len; i++) name[i] = sa->name[i];
+    name[name_len] = '\0';
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
     rights_t      rights_local[SYS_SPAWN_MAX_FDS];
     for (u32 i = 0; i < fd_count; i++) {
@@ -6980,13 +8838,24 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // been decided against the value being replaced.
     if (p->as && __atomic_load_n(&p->as->ref, __ATOMIC_ACQUIRE) == 1)
         __atomic_store_n(&p->as->page_budget, page_budget, __ATOMIC_RELEASE);
-    // VIVARIUM V-1b: stamp the declared phenotype BEFORE exec_setup and
-    // before EL0 -- the child has no peer thread yet, so a plain store is
-    // race-free (the identity/allowance set-once-before-EL0 contract), and
-    // exec can already read it for the section 12.1 rule-4 mismatch
-    // diagnostic. Descendants inherit it via rfork (rule 2). No gate: a
-    // phenotype confers ABI shape, never authority (I-43).
-    if (pheno_linux) p->phenotype = PHENO_LINUX;
+    // VIVARIUM V-1b + Design D (section 13.10.3): the declaration, then the
+    // decision -- BEFORE exec_setup and before EL0, where a plain store is
+    // race-free (no peer thread yet; the identity/allowance set-once-before-
+    // EL0 contract), and where exec_setup can already read the field for the
+    // PT_INTERP dispatch + the rule-4 diagnostic.
+    //
+    // The manifest bit declares the CHILD'S TERRITORY a Linux world (the
+    // container's namespace-level declaration, 13.10.3): from here every image
+    // load resolved from this Territory -- this entrypoint, its execve'd
+    // helpers, its rfork descendants (territory_clone copies the flag) --
+    // decides Linux. Set on the child's own clone, never on the parent's
+    // Territory (review F4): viv does not become a Linux world for having
+    // launched one. Then THE decision, by the rule every image load shares:
+    // the resolution's verdict (crossed a pheno-mount, seeded by the parent's
+    // declaration) OR this child's Territory declaration. No gate: a phenotype
+    // confers ABI shape, never authority (I-43).
+    if (pheno_manifest) territory_declare_linux(p->territory);
+    p->phenotype = phenotype_decide(exe_pheno_linux, territory_root_pheno(p->territory));
 
     // A-1a: apply the parent-vetted identity override BEFORE any user-
     // observable state (fd install / exec / userland_enter). The parent
@@ -7042,6 +8911,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // #359/#360: preemptible fresh-thread exec; the c->lock holds are covered
     // by the spinlock preempt count (spinlock.h). See sys_spawn_thunk.
     int rc = exec_setup_from_spoor(p, exe, exe_size,
+                                   name, name_len,
                                    argv_data, argv_data_len, argc,
                                    &entry, &sp);
     spoor_clunk(exe);
@@ -7104,8 +8974,14 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         return -1;
 
     // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
+    // section 13: also learn whether resolving `name` crossed an MPHENO_LINUX
+    // mount -- the /viv/bin subtree phenotype channel (seeded, since Design D,
+    // by THIS Territory's own declaration), carried to the thunk as
+    // sa->exe_pheno_linux beside the manifest bit (sa->pheno_manifest).
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    bool exe_pheno_linux = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len,
+                                                       &exe_size, &exe_pheno_linux);
     if (!exe) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
@@ -7147,9 +9023,19 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     // KP_ZERO left allowance.set false -> the child inherits via rfork).
     if (want_allowance) spawn_allowance_copy(&sa->allowance, want_allowance);
     sa->page_budget   = eff_budget;   // CL-5: parent-resolved; the thunk stamps it
-    // V-1b: carry the phenotype declaration (0 -> KP_ZERO left it false ->
-    // the child inherits via rfork).
-    sa->pheno_linux = (pheno_flags & SPAWN_PHENO_LINUX) != 0;
+    // V-1b + Design D: carry the two channels SEPARATELY (13.10.3). The manifest
+    // bit becomes the child Territory's declaration in the thunk; the mount
+    // channel's verdict (exe_pheno_linux, seeded by THIS parent's Territory
+    // declaration at the resolve) feeds the child's phenotype_decide. KP_ZERO
+    // left both false -> a plain child decides native unless the clone it
+    // inherits already declares Linux.
+    sa->pheno_manifest  = (pheno_flags & SPAWN_PHENO_LINUX) != 0;
+    sa->exe_pheno_linux = exe_pheno_linux;
+    // D-4: carry the caller's own name for the program. Bounded + NUL-checked
+    // by this function's entry gate above, so the copy is a straight one.
+    sa->name_len = (u32)name_len;
+    for (size_t i = 0; i < name_len; i++) sa->name[i] = name[i];
+    sa->name[name_len] = '\0';
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
         sa->rights[i] = bumped_rights[i];
@@ -7671,8 +9557,16 @@ static s64 sys_execve_core(struct exception_context *ctx,
     //    SYS_SPAWN_* uses, so exec and spawn cannot diverge on what is
     //    executable. Pins the Spoor; we clunk it below on every path.
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, path, (size_t)path_len,
-                                                    &exe_size);
+    // Design D (VIVARIUM 13.10.4): execve RE-DECIDES the phenotype -- a new
+    // image is a new ABI -- through the pheno-aware resolver, into a LOCAL.
+    // p->phenotype is not touched here, nor by the load below: it is stored
+    // exactly once, in proc_exec_replace's infallible commit region, so a
+    // failed resolve or load returns the caller to its old image with its old
+    // ABI intact (review F1 Leg B). The loader and the signal reset both take
+    // the decided value as a parameter (Legs C and A).
+    bool crossed_pheno = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, path, (size_t)path_len,
+                                                       &exe_size, &crossed_pheno);
     if (!exe) {
         // NOTE: argv_kbuf and env_kbuf are the CALLER's -- every front end frees
         // its own blobs on every path. The pre-L-6a body freed it here, when the
@@ -7696,8 +9590,12 @@ static s64 sys_execve_core(struct exception_context *ctx,
         return -(s64)T_E_NOMEM;
     }
 
+    const u32 new_pheno = phenotype_decide(crossed_pheno,
+                                           territory_root_pheno(p->territory));
+
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, proc_resource_exempt(p), exe, exe_size,
+    int rc = exec_load_into(nas, proc_resource_exempt(p), p, new_pheno, exe, exe_size,
+                            path, (u32)path_len,
                             argv_kbuf, (u32)argv_data_len, (u32)argc,
                             env_kbuf, (u32)env_data_len, (u32)envc,
                             &entry, &sp);
@@ -7721,7 +9619,7 @@ static s64 sys_execve_core(struct exception_context *ctx,
 
     // 4. COMMIT. Infallible from here -- there is no path back to the caller's
     //    old image, and none is needed.
-    proc_exec_replace(p, nas);
+    proc_exec_replace(p, nas, new_pheno);
 
     // The Proc-side stamps the spawn path applies inside exec_setup_from_spoor.
     // They land HERE instead, after the commit, for the reason exec_load_into's
@@ -7732,6 +9630,16 @@ static s64 sys_execve_core(struct exception_context *ctx,
     proc_set_exe_path(p, exe->path);
 
     spoor_clunk(exe);
+
+    // 6b: drop the socktab entry of every close-on-exec socket BEFORE
+    // handle_close_on_exec frees its fd. Otherwise the freed number carries a
+    // stale (proto, n) row into the new image, whose first fd-creating call is
+    // handed that number and then misroutes through the stale connection
+    // (connect dials the right ctl but opens a dead /net/<proto>/<n>/data; poll
+    // opens a stale ready file). Runs in execve's sole-live-thread window
+    // (proc_exec_alone, re-checked in proc_exec_replace), so it needs no lock,
+    // exactly like the handle_close_on_exec below. NULL-safe (native = no tab).
+    viv_socktab_drop_cloexec(p);
 
     // #151: consume the close-on-exec flags. AFTER the commit, for two reasons
     // pulling the same way: a failed exec must leave the process unchanged, so
@@ -7932,7 +9840,20 @@ static s64 sys_rfork_core(struct exception_context *ctx, unsigned flags,
         .child_tls = child_tls,
     };
 
-    int pid = rfork_forked(flags, &fc);
+    // I-43 (VIVARIUM.md): a Linux fork INHERITS the parent's capabilities, so
+    // the PHENO_LINUX clone path forks with CAP_ALL as the mask -- which
+    // rfork_internal intersects with the parent's actually-held caps and then
+    // strips ~CAP_ELEVATION_ONLY, so the child gets exactly parent_caps minus
+    // elevation (I-2: <= parent, never grown; elevation never propagates by
+    // inheritance). Without this a shell-forked phenotype program (git,
+    // anything) loses every cap the container was granted -- getrandom(2), for
+    // one, would fail in a forked child that the entrypoint could call fine.
+    // NATIVE fork keeps CAP_NONE (Thylacine's stronger fork-zeros-caps default):
+    // a native program confers caps explicitly at spawn, never by inheritance.
+    struct Proc *p = t->proc;
+    int pid = (p && p->phenotype == PHENO_LINUX)
+                  ? rfork_forked_with_caps(flags, &fc, CAP_ALL)
+                  : rfork_forked(flags, &fc);
     if (pid < 0) return -(s64)T_E_AGAIN;
 
     // Only the PARENT reaches here. The child never returns from this call at
@@ -8550,6 +10471,26 @@ static int viv_store_u64(u64 va, u64 v) {
     return 0;
 }
 
+// The 4-byte twins, for the socket-option shells (optval/optlen are C ints).
+// Same byte-wise little-endian idiom; no alignment assumption on the VA.
+static int viv_load_u32(u64 va, u32 *out) {
+    u32 v = 0;
+    for (u32 i = 0; i < 4; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(va + i, &b) != 0) return -1;
+        v |= (u32)b << (8u * i);
+    }
+    *out = v;
+    return 0;
+}
+
+static int viv_store_u32(u64 va, u32 v) {
+    for (u32 i = 0; i < 4; i++) {
+        if (uaccess_store_u8(va + i, (u8)(v >> (8u * i))) != 0) return -1;
+    }
+    return 0;
+}
+
 // The NOTE_BIT_* numbering lives in `g_viv_notebits` (vivarium.c) -- V-6c moved
 // it there when delivery became a SECOND consumer. Two files each carrying a
 // `static` copy is the mirror-drift trap: each one's asserts would verify only
@@ -8699,9 +10640,27 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
         return -(s64)T_E_IO;       // a /net that does not speak the idiom
     }
 
-    if (!viv_socktab_claim(tab, (s32)fd, proto, n)) {
+    if (!viv_socktab_claim(tab, (s32)fd, proto, n, VIV_SOCK_FRESH)) {
         handle_close(p, (hidx_t)fd);   // drops the ctl ref -> netd frees the conn
         return -(s64)T_E_MFILE;
+    }
+
+    // N-1a: apply the SOCK_NONBLOCK/SOCK_CLOEXEC the decide admitted. NONBLOCK
+    // becomes the ctl open-file's CNONBLOCK -- the guest-visible O_NONBLOCK state
+    // that fcntl(F_GETFL/F_SETFL) reads/writes AND that the recv shells consult to
+    // turn netd's empty-read (0 bytes, non-blocking at net-2c-2) into -EAGAIN.
+    // CLOEXEC becomes the fd's cloexec bit, honoured by handle_close_on_exec +
+    // the socktab's own execve sweep. A failure here is unreachable (the fd was
+    // just handed back by the open), but unwind rather than leak a half-configured
+    // socket: the guest would see a valid fd whose flags silently disagree with
+    // what it asked for.
+    bool nonblock = (type & (u64)VIV_SOCK_NONBLOCK) != 0;
+    bool cloexec  = (type & (u64)VIV_SOCK_CLOEXEC)  != 0;
+    if ((nonblock && handle_set_nonblock(p, (hidx_t)fd, true) < 0) ||
+        (cloexec  && handle_set_cloexec(p, (hidx_t)fd, true) < 0)) {
+        viv_socktab_drop(tab, (s32)fd);
+        handle_close(p, (hidx_t)fd);
+        return -(s64)T_E_IO;
     }
     return fd;
 }
@@ -8717,12 +10676,26 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
 //     only reference, and netd frees the connection at zero.
 // handle_replace does both correctly by construction: it installs the new
 // object first and releases the old one after.
+// The socket arms' fd -> row lookup, with Linux's two "no socket here" errnos
+// split the way sockfd_lookup_light splits them: a CLOSED fd is EBADF (the fd
+// lookup fails before any socket check), a live fd with no row is ENOTSOCK.
+// Every row-less fd used to answer ENOTSOCK, which is what the probe's L198
+// pinned as the meaning of "closed" until the socktab holotype (F5) caught it.
+// 0 with *out filled, or the negative errno.
+static s64 viv_sock_row(struct Proc *p, struct viv_socktab *tab, u64 fd_raw,
+                        struct viv_sock *out) {
+    if (viv_socktab_get(tab, (s32)(s64)fd_raw, out)) return 0;
+    if (fd_raw >= (u64)PROC_HANDLE_MAX || handle_get_cloexec(p, (hidx_t)fd_raw) < 0)
+        return -(s64)T_E_BADF;
+    return -(s64)T_E_NOTSOCK;
+}
+
 static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e)                       return -(s64)T_E_NOTSOCK;
-    if (e->state == VIV_SOCK_CONNECTED) return -(s64)T_E_ISCONN;
-    if (e->state == VIV_SOCK_LISTENING) return -(s64)T_E_ISCONN;
+    struct viv_sock     e;   // snapshot: proto/n are immutable, the rest read-once
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
+    if (e.state == VIV_SOCK_CONNECTED) return -(s64)T_E_ISCONN;
+    if (e.state == VIV_SOCK_LISTENING) return -(s64)T_E_ISCONN;
 
     // A CONSTRAINED bind cannot be honoured: netd's dial verb takes only the
     // REMOTE endpoint (its `!local` suffix is parsed and ignored), so a client
@@ -8732,7 +10705,7 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     // An UNCONSTRAINED bind (0.0.0.0:0) asks for nothing netd is not already
     // doing, so it proceeds -- which is also why the table needs no `bound`
     // flag: "bound to anything" and "not bound" are the same request here.
-    if (e->bound_port != 0 || e->bound_addr != 0) return -(s64)T_E_OPNOTSUPP;
+    if (e.bound_port != 0 || e.bound_addr != 0) return -(s64)T_E_OPNOTSUPP;
 
     // Copy the sockaddr into kernel memory before looking at it -- the parse is
     // pure and must never read user memory twice (a peer thread rewriting it
@@ -8749,7 +10722,9 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     if (!vivarium_sockaddr_in_parse(sa, addrlen, ip4, &port)) {
         // Wrong family is EAFNOSUPPORT; a short/degenerate address is EINVAL.
         // Telling them apart matters: a guest that gets EINVAL for an AF_INET6
-        // address retries it.
+        // address retries it. F6a: read sa[1] only when it was copied -- a 1-byte
+        // addr has no family word (viv_copy_sockaddr fills only sa[0..addrlen)).
+        if (addrlen < 2) return -(s64)T_E_INVAL;
         u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
         return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
     }
@@ -8767,7 +10742,7 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
 
     char path[64];
     u32  plen = viv_net_path(path, sizeof(path),
-                             (enum viv_net_proto)e->proto, true, e->n, "data");
+                             (enum viv_net_proto)e.proto, true, e.n, "data");
     if (plen == 0)                return -(s64)T_E_INVAL;
 
     // BLOCKS for TCP until ESTABLISHED (netd's deferred Rlopen). That is the
@@ -8805,12 +10780,38 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     handle_put(&dh);                      // release the borrowed one
     handle_close(p, (hidx_t)dfd);         // retire the temporary fd
 
+    // Read the socket's nonblocking state off ctl BEFORE the swap. Since N-1a
+    // admits SOCK_NONBLOCK, a socket(NONBLOCK)+connect() must stay nonblocking --
+    // but CNONBLOCK is a per-Spoor flag, and handle_replace installs a fresh data
+    // Spoor that does not carry it. Capture it here, re-apply after the swap.
+    int  ctl_omode = 0;
+    bool ctl_nonblock = false;
+    (void)handle_get_status_flags(p, (hidx_t)fd_raw, &ctl_omode, &ctl_nonblock);
+
     if (handle_replace(p, (hidx_t)fd_raw, KOBJ_SPOOR, dr, dsp) < 0) {
         spoor_clunk(dsp);
         return -(s64)T_E_IO;
     }
+    // Re-apply to the fd, which now names data. A failure is unreachable (the fd
+    // was just installed by handle_replace) and DELIBERATELY tolerated rather than
+    // unwound: connect() has already committed the connection, and a socket that
+    // is connected-but-blocking is a lesser evil than tearing down an established
+    // connection because a flag re-apply we cannot actually reach failed (F5c).
+    if (ctl_nonblock)
+        (void)handle_set_nonblock(p, (hidx_t)fd_raw, true);
 
-    e->state = VIV_SOCK_CONNECTED;
+    // Record the peer so a recvmsg on this connected socket can synthesize
+    // msg_name (the same field the datagram sendto path records), and transition
+    // CONNECTED -- both under one lock hold, KEYED on the socket we snapshotted
+    // (e.n). If a peer thread closed and recycled this fd while we blocked in the
+    // data open, the write lands nowhere rather than marking a stranger's fresh
+    // socket connected-to-our-peer. connect() still returns success: the
+    // connection was made; a guest that closes an fd it is connecting on another
+    // thread has raced its own descriptor.
+    u32 raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+              | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e.epoch, raddr, port,
+                                    /*also_connect=*/true);
     return 0;
 }
 
@@ -8838,9 +10839,9 @@ static s64 viv_copy_sockaddr(u64 addr_va, u64 addrlen, u8 *out /* [128] */) {
 // it does not vanish -- and it is recorded as one in VIVARIUM.md section 9.
 static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e)                             return -(s64)T_E_NOTSOCK;
-    if (e->state != VIV_SOCK_FRESH)     return -(s64)T_E_INVAL;
+    struct viv_sock     e;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
+    if (e.state != VIV_SOCK_FRESH)     return -(s64)T_E_INVAL;
 
     u8  sa[128];
     s64 rc = viv_copy_sockaddr(addr_va, addrlen, sa);
@@ -8851,13 +10852,17 @@ static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
     u8  ip4[4];
     u16 port = 0;
     if (!vivarium_sockaddr_in_parse_any(sa, addrlen, ip4, &port)) {
+        if (addrlen < 2) return -(s64)T_E_INVAL;   // F6a: no family word to read
         u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
         return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
     }
 
-    e->bound_addr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
-                  | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
-    e->bound_port = port;
+    u32 baddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+              | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+    // Keyed on the snapshot (e.n): a bind that raced a peer close+reuse of this
+    // fd writes nowhere, and reports the fd is no longer the socket it named.
+    if (!viv_socktab_set_bound(tab, (s32)(s64)fd_raw, e.epoch, baddr, port))
+        return -(s64)T_E_NOTSOCK;
     return 0;
 }
 
@@ -8871,23 +10876,343 @@ static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
 // no way to ask for another, so honouring the number is not possible; Linux
 // itself treats the value as a hint and silently clamps it to a system
 // maximum, so a caller cannot distinguish this from an ordinary clamp.
+// getsockopt(fd, level, optname, optval, optlen) -- the (SOL_SOCKET, SO_ERROR)
+// point only; the decide declines everything else back to the T2-ENOSYS path
+// so those options behave exactly as they did under the blanket refusal.
+//
+// The answer is the constant 0, TRUE for every SYNCHRONOUSLY-delivered error
+// -- the whole class a blocking-only phenotype socket produces on the guest's
+// own syscalls -- which is exactly the connect-verification purpose the row
+// exists for. The ONE gap (holotype F2, shipped narrowed per the header): an
+// error netd latches ASYNCHRONOUSLY (a connected-UDP/ICMP local send failure)
+// is not consulted, so a guest that sees POLLERR on such a socket then reads
+// SO_ERROR gets 0 -- latent at v1.0, filed as the netd-errno arc. The full
+// boundary + the NONBLOCK revisit: vivarium_getsockopt_decide's header.
+//
+// optlen is value-result (int): read it, require room for the int, write the
+// value + the 4 back. A caller passing less than 4 gets EINVAL rather than a
+// truncated write.
+static s64 viv_sock_getsockopt(struct Proc *p, u64 fd_raw, u64 level,
+                               u64 optname, u64 optval_va, u64 optlen_va) {
+    // getsockopt reads no per-entry field: an existence test suffices.
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    { s64 lr = viv_sock_row(p, tab, fd_raw, NULL); if (lr < 0) return lr; }
+
+    s32 err = 0;
+    if (!vivarium_getsockopt_decide(level, optname, &err))
+        return -(s64)err;
+
+    // The byte-wise uaccess helpers assume a validated user VA (uaccess.S:
+    // "the caller is responsible for VA-range validation") -- and the fault
+    // fixup only engages BELOW UACCESS_USER_VA_TOP, so an unchecked kernel VA
+    // here would silently write kernel memory (mapped) or extinct the box
+    // (unmapped), reachable by any phenotype Proc. Validate both spans first,
+    // exactly as every sibling shell does before its own load/store. This also
+    // rejects the top-of-address-space `va + 4` wrap.
+    if (!sys_validate_user_buf(optlen_va, 4)) return -(s64)T_E_FAULT;
+    if (!sys_validate_user_buf(optval_va, 4)) return -(s64)T_E_FAULT;
+
+    u32 olen = 0;
+    if (viv_load_u32(optlen_va, &olen) != 0) return -(s64)T_E_FAULT;
+    // optlen is a C `int`: Linux (sk_getsockopt) rejects a negative length
+    // with EINVAL before anything else. Match it (R2-F5) -- otherwise
+    // (socklen_t)-1 reads as 0xFFFFFFFF >= 4 and we would serve a length Linux
+    // refuses. The olen < 4 gate below then covers 0..3 (stricter than Linux's
+    // truncate-and-succeed there -- the deliberate delta named in the header).
+    if ((s32)olen < 0)                       return -(s64)T_E_INVAL;
+    if (olen < 4)                            return -(s64)T_E_INVAL;
+    if (viv_store_u32(optval_va, 0) != 0)    return -(s64)T_E_FAULT;
+    if (viv_store_u32(optlen_va, 4) != 0)    return -(s64)T_E_FAULT;
+    return 0;
+}
+
+// Open /net/<proto>/<n>/data for a socket, returning a fresh transient fd the
+// caller closes. PER-CALL, not cached: netd's rx/tx buffers live on the per-conn
+// slot N (server.rs), not the fid, so a transient data fid moves bytes to/from
+// the same connection AND never lands in the guest's fd-number space -- the
+// exact "opened per call, not cached" discipline the poll shell documents at
+// length, for the same reason (a cached derived fd the guest could close would
+// name a stranger's object after the close). UDP data open is immediate (netd's
+// deferred Rlopen is TCP-only), so this does not block for the datagram path.
+static s64 viv_sock_open_data(struct Proc *p, enum viv_net_proto proto, u32 n) {
+    char path[64];
+    u32  plen = viv_net_path(path, sizeof(path), proto, true, n, "data");
+    if (plen == 0) return -(s64)T_E_INVAL;
+    return sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
+                                   2u /* ORDWR */);
+}
+
+// The connectionless UDP datagram send (N-2a): dial `addr` on the ctl fd (netd
+// re-points conn N per call, server.rs), then move the payload on a transient
+// data fid. The guest fd stays `ctl`, so a subsequent sendto to a DIFFERENT peer
+// re-dials the same connection -- which is how res_msend queries several
+// nameservers on one socket. The recorded destination feeds recvmsg's msg_name.
+static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_socktab *tab,
+                                 const struct viv_sock *e, u64 fd_raw,
+                                 u64 buf_va, u64 len, u64 addr_va, u64 addrlen) {
+    // A CONSTRAINED bind cannot be honoured -- netd's connect verb takes only the
+    // remote and silently ignores any local endpoint, so a socket bound to a
+    // specific source port would get an ephemeral one. Refuse it, exactly as
+    // connect() does (the same OPNOTSUPP). An UNCONSTRAINED bind (0.0.0.0:0 --
+    // what musl's resolver does) leaves both fields 0 and proceeds.
+    if (e->bound_port != 0 || e->bound_addr != 0) return -(s64)T_E_OPNOTSUPP;
+
+    // Copy the destination into kernel memory before parsing (viv_copy_sockaddr
+    // is the connect/bind TOCTOU-safe copy: a peer thread cannot rewrite the
+    // family between the check and the address read).
+    u8  sa[128];
+    s64 rc = viv_copy_sockaddr(addr_va, addrlen, sa);
+    if (rc < 0) return rc;
+    u8  ip4[4];
+    u16 port = 0;
+    if (!vivarium_sockaddr_in_parse(sa, addrlen, ip4, &port)) {
+        if (addrlen < 2) return -(s64)T_E_INVAL;   // F6a: no family word to read
+        u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
+        return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
+    }
+
+    // Re-dial: `connect ip!port` to ctl (the guest fd, still ctl for a FRESH
+    // socket). All-or-nothing, like connect's own verb write.
+    char cmd[48];
+    u32  clen = vivarium_net_cmd_ipport(cmd, sizeof(cmd), "connect", ip4, port);
+    if (clen == 0) return -(s64)T_E_INVAL;
+    s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
+    if (w != (s64)clen) return -(s64)T_E_CONNREFUSED;
+
+    // Move the payload on a data fid opened for exactly this datagram. The native
+    // write handler does the copy-in + staging; a UDP write is one datagram.
+    s64 dfd = viv_sock_open_data(p, (enum viv_net_proto)e->proto, e->n);
+    if (dfd < 0) return dfd;
+    s64 sent = sys_write_handler((u64)dfd, buf_va, len);
+    handle_close(p, (hidx_t)dfd);
+    if (sent < 0) return sent;
+
+    // Record the destination AFTER the send succeeds -- a failed dial must not
+    // overwrite a working remote (recvmsg would then report the wrong peer, which
+    // musl's res_msend rejects via memcmp). Keyed on the snapshot (e->n): a
+    // datagram that raced a peer close+reuse of this fd records nowhere.
+    u32 raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+              | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e->epoch, raddr, port,
+                                    /*also_connect=*/false);
+    return sent;
+}
+
+// sendto(fd, buf, len, flags, addr, addrlen) / recvfrom(fd, buf, len, flags,
+// addr, addrlen). Two served shapes:
+//   * NO addr -- the connected send()/recv() (musl's send/recv ARE these numbers
+//     on aarch64). The data movement DELEGATES to the native write/read handlers
+//     on the guest fd (for a CONNECTED socket that fd IS `data`) -- same staging,
+//     weft fast-path, short-op semantics, and #844 lifecycle a T1-renumbered
+//     write()/read() would get.
+//   * WITH addr -- the UDP datagram sendto (N-2a), handled above.
+// `p` is used for the socktab screen; the native handlers re-derive it from
+// current_thread, the same Proc (this shell runs on the calling thread).
+static s64 viv_sock_sendto(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
+                           u64 flags, u64 addr_va, u64 addrlen) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock     e;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
+
+    s32 err = 0;
+    if (!vivarium_sendto_decide((enum viv_net_proto)e.proto, e.state, flags,
+                                addr_va, addrlen, &err))
+        return -(s64)err;
+
+    if (addr_va == 0 && addrlen == 0)
+        return sys_write_handler(fd_raw, buf_va, len);
+
+    return viv_sock_dgram_sendto(p, tab, &e, fd_raw, buf_va, len, addr_va, addrlen);
+}
+
+static s64 viv_sock_recvfrom(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
+                             u64 flags, u64 addr_va) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock     e;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
+
+    s32 err = 0;
+    if (!vivarium_recvfrom_decide(e.state, flags, addr_va, &err))
+        return -(s64)err;
+
+    return sys_read_handler(fd_raw, buf_va, len);
+}
+
+// recvmsg(fd, msghdr, flags) (N-2b). Reads ONE datagram and, when msg_name is
+// non-NULL, writes back the recorded remote as a byte-exact sockaddr_in -- the
+// shape musl's res_msend memcmp's against the nameserver it queried
+// (res_msend.c:216), so any deviation makes DNS silently drop the reply. This is
+// the audit-critical copy-out surface (the getdents64 P0 class): EVERY user
+// access -- the msghdr read, each iovec read, each scatter write, and the
+// msg_name/namelen/controllen/flags writeback -- is bounded by
+// sys_validate_user_buf before it runs.
+static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock     e;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
+
+    s32 derr = 0;
+    if (!vivarium_recvmsg_decide(e.state, flags, e.remote_port != 0, &derr))
+        return -(s64)derr;
+
+    // Copy the whole msghdr in (validated). No uaccess_load_u64 exists, and one
+    // staged copy is easier to reason about than seven field loads; the fault
+    // fixup makes a peer-unmapped read a clean -EFAULT (there is no peer thread
+    // for a PHENO_LINUX Proc, so this is belt-and-braces).
+    if (!sys_validate_user_buf(msg_va, sizeof(struct viv_linux_msghdr)))
+        return -(s64)T_E_FAULT;
+    struct viv_linux_msghdr mh;
+    if (uaccess_copy_in(&mh, msg_va, sizeof(mh)) != 0) return -(s64)T_E_FAULT;
+
+    if (mh.msg_iovlen > VIV_UIO_MAXIOV) return -(s64)T_E_INVAL;
+
+    // The socktab fields this path reads (e.state, e.remote_*) came from ONE
+    // snapshot under the lock (viv_socktab_get above) -- N-3's socktab lock -- so
+    // a peer thread's concurrent sendto/connect on this fd cannot tear them
+    // between the decide here and the msg_name writeback below; both read the
+    // same coherent copy. The transient data fd opened below still sits briefly
+    // in the guest's OWN fd space where a peer could close it, but that is a
+    // guest racing its own descriptor (memory-safe -- each fd resolution is
+    // validated), not a kernel hazard the lock must close.
+    //
+    // F3: validate msg_name UP FRONT, before a datagram is consumed. Linux checks
+    // the address buffer before the receive, so a bad msg_name must fail EFAULT
+    // without eating a datagram (which the netd read below cannot un-consume).
+    if (mh.msg_name != 0 && mh.msg_namelen > 0) {
+        u32 want = (mh.msg_namelen < 16u) ? mh.msg_namelen : 16u;
+        if (!sys_validate_user_buf(mh.msg_name, want)) return -(s64)T_E_FAULT;
+    }
+
+    // Pass 1: read + validate every iovec, summing the scatter capacity capped at
+    // one datagram. A zero-length entry names no memory (no range check -- Linux
+    // skips them, and sys_validate_user_buf would reject base==0).
+    u64 cap = 0;
+    for (u64 i = 0; i < mh.msg_iovlen; i++) {
+        struct viv_linux_iovec kiov;
+        u64 ent = mh.msg_iov + i * sizeof(kiov);
+        // F1: the iovec-ARRAY pointer needs its own range check -- uaccess_copy_in
+        // relies on the fault fixup, which does not fault an EL1 read of a mapped
+        // kernel VA, so validate the entry span before reading it (memory-safe
+        // without this, since kiov.base is validated before any copy-out, but the
+        // uaccess contract wants the source bounded).
+        if (!sys_validate_user_buf(ent, sizeof(kiov))) return -(s64)T_E_FAULT;
+        if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0) return -(s64)T_E_FAULT;
+        if (kiov.len != 0 && !sys_validate_user_buf(kiov.base, kiov.len))
+            return -(s64)T_E_FAULT;
+        if (cap < (u64)VIV_RECV_DGRAM_MAX) {
+            u64 room = (u64)VIV_RECV_DGRAM_MAX - cap;
+            cap += (kiov.len < room) ? kiov.len : room;
+        }
+    }
+
+    // The data fid: a CONNECTED socket's guest fd IS `data`; a FRESH datagram
+    // socket's guest fd is `ctl`, so open a transient data fid (closed below).
+    bool close_data = false;
+    s64  dfd;
+    if (e.state == (u8)VIV_SOCK_CONNECTED) {
+        dfd = (s64)fd_raw;
+    } else {
+        dfd = viv_sock_open_data(p, (enum viv_net_proto)e.proto, e.n);
+        if (dfd < 0) return dfd;
+        close_data = true;
+    }
+
+    // Read ONE datagram into a zeroed kernel bounce (cap up to 4 KiB is too big
+    // for the kernel stack; zeroed so no uninitialised kernel byte can ever reach
+    // the guest). One netd read == one UDP datagram, so all scatter comes from
+    // this single read -- a second read would consume a second datagram.
+    s64 got     = 0;
+    u8 *bounce  = NULL;
+    if (cap > 0) {
+        bounce = (u8 *)kzalloc(cap, 0);
+        if (!bounce) {
+            if (close_data) handle_close(p, (hidx_t)dfd);
+            return -(s64)T_E_NOMEM;
+        }
+        got = spoor_read_common(p, (hidx_t)dfd, bounce, cap, false, 0);
+    }
+    if (close_data) handle_close(p, (hidx_t)dfd);
+    if (got < 0) { if (bounce) kfree(bounce); return got; }
+
+    // NONBLOCK: netd's `data` read is non-blocking (0 bytes on an empty socket,
+    // net-2c-2), so a 0-byte read on a nonblocking socket is EAGAIN, not EOF --
+    // res_msend's recvmsg drain loop needs the negative return to break. A
+    // blocking socket keeps the 0.
+    if (got == 0) {
+        int  omode = 0;
+        bool nb    = false;
+        (void)handle_get_status_flags(p, (hidx_t)fd_raw, &omode, &nb);
+        if (bounce) kfree(bounce);
+        return nb ? -(s64)T_E_AGAIN : 0;
+    }
+
+    // Pass 2: scatter the datagram across the iovecs (validated copy-out per
+    // entry -- the array is re-read, and a peer rewrite yields values that are
+    // themselves validated before use, degrading only to a short scatter).
+    u64 off = 0;
+    for (u64 i = 0; i < mh.msg_iovlen && off < (u64)got; i++) {
+        struct viv_linux_iovec kiov;
+        u64 ent = mh.msg_iov + i * sizeof(kiov);
+        if (!sys_validate_user_buf(ent, sizeof(kiov))) { kfree(bounce); return -(s64)T_E_FAULT; }   // F1
+        if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0) { kfree(bounce); return -(s64)T_E_FAULT; }
+        if (kiov.len == 0) continue;
+        u64 take = (u64)got - off;
+        if (take > kiov.len) take = kiov.len;
+        if (!sys_validate_user_buf(kiov.base, take)) { kfree(bounce); return -(s64)T_E_FAULT; }
+        if (uaccess_copy_out(kiov.base, bounce + off, take) != 0) { kfree(bounce); return -(s64)T_E_FAULT; }
+        off += take;
+    }
+    kfree(bounce);
+
+    // msg_name writeback: the recorded remote as a byte-exact sockaddr_in, but
+    // only when the guest supplied a buffer. A CONNECTED socket with no recorded
+    // remote (remote_port == 0) reports a zero-length name, which is Linux's
+    // shape for a connected recvmsg the caller did not need the peer from.
+    u32 out_namelen = 0;
+    if (mh.msg_name != 0 && mh.msg_namelen > 0 && e.remote_port != 0) {
+        u8  ip4[4] = { (u8)(e.remote_addr >> 24), (u8)(e.remote_addr >> 16),
+                       (u8)(e.remote_addr >> 8),  (u8)(e.remote_addr) };
+        u8  sabuf[16];
+        u32 salen = vivarium_sockaddr_in_build(sabuf, sizeof(sabuf), ip4, e.remote_port);
+        if (salen == 0) return -(s64)T_E_INVAL;           // unreachable (16-byte buf)
+        u32 copy = (mh.msg_namelen < salen) ? mh.msg_namelen : salen;
+        if (!sys_validate_user_buf(mh.msg_name, copy)) return -(s64)T_E_FAULT;
+        if (uaccess_copy_out(mh.msg_name, sabuf, copy) != 0) return -(s64)T_E_FAULT;
+        out_namelen = salen;   // Linux reports the FULL addr size, even on truncation
+    }
+    if (uaccess_copy_out(msg_va + offsetof(struct viv_linux_msghdr, msg_namelen),
+                         &out_namelen, sizeof(out_namelen)) != 0) return -(s64)T_E_FAULT;
+
+    // No ancillary data served; report an empty control buffer + clean flags.
+    // (MSG_TRUNC detection would need netd to report the discarded tail size,
+    // which it does not, so flags stay 0 -- a DNS reply fits VIV_RECV_DGRAM_MAX.)
+    u64 zero64  = 0;
+    if (uaccess_copy_out(msg_va + offsetof(struct viv_linux_msghdr, msg_controllen),
+                         &zero64, sizeof(zero64)) != 0) return -(s64)T_E_FAULT;
+    s32 outflags = 0;
+    if (uaccess_copy_out(msg_va + offsetof(struct viv_linux_msghdr, msg_flags),
+                         &outflags, sizeof(outflags)) != 0) return -(s64)T_E_FAULT;
+
+    return got;
+}
+
 static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
     (void)backlog;
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e) return -(s64)T_E_NOTSOCK;
+    struct viv_sock     e;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
 
     s32 err = 0;
-    if (!vivarium_listen_decide((enum viv_net_proto)e->proto,
-                                (enum viv_sock_state)e->state,
-                                e->bound_port, &err))
+    if (!vivarium_listen_decide((enum viv_net_proto)e.proto,
+                                (enum viv_sock_state)e.state,
+                                e.bound_port, &err))
         return -(s64)err;      // err == 0 is the already-LISTENING success
 
-    u8 ip4[4] = { (u8)(e->bound_addr >> 24), (u8)(e->bound_addr >> 16),
-                  (u8)(e->bound_addr >> 8),  (u8)(e->bound_addr) };
+    u8 ip4[4] = { (u8)(e.bound_addr >> 24), (u8)(e.bound_addr >> 16),
+                  (u8)(e.bound_addr >> 8),  (u8)(e.bound_addr) };
 
     char cmd[48];
-    u32  clen = vivarium_net_cmd_announce(cmd, sizeof(cmd), ip4, e->bound_port);
+    u32  clen = vivarium_net_cmd_announce(cmd, sizeof(cmd), ip4, e.bound_port);
     if (clen == 0) return -(s64)T_E_INVAL;
 
     // All-or-nothing, exactly as connect's dial verb -- see the note there.
@@ -8899,7 +11224,10 @@ static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
         return -(s64)T_E_ADDRINUSE;
     }
 
-    e->state = VIV_SOCK_LISTENING;
+    // Keyed on the snapshot (e.n): a listen that raced a peer close+reuse of this
+    // fd transitions nowhere -- the socket the guest announced is gone.
+    if (!viv_socktab_set_state(tab, (s32)(s64)fd_raw, e.epoch, VIV_SOCK_LISTENING))
+        return -(s64)T_E_NOTSOCK;
     return 0;
 }
 
@@ -8927,18 +11255,18 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     if (flags != 0) return -(s64)T_E_INVAL;
 
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e)                                return -(s64)T_E_NOTSOCK;
-    if (e->state != VIV_SOCK_LISTENING)    return -(s64)T_E_INVAL;
+    struct viv_sock     e;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
+    if (e.state != VIV_SOCK_LISTENING)    return -(s64)T_E_INVAL;
 
     // Ask BEFORE blocking. Past this point a real peer is connected, and
     // discovering a full table then would mean hanging up on it.
     if (!viv_socktab_has_room(tab))        return -(s64)T_E_MFILE;
 
-    enum viv_net_proto proto = (enum viv_net_proto)e->proto;
+    enum viv_net_proto proto = (enum viv_net_proto)e.proto;
 
     char path[64];
-    u32  plen = viv_net_path(path, sizeof(path), proto, true, e->n, "listen");
+    u32  plen = viv_net_path(path, sizeof(path), proto, true, e.n, "listen");
     if (plen == 0) return -(s64)T_E_INVAL;
 
     // THE BLOCK. Propagate the open's own errno rather than flattening it:
@@ -8999,12 +11327,13 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     // Plan 9 connection is two files.
     handle_close(p, (hidx_t)lfd);
 
-    if (!viv_socktab_claim(tab, (s32)dfd, proto, m)) {
+    // Born CONNECTED in one lock hold -- the accepted fd IS `data`. Doing it in
+    // claim (rather than claim-then-set_state) closes the window in which a peer
+    // thread could observe the freshly-installed fd as FRESH.
+    if (!viv_socktab_claim(tab, (s32)dfd, proto, m, VIV_SOCK_CONNECTED)) {
         handle_close(p, (hidx_t)dfd);      // frees M
         return -(s64)T_E_MFILE;
     }
-    struct viv_sock *ne = viv_socktab_find(tab, (s32)dfd);
-    if (ne) ne->state = VIV_SOCK_CONNECTED;   // born connected; the fd IS data
 
     // The peer address is a value-result parameter: *addrlen in is the caller's
     // buffer size, out is the FULL size, and a short buffer truncates. Failing
@@ -9116,12 +11445,12 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
     if (tab) {
         for (u64 i = 0; i < nfds; i++) {
             if (kfds[i].fd < 0) continue;          // caller-disabled entry
-            struct viv_sock *e = viv_socktab_find(tab, kfds[i].fd);
-            if (!e) continue;                      // an ordinary file: as-is
+            struct viv_sock e;
+            if (!viv_socktab_get(tab, kfds[i].fd, &e)) continue;   // ordinary file: as-is
 
             char path[64];
             u32  plen = viv_net_path(path, sizeof(path),
-                                     (enum viv_net_proto)e->proto, true, e->n,
+                                     (enum viv_net_proto)e.proto, true, e.n,
                                      "ready");
             s64 rfd = (plen == 0)
                           ? -1
@@ -9646,6 +11975,19 @@ static s64 viv_writev(u64 fd, u64 iov_va, u64 iovcnt_raw) {
     // rather than by re-deriving the handle check here.
     if (count == 0) return sys_write_handler(fd, 0, 0);
 
+    // The iovec ARRAY must lie wholly in the user half before any copy_in of
+    // it. The uaccess fault-fixup recovers ONLY a user-half fault
+    // (exception.c, the `fi.vaddr < UACCESS_USER_VA_TOP` gate), so a
+    // kernel-range iov_va does NOT "land in the fixup" -- an unmapped one
+    // extincts the kernel (an unprivileged DoS) and a mapped one reads kernel
+    // memory. One span check bounds every `ent` in both passes: count <=
+    // VIV_UIO_MAXIOV makes count*16 <= 16 KiB (no overflow), and
+    // sys_validate_user_buf rejects NULL, the wrap, and any span reaching
+    // UACCESS_USER_VA_TOP. viv_sock_recvmsg guards the same class per-entry;
+    // Linux import_iovec access_oks the whole array identically.
+    if (!sys_validate_user_buf(iov_va, (u64)count * sizeof(struct viv_linux_iovec)))
+        return -(s64)T_E_FAULT;
+
     // PASS 1 -- read and validate every entry, writing nothing.
     u64 total = 0;
     for (u32 i = 0; i < count; i++) {
@@ -9653,7 +11995,9 @@ static s64 viv_writev(u64 fd, u64 iov_va, u64 iovcnt_raw) {
         u64 ent = iov_va + (u64)i * sizeof(struct viv_linux_iovec);
         // copy_in rather than paired 32-bit loads: it handles an unaligned
         // iov_va (a hostile guest is not obliged to pass an 8-aligned array,
-        // and Linux reads one regardless), and a bad VA lands in the fixup.
+        // and Linux reads one regardless); the array's user-half range was
+        // validated just above, so a fault here is only an unmapped user page
+        // and lands cleanly in the fixup -> -EFAULT.
         if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0) return -(s64)T_E_FAULT;
         if (!vivarium_writev_accumulate(&total, kiov.len)) return -(s64)T_E_INVAL;
         // A zero-length entry names no memory, so it gets no range check --
@@ -9688,6 +12032,436 @@ static s64 viv_writev(u64 fd, u64 iov_va, u64 iovcnt_raw) {
     return (s64)written;
 }
 
+// readv (65): the read twin of viv_writev above. git protocol v2 over smart-http
+// drives the transport through the helper's stateless-connect pipe, and the
+// parent reads that pipe with readv (musl's vectored read); with no translator
+// readv ENOSYSed and the v2 clone aborted SILENTLY right after it had read the
+// whole capability advertisement -- "reads the caps, writes nothing back" -- so
+// git could not issue ls-refs and fell over. v0's inline advertisement is read
+// with plain read(), which is why v0 clones and v2 did not.
+//
+// The mirror of writev is exact. readv and writev share the identical
+// iovec-array judgement -- Linux answers EINVAL for an iovcnt past UIO_MAXIOV or
+// negative, and for lengths summing past SSIZE_MAX, for BOTH -- so this reuses
+// vivarium_writev_decide / vivarium_writev_accumulate rather than cloning them
+// (the names carry writev only because it landed first, #150). Each entry
+// delegates to sys_read_handler, whose own sys_validate_user_buf guards the
+// COPY-OUT -- readv WRITES into the user's iovecs, so this is the getdents64 P0
+// class, and the guard lives in the callee exactly as writev's copy-IN validate
+// lives in sys_write_handler. Pass 1 range-checks every entry up front (Linux's
+// all-or-nothing EFAULT/EINVAL); pass 2 reads, and a short read ends the call --
+// the same first-short-op stop as writev, differing only in meaning (the source
+// is drained -- EOF or would-block -- where writev's sink was full), and POSIX's
+// bytes-transferred-win-over-a-later-error rule is identical.
+static s64 viv_readv(u64 fd, u64 iov_va, u64 iovcnt_raw) {
+    u32 count = 0;
+    if (vivarium_writev_decide(iovcnt_raw, &count) != VIV_TRANSLATED)
+        return -(s64)T_E_INVAL;
+
+    // A zero count still validates the fd (readv(badfd, x, 0) is EBADF, not 0):
+    // sys_read_handler's len==0 fast-path resolves the descriptor, same as writev.
+    if (count == 0) return sys_read_handler(fd, 0, 0);
+
+    // The iovec ARRAY must lie wholly in the user half before any copy_in of
+    // it -- see viv_writev: the uaccess fixup recovers only a user-half fault,
+    // so an unvalidated kernel-range iov_va extincts the kernel (an
+    // unprivileged DoS). One span check bounds every `ent` in both passes.
+    if (!sys_validate_user_buf(iov_va, (u64)count * sizeof(struct viv_linux_iovec)))
+        return -(s64)T_E_FAULT;
+
+    // PASS 1 -- read and validate every entry, reading nothing.
+    u64 total = 0;
+    for (u32 i = 0; i < count; i++) {
+        struct viv_linux_iovec kiov;
+        u64 ent = iov_va + (u64)i * sizeof(struct viv_linux_iovec);
+        if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0) return -(s64)T_E_FAULT;
+        if (!vivarium_writev_accumulate(&total, kiov.len)) return -(s64)T_E_INVAL;
+        // A zero-length entry names no memory, so it gets no range check --
+        // Linux skips them, and sys_validate_user_buf would reject base==0.
+        if (kiov.len != 0 && !sys_validate_user_buf(kiov.base, kiov.len))
+            return -(s64)T_E_FAULT;
+    }
+
+    // PASS 2 -- read, stopping at the first short (drained) or failing entry.
+    u64 nread = 0;
+    for (u32 i = 0; i < count; i++) {
+        struct viv_linux_iovec kiov;
+        u64 ent = iov_va + (u64)i * sizeof(struct viv_linux_iovec);
+        if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0)
+            return (nread > 0) ? (s64)nread : -(s64)T_E_FAULT;
+
+        s64 rd = sys_read_handler(fd, kiov.base, kiov.len);
+
+        // POSIX: bytes already read WIN over a later error, same as writev.
+        if (rd < 0) return (nread > 0) ? (s64)nread : rd;
+
+        nread += (u64)rd;
+
+        // A short read (incl. rd==0 EOF) ends the call: the source had no more,
+        // and this also bounds a single entry larger than SYS_RW_MAX (the core
+        // clamps and the guest's libc reissues from where it stopped).
+        if ((u64)rd < kiov.len) break;
+    }
+    return (s64)nread;
+}
+
+// C2-k1b: emit one "+name "/"-name " token of the consctl grammar. Returns the
+// bytes written. The TCSETS shell emits all five flags explicitly, so the
+// resulting command fully DETERMINES the mode regardless of the current one.
+static int viv_ioctl_emit_flag(char *out, const char *name, bool set) {
+    int k = 0;
+    out[k++] = set ? '+' : '-';
+    for (const char *s = name; *s != '\0'; s++) out[k++] = *s;
+    out[k++] = ' ';
+    return k;
+}
+
+// C2-k1b PURE: map the cons 5-flag word to a Linux struct termios (the TCGETS
+// content). No fd, no uaccess -- unit-testable with a plain struct, the
+// getdents64-transform precedent. Only the five modeled flags survive; other
+// bits are 0 (the pouch PTY-3 subset honesty), which round-trips a guest's
+// tcgetattr/modify/tcsetattr for the flags we implement. c_cc carries the Linux
+// INIT_C_CC baseline (asm-generic termbits indices) so a guest sees real
+// control chars; the rest stay 0.
+void viv_cons_to_linux_termios(u32 cons_flags, struct viv_linux_termios *out) {
+    if (!out) return;
+    for (u64 i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;   // defined zeros
+    out->c_iflag = (cons_flags & CONS_ICRNL) ? VIV_LINUX_ICRNL : 0u;
+    out->c_oflag = (cons_flags & CONS_ONLCR) ? (VIV_LINUX_OPOST | VIV_LINUX_ONLCR) : 0u;
+    out->c_lflag = ((cons_flags & CONS_ICANON) ? VIV_LINUX_ICANON : 0u)
+                 | ((cons_flags & CONS_ECHO)   ? VIV_LINUX_ECHO   : 0u)
+                 | ((cons_flags & CONS_ISIG)   ? VIV_LINUX_ISIG   : 0u);
+    out->c_cflag = VIV_LINUX_B38400 | VIV_LINUX_CS8 | VIV_LINUX_CREAD;
+    out->c_line  = 0;                                            // N_TTY
+    out->c_cc[0]  = 0x03;   // VINTR    ^C
+    out->c_cc[1]  = 0x1c;   // VQUIT    ^backslash
+    out->c_cc[2]  = 0x7f;   // VERASE   DEL
+    out->c_cc[3]  = 0x15;   // VKILL    ^U
+    out->c_cc[4]  = 0x04;   // VEOF     ^D
+    out->c_cc[5]  = 0x00;   // VTIME
+    out->c_cc[6]  = 0x01;   // VMIN
+    out->c_cc[8]  = 0x11;   // VSTART   ^Q
+    out->c_cc[9]  = 0x13;   // VSTOP    ^S
+    out->c_cc[10] = 0x1a;   // VSUSP    ^Z
+    out->c_cc[12] = 0x12;   // VREPRINT ^R
+    out->c_cc[13] = 0x0f;   // VDISCARD ^O
+    out->c_cc[14] = 0x17;   // VWERASE  ^W
+    out->c_cc[15] = 0x16;   // VLNEXT   ^V
+}
+
+// C2-k1b PURE: build the DETERMINISTIC 5-flag consctl grammar from a Linux
+// termios (the TCSETS content). Every flag is emitted explicitly (+/-), so the
+// result FULLY determines the mode regardless of the current one. Returns the
+// byte count; g must hold >= 64 bytes (max 5*8=40). onlcr requires OPOST --
+// Linux translates NL only under OPOST, so native ONLCR is on iff both.
+int viv_linux_termios_to_grammar(const struct viv_linux_termios *tio, char *g) {
+    int n = 0;
+    n += viv_ioctl_emit_flag(g + n, "icanon", (tio->c_lflag & VIV_LINUX_ICANON) != 0u);
+    n += viv_ioctl_emit_flag(g + n, "echo",   (tio->c_lflag & VIV_LINUX_ECHO)   != 0u);
+    n += viv_ioctl_emit_flag(g + n, "isig",   (tio->c_lflag & VIV_LINUX_ISIG)   != 0u);
+    n += viv_ioctl_emit_flag(g + n, "icrnl",  (tio->c_iflag & VIV_LINUX_ICRNL)  != 0u);
+    n += viv_ioctl_emit_flag(g + n, "onlcr",
+             (tio->c_oflag & VIV_LINUX_OPOST) != 0u
+          && (tio->c_oflag & VIV_LINUX_ONLCR) != 0u);
+    return n;
+}
+
+// C2-k1b: serve a classified terminal ioctl on a CONSOLE fd. The cons line
+// discipline (g_cons) is kernel-owned, so this maps it to/from the Linux
+// termios/winsize ABI directly -- no ptyfs round-trip (that is the pts case,
+// C2-k1c). The error-prone flag/grammar logic is the two PURE helpers above;
+// this arm is the thin uaccess + setter glue.
+static s64 viv_ioctl_cons(struct Proc *p, enum viv_ioctl_op op, u64 argp) {
+    switch (op) {
+    case VIV_IOCTL_TCGETS: {
+        // A READ -- ungated (isatty/tcgetattr work for any cons-fd holder,
+        // matching Linux; the ldisc flags are not sensitive).
+        struct viv_linux_termios tio;
+        viv_cons_to_linux_termios(cons_termios_get(), &tio);
+        if (!sys_validate_user_buf(argp, sizeof(tio)))       return -(s64)T_E_FAULT;
+        if (uaccess_copy_out(argp, &tio, sizeof(tio)) != 0)  return -(s64)T_E_FAULT;
+        return 0;
+    }
+    case VIV_IOCTL_TCSETS: {
+        // F2: flipping the GLOBAL console line discipline requires p's session to
+        // OWN the console (the foreground session -- the Linux "only the fg pgrp
+        // may tcsetattr" rule at session granularity). A background/other-session
+        // proc, and every proc after a SAK (owner=NULL), is refused -- so a
+        // lingering phenotype cannot flip ECHO on during corvus's trusted
+        // passphrase prompt. Checked BEFORE any argp access (early, cheap reject).
+        if (!proc_console_owner_in_session(p))               return -(s64)T_E_PERM;
+        struct viv_linux_termios tio;
+        if (!sys_validate_user_buf(argp, sizeof(tio)))       return -(s64)T_E_FAULT;
+        if (uaccess_copy_in(&tio, argp, sizeof(tio)) != 0)   return -(s64)T_E_FAULT;
+        char g[64];
+        int n = viv_linux_termios_to_grammar(&tio, g);
+        // allow_flags = true: this path is the fd holder setting line discipline,
+        // not a renderer-minted consctl file; the allow_flags gate (#55 F2)
+        // narrows only the latter. Reusing the ONE production setter gets the
+        // atomic apply + ICANON-clear-delivers-line + poller wake for free. A
+        // well-formed deterministic grammar cannot fail; map -1 to EINVAL.
+        return (cons_set_mode_cmd(g, n, true) < 0) ? -(s64)T_E_INVAL : 0;
+    }
+    case VIV_IOCTL_TIOCGWINSZ: {
+        u16 cols = 0, rows = 0;
+        cons_winsize_get(&cols, &rows);                             // coherent pair
+        struct viv_linux_winsize ws;
+        ws.ws_row = rows; ws.ws_col = cols; ws.ws_xpixel = 0; ws.ws_ypixel = 0;
+        if (!sys_validate_user_buf(argp, sizeof(ws)))       return -(s64)T_E_FAULT;
+        if (uaccess_copy_out(argp, &ws, sizeof(ws)) != 0)   return -(s64)T_E_FAULT;
+        return 0;
+    }
+    case VIV_IOCTL_TIOCSWINSZ:
+        // The console geometry is physical -- owned by the renderer via the
+        // consctl winsize verb, never an app's to set. pouch-0029 answers EPERM.
+        return -(s64)T_E_PERM;
+    default:
+        return -(s64)T_E_NOTTY;
+    }
+}
+
+// C2-k1b: the ioctl shell. Classify (pure), then serve terminal control on a
+// cons fd off g_cons. EBADF beats ENOTTY (Linux checks the fd first), so an
+// unserved request still validates the fd before answering ENOTTY.
+//
+// Rights: NONE required. Linux terminal ioctls do not check the fd's r/w mode,
+// and isatty() probes fd 1/2 -- often write-only -- so demanding RIGHT_READ
+// would make isatty() false on stdout/stderr and drop git to non-interactive.
+// TCSETS mutates the (global, single-console) line discipline; that is faithful
+// to Linux tty semantics (any tty fd may tcsetattr) and touches no security bit
+// -- the SAK/trusted path is independent of the ldisc flags (I-27).
+static s64 viv_ioctl(struct Proc *p, u64 fd, u64 request, u64 argp) {
+    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd, 0);
+    if (!sp) return -(s64)T_E_BADF;
+
+    enum viv_ioctl_op op = VIV_IOCTL_UNSERVED;
+    s64 r;
+    if (vivarium_ioctl_decide(request, &op) != VIV_TRANSLATED) {
+        r = -(s64)T_E_NOTTY;                        // not a served terminal request
+    } else if (spoor_is_console(sp)) {
+        // F1: the cons fd is identified by UNFORGEABLE device identity (devcons /
+        // the devdev /dev/cons leaf), NOT the CONS_STAT_QID_FLAG bit -- a
+        // dev9p-backed Spoor carries that bit verbatim from the server (e.g.
+        // tapestryd's PANE_FLAG is the same bit 41), so a server-backed fd must
+        // never impersonate the console and flip its global line discipline.
+        r = viv_ioctl_cons(p, op, argp);
+    } else {
+        // Not the console. A pts fd IS a terminal, but its line discipline lives
+        // in the ptyfs userspace server -- reaching it from the kernel (walk
+        // /dev/pts/<N>ctl + 9P I/O) is C2-k1c. A server-backed fd (a tapestryd
+        // pane, a Stratum file) and a plain file/pipe are not the console. All
+        // answer ENOTTY today: no regression (ioctl was ENOSYS before).
+        r = -(s64)T_E_NOTTY;
+    }
+    spoor_clunk(sp);
+    return r;
+}
+
+// gettimeofday(tv, tz): write the wall clock as a struct timeval. There is no
+// native syscall to dispatch to -- SYS_CLOCK_GETTIME writes a timespec, and a
+// timeval carries MICROseconds -- so this shell does the read + convert + write
+// itself, mirroring sys_clock_gettime_handler's uaccess discipline exactly
+// (4-byte-aligned target, one uaccess_store_u32 per word, any fault -> EFAULT
+// with nothing further touched).
+//
+// tv is mandatory. tz is the obsolete `struct timezone`, NULL in every modern
+// libc; Linux STILL zero-fills a non-NULL tz (the system timezone has read
+// {0,0} for decades), so a non-NULL tz is honoured rather than rejected.
+static s64 viv_gettimeofday_write(u64 tv_va, u64 tz_va) {
+    // Linux writes tv only when it is non-NULL and returns 0 either way (its
+    // handler guards `if (likely(tv != NULL))`), so gettimeofday(NULL, tz) is a
+    // rare-but-legal no-op for tv. Match that rather than answer EFAULT, since
+    // the phenotype's contract is Linux's shape (I-43).
+    if (tv_va != 0) {
+        // struct viv_linux_timeval pins the 16-byte size (vivarium.h, with a
+        // _Static_assert); the four stores below are its {tv_sec, tv_usec}
+        // layout, each s64 written as two u32. It has no native `struct t_*`
+        // twin because Thylacine has no gettimeofday syscall.
+        if (!sys_validate_user_buf(tv_va, sizeof(struct viv_linux_timeval)))
+            return -T_E_FAULT;
+        // uaccess_store_u32 requires a 4-byte-aligned target (an unaligned STR
+        // alignment-faults past the uaccess fixup table -> extinction once
+        // SCTLR_EL1.A is set); a conformant struct timeval is 8-aligned.
+        if (tv_va & 0x3u) return -T_E_FAULT;
+
+        u64 ns   = timer_realtime_ns();
+        u64 sec  = ns / 1000000000ull;
+        u32 usec = (u32)((ns % 1000000000ull) / 1000ull);   // ns -> us, < 1e6
+
+        // struct timeval { s64 tv_sec @0; s64 tv_usec @8 }. aarch64 little-endian,
+        // so each i64 is [low u32, high u32]. tv_sec's high word is 0 until year
+        // 2106 (sec < 2^32), but is computed dynamically so the 64-bit value is
+        // exact past then; tv_usec < 1e6 fits a u32 (high word always 0).
+        if (uaccess_store_u32(tv_va + 0,  (u32)(sec & 0xFFFFFFFFu)) != 0) return -T_E_FAULT;
+        if (uaccess_store_u32(tv_va + 4,  (u32)(sec >> 32))         != 0) return -T_E_FAULT;
+        if (uaccess_store_u32(tv_va + 8,  usec)                     != 0) return -T_E_FAULT;
+        if (uaccess_store_u32(tv_va + 12, 0u)                       != 0) return -T_E_FAULT;
+    }
+
+    if (tz_va != 0) {
+        // struct viv_linux_timezone { s32 tz_minuteswest; s32 tz_dsttime } -- both 0.
+        if (!sys_validate_user_buf(tz_va, sizeof(struct viv_linux_timezone)))
+            return -T_E_FAULT;
+        if (tz_va & 0x3u) return -T_E_FAULT;
+        if (uaccess_store_u32(tz_va + 0, 0u) != 0) return -T_E_FAULT;
+        if (uaccess_store_u32(tz_va + 4, 0u) != 0) return -T_E_FAULT;
+    }
+    return 0;
+}
+
+// The 9P-dirent -> linux_dirent64 re-encode (the getdents64 chunk; VIVARIUM.md
+// section 6.25). PURE kernel-buffer transform -- no uaccess, no Proc -- so the
+// format row is unit-testable with byte arrays. Source: the spoor_readdir_run
+// stream (per entry: qid[13] + offset[8 LE] + type[1] + name_len[2 LE] +
+// name). Destination: linux_dirent64 records (d_ino u64 <- qid.path; d_off
+// s64 <- the entry's own resume cookie, "seek here for the next entry" on
+// both sides; d_reclen u16 = 8-aligned 19 + name_len + 1; d_type u8 <- the
+// 9P2000.L type byte, which IS d_type encoding -- Linux v9fs forwards it the
+// same way; d_name NUL-terminated).
+//
+// Emits WHOLE records only. Stops at the first record that does not fit
+// dst_cap (or a truncated source tail) and reports the last EMITTED entry's
+// cookie -- the caller commits the directory cursor to exactly that, so the
+// next getdents64 resumes at the first unconsumed entry with no shell-side
+// state (the cookie is the 9P resume token). Returns bytes emitted (0 when
+// the first record does not fit -- the caller's EINVAL row).
+// Non-static: the format row is pinned by unit tests (the
+// sys_open_create_kpath_for_proc pattern -- testable without an EL0 thread).
+u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+                            u8 *dst, u64 dst_cap,
+                            u64 *last_cookie_out) {
+    u64 spos = 0, dpos = 0;
+    while (spos + 24 <= src_len) {
+        u32 nlen = (u32)src[spos + 22] | ((u32)src[spos + 23] << 8);
+        if (spos + 24 + nlen > src_len) break;          // truncated tail
+        u64 reclen = (19 + (u64)nlen + 1 + 7) & ~7ull;
+        // d_reclen is a u16 field; a reclen past 0xFFFF would store truncated
+        // and mislead the guest's record walk. Unreachable from the getdents64
+        // arm (VIV_GD_RAW=2048 bounds nlen), but this encoder is public + unit-
+        // tested, so its contract must not silently depend on the caller's
+        // buffer size. Defense-in-depth for any future caller.
+        if (reclen > 0xFFFF) break;
+        if (dpos + reclen > dst_cap) break;             // record does not fit
+
+        u64 ino = 0, cookie = 0;
+        for (int i = 0; i < 8; i++) {
+            ino    |= (u64)src[spos + 5  + i] << (8 * i);   // qid.path
+            cookie |= (u64)src[spos + 13 + i] << (8 * i);   // resume cookie
+        }
+        for (int i = 0; i < 8; i++) dst[dpos + i]     = (u8)(ino    >> (8 * i));
+        for (int i = 0; i < 8; i++) dst[dpos + 8 + i] = (u8)(cookie >> (8 * i));
+        dst[dpos + 16] = (u8)(reclen & 0xFF);
+        dst[dpos + 17] = (u8)(reclen >> 8);
+        dst[dpos + 18] = src[spos + 21];                    // d_type
+        for (u32 i = 0; i < nlen; i++) dst[dpos + 19 + i] = src[spos + 24 + i];
+        for (u64 i = 19 + nlen; i < reclen; i++) dst[dpos + i] = 0;  // NUL + pad
+
+        *last_cookie_out = cookie;
+        dpos += reclen;
+        spos += 24 + nlen;
+    }
+    return dpos;
+}
+
+// #50: the shared front of the phenotype unlinkat/renameat shells (the
+// create arm has its own richer rows inside sys_open_create_kpath_for_proc):
+// copy the user path, cwd-join (FROM_ROOT -- the decides admit AT_FDCWD
+// only), split the leaf lexically (kpath_split_leaf), apply the mutation
+// rows, and stalk the parent. The rows: a dot/root leaf answers EINVAL
+// (Linux's rmdir(".") row; its unlink/rename shapes are the same EINVAL/
+// EBUSY class); a trailing separator run answers ENOTDIR unless the caller
+// is a directory op (Linux: unlink("f/") and rename("f/", ..) are ENOTDIR;
+// rmdir("d/") is legal). Returns a REF-HELD parent Spoor with the leaf
+// copied NUL-terminated into leaf_scratch (SYS_WALK_OPEN_NAME_MAX + 1), or
+// NULL with *err_out set to the full -T_E_* return value.
+static struct Spoor *viv_mutation_parent(struct Proc *p, u64 path_va,
+                                         bool allow_trailing, char *leaf_scratch,
+                                         bool *is_union_out, s64 *err_out) {
+    *is_union_out = false;
+    u32 plen = 0;
+    s64 m = viv_measure_user_path(path_va, &plen);
+    if (m != 0) { *err_out = m; return NULL; }
+    char kpath[SYS_OPEN_PATH_MAX + 1];
+    for (u32 i = 0; i < plen; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)
+            { *err_out = -(s64)T_E_FAULT; return NULL; }
+        kpath[i] = (char)b;
+    }
+    kpath[plen] = '\0';
+
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    const char *rpath;
+    u64 rlen;
+    if (sys_join_cwd_if_relative(p, SYS_WALK_OPEN_FROM_ROOT, kpath, plen,
+                                 joined, sizeof(joined), &rpath, &rlen) != 0)
+        { *err_out = -(s64)T_E_INVAL; return NULL; }
+
+    u64 leaf_start, leaf_len;
+    bool trailing;
+    enum kpath_leaf_class lc = kpath_split_leaf(rpath, rlen,
+                                                &leaf_start, &leaf_len,
+                                                &trailing);
+    if (lc != KPATH_LEAF_NAME)   { *err_out = -(s64)T_E_INVAL;  return NULL; }
+    if (trailing && !allow_trailing)
+                                 { *err_out = -(s64)T_E_NOTDIR; return NULL; }
+    if (leaf_len > SYS_WALK_OPEN_NAME_MAX)
+                                 { *err_out = -(s64)T_E_INVAL;  return NULL; }
+    for (u64 i = 0; i < leaf_len; i++) leaf_scratch[i] = rpath[leaf_start + i];
+    leaf_scratch[leaf_len] = '\0';
+
+    struct Spoor *root = territory_root_ref(p->territory);
+    if (!root)                   { *err_out = -(s64)T_E_INVAL;  return NULL; }
+    int serr = 0;
+    // STALK_REMOVE (UM-7 F3): a union parent resolves to the mount point
+    // UNCROSSED; *is_union_out then tells the caller to select the member that
+    // HOLDS the leaf (viv_union_member), not member 0 / the MCREATE member.
+    struct Spoor *parent = sys_stalk_parent(p, root, rpath, leaf_start,
+                                            STALK_REMOVE, &serr);
+    spoor_clunk(root);
+    if (!parent)                 { *err_out = -(s64)serr;       return NULL; }
+    if (p->territory) {
+        // R2-F4: probe index 0 ("is this the uncrossed mount point STALK_REMOVE
+        // left me"), NOT index 1. A >=2-member test flips to "not union" if a
+        // peer unmounts to a single member between stalk and here -- routing the
+        // unlink onto the covered mounted-onto directory. Index 0 is stable and
+        // stalk_union_member_holding handles any member count (1..N).
+        struct Spoor *m0 = mount_member_at(p->territory, parent, 0, NULL);
+        if (m0) { spoor_clunk(m0); *is_union_out = true; }
+    }
+    return parent;
+}
+
+// UM-7 F3: two Spoors name the SAME mount-point identity (Plan 9 type+dev+qid
+// == dc / devno / qid.path). The union rename uses it to detect that old and new
+// resolve to the same union point -- the destination then lands in the source
+// member (a within-member rename), not the union's MCREATE member.
+static bool spoor_same_mount_identity(const struct Spoor *a,
+                                      const struct Spoor *b) {
+    return a && b && a->dc == b->dc && a->devno == b->devno &&
+           a->qid.path == b->qid.path;
+}
+
+// UM-7 F3: select the union member a mutation acts on, CONSUMING `resolved`
+// (the uncrossed union point when is_union, else the crossed parent). Returns a
+// ref-held member (caller clunks) or NULL with *err set to a negative -T_E_*:
+//   - not a union            -> `resolved` itself (ownership passes through).
+//   - remove (want_create 0) -> the member that HOLDS `leaf` (first-hit), else
+//                               -T_E_NOENT (no member has the entry).
+//   - create (want_create 1) -> the first MCREATE member, else -T_E_ACCES.
+static struct Spoor *viv_union_member(struct Proc *p, struct Spoor *resolved,
+                                      bool is_union, const char *leaf,
+                                      bool want_create, s64 *err) {
+    if (!is_union) return resolved;
+    int e = 0;
+    struct Spoor *m = want_create
+        ? stalk_union_create_member(p, resolved, &e)
+        : stalk_union_member_holding(p, resolved, leaf, &e);
+    spoor_clunk(resolved);
+    if (!m) *err = e ? -(s64)e : -(s64)(want_create ? T_E_ACCES : T_E_NOENT);
+    return m;
+}
+
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
 // the uaccess + native-core work that translator deliberately refuses to do.
 // `ctx` is used by exactly one case (clone, LINEAGE L-3d) and ignored by the
@@ -9706,11 +12480,50 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
     case VIV_LINUX_OPENAT: {
-        // openat(dirfd, path, flags, mode): x0 dirfd, x1 path, x2 flags.
+        // openat(dirfd, path, flags, mode): x0 dirfd, x1 path, x2 flags,
+        // x3 mode (read only by the O_CREAT arm).
+        //
+        // #50: O_CREAT WITHOUT O_PATH routes to the create arm (Linux's
+        // O_PATH ignores O_CREAT -- open(2): every flag but CLOEXEC/
+        // DIRECTORY/NOFOLLOW -- so that combination stays on the plain
+        // decide, the exact Linux contour). The routing reads only register
+        // bits; both decides stay pure and each owns its whole domain.
+        if (((u32)args[2] & (u32)VIV_O_CREAT) &&
+            !((u32)args[2] & (u32)VIV_O_PATH)) {
+            u32  omode   = 0;
+            u32  perm    = 0;
+            bool cloexec = false;
+            if (vivarium_openat_create_decide(args[0], args[2], args[3],
+                                              &omode, &perm, &cloexec)
+                    != VIV_TRANSLATED)
+                return -(s64)T_E_NOSYS;         // out of domain -> V-3 forwards
+            // DECIDE BEFORE MEASURE (vivarium.h): the measurement is a
+            // faultable user read the supervisor-bound path must not take.
+            u32 path_len = 0;
+            s64 m = viv_measure_user_path(args[1], &path_len);
+            if (m != 0)                          return m;
+            char kpath[SYS_OPEN_PATH_MAX + 1];
+            for (u32 i = 0; i < path_len; i++) {
+                u8 b;
+                if (uaccess_load_u8(args[1] + i, &b) != 0)
+                    return -(s64)T_E_FAULT;
+                kpath[i] = (char)b;
+            }
+            kpath[path_len] = '\0';
+            s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                                    kpath, path_len,
+                                                    (u64)omode, (u64)perm);
+            if (fd >= 0 && cloexec)
+                (void)handle_set_cloexec(p, (hidx_t)fd, true);
+            return fd;
+        }
+
         u64  start_fd = 0;
         u32  omode    = 0;
         bool cloexec  = false;
-        if (vivarium_openat_decide(args[0], args[2], &start_fd, &omode, &cloexec)
+        bool dir_required = false;
+        if (vivarium_openat_decide(args[0], args[2], &start_fd, &omode,
+                                   &cloexec, &dir_required)
                 != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // out of domain -> V-3 forwards
         // DECIDE BEFORE MEASURE: the measurement is a faultable user read, and
@@ -9722,6 +12535,20 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         struct viv_call c;
         vivarium_openat_build(start_fd, args[1], path_len, omode, &c);
         s64 fd = sys_open_handler(c.args[0], c.args[1], c.args[2], c.args[3]);
+        // O_DIRECTORY (the getdents64 chunk): the decide reported the
+        // requirement; enforce it HERE, on the minted handle's own qid -- no
+        // extra RPC, no TOCTOU (the qid is the identity of the object this
+        // very open resolved). A non-directory closes the fd and answers
+        // ENOTDIR, the Linux row musl's opendir depends on.
+        if (fd >= 0 && dir_required) {
+            struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd, 0);
+            bool isdir = sp && (sp->qid.type & QTDIR);
+            if (sp) spoor_clunk(sp);
+            if (!isdir) {
+                (void)handle_close(p, (hidx_t)fd);
+                return -(s64)T_E_NOTDIR;
+            }
+        }
         // #151: O_CLOEXEC is a property of the DESCRIPTOR, so it is applied
         // after the open rather than carried in the omode. Only on success --
         // there is no descriptor to flag otherwise. The set cannot fail here
@@ -9731,6 +12558,184 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (fd >= 0 && cloexec)
             (void)handle_set_cloexec(p, (hidx_t)fd, true);
         return fd;
+    }
+
+    case VIV_LINUX_MKDIRAT: {
+        // mkdirat(dirfd, path, mode): x0 dirfd, x1 path, x2 mode. The kernel
+        // core's exclusive arm with DMDIR (perm carries the bit from the
+        // decide); omode 0 == OREAD -- the SYS_WALK_CREATE contract opens a
+        // DMDIR create OREAD regardless.
+        u32 perm = 0;
+        if (vivarium_mkdirat_decide(args[0], args[2], &perm) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        u32 path_len = 0;
+        s64 m = viv_measure_user_path(args[1], &path_len);
+        if (m != 0)                                  return m;
+        char kpath[SYS_OPEN_PATH_MAX + 1];
+        for (u32 i = 0; i < path_len; i++) {
+            u8 b;
+            if (uaccess_load_u8(args[1] + i, &b) != 0) return -(s64)T_E_FAULT;
+            kpath[i] = (char)b;
+        }
+        kpath[path_len] = '\0';
+        s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                                kpath, path_len,
+                                                0 /*OREAD*/, (u64)perm);
+        if (fd < 0) return fd;
+        // Linux mkdirat returns 0, not a descriptor. Closing here is
+        // socktab-safe: this fd is a KOBJ_SPOOR the create core just minted,
+        // never a socket, so no socktab entry exists to strand -- the "close
+        // is the only freeing row" invariant (the dup3 block in vivarium.c)
+        // is about indices freed WITH an entry attached, and this one never
+        // had one.
+        (void)handle_close(p, (hidx_t)fd);
+        return 0;
+    }
+
+    case VIV_LINUX_UNLINKAT: {
+        // unlinkat(dirfd, path, flags): x0 dirfd, x1 path, x2 flags. The
+        // decide maps flags onto SYS_UNLINK's (0 <-> file, AT_REMOVEDIR <->
+        // REMOVEDIR); the shell splits the path and runs the SAME extracted
+        // mechanics (spoor_unlink_in_dir) the fd-based SYS_UNLINK runs.
+        u32 tflags = 0;
+        if (vivarium_unlinkat_decide(args[0], args[2], &tflags)
+                != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        char leaf[SYS_WALK_OPEN_NAME_MAX + 1];
+        s64 err = 0;
+        bool is_union = false;
+        struct Spoor *resolved = viv_mutation_parent(
+            p, args[1], /*allow_trailing=*/tflags != 0, leaf, &is_union, &err);
+        if (!resolved) return err;
+        // UM-7 F3: a union parent resolves to the mount POINT; act on the member
+        // that HOLDS the leaf, not member 0 / the MCREATE member.
+        struct Spoor *parent = viv_union_member(p, resolved, is_union, leaf,
+                                                /*want_create=*/false, &err);
+        if (!parent) return err;   // resolved already consumed
+        s64 rc = spoor_unlink_in_dir(p, parent, leaf, tflags);
+        spoor_clunk(parent);
+        return rc;
+    }
+
+    case VIV_LINUX_RENAMEAT:
+    case VIV_LINUX_RENAMEAT2: {
+        // renameat(olddirfd, oldpath, newdirfd, newpath): x0..x3;
+        // renameat2 adds flags in x4 (admitted: exactly 0). One decide, one
+        // shell -- the 1:1 map onto the extracted spoor_rename_in_dirs
+        // (Linux's replace-existing atomicity IS SYS_RENAME's contract).
+        u64 rflags = (linux_nr == VIV_LINUX_RENAMEAT2) ? args[4] : 0;
+        if (vivarium_renameat_decide(args[0], args[2], rflags)
+                != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        char oldleaf[SYS_WALK_OPEN_NAME_MAX + 1];
+        char newleaf[SYS_WALK_OPEN_NAME_MAX + 1];
+        s64 err = 0;
+        bool od_union = false, nd_union = false;
+        struct Spoor *od_res = viv_mutation_parent(p, args[1],
+                                                   /*allow_trailing=*/false,
+                                                   oldleaf, &od_union, &err);
+        if (!od_res) return err;
+        struct Spoor *nd_res = viv_mutation_parent(p, args[3],
+                                                   /*allow_trailing=*/false,
+                                                   newleaf, &nd_union, &err);
+        if (!nd_res) { spoor_clunk(od_res); return err; }
+        // UM-7 F3: a union rename is WITHIN the source member (Plan 9 -- a 9P
+        // Trenameat is one server). When old and new name the SAME union point,
+        // the destination lands in the member holding the source, not the
+        // union's MCREATE member. Otherwise the source parent selects the member
+        // holding oldleaf and a different-union / non-union dest selects its
+        // create target; spoor_rename_in_dirs's same-Dev guard then answers a
+        // genuine cross-member move as cross-server (EXDEV -> EINVAL).
+        bool same_union = od_union && nd_union &&
+                          spoor_same_mount_identity(od_res, nd_res);
+        struct Spoor *od = viv_union_member(p, od_res, od_union, oldleaf,
+                                            /*want_create=*/false, &err);
+        if (!od) { spoor_clunk(nd_res); return err; }
+        struct Spoor *nd;
+        if (same_union) {
+            spoor_clunk(nd_res);
+            nd = od;
+            spoor_ref(nd);
+        } else {
+            nd = viv_union_member(p, nd_res, nd_union, newleaf,
+                                  /*want_create=*/true, &err);
+            if (!nd) { spoor_clunk(od); return err; }
+        }
+        s64 rc = spoor_rename_in_dirs(p, od, nd, oldleaf, newleaf);
+        spoor_clunk(od);
+        spoor_clunk(nd);
+        return rc;
+    }
+
+    case VIV_LINUX_GETDENTS64: {
+        // getdents64(fd, dirp, count): x0 fd, x1 dirp, x2 count. One raw
+        // fetch through the SAME spoor_readdir_run the native SYS_READDIR
+        // runs (dev-op + malformed guard + the #955 stale-cursor bound --
+        // extraction, not duplication), then the pure
+        // viv_dirent64_encode_run re-encode, then the copy-out, then the
+        // cursor commit. Order is load-bearing: the cursor advances to the
+        // last EMITTED entry's cookie only after the user copy succeeded
+        // (the F3 property both native and phenotype readers share), so a
+        // partial fit or a faulted copy re-fetches, never skips. A raw
+        // fetch the user buffer cannot hold ONE record of answers EINVAL
+        // (the Linux row), cursor unchanged.
+        //
+        // Frame note: 2048 raw + 2560 encoded. The encode's worst growth is
+        // align8(20+n)/(24+n), maximized at n==5 (32/29): 2048 * 32/29 =
+        // 2260 < 2560, so the cap never truncates what the fit-check would
+        // admit; the per-record fit-check enforces it regardless.
+        enum { VIV_GD_RAW = 2048, VIV_GD_ENC = 2560 };
+        u64 count = args[2];
+        if (count == 0)                          return -(s64)T_E_INVAL;
+        // Validate the user buffer BEFORE any access -- the getdents64 copy-out
+        // below writes straight to args[1] via uaccess_store_u8, whose fault
+        // fixup only engages for the USER half; a kernel-range dirp from an
+        // unprivileged phenotype would otherwise extinct (or, at a writable
+        // kernel VA, corrupt) rather than fault-gracefully. Mirror the native
+        // sys_readdir_handler, which validates its buffer up front. The write
+        // is bounded by dst_cap (<= VIV_GD_ENC), so validating that span covers
+        // every store the loop can make.
+        u64 dst_cap = (count < (u64)VIV_GD_ENC) ? count : (u64)VIV_GD_ENC;
+        if (!sys_validate_user_buf(args[1], dst_cap)) return -(s64)T_E_FAULT;
+        struct Spoor *c = sys_lookup_spoor(p, (hidx_t)args[0], RIGHT_READ);
+        if (!c)                                  return -(s64)T_E_BADF;
+        if (!(c->qid.type & QTDIR))            { spoor_clunk(c); return -(s64)T_E_NOTDIR; }
+
+        u8  raw[VIV_GD_RAW];
+        u64 run_cookie = 0;
+        s64 got = spoor_readdir_run(c, raw, (long)VIV_GD_RAW, &run_cookie);
+        if (got <= 0)                          { spoor_clunk(c); return got; }
+
+        u8  enc[VIV_GD_ENC];
+        u64 emit_cookie = 0;
+        u64 emitted = viv_dirent64_encode_run(raw, (u64)got, enc, dst_cap,
+                                              &emit_cookie);
+        if (emitted == 0)                      { spoor_clunk(c); return -(s64)T_E_INVAL; }
+
+        for (u64 i = 0; i < emitted; i++) {
+            if (uaccess_store_u8(args[1] + i, enc[i]) != 0)
+                                               { spoor_clunk(c); return -(s64)T_E_FAULT; }
+        }
+        c->offset = (s64)emit_cookie;
+        spoor_clunk(c);
+        return (s64)emitted;
+    }
+
+    case VIV_LINUX_FSYNC:
+    case VIV_LINUX_FDATASYNC: {
+        // fsync(fd) / fdatasync(fd): the native durability core with an
+        // EXPLICIT datasync word. These are T2 shells and not T1 renumbers
+        // for one load-bearing reason: Linux passes ONE argument, so x1 is
+        // whatever the caller left there -- and SYS_FSYNC reads x1 as
+        // datasync, so a T1 verbatim copy would let register garbage flip a
+        // full fsync into data-only, a silent wrong answer. DEGRADATION
+        // (documented, loud): the native core gates RIGHT_WRITE, so fsync
+        // on an O_RDONLY fd answers EBADF where Linux permits it (git
+        // fsyncs directory fds when core.fsync is enabled; milestone A runs
+        // core.fsync=none). Relaxing the native gate is an ABI change --
+        // signoff-gated, not this chunk's call to make silently.
+        return sys_fsync_handler(args[0],
+                                 (linux_nr == VIV_LINUX_FDATASYNC) ? 1 : 0);
     }
 
     case VIV_LINUX_FCNTL: {
@@ -9762,17 +12767,110 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             // is merely reached. The range lives here rather than in the pure
             // decide because PROC_HANDLE_MAX is a fact about the handle table.
             if (min_fd >= (u64)PROC_HANDLE_MAX)      return -(s64)T_E_INVAL;
+            // The alias rule (VIVARIUM 5.5.2): a socket source's row is copied
+            // onto the new number after the install; room checked first so a
+            // refused fcntl leaves the table untouched. Before this, F_DUPFD of
+            // a socket minted a second fd on the data Spoor with NO row -- the
+            // silent "omit" half-service (reads fine, getpeername EBADF).
+            struct viv_socktab *dstab =
+                __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+            if (!viv_socktab_alias_fits(dstab, (s32)fd, -1))
+                return -(s64)T_E_MFILE;
             hidx_t nfd = handle_dup_posix(p, fd, (hidx_t)min_fd, cloexec);
-            // handle_dup_posix folds "no such fd" and "table full" into one -1,
-            // and EMFILE is the more useful of the two to a shell: a guest that
-            // just used this fd knows it exists, and EBADF would send it looking
-            // for a bug it does not have.
-            if (nfd < 0)                             return -(s64)T_E_MFILE;
+            // handle_dup_posix folds "no such fd" and "table full" into one -1;
+            // split them here, because the two errnos are LOAD-BEARING to a
+            // shell and not interchangeable. This used to answer EMFILE for
+            // both, on the argument that a guest which just used the fd knows
+            // it exists -- but busybox ash's redirect() probes the TARGET fd of
+            // every `N>&M` with fcntl(N, F_DUPFD, 10) precisely to learn
+            // whether N is open: EBADF means "not open, nothing to save", and
+            // ANY other errno is "strange" and aborts the command
+            // (`fcntl(3,F_DUPFD,10): No file descriptors available`, once per
+            // `3>&1` in the L-6c gate). POSIX: closed fd -> EBADF; table full
+            // -> EMFILE. The liveness re-check is the same lookup the GETFD arm
+            // uses; the residual -1 set (table full, a non-dup-able kind, a
+            // rights failure) stays EMFILE. A peer closing the fd between the
+            // dup and this lookup misreports one errno -- unreachable for a
+            // single-threaded phenotype Proc, and harmless if it were not.
+            if (nfd < 0) {
+                if (handle_get_cloexec(p, fd) < 0)  return -(s64)T_E_BADF;
+                return -(s64)T_E_MFILE;
+            }
+            if (viv_socktab_alias(dstab, (s32)fd, (s32)nfd) < 0) {
+                handle_close(p, nfd);            // fresh number: exact unwind
+                return -(s64)T_E_MFILE;
+            }
             return (s64)nfd;
         }
+        case VIV_FCNTL_GETFL: {
+            // The open-file status word: the access mode + O_NONBLOCK. Plan 9
+            // OREAD/OWRITE/ORDWR (0/1/2) share their encoding byte-for-byte with
+            // Linux O_RDONLY/WRONLY/RDWR, so `omode & 3` IS the Linux access
+            // mode. git's `F_GETFL` -> `F_SETFL(flags | O_NONBLOCK)` idiom
+            // round-trips the access mode through F_SETFL (which ignores it), so
+            // this is exact for that path and faithful for a reader of the mode.
+            int omode = 0;
+            bool nb = false;
+            if (handle_get_status_flags(p, fd, &omode, &nb) != 0)
+                return -(s64)T_E_BADF;
+            return (s64)((u64)(omode & 3) | (nb ? (u64)VIV_O_NONBLOCK : 0));
+        }
+        case VIV_FCNTL_SETFL:
+            // Serve O_NONBLOCK; ignore O_APPEND/O_ASYNC/O_DIRECT and the access
+            // mode, exactly as Linux's F_SETFL does (it silently drops every
+            // non-status bit rather than erroring). The arg is args[2].
+            if (handle_set_nonblock(p, fd, (args[2] & (u64)VIV_O_NONBLOCK) != 0) != 0)
+                return -(s64)T_E_BADF;
+            return 0;
         default:
             return -(s64)T_E_NOSYS;
         }
+    }
+
+    case VIV_LINUX_DUP: {
+        // dup(oldfd): x0 oldfd. aarch64 HAS the plain dup (23); musl's dup() is
+        // this number. git's transport-helper dup()s the helper's output fd to
+        // wrap it in a FILE*, so the external-helper transports (git-remote-https)
+        // need it -- FORWARD answered ENOSYS ("can't dup helper output fd:
+        // Function not implemented"), which stops every https clone. Semantics:
+        // lowest free fd, rights preserved VERBATIM (I-6-safe -- no widen),
+        // cloexec clear -- exactly handle_dup_posix(p, fd, 0, false), the F_DUPFD
+        // primitive with min 0. No flags word, so no decide function.
+        u32 oldfd = (u32)args[0];
+        if (oldfd >= (u32)PROC_HANDLE_MAX)  return -(s64)T_E_BADF;
+
+        // THE ALIAS RULE (operator-voted with the fork copy, VIVARIUM 5.5.2):
+        // a socket SOURCE is no longer declined -- the new number gets its OWN
+        // copy of the source's row (fresh epoch; viv_socktab_alias). Room is
+        // checked BEFORE the install so a refused dup never touches the table,
+        // and the alias runs AFTER it so a refused install never mints a row.
+        // The residual -- a peer thread claiming the last row between the two,
+        // or turning oldfd into a socket after the check -- is a guest racing
+        // its OWN table: the locked ops keep the kernel sound, and the guest's
+        // view is what races (the pre-N-3 argument was that no peer existed;
+        // the lock replaced it when the thread set was admitted).
+        struct viv_socktab *stab =
+            __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+        if (!viv_socktab_alias_fits(stab, (s32)oldfd, -1))
+            return -(s64)T_E_MFILE;
+
+        hidx_t nfd = handle_dup_posix(p, (hidx_t)oldfd, 0, false);
+        // Split EBADF (closed source) from EMFILE (table full / a non-dup-able
+        // kind), exactly as the F_DUPFD arm: the two errnos are load-bearing and
+        // not interchangeable. handle_dup_posix folds them into one -1, so the
+        // liveness re-check (the same lookup GETFD uses) disambiguates.
+        if (nfd < 0) {
+            if (handle_get_cloexec(p, (hidx_t)oldfd) < 0)  return -(s64)T_E_BADF;
+            return -(s64)T_E_MFILE;
+        }
+        if (viv_socktab_alias(stab, (s32)oldfd, (s32)nfd) < 0) {
+            // Lost the room to a peer. The number was fresh, so closing it
+            // restores the pre-call state exactly -- better than handing back a
+            // socket fd the socket arms would not recognize.
+            handle_close(p, nfd);
+            return -(s64)T_E_MFILE;
+        }
+        return (s64)nfd;
     }
 
     case VIV_LINUX_DUP3: {
@@ -9805,14 +12903,16 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (newfd >= (u32)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
         if (oldfd >= (u32)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
 
-        // THE SOCKET DECLINE (vivarium.h carries the three options and why the
-        // other two are wrong). It sits HERE -- after every argument error and
-        // before any mutation -- so that a decline can never mask an EINVAL or
-        // EBADF that Linux would have given for the same call.
+        // THE ALIAS RULE (operator-voted; VIVARIUM 5.5.2) replaces the socket
+        // DECLINE this arm carried since #157: `dup2(sockfd, 0)`, the inetd
+        // idiom, now works -- the target number gets its OWN copy of the
+        // source's row. The room check precedes every mutation (a refused dup3
+        // must leave the table untouched); when `new` already carries a row the
+        // alias reuses that slot (replace-on-claim), so it cannot run out.
         struct viv_socktab *stab =
             __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-        if (viv_socktab_find(stab, (s32)oldfd) != NULL)
-            return -(s64)T_E_NOSYS;
+        if (!viv_socktab_alias_fits(stab, (s32)oldfd, (s32)newfd))
+            return -(s64)T_E_MFILE;
 
         // The install. A -1 here is an empty `old` or a source the alias gate
         // refuses (hardware / Srv / Loom / a devsrv connection Spoor). EBADF is
@@ -9834,12 +12934,20 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // is never free -- handle_dup_to overwrites the slot in one lock hold --
         // so no such window exists, and dropping first would instead mean a
         // REFUSED dup3 (the -1 above) had already destroyed the guest's live
-        // socket state at `new`. Between the install and this drop nothing of
-        // the guest's runs; handle_dup_to's outgoing release may sleep, but a
-        // PHENO_LINUX Proc has no peer thread to observe the gap (the property
-        // named in struct viv_socktab's header, which must be re-derived if the
-        // clone domain ever admits the thread set).
-        viv_socktab_drop(stab, (s32)newfd);
+        // socket state at `new`. Between the install and this point a peer
+        // thread could observe `new` naming old's object while its socktab
+        // entry is still the stale pre-dup3 one; that is a guest doing dup3
+        // ONTO a number another of its threads is using -- a race on its own
+        // fd, memory-safe and the guest's own bug.
+        //
+        // A socket source pays it INSIDE the alias (its replace-on-claim clears
+        // the stale row in the same lock hold that claims the copy); any other
+        // source pays it with the plain drop. An alias that lost its room to a
+        // peer (-1, the guest's own race) falls back to the drop: the number is
+        // already overwritten, so no unwind restores anything, and a dropped
+        // row beats a stale one.
+        if (viv_socktab_alias(stab, (s32)oldfd, (s32)newfd) != 1)
+            viv_socktab_drop(stab, (s32)newfd);
 
         return (s64)newfd;
     }
@@ -9900,8 +13008,12 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // newfstatat(dirfd, path, statbuf, flags): x0 dirfd, x1 path,
         // x2 statbuf, x3 flags. openat's front half joined to fstat's back
         // half -- which is exactly why vivarium.c has no _fstatat_build.
-        if (vivarium_fstatat_decide(args[0], args[3]) != VIV_TRANSLATED)
-            return -(s64)T_E_NOSYS;             // notably: every lstat()
+        // D-1: lstat (AT_SYMLINK_NOFOLLOW) is TRANSLATED now -- the decide's
+        // out-param becomes the resolver's no-follow flag.
+        u32 viv_sflags = 0;
+        if (vivarium_fstatat_decide(args[0], args[3], &viv_sflags)
+                != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
         u32 path_len = 0;
         s64 m = viv_measure_user_path(args[1], &path_len);
         if (m != 0)                                  return m;
@@ -9922,13 +13034,43 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         }
         path_scratch[path_len] = '\0';
         struct t_stat ks;
-        s64 rc = sys_stat_for_proc(p, path_scratch, path_len, &ks);
+        s64 rc = sys_stat_for_proc(p, path_scratch, path_len,
+                                   viv_sflags ? (u32)STALK_NOFOLLOW : 0u, &ks);
         if (rc != 0)                                 return rc;
         return viv_stat_copy_out(args[2], &ks);
     }
 
     case VIV_LINUX_MMAP: {
         // mmap(addr, len, prot, flags, fd, offset): x0..x5.
+        //
+        // DISTRO D-3: the FILE arm is tried FIRST, and the order is free rather
+        // than load-bearing -- vivarium_mmap_arms_disjoint pins that no tuple is
+        // admitted by both, so neither order can shadow the other. Tried first
+        // only because it is the narrower domain, which reads better.
+        if (vivarium_mmap_file_decide(args[2], args[3], args[4], args[5])
+                == VIV_TRANSLATED) {
+            // `len` is judged in the shell, not the decide, for the same reason
+            // the anon arm judges it here: Linux answers EINVAL for 0 and ENOMEM
+            // for too-large, and sys_mmap_file_for_proc reproduces both.
+            return sys_mmap_file_for_proc(p, args[4], args[1],
+                                          ((u32)args[2] & VIV_PROT_EXEC) != 0,
+                                          args[5]);
+        }
+
+        // DISTRO D-3b: the two MAP_FIXED overlays. Same disjointness argument --
+        // all four arms demand EXACT equality against distinct flags words, so
+        // the ordering here cannot shadow anything.
+        if (vivarium_mmap_fixed_file_decide(args[0], args[2], args[3],
+                                            args[4], args[5]) == VIV_TRANSLATED) {
+            return sys_mmap_fixed_file_for_proc(p, args[0], args[4], args[1],
+                                                (u32)args[2], args[5]);
+        }
+        if (vivarium_mmap_fixed_anon_decide(args[0], args[2], args[3],
+                                            args[4], args[5]) == VIV_TRANSLATED) {
+            return sys_mmap_fixed_anon_for_proc(p, args[0], args[1],
+                                                (u32)args[2]);
+        }
+
         if (vivarium_mmap_decide(args[0], args[2], args[3], args[4], args[5])
                 != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // out of domain
@@ -9954,27 +13096,28 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     case VIV_LINUX_MUNMAP: {
         // munmap(addr, len): x0 addr, x1 len.
         //
-        // No pure _decide: this row's domain is a question about STATE (does a
-        // VMA match?), and sys_burrow_detach_for_proc ALREADY answers it -- it
-        // enforces the exact match itself. So the shell attempts it and reads
-        // the answer instead of re-deriving the check, which is what keeps this
-        // a decode rather than a second implementation, and leaves no second
-        // lookup to race against.
+        // #199 widened this row from exact-match to the RANGE form: D-3b's
+        // MAP_FIXED split turns one library map into 2-3 VMAs, and musl's
+        // unmap_library munmaps the WHOLE span in one call, so exact-match
+        // leaked every library torn down on map_library's error path or
+        // dlclose. sys_munmap_range_for_proc detaches every VMA WHOLLY inside
+        // the range (whole VMAs only -- never partial), treats nothing-mapped
+        // as the Linux no-op success, and refuses atomically on a boundary
+        // straddle. The range scan it needed (vma_next_overlap_in) now exists,
+        // which is what the previous decline-comment said was missing.
         //
         // The two argument errors are reproduced up front because Linux gives
         // them a specific errno that a decline would replace with ENOSYS.
         if (args[0] & (PAGE_SIZE - 1)) return -(s64)T_E_INVAL;
         if (args[1] == 0)              return -(s64)T_E_INVAL;
 
-        if (sys_burrow_detach_for_proc(p, args[0], args[1]) == 0) return 0;
+        if (sys_munmap_range_for_proc(p, args[0], args[1]) == 0) return 0;
 
-        // Outside the exact-match subset. This DECLINES a case Linux would
-        // succeed on -- unmapping a range with nothing mapped in it -- and that
-        // is deliberate: telling that apart from a PARTIAL overlap needs a range
-        // scan the VMA API does not expose (vma_lookup is a point probe, blind
-        // to a VMA lying strictly inside the range), and the two must not be
-        // conflated. Claiming success on a partial overlap would leave a mapping
-        // the guest believes is gone. Declining is honest; faking is not.
+        // Outside the served subset: a boundary-straddling partial overlap
+        // (Linux would SPLIT the VMA; partial unmap is post-v1.0), a CODE
+        // region (I-42's pair lifetime), or out-of-window coordinates.
+        // Claiming success would leave a mapping the guest believes is gone.
+        // Declining is honest; faking is not.
         return -(s64)T_E_NOSYS;
     }
 
@@ -10044,12 +13187,30 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // merely RESETS dispositions (the common post-fork cleanup) from
         // allocating anything at all.
         struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
-        if (act.handler == VIV_SIG_DFL && !tab) return 0;
-        if (!tab) {
-            tab = viv_sigtab_of(p);
-            if (!tab) return -(s64)T_E_NOMEM;
+        if (!(act.handler == VIV_SIG_DFL && !tab)) {
+            if (!tab) {
+                tab = viv_sigtab_of(p);
+                if (!tab) return -(s64)T_E_NOMEM;
+            }
+            (void)viv_sigtab_set(tab, note, &act);
         }
-        (void)viv_sigtab_set(tab, note, &act);
+
+        // POSIX 2.4.3 / Linux do_sigaction: a disposition that IGNORES --
+        // SIG_IGN, or SIG_DFL for a signal whose default is ignore -- discards
+        // every instance already pending, blocked or not. AFTER the store, so
+        // notes_post's under-lock disposition read and this discard are one
+        // step (see notes_discard_name): a poster that saw SIG_DFL enqueued in
+        // a lock hold this one follows, and is removed here; one that takes
+        // the lock after this sees the new value and drops. Without it the
+        // pending note waited for the EL0 tail's discard arm, and a guest that
+        // re-installed a HANDLER before unblocking had it delivered -- a
+        // signal POSIX says died at the SIG_IGN. Nothing to discard is the
+        // common case and costs one locked scan of an empty ring.
+        if (act.handler == VIV_SIG_IGN ||
+            (act.handler == VIV_SIG_DFL && viv_signote_default_is_ignore(note))) {
+            const char *nm = viv_signote_note_name(note);
+            if (nm) (void)notes_discard_name(p, nm);
+        }
         return 0;
     }
 
@@ -10129,6 +13290,31 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // accept4(fd, addr, addrlen, flags): x0..x3.
         return viv_sock_accept(p, args[0], args[1], args[2], args[3]);
 
+    case VIV_LINUX_GETSOCKOPT:
+        // getsockopt(fd, level, optname, optval, optlen): x0..x4.
+        return viv_sock_getsockopt(p, args[0], args[1], args[2], args[3],
+                                   args[4]);
+
+    case VIV_LINUX_SENDTO:
+        // sendto(fd, buf, len, flags, addr, addrlen): x0..x5.
+        return viv_sock_sendto(p, args[0], args[1], args[2], args[3],
+                               args[4], args[5]);
+
+    case VIV_LINUX_RECVFROM:
+        // recvfrom(fd, buf, len, flags, addr, addrlen): x0..x5. The addrlen
+        // out-pointer (x5) is deliberately unread: the decide refuses any
+        // non-NULL addr (x4), and with no address written back there is no
+        // length to report -- reading x5 would consult a register the served
+        // shape leaves as garbage (the clone garbage-register rule).
+        return viv_sock_recvfrom(p, args[0], args[1], args[2], args[3],
+                                 args[4]);
+
+    case VIV_LINUX_RECVMSG:
+        // recvmsg(fd, msghdr, flags): x0 fd, x1 msghdr, x2 flags. The msghdr's
+        // iovecs + msg_name are read/written by the shell (N-2b); this is the
+        // receive half of the DNS datagram path.
+        return viv_sock_recvmsg(p, args[0], args[1], args[2]);
+
     case VIV_LINUX_PPOLL:
         // ppoll(fds, nfds, tmo_p, sigmask, sigsetsize): x0..x4. sigsetsize is
         // read only via the sigmask decline, which needs no size -- Linux itself
@@ -10146,26 +13332,34 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // clone(flags, stack, parent_tid, tls, child_tid): x0..x4, in arm64's
         // CONFIG_CLONE_BACKWARDS order (tls BEFORE child_tid).
         //
-        // ONLY args[0] AND args[1] ARE READ, and that is a correctness
-        // requirement rather than an economy. posix_spawn calls
+        // On the FORK/VFORK arms ONLY args[0] AND args[1] ARE READ, and that is
+        // a correctness requirement rather than an economy. posix_spawn calls
         // `__clone(child, stack, flags, arg)` with four arguments, and musl's
         // clone.s then moves x4/x5/x6 into x2/x3/x4 -- three registers the
         // caller never initialised. Linux tolerates that because the
-        // corresponding CLONE_* bits are clear; so does this, by refusing every
-        // one of those bits in the admitted flags word and passing a LITERAL 0
-        // for child_tls. Reaching for args[3] here would hand the child a
-        // garbage TPIDR_EL0 and fault it at its first thread-local access, far
-        // from this line.
-        bool share_mem = false;
-        if (vivarium_clone_decide(args[0], args[1], &share_mem) != VIV_TRANSLATED)
+        // corresponding CLONE_* bits are clear; so do these arms, by refusing
+        // every one of those bits in the fork/vfork words and passing a LITERAL 0
+        // for child_tls. Reaching for args[3] on a FORK would hand the child a
+        // garbage TPIDR_EL0 and fault it at its first thread-local access.
+        //
+        // The THREAD arm is the deliberate exception: its exact word CARRIES
+        // SETTLS + PARENT_SETTID + CHILD_CLEARTID, so x2/x3/x4 are meaningful and
+        // viv_clone_thread reads them. The decide keeps the arms as separate
+        // exact words precisely so this "fork never reads the garbage registers"
+        // claim stays literally true.
+        enum viv_clone_mode mode;
+        if (vivarium_clone_decide(args[0], args[1], &mode) != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // out of domain -> V-3 forwards
 
-        // 0 = INHERIT the caller's TPIDR_EL0. That is what a vfork child needs
-        // (it runs the parent's C, thread-locals and all, until it execs) and
-        // equally what a fork child needs (it continues the parent outright).
+        if (mode == VIV_CLONE_MODE_THREAD)
+            return viv_clone_thread(ctx, args);  // N-3: a Thread in cur->proc
+
+        // FORK / VFORK. child_tls=0 = INHERIT the caller's TPIDR_EL0: what a vfork
+        // child needs (it runs the parent's C, thread-locals and all, until it
+        // execs) and equally what a fork child needs (it continues the parent).
         return sys_rfork_core(ctx,
-                              share_mem ? (unsigned)(RFPROC | RFMEM)
-                                        : (unsigned)RFPROC,
+                              mode == VIV_CLONE_MODE_VFORK ? (unsigned)(RFPROC | RFMEM)
+                                                          : (unsigned)RFPROC,
                               args[1], 0);
     }
 
@@ -10185,11 +13379,25 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // wait4(pid, wstatus, options, rusage): x0..x3. LINEAGE L-6b.
         return viv_wait4(args[0], args[1], args[2], args[3]);
 
+    case VIV_LINUX_FUTEX:
+        // futex(uaddr, op, val, timeout/val2, uaddr2, val3): x0..x5. N-3. The
+        // WAIT/WAKE/REQUEUE subset musl's pthread mutex + cond + join use.
+        return viv_futex(p, args[0], args[1], args[2], args[3], args[4]);
+
     // ---- the startup batch (#150, LINEAGE L-6c) --------------------------
+
+    case VIV_LINUX_READV:
+        // readv(fd, iov, iovcnt): x0..x2. N-5: writev's read twin.
+        return viv_readv(args[0], args[1], args[2]);
 
     case VIV_LINUX_WRITEV:
         // writev(fd, iov, iovcnt): x0..x2.
         return viv_writev(args[0], args[1], args[2]);
+
+    case VIV_LINUX_IOCTL:
+        // ioctl(fd, request, argp): x0..x2. C2-k1b: terminal control on a cons
+        // fd (isatty/termios/winsize); pts deferred (C2-k1c); else ENOTTY.
+        return viv_ioctl(p, args[0], args[1], args[2]);
 
     case VIV_LINUX_GETCWD: {
         // getcwd(buf, size): x0 buf, x1 size.
@@ -10234,6 +13442,38 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return (s64)proc_parent_pid(p);
     }
 
+    case VIV_LINUX_GETTID: {
+        // gettid(void) -> the per-Thread tid. getpid stays per-Proc (Proc.pid,
+        // shared by all CLONE_THREAD peers); gettid is the separate per-Thread
+        // counter (alloc_next_tid). No native twin exists and adding one would be
+        // a syscall-interface change for a Linux-only need, so it reads the field
+        // directly. current_thread() is never NULL on a phenotype dispatch (a
+        // syscall is executing on this Thread), but guard it -- a defensive NULL
+        // here is a clean -EINVAL, not a deref.
+        struct Thread *ct = current_thread();
+        return ct ? (s64)ct->tid : -(s64)T_E_INVAL;
+    }
+
+    case VIV_LINUX_SETSID:
+        // setsid(void) -> new sid. A shell (not a renumber) ONLY to remap the
+        // errno: the native core returns T_E_ACCES for "already a group leader",
+        // which Linux setsid(2) reports as EPERM. Called with the explicit p (not
+        // via current_thread) so the _for_test path drives the exact Proc.
+        {
+            s64 r = (s64)proc_setsid(p);
+            return (r == -(s64)T_E_ACCES) ? -(s64)T_E_PERM : r;
+        }
+
+    case VIV_LINUX_SETPGID:
+        // setpgid(pid, pgid): x0 pid, x1 pgid. Same errno remap -- the native
+        // "EPERM contour" (cross-session / session-leader / no such group in the
+        // session) is T_E_ACCES; Linux setpgid(2) reports these as EPERM. INVAL
+        // (pgid < 0) and SRCH (no such target) already match Linux and pass through.
+        {
+            s64 r = (s64)proc_setpgid(p, (int)args[0], (int)args[1]);
+            return (r == -(s64)T_E_ACCES) ? -(s64)T_E_PERM : r;
+        }
+
     case VIV_LINUX_GETUID:
         // getuid(void). The native twin is exact, the arity matches, and it is
         // STILL a shell -- the sentinel mapping (vivarium.h) has to happen
@@ -10243,6 +13483,174 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     case VIV_LINUX_GETGID:
         // getgid(void). Same shape, same reason.
         return (s64)(u64)vivarium_map_gid(p->primary_gid);
+
+    case VIV_LINUX_GETEUID:
+        // geteuid(void). Thylacine has ONE principal per Proc -- no real vs
+        // effective split (I-22: authority is the capability set, not a uid),
+        // so effective == real and this is getuid's exact twin.
+        return (s64)(u64)vivarium_map_uid(p->principal_id);
+
+    case VIV_LINUX_GETEGID:
+        // getegid(void). Same, for the gid.
+        return (s64)(u64)vivarium_map_gid(p->primary_gid);
+
+    case VIV_LINUX_FACCESSAT: {
+        // faccessat(dirfd, pathname, mode): x0 dirfd, x1 path, x2 mode. The
+        // RAW 3-arg syscall -- args[3] is not part of this number's ABI and is
+        // never read (see vivarium.h). It is fstatat's front half joined to a
+        // perm_check: resolve the path exactly as newfstatat does, then answer
+        // the mode question against the resolved file's stat.
+        //
+        // No copy-OUT: the only user memory touched is the path READ (measured
+        // then re-read under fault fixup, identical to the newfstatat arm), so
+        // there is no dst buffer to validate -- the getdents64 P0's hazard
+        // (an unvalidated copy-out to a raw user ptr) does not exist here.
+        if (vivarium_faccessat_decide(args[0]) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+
+        // The mode's EINVAL contour, judged in the shell (the mmap-len
+        // precedent): Linux answers EINVAL for any bit outside R_OK|W_OK|X_OK.
+        // R_OK=4/W_OK=2/X_OK=1 map 1:1 onto PERM_R/PERM_W/PERM_X, and F_OK=0
+        // asks only existence.
+        u32 mode = (u32)args[2];
+        if (mode & ~0x7u) return -(s64)T_E_INVAL;
+
+        u32 path_len = 0;
+        s64 m = viv_measure_user_path(args[1], &path_len);
+        if (m != 0)                                  return m;
+        char path_scratch[SYS_OPEN_PATH_MAX + 1];
+        for (u32 i = 0; i < path_len; i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(args[1] + i, &b) != 0) return -(s64)T_E_FAULT;
+            if (b == '\0')                             return -(s64)T_E_INVAL;
+            path_scratch[i] = (char)b;
+        }
+        path_scratch[path_len] = '\0';
+
+        // access(2) follows symlinks (there is no AT_SYMLINK_NOFOLLOW on the
+        // raw 3-arg number), so resolve with follow. A resolution failure IS
+        // the answer -- ENOENT/ENOTDIR/EACCES from the walk's own per-component
+        // gate flow straight back, exactly as git expects.
+        struct t_stat ks;
+        s64 rc = sys_stat_for_proc(p, path_scratch, path_len, 0u, &ks);
+        if (rc != 0)                                 return rc;
+
+        // F_OK: the file exists (the stat succeeded) and that is the whole
+        // answer. Otherwise the requested rwx bits are checked against the
+        // resolved file under the caller's OWN principal -- the same
+        // perm_check the open path runs, so access() and the subsequent open
+        // agree.
+        if (mode == 0)                               return 0;
+        if (perm_check(p, &ks, mode) != 0)           return -(s64)T_E_ACCES;
+        return 0;
+    }
+
+    case VIV_LINUX_CHDIR: {
+        // chdir(path): x0 = a NUL-terminated path pointer. The native
+        // SYS_CHDIR reads + validates the path itself (it takes path_va +
+        // path_len and runs its own sys_validate_user_buf + uaccess loop), so
+        // the only translation is measuring the length Linux leaves implicit.
+        u32 path_len = 0;
+        s64 m = viv_measure_user_path(args[0], &path_len);
+        if (m != 0)                                  return m;
+        s64 rc = sys_chdir_handler(args[0], (u64)path_len, 0, 0);
+        // sys_chdir_handler collapses every failure (target missing, not a
+        // directory, no search permission) to a bare -1. Passing that through
+        // would read as EPERM at the libc -- a code chdir never returns on
+        // Linux -- so map it to ENOENT, the dominant and least-wrong cause.
+        // The collapse of ENOTDIR/EACCES into ENOENT is a fidelity gap tracked
+        // for when a richer native chdir errno path exists; the SUCCESS path
+        // (the only one milestone A exercises) is exact.
+        return (rc == 0) ? 0 : -(s64)T_E_NOENT;
+    }
+
+    case VIV_LINUX_FCHMODAT: {
+        // fchmodat(dirfd, path, mode, flags): x0 dirfd, x1 path, x2 mode,
+        // x3 flags. git's git_config_set copies the config file's permission
+        // bits onto its lockfile via chmod before the rename and treats the
+        // chmod failing as a config-write failure, so `git init` needs this to
+        // write core.filemode.
+        //
+        // The AT_FDCWD gate is faccessat's exactly (dirfd == AT_FDCWD), which is
+        // also the native-53 (SYS_PIVOT_ROOT) collision defense -- see the
+        // header. A real dirfd forwards, as everywhere in this family.
+        if (vivarium_faccessat_decide(args[0]) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+
+        // The RAW 3-arg fchmodat(dirfd, path, mode) -- x0/x1/x2 only, exactly
+        // as musl's chmod()/fchmodat(...,0) issue it (SYS_fchmodat is DEFINE3;
+        // the flags-bearing variant is fchmodat2/452, a distinct number that
+        // FORWARDs). So args[3] is UNDEFINED register residue, not a flags word:
+        // reading it (the F1 defect) spuriously EINVAL'd a valid chmod whenever
+        // the caller left x3 nonzero, killing `git init`'s config write for an
+        // unlucky binary. Nothing to refuse -- the sibling faccessat row (48)
+        // makes the identical "args[3] does not exist and is never read" point.
+
+        // The 9 rwx bits only. Thylacine does not enforce setuid/setgid/sticky
+        // at v1.0 and T_WSTAT rejects them outright, so they are dropped here --
+        // a documented fidelity gap, not a silent one (git's config-file modes
+        // never carry them).
+        u32 mode = (u32)args[2] & T_WSTAT_MODE_MASK;
+
+        u32 path_len = 0;
+        s64 mrc = viv_measure_user_path(args[1], &path_len);
+        if (mrc != 0)                                return mrc;
+
+        // Open O_PATH: chmod requires OWNERSHIP, never read, so the
+        // perm_check-EXEMPT navigation handle is the correct base (an O_RDONLY
+        // open would wrongly fail for an owner who lacks read). FROM_ROOT is
+        // cwd-aware for a relative path (the openat AT_FDCWD correspondence).
+        // sys_open_handler returns the real errno (ER-1 rollout: ENOENT /
+        // ENOTDIR / EACCES from the walk), which IS the fchmodat answer.
+        s64 fd = sys_open_handler(SYS_WALK_OPEN_FROM_ROOT, args[1],
+                                  (u64)path_len, (u64)SYS_WALK_OPEN_OPATH);
+        if (fd < 0)                                  return fd;
+
+        // The mode change runs through the audited sys_wstat_for_proc, whose
+        // perm_wstat_check is the POSIX owner-or-CAP authority (the #47 note:
+        // the metadata axis is kind-gated, works on any-rights incl. O_PATH).
+        // Its bare -1 (perm denial / server refusal) maps to EPERM, chmod's
+        // permission-failure errno.
+        s64 rc = sys_wstat_for_proc(p, (hidx_t)fd, T_WSTAT_MODE, mode, 0, 0, 0);
+        (void)handle_close(p, (hidx_t)fd);
+        return (rc == 0) ? 0 : -(s64)T_E_PERM;
+    }
+
+    case VIV_LINUX_READLINKAT: {
+        // readlinkat(dirfd, path, buf, bufsiz): x0 dirfd, x1 path, x2 buf,
+        // x3 bufsiz. The AT_FDCWD gate is faccessat's exactly (also the
+        // native-78 SYS_PCI_INFO collision defense). The copy-OUT to buf is
+        // validated inside sys_readlink_for_proc, against the exact span.
+        if (vivarium_faccessat_decide(args[0]) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        u32 path_len = 0;
+        s64 mrc = viv_measure_user_path(args[1], &path_len);
+        if (mrc != 0)                                return mrc;
+        char path_scratch[SYS_OPEN_PATH_MAX + 1];
+        for (u32 i = 0; i < path_len; i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(args[1] + i, &b) != 0) return -(s64)T_E_FAULT;
+            if (b == '\0')                             return -(s64)T_E_INVAL;
+            path_scratch[i] = (char)b;
+        }
+        path_scratch[path_len] = '\0';
+        return sys_readlink_for_proc(p, path_scratch, path_len,
+                                     args[2], args[3]);
+    }
+
+    case VIV_LINUX_GETRANDOM: {
+        // getrandom(buf, buflen, flags): x0 buf, x1 buflen, x2 flags. The
+        // native SYS_GETRANDOM is shape-identical and does its own buffer
+        // validation + copy-out (the F237 partial-fault scrub included), and
+        // gates on CAP_CSPRNG_READ -- kept under I-43 (shape, not authority).
+        s64 rc = sys_getrandom_handler(args[0], args[1], args[2]);
+        // The native handler signals every failure (no cap / not seeded /
+        // fault) with a bare -1. -1 would read as EPERM at the libc; map it to
+        // EAGAIN, Linux getrandom's "entropy not available yet" errno and the
+        // closest analog for a v1.0 backend that cannot distinguish the causes.
+        // The success path returns the byte count verbatim (>= 0).
+        return (rc < 0) ? -(s64)T_E_AGAIN : rc;
+    }
 
     case VIV_LINUX_UNAME: {
         // uname(buf): x0 buf. A fabrication -- WHAT it claims is the decision,
@@ -10273,6 +13681,26 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         s64 rc = sys_set_tid_address_handler(args[0]);
         return (rc < 0) ? -(s64)T_E_INVAL : rc;
     }
+
+    case VIV_LINUX_CLOCK_GETTIME: {
+        // clock_gettime(clk_id, tp): x0 clk_id, x1 tp. The Linux timespec is
+        // byte-identical to the native one, so the ONLY translation is the
+        // clk_id map -- the native handler does the validated write. An unmapped
+        // clk_id is a SERVED -EINVAL (Linux's own answer for a clk_id it cannot
+        // serve), not a declined row: the number IS translated, this clock is
+        // not one we have. Returning -ENOSYS here would wrongly report the whole
+        // call as unserved to viv_report_unserved.
+        u64 clk;
+        if (!vivarium_clock_gettime_map(args[0], &clk))
+            return -(s64)T_E_INVAL;
+        return sys_clock_gettime_handler(clk, args[1], 0, 0);
+    }
+
+    case VIV_LINUX_GETTIMEOFDAY:
+        // gettimeofday(tv, tz): x0 tv, x1 tz. No native counterpart and a
+        // microsecond timeval, so the shell reads the clock and writes the
+        // converted struct itself. See viv_gettimeofday_write.
+        return viv_gettimeofday_write(args[0], args[1]);
 
     case VIV_LINUX_SETUID:
         // setuid(uid): x0. Identity is set once at spawn and immutable on a
@@ -10358,23 +13786,65 @@ static void viv_report_unserved(u64 nr, const char *why) {
     }
 
     // Dedupe BEFORE charging the cap: a number asked for in a loop must not
-    // burn the budget that a never-yet-seen number needs.
+    // burn the budget that a never-yet-seen number needs. ROUND F1: this is a
+    // read-only TEST here; the bit is SET below, after the line lands.
+    u64 bit = 0ull;
     if (nr < VIV_UNSERVED_BITS) {
-        u64 bit  = 1ull << (nr & 63u);
-        u64 prev = __atomic_fetch_or(&g_viv_unserved_seen[nr >> 6], bit,
-                                     __ATOMIC_RELAXED);
-        if (prev & bit) return;
+        bit = 1ull << (nr & 63u);
+        if (__atomic_load_n(&g_viv_unserved_seen[nr >> 6], __ATOMIC_RELAXED) & bit)
+            return;
     }
-    if (__atomic_fetch_add(&g_viv_unserved_reports, 1u, __ATOMIC_RELAXED)
+    // ROUND F5: LOAD-then-check, never an unconditional fetch_add. The add ran
+    // on every call past the cap too, including the `nr >= VIV_UNSERVED_BITS`
+    // arm that skips the dedupe entirely -- so a plain u32 wrapped at 2^32 and
+    // re-armed the next 96 lines. Negligible as a channel; reported because
+    // the commit body and the status row both assert the cap as a HARD bound
+    // for the boot, and asserted bounds get inherited as premises. The
+    // load-then-add race can over-print by at most the CPU count, which is
+    // strictly better than wrapping.
+    if (__atomic_load_n(&g_viv_unserved_reports, __ATOMIC_RELAXED)
         >= VIV_UNSERVED_MAX_REPORTS)
         return;
-    uart_puts("vivarium: unserved linux syscall nr=");
-    uart_putdec(nr);
-    uart_puts(" (");
-    uart_puts(why);
-    uart_puts(") pid=");
-    uart_putdec((u64)pid);
-    uart_puts("\n");
+    // #243: ONE unit under the ring lock, not seven lock-free uart_* calls.
+    // The raw loop is the pre-P1-F shape #75 exists to eliminate, and #76
+    // removed it from SYS_PUTS one file above after it was observed LIVE
+    // shredding a login prompt byte-for-byte against a peer writer. This
+    // path arrived later and reached for it again -- and it is the worse
+    // site of the two, because an unprivileged EL0 program CHOOSES when it
+    // fires by issuing a syscall the phenotype does not serve. A direct
+    // uart_puts also bypasses the extinction ring claim, whose hold stops
+    // every ring producer and the drain but cannot stop a peer writing the
+    // FIFO by another road -- so these bytes could land inside an
+    // `EXTINCTION:` line, which costs the multi-boot classifier a real
+    // corruption verdict and can invert a test-fault.sh result.
+    // ROUND F1 [P1]: the budget is spent on a line that LANDED, never on one
+    // that was attempted. `cons_diag_line_emit` is all-or-nothing, so a full
+    // ring drops the whole 107-byte unit -- and under back-pressure from a
+    // guest writing /dev/cons that drop is DETERMINISTIC, not racy. The first
+    // shape of this fix consumed the dedupe bit and the report budget BEFORE
+    // the emit, so a dropped line was marked seen forever and the census
+    // silently under-reported: exactly the failure this function's own header
+    // says the per-Proc rework existed to kill ("worse than no diagnostic,
+    // because it reads as a measurement"). The old raw `uart_puts` could not
+    // do this -- it span per byte and always emitted.
+    //
+    // So: emit, and only then take the dedupe bit and charge the cap. A
+    // dropped line stays unreported and unspent, and is retried the next time
+    // that number is declined.
+    struct cons_diag_line l;
+    cons_diag_line_init(&l);
+    cons_diag_line_puts(&l, "vivarium: unserved linux syscall nr=");
+    cons_diag_line_putdec(&l, nr);
+    cons_diag_line_puts(&l, " (");
+    cons_diag_line_puts(&l, why);
+    cons_diag_line_puts(&l, ") pid=");
+    cons_diag_line_putdec(&l, (u64)pid);
+    cons_diag_line_puts(&l, "\n");
+    if (!cons_diag_line_emit(&l))
+        return;   // dropped whole: spend nothing, so the next decline retries
+    if (bit)
+        __atomic_fetch_or(&g_viv_unserved_seen[nr >> 6], bit, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_viv_unserved_reports, 1u, __ATOMIC_RELAXED);
 }
 
 // VIV_TRACE: a bounded per-Proc trace of EVERY phenotyped syscall, not just
@@ -10407,6 +13877,91 @@ static void viv_trace_call(u64 nr, struct Proc *p) {
 }
 #endif
 
+// Test support (the burrow_*_for_test convention): drive the T2 fcntl arm on a
+// caller-supplied Proc with no exception frame. Deliberately absent from the
+// header; the harness extern-declares it. Safe ONLY because the FCNTL case
+// reads `p` and `args` and never touches ctx -- a hook that handed a NULL frame
+// to the arms that measure user memory (openat, the stat family) would fault,
+// so this is not a general T2 driver and must not grow into one.
+s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
+s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg) {
+    u64 args[VIV_NARGS] = { fd, cmd, arg, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_FCNTL, args);
+}
+
+// Drives the REAL dup arm through the T2 dispatcher (the DUP case never reads
+// the exception frame, so NULL ctx is safe), so a test proves the arm is wired
+// to handle_dup_posix -- not merely that the verdict is TIER2.
+s64 viv_dup_for_test(struct Proc *p, u64 fd);
+s64 viv_dup_for_test(struct Proc *p, u64 fd) {
+    u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_DUP, args);
+}
+
+// Drives the REAL dup3 arm (the DUP3 case reads `p` + `args` only, never the
+// frame), so a test proves the alias rule AT THE ARM: a socket source's row is
+// copied onto the target number, and a non-socket source onto a socket number
+// drops that number's row.
+s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
+s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags) {
+    u64 args[VIV_NARGS] = { oldfd, newfd, flags, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_DUP3, args);
+}
+
+// Drives the REAL getsockopt shell through the T2 dispatcher, so a test can
+// prove the F1 uaccess guard (the shell validates BOTH spans before any
+// memory access, so a kernel-range VA is rejected -T_E_FAULT with no access).
+s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
+                            u64 optval_va, u64 optlen_va);
+s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
+                            u64 optval_va, u64 optlen_va) {
+    u64 args[VIV_NARGS] = { fd, level, optname, optval_va, optlen_va, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_GETSOCKOPT, args);
+}
+
+// Drives the REAL getdents64 shell through the T2 dispatcher, so a test can
+// prove the F1 uaccess guard: the shell validates the user buffer BEFORE the
+// fd lookup, so a kernel-range dirp is rejected -T_E_FAULT with no store and no
+// extinction (the getdents64 copy-out writes via uaccess_store_u8, whose fault
+// fixup does not engage for a kernel-half VA). Same NULL-ctx safety as the
+// fcntl/getsockopt hooks: getdents64 reads `p` + `args` and never touches ctx.
+s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
+s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count) {
+    u64 args[VIV_NARGS] = { fd, dirp, count, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_GETDENTS64, args);
+}
+
+// Drives the REAL readv/writev shells through the T2 dispatcher, so a test can
+// prove the iovec-ARRAY span guard: both shells validate [iov_va, iov_va +
+// count*16) BEFORE any copy_in, so a kernel-range iov_va is rejected -T_E_FAULT
+// with no copy_in and no extinction (uaccess_copy_in's fixup does not engage for
+// a kernel-half VA -- the getdents64 P0 class, on the array read). Same NULL-ctx
+// safety as the getdents64 hook: readv/writev read `p` + `args`, never ctx.
+s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt) {
+    u64 args[VIV_NARGS] = { fd, iov_va, iovcnt, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_READV, args);
+}
+
+s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt) {
+    u64 args[VIV_NARGS] = { fd, iov_va, iovcnt, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_WRITEV, args);
+}
+
+// C2-k1b: drive the ioctl shell through the REAL viv_tier2 arm (declared in
+// vivarium.h). args order matches the case: {fd, request, argp}.
+s64 viv_ioctl_for_test(struct Proc *p, u64 fd, u64 request, u64 argp) {
+    u64 args[VIV_NARGS] = { fd, request, argp, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_IOCTL, args);
+}
+
+// C2-k2: drive a session/pgrp TIER2 shell through the REAL viv_tier2 arm.
+s64 viv_session_for_test(struct Proc *p, u64 linux_num, u64 a0, u64 a1) {
+    u64 args[VIV_NARGS] = { a0, a1, 0, 0, 0, 0 };
+    return viv_tier2(NULL, p, linux_num, args);
+}
+
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
 #if VIV_TRACE
     viv_trace_call(ctx->regs[8], p);
@@ -10431,6 +13986,22 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     if (ctx->regs[8] == VIV_LINUX_RT_SIGRETURN) {
         sys_noted_handler(ctx, 0);      // NCONT: restore from the Thread snapshot
         return false;                   // ctx is already final; write no result
+    }
+
+    // bug-2 (VIVARIUM.md §6.23): the PRIMARY handler-escape clear. A handler
+    // that siglongjmp'd out of itself (no rt_sigreturn -- the branch above) left
+    // in_handler stuck true, which the N-3 guard would read as "a handler is
+    // still running" and refuse all future caught-note delivery. This is the
+    // escaped main loop's FIRST syscall; ctx->sp is its (escaped, higher) SP_EL0,
+    // so thread_note_handler_escaped trips and we clear in_handler HERE -- before
+    // any blocking syscall below parks. That ordering is load-bearing, not an
+    // optimisation: an EL0-return-only clear deadlocks deaf (the parked read
+    // never returns to run it, and bug-1's sleep predicate won't wake it while
+    // in_handler is stuck). EL0-return keeps a defense-in-depth copy. rt_sigreturn
+    // is handled above and returns, so it never reaches this.
+    {
+        struct Thread *et = current_thread();
+        if (thread_note_handler_escaped(et, ctx->sp)) et->in_handler = false;
     }
 
     u64 args[VIV_NARGS];
@@ -10923,6 +14494,10 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                       ctx->regs[2], ctx->regs[3]);
         return;
 
+    case SYS_FD_DEVCLASS:
+        ctx->regs[0] = (u64)sys_fd_devclass_handler(ctx->regs[0]);
+        return;
+
     case SYS_WEFT_SHARE:
         ctx->regs[0] = (u64)sys_weft_share_handler(ctx->regs[0], ctx->regs[1]);
         return;
@@ -10943,6 +14518,24 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_DMA_CREATE_GPU_BO:
         ctx->regs[0] = (u64)sys_dma_create_gpu_bo_handler(ctx->regs[0],
                                                           ctx->regs[1]);
+        return;
+
+    case SYS_BURROW_FROM_HOSTMEM:
+        ctx->regs[0] = (u64)sys_burrow_from_hostmem_handler(
+            ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3],
+            ctx->regs[4]);
+        return;
+
+    case SYS_HOSTMEM_REFCOUNT:
+        ctx->regs[0] = (u64)sys_hostmem_refcount_handler(
+            ctx->regs[0], ctx->regs[1]);
+        return;
+
+    // #50: the path-based open-or-create (VIVARIUM.md section 6.24).
+    case SYS_OPEN_CREATE:
+        ctx->regs[0] = (u64)sys_open_create_handler(
+            ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3],
+            ctx->regs[4]);
         return;
 
     // I-42 / CL-7k: the JIT capability.

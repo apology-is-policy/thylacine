@@ -43,7 +43,7 @@ env THYLACINE_POOL_IMG="$WORK/pool-$TAG.img" \
     THYLACINE_NOSTORM=1 THYLACINE_NO_QMP=1 THYLACINE_NO_SHARE=1 \
     ${GPU_DEV:+THYLACINE_GPU_DEV="$GPU_DEV"} \
     ${DISP:+THYLACINE_DISPLAY="$DISP"} \
-    tools/run-vm.sh </dev/null > "$LOG" 2>&1 &
+    tools/run-vm.sh ${WARP_QEMU_DBG:-} </dev/null > "$LOG" 2>&1 &
 VMPID=$!
 
 # Bounded poll (#134: deadline + named failure conventions), kill by PID.
@@ -77,7 +77,32 @@ else
     echo "BOOT-$TAG: FAIL"
     tail -40 "$LOG"
 fi
-# The gpu driver's own evidence lines (capset probe etc.) -- emitted for the
-# caller to classify; grep -a because a serial log can carry binary bytes.
-grep -a "tapestryd: gpu" "$LOG" || true
+# The gpu driver's own evidence lines (capset probe etc.) + the warp server's
+# host3d-ring self-test line (V-3b-1c-2a lives in server.rs, prefix "warp", not
+# "gpu") + the ring-recreate self-test line (V-3b-3c-1, the F1 ridx-reuse
+# regression witness) + the mem-recreate self-test line (V-3b-3c-2, the
+# device-memory handle-reuse witness) -- emitted for the caller to classify;
+# grep -a because a serial log can carry binary bytes. The alternatives are
+# scoped to the specific self-test prefixes so the many routine
+# `tapestryd: warp ...` ctx/ring diagnostics do not flood the log.
+#
+# EVERY STRING A VERDICT ARM GREPS FOR MUST HAVE AN ALTERNATIVE HERE. This is
+# the CAPTURE half of the gate and it is the half a crafted-log suite cannot
+# test: `tools/test-venus-verdict.sh` writes the witness lines into its
+# fixtures by hand, so a line the verdict demands and this filter drops is
+# GREEN there and RED on every real boot (W-3c-1 audit F2 -- the presentable
+# arm was added to the verdict and not to this line, which would have made
+# `warp-host.sh venus` unpassable on a healthy host, deterministically).
+#
+# IT HAPPENED AGAIN AT ROUND 3, IN THE OTHER DIRECTION, WHICH IS WHY THIS
+# PARAGRAPH IS NOT ENOUGH ON ITS OWN. Round 2 added a verdict arm greping for
+# "UNBIND REFUSED by the device" and did not add an alternative here -- and
+# the reason it slipped is the instructive part: the refusal say-line was
+# MOVED from `wimg_teardown` (prefix `tapestryd: warp presentable`, already
+# captured) into `gl_evict_res`, where it correctly gained the prefix
+# `tapestryd: warp display` because it now serves every family. The pairing
+# was verified BEFORE the move and the comment asserting it was left behind,
+# true about a line that no longer existed. **A prefix change is a capture
+# change.** When you move a say-line between functions, re-check this filter.
+grep -aE "tapestryd: gpu|tapestryd: warp host3d-ring|tapestryd: warp ring-recreate|tapestryd: warp mem-recreate|tapestryd: warp scanout-blob|tapestryd: warp presentable|tapestryd: warp display|tapestryd: scanout|THYLACINE-VENUS-PROVE|venus-prove:|THYLACINE-VK-SDL-PROVE|vk-sdl-prove:" "$LOG" || true
 exit $((1 - ok))

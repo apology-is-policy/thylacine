@@ -1,0 +1,652 @@
+From 2a04a1fc05c144bf6fde23ceca30f4d8f76095f6 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Tue, 25 Aug 2026 20:06:11 +0200
+Subject: [PATCH 10/23] Thylacine Warp V-3b-3a: the Venus vn_renderer backend +
+ loader-less ICD proof
+
+The Mesa Venus driver runs on Thylacine via a vn_renderer backend that speaks
+9P over /srv/warp (Model B: virglrenderer polls the host3d command ring
+tapestryd mints/maps), not virtgpu/DRM. Vtest-shaped: userspace transport, no
+kernel DRM device.
+
+Build-system integration:
+- meson.build (top): system_has_kms_drm=false for thylacine -> dep_libdrm is
+  null_dep (Thylacine has no DRM; the virgl winsys uses the warp transport).
+- src/virtio/vulkan/meson.build: with_thylacine gate -- the backend in;
+  virtgpu + libdrm + vtest + WSI out; a STATIC loader-less ICD (Thylacine has
+  no dynamic loader, so no shared_library and no ICD json) + a
+  thylacine-venus-prove executable.
+- include/renderdoc_app.h: __thylacine__ added to the __linux__ platform arm.
+
+Backend (vn_renderer_thylacine.c): the 20-pointer vn_renderer vtable; ops
+stubbed for the transport bring-up (V-3b-3b/3c); info-init minimal (capset
+deferred to V-3c). vn_renderer.h routes vn_renderer_create to it under
+__thylacine__.
+
+Proof (thylacine_prove.c, the virgl_prove.c analog): a static ET_EXEC links the
+venus archive + resolves vk_icdGetInstanceProcAddr by symbol (loader-less) +
+dispatches vkEnumerateInstanceVersion. Witnessed on Thylacine:
+"THYLACINE-VENUS-PROVE PASS ... vkEnumerateInstanceVersion -> 1.4.354".
+---
+ include/renderdoc_app.h                   |   2 +-
+ meson.build                               |  10 +
+ src/virtio/vulkan/meson.build             | 115 ++++---
+ src/virtio/vulkan/thylacine_prove.c       |  51 ++++
+ src/virtio/vulkan/vn_renderer.h           |  13 +-
+ src/virtio/vulkan/vn_renderer_thylacine.c | 353 ++++++++++++++++++++++
+ 6 files changed, 506 insertions(+), 38 deletions(-)
+ create mode 100644 src/virtio/vulkan/thylacine_prove.c
+ create mode 100644 src/virtio/vulkan/vn_renderer_thylacine.c
+
+diff --git a/include/renderdoc_app.h b/include/renderdoc_app.h
+index b2d10c5..0017140 100644
+--- a/include/renderdoc_app.h
++++ b/include/renderdoc_app.h
+@@ -35,7 +35,7 @@
+ 
+ #if defined(WIN32) || defined(__WIN32__) || defined(_WIN32) || defined(_MSC_VER)
+ #define RENDERDOC_CC __cdecl
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__thylacine__)
+ #define RENDERDOC_CC
+ #elif defined(__APPLE__)
+ #define RENDERDOC_CC
+diff --git a/meson.build b/meson.build
+index 7c84bdd..79fd54d 100644
+--- a/meson.build
++++ b/meson.build
+@@ -168,6 +168,16 @@ system_has_kms_drm = ['openbsd', 'netbsd', 'freebsd', 'gnu/kfreebsd', 'dragonfly
+ # keys on -- one signal, both layers.
+ with_thylacine = cc.get_define('__thylacine__') != ''
+ 
++# Thylacine has no DRM device -- the /srv/warp seam (tapestryd) owns the GPU.
++# The cross file claims system = 'linux' (see above), which makes
++# system_has_kms_drm true and would force a hard libdrm dep plus a transitive
++# vk-runtime -> libdrm link (WARP-V3-DESIGN 0.14, blocker 1). Force it false so
++# dep_libdrm = null_dep -- the honest value; virgl-on-thylacine uses the warp
++# winsys, not DRM.
++if with_thylacine
++  system_has_kms_drm = false
++endif
++
+ 
+ gallium_drivers = get_option('gallium-drivers')
+ if gallium_drivers.contains('auto')
+diff --git a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
+index e9e9dca..b6ea4b1 100644
+--- a/src/virtio/vulkan/meson.build
++++ b/src/virtio/vulkan/meson.build
+@@ -107,44 +107,87 @@ vn_link_args = [
+ 
+ vn_libs = []
+ 
+-if not with_platform_windows
+-  libvn_files += files('vn_renderer_vtest.c')
++if with_thylacine
++  # Thylacine (Warp V-3b-3, WARP-V3-DESIGN section 0.14): the /srv/warp
++  # backend (tapestryd) is the sole transport -- no DRM device (so no
++  # vn_renderer_virtgpu.c + no libdrm dep, which the cross-file's
++  # system='linux' would otherwise pull in), no vtest socket, no WSI
++  # platform. The backend speaks 9P file ops on /srv/warp via <thyla/*>.
++  libvn_files += files('vn_renderer_thylacine.c')
++else
++  if not with_platform_windows
++    libvn_files += files('vn_renderer_vtest.c')
++  endif
++
++  if system_has_kms_drm
++    libvn_files += files('vn_renderer_virtgpu.c')
++    vn_deps += dep_libdrm
++  endif
++
++  if with_platform_wayland or with_platform_x11 or \
++     (system_has_kms_drm and not with_platform_android) or \
++     with_platform_windows
++    libvn_files += files('vn_wsi.c')
++    vn_c_args += '-DVN_USE_WSI_PLATFORM'
++  endif
++
++  if with_platform_wayland
++    vn_deps += dep_wayland_client
++  endif
++
++  if with_platform_x11
++    vn_deps += dep_xcb_dri3
++  endif
++
++  if with_platform_android
++    libvn_files += files('vn_android.c')
++    vn_deps += [dep_android, idep_u_gralloc]
++  endif
+ endif
+ 
+-if system_has_kms_drm
+-  libvn_files += files('vn_renderer_virtgpu.c')
+-  vn_deps += dep_libdrm
++if with_thylacine
++  # Static, loader-less: Thylacine has no dynamic loader (kernel/elf.c requires
++  # ET_EXEC with no PT_DYNAMIC), so there is no shared-library ICD and no ICD
++  # json for a loader to read. The consumer/prove binary links this archive and
++  # resolves vk_icdGetInstanceProcAddr directly -- the same static, direct-call
++  # shape the Warp-3 virgl_prove.c uses against OSMesa. No link_args
++  # (ld_args_bsymbolic / the ICD version-script) and no default install.
++  libvulkan_virtio = static_library(
++    'vulkan_virtio',
++    [libvn_files, vn_entrypoints, sha1_h],
++    include_directories : vn_incs,
++    link_with : vn_libs,
++    dependencies : vn_deps,
++    c_args : vn_c_args,
++    gnu_symbol_visibility : 'hidden',
++    install : false,
++  )
++else
++  libvulkan_virtio = shared_library(
++    'vulkan_virtio',
++    [libvn_files, vn_entrypoints, sha1_h],
++    include_directories : vn_incs,
++    link_with : vn_libs,
++    dependencies : vn_deps,
++    c_args : vn_c_args,
++    link_args : vn_link_args,
++    link_depends : vulkan_icd_link_depends,
++    gnu_symbol_visibility : 'hidden',
++    install : true,
++  )
+ endif
+ 
+-if with_platform_wayland or with_platform_x11 or \
+-   (system_has_kms_drm and not with_platform_android) or \
+-   with_platform_windows
+-  libvn_files += files('vn_wsi.c')
+-  vn_c_args += '-DVN_USE_WSI_PLATFORM'
++if with_thylacine
++  # V-3b-3a loader-less ICD proof (the virgl_prove.c analog): a static ET_EXEC
++  # that links the venus archive + its runtime deps and resolves
++  # vk_icdGetInstanceProcAddr by symbol -- proof the driver links loader-less
++  # and the ICD entry dispatches (WARP-V3-DESIGN section 0.14, the 3a milestone).
++  thylacine_venus_prove = executable(
++    'thylacine-venus-prove',
++    files('thylacine_prove.c'),
++    include_directories : vn_incs,
++    link_with : libvulkan_virtio,
++    dependencies : vn_deps,
++    install : false,
++  )
+ endif
+-
+-if with_platform_wayland
+-  vn_deps += dep_wayland_client
+-endif
+-
+-if with_platform_x11
+-  vn_deps += dep_xcb_dri3
+-endif
+-
+-if with_platform_android
+-  libvn_files += files('vn_android.c')
+-  vn_deps += [dep_android, idep_u_gralloc]
+-endif
+-
+-libvulkan_virtio = shared_library(
+-  'vulkan_virtio',
+-  [libvn_files, vn_entrypoints, sha1_h],
+-  include_directories : vn_incs,
+-  link_with : vn_libs,
+-  dependencies : vn_deps,
+-  c_args : vn_c_args,
+-  link_args : vn_link_args,
+-  link_depends : vulkan_icd_link_depends,
+-  gnu_symbol_visibility : 'hidden',
+-  install : true,
+-)
+diff --git a/src/virtio/vulkan/thylacine_prove.c b/src/virtio/vulkan/thylacine_prove.c
+new file mode 100644
+index 0000000..f284f0c
+--- /dev/null
++++ b/src/virtio/vulkan/thylacine_prove.c
+@@ -0,0 +1,51 @@
++/*
++ * Copyright 2026 The Thylacine Authors
++ * SPDX-License-Identifier: MIT
++ *
++ * V-3b-3a loader-less ICD proof (the virgl_prove.c analog for Venus).
++ *
++ * Thylacine has no dynamic loader (kernel/elf.c requires ET_EXEC with no
++ * PT_DYNAMIC), so there is no Vulkan loader to dlopen an ICD .so. This static
++ * ET_EXEC links libvulkan_virtio.a directly and resolves the ICD entry point
++ * -- vk_icdGetInstanceProcAddr -- by symbol, then dispatches one loader-less
++ * global command (vkEnumerateInstanceVersion, which needs no instance and no
++ * renderer transport). Proof that: (a) the static venus driver + the Thylacine
++ * backend link into a working ET_EXEC, and (b) the loader-less ICD entry
++ * resolves and dispatches. The renderer transport (V-3b-3b) is NOT exercised.
++ */
++
++#include <stdint.h>
++#include <stdio.h>
++
++#include <vulkan/vulkan.h>
++
++/* Defined in vn_icd.c; the driver's sole loader-facing entry. Declared here
++ * because the loader header (vk_icd.h) is not on this target's include path. */
++VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
++
++int
++main(void)
++{
++   PFN_vkVoidFunction p =
++      vk_icdGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
++   if (!p) {
++      printf("THYLACINE-VENUS-PROVE FAIL: "
++             "vk_icdGetInstanceProcAddr(vkEnumerateInstanceVersion) = NULL\n");
++      return 1;
++   }
++
++   uint32_t ver = 0;
++   VkResult r = ((PFN_vkEnumerateInstanceVersion)p)(&ver);
++   if (r != VK_SUCCESS) {
++      printf("THYLACINE-VENUS-PROVE FAIL: vkEnumerateInstanceVersion rc=%d\n", r);
++      return 1;
++   }
++
++   printf("THYLACINE-VENUS-PROVE PASS (loader-less ICD: "
++          "vk_icdGetInstanceProcAddr resolved + dispatched; "
++          "vkEnumerateInstanceVersion -> %u.%u.%u)\n",
++          VK_API_VERSION_MAJOR(ver), VK_API_VERSION_MINOR(ver),
++          VK_API_VERSION_PATCH(ver));
++   return 0;
++}
+diff --git a/src/virtio/vulkan/vn_renderer.h b/src/virtio/vulkan/vn_renderer.h
+index 08f34df..83767cc 100644
+--- a/src/virtio/vulkan/vn_renderer.h
++++ b/src/virtio/vulkan/vn_renderer.h
+@@ -236,6 +236,13 @@ vn_renderer_create_virtgpu(struct vn_instance *instance,
+                            struct vn_renderer **renderer);
+ #endif
+ 
++#ifdef __thylacine__
++VkResult
++vn_renderer_create_thylacine(struct vn_instance *instance,
++                             const VkAllocationCallbacks *alloc,
++                             struct vn_renderer **renderer);
++#endif
++
+ VkResult
+ vn_renderer_create_vtest(struct vn_instance *instance,
+                          const VkAllocationCallbacks *alloc,
+@@ -246,7 +253,11 @@ vn_renderer_create(struct vn_instance *instance,
+                    const VkAllocationCallbacks *alloc,
+                    struct vn_renderer **renderer)
+ {
+-#ifdef HAVE_LIBDRM
++#if defined(__thylacine__)
++   /* Thylacine has neither a DRM device nor a vtest socket; the /srv/warp
++    * backend (tapestryd) is the sole transport. */
++   return vn_renderer_create_thylacine(instance, alloc, renderer);
++#elif defined(HAVE_LIBDRM)
+    if (VN_DEBUG(VTEST)) {
+       VkResult result = vn_renderer_create_vtest(instance, alloc, renderer);
+       if (result == VK_SUCCESS)
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+new file mode 100644
+index 0000000..5546f55
+--- /dev/null
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -0,0 +1,353 @@
++/*
++ * Copyright 2026 The Thylacine Authors
++ * SPDX-License-Identifier: MIT
++ *
++ * based in part on vn_renderer_vtest.c which is:
++ * Copyright 2019 Google LLC
++ *
++ * The Thylacine vn_renderer backend (Warp V-3b-3). It is the VTEST shape --
++ * a userspace transport, no kernel DRM driver -- with Thylacine 9P file ops
++ * on the /srv/warp seam (tapestryd, the virtio-gpu owner) replacing vtest's
++ * socket, and t_weft_map replacing its SCM_RIGHTS-fd + mmap. It composes the
++ * shipped Model B substrate: shmem_create -> a HOST3D ring blob on the
++ * client's venus ctx (ring/new host3d) + weft-map; submit -> ctx/<id>/submit
++ * (warp_venus_submit, opaque bytes on venus_ctx); wait -> t_poll on the fence
++ * fd; bo -> the hostmem BAR (SYS_BURROW_FROM_HOSTMEM); info -> the caps file.
++ *
++ * V-3b-3a scope: the build path (a static, loader-less ICD; virtgpu/libdrm
++ * gated out) + this skeleton wired into vn_renderer_create + the vtable. The
++ * data-plane ops are stubs here; V-3b-3b fills shmem/submit/wait/sync and
++ * V-3b-3c the bo path. WARP-V3-DESIGN section 0.14 is the design pin.
++ */
++
++#include "virtio/virtio-gpu/venus_hw.h"
++
++#include "util/sparse_array.h"
++
++#include "vn_renderer_internal.h"
++
++/* virtio-gpu PCI identity (the same virtio vendor the guest device presents);
++ * the info is cosmetic until V-3c wires the real capset authority. */
++#define THYLACINE_PCI_VENDOR_ID 0x1af4
++#define THYLACINE_PCI_DEVICE_ID 0x1050
++
++struct thylacine_shmem {
++   struct vn_renderer_shmem base;
++};
++
++struct thylacine_bo {
++   struct vn_renderer_bo base;
++};
++
++struct thylacine_sync {
++   struct vn_renderer_sync base;
++};
++
++struct thylacine {
++   struct vn_renderer base;
++
++   struct vn_instance *instance;
++
++   /* the /srv/warp connection (open == connect). -1 until V-3b-3b wires the
++    * transport; the connect + ctx mint land there. */
++   long warp_root;
++
++   uint32_t max_timeline_count;
++
++   struct {
++      uint32_t id;
++      uint32_t version;
++      struct virgl_renderer_capset_venus data;
++   } capset;
++
++   struct util_sparse_array shmem_array;
++   struct util_sparse_array bo_array;
++
++   struct vn_renderer_shmem_cache shmem_cache;
++};
++
++/* ---- ops (V-3b-3a stubs; the real impl lands in 3b/3c) ---- */
++
++static void
++thylacine_shmem_destroy_now(struct vn_renderer *renderer,
++                            struct vn_renderer_shmem *shmem)
++{
++   struct thylacine *tly = (struct thylacine *)renderer;
++   struct thylacine_shmem *ts = (struct thylacine_shmem *)shmem;
++   (void)tly;
++   (void)ts;
++   /* V-3b-3b: t_close the map fd (drops mapping + pin) + retire the ring. */
++}
++
++static struct vn_renderer_shmem *
++thylacine_shmem_create(struct vn_renderer *renderer, size_t size)
++{
++   (void)renderer;
++   (void)size;
++   /* V-3b-3b: ring/new host3d <size> <ridx> on the venus ctx, read res_id
++    * from ring/<ridx>/info, t_weft_map the backing -> mmap_ptr. */
++   return NULL;
++}
++
++static void
++thylacine_shmem_destroy(struct vn_renderer *renderer,
++                        struct vn_renderer_shmem *shmem)
++{
++   struct thylacine *tly = (struct thylacine *)renderer;
++
++   if (vn_renderer_shmem_cache_add(&tly->shmem_cache, shmem))
++      return;
++
++   thylacine_shmem_destroy_now(&tly->base, shmem);
++}
++
++static VkResult
++thylacine_bo_create_from_device_memory(
++   struct vn_renderer *renderer,
++   VkDeviceSize size,
++   vn_object_id mem_id,
++   VkMemoryPropertyFlags flags,
++   VkExternalMemoryHandleTypeFlags external_handles,
++   struct vn_renderer_bo **out_bo)
++{
++   (void)renderer;
++   (void)size;
++   (void)mem_id;
++   (void)flags;
++   (void)external_handles;
++   (void)out_bo;
++   /* V-3b-3c: HOST_VISIBLE VkDeviceMemory over the hostmem BAR (MAP_BLOB +
++    * SYS_BURROW_FROM_HOSTMEM). */
++   return VK_ERROR_OUT_OF_HOST_MEMORY;
++}
++
++static bool
++thylacine_bo_destroy(struct vn_renderer *renderer, struct vn_renderer_bo *bo)
++{
++   (void)renderer;
++   (void)bo;
++   return false;
++}
++
++static int
++thylacine_bo_export_dma_buf(struct vn_renderer *renderer,
++                            struct vn_renderer_bo *bo)
++{
++   (void)renderer;
++   (void)bo;
++   return -1;
++}
++
++static void *
++thylacine_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *bo,
++                 void *placed_addr)
++{
++   (void)renderer;
++   (void)bo;
++   (void)placed_addr;
++   return NULL;
++}
++
++static void
++thylacine_bo_flush(struct vn_renderer *renderer, struct vn_renderer_bo *bo,
++                   VkDeviceSize offset, VkDeviceSize size)
++{
++   (void)renderer;
++   (void)bo;
++   (void)offset;
++   (void)size;
++   /* coherent hostmem BAR: no explicit flush (V-3b-3c confirms the cache
++    * attribute the host dictates). */
++}
++
++static void
++thylacine_bo_invalidate(struct vn_renderer *renderer,
++                        struct vn_renderer_bo *bo,
++                        VkDeviceSize offset, VkDeviceSize size)
++{
++   (void)renderer;
++   (void)bo;
++   (void)offset;
++   (void)size;
++}
++
++static VkResult
++thylacine_sync_create(struct vn_renderer *renderer, uint64_t initial_val,
++                      uint32_t flags, struct vn_renderer_sync **out_sync)
++{
++   (void)renderer;
++   (void)initial_val;
++   (void)flags;
++   (void)out_sync;
++   /* V-3b-3b: a u64 timeline over the coherent feedback slots
++    * (SIMULATE_SYNCOBJ). */
++   return VK_ERROR_OUT_OF_HOST_MEMORY;
++}
++
++static void
++thylacine_sync_destroy(struct vn_renderer *renderer,
++                       struct vn_renderer_sync *sync)
++{
++   (void)renderer;
++   (void)sync;
++}
++
++static VkResult
++thylacine_sync_reset(struct vn_renderer *renderer,
++                     struct vn_renderer_sync *sync, uint64_t initial_val)
++{
++   (void)renderer;
++   (void)sync;
++   (void)initial_val;
++   return VK_ERROR_OUT_OF_HOST_MEMORY;
++}
++
++static VkResult
++thylacine_sync_read(struct vn_renderer *renderer,
++                    struct vn_renderer_sync *sync, uint64_t *val)
++{
++   (void)renderer;
++   (void)sync;
++   (void)val;
++   return VK_ERROR_OUT_OF_HOST_MEMORY;
++}
++
++static VkResult
++thylacine_sync_write(struct vn_renderer *renderer,
++                     struct vn_renderer_sync *sync, uint64_t val)
++{
++   (void)renderer;
++   (void)sync;
++   (void)val;
++   return VK_ERROR_OUT_OF_HOST_MEMORY;
++}
++
++static VkResult
++thylacine_submit(struct vn_renderer *renderer,
++                 const struct vn_renderer_submit *submit)
++{
++   (void)renderer;
++   (void)submit;
++   /* V-3b-3b: ctx/<id>/submit -> warp_venus_submit (opaque venus bytes on
++    * venus_ctx); the bootstrap vkCreateRingMESA + the doorbell kick. */
++   return VK_ERROR_OUT_OF_HOST_MEMORY;
++}
++
++static VkResult
++thylacine_wait(struct vn_renderer *renderer,
++               const struct vn_renderer_wait *wait)
++{
++   (void)renderer;
++   (void)wait;
++   /* V-3b-3b: t_poll on ctx/<id>/fence with the Vulkan ns timeout; the fast
++    * path polls the coherent feedback slots. */
++   return VK_ERROR_DEVICE_LOST;
++}
++
++static void
++thylacine_destroy(struct vn_renderer *renderer,
++                  const VkAllocationCallbacks *alloc)
++{
++   struct thylacine *tly = (struct thylacine *)renderer;
++
++   vn_renderer_shmem_cache_fini(&tly->shmem_cache);
++
++   util_sparse_array_finish(&tly->shmem_array);
++   util_sparse_array_finish(&tly->bo_array);
++
++   /* V-3b-3b: warp_close(warp_root). */
++
++   vk_free(alloc, tly);
++}
++
++static void
++thylacine_init_renderer_info(struct thylacine *tly)
++{
++   struct vn_renderer_info *info = &tly->base.info;
++
++   info->pci.vendor_id = THYLACINE_PCI_VENDOR_ID;
++   info->pci.device_id = THYLACINE_PCI_DEVICE_ID;
++
++   info->has_dma_buf_import = false;
++   info->has_external_sync = false;
++   info->has_implicit_fencing = false;
++   info->has_guest_vram = false;
++
++   info->max_timeline_count = tly->max_timeline_count;
++
++   /* The capset (wire/xml/spec versions + the extension masks) is left zero
++    * here; V-3c wires the real capset authority from the caps file. The 3a
++    * link/load proof does not enumerate a physical device, so a zero capset
++    * is correct -- not a stub that must be remembered. */
++}
++
++static VkResult
++thylacine_init(struct thylacine *tly)
++{
++   util_sparse_array_init(&tly->shmem_array, sizeof(struct thylacine_shmem),
++                          1024);
++   util_sparse_array_init(&tly->bo_array, sizeof(struct thylacine_bo), 1024);
++
++   /* V-3b-3b: warp_open(&conn) -> connect + mint the venus ctx; init the
++    * capset from the caps file. At 3a the transport is unwired (the link/
++    * load proof needs neither). */
++   tly->warp_root = -1;
++   tly->max_timeline_count = 64;
++
++   vn_renderer_shmem_cache_init(&tly->shmem_cache, &tly->base,
++                                thylacine_shmem_destroy_now);
++
++   thylacine_init_renderer_info(tly);
++
++   tly->base.ops.destroy = thylacine_destroy;
++   tly->base.ops.submit = thylacine_submit;
++   tly->base.ops.wait = thylacine_wait;
++
++   tly->base.shmem_ops.create = thylacine_shmem_create;
++   tly->base.shmem_ops.destroy = thylacine_shmem_destroy;
++
++   tly->base.bo_ops.create_from_device_memory =
++      thylacine_bo_create_from_device_memory;
++   tly->base.bo_ops.create_from_dma_buf = NULL;
++   tly->base.bo_ops.destroy = thylacine_bo_destroy;
++   tly->base.bo_ops.export_dma_buf = thylacine_bo_export_dma_buf;
++   tly->base.bo_ops.export_sync_file =
++      vn_renderer_bo_export_sync_file_internal;
++   tly->base.bo_ops.map = thylacine_bo_map;
++   tly->base.bo_ops.flush = thylacine_bo_flush;
++   tly->base.bo_ops.invalidate = thylacine_bo_invalidate;
++
++   tly->base.sync_ops.create = thylacine_sync_create;
++   tly->base.sync_ops.create_from_syncobj = NULL;
++   tly->base.sync_ops.destroy = thylacine_sync_destroy;
++   tly->base.sync_ops.export_syncobj = NULL;
++   tly->base.sync_ops.reset = thylacine_sync_reset;
++   tly->base.sync_ops.read = thylacine_sync_read;
++   tly->base.sync_ops.write = thylacine_sync_write;
++
++   return VK_SUCCESS;
++}
++
++VkResult
++vn_renderer_create_thylacine(struct vn_instance *instance,
++                             const VkAllocationCallbacks *alloc,
++                             struct vn_renderer **renderer)
++{
++   struct thylacine *tly = vk_zalloc(alloc, sizeof(*tly), VN_DEFAULT_ALIGN,
++                                     VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
++   if (!tly)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++   tly->instance = instance;
++   tly->warp_root = -1;
++
++   VkResult result = thylacine_init(tly);
++   if (result != VK_SUCCESS) {
++      thylacine_destroy(&tly->base, alloc);
++      return result;
++   }
++
++   *renderer = &tly->base;
++
++   return VK_SUCCESS;
++}
+-- 
+2.43.0
+

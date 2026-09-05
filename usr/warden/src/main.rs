@@ -22,9 +22,17 @@
 //
 // The warden holds CAP_HW_CREATE + the broad allowance (joey spawns it without a
 // narrowing), so it can confer a narrowed allowance + CAP_HW_CREATE on each driver
-// AND on the bus source. Runs in joey's THYLA_BOOT_PROBES ladder, PRE-pivot (so
-// the driver + source binaries resolve in devramfs by absolute path). Exit 0 =
-// every bound driver came up (or nothing matched); exit 1 = a bound driver failed.
+// AND on the bus source. Runs PRE-pivot (so the driver + source binaries resolve
+// in devramfs by absolute path). Exit 0 = every bound driver came up (or nothing
+// matched); exit 1 = a bound driver failed.
+//
+// #230: the warden runs in EVERY build shape, not only joey's THYLA_BOOT_PROBES
+// ladder. It entered the tree at 5c as a bind-loop PROOF and was gated as one;
+// netd landed a day later and made it the thing that brings up the network, but
+// nothing revisited the gate -- so the lean production image had no drivers, no
+// network and no compositor. A hardware broker is not a test. What IS a test is
+// the fixture half of its bind database, which is now opt-in via
+// `--with-fixtures` (see FIXTURE_MANIFESTS).
 
 #![no_std]
 #![no_main]
@@ -40,7 +48,7 @@ use libthyla_rs::io::{slurp_capped, Read};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{Child, Command, ExitStatus, Stdio};
 use libthyla_rs::time::{sleep, Duration};
-use libthyla_rs::{T_CAP_HW_CREATE, T_SPAWN_PERM_MAY_POST_SERVICE};
+use libthyla_rs::{T_CAP_CSPRNG_READ, T_CAP_HW_CREATE, T_SPAWN_PERM_MAY_POST_SERVICE};
 
 use libdriver::driver::to_allowance;
 use libdriver::{
@@ -76,20 +84,13 @@ macro_rules! say {
 /// MMIO axis: a PCI function's registers are in BARs, mapped off the claimed
 /// KObj_PCI), and runs the TCP/IP stack (the live I-34-on-PCI proof, evolved from
 /// the 6b-3 ARP demo). v1.x reads `/lib/driver/*.manifest`.
+// The PRODUCTION bind database: real hardware, bound in every build shape.
+//
+// #230: this set used to be interleaved with the two TEST FIXTURES below, which
+// mattered the moment the warden stopped being probe-only. `menagerie-probe`
+// binds `arm,pl061` -- a node QEMU-virt really does provide -- so leaving it
+// here would spawn a test fixture on a production boot.
 const BUILTIN_MANIFESTS: &[&str] = &[
-    r#"
-driver "menagerie-probe" {
-    abi   = 1
-    binds = ["arm,pl061"]
-    needs {
-        mmio = "node:reg"
-        irq  = "node:interrupts"
-        dma  = "pool: 64 KiB"
-    }
-    serves  = "/dev/gpio/%instance"
-    restart = on-crash
-}
-"#,
     r#"
 driver "netdev-driver" {
     abi   = 1
@@ -116,19 +117,7 @@ driver "tapestryd" {
     restart   = on-crash
     lifecycle = persistent
     gather    = all
-}
-"#,
-    r#"
-driver "crash-probe" {
-    abi   = 1
-    binds = ["restart-test"]
-    needs {
-        mmio = "none"
-        irq  = "none"
-        dma  = "none"
-    }
-    serves  = "/dev/restart-test/%instance"
-    restart = on-crash
+    caps      = ["csprng"]
 }
 "#,
     r#"
@@ -147,12 +136,79 @@ driver "netd" {
 "#,
 ];
 
+// The TEST FIXTURES: bound only when the caller passes `--with-fixtures`
+// (joey does, from inside its THYLA_BOOT_PROBES ladder). They prove the bind
+// machinery itself -- `menagerie-probe` is the 5c grant/narrowing proof on the
+// QEMU-virt pl061, `crash-probe` drives the 5e-2 restart-with-backoff loop --
+// and neither is a device anyone wants brought up on a shipped box.
+//
+// Kept in ONE binary rather than behind a cargo feature deliberately: the
+// production warden then runs the SAME code the gates exercise, differing only
+// in the length of its bind database. A compile-time split would ship an
+// artifact no gate had ever run.
+const FIXTURE_MANIFESTS: &[&str] = &[
+    r#"
+driver "menagerie-probe" {
+    abi   = 1
+    binds = ["arm,pl061"]
+    needs {
+        mmio = "node:reg"
+        irq  = "node:interrupts"
+        dma  = "pool: 64 KiB"
+    }
+    serves  = "/dev/gpio/%instance"
+    restart = on-crash
+}
+"#,
+    r#"
+driver "crash-probe" {
+    abi   = 1
+    binds = ["restart-test"]
+    needs {
+        mmio = "none"
+        irq  = "none"
+        dma  = "none"
+    }
+    serves  = "/dev/restart-test/%instance"
+    restart = on-crash
+}
+"#,
+];
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    // Parse the built-in bind database. A malformed built-in is a build bug, not
+    // #230: the fixture manifests are opt-in, and the log SAYS which database
+    // this run used -- a boot that silently bound a different device set than
+    // the reader assumes is the whole class of bug this arc has been closing.
+    let with_fixtures = {
+        let mut it = libthyla_rs::env::args();
+        let _ = it.next(); // argv[0]
+        let mut found = false;
+        while let Some(a) = it.next() {
+            if a == b"--with-fixtures" {
+                found = true;
+            }
+        }
+        found
+    };
+
+    // Parse the bind database. A malformed built-in is a build bug, not
     // a runtime condition -- fail loud.
-    let mut db: Vec<Manifest> = Vec::with_capacity(BUILTIN_MANIFESTS.len());
-    for text in BUILTIN_MANIFESTS {
+    let mut texts: Vec<&str> = Vec::with_capacity(
+        BUILTIN_MANIFESTS.len() + FIXTURE_MANIFESTS.len(),
+    );
+    texts.extend_from_slice(BUILTIN_MANIFESTS);
+    if with_fixtures {
+        texts.extend_from_slice(FIXTURE_MANIFESTS);
+    }
+    say!(
+        "warden: bind database {} manifests ({} production{})",
+        texts.len(),
+        BUILTIN_MANIFESTS.len(),
+        if with_fixtures { " + fixtures" } else { ", no fixtures" }
+    );
+    let mut db: Vec<Manifest> = Vec::with_capacity(texts.len());
+    for text in &texts {
         match Manifest::parse(text) {
             Ok(m) => db.push(m),
             Err(e) => {
@@ -618,8 +674,23 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
     // /bin/<name>.
     let bin = alloc::format!("/{}", m.name);
 
+    // H-4b-1: the manifest's named caps ride beside CAP_HW_CREATE -- each a
+    // fork-grantable bit the warden itself holds (joey confers the set it may
+    // pass down; I-2 keeps the chain monotone). The vocabulary is the
+    // manifest parser's (an unknown name never parses), so this map is total.
+    // Said, so the extra grant sits in the log beside the allowance it rides.
+    fn cap_bit(c: libdriver::manifest::Cap) -> u64 {
+        match c {
+            libdriver::manifest::Cap::Csprng => T_CAP_CSPRNG_READ,
+        }
+    }
+    let extra = m.caps.iter().fold(0u64, |acc, c| acc | cap_bit(*c));
+    if extra != 0 {
+        say!("warden: {} caps +{:#x} (manifest)", m.name, extra);
+    }
+
     let mut cmd = Command::new(bin.as_str());
-    cmd.arg(desc).caps(T_CAP_HW_CREATE).allowance(allow);
+    cmd.arg(desc).caps(T_CAP_HW_CREATE | extra).allowance(allow);
     // A persistent service serves a namespace -- it posts a /srv listener (netd
     // posts /srv/net for joey to mount at /net), which requires
     // PROC_FLAG_MAY_POST_SERVICE. The warden confers it here, one hop: joey

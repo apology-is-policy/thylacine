@@ -116,6 +116,75 @@ gfx_sample stage1a $ax $ay "255 0 0"
 gfx_sample stage1b $bx $by "0 0 255"
 lc_pass "panes: composed pixels exact at both centers (A red, B blue)"
 
+# H-3b-1: the per-leaf Daylight tag bar renders header-bg (the resting
+# fallback, before a halcyond chrome surface binds). Positive witness: the
+# `tagbar` 9P file reports A's strip and its centre reads Daylight `header`
+# (0xCEC4B6 = 206 196 182).
+expect {
+    -re {battery: tagbar A (\d+) (\d+)\r?\n} {
+        set tbx $expect_out(1,string)
+        set tby $expect_out(2,string)
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the tagbar leg failed" }
+    timeout { lc_fail "no tagbar A line" }
+}
+gfx_sample tagbarA $tbx $tby "206 196 182"
+lc_pass "panes: per-leaf tag bar renders Daylight header-bg"
+
+# H-3b-2: the chrome-create gate (surface ctl `create W H role=chrome bind=<id>`):
+# malformed -> E_INVAL for every peer; well-formed chrome from a NON-renderer
+# (this battery) -> E_PERM. The positive twin (the same line from halcyond,
+# composited at the tag bar) is ls-halcyon's at H-3b-3.
+expect {
+    -ex "battery: chrome-create gate OK" { lc_pass "panes: chrome-create gate discriminates (E_INVAL syntax / E_PERM non-renderer; + the H-3d status role)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the chrome-create gate leg failed" }
+    timeout { lc_fail "battery never reached the chrome-create gate" }
+}
+
+# H-3d: the status bar is a display-level chrome surface (`role=status`, no
+# bind, renderer-gated -- probed in the gate above); with no renderer bar the
+# compositor's `statusbar` file reads zeros. The positive twin (a real bar's
+# rect + the carve it makes) is ls-halcyon's at H-3d-3.
+expect {
+    -ex "battery: statusbar file reads empty (no bar)" { lc_pass "panes: the statusbar file exists and reads empty with no renderer bar" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the statusbar file leg failed" }
+    timeout { lc_fail "battery never reached the statusbar file read" }
+}
+
+# H-3b-4: the tile-status verb (global ctl `tag <id> status ok|err|resting`)
+# is gated: a NON-renderer's write is refused (E_PERM) and the pane's
+# `status` file -- an ungated read -- still says `resting` after it (the
+# refusal did not apply). The positive twin (halcyond keying its live tile
+# sage/cinnabar) is ls-halcyon's.
+expect {
+    -ex "battery: tag-status gate OK" { lc_pass "panes: tag-status gate refuses a non-renderer (E_PERM; state unchanged)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the tag-status gate leg failed" }
+    timeout { lc_fail "battery never reached the tag-status gate" }
+}
+
+# H-3c: the menu verbs (`menu place` / `menu dismiss`) are gated like the
+# tile status -- a NON-renderer is refused whatever it writes, and the
+# `ctl` read shows `menu none` afterwards. The positive twin (halcyond
+# summoning a menu, the compositor dismissing it against a wedged owner)
+# is ls-halcyon's.
+expect {
+    -ex "battery: menu gate OK" { lc_pass "panes: menu gate refuses place/dismiss from a non-renderer (E_PERM; none placed)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the menu gate leg failed" }
+    timeout { lc_fail "battery never reached the menu gate" }
+}
+
+# The pane tree's trust model (the H-3b round F2): a client acts only on
+# what it owns. From the battery, `close` / `focus` / a `tag` write on the
+# console renderer's pane are E_PERM and the pane is intact; `focus` on its
+# own pane succeeds. A headless SKIP line is a failure here: this image has
+# a console.
+expect {
+    -ex "battery: pane-tree gate OK" { lc_pass "panes: pane-tree gate refuses close/focus/tag on a foreign pane (E_PERM; tree intact); own pane ok" }
+    -ex "battery: pane-tree gate SKIPPED" { lc_fail "the pane-tree gate leg found no foreign pane on an image with a console" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the pane-tree gate leg failed" }
+    timeout { lc_fail "battery never reached the pane-tree gate" }
+}
+
 # Scenario 2 (G-6b): the resize protocol.
 expect {
     -ex "battery: resize rejects OK" { lc_pass "panes: resize-ack negative probes OK" }
@@ -155,9 +224,9 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the tabbed leg failed" }
     timeout { lc_fail "battery never reached tabbed" }
 }
-gfx_sample tabA $sax $sy "58 58 68"
-gfx_sample tabB $sbx $sy "122 158 204"
-lc_pass "panes: tab strip segments exact (inactive border, active focus)"
+gfx_sample tabA $sax $sy "206 196 182"
+gfx_sample tabB $sbx $sy "224 120 64"
+lc_pass "panes: tab strip segments exact (Daylight: inactive header, active-focused ember)"
 expect {
     -ex "battery: tab cycled" { lc_pass "panes: tab next cycled the active child" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the tab-cycle leg failed" }
@@ -322,9 +391,20 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the pane-close leg failed" }
     timeout { lc_fail "TEV_CLOSE never arrived" }
 }
+
+# H-4b: the one-shot placement claim -- a surface created with the LIVE
+# claim lands in the claimed EMPTY leaf while focus sits elsewhere (the
+# focus path would have split A); a STALE token (re-minted under it) falls
+# back to focus placement and never steers into that leaf; a malformed
+# token is E_INVAL at the syntax gate.
+expect {
+    -ex "battery: claim OK" { lc_pass "panes: live claim places into the claimed leaf; stale falls back; malformed refused" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the claim leg failed" }
+    timeout { lc_fail "the claim leg never finished" }
+}
 expect {
     -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }
-    -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the close leg" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the claim leg" }
     timeout { lc_fail "battery never finished" }
 }
 

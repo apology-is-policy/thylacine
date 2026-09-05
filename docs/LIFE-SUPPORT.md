@@ -176,15 +176,16 @@ scenario here.
 
 ### LS-3 — Essential coreutils (adopt from the aux branch)
 
-**Userspace — EXECUTED** (LS-3a/LS-3b below are both marked done; `usr/coreutils/src/bin/`
-holds 51 binaries today). The plan as written was: the aux track had ~23 coreutils
-written + compiling, and adoption = copy each into `usr/coreutils/src/bin/`,
-substitute `aux-rt` -> `libthyla-rs` (`env::args` + `io::{stdin,stdout,stderr}` +
-the print macros — the U-6e-pre-b pattern), wire `tools/build.sh usr_rs_bins` +
-the cpio. That is what happened; the deps it named (`fs::read_dir`,
-`SYS_WALK_CREATE`, `SYS_UNLINK`, `SYS_RENAME`, `SYS_FSTAT`) all exist. Retained
-as the record of the adoption route, not as outstanding work.
-Closes most of #925. Split:
+**Userspace. THE ADOPTION IS DONE** — corrected 2026-08-16 (aux#237). This
+paragraph described, in future tense, a plan to copy ~23 coreutils out of the
+aux track's `usr/apps/**` into `usr/coreutils/src/bin/`, eight lines above its
+own LS-3a/LS-3b/LS-3c `[done]` markers. `usr/coreutils/src/bin/` holds **51**
+binaries; `usr/apps/**` is empty and the `aux/userspace-apps` branch is not
+where the aux track works. The recipe is kept below as the as-built record of
+HOW it was done (substitute `aux-rt` -> `libthyla-rs`: `env::args` +
+`io::{stdin,stdout,stderr}` + the print macros — the exact U-6e-pre-b pattern;
+wire `tools/build.sh usr_rs_bins` + the cpio), not as work outstanding. Closed
+most of #925. Split:
 
 - **LS-3a — navigate + inspect [done]**: `ls` (uses `fs::read_dir`), `stat` (uses `t_fstat`), `clear` (ANSI), adopted from `usr/apps/{ls,stat}` (aux branch) onto the libthyla-rs surface; `clear` authored native. Built into the cpio + LS-CI `ls-3a.exp` (`ls /var`->lib, `ls /`->thylacine-version, `stat /thylacine-version`->regular file, `clear`+alive). **#955 fixed** (the `ls /` headline): `ls` was the first consumer to ever readdir the pivot ROOT in a paginating loop, which surfaced a kernel readdir-cookie sign-truncation -- Stratum's Treaddir resume cookies for real dirents exceed INT64_MAX (bit 63 set), but the kernel carried the cookie through the SIGNED `s64 Spoor.offset` and `dev9p_readdir` clamped any "negative" offset to 0, restarting enumeration so the reader re-fetched batch 0 forever. Fixed by treating the cookie as an opaque u64 (no clamp) + a non-advancing-cursor EOD guard. NOT a Stratum bug, NOT an ls defect. `cat`/`head`/`tail`/`wc` already verified against real files (coreutil-smoke).
 - **LS-3b — fs-mutation [done]**: `mkdir` (+`-p`), `rmdir`, `rm` (+`-r`/`-f`), `touch`, `cp` (+`-r`), `mv`, `tee` (+`-a`), authored native on a NEW libthyla-rs `fs::` mutation surface -- `fs::create_dir` / `remove_file` / `remove_dir` / `rename` (path-based wrappers over the audited SYS_WALK_CREATE / SYS_UNLINK / SYS_RENAME, via a shared `with_parent_dir` parent-walk). The walk opens intermediates with `T_OPATH` (born R|W since A-3b), which **also fixed a latent `File::create` depth>=2 bug** (the old `T_OREAD` intermediate yielded a RIGHT_READ-only parent that SYS_WALK_CREATE rejects -- pulled forward, the proper-completion dependency). `rm -r` / `cp -r` skip `.`/`..` (fs::read_dir yields them). Verified by a new always-on `fs-mut-smoke` (joey post-pivot, 13 checks incl. depth-3 File::create) + the `ls-3b` LS-CI scenario. **#957 [done] (kernel, audit-bearing):** wiring ls-3b surfaced that a logged-in user could not write to their own `/home/<user>` -- the single-hop `SYS_WALK_OPEN` that `fs::` mutations navigate parent dirs with did NOT cross mounts (only multi-component `stalk`/SYS_OPEN did), so create/rename/unlink hit the SYSTEM-owned placeholder under the per-user home mount, not the mounted user-owned 0700 root. Fixed by making `sys_walk_open_handler` cross mounts at source + result like `stalk` does (the Plan 9 idiom; `cross_mounts` -> public `stalk_cross_mounts`); crossing into `/srv` also required making the devsrv registry root openable + stat-able as a directory (the #932 readdir prerequisite). Focused audit 0 P0/1 P1 (pre-existing devsrv open-return adopt)/0 P2/2 P3, all fixed/tracked; 791/791 + boot + ci-smp-gate 0 corruption. **This unblocks LS-4** (a user's cwd writes land in their own home). The ls-3b multi-step interactive net is PTY-render-flaky under host load (#958, a harness issue -- the write itself passes: ls-3b step (a) /home-write is reliable).
@@ -600,6 +601,7 @@ editors, eventually Ctrl-Z).
 
 - LS-1 root-cause + fix: commit `6e533d6`; `arch/arm64/uart.c` (`uart_rx_init`, `uart_rx_path_enabled`), `usr/login/src/main.rs` (`read_line`).
 - Interactive-terminal gap survey + U-PTY scope: `docs/ARCHITECTURE.md` 23.5, `docs/UTOPIA-SHELL-DESIGN.md` 10.1-10.8 + 13 (editor), `specs` gate-9 (`pty.tla`).
-- Coreutils gap: task #925. (The "aux `usr/apps/**` ready set" this named was
-  promoted into `usr/coreutils/src/bin/`, 51 binaries; aux#237.)
+- Coreutils gap: task #925 -- CLOSED by LS-3a/3b/3c. `usr/coreutils/src/bin/`
+  holds 51 binaries; the "aux `usr/apps/**` ready set" this pointed at no
+  longer exists (corrected 2026-08-16, aux#237).
 - The external-stdio flip seam: `usr/utopia/libutopia/src/eval/stmt.rs:71-81`, 476-532.

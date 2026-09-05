@@ -1,0 +1,268 @@
+From 5c2dcbdf1b26326d3d319d3d7b6e8be3edb46aee Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Mon, 31 Aug 2026 21:29:35 +0200
+Subject: [PATCH 23/23] thylacine wsi: the BUFFER_BLIT presentable variant
+ (THY_WSI_BLIT=1)
+
+The W-4 fps comparison measured vkQuake/venus at 73% of tyrquake/virgl
+on the same host/day/demo, with the LINEAR-tiled presentable as the
+shaped structural suspect: the scene renders into vkQuake's own tiled
+color buffer, but the postprocess fullscreen pass writes ~4 MB/frame
+into a LINEAR swapchain image on a tiled renderer (V3D). This lands
+the designed A/B (WARP-WSI-DESIGN section 8) without changing the
+default:
+
+- vn_wsi.c: wants_linear now selects the arm -- set (default) keeps
+  the NO_BLIT linear chain exactly as before; THY_WSI_BLIT=1 in the
+  env clears it, selecting wsi_common's BUFFER_BLIT chain
+  (OPTIMAL-tiled images + a per-present resolve-blit into a LINEAR
+  buffer). One build carries both arms.
+- wsi_common{.c,_private.h}: a driver hook, blit_mem_pnext -- when
+  set, injected as the chain HEAD of the BLIT BUFFER memory's
+  VkMemoryAllocateInfo (the stock dedicated chain relinked behind
+  it). The thylacine driver uses it to route exactly that one
+  allocation through its marked no-bo path; NULL = stock behavior.
+- vn_wsi_thylacine.c: the swapchain create dispatches on blit.type
+  (any type but NO_BLIT/BUFFER_BLIT still refuses); the blit arm
+  uses OUR create_mem -- the blit-context alloc alone (it allocates
+  BOTH memories + the plane fields), deliberately WITHOUT wsi's
+  CPU-present vkMapMemory -- and chains a new finish:
+  wsi_finish_create_blit_context FIRST (the per-image blit CBs;
+  without them presents blit nothing) then registers the BUFFER's
+  memory as the presentable at info->linear_stride (the buffer's
+  aligned pitch, not the image subresource's).
+
+The no-map create_mem is load-bearing, measured on leg B's first
+flight: under venus a first vkMapMemory lazily mints the memory's
+renderer bo, i.e. spends the memory's ONE blob export before the
+registration's mint -- the render server then refuses the second
+export ("vkr: mem has been exported", RESOURCE_CREATE_BLOB resp
+0x1200). Nothing ever CPU-reads the buffer (the blit CB is the only
+writer; the display consumes it host-side through the registration),
+so the map bought nothing and broke the mint. image->cpu_map stays
+NULL, which wsi_destroy_image's unmap already guards.
+
+The blit-dst memory-type selector default (wsi_select_host_memory_type)
+is kept deliberately: the mappable presentable mint needs a
+host-visible type, so a device-local override would break the mint's
+own requirement.
+
+The blit CB rides the generic present submit that signals the
+per-image throttle fence, so the existing I-40 stage-0 bracket (wait
+the fence, then poke) covers the blit's retirement with no
+present-path change. Acquire's sync_fd arm re-verified for the blit
+shape: dedicated_img is set on the tiled image's memory
+(vn_wsi_memory_info_init runs on every non-import alloc) and
+export_sync_file is a no-libdrm no-op, as leg A's acquires already
+witnessed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/virtio/vulkan/vn_wsi.c           |  13 +++-
+ src/virtio/vulkan/vn_wsi_thylacine.c | 108 ++++++++++++++++++++++++---
+ src/vulkan/wsi/wsi_common.c          |   7 ++
+ src/vulkan/wsi/wsi_common_private.h  |   8 ++
+ 4 files changed, 124 insertions(+), 12 deletions(-)
+
+diff --git a/src/virtio/vulkan/vn_wsi.c b/src/virtio/vulkan/vn_wsi.c
+index 801e6b0..59e44aa 100644
+--- a/src/virtio/vulkan/vn_wsi.c
++++ b/src/virtio/vulkan/vn_wsi.c
+@@ -195,9 +195,16 @@ vn_wsi_init(struct vn_physical_device *physical_dev)
+     * -- VK_EXT_headless_surface is the surface class (stock entrypoint), and
+     * the interface behind it becomes the Thylacine one (venus device
+     * memories registered as compositor presentables; wsi_common keeps the
+-    * swapchain state machine).  wants_linear pins the CPU-image config to
+-    * the NO_BLIT linear arm the Thylacine create_mem override requires. */
+-   physical_dev->wsi_device.wants_linear = true;
++    * swapchain state machine).
++    *
++    * W-4 (WARP-WSI-DESIGN section 8): wants_linear selects the ARM.
++    * Default (set): the NO_BLIT arm -- LINEAR swapchain images, the image
++    * IS the presentable.  THY_WSI_BLIT=1 (unset): the BUFFER_BLIT arm --
++    * OPTIMAL-tiled images the renderer draws into at full tiled speed,
++    * plus wsi_common's per-present resolve-blit into a LINEAR buffer,
++    * whose memory becomes the presentable.  One build carries both; the
++    * ratified fps comparison decides the default. */
++   physical_dev->wsi_device.wants_linear = (getenv("THY_WSI_BLIT") == NULL);
+    result = vn_wsi_thylacine_init(physical_dev);
+    if (result != VK_SUCCESS) {
+       wsi_device_finish(&physical_dev->wsi_device, alloc);
+diff --git a/src/virtio/vulkan/vn_wsi_thylacine.c b/src/virtio/vulkan/vn_wsi_thylacine.c
+index dbaeacc..a984479 100644
+--- a/src/virtio/vulkan/vn_wsi_thylacine.c
++++ b/src/virtio/vulkan/vn_wsi_thylacine.c
+@@ -92,6 +92,13 @@ struct vn_thylacine_wsi_image {
+ struct vn_thylacine_swapchain {
+    struct wsi_swapchain base;
+ 
++   /* W-4 blit variant: the chain-head routing marker injected into the
++    * BLIT BUFFER memory's alloc (wsi_image_info.blit_mem_pnext points
++    * here; wsi_create_buffer_blit_context relinks its own chain behind
++    * it).  Lives on the chain because the info struct holds a bare
++    * pointer for the swapchain's whole life. */
++   struct vn_thylacine_wsi_memory_info blit_marker;
++
+    struct vn_thylacine_wsi_image images[];
+ };
+ 
+@@ -395,6 +402,69 @@ vn_thylacine_wsi_finish_create(const struct wsi_swapchain *chain,
+    return VK_SUCCESS;
+ }
+ 
++/* The W-4 BUFFER_BLIT variant's create_mem: wsi's own CPU one
++ * (wsi_create_cpu_buffer_image_mem) is the blit-context alloc PLUS a
++ * vkMapMemory of the buffer for its CPU-copy present -- and under venus a
++ * first map lazily mints the memory's renderer bo, spending the memory's
++ * ONE blob export before the registration's mint (vkr refuses the second:
++ * "mem has been exported", resp 0x1200 -- measured, W-4 leg B).  Nothing
++ * here ever CPU-reads the buffer (the blit CB is the only writer; the
++ * display consumes it host-side through the registration), so take the
++ * alloc without the map.  image->cpu_map stays NULL, which the destroy
++ * path's unmap already guards. */
++static VkResult
++vn_thylacine_wsi_create_buffer_image_mem(const struct wsi_swapchain *chain,
++                                         const struct wsi_image_info *info,
++                                         struct wsi_image *image)
++{
++   return wsi_create_buffer_blit_context(chain, info, image, 0);
++}
++
++/* The W-4 BUFFER_BLIT variant's finish (WARP-WSI-DESIGN section 8): the
++ * image is OPTIMAL-tiled and its memory is a stock venus alloc; the
++ * presentable is the LINEAR BLIT BUFFER's memory, allocated by
++ * wsi_create_buffer_blit_context with our marker at the chain head (so it
++ * routed through alloc_simple: no renderer bo, the one export kept for
++ * the registration).  Chain wsi's own finish FIRST -- it records the
++ * per-image blit command buffers; without it presents have no blit and
++ * the buffer scans out uninitialized. */
++static VkResult
++vn_thylacine_wsi_finish_create_blit(const struct wsi_swapchain *chain,
++                                    const struct wsi_image_info *info,
++                                    struct wsi_image *image)
++{
++   struct vn_device *dev = vn_device_from_handle(chain->device);
++   struct vn_thylacine_wsi_image *timage =
++      container_of(image, struct vn_thylacine_wsi_image, base);
++
++   VkResult result = wsi_finish_create_blit_context(chain, info, image);
++   if (result != VK_SUCCESS)
++      return result;
++
++   struct vn_device_memory *mem =
++      vn_device_memory_from_handle(image->blit.memory);
++   result = vn_device_memory_wait_alloc(dev, mem);
++   if (result != VK_SUCCESS)
++      return result;
++
++   const uint32_t fmt = vn_thylacine_virtio_format(info->create.format);
++   if (fmt == 0)
++      return VK_ERROR_FORMAT_NOT_SUPPORTED;
++
++   /* The registered stride is the BUFFER's row pitch
++    * (wsi_configure_buffer_image aligned it to the device's optimal copy
++    * pitch), not the image's subresource layout. */
++   result = vn_renderer_thylacine_img_new(
++      dev->renderer, mem->base.id, info->create.extent.width,
++      info->create.extent.height, fmt, info->linear_stride,
++      &timage->img_handle);
++   if (result != VK_SUCCESS)
++      return result;
++
++   timage->registered = true;
++   return VK_SUCCESS;
++}
++
+ static struct wsi_image *
+ vn_thylacine_swapchain_get_wsi_image(struct wsi_swapchain *wsi_chain,
+                                      uint32_t image_index)
+@@ -583,20 +653,40 @@ vn_thylacine_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+       return result;
+    }
+ 
+-   /* wants_linear is set unconditionally for this renderer; a BUFFER_BLIT
+-    * chain here would mean OPTIMAL tiling under our LINEAR-stride
+-    * registration -- refuse loudly rather than register garbage. */
+-   if (chain->base.blit.type != WSI_SWAPCHAIN_NO_BLIT) {
++   /* Two arms (W-4, WARP-WSI-DESIGN section 8), selected by wants_linear
++    * at vn_wsi_init (THY_WSI_BLIT=1 -> BUFFER_BLIT).  Any OTHER blit type
++    * would mean a registration whose layout we did not choose -- refuse
++    * loudly rather than register garbage. */
++   if (chain->base.blit.type == WSI_SWAPCHAIN_NO_BLIT) {
++      /* The LINEAR arm (default): the image IS the presentable -- our
++       * create_mem replaces the CPU one (a MARKED dedicated alloc; no
++       * renderer bo; the one export kept for img/new). */
++      chain->base.image_info.create_mem = vn_thylacine_wsi_create_image_mem;
++      chain->base.image_info.finish_create = vn_thylacine_wsi_finish_create;
++   } else if (chain->base.blit.type == WSI_SWAPCHAIN_BUFFER_BLIT) {
++      /* The BLIT arm: the blit-context alloc allocates BOTH the tiled
++       * image's stock memory and the linear buffer's -- the latter with
++       * our marker injected at the chain head via blit_mem_pnext -- but
++       * through OUR create_mem, which skips wsi's CPU-present map (a
++       * venus map would spend the buffer memory's one blob export before
++       * the registration -- see vn_thylacine_wsi_create_buffer_image_mem);
++       * our finish chains wsi's blit-CB recorder then registers the
++       * BUFFER's memory as the presentable. */
++      chain->blit_marker = (struct vn_thylacine_wsi_memory_info){
++         .sType = VN_STRUCTURE_TYPE_THYLACINE_WSI_MEMORY_INFO,
++         .pNext = NULL,
++      };
++      chain->base.image_info.blit_mem_pnext = &chain->blit_marker;
++      chain->base.image_info.create_mem =
++         vn_thylacine_wsi_create_buffer_image_mem;
++      chain->base.image_info.finish_create =
++         vn_thylacine_wsi_finish_create_blit;
++   } else {
+       wsi_swapchain_finish(&chain->base);
+       vk_free(pAllocator, chain);
+       return VK_ERROR_INITIALIZATION_FAILED;
+    }
+ 
+-   /* The image path is ours: venus device memories registered as compositor
+-    * presentables (see the file header). */
+-   chain->base.image_info.create_mem = vn_thylacine_wsi_create_image_mem;
+-   chain->base.image_info.finish_create = vn_thylacine_wsi_finish_create;
+-
+    chain->base.destroy = vn_thylacine_swapchain_destroy;
+    chain->base.get_wsi_image = vn_thylacine_swapchain_get_wsi_image;
+    chain->base.acquire_next_image = vn_thylacine_swapchain_acquire_next_image;
+diff --git a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+index 4d5517d..42ba431 100644
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -2764,6 +2764,13 @@ wsi_create_buffer_blit_context(const struct wsi_swapchain *chain,
+       .memoryTypeIndex =
+          info->select_blit_dst_memory_type(wsi, reqs.memoryTypeBits),
+    };
++   /* Thylacine (W-4): the driver's chain-head routing marker for THIS
++    * allocation, with the stock chain relinked behind it. */
++   if (info->blit_mem_pnext) {
++      ((VkBaseOutStructure *)info->blit_mem_pnext)->pNext =
++         (VkBaseOutStructure *)&buf_mem_dedicated_info;
++      buf_mem_info.pNext = info->blit_mem_pnext;
++   }
+ 
+    void *sw_host_ptr = NULL;
+    if (info->alloc_shm)
+diff --git a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_private.h
+index 0b90eac..05eb054 100644
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -121,6 +121,14 @@ struct wsi_image_info {
+    wsi_memory_type_select_cb select_image_memory_type;
+    wsi_memory_type_select_cb select_blit_dst_memory_type;
+ 
++   /* Thylacine (W-4 blit variant): when set, injected as the chain HEAD of
++    * the BLIT BUFFER memory's VkMemoryAllocateInfo pNext chain --
++    * wsi_create_buffer_blit_context links the rest of its own chain behind
++    * it (the struct's pNext is overwritten).  The driver uses it to route
++    * that one allocation (a chain-head routing marker, stripped before
++    * encode); NULL = stock behavior. */
++   void *blit_mem_pnext;
++
+    uint8_t *(*alloc_shm)(struct wsi_image *image, unsigned size);
+ 
+    VkResult (*create_mem)(const struct wsi_swapchain *chain,
+-- 
+2.43.0
+

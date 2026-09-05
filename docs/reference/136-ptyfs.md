@@ -32,6 +32,7 @@ hardware/external dependency, so failure to come up is always a defect.
 | `/dev/pts/ptmx` | 1 | the clone file: open = mint pts N, rebind the fid onto the MASTER endpoint |
 | `/dev/pts/<n>` | `PTS_FLAG\|N<<8\|2` | the slave byte channel (resolves only while the slot is live) |
 | `/dev/pts/<n>ctl` | `PTS_FLAG\|N<<8\|3` | the per-pts ctl (termios + winsize; the Plan 9 `eia0`/`eia0ctl` idiom) |
+| `/dev/pts/<n>ready` | `PTS_FLAG\|N<<8\|4` (**QTPOLL**) | the poll-readiness file (item 10): a native SLAVE poller blocks on it — walkable, **not** in readdir (a hidden companion, the master precedent) |
 | (master, minted) | `PTS_FLAG\|N<<8\|1` | the master byte channel — never walkable, never in readdir |
 
 `PTS_FLAG` = bit 40. **The qid encoding is a documented client contract**:
@@ -67,7 +68,10 @@ console's ISIG-only boot word is a console posture, not the pts one).
 - **Input cook** (`master_write`, per byte, the cons.c order): ICRNL first
   (CR→NL) → ISIG (the standard trio: `0x03`→INT, `0x1c`→QUIT, `0x1a`→TSTP —
   the class is collected and the byte CONSUMED: never enqueued, never echoed
-  = `pty.tla` SignalXorByte) → ICANON (erase `\b \b`; NL flushes the line
+  = `pty.tla` SignalXorByte; in canonical mode it also DISCARDS the pending
+  assembly — POSIX NOFLSH-clear, PTY-DESIGN "ISIG characters DISCARD the
+  pending line", 2026-08-17: a disposition, not a counted drop; m2s/s2m are
+  never flushed) → ICANON (erase `\b \b`; NL flushes the line
   INCLUDING its newline; a byte past `LINE_MAX`=256 drops un-echoed) → raw.
 - **Output cook** (`slave_write`): ONLCR NL→CR NL, pair-atomic back-pressure
   (an expansion that doesn't fit stops BEFORE its input byte — a torn pair
@@ -87,7 +91,12 @@ console's ISIG-only boot word is a console posture, not the pts one).
 Write = the tcsetattr-atomic grammar: whitespace tokens, `+name`/`-name` over
 the five flags + `winsize <cols> <rows>` (decimal ≤ 65535); ALL tokens are
 validated before ANY applies — one malformed token rejects the whole write
-with the mode unchanged; a flag apply resets the ICANON assembly (TCSAFLUSH).
+with the mode unchanged; a write that CLEARS ICANON delivers the pending
+canonical line to the slave as raw bytes (`deliver_partial_line`; a short push
+into a full m2s is a real drop under its OWN counter, `drop_modeflush`), any other write leaves the assembly
+alone (PTY-DESIGN "Mode writes deliver, never discard", 2026-08-17 — it used to
+zero the assembly on any flag write, and dropped the head of a type-ahead line
+between a job's last output and ut's PROMPT-mode re-arm; LS-CI `pty-4`).
 A winsize CHANGE raises `TTY_SIG_WINCH` (iff changed — the Linux TIOCSWINSZ
 behavior); the kernel routes `tty:winch` to the fg pgrp. Read = one
 offset-served line: `+icanon +echo +isig +icrnl +onlcr winsize C R\n`
@@ -103,6 +112,39 @@ net-6a-1 discipline), NOT the cons single-reader. I-9 holds by
 single-threadedness: a ring fills only via a serviced frame, so every parked
 read is re-checked before the loop parks. Cancel paths: `Tflush` (by oldtag),
 clunk (by fid), teardown/Tversion (all).
+
+## Poll-readiness: the `<n>ready` bridge (item 10)
+
+A pts slave (`/dev/pts/<n>`) is not directly pollable — a data read parks
+server-side (above), and dev9p.poll reports a non-QTPOLL file as POSIX
+always-ready. So a **native** poller of its slave fd (the hosted `ut`) would
+`poll()` fd 0, get always-ready, then block in `read()` — where a caught
+`interrupt` note cannot wake it (the "^C eats the next line" bug). The fix is
+the netd `/net/<proto>/N/ready` precedent (net-6b-2b): a **separate**
+per-pts `/dev/pts/<n>ready` file whose qid carries **QTPOLL**, so the kernel's
+`dev9p_poll` probes it instead of assuming always-ready.
+
+- **The probe** (`h_read` on a ready fid): `dev9p_poll` encodes the wanted poll
+  mask in the Tread **offset** (count 4). `ready_revents(n, mask)` returns the
+  4-byte LE bitmap — POLLIN iff `read_ready(slave)` (a line queued OR the master
+  gone ⇒ EOF-as-readable), POLLOUT iff `s2m` has room, POLLHUP iff the master is
+  gone (always reported, the poll(2) contract). Non-zero ⇒ reply now; zero ⇒
+  **park** (netd's defer). A separate fid, never the slave's, because the slave's
+  read offset is meaningless and a real 4-byte data read must never be misread as
+  a probe.
+- **Reuses the `PendingRead` set**: a parked probe is a `PendingRead{probe:true,
+  mask}` in the SAME Vec as data reads, so `poll_reads` re-evaluates it
+  (recompute revents, non-consuming, deliver once satisfiable) and the SAME
+  cancel paths (Tflush/clunk/teardown/Tversion) dispose it — no separate cancel
+  machinery to miss.
+- **Scope**: SLAVE readiness only. `ptyhost` pumps the master with two blocking
+  threads (no poll), so only the slave needs the bridge; the master + the data
+  files stay non-QTPOLL. A master-poll `<n>mready` is a future seam.
+- **Client**: `ut`'s `init_pts_session` opens `<n>ready` (OREAD) and its idle
+  loop POLLS that fd (not fd 0); it still READS fd 0. A ready-open failure
+  degrades to polling fd 0 (pre-item-10 behavior), never fails the pts dance.
+  The kernel bridge (`kernel/dev9p_poll.c`) is unchanged — pts is simply its
+  second QTPOLL client after netd.
 
 ## Teardown (PTY-2d)
 
@@ -177,10 +219,15 @@ seam.
 - **The in-server selftest** (boot-gated; runs before the post): the ring
   battery (empty/round-trip/FIFO/raw transparency), the full ldisc truth
   table (ICRNL+flush+echo+ONLCR; assembly-holds; erase + empty-erase; the
-  ISIG trio collected + not-a-byte + not-echoed; ECHO-off no-leak; raw+ISIG;
+  ISIG trio collected + not-a-byte + not-echoed; leg (e4) an ISIG char
+  discards the pending line, its `-isig` control keeps the same bytes;
+  ECHO-off no-leak; raw+ISIG;
   output ONLCR; line overflow), the ctl battery (render format; atomic
   reject; winsize raise-iff-changed + band/arity rejects; mixed atomic write;
-  TCSAFLUSH; the walk grammar), the teardown algebra (queued-bytes
+  the mode-write delivery legs -- canonical→canonical keeps the fragment,
+  canonical→raw delivers it with the next raw byte in order and no drop
+  counted, raw→canonical prepends nothing; the walk grammar), the teardown
+  algebra (queued-bytes
   drain-then-EOF both directions; the hup edge fires once; slave-close
   silent; the master-read-before-slave park; free-on-last-unref).
 - **The joey 2a-2 probe** (boot-fatal, every boot): the wire data path over
@@ -206,13 +253,14 @@ discipline before reaching the shell, and every one of those sites discarded
 (`room.min(data.len())`), so a partial write silently dropped the remainder and
 reported it in a value nobody read.
 
-Per-pts counters (`drop_flush` / `drop_line` / `drop_echo`) now record them:
+Per-pts counters (`drop_flush` / `drop_line` / `drop_echo` / `drop_modeflush`) now record them:
 
 | Counter | Site | Notes |
 |---|---|---|
 | `drop_flush` | the cooked Enter-flush into `m2s` | the site that would carry **command** bytes. Both the line push and the newline push are counted. |
 | `drop_line` | line assembly past `LINE_MAX` | dropped un-echoed, the cons contract. |
-| `drop_echo` | `echo()` into `s2m` | the drop is deliberate and documented (echo is best-effort and cannot back-pressure the writer) -- counted under its own name precisely so it can never be mistaken for the two `m2s` sites that carry real input. |
+| `drop_echo` | `echo()` into `s2m` | the drop is deliberate and documented (echo is best-effort and cannot back-pressure the writer) -- counted under its own name precisely so it can never be mistaken for the `m2s` sites that carry real input. |
+| `drop_modeflush` | `deliver_partial_line` (a ctl write clearing ICANON) into `m2s` | **a real drop with its own name** (the ccb597b8 round, F2; PTY-DESIGN's rule for both ldiscs; the kernel twin is `rx_drop_modeflush`). A mode write cannot back-pressure. It was briefly folded into `drop_flush`, which would have falsified that row: a short cooked flush loses the tail AND the newline (the line never runs), a short mode-flush loses the tail and the terminator then arrives raw in the new mode, so the truncated command RUNS -- #95's exact shape. Driven on purpose by the selftest (a full `m2s`, a pending `yy`, a canonical->raw `set_tio`: +2 here, the other three unchanged, no report; the ring drains exactly `RING_CAP` then WouldBlock). |
 
 The first drop also emits one line naming the SITE:
 
@@ -227,13 +275,15 @@ would leave the next occurrence as unexplained as #95 itself.
 battery step 9 drops a byte on purpose (`B` past `LINE_MAX`). An armed report
 would cry wolf every boot and spend the one-shot latch. The selftest asserts
 all three properties: the deliberate drop IS counted, it is counted at the LINE
-site and not the other two, and it did NOT report.
+site and not the other three, and it did NOT report.
 
 Note what a short flush actually loses: the tail of the line and then the
 newline -- so the shell would never execute the line at all. That is why this
 site alone does not explain #95's observed shape (interior byte lost,
 terminator delivered, command ran); the counter is here to say whether it is
-involved, not because it is assumed to be.
+involved, not because it is assumed to be. The mode-flush site CAN produce that
+shape (tail lost, terminator delivered raw, command runs) -- which is exactly why
+it carries its own counter rather than sharing this one.
 
 ## Known caveats / seams
 

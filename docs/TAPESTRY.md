@@ -6,9 +6,11 @@ is the **Loom arc** (`docs/LOOM.md`); the graphics half (virtio-gpu scanout +
 the canonical scripture; it is folded from the auxiliary-track design notes +
 native proof-of-concept (`usr/apps/TAPESTRY-DESIGN.md` + `usr/apps/libtapestry`
 + `usr/apps/tapestry-demo`, authored on `aux/userspace-apps`), elevated here to
-binding form with the Loom-arc integration made precise. The POC compiles
-(the auxiliary track never boots); the kernel-side pieces are the main track's
-to build.
+binding form with the Loom-arc integration made precise. **That sentence is
+provenance, not a location** — the POC was PROMOTED into the main tree
+(`usr/lib/libtapestry` + `usr/tapestry-demo`) and the original paths no longer
+exist. It runs; the "compiles but never boots" caveat this paragraph used to
+carry was overtaken by the promotion and is corrected in section 11.
 
 Tapestry is the answer to "what is Loom *for*, beyond files?" — the concrete
 consumer that shapes Loom-5 (multishot) and Loom-6 (registered buffers + the
@@ -246,8 +248,10 @@ code sitting in their own tree.
 
 All four are Cargo workspace members in `usr/Cargo.toml`. The `MockLoom` seam is
 gone — the real backend was wired at `5f2217f6` ("wire the real Loom backend
-(RingLoom) after merging main"), so the one-line handoff this section described
-as pending is done. And `usr/tapestry-demo` is now the end-to-end liveness
+(RingLoom) after merging main"): `lib.rs` imports the ring directly
+(`use libthyla_rs::loom::{Cqe, Ring, RegisteredBuffer, Sqe, ENTER_GETEVENTS}`),
+so the one-line handoff this section described as pending is done, and the
+prediction held — `Display` / `Tapestry` were unchanged by the swap. And `usr/tapestry-demo` is now the end-to-end liveness
 witness for the whole G-2/G-3 path (private `/srv/tapestry` session -> surface
 mint -> `SYS_WEFT_MAP` -> present), verified by `tools/screendump.sh -v`:
 "never booted" is exactly backwards.
@@ -394,13 +398,18 @@ stacking (and Acme columns) legible rather than just structural.
 
 This forces one clean decision (who draws the title text, given D7):
 
-- **A thin renderer-drawn title surface** is the Plan-9-clean answer, and the
-  recommended one (to be ratified when Halcyon builds it): the compositor places
-  a title-bar rect — it already computes the strip geometry — and the *renderer*
-  (Aurora / Halcyon) paints the `tag` into it as just another surface. D7 stays
-  pristine; the compositor never grows a glyph path. Rejected: teaching the
-  compositor a minimal font, which would dissolve the mechanism/policy split the
-  whole design rests on.
+- **A thin renderer-drawn title surface** is the Plan-9-clean answer —
+  **RATIFIED 2026-09-01** (the Halcyon kickoff, `docs/HALCYON.md` §5): the
+  compositor places a title-bar rect — it already computes the strip geometry —
+  and the *renderer* (Aurora / Halcyon) paints the `tag` into it as just another
+  surface. D7 stays pristine; the compositor never grows a glyph path. Rejected:
+  teaching the compositor a minimal font, which would dissolve the
+  mechanism/policy split the whole design rests on. **The same pattern is the
+  ratified mechanism for ephemeral chrome generally** — context menus (admitted
+  2026-09-01 as an amendment to the "no transient panels" scope-out: menus are
+  compositor-summoned, short-lived, dismissed on click-away/Esc, and
+  applications can never create floating surfaces; HALCYON.md §5 carries the
+  discipline).
 - This is *why* TTF is foundational (next): the tag bar is the first place a
   renderer must draw crisp text into compositor-placed chrome. The near-term,
   tractable version can even be a Cornucopia-bitmap tag bar (Aurora's existing
@@ -415,8 +424,11 @@ chrome. This is where i3 (which gives the *layout*) and Acme (which gives the
 *executable tag*) fuse into something neither has, in the one OS whose founding
 conviction is "the shell is sufficient as a UI." Recorded as the Halcyon-era
 pane-title direction: titles-in-strips is the tractable first step; the
-executable tag line is the richness it grows into. **Deferred to Halcyon (Phase
-8) — captured now to steer the pane work, not built yet.**
+executable tag line is the richness it grows into. **The Halcyon phase is now
+OPEN (2026-09-01) and this is in its scope** — the tag line dispatches through
+the same rules engine as Beacon presentations and acme-style selected-text
+execution (one mechanism, three doors; `docs/HALCYON.md` §5, `docs/BEACON.md`
+§7).
 
 **TTF is foundational, not a nicety** (the Phase-0 fontdue note becomes
 load-bearing). A native `no_std` TrueType rasterizer (fontdue / swash-class;
@@ -429,6 +441,17 @@ and single-surface games map perfectly; multi-window / popup toolkit apps (GTK/Q
 menus, tooltips, dialogs, multiple top-levels) map awkwardly — a menu is a
 transient floating window by nature. Accepted: the porting target is games / TUIs,
 not the Linux desktop-app ecosystem.
+
+**Concretization — the multi-console substrate (2026-09-03, operator-ratified).**
+The "terminal is the desktop" model is concretized in `docs/HALCYON.md` §14: every
+tile is a console on a **pts** (the built `ptyfs`), hosted by a per-tile,
+crash-isolated **`kaua-term`** process (UNIFORM-Y) that parses the pts and feeds
+`halcyond` cells; `halcyond` keeps the transcript, render, inline media, and Helix,
+and composites. A graphical app spawned in a tile is an inline-live client surface —
+and under UNIFORM-Y a terminal tile is *also* a composited client surface, so inline
+graphics and terminals are one shape. The substrate / topology / seam / split, plus
+the trusted-path reconciliation (this §, §18.7), live in HALCYON §14; the per-tile
+parser is the aux track's `docs/KAUA-TERM.md`.
 
 ## 15. Layout-as-9P — the compositor is a file server
 
@@ -527,12 +550,14 @@ consumers before Halcyon — the highest-risk, last-phase client — commits to 
   backend (section 9), no GL. If SDL/Quake maps cleanly, the API is proven *before*
   the riskiest client is built. Phase 10 on-ramp.
 - **Halcyon = the headline client** on the now-proven protocol. Phase 10.
-- **Two tiers, and Halcyon is pure 2D.** A textual-heritage graphical shell (scroll
-  buffer, image display, video) is decode-then-blit — Halcyon never needs OpenGL.
-  **GL is exclusively for ported third-party apps** (off Halcyon's critical path),
-  and the system-optimal route is *port Mesa* (swrast / llvmpipe via Pouch), not a
-  hand-rolled GL; a native GL pipeline is a NOVEL research angle, not a roadmap
-  dependency. GL is v1.1+ and never blocks Halcyon.
+- **~~Two tiers, and Halcyon is pure 2D~~ — SUPERSEDED 2026-09-01
+  (`docs/HALCYON.md` §2).** This bullet was insurance against a GPU stack that
+  did not exist; the Warp arc landed it (venus/Vulkan audited on real silicon,
+  measured *faster* than GL — WSI-DESIGN §8.1), and Halcyon now **renders
+  Vulkan**. What survives of the original point: GL remains app-compat (real
+  hardware GL via virgl landed far beyond the swrast plan; its parity ledger is
+  WSI-DESIGN §8.3, after compose), and no hand-rolled GL pipeline is a roadmap
+  dependency.
 - **Two axes — decouple them.** (A) the Tapestry API stack (compositor -> present
   -> driver -> scanout) is entirely QEMU-validatable (virtio-gpu + virtio-input) —
   build and perfect the whole API + fbcon + Halcyon there. (B) bare-metal
@@ -1039,7 +1064,7 @@ only the trusted boot chain is spawned where it can connect — no
 untrusted tapestry client exists at v1.0. The per-client
 layout-control CAPABILITY (a WM-control client holds it; ordinary
 surface clients don't) + renderer-role protection + the D5 read ACL are
-the Halcyon-era multi-untrusted-client fix (task #42); a partial
+the Halcyon-era multi-untrusted-client fix (task #42) -- **REALIZED at H-4 (the D decision, ratified 2026-09-02): the WM-control capability is the `Session(principal)` actor tapestryd derives from the kernel-stamped `srv_peer_info.principal_id` (no new grant); a session-side layout tool, run as the user, drives layout, and placement is a one-shot `claim` token (HALCYON.md 13.6/13.7).** A partial
 owner-scope now would break the global-WM model (the no-overfit trap).
 The global `clock-rate` ctl is the same same-session-trust family;
 `test-mode`/`tick`/`release`/HOLD are dev-build-only (the `test-mode`
@@ -1054,7 +1079,17 @@ ls-gfx / ls-gfx-live / the per-boot `-c` gate stay green. As-built:
 weave generations.** The §18.3 resize protocol is live. A surface's
 `weave`/`resource_id` name its CURRENT generation (GPU resource ids are
 per-generation, minted above SCREEN_RES so a fresh resource never
-aliases the old — closing the #317 stale-content class); `alloc_weave`
+aliases the old — closing the #317 stale-content class; **at Warp-C C-2
+a generation mints one resource PER SLOT rather than one per generation
+— GPU-DESIGN §4.5.8, user-voted 2026-08-16, RESERVED.** The guest weave
+is triple-buffered while the host side is single-buffered, which is
+invisible while the transfer is synchronous and becomes the blit/fill
+collision the moment the compositor is a second async reader; the fix
+restores the 1:1 slot↔resource correspondence the offset-transfer
+collapsed. Consequence worth carrying: **the D1 recycle gate does not
+survive the composed path unchanged** — a present's terminal CQE stops
+meaning the resource is free once a composition may still be reading
+it); `alloc_weave`
 (the shared body of `create` + `resize_ack`) allocates a full
 generation, `release_gen` tears one down in the R2-F5 order. A
 size-changing CONFIGURE offer records `offered = (serial, w, h)` (only
@@ -1180,7 +1215,10 @@ domain + the virtio-gpu-resource detach fold into the G-2 T-1 spec/audit (NOT
 asserted type-independent). The client PTE attribute (Normal-WB, verified) was
 already sound; F1 is about region *contents*, not attrs.
 
-**F2 [P1] — `/dev/tapestry` is per-session isolated** (the enforcement V2 rests
+**F2 [P1] — `/dev/tapestry` is per-session isolated** (AS-BUILT H-3c-2: a client's
+surfaces share ONE session + ONE Loom ring, `tapestry::EventRing` -- per-process,
+still unresolvable from any other process's session; the compositor keys
+authority on the peer process) (the enforcement V2 rests
 on). A client sees + resolves ONLY the surfaces it created: the surface `<id>`
 qids are per-session-scoped, netd-`/net`-style (the `CONN_FLAG|…|N`
 per-connection encoding — a walk from session B cannot resolve session A's
@@ -1389,9 +1427,10 @@ dual-refcount addition.
   I-29/I-30, §10 the sub-chunk decomposition Tapestry shapes).
 - `docs/NOVEL.md` §3.2 (Angle #2, BURROW zero-copy drivers) + §3.3 (Angle #3,
   pipelined 9P client) + §3.4 (Angle #4, Halcyon).
-- The auxiliary-track design notes + POC this scripture was folded from. Those
-  `usr/apps/*` paths no longer exist: the design notes became THIS document, and
-  the code was promoted to `usr/lib/libtapestry` + `usr/tapestry-demo` (section 11).
+- `usr/lib/libtapestry` + `usr/tapestry-demo` (the POC this scripture was
+  folded from, at its PRESENT paths -- promoted off the auxiliary track, where
+  it lived under `usr/apps/` alongside a `TAPESTRY-DESIGN.md` that no longer
+  exists; corrected 2026-08-16, aux#237).
 - `usr/virtio-gpu` (the controlq probe; the scanout half is the graphics-phase
   unblock item) + `irq-bench` (the present IRQ-cost budget).
 - `ARCHITECTURE.md` §28 (where T-1 reserves a number when the graphics phase

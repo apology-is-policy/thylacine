@@ -1,0 +1,36 @@
+#!/usr/bin/expect -f
+# DISPLAY-MODES.md mode 1 (console): serial-primary. THYLACINE_DISPLAY=console
+# drops the whole GPU stack, so the warden finds no virtio-pci:16, tapestryd
+# never starts, joey skips aurora -- and /dev/winsize stays the serial posture
+# (winsize 0 0), the exact condition that makes ut's CPR fallback (section 3.4)
+# correct on the direct console.
+#
+# This is ALSO the positive control for the gpu-headless silence test: the login
+# banner + prompt DO reach serial here (serial LOUD), and do NOT there (SILENT).
+#
+#   caffeinate -i expect tools/display-modes/verify-console-mode.exp
+
+source [file join [file dirname [info script]] .. interactive lib.exp]
+
+set ::env(THYLACINE_ACCEL) hvf
+set ::env(THYLACINE_DISPLAY) console
+
+lc_boot
+
+# GPU dropped -> joey finds no tapestry tree -> aurora is skipped (no code change,
+# the ratified lean-console path).
+lc_expect "/srv/tapestry absent" "console-mode: GPU stack absent (aurora skipped)"
+
+# The boot banner is a direct-uart_putc line (the tooling ABI) -- it prints
+# regardless of the display mode.
+lc_expect "Thylacine boot OK" "console-mode: boot banner reaches serial"
+
+# Serial is the PRIMARY console: login runs on serial and its prompt reaches us.
+lc_login michael correct-horse-battery-staple-v1
+
+# The serial posture: no renderer set a winsize, so /dev/winsize is 0 0 -- ut's
+# CPR fast-path trigger.
+lc_run_expect "cat /dev/winsize" "winsize 0 0"
+
+lc_pass "console-mode: serial primary, aurora absent, /dev/winsize == 0 0"
+lc_quit

@@ -1,0 +1,193 @@
+From 5f9d0ce226057e7ef17aa29e963fada67c9ed72f Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Wed, 26 Aug 2026 14:26:27 +0200
+Subject: [PATCH 16/23] Thylacine Warp multi-queue audit close (F1 lock-split +
+ F4/F6/F7; r2-F1)
+
+The holotype round-1 fixes on the multi-queue client half, plus round-2's
+one P3. Round 1: 0 P0 / 1 P1 / 0 P2 / 6 P3; round 2 (on these fixes):
+0 P0 / 0 P1 / 0 P2 / 1 P3 -- CLEAN, converged.
+
+- F1 [P1]: the shmem cache's TIME-BASED EVICTION (cache_add ->
+  remove_expired_locked -> the registered destroy callback) mutated
+  ring_bitmap (an unguarded RMW) and the warp connection under only
+  cache->mutex -- the "its other caller is cache_fini" comment enumerated
+  two of the three callers. A lost set-bit re-hands a ridx over an
+  installed server ring (the ring-F1 wedge). FIX: split into
+  thylacine_shmem_destroy_now_locked (caller holds the transport mutex;
+  the direct shmem_destroy site) + a LOCKING thylacine_shmem_destroy_now
+  wrapper registered with the cache. The global lock order cache->mutex ->
+  tly->mutex has no reverse edge (round-2 verified edge-by-edge: every
+  cache call is made without the transport mutex; cache_get never evicts;
+  cache_fini invokes the callback without cache->mutex and before
+  mtx_destroy; warp_ring_destroy/unmap cannot park).
+- F4 [P3]: the LEDGER-CLASS INVARIANT documented in warp_client.h --
+  server timeline-0 counts transfers, the client t_issued[0] counts venus
+  submits only; sound iff a connection is one client class (both in-tree
+  consumers are), with the hybrid-future warning.
+- F6 [P3]: _Static_assert ties WARP_TIMELINES to the timelines snapshot
+  buffer so a lift fails the BUILD, not a wait at runtime. Round-2 F1
+  [P3]: the 32-byte/row constant holds only for single-digit indices (a
+  two-digit row is 33), so the assert also pins WARP_TIMELINES <= 10 and
+  the comment states the assumption -- without it a lift past 10 plus a
+  buffer grown to "32*T" would build green and truncate tail rows.
+- F7 [P3]: the >256-extension arm of the placed-map witness is a loud
+  FAIL instead of a skip that rode into the PASS banner's "F4 verified"
+  claim (a venus device advertises ~76; 256+ means broken enumeration).
+- The teardown comment no longer claims "no lock is taken here" (the
+  cache_fini callback takes the transport mutex per entry, correctly).
+
+Round-2 additions are comments + compile-time asserts only -- no codegen
+change vs the witnessed build (the assert shape compile-proven
+standalone); the re-witness on real V3D ran on the F1/F7-fixed binaries:
+all five witness lines + PASS, zero hazards.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../winsys/virgl/thylacine/warp_client.c      | 10 +++++
+ .../winsys/virgl/thylacine/warp_client.h      |  9 +++++
+ src/virtio/vulkan/thylacine_prove.c           | 14 +++++--
+ src/virtio/vulkan/vn_renderer_thylacine.c     | 38 ++++++++++++++++---
+ 4 files changed, 61 insertions(+), 10 deletions(-)
+
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index a3e025e..7b4d60a 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -693,6 +693,16 @@ int warp_timelines_refresh(struct warp_conn *w)
+    char buf[256];
+    char key[24];
+    uint32_t t;
++   /* Every timeline row must fit one snapshot read or the truncated lane's
++    * wait never observes its signal (audit F6): a max SINGLE-DIGIT-index row
++    * is "timeline N 18446744073709551615\n" = 32 bytes -- a two-digit index
++    * makes it 33, so the 32/row bound is valid only while the index stays
++    * single-digit; the first conjunct pins that assumption (audit r2-F1:
++    * without it, a lift past 10 lanes plus a buffer grown to "32*T" would
++    * build green and truncate the tail rows). Fail the BUILD, not a wait. */
++   _Static_assert(WARP_TIMELINES <= 10u &&
++                  WARP_TIMELINES * 32u <= sizeof(buf) - 1,
++                  "timelines snapshot must hold every row");
+    if (w->timelines_fd < 0 || read_snapshot(w->timelines_fd, buf, sizeof(buf)) < 0)
+       return -1;
+    for (t = 0; t < WARP_TIMELINES; t++) {
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index 3bfca35..29c9c3e 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -43,6 +43,15 @@
+  * lane; the `timelines` file serves the per-timeline signaled counts, and
+  * the fence file stays the (shared) park primitive.
+  *
++ * LEDGER-CLASS INVARIANT (audit F4): the server's timeline-0 count includes
++ * TRANSFERS (they fence on lane 0), but t_issued[0] counts venus submits
++ * only -- so the per-timeline pairing holds iff a connection is used as ONE
++ * client class: venus (warp_venus_submit + mem/, never warp_transfer) or GL
++ * (warp_submit/warp_transfer, never the timeline ledgers). Both in-tree
++ * consumers keep the split (separate connections); a future hybrid that
++ * routes warp_transfer over a venus conn would make timeline-0 waits return
++ * EARLY -- count its issues into t_issued[0] if that ever changes.
++ *
+  * Errors: functions return 0/-1 (or a pointer/NULL); a hard transport
+  * failure or a poisoned context LATCHES the connection (warp_wedged())
+  * so a submit-drop can never silently corrupt downstream rendering.
+diff --git a/src/virtio/vulkan/thylacine_prove.c b/src/virtio/vulkan/thylacine_prove.c
+index a9342a1..79e5072 100644
+--- a/src/virtio/vulkan/thylacine_prove.c
++++ b/src/virtio/vulkan/thylacine_prove.c
+@@ -407,10 +407,16 @@ main(void)
+       }
+       static VkExtensionProperties exts[256];
+       if (ext_count > 256) {
+-         /* A partial scan could MISS the extension and false-pass; say so
+-          * loudly instead of pretending the negative was checked (#184). */
+-         printf("venus-prove: ext list %u wide (> 256); placed-map check "
+-                "SKIPPED\n", ext_count);
++         /* A partial scan could MISS the extension and false-pass -- and a
++          * skip must not ride into the PASS banner, which claims F4 verified
++          * (audit F7). A venus device advertises ~76 exts; 256+ signals a
++          * broken enumeration, so FAIL loud rather than skip. */
++         printf("THYLACINE-VENUS-PROVE FAIL: ext list %u wide (> 256) -- "
++                "placed-map check cannot scan completely (broken "
++                "enumeration?)\n", ext_count);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
+       } else {
+          uint32_t n = ext_count;
+          r = vn_EnumerateDeviceExtensionProperties(pds[0], NULL, &n, exts);
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+index 8796b57..471ff97 100644
+--- a/src/virtio/vulkan/vn_renderer_thylacine.c
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -226,9 +226,16 @@ thylacine_mem_free(struct thylacine *tly, uint32_t handle)
+ 
+ /* ---- shmem: the coherent HOST3D ring the Venus driver lays its ring in ---- */
+ 
++/* Caller holds tly->mutex (audit F1): this mutates ring_bitmap (an unguarded
++ * RMW) and drives the warp connection, and it has THREE callers -- the direct
++ * shmem_destroy (mutex held), cache_fini at teardown (single-threaded), and
++ * the shmem cache's TIME-BASED EVICTION inside cache_add (a hot-path caller
++ * under cache->mutex only, which the pre-audit comment here missed -- the
++ * enumerate-callers-by-enclosing-function lesson). The locking wrapper below
++ * is what the cache registers. */
+ static void
+-thylacine_shmem_destroy_now(struct vn_renderer *renderer,
+-                            struct vn_renderer_shmem *shmem)
++thylacine_shmem_destroy_now_locked(struct vn_renderer *renderer,
++                                   struct vn_renderer_shmem *shmem)
+ {
+    struct thylacine *tly = (struct thylacine *)renderer;
+    struct thylacine_shmem *ts = (struct thylacine_shmem *)shmem;
+@@ -250,6 +257,23 @@ thylacine_shmem_destroy_now(struct vn_renderer *renderer,
+       thylacine_ridx_free(tly, ts->ridx);
+ }
+ 
++/* The cache-registered destroy callback (audit F1): the cache invokes it from
++ * the EVICTION path (remove_expired_locked inside cache_add, under
++ * cache->mutex) and from cache_fini -- both without the transport mutex, so
++ * take it here. The global lock order is cache->mutex -> tly->mutex and has
++ * no reverse edge: every cache call (shmem_create's cache_get,
++ * shmem_destroy's cache_add, destroy's cache_fini) is made WITHOUT
++ * tly->mutex held. */
++static void
++thylacine_shmem_destroy_now(struct vn_renderer *renderer,
++                            struct vn_renderer_shmem *shmem)
++{
++   struct thylacine *tly = (struct thylacine *)renderer;
++   mtx_lock(&tly->mutex);
++   thylacine_shmem_destroy_now_locked(renderer, shmem);
++   mtx_unlock(&tly->mutex);
++}
++
+ static struct vn_renderer_shmem *
+ thylacine_shmem_create(struct vn_renderer *renderer, size_t size)
+ {
+@@ -332,10 +356,10 @@ thylacine_shmem_destroy(struct vn_renderer *renderer,
+       return;
+ 
+    /* The cache declined it: retire for real, under the transport mutex
+-    * (destroy_now itself stays lock-free -- its other caller is cache_fini
+-    * inside thylacine_destroy, where no second thread can exist). */
++    * (the _locked body; the locking wrapper is what the cache's eviction /
++    * fini paths call -- audit F1). */
+    mtx_lock(&tly->mutex);
+-   thylacine_shmem_destroy_now(&tly->base, shmem);
++   thylacine_shmem_destroy_now_locked(&tly->base, shmem);
+    mtx_unlock(&tly->mutex);
+ }
+ 
+@@ -848,7 +872,9 @@ thylacine_destroy(struct vn_renderer *renderer,
+    /* cache_fini drops any cached ring mappings (warp_ring_unmap) -- must run
+     * while the connection is still open, i.e. before warp_close. Teardown is
+     * single-threaded by the Vulkan contract (vkDestroyInstance externally
+-    * synchronized against everything), so no lock is taken here. */
++    * synchronized against everything); the cache_fini callback still takes
++    * tly->mutex per entry (it is the locking destroy_now wrapper, audit F1),
++    * which is why mtx_destroy comes after it below. */
+    vn_renderer_shmem_cache_fini(&tly->shmem_cache);
+ 
+    util_sparse_array_finish(&tly->shmem_array);
+-- 
+2.43.0
+

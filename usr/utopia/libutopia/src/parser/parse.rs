@@ -335,12 +335,39 @@ impl Parser {
     // -----------------------------------------------------------------
 
     fn parse_pipeline_statement(&mut self) -> ParseResult<Statement> {
-        let pipeline = self.parse_pipeline()?;
-        let span = pipeline.span;
-        Ok(Statement {
-            kind: StatementKind::Pipeline(pipeline),
-            span,
-        })
+        let first = self.parse_pipeline()?;
+        // AND-OR list (scripture 8.6): pipeline (( && | || ) pipeline)*.
+        // A lone pipeline stays a Pipeline statement (unchanged shape); an
+        // AndOr node is built only when at least one connector is present.
+        let mut rest = Vec::new();
+        loop {
+            let op = match self.peek_kind() {
+                Some(TokenKind::AndAnd) => AndOrOp::And,
+                Some(TokenKind::OrOr) => AndOrOp::Or,
+                _ => break,
+            };
+            self.pos += 1;
+            self.skip_newlines_only(); // allow a line break after `&&` / `||`
+            rest.push((op, self.parse_pipeline()?));
+        }
+        if rest.is_empty() {
+            let span = first.span;
+            Ok(Statement {
+                kind: StatementKind::Pipeline(first),
+                span,
+            })
+        } else {
+            let start = first.span.start;
+            let end = rest
+                .last()
+                .map(|(_, p)| p.span.end)
+                .unwrap_or(first.span.end);
+            let span = Span::new(start, end);
+            Ok(Statement {
+                kind: StatementKind::AndOr(Box::new(AndOrList { first, rest, span })),
+                span,
+            })
+        }
     }
 
     fn parse_pipeline(&mut self) -> ParseResult<Pipeline> {
@@ -540,10 +567,11 @@ impl Parser {
                     redirects.push(self.parse_redirect()?);
                 }
                 Some(TokenKind::Equal) if !words.is_empty() => {
-                    return Err(ParseError {
-                        kind: ParseErrorKind::UnexpectedEqualInCommand,
-                        span: self.current_span(),
-                    });
+                    // A standalone `=` in argument position is a LITERAL argument
+                    // (`=foo`, or a lone `=` between spaces) -- never an
+                    // assignment, which is detected at statement start. parse_word
+                    // starts from the `=` and glues any span-adjacent value.
+                    words.push(self.parse_word()?);
                 }
                 _ => break,
             }
@@ -580,7 +608,7 @@ impl Parser {
     /// (no whitespace between).
     fn parse_word(&mut self) -> ParseResult<Word> {
         let first = self.advance();
-        debug_assert!(is_value_token(&first.kind));
+        debug_assert!(is_value_token(&first.kind) || matches!(first.kind, TokenKind::Equal));
         // Assemble a maximal span-adjacent word. Two joining rules, both
         // requiring zero whitespace between the joined tokens:
         //   (a) a `~` fuses span-adjacent value tokens into ONE word, so
@@ -595,29 +623,43 @@ impl Parser {
         // (`$a$b`) stay separate words, unchanged from before.
         let mut parts: Vec<Token> = alloc::vec![first];
         let mut has_tilde = matches!(parts[0].kind, TokenKind::Tilde);
+        // `=` is a literal word-gluer: it keeps `-std=c++20` / `--foo=bar` a
+        // single argv element. An `=` in a WORD is never an assignment --
+        // assignment is detected at statement start (is_assignment_start), so
+        // any `=` reaching parse_word is argument-position and literal.
+        let mut has_equal = matches!(parts[0].kind, TokenKind::Equal);
         loop {
             let last_end = parts.last().expect("parts has >= 1").span.end;
             // Copy out the scalars the branches need so no borrow of the
             // peeked token survives across the `self` mutation below.
-            let (adjacent, is_value, is_tilde, is_caret, next_end) = match self.peek_token() {
+            let (adjacent, is_value, is_tilde, is_caret, is_equal, next_end) = match self.peek_token() {
                 Some(t) => (
                     t.span.start == last_end,
                     is_value_token(&t.kind),
                     matches!(t.kind, TokenKind::Tilde),
                     matches!(t.kind, TokenKind::Caret),
+                    matches!(t.kind, TokenKind::Equal),
                     t.span.end,
                 ),
                 None => break,
             };
-            // (a) tilde gluing: once a `~` is anywhere in the word, absorb
-            // span-adjacent value tokens, so the whole tilde-prefix-and-path
-            // is one argv element (`~/foo`, `~/$dir`, and the literal `a~b`).
-            // The leading-vs-literal decision is made later at eval by token
-            // position; here we only assemble the word.
-            if adjacent && is_value && (has_tilde || is_tilde) {
+            // (a) tilde / `=` gluing: once a `~` or `=` is anywhere in the word,
+            // absorb span-adjacent value tokens, so the whole thing is one argv
+            // element (`~/foo`, `a~b`, `-std=c++20`). The leading-vs-literal
+            // tilde decision is made later at eval by token position; here we
+            // only assemble the word.
+            if adjacent && is_value && (has_tilde || is_tilde || has_equal) {
                 let value = self.advance();
                 has_tilde |= matches!(value.kind, TokenKind::Tilde);
                 parts.push(value);
+                continue;
+            }
+            // (a') absorb a span-adjacent `=` itself -- the literal joining
+            // value=value into one word.
+            if adjacent && is_equal {
+                let eq = self.advance();
+                has_equal = true;
+                parts.push(eq);
                 continue;
             }
             // (b) `^` concatenation: span-adjacent Caret + span-adjacent
@@ -1847,10 +1889,30 @@ mod tests {
     }
 
     #[test]
-    fn equal_in_command_position_errors() {
-        match parse_err("cmd =arg") {
-            ParseErrorKind::UnexpectedEqualInCommand => {}
-            other => panic!("expected UnexpectedEqualInCommand, got {:?}", other),
+    fn equal_in_argument_position_is_literal() {
+        // A `=` in argument position is a literal, not an assignment (was
+        // UnexpectedEqualInCommand). `cmd =arg` -> two words: "cmd", "=arg".
+        let s = parse_ok("cmd =arg");
+        match &s.statements[0].kind {
+            StatementKind::Pipeline(p) => match &p.elements[0].command.kind {
+                CommandKind::Simple(sc) => assert_eq!(sc.words.len(), 2),
+                _ => panic!(),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn equal_glues_flag_value_into_one_word() {
+        // `-std=c++20` is ONE argv element (word, `=`, value glued), so
+        // `clang -std=c++20 main.cpp` has exactly three words.
+        let s = parse_ok("clang -std=c++20 main.cpp");
+        match &s.statements[0].kind {
+            StatementKind::Pipeline(p) => match &p.elements[0].command.kind {
+                CommandKind::Simple(sc) => assert_eq!(sc.words.len(), 3),
+                _ => panic!(),
+            },
+            _ => panic!(),
         }
     }
 

@@ -1,5 +1,5 @@
-// ls [-laFh1] [--color[=WHEN]] [PATH...] -- list directory contents, the
-// Thylacine way (COREUTILS-THYLACINE-DESIGN.md).
+// ls [-laFh1] [--color[=WHEN]] [--beacon=WHEN] [PATH...] -- list directory
+// contents, the Thylacine way (COREUTILS-THYLACINE-DESIGN.md).
 //
 // Plain `ls`: one name per line, color-coded by kind (dir=slate, exec=green,
 // graft=violet, dev=gold) with a classify suffix (`/` `*`). `ls -l` (= ll / la):
@@ -10,9 +10,16 @@
 // the signal, so the old ugly `??????` row becomes a first-class `graft` (the
 // REALM column + the violet name say so).
 //
-// Color gate: default ON (the exotic look); `--color=never` drops color AND the
-// box for a byte-clean, parseable pipe; `--color=auto` is parked == on until a
-// kernel TTY check (SYS_FD_DEVCLASS) lands.
+// Color gate: default AUTO since H-1 -- SYS_FD_DEVCLASS answers the long-
+// parked TTY question (dc 'c' == the interactive console), so `ls | cat` is
+// byte-clean while the console keeps the exotic look. `--color=always` forces.
+//
+// Beacon (docs/BEACON.md): at the Rich tier the listing is emitted as
+// semantic frames -- names carry `obj type=path` with the cleaned absolute
+// ref, and `-l` realizes a beacon `table` (plain-aligned payload + frames,
+// NO box -- the renderer restyles). SGR is off inside rich-structured output
+// (the renderer stylesheet owns typography). The cells/never realizations
+// above are untouched at every other tier.
 
 #![no_std]
 #![no_main]
@@ -37,13 +44,14 @@ use libthyla_rs::fs::{self, Metadata};
 use libthyla_rs::io;
 
 const USAGE: &str = "\
-usage: ls [-laFh1] [--color[=WHEN]] [PATH...]
+usage: ls [-laFh1] [--color[=WHEN]] [--beacon=WHEN] [PATH...]
   List directory contents the Thylacine way: names color-coded by kind
   (dir / exec / graft / dev); -l boxes the listing with a REALM + 9P QID
   column. A graft is a live kernel namespace (fstat can't cross it).
   -a  include dotfiles          -l  long (boxed) format
   -h  human-readable sizes       -F  classify (/ dir, * exec)
   -1  one entry per line         --color[=WHEN]  always | never | auto
+  --beacon=WHEN  semantic markup: auto (default) | always | never
   --help  show this help
 
 Examples:
@@ -68,7 +76,10 @@ fn run(args: Args) -> i64 {
     let mut long = false;
     let mut human = false;
     let mut classify_force = false;
-    let mut mode = ColorMode::Always; // exotic by default
+    // AUTO since H-1: the console gets the exotic look, a pipe gets clean
+    // bytes -- SYS_FD_DEVCLASS finally answers which one stdout is.
+    let mut mode = ColorMode::Auto;
+    let mut bmode = beacon::BeaconMode::Auto;
     let mut operands: Vec<&str> = Vec::new();
     let mut opts_done = false;
 
@@ -94,6 +105,17 @@ fn run(args: Args) -> i64 {
             }
             continue;
         }
+        if a == "--beacon" {
+            bmode = beacon::BeaconMode::Always;
+            continue;
+        }
+        if let Some(when) = a.strip_prefix("--beacon=") {
+            match beacon::BeaconMode::parse_when(when) {
+                Some(m) => bmode = m,
+                None => return usage::die("ls", &format!("invalid --beacon value -- '{}'", when)),
+            }
+            continue;
+        }
         if a.starts_with('-') && a != "-" && a.len() > 1 {
             for ch in a[1..].chars() {
                 match ch {
@@ -110,7 +132,10 @@ fn run(args: Args) -> i64 {
         operands.push(a);
     }
 
-    let on = mode.resolve(stdout_is_console);
+    // The emission gate (BEACON.md 12.4). At Rich, SGR goes OFF inside the
+    // structured output -- the renderer stylesheet owns typography there.
+    let rich = coreutils::beacon_gate::resolve(bmode) == beacon::Tier::Rich;
+    let on = !rich && mode.resolve(stdout_is_console);
 
     // No operand -> the per-Proc cwd (LS-4). Held so the &str outlives the loop.
     let cwd_holder = if operands.is_empty() {
@@ -152,10 +177,10 @@ fn run(args: Args) -> i64 {
                     rd_dir: false,
                 })
                 .collect();
-            render_long(&mut out, &here, &fe, human, on, classify_force);
+            render_long(&mut out, &here, &fe, human, on, classify_force, rich);
         } else {
             for &p in &files {
-                emit_name(&mut out, "", p, false, on, classify_force);
+                emit_name(&mut out, "", p, false, on, classify_force, rich);
                 out.put(b"\n");
             }
         }
@@ -172,9 +197,9 @@ fn run(args: Args) -> i64 {
         }
         first = false;
         let r = if long {
-            list_long_dir(&mut out, dir, all, human, on, classify_force)
+            list_long_dir(&mut out, dir, all, human, on, classify_force, rich)
         } else {
-            list_short_dir(&mut out, dir, all, on, classify_force)
+            list_short_dir(&mut out, dir, all, on, classify_force, rich)
         };
         if let Err(e) = r {
             eprintln!("ls: {}: {}", dir, e);
@@ -188,15 +213,12 @@ fn run(args: Args) -> i64 {
     status
 }
 
-/// `--color=auto` resolution. Reliable TTY detection needs a kernel surface that
-/// does NOT exist yet: a console fd (`SYS_CONSOLE_OPEN`) and a pipe fd are both
-/// path-less `KOBJ_SPOOR` Devs with no `stat_native`, so `fstat(1)` fails on both
-/// and `fd2path(1)` returns 0 for both -- indistinguishable from userspace. So
-/// `auto` is color-on for now (the exotic default); use `--color=never` for a
-/// clean pipe. The one-line fix when a kernel `SYS_ISATTY` lands
-/// (COREUTILS-THYLACINE-DESIGN.md) is to call it here.
+/// `--color=auto` resolution: stdout is the interactive console iff its Dev
+/// class is `'c'` (`SYS_FD_DEVCLASS`; the kernel normalizes the walked
+/// `/dev/cons` leaf too -- docs/SYS-FD-DEVCLASS-SPEC.md AS-BUILT). H-1 closed
+/// the long-parked `true` stub: a pipe / file / closed fd resolves color-off.
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }
 
 /// Read a directory's entries (name + whether readdir called it a directory),
@@ -223,17 +245,36 @@ fn list_short_dir(
     all: bool,
     on: bool,
     classify_force: bool,
+    rich: bool,
 ) -> Result<()> {
     for (name, rd_dir) in read_entries(dir, all)? {
-        emit_name(out, dir, &name, rd_dir, on, classify_force);
+        emit_name(out, dir, &name, rd_dir, on, classify_force, rich);
         out.put(b"\n");
     }
     Ok(())
 }
 
 /// A single colored, classified name (short mode). When color is off and `-F`
-/// is not set, this is the bare name -- byte-clean for a pipe.
-fn emit_name(out: &mut io::OutSink, dir: &str, name: &str, rd_dir: bool, on: bool, classify_force: bool) {
+/// is not set, this is the bare name -- byte-clean for a pipe. At Rich the
+/// SAME plain bytes are bracketed by an `obj type=path` frame (the cleaned
+/// absolute ref); the classify suffix stays OUTSIDE the frame (it is
+/// presentation, not part of the name), so strip() recovers the plain line.
+fn emit_name(out: &mut io::OutSink, dir: &str, name: &str, rd_dir: bool, on: bool, classify_force: bool, rich: bool) {
+    if rich {
+        {
+            let mut sout = coreutils::beacon_gate::SinkOut(out);
+            let mut s = beacon::sink::Sink::new(&mut sout, beacon::Tier::Rich);
+            match coreutils::path::abs(&join(dir, name)) {
+                Some(r) => s.obj(beacon::sink::ObjType::Path, &r, name),
+                None => s.text(name),
+            }
+        }
+        if classify_force {
+            let md = fs::metadata(join(dir, name)).ok();
+            out.put(meta::classify(rd_dir, &md).suffix().as_bytes());
+        }
+        return;
+    }
     if !on && !classify_force {
         out.put(name.as_bytes());
         return;
@@ -270,6 +311,7 @@ struct LongEntry {
 }
 
 /// `ls -l` over a directory: build the entry list from readdir, then render.
+#[allow(clippy::too_many_arguments)]
 fn list_long_dir(
     out: &mut io::OutSink,
     dir: &str,
@@ -277,6 +319,7 @@ fn list_long_dir(
     human: bool,
     on: bool,
     classify_force: bool,
+    rich: bool,
 ) -> Result<()> {
     let entries: Vec<LongEntry> = read_entries(dir, all)?
         .into_iter()
@@ -286,15 +329,18 @@ fn list_long_dir(
             rd_dir,
         })
         .collect();
-    render_long(out, dir, &entries, human, on, classify_force);
+    render_long(out, dir, &entries, human, on, classify_force, rich);
     Ok(())
 }
 
 /// Render `entries` as a long listing titled `title`. Color on -> the boxed
 /// presentation with the REALM + QID columns; color off -> the same columns
-/// space-separated with no box / header / color (parseable + byte-clean). Shared
+/// space-separated with no box / header / color (parseable + byte-clean); Rich
+/// -> a beacon `table` (header + plain-aligned payload + frames, no box --
+/// the renderer restyles) with `obj type=path` on the name cells. Shared
 /// by a directory listing and explicit file operands, so `ls -l file` gets the
 /// same look as `ls -l dir`.
+#[allow(clippy::too_many_arguments)]
 fn render_long(
     out: &mut io::OutSink,
     title: &str,
@@ -302,6 +348,7 @@ fn render_long(
     human: bool,
     on: bool,
     classify_force: bool,
+    rich: bool,
 ) {
     // Cells per entry (and the widths they drive).
     let mut mode_s: Vec<String> = Vec::new();
@@ -335,6 +382,40 @@ fn render_long(
         name_s.push(e.display.clone());
         suffix_s.push(kind.suffix());
         color_s.push(kind.color());
+    }
+
+    if rich {
+        // The beacon table realization: same columns, widths from content
+        // (Table's own math), the name cells presenting their objects. The
+        // classify suffix is dropped here -- the REALM column classifies.
+        use beacon::sink::{Cell, ObjType, Sink, Table};
+        let mut t = Table::new("llrlll").hdr();
+        t.push_row(alloc::vec![
+            Cell::plain("MODE"),
+            Cell::plain("OWNER"),
+            Cell::plain("SIZE"),
+            Cell::plain("REALM"),
+            Cell::plain("QID"),
+            Cell::plain("NAME"),
+        ]);
+        for i in 0..entries.len() {
+            let name_cell = match coreutils::path::abs(&entries[i].path) {
+                Some(r) => Cell::obj(ObjType::Path, &r, &name_s[i]),
+                None => Cell::plain(&name_s[i]),
+            };
+            t.push_row(alloc::vec![
+                Cell::plain(&mode_s[i]),
+                Cell::plain(&owner_s[i]),
+                Cell::plain(&size_s[i]),
+                Cell::plain(realm_s[i]),
+                Cell::plain(&qid_s[i]),
+                name_cell,
+            ]);
+        }
+        let mut sout = coreutils::beacon_gate::SinkOut(out);
+        let mut s = Sink::new(&mut sout, beacon::Tier::Rich);
+        t.realize(&mut s);
+        return;
     }
 
     // Column widths (>= the header label widths).

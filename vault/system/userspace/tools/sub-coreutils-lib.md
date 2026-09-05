@@ -5,10 +5,7 @@ title: "coreutils' shared library — one discipline, and the probe it delegated
 parent: moc-userspace-tools
 code:
   - usr/coreutils/src/lib.rs
-  - usr/coreutils/src/palette.rs
-  - usr/coreutils/src/color.rs
   - usr/coreutils/src/size.rs
-  - usr/coreutils/src/boxd.rs
   - usr/coreutils/src/meta.rs
   - usr/coreutils/src/ui.rs
   - usr/coreutils/src/usage.rs

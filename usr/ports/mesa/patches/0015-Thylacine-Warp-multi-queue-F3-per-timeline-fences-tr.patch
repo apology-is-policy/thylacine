@@ -1,0 +1,1446 @@
+From deed314a45fa093b53e6f2008e11a70456ec8831 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Wed, 26 Aug 2026 13:35:47 +0200
+Subject: [PATCH 15/23] Thylacine Warp multi-queue (F3): per-timeline fences +
+ transport mutex + witnesses
+
+The multi-queue submit-fence redesign, client half (WARP-MULTIQUEUE-DESIGN in
+the Thylacine tree; ratified fence-ABI v2 -- the timelines file + the shared
+park):
+
+- warp_client: warp_venus_submit carries the venus TIMELINE and is NON-PARKING
+  (the fence file admits ONE parked reader -- the server keeps a single
+  per-ctx report cursor -- so a throttle park inside a mutex-holding submit
+  would deadlock against the renderer's parker; a full throttle/lane reports
+  *again instead). The timeline rides the FILE (submit1..3; submit = timeline
+  0) because the payload is opaque bytes and t_write's implicit offset rules
+  out offset-encoding. Per-timeline t_issued/t_signaled ledgers + the
+  timelines-file refresh (warp_timelines_refresh) + the bare park primitive
+  (warp_fence_park: one blocking read, no state mutation -- the caller does
+  all bookkeeping under its own mutex).
+
+- vn_renderer_thylacine: the transport mutex lands (the owed F6/F8
+  per-renderer mutex, now a dependency of concurrent multi-queue submits) +
+  the one-parker/condvar protocol (the mutex is NEVER held across the park).
+  thylacine_submit threads batch->ring_idx end-to-end with a bounded
+  non-parking retry loop; syncs bind (timeline, seq); thylacine_wait waits
+  per-timeline through the parker. max_timeline_count lifts to 4 (3 VkQueues
+  + the CPU lane, the ratified v1.0 bound) gated on the host capset's
+  supports_multiple_timelines (degenerate hosts keep 2); the forced
+  supports_multiple_timelines=0 is dropped -- the seam now carries timelines.
+
+- thylacine_prove: four new witnesses, all green on thyla-pi/KVM real V3D
+  4.2.14: the F1 reify-at-alloc fix-proof (vkCmdCopyBuffer + fenced
+  vkQueueSubmit + vkWaitForFences + FIRST-map pattern survival -- the first
+  GPU round-trip executed on Thylacine), the F4 placed-map de-advertisement
+  check (76 device exts scanned), the timeline lift (a second logical device
+  acquires ring_idx 2 -- refused under the old count of 2), and the F2
+  cap-exhaustion recovery cycle (refusal at the 64 MiB ctx cap burns no
+  handle state). Queue getter goes direct to vk_common_GetDeviceQueue2 and
+  buffers use the `2` forms -- the link is the census: the flat forms are not
+  defined symbols in libvulkan_virtio.a.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../winsys/virgl/thylacine/warp_client.c      |  97 +++-
+ .../winsys/virgl/thylacine/warp_client.h      |  71 ++-
+ src/virtio/vulkan/thylacine_prove.c           | 456 +++++++++++++++++-
+ src/virtio/vulkan/vn_renderer_thylacine.c     | 363 ++++++++++----
+ 4 files changed, 857 insertions(+), 130 deletions(-)
+
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index 224d28f..a3e025e 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -620,11 +620,14 @@ int warp_mem_destroy(struct warp_conn *w, uint32_t handle)
+    return write_verb(w->root, path, "destroy");
+ }
+ 
+-uint64_t warp_venus_submit(struct warp_conn *w, const void *bytes, uint32_t len)
++uint64_t warp_venus_submit(struct warp_conn *w, const void *bytes, uint32_t len,
++                           uint32_t timeline, bool *again)
+ {
+-   uint64_t seq;
++   long fd;
++   long n;
+ 
+-   if (w->wedged)
++   *again = false;
++   if (w->wedged || timeline >= WARP_TIMELINES)
+       return 0;
+ 
+    /* One Twrite = one atomic submission. Past the chunk bound the kernel 9P
+@@ -644,13 +647,70 @@ uint64_t warp_venus_submit(struct warp_conn *w, const void *bytes, uint32_t len)
+       return 0;
+    }
+ 
+-   seq = fenced_write(w, w->submit_fd, bytes, len);
+-   if (seq == 0 && !w->wedged) {
+-      fprintf(stderr, "warp: venus submit failed -- a dropped command "
+-                      "stream poisons the ring; latching\n");
+-      w->wedged = true;
++   /* The timeline rides the FILE (submit<t>), not the payload: the stream is
++    * opaque bytes (an in-band index would change the byte format) and a
++    * Twrite offset cannot carry it (t_write's implicit offset arrives
++    * nonzero). Lazy-open: most apps drive one queue, so the other lanes'
++    * fids are never spent. */
++   fd = w->submit_fd;
++   if (timeline > 0) {
++      if (w->submit_t_fd[timeline] < 0) {
++         char path[64];
++         snprintf(path, sizeof(path), "ctx/%u/submit%u", w->ctx, timeline);
++         w->submit_t_fd[timeline] = open_at(w->root, path, T_OWRITE);
++         if (w->submit_t_fd[timeline] < 0)
++            return 0; /* server refuses the lane; not a wedge -- no stream lost */
++      }
++      fd = w->submit_t_fd[timeline];
+    }
+-   return seq;
++
++   /* The throttle check rides the CACHED ledger: a stale-high in-flight only
++    * produces a spurious *again, and the caller's parker cycle is itself the
++    * refresh, so it converges. */
++   if (inflight_depth(w) >= w->max_inflight) {
++      *again = true;
++      return 0;
++   }
++   n = t_write(fd, bytes, len);
++   if (n == (long)len) {
++      ++w->issued; /* the ctx-wide throttle ledger */
++      return ++w->t_issued[timeline];
++   }
++   if (n == -EAGAIN) {
++      /* Lane momentarily full (another client's chains, or our own share
++       * raced): retryable, nothing was consumed. */
++      *again = true;
++      return 0;
++   }
++   fprintf(stderr, "warp: venus submit failed -- a dropped command "
++                   "stream poisons the ring; latching\n");
++   w->wedged = true;
++   return 0;
++}
++
++int warp_timelines_refresh(struct warp_conn *w)
++{
++   char buf[256];
++   char key[24];
++   uint32_t t;
++   if (w->timelines_fd < 0 || read_snapshot(w->timelines_fd, buf, sizeof(buf)) < 0)
++      return -1;
++   for (t = 0; t < WARP_TIMELINES; t++) {
++      long long v;
++      snprintf(key, sizeof(key), "timeline %u", t);
++      v = parse_field(buf, key);
++      if (v < 0)
++         return -1;
++      w->t_signaled[t] = (uint64_t)v;
++   }
++   return 0;
++}
++
++int warp_fence_park(struct warp_conn *w)
++{
++   char rec[64];
++   long n = t_read(w->fence_fd, rec, sizeof(rec));
++   return (n <= 0) ? -1 : 0;
+ }
+ 
+ static long read_caps_path(struct warp_conn *w, const char *path, void *buf,
+@@ -695,6 +755,9 @@ int warp_open(struct warp_conn *w)
+ 
+    memset(w, 0, sizeof(*w));
+    w->root = w->ctx_ctl_fd = w->submit_fd = w->fence_fd = -1;
++   w->timelines_fd = -1;
++   for (unsigned t = 0; t < WARP_TIMELINES; t++)
++      w->submit_t_fd[t] = -1;
+ 
+    w->root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/warp", 9, T_OREAD);
+    if (w->root < 0)
+@@ -733,7 +796,13 @@ int warp_open(struct warp_conn *w)
+    w->submit_fd = open_at(w->root, path, T_OWRITE);
+    snprintf(path, sizeof(path), "ctx/%u/fence", w->ctx);
+    w->fence_fd = open_at(w->root, path, T_OREAD);
+-   if (w->ctx_ctl_fd < 0 || w->submit_fd < 0 || w->fence_fd < 0)
++   /* Eager like the other hot fds: server + client ship paired in one ramfs
++    * (no skew support), so an absent timelines file is a broken server, not
++    * a version to accommodate. */
++   snprintf(path, sizeof(path), "ctx/%u/timelines", w->ctx);
++   w->timelines_fd = open_at(w->root, path, T_OREAD);
++   if (w->ctx_ctl_fd < 0 || w->submit_fd < 0 || w->fence_fd < 0 ||
++       w->timelines_fd < 0)
+       goto fail;
+ 
+    /* The promoted counter is load-bearing (the whole fence model rides
+@@ -758,10 +827,18 @@ void warp_close(struct warp_conn *w)
+       t_close(w->fence_fd);
+    if (w->submit_fd >= 0)
+       t_close(w->submit_fd);
++   for (unsigned t = 0; t < WARP_TIMELINES; t++) {
++      if (w->submit_t_fd[t] >= 0)
++         t_close(w->submit_t_fd[t]);
++      w->submit_t_fd[t] = -1;
++   }
++   if (w->timelines_fd >= 0)
++      t_close(w->timelines_fd);
+    if (w->ctx_ctl_fd >= 0)
+       t_close(w->ctx_ctl_fd);
+    if (w->root >= 0)
+       t_close(w->root);
+    w->root = w->ctx_ctl_fd = w->submit_fd = w->fence_fd = -1;
++   w->timelines_fd = -1;
+    w->ctx = 0;
+ }
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index 062cdca..3bfca35 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -32,7 +32,16 @@
+  * backwards (#210) -- see inflight_depth in warp_client.c.
+  *
+  * Threading: the connection is one 9P stream; callers serialize through
+- * the winsys mutex. This library does no locking of its own.
++ * the winsys mutex (GL) or the renderer's transport mutex (Venus). This
++ * library does no locking of its own. Venus multi-queue adds one rule the
++ * caller must keep: the fence file admits ONE parked reader at a time (the
++ * server keeps a single per-ctx report cursor), so all parking goes through
++ * the renderer's one-parker protocol -- warp_fence_park never refreshes or
++ * latches, and warp_venus_submit never parks (WARP-MULTIQUEUE-DESIGN E.1).
++ *
++ * Venus timelines: t_issued/t_signaled refine the ctx-wide pair per queue
++ * lane; the `timelines` file serves the per-timeline signaled counts, and
++ * the fence file stays the (shared) park primitive.
+  *
+  * Errors: functions return 0/-1 (or a pointer/NULL); a hard transport
+  * failure or a poisoned context LATCHES the connection (warp_wedged())
+@@ -44,16 +53,33 @@
+ #include <stdbool.h>
+ #include <stdint.h>
+ 
++/* Venus fence timelines (multi-queue F3; mirrors the server's
++ * WARP_TIMELINES): 0 = the ctx-global lane (every fenced op counts there),
++ * 1..3 = VkQueue lanes. A queue timeline is a pure fence lane -- it has NO
++ * host3d ring behind it (WARP-MULTIQUEUE-DESIGN section E.1); do not confuse
++ * this index with a ring slot (ridx). */
++#define WARP_TIMELINES 4u
++
+ struct warp_conn {
+    long root;         /* the /srv/warp connection (open = connect) */
+    long ctx_ctl_fd;   /* kept open; fence-signaled polls are one t_pread */
+    long submit_fd;
+    long fence_fd;
++   long timelines_fd; /* kept open; per-timeline polls are one t_pread */
++   /* per-timeline submit fds (submit<t>), opened lazily on the first
++    * submit to that timeline; [0] unused (timeline 0 = submit_fd). */
++   long submit_t_fd[WARP_TIMELINES];
+    uint32_t ctx;      /* the minted context's public id */
+    uint32_t bo_cap;   /* ctl `bo-cap`: per-ctx BO capacity (discovery) */
+    uint32_t max_inflight; /* ctl `fence-lane`: the throttle depth (#204) */
+    uint64_t issued;   /* fenced ops issued (submits + transfers) */
+    uint64_t signaled; /* last read of ctl `fence-signaled` */
++   /* The per-timeline ledger (multi-queue F3): venus submits issued on each
++    * timeline / last read of ctx/<id>/timelines. The ctx-wide pair above
++    * stays the throttle's ledger (every fenced op, transfers included);
++    * these refine venus completion per queue lane. */
++   uint64_t t_issued[WARP_TIMELINES];
++   uint64_t t_signaled[WARP_TIMELINES];
+    bool wedged;       /* latched on transport failure / poison EOF */
+    bool ledger_warned; /* one-shot: the #210 conservation clamp fired */
+    bool build_diag_said; /* one-shot: first refused BO create named */
+@@ -205,17 +231,40 @@ void warp_mem_unmap(long map_fd);
+  * handle marked; a stale server slot is bounded by ctx death). */
+ int warp_mem_destroy(struct warp_conn *w, uint32_t handle);
+ 
+-/* Submit one opaque Venus command stream (raw SUBMIT_CMD/execbuffer bytes) to
+- * the ctx's submit file. With a host3d ring armed the server routes this to
+- * warp_venus_submit on the venus device-ctx; tapestryd never parses the
+- * bytes. One write = one atomic fenced submission (completion observed on
+- * ctx/<id>/fence via warp_fence_wait); `len` must be <= the seam chunk bound
+- * (the opaque stream cannot be split at a CCMD boundary the way warp_submit
+- * splits, so it must ride one Twrite). Latches the wedge on a dropped submit
+- * (a lost command stream poisons the ring). Returns the issue seq (> 0)
+- * or 0. */
++/* Submit one opaque Venus command stream (raw SUBMIT_CMD/execbuffer bytes) on
++ * `timeline` (0 = the ctx-global lane -> the ctx's submit file; 1..3 = a
++ * VkQueue lane -> submit<t>, so the server fences it on that virtio-gpu
++ * per-context timeline). The server routes a Venus client's stream to the
++ * venus device-ctx; tapestryd never parses the bytes. One write = one atomic
++ * fenced submission; `len` must be <= the seam chunk bound (the opaque stream
++ * cannot be split at a CCMD boundary the way warp_submit splits, so it must
++ * ride one Twrite).
++ *
++ * NON-PARKING (unlike warp_submit's fenced_write): the fence file admits ONE
++ * parked reader (single per-ctx report cursor), and the renderer's one-parker
++ * protocol owns it -- an internal throttle park here would be a second
++ * reader, parked while holding the renderer's transport mutex (the deadlock
++ * corner WARP-MULTIQUEUE-DESIGN E.1 closes). A full throttle or a momentarily
++ * full lane sets *again (returns 0, nothing latched): the caller runs one
++ * parker cycle and retries. A hard failure latches the wedge (a lost command
++ * stream poisons the ring) with *again false. Returns the PER-TIMELINE issue
++ * seq (> 0) or 0 -- completion is `t_signaled[timeline] >= seq`
++ * (warp_timelines_refresh), with the fence file as the park primitive. */
+ uint64_t warp_venus_submit(struct warp_conn *w, const void *bytes,
+-                           uint32_t len);
++                           uint32_t len, uint32_t timeline, bool *again);
++
++/* Refresh t_signaled[] from the timelines fd (one t_pread). 0 / -1. */
++int warp_timelines_refresh(struct warp_conn *w);
++
++/* ONE blocking park on the fence file -- no refresh, no state mutation.
++ * Built for the multi-queue one-parker protocol: the caller parks WITHOUT
++ * its transport mutex (a park with it held would block every submit) and
++ * does all bookkeeping -- the refreshes, the wedge latch -- after retaking
++ * it. At most ONE thread may be parked at a time (the server's fence file
++ * has a single per-ctx reported cursor; two parked readers would steal each
++ * other's wakes). Only sound with in-flight > 0 on some timeline the caller
++ * is tracking. Returns 0 on a wake, -1 on EOF/error (the caller latches). */
++int warp_fence_park(struct warp_conn *w);
+ 
+ /* Warp-4, the adoption's ctx half: consent to displaying `bo_pub` on
+  * tapestry surface `surface_id` ("present-to <surface> <bo>" on the ctx
+diff --git a/src/virtio/vulkan/thylacine_prove.c b/src/virtio/vulkan/thylacine_prove.c
+index c86561e..a9342a1 100644
+--- a/src/virtio/vulkan/thylacine_prove.c
++++ b/src/virtio/vulkan/thylacine_prove.c
+@@ -66,6 +66,53 @@ extern VKAPI_ATTR VkResult VKAPI_CALL
+ vn_UnmapMemory2(VkDevice, const VkMemoryUnmapInfo *);
+ extern VKAPI_ATTR void VKAPI_CALL
+ vn_FreeMemory(VkDevice, VkDeviceMemory, const VkAllocationCallbacks *);
++/* The GPU round-trip proof (multi-queue chunk) -- all device-level, so all
++ * direct symbols (the same trampoline-layout reason as above). */
++/* Venus defines the `2` forms only (the link is the census -- the flat
++ * GetBufferMemoryRequirements / BindBufferMemory are not symbols in
++ * libvulkan_virtio.a), and the queue getter is not venus code at all: it is
++ * the common runtime's vk_common_GetDeviceQueue2 (nm: the only defined
++ * queue-getter T symbol), which walks the vk_device's queue list directly. */
++extern VKAPI_ATTR void VKAPI_CALL
++vk_common_GetDeviceQueue2(VkDevice, const VkDeviceQueueInfo2 *, VkQueue *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateBuffer(VkDevice, const VkBufferCreateInfo *,
++                const VkAllocationCallbacks *, VkBuffer *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyBuffer(VkDevice, VkBuffer, const VkAllocationCallbacks *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_GetBufferMemoryRequirements2(VkDevice,
++                                const VkBufferMemoryRequirementsInfo2 *,
++                                VkMemoryRequirements2 *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_BindBufferMemory2(VkDevice, uint32_t, const VkBindBufferMemoryInfo *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateCommandPool(VkDevice, const VkCommandPoolCreateInfo *,
++                     const VkAllocationCallbacks *, VkCommandPool *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyCommandPool(VkDevice, VkCommandPool, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_AllocateCommandBuffers(VkDevice, const VkCommandBufferAllocateInfo *,
++                          VkCommandBuffer *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_BeginCommandBuffer(VkCommandBuffer, const VkCommandBufferBeginInfo *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_CmdCopyBuffer(VkCommandBuffer, VkBuffer, VkBuffer, uint32_t,
++                 const VkBufferCopy *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_EndCommandBuffer(VkCommandBuffer);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateFence(VkDevice, const VkFenceCreateInfo *,
++               const VkAllocationCallbacks *, VkFence *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyFence(VkDevice, VkFence, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_QueueSubmit(VkQueue, uint32_t, const VkSubmitInfo *, VkFence);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_WaitForFences(VkDevice, uint32_t, const VkFence *, VkBool32, uint64_t);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_EnumerateDeviceExtensionProperties(VkPhysicalDevice, const char *,
++                                      uint32_t *, VkExtensionProperties *);
+ 
+ int
+ main(void)
+@@ -342,14 +389,415 @@ main(void)
+ 
+    vn_UnmapMemory2(device, &umi);
+    free_mem(device, memory, NULL);
++
++   /* Step 4 (multi-queue chunk, F4 witness): VK_EXT_map_memory_placed must
++    * NOT be advertised -- the backend cannot honor a caller-chosen VA (the
++    * weft map picks it), so it sets cannot_map_placed and the extension is
++    * suppressed. An advertised-but-discarded placed map was the V-3b-3c-2b
++    * F4 silent corruption; this pins the de-advertisement. */
++   {
++      uint32_t ext_count = 0;
++      r = vn_EnumerateDeviceExtensionProperties(pds[0], NULL, &ext_count, NULL);
++      if (r != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: EnumerateDeviceExtensionProperties "
++                "rc=%d\n", r);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      static VkExtensionProperties exts[256];
++      if (ext_count > 256) {
++         /* A partial scan could MISS the extension and false-pass; say so
++          * loudly instead of pretending the negative was checked (#184). */
++         printf("venus-prove: ext list %u wide (> 256); placed-map check "
++                "SKIPPED\n", ext_count);
++      } else {
++         uint32_t n = ext_count;
++         r = vn_EnumerateDeviceExtensionProperties(pds[0], NULL, &n, exts);
++         if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
++            printf("THYLACINE-VENUS-PROVE FAIL: ext list rc=%d\n", r);
++            destroy_device(device, NULL);
++            destroy_instance(instance, NULL);
++            return 1;
++         }
++         for (uint32_t i = 0; i < n; i++) {
++            if (!strcmp(exts[i].extensionName, "VK_EXT_map_memory_placed")) {
++               printf("THYLACINE-VENUS-PROVE FAIL: VK_EXT_map_memory_placed "
++                      "is advertised but the backend cannot place (F4)\n");
++               destroy_device(device, NULL);
++               destroy_instance(instance, NULL);
++               return 1;
++            }
++         }
++         printf("venus-prove: placed-map de-advertised OK (%u device exts)\n",
++                n);
++      }
++   }
++
++   /* Step 5 (multi-queue chunk, the F1 fix-proof): allocate two HOST_VISIBLE
++    * memories, bind buffers, CPU-write a pattern into src, vkCmdCopyBuffer
++    * src->dst on the queue, vkWaitForFences, then FIRST-map dst and require
++    * the pattern. Under the pre-F1 lazy mint (bo created at first map) the
++    * mint's zeroing would destroy the GPU-written bytes -- reify-at-alloc
++    * (bo_must_init_at_alloc) is what makes this pass. This is the witness
++    * the allocate+map E2E structurally could not provide. */
++   {
++      const VkDeviceSize psize = 4096;
++      const VkBufferCreateInfo src_bci = {
++         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++         .size = psize,
++         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
++         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
++      };
++      const VkBufferCreateInfo dst_bci = {
++         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++         .size = psize,
++         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
++      };
++      VkBuffer src_buf = VK_NULL_HANDLE, dst_buf = VK_NULL_HANDLE;
++      if (vn_CreateBuffer(device, &src_bci, NULL, &src_buf) != VK_SUCCESS ||
++          vn_CreateBuffer(device, &dst_bci, NULL, &dst_buf) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateBuffer\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkBufferMemoryRequirementsInfo2 bmri = {
++         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
++         .buffer = src_buf,
++      };
++      VkMemoryRequirements2 req2 = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
++      };
++      vn_GetBufferMemoryRequirements2(device, &bmri, &req2);
++      const VkMemoryRequirements req = req2.memoryRequirements;
++      /* Need a type that is both buffer-compatible and HOST_VISIBLE (mt is
++       * HOST_VISIBLE from step 3; require the bits agree). */
++      int cmt = -1;
++      for (uint32_t i = 0; i < mem.memoryTypeCount; i++) {
++         if (!(req.memoryTypeBits & (1u << i)))
++            continue;
++         const VkMemoryPropertyFlags pf = mem.memoryTypes[i].propertyFlags;
++         if ((pf & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++             (pf & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
++            cmt = (int)i;
++            break;
++         }
++      }
++      if (cmt < 0) {
++         printf("THYLACINE-VENUS-PROVE ABSENT (no HOST_VISIBLE|COHERENT type "
++                "backs a transfer buffer -- copy proof not exercisable)\n");
++         vn_DestroyBuffer(device, src_buf, NULL);
++         vn_DestroyBuffer(device, dst_buf, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 0;
++      }
++      const VkDeviceSize asize = req.size > psize ? req.size : psize;
++      const VkMemoryAllocateInfo cp_mai = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++         .allocationSize = asize,
++         .memoryTypeIndex = (uint32_t)cmt,
++      };
++      VkDeviceMemory src_mem = VK_NULL_HANDLE, dst_mem = VK_NULL_HANDLE;
++      if (alloc_mem(device, &cp_mai, NULL, &src_mem) != VK_SUCCESS ||
++          alloc_mem(device, &cp_mai, NULL, &dst_mem) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: copy-proof vkAllocateMemory\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkBindBufferMemoryInfo binds[2] = {
++         {
++            .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
++            .buffer = src_buf,
++            .memory = src_mem,
++            .memoryOffset = 0,
++         },
++         {
++            .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
++            .buffer = dst_buf,
++            .memory = dst_mem,
++            .memoryOffset = 0,
++         },
++      };
++      if (vn_BindBufferMemory2(device, 2, binds) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkBindBufferMemory2\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      /* CPU-write the pattern into src (map + fill + unmap). */
++      const VkMemoryMapInfo src_mmi = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
++         .memory = src_mem,
++         .offset = 0,
++         .size = psize,
++      };
++      void *src_ptr = NULL;
++      if (vn_MapMemory2(device, &src_mmi, &src_ptr) != VK_SUCCESS ||
++          !src_ptr) {
++         printf("THYLACINE-VENUS-PROVE FAIL: copy-proof src map\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      for (uint32_t i = 0; i < psize / 4; i++)
++         ((uint32_t *)src_ptr)[i] = 0xA5000000u | i;
++      const VkMemoryUnmapInfo src_umi = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
++         .memory = src_mem,
++      };
++      vn_UnmapMemory2(device, &src_umi);
++
++      /* Record + submit the copy, fenced. */
++      const VkCommandPoolCreateInfo cpci = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
++         .queueFamilyIndex = 0,
++      };
++      VkCommandPool pool = VK_NULL_HANDLE;
++      if (vn_CreateCommandPool(device, &cpci, NULL, &pool) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateCommandPool\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkCommandBufferAllocateInfo cbai = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++         .commandPool = pool,
++         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++         .commandBufferCount = 1,
++      };
++      VkCommandBuffer cmd = VK_NULL_HANDLE;
++      const VkCommandBufferBeginInfo cbbi = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
++      };
++      const VkBufferCopy region = { .srcOffset = 0, .dstOffset = 0,
++                                    .size = psize };
++      if (vn_AllocateCommandBuffers(device, &cbai, &cmd) != VK_SUCCESS ||
++          vn_BeginCommandBuffer(cmd, &cbbi) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: command-buffer setup\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      vn_CmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
++      if (vn_EndCommandBuffer(cmd) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkEndCommandBuffer\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      const VkDeviceQueueInfo2 qi = {
++         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2,
++         .queueFamilyIndex = 0,
++         .queueIndex = 0,
++      };
++      VkQueue queue = VK_NULL_HANDLE;
++      vk_common_GetDeviceQueue2(device, &qi, &queue);
++      if (queue == VK_NULL_HANDLE) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkGetDeviceQueue returned NULL\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkFenceCreateInfo fci = {
++         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
++      };
++      VkFence fence = VK_NULL_HANDLE;
++      if (vn_CreateFence(device, &fci, NULL, &fence) != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkCreateFence\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkSubmitInfo si = {
++         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++         .commandBufferCount = 1,
++         .pCommandBuffers = &cmd,
++      };
++      r = vn_QueueSubmit(queue, 1, &si, fence);
++      if (r != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkQueueSubmit rc=%d\n", r);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      printf("venus-prove: copy submitted on queue 0; waiting fence...\n");
++      r = vn_WaitForFences(device, 1, &fence, VK_TRUE,
++                           10ull * 1000 * 1000 * 1000);
++      if (r != VK_SUCCESS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: vkWaitForFences rc=%d\n", r);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++
++      /* FIRST map of dst -- after the GPU wrote it. */
++      const VkMemoryMapInfo dst_mmi = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
++         .memory = dst_mem,
++         .offset = 0,
++         .size = psize,
++      };
++      void *dst_ptr = NULL;
++      if (vn_MapMemory2(device, &dst_mmi, &dst_ptr) != VK_SUCCESS ||
++          !dst_ptr) {
++         printf("THYLACINE-VENUS-PROVE FAIL: copy-proof dst first-map\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      uint32_t bad = 0;
++      for (uint32_t i = 0; i < psize / 4; i++)
++         if (((volatile uint32_t *)dst_ptr)[i] != (0xA5000000u | i)) {
++            bad = i + 1;
++            break;
++         }
++      if (bad) {
++         printf("THYLACINE-VENUS-PROVE FAIL: GPU copy pattern lost at word %u "
++                "(got %08x want %08x) -- reify-at-alloc broken (F1) or copy "
++                "failed\n", bad - 1,
++                ((volatile uint32_t *)dst_ptr)[bad - 1],
++                0xA5000000u | (bad - 1));
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      printf("venus-prove: GPU round-trip OK (vkCmdCopyBuffer 4 KiB, fenced "
++             "submit, pattern survived FIRST map -- the F1 reify-at-alloc "
++             "proof)\n");
++
++      const VkMemoryUnmapInfo dst_umi = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
++         .memory = dst_mem,
++      };
++      vn_UnmapMemory2(device, &dst_umi);
++      vn_DestroyFence(device, fence, NULL);
++      vn_DestroyCommandPool(device, pool, NULL);
++      vn_DestroyBuffer(device, src_buf, NULL);
++      vn_DestroyBuffer(device, dst_buf, NULL);
++      free_mem(device, src_mem, NULL);
++      free_mem(device, dst_mem, NULL);
++   }
++
++   /* Step 6 (multi-queue chunk): a SECOND logical device from the same
++    * instance. Its queue acquires the next timeline (ring_idx 2) -- under
++    * the old max_timeline_count=2 this exact create FAILED (the acquire
++    * returned -1), so its success is the black-box witness of the timeline
++    * lift, and vkGetDeviceQueue2's .ringIdx binding of a second lane
++    * exercises the host-side timeline table. */
++   {
++      VkDevice dev2 = VK_NULL_HANDLE;
++      r = vn_CreateDevice(pds[0], &dci, NULL, &dev2);
++      if (r != VK_SUCCESS || dev2 == VK_NULL_HANDLE) {
++         printf("THYLACINE-VENUS-PROVE FAIL: second vkCreateDevice rc=%d -- "
++                "the timeline lift (max_timeline_count=4) is not effective\n",
++                r);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      const VkDeviceQueueInfo2 qi2 = {
++         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2,
++         .queueFamilyIndex = 0,
++         .queueIndex = 0,
++      };
++      VkQueue q2 = VK_NULL_HANDLE;
++      vk_common_GetDeviceQueue2(dev2, &qi2, &q2);
++      if (q2 == VK_NULL_HANDLE) {
++         printf("THYLACINE-VENUS-PROVE FAIL: second device queue NULL\n");
++         destroy_device(dev2, NULL);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      destroy_device(dev2, NULL);
++      printf("venus-prove: second logical device + queue OK (timeline 2 "
++             "acquired -- the multi-queue lift)\n");
++   }
++
++   /* Step 7 (multi-queue chunk, the F2 witness): drive vkAllocateMemory past
++    * the server's 64 MiB per-ctx holistic backing cap (3 x 24 MiB), require
++    * the clean refusal, then free one and require a fresh 24 MiB to SUCCEED
++    * -- the pre-F2 client burned its handle slot on every refusal, so the
++    * recovery alloc is the proof the slot space survives memory pressure. */
++   {
++      const VkDeviceSize big = 24ull * 1024 * 1024;
++      const VkMemoryAllocateInfo big_mai = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++         .allocationSize = big,
++         .memoryTypeIndex = (uint32_t)mt,
++      };
++      VkDeviceMemory bigs[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE,
++                                 VK_NULL_HANDLE };
++      uint32_t got = 0;
++      VkResult rr = VK_SUCCESS;
++      for (uint32_t i = 0; i < 3; i++) {
++         rr = alloc_mem(device, &big_mai, NULL, &bigs[i]);
++         if (rr != VK_SUCCESS)
++            break;
++         got++;
++      }
++      if (got == 3) {
++         /* The cap admitted 72 MiB -- server cap not in force (unexpected);
++          * clean up and treat as a failure of the witness's premise. */
++         printf("THYLACINE-VENUS-PROVE FAIL: 3 x 24 MiB all admitted -- the "
++                "64 MiB per-ctx cap did not refuse (premise broken)\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      if (rr != VK_ERROR_OUT_OF_DEVICE_MEMORY) {
++         printf("THYLACINE-VENUS-PROVE FAIL: cap refusal rc=%d (want "
++                "OUT_OF_DEVICE_MEMORY)\n", rr);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      /* Recovery: free one admitted allocation, re-allocate the same size. */
++      if (got == 0) {
++         printf("THYLACINE-VENUS-PROVE FAIL: first 24 MiB refused -- cap "
++                "engaged too early\n");
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      free_mem(device, bigs[got - 1], NULL);
++      bigs[got - 1] = VK_NULL_HANDLE;
++      VkDeviceMemory again = VK_NULL_HANDLE;
++      rr = alloc_mem(device, &big_mai, NULL, &again);
++      if (rr != VK_SUCCESS || again == VK_NULL_HANDLE) {
++         printf("THYLACINE-VENUS-PROVE FAIL: post-refusal realloc rc=%d -- "
++                "the refusal burned state (F2 regression)\n", rr);
++         destroy_device(device, NULL);
++         destroy_instance(instance, NULL);
++         return 1;
++      }
++      free_mem(device, again, NULL);
++      for (uint32_t i = 0; i < got; i++)
++         if (bigs[i] != VK_NULL_HANDLE)
++            free_mem(device, bigs[i], NULL);
++      printf("venus-prove: cap-exhaustion cycle OK (refused at the 64 MiB "
++             "ctx cap, freed, realloc'd -- the F2 no-burn proof)\n");
++   }
++
+    destroy_device(device, NULL);
+ 
+    destroy_instance(instance, NULL);
+ 
+-   printf("THYLACINE-VENUS-PROVE PASS (bring-up + device-memory over /srv/warp: "
+-          "instance + logical device created, %u physical device(s), dev0 '%s', "
+-          "HOST_VISIBLE VkDeviceMemory allocated + mapped + sentinel "
+-          "round-tripped + freed -- V-3b-3c-2b)\n",
++   printf("THYLACINE-VENUS-PROVE PASS (bring-up + device-memory + GPU "
++          "round-trip over /srv/warp: instance + 2 logical devices, %u "
++          "physical device(s), dev0 '%s', HOST_VISIBLE VkDeviceMemory "
++          "allocated + mapped + sentinel round-tripped, vkCmdCopyBuffer "
++          "fenced round-trip with first-map pattern survival (F1), placed-map "
++          "de-advertised (F4), cap-exhaustion recovery (F2), timeline lift "
++          "witnessed -- the multi-queue GPU-submit chunk)\n",
+           pd_count, props.deviceName);
+    return 0;
+ }
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+index 8e08ff1..8796b57 100644
+--- a/src/virtio/vulkan/vn_renderer_thylacine.c
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -42,9 +42,12 @@
+  */
+ 
+ #include <stdint.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#include "c11/threads.h"
++
+ #include "virtio/virtio-gpu/venus_hw.h"
+ 
+ #include "util/sparse_array.h"
+@@ -90,17 +93,19 @@ struct thylacine_bo {
+ /*
+  * A vn_renderer_sync is a u64 timeline counter. Model B has no renderer-side
+  * sync object (SIMULATE_SYNCOBJ): the counter lives guest-side here, advanced
+- * either by the CPU (write/reset) or by a submit's WARP fence retiring. When
+- * a submit carries this sync, we record the issue seq it is bound to and the
+- * value it reaches; the counter is "at" that value once the WARP fence for
+- * that seq retires (observed via warp_fence_*). Bring-up never waits a sync;
+- * only teardown's vkDestroyRingMESA does (a binary 0->1 timeline).
++ * either by the CPU (write/reset) or by a submit's per-timeline WARP fence
++ * retiring. When a submit carries this sync, we record the (timeline, seq)
++ * it is bound to and the value it reaches; the counter is "at" that value
++ * once t_signaled[timeline] passes the seq (warp_timelines_refresh). Waiters:
++ * teardown's vkDestroyRingMESA (binary, timeline 0) and the sync-export path
++ * (vkWaitRingSeqnoMESA on a queue's timeline).
+  */
+ struct thylacine_sync {
+    struct vn_renderer_sync base;
+    uint64_t value;        /* current CPU-visible counter value */
+-   uint64_t signal_seq;   /* WARP submit seq that advances it (0 = CPU-only) */
++   uint64_t signal_seq;   /* per-timeline WARP seq that advances it (0 = CPU-only) */
+    uint64_t signal_value; /* value reached once signal_seq retires */
++   uint32_t signal_ring;  /* the venus TIMELINE signal_seq lives on (multi-queue) */
+ };
+ 
+ struct thylacine {
+@@ -108,33 +113,34 @@ struct thylacine {
+ 
+    struct vn_instance *instance;
+ 
+-   /* the /srv/warp connection: embeds the root/ctx/submit/fence fds and the
+-    * issued/signaled fence model reused for wait.
++   /* the /srv/warp connection: embeds the root/ctx/submit/fence/timelines
++    * fds and the ctx-wide + per-timeline fence ledgers.
+     *
+-    * SINGLE-THREAD ASSUMPTION (V-3b-3b): warp (its fds + fence counters +
+-    * wedge) and ring_bitmap are unguarded. The bring-up path (vkCreateInstance
+-    * -> enumerate -> vkDestroyInstance) is single-threaded and the prove
+-    * harness is the only caller of this backend today, so no concurrency
+-    * reaches here. The real trigger is NOT a second queue -- vkAllocateMemory is
+-    * not externally synchronized, so ANY two app threads allocating concurrently
+-    * race thylacine_mem_alloc's plain RMW (V-3b-3c-2b F6). The ops that touch
+-    * warp (shmem_create/destroy, bo_create/map/destroy, submit, wait,
+-    * sync_read/write) and the two bitmaps must serialize under a per-renderer
+-    * mutex (the vtest sock_mutex analog) before ANY concurrent-capable consumer
+-    * -- do NOT ship one without it. The F2 free-on-refusal arm's invariant-break
+-    * (a race-loser freeing the winner's handle) is already closed by warp_mem_
+-    * new's errno discrimination (a duplicate -EINVAL keeps the handle marked, it
+-    * does not free); the torn-RMW residual is what this mutex owes. */
++    * THE TRANSPORT MUTEX (multi-queue F3; the owed F6/F8 mutex landed):
++    * `mutex` guards warp (fds, ledgers, wedge), ring_bitmap, mem_bitmap,
++    * next_sync_id, and every sync's binding fields -- the vtest sock_mutex
++    * analog the V-3b-3b single-thread assumption owed (the torn-RMW trigger
++    * was ANY concurrent vkAllocateMemory, V-3b-3c-2b F6, not just a second
++    * queue). Two rules make it multi-queue-safe:
++    * (1) it is NEVER held across the fence park -- a park with it held
++    * would block every other queue's submit for the wait's duration;
++    * (2) at most ONE thread parks at a time (`parker_active` + `fence_cnd`
++    * fan-out): the server's fence file has a single per-ctx reported
++    * cursor, so two parked readers would steal each other's wakes
++    * (WARP-MULTIQUEUE-DESIGN section E.1). The parker re-reads both
++    * ledgers under the mutex after every wake and broadcasts; woken
++    * waiters re-evaluate and the first unmet one becomes the next parker. */
+    struct warp_conn warp;
+    bool connected;
++   mtx_t mutex;
++   cnd_t fence_cnd;
++   bool parker_active;
+ 
+    /* allocated host3d ring slots (ridx 0..63); one bit per WarpRing. */
+    uint64_t ring_bitmap;
+ 
+    /* allocated device-memory slots (handle 0..255); one bit per mem/<handle>.
+-    * Same SINGLE-THREAD assumption as ring_bitmap (see the warp field): the
+-    * owed per-renderer mutex (any concurrent vkAllocateMemory, not multi-queue)
+-    * covers this too. */
++    * Guarded by the transport mutex (see the warp field), like ring_bitmap. */
+    uint64_t mem_bitmap[THY_MEM_WORDS];
+ 
+    uint32_t next_sync_id;
+@@ -256,6 +262,9 @@ thylacine_shmem_create(struct vn_renderer *renderer, size_t size)
+       return cached_shmem;
+    }
+ 
++   struct vn_renderer_shmem *ret = NULL;
++   mtx_lock(&tly->mutex);
++
+    /* The server backs a ring with page-multiple, <= 1 MiB pages. The Venus
+     * ring is 131268 B (128 KiB buffer + control lines) -- round up to the
+     * page; the reply pool is 1 MiB (exactly the ceiling). A request over
+@@ -263,11 +272,11 @@ thylacine_shmem_create(struct vn_renderer *renderer, size_t size)
+     * ceiling, the Loom bulk path is the successor (out of V-3b-3 scope). */
+    size_t rounded = (size + (THY_PAGE - 1)) & ~(size_t)(THY_PAGE - 1);
+    if (rounded == 0 || rounded > THY_RING_MAX)
+-      return NULL;
++      goto out;
+ 
+    int ridx = thylacine_ridx_alloc(tly);
+    if (ridx < 0)
+-      return NULL;
++      goto out;
+ 
+    uint32_t res_id = 0;
+    if (warp_ring_create_host3d(&tly->warp, (uint32_t)ridx, (uint32_t)rounded,
+@@ -278,7 +287,7 @@ thylacine_shmem_create(struct vn_renderer *renderer, size_t size)
+        * collision). Converging it -- attempt `ring/<ridx>/ctl destroy` and free
+        * the ridx on success, as the happy path does -- is a V-3b-3c-2 follow-on
+        * (audit F2); the info-read failure is a device fault, not a client path. */
+-      return NULL;
++      goto out;
+    }
+ 
+    long map_fd = -1;
+@@ -291,7 +300,7 @@ thylacine_shmem_create(struct vn_renderer *renderer, size_t size)
+        * success) is a V-3b-3c-2 follow-on (audit F2). It matters most for a
+        * client at its shared-map budget, whose every map fails here: 64 such
+        * leaks re-enter the F1 permanent-shmem_create-failure symptom. */
+-      return NULL;
++      goto out;
+    }
+ 
+    struct thylacine_shmem *shmem =
+@@ -306,8 +315,11 @@ thylacine_shmem_create(struct vn_renderer *renderer, size_t size)
+       .ridx = (uint32_t)ridx,
+       .map_fd = map_fd,
+    };
++   ret = &shmem->base;
+ 
+-   return &shmem->base;
++out:
++   mtx_unlock(&tly->mutex);
++   return ret;
+ }
+ 
+ static void
+@@ -319,7 +331,12 @@ thylacine_shmem_destroy(struct vn_renderer *renderer,
+    if (vn_renderer_shmem_cache_add(&tly->shmem_cache, shmem))
+       return;
+ 
++   /* The cache declined it: retire for real, under the transport mutex
++    * (destroy_now itself stays lock-free -- its other caller is cache_fini
++    * inside thylacine_destroy, where no second thread can exist). */
++   mtx_lock(&tly->mutex);
+    thylacine_shmem_destroy_now(&tly->base, shmem);
++   mtx_unlock(&tly->mutex);
+ }
+ 
+ /* ---- bo / device memory: V-3b-3c (the hostmem BAR path) ---- */
+@@ -362,6 +379,7 @@ thylacine_bo_create_from_device_memory(
+    struct vn_renderer_bo **out_bo)
+ {
+    struct thylacine *tly = (struct thylacine *)renderer;
++   VkResult result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    (void)flags;            /* every mint is a RW coherent hostmem backing */
+    (void)external_handles; /* export is unsupported (export_dma_buf -> -1) */
+ 
+@@ -369,9 +387,10 @@ thylacine_bo_create_from_device_memory(
+    if (rounded == 0 || rounded > THY_MEM_MAX)
+       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+ 
++   mtx_lock(&tly->mutex);
+    int handle = thylacine_mem_alloc(tly);
+    if (handle < 0)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      goto out;
+ 
+    uint32_t res_id = 0;
+    int rc = warp_mem_new(&tly->warp, (uint32_t)handle, (uint32_t)rounded, mem_id,
+@@ -388,10 +407,13 @@ thylacine_bo_create_from_device_memory(
+        * have committed, F5; an info-read failure; any unrecognized errno) ->
+        * keep the handle marked (bounded leak, ctx-death reaped; NEVER free a
+        * handle whose server slot may be live -> the ring-F1 wedge class).
+-       * Converging the rc<0 arm with a destroy is the ring/mem F2 follow-on. */
++       * Converging the rc<0 arm with a destroy is the ring/mem F2 follow-on.
++       * (The F6 race-loser arm is now doubly closed: the transport mutex
++       * serializes the RMW itself, and the errno discrimination stays as the
++       * defense-in-depth below it.) */
+       if (rc > 0)
+          thylacine_mem_free(tly, (uint32_t)handle);
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      goto out;
+    }
+ 
+    struct thylacine_bo *bo = util_sparse_array_get(&tly->bo_array, res_id);
+@@ -407,7 +429,11 @@ thylacine_bo_create_from_device_memory(
+    };
+ 
+    *out_bo = &bo->base;
+-   return VK_SUCCESS;
++   result = VK_SUCCESS;
++
++out:
++   mtx_unlock(&tly->mutex);
++   return result;
+ }
+ 
+ static bool
+@@ -422,11 +448,13 @@ thylacine_bo_destroy(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
+     * "guest handle free <=> server slot free" so a reused handle never collides.
+     * On a refused destroy (wedged / already-gone) leave the handle marked -- the
+     * bounded-leak posture, one slot, reaped at ctx death. */
++   mtx_lock(&tly->mutex);
+    warp_mem_unmap(bo->map_fd);
+    bo->map_fd = -1;
+    bo->base.mmap_ptr = NULL;
+    if (warp_mem_destroy(&tly->warp, bo->handle) == 0)
+       thylacine_mem_free(tly, bo->handle);
++   mtx_unlock(&tly->mutex);
+    return true;
+ }
+ 
+@@ -455,8 +483,10 @@ thylacine_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *_bo,
+    if (placed_addr)
+       return NULL;
+    /* Map lazily + cache, like vtest: vkMapMemory may be called more than once,
+-    * and the second returns the cached ptr. Not thread-safe (the bo_ops map
+-    * contract), covered by the owed per-renderer mutex (see the warp field). */
++    * and the second returns the cached ptr. The transport mutex makes the
++    * lazy-map idempotent under concurrent callers (the second maps see the
++    * first's cached ptr). */
++   mtx_lock(&tly->mutex);
+    if (!bo->base.mmap_ptr) {
+       long map_fd = -1;
+       void *ptr = warp_mem_map(&tly->warp, bo->handle, &map_fd);
+@@ -465,7 +495,9 @@ thylacine_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *_bo,
+          bo->map_fd = map_fd;
+       }
+    }
+-   return bo->base.mmap_ptr;
++   void *ret = bo->base.mmap_ptr;
++   mtx_unlock(&tly->mutex);
++   return ret;
+ }
+ 
+ static void
+@@ -489,16 +521,18 @@ thylacine_bo_invalidate(struct vn_renderer *renderer,
+    (void)size;
+ }
+ 
+-/* ---- sync: guest-side u64 timeline bound to the WARP ctx fence ---- */
++/* ---- sync: guest-side u64 timeline bound to a per-queue WARP fence ---- */
+ 
++/* Caller holds tly->mutex. */
+ static void
+ thylacine_sync_refresh(struct thylacine *tly, struct thylacine_sync *s)
+ {
+    if (s->signal_seq == 0)
+       return; /* CPU-only value (write/reset); no fence to observe */
+-   if (warp_fence_refresh(&tly->warp) != 0)
++   if (warp_timelines_refresh(&tly->warp) != 0)
+       return;
+-   if (tly->warp.signaled >= s->signal_seq && s->value < s->signal_value)
++   if (tly->warp.t_signaled[s->signal_ring] >= s->signal_seq &&
++       s->value < s->signal_value)
+       s->value = s->signal_value;
+ }
+ 
+@@ -513,9 +547,12 @@ thylacine_sync_create(struct vn_renderer *renderer, uint64_t initial_val,
+    if (!sync)
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+ 
++   mtx_lock(&tly->mutex);
+    sync->base.sync_id = tly->next_sync_id++;
++   mtx_unlock(&tly->mutex);
+    sync->value = initial_val;
+    sync->signal_seq = 0;
++   sync->signal_ring = 0;
+    sync->signal_value = initial_val;
+ 
+    *out_sync = &sync->base;
+@@ -534,11 +571,14 @@ static VkResult
+ thylacine_sync_reset(struct vn_renderer *renderer,
+                      struct vn_renderer_sync *_sync, uint64_t initial_val)
+ {
++   struct thylacine *tly = (struct thylacine *)renderer;
+    struct thylacine_sync *sync = (struct thylacine_sync *)_sync;
+-   (void)renderer;
++   mtx_lock(&tly->mutex);
+    sync->value = initial_val;
+    sync->signal_seq = 0;
++   sync->signal_ring = 0;
+    sync->signal_value = initial_val;
++   mtx_unlock(&tly->mutex);
+    return VK_SUCCESS;
+ }
+ 
+@@ -548,8 +588,10 @@ thylacine_sync_read(struct vn_renderer *renderer,
+ {
+    struct thylacine *tly = (struct thylacine *)renderer;
+    struct thylacine_sync *sync = (struct thylacine_sync *)_sync;
++   mtx_lock(&tly->mutex);
+    thylacine_sync_refresh(tly, sync);
+    *val = sync->value;
++   mtx_unlock(&tly->mutex);
+    return VK_SUCCESS;
+ }
+ 
+@@ -557,48 +599,68 @@ static VkResult
+ thylacine_sync_write(struct vn_renderer *renderer,
+                      struct vn_renderer_sync *_sync, uint64_t val)
+ {
++   struct thylacine *tly = (struct thylacine *)renderer;
+    struct thylacine_sync *sync = (struct thylacine_sync *)_sync;
+-   (void)renderer;
+    /* CPU override: drop any fence binding -- a later value the GPU has not
+     * reached is now the truth the driver asserted. */
++   mtx_lock(&tly->mutex);
+    sync->value = val;
+    sync->signal_seq = 0;
++   sync->signal_ring = 0;
+    sync->signal_value = val;
++   mtx_unlock(&tly->mutex);
+    return VK_SUCCESS;
+ }
+ 
+-/* ---- submit: forward the opaque bootstrap SUBMIT_CMD stream ---- */
++/* ---- submit: forward the opaque venus SUBMIT_CMD stream per-timeline ---- */
++
++static int thylacine_fence_cycle_locked(struct thylacine *tly);
+ 
+ static VkResult
+ thylacine_submit(struct vn_renderer *renderer,
+                  const struct vn_renderer_submit *submit)
+ {
+    struct thylacine *tly = (struct thylacine *)renderer;
+-
+-   /* Bring-up submits carry one batch with one command (vkCreateRingMESA /
+-    * vkNotifyRingMESA), no syncs. Teardown carries vkDestroyRingMESA with a
+-    * single binary sync. Each batch is one atomic venus submission; its
+-    * syncs bind to that submission's WARP fence seq. bos[] (submit-time pin)
+-    * is empty on every bring-up path -- BO pinning lands with the bo path
+-    * in V-3b-3c. */
++   VkResult result = VK_SUCCESS;
++
++   /* Each batch is one atomic venus submission on `batch->ring_idx` -- the
++    * venus TIMELINE the submitting VkQueue is bound to (0 = the CPU/instance
++    * lane: the bootstrap vkCreateRingMESA/vkNotifyRingMESA commands, and any
++    * pre-queue traffic). Its syncs bind to that submission's per-timeline
++    * WARP fence seq. The sync-export path (vn_create_sync_file) is the
++    * ring_idx>0 producer today: a vkWaitRingSeqnoMESA cs + syncs, fenced on
++    * the queue's timeline. bos[] (submit-time pin) remains empty on every
++    * driving path. */
++   mtx_lock(&tly->mutex);
+    for (uint32_t i = 0; i < submit->batch_count; i++) {
+       const struct vn_renderer_submit_batch *batch = &submit->batches[i];
++      const uint32_t ring = batch->ring_idx;
+       uint64_t seq;
+ 
++      if (ring >= WARP_TIMELINES) {
++         /* max_timeline_count bounds what the driver acquires, so this arm
++          * is unreachable through vn_queue -- refuse rather than mis-fence
++          * on a truncated lane if a future caller slips one through. */
++         result = VK_ERROR_DEVICE_LOST;
++         break;
++      }
++
+       if (batch->cs_size == 0) {
+-         /* A batch with syncs but no command. If work is in flight the syncs
+-          * must NOT jump ahead of it (submission-order signaling, like
+-          * vtest/virtgpu): bind them to the last issued seq so they signal
+-          * when everything currently in flight retires. Only with nothing in
+-          * flight do they signal immediately on the CPU timeline. (V-3b-3b
+-          * audit F4.) */
+-         const uint64_t issued = tly->warp.issued;
++         /* A batch with syncs but no command. If work is in flight ON THIS
++          * TIMELINE the syncs must NOT jump ahead of it (submission-order
++          * signaling, like vtest/virtgpu): bind them to the timeline's last
++          * issued seq so they signal when everything currently in flight
++          * there retires. Only with nothing in flight do they signal
++          * immediately on the CPU timeline. (V-3b-3b audit F4, per-timeline
++          * since the multi-queue redesign.) */
++         const uint64_t issued = tly->warp.t_issued[ring];
+          for (uint32_t j = 0; j < batch->sync_count; j++) {
+             struct thylacine_sync *s =
+                (struct thylacine_sync *)batch->syncs[j];
+             const uint64_t v = batch->sync_values[j];
+-            if (issued > tly->warp.signaled) {
++            if (issued > tly->warp.t_signaled[ring]) {
+                s->signal_seq = issued;
++               s->signal_ring = ring;
+                s->signal_value = v;
+             } else {
+                if (s->value < v)
+@@ -614,25 +676,107 @@ thylacine_submit(struct vn_renderer *renderer,
+          /* the seam's len type is u32; guard the cast so an implausibly
+           * large stream cannot truncate to a small value that slips the
+           * one-write bound (a stream this large needs the Loom bulk path). */
+-         return VK_ERROR_DEVICE_LOST;
++         result = VK_ERROR_DEVICE_LOST;
++         break;
+       }
+ 
+-      seq = warp_venus_submit(&tly->warp, batch->cs_data,
+-                              (uint32_t)batch->cs_size);
+-      if (seq == 0)
+-         return VK_ERROR_DEVICE_LOST;
++      /* The submit is non-parking (see warp_venus_submit): a full throttle
++       * or lane reports `again`, and the wait runs through the one-parker
++       * cycle -- with our own work in flight its retirement fills the park;
++       * with none (foreign contention) there is nothing of ours to park on,
++       * so yield off-mutex and retry. Bounded like fenced_write's loop. */
++      seq = 0;
++      for (int attempts = 0; attempts < 64; attempts++) {
++         bool retry = false;
++         seq = warp_venus_submit(&tly->warp, batch->cs_data,
++                                 (uint32_t)batch->cs_size, ring, &retry);
++         if (seq != 0 || !retry)
++            break;
++         if (tly->warp.issued > tly->warp.signaled) {
++            if (thylacine_fence_cycle_locked(tly) < 0)
++               break;
++         } else {
++            mtx_unlock(&tly->mutex);
++            thrd_yield();
++            mtx_lock(&tly->mutex);
++            (void)warp_fence_refresh(&tly->warp);
++         }
++      }
++      if (seq == 0) {
++         result = VK_ERROR_DEVICE_LOST;
++         break;
++      }
+ 
+       for (uint32_t j = 0; j < batch->sync_count; j++) {
+          struct thylacine_sync *s = (struct thylacine_sync *)batch->syncs[j];
+          s->signal_seq = seq;
++         s->signal_ring = ring;
+          s->signal_value = batch->sync_values[j];
+       }
+    }
++   mtx_unlock(&tly->mutex);
+ 
+-   return VK_SUCCESS;
++   return result;
++}
++
++/* ---- wait: block on the bound per-timeline WARP fence seq(s) ---- */
++
++/* One cycle of the one-parker protocol (tly->mutex held on entry AND exit):
++ * if no thread is parked on the shared fence file, become the parker -- park
++ * WITH THE MUTEX DROPPED, re-read both ledgers under the mutex on the wake,
++ * broadcast; otherwise cnd-wait for the active parker's broadcast. At most
++ * one parked reader can exist (the server's fence file has a single per-ctx
++ * report cursor), and the venus submit path is non-parking for the same
++ * reason -- its throttle waits run through THIS cycle, never through an
++ * internal park taken with the mutex held (the deadlock corner
++ * WARP-MULTIQUEUE-DESIGN E.1 closes). A cycle is only sound with work in
++ * flight (a retirement or the poison EOF is coming); every caller
++ * establishes that before cycling. Returns 0, or -1 on a wedged/torn
++ * connection (everyone is woken so no waiter sleeps on a dead stream). */
++static int
++thylacine_fence_cycle_locked(struct thylacine *tly)
++{
++   if (tly->warp.wedged)
++      return -1;
++   if (!tly->parker_active) {
++      tly->parker_active = true;
++      mtx_unlock(&tly->mutex);
++      const int parked = warp_fence_park(&tly->warp);
++      mtx_lock(&tly->mutex);
++      tly->parker_active = false;
++      if (parked < 0) {
++         /* EOF/error: the ctx is poisoned or torn down. Latch under the
++          * mutex (warp_fence_park deliberately mutates nothing). */
++         if (!tly->warp.wedged) {
++            fprintf(stderr, "warp: fence stream EOF/error -- context is "
++                            "dead (poisoned or torn down); latching\n");
++            tly->warp.wedged = true;
++         }
++         cnd_broadcast(&tly->fence_cnd);
++         return -1;
++      }
++      (void)warp_fence_refresh(&tly->warp);
++      (void)warp_timelines_refresh(&tly->warp);
++      cnd_broadcast(&tly->fence_cnd);
++   } else {
++      cnd_wait(&tly->fence_cnd, &tly->mutex);
++   }
++   return tly->warp.wedged ? -1 : 0;
+ }
+ 
+-/* ---- wait: block on the bound WARP fence seq(s) ---- */
++/* Block (tly->mutex held on entry AND exit) until the bound per-timeline
++ * seq retires. Sound because the waited seq is <= t_issued[ring] (it was
++ * returned by a successful submit), so while t_signaled[ring] < seq that
++ * timeline has work in flight -- the cycle's park is always fillable. */
++static int
++thylacine_fence_wait_locked(struct thylacine *tly, uint32_t ring, uint64_t seq)
++{
++   while (tly->warp.t_signaled[ring] < seq) {
++      if (thylacine_fence_cycle_locked(tly) < 0)
++         return -1;
++   }
++   return 0;
++}
+ 
+ static VkResult
+ thylacine_wait(struct vn_renderer *renderer,
+@@ -640,15 +784,17 @@ thylacine_wait(struct vn_renderer *renderer,
+ {
+    struct thylacine *tly = (struct thylacine *)renderer;
+    bool any_satisfied = false;
+-
+-   /* Model B waits are only the teardown binary timeline (one sync). A sync
+-    * is satisfied when its bound WARP fence seq retires; warp_fence_wait is
+-    * the blocking Tread of ctx/<id>/fence (not t_poll -- see file header).
+-    * A zero timeout polls without blocking; any non-zero timeout blocks
+-    * until the fence retires (the ns bound is not honored precisely -- the
+-    * only non-zero-timeout waiter today is teardown, which wants
+-    * completion; finite-timeout precision via the coherent seqno slot is a
++   VkResult result = VK_SUCCESS;
++
++   /* A sync is satisfied when its bound per-timeline WARP seq retires. The
++    * park primitive is the blocking Tread of ctx/<id>/fence (not t_poll --
++    * see file header), shared across timelines through the one-parker
++    * protocol above. A zero timeout polls without blocking; any non-zero
++    * timeout blocks until the fence retires (the ns bound is not honored
++    * precisely -- teardown and sync-file waiters want completion;
++    * finite-timeout precision via the coherent seqno slot is a
+     * refinement). */
++   mtx_lock(&tly->mutex);
+    for (uint32_t i = 0; i < wait->sync_count; i++) {
+       struct thylacine_sync *s = (struct thylacine_sync *)wait->syncs[i];
+       const uint64_t target = wait->sync_values[i];
+@@ -657,32 +803,40 @@ thylacine_wait(struct vn_renderer *renderer,
+       if (s->value >= target) {
+          any_satisfied = true;
+          if (wait->wait_any)
+-            return VK_SUCCESS;
++            goto out;
+          continue;
+       }
+ 
+       if (wait->timeout != 0 && s->signal_seq != 0 &&
+           target <= s->signal_value) {
+-         if (warp_fence_wait(&tly->warp, s->signal_seq) < 0)
+-            return VK_ERROR_DEVICE_LOST;
++         if (thylacine_fence_wait_locked(tly, s->signal_ring,
++                                         s->signal_seq) < 0) {
++            result = VK_ERROR_DEVICE_LOST;
++            goto out;
++         }
+          thylacine_sync_refresh(tly, s);
+          if (s->value >= target) {
+             any_satisfied = true;
+             if (wait->wait_any)
+-               return VK_SUCCESS;
++               goto out;
+             continue;
+          }
+       }
+ 
+       /* Unmet: for wait_all one unmet sync means the whole wait times out;
+        * for wait_any keep scanning the rest. */
+-      if (!wait->wait_any)
+-         return VK_TIMEOUT;
++      if (!wait->wait_any) {
++         result = VK_TIMEOUT;
++         goto out;
++      }
+    }
+ 
+-   if (wait->wait_any)
+-      return any_satisfied ? VK_SUCCESS : VK_TIMEOUT;
+-   return VK_SUCCESS;
++   if (wait->wait_any && !any_satisfied)
++      result = VK_TIMEOUT;
++
++out:
++   mtx_unlock(&tly->mutex);
++   return result;
+ }
+ 
+ static void
+@@ -692,7 +846,9 @@ thylacine_destroy(struct vn_renderer *renderer,
+    struct thylacine *tly = (struct thylacine *)renderer;
+ 
+    /* cache_fini drops any cached ring mappings (warp_ring_unmap) -- must run
+-    * while the connection is still open, i.e. before warp_close. */
++    * while the connection is still open, i.e. before warp_close. Teardown is
++    * single-threaded by the Vulkan contract (vkDestroyInstance externally
++    * synchronized against everything), so no lock is taken here. */
+    vn_renderer_shmem_cache_fini(&tly->shmem_cache);
+ 
+    util_sparse_array_finish(&tly->shmem_array);
+@@ -701,6 +857,9 @@ thylacine_destroy(struct vn_renderer *renderer,
+    if (tly->connected)
+       warp_close(&tly->warp);
+ 
++   cnd_destroy(&tly->fence_cnd);
++   mtx_destroy(&tly->mutex);
++
+    vk_free(alloc, tly);
+ }
+ 
+@@ -753,7 +912,10 @@ thylacine_init(struct thylacine *tly)
+ {
+    /* Init the non-fallible structures first so the failure path
+     * (thylacine_destroy on a warp_open failure) always finds valid arrays +
+-    * cache to finish/fini. */
++    * cache + lock to finish/fini. */
++   mtx_init(&tly->mutex, mtx_plain);
++   cnd_init(&tly->fence_cnd);
++   tly->parker_active = false;
+    util_sparse_array_init(&tly->shmem_array, sizeof(struct thylacine_shmem),
+                           1024);
+    util_sparse_array_init(&tly->bo_array, sizeof(struct thylacine_bo), 1024);
+@@ -778,28 +940,19 @@ thylacine_init(struct thylacine *tly)
+       memset((char *)&tly->capset.data + n, 0, sizeof(tly->capset.data) - n);
+    tly->capset.id = THYLACINE_VENUS_CAPSET_ID;
+    tly->capset.version = 0;
+-   /* Timelines (V-3b-3c-2b). The seam still does not carry ring_idx
+-    * (thylacine_submit ignores batch->ring_idx; tapestryd hardcodes the submit
+-    * ring word to 0), so multiple queues bound to distinct nonzero timelines
+-    * would be mis-attributed + all fenced on ring 0 (V-3b-3b F3). But capping
+-    * max_timeline_count to 1 is a LATENT BUG: vn_queue_init unconditionally
+-    * calls vn_instance_acquire_ring_idx, which reserves ring 0 for the CPU
+-    * timeline and hands a queue the first free index (1); with
+-    * max_timeline_count==1 that index is rejected (>= count) and EVERY
+-    * vkCreateDevice with a queue fails -- i.e. no device can be created at all.
+-    * Allow exactly ONE queue timeline (ring 0 CPU + ring 1 queue): single-queue
+-    * CREATION is sound (a 2nd queue's acquire returns -1 -> clean
+-    * VK_ERROR_INITIALIZATION_FAILED, never a silent mis-fence). Single-queue
+-    * SUBMIT fencing is NOT established here: GetDeviceQueue2 binds the queue to
+-    * timeline 1 host-side while thylacine_submit drops ring_idx onto ring 0, and
+-    * the ring-0 retirement semantics for a queue submission are unanalyzed. This
+-    * allocate+map path creates the queue but never submits, so nothing here is
+-    * reachable; the OWED F3 work is the full seam-carries-ring_idx fix AND that
+-    * submit-fence analysis, landing with the GPU-submit chunk. */
+-   tly->capset.data.supports_multiple_timelines = 0;
+-
++   /* Timelines (multi-queue F3, WARP-MULTIQUEUE-DESIGN): the seam now
++    * carries batch->ring_idx end-to-end -- submit<t> -> the server's
++    * per-context virtio-gpu fence timeline (INFO_RING_IDX) -> the per-
++    * timeline signaled counters -- so the V-3b-3b F3 cap ("one queue,
++    * because ring_idx was dropped on the floor") is lifted to the ratified
++    * v1.0 bound: 4 timelines = ring 0 (CPU) + 3 VkQueues. The host capset's
++    * supports_multiple_timelines is passed through untouched (the sibling
++    * backends assert it; a venus host sets it): on the degenerate host that
++    * clears it, fall back to the single-queue count of 2 rather than hand
++    * out lanes the host cannot fence. */
+    tly->next_sync_id = 1;
+-   tly->max_timeline_count = 2;
++   tly->max_timeline_count =
++      tly->capset.data.supports_multiple_timelines ? WARP_TIMELINES : 2;
+ 
+    thylacine_init_renderer_info(tly);
+ 
+-- 
+2.43.0
+

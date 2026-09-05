@@ -16,6 +16,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>                 // RW-11 SA-1b: sched_mark_interactive
+#include <thylacine/smp.h>                   // the extinction ring claim: per-CPU owner
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>               // #55: struct t_stat (cons_stat_native_fill)
@@ -103,6 +104,26 @@ struct cons_input {
     u16         ws_rows;
     u32         winch_events;
 
+    // H-1 (BEACON.md 12.3 / ARCH 23.5.4): the Beacon render-capability tier
+    // the console renderer advertises -- CONS_BEACON_NONE (unset; the serial
+    // posture), _CELLS (aurora), _RICH (Halcyon). Written by the renderer via
+    // the consctl `beacon <tier>` verb (the winsize discipline: staged parse,
+    // atomic apply, readback on the ctl render line); reset to NONE when the
+    // renderer's drain closes (cons_drain_close -- no renderer, no rich sink)
+    // and by cons_test_reset. Mutated + read under g_cons.lock like winsize.
+    // Confers nothing: a lying tier changes only how consumers FORMAT bytes.
+    u32         beacon_tier;
+    // DISPLAY-MODES.md 1b: the serial-silence flag. When a graphical renderer
+    // is the PRIMARY display (thylacine.display=gpu), it silences EL0 program
+    // output on the serial UART so the framebuffer is the sole view. Set/cleared
+    // by the renderer via the consctl `serialsilent <0|1>` verb (the same
+    // renderer-minted consctl that reports winsize -- a display-routing decision
+    // by the display owner, never a termios flag), stored under g_cons.lock and
+    // read LOCKLESSLY (relaxed-atomic) in the two cons_emit paths. It gates ONLY
+    // the serial sink; the drain tap (aurora), kernel diagnostics + the boot
+    // banner + extinction (all direct uart_puts, never cons_emit) are untouched.
+    bool        serial_silent;
+
     // #95: the INPUT-path silent-drop counters. Every RX drop site is counted
     // here, under g_cons.lock (all three sites already run under it). They exist
     // because a lost input byte previously left NO trace anywhere: #95 observed
@@ -140,6 +161,17 @@ struct cons_input {
     //                   a diagnostic counter but an invariant WITNESS: it has no
     //                   reachable driver by construction, and that is the claim
     //                   it exists to falsify.
+    //   rx_drop_modeflush -- a consctl write that CLEARS ICANON delivers the
+    //                   half-assembled line[] to the ring (PTY-DESIGN "Mode
+    //                   writes deliver, never discard"); a mode write cannot
+    //                   back-pressure, so what does not fit is a REAL DROP, and
+    //                   the #95 rule gives a new drop site its own counter.
+    //                   Reachable by ordinary type-ahead volume, not only a
+    //                   wedged reader: the shell re-arms PROMPT_MODE BEFORE it
+    //                   drains, so a paste of a ring's worth of complete lines
+    //                   into a non-reading foreground job fills the ring by
+    //                   Enter-flushes and the trailing partial line meets a
+    //                   full ring at the re-arm (the ccb597b8 round, F4).
     //
     // Counting is NOT a fix for any of them; it is what makes the next
     // occurrence decidable instead of unexplained.
@@ -147,6 +179,7 @@ struct cons_input {
     u32         rx_bp_flush;
     u32         rx_drop_line;
     u32         rx_drop_ring;
+    u32         rx_drop_modeflush;
 
     // #95: set by any drop site, drained by console_mgr, which emits ONE loud
     // line in process context (the intr/sak/pollwake deferred-relay pattern --
@@ -241,15 +274,24 @@ static inline void drain_armed_store(bool v)   { __atomic_store_n(&g_cons_drain.
 static inline bool drain_pollwake_load(void)   { return __atomic_load_n(&g_cons_drain.poll_wake_pending, __ATOMIC_RELAXED); }
 static inline void drain_pollwake_store(bool v) { __atomic_store_n(&g_cons_drain.poll_wake_pending, v, __ATOMIC_RELAXED); }
 
-// The tap: mirror one output/echo byte into the drain ring. Called from
-// cons_emit (process OR IRQ context). The armed pre-check is a lockless fast
-// path -- disarmed (the boot/serial-only state) costs one RELAXED load per
-// byte; the open re-check under the lock closes the check-vs-disarm race (a
-// byte racing a close is dropped, never pushed to a dead epoch). Wakes the
-// drain reader (wakeup is IRQ-safe) and, on the empty->non-empty edge, arms
-// the deferred POLLIN walk + wakes console_mgr.
-static void cons_drain_tap(u8 byte) {
-    if (!drain_armed_load()) return;
+// The tap: mirror one output UNIT into the drain ring under ONE lock hold, so
+// the renderer's stream has the same unit atomicity the serial ring has (ARCH
+// 23.5.2 "UNIT ATOMICITY": a peer's unit lands before or after this one, never
+// inside it). Called from the emit paths (process OR IRQ context). The armed
+// pre-check is a lockless fast path -- disarmed (the boot/serial-only state)
+// costs one RELAXED load per unit; the open re-check under the lock closes the
+// check-vs-disarm race (a unit racing a close is dropped, never pushed to a
+// dead epoch). Full: drop OLDEST by the deficit so the newest output survives
+// (`overflow` counts the bytes lost). Wakes the drain reader (wakeup is
+// IRQ-safe) and, on the empty->non-empty edge, arms the deferred POLLIN walk +
+// wakes console_mgr. Never nested with g_cons_tx.lock: the emits tap, release,
+// then push.
+static void cons_drain_tap_bulk(const u8 *b, u32 n) {
+    if (n == 0u || !drain_armed_load()) return;
+    if (n > CONS_DRAIN_RING_SIZE) {         // only the newest ring's worth can survive
+        b += n - CONS_DRAIN_RING_SIZE;
+        n  = CONS_DRAIN_RING_SIZE;
+    }
 
     bool wake_mgr = false;
     irq_state_t s = spin_lock_irqsave(&g_cons_drain.lock);
@@ -258,15 +300,17 @@ static void cons_drain_tap(u8 byte) {
         return;
     }
     u32 c = drain_count_load();
-    if (c >= CONS_DRAIN_RING_SIZE) {
-        // Full: drop OLDEST (advance head) so the newest output survives.
-        g_cons_drain.head = (g_cons_drain.head + 1u) & (CONS_DRAIN_RING_SIZE - 1u);
-        g_cons_drain.overflow++;
-        c--;
+    if (c + n > CONS_DRAIN_RING_SIZE) {
+        u32 evict = c + n - CONS_DRAIN_RING_SIZE;
+        g_cons_drain.head = (g_cons_drain.head + evict) & (CONS_DRAIN_RING_SIZE - 1u);
+        g_cons_drain.overflow += evict;
+        c -= evict;
     }
-    g_cons_drain.ring[g_cons_drain.tail] = byte;
-    g_cons_drain.tail = (g_cons_drain.tail + 1u) & (CONS_DRAIN_RING_SIZE - 1u);
-    drain_count_store(c + 1u);
+    for (u32 i = 0; i < n; i++) {
+        g_cons_drain.ring[g_cons_drain.tail] = b[i];
+        g_cons_drain.tail = (g_cons_drain.tail + 1u) & (CONS_DRAIN_RING_SIZE - 1u);
+    }
+    drain_count_store(c + n);
     if (c == 0u) {
         drain_pollwake_store(true);
         wake_mgr = true;
@@ -301,6 +345,14 @@ static inline void cons_pollwake_store(bool v) { __atomic_store_n(&g_cons.poll_w
 // cons_mgr_pending (which runs under the Rendez lock, not this one).
 static inline bool cons_dropreport_load(void)   { return __atomic_load_n(&g_cons.drop_report_pending, __ATOMIC_RELAXED); }
 static inline void cons_dropreport_store(bool v) { __atomic_store_n(&g_cons.drop_report_pending, v, __ATOMIC_RELAXED); }
+// DISPLAY-MODES.md 1b: the serial-silence flag. Written under g_cons.lock (the
+// consctl verb apply), read locklessly in the two cons_emit paths (both run
+// with g_cons.lock RELEASED). RELAXED is correct: there is no ordering
+// dependency, and a stale read only lets a byte or two reach serial during the
+// one-time startup race before the renderer sets it -- harmless (never a
+// correctness or safety property, unlike the count/intr flags).
+static inline bool cons_serial_silent_load(void)   { return __atomic_load_n(&g_cons.serial_silent, __ATOMIC_RELAXED); }
+static inline void cons_serial_silent_store(bool v) { __atomic_store_n(&g_cons.serial_silent, v, __ATOMIC_RELAXED); }
 
 // LS-8b: the termios word. Read + written under g_cons.lock (cooking reads it,
 // consctl writes it); RELAXED-atomic for consistency with the sibling flags.
@@ -349,6 +401,14 @@ static inline void cons_termios_store(u32 v) { __atomic_store_n(&g_cons.termios,
 #define CONS_TX_RING_SIZE  8192u   // power of two (mask-indexed)
 _Static_assert((CONS_TX_RING_SIZE & (CONS_TX_RING_SIZE - 1u)) == 0u,
                "CONS_TX_RING_SIZE must be a power of two");
+// The role writer's push UNIT (ARCH 23.5.2 "UNIT ATOMICITY"): cons_output_write
+// stages up to this many COOKED bytes and pushes them under one lock hold. A
+// console line is far below it, so the common write is one unit; a longer
+// write spans chunks cut at NL boundaries. Bounded so the stack stage stays
+// small and a unit can always fit an empty ring.
+#define CONS_TX_STAGE      512u
+_Static_assert(CONS_TX_STAGE <= CONS_TX_RING_SIZE, "a chunk must fit an empty ring");
+_Static_assert(CONS_ECHO_MAX <= CONS_TX_RING_SIZE, "an echo unit must fit an empty ring");
 
 // #67 inherited, NOT weakened: a stalled host consumer stops the TX IRQ, so the
 // room-wait is DEADLINED and a timeout drops the remainder of the write (a short
@@ -429,24 +489,109 @@ void cons_tx_arm(void) {
     spin_unlock_irqrestore(&g_cons_tx.lock, s);
 }
 
-// #75: flush the ring synchronously, bounded. The extinction / Halls path calls
-// this before its own direct-DR dump so pre-crash ring output is not lost. It
-// runs on a dying, IRQ-masked machine, so it must NOT wait on the IRQ and must
-// NOT take the ring lock (a dying CPU may already hold it) -- it drains with a
-// bounded trylock, then gives up. HX-I discipline: bounded, never recursing.
-void cons_tx_flush_for_dump(void) {
-    if (!spin_trylock(&g_cons_tx.lock)) return;   // a peer holds it: skip, do not wedge
-    for (u32 i = 0; i < CONS_TX_RING_SIZE && tx_count_load() != 0u; i++) {
-        if (!uart_tx_try_putc((char)g_cons_tx.ring[g_cons_tx.head])) break;
-        g_cons_tx.head = (g_cons_tx.head + 1u) & (CONS_TX_RING_SIZE - 1u);
-        tx_count_store(tx_count_load() - 1u);
+// The extinction winner's claim of the TX ring (the second of the three
+// EXTINCTION-line tearing sources; the vault's seam-extinction-line-unserialized).
+//
+// Every steady-state console producer pushes its unit under g_cons_tx.lock
+// (cons_tx_push_bulk) and every ring->FIFO drain pops under it (the TX IRQ arm,
+// cons_tx_kick, cons_tx_flush) -- so a CPU that HOLDS this lock owns the wire:
+// no peer can put a byte into the FIFO between the winner's "\n" and its
+// "EXTINCTION: ...\n". The predecessor here (cons_tx_flush_for_dump) took the
+// lock by ONE trylock, drained, and RELEASED it -- so a peer mid-push made it
+// skip, and even when it did flush, the release let the next push land inside
+// the banner. The one case it declined to handle was precisely the tear.
+//
+// The lock, not the writer role. The role (g_cons_tx.writing) serializes whole
+// cons_output_write calls but the DRAIN never consults it (main#144): bytes a
+// peer already pushed would still pop into the FIFO from cpu0's TX IRQ or a
+// peer's kick. The ring lock covers both the push and the pop, and a healthy
+// peer holds it only for one bounded push or one FIFO-depth drain -- microseconds
+// -- where the role is held across a whole write, room-waits included.
+//
+// Three properties, each deliberate, each different from the console-word claim
+// one file over (extinction_claim_console): that word's holder is a dying peer
+// that never releases, so a spin there could only burn its bound -- TRY-ONCE is
+// right for it. This lock's holder is a HEALTHY peer that WILL release, so:
+//   - BOUNDED SPIN, not try-once: wall clock (the #67 shape) with an iteration
+//     backstop for a frozen or not-yet-running timer. Past the bound we give up
+//     and the caller emits unserialized -- torn beats silent, the same asymmetry
+//     the console claim chose -- and REPORTS the miss after the dump.
+//   - RAW, never counted (spin_trylock_raw): the counted variants read
+//     current_thread() through TPIDR_EL1, state a crash may have destroyed; a
+//     fault inside the claim would replace the banner with a recursion note.
+//   - IRQs are masked FIRST, and never restored: with the ring lock held on this
+//     CPU, its own TX IRQ arm (cons_tx_drain_from_irq -> spin_lock_irqsave)
+//     would self-deadlock -- a silent hang in place of the dump. The caller
+//     parks in _torpor, so nothing is owed back.
+//
+// HELD FOREVER on success. Peers that reach for the ring after this spin
+// IRQ-masked on a dead machine -- the intended effect (a poor man's IPI_HALT
+// for anyone touching the console; the real one is the third source, still a
+// reservation in smp.h). Hence the same interface split as the console word: the
+// core runs on a CALLER-SUPPLIED lock so a test can exercise the bound and the
+// return-holding contract, and nothing exports a claim of the LIVE ring -- a
+// test that took it would silence the console for every test after it.
+//
+// The flush on success is the FULL bounded ring (the healthy cons_tx_flush's
+// loop shape, drained through the non-spinning try_putc, no TXIM re-eval, no
+// nested lock): with the lock held forever, whatever the pre-crash ring still
+// holds when we stop draining is lost, where the predecessor's one-FIFO flush
+// let the rest trickle out after the dump. Bounded: each pass either empties
+// the ring, or moves >= 1 byte after a bounded FIFO wait, or moves nothing
+// (a stalled host consumer -- nobody is reading) and stops.
+#define CONS_TX_CLAIM_MAX_NS    (20ull * 1000ull * 1000ull)   // 20 ms wall clock, the #67 shape
+#define CONS_TX_CLAIM_MAX_ITERS (1u << 20)                     // backstop: frozen / pre-init timer
+
+static bool g_cons_tx_claimed_for_dump;
+
+// Which CPU holds the claim, so the owner re-entering (the classic seed:
+// extinction -> halls_dump faults -> ... -> exception.c's el1_sync_runaway on
+// the SAME CPU) is answered "held" at once instead of burning the bound on a
+// lock it already holds and then reporting a miss it did not have.
+static u8 g_cons_tx_claim_owner[DTB_MAX_CPUS];
+
+bool cons_tx_claim_core(spin_lock_t *l) {
+    u32 iters = 0;
+    u64 t0 = 0;   // anchored lazily on the FIRST miss (0 = unset / pre-init -> backstop governs)
+    for (;;) {
+        if (spin_trylock_raw(l)) return true;
+        if (++iters >= CONS_TX_CLAIM_MAX_ITERS) return false;
+        u64 now = timer_now_ns();                          // 0 before timer_init
+        if (t0 == 0) t0 = now;
+        else if (now - t0 >= CONS_TX_CLAIM_MAX_NS) return false;
+        __asm__ __volatile__("yield" ::: "memory");
     }
-    spin_unlock(&g_cons_tx.lock);
-    uart_tx_drain_sync();
+}
+
+bool cons_tx_claim_for_dump(void) {
+    __asm__ __volatile__("msr daifset, #2" ::: "memory");   // never restored: the caller parks
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    if (g_cons_tx_claim_owner[cpu]) return true;             // already ours (see above); nothing left to flush
+    if (!cons_tx_claim_core(&g_cons_tx.lock)) return false;
+    g_cons_tx_claim_owner[cpu] = 1u;
+    __atomic_store_n(&g_cons_tx_claimed_for_dump, true, __ATOMIC_RELAXED);
+    for (u32 pass = 0; pass <= CONS_TX_RING_SIZE; pass++) {
+        while (tx_count_load() != 0u) {
+            if (!uart_tx_try_putc((char)g_cons_tx.ring[g_cons_tx.head])) break;   // FIFO full
+            g_cons_tx.head = (g_cons_tx.head + 1u) & (CONS_TX_RING_SIZE - 1u);
+            tx_count_store(tx_count_load() - 1u);
+        }
+        uart_tx_drain_sync();                          // bounded: wait the FIFO out
+        if (tx_count_load() == 0u) break;              // ring empty and on the wire
+        if (!uart_tx_fifo_empty()) break;              // the bound fired with bytes still queued: nobody is reading; stop
+    }
+    return true;
+}
+
+// The clean-boot witness (see the test): FALSE unless an extinction claimed the
+// live ring, and it must STAY false -- a spurious claim is a dead console.
+bool cons_tx_claimed_for_dump(void) {
+    return __atomic_load_n(&g_cons_tx_claimed_for_dump, __ATOMIC_RELAXED);
 }
 
 // #75-audit F3: a bounded SYNCHRONOUS flush for a HEALTHY caller (unlike
-// cons_tx_flush_for_dump's trylock, which is for the dying machine). #75 buffers
+// cons_tx_claim_for_dump's raw try-spin, which is for the dying machine). #75 buffers
 // EL0 output that drains lazily via the TX IRQ, so a residual ring can drain
 // between the byte-by-byte uart_putc calls of the direct-path "Thylacine boot OK"
 // banner and TEAR that tooling-ABI line (TOOLING.md section 10; a torn banner =
@@ -466,24 +611,53 @@ void cons_tx_flush(void) {
     }
 }
 
-// Non-blocking ring push. false == the ring is FULL (the caller drops or waits).
-// Pre-arm this takes the direct bounded path and always succeeds.
-static bool cons_tx_push_nowait(u8 b) {
+// Push a UNIT of `n` bytes under ONE lock hold (ARCH 23.5.2 "UNIT ATOMICITY").
+// The atomicity of every producer's unit is exactly this: no peer's push can
+// land inside it, because every peer pushes its own unit under the same lock.
+// Returns the number pushed. `all_or_nothing`: a unit that does not fit is
+// dropped WHOLE (0 pushed; `dropped += n` under the same hold) -- the
+// IRQ-context disposition, where a partial unit (half an echo erase, a torn
+// diagnostic) is worse than none. Otherwise pushes what fits (the process-
+// context writer, which room-waits for the rest). Pre-arm every byte takes the
+// direct bounded path and the whole unit always succeeds.
+static u32 cons_tx_push_bulk(const u8 *b, u32 n, bool all_or_nothing) {
+    if (n == 0u) return 0u;
     irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
     if (!g_cons_tx.armed) {
         spin_unlock_irqrestore(&g_cons_tx.lock, s);
-        uart_putc((char)b);            // pre-GIC boot path: direct, bounded (#67)
-        return true;
+        for (u32 i = 0; i < n; i++) uart_putc((char)b[i]);   // pre-GIC boot path: direct, bounded (#67)
+        return n;
     }
-    if (tx_count_load() == CONS_TX_RING_SIZE) {
+    u32 room = CONS_TX_RING_SIZE - tx_count_load();
+    u32 take = (n <= room) ? n : room;
+    if (all_or_nothing && take != n) {
+        g_cons_tx.dropped += n;
         spin_unlock_irqrestore(&g_cons_tx.lock, s);
-        return false;
+        return 0u;
     }
-    g_cons_tx.ring[g_cons_tx.tail] = b;
-    g_cons_tx.tail = (g_cons_tx.tail + 1u) & (CONS_TX_RING_SIZE - 1u);
-    tx_count_store(tx_count_load() + 1u);
+    for (u32 i = 0; i < take; i++) {
+        g_cons_tx.ring[g_cons_tx.tail] = b[i];
+        g_cons_tx.tail = (g_cons_tx.tail + 1u) & (CONS_TX_RING_SIZE - 1u);
+    }
+    tx_count_store(tx_count_load() + take);
     spin_unlock_irqrestore(&g_cons_tx.lock, s);
-    return true;
+    return take;
+}
+
+// Test hook: a NON-consuming copy from the ring head. The unit tests' witness --
+// a torn unit is provable only by reading the ring's byte order back, with the
+// UART stalled so the bytes stay where the pushes put them.
+u32 cons_test_tx_ring_peek(u8 *out, u32 n) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    u32 have = tx_count_load();
+    u32 take = (n < have) ? n : have;
+    u32 h = g_cons_tx.head;
+    for (u32 i = 0; i < take; i++) {
+        out[i] = g_cons_tx.ring[h];
+        h = (h + 1u) & (CONS_TX_RING_SIZE - 1u);
+    }
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+    return take;
 }
 
 // Hand the FIFO whatever it will take now + (re)arm TXIM for the remainder.
@@ -672,6 +846,22 @@ bool cons_test_tx_armed(void) {
     return a;
 }
 
+// DISPLAY-MODES.md 1b: the serial-silence flag, for the regression test to
+// assert the consctl verb applied. Lockless relaxed read (same as production).
+bool cons_test_serial_silent(void) {
+    return cons_serial_silent_load();
+}
+
+// DISPLAY-MODES.md 1b (audit F2): restore serial output unconditionally. The SAK
+// path (proc_console_sak) calls this so the operator's trusted-path prompt is
+// visible on the emergency serial medium even if a renderer had silenced it --
+// TRUSTED-PATH.md section 7 keeps the trusted path ON serial for virtio-gpu
+// media, so a muted serial there is a trusted-path gap. Lockless relaxed store
+// (the flag carries no happens-before obligation); callable from any context.
+void cons_serial_silent_clear(void) {
+    cons_serial_silent_store(false);
+}
+
 // Exported so the test asserts against the REAL constants instead of mirroring
 // them -- a silently-drifted mirror is its own bug class (the struct t_stat
 // lesson: a per-mirror size assert proves only that mirror's self-consistency).
@@ -694,54 +884,74 @@ static u8   g_cons_echo_cap[128];
 static u32  g_cons_echo_cap_len;
 static bool g_cons_echo_capture;
 
-static void cons_emit(u8 b) {
+static void cons_echo_capture_take(const u8 *b, u32 n) {
+    for (u32 i = 0; i < n && g_cons_echo_cap_len < sizeof(g_cons_echo_cap); i++)
+        g_cons_echo_cap[g_cons_echo_cap_len++] = b[i];
+}
+
+// The IRQ-context emit (echo from cons_rx_input): one UNIT, non-blocking,
+// all-or-nothing. It must never sleep, so a unit the ring cannot take is
+// DROPPED WHOLE (a tty overrun, the drain-ring disposition -- and whole because
+// half a "\b \b" is a visible lie). Kick immediately: echo is <= CONS_ECHO_MAX
+// bytes and typing latency is user-visible, so it does not batch.
+static void cons_emit_bulk(const u8 *b, u32 n) {
+    if (n == 0u) return;
     // G-4: the drain tap fires FIRST and unconditionally of the capture mode
     // -- the tap models the renderer's view (which sees the byte stream
     // regardless of where the serial side lands), and a test with capture ON
-    // can then assert drain content with the UART suppressed.
-    cons_drain_tap(b);
-    if (g_cons_echo_capture) {
-        if (g_cons_echo_cap_len < sizeof(g_cons_echo_cap))
-            g_cons_echo_cap[g_cons_echo_cap_len++] = b;
-        return;
-    }
-    // #75: NON-BLOCKING. This is the IRQ-context (echo) contract -- it must
-    // never sleep, so a full ring DROPS (a tty overrun, the same disposition
-    // the drain ring uses). Kick immediately: echo is <= CONS_ECHO_MAX bytes
-    // and typing latency is user-visible, so it does not batch.
-    if (cons_tx_push_nowait(b)) cons_tx_kick();
-    else                        cons_tx_count_drop();
+    // can then assert drain content with the UART suppressed. Tap, release,
+    // THEN push: the two leaf locks are never nested.
+    cons_drain_tap_bulk(b, n);
+    // DISPLAY-MODES.md 1b: when a renderer owns the display, EL0 output is
+    // silenced on the serial sink (the tap above already gave the renderer its
+    // copy). Gate AFTER the tap and BEFORE the capture stand-in, so silence
+    // suppresses the serial sink whole -- kernel diagnostics + the banner never
+    // reach here (direct uart_puts), so they are unaffected. The silence is
+    // conditioned on `drain_armed` (a renderer is actually receiving the tap):
+    // if the renderer dies, the drain disarms and serial output RESUMES -- else
+    // a dead renderer would strand the console with no sink at all (audit F1).
+    if (cons_serial_silent_load() && drain_armed_load()) return;
+    if (g_cons_echo_capture) { cons_echo_capture_take(b, n); return; }
+    if (cons_tx_push_bulk(b, n, true) == n) cons_tx_kick();
 }
 
-// #75: the PROCESS-context emit used by cons_output_write. Pushes, and on a
-// full ring kicks the FIFO then parks until the TX IRQ frees a slot.
-//
-// Returns false only when the write must be cut short -- a #811 death-interrupt
-// or the #67 deadline against a stalled host consumer. The caller then returns a
-// SHORT WRITE, which is POSIX-legal and is the inherited "bounded-but-lossy
-// console beats a wedged writer" disposition; it must never become a hang.
+// The PROCESS-context emit used by cons_output_write (role held): one staged
+// chunk. Pushes what fits under one hold -- a chunk that fits is therefore
+// contiguous against every other producer -- and on a full ring kicks the
+// FIFO then parks until the TX IRQ frees room, then pushes the rest. Returns
+// the bytes accepted: < n only when the write must be cut short -- a #811
+// death-interrupt or the #67 deadline against a stalled host consumer. The
+// caller then returns a SHORT WRITE, which is POSIX-legal and is the inherited
+// "bounded-but-lossy console beats a wedged writer" disposition; it must never
+// become a hang.
 //
 // I-9 (no lost wake): cons_tx_kick re-evaluates ring + TXIM under the ring lock,
 // and cons_tx_drain_from_irq wakes AFTER releasing that lock, so a slot freed in
 // the window between our full-observation and our park is either seen by
 // tsleep's cond re-check (under the rendez lock) or delivered to this rendez.
-static bool cons_emit_wait(u8 b) {
-    cons_drain_tap(b);
-    if (g_cons_echo_capture) {
-        if (g_cons_echo_cap_len < sizeof(g_cons_echo_cap))
-            g_cons_echo_cap[g_cons_echo_cap_len++] = b;
-        return true;
-    }
+static u32 cons_emit_bulk_wait(const u8 *b, u32 n) {
+    if (n == 0u) return 0u;
+    cons_drain_tap_bulk(b, n);
+    // DISPLAY-MODES.md 1b: serial silenced -> the EL0 write SUCCEEDS fully (the
+    // bytes reached the renderer via the tap; the serial sink is intentionally
+    // dropped). Returning n, never a short write, so the program never blocks or
+    // sees an error for output it "produced". Gated on `drain_armed` (a live
+    // renderer): a dead renderer disarms the drain and serial output resumes,
+    // so silence never outlives the mirror that justifies it (audit F1).
+    if (cons_serial_silent_load() && drain_armed_load()) return n;
+    if (g_cons_echo_capture) { cons_echo_capture_take(b, n); return n; }
+    u32 done = 0u;
     for (;;) {
-        if (cons_tx_push_nowait(b)) return true;
+        done += cons_tx_push_bulk(b + done, n - done, false);
+        if (done == n) return n;
         cons_tx_kick();
         cons_tx_count_room_wait();
         int ts = tsleep(&g_cons_tx_room, cons_tx_has_room, NULL,
                         timer_now_ns() + CONS_TX_ROOM_WAIT_NS);
-        if (ts == TSLEEP_INTR) return false;            // #811 death -> short write
-        if (ts == TSLEEP_TIMEDOUT) {                    // #67 stalled consumer
+        if (ts == TSLEEP_INTR) return done;                 // #811 death -> short write
+        if (ts == TSLEEP_TIMEDOUT) {                        // #67 stalled consumer
             cons_tx_count_drop();
-            return false;                               // drop the rest -> short write
+            return done;                                    // drop the rest -> short write
         }
     }
 }
@@ -759,61 +969,110 @@ static bool cons_emit_wait(u8 b) {
 // IRQ-masked with the global process-table lock held -- precisely the
 // interrupt-dead stall #67's bound was introduced to prevent.
 //
-// These route the same bytes through the #75 TX ring instead: never spinning,
-// dropping on a full ring (the echo disposition), kicking the FIFO once per
-// call. A stalled consumer therefore costs a bounded handful of MMIO accesses,
-// not seconds. They also feed the G-4 drain tap, so a kernel diagnostic reaches
-// the framebuffer console and not only serial -- the #76 class, which every
-// direct-path emit silently exhibits.
+// The line API below routes the same bytes through the #75 TX ring instead:
+// never spinning, dropping a line that does not fit WHOLE (the echo
+// disposition, per unit), kicking the FIFO once per line. A stalled consumer
+// therefore costs a bounded handful of MMIO accesses, not seconds. It also
+// feeds the G-4 drain tap, so a kernel diagnostic reaches the framebuffer
+// console and not only serial -- the #76 class, which every direct-path emit
+// silently exhibits.
 //
 // CONTRACT: never sleeps, never spins, and takes only LEAF locks
 // (g_cons_drain.lock; g_cons_tx.lock, which nests only the g_uart_imsc_lock
 // leaf), waking outside them. So it is legal from IRQ context and from under
-// any lock ordered above those -- the same path cons_emit already takes for
-// echo from the UART RX IRQ, the most constrained context in the kernel.
+// any lock ordered above those -- the same path cons_emit_bulk already takes
+// for echo from the UART RX IRQ, the most constrained context in the kernel.
 //
-// Pre-arm (early boot) cons_tx_push_nowait falls through to the direct bounded
+// Pre-arm (early boot) cons_tx_push_bulk falls through to the direct bounded
 // path, so output before cons_tx_arm() stays byte-identical.
 // ---------------------------------------------------------------------------
 
-// Deliberately does NOT consult g_cons_echo_capture (unlike cons_emit): that
+// The kernel diagnostic LINE. #126 gave kernel diagnostics the ring (never
+// spinning, never sleeping); this gives them the UNIT: a line is assembled on
+// the CALLER's stack and pushed by ONE cons_tx_push_bulk, so a peer producer --
+// a SYS_PUTS on another CPU, an echo from the RX IRQ -- lands before or after
+// it, never inside it. The per-token API this replaces (cons_diag_puts + putdec
+// + puthex64, eleven calls per orphan line) pushed each byte under its own lock
+// hold, and a userspace posture line and a `proc: orphan` burst on two CPUs
+// came out as `ttaappeessttrryydd` (thyla-pi, 2026-08-17): every lock release
+// was an interleave point. A caller-owned object (not a per-CPU accumulator) is
+// what makes it nesting-safe: an IRQ handler's diagnostic on the same CPU
+// cannot splice into a process-context line half-assembled below it.
+//
+// CONTRACT (unchanged from #126): never sleeps, never spins, takes only LEAF
+// locks (g_cons_drain.lock; g_cons_tx.lock, which nests only g_uart_imsc_lock),
+// waking outside them -- legal from IRQ context and under any lock ordered
+// above those. A line the ring cannot take is dropped WHOLE (dropped += len).
+// Deliberately does NOT consult g_cons_echo_capture (unlike the emits): that
 // 128-byte buffer exists so a test can assert EXACTLY what was ECHOED, and a
 // kernel diagnostic landing in it would corrupt the assertions it exists for.
-static void cons_diag_byte(u8 b) {
-    cons_drain_tap(b);
-    if (!cons_tx_push_nowait(b)) cons_tx_count_drop();
+// Pre-arm (early boot) the push falls through to the direct bounded path, so
+// output before cons_tx_arm() stays byte-identical.
+_Static_assert(CONS_DIAG_LINE_MAX <= CONS_TX_RING_SIZE,
+               "an all-or-nothing unit larger than the ring would be dropped forever");
+
+static void cons_diag_line_putc(struct cons_diag_line *l, u8 b) {
+    if (l->len < CONS_DIAG_LINE_MAX - 2u) l->buf[l->len++] = b;   // keep room for "\r\n"
+    else l->truncated = true;
 }
 
-void cons_diag_puts(const char *s) {
-    if (!s) return;
+void cons_diag_line_init(struct cons_diag_line *l) {
+    l->len = 0u;
+    l->truncated = false;
+}
+
+void cons_diag_line_puts(struct cons_diag_line *l, const char *s) {
+    if (!l || !s) return;
     for (; *s; s++) {
         // ONLCR, matching uart_puts byte-for-byte: QEMU's `-serial mon:stdio`
         // host tty does no CR translation, and a bare LF staircases on aurora's
         // VT (#76).
-        if (*s == '\n') cons_diag_byte((u8)'\r');
-        cons_diag_byte((u8)*s);
+        if (*s == '\n') cons_diag_line_putc(l, (u8)'\r');
+        cons_diag_line_putc(l, (u8)*s);
     }
-    cons_tx_kick();
 }
 
-void cons_diag_putdec(u64 v) {
+void cons_diag_line_putdec(struct cons_diag_line *l, u64 v) {
+    if (!l) return;
     char buf[21];                       // max u64 is 20 decimal digits
     int  i = 0;
     if (v == 0) {
-        cons_diag_byte((u8)'0');
-    } else {
-        while (v) { buf[i++] = (char)('0' + (v % 10)); v /= 10; }
-        while (i > 0) cons_diag_byte((u8)buf[--i]);   // reversed: high digit first
+        cons_diag_line_putc(l, (u8)'0');
+        return;
     }
-    cons_tx_kick();
+    while (v) { buf[i++] = (char)('0' + (v % 10)); v /= 10; }
+    while (i > 0) cons_diag_line_putc(l, (u8)buf[--i]);   // reversed: high digit first
 }
 
-void cons_diag_puthex64(u64 v) {
+void cons_diag_line_puthex64(struct cons_diag_line *l, u64 v) {
+    if (!l) return;
     static const char hexdigits[] = "0123456789abcdef";
-    cons_diag_byte((u8)'0');
-    cons_diag_byte((u8)'x');
-    for (int i = 60; i >= 0; i -= 4) cons_diag_byte((u8)hexdigits[(v >> i) & 0xF]);
-    cons_tx_kick();
+    cons_diag_line_putc(l, (u8)'0');
+    cons_diag_line_putc(l, (u8)'x');
+    for (int i = 60; i >= 0; i -= 4) cons_diag_line_putc(l, (u8)hexdigits[(v >> i) & 0xF]);
+}
+
+bool cons_diag_line_emit(struct cons_diag_line *l) {
+    if (!l || l->len == 0u) return true;
+    // A truncated line still ends as a line: the two reserved bytes take the
+    // terminator, so the next writer's output never joins it; the truncation
+    // is visible as the missing tail, not as a joined line. A dangling CR from
+    // a cut "\r\n" is dropped first.
+    if (l->truncated) {
+        if (l->buf[l->len - 1u] == (u8)'\r') l->len--;
+        l->buf[l->len++] = (u8)'\r';
+        l->buf[l->len++] = (u8)'\n';
+    }
+    cons_drain_tap_bulk(l->buf, l->len);
+    // The push is ALL-OR-NOTHING, so a full ring drops the whole unit. Report
+    // it: a caller that spent a one-shot latch or a bounded budget on this
+    // line needs to know the line never landed, or its instrument silently
+    // under-reports and still reads as a measurement.
+    bool landed = cons_tx_push_bulk(l->buf, l->len, true) == l->len;
+    if (landed) cons_tx_kick();
+    l->len = 0u;
+    l->truncated = false;
+    return landed;
 }
 
 // Stage one echoed/output byte into `echo[*necho]`, applying ONLCR (NL -> CR NL).
@@ -914,6 +1173,26 @@ static void cons_rx_note_drop(u32 *site, bool *wake_mgr) {
     }
 }
 
+// A mode write that CLEARS ICANON hands the reader what was typed: the
+// half-assembled line[] goes to the ring as raw bytes, no newline appended
+// (PTY-DESIGN "Mode writes deliver, never discard" -- Plan 9's rawon pushes
+// kbd.line to the reader; Linux's n_tty makes the partial line readable as-is
+// on the same transition). It used to be zeroed on ANY mode write (the LS-8b
+// F1 remedy, "TCSAFLUSH"), and that dropped the head of a type-ahead line that
+// landed between a foreground job's last output and the shell's raw-mode
+// re-arm -- echoed by the cooked ldisc, then gone, its tail executed as a
+// different command (LS-CI pty-4, 2026-08-17). A mode write cannot refuse the
+// way cons_rx_input's #129 gate does (there is no producer to hold the bytes),
+// so what does not fit is a real drop under its own counter. Caller holds
+// g_cons.lock; the wake flags are the caller's to act on after the unlock.
+static void cons_deliver_partial_line_locked(bool *wake_data, bool *wake_mgr) {
+    for (u32 i = 0; i < g_cons.line_len; i++) {
+        if (cons_ring_push(g_cons.line[i], wake_mgr)) *wake_data = true;
+        else cons_rx_note_drop(&g_cons.rx_drop_modeflush, wake_mgr);
+    }
+    g_cons.line_len = 0u;
+}
+
 bool cons_rx_input(u8 byte, bool is_break) {
     bool wake_data = false, wake_mgr = false;
     bool accepted = true;
@@ -945,6 +1224,16 @@ bool cons_rx_input(u8 byte, bool is_break) {
             // (the LS-5 path). ISIG clear -> 0x03 falls through as a data byte.
             cons_intr_store(true);
             wake_mgr = true;
+            // POSIX NOFLSH-clear: the INTR character discards the pending
+            // canonical assembly (PTY-DESIGN "ISIG characters DISCARD the
+            // pending line", operator-voted 2026-08-17). An I-20 disposition
+            // of those bytes like an erase -- not a drop, not counted; the ring
+            // (lines already committed by Enter) and the TX side are NOT
+            // flushed. The old unconditional mode-write reset masked this by
+            // accident; delivery made type-ahead + ^C arrive at the next prompt
+            // as pre-typed input. Under g_cons.lock with the arm, so a mode
+            // write racing this cannot deliver what the ^C discarded.
+            if (tio & CONS_ICANON) g_cons.line_len = 0u;
         } else if (tio & CONS_ICANON) {
             // Canonical (cooked) mode: assemble a line; deliver it on NL.
             if (byte == 0x7fu || byte == 0x08u) {     // DEL / BS: erase one char
@@ -1022,7 +1311,7 @@ bool cons_rx_input(u8 byte, bool is_break) {
     // g_cons.lock and the wakeup takes the Rendez lock the sleeper's cond-check +
     // sleep-transition hold -> no lost wakeup (I-9; cons_poll.tla for the
     // poll-edge relay).
-    for (int i = 0; i < necho; i++) cons_emit(echo[i]);
+    cons_emit_bulk(echo, (u32)necho);   // ONE unit: a peer's push cannot land inside "\b \b"
     if (wake_data) wakeup(&g_cons_data_rendez);
     if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
     return accepted;
@@ -1084,6 +1373,7 @@ static void cons_service_deferred(void) {
     // many further drops occur.
     bool do_drop_report = cons_dropreport_load();
     u32  d_line = g_cons.rx_drop_line, d_ring = g_cons.rx_drop_ring;
+    u32  d_mode = g_cons.rx_drop_modeflush;
     u32  b_raw = g_cons.rx_bp_raw, b_flush = g_cons.rx_bp_flush;
     cons_dropreport_store(false);
     if (do_drop_report) g_cons.drop_reported = true;
@@ -1103,16 +1393,24 @@ static void cons_service_deferred(void) {
     // events is disarmed exactly when it matters.) The bp counts ride along in
     // the line as context -- they say how hard the console was pushed when the
     // loss happened -- but they never trigger it.
+    // The site NAME is the decisive datum, so every REAL-loss site is on the
+    // line: a mode-flush drop that printed only line=0 ring=0 would spend the
+    // one-shot latch without naming what fired it (the ccb597b8 round, F3).
     if (do_drop_report) {
-        cons_diag_puts("cons: INPUT DROP (#95) line=");
-        cons_diag_putdec(d_line);
-        cons_diag_puts(" ring=");
-        cons_diag_putdec(d_ring);
-        cons_diag_puts(" (bp raw=");
-        cons_diag_putdec(b_raw);
-        cons_diag_puts(" flush=");
-        cons_diag_putdec(b_flush);
-        cons_diag_puts(") -- further drops counted silently at /ctl/cons\n");
+        struct cons_diag_line l;
+        cons_diag_line_init(&l);
+        cons_diag_line_puts(&l, "cons: INPUT DROP (#95) line=");
+        cons_diag_line_putdec(&l, d_line);
+        cons_diag_line_puts(&l, " ring=");
+        cons_diag_line_putdec(&l, d_ring);
+        cons_diag_line_puts(&l, " modeflush=");
+        cons_diag_line_putdec(&l, d_mode);
+        cons_diag_line_puts(&l, " (bp raw=");
+        cons_diag_line_putdec(&l, b_raw);
+        cons_diag_line_puts(&l, " flush=");
+        cons_diag_line_putdec(&l, b_flush);
+        cons_diag_line_puts(&l, ") -- further drops counted silently at /ctl/cons\n");
+        cons_diag_line_emit(&l);
     }
 
     // RW-7 R2-F2 (round-2 F2): a SAK SUPERSEDES a Ctrl-C coalesced into the
@@ -1173,11 +1471,14 @@ void cons_test_reset(void) {
     g_cons.line_len = 0u;
     g_cons.ws_cols = 0u;                        // #55: winsize back to unset
     g_cons.ws_rows = 0u;
+    cons_serial_silent_store(false);            // 1b: back to loud (serial live)
     g_cons.winch_events = 0u;
+    g_cons.beacon_tier = CONS_BEACON_NONE;      // H-1: tier back to unset
     g_cons.rx_bp_raw = 0u;                      // #95/#129: RX counters + report latch
     g_cons.rx_bp_flush = 0u;
     g_cons.rx_drop_line = 0u;
     g_cons.rx_drop_ring = 0u;
+    g_cons.rx_drop_modeflush = 0u;
     cons_dropreport_store(false);
     g_cons.drop_reported = false;
     spin_unlock_irqrestore(&g_cons.lock, s);
@@ -1223,6 +1524,16 @@ void cons_rx_counters(u32 *bp_raw, u32 *bp_flush, u32 *drop_line, u32 *drop_ring
     spin_unlock_irqrestore(&g_cons.lock, s);
 }
 
+// The fifth site, its own accessor so the four-counter callers above stay as
+// they are: bytes of a half-assembled line that a mode write delivered but the
+// ring could not take (see cons_deliver_partial_line_locked).
+u32 cons_rx_drop_modeflush(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 v = g_cons.rx_drop_modeflush;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return v;
+}
+
 bool cons_test_intr_pending(void) {
     return cons_intr_load();
 }
@@ -1250,10 +1561,20 @@ u32 cons_test_termios(void) {
 }
 
 void cons_test_set_termios(u32 v) {
+    // The SAME rule as cons_set_mode_cmd (a canonical->raw flip delivers the
+    // pending line; nothing else touches it), so the hook and the production
+    // path cannot diverge -- the divergence the old "fresh line" reset existed
+    // to prevent, now in the other direction.
+    bool wake_data = false, wake_mgr = false;
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    cons_termios_store(v & CONS_TERMIOS_ALL);
-    g_cons.line_len = 0u;                        // a mode flip starts a fresh line
+    u32 cur = cons_termios_load();
+    u32 nxt = v & CONS_TERMIOS_ALL;
+    cons_termios_store(nxt);
+    if ((cur & CONS_ICANON) != 0u && (nxt & CONS_ICANON) == 0u)
+        cons_deliver_partial_line_locked(&wake_data, &wake_mgr);
     spin_unlock_irqrestore(&g_cons.lock, s);
+    if (wake_data) wakeup(&g_cons_data_rendez);
+    if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
 }
 
 void cons_test_echo_capture(bool on) {
@@ -1444,6 +1765,33 @@ static struct Block *devcons_bread(struct Spoor *c, long n, s64 off) {
 //
 // #57b: the ONE console-output implementation, shared by devcons (the syscall
 // path) and devdev's /dev/cons leaf (the namespace path).
+// Translate up to `avail` input bytes into `stage[]` (ONLCR: NL -> CR NL when
+// set), stopping at `cap` staged bytes. Returns the number of INPUT bytes
+// consumed; *out_len is the staged length. Prefix-closed and deterministic:
+// staging the same input with a smaller cap consumes a prefix of what the
+// larger cap consumed -- which is what lets a short accept be mapped back to
+// input bytes by re-staging with cap = accepted (an NL whose CR went out but
+// whose LF did not counts as unwritten, exactly as the per-byte loop did).
+static long cons_stage_chunk(const u8 *in, long avail, u32 tio,
+                             u8 *stage, u32 cap, u32 *out_len) {
+    u32  len = 0u;
+    long i   = 0;
+    while (i < avail) {
+        u8 c = in[i];
+        if (c == (u8)'\n' && (tio & CONS_ONLCR)) {
+            if (len + 2u > cap) break;
+            stage[len++] = (u8)'\r';
+            stage[len++] = (u8)'\n';
+        } else {
+            if (len + 1u > cap) break;
+            stage[len++] = c;
+        }
+        i++;
+    }
+    *out_len = len;
+    return i;
+}
+
 long cons_output_write(const void *buf, long n) {
     if (!buf) return -1;
     if (n < 0) return -1;
@@ -1457,16 +1805,37 @@ long cons_output_write(const void *buf, long n) {
     // wait but never pins a CPU.
     if (cons_tx_role_acquire() != 0) return -1;   // #811 death before we wrote anything
 
+    // The UNIT this writer pushes is a staged chunk (<= CONS_TX_STAGE cooked
+    // bytes), pushed under ONE ring-lock hold when it fits -- so a ring-fitting
+    // write (the common case: a console line against an 8 KiB ring) is
+    // contiguous against EVERY producer, including the ones the role cannot
+    // park (echo from the RX IRQ; a kernel diagnostic line from a peer CPU).
+    // Those land between two chunks, never inside one (ARCH 23.5.2 "UNIT
+    // ATOMICITY"). When the input runs past one stage the cut is moved back to
+    // the last NL so lines stay whole across chunks; a single line longer than
+    // the stage still spans two, and a FULL ring takes what fits (progress
+    // beats atomicity under congestion; the #67 short-write rule is unchanged).
     u32 tio = cons_termios_load();
     const u8 *bytes = (const u8 *)buf;
+    u8   stage[CONS_TX_STAGE];
     long i = 0;
-    for (; i < n; i++) {
-        if (bytes[i] == (u8)'\n' && (tio & CONS_ONLCR)) {
-            if (!cons_emit_wait((u8)'\r')) break;
-            if (!cons_emit_wait((u8)'\n')) break;
-        } else {
-            if (!cons_emit_wait(bytes[i])) break;
+    while (i < n) {
+        u32  len;
+        long used = cons_stage_chunk(bytes + i, n - i, tio, stage, CONS_TX_STAGE, &len);
+        if (i + used < n && len > 0u) {
+            u32 k = len;
+            while (k > 0u && stage[k - 1u] != (u8)'\n') k--;
+            if (k > 0u && k < len)               // cut after the last NL; re-stage exactly it
+                used = cons_stage_chunk(bytes + i, n - i, tio, stage, k, &len);
         }
+        if (len == 0u) break;                    // unreachable (cap >= 2 and avail >= 1); defensive
+        u32 acc = cons_emit_bulk_wait(stage, len);
+        if (acc != len) {                        // short: map the accepted prefix back to input
+            u32 dummy;
+            i += cons_stage_chunk(bytes + i, n - i, tio, stage, acc, &dummy);
+            break;
+        }
+        i += used;
     }
 
     // Hand the FIFO whatever it can take now (the healthy case moves every byte
@@ -1524,9 +1893,30 @@ int cons_drain_open(void) {
 // hook list directly is legal (the console_mgr precedent). A reader parked
 // mid-close observes !armed via the sleep cond and returns EOF.
 void cons_drain_close(void) {
-    irq_state_t s = spin_lock_irqsave(&g_cons_drain.lock);
+    // H-1 (ARCH 23.5.4): the renderer's drain closing means the renderer is
+    // gone -- no renderer, no rich/cells sink, so the Beacon tier resets to
+    // NONE (a respawned renderer re-advertises, like it re-writes winsize).
+    // Reset BEFORE disarming the drain (audit H-1 F2): the instant `open`
+    // clears, a respawned renderer can win cons_drain_open and advertise;
+    // a reset ordered after the disarm could then wipe the SUCCESSOR's
+    // fresh advertisement for its whole life. Reset-first closes that
+    // window (the dying renderer's own tier going NONE a moment early is
+    // harmless -- it is closing). Locks stay strictly sequential:
+    // g_cons.lock and g_cons_drain.lock never nest anywhere.
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    g_cons.beacon_tier = CONS_BEACON_NONE;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+
+    s = spin_lock_irqsave(&g_cons_drain.lock);
     g_cons_drain.open = false;
     drain_armed_store(false);
+    // 1b (audit F1): the renderer that requested serial-silence is gone, so the
+    // routing decision is void -- clear it. The emit gate already conditions on
+    // drain_armed (so serial resumes on death regardless), but keeping the flag
+    // honest means introspection + a re-armed drain do not inherit a stale
+    // silence. A fresh renderer re-asserts silence per bootargs after its first
+    // present. Relaxed store (the flag carries no happens-before obligation).
+    cons_serial_silent_store(false);
     spin_unlock_irqrestore(&g_cons_drain.lock, s);
     wakeup(&g_cons_drain_rendez);
     poll_waiter_list_wake(&g_cons_drain.poll_list);
@@ -1746,6 +2136,10 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
     int tokens = 0;
     bool have_ws = false;                                     // #55 winsize staged
     long ws_cols = 0, ws_rows = 0;
+    bool have_beacon = false;                                 // H-1 tier staged
+    u32 beacon = CONS_BEACON_NONE;
+    bool have_silent = false;                                 // 1b serialsilent staged
+    long silent_val = 0;
     long i = 0;
     while (i < n) {
         while (i < n && cons_is_space(b[i])) i++;            // skip whitespace
@@ -1769,11 +2163,65 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
             tokens++;
             continue;
         }
+        // H-1 (BEACON.md 12.3): the `beacon <tier>` verb -- the renderer's
+        // render-capability advertisement. Staged like winsize (atomic whole-
+        // write reject on a malformed tier word). Allowed on a renderer-minted
+        // consctl (see the F2 note below): the renderer IS the tier authority,
+        // and a lying tier only changes how consumers format bytes -- it
+        // confers nothing (ARCH 23.5.4).
+        if (sign == (u8)'b' && i + 6 <= n &&
+            b[i+1]==(u8)'e' && b[i+2]==(u8)'a' && b[i+3]==(u8)'c' &&
+            b[i+4]==(u8)'o' && b[i+5]==(u8)'n' &&
+            (i + 6 == n || cons_is_space(b[i+6]))) {
+            i += 6;
+            while (i < n && cons_is_space(b[i])) i++;
+            long w = i;
+            while (i < n && !cons_is_space(b[i])) i++;
+            long wl = i - w;
+            if (wl == 4 && b[w]==(u8)'n' && b[w+1]==(u8)'o' &&
+                b[w+2]==(u8)'n' && b[w+3]==(u8)'e') {
+                beacon = CONS_BEACON_NONE;
+            } else if (wl == 5 && b[w]==(u8)'c' && b[w+1]==(u8)'e' &&
+                       b[w+2]==(u8)'l' && b[w+3]==(u8)'l' && b[w+4]==(u8)'s') {
+                beacon = CONS_BEACON_CELLS;
+            } else if (wl == 4 && b[w]==(u8)'r' && b[w+1]==(u8)'i' &&
+                       b[w+2]==(u8)'c' && b[w+3]==(u8)'h') {
+                beacon = CONS_BEACON_RICH;
+            } else {
+                return -1;                                   // unknown tier word
+            }
+            have_beacon = true;
+            tokens++;
+            continue;
+        }
+        // DISPLAY-MODES.md 1b: the `serialsilent <0|1>` verb. Like winsize it is
+        // renderer-writable (handled BEFORE the +/- allow_flags gate) -- silence
+        // is a display-routing decision by the display owner, not a termios flag,
+        // so it does NOT widen the CCONSWINSZONLY authority the #55 audit F2 gate
+        // narrows (it cannot flip ECHO/ICANON or defeat the serial-input mask;
+        // it only drops EL0 OUTPUT on the serial UART, never kernel diagnostics).
+        if (sign == (u8)'s' && i + 12 <= n &&
+            b[i+1]==(u8)'e' && b[i+2]==(u8)'r' && b[i+3]==(u8)'i' && b[i+4]==(u8)'a' &&
+            b[i+5]==(u8)'l' && b[i+6]==(u8)'s' && b[i+7]==(u8)'i' && b[i+8]==(u8)'l' &&
+            b[i+9]==(u8)'e' && b[i+10]==(u8)'n' && b[i+11]==(u8)'t' &&
+            (i + 12 == n || cons_is_space(b[i+12]))) {
+            i += 12;
+            while (i < n && cons_is_space(b[i])) i++;
+            long v = cons_parse_u16_token(b, n, &i);
+            if (v != 0 && v != 1) return -1;                 // strictly 0|1
+            have_silent = true;
+            silent_val = v;
+            tokens++;
+            continue;
+        }
         if (sign != (u8)'+' && sign != (u8)'-') return -1;   // malformed token
-        // #55 audit F2: a renderer-minted consctl (CCONSWINSZONLY) may write
-        // ONLY the winsize verb -- a `+`/`-` flag token rejects the whole
-        // write, so a compromised renderer cannot flip the global termios
-        // (the ECHO-off serial-input mask defeat).
+        // #55 audit F2 (+ H-1 + 1b): a renderer-minted consctl (CCONSWINSZONLY)
+        // may write ONLY the renderer-authority verbs -- winsize + beacon +
+        // serialsilent -- a `+`/`-` flag token rejects the whole write, so a
+        // compromised renderer cannot flip the global termios (the ECHO-off
+        // serial-input mask defeat). All three admitted verbs are authority-
+        // free: geometry is physical, the tier only shapes formatting, and
+        // serialsilent routes serial OUTPUT only (never a termios flag).
         if (!allow_flags) return -1;
         long name_start = i + 1;
         long j = name_start;
@@ -1788,9 +2236,11 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
     if (tokens == 0) return -1;                               // empty command
 
     bool winch = false;                                       // #55 changed?
+    bool wake_data = false, wake_mgr = false;
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     u32 cur = cons_termios_load();
-    cons_termios_store((cur | set_mask) & ~clear_mask);
+    u32 nxt = (cur | set_mask) & ~clear_mask;
+    cons_termios_store(nxt);
     if (have_ws) {
         // #55: iff-changed (the Linux TIOCSWINSZ / ptyfs semantics). An
         // unchanged rewrite must NOT post -- a repeat-post storm would be a
@@ -1802,25 +2252,39 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
             winch = true;
         }
     }
-    // A mode change starts a FRESH canonical line (the TCSAFLUSH discipline):
-    // discard any half-assembled line[] so a canonical->raw->canonical flip can
-    // never strand a fragment that then prepends the next line. This matches the
-    // test hook (cons_test_set_termios) -- without it the production consctl
-    // path and the test path diverge (the cooking tests would not catch a
-    // fragment-survival regression). The discard is deliberate and matches
-    // what getpass(3) buys with TCSAFLUSH: type-ahead offered before a
-    // passphrase prompt must not be accepted as part of it.
+    if (have_beacon)
+        g_cons.beacon_tier = beacon;   // H-1: no post -- read at spawn time
+    // 1b: stored under g_cons.lock for atomicity of the whole apply; the emit
+    // paths read it locklessly (relaxed-atomic) with the lock released.
+    if (have_silent) {
+        cons_serial_silent_store(silent_val != 0);
+    }
+    // The one thing a mode write does to the canonical assembly: a write that
+    // CLEARS ICANON delivers the pending line[] to the reader; any other write
+    // leaves it alone, and raw->canonical has nothing pending by construction.
+    // (This used to zero line_len unconditionally -- "a mode change starts a
+    // FRESH canonical line, the TCSAFLUSH discipline" -- on the premise that no
+    // consumer flips mid-line. The pts job-control shell does, around every
+    // foreground job, and the type-ahead head was lost. PTY-DESIGN "Mode writes
+    // deliver, never discard"; the test hook cons_test_set_termios carries the
+    // same rule so the production path and the cooking tests cannot diverge.)
     //
-    // The corollary binds every consctl writer: set the mode BEFORE emitting
-    // the prompt that invites the input, never after. A flip placed after the
-    // prompt makes any byte that races it BOTH echoed (the pre-flip mode is
-    // still in force) and then discarded here -- a rendered passphrase prefix
-    // and a silently truncated read. This paragraph previously asserted the
-    // opposite ("no current consumer flips mid-line; login flips between
-    // completed reads"); login's passphrase prompt did exactly that, and the
-    // claim held only because the window is narrow, not because it was shut.
-    g_cons.line_len = 0u;
+    // The corollary that binds every consctl writer stands regardless (#233):
+    // set the mode BEFORE emitting the prompt that invites the input, never
+    // after. A byte that races a flip placed after the prompt is handled in
+    // the PRE-flip mode -- under ECHO it is rendered, which for a passphrase
+    // prompt is a disclosed prefix on the I-27 trusted path. login's passphrase
+    // prompt did exactly that once; the ordering is what shut the window.
+    if ((cur & CONS_ICANON) != 0u && (nxt & CONS_ICANON) == 0u)
+        cons_deliver_partial_line_locked(&wake_data, &wake_mgr);
     spin_unlock_irqrestore(&g_cons.lock, s);
+
+    // The delivered fragment wakes the reader / the mgr exactly as an RX push
+    // does (cons_rx_input's tail): wakeup() is IRQ-safe and a no-op with no
+    // waiter; the condition was set under g_cons.lock (I-9, the register-then-
+    // observe pairing on the Rendez).
+    if (wake_data) wakeup(&g_cons_data_rendez);
+    if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
 
     // #55: the tty:winch post runs AFTER g_cons.lock drops -- no g_cons.lock
     // -> g_proc_table_lock edge (the 25.4 row's ordering obligation). This is
@@ -1837,6 +2301,14 @@ static void cons_render_dec_u16(u8 *out, long *off, u32 v) {
     int t = 0;
     do { tmp[t++] = (char)('0' + (v % 10u)); v /= 10u; } while (v != 0u);
     while (t > 0) out[(*off)++] = (u8)tmp[--t];
+}
+
+// C2-k1b: the flag-word getter for the phenotype TCGETS shell. A single relaxed
+// atomic load -- a one-word read needs no g_cons.lock (the store side holds the
+// lock only to keep the whole multi-flag/winsize apply atomic; there is no torn
+// read of a u32). Same value cons_render_mode snapshots, without the string.
+u32 cons_termios_get(void) {
+    return cons_termios_load();
 }
 
 long cons_render_mode(void *buf, long n) {
@@ -1856,15 +2328,30 @@ long cons_render_mode(void *buf, long n) {
         for (long k = 0; k < namelen; k++) out[off++] = (u8)nm[k];
         out[off++] = (u8)' ';                                // #55: winsize follows
     }
-    // #55: `winsize <cols> <rows>` closes the line (the ptyfs ctl_render
-    // shape: "+icanon ... +onlcr winsize 80 24\n" -- parser parity, pouch
-    // 0021's strstr(buf, "winsize ") works on either ctl).
-    if (off + 8 + 5 + 1 + 5 + 1 > n) return 0;               // "winsize " CCCCC ' ' RRRRR '\n'
+    // #55: `winsize <cols> <rows>` follows the flags (the ptyfs ctl_render
+    // shape: "+icanon ... +onlcr winsize 80 24" -- parser parity, pouch
+    // 0021's strstr(buf, "winsize ") works on either ctl). H-1: `beacon
+    // <tier>` closes the line -- ABSENT on a ptyfs ctl, so consctl-line
+    // consumers treat a missing beacon token as NONE (strstr, never
+    // positional). Token order is flags, winsize, beacon; whole-line-or-
+    // nothing on a short buffer, like the flags.
+    u32 bt = cons_beacon_tier();                             // one lock hold
+    const char *btw = (bt == CONS_BEACON_RICH)  ? "rich"
+                    : (bt == CONS_BEACON_CELLS) ? "cells" : "none";
+    long btl = (bt == CONS_BEACON_CELLS) ? 5 : 4;
+    // "winsize " CCCCC ' ' RRRRR " beacon " + tier + '\n'. The reserve uses
+    // the FIXED max tier width (5, "cells") -- the #55-F4 discipline: the
+    // floor is deterministic, never content-dependent. Real readers are >= 96
+    // bytes (pouch 0021 buf[96]); nothing native reads this line today.
+    if (off + 8 + 5 + 1 + 5 + 8 + 5 + 1 > n) return 0;
     const char ws[] = "winsize ";
     for (long k = 0; ws[k]; k++) out[off++] = (u8)ws[k];
     cons_render_dec_u16(out, &off, wc);
     out[off++] = (u8)' ';
     cons_render_dec_u16(out, &off, wr);
+    const char bs[] = " beacon ";
+    for (long k = 0; bs[k]; k++) out[off++] = (u8)bs[k];
+    for (long k = 0; k < btl; k++) out[off++] = (u8)btw[k];
     out[off++] = (u8)'\n';
     return off;
 }
@@ -1876,6 +2363,14 @@ void cons_winsize_get(u16 *cols, u16 *rows) {
     if (cols) *cols = g_cons.ws_cols;
     if (rows) *rows = g_cons.ws_rows;
     spin_unlock_irqrestore(&g_cons.lock, s);
+}
+
+// H-1: the Beacon tier snapshot (ARCH 23.5.4; the cons_winsize_get shape).
+u32 cons_beacon_tier(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 bt = g_cons.beacon_tier;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return bt;
 }
 
 // #55: the standalone `winsize <cols> <rows>\n` line the UNGATED /dev/winsize
@@ -1893,6 +2388,30 @@ long cons_render_winsize(void *buf, long n) {
     cons_render_dec_u16(out, &off, wc);
     out[off++] = (u8)' ';
     cons_render_dec_u16(out, &off, wr);
+    out[off++] = (u8)'\n';
+    return off;
+}
+
+// H-1 (audit F1): the standalone `beacon <tier>\n` line the UNGATED
+// /dev/beacon leaf serves -- the tier readback for the session shell, which
+// can neither seek its inherited consctl fd (devdev is non-seekable; the
+// shared Spoor offset sits past the mode line after login's writes) nor
+// mint a fresh consctl (the I-27 attach gate; attach never propagates).
+// The /dev/winsize precedent exactly: a renderer self-description is not a
+// secret, so the leaf is world-readable.
+long cons_render_beacon(void *buf, long n) {
+    if (!buf || n < 13) return 0;   // "beacon cells\n" = 13 bytes, the max
+    const char *word;
+    switch (cons_beacon_tier()) {
+    case CONS_BEACON_RICH:  word = "rich";  break;
+    case CONS_BEACON_CELLS: word = "cells"; break;
+    default:                word = "none";  break;
+    }
+    u8 *out = (u8 *)buf;
+    long off = 0;
+    const char pre[] = "beacon ";
+    for (long k = 0; pre[k]; k++) out[off++] = (u8)pre[k];
+    for (long k = 0; word[k]; k++) out[off++] = (u8)word[k];
     out[off++] = (u8)'\n';
     return off;
 }

@@ -1,0 +1,41 @@
+W-4: set the cmdline cvar on the shareware arm of COM_CheckRegistered.
+
+The stall that ate three Pi runs was never graphics: johnfitz rewrote
+Cmd_StuffCmds_f to read the "cmdline" CVAR (for dynamic mod loading),
+and COM_CheckRegistered sets that cvar ONLY on the registered arm --
+the shareware arm returns first. With shareware pak0.pak every
++command on the command line is silently discarded: +timedemo demo1
+never entered the cbuf, startdemos took the QuakeSpasm no-fitzmode
+path (straight to menu_main, no demo loop), and the game sat at the
+main menu rendering at a healthy ~17 fps -- ~35 venus fences/s, all
+retiring, zero parks (the warp-watch ledger named it) -- while the
+harness waited for an fps line that could never come.
+
+tyrquake's Cmd_StuffCmds_f still parses com_argv directly and is
+immune, which is why the GL leg's +timedemo works on the same pak.
+This patch mirrors the registered arm's leading-space skip +
+Cvar_SetROM onto the shareware arm, restoring original-Quake
++command semantics for shareware content.
+
+--- a/Quake/common.c	2026-08-31 20:04:04
++++ b/Quake/common.c	2026-08-31 20:04:12
+@@ -1290,6 +1290,19 @@
+ 
+ 	if (h == -1)
+ 	{
++		/* THYLACINE port (0004): set the cmdline cvar on THIS arm too.
++		 * johnfitz's Cmd_StuffCmds_f reads the "cmdline" CVAR (not
++		 * com_argv, which tyrquake still parses and is immune), and
++		 * only the registered arm below ever set it -- so on shareware
++		 * content every +command was silently discarded: +timedemo
++		 * never entered the cbuf and the QuakeSpasm no-fitzmode
++		 * startdemos path parked the game at menu_main forever. */
++		for (i = 0; com_cmdline[i]; i++)
++		{
++			if (com_cmdline[i]!= ' ')
++				break;
++		}
++		Cvar_SetROM ("cmdline", &com_cmdline[i]);
+ 		Cvar_SetROM ("registered", "0");
+ 		Con_Printf ("Playing shareware version.\n");
+ 		if (com_modified)
