@@ -117,6 +117,10 @@ CHUNK_CLADE=y             # implies CHUNK_STORM       -> THYLACINE_BAKE_CLADE
 CHUNK_CHASE_W2=n
 CHUNK_ALPINE=y            # needs the cache inputs (section 5)
 CHUNK_QUAKE=y
+CHUNK_DOSBOX=y            # DX-8: the DOSBox-X emulator + /lib/dosbox-x/dosbox-x.conf
+CHUNK_DUKE3D=y            # needs CHUNK_DOSBOX (lowered without it)
+CHUNK_TOMBRAIDER=y        # needs CHUNK_DOSBOX (lowered without it)
+DOSBOX_CPU_PRESET=pentium # xt|286|386|486|pentium|pentium2 -> the baked cycles=fixed N
 CHUNK_AURORA_CFG=n
 DISK_SIZE=16M
 MKFS_SEED=                # empty = random
@@ -138,7 +142,10 @@ it once, in the schema.
 - **compile-shape** — `BUILD_TYPE`, `TESTS`, `BOOT_PROBES`, `DEV_ACCOUNTS`,
   `HARDENING_FULL`, `KASLR`, `SANITIZE`, `TICKLESS`.
 - **bake-content** — `CHUNK_GOROOT`, `CHUNK_CLADE` (+`CHUNK_STORM`), `CHUNK_CHASE_W2`,
-  `CHUNK_ALPINE`, `CHUNK_QUAKE`, `CHUNK_AURORA_CFG`.
+  `CHUNK_ALPINE`, `CHUNK_QUAKE`, `CHUNK_AURORA_CFG`; since DX-8 (2026-09-05)
+  `CHUNK_DOSBOX`, `CHUNK_DUKE3D`, `CHUNK_TOMBRAIDER` and the choice
+  `DOSBOX_CPU_PRESET` (the one non-bool bake symbol: the emulated CPU class the
+  baked DOSBox-X system config pins).
 - **pool-control** — `DISK_SIZE`, `MKFS_SEED`, `MKFS_PRESERVE`.
 
 One symbol per independent decision — the orthogonalization that dissolves the
@@ -285,7 +292,9 @@ copies), incl. the isolation guard that the real `configs/` is never touched.
   `stratum/v2` (`thylacine-pouch-arm`).
 - **Two manual-drop cache inputs**: Alpine minirootfs (3.21.0-aarch64) +
   busybox-static (1.37.0-r14.apk) — URL + sha256 each.
-- **One network input**: `quake106.zip` (already sha256-pinned, build.sh:3417).
+- **Network inputs**: `quake106.zip`, and since DX-8 `3dduke13.zip` +
+  `tomb3dem.zip` (each sha256-pinned in build.sh; the manifest mirrors the pins
+  and `test-forage.sh` A9 fails on drift).
 - **Remote-build artifacts** (cannot be cheaply rebuilt on the Mac):
   `build/clade/llvm-build/{bin/llvm,bin/clangd,lib/clang}` and `build/clade/gl/*` —
   each with builder host + source commit + content hash -> **pull-or-rebuild** (via

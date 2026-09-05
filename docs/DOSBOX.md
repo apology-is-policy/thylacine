@@ -275,6 +275,27 @@ server + virtio-sound (post-v1.0) lights it up.
     DYNAMIC and pin the clock -- its own graphics-arc chunk (scripture ->
     libtapestry + tapestryd + SDL_thylacine -> audit).
 
+- **DX-8 LANDED** (2026-09-05) -- **defaults, presets, per-game configs + the
+  build inputs** (operator-asked: "autolock default + the tick rate / multiple
+  presets", and "add DOSBox and the two shareware games to Forage and the build
+  configurator"). Upstream DOSBox-X has NO system-wide config location and its
+  first launch generates a per-user file that pins every built-in default, so a
+  build-time default had nowhere to live. Patch `0008` adds a system BASE LAYER
+  (`/lib/dosbox-x/dosbox-x.conf`, parsed first, values only, upstream flow
+  unchanged; `-defaultconf` skips it) rendered at bake from the configurator's
+  `DOSBOX_CPU_PRESET` (xt..pentium2 -> a fixed cycle count; default pentium):
+  `autolock=true` + `core=dynamic_rec` + `cycles=fixed N`. Both game masters ship
+  a per-game `dosbox-x.conf` (`mount c .` + the game; TR adds
+  `voodoo_card=software`), so `cd ~/duke3d; dosbox-x` is the whole launch.
+  `build_tombraider_fixture` closes the DX-7 owed follow-up (archive.org
+  `tomb3dem`, sha256-pinned, proven on thyla-pi incl. sabotage runs); the
+  manifest gained `[network.duke3d]`/`[network.tombraider]` with a pin-drift
+  test, the configurator `CHUNK_DOSBOX`/`CHUNK_DUKE3D`/`CHUNK_TOMBRAIDER` + the
+  lowering constraint. The Duke3D gate now proves MOUSE-LOOK BY DEFAULT with a
+  lateral-shift witness + a no-input control (a frame hash cannot: a live frame
+  changes by itself). Reference: `docs/reference/152-dosbox.md` "DX-8"; manual:
+  `docs/manual/40-dosbox.md`.
+
 **Act 2 -- Win9x + 3dfx (the showcase; needs DX-4):**
 - **DX-6** -- **Win9x guest bring-up**: boot Windows 98 in DOSBox-X on Thylacine
   (IDE/disk-image + SVGA + PCI all in DOSBox-X's C++; display via the software

@@ -29,6 +29,10 @@ bc_reset
 eq "default KASLR"        "$(bc_get KASLR)"        "n"
 eq "default DEV_ACCOUNTS" "$(bc_get DEV_ACCOUNTS)" "y"
 eq "default BUILD_TYPE"   "$(bc_get BUILD_TYPE)"   "debug"
+eq "default CHUNK_DOSBOX"  "$(bc_get CHUNK_DOSBOX)"  "y"
+eq "default CHUNK_DUKE3D"  "$(bc_get CHUNK_DUKE3D)"  "y"
+eq "default CHUNK_TOMBRAIDER" "$(bc_get CHUNK_TOMBRAIDER)" "y"
+eq "default DOSBOX_CPU_PRESET" "$(bc_get DOSBOX_CPU_PRESET)" "pentium"
 
 echo "== preset: production =="
 bc_reset; bc_apply_preset production
@@ -64,15 +68,27 @@ eq "pre-resolve DEV_ACCOUNTS" "$(bc_get DEV_ACCOUNTS)" "n"
 bc_resolve 2>/dev/null
 eq "post-resolve DEV_ACCOUNTS" "$(bc_get DEV_ACCOUNTS)" "y"
 
+echo "== T-needs: CHUNK_DOSBOX=n LOWERS the games (never raises the emulator back) =="
+bc_reset; bc_set CHUNK_DOSBOX=n
+eq "pre-resolve CHUNK_DUKE3D"     "$(bc_get CHUNK_DUKE3D)"     "y"
+bc_resolve 2>/dev/null
+eq "post-resolve CHUNK_DOSBOX stays n" "$(bc_get CHUNK_DOSBOX)" "n"
+eq "post-resolve CHUNK_DUKE3D"     "$(bc_get CHUNK_DUKE3D)"     "n"
+eq "post-resolve CHUNK_TOMBRAIDER" "$(bc_get CHUNK_TOMBRAIDER)" "n"
+bc_reset; bc_set CHUNK_DOSBOX=y; bc_resolve 2>/dev/null    # the control: emulator on -> untouched
+eq "control: DOSBOX=y keeps CHUNK_DUKE3D" "$(bc_get CHUNK_DUKE3D)" "y"
+
 echo "== validation: bad value + unknown symbol rejected =="
 bc_reset
 if bc_set KASLR=maybe 2>/dev/null; then bad "bad value accepted"; else ok "bad value rejected"; fi
+if bc_set DOSBOX_CPU_PRESET=turbo 2>/dev/null; then bad "bad preset accepted"; else ok "bad preset (turbo) rejected"; fi
+if bc_set DOSBOX_CPU_PRESET=486 2>/dev/null; then ok "preset 486 accepted"; else bad "preset 486 rejected"; fi
 if bc_set_one BOGUS y 2>/dev/null; then bad "unknown symbol accepted"; else ok "unknown symbol rejected"; fi
 
 echo "== T-export: symbols -> build.sh knobs (incl. TICKLESS inversion + DEV_ACCOUNTS) =="
 build_type=""; kernel_tests=""; boot_probes=""; hardening_full=""; kaslr=""
 sanitize="__unset__"; no_tickless=""; dev_accounts=""; extra_cmake_args=()
-unset THYLACINE_BAKE_GOROOT THYLACINE_BAKE_CLADE 2>/dev/null || true
+unset THYLACINE_BAKE_GOROOT THYLACINE_BAKE_CLADE THYLACINE_BAKE_DOSBOX THYLACINE_BAKE_DUKE3D THYLACINE_BAKE_TOMBRAIDER THYLACINE_DOSBOX_CPU_PRESET 2>/dev/null || true
 bc_reset; bc_apply_preset production; bc_resolve 2>/dev/null; bc_export
 eq "export build_type"    "$build_type"    "Release"
 eq "export kernel_tests"  "$kernel_tests"  "OFF"
@@ -84,6 +100,9 @@ eq "export no_tickless (TICKLESS=y -> OFF)" "$no_tickless" "OFF"
 eq "export dev_accounts (DEV_ACCOUNTS=y -> ON)" "$dev_accounts" "ON"
 eq "export THYLACINE_BAKE_GOROOT" "${THYLACINE_BAKE_GOROOT:-}" "1"
 eq "export THYLACINE_BAKE_CLADE"  "${THYLACINE_BAKE_CLADE:-}"  "0"
+eq "export THYLACINE_BAKE_DOSBOX (y -> 1)" "${THYLACINE_BAKE_DOSBOX:-}" "1"
+eq "export THYLACINE_BAKE_TOMBRAIDER (y -> 1)" "${THYLACINE_BAKE_TOMBRAIDER:-}" "1"
+eq "export THYLACINE_DOSBOX_CPU_PRESET (choice -> raw)" "${THYLACINE_DOSBOX_CPU_PRESET:-}" "pentium"
 
 echo "== T-honor-env: a pre-set legacy env var is honored (D-b transition shim) =="
 export THYLACINE_BAKE_CLADE=1                       # production sets CLADE=n (-> 0)

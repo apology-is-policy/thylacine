@@ -23,6 +23,150 @@ needed the operator.
 
 ---
 
+## 2026-09-05 (aux, Fable 5.1, effort max) -- DX-8: DOSBox defaults, presets, per-game configs, the build inputs; Nocturne named
+
+Resumed from a self-compaction with one queued item the resume note called
+"blocked on the operator's archive URLs": registering DOSBox-X and its two
+games in Forage + the build configurator, with the autolock default and the
+cycle presets riding on it. The note was wrong about the block, in two ways
+worth recording.
+
+**The block that was not one.** Duke3D's fetch was ALREADY pinned in
+`build_duke3d_fixture` (archive.org `3dduke13`, sha256 of the zip AND of
+`DUKE3D.GRP`) -- the manifest merely lacked the row. And Tomb Raider's origin
+was in the reference doc (archive.org item `tomb3dem`), so "I don't hold the
+originals" was answerable from ground truth: archive.org publishes md5/sha1 per
+file in its metadata API; thyla-pi has internet; the zip's ten files md5-match
+the operator's hand-staged demo byte for byte. The pins (`4ffd686c…` zip,
+`6a333d2d…` TOMB.EXE) were established there, and `build_tombraider_fixture`
+was exercised on the Pi end to end: cold fetch (19 s), warm cache hit, a
+corrupted `TOMB.EXE` re-staging from the cached zip, a wrong zip failing loud
+on the sha. The lesson is the CLAUDE.md one -- "I cannot verify from this
+tree" was a choice not to look; the networked host was one `ssh` away.
+
+**Where "autolock default" had nowhere to live.** Measured from the gate
+logs: every plain launch loads `~/.config/dosbox-x/dosbox-x-2026.08.31.conf`,
+a file DOSBox-X GENERATES on first launch with every key written out from the
+built-in defaults (`autolock=false` at `sdlmain.cpp:6886`, `core=auto`,
+`cycles=auto`). Upstream has no system-wide config location; the exe-dir slot
+is empty on Thylacine (whereami finds no `/proc/self/exe`) and would shadow
+the user's file anyway (the search is exclusive-first-hit). So a build-time
+default needs a BASE LAYER: patch `0008` parses `/lib/dosbox-x/dosbox-x.conf`
+first and clears the loaded-file list, leaving upstream's flow byte-identical
+-- the first launch's generated user file now inherits the system values, and
+user / cwd / `-conf` / `-set` all still override. `/lib` was already the
+system-data location (joey reads `/lib/ndb`, `/lib/aurora`, `/lib/halcyon`),
+rendered from the configurator's new `DOSBOX_CPU_PRESET` choice (xt..pentium2
+-> `cycles=fixed N`). Both game masters got a per-game `dosbox-x.conf`
+(`mount c .` + the game; TR adds `voodoo_card=software`), so the launch is
+`cd ~/duke3d; dosbox-x` -- the portable-DOS-game idiom, no shell script.
+
+**The witness that a hash could not carry.** "Mouse-look works by default"
+needs a gate leg, and the obvious witness -- the frame hash changes after a
+mouse sweep -- is void: on the earlier probe's frames the click-ONLY pair
+already hashed differently (the shot's flash; a live 3D frame moves by
+itself). A yaw is different in kind: it shifts the whole viewport sideways.
+`gfx_shift.py` reduces each frame to a per-column luma profile over the
+viewport band and finds the shift minimizing their difference; calibrated on
+the probe frames BEFORE the gate ran: click-only -> 0 px, each 20x500 sweep
+-> +-288 px with the sign following the direction. The gate runs the no-input
+CONTROL first (two frames, ~0 required, else "cannot discriminate" -- not a
+pass), then requires >= 100 px for the sweep and the opposite sign for the
+sweep back. Level entry uses `-noautoexec` (drops only the file's autoexec;
+`-c` still runs, verified in `shell.cpp`) + `DUKE3D.EXE /v1 /l1 /s2` -- no
+menu navigation to time -- after Ctrl+F9 (the mapper's shutdown, MK_f9+MMOD1)
+kills the first launch, witnessed by tapestryd's `retire surface` line.
+
+**The gate's first run stacked two DOSBox windows -- and the screendump said
+so.** The Duke leg's quit step sent Ctrl+F9 and then expected tapestryd's
+`retire surface` line; it matched at once and the second launch went ahead.
+Deterministic failure at the mouse arm: control 0, sweep 0. The last
+attempt's frame showed three tiles: the console pane flooded with DOSBox-X's
+"You are currently running a program or game. Are you sure to quit anyway
+now? y/n:" (repeated, forever), DOSBox #1 alive at Duke's episode menu, and
+DOSBox #2 IN THE LEVEL -- so the `/v1 /l1 /s2` warp works, and the click and
+the shift band had straddled two windows. Two defects, both mine: (a) the
+`retire surface` line that satisfied the witness was already in the buffer
+from DOSBox-X's start-up window re-creation -- the "token an earlier leg can
+contain" trap, now fenced behind a fresh echo marker; (b) DOSBox-X's quit
+confirmation has no dialog on this port and falls back to a CONSOLE y/n
+prompt, which a captured game window cannot reach and which a backgrounded
+launch loops onto the console pane -- so the system default now carries
+`quit warning=false` (upstream DOSBox quits at once; the confirmation is a
+DOSBox-X addition the port cannot present), the manual says so, and the gate
+gained a keyboard-turn POSITIVE control between the no-input control and the
+mouse arm, so "not in the level" and "the witness is blind here" can never
+again read as "the mouse is broken".
+
+**The second run failed at the positive control -- and the control was right
+about the instrument, not the game.** Rerun with the fenced quit and
+`quit warning=false`: one DOSBox window, the warp in the level, the no-input
+control at 0 -- and the keyboard turn "did not yaw" either, so the mouse arm
+was (correctly) not judged. My first reading was a focus problem; the frames
+said otherwise. Measured against the DOSBox surface's REAL box in the frame
+(rows 26..438 of the right tile -- top-aligned, with the HUD in its bottom
+~15% and a uniform dark-grey tile ground below it), the keyboard turn had
+yawed the view by 212 px. The witness's band was fixed at display rows
+30..65%, which on this placement straddles the HUD and the empty ground --
+both identical between frames -- and those static columns swamped a moderate
+yaw. The earlier calibration had survived only because the probe's sweeps
+were huge (+-288 px). Fix: `gfx_shift.py` now finds the surface itself
+(per-row luma VARIANCE across the tile, inset past its frame lines -- a
+brightness floor cannot do it, the ground's mean is above a dark sky's) and
+bands 10..80% of that extent; `--extent` also gives the gate the centre to
+click, so no coordinate is guessed. Re-calibrated: keyboard turn 212 px, the
+big sweeps +-296 px, click-only and no-input 0. Two wrong turns in one leg,
+both caught by a control, neither by reading code.
+
+**Small catches.** (1) A Tcl `[autoexec]` inside two gate strings -- the
+command-substitution trap the memory already names -- and my own sweep for it
+was BLIND: it filtered lines containing "exec" to skip `exec` calls, and
+`autoexec` contains "exec". A sweep whose exclusion matches the target finds
+nothing; fixed the sweep, then the strings. (2) The calibration loop's
+`set -- $pair` did not split under zsh -- a silent no-op that read as five
+file-not-found errors. (3) A manual row for live cycle hotkeys (Ctrl+F11/F12)
+turned out to be upstream DOSBox's binding; DOSBox-X binds Host+-/Host+= and
+I could not pin the host key's default from the source, so the row came out
+rather than ship a claim I had not verified. (4) build.sh's populate arms
+baked a STALE game stage past an opt-out flag (`THYLACINE_BAKE_DUKE3D=0` with
+an old stage still baked /duke3d, and the bake-verify then EXPECTED it);
+populate + verify now key on the same flag-AND-stage predicate.
+
+**Forage/configurator.** `[network.duke3d]` + `[network.tombraider]`
+(auto-at-build), forage targets + literal `class.name` sections, and a
+pin-drift control (`test-forage.sh` A9: every hash/url under `network.*` must
+appear verbatim in build.sh -- two copies of one truth). `CHUNK_DOSBOX` /
+`CHUNK_DUKE3D` / `CHUNK_TOMBRAIDER` / `DOSBOX_CPU_PRESET` in the configurator
+with a second constraint kind: DOSBOX=n LOWERS the games (raising the
+emulator back would undo an explicit 17.6 MB opt-out). The emulator itself is
+vendored and deliberately not a manifest input.
+
+**Operator input mid-run (recorded, not acted on yet):** the audio system is
+named **Nocturne**, and a first-class requirement: permissioned PROGRAMS must
+be able to hook into the routing graph and add their own DSP modules (e.g. a
+convolution filter). Both are in the audio-arc memory for the research pass.
+
+**Verification.** All fast tests green: `tools/test-build-config.sh` (ALL PASS, incl. the new
+T-needs + the DOSBOX_CPU_PRESET validation/export), `tools/test-forage.sh`
+(33/33, incl. the A9 pin-drift control and the auto-at-build class),
+`tools/test-configure.sh` (21/21). `build_tombraider_fixture` exercised on
+thyla-pi (cold fetch 19 s / warm / corrupt-restage / wrong-zip loud). Two pool
+bakes (`build.sh kernel`; the second added `quit warning=false`), each verified
+by CONTENT: the relinked binary carries the new log string, the rendered system
+config reads pentium/60000, `/lib/dosbox-x/dosbox-x.conf` readback-verified,
+bake-verify lists DUKE3D TOMBRAIDER DBXCONF. All six DOSBox LS-CI gates green
+on the FINAL pool, serial (LS_CI_JOBS=1): ls-gfx-dosbox 40 s (the baked config
+read back through the FS + the base layer loading on a launch with no -conf),
+-input 45 s, -conf 37 s, -dynarec 35 s, -tombraider 65 s (launched as `cd
+~/tombraider; dosbox-x`, both config layers witnessed, Voodoo from the file),
+-duke3d 107 s first attempt (both layers, the fenced Ctrl+F9 quit, the warp,
+no-input control 0 px, keyboard turn 224 px, right sweep 320 px, left sweep
+-320 px). The kernel is untouched, so no SMP gate is owed. The Duke gate's two
+failed runs before that are the two wrong turns above -- both real defects in
+the gate, neither in DX-8.
+
+---
+
 ## 2026-09-05 (aux, Opus 4.8, effort max) -- Duke3D mouse, the throttle-log churn, the manual revival
 
 Operator returned after the DX-7 (Tomb Raider Voodoo) landing and drove three

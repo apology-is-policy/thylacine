@@ -8,7 +8,8 @@
 #
 #   forage.sh                 report the status of every input
 #   forage.sh <target>        gather one: go|ambush|stratum|gopls|llvm|mesa|
-#                             alpine|busybox|static-curl|quake|clade|clade-gl
+#                             alpine|busybox|static-curl|quake|duke3d|tombraider|
+#                             clade|clade-gl
 #   forage.sh all             gather everything that can be gathered automatically
 #   FORAGE_DRY=1 forage.sh …   print what it WOULD do; touch nothing (git/net/gcp)
 #
@@ -157,8 +158,12 @@ target_sections() {
         busybox)  echo "cache.busybox" ;;
         static-curl) echo "cache.static-curl" ;;
         quake)    echo "network.quake" ;;
+        duke3d)   echo "network.duke3d" ;;
+        tombraider) echo "network.tombraider" ;;
         clade)    echo "remote.clade_llvm" ;;
         clade-gl) echo "remote.clade_gl" ;;
+        *.*)      # a literal manifest section (fork.x / cache.x / network.x / remote.x)
+                  [[ -n "$(manifest_get "$1" forageable)" ]] && echo "$1" || return 1 ;;
         *)        return 1 ;;
     esac
 }
@@ -172,7 +177,7 @@ forage_status() {
         printf '%-18s %-8s %-13s %s\n' "$sec" "$st" "$(manifest_get "$sec" forageable)" "$(manifest_get "$sec" feeds)"
     done
     echo
-    echo "Gather one:  tools/forage.sh <go|ambush|stratum|gopls|alpine|static-curl|clade|clade-gl|quake>"
+    echo "Gather one:  tools/forage.sh <go|ambush|stratum|gopls|alpine|static-curl|clade|clade-gl|quake|duke3d|tombraider>"
     echo "Gather all:  tools/forage.sh all   (FORAGE_DRY=1 to preview)"
 }
 

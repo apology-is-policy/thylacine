@@ -1,8 +1,10 @@
 #!/usr/bin/expect -f
-# tools/interactive/ls-gfx-dosbox-duke3d.exp -- the DX-5 (Cryptid) showcase:
-# Duke Nukem 3D shareware runs under DOSBox-X's core=dynamic (the CAP_JIT
-# dynrec, I-42) on Thylacine, rendering its title through JIT-compiled x86 and
-# responding to keyboard input.
+# tools/interactive/ls-gfx-dosbox-duke3d.exp -- the DX-5 (Cryptid) showcase +
+# the DX-8 defaults: Duke Nukem 3D shareware runs under DOSBox-X's
+# core=dynamic_rec (the CAP_JIT dynrec, I-42) on Thylacine, launched exactly the
+# way the manual says (`cd ~/duke3d; dosbox-x` -- the per-game config, no -set
+# flags), renders, takes keyboard input, and -- the DX-8 point -- turns on MOUSE
+# motion because autolock is on by default.
 #
 # This is the compute-heavy real-program showcase the DX-4 dynrec was built for
 # (DX-1..DX-4 ran DX2C.COM, a 49-byte toy). Duke3D is ~11 MB of game data
@@ -10,6 +12,11 @@
 # code Burrow.
 #
 # THE WITNESSES:
+#   0. DX-8 configs: "CONFIG: Loaded system config: /lib/dosbox-x/dosbox-x.conf"
+#      (the base layer patch 0008 parses under EVERY launch) AND "CONFIG: Loaded
+#      config file: dosbox-x.conf" (the per-game config found in the cwd). So the
+#      launch carried autolock + dynrec + fixed cycles from FILES; the command
+#      line was bare.
 #   1. "dosbox-x: CAP_JIT acquired" on serial -- the dynrec code cache was
 #      minted through CAP_JIT (there is no other producer of this line). A
 #      capability/region failure E_Exits instead.
@@ -18,10 +25,40 @@
 #      FAR above both a black/flat surface (~1-3) and a DOS text screen (~19).
 #      The >= 30 floor is the HARD gate -- it distinguishes "the game rendered"
 #      from "Duke3D bailed to a DOS prompt" (the exact failure of a missing GRP
-#      or CFG).
+#      or CFG). The title's existence ALSO proves the per-game [autoexec] ran
+#      (mount c . / c: / DUKE3D.EXE) -- nothing else started the game.
 #   3. A keystroke (ENTER) advances title -> menu; a second screendump stays
 #      colour-rich AND differs from the first, proving keyboard input reached
 #      the dynrec-executed game and it kept rendering.
+#   4. DX-8 mouse-look. Ctrl+F9 shuts the first DOSBox-X down -- at once, because
+#      the system default sets `quit warning=false` (DOSBox-X's confirmation has
+#      no dialog on this port: it asks y/n on the CONSOLE, behind the game, and a
+#      backgrounded launch loops the prompt forever -- the first version of this
+#      leg found that out by stacking two DOSBox windows). The quit witness is
+#      tapestryd's `retire surface` line, FENCED behind a fresh echo marker so a
+#      retire line already in the buffer (DOSBox-X re-creates its window during
+#      start-up) cannot satisfy it -- the "token an earlier leg can contain"
+#      trap, which the first version fell into. Then a SECOND launch warps
+#      straight into E1L1 (`-noautoexec` drops only the file's [autoexec]; the
+#      two config files still apply; `DUKE3D.EXE /v1 /l1 /s2` skips the menus).
+#      The witness is a LATERAL SHIFT of the viewport (gfx_shift.py: the
+#      per-column luma profile moves wholesale; calibrated +-288 px on the DX-8
+#      probe frames), NOT a frame hash -- a live 3D frame changes on its own
+#      (animation, the shot's flash), so "changed" proves nothing. Three arms:
+#      the CONTROL (two frames, no input: ~0 shift required, else the instrument
+#      cannot discriminate here and the leg says so instead of passing); a
+#      click at the surface's MEASURED centre (gfx_shift.py --extent -- where
+#      the window IS in the frame, not where a layout guess puts it), which is
+#      what a player does and what captures the mouse (autolock=true from the
+#      files); the POSITIVE control (a keyboard turn -- the right arrow -- must
+#      yaw, proving the game is in the level, has keyboard focus, and that the
+#      witness can see a yaw in this frame -- the second version of this leg
+#      failed HERE, and the frames showed the keys had yawed the view by 212 px
+#      that a fixed display-relative band could not see: it straddled the HUD
+#      and the empty tile ground, both identical between frames, so the
+#      instrument was blind to moderate yaws and the band now lives inside the
+#      measured viewport); and the CLAIM: a relative sweep yaws the view; a
+#      left sweep then flips the sign.
 #
 # The game data lives at /duke3d (baked by build_duke3d_fixture) as a read-only
 # SYSTEM-owned master; the gate copies it into a writable home first (see the
@@ -41,6 +78,14 @@ set qmp [lc_qmp_sock]
 proc gfx_fp {png} {
     return [exec python3 [file join [file dirname [info script]] gfx_fp.py] $png]
 }
+proc gfx_shift {a b} {
+    return [exec python3 [file join [file dirname [info script]] gfx_shift.py] $a $b]
+}
+# The surface box (x0 y0 x1 y1, display px) measured from a frame -- where the
+# game window IS, not where a layout guess puts it.
+proc gfx_extent {png} {
+    return [exec python3 [file join [file dirname [info script]] gfx_shift.py] --extent $png]
+}
 proc gfx_dump_or_fail {out} {
     global repo qmp
     if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return $err }
@@ -49,6 +94,19 @@ proc gfx_dump_or_fail {out} {
 proc qkey {qcode} {
     global repo qmp
     catch {exec $repo/tools/qmp-send-key.sh -s $qmp $qcode}
+}
+proc qchord {a b} {
+    global repo qmp
+    catch {exec $repo/tools/qmp-send-key.sh -s $qmp $a $b}
+}
+# The relative device (virtio-mouse) is what a captured DOS game reads; the
+# tablet (abs) only positions the pointer for the capture click.
+proc ptr {op} {
+    global repo qmp
+    catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p $op}
+}
+proc sweep {sign} {
+    for {set i 0} {$i < 20} {incr i} { ptr "rel [expr {$sign * 500}] 0"; after 70 }
 }
 
 # Host-side skip: the staged tree is the same one the pool bakes, so its absence
@@ -71,11 +129,38 @@ lc_login michael correct-horse-battery-staple-v1
 # fast on the local pool.
 lc_send "cp -r /duke3d /home/michael/duke3d"
 after 10000
-# cycles=fixed 60000 (DX-5): cycles=auto's control loop (increaseticks(), 250ms
-# window) hunts CPU_CycleMax wildly here (measured 506% peak-to-peak) -> a ~500ms
-# emulated-speed oscillation. A fixed cycle count (Pentium-100 class) pins the
-# emulated speed. See docs/reference/152-dosbox.md.
-lc_send "dosbox-x -set \"cpu core=dynamic_rec\" -set \"cpu cycles=fixed 60000\" -c \"mount c /home/michael/duke3d\" -c \"c:\" -c \"DUKE3D.EXE\" &"
+
+# DX-8: the per-game config launch. /duke3d ships dosbox-x.conf (autolock +
+# core=dynamic_rec + cycles=fixed 60000 + an [autoexec] that mounts . and runs
+# DUKE3D.EXE); DOSBox-X's cwd search finds it, so `cd ~/duke3d; dosbox-x` is the
+# whole launch. The system base layer (/lib/dosbox-x/dosbox-x.conf, patch 0008)
+# loads under it. cycles=fixed (DX-5): cycles=auto's control loop hunts
+# CPU_CycleMax wildly here -> a ~500ms emulated-speed oscillation; a fixed
+# count (Pentium-100 class) pins it. See docs/reference/152-dosbox.md.
+lc_send "cd /home/michael/duke3d"
+after 800
+lc_send "dosbox-x &"
+
+# WITNESS 0: both config layers loaded from files (order-agnostic).
+set timeout 30
+set seen_sys 0
+set seen_game 0
+expect {
+    -re {CONFIG: Loaded system config: /lib/dosbox-x/dosbox-x\.conf} {
+        set seen_sys 1
+        if {!$seen_game} exp_continue
+    }
+    -re {CONFIG: Loaded config file: [^\r\n]*dosbox-x\.conf[\r\n]} {
+        set seen_game 1
+        if {!$seen_sys} exp_continue
+    }
+    -re {E_Exit|Can't init SDL}        { lc_fail "dosbox-x E_Exit during startup" }
+    "snare:"                           { lc_fail "dosbox-x faulted (snare) during startup" }
+    -re {EXTINCTION:}                  { lc_extinction_fail "kernel extinction during Duke3D startup" }
+    timeout                            { lc_fail "DX-8 config witnesses missing within 30s (system=$seen_sys per-game=$seen_game)\
+                                                  -- the base layer (patch 0008) or the cwd dosbox-x.conf did not load" }
+}
+lc_step "DX-8: system base layer (/lib/dosbox-x/dosbox-x.conf) + the per-game dosbox-x.conf both loaded -- a bare 'dosbox-x' launch"
 
 # WITNESS 1: the dynrec cache was minted through CAP_JIT.
 set timeout 45
@@ -96,9 +181,10 @@ set fp1 [gfx_fp /tmp/lsd3d-1.png]
 set h1 [lindex $fp1 0]; set c1 [lindex $fp1 1]
 if {$c1 < 30} {
     lc_fail "too few colours ($c1) -- Duke3D did not render its title (a missing\
-             GRP/CFG bails to a ~19-colour DOS prompt; a black surface ~1-3)"
+             GRP/CFG bails to a ~19-colour DOS prompt; a black surface ~1-3;\
+             a per-game \[autoexec\] that did not run leaves the DOS prompt)"
 }
-lc_step "dynrec render: Duke3D title on the scanout ($c1 colour buckets, >= 30)"
+lc_step "dynrec render: Duke3D title on the scanout ($c1 colour buckets, >= 30) -- the per-game \[autoexec\] started the game"
 
 # WITNESS 3: keyboard reaches the dynrec-executed game. ENTER advances the
 # title/attract to the main menu; the frame stays colour-rich AND changes.
@@ -119,7 +205,135 @@ if {$h1 eq $h2} {
 lc_step "input: ENTER advanced the frame ($c1 -> $c2 colours, hash $h1 -> $h2)\
          -- keyboard reached the dynrec-executed game"
 
+# WITNESS 4a: shut the first DOSBox-X down. Ctrl+F9 is DOSBox's own "quit"
+# hotkey (the mapper's shutdown handler); with the system default's
+# `quit warning=false` it quits at once. The proof it died is tapestryd's
+# surface retire on serial -- FENCED: the echo marker below is consumed first,
+# so a retire line that was already in the buffer (DOSBox-X re-creates its
+# window during start-up) cannot satisfy the witness. Without a real quit the
+# second launch would stack two windows and the mouse leg would judge the
+# wrong one.
+lc_send "echo DX8-QUIT-FENCE"
+set timeout 15
+expect {
+    -re {DX8-QUIT-FENCE[\r\n]}          { }
+    timeout                            { lc_fail "the quit fence echo did not come back within 15s -- the shell is wedged" }
+}
+qchord ctrl f9
+set timeout 20
+expect {
+    -re {tapestryd: retire surface}    { lc_step "Ctrl+F9 shut DOSBox-X down at once (quit warning=false from the system default; tapestryd retired its surface after the fence)" }
+    -re {Are you sure to quit}         { lc_fail "Ctrl+F9 asked for confirmation -- the system default's quit warning=false is not effective" }
+    -re {EXTINCTION:}                  { lc_extinction_fail "kernel extinction on DOSBox-X shutdown" }
+    timeout                            { lc_fail "no surface retire within 20s of Ctrl+F9 -- DOSBox-X did not quit" }
+}
+after 3000
+
+# WITNESS 4b: the mouse-look launch. Same cwd, same two config files (so
+# autolock=true still comes from the FILES), but -noautoexec drops the per-game
+# [autoexec] and the -c commands warp straight into E1L1 -- no menu navigation
+# to time. The dynrec re-acquires CAP_JIT in the new process.
+lc_send "dosbox-x -noautoexec -c \"mount c .\" -c \"c:\" -c \"DUKE3D.EXE /v1 /l1 /s2\" &"
+set timeout 45
+expect {
+    -re {dosbox-x: CAP_JIT acquired}   { lc_step "mouse-look launch: CAP_JIT acquired (second process)" }
+    -re {CAP_JIT acquisition failed}   { lc_fail "mouse-look launch: CAP_JIT acquire E_Exit" }
+    -re {E_Exit|Can't init SDL}        { lc_fail "mouse-look launch: dosbox-x E_Exit" }
+    "snare:"                           { lc_fail "mouse-look launch: dosbox-x faulted (snare)" }
+    -re {EXTINCTION:}                  { lc_extinction_fail "kernel extinction during the mouse-look launch" }
+    timeout                            { lc_fail "mouse-look launch: no CAP_JIT-acquired line within 45s" }
+}
+# The warp loads the GRP, compiles the CONs and builds the level: ~20 s.
+after 24000
+
+# The CONTROL: two frames, no input. A live 3D frame may change on its own, but
+# it must not SHIFT sideways on its own -- else the yaw witness below could not
+# tell a turn from drift, and the honest result is "cannot discriminate".
+if {[gfx_dump_or_fail /tmp/lsd3d-c0.png] ne ""} { lc_fail "screendump c0 failed" }
+after 1000
+if {[gfx_dump_or_fail /tmp/lsd3d-c1.png] ne ""} { lc_fail "screendump c1 failed" }
+set fpc [gfx_fp /tmp/lsd3d-c1.png]
+set cc [lindex $fpc 1]
+if {$cc < 30} {
+    lc_fail "in-game frame not colour-rich ($cc buckets) -- the /v1 /l1 /s2 warp did\
+             not reach the level (a DOS prompt ~19; black ~1-3)"
+}
+set ctl [gfx_shift /tmp/lsd3d-c0.png /tmp/lsd3d-c1.png]
+set ctl_s [lindex $ctl 0]
+if {$ctl_s > 60 || $ctl_s < -60} {
+    lc_fail "no-input control drifted $ctl_s px sideways -- the yaw witness cannot\
+             discriminate here (the view moves by itself); not a pass"
+}
+lc_step "mouse-look control: in-game ($cc buckets), no input -> shift $ctl_s px (~0)"
+
+# Capture: a click at the surface's MEASURED centre -- what a player does;
+# with autolock=true (from the files) it captures the mouse, and it lands the
+# tablet pointer on the window whatever the compositor's placement. It also
+# fires the weapon -- its flash is why the arms below wait before their BEFORE
+# frames.
+set ext [gfx_extent /tmp/lsd3d-c1.png]
+set ex0 [lindex $ext 0]; set ey0 [lindex $ext 1]; set ex1 [lindex $ext 2]; set ey1 [lindex $ext 3]
+if {$ex1 - $ex0 < 200 || $ey1 - $ey0 < 150} {
+    lc_fail "could not find the game surface in the frame (extent $ext) -- no window to click"
+}
+set cx [expr {($ex0 + $ex1) / 2}]; set cy [expr {($ey0 + $ey1) / 2}]
+set tx [expr {$cx * 32767 / 1280}]; set ty [expr {$cy * 32767 / 800}]
+lc_step "game surface at $ext -- clicking its centre ($cx,$cy) to focus + capture"
+ptr "abs $tx $ty"
+after 200
+ptr "btn left down"
+after 200
+ptr "btn left up"
+after 1500
+
+# The POSITIVE control: a keyboard turn (the right arrow, six taps) must yaw.
+# It proves three things the mouse arm needs: the warp really put the game in
+# the level (a title/menu/loading screen is colour-rich too, and ignores
+# arrows), the window has keyboard focus, and the witness can see a yaw in
+# THIS frame. If this fails, the mouse arm would fail for a reason that has
+# nothing to do with the mouse.
+if {[gfx_dump_or_fail /tmp/lsd3d-k0.png] ne ""} { lc_fail "screendump k0 failed" }
+for {set i 0} {$i < 6} {incr i} { qkey right; after 60 }
+after 800
+if {[gfx_dump_or_fail /tmp/lsd3d-k1.png] ne ""} { lc_fail "screendump k1 failed" }
+set kyaw [gfx_shift /tmp/lsd3d-k0.png /tmp/lsd3d-k1.png]
+set kyaw_s [lindex $kyaw 0]
+if {$kyaw_s < 100 && $kyaw_s > -100} {
+    lc_fail "the keyboard turn did not yaw the view (shift $kyaw_s px) -- the warp did\
+             not reach the level, the click did not focus the window, or the\
+             witness cannot see a yaw here; the mouse arm cannot be judged"
+}
+lc_step "mouse-look positive control: a keyboard turn yawed the view ($kyaw_s px) -- in the level, focused, the witness sees yaws here"
+after 500
+
+if {[gfx_dump_or_fail /tmp/lsd3d-m0.png] ne ""} { lc_fail "screendump m0 failed" }
+sweep 1
+after 800
+if {[gfx_dump_or_fail /tmp/lsd3d-m1.png] ne ""} { lc_fail "screendump m1 failed" }
+set yaw [gfx_shift /tmp/lsd3d-m0.png /tmp/lsd3d-m1.png]
+set yaw_s [lindex $yaw 0]; set yaw_c [lindex $yaw 1]
+if {$yaw_s < 100 && $yaw_s > -100} {
+    lc_fail "relative mouse motion did not yaw the view (shift $yaw_s px, conf $yaw_c;\
+             control was $ctl_s) -- capture (autolock) or the relative-motion path\
+             is broken; the DX-8 default is not effective"
+}
+lc_step "mouse-look: a right sweep yawed the view (viewport shift $yaw_s px, conf $yaw_c;\
+         control $ctl_s px) -- autolock=true from the files captured on click"
+
+# The sign flips for the opposite sweep -- the shift follows the mouse, it is
+# not a one-off scene change.
+sweep -1
+after 800
+if {[gfx_dump_or_fail /tmp/lsd3d-m2.png] ne ""} { lc_fail "screendump m2 failed" }
+set back [gfx_shift /tmp/lsd3d-m1.png /tmp/lsd3d-m2.png]
+set back_s [lindex $back 0]
+if {($back_s < 100 && $back_s > -100) || ($back_s > 0) == ($yaw_s > 0)} {
+    lc_fail "left sweep did not yaw the other way (right $yaw_s px, left $back_s px)"
+}
+lc_step "mouse-look: the left sweep yawed back ($back_s px) -- the shift follows the mouse"
+
 lc_quit
-lc_pass "ls-gfx-dosbox-duke3d: DX-5 showcase verified -- Duke Nukem 3D shareware\
-         runs under core=dynamic (CAP_JIT dynrec), renders, and takes input"
+lc_pass "ls-gfx-dosbox-duke3d: DX-5 + DX-8 verified -- Duke Nukem 3D shareware runs\
+         under core=dynamic (CAP_JIT dynrec) from its per-game config on the system\
+         defaults, renders, takes keyboard input, and mouse-look works by default"
 exit 0

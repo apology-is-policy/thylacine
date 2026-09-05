@@ -31,18 +31,30 @@ legal under strict W^X (I-12).
 - `usr/ports/dosbox-x/config.h` + `config_package.h` — the hand build config
   (`C_DYNREC`, `C_TARGETCPU=0x07` = ARMv8LE) placed on the `-I` path.
 - `usr/ports/dosbox-x/duke3d/` — the Duke3D showcase fixtures: `DUKE3D.CFG` (a
-  SETUP-generated game config). The cycles fix is a launch flag, not a shipped
-  emulator config (see the cycles section).
+  SETUP-generated game config) + `dosbox-x.conf` (DX-8: the per-game DOSBox-X
+  config -- autolock + dynrec + fixed cycles + an `[autoexec]` that mounts `.`
+  and runs the game; see DX-8 below).
+- `usr/ports/dosbox-x/tombraider/dosbox-x.conf` — the Tomb Raider per-game
+  config (the same, plus `voodoo_card=software`).
 - `tools/build.sh::build_dosbox_x` — the curated object-list build (static
   ET_EXEC, links libSDL2.a + libc++.a + libz.a). Staleness-cached against the
   vendored tree + port dir + extractor + thylajit + the linked archives; a newer
   patch auto-triggers a clean rebuild (`rm -rf` the copy + obj, re-extract,
   re-patch). `DBX_FORCE=1` forces it.
-- `tools/build.sh::build_duke3d_fixture` — fetches + stages the Duke3D shareware
-  (see the showcase).
-- `THYLACINE_BAKE_DOSBOX` (default-on) bakes the emulator; `THYLACINE_BAKE_DUKE3D`
-  (default-on with the emulator) bakes the game data. Either `=0` opts out for a
-  fast iteration loop; an absent LLVM C++ fork skips the emulator gracefully.
+- `tools/build.sh::build_duke3d_fixture` / `build_tombraider_fixture` — fetch +
+  stage the two games (sha256-pinned archive.org fetches; see the showcases).
+- `tools/build.sh::stage_dosbox_sysconf` — renders the SYSTEM default config
+  (`/lib/dosbox-x/dosbox-x.conf`) from `THYLACINE_DOSBOX_CPU_PRESET` (DX-8);
+  `populate_stratum_pool` bakes it under `/lib` and the bake-verify asserts it.
+- `THYLACINE_BAKE_DOSBOX` (default-on) bakes the emulator + the system config;
+  `THYLACINE_BAKE_DUKE3D` / `THYLACINE_BAKE_TOMBRAIDER` (default-on with the
+  emulator) bake the games. Any `=0` opts out for a fast/offline iteration loop
+  (populate + bake-verify key on the same flag+stage predicate, so a stale stage
+  never bakes past an opt-out); an absent LLVM C++ fork skips the emulator
+  gracefully. The build configurator exposes them as `CHUNK_DOSBOX` /
+  `CHUNK_DUKE3D` / `CHUNK_TOMBRAIDER` / `DOSBOX_CPU_PRESET`
+  (`docs/reference/150-build-config.md`); `tools/build-manifest.toml` pins the
+  two game fetches as `[network.duke3d]` / `[network.tombraider]`.
 
 ## The patch series
 
@@ -55,6 +67,7 @@ legal under strict W^X (I-12).
 | `0005-thylacine-non-resizable-window` | pin the window non-resizable — the Tapestry compositor is authoritative on size and letterboxes; a resizable window starts a CONFIGURE resize-war |
 | `0006-thylacine-dynrec-capjit` | **DX-4**: the CAP_JIT dynarec alloc arm — `__thylacine__` `DYNCOREALLOC_THYLACINE_JIT`; emit at `writer_va`, execute at `exec_va`, publish via `SYS_ICACHE_SYNC` (see below) |
 | `0007-thylacine-cycle-telemetry` | uncomment DOSBox-X's built-in per-adjust `cyclelog` (silent unless `cycles=auto/max`; a diagnostic — see the cycles fix) |
+| `0008-thylacine-system-config` | **DX-8**: a system-wide BASE-LAYER config — `/lib/dosbox-x/dosbox-x.conf` is parsed first (values only; the loaded-file list is cleared so upstream's search runs unchanged), logged as `CONFIG: Loaded system config: …`; `-defaultconf` skips it (see DX-8) |
 
 ## The CAP_JIT dynarec (DX-4 — I-42 / I-12)
 
@@ -176,25 +189,121 @@ launched with `-set "voodoo voodoo_card=software"`:
   updates). The first 3D-accelerated gameplay on Thylacine.
 
 **Run model** (as Duke3D): `/tombraider` is a read-only SYSTEM master; copy to a
-writable home (`cp -r /tombraider ~/tombraider`) then
+writable home then launch from it: `cp -r /tombraider ~/tombraider; cd ~/tombraider;
+dosbox-x` (DX-8: the per-game `dosbox-x.conf` carries the dynrec, the fixed cycles,
+`voodoo_card=software` and the `[autoexec]`). The explicit long form still works:
 `dosbox-x -set "cpu core=dynamic_rec" -set "cpu cycles=fixed 60000" -set "voodoo voodoo_card=software" -c "mount c ~/tombraider" -c "c:" -c "TOMB.EXE"`.
 
-**Owed follow-up:** `build_tombraider_fixture` (a build-time archive.org fetch,
-sha256-pinned, mirroring `build_duke3d_fixture`) is not yet written -- the pool bake
-is currently conditional on a locally-staged `build/tombraider/stage` (the demo is
-game data, never committed -- the quake/Duke3D posture). Pinning the fetch needs a
-networked build context.
+**The fetch (DX-8, closes the DX-7 owed follow-up):** `build_tombraider_fixture`
+fetches `tomb3dem.zip` from the archive.org item `tomb3dem` (2,310,970 B,
+sha256 `4ffd686c…`; the item's published md5 `d0150cc4…` matched) at build time,
+NEVER committed -- the quake/Duke3D posture. The zip is a single `tomb3dem/`
+directory holding exactly the ten released files; `TOMB.EXE` (788,171 B, sha256
+`6a333d2d…`) is the fixture's identity and the cache guard. Every staged file was
+byte-compared (md5) against the operator's hand-staged demo before the pin was
+written. The function was exercised end-to-end on thyla-pi (the networked host):
+cold fetch 19 s, warm cache hit, a corrupted `TOMB.EXE` re-stages from the cached
+zip, and a wrong zip fails loud on the sha. `THYLACINE_BAKE_TOMBRAIDER=0` opts out.
+
+## DX-8: defaults, presets, per-game configs + the build inputs
+
+**The problem.** Upstream DOSBox-X has no system-wide config location. A plain
+launch searches the cwd, the executable's directory (empty on Thylacine: `whereami`
+finds no `/proc/self/exe`), then the per-user XDG directory, loads the FIRST hit
+exclusively -- and on a first launch GENERATES `~/.config/dosbox-x/dosbox-x-<ver>.conf`
+from the built-in defaults with every key written explicitly. So a build-time
+default had nowhere to live: whatever the image wanted, the user's generated file
+pinned the built-in defaults (`autolock=false`, `core=auto`, `cycles=auto`) over it
+forever after. Measured on the gate logs: every plain launch logged
+`CONFIG: Loaded config file: /home/michael/.config/dosbox-x/dosbox-x-2026.08.31.conf`.
+
+**The mechanism -- three layers, values-last-wins:**
+
+1. **System base layer** `/lib/dosbox-x/dosbox-x.conf` (patch `0008`): parsed FIRST
+   in `sdlmain.cpp`'s config resolution, then `configfiles.clear()` so the upstream
+   flow runs byte-for-byte as before. Consequences: a first launch's generated
+   per-user file INHERITS the system values (PrintConfig writes the current values);
+   the per-user file, a cwd/exe-dir `dosbox-x.conf`, `-conf` files and `-set` all
+   still override it; `-defaultconf` ignores it like every other file. It logs
+   `CONFIG: Loaded system config: /lib/dosbox-x/dosbox-x.conf` (the gate witness).
+   Rendered by `stage_dosbox_sysconf` from the build config's `DOSBOX_CPU_PRESET`
+   (xt=500 / 286=3000 / 386=12000 / 486=45000 / pentium=60000 / pentium2=200000
+   cycles per emulated ms; default pentium) -- four values: `autolock=true`,
+   `core=dynamic_rec`, `cycles=fixed <N>`, and `quit warning=false` (Ctrl+F9 quits
+   at once, upstream-DOSBox style: DOSBox-X's confirmation has no dialog on this
+   port -- it asks y/n on the CONSOLE, behind a captured game window, and a
+   backgrounded launch loops the prompt onto the console forever; the first
+   version of the Duke3D gate's quit leg found that out by stacking two DOSBox
+   windows). Baked SYSTEM-owned + readback-verified
+   under `/lib` (the Plan 9 system-data idiom joey already uses for `/lib/ndb`,
+   `/lib/aurora`, `/lib/halcyon`); the bake-verify lists it as `DBXCONF`.
+2. **Per-user** `~/.config/dosbox-x/dosbox-x-<ver>.conf` -- upstream's own file,
+   generated on first launch from the system values; the user edits it to override.
+   The trap it inherits from upstream: it pins EVERY key, so a later build's changed
+   preset does not propagate to an existing user file (delete it to re-inherit).
+3. **Per-game** `dosbox-x.conf` in the game directory (shipped in both masters,
+   copied with `cp -r`): autolock + dynrec + `cycles=fixed 60000` (both games are
+   Pentium-class) + Tomb Raider's `voodoo_card=software` + an `[autoexec]` that does
+   `mount c .` / `c:` / `<GAME>.EXE`. DOSBox-X's cwd search finds it, so
+   `cd ~/duke3d; dosbox-x` is the whole launch -- the GOG/portable-DOS-game idiom,
+   with no shell script and no `-set`. Self-contained on purpose: the copied
+   directory carries what the game needs even if the system layer changes.
+
+**Why a port patch and not a workaround.** The exe-dir slot would have shadowed the
+user's own config (upstream's search is exclusive-first-hit); seeding the user's
+file at login would need a skeleton mechanism Thylacine does not have; the base
+layer is a 15-line hunk that leaves every upstream semantic intact and gives the
+Unix layering (system defaults < user < per-game < per-launch).
+
+**Mouse-look by default** is what the operator asked for and what the Duke3D gate
+now proves end to end (WITNESS 4): the second launch warps into E1L1
+(`-noautoexec` drops only the file's `[autoexec]`; `-c` still runs;
+`DUKE3D.EXE /v1 /l1 /s2`), a tablet click captures (autolock from the FILES), and a
+relative sweep yaws the view. The witness is `tools/interactive/gfx_shift.py`: the
+per-column luma profile of the viewport band moves WHOLESALE under a yaw, while
+animation or the shot's muzzle flash changes brightness locally without moving it.
+The band lives INSIDE the surface's extent measured from the frame (per-row luma
+variance across the tile, inset past its frame lines; 10..80% of that, below
+DOSBox-X's menu bar and above the game's HUD) -- a fixed display-relative band went
+blind on the gate's second run: the surface is top-aligned in its tile, so display
+rows 30..65% straddled the HUD and the uniform dark-grey tile ground, both identical
+between frames, and a 212 px keyboard yaw read as 0; `--extent` also hands the gate
+the surface centre to click. Calibrated: click-only and no-input -> 0 px; a
+keyboard turn (six arrow taps) 212-224 px; each 20x500 sweep +-296..320 px (320 is
+the search window's cap), sign following the direction. The passing run measured
+control 0 / keyboard 224 / right sweep 320 / left sweep -320. The gate runs the no-input CONTROL first
+(two frames, ~0 shift required, else "cannot discriminate" rather than a pass) and
+then requires |shift| >= 100 px for the sweep and the opposite sign for the sweep
+back. A keyboard turn (the right arrow) sits between them as the POSITIVE control:
+it proves the warp reached the level (a title/menu/loading screen is colour-rich
+too) and that the witness can see a yaw in this layout, so a mouse-arm failure means
+the mouse. A frame hash cannot carry this witness -- a live 3D frame differs on its
+own (measured: the click-only pair already hashed differently). The quit between the
+two launches is FENCED behind an echo marker: the first version matched a `retire
+surface` line already in the buffer (DOSBox-X re-creates its window at start-up),
+passed its "quit" step, and stacked two windows.
+
+**The build inputs.** `tools/build-manifest.toml` gained `[network.duke3d]` +
+`[network.tombraider]` (auto-at-build; url + sha256 + the GRP/EXE identity pins),
+`forage.sh` the `duke3d` / `tombraider` targets (and accepts any literal
+`class.name` section), and `test-forage.sh` a pin-drift control (A9): every hash and
+url under `network.*` must appear verbatim in `build.sh` -- two copies of one truth,
+and a bump in one place fails the test. The configurator gained `CHUNK_DOSBOX` /
+`CHUNK_DUKE3D` / `CHUNK_TOMBRAIDER` (all default y) + `DOSBOX_CPU_PRESET` (choice),
+and a second constraint kind: `CHUNK_DOSBOX=n` LOWERS the two games (raising the
+emulator back would silently undo an explicit 17.6 MB opt-out). The emulator itself
+is vendored in-repo and is deliberately NOT a manifest input.
 
 ## The gates (`tools/interactive/`)
 
 | Gate | Proves |
 |---|---|
-| `ls-gfx-dosbox.exp` | DX-2: render (VGA text → Tapestry pane) + a DOS program (`DX2C.COM` writes `C:\OUT.TXT`) |
+| `ls-gfx-dosbox.exp` | DX-2: render (VGA text → Tapestry pane) + a DOS program (`DX2C.COM` writes `C:\OUT.TXT`); DX-8: `/lib/dosbox-x/dosbox-x.conf` baked with the preset + the base layer loads on a launch with no `-conf` |
 | `ls-gfx-dosbox-input.exp` | DX-3a: QMP key → virtio-keyboard → tapestryd → SDL → DOS (`DX3K.COM` reads a key) |
 | `ls-gfx-dosbox-conf.exp` | DX-3b: `-conf` loads settings + runs the `[autoexec]` (OUT.TXT with no `-c` flags) |
 | `ls-gfx-dosbox-dynarec.exp` | DX-4: `core=dynamic_rec` runs a DOS program correctly (I-42 dual-map) |
-| `ls-gfx-dosbox-duke3d.exp` | DX-5a: Duke3D under `core=dynamic_rec` — CAP_JIT acquired on serial + a colour-rich title render (≥30 quantized buckets) + a keystroke advancing the frame |
-| `ls-gfx-dosbox-tombraider.exp` | DX-7: Tomb Raider 3dfx under software Voodoo — CAP_JIT + `VOODOO LFB` mapped + colour-rich title render + ENTER changes the frame (in-game 3D verified by hand) |
+| `ls-gfx-dosbox-duke3d.exp` | DX-5a + DX-8: Duke3D launched as `cd ~/duke3d; dosbox-x` (both config layers witnessed) under `core=dynamic_rec` — CAP_JIT acquired + a colour-rich title render (≥30 buckets; also proves the per-game `[autoexec]` ran) + ENTER advancing the frame; then Ctrl+F9 (surface retired) + a warp launch into E1L1 + the **mouse-look witness** (no-input control ~0 shift; a sweep yaws ≥100 px; the reverse sweep flips the sign) |
+| `ls-gfx-dosbox-tombraider.exp` | DX-7 + DX-8: Tomb Raider launched as `cd ~/tombraider; dosbox-x` (both config layers witnessed; `voodoo_card=software` from the per-game file) — CAP_JIT + `VOODOO LFB` mapped + colour-rich title render + ENTER changes the frame (in-game 3D verified by hand); SKIPs (77) when not baked |
 
 ## Performance characteristics
 
@@ -238,13 +347,23 @@ Two dynrec-vs-interpreter attempts, both instructive:
 - **Win9x (DX-6) unbuilt** — resource + dynarec heavy; DX-4 is its prerequisite.
 - **The run model copies the game to the user's home** — `/duke3d` is read-only
   SYSTEM-owned; DOSBox-X needs a writable drive, so the game is copied first
-  (`cp -r /duke3d ~/duke3d`) and the launch mounts `~/duke3d` as C:. The
-  cycles=fixed fix is a launch flag on that command; a one-command `-conf`
-  wrapper (with `mount c .`) is a possible convenience follow-up, not shipped.
+  (`cp -r /duke3d ~/duke3d`). Since DX-8 the copied directory carries its own
+  `dosbox-x.conf` (`mount c .` + the game), so the launch is `cd ~/duke3d;
+  dosbox-x`; the explicit `-set`/`-c` long form still works.
+- **The generated per-user config pins every key** (upstream behaviour): the
+  first launch writes `~/.config/dosbox-x/dosbox-x-<ver>.conf` from the system
+  values, so a LATER change of the build's `DOSBOX_CPU_PRESET` does not reach an
+  existing user file -- delete it to re-inherit, or set the value there.
+- **`/lib/dosbox-x/dosbox-x.conf` is pool content**: a ramfs-only rebuild
+  (`build.sh ramfs`, or `THYLACINE_MKFS_PRESERVE=1`) does not re-render it into
+  the pool; a preset change needs a pool bake (the general PRESERVE trap).
 
 ## Status
 
 DX-1..DX-4 + DX-5a AS-BUILT (`core=normal` floor, `core=dynamic_rec` via CAP_JIT,
-Duke3D showcase). DX-5 (the cycles-auto oscillation fix + telemetry) landed this
-session. DX-7 software Voodoo/Glide AS-BUILT (Tomb Raider). DX-6 (Win9x) + DX-7 GL-accelerated Voodoo unbuilt. Design + exit
-criteria: `docs/DOSBOX.md`.
+Duke3D showcase). DX-5 (the cycles-auto oscillation fix + telemetry) landed.
+DX-7 software Voodoo/Glide AS-BUILT (Tomb Raider). DX-8 AS-BUILT (2026-09-05): the
+system base-layer config (patch 0008) + `DOSBOX_CPU_PRESET` + the per-game configs
+(mouse-look on by default, gate-proven) + `build_tombraider_fixture` + the
+manifest/forage/configurator registration. DX-6 (Win9x) + DX-7 GL-accelerated
+Voodoo unbuilt. Design + exit criteria: `docs/DOSBOX.md`.

@@ -81,6 +81,22 @@ expect {
     timeout { lc_fail "no version line within 60s" }
 }
 
+# --- DX-8: the system default config is baked at /lib/dosbox-x/dosbox-x.conf ---
+# Read it back through the FS (a cheap proof the bake put it there, with the
+# configured preset rendered), then watch DOSBox-X load it on the launch below,
+# which passes no -conf at all.
+lc_send "cat /lib/dosbox-x/dosbox-x.conf"
+set timeout 20
+expect {
+    -re {autolock=true[\r\n]}       { lc_step "DX-8: /lib/dosbox-x/dosbox-x.conf baked (autolock=true)" }
+    -re {No such|not found|cannot}   { lc_fail "DX-8: /lib/dosbox-x/dosbox-x.conf missing from the pool (populate arm / THYLACINE_BAKE_DOSBOX?)" }
+    timeout                          { lc_fail "DX-8: no autolock=true line from /lib/dosbox-x/dosbox-x.conf within 20s" }
+}
+expect {
+    -re {cycles=fixed ([0-9]+)[\r\n]} { lc_step "DX-8: system config pins cycles=fixed $expect_out(1,string) (the DOSBOX_CPU_PRESET render)" }
+    timeout                          { lc_fail "DX-8: no cycles=fixed line in the system config" }
+}
+
 # --- first-light + run-a-program leg (DX-2c) ---
 set dbx_render_png $repo/build/ls-gfx-dosbox-render.png
 # "Not flat black" backstop on the presented frame (measured: the DOSBox-X DOS
@@ -103,15 +119,22 @@ lc_send "dosbox-x -c \"mount c /home/michael\" -c \"c:\" -c \"DX2C.COM\" &"
 # Positive 1: "Video thylacine" proves the fatal combined SDL_Init succeeded
 # with our backend. Fail fast on E_Exit (the audio-backend gap the 0004 patch
 # closes), a crash, a kernel fault, or a no-show.
+# DX-8 rides the same window: with NO -conf on the line, the base layer (patch
+# 0008) must announce itself. Order-agnostic with the SDL line.
 set timeout 30
+set seen_sys 0
+set seen_vid 0
 expect {
-    -re {Video thylacine}       { lc_step "SDL up: thylacine video + dummy audio (past the fatal SDL_Init)" }
+    -re {CONFIG: Loaded system config: /lib/dosbox-x/dosbox-x\.conf} { set seen_sys 1; if {!$seen_vid} exp_continue }
+    -re {Video thylacine}       { set seen_vid 1; if {!$seen_sys} exp_continue }
     -re {E_Exit|Can't init SDL} { lc_fail "dosbox-x E_Exit during SDL init -- audio/video backend gap (0004 patch missing/regressed?)" }
     "snare:"                    { lc_fail "dosbox-x graphical faulted (snare)" }
     "user fault"                { lc_fail "dosbox-x graphical user fault" }
     -re {EXTINCTION:}           { lc_extinction_fail "kernel extinction while dosbox-x graphical ran" }
-    timeout                     { lc_fail "dosbox-x SDL did not come up within 30s (no 'Video thylacine' line)" }
+    timeout                     { lc_fail "dosbox-x did not come up within 30s (system config seen=$seen_sys, 'Video thylacine' seen=$seen_vid)" }
 }
+lc_step "SDL up: thylacine video + dummy audio (past the fatal SDL_Init)"
+lc_step "DX-8: the system base layer loaded on a launch with no -conf (patch 0008)"
 # Positive 2: DOSBox-X boots its INTERNAL DOS to the COMMAND.COM shell, which
 # runs the autoexec (-c) commands. This is the "the DOS is live" proof.
 set timeout 25

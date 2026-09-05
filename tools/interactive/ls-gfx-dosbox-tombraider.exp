@@ -9,6 +9,10 @@
 # stack is already compiled in; this is a launch-config path (voodoo_card=software).
 #
 # WITNESSES:
+#   0. DX-8 configs: the system base layer (/lib/dosbox-x/dosbox-x.conf, patch
+#      0008) AND the per-game dosbox-x.conf in the cwd both loaded -- the launch is
+#      a bare `dosbox-x` in the game directory; voodoo_card=software, the dynrec
+#      and the fixed cycles all come from the per-game FILE, not -set flags.
 #   1. CAP_JIT acquired on serial -- the dynrec code cache is a dual-mapped CODE
 #      Burrow (I-42), same as Duke3D.
 #   2. "VOODOO LFB now at" on serial -- the game mapped the emulated Voodoo card's
@@ -21,6 +25,9 @@
 # The in-game 3D (Lara in the Vilcabamba cave/cavern, moving on input) is verified
 # by hand (docs/reference/152-dosbox.md screenshots); the menu-nav-to-level path is
 # left out of the deterministic gate as timing-fragile.
+#
+# SKIPs (77) when the demo is not baked (THYLACINE_BAKE_TOMBRAIDER=0 or dosbox
+# opted out), stated out loud so "absent" and "works" never share a green.
 set ::env(THYLACINE_ACCEL) hvf
 source [file join [file dirname [info script]] lib.exp]
 set repo $lc_repo
@@ -29,13 +36,40 @@ proc gfx_dump_or_fail {out} { global repo qmp; if {[catch {exec $repo/tools/scre
 proc gfx_fp {png} { global repo; return [exec python3 $repo/tools/interactive/gfx_fp.py $png] }
 proc qkey {qcode} { global repo qmp; catch {exec $repo/tools/qmp-send-key.sh -s $qmp $qcode} }
 
+# Host-side skip: the staged tree is the one the pool bakes (build_tombraider_fixture).
+if {![file exists "$repo/build/tombraider/stage/TOMB.EXE"]} {
+    puts "LS-CI SKIP: no Tomb Raider staged at build/tombraider/stage -- the demo is not\
+          baked into this pool (THYLACINE_BAKE_TOMBRAIDER=0 or dosbox opted out)"
+    exit 77
+}
+
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
 # /tombraider is a read-only SYSTEM master; copy to a writable home (the quake shape).
 lc_send "cp -r /tombraider /home/michael/tombraider"
 after 10000
-lc_send "dosbox-x -set \"cpu core=dynamic_rec\" -set \"cpu cycles=fixed 60000\" -set \"voodoo voodoo_card=software\" -c \"mount c /home/michael/tombraider\" -c \"c:\" -c \"TOMB.EXE\" &"
+# DX-8: the per-game config launch. /tombraider ships dosbox-x.conf (autolock +
+# dynrec + fixed cycles + voodoo_card=software + an [autoexec] that mounts . and
+# runs TOMB.EXE); the cwd search finds it, so `cd ~/tombraider; dosbox-x` is the
+# whole launch, under the system base layer (/lib/dosbox-x/dosbox-x.conf).
+lc_send "cd /home/michael/tombraider"
+after 800
+lc_send "dosbox-x &"
+
+# WITNESS 0: both config layers loaded from files (order-agnostic).
+set timeout 30
+set seen_sys 0
+set seen_game 0
+expect {
+    -re {CONFIG: Loaded system config: /lib/dosbox-x/dosbox-x\.conf} { set seen_sys 1; if {!$seen_game} exp_continue }
+    -re {CONFIG: Loaded config file: [^\r\n]*dosbox-x\.conf[\r\n]}   { set seen_game 1; if {!$seen_sys} exp_continue }
+    -re {E_Exit|Can't init SDL}        { lc_fail "dosbox-x E_Exit during startup" }
+    "snare:"                           { lc_fail "dosbox-x faulted (snare) during startup" }
+    -re {EXTINCTION:}                  { lc_extinction_fail "kernel extinction during TR startup" }
+    timeout                            { lc_fail "DX-8 config witnesses missing within 30s (system=$seen_sys per-game=$seen_game)" }
+}
+lc_step "DX-8: system base layer + the per-game dosbox-x.conf both loaded -- a bare 'dosbox-x' launch (voodoo from the file)"
 
 # WITNESS 1: the dynrec cache was minted through CAP_JIT.
 set timeout 45
@@ -81,7 +115,7 @@ if {$c2 < 8} { lc_fail "frame went BLACK after input ($c2 buckets) -- the game s
 lc_step "input: ENTER changed the frame ($c1 -> $c2 buckets, hash $h1 -> $h2, still rendering) -- keyboard reached the dynrec-executed game"
 
 lc_quit
-lc_pass "ls-gfx-dosbox-tombraider: DX-7 showcase verified -- Tomb Raider 3dfx runs\
-         under core=dynamic (CAP_JIT dynrec) on the SOFTWARE-emulated Voodoo (Glide),\
-         renders, and takes input"
+lc_pass "ls-gfx-dosbox-tombraider: DX-7 + DX-8 verified -- Tomb Raider 3dfx runs\
+         under core=dynamic (CAP_JIT dynrec) on the SOFTWARE-emulated Voodoo (Glide)\
+         from its per-game config on the system defaults, renders, and takes input"
 exit 0

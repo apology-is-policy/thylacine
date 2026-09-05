@@ -85,6 +85,18 @@ bc_def bake CHUNK_GITWF bool n "env:THYLACINE_BAKE_GITWF" \
 bc_def bake CHUNK_QUAKE bool n "want:THYLACINE_WANT_QUAKE" \
   "Quake (tyrquake, /quake)" \
   "Bakes the tyrquake port + the shareware pak (fetched from the network). A demo/fun chunk; the build runs the tyrquake stage when this is on."
+bc_def bake CHUNK_DOSBOX bool y "env:THYLACINE_BAKE_DOSBOX" \
+  "DOSBox-X (x86 PC emulator, /bin/dosbox-x)" \
+  "Bakes the DOSBox-X port (~17.6 MB static): DOS programs and games via the CAP_JIT dynarec (I-42), incl. software 3dfx/Glide. Vendored in-repo (third_party/dosbox-x) -- nothing to forage; an absent LLVM C++ fork skips it gracefully. Also bakes the system default config at /lib/dosbox-x/dosbox-x.conf (autolock + dynrec + the DOSBOX_CPU_PRESET cycle count). Off -> the two games below are lowered too."
+bc_def bake CHUNK_DUKE3D bool y "env:THYLACINE_BAKE_DUKE3D" \
+  "Duke Nukem 3D shareware (/duke3d)" \
+  "Fetches Apogee's v1.3d shareware (3dduke13.zip from archive.org, sha256-pinned) at build time and bakes the complete released file set + a ready-to-play per-game config to /duke3d (~12 MB). Needs CHUNK_DOSBOX (lowered to n without it). Play: cp -r /duke3d ~/duke3d; cd ~/duke3d; dosbox-x."
+bc_def bake CHUNK_TOMBRAIDER bool y "env:THYLACINE_BAKE_TOMBRAIDER" \
+  "Tomb Raider 3dfx demo (/tombraider)" \
+  "Fetches the 1996 Tomb Raider 3dfx DOS demo (tomb3dem.zip from archive.org, sha256-pinned) at build time and bakes it + a per-game config to /tombraider (~5 MB) -- the software Voodoo/Glide showcase. Needs CHUNK_DOSBOX (lowered to n without it). Play: cp -r /tombraider ~/tombraider; cd ~/tombraider; dosbox-x."
+bc_def bake DOSBOX_CPU_PRESET "choice:xt,286,386,486,pentium,pentium2" pentium "env:THYLACINE_DOSBOX_CPU_PRESET" \
+  "DOSBox-X default CPU speed preset" \
+  "The emulated CPU class the baked system config (/lib/dosbox-x/dosbox-x.conf) pins as the default fixed cycle count: xt=500, 286=3000, 386=12000, 486=45000, pentium=60000, pentium2=200000 cycles/ms. A plain 'dosbox-x' launch runs at this speed; the shipped games carry their own per-game config (Pentium class); any launch overrides with -set \"cpu cycles=fixed N\". pentium suits most 1994-97 titles. Ignored when CHUNK_DOSBOX=n."
 bc_def bake CHUNK_AURORA_CFG bool n "env:THYLACINE_AURORA_CFG4" \
   "Aurora config-4 payload" \
   "An opt-in Aurora renderer config-4 payload."
@@ -180,14 +192,29 @@ BC_DIR_CONFIGS="${BC_DIR_CONFIGS:-configs}"
 bc_apply_preset()   { bc_load_file "$BC_DIR_CONFIGS/$1.config"; }
 bc_apply_fragment() { bc_load_file "$BC_DIR_CONFIGS/fragments/$1.config"; }
 
-# bc_resolve -> enforce the implies-constraints, then a final validate. MVP has one
-# constraint (BOOT_PROBES implies DEV_ACCOUNTS): the boot-test ladder authenticates
-# the dev accounts, so it cannot run without them. Auto-raise + warn (never silently
-# produce an image whose CI probes would deadlock on a missing login).
+# bc_resolve -> enforce the constraints, then a final validate. Two kinds:
+#   implies  (BOOT_PROBES implies DEV_ACCOUNTS): the boot-test ladder authenticates
+#            the dev accounts, so it cannot run without them. Auto-RAISE + warn
+#            (never silently produce an image whose CI probes would deadlock on a
+#            missing login).
+#   needs    (CHUNK_DUKE3D / CHUNK_TOMBRAIDER need CHUNK_DOSBOX): game data is
+#            useless without the emulator that runs it. Auto-LOWER the game + warn
+#            -- the games default ON, so raising the emulator back would silently
+#            undo an explicit CHUNK_DOSBOX=n (a 17.6 MB opt-out); lowering the
+#            dependents keeps the user's decision and drops only what it implies.
 bc_resolve() {
     if [[ "$(bc_get BOOT_PROBES)" == y && "$(bc_get DEV_ACCOUNTS)" == n ]]; then
         echo "build-config: BOOT_PROBES=y requires DEV_ACCOUNTS -- raising DEV_ACCOUNTS=y" >&2
         bc__set_raw DEV_ACCOUNTS y
+    fi
+    local g
+    if [[ "$(bc_get CHUNK_DOSBOX)" == n ]]; then
+        for g in CHUNK_DUKE3D CHUNK_TOMBRAIDER; do
+            if [[ "$(bc_get "$g")" == y ]]; then
+                echo "build-config: $g=y needs CHUNK_DOSBOX (the emulator that runs it) -- lowering $g=n" >&2
+                bc__set_raw "$g" n
+            fi
+        done
     fi
     local i n v
     for i in "${!BC_NAME[@]}"; do

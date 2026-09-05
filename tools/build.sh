@@ -319,6 +319,15 @@ build_kernel() {
     # THYLACINE_BAKE_DUKE3D=0 opts out of just the game (keeps the emulator) for
     # a fast/offline iteration loop.
     [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" ]] && build_duke3d_fixture
+    # DX-8 (Cryptid): fetch + stage the Tomb Raider 3dfx demo the same way
+    # (-> /tombraider; the DX-7 software-Voodoo showcase). Same gating shape:
+    # useless without the emulator; THYLACINE_BAKE_TOMBRAIDER=0 opts out of
+    # just the game.
+    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_TOMBRAIDER:-1}" == "1" ]] && build_tombraider_fixture
+    # DX-8: render the DOSBox-X system default config (-> /lib/dosbox-x) from
+    # the build config's CPU preset (THYLACINE_DOSBOX_CPU_PRESET). It rides the
+    # emulator's opt-in: no emulator, no config to default.
+    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" ]] && stage_dosbox_sysconf
     # Warp W-4: cross-build vkQuake over venus + the W-3e SDL Vulkan glue.
     # Self-skips (announced) without the fetched venus link set.
     build_vkquake
@@ -3526,8 +3535,10 @@ populate_stratum_pool() {
     fi
 
     # --- DX-5: the Duke Nukem 3D shareware data (-> /duke3d). Staged by
-    # build_duke3d_fixture; skipped gracefully when the stage is absent
-    # (THYLACINE_BAKE_DUKE3D=0 or the dosbox emulator opted out). This is the
+    # build_duke3d_fixture; skipped when the stage is absent OR the game/the
+    # emulator is opted out (THYLACINE_BAKE_DUKE3D=0 / THYLACINE_BAKE_DOSBOX=0
+    # -- a stale stage from an earlier build must not bake past an opt-out;
+    # the bake-verify below keys on the same predicate). This is the
     # READ-ONLY MASTER (SYSTEM-owned; the natural staged modes -- 0644 files,
     # 0755 dir -- ride through the put). DOSBox-X opens the group file
     # READ-WRITE, and a non-owner cannot open a SYSTEM-owned file read-write
@@ -3537,7 +3548,7 @@ populate_stratum_pool() {
     # home and runs from there: the same "install to a writable dir" step a real
     # DOS game needs, and the quake precedent's per-user game-dir shape. ---
     local duke3d_stage="$BUILD_DIR/duke3d/stage"
-    if [[ -f "$duke3d_stage/DUKE3D.GRP" ]]; then
+    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" && -f "$duke3d_stage/DUKE3D.GRP" ]]; then
         echo "==> populate pool: baking Duke3D shareware data ($duke3d_stage -> /duke3d, $(du -sh "$duke3d_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$duke3d_stage" /duke3d \
             || { echo "==> populate pool: put /duke3d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -3546,13 +3557,15 @@ populate_stratum_pool() {
         echo "==> populate pool: Duke3D shareware baked at /duke3d"
     fi
 
-    # --- DX-7 (Cryptid): the Tomb Raider 3dfx DOS demo (-> /tombraider). Staged
-    # by copying build/tombraider/stage; baked iff TOMB.EXE is present. The 3dfx
+    # --- DX-7/DX-8 (Cryptid): the Tomb Raider 3dfx DOS demo (-> /tombraider).
+    # Staged by build_tombraider_fixture (the archive.org fetch, sha256-pinned);
+    # baked iff TOMB.EXE is staged AND neither the game nor the emulator is
+    # opted out (THYLACINE_BAKE_TOMBRAIDER / THYLACINE_BAKE_DOSBOX). The 3dfx
     # build (TOMB.EXE + DOS4GW) drives Glide -> DOSBox-X's built-in GLIDE2X.OVL ->
     # the software-emulated Voodoo (voodoo_card=software; C_OPENGL off). Read-only
     # SYSTEM master; the gate copies it to a writable home (the quake shape).
     local tombraider_stage="$BUILD_DIR/tombraider/stage"
-    if [[ -f "$tombraider_stage/TOMB.EXE" ]]; then
+    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_TOMBRAIDER:-1}" == "1" && -f "$tombraider_stage/TOMB.EXE" ]]; then
         echo "==> populate pool: baking Tomb Raider 3dfx demo ($tombraider_stage -> /tombraider, $(du -sh "$tombraider_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$tombraider_stage" /tombraider \
             || { echo "==> populate pool: put /tombraider FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -3711,6 +3724,25 @@ populate_stratum_pool() {
     fi
     [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
 
+    # DX-8 (Cryptid): the DOSBox-X system default config -> /lib/dosbox-x/
+    # dosbox-x.conf, the base layer the 0008 patch parses under every launch
+    # (rendered by stage_dosbox_sysconf from DOSBOX_CPU_PRESET). /lib exists
+    # from the ndb bake above; mkdir is single-level. Rides the emulator's
+    # opt-in AND the rendered file, so a stale render from an earlier build
+    # never bakes past an opted-out emulator.
+    local dbxconf_stage="$BUILD_DIR/dosbox-x-sysconf/dosbox-x.conf"
+    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && -f "$dbxconf_stage" ]]; then
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/dosbox-x \
+            || { echo "==> populate pool: mkdir /lib/dosbox-x FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" write /lib/dosbox-x/dosbox-x.conf < "$dbxconf_stage" \
+            || { echo "==> populate pool: write /lib/dosbox-x/dosbox-x.conf FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (dosbox-x sysconf) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" read /lib/dosbox-x/dosbox-x.conf | cmp -s - "$dbxconf_stage" \
+            || { echo "==> populate pool: /lib/dosbox-x/dosbox-x.conf readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: /lib/dosbox-x/dosbox-x.conf baked + readback-verified (DX-8 system defaults, preset ${THYLACINE_DOSBOX_CPU_PRESET:-pentium})"
+    fi
+
     # H-3c: bake the presentation verb table at /lib/beacon/verbs (BEACON.md
     # 7; the system tier of the plumber-style rules halcyond's obj menu
     # offers). /lib exists from the ndb bake above. Under the HALCYON lever
@@ -3829,6 +3861,7 @@ populate_stratum_pool() {
     local vp_quake="$BUILD_DIR/quake/stage"
     local vp_duke3d="$BUILD_DIR/duke3d/stage"
     local vp_tombraider="$BUILD_DIR/tombraider/stage"
+    local vp_dbxconf="$BUILD_DIR/dosbox-x-sysconf/dosbox-x.conf"
 
     # /thylacine-version is written unconditionally near the top of this
     # function, so it is the POSITIVE CONTROL: it proves `stat` can see a file
@@ -3863,13 +3896,19 @@ STORM /storm/Makefile"
         bake_want="$bake_want
 QUAKE /quake/id1/pak0.pak"
     fi
-    if [[ -f "$vp_duke3d/DUKE3D.GRP" ]]; then
+    # The DOSBox chunks key on the SAME predicates their populate arms use
+    # (flags AND stage), so an opted-out game is neither baked nor expected.
+    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" && -f "$vp_duke3d/DUKE3D.GRP" ]]; then
         bake_want="$bake_want
 DUKE3D /duke3d/DUKE3D.GRP"
     fi
-    if [[ -f "$vp_tombraider/TOMB.EXE" ]]; then
+    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_TOMBRAIDER:-1}" == "1" && -f "$vp_tombraider/TOMB.EXE" ]]; then
         bake_want="$bake_want
 TOMBRAIDER /tombraider/TOMB.EXE"
+    fi
+    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && -f "$vp_dbxconf" ]]; then
+        bake_want="$bake_want
+DBXCONF /lib/dosbox-x/dosbox-x.conf"
     fi
 
     local bake_missing=""
@@ -4754,6 +4793,144 @@ build_duke3d_fixture() {
     mkdir -p "$stage"
     cp "$REPO_ROOT/usr/ports/dosbox-x/duke3d/DUKE3D.CFG" "$stage/DUKE3D.CFG" \
         || { echo "==> duke3d: DUKE3D.CFG stage failed" >&2; exit 1; }
+    # DX-8: the per-game DOSBox-X config (autolock + dynrec + fixed cycles +
+    # an [autoexec] that mounts . and runs DUKE3D.EXE), so `cd ~/duke3d;
+    # dosbox-x` is the whole launch. Ours, not 3D Realms' (condition [C] is
+    # about THEIR released files); copied unconditionally like the CFG.
+    cp "$REPO_ROOT/usr/ports/dosbox-x/duke3d/dosbox-x.conf" "$stage/dosbox-x.conf" \
+        || { echo "==> duke3d: dosbox-x.conf stage failed" >&2; exit 1; }
+}
+
+build_tombraider_fixture() {
+    # DX-8 (Cryptid): the Tomb Raider (1996) 3dfx DOS demo -> /tombraider. The
+    # DX-7 showcase: TOMB.EXE (the DOS4GW 3dfx build) drives Glide into
+    # DOSBox-X's built-in GLIDE2X.OVL -> the software Voodoo, on the CAP_JIT
+    # dynrec. DATA only -- no compile (the Duke3D shape).
+    #
+    # tomb3dem.zip is the archive.org item `tomb3dem` (2,310,970 B, sha256-
+    # pinned), fetched ONCE into build/tombraider/ and NEVER committed. The zip
+    # carries a single tomb3dem/ directory holding the released demo file set
+    # (TOMB.EXE, SETUP.EXE, DOS4GW.EXE, the two HMI sound drivers, SETTINGS.DAT,
+    # DATA/{TITLE,LEVEL2}.PHD + two PCX) -- all ten files are staged as-is and
+    # TOMB.EXE is sha256-verified as the fixture's identity. The demo is the
+    # freely distributed 1996/97 promotional demo (Core Design / Eidos; the 3dfx
+    # site + cover discs); commercial/product redistribution of a shipped image
+    # is the same v1.0-packaging decision the Duke3D/Quake shareware carries.
+    local tr_dir="$BUILD_DIR/tombraider"
+    local stage="$tr_dir/stage"
+    local zip="$tr_dir/tomb3dem.zip"
+    local zip_sha="4ffd686c7cc21513abd5bc352057314ed6bcf5519acd532987807d29a8cdfd72"
+    local exe_sha="6a333d2da2a099f88ad04f78707d0fd0392caad07b7502c81f93b622ab02d53d"
+
+    # Cache-guarded on the TOMB.EXE sha (a truncated/wrong stage re-fetches
+    # rather than baking corrupt game data); the per-game config copy at the
+    # end always runs, so a config change never busts the fetch.
+    local need_extract=1
+    if [[ -f "$stage/TOMB.EXE" ]]; then
+        local have_sha
+        have_sha="$(shasum -a 256 "$stage/TOMB.EXE" | awk '{print $1}')"
+        if [[ "$have_sha" == "$exe_sha" ]]; then
+            need_extract=0
+        else
+            echo "==> tombraider: cached TOMB.EXE sha mismatch ($have_sha); re-staging" >&2
+            rm -rf "$stage"
+        fi
+    fi
+
+    if [[ "$need_extract" == "1" ]]; then
+        mkdir -p "$tr_dir"
+        if [[ ! -f "$zip" ]]; then
+            echo "==> tombraider: fetching tomb3dem.zip (the 1996 3dfx demo, ~2.3 MB)"
+            curl -sL --max-time 300 -o "$zip" \
+                "https://archive.org/download/tomb3dem/tomb3dem.zip" \
+                || { echo "==> tombraider: demo fetch failed" >&2; exit 1; }
+        fi
+        local got_sha
+        got_sha="$(shasum -a 256 "$zip" | awk '{print $1}')"
+        if [[ "$got_sha" != "$zip_sha" ]]; then
+            echo "==> tombraider: tomb3dem.zip sha256 mismatch ($got_sha)" >&2
+            exit 1
+        fi
+
+        rm -rf "$tr_dir/unzip" "$stage"
+        mkdir -p "$tr_dir/unzip"
+        unzip -o -q "$zip" -d "$tr_dir/unzip" \
+            || { echo "==> tombraider: unzip failed" >&2; exit 1; }
+        # The zip's single top-level directory IS the released file set.
+        [[ -f "$tr_dir/unzip/tomb3dem/TOMB.EXE" ]] \
+            || { echo "==> tombraider: tomb3dem/TOMB.EXE not in the zip (layout changed?)" >&2; exit 1; }
+        mv "$tr_dir/unzip/tomb3dem" "$stage"
+        rm -rf "$tr_dir/unzip"
+
+        local exe_got
+        exe_got="$(shasum -a 256 "$stage/TOMB.EXE" | awk '{print $1}')"
+        if [[ "$exe_got" != "$exe_sha" ]]; then
+            echo "==> tombraider: TOMB.EXE sha256 mismatch ($exe_got) -- not the 3dfx demo build" >&2
+            exit 1
+        fi
+        echo "    tombraider 3dfx demo staged ($(du -sh "$stage" | cut -f1), TOMB.EXE $(wc -c < "$stage/TOMB.EXE" | tr -d ' ') bytes)"
+    fi
+
+    # The per-game DOSBox-X config (autolock + dynrec + fixed cycles + the
+    # software Voodoo + an [autoexec] that mounts . and runs TOMB.EXE), so
+    # `cd ~/tombraider; dosbox-x` is the whole launch. Ours, not Eidos's: it
+    # rides the repo, copied unconditionally (idempotent).
+    mkdir -p "$stage"
+    cp "$REPO_ROOT/usr/ports/dosbox-x/tombraider/dosbox-x.conf" "$stage/dosbox-x.conf" \
+        || { echo "==> tombraider: dosbox-x.conf stage failed" >&2; exit 1; }
+}
+
+stage_dosbox_sysconf() {
+    # DX-8 (Cryptid): render the DOSBox-X SYSTEM default config the 0008 patch
+    # parses under every launch (/lib/dosbox-x/dosbox-x.conf; populate_stratum_pool
+    # bakes it). Three values, each one upstream's default gets wrong for us:
+    # autolock=true (mouse-look works out of the box; upstream is false),
+    # core=dynamic_rec (the CAP_JIT dynrec every showcase + gate runs; upstream's
+    # `auto` switches cores only on entering protected mode), and a FIXED cycle
+    # count from the build config's CPU preset (cycles=auto hunts -- DX-5), and quit warning=false (Ctrl+F9 quits at once:
+    # DOSBox-X's confirmation has no GUI dialog on this port -- it prompts "y/n"
+    # on the CONSOLE, unreachable behind a captured game window, and a
+    # backgrounded launch loops the prompt onto the console pane forever;
+    # measured in the DX-8 gate).
+    local preset="${THYLACINE_DOSBOX_CPU_PRESET:-pentium}"
+    local cycles
+    case "$preset" in
+        xt)       cycles=500 ;;      # ~4.77 MHz 8088
+        286)      cycles=3000 ;;     # ~12 MHz 286
+        386)      cycles=12000 ;;    # ~25-40 MHz 386
+        486)      cycles=45000 ;;    # ~66 MHz 486
+        pentium)  cycles=60000 ;;    # ~100-133 MHz Pentium (the showcases)
+        pentium2) cycles=200000 ;;   # ~233-450 MHz Pentium II
+        *) echo "==> dosbox-x: unknown THYLACINE_DOSBOX_CPU_PRESET '$preset' (xt|286|386|486|pentium|pentium2)" >&2; exit 1 ;;
+    esac
+    local out_dir="$BUILD_DIR/dosbox-x-sysconf"
+    mkdir -p "$out_dir"
+    cat > "$out_dir/dosbox-x.conf" <<DOSBOXSYSCONF
+# Thylacine system defaults for DOSBox-X -- the base layer under every launch.
+# Baked by tools/build.sh from the build config (DOSBOX_CPU_PRESET=$preset);
+# SYSTEM-owned, read-only. Override it per user in ~/.config/dosbox-x/ (your
+# first launch generates that file from these values), per game with a
+# dosbox-x.conf in the game directory, or per launch with -conf / -set.
+# Reference: docs/manual/40-dosbox.md.
+
+[sdl]
+# Click in the window to capture the mouse (motion then reaches the game);
+# Ctrl+F10 releases it.
+autolock=true
+
+[cpu]
+# The CAP_JIT dynarec (I-42). A fixed cycle count pins the emulated speed:
+# preset $preset = $cycles cycles per emulated millisecond.
+core=dynamic_rec
+cycles=fixed $cycles
+
+[dosbox]
+# Ctrl+F9 quits at once (upstream DOSBox behaviour). DOSBox-X's confirmation
+# has no dialog here: it asks "y/n" on the CONSOLE, which sits behind a
+# captured game window, and a backgrounded launch re-asks it forever.
+quit warning=false
+DOSBOXSYSCONF
+    ledger "dosbox-x: system config rendered (preset $preset -> cycles=fixed $cycles)"
 }
 
 build_zlib() {
