@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-proc brought current: rfork_forked_with_caps (the Linux clone), the PHENO_LINUX note-mask inherit, Design D's phenotype commit"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["63f91796"]
 touched:
   - sub-kernel-proc
 established: []
