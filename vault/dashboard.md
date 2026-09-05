@@ -129,6 +129,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-05 [[chg-2026-09-05-crate-extraction-sweep]] — The crate extractions -- the refactor the 2026-08-04 sweep named finally landed
 - 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
 - 2026-09-05 [[chg-2026-09-05-r6-grandfather]] — R6 grandfathers committed history: a grown mirror set stops failing past chgs
 - 2026-09-02 [[chg-2026-09-02-h4b1-claim]] — H-4b-1: the one-shot placement claim (pane/<id>/claim + create claim=) lands in tapestryd
@@ -136,5 +137,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-02 [[chg-2026-09-02-h4b3a-autoclaim]] — H-4b-3a: libtapestry auto-consumes an inherited TAPESTRY_CLAIM on open
 - 2026-09-02 [[chg-2026-09-02-h4b3b-restore]] — H-4b-3b: the restore tool + PFK_OWNER + the H-4b arc audit close
 - 2026-08-24 [[chg-2026-08-24-v3b-1a]] — V-3b-1a HOST3D+MAP_BLOB substrate: sub-tapestryd mechanism section + the venus-ctx finding
-- 2026-08-24 [[chg-2026-08-24-v3b-1b]] — V-3b-1b hostmem guest-map: sub-tapestryd guest-map section + the SYS_BURROW_FROM_HOSTMEM client wrapper
 <!-- generated:end -->

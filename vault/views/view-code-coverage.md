@@ -65,24 +65,24 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**366 owned · 114 unowned · 480 files (76% owned) · ~37436 unswept lines.**
+**376 owned · 104 unowned · 480 files (78% owned) · ~33185 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **65 files, ~29905 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/halcyond | 0 | 17 | 8747 |
-| usr/lib | 40 | 17 | 7406 |
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/ports | 0 | 18 | 4033 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
+| usr/lib | 48 | 9 | 3248 |
 | usr/kaua-term | 0 | 3 | 1518 |
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1028 |
 | arch | 34 | 4 | 971 |
 | usr/stratumd-stub | 0 | 1 | 453 |
-| usr/coreutils | 57 | 3 | 390 |
+| usr/coreutils | 59 | 1 | 297 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
@@ -121,7 +121,6 @@ Excluded as harness and counted here rather than dropped: **65 files, ~29905 lin
 | file | lines |
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
-| usr/lib/vt/src/lib.rs | 2373 |
 | usr/halcyond/src/transcript.rs | 1849 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/halcyond/src/main.rs | 1238 |
@@ -133,11 +132,9 @@ Excluded as harness and counted here rather than dropped: **65 files, ~29905 lin
 | usr/kaua-term/src/lib.rs | 700 |
 | arch/arm64/uart.c | 674 |
 | usr/halcyond/src/session.rs | 648 |
-| usr/lib/beacon/src/wire.rs | 638 |
 | usr/lib/cartoon/src/lib.rs | 616 |
 | usr/kaua-term/src/wire.rs | 518 |
 | usr/lib/libhalcyon/src/skeleton.rs | 492 |
-| usr/lib/beacon/src/sink.rs | 486 |
 | kernel/joey.c | 478 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/halcyond/src/tile.rs | 450 |
@@ -175,13 +172,10 @@ Excluded as harness and counted here rather than dropped: **65 files, ~29905 lin
 | kernel/include/thylacine/devcap.h | 208 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
-| usr/lib/beacon/src/verbs.rs | 198 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/ports/sdl2/SDL_config.h | 186 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
-| usr/lib/beacon/src/lib.rs | 168 |
 | usr/ports/gnumake/generated/glob.h | 163 |
-| usr/lib/beacon/src/boxd.rs | 162 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
 | arch/arm64/uart.h | 151 |
@@ -200,7 +194,6 @@ Excluded as harness and counted here rather than dropped: **65 files, ~29905 lin
 | usr/ports/sdl2/thylacine-nogl/SDL_thylacineopengl_nogl.c | 118 |
 | kernel/canary.c | 111 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
-| usr/lib/beacon/src/color.rs | 92 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
@@ -218,16 +211,13 @@ Excluded as harness and counted here rather than dropped: **65 files, ~29905 lin
 | kernel/include/thylacine/cpio.h | 61 |
 | kernel/include/thylacine/joey.h | 59 |
 | kernel/include/thylacine/extinction.h | 58 |
-| usr/coreutils/src/path.rs | 58 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.h | 52 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | kernel/include/thylacine/canary.h | 50 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
-| usr/lib/beacon/src/palette.rs | 41 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
-| usr/coreutils/src/beacon_gate.rs | 35 |
 | usr/halcyond/src/lib.rs | 33 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
