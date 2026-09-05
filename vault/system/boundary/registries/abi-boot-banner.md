@@ -48,7 +48,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-08-18
+updated: 2026-09-05
 ---
 ## The surface
 
@@ -89,11 +89,54 @@ fault-injection variant reports the protection did not fire.
 ## Why it is frozen
 
 It is the whole agentic loop's success signal, and the mirror set above is
-what that means concretely: **fourteen tools match one or both literals**, plus
-`stall-watch.py` on `kernel base:`. Two more mention them in comments only
-(`tools/warp-host.sh`, `tools/interactive/go8d.exp`) — they become wrong
-rather than broken, so they are not mirrors. 14 + 2 = the 16 files under
-`tools/` that carry either string.
+what that means concretely. Since the 2026-09 resync grew the set to
+**twenty-eight** (it added thirteen consumer gates — see "The resync grew the
+set to twenty-eight" below): **twenty-seven mirrors match one or both of
+`Thylacine boot OK` / `EXTINCTION:`** — one of those twenty-seven,
+`real-pass-harness.log`, is a captured-log fixture, data not a program — plus
+`stall-watch.py` on `kernel base:`. Two more mention the literals in comments
+only (`tools/warp-host.sh`, `tools/interactive/go8d.exp`) — they become wrong
+rather than broken, so they are not mirrors. 28 mirrors + 2 mentions = the 30
+files under `tools/` that carry a literal.
+
+**Reading the counts below.** The dated measurements further down (the 2026-08-18
+main#245 census, the delivery classification) describe the **fifteen-member set
+as it then stood**; they are kept as the historical record. The current totals
+are the twenty-eight above, the delivery table is updated to twenty-eight, and
+the resync's thirteen gates are classified in their own subsection.
+
+### The resync grew the set to twenty-eight (2026-09)
+
+The 2026-09 vault resync added thirteen consumer gates to `mirrors` — the
+`.exp`/`.sh` gates that `expect` or watch a literal and break if it changes,
+which had accumulated on `main` while the vault branch was behind. All thirteen
+match a literal (verified by grep); by which:
+
+- **`Thylacine boot OK`** (5): `check-arc-gates.sh`, `verify-console-mode.exp`,
+  `verify-gpu-headless-1b.exp`, `test-smp-classify.sh`, `real-pass-harness.log`.
+- **`EXTINCTION:`** (10): `verify-gpu-headless-1b.exp`, `item10-ctrlc.exp`,
+  `ls-gfx-age.exp`, `ls-gfx-restore.exp`, `ls-gfx-session.exp`, `ls-halcyon.exp`,
+  `pty-susp-pouch.exp`, `r5f9-ash.exp`, `test-smp-classify.sh`,
+  `composed-screen.exp`.
+- **`kernel base:`** — none; `stall-watch.py` remains the sole matcher.
+
+By the four-class taxonomy above (program / document / inert / phantom), eleven
+are **programs that deliver**: the ten interactive/display/warp `.exp` gates
+boot a real guest through `lib.exp`, so a reworded literal fails to match real
+boot output and is caught, and `check-arc-gates.sh` reads real boot output for
+its verdict. **Two do not deliver**: `test-smp-classify.sh` is the classifier's
+own unit test — explicitly "no boots", over fixtures — and
+`real-pass-harness.log` is one of those fixtures (data). For those two the
+literal is self-consistent within a crafted input; unlike the 2026-08-18
+`test-fault.sh`/`verify-kaslr.sh` finding, these two are no-delivery **by
+design** (a classifier unit test must not boot), so their obligation is
+co-update only, never detection.
+
+This grew the delivery table's `Thylacine boot OK` matchers 8 -> 13 and
+`EXTINCTION:` 14 -> 24. The growth is recorded by
+[[chg-2026-09-05-boot-banner-mirror-recount]], which carries `mirrors-checked`
+for all twenty-eight — the R6 grandfather fix ([[chg-2026-09-05-r6-grandfather]])
+is what lets a mirror-growing chg carry the full current set cleanly.
 
 ### The co-update list has never described that population
 
@@ -120,7 +163,9 @@ rather than broken, so they are not mirrors. 14 + 2 = the 16 files under
   do not share one.
 
 So the corrected four-file list still names one file that cannot break and
-misses fourteen that can. That is [[seam-boot-banner-coupdate-list]].
+misses twenty-seven that can (the boot-OK/EXTINCTION matchers; fourteen when
+this was written, twenty-seven since the resync). That is
+[[seam-boot-banner-coupdate-list]].
 
 ### A fourth class the taxonomy above does not have: the mirror nothing runs
 
@@ -278,17 +323,19 @@ what the guarantee is worth:
 ### The protected string has the narrower readership
 
 Forced to enumerate by the mirror rule, and the answer inverts the fix's value.
-Classifying all fifteen mirrors by which literal each actually matches:
+Classifying all twenty-eight mirrors by which literal each actually matches
+(a mirror matching two literals is counted in both rows):
 
 | Literal | Delivery | Mirrors matching |
 |---|---|---|
-| `Thylacine boot OK` | **serialized** (writer role) | 8 |
-| `EXTINCTION:` | **unserialized** — lock-free, no role | **14** |
+| `Thylacine boot OK` | **serialized** (writer role) | 13 |
+| `EXTINCTION:` | **unserialized** — lock-free, no role | **24** |
 | `kernel base:` | unserialized | 1 |
 
-**Every consumer of this ABI except one matches the string with no delivery
-guarantee**, and the string that got the guarantee is matched by roughly half of
-them. The crash path emits through the same lock-free byte-at-a-time put the
+**Almost every consumer of this ABI matches an unserialized string** — 24 of
+the 28 match `EXTINCTION:` and one matches `kernel base:`, both emitted without
+the writer role — while the one string that got a delivery guarantee, the
+banner, is matched by under half of them. The crash path emits through the same lock-free byte-at-a-time put the
 banner used, does **not** stop peer processors first, and its pre-emit flush is
 a bounded try-lock that *skips* when a peer holds the ring — so a peer mid-write
 is precisely the case it declines to handle.
@@ -328,13 +375,20 @@ That is the implementation track's call.
 
 - Any change to either string is an ABI break requiring the **full `mirrors`
   set** to move in the same commit — not the four-file list the scripture
-  states, which names one file that cannot break and omits fourteen that can.
+  states, which names one file that cannot break and omits the twenty-seven
+  boot-OK/EXTINCTION matchers that can.
 - A change to the `kernel base:` line is an ABI break too, notwithstanding
   that this note called it informational for two weeks. `verify-kaslr.sh` is
   I-16's runtime witness.
 - A reworded extinction **message** is an ABI break for `test-fault.sh`'s
   seven matched variants, which is not what "the prefix is the ABI" leads a
   reader to expect.
+- **Owed** (deferred at the 2026-09 recount): whether the `el1_sync_runaway`
+  extinction-message body joins the pinned message-body set (as `test-fault.sh`'s
+  seven are) is an OPEN question tied to [[seam-extinction-line-unserialized]]
+  and #246. Its original context (yip 0026) is purged; deciding it needs the
+  #246 el1_sync_runaway test's ground truth, so it is left open rather than
+  guessed.
 - Any new path that can print `Thylacine boot OK` outside
   `boot_mark_complete` breaks the one-shot console-attached gate, which is
   the only thing preventing a forged PASS.

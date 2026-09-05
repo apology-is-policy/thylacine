@@ -17,22 +17,25 @@ hazards: []
 abis: []
 design: ["docs/AURORA.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-05
 ---
 ## Purpose
 
 The console on a screen. Everything else in this area paints *into* a
 terminal; aurora paints the terminal itself — it reads the byte stream
-every program writes to the console, interprets it into a cell grid, sets
-that grid in the system face, and presents it as pixels through the
-compositor.
+every program writes to the console, feeds it to the shared VT interpreter
+([[sub-lib-vt]]) to get a cell grid, sets that grid in the system face, and
+presents it as pixels through the compositor.
 
 So it sits at the far end of the same stack: [[sub-kaua]] emits escape
 sequences, [[sub-utopia-interactive]] emits a prompt, and aurora is what
 turns either into something a person can see. It is an ordinary
 [[sub-libtapestry]] client — the same protocol any graphical program
 speaks — with two extra file descriptors that make it the console's
-renderer.
+renderer. The byte-to-grid interpretation was extracted to [[sub-lib-vt]]
+at H-2a (halcyond shares it); aurora is now that crate's host on the
+console path, owning the pixel side — the atlas blit, the damage-to-present
+rectangle — and the two-descriptor console role.
 
 ## Contract
 
@@ -96,32 +99,25 @@ transfer to input: dropping a prefix can leave a complete but *different*
 command where dropping a suffix leaves an incomplete one the shell
 rejects.
 
-**The interpreter is a plain byte machine over the tree's own emitters
-plus the classic core.** Unknown sequences are parsed and dropped rather
-than desyncing. Two behaviours are load-bearing rather than cosmetic:
-autowrap is honoured (ignoring it made every bottom-right cell paint
-scroll the whole screen, once per status repaint), and the cursor-position
-report is *answered* — the reply rides the same input queue as keystrokes,
-so it cannot overtake typing, and without it every full-screen application
-falls back to an 80x24 guess inside the real grid.
-
-**The in-band settings channel is allowlisted twice.** A session can push
-cosmetic settings through an escape sequence, and the parser rejects any
-control byte in the key or value — because the configuration parser
-re-splits values on lines, so an embedded newline once laundered a second
-statement past a single-token allowlist and reached the compositor tier,
-which a later overlay save would have persisted.
+**The interpretation is [[sub-lib-vt]]'s, and aurora is its host on the
+console path.** The byte machine — the VT100 core, the parse-and-drop of
+unknown sequences, honoured autowrap, the answered cursor-position report,
+the twice-allowlisted `OSC 7770` settings channel — was extracted to the
+shared crate at H-2a and is documented there. Aurora's job around it is
+three-fold: feed it the drain bytes, write its `reply` queue into the feed
+fd (a terminal answering on the keyboard wire), and apply its
+`settings_req` lines. The aurora half of the settings threat model lives
+here: an OSC-applied setting is session-scoped and **never persisted**, so a
+later overlay save cannot make a console writer's cosmetic push permanent.
 
 ## Data structures
 
-`Vt` is the grid: two cell buffers (main and alternate), cursor state,
-saved cursor state including autowrap, the parser state machine, a live
-palette, a per-row damage flag vector, and two output queues — bytes the
-terminal must answer, and settings the session pushed.
-
-`Cell` bakes *resolved* colours at write time, which is what makes a theme
-switch a remap by exact old-to-new match rather than a re-interpretation.
-True colour passes through untouched by design.
+`Vt` and `Cell` — the two cell buffers, the cursor and saved-cursor state,
+the parser state machine, the live palette, the per-row damage vector, and
+the two output queues — are [[sub-lib-vt]]'s. Aurora holds one `Vt` per
+surface and reads its public fields to render; the resolved-colour baking
+that makes a theme switch an exact remap, and the truecolour pass-through,
+are that crate's.
 
 `Metrics` pairs the cell dimensions with the atlas they came from, so a
 font-size change swaps both together — a stale atlas beside new dimensions
@@ -213,7 +209,9 @@ did not reach.
   row indexes past a shrunk damage vector — an out-of-bounds panic, which
   under abort-on-panic is a dark console.
 - **The settings channel must never gain a persisting or authority-bearing
-  key.** Any console writer can emit it.
+  key, and an OSC-applied setting must never be persisted.** Any console
+  writer can emit it; [[sub-lib-vt]] rejects control bytes in the payload,
+  and aurora must not let a cosmetic push survive a restart.
 
 ## Seams
 
@@ -227,23 +225,22 @@ after closing; a tap does not.
 
 ## Caveats
 
-- **Eighteen tests cannot compile, and one module says they run** (task
-  #153). The crate is unconditionally no-standard-library, so `cargo test`
-  fails with nineteen "can't find crate for test" errors. Three of the
-  four modules say so correctly — two of them naming the fourth
-  explicitly — and [[sub-cornucopia]] names aurora as its counter-example.
-  The dissenter is the interpreter, with nine of the eighteen, over the
-  most exposed surface here: the byte machine that eats every byte any
-  program writes to the console. Two of its nine are named security
-  regressions that have never executed — the escape-laundering fix and the
-  out-of-bounds erase fix, both reachable from any console writer. The
-  refactor that would fix it is the one its siblings already name.
+- **The interpreter's tests now run — the refactor its siblings named
+  landed** (task #153, resolved at H-2a). The byte machine and its host
+  tests moved into [[sub-lib-vt]], a pure host-testable crate, so the nine
+  interpreter tests — including the two security regressions that had never
+  executed, the escape-laundering fix and the out-of-bounds erase fix —
+  are covered there (~46 tests in that crate). What could not compile was
+  the parser trapped inside aurora's unconditionally-no_std crate;
+  extracting it *was* the fix.
 
-- **The interpreter's proof is therefore the in-guest end-to-end battery**,
-  which is real (it drives keystrokes through the full path and asserts on
-  rendered output) but is a different kind of proof: it exercises the
-  paths a session takes, not the malformed-input paths the dormant tests
-  were written for.
+- **Aurora's own modules remain no_std and host-untestable**, so `cargo
+  test` on the aurora crate still cannot build. The render side — the atlas
+  blit, the damage-to-present rectangle, the loop — is proven by the
+  in-guest end-to-end battery, which drives keystrokes through the full path
+  and asserts on rendered output. That is a different kind of proof than a
+  unit test: it exercises the paths a session takes, not malformed-input
+  paths, which is now [[sub-lib-vt]]'s to cover.
 
 - **The window-size report at boot is silent by construction.** The
   transition from zero to a real grid is a change, so the kernel attempts
