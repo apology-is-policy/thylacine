@@ -4,7 +4,7 @@ type: chg
 title: "The Halcyon graphics libs -- the three crates the handoff did not name"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["69fbb98d"]
 touched:
   - sub-cartoon
   - sub-libhalcyon
