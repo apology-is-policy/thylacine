@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-08-24
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -37,11 +37,14 @@ renumbering and nothing else. Userspace issues `svc #0`; the immediate is
 ignored at v1.0 and reserved as a future class selector.
 
 Numbers are **append-only and never reused** — with one bounded exception, a
-pre-merge collision between two branches, argued under Mechanism. Four of the
-107 allocated slots are holes: three retired when `/srv` moved from dedicated
-syscalls to ordinary namespace operations, one reserved for an unbuilt
-device-class query. Each hole carries a comment naming what used to be there or
-what is coming. An unknown number returns `-1` rather than terminating the
+pre-merge collision between two branches, argued under Mechanism. Three of the
+110 slots below the span are holes: `SYS_POST_SERVICE` (26), `SYS_SRV_CONNECT`
+(30), and `SYS_POST_SERVICE_BYTE` (43), all retired when `/srv` moved from
+dedicated syscalls to ordinary namespace operations (stalk-3c). The
+device-class-query slot that the last sweep recorded as reserved-but-unbuilt is
+now filled: `SYS_FD_DEVCLASS` (80, H-1a) returns a Dev's class character, so
+is-a-terminal is exactly `dc == 'c'`. Each hole carries a comment naming what
+used to be there. An unknown number returns `-1` rather than terminating the
 caller.
 
 Return values follow two conventions and the split is per-syscall, not
@@ -56,10 +59,12 @@ failure", and the header says so, steering POSIX-EPERM contours to
 
 ### The number space is coherent, and that is verifiable
 
-**103** numbers are live; `syscall_dispatch`'s switch has exactly **103** arms;
+**107** numbers are live; `syscall_dispatch`'s switch has exactly **107** arms;
 the two sets are equal with **both** differences empty. Every mirrored number
 agrees across all three copies — there is no case where a name means one number
-to the kernel and another to a library.
+to the kernel and another to a library. (Re-measured this sweep against the enum
+and the dispatch body: each set difference is empty, and no name overlapping a
+mirror and the kernel disagrees on its value.)
 
 Compare the *sets*, not the counts. Two lists of equal length can disagree
 about their members, so a count match passes vacuously; the empty
@@ -68,31 +73,35 @@ difference in each direction is the claim worth making.
 That is worth stating precisely because it is *not* guaranteed by anything. It
 is the current state, maintained by hand.
 
-The allocated span runs to **106** with **four holes** — 26, 30, 43 and 80 —
-unchanged in count and identity since the last sweep, which is the append-only
-rule visibly holding.
+The allocated span runs to **109** with **three holes** — 26, 30 and 43, all
+`/srv` retirements. The 110 slots below the span are 107 live plus those three.
 
-Since that sweep the Warp host-visible-ring arc has appended two native numbers —
-**107** (`SYS_BURROW_FROM_HOSTMEM`, V-2) and **108** (`SYS_HOSTMEM_REFCOUNT`,
-V-3b-1c-2b; a read-only VA-keyed query returning [[sub-kernel-burrow]]'s
-`burrow_total_refs`) — each in the kernel enum and the Rust mirror, neither with a C
-consumer. They postdate the census above, so a refresh should read span → **108**,
-live → **105**, the four holes unchanged (the append-only rule still holding), and
-**re-derive** the mirror-subset and static-assert counts by the method stated below
-rather than incrementing them — the same "measure, don't guess" discipline that
-caught the Rust `T_SYS_` bounds-constant trap.
+Four numbers moved the census since the 103-live sweep, and this refresh folded
+them in by **re-measuring**, not incrementing — the same "measure, don't guess"
+discipline that caught the Rust `T_SYS_` bounds-constant trap below. Three were
+appends past the top: **107** (`SYS_BURROW_FROM_HOSTMEM`, V-2) and **108**
+(`SYS_HOSTMEM_REFCOUNT`, V-3b-1c-2b; a read-only VA-keyed query returning
+[[sub-kernel-burrow]]'s `burrow_total_refs`) from the Warp host-visible-ring arc,
+then **109** (`SYS_OPEN_CREATE`, the #50 path-mutation family). The fourth did
+not extend the span at all: `SYS_FD_DEVCLASS` (H-1a) took the reserved slot at
+**80**, so what the last sweep recorded as four holes is now three. None of the
+three appends has a C consumer; the Rust mirror carries all three, the C mirror
+none — the subset rule below, visibly holding rather than asserted.
 
 ### The libraries are subsets, not copies
 
 Neither mirror carries the whole set, and neither is expected to: the C library
-exposes **75** numbers, the Rust library **95**, and each omits what its
+exposes **77** numbers, the Rust library **100**, and each omits what its
 consumers do not call. So the invariant that matters is not "the mirrors are
-complete" but "where they overlap, they agree" — which holds.
+complete" but "where they overlap, they agree" — which holds (re-verified this
+sweep on both intersections: no name means one number to a library and another
+to the kernel).
 
 **Counting the Rust mirror has a trap in it, and it caught this sweep.** The
 Rust side spells *bounds constants* with the same `T_SYS_` prefix as syscall
 numbers — the argv count and data caps sit in the same namespace as the calls —
-so a census keyed on the prefix returns 97 and two of those are not syscalls.
+so a census keyed on the prefix returns **102** and two of those —
+`T_SYS_SPAWN_ARGV_MAX` and `T_SYS_SPAWN_ARGV_DATA_MAX` — are not syscalls.
 The kernel keeps the two categories apart by **form** (an enum for numbers, a
 `#define` for bounds); the Rust mirror flattens both into `pub const`, and the
 prefix no longer discriminates. Intersect against the kernel's enum rather than
@@ -100,9 +109,9 @@ trusting the prefix.
 
 ### Nothing pins a mirror to the kernel
 
-The kernel header carries **109** compile-time assertions; the C mirror **50**;
+The kernel header carries **111** compile-time assertions; the C mirror **50**;
 the Rust mirror **43**. Every one of them constrains **its own file**. Across
-the mirrors the word "mirror" appears on **80** lines, **23** of them as some
+the mirrors the word "mirror" appears on **84** lines, **23** of them as some
 casing of "must mirror". Neither phrase is a mechanism.
 
 (State the method with the figure: those counts are case-insensitive line
@@ -175,15 +184,39 @@ the same C layout.
 
 ### Growth is by appended field into a reserved slot, and it has worked
 
-The spawn argument record has grown three times — an identity block, a hardware
-allowance block, a page budget — from 56 bytes to 96, and every existing caller
-kept working, because each growth either appended past the end or claimed a
-field that was already reserved and required to be zero. The page budget is the
-best case: it took over the tail padding slot, so the struct did **not** grow,
-and every caller that zero-fills the struct gets the historical behaviour by
-construction rather than by a compatibility branch. Sixteen offset assertions
-pin the result, and the one on the reused slot spends its message explaining
-that reuse rather than restating the offset.
+The spawn argument record has grown four times — an identity block, a hardware
+allowance block, a page budget, a phenotype-flags word — from 56 bytes to 104,
+and every existing caller kept working, because each growth either appended past
+the end or claimed a field that was already reserved and required to be zero. The
+page budget is the best case: it took over the tail padding slot (`_pad_allow`,
+offset 92), so the struct did **not** grow, and every caller that zero-fills the
+struct gets the historical behaviour by construction rather than by a
+compatibility branch. Twenty offset assertions pin the result, and the one on the
+reused slot spends its message explaining that reuse rather than restating the
+offset.
+
+**The fourth growth is where the two hazards on this surface meet.** The
+phenotype-flags word (VIVARIUM V-1b) was authored at offset 92 — the *same*
+`_pad_allow` slot the page budget had already claimed — on a different branch.
+That is the concurrent-allocation collision from the number space replayed one
+level down, at a struct offset: two branches drawing the last reserved field from
+the same free slot, both compiling, the merge the place it surfaces. It was
+resolved the same way the number collision was — the aux-2 merge moved the
+phenotype word to 96 (growing the struct to 104) and opened a fresh forward-compat
+pad at 100 — and the offset assertion on it records that history verbatim, so a
+reader is not surprised by a struct that is 104 rather than 96. A `_Static_assert`
+at the point of the hazard, again, is the whole mechanism.
+
+`t_stat` is the same story in the other growth mode. It has grown twice — uid+gid
+(A-2a) took it from 72 to 80, then a per-instance device number plus pad (#100)
+from 80 to 88 — both **appended past the end**, because a stat result is written
+into the caller's buffer and there was no reserved slot to reuse. Its size
+assertion is unusually loud about the consequence: the kernel writes `sizeof(88)`
+bytes, so a mirror left at 80 *overflows the caller's buffer*, and the message
+names all four copies that must grow in lockstep — libt, libthyla-rs, the pouch
+stat patch, and the go-thylacine `Stat_t`. Four mirrors, not two: the drift hazard
+is wider here than anywhere else on the surface, and nothing but that comment binds
+them.
 
 ### The all-or-nothing rule, stated twice and broken once
 
@@ -208,10 +241,11 @@ The CSPRNG read clamps. See Caveats.
 ## Data structures
 
 Thirteen argument and result records cross the boundary, each pinned by size and
-per-field offset assertions on the kernel side: the spawn arguments (18
-assertions, the most-grown record), the stat result, the hardware allowance
-descriptor, the PCI info block and its two sub-records, the debug register
-frames, the peer identity record, a timespec, and a JIT region descriptor.
+per-field offset assertions on the kernel side: the spawn arguments (twenty
+offset assertions plus the size assertion, the most-grown record at 104 bytes),
+the stat result (88 bytes after two growths), the hardware allowance descriptor,
+the PCI info block and its two sub-records, the debug register frames, the peer
+identity record, a timespec, and a JIT region descriptor.
 
 One is pinned only transitively. The hardware window — a base/size pair — has no
 assertion naming it, but the descriptor that contains an array of eight of them
@@ -370,4 +404,4 @@ be one 4 KiB staging buffer per round trip.
 
 ## Provenance
 
-[[chg-2026-08-03-syscall-abi-sweep]].
+[[chg-2026-08-03-syscall-abi-sweep]], [[chg-2026-09-05-syscall-abi-census]].
