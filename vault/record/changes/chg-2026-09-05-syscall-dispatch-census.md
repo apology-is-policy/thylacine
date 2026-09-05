@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-syscall-dispatch census re-derived (14731 lines, 107 arms, 50 split) + execve Design-D phenotype re-decision"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["72d09ada"]
 touched:
   - sub-kernel-syscall-dispatch
 established: []
