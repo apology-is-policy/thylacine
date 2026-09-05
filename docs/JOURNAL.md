@@ -23,6 +23,65 @@ needed the operator.
 
 ---
 
+## 2026-09-05 (aux, Opus 4.8, effort max) -- Duke3D mouse, the throttle-log churn, the manual revival
+
+Operator returned after the DX-7 (Tomb Raider Voodoo) landing and drove three
+threads: the mouse in the DOSBox games, two small tapestryd annoyances, and
+starting a user manual. Audio was named as the *next* arc (fresh session).
+
+**The Duke3D mouse -- root-caused across 4 boots, with a wrong-device trap.**
+"Duke can use mouse though, right?" -- yes, and proving it took care. First two
+probes fired but never TURNED the view; I nearly concluded a motion gap. The
+trap: `qmp-sendtext -p "abs X Y"` drives the virtio-TABLET (absolute), but a
+captured DOS FPS reads RELATIVE deltas from the virtio-MOUSE -- tapestryd sources
+TEV_PTR_REL only from the relative device (server.rs ~798). Switching to
+`-p "rel dx dy"` + forcing `sdl autolock=true` (so the click captures) gave a
+dramatic bidirectional turn (fs frames dxm4-40/42/43). So: mouse BUTTON fires
+unconditionally; mouse LOOK needs autolock + a capture-click. Also learned: in a
+tiled layout `abs` spans the whole 1280px display, so half my early sweep landed
+on the console pane. Findings in [[bug-dosbox-mouse-look-needs-autolock]]. TR
+(1996) is tank-controls -- no mouse gameplay -- so mouse is moot there, a game
+fact not a Thylacine gap.
+
+**Throttle-log churn -- fixed at the root (7ad00831).** The
+`idle-throttle N -> M Hz` say! flooded the console during typing. Root cause: the
+frame clock throttled after only 250ms input-quiet, and a >250ms gap between
+keystrokes is ordinary -- so every keystroke churned 60<->15 and logged a line.
+The WRONG-TURN I caught: I first wrote a log-only debounce (settle before
+logging). It reads faithful but it BREAKS ls-gfx-throttle deterministically --
+it suppresses the gate's transient force->60->15 when the last-logged rate is
+already 15. A flaky gate is worse than the spam. Reverted; raised IDLE_AFTER_MS
+250->1000 instead (clock stays 60 through typing, say! stays per-transition, gate
+stays deterministic). Verified IDLE_AFTER_MS is NOT coupled to
+PRESENT_BURST_WINDOW_MS. Gate: ls-gfx-throttle PASS 76s attempt-1.
+
+**Manual revived (876888cf).** Operator confirmed: Markdown source in the repo ->
+ship in-OS at `/manual` -> render richly via Beacon (plain-text fallback), one
+source. Wrote `docs/manual/40-dosbox.md` (the first chapter: every DOSBox setting
++ effect, cycle presets, the working autolock+mouse-look launch, both games,
+troubleshooting) + revived USER-MANUAL.md (supersedes the 2026-05-31 deferral).
+
+**Fullscreen-zoom -- root-caused, then DEFERRED to main.** Cmd+F (Super+F=zoom) of
+a sub-display surface (DOSBox 640x417) leaves it native-size top-left on black,
+not scaled. reconcile correctly picks Composed (not Direct -- the s.w==dw guard),
+but the composed placement hit placement_rect's SAME-SIZE-CROP branch, so the
+zoomed leaf's `content` reaching composition was ~640x417 not the full 1280x800
+recompute sets. Smoking gun: ZERO letterbox/scanout output after the Super+F
+inject (fs-repro-run.log). NOT a pure regression -- Quake fills because it renders
+at full display res; DOSBox renders a fixed buffer. Operator said main is actively
+in that compositor code -> stopped. main confirmed (yip 0048): their F2 arc
+touches the SAME loci (layout_pane zoom arm + placement_rect), so the fixer must
+REBASE ON F2 first. Handed off: [[bug-zoom-fullscreen-surface-not-scaled]].
+
+**Open / handed off:** Forage registration of DOSBox + the 2 games
+(build-manifest.toml [network.*] entries) is BLOCKED on archive URLs + sha256s (a
+networked fetch; I don't hold the originals); the autolock/preset launcher-default
+rides that work. CLAUDE.md doc-discipline reconciliation for the manual revival
+(deferred rather than rush a binding-scripture edit into a compaction). The
+fullscreen fix (post-F2). Audio arc filed: [[project-audio-arc-future]].
+
+---
+
 ## 2026-09-04 (aux, Opus 4.8, effort max) -- DX-7: Voodoo/Glide 3D on Thylacine (Tomb Raider)
 
 Operator: "let's give Voodoo/Glide a shot." First target was Unreal (they had the
