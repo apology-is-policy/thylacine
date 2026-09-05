@@ -4,7 +4,7 @@ type: chg
 title: "KT-1 audit close, round 3: the restructures re-read -- the held-cells sink, the constant open-block cap, the seat held while it hosts, TEV_LAYOUT coalesced"
 date: 2026-09-05
 arc: arc-tapestry
-commits: ["*(pending)*"]
+commits: ["65bb05b3"]
 touched: [sub-tapestryd, sub-libtapestry]
 established: [adt-kt1-r3]
 closed: [fnd-kt1-r3-c2, fnd-kt1-r3-c6]
