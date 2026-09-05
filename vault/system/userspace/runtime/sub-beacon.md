@@ -70,10 +70,13 @@ emission. This is not a nicety: it is why `richtool | plaintool` is safe, and
 it is the property the whole design is arranged to preserve.
 
 **The emission gate fails closed.** `effective_tier` emits above None only
-when the flag permits AND (for Auto) the stdout Dev class is the interactive
-console AND the advertised tier renders. A failed `SYS_FD_DEVCLASS` probe
-reads as not-a-terminal (the caller passes `None`), never as one, so a closed
-or pre-H-1 fd gets plain bytes -- the safe direction. An explicit `Always`
+when the flag permits AND (for Auto) the stdout Dev class is an interactive
+terminal AND the advertised tier renders. "Interactive terminal" is the console
+(`DC_CONSOLE`, `'c'`) OR a pts slave (`DC_PTS`, `'t'` -- H-4d): a program
+writing into a session tile through a pseudoterminal is as much on a terminal as
+one on `/dev/cons`, so the Auto arm admits both classes. A failed
+`SYS_FD_DEVCLASS` probe reads as not-a-terminal (the caller passes `None`), never
+as one, so a closed or pre-H-1 fd gets plain bytes -- the safe direction. An explicit `Always`
 trusts the advertisement over the fd, but an *absent* advertisement still
 yields None: there is no renderer to read frames, so emitting them would be
 pure corruption.

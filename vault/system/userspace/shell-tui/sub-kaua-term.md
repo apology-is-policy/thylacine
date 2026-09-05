@@ -43,16 +43,26 @@ The library (`lib.rs` + `wire.rs`, host-buildable) is a pure event model:
 - `Producer::resized(vt, out)` resyncs the shadow screen after a geometry
   change and emits the full diff.
 - `wire::encode_record` / `parse_record` are the framed codec up (records) and
-  `encode_input` / `FrameDecoder` down (`Input::Key` / `Resize`), with
-  `MAX_FRAME` = 4 MiB the decoder's hard bound and `MAX_TITLE` = 256 the
-  parse-time title cap.
+  `encode_input` / `FrameDecoder` down, with `MAX_FRAME` = 4 MiB the decoder's
+  hard bound and `MAX_TITLE` = 256 the parse-time title cap. The DOWN channel
+  carries `Input::Key` / `Resize` and (H-4d) `Input::Text(Vec<u8>)` -- a byte run
+  the compositor's tile menu types (`^E^U<cmd>\n`) that the INPUT thread writes to
+  the master *verbatim* under the key lock, not re-encoded like a key. The UP
+  channel's `Control` gained `Osc1936Raw { serial, frame }` -- the raw Beacon
+  frame plus its span serial -- and the wire cell is now 17 bytes (`ch`/`fg`/`bg`
+  u32, `attrs` u8, `span` u32; the trailing `span` is what the H-4d Beacon
+  threading added).
 
-The bin (`main.rs`): `kaua-term <cols> <rows> [prog [args...]]` — fd 0 is the
-DOWN channel (halcyond's `Input` frames), fd 1 the UP channel (the `Record`
-frames), fd 2 inherited. It opens a pts pair through [[sub-ptyhold]], spawns
-`prog` (default `/bin/ut`, `--home` forwarded verbatim) on the slave, and runs
-two threads: INPUT (fd 0 keys re-encoded to the master; `Resize` -> the pts
-winsize) and OUTPUT (master -> vt -> Producer -> records -> fd 1).
+The bin (`main.rs`): `kaua-term [--beacon none|cells|rich] <cols> <rows> [prog
+[args...]]` — fd 0 is the DOWN channel (halcyond's `Input` frames), fd 1 the UP
+channel (the `Record` frames), fd 2 inherited. `--beacon` (default `none`, H-4d)
+is written to the tile's *own* `/env/BEACON` before the slave spawn, so the shell
+it hosts inherits the render tier this tile's renderer declared -- the word
+[[sub-utopia-interactive]]'s `env_beacon_tier` then reads. It opens a pts pair
+through [[sub-ptyhold]], spawns `prog` (default `/bin/ut`, `--home` forwarded
+verbatim) on the slave, and runs two threads: INPUT (fd 0 keys re-encoded to the
+master, `Input::Text` written verbatim; `Resize` -> the pts winsize) and OUTPUT
+(master -> vt -> Producer -> records -> fd 1).
 
 ## Mechanism
 

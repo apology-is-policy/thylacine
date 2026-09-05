@@ -77,6 +77,18 @@ finals and malformed sequences abort to `Ground` without touching the grid --
 or simply unfamiliar stream can only ever produce wrong-looking output, never
 a wedged interpreter.
 
+**The span serial threads Beacon frames to cells, without a second parser
+(H-4d).** In capture mode the parser keeps a monotonic `span_serial`: a Beacon
+frame (OSC 1936) advances it by one (skipping 0 on wrap) and copies it into
+`Vt.span`, which every subsequent `Cell.span` inherits; any other OSC (a title,
+0 or 2) leaves it untouched. The frame's raw body rides out on the new
+`Boundary::Osc { serial, body }` variant -- the parser NEVER reads a Beacon body
+(R5: one parser, and it lives in the consumer). The consumer parses the forwarded
+frames in order, maps each serial to the presentation state *after* that frame
+(obj / em / hdr), and so recovers a cell's markup from its `span` alone. Blanks
+from erase or scroll fill carry span 0. This is what lets a session tile render
+Beacon presentation over a pure cell grid without vt growing a Beacon parser.
+
 **Autowrap is deferred, and that is load-bearing rather than cosmetic.** A
 glyph written to the last column leaves the cursor *at* `cols` (past the
 edge); the wrap happens when the *next* glyph arrives (`put_char` resolves

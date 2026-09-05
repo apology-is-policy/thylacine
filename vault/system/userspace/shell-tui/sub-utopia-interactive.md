@@ -20,7 +20,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-05
 area: userspace
 ---
 ## Purpose
@@ -63,6 +63,17 @@ captures only the shell's own painting.
 **`ut` owns the descriptors** and the startup order. It decides whether this is a
 session (a live fd 1) or the bare-spawn boot check, opens the note queue, runs the
 session dance, installs completion and history, and drives the poll loop.
+
+**The session's beacon tier is inherited, not probed (H-4d).** Part of the session
+dance is reading `/env/BEACON` -- the render tier its pts host declared and the
+kernel deep-copied in at spawn (a tile's `kaua-term --beacon rich` is the word; the
+console's own `/dev/beacon` leaf describes a *different* renderer and is not
+consulted for a tile). If the inherited word is `rich` AND stdout is a terminal
+(`libthyla-rs::stdout_is_terminal()`, i.e. the console `'c'` OR a pts slave `'t'`),
+`ut` arms its transcript zones (`set_beacon_rich`); otherwise it stays plain. It is
+decided once at startup -- a tile's tier is fixed for its host's life, so there is
+no per-prompt re-read. Degradation as everywhere: an unadvertised word or a
+non-terminal fd yields plain.
 
 **Degradation is the house style.** Every optional facility — completion, history,
 the pts dance, the consctl mode-set, `$home` — fails to *absent*, never to fatal.

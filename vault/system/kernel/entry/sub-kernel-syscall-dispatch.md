@@ -25,7 +25,7 @@ takes it across — the dispatch switch, the user-pointer validator, the staging
 buffers, and the split between the layer that talks to userspace and the layer
 that does the work.
 
-**What this dossier covers, precisely.** The file is 14731 lines and holds all
+**What this dossier covers, precisely.** The file is 14749 lines and holds all
 107 handlers. Most of a handler is *policy belonging to its own subsystem* — a
 Burrow handler is described by [[sub-kernel-burrow]], a pts handler by
 [[sub-kernel-pts]], and so on across roughly thirty dossiers. The subject here
@@ -576,6 +576,11 @@ split, and the payer attribution.
 [[chg-2026-09-05-syscall-dispatch-census]] re-derives the census after ~4300
 more lines (14731 total): 107 live/107 arms, 50 split (45 non-static inners), 88
 validator sites, and adds execve's Design-D phenotype re-decision.
+[[chg-2026-09-05-h4d2-family-fold]] folds H-4d-2a: `sys_fd_devclass_handler`'s
+inline class-pick became the named classifier `spoor_devclass` (adding the
+pts-slave `'t'` arm via `pts_resolve_spoor`; master stays `'9'`), +18 lines ->
+14749. Not a new split -- a classifier, not a `_handler`/`_for_proc` pair -- so
+the 50/45 metric is unchanged.
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 

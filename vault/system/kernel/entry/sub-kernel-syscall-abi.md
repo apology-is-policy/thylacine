@@ -43,8 +43,10 @@ pre-merge collision between two branches, argued under Mechanism. Three of the
 dedicated syscalls to ordinary namespace operations (stalk-3c). The
 device-class-query slot that the last sweep recorded as reserved-but-unbuilt is
 now filled: `SYS_FD_DEVCLASS` (80, H-1a) returns a Dev's class character, so
-is-a-terminal is exactly `dc == 'c'`. Each hole carries a comment naming what
-used to be there. An unknown number returns `-1` rather than terminating the
+is-a-terminal is `dc == 'c'` (the console) OR `dc == 't'` (a pts slave, H-4d) --
+`libthyla-rs::stdout_is_terminal()` is the one wrapper that folds both, since a
+program in a session tile is on a terminal exactly as one on `/dev/cons` is. Each
+hole carries a comment naming what used to be there. An unknown number returns `-1` rather than terminating the
 caller.
 
 Return values follow two conventions and the split is per-syscall, not
