@@ -1284,3 +1284,191 @@ survival, lone-tile and 1264/1280 geometry legs. Unconstructed: the takeover
 arms (a second conn of one principal; a foreign holder), a crash with >= 2
 tiles, a Tab container of only backgrounded leaves.
 
+## The PRESENTABLE -- a display object the server never maps (2026-08-26, Warp-WSI W-3c-1)
+
+The vkQuake/WSI arc's first new object class on the warp seam: a venus
+swapchain image registered for the compositor to scan out, NOT for the guest
+to draw into. `ctx/<id>/img/{new,<handle>/{info,ctl}}` -- `new` takes
+`<handle> <w> <h> <format> <stride> <mem_id>`, validates the display shape
+against the compositor's accept set (stage 0: B8G8R8A8 only), and registers a
+`WarpImg`; `info` reports the accepted shape + `bound` + `mem`; `ctl` takes
+`destroy` only. `create_presentable` (gpu.rs) mints it as a HOST3D blob --
+AMENDED by measurement at W-3c-1 round 2: virglrenderer REFUSES
+`USE_SHAREABLE` on a HOST3D blob, so the mint is `USE_MAPPABLE` and the
+guest-invisibility comes from the server NEVER MAPPING it, not from a share
+flag. `set_scanout_blob` (gpu.rs, the verdict wrapper over the W-3a raw-resp
+probe fn -- one wire implementation, the #230 by-meaning rule) binds it.
+
+**The class is defined as much by what it LACKS.** No guest mapping, hence no
+weft share, no hostmem offset, no reclaim park, no #847 dual count. Its I-7
+lifetime hazard runs the OTHER way from a mapped BO's: the DISPLAY holds the
+reference, so a retire must not race the scanout. `wimg_teardown` is therefore
+ORDERED -- unbind (via the existing `gl_evict_res`, reused not
+re-implemented) BEFORE `resource_unref`. That order is `specs/tapestry_present.tla`'s
+W-3b presentable-class `PUnbound` conjunct as code, whose `buggy_punbind_skipped`
+cfg proves the omission violates `NoTornPresentable`. The unbind issues
+UNCONDITIONALLY, never gated on the per-object `bound` flag: `gl_evict_res`
+self-guards on the authoritative `Comp.bound_res`, so a redundant no-op is
+free while trusting a second copy of the fact costs the display (the
+#230/#847 by-meaning discipline).
+
+`MAX_WARP_IMGS_PER_CTX` = 16, folded into `ctx_backing_total` so the I-32
+holistic cap covers the class; `WARP_IMG` = `1 << 45`, a new qid tag under the
+existing 8-way disjointness `assert!` (WARP_CTX/BO/RING/MEM/IMG + SURF + PANE
++ FLAG). `warp_img_selftest` proves it with four arms -- `shape=` (three
+refusals one variable away, the accept-set discriminator), `mint=`, `bind=`,
+`unbind=` (the ORDERING witness: destroy WHILE BOUND, observe `bound_res` back
+to 0 -- the modeled bug's ABSENCE, not a generic teardown success). The
+AUDIT-TRIGGERS row the W-3a closer deferred to this chunk was added here.
+
+## The generalized present source -- Bo | Img (2026-08-31, Warp-WSI W-3c-2)
+
+W-3c-2 gave present-to two source families. Context (JOURNAL run 6): the
+run-5 "a presentable is not blittable" measurement was of the blob_id=0
+STAND-IN class (an SHM fd, categorically untypeable by vrend's
+`pipe_resource_set_type`, which takes DMABUF only -- a blit on it raises
+ILLEGAL_RESOURCE -> `ctx->in_error`, the measured `compose=noreadback`). The
+REAL class (blob_id names a VkDeviceMemory) has virglrenderer's designed
+cross-context path; the composed arm is resequenced to W-3d and NO scripture
+was narrowed.
+
+The mechanism: `enum PresentSrc { Bo(u32), Img(u32) }`; `WarpCtx.present_to`
+becomes `Option<(slot, gen, PresentSrc)>`. BOTH families are PUB-keyed -- the
+verb resolves an img HANDLE to its pub id at consent time, so a freed handle's
+later tenant can never inherit a consent (pub ids monotonic, never reused --
+the pin `gen` gives the surface half). `enum AdoptSrc { Bo, Img{stride} }` +
+`GlAdopt.kind`; `gl_adoption` gains the img arm (geometry vs the CURRENT
+surface incarnation -- the display-MODE half of the accept set, discharged
+per-use where the bind is chosen). `Comp::direct_bind_adopted(g, w, h)` is ONE
+copy of the family dispatch (SET_SCANOUT for Bo, SET_SCANOUT_BLOB at the
+declared shape for Img -- the spec's `PPresentBind`; a post-bind full flush
+per #57 on both).
+
+**Every composed-machinery consumer is HARD-GATED to `AdoptSrc::Bo`, and the
+gate is MEMORY SAFETY, not sequencing.** `comp_rb_pump` (its readback DMA
+writes into `g.va`; an img adoption's va is 0), `comp_readback_retired`'s
+`same_adoption` (plus a KIND PIN: img and bo pub sequences are independent, so
+a bare pub compare could false-match across families after the consent
+changed), and the composed present arm. `comp_import_bo` /
+`comp_release_bo` / `comp_replay_deferred_imports` are Bo-only (an img consent
+imports nothing until the W-3d compose arm -- no compositor-side
+representation to witness yet). `wimg_destroy` gains the consent-clear arm
+(clear `present_to` + `res_stale` + `gl_retarget` BEFORE the take+teardown). A
+composed-mode surface whose consent names an img is LOUD once per ctx
+(`note_img_composed_deferred`) and the pane shows its own 2D weave until W-3d.
+
+**Seam (owed, load-bearing).** `wimg_teardown`'s `PDrained` conjunct: the
+Direct adoption creates NO pinflight member (the standing binding is tracked
+by `Comp.bound_res`, completed inside one dispatch). THE W-3d COMPOSE ARM IS
+THE FIRST PINFLIGHT PRODUCER AND MUST LAND THE DRAIN IN `wimg_teardown` IN THE
+SAME COMMIT (`tapestry_present_buggy_pdrain_skipped.cfg` is the counterexample;
+a green suite between the two proves nothing). Constraint carried for the
+compose arm: vkr's `mem->exported` is ONE-SHOT (a memory exports once), so one
+blob mint per VkDeviceMemory -- the registration must adopt, or the map and
+present paths coordinate on a single mint.
+
+## The W-4 present windows: the text pin, the double-paint census, the latency instrument (2026-08-31, Warp-4)
+
+Mechanisms server.rs grew across the W-4 comparison arc (which INVERTED the GL
+vs VK verdict: GL 44.8 / VK-linear 47.6 / VK-blit 51.3 fps).
+
+- **`text_snaps: Vec<(fid, gen, bytes)>` -- a per-fid generation pin for the
+  REGENERATING text files** (P_CTL / P_LAYOUT / W_CTL). An offset-0 read
+  snapshots the composed text on the Conn; later offsets serve the pin, so one
+  open reads one generation (the r7-F6 splice fix -- a naive re-compose per
+  read tore a multi-read consumer). Cleared at `fid_clunk`, `teardown`, AND
+  `drop_all_fids` (the r8-F1 sibling-omission find: the third clear site the
+  first two implied).
+- **The double-paint fix (the PokeBind/PokeFlush census).**
+  `direct_bind_adopted` flushes INTERNALLY on success, so `img_poke_complete`'s
+  rotated-poke arm must NOT flush again. The `Cost` census splits it:
+  `PokeBind` = the WHOLE rotated paint (set_scanout + internal flush),
+  `PokeFlush` = same-image re-pokes ONLY. Under a rotating swapchain the steady
+  state is ALL PokeBind. `img_poke_complete` calls `release_displaced_gen`
+  (the retired generation's resources) then charges the right census.
+- **The latency instrument.** `poke_hist_bind[8]` / `poke_hist_flush[8]`,
+  buckets `<2 <5 <8 <11 <14 <20 <30 >=30` ms, read as two tctl rows -- the
+  instrument that proved the ~10 ms host pacing quantization (0/3796 steps
+  under 8 ms, run 5). A measured number, with its lane named.
+- **`warp_stall_watch`** -- one warp-watch line per live ctx carrying the
+  identity fields `conn=` / `surf=` (surf = the surface whose `gl_src` names
+  the ctx, `-` if none; an orphan reports `surf=-`), plus `pass`/`fparked`/
+  `rparked`/`inflight`/`sig`/`rep`/`again`/timeline/`poisoned`. The mint say
+  carries `conn=selftest` for the u64::MAX self-test conn.
+- **The hostmem budget split.** `ctx_guest_backing` / `ctx_hostmem_backing`
+  are separate axes (the round-7 F4 correction: hostmem has its own
+  `WARP_CTX_HOSTMEM_MAX` bound, not the guest cap).
+
+## The menu -- the one ephemeral surface the compositor grabs and tears down (2026-09-02, H-3c THE GATE + its audit close)
+
+The obj verb menu: a `Role::Menu` surface (`create W H role=menu`,
+renderer-gated E_PERM, no bind, NEVER hosted, never focusable). `Comp.menu:
+Option<MenuState { n, gen, rect }>` is the ONE placed menu. Gated global verbs:
+`menu place <surface-id> <x> <y>` (authority -> syntax -> a non-menu surface
+E_NOENT -> owned by the caller's PROCESS via `owner_peer == peer_stripes`
+E_PERM; clamp; replace; forces Composed; redraw CONFIGURE) and `menu dismiss`.
+
+**THE GRAB.** `key_event` (Esc press = compositor dismiss + swallow the
+release/repeats), `ptr_route` (MOVE/SCROLL menu-relative), `ptr_btn` (press
+outside = click-away: dismiss, press AND release swallowed; the no-menu arm =
+click-to-focus on a focusable unfocused hosted leaf, press passed through),
+`chord_key` (dismiss before `chord_action`). The swallow bookkeeping is the
+audit-close restructure: `Comp.menu_swallow_btn` is GONE, replaced by
+`key_owner: [u64; KEYCODE_SPAN]` and `btn_owner: [u64; BTNCODE_SPAN]` (packed
+`slot+1 | gen<<16`; `OWNER_SWALLOWED` = 0xffff) -- a press records its target
+(`owner_pack`), a release/repeat follows it iff the gen matches, drops if
+retired, live-routes only when unrecorded. `chord_down` widened to
+`[u64; KEYCODE_SPAN/64]` (was `[u64;4]` & 0xff -- aliased codes >= 256).
+`ptr_btn`'s click-away marks `OWNER_SWALLOWED` AFTER `menu_dismiss` (the old
+order let retire's arm clear the record -> the release leaked).
+
+**COMPOSITOR-OWNED DISMISS** = `retire`'s menu arm (unplace first,
+`menu N dismissed (<reason>)`, `menu_heal` at the tail), reached by EVERY path
+including ctl `destroy` / `retire_conn` / WEDGE. `menu_heal` targets the
+intersection: `paint_borders(false)` + strip intersections pushed, tag-bar
+headers + empty-leaf BG_COLOR filled (`placement_rect` = the crop),
+same-size CONFIGURE to intersecting hosted + `visible_chrome` surfaces.
+`menu_reassert` composes each `shown_slot` over any screen write under the
+menu (`screen_push` before upload, `screen_flush_rect`/`_full` after);
+`reconcile`'s structural repaint runs `prefill_from_shown()` after
+`paint_chrome()` (every visible hosted surface's `shown_slot` composed;
+GL adoptions and held slots skipped), and its Off/Direct `want` arms gained
+`&& self.menu.is_none()`. The `ctl` read reports `menu none | n x y w h`.
+Closed list: `memory/audit_h3c_closed_list.md` (0/1/0/5 + 5 self-found, DIRTY).
+
+## fid_clunk: the minted-never-created surface reaped on its ctl clunk (2026-09-02, H-3c-2 audit close)
+
+`fid_clunk(&mut self, comp, fid)` (was fid-only; `h_clunk` threads `comp`).
+After the fid + its held replies drop, if the fid was a surface CTL fid
+(`is_surf && surf_fk == FK_CTL`) whose surface is owned by THIS conn at THIS
+gen and still `SurfState::Minted` (created server-side by the `surface/new`
+mint but never `create`d), and NO OTHER fid of this conn names the same path,
+the surface is retired (`comp.retire(n)`, say `surface N minted, never
+created, its ctl clunked: retired`). The client-side twin is libtapestry's
+`fail_created` (it says `destroy` on a post-mint failure); this is the
+compositor's backstop for a client that clunks without it. The three text-pin
+clears (`fid_clunk` retain, `teardown`, `drop_all_fids`) live alongside.
+
+## The status bar -- the display carves a strip (2026-09-02, H-3d)
+
+`Role::Status` (a surface role only). `Surface.is_status`; `Comp.status:
+Option<StatusState { n, gen }>`. `create(.., is_status)` refuses (E_INVAL,
+BEFORE the weave allocation) when a bar exists or `w != disp_w || h !=
+status_h || disp_h <= status_h`; on success registers `Comp.status`, says
+`status bar N created (WxH); the display carves H`, `reconcile()`. The ctl
+parse: `role=status`, no bind, renderer-gated.
+
+`status_rect() -> Option<Rect>` = `{0, dh - status_h, dw, status_h}` while a
+bar is registered and the display is taller than the unit; `surface_target`'s
+status arm (gen-pinned) resolves to it; `visible_chrome` / `compose_geometry`
+classify `is_status` as chrome. **`reconcile`: `layout_h = dh - status_h`
+while a bar exists is passed to `recompute` ONLY** -- every other height use
+stays the DISPLAY's; shadowing `dh` bound the scanout at 1280x780 (the found
+bug). The Off/Direct `want` arms require `status.is_none()`. `paint_borders`
+fills the strip `status_bg` (Daylight token 6) at structural repaints;
+`retire`'s status arm clears `Comp.status` before the reconcile (say `status
+bar N retired; the display returns`). The global `statusbar` file
+(`P_STATUSBAR` = 6; walk/readdir/read) reports "x y w h", zeros with no bar.
+The halcyond-side chrome (`status.rs`/`statusset.rs`, OSC 7 + the cmd mark)
+and libutopia's `cwd_report`/`mark_cmd` are not vault-owned here.
+
