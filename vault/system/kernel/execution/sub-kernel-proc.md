@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -32,7 +32,7 @@ keeps the tree rooted and therefore keeps every Proc findable.
 | Surface | Shape |
 |---|---|
 | `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a fresh pid + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |
-| `rfork` / `rfork_with_caps` / `rfork_forked` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts** |
+| `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
 | `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG` |
 | `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
@@ -85,7 +85,13 @@ a ledger of three columns:
   session and group (`sid`, `pgid` — POSIX fork semantics, overwriting
   `proc_alloc`'s own-session default), the legate scope tag, the hardware
   allowance (deep-cloned), the environment group (deep-copied), the
-  phenotype, `exe_path`, and the CL-5 `page_budget`.
+  phenotype, `exe_path`, and the CL-5 `page_budget`. A **PHENO_LINUX** fork
+  additionally gives the child thread the calling thread's **note mask** (#127
+  — POSIX fork's signal-mask inheritance; a native fork keeps the zero mask, the
+  rfork rule) and preserves the handler-execution snapshot, so a `fork()` issued
+  from inside a signal handler produces a child whose saved user context agrees
+  with its stack rather than a `KP_ZERO` "not in a handler" that would make its
+  handler-return silent UB.
 - **Fresh** — pid, `stripes`, pgtable root, handle table, note queue,
   Territory (deep clone), and every I-32 counter.
 - **Stripped** — `caps` are `(parent_caps & caps_mask) & ~CAP_ELEVATION_ONLY`
@@ -206,6 +212,26 @@ scheduled. Stated in the header rather than hidden, which is the right
 disposition — but it means the check that protects the production path does not
 protect a future second caller.
 
+### The phenotype is committed here — the one store among the clears (Design D)
+
+Everything above is *reset* because the old image's addresses are gone; the
+phenotype is the opposite — a value *written*, the new image's ABI shape, decided
+by the resolver ([[sub-kernel-stalk]]) and threaded in to `proc_exec_replace` as
+`new_pheno`. It is the ONE store of the phenotype, in the infallible commit
+region and nowhere earlier: before the address-space swap the load could still
+fail and return the caller to its OLD image, which must keep decoding under its
+own ABI (the review F1 Leg-B correction). The store is RELEASE — it orders the
+swap and the close-on-exec sweep ahead of it for an acquiring reader — but it
+deliberately does NOT order the signal reset above, whose plain/relaxed stores a
+lock-free cross-Proc reader (notes.c's SIG_IGN hook, the default-disposition
+query, the job-stop fan) may observe before OR after this one. So all four
+(phenotype, reset-state) combinations are observable, and each is a legitimate
+state of ONE image: a native Proc never consults the sigtab; a Linux Proc reads
+either the reset all-`SIG_DFL` table (the new image's initial state) or the old
+dispositions (the POSIX latitude for a `sigaction` racing an in-flight signal).
+This is the commit half of Design D — the decision half is
+[[sub-kernel-syscall-dispatch]]'s execve, the resolver seed [[sub-kernel-stalk]]'s.
+
 ## Data structures
 
 `struct Proc` is 392 bytes and no longer holds a page table at all — it holds a
@@ -277,7 +303,14 @@ accountant.
   ([[sub-kernel-death]]).
 - [[inv-i32]] — the four axes charged here (pages, VMAs, shared-in pages,
   children/threads) plus the unforgeable `PRINCIPAL_SYSTEM` exemption.
-- The I-2 capability strip — `& ~CAP_ELEVATION_ONLY` on every fork.
+- The I-2 capability strip — `& ~CAP_ELEVATION_ONLY` on every fork, the Linux
+  `clone` included (`rfork_forked_with_caps` with `caps_mask = CAP_ALL`): a clone
+  inherits the parent's full set, but the elevation bits are stripped
+  unconditionally, so monotonic reduction holds on the phenotype path too.
+- I-43 — `proc_exec_replace` commits the new image's phenotype (above): it sets
+  the ABI *shape* the process presents and confers no authority. The decision is
+  the resolver's and the dispatcher's; this file only *stores* it, in the
+  infallible region, so shape and address space flip together.
 - I-22 — `proc_apply_identity` extincts on an attempt to *stamp*
   `PRINCIPAL_SYSTEM` or the INVALID sentinel, so the TCB identity cannot be
   reached from the spawn path; identity confers no caps.
@@ -390,3 +423,7 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
 [[chg-2026-08-15-proc-lineage]] is the re-sweep after the LINEAGE arc: the
 address-space extraction, the second accepted rfork shape, and the three-shape
 creation decision.
+[[chg-2026-09-05-proc-pheno-fork-exec]] brings it current through the phenotype
+fork+exec work: `rfork_forked_with_caps` (the Linux clone), the PHENO_LINUX
+note-mask inheritance (#127), and Design D's phenotype commit in
+`proc_exec_replace`.
