@@ -137,6 +137,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
 - 2026-09-05 [[chg-2026-09-05-fullscreen-zoom]] — The fullscreen-zoom fix: the #56 patchwork latch re-keyed on slot rotation; the letterboxed compose clips to the damage's projection
 - 2026-09-05 [[chg-2026-09-05-h4c-layout-gesture]] — H-4c: the layout gesture rides the verb menu (obj type=layout), halcyon layout list/delete, and the session startup script (halcyon.rc or the device default) run by the per-user compositor
+- 2026-09-05 [[chg-2026-09-05-h4d1-creator-reservation]] — H-4d-1: a peer-split empty leaf is reserved to its creator conn until the conn goes; the session compositor hosts a tagged leaf as a terminal tile; the restore tool defers to a present compositor; print!/println! write one statement per syscall
 - 2026-09-05 [[chg-2026-09-05-halcyon-libs-sweep]] — The Halcyon graphics libs -- the three crates the handoff did not name
-- 2026-09-05 [[chg-2026-09-05-halcyon-session-crates]] — The KT-1 session-compositor crates dossiered: sub-halcyond + sub-kaua-term (from the 150/152 reference prose)
 <!-- generated:end -->

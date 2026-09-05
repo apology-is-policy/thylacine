@@ -45,6 +45,67 @@ The design memory listed H-4c as "the gesture (a halcyond verb `Restore layout X
 
 **The lesson, pinned.** A latch keyed on a proxy property fires on every class the proxy covers and the property does not. The tell was in the doc comment itself: it named the property ("rotating weave slots") and asserted a class ("the SDL class never latches") that the code never checked.
 
+### H-4d-1 (same run, after the self-compaction): a peer-split empty leaf is its creator's
+
+**The race, and why a mark after the split cannot close it.** Under the per-user
+compositor, `halcyon layout restore` builds its skeleton with `split` verbs while
+the compositor -- the same principal -- hears TEV_LAYOUT per split and fills every
+empty leaf it owns with a shell tile; both mint claims on the same leaves and the
+last mint wins. The pickup's rule ("an empty leaf carrying a tag belongs to whoever
+tagged it") is right and insufficient: the tool tags AFTER it has built the whole
+skeleton, and even tagging each leaf the instant its id is bound leaves a window the
+compositor's reconcile can enter. Only the split can mark the leaf. So tapestryd
+stamps the writing conn on both empties a ctl split makes (`Pane.creator_conn`,
+`c96f5173`), the claim mint answers E_AGAIN to every other conn of the principal
+while that conn lives, and the retire lifts the reservations + fans ONE TEV_LAYOUT
+(a release changes no geometry, so the structural fan would never fire for it). rio's
+rule: a window a program creates is that program's, not the menu's.
+
+**The second decision the race forced: who hosts a tagged leaf under a session.**
+The tool's spawn path (H-4b-3b) spawns self-hosting graphical clients; a TEXT tag
+(`halcyon welcome`, `ut`) spawned that way has no terminal. Under a session the
+compositor is the user's rio (14.12), so the tag of an empty leaf is now the tile's
+command line (acme; rio's `window cmd`): reconcile reads the tag after its mint and
+hosts `kaua-term cols rows <argv>`. The tool, seeing the compositor's mark in /env
+(`HALCYON_SESSION=on`), only tags and exits; the release then lets the compositor
+host. On the console path nothing changes. Graphical tags under a session open
+BESIDE their terminal tile -- the rio-shaped stack-over-the-terminal refinement is
+v1.x, named in HALCYON 13.7.
+
+**The welcome's shape came from two placement rules, not a bootstrap dance.** The
+first plan suppressed the root tile when an init would run and destroyed the
+bootstrap surface afterwards -- moving parts on the seat holder. The layout format
+already had the right word: an `env` leaf is "the tile that was already there". A
+saved tree whose root's LAST child is the one env leaf now puts the built part
+BEFORE the anchor (the tool moves the pre-existing focused tile past what it built,
+one `move` per step checked against the dump), and an `active` naming that env
+leaf hands the focus to the anchor -- `splith [halcyon welcome, env] active=1` is
+the welcome, and the session's own root shell IS its right pane.
+
+**The gate failed three times on itself, and the capture said so.** Every attempt's
+serial log showed the mechanism in order (`claim on pane 8 reserved by conn 10
+(E_AGAIN)`, `conn 10 released 2 reserved empty leaf/leaves`, the two spawns, the init
+exit). Attempts 2-3: the rc leg expected the init's exit line AFTER the three-tile
+witness, but the compositor now fills only once the tool is gone, so the exit line
+came first and the sequential expect consumed past it -- the arm-order lesson in
+its purest form; one alternation now. Attempt 1: the tool's `restored 0 of 0` was
+TORN by tapestryd's new line (`restored 0 of 0` | `tapestryd: claim ...` |
+` program(s)`), and the leg's error arm `halcyon: .*(refused|...)` then matched a
+daemon's unrelated `resize-ack ... refused` two lines later because a Tcl `.*` spans
+lines. The tear's mechanism was userspace: libthyla-rs's `print!` wrote one syscall
+per format FRAGMENT and `println!` the newline as another, and the kernel console
+holds its writer role per WRITE. Both fixed in the same commit (the message says "the
+preceding commit" for the println fix; the staged-only vault lint refused that
+split, so it rode H-4d-1 -- recorded here). What stays: a FULL console ring takes
+what fits and returns short (kernel cons.c, documented: progress beats atomicity
+under congestion) -- gate witnesses key on a line's tail token.
+
+**Landed** `c96f5173` (both mirrors); gates panes / restore [29 s] / test.sh /
+session [51 s, first attempt after the fixes]; host tests libhalcyon 41, halcyon 13,
+halcyond 104. Unaudited (batched). NEXT in the run: H-4d-2 (the obj verb menu in
+session tiles; the scripts are drafted) and H-4d-3 (`halcyon welcome` + the
+device default layout bake + the gate's welcome/menu legs; drafted).
+
 ---
 
 ## Run 30 (2026-09-05, Fable 5.1, effort max): the KT-1 audit's round 2 — the fixes re-prosecuted, and the two the arithmetic had not reached
