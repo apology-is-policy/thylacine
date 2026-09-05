@@ -4,7 +4,7 @@ type: chg
 title: "sub-libtapestry brought current: the shared event ring (H-3c-2), the role constructors (H-3c/H-3d), the surface-leak Drop fix, the host tests"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["dbfe341f"]
 touched:
   - sub-libtapestry
 established: []
