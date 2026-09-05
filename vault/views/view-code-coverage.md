@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**376 owned · 104 unowned · 480 files (78% owned) · ~33185 unswept lines.**
+**382 owned · 98 unowned · 480 files (79% owned) · ~30713 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **65 files, ~29905 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -76,11 +76,11 @@ Excluded as harness and counted here rather than dropped: **65 files, ~29905 lin
 | usr/ports | 0 | 18 | 4033 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/lib | 48 | 9 | 3248 |
 | usr/kaua-term | 0 | 3 | 1518 |
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1028 |
 | arch | 34 | 4 | 971 |
+| usr/lib | 54 | 3 | 776 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/coreutils | 59 | 1 | 297 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
@@ -126,15 +126,12 @@ Excluded as harness and counted here rather than dropped: **65 files, ~29905 lin
 | usr/halcyond/src/main.rs | 1238 |
 | usr/quarry/src/main.rs | 1028 |
 | usr/halcyond/src/layout.rs | 974 |
-| usr/lib/libhalcyon/src/layout.rs | 940 |
 | usr/halcyon/src/main.rs | 874 |
 | usr/halcyond/src/menu.rs | 790 |
 | usr/kaua-term/src/lib.rs | 700 |
 | arch/arm64/uart.c | 674 |
 | usr/halcyond/src/session.rs | 648 |
-| usr/lib/cartoon/src/lib.rs | 616 |
 | usr/kaua-term/src/wire.rs | 518 |
-| usr/lib/libhalcyon/src/skeleton.rs | 492 |
 | kernel/joey.c | 478 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/halcyond/src/tile.rs | 450 |
@@ -158,7 +155,6 @@ Excluded as harness and counted here rather than dropped: **65 files, ~29905 lin
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
-| usr/lib/libhalcyon/src/theme.rs | 263 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/halcyond/src/chrome.rs | 261 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
@@ -179,7 +175,6 @@ Excluded as harness and counted here rather than dropped: **65 files, ~29905 lin
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
 | arch/arm64/uart.h | 151 |
-| usr/lib/ptyhold/src/lib.rs | 148 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/ports/tyrquake/tyr-glquake-launcher.c | 134 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
@@ -223,5 +218,4 @@ Excluded as harness and counted here rather than dropped: **65 files, ~29905 lin
 | kernel/include/thylacine/devramfs.h | 27 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.h | 21 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents_c.h | 14 |
-| usr/lib/libhalcyon/src/lib.rs | 13 |
 <!-- generated:end -->
