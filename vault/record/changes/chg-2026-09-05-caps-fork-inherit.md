@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-caps brought current: the Linux-clone fork-inherits-caps (rfork_forked_with_caps) + the resolved comment drift -- its first EARNED update"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["c2991edb"]
 touched:
   - sub-kernel-caps
 established: []
