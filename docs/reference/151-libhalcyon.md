@@ -402,3 +402,38 @@ offers on a `layout` obj come from `/lib/beacon/verbs` (`restore` / `save` /
 ls-gfx-restore's list/delete legs (the list shows `e2e` in the session tier;
 the delete removes it; a restore and a second delete then report no such
 layout).
+
+## The `tag` module + the anchor rules (H-4d-1, 2026-09-05)
+
+`libhalcyon::tag` is the one definition of a tag as a command line, shared
+by the two hosts of a tagged leaf: `argv_of` (ASCII-whitespace split, no
+quoting), `PROG_DIRS` (`/bin/`, `/`, `/goroot/bin/` — the shell's search),
+`prog_candidates` (a name with `/` is one candidate) and
+`resolve_prog(argv0, exists)` (the first candidate `exists` says is there,
+else the first — the shell-identical spawn error). The halcyon crate's lib
+re-exports the first three (libhalcyon is now its unconditional dep; pure
+no_std). `layout::anchor_last(root)` is true iff the root is a container
+whose LAST child is a Leaf `env` and no other env leaf exists — the saved
+tree wants the built part BEFORE the pre-existing tile; `layout::
+active_is_env(root)` is true iff the root container's active child is an
+env leaf — the saved focus is on that tile. Both drive the restore tool
+under a session (`docs/HALCYON.md` 13.7). Host tests:
+`resolve_takes_the_first_existing_candidate`,
+`anchor_last_means_one_env_leaf_last_under_the_root`.
+
+### Consumer: the restore tool under a session compositor (H-4d-1)
+
+`layout_restore` reads `HALCYON_SESSION` (the compositor's mark in the
+session's /env, `SESSION_ENV`) and the focused leaf from the dump header
+BEFORE the placeholder splits beside it (`Dump.focused`; the anchor). After
+the skeleton stands and the placeholder is gone: if `anchor_last(saved)`,
+`place_anchor_last` moves the anchor past every sibling the build put
+after it (`move <id> right|down` per the parent's mode, one step at a time,
+each verified by `Dump::siblings_of`; E_PERM — the environment's console —
+is said once and the built part stays after it; a tab/stack order is not
+a placement). Under the mark, phase 5 writes each tagged leaf's `tag` and
+stops (`pane N: <tag> (the session compositor hosts it)`, then `tagged N
+pane(s) for the session compositor`); no claim, no /env token, no spawn.
+The focus replay still runs over landed tiles, and `active_is_env(saved)`
+focuses the anchor at the end (`focus -> pane <anchor>`). The
+`restored 0 of 0 program(s)` tally is unchanged (the gates key on it).

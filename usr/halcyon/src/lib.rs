@@ -223,37 +223,10 @@ pub fn owner_is_env(owner: Option<u32>, me: u32) -> bool {
     }
 }
 
-/// A leaf's tag as the argv a restore spawns: the tag IS the command line
-/// (acme), split on ASCII whitespace -- no quoting, no shell (a tag that
-/// needs either names a shell explicitly). Empty for an empty/blank tag.
-pub fn argv_of(tag: &str) -> Vec<&str> {
-    tag.split_ascii_whitespace().collect()
-}
-
-/// The directories a bare program name is searched in, in order -- the shell's
-/// `resolve_command` list (`usr/utopia/.../eval/stmt.rs`), so a saved tag
-/// resolves to the same binary the shell would run. The kernel resolves a
-/// spawn name relative to the child's CWD (not a `$path` search), so the tool
-/// must expand a bare name itself.
-pub const PROG_DIRS: [&str; 3] = ["/bin/", "/", "/goroot/bin/"];
-
-/// The candidate paths for `argv0`, in probe order. A name containing `/` is
-/// used verbatim (one candidate); a bare name expands to the PROG_DIRS joins.
-/// The caller probes each (an O-read existence check) and, on no hit, spawns
-/// the first (`/bin/<name>`) for a clean, shell-identical spawn error.
-pub fn prog_candidates(argv0: &str) -> Vec<String> {
-    if argv0.contains('/') {
-        return alloc::vec![String::from(argv0)];
-    }
-    PROG_DIRS
-        .iter()
-        .map(|d| {
-            let mut s = String::from(*d);
-            s.push_str(argv0);
-            s
-        })
-        .collect()
-}
+/// The tag-as-command-line helpers now live in `libhalcyon::tag` (H-4d:
+/// the session compositor hosts tagged leaves too, off the same
+/// definitions); re-exported so the tool's callers + tests are unchanged.
+pub use libhalcyon::tag::{argv_of, prog_candidates, PROG_DIRS};
 
 /// The directory chain to `mkdir -p` (top-down, each ignoring "already
 /// exists") before a session write: `<home>/lib`, `<home>/lib/halcyon`,

@@ -69,6 +69,9 @@ const TAG_READ_CAP: usize = layout::MAX_TAG_LEN + 8;
 /// The claim token's /env name (libtapestry reads it back on the child's
 /// first open) and its path.
 const CLAIM_ENV_PATH: &str = "/env/TAPESTRY_CLAIM";
+/// H-4d: the per-user session compositor's mark in the session's /env; while
+/// it is set a restore only TAGS its leaves (the compositor hosts them).
+const SESSION_ENV: &str = "HALCYON_SESSION";
 /// The placeholder surface: the smallest weave the compositor takes; it is
 /// never presented and lives only while the skeleton is built.
 const PLACEHOLDER_W: u32 = 16;
@@ -403,9 +406,39 @@ enum DumpRow {
 struct Dump {
     /// (depth, row), pre-order as printed.
     rows: Vec<(usize, DumpRow)>,
+    /// The focused leaf, from the header (`epoch N focused M`).
+    focused: Option<u32>,
 }
 
 impl Dump {
+    /// The mode of `id`'s parent container and that container's children in
+    /// order (None: `id` is the root, or unknown).
+    fn siblings_of(&self, id: u32) -> Option<(LayoutMode, Vec<u32>)> {
+        let at = self.rows.iter().position(|(_, r)| match r {
+            DumpRow::Leaf { id: i, .. } | DumpRow::Cont { id: i, .. } => *i == id,
+        })?;
+        let depth = self.rows[at].0;
+        if depth == 0 {
+            return None;
+        }
+        let pat = self.rows[..at]
+            .iter()
+            .rposition(|(d, r)| *d + 1 == depth && matches!(r, DumpRow::Cont { .. }))?;
+        let mode = match self.rows[pat].1 {
+            DumpRow::Cont { mode, .. } => mode,
+            DumpRow::Leaf { .. } => return None,
+        };
+        let kids = self.rows[pat + 1..]
+            .iter()
+            .take_while(|(d, _)| *d > depth - 1)
+            .filter(|(d, _)| *d == depth)
+            .map(|(_, r)| match r {
+                DumpRow::Leaf { id, .. } | DumpRow::Cont { id, .. } => *id,
+            })
+            .collect();
+        Some((mode, kids))
+    }
+
     fn leaf_ids(&self) -> Vec<u32> {
         self.rows
             .iter()
@@ -461,9 +494,15 @@ impl Dump {
 /// aborts rather than guess at the tree).
 fn parse_dump(text: &str) -> Option<Dump> {
     let mut lines = text.split('\n');
-    if !lines.next()?.starts_with("epoch ") {
+    let header = lines.next()?;
+    if !header.starts_with("epoch ") {
         return None;
     }
+    let mut hit = header.split_ascii_whitespace();
+    let focused = hit
+        .find(|t| *t == "focused")
+        .and_then(|_| hit.next())
+        .and_then(|t| t.parse::<u32>().ok());
     let mut rows: Vec<(usize, DumpRow)> = Vec::new();
     for raw in lines {
         let line = raw.trim_end_matches('\r');
@@ -495,7 +534,7 @@ fn parse_dump(text: &str) -> Option<Dump> {
         };
         rows.push((depth, row));
     }
-    Some(Dump { rows })
+    Some(Dump { rows, focused })
 }
 
 /// The ids in `after` that are not in `before`.
@@ -621,6 +660,16 @@ fn layout_restore(name: &str) -> i64 {
             return 1;
         }
     };
+    // H-4d: under the per-user session compositor (the mark it seeds into
+    // the session's /env) the tool arranges + TAGS the leaves and the
+    // compositor hosts each tag in a terminal tile once this conn is gone
+    // (its split reservations lift at retire); on the console path the tool
+    // spawns the tags itself, placed by claim.
+    let session_hosts = env::var(SESSION_ENV).is_some();
+    // The anchor: the tile focused before the placeholder splits beside it
+    // -- the environment's own (the console, or the session's shell), whose
+    // saved position the built part is arranged around.
+    let anchor_tile = tap.dump().and_then(|d| d.focused);
 
     // 1. The placeholder lands beside the focused tile (the console): its
     //    leaf is the one tile this session may split.
@@ -743,10 +792,21 @@ fn layout_restore(name: &str) -> i64 {
     //    empty and this session's (stamped at each split).
     drop(ph);
 
+    // 4b. The saved tree put the environment's tile LAST: move the anchor
+    //     past what was built (the welcome's tour-left, shell-right shape).
+    if layout::anchor_last(&saved) {
+        if let Some(f) = anchor_tile {
+            place_anchor_last(&tap, f);
+        }
+    }
+
     // 5. Placement: per tagged leaf, mint its claim, name it, seed the token
     //    into our /env (each spawn deep-copies the env as it stands), spawn.
+    //    Under a session compositor: name it and stop -- the compositor hosts
+    //    the tag in a terminal tile the moment this process exits.
     let mut spawned: Vec<(u32, i32, String)> = Vec::new();
     let mut failed: usize = 0;
+    let mut tagged: usize = 0;
     for pl in &plan.leaves {
         if pl.tag.trim().is_empty() {
             continue;
@@ -758,6 +818,19 @@ fn layout_restore(name: &str) -> i64 {
                 continue;
             }
         };
+        if session_hosts {
+            if tap.write(&format!("pane/{}/tag", id), &pl.tag) < 0 {
+                eprintln!("halcyon: pane {}: tag write refused", id);
+                failed += 1;
+                continue;
+            }
+            println!(
+                "halcyon: pane {}: {} (the session compositor hosts it)",
+                id, pl.tag
+            );
+            tagged += 1;
+            continue;
+        }
         let token = match tap.read(&format!("pane/{}/claim", id)) {
             Some(s) if s.trim().len() == 32 => match u128::from_str_radix(s.trim(), 16) {
                 Ok(t) => t,
@@ -815,8 +888,23 @@ fn layout_restore(name: &str) -> i64 {
             last_focus = Some(id);
         }
     }
+    // The saved focus on the environment's tile: hand it back to the anchor
+    // (the welcome leaves the user at the shell prompt, not on the tour).
+    if layout::active_is_env(&saved) {
+        if let Some(f) = anchor_tile {
+            if tap.verb(&format!("focus {}", f)) >= 0 {
+                last_focus = Some(f);
+            }
+        }
+    }
     if let Some(id) = last_focus {
         println!("halcyon: focus -> pane {}", id);
+    }
+    if session_hosts {
+        println!(
+            "halcyon: tagged {} pane(s) for the session compositor",
+            tagged
+        );
     }
     let n_landed = landed.iter().filter(|l| **l).count();
     for ((id, pid, tag), l) in spawned.iter().zip(landed.iter()) {
@@ -839,6 +927,51 @@ fn layout_restore(name: &str) -> i64 {
         0
     } else {
         1
+    }
+}
+
+/// H-4d: move the anchor tile `f` past every sibling the build put after
+/// it, one `move` per step, each verified against the dump. The environment's
+/// tile on the console path is not ours to move (E_PERM): said once, the
+/// built part then stays after it, as before.
+fn place_anchor_last(tap: &Tap, f: u32) {
+    for _ in 0..layout::MAX_NODES {
+        let dump = match tap.dump() {
+            Some(d) => d,
+            None => return,
+        };
+        let (mode, kids) = match dump.siblings_of(f) {
+            Some(x) => x,
+            None => return,
+        };
+        let at = match kids.iter().position(|&k| k == f) {
+            Some(i) => i,
+            None => return,
+        };
+        if at + 1 >= kids.len() {
+            return;
+        }
+        let dir = match mode {
+            LayoutMode::SplitH => "right",
+            LayoutMode::SplitV => "down",
+            _ => return, // a tab/stack order is not a placement
+        };
+        let rc = tap.verb(&format!("move {} {}", f, dir));
+        if rc < 0 {
+            println!(
+                "halcyon: the environment's tile keeps its place ({}: not ours to move)",
+                rc
+            );
+            return;
+        }
+        let after = tap
+            .dump()
+            .and_then(|d| d.siblings_of(f))
+            .and_then(|(_, k)| k.iter().position(|&x| x == f));
+        if after != Some(at + 1) {
+            eprintln!("halcyon: anchor move diverged at pane {}", f);
+            return;
+        }
     }
 }
 

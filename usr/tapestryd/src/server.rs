@@ -6466,7 +6466,7 @@ impl Comp {
         }
     }
 
-    pub fn layout_cmd(&mut self, actor: Actor, s: &str) -> Result<(), u32> {
+    pub fn layout_cmd(&mut self, actor: Actor, creator: u64, s: &str) -> Result<(), u32> {
         let s = s.trim();
         let mut it = s.splitn(2, ' ');
         let verb = it.next().ok_or(p9::E_INVAL)?;
@@ -6531,14 +6531,16 @@ impl Comp {
             }
             _ => return Err(p9::E_INVAL),
         };
-        self.pane_cmd(actor, id, &cmd)
+        self.pane_cmd(actor, creator, id, &cmd)
     }
 
     /// One layout mutation targeting pane `id` (shared by the layout file
     /// and each pane's ctl). Every successful mutation reconciles.
     /// Structural verbs restore a zoomed layout first (the tmux rule);
     /// `focus` keeps zoom only when it names the zoomed pane itself.
-    pub fn pane_cmd(&mut self, actor: Actor, id: u32, cmd: &str) -> Result<(), u32> {
+    /// `creator` is the writing conn's id (0 for the compositor's own
+    /// internal calls): a `split` stamps it on the empties it makes (H-4d).
+    pub fn pane_cmd(&mut self, actor: Actor, creator: u64, id: u32, cmd: &str) -> Result<(), u32> {
         let slot = self.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
         let cmd = cmd.trim();
         // The trust model, per verb (syntax first, then authority): a
@@ -6574,6 +6576,14 @@ impl Comp {
             // one confers nothing beyond the close every peer already holds.
             if self.layout.is_empty_leaf(slot) {
                 self.layout.set_owner_principal(slot, owner);
+            }
+            // H-4d: both empties are RESERVED to the conn that split them
+            // until it goes (`Pane.creator_conn`): a restore tool's skeleton
+            // is never filled by its own session compositor mid-build. A
+            // hosted original keeps its surface; the stamp is inert there.
+            self.layout.set_creator(new_leaf, creator);
+            if self.layout.is_empty_leaf(slot) {
+                self.layout.set_creator(slot, creator);
             }
         } else if let Some(rest) = cmd.strip_prefix("move ") {
             let d = Dir::parse(rest.trim()).ok_or(p9::E_INVAL)?;
@@ -6787,6 +6797,44 @@ impl Comp {
             }
         }
         self.session_conns.retain(|&(c, _)| c != conn_id);
+        // H-4d: the empties this conn split are reserved no longer -- they
+        // are the principal's to host now (a restore tool exits after
+        // tagging them). Nothing about the geometry changed, so the
+        // reconcile above fanned no TEV_LAYOUT for it: fan one here, else
+        // the session compositor learns of the release only at its next
+        // unrelated relayout.
+        let released = self.layout.release_creator(conn_id);
+        if released > 0 {
+            #[cfg(feature = "test-mode")]
+            say!(
+                "tapestryd: conn {} released {} reserved empty leaf/leaves",
+                conn_id,
+                released
+            );
+            self.layout.epoch += 1;
+            self.notify_session_layout();
+        }
+    }
+
+    /// Fan one TEV_LAYOUT to the declared session conn (its lowest-slot
+    /// surface) outside a reconcile: a tree-state change with no geometry
+    /// in it (a reservation release). A push that wedges retires the
+    /// surface, as the reconcile fan does.
+    fn notify_session_layout(&mut self) {
+        if let Some(n) = self.session_notify_surface() {
+            let ev = Tevent {
+                kind: TEV_LAYOUT,
+                code: 0,
+                value: self.layout.epoch as u32,
+                rune: 0,
+                mods: 0,
+                flags: 0,
+                tick: self.tick,
+            };
+            if !self.push_event(n, ev) {
+                self.retire(n);
+            }
+        }
     }
 
     /// Is `conn` the declared session conn (the seat)?
@@ -7616,7 +7664,7 @@ impl Comp {
             ChordAction::Close => {
                 let f = self.layout.focused;
                 if let Some(id) = self.layout.id_of(f) {
-                    let _ = self.pane_cmd(Actor::Renderer, id, "close");
+                    let _ = self.pane_cmd(Actor::Renderer, 0, id, "close");
                 }
             }
         }
@@ -13747,13 +13795,33 @@ impl Conn {
                 // Placement is a capability: mint only on a leaf the reader
                 // owns. E_PERM (as for an occupied leaf) -- both are "this
                 // placement is not available to you".
-                let owns = match self.actor() {
+                let actor = self.actor();
+                let owns = match actor {
                     Actor::Renderer => true,
                     Actor::Session(p) => comp.layout.pane_owner_principal(slot) == p,
                     Actor::Client(_) => false,
                 };
                 if !owns {
                     return self.err(tag, p9::E_PERM);
+                }
+                // H-4d: a peer-split empty leaf is RESERVED to the conn that
+                // split it while that conn lives (`Pane.creator_conn`): a
+                // sibling conn of the same principal -- the session
+                // compositor filling every empty it owns -- is told to try
+                // later (E_AGAIN, not E_PERM: the leaf IS its principal's,
+                // just not yet). The reservation lifts at the creator's
+                // retire, which fans TEV_LAYOUT to the declared session so
+                // the retry is prompt. The renderer (the environment) is
+                // never held off.
+                let creator = comp.layout.pane_creator(slot);
+                if creator != 0 && creator != self.conn_id && !matches!(actor, Actor::Renderer) {
+                    #[cfg(feature = "test-mode")]
+                    say!(
+                        "tapestryd: claim on pane {} reserved by conn {} (E_AGAIN)",
+                        id,
+                        creator
+                    );
+                    return self.err(tag, p9::E_AGAIN);
                 }
                 let mut raw = [0u8; 16];
                 if libthyla_rs::rand::fill_bytes(&mut raw).is_err() {
@@ -14699,7 +14767,7 @@ impl Conn {
         match pane_fk(path) {
             PFK_CTL => {
                 self.layout_verb_budget()?;
-                comp.pane_cmd(actor, id, s)
+                comp.pane_cmd(actor, self.conn_id, id, s)
             }
             PFK_MODE => {
                 let mode = Mode::parse(s).ok_or(p9::E_INVAL)?;
@@ -14775,7 +14843,7 @@ impl Conn {
             return match core::str::from_utf8(a.data)
                 .map_err(|_| p9::E_INVAL)
                 .and_then(|s| self.layout_verb_budget().map(|_| s))
-                .and_then(|s| comp.layout_cmd(actor, s))
+                .and_then(|s| comp.layout_cmd(actor, self.conn_id, s))
             {
                 Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                 Err(e) => self.err(tag, e),
@@ -15665,7 +15733,11 @@ impl Conn {
         // Default-DENY: only the determinism verbs are exempt (see
         // is_ungated_ctl); ctl READS stay ungated (the geometry query,
         // a separate read path).
-        if !Self::is_ungated_ctl(s) && !self.peer_is_renderer() {
+        // H-4d: the menu verbs (`menu place` / `menu dismiss`) are ALSO the
+        // declared session compositor's -- the arms below still require the
+        // menu surface to be the caller's own process's.
+        let session_menu_verb = s.starts_with("menu ") && comp.session_declared(self.conn_id);
+        if !Self::is_ungated_ctl(s) && !self.peer_is_renderer() && !session_menu_verb {
             return Err(p9::E_PERM);
         }
         if s == "mode auto" {
@@ -15989,8 +16061,14 @@ impl Conn {
                 // `menu place`); renderer-gated like chrome -- an ungated
                 // menu role would let any client float a surface over
                 // another client's pane and take its input.
+                // H-4d: the DECLARED session compositor is the user's rio
+                // (HALCYON.md 14.12): it summons the obj verb menu over its
+                // own tiles, so it mints menu surfaces on the renderer's
+                // terms. The seat is one conn per display and held only
+                // while it hosts, so no other same-user program can reach
+                // this arm by declaring past a live compositor.
                 (Role::Menu, None) => {
-                    if !self.peer_is_renderer() {
+                    if !self.peer_is_renderer() && !comp.session_declared(self.conn_id) {
                         return Err(p9::E_PERM);
                     }
                     Host::Menu

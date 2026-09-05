@@ -529,6 +529,30 @@ gate, raw, no surface behind it])
 plus the collapse coda (the battery exits, panes collapse, the console
 returns to fullscreen direct scanout, `-c` passes again).
 
+**The creator reservation (H-4d-1, 2026-09-05).** `Pane.creator_conn`: a
+ctl `split` (`pane_cmd`, which now takes the writing conn's id; the
+compositor's own internal calls pass 0) stamps the writing conn on the
+new empty leaf AND on the original when it was empty — the same two
+empties the H-4b-2 owner stamp covers; a chord split stamps none. The
+claim mint (`pane/<id>/claim`, offset 0) answers **E_AGAIN** to a conn
+that is not the creator while the creator lives (after the owner check;
+`Actor::Renderer` is exempt), said in test builds as `claim on pane N
+reserved by conn C (E_AGAIN)`. `retire_conn` clears every reservation
+the dying conn held (`Layout::release_creator`, counting the EMPTY leaves
+it freed) and, when it freed any, bumps the epoch and fans one
+`TEV_LAYOUT` to the declared session (`notify_session_layout`; test
+builds say `conn C released N reserved empty leaf/leaves`) — a release
+changes no geometry, so the reconcile's structural fan would never fire
+for it. Why: under the per-user session compositor a `halcyon layout
+restore` builds its skeleton with splits while the compositor, the same
+principal, hears every TEV_LAYOUT and fills every empty it owns; both
+mint claims on the same leaves and the last mint wins. A mark made
+AFTER the split (a tag, a claim) leaves a window the compositor enters;
+the reservation is made BY the split. rio's rule: a window a program
+creates is that program's, not the menu's. Gate: ls-gfx-session's rc leg
+(the reservation line is the positive control that the compositor's
+mint was refused, not merely beaten) and its welcome leg.
+
 ## The resize protocol + pane close (G-6b): weave generations
 
 **Weave generations.** A surface's `weave`/`resource_id` name its
@@ -767,7 +791,10 @@ HALCYON.md 13.6 "Menus -- THE GATE" as built (2026-09-02). The renderer
 summons ONE ephemeral menu; from the placement on, the compositor owns it.
 
 **The surface.** `create W H role=menu` (`surface_ctl`; syntax first, then
-`peer_is_renderer` -> E_PERM; a `bind=` with the menu role is E_INVAL) mints
+`peer_is_renderer() || session_declared(conn)` -> else E_PERM — the DECLARED
+session compositor summons menus over its own tiles since H-4d-1, and the
+`menu ` verbs pass the cfg-3 gate for it on the same test, the per-process
+owner check below unchanged; a `bind=` with the menu role is E_INVAL) mints
 a `Surface { is_menu: true }`: never hosted (`create` returns before the
 G-6 host step), no Direct count, no pointer routing by construction --
 `surface_target` names it ONLY while it is the placed menu

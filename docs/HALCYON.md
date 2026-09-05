@@ -770,6 +770,14 @@ AND the chrome; the H-2 transcript palette (`parchment_sheet()` from
 `vt::THEMES[1]`) is swapped for the Daylight §1 tokens in the same chunk, so
 transcript and chrome match from the start.
 
+**Menus admit the declared session (H-4d-1, 2026-09-05).** The `role=menu`
+create and the `menu place` / `menu dismiss` verbs are the renderer's OR the
+DECLARED session compositor's (the seat holder of §14.12): the per-user
+compositor is the user's rio and summons the obj verb menu over its own
+tiles. The seat is one conn per display, held only while it hosts, so no
+other same-user program reaches the arm past a live compositor; the
+per-process owner check on the placed surface is unchanged.
+
 **Menus (H-3c — THE GATE).** ONE ephemeral `Role::Chrome` surface, summoned by
 halcyond via the gated global-ctl verb `menu place <x> <y> <w> <h>` /
 `menu dismiss` (names provisional; the default-deny gate). Compositor-placed at
@@ -1084,10 +1092,37 @@ authority) is not audit-bearing on its own.
   `/lib/halcyon/layouts/default` (the first-launch welcome, H-4d), else
   nothing — rio's `-i` idiom; no marker state (an empty rc opts out of the
   welcome). The child is reaped by the compositor (a bounded idle poll while
-  it runs) and killed at logout. OWED at H-4d: a restore with TAGGED leaves
-  under the session compositor races the compositor's own empty-leaf tile
-  spawn for the same leaves (both same-principal; last claim wins) — the
-  compositor must leave a tagged empty leaf to whoever tagged it.
+  it runs) and killed at logout.
+- **Who hosts a tagged leaf under the session compositor (H-4d-1 AS-BUILT,
+  2026-09-05).** Three rules close the race H-4c left owed (the tool's
+  splits vs the compositor filling every empty it owns, same principal,
+  last claim wins). (1) **A peer-split empty leaf is its creator's until
+  the creator's conn goes**: tapestryd stamps the writing conn on both
+  empties a ctl `split` makes (`Pane.creator_conn`; a chord split stamps
+  none), and while that conn lives the claim mint answers E_AGAIN to every
+  other conn of the principal (the renderer is never held off); the
+  reservations lift at the conn's retire, which fans one TEV_LAYOUT to the
+  declared session (a release changes no geometry). The mark is made BY
+  the split, so no window exists for a mark made after it. (2) **The tag
+  of an empty leaf is the tile's command line** (acme; rio's `window
+  cmd`): the session compositor reads `pane/<id>/tag` after its mint and
+  hosts `kaua-term cols rows <tag argv>` — empty = the shell with the
+  session's `--home`, a tagged `ut` gets the same home, a bare name
+  resolves through the shell's search (`libhalcyon::tag`). (3) **The tool
+  defers to a present compositor**: the compositor marks its session
+  (`/env/HALCYON_SESSION=on`, inherited by every tile and the init child);
+  a restore that sees the mark arranges + TAGS its leaves and exits, and
+  the compositor hosts each tag the moment the tool's conn is gone. On the
+  console path (no mark) the tool spawns its tags itself, placed by claim,
+  as before. Two placement rules give the welcome its shape: a saved tree
+  whose ROOT's LAST child is the one `env` leaf puts the built part BEFORE
+  the anchor (the tool moves the pre-existing focused tile past what it
+  built; the environment's console refuses with E_PERM and keeps its
+  place), and a saved `active` naming that env leaf hands the focus to the
+  anchor at the end. Graphical programs named by a tag under a session
+  therefore open BESIDE their terminal tile (focus placement) — the
+  rio-shaped refinement (a tile's graphical child stacking over its
+  terminal) is v1.x.
 
 ### 13.8 Audit + scripture-sync obligations (the §18.10 pattern; owed at
 ### each chunk's close)

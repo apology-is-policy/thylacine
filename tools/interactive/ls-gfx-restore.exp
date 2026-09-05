@@ -73,7 +73,7 @@ expect {
     -re {halcyon: pane \d+: tapestry-demo \(pid \d+\)} {
         lc_pass "restore: the tool spawned a demo into a built leaf"
     }
-    -re {halcyon: .*(refused|malformed|unreachable|no layout)} {
+    -re {halcyon: [^\n]*(refused|malformed|unreachable|no layout)} {
         lc_fail "restore: the tool errored before spawning a program"
     }
     -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during restore" }

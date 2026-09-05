@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 78 unowned · 483 files (83% owned) · ~20479 unswept lines.**
+**405 owned · 79 unowned · 484 files (83% owned) · ~20656 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30236 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -75,11 +75,11 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30236 lin
 | usr/ports | 0 | 18 | 4033 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/halcyon | 0 | 2 | 1493 |
+| usr/halcyon | 0 | 2 | 1599 |
 | usr/quarry | 0 | 1 | 1028 |
 | arch | 34 | 4 | 971 |
+| usr/lib | 56 | 3 | 461 |
 | usr/stratumd-stub | 0 | 1 | 453 |
-| usr/lib | 56 | 2 | 390 |
 | usr/coreutils | 59 | 1 | 297 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/susp-mask-child | 0 | 1 | 139 |
@@ -122,12 +122,12 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30236 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
+| usr/halcyon/src/main.rs | 1151 |
 | usr/quarry/src/main.rs | 1028 |
-| usr/halcyon/src/main.rs | 1018 |
 | arch/arm64/uart.c | 674 |
 | kernel/joey.c | 478 |
-| usr/halcyon/src/lib.rs | 475 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
+| usr/halcyon/src/lib.rs | 448 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 390 |
 | kernel/include/thylacine/errno.h | 388 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
@@ -179,6 +179,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30236 lin
 | arch/arm64/psci.c | 78 |
 | kernel/include/thylacine/vdso.h | 73 |
 | usr/lib/pouch/compiler-rt/aarch64-thylacine.c | 72 |
+| usr/lib/libhalcyon/src/tag.rs | 71 |
 | usr/pouch-hello/pouch-hello-susp.c | 71 |
 | arch/arm64/psci.h | 68 |
 | kernel/vdso.c | 68 |

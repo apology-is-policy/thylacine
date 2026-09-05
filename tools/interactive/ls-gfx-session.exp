@@ -415,25 +415,52 @@ expect {
     eof     { lc_fail "qemu exited awaiting the session init" }
 }
 expect {
-    -ex "halcyon: restored 0 of 0 program(s)" { lc_pass "H-4c: the rc restored the saved layout through the session tool" }
-    -re {halcyon: .*(refused|malformed|unreachable|no layout)} { lc_fail "H-4c: the rc's restore errored" }
+    -re {halcyon: restored 0 of 0 program\(s\)} { lc_pass "H-4c: the rc restored the saved layout through the session tool" }
+    -re {halcyon: [^\n]*(refused|malformed|unreachable|no layout|diverged)} { lc_fail "H-4c: the rc's restore errored: $expect_out(0,string)" }
     -re {halcyond: session init exited \(code [1-9]} { lc_fail "H-4c: the rc exited non-zero before restoring" }
     -re {EXTINCTION:} { lc_extinction_fail "extinction during the rc restore" }
     timeout { lc_fail "H-4c: the rc's restore never reported" }
     eof     { lc_fail "qemu exited during the rc restore" }
 }
-expect {
-    -re {tapestryd: session-tiling active=3 } { lc_pass "H-4c: the compositor filled the two restored leaves -- three tiles" }
-    -re {EXTINCTION:} { lc_extinction_fail "extinction filling the restored leaves" }
-    timeout { lc_fail "H-4c: the tiling never reached three tiles (the restored empties were not filled)" }
-    eof     { lc_fail "qemu exited awaiting the three-tile witness" }
+# H-4d: the tool's leaves are RESERVED to it while it lives (the compositor's
+# mints answer E_AGAIN -- the positive control that the race this exists for
+# was refused, not merely won), released at its exit, and only then filled:
+# the init's exit line and the three-tile witness arrive in EITHER order, so
+# match the set with one alternation (the logout triple's pattern). The
+# reservation token is matched by its tail: a daemon line landing mid-write
+# on the shared console has torn the prefix before.
+set saw_reserved 0
+set saw_released 0
+set saw_three 0
+set saw_exit 0
+set tries 0
+while {(!$saw_reserved || !$saw_released || !$saw_three || !$saw_exit) && $tries < 10} {
+    incr tries
+    expect {
+        -re {reserved by conn [0-9]+ \(E_AGAIN\)|released [0-9]+ reserved empty leaf/leaves|tapestryd: session-tiling active=3 |halcyond: session init exited \(code ([0-9-]+)\)} {
+            set m $expect_out(0,string)
+            if {[string match "*E_AGAIN*" $m]} {
+                set saw_reserved 1
+                lc_step "H-4d: the compositor's mint on a restore-built leaf was REFUSED while the tool lived"
+            } elseif {[string match "*released*" $m]} {
+                set saw_released 1
+                lc_step "H-4d: the tool's exit released its reservations"
+            } elseif {[string match "*active=3*" $m]} {
+                set saw_three 1
+                lc_pass "H-4c: the compositor filled the two restored leaves -- three tiles"
+            } else {
+                set saw_exit 1
+                if {$expect_out(1,string) ne "0"} { lc_fail "H-4c: the init child exited $expect_out(1,string)" }
+                lc_pass "H-4c: the init child exited clean and was reaped"
+            }
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction filling the restored leaves" }
+        timeout { lc_fail "H-4c/H-4d: rc-leg markers missing (reserved=$saw_reserved released=$saw_released three=$saw_three exit=$saw_exit)" }
+        eof     { lc_fail "qemu exited awaiting the rc-leg markers" }
+    }
 }
-expect {
-    -re {halcyond: session init exited \(code 0\)} { lc_pass "H-4c: the init child exited clean and was reaped" }
-    -re {halcyond: session init exited \(code [1-9-]} { lc_fail "H-4c: the init child exited non-zero" }
-    -re {EXTINCTION:} { lc_extinction_fail "extinction reaping the init child" }
-    timeout { lc_fail "H-4c: the init child was never reaped" }
-    eof     { lc_fail "qemu exited awaiting the init reap" }
+if {!$saw_reserved || !$saw_released || !$saw_three || !$saw_exit} {
+    lc_fail "H-4c/H-4d: rc-leg markers missing (reserved=$saw_reserved released=$saw_released three=$saw_three exit=$saw_exit)"
 }
 
 lc_quit

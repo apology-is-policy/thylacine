@@ -3398,10 +3398,11 @@ macro_rules! println {
         let _ = <$crate::io::Stdout as $crate::io::Write>::write_all(
             &mut $crate::io::stdout(), b"\n");
     }};
+    // The line AND its newline in one write (Stdout::write_fmt formats the
+    // whole statement first): a newline written separately let another
+    // writer's line glue onto this one's end.
     ($($arg:tt)*) => {{
-        $crate::print!($($arg)*);
-        let _ = <$crate::io::Stdout as $crate::io::Write>::write_all(
-            &mut $crate::io::stdout(), b"\n");
+        $crate::print!("{}\n", core::format_args!($($arg)*));
     }};
 }
 
@@ -3422,8 +3423,6 @@ macro_rules! eprintln {
             &mut $crate::io::stderr(), b"\n");
     }};
     ($($arg:tt)*) => {{
-        $crate::eprint!($($arg)*);
-        let _ = <$crate::io::Stderr as $crate::io::Write>::write_all(
-            &mut $crate::io::stderr(), b"\n");
+        $crate::eprint!("{}\n", core::format_args!($($arg)*));
     }};
 }

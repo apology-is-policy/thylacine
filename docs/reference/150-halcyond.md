@@ -631,10 +631,26 @@ that restores it, a logout, a re-login: the init line, the tool's
 `restored 0 of 0 program(s)`, the tiling witness at three tiles (the root tile
 plus the two restored empties the compositor fills), the exit line.
 
-Known limit (OWED at H-4d): a restore of TAGGED leaves under the session
-compositor races `reconcile`'s empty-leaf tile spawn for the same leaves
-(same principal; the last claim wins). The fix shape is the compositor
-skipping an empty leaf that carries a tag (the tool tags before it spawns).
+**A tagged leaf is hosted by the compositor (H-4d-1).** The race H-4c left
+owed (a restore's TAGGED leaves vs `reconcile`'s empty-leaf tile spawn,
+same principal, last claim wins) is closed on the server by the creator
+reservation (139-tapestryd.md: a peer-split empty leaf's claim mint answers
+E_AGAIN to every other conn of the principal until the creator's conn
+retires, which fans one TEV_LAYOUT). `reconcile`'s mint on such a leaf
+fails -> the candidate is skipped (not `closed`) and retried on the next
+TEV_LAYOUT — the release's. After a successful mint it reads
+`pane/<id>/tag` and hosts the tag as the tile's command line
+(`tiles::tile_command`, pure, host-tested): empty = `/bin/ut --home <home>`,
+a tagged `ut` gets the home when it named none, a bare program resolves
+through the shell's search (`libhalcyon::tag::resolve_prog` over `PROG_DIRS`,
+`fs::exists` probing; not found = `/bin/<name>` for the shell-identical
+error). `SessionTile::spawn` takes the argv; its line says it (`session
+tile leaf=N spawned pid=P CxR <argv>`). At start `run` writes
+`/env/HALCYON_SESSION=on` (`SESSION_ENV_PATH`; every tile + the init child
+inherit the deep copy): a `halcyon layout restore` that sees the mark only
+tags its leaves and exits. Test builds say `session tile leaf=N presents
+objs (K)` the first time a tile's transcript holds a Beacon object — the
+witness that a tagged program's rich frames reached the model.
 
 ## Tests
 

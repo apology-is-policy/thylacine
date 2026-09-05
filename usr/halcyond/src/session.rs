@@ -26,10 +26,11 @@ use halcyond::layout::{daylight_sheet, Sheet};
 use halcyond::raster::GlyphSource;
 use halcyond::session_init;
 use halcyond::tile::Tile;
-use halcyond::tiles::plan_tiles;
+use halcyond::tiles::{plan_tiles, tile_command};
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
 use libhalcyon::theme::daylight_palette;
 use libthyla_rs::fs::{self, File};
+use libthyla_rs::io::Write;
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_poll, t_read, t_write, TPollFd, T_POLLHUP, T_POLLIN, T_POLLOUT};
@@ -89,6 +90,12 @@ const DOWN_OMITTED_POLL_MS: i32 = 10;
 /// proc-table slot until the next wake otherwise).
 const INIT_REAP_POLL_MS: i32 = 200;
 
+/// H-4d: the mark this compositor leaves in the session's /env (every tile
+/// and the init child inherit it): a `halcyon layout restore` that sees it
+/// only TAGS the leaves it builds -- the compositor hosts each tag in a
+/// terminal tile once the tool's conn is gone.
+const SESSION_ENV_PATH: &str = "/env/HALCYON_SESSION";
+
 /// How many connect iterations tolerate a refused `session on` before the
 /// compositor runs UNDECLARED: the seat may be mid-handover (the previous
 /// compositor's conn not yet retired), which clears within milliseconds.
@@ -143,6 +150,7 @@ fn leaf_geometry(troot: i64, id: u32) -> Option<(u32, u32)> {
 /// leaf `leaf`, the two pipe ends (kept alive by value so their fds stay
 /// open), and the `Tile` grid+scrollback model fed by the child's records.
 struct SessionTile {
+    leaf: u32,
     surf: Surface,
     child: Child,
     // The parent pipe ends: fd 0 = down (we write Key/Resize Input), fd 1 =
@@ -159,6 +167,8 @@ struct SessionTile {
     cols: u16,
     rows: u16,
     dirty: bool,
+    /// The one-shot "this tile presents objects" witness (test builds).
+    objs_said: bool,
     /// None = live; Some(code) = the child is gone. A clean exit closes the
     /// leaf immediately (reaped there); a crash keeps the tile as a frozen
     /// affordance (14.11.10) -- its pipe skipped, its last frame held -- reaped
@@ -180,22 +190,22 @@ enum Ingested {
 }
 
 impl SessionTile {
-    /// Spawn a `kaua-term` on `ut` sized to `surf`, wired to the two pipes.
+    /// Spawn a `kaua-term` hosting `argv` (the tile's command line: the
+    /// shell, or the leaf's tag -- `tile_command`) sized to `surf`, wired to
+    /// the two pipes.
     fn spawn(
         leaf: u32,
         surf: Surface,
         geom: Geom,
-        home: Option<&str>,
+        argv: &[String],
         budget: usize,
     ) -> Option<SessionTile> {
         let cols = ((surf.w as i32 / geom.cell_w).max(1)) as u16;
         let rows = ((surf.h as i32 / geom.cell_h).max(1)) as u16;
         let mut cmd = Command::new("/bin/kaua-term");
-        cmd.arg(format!("{}", cols))
-            .arg(format!("{}", rows))
-            .arg("/bin/ut");
-        if let Some(h) = home {
-            cmd.arg("--home").arg(h);
+        cmd.arg(format!("{}", cols)).arg(format!("{}", rows));
+        for a in argv {
+            cmd.arg(a.clone());
         }
         // The identity axis stops here whatever the parent holds: a tile's
         // programs never spawn as another principal (login masks it too; this
@@ -221,13 +231,15 @@ impl SessionTile {
         let down_fd = down.as_raw_fd() as i64;
         let up_fd = up.as_raw_fd() as i64;
         say!(
-            "halcyond: session tile leaf={} spawned pid={} {}x{}",
+            "halcyond: session tile leaf={} spawned pid={} {}x{} {}",
             leaf,
             pid,
             cols,
-            rows
+            rows,
+            argv.join(" ")
         );
         Some(SessionTile {
+            leaf,
             surf,
             child,
             _down: down,
@@ -241,6 +253,7 @@ impl SessionTile {
             cols,
             rows,
             dirty: true,
+            objs_said: false,
             exit: None,
         })
     }
@@ -310,6 +323,26 @@ impl SessionTile {
                 // An oversize frame: unrecoverable stream desync.
                 Some(Err(_)) => return Ingested::Crash,
                 None => break,
+            }
+        }
+        // Test builds: the first time this tile's transcript holds a Beacon
+        // object, say so -- the witness that a tagged program's rich frames
+        // reached the renderer's model (the welcome's tour, a menu-run `ls`).
+        #[cfg(feature = "test-mode")]
+        if !self.objs_said {
+            let sb = &self.tile.scrollback;
+            let n = sb.open_block().objs.len()
+                + sb.frozen_blocks()
+                    .iter()
+                    .map(|b| b.objs.len())
+                    .sum::<usize>();
+            if n > 0 {
+                self.objs_said = true;
+                say!(
+                    "halcyond: session tile leaf={} presents objs ({})",
+                    self.leaf,
+                    n
+                );
             }
         }
         // A clean exit arrived interleaved in the record stream.
@@ -403,6 +436,13 @@ fn reconcile(
             Some(t) => t,
             None => continue,
         };
+        // H-4d: the leaf's tag is the tile's command line (a restore tool
+        // names the leaves it builds and leaves them to us); empty = the
+        // shell. Read AFTER the mint: the mint is the ownership proof, and a
+        // tag written before the tool's conn went is what the mint's
+        // reservation guaranteed we did not race.
+        let tag = read_file(troot, &format!("pane/{}/tag", leaf)).unwrap_or_default();
+        let argv = tile_command(tag.trim_end_matches('\n'), home, |p| fs::exists(p));
         // Mint at the leaf's own content rect (a CONFIGURE still corrects any
         // staleness); fall back to the display size if geometry is unreadable.
         let (w, h) = leaf_geometry(troot, leaf).unwrap_or((geom.disp_w, geom.disp_h));
@@ -424,7 +464,7 @@ fn reconcile(
             }
         };
         let budget = SESSION_SCROLLBACK_BUDGET / (tiles.len() + 1);
-        match SessionTile::spawn(leaf, surf, geom, home, budget) {
+        match SessionTile::spawn(leaf, surf, geom, &argv, budget) {
             Some(t) => {
                 tiles.insert(leaf, t);
             }
@@ -550,13 +590,23 @@ pub fn run(home: Option<String>) -> i64 {
             return 1;
         }
     };
+    // H-4d: mark the session for the tools its tiles run (a restore defers
+    // hosting to this compositor while the mark is set). Best-effort: without
+    // it a restore spawns its tags itself, the console-path behaviour.
+    if File::create(SESSION_ENV_PATH)
+        .and_then(|mut f| f.write_all(b"on"))
+        .is_err()
+    {
+        say!("halcyond: could not mark {}", SESSION_ENV_PATH);
+    }
     let mut tiles: BTreeMap<u32, SessionTile> = BTreeMap::new();
     let mut closed: BTreeSet<u32> = BTreeSet::new();
+    let shell = tile_command("", home.as_deref(), |p| fs::exists(p));
     match SessionTile::spawn(
         root_leaf,
         root_surf,
         geom,
-        home.as_deref(),
+        &shell,
         SESSION_SCROLLBACK_BUDGET,
     ) {
         Some(t) => {
