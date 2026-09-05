@@ -4,7 +4,7 @@ type: chg
 title: "H-4d-2a: a pts slave is a terminal (SYS_FD_DEVCLASS 't'), the Beacon gate admits it, the pts host declares the tier (kaua-term --beacon), ut's pts branch arms from the inheritance -- session tiles were plain by construction until this"
 date: 2026-09-05
 arc: arc-tapestry
-commits: ["eaa258db"]
+commits: ["8f553c78"]
 touched: [sub-kernel-syscall-dispatch, sub-beacon, sub-kernel-syscall-abi, sub-utopia-interactive, sub-kaua-term, sub-halcyond]
 established: []
 closed: []

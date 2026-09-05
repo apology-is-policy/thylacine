@@ -4,7 +4,7 @@ type: chg
 title: "H-4d-3: the first-launch welcome -- the baked device default layout (tour LEFT, the session's shell RIGHT + focused), `halcyon welcome` (a Beacon tour, then the user's shell exec'd in place), the session gate's first-login witness"
 date: 2026-09-05
 arc: arc-tapestry
-commits: ["65ec1602"]
+commits: ["4f4e7a9f"]
 touched: [sub-substrate-build, sub-halcyond]
 established: []
 closed: []

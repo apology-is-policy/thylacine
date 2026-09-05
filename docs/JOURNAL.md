@@ -174,7 +174,7 @@ device default layout bake + the gate's welcome/menu legs; drafted).
 
 ---
 
-### H-4d-2a / H-4d-2 / H-4d-3 (same run, after the second self-compaction): rich tiles `eaa258db`, the tile menu over cell spans `7c180bfa`, the welcome `65ec1602`
+### H-4d-2a / H-4d-2 / H-4d-3 (same run, after the second self-compaction): rich tiles `8f553c78`, the tile menu over cell spans `946ac379`, the welcome `4f4e7a9f`
 
 **The dependency the drafted legs sat on.** Both H-4d-3 gate legs drafted before
 the compaction assumed a session tile renders Beacon objects: the tour "at the
@@ -323,7 +323,7 @@ carried `invalid command name "}"` -- an orphan brace my replacement had left af
 the loop. The symptom is worth its own line: the scenario's last recorded step was
 a PASS.
 
-**The commits themselves needed a repair (`8bc2a313`).** The three sub-chunks were
+**The commits themselves needed a repair (`da0a5c10`).** The three sub-chunks were
 staged by hunk with zero context (`git apply --cached --unidiff-zero`) and
 committed under `git stash push --keep-index` so the vault lint would see a
 working tree equal to the index. A zero-context hunk can land one statement off;

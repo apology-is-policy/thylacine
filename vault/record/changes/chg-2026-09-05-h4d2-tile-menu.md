@@ -4,7 +4,7 @@ type: chg
 title: "H-4d-2: the obj verb menu inside a session tile -- the Normal-mode port + the cell-span model it needed (vt::Cell.span, Osc1936Raw { serial, frame }, SpanMap, the obj copied into the landing block, the live grid as the virtual trailing block) + the kaua-term Text down-record"
 date: 2026-09-05
 arc: arc-tapestry
-commits: ["7c180bfa"]
+commits: ["946ac379"]
 touched: [sub-halcyond, sub-kaua-term, sub-lib-vt, sub-substrate-build]
 established: []
 closed: []
