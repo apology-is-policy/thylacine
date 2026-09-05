@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**382 owned · 99 unowned · 481 files (79% owned) · ~31950 unswept lines.**
+**383 owned · 98 unowned · 481 files (79% owned) · ~31564 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30093 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -80,8 +80,8 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30093 lin
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1028 |
 | arch | 34 | 4 | 971 |
-| usr/lib | 54 | 3 | 776 |
 | usr/stratumd-stub | 0 | 1 | 453 |
+| usr/lib | 55 | 2 | 390 |
 | usr/coreutils | 59 | 1 | 297 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/susp-mask-child | 0 | 1 | 139 |
@@ -138,7 +138,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30093 lin
 | usr/halcyond/src/status.rs | 445 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 390 |
 | kernel/include/thylacine/errno.h | 388 |
-| usr/lib/libtapestry/src/ring.rs | 386 |
 | usr/halcyond/src/input.rs | 385 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/kaua-term/src/main.rs | 354 |

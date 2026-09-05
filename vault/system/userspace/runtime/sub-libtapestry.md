@@ -1,10 +1,11 @@
 ---
 id: sub-libtapestry
 type: sub
-title: "libtapestry — the client weave, and a cleanup helper one line skips"
+title: "libtapestry — the client weave and the shared event ring"
 parent: moc-userspace-runtime
 code:
   - usr/lib/libtapestry/src/lib.rs
+  - usr/lib/libtapestry/src/ring.rs
   - usr/lib/libtapestry/Cargo.toml
 audit: light
 guarded-by: []
@@ -19,152 +20,262 @@ updated: 2026-09-05
 ## Purpose
 
 The client half of the graphics protocol: connect to the compositor,
-create a surface, get a zero-copy mapping of its framebuffer, draw into
-it, present, and receive events. Every graphical program links this;
-[[sub-aurora]] is the one that matters, since it is the console.
+create surfaces, get a zero-copy mapping of each surface's framebuffer,
+draw into it, present, and receive events. Every graphical program links
+this; [[sub-aurora]] is the one that matters, since it is the console, and
+halcyond is the one that stresses it, since it drives a whole
+session's worth of surfaces — tiles, tag bars, menus, the status bar — from
+one process.
 
 The naming is the design in miniature — a loom weaves threads into fabric,
 a tapestry is the woven picture. The client maps a surface's *weave* and
 operates a ring to present into it.
 
+**One session, one ring, many surfaces (H-3c-2).** The load-bearing shape
+this crate settled into: an `EventRing` is ONE 9P session to `/srv/tapestry`
+plus ONE Loom ring, and every surface opened *on* that ring shares both,
+taking a slot for its own event queue. The one-surface convenience
+constructors (`Surface::fullscreen` / `open`) still make a private ring each
+— aurora, the battery, tapestry-demo and warp-prove are single-surface and
+unchanged — but a multi-surface client (halcyond) opens ONE ring and every
+tile, chrome bar, menu and status bar rides it. The reason is not tidiness;
+it is a kernel constraint that a two-ring client silently starves (see
+Mechanism).
+
 ## Contract
 
-`Surface::fullscreen()` or `Surface::open(w, h)` connects a session and
-creates a surface. `pixels()` hands out the current draw slot as a mutable
-pixel slice. `present(rect)` pushes it and rotates to the next slot.
-`wait_event()` blocks for the next event; `poll_event()` does not.
-`handle_configure(ev)` absorbs the compositor's redraw and resize
-requests, returning whether the geometry changed.
+`EventRing::connect()` opens a session to the compositor and sets up its
+ring; `EventRing::adopt(root)` wraps a session root fd the caller already
+holds (the ring owns it thereafter). `Clone` is another handle to the same
+ring — the session closes with the last handle. Surfaces are then minted on
+the ring:
 
-**Each surface owns its own session.** Opening the service mints a fresh
-server connection per opener, so one client's surfaces are unresolvable
-from any other session. Processes that deliberately share a session by
-inheriting the descriptor share its surfaces — that is the Plan 9
-shared-mount semantic, not a leak.
+- `Surface::fullscreen_on(ring)` / `open_on(ring, w, h)` — a content surface.
+- `Surface::chrome_on(ring, pane_id, w, h)` — a `Role::Chrome` tag bar bound
+  to a pane (H-3b); renderer-gated server-side.
+- `Surface::menu_on(ring, w, h)` — the one ephemeral `Role::Menu` surface
+  (H-3c); invisible until the compositor places it, and torn down by the
+  compositor itself.
+- `Surface::status_on(ring, w, h)` — the `Role::Status` bottom bar (H-3d);
+  `w` must be the display width and `h` one status unit or the compositor
+  refuses.
+- `Surface::open_claim_on(ring, w, h, token)` — a content surface steered
+  into the specific empty leaf a restore token names (H-4b).
 
-`surface_ctl(cmd)` writes one verb on **this surface's own** control
-descriptor — the one the surface mint rebound — so it rides the owning
-connection **by construction**. That is the point of the shape rather than a
-convenience: because no other connection can even resolve this surface, the
-verb cannot be aimed at someone else's, and no addressing argument is needed
-to prove it. Present and release keep their dedicated paths; this is the
-general escape hatch for verbs that do not.
+`Surface::fullscreen()` / `open(w, h)` are the private-ring shorthands: they
+make an `EventRing` and open one surface on it.
 
-**Authority carried by which descriptor you hold, rather than by a check on
-what you named** — the same shape as the inherited control descriptor on the
-console, and the reason the per-opener session above is load-bearing rather
-than tidy.
+Per surface: `pixels()` hands out the current draw slot as a mutable pixel
+slice. `present(rect)` (or `present_rects` / `present_hold`) pushes it,
+waits for that submission's completion, and rotates to the next slot.
+`handle_configure(ev)` absorbs the compositor's redraw and resize requests,
+returning whether the geometry changed.
 
-`Drop` closes everything: the weave descriptor's clunk drops the client
-mapping, the control clunk and connection close retire the surface.
+Per ring: `wait()` blocks until ANY surface on the ring has an event, then
+routes every reaped completion to its surface's queue; `poll()` reaps
+without blocking. A surface's own `wait_event()` / `poll_event()` then take
+from *its* queue. `global_ctl(cmd)` writes one verb on the ring's session
+root ctl — the conn every surface shares — so a session declaration made
+before the first surface names exactly the conn those surfaces will belong
+to.
+
+**Authority is carried by which descriptor you hold, not by a check on what
+you named.** A surface's control verbs ride the fid the `surface/new` mint
+rebound onto that surface — the owning connection, by construction, because
+no other connection can even resolve the surface. `global_ctl` rides the
+ring's own conn for the same reason. This is the shape that makes the
+per-opener session load-bearing rather than tidy: the compositor's gate
+checks the connection's kernel-stamped peer, so a verb sent over a shared
+mount would carry the mounter's identity, and the shape forecloses that
+without an addressing argument.
+
+`Surface::drop` retires the surface (a `destroy` verb, then it leaves the
+ring slot, then closes its fds); `EventRing`'s last handle closes the
+session.
 
 ## Mechanism
 
-**The wire is six file operations and no custom protocol.** Open the
-service for the session root; open a clone node, which rebinds the
-descriptor onto the new surface's control file and reads back its id;
-write a create command; open the weave, read its geometry, map it; open
-the present and event nodes. The compositor-side protocol is 9P
-throughout, which is why this crate is small.
+**The wire is a handful of file operations and no custom protocol.** Open
+the service for the session root; open `surface/new`, which rebinds the fid
+onto the new surface's control file and reads back its id; write a `create`
+command (with the role/claim suffix for a chrome/menu/status/claimed mint);
+open the weave, read its geometry, map it; open the present and event nodes;
+join the ring. The compositor-side protocol is 9P throughout, which is why
+this crate is small.
 
-**Presenting is a ring submission whose completion is the recycle gate.**
-A present stages a fixed-layout descriptor into a registered buffer,
-submits a write, and waits for *that* submission's completion — correlated
-by a per-operation tag, because one ring carries both presents and event
-reads. Event completions arriving while waiting are routed to the pending
-queue rather than dropped.
+**One session per ring is load-bearing, not a convenience.**
+`loom_wait_for_completions` (kernel/loom.c) pumps the session of the ring's
+FIRST in-flight op only, so a ring spanning two sessions would silently
+starve the second: its replies would land only inside a blocking wait or one
+of that thread's own RPCs on that session. The H-3c lever measured exactly
+this across halcyond's earlier two-rings-on-two-sessions arrangement — a
+tile's CONFIGURE arrived only at the next pane-tree RPC, and a menu's
+keystroke never. Collapsing to one ring over one session is the fix, and it
+is why the shared-ring constructors exist.
 
-**Event reads are single-shot, deliberately.** A multi-shot read re-arms
-into the same registered slice, so a delivery landing before the client
-drains the previous one overwrites it — droppable for a frame tick, a lost
-keystroke for the classes that must never drop. Until the ring grows a
-provided-buffer pool, the client re-arms after each drain: correct by
-construction, one call per delivery batch.
+**A present is a synchronous write whose completion is the recycle gate.**
+`present` stages a fixed-layout descriptor into the surface's region of the
+ring's registered staging buffer and does a `t_write` of the present on the
+present fid; the compositor composes inside that write's dispatch, so the
+Rwrite IS the recycle gate, and the calling thread is the session's reader
+for the duration (in-flight event replies demux to CQEs meanwhile). This
+replaced an earlier Loom WRITE that bought nothing and cost a second
+registered handle per surface.
+
+**Event delivery is a per-slot single-shot read, demultiplexed by tag.**
+Each surface's event read is armed into that surface's 128-byte region of the
+one registered staging buffer; the completion's `user_data` packs the slot
+in bits 40.., a per-join generation in bits 8..40, and the op class in the
+low byte. `EventRing::wait` arms every idle slot's read (`arm_all`), blocks
+in ONE `enter(GETEVENTS)`, and routes each reaped completion by its tag into
+that slot's queue. `poll` is the submit-only form — a non-blocking enter on a
+non-SQPOLL ring demuxes nothing, so replies land only inside a blocking wait
+or this thread's own RPCs. Reads stay single-shot because a multi-shot read
+would re-arm into the same region and overwrite an undrained delivery —
+droppable for a frame tick, a lost keystroke for the classes that must never
+drop.
+
+**The registered-handle table is index-stable, with a placeholder fid.**
+`ring::table` rebuilds the whole table at every join/leave (the kernel has no
+per-entry update — `Ring::register_handles` has `IORING_REGISTER_FILES`
+replace-whole semantics), and index == slot index: a live slot holds its
+event fid, every other index (free, retiring, or left) holds a read-only
+`ctl` PLACEHOLDER fid the ring opens once at `adopt`. The stability is the
+point: `loom_drain_sq` can leave an SQE unconsumed (the CQ admission gate,
+the chain gate), and a dense rebuild between arm and consume would re-bind
+that SQE's index to another surface's fid. A stale read on the placeholder
+returns text nobody reads — never another surface's event.
+
+**The slot lifecycle is the I-7-shaped hazard, handled in `ring.rs`.** A
+`join` takes a free slot and bumps its generation. A `leave` frees the slot
+at once if no read is armed, else marks it RETIRING — kept until the
+in-flight read completes, so a stale completion can never write a re-minted
+surface's region (the generation in the tag is the belt on that brace). A
+completion for a slot whose generation has moved on is dropped; a completion
+on a retiring slot frees it; a `result <= 0` (EOF or error) latches the
+slot's stream closed so a poll caller cannot re-arm through the end forever
+and an errored read's inline CQE cannot satisfy every wait at once (a spin).
 
 **A resize maps the new generation before unmapping the old.** The ack is
-the server's generation fence; then a *fresh* weave descriptor is opened
-(the old one's kernel-side mapping is pinned to the old generation, so
-fresh state needs a fresh descriptor), the geometry re-read, the new
-weave mapped, and only then the old descriptor closed — so the client
-stays mapped throughout. The slot cursor restarts, because every slot of
-the new generation is untouched.
-
-**Authority writes ride the caller's own connection.** The compositor's
-gate checks the connection's kernel-stamped peer, so a mode change sent
-over a shared mount would carry the mounter's identity rather than the
-caller's. There are two paths for this: one over a live surface's session,
-and a throwaway-connection form for the startup push that must happen
-*before* any surface exists.
+the server's generation fence; a *fresh* weave descriptor is opened (the old
+one's kernel-side mapping is pinned to the old generation), the geometry
+re-read, the new weave mapped, and only then the old descriptor closed — so
+the client stays mapped throughout. The slot cursor restarts, because every
+slot of the new generation is untouched.
 
 ## Data structures
 
-`Surface` holds five descriptors (root, control, weave, present, event),
-the geometry, the mapping address, the slot stride and count, the ring,
-one registered staging buffer, the current slot, an armed flag, a closed
-latch, a pending event queue and a sequence counter.
+`EventRing { core: Rc<RefCell<RingCore>> }` — a cheap-to-clone handle; every
+public entry borrows the core once for its duration.
 
-The staging buffer is partitioned by fixed offset: the present descriptor
-and its inline rectangle array at the base, the event landing zone above
-it. That partition is what bounds the client-side rectangle count.
+`RingCore { ring: Ring, staging: RegisteredBuffer, slots: Vec<ring::Slot>,
+placeholder: OwnedFd, root: OwnedFd }` — the Loom ring, the one registered
+staging buffer (`MAX_RING_SURFACES` × `EV_REGION` = 48 × 128 B), the slot
+table, the placeholder fid for empty table entries, and the session root
+(closed with the ring). No manual `Drop`; fields drop in declaration order
+(the Loom first, the root last).
 
-`Event` is the decoded 24-byte record. `TapError` has eight variants, one
-of which — busy — is load-bearing rather than informational: it means a
-resize offer went stale and the caller should keep draining, not that
-anything failed.
+`ring::Slot { used, retiring, event_fd, armed, closed, gen, pending }` — the
+per-slot bookkeeping. `pending` is the surface's event queue; `gen` is the
+completion-matching generation; `closed` is the stream-end latch.
+
+`Surface` no longer owns a session. It holds a *clone* of the `EventRing`, a
+`slot: u16` (its place on the ring), the ring's session `root` (read-only —
+the ring closes it), its four fids (ctl, weave, present, event), the geometry
+(`w`/`h`/`stride`), the `slot_stride`/`nslots`/`map_va`/`cur_slot` of the
+mapped weave, a `presents` counter, and `slot_seen: [u64; MAX_SLOTS]` (per
+present-slot, the `presents` value at which it was last drawn, or
+`SLOT_UNSEEN` — the age bookkeeping `age` reads).
+
+Constants: `TEVENT_LEN` = 24 (the wire event record), `EV_REGION` = 128 B
+(the per-slot landing zone), `EV_CAP` = 4 × 24 (records per read),
+`MAX_RING_SURFACES` = 48 (the session's 64-tag table minus the synchronous
+RPCs' share — a parked event read holds a tag), `SLOT_QUEUE_CAP` = 256 (the
+client-side per-slot backlog before arming stops), `MAX_SLOTS` = 8 (the
+present-slot rotation the age array bounds).
+
+`Event` is the decoded 24-byte record (kind/code/value/rune/mods/flags/tick).
+`TapError` has a `Full` variant (no free ring slot) alongside the transport
+and protocol errors; its `Busy` is load-bearing rather than informational —
+it means a resize offer went stale and the caller should keep draining.
+
+`Mint` (internal) is what `create` mints: `Content`, `Chrome(pane_id)`,
+`Menu`, `Status`, or `Claim(token)`.
 
 ## Concurrency
 
-None. A surface is owned by one caller, there are no locks and no shared
-state. The pending queue is a plain vector used as a queue, with a
-front-pop helper whose comment is honest about the cost — event volumes
-are small.
+Single-threaded by construction. The ring's state lives behind
+`Rc<RefCell<RingCore>>`; every public entry takes one short borrow, and
+`route` pushes into queues the core owns, so no callback re-enters a Surface
+while the core is borrowed. There are no locks and no cross-thread sharing:
+a ring and its surfaces are owned by one caller. `Clone` on an `EventRing`
+shares the core by reference count, not across threads.
 
 ## Invariants enforced
 
-None of the enumerated system invariants. This is client code above the
+None of the enumerated *system* invariants. This is client code above the
 privilege boundary: it reaches the display only through a service its
 caller's namespace already grants, and the compositor validates every
-request. A defect corrupts this client's own surface.
+request. A defect corrupts this client's own surfaces.
 
-It is on the *client* side of the surface-share machinery, whose integrity
-property is the kernel's and the compositor's, not this crate's. What it
-must not do is misuse the mapping it is handed — see the caveats, where
-the safety argument for the one unsafe construction rests on a field the
-parser does not check.
+It sits on the *client* side of the surface-share machinery, whose integrity
+property (I-40 / I-7) is the kernel's and the compositor's. What this crate
+must not do is misuse a mapping it is handed, or route one surface's event to
+another — the latter is the slot-lifecycle discipline in `ring.rs`, which is
+exactly why that module is factored out syscall-free and host-tested: a
+completion lands only in the slot AND generation it was armed for, a retiring
+slot is never re-armed and never reused until its last read completes, and
+the table index is the slot index.
 
 ## Error paths
 
-Every fallible entry returns the crate's error type. The construction path
-has a cleanup closure that closes the descriptors opened so far — used on
-every failure but one (task #152).
+Every fallible entry returns `TapError`. The surface construction path uses a
+cleanup closure (`fail`) that closes the descriptors opened so far, and once
+`create` has succeeded server-side it uses `fail_created`, which writes
+`destroy` before closing — so a failure past the create point does not leak a
+server-side surface for the session's life (the H-3c-2 round F2 fix: the mint
+already took a per-conn slot, so a bare close would pin it).
 
-A resize failure *after* a successful ack is unrecoverable for that
-surface: the server has moved to the new generation while this client
-still holds the old mapping, so presents would show zeroed slots. Callers
-are told to treat any non-busy error there as fatal, and aurora does.
+`route` latches a slot `closed` on any `result <= 0`, so both EOF and a
+transport error end that surface's stream for good, and `take_event` returns
+`Err(Closed)` once the stream ends and the backlog is drained. `join` returns
+`TapError::Full` when the ring's 48 slots are taken.
 
-The event stream's end-of-file latches a closed flag, so a non-blocking
-caller cannot re-arm through it forever.
+A resize failure *after* a successful ack is unrecoverable for that surface:
+the server has moved to the new generation while this client still holds the
+old mapping, so presents would show zeroed slots. Callers treat any non-busy
+error there as fatal, and aurora does.
 
 ## Performance
 
-One ring, one staging buffer, no allocation on the present path beyond
-the command strings. The present blocks until its own completion — the
-recycle gate — so a client's frame rate is the compositor's.
+One ring and one registered staging buffer per client, shared across up to 48
+surfaces; no allocation on the present path beyond the command strings. A
+present blocks until its own completion — the recycle gate — so a client's
+frame rate is the compositor's. `wait` wakes on the first event across all
+surfaces and drains in one enter, so a session with many idle surfaces pays
+one blocking syscall per event batch, not one per surface.
 
 ## Prosecution
 
-- **Every failure path in construction must close what it opened.** The
-  helper exists for exactly this and one path skips it.
-- **The geometry reply must be validated before the mapping is used.**
-  Four of five fields are checked; the fifth is the one the safety
-  argument names.
-- **Event reads stay single-shot** until the ring can hand out distinct
-  buffers, or a delivery will overwrite an undrained one.
-- **A resize maps new before unmapping old**, or the client is briefly
-  unmapped and a concurrent present writes nowhere.
+- **A completion routes only to the slot AND generation it was armed for.**
+  The tag packs both; `route` drops a mismatched generation. Without it a
+  re-minted slot would inherit a departed surface's in-flight read.
+- **A retiring slot is never re-armed and never reused until its read
+  completes.** `leave` marks retiring when armed; `join` skips it; `route`
+  frees it on the completion. A reuse-before-completion would let a stale read
+  write a live surface's region.
+- **The table index is the slot index, rebuilt whole.** A dense rebuild that
+  moved a live slot would re-bind an unconsumed SQE to the wrong fid.
+- **Every construction failure past `create` says `destroy`.** Otherwise a
+  refused weave/present/event open pins a server-side slot for the session.
+- **A stream-end latches closed.** Otherwise a poll re-arms through EOF
+  forever and an errored read spins every waiter.
+- **The geometry reply's stride is validated before the mapping is used.**
+  Four of the five fields are checked; the fifth — `slot_stride` — is the one
+  the `pixels()` safety argument names and the parser trusts.
 - **Authority writes stay on the caller's own connection.** A shared mount
-  carries the mounter's identity.
+  would carry the mounter's identity; the surface-ctl and global-ctl shapes
+  ride the owning conn by construction.
 
 ## Seams
 
@@ -172,43 +283,55 @@ No damage-tracking help — a client computes its own rectangles. No
 double-buffer abstraction beyond the slot rotation. No timeout on any
 operation.
 
+**SQPOLL (KT-1.5b).** `EventRing::connect_sqpoll` / `adopt_flags(root,
+SETUP_SQPOLL)` sets up a kthread-driven ring: the kernel poll-thread drives
+the session's reader and posts completions asynchronously, so the ring fd
+(`poll_fd`) becomes pollable and a multiplexing client can wait in one
+`poll(2)` over the ring plus its other streams instead of blocking in `wait`.
+The `/srv/tapestry` srvconn transport is deadline-capable, which the SQPOLL
+reader requires (the kernel loom register gate rejects a non-deadline-capable
+handle on an SQPOLL ring). halcyond's unified poll uses this; aurora's
+single-surface blocking `wait` does not.
+
 ## Caveats
 
-- **Five descriptors and the weave mapping leak on one failure path**
-  (task #152). The construction path defines a cleanup closure and uses it
-  on every failure *except* the staging-buffer allocation, which uses the
-  question-mark operator and returns early — sandwiched between two
-  neighbours that both call the helper. The mapping has already succeeded
-  by then, and its lifetime is the weave descriptor's, which is never
-  clunked. Aurora's bounded connect retry calls this up to twenty-five
-  times, so a sustained allocation shortage leaks the set each time.
-
-- **The one unsafe construction's safety comment names the one geometry
-  field the parser skips** (task #154). `pixels()` computes its slice base
-  from the slot stride and states "slot stride >= width * height * 4" as
-  established. The parser checks the other four fields of the same reply
-  and not that one. The property holds — the compositor computes the
-  stride as a page-rounded row span — so this is a trust-the-server fact
-  written as a checked one, the shape [[sub-netdev]] carries at a
-  different joint.
+- **The one unsafe construction's safety comment names the one geometry field
+  the parser skips** (task #154). `pixels()` computes its slice base from
+  `slot_stride` and states "slot_stride >= w*h*4" as established. The parser
+  checks the other four fields of the reply (width, height, row stride ==
+  w*4, slot count against `MAX_SLOTS`) and not `slot_stride`. The property
+  holds — the compositor computes the slot stride as a page-rounded span — so
+  this is a trust-the-server fact written as a checked one, the shape
+  [[sub-netdev]] carries at a different joint.
 
 - **The present wait has no bound.** It loops until its own completion
   arrives; a wedged compositor blocks the client indefinitely. Arguably
-  correct — the compositor *is* the display, and a renderer with nowhere
-  to present has nothing useful to do — but it is worth seeing next to
+  correct — the compositor *is* the display, and a renderer with nowhere to
+  present has nothing useful to do — but it is worth seeing next to
   [[sub-tls]]'s inverse defect, where the bound sits on the one loop that
   cannot stall.
 
-- **A completion-free return from the submit call spins.** The wait loop
-  continues when it reaps nothing, and the submit is a blocking form, so
-  this is defensive rather than live — but it is a busy loop rather than a
-  back-off if the assumption ever breaks.
+- **Event reads stay single-shot.** Until the ring can hand out distinct
+  buffers per delivery, a multi-shot read would overwrite an undrained one.
+  The single-shot re-arm after each drain is correct by construction, one
+  arm per delivery batch.
 
-- **No tests of any kind.** The crate is unconditionally
-  no-standard-library, so the same barrier [[sub-aurora]] hits applies. Its
-  whole proof is that the console comes up, which exercises the happy path
-  of every function here and none of the failure paths — including the one
-  that leaks.
+- **The slot bookkeeping is host-tested; the syscall half is not.** The
+  crate splits into a default `guest` feature (the `Surface` + the Loom +
+  session halves, which need libthyla-rs and the guest) and, with
+  `--no-default-features`, the wire types plus `ring.rs` alone — nine host
+  tests drive the routing invariants against a synthetic staging buffer
+  (`cargo test -p libtapestry --no-default-features --target
+  aarch64-apple-darwin`): an error/EOF stream-end, a dropped older
+  generation, a retiring slot freeing on any completion, index stability
+  across a rebuild, the full-queue arm stop, whole-record clamping, a foreign
+  tag ignored, the join bound. The tests are the H-3c-2 audit's regressions
+  (F1 re-arm-forever, F2 refused-create leak, F3/SA-4 table stability, F4
+  unbounded queue) as executable counterexamples. What stays unproven by test
+  is everything behind `guest`: the actual weave map, the resize reweave, the
+  present/recycle path — their whole proof is still that the console comes up
+  and halcyond drives a session, which exercises the happy path of every
+  guest function and few of its failure paths.
 
 ## The restore auto-claim (2026-09-02, H-4b-3a)
 
@@ -234,9 +357,6 @@ ever degrades a grandchild to focus fallback, never a foreign placement). The
 H-4b arc audit closed 0 P0 / 0 P1 / 0 P2 / 2 P3 (NOT dirty); this surface drew
 no finding.
 
-## Provenance
-(generated -- incoming `touched` backlinks, newest first; never hand-written)
-
 ## `global_ctl` and `TEV_LAYOUT` (2026-09-05, the KT-1 audit)
 
 `EventRing::global_ctl(cmd)` writes one verb to the compositor's root `ctl` on
@@ -250,3 +370,5 @@ declared session conn receives on one of its surfaces at every structural
 layout pass, `value` the layout epoch: re-read `layout`. Other clients never
 see it.
 
+## Provenance
+(generated -- incoming `touched` backlinks, newest first; never hand-written)
