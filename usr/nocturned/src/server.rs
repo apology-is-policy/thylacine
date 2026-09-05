@@ -187,6 +187,13 @@ impl Shared {
         self.voices.iter().position(|v| v.id == id)
     }
 
+    /// The connection handle that minted `id`, or None if no such voice. Voice 0
+    /// returns -1 (the persistent, world-shared default, exempt from the owner
+    /// gate).
+    fn voice_owner(&self, id: u32) -> Option<i64> {
+        self.voice_pos(id).map(|i| self.voices[i].owner)
+    }
+
     /// Total buffered bytes across every voice (the device idle-stop reads this).
     pub fn fifo_len(&self) -> usize {
         self.voices.iter().map(|v| v.fifo.len()).sum()
@@ -842,6 +849,17 @@ impl Conn {
         };
 
         if let Some(voice) = ctl_voice {
+            // I-46(a): a per-voice ctl acts only for the connection that minted
+            // the voice (voice 0 is the world-shared default, exempt). The
+            // server is the authority -- an unauthorized ctl is refused
+            // regardless of the advisory mode bits.
+            if voice != 0 {
+                match sh.voice_owner(voice) {
+                    Some(o) if o == self.handle => {}
+                    Some(_) => return self.err(tag, p9::E_PERM),
+                    None => return self.err(tag, p9::E_BADF),
+                }
+            }
             // Root ctl historically accepts only `flush`; a per-voice ctl adds
             // gain/remove. Route both through apply_ctl (root ctl's `remove`
             // no-ops on voice 0 by the guard above).
@@ -858,6 +876,13 @@ impl Conn {
             }
             if sh.voice_pos(voice).is_none() {
                 return self.err(tag, p9::E_BADF);
+            }
+            // I-46(a): only the minting connection may write a voice (voice 0 is
+            // the world-shared default). The server enforces it directly, so a
+            // cross-Proc write to a private voice is refused even though the
+            // audio file's mode admits the open.
+            if voice != 0 && sh.voice_owner(voice) != Some(self.handle) {
+                return self.err(tag, p9::E_PERM);
             }
             // Order matters: a write behind a parked one must queue behind it.
             if self.pending.is_empty() {

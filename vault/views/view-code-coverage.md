@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 86 unowned · 491 files (82% owned) · ~22780 unswept lines.**
+**405 owned · 86 unowned · 491 files (82% owned) · ~22805 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **68 files, ~30585 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -75,7 +75,7 @@ Excluded as harness and counted here rather than dropped: **68 files, ~30585 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/nocturned | 0 | 3 | 1984 |
+| usr/nocturned | 0 | 3 | 2009 |
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1033 |
 | arch | 34 | 4 | 971 |
@@ -123,7 +123,7 @@ Excluded as harness and counted here rather than dropped: **68 files, ~30585 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/nocturned/src/server.rs | 1064 |
+| usr/nocturned/src/server.rs | 1089 |
 | usr/quarry/src/main.rs | 1033 |
 | usr/halcyon/src/main.rs | 874 |
 | usr/nocturned/src/snd.rs | 722 |
