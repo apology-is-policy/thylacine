@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -30,12 +30,13 @@ read — visibility is the first wall.
 
 ## Contract
 
-Four structures on `struct Territory`, three of them live:
+Five structures on `struct Territory`, four of them live:
 
 | Field | What | Reached by |
 |---|---|---|
-| `mounts[32]` | `(dc, devno, qid.path) -> source Spoor` grafts | `mount_lookup` from [[sub-kernel-stalk]]; `SYS_MOUNT`/`SYS_UNMOUNT` |
+| `mounts[32]` | `(dc, devno, qid.path) -> source Spoor` grafts; a point may hold a UNION (several members in `MBEFORE`/`MAFTER` order) | `mount_lookup` / `mount_members_snapshot` from [[sub-kernel-stalk]]; `SYS_MOUNT`/`SYS_UNMOUNT` |
 | `root_spoor` | the resolution floor + FROM_ROOT walk base | `territory_root_ref`; `SYS_CHROOT`/`SYS_PIVOT_ROOT` |
+| `flags` | `TERRITORY_ROOT_PHENO_LINUX` — the namespace-level phenotype declaration (Design D) | `territory_root_pheno` from `stalk_core`'s `crossed_pheno` seed; `territory_declare_linux` at spawn |
 | `dot_path` | the cwd string (`NULL` == `"/"`) | `SYS_CHDIR`/`SYS_GETCWD`; the `SYS_OPEN` relative join |
 | `binds[8]` | Plan 9 path-to-path edges | **nothing — see Caveats** |
 
@@ -88,12 +89,13 @@ MREPL work: a re-mount onto an already-mounted point keys on the SAME
 underlying identity, so the existing entry is found and replaced rather
 than a second entry stacking on the crossed target.
 
-**MREPL displacement** replaces the first entry at a matching identity:
-capture the old source, install the new (with a fresh `spoor_ref`),
-re-capture `mp_path` ref-NEW-before-unref-OLD (so a degenerate shared
-`Path` object survives the swap), and `spoor_clunk` the displaced source
-**outside** the lock. `MBEFORE`/`MAFTER`/`MCREATE` are stored but never
-walked (see Seams).
+**MREPL displacement** now replaces the WHOLE union group at a point (the
+UM-8 F6 correction): remove every existing member at the matching identity,
+then install the new one, `spoor_clunk`ing each displaced source **outside**
+the lock; a fresh `spoor_ref` on the new source and `mp_path`
+ref-NEW-before-unref-OLD (so a degenerate shared `Path` object survives the
+swap). `MBEFORE`/`MAFTER`/`MCREATE` are no longer inert — see the union-mount
+section below.
 
 **Two cycle checks, one modeled.** `would_create_cycle` guards the bind
 graph (fixed-point reachability over `binds[]`) — it is what
@@ -295,7 +297,30 @@ exist at v1.0, so a Territory has exactly one Proc except for the peer
 Threads that share it.
 
 [[inv-i3]] — the DAG. Enforced twice: `would_create_cycle` on binds,
-`would_create_mount_cycle` on the mount identity graph.
+`would_create_mount_cycle` on the mount identity graph. A union at a point is
+a SET of members at one identity, not a cycle: the cycle check keys on the
+mount identity, so stacking members at the same point adds no edge.
+
+[[inv-i28]] (prose, the pheno-mount half) — the `MPHENO_LINUX` declaration is
+detected by the RESOLVER ([[sub-kernel-stalk]]), scoped per mount POINT, and
+so bounded by the same per-component X-search containment as every other
+crossing; the phenotype is a property of HOW a file was named, not of its
+bytes, so the SAME file reached by a non-pheno path stays native. Enforcement
+of I-28 itself is stalk's.
+
+[[inv-i43]] (prose, the declaration channel) — Design D and `MPHENO_LINUX` make
+this Territory a phenotype DECLARATION channel (`territory_root_pheno`, the
+mount crossing), conferring ABI SHAPE and no authority; the ENFORCEMENT half of
+I-43 stays at the fork cap-strip and the exec-time stamp (a mis-declared Proc
+mis-decodes its own calls behind its own gates). Not in `guarded-by` for the
+exec-precedent reason: territory declares the shape, it does not enforce the
+non-escalation.
+
+The union-mount invariants are [[spec-territory]]'s `WalkFirstHit` /
+`ReaddirDedupFirstWins` / `CreateTargetCorrect` / `RemoveTargetCorrect` /
+`OrderCorrect` (each with a buggy cfg); this file owns the ordering + the
+atomic snapshot they rest on, [[sub-kernel-stalk]] owns the walk/readdir/
+create/remove that consume it.
 
 [[inv-i33]] — `mp_path` is the territory-side mirror of the Spoor Path,
 and it is introspection-ONLY. Every keying decision (`mount_key_eq`,
@@ -389,8 +414,8 @@ On any change to this file, prosecute:
 
 ## Seams
 
-- [[seam-union-mount-walk]] — MBEFORE/MAFTER/MCREATE are stored and
-  never walked.
+- [[seam-union-mount-walk]] — CLOSED (the UM arc): MBEFORE/MAFTER/MCREATE
+  are walked, ordered, and spec-modeled (see the union-mount section).
 - [[seam-rfnameg-shared-territory]] — cross-Proc namespace sharing.
 - [[seam-80-pivot-orphan-mounts]] — pre-pivot mounts accumulate; the cap
   grows instead of a GC running.
@@ -451,6 +476,80 @@ teaching that walking a mount point "still uses the Plan 9 bind table
 (already implemented)", which the walk has never done. A current section
 lends authority to the stale ones below it, so the partial update is
 harder to catch than wholesale rot.
+
+## Union mounts (the UM arc; 2026-09-05) — MBEFORE / MAFTER / MCREATE walked
+
+The seam that said these flags were "stored and never walked"
+([[seam-union-mount-walk]]) is CLOSED: a point may hold a UNION of members and
+the whole stack is walked, ordered, and spec-modeled. This file owns the
+ordering + the snapshot; [[sub-kernel-stalk]] owns the walk/readdir/create/
+remove that consume them.
+
+- **Placement dispatch (`mount`).** A non-MREPL mount at an existing point
+  places by its ordering flag: `MBEFORE` inserts at the index of the point's
+  FIRST existing member (Plan 9 prepend; later MBEFOREs go after earlier ones),
+  `MAFTER` and the flagless default append. Members are searched in `mounts[]`
+  ARRAY ORDER — so MBEFORE members precede MAFTER members by construction, which
+  is `OrderCorrect`. An existing pair re-mounted with a new ordering flag is
+  MOVED, not duplicated (UM-8 F6). `unmount` shifts down rather than swap-removes,
+  because order stopped being cosmetic.
+- **MREPL replaces the WHOLE group** (above) — the spec's `MountRepl` collapses
+  a union to one member, so it must remove every member at the point, not just
+  the first.
+- **`mount_members_snapshot` — the atomic whole-union snapshot.** The resolver
+  cannot walk `mounts[]` member-by-member under a lock it must release to cross
+  (a cross may block on 9P), so it snapshots the point's members + their flags
+  ATOMICALLY under `ns_lock` into a caller array, then crosses them lock-free.
+  The atomicity is load-bearing: a member shifting into slot k between two
+  separate reads would land a create on the wrong member (the UM-8 F4 hazard the
+  snapshot closes). Ordered: MBEFORE members first, MAFTER/default last.
+- **MCREATE — the writable member.** The create path crosses the FIRST member
+  carrying `MCREATE` (stalk's `stalk_union_create`); a union with no MCREATE
+  member answers `-T_E_ACCES` (no writable member), never a silent misplacement.
+  That is `CreateTargetCorrect`; picking the holder instead of the MCREATE member
+  is `RemoveTargetCorrect`'s buggy twin.
+
+The spec grew a SEQUENCE-valued `mounts` (the set-valued model could not express
+order) with `WalkFirstHit` / `ReaddirDedupFirstWins` / `CreateTargetCorrect` /
+`RemoveTargetCorrect` / `OrderCorrect` and their buggy cfgs.
+
+## VIVARIUM Design D + the pheno-mount (2026-09-05) — the phenotype declaration
+
+Two namespace channels declare a loaded image's Linux phenotype (ABI SHAPE, not
+authority — [[inv-i43]]); this file owns both.
+
+- **Design D — the namespace-level declaration (`Territory.flags`).**
+  `TERRITORY_ROOT_PHENO_LINUX` (a bit in `flags`, occupying the old alignment
+  pad so the pinned offsets hold) means every image load whose resolution starts
+  from this Territory decides `PHENO_LINUX`. `territory_root_pheno(t)` reads it
+  (NULL-safe false); `territory_declare_linux(t)` sets it (idempotent,
+  release-ordered), called ONCE on a child's freshly cloned Territory in the
+  FULL_ARGV spawn thunk before EL0, and copied by `territory_clone` under
+  `ns_lock` next to `root_spoor`. `stalk_core` seeds `crossed_pheno` from it at
+  its `restart:` label, so the seed covers the first pass AND every symlink
+  re-anchor. A container declares it on the namespace object itself because
+  `territory_chroot` swaps `root_spoor`, so a crossing can never fire from inside
+  a rootfs mount. `/proc/<pid>/ns` renders `root: pheno-linux` when set.
+- **The pheno-mount (`MPHENO_LINUX`).** A binary whose exec RESOLUTION CROSSES a
+  mount carrying this flag is stamped `PHENO_LINUX` — how `/viv/bin` ships bare
+  Linux binaries (git) on the user's PATH: the location IS the declaration (a
+  static binary has no reliable intrinsic ABI marker, so a phenotype is declared,
+  never sniffed; FreeBSD's `/compat/linux` path-brand in a Plan 9 mount-flag
+  form). SCOPE is per mount POINT, detected by the RESOLVER, NOT the
+  `(dc, devno)` device-instance key `MNOEXEC` uses — a devno is minted per 9P
+  session, so a device-instance key would declare EVERY file in the shared pool,
+  native `/bin/ut` included. `stalk_cross_mounts` reports the crossing via its
+  `crossed_pheno` out-param, giving exact `/viv/bin`-subtree semantics: the SAME
+  file reached another way stays native.
+- Both are OR-combined at the single exec-time stamp with the container
+  manifest's `pheno_flags` spawn arg. Both are FAIL-SAFE (a resolution crossing
+  no pheno-mount leaves the binary native — a Linux binary that misses the
+  phenotype makes Linux-numbered calls that hit native handlers and fails cleanly,
+  never a silent privilege gain) and deliberately UNGATED (composing a mount is a
+  namespace edit that confers no authority; `/viv/bin` is composed by
+  `PRINCIPAL_SYSTEM` at boot). Execve re-decides the phenotype at every image
+  load; the exec-side consumer is [[sub-kernel-exec]] (its Legs A/B + the
+  RELEASE-store commit live in [[sub-kernel-proc]]).
 
 ## Provenance
 

@@ -18,6 +18,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
 | [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
+| [[seam-union-mount-walk]] | closed | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-220-netd-listener-poll]] | open | sub-netd-server | chg-2026-06-18-net6b-poll-bridge | task #220 |
 | [[seam-221-idle-pump-wake]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r1-f3 | task #221 |
 | [[seam-223-pump-tail-starvation]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r2-f1 | task #223 |
@@ -106,7 +107,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-torpor-cross-proc]] | open | sub-kernel-torpor | chg-2026-05-23-torpor | POUCH-DESIGN section 7, Tier-2 burrows |
 | [[seam-torpor-lock-wake-spin]] | open | sub-kernel-torpor | chg-2026-05-23-torpor | torpor-8 audit F2 (P2, documented) |
 | [[seam-torpor-reclaim-uaccess]] | open | sub-kernel-torpor | chg-2026-07-04-torpor-lockfree | REVENANT R-5 F1 close; REVENANT section 9 |
-| [[seam-union-mount-walk]] | open | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-warp-prove-unowned]] | open | sub-tapestryd | chg-2026-08-19-v3a-ring | V-3a coherent-ring doc pass, 2026-08-19 |
 | [[seam-wb-close-flush-slot]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-wb-staging |  |
 <!-- generated:end -->

@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 91
+## Open seams: 90
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -126,7 +126,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-torpor-cross-proc]] (sub-kernel-torpor)
 - [[seam-torpor-lock-wake-spin]] (sub-kernel-torpor)
 - [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
-- [[seam-union-mount-walk]] (sub-kernel-territory, sub-kernel-stalk)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
 - [[seam-wb-close-flush-slot]] (sub-kernel-ninep-dev9p)
 

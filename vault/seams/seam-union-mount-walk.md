@@ -2,7 +2,8 @@
 id: seam-union-mount-walk
 type: seam
 title: "MBEFORE / MAFTER / MCREATE are stored and never walked"
-status: open
+status: closed
+closed-by: chg-2026-09-05-territory-union-pheno
 surface: [sub-kernel-territory, sub-kernel-stalk]
 opened-by: chg-2026-05-13-p5-attach-mount
 tracker: "unfiled"
