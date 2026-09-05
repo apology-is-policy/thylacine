@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-territory brought current: union mounts (the UM arc, seam closed), VIVARIUM Design D, the pheno-mount"
 date: 2026-09-05
 arc: arc-vault
-commits: []
+commits: ["aefbba46"]
 touched:
   - sub-kernel-territory
 established: []
