@@ -4,7 +4,7 @@ type: chg
 title: "H-4c: the layout gesture rides the verb menu (obj type=layout), halcyon layout list/delete, and the session startup script (halcyon.rc or the device default) run by the per-user compositor"
 date: 2026-09-05
 arc: arc-tapestry
-commits: ["*(pending)*"]
+commits: ["26f903a0"]
 touched: [sub-beacon]
 established: []
 closed: []
