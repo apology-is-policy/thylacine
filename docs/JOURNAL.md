@@ -23,14 +23,15 @@ needed the operator.
 
 ---
 
-## Run 32 (vault absorption, 2026-09-05, Opus 4.8, effort max): four kernel-entry/namespace giants + the H-arc folds
+## Run 32 (vault absorption, 2026-09-05, Opus 4.8, effort max): eight kernel dossiers (four entry/namespace + the whole proc.c cluster) + the H-arc folds
 
 **Where it sits.** A vault-track run (`../thylacine-vault`, `vault/bootstrap` ==
 origin/main), not main's. The operator ratified keeping aux's R6 tooling fix and
 greenlit "keep going through the knowledge backlog." This run de-staled the four
-kernel-entry/namespace dossiers whose code had drifted furthest, then cleared the
-H-4c/H-4d-1 fold backlog. Six increments, all lint-green, both mirrors, tip
-`1db2e9b9`. It runs AFTER Run 31 because it consumes Run 31's output (it folds
+kernel-entry/namespace dossiers whose code had drifted furthest, then the whole
+proc.c execution cluster (proc, caps, death, jobctl), and cleared the H-4c/H-4d-1
+fold backlog. Ten increments, all lint-green, both mirrors, final tip
+`b335e0e4`. It runs AFTER Run 31 because it consumes Run 31's output (it folds
 H-4c/H-4d-1).
 
 **The method, because it repeated four times.** Each dossier is `audit: hard`,
@@ -94,18 +95,40 @@ fork-inherits-caps variant plus the resolved comment drift (caps.h's
 `CAP_ALL`/`CAP_ELEVATION_ONLY` comments, once four-and-omitting-DEBUG, now
 enumerate all six).
 
-**What is open, precisely classified.** The two remaining proc.c-cluster
-siblings split: `sub-kernel-death` is **earned** (`f557beb2` #91 exit-byte -> `$?`,
-plus the vfork audit -- a real de-stale), while `sub-kernel-jobctl` looks
-**borrowed** (no `setsid`/`setpgid`/`notes_post_pgrp`/`job_stop` token changed)
-but a substring scan hit noisy `sid`/`session`/`pgrp`, so confirming it needs a
-*word-bounded* token diff in context before a borrowed-re-verify (the caps
-`stale-by-cotenancy` pattern) -- not assumed. Beyond the cluster: `sub-stratum-boot`
-(joey.c, ~5659, biggest), `sub-substrate-build`, and a NEW `sub-sdl-port` for
-aux's N-2a-2 SDL work. Backlog: 51 dossiers (from 56 at the run's start).
+**The cluster closed -- and the last sibling was more than borrowed.**
+`sub-kernel-death` landed earned (`669aad97`): #91's exit byte (`f557beb2`) means
+`t_exits(N)` and a phenotype `exit_group(N)` now reach the parent's wait as the
+real byte, not the old 0/1 collapse -- recorded as a Data-structures split
+(`group_exit_msg` = die flag + msg; `exit_status` = the numeric byte) and a
+ZOMBIE-chokepoint paragraph. `sub-kernel-jobctl` (`e0ae7d07`, fixup `b335e0e4`)
+was the interesting one. The note's guess -- "likely borrowed" -- was RIGHT about
+the churn: the word-bounded token diff (the discipline the substring scan's noisy
+`sid`/`session`/`pgrp` hits demanded, and the reason I did not bump `updated:` on
+the guess) confirmed all six owned entry points unchanged since 2026-08-14, and
+the one adjacent post-08-16 change (`proc_mark_self_managing_notes`'s Design-D
+exec-clear) is the mark's *lifecycle* -- proc/exec's, not the read polarity jobctl
+describes. But the same careful pass surfaced what a substring scan never would: a
+coverage gap that PREDATED the dossier. The `#15`/`#240` self-stop --
+`proc_job_stop_self` (a THIRD stop source, called from notes.c on `NDFLT` and
+`tty:susp` delivery) plus `susp_stop_armed` (a fourth job-control field) -- landed
+2026-08-13/14, days before the dossier's first write, and was never captured: the
+Contract had six entry points where there were seven, Data-structures said "three
+fields" for four, and the dossier's *own* third-stop-source caveat anticipated it
+abstractly while the source already existed. Added it, closing the caveat. A
+borrowed re-verify that became a real de-stale -- the lesson being that the
+word-bounded diff earns its cost not by confirming the guess but by what it finds
+beside it.
 
-Six kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
-vivarium, proc, caps), the two H-arc folds, and this entry.
+Also surfaced, not fixed (yip call 0056 to aux): proc.h's "struct Proc stays 352"
+comment is stale -- the live `_Static_assert(sizeof(struct Proc) == 392)` is
+correct, VIVARIUM's phenotype fields grew it after that comment was written.
+Cosmetic (the assert is sound); a vivarium-arc code fix, not a vault edit.
+
+Eight kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
+vivarium, proc, caps, death, jobctl -- the entry/namespace four plus the whole
+proc.c cluster), the two H-arc folds, and this entry. Backlog: 49 (from 56 at the
+run's start). Open beyond the cluster: `sub-stratum-boot` (joey.c ~5659, biggest),
+`sub-substrate-build`, and a NEW `sub-sdl-port` for aux's N-2a-2 SDL work.
 
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
