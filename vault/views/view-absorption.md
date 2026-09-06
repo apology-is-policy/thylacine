@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**114 absorbed · 43 live · 157 total.**
+**115 absorbed · 42 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -175,7 +175,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 76-admin-elevate.md | live | — |
 | 77-sys-chroot.md | absorbed | [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]] |
 | 78-pouch.md | absorbed | [[moc-pouch-seam]], [[seam-pouch-select-fd-bound]], [[sub-pouch-fs]], [[sub-pouch-net]], [[sub-pouch-process]], [[sub-pouch-seam]], [[sub-pouch-signal]], [[sub-pouch-thread]], [[sub-pouch-tty]] |
-| 79-sys-burrow.md | live | — |
+| 79-sys-burrow.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-vma]], [[sub-pouch-process]] |
 | 80-torpor.md | absorbed | [[sub-kernel-torpor]] |
 | 81-sys-thread.md | absorbed | [[sub-kernel-death]], [[sub-kernel-sched-smp]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-thread]], [[sub-kernel-torpor]], [[sub-kernel-uaccess]] |
 | 82-pouch-pthread.md | absorbed | [[sub-pouch-thread]] |

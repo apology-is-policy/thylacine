@@ -276,6 +276,21 @@ vaddr_start)` invariant across the cut; that any path freeing a Burrow under
 sleeps) and never drops the `out_free` it is handed; and that every new mutator
 takes `vma_lock` — the header will not tell you to.
 
+A separate rule governs the geometry-matching *removers* rather than this file's
+own arithmetic: **`vma_remove` / `burrow_unmap` match a VMA by its coordinates
+alone, so any syscall that hands them a user-supplied `(vaddr, length)` must bound
+the vaddr to a region the caller is entitled to unmap before the match runs.**
+`SYS_BURROW_DETACH` is the one that does — it rejects any vaddr outside the
+burrow-attach window `[EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP)` before it
+touches the list (the P6-pouch-mem-a F1). Without that bound a caller could pass
+the coordinates of its own ELF-segment, stack, or stack-guard VMA and have it
+dismantled — the stack-guard case silently retiring a security-relevant page,
+because a geometry match cannot tell those apart from a burrow region. Every
+attach lives in the window and every ELF / stack / guard VMA sits below it
+(`_Static_assert`'d in `exec.h`), so the bound structurally excludes them; a
+driver that placed an MMIO/DMA mapping *inside* the window could still detach it by
+coordinates, but that is its own resource and self-harm, not an [[inv-i1]] breach.
+
 ## Seams
 
 - The header's stale lock commentary (task #60) is documentation, but it is the
@@ -307,6 +322,12 @@ DISTRO D-3 added the file-backed-mmap surface: D-3b the MAP_FIXED split/replace
 (`vma_replace_range_in`), D-3c the FILE-backed VMA arm and the
 sleeping-free-under-lock deferral (`vma_free_deferred`, F1/F5 — four sites) plus
 `vma_next_overlap_in` (#199). [[chg-2026-09-06-vma-mapfixed-file-arm]].
+
+[[chg-2026-09-06-sys-burrow-doc-absorb]] folds the P6-pouch-mem-a F1 finding
+absorbed from docs/reference/79: `SYS_BURROW_DETACH` must bound its user-supplied
+vaddr to the burrow-attach window before `burrow_unmap`, because the remover
+matches by geometry alone — else EL0 dismantles its own ELF/stack/stack-guard VMA
+(the guard case silently retiring a security page).
 
 ## Tests
 
