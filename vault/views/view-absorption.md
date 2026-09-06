@@ -35,12 +35,12 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**63 absorbed · 94 live · 157 total.**
+**64 absorbed · 93 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
 | 00-overview.md | live | — |
-| 01-boot.md | absorbed | [[abi-boot-banner]], [[inv-i16]], [[sub-kernel-boot-entry]], [[sub-kernel-boot-sequence]] |
+| 01-boot.md | absorbed | [[abi-boot-banner]], [[inv-i16]], [[sub-kernel-boot-entry]], [[sub-kernel-boot-sequence]], [[sub-kernel-uart]] |
 | 02-dtb.md | absorbed | [[inv-i15]], [[sub-kernel-dtb]] |
 | 03-mmu.md | absorbed | [[sub-kernel-mmu]] |
 | 04-extinction.md | live | — |
@@ -127,7 +127,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 28-syscall.md | live | — |
 | 29-joey.md | live | — |
 | 30-dev-spoor.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-path]], [[sub-kernel-spoor]] |
-| 31-trivial-devs.md | live | — |
+| 31-trivial-devs.md | absorbed | [[sub-kernel-cons]], [[sub-kernel-content]], [[sub-kernel-dev]], [[sub-kernel-uart]] |
 | 32-devproc.md | absorbed | [[sub-kernel-devproc]] |
 | 33-devctl.md | absorbed | [[sub-kernel-cons]], [[sub-kernel-devctl]], [[sub-kernel-srvconn]] |
 | 34-devramfs.md | absorbed | [[inv-i28]], [[inv-i32]], [[inv-i33]], [[sub-kernel-content]] |

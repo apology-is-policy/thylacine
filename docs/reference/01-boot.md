@@ -42,15 +42,20 @@ init process that never exits, and the success line is printed on that
 process's explicit signal rather than at the end of `boot_main`. The
 `_torpor` entry in the symbol table cites a stale line number.
 
-**What was NOT absorbed, and is therefore owed** (found at the ledger
-reconciliation, `chg-2026-08-02-absorption-reconciliation`): this document also
-held the only account of **the PL011 driver itself** — `arch/arm64/uart.c`, 473
-lines: the discovery of its register base from the device tree, the hardcoded
-fallback covering the window before the tree is parsed, the register
-programming, the receive interrupt, and the line-break detection the trusted
-path's attention key rests on. The console dossier covers how the console
-*uses* the UART — the rings, the full-FIFO back-pressure, the writer role — but
-not the driver beneath it, and no other note does. Tracked as task #32.
+**The PL011 driver debt (task #32) is now RESOLVED.** This document once held
+the only account of **the PL011 driver itself** — `arch/arm64/uart.c`: the
+register base discovered from the device tree, the hardcoded fallback covering
+the pre-`dtb_init` window, the register programming, the receive interrupt, and
+the `DR.BE` line-break detection the trusted path's attention key rests on. That
+driver now has its own dossier:
+
+    vault/system/kernel/devices/sub-kernel-uart.md
+
+covering all of the above plus the bounded TX spin, the clear-first bounded RX
+drain, the #174 backpressure no-lost-wake (behind a StoreLoad fence), and the
+two-lock IMSC serialization. The console dossier still covers how the console
+*uses* the UART — the rings, the back-pressure, the writer role — and the driver
+beneath it is now `sub-kernel-uart`'s.
 
 The invariants live at `vault/invariants/inv-i16.md` (randomized, never-zero
 kernel base) and `inv-i21.md` (uniform EL1h, established here at the first
