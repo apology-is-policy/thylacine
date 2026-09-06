@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**121 absorbed · 36 live · 157 total.**
+**122 absorbed · 35 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -172,7 +172,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 73-sys-spawn-with-perms.md | absorbed | [[sub-halcyond]], [[sub-kernel-devsrv]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]], [[sub-netd-nic]], [[sub-ptyfs]], [[sub-stratum-boot]], [[sub-stratum-session]], [[sub-viv]] |
 | 74-corvus-9p-server.md | absorbed | [[sub-corvus]], [[sub-kernel-srvconn]] |
 | 75-devcap.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-perm]] |
-| 76-admin-elevate.md | live | — |
+| 76-admin-elevate.md | absorbed | [[sub-corvus]], [[sub-kernel-caps]] |
 | 77-sys-chroot.md | absorbed | [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]] |
 | 78-pouch.md | absorbed | [[moc-pouch-seam]], [[seam-pouch-select-fd-bound]], [[sub-pouch-fs]], [[sub-pouch-net]], [[sub-pouch-process]], [[sub-pouch-seam]], [[sub-pouch-signal]], [[sub-pouch-thread]], [[sub-pouch-tty]] |
 | 79-sys-burrow.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-vma]], [[sub-pouch-process]] |
