@@ -4,7 +4,7 @@ type: chg
 title: "author sub-kernel-uart over the arch/arm64/uart.c orphan -- the PL011 driver + the I-27 RX break/SAK half + the I-9 backpressure pause; audit:hard under moc-kernel-devices (1 of the 2 remaining orphans resolved)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["418035f0"]
 touched: []
 established: [sub-kernel-uart]
 closed: []
