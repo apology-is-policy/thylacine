@@ -20,7 +20,7 @@ design:
   - "docs/TAPESTRY.md section 18.7 (the renderer drain/feed)"
   - "docs/LIFE-SUPPORT.md LS-8"
 created: 2026-08-02
-updated: 2026-08-18
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -324,7 +324,9 @@ renderer can reach that read.
 ### The control file and the window size
 
 The control surface is a **file with a text grammar**, not an ioctl — the Plan 9
-idiom. Whitespace-separated `+name`/`-name` tokens, plus a `winsize` verb.
+idiom. Whitespace-separated `+name`/`-name` mode tokens, plus three value verbs —
+`winsize <cols> <rows>`, `beacon <tier>`, and `serialsilent <0|1>` — all staged in
+the same atomic parse as the mode tokens.
 
 **The whole write is atomic**: every token is parsed before any is applied, so a
 single malformed token rejects the write and leaves the mode unchanged. That is
@@ -358,6 +360,26 @@ The window size posts its change note **iff the size actually changed**. An
 unchanged rewrite must not post: a repeat-post storm would be a notes-queue
 denial of service against the owner's process group. The post happens after the
 console lock drops.
+
+**The `beacon` verb is the console side of the render-tier chain (H-1/H-1a).** A
+renderer advertises its Beacon render-capability -- `beacon rich`/`cells`/`none`
+-> `beacon_tier` (`CONS_BEACON_NONE`/`CELLS`/`RICH`), staged and applied exactly as
+winsize is, mutated and read under the console lock; `cons_beacon_tier()` is the
+reader, and the tier resets to NONE when the renderer goes (a respawn re-advertises,
+like it re-writes winsize). It confers nothing -- a lying tier changes only how
+consumers FORMAT bytes, never any authority -- which is why the console can expose
+it (the shell reads it and exports `BEACON`, [[sub-beacon]] /
+[[sub-utopia-interactive]]) with no capability question.
+
+**The `serialsilent` verb routes EL0 output away from a superseded serial line
+(DISPLAY-MODES 1b).** When a graphical renderer is the PRIMARY display
+(`thylacine.display=gpu`), the display owner sets `serialsilent 1` and EL0 program
+output to the UART is dropped -- the write SUCCEEDS fully (the program is neither
+blocked nor errored; only the bytes are not emitted), read locklessly in the
+`cons_emit` paths. It is a display-routing decision by the display owner, never a
+termios flag, and the SAK path restores serial output unconditionally
+(`cons_serial_silent_clear`, the audit F2 fix) so the trusted path is never left
+dark.
 
 ### The renderer drain and feed
 
@@ -500,8 +522,10 @@ gave up.
 - **A dedicated revocation note.** The attention key currently signals the
   displaced owner only by removing its attach bit, because the note it used to
   reuse became a real terminating signal. See [[inv-i27]].
-- **Per-fd terminal attributes.** The console carries one global termios word;
-  per-fd belongs to the pseudoterminal surface.
+- **Per-fd terminal attributes.** The console carries one global termios word
+  (since C2-k1b, `cons_termios_get` also renders that same word as a Linux
+  `struct termios` for the VIVARIUM `isatty` / `tc[gs]etattr` ioctl -- a read-only
+  projection, still one global word); per-fd belongs to the pseudoterminal surface.
 - **The exclusive board-era output switch.** On a display-only board the serial
   side should be suppressed rather than mirrored; the tap composes with that
   (the selector will gate the UART emit, not the tap).
@@ -556,6 +580,15 @@ gave up.
 [[chg-2026-08-02-console-sweep]]; [[chg-2026-08-16-cons-writer-set]] the
 kernel-emitter writer role, the mode-flip ordering rule, and the holdback
 strand.
+
+[[chg-2026-09-06-cons-consctl-verbs]] adds the three consctl surfaces that landed
+after the 2026-08-18 update: the `beacon <tier>` verb + `beacon_tier` (H-1/H-1a --
+the console side of the render-tier chain, confers nothing), the `serialsilent
+<0|1>` verb (DISPLAY-MODES 1b -- the display owner routes EL0 output off a
+superseded serial line; SAK restores it unconditionally), and `cons_termios_get`
+(C2-k1b -- the global termios word projected as a Linux `struct termios` for the
+VIVARIUM ioctl). The extinction ring-lock tearing (455c651d / 7dd5be19, both
+2026-08-18) was already the update's base -- borrowed.
 
 ## `cons_diag_line_emit` returns whether the unit LANDED (2026-08-18)
 
