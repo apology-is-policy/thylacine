@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**102 absorbed · 55 live · 157 total.**
+**103 absorbed · 54 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -75,7 +75,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 120-devpci.md | absorbed | [[inv-i15]], [[inv-i34]], [[inv-i5]], [[sub-kernel-discovery]] |
 | 121-netd.md | absorbed | [[sub-netd-nic]], [[sub-netd-server]] |
 | 122-net.md | live | — |
-| 123-tls.md | live | — |
+| 123-tls.md | absorbed | [[sub-net-clients]], [[sub-tls]] |
 | 124-net-utils.md | live | — |
 | 125-weft.md | absorbed | [[abi-ninep-wire]], [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-loom]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-ninep-wire]], [[sub-kernel-proc]], [[sub-kernel-weft]], [[sub-libtapestry]], [[sub-netd-nic]], [[sub-netd-server]], [[sub-tapestryd]] |
 | 126-revenant.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-elf]], [[sub-kernel-exec]], [[sub-kernel-fault]], [[sub-kernel-image]], [[sub-kernel-mmu]] |
