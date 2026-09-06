@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/89-hardware (t::hardware RAII wrappers): fold the ISV-safe MMIO accessor finding (#890) into sub-libthyla-rs, multi-redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["77f61fee"]
 touched: [sub-libthyla-rs]
 established: []
 closed: []
