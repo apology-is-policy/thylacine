@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/130-positioned-io (SYS_PREAD/PWRITE #37 + wstat #47): fold the positioned-I/O syscall mechanism into sub-kernel-syscall-dispatch, multi-redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["1ebe5569"]
 touched: [sub-kernel-syscall-dispatch]
 established: []
 closed: []
