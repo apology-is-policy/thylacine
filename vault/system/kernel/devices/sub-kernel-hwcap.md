@@ -19,7 +19,7 @@ design:
   - "docs/ARCHITECTURE.md section 13"
   - "docs/VIRTIO-PCI-DESIGN.md"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -41,6 +41,13 @@ naming exactly which ranges, interrupts, sizes and functions it may ask for
 ([[sub-kernel-allowance]]). Release is not a call anyone makes: it happens when
 the handle table is torn down, which is what makes a driver's death sufficient to
 free its hardware.
+
+Since Warp-6 V-2, owning a bus-function claim confers one further authority:
+mapping a subrange of one of its shared-memory BARs into a client's address
+space (`SYS_BURROW_FROM_HOSTMEM`, yielding a `BURROW_TYPE_HOSTMEM` Burrow). That
+map needs no additional capability — the handle is non-transferable ([[inv-i5]]),
+so holding it already *is* the authority — and the subrange is bounded inside the
+discovered window ([[inv-i45]]; the physical base never escapes the BAR).
 
 ## Mechanism
 
@@ -157,6 +164,13 @@ than there are slots has the surplus silently ignored, which is fail-safe (the
 driver sees fewer regions, never a wrong one) but is a silent truncation and not
 signalled anywhere.
 
+Since Warp-6 V-2 these regions are not merely discovered but *mappable*:
+`SYS_BURROW_FROM_HOSTMEM` hands a client a physical-backed `BURROW_TYPE_HOSTMEM`
+Burrow over a subrange of one, resolved by the same non-wrapping containment
+arithmetic so the physical base is pinned inside the discovered window
+([[inv-i45]]). The Burrow carries no pages of its own and pins a reference to
+this function object for as long as it lives.
+
 **Ordering, on the claim path, is what makes rollback total.** The exclusivity
 slot is installed *before* any device state is touched — so a double claim and a
 full table are refused while nothing has been mutated — and after that point every
@@ -171,6 +185,16 @@ them. The window's pages themselves can outlive the claim: a live user mapping
 holds an independent reference, so the address is freed for reuse only once that
 mapping is gone too.
 
+A cross-Proc hostmem mapping complicates the *first* step. If the owner dies
+while a client still holds a `BURROW_TYPE_HOSTMEM` mapping of one of its BARs,
+disabling MEM-decode would yank a live mapping out from under another Proc. So
+the death path counts live hostmem Burrows (`hostmem_burrows`, bumped at create,
+dropped at free) and, for a claim carrying any, does a *DMA-only* quiesce —
+bus-mastering cleared so the dead device stops writing, MEM-decode KEPT so the
+client's BAR keeps answering. Full MEM-decode disable is deferred to the last
+unreference, once the last hostmem Burrow (hence the last client mapping) is
+gone.
+
 ## Data structures
 
 One object per lent thing, allocated zeroed, each with a magic value, an atomic
@@ -178,7 +202,8 @@ reference count, and its identifying fields set once at creation and never
 rewritten. The register object holds an address and size; the buffer object holds
 an address, size, page pointer, allocation order, and a create-immutable subtype
 bit; the function object holds its triple, its per-window records, its resolved
-regions, and its interrupt number.
+regions, its interrupt number, and (since V-2) a count of the live hostmem
+Burrows mapping its BARs.
 
 Two claim tables, each a small fixed array under its own lock: thirty-two register
 ranges, eight bus functions. The register table also holds the kernel's own
@@ -279,6 +304,12 @@ function is one-shot at driver startup.
 - Ordering on the claim path: slot before device mutation, quiesce before
   release, enable last. Each is load-bearing and none is enforced by anything but
   reading.
+- The live-hostmem-Burrow count decides which quiesce death runs, so it must
+  track reality exactly: an undercount disables a BAR under a live client mapping
+  (the V-2 F1 hazard), an overcount pins the BAR forever. It is bumped at
+  hostmem-Burrow create and dropped at free, and the release-time MEM-decode
+  disable rides the last unreference — so the count and the reference must fall
+  together.
 - The two locks must stay unnested; the sequence, not the nesting, is what makes
   the order acyclic.
 - **The two width rules are independent.** The size inversion must stay
@@ -351,5 +382,13 @@ buffer class enum. Cross-checked this pass: every writer of either class bit
 across the kernel and architecture trees (one, the constructor), the class
 readers in the network dataplane, and the shared-memory containment arithmetic.
 [[chg-2026-08-16-hwcap-widths]].
+
+Re-read 2026-09-06 at `6cb931d8` for Warp-6 V-2 (`7973f8dc`, 2026-08-19):
+`pci_handle.c` gained `kobj_pci_quiesce_dma_only` and the `hostmem_burrows`
+counter for the host-visible BAR-mapping path (`SYS_BURROW_FROM_HOSTMEM` ->
+`BURROW_TYPE_HOSTMEM`). Cross-checked: the counter's create/free call sites, the
+DMA-only-vs-full quiesce split on the owner-death path, and that the map
+subrange is contained inside the discovered shared-memory window (I-45).
+[[chg-2026-09-06-hwcap-warp-v2-hostmem]].
 
 Absorbed `docs/reference/39-hw-handles.md` and `docs/reference/115-pci-claim.md`.
