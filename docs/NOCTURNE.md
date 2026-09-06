@@ -1,17 +1,16 @@
 # NOCTURNE.md — the Thylacine audio system
 
-**Status: N-0 research pass + design CANDIDATE (aux track, Fable 5.1, effort
-max, 2026-09-05). NOT YET RATIFIED.** The top-level name is the operator's
-("The audio system will be called Nocturne", 2026-09-05). Everything below the
-name is a candidate: the prior-art digest is measured or cited, the design is
-recommended, and the decisions in §9 were provisionally taken under the
-standing autonomy rule (`memory/feedback_operator_away_fable_autonomy.md`:
-a heritage-aligned recommended design is auto-accepted, forks self-resolve,
-every such call is NAMED for the operator to overturn). The operator has
-hands-on PipeWire and PulseAudio development experience and asked that the
-known quirks of both be **designed around, not inherited** — so each SOTA
-section ends with "take / shed", and §10 lists the residue only the operator
-can settle.
+**Status: RATIFIED 2026-09-06** (operator vote via a full AskUserQuestion pass
+over §9 + §10; the record is §13). Design pass N-0 (aux track, Fable 5.1,
+2026-09-05); the top-level name is the operator's ("The audio system will be
+called Nocturne", 2026-09-05). The prior-art digest is measured or cited; the
+§9 decisions (provisionally taken under the standing autonomy rule,
+`memory/feedback_operator_away_fable_autonomy.md`) are now ratified as a set,
+and §10's residue is settled — both recorded in **§13 (Ratification record)**,
+which also carries the operator's two amendments (the 192 kHz / 24-bit rate-depth
+target and the MIDI-is-DOSBox-internal note). The operator has hands-on PipeWire
+and PulseAudio development experience and asked that the known quirks of both be
+**designed around, not inherited** — so each SOTA section ends with "take / shed".
 
 The operator's one hard requirement, verbatim intent (2026-09-05): *"permissioned
 programs would be able to hook onto the graph and add their own DSP modules,
@@ -940,19 +939,29 @@ kernel-side authority and it is an allowance, not a cap.
 
 ### 6.9 Formats, rate, quantum, latency budget
 
-- **Graph rate = the tempo sink's rate**, default 48 kHz (QEMU's device
-  default and every HDMI/USB sink; 44.1 kHz only when a device insists).
-  Internal format **float32 planar** per port (PipeWire's; sums without
-  clipping; descants get floats). Voices may deliver `s8/u8/s16/s32/f32` at
-  any rate; **the server converts at voice entry** (D-3: mixfs and Genode
-  resample in the mixer; clients need not know the graph rate) — libnocturne
-  also offers client-side conversion for programs that prefer to pay it
-  themselves. Descants run at the graph rate only.
-- **Quantum**: default 256 frames (5.33 ms at 48 kHz); the tempo picks the
-  smallest value within every incycle node's `[quantum-min, quantum-max]`
-  intersection, clamped to `[64, 2048]`; changes only on `ctl quantum` or a
-  node join/leave that empties the intersection (announced on `event`, one
-  cycle of silence — never mid-cycle). The device keeps **two periods in
+- **Graph rate = the tempo sink's rate. TARGET (ratified 2026-09-06, §13):
+  192 kHz / 24-bit where the device and host backend support it; 48 kHz / S16
+  is the guaranteed floor.** Feasibility, decoded from the QEMU virtio-snd
+  device the driver already sees (`rates=0x3fff`, `formats=0xe0078`): 192 kHz
+  IS advertised (rate bit 12); "24-bit" is delivered via **S32 or FLOAT** (the
+  device offers S8/U8/S16/U16/S32/U32/FLOAT — **no packed S24**), i.e. 24-bit
+  precision carried in a 32-bit / float container, which the float32-internal
+  pipeline maps to directly. On real hardware the sink's actual depth applies
+  (the Pi HDMI/codec path). The negotiation picks the highest the device + the
+  chosen backend jointly support, falling to the floor. Internal format
+  **float32 planar** per port (PipeWire's; sums without clipping; descants get
+  floats). Voices may deliver `s8/u8/s16/s32/f32` at any rate; **the server
+  converts at voice entry** (D-3: mixfs and Genode resample in the mixer;
+  clients need not know the graph rate) — libnocturne also offers client-side
+  conversion. Descants run at the graph rate only.
+- **Quantum**: default 256 frames (ratified) — 5.33 ms at 48 kHz, **1.33 ms at
+  the 192 kHz target**, so the in-cycle deadline tightens ~4x at high-res: the
+  cadence lease (Q2 = in-cycle DSP, ratified) must hold a sub-1.33 ms budget for
+  a leased incycle descant at 192 kHz, which the `specs/cadence.tla` bound and
+  the N-4 audit must prove. The tempo picks the smallest value within every
+  incycle node's `[quantum-min, quantum-max]` intersection, clamped to
+  `[64, 2048]`; changes only on `ctl quantum` or a node join/leave that empties
+  the intersection (announced on `event`, one cycle of silence — never mid-cycle). The device keeps **two periods in
   flight** (buffer = 2 × quantum), so a driver-side miss of a full period is
   still covered.
 - **Budget to measure** (VISION §4.5 row candidates; numbers become claims
@@ -1144,6 +1153,8 @@ and its JOURNAL entry.
 
 ## 9. Decisions taken in this pass (auto-ratified provisionally; overturnable)
 
+> **RATIFIED 2026-09-06** as a set (operator vote) — see §13. D-3's sink-facing target is amended by Q3 (§6.9).
+
 Each names its precedent, fit, cost and the alternative rejected, per the
 research-before-fork rule.
 
@@ -1193,6 +1204,8 @@ research-before-fork rule.
 ---
 
 ## 10. Open questions for the operator (the residue research cannot settle)
+
+> **SETTLED 2026-09-06** — every question below has a ratified answer in §13.
 
 1. **The sub-names** (§1): `voice`/`ear`/`descant`/`tempo`/`conductor`/
    `cadence` — keep, prune, or rename.
@@ -1262,3 +1275,49 @@ Sources fetched in this pass are linked inline in §5; the two PDFs (Letz
 2009, the sDDF design) and the IWP9 2026 paper were text-extracted on
 thyla-pi with `pdftotext` because the mac lacks poppler and the paper's TLS
 chain is incomplete.
+
+---
+
+## 13. Ratification record (2026-09-06)
+
+The candidate design was ratified by the operator in a full `AskUserQuestion`
+vote (Opus session, three batches over §9 + §10). Every recommendation was
+checked against "build proper" and the Thylacine values before it was offered.
+
+### §10 open questions — settled
+
+| # | Question | Ratified answer |
+|---|---|---|
+| Q1 | Sub-names | KEEP ALL (voice/ear/descant/tempo/conductor/cadence; the plain fallbacks stay). |
+| Q2 | Incycle DSP ambition | **IN-CYCLE LEASED DSP** — build the cadence lease (the arc's one kernel lift), N-4, spec-first. The scheduler lift is ON the critical path. |
+| Q3 | Quantum / rate / depth | 256-frame quantum; **rate+depth target 192 kHz / 24-bit where the device + backend support it**, 48 kHz / S16 the floor. Amendment (see §6.9): the QEMU virtio-snd device advertises S32/FLOAT + rates through 192 kHz but **no packed S24**, so "24-bit" rides a 32-bit/float container (float32-internal maps to it). No auto-quantum-change except on `ctl` or an emptying join/leave. |
+| Q4 | Tap authority | Own-voice taps = the owner axis (no clearance); sink-loopback reads (`/dev/nocturne/audio`) clearance-gated. |
+| Q5 | Policy identity keys | principal + program-name + label (per-tile and other Halcyon keys are non-breaking later additions). |
+| Q6 | Linux compat protocol | PulseAudio native (D-8); capture (the ear) later, at N-3. |
+| Q7 | Descant multi-input | Single-input first; multi-input (side-chains / a ducker) a non-breaking follow-on (the port model already allows it). |
+| Q8 | MIDI / Bluetooth | OUT OF SCOPE. Operator note: MIDI/wavetables matter for DOS games, but DOSBox emulates the wavetable synth itself (e.g. Gravis Ultrasound / Sound Canvas) and outputs PCM — so Nocturne's PCM sink already serves it; native MIDI/BT are clean later nodes ("real hardware is a sink node, not a redesign"). |
+| Q9 | VISION §9 non-goal | The relaxation (already written 2026-09-05 in VISION §9) is confirmed; updated to note N-0 is now ratified. |
+
+### §9 decisions — ratified as a set
+
+D-1..D-11 all ratified (D-5 the cadence lease and D-8 the pulse protocol come via
+Q2 and Q6). D-3 (float32 internal, server-side conversion at voice entry) is
+amended only in its sink-facing target by Q3 (192 kHz / 24-bit-via-S32-or-FLOAT).
+
+### The poke fork (Ad-3, carried from the N-2b close)
+
+The cross-Proc wake — voice back-pressure now, the descant per-cycle poke at
+N-4 — will **wire the weft ready-ring's park leg** (keyed on the weft binding the
+kernel already tracks; reuses WEFT_READY_TX; already specced in
+`specs/weft_readiness.tla`, I-9), NOT a general shared-memory futex. It is the
+design's own reserved mechanism (the §6.5 poke word) and N-4's descants require
+it regardless; `torpor` stays per-Proc (it cannot do the cross-Proc wake).
+
+### Sequencing consequence
+
+Q2 = in-cycle DSP puts the cadence-lease kernel lift (a scheduler change,
+spec-first: `specs/cadence.tla` + `KObj_Cadence`/allowance) firmly on the N-4
+critical path; at the 192 kHz target the incycle deadline is ~1.33 ms (§6.9).
+NEXT after this scripture commit: N-2c (the cycle/control split), then N-3
+(ears/capture + the volume dB grammar), then N-4 (descants + the cadence lease +
+the weft park leg).

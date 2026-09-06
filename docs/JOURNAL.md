@@ -22,6 +22,56 @@ needed the operator.
 
 
 ---
+## 2026-09-06 (aux) -- Nocturne design RATIFIED by operator vote; scripture commit
+
+After the N-2b close, the operator engaged the pending items and asked me to
+surface every open design question and fork via `AskUserQuestion` "so I can
+directly vote", with each recommendation checked against "build proper" and the
+Thylacine values. I put all 11 through three batches. The operator's votes (all
+matched the recommendation except Q3, which they amended, and Q8, which they
+enriched):
+
+- **Q2 = in-cycle leased DSP.** The cadence lease (the arc's one kernel/scheduler
+  lift, N-4, spec-first) is now firmly ON the critical path -- the complete design
+  over the deferred half-version, per "build proper / cost-speed not a factor".
+- **Poke = wire the weft ready-ring park leg** (not a general shared-memory
+  futex). Research finding that made this legible: `torpor` is per-Proc-keyed
+  (hash(Proc*,user_va)), so it cannot do the cross-Proc consumer->producer wake;
+  the weft park leg keys on the binding the kernel already tracks, reuses
+  WEFT_READY_TX, is already specced (weft_readiness.tla), and N-4's descants need
+  it regardless.
+- **Q3 amended by the operator: rate/depth target 192 kHz / 24-bit "if
+  possible"** (I had proposed 48 kHz/S16). Decoded the device the driver already
+  sees (rates=0x3fff, formats=0xe0078, cross-checked against the FMT_S16=5 /
+  RATE_48000=7 constants in snd.rs): 192 kHz is advertised (rate bit 12); 24-bit
+  is deliverable via **S32/FLOAT** (the QEMU device offers S8/U8/S16/U16/S32/
+  U32/FLOAT -- no packed S24), which float32-internal maps to; 48k/S16 stays the
+  floor. At 256 frames / 192 kHz the in-cycle deadline is ~1.33 ms (§6.9), which
+  the cadence-lease spec + N-4 audit must hold.
+- Pulse-native compat / capture-later (Q6); single-input descants first (Q7,
+  multi-input a non-breaking follow-on); keep all sub-names (Q1); own-tap free /
+  loopback clearance-gated (Q4); policy keys principal+program+label (Q5); MIDI/BT
+  out of scope (Q8 -- operator note: DOSBox emulates its wavetable synth, e.g.
+  Gravis Ultrasound, itself and outputs PCM, so Nocturne's PCM sink already
+  serves it); the VISION §9 relaxation confirmed (Q9); D-1..D-11 ratified.
+
+Landed as a **scripture commit** (design->scripture pattern, no code):
+NOCTURNE.md §3 status CANDIDATE->RATIFIED + a new §13 ratification record + the
+§6.9 rate/depth amendment + §9/§10 settled-notes; VISION.md §9 (N-0 ratified);
+the I-46 rows in ARCHITECTURE.md §28 + CLAUDE.md (candidate -> ratified).
+
+**Also, an honest correction (Ad 2 from the hand-off).** My close said "clade
+can't build on the Pi, defer N-2a-4"; the operator corrected that we build clade
+on thyla-keep (GCP) and authorized the compute. Checking thyla-keep, clade is
+already fully built there (an Aug-24 build: the llvm multicall + clangd + 135
+static libs incl. JIT/ORC) -- and clade is the stable LLVM-fork toolchain,
+untouched by Nocturne/DOSBox work, so N-2a-4 needs no rebuild at all, only the
+thyla-pi GL+audio witness. Started thyla-keep to verify, confirmed, stopped it
+again (disk-only; nothing burned).
+
+**Next**: N-2c (the cycle/control split) builds against the now-fixed reference.
+
+---
 ## 2026-09-06 (aux) -- Nocturne N-2b-2a: the ring period protocol + the ring-fed mixer
 
 **Landed** `37604139` (aux-3). The first cross-Proc DATA path in nocturned: a
