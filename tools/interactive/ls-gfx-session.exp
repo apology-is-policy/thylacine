@@ -116,6 +116,19 @@ expect {
     eof     { lc_fail "qemu exited during the Direct handoff" }
 }
 
+# --- s7a-4: the session published its Daylight palette to /env (tiles inherit it) ---
+# Fires in session_run just before the first tile spawn, so a tile's programs
+# (nora) can follow the session theme. Proves the /env write happened at runtime.
+expect {
+    -re {halcyond: palette published \(([0-9]+) bytes\) to /env/HALCYON_PALETTE} {
+        lc_step "s7a-4: the session published its palette ($expect_out(1,string) bytes) to /env/HALCYON_PALETTE"
+    }
+    -re {halcyond: could not write /env/HALCYON_PALETTE} { lc_fail "the session failed to write the /env palette" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the palette was published" }
+    timeout { lc_fail "the session never published the /env palette" }
+    eof     { lc_fail "qemu exited before the palette was published" }
+}
+
 # --- d-2: the ROOT tile spawns (capture its leaf id A) ---
 set A ""
 expect {

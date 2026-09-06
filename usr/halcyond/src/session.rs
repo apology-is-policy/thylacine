@@ -1026,11 +1026,14 @@ pub fn run(home: Option<String>) -> i64 {
     // session theme. Written BEFORE the first tile spawn, so every descendant
     // inherits it via /env; best-effort, an unset value just leaves the program
     // on its own default.
-    if File::create(HALCYON_PALETTE_ENV_PATH)
-        .and_then(|mut f| f.write_all(daylight_env_palette().as_bytes()))
-        .is_err()
-    {
-        say!("halcyond: could not write {}", HALCYON_PALETTE_ENV_PATH);
+    let palette = daylight_env_palette();
+    match File::create(HALCYON_PALETTE_ENV_PATH).and_then(|mut f| f.write_all(palette.as_bytes())) {
+        Ok(()) => say!(
+            "halcyond: palette published ({} bytes) to {}",
+            palette.len(),
+            HALCYON_PALETTE_ENV_PATH
+        ),
+        Err(_) => say!("halcyond: could not write {}", HALCYON_PALETTE_ENV_PATH),
     }
     let mut tiles: BTreeMap<u32, SessionTile> = BTreeMap::new();
     let mut closed: BTreeSet<u32> = BTreeSet::new();
