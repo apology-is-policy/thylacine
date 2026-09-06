@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/40-uaccess (R12 kernel-mode user-VA accessor): fold the F210 P1 caller-bound corollary into sub-kernel-uaccess, redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["ac3413b6"]
 touched: [sub-kernel-uaccess]
 established: []
 closed: []
