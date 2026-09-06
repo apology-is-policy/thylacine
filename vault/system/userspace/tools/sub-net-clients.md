@@ -20,7 +20,7 @@ hazards: []
 abis: []
 design: ["docs/NET-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-09-06
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -73,6 +73,19 @@ error — and a *non*-denial fails the boot. That is a privilege regression
 detector written as a positive assertion, and it is the sharpest
 self-test in the group: most tests prove a thing works, this one proves a
 gate still refuses.
+
+**And its live query carries a per-request nonce it requires echoed
+back.** SNTP is unauthenticated, so trusting the answer at all rests on
+one defense: the request writes a fresh nonce into the transmit field,
+and a response whose *originate* timestamp does not echo that nonce is
+discarded, not stepped. An off-path spoofer cannot guess the nonce, so
+this is what lets an unauthenticated time source be trusted against blind
+injection. The full validation battery is mode-4 + stratum in [1,15] +
+non-zero transmit + the originate echo; failing any one discards the
+response. The step itself is the SNTP simple algorithm (`transmit +
+rtt/2`) — it steps, it does not slew — and it goes through the
+CAP_HOSTOWNER-gated realtime-set syscall, which is the gate the denial
+self-test proves still refuses.
 
 **The TLS client's self-test proves the bundle baked and parses** into a
 non-empty trust store that composes with the crypto provider in-guest. No
@@ -149,6 +162,15 @@ read, which is quadratic but bounded by the head cap.
 HTTP/1.0 only: no chunked transfer, no keep-alive, no redirects.
 Address resolution is version-four only. The server is single-connection
 and supports two methods.
+
+**The time client trusts the answering server**, and its boundary is
+stated precisely: the originate-nonce echo defends against an *off-path*
+spoofer, but an *on-path* attacker who can see the nonce is the documented
+limit — NTS or a symmetric-key MAC is the v1.x hardening. Its 1900->Unix
+conversion (`ntp_secs - 2_208_988_800`) **saturates** below the epoch
+delta rather than wrapping, so the era-2036 rollover is a named seam, not
+a silent wrap. And it steps rather than slews: a drift-correcting daemon
+is a separate v1.x add.
 
 ## Caveats
 
