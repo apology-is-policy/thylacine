@@ -168,6 +168,20 @@ matters because the first user creation is the one that needs no
 authority, so a database that reads as empty would hand the next caller a
 free hostowner candidate.
 
+**The on-disk split is a secret boundary.** Two kinds of artifact persist: a
+central identity database, and per user a keypair wrap. The identity
+database is **non-secret** — a uid-to-name-to-group map, the shape
+`/etc/passwd` is world-readable in — and it is serialized as exactly that,
+never carrying a salt, nonce, ciphertext or tag. The keypair wrap is the
+only secret written, and it is ciphertext, openable solely with the
+passphrase- or phrase-derived key, so no plaintext secret ever reaches the
+filesystem. The two commit in a fixed order: the wrap is made durable
+*before* the identity record that names it, so a crash between leaves a
+harmless orphan wrap rather than a record pointing at a missing secret. The
+mirror holds at load — a user whose wrap is missing or corrupt is dropped
+fail-closed, logged and not authoritative for login, rather than admitted
+without a usable secret.
+
 **Clearance activation has two forms, and the newer one quotes nothing.**
 `CLEARANCE_ACTIVATE` (verb 15) is the **bearer** form: present a session
 token, and the grant lands on whoever presented it. `CLEARANCE_ACTIVATE_SELF`
@@ -328,6 +342,15 @@ and the privileged pair (system recovery, admin elevation) additionally
 requires live console attachment. corvus is the mechanism by which a
 scope-bounded legate elevation is created, not a holder of standing
 authority.
+
+The invariant reaches the numbering as well as the verbs. Identifiers are
+minted from one monotonic counter that starts above a low reserved range
+and refuses to reach the reserved top — a single `>=` test covers both the
+system principal and the null sentinel, because a compile-time assertion
+pins their ordering — so an assigned id can never *be* a privileged
+principal. The counter is persisted, so a freed id is never re-minted, and
+a user's private group takes its gid from the same counter, which is what
+keeps `uid == gid` collision-free.
 
 **The unwrap owner gate** — a DEK envelope is opened only when the
 session's bound user is the recorded owner of the named dataset. A
