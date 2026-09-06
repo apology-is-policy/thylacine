@@ -4,7 +4,7 @@ type: chg
 title: "sub-utopia-parser de-stale: the && / || AND-OR list grammar (scripture 8.6) and = as a literal command argument (UnexpectedEqualInCommand retired as a raise)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["53f6a876"]
 touched:
   - sub-utopia-parser
 established: []
