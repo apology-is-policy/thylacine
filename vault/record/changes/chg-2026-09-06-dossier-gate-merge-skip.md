@@ -4,7 +4,7 @@ type: chg
 title: "dossier-gate: durable tracked MERGE_HEAD skip (mergeInProgress) + discrimination test -- a merge that pulls in audit:hard code no longer blocks; the hook's inline skip becomes belt-and-suspenders"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["40cb19aa"]
 touched: []
 established: []
 closed: []
