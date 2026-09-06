@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**84 absorbed · 73 live · 157 total.**
+**85 absorbed · 72 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -186,7 +186,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 87-pouch-fstat-lseek.md | absorbed | [[sub-pouch-fs]] |
 | 88-ninep.md | absorbed | [[sub-libthyla-rs]] |
 | 89-hardware.md | live | — |
-| 90-u-test.md | live | — |
+| 90-u-test.md | absorbed | [[sub-kernel-syscall-abi]] |
 | 91-utopia.md | live | — |
 | 92-utopia-line-editor.md | live | — |
 | 93-utopia-parser.md | live | — |
