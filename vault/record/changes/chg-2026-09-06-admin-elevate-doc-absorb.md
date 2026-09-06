@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/76-admin-elevate (corvus ADMIN_ELEVATE + C-22 gating): clean redirect to sub-corvus + sub-kernel-caps, superseded hardcoded-passphrase named"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["fc9e3c46"]
 touched: []
 established: []
 closed: []
