@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/148-fork (SYS_RFORK + fork, LINEAGE L-3b..L-5): fold the #137 WnR-decode lesson into sub-kernel-fault, 9-surface redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["0fd9c2ea"]
 touched: [sub-kernel-fault]
 established: []
 closed: []
