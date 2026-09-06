@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**116 absorbed · 41 live · 157 total.**
+**117 absorbed · 40 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -150,7 +150,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 51-pipe.md | absorbed | [[sub-kernel-pipe]] |
 | 52-sys-pipe.md | absorbed | [[sub-kernel-pipe]] |
 | 53-sys-rw.md | absorbed | [[abi-handle-rights]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-uaccess]] |
-| 54-sys-fd-syscalls.md | live | — |
+| 54-sys-fd-syscalls.md | absorbed | [[sub-kernel-handle]], [[sub-kernel-syscall-dispatch]] |
 | 55-sys-attach-9p.md | absorbed | [[sub-kernel-ninep-attach]] |
 | 56-sys-mount.md | absorbed | [[chg-2026-05-14-p5-mount-syscall]], [[sub-kernel-territory]] |
 | 57-attach-probe.md | absorbed | [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-transport]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]] |
