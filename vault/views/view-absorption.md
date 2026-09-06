@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**48 absorbed · 109 live · 157 total.**
+**50 absorbed · 107 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -102,7 +102,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 144-prowl.md | live | — |
 | 145-jit.md | live | — |
 | 145-vivarium.md | live | — |
-| 146-addrspace.md | live | — |
+| 146-addrspace.md | absorbed | [[sub-kernel-addrspace]] |
 | 147-execve.md | live | — |
 | 148-fork.md | live | — |
 | 149-warp.md | live | — |
@@ -122,7 +122,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 23-direct-map.md | live | — |
 | 24-per-proc-pgtable.md | live | — |
 | 25-fault-dispatcher.md | live | — |
-| 26-vma.md | live | — |
+| 26-vma.md | absorbed | [[sub-kernel-vma]] |
 | 27-exec.md | live | — |
 | 28-syscall.md | live | — |
 | 29-joey.md | live | — |

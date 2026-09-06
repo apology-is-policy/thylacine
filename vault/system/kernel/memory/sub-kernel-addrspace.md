@@ -10,7 +10,7 @@ validated-by: [spec-cow, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -53,6 +53,16 @@ in one pointer. A NULL deref on a kernel-only path is deliberately a
 **loud** failure, the opposite of the silent-miss class where a
 half-converted predicate quietly treats a live user address space as a
 kernel Proc.
+
+**The conversion stopped at the mmu API on purpose.** `mmu_install_user_pte`
+and its family keep taking a bare `paddr_t pgtable_root`, not an
+`AddrSpace *` — that layer has no business knowing what a Proc is, and its own
+`pgtable_root == 0` rejects are *parameter validation*, not the kernel-Proc
+test. So the `pgtable_root == 0` sites split by what they actually meant: the
+ones encoding the kernel-Proc question became `as == NULL`; the ones that were
+parameter checks stayed as they were. A reader who "finishes" the conversion by
+threading `AddrSpace` down into the mmu layer would be converting checks that
+were never about a Proc.
 
 `page_budget == 0` is refused rather than read as "unlimited", because an
 uncapped address space is precisely the DoS hole [[inv-i32]] exists to
@@ -360,6 +370,25 @@ What a change must re-establish:
   occur.** REVENANT's dispatch gate admits only non-writable segments, so
   the check guards against a future loader rather than a present path —
   a different guarantee from one this file enforces today.
+- **Do not rename the `AddrSpace` fields by grep.** Two of the seven names
+  are overloaded elsewhere in the tree — `page_count` is also a `struct Burrow`
+  field and `context_id` is also a `psci_cpu_on` parameter — so a blind rename
+  hits unrelated code. The L-1 field-move was done compiler-driven instead:
+  delete the fields from `struct Proc` first and let every now-broken reference
+  surface (measured at the time as 239 sites, all genuinely on `struct Proc`,
+  zero false positives).
+
+## Tests
+
+`kernel/test/test_addrspace.c` — `addrspace.alloc_shape` (a fresh space has
+`ref == 1` and an empty VMA list), `addrspace.refcount` (ref/unref arithmetic;
+the last drop frees), `addrspace.kproc_has_none` (kproc's `as` stays NULL),
+`addrspace.charge_helpers_refuse_without_as` (the six I-32 operations fail
+closed on a kernel-only Proc), `addrspace.proc_alloc_in_shares` (an
+`RFPROC|RFMEM` child shares the parent's space), and
+`addrspace.share_drains_at_last_ref` (the VMA drain runs at the last unref, not
+the first death — the L-3 fix). The COW break's two arms are pinned by
+[[spec-cow]]'s buggy cfgs and exercised at runtime through the fork path.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

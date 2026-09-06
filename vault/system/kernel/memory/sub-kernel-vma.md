@@ -73,6 +73,12 @@ early: once a node starts above the target, no later node can contain it.
 `vma_find_gap` is a single forward sweep carrying a candidate base that jumps
 past each blocking VMA — first-fit, lowest gap, one pass.
 
+Overlap is **half-open**: `ranges_overlap(a, b, c, d) = a < d && c < b`, so two
+ranges that merely touch at a boundary — `[a, b)` and `[b, c)` — are *adjacent*,
+not overlapping, and both insert. This is the right rule for a page-aligned
+address space where one mapping ends exactly where the next begins, and it is
+what `vma.insert_overlap_rejected` pins against a partial-overlap regression.
+
 `vma_find_gap` is written to never form the sum `cand + length`. Every
 comparison is a subtraction guarded by an ordering test, so the arithmetic
 cannot overflow for any window in the 47-bit user space. That is a deliberate
@@ -295,10 +301,19 @@ sleeping-free-under-lock deferral (`vma_free_deferred`, F1/F5 — four sites) pl
 
 ## Tests
 
-Driven indirectly by every demand-page and attach/detach test — `vma_alloc`'s
-rejections are exercised through `burrow_map`, and the list operations through
-the fault path. There is no dedicated `vma.*` suite; the structure is proven by
-its users.
+`kernel/test/test_vma.c` — six unit tests exercising this file directly:
+`vma.alloc_free_smoke` (alloc/free; the `vma_total_allocated`/`_freed` counters
+advance), `vma.alloc_constraints` (the rejections — zero-length, reversed,
+unaligned, `WRITE|EXEC`, null Burrow — each return NULL),
+`vma.insert_lookup_smoke` (three non-overlapping VMAs; lookup hits every covered
+address and misses the gaps), `vma.insert_overlap_rejected` (exact and partial
+overlaps return -1; an adjacent range touching at a boundary is accepted — the
+half-open semantic), `vma.insert_sorted_invariant` (insert in mixed order, walk
+ascending), and `vma.drain_releases_all` (insert four, drain, assert
+`burrow_mapping_count` returns to baseline — the `vma_alloc` <-> `burrow_map`
+symmetry). Beyond the suite, `vma_alloc`'s rejections and the list walk are
+exercised indirectly by every demand-page and attach/detach test through the
+fault path.
 
 ## Referenced by
 
