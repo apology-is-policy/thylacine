@@ -37,6 +37,11 @@ use cartoon::{Cartoon, Op};
 use kaua_term::{Control, Record, ScreenMode};
 use vt::{Palette, ATTR_REVERSE, ATTR_UNDERLINE};
 
+/// PL-4b-ii: a render's cached proportional live tail -- the laid live block,
+/// the per-grid-row provenance `(logical line item, start column)`, and the
+/// tail's screen-y -- that a click inverts through (`Tile::live_laid`).
+type LiveLaid = (LaidBlock, Vec<(usize, usize)>, i32);
+
 pub struct Tile {
     pub grid: Grid,
     pub scrollback: Transcript,
@@ -74,6 +79,15 @@ pub struct Tile {
     /// Visual lines laid out by the last `render` (the transient's witness:
     /// bounded by the view plus the two whole blocks, never the history).
     pub laid_lines_last: usize,
+    /// PL-4b-ii: the last NORMAL-mode render's proportional live tail --
+    /// (the laid live block, the per-grid-row provenance, the tail's screen-y)
+    /// -- so a click on the tail (`grid_hit` / `grid_run_rect`) inverts through
+    /// the SAME geometry the render painted, not the mono cell grid. None in
+    /// alt-screen (the tail is the mono `paint_grid`, hit by cell) and before
+    /// the first render. Rebuilt every render (O(grid), never the history), so
+    /// a stale cache never outlives one frame; a click uses the last frame's
+    /// layout exactly as the block `frame` does.
+    live_laid: Option<LiveLaid>,
 }
 
 impl Tile {
@@ -102,6 +116,7 @@ impl Tile {
             spans: SpanMap::new(),
             laid_last: 0,
             laid_lines_last: 0,
+            live_laid: None,
         }
     }
 
@@ -170,18 +185,80 @@ impl Tile {
         self.scrollback.obj_in_block(t.block, t.obj)
     }
 
-    /// The run under a grid-relative point (cells `cw` x `ch`): (row, key).
-    pub fn grid_hit(&self, x: i32, y: i32, cw: i32, ch: i32) -> Option<(usize, u16)> {
-        if x < 0 || y < 0 || cw <= 0 || ch <= 0 {
-            return None;
-        }
-        let (r, c) = ((y / ch) as usize, (x / cw) as usize);
-        let t = self.grid_tag(r, c)?;
-        let mut start = c;
+    /// The run key (start col + 1) for the obj at grid cell (r, col), walking
+    /// left to the run's start; None if the cell carries no obj.
+    fn run_key_at(&self, r: usize, col: usize) -> Option<u16> {
+        let t = self.grid_tag(r, col)?;
+        let mut start = col;
         while start > 0 && self.grid_tag(r, start - 1) == Some(t) {
             start -= 1;
         }
-        Some((r, (start as u16).saturating_add(1)))
+        Some((start as u16).saturating_add(1))
+    }
+
+    /// The obj run under a tail-relative point: (grid row, run key). In NORMAL
+    /// mode the tail is proportional (PL-4b), so the click inverts through the
+    /// last render's cached layout -- `x`/`y` relative to the tail's top-left
+    /// (the caller subtracts the tail's screen-y): the laid line under `y`, its
+    /// logical column under `x`, then the `prov` inverse back to the grid
+    /// (row, col). In alt-screen there is no cache, so it falls back to the mono
+    /// cell grid (`cw` x `ch`), the geometry `paint_grid` uses.
+    pub fn grid_hit(&self, x: i32, y: i32, cw: i32, ch: i32) -> Option<(usize, u16)> {
+        if x < 0 || y < 0 {
+            return None;
+        }
+        match &self.live_laid {
+            Some((live_lb, prov, _)) => {
+                let line = live_lb.lines.iter().find(|l| y >= l.y && y < l.y + l.h)?;
+                let col = col_at_x(line, x)?;
+                let cols = self.grid.dims().0;
+                let (r, rc) = prov_inverse(prov, line.src_item, col, cols)?;
+                self.run_key_at(r, rc).map(|k| (r, k))
+            }
+            None => {
+                if cw <= 0 || ch <= 0 {
+                    return None;
+                }
+                let (r, c) = ((y / ch) as usize, (x / cw) as usize);
+                self.run_key_at(r, c).map(|k| (r, k))
+            }
+        }
+    }
+
+    /// The tail-relative display rect (x, y, w, h) of grid run (r, key): the
+    /// proportional x-extent + laid-line y/h from the cached layout in NORMAL
+    /// mode, or the mono cell rect (`cw` x `ch`) in alt-screen / before a
+    /// render. A soft-wrapped run reports its FIRST laid piece (this rect only
+    /// rides the menu-witness say line; the menu anchors at the pointer). None
+    /// when the cell carries no run.
+    pub fn grid_run_rect(&self, r: usize, key: u16, cw: i32, ch: i32) -> Option<(i32, i32, i32, i32)> {
+        let (c0, n, _) = self.grid_run(r, key)?;
+        match &self.live_laid {
+            Some((live_lb, prov, _)) => {
+                let &(item, start) = prov.get(r)?;
+                let (a, b) = (start + c0, start + c0 + n);
+                for line in live_lb.lines.iter() {
+                    if line.src_item != item {
+                        continue;
+                    }
+                    let lo = line.segs.first().map(|s| s.src_col).unwrap_or(0);
+                    let hi = line
+                        .segs
+                        .last()
+                        .map(|s| s.src_col + s.refs.len())
+                        .unwrap_or(lo);
+                    let (aa, bb) = (a.max(lo), b.min(hi));
+                    if aa >= bb {
+                        continue;
+                    }
+                    let x0 = line_col_x(line, aa);
+                    let x1 = line_col_x(line, bb);
+                    return Some((x0, line.y, (x1 - x0).max(1), line.h));
+                }
+                None
+            }
+            None => Some((c0 as i32 * cw, r as i32 * ch, (n as i32 * cw).max(1), ch)),
+        }
     }
 
     /// The record -> model dispatch (14.11.2).
@@ -293,6 +370,10 @@ impl Tile {
         self.frame.clear();
 
         if self.mode == ScreenMode::AltScreen {
+            // The tail is the mono grid; a click hits it by cell, not through a
+            // proportional cache -- drop any stale normal-mode layout so
+            // `grid_hit` takes the mono path.
+            self.live_laid = None;
             paint_grid(cart, &self.grid, 0, 0, gs, sheet);
             return grid_h;
         }
@@ -473,6 +554,11 @@ impl Tile {
                 }
             }
         }
+        // Cache this frame's proportional tail for the click inverse (`y` is the
+        // tail's screen-y). Moved in AFTER every read above (`live_lb` / `prov`
+        // are done being borrowed); `grid_hit` / `grid_run_rect` invert through
+        // it until the next render replaces it.
+        self.live_laid = Some((live_lb, prov, y));
         content_h
     }
 
@@ -590,6 +676,44 @@ fn line_col_x(line: &LaidLine, col: usize) -> i32 {
         }
     }
     line.segs.last().map(|s| s.x_end).unwrap_or(0)
+}
+
+/// PL-4b: the logical column of laid line `line` under block-relative x `x` --
+/// the seg whose [x, x_end) contains it, then the glyph cell within it (each
+/// glyph owns [xs[i], xs[i+1])). None past the content: a click beyond the last
+/// glyph, or in a gap between runs, hits no cell (so no run).
+fn col_at_x(line: &LaidLine, x: i32) -> Option<usize> {
+    for seg in line.segs.iter() {
+        if x >= seg.x && x < seg.x_end {
+            let n = seg.refs.len();
+            for i in 0..n {
+                let hi = if i + 1 < n { seg.xs[i + 1] } else { seg.x_end };
+                if x < hi {
+                    return Some(seg.src_col + i);
+                }
+            }
+            return Some(seg.src_col + n.saturating_sub(1));
+        }
+    }
+    None
+}
+
+/// PL-4b: the inverse of `prov` -- the grid (row, col-in-row) that logical
+/// column `col` of laid line `item` came from. The joined rows of one logical
+/// line hold disjoint column ranges ([start, start+cols)), so at most one row
+/// matches. None if no row covers it.
+fn prov_inverse(
+    prov: &[(usize, usize)],
+    item: usize,
+    col: usize,
+    cols: usize,
+) -> Option<(usize, usize)> {
+    for (r, &(it, start)) in prov.iter().enumerate() {
+        if it == item && start <= col && col < start + cols {
+            return Some((r, col - start));
+        }
+    }
+    None
 }
 
 /// PL-4: the (block-relative y, h) spans of `live`'s laid lines that show grid
@@ -968,6 +1092,7 @@ mod tests {
             spans: SpanMap::new(),
             laid_last: 0,
             laid_lines_last: 0,
+            live_laid: None,
         }
     }
 
@@ -1353,6 +1478,82 @@ mod tests {
             t.scrollback.block_by_id(b0).map(|b| b.objs.len()),
             Some(1),
             "the source block keeps its own"
+        );
+    }
+
+    #[test]
+    fn grid_hit_inverts_a_proportional_click_to_the_run() {
+        // PL-4b-ii-b: after a proportional render, a click on the live tail
+        // inverts through the CACHED layout (not the mono cell grid) to the
+        // right grid run, and the run's display rect is its real x-extent.
+        let cs = |ch: char, span: u32| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span,
+        };
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let mut t = daylight_tile(16, 4);
+        // An obj run "bin" on grid row 0 (cols 0..3, serial 1), then a plain
+        // 'x' at col 4 (serial 2, obj closed) -- the mono test's shape.
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 1,
+            frame: b"\x1b]1936;v1;obj;type=path;ref=/bin\x1b\\".to_vec(),
+        }));
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cs('b', 1)), (0, 1, cs('i', 1)), (0, 2, cs('n', 1))],
+            cursor: (0, 3, true),
+            wrapped: vec![],
+        });
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 2,
+            frame: b"\x1b]1936;v1;/obj\x1b\\".to_vec(),
+        }));
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 4, cs('x', 2))],
+            cursor: (0, 5, true),
+            wrapped: vec![],
+        });
+        // Render populates the proportional cache (live_laid Some).
+        let mut cart = Cartoon::new();
+        let (w, h) = (16 * 8, 4 * 20);
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+
+        // The run's tail-relative rect is proportional (a real x-extent, one
+        // laid line high), and its centre inverts back to (row 0, key 1).
+        let (rx, ry, rw, rh) = t.grid_run_rect(0, 1, 8, 20).expect("the run has a rect");
+        assert!(rw > 0 && rh > 0, "a non-empty proportional rect: {rw}x{rh}");
+        let (cx, cy) = (rx + rw / 2, ry + rh / 2);
+        assert_eq!(
+            t.grid_hit(cx, cy, 8, 20),
+            Some((0, 1)),
+            "a click on 'bin' inverts to its run"
+        );
+        assert_eq!(
+            t.grid_run_obj(0, 1),
+            Some(("path", "/bin")),
+            "the returned key resolves the obj"
+        );
+        // A click far right of every glyph, or below the trimmed tail, hits no
+        // run (the proportional inverse finds no cell there).
+        assert_eq!(t.grid_hit(w as i32 - 1, cy, 8, 20), None, "past the content");
+        assert_eq!(t.grid_hit(cx, h as i32 - 1, 8, 20), None, "below the tail");
+
+        // Alt-screen drops the cache -> grid_hit falls back to the mono grid
+        // (the same (row, key) by cell), and grid_run_rect to the mono cell.
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        assert_eq!(
+            t.grid_hit(5, 5, 8, 20),
+            Some((0, 1)),
+            "alt-screen: mono hit on 'bin'"
+        );
+        assert_eq!(
+            t.grid_run_rect(0, 1, 8, 20),
+            Some((0, 0, 24, 20)),
+            "alt-screen: the mono 3-cell rect"
         );
     }
 

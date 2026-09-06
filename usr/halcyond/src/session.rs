@@ -556,6 +556,12 @@ impl SessionTile {
                 // transcript row from its laid block.
                 let placed: Option<((i32, i32, i32, i32), (String, String))> =
                     if fr.block == GRID_BLOCK {
+                        // PL-4b: the live grid tail is proportional, so the
+                        // run's rect comes from the cached layout
+                        // (grid_run_rect), tail-relative, lifted by the GRID_KEY
+                        // frame y -- the click path's twin (both summon the same
+                        // GRID_KEY menu). The old mono c0*cw / row*ch anchored a
+                        // KEYBOARD-summoned menu at the wrong x on the tail.
                         let (cw, ch, _) = gs.mono_cell();
                         let gy = self
                             .tile
@@ -563,21 +569,15 @@ impl SessionTile {
                             .iter()
                             .find(|f| f.0 == GRID_KEY)
                             .map(|f| f.1);
-                        let run = self.tile.grid_run(fr.item, obj);
+                        let rect = self.tile.grid_run_rect(fr.item, obj, cw, ch);
                         let o = self
                             .tile
                             .grid_run_obj(fr.item, obj)
                             .map(|(t, r)| (String::from(t), String::from(r)));
-                        match (gy, run, o) {
-                            (Some(gy), Some((c0, n, _)), Some(o)) => Some((
-                                (
-                                    c0 as i32 * cw,
-                                    gy + fr.item as i32 * ch,
-                                    (n as i32 * cw).max(1),
-                                    ch,
-                                ),
-                                o,
-                            )),
+                        match (gy, rect, o) {
+                            (Some(gy), Some((rx, ry, rw, rh)), Some(o)) => {
+                                Some(((rx, gy + ry, rw, rh), o))
+                            }
                             _ => None,
                         }
                     } else {
@@ -635,20 +635,17 @@ impl SessionTile {
     fn click(&mut self, rules: &[Rule], sheet: &Sheet, gs: &mut GlyphSource) -> Option<MenuReq> {
         let (key, by) = self.tile.hit(self.ptr.1)?;
         let (rect, (ty, refv)) = if key == GRID_KEY {
-            // The live grid: the run under the cell at the pointer.
+            // The live grid tail: the run under the pointer. `by` is the tail's
+            // screen-y (the GRID_KEY frame entry), so the pointer is made
+            // tail-relative for the hit; the run's rect comes back tail-relative
+            // and is lifted by `by`. PL-4b: the tail is proportional, so
+            // grid_hit / grid_run_rect invert through the cached layout (the
+            // grid analogue of the scrollback path's hit_run + run_rect).
             let (cw, ch, _) = gs.mono_cell();
             let (r, k) = self.tile.grid_hit(self.ptr.0, self.ptr.1 - by, cw, ch)?;
-            let (c0, n, _) = self.tile.grid_run(r, k)?;
             let (t, rf) = self.tile.grid_run_obj(r, k)?;
-            (
-                (
-                    c0 as i32 * cw,
-                    by + r as i32 * ch,
-                    (n as i32 * cw).max(1),
-                    ch,
-                ),
-                (String::from(t), String::from(rf)),
-            )
+            let (rx, ry, rw, rh) = self.tile.grid_run_rect(r, k, cw, ch)?;
+            ((rx, by + ry, rw, rh), (String::from(t), String::from(rf)))
         } else {
             let bi = self.block_index(key)?;
             let laid = self.lay(bi, sheet, gs)?;

@@ -1365,9 +1365,11 @@ impl Transcript {
                     obj,
                     hdr: tag.hdr,
                 };
-                let style = if styles.last() == Some(&st) {
-                    (styles.len() - 1) as u16
-                } else if styles.len() >= MAX_STYLES_PER_BLOCK {
+                // The last slot when it already holds this style (the hot tail)
+                // OR when the table is full (degrade to the last -- a run keeps
+                // its neighbour's style, never overflows); else an earlier match
+                // on the capped scan; else a fresh slot.
+                let style = if styles.last() == Some(&st) || styles.len() >= MAX_STYLES_PER_BLOCK {
                     (styles.len() - 1) as u16
                 } else if let Some(i) = styles.iter().position(|s| *s == st) {
                     i as u16
