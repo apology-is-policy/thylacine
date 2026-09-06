@@ -546,6 +546,22 @@ staleness census went 24 -> 21 -- the three dossiers it named are refreshed.
 Fourth peer-flagged de-stale of the run; the code was main's, already merged and
 s7a+F2-audited, so no code was touched.
 
+### Run 37 continued: two joey docs absorbed, and a caveat that argued with its own body
+
+A bounded follow-on to the entry-cluster work: `29-joey` and `59-joey-from-ramfs`
+both stubbed to `sub-kernel-joey` (authored earlier this run from the current
+`kernel/joey.c`) + `sub-stratum-boot`. Zero-fold -- the dossier was written from
+the code, so it already carried every current kernel-side atom; I verified that
+atom-by-atom rather than trusting it. `29-joey` is a P3-F milestone frozen in
+amber (the 9-instruction hand-encoded hello blob in an 8 KiB BSS array, all of it
+superseded by the `#85` initrd-loaded transient and the long-running init). The
+find worth keeping is in `59-joey-from-ramfs`: its body was correctly updated for
+`#85` (the heap transient that retired the static `JOEY_BLOB_MAX` array), but
+**caveat 3 still says `JOEY_BLOB_MAX = 32 KiB`** -- the same document asserting a
+constant its own body records as removed. A doc can rot against itself when an
+edit updates the prose and leaves the caveat; the stub names the contradiction so
+the next reader is not misled by it. `68 absorbed / 89 live`.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
