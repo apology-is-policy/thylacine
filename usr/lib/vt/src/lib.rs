@@ -841,6 +841,16 @@ impl Vt {
         self.pending.clear();
     }
 
+    /// The ACTIVE buffer's per-row soft-wrap flags (`wrapped[y]` == the flag
+    /// documented on the field: row y ended by autowrap). Alt-swapped, so this
+    /// is the alt buffer's flags on the alt screen and the main's on the normal
+    /// screen. The KT-1 consumer carries this on the live-screen CellDiff (PL-4)
+    /// so halcyond can rejoin soft-wrapped grid rows into logical lines the same
+    /// way it rejoins scrolled-off rows (PL-3).
+    pub fn wrapped(&self) -> &[bool] {
+        &self.wrapped
+    }
+
     /// Resumable feed for the event-capture consumer (KT-1). Processes bytes
     /// from `*pos` and returns at the first boundary event (having advanced
     /// `*pos` past its triggering byte and applied its cell effect), or None at

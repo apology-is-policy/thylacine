@@ -185,7 +185,11 @@ impl Tile {
     /// The record -> model dispatch (14.11.2).
     pub fn apply(&mut self, rec: Record) {
         match rec {
-            Record::CellDiff { changed, cursor } => self.grid.apply_celldiff(&changed, cursor),
+            Record::CellDiff {
+                changed,
+                cursor,
+                wrapped,
+            } => self.grid.apply_celldiff(&changed, cursor, &wrapped),
             Record::ScrollOff { rows, wrapped } => {
                 self.scrollback
                     .push_scrolled_rows(&rows, &wrapped, &self.spans)
@@ -613,6 +617,7 @@ mod tests {
         t.apply(Record::CellDiff {
             changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
             cursor: (0, 2, true),
+            wrapped: vec![],
         });
         assert_eq!(t.grid.row(0)[0].ch, 'h');
         assert_eq!(t.grid.row(0)[1].ch, 'i');
@@ -744,6 +749,7 @@ mod tests {
         t.apply(Record::CellDiff {
             changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
             cursor: (0, 2, true),
+            wrapped: vec![],
         });
         let mut cart = Cartoon::new();
         let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
@@ -765,6 +771,7 @@ mod tests {
         t.apply(Record::CellDiff {
             changed: vec![(3, 0, cell('x'))],
             cursor: (3, 1, true),
+            wrapped: vec![],
         });
         let mut cart = Cartoon::new();
         let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
@@ -1125,6 +1132,7 @@ mod tests {
         t.apply(Record::CellDiff {
             changed: vec![(0, 0, cs('b', 1)), (0, 1, cs('i', 1)), (0, 2, cs('n', 1))],
             cursor: (0, 3, true),
+            wrapped: vec![],
         });
         t.apply(Record::Control(Control::Osc1936Raw {
             serial: 2,
@@ -1133,6 +1141,7 @@ mod tests {
         t.apply(Record::CellDiff {
             changed: vec![(0, 4, cs('x', 2))],
             cursor: (0, 5, true),
+            wrapped: vec![],
         });
         let runs = t.grid_runs(0);
         assert_eq!(runs.len(), 1, "one run on the grid row: {:?}", runs);

@@ -18,7 +18,7 @@ process whose death is a held affordance, not a dead environment.
 ## Public API (`usr/kaua-term/src/lib.rs`, `wire.rs`)
 
 ```rust
-pub enum Record { CellDiff { changed: Vec<(u16,u16,Cell)>, cursor: (u16,u16,bool) },
+pub enum Record { CellDiff { changed: Vec<(u16,u16,Cell)>, cursor: (u16,u16,bool), wrapped: Vec<bool> },
                   ScrollOff { rows: Vec<Vec<Cell>>, wrapped: Vec<bool> }, Control(Control), Mode(ScreenMode) }
 pub enum Control { Osc1936Raw { serial: u32, frame: Vec<u8> }, Title(String), Bell, Exit(i32), WinsizeAck }
 pub struct Producer;               // vt bytes -> records, with a shadow screen

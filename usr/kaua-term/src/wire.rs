@@ -99,7 +99,11 @@ fn frame(tag: u8, payload: &[u8], out: &mut Vec<u8>) {
 pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
     let mut p = Vec::new();
     let tag = match rec {
-        Record::CellDiff { changed, cursor } => {
+        Record::CellDiff {
+            changed,
+            cursor,
+            wrapped,
+        } => {
             put_u16(&mut p, cursor.0);
             put_u16(&mut p, cursor.1);
             p.push(cursor.2 as u8);
@@ -108,6 +112,12 @@ pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
                 put_u16(&mut p, *r);
                 put_u16(&mut p, *c);
                 put_cell(&mut p, cell);
+            }
+            // PL-4: the grid's per-row soft-wrap snapshot -- length-prefixed, one
+            // byte per row -- after the sparse cell changes.
+            put_u32(&mut p, wrapped.len() as u32);
+            for &w in wrapped {
+                p.push(w as u8);
             }
             T_CELLDIFF
         }
@@ -277,9 +287,15 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
                 let cx = r.u16()?;
                 changed.push((rr, cx, r.cell()?));
             }
+            let nw = r.u32()?;
+            let mut wrapped = Vec::with_capacity(r.capped(nw, 1));
+            for _ in 0..nw {
+                wrapped.push(r.u8()? != 0);
+            }
             Record::CellDiff {
                 changed,
                 cursor: (cr, cc, cv),
+                wrapped,
             }
         }
         T_SCROLLOFF => {
@@ -484,6 +500,7 @@ mod tests {
         rt_record(Record::CellDiff {
             changed: vec![(0, 0, cell('a')), (3, 7, cell('Z'))],
             cursor: (2, 5, true),
+            wrapped: vec![true, false, true, false],
         });
         rt_record(Record::ScrollOff {
             rows: vec![vec![cell('x'), cell('y')], vec![cell('z')]],

@@ -119,7 +119,11 @@ stream down. The record ORDER is load-bearing (it delimits Beacon zones); the
 kaua-term emits in VT-stream order, flushing a pending CellDiff at every boundary.**
 
 kaua-term -> halcyond (ordered):
-- `CellDiff { changed (row,col,cell)[], cursor(row,col,vis) }` -- the live screen.
+- `CellDiff { changed (row,col,cell)[], cursor(row,col,vis), wrapped bool[] }` -- the
+  live screen. `wrapped` is the grid's per-row soft-wrap snapshot (length == rows),
+  carried like `cursor` so halcyond can rejoin soft-wrapped live rows into logical
+  lines for the normal-mode proportional render (PL-4), the live analogue of
+  ScrollOff's per-row flag (PL-3).
   (Cells are position-keyed, so intra-batch order is irrelevant -- only the
   boundary order between records matters.)
 - `ScrollOff { rows: cell[][], wrapped: bool[] }` -- normal-mode lines off the top

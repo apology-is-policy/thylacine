@@ -277,7 +277,7 @@ model dispatch (`Tile::apply`, 14.11.2):
 
 | Record | applied to |
 |---|---|
-| `CellDiff{changed,cursor}` | the live grid (`grid.rs`) |
+| `CellDiff{changed,cursor,wrapped}` | the live grid (`grid.rs`); `wrapped` = the grid's per-row soft-wrap snapshot (PL-4, for the proportional-live rejoin) |
 | `ScrollOff{rows,wrapped}` | `Transcript::push_scrolled_rows` (history; rejoins soft-wrapped rows) |
 | `Control(Osc1936Raw)` | `Transcript::feed` -- the SAME beacon parser the console uses |
 | `Control(Title/Exit/Bell/WinsizeAck)` | tile fields |

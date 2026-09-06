@@ -72,6 +72,17 @@ pub enum Record {
     CellDiff {
         changed: Vec<(u16, u16, Cell)>,
         cursor: (u16, u16, bool),
+        /// The live screen's per-row soft-wrap flags (the vt's active-buffer
+        /// `wrapped`) -- a full-grid snapshot carried on every CellDiff like
+        /// `cursor`, so halcyond can rejoin soft-wrapped grid rows into logical
+        /// lines and paint the normal-mode live view proportional (PL-4), the
+        /// same rejoin ScrollOff enables for scrollback (PL-3). `wrapped.len()`
+        /// is the grid's row count. NOT diffed: a wrap flag only ever changes
+        /// together with a cell write in the same row, so the snapshot rides
+        /// the very diff it is coherent with. On the alt screen it is the alt
+        /// buffer's flags (unused there -- the alt screen renders the raw mono
+        /// grid, not the proportional join).
+        wrapped: Vec<bool>,
     },
     /// Normal-mode lines that scrolled off the top -> the transcript. Coalesced:
     /// a bulk scroll is one record carrying every row that left, in order.
@@ -207,10 +218,15 @@ impl Producer {
                     // AND send it whole: the consumer keeps one grid, so the
                     // alt screen's blank rows must overwrite the main's text.
                     self.flush_scroll(out);
-                    self.emit_celldiff(&outgoing, mcx, mcy, vt.cursor_visible, out);
+                    // The outgoing MAIN's wrap is now in the (swapped-away) alt
+                    // buffer, so vt.wrapped() here is the blank alt's -- but this
+                    // CellDiff is overwritten by the blank-alt full_diff below
+                    // before any render, and the alt screen renders the raw mono
+                    // grid (no join), so the wrap it carries is never read.
+                    self.emit_celldiff(&outgoing, mcx, mcy, vt.cursor_visible, vt.wrapped(), out);
                     out.push(Record::Mode(ScreenMode::AltScreen));
                     self.reset_shadow(&vt.cells, vt.cx, vt.cy, vt.cursor_visible);
-                    out.push(self.full_diff());
+                    out.push(self.full_diff(vt.wrapped()));
                 }
                 Boundary::AltLeave(restored) => {
                     // The alt live grid is discarded; announce the mode, reset
@@ -219,7 +235,7 @@ impl Producer {
                     self.flush_scroll(out);
                     out.push(Record::Mode(ScreenMode::Normal));
                     self.reset_shadow(&restored, vt.cx, vt.cy, vt.cursor_visible);
-                    out.push(self.full_diff());
+                    out.push(self.full_diff(vt.wrapped()));
                 }
             }
             // Ship whenever the held cells reach the accumulator bound,
@@ -239,13 +255,13 @@ impl Producer {
         let cursor = (vt.cy as u16, vt.cx as u16, vt.cursor_visible);
         self.shadow = vt.cells.clone();
         self.last_cursor = cursor;
-        out.push(self.full_diff());
+        out.push(self.full_diff(vt.wrapped()));
     }
 
     /// Every shadow cell as one CellDiff (the consumer redraws the whole
     /// screen): the resize and the alt-screen boundaries, where the consumer's
     /// single grid must be overwritten wholesale.
-    fn full_diff(&self) -> Record {
+    fn full_diff(&self, wrapped: &[bool]) -> Record {
         let cols = self.cols.max(1);
         let changed = self
             .shadow
@@ -256,12 +272,13 @@ impl Producer {
         Record::CellDiff {
             changed,
             cursor: self.last_cursor,
+            wrapped: wrapped.to_vec(),
         }
     }
 
     fn flush(&mut self, vt: &Vt, out: &mut Vec<Record>) {
         self.flush_scroll(out);
-        self.emit_celldiff(&vt.cells, vt.cx, vt.cy, vt.cursor_visible, out);
+        self.emit_celldiff(&vt.cells, vt.cx, vt.cy, vt.cursor_visible, vt.wrapped(), out);
     }
 
     fn flush_scroll(&mut self, out: &mut Vec<Record>) {
@@ -301,6 +318,7 @@ impl Producer {
         cx: usize,
         cy: usize,
         vis: bool,
+        wrapped: &[bool],
         out: &mut Vec<Record>,
     ) {
         let cursor = (cy as u16, cx as u16, vis);
@@ -321,7 +339,11 @@ impl Producer {
             self.shadow.copy_from_slice(current);
         }
         self.last_cursor = cursor;
-        out.push(Record::CellDiff { changed, cursor });
+        out.push(Record::CellDiff {
+            changed,
+            cursor,
+            wrapped: wrapped.to_vec(),
+        });
     }
 
     fn reset_shadow(&mut self, to: &[Cell], cx: usize, cy: usize, vis: bool) {
@@ -994,12 +1016,32 @@ mod tests {
         p.feed(&mut vt, b"\x1b[2;3H", &mut out); // move cursor, no cell change
         assert_eq!(out.len(), 1);
         match &out[0] {
-            Record::CellDiff { changed, cursor } => {
+            Record::CellDiff { changed, cursor, .. } => {
                 assert!(changed.is_empty());
                 assert_eq!(*cursor, (1, 2, true));
             }
             other => panic!("expected a cursor-only CellDiff, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn celldiff_carries_the_live_grid_soft_wrap() {
+        // PL-4a: "abcde" on a 4x2 grid fills row 0 (abcd) and autowraps 'e' onto
+        // row 1 WITHOUT scrolling -- so the live-screen CellDiff (not a ScrollOff)
+        // must carry the grid's per-row wrap, letting halcyond rejoin the
+        // soft-wrapped live row into a logical line (PL-4).
+        let recs = produce(4, 2, b"abcde");
+        let wrapped = recs
+            .iter()
+            .rev()
+            .find_map(|r| match r {
+                Record::CellDiff { wrapped, .. } => Some(wrapped.clone()),
+                _ => None,
+            })
+            .expect("a CellDiff");
+        assert_eq!(wrapped.len(), 2, "one flag per grid row");
+        assert!(wrapped[0], "row 0 ended by autowrap");
+        assert!(!wrapped[1], "row 1 did not");
     }
 
     // ---- the down channel: encode_key ----
