@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**415 owned · 69 unowned · 484 files (85% owned) · ~18563 unswept lines.**
+**416 owned · 68 unowned · 484 files (85% owned) · ~18231 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30431 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,7 +74,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/ports | 0 | 18 | 4033 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| kernel | 122 | 16 | 2450 |
+| kernel | 123 | 15 | 2118 |
 | usr/halcyon | 0 | 2 | 1739 |
 | usr/quarry | 0 | 1 | 1028 |
 | usr/lib | 56 | 3 | 461 |
@@ -131,7 +131,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 336 |
-| kernel/fault_test.c | 332 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
 | usr/ports/sdl2/thylacine/thyla_tap.c | 320 |
 | usr/lib/thylajit/thyla_capjit.h | 318 |

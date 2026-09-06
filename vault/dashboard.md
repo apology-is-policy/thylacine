@@ -136,8 +136,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-07 [[chg-2026-09-07-net-doc-absorb]] — absorb docs/reference/122-net (libthyla-rs::net, the native /net client): fold the SNTP trust model into sub-net-clients; redirect the protocol to sub-netd-server
 - 2026-09-07 [[chg-2026-09-07-prowl-doc-absorb]] — absorb docs/reference/144-prowl (the scheduler-aware process monitor): clean redirect to sub-prowl (ahead of the doc)
 - 2026-09-07 [[chg-2026-09-07-ptyfs-doc-absorb]] — absorb docs/reference/136-ptyfs (the pts server, I-20/PTY-2): fold 3 gaps into sub-ptyfs (cacheability fail-safe, item-10 readiness, drop_modeflush); PTY-4 #19/TTIN deferred to 135-pty-kernel
+- 2026-09-07 [[chg-2026-09-07-verification-doc-absorb]] — absorb docs/reference/13-verification (Phase-1 verification infra): fold the deliberate-fault matrix anti-DCE + #244 into sub-kernel-boot-sequence, claim fault_test.c + test-fault.sh
 - 2026-09-06 [[chg-2026-09-06-9p-identity-absorb]] — absorb docs/reference/100 (9P identity presentation, A-3): the cross-cutting security surface folded across 7 dossiers + a new n_uname trust-stamp seam, then multi-redirect stub -- 66 absorbed / 91 live
 - 2026-09-06 [[chg-2026-09-06-abi-errno-reconcile]] — abi-errno registry reconcile: +16 missing codes (the whole V-5 socket family + INTR/2BIG/CHILD/NOTTY/MFILE/NODEV/NOTDIR/ISDIR/LOOP), the stale self-counts (19->35 non-zero, 20->36 asserts), and the err.rs mirror analysis
 - 2026-09-06 [[chg-2026-09-06-admin-elevate-doc-absorb]] — absorb docs/reference/76-admin-elevate (corvus ADMIN_ELEVATE + C-22 gating): clean redirect to sub-corvus + sub-kernel-caps, superseded hardcoded-passphrase named
-- 2026-09-06 [[chg-2026-09-06-allowance-doc-absorb]] — absorb docs/reference/117-allowance (I-34 hardware allowance): zero-fold; ref doc stale on the audit-F1 install-under-lock UAF
 <!-- generated:end -->

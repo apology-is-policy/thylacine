@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**132 absorbed · 25 live · 157 total.**
+**133 absorbed · 24 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -82,7 +82,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 127-overcommit.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-fault]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]] |
 | 128-devenv.md | absorbed | [[inv-i1]], [[inv-i32]], [[lock-env]], [[sub-kernel-content]] |
 | 129-fsbench.md | live | — |
-| 13-verification.md | live | — |
+| 13-verification.md | absorbed | [[abi-boot-banner]], [[sub-kernel-boot-sequence]], [[sub-substrate-gates]] |
 | 130-positioned-io.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]] |
 | 131-pounce.md | absorbed | [[adt-pounce-p5]], [[chg-2026-07-07-pounce]], [[sub-kernel-ninep-client]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-ninep-wire]], [[sub-kernel-stalk]] |
 | 132-larder.md | absorbed | [[sub-kernel-larder]], [[sub-kernel-ninep-dev9p]], [[view-closed-sub-kernel-larder]] |
