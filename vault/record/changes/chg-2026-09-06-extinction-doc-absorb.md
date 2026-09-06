@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/04-extinction (kernel ELE): fold the unowned extinction.c into sub-kernel-halls"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["8cade34d"]
 touched: [sub-kernel-halls]
 established: []
 closed: []
