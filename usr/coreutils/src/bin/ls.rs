@@ -384,48 +384,14 @@ fn render_long(
         color_s.push(kind.color());
     }
 
-    if rich {
-        // The beacon table realization: same columns, widths from content
-        // (Table's own math), the name cells presenting their objects. The
-        // classify suffix is dropped here -- the REALM column classifies.
-        use beacon::sink::{Cell, ObjType, Sink, Table};
-        let mut t = Table::new("llrlll").hdr();
-        t.push_row(alloc::vec![
-            Cell::plain("MODE"),
-            Cell::plain("OWNER"),
-            Cell::plain("SIZE"),
-            Cell::plain("REALM"),
-            Cell::plain("QID"),
-            Cell::plain("NAME"),
-        ]);
-        for i in 0..entries.len() {
-            let name_cell = match coreutils::path::abs(&entries[i].path) {
-                Some(r) => Cell::obj(ObjType::Path, &r, &name_s[i]),
-                None => Cell::plain(&name_s[i]),
-            };
-            t.push_row(alloc::vec![
-                Cell::plain(&mode_s[i]),
-                Cell::plain(&owner_s[i]),
-                Cell::plain(&size_s[i]),
-                Cell::plain(realm_s[i]),
-                Cell::plain(&qid_s[i]),
-                name_cell,
-            ]);
-        }
-        let mut sout = coreutils::beacon_gate::SinkOut(out);
-        let mut s = Sink::new(&mut sout, beacon::Tier::Rich);
-        t.realize(&mut s);
-        return;
-    }
-
-    // Column widths (>= the header label widths).
+    // Column widths (>= the header label widths). Shared by every realization.
     let mw = 10usize; // perms are 10
     let ow = owner_s.iter().map(|s| s.chars().count()).max().unwrap_or(0).max(5);
     let sw = size_s.iter().map(|s| s.chars().count()).max().unwrap_or(0).max(4);
     let rw = 5usize; // "graft" / "REALM"
     let qw = qid_s.iter().map(|s| s.chars().count()).max().unwrap_or(0).max(3);
 
-    // Build rows (header first).
+    // Build rows (header first). rows[0] is the header; rows[i + 1] is entry i.
     let mut rows: Vec<Row> = Vec::new();
     rows.push(Row {
         prefix: row_prefix("MODE", "OWNER", "SIZE", "REALM", "QID", mw, ow, sw, rw, qw),
@@ -442,6 +408,57 @@ fn render_long(
         });
     }
 
+    // Box geometry: one total-width for every realization below, so the Rich
+    // `pre` and the SGR box are the SAME box in two encodings.
+    let content_w = rows
+        .iter()
+        .map(|r| r.prefix.chars().count() + r.name.chars().count() + r.suffix.chars().count())
+        .max()
+        .unwrap_or(0);
+    let count = format!("{} item{}", entries.len(), if entries.len() == 1 { "" } else { "s" });
+    let total = boxd::fit(content_w, title, &count, "");
+
+    if rich {
+        // PL-5: box-drawing output rides a Beacon `pre` block (HALCYON.md 14.13
+        // / BEACON.md 12.2) -- a Cornucopia mono island the renderer sets apart,
+        // box-drawing in the cells tier. The box furniture (frame + title + item
+        // count) is the pre payload; each name cell stays affordant as an `obj
+        // type=path`, the classify suffix riding OUTSIDE the frame (presentation,
+        // not the name). SGR is off at Rich (the renderer owns typography);
+        // stripping every frame yields the exact plain box below (BEACON.md 12.8
+        // P1) -- one geometry, two realizations. `\u{2502}` is boxd::V (the box
+        // vertical); the borders come straight from boxd so the widths match.
+        use beacon::sink::{ObjType, Sink};
+        let mut sout = coreutils::beacon_gate::SinkOut(out);
+        let mut s = Sink::new(&mut sout, beacon::Tier::Rich);
+        s.pre_open();
+        s.text(&boxd::top(total, title, &count));
+        s.text("\n");
+        for (i, r) in rows.iter().enumerate() {
+            let vis = r.prefix.chars().count() + r.name.chars().count() + r.suffix.chars().count();
+            s.text("\u{2502} ");
+            s.text(&r.prefix);
+            if i == 0 {
+                // The header's NAME label is not a presentation.
+                s.text(&r.name);
+            } else {
+                match coreutils::path::abs(&entries[i - 1].path) {
+                    Some(rf) => s.obj(ObjType::Path, &rf, &r.name),
+                    None => s.text(&r.name),
+                }
+                s.text(r.suffix);
+            }
+            for _ in 0..boxd::pad(total, vis) {
+                s.text(" ");
+            }
+            s.text(" \u{2502}\n");
+        }
+        s.text(&boxd::bottom(total, ""));
+        s.text("\n");
+        s.pre_close();
+        return;
+    }
+
     if !on {
         // Plain parseable long format: the data rows only (no box / header /
         // color), suffixes only under -F. The pipe-clean discipline.
@@ -454,15 +471,6 @@ fn render_long(
         }
         return;
     }
-
-    // Box geometry.
-    let content_w = rows
-        .iter()
-        .map(|r| r.prefix.chars().count() + r.name.chars().count() + r.suffix.chars().count())
-        .max()
-        .unwrap_or(0);
-    let count = format!("{} item{}", entries.len(), if entries.len() == 1 { "" } else { "s" });
-    let total = boxd::fit(content_w, title, &count, "");
 
     // Emit: top border, header (dim), rows (name colored), bottom rule. The
     // realm column + the violet name carry the graft meaning -- no legend.

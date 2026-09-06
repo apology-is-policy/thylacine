@@ -23,6 +23,56 @@ needed the operator.
 
 ---
 
+## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
+
+**PL-5 -- the `pre` PRODUCER (`*(pending)*`).** PL-1b (run 34) built the `pre`
+RENDER but landed host-tested only: a `pre` block needs a producer to witness it
+on the lever. PL-5 is that producer -- and the resume note's one-line plan ("wrap
+`la`'s box in `pre`") was porting against the wrong content model.
+
+**The fork, and why it was the operator's.** Ground truth (reading the CODE, not
+the note): at the RICH tier `render_long` already emitted a semantic Beacon
+`table` (`Table::new("llrlll")` + `obj type=path` name cells), landed at H-1c-2
+(`8922ccd7`) -- and HALCYON.md 14.13 line 116 renders a `table` PROPORTIONAL. But
+the same 14.13 pass (`a95d437c`, today) and BEACON.md 12.2 say box-drawing
+emitters (`la` and kin) wrap their output in `pre` (a mono island). Contradictory
+for `la` specifically. On Opus (the operator-away pin: STOP at the first
+user-input item) I surfaced it as a blocking question rather than guess --
+guessing wrong regresses user-visible output on the KT-1 format-fuzz surface and
+burns an audit cycle. The operator ratified the mono box via `pre`. The
+resolution that keeps scripture self-consistent: line 116 governs things that ARE
+tables; a `pre`-`la` isn't one, so 116 is silent -- the `table` path was simply
+the pre-14.13 realization, superseded, not a live design conflict.
+
+**The change.** `render_long`'s box geometry (widths -> rows -> content_w ->
+total) hoisted above the tier branches, so the Rich `pre`, the cells SGR box, and
+the pipe columns are three realizations of ONE box. The `if rich` arm wraps
+`boxd::top` / the `│ ...pad... │` rows / `boxd::bottom` in
+`pre_open`/`pre_close` -- the box furniture as pre payload (mono, verbatim), each
+name an `obj type=path` (affordant), the classify suffix OUTSIDE the frame, SGR
+off. strip(rich) == the plain box (BEACON 12.8 P1), byte-exact against `emit_row`.
+
+**The consumer sweep (bug_91: removing the collapsed value voids every asserter of
+it).** Exactly one consumer asserted `ls -l` -> `table`: ls-halcyon.exp, flipped
+to `1936;v1;pre`. coreutil-smoke's ls -l test is pipe-clean columns (the pipe
+never reaches the rich arm); ps is the genuine table; ls-gfx-session runs `ls -l`
+via the menu with no frame/color assertion -- all three unaffected.
+
+**A cheap witness the expensive E2E can't be.** Added an every-boot producer
+witness in coreutil-smoke: `ls -l --beacon=always /version` must emit the pre +
+obj frames AND strip to the box (the ┌ top-left + │ vertical). Caught by
+the real boot, not the ~2-min HVF lever E2E: `ls -l rich pre-box (PL-5) ok`, 56
+checks.
+
+**Verified.** Producer on the wire: `1936;v1;pre` present in the ls-halcyon
+transcript (the frame followed by the box chars). Console render (lever):
+ls-halcyon PASS [117s] -- the pre frame witnessed, and the parchment-ground pixel
+proof HELD (dom 242,235,224, 55039/440000 non-ground px), refuting my own flagged
+risk that the raised pre-box ground would flip the center rect's dominant (it is
+a minority). Session render: ls-gfx-session PASS [28s]. What caught the wrong
+turn: reading the CODE, not the resume note (a port against the wrong content
+model lands hollow -- bug_h4d2).
+
 ## Run 35 (vault absorption cont., 2026-09-06, Opus 4.8, effort max): the two BIG dossiers, an errno-registry reconcile that the stale tool was structurally blind to, and a triage tool that lied
 
 **Where it sits.** The continuation of Run 33 across its self-compaction (Run 33

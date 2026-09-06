@@ -15,8 +15,9 @@
 #             top (the discriminating pixel pair).
 #   rich    : the H-1 canary now reads RICH ("ut: beacon rich exported" +
 #             "transcript zones armed" -- the F7 transport half through a
-#             REAL advertisement), and `ls -l` emits the rich TABLE frames
-#             on the wire ("1936;v1;table" in the transcript -- output-only:
+#             REAL advertisement), and `ls -l` emits the rich PRE (box-
+#             drawing code-fence) frame on the wire ("1936;v1;pre" -- PL-5:
+#             box-drawing output rides `pre`, HALCYON.md 14.13; output-only:
 #             no typed command contains it). F10's silence is pinned too:
 #             no "re-exported" line (the tier never changed mid-session).
 #   reflow  : /dev/winsize reads the full mono grid; a compositor SPLIT
@@ -745,7 +746,7 @@ tgrep "halcyond: beacon rich advertised" "halcyond advertised the rich tier (the
 tgrep "halcyond: console up" "halcyond brought up the transcript surface"
 tgrep "ut: beacon rich exported" "the rich canary (the F7 transport half, real advertisement)"
 tgrep "transcript zones armed" "ut armed the transcript zones"
-tgrep "1936;v1;table" "ls -l emitted the rich table frames on the wire"
+tgrep "1936;v1;pre" "ls -l emitted the rich pre (code-fence box) frame on the wire"
 tgrep "7;file://localhost/lib/aurora" "ut reported the working directory as OSC 7 (H-3d)"
 tgrep "1936;v1;mark;k=cmd;text=grep -q h3d-not-there /lib/beacon/verbs" "ut marked the accepted command as the output zone's first child (H-3d)"
 tgrep "context \"halcyon.*/lib/aurora.*pwd\" condition Ok" "the status bar showed the console's directory and last command (H-3d)"
