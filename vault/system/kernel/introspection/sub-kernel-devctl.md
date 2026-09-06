@@ -12,7 +12,7 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17"]
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -108,6 +108,16 @@ the global lock with interrupts off. Once `/ctl` became reachable from userspace
 this stopped being a formatting nicety: it is what bounds an unprivileged
 tight-loop reader's lock hold to the size of the buffer instead of the size of
 the process table.
+
+### The STATE column shows job-stop, never debug-stop
+
+An ALIVE Proc carrying `job_stop_req` (a `/proc/<pid>/ctl` suspend, or a Ctrl-Z
+through the pts path) renders `STOPPED` — the Unix `ps` T-state, via
+`procs_state_name`. The DEBUG stop (`debug_stop_req`, the attach-gated debugger
+stop) is deliberately **not** surfaced: it is the debugger's private I-39 view,
+not a job-control state a monitor should expose, so the render reads
+`job_stop_req` alone. That flag is read atomically — a cross-Proc reader holds
+`g_proc_table_lock` via `proc_for_each` but takes no per-Proc lock.
 
 ### Offline CPUs render as a short row, not as a busy one
 
