@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 88-ninep (the userspace libthyla-rs 9P codec, NOT the kernel client) -- fold the codec invariants into sub-libthyla-rs, then stub (55 absorbed / 102 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["816b637d"]
 touched: [sub-libthyla-rs]
 established: []
 closed: []
