@@ -851,6 +851,21 @@ stub-worthy staleness is that the doc's "userspace malloc wiring lands at #321" 
 long built. `31841eed`, fixup `0affb8c6`, both mirrors. `80 absorbed / 77 live` --
 nine chunks since the second self-compact.
 
+### Run 37 continued: 110-resource -- the I-32 floor, and the per-Proc-to-per-AddrSpace move the doc missed
+
+The DoS bound, the I-32 invariant this sweep has now leaned on five times. Zero
+fold -- the thread and child caps with their deliberate `ncpus-1` TOCTOU overshoot
+are in `sub-kernel-proc`, the page/VMA counters with their charge-beside-the-count
+discipline in `sub-kernel-addrspace`. The staleness worth naming in the stub is
+the one that matters for correctness: the doc frames the page budget as per-Proc,
+title and all, but since LINEAGE L-1 / RW-12 the enforced bound hangs off the
+**AddrSpace** (`Proc.page_budget` is only the authorization). That is not a
+cosmetic relocation -- it is the whole reason `rfork(RFMEM)` siblings and peer
+threads share one cap, and why the counter must sit on the object it charges. The
+current dossier carries that reasoning and the rejected inverse; the frozen doc
+predates it. `2626175f`, fixup `29c20ebd`, both mirrors. `81 absorbed / 76 live`
+-- ten chunks since the second self-compact.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
