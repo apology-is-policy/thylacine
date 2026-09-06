@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/67-el1h-kernel (uniform-EL1h model, I-21): clean multi-redirect to inv-i21 + exception + thread + sched-smp + boot-entry + mmu"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["3851e2e4"]
 touched: []
 established: []
 closed: []
