@@ -4,7 +4,7 @@ type: chg
 title: "kernel-elf de-stale: the DISTRO D-2/D-4 dynamic-binary surface -- ET_DYN/PIE placement + AT_ENTRY (D-2), the shared elf_read_interp for the rewrite-to-ldso route (D-4/#215), and the measured code count (twenty-four, not twenty-two)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["0ffd8eca"]
 touched:
   - sub-kernel-elf
 established: []
