@@ -7,6 +7,8 @@ code:
   - kernel/main.c
   - arch/arm64/hwfeat.c
   - arch/arm64/hwfeat.h
+  - kernel/canary.c
+  - kernel/include/thylacine/canary.h
 audit: hard
 guarded-by: [inv-i15]
 validated-by: [prose, gate-smp, gate-interactive]
@@ -15,7 +17,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -86,6 +88,21 @@ The published word is deliberately Linux-shaped, so ported code's existing
 feature detection works unmodified. Two of its fields are inverted sentinels
 where zero means present, unlike every neighbouring field, and the code says so
 at the site.
+
+**The stack-canary cookie is seeded from the KASLR entropy, and the ordering is
+the subtlety.** `__stack_chk_guard` — the global cookie every
+`-fstack-protector-strong` prologue reads and epilogue re-checks — starts at a
+non-zero **link-time magic**, so functions that complete *before* `canary_init`
+runs still validate against a consistent value. `canary_init(seed)` overwrites it
+with a runtime cookie derived from the KASLR seed; the calling frame is chosen so
+that no function whose prologue sampled the old value reaches its epilogue after
+the overwrite, and a compiler barrier forces the write to complete before
+`canary_init` returns — so every frame sees exactly one cookie for its whole
+lifetime. A frame that straddled the write would fail its own epilogue check on a
+stack it never smashed. `__stack_chk_fail` routes a detected smash to
+`extinction()`, the last-resort path any kernel invariant break takes; it is one
+of the seven `tools/test-fault.sh` provokers that prove the protection actually
+*fires* rather than merely compiling in.
 
 **Per-CPU identity is handled differently from features.** The processor
 identifier and cache line size are recorded *by each CPU, into its own slot*, at
@@ -257,3 +274,8 @@ The writeback-granule decode, the compile-time padding constant, and the
 refuted parenthetical are [[chg-2026-08-16-boot-cwg-parenthetical]]. The banner
 emitter's writer role — the delivery half of [[abi-boot-banner]] — is
 [[chg-2026-08-16-cons-writer-set]].
+
+[[chg-2026-09-06-hardening-doc-absorb]] added `kernel/canary.c` (previously
+unowned) — the `__stack_chk_guard` link-time-magic → KASLR-seeded-runtime-cookie
+lifecycle, the barrier that keeps one cookie per frame, and `__stack_chk_fail` →
+`extinction` — at the 12-hardening absorption.
