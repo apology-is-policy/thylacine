@@ -794,6 +794,26 @@ reference now, and the frozen doc had nothing left but its one orphan lesson.
 `0fd9c2ea`, fixup `40532ce5`, both mirrors. `77 absorbed / 80 live` -- six chunks
 since the second self-compact.
 
+### Run 37 continued: 27-exec -- the trilogy closes, and the halfway line
+
+The last big LINEAGE/exec doc, `exec_setup` -- the bridge from a parsed ELF to a
+populated address space. Zero-fold, because `sub-kernel-exec`, warm from the
+`147-execve` chunk two before it, already carries the whole spine: the three
+`exec_setup` forms, the sub-page `PT_LOAD` floor, the L-4a sparse backing, the
+#107 I-cache span over the executable segment, the D-4 `PT_INTERP` rewrite. The
+REVENANT file-backed half distributes cleanly -- the FILE fault arm to
+`sub-kernel-fault`, the Image cache to `sub-kernel-image`, the BURROW mapping
+lifecycle to `sub-kernel-burrow`. The one thing to say in the stub is what a P3-Eb
+doc necessarily gets wrong: it still frames `exec_setup` as kernel-internal with
+the EL0 transition "deferred to P3-Ed", and it predates the split between this
+spawn-into-an-empty-child path and the *detached* `exec_load_into` that `execve`
+introduced at L-2a. With this the exec/fork trilogy (27 + 147 + 148) is fully
+absorbed, and the ledger crosses its halfway line: `78 absorbed / 79 live`. The
+high-value load-bearing docs -- A-2 permission, the exception machinery, the whole
+exec/fork arc, the memory allocators -- are now dossier-first; what remains thins
+toward bringup probes and the still-unwritten uncovered set. `1e3dfb62`, fixup
+`84672c56`, both mirrors. Seven chunks since the second self-compact.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
