@@ -193,11 +193,27 @@ now built). Also folded CNONBLOCK/EAGAIN (34ff46df) and the item-11->11c seam (a
 read is deliberately NOT caught-note-interruptible yet -- only death interrupts,
 because a native reader is not EINTR-aware). Dropped `lock-rendez` from the frontmatter.
 
-Twelve kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
-vivarium, proc, caps, death, jobctl, stratum-boot, cons, notes, pipe), the H-arc fold
-backlog cleared ENTIRELY, and this entry. Backlog: 43 (from 56 at the run's start; the
-run crossed into 2026-09-06). Open next: a NEW `sub-sdl-port` (aux's N-2a-2 SDL) and the
-churn-ordered tail (ptyfs, viv, substrate-gates, kernel-burrow, kernel-vma, ...).
+**burrow was a same-day-tie flag, and a mirror-split interrupted the push.**
+`sub-kernel-burrow` looked stale (~334 lines, "changed 2026-09-05") but ground-truth
+diffing showed the only post-update change was `3de39ad0` (V-3b-1c-2b round-3, 37 min
+after the last real commit) -- a COMMENT-only refinement of `burrow_total_refs`'s
+rationale from "IRQ-preemptible" to the true "SMP cross-CPU", which the dossier's prose
+already carried. Borrowed. But its push raced a peer: I had pushed to github while main
+pushed its H-arc audit round-1 close to codeberg, and the two mirrors SPLIT (github had
+my burrow, codeberg had the peer's H-arc, both diverged from the same base). Main merged
+them (`454ecde9`) before I could -- but its merge left `view-spec-coverage.md` with 78
+duplicated lines from the textual combine. The recovery: verify my burrow work was fully
+in the converged tip (it was, `commits: ["d3c4312f"]`), reset onto it, re-render the view
+to collapse the duplication, push the fix. Both mirrors reconverged at `838cb360`. The
+lesson is the standing one -- resolve a split by MERGE never force, and re-RENDER any
+generated view a merge touched rather than trusting the textual combine.
+
+Thirteen kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
+vivarium, proc, caps, death, jobctl, stratum-boot, cons, notes, pipe, burrow), the H-arc
+fold backlog cleared ENTIRELY, and this entry. Backlog: 42 after burrow, then 47 once the
+peer's H-arc round-1 merge landed (its code touched ~5 more dossiers -- a fresh
+churn-ordered pass is owed). Open next: the post-merge stale top (ptyfs, viv,
+substrate-gates, kernel-vma, ...) and a NEW `sub-sdl-port` (aux's N-2a-2 SDL).
 
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
