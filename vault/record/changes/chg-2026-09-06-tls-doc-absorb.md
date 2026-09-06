@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/123-tls (native TLS substrate): zero-fold redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["6b98e65c"]
 touched: []
 established: []
 closed: []
