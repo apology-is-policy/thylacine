@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/91-utopia (the U-3 ut skeleton): clean redirect to sub-utopia-interactive (superseded skeleton, ahead of the doc)"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["ed03545c"]
 touched: []
 established: []
 closed: []
