@@ -221,9 +221,22 @@ earlier the same run. I took the UI + beacon-relay half (`29b3267c`): sub-halcyo
 (the SpanMap is LAZY, 128 KiB outside the scrollback budget -- my h4d2 prose had a flat
 ring; AltScreen leaves Normal), sub-kaua-term (scroll_cap sizes by the in-memory Cell),
 sub-ptyhold + sub-mechanism-drivers (the shared `declare_beacon`/`relayed_tier`, ptyhost
-declaring before its mint). The **tapestryd half -- six A-F GPU/compositor findings --
-is DEFERRED** (`chg-2026-09-06-harc-audit-close-r1`'s no-dossier-change names each; it is
-the top owed item). Run hit the 600k self-compact line here.
+declaring before its mint). The **tapestryd half -- six A-F GPU/compositor findings --** was deferred at the
+600k self-compact line, then folded on the far side (`eb480b58` + fixup
+`a04b52e5`, [[chg-2026-09-06-harc-r1-fold-tapestryd]]): a new "The H-arc audit
+close, round 1" sub-section in sub-tapestryd carrying the round header + all six
+findings, plus three in-place amendments where a finding refined described
+mechanism -- the generation fence (A-F2's `ack_deferred` re-offer), the creator
+reservation (A-F3's `creator_peer` process-keying), and the menu (A-F5's
+`session_declared && conn_hosts` seat). Each verified in
+`usr/tapestryd/src/{server,pane}.rs` before a word was written (server.rs:16793
+the composed-arm stale-slot expansion, 2611 `release_displaced_gen`, 5380
+`floor_bars_around`, pane.rs:579 `host_for`, 16164 the menu gate). The two P1s
+(A-F1 the composed-arm stale blit, A-F2 the drain-refused resize-ack) landed with
+the four P3s; stale backlog 43 -> 42. The H-arc round-1 fold is now complete
+across both halves (UI `29b3267c` + tapestryd `eb480b58`). OWED at the peer (the
+implementation side): the GPU-path witness for A-F1 on the GL host + aux's real
+DOSBox-X re-run.
 
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
