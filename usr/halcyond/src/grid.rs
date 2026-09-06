@@ -92,6 +92,26 @@ impl Grid {
         &self.wrapped
     }
 
+    /// The whole grid, row-major (`rows * cols`) -- the PL-4 proportional render
+    /// lays it as logical lines (via `Transcript::live_block`).
+    pub fn cells(&self) -> &[Cell] {
+        &self.cells
+    }
+
+    /// PL-4: the number of rows the proportional render lays -- through the last
+    /// row with content OR the cursor row, whichever is lower, so a screen of
+    /// trailing blank rows below the prompt is not painted (the bottom-anchored
+    /// view would otherwise float the prompt mid-tile). At least 1.
+    pub fn content_rows(&self) -> usize {
+        let cur = self.cursor().0 + 1;
+        let last = (0..self.rows)
+            .rev()
+            .find(|&r| self.row(r).iter().any(|c| c.ch != ' '))
+            .map(|r| r + 1)
+            .unwrap_or(0);
+        last.max(cur).min(self.rows).max(1)
+    }
+
     /// Row `r`'s cells (empty slice if out of range).
     pub fn row(&self, r: usize) -> &[Cell] {
         if r < self.rows {
@@ -256,6 +276,21 @@ mod tests {
         assert_eq!(g.wrapped(), &[true, true]);
         g.resize(4, 4);
         assert_eq!(g.wrapped(), &[true, true, false, false]);
+    }
+
+    #[test]
+    fn content_rows_trims_trailing_blanks() {
+        // PL-4: the proportional render lays through the last content row or the
+        // cursor row, not the full grid -- so trailing blanks below the prompt
+        // are not painted.
+        let mut g = Grid::new(4, 4, 0xFFFFFF, 0);
+        assert_eq!(g.content_rows(), 1, "blank grid, cursor home -> 1 row");
+        g.apply_celldiff(&[(1, 0, c('x'))], (1, 1, true), &[]);
+        assert_eq!(g.content_rows(), 2, "content + cursor on row 1 -> 2 rows");
+        // cursor past the content still extends through the cursor.
+        let mut g2 = Grid::new(4, 4, 0xFFFFFF, 0);
+        g2.apply_celldiff(&[], (3, 0, true), &[]);
+        assert_eq!(g2.content_rows(), 4, "cursor at row 3 -> 4 rows even if blank");
     }
 
     #[test]

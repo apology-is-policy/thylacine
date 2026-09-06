@@ -710,6 +710,31 @@ pub fn cursor_pos(laid: &LaidBlock, col: usize, sheet: &Sheet) -> (i32, i32, i32
     (sheet.pad_x, 0, 16)
 }
 
+/// PL-4: the pixel position of column `col` within ONE logical line of a
+/// multi-line laid block. `cursor_pos` counts a GLOBAL column across the whole
+/// block, which is wrong for the live grid, whose block holds many logical
+/// lines; this scopes to the LaidLines whose `src_item == item` (a logical
+/// line's wrapped pieces share it). `col` is the column within that logical
+/// line; the per-glyph `seg.xs` give the x directly. A column past the item's
+/// content lands at the end of its last laid line. Returns (x, line.y, line.h).
+pub fn caret_in_block(laid: &LaidBlock, item: usize, col: usize) -> (i32, i32, i32) {
+    let mut end: Option<(i32, i32, i32)> = None;
+    for line in laid.lines.iter() {
+        if line.src_item != item {
+            continue;
+        }
+        for seg in line.segs.iter() {
+            let n = seg.refs.len();
+            if col >= seg.src_col && col < seg.src_col + n {
+                return (seg.xs[col - seg.src_col], line.y, line.h);
+            }
+        }
+        let x = line.segs.last().map(|s| s.x_end).unwrap_or(0);
+        end = Some((x, line.y, line.h));
+    }
+    end.unwrap_or((0, 0, 16))
+}
+
 /// Emit a laid block into the cartoon at (0, y0): background rects first,
 /// then glyph runs (paint order is the op order).
 /// The visual span (block-relative y, height) of one source row -- a Line

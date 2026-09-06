@@ -25,7 +25,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::grid::Grid;
-use crate::layout::{laid_line_for, layout_block, render_block, LaidBlock, Sheet};
+use crate::layout::{
+    caret_in_block, laid_line_for, layout_block, render_block, LaidBlock, LaidLine, Sheet,
+};
 use crate::menu::{run_rect, ObjRun};
 use crate::raster::{GlyphSource, FACE_MONO};
 use crate::transcript::{
@@ -284,7 +286,7 @@ impl Tile {
         cart.ops.push(Op::Clear {
             color: sheet.ground,
         });
-        let (cw, cell_h, _base) = gs.mono_cell();
+        let (_cw, cell_h, _base) = gs.mono_cell();
         let grid_h = self.grid.dims().1 as i32 * cell_h;
         self.laid_last = 0;
         self.laid_lines_last = 0;
@@ -312,7 +314,27 @@ impl Tile {
         self.laid_lines_last += open_lb.lines.len();
         total += open_lb.height;
 
-        let content_h = total + grid_h;
+        // PL-4: the live grid renders PROPORTIONALLY as the normal-mode tail
+        // (HALCYON 14.13) -- its soft-wrapped rows joined into logical lines and
+        // re-wrapped at the tile width, replacing the fixed mono grid. Laid only
+        // through the content rows so a screen of trailing blanks below the
+        // prompt is not painted (the bottom-anchored view would else float the
+        // prompt mid-tile). `prov` maps a grid row -> (logical line, start col).
+        let live_cols = self.grid.dims().0;
+        let live_rows = self.grid.content_rows();
+        let live_wrapped = self.grid.wrapped();
+        let (live_b, prov) = self.scrollback.live_block(
+            self.grid.cells(),
+            live_cols,
+            live_rows,
+            live_wrapped,
+            &self.spans,
+        );
+        let live_lb = layout_block(&live_b, widthi, sheet, gs);
+        self.laid_last += 1;
+        self.laid_lines_last += live_lb.lines.len();
+
+        let content_h = total + live_lb.height;
 
         // The mark's row drags the view: locate its content-relative span
         // (a frozen block's from the cached heights; the open block's is
@@ -343,7 +365,10 @@ impl Tile {
                 });
             }
             if span.is_none() && m.block == GRID_KEY {
-                span = Some((total + m.item as i32 * cell_h, cell_h));
+                let sp = live_row_spans(&live_lb, &prov, m.item, live_cols);
+                if let (Some(&(y0, _)), Some(&(y1, h1))) = (sp.first(), sp.last()) {
+                    span = Some((total + y0, (y1 + h1) - y0));
+                }
             }
             if let Some((r, lh)) = span {
                 // Visible iff scroll_up <= from_bottom <= scroll_up + viewh - lh.
@@ -396,18 +421,40 @@ impl Tile {
         // live grid is the virtual trailing block (14.11.5) -- in the frame
         // under GRID_KEY, its marked row banded under the cells, its
         // selected run underlined over them.
-        self.frame.push((GRID_KEY, y, grid_h));
+        self.frame.push((GRID_KEY, y, live_lb.height));
         let gm = mark.filter(|m| m.block == GRID_KEY);
+        // The marked grid row's band, proportional (a soft-wrapped row spans
+        // several laid lines) -- painted UNDER the cells.
         if let Some(m) = gm {
-            cart.ops.push(Op::Rect {
-                x: 0,
-                y: y + m.item as i32 * cell_h,
-                w: w as u32,
-                h: cell_h as u32,
-                color: sheet.sel_bg,
-            });
+            for (by, bh) in live_row_spans(&live_lb, &prov, m.item, live_cols) {
+                cart.ops.push(Op::Rect {
+                    x: 0,
+                    y: y + by,
+                    w: w as u32,
+                    h: bh as u32,
+                    color: sheet.sel_bg,
+                });
+            }
         }
-        paint_grid(cart, &self.grid, 0, y, gs, sheet);
+        render_block(cart, &live_lb, y, gs);
+        // The caret: ONE source of truth (the grid cursor), placed at the
+        // proportional x of its character boundary (HALCYON 14.13; subsumes s2,
+        // the stray cursor adrift from the rows).
+        let (cr, cc, cvis) = self.grid.cursor();
+        if cvis {
+            if let Some(&(item, start)) = prov.get(cr) {
+                let (cx, cy, chh) = caret_in_block(&live_lb, item, start + cc);
+                cart.ops.push(Op::Rect {
+                    x: cx,
+                    y: y + cy,
+                    w: 2,
+                    h: chh as u32,
+                    color: libhalcyon::theme::DAYLIGHT.ember,
+                });
+            }
+        }
+        // The selected obj run underlined, proportional -- each laid piece of a
+        // wrapped run over its real x-extent, painted OVER the cells.
         if let Some(Mark {
             item,
             obj: Some(key),
@@ -415,13 +462,15 @@ impl Tile {
         }) = gm
         {
             if let Some((c0, n, _)) = self.grid_run(item, key) {
-                cart.ops.push(Op::Rect {
-                    x: c0 as i32 * cw,
-                    y: y + item as i32 * cell_h + cell_h - 2,
-                    w: (n as i32 * cw).max(1) as u32,
-                    h: 2,
-                    color: libhalcyon::theme::DAYLIGHT.ember,
-                });
+                for (by, x0, x1) in live_run_underline(&live_lb, &prov, item, c0, n) {
+                    cart.ops.push(Op::Rect {
+                        x: x0,
+                        y: y + by,
+                        w: (x1 - x0).max(1) as u32,
+                        h: 2,
+                        color: libhalcyon::theme::DAYLIGHT.ember,
+                    });
+                }
             }
         }
         content_h
@@ -531,6 +580,86 @@ fn paint_run(cart: &mut Cartoon, lb: &LaidBlock, y: i32, m: Option<Mark>) {
 /// then the underline; the block cursor beam last). Out-of-range is impossible
 /// -- `Grid::row` and `Grid::cursor` are already clamped (grid.rs), the tile
 /// trust boundary (14.11.12).
+/// PL-4: the x of column `col` within ONE laid line (line-scoped, for the
+/// per-line banding + underline geometry). Past the line's content -> its end.
+fn line_col_x(line: &LaidLine, col: usize) -> i32 {
+    for seg in line.segs.iter() {
+        let n = seg.refs.len();
+        if col >= seg.src_col && col < seg.src_col + n {
+            return seg.xs[col - seg.src_col];
+        }
+    }
+    line.segs.last().map(|s| s.x_end).unwrap_or(0)
+}
+
+/// PL-4: the (block-relative y, h) spans of `live`'s laid lines that show grid
+/// row `r`'s columns. A soft-wrapped row can span several laid lines; a laid
+/// line shared by two grid rows bands for both (matching the mono full-row
+/// band). Empty for a row past `prov`.
+fn live_row_spans(
+    live: &LaidBlock,
+    prov: &[(usize, usize)],
+    r: usize,
+    cols: usize,
+) -> Vec<(i32, i32)> {
+    let Some(&(item, start)) = prov.get(r) else {
+        return Vec::new();
+    };
+    let end = start + cols;
+    let mut spans = Vec::new();
+    for line in live.lines.iter() {
+        if line.src_item != item {
+            continue;
+        }
+        let lo = line.segs.first().map(|s| s.src_col).unwrap_or(0);
+        let hi = line
+            .segs
+            .last()
+            .map(|s| s.src_col + s.refs.len())
+            .unwrap_or(lo);
+        if lo < end && hi > start {
+            spans.push((line.y, line.h));
+        }
+    }
+    spans
+}
+
+/// PL-4: the (block-relative line-bottom y, x0, x1) underline segments for grid
+/// row `r`'s obj run at grid columns [rc0, rc0+n) -- one per laid line the run
+/// crosses, so a wrapped run underlines each piece over its real x-extent.
+fn live_run_underline(
+    live: &LaidBlock,
+    prov: &[(usize, usize)],
+    r: usize,
+    rc0: usize,
+    n: usize,
+) -> Vec<(i32, i32, i32)> {
+    let Some(&(item, start)) = prov.get(r) else {
+        return Vec::new();
+    };
+    let c0 = start + rc0;
+    let c1 = c0 + n;
+    let mut out = Vec::new();
+    for line in live.lines.iter() {
+        if line.src_item != item {
+            continue;
+        }
+        let lo = line.segs.first().map(|s| s.src_col).unwrap_or(0);
+        let hi = line
+            .segs
+            .last()
+            .map(|s| s.src_col + s.refs.len())
+            .unwrap_or(lo);
+        let a = c0.max(lo);
+        let b = c1.min(hi);
+        if a >= b {
+            continue;
+        }
+        out.push((line.y + line.h - 2, line_col_x(line, a), line_col_x(line, b)));
+    }
+    out
+}
+
 fn paint_grid(
     cart: &mut Cartoon,
     grid: &Grid,
@@ -789,6 +918,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn render_normal_tail_is_proportional_with_a_caret() {
+        // PL-4b: the normal-mode tail renders PROPORTIONAL (via live_block, not
+        // the mono paint_grid); a 2px ember caret marks the grid cursor; and a
+        // mostly-blank TALL grid TRIMS -- the content height is far below
+        // rows*cell_h.
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let (_, ch, _) = gs.mono_cell();
+        let mut t = daylight_tile(20, 24); // tall grid, one line of content
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
+            cursor: (0, 2, true),
+            wrapped: vec![],
+        });
+        let mut cart = Cartoon::new();
+        let (w, h) = (20 * 8, (24 * ch) as usize);
+        let content = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        assert!(
+            content < 24 * ch,
+            "the trimmed proportional tail is far below the full mono grid ({content} < {})",
+            24 * ch
+        );
+        let caret = cart.ops.iter().any(|op| {
+            matches!(op, Op::Rect { w: 2, color, .. } if *color == libhalcyon::theme::DAYLIGHT.ember)
+        });
+        assert!(caret, "a 2px ember caret beam is painted at the grid cursor");
+    }
+
     /// A tile whose scrollback freezes a block every `lines` rows (zone cuts)
     /// and holds at most `max_blocks` frozen blocks.
     fn history_tile(cols: usize, rows: usize, max_blocks: usize) -> Tile {
@@ -832,13 +990,21 @@ mod tests {
 
     /// The exact content height by the OLD method (every block laid out).
     fn full_height(t: &Tile, w: usize, gs: &mut GlyphSource, sheet: &Sheet) -> i32 {
-        let (_, ch, _) = gs.mono_cell();
         let mut total = sheet.block_gap;
         for b in t.scrollback.frozen_blocks().iter() {
             total += layout_block(b, w as i32, sheet, gs).height + sheet.block_gap;
         }
         total += layout_block(t.scrollback.open_block(), w as i32, sheet, gs).height;
-        total + t.grid.dims().1 as i32 * ch
+        // PL-4: the tail is the proportional live grid (its content rows laid
+        // as logical lines), not rows*cell_h.
+        let (live_b, _) = t.scrollback.live_block(
+            t.grid.cells(),
+            t.grid.dims().0,
+            t.grid.content_rows(),
+            t.grid.wrapped(),
+            &t.spans,
+        );
+        total + layout_block(&live_b, w as i32, sheet, gs).height
     }
 
     #[test]
