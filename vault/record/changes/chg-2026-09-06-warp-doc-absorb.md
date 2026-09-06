@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/149-warp (I-45 GPU seam): zero-fold, multi-redirect across hwcap + tapestryd"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["d00bebbf"]
 touched: []
 established: []
 closed: []
