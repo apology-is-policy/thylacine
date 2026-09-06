@@ -7,7 +7,7 @@ guards: [sub-corvus]
 validated-by: [prose]
 strength: prose
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-06
 ---
 ## Statement
 
@@ -58,6 +58,19 @@ corvus additionally **proves** the confinement at boot rather than
 assuming it: it creates and reads inside the capability, and asserts that
 a known path above it is unreachable. A cooperative invariant that the
 cooperator verifies is meaningfully stronger than one it merely intends.
+
+**What bounds a delegate is the monotonic rights reduction, not the
+withholding of `RIGHT_TRANSFER`** — the A-1.7 audit corrected a false
+earlier claim on this exact point. A grantee handed only `R|W` (with
+`TRANSFER` dropped) can still delegate its capability to its own spawned
+children, because the spawn-fd endow and `handle_dup` gate on the handle
+*kind* plus a rights *subset*, never on `RIGHT_TRANSFER`. That is sound:
+the delegate stays `<=` the grantee's rights and confined to the same
+subtree (I-6 / I-4), and the grantee cannot manufacture a right it does
+not hold — so the monotonic bound is the load-bearing property, and it
+holds regardless. Withholding `TRANSFER` is least-authority hardening
+reserved for the future cross-Proc 9P-transfer surface, not the mechanism
+that keeps a service inside its subtree.
 
 ## Validation
 
