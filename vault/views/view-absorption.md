@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**115 absorbed · 42 live · 157 total.**
+**116 absorbed · 41 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -163,7 +163,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 64-sys-spawn-full.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-exec]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-process]] |
 | 65-corvus-skeleton.md | absorbed | [[sub-corvus]] |
 | 66-corvus-server.md | absorbed | [[sub-corvus]] |
-| 67-el1h-kernel.md | live | — |
+| 67-el1h-kernel.md | absorbed | [[inv-i21]], [[sub-kernel-boot-entry]], [[sub-kernel-exception]], [[sub-kernel-mmu]], [[sub-kernel-sched-smp]], [[sub-kernel-thread]] |
 | 68-corvus-crypto.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus]] |
 | 69-corvus-unwrap.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus]] |
 | 70-devsrv.md | absorbed | [[sub-kernel-devsrv]], [[view-closed-sub-kernel-devsrv]] |
