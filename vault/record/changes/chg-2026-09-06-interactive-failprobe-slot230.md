@@ -4,7 +4,7 @@ type: chg
 title: "substrate-interactive de-stale: the failure-time state probe (the burned-retry decider), the #230 second-QMP-monitor per-slot isolation, and the #224 refinement of the in-tree refusal"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["0faac928"]
 touched:
   - sub-substrate-interactive
 established: []
