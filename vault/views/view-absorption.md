@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**126 absorbed · 31 live · 157 total.**
+**127 absorbed · 30 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -90,7 +90,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 134-debug-fs.md | absorbed | [[sub-kernel-devproc]], [[sub-kernel-exception]], [[sub-kernel-halls]], [[sub-kernel-hwdebug]], [[sub-kernel-mmu]] |
 | 135-pty-kernel.md | live | — |
 | 136-ptyfs.md | live | — |
-| 137-gopls.md | live | — |
+| 137-gopls.md | absorbed | [[abi-t-stat]], [[sub-kernel-caps]], [[sub-kernel-joey]], [[sub-kernel-ninep-dev9p]], [[sub-parley]], [[sub-stratum-session]] |
 | 138-gpud.md | absorbed | [[sub-substrate-gates]], [[sub-tapestryd]], [[sub-warden]] |
 | 139-tapestryd.md | absorbed | [[sub-kernel-weft]], [[sub-libdriver-grant]], [[sub-libtapestry]], [[sub-tapestryd]] |
 | 14-process-model.md | absorbed | [[inv-i24]], [[lock-proc-table]], [[spec-death-wake]], [[sub-kernel-death]], [[sub-kernel-proc]], [[sub-kernel-thread]], [[view-closed-sub-kernel-death]] |
