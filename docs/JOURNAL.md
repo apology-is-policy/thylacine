@@ -180,12 +180,24 @@ guard that closes the arm-2 livelock), the siglongjmp `in_handler` clear (bug-2,
 stack-geometry detector exact for a single-stack guest, plus its cross-stack F1), and
 the phenotype handler-time mask.
 
-Eleven kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
-vivarium, proc, caps, death, jobctl, stratum-boot, cons, notes), the H-arc fold
-backlog cleared ENTIRELY (h4c + h4d1 + the h4d2-family's eight-dossier fold), and this
-entry. Backlog: 44 (from 56 at the run's start; the run crossed into 2026-09-06). Open
-next: a NEW `sub-sdl-port` for aux's N-2a-2 SDL work, and the churn-ordered tail
-(ptyfs, viv, kernel-pipe, kernel-burrow, ...).
+**And pipe -- the concurrency model had moved out from under it.** `sub-kernel-pipe`
+(~262 lines, audit:hard) had gone stale in a way a line-count never shows: the
+single->multi-waiter lift (dd9f9508) retired both single-waiter Rendezes for one
+`poll_waiter_list`, and the dossier's entire "single-waiter per direction, a second
+sleeper extincts" framing -- Data structures, Concurrency, Invariants, Seams -- was
+describing a shape that no longer existed. The lift is the memory's flagged lesson
+made concrete: a "fine in-kernel" Rendez is an unprivileged EL0 crash the day the
+object becomes EL0-shared, and the dossier's OWN Seams had asserted "multi-waiter
+direction queues never needed -- poll covers it," wrong twice (it was needed AND is
+now built). Also folded CNONBLOCK/EAGAIN (34ff46df) and the item-11->11c seam (a pipe
+read is deliberately NOT caught-note-interruptible yet -- only death interrupts,
+because a native reader is not EINTR-aware). Dropped `lock-rendez` from the frontmatter.
+
+Twelve kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
+vivarium, proc, caps, death, jobctl, stratum-boot, cons, notes, pipe), the H-arc fold
+backlog cleared ENTIRELY, and this entry. Backlog: 43 (from 56 at the run's start; the
+run crossed into 2026-09-06). Open next: a NEW `sub-sdl-port` (aux's N-2a-2 SDL) and the
+churn-ordered tail (ptyfs, viv, substrate-gates, kernel-burrow, kernel-vma, ...).
 
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
