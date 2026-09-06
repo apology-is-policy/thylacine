@@ -4,7 +4,7 @@ type: chg
 title: "sub-substrate-builders de-stale: the clade builders must sync build-config.sh + configs/ (the build-configurator arc's silent dependency)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["c694c315"]
 touched:
   - sub-substrate-builders
 established: []
