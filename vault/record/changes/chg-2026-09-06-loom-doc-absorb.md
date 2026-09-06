@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/107-loom (I-29/I-30 Loom ring transport): fold the device-gone terminal into sub-kernel-ninep-client"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["d02252fe"]
 touched: [sub-kernel-ninep-client]
 established: []
 closed: []
