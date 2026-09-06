@@ -295,3 +295,136 @@ pub unsafe fn ready_observe(ready_base: *const u8) -> (u32, u32) {
     let mask = mask_w.load(Ordering::Relaxed);
     (seq, mask)
 }
+
+// =============================================================================
+// Fixed-slot SPSC drive (docs/NOCTURNE.md N-2b) -- an alternative drain mode to
+// netd's addr-based descriptor ring, used by nocturned's per-voice audio ring.
+// The payload region is treated as K = ring_entries FIXED slots of `slot_bytes`
+// each; slot i sits at payload_off + (i % K) * slot_bytes. The CONSUMER computes
+// the slot offset from cons_head % K and NEVER trusts a client-written desc.addr
+// -- the only client value it reads is desc[i].len, snapshotted ONCE and
+// validated before use (the I-30 discipline). This closes the addr-injection
+// hazard by construction: no client-supplied address is ever on the read path.
+//
+// Single-producer / single-consumer, cross-Proc over the one shared ring Burrow
+// (the kernel's consume-once share claim makes the mapper the unique producer):
+//   * the PRODUCER owns prod_tail and Release-publishes a filled slot LAST, so
+//     the consumer sees the slot's payload+len before it sees the slot exists;
+//   * the CONSUMER owns cons_head (Release-frees a drained slot) and `dropped`;
+//   * prod_tail's Release/Acquire pair carries the payload+len across the Proc
+//     boundary, so the consumer reads a slot's bytes only AFTER the producer
+//     published them (no torn period), and the full-check (pt-ch >= K) stops the
+//     producer overwriting a slot the consumer has not yet freed.
+// Both indices are free-running u32; wrapping_sub is exact while the invariant
+// 0 <= pt-ch <= K holds (K << 2^32). `% K` (not `& (K-1)`) is used so a header
+// with a non-power-of-two K -- which read_ring_geom does not reject -- cannot
+// mis-index; for the real ring nocturned mints K via ring_layout (a power of two).
+// =============================================================================
+
+const PROD_TAIL_OFF: usize = 20; // WeftRingHdr.prod_tail (asserted @20)
+const CONS_HEAD_OFF: usize = 24; // WeftRingHdr.cons_head (asserted @24)
+const DROPPED_OFF: usize = 28; //   WeftRingHdr.dropped (cons_head + 4)
+
+/// Producer: reserve, fill, and publish ONE fixed slot. `data` (non-empty, at
+/// most `slot_bytes`) is copied into slot `prod_tail % ring_entries`; the slot's
+/// desc.len is set to data.len(); prod_tail is Release-bumped LAST. Returns false
+/// WITHOUT touching the ring if it is FULL (ring_entries slots in flight) -- the
+/// caller's back-pressure policy (yield + retry) decides what to do. Non-blocking.
+///
+/// # Safety
+/// `base` points at a live, writable mapping of the whole ring Burrow that this
+/// Proc owns, and this Proc is the sole producer of this ring.
+pub unsafe fn slot_produce(base: *mut u8, geom: &RingGeom, slot_bytes: u32, data: &[u8]) -> bool {
+    let k = geom.ring_entries;
+    if k == 0 || data.is_empty() || data.len() > slot_bytes as usize {
+        return false;
+    }
+    let cbase = base as *const u8;
+    let pt_w = &*(cbase.add(PROD_TAIL_OFF) as *const AtomicU32);
+    let ch_w = &*(cbase.add(CONS_HEAD_OFF) as *const AtomicU32);
+    let pt = pt_w.load(Ordering::Relaxed); // producer is the sole writer of prod_tail
+    let ch = ch_w.load(Ordering::Acquire); // pairs with the consumer's Release free
+    if pt.wrapping_sub(ch) >= k {
+        return false; // full: every slot in flight, none freed
+    }
+    let i = (pt % k) as usize;
+    let slot = geom.payload_off as usize + i * slot_bytes as usize;
+    core::ptr::copy_nonoverlapping(data.as_ptr(), base.add(slot), data.len());
+    // desc.addr is set for tidiness/debuggability only; the consumer IGNORES it
+    // and computes the offset itself. desc.len IS the protocol (snapshotted +
+    // validated by the consumer). Both are written before the Release publish.
+    let desc = base.add(geom.desc_off as usize + i * DESC_LEN);
+    core::ptr::write_volatile(desc as *mut u32, (i * slot_bytes as usize) as u32); // desc.addr
+    core::ptr::write_volatile(desc.add(4) as *mut u32, data.len() as u32); // desc.len
+    pt_w.store(pt.wrapping_add(1), Ordering::Release); // publish the slot LAST
+    true
+}
+
+/// Consumer: peek, copy, and free ONE fixed slot into `scratch` (which must be at
+/// least `slot_bytes`). Returns the valid byte count copied, or 0 for "no data
+/// this period" -- either the ring is EMPTY, or the slot's client-written desc.len
+/// failed validation and was DROPPED (both read as silence upstream). Snapshots
+/// desc.len ONCE and validates it (0 < len <= slot_bytes, len % align == 0 when
+/// align != 0), copies from the CONSUMER-COMPUTED offset (never desc.addr), then
+/// Release-bumps cons_head. Non-blocking.
+///
+/// Ordering: the Acquire load of prod_tail synchronizes-with the producer's
+/// Release publish, so for a slot with cons_head < prod_tail the producer's
+/// payload+len writes happen-before these reads -- the desc.len read and the
+/// payload copy are ordered after it, never concurrent, so the plain volatile
+/// read + copy are not a data race. The Release store of cons_head is bumped
+/// AFTER the copy, so the producer never overwrites a slot mid-copy.
+///
+/// # Safety
+/// `base` points at a live, writable mapping of the whole ring Burrow that this
+/// Proc owns, and this Proc is the sole consumer of this ring.
+pub unsafe fn slot_consume(
+    base: *mut u8,
+    geom: &RingGeom,
+    slot_bytes: u32,
+    align: u32,
+    scratch: &mut [u8],
+) -> usize {
+    let k = geom.ring_entries;
+    if k == 0 || scratch.len() < slot_bytes as usize {
+        return 0;
+    }
+    let cbase = base as *const u8;
+    let pt_w = &*(cbase.add(PROD_TAIL_OFF) as *const AtomicU32);
+    let ch_w = &*(cbase.add(CONS_HEAD_OFF) as *const AtomicU32);
+    let ch = ch_w.load(Ordering::Relaxed); // consumer is the sole writer of cons_head
+    let pt = pt_w.load(Ordering::Acquire); // pairs with the producer's Release publish
+    if ch == pt {
+        return 0; // empty
+    }
+    let i = (ch % k) as usize;
+    let desc = cbase.add(geom.desc_off as usize + i * DESC_LEN);
+    let len = core::ptr::read_volatile(desc.add(4) as *const u32); // desc.len, snapshot ONCE
+    let valid = len != 0 && len <= slot_bytes && (align == 0 || len % align == 0);
+    let n = if valid {
+        let slot = geom.payload_off as usize + i * slot_bytes as usize;
+        core::ptr::copy_nonoverlapping(cbase.add(slot), scratch.as_mut_ptr(), len as usize);
+        len as usize
+    } else {
+        // Diagnostics only; the consumer is the sole writer of `dropped`.
+        let dr_w = &*(cbase.add(DROPPED_OFF) as *const AtomicU32);
+        dr_w.store(dr_w.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+        0
+    };
+    ch_w.store(ch.wrapping_add(1), Ordering::Release); // free the slot AFTER the copy
+    n
+}
+
+/// The number of published-but-undrained slots (prod_tail - cons_head), read by
+/// the consumer to decide whether a stopped stream has work. Acquire on prod_tail
+/// pairs with the producer's publish; cons_head is the consumer's own value.
+///
+/// # Safety
+/// `base` points at a live, readable mapping of this ring Burrow's header.
+pub unsafe fn slot_pending(base: *const u8) -> u32 {
+    let pt_w = &*(base.add(PROD_TAIL_OFF) as *const AtomicU32);
+    let ch_w = &*(base.add(CONS_HEAD_OFF) as *const AtomicU32);
+    let pt = pt_w.load(Ordering::Acquire);
+    let ch = ch_w.load(Ordering::Relaxed);
+    pt.wrapping_sub(ch)
+}

@@ -182,6 +182,33 @@ impl Drop for RingVoice {
     }
 }
 
+impl RingVoice {
+    /// Consume ONE period from the ring into `scratch` (>= PERIOD_BYTES); the
+    /// consumer half of the fixed-slot SPSC (N-2b-2). Returns the valid S16 byte
+    /// count (0 = ring empty or a dropped/invalid slot -- both silence this
+    /// period). The client is the producer; nocturned reads on the device clock
+    /// (one period per next_period call), computing the slot offset itself and
+    /// validating only the client-written len (I-30).
+    fn consume_period(&self, scratch: &mut [u8]) -> usize {
+        unsafe {
+            weftlib::slot_consume(
+                self.ring_va as *mut u8,
+                &self.geom,
+                PERIOD_BYTES as u32,
+                FRAME as u32,
+                scratch,
+            )
+        }
+    }
+
+    /// Published-but-undrained periods in this ring. The device start + idle-stop
+    /// read this so a ring-only voice (empty byte FIFO) still starts and holds
+    /// the stream.
+    fn pending(&self) -> u32 {
+        unsafe { weftlib::slot_pending(self.ring_va as *const u8) }
+    }
+}
+
 /// One mixer input: an independent S16LE-stereo stream with its own bounded
 /// FIFO and gain. Voice 0 is the persistent default (the root `audio` file);
 /// every other voice is owned by the connection that minted it.
@@ -295,6 +322,21 @@ impl Shared {
         self.voices.iter().map(|v| v.fifo.len()).sum()
     }
 
+    /// True if any voice has data to play -- byte FIFO bytes OR published ring
+    /// periods (N-2b-2). The device start condition and the idle-stop both read
+    /// this so a ring-only voice (empty FIFO) still starts and holds the stream.
+    /// A ring producer writing to a STOPPED stream generates no poll event, so
+    /// the serve loop's bounded idle poll is what notices it (the wake poke is
+    /// N-2b-2b).
+    pub fn has_playable(&self) -> bool {
+        if self.fifo_len() > 0 {
+            return true;
+        }
+        self.voices
+            .iter()
+            .any(|v| v.ring.as_ref().map_or(false, |r| r.pending() > 0))
+    }
+
     /// Clear every voice's FIFO. Used when the device stream fails to start:
     /// the backlog cannot play, so drop it rather than wedge the idle-stop.
     pub fn drop_fifo(&mut self) {
@@ -348,7 +390,32 @@ impl Shared {
         let mut mix = [0f32; PERIOD_BYTES / 2];
         let mix = &mut mix[..nsamp];
         let mut any = false;
+        // One scratch period reused across ring voices; the zero-copy ring
+        // (N-2b-2) is drained through it, one period per voice per call.
+        let mut ring_scratch = [0u8; PERIOD_BYTES];
         for v in self.voices.iter_mut() {
+            let g = v.gain;
+            // A ring voice reads the zero-copy Weft ring; a byte voice its FIFO.
+            // The two are mutually exclusive per voice (a ring client does not
+            // also byte-write audio); voice 0 never has a ring.
+            if let Some(r) = v.ring.as_ref() {
+                let n = r.consume_period(&mut ring_scratch);
+                // Whole frames only, bounded to the mix width.
+                let have = n.min(buf.len());
+                let have = have - (have % FRAME);
+                if have == 0 {
+                    continue;
+                }
+                any = true;
+                let samples = have / 2;
+                for (k, m) in mix.iter_mut().take(samples).enumerate() {
+                    let lo = ring_scratch[2 * k] as u16;
+                    let hi = ring_scratch[2 * k + 1] as u16;
+                    let s = (lo | (hi << 8)) as i16;
+                    *m += s as f32 * g;
+                }
+                continue;
+            }
             // Whole frames only: a torn frame would shift the channel phase.
             let have = v.fifo.len().min(buf.len());
             let have = have - (have % FRAME);
@@ -356,7 +423,6 @@ impl Shared {
                 continue;
             }
             any = true;
-            let g = v.gain;
             let samples = have / 2;
             for m in mix.iter_mut().take(samples) {
                 let lo = v.fifo.pop_front().unwrap_or(0) as u16;

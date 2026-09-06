@@ -11337,10 +11337,13 @@ int main(void) {
     // probe: by default /nocturne-probe (N-2a-1: mint two voices, play 1 kHz
     // and 2 kHz SIMULTANEOUSLY so the mixer sums them, then silence), or under
     // thylacine.sdlaudio /sdl-audio-probe (N-2a-2: the same chord streamed
-    // through SDL_thylacineaudio). FATAL once the mount is up -- a driver that
-    // cannot play a period is a regression, never an environment. The
-    // host-side half is tools/test-audio.sh / tools/test-sdl-audio.sh (the wav
-    // capture + tools/audio-verdict.py --chord).
+    // through SDL_thylacineaudio), or under thylacine.ringprobe /ring-voice-probe
+    // (N-2b: the same chord streamed through the zero-copy Weft rings of two
+    // voices). The three are mutually exclusive -- one wav capture, one chord
+    // span -- so only one runs. FATAL once the mount is up -- a driver that
+    // cannot play a period is a regression, never an environment. The host-side
+    // halves are tools/test-audio.sh / tools/test-sdl-audio.sh /
+    // tools/test-ring-audio.sh (the wav capture + tools/audio-verdict.py --chord).
     {
         long noc_root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/nocturne", 13, T_OREAD);
         if (noc_root >= 0) {
@@ -11371,6 +11374,27 @@ int main(void) {
                     return 1;
                 }
                 t_putstr("joey: sdl-audio-probe OK (1 kHz + 2 kHz via SDL_thylacineaudio -> a Nocturne voice; N-2a-2)\n");
+            } else if (bootarg_has("thylacine.ringprobe", 19)) {
+                // N-2b: the zero-copy Weft ring witness. EXCLUSIVE with the byte
+                // /nocturne-probe (they cannot share a wav capture -- the chord
+                // verdict's silent-tail + contiguity checks forbid a second chord
+                // span), so under thylacine.ringprobe the byte probe stands down
+                // and the ring is the ONLY thing in the capture: any chord present
+                // came through the zero-copy path. The probe runs both phases --
+                // N-2b-1 (map + geometry + 2 controls) and N-2b-2a (stream a
+                // 1 kHz + 2 kHz chord through two ring voices) -- and emits ONE
+                // PASS. FATAL once selected (a ring that will not map or play is a
+                // regression, never an environment). Gated off by default; the
+                // host halves are tools/test-ring-voice.sh (substrate, no capture)
+                // and tools/test-ring-audio.sh (the wav + audio-verdict --chord).
+                static const char rp_name[]   = "/bin/ring-voice-probe";
+                static const char rp_expect[] = "RING-VOICE-PROBE PASS";
+                if (pouch_smoke_one(rp_name, sizeof(rp_name) - 1,
+                                    rp_expect, sizeof(rp_expect) - 1) != 0) {
+                    t_putstr("joey: ring-voice-probe FAILED (the Weft ring chord did not play; Nocturne N-2b)\n");
+                    return 1;
+                }
+                t_putstr("joey: ring-voice-probe OK (Weft ring mapped + geometry valid + ring chord played; Nocturne N-2b)\n");
             } else {
                 // POST-PIVOT: bare ramfs names no longer resolve; the ramfs
                 // root is bound at /bin (#58), like /bin/corvus and /bin/login.
@@ -11382,23 +11406,6 @@ int main(void) {
                     return 1;
                 }
                 t_putstr("joey: nocturne-probe OK (1 kHz + 2 kHz mixed on two voices; Nocturne N-2a-1)\n");
-            }
-            // N-2b-1: the zero-copy ring SUBSTRATE witness (thylacine.ringprobe;
-            // tools/test-ring-voice.sh). Orthogonal to the audio probes above --
-            // it maps a voice's Weft ring and validates the geometry, plays no
-            // audio -- so it runs IN ADDITION, under its own boot arg. FATAL once
-            // selected (a ring that will not map is a regression, never an
-            // environment). Gated off by default so ordinary boots and the other
-            // gates are unaffected until N-2b-1's own audit closes.
-            if (bootarg_has("thylacine.ringprobe", 19)) {
-                static const char rp_name[]   = "/bin/ring-voice-probe";
-                static const char rp_expect[] = "RING-VOICE-PROBE PASS";
-                if (pouch_smoke_one(rp_name, sizeof(rp_name) - 1,
-                                    rp_expect, sizeof(rp_expect) - 1) != 0) {
-                    t_putstr("joey: ring-voice-probe FAILED (the Weft ring did not map; Nocturne N-2b-1)\n");
-                    return 1;
-                }
-                t_putstr("joey: ring-voice-probe OK (Weft ring mapped + geometry valid; Nocturne N-2b-1)\n");
             }
 #endif
         } else {

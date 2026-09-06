@@ -1,7 +1,8 @@
 # 153 — Nocturne: `nocturned`, the virtio-snd driver + the mixed-voice graph core
 
 **Status:** N-1 AS-BUILT (2026-09-05, @562cbe50) + N-2a-1 AS-BUILT (2026-09-05)
-+ N-2b-1 (the zero-copy Weft ring substrate + map witness) AS-BUILT (2026-09-06).
++ N-2b-1 (the zero-copy Weft ring substrate + map witness) AS-BUILT (2026-09-06)
++ N-2b-2a (the ring PERIOD protocol + the ring-fed mixer) AS-BUILT (2026-09-06).
 The design is `docs/NOCTURNE.md`; this chapter is what exists in the tree.
 **N-1**: one warden-bound daemon owning the `virtio-sound` function, one
 playback stream, one 9P tree, one boot probe, one host witness. **N-2a-1**: the
@@ -198,9 +199,9 @@ not in play; the lifecycle mirrors netd's `weft_ensure` verbatim.
 (16 each) + payload`. `RING_ENTRIES` = 8 period slots (K >= 3); `RING_SIZE` =
 20480 (5 pages) gives a payload of 20160 B >= 8 x `PERIOD_BYTES`. nocturned is
 the CONSUMER (reads finished periods on the device clock), the client the
-PRODUCER (`prod_tail`/`cons_head` ownership). N-2b-1 builds the allocate + share
-+ map half only; the period producer/consumer protocol over the ring and the
-ring-fed mixer are N-2b-2.
+PRODUCER (`prod_tail`/`cons_head` ownership). N-2b-1 built the allocate + share
++ map half; N-2b-2a adds the period producer/consumer protocol over the ring and
+the ring-fed mixer (below).
 
 **Lifetime** (I-7/I-37): the ring is a field on the `Voice`
 (`Option<RingVoice>`); `RingVoice`'s `Drop` runs `t_weft_unshare(share_id)` +
@@ -220,6 +221,49 @@ kernel's CONSUME-ONCE share claim is the SPSC producer-uniqueness backstop --
 only the first Proc to `SYS_WEFT_MAP` a given voice's ring claims it, a second
 mapper gets a claim failure. W^X holds (the ring is ANON RW-only; `SYS_WEFT_SHARE`
 rejects EXEC). The `data` leaf is never byte-read/written (`EINVAL`/`EPERM`).
+
+## The ring period protocol (N-2b-2a)
+
+The payload region is K = `RING_ENTRIES` FIXED period slots of `PERIOD_BYTES`
+each; slot i sits at `payload_off + (i % K) * PERIOD_BYTES`. This is a fixed-slot
+SPSC over the Weft ring -- a safer drain mode than netd's addr-based descriptor
+ring -- and the shared primitives live in `libthyla-rs::weft`
+(`slot_produce` / `slot_consume` / `slot_pending`), one source for the cross-Proc
+memory ordering that both nocturned (consumer) and a client (producer) obey.
+
+**The consumer** (`Shared::next_period`, the mixer): for each voice with a ring,
+one `RingVoice::consume_period` call drains ONE period. `slot_consume` loads
+`prod_tail` (Acquire), returns 0 if the ring is empty (`cons_head == prod_tail`,
+i.e. silence this period), else snapshots `desc[i].len` ONCE and validates it
+(`0 < len <= PERIOD_BYTES`, `len % FRAME == 0`; a bad len is DROPPED --
+`dropped++`, `cons_head` advances, silence), copies `len` bytes from the
+CONSUMER-COMPUTED offset (never `desc.addr` -- no client address is ever on the
+read path, the I-30 discipline), then Release-bumps `cons_head`. The mixer sums
+those S16 frames into the float32 accumulator scaled by the voice's gain, exactly
+as it does a byte-FIFO voice; a voice is byte OR ring, never both, and voice 0
+never has a ring.
+
+**The producer** (a client): `slot_produce` loads `cons_head` (Acquire), returns
+false WITHOUT touching the ring if it is FULL (`prod_tail - cons_head >= K`),
+else writes the period into slot `prod_tail % K`, sets `desc[i].len`, and
+Release-bumps `prod_tail` LAST. The Release/Acquire pair on `prod_tail` carries
+the payload+len across the Proc boundary, so the consumer reads a slot only after
+the producer published it (no torn period); the full-check stops the producer
+overwriting a slot the consumer has not freed (`cons_head` is bumped AFTER the
+copy, so the two never touch the same slot at once). Back-pressure on a full ring
+is the caller's policy -- `/ring-voice-probe` yields (`t_yield`) and retries with
+a stall backstop; a blocking producer (`torpor`) is the v1.x refinement.
+
+**Start / stop with a ring** (`Shared::has_playable`): the device start condition
+and the idle-stop read published-but-undrained ring periods (`slot_pending`) in
+addition to byte-FIFO bytes, so a ring-only voice (empty FIFO) still starts and
+holds the stream. A producer writing to a STOPPED stream generates no poll event
+(the ring is shared memory, not an fd), so the serve loop's poll timeout is
+shortened to `IDLE_POLL_MS` = 100 ms, which bounds a stopped stream's ring-notice
+latency; a running stream wakes on the device IRQ every period, and byte writes
+wake on the connection fd, so neither depends on the timeout. The wake POKE that
+removes even the 100 ms latency (the producer signalling the consumer on a
+stopped stream) is N-2b-2b.
 
 ## The probe and the witness
 
@@ -258,6 +302,25 @@ alone in its own windows — the N-1 shape), a single tone, silence, a missing
 tail, noise after the tones and a gapped span all FAIL — the sequential-fails-
 chord case is the control proving the witness checks *simultaneity* (mixing),
 not mere presence.
+
+`/ring-voice-probe` is the zero-copy ring witness, in two phases with one PASS.
+N-2b-1 (the substrate): mint a voice, `SYS_WEFT_MAP` its `data` leaf through the
+mount, validate the geometry (`WEFT_MAGIC`, K slots, a K-period payload), and run
+two controls -- a second map is idempotent (same VA), and voice 0's map is
+REFUSED. N-2b-2a (the period protocol): mint a SECOND ring voice and STREAM a
+1 kHz + 2 kHz chord THROUGH the two rings (`weft::slot_produce` per period,
+`t_yield` back-pressure), 1 kHz into voice A and 2 kHz into voice B in lockstep so
+nocturned's mixer sums two RING voices into every device period. Guest-side
+corroborators: `dropped == 0` on both rings (no period failed the consumer's len
+validation) and `periods-played > 0`. `tools/test-ring-voice.sh` boots it WITHOUT
+a capture (the substrate + the producer/consumer path; a wedged ring fails the
+probe). `tools/test-ring-audio.sh` boots with `THYLACINE_AUDIODEV=wav` AND
+`thylacine.ringprobe`, which makes joey run `/ring-voice-probe` INSTEAD of the
+byte `/nocturne-probe` -- the two are exclusive (one wav, one chord span), so the
+ring is the ONLY audio in the capture and any chord present came through the
+zero-copy path -- then judges the FILE with `audio-verdict.py --chord` (the same
+mixing verdict as the byte path). That exclusivity is the control that this
+witnesses the DATA path, not the byte path.
 
 ## QEMU wiring (`tools/run-vm.sh`)
 
@@ -322,19 +385,23 @@ single boot's wall time.
 - No cooperative quiesce-on-remove: the warden's `DeviceRemoved` is a forced
   group-terminate that skips `Drop` (the netdev precedent; MENAGERIE §10).
 - Independent voices now MIX (N-2a-1); voice 0 (the root `audio` file) and every
-  `nodes/new` voice sum cleanly. What is NOT built: the zero-copy Weft ring
-  (`nodes/<id>/data`; N-2b), ports/links, ears/`source` (capture; N-3),
-  descants + the cadence lease (N-4), and per-format/rate conversion at voice
-  entry (D-3; N-2a-1 accepts only S16 stereo 48 kHz — a voice at another shape
-  is a future entry-conversion seam).
+  `nodes/new` voice sum cleanly, whether a voice feeds bytes (the FIFO) or the
+  zero-copy ring (N-2b-2a). What is NOT built: the back-pressure wake POKE
+  (N-2b-2b -- a producer on a stopped stream waits up to `IDLE_POLL_MS`),
+  ports/links, ears/`source` (capture; N-3), descants + the cadence lease (N-4),
+  and per-format/rate conversion at voice entry (D-3; N-2a-1 accepts only S16
+  stereo 48 kHz -- a voice at another shape is a future entry-conversion seam).
 - Voices minted through the shared `/dev/nocturne` mount persist for the mount's
   life; per-exit lifetime needs a direct `/srv/nocturne` connection -- what the
   SDL backend does (N-2a-2, reference 142).
-- The N-2b-1 zero-copy ring shares the F5 limitation: a ring voice minted via
+- The N-2b zero-copy ring shares the F5 limitation: a ring voice minted via
   the shared `/dev/nocturne` mount is owned by the one kernel dev9p connection,
   so the `h_weft` owner gate does not isolate mounted clients from each other --
   the kernel's consume-once share claim is what keeps the ring single-producer.
-  The N-2b-1 formal audit is batched to the N-2b close (with N-2b-2).
+  The N-2b formal holotype audit is batched to the N-2b close (N-2b-1 + N-2b-2a
+  together, the first cross-Proc DATA path in nocturned; I-37), where the
+  producer/consumer memory ordering, the len-snapshot validation, the no-torn-
+  period argument and teardown-under-inflight are the prosecution targets.
 - The whole N-1..N-2a-4 surface was adversarially audited (round 1 Fable +
   round 2 Opus; `memory/audit_nocturne_closed_list.md`). Deferred by design
   (F5, P2): a voice minted via the shared mount is box-wide and outlives its

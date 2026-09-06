@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 86 unowned · 491 files (82% owned) · ~22985 unswept lines.**
+**405 owned · 86 unowned · 491 files (82% owned) · ~23059 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **69 files, ~30728 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **69 files, ~30880 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -75,7 +75,7 @@ Excluded as harness and counted here rather than dropped: **69 files, ~30728 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/nocturned | 0 | 3 | 2189 |
+| usr/nocturned | 0 | 3 | 2263 |
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1033 |
 | arch | 34 | 4 | 971 |
@@ -123,7 +123,7 @@ Excluded as harness and counted here rather than dropped: **69 files, ~30728 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/nocturned/src/server.rs | 1228 |
+| usr/nocturned/src/server.rs | 1294 |
 | usr/quarry/src/main.rs | 1033 |
 | usr/halcyon/src/main.rs | 874 |
 | usr/nocturned/src/snd.rs | 756 |
@@ -151,8 +151,8 @@ Excluded as harness and counted here rather than dropped: **69 files, ~30728 lin
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | kernel/extinction.c | 229 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
+| usr/nocturned/src/main.rs | 213 |
 | kernel/include/thylacine/devcap.h | 208 |
-| usr/nocturned/src/main.rs | 205 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |

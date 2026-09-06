@@ -10,10 +10,13 @@
 # voice 0's data map is REFUSED -- so a PASS proves discrimination, not mere
 # detection (#245).
 #
-# No audio: this is the substrate witness. The period producer/consumer protocol
-# over the ring and its wav witness are N-2b-2. Needs no host audio hardware.
-# Not a multi-boot; like every boot gate it must not run beside another VM from
-# this tree (#224).
+# This is the SUBSTRATE + protocol witness WITHOUT a wav capture: the probe also
+# streams a 1 kHz + 2 kHz chord through the rings (N-2b-2a), but with no audio
+# backend here that only exercises the producer/consumer path (a wedged ring
+# FAILS the probe). The AUDIBLE proof -- the chord in a captured wav, judged by
+# audio-verdict --chord -- is tools/test-ring-audio.sh. Needs no host audio
+# hardware. Not a multi-boot; like every boot gate it must not run beside another
+# VM from this tree (#224).
 #
 # Usage: tools/test-ring-voice.sh    -- one boot + the guest-side PASS assertion
 

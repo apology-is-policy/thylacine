@@ -22,6 +22,75 @@ needed the operator.
 
 
 ---
+## 2026-09-06 (aux) -- Nocturne N-2b-2a: the ring period protocol + the ring-fed mixer
+
+**Landed** `<pending>` (aux-3). The first cross-Proc DATA path in nocturned: a
+client PRODUCES S16 periods into a voice's zero-copy Weft ring, nocturned's mixer
+CONSUMES them on the device clock. N-2b-1 built the ring's allocate+share+map;
+this adds the producer/consumer protocol over it and the ring-fed mixer branch.
+
+**The shape.** A fixed-slot SPSC over the ring, chosen over netd's addr-based
+descriptor mode because it is safer by construction: the payload is K=8 fixed
+period slots, the CONSUMER computes slot `cons_head % K`'s offset itself and
+NEVER trusts a client-written `desc.addr` -- the only client value it reads is
+`desc[i].len`, snapshotted once and validated (`0 < len <= PERIOD_BYTES`,
+`len % FRAME == 0`; a bad len is dropped) -- so no client address is ever on the
+read path (the I-30 discipline). The load-bearing memory ordering lives in ONE
+place, `libthyla-rs::weft` (`slot_produce`/`slot_consume`/`slot_pending`), which
+both the probe (producer) and nocturned (consumer) obey: `prod_tail`'s
+Release/Acquire pair carries the payload+len across the Proc boundary (no torn
+period), the full-check (`pt-ch >= K`) stops the producer overwriting an
+undrained slot, and `cons_head` is Release-bumped AFTER the copy so the two never
+touch a slot at once.
+
+**One design point that is not obvious and is worth recording.** A ring producer
+writing to a STOPPED stream generates no poll event -- the ring is shared memory,
+not an fd -- so nocturned would not notice new data until its next poll timeout,
+which was 1000 ms. For N-2b-2a the fix is a bounded idle poll (`IDLE_POLL_MS` =
+100 ms in `main.rs:58`): a running stream still wakes on the device IRQ every
+period and byte writes still wake on the conn fd, so only a stopped stream's
+ring-notice latency is affected, and 100 ms is imperceptible for a chord start.
+The producer->consumer wake POKE that removes even that latency is deferred to
+N-2b-2b (the ready-ring is already there; wiring it is the next chunk). Named so
+the 100 ms is understood as a chosen bound, not an accident.
+
+**Verified rather than assumed.** The producer WRITES the ring through its client
+mapping, so the map had to be read-write, not read-only. Checked:
+`sys_weft_map_for_proc` -> `weft_map_claimed` -> `burrow_share_into(p, v, va,
+VMA_PROT_RW)` (`syscall.c:7000`) -- RW confirmed, so the write path is sound.
+
+**The witness (the discriminating one).** `/ring-voice-probe` now mints TWO ring
+voices and streams a 1 kHz + 2 kHz chord THROUGH the rings (one tone per ring,
+`t_yield` back-pressure). joey runs it under `thylacine.ringprobe` INSTEAD of the
+byte `/nocturne-probe` -- exclusive, one wav, one chord span -- so the ring is
+the ONLY audio in the capture: any chord present came through the zero-copy path.
+`tools/test-ring-audio.sh` boots with the wav backend and judges the FILE:
+`PASS(chord): 70 windows carry 1000+2000 Hz at once; silent tail 34; 104 windows
+total`. Both tones SIMULTANEOUSLY = the mixer summed two ring voices; a torn
+period would corrupt the tones and fail the Goertzel; `dropped=0` on both rings =
+no period failed the consumer's len validation. All regressions green:
+`test-ring-voice` (N-2b-1 substrate, no capture), `test-audio` (N-2a byte chord,
+`PASS(chord): 59 windows` -- the exclusive ladder left the default intact), and
+`test.sh` (the default suite).
+
+**Wrong turn, caught cheap.** First build failed: I typed `IDLE_POLL_MS: i64` but
+`t_poll`'s timeout is `i32` (`lib.rs:1295`). cargo caught it in one line; fixed
+to `i32`. Cost: one rebuild.
+
+**Vault.** `quaestor owner` on the changed paths: `weft.rs` is OWNED by
+`sub-libthyla-rs` and `joey.c` by `sub-stratum-boot` (so their descriptions do
+NOT go in a reference doc); the joey change lands in the audio-ladder region that
+dossier explicitly disclaims and touches no banner-ABI literal, so no dossier
+prose is owed there. The one owed sweep is `sub-libthyla-rs.md` gaining the new
+`slot_*` primitives -- actionable when the Nocturne arc merges to main and the
+vault syncs. Nocturned/probe/tests are UNOWNED -> `docs/reference/153-nocturne.md`
+(done this PR).
+
+**Open.** N-2b-2b (the wake poke + the batched N-2b formal holotype audit --
+N-2b-1 + N-2b-2a together, I-37 cross-Proc DATA race, per the double-the-distance
+rule). Then the SMP gate owed at the full N-2 close.
+
+---
 ## 2026-09-06 (aux) -- Nocturne N-2b-1: the zero-copy Weft ring substrate
 
 The operator ratified N-2b and said "feel free to start"; effort confirmed max.

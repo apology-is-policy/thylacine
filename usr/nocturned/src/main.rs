@@ -49,6 +49,14 @@ use snd::VirtioSnd;
 /// box must not pay it forever. ~0.5 s covers a writer's inter-chunk gap.
 const IDLE_STOP_PERIODS: u64 = 48;
 
+/// The serve loop's poll timeout (ms). While the stream RUNS the device IRQ wakes
+/// it every period, so this only bounds how long a STOPPED stream waits before
+/// re-checking for work. A ring producer writing to a stopped stream generates no
+/// poll event (it is shared memory, not an fd), so this is its start latency; the
+/// wake poke that removes even this is N-2b-2b. Byte writes wake on the conn fd,
+/// so they never depend on it.
+const IDLE_POLL_MS: i32 = 100;
+
 struct Nocturned {
     snd: VirtioSnd,
 }
@@ -107,11 +115,11 @@ impl Driver for Nocturned {
                         idle_periods += reaped as u64;
                     }
                 }
-                if idle_periods >= IDLE_STOP_PERIODS && shared.fifo_len() == 0 {
+                if idle_periods >= IDLE_STOP_PERIODS && !shared.has_playable() {
                     self.snd.stop();
                     idle_periods = 0;
                 }
-            } else if shared.fifo_len() > 0 {
+            } else if shared.has_playable() {
                 if let Err(e) = self.snd.start(|buf| shared.next_period(buf)) {
                     say!("nocturned: stream start failed: {:?}", e);
                     shared.drop_fifo();
@@ -158,7 +166,7 @@ impl Driver for Nocturned {
                 events: T_POLLIN,
                 revents: 0,
             });
-            let rc = unsafe { t_poll(pollfds.as_mut_ptr(), pollfds.len(), 1000) };
+            let rc = unsafe { t_poll(pollfds.as_mut_ptr(), pollfds.len(), IDLE_POLL_MS) };
             if rc < 0 {
                 continue;
             }
