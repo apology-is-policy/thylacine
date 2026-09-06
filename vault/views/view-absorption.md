@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**86 absorbed · 71 live · 157 total.**
+**87 absorbed · 70 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -157,7 +157,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 58-corvus-syscalls.md | live | — |
 | 59-joey-from-ramfs.md | absorbed | [[sub-kernel-joey]], [[sub-stratum-boot]] |
 | 60-sys-spawn-wait.md | live | — |
-| 61-stratumd-stub.md | live | — |
+| 61-stratumd-stub.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-exec]], [[sub-kernel-joey]], [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-pipe]], [[sub-kernel-spoor]], [[sub-kernel-stalk]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]], [[sub-pouch-process]] |
 | 62-sys-spawn-with-fds.md | live | — |
 | 63-sys-spawn-with-caps.md | live | — |
 | 64-sys-spawn-full.md | live | — |
