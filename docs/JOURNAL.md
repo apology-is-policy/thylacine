@@ -24,7 +24,7 @@ needed the operator.
 ---
 ## 2026-09-06 (aux) -- Nocturne N-2b-2a: the ring period protocol + the ring-fed mixer
 
-**Landed** `<pending>` (aux-3). The first cross-Proc DATA path in nocturned: a
+**Landed** `37604139` (aux-3). The first cross-Proc DATA path in nocturned: a
 client PRODUCES S16 periods into a voice's zero-copy Weft ring, nocturned's mixer
 CONSUMES them on the device clock. N-2b-1 built the ring's allocate+share+map;
 this adds the producer/consumer protocol over it and the ring-fed mixer branch.
