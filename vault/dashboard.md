@@ -131,6 +131,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-06 [[chg-2026-09-06-joey-boot-borrowed]] — sub-stratum-boot re-verified after the KT-1.5 + VIVARIUM merge: the bringup sequence is borrowed; the ~5659-line churn is all in the undescribed region (#177 gap widened)
 - 2026-09-05 [[chg-2026-09-05-beacon-layout-fold]] — The H-4c layout gesture folded into sub-beacon: ObjType::Layout (type=layout) + the three verbs.default layout rules
 - 2026-09-05 [[chg-2026-09-05-boot-banner-mirror-recount]] — abi-boot-banner recount: the prose caught up to the twenty-eight-mirror set
 - 2026-09-05 [[chg-2026-09-05-caps-fork-inherit]] — sub-kernel-caps brought current: the Linux-clone fork-inherits-caps (rfork_forked_with_caps) + the resolved comment drift -- its first EARNED update
@@ -138,5 +139,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-05 [[chg-2026-09-05-death-exit-byte]] — sub-kernel-death brought current: #91 -- the ZOMBIE chokepoint captures the real exit byte, not the 0/1 collapse
 - 2026-09-05 [[chg-2026-09-05-exec-phenotype]] — sub-kernel-exec brought current: the phenotype threaded, the interpreter rewrite, the pheno-mount resolver
 - 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
-- 2026-09-05 [[chg-2026-09-05-fullscreen-zoom]] — The fullscreen-zoom fix: the #56 patchwork latch re-keyed on slot rotation; the letterboxed compose clips to the damage's projection
 <!-- generated:end -->
