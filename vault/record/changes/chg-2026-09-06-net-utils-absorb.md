@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/124-net-utils (nslookup/ping/curl/wget): fold two client-facing atoms into sub-netd-server, multi-redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["26d61946"]
 touched: [sub-netd-server]
 established: []
 closed: []
