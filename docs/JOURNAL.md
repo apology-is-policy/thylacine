@@ -238,6 +238,30 @@ across both halves (UI `29b3267c` + tapestryd `eb480b58`). OWED at the peer (the
 implementation side): the GPU-path witness for A-F1 on the GL host + aux's real
 DOSBox-X re-run.
 
+**Then two churn-tail de-stales, each ground-truthed past the merge-date trap.**
+The stale tool dates churn by the MERGE that brought a commit into the vault
+lineage, not the commit itself, so "changed 2026-09-05" on both of these was
+misleading -- but unlike stratum-boot/burrow earlier this run, both turned out
+GENUINELY stale once diffed from the dossier's own last commit.
+`sub-substrate-gates` (`407a5a95`, backlog 42 -> 41): eight numbered tool commits
+(#88..#234, commit-dated 2026-07-30..08-13) had reached the vault only at the
+merge, so `git log --since` found nothing while `6a275990..HEAD` carried all
+eight (+333 lines). Five real gaps: #222 EXTERNAL-KILL grew a SECOND arm and the
+dossier's single-arm soundness argument was superseded by it (the harness SIGKILL
+prints nothing, which is exactly why arm 1 is blind to a real external SIGKILL --
+so arm 2 reads the shell's job notification gated on `qemu_alive_at_teardown=0`);
+#234/#143 the classifier is now a pure sourceable function driven over fixtures
+with its verdict-string map cross-checked (`test-smp-classify.sh` was UNOWNED,
+added to `code:`); #223 archive-not-delete; #200 the per-boot wall clock; #228-232
+the lean-shape gate. `sub-kernel-vma` (`a14f7f81`, backlog 41 -> 40): the DISTRO
+D-3 file-backed-mmap arc (+278 lines) the anon/COW-only dossier never mentioned --
+`vma_replace_range_in` (the MAP_FIXED split/replace, hole-free by reusing the old
+VMA as the survivor, offset preserved exactly so the #190 post-sleep geometry
+check holds), `vma_free_deferred` (a 9P FILE Burrow's `spoor_clunk` sleeps, so its
+free moves past `as->lock` -- the F5 fourth site, `out_free` mandatory per F7),
+and `vma_next_overlap_in` (#199). Both were load-bearing surfaces (substrate-gates
+evidences I-9/I-21; vma is I-12/I-7/I-32/I-44 audit:hard), described at effort max.
+
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
 **Where it sits.** Run 30 closed and landed the KT-1 audit arc (`6e6503ad`). This run picked up the operator's Cmd+F report that aux reproduced and handed over (yip 0048, `memory/bug_zoom_fullscreen_surface_not_scaled.md`): zooming DOSBox-X showed its 640x417 frame native at the display's top-left on black. Compositor geometry, so main's.
