@@ -229,6 +229,63 @@ executed next session without re-analysis). The multi-dossier trap also defers
 the sys-spawn family, whose creation half is `sub-kernel-proc`'s and whose
 syscall-ABI half is `sub-kernel-syscall-dispatch`'s.
 
+### Run 37 continued (after the 600k self-compact): the corvus area, fully absorbed -- 8 security atoms, each verified against the code before it entered a dossier
+
+The self-compaction fired at the 600k line with the corvus area analyzed and
+queued but not folded -- deliberately, because it is the key agent and its atoms
+are security-critical, and the resume note said to give them fresh focus. That
+was the right call: the folds took real reading. Seven files, four commits,
+both mirrors converged each time; **63 absorbed / 94 live**, and the corvus
+reference set is now complete.
+
+**The routing lesson the plan named held: a doc titled "crypto" is not one
+dossier's.** The owners split by *code*, not by title -- `sub-corvus` owns the
+daemon (`usr/corvus/src/main.rs`), `sub-corvus-crypto` owns the crate
+(`usr/lib/corvus-crypto`). So 68 and 69, both titled crypto, split: the KDF /
+AEAD / wrap layout to the crate dossier, the USER_CREATE / AUTH / WRAP flow to
+the daemon. A wholesale stub-to-crypto would have mis-homed half of each.
+
+**Eight security atoms, and effort-max meant every one was read out of the code
+before it was written into a dossier -- not paraphrased from the legacy doc.**
+The two that most repay the reading: (1) the DEK envelope's *sole* integrity
+gate is the AEGIS-256 tag, a consequence of ML-KEM's FIPS-203 implicit
+rejection -- `decapsulate` never rejects a length-valid ciphertext (it returns
+a deterministic-but-wrong shared secret, `lib.rs:378`), so a tampered ciphertext
+derives a wrong KEK and *only* `aegis_unwrap`'s tag catches it (`:401`); nothing
+upstream validates the ciphertext. (2) `ADMIN_ELEVATE` is a *real* Argon2id+AEGIS
+unwrap of the host-baked system wrap (`main.rs:3276`), with the keypair wiped at
+once because only the yes/no is needed -- the v1.0 byte-compare is retired; the
+gate order is token -> console -> passphrase, fail-closed to BadAuth. Also folded:
+`RECOVER(user)` takes no token and no capability (the phrase + BIP-39 checksum +
+a per-subject rate limit are the whole gate); the twin-wrap crash-safety (the
+passphrase wrap commits before the recovery wrap, both hold the same keypair, so
+a crash between leaves the new passphrase live and the old phrase valid); the
+C-24 boundary (`identity_db_serialize` writes only the id/name/gid map, no secret
+bytes) and the I-22 monotonic id-alloc that refuses `>= PRINCIPAL_SYSTEM` with
+one `>=` covering both reserved sentinels via a const-assert on their ordering;
+and the bounded provisioning window (USER_CREATE returns the initial phrase once
+then wipes it, only the ciphertext wrap persists).
+
+**verify-before-stub earned its keep again at 74**: the Explore flagged three
+minor atoms; reading the code found a fourth -- the monotonic connection id
+*skips zero on the 64-bit wrap* (`main.rs:4198-4204`) because zero is the
+"no owner" sentinel, so a recycled id can't alias it and pass the SESSION_CLOSE
+ownership gate. A security-adjacent correctness property a three-atom stub would
+have dropped.
+
+**The 3rd orphan, resolved by authoring rather than deferring.** 105 could not
+fully stub while `tools/corvus-mint/src/main.rs` was unowned -- the host minter
+that writes the system identity the device opens at boot. Per the
+chunk-completeness default (pull the dependency forward), I authored
+`sub-corvus-mint` (`c7db7e1c`) rather than leave 105 half-absorbed. It sits under
+`moc-substrate` (its role is a build-chain host tool) but carries `audit:hard`, a
+deliberate exception in that otherwise-`audit:none` area: it is not a harness but
+a *secret producer*, and the secret is the most privileged one in the system.
+Its self-verify -- unwrap both keyslots, assert each equals the keypair, before
+baking -- is that area's own "verify the artifact, not the intent" discipline
+applied to a secret. Two orphans remain (`uart.c` = I-27 trusted path, `joey.c` =
+boot mounts); corvus-mint is off the list.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
