@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/23-direct-map (P3-Bb kernel direct map): zero-fold, 3-surface redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["74276f16"]
 touched: []
 established: []
 closed: []
