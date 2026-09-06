@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 20-burrow -- a CROSS-LAYER absorption: fold A1/A4 into sub-kernel-burrow + A2 (the AEGIS teardown ordering) into sub-kernel-vma, then multi-redirect stub (53 absorbed / 104 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["6daac17b"]
 touched: [sub-kernel-burrow, sub-kernel-vma]
 established: []
 closed: []
