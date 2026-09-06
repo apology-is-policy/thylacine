@@ -1077,6 +1077,77 @@ the `145-vivarium` dedicated pass.
 
 ---
 
+### Run 37 continued (after the 4th self-compact): 14 more docs, seven security folds, and a benches family that earned a deferral instead of a rushed stub
+
+From `a4e8d959` to `347436da`, **107 -> 121 absorbed / 36 live**, fourteen docs,
+all lint-0-fail and dual-pushed. Seven were real folds -- each a load-bearing
+atom that lived only in a doc about to become a stub -- and the through-line this
+run was *security atoms the count would have missed*.
+
+**The security folds.** `73-sys-spawn-with-perms` (`f17f0e59`): the SPAWN_PERM_*
+grant gate was owned only as a *shape* -- `sub-kernel-syscall-dispatch` carried
+the one-hop delegation for the sibling I-32 page-budget raise, but not the
+service-posting gate's two soundness atoms: the I-27 reason `CONSOLE_TRUSTED` is
+never-delegable (a service-poster must not confer the console-trust used for
+hostowner elevation) and the SMP race the atomic-stamp-in-thunk closes (a child
+scheduled onto another CPU could reach `SYS_POST_SERVICE` before a mark-after-spawn
+lands). `40-uaccess` (`ac3413b6`): the F210 P1 *corollary* -- the dossier had "the
+bound must stay pinned" and "callers must validate range" as *separate* bullets,
+but not the interaction that makes them a bug together: a caller holding a laxer
+bound than the dispatcher's fixup gate (`fi.vaddr < UACCESS_USER_VA_TOP`) is an
+EL0-triggerable extinction, because a VA in the gap passes the caller, faults in
+the non-range-checking primitive, and fails gate #2 so the fixup never applies.
+`SYS_PUTS` once held `2^48` vs the gate's `2^47`. `79-sys-burrow` (`594079d4`): the
+P6-pouch-mem-a F1 -- `burrow_unmap` matches a VMA by geometry alone, so
+`SYS_BURROW_DETACH` must bound its vaddr to the burrow window *before* the match,
+or EL0 dismantles its own stack-guard VMA (silently retiring a security page).
+`130-positioned-io` (`1ebe5569`): the cursor-untouched contract + the ordered
+ESPIPE/overflow gates the `io.ReaderAt` parallel-use guarantee rides on.
+
+**Two smaller folds, and a two-atom one.** `77-sys-chroot` (`26b3b9c3`): the
+one-way-chroot lifetime caveat -- v1.0 has no unchroot, so a persistent Proc that
+chroots pins its root Spoor (and the 9P session behind it) for life, the reason
+long-running init uses short-lived child probes. `124-net-utils` (`26d61946`): two
+client-facing atoms into `sub-netd-server` -- the `/net/cs` 0-service resolve
+footgun (a resolve for the IP only must still pass a non-zero service) and `ping`'s
+seam #256 (an ICMP-error recv fooled into waiting out its poll).
+
+**The deferral that was the right call.** `129-fsbench` verified UNOWNED, and so
+did its siblings `usr/netperf` and `usr/cpubench` -- a coherent in-guest benches
+family with no dossier and no reference docs beyond `129` + `41-irq-bench`. Rather
+than rush-stub against a home that does not exist, I deferred it with a residue
+map (the `SYS_RW_MAX=4096` syscall-bound-ceiling finding, the #343 dcache 4.1x,
+the `arwrite`/`coherence` FS-correctness probes that ruled out the FS for the
+go-build `not package main` bug) -- the same discipline as `145-vivarium`. A
+benches dossier is owed; it is one of the ~12 uncovered surfaces.
+
+**Two stale framings caught by reading the code, not the doc.** `58-corvus-syscalls`
+(`d4df899a`) is P5 hardening scaffolding whose two live claims are both refuted by
+landed work: "GETRANDOM RNDR-absent is permanent, no software-CSPRNG mixing" --
+the Lazarus W3 ChaCha20 stir landed, so an RNDR-less target (Apple/HVF, the A72)
+seeds from the DTB boot seed + CNTPCT jitter; and "flags not enforced at v1.0" --
+the I-39 debug gate now enforces `PROC_FLAG_NOTRACE`. The stub names both.
+
+**The clean redirects, and how often the dossier was AHEAD.** `138-gpud`
+(retired at G-3, `usr/gpud` deleted; the transport-pivot rationale preserved
+verbatim-in-spirit in `sub-tapestryd`), `75-devcap`, `67-el1h-kernel` (I-21,
+distributed and current), `54-sys-fd-syscalls` (the dossier carries
+`handle_dup_posix`/dup2 the doc lists as not-yet-existing), `60-sys-spawn-wait`
+(every one of its five "deferred" caveats -- COW rfork, spawn-with-caps, argv,
+the wait_pid PID-selector -- has since landed), `152-kaua-term` and `150-vt` (both
+onto dossiers dated the same day, carrying the span-serial anti-clickjack and the
+per-record-CLASS bound). The recurring shape: a first-cut doc frozen in its era,
+and a dossier that lapped it -- the absorption's job is to prove that, not assume
+it.
+
+**Left open / NEXT:** ~36 live docs remain, several big (`133-go-port`,
+`91-utopia`, `13-verification`, `136-ptyfs`); then the ~12 uncovered surfaces
+(the benches family is one, and each needs a dossier authored), and the
+`145-vivarium` dedicated pass (the `^C`-mask container fold + DISTRO-D-5 + the V-8
+findings). No operator-input item is pending; the sweep continues autonomously.
+
+---
+
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
 
 **PL-5 -- the `pre` PRODUCER (`ea731dd8`).** PL-1b (run 34) built the `pre`
