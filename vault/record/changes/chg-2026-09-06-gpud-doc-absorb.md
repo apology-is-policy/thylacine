@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/138-gpud (retired G-1 virtio-gpu scaffold): clean redirect to sub-tapestryd + sub-substrate-gates + sub-warden"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["fd4020fa"]
 touched: []
 established: []
 closed: []
