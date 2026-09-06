@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/150-vt (the shared VT/xterm parser): clean redirect to sub-lib-vt + the untrusted-ingest boundary"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["f9779d87"]
 touched: []
 established: []
 closed: []
