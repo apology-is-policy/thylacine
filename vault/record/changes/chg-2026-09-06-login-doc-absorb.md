@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/103-login (A-5a login+session): zero-fold, multi-redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["3fcb9ad4"]
 touched: []
 established: []
 closed: []
