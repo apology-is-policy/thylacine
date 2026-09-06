@@ -52,8 +52,20 @@ if (( boot )); then
         echo "==> FAIL: the scenario itself failed (see build/ls-ci-$scen.log)"
         exit 1
     fi
-    if ! grep -q 'joey: audio probe DECLINED' "$REPO_ROOT/build/ls-ci-$scen.log"; then
-        echo "==> FAIL: the boot did not decline its audio probe -- the wav is not the game's alone"
+    # The wav must be the game's alone. TWO boot shapes guarantee that:
+    #   (1) a normal boot RUNS the audio probe and DECLINES it (thylacine.noaudioprobe),
+    #       so the probe emits no audio into the wav; or
+    #   (2) a --production boot drops the entire boot-probe region
+    #       (THYLA_BOOT_PROBES=OFF), so the audio probe -- the only boot-time
+    #       audio source -- never runs, and the wav is the game's alone by
+    #       construction. A clade-baked game image (tyr-glquake lives at
+    #       /clade/bin, so it needs THYLACINE_BAKE_CLADE=1) MUST boot --production
+    #       to skip the boot-fatal clade gates (joey CL-4/CL-5), so it can only
+    #       ever satisfy (2).
+    if ! grep -q 'joey: audio probe DECLINED' "$REPO_ROOT/build/ls-ci-$scen.log" \
+       && ! grep -q 'THYLA_BOOT_PROBES=OFF' "$REPO_ROOT/build/ls-ci-$scen.log"; then
+        echo "==> FAIL: neither an audio-probe DECLINE nor a probes-off (--production) boot"
+        echo "    -- cannot confirm the wav is the game's alone"
         exit 1
     fi
     # A sanity check that Quake opened audio at all -- the RAW guest line in

@@ -156,9 +156,15 @@ chunk (the zero-copy ring, N-2b) trims it.
 Quake has sound: `tyr-quake` (and `tyr-glquake`) play through the SDL driver,
 so the game's effects come out of whatever host backend you chose below. Pass
 `-nosound` to silence it; `quarry`'s bench lanes do that themselves so a
-benchmark's frame rate is not a property of the sound path. DOSBox-X does not
-have sound yet -- it is built through a separate toolchain and arrives a chunk
-later (N-2a-4).
+benchmark's frame rate is not a property of the sound path.
+
+DOSBox-X games have sound too (N-2a-4): the emulator's built-in mixer (a
+SoundBlaster 16 + OPL, the cards a DOS game expects) reaches Nocturne through the
+same SDL driver, so a DOS game's music and effects come out of your chosen host
+backend. A game's own setup decides which card it uses -- the shipped Duke
+Nukem 3D config selects the SoundBlaster, and `cat music.s16 > /dev/nocturne/audio`
+still works alongside it (each is its own voice). DOSBox-X is built through a
+separate toolchain, so it is present only in images baked with that toolchain.
 
 ## Choosing the host backend (QEMU)
 

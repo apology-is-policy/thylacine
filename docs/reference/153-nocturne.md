@@ -450,6 +450,15 @@ single boot's wall time.
 - Voices minted through the shared `/dev/nocturne` mount persist for the mount's
   life; per-exit lifetime needs a direct `/srv/nocturne` connection -- what the
   SDL backend does (N-2a-2, reference 142).
+- Ported GAME audio reaches Nocturne through that SDL backend, WITNESSED at
+  N-2a-4 (2026-09-06): DOSBox-X's built-in mixer (SoundBlaster 16 + OPL; the
+  shipped Duke Nukem 3D `DUKE3D.CFG` selects `FXDevice=0`/`MusicDevice=0` = the
+  SB) and tyr-glquake's `snd_sdl` both play through it. `tools/test-game-audio.sh`
+  is the W-4 wav witness (`audio-verdict.py --music`); a clade-baked game image
+  (tyr-glquake at `/clade/bin`) boots `--production` to skip the boot-fatal clade
+  gates, and the witness accepts that `THYLA_BOOT_PROBES=OFF` boot as a clean-wav
+  guarantee (the audio probe -- the only boot-time audio source -- never runs).
+  The thyla-pi SILICON audio leg is N-6 (the game `.exp` force `hvf`).
 - The N-2b zero-copy ring shares the F5 limitation: a ring voice minted via
   the shared `/dev/nocturne` mount is owned by the one kernel dev9p connection,
   so the `h_weft` owner gate does not isolate mounted clients from each other --

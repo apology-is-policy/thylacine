@@ -22,6 +22,86 @@ needed the operator.
 
 
 ---
+## 2026-09-06 (aux) -- Nocturne N-2a-4: DOSBox-X + glquake game audio (and a build subsystem the main merge had silently deleted)
+
+The operator chose N-2a-4 (both games' audio) after the N-2c close. The chunk
+looked like "retire patch 0004, boot, capture" -- `c5136f31` had already retired
+`0004-thylacine-force-dummy-audio` (the whole code change; there was never a
+"nosound config to flip"). It was not that simple, in three separate ways, and
+each was caught by a check rather than by luck.
+
+**The build subsystem was gone.** The dosbox-x binary on disk was `Sep 5 13:30`
+-- older than `c5136f31` (`Sep 5 18:06`), its own audio fix. A stale artifact
+older than its own source fix is the tell: nothing rebuilds it. `grep -ci dosbox
+tools/build.sh` = 0. The 292-commit main merge (`8b28327f`) had taken
+origin/main's `build.sh` wholesale and dropped aux's entire DOSBox build+bake
+subsystem (aux-only since DX-1 `5af3e46d`; main never had it) -- `build_dosbox_x`,
+`build_duke3d_fixture`, `build_tombraider_fixture`, `stage_dosbox_sysconf`,
+`build_zlib`, the ramfs staging, the pool puts, the bake-verify arms, the
+dispatch case. `build-config.sh` still advertised `CHUNK_DOSBOX=y` -- a live
+config/executor mismatch, silent because `build.sh all` skips a missing chunk
+gracefully and no gate builds dosbox. Restored all five functions + five call
+sites verbatim from `4e930f11` (verified functionally identical: all 20 ops + 12
+`THYLACINE_BAKE_DOSBOX` guards match; only condensed comments differ). Memory:
+[[bug-main-merge-deleted-dosbox-subsystem]]. (A self-inflicted wrong turn caught
+immediately: the `awk`-splice + `mv` that inserted the functions reset build.sh's
++x bit -> "Permission denied"; `chmod 755` and on.)
+
+**Duke3D was silent, then wouldn't start.** With dosbox rebuilt (fresh, audio
+path live -- SDL selected "Audio thylacine", nocturned serving), the first witness
+PASSED the scenario but the wav was ~66 s of silence: `0 windows above -40 dBFS`.
+`usr/ports/dosbox-x/duke3d/DUKE3D.CFG` (git-tracked from DX-5a, never exercised
+because 0004 forced dummy) had `FXDevice = 13` -- the PC speaker in the Apogee
+Sound System enum, not the SoundBlaster DOSBox emulates -- plus `NumBits = 1`.
+The Blaster* hardware settings were already correct SB16. First fix guessed the
+enum wrong (`FXDevice = 1`): Duke3D printed `MVSOUND.SYS not loaded` and exited to
+DOS. MVSOUND.SYS is specifically the Pro Audio Spectrum driver -- so device 1 is
+the PAS, and the enum is SoundBlaster=**0**, not the 0=NoSound/1=SB I had assumed.
+The screenshot was the oracle: Duke3D's sound-init prints to the DOSBox SDL
+window, not the serial log, so `/tmp/lsd3d-1.png` (the scenario's own title dump)
+showed the exact console. `FXDevice=0`/`MusicDevice=0` (SoundBlaster for both):
+`PASS(music): 1779 active windows of 3319; median flatness 0.09; 14 distinct
+dominant bins`.
+
+**glquake needed the clade toolchain, which was incompletely fetched.**
+tyr-glquake lives at `/clade/bin`, so it needs a `THYLACINE_BAKE_CLADE=1` pool.
+The Mesa/llvmpipe GL stack was already cross-built on thyla-keep
+(`/build/mesa-xOS5`, the heavy part done); a subagent assembled `build/clade/gl`
+(libOSMesa.a + `llvm-libs.list` + 8 ORC/JIT archives absent on the mac) and
+tyr-glquake built (146 MB). Then `stage_clade` refused: `cxx-rt/libc++.a` MISSING
+-- the #156 fetch-set gap (the mac's clade is a partial fetch of bin/llvm+clangd,
+never the C++ runtime). The comment names the source ("pull it from the builder's
+stage2 sysroot"), which is exactly the mac's locally-built `build/sysroot/lib` --
+so filling `cxx-rt` from there is the intended fix, no thyla-keep round-trip.
+glquake wav: `PASS(music): 761 active windows of 1096; flatness 0.20; 18 distinct
+dominant bins`.
+
+**The witness harness had a --production blindspot.** A clade-baked game image
+must boot `--production` to skip the boot-fatal clade gates (joey CL-4/CL-5,
+`clade_gate()!=0 -> return 1`). But `--production` sets `THYLA_BOOT_PROBES=OFF`,
+dropping joey's audio probe -- so `test-game-audio.sh`'s "the boot did not decline
+its audio probe" check (a proxy for "the wav is the game's alone") fired, even
+though the probe being ABSENT means the wav is clean by construction (the probe
+is the only boot-time audio source). Refined the check to accept
+`THYLA_BOOT_PROBES=OFF` as the second clean-wav guarantee.
+
+**Witnesses** (mac HVF + QEMU wav; `audio-verdict.py --music` = >=2 s of energy
+that is neither noise nor a stationary buzz): DOSBox `ls-gfx-dosbox-duke3d` and
+glquake `ls-gfx-glquake`, both on the final `THYLACINE_BAKE_CLADE=1 --production`
+image (dosbox + duke3d + /clade/bin/tyr-glquake). The DOSBox sound path
+(SoundBlaster 16 + OPL -> the SDL thylacine backend -> Nocturne) had NEVER run on
+Thylacine before this -- 0004 sent it to a null sink from DX-1 onward.
+
+**Open / deferred.** The thyla-pi SILICON audio leg (the operator's original "on
+thyla-pi" framing) is N-6, not N-2a-4: the game `.exp` scenarios hardcode
+`THYLACINE_ACCEL=hvf`, so the audio `--music` witness is a mac/HVF+wav witness by
+construction; thyla-pi is the graphics/GL host (a separate FPS witness). Second
+defect owned + noted, not fixed: `build-manifest.toml [remote.clade_gl]` claims
+`pull = clade-keep-build.sh fetch`, but `cmd_fetch` never retrieves
+`build/clade/gl` -- the GL-stack fetch path is unwired (the #156 family). A Fable
+audit pass on N-2c is still owed (credits).
+
+---
 ## 2026-09-06 (aux) -- Nocturne N-2c: the cycle/control thread split + a futex Mutex
 
 With the design ratified, resumed the arc at N-2c (`dd07836a`): split `nocturned`
