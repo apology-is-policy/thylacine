@@ -298,12 +298,16 @@ gate's `qmp-gate.sock` raced at JOBS=3 -- the sibling of substrate-gates' #230),
 and the #224 refinement of the in-tree refusal. That paired the two substrate gate
 dossiers (gates + interactive) current together.
 
-**Run 32 total: 7 chunks, backlog 43 -> 36, tip `9842846e`, both mirrors
-converged throughout** (one mirror-split resolved mid-run). Every de-stale
-ground-truthed past the merge-date trap by diffing `<dossier-commit>..HEAD` rather
-than trusting the stale tool's merge-date reading. The remaining top churn is
-either aux-union-arc heavy (spoor + the namespace/9P layer) or big multi-file
-(libthyla-rs 12 files, coreutils 15) -- both better suited to a fresh focused run.
+**Run 32 total: 8 chunks, backlog 43 -> 35, tip `3c684c60`, both mirrors
+converged throughout** (one mirror-split resolved mid-run). The 8th, after the
+600k checkpoint line fired, was `sub-libdriver-grant` (`d8281e1f`): the H-4b-1
+`caps = [...]` fork-grantable-capability vocabulary (the `Cap` enum, named-not-
+numbered because the crate is pure, fail-closed parse), the libdriver side of the
+csprng chain warden documents. Every de-stale ground-truthed past the merge-date
+trap by diffing `<dossier-commit>..HEAD` rather than trusting the stale tool's
+merge-date reading. The remaining top churn is either aux-union-arc heavy (spoor +
+the namespace/9P layer) or big multi-file (libthyla-rs 12 files, coreutils 15) --
+both better suited to a fresh focused run. Self-compacted at the 600k line here.
 
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
