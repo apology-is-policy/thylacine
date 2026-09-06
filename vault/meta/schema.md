@@ -503,6 +503,33 @@ It is a WARN in `lint`, never a FAIL — staleness is a property of the
 world moving rather than of the commit in hand, and a gate that refused
 the merge commit *recording* the fact would be switched off.
 
+`quaestor dossier-gate` is the **code→dossier reminder**, and the mirror
+image of the audit:hard advisory in `lint --staged` (check 3 below): there a
+staged *chg* that touches an `audit: hard` dossier warns when the dossier is
+not co-staged; here staged *code* owned by a dossier reminds you the dossier
+may be owed an update. It is **tiered** (operator-ratified 2026-09-06): a
+staged source file (`kernel|arch|mm|usr/…​.{c,h,S,rs}`, plus the `.c`/`.h`
+twin — editing either half touches the one surface the dossier describes)
+owned by an `audit: hard` `sub` dossier **blocks** the commit; any other
+owner **warns**. The one escape is a `No-dossier-change: <why>` git trailer,
+with a non-empty reason required — a bare key is a silent off-switch, the
+opposite of a reliable reminder. The same field on a staged chg is honoured
+too, so the vault track reaches the escape identically.
+
+It runs from a `commit-msg` hook, not `pre-commit`, and the placement is
+load-bearing. The escape that serves every track is the trailer, and only
+the commit message carries it — the code tracks (main, aux) write no vault
+chg notes and, per the cutover rule in `CLAUDE.md`, ring the vault for owned
+prose rather than co-staging it in a kernel commit, so a chg-field-only
+escape would leave them blocked with no clean way through. `pre-commit` runs
+before any message exists; only `commit-msg` sees it. On an empty registry it
+**fails open** (returns clean) — the opposite of `lint`'s fail-closed —
+because `pre-commit` is the authoritative infra gate (it refuses an empty
+registry first), and a `commit-msg` hook that blocked on a bypassed or absent
+vault would be a worse failure than a missed reminder. `--no-verify` skips
+both hooks and is the sanctioned emergency bypass; the gate does not try to
+defeat it.
+
 `quaestor lint` checks:
 
 1. `id` == filename; `type` valid; required fields present per §5; enums valid.
@@ -517,6 +544,9 @@ the merge commit *recording* the fact would be switched off.
 7. View bodies match their queries (re-render and diff — a stale committed
    view fails the commit).
 8. Citation style: `file:line` patterns outside `record/` are flagged (R4).
+9. Code→dossier reminder (`dossier-gate`, the `commit-msg` hook): staged source
+   owned by an `audit: hard` dossier fails unless the dossier is co-staged or a
+   `No-dossier-change: <why>` trailer is present; other owners warn (above).
 
 Notes live under `vault/` excluding `vault/meta/` (prose + machinery) and
 `vault/journal/` — the operator's Obsidian scratch (daily notes, canvases,

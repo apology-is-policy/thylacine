@@ -27,6 +27,10 @@ const usage = `quaestor -- the vault registrar (vault/meta/schema.md section 8)
                                 vault, 1 = write the reference doc
   quaestor stale [--all] [--json]
                                 dossiers whose code changed after 'updated:'
+  quaestor dossier-gate --msg F the commit-msg gate: staged code owned by an
+                                audit:hard dossier blocks unless the dossier is
+                                co-staged or 'No-dossier-change: <why>' is a
+                                commit trailer; other owners warn
   quaestor serve                MCP server on stdio (newline-delimited JSON-RPC)
 
   --root DIR (any command)      explicit repo root -- hooks pass it (relative
@@ -129,6 +133,8 @@ func main() {
 		code = cmdID(root, rest)
 	case "owner":
 		code = cmdOwner(root, rest)
+	case "dossier-gate":
+		code = cmdDossierGate(root, rest)
 	case "stale":
 		code = cmdStale(root, rest)
 	case "serve":

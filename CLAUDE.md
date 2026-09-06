@@ -855,6 +855,8 @@ When a chunk lands (bug fix, refactor, new module, new feature), the author upda
 
    This step exists because the alternative is a protocol whose first move is remembering to tell someone. It rides the doc-update step precisely so it cannot be skipped separately from it.
 
+   **Since 2026-09-06 this is enforced mechanically, not only by convention** (operator-ratified). A `commit-msg` hook runs `quaestor dossier-gate`: staging code owned by an `audit: hard` dossier **blocks** the commit unless that dossier is co-staged OR the message carries a `No-dossier-change: <why>` trailer (non-empty reason required); any other owned surface **warns**. So the reminder to update — or consciously defer — a dossier fires the moment the code lands, on every track sharing the hook. The code tracks reach the escape through the trailer, since they ring the vault rather than co-stage vault prose. Details + the fail-open/commit-msg-placement rationale: `vault/meta/schema.md` section 8 (check 9). `--no-verify` skips it and is the sanctioned emergency bypass.
+
 1. **Technical reference**: extend or update the relevant `docs/reference/NN-*.md` section. New module → new section. Bug fix that touches a documented invariant → update the section after the spec. New term / acronym → glossary entry.
 2. **User reference**: extend or update the relevant `docs/manual/NN-*.md` section if the change is user-visible (new syscall, new admin command, new error case, behavior change). Internal refactors typically don't touch the user manual; user-visible changes always do.
 3. **Snapshot block** in `docs/REFERENCE.md` — refresh figures (test count, spec count, tip hash) on every chunk that changes them. Refresh the user-facing snapshot in `docs/USER-MANUAL.md` at the same cadence.

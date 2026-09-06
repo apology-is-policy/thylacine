@@ -21,19 +21,7 @@ func gitOut(root string, args ...string) string {
 }
 
 func stagedChecks(root string, reg *Registry) (fails, warns []string) {
-	status := gitOut(root, "diff", "--cached", "--name-status")
-	type entry struct{ st, path string }
-	var entries []entry
-	for _, ln := range strings.Split(status, "\n") {
-		parts := strings.Split(ln, "\t")
-		if len(parts) >= 2 {
-			st := parts[0]
-			if len(st) > 1 {
-				st = st[:1]
-			}
-			entries = append(entries, entry{st, parts[len(parts)-1]})
-		}
-	}
+	entries := stagedEntries(root)
 	stagedPaths := map[string]bool{}
 	for _, e := range entries {
 		stagedPaths[e.path] = true
