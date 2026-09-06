@@ -2,7 +2,7 @@
 id: sub-utopia-parser
 type: sub
 parent: moc-userspace-shell-tui
-title: "The ut parser — an rc-shape grammar, three recursion bounds, and 188 tests that cannot compile"
+title: "The ut parser — an rc-shape grammar, three recursion bounds, and 189 tests that cannot compile"
 code:
   - usr/utopia/libutopia/src/parser/mod.rs
   - usr/utopia/libutopia/src/parser/lexer.rs
@@ -21,7 +21,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-9"
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -128,8 +128,12 @@ both the success and error paths so a top-level parse always restores it.
 - **`DqPart`** — the pieces of an interpolated string, so a double-quoted run
   keeps its literal and substituted segments distinct instead of being
   re-scanned later.
-- **The AST** — a `Script` of `Statement`s; a statement is a pipeline or one of
-  the control forms; a pipeline holds elements holding commands; a command is
+- **The AST** — a `Script` of `Statement`s; a statement is a pipeline, a
+  short-circuit AND-OR list (`p && q || r`, scripture 8.6 — a `first` pipeline
+  plus a `Vec<(AndOrOp, Pipeline)>`, built only when a connector is present so a
+  lone pipeline keeps its `Pipeline` shape; left-associative, `&&`/`||` at equal
+  precedence), or one of the control forms; a pipeline holds elements holding
+  commands; a command is
   simple, a brace block, a subshell, or arithmetic. Expressions are a separate
   tree reached from every expression slot, with one node kind for
   case-as-an-expression so `case` is available in both positions.
@@ -162,6 +166,13 @@ returned and there is no panicking path in normal operation. The 29 error kinds
 are specific enough that the taxonomy is itself a description of the grammar —
 unterminated heredoc, empty case pattern, invalid variable index, recursion
 limit, and so on.
+
+One of the 29 is now vestigial: `UnexpectedEqualInCommand` is kept for its
+`Display` arm but no longer raised. An `=` in argument position is a literal
+word — `parse_word` glues a span-adjacent `=` and its value into one argv
+element (`-std=c++20`), the same span-adjacency rule that already fused
+`~/path` — and a statement-start assignment is caught earlier by
+`is_assignment_start`, so nothing reaches the old raise.
 
 Depth exhaustion is reported through the same channel as any syntax error,
 which is the whole design goal: a pathological input is a *message*, not a dead
@@ -204,7 +215,7 @@ Nothing here is on a hot path — it runs once per line typed.
 
 ## Caveats
 
-- **188 of this parser's tests cannot compile, in the file that claims to be
+- **189 of this parser's tests cannot compile, in the file that claims to be
   host-testable.** The lexer's header says "Pure logic; no I/O; host-testable."
   As configured it is none of the third: the workspace pins a bare-metal target
   for every build, that target has no test harness, and the crate is
@@ -214,8 +225,8 @@ Nothing here is on a hot path — it runs once per line typed.
   assemble for a host target. That diagnosis is exact for *this* crate: it
   depends on libthyla-rs unconditionally, which is precisely what makes the
   escape unavailable. The cross-crate figure once claimed here — 878 across six
-  crates — was wrong twice over. Measured, 389 test functions across **two**
-  crates are stranded (this one's 385 and tapestryd's 4), while 489 run today in
+  crates — was wrong twice over. Measured, 398 test functions across **two**
+  crates are stranded (this one's 394 and tapestryd's 4), while 489 run today in
   four others, so the pattern that fixes it is in production rather than merely
   proven; see [[chg-2026-08-03-nora-engine-sweep]]. The parser *is* covered — but by a separate in-guest test
   binary that drives it through the public entry points on every boot. Two
@@ -249,4 +260,4 @@ Nothing here is on a hot path — it runs once per line typed.
 
 ## Provenance
 
-[[chg-2026-08-03-utopia-parser-sweep]].
+[[chg-2026-08-03-utopia-parser-sweep]] · [[chg-2026-09-06-utopia-parser-andor-eqliteral]].
