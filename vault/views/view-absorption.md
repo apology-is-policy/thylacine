@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**136 absorbed · 21 live · 157 total.**
+**137 absorbed · 20 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -88,7 +88,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 132-larder.md | absorbed | [[sub-kernel-larder]], [[sub-kernel-ninep-dev9p]], [[view-closed-sub-kernel-larder]] |
 | 133-go-port.md | absorbed | [[sub-kernel-loom]], [[sub-kernel-perm]], [[sub-kernel-syscall-dispatch]], [[sub-libthyla-rs]], [[sub-nora-host]], [[sub-stratum-boot]], [[sub-stratum-session]] |
 | 134-debug-fs.md | absorbed | [[sub-kernel-devproc]], [[sub-kernel-exception]], [[sub-kernel-halls]], [[sub-kernel-hwdebug]], [[sub-kernel-mmu]] |
-| 135-pty-kernel.md | live | — |
+| 135-pty-kernel.md | absorbed | [[abi-note-names]], [[inv-i20]], [[sub-kernel-jobctl]], [[sub-kernel-notes]], [[sub-kernel-proc]], [[sub-kernel-pts]] |
 | 136-ptyfs.md | absorbed | [[sub-ptyfs]] |
 | 137-gopls.md | absorbed | [[abi-t-stat]], [[sub-kernel-caps]], [[sub-kernel-joey]], [[sub-kernel-ninep-dev9p]], [[sub-parley]], [[sub-stratum-session]] |
 | 138-gpud.md | absorbed | [[sub-substrate-gates]], [[sub-tapestryd]], [[sub-warden]] |

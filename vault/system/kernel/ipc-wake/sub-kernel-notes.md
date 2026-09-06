@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -270,6 +270,45 @@ restores the saved one). Delivery itself is unchanged — the `in_handler` guard
 still holds every note for the handler's duration, so the widened mask cannot
 admit a nested delivery here; it only stops a handler's own `rt_sigprocmask` from
 outliving the handler.
+
+### A masked STOP-class note becomes pending, and is consumed by its own scan
+
+Most `tty:susp` suspends never reach the note queue: the job-control fan
+([[sub-kernel-jobctl]]) takes the stop at POST time. The queue path exists for one
+POSIX case — **every** thread masks `NOTE_BIT_TTY`, so the fan cannot stop and
+posts `tty:susp` instead (a blocked stop signal becomes *pending*). Before PTY-1f's
+round-2 F2 (#252) nothing could ever consume it: the EL0-return tail's case
+analysis handled only the terminate class, so a STOP-class note fell through every
+arm and was left queued with a comment claiming it awaited an "fd-read path" that
+does not exist for a non-self-managing Proc and *cannot* exist for a phenotyped one
+(a Linux guest has no notes fd). The `^Z` was silently lost, and one of the
+sixteen queue slots went with it. `notes_stop_note_name_locked` is the STOP-class
+twin of the terminate scanner: the tail consults it after the terminate check
+misses, and on a hit applies the stop through `proc_job_stop_self` — the same
+primitive `SYS_NOTED(NDFLT)` uses, so the #240 freshness (`susp_stop_armed`) and
+orphan-rule guards both apply without restating. The peek only yields a note once
+its family bit is *unmasked*, so the deferred stop lands exactly when the guest
+unblocks the signal; a `tty:cont` that arrived meanwhile has already disarmed the
+freshness flag, so the superseded `^Z` evaporates rather than resurrecting.
+
+**The consume is its own function because a decision and its consumption written
+as two scans are two predicates (P1).** `notes_stop_dequeue_locked` is
+*class-filtered* — it returns the first deliverable STOP-class note at **any**
+index, the same index-returning scan the peek runs. `notes_dequeue_locked` is
+class-**blind**: it pops the first mask-permitted entry in FIFO order, i.e. the
+queue head. On a one-note queue the two are indistinguishable, and every queue any
+test had built held one note — so reusing the general pop looked correct. Put a
+`child_exit` in front of the susp and they diverge: the stop applies, the
+`child_exit` is popped into a stack local nobody reads (a wait notification
+*silently destroyed*), and the `tty:susp` stays queued to re-fire. The lesson
+generalizes past this file — only a test that puts something *between* the decision
+and the consumption can tell the two scans apart (`notes.stop_dequeue_picks_its_own_note`,
+whose leg A executes the class-blind pop and asserts it takes the wrong note). A
+sibling correction (the c8ab2744 round) makes both class scans gate every hit on
+`notes_proc_default_applies(p, name)` per note rather than on a fixed name — the
+phenotype-sigtab reading that keeps a Linux guest's `SIG_DFL` susp from being
+`exits()`ed on a caught `tty:hup` queued behind it (its regression lives with the
+vivarium phenotype surface).
 
 ## Data structures
 
