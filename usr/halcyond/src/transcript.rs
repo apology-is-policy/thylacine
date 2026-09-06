@@ -1294,6 +1294,114 @@ impl Transcript {
         self.finalize_scroll_pending(spans);
     }
 
+    /// PL-4: build the LIVE grid as a transient block for the normal-mode
+    /// proportional render. Joins the grid's soft-wrapped rows into logical
+    /// lines (using `wrapped`, the CellDiff snapshot), interns each cell's span
+    /// (obj / em / hdr, the obj COPIED from its source block -- frozen or open)
+    /// into the transient block's own tables, and returns it plus, per grid row,
+    /// the `(logical-line item index, starting column in that line)` so the
+    /// caller maps a grid row / cursor / obj-run back to its proportional
+    /// position (the caret + the live selection, PL-4b). READ-ONLY -- a
+    /// per-frame render, never history, so nothing here mutates the transcript
+    /// (the obj-copy and style-intern build fresh transient tables, unlike
+    /// `finalize_scroll_pending` which writes into the open block).
+    pub fn live_block(
+        &self,
+        grid_cells: &[vt::Cell],
+        cols: usize,
+        rows: usize,
+        wrapped: &[bool],
+        spans: &SpanMap,
+    ) -> (Block, Vec<(usize, usize)>) {
+        let mut styles: Vec<Style> = Vec::new();
+        let mut objs: Vec<Obj> = Vec::new();
+        let mut remap: BTreeMap<(u64, u16), u16> = BTreeMap::new();
+        let mut items: Vec<Item> = Vec::new();
+        let mut prov: Vec<(usize, usize)> = Vec::with_capacity(rows);
+        let mut cur: Vec<TCell> = Vec::new();
+        for r in 0..rows {
+            // This grid row joins the logical line currently building (its item
+            // index is the next `items` slot; its start column is the running
+            // length); PL-4b maps a grid row / obj-run to (line, col) through it.
+            prov.push((items.len(), cur.len()));
+            let base = r * cols;
+            let row = grid_cells.get(base..base + cols).unwrap_or(&[]);
+            for c in row {
+                let tag = spans.get(c.span).unwrap_or_default();
+                // The obj: the transient block owns none, so every obj is copied
+                // from its source block (frozen or open), deduped through remap;
+                // an evicted source or a full table yields 0 (a run that lost its
+                // object, never a wrong one) -- the local_obj discipline.
+                let obj = if tag.obj == 0 {
+                    0
+                } else if let Some(&idx) = remap.get(&(tag.block, tag.obj)) {
+                    idx
+                } else {
+                    let src = self
+                        .frozen
+                        .iter()
+                        .chain(core::iter::once(&self.open))
+                        .find(|b| b.id == tag.block)
+                        .and_then(|b| b.objs.get((tag.obj as usize).wrapping_sub(1)))
+                        .map(|o| (o.ty.clone(), o.refv.clone()));
+                    let idx = match src {
+                        None => 0,
+                        Some(_) if objs.len() >= MAX_OBJS_PER_BLOCK => 0,
+                        Some((ty, refv)) => {
+                            objs.push(Obj { ty, refv });
+                            objs.len() as u16
+                        }
+                    };
+                    remap.insert((tag.block, tag.obj), idx);
+                    idx
+                };
+                // The style: intern into the transient table (hot-tail fast path,
+                // capped scan -- the intern_style discipline).
+                let st = Style {
+                    fg: c.fg,
+                    bg: c.bg,
+                    attrs: c.attrs,
+                    em: tag.em,
+                    obj,
+                    hdr: tag.hdr,
+                };
+                let style = if styles.last() == Some(&st) {
+                    (styles.len() - 1) as u16
+                } else if styles.len() >= MAX_STYLES_PER_BLOCK {
+                    (styles.len() - 1) as u16
+                } else if let Some(i) = styles.iter().position(|s| *s == st) {
+                    i as u16
+                } else {
+                    styles.push(st);
+                    (styles.len() - 1) as u16
+                };
+                cur.push(TCell { ch: c.ch, style });
+            }
+            // A row that did NOT autowrap ends the logical line.
+            if !wrapped.get(r).copied().unwrap_or(false) {
+                items.push(Item::Line(Line {
+                    cells: core::mem::take(&mut cur),
+                }));
+            }
+        }
+        // A trailing soft-wrapped row (the grid ends mid-logical-line) still lays.
+        if !cur.is_empty() {
+            items.push(Item::Line(Line { cells: cur }));
+        }
+        let b = Block {
+            id: u64::MAX,
+            kind: BlockKind::Foreign,
+            continuation: false,
+            exit: None,
+            cmd: None,
+            items,
+            styles,
+            objs,
+            cost: 0,
+        };
+        (b, prov)
+    }
+
     /// The open block's index for a tagged obj: its own when the tag's block
     /// IS the open block; else the obj is copied in once (the remap cache)
     /// at the same cost the wire's obj-open charges. An evicted source block
@@ -2059,6 +2167,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn live_block_joins_soft_wrapped_grid_rows() {
+        // PL-4b: "abc"(wrapped) + "def"(not) on a 3x2 grid -> ONE logical line
+        // "abcdef"; the provenance maps grid row 1 to column 3 of line 0, the
+        // key the caret + live selection need.
+        let t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let grid = wrow("abcdef");
+        let (b, prov) = t.live_block(&grid, 3, 2, &[true, false], &SpanMap::new());
+        assert_eq!(b.items.len(), 1, "one logical line");
+        let Item::Line(l) = &b.items[0] else {
+            panic!("a Line")
+        };
+        let s: String = l.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(s, "abcdef");
+        assert_eq!(prov, alloc::vec![(0, 0), (0, 3)]);
+    }
+
+    #[test]
+    fn live_block_unwrapped_rows_are_separate_lines() {
+        // Two hard-terminated rows -> two logical lines; provenance keeps them
+        // apart (each starts at column 0 of its own line).
+        let t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let grid = wrow("abcdef");
+        let (b, prov) = t.live_block(&grid, 3, 2, &[false, false], &SpanMap::new());
+        assert_eq!(b.items.len(), 2, "two logical lines");
+        assert_eq!(prov, alloc::vec![(0, 0), (1, 0)]);
     }
 
     #[test]
