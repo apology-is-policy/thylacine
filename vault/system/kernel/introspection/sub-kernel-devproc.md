@@ -75,6 +75,36 @@ places**, and the code flags that only one of them fails *silently*: omit the
 read whitelist and the file resolves fine and reads `-1` forever. The prior
 `maps` chunk shipped with exactly that omission.
 
+### The rendered fields carry contracts a reader depends on
+
+The dispatch above says *how* a field is served; several fields also pin *what
+the bytes mean*, and a monitor or a Linux `/proc` shim breaks if they drift:
+
+- **`cpu_ns` is cumulative and monotonic** — the sum of every thread's `run_ns`
+  (`proc_cpu_ns`, walked under the table lock), so a monitor derives %CPU by
+  diffing it across two polls (`Δcpu_ns / Δwall`, the htop method); the kernel
+  keeps no instantaneous-rate state. It deliberately excludes the running
+  thread's in-flight slice since its last switch-in (under one slice, negligible
+  over a poll).
+- **`name` is unforgeable.** It is the basename of the *resolved* binary path
+  (from the Spoor's #66 namespace name via `exec_setup_from_spoor`), never the
+  caller-controlled `argv[0]` — so a process cannot spoof its own name in
+  `status`. The boot chain (kproc/joey), which predates any namespace, is
+  stamped its literal.
+- **`exe` and `cwd` are bare bytes** — no trailing NUL, no newline — because
+  `readlink("/proc/self/{exe,cwd}")` yields a bare path and a terminator would
+  land inside every consumer's buffer. They differ on emptiness: `exe` is
+  **empty-is-valid** (kproc, the blob-loaded `/joey`, or any Proc whose `Path`
+  alloc failed genuinely have no name — I-33 makes that cost only this file's
+  content; the read returns 0 bytes, never -1), while `cwd` is **never empty for
+  a live Proc** (a NULL `dot_path` renders `"/"`, `territory_getdot`'s contract).
+- **The qid disambiguates pid 0.** Path 0 is the dev apex, so kproc (pid 0) is
+  encoded `(0 << 32) | PQS_PID_DIR` = 1, distinct from the apex — without the
+  nonzero subkind kproc's directory would collide with the root.
+- **`ns` renders a conditional `root: pheno-linux` final line** only for a
+  Linux-phenotype Territory, whole-line-or-nothing so an existing parse is
+  unchanged.
+
 ### The debug attach slot is a bare pointer, and that is sound
 
 `Proc.debug_owner` holds the `/proc/<pid>/ctl` Spoor that claimed the debugger

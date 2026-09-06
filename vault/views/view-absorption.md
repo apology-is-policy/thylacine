@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**51 absorbed · 106 live · 157 total.**
+**52 absorbed · 105 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -128,7 +128,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 29-joey.md | live | — |
 | 30-dev-spoor.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-path]], [[sub-kernel-spoor]] |
 | 31-trivial-devs.md | live | — |
-| 32-devproc.md | live | — |
+| 32-devproc.md | absorbed | [[sub-kernel-devproc]] |
 | 33-devctl.md | live | — |
 | 34-devramfs.md | absorbed | [[inv-i28]], [[inv-i32]], [[inv-i33]], [[sub-kernel-content]] |
 | 35-virtio.md | absorbed | [[inv-i15]], [[inv-i34]], [[inv-i5]], [[sub-kernel-discovery]] |
