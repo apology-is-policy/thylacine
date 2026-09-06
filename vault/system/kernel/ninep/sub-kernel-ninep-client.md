@@ -129,9 +129,32 @@ branch.
 
 **Fail-close.** `client_mark_dead_locked` is the SOLE `c->dead` setter
 (transport EOF/error, or a demux-level protocol violation — malformed
-header, out-of-range tag, oversize); it fails every in-flight rpc `-EIO` and
+header, out-of-range tag, oversize); it fails every in-flight rpc and
 wakes both the per-rpc rendezes and the parked-sender list. A dead session
 rejects all subsequent ops; there is no reconnect (destroy + re-init above).
+The sync (WAKE_RENDEZ) front-end and the boot path fail every op `-EIO`;
+the *async* (POST_CQE / Loom) path carries one more distinction (below).
+
+**The device-gone death reason ([[inv-i29]] device-gone extension, Menagerie
+step 4).** `client_mark_dead_locked(c, bool devgone)` takes a reason, and the
+three reader sites (`client_wait`'s elected-reader loop and the two
+`p9_client_reader_pump_once*`) pass `rr == 0`: a **clean EOF** (`recv` returned
+0 — the server/driver endpoint torn down) maps a dying session's async ops to
+the device-gone `-T_E_NODEV` (ENODEV), while a `recv` error / armed-deadline /
+malformed frame (`-1`) keeps the transport `-T_E_IO`. Before step 4 both
+collapsed to `-1`. So a driver group-terminated by a `DeviceRemoved` tears down
+its served endpoint → the consumer's rings EOF → its reader sees `recv 0` → its
+in-flight Loom ops complete `-ENODEV`, the whole chain automatic with **no
+warden code on the consumer's client**. `p9_client_mark_devgone(c)` is the
+explicit secondary entry (a device-teardown hook that holds the client),
+idempotent — the first death's reason stands. The reason rides only the async
+path because it is a Loom-completion (I-29) property the sync ABI does not
+expose; the audited #841 synchronous surface is untouched. Exactly-once holds
+by the demux clearing `inflight[tag]` **before** completing, so a reply and a
+death never both terminate one op — a late reply on a death-completed op
+dispatches ownerless (the `demux_orphan_late` taxonomy below) and is
+discarded, never a second terminal CQE. Spec: `loom_devgone.tla`
+(`NoDoubleTerminal` / `DeathResultFaithful` / `SessionDeathCompletes`).
 
 **Buffers.** Tmsgs build in the two-tier `out_buf` (inline 32 KiB, or an
 msize-sized kmalloc for a `DMSRVBULK` 128-KiB session; OOM degrades to
