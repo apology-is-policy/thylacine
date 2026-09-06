@@ -281,6 +281,29 @@ so a recompute files stale bytes under a fresh slot) and the #194 past-EOF SIGBU
 (refused before allocation, so a demand-zero cannot mint memory the I-32 axis never
 sees). Three audit:hard kernel surfaces, the D-3 story now coherent across
 vma/elf/fault on the vault side (exec is a separate dossier, checked next).
+`sub-kernel-exec` turned out already current (updated 2026-09-05, covers D-4 +
+Design-D; no code change since), so the D-3 story was complete across all four
+surfaces.
+
+**Two boot-chain / gate-infra de-stales closed the run.** `sub-warden`
+(`204363fa`, 38 -> 37): #230 -- the warden was probe-gated as a bind-loop proof,
+but netd made it the network + compositor bring-up and nothing revisited the gate,
+so the lean production image had no drivers; the fix runs it unconditionally and
+SPLITS its bind database into production `BUILTIN_MANIFESTS` vs opt-in
+`FIXTURE_MANIFESTS` (`--with-fixtures`), a safety boundary because `menagerie-probe`
+binds a real QEMU-virt node. `sub-substrate-interactive` (`0faac928`, 37 -> 36):
+the `fail-probe` (a scenario's own account of the guest at failure, the
+burned-retry decider), the #230 second-QMP-monitor per-slot isolation (the console
+gate's `qmp-gate.sock` raced at JOBS=3 -- the sibling of substrate-gates' #230),
+and the #224 refinement of the in-tree refusal. That paired the two substrate gate
+dossiers (gates + interactive) current together.
+
+**Run 32 total: 7 chunks, backlog 43 -> 36, tip `9842846e`, both mirrors
+converged throughout** (one mirror-split resolved mid-run). Every de-stale
+ground-truthed past the merge-date trap by diffing `<dossier-commit>..HEAD` rather
+than trusting the stale tool's merge-date reading. The remaining top churn is
+either aux-union-arc heavy (spoor + the namespace/9P layer) or big multi-file
+(libthyla-rs 12 files, coreutils 15) -- both better suited to a fresh focused run.
 
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
