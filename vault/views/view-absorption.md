@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**131 absorbed · 26 live · 157 total.**
+**132 absorbed · 25 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -89,7 +89,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 133-go-port.md | absorbed | [[sub-kernel-loom]], [[sub-kernel-perm]], [[sub-kernel-syscall-dispatch]], [[sub-libthyla-rs]], [[sub-nora-host]], [[sub-stratum-boot]], [[sub-stratum-session]] |
 | 134-debug-fs.md | absorbed | [[sub-kernel-devproc]], [[sub-kernel-exception]], [[sub-kernel-halls]], [[sub-kernel-hwdebug]], [[sub-kernel-mmu]] |
 | 135-pty-kernel.md | live | — |
-| 136-ptyfs.md | live | — |
+| 136-ptyfs.md | absorbed | [[sub-ptyfs]] |
 | 137-gopls.md | absorbed | [[abi-t-stat]], [[sub-kernel-caps]], [[sub-kernel-joey]], [[sub-kernel-ninep-dev9p]], [[sub-parley]], [[sub-stratum-session]] |
 | 138-gpud.md | absorbed | [[sub-substrate-gates]], [[sub-tapestryd]], [[sub-warden]] |
 | 139-tapestryd.md | absorbed | [[sub-kernel-weft]], [[sub-libdriver-grant]], [[sub-libtapestry]], [[sub-tapestryd]] |
