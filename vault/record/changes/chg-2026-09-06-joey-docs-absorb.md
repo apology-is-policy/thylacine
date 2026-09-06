@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/{29-joey, 59-joey-from-ramfs}: two joey-era docs (P3-F embedded blob; P5 initrd load) both superseded by sub-kernel-joey + sub-stratum-boot -- zero-fold, two redirect stubs"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["b6afdf44"]
 touched: []
 established: []
 closed: []
