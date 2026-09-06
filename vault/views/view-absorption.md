@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**89 absorbed · 68 live · 157 total.**
+**90 absorbed · 67 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -77,7 +77,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 122-net.md | live | — |
 | 123-tls.md | live | — |
 | 124-net-utils.md | live | — |
-| 125-weft.md | live | — |
+| 125-weft.md | absorbed | [[abi-ninep-wire]], [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-loom]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-ninep-wire]], [[sub-kernel-proc]], [[sub-kernel-weft]], [[sub-libtapestry]], [[sub-netd-nic]], [[sub-netd-server]], [[sub-tapestryd]] |
 | 126-revenant.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-elf]], [[sub-kernel-exec]], [[sub-kernel-fault]], [[sub-kernel-image]], [[sub-kernel-mmu]] |
 | 127-overcommit.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-fault]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]] |
 | 128-devenv.md | absorbed | [[inv-i1]], [[inv-i32]], [[lock-env]], [[sub-kernel-content]] |
