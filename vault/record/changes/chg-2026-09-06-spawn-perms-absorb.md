@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/73-sys-spawn-with-perms: fold the SPAWN_PERM_* grant-gate security mechanism into sub-kernel-syscall-dispatch, multi-redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["f17f0e59"]
 touched: [sub-kernel-syscall-dispatch]
 established: []
 closed: []
