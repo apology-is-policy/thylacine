@@ -60,6 +60,13 @@ tracked (not blockers): F5 [P2, immortal mount voices -- architectural]; the
 proper F6 fix [P3, count-based stale-completion rejection]; F9 / F1-followup /
 F-R2-2 [P3]. Dispositions: memory/audit_nocturne_closed_list.md.
 
+**Doc-per-PR close (`31a820fb`).** The fixes had been pushed without their
+reference-doc update. `quaestor owner` put `usr/nocturned/src/*` UNOWNED, so
+the gap was closed in `docs/reference/153-nocturne.md` -- the F1 owner gate,
+the F2 always-armed listener + accept-refuse at `MAX_CONNS`=32, the F3
+`ctrl_drain_stale` control-queue resync, the error-path rows, and a caveat
+recording the audit + the deferred F5.
+
 
 ## 2026-09-06 (aux) -- Nocturne N-2a-4 code + the audit of the whole audio surface
 
