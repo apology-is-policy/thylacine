@@ -1,6 +1,6 @@
 # Audio — Nocturne
 
-**Status: N-2a-2 (2026-09-05).** The audio system is being built (`docs/NOCTURNE.md`).
+**Status: N-2b (2026-09-06).** The audio system is being built (`docs/NOCTURNE.md`).
 What exists today: a Plan 9-shaped audio device file you can write PCM to,
 several programs mixing at once through their own *voices*, per-voice gain, and
 SDL programs playing through it automatically. Capture, the graph's ports and
@@ -112,10 +112,25 @@ bytes, and totals; the root `info` gains a `voices N` line.
 | `nodes/<id>/audio` | `0666` | 0 bytes | S16LE stereo 48000 Hz into voice `<id>` |
 | `nodes/<id>/ctl` | `0644` | a one-line description | `gain <percent>` / `flush` / `remove` |
 | `nodes/<id>/info` | `0444` | that voice's gain, queued bytes, totals | not writable |
+| `nodes/<id>/data` | `0666` | a zero-copy ring map fid (not byte I/O) | `SYS_WEFT_MAP` it (see below); reading/writing it as bytes is refused |
 
 The stream starts on the first write to any voice and stops on its own after
 about half a second with every voice silent, so an idle machine pays no periodic
 interrupt. Up to 16 voices mix at once.
+
+## Zero-copy ring (advanced)
+
+Writing a voice's `audio` copies your bytes into the server. A program that wants
+no copy — a game engine, a synth — can instead map that voice's ring and write
+audio periods straight into shared memory the server plays from. Open the voice's
+`data` file **through the `/dev/nocturne` mount** and `SYS_WEFT_MAP` it (a direct
+`/srv/nocturne` connection cannot — the map needs a mounted fd); the server hands
+back a shared ring you write fixed-size periods into, advancing a producer index
+the server reads on the audio clock. One program produces per ring (the kernel
+grants the ring to the first mapper and no other), so a ring voice is byte-fed
+*or* ring-fed, never both. This is a low-level interface; most programs should use
+`audio` or an audio library (SDL, below). The wire layout and the producer/consumer
+protocol are in the developer reference (`docs/reference/153-nocturne.md`).
 
 ## Programs: SDL
 
