@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**95 absorbed · 62 live · 157 total.**
+**96 absorbed · 61 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -52,7 +52,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 10-gic.md | absorbed | [[inv-i15]], [[sub-kernel-gic]] |
 | 100-9p-identity-presentation.md | absorbed | [[inv-i22]], [[seam-nuname-trust-stamp]], [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-client]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-perm]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-net]], [[sub-stratum-server]], [[sub-stratum-session]], [[sub-substrate-build]] |
 | 101-halls.md | live | — |
-| 102-legate.md | live | — |
+| 102-legate.md | absorbed | [[sub-corvus]], [[sub-kernel-caps]], [[sub-kernel-perm]] |
 | 103-login.md | live | — |
 | 104-stalk.md | absorbed | [[inv-i28]], [[sub-kernel-path]], [[sub-kernel-stalk]] |
 | 105-corvus-recovery.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus-mint]], [[sub-corvus]] |
