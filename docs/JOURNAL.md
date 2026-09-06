@@ -160,6 +160,64 @@ So the retirement is ~83% mechanical. The absorption sweep itself -- stub the 92
 author the 12, adjudicate the 7 -- is the ongoing multi-session vault loop, not
 this run.
 
+### Run 37 continued (post-self-compact): the durable merge-blindspot fix, then the sweep -- where verify-before-stub caught a dossier asserting the opposite of reality
+
+Resumed from the 600k self-compaction. The resume note's #1 top-next was a
+correctness fix to the gate this run had just built: the `commit-msg` hook had a
+**merge-blindspot**. A merge that pulls in audit:hard code (a code track merging
+`origin/main` carrying a `kernel/*.c` change) re-stages that code with no dossier
+co-staged and no trailer, so `dossierGate` blocked it -- the R6 merge-blindspot
+class reappearing in the reminder, and worse than a nuisance because aux is
+classifier-blocked from `--no-verify`, so a blocking merge leaves that track no
+way through. Last run I had patched only the local hook (`git rev-parse --verify
+MERGE_HEAD && exit 0`); that copy dies on a reinstall and was untested. The
+durable fix (`40cb19aa`, both mirrors): `mergeInProgress()` in `dossier_gate.go`,
+matching the hook's probe exactly, so the gate is correct even invoked directly.
+`TestDossierGateSkipsMergeInProgress` pins it -- and it is a real
+**discrimination** test, the exact staged state of `TestDossierGateBlocksHardCode`
+with one variable added (MERGE_HEAD present) flipping block to clean.
+Sabotage-verified: disabling the skip flips the merge test to FAIL while the
+block test still passes, so the one variable it asserts on is the skip. A
+realization worth recording: the hook lives in the **shared** `.git/hooks`
+(per-repo, not per-worktree), so the local inline skip already protected aux/main
+before the durable fix even landed -- the tracked fix is the tested,
+reinstall-proof form, not a live unblock.
+
+**Then the absorption sweep, and it vindicated verify-before-stub on every file
+it touched.** Four files absorbed (`c637e9a8` 22-asid; `7d1ecdfd` 26-vma +
+146-addrspace; `aa551eb4` 30-dev-spoor; 51/106 absorbed at run end), and the
+method was proven: a read-only Explore agent as a **gap-FINDER** (not a
+completeness-confirmer -- I never trust a bare "COVERED"; I verify each flagged
+gap in-tree), then fold the gaps into the dossier, then stub with an honest "what
+it got wrong". **The discipline earned its keep 4/4.** 22-asid: sub-kernel-asid
+was missing the no-per-Proc-`asid_free` teardown-TLB-safety argument (an
+I-31-supporting atom a blind stub would have dropped to git history). The
+standout: **sub-kernel-vma's Tests section asserted "there is no dedicated
+`vma.*` suite; the structure is proven by its users" -- the exact opposite of
+reality.** `kernel/test/test_vma.c` exists, 16987 bytes, six tests. A
+stub-on-COVERED would have retired the legacy doc that listed them and left the
+dossier *denying they exist* -- a factual dossier bug, not merely a coverage gap,
+and precisely the failure the "read BOTH docs" rule exists to catch. Corrected to
+the real suite. 30-dev-spoor was the inverse lesson: zero content lost, but it
+bundled three concerns the vault splits into three dossiers, so a single-target
+stub would have orphaned two -- it redirects to all three (dev + spoor + path),
+verified each carries its file set.
+
+**The standout finding, and it was not in any plan: `arch/arm64/uart.c` is an
+orphan.** The second Explore (the devices/introspection batch) confirmed no
+dossier's `code:` owns it, and it holds the A-4c-1 content the I-27 trusted path
+rests on -- the PL011 RX programming, the RX-FIFO drain, and the `DR.BE` BREAK
+detection that feeds the SAK attention key. It was already orphaned from
+`01-boot`'s stub (task #32) and now blocks stubbing `31-trivial-devs` too. It
+needs a home before either can stub -- authoring `sub-kernel-uart` (it is the
+"A-4c trusted path: kernel console RX + SAK" audit-trigger surface, so audit:hard)
+or extending an entry dossier. Recorded as the top item of the analyzed queue
+(the full per-file fold list for 20-burrow, 25-fault-dispatcher, 32-devproc,
+33-devctl, 109-devdev is in `project_vault_arc.md`, so the two Explores' work is
+executed next session without re-analysis). The multi-dossier trap also defers
+the sys-spawn family, whose creation half is `sub-kernel-proc`'s and whose
+syscall-ABI half is `sub-kernel-syscall-dispatch`'s.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
