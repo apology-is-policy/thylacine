@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32]
 validated-by: [spec-burrow, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-08-24
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -418,3 +418,11 @@ the Loom-side claim fails only the foreign-charge leg, undoing the `shared_out`
 arm fails only the payer-settles legs, and neither masks the other. Two fixes,
 two independently-failing tests, which is the bar a single test covering both
 would have quietly missed.
+
+[[chg-2026-09-06-burrow-borrowed]] re-verified this after a same-day-tie stale
+flag. The only burrow change since the 2026-08-24 update is `3de39ad0`
+(V-3b-1c-2b round-3, 16:29 the same day) — a COMMENT-only refinement of
+`burrow_total_refs`'s rationale from round-2's "IRQ-preemptible" to the true
+"SMP cross-CPU" (masking cannot serialize two CPUs; only `v->lock` can), and this
+dossier's prose already carries the SMP reasoning ("a peer CPU mutating one count
+between them"). The code is unchanged. Borrowed — nothing owed.

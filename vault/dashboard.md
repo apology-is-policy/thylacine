@@ -131,6 +131,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-06 [[chg-2026-09-06-burrow-borrowed]] — sub-kernel-burrow re-verified borrowed: the only post-update change is a comment-only round-3 refinement the dossier's prose already reflects
 - 2026-09-06 [[chg-2026-09-06-cons-consctl-verbs]] — sub-kernel-cons brought current: the three consctl surfaces since 2026-08-18 -- the beacon-tier verb, the serialsilent display-routing verb, and the C2-k1b termios projection
 - 2026-09-06 [[chg-2026-09-06-harc-audit-close-r1]] — H-arc audit close, round 1 (batched: the zoom fix, H-4c, H-4d-1, H-4d-2a/2/3): the composed GPU arm's stale-slot expansion, the draining resize-ack re-offer, the reservation on claim-less creates, the floor at the latch, the menu seat requires hosting; the span ring lazy + packed, the obj-copy cache a map, Normal mode left on AltEnter; ptyhost declares its tier; the pts-slave 't' unit positive
 - 2026-09-06 [[chg-2026-09-06-joey-boot-borrowed]] — sub-stratum-boot re-verified after the KT-1.5 + VIVARIUM merge: the bringup sequence is borrowed; the ~5659-line churn is all in the undescribed region (#177 gap widened)
@@ -138,5 +139,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-06 [[chg-2026-09-06-pipe-multiwaiter]] — sub-kernel-pipe brought current: the single->multi-waiter lift (two Rendezes -> one poll_waiter_list, closing the EL0-shared crash), CNONBLOCK/EAGAIN, and the item-11->11c caught-note seam
 - 2026-09-05 [[chg-2026-09-05-beacon-layout-fold]] — The H-4c layout gesture folded into sub-beacon: ObjType::Layout (type=layout) + the three verbs.default layout rules
 - 2026-09-05 [[chg-2026-09-05-boot-banner-mirror-recount]] — abi-boot-banner recount: the prose caught up to the twenty-eight-mirror set
-- 2026-09-05 [[chg-2026-09-05-caps-fork-inherit]] — sub-kernel-caps brought current: the Linux-clone fork-inherits-caps (rfork_forked_with_caps) + the resolved comment drift -- its first EARNED update
 <!-- generated:end -->
