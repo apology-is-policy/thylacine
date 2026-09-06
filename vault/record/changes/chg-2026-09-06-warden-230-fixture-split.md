@@ -4,7 +4,7 @@ type: chg
 title: "warden de-stale: #230 -- the broker runs in every build shape (not init's probe ladder), and its bind database splits into production BUILTIN_MANIFESTS vs opt-in FIXTURE_MANIFESTS (--with-fixtures)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["204363fa"]
 touched:
   - sub-warden
 established: []
