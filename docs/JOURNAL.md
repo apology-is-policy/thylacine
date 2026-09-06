@@ -359,6 +359,62 @@ referenced in prose, never as a `guarded-by` id.
 
 ---
 
+### Run 37 continued: docs/reference/100 (9P identity, A-3) -- a security surface across seven dossiers, and a dossier that asserted the opposite of the code
+
+The A-3 identity-presentation surface -- how a 9P server learns *who is
+connecting* and how that reconciles with the kernel's durable per-Proc
+`principal_id`, so kernel rwx enforcement can activate on dev9p without bricking
+boot. Cross-cutting: one doc, eight atoms, homed across seven dossiers + one new
+seam. Every atom verified against the code before it entered a dossier, and that
+discipline earned its keep twice.
+
+**The finding worth recording: a dossier that asserted the opposite of the
+code.** `sub-kernel-ninep-client` said, in three places (Error convention, Error
+paths, Caveats), that the server's Rlerror ecode "passes through verbatim /
+u32-unbounded here / bounded at the dev9p layer, not here." The code
+(`9p_client.c:116`) does the opposite: `map_error` bounds the wire ecode to
+`[1,4095]` *before* negating (`ecode == 0 || ecode > 4095 -> -EIO`), which is the
+guard that closes a signed-overflow UB -- `-(int)0x80000000` traps under UBSan, a
+kernel halt reachable by any hostile `Rlerror` on any op. The dossier not only
+missed the guard, it told a reader the client was the UB hazard and dev9p was the
+fix -- both wrong, and its own sibling `sub-kernel-ninep-wire` already said so
+correctly (they contradicted each other). This was a REWRITE of three lines, not
+an append; the absorption made the two siblings agree with the code. Trusting
+the dossier's framing would have propagated the inversion.
+
+**The second catch: a seam recorded but un-homed.** Doc 100's M5 records the
+`n_uname` trust-stamp gate as a v1.x seam, and `sub-kernel-ninep-attach` said it
+was "swept there" -- but "there" named no node. Neither `seam-845`
+(one-reply-per-tag tag generations) nor `seam-stratum-notify-peercred` (the
+notify socket) is that gate; they are the same untrusted-9P-peer family but
+different gaps. I authored `seam-nuname-trust-stamp` (gate the `n_uname`
+assertion on a corvus trust bit before asserting identity to a server whose peer
+the kernel does not stamp) and fixed the dangling attach pointer.
+
+The other folds were additive and grounded: the pouch `SO_PEERCRED` principal
+marshal (M1, `uid=principal_id` / `gid=primary_gid`, was a `0/0` stub -- with a
+stale top-of-file comment still claiming "uid 0 at v1.0" above the live code);
+the F1 `rights_for_omode` handle-rights table + the caller-policy disclaim
+(`RIGHT_TRANSFER` / `T_OPATH` are set at the syscall site, not in the omode map);
+the syscall-path gates (F2 rename/unlink `perm_check` behind `perm_enforced`, M4
+`n_uname=principal`, `attach_err_to_ret` surfacing the Tattach `-EACCES` -- folded
+into syscall-dispatch's existing "two error conventions" section, the same
+window clamp it already described); and the Stratum `--bake-owner-uid` host-bake
+override + the `PRINCIPAL_SYSTEM` no-brick bake value. Three atoms were verified
+PRESENT and left alone (ninep-attach `out_err`, ninep-dev9p `perm_enforced=true`,
+stratum-session `--datasets-allowed`).
+
+Landed `90422106` (+ fixup `f5639ef8`). Then origin/main had moved: main pushed
+the nora s7a session-palette arc (four commits, tip `efc779d5`). Conflict-free
+merge (zero path overlap: main = `usr/{nora,halcyond,lib/libhalcyon}` + docs;
+vault = `vault/**` + `docs/reference/100`), tip `418b2ed5`, dual-pushed. **66
+absorbed / 91 live.** The merge is what UNBLOCKS the peer-flagged s7a vault fold
+-- main's s7a code is now in the worktree, and the staleness census ticked
+21 -> 24 to name exactly the three dossiers (nora-view, halcyond, libhalcyon)
+that fold will refresh.
+
+---
+
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
 
 **PL-5 -- the `pre` PRODUCER (`ea731dd8`).** PL-1b (run 34) built the `pre`
