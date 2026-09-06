@@ -376,6 +376,47 @@ it (its identity check was the open-time `perm_check`). Since #47 this is the
 *sole* write-authority gate on the mode/uid/gid path: load-bearing, not additive
 to a handle right.
 
+### Positioned byte I/O reuses the read/write inner with the cursor held still
+
+`SYS_PREAD` (85) and `SYS_PWRITE` (86) are POSIX positioned I/O: a byte transfer
+at a caller-supplied absolute offset that **never reads or advances the fd
+cursor**. The absence of cursor traffic is the contract, not an optimisation —
+`io.ReaderAt`'s documented parallel-use guarantee, and every archive and loader
+reader built on it, rides on two positioned ops sharing no mutable state, and no
+Seek+Read emulation can provide it.
+
+The kernel half is thin because the Dev vtable **always** took an explicit offset
+— the Plan 9 `Dev.read(c, buf, n, off)` shape — and the per-Spoor cursor is
+syscall-layer sugar. So `sys_read_for_proc` and `sys_write_for_proc` were
+refactored onto a shared inner (`spoor_read_common` / `spoor_write_common`)
+carrying a `positioned` flag: cleared, it reads `c->offset` and advances it after
+the transfer, byte-identical to the pre-existing bodies; set, it passes the
+caller's offset straight through and touches the cursor on no path.
+
+Three positioned-specific gates guard the offset, and their ORDER is load-bearing:
+
+- **`off < 0` is rejected before the handle lookup.**
+- **A non-seekable Dev is rejected with the POSIX ESPIPE shape**, and the check
+  sits *before* the `len == 0` short-circuit — so even a zero-length positioned
+  probe on a pipe, cons, or `/srv` stream reports the refusal instead of
+  succeeding as a cursor-free no-op. `dev->seekable` (true only for devramfs and
+  dev9p) is what marks a byte-offset Dev.
+- **`len > INT64_MAX - off` is rejected** as a `u64`-arithmetic overflow guard, so
+  the offset addition never wraps.
+
+Everything else is byte-identical to the cursored path: the ref-held lookup, the
+`CWALKONLY` reject, the errno clamp. One asymmetry is worth holding onto — a
+copy-out fault mid-`pread` loses nothing, because the cursor never moved and the
+caller can repeat, unlike `SYS_READ`'s consumed-bytes-lost window. The one known
+divergence is consumer-side, not here: the Go `syscall.Pread`/`Pwrite` wrapper
+returns `(0, nil)` on a `len == 0` call rather than trapping, because indexing an
+empty slice panics — so a zero-length positioned op on a non-seekable fd is seen
+as success by that one caller where the kernel reports the ESPIPE-shaped refusal.
+The soundness pin on the metadata sibling — `dev_register` extincts a
+`wstat_native` Dev that is not `perm_enforced`, since `perm_wstat_check` is the
+only write-authority gate there — lives with the Dev registration
+([[sub-kernel-dev]]), not here.
+
 ### The hardware-mint sequence, and where the same idea is factored and where it is copied
 
 The three DMA-family create calls — plain, weave, and GPU buffer object — each
@@ -595,6 +636,12 @@ threshold so small transfers never pay the extra handle lookup.
   delegates, because a service-poster conferring console-trust would breach
   [[inv-i27]]. The tail `extinction` in `apply_spawn_perms` is the proof the two
   sites agree.
+- **A positioned-I/O gate order is part of its contract.** The non-seekable
+  refusal must precede the `len == 0` short-circuit, or a zero-length positioned
+  probe on a stream Dev succeeds where POSIX reports ESPIPE; the overflow guard
+  must precede the offset's use; and the shared `positioned` flag must leave the
+  cursor untouched on every path, because a single advanced cursor breaks the
+  parallel-use guarantee the whole surface exists to provide.
 - **A new phenotype row confers shape, not authority.** A translation may
   renumber and remap arguments; it may not read or write the capability word, and
   the native gate it lands on must be the same one a native caller meets.
@@ -742,6 +789,16 @@ the entry before the user-VA read, `apply_spawn_perms` in the child thunk before
 (`CONSOLE_TRUSTED` never-delegable I-27, `MAY_POST_SERVICE`/`CONSOLE_OWNER`
 holder-delegable one-hop), and the I-2 non-propagation (perm bits are spawn-time,
 not `cap_mask`).
+
+[[chg-2026-09-06-positioned-io-absorb]] folds the SYS_PREAD/PWRITE syscall-layer
+mechanism absorbed from docs/reference/130: the cursor-untouched contract (the
+shared `spoor_read_common`/`spoor_write_common` inner + the `positioned` flag),
+the three ordered gates (off<0; non-seekable -> ESPIPE-shape, before the len==0
+short-circuit; off+len overflow), the repeat-safe mid-`pread` fault asymmetry, and
+the consumer-side Go len==0 divergence. The Dev-half `seekable` flag stays with
+[[sub-kernel-ninep-dev9p]]; the ABI numbers with [[sub-kernel-syscall-abi]]; the
+`wstat_native`/`perm_enforced` pin with [[sub-kernel-dev]]; SYS_WSTAT #47 was
+already folded above.
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 
