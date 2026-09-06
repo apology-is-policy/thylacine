@@ -1977,6 +1977,21 @@ proportional live.**
   grid as fixed Cornucopia cells in the terminal-content palette (Bonfire — an
   alt-screen app *is* a terminal, so Bonfire is correct there, §3). Unchanged
   from §14.11.3.
+  **AMENDED 2026-09-06 (s7a; operator-ratified — the s7 finding; recorded for
+  the operator).** "Bonfire is correct there" stands as the CONSOLE / non-session
+  default, but a session-aware program now FOLLOWS THE SESSION THEME rather than
+  hardcoding Bonfire on a light ground (s7: nora opened from a menu painted
+  Bonfire inside a Daylight session). The session publishes its resolved palette
+  to `/env/HALCYON_PALETTE` — a program-agnostic `role=RRGGBB` list
+  (`libhalcyon::theme::env_palette`) — and a hosted program adopts it: `nora`
+  reads it plus a `$HOME/.config/nora/palette` dotfile, precedence
+  dotfile > /env > its own compiled default. So `nora` in a Daylight session
+  renders Daylight. halcyond is UNCHANGED — it still displays the cells the
+  program emits; only the program's own output colours change (the seam ships
+  resolved RGB, §14.3, so the palette is applied at the producer). One
+  resolution note: the `surface` panel role resolves from Daylight `header` (the
+  light lift), NOT the dark `status_bg` strip, so a program painting its own ink
+  on it keeps contrast.
 
 **Rendering is a sink choice; the pts stays a fixed-width grid.** The kaua-term
 producer is UNCHANGED — it still hosts a real pts, still maintains a fixed
