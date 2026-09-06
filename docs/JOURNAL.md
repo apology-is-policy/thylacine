@@ -100,6 +100,23 @@ false-churn (libthyla-rs), so bump `updated:` on every fold. And yip 0029 (the
 unowned Warp paths -- GPU-DESIGN.md scripture + warp tooling) is a vault-*scope*
 decision for the operator, not a routine de-stale.
 
+**Coda -- the upkeep model, caught live.** Right after that conclusion, while
+answering the operator's return question ("do the agents upkeep their own dossiers
+now?"), main flagged a fresh de-stale on yip 0058: `sub-halcyond` PL-4
+(proportional-live). That is the model working -- main ran `quaestor owner`
+(exit 0, vault-owned) and rang the vault to fold rather than writing
+`docs/reference` -- and it is the *distinction* that corrects "the safe pool is
+exhausted": an **unflagged** peer-active dossier is deferred (it re-stales on the
+next push), but a **flagged** one is work the vault should take. Folded
+(`82e47377`): the normal-screen tail is now documented proportional
+(`live_block -> layout_block -> render_block`, mono `paint_grid` retired for
+normal / kept for alt), the run-menu geometry inverts through the laid tail
+(`grid_hit` + `grid_run_rect`) at both summon sites, and the untrusted-drop clamp
+stays in `grid.rs` below the layout swap. It was stale *within the same day* (the
+H-arc fold `29b3267c` preceded PL-4; `updated:` was already today), so the stale
+tool could not see it -- a live instance of the same-day blind spot behind this
+run's registry finding. Run 35's ledger is 5 de-stales, not 4.
+
 ---
 
 ## Run 34 (2026-09-06, Opus 4.8, effort max): the Halcyon stabilization arc opens -- proportional-live ratified into scripture, then the Beacon `pre` op and Genera typography
