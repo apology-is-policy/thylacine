@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/118-libdriver (the Menagerie driver framework, I-34): clean redirect to sub-libdriver-grant + sub-libdriver-discovery (grant AHEAD of the doc)"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["67fd7355"]
 touched: []
 established: []
 closed: []
