@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/98-capability-storage (I-23 + FS-delta O_PATH): fold the A-1.7 F1 monotonic-bound reconciliation into inv-i23, multi-redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["86637f88"]
 touched: [inv-i23]
 established: []
 closed: []
