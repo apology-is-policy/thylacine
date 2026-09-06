@@ -48,11 +48,11 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-06
 ---
 ## Purpose
 
-Thirty-six of the fifty-one coreutils binaries: the text filters, the file
+Thirty-six of the fifty-two coreutils binaries: the text filters, the file
 operations, and the small identity and time queries. Everything whose
 output another program is expected to read.
 
@@ -78,7 +78,7 @@ loop against the runtime's argument iterator, which is why the flag
 colour modules must be named to be used; a binary that never writes
 `coreutils::palette` cannot emit an escape byte. Verified across the set:
 zero of these thirty-six reference the colour or palette modules, and all
-fifteen of the others do. The partition is exact.
+sixteen of the others do. The partition is exact.
 
 That is the same "authority by absence" move the runtime libraries use for
 capabilities, applied to output cleanliness — and it is stronger than a
@@ -101,10 +101,28 @@ a restriction: the whole pivoted tree is one device.
 entries the directory reader yields — a real hazard handled, since a
 recursive copy that followed the parent entry would walk upward.
 
+**`mkdir -p` treats an uncreatable-but-existing ancestor as success.**
+Walking the chain from `/`, `-p` tries to create every ancestor; one that
+already exists inside a directory the user cannot write answers
+permission-denied, not exists — the kernel checks the parent's write bit
+before it discovers the child is already there. So the benign case is not
+"the create returned EEXIST" but "the component is a directory afterwards",
+re-checked after the failed create, which also absorbs a concurrent creator.
+Without it, `-p` from `/tmp` or from a home died on its first existing
+ancestor.
+
 **Sort holds everything in memory.** Whole-line lexical by default, with
 field and character keys, per-key modifiers, and a whole-line last resort
 so the order is total. Reading all input into memory is a stated choice,
 appropriate for a system whose files are small and whose heap is fixed.
+
+**Path cleaning is the one shared piece of behaviour.** `realpath` no longer
+carries its own lexical normaliser; the collapse of `.`, `..` and `//` lives in
+`coreutils::path::normalize`, so a filter and the colour-linking presenters
+(`ls`, `ps`, `stat`) that emit a cleaned-absolute reference clean it the same
+way. It is the only *logic* — as against the shared `--help` and usage-error
+plumbing — that crosses the partition, and it crosses because a path is a path
+on both sides.
 
 **The odd one out is aurora-push**, which is a filter in the linkage sense
 — no colour modules — but writes terminal escapes as its *entire purpose*:
@@ -180,13 +198,16 @@ report a symlink as a plain file even where the mode string shows `l`.
 
 - **`which` answers from a mirror that has drifted, and its own header
   says drift is a bug.** The shell resolves a bare command against a
-  three-entry list — `/bin/`, `/`, `/goroot/bin/` — while the environment
-  variable `which` reads is seeded with two, dropping the namespace root.
-  So a root-level binary (and several exist: the boot probes are spawned
-  by root-anchored path) *runs* when typed and reports *not found* when
-  asked about. The same missing entry is already filed against the shell's
-  completion index, so one omission now stands in three places, each of
-  which documents itself as mirroring the others (task #159).
+  six-entry list — `/bin/`, `/`, `/goroot/bin/`, `/clade/bin/`, `/viv/bin/`,
+  `/viv/abin/` — while the environment variable `which` reads is seeded with
+  five, dropping only the namespace root `/`. So a binary that lives at `/`
+  (the pre-pivot initrd root, where the boot-test shell runs) *runs* when
+  typed and reports *not found* when asked about. The lists have since grown
+  together: the `/viv/bin` instance of this drift — `git` ran while `which
+  git` failed because the shell list carried `/viv/bin` and the login seed did
+  not — was closed at X-2 (W1-b) by seeding both surfaces, and `/clade/bin` was
+  added to both at once. The residual is the single `/` entry; the same
+  omission stands against the shell's completion index (task #159).
 
 - **Zero tests, and none are reachable from the host harness.** These are
   binary crates that link the runtime unconditionally, so `cargo test`
