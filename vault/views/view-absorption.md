@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**110 absorbed · 47 live · 157 total.**
+**111 absorbed · 46 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -76,7 +76,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 121-netd.md | absorbed | [[sub-netd-nic]], [[sub-netd-server]] |
 | 122-net.md | live | — |
 | 123-tls.md | absorbed | [[sub-net-clients]], [[sub-tls]] |
-| 124-net-utils.md | live | — |
+| 124-net-utils.md | absorbed | [[sub-coreutils-presenters]], [[sub-libthyla-rs]], [[sub-net-clients]], [[sub-netd-server]] |
 | 125-weft.md | absorbed | [[abi-ninep-wire]], [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-loom]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-ninep-wire]], [[sub-kernel-proc]], [[sub-kernel-weft]], [[sub-libtapestry]], [[sub-netd-nic]], [[sub-netd-server]], [[sub-tapestryd]] |
 | 126-revenant.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-elf]], [[sub-kernel-exec]], [[sub-kernel-fault]], [[sub-kernel-image]], [[sub-kernel-mmu]] |
 | 127-overcommit.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-fault]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]] |
