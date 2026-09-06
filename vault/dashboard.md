@@ -132,11 +132,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-06 [[chg-2026-09-06-abi-errno-reconcile]] — abi-errno registry reconcile: +16 missing codes (the whole V-5 socket family + INTR/2BIG/CHILD/NOTTY/MFILE/NODEV/NOTDIR/ISDIR/LOOP), the stale self-counts (19->35 non-zero, 20->36 asserts), and the err.rs mirror analysis
+- 2026-09-06 [[chg-2026-09-06-asid-absorb]] — docs/reference retirement: absorb 22-asid into sub-kernel-asid -- fold the missing no-per-Proc-free teardown-TLB-safety atom first, then stub-and-redirect (48 absorbed / 109 live)
 - 2026-09-06 [[chg-2026-09-06-builders-config-overlay]] — sub-substrate-builders de-stale: the clade builders must sync build-config.sh + configs/ (the build-configurator arc's silent dependency)
 - 2026-09-06 [[chg-2026-09-06-burrow-borrowed]] — sub-kernel-burrow re-verified borrowed: the only post-update change is a comment-only round-3 refinement the dossier's prose already reflects
 - 2026-09-06 [[chg-2026-09-06-cons-consctl-verbs]] — sub-kernel-cons brought current: the three consctl surfaces since 2026-08-18 -- the beacon-tier verb, the serialsilent display-routing verb, and the C2-k1b termios projection
 - 2026-09-06 [[chg-2026-09-06-content-mayexec-vouch]] — sub-kernel-content de-stale: devramfs vouches may_back_exec=true (the #217 I-12 provenance floor) -- ramfs may back executable pages, /env's Dev deliberately may not
 - 2026-09-06 [[chg-2026-09-06-coreutils-filters-destale]] — coreutils-filters de-stale: the ps-driven partition recount (51->52, 15->16), the which drift narrowed to the single / entry, realpath's shared path::normalize, and mkdir -p's race-tolerant re-check
 - 2026-09-06 [[chg-2026-09-06-coreutils-presenters-h1c2-destale]] — sub-coreutils-presenters de-stale: H-1c-2 built the console probe -- --color=auto now means auto across all sixteen, ps joins the set, and four tools gain a Beacon Rich realization
-- 2026-09-06 [[chg-2026-09-06-dev-fdclass-console-helpers]] — sub-kernel-dev de-stale: dev.h gains the devdev_fd_devclass / spoor_is_console decls + the extern devcons (the header side of the devdev fd-class + console-identity work)
 <!-- generated:end -->
