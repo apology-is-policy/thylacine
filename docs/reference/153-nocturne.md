@@ -122,10 +122,11 @@ graph:
 
 | Path | qid | Mode | Read | Write |
 |---|---|---|---|---|
-| `/` | 0 | `0555` dir | `Treaddir` lists `ctl info audio nodes` | — |
+| `/` | 0 | `0555` dir | `Treaddir` lists `ctl info volume audio nodes` | — |
 | `audio` | 3 | `0666` | 0 bytes (output-only, `audio(3)`) | S16 stereo 48 kHz into **voice 0** |
 | `info` | 2 | `0444` | device words + counters + `voices N` | `EPERM` |
 | `ctl` | 1 | `0644` | one description line | `flush` (drops voice 0); else `EINVAL` |
+| `volume` | 6 | `0666` | `audio <l> <r>` + `mix <l> <r>` (Plan 9 `volume(3)`) | the grammar; whole-sink authority gate (N-3a-2) |
 | `nodes/` | 4 | `0555` dir | `Treaddir` lists `new` + each live voice id | — |
 | `nodes/new` | 5 | `0666` | the id of the voice this open minted | (open is the mint) |
 | `nodes/<id>/audio` | vpath | `0666` | 0 bytes | S16 stereo 48 kHz into voice `<id>` |
@@ -183,6 +184,40 @@ its `CloseDevice`, or the program's death, drops the connection and the voice.
 `period-bytes`, `buffer-bytes`, `periods`, `started`, `periods-played`,
 `silence-periods`, `tx-errors`, `bad-used`, `latency-bytes`; `nodes/<id>/info`
 renders `voice`, `gain` (percent), `buffered`, `bytes-in`, `flushes`, `owner`.
+
+**The sink volume + the whole-sink authority gate (N-3a-2).** The root
+`volume` file speaks Plan 9 `volume(3)` over the active sink: a write is one or
+more lines `audio <v>` / `audio <l> <r>` / `mix <v>` / `mix <l> <r>`, values
+0..100 (100 = unity), and a read renders the current `audio`/`mix` per channel.
+The two controls are a sink gain STAGE on `Graph` (`sink_audio[2]`,
+`sink_mix[2]`, default unity): `next_period` scales each channel of the final
+float mix by `(sink_audio/100) * (sink_mix/100)` BEFORE the single I-14 clamp,
+so the stage only ever attenuates and can never push the mix past the clamp.
+`dev <name>` (sink selection) is N-3b (one sink today); an unknown control is
+`EINVAL`, leaving the gain unchanged.
+
+The sink is SYSTEM-owned, so whole-sink authority is the two-axis rule of
+I-26/I-39 (NOCTURNE.md 6.8, I-46): a `volume` write is admitted iff the
+connection's peer is `PRINCIPAL_SYSTEM`, holds `CAP_HOSTOWNER`, holds the
+`CAP_AUDIO_GRAPH` clearance (the corvus-gated "audio-graph" level, N-3a-1), OR
+is console-attached (the "person at the keyboard" axis). The gate reads the
+peer FRESH via `SYS_SRV_PEER` on each write -- never an accept-time snapshot --
+because caps mutate: a clearance can be redeemed or expire after the connection
+opens. A dead/unknown peer fails closed.
+
+**This gate is per-DIRECT-connection, and that is load-bearing.** `t_srv_peer`
+resolves the peer of the SERVER-SIDE connection, so a write through joey's
+shared `/dev/nocturne` mount carries the MOUNTER's identity (SYSTEM), not the
+writing program's -- the Warp F1 / libtapestry idiom. Whole-sink authority is
+therefore meaningful for a client that connects DIRECTLY to `/srv/nocturne`
+(the volume OSD, the SDL backend): its own principal / clearance / console is
+what the gate sees. The shared mount is the mounter's audio session (namespace
+IS the capability, 6.8): a program that must not touch the whole sink is simply
+not given the shared mount -- it gets a direct or restricted connection. The
+witness (`/nocturne-vol-probe`, `tools/test-nocturne-volume.sh`) exercises both
+arms over direct connections: a SYSTEM write ACCEPTED + the grammar round-trip,
+and a user-principal child's write REFUSED with EPERM -- the discrimination a
+`return true` gate could not pass.
 
 ## The zero-copy ring (N-2b-1)
 

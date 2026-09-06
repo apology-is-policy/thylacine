@@ -1040,6 +1040,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nocturne-vol-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "nocturned"
 version = "0.1.0"
 dependencies = [

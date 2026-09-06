@@ -34,8 +34,9 @@ use libthyla_rs::sync::Mutex;
 use libthyla_rs::torpor;
 use libthyla_rs::weft as weftlib;
 use libthyla_rs::{
-    t_burrow_attach, t_burrow_detach, t_close, t_open, t_walk_create, t_weft_share,
-    t_weft_unshare, T_OPATH, T_OREAD, T_WALK_OPEN_FROM_ROOT,
+    t_burrow_attach, t_burrow_detach, t_close, t_open, t_srv_peer, t_walk_create,
+    t_weft_share, t_weft_unshare, TSrvPeerInfo, T_CAP_AUDIO_GRAPH, T_CAP_HOSTOWNER,
+    T_OPATH, T_OREAD, T_PRINCIPAL_SYSTEM, T_WALK_OPEN_FROM_ROOT,
 };
 
 use crate::snd::{Stats, BUFFER_BYTES, PERIODS, PERIOD_BYTES, RATE_HZ};
@@ -68,6 +69,7 @@ const P_INFO: u64 = 2;
 const P_AUDIO: u64 = 3;
 const P_NODES: u64 = 4;
 const P_NODES_NEW: u64 = 5;
+const P_VOLUME: u64 = 6;
 
 // Voice paths: VBIT | (id << 4) | leaf. Leaf 0 = the voice dir; 1/2/3 = the
 // audio/ctl/info files. VBIT (bit 40) is above the 6 fixed root paths AND above
@@ -118,9 +120,10 @@ fn vleaf(path: u64) -> u64 {
 const _: () = assert!(VBIT > ((u32::MAX as u64) << 4));
 
 // Root directory children (name, path, mode).
-const ROOT_CHILDREN: [(&[u8], u64, u32); 4] = [
+const ROOT_CHILDREN: [(&[u8], u64, u32); 5] = [
     (b"ctl", P_CTL, S_IFREG | 0o644),
     (b"info", P_INFO, S_IFREG | 0o444),
+    (b"volume", P_VOLUME, S_IFREG | 0o666),
     (b"audio", P_AUDIO, S_IFREG | 0o666),
     (b"nodes", P_NODES, S_IFDIR | 0o555),
 ];
@@ -264,6 +267,12 @@ pub struct Graph {
     next_id: u32,
     pub stats: Stats,
     pub started: bool,
+    /// The sink gain stage (N-3a): Plan 9 volume(3) controls, 0..=100 per
+    /// channel (100 = unity). Effective per-channel linear gain on the final
+    /// mix = (sink_audio/100) * (sink_mix/100) -- `audio` the PCM out level,
+    /// `mix` the master, the mixfs master*control shape.
+    sink_audio: [u32; 2],
+    sink_mix: [u32; 2],
 }
 
 /// The daemon's cross-thread state (N-2c). The graph lives behind a try-lockable
@@ -314,6 +323,8 @@ impl Graph {
             next_id: 1,
             stats: Stats::default(),
             started: false,
+            sink_audio: [100, 100],
+            sink_mix: [100, 100],
         }
     }
 
@@ -486,13 +497,19 @@ impl Graph {
                 *m += s as f32 * g;
             }
         }
+        // The sink gain stage (N-3a): scale each channel by its effective Plan 9
+        // volume(3) gain before the single I-14 clamp. 0..=100 -> 0.0..=1.0, so
+        // this only ever attenuates -- it can never push the mix past the clamp.
+        let g_l = (self.sink_audio[0] as f32 / 100.0) * (self.sink_mix[0] as f32 / 100.0);
+        let g_r = (self.sink_audio[1] as f32 / 100.0) * (self.sink_mix[1] as f32 / 100.0);
         for (i, m) in mix.iter().enumerate() {
-            let clamped = if *m > 32767.0 {
+            let s = *m * if i & 1 == 0 { g_l } else { g_r };
+            let clamped = if s > 32767.0 {
                 32767i16
-            } else if *m < -32768.0 {
+            } else if s < -32768.0 {
                 -32768i16
             } else {
-                *m as i16
+                s as i16
             };
             let b = (clamped as u16).to_le_bytes();
             buf[2 * i] = b[0];
@@ -570,7 +587,54 @@ impl Graph {
     }
 
     fn render_ctl(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(b"nocturne n-2a: mixed voices; write s16le stereo 48000 Hz to a voice's audio; ctl: flush; per-voice ctl: gain <percent>, flush, remove\n");
+        out.extend_from_slice(b"nocturne n-3a: mixed voices; write s16le stereo 48000 Hz to a voice's audio; root ctl: flush; per-voice ctl: gain <percent>, flush, remove; root volume: Plan 9 volume(3) grammar (audio/mix, 0..100)\n");
+    }
+
+    /// Render the sink gain in Plan 9 volume(3) grammar (0..100 per channel).
+    fn render_volume(&self, out: &mut Vec<u8>) {
+        let text = alloc::format!(
+            "audio {} {}\nmix {} {}\n",
+            self.sink_audio[0], self.sink_audio[1], self.sink_mix[0], self.sink_mix[1],
+        );
+        out.extend_from_slice(text.as_bytes());
+    }
+
+    /// Apply a Plan 9 volume(3) write to the sink gain. Each line is
+    /// `<control> <v>` (both channels) or `<control> <l> <r>`; controls are
+    /// `audio` and `mix`, values clamped to 0..=100. `dev <name>` (sink select)
+    /// is N-3b (single sink today). Returns false (=> EINVAL) on an unknown
+    /// control or a non-numeric value; an all-blank write is likewise EINVAL.
+    fn apply_volume(&mut self, data: &[u8]) -> bool {
+        let mut any = false;
+        for line in data.split(|&b| b == b'\n') {
+            let line = trim_line(line);
+            if line.is_empty() {
+                continue;
+            }
+            let mut it = line.split(|&b| b == b' ').filter(|t| !t.is_empty());
+            let ctl = match it.next() {
+                Some(c) => c,
+                None => continue,
+            };
+            let v0 = match it.next().and_then(parse_u32) {
+                Some(v) => v.min(100),
+                None => return false,
+            };
+            let v1 = match it.next() {
+                Some(t) => match parse_u32(t) {
+                    Some(v) => v.min(100),
+                    None => return false,
+                },
+                None => v0,
+            };
+            match ctl {
+                b"audio" => self.sink_audio = [v0, v1],
+                b"mix" => self.sink_mix = [v0, v1],
+                _ => return false,
+            }
+            any = true;
+        }
+        any
     }
 }
 
@@ -815,6 +879,22 @@ impl Conn {
         p9::build_rlerror(&mut self.out_buf, tag, code)
     }
 
+    /// I-46 / NOCTURNE.md 6.8: may this connection's peer set the SYSTEM-owned
+    /// sink volume? The two-axis rule (console-owner OR the `audio-graph`
+    /// clearance), plus the SYSTEM TCB and the CAP_HOSTOWNER admin axis. Read
+    /// FRESH per write via SYS_SRV_PEER (caps mutate), fail-closed on a
+    /// dead/unknown peer.
+    fn volume_authorized(&self) -> bool {
+        let mut info = TSrvPeerInfo::default();
+        if unsafe { t_srv_peer(self.handle, &mut info) } != 0 || info.alive != 1 {
+            return false;
+        }
+        info.principal_id == T_PRINCIPAL_SYSTEM
+            || (info.caps & T_CAP_HOSTOWNER) != 0
+            || (info.caps & T_CAP_AUDIO_GRAPH) != 0
+            || info.console == 1
+    }
+
     fn qid_of(path: u64) -> p9::Qid {
         p9::Qid {
             kind: if is_dir(path) { p9::P9_QTDIR } else { p9::P9_QTFILE },
@@ -1029,6 +1109,8 @@ impl Conn {
                 }
             } else if f.path == P_INFO {
                 g.render_info(&mut text);
+            } else if f.path == P_VOLUME {
+                g.render_volume(&mut text);
             } else {
                 g.render_ctl(&mut text);
             }
@@ -1171,6 +1253,25 @@ impl Conn {
             });
             self.defer = true;
             return Ok(0); // ignored: dispatch returns Disp::Deferred
+        }
+
+        if f.path == P_VOLUME {
+            // I-46 / NOCTURNE.md 6.8: the sink volume is SYSTEM-owned authority.
+            // The two-axis gate is read FRESH per write (caps mutate -- a
+            // clearance redeemed or expired after connect -- so an accept-time
+            // snapshot would be stale) and fails closed on a dead peer.
+            if !self.volume_authorized() {
+                return self.err(tag, p9::E_PERM);
+            }
+            let ok = {
+                let mut g = sh.graph.lock();
+                g.apply_volume(a.data)
+            };
+            return if ok {
+                p9::build_rwrite(&mut self.out_buf, tag, a.data.len() as u32)
+            } else {
+                self.err(tag, p9::E_INVAL)
+            };
         }
 
         self.err(tag, p9::E_PERM)

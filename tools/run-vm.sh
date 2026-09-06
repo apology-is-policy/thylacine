@@ -531,6 +531,13 @@ fi
 if [[ "${THYLACINE_RINGPROBE:-0}" == "1" ]]; then
     append_tokens+=("thylacine.ringprobe")
 fi
+# N-3a-2: the sink-volume gate witness (tools/test-nocturne-volume.sh runs
+# /nocturne-vol-probe -- the Plan 9 volume(3) grammar round-trip over a direct
+# /srv/nocturne conn, a SYSTEM write ACCEPTED, and a user-principal write
+# REFUSED). No wav capture; gated off by default.
+if [[ "${THYLACINE_VOLPROBE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.volprobe")
+fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends

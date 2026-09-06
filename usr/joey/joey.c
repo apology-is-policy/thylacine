@@ -11395,6 +11395,27 @@ int main(void) {
                     return 1;
                 }
                 t_putstr("joey: ring-voice-probe OK (Weft ring mapped + geometry valid + ring chord played; Nocturne N-2b)\n");
+            } else if (bootarg_has("thylacine.volprobe", 18)) {
+                // N-3a-2: the sink-volume gate witness. nocturne-vol-probe runs
+                // TWO arms over DIRECT /srv/nocturne connections -- a SYSTEM
+                // volume write ACCEPTED + the Plan 9 volume(3) grammar
+                // round-trip (the positive arm), and a user-principal child's
+                // write REFUSED with EPERM (the negative arm; without it a
+                // return-true gate would pass the positive alone). The parent
+                // needs CAP_SET_IDENTITY to stamp the child's principal, so it
+                // rides pouch_smoke_one_caps. No wav capture (a control-file
+                // test), so it conflicts with no chord probe -- but it takes
+                // its own boot arg for a clean, dedicated witness
+                // (tools/test-nocturne-volume.sh). FATAL once selected.
+                static const char vp_name[]   = "/bin/nocturne-vol-probe";
+                static const char vp_expect[] = "NOCTURNE-VOL-PROBE PASS";
+                if (pouch_smoke_one_caps(vp_name, sizeof(vp_name) - 1,
+                                         vp_expect, sizeof(vp_expect) - 1,
+                                         T_CAP_SET_IDENTITY) != 0) {
+                    t_putstr("joey: nocturne-vol-probe FAILED (the sink-volume gate; Nocturne N-3a-2)\n");
+                    return 1;
+                }
+                t_putstr("joey: nocturne-vol-probe OK (volume grammar + SYSTEM allow + user-principal deny; Nocturne N-3a-2)\n");
             } else {
                 // POST-PIVOT: bare ramfs names no longer resolve; the ramfs
                 // root is bound at /bin (#58), like /bin/corvus and /bin/login.
