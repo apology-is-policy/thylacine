@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**407 owned · 77 unowned · 484 files (84% owned) · ~20373 unswept lines.**
+**409 owned · 75 unowned · 484 files (84% owned) · ~19548 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30431 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -77,10 +77,10 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/pouch-hello | 0 | 22 | 3384 |
 | usr/halcyon | 0 | 2 | 1739 |
 | usr/quarry | 0 | 1 | 1028 |
-| arch | 34 | 4 | 971 |
 | usr/lib | 56 | 3 | 461 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
+| arch | 36 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
 | mm | 8 | 0 | 0 |
@@ -124,7 +124,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/halcyon/src/main.rs | 1275 |
 | usr/quarry/src/main.rs | 1028 |
-| arch/arm64/uart.c | 674 |
 | kernel/joey.c | 478 |
 | usr/halcyon/src/lib.rs | 464 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
@@ -154,7 +153,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
-| arch/arm64/uart.h | 151 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/ports/tyrquake/tyr-glquake-launcher.c | 134 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
