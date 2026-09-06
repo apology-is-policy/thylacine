@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-image de-stale: DISTRO D-3c -- the clientele generalizes from exec-only to exec + phenotype file-backed mmap, and the #194 file_limit stamp (past-EOF SIGBUS closes the uncharged demand-zero mint)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["5f58e86e"]
 touched:
   - sub-kernel-image
 established: []
