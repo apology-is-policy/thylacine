@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-pipe brought current: the single->multi-waiter lift (two Rendezes -> one poll_waiter_list, closing the EL0-shared crash), CNONBLOCK/EAGAIN, and the item-11->11c caught-note seam"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["5914ed9a"]
 touched:
   - sub-kernel-pipe
 established: []
