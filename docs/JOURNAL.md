@@ -683,6 +683,39 @@ both heavy teed-up docs now done.
 
 ---
 
+### Run 37 continued: 147-execve -- mostly covered, but it uniquely held one load-bearing cluster (a heap-corruption lesson included)
+
+With both teed-up heavies done, I took the LINEAGE execve reference next -- and it
+was the useful counter-example to the last two. 08-exception and 19-handles were
+zero-fold because the dossier had lapped the doc; a lazier reading would have
+assumed 147-execve was the same. It nearly is: the address-space swap
+(`sched_activate_addrspace`, the one TTBR0 move outside a context switch, with the
+two independent reasons its window runs IRQ-masked) is deep in sub-kernel-sched,
+the ASID-tag teardown soundness is in sub-kernel-asid, the close-on-exec bitmap in
+sub-kernel-handle, the #254 sigtab reset-in-place in sub-kernel-vivarium, the
+infallible `proc_exec_replace` commit in sub-kernel-proc. Eight dossiers, each
+carrying its half more completely than the doc.
+
+But one cluster lived only in the reference: the L-6a execve *core* -- the two
+front ends (`sys_execve_core` fed by the native concatenated-blob handler on one
+side and `viv_execve`'s Linux `char *[]` repack on the other), the two-pass I-30
+argv bound, the envp #140 decline-as-detector, and the one I most wanted kept: the
+caller-owns-the-blob double-free. That was a real heap corruption -- the pre-split
+body freed the argv blob inside what became the shared core, so carrying those
+frees across the split double-freed on *every* execve, and it surfaced as a
+mangled blob in an unrelated later spawn, nowhere near execve. The tell, recorded
+in the doc, is the reusable part: a comment stated the ownership rule before the
+body was adjusted to match it, so the comment licensed the bug. That belongs in a
+dossier's mechanism, not in a reference doc about to become a stub, so I folded
+the whole L-6a core into sub-kernel-exec -- code-grounded first (confirmed
+`sys_execve_core`, `VIV_LINUX_EXECVE`, the `_pad_envp` reject and the
+`/env`-preservation asymmetry are all live in the current tree, per the #157
+lesson from the chunk before). The lesson for the sweep: "mostly covered" is not
+"covered", and the residue is exactly where the load-bearing, hard-won findings
+hide. `a44662e1`, fixup `a99b06eb`, both mirrors. `74 absorbed / 83 live`.
+
+---
+
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
 
 **PL-5 -- the `pre` PRODUCER (`ea731dd8`).** PL-1b (run 34) built the `pre`
