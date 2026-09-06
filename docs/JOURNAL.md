@@ -184,10 +184,15 @@ before the durable fix even landed -- the tracked fix is the tested,
 reinstall-proof form, not a live unblock.
 
 **Then the absorption sweep, and it vindicated verify-before-stub on every file
-it touched.** Seven files absorbed (`c637e9a8` 22-asid; `7d1ecdfd` 26-vma +
+it touched.** Nine files absorbed (`c637e9a8` 22-asid; `7d1ecdfd` 26-vma +
 146-addrspace; `aa551eb4` 30-dev-spoor; `8db78248` 32-devproc; `6daac17b`
-20-burrow; `c6eed249` 25-fault-dispatcher; **54/103 absorbed, and the MEMORY AREA
-is 100% done** -- mmu/asid/vma/addrspace/burrow/fault), and the method was proven
+20-burrow; `c6eed249` 25-fault-dispatcher; `816b637d` 88-ninep; `1fb76ff4`
+33-devctl; **56/101 absorbed, the MEMORY AREA 100% done**
+-- mmu/asid/vma/addrspace/burrow/fault -- and the devices-fold set done), and the
+method held **9/9** -- every file had a real gap, a factual bug, a cross-layer
+atom, *or a mislabeled subject*: 88-ninep's title and citations pointed at the
+kernel 9P client but its subject was the *userspace* libthyla-rs codec (the
+title-isn't-the-subject trap, caught by reading). The method was proven
 -- including on cross-layer files: a read-only Explore agent as a **gap-FINDER**
 (not a completeness-confirmer -- I never trust a bare "COVERED"; I verify each
 flagged gap in-tree AND pin its true code-owner dossier), then fold each gap into
