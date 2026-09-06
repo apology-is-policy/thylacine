@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-08-15
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -131,6 +131,18 @@ record lands beside it as `bridge-at-fail`, and its `reason=` field
 separates `stdout-broken` (reader closed) from `socket-eof` (guest gone) —
 "the difference between chasing the relay and chasing expect."
 
+**The failure-time state probe asks the guest for its own account — the
+burned-retry decider.** A scenario may set a probe script that `lc_fail` runs,
+ONCE and non-recursively (`lc_fail_probe_run` clears itself before invoking, so it
+cannot re-enter through its own failures), at the moment its assertion missed and
+WHILE the VM is still alive. It is not a retry and not a tolerance: it changes
+nothing on the passing path. It exists because a burned retry is otherwise
+undecidable — pty-4 burned one (2026-08-16) at "^Z stops the foreground sleep",
+where the echo stopped at `sleep ` and `Stopped` never came with the guest ALIVE,
+and only the guest's own state at that instant separates a real regression from a
+timing miss. Same discipline as `vm-at-fail`, one layer in: `vm-at-fail` records
+THAT the guest was alive; the probe asks it WHY.
+
 **Four outcomes, and three of them are not the guest.**
 
 | Outcome | Counts as | Meaning |
@@ -238,6 +250,17 @@ the gate now runs `LS_CI_JOBS` scenarios at once, and every shared thing it
 touched became per-slot to allow it: the pool fixture, the QMP socket, the
 reaper. Measured on the full set: 4908 s serial → 2925 s wall.
 
+**The SECOND QMP monitor was a per-slot miss that read as a flake (#230).** The
+console screendump gate (G-4) needs a second monitor, and #230 gave `run-vm.sh`
+one at a fixed `build/qmp-gate.sock` — arriving AFTER the per-slot conversion, so
+at `JOBS=3` the first batch's three VMs raced on it (`run-vm.sh`'s `rm -f`-then-bind
+interleaved; the loser died at t=0 with "Failed to bind socket ... File exists").
+Three attempt-1 INFRA failures in one 37-scenario run, each retried green — the
+deterministic-collision-read-as-flake this section exists to prevent. It is now
+per-slot (`THYLACINE_QMP_SOCK2 = <slot>/qmp-gate.sock`, the same variable
+`test.sh`'s gate reads) and cleaned by `slot_release`. See [[sub-substrate-gates]]
+for the monitor's own side of #230.
+
 **Concurrency here is RAM-bound, not core-bound.** Each VM takes
 `THYLACINE_MEM_MIB`, so ~3 is the honest ceiling on an 8 GB host regardless
 of its 8 cores. Overcommitting swaps, and a swapping host "makes every
@@ -268,10 +291,13 @@ That is #59's cross-tree shootout reproduced *inside* one tree, presenting
 as "qemu GONE, guest healthy" — indistinguishable from a guest fault, and
 exactly the shape this project keeps mistaking for load.
 
-**In-tree concurrency with any other VM is refused up front (#217).** The
-`EXIT` trap is still tree-wide, so a VM this script never started — an SMP
-gate, a `test.sh` boot, a manual run — would die uncatchably on the way
-out, its log simply stopping: the misread-as-flake shape again. Refusal
+**In-tree concurrency with any other VM is refused up front (#217, refined by
+#224).** The `EXIT` trap is still tree-wide, so a VM this script never started —
+an SMP gate, a `test.sh` boot, a manual run — would die uncatchably on the way
+out, its log simply stopping: the misread-as-flake shape again. #224 is the same
+finding read from the reaper's side — the tree-wide reaper SIGKILLs boots it does
+not own — and the answer is the same: a named refusal beats a silent
+mutual-corruption race. Refusal
 beats narrowing, because in-tree concurrency is unsafe for a second reason
 anyway (both gates restore the same `pool.img`, and a restore under a live
 VM manufactures exactly the corruption the gates exist to detect), so a
@@ -379,4 +405,6 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
 
 ## Provenance
 
-[[chg-2026-08-01-substrate-sweep]].
+[[chg-2026-08-01-substrate-sweep]]; [[chg-2026-09-06-interactive-failprobe-slot230]]
+the fail-probe (the burned-retry decider), the #230 second-monitor per-slot
+isolation, and the #224 refinement of the in-tree refusal.
