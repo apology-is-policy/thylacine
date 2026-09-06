@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**85 absorbed · 72 live · 157 total.**
+**86 absorbed · 71 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -153,7 +153,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 54-sys-fd-syscalls.md | live | — |
 | 55-sys-attach-9p.md | absorbed | [[sub-kernel-ninep-attach]] |
 | 56-sys-mount.md | absorbed | [[chg-2026-05-14-p5-mount-syscall]], [[sub-kernel-territory]] |
-| 57-attach-probe.md | live | — |
+| 57-attach-probe.md | absorbed | [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-transport]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]] |
 | 58-corvus-syscalls.md | live | — |
 | 59-joey-from-ramfs.md | absorbed | [[sub-kernel-joey]], [[sub-stratum-boot]] |
 | 60-sys-spawn-wait.md | live | — |
