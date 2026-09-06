@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 87 unowned · 492 files (82% owned) · ~23473 unswept lines.**
+**405 owned · 87 unowned · 492 files (82% owned) · ~23478 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **69 files, ~31000 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -73,7 +73,7 @@ Excluded as harness and counted here rather than dropped: **69 files, ~31000 lin
 |---|---:|---:|---:|
 | usr/ports | 0 | 23 | 4678 |
 | usr/warp-prove | 0 | 1 | 4349 |
-| kernel | 116 | 22 | 3435 |
+| kernel | 116 | 22 | 3440 |
 | usr/pouch-hello | 0 | 22 | 3384 |
 | usr/nocturned | 0 | 3 | 2481 |
 | usr/halcyon | 0 | 2 | 1202 |
@@ -152,7 +152,7 @@ Excluded as harness and counted here rather than dropped: **69 files, ~31000 lin
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | kernel/extinction.c | 229 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
-| kernel/include/thylacine/devcap.h | 208 |
+| kernel/include/thylacine/devcap.h | 213 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |

@@ -112,7 +112,7 @@ use libthyla_rs::{
     t_cap_grant, t_cap_grant_clearance, t_chroot, t_close, t_explicit_bzero, t_fsync,
     t_getrandom, t_mlockall, t_open, t_poll, t_putstr, t_read, t_rename,
     t_set_dumpable, t_set_traceable, t_srv_accept, t_srv_peer, t_unlink, t_walk_create,
-    t_walk_open, t_write, TPollFd, TSrvPeerInfo, T_CAP_CHOWN, T_CAP_DAC_OVERRIDE,
+    t_walk_open, t_write, TPollFd, TSrvPeerInfo, T_CAP_AUDIO_GRAPH, T_CAP_CHOWN, T_CAP_DAC_OVERRIDE,
     T_CAP_HOSTOWNER, T_CAP_JIT, T_CAP_KILL, T_OPATH, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN,
     T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
@@ -1223,7 +1223,7 @@ const MAX_LEVEL_LEN: usize = 32;
 // A clearance level -- a built-in policy object at v1.0 (the coarse set scripture
 // names; no LEVEL_CREATE verb exists, so runtime authoring + per-level-file
 // persistence are a v1.x seam). A level's caps MUST be a subset of the kernel's
-// CAP_GRANTABLE_CLEARANCE ({DAC_OVERRIDE, CHOWN, KILL}) -- the kernel grant
+// CAP_GRANTABLE_CLEARANCE ({DAC_OVERRIDE, CHOWN, KILL, DEBUG, JIT, AUDIO_GRAPH}) -- the kernel grant
 // rejects anything else -- and only RE_AUTH levels are activatable at v1.0.
 struct ClearanceLevel {
     name: &'static [u8],
@@ -1266,6 +1266,20 @@ static CLEARANCE_LEVELS: &[ClearanceLevel] = &[
     ClearanceLevel {
         name: b"jit",
         caps: T_CAP_JIT,
+        auth_required: AUTH_REQ_RE_AUTH,
+        time_bound_ns: 0,
+    },
+    // audio-graph (Nocturne N-3a / I-46; docs/NOCTURNE.md 6.8): the whole-sink
+    // authority. Its holder may operate on the SYSTEM-owned sink beyond its own
+    // voices -- set the sink volume/default, insert a descant at the sink input
+    // (a system EQ), and tap the sink loopback. The consumer is nocturned (the
+    // sink owner), which checks the bit via SYS_SRV_PEER. Unlike jit this is NOT
+    // user-default-eligible: it is whole-sink, cross-owner authority, not a
+    // self-contained one, so 6.8 -- "a system-level program ... needs a grant" --
+    // means eligibility is admin-granted (VERB_CLEARANCE_GRANT), never seeded.
+    ClearanceLevel {
+        name: b"audio-graph",
+        caps: T_CAP_AUDIO_GRAPH,
         auth_required: AUTH_REQ_RE_AUTH,
         time_bound_ns: 0,
     },

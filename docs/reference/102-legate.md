@@ -185,7 +185,12 @@ cap-stamp + scope). `usr/corvus/src/main.rs`:
   `fs-admin` (`CAP_DAC_OVERRIDE | CAP_CHOWN` -- the only level with a live consumer
   today, via `perm_check`) + `supervisor` (`CAP_KILL`; its `/proc`-ctl consumer
   lands in A-4b -- inert until then, but it proves the mechanism with a second
-  cap). Both `auth_required = RE_AUTH`. A level's caps MUST be a subset of the
+  cap) + `jit` (`CAP_JIT`; the code-emission authority, CL-7k / I-42; USER-DEFAULT
+  since #163, see below) + `audio-graph` (`CAP_AUDIO_GRAPH`; the Nocturne
+  whole-sink authority, N-3a / I-46 -- consumer is `nocturned`, which gates the
+  sink `volume` / tap / descant-insert on it; admin-granted, NOT user-default,
+  because it is whole-sink cross-owner authority, not a self-contained one).
+  All `auth_required = RE_AUTH`. A level's caps MUST be a subset of the
   kernel `CAP_GRANTABLE_CLEARANCE` set. hw-dev / user-admin / clearance-admin
   (scripture's other coarse names) are NOT v1.0 levels -- their caps are not in
   `CAP_GRANTABLE_CLEARANCE`.

@@ -61,6 +61,7 @@ void test_devcap_clearance_one_shot(void);
 void test_devcap_clearance_cross_stripes(void);
 void test_devcap_clearance_valid_until(void);
 void test_devcap_clearance_kind_isolation(void);
+void test_devcap_clearance_audio_graph(void);
 
 // Test-only Proc construction. proc_alloc() draws a fresh stripes, so
 // each test Proc has a unique tag. The console-attached + cap setup is
@@ -440,6 +441,41 @@ void test_devcap_clearance_redeem_basic(void) {
         "marked LEGATE_ROOT");
     TEST_EXPECT_EQ(cap_pending_count(), 0, "pending consumed");
 
+    drop_test_proc(redeemer);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}
+
+void test_devcap_clearance_audio_graph(void) {
+    // N-3a-1: CAP_AUDIO_GRAPH (the Nocturne whole-sink clearance, I-46) is a
+    // REAL grantable clearance -- register admits it (so it is a member of
+    // CAP_GRANTABLE_CLEARANCE) and a redeem yields the bit in the redeemer's
+    // live caps, with the negative control one variable away (an ungranted
+    // peer never carries it -- the exact state nocturned's gate must deny).
+    cap_reset_table();
+    struct Proc *grantor  = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    struct Proc *redeemer = make_test_proc();   // caps = 0, no console
+    struct Proc *control  = make_test_proc();   // caps = 0, never granted
+    TEST_ASSERT(grantor && redeemer && control, "alloc");
+
+    TEST_EXPECT_EQ(control->caps & CAP_AUDIO_GRAPH, (u64)0,
+        "control never carries CAP_AUDIO_GRAPH");
+
+    u64 target = proc_stripes(redeemer);
+    // Register ADMITS CAP_AUDIO_GRAPH -> it is in CAP_GRANTABLE_CLEARANCE.
+    TEST_EXPECT_EQ(cap_register_clearance_grant_for_writer(
+        grantor, CAP_AUDIO_GRAPH, target, 0, 0x5E55),
+        (long)CAP_GRANT_CLEARANCE_WRITE_LEN, "audio-graph clearance grant ok");
+    // Redeem (no console -- a clearance, not the hostowner path) yields the bit.
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(redeemer, CAP_AUDIO_GRAPH),
+        (long)CAP_USE_WRITE_LEN, "audio-graph redeem ok (no console)");
+    TEST_EXPECT_NE(redeemer->caps & CAP_AUDIO_GRAPH, (u64)0,
+        "redeemer gained CAP_AUDIO_GRAPH");
+    // Discrimination: the control, one variable apart, is unchanged.
+    TEST_EXPECT_EQ(control->caps & CAP_AUDIO_GRAPH, (u64)0,
+        "control still lacks CAP_AUDIO_GRAPH");
+
+    drop_test_proc(control);
     drop_test_proc(redeemer);
     drop_test_proc(grantor);
     cap_reset_table();

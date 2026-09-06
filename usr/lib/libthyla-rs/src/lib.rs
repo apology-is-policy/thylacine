@@ -710,6 +710,7 @@ pub const T_CAP_CHOWN: u64           = 1 << 8;   // elevation-only; chown/chgrp-
 pub const T_CAP_KILL: u64            = 1 << 9;   // elevation-only; cross-identity kill override
 pub const T_CAP_DEBUG: u64           = 1 << 10;  // elevation-only; cross-Proc debug authority (I-39)
 pub const T_CAP_JIT: u64             = 1 << 11;  // elevation-only; code-Burrow creation (I-42)
+pub const T_CAP_AUDIO_GRAPH: u64     = 1 << 12;  // elevation-only; Nocturne whole-sink authority (I-46; NOCTURNE.md 6.8)
 
 // =============================================================================
 // Rights — MUST mirror RIGHT_* bits in kernel/include/thylacine/handle.h.

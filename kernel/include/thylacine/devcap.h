@@ -72,7 +72,12 @@ struct Spoor;
 // footing: a Proc that must emit code (an llvmpipe-backed GL app) acquires the
 // authority through a bounded legate rather than by inheritance, which is what
 // keeps I-42's "non-heritable" clause true of every path, not just rfork.
-#define CAP_GRANTABLE_CLEARANCE  (CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
+// CAP_AUDIO_GRAPH (Nocturne N-3a / I-46; docs/NOCTURNE.md §6.8) joins on the
+// SAME mask-driven footing -- a system-level audio program (a whole-sink EQ,
+// the sink-loopback recorder, a non-console volume setter) acquires the
+// whole-sink authority through a bounded legate, never by inheritance; no
+// devcap.c change is needed.
+#define CAP_GRANTABLE_CLEARANCE  (CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT | CAP_AUDIO_GRAPH)
 
 // RW-5 SA-2 -- pin the I-25 member-unelevated invariant at compile time. BOTH
 // grantable sets MUST be entirely elevation-only. The load-bearing consequence:

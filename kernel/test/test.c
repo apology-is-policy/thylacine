@@ -1041,6 +1041,7 @@ void test_devcap_clearance_one_shot(void);
 void test_devcap_clearance_cross_stripes(void);
 void test_devcap_clearance_valid_until(void);
 void test_devcap_clearance_kind_isolation(void);
+void test_devcap_clearance_audio_graph(void);
 void test_srvconn_create_destroy(void);
 void test_srvconn_roundtrip(void);
 void test_srvconn_ring_capacity(void);
@@ -2672,6 +2673,7 @@ struct test_case g_tests[] = {
     { "devcap.clearance_grant_gate_no_cap",   test_devcap_clearance_grant_gate_no_cap,   false, NULL },
     { "devcap.clearance_grant_bad_args",      test_devcap_clearance_grant_bad_args,      false, NULL },
     { "devcap.clearance_redeem_basic",        test_devcap_clearance_redeem_basic,        false, NULL },
+    { "devcap.clearance_audio_graph",         test_devcap_clearance_audio_graph,         false, NULL },
     { "devcap.clearance_self_restriction",    test_devcap_clearance_self_restriction,    false, NULL },
     { "devcap.clearance_redeem_beyond_grant", test_devcap_clearance_redeem_beyond_grant, false, NULL },
     { "devcap.clearance_one_shot",            test_devcap_clearance_one_shot,            false, NULL },

@@ -33,7 +33,7 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**34 dossiered · 51 missing · 85 modules.**
+**34 dossiered · 52 missing · 86 modules.**
 
 | module | spec note | state |
 |---|---|---|
@@ -49,6 +49,7 @@ reads as missing, which is the intended pressure.
 | debug_stop.tla | [[spec-debug-stop]] | dossiered |
 | fs_cache.tla | [[spec-fs-cache]] | dossiered |
 | handles.tla | [[spec-handles]] | dossiered |
+| handles_TTrace_1788722410.tla | `spec-handles-TTrace-1788722410` | **missing** |
 | loom.tla | [[spec-loom]] | dossiered |
 | loom_devgone.tla | [[spec-loom-devgone]] | dossiered |
 | loom_multishot.tla | [[spec-loom-multishot]] | dossiered |
