@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**87 absorbed · 70 live · 157 total.**
+**88 absorbed · 69 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -68,7 +68,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 114-netdev.md | live | — |
 | 115-pci-claim.md | absorbed | [[inv-i5]], [[sub-kernel-hwcap]] |
 | 116-devhw.md | absorbed | [[inv-i15]], [[inv-i34]], [[inv-i5]], [[sub-kernel-discovery]] |
-| 117-allowance.md | live | — |
+| 117-allowance.md | absorbed | [[sub-kernel-allowance]], [[sub-kernel-death]], [[sub-kernel-exec]], [[sub-kernel-hwcap]], [[sub-kernel-proc]], [[sub-libdriver-grant]] |
 | 118-libdriver.md | live | — |
 | 119-warden.md | live | — |
 | 12-hardening.md | live | — |

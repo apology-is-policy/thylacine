@@ -134,10 +134,10 @@ Generated — do not edit between the markers (`quaestor render`).
 
 - 2026-09-06 [[chg-2026-09-06-9p-identity-absorb]] — absorb docs/reference/100 (9P identity presentation, A-3): the cross-cutting security surface folded across 7 dossiers + a new n_uname trust-stamp seam, then multi-redirect stub -- 66 absorbed / 91 live
 - 2026-09-06 [[chg-2026-09-06-abi-errno-reconcile]] — abi-errno registry reconcile: +16 missing codes (the whole V-5 socket family + INTR/2BIG/CHILD/NOTTY/MFILE/NODEV/NOTDIR/ISDIR/LOOP), the stale self-counts (19->35 non-zero, 20->36 asserts), and the err.rs mirror analysis
+- 2026-09-06 [[chg-2026-09-06-allowance-doc-absorb]] — absorb docs/reference/117-allowance (I-34 hardware allowance): zero-fold; ref doc stale on the audit-F1 install-under-lock UAF
 - 2026-09-06 [[chg-2026-09-06-asid-absorb]] — docs/reference retirement: absorb 22-asid into sub-kernel-asid -- fold the missing no-per-Proc-free teardown-TLB-safety atom first, then stub-and-redirect (48 absorbed / 109 live)
 - 2026-09-06 [[chg-2026-09-06-attach-probe-doc-absorb]] — absorb docs/reference/57-attach-probe (mount-surface E2E test binary): zero-fold, test-probe redirect stub
 - 2026-09-06 [[chg-2026-09-06-builders-config-overlay]] — sub-substrate-builders de-stale: the clade builders must sync build-config.sh + configs/ (the build-configurator arc's silent dependency)
 - 2026-09-06 [[chg-2026-09-06-burrow-absorb]] — docs/reference retirement: absorb 20-burrow -- a CROSS-LAYER absorption: fold A1/A4 into sub-kernel-burrow + A2 (the AEGIS teardown ordering) into sub-kernel-vma, then multi-redirect stub (53 absorbed / 104 live)
 - 2026-09-06 [[chg-2026-09-06-burrow-borrowed]] — sub-kernel-burrow re-verified borrowed: the only post-update change is a comment-only round-3 refinement the dossier's prose already reflects
-- 2026-09-06 [[chg-2026-09-06-cons-consctl-verbs]] — sub-kernel-cons brought current: the three consctl surfaces since 2026-08-18 -- the beacon-tier verb, the serialsilent display-routing verb, and the C2-k1b termios projection
 <!-- generated:end -->
