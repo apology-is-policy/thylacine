@@ -4,7 +4,7 @@ type: chg
 title: "sub-net-clients de-stale: httpd's access-log --color default flips to auto (H-1c-2, real SYS_FD_DEVCLASS TTY check)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["a596d2d0"]
 touched:
   - sub-net-clients
 established: []
