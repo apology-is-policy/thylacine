@@ -4,7 +4,7 @@ type: chg
 title: "H-arc audit close, round 1 (batched: the zoom fix, H-4c, H-4d-1, H-4d-2a/2/3): the composed GPU arm's stale-slot expansion, the draining resize-ack re-offer, the reservation on claim-less creates, the floor at the latch, the menu seat requires hosting; the span ring lazy + packed, the obj-copy cache a map, Normal mode left on AltEnter; ptyhost declares its tier; the pts-slave 't' unit positive"
 date: 2026-09-06
 arc: arc-tapestry
-commits: []
+commits: ["839a966f"]
 touched: [sub-tapestryd, sub-halcyond, sub-kaua-term, sub-ptyhold, sub-mechanism-drivers]
 established: [adt-harc-r1]
 closed: [fnd-harc-r1-a1, fnd-harc-r1-a2]
