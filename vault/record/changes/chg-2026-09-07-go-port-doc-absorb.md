@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/133-go-port (GOOS=thylacine capability map): fold the Loom SETATTR truncate-only fail-close into sub-kernel-loom; fork is external"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["7c69d2a0"]
 touched: [sub-kernel-loom]
 established: []
 closed: []
