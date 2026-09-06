@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**54 absorbed · 103 live · 157 total.**
+**55 absorbed · 102 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -184,7 +184,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 85-pouch-stratumd-build.md | live | — |
 | 86-pouch-stratumd-boot.md | live | — |
 | 87-pouch-fstat-lseek.md | absorbed | [[sub-pouch-fs]] |
-| 88-ninep.md | live | — |
+| 88-ninep.md | absorbed | [[sub-libthyla-rs]] |
 | 89-hardware.md | live | — |
 | 90-u-test.md | live | — |
 | 91-utopia.md | live | — |

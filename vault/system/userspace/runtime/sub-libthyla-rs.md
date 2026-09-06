@@ -186,6 +186,29 @@ the ported libc's splitter, and this — each getting it wrong differently. That
 is the argument for the principle: when N layers each normalize, they each
 normalize wrong, and the fix is not to fix N implementations but to have one.
 
+### The 9P serving codec (`ninep`)
+
+`ninep` is the `no_std`/`no_alloc` 9P2000.L wire codec for a native program that
+*serves* 9P — the T-message parsers and R-message builders a `/srv` publisher
+dispatches (corvus is the canonical consumer; it retired its own private `p9`
+module onto this). It operates entirely on caller-supplied buffers: no I/O, no
+session state, no fid table, no tag allocation — those live in the server above
+it. Only the server side landed; the client side (T-builders + R-parsers) is a
+mechanical mirror deferred until a native program needs to make *outgoing* 9P
+calls.
+
+Its codec invariants are pure wire properties: `pack_X` then `unpack_X` is the
+identity; every unpack short-circuits to `Err(())` rather than over-reading a
+short buffer, and every pack rather than over-writing; `build_r*` writes a
+placeholder size, then the body, then back-patches the total (so a
+variable-length body needs no length known up front); and `parse_twalk` bounds
+the wname array twice (`nwname <= 16`, each name `<= 255`). The distinction worth
+stating is what these are **not**: the 9P *session* invariants — [[inv-i10]] tag
+uniqueness, [[inv-i11]] fid stability — are **server-state** invariants the
+dispatcher enforces *above* the codec, never codec invariants. The wire
+constants, message-type numbers, and struct layouts are the code's (`ninep.rs`),
+pinned by the pack/unpack that reads them rather than by `#[repr(C)]`.
+
 ### Two invariants are enforced by absence rather than by checking
 
 The hardware wrappers preserve hardware-handle non-transferability
