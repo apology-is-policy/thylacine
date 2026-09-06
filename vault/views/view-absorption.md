@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**101 absorbed · 56 live · 157 total.**
+**102 absorbed · 55 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -139,7 +139,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 40-uaccess.md | live | — |
 | 41-irq-bench.md | live | — |
 | 42-virtio-input.md | live | — |
-| 43-virtio-gpu.md | live | — |
+| 43-virtio-gpu.md | absorbed | [[sub-tapestryd]], [[sub-virtio-probes]] |
 | 44-9p-wire.md | absorbed | [[sub-kernel-ninep-wire]] |
 | 45-9p-session.md | absorbed | [[sub-kernel-ninep-session]] |
 | 46-9p-transport.md | absorbed | [[sub-kernel-ninep-transport]] |
