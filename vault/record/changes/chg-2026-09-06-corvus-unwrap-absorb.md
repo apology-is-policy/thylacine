@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 69-corvus-unwrap -- fold the 2 SECURITY crypto atoms into sub-corvus-crypto (FIPS-203 implicit-rejection => AEGIS-256 tag is the SOLE integrity gate; dataset+key_id AAD binding => rotation-safe/non-replayable) + 2 daemon minors into sub-corvus (C-7 gate before any crypto; runtime getrandom-fatal); dual-redirect stub (61 absorbed / 96 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["ce0a9906"]
 touched: [sub-corvus, sub-corvus-crypto]
 established: []
 closed: []
