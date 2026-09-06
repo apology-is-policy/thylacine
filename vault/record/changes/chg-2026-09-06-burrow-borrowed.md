@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-burrow re-verified borrowed: the only post-update change is a comment-only round-3 refinement the dossier's prose already reflects"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["d3c4312f"]
 touched:
   - sub-kernel-burrow
 established: []
