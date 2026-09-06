@@ -651,6 +651,38 @@ paragraphs above a Status section that says "LANDED". `1ecd1f2f`, fixup
 
 ---
 
+### Run 37 continued: 08-exception -- a partially-updated doc whose body still described a mechanism its own update had killed
+
+The second heavy of the pair, and it turned out zero-fold: the 425-line P1-F/P1-G
+exception reference is comprehensively superseded, and `sub-kernel-exception`
+carries every atom -- the vector table, the 288-byte frame with its offset
+asserts, the #107 return-tail ordering (preempt -> die -> notes -> stop, which is
+how I-24's "death is caught before any EL0 instruction" and I-39's "death wins
+over a stop" are made mechanical), the #713 eret-window mask rule -- more
+currently than the doc, and it even self-documents that the doc's vector table is
+stale. So the redirect was clean: uaccess for the R12 fault-recovery arm,
+sched-smp for the EL1h/I-21 model and the `thread_user_trampoline` half of #713,
+halls for the extinction primitive.
+
+What made the max-effort read worth it was the soundness-critical trio. The doc's
+#157 section walks the P4-Fix157 `SPSel` dance -- "the kernel's normal-mode steady
+state is `SPSel=0`", fix is `msr SPSel,#0; mov sp` -- and I very nearly folded it
+as a live mechanism. Reading the *current* `arch/arm64/userland.S` instead showed
+P5-el1h had reverted the kernel to *uniform* `SPSel=1` and replaced the dance with
+a direct `msr sp_el0, user_sp` write of the non-current bank; the dance is dead
+code, and the dossier is right to omit it. This is the hazard specific to a
+*partially* updated doc: a P5-el1h Status note was bolted onto the top, but the
+Phase-1 body underneath still narrated the superseded model, and the two
+contradict each other three paragraphs apart. For a soundness-critical atom the
+doc's own narrative of the mechanism is exactly what you cannot trust -- only the
+code says what ships. (#713's DAIF mask, by contrast, is still live and carried;
+and I-12 correctly is *not* claimed by the exception dossier, because the handler
+only diagnoses a W^X kernel-image fault while the enforcer is the PTE constructors
+in mmu.) `4a49f288`, fixup `f85d1599`, both mirrors. `73 absorbed / 84 live` --
+both heavy teed-up docs now done.
+
+---
+
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
 
 **PL-5 -- the `pre` PRODUCER (`ea731dd8`).** PL-1b (run 34) built the `pre`
