@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/85-pouch-stratumd-build (P6 stratumd cross-build recipe): clean redirect; the UNOWNED cross-toolchain file noted"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["b2f1c77c"]
 touched: []
 established: []
 closed: []
