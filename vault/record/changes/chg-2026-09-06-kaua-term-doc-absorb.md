@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/152-kaua-term (the per-tile terminal + record stream): clean redirect to sub-kaua-term + companions"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["c9e160a0"]
 touched: []
 established: []
 closed: []
