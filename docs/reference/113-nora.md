@@ -148,6 +148,18 @@ own copies rather than depend on the whole shell library. *(#124: pre-T2 these
 held the retired U-1 "Pale Fire" cold values — `#0e1018`/`#d8e4f4`/`#8898b4`, the
 exact residue UTOPIA-VISUAL.md §8 flags; corrected to Bonfire with T2.)*
 
+Since **s7a-1** the palette is a **runtime value**, not a set of constants: a
+`Palette` struct holds the 11 semantic roles (plus a derived debugger stopped-line
+tint), `BONFIRE` is the compiled default (nora's identity and the console
+fallback), and `active()` / `set_palette` hold the palette in force. Every style
+builder reads through `active()`, so an unthemed `nora` renders exactly as before.
+This is the seam by which `nora` under a Halcyon session follows the session's
+theme instead of hardcoding Bonfire: the session conveys its resolved role colours
+out of band and `nora` adopts them once at startup (**s7a-2**: `/env/HALCYON_PALETTE`
+plus a `nora` dotfile, precedence dotfile > /env > `BONFIRE`). `nora` is
+single-threaded and sets the palette before the first render, which is what makes
+the shared-global holder sound.
+
 ## Keybindings (the modal grammar)
 
 | Mode | Keys |

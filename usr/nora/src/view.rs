@@ -1118,12 +1118,12 @@ fn mode_color(mode: &Mode) -> Color {
         | Mode::Menu
         | Mode::DebugMenu
         | Mode::BufferPicker { .. }
-        | Mode::FilePicker { .. } => theme::EMBER,
+        | Mode::FilePicker { .. } => theme::active().ember,
         // Completion overlays Insert; keeping the accent means the cursor does
         // not change colour under the user just because a popup opened.
-        Mode::Insert | Mode::Completion { .. } => theme::GREEN,
-        Mode::Visual => theme::VIOLET,
-        Mode::Command(_) => theme::GOLD,
+        Mode::Insert | Mode::Completion { .. } => theme::active().green,
+        Mode::Visual => theme::active().violet,
+        Mode::Command(_) => theme::active().gold,
     }
 }
 
@@ -1195,13 +1195,13 @@ ccc", false);
         // Row 1 (line 2) is the marked one; its number is rust + bold.
         let marked = b.get(2, 1).unwrap();
         assert_eq!(marked.symbol, '2');
-        assert_eq!(marked.style.fg, theme::RUST);
+        assert_eq!(marked.style.fg, theme::active().rust);
         // Its NEIGHBOURS keep the ordinary gutter colour -- the tint must not
         // bleed to the whole buffer.
-        assert_ne!(b.get(2, 2).unwrap().style.fg, theme::RUST);
+        assert_ne!(b.get(2, 2).unwrap().style.fg, theme::active().rust);
         // And the line's TEXT is untouched (we recolor the gutter, not the code).
         assert_eq!(sym(&b, 4, 1), 'b');
-        assert_ne!(b.get(4, 1).unwrap().style.fg, theme::RUST);
+        assert_ne!(b.get(4, 1).unwrap().style.fg, theme::active().rust);
     }
 
     #[test]
@@ -1211,7 +1211,7 @@ bbb", false);
         ed.diags.set(alloc::vec![diag(0, DiagSeverity::Warning, "unused")]);
         let mut b = Buffer::empty(area());
         render(&ed, area(), &mut b);
-        assert_eq!(b.get(2, 0).unwrap().style.fg, theme::GOLD);
+        assert_eq!(b.get(2, 0).unwrap().style.fg, theme::active().gold);
     }
 
     #[test]
@@ -1275,7 +1275,7 @@ ccc", false);
         assert_eq!(sym(&b, 2, 4), 'O');
         assert_eq!(sym(&b, 3, 4), 'R');
         // chip bg is the ember accent.
-        assert_eq!(b.get(1, 4).unwrap().style.bg, theme::EMBER);
+        assert_eq!(b.get(1, 4).unwrap().style.bg, theme::active().ember);
     }
 
     #[test]
@@ -1310,8 +1310,8 @@ ccc", false);
         let mut b = Buffer::empty(area());
         render(&ed, area(), &mut b);
         // text starts at x=4; selected cols 0,1 -> x 4,5 carry the selection bg.
-        assert_eq!(b.get(4, 0).unwrap().style.bg, theme::VIOLET);
-        assert_eq!(b.get(5, 0).unwrap().style.bg, theme::VIOLET);
+        assert_eq!(b.get(4, 0).unwrap().style.bg, theme::active().violet);
+        assert_eq!(b.get(5, 0).unwrap().style.bg, theme::active().violet);
     }
 
     #[test]
@@ -1352,7 +1352,7 @@ ccc", false);
         // "f  open file picker" (the 'd' debug-submenu entry added one row).
         assert_eq!(sym(&b, 1, 3), 'f'); // the key
         assert_eq!(sym(&b, 4, 3), 'o'); // "open file picker" after "f  "
-        assert_ne!(b.get(1, 3).unwrap().style.bg, theme::EMBER); // no selection bar
+        assert_ne!(b.get(1, 3).unwrap().style.bg, theme::active().ember); // no selection bar
     }
 
     #[test]
@@ -1400,8 +1400,8 @@ ccc", false);
         let ed = Editor::new(Some("f".into()), "hello\nworld", false); // cursor (0,0)
         let mut b = Buffer::empty(area());
         render(&ed, area(), &mut b);
-        assert_eq!(b.get(5, 0).unwrap().style.bg, theme::BAR); // 'e', current line
-        assert_eq!(b.get(4, 1).unwrap().style.bg, theme::BG); // 'w', other line
+        assert_eq!(b.get(5, 0).unwrap().style.bg, theme::active().bar); // 'e', current line
+        assert_eq!(b.get(4, 1).unwrap().style.bg, theme::active().bg); // 'w', other line
     }
 
     #[test]
@@ -1412,12 +1412,12 @@ ccc", false);
         let mut b = Buffer::empty(area());
         let cur = render(&ed, area(), &mut b);
         assert_eq!(cur, (4, 0));
-        assert_eq!(b.get(4, 0).unwrap().style.bg, theme::EMBER);
+        assert_eq!(b.get(4, 0).unwrap().style.bg, theme::active().ember);
         assert_eq!(b.get(4, 0).unwrap().symbol, 'h');
         ed.handle_key(KeyEvent::char('i')); // -> Insert
         let mut b2 = Buffer::empty(area());
         render(&ed, area(), &mut b2);
-        assert_eq!(b2.get(4, 0).unwrap().style.bg, theme::GREEN);
+        assert_eq!(b2.get(4, 0).unwrap().style.bg, theme::active().green);
     }
 
     #[test]
@@ -1429,10 +1429,10 @@ ccc", false);
         ed.open_buffer(Some("beta".into()), "y"); // 2 buffers, active = beta (1)
         let mut b = Buffer::empty(big);
         render(&ed, big, &mut b);
-        assert_eq!(b.get(0, 0).unwrap().style.bg, theme::SLATE); // strip / inactive tab
+        assert_eq!(b.get(0, 0).unwrap().style.bg, theme::active().slate); // strip / inactive tab
         assert_eq!(sym(&b, 1, 0), 'a'); // " alpha "
         assert_eq!(sym(&b, 9, 0), 'b'); // " beta " after the 7-cell tab + 1 gap
-        assert_eq!(b.get(9, 0).unwrap().style.bg, theme::EMBER); // active = ember
+        assert_eq!(b.get(9, 0).unwrap().style.bg, theme::active().ember); // active = ember
         assert_eq!(sym(&b, 2, 1), '1'); // text region starts on row 1 now
     }
 
@@ -1465,7 +1465,7 @@ ccc", false);
         let mut b = Buffer::empty(area());
         render(&ed, area(), &mut b);
         assert_eq!(sym(&b, 5, 0), 'f');
-        assert_eq!(b.get(5, 0).unwrap().style.fg, theme::SLATE);
+        assert_eq!(b.get(5, 0).unwrap().style.fg, theme::active().slate);
     }
 
     #[test]
@@ -1475,7 +1475,7 @@ ccc", false);
         let mut b = Buffer::empty(area());
         render(&ed, area(), &mut b);
         assert_eq!(sym(&b, 5, 0), 'f');
-        assert_eq!(b.get(5, 0).unwrap().style.fg, theme::FG);
+        assert_eq!(b.get(5, 0).unwrap().style.fg, theme::active().fg);
     }
 
     #[test]
@@ -1489,8 +1489,8 @@ ccc", false);
         let mut b = Buffer::empty(area());
         render(&ed, area(), &mut b);
         // gutter 4: 'b'@4, ' '@5, 'b'@6.
-        assert_eq!(b.get(6, 0).unwrap().style.bg, theme::VIOLET); // the 2nd match is selected
-        assert_ne!(b.get(5, 0).unwrap().style.bg, theme::VIOLET); // the gap is not
+        assert_eq!(b.get(6, 0).unwrap().style.bg, theme::active().violet); // the 2nd match is selected
+        assert_ne!(b.get(5, 0).unwrap().style.bg, theme::active().violet); // the gap is not
     }
 
     #[test]
@@ -1502,7 +1502,7 @@ ccc", false);
         render(&ed, area(), &mut b);
         assert_eq!(sym(&b, 4, 3), 'h');
         assert_eq!(sym(&b, 5, 3), 'i');
-        assert_eq!(b.get(4, 3).unwrap().style.fg, theme::DIM);
+        assert_eq!(b.get(4, 3).unwrap().style.fg, theme::active().dim);
     }
 
     #[test]
@@ -1530,7 +1530,7 @@ ccc", false);
         render(&ed, area(), &mut b);
         // "X X": carets at (0,1) and (0,3). The non-primary caret paints a moss
         // (Insert accent) block at col 3 -> x = gutter(4) + 3 = 7.
-        assert_eq!(b.get(7, 0).unwrap().style.bg, theme::GREEN);
+        assert_eq!(b.get(7, 0).unwrap().style.bg, theme::active().green);
     }
 
     // -- the language-server overlays (8e-2c) ------------------------------
@@ -1718,12 +1718,12 @@ ccc", false);
         let corner_x = 60 - SIDEBAR_W;
         let mut b = Buffer::empty(a);
         render(&ed, a, &mut b);
-        assert_eq!(b.get(corner_x, 0).unwrap().style.fg, theme::BORDER);
+        assert_eq!(b.get(corner_x, 0).unwrap().style.fg, theme::active().border);
         // Tab focuses Variables -> its border goes ember.
         ed.handle_key(KeyEvent::new(KeyCode::Tab));
         let mut b2 = Buffer::empty(a);
         render(&ed, a, &mut b2);
-        assert_eq!(b2.get(corner_x, 0).unwrap().style.fg, theme::EMBER);
+        assert_eq!(b2.get(corner_x, 0).unwrap().style.fg, theme::active().ember);
     }
 
     // -- the navigable dashboard (8f-2b-1) ---------------------------------
@@ -1778,10 +1778,10 @@ ccc", false);
         let mut b = Buffer::empty(a);
         render(&ed, a, &mut b);
         let y = find_row(&b, a, "f1").expect("frame #1 shown");
-        assert!(row_has_bg(&b, a, y, theme::EMBER), "selected row is ember");
+        assert!(row_has_bg(&b, a, y, theme::active().ember), "selected row is ember");
         // The other frames are not highlighted.
         let y0 = find_row(&b, a, "f0").expect("frame #0 shown");
-        assert!(!row_has_bg(&b, a, y0, theme::EMBER));
+        assert!(!row_has_bg(&b, a, y0, theme::active().ember));
     }
 
     #[test]
@@ -1794,7 +1794,7 @@ ccc", false);
         let mut b = Buffer::empty(a);
         render(&ed, a, &mut b);
         let y = find_row(&b, a, "f0").expect("a frame is shown");
-        assert!(!row_has_bg(&b, a, y, theme::EMBER));
+        assert!(!row_has_bg(&b, a, y, theme::active().ember));
     }
 
     #[test]
@@ -1957,7 +1957,7 @@ ccc", false);
         (0..a.width).any(|x| {
             (0..a.height).any(|y| {
                 b.get(x, y)
-                    .map(|c| c.symbol == '\u{2500}' && c.style.fg == theme::EMBER)
+                    .map(|c| c.symbol == '\u{2500}' && c.style.fg == theme::active().ember)
                     .unwrap_or(false)
             })
         })
@@ -1987,8 +1987,8 @@ ccc", false);
         // Order: Go frames, then the divider, then the kernel frames.
         assert!(y_go < y_div && y_div < y_k, "the divider sits at the boundary");
         // The Go frame is body-text; the kernel frame is dim.
-        assert_eq!(hash_fg(&b, a, y_go), Some(theme::FG));
-        assert_eq!(hash_fg(&b, a, y_k), Some(theme::DIM));
+        assert_eq!(hash_fg(&b, a, y_go), Some(theme::active().fg));
+        assert_eq!(hash_fg(&b, a, y_k), Some(theme::active().dim));
     }
 
     #[test]
@@ -2014,9 +2014,9 @@ ccc", false);
         let mut b = Buffer::empty(a);
         render(&ed, a, &mut b);
         let y_k = find_row(&b, a, "ksym0").expect("first kernel frame");
-        assert!(row_has_bg(&b, a, y_k, theme::EMBER), "the kernel frame is selected");
+        assert!(row_has_bg(&b, a, y_k, theme::active().ember), "the kernel frame is selected");
         let y_div = find_row(&b, a, "kernel").expect("the divider");
-        assert!(!row_has_bg(&b, a, y_div, theme::EMBER), "the divider is not selectable");
+        assert!(!row_has_bg(&b, a, y_div, theme::active().ember), "the divider is not selectable");
     }
 
     // -- the stopped-line marker (debugger follow + highlight) -------------
