@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/58-corvus-syscalls (5 hardening syscalls, P5 scaffold): multi-redirect, two stale framings named (CSPRNG + NOTRACE superseded)"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["d4df899a"]
 touched: []
 established: []
 closed: []
