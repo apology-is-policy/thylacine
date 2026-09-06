@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/144-prowl (the scheduler-aware process monitor): clean redirect to sub-prowl (ahead of the doc)"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["cd6006ae"]
 touched: []
 established: []
 closed: []
