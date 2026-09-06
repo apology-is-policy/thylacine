@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/KAUA-TERM.md"]
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -80,9 +80,11 @@ The number of rows a chunk yields is the VT's to decide, not the chunk's size:
 ~30K rows (tens of MiB of cells) before a single byte is written. Two bounds
 close this, and both had to be found the hard way (rounds 2-3):
 
-- `scroll_cap()` = `min(MAX_FRAME/2, SCROLL_ACC_BYTES = 256 KiB) / per_row`
-  bounds ONE `ScrollOff` so it fits the consumer's 4 MiB decoder AND the
-  producer's own heap (a record is held as cells, serialized, then framed —
+- `scroll_cap()` = `min(MAX_FRAME/2, SCROLL_ACC_BYTES = 256 KiB) / per_row`,
+  where a row costs `cols * size_of::<Cell>()` — the in-memory `Cell`, not the
+  wire cell (B-F1/F2), so the cap bounds the actual heap the accumulated rows
+  occupy. It bounds ONE `ScrollOff` so it fits the consumer's 4 MiB decoder AND
+  the producer's own heap (a record is held as cells, serialized, then framed —
   three copies).
 - `feed_into`'s sink ships (serialize + write + clear `out`) whenever
   `cells_in(out)` — ScrollOff rows PLUS CellDiff entries — reaches

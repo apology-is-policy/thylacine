@@ -31,7 +31,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: []
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md"]
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -142,13 +142,17 @@ obj/em/hdr markup over its cell grid without a second Beacon parser: the produce
 stamps each `vt::Cell` with the serial of the last Beacon frame ([[sub-lib-vt]]'s
 span mechanism), and the tile keeps a `SpanMap` -- an 8192-entry ring of `serial
 -> SpanTag { block, obj, em, hdr }` noted as it feeds the SAME forwarded frames in
-order (R5: one parser, and it is the console's). A cell resolves its presentation
-from its serial however late it scrolls off and across the grid's zone straddle;
-a serial that fell off the ring resolves to no span (the bound is reached only by
-a repainting TUI, which lives on the alt screen where no span is read).
-`push_scrolled_rows(rows, &spans)` carries the tags into scrollback, and
-`local_obj` copies the open block's obj into the landing block so a scrolled row
-keeps its reference. `Transcript::{span_tag, block_by_id, obj_in_block}` and
+order (R5: one parser, and it is the console's). The ring allocates **lazily**
+(16-byte `SpanSlot`s, `SPAN_MAP_BYTES` = 128 KiB): 0 bytes for a native tile that
+never sees a Beacon frame, `SPAN_MAP_BYTES` once for a rich one -- and it sits
+OUTSIDE the scrollback cost budget, so it is not double-counted against it (H-arc
+round-1 B-F4). A cell resolves its presentation from its serial however late it
+scrolls off and across the grid's zone straddle; a serial that fell off the ring
+resolves to no span (the bound is reached only by a repainting TUI, which lives on
+the alt screen where no span is read). `push_scrolled_rows(rows, &spans)` carries
+the tags into scrollback, and `local_obj` copies the open block's obj into the
+landing block -- through a `BTreeMap` remap cache (B-F3) -- so a scrolled row keeps
+its reference. `Transcript::{span_tag, block_by_id, obj_in_block}` and
 `Tile::{grid_runs, grid_run, grid_run_obj, grid_hit}` (the GRID_KEY render arms)
 are the readers; `select::flatten_with_grid` folds the grid tail into selection as
 a `GRID_BLOCK`.
@@ -159,7 +163,9 @@ A session tile spawns its `kaua-term` with `--beacon rich`, so the shell it host
 emits the frames the SpanMap reads. Beyond hosting, the tile carries a modal
 interaction of its own. `Mode` is `Insert` (keys flow to the pts) or `Normal` (a
 selection state): Esc enters Normal, but only when the VT is on its normal screen
--- a full-screen app owns Esc. `normal_input` is the navigator -- the console's
+-- a full-screen app owns Esc -- and a `Record::Mode(AltScreen)` (the app switching
+TO full-screen) leaves Normal on the spot (B-F5), so a selection cannot outlive the
+screen it was made on. `normal_input` is the navigator -- the console's
 Normal keys minus yank/paste, moving a cursor that starts on the grid's prompt row
 with the view following it (`render(.., &mut scroll_up, Option<Mark>)`: the
 selection band and the ember underline). `Sel` is the selection; `Tile.frame`

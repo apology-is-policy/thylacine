@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 5", "docs/PTY-DESIGN.md section 10"]
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -44,6 +44,13 @@ session ends (or on any later error); neither `seed_winsize` nor
 `spawn_on_slave` closes it. `mint`'s own failure paths close the just-opened
 fd before returning -- so a caller closes `mfd` only after a successful mint,
 never after an `Err` from mint.
+
+**Both hosts declare their render tier through one writer (H-4d).**
+`declare_beacon(tier)` is the shared consctl writer both pts hosts (ptyhost and
+kaua-term) use to advertise a Beacon tier to the console; `relayed_tier()` returns
+what THIS relay's own sink renders, so a nested host declares the tier it will
+actually relay rather than guessing one. Keeping the writer in the crate is what
+stops the two hosts drifting apart on the consctl grammar.
 
 ## Mechanism
 

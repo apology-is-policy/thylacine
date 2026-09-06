@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md", "docs/LOOM.md"]
 created: 2026-08-04
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -38,7 +38,10 @@ run every boot*.
 **The session host** takes a program (defaulting to the shell) and hosts
 it on a fresh pseudoterminal, relaying between its own standard input and
 output — the console when launched from a console shell, or an outer
-pseudoterminal when nested — and the master side.
+pseudoterminal when nested — and the master side. Before the mint it declares
+its render tier via `ptyhold::declare_beacon(relayed_tier())` (C-F1), so the tier
+the aurora console renders is relayed down to the nested session rather than lost
+at the hop; `pty-4` witnesses `beacon cells inherited (pts host)`.
 
 **The stress program** runs after the root pivot, so the disk filesystem
 is live and the ring's payload operations actually dispatch. Three phases:
