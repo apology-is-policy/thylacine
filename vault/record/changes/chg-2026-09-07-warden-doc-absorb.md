@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/119-warden (the Menagerie hardware broker, I-34): fold the UNOWNED menagerie-probe (the I-34 grant proof) into sub-menagerie-leaves"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["c67bcd8a"]
 touched: [sub-menagerie-leaves]
 established: []
 closed: []
