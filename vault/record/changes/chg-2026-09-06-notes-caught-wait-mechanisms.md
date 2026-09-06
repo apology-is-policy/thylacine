@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-notes brought current: the caught-note interruptible wait (item 11 + N-3 guard), the siglongjmp in_handler clear (bug-2), and the phenotype handler-time mask"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["053b1220"]
 touched:
   - sub-kernel-notes
 established: []
