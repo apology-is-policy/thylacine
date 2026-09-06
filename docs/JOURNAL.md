@@ -25,7 +25,7 @@ needed the operator.
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
 
-**PL-5 -- the `pre` PRODUCER (`*(pending)*`).** PL-1b (run 34) built the `pre`
+**PL-5 -- the `pre` PRODUCER (`ea731dd8`).** PL-1b (run 34) built the `pre`
 RENDER but landed host-tested only: a `pre` block needs a producer to witness it
 on the lever. PL-5 is that producer -- and the resume note's one-line plan ("wrap
 `la`'s box in `pre`") was porting against the wrong content model.
