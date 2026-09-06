@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/139-tapestryd (I-40 compositor): zero-fold, dossier is larger + ahead of the doc"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["adae2620"]
 touched: []
 established: []
 closed: []
