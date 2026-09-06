@@ -578,19 +578,6 @@ impl VirtioSnd {
         if self.started {
             return Ok(());
         }
-        // Do not prime while the device still owns TX entries from a prior stream:
-        // a late completion for an old post would land on a freshly primed slot
-        // (its in-flight bit re-set) and double-post it. The posted-minus-reaped
-        // count (avail vs used), not the in-flight bitmask, is the ground truth.
-        // Drain the used ring; if it cannot be cleared, refuse rather than prime
-        // into a dirty ring.
-        if self.tx_avail_idx != self.tx_used_idx {
-            self.reap_without_repost();
-            if self.tx_avail_idx != self.tx_used_idx {
-                say!("nocturned: TX ring not drained before start (avail {} used {})", self.tx_avail_idx, self.tx_used_idx);
-                return Err(Error::Hardware);
-            }
-        }
         let mut buf = [0u8; PERIOD_BYTES];
         for s in 0..PERIODS {
             let real = next_period(&mut buf);
