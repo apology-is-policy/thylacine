@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/27-exec (P3-Eb kernel-internal exec / exec_setup): zero-fold, 6-surface redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["1e3dfb62"]
 touched: []
 established: []
 closed: []
