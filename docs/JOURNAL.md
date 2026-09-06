@@ -23,6 +23,86 @@ needed the operator.
 
 ---
 
+## Run 34 (2026-09-06, Opus 4.8, effort max): the Halcyon stabilization arc opens -- proportional-live ratified into scripture, then the Beacon `pre` op and Genera typography
+
+**Where it sits.** After the H-arc audit close (Run 31 part 4, `454ecde9`), the
+operator booted Halcyon interactively for the first time, filed observations
+(`thylacine-aux/docs/Found issues.txt` + screenshots s1-s7 + genera.gif) and
+directed: stabilize before more features. A design conversation ratified a
+sharpened model, which this run landed as scripture-first, then began
+implementing. Tip `116d7055`, both mirrors.
+
+**The design (ratified by the operator).** Halcyon is mainly PROPORTIONAL -- the
+prompt included. Monospace only where character-grid alignment is essential: the
+editor (nora) and box-drawing / column-exact output (`la`), each set apart like a
+Markdown code fence. The clean seam is the existing tile mode boundary: normal
+screen -> the proportional live transcript; alt screen -> the raw mono grid. This
+RETIRES the KT-1.5 "mono live grid tail + proportional scrollback" split for the
+normal screen (the source of the operator's s1/s5/s6: fresh output rendered mono,
+became proportional only on scrollback, and the two halves of one document
+disagreed on metric AND affordance). North star: a professionally typeset
+document that is also interactive and a shell.
+
+**What landed, in order.**
+- **The scripture commit (`a95d437c`, docs only).** HALCYON.md section 14.13 (the
+  proportional-live tile model, superseding 14.11.3's composition for the normal
+  screen), section 3 (the two mono cases + code-block chrome + the Genera type
+  discipline); BEACON.md the `pre` op (section 3 / 12.1 / 12.2 / 11, a v1 additive
+  amendment). The op is named `pre`, not `mono`, because BEACON never names a face
+  -- `pre` names a content PROPERTY (whitespace-significant), the stylesheet picks
+  mono + chrome. Rendering is a SINK choice: the pts/producer is unchanged (a
+  fixed-width grid; the shell sees an ordinary terminal); proportional-ness is
+  purely how halcyond PAINTS the grid in normal mode. The core mechanism (for
+  PL-3/PL-4) is logical-line reconstruction: the VT's per-row soft-wrap flag rides
+  the wire, halcyond joins soft-wrapped runs and re-wraps at word boundaries --
+  dissolving the mid-word wrap (s5). Open at implementation: the winsize policy
+  (keep real cols + soft-wrap join, vs advertise wide cols).
+- **PL-1a -- the Beacon `pre` op (`de753061`).** wire.rs Op::Pre + sink.rs
+  pre_open/pre_close/pre(s); beacon host 37/37 (a `pre` with an inline obj
+  round-trips, strip yields the exact none-tier payload).
+  **The wrong turn, and what caught it:** the beacon host test is host-only and
+  never compiles CONSUMERS. Adding Op::Pre broke halcyond's `open_op`/`close_op`
+  -- both match Op EXHAUSTIVELY with no wildcard, so a new variant fails to
+  compile. Host-green but build-RED. The USERSPACE BUILD caught it (point_op
+  already had a `_`; only the two paired-op matches broke). The lesson: for a
+  vocabulary addition, the build -- not the host test -- is the real gate; the
+  commit folds in `Op::Pre => {}` arms and says so.
+- **PL-2 -- Genera typography (`116d7055`).** face_for remapped: bold RESERVED for
+  strong (extreme emphasis) + foreign SGR bold; emphasis and headings go ITALIC;
+  heading rank stays size (px_for, unchanged). Retires bold headings (the
+  operator's genera.gif note). The Oblique face was vendored Sep 1 "for the day
+  the stylesheet takes an italic role" -- that day arrived. To keep the
+  proportional faces contiguous in faces[] (glyph indexes faces[face] directly),
+  FACE_MONO renumbered 2 -> 3 (a sentinel, special-cased; safe because every mono
+  check is the constant, never a literal 2). halcyond lib 108/108.
+  **A test earned its keep:** the new Genera assertion first FAILED on "foreign
+  SGR bold stays bold" -- because an UN-annotated cell returns FACE_MONO *before*
+  the bold check (un-annotated foreign output is mono today). The code was right;
+  my assertion was wrong. Fixed to document the nuance (and it is forward-correct
+  for PL-4, when un-annotated goes proportional).
+
+**A cross-track bug, root-caused and owned end to end.** The first PL-1a commit was
+blocked by the pre-commit vault-lint: `view-spec-coverage.md` stale. Root cause: 77
+gitignored `specs/*_TTrace_*.tla` (TLC counterexample dumps) sat on disk, and
+`quaestor render` scanned the DIRECTORY (not git), miscounting them as 77 missing
+modules -- a divergence from the project convention (`.gitignore:29`, CLAUDE.md's
+`grep -v TTrace`). Not mine, but ours: I removed the junk to unblock, then flagged
+the vault peer with the precise root cause (yip call 0057). They fixed quaestor
+(`bb14a0dc`: the scan now skips the dumps) with a discriminating regression
+(`TestSpecCoverageExcludesTTraceDumps`, fail-pre/pass-post) and pushed. The blocker
+is gone for every track.
+
+**What is open (the arc continues).** PL-1b (the halcyond `pre` render -- mono +
+code-block chrome; non-trivial: the 16-byte SpanSlot has no room for a `pre` bit,
+so the flag rides EM_PRE or a block Item, and the chrome extent needs care) --
+deferred as needing fresh design. PL-3 + PL-4 (the soft-wrap wire bit + the
+proportional-live normal mode) -- the keystone and the operator's MAIN pain, a
+large multi-crate render change best given fresh context. PL-5 (`la` fences its
+box output in `pre`). Owed gate: the graphical E2E for PL-2 (a stylesheet change,
+host-verified via face_for + face_count; pushed with the gate deferred to the
+batched arc gate, per its commit body). Full plan + the screenshot findings:
+`memory/project_halcyon_stabilization.md`.
+
 ## Run 33 (vault absorption cont., 2026-09-06, Opus 4.8, effort max): the shell (parser + eval), the coreutils-filters recount, and the Image-cache half of DISTRO D-3
 
 **Where it sits.** The continuation of Run 32 across a self-compaction (Run 32
