@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/96-fs-mutation (FS-mutation syscalls): zero-fold, multi-redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["8e7c8575"]
 touched: []
 established: []
 closed: []
