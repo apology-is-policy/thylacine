@@ -351,7 +351,12 @@ func renderSpecCoverage(reg *Registry) string {
 	var rows []row
 	var have, missing int
 	for _, e := range ents {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tla") {
+		// *_TTrace_*.tla are gitignored TLC counterexample dumps (.gitignore:29),
+		// not modules -- the committed inventory is `ls specs/*.tla | grep -v
+		// TTrace`. Scanning the directory would otherwise count each leftover dump
+		// as a missing module and flip this view stale, blocking every commit on
+		// every track until the junk is hand-removed.
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tla") || strings.Contains(e.Name(), "_TTrace_") {
 			continue
 		}
 		id := specNoteID(e.Name())
