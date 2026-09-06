@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 97-corvus-identity-db -- fold 2 SECURITY atoms into sub-corvus (identity.db is NON-secret vs the ciphertext wrap = the C-24 boundary; UPG shared monotonic id-alloc refuses >= PRINCIPAL_SYSTEM = I-22, persisted/never-reused) + 2 minors (wrap-before-record persist ordering; dropped-wrap fail-closed on load); single-redirect stub (62 absorbed / 95 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["d8b08570"]
 touched: [sub-corvus]
 established: []
 closed: []
