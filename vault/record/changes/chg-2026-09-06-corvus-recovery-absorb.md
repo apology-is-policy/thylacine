@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 105-corvus-recovery (the heaviest) -- author sub-corvus-mint (the 3rd orphan: tools/corvus-mint, host system-identity minter) + fold 4 SECURITY atoms into sub-corvus (RECOVER(user) unauthenticated; ADMIN_ELEVATE real crypto not byte-compare; twin-wrap crash-safety; bounded provisioning window); triple-redirect stub (63 absorbed / 94 live, +1 new dossier sub-corvus-mint)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["e9810d3f"]
 touched: [sub-corvus]
 established: [sub-corvus-mint]
 closed: []
