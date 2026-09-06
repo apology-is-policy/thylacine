@@ -177,6 +177,40 @@ a minority). Session render: ls-gfx-session PASS [28s]. What caught the wrong
 turn: reading the CODE, not the resume note (a port against the wrong content
 model lands hollow -- bug_h4d2).
 
+**Then the batched PL-arc audit, closed clean via two rounds (across a
+self-compaction).** Fable was credit-exhausted, so both rounds ran on the Opus
+fallback at max -- context-independent, findings re-derived from the code -- and
+since the holotype-reviewer subagent_type was unavailable this session, they ran
+as general-purpose + `model: opus`. R1 DIRTY on ONE P0: `freeze_open` finalized an
+open `table` at a block boundary but had NO arm for an open `pre`, so a `pre`
+spanning a block-freeze committed its `Item::Pre` into the FRESH block (0 styles)
+carrying the old block's style indices, and `layout_block`'s `b.styles[sid]`
+(layout.rs:473) panicked OOB -- a console crash reachable from an untrusted tile
+stream (a ScrollOff, or a tile-split's `set_max_cost`, between pre-open and
+pre-close). Fixed by an inline pre-finalization mirroring the table arm; a pre
+spanning the freeze splits. The dirty close obliged a re-round on the fix.
+
+**The re-round came back CLEAN (0/0/0/2 P3), and my parallel self-audit and the
+prosecutor converged on the same crux from opposite ends:** the fix is sound
+because the pre finalizes into the one block whose styles vec its cells' indices
+name -- `self.open` is reassigned in exactly one place (the `mem::replace`), and
+`intern_style` is append-only / degrade-to-last so a handed-out index is never
+invalidated, even when scrolled lines intern more styles into the same block. The
+only two `freeze_open` callers that reach it with a pre open are precisely the two
+the arm handles; every other path guard-returns while pre=Some. **What the
+re-round caught that R1's close had left open: F6** -- only the `set_max_cost`
+freeze trigger was unit-tested; the `finalize_scroll_pending` (ScrollOff) trigger
+used the identical arm but was UNWITNESSED. On a format-fuzz surface that is a gap
+to close, not track, so it landed as a second regression
+(`pre_finalized_at_a_scrolloff_triggered_freeze_lays_out_without_panic`) --
+discrimination-proven: with the arm sabotaged it panics at the same layout.rs:473
+site ("len 0 index 0"; the set_max_cost twin panics "index 1"), with the arm it
+passes. Both freeze-mid-pre triggers are now test-verified, not one tested + one
+reasoned. Evidence: halcyond host 127 (+1); the sabotage/restore proof run
+in-session. Owed, non-blocking: a Fable round for the family-diversity axis when
+credits return (both rounds were Opus; a finished fallback round is closed per the
+never-skip rule, so only the diversity pass is a fresh obligation).
+
 ## Run 35 (vault absorption cont., 2026-09-06, Opus 4.8, effort max): the two BIG dossiers, an errno-registry reconcile that the stale tool was structurally blind to, and a triage tool that lied
 
 **Where it sits.** The continuation of Run 33 across its self-compaction (Run 33

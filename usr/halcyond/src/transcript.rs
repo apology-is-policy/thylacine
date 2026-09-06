@@ -2205,6 +2205,64 @@ mod tests {
     }
 
     #[test]
+    fn pre_finalized_at_a_scrolloff_triggered_freeze_lays_out_without_panic() {
+        // F1's OTHER trigger (the re-round's F6): a freeze mid-pre driven by a
+        // ScrollOff (push_scrolled_rows), not a tile-split (set_max_cost). The
+        // set_max_cost test above lowers the cap; here finalize_scroll_pending
+        // pushes an Item::Line into the open block and, over the open cap,
+        // freezes it WHILE a pre is open -- the identical fix arm, reached from
+        // the second of the two uncovered callers. It also interleaves a scroll
+        // Line before the finalized Item::Pre in one block. Both the scroll
+        // line's and the pre's obj-styled cells interned their indices into THIS
+        // block; the fix finalizes the pre into it, so layout_block's
+        // b.styles[sid] stays in bounds. Pre-fix: the pre carries to a fresh
+        // block and layout panics on the stale index.
+        let mut t = Transcript::with_caps(daylight(), 1000, 256, 10_000); // open cap 32
+        // A pre with an obj-styled cell: the index interns into the open block;
+        // the pre line rides self.pre uncharged, so it never freezes its own
+        // block (open.cost stays the obj's few bytes, under the cap).
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/bin")]),
+            F::Text("/bin"),
+            F::Close(Op::Obj),
+            F::Text("\n"),
+        ]));
+        // One ScrollOff line lands in the open block and pushes it over the open
+        // cap: finalize_scroll_pending -> enforce_block_cap -> freeze_open with
+        // pre=Some. This is the caller the set_max_cost test does not exercise.
+        t.push_scrolled_rows(&[wrow("a scrolled grid line over the tiny cap")], &[false], &SpanMap::new());
+        // Close the pre after the freeze: with the fix it is a no-op (already
+        // finalized); pre-fix the still-open pre finalizes into the FRESH block
+        // (its stale indices name the frozen block), and layout OOB-panics below.
+        t.feed(&frames(&[F::Close(Op::Pre)]));
+        // Lay out every block -- pre-fix the pre's stale index panics here.
+        let mut gs = crate::raster::GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        for b in t.frozen_blocks() {
+            let _ = crate::layout::layout_block(b, 400, &sheet, &mut gs);
+        }
+        let _ = crate::layout::layout_block(t.open_block(), 400, &sheet, &mut gs);
+        // The scroll-triggered freeze finalized the pre into a block (not lost),
+        // alongside the scroll Line that triggered it (the interleave).
+        let has_pre = t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(t.open_block()))
+            .any(|b| b.items.iter().any(|it| matches!(it, Item::Pre(_))));
+        let has_scroll_line = t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(t.open_block()))
+            .any(|b| b.items.iter().any(|it| matches!(it, Item::Line(_))));
+        assert!(has_pre, "the pre was finalized by the scroll-triggered freeze");
+        assert!(
+            has_scroll_line,
+            "the ScrollOff line that triggered the freeze is present"
+        );
+    }
+
+    #[test]
     fn byte_by_byte_equals_whole() {
         let corpus = session_corpus();
         let mut whole = Transcript::new(daylight());
