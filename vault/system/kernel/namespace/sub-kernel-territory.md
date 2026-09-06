@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -115,7 +115,14 @@ bump-before-swap discipline: `spoor_ref(new)` (which extincts on a
 corrupted source, leaving `root_spoor` untouched), swap under
 `ns_lock`, then `spoor_clunk(old)` outside it. `spoor_clunk`, not
 `spoor_unref` — the displaced root may be its Spoor's last holder, and
-the Dev's close hook must run.
+the Dev's close hook must run. A chroot is **one-way at v1.0**: there is
+no unchroot or `chroot(NULL)`, so the reference a chroot takes on its
+root Spoor is held for the Proc's whole life. The consequence is a
+caller discipline — a *persistent* Proc that chroots to a mounted Spoor
+pins that Spoor (and the 9P session behind it) forever, so the
+long-running init exercises chroot only through short-lived child probes
+that release it on exit, never in its own persistent context, where the
+pin would wedge a teardown that waits for the session's EOF.
 
 **`territory_clone` copies four things and takes three ref classes.**
 Under the parent's `ns_lock`: the bind array, the mount array (one
@@ -554,3 +561,8 @@ authority — [[inv-i43]]); this file owns both.
 ## Provenance
 
 [[chg-2026-08-16-territory-verbatim-join]].
+
+[[chg-2026-09-06-chroot-doc-absorb]] folds the one-way-chroot lifetime caveat
+absorbed from docs/reference/77: a persistent Proc that chroots pins its root
+Spoor (and the 9P session behind it) for life, since v1.0 has no unchroot -- the
+reason long-running init uses short-lived child probes, not its own chroot.
