@@ -22,6 +22,53 @@ needed the operator.
 
 
 ---
+## 2026-09-06 (aux) -- Nocturne N-2b-1: the zero-copy Weft ring substrate
+
+The operator ratified N-2b and said "feel free to start"; effort confirmed max.
+N-2b-1 (`497f7151`) lands the ring's allocate + share + map half -- a voice's
+`data` leaf, an `h_weft` Tweft responder, a per-voice ANON ring, and
+`/ring-voice-probe` to map + validate it. The period producer/consumer protocol
+is N-2b-2.
+
+**The finding that shrank the chunk.** An Explore subagent mapped the Weft
+substrate end-to-end; the pivotal answer was that `sys_weft_share_for_proc`
+(syscall.c:6875) is GENERIC and CAP_HW_CREATE-gated -- not hardwired to `/net`
+-- and the Tweft responder lives in the userspace server (netd's `h_weft` is the
+verbatim template). So N-2b-1 is USERSPACE-ONLY: the kernel Weft mechanism is
+reused unchanged, `weft.tla` is not in play, and no kernel change was needed.
+The roles invert vs netd (nocturned = allocator+consumer, probe = producer),
+matching `weft_ring_hdr`'s prod_tail/cons_head ownership exactly.
+
+**The wrong turn the boot caught.** I first gave `data` mode 0o600 ("owner-only
+intent; the real gate is h_weft"). The boot FAILED: `RING-VOICE-PROBE FAIL: open
+nodes/<id>/data`. The kernel's dev9p rwx enforcement (A-2d) gates the OPEN on the
+file mode BEFORE any handler runs, and a boot probe is not uid 0 -- so 0o600
+refused the open before h_weft's owner gate could speak. The witness discriminated
+cleanly: nocturne-probe (opens `audio` at 0o666) passed in the same boot, so the
+only variable was the mode. Fixed to 0o666, matching the established pattern
+(`audio` is 0o666; authority is server-side at the operation, not the mode).
+Re-boot GREEN: `mapped ring va=0x100400000 K=8 size=20480 payload=20160`.
+
+**The authority shape.** Because `/dev/nocturne` is one shared kernel dev9p
+session, the h_weft owner gate cannot isolate mounted clients from each other
+(the pre-existing F5 limitation). The kernel's CONSUME-ONCE share claim is the
+SPSC producer-uniqueness backstop: only the first Proc to SYS_WEFT_MAP a voice's
+ring claims it; a second mapper gets a claim failure. The probe proves both a
+positive (map + geometry) and two controls (idempotent re-map; voice-0 refused).
+
+**A dead-code catch.** I added a `ctl remove` to the probe "to exercise the
+RingVoice teardown at runtime" -- but ctl is 0o644 (owner-write) and the probe
+is not uid 0, so the remove is refused at the kernel rwx layer: dead code whose
+comment falsely claimed coverage it never had. Removed it; the probe now leaks
+its mount-minted voice exactly like /nocturne-probe does (the F5 root). The
+RingVoice Drop is left to the batched N-2b formal audit, not a false runtime claim.
+
+Still open: N-2b-2 (the period protocol). And the N-2a-4 host correction stands
+(clade cannot build on the Pi; it needs a big-RAM GCP builder -- surfaced, awaiting
+the operator).
+
+---
+
 ## 2026-09-06 (aux) -- Nocturne audit close: verified GREEN and pushed
 
 The prior entry left the runtime test + push OWED (mac-blocked). The mac freed
