@@ -4,7 +4,7 @@ type: chg
 title: "H-arc round-1 fold (tapestryd half): the six A-F GPU/compositor findings -- the composed-arm stale-slot expansion, the draining resize-ack re-offer, the process-keyed creator reservation, the latch-flip bar floor, the hosting-gated menu seat, and the re-offer + partial-first test coverage"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["eb480b58"]
 touched:
   - sub-tapestryd
 established: []
