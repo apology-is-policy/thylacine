@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/77-sys-chroot (SYS_CHROOT territory-root pivot): fold the one-way lifetime caveat into sub-kernel-territory, redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["26b3b9c3"]
 touched: [sub-kernel-territory]
 established: []
 closed: []

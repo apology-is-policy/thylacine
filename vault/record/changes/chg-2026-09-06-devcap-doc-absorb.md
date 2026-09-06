@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/75-devcap (hostowner-elevation cap device): clean redirect to sub-kernel-caps"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["26b3b9c3"]
 touched: []
 established: []
 closed: []
