@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/64-sys-spawn-full: zero-fold, multi-redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["b13a35a0"]
 touched: []
 established: []
 closed: []
