@@ -58,7 +58,7 @@ These documents are binding. Implementation deviations either update scripture f
 | `docs/ARCHITECTURE.md` | How we're building it. Foundational decisions with rationale. 20 enumerated invariants. Audit-trigger surface table. |
 | `docs/ROADMAP.md` | In what order. 8 phases with deliverables, exit criteria, risks, dependencies. Risk register. |
 | `docs/TOOLING.md` | Development tooling and agentic loop. QEMU + 9P host share + agent protocol. |
-| `docs/REFERENCE.md` + `docs/reference/NN-*.md` | As-built technical reference. Per-subsystem; deep; binding. Updated per chunk. |
+| the vault (`../thylacine-vault/vault/`) + `docs/reference/NN-*.md` (LEGACY) | As-built technical reference. Per-subsystem; deep; binding. **Being retired into the vault (2026-09-06): `docs/reference` is frozen; new prose goes to a dossier.** See "Reference documentation discipline" Part A. |
 | `docs/USER-MANUAL.md` + `docs/manual/NN-*.md` | User-facing reference. Per-topic; deep; binding. Updated per user-visible change. |
 | `docs/AUDIT-TRIGGERS.md` | The full audit-trigger surface table (moved verbatim from this file 2026-08-05). One row per audit-bearing surface: files + invariants + the per-chunk prosecution addenda. Cumulative; binding. |
 | `docs/ERRORS.md` | Error-code system. Errno registry (Thylacine-wide, POSIX-aligned values), `snare:*` fault-note family (thematic; replaces EL0-unhandled-fault extinction with per-Proc termination), exit-status semantics, boundary-line translation policy. ABI-bearing; updates require user signoff. |
@@ -798,11 +798,13 @@ same as a missing status row: the work is not finished without it.
 
 **Two parallel references, both maintained continuously, both binding for every PR**:
 
-### A. Technical reference — `docs/REFERENCE.md` + `docs/reference/NN-*.md`
+### A. Technical reference — the vault (`../thylacine-vault/vault/`), absorbing `docs/reference/NN-*.md`
 
-The **as-built** reference. Audience: developers, auditors, future maintainers. Distinct from `ARCHITECTURE.md` (which is design intent, including unimplemented work) — the technical reference describes *what exists in the tree right now*, with file:line citations and runtime semantics.
+**RETIREMENT IN PROGRESS (operator-ratified 2026-09-06).** The technical reference is moving into **the vault**: the registrar-linted, code-verified graph of per-surface dossiers under `vault/system/`. `docs/reference/` is now the **legacy** tree — frozen (no new content) and being absorbed subsystem-by-subsystem into redirect stubs (see `docs/reference/18-territory.md` for the shape: an `[ABSORBED INTO THE VAULT]` pointer to the owning dossier, plus what the old file got wrong by the time it was absorbed). New technical-reference prose goes to a **dossier**, never a new `docs/reference` section (the routing is enforced by step 0 below). ~32 of 157 files were absorbed as of the flip; the rest carry full parallel content until the sweep reaches them.
 
-Each subsystem gets its own `docs/reference/NN-<subsystem>.md` file when the subsystem lands. Per-file template per `docs/REFERENCE.md` "How to read this":
+The **as-built** contract is unchanged, only its home is: the reference describes *what exists in the tree right now*, with file:line citations and runtime semantics, distinct from `ARCHITECTURE.md` (design intent, including unimplemented work). Audience: developers, auditors, future maintainers.
+
+A dossier covers the same ground the legacy per-file template did (kept here as the depth bar the dossier meets), per `docs/REFERENCE.md` "How to read this":
 
 - **Purpose** — one paragraph on what the layer does and where it sits in the stack.
 - **Public API** — every exported function with its contract. Code blocks; not prose.
@@ -849,7 +851,7 @@ When a chunk lands (bug fix, refactor, new module, new feature), the author upda
    cd ~/projects/thylacine-vault && vault/meta/quaestor/quaestor owner <changed paths>
    ```
 
-   **Exit 0** — the vault carries that surface: the prose belongs there, so ring vault over yip rather than writing the section here. **Exit 1** — no dossier: write the reference section as today, and file the sweep. **With several paths the answer is usually MIXED and the exit status reports only half of it** — read the summary line, which names both sets; both actions are then owed.
+   **Since 2026-09-06 (operator-ratified) the answer is ALWAYS the vault** — `docs/reference` is frozen and being retired (Part A). **Exit 0** — the vault carries that surface: update the owning dossier (ring vault over yip if you're on a code track). **Exit 1** — no dossier yet: a **new dossier** is owed for the surface — ring vault to author it (same delegation as exit 0), never a new `docs/reference` section. **With several paths the answer is usually MIXED and the exit status reports only half of it** — read the summary line, which names both sets; a dossier is owed for each either way (update for the covered, create for the uncovered).
 
    Read any `ALSO named by` line in the output. A note that merely **pins** a file (an `abi-*` registry pins VALUES or STRINGS) cannot hold a description of a mechanism — so the reference section is still owed, AND that note may need the same change.
 
@@ -857,7 +859,7 @@ When a chunk lands (bug fix, refactor, new module, new feature), the author upda
 
    **Since 2026-09-06 this is enforced mechanically, not only by convention** (operator-ratified). A `commit-msg` hook runs `quaestor dossier-gate`: staging code owned by an `audit: hard` dossier **blocks** the commit unless that dossier is co-staged OR the message carries a `No-dossier-change: <why>` trailer (non-empty reason required); any other owned surface **warns**. So the reminder to update — or consciously defer — a dossier fires the moment the code lands, on every track sharing the hook. The code tracks reach the escape through the trailer, since they ring the vault rather than co-stage vault prose. Details + the fail-open/commit-msg-placement rationale: `vault/meta/schema.md` section 8 (check 9). `--no-verify` skips it and is the sanctioned emergency bypass.
 
-1. **Technical reference**: extend or update the relevant `docs/reference/NN-*.md` section. New module → new section. Bug fix that touches a documented invariant → update the section after the spec. New term / acronym → glossary entry.
+1. **Technical reference (the vault)**: extend or create the owning dossier under `vault/system/` — ring vault if you're on a code track, per step 0. New module → new dossier. Bug fix that touches a documented invariant → update the dossier after the spec. New term / acronym → a vault glossary note. **`docs/reference` is frozen legacy — never add to it or create a new `NN-*.md`;** it is being absorbed into redirect stubs subsystem-by-subsystem (Part A).
 2. **User reference**: extend or update the relevant `docs/manual/NN-*.md` section if the change is user-visible (new syscall, new admin command, new error case, behavior change). Internal refactors typically don't touch the user manual; user-visible changes always do.
 3. **Snapshot block** in `docs/REFERENCE.md` — refresh figures (test count, spec count, tip hash) on every chunk that changes them. Refresh the user-facing snapshot in `docs/USER-MANUAL.md` at the same cadence.
 
@@ -865,11 +867,11 @@ A PR that adds code without updating the relevant reference sections is incomple
 
 ### Audit-policy extension to the references
 
-The audit-trigger surfaces table in this document and in `ARCHITECTURE.md §25.4` covers code. The reference docs extend the audit policy: a change to a documented invariant in the technical reference updates the spec FIRST (per spec-first policy), then the technical reference, then the code, then the user reference if user-visible. If the four disagree, **the spec wins**, then the technical reference, then the code, then the user reference. The user reference can never be authoritative on internal semantics; it can only describe them.
+The audit-trigger surfaces table in this document and in `ARCHITECTURE.md §25.4` covers code. The reference docs extend the audit policy: a change to a documented invariant in the technical reference (now the vault dossier — or the legacy `docs/reference` section until its subsystem is absorbed) updates the spec FIRST (per spec-first policy), then that technical reference, then the code, then the user reference if user-visible. If the four disagree, **the spec wins**, then the technical reference (the vault), then the code, then the user reference. The user reference can never be authoritative on internal semantics; it can only describe them.
 
 ### Why two references, not one
 
-The technical reference and the user reference have **different audiences with different needs**. A user wants to know "how do I create a snapshot of my home subvolume?" — they don't care about the Bε-tree commit protocol. A developer wants to know "what happens to outstanding 9P tags when a session is dropped?" — they don't care about the `stratum snapshot` CLI usage. Splitting them keeps each focused; merging them produces a 1000-page document where neither audience finds what they need.
+The technical reference (now **the vault**) and the user reference (`docs/manual`) have **different audiences with different needs**, and the retirement does not merge them — it only moves the technical one into the vault. A user wants to know "how do I create a snapshot of my home subvolume?" — they don't care about the Bε-tree commit protocol. A developer wants to know "what happens to outstanding 9P tags when a session is dropped?" — they don't care about the `stratum snapshot` CLI usage. Splitting them keeps each focused; merging them produces a 1000-page document where neither audience finds what they need. (`docs/manual` is a separate track, unaffected by the docs/reference retirement, and is itself deferred to v1.0-rc.)
 
 Both are first-class. Neither is optional.
 
