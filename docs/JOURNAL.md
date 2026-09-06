@@ -62,6 +62,16 @@ start of this segment.
   re-measured 385 -> 394 (the libutopia total) / 389 -> 398.
 - **utopia-eval** (`8b78b921`, merge `672f5179`). The eval companion, and the
   one judgment call of the run.
+- **kernel-hwcap** (`b5240804`) and **kernel-mmu** (`1a895862`, merge
+  `60eb3155`). The two remaining halves of Warp-6 V-2's host-visible BAR path,
+  which completes that arc across the vault: the burrow/fault side went in last
+  run (`sub-kernel-fault`), the KObj_PCI map authority + the DMA-only
+  owner-death quiesce here (`hwcap`), and the PTE encoder's MAIR-index widening
+  here (`mmu`). Both `audit: hard`; the mmu fold is W^X-critical (I-12) -- the
+  executable-page guard widened from *reject execute-on-device* to *confine
+  execute to cacheable Normal-WB RAM*, which also rejects the new
+  write-combining index, so the encoder now forbids an executable page on any
+  non-cacheable attribute.
 
 **The judgment worth recording: a dossier straddling two tracks.**
 utopia-eval's post-2026-08-16 churn was *mixed* -- main's shell arc (`eval_and_or`
@@ -94,7 +104,24 @@ staged-not-committed, so the recovery was clean: verify `a95d437c` descends from
 my base and touches disjoint files, commit my work on the base, `git merge`
 (ort, no conflict), full-lint the merged tree, re-verify the mirrors had not
 moved again, push `672f5179`. No rebase, no force, no lost work -- the discipline
-behaving exactly as designed.
+behaving exactly as designed. It happened twice over the run (the docs commit
+during utopia-eval, then `de753061`'s beacon `pre` op during mmu), each handled
+identically; the ls-remote-before-every-push guard is what turns a
+concurrent-writer hazard into routine bookkeeping.
+
+**A cross-track fix, not a de-stale.** Mid-run, main flagged (yip 0057) a
+quaestor papercut in the vault's own tooling: `renderSpecCoverage` scanned the
+`specs/` directory rather than git, so a gitignored `*_TTrace_*.tla` TLC
+counterexample dump counted as a module, flipped the spec-coverage view stale,
+and blocked *every* commit on *every* track until the junk was hand-removed --
+main had hit 77 of them at once. It is squarely the vault track's domain, so it
+was fixed rather than deferred (`bb14a0dc`): the scan now excludes `_TTrace_`,
+mirroring `.gitignore` and the `grep -v TTrace` inventory rule, with a
+discriminating regression (`render_test.go`) verified to FAIL on the pre-fix
+scan (both a real module and the dump listed) and PASS on the fix. The
+stewardship point: a bug a peer reports, in tooling that gates all three tracks,
+is not "main's problem to route around" -- it is the track that owns the tool's
+to close.
 
 ---
 
