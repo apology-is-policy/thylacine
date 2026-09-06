@@ -294,6 +294,25 @@ while a real drop is a byte past the line limit. A third counter exists to stay
 **zero** — a push that fails after the room check succeeded would mean the two
 disagree, so it is an invariant witness rather than a statistic.
 
+**The real drops arm a one-shot report (#95).** Until #95 all three RX drop sites
+were silent, and the shape is why that mattered: a dropped input byte truncates a
+command that then *runs anyway* (`sleep 30` observed as `sleep 3`). Each site now
+names its counter under the console lock — the two back-pressure counters (`rx_bp_raw`,
+`rx_bp_flush`; refusals, not losses, and so they do **not** arm the report),
+`rx_drop_line` (past the line limit), the zero-witness `rx_drop_ring`, and
+`rx_drop_modeflush`. That last is the drop the mode-flip discipline above does
+**not** cover: a consctl write clearing ICANON *delivers* the half-assembled
+canonical line, a full ring takes none of it, and the fragment's tail is lost so
+the terminator arrives as a raw byte — #95's exact truncated-command shape,
+reachable by ordinary type-ahead volume (the shell re-arms canonical mode before
+it drains), not only by a wedged reader. The real-drop counters set
+`drop_report_pending`, which a `drop_reported` latch emits **once** and then
+silences forever, gated on `boot_is_complete()` so the boot window's own
+self-emitted drops do not fire it. That one-shot latch is a **known-open hazard
+(#95)**: it is spent by its own test, so a genuine post-boot drop after the test
+has run reports nothing — the latch must be re-armed, or the report keyed on
+something the test does not consume.
+
 **A full ring never suppresses the trusted path.** A serial BREAK is recognized
 before any admission logic and ungated by the mode flags, because it is a line
 condition rather than a data byte; the secure-attention trigger cannot be starved
@@ -589,6 +608,11 @@ superseded serial line; SAK restores it unconditionally), and `cons_termios_get`
 (C2-k1b -- the global termios word projected as a Linux `struct termios` for the
 VIVARIUM ioctl). The extinction ring-lock tearing (455c651d / 7dd5be19, both
 2026-08-18) was already the update's base -- borrowed.
+
+[[chg-2026-09-06-cons-doc-absorb]] folded the #95 RX input-drop report (the five
+named counters, `rx_drop_modeflush` as the mode-flush drop the mode-flip section
+did not cover, and the boot-gated one-shot latch with its known-open
+disarmed-by-its-own-test hazard) at the 111-cons absorption.
 
 ## `cons_diag_line_emit` returns whether the unit LANDED (2026-08-18)
 
