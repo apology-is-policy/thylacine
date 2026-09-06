@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/137-gopls (Go LSP engine port, Stage 8d): clean redirect; the two RESOLVED kernel findings (#99/#100) verified home"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["599929e2"]
 touched: []
 established: []
 closed: []
