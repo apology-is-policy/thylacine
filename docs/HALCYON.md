@@ -100,11 +100,28 @@ standing "design for Halcyon-on-vk" directive is hereby cashed:
   Halcyon is dark text in full daylight — the calm day.** The palettes
   themselves say which environment you are in. (Dark Halcyon themes remain a
   stylesheet matter, not a design fork.)
-- **What stays monospace**: raw-VT panes (§5), code (`em class=code` runs), and
-  any content whose alignment is character-grid semantics. Tables do NOT force
-  monospace: a Beacon `table` renders as a proportional ruled table in Halcyon
-  and as box-drawing in the cells tier — same bytes, two realizations
-  (BEACON.md §4).
+- **What stays monospace — two load-bearing cases only** (proportional-live,
+  §14.13, operator-ratified 2026-09-06). Monospace serves exactly where
+  character-grid alignment is essential: (1) the **raw-VT / alt-screen pane**
+  (§4 Class 2, §5) — a full-screen app owns its cells (nora, Quake, htop); and
+  (2) **grid-aligned output in the flow** — box-drawing and column-exact
+  listings (e.g. `la`), carried by the Beacon `pre` op (BEACON.md §3/§12.2) and
+  inline `em class=code` runs. Everything else — the prompt, typed input,
+  ordinary output, prose, tables — is **proportional** (DejaVu). A `pre` block
+  is **set apart like a code fence in Markdown or a scientific paper**: its own
+  ground colour + a leading vertical gutter rule, so a monospace island reads as
+  a deliberate inset, not a metric clash. Tables do NOT force monospace: a
+  Beacon `table` renders as a proportional ruled table in Halcyon and as
+  box-drawing in the cells tier — same bytes, two realizations (BEACON.md §4).
+- **Genera type discipline — hierarchy by size and italic, not weight.**
+  Following Symbolics Genera (the heritage this environment claims; `genera.gif`
+  is the reference), the stylesheet carries structure typographically: `hdr
+  level=1|2|3` render at descending sizes, **italic permitted, never bold**; `em
+  class=emph` renders **italic**; **bold is reserved for `em class=strong`
+  alone** — extreme emphasis in prose, nothing else. Bold headings are retired
+  (typographically crude). The Halcyon face set is therefore DejaVu proportional
+  in regular + italic + a bold kept only for `strong`, and Cornucopia mono for
+  `pre` / `em class=code` / alt-screen.
 
 ## 4. The pane-content model — two pane classes
 
@@ -116,9 +133,12 @@ pane):
   the data model for "select a past command, tweak, resubmit" and for
   block-level operations (fold a long output, yank a block, re-run).
 - Proportional body text (DejaVu) with monospace islands (Cornucopia) where
-  semantics demand; Beacon `table`/`hdr`/`em`/`obj` realized per the
-  stylesheet; plain un-annotated output renders in monospace exactly as a
-  terminal would — foreign programs lose nothing.
+  alignment is load-bearing (`pre` blocks, `em class=code`); Beacon
+  `table`/`hdr`/`em`/`obj` realized per the stylesheet. Plain un-annotated
+  output renders **proportional** too — the mainly-proportional default
+  (§14.13); a foreign program whose columnar ASCII needs the grid emits a `pre`
+  block or runs full-screen (alt-screen → the raw-VT class, §14.13), the two
+  places the character grid is preserved.
 - The **Helix-modal transcript** (TAPESTRY §14) governs keyboard interaction:
   Esc → normal mode, navigate/select/yank anywhere in read-only scrollback,
   `i` jumps to the writable prompt. Selection spans mixed-metric content
@@ -1522,6 +1542,15 @@ zone-open lands in the new zone.
 
 **14.11.3 The render composition.**
 
+> **SUPERSEDED for the normal screen by §14.13 (proportional-live,
+> operator-ratified 2026-09-06).** The normal-mode composition below — a
+> proportional scrollback flow above a **mono live grid tail** — is retired:
+> the normal screen now renders the proportional live transcript throughout
+> (prompt + typing + output), painting the grid's live content proportionally
+> rather than as a fixed-cell tail. The **alt-screen** arm below is unchanged.
+> Read §14.13 for the ratified model; the text below is the KT-1.5 record it
+> amends.
+
 - **Normal mode**: the scrollback blocks (flow layout, `layout.rs`, cursor-anchored
   like #55) render above; the **live grid** renders as the tail (a fixed-height
   grid region at the bottom). The viewport shows the tail by default; scrolling up
@@ -1889,8 +1918,9 @@ already held.
     handoff (C-F11, open).
 - **KT-1.5d-2 -- one session tile.** the per-user halcyond spawns ONE kaua-term (as
   the user) hosting `ut`, folds its up-pipe into the unified poll, ingests via the
-  ii-a `Tile` model, and renders it (normal = scrollback + grid tail; alt = grid only,
-  14.11.3). This is the old ii-b render, now inside the per-user compositor.
+  ii-a `Tile` model, and renders it (normal-mode composition now proportional-live
+  per §14.13; alt = grid only, 14.11.3). This is the old ii-b render, now inside the
+  per-user compositor.
 - **KT-1.5d-3 -- multi-tile.** per-leaf spawn/teardown + N-pipe multiplex +
   focus-routed input (the old 1.5c) -> **unblocks H-4d** (the welcome's two `ut` panes).
 
@@ -1911,3 +1941,132 @@ restore — with the tile cap mask (`!CAP_SET_IDENTITY`), stdin from
 failure is said and the session lives on (an rc is a convenience, never a
 gate). The pure decision is `halcyond::session_init` (host-tested); the rule
 itself is §13.7's.
+
+### 14.13 The proportional-live tile model (operator-ratified 2026-09-06)
+
+**The decision.** After the first hands-on interactive Halcyon session
+(2026-09-06; the operator's findings in `Found issues.txt` + screenshots
+s1..s7), the operator ratified a sharpened rendering model: **Halcyon is mainly
+proportional — the prompt included.** The guiding question is "where does
+monospace serve a real purpose?", and the answer is "where character-grid
+alignment is essential." That is exactly two cases: the **editor** (nora —
+characters must line up; a Beacon mode may make it proportional later) and
+**box-drawing / column-exact output** (e.g. `la`, until Beacon has box/table
+primitives — carried by the new `pre` op, BEACON.md §3/§12.2). Everything else —
+the prompt, typed input, ordinary output, prose, tables — is proportional. North
+star: **Halcyon reads as a professionally typeset document that is also
+interactive and a shell** (the Genera listener, §3's type discipline).
+
+**What this retires.** The §14.11.3 normal-mode composition — a proportional
+scrollback flow above a **mono live grid tail** — is retired for the normal
+screen. Under §14.11 the fresh output you are looking at (the welcome, a
+just-run `ls`) rendered mono (the live grid) and became the proportional Genera
+presentation only once it scrolled off; the two halves of one document disagreed
+on metric *and* affordance (paths were blue objects on scrollback, plain mono
+text live — the operator's s1/s5/s6). That split is gone: **the normal screen is
+proportional live.**
+
+**The seam is the existing mode boundary** (§4 Class 1 / Class 2; §14.11.3):
+
+- **Normal screen → the proportional live transcript.** Prompt + line-editing
+  echo + command output all render proportional (DejaVu), Beacon spans realized
+  (obj/em/hdr), `pre` blocks as mono islands. This is the console H-2 flow model
+  brought to the session tile; it replaces the mono-grid tail.
+- **Alt screen → the raw mono grid, full-tile.** A program on the alternate
+  screen (nora, Quake, htop) owns its cells; halcyond renders the producer's
+  grid as fixed Cornucopia cells in the terminal-content palette (Bonfire — an
+  alt-screen app *is* a terminal, so Bonfire is correct there, §3). Unchanged
+  from §14.11.3.
+
+**Rendering is a sink choice; the pts stays a fixed-width grid.** The kaua-term
+producer is UNCHANGED — it still hosts a real pts, still maintains a fixed
+`rows x cols` grid, still xterm-encodes input. The shell and every hosted
+program see an ordinary terminal (readline's column arithmetic, cursor
+addressing, and winsize all keep working). Proportional-ness is purely how
+halcyond PAINTS the grid's content in normal mode — the BEACON thesis exactly
+("annotate meaning at the producer, render at the sink"; §3 "same bytes, two
+realizations"). Nothing about proportional-live changes the producer, the pts,
+or the wire records (§14.11.2); it changes the normal-mode composition in
+halcyond.
+
+**The core mechanism — logical lines, re-wrapped.** A fixed-width grid
+hard-wraps output at `cols` (mid-word: the operator's s5 "tho/ught"). Painting
+those rows proportionally verbatim would preserve the mid-word break. So
+halcyond must render from LOGICAL lines, not grid rows: the producer's VT tracks
+per row whether the break was an autowrap-at-margin (soft) or an explicit
+newline (hard) — the standard terminal "wrapped" flag — and forwards it on the
+ScrollOff/CellDiff rows (§14.11.2 records gain a per-row wrapped bit); halcyond
+joins soft-wrapped runs into logical lines and re-wraps each at the tile's
+proportional width, breaking only at word boundaries. This is the analog of the
+console flow (`layout()`), which already word-wraps because it flows the byte
+stream, not a pre-wrapped grid. A `pre` block is the exception: its rows are
+preserved verbatim (no join, no re-wrap) — that is what `pre` is for.
+
+**The prompt + live editing.** The prompt and the line being typed are part of
+the live tail and render proportional. Editing keeps working because the
+PRODUCER'S grid handles all cursor/VT semantics (readline redraws land in the
+grid as today); halcyond re-derives the logical line + caret each frame from the
+current grid state, and places the caret at the proportional x of the cursor's
+character boundary. The caret is a character index, not a pixel offset, so
+proportional placement is well-defined. This also subsumes the stray-cursor bug
+(s2: a caret adrift from the rows) — the caret is derived from the grid cursor,
+one source of truth.
+
+> **Open implementation choice — the winsize policy.** Two ways to keep the
+> shell's hard-wrap from fighting the proportional re-wrap: (a) keep the real
+> tile-derived `cols` and rely on the soft-wrap join above; or (b) advertise a
+> wide `cols` so the shell emits long logical lines directly and halcyond does
+> all wrapping. (a) is the leading candidate — it does not lie to programs that
+> query `cols` for their own layout (`ls` columns, a foreign pager), and native
+> tools emit Beacon (`table`/`pre`) rather than depending on `cols` for the
+> renderer. Pinned at implementation, not in this design.
+
+**Where mono stays, and how it is set apart.** The two mono cases (the editor
+via alt-screen; grid-aligned output via `pre`) render Cornucopia. A `pre` block
+is **visually inset like a Markdown / scientific-paper code fence**: its own
+ground colour + a leading vertical gutter rule (§3), so a monospace island reads
+as a deliberate block, not a metric accident. Box-drawing emitters (`la` and
+kin) wrap their output in `pre`; inline `obj`/`em` runs inside a `pre` stay
+affordant (so `la`'s path entries remain presentations), but the block's spacing
+is preserved verbatim.
+
+**Which findings this dissolves** (the operator's Found-issues list):
+
+- **s1** (the welcome renders mono live; objects indistinguishable from text):
+  dissolves — normal-mode is proportional live, so objects are affordant
+  immediately (blue paths, exit-coloured prompt marks), as they already are on
+  scrollback.
+- **s5** (proportional wrap breaks mid-word): dissolves — the logical-line
+  re-wrap breaks at word boundaries.
+- **s6** (the live/scrollback boundary is visible mid-document): dissolves —
+  one metric (proportional) across the whole normal screen; ScrollOff is
+  seamless.
+- **s2** (the stray vertical cursor): dissolves — one caret, derived from the
+  grid cursor.
+- s5's uneven line heights + s6's misaligned rules become plain
+  proportional-layout bugs in one surface (`layout`/the flow), no longer
+  entangled with the grid seam.
+
+**What still needs its own fix** (NOT dissolved by the model; tracked in
+`memory/project_halcyon_stabilization.md`, built AFTER the model lands):
+
+- **s7** — the editor-in-tile: an alt-screen lifecycle bug. The alt-screen pane
+  must fill the tile (nora's rows == tile rows), adopt the Bonfire
+  terminal-content palette deliberately (correct per §3 — an alt-screen app is a
+  terminal), and tear down cleanly on exit (today ut + nora "merge" and Esc goes
+  dead — a mode-latch not cleared on the child's alt-screen exit; the B-F5
+  alt→Normal transition is adjacent).
+- **split starvation** — too many splits leave some tiles untypeable (input
+  routing / focus / per-session back-pressure).
+- **s3** — the hidden prompt after a big listing: the viewport must follow to
+  the live tail after a large scrollback insert (view-follow / scroll clamp).
+
+**Scope + audit.** This reshapes halcyond's normal-mode render composition
+(`transcript.rs` / `layout.rs` / `session.rs`), adds the soft-wrap flag to the
+vt / kaua-term wire (§14.11.2 records gain a per-row wrapped bit), adds
+`FACE_BODY_ITALIC` + retires bold headings in the stylesheet (§3), and consumes
+the Beacon `pre` op. It sits on the audit-trigger surface (KT-1; the
+session-render + format-fuzz class; AUDIT-TRIGGERS rows 142/151) and joins the
+batched stabilization audit at the arc's close. The producer/pts, the trust
+boundary (§14.11.10), the resize path (§14.11.8), and the alt-screen render are
+unchanged in shape.
