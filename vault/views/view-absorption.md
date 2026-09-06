@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**108 absorbed · 49 live · 157 total.**
+**109 absorbed · 48 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -91,7 +91,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 135-pty-kernel.md | live | — |
 | 136-ptyfs.md | live | — |
 | 137-gopls.md | live | — |
-| 138-gpud.md | live | — |
+| 138-gpud.md | absorbed | [[sub-substrate-gates]], [[sub-tapestryd]], [[sub-warden]] |
 | 139-tapestryd.md | absorbed | [[sub-kernel-weft]], [[sub-libdriver-grant]], [[sub-libtapestry]], [[sub-tapestryd]] |
 | 14-process-model.md | absorbed | [[inv-i24]], [[lock-proc-table]], [[spec-death-wake]], [[sub-kernel-death]], [[sub-kernel-proc]], [[sub-kernel-thread]], [[view-closed-sub-kernel-death]] |
 | 140-aurora.md | live | — |
