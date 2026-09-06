@@ -4,7 +4,7 @@ type: chg
 title: "s7a nora session-palette de-stale (peer-flagged, yip 0067): 4 dossiers follow the palette-as-runtime-value after main's s7a arc merged, + a new abi-halcyon-palette contract note for the /env/HALCYON_PALETTE cross-program surface"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["99c8c72c"]
 touched:
   - sub-libhalcyon
   - sub-halcyond
