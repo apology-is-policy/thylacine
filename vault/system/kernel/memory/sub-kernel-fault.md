@@ -2,7 +2,7 @@
 id: sub-kernel-fault
 type: sub
 parent: moc-kernel-memory
-title: "The fault dispatcher — classification, demand paging, six backing arms, and the COW break"
+title: "The fault dispatcher — classification, demand paging, seven backing arms, and the COW break"
 code: [arch/arm64/fault.c, arch/arm64/fault.h]
 audit: hard
 guarded-by: [inv-i12, inv-i32, inv-i7, inv-i36, inv-i44]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -108,10 +108,30 @@ interesting part of this file:
 2. Drop the lock. Read from the backing file — a 9P round trip that blocks, and
    that a dying Proc unwinds out of by inheritance from the read itself, with
    no new wait/wake machinery.
-3. Re-take the lock. **Re-look up the VMA and re-validate** it still maps the
-   same pinned Burrow — a sibling may have torn it down while we slept.
+3. Re-take the lock. **Re-look up the VMA and re-validate the GEOMETRY** — not
+   just that it still maps the same pinned Burrow (a sibling may have torn it
+   down), but that `freq->page_va` is still inside `[vaddr_start, vaddr_end)` AND
+   `slot_now == freq->slot`. On a mismatch, BAIL: free the read page, return
+   `FAULT_UNHANDLED_USER`, and let a re-fault re-resolve against the new geometry.
 4. Install-once under the Burrow lock: if a sibling filled the slot, keep
    theirs and free ours.
+
+**Step 3 verifies geometry because DISTRO D-3 retired the premise that once let
+it check only identity (#190).** The R-5 audit's F2 justified trusting the cached
+`freq->slot` on "a FILE Burrow is created only by exec, mapped once at offset 0,
+never re-mapped" — so it had ONE fixed VMA and `page_va -> slot` was stable. D-3
+is exactly the future that premise excluded, on every count: it creates FILE
+Burrows from EL0, a MAP_FIXED replace SPLITS a FILE VMA (so a tail carries a
+non-zero `burrow_offset`), and one Image-cached Burrow is reachable from several
+address spaces at once. "Same Burrow?" answers yes to a split over that same
+Burrow, so identity no longer suffices. And F2's *prescribed* remedy — "recompute
+the slot from `vma->burrow_offset`" — is WRONG: `freq->file_offset` was ALSO
+derived from the pre-sleep geometry and the read page already holds the bytes read
+at it, so recomputing only the index files stale bytes under a fresh slot number
+(a correctly-indexed slot holding the wrong page — the same corruption, tidier
+address). The bytes and the index must agree, and only the mapping still being in
+place guarantees that. Verify and bail; never recompute. Both the single and the
+cluster path carry the identical check.
 
 The pin is what makes step 3 safe against both use-after-free and address
 reuse: the Burrow cannot be freed *or* have its allocator slot recycled under
@@ -128,6 +148,10 @@ live in one place ([[sub-kernel-vma]]).
 genuinely new work: the page-in is death-interruptible, and an I/O error
 terminates the Proc rather than installing zeros where instructions should be.
 The other five live in [[sub-kernel-exec]], [[sub-kernel-image]] and Stratum.
+DISTRO D-3 GENERALIZED I-36 from exec text to phenotype mmap-time library maps —
+the same seven conditions now gate a userspace read-only/exec file map — and this
+arm's two conditions are unchanged by that generalization; the one fail-mode it
+added is the #194 past-EOF `FAULT_USER_BUS` (Error paths).
 
 The note did not exist when this dossier was written, deliberately: half its
 enforcement was unswept, and an invariant written from half its enforcement is
@@ -140,11 +164,12 @@ nothing. Over-budget fails the fault, which terminates one Proc — never the bo
 
 ## The backing arms
 
-**Six**, not the five this heading and the title claimed until 2026-08-16 —
-against a table in the same block, which is the second miscount of exactly that
-shape found in one sweep (the notes dossier said "four families" over five
-rows). A count no argument rests on is invisible to every reader, its author
-included.
+**Seven** since Warp-6 V-2 added the HOSTMEM arm. It read five until 2026-08-16
+(a miscount against a table in the same block, the second of that shape in one
+sweep — the notes dossier said "four families" over five rows), was corrected to
+six, and is now seven. A count no argument rests on is invisible to every reader,
+its author included — which is exactly why it keeps drifting here, three times
+now.
 
 | type | resolution | notes |
 |---|---|---|
@@ -152,8 +177,18 @@ included.
 | **code** | *identical to anonymous* | I-42/JIT: two aliases of one region, each installing at **its own** VMA prot |
 | MMIO | device PA + offset, device attributes | |
 | DMA | pinned chunk PA + offset, cacheable | coherent on this platform's transports |
+| **HOSTMEM** | PCI BAR PA + offset, **host-dictated** MAIR attr | Warp-6 V-2: a hostmem subrange; `kobj_pci` non-NULL is the liveness guard |
 | file-backed | sparse per-slot pages, demand-read | the arm that sleeps |
 | lazy-anonymous | allocate + zero + install-once, all under the lock | no backing read, so no slow path |
+
+**The install attribute widened from a bool to a MAIR index for HOSTMEM (V-2).**
+Every arm used to hand `mmu_install_user_pte` a `device_memory` bool — a two-way
+Device-vs-Normal-WB choice. HOSTMEM broke that: a hostmem BAR subrange carries a
+**create-time host-dictated** attribute (NORMAL_WB for a CACHED mapping,
+NORMAL_NC for WC), honoured exactly rather than guessed. So the arms now carry a
+`mair_idx` and install through `mmu_install_user_pte_attr`; the other six pass a
+fixed index (NORMAL_WB or DEVICE) and are byte-identical to the bool they
+replaced.
 
 The code arm shares the anonymous arm **because it must**: a JIT region is
 mapped twice, writable at one address and executable at another, and both
@@ -254,6 +289,18 @@ the matching `snare:*` note. A read failure in the file arm is **fail-closed**:
 `FAULT_USER_BUS`, never a silent zero-fill of executable text — filling text
 with zeros on an I/O error would execute them.
 
+**A fault WHOLLY past the file's last page is `FAULT_USER_BUS`, not a zero-fill
+(#194).** Demand-zeroing it would mint real memory the I-32 page axis never sees
+— anonymous in effect, accounted as FILE, i.e. not at all (the R-5 uncharged
+posture is justified by SHARED FILE BYTES, which a past-EOF page is not). The
+refusal comes BEFORE any allocation, so nothing is minted and nothing needs
+charging; the file's final PARTIAL page still zero-fills past EOF (the read-short
+path), matching Linux. `file_limit` is creation-time (close-to-open); an UNKNOWN
+limit — only the immutable baked ramfs — keeps the pre-#194 behaviour. Read-ahead
+carries the same bound: the cluster never PRE-READS a neighbour past the limit,
+because a past-EOF resident zero page would then be installed by the fast path
+with no check — the uncharged mint sneaking back in through read-ahead.
+
 ## Performance
 
 The read-ahead cluster is the one performance mechanism here, and it exists
@@ -289,9 +336,11 @@ zero-fill.
 
 - The header's stale claim that this path is single-threaded and needs a future
   lock — the body documents the fix in detail directly below it (task #60).
-- A future path that maps a file-backed Burrow at a chosen offset would
-  invalidate the cached slot index the slow path carries across its sleep; both
-  the single and cluster paths say so at the point it would matter.
+- DISTRO D-3 REALIZED what was once a seam here: it maps file-backed Burrows at
+  chosen offsets (userspace mmap, MAP_FIXED split, cross-AddrSpace Image share),
+  which invalidates the cached slot the slow path carries across its sleep. The
+  #190 verify-and-bail (Concurrency, above) closes it in both paths, so the seam
+  is discharged, not open.
 
 ## Caveats
 
@@ -307,6 +356,11 @@ it is named rather than landing in the catch-all.
 P3-C built the classifier; P3-Dc added demand paging; P6 #713 added the lock
 coverage; REVENANT added the file-backed arm and later its read-ahead; the
 overcommit model added the lazy-anonymous arm; I-42 added the code arm.
+
+DISTRO D-3a generalized the file arm to userspace mmap — retiring the R-5 F2
+one-fixed-VMA premise, which the #190 verify-and-bail replaces — D-3c added the
+#194 past-EOF `FAULT_USER_BUS`, and Warp-6 V-2 added the HOSTMEM arm (the
+`device_memory` bool widened to a MAIR index). [[chg-2026-09-06-fault-distro-hostmem]].
 
 ## Tests
 
