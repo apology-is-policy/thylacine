@@ -743,6 +743,23 @@ caught by reading the current owner rather than carrying the doc's TODO forward.
 `767181bf`, fixup `88e8c51a`, both mirrors. `75 absorbed / 82 live` -- four chunks
 since the second self-compact.
 
+### Run 37 continued: 23-direct-map -- the fifth, and a clean one that still predates a footgun
+
+The kernel direct map, a foundational Phase-3 refactor, zero-fold across three
+memory dossiers: the mapping machinery (TTBR1 high half, the linear PA->KVA map,
+the identity-map retirement it unblocked) is in `sub-kernel-mmu`, the
+`pa_to_kva`/`kva_to_pa` round-trip in `sub-kernel-mm-phys`, the SLUB slab pointers
+in `sub-kernel-mm-slub`. The one thing worth flagging in the stub is what the
+Phase-3 doc *couldn't* have known: it predates #808, so it warns nobody that the
+`l1_directmap` cap is absolute rather than relative to `mem_base` -- a bringup at
+any other base would dereference `pa_to_kva` past the mapped window. That finding
+and its seam live in `sub-kernel-mm-phys`, which is exactly why the current
+dossier is the reference and the frozen doc is a stub. `74276f16`, fixup
+`81edf7cd`, both mirrors. `76 absorbed / 81 live` -- five chunks since the second
+self-compact, and the memory/kernel-entry frozen-milestone vein (mmu, phys, slub,
+addrspace, asid, exec, syscall-dispatch all fresh and comprehensive) is the
+productive one right now.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
