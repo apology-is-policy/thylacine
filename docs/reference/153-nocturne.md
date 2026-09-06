@@ -473,7 +473,28 @@ single boot's wall time.
 - `nodes/<id>/ctl gain` is Plan 9 `volume`-style percent, not the dB grammar the
   design's `volume` file (N-3) will carry; the per-link/stage dB gains are N-3+.
 - The virtio-pci-modern constants are a private copy of netdev's (a hoist seam).
-- The serve loop is still single-threaded; the cycle/control thread split
-  (`docs/NOCTURNE.md` §6.2 D-1c) is N-2c.
+- The cycle/control thread split (`docs/NOCTURNE.md` §6.2 D-1c) LANDED at N-2c
+  (@dd07836a). The N-2c holotype audit closed CLEAN (0 P0/P1/P2, 2 P3, both
+  deferred): **F2 [P3, bounded]** -- the cycle holds the graph lock across
+  `snd.start()`/`stop()`, which issue virtio-snd control RPCs, so a wedged device
+  freezes the control plane for a BOUNDED interval (each rpc caps at
+  `CTRL_WAIT_STEPS`=2000 x 1 ms; `stop()` = 3 rpcs ~= 6 s worst case) -- not a
+  deadlock (the device never takes the graph lock), not a regression (the
+  pre-N-2c serve loop also blocked on device rpcs). The optional refinement
+  (snapshot the priming periods under the lock, drop it, then do the device
+  transition) is a v1.x item; `start()` genuinely needs the lock (it primes via
+  `next_period`), `stop()` does not. **F1 [P3, pre-existing N-2a, NOT N-2c]** --
+  see the mixer caveat below.
+- **F1 (pre-existing, deferred):** `has_playable` returns true whenever the
+  cross-voice byte SUM is non-zero, but `next_period` drains only whole frames,
+  so a sub-frame residue (1-3 bytes, e.g. a client writing a byte count not
+  divisible by `FRAME`=4 then stopping) sticks in the FIFO and keeps
+  `has_playable` true forever -- the idle-stop never fires and the cycle wakes
+  every period re-mixing silence. Byte-identical in the parent 46d51fbb (N-2a
+  mixer behavior); N-2c only moved the caller into the cycle thread. Fix (a
+  focused follow-up, with a residue-idle-stop regression witness): make
+  "playable" per-voice -- `voices.iter().any(|v| v.fifo.len() >= FRAME || ring
+  pending)` (the per-voice `>= FRAME` test, not the cross-voice sum, since two
+  voices with 2 residual bytes each sum to 4 while neither holds a frame).
 - The wav witness covers playback only (QEMU's `wav` backend has no capture
   voice); the capture-side witness needs a non-wav backend (N-3).

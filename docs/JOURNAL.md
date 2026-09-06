@@ -22,6 +22,105 @@ needed the operator.
 
 
 ---
+## 2026-09-06 (aux) -- Nocturne N-2c: the cycle/control thread split + a futex Mutex
+
+With the design ratified, resumed the arc at N-2c (`dd07836a`): split `nocturned`
+from one poll loop into two threads (D-1c), so the audio clock is never delayed
+by 9P work -- the foundation N-4's in-cycle descants require. The CYCLE thread
+owns the device and runs the audio clock (try_lock the graph, pump, start/stop,
+publish stats, wait on the IRQ); the CONTROL thread (the original, after it
+spawns the cycle) serves /srv/nocturne and touches the graph only under the lock,
+never across a reply. Neither crosses into the other's half: the cycle never
+touches 9P, the control never touches the device.
+
+**The design choice inside the ratified D-1c.** D-1c fixes "two threads, one
+try-locked graph"; the *mechanism* was mine to pick. I chose the literal reading
+-- ONE `Mutex<Graph>`, the cycle `try_lock`s and on a miss REPLAYS the last
+mixed period (voices do not advance, so no data lost, at most one ~10.7 ms period
+repeats) -- over a refcounted-Arc-plan model (PipeWire's RCU-style graph swap).
+The Arc model is glitch-free on graph edits but adds per-voice atomics + an
+SPSC-flush race + Arc lifetime, i.e. more concurrency surface, for a benefit
+(no ~10.7 ms replay) that is inaudible at the <0.001%-per-period collision rate
+(the control holds the lock only for microsecond graph ops, never across I/O, vs
+a 10.7 ms period). For a security-critical OS, fewer moving parts under
+concurrency is the "build proper" call, and it is exactly what "run last cycle's
+plan" says. The new primitive it rides -- `libthyla_rs::sync::Mutex` (N-2c-1) --
+is the three-state futex mutex std uses on Linux, over AtomicU32 + torpor, plus a
+non-blocking `try_lock` for the realtime cycle; libthyla-rs had spawn_raw + torpor
+but no Mutex, and native callers had each rolled their own.
+
+**The same-Proc poke.** A stopped stream has no IRQ, so the cycle parks on a
+`wake` futex with a 100 ms backstop; a byte write that makes a stopped voice
+playable pokes it (torpor works intra-Proc), preserving the single-threaded era's
+instant byte-start. A ring producer in *another* Proc still cannot poke (no fd,
+no cross-Proc torpor) -- that stays the N-2b-2b deferral; its start rides the
+backstop. Register-then-observe closes the poke-vs-park race.
+
+**Verified** (all GREEN): the `alloc-smoke` sync leg -- try_lock semantics + a
+5-thread contended mutual-exclusion stress (total must equal (WORKERS+1)*ITERS or
+a lost wakeup shows as a short total / join timeout) -- under `-smp 4` real
+parallelism; `test-ring-audio` PASS(chord) 70 windows (the cycle consumes rings +
+the control serves weft); `test-audio` PASS(chord) 59 (the cycle drains FIFOs +
+the control pushes + pokes); `test-sdl-audio` PASS(chord) 78; the full boot ladder
+green. The **SMP gate is not owed** -- N-2c is userspace-only (no kernel/arch/mm
+delta), and the mutex + split are already exercised under `-smp 4` x3 (same
+reasoning as the N-2b close).
+
+**The batched holotype audit (N-2c-1 + N-2c-2, Opus -- Fable out of credits)
+closed CLEAN: 0 P0 / 0 P1 / 0 P2, 2 P3, both deferred.** The prosecutor
+re-derived the mutex (Drepper three-state, no lost wake), the poke/park
+register-then-observe, the lock-across-reply discipline (checked every handler),
+the single-mutex lifetime argument, and the memory-safety bounds -- all sound. It
+refined one self-audit claim: the cycle is ALSO a FIFO *writer* (`pop_front`,
+`drop_fifo`), not only a reader -- but every access on both threads is under the
+one mutex, so the "single writer at a time" property holds and there is no race
+(conclusion correct, premise sharpened). The two P3s are both pre-existing /
+non-regression: **F1** -- `has_playable` uses the cross-voice byte SUM, but
+`next_period` drains only whole frames, so a sub-frame residue (1-3 bytes) sticks
+and defeats the idle-stop forever (perpetual wakeups); byte-identical in the
+parent 46d51fbb (N-2a mixer, NOT N-2c -- N-2c only moved the caller into the
+cycle thread). **F2** -- the cycle holds the graph lock across `snd.start()`/
+`stop()`'s device RPCs, so a wedged device freezes the control plane for a
+BOUNDED interval (verified: `ctrl_rpc` caps at `CTRL_WAIT_STEPS`=2000x1ms;
+`stop()`=3 rpcs ~= 6 s worst case) -- not a deadlock, not a regression (the
+pre-N-2c serve loop also blocked on device RPCs). Both are documented in
+reference 153's caveats + the closed list; F1 gets a focused follow-up (the
+one-line per-voice `>= FRAME` fix + a residue-idle-stop regression witness), F2
+an optional v1.x refinement. A Fable pass on this surface remains the stronger
+check, owed whenever credits return (the standing Opus-round caveat).
+
+**The wrong turn, caught by the tooling.** My first commit was blocked by
+vault's freshly-installed shared commit-msg dossier-gate -- which I had ACKed on
+yip without verifying aux's own quaestor had the feature. It did not: the hook
+builds quaestor from the COMMITTING worktree's source, and aux-3's quaestor
+(lint/render/owner only) predates `dossier-gate` (landed @292a1f9c, not in aux
+HEAD), so it hit quaestor's usage arm -> exit 2 -> the hook fail-CLOSED,
+contradicting its own "fail open on infra" design. I diagnosed it (the exact
+subcommand-absent -> exit-2 -> exec-propagated chain, with the merge-base
+evidence) and flagged vault via yip; vault fixed the shared hook to no-op when the
+committing worktree lacks `vault/meta/quaestor/dossier_gate.go` (a file-check,
+zero extra compiles for behind-worktrees) + exit==2 tolerance. Lesson: ACK a
+shared-hook install only after checking the feature exists in YOUR worktree's
+tool, not just on main. The gate activates for aux automatically once aux merges
+main; until then it correctly no-ops. (A separate, pre-existing observation:
+`joey: pouch-smoke spawn FAILED` x2 -- confirmed via JOURNAL:1031 as pre-existing
+on all boots, a bare-name resolution issue in a different toolchain, NOT an N-2c
+regression.)
+
+Also caught before the audit: I traced `ctrl_rpc` and confirmed it is bounded
+(CTRL_WAIT_STEPS, 1 ms sleeps, then Err) -- so a device that never answers a STOP
+verb cannot wedge the control thread past that timeout, and it is the same
+bounded-stall class the single-threaded loop already had (no regression).
+
+**Open:** F1 (the pre-existing idle-stop residue -- a focused follow-up: the
+one-line `has_playable` per-voice `>= FRAME` fix + a residue-idle-stop regression
+witness); F2 (the bounded lock-across-device-RPC -- an optional v1.x refinement);
+N-2c-2b (the cross-Proc back-pressure poke) stays v1.x. Next on the arc: N-3
+(ears/capture + the dB grammar), then N-4 (descants + the cadence lease + the
+weft park leg, spec-first, max effort). Per the @695e0ef5 scripture flip, N-3's
+technical-reference prose routes to a vault dossier, not a docs/reference section.
+
+---
 ## 2026-09-06 (aux) -- Nocturne design RATIFIED by operator vote; scripture commit
 
 After the N-2b close, the operator engaged the pending items and asked me to
