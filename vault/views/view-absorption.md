@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**93 absorbed · 64 live · 157 total.**
+**94 absorbed · 63 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -105,7 +105,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 146-addrspace.md | absorbed | [[sub-kernel-addrspace]] |
 | 147-execve.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-asid]], [[sub-kernel-exec]], [[sub-kernel-handle]], [[sub-kernel-proc]], [[sub-kernel-sched]], [[sub-kernel-vivarium]] |
 | 148-fork.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-caps]], [[sub-kernel-exception]], [[sub-kernel-fault]], [[sub-kernel-handle]], [[sub-kernel-proc]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-thread]] |
-| 149-warp.md | live | — |
+| 149-warp.md | absorbed | [[sub-kernel-burrow]], [[sub-kernel-hwcap]], [[sub-kernel-weft]], [[sub-tapestryd]] |
 | 15-scheduler.md | absorbed | [[seam-eevdf-math]], [[sub-kernel-rendez]], [[sub-kernel-sched-smp]], [[sub-kernel-sched]] |
 | 150-build-config.md | live | — |
 | 150-halcyond.md | live | — |
