@@ -131,6 +131,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-06 [[chg-2026-09-06-burrow-borrowed]] — sub-kernel-burrow re-verified borrowed: the only post-update change is a comment-only round-3 refinement the dossier's prose already reflects
 - 2026-09-06 [[chg-2026-09-06-cons-consctl-verbs]] — sub-kernel-cons brought current: the three consctl surfaces since 2026-08-18 -- the beacon-tier verb, the serialsilent display-routing verb, and the C2-k1b termios projection
 - 2026-09-06 [[chg-2026-09-06-joey-boot-borrowed]] — sub-stratum-boot re-verified after the KT-1.5 + VIVARIUM merge: the bringup sequence is borrowed; the ~5659-line churn is all in the undescribed region (#177 gap widened)
 - 2026-09-06 [[chg-2026-09-06-notes-caught-wait-mechanisms]] — sub-kernel-notes brought current: the caught-note interruptible wait (item 11 + N-3 guard), the siglongjmp in_handler clear (bug-2), and the phenotype handler-time mask
@@ -138,5 +139,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-05 [[chg-2026-09-05-beacon-layout-fold]] — The H-4c layout gesture folded into sub-beacon: ObjType::Layout (type=layout) + the three verbs.default layout rules
 - 2026-09-05 [[chg-2026-09-05-boot-banner-mirror-recount]] — abi-boot-banner recount: the prose caught up to the twenty-eight-mirror set
 - 2026-09-05 [[chg-2026-09-05-caps-fork-inherit]] — sub-kernel-caps brought current: the Linux-clone fork-inherits-caps (rfork_forked_with_caps) + the resolved comment drift -- its first EARNED update
-- 2026-09-05 [[chg-2026-09-05-crate-extraction-sweep]] — The crate extractions -- the refactor the 2026-08-04 sweep named finally landed
 <!-- generated:end -->
