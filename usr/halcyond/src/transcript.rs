@@ -887,6 +887,25 @@ impl Transcript {
         if self.table.is_some() {
             self.close_op(Op::Table);
         }
+        // Symmetric with the table arm: an open `pre` at a block boundary is
+        // finalized into THIS block, where its cells' block-relative style
+        // indices are valid. Without it the Item::Pre commits to the fresh block
+        // below (0 styles) and layout_block's `b.styles[sid]` panics on a stale
+        // index -- reachable from an untrusted tile stream interleaving a
+        // ScrollOff (or a tile-split's set_max_cost) between pre-open and
+        // pre-close. Inline (no re-entrant enforce_block_cap -- the mem::replace
+        // below freezes this block); a pre spanning a block-freeze is split, its
+        // post-freeze content resuming as ordinary lines.
+        if let Some(lines) = self.pre.take() {
+            let mut cost = 0usize;
+            for l in lines.iter() {
+                cost += l.cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
+            }
+            self.open.cost += cost;
+            self.stored_cost += cost;
+            self.open.items.push(Item::Pre(lines));
+            self.pre_bytes = 0;
+        }
         let keep = self.open.has_content() || self.open.kind != BlockKind::Foreign;
         let id = self.next_id;
         self.next_id += 1;
@@ -2143,6 +2162,46 @@ mod tests {
             lb.rects.iter().any(|r| r.color == sheet.rule && r.w == 2),
             "the 2px leading gutter rule"
         );
+    }
+
+    #[test]
+    fn pre_spanning_a_block_freeze_lays_out_without_panic() {
+        // F1 (P0): a `pre` open when its block freezes must be finalized into
+        // THAT block -- else its Item::Pre commits to the fresh block (0 styles)
+        // carrying the old block's style indices, and layout_block's
+        // `b.styles[sid]` panics on the stale index. Reachable from an untrusted
+        // tile stream: a ScrollOff, or a tile-split's set_max_cost, between
+        // pre-open and pre-close. Pre-fix this panics in layout_block.
+        let mut t = Transcript::new(daylight());
+        // Content before the pre gives the open block an item + cost to freeze on.
+        t.feed(&frames(&[F::Text("before\n")]));
+        // Open a pre + a styled line: the pre cell interns a style index into the
+        // CURRENT open block; the pre line rides self.pre, not the block items.
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/bin")]),
+            F::Text("/bin"),
+            F::Close(Op::Obj),
+            F::Text("\n"),
+        ]));
+        // Freeze the open block WHILE the pre is open (the tile-split trigger);
+        // the fresh open block has zero styles.
+        t.set_max_cost(1);
+        t.feed(&frames(&[F::Close(Op::Pre)]));
+        // Lay out every block -- pre-fix one panics on the stale style index.
+        let mut gs = crate::raster::GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        for b in t.frozen_blocks() {
+            let _ = crate::layout::layout_block(b, 400, &sheet, &mut gs);
+        }
+        let _ = crate::layout::layout_block(t.open_block(), 400, &sheet, &mut gs);
+        // No panic reached here; the pre was finalized into a block, not lost.
+        let has_pre = t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(t.open_block()))
+            .any(|b| b.items.iter().any(|it| matches!(it, Item::Pre(_))));
+        assert!(has_pre, "the pre was finalized into a block, not lost");
     }
 
     #[test]

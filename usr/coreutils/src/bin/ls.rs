@@ -333,6 +333,12 @@ fn list_long_dir(
     Ok(())
 }
 
+// F4 (PL-arc audit): the rich pre-box below emits the box vertical as a
+// `\u{2502}` str literal (s.text needs &str; boxd::V is a char). Pin the
+// coupling so a change to boxd::V breaks the build, not the pre-box's strip
+// identity against emit_row's SGR box (#230 lifted-constant).
+const _: () = assert!(boxd::V as u32 == 0x2502);
+
 /// Render `entries` as a long listing titled `title`. Color on -> the boxed
 /// presentation with the REALM + QID columns; color off -> the same columns
 /// space-separated with no box / header / color (parseable + byte-clean); Rich
