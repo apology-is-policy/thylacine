@@ -562,6 +562,22 @@ constant its own body records as removed. A doc can rot against itself when an
 edit updates the prose and leaves the caveat; the stub names the contradiction so
 the next reader is not misled by it. `68 absorbed / 89 live`.
 
+The same pattern recurred one doc later, which is why it is worth naming as a
+class: `28-syscall` (the P3-Ec two-syscall minimum, `SYS_EXITS`/`SYS_PUTS`,
+superseded by the frozen ~107-syscall ABI) carries a caveat 1 -- "no userspace
+pointer validation at v1.0, a bad VA extincts the kernel" -- that its own `#76`
+and R12 body flatly contradicts (the staging path validates the VA and recovers
+from a fault via a fixup label, a whole-op EFAULT, never an extinction). Zero-fold
+again: the dispatcher, staging, and `SYS_PUTS`/`SYS_EXITS` paths all live in
+`sub-kernel-syscall-dispatch` (fresh from this run's A-3 fold) + `sub-kernel-proc`
++ `sub-kernel-cons`. Two milestone docs stubbed, two headers caught arguing with
+their own bodies -- the tell that a doc has been edited forward without its
+caveats being re-read. `69 absorbed / 88 live`. The next two docs on the pile --
+`99-fs-permission` (the A-2 rwx layer, sibling of this run's A-3 work) and
+`08-exception` (the vector machinery, and the `#713` eret-race that was the
+year-long "AEGIS corruption" ghost) -- are load-bearing, not milestones, and are
+teed up for a fresh session at full budget rather than squeezed into a runway.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
