@@ -101,14 +101,23 @@ makes agreeing them a conscious decision. A Fable DIVERSITY round stays owed on
 s7a (+ PL) when credits return -- non-blocking; a fallback that finishes is a
 closed round.
 
-**Left open.** s7a-4 (a mac boot-verify: confirm the session still boots with
-the new `/env` write, and add a `halcyond: palette published` marker) is
-deferred -- aux holds the mac ~3.4h; the `/env` inheritance is proven-by-parts
-(the identical `SESSION_ENV_PATH` write is a tested analog), and the visual (nora
-actually rendering Daylight) is the operator's next-session confirmation. The
-vault has queued the 4-dossier fold + a `/env/HALCYON_PALETTE` abi-note (call
-0067). s7b/s7c (the OTHER two s7 bugs: wrong pts winsize, and the alt-screen /
-`raw_vt_intent` teardown) still need a live mac repro -- separate from the theme.
+**s7a-4 landed the same run, once the operator flagged the mac free.** A
+`halcyond: palette published (N bytes)` runtime marker on the successful write +
+an ls-gfx-session leg asserting it (placed between the Direct-handoff and
+root-tile-spawn expects, where the write lands). The FULL session E2E passed
+[76s] with the new `/env` write -- login -> session -> tiles -> menu -> split ->
+zoom -> logout -> re-login -> rc-restore, so no regression -- and the marker
+fired live at **139 bytes** (the 11 Daylight roles), the step order confirming it
+lands before the first tile spawn (raw marker x2 = the first session + the H-4c
+re-login). So the write half is proven at runtime; the inheritance rides the
+tested `SESSION_ENV_PATH` analog + the audit; nora's visual Daylight is the
+operator's next-session confirmation.
+
+**Left open.** s7b/s7c (the OTHER two s7 bugs: wrong pts winsize, and the
+alt-screen / `raw_vt_intent` teardown) still need a live mac repro that drives
+nora in a tile -- separate from the theme. A Fable diversity round on s7a (+ PL)
+stays owed when credits return (non-blocking). The vault has queued the 4-dossier
+fold + a `/env/HALCYON_PALETTE` abi-note (call 0067).
 
 ## Run 37 (vault, 2026-09-06, Opus 4.8, effort max): the tiered code->dossier reminder -- the operator's ratified priority, and why the escape forced a commit-msg hook
 
