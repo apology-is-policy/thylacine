@@ -814,6 +814,32 @@ exec/fork arc, the memory allocators -- are now dossier-first; what remains thin
 toward bringup probes and the still-unwritten uncovered set. `1e3dfb62`, fixup
 `84672c56`, both mirrors. Seven chunks since the second self-compact.
 
+### Run 37 continued: 126-revenant, and the moment I caught myself tunneling
+
+REVENANT, the I-36 audit-trigger surface: a binary paged in on fault, the seven
+soundness conditions. It absorbed cleanly -- every condition already enforced in a
+fresh dossier, warm from the two chunks before it. `sub-kernel-image` is literally
+titled around the proof that eviction cannot race a mapper; the fault arm's
+file-backed miss (the one arm that sleeps, with its deliberate lock-break) is in
+`sub-kernel-fault`, where I had folded #137 an hour earlier; the qid-version key
+that makes close-to-open coherence free is right there in the Image cache. Zero
+fold, and the ledger tips past halfway: `79 absorbed / 78 live`.
+
+The more useful thing happened just before this chunk. I had written in my own
+notes that the vein was "thinning to lower-value test-probes", and I was about to
+spend a chunk forcing an awkward stub for `/attach-probe` -- a test binary no
+dossier even witnesses. Before committing to it I ran an actual census of the 78
+live docs instead of trusting my own summary, and it was plainly wrong: what
+remains is not thin, it is *big* -- `145-vivarium` at 3792 lines, `149-warp` at
+2261, loom, weft, tapestryd, debug-fs, allowance, most of them audit-trigger
+surfaces with dossiers already standing. I had let "the high-value small docs are
+done" quietly become "the high-value docs are done", which is a different and
+false claim. The correction cost one `wc -l` over a glob; the tunnel would have
+cost a chunk on a test probe while a 1200-line capability-network reference sat
+unread. A summary of the remaining work is not the remaining work -- re-derive the
+set before you pick from it. `9477bee8`, fixup `b1ed94b9`, both mirrors. Eight
+chunks since the second self-compact.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
