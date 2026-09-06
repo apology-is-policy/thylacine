@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**103 absorbed · 54 live · 157 total.**
+**104 absorbed · 53 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -180,7 +180,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 81-sys-thread.md | absorbed | [[sub-kernel-death]], [[sub-kernel-sched-smp]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-thread]], [[sub-kernel-torpor]], [[sub-kernel-uaccess]] |
 | 82-pouch-pthread.md | absorbed | [[sub-pouch-thread]] |
 | 83-pouch-signals.md | absorbed | [[sub-pouch-signal]] |
-| 84-pouch-libsodium.md | live | — |
+| 84-pouch-libsodium.md | absorbed | [[sub-pouch-seam]], [[sub-substrate-build]] |
 | 85-pouch-stratumd-build.md | live | — |
 | 86-pouch-stratumd-boot.md | live | — |
 | 87-pouch-fstat-lseek.md | absorbed | [[sub-pouch-fs]] |
