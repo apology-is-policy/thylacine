@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/135-pty-kernel (the PTY-1 kernel arc, I-20): fold the STOP-class note consumption (#252 masked reader + the notes_stop_dequeue P1) into sub-kernel-notes"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["277b57ad"]
 touched: [sub-kernel-notes]
 established: []
 closed: []
