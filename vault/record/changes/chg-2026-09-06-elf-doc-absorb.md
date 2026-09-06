@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/21-elf (P2-Ga ELF loader): superseded by sub-kernel-elf (more current -- 24 error codes, ELFOSABI_GNU, D-2/D-4); zero-fold stub"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["ed0047ab"]
 touched: []
 established: []
 closed: []
