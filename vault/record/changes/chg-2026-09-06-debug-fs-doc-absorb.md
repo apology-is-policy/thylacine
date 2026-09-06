@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/134-debug-fs (I-39 debug surface): fold the die-with-launcher exitkill release into sub-kernel-devproc"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["a031a7b8"]
 touched: [sub-kernel-devproc]
 established: []
 closed: []
