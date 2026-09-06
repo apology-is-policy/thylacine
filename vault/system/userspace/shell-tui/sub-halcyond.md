@@ -29,7 +29,7 @@ guarded-by: []
 validated-by: [prose, gate-interactive]
 locks: []
 hazards: [haz-budget-stored-not-derived]
-abis: []
+abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md"]
 created: 2026-09-05
 updated: 2026-09-06
@@ -117,6 +117,16 @@ session runs UNDECLARED beside the console rather than exiting (login treats
 halcyond's exit as logout, so exiting would re-prompt the seat forever --
 `seam-login-halcyond-fallback`). Once the first surface hosts, `connect`
 re-writes `session on` and takes THAT verdict as `declared`.
+
+**The session publishes its palette to `/env/HALCYON_PALETTE` (s7a-3).** Beside
+the `/env/HALCYON_SESSION` marker, at session start and before the first tile
+spawn, the compositor writes `libhalcyon::theme::daylight_env_palette()` -- the
+Daylight roles as `role=RRGGBB` text ([[abi-halcyon-palette]]) -- to
+`/env/HALCYON_PALETTE`. A tile's hosted program (nora) inherits it via `/env` and
+adopts it, so an editor in a session tile follows the session theme instead of
+painting a hardcoded palette on the Daylight ground. Best-effort by design: the
+write failing just leaves the value unset, and a hosted program keeps its own
+default ([[sub-nora-host]]).
 
 **Death containment (14.11.10).** A clean `Control::Exit(0)` CLOSES the leaf (a
 `close` layout verb) and reaps the tile; a `WireError` / non-clean exit /

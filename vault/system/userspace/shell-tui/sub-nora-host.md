@@ -12,10 +12,10 @@ guarded-by: []
 validated-by: [prose, gate-interactive]
 locks: []
 hazards: []
-abis: []
+abis: [abi-halcyon-palette]
 design: []
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-06
 area: userspace
 ---
 ## Purpose
@@ -59,6 +59,19 @@ the restore explicitly; both are idempotent. Neither runs on a **crash**: a
 native binary aborts on panic, so destructors do not run, which is why the
 shell's post-reap restore is the real backstop. The layer is written knowing its
 own cleanup is best-effort.
+
+### The session palette is adopted once, before the first render
+
+Before it parses arguments, `main` calls `adopt_session_palette`. It starts from
+`theme::BONFIRE`, applies the session's `/env/HALCYON_PALETTE` roles over it if
+present ([[abi-halcyon-palette]]), then the user's `$HOME/.config/nora/palette`
+dotfile over that -- so precedence is **dotfile > /env > BONFIRE** (the dotfile
+wins because it is applied last), and any source that is absent or unparseable
+simply does not apply. It calls `theme::set_palette` exactly once, before the
+first render, which is the whole basis of that global's soundness
+([[sub-nora-view]] Concurrency). An unthemed console keeps Bonfire; an editor in
+a Halcyon session tile follows the session theme without nora knowing anything
+about Halcyon beyond the role vocabulary.
 
 ### Sizing is a round-trip, because there is no syscall to ask
 
@@ -285,4 +298,5 @@ twice.
 
 ## Provenance
 
-[[chg-2026-08-03-nora-host-sweep]].
+[[chg-2026-08-03-nora-host-sweep]] · [[chg-2026-09-06-s7a-palette-destale]]
+(the `adopt_session_palette` startup adoption + [[abi-halcyon-palette]]).

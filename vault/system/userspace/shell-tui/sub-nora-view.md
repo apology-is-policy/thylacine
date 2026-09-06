@@ -15,10 +15,10 @@ guarded-by: []
 validated-by: [prose, gate-interactive]
 locks: []
 hazards: []
-abis: []
+abis: [abi-halcyon-palette]
 design: []
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-06
 area: userspace
 ---
 ## Purpose
@@ -132,6 +132,23 @@ The shell keyword set is a copy of the parser's, because nora cannot import
 `libutopia` — see Caveats for why, and for what the copy is and is not pinned
 against.
 
+### The palette is a runtime value, adopted once at startup (s7a)
+
+Colours are no longer constants. `theme::Palette` is 11 semantic roles plus one
+derived `debug_bg`, and every style constructor reads the palette in force via
+`active()`. Standalone, `active()` is `BONFIRE` -- the byte-pinned console
+default; under a Halcyon session [[sub-nora-host]]'s `adopt_session_palette`
+calls `set_palette` once, before the first render, with the roles from
+`/env/HALCYON_PALETTE` ([[abi-halcyon-palette]]), so an editor in a session tile
+follows the session theme instead of painting Bonfire on a light ground.
+`Palette::with_overrides(text)` applies a `role=RRGGBB` list role-by-role,
+mapping each Halcyon role name to a nora field and ignoring unknown roles,
+malformed hex, comments and blanks -- a hostile or partial source degrades to
+the roles it could parse. The `debug_bg` stopped-line tint is NOT a session
+role: `BONFIRE` carries a hand-tuned literal, but `with_overrides` DERIVES it
+from the adopted `bg`/`ember` (never Bonfire's), so a themed palette's debug
+tint tracks its own colours rather than leaking Bonfire's.
+
 ## Data structures
 
 - **`Diagnostics`** — a flat `Vec<LineDiag>`, deliberately unindexed: a compiler
@@ -152,13 +169,24 @@ against.
   into a tree.
 - **`HlSpan` / `HlClass`** — character-indexed runs. `line_classes` expands them
   to one class per character, which is the form the per-cell painter wants.
-- **`theme`** — colour constants and style constructors, no state.
+- **`theme`** — the runtime `Palette` (11 semantic roles + one derived
+  `debug_bg` tint) and its style constructors, read through `active()`. Since
+  s7a it is set-once global state, not constants: a `static ACTIVE` (an
+  `UnsafeCell<Palette>`, `BONFIRE` until adopted) written once at startup by
+  `set_palette` before the first render (see Concurrency). Roles are adopted
+  from the session palette ([[abi-halcyon-palette]]) via `with_overrides`.
 
 ## Concurrency
 
-None. Single-threaded, no locks, no shared mutable state, no interior
-mutability. The renderer takes `&Editor` and `&mut Buffer` and touches nothing
-else.
+Single-threaded, no locks. Since s7a there is one piece of shared mutable
+state: `theme::ACTIVE`, a `static UnsafeCell<Palette>` with an `unsafe impl
+Sync`, and its soundness rests entirely on a set-once-before-render discipline
+-- `set_palette` runs once at startup, before any render reads `active()`, so no
+concurrent reader/writer ever exists. A debug-build `AtomicBool` asserts the
+at-most-once half loudly (a stray second call -- e.g. a `--lib` unit test
+mutating the global from a parallel host thread -- trips rather than races) and
+compiles out in release, so device codegen is unchanged. Apart from that cell
+the renderer takes `&Editor` and `&mut Buffer` and touches nothing else.
 
 ## Invariants enforced
 
@@ -299,4 +327,6 @@ dropped; the completion popup formats only the rows it will draw.
 
 ## Provenance
 
-[[chg-2026-08-03-nora-view-sweep]].
+[[chg-2026-08-03-nora-view-sweep]] · [[chg-2026-09-06-s7a-palette-destale]]
+(the s7a runtime `Palette` + the corrected no-state/no-interior-mutability
+claims + [[abi-halcyon-palette]]).

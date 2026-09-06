@@ -15,10 +15,10 @@ guarded-by: []
 validated-by: [prose]
 locks: []
 hazards: []
-abis: []
+abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md"]
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -50,7 +50,10 @@ everything else is pure `no_std` + `alloc`.
 `theme::DAYLIGHT` is the `Theme` (colours + syntax), `theme::METRICS` the
 `Metrics`, `theme::hairline(&Theme)` the derived rule colour, and
 `theme::daylight_palette()` the `vt::Palette` a per-tile kaua-term stamps its
-cells in. `layout::serialize`/`parse` round-trip a `LayoutNode` tree to and
+cells in, and `theme::env_palette(theme)` (with `daylight_env_palette()` its
+`DAYLIGHT` specialization) the `role=RRGGBB` text a Halcyon session publishes to
+`/env/HALCYON_PALETTE` ([[abi-halcyon-palette]]). `layout::serialize`/`parse`
+round-trip a `LayoutNode` tree to and
 from the `halcyon-layout v1` text; `layout::prune_env` drops the env-marker
 leaves; `layout::from_render_text` builds a tree from the compositor's own
 dump (the D-decision read side). `skeleton::plan` turns a `LayoutNode` into a
@@ -67,6 +70,20 @@ coherently with halcyond's transcript. Colours are `Argb` (0xAARRGGBB,
 opaque). The `Theme` struct is theme-agnostic -- Frutiger Aero (deferred) is a
 second const of the same shape -- so nothing structural changes when a second
 theme lands.
+
+**`env_palette` is the WRITE side of the palette seam.** `theme::env_palette(theme)`
+renders the `Theme` as the 11-role `role=RRGGBB` text the session publishes to
+`/env/HALCYON_PALETTE` ([[abi-halcyon-palette]]) -- the program-agnostic roles
+(`bg fg dim accent surface border` + the five syntax roles), each emitted with
+the opaque alpha byte dropped, which a hosted pts program (nora) adopts by name.
+One role mapping is a deliberate judgement worth keeping: the **`surface` role
+resolves from `Theme.header`, NOT `status_bg`.** `surface` is a lifted PANEL a
+program paints its own dark ink on (nora's status bar, popups, current-line);
+`status_bg` is Halcyon's own dark bottom strip worn with the light `status_fg`,
+so a program painting its `fg` on it would render dark-on-dark. `header` is the
+light lift that keeps the contrast. This is the concrete write side of the `vt`
+palette-seam comment named for v1.x; the roles are host-tested against the
+`DAYLIGHT` scripture (`daylight_matches_the_scripture`).
 
 **`layout` parses UNTRUSTED input and is written to prove it can't be made to
 fault.** A layout file lives in the user's `$home`, so `parse` is bounded on
