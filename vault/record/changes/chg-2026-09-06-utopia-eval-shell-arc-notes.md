@@ -4,7 +4,7 @@ type: chg
 title: "sub-utopia-eval de-stale: the && / || eval half, the six-entry $path, cd --, and the settled notes-mask changes (#237 pipe default, on-note unmask, mask tty:*)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["8b78b921"]
 touched:
   - sub-utopia-eval
 established: []
