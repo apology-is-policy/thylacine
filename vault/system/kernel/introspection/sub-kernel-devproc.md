@@ -16,7 +16,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -90,6 +90,15 @@ Two properties make that safe, and both are external to this file:
   is always cleared before the Spoor it names can be reallocated. If the close
   hook were ever made conditional, or the free reordered ahead of it, this whole
   design becomes a stale-pointer match.
+- **The release gate is atomic, and must stay so.** The close hook *is*
+  conditional — it releases `debug_owner` only when the ctl Spoor's
+  `CDEBUGOWNER` flag is set — so that flag is read and written through
+  `spoor_flag_get`/`spoor_flag_set`, not a bare `|=`. The Spoor's `flag` word is
+  RMW'd cross-domain (a fork shares the Spoor, and `fcntl(CNONBLOCK)` writes the
+  same word, under a table lock), and a non-atomic RMW that dropped
+  `CDEBUGOWNER` would silence the release and hand the design straight back the
+  stale-pointer match the bullet above rules out. The atomic accessors are what
+  keep that ruling true under a concurrent `fcntl`.
 
 The close hook runs **outside** `g_proc_table_lock` — a precondition, not an
 observation. It is reached from `handle_release_obj` and from the last-thread-out
@@ -404,4 +413,4 @@ performance backlog.
 
 ## Provenance
 
-[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devproc-park-predicate]].
+[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devproc-park-predicate]] · [[chg-2026-09-06-devproc-atomic-cdebugowner]].
