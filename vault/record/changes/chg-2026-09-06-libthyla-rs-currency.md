@@ -4,7 +4,7 @@ type: chg
 title: "sub-libthyla-rs de-stale: a date-field staleness, not a content one -- the H-4d-1 fold brought the body current but left updated: at 2026-08-15, so the stale tool re-flagged 12 byte-identical files"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["4e574cba"]
 touched:
   - sub-libthyla-rs
 established: []
