@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/117-allowance (I-34 hardware allowance): zero-fold; ref doc stale on the audit-F1 install-under-lock UAF"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["1f68b95e"]
 touched: []
 established: []
 closed: []
