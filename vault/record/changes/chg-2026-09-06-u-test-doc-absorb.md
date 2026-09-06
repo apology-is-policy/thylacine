@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/90-u-test (libthyla-rs integration smoke test binary): zero-fold, redirect stub -- a test probe has no dossier owner"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["417aa391"]
 touched: []
 established: []
 closed: []
