@@ -4,7 +4,7 @@ type: chg
 title: "libdriver-grant de-stale: the H-4b-1 caps = [...] fork-grantable-capability vocabulary (the closed Cap enum, named-not-numbered, fail-closed parse)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["d8281e1f"]
 touched:
   - sub-libdriver-grant
 established: []
