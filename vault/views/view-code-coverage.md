@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**409 owned · 75 unowned · 484 files (84% owned) · ~19548 unswept lines.**
+**411 owned · 73 unowned · 484 files (84% owned) · ~19011 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30431 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -73,8 +73,8 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/ports | 0 | 18 | 4033 |
-| kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
+| kernel | 118 | 20 | 2898 |
 | usr/halcyon | 0 | 2 | 1739 |
 | usr/quarry | 0 | 1 | 1028 |
 | usr/lib | 56 | 3 | 461 |
@@ -124,7 +124,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/halcyon/src/main.rs | 1275 |
 | usr/quarry/src/main.rs | 1028 |
-| kernel/joey.c | 478 |
 | usr/halcyon/src/lib.rs | 464 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 390 |
@@ -182,7 +181,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/ports/gnumake/generated/fnmatch.h | 64 |
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
 | kernel/include/thylacine/cpio.h | 61 |
-| kernel/include/thylacine/joey.h | 59 |
 | kernel/include/thylacine/extinction.h | 58 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.h | 52 |

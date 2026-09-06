@@ -132,6 +132,15 @@ tree. Each re-graft is `mkdir`-then-`MREPL`, and the `mkdir` must be
 idempotent because the pool persists across reboots and a later boot finds
 its own directories already there.
 
+**`/dev/pts` is grafted separately, after the swap, once ptyfs is up** — it is
+not one of the seven carried handles because its tree does not exist until joey
+spawns `/sbin/ptyfs`. After the spawn and a liveness connect, joey does a fresh
+open-is-connect of `/srv/ptyfs` (a 9P-mode service open yields a mountable
+dev9p root) and `MREPL`-mounts it over the `pts` synthetic stub the `/dev`
+(devdev) tree already provides — **no `mkdir`**, because the devdev walk is the
+mount point. It is boot-fatal on failure: ptyfs has no hardware or external
+dependency, so a failure there is always a defect, never an environment.
+
 `/srv` must survive because the retired `SYS_SRV_CONNECT` bypassed the
 namespace and its replacement — open-is-connect — resolves *through* it.
 `/bin` exists because the disk root holds user data only; the boot medium
