@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/151-libhalcyon (the Halcyon environment library): fold the UNOWNED halcyon tool + tag.rs into sub-libhalcyon"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["f41a0a65"]
 touched: [sub-libhalcyon]
 established: []
 closed: []
