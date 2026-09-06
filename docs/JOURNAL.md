@@ -716,6 +716,35 @@ hide. `a44662e1`, fixup `a99b06eb`, both mirrors. `74 absorbed / 83 live`.
 
 ---
 
+### Run 37 continued: 24-per-proc-pgtable -- a clean zero-fold, and two ways verify-before-fold earned its keep on an easy one
+
+A palate-cleanser after execve: the Phase-3 per-Proc page-table allocator, which
+turned out zero-fold -- `sub-kernel-mmu` owns the allocator and the W^X PTE
+encoding, `sub-kernel-addrspace` the `pgtable_root` field, `sub-kernel-sched-smp`
+the TTBR0 install, `sub-kernel-asid` the teardown TLB lifecycle. But even an easy
+one paid for the discipline twice. First, when I asked quaestor who owns
+`arch/arm64/pgtable.c`, it answered UNOWNED -- and for a moment that reads as a
+coverage gap, a code file no dossier claims. It isn't: the file *doesn't exist*.
+I had synthesized the path from the doc's title, and quaestor dutifully reported
+that nothing owns a file that isn't there. The allocator lives in `mmu.c`; a grep
+settled it in one line. A probe built on a path you invented tells you about your
+invention, not the tree.
+
+Second, the doc carries a threading trip-hazard in bold -- "Phase 5+ multi-thread
+Procs need a per-Proc pgtable lock", because two CPUs faulting on the same address
+space could each allocate a fresh sub-table and leak one. With peer threads now
+sharing the AddrSpace, that would be a live race if it were still open. Reading
+the mmu dossier's Concurrency section showed it closed: the demand-fault path
+holds the address-space lock across the whole resolve-and-install, so the walk is
+serialized. The doc also still says `pgtable_root` hangs off the Proc; since L-4
+it hangs off the AddrSpace, which is exactly what lets those peer threads share
+one. Both are the good kind of stale -- a hazard resolved and a field relocated,
+caught by reading the current owner rather than carrying the doc's TODO forward.
+`767181bf`, fixup `88e8c51a`, both mirrors. `75 absorbed / 82 live` -- four chunks
+since the second self-compact.
+
+---
+
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
 
 **PL-5 -- the `pre` PRODUCER (`ea731dd8`).** PL-1b (run 34) built the `pre`
