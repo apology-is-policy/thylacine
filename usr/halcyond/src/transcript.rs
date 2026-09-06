@@ -630,6 +630,10 @@ impl Transcript {
                 };
                 self.hdr = level;
             }
+            // `pre` is a paired block; halcyond renders it specially (mono +
+            // code-block chrome) at PL-1b. Until then, ignore the frame -- its
+            // payload still renders as ordinary text (strip-equivalent).
+            Op::Pre => {}
             Op::Mark | Op::Rule => {} // point ops; a paired open is malformed -- ignore
         }
     }
@@ -704,6 +708,7 @@ impl Transcript {
             Op::Hdr => {
                 self.hdr = 0;
             }
+            Op::Pre => {} // PL-1b renders `pre`; ignored until then (PL-1a)
             Op::Mark | Op::Rule => {}
         }
     }
