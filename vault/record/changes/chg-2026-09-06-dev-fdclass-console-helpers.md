@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-dev de-stale: dev.h gains the devdev_fd_devclass / spoor_is_console decls + the extern devcons (the header side of the devdev fd-class + console-identity work)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["d102f449"]
 touched:
   - sub-kernel-dev
 established: []
