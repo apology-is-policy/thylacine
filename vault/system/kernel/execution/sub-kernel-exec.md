@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -206,6 +206,43 @@ thread no program name, which the rewrite needs, so a *dynamic* pheno-mount
 binary loads through `SYS_SPAWN_FULL_ARGV` and refuses loudly on the others —
 every shipped pheno-mount binary is static, so no caller meets it today.
 
+### Two execve front ends, one core, and the blob that belongs to the caller (L-6a)
+
+`execve` has two entry shapes and one body. `sys_execve_core` takes arguments
+**already copied into kernel memory**; the two front ends differ only in how they
+get there. The native `sys_execve_handler` receives the Thylacine ABI — a single
+pre-concatenated argv blob — and copies it out of user memory. `viv_execve`
+receives the Linux ABI, an *array* of `char *` pointers, and repacks it into a
+blob in kernel memory (there is no user VA it could hand the core, since the old
+address space is about to vanish). One ordering, two shapes.
+
+**The packing contract is validated once, in the core, below both builders** —
+`exec_build_init_stack` extincts when the NUL count disagrees with `argc`, so a
+mis-built blob becomes `-EINVAL` before the loader rather than a dead kernel, and
+a bug in *either* front end is caught at the one chokepoint.
+
+**The blob belongs to the caller on every path**, and getting that wrong was a
+heap corruption, not a leak. The pre-split body freed the blob inside what became
+the core; carrying those frees across the split double-freed on **every** execve,
+and it surfaced as a mangled argv blob in an *unrelated later spawn*, nowhere near
+execve — the signature of a stale comment that stated the ownership rule before
+the body was adjusted to match it. The strv walk is also **two passes, the second
+bounded by the first**: pass one measures, pass two copies capped by that count
+and writes each terminator itself, so the blob has exactly `argc` of them whatever
+the strings did in between — the [[inv-i30]] snapshot discipline, removing the
+class rather than resting on "no concurrent writer exists today."
+
+**envp's asymmetry is deliberate, and its former decline was a detector (#140).**
+Before #140 a non-empty envp was *refused* — not a stub, but because the effect
+could not be produced at any layer (musl does `__environ = envp`, and only `/env`
+carried anything), so serving an empty envp exactly and refusing a non-empty one
+made the gap a detector rather than a silent loss. It fired at #151: a busybox
+`ash` synthesizes `SHLVL`, so its envp is non-empty even from an empty
+environment. #140 built the frame half. The lasting asymmetry: the **native**
+`SYS_EXECVE` has no envp argument and *preserves* — it projects the caller's own
+`/env` onto the new stack; the **Linux** `viv_execve` follows POSIX, so an empty
+envp now means an empty environment, not an inherited one.
+
 ## Data structures
 
 No types of its own. It consumes `struct elf_image` from [[sub-kernel-elf]] and
@@ -393,6 +430,12 @@ non-executable segments: [[chg-2026-08-15-exec-lineage]]. DISTRO D-4 added the
 phenotype as `exec_load_into`'s `pheno` parameter — the Leg-C dispatch reads
 the parameter, never `nsp->phenotype`, and the loader never writes it (the
 commit is [[sub-kernel-proc]]'s): [[chg-2026-09-05-exec-phenotype]].
+
+[[chg-2026-09-06-execve-doc-absorb]] folds the L-6a execve-core front-end story
+absorbed from docs/reference/147: the two front ends (`sys_execve_core` +
+native/`viv_execve`), the caller-owns-the-blob double-free lesson, the two-pass
+I-30 argv/envp bound, and the envp #140 decline-as-detector + the native-preserves
+/ Linux-empty asymmetry.
 
 ## Tests
 

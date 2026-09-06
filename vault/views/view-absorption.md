@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**73 absorbed · 84 live · 157 total.**
+**74 absorbed · 83 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -103,7 +103,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 145-jit.md | live | — |
 | 145-vivarium.md | live | — |
 | 146-addrspace.md | absorbed | [[sub-kernel-addrspace]] |
-| 147-execve.md | live | — |
+| 147-execve.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-asid]], [[sub-kernel-exec]], [[sub-kernel-handle]], [[sub-kernel-proc]], [[sub-kernel-sched]], [[sub-kernel-vivarium]] |
 | 148-fork.md | live | — |
 | 149-warp.md | live | — |
 | 15-scheduler.md | absorbed | [[seam-eevdf-math]], [[sub-kernel-rendez]], [[sub-kernel-sched-smp]], [[sub-kernel-sched]] |
