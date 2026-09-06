@@ -4,7 +4,7 @@ type: chg
 title: "entry cluster stubs: close 01-boot's PL011 debt (task #32, now sub-kernel-uart) and stub 31-trivial-devs (multi-redirect dev/content/cons/uart; a heavily-superseded P4-B doc, every live atom already homed) -- 64 absorbed / 93 live"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["f010494f"]
 touched: []
 established: []
 closed: []
