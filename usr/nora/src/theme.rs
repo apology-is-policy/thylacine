@@ -51,8 +51,14 @@ pub struct Palette {
     /// against the ember accent without leaving the family (a raw ANSI red clashes).
     pub rust: Color,
     /// The debugger's stopped-line background -- a warm tint of `bg` toward
-    /// `ember`. Not a session role (no palette conveys it): `BONFIRE` pins the
-    /// Bonfire value and the from-roles constructor derives it (s7a-2).
+    /// `ember`. Not a session role (no palette conveys it). `BONFIRE`'s value is
+    /// the hand-tuned pre-refactor literal; `with_overrides` instead DERIVES it
+    /// via `blend(bg, ember, 3, 16)`. The two deliberately differ for Bonfire's
+    /// own inputs (the eye-tuned literal is not a uniform blend) -- but never on
+    /// one palette: standalone nora reads `BONFIRE.debug_bg` and never calls
+    /// `with_overrides`, while a themed palette derives from ITS bg/ember (never
+    /// Bonfire's), so the divergence is inert. `bonfire_derived_debug_tint_
+    /// documents_the_split` pins that this is intended, not drift.
     pub debug_bg: Color,
 }
 
@@ -205,6 +211,21 @@ pub fn active() -> &'static Palette {
 /// render: nora is single-threaded and this is deliberately not synchronised
 /// for concurrent or mid-render use.
 pub fn set_palette(p: Palette) {
+    // The `Sync` impl's soundness rests on this being called at most once,
+    // before any render reads `active()`. That invariant is otherwise
+    // convention-only, so enforce the "at most once" half in debug/test builds:
+    // a stray second call (e.g. a `--lib` unit test mutating the global the host
+    // harness reads from parallel threads) trips loudly here instead of racing.
+    // Compiles out in release, so device codegen is unchanged.
+    #[cfg(debug_assertions)]
+    {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        static SET: AtomicBool = AtomicBool::new(false);
+        debug_assert!(
+            !SET.swap(true, Ordering::Relaxed),
+            "theme::set_palette called more than once -- the set-once invariant is broken"
+        );
+    }
     // SAFETY: single-threaded, called once at startup (see `Active`).
     unsafe {
         *ACTIVE.0.get() = p;
@@ -471,6 +492,23 @@ mod tests {
         assert_eq!(BONFIRE.slate, Color::Rgb(0x8a, 0x9a, 0xc8));
         assert_eq!(BONFIRE.rust, Color::Rgb(0xd0, 0x5a, 0x4a));
         assert_eq!(BONFIRE.debug_bg, Color::Rgb(0x33, 0x1e, 0x12));
+    }
+
+    // The debugger tint deliberately differs between standalone BONFIRE (a
+    // hand-tuned literal) and the derived path (blend of bg toward ember): the
+    // eye-tuned Bonfire value is not a uniform blend. This pins that the split
+    // is INTENDED -- if a future change makes them equal (e.g. re-deriving
+    // BONFIRE's debug_bg), both asserts trip and force a conscious decision.
+    #[test]
+    fn bonfire_derived_debug_tint_documents_the_split() {
+        // Standalone reads the literal (byte-pinned above); the themed path
+        // would derive a DIFFERENT value for Bonfire's own inputs.
+        assert_ne!(BONFIRE.debug_bg, blend(BONFIRE.bg, BONFIRE.ember, 3, 16));
+        // The derivation is well-defined -- this is what a themed palette gets.
+        assert_eq!(
+            blend(BONFIRE.bg, BONFIRE.ember, 3, 16),
+            Color::Rgb(0x35, 0x20, 0x15)
+        );
     }
 
     // The default active palette is BONFIRE, so an unthemed nora renders exactly

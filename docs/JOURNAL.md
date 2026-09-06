@@ -23,6 +23,93 @@ needed the operator.
 
 ---
 
+## Run 38 (main, 2026-09-06, Opus 4.8, effort max): s7a -- nora follows the Halcyon session palette, and the two things reasoning caught before a boot could
+
+**The arc.** s7 is the operator's worst residual Halcyon P0: an editor opened
+from a tile's context menu (`nora`) paints its hardcoded Bonfire palette even
+inside a light Daylight session (`thylacine-aux/docs/Found issues.txt`). Last
+run root-caused it (nora hardcodes Bonfire; the launch is `nora '/path'` typed
+into the tile pts) and the operator ratified the fix by AskUserQuestion: nora
+follows the terminal palette via **resolved RGB in `/env`** + a nora dotfile
+override. This run built the reads+writes loop in three sub-chunks, all host-
+tested + device-built + pushed (`fedcff08..efc779d5`):
+
+- **s7a-1 `ecea18d1`** -- nora's palette became a runtime value. The 11 Bonfire
+  role `const`s + two inline debug literals became a `Palette` struct (11 roles
+  + a derived `debug_bg`), `BONFIRE` the default, and a set-once global
+  (`UnsafeCell<Palette>` + `unsafe impl Sync`, `active()`/`set_palette`).
+  Bonfire stays active by default, so the console is byte-identical (a pure
+  refactor boundary; the byte-pins guard it). host nora 241 (+3).
+- **s7a-2 `6e39ae7e`** -- the reads. A PURE `Palette::with_overrides(text)`
+  parser (host-tested) + `adopt_session_palette()` reading `/env/HALCYON_PALETTE`
+  then `$HOME/.config/nora/palette`, precedence dotfile > /env > BONFIRE. host
+  nora 246 (+5).
+- **s7a-3 `233a18fe`** -- the writes. `libhalcyon::theme::env_palette` (pure,
+  host-tested next to DAYLIGHT so it cannot drift) + halcyond `session.rs` writes
+  the palette to `/env/HALCYON_PALETTE` before the first tile spawn, so tiles
+  inherit it. host libhalcyon 42 (+1).
+
+**Wrong turn #1, caught by reasoning about a consumer -- the panel role.** The
+ratified design note said `/env "surface"` resolves from `DAYLIGHT.status_bg`.
+Implementing the resolver, I traced every use of nora's `bar`/surface role:
+`statusbar()`, `current_line()`, the popups -- all paint nora's own `fg` (dark
+ink, `0x1A120A`) ON that role as the background. `DAYLIGHT.status_bg` is
+`0x1A120A` -- the same dark ink (it is Halcyon's dark bottom strip, worn with a
+LIGHT `status_fg`). So the design note's mapping would have rendered nora's
+status bar dark-on-dark: unreadable. Resolved `surface <- DAYLIGHT.header` (the
+light lift) instead, discrimination-pinned (`surface=cec4b6` AND NOT
+`surface=1a120a`). A legibility fix inside the ratified direction, reported for
+the operator, not a new fork. The catch was reading the consumer, not the
+palette -- a value collision (`status_bg == fg`) would have hidden it from a
+value-only test, which is why the negative control (`!surface=1a120a`) is there.
+
+**Wrong turn #2, caught by read-scripture-not-memory -- the vt comment.** My own
+resume note (and the s7 design memo) claimed `vt/lib.rs:135-144` already named
+this seam ("v1.x: the compositor plumbs the palette to programs (an env var)")
+and I should "promote it to as-built." Reading the actual comment: it says the
+compositor plumbs the palette **to the kaua-term** (the grid RENDER palette),
+which I did NOT build (kaua-term still stamps via `daylight_palette()`). My seam
+plumbs a palette to a PROGRAM's own SGR -- a different, new thing. Editing that
+comment would have shipped a false as-built claim. Left vt untouched; amended
+`HALCYON.md 14.13`'s alt-screen bullet instead (which literally said "Bonfire is
+correct there") to record the ratified change, and corrected the memory.
+
+**The unsafe global, prosecuted.** The `unsafe impl Sync` rests on "nora is
+single-threaded, palette set once before the first render." Self-audit ground-
+truthed it: no `thread_spawn` anywhere in nora/kaua/parley (the `Command::new`
+calls spawn gopls/ambush/gofmt as separate PROCESSES, not peer threads);
+`adopt_session_palette()` is `rs_main`'s first statement (`main.rs:88`), before
+`Editor::new` (`:119`) and every render, and nothing reads `active()` earlier.
+The host tests never mutate the global (the harness runs them in parallel
+threads -- a mutation would be a data race green only by luck).
+
+**The audit.** Batched F2 + s7a per double-distance. The Fable round DIED on
+credit exhaustion (HTTP 429) before a report; per never-skip, re-spawned on the
+Opus fallback tier (`a745470c`) rather than retrying Fable. It CLOSED CLEAN --
+0 P0 / 0 P1 / 0 P2, two P3s (MODEL start==end Opus 4.8, no mid-run switch). The
+prosecutor independently reproduced my self-audit's two crux results: the same
+exhaustive thread-spawn search + read-before-write proof on the unsafe global
+(sound), and the parser's boundary inputs traced to panic-freedom. Both P3s were
+fixed in the close: F1 -- the unsafe global's set-once safety was convention-only
+with NO enforcement, so a debug-only one-shot latch now trips a stray second
+`set_palette` loudly (release codegen unchanged) -- the reviewer's point that a
+soundness claim resting on one un-enforced convention is a P3 waiting to become a
+P1; F2 -- `BONFIRE.debug_bg` (`0x331e12`, eye-tuned) diverges from the `blend`
+the themed path derives (`0x352015`), inert in every shipping config but a quiet
+contradiction of the byte-identical claim, now documented + pinned by a test that
+makes agreeing them a conscious decision. A Fable DIVERSITY round stays owed on
+s7a (+ PL) when credits return -- non-blocking; a fallback that finishes is a
+closed round.
+
+**Left open.** s7a-4 (a mac boot-verify: confirm the session still boots with
+the new `/env` write, and add a `halcyond: palette published` marker) is
+deferred -- aux holds the mac ~3.4h; the `/env` inheritance is proven-by-parts
+(the identical `SESSION_ENV_PATH` write is a tested analog), and the visual (nora
+actually rendering Daylight) is the operator's next-session confirmation. The
+vault has queued the 4-dossier fold + a `/env/HALCYON_PALETTE` abi-note (call
+0067). s7b/s7c (the OTHER two s7 bugs: wrong pts winsize, and the alt-screen /
+`raw_vt_intent` teardown) still need a live mac repro -- separate from the theme.
+
 ## Run 37 (vault, 2026-09-06, Opus 4.8, effort max): the tiered code->dossier reminder -- the operator's ratified priority, and why the escape forced a commit-msg hook
 
 The operator returned mid-run last session and ratified two directions by
