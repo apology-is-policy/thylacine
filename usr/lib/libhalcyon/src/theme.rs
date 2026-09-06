@@ -14,6 +14,9 @@
 // palette differs between themes). Frutiger Aero (deferred to a later chunk)
 // is a second `Theme` const of this exact shape; nothing structural changes.
 
+use alloc::string::String;
+use core::fmt::Write as _;
+
 /// 0xAARRGGBB, alpha 0xFF opaque.
 pub type Argb = u32;
 
@@ -181,6 +184,46 @@ pub fn daylight_palette() -> vt::Palette {
     vt::DAYLIGHT
 }
 
+/// The session palette as the `role=RRGGBB` text a Halcyon session publishes to
+/// `/env/HALCYON_PALETTE`, resolved from `theme`. The role names are the
+/// program-agnostic Halcyon palette roles; a hosted pts program maps them to
+/// its own fields (e.g. `nora`'s `theme::Palette::with_overrides`). This is the
+/// WRITE side of the seam `vt`'s palette comment named for v1.x -- the
+/// compositor plumbs its resolved palette to the programs it hosts. Each role's
+/// `Argb` is emitted as `RRGGBB` (the opaque alpha byte is dropped).
+///
+/// The `surface` role -- a lifted PANEL a program paints its own dark ink on
+/// (nora's status bar, popups, current-line) -- resolves from `header`, NOT
+/// `status_bg`: `status_bg` is Halcyon's own dark bottom strip (worn with the
+/// light `status_fg`), so a program that paints its `fg` on it would render
+/// dark-on-dark. `header` is the light lift that keeps that contrast.
+pub fn env_palette(theme: &Theme) -> String {
+    let roles: [(&str, Argb); 11] = [
+        ("bg", theme.surface),
+        ("fg", theme.fg),
+        ("dim", theme.fg_muted),
+        ("accent", theme.ember),
+        ("surface", theme.header),
+        ("border", theme.border),
+        ("moss", theme.syntax.moss),
+        ("dusk", theme.syntax.dusk),
+        ("sand", theme.syntax.sand),
+        ("slate", theme.syntax.slate),
+        ("cinnabar", theme.syntax.cinnabar),
+    ];
+    let mut s = String::new();
+    for (name, argb) in roles {
+        // writeln! into a String is infallible; the `let _` documents that.
+        let _ = writeln!(s, "{}={:06x}", name, argb & 0x00FF_FFFF);
+    }
+    s
+}
+
+/// `env_palette(&DAYLIGHT)` -- the session's Daylight roles as /env text.
+pub fn daylight_env_palette() -> String {
+    env_palette(&DAYLIGHT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +302,34 @@ mod tests {
     #[test]
     fn ember_is_the_bonfire_ember() {
         assert_eq!(DAYLIGHT.ember, 0xFFE07840);
+    }
+
+    // The /env palette the session publishes resolves DAYLIGHT under the
+    // program-agnostic role names a hosted program (nora) reads. A drift in a
+    // role's SOURCE here silently re-themes every hosted program.
+    #[test]
+    fn daylight_env_palette_resolves_every_role() {
+        let text = daylight_env_palette();
+        assert_eq!(text.lines().count(), 11);
+        assert!(text.contains("bg=f2ebe0\n")); // surface
+        assert!(text.contains("fg=1a120a\n")); // fg
+        assert!(text.contains("dim=6a5a48\n")); // fg_muted
+        assert!(text.contains("accent=e07840\n")); // ember
+        assert!(text.contains("border=a89880\n"));
+        assert!(text.contains("moss=3a5818\n")); // syntax.moss
+        assert!(text.contains("dusk=4a3868\n")); // syntax.dusk
+        assert!(text.contains("sand=7a5020\n")); // syntax.sand
+        assert!(text.contains("slate=3a4878\n")); // syntax.slate
+        assert!(text.contains("cinnabar=982818\n")); // syntax.cinnabar
+        // The panel role is the LIGHT lift (header), NOT the dark status strip:
+        // a program paints its own dark ink on it (nora's status bar), so
+        // status_bg would be dark-on-dark. This pins the contrast fix.
+        assert!(text.contains("surface=cec4b6\n")); // header
+        assert!(!text.contains("surface=1a120a\n")); // NOT status_bg (the dark strip)
+        // No alpha leaked: every value is exactly six hex digits.
+        for line in text.lines() {
+            let hex = line.split('=').nth(1).unwrap();
+            assert_eq!(hex.len(), 6, "{line} is not RRGGBB");
+        }
     }
 }

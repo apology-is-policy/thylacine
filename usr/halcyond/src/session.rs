@@ -36,7 +36,7 @@ use halcyond::tile::{Mark, GRID_KEY};
 use halcyond::tiles::{plan_tiles, tile_command};
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
 use kaua_term::{Record, ScreenMode};
-use libhalcyon::theme::daylight_palette;
+use libhalcyon::theme::{daylight_env_palette, daylight_palette};
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Write;
 use libthyla_rs::process::{Child, Command, Stdio};
@@ -118,6 +118,10 @@ const INIT_REAP_POLL_MS: i32 = 200;
 /// only TAGS the leaves it builds -- the compositor hosts each tag in a
 /// terminal tile once the tool's conn is gone.
 const SESSION_ENV_PATH: &str = "/env/HALCYON_SESSION";
+/// The session's resolved theme palette, published for the programs its tiles
+/// run (s7a-3). A hosted pts program (nora) reads it to follow Daylight instead
+/// of a hardcoded palette; the format is `libhalcyon::theme::env_palette`.
+const HALCYON_PALETTE_ENV_PATH: &str = "/env/HALCYON_PALETTE";
 
 /// How many connect iterations tolerate a refused `session on` before the
 /// compositor runs UNDECLARED: the seat may be mid-handover (the previous
@@ -1017,6 +1021,16 @@ pub fn run(home: Option<String>) -> i64 {
         .is_err()
     {
         say!("halcyond: could not mark {}", SESSION_ENV_PATH);
+    }
+    // s7a-3: publish the Daylight palette so a tile's programs (nora) follow the
+    // session theme. Written BEFORE the first tile spawn, so every descendant
+    // inherits it via /env; best-effort, an unset value just leaves the program
+    // on its own default.
+    if File::create(HALCYON_PALETTE_ENV_PATH)
+        .and_then(|mut f| f.write_all(daylight_env_palette().as_bytes()))
+        .is_err()
+    {
+        say!("halcyond: could not write {}", HALCYON_PALETTE_ENV_PATH);
     }
     let mut tiles: BTreeMap<u32, SessionTile> = BTreeMap::new();
     let mut closed: BTreeSet<u32> = BTreeSet::new();
