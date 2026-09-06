@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**99 absorbed · 58 live · 157 total.**
+**100 absorbed · 57 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -51,7 +51,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 09-test-harness.md | absorbed | [[abi-boot-banner]], [[sub-substrate-gates]], [[sub-substrate-interactive]] |
 | 10-gic.md | absorbed | [[inv-i15]], [[sub-kernel-gic]] |
 | 100-9p-identity-presentation.md | absorbed | [[inv-i22]], [[seam-nuname-trust-stamp]], [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-client]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-perm]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-net]], [[sub-stratum-server]], [[sub-stratum-session]], [[sub-substrate-build]] |
-| 101-halls.md | live | — |
+| 101-halls.md | absorbed | [[sub-kernel-halls]] |
 | 102-legate.md | absorbed | [[sub-corvus]], [[sub-kernel-caps]], [[sub-kernel-perm]] |
 | 103-login.md | absorbed | [[abi-boot-banner]], [[sub-corvus]], [[sub-kernel-cons]], [[sub-kernel-devdev]], [[sub-kernel-joey]], [[sub-stratum-boot]], [[sub-stratum-session]] |
 | 104-stalk.md | absorbed | [[inv-i28]], [[sub-kernel-path]], [[sub-kernel-stalk]] |
