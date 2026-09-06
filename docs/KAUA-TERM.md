@@ -122,7 +122,10 @@ kaua-term -> halcyond (ordered):
 - `CellDiff { changed (row,col,cell)[], cursor(row,col,vis) }` -- the live screen.
   (Cells are position-keyed, so intra-batch order is irrelevant -- only the
   boundary order between records matters.)
-- `ScrollOff { rows: cell[][] }` -- normal-mode lines off the top -> the transcript.
+- `ScrollOff { rows: cell[][], wrapped: bool[] }` -- normal-mode lines off the top
+  -> the transcript. `wrapped[i]` is true iff row `i` ended by AUTOWRAP (the grid
+  broke a logical line at `cols`) and continues into row `i+1`, so halcyond rejoins
+  the fragments and re-wraps at word boundaries (PL-3).
 - `Control { osc1936_raw(bytes) | bell | title(str) | exit(code) | winsize_ack }`
   -- the kaua-term forwards OSC 1936 (Beacon-zone frames) RAW, uninterpreted
   (halcyond keeps the Beacon parser -- R5 + its format-fuzz surface), plus BEL,

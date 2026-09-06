@@ -278,7 +278,7 @@ model dispatch (`Tile::apply`, 14.11.2):
 | Record | applied to |
 |---|---|
 | `CellDiff{changed,cursor}` | the live grid (`grid.rs`) |
-| `ScrollOff{rows}` | `Transcript::push_scrolled_rows` (history) |
+| `ScrollOff{rows,wrapped}` | `Transcript::push_scrolled_rows` (history; rejoins soft-wrapped rows) |
 | `Control(Osc1936Raw)` | `Transcript::feed` -- the SAME beacon parser the console uses |
 | `Control(Title/Exit/Bell/WinsizeAck)` | tile fields |
 | `Mode(Normal\|AltScreen)` | the render mode |
@@ -719,7 +719,7 @@ the ring is allocated on the FIRST note and packed to 16-byte slots, so a
 plain tile costs nothing and a rich one `SPAN_MAP_BYTES` = 128 KiB once, a
 fixed per-tile cost outside `SESSION_SCROLLBACK_BUDGET` bounded by the pane
 count -- recorded in the I-32 accounting, not charged to the history it
-would evict). (2) `push_scrolled_rows(rows,
+would evict). (2) `push_scrolled_rows(rows, wrapped,
 &spans)` interns em / obj / hdr from the tags and COPIES an obj from its
 source block into the landing block (`local_obj`, dedup per call through a
 `BTreeMap` -- B-F3: a linear scan was O(n) per cell against a producer
@@ -727,7 +727,16 @@ scrolling cells that each name a distinct frozen obj -- at the wire's
 obj-open cost; an evicted source or a full table yields 0 -- a run that lost
 its object, never a wrong one) because the grid's rows straddle zone cuts
 and a block's Line styles must index its own obj table (the invariant
-`runs_on_row` / `obj_of` / every menu consumer relies on). (3) The grid's
+`runs_on_row` / `obj_of` / every menu consumer relies on). Since PL-3 it also
+REJOINS a soft-wrapped logical line: the grid breaks a long line at `cols`
+(often mid-word), so each `ScrollOff` row carries the vt's per-row soft-wrap
+flag (`wrapped[i]` true iff row `i` continues into `i+1`); rows accumulate
+RAW (uninterned, in `scroll_pending`, so a block change mid-line interns
+cleanly at finalize) until a non-wrapped row ends the logical line, then
+intern as ONE Line -- the flow layout then re-wraps at word boundaries (fixes
+the mid-word wrap on the proportional scrollback, s5). Bounded by
+`MAX_LINE_CELLS` (a hard split); a screen-mode change flushes an in-flight
+fragment (`flush_scroll_pending`). (3) The grid's
 rows are `select::GRID_BLOCK` rows after the transcript's
 (`flatten_with_grid`); `Tile::grid_runs` (runs keyed by start column + 1),
 `grid_run`, `grid_run_obj` (the span's block + obj), `grid_hit` are the
