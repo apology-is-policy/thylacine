@@ -75,7 +75,15 @@ pub enum Record {
     },
     /// Normal-mode lines that scrolled off the top -> the transcript. Coalesced:
     /// a bulk scroll is one record carrying every row that left, in order.
-    ScrollOff { rows: Vec<Vec<Cell>> },
+    /// `wrapped[i]` is true iff row `i` ended by AUTOWRAP (the grid broke a
+    /// logical line at `cols`, often mid-word) and so continues into row `i+1`
+    /// -- the consumer rejoins the fragments and re-wraps at word boundaries
+    /// (PL-3, fixing the mid-word wrap on the proportional scrollback). One flag
+    /// per row: `wrapped.len() == rows.len()`.
+    ScrollOff {
+        rows: Vec<Vec<Cell>>,
+        wrapped: Vec<bool>,
+    },
     /// An out-of-band control event.
     Control(Control),
     /// The screen-mode flip (alt-screen enter/leave).
@@ -95,6 +103,9 @@ pub struct Producer {
     cols: usize,
     last_cursor: (u16, u16, bool),
     scroll_acc: Vec<Vec<Cell>>,
+    // Parallel to `scroll_acc` (pushed together, taken together): the per-row
+    // soft-wrap flag the vt emits on each Scroll boundary (PL-3b).
+    scroll_wrapped: Vec<bool>,
 }
 
 impl Producer {
@@ -106,6 +117,7 @@ impl Producer {
             cols: vt.cols,
             last_cursor: (vt.cy as u16, vt.cx as u16, vt.cursor_visible),
             scroll_acc: Vec::new(),
+            scroll_wrapped: Vec::new(),
         }
     }
 
@@ -164,10 +176,13 @@ impl Producer {
                 // exceeds wire::MAX_FRAME, and halcyond's decoder would reject it
                 // and kill the tile. Flush at the cap; order is preserved (the
                 // rows split across several ScrollOff records, in sequence).
-                Boundary::Scroll(row, _wrapped) => {
-                    // PL-3a: the soft-wrap flag is tracked + emitted by the vt;
-                    // kaua-term carries it into the ScrollOff record at PL-3b.
+                Boundary::Scroll(row, wrapped) => {
+                    // PL-3b: carry the vt's per-row soft-wrap flag alongside the
+                    // row -- parallel vecs pushed together so they stay aligned,
+                    // and a cap-flush takes both -- so the transcript can rejoin
+                    // a logical line the grid broke mid-word at `cols`.
                     self.scroll_acc.push(row);
+                    self.scroll_wrapped.push(wrapped);
                     if self.scroll_acc.len() >= self.scroll_cap() {
                         self.flush_scroll(out);
                     }
@@ -252,7 +267,8 @@ impl Producer {
     fn flush_scroll(&mut self, out: &mut Vec<Record>) {
         if !self.scroll_acc.is_empty() {
             let rows = core::mem::take(&mut self.scroll_acc);
-            out.push(Record::ScrollOff { rows });
+            let wrapped = core::mem::take(&mut self.scroll_wrapped);
+            out.push(Record::ScrollOff { rows, wrapped });
         }
     }
 
@@ -319,7 +335,7 @@ impl Producer {
 fn cells_in(out: &[Record]) -> usize {
     out.iter()
         .map(|r| match r {
-            Record::ScrollOff { rows } => rows.iter().map(|row| row.len()).sum(),
+            Record::ScrollOff { rows, .. } => rows.iter().map(|row| row.len()).sum(),
             Record::CellDiff { changed, .. } => changed.len(),
             _ => 0,
         })
@@ -511,7 +527,7 @@ mod tests {
             let held: usize = o
                 .iter()
                 .map(|r| match r {
-                    Record::ScrollOff { rows } => rows.len(),
+                    Record::ScrollOff { rows, .. } => rows.len(),
                     _ => 0,
                 })
                 .sum();
@@ -522,7 +538,7 @@ mod tests {
         let tail: usize = out
             .iter()
             .map(|r| match r {
-                Record::ScrollOff { rows } => rows.len(),
+                Record::ScrollOff { rows, .. } => rows.len(),
                 _ => 0,
             })
             .sum();
@@ -553,7 +569,7 @@ mod tests {
         let held: usize = all
             .iter()
             .map(|r| match r {
-                Record::ScrollOff { rows } => rows.len(),
+                Record::ScrollOff { rows, .. } => rows.len(),
                 _ => 0,
             })
             .sum();
@@ -657,7 +673,7 @@ mod tests {
         prod.drain_pending(&mut vt, &mut out);
         prod.resized(&vt, &mut out);
         assert!(
-            matches!(out.first(), Some(Record::ScrollOff { rows }) if rows.len() == 2),
+            matches!(out.first(), Some(Record::ScrollOff { rows, .. }) if rows.len() == 2),
             "first record is the two scrolled-off rows, got {:?}",
             out.first().map(|r| core::mem::discriminant(r))
         );
@@ -756,13 +772,51 @@ mod tests {
         let so = recs
             .iter()
             .find_map(|r| match r {
-                Record::ScrollOff { rows } => Some(rows),
+                Record::ScrollOff { rows, .. } => Some(rows),
                 _ => None,
             })
             .expect("a ScrollOff");
         assert_eq!(so.len(), 1);
         let s: String = so[0].iter().map(|c| c.ch).collect();
         assert_eq!(s, "top!");
+    }
+
+    #[test]
+    fn scrolloff_carries_the_per_row_soft_wrap_flags() {
+        // PL-3b: a 4x2 tile; "abcdefghij" fills row0 (abcd, autowrap), row1
+        // (efgh, autowrap), then 'i' scrolls "abcd" off -- a row that ended by
+        // AUTOWRAP, so its ScrollOff flag is true (the consumer rejoins it).
+        let recs = produce(4, 2, b"abcdefghij");
+        let (rows, wrapped) = recs
+            .iter()
+            .find_map(|r| match r {
+                Record::ScrollOff { rows, wrapped } => Some((rows, wrapped)),
+                _ => None,
+            })
+            .expect("a ScrollOff");
+        assert_eq!(rows.len(), wrapped.len(), "one flag per row");
+        assert_eq!(rows.len(), 1);
+        let s: String = rows[0].iter().map(|c| c.ch).collect();
+        assert_eq!(s, "abcd");
+        assert!(wrapped[0], "the scrolled row ended by autowrap");
+    }
+
+    #[test]
+    fn scrolloff_flag_is_false_on_a_hard_newline() {
+        // A row terminated by an explicit LF (not autowrap) must carry false, so
+        // the consumer finalizes the logical line there. 4x2: "ab\ncd\nef"
+        // scrolls "ab" off, which ended on a newline.
+        let recs = produce(4, 2, b"ab\r\ncd\r\nef");
+        let (rows, wrapped) = recs
+            .iter()
+            .find_map(|r| match r {
+                Record::ScrollOff { rows, wrapped } => Some((rows, wrapped)),
+                _ => None,
+            })
+            .expect("a ScrollOff");
+        let s: String = rows[0].iter().map(|c| c.ch).collect();
+        assert!(s.starts_with("ab"), "row content, got {s:?}"); // tail is blank padding
+        assert!(!wrapped[0], "a newline-terminated row is not soft-wrapped");
     }
 
     #[test]
@@ -777,7 +831,7 @@ mod tests {
         let so = out
             .iter()
             .find_map(|r| match r {
-                Record::ScrollOff { rows } => Some(rows),
+                Record::ScrollOff { rows, .. } => Some(rows),
                 _ => None,
             })
             .expect("a ScrollOff");
@@ -879,7 +933,7 @@ mod tests {
         let sos: Vec<&Vec<Vec<Cell>>> = out
             .iter()
             .filter_map(|r| match r {
-                Record::ScrollOff { rows } => Some(rows),
+                Record::ScrollOff { rows, .. } => Some(rows),
                 _ => None,
             })
             .collect();

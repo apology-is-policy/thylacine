@@ -327,6 +327,12 @@ pub struct Transcript {
     /// The line being built (column-addressed; the line discipline).
     line: Vec<TCell>,
     col: usize,
+    /// PL-3: raw cells of a soft-wrapped logical line being rejoined from
+    /// ScrollOff rows -- held uninterned (self-contained style, so a block
+    /// change mid-line interns cleanly at finalize) until a non-wrapped row
+    /// ends the line. Bounded by MAX_LINE_CELLS (hard-split), the only window
+    /// in which it is off-budget.
+    scroll_pending: Vec<vt::Cell>,
     pal: Palette,
     pen: SgrPen,
     em_stack: Vec<u8>,
@@ -441,6 +447,7 @@ impl Transcript {
             cur_param: 0,
             csi_private: false,
             carry: Vec::new(),
+            scroll_pending: Vec::new(),
             utf8: [0; 4],
             utf8_len: 0,
             utf8_need: 0,
@@ -1221,38 +1228,70 @@ impl Transcript {
     /// is then COPIED into the landing block (`local_obj`), keeping every
     /// block self-contained (its Line styles index its own obj table, the
     /// console's invariant every run/menu consumer relies on).
-    pub fn push_scrolled_rows(&mut self, rows: &[Vec<vt::Cell>], spans: &SpanMap) {
-        // (source block, obj) -> the index in the CURRENT open block; reset
-        // when the open block changes under us (the per-block line cap). A
-        // map, not a scan: the keys a push can meet are bounded by the ring's
-        // live serials (8192), and a producer scrolling cells that each name
-        // a distinct frozen obj must not pay O(n) per cell (the H-arc round-1
-        // audit, B-F3).
-        let mut remap: (u64, BTreeMap<(u64, u16), u16>) = (self.open.id, BTreeMap::new());
-        for row in rows {
-            let mut cells: Vec<TCell> = Vec::with_capacity(row.len());
-            for c in row {
-                let tag = spans.get(c.span).unwrap_or_default();
-                if remap.0 != self.open.id {
-                    remap = (self.open.id, BTreeMap::new());
-                }
-                let obj = self.local_obj(tag, &mut remap.1);
-                let style = self.intern_style(Style {
-                    fg: c.fg,
-                    bg: c.bg,
-                    attrs: c.attrs,
-                    em: tag.em,
-                    obj,
-                    hdr: tag.hdr,
-                });
-                cells.push(TCell { ch: c.ch, style });
+    pub fn push_scrolled_rows(&mut self, rows: &[Vec<vt::Cell>], wrapped: &[bool], spans: &SpanMap) {
+        for (i, row) in rows.iter().enumerate() {
+            // PL-3: a soft-wrapped grid row is half of a logical line the grid
+            // broke at `cols` (often mid-word, s5). Accumulate the raw cells
+            // until a row that did NOT wrap ends the logical line, then
+            // finalize it as ONE Line so the flow layout re-wraps at word
+            // boundaries. Raw vt::Cells, not interned TCells: their style is
+            // self-contained (no block-relative index), so a block change
+            // mid-line -- a frozen open block, or an inline obj / zone frame
+            // arriving as a Control record between two ScrollOff records --
+            // interns cleanly into whatever block is open at finalize (the
+            // straddle case local_obj already copies the obj across).
+            self.scroll_pending.extend_from_slice(row);
+            // A logical line that soft-wraps forever (no LF) is hard-split at
+            // MAX_LINE_CELLS, the same clamp the feed path uses, so a
+            // pathological stream cannot grow the held fragment unbounded.
+            let ends = !wrapped.get(i).copied().unwrap_or(false);
+            if ends || self.scroll_pending.len() >= MAX_LINE_CELLS {
+                self.finalize_scroll_pending(spans);
             }
-            let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
-            self.open.cost += cost;
-            self.stored_cost += cost;
-            self.open.items.push(Item::Line(Line { cells }));
-            self.enforce_block_cap();
         }
+    }
+
+    /// Intern the pending soft-wrapped logical line into the open block as one
+    /// Line and clear it, mirroring the old per-row cost accounting so the
+    /// block-cap / eviction machinery still bounds a tile that scrolls forever.
+    /// No-op when nothing is pending.
+    fn finalize_scroll_pending(&mut self, spans: &SpanMap) {
+        if self.scroll_pending.is_empty() {
+            return;
+        }
+        let raw = core::mem::take(&mut self.scroll_pending);
+        // (source block, obj) -> the index in the open block. A map, not a
+        // scan: a cell naming a distinct frozen obj must not pay O(n) (the
+        // H-arc round-1 audit, B-F3). One push at the end, so the open block
+        // cannot change mid-loop and no reset is needed.
+        let mut remap: BTreeMap<(u64, u16), u16> = BTreeMap::new();
+        let mut cells: Vec<TCell> = Vec::with_capacity(raw.len());
+        for c in &raw {
+            let tag = spans.get(c.span).unwrap_or_default();
+            let obj = self.local_obj(tag, &mut remap);
+            let style = self.intern_style(Style {
+                fg: c.fg,
+                bg: c.bg,
+                attrs: c.attrs,
+                em: tag.em,
+                obj,
+                hdr: tag.hdr,
+            });
+            cells.push(TCell { ch: c.ch, style });
+        }
+        let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
+        self.open.cost += cost;
+        self.stored_cost += cost;
+        self.open.items.push(Item::Line(Line { cells }));
+        self.enforce_block_cap();
+    }
+
+    /// PL-3: force any in-flight soft-wrapped ScrollOff line to finalize -- at a
+    /// screen-mode change, where the content model has a hard discontinuity and
+    /// a fragment must not carry a stale continuation across it. No-op when
+    /// nothing is pending.
+    pub fn flush_scroll_pending(&mut self, spans: &SpanMap) {
+        self.finalize_scroll_pending(spans);
     }
 
     /// The open block's index for a tagged obj: its own when the tag's block
@@ -1923,6 +1962,105 @@ mod tests {
     // eviction can reach any of it. Small caps make the test cheap: the open
     // block must never exceed its byte cap, and the whole transcript must
     // stay within one open-cap of the budget.
+    // PL-3: the soft-wrap rejoin. A row helper for these tests: chars -> a row
+    // of unstyled vt::Cells (span 0 -> the default tag).
+    fn wrow(s: &str) -> Vec<vt::Cell> {
+        s.chars()
+            .map(|ch| vt::Cell {
+                ch,
+                fg: 0xFFFFFF,
+                bg: 0,
+                attrs: 0,
+                span: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn soft_wrapped_scroll_rows_rejoin_into_one_logical_line() {
+        // The grid broke "hello world" at col 5 into "hello"(wrapped) +
+        // " worl"(wrapped) + "d"(not). The three ScrollOff rows rejoin into ONE
+        // Line -- so the flow layout re-wraps at the space, not mid-word (s5) --
+        // not three Lines.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let rows = alloc::vec![wrow("hello"), wrow(" worl"), wrow("d")];
+        t.push_scrolled_rows(&rows, &[true, true, false], &SpanMap::new());
+        let items = &t.open_block().items;
+        assert_eq!(items.len(), 1, "three soft-wrapped rows -> one Line");
+        let Item::Line(l) = &items[0] else {
+            panic!("a Line")
+        };
+        let s: String = l.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(s, "hello world");
+    }
+
+    #[test]
+    fn a_hard_wrapped_batch_stays_one_line_per_row() {
+        // The all-false case (a listing of distinct short lines) is unchanged:
+        // one Line per row.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let rows = alloc::vec![wrow("dev"), wrow("dl-symlink")];
+        t.push_scrolled_rows(&rows, &[false, false], &SpanMap::new());
+        assert_eq!(t.open_block().items.len(), 2, "two rows -> two Lines");
+    }
+
+    #[test]
+    fn a_pending_soft_wrapped_line_spans_push_calls() {
+        // The last row of a batch may soft-wrap (its continuation is still on
+        // the live grid); the fragment carries to the next call and rejoins,
+        // not finalizes early.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.push_scrolled_rows(&[wrow("abc")], &[true], &SpanMap::new());
+        assert_eq!(
+            t.open_block().items.len(),
+            0,
+            "nothing finalizes while a line is pending"
+        );
+        t.push_scrolled_rows(&[wrow("def")], &[false], &SpanMap::new());
+        let items = &t.open_block().items;
+        assert_eq!(items.len(), 1, "the completed line finalizes as one Line");
+        let Item::Line(l) = &items[0] else {
+            panic!("a Line")
+        };
+        let s: String = l.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(s, "abcdef");
+    }
+
+    #[test]
+    fn flush_scroll_pending_finalizes_an_in_flight_fragment() {
+        // A screen-mode change forces a held fragment out as its own Line.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.push_scrolled_rows(&[wrow("ab")], &[true], &SpanMap::new());
+        assert_eq!(t.open_block().items.len(), 0);
+        t.flush_scroll_pending(&SpanMap::new());
+        assert_eq!(t.open_block().items.len(), 1, "the fragment flushed");
+    }
+
+    #[test]
+    fn an_endless_soft_wrap_hard_splits_at_max_line_cells() {
+        // A never-ending soft-wrapped line (every row wrapped) must not grow the
+        // held fragment unbounded: it hard-splits at MAX_LINE_CELLS.
+        let mut t = Transcript::with_caps(daylight(), 1000, 8 << 20, 10_000);
+        let wide = wrow(&"a".repeat(256));
+        let n = (MAX_LINE_CELLS / 256) + 4;
+        let rows = alloc::vec![wide; n];
+        let wrapped = alloc::vec![true; n]; // never ends
+        t.push_scrolled_rows(&rows, &wrapped, &SpanMap::new());
+        assert!(
+            !t.open_block().items.is_empty(),
+            "the endless line hard-split at least once"
+        );
+        for it in &t.open_block().items {
+            if let Item::Line(l) = it {
+                assert!(
+                    l.cells.len() <= MAX_LINE_CELLS + 256,
+                    "a finalized line stayed bounded, got {}",
+                    l.cells.len()
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_re_budget_residue_is_bounded_by_the_constant_open_cap() {
         // Round-3 F5: the eviction floor keeps the newest frozen block, sized
@@ -1944,7 +2082,7 @@ mod tests {
         let rows: Vec<Vec<vt::Cell>> = alloc::vec![row; 64];
         // several cap-sized continuation blocks
         while t.frozen_blocks().len() < 6 {
-            t.push_scrolled_rows(&rows, &SpanMap::new());
+            t.push_scrolled_rows(&rows, &alloc::vec![false; rows.len()], &SpanMap::new());
         }
         let last = t.frozen_blocks().back().map_or(0, |b| b.cost);
         assert!(
@@ -1979,7 +2117,7 @@ mod tests {
             .collect();
         let rows: Vec<Vec<vt::Cell>> = alloc::vec![row; 64];
         while t.stored_cost() < big - (big / 8) {
-            t.push_scrolled_rows(&rows, &SpanMap::new());
+            t.push_scrolled_rows(&rows, &alloc::vec![false; rows.len()], &SpanMap::new());
         }
         let before = t.stored_cost();
         assert!(

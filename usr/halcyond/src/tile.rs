@@ -186,9 +186,17 @@ impl Tile {
     pub fn apply(&mut self, rec: Record) {
         match rec {
             Record::CellDiff { changed, cursor } => self.grid.apply_celldiff(&changed, cursor),
-            Record::ScrollOff { rows } => self.scrollback.push_scrolled_rows(&rows, &self.spans),
+            Record::ScrollOff { rows, wrapped } => {
+                self.scrollback
+                    .push_scrolled_rows(&rows, &wrapped, &self.spans)
+            }
             Record::Control(c) => self.apply_control(c),
-            Record::Mode(m) => self.mode = m,
+            Record::Mode(m) => {
+                // PL-3: a soft-wrapped ScrollOff line in flight must not carry
+                // its continuation across a screen-mode discontinuity.
+                self.scrollback.flush_scroll_pending(&self.spans);
+                self.mode = m;
+            }
         }
     }
 
@@ -618,6 +626,7 @@ mod tests {
         let mut t = tile();
         t.apply(Record::ScrollOff {
             rows: vec![vec![cell('a'), cell('b')], vec![cell('c')]],
+            wrapped: vec![false, false],
         });
         let items = &t.scrollback.open_block().items;
         assert_eq!(items.len(), 2, "two scrolled rows -> two Line items");
@@ -699,6 +708,7 @@ mod tests {
         let mut t = tile();
         t.apply(Record::ScrollOff {
             rows: vec![vec![cell('1')], vec![cell('2')]],
+            wrapped: vec![false, false],
         });
         assert_eq!(t.scrollback.open_block().items.len(), 2);
         t.apply(Record::Control(Control::Osc1936Raw {
@@ -708,6 +718,7 @@ mod tests {
         // the zone cut froze the old block and opened a fresh one.
         t.apply(Record::ScrollOff {
             rows: vec![vec![cell('3')]],
+            wrapped: vec![false],
         });
         assert_eq!(
             t.scrollback.open_block().items.len(),
@@ -762,6 +773,7 @@ mod tests {
         // than the grid tail alone (the flow renders above it, 14.11.3).
         t.apply(Record::ScrollOff {
             rows: vec![vec![cell('a')], vec![cell('b')], vec![cell('c')]],
+            wrapped: vec![false, false, false],
         });
         let with_hist = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert!(
@@ -799,7 +811,10 @@ mod tests {
             let rows: Vec<Vec<Cell>> = (0..lines_per_block)
                 .map(|_| vec![cell(ch), cell(ch), cell(ch)])
                 .collect();
-            t.apply(Record::ScrollOff { rows });
+            t.apply(Record::ScrollOff {
+                wrapped: vec![false; rows.len()],
+                rows,
+            });
             // a zone cut freezes the open block and opens the next one
             t.apply(Record::Control(Control::Osc1936Raw {
                 serial: 0,
@@ -948,6 +963,7 @@ mod tests {
         }));
         t.apply(Record::ScrollOff {
             rows: vec![vec![cell('a')], vec![cell('b')]],
+            wrapped: vec![false, false],
         });
         t.apply(Record::Control(Control::Osc1936Raw {
             serial: 0,
@@ -1090,6 +1106,7 @@ mod tests {
         // Content before the obj, so the zone cut below freezes a block.
         t.apply(Record::ScrollOff {
             rows: vec![vec![cs('p', 0), cs('q', 0)]],
+            wrapped: vec![false],
         });
         let b0 = t.scrollback.open_block().id;
         t.apply(Record::Control(Control::Osc1936Raw {
@@ -1141,6 +1158,7 @@ mod tests {
                 cs(' ', 0),
                 cs('x', 2),
             ]],
+            wrapped: vec![false],
         });
         let fr = crate::select::FlatRow {
             block: usize::MAX,

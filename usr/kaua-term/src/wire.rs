@@ -111,13 +111,17 @@ pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
             }
             T_CELLDIFF
         }
-        Record::ScrollOff { rows } => {
+        Record::ScrollOff { rows, wrapped } => {
             put_u32(&mut p, rows.len() as u32);
-            for row in rows {
+            for (i, row) in rows.iter().enumerate() {
                 put_u32(&mut p, row.len() as u32);
                 for c in row {
                     put_cell(&mut p, c);
                 }
+                // PL-3b: the row's soft-wrap flag rides right after its cells, so
+                // decode reconstructs `wrapped` aligned to `rows` from the frame
+                // alone -- a desynced length can never mis-shift the flags.
+                p.push(*wrapped.get(i).unwrap_or(&false) as u8);
             }
             T_SCROLLOFF
         }
@@ -281,6 +285,7 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
         T_SCROLLOFF => {
             let nrows = r.u32()?;
             let mut rows = Vec::with_capacity(r.capped(nrows, 4));
+            let mut wrapped = Vec::with_capacity(r.capped(nrows, 4));
             for _ in 0..nrows {
                 let ncells = r.u32()?;
                 let mut row = Vec::with_capacity(r.capped(ncells, CELL_BYTES));
@@ -288,8 +293,9 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
                     row.push(r.cell()?);
                 }
                 rows.push(row);
+                wrapped.push(r.u8()? != 0);
             }
-            Record::ScrollOff { rows }
+            Record::ScrollOff { rows, wrapped }
         }
         T_CONTROL => {
             let sub = r.u8()?;
@@ -481,6 +487,7 @@ mod tests {
         });
         rt_record(Record::ScrollOff {
             rows: vec![vec![cell('x'), cell('y')], vec![cell('z')]],
+            wrapped: vec![true, false],
         });
         rt_record(Record::Control(Control::Osc1936Raw {
             serial: 3,

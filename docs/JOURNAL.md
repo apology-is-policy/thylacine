@@ -30,7 +30,7 @@ operator booted Halcyon interactively for the first time, filed observations
 (`thylacine-aux/docs/Found issues.txt` + screenshots s1-s7 + genera.gif) and
 directed: stabilize before more features. A design conversation ratified a
 sharpened model, which this run landed as scripture-first, then began
-implementing. Tip `116d7055`, both mirrors.
+implementing. Tip `ee426200`, both mirrors.
 
 **The design (ratified by the operator).** Halcyon is mainly PROPORTIONAL -- the
 prompt included. Monospace only where character-grid alignment is essential: the
@@ -92,15 +92,48 @@ the vault peer with the precise root cause (yip call 0057). They fixed quaestor
 (`TestSpecCoverageExcludesTTraceDumps`, fail-pre/pass-post) and pushed. The blocker
 is gone for every track.
 
+**PL-3 -- the soft-wrap rejoin (PL-3a + PL-3b/c), landed.** The keystone's first
+half. The scoping finding: s5 (proportional text wrapping mid-word, "tho/ught")
+is NOT a layout bug -- `layout.rs::lay_span` already breaks at the last space; the
+mid-word breaks are the GRID's hard wraps at `cols` surviving because each
+scrolled-off row became its own transcript Line. PL-3a (`24fd27f9`) added a
+per-row soft-wrap flag to the vt (`wrapped: Vec<bool>`, mirroring `dirty`
+site-for-site: SET on autowrap, CLEARED on col-0/erase/blank, rotated on
+scroll/IL/DL, reindexed on resize, swapped on alt) riding `Boundary::Scroll(row,
+wrapped)`. PL-3b/c (`ee426200`) carries it end to end: kaua-term threads the
+flag through `ScrollOff { rows, wrapped }` and the wire (interleaved per row, so a
+declared-length desync can never mis-shift the flags), and halcyond's
+`push_scrolled_rows` REJOINS -- accumulating RAW cells until a non-wrapped row
+ends the logical line, then interning ONE Line, which the flow layout re-wraps at
+word boundaries. Bounded by `MAX_LINE_CELLS` (a hard split); a screen-mode change
+flushes an in-flight fragment.
+
+The design choice that made it correct, and the wrong turn it avoided: hold RAW
+`vt::Cell`s in the pending carry, NOT interned `TCell`s. An interned cell's style
+is an index into whatever block was open when it was interned -- so a zone/obj
+frame arriving as a Control record, or a frozen open block, mid-soft-wrapped-line
+would leave the held indices stale against the block the line finalizes into. An
+inline `ls` path object IS exactly this case (the obj open/close ride Beacon
+frames interleaved with the ScrollOff rows), so it is not a corner case -- it is
+the common one. Raw cells intern at finalize into the then-open block, and the
+existing straddle handling (`local_obj` copies an obj across) already covers it.
+Host tests: the join, the cross-call pending carry (the last row of a batch may
+soft-wrap, its continuation still on the live grid), the mode flush, the
+endless-wrap hard split; kaua-term the flag both directions + the wire round-trip.
+Fixes s5 on the SCROLLBACK; PL-4 brings the same rejoin to the LIVE view.
+
 **What is open (the arc continues).** PL-1b (the halcyond `pre` render -- mono +
 code-block chrome; non-trivial: the 16-byte SpanSlot has no room for a `pre` bit,
 so the flag rides EM_PRE or a block Item, and the chrome extent needs care) --
-deferred as needing fresh design. PL-3 + PL-4 (the soft-wrap wire bit + the
-proportional-live normal mode) -- the keystone and the operator's MAIN pain, a
-large multi-crate render change best given fresh context. PL-5 (`la` fences its
-box output in `pre`). Owed gate: the graphical E2E for PL-2 (a stylesheet change,
-host-verified via face_for + face_count; pushed with the gate deferred to the
-batched arc gate, per its commit body). Full plan + the screenshot findings:
+deferred as needing fresh design. PL-4 (the proportional-live normal-mode LIVE
+view -- retire the mono grid tail; the live grid's rows need the same join through
+a CellDiff/grid channel) -- the operator's MAIN pain, a large render change best
+given fresh context. PL-5 (`la` fences its box output in `pre`). The batched
+graphical E2E (PL-2 + PL-3a + PL-3b/c) ran GREEN before the push: ls-gfx-session
+PASS [28s] -- the session path, where `push_scrolled_rows` actually lives -- and
+ls-halcyon PASS [117s] on a `THYLACINE_HALCYON=1` bake (the console/Genera path;
+it does NOT exercise the rejoin, so ls-gfx-session is the witness that matters for
+PL-3b/c). Full plan + the screenshot findings:
 `memory/project_halcyon_stabilization.md`.
 
 ## Run 33 (vault absorption cont., 2026-09-06, Opus 4.8, effort max): the shell (parser + eval), the coreutils-filters recount, and the Image-cache half of DISTRO D-3
