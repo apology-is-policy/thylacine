@@ -134,8 +134,20 @@ console uses -- the format-fuzz surface stays ONE audited parser, not N);
 `Control(Title/Exit/Bell)` -> tile fields; `Mode` -> the render mode. A tile is
 untrusted (14.11.12): a producer's out-of-bounds `CellDiff` write is DROPPED in
 `grid.rs` and the cursor clamped on read, so a hostile `kaua-term` cannot index
-past the buffer. `Tile::render` composes alt-screen (the live grid alone) or
-normal (scrollback flowing above a fixed mono grid tail, bottom-anchored).
+past the buffer. `Tile::render` composes alt-screen (the live grid alone, still
+the mono `paint_grid`) or normal.
+
+**The normal-screen tail is now PROPORTIONAL (PL-3/PL-4), not the mono grid.**
+The live grid carries its soft-wrap state (PL-4a), `Transcript::live_block`
+joins the soft-wrapped grid rows into logical lines (PL-4b-i), and the normal
+render lays them through `live_block -> layout_block -> render_block` --
+retiring the mono `paint_grid` tail there (it survives only on the alt screen).
+So the tail flows in the same proportional layout as scrollback, with a
+char-index caret, proportional selection banding, and obj underline. The
+untrusted-drop discipline is unchanged -- the OOB clamp lives in `grid.rs`,
+below the layout swap. `paint_grid` remains for the alt screen and for the
+repainting-TUI case; `main.rs`'s console renderer is untouched (it drives the
+`Transcript` run path, not this one).
 
 **Beacon presentation rides the span serial, parser-free (H-4d).** A tile renders
 obj/em/hdr markup over its cell grid without a second Beacon parser: the producer
@@ -170,7 +182,12 @@ Normal keys minus yank/paste, moving a cursor that starts on the grid's prompt r
 with the view following it (`render(.., &mut scroll_up, Option<Mark>)`: the
 selection band and the ember underline). `Sel` is the selection; `Tile.frame`
 records the last render's block placement so `Tile::hit` / `grid_hit` turn a
-`click` at display coordinates into a block or a grid run. Enter on an obj run (or
+`click` at display coordinates into a block or a grid run. Since the tail went
+proportional (PL-4), a grid run's screen rectangle is no longer a cell product:
+`grid_hit` + `grid_run_rect` invert the *cached laid tail* to map a position to a
+run and back to its rectangle, and both are wired at BOTH menu-summon sites --
+the mouse `click()` and the self-caught keyboard `act()` (the twin that a naive
+one-site fix would have missed). Enter on an obj run (or
 a click on one) summons the verb menu -- the same H-3c-2 `MenuSet` on the session's
 shared ring, placed at the run's display coordinates (`menu::step_run_with`) -- and
 a `Command` choice is typed back into the tile it was opened over as ONE
