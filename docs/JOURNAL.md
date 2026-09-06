@@ -125,6 +125,41 @@ a gate that runs the *committing worktree's* tooling must fail open when that
 tooling predates the gate, and "the directory is present" is not "the feature is
 present."
 
+**Then direction 2, the docs/reference retirement, opened.** Surfaced the
+approach to the operator (AskUserQuestion) with the grounding that the
+stub-and-redirect mechanism is already settled by precedent (`18-territory.md` is
+an `[ABSORBED INTO THE VAULT]` redirect stub; 46 of 157 files absorbed). Operator
+chose **"flip now."** Landed the scripture commit (`f4d09573` -> `695e0ef5`):
+CLAUDE.md's doc-update discipline now retires docs/reference INTO the vault --
+steps 0 + 1 flipped so new technical-reference prose goes to a dossier, never a
+new `docs/reference` section; the legacy tree is frozen, absorbed into stubs.
+docs/manual (user-facing) is untouched -- a separate track. This is the pivot
+that stops the parallel tree growing, closing the two-sources divergence the
+whole vault exists to end.
+
+**The upkeep model then proved itself end-to-end, unplanned.** main, mid-run,
+rang the vault on 0063 for a sub-halcyond de-stale (their PL-arc audit had just
+closed; the freeze-mid-`pre` soundness fix) and carried a `No-dossier-change`
+trailer on the code commit -- exactly the escape the dossier-gate defines. The
+vault folded it (`2835e43d`): the freeze-mid-`pre` style-index soundness
+invariant (a `pre` open at a block freeze finalizes into the block whose styles
+its cells' indices name, else `layout_block` OOB-panics; both triggers now
+witnessed). MEASURE surfaced more than the flag named -- the test count was stale
+99 -> 127, a whole module (`session_init`) was missing from the `code:` list --
+the recurring lesson that a flag is a trigger to re-measure, not a diff to apply.
+The first flag folded under the gate that landed the same run: build the
+enforcement, then watch it drive the exact behaviour it was built for.
+
+**The absorption survey (delegated, read-only during the push-hold) returned the
+work queue:** of the 111 full-content files, 92 COVERED (a dossier exists ->
+cheap stub), 12 UNCOVERED (author a dossier -- the real queue: 58-corvus-syscalls,
+110-resource, 138-gpud, 149-warp, 142-sdl-port, 143-tyrquake, 84/85-pouch-*,
+133-go-port, 137-gopls, 129-fsbench, 150-build-config), 7 AMBIGUOUS (index files
+-> mocs; unowned caveats like `canary.c`, `fault_test.c`, the I-23 storage model).
+So the retirement is ~83% mechanical. The absorption sweep itself -- stub the 92,
+author the 12, adjudicate the 7 -- is the ongoing multi-session vault loop, not
+this run.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
