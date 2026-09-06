@@ -84,6 +84,16 @@ const VLEAF_DATA: u64 = 4;
 const RING_ENTRIES: u32 = 8;
 const RING_SIZE: u64 = 20480; // 5 pages: 320 B hdr + >= 8 * PERIOD_BYTES payload
 
+// The ring must fit K = RING_ENTRIES period slots of PERIOD_BYTES after the
+// weftlib header (RING_HDR 64 + READY_HDR 128 + DESC[K]*16, 16-aligned). The
+// consumer copies into payload_off + i*PERIOD_BYTES for i < K, so K*PERIOD_BYTES
+// must fit the payload region -- pin it at compile time so a future const change
+// (a bigger PERIOD_BYTES, a smaller RING_SIZE) cannot silently push the copy off
+// the ring (the compile-time-invariants pattern; slot_consume trusts this).
+const _: () = assert!(
+    192 + (RING_ENTRIES as usize) * 16 + (RING_ENTRIES as usize) * PERIOD_BYTES <= RING_SIZE as usize
+);
+
 fn vpath(id: u32, leaf: u64) -> u64 {
     VBIT | ((id as u64) << 4) | leaf
 }

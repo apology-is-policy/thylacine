@@ -332,8 +332,13 @@ const DROPPED_OFF: usize = 28; //   WeftRingHdr.dropped (cons_head + 4)
 /// caller's back-pressure policy (yield + retry) decides what to do. Non-blocking.
 ///
 /// # Safety
-/// `base` points at a live, writable mapping of the whole ring Burrow that this
-/// Proc owns, and this Proc is the sole producer of this ring.
+/// `base` points at a live, writable mapping of the whole ring Burrow, and the
+/// caller is the sole producer THREAD of this ring. The kernel's consume-once
+/// share claim enforces single-producer across PROCS (only one Proc ever maps a
+/// given ring), but a single producing thread is the caller's contract: two peer
+/// threads racing slot_produce would tear a slot and lose a prod_tail increment.
+/// That stays memory-safe (the consumer validates len and indexes by its own
+/// trusted geometry, so no OOB), but corrupts the producer's own audio.
 pub unsafe fn slot_produce(base: *mut u8, geom: &RingGeom, slot_bytes: u32, data: &[u8]) -> bool {
     let k = geom.ring_entries;
     if k == 0 || data.is_empty() || data.len() > slot_bytes as usize {

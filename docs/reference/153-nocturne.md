@@ -398,10 +398,16 @@ single boot's wall time.
   the shared `/dev/nocturne` mount is owned by the one kernel dev9p connection,
   so the `h_weft` owner gate does not isolate mounted clients from each other --
   the kernel's consume-once share claim is what keeps the ring single-producer.
-  The N-2b formal holotype audit is batched to the N-2b close (N-2b-1 + N-2b-2a
-  together, the first cross-Proc DATA path in nocturned; I-37), where the
-  producer/consumer memory ordering, the len-snapshot validation, the no-torn-
-  period argument and teardown-under-inflight are the prosecution targets.
+  The N-2b batched holotype audit (N-2b-1 + N-2b-2a, the first cross-Proc DATA
+  path in nocturned; I-37) CLOSED CLEAN: 0 P0 / 0 P1 / 0 P2, 3 P3 fixed. The
+  prosecutor re-derived the cross-Proc SPSC memory ordering (each Release/Acquire
+  required and present -- no torn read, no in-flight overwrite), the consumer's
+  memory safety against a fully-hostile ring (own trusted geometry bounds every
+  index; desc.len is the only client value on the read path, snapshot-once +
+  validated), the #847 dual-count lifetime, and the consume-once SPSC backstop --
+  all sound. P3 fixes: the probe control-(b) attribution (id==0 AND owner), a
+  time-based (not yield-count) back-pressure stall bound, a "sole producer thread"
+  safety note, and a compile-time K*PERIOD_BYTES-fits-the-payload assert.
 - The whole N-1..N-2a-4 surface was adversarially audited (round 1 Fable +
   round 2 Opus; `memory/audit_nocturne_closed_list.md`). Deferred by design
   (F5, P2): a voice minted via the shared mount is box-wide and outlives its

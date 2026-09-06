@@ -86,9 +86,36 @@ prose is owed there. The one owed sweep is `sub-libthyla-rs.md` gaining the new
 vault syncs. Nocturned/probe/tests are UNOWNED -> `docs/reference/153-nocturne.md`
 (done this PR).
 
-**Open.** N-2b-2b (the wake poke + the batched N-2b formal holotype audit --
-N-2b-1 + N-2b-2a together, I-37 cross-Proc DATA race, per the double-the-distance
-rule). Then the SMP gate owed at the full N-2 close.
+**The batched N-2b audit CLOSED CLEAN (same run): 0 P0 / 0 P1 / 0 P2, 3 P3.**
+Opus fallback (Fable out of credits; MODEL(start)==MODEL(end), no mid-run
+switch). The prosecutor re-derived the load-bearing surface from source, not from
+the comments: the cross-Proc SPSC memory ordering (each Release/Acquire required
+and present -- no torn read, no in-flight overwrite; wrapping_sub exact), the
+consumer's memory safety against a fully-hostile ring (own trusted geometry ->
+every index bounded; desc.len the only client value on the read path,
+snapshot-once + validated), the #847 dual-count lifetime, and the consume-once
+SPSC backstop -- all sound, no finding on the crux. The 3 P3s were witness/comment
+quality: F1 (the probe's control-(b) over-attributes voice-0-unmappable to the
+id==0 gate, when the owner gate independently refuses it -- reworded to "id==0 AND
+owner"), F2 (the back-pressure stall bound was a yield COUNT, which false-fails a
+live-but-starved consumer under host contention -- made it a monotonic-time
+deadline), F3 ("sole producer THREAD" safety note). Plus a self-audit SA-2 (a
+compile-time K*PERIOD_BYTES-fits-payload assert). My self-audit SA-1 (nocturned
+reads the client-writable shared cons_head) was WITHDRAWN: the prosecutor
+independently confirmed it yields only bounded garbage to the client's OWN voice
+(within I-37 + the deferred F5 envelope), so touching the verified-sound ordering
+for a non-defect was the wrong move. Not a dirty close -> no re-audit round.
+
+**Open (deferred, not v1.0).** The blocking back-pressure POKE is a v1.x item:
+the research finding is that `torpor` is per-Proc-keyed (`hash(Proc*, user_va)`,
+torpor.c:55/80), so it CANNOT do the cross-Proc consumer->producer wake the
+design doc casually named -- a real cross-Proc park+wake needs a NEW kernel
+primitive (a physical-page-keyed futex, or wiring the weft ready-ring's
+validated-not-wired park leg). That is a kernel-scope fork for the operator, not
+a v1.0 blocker (the t_yield busy-poll is the correct v1.0 answer). The "SMP gate
+owed at the N-2 close" note is SUPERSEDED: the whole Nocturne N-2 arc is
+userspace-only (verified -- the kernel changes in 562cbe50..HEAD are all from the
+main merge, already SMP-gated on main), so N-2b owes no fresh SMP gate.
 
 ---
 ## 2026-09-06 (aux) -- Nocturne N-2b-1: the zero-copy Weft ring substrate

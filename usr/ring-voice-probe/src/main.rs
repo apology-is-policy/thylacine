@@ -7,8 +7,11 @@
 //   K slots, a K-period payload). Controls (a check that cannot fail proves
 //   nothing, #245): (a) a SECOND map of the same fd is idempotent (same VA);
 //   (b) mapping VOICE 0's `data` is REFUSED -- voice 0 is the world-shared byte
-//   sink and has no private SPSC ring, so a positive here would mean the id==0
-//   gate is dead.
+//   sink and has no private SPSC ring. Control (b) proves the SECURITY PROPERTY
+//   "voice 0 has no mappable ring", enforced by two INDEPENDENT gates (the id==0
+//   refusal AND the owner gate -- voice 0's owner is -1, which never matches an
+//   accept handle); it does not isolate WHICH gate fires, so it catches only a
+//   regression of BOTH (defense-in-depth), not single-gate coverage.
 //
 //   N-2b-2a (the PERIOD PROTOCOL): mint a SECOND ring voice, then STREAM a chord
 //   THROUGH THE RINGS -- 1 kHz into voice A, 2 kHz into voice B, in lockstep with
@@ -40,7 +43,8 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use libthyla_rs::io::Write;
 use libthyla_rs::weft;
 use libthyla_rs::{
-    t_close, t_open, t_putstr, t_read, t_weft_map, t_yield, T_OREAD, T_WALK_OPEN_FROM_ROOT,
+    t_clock_gettime, t_close, t_open, t_putstr, t_read, t_weft_map, t_yield, T_CLOCK_MONOTONIC,
+    T_OREAD, T_WALK_OPEN_FROM_ROOT,
 };
 
 // Must match nocturned/src/server.rs (RING_ENTRIES) and snd.rs (PERIOD_BYTES).
@@ -52,11 +56,16 @@ const PERIOD_BYTES: usize = 2048;
 // audio-verdict's MIN_CHORD_WINDOWS (15) and MIN_TAIL_WINDOWS (10) comfortably.
 const CHORD_PERIODS: usize = 130;
 const TAIL_PERIODS: usize = 24;
-// A deadlock backstop for the back-pressure loop: a live consumer frees a slot
+// A deadlock backstop for the back-pressure loop. A live consumer frees a slot
 // within ~1 period (10.67 ms) plus the <=100 ms stopped-stream start latency, so
-// this many no-slot yields means the ring is wedged (the consumer is not
-// draining), which FAILS the probe loudly rather than spinning forever.
-const STALL_YIELD_BOUND: u32 = 2_000_000;
+// wall-clock past STALL_DEADLINE_NS with no slot means the ring is wedged (the
+// consumer is not draining) -> FAIL loudly, not spin forever. This is a TIME
+// bound, not a yield count (audit N-2b F2): a yield count false-fails a live-but-
+// STARVED consumer under host contention, which the aux contention memory shows is
+// real. STALL_YIELD_BACKSTOP is the fallback ceiling if the monotonic clock is
+// unavailable (start_ns == 0) -- generous, since it only governs that rare case.
+const STALL_DEADLINE_NS: u64 = 5_000_000_000; // 5 s of no freed slot == wedged
+const STALL_YIELD_BACKSTOP: u64 = 50_000_000;
 
 /// round(8192 * sin(2*pi*k/48)), k = 0..47 (-12 dBFS peak; two of these sum to
 /// at most -6 dBFS, well clear of clipping). 1 kHz at 48 kHz is 48 samples/cycle,
@@ -161,16 +170,37 @@ fn fill_period(buf: &mut [u8], phase: &mut usize, step: usize) {
     }
 }
 
+/// Monotonic nanoseconds (SYS_CLOCK_GETTIME), or 0 if unavailable -- the caller
+/// then leans on the yield-count backstop instead of the wall-clock deadline.
+fn now_ns() -> u64 {
+    let mut ts = [0i64; 2]; // { tv_sec, tv_nsec }
+    let r = unsafe { t_clock_gettime(T_CLOCK_MONOTONIC, ts.as_mut_ptr() as u64) };
+    if r != 0 {
+        return 0;
+    }
+    (ts[0] as u64).wrapping_mul(1_000_000_000).wrapping_add(ts[1] as u64)
+}
+
 /// Publish ONE period into a ring, back-pressuring (yield + retry) while it is
-/// full. Fails only if the consumer never drains within STALL_YIELD_BOUND yields.
+/// full. Fails only if the consumer does not free a slot within STALL_DEADLINE_NS
+/// of WALL-CLOCK (a wedged ring) -- a time bound, so a live-but-starved consumer
+/// under host contention is not misjudged (audit N-2b F2). The yield backstop is
+/// the fallback if the monotonic clock is unavailable.
 fn produce_one(va: u64, geom: &weft::RingGeom, period: &[u8]) -> Result<(), &'static str> {
-    let mut spins: u32 = 0;
+    let start = now_ns();
+    let mut spins: u64 = 0;
     loop {
         if unsafe { weft::slot_produce(va as *mut u8, geom, PERIOD_BYTES as u32, period) } {
             return Ok(());
         }
         spins += 1;
-        if spins >= STALL_YIELD_BOUND {
+        // Amortize the clock read: check the wall-clock deadline every 8192 spins.
+        // `start != 0` guards the clock-unavailable case (now_ns returned 0).
+        if start != 0 && spins & 0x1FFF == 0 && now_ns().saturating_sub(start) > STALL_DEADLINE_NS {
+            return Err("ring full for too long: consumer not draining (wedged)");
+        }
+        // The count backstop covers a kernel with no working monotonic clock.
+        if spins >= STALL_YIELD_BACKSTOP {
             return Err("ring full for too long: consumer not draining (wedged)");
         }
         let _ = t_yield();
@@ -227,7 +257,7 @@ pub extern "C" fn rs_main() -> i64 {
         let r0 = unsafe { t_weft_map(d0 as u64, 0) };
         let _ = unsafe { t_close(d0) };
         if r0 >= 0 {
-            return fail("voice 0 data map was NOT refused (the id==0 gate is dead)");
+            return fail("voice 0 data map was NOT refused (both the id==0 AND owner gates regressed)");
         }
     }
 
