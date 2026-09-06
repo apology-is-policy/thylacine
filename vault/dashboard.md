@@ -133,11 +133,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-07 [[chg-2026-09-07-net-doc-absorb]] — absorb docs/reference/122-net (libthyla-rs::net, the native /net client): fold the SNTP trust model into sub-net-clients; redirect the protocol to sub-netd-server
+- 2026-09-07 [[chg-2026-09-07-prowl-doc-absorb]] — absorb docs/reference/144-prowl (the scheduler-aware process monitor): clean redirect to sub-prowl (ahead of the doc)
 - 2026-09-06 [[chg-2026-09-06-9p-identity-absorb]] — absorb docs/reference/100 (9P identity presentation, A-3): the cross-cutting security surface folded across 7 dossiers + a new n_uname trust-stamp seam, then multi-redirect stub -- 66 absorbed / 91 live
 - 2026-09-06 [[chg-2026-09-06-abi-errno-reconcile]] — abi-errno registry reconcile: +16 missing codes (the whole V-5 socket family + INTR/2BIG/CHILD/NOTTY/MFILE/NODEV/NOTDIR/ISDIR/LOOP), the stale self-counts (19->35 non-zero, 20->36 asserts), and the err.rs mirror analysis
 - 2026-09-06 [[chg-2026-09-06-admin-elevate-doc-absorb]] — absorb docs/reference/76-admin-elevate (corvus ADMIN_ELEVATE + C-22 gating): clean redirect to sub-corvus + sub-kernel-caps, superseded hardcoded-passphrase named
 - 2026-09-06 [[chg-2026-09-06-allowance-doc-absorb]] — absorb docs/reference/117-allowance (I-34 hardware allowance): zero-fold; ref doc stale on the audit-F1 install-under-lock UAF
 - 2026-09-06 [[chg-2026-09-06-asid-absorb]] — docs/reference retirement: absorb 22-asid into sub-kernel-asid -- fold the missing no-per-Proc-free teardown-TLB-safety atom first, then stub-and-redirect (48 absorbed / 109 live)
 - 2026-09-06 [[chg-2026-09-06-attach-probe-doc-absorb]] — absorb docs/reference/57-attach-probe (mount-surface E2E test binary): zero-fold, test-probe redirect stub
-- 2026-09-06 [[chg-2026-09-06-builders-config-overlay]] — sub-substrate-builders de-stale: the clade builders must sync build-config.sh + configs/ (the build-configurator arc's silent dependency)
 <!-- generated:end -->
