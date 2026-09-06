@@ -526,9 +526,9 @@ before any message exists; only `commit-msg` sees it. The hook **fails open**
 on every infra shortfall — the opposite of `lint`'s fail-closed — because a
 reminder that blocked on infra would be worse than a missed one, and
 `pre-commit` is the authoritative infra gate (it runs first and refuses an empty
-registry or a broken build). Two fail-open cases are load-bearing and the second
-was learned by getting it wrong. (1) An empty registry: `dossier-gate` returns
-clean. (2) A **behind-main worktree** whose checked-out quaestor predates the
+registry or a broken build). Three fail-open cases are load-bearing, and two of
+them were learned by getting them wrong. (1) An empty registry: `dossier-gate`
+returns clean. (2) A **behind-main worktree** whose checked-out quaestor predates the
 feature: the hook builds quaestor from the *committing worktree's* source, and an
 older source has no `dossier-gate` subcommand — it hits quaestor's usage arm and
 exits 2, which if `exec`'d would BRICK the commit (fail-*closed*, the exact
@@ -537,7 +537,17 @@ opposite of intent). So the hook no-ops when the worktree lacks
 any `go` run so a behind worktree pays nothing), with an `exit 2` tolerance as
 defense-in-depth for a half-merged tree. The gate activates for a worktree only
 once it carries the feature — correct, since a worktree is gated by its own
-tooling version. `--no-verify` skips both hooks and is the sanctioned emergency
+tooling version. (3) A **merge in progress** (`MERGE_HEAD` present and
+resolving): a merge integrates already-committed, already-gated commits — it is
+not a new authored change to the code it brings in — so `dossierGate` returns
+clean. Without it, every merge that pulls in `audit: hard` code (a code track
+merging `origin/main`, say) would block, and a track that cannot `--no-verify`
+(aux is classifier-blocked from it) would be stuck with no clean way through —
+the R6 merge-blindspot class reappearing in the reminder. The skip lives in
+`dossier_gate.go` (`mergeInProgress`, matching `git rev-parse -q --verify
+MERGE_HEAD`) so it is tested and survives a hook reinstall; the `commit-msg`
+hook carries the same check so it never even spawns `go run` on a merge.
+`--no-verify` skips both hooks and is the sanctioned emergency
 bypass; the gate does not try to defeat it.
 
 `quaestor lint` checks:

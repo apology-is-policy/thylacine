@@ -50,6 +50,18 @@ func stagedEntries(root string) []stagedEntry {
 // and reports the ones not co-staged, blocking on audit:hard and warning
 // otherwise. `msg` is the commit-message text (the hook reads the file).
 func dossierGate(root string, reg *Registry, msg string) (fails, warns []string) {
+	// A merge integrates already-committed (already-gated) commits; it is not a
+	// new authored change to the code it brings in. Fail OPEN on a merge, else
+	// the gate blocks every merge that pulls in audit:hard code, and a code
+	// track that cannot --no-verify (aux is classifier-blocked from it) would be
+	// stuck on every merge of main -- the R6 merge-blindspot class, reappearing
+	// in the reminder. The commit-msg hook carries the same skip (so it never
+	// spawns `go run` on a merge); keeping it here too makes the gate correct
+	// when invoked directly, independent of the local hook, and lets a test pin
+	// it against a reinstall silently dropping the hook's copy.
+	if mergeInProgress(root) {
+		return nil, nil
+	}
 	entries := stagedEntries(root)
 	// A blanket deferral, keyed exactly like the chg field so there is one
 	// concept to learn: `No-dossier-change: <why>`. Honoured from the commit
@@ -137,6 +149,14 @@ func stagedChgDefers(root string, entries []stagedEntry) bool {
 		}
 	}
 	return false
+}
+
+// mergeInProgress reports whether a merge is being committed (MERGE_HEAD present
+// and resolving to an object), matching the commit-msg hook's
+// `git rev-parse -q --verify MERGE_HEAD` exactly so the two layers cannot
+// disagree. gitOut maps the -q failure (no MERGE_HEAD) to empty output.
+func mergeInProgress(root string) bool {
+	return strings.TrimSpace(gitOut(root, "rev-parse", "-q", "--verify", "MERGE_HEAD")) != ""
 }
 
 func cmdDossierGate(root string, args []string) int {

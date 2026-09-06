@@ -8,6 +8,8 @@ package main
 // pairs below are what separate the gate that works from the one that is stuck.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -38,6 +40,23 @@ func wantGateClean(t *testing.T, fails, warns []string) {
 	}
 }
 
+// writeMergeHead simulates a merge in progress: MERGE_HEAD pointing at a real
+// object, so the gate's `rev-parse --verify` probe (matching the hook) resolves
+// it. --git-path resolves the correct location (a plain repo or a worktree).
+func writeMergeHead(t *testing.T, root, sha string) {
+	t.Helper()
+	p := strings.TrimSpace(gitOut(root, "rev-parse", "--git-path", "MERGE_HEAD"))
+	if p == "" {
+		t.Fatal("could not resolve MERGE_HEAD git-path")
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(root, p)
+	}
+	if err := os.WriteFile(p, []byte(sha+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDossierGateBlocksHardCode(t *testing.T) {
 	root := setupHardCode(t)
 	mutate(t, root, "kernel/t.c", "int t;", "int t; /* edit */")
@@ -46,6 +65,26 @@ func TestDossierGateBlocksHardCode(t *testing.T) {
 	fails, _ := dossierGate(root, reg, "kernel: tweak t")
 	wantFailContaining(t, fails, "kernel/t.c changed but its dossier [[sub-t-x]]")
 	wantFailContaining(t, fails, "audit:hard")
+}
+
+// The merge fail-open, and the discrimination partner of
+// TestDossierGateBlocksHardCode: the EXACT same staged state (audit:hard
+// kernel/t.c, no dossier, no trailer) with ONE variable added -- MERGE_HEAD
+// present -- must go from block to clean. A merge integrates already-gated
+// commits; blocking it would strand a track that cannot --no-verify (aux) on
+// every merge of main (the R6 merge-blindspot class).
+func TestDossierGateSkipsMergeInProgress(t *testing.T) {
+	root := setupHardCode(t)
+	mutate(t, root, "kernel/t.c", "int t;", "int t; /* edit */")
+	gitT(t, root, "add", "kernel/t.c")
+	head := strings.TrimSpace(gitOut(root, "rev-parse", "HEAD"))
+	if head == "" {
+		t.Fatal("fixture HEAD did not resolve")
+	}
+	writeMergeHead(t, root, head)
+	reg, _ := loadRegistry(root)
+	fails, warns := dossierGate(root, reg, "Merge origin/main into t")
+	wantGateClean(t, fails, warns)
 }
 
 // The tier boundary: the SAME edit, to code owned by an audit:light dossier,
