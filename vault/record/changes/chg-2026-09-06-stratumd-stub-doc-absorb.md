@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/61-stratumd-stub (P5 stub-bringup test-scaffold arc): zero-fold, test-probe redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["6ac898c0"]
 touched: []
 established: []
 closed: []
