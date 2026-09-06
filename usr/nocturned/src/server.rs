@@ -23,10 +23,15 @@
 // Framing + dispatch + the parked-write / Tflush machinery mirror
 // usr/ptyfs/src/server.rs and are preserved verbatim from the N-1 audit.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+use core::time::Duration;
+
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use libthyla_rs::ninep as p9;
+use libthyla_rs::sync::Mutex;
+use libthyla_rs::torpor;
 use libthyla_rs::weft as weftlib;
 use libthyla_rs::{
     t_burrow_attach, t_burrow_detach, t_close, t_open, t_walk_create, t_weft_share,
@@ -251,20 +256,60 @@ impl Voice {
     }
 }
 
-/// State shared by every connection and the device pump (single-threaded at
-/// N-2a-1: the serve loop is one thread; the cycle/control split is N-2c).
-pub struct Shared {
+/// The mixer graph: the voices, the id allocator, and the device stats the
+/// cycle thread publishes for `info`. Reached only through [`Shared`]'s lock,
+/// so each field has a single writer at a time across the two threads (D-1c).
+pub struct Graph {
     voices: Vec<Voice>,
     next_id: u32,
     pub stats: Stats,
     pub started: bool,
 }
 
+/// The daemon's cross-thread state (N-2c). The graph lives behind a try-lockable
+/// mutex the CYCLE thread takes non-blockingly (a miss = "graph edit in
+/// progress, replay last period") and the CONTROL thread takes blockingly for
+/// brief edits, never across a 9P reply.
+pub struct Shared {
+    pub graph: Mutex<Graph>,
+    // The cycle thread parks on this word when the stream is STOPPED (there is
+    // no device IRQ to wake it then); the control thread bumps it + wakes when a
+    // byte write makes a voice playable, so a stopped stream starts promptly
+    // instead of waiting the backstop. A ring producer in ANOTHER Proc cannot
+    // poke through this same-Proc word -- that cross-Proc wake stays N-2b-2b; a
+    // bounded backstop in the park covers it.
+    wake: AtomicU32,
+}
+
 impl Shared {
     pub fn new() -> Shared {
+        Shared {
+            graph: Mutex::new(Graph::new()),
+            wake: AtomicU32::new(0),
+        }
+    }
+
+    /// Wake a cycle thread parked on a stopped stream. Cheap no-op when the
+    /// cycle is running (it waits on the device IRQ, not this word).
+    pub fn poke_cycle(&self) {
+        self.wake.fetch_add(1, Ordering::Release);
+        let _ = torpor::wake_one(&self.wake);
+    }
+
+    /// The cycle thread's stopped-state park: sleep until a poke or `timeout`.
+    /// Register-then-observe on `wake` closes the poke-vs-park race (no lost
+    /// start).
+    pub fn cycle_park(&self, timeout: Duration) {
+        let seen = self.wake.load(Ordering::Acquire);
+        let _ = torpor::wait(&self.wake, seen, Some(timeout));
+    }
+}
+
+impl Graph {
+    pub fn new() -> Graph {
         let mut voices = Vec::with_capacity(MAX_VOICES);
         voices.push(Voice::new(0, -1)); // the persistent default voice
-        Shared {
+        Graph {
             voices,
             next_id: 1,
             stats: Stats::default(),
@@ -597,29 +642,51 @@ impl Conn {
         self.handle
     }
 
-    pub fn teardown(&mut self, sh: &mut Shared) {
+    pub fn teardown(&mut self, sh: &Shared) {
         for slot in self.fids.iter_mut() {
             *slot = None;
         }
         self.pending.clear();
         // Every voice this connection minted dies with it.
-        sh.drop_conn_voices(self.handle);
+        sh.graph.lock().drop_conn_voices(self.handle);
+    }
+
+    /// True iff this connection has parked writes awaiting FIFO room; the
+    /// control loop shortens its poll timeout while any conn does, so a parked
+    /// write completes within a period of the cycle draining room.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     /// Retry the parked writes in order; a fully-accepted one gets its Rwrite.
     /// False if the connection's reply write failed (close it).
-    pub fn poll_writes(&mut self, sh: &mut Shared) -> bool {
+    pub fn poll_writes(&mut self, sh: &Shared) -> bool {
         while !self.pending.is_empty() {
-            let (tag, total, finished) = {
+            let (tag, total, finished, poke) = {
                 let pw = &mut self.pending[0];
-                let n = sh.push(pw.voice, &pw.data[pw.done..]);
-                pw.done += n;
-                // A voice that vanished under a parked write (its conn is us,
-                // so this cannot happen for our own voice; defensive) drains as
-                // accepted so the reply is not stuck forever.
-                let gone = sh.voice_pos(pw.voice).is_none();
-                (pw.tag, pw.data.len(), gone || pw.done >= pw.data.len())
+                // Lock only for the push; the Rwrite send below runs unlocked.
+                let (accepted, gone, was_stopped) = {
+                    let mut g = sh.graph.lock();
+                    let n = g.push(pw.voice, &pw.data[pw.done..]);
+                    // A voice that vanished under a parked write (its conn is us,
+                    // so this cannot happen for our own voice; defensive) drains
+                    // as accepted so the reply is not stuck forever.
+                    (n, g.voice_pos(pw.voice).is_none(), !g.started)
+                };
+                pw.done += accepted;
+                (
+                    pw.tag,
+                    pw.data.len(),
+                    gone || pw.done >= pw.data.len(),
+                    accepted > 0 && was_stopped,
+                )
             };
+            // New room made a stopped stream playable: wake the cycle thread.
+            // (While writes are parked the stream is normally running, so this is
+            // a rare edge; the poke is a cheap no-op when the cycle is running.)
+            if poke {
+                sh.poke_cycle();
+            }
             if !finished {
                 return true; // still parked; keep order
             }
@@ -655,7 +722,7 @@ impl Conn {
     }
 
     /// Read available bytes and dispatch every complete frame (the ptyfs shape).
-    pub fn service(&mut self, sh: &mut Shared) -> bool {
+    pub fn service(&mut self, sh: &Shared) -> bool {
         let cur = self.in_buf.len();
         if cur >= SRV_MSIZE_USIZE {
             return false;
@@ -698,7 +765,7 @@ impl Conn {
         }
     }
 
-    fn dispatch(&mut self, sh: &mut Shared, tmsg: &[u8], hdr: p9::Header) -> Disp {
+    fn dispatch(&mut self, sh: &Shared, tmsg: &[u8], hdr: p9::Header) -> Disp {
         let tag = hdr.tag;
         self.out_buf.clear();
         self.out_buf.resize(SRV_MSIZE_USIZE, 0);
@@ -798,7 +865,7 @@ impl Conn {
     }
 
     /// Resolve one path component from `cur`. Returns the child path, or None.
-    fn walk_child(sh: &Shared, cur: u64, name: &[u8]) -> Option<u64> {
+    fn walk_child(g: &Graph, cur: u64, name: &[u8]) -> Option<u64> {
         if name == b".." || name == b"." {
             // ".." off a voice leaf/dir climbs to nodes/, off nodes/ to root.
             return Some(match cur {
@@ -820,7 +887,7 @@ impl Conn {
                 }
                 // A decimal voice id that names a live voice.
                 let id = parse_u32(name)?;
-                if sh.voice_pos(id).is_some() {
+                if g.voice_pos(id).is_some() {
                     Some(vpath(id, VLEAF_DIR))
                 } else {
                     None
@@ -837,7 +904,7 @@ impl Conn {
         }
     }
 
-    fn h_walk(&mut self, sh: &mut Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_walk(&mut self, sh: &Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_twalk(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -856,14 +923,18 @@ impl Conn {
         let mut cur = f.path;
         let mut qids: [p9::Qid; p9::P9_MAX_WALK] = [p9::Qid::default(); p9::P9_MAX_WALK];
         let mut n = 0usize;
-        for k in 0..(a.nwname as usize).min(p9::P9_MAX_WALK) {
-            match Conn::walk_child(sh, cur, a.names[k]) {
-                Some(p) => {
-                    cur = p;
-                    qids[n] = Conn::qid_of(p);
-                    n += 1;
+        {
+            // One lock for the whole (bounded) walk; released before the reply.
+            let g = sh.graph.lock();
+            for k in 0..(a.nwname as usize).min(p9::P9_MAX_WALK) {
+                match Conn::walk_child(&g, cur, a.names[k]) {
+                    Some(p) => {
+                        cur = p;
+                        qids[n] = Conn::qid_of(p);
+                        n += 1;
+                    }
+                    None => break,
                 }
-                None => break,
             }
         }
         if a.nwname > 0 && n == 0 {
@@ -875,7 +946,7 @@ impl Conn {
         p9::build_rwalk(&mut self.out_buf, tag, &qids[..n])
     }
 
-    fn h_lopen(&mut self, sh: &mut Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_lopen(&mut self, sh: &Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_tlopen(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -891,7 +962,7 @@ impl Conn {
         // Opening nodes/new MINTS a voice owned by this connection; the fid
         // remembers the id so a read returns it (the tapestry surface/new idiom).
         let minted = if f.path == P_NODES_NEW {
-            match sh.mint_voice(self.handle) {
+            match sh.graph.lock().mint_voice(self.handle) {
                 Some(id) => id as i64,
                 None => return self.err(tag, p9::E_NOMEM),
             }
@@ -917,7 +988,7 @@ impl Conn {
         p9::build_rread(&mut self.out_buf, tag, &text[off..off + k])
     }
 
-    fn h_read(&mut self, sh: &mut Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_read(&mut self, sh: &Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_tread(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -948,23 +1019,26 @@ impl Conn {
             return self.err(tag, p9::E_INVAL);
         }
         let mut text: Vec<u8> = Vec::new();
-        if is_voice(f.path) {
-            match vleaf(f.path) {
-                VLEAF_INFO => sh.render_voice_info(vid(f.path), &mut text),
-                VLEAF_CTL => sh.render_ctl(&mut text),
-                _ => {}
+        {
+            let g = sh.graph.lock();
+            if is_voice(f.path) {
+                match vleaf(f.path) {
+                    VLEAF_INFO => g.render_voice_info(vid(f.path), &mut text),
+                    VLEAF_CTL => g.render_ctl(&mut text),
+                    _ => {}
+                }
+            } else if f.path == P_INFO {
+                g.render_info(&mut text);
+            } else {
+                g.render_ctl(&mut text);
             }
-        } else if f.path == P_INFO {
-            sh.render_info(&mut text);
-        } else {
-            sh.render_ctl(&mut text);
         }
         self.read_text(tag, a.offset, a.count, &text)
     }
 
     /// A ctl verb line (`flush`, `gain <n>`, `remove`) applied to `voice`.
     /// Returns Ok(true) if the verb is known + accepted, Ok(false) if unknown.
-    fn apply_ctl(sh: &mut Shared, voice: u32, data: &[u8]) -> bool {
+    fn apply_ctl(g: &mut Graph, voice: u32, data: &[u8]) -> bool {
         // First token.
         let vend = data
             .iter()
@@ -972,13 +1046,13 @@ impl Conn {
             .unwrap_or(data.len());
         let verb = &data[..vend];
         if verb == b"flush" {
-            sh.drop_fifo_voice(voice);
+            g.drop_fifo_voice(voice);
             true
         } else if verb == b"remove" {
             // Never remove voice 0; the connection's teardown reaps the rest,
             // but an explicit remove is allowed for a client that is done.
             if voice != 0 {
-                sh.voices.retain(|v| v.id != voice);
+                g.voices.retain(|v| v.id != voice);
             }
             true
         } else if verb == b"gain" {
@@ -986,7 +1060,7 @@ impl Conn {
             let rest = &data[vend..];
             let start = rest.iter().position(|&b| b != b' ').unwrap_or(rest.len());
             match parse_u32(trim_line(&rest[start..])) {
-                Some(p) => sh.set_gain(voice, p),
+                Some(p) => g.set_gain(voice, p),
                 None => false,
             }
         } else {
@@ -994,7 +1068,7 @@ impl Conn {
         }
     }
 
-    fn h_write(&mut self, sh: &mut Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_write(&mut self, sh: &Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_twrite(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -1030,18 +1104,23 @@ impl Conn {
             // I-46(a): a per-voice ctl acts only for the connection that minted
             // the voice (voice 0 is the world-shared default, exempt). The
             // server is the authority -- an unauthorized ctl is refused
-            // regardless of the advisory mode bits.
-            if voice != 0 {
-                match sh.voice_owner(voice) {
-                    Some(o) if o == self.handle => {}
-                    Some(_) => return self.err(tag, p9::E_PERM),
-                    None => return self.err(tag, p9::E_BADF),
+            // regardless of the advisory mode bits. One lock spans the owner
+            // check + verb; released before the reply.
+            let ok = {
+                let mut g = sh.graph.lock();
+                if voice != 0 {
+                    match g.voice_owner(voice) {
+                        Some(o) if o == self.handle => {}
+                        Some(_) => return self.err(tag, p9::E_PERM),
+                        None => return self.err(tag, p9::E_BADF),
+                    }
                 }
-            }
-            // Root ctl historically accepts only `flush`; a per-voice ctl adds
-            // gain/remove. Route both through apply_ctl (root ctl's `remove`
-            // no-ops on voice 0 by the guard above).
-            return if Conn::apply_ctl(sh, voice, a.data) {
+                // Root ctl historically accepts only `flush`; a per-voice ctl
+                // adds gain/remove. Route both through apply_ctl (root ctl's
+                // `remove` no-ops on voice 0 by the guard above).
+                Conn::apply_ctl(&mut g, voice, a.data)
+            };
+            return if ok {
                 p9::build_rwrite(&mut self.out_buf, tag, a.data.len() as u32)
             } else {
                 self.err(tag, p9::E_INVAL)
@@ -1052,44 +1131,44 @@ impl Conn {
             if a.data.is_empty() {
                 return p9::build_rwrite(&mut self.out_buf, tag, 0);
             }
-            if sh.voice_pos(voice).is_none() {
-                return self.err(tag, p9::E_BADF);
-            }
-            // I-46(a): only the minting connection may write a voice (voice 0 is
-            // the world-shared default). The server enforces it directly, so a
-            // cross-Proc write to a private voice is refused even though the
-            // audio file's mode admits the open.
-            if voice != 0 && sh.voice_owner(voice) != Some(self.handle) {
-                return self.err(tag, p9::E_PERM);
-            }
-            // Order matters: a write behind a parked one must queue behind it.
-            if self.pending.is_empty() {
-                let n = sh.push(voice, a.data);
-                if n == a.data.len() {
-                    return p9::build_rwrite(&mut self.out_buf, tag, n as u32);
+            // Order matters: a write behind a parked one must queue behind it,
+            // so push directly only when nothing is parked ahead.
+            let was_empty = self.pending.is_empty();
+            // One lock spans the existence + owner check + (when unparked) the
+            // push; the push count and the stopped-state come back so the reply,
+            // parking, and poke all run unlocked.
+            let (accepted, was_stopped) = {
+                let mut g = sh.graph.lock();
+                if g.voice_pos(voice).is_none() {
+                    return self.err(tag, p9::E_BADF);
                 }
-                if self.pending.len() >= MAX_PENDING_WRITES {
-                    return self.err(tag, p9::E_NOMEM);
+                // I-46(a): only the minting connection may write a voice (voice 0
+                // is the world-shared default). The server enforces it directly,
+                // so a cross-Proc write to a private voice is refused even though
+                // the audio file's mode admits the open.
+                if voice != 0 && g.voice_owner(voice) != Some(self.handle) {
+                    return self.err(tag, p9::E_PERM);
                 }
-                self.pending.push(PendingWrite {
-                    tag,
-                    fid: a.fid,
-                    voice,
-                    data: a.data.to_vec(),
-                    done: n,
-                });
-            } else {
-                if self.pending.len() >= MAX_PENDING_WRITES {
-                    return self.err(tag, p9::E_NOMEM);
-                }
-                self.pending.push(PendingWrite {
-                    tag,
-                    fid: a.fid,
-                    voice,
-                    data: a.data.to_vec(),
-                    done: 0,
-                });
+                let n = if was_empty { g.push(voice, a.data) } else { 0 };
+                (n, !g.started)
+            };
+            // New room made a stopped stream playable: wake the cycle thread.
+            if accepted > 0 && was_stopped {
+                sh.poke_cycle();
             }
+            if was_empty && accepted == a.data.len() {
+                return p9::build_rwrite(&mut self.out_buf, tag, accepted as u32);
+            }
+            if self.pending.len() >= MAX_PENDING_WRITES {
+                return self.err(tag, p9::E_NOMEM);
+            }
+            self.pending.push(PendingWrite {
+                tag,
+                fid: a.fid,
+                voice,
+                data: a.data.to_vec(),
+                done: if was_empty { accepted } else { 0 },
+            });
             self.defer = true;
             return Ok(0); // ignored: dispatch returns Disp::Deferred
         }
@@ -1097,7 +1176,7 @@ impl Conn {
         self.err(tag, p9::E_PERM)
     }
 
-    fn h_readdir(&mut self, sh: &mut Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_readdir(&mut self, sh: &Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_treaddir(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -1149,11 +1228,16 @@ impl Conn {
                     }
                 }
                 // The live voices, by decimal id (voice 0 included -- it is
-                // reachable as both /audio and /nodes/0).
+                // reachable as both /audio and /nodes/0). Snapshot the ids under
+                // the lock, then build entries unlocked.
+                let voice_ids: Vec<u32> = {
+                    let g = sh.graph.lock();
+                    g.voices.iter().map(|v| v.id).collect()
+                };
                 let mut buf16 = [0u8; 16];
-                for v in sh.voices.iter() {
-                    let name = fmt_u32(v.id, &mut buf16);
-                    if !push_entry(name, vpath(v.id, VLEAF_DIR), &mut ord) {
+                for id in voice_ids {
+                    let name = fmt_u32(id, &mut buf16);
+                    if !push_entry(name, vpath(id, VLEAF_DIR), &mut ord) {
                         break;
                     }
                 }
@@ -1228,7 +1312,7 @@ impl Conn {
     /// (the F1 owner gate); voice 0 (the world-shared byte sink) has no ring.
     /// The kernel's consume-once share claim makes the mapper unique -- the SPSC
     /// producer -- even though mounted clients share one dev9p connection.
-    fn h_weft(&mut self, sh: &mut Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_weft(&mut self, sh: &Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let fid = match p9::parse_tweft(tmsg) {
             Ok(f) => f,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -1245,12 +1329,20 @@ impl Conn {
         if id == 0 {
             return self.err(tag, p9::E_INVAL);
         }
-        match sh.voice_owner(id) {
-            Some(o) if o == self.handle => {}
-            Some(_) => return self.err(tag, p9::E_PERM),
-            None => return self.err(tag, p9::E_BADF),
-        }
-        match sh.weft_ensure(id) {
+        // One lock spans the owner check + the (idempotent) ring alloc/share;
+        // released before the reply. weft_ensure runs its burrow/share syscalls
+        // under the lock -- bounded, once per ring voice, and it must be atomic
+        // with the owner check against a concurrent teardown anyway.
+        let res = {
+            let mut g = sh.graph.lock();
+            match g.voice_owner(id) {
+                Some(o) if o == self.handle => {}
+                Some(_) => return self.err(tag, p9::E_PERM),
+                None => return self.err(tag, p9::E_BADF),
+            }
+            g.weft_ensure(id)
+        };
+        match res {
             Some((share_id, ring_size, ring_entries)) => {
                 p9::build_rweft(&mut self.out_buf, tag, share_id, ring_size as u32, ring_entries)
             }

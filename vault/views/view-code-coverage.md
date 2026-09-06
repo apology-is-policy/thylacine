@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 86 unowned · 491 files (82% owned) · ~23069 unswept lines.**
+**405 owned · 87 unowned · 492 files (82% owned) · ~23473 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **69 files, ~30910 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **69 files, ~31000 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -75,7 +75,7 @@ Excluded as harness and counted here rather than dropped: **69 files, ~30910 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | kernel | 116 | 22 | 3435 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/nocturned | 0 | 3 | 2273 |
+| usr/nocturned | 0 | 3 | 2481 |
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1033 |
 | arch | 34 | 4 | 971 |
@@ -83,6 +83,7 @@ Excluded as harness and counted here rather than dropped: **69 files, ~30910 lin
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/coreutils | 59 | 1 | 297 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
+| usr/libthyla-rs | 29 | 1 | 196 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
 | mm | 8 | 0 | 0 |
@@ -95,7 +96,6 @@ Excluded as harness and counted here rather than dropped: **69 files, ~30910 lin
 | usr/https | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
 | usr/kaua-term | 3 | 0 | 0 |
-| usr/libthyla-rs | 29 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
 | usr/net-echo | 1 | 0 | 0 |
@@ -122,8 +122,8 @@ Excluded as harness and counted here rather than dropped: **69 files, ~30910 lin
 | file | lines |
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
+| usr/nocturned/src/server.rs | 1396 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/nocturned/src/server.rs | 1304 |
 | usr/quarry/src/main.rs | 1033 |
 | usr/halcyon/src/main.rs | 874 |
 | usr/nocturned/src/snd.rs | 756 |
@@ -137,6 +137,7 @@ Excluded as harness and counted here rather than dropped: **69 files, ~30910 lin
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/ports/sdl2/thylacine/thyla_tap.c | 333 |
 | kernel/fault_test.c | 332 |
+| usr/nocturned/src/main.rs | 329 |
 | usr/halcyon/src/lib.rs | 328 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
 | usr/lib/thylajit/thyla_capjit.h | 318 |
@@ -151,10 +152,10 @@ Excluded as harness and counted here rather than dropped: **69 files, ~30910 lin
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | kernel/extinction.c | 229 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
-| usr/nocturned/src/main.rs | 213 |
 | kernel/include/thylacine/devcap.h | 208 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
+| usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/ports/sdl2/SDL_config.h | 191 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |

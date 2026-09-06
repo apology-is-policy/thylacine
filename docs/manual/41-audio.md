@@ -1,11 +1,14 @@
 # Audio — Nocturne
 
-**Status: N-2b (2026-09-06).** The audio system is being built (`docs/NOCTURNE.md`).
+**Status: N-2c (2026-09-06).** The audio system is being built (`docs/NOCTURNE.md`).
 What exists today: a Plan 9-shaped audio device file you can write PCM to,
 several programs mixing at once through their own *voices*, per-voice gain, and
-SDL programs playing through it automatically. Capture, the graph's ports and
-links, and the games' sound switch-on arrive in the following chunks; this
-page grows with them.
+SDL programs playing through it automatically. Since N-2c the driver runs the
+audio clock on its own thread, separate from the one serving the device files --
+an internal change (nothing you do differs) that keeps the sound steady while
+the graph is edited and lays the ground for low-latency effects. Capture, the
+graph's ports and links, and the games' sound switch-on arrive in the following
+chunks; this page grows with them.
 
 ## Overview
 

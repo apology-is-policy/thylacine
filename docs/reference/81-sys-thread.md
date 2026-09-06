@@ -274,6 +274,72 @@ joey's main runs this on every boot via a small `t_spawn("thread-probe")` + `t_w
 
 ---
 
+## libthyla-rs `sync::Mutex<T>` (userspace)
+
+The userspace lock native multi-threaded Procs share, built on the `torpor`
+futex substrate above (`usr/lib/libthyla-rs/src/sync.rs`, landed N-2c-1). Threads
+of a Proc share the address space, so a `Mutex` is a plain futex: an `AtomicU32`
+lock word the threads CAS, with `torpor::wait`/`wake` for the parked case. It is
+the three-state (`UNLOCKED` / `LOCKED` / `CONTENDED`) mutex Rust std uses on
+Linux, plus a non-blocking `try_lock` for a realtime thread that must never
+sleep.
+
+### API
+
+```rust
+impl<T> Mutex<T> {
+    pub const fn new(data: T) -> Mutex<T>;   // const -> a Mutex can be a static
+    pub fn into_inner(self) -> T;            // no lock; by-value proves no borrows
+}
+impl<T: ?Sized> Mutex<T> {
+    pub fn lock(&self) -> MutexGuard<'_, T>;         // blocks (parks) when held
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>>; // None if held; never sleeps
+    pub fn get_mut(&mut self) -> &mut T;             // no lock; &mut self is exclusive
+}
+// MutexGuard: Deref/DerefMut to T; unlocks on drop; !Send + !Sync.
+```
+
+### Semantics
+
+- **`lock`** — fast-path `UNLOCKED -> LOCKED` CAS; on contention marks the word
+  `CONTENDED` and parks on `torpor::wait(&state, CONTENDED, None)`. The
+  register-then-observe wait closes the wake-vs-park race: if the holder released
+  between the mark and the syscall, `wait` returns without parking, so **no wake
+  is lost**. Acquire ordering on success.
+- **`try_lock`** — takes only the `UNLOCKED -> LOCKED` edge; a `LOCKED` or
+  `CONTENDED` word (both "held") returns `None`. **Never issues a syscall, never
+  sleeps.** This is the realtime path: nocturned's audio cycle thread (N-2c-2)
+  takes the graph lock this way and, on a miss, replays the last period ("run
+  last cycle's plan") rather than ever blocking on the control thread.
+- **`unlock`** (guard drop) — `swap(UNLOCKED, Release)`; wakes one waiter only
+  when the prior word was `CONTENDED`. A waiter that re-acquires as `CONTENDED`
+  may cause at most one spurious wake later -- the textbook cost of the
+  three-state mutex, never a correctness issue.
+- **`MutexGuard` is `!Send` + `!Sync`** (a `PhantomData<*const ()>`): a guard is
+  bound to the thread that acquired it; releasing on another thread would wake
+  the wrong futex owner.
+
+### Caveats
+
+- **No poisoning.** no_std, no unwinding: a panic terminates the Proc (there is
+  nothing to poison). A guard held at a panic is irrelevant -- the Proc is gone.
+- **Not reentrant.** `lock()` on a mutex this thread already holds deadlocks
+  (well, parks forever). Standard for a futex mutex; do not re-enter.
+- **Fairness is the kernel's.** Wakes go through `torpor_wake`; ordering among
+  waiters is the kernel wait-queue's, not FIFO by request.
+
+### Test
+
+`alloc-smoke` exercises it in the default `test.sh` ladder under `-smp 4` (real
+parallelism): `try_lock` semantics (free -> `Some`, held -> `None`, released ->
+`Some`) plus a contended mutual-exclusion stress -- four worker threads + the
+main thread each increment a shared `Mutex<u64>` 1000 times through `lock()`; the
+total must equal exactly `(WORKERS+1)*ITERS` or a lost wakeup / torn word shows
+as a short total (or a join timeout). Green: `alloc-smoke: sync::Mutex (try_lock
++ contended mutual-exclusion) OK`.
+
+---
+
 ## Known caveats / footguns
 
 1. **No per-Thread reaping at v1.0.** A Thread that calls `SYS_THREAD_EXIT` leaves its Thread descriptor + 32 KiB allocation (16 KiB kstack + 16 KiB guard) live in the Proc's `threads` list until the Proc dies. For short-lived programs (libsodium tests) the leak is bounded; for long-running daemons (stratumd, future Thylacine-native daemons) the thread count must be bounded at the program level — typical pthread pool patterns work. A v1.x sub-chunk can add a per-Thread reap path (idle-CPU reaper walking a per-Proc dead-Thread list) when a workload requires it.

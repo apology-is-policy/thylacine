@@ -41,10 +41,12 @@ in.
 its manifest to the `virtio-pci:25` function, confers an allowance narrowed to
 that function's `(bus,dev,fn)` + its INTx INTID + a 256 KiB DMA cap (I-34), and
 spawns it persistent with `MAY_POST_SERVICE`. `probe` brings the device up
-(`snd::VirtioSnd::open`); `serve` posts `/srv/nocturne`, writes the one `READY`
-line the warden waits for, and runs a single poll loop over the listener, the
-9P connections and the IRQ fd (the IRQ handle is pollable: readable at a
-pending count ≥ 1). joey mounts `/srv/nocturne` at `/dev/nocturne` (MREPL over
+(`snd::VirtioSnd::open`); `serve` posts `/srv/nocturne`, spawns the **cycle
+thread** (which owns the device), writes the one `READY` line the warden waits
+for, and then *becomes* the **control thread** serving 9P. Since N-2c
+`nocturned` runs two threads sharing the graph under one try-lock (D-1c; see
+"The cycle/control thread split" below) -- the cycle thread on the device IRQ,
+the control thread on the listener + 9P connections. joey mounts `/srv/nocturne` at `/dev/nocturne` (MREPL over
 the devdev mount stub) when the service exists and logs
 `joey: /srv/nocturne absent (no virtio-sound function); skipping` otherwise.
 
@@ -264,6 +266,60 @@ latency; a running stream wakes on the device IRQ every period, and byte writes
 wake on the connection fd, so neither depends on the timeout. The wake POKE that
 removes even the 100 ms latency (the producer signalling the consumer on a
 stopped stream) is N-2b-2b.
+
+## The cycle/control thread split (N-2c)
+
+Through N-2b `nocturned` was single-threaded: one poll loop pumped the device
+*and* served 9P. N-2c splits it into two threads (D-1c), so the audio clock is
+never delayed by 9P work -- the foundation the in-cycle descants of N-4 require.
+
+**The two threads.** `serve` leaks the `Shared` graph to `'static`, spawns the
+**cycle thread** (`cycle_run`, `main.rs`) with a fresh page-aligned 128 KiB
+`t_burrow_attach` stack, then the original thread runs `control_run`:
+
+- **Cycle thread** -- owns the device (`VirtioSnd`, moved into a leaked
+  `CycleCtx`). One iteration per device period: try_lock the graph, `pump`
+  (reap completions + refill each freed slot from `Graph::next_period`, saving
+  the mixed period), decide start/stop, publish stats, then wait on the period
+  IRQ (`t_poll(irq_fd, IDLE_POLL_MS)`). It never touches 9P.
+- **Control thread** -- the listener + connections + framing + dispatch +
+  parked-write retry. It touches the graph only under the blocking lock and
+  never across a 9P reply. It never touches the device.
+
+**One lock, taken two ways** (`libthyla_rs::sync::Mutex`, reference 81). The
+graph is `Shared { graph: Mutex<Graph>, wake: AtomicU32 }`; `Graph` holds the
+voices, the id allocator, and the device stats/started the cycle publishes.
+
+- The **cycle** `try_lock`s and NEVER blocks. On a miss (the control thread is
+  mid-edit) it **replays the last mixed period** so the device never underruns:
+  voices do not advance that period (they advance next period), so no data is
+  lost and at most one ~10.7 ms period repeats. This is D-1c's "run last cycle's
+  plan" in its minimal faithful form. Collisions are vanishingly rare (the
+  control thread holds the lock only for microsecond-scale graph edits, never
+  across I/O, vs a 10.7 ms period).
+- The **control** thread `lock`s (blocking) for each graph op -- mint, push,
+  gain, flush, remove, weft-ensure, render -- in a tight scope released before
+  the reply, so the lock is never held across a 9P `send`.
+
+**The wake poke** (`Shared::poke_cycle` / `cycle_park`). A stopped stream has no
+IRQ, so the cycle thread parks on the `wake` futex with an `IDLE_POLL_MS`
+backstop. When a byte write makes a voice playable (`h_write` / `poll_writes`)
+AND the stream is stopped, the control thread bumps `wake` + `torpor::wake_one`,
+so the stream starts within the poke's latency instead of the 100 ms backstop --
+preserving the single-threaded era's instant byte-start. This is a *same-Proc*
+wake (torpor works intra-Proc). A ring producer in *another* Proc still cannot
+poke (no fd, no cross-Proc torpor), so its stopped-stream start rides the
+backstop -- the N-2b-2b cross-Proc primitive remains the future removal of even
+that. Register-then-observe on `wake` closes the poke-vs-park race (no lost
+start).
+
+**Why it is sound** (self-audit + the audit round): the `voices` Vec structure
+is mutated only by the single control thread and only read by the cycle; every
+graph field is touched under the one lock in both threads, so there is no data
+race; the device is exclusively the cycle's; the poke never loses a start; and
+there is exactly one lock, so no lock-order/deadlock surface. The mutex itself
+is proven under real 4-CPU contention by the `alloc-smoke` sync leg
+(reference 81).
 
 ## The probe and the witness
 

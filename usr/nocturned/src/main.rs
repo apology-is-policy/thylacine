@@ -33,13 +33,19 @@ macro_rules! say {
 mod server;
 mod snd;
 
+use core::time::Duration;
+
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use libdriver::driver::{run, Driver, DriverVa};
 use libdriver::resource::BoundResources;
 use libdriver::Error;
 use libthyla_rs::io::Write;
-use libthyla_rs::{t_close, t_poll, t_srv_accept, TPollFd, T_POLLHUP, T_POLLIN};
+use libthyla_rs::thread;
+use libthyla_rs::{
+    t_burrow_attach, t_close, t_poll, t_srv_accept, TPollFd, T_POLLHUP, T_POLLIN,
+};
 
 use server::{Conn, Shared, MAX_CONNS};
 use snd::VirtioSnd;
@@ -49,16 +55,38 @@ use snd::VirtioSnd;
 /// box must not pay it forever. ~0.5 s covers a writer's inter-chunk gap.
 const IDLE_STOP_PERIODS: u64 = 48;
 
-/// The serve loop's poll timeout (ms). While the stream RUNS the device IRQ wakes
-/// it every period, so this only bounds how long a STOPPED stream waits before
-/// re-checking for work. A ring producer writing to a stopped stream generates no
-/// poll event (it is shared memory, not an fd), so this is its start latency; the
-/// wake poke that removes even this is N-2b-2b. Byte writes wake on the conn fd,
-/// so they never depend on it.
+/// The backstop timeout (ms), used two ways since the N-2c split. In the CYCLE
+/// thread it bounds how long a STOPPED stream parks before re-checking for work;
+/// a byte write wakes it sooner via the control thread's same-Proc poke, but a
+/// ring producer in ANOTHER Proc cannot poke (shared memory, no fd, no
+/// cross-Proc torpor -- N-2b-2b), so this is that ring's start latency. In the
+/// running cycle it is a device-IRQ backstop. In the CONTROL thread it is the
+/// idle poll interval when no write is parked.
 const IDLE_POLL_MS: i32 = 100;
+
+/// The CONTROL thread's poll timeout (ms) while any connection has a parked
+/// write: the cycle frees FIFO room by draining (~one period, 10.7 ms), and the
+/// control thread has no fd event for that (shared memory), so it re-checks at
+/// about a period so a parked write completes promptly. A client only parks when
+/// it over-produces (its 64 KiB FIFO full, ~340 ms buffered), so this granularity
+/// is invisible.
+const PARKED_RETRY_MS: i32 = 10;
+
+/// The cycle thread's stack: a fresh page-aligned anon burrow (so its top is
+/// 16-aligned for spawn_raw). Generous for the mix path's on-stack period +
+/// float32 buffers (~8 KiB) plus frames.
+const CYCLE_STACK: u64 = 128 * 1024;
 
 struct Nocturned {
     snd: VirtioSnd,
+}
+
+/// The cycle thread's context, leaked to 'static and handed to `cycle_entry`
+/// through spawn_raw's one u64 arg. It owns the device; `sh` is the graph both
+/// threads share.
+struct CycleCtx {
+    snd: VirtioSnd,
+    sh: &'static Shared,
 }
 
 impl Driver for Nocturned {
@@ -75,7 +103,7 @@ impl Driver for Nocturned {
         Ok(Nocturned { snd })
     }
 
-    fn serve(mut self, _res: &BoundResources) -> Result<(), Error> {
+    fn serve(self, _res: &BoundResources) -> Result<(), Error> {
         let listener = match server::post_srv_nocturne() {
             Ok(l) => l,
             Err(()) => {
@@ -89,119 +117,207 @@ impl Driver for Nocturned {
             snd::PERIOD_BYTES,
             snd::PERIODS
         );
-        // READY last: all bring-up console output precedes it; the warden's
-        // readiness read wakes on this one line.
+
+        // The graph both threads share, leaked to 'static so each thread holds a
+        // stable reference for the life of the Proc (D-1c).
+        let sh: &'static Shared = Box::leak(Box::new(Shared::new()));
+
+        // Spawn the CYCLE thread: it owns the device and runs the audio clock
+        // (the IRQ-driven pump + float32 mix), and never touches 9P. This
+        // (original) thread becomes the CONTROL thread serving /srv/nocturne.
+        // They meet only at `sh`'s try-locked graph.
+        let ctx: &'static mut CycleCtx = Box::leak(Box::new(CycleCtx { snd: self.snd, sh }));
+        let stack = unsafe { t_burrow_attach(CYCLE_STACK) };
+        if stack < 0 {
+            say!("nocturned: cycle-thread stack attach failed");
+            return Err(Error::Hardware);
+        }
+        let sp = (stack as u64) + CYCLE_STACK;
+        if unsafe {
+            thread::spawn_raw(
+                cycle_entry as *const () as u64,
+                sp,
+                ctx as *mut CycleCtx as u64,
+                0,
+            )
+        }
+        .is_err()
+        {
+            say!("nocturned: cycle-thread spawn failed");
+            return Err(Error::Hardware);
+        }
+
+        // READY last: all bring-up console output + the cycle spawn precede it;
+        // the warden's readiness read wakes on this one line.
         let mut out = libthyla_rs::io::stdout();
         let _ = out.write_all(b"READY\n");
 
-        let mut shared = Shared::new();
-        let mut conns: Vec<Conn> = Vec::new();
-        let irq_fd = self.snd.irq_fd();
-        let mut idle_periods: u64 = 0;
+        control_run(sh, listener)
+    }
+}
 
-        loop {
-            // 1. The device: reap completions (each one is a period), refilling
-            //    every slot from the FIFO (silence when it is empty). A stream
-            //    that has played only silence for IDLE_STOP_PERIODS stops.
-            if self.snd.started() {
-                let before = self.snd.stats;
-                let reaped = self.snd.pump(|buf| shared.next_period(buf));
-                let real = (self.snd.stats.periods_played - before.periods_played)
-                    - (self.snd.stats.silence_periods - before.silence_periods);
-                if reaped > 0 {
-                    if real > 0 {
-                        idle_periods = 0;
-                    } else {
-                        idle_periods += reaped as u64;
+/// The CYCLE thread entry (spawn_raw ABI: one u64 arg = the leaked CycleCtx).
+extern "C" fn cycle_entry(arg: u64) -> ! {
+    // SAFETY: `arg` is the address of the CycleCtx leaked in serve(); it lives
+    // for the Proc's life and only this thread touches it.
+    let ctx: &mut CycleCtx = unsafe { &mut *(arg as *mut CycleCtx) };
+    cycle_run(&mut ctx.snd, ctx.sh)
+}
+
+/// The audio clock (D-1c). Runs one iteration per device period: try_lock the
+/// graph, pump the device (reap completions + refill each freed slot with a
+/// freshly-mixed period), decide start/stop, publish stats, then wait for the
+/// next period IRQ. A try_lock miss (the control thread is mid-edit) replays the
+/// last mixed period so the device never underruns -- "run last cycle's plan".
+fn cycle_run(snd: &mut VirtioSnd, sh: &'static Shared) -> ! {
+    let irq_fd = snd.irq_fd();
+    let mut idle_periods: u64 = 0;
+    // The last period we mixed; replayed on a try_lock miss so a brief control
+    // edit never starves the device. Voices do not advance on a replay -- they
+    // advance next period -- so no data is lost; at most one period repeats.
+    let mut last_period = [0u8; snd::PERIOD_BYTES];
+    loop {
+        match sh.graph.try_lock() {
+            Some(mut g) => {
+                if snd.started() {
+                    let before = snd.stats;
+                    let reaped = snd.pump(|buf| {
+                        let any = g.next_period(buf);
+                        let n = buf.len().min(snd::PERIOD_BYTES);
+                        last_period[..n].copy_from_slice(&buf[..n]);
+                        any
+                    });
+                    let real = (snd.stats.periods_played - before.periods_played)
+                        - (snd.stats.silence_periods - before.silence_periods);
+                    if reaped > 0 {
+                        if real > 0 {
+                            idle_periods = 0;
+                        } else {
+                            idle_periods += reaped as u64;
+                        }
                     }
-                }
-                if idle_periods >= IDLE_STOP_PERIODS && !shared.has_playable() {
-                    self.snd.stop();
+                    if idle_periods >= IDLE_STOP_PERIODS && !g.has_playable() {
+                        snd.stop();
+                        idle_periods = 0;
+                    }
+                } else if g.has_playable() {
+                    if let Err(e) = snd.start(|buf| {
+                        let any = g.next_period(buf);
+                        let n = buf.len().min(snd::PERIOD_BYTES);
+                        last_period[..n].copy_from_slice(&buf[..n]);
+                        any
+                    }) {
+                        say!("nocturned: stream start failed: {:?}", e);
+                        g.drop_fifo();
+                    }
                     idle_periods = 0;
                 }
-            } else if shared.has_playable() {
-                if let Err(e) = self.snd.start(|buf| shared.next_period(buf)) {
-                    say!("nocturned: stream start failed: {:?}", e);
-                    shared.drop_fifo();
-                }
-                idle_periods = 0;
+                // Publish device state for the control thread's `info` reader.
+                g.stats = snd.stats;
+                g.started = snd.started();
             }
-            shared.stats = self.snd.stats;
-            shared.started = self.snd.started();
-
-            // 2. Writers parked on a full FIFO: the reap above freed room.
-            let mut i = conns.len();
-            while i > 0 {
-                i -= 1;
-                if !conns[i].poll_writes(&mut shared) {
-                    conns[i].teardown(&mut shared);
-                    let _ = unsafe { t_close(conns[i].handle()) };
-                    conns.remove(i);
+            None => {
+                // Graph edit in progress. Keep the device fed by REPLAYING the
+                // last mixed period; skip start/stop (they need the graph). A
+                // stopped stream just parks below until the edit clears.
+                if snd.started() {
+                    let _ = snd.pump(|buf| {
+                        let n = buf.len().min(snd::PERIOD_BYTES);
+                        buf[..n].copy_from_slice(&last_period[..n]);
+                        false
+                    });
                 }
             }
+        }
 
-            // 3. Poll: the listener (only with room, the ptyfs F4 lesson), the
-            //    connections, and the IRQ (readable at pending-count >= 1).
-            let nc = conns.len().min(MAX_CONNS);
-            let mut pollfds: Vec<TPollFd> = Vec::with_capacity(2 + nc);
-            // The listener is ALWAYS polled; when full we accept-and-close (below)
-            // so a connector fails fast instead of stalling ~5 s on the srvconn
-            // handshake deadline and only then falling to its own fallback.
-            pollfds.push(TPollFd {
-                fd: listener as i32,
-                events: T_POLLIN,
-                revents: 0,
-            });
-            let conn_base = pollfds.len();
-            for c in conns.iter().take(nc) {
-                pollfds.push(TPollFd {
-                    fd: c.handle() as i32,
-                    events: T_POLLIN,
-                    revents: 0,
-                });
-            }
-            let irq_slot = pollfds.len();
-            pollfds.push(TPollFd {
+        // Wait for the next wake.
+        if snd.started() {
+            // Running: the device period IRQ, with a bounded backstop against a
+            // device that stops interrupting (the pump reaps opportunistically).
+            let mut pfd = [TPollFd {
                 fd: irq_fd,
                 events: T_POLLIN,
                 revents: 0,
+            }];
+            let _ = unsafe { t_poll(pfd.as_mut_ptr(), 1, IDLE_POLL_MS) };
+            if pfd[0].revents & T_POLLIN != 0 {
+                let _ = snd.irq_wait();
+            }
+        } else {
+            // Stopped: no IRQ. Park on the control thread's poke (a byte write
+            // made a voice playable) with a bounded backstop -- a cross-Proc ring
+            // producer cannot poke (N-2b-2b), so the backstop starts it.
+            sh.cycle_park(Duration::from_millis(IDLE_POLL_MS as u64));
+        }
+    }
+}
+
+/// The CONTROL thread (D-1c): the original thread after it spawns the cycle. It
+/// serves /srv/nocturne -- accept, framing, dispatch, parked-write retry -- and
+/// touches the graph only under `sh`'s blocking lock, never across a 9P reply.
+fn control_run(sh: &'static Shared, listener: i64) -> ! {
+    let mut conns: Vec<Conn> = Vec::new();
+    loop {
+        // 1. Retry parked writes: the cycle thread frees FIFO room by draining.
+        let mut i = conns.len();
+        while i > 0 {
+            i -= 1;
+            if !conns[i].poll_writes(sh) {
+                conns[i].teardown(sh);
+                let _ = unsafe { t_close(conns[i].handle()) };
+                conns.remove(i);
+            }
+        }
+
+        // 2. Poll the listener + connections (no IRQ -- that is the cycle's). A
+        //    short timeout while any write is parked so it completes within a
+        //    period of the cycle draining room; otherwise the idle interval.
+        let any_pending = conns.iter().any(|c| c.has_pending());
+        let timeout = if any_pending { PARKED_RETRY_MS } else { IDLE_POLL_MS };
+        let nc = conns.len().min(MAX_CONNS);
+        let mut pollfds: Vec<TPollFd> = Vec::with_capacity(1 + nc);
+        // The listener is ALWAYS polled; when full we accept-and-close (below)
+        // so a connector fails fast instead of stalling on the handshake.
+        pollfds.push(TPollFd {
+            fd: listener as i32,
+            events: T_POLLIN,
+            revents: 0,
+        });
+        let conn_base = pollfds.len();
+        for c in conns.iter().take(nc) {
+            pollfds.push(TPollFd {
+                fd: c.handle() as i32,
+                events: T_POLLIN,
+                revents: 0,
             });
-            let rc = unsafe { t_poll(pollfds.as_mut_ptr(), pollfds.len(), IDLE_POLL_MS) };
-            if rc < 0 {
-                continue;
-            }
+        }
+        let rc = unsafe { t_poll(pollfds.as_mut_ptr(), pollfds.len(), timeout) };
+        if rc < 0 {
+            continue;
+        }
 
-            // 4. The IRQ: consume the pending count (non-blocking now) -- the
-            //    reap itself runs at the top of the next iteration.
-            if pollfds[irq_slot].revents & T_POLLIN != 0 {
-                let _ = self.snd.irq_wait();
-            }
-
-            // 5. Accept -- push if there is room, else close immediately so the
-            //    connector's handshake fails fast (EOF) and it falls to its own
-            //    fallback (SDL's DUMMY), rather than stalling on the handshake
-            //    deadline. conns.len() is fresh here (the teardown pass above ran).
-            if pollfds[0].revents & T_POLLIN != 0 {
-                let h = unsafe { t_srv_accept(listener) };
-                if h >= 0 {
-                    if conns.len() < MAX_CONNS {
-                        conns.push(Conn::new(h));
-                    } else {
-                        let _ = unsafe { t_close(h) };
-                    }
+        // 3. Accept -- push if there is room, else close immediately so the
+        //    connector's handshake fails fast and falls to its own fallback.
+        if pollfds[0].revents & T_POLLIN != 0 {
+            let h = unsafe { t_srv_accept(listener) };
+            if h >= 0 {
+                if conns.len() < MAX_CONNS {
+                    conns.push(Conn::new(h));
+                } else {
+                    let _ = unsafe { t_close(h) };
                 }
             }
+        }
 
-            // 6. Service the readable connections (backward, remove-safe).
-            let mut i = nc;
-            while i > 0 {
-                i -= 1;
-                let pf = pollfds[conn_base + i];
-                if pf.revents & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(&mut shared) {
-                    conns[i].teardown(&mut shared);
-                    let _ = unsafe { t_close(conns[i].handle()) };
-                    conns.remove(i);
-                }
+        // 4. Service the readable connections (backward, remove-safe).
+        let mut i = nc;
+        while i > 0 {
+            i -= 1;
+            let pf = pollfds[conn_base + i];
+            if pf.revents & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(sh) {
+                conns[i].teardown(sh);
+                let _ = unsafe { t_close(conns[i].handle()) };
+                conns.remove(i);
             }
         }
     }
