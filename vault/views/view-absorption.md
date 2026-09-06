@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**78 absorbed · 79 live · 157 total.**
+**79 absorbed · 78 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -78,7 +78,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 123-tls.md | live | — |
 | 124-net-utils.md | live | — |
 | 125-weft.md | live | — |
-| 126-revenant.md | live | — |
+| 126-revenant.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-elf]], [[sub-kernel-exec]], [[sub-kernel-fault]], [[sub-kernel-image]], [[sub-kernel-mmu]] |
 | 127-overcommit.md | live | — |
 | 128-devenv.md | absorbed | [[inv-i1]], [[inv-i32]], [[lock-env]], [[sub-kernel-content]] |
 | 129-fsbench.md | live | — |
