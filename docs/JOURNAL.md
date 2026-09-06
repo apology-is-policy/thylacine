@@ -218,15 +218,17 @@ stewardship point: a bug a peer reports, in tooling that gates all three tracks,
 is not "main's problem to route around" -- it is the track that owns the tool's
 to close.
 
-**Where it stands.** Ten dossiers current, one tooling bug closed, backlog
-35 -> 26, tip `812fb4d4`, both mirrors converged throughout (fast-forwarded past
-several concurrent peer halcyond commits). With `kernel-dev`'s small header
-sibling folded, the clean/thin pool is fully spent: the only substantive work
-left is the two big dossiers (`coreutils-presenters`, 15 files plus a new `ps`;
-`libthyla-rs`, 12), which want a fresh context rather than a deep one, per the
-arc's own "BIG: own focused session, do NOT start deep in context" -- so this is
-the point at which a self-compact at the next 600k signal is what continues the
-arc.
+**Where it stands.** Eleven dossiers current, one tooling bug closed, backlog
+35 -> 25, tip `9c8cb040`, both mirrors converged throughout (fast-forwarded past
+several concurrent peer halcyond commits). The last two were `kernel-dev` (the
+dev.h header sibling of devdev) and `kernel-devproc` (whose atomic-`CDEBUGOWNER`
+fold reinforces the debug-fs no-dangle argument -- a change I had first mis-filed
+as merge-noise and the Stop hook correctly pushed me to re-triage). With those,
+the clean/thin pool is fully spent: the only substantive work left is the two big
+dossiers (`coreutils-presenters`, 15 files plus a new `ps`; `libthyla-rs`, 12),
+which want a fresh context rather than a deep one, per the arc's own "BIG: own
+focused session, do NOT start deep in context". The run self-compacted here at
+the 600k line to hand those to a fresh context.
 
 ---
 
