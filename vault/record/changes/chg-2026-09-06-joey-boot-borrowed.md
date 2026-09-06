@@ -4,7 +4,7 @@ type: chg
 title: "sub-stratum-boot re-verified after the KT-1.5 + VIVARIUM merge: the bringup sequence is borrowed; the ~5659-line churn is all in the undescribed region (#177 gap widened)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["162dde0b"]
 touched:
   - sub-stratum-boot
 established: []
