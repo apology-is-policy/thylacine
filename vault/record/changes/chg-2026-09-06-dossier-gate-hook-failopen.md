@@ -4,7 +4,7 @@ type: chg
 title: "dossier-gate commit-msg hook: fail OPEN on a behind-main worktree (aux 0062) -- an older quaestor with no dossier-gate subcommand exited 2 and exec-bricked the commit; the hook now no-ops when the worktree lacks dossier_gate.go"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["6fcbbd40"]
 touched: []
 established: []
 closed: []
