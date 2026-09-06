@@ -76,6 +76,15 @@ under exactly the corruption it exists for instead of disabling itself.
 install the PTE, all under `vma_lock`, with one arm that cannot run under a
 spinlock.
 
+Two properties of that install are load-bearing and invisible. The offset is
+**bounded**: `burrow_byte_off = vma->burrow_offset + (page_va - vma->vaddr_start)`
+is rejected if `>= burrow->size`, so a mapping can never resolve past its
+backing. And the install into a not-present leaf needs **no TLB invalidation** —
+invalid→valid requires no flush (ARM ARM B2.7.1). The demand-page path never
+overwrites a *valid* leaf: `mmu_install_user_pte` refuses a mismatching install
+over one (the COW break does its own uninstall-first dance instead), so the fast
+path issues no TLBI at all.
+
 ## Data structures
 
 `struct fault_info` — decoded, pure data, no kernel pointers, which is what
@@ -98,6 +107,13 @@ otherwise race sub-table construction and orphan one.
 
 Lock order is `vma_lock → burrow lock → buddy`, matching the attach path, so
 there is no inversion.
+
+**The ordinary arms take no Burrow reference.** A demand-paged anonymous or lazy
+page is just a PA installed into the VMA's *already-mapped* Burrow, whose
+`mapping_count` is the liveness guarantee — so `NoUseAfterFree` holds by
+construction without a fresh ref. Only the file arm, which drops the lock to
+sleep, needs its own pin, exactly because it lets go of the lock that keeps the
+mapping (and therefore the Burrow) alive.
 
 **The file arm breaks the lock deliberately**, and the protocol is the
 interesting part of this file:

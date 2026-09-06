@@ -1,346 +1,41 @@
-# Reference: page-fault dispatcher (P3-C / P3-Dc / P3-Ea)
-
-## Purpose
-
-The fault dispatcher decodes ARMv8 ESR_EL1 / FAR_EL1 / ELR_EL1 into a structured `fault_info` and routes the fault to a handler that either resolves it (returns `FAULT_HANDLED` — the ERET resumes the interrupted instruction) or extincts with a specific diagnostic.
-
-History:
-- **P3-C** (`12ff454`): structured decode + classification. Resolve path empty; every call extincts.
-- **P3-Dc** (`936c2ed`): user-mode demand-paging path live. `userland_demand_page` looks up the VMA covering FAR, validates the access against VMA prot, resolves the BURROW offset to a backing PA, and installs a leaf PTE in the per-Proc TTBR0 tree (`mmu_install_user_pte`). User-mode resolves return `FAULT_HANDLED`. Failures fall through to `FAULT_UNHANDLED_USER`.
-- **P3-Ea**: EL0 sync vector live. New `exception_sync_lower_el` handles sync exceptions taken from EL0 (data/instr abort routed through `arch_fault_handle` for demand paging; SVC stub extincts at v1.0; alignment / BTI / BRK extinct with EL0-prefixed diagnostics). Vector slot 0x400 wired (was VEC_UNEXPECTED 8); IRQ slot 0x480 wired to `exception_irq_curr_el` + `preempt_check_irq` (was VEC_UNEXPECTED 9).
-
-The dispatcher is the substrate for:
-- ARCH §28 I-12 (W^X) runtime detection — kernel-image permission faults are recognized and produce "PTE violates W^X (kernel image)" extinctions.
-- Per-thread kstack overflow detection (P3-Bca: kstack guard pages mapped no-access in the kernel direct map).
-- Per-Proc VMA dispatch + demand-paging at P3-Dc.
-
-ARCH §12: "Synchronous exceptions enter `exception_sync_*`. Page faults dispatch through `arch_fault_handle` after structured decoding via `fault_info_decode`."
-
-## Public API
-
-### `<arch/arm64/fault.h>`
-
-```c
-struct fault_info {
-    u64 vaddr;            // FAR_EL1
-    u64 elr;              // ELR_EL1 (faulting PC)
-    u64 esr;              // raw ESR_EL1
-    u32 ec;               // ESR.EC[31:26]
-    u32 fsc;              // ESR.ISS[5:0]
-    u8  fault_level;      // FSC[1:0]
-    bool from_user;       // EL0 origin
-    bool is_instruction;  // instruction abort vs data abort
-    bool is_write;        // ESR.WnR (data aborts only)
-    bool is_translation;  // FSC ∈ FSC_TRANS_FAULT_L{0..3}
-    bool is_permission;   // FSC ∈ FSC_PERM_FAULT_L{1..3}
-    bool is_access_flag;  // FSC ∈ FSC_ACCESS_FAULT_L{1..3}
-};
-
-enum fault_result {
-    FAULT_HANDLED         = 0,
-    FAULT_FATAL           = 1,
-    FAULT_UNHANDLED_USER  = 2,
-};
-
-void fault_info_decode(u64 esr, u64 far, u64 elr, struct fault_info *out);
-enum fault_result arch_fault_handle(const struct fault_info *fi);
-
-// P3-Dc: user-mode demand paging.
-struct Proc;
-enum fault_result userland_demand_page(struct Proc *p,
-                                       const struct fault_info *fi);
-```
-
-#### `fault_info_decode(esr, far, elr, *out)`
-
-Pure decoder — no kernel state reads. Extracts:
-- EC (exception class) from ESR[31:26].
-- FSC (fault status code) from ESR[5:0].
-- WnR (write/read) from ESR[9] (data aborts only; instruction aborts always read=0).
-- `from_user` from EC (0x20/0x24 = lower EL = EL0).
-- `is_instruction` from EC (0x20/0x21 = instruction abort).
-- Classification booleans from FSC value lookup.
-- `fault_level` from FSC[1:0].
-
-Used by `exception_sync_curr_el` (and future `exception_sync_lower_el` at P3-E) when the EC indicates a data or instruction abort.
-
-#### `arch_fault_handle(fi)`
-
-Top-level dispatcher. At v1.0 P3-C the order of checks is:
-
-0. **Kernel-mode re-entrancy guard (#806)** → if the per-CPU `g_in_kernel_fault[cpu]` flag is already set, the handler *itself* faulted while handling a kernel fault — classically a wild `current_thread()` (TPIDR_EL1) deref in `stack_guard_overflow_msg` (`t->magic`). `extinction_with_addr("recursive kernel fault (handler re-entered)", FAR)` fires NOW, before re-running the faulting code. The flag is set on first kernel-fault entry and never cleared (a kernel fault is always fatal — every branch below extincts — so the CPU is dying regardless; the flag only has to survive long enough to break the recursion). Without this guard, such a fault recurses one `KERNEL_ENTRY` frame (288 B) per fault until the boot stack crosses its guard — which is exactly how the F-B/#806 saga masqueraded as a `boot-stack guard` overflow for a year. The boot CPU *can* deepen its stack — via fault recursion, not honest call depth (measured normal boot-stack high-water is ~4.5 KiB of 16 KiB). The OOB-cpu case clamps onto slot 0 (mirrors `halls_cpu`) so the guard stays live under a wild MPIDR. Composes with HX-1's `g_halls_in_dump` (a fault inside the resulting dump bails to `_torpor`).
-1. **Kernel-mode + stack-guard region** → `extinction("kernel stack overflow (<flavor>)")` where `<flavor>` is `boot-stack guard` / `secondary-stack guard` / `current-thread kstack guard` (F4, 2026-05-31: the message NAMES the guard so a wild-SP fault is never misattributed). NB: a `boot-stack guard` hit is NOT proof of honest boot-CPU depth — the #806 recursion descends the boot stack too; the re-entrancy guard (step 0) fires first so that case extincts honestly with the wild-pointer FAR.
-2. **Kernel-mode + permission fault + kernel image** → `extinction("PTE violates W^X (kernel image)")`.
-3. **Kernel-mode + translation fault** → `extinction("unhandled kernel translation fault")`.
-4. **Kernel-mode + permission fault (other)** → `extinction("unhandled kernel permission fault")`.
-5. **Kernel-mode + access-flag fault** → `extinction("unhandled kernel access-flag fault")`.
-6. **User-mode** → routes through `userland_demand_page(current_thread()->proc, fi)`. Returns `FAULT_HANDLED` on success / `FAULT_UNHANDLED_USER` on failure (caller extincts at v1.0; Phase 5+ note delivery upgrades to SIGSEGV).
-7. **Anything else** → `extinction("unclassified kernel fault (ESR)")`.
-
-Returns `FAULT_HANDLED` for resolved user-mode faults (P3-Dc); for kernel-mode faults the resolve path remains empty (every kernel-mode fault extincts).
-
-#### `userland_demand_page(p, fi)` — P3-Dc
-
-The per-Proc VMA-tree dispatcher. Steps:
-
-1. Validate Proc magic + non-zero `pgtable_root` (kproc has 0 — never demand-pages).
-2. `vma_lookup(p, fi->vaddr)` — sorted-list walk to find the VMA covering the faulting VA. Returns NULL → `FAULT_UNHANDLED_USER`.
-3. Permission check vs fault type:
-   - `is_write` requires `VMA_PROT_WRITE`.
-   - `is_instruction` requires `VMA_PROT_EXEC`.
-   - Read fault requires `VMA_PROT_READ`.
-4. Resolve the BURROW offset: `burrow_byte_off = vma->burrow_offset + (page_va - vma->vaddr_start)`. Reject if offset ≥ `burrow->size`.
-5. Resolve to a backing PA: `burrow_base_pa + (burrow_byte_off & ~PAGE_MASK)`. v1.0 anonymous BURROW: pages are eagerly allocated in a single `alloc_pages(order)` chunk; page i is at `page_to_pa(burrow->pages) + i * PAGE_SIZE`.
-6. `mmu_install_user_pte(p->pgtable_root, p->asid, page_va, page_pa, vma->prot)` — walks the L0 → L1 → L2 → L3 tree, allocates sub-tables KP_ZERO as needed, installs the leaf PTE.
-
-Exposed in the header so tests can drive demand paging directly (a synthetic `fault_info` + a manually constructed Proc) without triggering a real EL0 fault — at v1.0 pre-exec there's no userspace to fault.
-
-## Implementation
-
-### `arch/arm64/fault.c`
-
-`fault_info_decode` is straight bit-extraction. The constants for FSC values mirror ARM ARM D17.2.40:
-
-| FSC | Meaning |
-|---|---|
-| 0x04..0x07 | Translation fault L0..L3 |
-| 0x09..0x0B | Access flag fault L1..L3 (FEAT_HAFDBS) |
-| 0x0D..0x0F | Permission fault L1..L3 |
-
-`arch_fault_handle` performs the priority-ordered checks above. Each check that matches calls `extinction_with_addr` (noreturn). The `FAULT_UNHANDLED_USER` return is the only non-extinction path; the caller (`exception_sync_curr_el`) currently extincts on it.
-
-### `arch/arm64/exception.c::exception_sync_lower_el` — P3-Ea
-
-Counterpart for EL0 → EL1 sync exceptions. Same shape as `exception_sync_curr_el` but switches on the LOWER EC values:
-
-```c
-case EC_DATA_ABORT_LOWER:
-case EC_INST_ABORT_LOWER: {
-    struct fault_info fi;
-    fault_info_decode(esr, far, ctx->elr, &fi);
-    enum fault_result r = arch_fault_handle(&fi);
-    switch (r) {
-    case FAULT_HANDLED: return;       // ERET resumes the EL0 instruction.
-    case FAULT_UNHANDLED_USER:
-        extinction_with_addr("EL0 fault: no VMA covers vaddr / permission denied",
-                             (uintptr_t)fi.vaddr);
-    /* ... */
-    }
-}
-
-case EC_SVC_AARCH64:
-    extinction_with_addr("EL0 SVC (userspace syscall) — not implemented at v1.0",
-                         (uintptr_t)ctx->elr);
-
-case EC_PC_ALIGN / EC_SP_ALIGN / EC_BTI / EC_BRK:
-    /* extinct with EL0-prefixed diagnostic */
-```
-
-`fault_info_decode` already sets `from_user=true` for the LOWER ECs, so `arch_fault_handle` routes through `userland_demand_page` (P3-Dc) — no additional dispatch logic needed. On `FAULT_HANDLED` return, vectors.S slot 0x400 branches to `.Lexception_return` and ERETs. On `FAULT_UNHANDLED_USER` the handler extincts (Phase 5+ note delivery upgrades to SIGSEGV).
-
-### `arch/arm64/exception.c::exception_sync_curr_el`
-
-Refactored at P3-C to a thin dispatcher:
-
-```c
-case EC_DATA_ABORT_SAME:
-case EC_INST_ABORT_SAME: {
-    struct fault_info fi;
-    fault_info_decode(esr, far, ctx->elr, &fi);
-    enum fault_result r = arch_fault_handle(&fi);
-    switch (r) {
-    case FAULT_HANDLED: return;
-    case FAULT_UNHANDLED_USER:
-        extinction_with_addr("unhandled user-mode fault (no VMA / SIGSEGV pending)",
-                             (uintptr_t)fi.vaddr);
-    case FAULT_FATAL:
-        extinction_with_addr("arch_fault_handle returned FAULT_FATAL",
-                             (uintptr_t)fi.vaddr);
-    }
-    extinction_with_addr("arch_fault_handle returned unknown result",
-                         (uintptr_t)fi.vaddr);
-}
-```
-
-(The `LOWER` EC values aren't tested here — `exception_sync_curr_el` is wired to the Current EL/SPx vector. P3-E will add `exception_sync_lower_el` for the EL0 sync vector, using the same dispatcher.)
-
-### Address-range classifiers
-
-- `stack_guard_overflow_msg(addr)` checks: the boot-stack guard (PA + high-VA ranges), each secondary boot-stack guard page (PA + high-VA forms — P5-secondary-stack-guard, one per `g_secondary_boot_stacks` slot), and the current-thread kstack guard region (direct-map KVA via `t->kstack_base`), returning the flavor-named extinction string (or NULL). Defense-in-depth: multiple address forms because FAR_EL1 may carry the PA OR the VA depending on which translation root caught the fault. A secondary CPU's idle thread runs on its boot stack, so an overflow there lands in that slot's guard page. (The former thin `addr_is_stack_guard` `!= NULL` wrapper was removed as dead code in the #806 close.) Naming the flavor disambiguated what turned out to be ≥2 conflated wild-SP overflows wearing the one "kernel stack overflow" symptom.
-- `addr_is_kernel_image(addr)` checks: kernel-image PA range, kernel-image high VA range, and direct-map alias of kernel-image PA range (P3-Bca added the third).
-
-## Data structures
-
-```c
-struct fault_info { ... };  // 56 bytes (3×u64 + 2×u32 + u8 + 6×bool + padding)
-enum fault_result { ... };  // u32-sized enum
-```
-
-No kernel-side state; pure decoded view.
-
-## State machines
-
-### Fault dispatch flow (P3-C)
-
-```
-EXCEPTION (sync, current EL)
-   │
-   │ exception_sync_curr_el
-   ▼
-EC switch
-   │
-   ├── EC_DATA_ABORT_SAME / EC_INST_ABORT_SAME
-   │      │
-   │      │ fault_info_decode
-   │      ▼
-   │   struct fault_info
-   │      │
-   │      │ arch_fault_handle
-   │      ▼
-   │   ┌────────────────────────┐
-   │   │ Priority checks (P3-C) │
-   │   │  1. kstack guard       │── extinction
-   │   │  2. W^X kernel image   │── extinction
-   │   │  3. kernel translation │── extinction
-   │   │  4. kernel permission  │── extinction
-   │   │  5. kernel access-flag │── extinction
-   │   │  6. user-mode          │── FAULT_UNHANDLED_USER
-   │   │  7. unclassified       │── extinction
-   │   └────────────────────────┘
-   │      │
-   │      └── FAULT_HANDLED → ERET (none at v1.0 P3-C)
-   │      └── FAULT_UNHANDLED_USER → caller extincts
-   │
-   ├── EC_SP_ALIGN / EC_PC_ALIGN / EC_BTI / EC_BRK
-   │      │
-   │      └── extinction (handled inline in exception.c)
-   │
-   └── (default)
-          │
-          └── extinction("unhandled sync exception")
-```
-
-### User-mode resolved (P3-Dc)
-
-```
-6. user-mode
-   │
-   │ userland_demand_page(p, fi)
-   ▼
-   ├── vma_lookup(p, fi->vaddr)
-   │      │
-   │      ├── VMA covers FAR
-   │      │   │
-   │      │   ├── permission check vs is_write / is_instruction / read
-   │      │   │      │
-   │      │   │      ├── allowed
-   │      │   │      │   ├── resolve BURROW offset → backing PA
-   │      │   │      │   ├── mmu_install_user_pte (walks/grows L0..L3)
-   │      │   │      │   └── return FAULT_HANDLED
-   │      │   │      │
-   │      │   │      └── denied → return FAULT_UNHANDLED_USER
-   │      │   │
-   │      │   └── (no TLB flush: invalid → valid; ARM ARM B2.7.1)
-   │      │
-   │      └── no VMA → return FAULT_UNHANDLED_USER
-```
-
-PTE bit encoding for user pages:
-- `VMA_PROT_R`  → `AP_RO_ANY | PXN | UXN` (RO for both ELs; no exec).
-- `VMA_PROT_RW` → `AP_RW_ANY | PXN | UXN` (RW for both ELs; no exec).
-- `VMA_PROT_RX` → `AP_RO_ANY | PXN` (RO for both ELs; user can exec).
-- `VMA_PROT_W|X` is rejected at the VMA layer (vma_alloc) AND at the PTE installer (defense in depth).
-
-W^X (I-12) holds by construction at every PTE: writable PTEs always have UXN+PXN set; executable-at-EL0 PTEs are read-only.
-
-## Spec cross-reference
-
-No new TLA+ spec at P3-C or P3-Dc. The reasoning:
-
-- **P3-C dispatch**: straight if-else over decoded ESR — config parsing per CLAUDE.md "Features that usually don't [benefit from spec]".
-
-- **P3-Dc demand paging at v1.0**: structurally simple under the v1.0 single-thread-Proc invariant.
-  - **No new concurrency**: only the running thread of Proc P faults P's pgtable. No two CPUs concurrently demand-page on the same Proc. (Phase 5+ multi-thread Procs DO introduce concurrency on `mmu_install_user_pte`'s walk; a per-Proc pgtable lock OR a TLA+ extension at that point becomes necessary.)
-  - **No new refcount semantics**: `userland_demand_page` doesn't take or release BURROW refs. The VMA already holds `mapping_count`; the demand-paged page is just a PA reference, not a fresh ref. `burrow.tla::NoUseAfterFree` continues to hold by construction.
-  - **W^X invariant by construction**: PTE bits derived from VMA prot, and VMA prot already excludes W+X. Every PTE the installer can produce satisfies "writable XOR executable-at-EL0".
-
-The intermediate invariants `userland_demand_page` upholds — VMA-presence implies access permitted; PTE bits respect VMA prot; sub-table allocation rolls back cleanly on failure — are local to the function and verified by the unit tests. They're documented in commentary above the impl rather than formalized in TLA+; if a future bug demonstrates the structural reasoning was insufficient, a spec extension lands at that point.
-
-ARCH §28 I-12 (W^X) is enforced at runtime by check #2 in arch_fault_handle (kernel-image case) and at PTE-construction time in `mmu_install_user_pte` (user-image case). PTE constructors at static layer + VMA layer + ELF loader form the layered defense.
-
-## Tests
-
-`kernel/test/test_fault_decode.c` — five unit tests on the decoder:
-
-- `fault.decode_kernel_data_translation_l2`: kernel-mode data abort, translation fault L2, read.
-- `fault.decode_kernel_data_permission_write`: kernel-mode data abort, permission fault L3, write.
-- `fault.decode_user_data_translation`: lower-EL data abort, translation fault L1.
-- `fault.decode_user_instruction_fetch`: lower-EL instruction abort, translation fault L3.
-- `fault.decode_access_flag`: data abort, access-flag fault L2 (FEAT_HAFDBS).
-
-Each test constructs a synthetic ESR via `mk_esr(ec, iss)` and verifies the decoded `fault_info` fields.
-
-`kernel/test/test_demand_page.c` (P3-Dc) — seven unit tests on the demand-paging pipeline:
-
-- `pgtable.install_user_pte_smoke`: install RW + RX leaf PTEs; verify L0→L3 chain is allocated; verify PTE bits match expected encoding (AP, PXN, UXN, AF, nG).
-- `pgtable.install_user_pte_constraints`: zero pgtable_root, unaligned vaddr/pa, high-VA vaddr, W+X prot — all return -1.
-- `pgtable.install_user_pte_idempotent`: identical re-install returns 0 without reallocating; mismatching PA at the same vaddr returns -1.
-- `demand_page.smoke`: synthetic fault_info on a mapped VMA returns FAULT_HANDLED; L3 entry installed at expected vaddr pointing at the BURROW's backing page.
-- `demand_page.no_vma`: fault on unmapped vaddr → FAULT_UNHANDLED_USER.
-- `demand_page.permission_denied`: write fault on RO VMA / instruction fault on non-EXEC VMA → FAULT_UNHANDLED_USER. Read fault on R-only VMA → FAULT_HANDLED.
-- `demand_page.lifecycle_round_trip`: 4-page VMA + demand-page each page; proc_free + burrow_unref returns `phys_free_pages` to baseline (sub-tables freed by P3-Db walker; backing pages freed by BURROW lifecycle).
-
-The integration tests (`tools/test-fault.sh`) cover the dispatch:
-
-- `kstack_overflow` → check #1 fires → "kernel stack overflow" extinction.
-- `wxe_violation` → check #2 fires → "PTE violates W^X (kernel image)" extinction.
-- `bti_fault` / `canary_smash` → not page faults; handled inline in `exception_sync_curr_el`.
-
-## Error paths
-
-The dispatcher's "errors" are extinctions. There's no other error mode — a fault either resolves (FAULT_HANDLED) or extincts (with a specific message). Diagnostic strings are stable and grep-able for tooling:
-
-- `"kernel stack overflow"` (kstack guard).
-- `"PTE violates W^X (kernel image)"` (kernel-image permission fault).
-- `"unhandled kernel translation fault"` (kernel-mode translation fault).
-- `"unhandled kernel permission fault"` (kernel-mode permission fault, not in kernel image).
-- `"unhandled kernel access-flag fault"` (kernel-mode access-flag fault).
-- `"unclassified kernel fault (ESR)"` (caught by step 7 — every other case).
-- `"unhandled user-mode fault (no VMA / SIGSEGV pending)"` (caller-emitted on FAULT_UNHANDLED_USER).
-
-## Performance characteristics
-
-- `fault_info_decode`: ~10 instructions of bit extraction; sub-microsecond.
-- `arch_fault_handle`: ~5 conditional branches on the fault-info booleans; sub-microsecond.
-
-The dispatcher itself is not on a hot path (faults are exceptional). Performance-critical at P3-D when demand paging fires for every fresh user page.
-
-## Status
-
-- **Implemented at P3-C** (`12ff454`): `fault_info_decode`, `arch_fault_handle` with the kernel-mode classification paths, exception.c refactor to use the dispatcher, 5 decoder unit tests.
-- **Implemented at P3-Dc** (`936c2ed`): `userland_demand_page` (vma_lookup → permission check → BURROW offset → PTE install). `mmu_install_user_pte` walks/grows the per-Proc TTBR0 tree. `arch_fault_handle`'s user-mode case routes through `userland_demand_page`. 7 new unit tests in `test_demand_page.c`.
-- **Implemented at P3-Ea**: `exception_sync_lower_el` for EL0 sync vector slot 0x400. EL0 IRQ slot 0x480 wired to `exception_irq_curr_el` + `preempt_check_irq`. SVC + alignment + BTI + BRK from EL0 stub-extinct at v1.0; P3-Ec wires real syscall dispatch.
-- **Stubbed**: COW (post-v1.0; not on the critical path for /init or the typical static-ELF case). SVC/syscall dispatcher (P3-Ec).
-
-Commit landing points: `12ff454` (P3-C), `936c2ed` (P3-Dc), `793c535` (P3-Ea).
-
-## Known caveats / footguns
-
-1. **`exception_sync_curr_el` only sees Current EL/SPx aborts**. EC_DATA_ABORT_LOWER (0x24) and EC_INST_ABORT_LOWER (0x20) are unreachable here. P3-E adds `exception_sync_lower_el` for the EL0 sync vector; that handler reuses the same dispatcher.
-
-2. **`from_user` is derived from EC, not SPSR**. We rely on the ARMv8 architecture rule that EC discriminates lower-EL vs current-EL aborts; SPSR isn't consulted. Cleaner; matches the ARM ARM intent.
-
-3. **Access-flag fault path extincts at v1.0**. PTE_AF is set eagerly by the constructors so the path shouldn't fire. If it does, something built a PTE without AF — kernel bug. P3-D's PTE installation must continue to set AF.
-
-4. **`FAULT_FATAL` is reserved**. Currently no path returns it; `arch_fault_handle` extincts internally on every fatal path. The enum value exists for API completeness in case a P3-D handler needs to report fatality without extincting (e.g., to clean up Proc state before extincting from the caller).
-
-5. **`stack_guard_overflow_msg` checks all three address forms**. FAR_EL1 may carry the PA (legacy TTBR0-identity access — should be impossible post-P3-Bda but defensive), the boot-stack high VA, OR the per-thread direct-map KVA. The classifier handles all three.
-6. **A "kernel stack overflow" extinction is NOT proof of honest call depth** (#806). A wild SP / wild `current_thread` lands in whichever guard is near the wild value; the message names the guard, not the cause. The step-0 re-entrancy guard converts the recursive-handler-fault flavor (which descends the boot stack ~one frame per fault) into an honest `recursive kernel fault` with the wild-pointer FAR. Measured normal boot-stack high-water is ~4.5 KiB of 16 KiB (`boot_stack_report` in `kernel/main.c`, a permanent per-boot depth canary) — so a true depth overflow is not constructible; treat any `boot-stack guard` hit as a corruption symptom, not a margin problem.
-
-   **ROOT CAUSE FOUND + FIXED (2026-05-31).** The step-0 guard was the diagnostic; it then *caught* the root. With the guard in the binary, a KASLR-seed-pinned repro (`-dtb` fixes the seed; the slide moves the kernel's physical base, so the seed deterministically selects the heap layout) produced the *honest* dump: `recursive kernel fault ... 0xffff0000_xxxxxxxx` (a direct-map KVA, = the wild `current_thread`), `ESR` DFSC=0x06 (L2 translation fault, a *read*), backtrace `boot_main -> test_run_all -> rfork_stress_1000 -> rfork_internal -> thread_create_internal -> mmu_set_no_access_range -> exception_irq_curr_el -> exception_sync_curr_el -> arch_fault_handle`. The root is **an IRQ taken during the direct-map break-before-make** in `arch/arm64/mmu.c::directmap_walk_to_l2/_l3` (the kstack-guard demote): the BBM transiently unmaps a 1 GiB / 2 MiB block of the direct map across a `tlbi+dsb_ish`, and a timer IRQ in that window runs a handler that dereferences `current_thread()` (a slab object reached via its direct-map KVA) sitting in the unmapped block -> translation fault -> the wild-`current_thread` recursion this guard converts to honest. **Fixed by masking IRQs across the BBM windows** (`spin_lock_irqsave(NULL)`); see `03-mmu.md`. This was the year-long "rfork_stress overflow" (distinct from #788, the on_cpu UAF, fixed separately at `107186d`; the symptom conflated >=2 bugs). **#808 then made the runtime demote go away entirely** — `mmu_pagemap_directmap` (driven from `phys_init`, single-CPU + IRQ-masked + pre-`thread_create`) page-maps the whole buddy direct map to L3 at boot, so this BBM never fires at runtime (the IRQ-mask becomes belt-and-suspenders) and the cross-CPU sibling of the race is closed by construction too. So #806's mechanism cannot recur: the window simply no longer opens at runtime. See `03-mmu.md` "Direct-map page-mapped from boot".
-
-## Naming rationale
-
-`fault.{c,h}` — standard. No thematic name proposed; `fault` is the universal term for ARMv8 page faults / aborts. The dispatcher is `arch_fault_handle` (no `arm64_` prefix because the abstraction itself is architecture-specific — the function lives in `arch/arm64/`).
-
-`fault_result` enum values use FAULT_ prefix. Could have been `FAULT_OK / FAULT_BAD / FAULT_USER` but the explicit naming (HANDLED / FATAL / UNHANDLED_USER) makes the call-site read more clearly.
+# 25 — Fault dispatcher [ABSORBED INTO THE VAULT]
+
+Absorbed at the docs/reference retirement (`chg-2026-09-06-fault-absorb`; the
+memory area, completing it). This document spanned two layers the vault keeps as
+two dossiers, so it redirects to both:
+
+- the **fault dispatch, demand paging, and the COW break** (`arch/arm64/fault.c`
+  — the fixed-order kernel classification and its scar tissue, the seven backing
+  arms and the HOSTMEM MAIR-index widening, the file arm's four-step
+  drop-the-lock protocol and the #190 verify-and-bail, the ordinary arms taking
+  no Burrow ref, the no-TLBI-on-invalid→valid install, the bounded offset, the
+  copy-on-write break and its uninstall-before-install, the #194 past-EOF
+  `FAULT_USER_BUS`, read-ahead. I-12, I-32, I-7, I-36, I-44):
+
+      vault/system/kernel/memory/sub-kernel-fault.md
+
+- the **EL0 sync-vector dispatch layer** (`arch/arm64/exception.c` —
+  `exception_sync_lower_el` / `exception_sync_curr_el`, the vector slot dispatch,
+  the EL0 SVC/PC_ALIGN/SP_ALIGN/BTI/BRK handling, and where a kernel fault
+  extincts vs an EL0 fault terminates the Proc):
+
+      vault/system/kernel/entry/sub-kernel-exception.md
+
+**What this file got WRONG or MISSED by the time it was absorbed** (the reason
+the dossiers are written from the code):
+
+- Its concurrency posture is stale: it claims the path is **single-threaded and
+  needs a future lock**, but the #713 fix made the whole fast path run under
+  `vma_lock` (the fault handler is a reader on the same lock), closing the
+  half-unlinked-list UAF. A reader following the doc would add a lock that
+  already exists.
+- It carries only **three `fault_result` values**; the dossier has four
+  (`FAULT_USER_BUS` — a valid mapping whose backing store failed, distinct from a
+  bad address, so a wedged FS server is not reported as a segfault in the victim).
+- It predates the **seven backing arms** (the HOSTMEM arm and the
+  `device_memory` bool → MAIR-index widening, the code/JIT arm), the **DISTRO
+  D-3** file-mmap generalization (and the verify-and-bail that replaced the R-5
+  one-fixed-VMA premise), and the copy-on-write break entirely.
+- The exact register-decode bit positions and the vector-slot offsets live in
+  `arch/arm64/fault.c` / `arch/arm64/exception.c` — the source of truth — which
+  the dossiers point at rather than duplicating.
