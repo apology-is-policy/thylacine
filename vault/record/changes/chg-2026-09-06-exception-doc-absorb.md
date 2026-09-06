@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/08-exception (P1-F/G vector table + fault machinery): zero-fold, 4-surface redirect stub; the dossiers are far ahead of the Phase-1-era doc"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["4a49f288"]
 touched: []
 established: []
 closed: []
