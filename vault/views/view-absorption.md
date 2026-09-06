@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**68 absorbed · 89 live · 157 total.**
+**69 absorbed · 88 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -124,7 +124,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 25-fault-dispatcher.md | absorbed | [[sub-kernel-exception]], [[sub-kernel-fault]] |
 | 26-vma.md | absorbed | [[sub-kernel-vma]] |
 | 27-exec.md | live | — |
-| 28-syscall.md | live | — |
+| 28-syscall.md | absorbed | [[sub-kernel-cons]], [[sub-kernel-proc]], [[sub-kernel-syscall-dispatch]] |
 | 29-joey.md | absorbed | [[sub-kernel-joey]], [[sub-stratum-boot]] |
 | 30-dev-spoor.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-path]], [[sub-kernel-spoor]] |
 | 31-trivial-devs.md | absorbed | [[sub-kernel-cons]], [[sub-kernel-content]], [[sub-kernel-dev]], [[sub-kernel-uart]] |
