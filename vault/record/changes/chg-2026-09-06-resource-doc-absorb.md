@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/110-resource (per-Proc resource floor, I-32 DoS bound): zero-fold, 4-surface redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["2626175f"]
 touched: []
 established: []
 closed: []
