@@ -48,6 +48,7 @@ pub enum Op {
     Rule,
     Em,
     Obj,
+    Pre,
 }
 
 impl Op {
@@ -62,6 +63,7 @@ impl Op {
             Op::Rule => "rule",
             Op::Em => "em",
             Op::Obj => "obj",
+            Op::Pre => "pre",
         }
     }
 
@@ -76,6 +78,7 @@ impl Op {
             "rule" => Some(Op::Rule),
             "em" => Some(Op::Em),
             "obj" => Some(Op::Obj),
+            "pre" => Some(Op::Pre),
         _ => None,
         }
     }
@@ -455,6 +458,29 @@ mod tests {
         }
         assert_eq!(evs[1], Event::Text(b"shown".to_vec()));
         assert_eq!(evs[2], Event::Close(Op::Obj));
+    }
+
+    #[test]
+    fn pre_block_roundtrips_and_strips_to_payload() {
+        // A `pre` block is paired; its payload (whitespace + newlines) is
+        // significant and survives strip byte-exactly (12.1 rule 1). Inline
+        // `obj` runs inside stay affordant -- their shown text is payload too.
+        let mut v = Vec::new();
+        open(&mut v, Op::Pre, &[]);
+        v.extend_from_slice(b"+--+\n|");
+        open(&mut v, Op::Obj, &[("type", "path"), ("ref", "/dev")]);
+        v.extend_from_slice(b"dev");
+        close(&mut v, Op::Obj);
+        v.extend_from_slice(b"|\n+--+\n");
+        close(&mut v, Op::Pre);
+
+        let evs = parse(&v);
+        assert_eq!(evs[0], Event::Open(Op::Pre, vec![]));
+        assert!(matches!(evs.last(), Some(Event::Close(Op::Pre))));
+        assert_eq!(strip(&v), b"+--+\n|dev|\n+--+\n");
+        assert!(!Op::Pre.is_point(), "pre pairs; it is never a point op");
+        assert_eq!(Op::parse("pre"), Some(Op::Pre));
+        assert_eq!(Op::Pre.as_str(), "pre");
     }
 
     #[test]

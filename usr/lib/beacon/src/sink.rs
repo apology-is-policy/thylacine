@@ -192,6 +192,35 @@ impl<'a> Sink<'a> {
         }
     }
 
+    /// Open a preformatted block (12.2 `pre`): the payload's whitespace and
+    /// line breaks are significant. A rich sink sets it apart (mono +
+    /// code-block chrome) and neither re-wraps nor collapses it; inline
+    /// `obj`/`em` runs emitted between open and close stay affordant. The
+    /// interim home for box-drawing / column-exact output until Beacon gains
+    /// box/table primitives.
+    pub fn pre_open(&mut self) {
+        if self.tier == Tier::Rich {
+            wire::open(&mut self.buf, Op::Pre, &[]);
+            self.flush_frame();
+        }
+    }
+
+    pub fn pre_close(&mut self) {
+        if self.tier == Tier::Rich {
+            wire::close(&mut self.buf, Op::Pre);
+            self.flush_frame();
+        }
+    }
+
+    /// A preformatted block wrapping a literal string -- the common case:
+    /// bytes already laid out on the character grid (a box, aligned columns).
+    /// At `none`/`cells` this is exactly the plain payload.
+    pub fn pre(&mut self, s: &str) {
+        self.pre_open();
+        self.text(s);
+        self.pre_close();
+    }
+
     /// Transcript structure (the shell only; 12.6). Explicitly non-scoped.
     pub fn zone_open(&mut self, z: Zone) {
         if self.tier == Tier::Rich {
