@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**52 absorbed · 105 live · 157 total.**
+**53 absorbed · 104 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -116,7 +116,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 17-smp-bringup.md | absorbed | [[seam-sparse-mpidr]], [[sub-kernel-sched-smp]] |
 | 18-territory.md | absorbed | [[inv-i1]], [[lock-territory-ns-lock]], [[spec-territory]], [[sub-kernel-territory]] |
 | 19-handles.md | live | — |
-| 20-burrow.md | live | — |
+| 20-burrow.md | absorbed | [[sub-kernel-burrow]], [[sub-kernel-handle]], [[sub-kernel-vma]] |
 | 21-elf.md | live | — |
 | 22-asid.md | absorbed | [[sub-kernel-asid]], [[sub-kernel-proc]] |
 | 23-direct-map.md | live | — |

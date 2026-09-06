@@ -181,6 +181,15 @@ of the #713 fix: before it, an unlocked walker could follow a half-unlinked
 list into a freed VMA and install a leaf PTE aliasing a page already recycled
 into kernel memory.
 
+**`vma_free`'s teardown clears the PTEs before it frees the pages, and that
+order is the corruption boundary.** It calls `mmu_uninstall_user_range` over the
+VMA's range — clearing the leaf PTEs and broadcasting `tlbi vaae1is` — *before*
+the backing pages return to the buddy. Freeing first would leave live PTEs and
+cached TLB entries pointing at pages the allocator has since handed to someone
+else: the stale-mapping class suspected behind the AEGIS-256/mallocng
+corruption. The clear is idempotent on never-faulted-in pages, so it runs
+unconditionally over the range.
+
 **A FILE-backed Burrow's free may SLEEP, so it cannot happen under the lock
 (D-3c F1/F5).** Freeing a 9P-backed FILE Burrow reaches `spoor_clunk`, which may
 sleep — and every VMA mutator holds `as->lock`, a spinlock, so an inline free is
