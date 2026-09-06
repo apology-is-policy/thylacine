@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 25-fault-dispatcher -- fold C2/C3/C4 (fault's own demand-page properties) into sub-kernel-fault, dual-redirect with the exception sibling; MEMORY AREA COMPLETE (54 absorbed / 103 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["c6eed249"]
 touched: [sub-kernel-fault]
 established: []
 closed: []
