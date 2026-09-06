@@ -241,6 +241,54 @@ that wants to replace the environment writes `/env` first. The projection is
 staged before the commit so a later failure cannot have disturbed the caller's
 own environment.
 
+### The spawn-permission gate is two sites, and the split is the security property
+
+`SYS_SPAWN_WITH_PERMS` and `SYS_SPAWN_FULL_ARGV` carry a `perm_flags` word of
+`SPAWN_PERM_*` bits the parent asks to stamp on the child — `MAY_POST_SERVICE`
+(the child may register a `/srv/<name>` server, [[sub-kernel-devsrv]]),
+`CONSOLE_TRUSTED` (the SAK re-grant anchor), `CONSOLE_OWNER` (the Ctrl-C target),
+and the I-32 `MAY_RAISE_PAGE_BUDGET` above. The mechanism is deliberately **two
+sites, and neither is the other's redundancy**:
+
+- **The grant gate runs at the entry, before a single user-VA byte is read.**
+  `spawn_perm_grant_check` (`kernel/syscall.c`) adjudicates every requested
+  bit against the *parent's* authority and rejects the whole call on any failure,
+  placed ahead of the argument copy-in so a hostile caller cannot probe gate
+  behaviour with a side effect — the same "check before the copy, where the check
+  has no user-memory dependency" discipline the staging tiers use. Any bit outside
+  `SPAWN_PERM_ALL` is rejected here outright.
+- **The stamp runs at the thunk, in the child's own thread context, before
+  `exec_setup`.** `apply_spawn_perms` (`kernel/syscall.c`) translates the
+  parent-vetted bits into their `proc_*` marks in the child, and its placement —
+  before the fd-install loop and before the image is set up, hence before any
+  user-mode instruction of the child — is the whole point. The naive "spawn, then
+  mark the returned pid" pattern leaves a window in which the child, scheduled
+  onto another CPU between the parent's spawn-return and its next syscall, reaches
+  `SYS_POST_SERVICE` before the mark lands; baking the stamp into the thunk closes
+  it structurally, because no `userland_enter` runs before the stamp.
+
+The per-bit rules are where the trust model lives, and one distinction is
+load-bearing:
+
+- **`CONSOLE_TRUSTED` is console-attach-only and never delegable.** A process
+  that can post services must not be able to confer the console-trust used for
+  hostowner elevation — that would collapse [[inv-i27]] — so only a
+  console-attached process grants it.
+- **`MAY_POST_SERVICE` and `CONSOLE_OWNER` are holder-delegable: console-attached
+  OR an existing `MAY_POST_SERVICE` holder** (the A-5b one-hop delegation). This
+  is what lets init — the console root — confer `MAY_POST_SERVICE` on
+  `/sbin/login`, which, now a holder, re-confers it on the per-user proxy and
+  confers `CONSOLE_OWNER` on the session shell, none of the later links being
+  console-attached. It is the same one-hop shape the I-32 raise authority takes,
+  applied to a different bit.
+
+None of these is a `cap_mask` bit and none is `rfork`-propagated: each is a
+`perm_flags` *spawn-time* decision, so I-2 — the fork-grantable capability set
+only reduces — is untouched by the whole family. The backstop for the two-site
+split is an `extinction` at the tail of `apply_spawn_perms`: a bit outside
+`SPAWN_PERM_ALL` surviving to the thunk means the entry gate failed to reject it,
+which is a kernel invariant violation, not a runtime error.
+
 ### The capability is checked once, at mint, and the object type carries it after
 
 The JIT surface is the clearest instance of the pattern that makes the layering
@@ -495,7 +543,10 @@ object's.
 
 **[[inv-i22]]** and **[[inv-i27]]** — several handlers carry identity and
 console-trust gates. They are enforced here in the sense that this is where the
-check is written; the authority model itself is [[moc-kernel-security]]'s.
+check is written; the authority model itself is [[moc-kernel-security]]'s. The
+spawn-permission gate above is one of them: `CONSOLE_TRUSTED` is granted only by
+a console-attached process and never by a mere service-poster, which is the I-27
+line held at the child-creation boundary.
 
 ## Error paths
 
@@ -535,6 +586,15 @@ threshold so small transfers never pay the extra handle lookup.
   has two argument shapes, the gate goes in the shared core even when that costs
   a wasted copy on a refusing path — a gate in one front end is a gate the other
   does not pass, which is the handler/inner rule restated for the core split.
+- **A new `SPAWN_PERM_*` bit is gated at the entry and stamped at the thunk, and
+  the two placements are not interchangeable.** The grant check must run before
+  the argument copy-in so a refusal has no user-memory dependency to probe; the
+  stamp must run in the child's thunk before `exec_setup`, so no user-mode
+  instruction of the child precedes it. A delegable bit (`MAY_POST_SERVICE`,
+  `CONSOLE_OWNER`) widens the trust chain by one hop; `CONSOLE_TRUSTED` never
+  delegates, because a service-poster conferring console-trust would breach
+  [[inv-i27]]. The tail `extinction` in `apply_spawn_perms` is the proof the two
+  sites agree.
 - **A new phenotype row confers shape, not authority.** A translation may
   renumber and remap arguments; it may not read or write the capability word, and
   the native gate it lands on must be the same one a native caller meets.
@@ -674,6 +734,14 @@ substitution.
 (`sys_wstat_for_proc`) absorbed from docs/reference/99: the kind-gate-not-rights-
 gate metadata authority (#47), the `T_WSTAT_SIZE` content/metadata split, the
 #81-class truncate-via-`O_PATH` close, and the `perm_wstat_check` placement.
+
+[[chg-2026-09-06-spawn-perms-absorb]] folds the SPAWN_PERM_* grant gate absorbed
+from docs/reference/73: the two-site security split (`spawn_perm_grant_check` at
+the entry before the user-VA read, `apply_spawn_perms` in the child thunk before
+`exec_setup`, closing the SMP mark-after-spawn race), the per-bit rules
+(`CONSOLE_TRUSTED` never-delegable I-27, `MAY_POST_SERVICE`/`CONSOLE_OWNER`
+holder-delegable one-hop), and the I-2 non-propagation (perm bits are spawn-time,
+not `cap_mask`).
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 

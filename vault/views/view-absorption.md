@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**107 absorbed · 50 live · 157 total.**
+**108 absorbed · 49 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -169,7 +169,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 70-devsrv.md | absorbed | [[sub-kernel-devsrv]], [[view-closed-sub-kernel-devsrv]] |
 | 71-srvconn.md | absorbed | [[sub-kernel-srvconn]], [[view-closed-sub-kernel-srvconn]] |
 | 72-poll.md | absorbed | [[sub-kernel-poll]] |
-| 73-sys-spawn-with-perms.md | live | — |
+| 73-sys-spawn-with-perms.md | absorbed | [[sub-halcyond]], [[sub-kernel-devsrv]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]], [[sub-netd-nic]], [[sub-ptyfs]], [[sub-stratum-boot]], [[sub-stratum-session]], [[sub-viv]] |
 | 74-corvus-9p-server.md | absorbed | [[sub-corvus]], [[sub-kernel-srvconn]] |
 | 75-devcap.md | live | — |
 | 76-admin-elevate.md | live | — |
