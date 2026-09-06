@@ -905,6 +905,19 @@ dossiers had already lapped their frozen reference docs. What remains is the big
 audit-trigger surfaces -- vivarium at 3792 lines, warp, loom, weft, tapestryd --
 which have standing dossiers and deserve a fresh budget to verify against.
 
+### Run 37 continued: 95-identity -- the thirteenth, and the run's last before the self-compact line
+
+One more clean one on the way to the 600k checkpoint: the A-1a identity model, I-22.
+Zero fold -- the identity fields and `proc_apply_identity` (the single audited
+mutation site, which extincts rather than let anything stamp `PRINCIPAL_SYSTEM`) are
+in `sub-kernel-proc`, `CAP_SET_IDENTITY` and the capabilities-only growth path in
+`sub-kernel-caps`, and the reason the identity-at-spawn needs no lock -- it runs in
+the child before EL0 -- in `sub-kernel-perm`. The stub notes the one stale line: the
+doc says A-1b's corvus authority half is "not yet landed", and corvus is built (its
+dossiers were absorbed at the top of this very run). `de4e9fd5`, fixup `a602a013`,
+both mirrors. `84 absorbed / 73 live` -- thirteen chunks since the second
+self-compact, and the point where this context reaches the checkpoint line.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
