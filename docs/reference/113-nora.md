@@ -160,6 +160,18 @@ plus a `nora` dotfile, precedence dotfile > /env > `BONFIRE`). `nora` is
 single-threaded and sets the palette before the first render, which is what makes
 the shared-global holder sound.
 
+**s7a-2** wired the reads: `adopt_session_palette()` (main.rs, before the first
+render) applies `/env/HALCYON_PALETTE` then the dotfile
+`$HOME/.config/nora/palette` over `BONFIRE`. Both sources share one
+`role=RRGGBB` vocabulary — the semantic Halcyon roles `bg` / `fg` / `dim` /
+`accent` / `surface` / `border` / `moss` / `dusk` / `sand` / `slate` /
+`cinnabar`, mapped to `nora`'s fields by `Palette::with_overrides` (`accent`→
+`ember`, `surface`→`bar`, `moss`→`green`, `dusk`→`violet`, `sand`→`gold`,
+`cinnabar`→`rust`; the rest by the same name). Unknown roles, malformed hex,
+comment (`#`) and blank lines are ignored, and the debugger stopped-line tint is
+re-derived from the resulting `bg`/`ember` (it is not a role). The session that
+*writes* `/env/HALCYON_PALETTE` is **s7a-3**.
+
 ## Keybindings (the modal grammar)
 
 | Mode | Keys |

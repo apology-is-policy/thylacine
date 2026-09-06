@@ -46,6 +46,7 @@ use kaua::term::Terminal;
 use parley::transport::{Mux, Ready, Tag};
 
 use nora::editor::{DapRequest, Editor, Mode, Request};
+use nora::theme;
 use nora::view;
 
 mod dap_host;
@@ -81,6 +82,11 @@ const MAX_FILE: usize = 2 * 1024 * 1024;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    // Follow the session theme, if any, before the first render (theme::
+    // set_palette's once-before-render contract). A console with no session
+    // palette keeps Bonfire, so this is invisible outside a Halcyon session.
+    adopt_session_palette();
+
     let (readonly, filename) = parse_args();
 
     // Load the initial buffer. A named-but-absent file starts empty -- `:w`
@@ -632,4 +638,32 @@ fn parse_args() -> (bool, Option<String>) {
         }
     }
     (readonly, filename)
+}
+
+/// Adopt the session's theme over nora's Bonfire default, so an editor launched
+/// inside a Halcyon session follows the session palette instead of painting
+/// Bonfire on a light ground (s7). Precedence: the user's nora palette dotfile >
+/// the session's `/env/HALCYON_PALETTE` > `BONFIRE`. Any source that is absent
+/// or unparseable simply does not apply -- an unthemed console keeps Bonfire.
+/// Called once, before the first render (theme::set_palette's contract).
+fn adopt_session_palette() {
+    let mut p = theme::BONFIRE;
+    if let Some(env_text) = env::var("HALCYON_PALETTE") {
+        p = p.with_overrides(&env_text);
+    }
+    if let Some(dot_text) = read_palette_dotfile() {
+        p = p.with_overrides(&dot_text);
+    }
+    theme::set_palette(p);
+}
+
+/// The user's nora palette dotfile: `$HOME/.config/nora/palette`, the same
+/// `role=RRGGBB` format as `/env/HALCYON_PALETTE`. Absent `HOME`, an absent
+/// file, or a read error all mean "no dotfile" -- a best-effort override.
+fn read_palette_dotfile() -> Option<String> {
+    let home = env::var("HOME")?;
+    let mut path = String::with_capacity(home.len() + 21);
+    path.push_str(&home);
+    path.push_str("/.config/nora/palette");
+    read_file(&path).ok()
 }

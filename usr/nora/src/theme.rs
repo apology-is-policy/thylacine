@@ -74,6 +74,114 @@ pub const BONFIRE: Palette = Palette {
     debug_bg: Color::Rgb(0x33, 0x1e, 0x12),
 };
 
+impl Palette {
+    /// Apply `text` -- a `role=RRGGBB` list, one entry per line -- over this
+    /// palette, role by role, returning the result. `role` is a semantic
+    /// palette-role name (the /env/HALCYON_PALETTE and nora-dotfile vocabulary),
+    /// `RRGGBB` six hex digits (no `#`). The role names are the Halcyon palette
+    /// roles, each mapped to nora's own field:
+    ///
+    /// | role       | nora field | Halcyon `libhalcyon::theme` source |
+    /// |------------|------------|------------------------------------|
+    /// | `bg`       | `bg`       | `surface`                          |
+    /// | `fg`       | `fg`       | `fg`                               |
+    /// | `dim`      | `dim`      | `fg_muted`                         |
+    /// | `accent`   | `ember`    | `ember`                            |
+    /// | `surface`  | `bar`      | `status_bg`                        |
+    /// | `border`   | `border`   | `border`                           |
+    /// | `moss`     | `green`    | `syntax.moss`                      |
+    /// | `dusk`     | `violet`   | `syntax.dusk`                      |
+    /// | `sand`     | `gold`     | `syntax.sand`                      |
+    /// | `slate`    | `slate`    | `syntax.slate`                     |
+    /// | `cinnabar` | `rust`     | `syntax.cinnabar`                  |
+    ///
+    /// Unknown roles, malformed hex, comment lines (`#...`) and blank lines are
+    /// ignored: a hostile or partial source degrades to the roles it could parse
+    /// and never panics (nora runs under an untrusted session; KT-1 format-fuzz).
+    /// The debugger stopped-line tint is NOT a role -- it is re-derived from the
+    /// resulting `bg`/`ember` so it follows whatever theme is applied.
+    pub fn with_overrides(mut self, text: &str) -> Palette {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((name, hex)) = line.split_once('=') else {
+                continue;
+            };
+            let Some(color) = parse_hex_rgb(hex.trim()) else {
+                continue;
+            };
+            match name.trim() {
+                "bg" => self.bg = color,
+                "fg" => self.fg = color,
+                "dim" => self.dim = color,
+                "accent" => self.ember = color,
+                "surface" => self.bar = color,
+                "border" => self.border = color,
+                "moss" => self.green = color,
+                "dusk" => self.violet = color,
+                "sand" => self.gold = color,
+                "slate" => self.slate = color,
+                "cinnabar" => self.rust = color,
+                _ => {}
+            }
+        }
+        self.debug_bg = blend(self.bg, self.ember, 3, 16);
+        self
+    }
+}
+
+/// Parse exactly six hex digits (`RRGGBB`, no `#`) into an RGB colour. Returns
+/// `None` for any other length or a non-hex byte -- byte-indexed, so a 6-byte
+/// non-ASCII input fails cleanly rather than panicking on a char boundary.
+fn parse_hex_rgb(s: &str) -> Option<Color> {
+    let b = s.as_bytes();
+    if b.len() != 6 {
+        return None;
+    }
+    let byte = |hi: usize, lo: usize| -> Option<u8> {
+        Some((hex_nibble(b[hi])? << 4) | hex_nibble(b[lo])?)
+    };
+    Some(Color::Rgb(byte(0, 1)?, byte(2, 3)?, byte(4, 5)?))
+}
+
+/// A single hex digit's value, or `None` for a non-hex byte.
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// `a` moved `num/den` of the way toward `b`, per channel. A non-`Rgb` input
+/// (never a real role) leaves `a` unchanged. Used to derive the debugger tint
+/// from `bg` toward `ember`, so it follows any applied theme.
+fn blend(a: Color, b: Color, num: u32, den: u32) -> Color {
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => Color::Rgb(
+            mix_channel(ar, br, num, den),
+            mix_channel(ag, bg, num, den),
+            mix_channel(ab, bb, num, den),
+        ),
+        _ => a,
+    }
+}
+
+/// One channel of `blend`: `x` moved `num/den` toward `y`, saturating in u8.
+fn mix_channel(x: u8, y: u8, num: u32, den: u32) -> u8 {
+    let x = x as u32;
+    let y = y as u32;
+    let v = if y >= x {
+        x + (y - x) * num / den
+    } else {
+        x - (x - y) * num / den
+    };
+    v as u8
+}
+
 /// The active palette, held so every style function can read the roles in force.
 /// nora is single-threaded and sets this ONCE at startup, before the first
 /// render (`set_palette`); there is never a concurrent reader and writer, which
@@ -394,5 +502,95 @@ mod tests {
         assert_eq!(chip.bg, BONFIRE.ember);
         assert_eq!(chip.fg, BONFIRE.bg);
         assert!(chip.attr.contains(Attr::BOLD));
+    }
+
+    // Every semantic role name maps to the RIGHT nora field (a mis-mapping --
+    // accent painting bg, say -- would be caught by the distinct per-role hex).
+    #[test]
+    fn with_overrides_maps_every_role_to_its_field() {
+        let text = "\
+bg=010203
+fg=040506
+dim=070809
+accent=0a0b0c
+surface=0d0e0f
+border=101112
+moss=131415
+dusk=161718
+sand=191a1b
+slate=1c1d1e
+cinnabar=1f2021
+";
+        let p = BONFIRE.with_overrides(text);
+        assert_eq!(p.bg, Color::Rgb(0x01, 0x02, 0x03));
+        assert_eq!(p.fg, Color::Rgb(0x04, 0x05, 0x06));
+        assert_eq!(p.dim, Color::Rgb(0x07, 0x08, 0x09));
+        assert_eq!(p.ember, Color::Rgb(0x0a, 0x0b, 0x0c)); // accent -> ember
+        assert_eq!(p.bar, Color::Rgb(0x0d, 0x0e, 0x0f)); // surface -> bar
+        assert_eq!(p.border, Color::Rgb(0x10, 0x11, 0x12));
+        assert_eq!(p.green, Color::Rgb(0x13, 0x14, 0x15)); // moss -> green
+        assert_eq!(p.violet, Color::Rgb(0x16, 0x17, 0x18)); // dusk -> violet
+        assert_eq!(p.gold, Color::Rgb(0x19, 0x1a, 0x1b)); // sand -> gold
+        assert_eq!(p.slate, Color::Rgb(0x1c, 0x1d, 0x1e));
+        assert_eq!(p.rust, Color::Rgb(0x1f, 0x20, 0x21)); // cinnabar -> rust
+        // The debugger tint is re-derived from the NEW bg/ember, not the literal.
+        assert_ne!(p.debug_bg, BONFIRE.debug_bg);
+        assert_eq!(p.debug_bg, blend(p.bg, p.ember, 3, 16));
+    }
+
+    // A hostile / partial source degrades to the roles it could parse: comments,
+    // blanks, unknown roles, and malformed hex are skipped, and unmentioned
+    // roles keep their prior value. (nora runs under an untrusted session.)
+    #[test]
+    fn with_overrides_ignores_junk_and_keeps_unmentioned_roles() {
+        let text = "\
+# a comment
+accent=ff8800
+
+nope=123456
+fg=zzzzzz
+fg=00ff00
+";
+        let p = BONFIRE.with_overrides(text);
+        assert_eq!(p.ember, Color::Rgb(0xff, 0x88, 0x00)); // the valid accent applied
+        assert_eq!(p.fg, Color::Rgb(0x00, 0xff, 0x00)); // malformed skipped, valid wins
+        assert_eq!(p.bg, BONFIRE.bg); // unmentioned role unchanged
+        assert_eq!(p.slate, BONFIRE.slate); // unknown 'nope' touched nothing
+    }
+
+    // Precedence is "last source wins, role by role": the dotfile beats /env on
+    // an overlapping role, while an /env-only role survives.
+    #[test]
+    fn with_overrides_last_source_wins_on_overlap() {
+        let env = "accent=ff0000\nbg=111111\n";
+        let dot = "accent=00ff00\n";
+        let p = BONFIRE.with_overrides(env).with_overrides(dot);
+        assert_eq!(p.ember, Color::Rgb(0x00, 0xff, 0x00)); // dotfile beat /env
+        assert_eq!(p.bg, Color::Rgb(0x11, 0x11, 0x11)); // /env-only role survives
+    }
+
+    #[test]
+    fn parse_hex_rgb_rejects_bad_input() {
+        assert_eq!(parse_hex_rgb("aabbcc"), Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
+        assert_eq!(parse_hex_rgb("AABBCC"), Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
+        assert_eq!(parse_hex_rgb("abc"), None); // too short
+        assert_eq!(parse_hex_rgb("aabbccdd"), None); // too long
+        assert_eq!(parse_hex_rgb("gggggg"), None); // non-hex
+        assert_eq!(parse_hex_rgb("#aabbc"), None); // stray '#'
+        assert_eq!(parse_hex_rgb("ééé"), None); // 6 BYTES, non-ASCII: byte-indexed, no panic
+    }
+
+    // The derived debug tint sits between bg and ember (moved toward ember), so
+    // it reads on whatever ground the theme sets -- a light bg here.
+    #[test]
+    fn the_debug_tint_stays_between_bg_and_ember() {
+        let p = BONFIRE.with_overrides("bg=faf4e8\naccent=c05a2a\n");
+        let (Color::Rgb(dr, _, _), Color::Rgb(br, _, _), Color::Rgb(er, _, _)) =
+            (p.debug_bg, p.bg, p.ember)
+        else {
+            panic!("roles are always Rgb")
+        };
+        // bg.r (0xfa) > ember.r (0xc0), so the tint's red lies between them.
+        assert!(er <= dr && dr <= br, "tint {dr:#x} between ember {er:#x} and bg {br:#x}");
     }
 }
