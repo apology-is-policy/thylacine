@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**66 absorbed · 91 live · 157 total.**
+**68 absorbed · 89 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -125,7 +125,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 26-vma.md | absorbed | [[sub-kernel-vma]] |
 | 27-exec.md | live | — |
 | 28-syscall.md | live | — |
-| 29-joey.md | live | — |
+| 29-joey.md | absorbed | [[sub-kernel-joey]], [[sub-stratum-boot]] |
 | 30-dev-spoor.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-path]], [[sub-kernel-spoor]] |
 | 31-trivial-devs.md | absorbed | [[sub-kernel-cons]], [[sub-kernel-content]], [[sub-kernel-dev]], [[sub-kernel-uart]] |
 | 32-devproc.md | absorbed | [[sub-kernel-devproc]] |
@@ -155,7 +155,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 56-sys-mount.md | absorbed | [[chg-2026-05-14-p5-mount-syscall]], [[sub-kernel-territory]] |
 | 57-attach-probe.md | live | — |
 | 58-corvus-syscalls.md | live | — |
-| 59-joey-from-ramfs.md | live | — |
+| 59-joey-from-ramfs.md | absorbed | [[sub-kernel-joey]], [[sub-stratum-boot]] |
 | 60-sys-spawn-wait.md | live | — |
 | 61-stratumd-stub.md | live | — |
 | 62-sys-spawn-with-fds.md | live | — |
