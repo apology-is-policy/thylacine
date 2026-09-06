@@ -240,11 +240,33 @@ grid tail), its real body (rich tables + 11 menu/click witnesses, 0 skip markers
 as the coherent-build regression check. `docs/reference` is vault-owned
 (`sub-halcyond`) -- rung to the vault peer, not written here.
 
-**What is open (the arc continues).** PL-1b (the halcyond `pre` render -- mono +
-code-block chrome; non-trivial: the 16-byte SpanSlot has no room for a `pre` bit,
-so the flag rides EM_PRE or a block Item, and the chrome extent needs care) --
-deferred as needing fresh design. PL-4 landed this run (above). PL-5 (`la`
-fences its box output in `pre`). The batched
+**PL-1b landed: the `pre` code-fence render (`0274c406`).** PL-1a added the
+beacon `pre` vocabulary but halcyond no-op'd the frames; this renders them. A
+`pre` is the preformatted mono island -- verbatim (no re-wrap, no
+space-collapse), set apart by its own ground + a leading gutter rule (the
+Markdown-code-fence treatment scripture calls for). The mechanism dissolved the
+"16-byte SpanSlot has no room for a `pre` bit" worry that had it marked "needs
+fresh design": a `pre` is BLOCK-level (block chrome cannot ride a per-cell
+span), so it rides a new `Item::Pre(Vec<Line>)`, and the feed reuses the SAME
+line discipline (put_char / newline / flush_line -- tabs, spacing, `\r`
+verbatim) by REDIRECTING the flushed lines into a pre accumulator between
+open/close. lay_span gained a `pre` flag that forces mono over a run's
+annotation (an obj in a pre would else lay proportional and break the
+alignment) and disables word-wrap; the Item::Pre arm adds the ground + gutter
+RectSpecs behind the text.
+
+The self-audit catch: the pre is UNCHARGED to the block budget until close, so
+the line cap alone left an unclosed pre able to hold
+`MAX_LINES_PER_BLOCK * MAX_LINE_CELLS` cells ~= 327 MiB. Added a MAX_PRE_BYTES
+(16 MiB) byte budget mirroring TableCap.bytes -- and the byte-flood test that
+proves it also surfaced that a big pre charges enough at close to FREEZE its
+block (the Item::Pre lands in a frozen block, which the test now looks for).
+Host: 125 pass (+6, incl. the two DoS bounds + the containment guard). No E2E
+here -- a `pre` needs a producer (PL-5's `la`), so PL-1b lands host-tested and
+the E2E rides PL-5.
+
+**What is open (the arc continues).** PL-1b + PL-4 landed this run (above).
+PL-5 (`la` fences its box output in `pre`). The batched
 graphical E2E (PL-2 + PL-3a + PL-3b/c) ran GREEN before the push: ls-gfx-session
 PASS [28s] -- the session path, where `push_scrolled_rows` actually lives -- and
 ls-halcyon PASS [117s] on a `THYLACINE_HALCYON=1` bake (the console/Genera path;
