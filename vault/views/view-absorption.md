@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**72 absorbed · 85 live · 157 total.**
+**73 absorbed · 84 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -47,7 +47,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 05-kaslr.md | absorbed | [[inv-i16]], [[sub-kernel-kaslr]] |
 | 06-allocator.md | absorbed | [[sub-kernel-mm-phys]] |
 | 07-slub.md | absorbed | [[sub-kernel-mm-slub]] |
-| 08-exception.md | live | — |
+| 08-exception.md | absorbed | [[sub-kernel-exception]], [[sub-kernel-halls]], [[sub-kernel-sched-smp]], [[sub-kernel-uaccess]] |
 | 09-test-harness.md | absorbed | [[abi-boot-banner]], [[sub-substrate-gates]], [[sub-substrate-interactive]] |
 | 10-gic.md | absorbed | [[inv-i15]], [[sub-kernel-gic]] |
 | 100-9p-identity-presentation.md | absorbed | [[inv-i22]], [[seam-nuname-trust-stamp]], [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-client]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-perm]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-net]], [[sub-stratum-server]], [[sub-stratum-session]], [[sub-substrate-build]] |
