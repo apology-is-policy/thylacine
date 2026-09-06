@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/108-utopia-repl (ut REPL loop): zero-fold, multi-redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["23e33d0c"]
 touched: []
 established: []
 closed: []
