@@ -13,13 +13,17 @@ use alloc::vec::Vec;
 
 use cartoon::{AtlasPacker, GlyphRef};
 
-/// A face slot in this source: the two vendored DejaVu weights, plus the
-/// system monospace -- the baked Cornucopia atlas (fixed cell, one size
-/// per advance), serving mono islands + foreign terminal output through
-/// the SAME packer/id space so one atlas store feeds the executor.
+/// A face slot in this source: the three vendored DejaVu weights (regular,
+/// bold, oblique -- HALCYON.md section 3's Genera type discipline), plus the
+/// system monospace -- the baked Cornucopia atlas (fixed cell, one size per
+/// advance), serving mono islands + foreign terminal output through the SAME
+/// packer/id space so one atlas store feeds the executor. The three
+/// proportional faces index `self.faces` directly; FACE_MONO is a sentinel,
+/// special-cased before any `faces[]` access -- never a slot.
 pub const FACE_BODY: u8 = 0;
 pub const FACE_BODY_BOLD: u8 = 1;
-pub const FACE_MONO: u8 = 2;
+pub const FACE_BODY_ITALIC: u8 = 2;
+pub const FACE_MONO: u8 = 3;
 
 /// Per-(face, size) vertical metrics, integer pixels, y-down. `ascent` is
 /// baseline distance from the line top; `line_height` includes the gap.
@@ -61,6 +65,7 @@ impl GlyphSource {
         for bytes in [
             crate::DEJAVU_SANS_CONDENSED,
             crate::DEJAVU_SANS_CONDENSED_BOLD,
+            crate::DEJAVU_SANS_CONDENSED_OBLIQUE,
         ] {
             // The vendored faces parse by construction; a fontdue reject
             // here is a build-input defect, not a runtime input -- panic
@@ -217,7 +222,7 @@ mod tests {
     #[test]
     fn vendored_faces_parse() {
         let gs = GlyphSource::new_vendored(512);
-        assert_eq!(gs.face_count(), 2, "both vendored DejaVu weights parse");
+        assert_eq!(gs.face_count(), 3, "all three vendored DejaVu weights parse (regular, bold, oblique)");
         let lm = gs.line_metrics(FACE_BODY, 16.0).unwrap();
         assert!(
             lm.ascent > 8 && lm.ascent < 24,

@@ -23,8 +23,8 @@ use alloc::vec::Vec;
 use cartoon::{Cartoon, GlyphRef, Op};
 use vt::ATTR_BOLD;
 
-use crate::raster::{GlyphSource, FACE_BODY, FACE_BODY_BOLD, FACE_MONO};
-use crate::transcript::{Block, BlockKind, Item, Style, TCell, EM_CODE, EM_DIM, EM_STRONG};
+use crate::raster::{GlyphSource, FACE_BODY, FACE_BODY_BOLD, FACE_BODY_ITALIC, FACE_MONO};
+use crate::transcript::{Block, BlockKind, Item, Style, TCell, EM_CODE, EM_DIM, EM_EMPH, EM_STRONG};
 
 /// The stylesheet: the paper-light theme's numbers (section 3 -- dark ink
 /// in full daylight). Colors are ARGB like everything in the weave.
@@ -127,16 +127,26 @@ pub struct LaidBlock {
     pub rects: Vec<RectSpec>,
 }
 
-fn face_for(st: &Style, in_table: bool) -> (u8, bool) {
+fn face_for(st: &Style, in_table: bool) -> u8 {
     if st.em == EM_CODE {
-        return (FACE_MONO, false);
+        return FACE_MONO;
     }
     let annotated = st.obj != 0 || st.em != 0 || st.hdr != 0 || in_table;
     if !annotated {
-        return (FACE_MONO, false);
+        return FACE_MONO;
     }
-    let bold = st.attrs & ATTR_BOLD != 0 || st.em == EM_STRONG || st.hdr != 0;
-    (if bold { FACE_BODY_BOLD } else { FACE_BODY }, bold)
+    // Genera type discipline (HALCYON.md section 3): bold is RESERVED for
+    // extreme emphasis -- em class=strong and foreign SGR bold, nothing else;
+    // emphasis and headings go ITALIC, with heading RANK carried by size
+    // (px_for), never weight -- bold headings are retired. Other annotated
+    // runs (an obj presentation, a table cell) stay regular body.
+    if st.em == EM_STRONG || st.attrs & ATTR_BOLD != 0 {
+        FACE_BODY_BOLD
+    } else if st.em == EM_EMPH || st.hdr != 0 {
+        FACE_BODY_ITALIC
+    } else {
+        FACE_BODY
+    }
 }
 
 fn color_for(st: &Style, sheet: &Sheet) -> u32 {
@@ -271,7 +281,7 @@ impl<'a> LineBuilder<'a> {
         src_col: usize,
         bg: Option<u32>,
     ) {
-        let (face, _) = face_for(st, in_table);
+        let face = face_for(st, in_table);
         let px = px_for(st, self.sheet);
         let color = color_for(st, self.sheet);
         self.note_metrics(gs, face, px);
@@ -508,7 +518,7 @@ fn lay_table(
             let mut w = 0i32;
             for (s, e, sid) in runs_of(cell) {
                 let st = b.styles[sid as usize];
-                let (face, _) = face_for(&st, true);
+                let face = face_for(&st, true);
                 let px = px_for(&st, sheet);
                 for c in cell[s..e].iter() {
                     if let Some(gr) = gs.glyph(face, px, c.ch) {
@@ -783,6 +793,35 @@ mod tests {
             "obj at default ink takes the slate object colour"
         );
         assert!(line.segs[1].obj > 0, "the obj hit target rides the seg");
+    }
+
+    #[test]
+    fn genera_headings_and_emph_are_italic_strong_is_bold() {
+        // The Genera type discipline (HALCYON.md section 3): headings and
+        // emphasis go ITALIC, never bold; bold is reserved for strong (extreme
+        // emphasis) + foreign SGR bold. Heading RANK is size (px_for), not
+        // weight. This FAILS on the pre-PL-2 rule (hdr -> bold, emph -> body).
+        let base = Style { fg: 0, bg: 0, attrs: 0, em: 0, obj: 0, hdr: 0 };
+        let with = |em: u8, hdr: u8, attrs: u8| Style { em, hdr, attrs, ..base };
+
+        assert_eq!(face_for(&with(0, 1, 0), false), FACE_BODY_ITALIC, "hdr 1 is italic, never bold");
+        assert_eq!(face_for(&with(0, 3, 0), false), FACE_BODY_ITALIC, "hdr 3 is italic too");
+        assert_eq!(face_for(&with(EM_EMPH, 0, 0), false), FACE_BODY_ITALIC, "emph is italic");
+        assert_eq!(face_for(&with(EM_STRONG, 0, 0), false), FACE_BODY_BOLD, "strong is the reserved bold");
+        // An UN-annotated cell is mono even with SGR bold (today's model:
+        // un-annotated foreign output renders as a terminal; the bold check
+        // sits AFTER the annotated gate). PL-4 makes un-annotated proportional,
+        // at which point the annotated + SGR-bold -> bold path below applies live.
+        assert_eq!(face_for(&with(0, 0, ATTR_BOLD), false), FACE_MONO, "un-annotated SGR bold is still mono today");
+        assert_eq!(face_for(&with(0, 0, ATTR_BOLD), true), FACE_BODY_BOLD, "annotated + foreign SGR bold -> the reserved bold");
+        assert_eq!(face_for(&with(EM_CODE, 0, 0), false), FACE_MONO, "code is mono");
+        assert_eq!(face_for(&base, false), FACE_MONO, "un-annotated is mono");
+        assert_eq!(face_for(&Style { obj: 1, ..base }, false), FACE_BODY, "an obj presentation is regular body");
+        // px_for still carries heading rank by SIZE (unchanged), so italic
+        // headings are not flattened to one size.
+        let sheet = daylight_sheet();
+        assert!(px_for(&with(0, 1, 0), &sheet) > px_for(&with(0, 3, 0), &sheet), "hdr 1 > hdr 3 by size");
+        assert!(px_for(&with(0, 3, 0), &sheet) > px_for(&base, &sheet), "any heading > body by size");
     }
 
     #[test]

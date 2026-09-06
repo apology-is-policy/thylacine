@@ -406,7 +406,7 @@ pub extern "C" fn rs_main() -> i64 {
     let mut ptr: (i32, i32) = (0, 0);
 
     let mut gs = GlyphSource::new_vendored(512);
-    if gs.face_count() != 2 {
+    if gs.face_count() != 3 {
         say!("halcyond: FAIL vendored face parse");
         return 1;
     }
