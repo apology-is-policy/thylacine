@@ -140,13 +140,26 @@ corrected, with a note that it is a classifier, not a new handler/inner split
 (the 50/45 metric holds). The welcome (h4d3) is "none in code" for sub-halcyond
 (compositor-hosted), correctly no edit.
 
-Eight kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
-vivarium, proc, caps, death, jobctl -- the entry/namespace four plus the whole
-proc.c cluster), the H-arc fold backlog cleared ENTIRELY (h4c + h4d1 + the
-h4d2-family's eight-dossier fold), and this entry. Backlog: 47 (from 56 at the
-run's start). Open next: `sub-stratum-boot` (joey.c ~5659, biggest),
-`sub-kernel-cons`, `sub-kernel-notes` (aux's area -- check owner first), and a NEW
-`sub-sdl-port` for aux's N-2a-2 SDL work.
+**Then stratum-boot, the biggest single drift (joey.c, ~5659 lines) -- and it was
+borrowed.** The dossier scopes itself to the bringup sequence (spawn stratumd ->
+readiness -> attach -> pivot -> re-graft), and its own caveat already discloses it
+owns only that few-hundred lines of an 11578-line file, leaving init's other
+eight-ninths -- the getty loop, the gates, the smoke suite -- undescribed (task
+#177). The evidence held: the bringup's core tokens ("bound and ready",
+ATTACH_9P_SRV, PIVOT_ROOT, --fs-workers, the stratumd spawn args) have zero diff
+hits since 2026-09-02, and the pivot line last moved 2026-05-26. The whole
++1807-line growth landed in the disclaimed region (the KT-1.5d-1a login-spawned
+session bootstrap, a kaua-term boot-prove, the /viv/bin graft gates), so the
+currency action was measurement -- the caveat's count refreshed 9771/~50 ->
+11578/53, the #177 gap noted wider -- not new bringup prose. A dossier's
+self-disclosed scope is what turned a 5659-line churn into a five-minute re-verify.
+
+Nine kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
+vivarium, proc, caps, death, jobctl, stratum-boot), the H-arc fold backlog cleared
+ENTIRELY (h4c + h4d1 + the h4d2-family's eight-dossier fold), and this entry.
+Backlog: 46 (from 56 at the run's start; the run has crossed into 2026-09-06). Open
+next: `sub-kernel-cons`, `sub-kernel-notes` (aux's area -- check owner first), and
+a NEW `sub-sdl-port` for aux's N-2a-2 SDL work.
 
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
