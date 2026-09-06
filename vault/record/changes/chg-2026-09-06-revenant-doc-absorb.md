@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/126-revenant (REVENANT file-backed demand-paged exec, I-36): zero-fold, 6-surface redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["9477bee8"]
 touched: []
 established: []
 closed: []
