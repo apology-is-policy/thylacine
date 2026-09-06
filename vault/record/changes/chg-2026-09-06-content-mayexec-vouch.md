@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-content de-stale: devramfs vouches may_back_exec=true (the #217 I-12 provenance floor) -- ramfs may back executable pages, /env's Dev deliberately may not"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["de3780e2"]
 touched:
   - sub-kernel-content
 established: []
