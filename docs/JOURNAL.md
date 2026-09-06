@@ -167,12 +167,25 @@ bytes drop; SAK restores it) and `cons_termios_get` (the C2-k1b termios projecti
 the VIVARIUM ioctl). Folding both ends of one mechanism in one run is the vault working
 as intended: the chain is legible only when both halves are current.
 
-Ten kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
-vivarium, proc, caps, death, jobctl, stratum-boot, cons), the H-arc fold backlog
-cleared ENTIRELY (h4c + h4d1 + the h4d2-family's eight-dossier fold), and this entry.
-Backlog: 45 (from 56 at the run's start; the run has crossed into 2026-09-06). Open
-next: `sub-kernel-notes` (aux's area -- check owner first), a NEW `sub-sdl-port` for
-aux's N-2a-2 SDL work, and the churn-ordered tail (ptyfs, viv, kernel-pipe, ...).
+**And notes -- checked with the RIGHT vocabulary, which halved it.** `sub-kernel-notes`
+(~969 lines, audit:hard, aux's area but stable since 2026-09-02) first looked like a
+4-plus-mechanism de-stale, until the coverage grep was re-run with the dossier's own
+words: it says `*_INTR` and "interrupted", never "interruptible", so the first pass
+under-counted -- the "sweep every vocabulary" lesson biting on my own probe. Two
+mechanisms were already covered and borrowed (SIG_IGN-at-generation, pipe-as-a-
+TERMINATE-note); three were genuinely absent and got folded, all I-9 signal-delivery
+concurrency reasoned against no-lost-wakeup: the caught-note interruptible wait (item
+11 -- a per-Proc caught-note mask + the lock-free deliverability predicate + the N-3
+guard that closes the arm-2 livelock), the siglongjmp `in_handler` clear (bug-2, a
+stack-geometry detector exact for a single-stack guest, plus its cross-stack F1), and
+the phenotype handler-time mask.
+
+Eleven kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
+vivarium, proc, caps, death, jobctl, stratum-boot, cons, notes), the H-arc fold
+backlog cleared ENTIRELY (h4c + h4d1 + the h4d2-family's eight-dossier fold), and this
+entry. Backlog: 44 (from 56 at the run's start; the run crossed into 2026-09-06). Open
+next: a NEW `sub-sdl-port` for aux's N-2a-2 SDL work, and the churn-ordered tail
+(ptyfs, viv, kernel-pipe, kernel-burrow, ...).
 
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
