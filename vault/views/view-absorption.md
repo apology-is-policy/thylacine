@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**80 absorbed · 77 live · 157 total.**
+**81 absorbed · 76 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -61,7 +61,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 108-utopia-repl.md | live | — |
 | 109-devdev.md | absorbed | [[seam-80-pivot-orphan-mounts]], [[sub-kernel-cons]], [[sub-kernel-devdev]], [[sub-kernel-joey]], [[sub-kernel-territory]], [[sub-stratum-boot]] |
 | 11-timer.md | absorbed | [[inv-i15]], [[sub-kernel-timer]] |
-| 110-resource.md | live | — |
+| 110-resource.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-caps]], [[sub-kernel-proc]], [[sub-kernel-thread]] |
 | 111-cons.md | live | — |
 | 112-kaua.md | live | — |
 | 113-nora.md | live | — |
