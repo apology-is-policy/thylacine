@@ -4,7 +4,7 @@ type: chg
 title: "sub-halcyond de-stale: the normal-screen tail is now PROPORTIONAL (PL-3/PL-4), retiring the mono paint_grid there; the run-menu geometry inverts through the laid tail (grid_hit + grid_run_rect)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["adc26ed0"]
 touched:
   - sub-halcyond
 established: []
