@@ -4,7 +4,7 @@ type: chg
 title: "close the entry cluster: author sub-kernel-joey over the kernel/joey.c orphan (2nd orphan resolved) + fold the /dev/pts graft into sub-stratum-boot + stub 109-devdev (multi-redirect devdev/cons/joey/stratum-boot/territory) -- 65 absorbed / 92 live, BOTH entry orphans now resolved"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["77f766f3"]
 touched: [sub-stratum-boot]
 established: [sub-kernel-joey]
 closed: []
