@@ -246,6 +246,28 @@ in-session. Owed, non-blocking: a Fable round for the family-diversity axis when
 credits return (both rounds were Opus; a finished fallback round is closed per the
 never-skip rule, so only the diversity pass is a fresh obligation).
 
+**Then F2 -- closing the audit's own deferred P2 in the same run.** R1 had
+deferred F2 (owned): the `pre` and the pre-existing `table` in-progress
+accumulators are each a fixed-16 MiB transient, uncharged to the block budget
+until close and un-scaled by tile count -- so N tiles each holding one (pre XOR
+table) sum to N x 16 MiB and OOM the 64 MiB console heap at N>=4. The fix folds
+both into the tile's scrollback share: `transient_cap() = (max_cost/2).max(
+OPEN_BLOCK_MAX_COST)`. Because `set_max_cost` already divides ONE 32 MiB session
+budget by the tile count, half a tile's share sums across all N tiles to at most
+16 MiB in transients regardless of N. The subtlety that decided the formula: a cap
+tied to `max_cost` goes to zero for a test's `set_max_cost(1)`, so it is floored at
+one open block (512 KiB) -- and that floor is provably inert for a real tile
+(N <= MAX_PANES=32 keeps share/2 above 512 KiB), binding only for the artificial
+tiny-cap case, so no bound test breaks and the aggregate stays exactly 16 MiB.
+Single-tile behaviour is unchanged (32 MiB share -> 16 MiB cap, the old value), so
+there is no regression for the common case; only the multi-tile OOM is closed. Two
+regressions, both discrimination-proven by sabotaging `transient_cap` back to the
+fixed 16 MiB: the formula test (share/2 + the floor at set_max_cost(1)) and a
+runtime test (a 4 MiB-share tile caps a flooding pre at 2 MiB, not 16). Host 129,
+ELF green, clippy no new warnings. Unaudited -- batched with the next chunk per
+double-distance; the vault folded the F6 dossier delta @2835e43d, and the F2
+transient-bound prose is rung next.
+
 ## Run 35 (vault absorption cont., 2026-09-06, Opus 4.8, effort max): the two BIG dossiers, an errno-registry reconcile that the stale tool was structurally blind to, and a triage tool that lied
 
 **Where it sits.** The continuation of Run 33 across its self-compaction (Run 33

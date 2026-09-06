@@ -311,8 +311,12 @@ const MAX_SPAN_NEST: usize = 64; // em/obj nesting (wire caps 8/parse; this boun
 const MAX_TABLE_ROWS: usize = 100_000;
 const MAX_TABLE_COLS: usize = 256; // cells per row
 const MAX_CELL_CHARS: usize = 4096;
-const MAX_TABLE_BYTES: usize = 16 << 20; // total in-progress table memory (content + Vec overhead)
-const MAX_PRE_BYTES: usize = 16 << 20; // total in-progress pre-block memory (uncharged until close)
+// The pre/table in-progress accumulators (each uncharged to the block budget
+// until close) are bounded by `transient_cap()` -- HALF the tile's scrollback
+// share, floored -- NOT a fixed constant. A fixed 16 MiB, unscaled by tile
+// count, let N tiles hold N x 16 MiB and OOM the 64 MiB heap (pre XOR table, so
+// 16 MiB per tile). Since a tile's share is SESSION_SCROLLBACK_BUDGET/N, the
+// per-tile half-share sums to SESSION_SCROLLBACK_BUDGET/2 regardless of N.
 
 struct TableCap {
     cols: Vec<u8>,
@@ -356,12 +360,12 @@ pub struct Transcript {
     /// newline / flush_line) so tabs, spacing and `\r` behave verbatim; the
     /// flushed lines are redirected HERE instead of into the block's items.
     /// None = not in a pre. Bounded by the per-block line cap AND `pre_bytes`
-    /// (MAX_PRE_BYTES); charged + cap-enforced at close (a bounded transient
-    /// like `scroll_pending`).
+    /// (`transient_cap()`, the tile's half-share); charged + cap-enforced at
+    /// close (a bounded transient like `scroll_pending`).
     pre: Option<Vec<Line>>,
     /// PL-1b: bytes accumulated in the open `pre` (content only). The pre is
     /// uncharged to the block budget until close, so this bounds the transient
-    /// independently -- an unclosed / hostile pre cannot exceed MAX_PRE_BYTES
+    /// independently -- an unclosed / hostile pre cannot exceed `transient_cap()`
     /// (the format-fuzz DoS floor, mirroring TableCap.bytes). Reset at open.
     pre_bytes: usize,
     // Escape-scanner state (persists across feeds via `carry`, but the
@@ -688,6 +692,9 @@ impl Transcript {
         if self.pre.is_some() && !matches!(op, Op::Em | Op::Obj | Op::Pre) {
             return;
         }
+        // The table byte cap for this tile (half its scrollback share); read
+        // before any self.table borrow below so the arms can pass/compare it.
+        let byte_cap = self.transient_cap();
         match op {
             Op::Zone => {
                 self.freeze_open(BlockKind::Foreign, false);
@@ -697,7 +704,7 @@ impl Transcript {
                     // Tolerate unclosed row/cell at table close (the final
                     // row/cell -- bounded, one each -- still honors the caps).
                     if t.in_cell {
-                        Self::table_push_cell(&mut t);
+                        Self::table_push_cell(&mut t, byte_cap);
                     }
                     if t.in_row && t.rows.len() < MAX_TABLE_ROWS {
                         t.rows.push(core::mem::take(&mut t.row));
@@ -721,14 +728,14 @@ impl Transcript {
             Op::Row => {
                 if let Some(t) = self.table.as_mut() {
                     if t.in_cell {
-                        Self::table_push_cell(t);
+                        Self::table_push_cell(t, byte_cap);
                         t.in_cell = false;
                     }
                     if t.in_row {
                         // At the row cap or byte budget, drop the row (never
                         // grow the Vec-of-Vecs unboundedly on an unclosed
                         // table); else charge its overhead + keep it.
-                        if t.rows.len() < MAX_TABLE_ROWS && t.bytes < MAX_TABLE_BYTES {
+                        if t.rows.len() < MAX_TABLE_ROWS && t.bytes < byte_cap {
                             t.bytes = t.bytes.saturating_add(
                                 core::mem::size_of::<Vec<TCell>>() * (t.row.len() + 1),
                             );
@@ -743,7 +750,7 @@ impl Transcript {
             Op::Cell => {
                 if let Some(t) = self.table.as_mut() {
                     if t.in_cell {
-                        Self::table_push_cell(t);
+                        Self::table_push_cell(t, byte_cap);
                         t.in_cell = false;
                     }
                 }
@@ -816,8 +823,8 @@ impl Transcript {
 
     /// Finalize the current cell into the row under the col cap + byte budget;
     /// past either, the cell is dropped (never grow an unclosed table).
-    fn table_push_cell(t: &mut TableCap) {
-        if t.row.len() < MAX_TABLE_COLS && t.bytes < MAX_TABLE_BYTES {
+    fn table_push_cell(t: &mut TableCap, byte_cap: usize) {
+        if t.row.len() < MAX_TABLE_COLS && t.bytes < byte_cap {
             t.bytes = t.bytes.saturating_add(core::mem::size_of::<Vec<TCell>>());
             t.row.push(core::mem::take(&mut t.cell));
         } else {
@@ -964,11 +971,12 @@ impl Transcript {
         // line is already <= MAX_LINE_CELLS via put_char's soft-wrap). Charged
         // + cap-enforced at close_op(Pre).
         let cap = self.max_lines_per_block;
+        let byte_cap = self.transient_cap();
         if let Some(pre) = self.pre.as_mut() {
             // Bounded by BOTH the line cap and the byte budget (the pre is
-            // uncharged to the block until close; MAX_PRE_BYTES caps the
-            // transient). A line past either bound is dropped.
-            if pre.len() < cap && self.pre_bytes < MAX_PRE_BYTES {
+            // uncharged to the block until close; transient_cap() -- the tile's
+            // half-share -- bounds the transient). A line past either is dropped.
+            if pre.len() < cap && self.pre_bytes < byte_cap {
                 self.pre_bytes += cells.len() * core::mem::size_of::<TCell>();
                 pre.push(Line { cells });
             }
@@ -1223,11 +1231,12 @@ impl Transcript {
 
     fn put_char(&mut self, ch: char) {
         let style = self.style_idx();
+        let byte_cap = self.transient_cap();
         if let Some(t) = self.table.as_mut() {
             // Inside a table: cell content appends (no column discipline);
             // padding between cells is the plain realization -- dropped. The
             // per-cell char cap AND the whole-table byte budget both bound it.
-            if t.in_cell && t.cell.len() < MAX_CELL_CHARS && t.bytes < MAX_TABLE_BYTES {
+            if t.in_cell && t.cell.len() < MAX_CELL_CHARS && t.bytes < byte_cap {
                 t.cell.push(TCell {
                     ch: if ch < ' ' { ' ' } else { ch },
                     style,
@@ -1588,6 +1597,18 @@ impl Transcript {
         self.max_open_cost = open_cap(max_cost);
         self.enforce_block_cap();
         self.enforce_budget();
+    }
+
+    /// The per-tile cap on the pre/table in-progress accumulators (each
+    /// uncharged to the block budget until close). HALF the tile's scrollback
+    /// share: N tiles -- each share = SESSION_SCROLLBACK_BUDGET/N -- hold at
+    /// most SESSION_SCROLLBACK_BUDGET/2 in transients TOTAL, regardless of tile
+    /// count, against a fixed 16 MiB that N tiles multiply into an OOM. Floored
+    /// at one open block so an artificially tiny max_cost (a test's
+    /// set_max_cost(1)) still admits a small transient; the floor never binds
+    /// for a real tile (N <= MAX_PANES keeps max_cost/2 above it).
+    fn transient_cap(&self) -> usize {
+        (self.max_cost / 2).max(OPEN_BLOCK_MAX_COST)
     }
 
     /// The retained cost the budget bounds (frozen blocks + the open one).
@@ -2052,7 +2073,7 @@ mod tests {
 
     #[test]
     fn pre_is_bounded_under_a_byte_flood() {
-        // Wide lines are bounded by the byte budget (MAX_PRE_BYTES), not only
+        // Wide lines are bounded by the byte budget (transient_cap()), not only
         // the line cap. A ~16 MiB pre also charges enough to FREEZE the block
         // on close, so the Item::Pre may land in a frozen block -- look across
         // both. The invariant: fewer lines than fed (bytes dropped some) AND
@@ -2090,9 +2111,68 @@ mod tests {
             "the byte budget dropped lines: {lines_len} of 700 fed"
         );
         assert!(
-            cells * 8 <= MAX_PRE_BYTES + 4096 * 8,
+            cells * 8 <= t.transient_cap() + 4096 * 8,
             "pre content bounded within one line of the cap: {} MiB",
             cells * 8 / (1 << 20)
+        );
+    }
+
+    #[test]
+    fn transient_cap_is_half_the_share_floored_at_one_open_block() {
+        // F2: the pre/table transient cap = HALF the tile's scrollback share,
+        // so N tiles (each share = SESSION_SCROLLBACK_BUDGET/N) sum to at most
+        // SESSION_SCROLLBACK_BUDGET/2 regardless of N -- vs a fixed 16 MiB that
+        // N tiles multiply into an OOM.
+        let mut t = Transcript::new(daylight());
+        // The default 32 MiB single-tile share -> 16 MiB (unchanged behavior).
+        assert_eq!(t.transient_cap(), 16 << 20);
+        // A 4-tile share (8 MiB) -> 4 MiB; aggregate over 4 tiles = 16 MiB.
+        t.set_max_cost(8 << 20);
+        assert_eq!(t.transient_cap(), 4 << 20);
+        // An artificially tiny share floors at one open block, never 0, so a
+        // test's set_max_cost(1) still admits a small transient (the floor never
+        // binds for a real tile: N <= MAX_PANES keeps share/2 above it).
+        t.set_max_cost(1);
+        assert_eq!(t.transient_cap(), OPEN_BLOCK_MAX_COST);
+    }
+
+    #[test]
+    fn the_pre_transient_scales_with_the_tile_share_not_a_fixed_16_mib() {
+        // F2 runtime: a small-share tile caps the pre at its half-share, well
+        // below the old fixed 16 MiB. Pre-F2 this tile would accumulate 16 MiB.
+        // (max_lines high so the BYTE cap binds first, not the line cap.)
+        let mut t = Transcript::with_caps(daylight(), 1000, 4 << 20, 1_000_000);
+        assert_eq!(t.transient_cap(), 2 << 20, "half the 4 MiB share");
+        let wide: String = core::iter::repeat('x').take(4000).collect();
+        let framed: Vec<String> = (0..500).map(|_| format!("{wide}\n")).collect();
+        let mut parts = vec![F::Open(Op::Pre, &[])];
+        for l in framed.iter() {
+            parts.push(F::Text(l.as_str()));
+        }
+        parts.push(F::Close(Op::Pre));
+        t.feed(&frames(&parts));
+        let mut cells = 0usize;
+        for b in t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(t.open_block()))
+        {
+            for it in b.items.iter() {
+                if let Item::Pre(ls) = it {
+                    cells += ls.iter().map(|l| l.cells.len()).sum::<usize>();
+                }
+            }
+        }
+        // Bounded within one wide line of the 2 MiB half-share -- NOT 16 MiB.
+        assert!(
+            cells * 8 <= (2 << 20) + 4000 * 8,
+            "pre bounded by the 2 MiB half-share, not 16 MiB: {} KiB",
+            cells * 8 / 1024
+        );
+        assert!(
+            cells * 8 > (2 << 20) / 2,
+            "the pre accumulated up to its cap (not dropped early): {} KiB",
+            cells * 8 / 1024
         );
     }
 
