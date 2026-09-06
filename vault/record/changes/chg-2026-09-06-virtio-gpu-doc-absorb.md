@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/43-virtio-gpu (P4-L probe driver): zero-fold, multi-redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["86e027c3"]
 touched: []
 established: []
 closed: []
