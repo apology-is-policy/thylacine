@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/95-identity (identity model A-1a, I-22): zero-fold, 5-surface redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["de4e9fd5"]
 touched: []
 established: []
 closed: []
