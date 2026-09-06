@@ -24,7 +24,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-alternatives]] | arch/arm64/alternatives.c, arch/arm64/alternatives.h, arch/arm64/atomic_lse.h |  | - **The write must never go through an executable mapping.** The scratch alias's |
 | [[sub-kernel-asid]] | arch/arm64/asid.c, arch/arm64/asid.h | inv-i31 | - **The rollover-versus-switch race** is the whole surface. Any change to the |
 | [[sub-kernel-boot-entry]] | arch/arm64/start.S, arch/arm64/kernel.ld | inv-i16, inv-i21 | - **The eret window.** Any hand-rolled path that sets `ELR_EL1` and returns to |
-| [[sub-kernel-boot-sequence]] | kernel/main.c, arch/arm64/hwfeat.c, arch/arm64/hwfeat.h | inv-i15 | - **Every reordering is a potential correctness change**, and the dependencies are |
+| [[sub-kernel-boot-sequence]] | kernel/main.c, arch/arm64/hwfeat.c, arch/arm64/hwfeat.h, kernel/canary.c, kernel/include/thylacine/canary.h | inv-i15 | - **Every reordering is a potential correctness change**, and the dependencies are |
 | [[sub-kernel-burrow]] | kernel/burrow.c, kernel/include/thylacine/burrow.h | inv-i7, inv-i32 | - **The free decision must stay under the lock and the free must stay outside |
 | [[sub-kernel-caps]] | kernel/include/thylacine/caps.h, kernel/devcap.c, kernel/proc.c |  | - A new capability bit must be added to `CAP_ALL` **or** to |
 | [[sub-kernel-cons]] | kernel/cons.c, kernel/include/thylacine/cons.h | inv-i27, inv-i9 | - **Nothing that needs [[lock-proc-table]] or a hook-list walk may be called |
@@ -39,7 +39,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-exec]] | kernel/exec.c, kernel/include/thylacine/exec.h | inv-i36, inv-i12, inv-i32, inv-i33, inv-i44 | On any change: that the Spoor ref ledger balances on every path — the Image |
 | [[sub-kernel-fault]] | arch/arm64/fault.c, arch/arm64/fault.h | inv-i12, inv-i32, inv-i7, inv-i36, inv-i44 | On any change here: that the file arm's four-step protocol keeps its pin across |
 | [[sub-kernel-gic]] | arch/arm64/gic.c, arch/arm64/gic.h | inv-i15, inv-i18 | - The two generations are **different code for the same behaviour**, and a run |
-| [[sub-kernel-halls]] | arch/arm64/halls.c, arch/arm64/halls.h, arch/arm64/halls_symtab.h, arch/arm64/halls_symtab.stub.c |  | On any change, re-establish: |
+| [[sub-kernel-halls]] | arch/arm64/halls.c, arch/arm64/halls.h, arch/arm64/halls_symtab.h, arch/arm64/halls_symtab.stub.c, kernel/extinction.c, kernel/include/thylacine/extinction.h |  | On any change, re-establish: |
 | [[sub-kernel-handle]] | kernel/handle.c, kernel/include/thylacine/handle.h |  | - A new `kobj_kind` must be classified into exactly one partition; the |
 | [[sub-kernel-hwcap]] | kernel/mmio_handle.c, kernel/include/thylacine/mmio_handle.h, kernel/dma_handle.c, kernel/include/thylacine/dma_handle.h, kernel/pci_handle.c, kernel/include/thylacine/pci_handle.h | inv-i5, inv-i32, inv-i34 | - The three exclusivity mechanisms are **different code for the same property**. |
 | [[sub-kernel-hwdebug]] | arch/arm64/hwdebug.c, arch/arm64/hwdebug.h | inv-i39 | On any change, re-establish: |

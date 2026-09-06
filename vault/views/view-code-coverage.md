@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**411 owned · 73 unowned · 484 files (84% owned) · ~19011 unswept lines.**
+**415 owned · 69 unowned · 484 files (85% owned) · ~18563 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30431 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,7 +74,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/ports | 0 | 18 | 4033 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| kernel | 118 | 20 | 2898 |
+| kernel | 122 | 16 | 2450 |
 | usr/halcyon | 0 | 2 | 1739 |
 | usr/quarry | 0 | 1 | 1028 |
 | usr/lib | 56 | 3 | 461 |
@@ -141,7 +141,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
-| kernel/extinction.c | 229 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
 | kernel/include/thylacine/devcap.h | 208 |
 | kernel/include/thylacine/spinlock.h | 204 |
@@ -163,7 +162,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
 | usr/ports/sdl2/thylacine-nogl/SDL_thylacineopengl_nogl.c | 118 |
-| kernel/canary.c | 111 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
@@ -181,11 +179,9 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/ports/gnumake/generated/fnmatch.h | 64 |
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
 | kernel/include/thylacine/cpio.h | 61 |
-| kernel/include/thylacine/extinction.h | 58 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.h | 52 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
-| kernel/include/thylacine/canary.h | 50 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
