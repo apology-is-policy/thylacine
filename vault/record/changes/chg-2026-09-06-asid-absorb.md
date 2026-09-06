@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 22-asid into sub-kernel-asid -- fold the missing no-per-Proc-free teardown-TLB-safety atom first, then stub-and-redirect (48 absorbed / 109 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["c637e9a8"]
 touched: [sub-kernel-asid]
 established: []
 closed: []
