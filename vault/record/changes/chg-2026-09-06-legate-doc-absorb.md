@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/102-legate (I-25 legate elevation): zero-fold, multi-redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["37a261fb"]
 touched: []
 established: []
 closed: []
