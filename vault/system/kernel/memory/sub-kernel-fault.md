@@ -363,6 +363,24 @@ zero-fill.
 Instruction aborts report as reads, which is correct — a fetch *is* a read — and
 falls out of the encoding rather than being special-cased.
 
+**The WnR write/not-read bit was decoded from the wrong `ISS` position for the
+whole life of the fault path, and nothing failed until the COW break needed it
+(#137).** `is_write` is `ESR.ISS` bit 6; the decoder read bit 9, which is `EA` —
+zero for every normal abort — so `is_write` was **always false**, tree-wide. It
+survived because no arm branched on it for *correctness*: demand-zero and the
+`FILE` arm install at `vma->prot` whichever way it reads, so first touch works
+either way, and a store to genuinely read-only memory is a program bug nobody
+ran. The COW break's write arm was the first real consumer, and with the wrong
+bit that arm is simply unreachable — the store re-installs read-only, re-faults,
+and loops, so the symptom is a **hang with no fault logged**, not anything shaped
+like a memory bug. The seam that hid it is the reusable part: the decode's own
+unit test **mirrored the constant** — it set bit 9 and asserted the decoder read
+bit 9, so it agreed with the *code* instead of the *hardware* and could not have
+failed however wrong both were, while every test on the consuming side assigns
+`is_write` directly and never runs the decode. The fix pins the test's bit as an
+independent literal with an ARM ARM citation, deliberately **not** `#include`d
+from the kernel header — sharing the constant would restore the tautology.
+
 The access-flag arm is defensive: this kernel sets the access flag eagerly, so
 those faults should not occur. Classifying them anyway means the day one appears
 it is named rather than landing in the catch-all.
@@ -377,6 +395,10 @@ DISTRO D-3a generalized the file arm to userspace mmap — retiring the R-5 F2
 one-fixed-VMA premise, which the #190 verify-and-bail replaces — D-3c added the
 #194 past-EOF `FAULT_USER_BUS`, and Warp-6 V-2 added the HOSTMEM arm (the
 `device_memory` bool widened to a MAIR index). [[chg-2026-09-06-fault-distro-hostmem]].
+
+[[chg-2026-09-06-fork-doc-absorb]] folds the #137 WnR-decode caveat absorbed from
+docs/reference/148: `is_write` was decoded from the wrong `ISS` bit for the life
+of the path, unreachable-until-COW, hidden by a constant-mirroring unit test.
 
 ## Tests
 
