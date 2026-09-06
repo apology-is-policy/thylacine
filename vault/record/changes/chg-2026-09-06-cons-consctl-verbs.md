@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-cons brought current: the three consctl surfaces since 2026-08-18 -- the beacon-tier verb, the serialsilent display-routing verb, and the C2-k1b termios projection"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["5db399d9"]
 touched:
   - sub-kernel-cons
 established: []
