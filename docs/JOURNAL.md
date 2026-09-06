@@ -840,6 +840,17 @@ unread. A summary of the remaining work is not the remaining work -- re-derive t
 set before you pick from it. `9477bee8`, fixup `b1ed94b9`, both mirrors. Eight
 chunks since the second self-compact.
 
+### Run 37 continued: 127-overcommit -- a clean I-32 zero-fold on the census's strength
+
+Following the census correction to a load-bearing pick: the #319 overcommit model,
+lazy-anon demand-zero plus decommit, the I-32 fourth axis. Zero-fold -- the
+substrate and `burrow_decommit` are in `sub-kernel-burrow`, the demand-zero fault
+arm with its charge-before-allocate ordering in `sub-kernel-fault`, the `vma_count`
+cap and the atomic-charge discipline in `sub-kernel-addrspace`, all fresh. The only
+stub-worthy staleness is that the doc's "userspace malloc wiring lands at #321" is
+long built. `31841eed`, fixup `0affb8c6`, both mirrors. `80 absorbed / 77 live` --
+nine chunks since the second self-compact.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
