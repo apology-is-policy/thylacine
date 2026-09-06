@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/101-halls (crash dump + symbolization): zero-fold redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["d20836f0"]
 touched: []
 established: []
 closed: []
