@@ -23,6 +23,69 @@ needed the operator.
 
 ---
 
+## 2026-09-06 (aux) -- Nocturne N-2a-4 code + the audit of the whole audio surface
+
+**Two things landed**: N-2a-4's code (`c5136f31`, LOCAL/unpushed) and the first
+adversarial audit of the whole Nocturne surface (N-1..N-2a-4) plus its fixes. The
+session ran on OPUS, not Fable (it fell back; the operator-away rule then bounds
+autonomy to non-design work -- so N-2a-4's GCP verification and N-2b's design
+ratification are handed back, not taken).
+
+**N-2a-4 -- a scope correction.** NOCTURNE.md section 8 recorded "flip the nosound
+config"; that premise was wrong. config.h has always compiled the DOSBox mixer
+("the mixer still runs the emulation into a null sink") -- patch
+`0004-thylacine-force-dummy-audio` (a `setenv SDL_AUDIODRIVER=dummy`) was the SOLE
+silencer, and the audio-stubs are opusfile/speexdsp CD-DA codec shims, unrelated.
+So the code change is just retiring 0004. Empirical verification needs a clade
+dosbox rebuild = GCP budget = an operator decision on Opus; and the thyla-pi has
+NO clade toolchain (`build/clade` absent), contradicting the resume note's "build
+on the ready pi." Plan + the open DUKE3D.CFG FXDevice=13 question:
+scratchpad/n2a4-verification-plan.md.
+
+**The Nocturne audit (rounds 1+2).** Round 1 (holotype-reviewer, Fable 5.1,
+78/78 JSONL-verified) prosecuted the virtio-snd driver + mixer/server: 1 P1 +
+4 P2 + 4 P3, three systemic roots -- (a) ownership was a field never gated,
+(b) the shared /dev/nocturne mount is ONE 9P conn so per-conn bounds go box-wide,
+(c) the driver tracked in-flight TX by a bitmask, not the posted-minus-reaped
+count. My parallel self-audit independently found the P1's sibling (the unbounded
+reap loop == the reviewer's F7).
+
+Fixed (committed, compile+bake verified, NOT runtime-tested -- the mac is held by
+main's H-arc gfx gates): F1 [P1] the cross-Proc voice-injection hole (`867a0632`,
+a server-side conn-scoped owner gate; voice 0 the world-shared exemption);
+F2/F3/F4 [P2] + F7/F8/SA2 [P3] (`816010df`, `f56fe99b`, `e9f69dc7`).
+
+**The wrong turn, and what caught it.** My F6 fix (start() refuses to prime a
+dirty TX ring) was a NET REGRESSION: on a PCM_START control-timeout it left
+PERIODS buffers queued-but-never-returned with no reclaim path -> audio wedged
+PERMANENTLY, on the exact transient F6 targeted. My own self-audit had checked F6
+for a livelock and missed the wedge one function-call away, on the start()-failure
+path it never opened. The round-2 dirty-close audit caught it (F-R2-1, P2). Round 2
+ran on the OPUS FALLBACK: Fable ran out of credits mid-round-2 (HTTP 429), so per
+the reviewer-model rule I re-spawned on Opus -- context-independence, not family
+diversity, was its value that round, and it re-derived the accounting the
+same-context self-audit could not. Disposition: I REVERTED F6 (`9b17f56f`, keeping
+F3 -- round 2 confirmed F3 clean and hostile-device-robust) rather than stack a
+reclaim fix that carries its own residual wedge; with no round-3 available (Fable
+out) to verify new code, reverting to proven pre-F6 code is the zero-new-risk
+close. F6's round-1 hazard (idle-STOP double-post, a pre-existing P3, latent in
+production) is re-deferred for a proper count-based fix under a review.
+
+**Deferred, risk stated (not a blocker).** F5 [P2] immortal mount-minted voices --
+round 2 confirmed it invariant-safe (bounded graceful ENOMEM) but
+under-characterized: persistent + box-wide + reachable by any proc via the
+world-writable nodes/new + leaks under crash-churn; its proper fix is
+architectural. F9 [P3], F1-followup [non-security], F-R2-2 [P3, F2 accept-spin]
+tracked. Full dispositions: memory/audit_nocturne_closed_list.md.
+
+**Cost / open.** The mandatory P1+P2 (F1-F4) are fixed and compile+bake clean, but
+the runtime witness (test-audio + test-sdl-audio) is MAC-BLOCKED by main's gfx
+gates, so the PUSH is owed -- the mirrors (0c0456ab) still carry the P1 injection
+hole until it lands. Owed to the operator: N-2a-4 GCP verify + N-2b ratification
+(Opus stop-items). Along the way: closed a vault-surfaced stale proc.h comment
+(`e30d95d0`, VIVARIUM grew struct Proc 352->392), and a self-compaction failed on
+a session limit (since reset; context never compacted, so the run continued in place).
+
 ## 2026-09-05 (aux) -- Nocturne N-2a-3: the Quake sound flip
 
 **Landed** (aux-3, on 348d9780): TyrQuake has sound. Its software build's
