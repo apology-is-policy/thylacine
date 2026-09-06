@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/112-kaua (the console TUI substrate): clean redirect to sub-kaua (ahead of the doc's stale Status table)"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["727e4e60"]
 touched: []
 established: []
 closed: []
