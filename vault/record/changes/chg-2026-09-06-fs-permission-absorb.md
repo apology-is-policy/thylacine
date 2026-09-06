@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/99-fs-permission (A-2 rwx + ownership): fold the SYS_WSTAT handler + devramfs enforcement, multi-redirect stub across 8 surfaces"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["1ecd1f2f"]
 touched: [sub-kernel-syscall-dispatch, sub-kernel-content]
 established: []
 closed: []
