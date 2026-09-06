@@ -591,6 +591,17 @@ machinery + the `#713` eret-race that was the year-long "AEGIS corruption" ghost
 stay deferred -- they are load-bearing, not milestones, and want a fresh session
 at full budget rather than a runway tail.
 
+`21-elf` (the ELF loader) followed, and it was NOT a frozen milestone like the
+last two -- it is D-2/D-4-updated and rich (PIE placement, the `elf_read_interp`
+walk, the #215 alignment inheritance). It was a clean zero-fold stub only because
+`sub-kernel-elf`, updated the same day, already carried all of it and more (24
+rejection codes to the doc's ~21, `ELFOSABI_GNU`, the F61/F62 guards). The catch
+worth recording is the verification itself: a hand-built coverage grep,
+mis-escaped, reported `0 hits` on every single atom -- and the dossier plainly
+covers them all. Reading the file rather than trusting the grep's zero is the
+whole of the check-the-checker lesson; a "0" from a throwaway verifier is a claim
+about the verifier first. `71 absorbed / 86 live`, six chunks this run.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
