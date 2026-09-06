@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/24-per-proc-pgtable (P3-B allocator): zero-fold, 5-surface redirect stub; the dossiers are current and the doc's open trip-hazard is closed"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["767181bf"]
 touched: []
 established: []
 closed: []
