@@ -201,13 +201,50 @@ soft-wrap, its continuation still on the live grid), the mode flush, the
 endless-wrap hard split; kaua-term the flag both directions + the wire round-trip.
 Fixes s5 on the SCROLLBACK; PL-4 brings the same rejoin to the LIVE view.
 
+**PL-4 landed: the proportional-live LIVE view (the operator's main pain).** The
+normal-screen tile tail was the last mono surface -- fresh output rendered as a
+fixed cell grid under the proportional scrollback, so one document disagreed with
+itself on metric and affordance (s1/s6). PL-4 retires it. PL-4a (`6270b132`)
+carries the live grid's per-row soft-wrap state to halcyond on the CellDiff (a
+full-grid `wrapped` snapshot, like the cursor -- a wrap flag only changes with a
+same-row cell write). PL-4b-i (`f51c9b5f`) adds `Transcript::live_block`: it joins
+the live grid's soft-wrapped rows into logical lines (the PL-3 scrollback rejoin,
+now for the live grid), interns read-only into a transient block, and returns
+per-row provenance `(logical line, start col)`. PL-4b-ii-a (`4b740230`) is the
+visible swap: `tile.rs::render`'s normal path lays the live tail through
+`live_block -> layout_block -> render_block` (not `paint_grid`), with a char-index
+caret (the one cursor source, subsuming s2), proportional selection banding + obj
+underline via the provenance, and trailing-blank trim (`content_rows`) so the
+bottom-anchored prompt does not float. Alt screen stays the raw mono grid.
+
+PL-4b-ii-b (`5a1ce719`) closes the run-menu geometry: `render` caches the laid
+live tail (block + provenance + screen-y) so a menu-summon inverts through the
+SAME geometry the frame painted -- `grid_hit` maps a pointer to (grid row, run
+key) via the laid line -> `col_at_x` -> the provenance inverse, and
+`grid_run_rect` returns the run's real proportional x-extent. The wrong turn, and
+what caught it: the first cut fixed only the MOUSE path (`click()`), and its host
+tests + ls-gfx-session both passed. Enumerating EVERY GRID_KEY geometry site --
+not just the one in the file I was editing -- found the KEYBOARD `act()` path
+computing the same run rect with mono `c0*cw` / `row*ch`. ls-gfx-session passed
+because its keyboard-menu leg asserts the resolved REF, never the anchor, so a
+menu popping at the wrong x on the proportional tail was invisible to it (the
+`audit_v8` M-PIN: the fix on site N stops you asking about site N+1 -- follow the
+call, not the file). Fixed `act()` to take `grid_run_rect` too, folded into the
+same commit. main.rs's console `run at` is the Transcript `run_rect` path (already
+proportional, no grid tail), correctly untouched.
+
+E2E (both HVF, coherent bakes): ls-gfx-session PASS [28s] -- the session path, the
+live-grid keyboard menu now anchored proportionally (ref still correct);
+ls-halcyon PASS [115s] on the `THYLACINE_HALCYON=1` lever -- the console path (no
+grid tail), its real body (rich tables + 11 menu/click witnesses, 0 skip markers)
+as the coherent-build regression check. `docs/reference` is vault-owned
+(`sub-halcyond`) -- rung to the vault peer, not written here.
+
 **What is open (the arc continues).** PL-1b (the halcyond `pre` render -- mono +
 code-block chrome; non-trivial: the 16-byte SpanSlot has no room for a `pre` bit,
 so the flag rides EM_PRE or a block Item, and the chrome extent needs care) --
-deferred as needing fresh design. PL-4 (the proportional-live normal-mode LIVE
-view -- retire the mono grid tail; the live grid's rows need the same join through
-a CellDiff/grid channel) -- the operator's MAIN pain, a large render change best
-given fresh context. PL-5 (`la` fences its box output in `pre`). The batched
+deferred as needing fresh design. PL-4 landed this run (above). PL-5 (`la`
+fences its box output in `pre`). The batched
 graphical E2E (PL-2 + PL-3a + PL-3b/c) ran GREEN before the push: ls-gfx-session
 PASS [28s] -- the session path, where `push_scrolled_rows` actually lives -- and
 ls-halcyon PASS [117s] on a `THYLACINE_HALCYON=1` bake (the console/Genera path;
