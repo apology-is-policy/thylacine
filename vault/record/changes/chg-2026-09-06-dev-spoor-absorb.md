@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 30-dev-spoor -- a THREE-dossier redirect (dev + spoor + path), zero-fold (content fully covered across all three, verified no orphan) (51 absorbed / 106 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["aa551eb4"]
 touched: []
 established: []
 closed: []
