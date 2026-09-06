@@ -131,6 +131,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-06 [[chg-2026-09-06-abi-errno-reconcile]] — abi-errno registry reconcile: +16 missing codes (the whole V-5 socket family + INTR/2BIG/CHILD/NOTTY/MFILE/NODEV/NOTDIR/ISDIR/LOOP), the stale self-counts (19->35 non-zero, 20->36 asserts), and the err.rs mirror analysis
 - 2026-09-06 [[chg-2026-09-06-builders-config-overlay]] — sub-substrate-builders de-stale: the clade builders must sync build-config.sh + configs/ (the build-configurator arc's silent dependency)
 - 2026-09-06 [[chg-2026-09-06-burrow-borrowed]] — sub-kernel-burrow re-verified borrowed: the only post-update change is a comment-only round-3 refinement the dossier's prose already reflects
 - 2026-09-06 [[chg-2026-09-06-cons-consctl-verbs]] — sub-kernel-cons brought current: the three consctl surfaces since 2026-08-18 -- the beacon-tier verb, the serialsilent display-routing verb, and the C2-k1b termios projection
@@ -138,5 +139,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-06 [[chg-2026-09-06-coreutils-presenters-h1c2-destale]] — sub-coreutils-presenters de-stale: H-1c-2 built the console probe -- --color=auto now means auto across all sixteen, ps joins the set, and four tools gain a Beacon Rich realization
 - 2026-09-06 [[chg-2026-09-06-dev-fdclass-console-helpers]] — sub-kernel-dev de-stale: dev.h gains the devdev_fd_devclass / spoor_is_console decls + the extern devcons (the header side of the devdev fd-class + console-identity work)
 - 2026-09-06 [[chg-2026-09-06-devdev-fdclass-console-identity]] — sub-kernel-devdev de-stale: devdev_fd_devclass (H-1a fd-class; /dev/cons -> 'c') and spoor_is_console (viv-C2 unforgeable console identity, not a qid bit)
-- 2026-09-06 [[chg-2026-09-06-devproc-atomic-cdebugowner]] — sub-kernel-devproc de-stale: CDEBUGOWNER is now read/written atomically (spoor_flag_get/set) -- the release gate that keeps the debug_owner no-dangle argument sound under a concurrent fcntl
 <!-- generated:end -->
