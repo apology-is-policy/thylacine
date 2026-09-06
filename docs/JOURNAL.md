@@ -262,6 +262,26 @@ free moves past `as->lock` -- the F5 fourth site, `out_free` mandatory per F7),
 and `vma_next_overlap_in` (#199). Both were load-bearing surfaces (substrate-gates
 evidences I-9/I-21; vma is I-12/I-7/I-32/I-44 audit:hard), described at effort max.
 
+**The kernel-vma de-stale opened a DISTRO-D-3 trio that the churn list surfaced in
+order.** D-3 (file-backed mmap) touched three kernel files, and their dossiers had
+all gone stale together at the 2026-09-05 merge: vma (done), then `sub-kernel-elf`
+(`0ffd8eca`, 40 -> 39) and `sub-kernel-fault` (`6df359aa`, 39 -> 38). elf was the
+sharpest of the three -- its whole "static ET_EXEC only, dynamic refused
+permanently" thesis was INVERTED by D-2 (ET_DYN/PIE placement at a 512 MiB bias,
+one bias site, PT_DYNAMIC narrowed to ET_EXEC) and D-4 (`elf_read_interp`, the
+rewrite-to-ldso route: PT_INTERP is still rejected AT elf_load, but the vivarium
+exec chokepoint reads it and runs the interpreter). Its code count also measured
+24, not the prose's "twenty-two" -- which had undercounted by one even at its own
+commit. fault added a SEVENTH backing arm (HOSTMEM, the Warp-6 V-2 BAR fault, the
+`device_memory` bool widened to a MAIR index) -- the arm count drifting a THIRD
+time, the exact miscount the dossier itself warns about -- plus the #190
+verify-and-bail (D-3 retired the R-5 F2 "one fixed VMA at offset 0" premise, and
+F2's *prescribed* recompute remedy was wrong: file_offset is pre-sleep-derived too,
+so a recompute files stale bytes under a fresh slot) and the #194 past-EOF SIGBUS
+(refused before allocation, so a demand-zero cannot mint memory the I-32 axis never
+sees). Three audit:hard kernel surfaces, the D-3 story now coherent across
+vma/elf/fault on the vault side (exec is a separate dossier, checked next).
+
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
 **Where it sits.** Run 30 closed and landed the KT-1 audit arc (`6e6503ad`). This run picked up the operator's Cmd+F report that aux reproduced and handed over (yip 0048, `memory/bug_zoom_fullscreen_surface_not_scaled.md`): zooming DOSBox-X showed its 640x417 frame native at the display's top-left on black. Compositor geometry, so main's.
