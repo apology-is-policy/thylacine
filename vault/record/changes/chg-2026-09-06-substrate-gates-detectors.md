@@ -4,7 +4,7 @@ type: chg
 title: "substrate-gates de-stale: the second EXTERNAL-KILL arm (#222), the sourceable classifier + producer cross-check (#234/#212/#143), archive-not-delete (#223), the per-boot wall clock (#200), and the lean-shape / arc-gate propagation (#228/#229/#230/#232)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["407a5a95"]
 touched:
   - sub-substrate-gates
 established: []
