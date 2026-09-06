@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/145-jit (the JIT capability, I-42): fold the I-cache contract (CL-7k-3 F1 create-invalidate + the cross-PE ISB publish contract) into sub-kernel-mmu"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["8efdea10"]
 touched: [sub-kernel-mmu]
 established: []
 closed: []
