@@ -30,7 +30,7 @@ operator booted Halcyon interactively for the first time, filed observations
 (`thylacine-aux/docs/Found issues.txt` + screenshots s1-s7 + genera.gif) and
 directed: stabilize before more features. A design conversation ratified a
 sharpened model, which this run landed as scripture-first, then began
-implementing. Tip `PL3BC_PENDING`, both mirrors.
+implementing. Tip `ee426200`, both mirrors.
 
 **The design (ratified by the operator).** Halcyon is mainly PROPORTIONAL -- the
 prompt included. Monospace only where character-grid alignment is essential: the
@@ -100,7 +100,7 @@ scrolled-off row became its own transcript Line. PL-3a (`24fd27f9`) added a
 per-row soft-wrap flag to the vt (`wrapped: Vec<bool>`, mirroring `dirty`
 site-for-site: SET on autowrap, CLEARED on col-0/erase/blank, rotated on
 scroll/IL/DL, reindexed on resize, swapped on alt) riding `Boundary::Scroll(row,
-wrapped)`. PL-3b/c (`PL3BC_PENDING`) carries it end to end: kaua-term threads the
+wrapped)`. PL-3b/c (`ee426200`) carries it end to end: kaua-term threads the
 flag through `ScrollOff { rows, wrapped }` and the wire (interleaved per row, so a
 declared-length desync can never mis-shift the flags), and halcyond's
 `push_scrolled_rows` REJOINS -- accumulating RAW cells until a non-wrapped row
@@ -128,10 +128,12 @@ so the flag rides EM_PRE or a block Item, and the chrome extent needs care) --
 deferred as needing fresh design. PL-4 (the proportional-live normal-mode LIVE
 view -- retire the mono grid tail; the live grid's rows need the same join through
 a CellDiff/grid channel) -- the operator's MAIN pain, a large render change best
-given fresh context. PL-5 (`la` fences its box output in `pre`). Owed gate: the
-graphical E2E for PL-2 + PL-3 (a stylesheet + scrollback-render change,
-host-verified via face_for + face_count + the join tests; run ls-gfx-session /
-ls-halcyon at the batched arc gate). Full plan + the screenshot findings:
+given fresh context. PL-5 (`la` fences its box output in `pre`). The batched
+graphical E2E (PL-2 + PL-3a + PL-3b/c) ran GREEN before the push: ls-gfx-session
+PASS [28s] -- the session path, where `push_scrolled_rows` actually lives -- and
+ls-halcyon PASS [117s] on a `THYLACINE_HALCYON=1` bake (the console/Genera path;
+it does NOT exercise the rejoin, so ls-gfx-session is the witness that matters for
+PL-3b/c). Full plan + the screenshot findings:
 `memory/project_halcyon_stabilization.md`.
 
 ## Run 33 (vault absorption cont., 2026-09-06, Opus 4.8, effort max): the shell (parser + eval), the coreutils-filters recount, and the Image-cache half of DISTRO D-3
