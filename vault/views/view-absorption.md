@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**117 absorbed · 40 live · 157 total.**
+**118 absorbed · 39 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -156,7 +156,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 57-attach-probe.md | absorbed | [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-transport]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]] |
 | 58-corvus-syscalls.md | live | — |
 | 59-joey-from-ramfs.md | absorbed | [[sub-kernel-joey]], [[sub-stratum-boot]] |
-| 60-sys-spawn-wait.md | live | — |
+| 60-sys-spawn-wait.md | absorbed | [[sub-kernel-elf]], [[sub-kernel-exec]], [[sub-kernel-proc]], [[sub-kernel-syscall-dispatch]] |
 | 61-stratumd-stub.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-exec]], [[sub-kernel-joey]], [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-pipe]], [[sub-kernel-spoor]], [[sub-kernel-stalk]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]], [[sub-pouch-process]] |
 | 62-sys-spawn-with-fds.md | absorbed | [[sub-kernel-exec]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-process]] |
 | 63-sys-spawn-with-caps.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-exec]], [[sub-kernel-syscall-dispatch]] |
