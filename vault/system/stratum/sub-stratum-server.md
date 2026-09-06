@@ -15,7 +15,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.7", "docs/POUNCE-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -55,6 +55,20 @@ connecting Proc cannot forge it. Stratum's own source carries the warning
 back across the boundary in as many words: *this is load-bearing, do not
 "simplify" the marshal back toward 0*, because the `/ctl` SYSTEM gate keys
 on this uid.
+
+**The host-bake overrides the stamped owner (`--bake-owner-uid` / `-gid`).**
+The runtime per-user stratumd stamps create-ownership from the peer cred
+(above), but the host build runs stratumd + `stratum-fs write` as the build
+user, which would leave the baked corpus owned by the host uid (e.g. 501 /
+1000), not a Thylacine principal — and once dev9p enforces (A-3b) the
+`PRINCIPAL_SYSTEM` boot chain would hit its own files as *other* and be denied.
+So `--bake-owner-uid` / `--bake-owner-gid` override `auth_uid` / `auth_gid` at
+the create chokepoint (`serve.c`), and `build.sh` stamps `PRINCIPAL_SYSTEM`
+(`4294967294`) — the no-brick property A-3b relies on ([[sub-substrate-build]]).
+It is opt-in and per-axis: `bake_owner_enabled` is `memset`-0 false so a normal
+runtime daemon never overrides, and a `(uid_t)-1` sentinel leaves an individual
+axis on peer creds. Not an on-disk-format change — only the stamped `si_uid` /
+`si_gid` *value* differs, no `STM_UB_VERSION` bump.
 
 **`ds:<name>` and the three access gates.** Selecting a child dataset by
 name is what makes a per-user encrypted home reachable, and *three*
@@ -176,4 +190,6 @@ multi-RPC stat into one round trip.
 
 ## Provenance
 
-[[chg-2026-08-02-stratum-sweep]].
+[[chg-2026-08-02-stratum-sweep]] · [[chg-2026-09-06-9p-identity-absorb]] (the
+A-3 M2 `--bake-owner-uid` host-bake owner override, folded at the docs/reference
+retirement).

@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 3.7.1", "docs/IDENTITY-DESIGN.md section 9.6"]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -79,7 +79,23 @@ it and there is no `RIGHT_EXEC`. So `perm_want_for_omode(OEXEC)` must demand
 permission would mint a read-capable handle. The rule the pair maintains:
 **the granted rights must never exceed the access the identity check
 validated.** `OTRUNC` adds `PERM_W` on one side and `RIGHT_WRITE` on the
-other, in step.
+other, in step. The `rights_for_omode` envelope in full:
+
+| omode | handle rights |
+|---|---|
+| `OREAD` | `RIGHT_READ` |
+| `OWRITE` | `RIGHT_WRITE` |
+| `ORDWR` | `RIGHT_READ \| RIGHT_WRITE` |
+| `OEXEC` | `RIGHT_READ` (read-implied; there is no `RIGHT_EXEC`) |
+| `+OTRUNC` | adds `RIGHT_WRITE` |
+
+Two rights this map deliberately does **not** set are *caller policy*, not
+`omode`-derived, and the code says so explicitly: `RIGHT_TRANSFER` (a
+normally-opened handle gets it at the syscall walk-open site) and the
+`T_OPATH` navigation handle's born-`R|W` base with **no** `RIGHT_TRANSFER`
+(the A-1.7/F5 confined storage-capability navigation base). `rights_for_omode`
+is the pure `omode -> RIGHT_*` half; the transfer bit and the `T_OPATH`
+exception live in `sys_walk_open_handler` ([[sub-kernel-syscall-dispatch]]).
 
 **The wstat policy is three different authorities, not one.**
 
@@ -180,4 +196,6 @@ belong in the clearance set.
 
 ## Provenance
 
-[[chg-2026-08-02-authority-sweep]].
+[[chg-2026-08-02-authority-sweep]] · [[chg-2026-09-06-9p-identity-absorb]]
+(the F1 `rights_for_omode` table + the caller-policy disclaim, folded at the
+docs/reference retirement).

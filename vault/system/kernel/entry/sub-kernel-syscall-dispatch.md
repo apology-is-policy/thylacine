@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -256,6 +256,38 @@ So the authority is enforced by *kernel-minted object type*, not by repeating a
 capability check at every touch. A re-check would be the weaker design: it has
 to be added to each new operation, and forgetting one is silent.
 
+### The FS handlers carry the identity gate, and walk-open sets the handle rights
+
+Three A-3 touches live on the FS-mutation and walk-open handlers, all in this
+file. First, the **identity gate reaches FS mutation** (A-3b/F2): once `dev9p`
+enforces (`dev->perm_enforced`), `sys_rename_handler` runs
+`perm_check(PERM_W | PERM_X)` on **both** parent directories — POSIX rename
+needs write+search on source and destination — and `sys_unlink_handler` on the
+parent, mirroring `sys_walk_create_handler` and gated on the same flag so a
+non-enforcing Dev (devramfs, whose leaves have no `.rename`) is unaffected.
+Before A-3b these gated on `RIGHT_WRITE` alone, so an `O_PATH`-born `R|W` handle
+to a no-`other-w` directory could rename or unlink its entries once the FS
+enforced; the `perm_check` closes that. The *check* is [[sub-kernel-perm]]'s;
+the *placement* — in the handler, behind `perm_enforced` — is this file's.
+
+Second, **walk-open sets the handle rights** (A-3b/F1): it derives the envelope
+from `omode` via `rights_for_omode` (so the capability axis cannot exceed the
+access `perm_check` validated) and then ORs `RIGHT_TRANSFER` as caller policy —
+with one exception, the `T_OPATH` walk-only handle, born `R|W` with NO
+`RIGHT_TRANSFER` (the confined-storage navigation base). `rights_for_omode`
+itself sets neither the transfer bit nor the `T_OPATH` base; both are decided
+here, at the mint site — the same "policy lives at the caller, the pure map
+lives in the leaf" split as the gate-placement rule above.
+
+Third, **the attach handlers assert the caller's identity** (M4): `sys_attach_9p`
+and `sys_attach_9p_srv` substitute the calling Proc's kernel-stamped
+`principal_id` for the userspace `n_uname` Tattach field (still validated for
+ABI hygiene, then superseded). Against a trusted-local Stratum server this is
+inert — the live identity channel is `SO_PEERCRED` ([[sub-pouch-net]]) — so
+`n_uname` is forward-compat for a v1.x foreign server that honours it but has no
+peer-cred, gated behind a recorded trust-stamp seam
+([[seam-nuname-trust-stamp]]).
+
 ### The hardware-mint sequence, and where the same idea is factored and where it is copied
 
 The three DMA-family create calls — plain, weave, and GPU buffer object — each
@@ -319,6 +351,17 @@ instead.
 Where a device's error is forwarded, an out-of-window negative is clamped to a
 generic I/O error, so a device cannot punch a value through the boundary
 library's error window and have it read as an enormous success.
+
+The 9P attach path is the concrete instance of both halves (A-3c). Both attach
+handlers refine their return from a bare `{-1, fd}` to `{-errno, fd}` via
+`attach_err_to_ret`, which surfaces the value only if it lies in the
+`[-4095, -2]` passthrough window and otherwise clamps to `-1`. The value comes
+from `p9_attached_create`'s `out_err` param, which threads the Tattach failure
+out — a per-user stratumd's dataset-scope refusal arrives as `Rlerror(EACCES)`,
+mapped to `-T_E_ACCES`. So an out-of-scope attach now returns `-EACCES` (pouch
+presents `errno == EACCES`) where it once collapsed to a bare `-1` — the reason
+that identity refusal is observable from Thylacine at all
+([[sub-kernel-ninep-attach]]).
 
 ## Data structures
 
@@ -581,6 +624,11 @@ inline class-pick became the named classifier `spoor_devclass` (adding the
 pts-slave `'t'` arm via `pts_resolve_spoor`; master stays `'9'`), +18 lines ->
 14749. Not a new split -- a classifier, not a `_handler`/`_for_proc` pair -- so
 the 50/45 metric is unchanged.
+[[chg-2026-09-06-9p-identity-absorb]] folds the A-3 syscall-path atoms absorbed
+from docs/reference/100: the attach-error surfacing (`attach_err_to_ret`), the
+FS-mutation identity gate (F2 rename/unlink `perm_check` behind `perm_enforced`),
+the walk-open handle-rights caller policy, and the M4 `n_uname = principal`
+substitution.
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 
