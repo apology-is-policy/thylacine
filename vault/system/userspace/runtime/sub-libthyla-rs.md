@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-08-15
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -466,4 +466,5 @@ instant, and falling back to the syscall when the page is absent.
 
 ## Provenance
 
-[[chg-2026-08-03-libthyla-rs-sweep]].
+[[chg-2026-08-03-libthyla-rs-sweep]]. [[chg-2026-09-06-libthyla-rs-currency]]
+(a verified currency bump -- body already current, `updated:` field was stale).
