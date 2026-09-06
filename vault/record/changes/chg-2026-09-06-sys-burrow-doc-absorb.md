@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/79-sys-burrow (SYS_BURROW_ATTACH/DETACH): fold the F1 window-confinement finding into sub-kernel-vma, multi-redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["594079d4"]
 touched: [sub-kernel-vma]
 established: []
 closed: []
