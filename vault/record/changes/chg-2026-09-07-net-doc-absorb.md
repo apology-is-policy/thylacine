@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/122-net (libthyla-rs::net, the native /net client): fold the SNTP trust model into sub-net-clients; redirect the protocol to sub-netd-server"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["a57d9c24"]
 touched: [sub-net-clients]
 established: []
 closed: []
