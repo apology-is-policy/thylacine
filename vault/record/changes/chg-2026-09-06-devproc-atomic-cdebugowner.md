@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-devproc de-stale: CDEBUGOWNER is now read/written atomically (spoor_flag_get/set) -- the release gate that keeps the debug_owner no-dangle argument sound under a concurrent fcntl"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["939a7d19"]
 touched:
   - sub-kernel-devproc
 established: []
