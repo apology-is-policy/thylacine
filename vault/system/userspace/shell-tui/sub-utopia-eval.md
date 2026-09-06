@@ -23,7 +23,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -64,9 +64,15 @@ mode flags (`interactive`, `stdio_inherit`, `consctl_fd`, `job_control`).
 `eval_command` expands argv[0] through the alias table, then resolves
 **function → builtin → external**. A function runs in a pushed scope; a builtin
 runs in-process because it mutates shell state; anything else is spawned, with
-`$path` handled shell-side (a bare name becomes `/bin/<name>`, a `/`-bearing
-name is used as-is) and the actual resolution done by the kernel against the
-caller's namespace. There are sixteen builtins, and `BUILTIN_NAMES` — the list
+`$path` handled shell-side (a bare name is searched over `/bin`, `/`,
+`/goroot/bin`, `/clade/bin`, `/viv/bin`, `/viv/abin` in order — first existing
+hit wins, a miss falls back to `/bin/<name>` for a clean spawn error; the
+toolchain and phenotype dirs come last so `/bin` stays authoritative, and the
+two `/viv` dirs are `MPHENO_LINUX` mounts so a Linux binary there runs
+seamlessly; a `/`-bearing name is used as-is) and the actual resolution done by
+the kernel against the caller's namespace. There are sixteen builtins (`cd --`
+ends option processing — the one way to enter a directory whose name begins with
+`-`), and `BUILTIN_NAMES` — the list
 `is_builtin` tests and `type` answers from — agrees exactly with `try_builtin`'s
 dispatch arms.
 
@@ -77,6 +83,19 @@ the block's flow to `Return`, so the failure propagates out of the enclosing
 function or script. Interactive mode suppresses it; the `?` postfix forces it
 regardless of mode. This is `set -e`'s intent with the modes made explicit
 rather than global.
+
+### `&&` / `||` short-circuit lists
+
+`eval_and_or` runs the first pipeline, then each later pipeline only if its
+connector is satisfied by the running `$status` (`&&` → 0, `||` → non-zero). A
+link's non-zero exit is consumed by its connector rather than propagated, so
+only the list's *final* `$status` reaches the block loop's implicit-fail check —
+which is why `a || b` tolerates `a`'s failure when `b` succeeds (scripture 8.6).
+A control-flow escape (`return` / `break` / `continue`) from any operand wins
+immediately, and a visible `?` on the leading command still forces propagation
+even interactively (the `should_propagate_failure` AND-OR arm). The parser
+builds the `AndOr` node only when a connector is present, so a lone pipeline
+never reaches this path.
 
 ### Two foreground wait paths, chosen by whether the session dance succeeded
 
@@ -95,6 +114,12 @@ restores the terminal and the prompt line discipline on **every** outcome
 including a stop. No note forwarding happens on this path. Every job-control arm
 is inert while `job_control` is `None`, so the console path is unchanged by the
 existence of the other one.
+
+The pts slave is not directly pollable — `dev9p.poll` reports it always-ready —
+so for fd-0 input readiness the shell polls a side fd, `/dev/pts/<n>ready`
+(`JobControlState.poll_in_fd`), while still reading fd 0 itself; a failed
+ready-open degrades to polling fd 0, the prior behaviour. That bridge is what
+lets a native `ut` service Ctrl-C at an otherwise-idle pts prompt.
 
 ### The raw-mode set is a closed allowlist, and joining it is a deliberate act
 
@@ -126,6 +151,22 @@ forwards `interrupt`, swallows `child_exit` (so the fd stops advertising
 strided loop poll defers every non-`interrupt` note it passes. `Env` holds them
 FIFO and `deliver_pending_notes` fires them **before** draining the live queue,
 preserving arrival order across the boundary.
+
+### The note mask mirrors the kernel's, and `mask note` swaps it whole
+
+The shell keeps a model of the kernel note mask (`Env.note_mask`) seeded to
+`just(Pipe)` — the process default is pipe-masked (a pipe write to a dead reader
+is EPIPE, not death), and `mask note` SWAPS the whole kernel mask, so the model
+must carry `pipe` or the first `mask note` block would clobber it and a later
+shell pipe-write would terminate instead (#237). Registering a handler with `on
+note <name>` *unmasks* that note's class, so an `on note 'pipe'` handler can
+actually receive the note it was written for — the mirror of pouch's
+`sigaction(SIGPIPE, handler)` clearing the mask bit. Names map to kernel classes
+through `note_class_for_name`, where any `tty:`-prefixed name (`tty:susp`,
+`tty:winch`, …) resolves to the single `NoteClass::Tty` bit, so `mask note
+'tty:susp'` masks the whole tty family — matched by prefix rather than by
+enumerating the five, because before this arm existed that exact `mask note
+'tty:susp'` parsed, ran its body, and masked nothing.
 
 ### The recursion bound is ONE counter with two entry points
 
@@ -324,3 +365,6 @@ one.
 [[chg-2026-08-03-utopia-eval-sweep]].
 
 [[chg-2026-08-16-seven-small-surfaces]] records this interval.
+
+[[chg-2026-09-06-utopia-eval-shell-arc-notes]] folds the `&&`/`||` eval half,
+the six-entry `$path`, `cd --`, and the settled notes-mask changes.
