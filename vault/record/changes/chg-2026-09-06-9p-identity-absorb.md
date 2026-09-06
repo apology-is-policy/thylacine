@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/100 (9P identity presentation, A-3): the cross-cutting security surface folded across 7 dossiers + a new n_uname trust-stamp seam, then multi-redirect stub -- 66 absorbed / 91 live"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["90422106"]
 touched:
   - sub-pouch-net
   - sub-kernel-ninep-client
