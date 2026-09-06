@@ -502,6 +502,52 @@ that fold will refresh.
 
 ---
 
+### Run 37 continued: the peer-flagged s7a palette de-stale, and a new-feature blast radius the merge carried in
+
+The merge in the previous entry unblocked exactly one thing, and I did it next:
+the vault fold main flagged on yip 0067 for its nora s7a session-palette arc
+(nora follows the Halcyon session theme instead of a hardcoded Bonfire -- the
+operator's residual s7 P0). Four dossiers, every atom checked against the
+now-merged code.
+
+**The finding: a new feature that voided two standing claims.** s7a made
+`nora/theme.rs` a runtime palette -- a `static ACTIVE` holding an
+`UnsafeCell<Palette>` with an `unsafe impl Sync`, written once at startup by
+`set_palette` and read via `active()`. `sub-nora-view` said, in two places, the
+opposite of what that made true: Data structures called theme "colour constants
+... no state," and Concurrency said "no shared mutable state, no interior
+mutability." Both were now false. This is the blast-radius class the memory
+keeps: a new feature does not just need documenting, it voids a claim elsewhere
+that named the old behaviour. I rewrote both to the truth -- one set-once global
+cell, sound by a set-once-before-render discipline (nora is single-threaded; a
+debug-only `AtomicBool` asserts the at-most-once half and compiles out in
+release) -- rather than only appending the new palette description, which would
+have left the two false claims standing beside a correct one.
+
+**The abi-note call main delegated.** `/env/HALCYON_PALETTE` is a genuine new
+cross-program surface: halcyond writes it, nora (and future pts programs) read
+it, with a defined role vocabulary and `role=RRGGBB` format. main asked whether
+it "may deserve its own abi note -- your call." It is exactly what an abi
+registry note models (a format contract with a writer and readers), so I
+authored `abi-halcyon-palette`. R6 made it verifiable: declaring
+`literals: [HALCYON_PALETTE]` with `literal-scan: [usr]` means the linter flags
+any `usr/` file that names the string but is not a declared mirror -- I
+enumerated all four occurrences (one pinned-by authority, three mirrors) so the
+reverse scan is clean and stays honest as a fifth consumer lands.
+
+The load-bearing judgement worth keeping is small and easy to get wrong: the
+`surface` role resolves from `Theme.header`, NOT `status_bg`. `surface` is a
+lifted panel a hosted program paints its own dark ink on; `status_bg` is
+Halcyon's own dark bottom strip, so a program painting its `fg` on it would be
+dark-on-dark. Recorded in the abi note and in libhalcyon.
+
+Landed `99c8c72c` (+ fixup `588f3524`), clean fast-forward, dual-pushed. The
+staleness census went 24 -> 21 -- the three dossiers it named are refreshed.
+Fourth peer-flagged de-stale of the run; the code was main's, already merged and
+s7a+F2-audited, so no code was touched.
+
+---
+
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
 
 **PL-5 -- the `pre` PRODUCER (`ea731dd8`).** PL-1b (run 34) built the `pre`
