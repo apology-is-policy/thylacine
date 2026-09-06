@@ -23,6 +23,81 @@ needed the operator.
 
 ---
 
+## Run 33 (vault absorption cont., 2026-09-06, Opus 4.8, effort max): the shell (parser + eval), the coreutils-filters recount, and the Image-cache half of DISTRO D-3
+
+**Where it sits.** The continuation of Run 32 across a self-compaction (Run 32
+ended at the 600k line, tip `aeddb75b`). Same track (`../thylacine-vault`,
+`vault/bootstrap` == origin/main), same greenlight ("keep going through the
+knowledge backlog"). Four dossiers de-staled, all lint-green, both mirrors, final
+tip `672f5179`. Backlog 33 -> 31 measured (`quaestor stale`), 35 at Run 32's
+start of this segment.
+
+**What landed, in order.**
+- **coreutils-filters** (`d2891261`). Three self-contained landings the
+  merge-date trap hid (`git-log-since` finds nothing; the topological
+  `<dossier>..HEAD` carries all three). The load-bearing correction was a
+  *recount driven by a sibling*: H-1c-2 (`8922ccd7`) built `ps`, a sixteenth
+  colour-linking presenter, so this dossier's own partition figures were stale
+  by one -- MEASURED 52 bins = 36 filters + 16 colour-linking, so "fifty-one"
+  -> fifty-two and "fifteen of the others" -> sixteen, the partition-exact
+  claim preserved (36+16=52). Plus the `which` drift (#159) narrowed to exactly
+  the `/` entry (shell `resolve_command` is now six dirs, login seeds five,
+  dropping only the namespace root), `realpath`'s `normalize` extracted to a
+  shared `coreutils::path`, and `mkdir -p`'s race-tolerant re-check.
+- **kernel-image** (`5f58e86e`). The Image-cache half of DISTRO D-3, the arc
+  Run 32 folded into vma/elf/fault -- so this closes that story on the vault
+  side. Two shifts: the clientele generalised exec-only -> exec + phenotype
+  file-backed mmap (`image_lookup_or_create` now called from `syscall.c:6139`/
+  `:6350` beside `exec.c:939`), and the #194 `file_limit` stamp (the fault arm
+  refuses a page past `round_up(file_limit)` with SIGBUS, closing the lying-ELF
+  uncharged demand-zero mint). Care taken NOT to mis-file `file_limit` as an
+  `image_entry` key field -- it is a `struct Burrow` field, so the seven-field
+  key and Data structures stayed untouched.
+- **utopia-parser** (`53f6a876`). Purely-main, settled: the `&&`/`||` AND-OR
+  list grammar (new `StatementKind::AndOr`; `parse_pipeline_statement`'s
+  connector loop is iterative, so the three recursion bounds are untouched) and
+  `=` as a literal command argument (`UnexpectedEqualInCommand` retired as a
+  raise, now vestigial). MEASURED: parser `#[test]` 188 -> 189 (`fd4c59ae`
+  removed one, added two), and the Caveats' cross-crate stranded figure
+  re-measured 385 -> 394 (the libutopia total) / 389 -> 398.
+- **utopia-eval** (`8b78b921`, merge `672f5179`). The eval companion, and the
+  one judgment call of the run.
+
+**The judgment worth recording: a dossier straddling two tracks.**
+utopia-eval's post-2026-08-16 churn was *mixed* -- main's shell arc (`eval_and_or`
+short-circuit, the six-entry `$path`, `cd --`) AND aux's notes/job-control arc
+(#237 pipe-default mask, `mask tty:*`, the item-10 pts poll bridge). A partial
+fold that bumped `updated:` would falsely mark the aux half current, so the
+choice was fold-all or skip. Folding won, on two grounds checked before
+committing: the aux changes are *settled* (landed 2026-08-17..19; aux is on
+Nocturne now), and the eval dossier already *scaffolds* the notes/mask/^C
+machinery (it names `wait_pids_interruptible`, the note-handler registry, the
+held-note queue, `note_mask`), so the aux changes land as UPDATES to existing
+prose rather than fresh documentation of a peer's mechanism. That is the rule
+this run adds: fold a peer's LANDED code when the dossier already owns the file
+and the code is settled; the append-only discipline is about the record plane
+(never edit a peer's chg), not about who may describe landed state.
+
+**The wrong turns that were caught.** Two candidates were triaged and rejected
+before any edit: `kernel-loom` (its `loom_poll` addition is main's *actively-
+iterating* KT-1.5 surface with a just-opened seam `seam-loom-sqpoll-p3s`, so
+documenting it now risks re-staling) and `kernel-devctl` (its only post-dossier
+change was an F4 comment reword -- no mechanism change, so no substantive de-stale
+was owed; forcing one would have been a hollow `updated:` bump). The general
+tell: churn is not change, and a bumped date must be backed by a real mechanism
+delta.
+
+**The peer-contention event.** During utopia-eval a peer advanced main to
+`a95d437c` (a docs-only commit, docs/BEACON + docs/HALCYON). Caught by the
+pre-commit ls-remote guard, which refused the blind push. The work was still
+staged-not-committed, so the recovery was clean: verify `a95d437c` descends from
+my base and touches disjoint files, commit my work on the base, `git merge`
+(ort, no conflict), full-lint the merged tree, re-verify the mirrors had not
+moved again, push `672f5179`. No rebase, no force, no lost work -- the discipline
+behaving exactly as designed.
+
+---
+
 ## Run 32 (vault absorption, 2026-09-05, Opus 4.8, effort max): eight kernel dossiers (four entry/namespace + the whole proc.c cluster) + the H-arc folds
 
 **Where it sits.** A vault-track run (`../thylacine-vault`, `vault/bootstrap` ==
