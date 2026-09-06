@@ -572,11 +572,24 @@ again: the dispatcher, staging, and `SYS_PUTS`/`SYS_EXITS` paths all live in
 `sub-kernel-syscall-dispatch` (fresh from this run's A-3 fold) + `sub-kernel-proc`
 + `sub-kernel-cons`. Two milestone docs stubbed, two headers caught arguing with
 their own bodies -- the tell that a doc has been edited forward without its
-caveats being re-read. `69 absorbed / 88 live`. The next two docs on the pile --
-`99-fs-permission` (the A-2 rwx layer, sibling of this run's A-3 work) and
-`08-exception` (the vector machinery, and the `#713` eret-race that was the
-year-long "AEGIS corruption" ghost) -- are load-bearing, not milestones, and are
-teed up for a fresh session at full budget rather than squeezed into a runway.
+caveats being re-read. `69 absorbed / 88 live`.
+
+I drafted the run's close here, and the stop-hook was right to push back: budget
+below the checkpoint line, an away operator, no escalation. The honest correction
+was that the *named* next docs (`99-fs-permission`, `08-exception`) being
+load-bearing did not mean the *sweep* was out of bounded work -- I had asserted
+scarcity I never measured. So I kept going. `19-handles` (the P2-Fc handle table)
+is the third milestone stub and the sharpest instance of the class, because here
+the direction inverted: the DOSSIER was more current than the reference doc.
+`sub-kernel-handle` documents `PROC_HANDLE_MAX` going 64 -> 256 -> 1024 while the
+doc -- and `poll.h`/`syscall.h` -- still say 64, and the doc even contradicts
+itself (`KOBJ_KIND_COUNT == 10` in the enum, `== 9` left in two spec-mapping
+rows). Zero-fold: the dossier already carried every current atom, more completely
+(the four-way kind partition, the four dup primitives, the per-table #844 lock).
+`70 absorbed / 87 live`. `99-fs-permission` and `08-exception` (the vector
+machinery + the `#713` eret-race that was the year-long "AEGIS corruption" ghost)
+stay deferred -- they are load-bearing, not milestones, and want a fresh session
+at full budget rather than a runway tail.
 
 ---
 
