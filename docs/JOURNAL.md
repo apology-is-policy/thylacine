@@ -760,6 +760,40 @@ self-compact, and the memory/kernel-entry frozen-milestone vein (mmu, phys, slub
 addrspace, asid, exec, syscall-dispatch all fresh and comprehensive) is the
 productive one right now.
 
+### Run 37 continued: 148-fork -- the richest remaining doc, and still a one-fold stub because the dossiers had lapped it
+
+The biggest and most load-bearing doc left: the whole `rfork`/vfork/COW-`fork`
+arc across L-3b through L-5, 583 lines, I-44. I read it end to end expecting a
+multi-fold chunk, and got the opposite lesson: eight of its nine halves were
+already carried, and carried *well*, by dossiers written since. The vfork suspend
+-- the parent parking until the child leaves the address space, the predicate that
+reads the release off the live state (`state != ALIVE || as != parent->as`)
+rather than a flag, the ABA-safety that holds only because the parent still
+references the space it is comparing against -- is all in `sub-kernel-proc`. The
+#136 finding (the clone that refused every real address space, because the one VMA
+every Proc has, the read-only eager-anon vDSO clock page, was in none of L-4b's
+synthetic test spaces) is the centerpiece of `sub-kernel-addrspace`'s writability
+split. Descriptor inheritance with its I-5/I-6 hole is in `sub-kernel-handle`; the
+fork trampoline that refuses to be a fourth `eret` is in `sub-kernel-exception`.
+
+The one thing with no home was #137, and it is the one most worth keeping. The
+`is_write` bit was decoded from the wrong ISS position -- bit 9, which is `EA` and
+zero for every normal abort -- so it read *false* tree-wide, for the life of the
+fault path. Nothing failed until the COW break became its first real consumer,
+where a wrong-direction store re-installs read-only and loops: a hang with no
+fault logged, three layers from its cause. What let it hide is the reusable part,
+and it is a control trap of the exact family this project keeps relearning: the
+decode's unit test *mirrored the constant*, setting bit 9 and asserting the
+decoder read bit 9, so it agreed with the code instead of the hardware and could
+not have failed however wrong both were. That is a general fault-decode lesson
+wearing a fork-story costume, so I folded it into `sub-kernel-fault`'s caveats
+beside the existing read/write-encoding note, code-confirmed against the current
+`ESR_ISS_WNR_BIT == 6`. The richest doc in the queue reduced to a single fold --
+which is the absorption sweep working exactly as intended: the dossiers are the
+reference now, and the frozen doc had nothing left but its one orphan lesson.
+`0fd9c2ea`, fixup `40532ce5`, both mirrors. `77 absorbed / 80 live` -- six chunks
+since the second self-compact.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
