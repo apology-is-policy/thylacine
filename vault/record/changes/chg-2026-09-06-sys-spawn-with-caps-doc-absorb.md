@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/63-sys-spawn-with-caps: zero-fold, multi-redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["09aa9fae"]
 touched: []
 established: []
 closed: []
