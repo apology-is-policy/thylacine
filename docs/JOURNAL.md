@@ -1022,6 +1022,56 @@ narrative is what separated them from the zero-folds. Next: `111-cons`,
 `139-tapestryd` (its dossier is bigger than the doc and current -- likely
 zero-fold), and `149-warp` at 2261 lines and I-45, the biggest remaining lift.
 
+### Run 37 continued: the rest of the audit-trigger set, then the mediums -- past 100 absorbed, and two UNOWNED primitive files the sweep had walked past
+
+Nine more docs to `100 absorbed / 57 live`, and the run's shape settled into two
+findings the count could not have surfaced. The audit-trigger references finished
+first: `111-cons` folded the #95 RX input-drop report into `sub-kernel-cons` (the
+dossier *referenced* "the report" without describing it, and `rx_drop_modeflush`
+-- a consctl ICANON-clear delivering a half-line the full ring drops, #95's
+truncated-command-runs shape, reachable by ordinary type-ahead -- was absent);
+`139-tapestryd` was a clean zero-fold against a dossier 400 lines *larger* than
+the doc and ahead of it; `149-warp` at 2261 lines was the biggest, and mostly
+host-side (Mesa/Venus/WSI, the TRUSTED-not-enforced half of I-45) -- the
+load-bearing guest half verified across `sub-kernel-hwcap` (the GPU-BO envelope +
+the physical-base-in-window containment) and `sub-tapestryd` (the cross-ctx
+isolation contract), a zero-fold.
+
+Then `145-vivarium`, the 3792-line giant, and the disciplined call was to **defer
+it**. It is not a single-surface doc; it is a fifteen-dossier umbrella. The I-43
+soundness core is thorough and current in `sub-kernel-vivarium` (every decide
+function, the collision re-check, the mmap-D-3 I-36 allow-list, the sigtab-tearing
+finding), and the per-feature sections each have a confirmed owner -- but the
+`^C-reaches-container` section (viv masks `interrupt` at startup; `note_mask`
+inherited only when the parent is PHENO_LINUX, so a native child gets a zero mask;
+the tty family stays unmasked for ^Z/hangup/^\) matched no dossier, and stubbing a
+3792-line doc without homing sections like it is exactly the shallow absorption
+the method forbids. Deferred with a precise residue map, not walked past.
+
+The mediums then turned up the run's other shape: **two primitive files nobody
+owned.** `12-hardening` was a clean redirect on every surface -- PAC/BTI to
+boot-entry, W^X to mmu, LSE to alternatives, KASLR to kaslr -- *except* the stack
+canary: `kernel/canary.c` was UNOWNED, its `__stack_chk_guard` link-magic ->
+KASLR-seeded-runtime-cookie-under-a-barrier lifecycle in no dossier. Folded into
+`sub-kernel-boot-sequence` (the sibling hwfeat+banner owner), which now claims the
+file. `04-extinction` was the same shape one layer down: `sub-kernel-halls`
+described the crash dump and *referenced* the extinction path, but `kernel/extinction.c`
+-- the `extinction()` ELE entry, the `EXTINCTION:` marker the whole agentic loop
+greps literally, the recursive-extinction suppression, the owed-`IPI_HALT` #243
+tearing seam -- was unowned; folded into `sub-kernel-halls`, and `101-halls` then
+redirected to it clean. **The tell both times was `quaestor owner -> UNOWNED` on a
+file the surrounding dossiers all *called* but none *claimed*** -- a hardening
+posture and a crash path each missing exactly their entry primitive. `103-login`
+and `102-legate` in between were clean zero-folds (login's DEK lifetime is
+`sub-stratum-session`'s; the legate is literally in `sub-kernel-caps`'s title).
+
+Six real folds across the run (allowance's pre-F1 lock-free-kfree staleness, loom's
+device-gone terminal, debug-fs's terminate-on-release exitkill, cons's #95
+input-drop, hardening's canary, extinction) -- every one a load-bearing atom that
+would have been lost when its frozen doc became a stub. Next: the remaining
+mediums, then the 12 uncovered surfaces (dossiers to author) and the 145-vivarium
+dedicated pass.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
