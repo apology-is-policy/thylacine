@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/84-pouch-libsodium (first cross-compiled C lib): zero-fold, build-recipe redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["fc4d406d"]
 touched: []
 established: []
 closed: []
