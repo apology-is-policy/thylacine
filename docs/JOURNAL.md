@@ -286,6 +286,63 @@ baking -- is that area's own "verify the artifact, not the intent" discipline
 applied to a secret. Two orphans remain (`uart.c` = I-27 trusted path, `joey.c` =
 boot mounts); corvus-mint is off the list.
 
+### Run 37 continued: the entry/trivial-devices cluster -- one orphan resolved, the headline gap folded, two stubs, and an Explore that corrected me twice
+
+With corvus done I opened the entry/trivial-devices cluster (01-boot,
+31-trivial-devs, 109-devdev) and launched a read-only Explore to map its breadth
+while I read `arch/arm64/uart.c` (674 lines) myself. The parallel reads were the
+point: the Explore is a gap-finder, not an oracle, and it **corrected two of my
+starting facts**. I had queried `kernel/devnull.c` / `devzero.c` for ownership
+and gotten UNOWNED -- because those files do not exist; the real trivial leaves
+are `kernel/{null,zero,full}.c`, all owned by `sub-kernel-dev`. And the "joey.c
+orphan" is the *kernel* `kernel/joey.c` (the init kproc), not `usr/joey/joey.c`
+(which `sub-stratum-boot` owns). A wrong filename had read as an orphan; the real
+orphan wore a familiar name.
+
+**`sub-kernel-uart` authored (`418035f0`), resolving orphan 1 of 2.**
+`arch/arm64/uart.c` had been flagged across two prior Explores and was the only
+account of the PL011 driver -- so I wrote its dossier from a full read rather
+than defer it (it is the "A-4c trusted path: kernel console RX + SAK"
+audit-trigger surface, so `audit:hard`, under `moc-kernel-devices` beside gic).
+It carries the DTB base + boot fallback (I-15), the `DR.BE` break -> SAK RX half
+of the trusted path (I-27, complementary to devdev's mint gate), and the #174
+backpressure pause as a no-lost-wake site publishing-then-re-observing behind a
+StoreLoad fence (I-9) -- plus the #67 bounded TX spin, the #172 clear-first
+bounded RX drain, and the two-lock split whose `g_uart_imsc_lock` leaf serializes
+every IMSC RMW so a `TXIM`/`RXIM` update is never lost.
+
+**The two non-orphan gaps, folded before the docs stubbed (`6202dc8d`).** The
+Explore's headline finding was that `109-devdev`'s **revoke-asymmetry** had no
+home in any of the three candidate notes. Verified in the code: `cons_input_read`
+(cons.c:1687) re-reads console attachment only to set a scheduling band
+(:1711), never to authorize -- so a `SYS_CONSOLE_OPEN` (devcons) fd **survives** a
+SAK revoke, which is exactly what lets the boot authority hand an attached fd
+down as session stdio; `/dev/cons` re-gates every I/O, so its fd **dies** on
+de-attach. Folded into `sub-kernel-devdev`, with a precision clause on `inv-i27`:
+its "every door gates identically" is about the *mint* gate (both demand attach
+at open), and the post-mint divergence is a strict *tightening* on the namespace
+path, not a contradiction -- so the clause clarifies rather than weakens. The
+second gap: `sub-kernel-content` had abstracted RNDR to "the CPU's own
+generator"; folded the concrete live mechanism -- the FEAT_RNG probe from
+`ID_AA64ISAR0_EL1` bits[63:60], the `PSTATE.NZCV` capture (`cset` on `ne`, the
+10-attempt retry) and the load-bearing `"cc"` clobber (RNDR writes the flags).
+
+**Two stubs (`f010494f`), both verified fully homed first.** `01-boot`'s one open
+debt -- task #32, the PL011 driver had no home -- is now closed by
+`sub-kernel-uart`. `31-trivial-devs`, a heavily-superseded P4-B snapshot,
+multi-redirects to dev/content/cons/uart with a substantial "what it got wrong":
+`devcons.read` is no longer degenerate (RX landed A-4c-1), `random` is no longer
+RNDR-only (the ChaCha20 stir landed; RNDR is one of three seed inputs) and reads
+through the devdev leaf not the standalone `devrandom`, and urandom/consctl/full
+have all landed. **64 absorbed / 93 live.**
+
+What is left in the cluster, and recorded for the next context: `kernel/joey.c`
+(the 2nd orphan, the init kproc's boot-namespace mounts) needs its own dossier
+before `109-devdev` can stub its kernel-boot-mount atom -- a fresh 478-line
+authoring plus a parent-moc decision (boot vs namespace) worth fresh focus. The
+`109` revoke-asymmetry is already folded; the remaining 109 work is that stub
+plus folding the `/dev/pts` graft into `sub-stratum-boot`'s mount sequence.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
