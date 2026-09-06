@@ -343,6 +343,20 @@ authoring plus a parent-moc decision (boot vs namespace) worth fresh focus. The
 `109` revoke-asymmetry is already folded; the remaining 109 work is that stub
 plus folding the `/dev/pts` graft into `sub-stratum-boot`'s mount sequence.
 
+**The cluster then closed in one commit (`77f766f3`).** `sub-kernel-joey` was
+authored over the `kernel/joey.c` orphan (the kernel-to-userspace handoff: the
+boot-namespace construction via `joey_mount_static_dev`, the `CAP_ALL`
+capability-delegate root, the console/init/service trust-root stamps in the
+child's own context before exec, and the by-pid wait that survives the
+orphan-adoption race) -- the second and last entry-cluster orphan resolved. The
+`/dev/pts` graft was folded into `sub-stratum-boot` (a post-swap mount, not one
+of the seven carried handles, because the ptyfs tree does not exist until joey
+spawns it), and `109-devdev` stubbed as a five-way redirect. **65 absorbed / 92
+live; both entry-cluster orphans gone.** One lint trap worth keeping: I put
+`inv-i2` in the new dossier's `guarded-by` and it failed -- I-2 has no vault note
+(the notes for I-2/4/6/14/25/35/41/42 do not exist), so those invariants are
+referenced in prose, never as a `guarded-by` id.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
