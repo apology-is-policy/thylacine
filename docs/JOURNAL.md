@@ -883,6 +883,28 @@ code-confirmed against `proc.c` and the uaccess store fixup. `32118630`, fixup
 `ac7c7ecb`, both mirrors. `82 absorbed / 75 live` -- eleven chunks since the second
 self-compact.
 
+### Run 37 continued: 53-sys-rw -- the twelfth, and where this run's post-compact arc rests
+
+The byte-I/O syscalls, a clean zero-fold to close the run's momentum: the
+dispatcher whose literal title is "the staging tiers" carries the read/write
+handlers, the rights gates, and the two-tier bounce staging; `uaccess` carries the
+byte primitives. The stub's one note is that `SYS_RW_MAX` grew from 4 KiB to 128
+KiB when CF-3 added the heap staging tier. `822b762d`, fixup `d4ddd540`, both
+mirrors. `83 absorbed / 74 live`.
+
+That is twelve chunks since the second self-compact, and a natural place to name
+the shape of the run: A-2 file permission and the exception machinery to open, the
+exec/fork trilogy (`27`/`147`/`148`) and REVENANT/I-36 as its spine, the memory
+cluster (`24`-pgtable, `23`-direct-map, `127`-overcommit, `110`-resource) all
+carrying the I-32 invariant, then `81`-sys-thread and `53`-sys-rw. Four real folds
+against the dossiers -- the `SYS_WSTAT` handler into syscall-dispatch, the execve
+core into exec, the #137 WnR-decode tautology into fault, the `clear_child_tid`
+join into death -- each one a load-bearing atom that lived only in a doc about to
+become a stub. The rest were clean redirects, because the memory and execution
+dossiers had already lapped their frozen reference docs. What remains is the big
+audit-trigger surfaces -- vivarium at 3792 lines, warp, loom, weft, tapestryd --
+which have standing dossiers and deserve a fresh budget to verify against.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
