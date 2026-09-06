@@ -117,9 +117,14 @@ draw a partial table.
 Rich tier — resolved by the shared `beacon_gate` from the `BEACON` env
 export, stdout's Dev class, and the tool's `--beacon` flag — the same plain
 bytes go out wrapped in semantic frames a renderer can act on: `ps` emits a
-`table` with `obj type=pid` on the PID cells; `grep` wraps each match in
-`em class=strong` and tags the filename prefix `obj type=path`; `ls` and
-`stat` frame their listings likewise. **SGR colour and Rich are mutually
+genuine `table` with `obj type=pid` on the PID cells; `grep` wraps each match in
+`em class=strong` and tags the filename prefix `obj type=path`; short `ls` tags
+each name `obj type=path`; `stat` frames its listing. **`ls -l`/`la` are the
+exception, since PL-5: their box-drawn long form emits a Beacon `pre` code-fence
+box (the box furniture as the `pre` payload, name cells `obj type=path`), NOT a
+`table`** — a table renders proportional, which would break the mono box, so a
+box-drawing emitter wraps its output in `pre` (HALCYON.md 14.13). So `ps` is the
+table; `ls -l` is a mono `pre` island. **SGR colour and Rich are mutually
 exclusive** — a tool forces its colour gate off when the resolved tier is
 Rich, because the renderer's stylesheet owns typography there. The gate
 itself lives in `[[sub-coreutils-lib]]`; what belongs here is that these
@@ -242,10 +247,15 @@ cost a read per listing.
 - **No unit tests.** These link the runtime unconditionally, so the host
   harness cannot build them — the structural reason is unchanged. The
   interactive scenarios exercise a handful on a live console each boot, and
-  H-1c-2 added one witness that matters: `ls-halcyon.exp` asserts `ps`
-  frames its output at the Rich tier while `ls` (there) does not
-  ("ps framed, ls never did; the gate was innocent"), which pins the beacon
-  side of the new probe. The colour flag matrices — in particular the
+  the beacon side is now witnessed: `ls-halcyon.exp` asserts `ls -l` DOES
+  frame at the Rich tier — as `1936;v1;pre` since PL-5 (was `table`). (The
+  "ps framed, ls never did; the gate was innocent" line was the *pre-fix*
+  operand-vanished bug hunt, not the current assertion.) A new every-boot
+  producer witness in `coreutil-smoke` — `ls -l --beacon=always /version`
+  emits `1936;v1;pre` + `1936;v1;obj` and strips to the box (`┌`/`│`), "ls -l
+  rich pre-box (PL-5)", 56 checks — pins the `pre`-box emission directly.
+  (`usr/coreutil-smoke` is UNOWNED by the vault — a sweep is filed, like the
+  yip-0029 Warp paths.) The colour flag matrices — in particular the
   `auto`-resolves-off-in-a-pipe guarantee that the whole H-1c-2 change turns
   on — the graft classification, and every network error path remain
   unpinned.
