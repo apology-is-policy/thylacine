@@ -23,6 +23,86 @@ needed the operator.
 
 ---
 
+## Run 37 (vault, 2026-09-06, Opus 4.8, effort max): the tiered code->dossier reminder -- the operator's ratified priority, and why the escape forced a commit-msg hook
+
+The operator returned mid-run last session and ratified two directions by
+AskUserQuestion; this run built the first. **Direction (1): a "reliable reminder
+that reminds the agents to update the dossiers" -> "Tiered: block audit:hard,
+warn rest."** It is the mirror image of the advisory that already existed in
+`stagedChecks` (a staged CHG touching an audit:hard dossier warns when the
+dossier is not co-staged); the new gate runs the other way -- staged CODE owned
+by a dossier reminds you the dossier may be owed an update.
+
+**The design fork that took the most thought: where the escape lives, which
+decided which hook.** The naive plan (my own resume note's one-liner) was to
+extend `staged.go` and run in pre-commit. That breaks on the code tracks. main
+and aux write no vault chg notes and, per CLAUDE.md's cutover rule, RING the
+vault for owned prose rather than write a dossier in a kernel commit -- so the
+existing `no-dossier-change` chg-field escape does not serve them. The escape
+that does is a `No-dossier-change: <why>` commit-message trailer: auditable,
+per-commit, greppable in `git log`, no session-wide off-switch. But only the
+commit message carries a trailer and only the **commit-msg** hook sees the
+message -- pre-commit runs before any message exists. So the placement is
+load-bearing, not incidental. **Alternative rejected:** keep it in pre-commit
+with an env-var escape -- but `export QUAESTOR_SKIP=1` once and the reminder is
+silently dead forever, which is fatal for a gate whose entire value is
+reliability. A staged sentinel file is clunky for the code tracks. The trailer
+won on all three axes.
+
+**What landed** (`6ba2970d` feature + `a2a1c65c` chg-fixup + merge `292a1f9c`,
+both mirrors): a new `dossier_gate.go` -- `dossierGate(root,reg,msg)` walks the
+staged set via an extracted `stagedEntries` (now the ONE reading of the git
+index; `stagedChecks` refactored onto it, so there is a single definition of
+"what this commit stages"), resolves each staged `srcRe` file (plus the `.c`/`.h`
+twin, because editing either half touches the one surface a dossier describes) to
+its owning `sub` via `ownerIndex`, and blocks on an audit:hard owner not
+co-staged, warns on any other. Fails OPEN on an empty registry (pre-commit is the
+authoritative infra gate and refuses that first). schema.md section 8 gained the
+`dossier-gate` paragraph + check 9; CLAUDE.md step 0 records that the reminder is
+now mechanical, not only convention.
+
+**The testing was the point, for a shared hook that a bug would use to halt every
+track (the TTrace lesson).** 9 tests, each a *discrimination* not a detection:
+audit:hard BLOCKS vs audit:light WARNS (the tier boundary -- the single most
+important pair), co-stage clears it, the trailer + chg-field escapes both work,
+an empty-or-commented trailer does NOT escape (the escape must carry a reason, or
+it is a silent off-switch), the twin resolves, unowned + non-code are silent, one
+owner of two staged files is reported once. Then **sabotage-verified three ways**
+-- never-block, always-block, ignore-trailer -- each breaking exactly the tests
+that assert that property (and the restored suite was a byte-identical cache hit,
+which is itself the proof the restore was exact). Then integration-tested against
+real staged `kernel/burrow.c` (audit:hard, `sub-kernel-burrow`) via both the
+command and the hook script, for the absolute `$1` the linked worktrees get AND
+the relative `$1` the main worktree gets; then LIVE -- a real `git commit`
+aborted by the installed hook, HEAD unchanged, tree restored exactly. The hook is
+a local install (like pre-commit; not tracked -- reinstall on a fresh machine).
+
+**Coordination before landing** (calls 0060 main, 0061 aux). Both acked, no
+objection. The gate proved itself in the ack: aux immediately recognized that its
+imminent N-2c commit stages `lib.rs` (owned by `sub-kernel-syscall-abi`,
+audit:hard) with a one-line `pub mod sync;` registration -- not an ABI change --
+and will carry `No-dossier-change: pub mod sync line only, not a syscall-ABI
+change`. That is the mechanism working exactly as intended: the author judges,
+the trailer records the judgement. main confirmed it had FF'd to my merge tip and
+will flag `sub-halcyond` if its running F1 re-round touches `transcript.rs`
+(which the merged `46c3d9e5` already did -- a de-stale the vault now owes).
+
+**Commons upkeep, unplanned:** the shared MEMORY.md index had crept to 23.7 KB,
+near the 24.4 KB auto-load truncation limit -- and a truncation cuts the TAIL,
+which holds the pickup/task-archive/audit-index pointers. Compressed the four
+multi-paragraph entries that violated the index's own "one line each; detail in
+the linked file" contract (NOCTURNE, HALCYON, KT-1/H-4, the R6 record) to
+fact-preserving one-liners (every hash, state, NEXT, and link kept), down to
+21.8 KB. Left the recurring-lessons section intact -- those are terse, precise,
+and collective; lossy-recompressing them would trade precision for bytes.
+
+**Left open / NEXT:** direction (2) -- the docs/reference retirement -- whose
+first deliverable is a PLAN surfaced for operator signoff (survey the 157
+parallel reference files' coverage, the retirement mechanism, the sequence, the
+CLAUDE.md doc-update change, peer coordination), not blind execution.
+
+---
+
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
 
 **PL-5 -- the `pre` PRODUCER (`ea731dd8`).** PL-1b (run 34) built the `pre`
