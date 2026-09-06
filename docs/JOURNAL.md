@@ -951,6 +951,77 @@ live` -- fifteen chunks, and the true self-compact boundary; `61-stratumd-stub` 
 the last probe and follows the same shape. This is where the run stops and the
 context compacts.
 
+### Run 37 continued (after the 3rd self-compact): the big audit-trigger references begin -- and two of the four had a load-bearing atom the count would have missed
+
+Five docs past the checkpoint, `86 -> 91 absorbed`, and the batch is where the
+sweep left the small docs behind for the invariant-bearing surfaces. The first,
+`61-stratumd-stub`, was the last test-probe: a P5 arc doc that proved a userspace
+process can be the 9P responder and introduced two real syscalls along the way
+(`SYS_WALK_OPEN`, `SYS_CHROOT`) -- but those have their own live reference docs
+(62, 77) and dossier homes, so the stub redirects the scaffold to the surfaces it
+exercises and names the stub + three probes as records. Clean. `6ac898c0`.
+
+Then the four audit-trigger references, and the discipline earned its keep on two
+of them. **117-allowance (I-34)** looked like a zero-fold -- the 188-line
+`sub-kernel-allowance` dossier covers every one of the 804-line doc's atoms -- until
+the set-once caveat. The doc says the confer `kfree(old)` is "still lock-free,
+sound only because the Proc has not entered EL0, so nothing reads `p->allowance`
+concurrently." I read the code to be sure, and it says the opposite:
+`allowance.c:66-77`, `proc_allowance_install_locked`, "audit F1" -- the swap runs
+UNDER `g_proc_table_lock` precisely because the child IS reachable by a concurrent
+`proc_group_terminate -> proc_revoke_allowance` on the inherited-clone `old`
+allowance, independent of EL0 entry; the lockless swap was a real UAF on the
+narrowed-parent-spawns-child path. The dossier had the corrected mechanism; the
+reference doc was frozen at the pre-fix understanding. Zero fold, but the stub
+names the staleness so no one reads the doc and believes the free is free.
+`1f68b95e`.
+
+**107-loom (I-29/I-30)** was a genuine fold, and it was hiding in the frontmatter.
+The 482-line `sub-kernel-loom` dossier is one of the deepest in the tree -- the
+private-counter authority, the submit-time pin, the I-32 dual charge-ledger with
+its two-owner-pointers and the thread-backstop wrong-fix -- and it lists
+`spec-loom-devgone` in `validated-by`. But the device-gone terminal itself (the
+I-29 extension: a clean EOF from a torn-down server/driver endpoint completes
+in-flight async ops `-ENODEV`, distinct from a transport `-EIO`; before Menagerie
+step 4 both collapsed to `-1`) was in no dossier BODY. Its code lives in
+`9p_client.c` (`client_mark_dead_locked(c, bool devgone)`, the reader sites
+passing `rr == 0`), not `loom.c` -- so its home is `sub-kernel-ninep-client`,
+whose Fail-close section had documented the sole dead-setter but omitted its
+reason parameter. Folded there, code-grounded to `9p_client.c:187`. `d02252fe`.
+
+**125-weft (I-37)** was the batch's true zero-fold: the 404-line dossier is
+exhaustive -- the four minted-not-asserted kinds including the HOSTMEM half-widen
+bug, the F_NOTIF three-holder tracker, the I-9 no-lost-wake across a Proc
+boundary, the I-32 sharer-settles-on-shared-out leak -- and the doc's other 800
+lines (the Tweftio data-drive, the weave share, the shared-in budget) are owned by
+`sub-kernel-ninep-dev9p`, `sub-kernel-burrow`, `sub-kernel-addrspace`, verified by
+grep and by finding `weft_binding_validate_rw`'s role covered by MEANING at the
+dossier's Prosecution (the kind-gate single chokepoint) even without the function
+name. `65f7365f`.
+
+**134-debug-fs (I-39)** closed the batch with the second fold. The today-current
+`sub-kernel-devproc` dossier covers the two-axis gate, the three-conjunct
+park-predicate fix, the SPSR guard, the atomic-CDEBUGOWNER release, the kstack
+KASLR split -- and the SA-1 stale-fire strand turned out to live correctly in
+`sub-kernel-hwdebug`. But the die-with-launcher exitkill release was only a field
+name (`debug_exitkill`) and the resume-on-release half of NoStrand. The terminate
+half -- `devproc_debug_release_cb` `proc_group_terminate`ing a launched
+exitkill-marked ALIVE target instead of resuming it, closing the orphan-to-init
+leak, the #811 cascade waking debug-parked threads by rendez not `debug_stop_req`,
+the audit-F1 trigger nuance that it fires on any ctl-fd close without a prior
+`detach` -- was absent. Folded into `sub-kernel-devproc` as a Die-with-launcher
+subsection, code-grounded to `devproc.c:940-975`, with the I-39 statement amended
+to resume-OR-terminate and a prosecution bullet. `a031a7b8`.
+
+The pattern across the batch: the dossiers had lapped the frozen docs on nearly
+everything, and the two folds and one staleness were exactly where a load-bearing
+mechanism sat one dossier over from where the doc put it (device-gone in the 9P
+client, not Loom) or in the half of an invariant the dossier had not yet reached
+(terminate-on-release, not resume). Reading the code rather than the doc's
+narrative is what separated them from the zero-folds. Next: `111-cons`,
+`139-tapestryd` (its dossier is bigger than the doc and current -- likely
+zero-fold), and `149-warp` at 2261 lines and I-45, the biggest remaining lift.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
