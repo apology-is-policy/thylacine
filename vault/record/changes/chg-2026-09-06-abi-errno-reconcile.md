@@ -4,7 +4,7 @@ type: chg
 title: "abi-errno registry reconcile: +16 missing codes (the whole V-5 socket family + INTR/2BIG/CHILD/NOTTY/MFILE/NODEV/NOTDIR/ISDIR/LOOP), the stale self-counts (19->35 non-zero, 20->36 asserts), and the err.rs mirror analysis"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["de809a31"]
 touched:
   - abi-errno
 established: []
