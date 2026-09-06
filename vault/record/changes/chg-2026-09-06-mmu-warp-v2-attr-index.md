@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-mmu de-stale: Warp-6 V-2 -- the PTE encoder's MAIR-index widening (NORMAL_NC), the W^X guard confined to NORMAL_WB, and the bool->index wrapper"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["1a895862"]
 touched:
   - sub-kernel-mmu
 established: []
