@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**83 absorbed · 74 live · 157 total.**
+**84 absorbed · 73 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -191,7 +191,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 92-utopia-line-editor.md | live | — |
 | 93-utopia-parser.md | live | — |
 | 94-utopia-eval.md | live | — |
-| 95-identity.md | live | — |
+| 95-identity.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-ninep-attach]], [[sub-kernel-perm]], [[sub-kernel-proc]], [[sub-kernel-syscall-abi]] |
 | 96-fs-mutation.md | live | — |
 | 97-corvus-identity-db.md | absorbed | [[sub-corvus]] |
 | 98-capability-storage.md | live | — |
