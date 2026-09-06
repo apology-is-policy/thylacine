@@ -22,6 +22,44 @@ needed the operator.
 
 
 ---
+## 2026-09-06 (aux) -- Nocturne audit close: verified GREEN and pushed
+
+The prior entry left the runtime test + push OWED (mac-blocked). The mac freed
+(operator), so this short run discharged it. Model OPUS 4.8.
+
+**The ramfs was stale, and that was the trap.** The last `build all` ran at
+`e9f69dc7` -- which still HAD the F6 TX-reprime gate -- so the baked ramfs
+predated the F6 revert (`9b17f56f`). Testing it would have witnessed reverted
+code, not the shipped code. Rebuilt (`build all`; fresh pool+key pair, seed
+`0xac4ee5e3371a2364`), then verified by CONTENT, not exit code: the nocturned
+extracted from `build/ramfs.cpio` is byte-identical to the freshly staged build
+(`sha256 a98ba4b4...`). Bake traps fail as absent/stale content, so the
+byte-compare is the gate, not the ledger line.
+
+**Both runtime witnesses GREEN** (single boots; wav-capture + verdict; each with
+its checker's discrimination selftest running first, #245):
+- `test-audio` (N-1/N-2a-1, `/nocturne-probe`): `joey: nocturne-probe OK`; the
+  389 KB capture PASSes the chord verdict -- 59 windows carry 1000+2000 Hz at
+  once (both tones in the SAME windows = the mixer proof, unmeetable by two
+  voices played sequentially). So F1's conn-scoped owner gate does NOT regress
+  the probe (it mints + writes both voices on the one mount conn -> same-conn
+  writes allowed).
+- `test-sdl-audio` (N-2a-2, the SDL `thylacine` backend over a fresh private
+  `/srv/nocturne` conn): `joey: sdl-audio-probe OK`; the 487 KB capture PASSes
+  the chord verdict -- 78 windows. So the F1 owner gate + F2 accept-refuse + conn
+  teardown do NOT regress the private-conn path.
+
+**Pushed** `0c0456ab..a40d0081` to both mirrors (codeberg + github, ls-remote
+verified). This CLOSES the P1 (F1 cross-Proc voice injection) on the mirrors,
+which had carried it since `0c0456ab`.
+
+**Still open, handed back (Opus stop-rule -- design/budget items are the
+operator's):** N-2a-4's empirical DOSBox-sound verification (needs a clade
+rebuild = GCP budget); N-2b's Weft-ring voice design ratification. Deferred and
+tracked (not blockers): F5 [P2, immortal mount voices -- architectural]; the
+proper F6 fix [P3, count-based stale-completion rejection]; F9 / F1-followup /
+F-R2-2 [P3]. Dispositions: memory/audit_nocturne_closed_list.md.
+
 
 ## 2026-09-06 (aux) -- Nocturne N-2a-4 code + the audit of the whole audio surface
 
