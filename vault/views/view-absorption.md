@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**100 absorbed · 57 live · 157 total.**
+**101 absorbed · 56 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -58,7 +58,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 105-corvus-recovery.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus-mint]], [[sub-corvus]] |
 | 106-random.md | absorbed | [[inv-i16]], [[lock-random]], [[lock-rng-dev]], [[sub-kernel-content]] |
 | 107-loom.md | absorbed | [[abi-loom-ring]], [[sub-kernel-loom]], [[sub-kernel-ninep-client]], [[sub-kernel-ninep-transport]] |
-| 108-utopia-repl.md | live | — |
+| 108-utopia-repl.md | absorbed | [[sub-utopia-eval]], [[sub-utopia-interactive]], [[sub-utopia-parser]] |
 | 109-devdev.md | absorbed | [[seam-80-pivot-orphan-mounts]], [[sub-kernel-cons]], [[sub-kernel-devdev]], [[sub-kernel-joey]], [[sub-kernel-territory]], [[sub-stratum-boot]] |
 | 11-timer.md | absorbed | [[inv-i15]], [[sub-kernel-timer]] |
 | 110-resource.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-caps]], [[sub-kernel-proc]], [[sub-kernel-thread]] |
