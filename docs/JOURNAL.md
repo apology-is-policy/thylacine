@@ -604,6 +604,44 @@ about the verifier first. `71 absorbed / 86 live`, six chunks this run.
 
 ---
 
+### Run 37 continued (after the 600k self-compact): 99-fs-permission -- the security atom hiding in the delta between an A-era doc and the code that grew past it
+
+The first heavy of the teed-up pair. `docs/reference/99-fs-permission` is a rich
+A-2/A-2a/A-2d reference, not a thin milestone, so I verified it atom-by-atom
+against six owning dossiers (`quaestor owner`) before stubbing. Most of it was
+already carried, and often the dossier was *ahead* of the doc: `abi-t-stat` has
+the record at 88 bytes (the doc says 80 -- #100 later appended `devno`);
+`sub-kernel-perm`, fresh from last run's `rights_for_omode` fold, adds
+`CAP_DAC_OVERRIDE`/`CAP_CHOWN`; `sub-kernel-ninep-dev9p` records that dev9p's
+`perm_enforced` is now **true** (A-3b landed and flipped the one flag the doc says
+is "deferred to A-3"). The walk-open access gate turned out to live in the
+*resolver* (`sub-kernel-stalk` L100-106/L416), more accurately than the doc's
+attribution to the handler, and the security-critical #81 `O_PATH` read-bypass
+close (the `CWALKONLY` reject that once stopped a leak of the 0400 `/system.key`)
+was already homed at stalk L657.
+
+What made this worth the max-effort read was the one atom that was *not* anywhere.
+The doc is A-2a-era and its `SYS_WSTAT` covers only MODE/UID/GID -- but reading the
+actual `sys_wstat_for_proc` (`kernel/syscall.c:4604`) showed the code has since
+grown a `T_WSTAT_SIZE`/ftruncate axis, and with it a #81-*class* close I could
+find in no dossier: an `O_PATH` (`CWALKONLY`) handle is born `RIGHT_WRITE` but is
+`perm_check`-exempt at open, so its write right is *hollow*, and a truncate through
+it would mutate a file the caller has no W permission on. The handler rejects
+exactly that (`(valid & T_WSTAT_SIZE) && (c->flag & CWALKONLY)`), extending #81
+from the read/write/readdir axes to the size axis. A bare "covered" -- the grep a
+thinner sweep would have run -- would have stubbed the doc and left that security
+mechanism undocumented forever, because the doc that should have prompted it never
+knew the axis existed. Verify-before-fold is the only thing that reaches a gap
+living in the *delta* between a frozen doc and the code that grew past it. Folded
+the complete handler into `sub-kernel-syscall-dispatch` (beside last run's F2
+rename/unlink gate) and devramfs's `perm_enforced = true` + `PRINCIPAL_SYSTEM`
+stamp into `sub-kernel-content`. The stub also names the doc's own header/body
+self-contradiction: its intro says A-2d enforcement "is not yet built" three
+paragraphs above a Status section that says "LANDED". `1ecd1f2f`, fixup
+`77b645e5`, both mirrors. `72 absorbed / 85 live`.
+
+---
+
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
 
 **PL-5 -- the `pre` PRODUCER (`ea731dd8`).** PL-1b (run 34) built the `pre`
