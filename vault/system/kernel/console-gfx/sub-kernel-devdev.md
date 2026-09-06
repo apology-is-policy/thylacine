@@ -71,6 +71,21 @@ design would let a path-only handle read the console. A later walk-only flag
 now also rejects such a handle at the syscall layer, so the re-gate is
 belt-and-suspenders on the highest-stakes leaf rather than the sole defence.
 
+**The re-gate is also a deliberate revoke asymmetry between the two console
+doors.** The `SYS_CONSOLE_OPEN` door (`devcons`) gates only at open — its read
+path re-reads console attachment solely to decide a scheduling band, never to
+authorize — so an already-open `devcons` fd **survives** a later attachment
+revoke (a SAK). The inherited session stdio relies on exactly that: the boot
+authority opens while attached, hands the fd to login, then relinquishes. The
+`/dev/cons` leaf re-gates every I/O, so its fd instead **stops working the
+instant the caller de-attaches** — the stricter, more-I-27-correct semantic,
+and the one that closes the fd-outlives-revoke window a path-open would open. A
+consumer that opens `/dev/cons` expecting POSIX "the fd survives a privilege
+change" semantics will be surprised; a delegated console should ride the
+inherited `devcons` stdio, not a freshly-opened `/dev/cons`. [[inv-i27]]'s
+"every door gates identically" is about the shared *mint* gate; this is the
+post-mint divergence.
+
 The poll gate exists for a subtler reason than the read gate: an ungated poller
 would register a wake hook on the console and **learn its input timing** without
 ever reading a byte.

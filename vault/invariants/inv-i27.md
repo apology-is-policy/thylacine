@@ -7,7 +7,7 @@ guards: [sub-kernel-cons, sub-kernel-devdev]
 validated-by: [prose, gate-interactive, gate-smp]
 strength: prose
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-06
 ---
 ## Statement
 
@@ -29,7 +29,14 @@ Three clauses carry it.
 - **Every door onto the console gates identically.** The console is one
   single-reader resource with two front doors — a syscall and a namespace path
   — and both enforce the same attachment check. Adding a walkable path adds no
-  ungated door.
+  ungated door. The identical check is the *mint* gate: both doors demand
+  console attachment to open. Past the mint the two deliberately diverge — the
+  namespace path (`/dev/cons`) re-checks attachment on every read, write and
+  poll, so its fd loses access the instant the caller de-attaches, while the
+  syscall's fd is gated only at open and survives a revoke, which is what lets
+  the boot authority hand an attached fd down as session stdio before it
+  relinquishes. The divergence is a strict *tightening* on the namespace path,
+  not an ungated door (see [[sub-kernel-devdev]]).
 
 ## The three roles
 

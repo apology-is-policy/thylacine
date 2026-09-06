@@ -147,6 +147,19 @@ material — through a deliberately different avalanche function, so the two
 derivations do not correlate ([[inv-i16]]) — but it does not count toward
 readiness. Only the CPU's own generator, or a pull from the host, flips the gate.
 
+**The CPU's own generator is RNDR (FEAT_RNG), and its capture idiom is
+load-bearing.** Presence is probed once at init from `ID_AA64ISAR0_EL1`
+bits[63:60] (a value `>= 1`) into a cross-CPU-read flag, which the boot banner
+reports. A read of the RNDR register sets `PSTATE.NZCV` — `Z == 0` means it
+returned fresh entropy — so the read is captured with a `cset` on `ne` and
+retried up to ten times when the source is transiently dry, and the inline
+assembly **must clobber `cc`**, because RNDR writes the flags and omitting the
+clobber is a miscompile that reads a stale condition. Since the ChaCha20-stir
+baseline RNDR is no longer the *sole* source: on an RNDR-less target (Apple
+cores under HVF, the A72) the DTB boot seed, `CNTPCT` jitter and a host
+virtio-rng pull carry it — but where RNDR is present it is the unobserved strong
+source that flips the readiness gate.
+
 **That pull is bounded twice, and each bound covers the other's blind spot.** The
 host device completes asynchronously on another thread while the guest may be
 spinning at native speed, so a fixed spin count can expire before a perfectly
