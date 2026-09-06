@@ -866,6 +866,23 @@ current dossier carries that reasoning and the rejected inverse; the frozen doc
 predates it. `2626175f`, fixup `29c20ebd`, both mirrors. `81 absorbed / 76 live`
 -- ten chunks since the second self-compact.
 
+### Run 37 continued: 81-sys-thread -- an audit-trigger surface with a pthread primitive that had no kernel home
+
+The kernel pthread substrate, an audit-trigger surface, and the one small chunk in
+the batch that turned up a genuine gap. Its creation half is in `sub-kernel-thread`
+and its exit half in `sub-kernel-death`, as expected -- but the join handshake, the
+kernel half of `pthread_join`, was documented **only on the pouch userspace side**.
+The mechanism is real and load-bearing: on any Thread's exit,
+`thread_clear_child_tid_handoff` atomically zeroes the `clear_child_tid` word the
+Thread registered via `SYS_SET_TID_ADDRESS` and `torpor_wake`s every joiner parked
+on that futex VA, and a bad tidptr is skipped silently through the
+`uaccess_store_u32` fixup rather than crashing the box. That a POSIX join primitive
+lived in no kernel dossier is exactly the kind of gap the sweep exists to close, so
+I folded it into `sub-kernel-death` beside `thread_exit_self` and the death-wake,
+code-confirmed against `proc.c` and the uaccess store fixup. `32118630`, fixup
+`ac7c7ecb`, both mirrors. `82 absorbed / 75 live` -- eleven chunks since the second
+self-compact.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
