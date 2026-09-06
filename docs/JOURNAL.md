@@ -23,6 +23,85 @@ needed the operator.
 
 ---
 
+## Run 35 (vault absorption cont., 2026-09-06, Opus 4.8, effort max): the two BIG dossiers, an errno-registry reconcile that the stale tool was structurally blind to, and a triage tool that lied
+
+**Where it sits.** The continuation of Run 33 across its self-compaction (Run 33
+ended at the 600k line, tip `087b4e6a`). Same track (`../thylacine-vault`,
+`vault/bootstrap` == origin/main), same greenlight ("keep going through the
+backlog"). Main's Run 34 (Halcyon PL-3) landed in between; merged clean twice
+here (PL-3a `3c492b3b`, PL-3b/c `6d7073ec`). Backlog 25 -> 23. Tip `b10aeca6`,
+both mirrors converged.
+
+**The two BIG dossiers the resume note named.** `sub-coreutils-presenters`
+(`bbba5ea7`) was the sharply-superseded one: its title and central caveat both
+asserted the exact thing H-1c-2 (`8922ccd7`) had fixed. `--color=auto` used to
+mean *always* (fifteen `fn stdout_is_console() -> bool { true }` stubs); the arc
+built the shared probe (`libthyla_rs::stdout_is_terminal()` over
+`SYS_FD_DEVCLASS`), so all sixteen tools now default `ColorMode::Auto` and the
+old introspection-ON/grep-OFF asymmetry is gone. Added `ps.rs` (the 16th
+presenter, verified present at `usr/coreutils/src/bin/ps.rs`), documented the
+four-tool Beacon Rich tier, and retitled ("fifteen tools, fifteen copies of one
+stub" -> "sixteen tools, one console probe" -- both halves were stale).
+
+`sub-libthyla-rs` (`a85de210`) looked like the bigger job -- the stale tool
+reported 12 files, ~488 lines, led by `fs/file.rs` at +/-188 -- and was almost
+entirely a **date-field** staleness. All 12 flagged files are byte-identical
+`d1a4b8e4..HEAD` (`git diff --stat` empty): the H-4d-1 fold was the last body
+edit and left `updated:` at 2026-08-15. The one genuine post-edit change
+(`8f553c78`) touched only `lib.rs`, which the dossier explicitly excludes. Spot-
+verified the richest claims survived (the #100 File-rights caveat holds verbatim
+-- both constructors still record the constant `Rights::READ|WRITE|TRANSFER` at
+`file.rs:235`/`:291` while `rights()`'s doc describes the kernel's A-3b
+derivation). A new guise of the merge-date trap: date the churn by the
+`updated:` field, not the last body edit.
+
+**The reconcile the stale tool could not see.** Processing aux's yip 0036
+handoff, one owed errno (`T_E_NOTTY=25`) turned into a full audit of
+`abi-errno`: it was missing **sixteen** codes -- the whole V-5 socket family
+plus INTR/2BIG/CHILD/NOTDIR/ISDIR/MFILE/NOTTY/LOOP -- because **the stale tool
+tracks sub-dossier `code:` churn and is structurally blind to registry drift**.
+Reconciled the table (19 -> 35 non-zero rows, meanings from each define's own
+comment), the self-counts (`pinned-by` 20 -> 36 asserts, measured), and the
+err.rs mirror analysis (names 18 of 35, missing 17; the note's old "missing
+four" was itself stale; recorded the reverse asymmetry `DirectoryNotEmpty` -> 39
+with no `T_E_*`). First chg to trip the R6 `mirrors-checked` gate (`de809a31`).
+Then generalized it: audited all 8 abi notes -- **abi-errno was the only one
+drifted**; caps/handle-rights/note-names/loom-ring/ninep-wire/t-stat/boot-banner
+all verified current against their pinning code.
+
+**The wrong turn, and what caught it.** Hunting cheap date-field de-stales, I
+wrote a batch triage that awk-parsed `quaestor stale --all` for each dossier's
+file list. It silently returned wrong/empty lists, so the base-diff was
+vacuously empty, so it reported "FALSE CHURN" on genuinely-churned dossiers --
+`poll` (+8) and `handle` (+69) both mislabeled as byte-current. Had I trusted
+it, I would have date-bumped stale dossiers as "verified current" -- a hollow
+close on load-bearing kernel surfaces. What caught it was a cheap
+**consistency check**: grep each "false-churn" dossier for a keyword from its
+latest code arc. `poll.c` has the KOBJ_LOOM arm; the poll dossier says "loom"
+zero times. That contradiction forced a direct diff with explicit paths, which
+exposed the tool. Lesson banked in the pickup: verify de-stale base-diffs with
+explicit file paths and a `git log -1 -- <md>` base, never a parse of the tool's
+own output. (It also corrected Run 33's unverified "devctl comment-only" -- it's
++13/-4, aux's `rx_drop_modeflush` pty-4 counter.)
+
+**One small settled fold** rode through cleanly: `sub-kernel-content`
+(`b10aeca6`) gained the `devramfs.c:622 .may_back_exec = true` vouch (#217, the
+I-12 provenance floor), with `inv-i12` added to `guarded-by` -- `/env`'s Dev
+deliberately does not vouch (verified no `may_back_exec` in `devenv.c`).
+
+**What it left open.** The safe, high-value, vault-owned pool is exhausted --
+*verified*, not assumed: direct-diffed 10+ remaining candidates, all real-churn
+on active peer arcs (aux VIVARIUM/notes/PTY; main KT-1.5/Warp), which re-stale
+on the next peer push. Deferred, not dropped. Two systemic findings owed to the
+peers (surfaced via yip): (1) registries drift silently -- a periodic
+registry-drift check is owed, since abi-errno sat 16 codes behind undetected;
+(2) folding content into a dossier without bumping `updated:` manufactures
+false-churn (libthyla-rs), so bump `updated:` on every fold. And yip 0029 (the
+unowned Warp paths -- GPU-DESIGN.md scripture + warp tooling) is a vault-*scope*
+decision for the operator, not a routine de-stale.
+
+---
+
 ## Run 34 (2026-09-06, Opus 4.8, effort max): the Halcyon stabilization arc opens -- proportional-live ratified into scripture, then the Beacon `pre` op and Genera typography
 
 **Where it sits.** After the H-arc audit close (Run 31 part 4, `454ecde9`), the
