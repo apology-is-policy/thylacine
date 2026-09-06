@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -107,6 +107,18 @@ exit and a kill alike:
 The wake-under-lock is the R5-H F75 close: between releasing the lock and
 waking, the parent could be reaped and freed by the *grandparent*'s
 `wait_pid`, and the wake would touch freed memory.
+
+**A peer Thread's own exit carries the pthread-join wakeup.** `thread_exit_self`
+runs `thread_clear_child_tid_handoff` before it departs: if the Thread registered
+a `clear_child_tid` word (via `SYS_SET_TID_ADDRESS`, which stores the tidptr on the
+Thread), the kernel atomically zeroes `*clear_child_tid` and `torpor_wake`s
+`UINT32_MAX` waiters on that VA — the futex a joining pthread parks on. This is the
+kernel half of `pthread_join`, and it fires for **every** exiting Thread, not only
+the last one out (that one additionally zombies the Proc through the chokepoint
+above). An unmapped or unwritable tidptr **silently skips** both the store and the
+wake — via the `uaccess_store_u32` fixup ([[sub-kernel-uaccess]]) — rather than
+extincting: a departing Thread must not be able to crash the box with a bad address
+it registered earlier.
 
 **The exit byte is the real one now (#91).** The ZOMBIE chokepoint captures
 `exit_status` **verbatim** — the byte a userspace `t_exits(42)` or a phenotype
@@ -366,3 +378,8 @@ familiar; the exec-side content is on [[sub-kernel-proc]] and
 [[chg-2026-09-05-death-exit-byte]] is the next earned interval: #91 (`f557beb2`)
 made the ZOMBIE chokepoint capture the real exit byte in `exit_status` verbatim
 instead of collapsing it to 0/1 — the exit-status half of self-hosting's C1 floor.
+
+[[chg-2026-09-06-sys-thread-doc-absorb]] folds the `thread_clear_child_tid_handoff`
+pthread-join wakeup absorbed from docs/reference/81: a peer Thread's exit atomically
+zeroes its registered `clear_child_tid` and `torpor_wake`s joiners, silently
+skipping a bad tidptr.
