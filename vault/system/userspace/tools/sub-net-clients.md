@@ -20,7 +20,7 @@ hazards: []
 abis: []
 design: ["docs/NET-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -84,7 +84,11 @@ that wait on writability, so it serves files far larger than the heap —
 which is its point: it is how a real download over the real interface gets
 measured, where a loopback benchmark cannot. Path traversal is rejected on
 top of the namespace containment, which is belt and braces since the
-namespace is already the sandbox.
+namespace is already the sandbox. Its access log colourizes only when stdout is
+an interactive console: the default flipped to `--color=auto` at H-1c-2,
+resolved by the real Dev-class TTY check (`stdout_is_terminal` over
+`SYS_FD_DEVCLASS`, which retired the always-true stub), so a log piped to a file
+or another program now carries no escape bytes.
 
 **The echo server's boot probe is peer-independent because one process is
 both ends** — it connects to itself over the resident loopback, and the
