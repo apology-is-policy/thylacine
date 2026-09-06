@@ -4,7 +4,7 @@ type: chg
 title: "sub-halcyond de-stale: the freeze-mid-pre style-index soundness invariant (PL-arc R1 F1 [P0] + R2 F6) + session_init.rs added to code + test count 99->127 (13 modules)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["8e8778cc"]
 touched:
   - sub-halcyond
 established: []
