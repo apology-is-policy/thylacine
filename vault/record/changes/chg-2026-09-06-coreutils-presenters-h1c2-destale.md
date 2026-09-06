@@ -4,7 +4,7 @@ type: chg
 title: "sub-coreutils-presenters de-stale: H-1c-2 built the console probe -- --color=auto now means auto across all sixteen, ps joins the set, and four tools gain a Beacon Rich realization"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["b28a2154"]
 touched:
   - sub-coreutils-presenters
 established: []
