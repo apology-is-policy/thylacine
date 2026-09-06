@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/19-handles (P2-Fc handle table): comprehensively superseded by sub-kernel-handle (which is more current); zero-fold multi-redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["da27b73f"]
 touched: []
 established: []
 closed: []
