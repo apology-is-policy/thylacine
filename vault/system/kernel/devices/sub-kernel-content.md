@@ -13,7 +13,7 @@ code:
   - kernel/include/thylacine/random.h
   - kernel/include/thylacine/chacha20.h
 audit: hard
-guarded-by: [inv-i1, inv-i16, inv-i28, inv-i32, inv-i33]
+guarded-by: [inv-i1, inv-i12, inv-i16, inv-i28, inv-i32, inv-i33]
 validated-by: [prose, gate-smp]
 locks: [lock-env, lock-random, lock-rng-dev]
 abis: []
@@ -22,7 +22,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.7"
   - "docs/PORTABILITY.md section 6"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -56,6 +56,17 @@ copied. The consequence is not incidental: the archive can never be freed, and
 the long-standing intent to release it once the real filesystem mounts is blocked
 by the shape of the table that reads it, not by anyone's priorities. Identity is
 positional — a file's name in the protocol is its index in the table plus one.
+
+**And because that content is real, system-owned files, the boot filesystem
+vouches that they may back executable pages.** Its Dev sets `may_back_exec =
+true` (#217) — the I-12 provenance floor ([[inv-i12]]): a file-backed executable
+mapping is admitted only if **both** the backing Dev carries this vouch **and**
+the mount is not `MNOEXEC`. ramfs vouches for the same reason it preserves each
+file's execute bit (Caveats) — it serves the binaries the machine executes from;
+`/env`'s Dev deliberately does not, because it serves per-process variable text,
+never code. The vouch is the allowlist entry, not the enforcement: the check
+lives on the exec/mmap path, and a Dev that forgot to set it would simply have
+its files refused as executable backing, fail-closed.
 
 **The environment's content is the process's own, and its identity has to be
 manufactured.** A variable is named by a **monotonically increasing id**, assigned
@@ -343,3 +354,4 @@ of vtable slot, the device-registration consistency check, the archive
 generator's mode handling, and the 40 registered tests across the five files.
 
 [[chg-2026-08-16-seven-small-surfaces]] records this interval.
+[[chg-2026-09-06-content-mayexec-vouch]] adds the #217 `may_back_exec` vouch.
