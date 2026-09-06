@@ -96,7 +96,10 @@ anything else increments `bad_used` and is dropped without a re-post.
 `latency_bytes` is clamped to `BUFFER_BYTES`; a non-`S_OK` status increments
 `tx_errors`. Control round-trips (`ctrl_rpc`) poll the controlq used ring with
 1 ms sleeps for at most 2 s, so a dead device fails `probe` loudly instead of
-hanging the warden's bind ladder.
+hanging the warden's bind ladder. A timed-out round-trip may still
+land a late completion; `ctrl_drain_stale` drains any such outstanding
+completion (bounded) before each new RPC, so a prior timeout cannot desync
+the control queue's request/response slots (the audit P2 F3).
 
 **Idle stop** (`stop()`): after `IDLE_STOP_PERIODS` (48, ≈0.5 s) consecutive
 silence periods with an empty FIFO, `PCM_STOP` + `PCM_RELEASE` are issued, the
@@ -107,8 +110,11 @@ machine therefore pays no periodic interrupt.
 ## The server half (`server.rs`)
 
 Framing + dispatch mirror `usr/ptyfs` (one `t_read` per readable event, every
-complete frame dispatched, `Disp::{Reply,Deferred,Fatal}`). N-2a-1 grows the
-static N-1 tree into a voice graph:
+complete frame dispatched, `Disp::{Reply,Deferred,Fatal}`). The listener stays armed at all times; when
+the connection table is full (`MAX_CONNS` = 32) a fresh accept is closed
+immediately (fail-fast EOF) rather than left to stall on the srvconn handshake
+deadline (the audit P2 F2). N-2a-1 grows the static N-1 tree into a voice
+graph:
 
 | Path | qid | Mode | Read | Write |
 |---|---|---|---|---|
@@ -138,6 +144,17 @@ once (the only bound on a hot mix — the f32 accumulator makes N unity voices
 un-overflowable before the clamp, the I-14 posture at the graph layer). An empty
 voice contributes silence; the pass returns whether ANY voice supplied real
 data (the idle-stop counts silence).
+
+**Authority (the F1 owner gate).** A write or `ctl` to a non-zero voice is
+accepted only from the connection that minted it: the handler resolves the
+voice's `owner` (the minting conn's handle) and returns `EPERM` for a live
+voice owned by another connection, `EBADF` for an unknown id. Voice 0 is the
+world-shared sink and is exempt -- any connection may write it (the `audio(3)`
+root file). This bounds a voice to its owner so one client cannot inject into
+or starve another's stream (I-46 authority, the audit P1); the `/dev/nocturne`
+mount is one shared connection, so programs sharing that mount also share its
+voices by construction -- per-exit isolation is the direct-connection path
+below.
 
 **The parked write** is unchanged from N-1 but per-voice: a `Twrite` to a
 voice's `audio` pushes what fits and PARKS the rest in a `PendingWrite {tag,
@@ -250,6 +267,8 @@ single boot's wall time.
 | `serve` | `/srv/nocturne` post fails | `Err(Hardware)` → `EXIT_SERVE` |
 | `audio` write | FIFO full | parked (deferred `Rwrite`), `ENOMEM` past 8 parked writes per connection |
 | `audio`/`info`/`ctl` | bad verb / not writable | `EINVAL` / `EPERM` |
+| voice `audio`/`ctl` | write/`ctl` to a non-zero voice from a non-owning connection | `EPERM` (owned elsewhere) / `EBADF` (unknown id) |
+| `serve` accept | connection table full (`MAX_CONNS` = 32) | accepted then closed at once (fail-fast EOF) |
 | device | bogus used id | dropped, `bad-used`++ (never re-posted) |
 | device | status ≠ `S_OK` | `tx-errors`++ (the slot is still re-posted) |
 
@@ -266,6 +285,12 @@ single boot's wall time.
 - Voices minted through the shared `/dev/nocturne` mount persist for the mount's
   life; per-exit lifetime needs a direct `/srv/nocturne` connection -- what the
   SDL backend does (N-2a-2, reference 142).
+- The whole N-1..N-2a-4 surface was adversarially audited (round 1 Fable +
+  round 2 Opus; `memory/audit_nocturne_closed_list.md`). Deferred by design
+  (F5, P2): a voice minted via the shared mount is box-wide and outlives its
+  writer until the mount closes -- a bounded, graceful DoS (`ENOMEM` at
+  `MAX_VOICES` = 16, never a crash); the proper fix (per-voice fid-refcount
+  lifetime or a per-principal connection cap) is an N-2c/N-3 design decision.
 - `nodes/<id>/ctl gain` is Plan 9 `volume`-style percent, not the dB grammar the
   design's `volume` file (N-3) will carry; the per-link/stage dB gains are N-3+.
 - The virtio-pci-modern constants are a private copy of netdev's (a hoist seam).
