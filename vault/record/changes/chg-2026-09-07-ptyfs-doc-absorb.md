@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/136-ptyfs (the pts server, I-20/PTY-2): fold 3 gaps into sub-ptyfs (cacheability fail-safe, item-10 readiness, drop_modeflush); PTY-4 #19/TTIN deferred to 135-pty-kernel"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["38aa52ed"]
 touched: [sub-ptyfs]
 established: []
 closed: []
