@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/127-overcommit (lazy-anon demand-zero + decommit, I-32 fourth axis): zero-fold, 4-surface redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["31841eed"]
 touched: []
 established: []
 closed: []
