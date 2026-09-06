@@ -1068,9 +1068,12 @@ and `102-legate` in between were clean zero-folds (login's DEK lifetime is
 Six real folds across the run (allowance's pre-F1 lock-free-kfree staleness, loom's
 device-gone terminal, debug-fs's terminate-on-release exitkill, cons's #95
 input-drop, hardening's canary, extinction) -- every one a load-bearing atom that
-would have been lost when its frozen doc became a stub. Next: the remaining
-mediums, then the 12 uncovered surfaces (dossiers to author) and the 145-vivarium
-dedicated pass.
+would have been lost when its frozen doc became a stub. The run then closed out to
+`107 absorbed / 50 live` on a run of clean zero-folds (`108-utopia-repl`,
+`43-virtio-gpu`, `123-tls`, `84-pouch-libsodium`, and the spawn-family cluster
+`62`/`63`/`64`) — each a doc whose dossier had simply lapped it. Next: the
+remaining ~50 live docs, then the 12 uncovered surfaces (dossiers to author) and
+the `145-vivarium` dedicated pass.
 
 ---
 
