@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/12-hardening (P1-H): fold the unowned stack canary into sub-kernel-boot-sequence"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["fafcae5f"]
 touched: [sub-kernel-boot-sequence]
 established: []
 closed: []
