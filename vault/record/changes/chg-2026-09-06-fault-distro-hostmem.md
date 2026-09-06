@@ -4,7 +4,7 @@ type: chg
 title: "kernel-fault de-stale: the seventh (HOSTMEM) backing arm + the MAIR-index install generalization (Warp-6 V-2), the #190 geometry verify-and-bail (D-3 retires the R-5 F2 premise, and F2's recompute remedy was wrong), and the #194 past-EOF SIGBUS"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["6df359aa"]
 touched:
   - sub-kernel-fault
 established: []
