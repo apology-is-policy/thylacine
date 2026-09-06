@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -203,6 +203,30 @@ threaded through these functions is vestigial and documented as such.
 
 [[inv-i39]] — cross-Proc read and write, confined to the target's own tables,
 never faulting anything in, and refusing to write a read-only page.
+
+**I-42** — the JIT's outward generalization of the self-modification alias
+(the [[sub-kernel-burrow]] `BURROW_TYPE_CODE` dual mapping), and its two I-cache
+obligations both ride this file's primitive, `arch_icache_sync_range`. *At
+create*: a code Burrow's backing is a recycled anon page, and zeroing it — which
+makes an un-emitted page decode as `UDF #0` rather than run residue — does **not**
+touch the instruction cache, and nothing on the free path does either (unmap
+broadcasts a TLBI, a *TLB* operation; `free_pages` performs no cache maintenance).
+So a fresh code region could carry a previous region's I-cache lines and execute
+bytes the Proc never emitted; `sys_jit_create_region` therefore invalidates the
+I-cache over the fresh pages before any RX PTE can name them (the CL-7k-3 F1
+finding — the code Burrow had been the sole executable backing in the tree that
+skipped this, where `exec.c`'s eager paths and `fault.c`'s FILE demand-page arm
+already did it). *At publish* (`SYS_ICACHE_SYNC`): the maintenance runs on the
+**direct map**, never the user VA — `dc cvau`/`ic ivau` can take translation
+faults and a user VA is exactly what a caller can arrange to be unmapped, and
+`IC IVAU` is architecturally PIPT-exact across every alias of the PA. The cache
+half is genuinely cross-PE (`IC IVAU` is Inner-Shareable *broadcast*); the
+trailing `ISB` is **not** — it retires prefetch on the *calling* PE only, so a
+peer PE that already executed at those exec-alias addresses must take a
+context-synchronization event (any syscall or exception return is one) before
+branching in. Nothing at v1.0 drives the exposed spin-wait case, but an
+emit-on-one-thread / execute-on-a-worker mapper (ORC's `DualMapMemoryMapper`)
+must honor the contract or make the syscall broadcast an ISB.
 
 ## Error paths
 

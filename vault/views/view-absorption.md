@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**135 absorbed · 22 live · 157 total.**
+**136 absorbed · 21 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -100,7 +100,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 142-sdl-port.md | live | — |
 | 143-tyrquake.md | live | — |
 | 144-prowl.md | absorbed | [[sub-kaua]], [[sub-prowl]] |
-| 145-jit.md | live | — |
+| 145-jit.md | absorbed | [[abi-caps]], [[inv-i12]], [[sub-corvus]], [[sub-kernel-burrow]], [[sub-kernel-caps]], [[sub-kernel-fault]], [[sub-kernel-mmu]], [[sub-libthyla-rs]] |
 | 145-vivarium.md | live | — |
 | 146-addrspace.md | absorbed | [[sub-kernel-addrspace]] |
 | 147-execve.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-asid]], [[sub-kernel-exec]], [[sub-kernel-handle]], [[sub-kernel-proc]], [[sub-kernel-sched]], [[sub-kernel-vivarium]] |

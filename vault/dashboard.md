@@ -133,11 +133,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-07 [[chg-2026-09-07-go-port-doc-absorb]] — absorb docs/reference/133-go-port (GOOS=thylacine capability map): fold the Loom SETATTR truncate-only fail-close into sub-kernel-loom; fork is external
+- 2026-09-07 [[chg-2026-09-07-jit-doc-absorb]] — absorb docs/reference/145-jit (the JIT capability, I-42): fold the I-cache contract (CL-7k-3 F1 create-invalidate + the cross-PE ISB publish contract) into sub-kernel-mmu
 - 2026-09-07 [[chg-2026-09-07-net-doc-absorb]] — absorb docs/reference/122-net (libthyla-rs::net, the native /net client): fold the SNTP trust model into sub-net-clients; redirect the protocol to sub-netd-server
 - 2026-09-07 [[chg-2026-09-07-prowl-doc-absorb]] — absorb docs/reference/144-prowl (the scheduler-aware process monitor): clean redirect to sub-prowl (ahead of the doc)
 - 2026-09-07 [[chg-2026-09-07-ptyfs-doc-absorb]] — absorb docs/reference/136-ptyfs (the pts server, I-20/PTY-2): fold 3 gaps into sub-ptyfs (cacheability fail-safe, item-10 readiness, drop_modeflush); PTY-4 #19/TTIN deferred to 135-pty-kernel
 - 2026-09-07 [[chg-2026-09-07-utopia-skeleton-doc-absorb]] — absorb docs/reference/91-utopia (the U-3 ut skeleton): clean redirect to sub-utopia-interactive (superseded skeleton, ahead of the doc)
 - 2026-09-07 [[chg-2026-09-07-verification-doc-absorb]] — absorb docs/reference/13-verification (Phase-1 verification infra): fold the deliberate-fault matrix anti-DCE + #244 into sub-kernel-boot-sequence, claim fault_test.c + test-fault.sh
 - 2026-09-07 [[chg-2026-09-07-warden-doc-absorb]] — absorb docs/reference/119-warden (the Menagerie hardware broker, I-34): fold the UNOWNED menagerie-probe (the I-34 grant proof) into sub-menagerie-leaves
-- 2026-09-06 [[chg-2026-09-06-9p-identity-absorb]] — absorb docs/reference/100 (9P identity presentation, A-3): the cross-cutting security surface folded across 7 dossiers + a new n_uname trust-stamp seam, then multi-redirect stub -- 66 absorbed / 91 live
 <!-- generated:end -->
