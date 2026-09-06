@@ -15,7 +15,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -108,6 +108,25 @@ same session, because those messages name two fids in one namespace.
 The registered buffer's kernel address is taken from the backing region's
 direct-map base rather than the user virtual address, so the pin survives the
 caller unmapping its own view.
+
+**`SETATTR` is where the submit-time snapshot meets its limit, and the async
+path fail-closes rather than guess.** A `SETATTR` operation's authority is not
+uniform. The SIZE axis — a truncate — is authorized by `RIGHT_WRITE` on the fd,
+which the submit path already snapshots; so async truncate is admitted, on a
+non-`O_PATH` (`CWALKONLY`) handle, with the same `INT64_MAX` size bound the sync
+handler applies (the #81 hollow-rights close — an `O_PATH` handle is born `R|W`
+but `perm_check`-exempt, so its `RIGHT_WRITE` is hollow — extended to the async
+path here). But MODE/UID/GID are authorized by *identity*, the sync side's
+owner-only `perm_wstat_check`, which the submit path cannot evaluate without a
+blocking owner-stat it is structurally forbidden from making. So the async
+`SETATTR` splits by authority kind: SIZE dispatches, and MODE/UID/GID are
+**rejected fail-closed** — v1.0 Loom `SETATTR` is truncate-only; an async
+identity-setattr (a submit-stat, or a completion-recheck design) is a v1.x seam.
+The audit that found this found the same `O_PATH` truncate bypass on the async
+path as on the sync one, *plus* the broader gap that the async path ran no
+identity check at all — both closed by the split. (`9p_client.loom_setattr_e2e`:
+chmod rejected and never on the wire; truncate reaches the wire; `O_PATH`
+truncate rejected.)
 
 ### Back-pressure at submit, not at completion
 

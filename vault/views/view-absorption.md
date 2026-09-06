@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**130 absorbed · 27 live · 157 total.**
+**131 absorbed · 26 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -86,7 +86,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 130-positioned-io.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]] |
 | 131-pounce.md | absorbed | [[adt-pounce-p5]], [[chg-2026-07-07-pounce]], [[sub-kernel-ninep-client]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-ninep-wire]], [[sub-kernel-stalk]] |
 | 132-larder.md | absorbed | [[sub-kernel-larder]], [[sub-kernel-ninep-dev9p]], [[view-closed-sub-kernel-larder]] |
-| 133-go-port.md | live | — |
+| 133-go-port.md | absorbed | [[sub-kernel-loom]], [[sub-kernel-perm]], [[sub-kernel-syscall-dispatch]], [[sub-libthyla-rs]], [[sub-nora-host]], [[sub-stratum-boot]], [[sub-stratum-session]] |
 | 134-debug-fs.md | absorbed | [[sub-kernel-devproc]], [[sub-kernel-exception]], [[sub-kernel-halls]], [[sub-kernel-hwdebug]], [[sub-kernel-mmu]] |
 | 135-pty-kernel.md | live | — |
 | 136-ptyfs.md | live | — |
