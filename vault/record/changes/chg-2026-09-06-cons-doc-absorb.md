@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/111-cons (I-27/I-9 pollable console): fold the #95 RX input-drop report into sub-kernel-cons"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["3076ff50"]
 touched: [sub-kernel-cons]
 established: []
 closed: []
