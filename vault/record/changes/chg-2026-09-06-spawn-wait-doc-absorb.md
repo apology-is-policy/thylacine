@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/60-sys-spawn-wait (SYS_SPAWN/SYS_WAIT_PID, superseded first-cut): clean redirect to exec + proc + elf"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["e8065be5"]
 touched: []
 established: []
 closed: []
