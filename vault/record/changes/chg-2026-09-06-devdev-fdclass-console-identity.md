@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-devdev de-stale: devdev_fd_devclass (H-1a fd-class; /dev/cons -> 'c') and spoor_is_console (viv-C2 unforgeable console identity, not a qid bit)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["0c859961"]
 touched:
   - sub-kernel-devdev
 established: []
