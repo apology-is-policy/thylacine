@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 26-vma + 146-addrspace -- fold gaps first (incl. a FACTUAL dossier bug: sub-kernel-vma claimed no test suite, test_vma.c has 6), then stub (50 absorbed / 107 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["7d1ecdfd"]
 touched: [sub-kernel-vma, sub-kernel-addrspace]
 established: []
 closed: []
