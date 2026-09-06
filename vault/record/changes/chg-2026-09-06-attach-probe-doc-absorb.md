@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/57-attach-probe (mount-surface E2E test binary): zero-fold, test-probe redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["4b3868fb"]
 touched: []
 established: []
 closed: []
