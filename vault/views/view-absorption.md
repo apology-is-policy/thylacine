@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**50 absorbed · 107 live · 157 total.**
+**51 absorbed · 106 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -126,7 +126,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 27-exec.md | live | — |
 | 28-syscall.md | live | — |
 | 29-joey.md | live | — |
-| 30-dev-spoor.md | live | — |
+| 30-dev-spoor.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-path]], [[sub-kernel-spoor]] |
 | 31-trivial-devs.md | live | — |
 | 32-devproc.md | live | — |
 | 33-devctl.md | live | — |
