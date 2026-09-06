@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**56 absorbed · 101 live · 157 total.**
+**60 absorbed · 97 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -161,16 +161,16 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 62-sys-spawn-with-fds.md | live | — |
 | 63-sys-spawn-with-caps.md | live | — |
 | 64-sys-spawn-full.md | live | — |
-| 65-corvus-skeleton.md | live | — |
-| 66-corvus-server.md | live | — |
+| 65-corvus-skeleton.md | absorbed | [[sub-corvus]] |
+| 66-corvus-server.md | absorbed | [[sub-corvus]] |
 | 67-el1h-kernel.md | live | — |
-| 68-corvus-crypto.md | live | — |
+| 68-corvus-crypto.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus]] |
 | 69-corvus-unwrap.md | live | — |
 | 70-devsrv.md | absorbed | [[sub-kernel-devsrv]], [[view-closed-sub-kernel-devsrv]] |
 | 71-srvconn.md | absorbed | [[sub-kernel-srvconn]], [[view-closed-sub-kernel-srvconn]] |
 | 72-poll.md | absorbed | [[sub-kernel-poll]] |
 | 73-sys-spawn-with-perms.md | live | — |
-| 74-corvus-9p-server.md | live | — |
+| 74-corvus-9p-server.md | absorbed | [[sub-corvus]], [[sub-kernel-srvconn]] |
 | 75-devcap.md | live | — |
 | 76-admin-elevate.md | live | — |
 | 77-sys-chroot.md | live | — |

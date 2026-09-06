@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -59,6 +59,16 @@ torn down, because the wire contract says a stream cannot be safely
 re-synced across a framing disagreement. The reply is delivered *before*
 the EOF: the teardown is deferred until the staged response has been fully
 drained by a subsequent read.
+
+`ctl` is **message-oriented, not a byte stream.** A `Tread` ignores the
+offset the client presents and drains instead from corvus's own
+per-connection cursor into the staged response, resetting the cursor when
+the response is exhausted so the next read returns zero bytes. The 9P
+offset would be racy on a verb-by-verb pattern — two reads of one reply
+could disagree on where they are — so the server owns the drain position
+and random-access reads on `ctl` are meaningless. The only client is the
+kernel-internal 9P client the transport drives, which reads each reply
+whole.
 
 **A response frame** is three bytes — status, 16-bit payload length —
 plus payload. Seven statuses: OK, BadAuth, PermissionDenied, NotFound,
@@ -139,6 +149,15 @@ input to any gate, because capabilities are mutable on a live process (a
 peer can elevate mid-conversation) and console attachment is revocable in
 both directions. A dead peer or a failed query yields zero capabilities,
 so the gate fails closed by construction rather than by a branch.
+
+The accept-time snapshot is captured by one `t_srv_peer` read, and **that
+read is itself fail-closed**: a non-zero return closes the just-accepted
+handle rather than pushing a connection whose identity is unknown. It is
+not that the snapshot authorizes anything — it deliberately does not — but
+that a *failed* read must never be aliased with the zero-capability value a
+live gate treats as fail-closed. Refusing the accept keeps "no identity"
+and "no capabilities" distinct, which is the property a future
+administrative verb reading the snapshot's caps or stripes would depend on.
 
 **Persistence is atomic-by-rename.** The identity database and the
 clearance database are each serialized whole, written to a temporary name,
@@ -254,7 +273,10 @@ written down:
   disconnecting must not wipe a live login session, because the storage
   coordinator presents the login token over its own transient connection
   to pull a home DEK, and mid-session legate elevation re-presents the
-  same token.
+  same token. The identifier is monotonic and **skips zero on the 64-bit
+  wrap**, because zero is the "no owner" sentinel: a recycled id that
+  aliased it would let an unrelated connection's close pass the ownership
+  gate and wipe a session it never created.
 
 ### The AUTH gate is a narrowing, not a design — and it cost a capability
 
@@ -390,6 +412,12 @@ design's model already permits a set of session records keyed by owner,
 and the connection-ownership tag is the piece that was added in
 anticipation. What remains is making the session per-connection rather
 than global, and the AUTH gate's refusal is what stands in for it today.
+
+**No `Tflush`.** The 9P server has no flush handler, because the
+kernel-internal client is single-flight — it blocks for each reply before
+issuing the next request, so no request is ever outstanding to cancel. A
+pipelined client would need one; this is the transport-layer twin of the
+same not-yet-multiplexed posture the single session slot describes above.
 
 **Rate limiting does not cover authentication.** Repeated wrong-passphrase
 AUTH attempts are bounded only by the cost of Argon2id itself.
