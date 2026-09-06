@@ -8,6 +8,8 @@ code:
   - usr/virtio-mmio-source/Cargo.toml
   - usr/netdev-driver/src/main.rs
   - usr/netdev-driver/Cargo.toml
+  - usr/menagerie-probe/src/main.rs
+  - usr/menagerie-probe/Cargo.toml
 audit: light
 guarded-by: [inv-i34]
 validated-by: [prose, gate-smp]
@@ -16,7 +18,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -25,6 +27,11 @@ narrowed hardware allowance, each to do one job the broker will not do itself.
 `virtio-mmio-source` reads device identity registers so the trusted component
 never touches one; `netdev-driver` holds a network device through a full
 lifecycle so the lifecycle can be observed. Between them, 414 lines.
+
+A third program, `menagerie-probe`, is the fixture the two production leaves
+are measured against: a minimal `impl Driver` that does nothing but *demonstrate
+the grant*, probe-gated since #230 (`--with-fixtures`) so a shipped box never
+binds it.
 
 They are the only programs in the tree that are *granted* hardware rather than
 taking it. Everything in [[sub-virtio-probes]] hardcodes a physical address and
@@ -84,6 +91,19 @@ then blocks on its interrupt handle forever. The blocking is the point: it is
 alive so that something can take the device away from it, and the observable
 proof is the warden's log recording the bind, the readiness, and then the
 teardown with an exit status.
+
+**The probe** is [[inv-i34]] reduced to its two halves and nothing else. Granted
+the undriven, unreserved pl061 GPIO by its own `reg`, it does exactly two things.
+The **positive**: it maps the granted window (`map_mmio(res, 0, ..)`) and the map
+succeeds — the descriptor round-trip (the driver received the exact window the
+warden granted) *and* the kernel gate admitting the grant. The **negative**: it
+constructs an `Mmio` for a physical address *outside* the grant (`0xDEAD_0000`)
+and the kernel **rejects** it — because the conferred allowance is narrowed, and a
+success there would mean the allowance was not enforced. It holds no long-lived
+device (`serve` returns immediately), so the warden reaps it for its exit code
+rather than tearing it down. That the negative is a *deliberate* assertion, not an
+incidental failure, is the whole value: it is the one leaf that proves the gate
+denies, where the others prove it admits.
 
 ## Data structures
 

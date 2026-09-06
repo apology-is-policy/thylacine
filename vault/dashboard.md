@@ -138,6 +138,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-07 [[chg-2026-09-07-ptyfs-doc-absorb]] — absorb docs/reference/136-ptyfs (the pts server, I-20/PTY-2): fold 3 gaps into sub-ptyfs (cacheability fail-safe, item-10 readiness, drop_modeflush); PTY-4 #19/TTIN deferred to 135-pty-kernel
 - 2026-09-07 [[chg-2026-09-07-utopia-skeleton-doc-absorb]] — absorb docs/reference/91-utopia (the U-3 ut skeleton): clean redirect to sub-utopia-interactive (superseded skeleton, ahead of the doc)
 - 2026-09-07 [[chg-2026-09-07-verification-doc-absorb]] — absorb docs/reference/13-verification (Phase-1 verification infra): fold the deliberate-fault matrix anti-DCE + #244 into sub-kernel-boot-sequence, claim fault_test.c + test-fault.sh
+- 2026-09-07 [[chg-2026-09-07-warden-doc-absorb]] — absorb docs/reference/119-warden (the Menagerie hardware broker, I-34): fold the UNOWNED menagerie-probe (the I-34 grant proof) into sub-menagerie-leaves
 - 2026-09-06 [[chg-2026-09-06-9p-identity-absorb]] — absorb docs/reference/100 (9P identity presentation, A-3): the cross-cutting security surface folded across 7 dossiers + a new n_uname trust-stamp seam, then multi-redirect stub -- 66 absorbed / 91 live
-- 2026-09-06 [[chg-2026-09-06-abi-errno-reconcile]] — abi-errno registry reconcile: +16 missing codes (the whole V-5 socket family + INTR/2BIG/CHILD/NOTTY/MFILE/NODEV/NOTDIR/ISDIR/LOOP), the stale self-counts (19->35 non-zero, 20->36 asserts), and the err.rs mirror analysis
 <!-- generated:end -->
