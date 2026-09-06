@@ -4,7 +4,7 @@ type: chg
 title: "sub-coreutils-presenters delta: ls -l/la now frame RICH as a Beacon `pre` code-fence box (PL-5), not a `table` -- ps stays the genuine table; the ls-halcyon witness token is `1936;v1;pre`"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["556ce15c"]
 touched:
   - sub-coreutils-presenters
 established: []
