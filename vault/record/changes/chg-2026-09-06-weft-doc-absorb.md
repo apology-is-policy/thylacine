@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/125-weft (I-37 capability network dataplane): zero-fold, multi-redirect"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["65f7365f"]
 touched: []
 established: []
 closed: []
