@@ -4,7 +4,7 @@ type: chg
 title: "kernel-vma de-stale: the DISTRO D-3 file-backed-mmap surface -- the MAP_FIXED split/replace (vma_replace_range_in), the sleeping-free-under-lock deferral (vma_free_deferred, F1/F5), and vma_next_overlap_in (#199)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["a14f7f81"]
 touched:
   - sub-kernel-vma
 established: []
