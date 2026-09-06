@@ -11383,6 +11383,23 @@ int main(void) {
                 }
                 t_putstr("joey: nocturne-probe OK (1 kHz + 2 kHz mixed on two voices; Nocturne N-2a-1)\n");
             }
+            // N-2b-1: the zero-copy ring SUBSTRATE witness (thylacine.ringprobe;
+            // tools/test-ring-voice.sh). Orthogonal to the audio probes above --
+            // it maps a voice's Weft ring and validates the geometry, plays no
+            // audio -- so it runs IN ADDITION, under its own boot arg. FATAL once
+            // selected (a ring that will not map is a regression, never an
+            // environment). Gated off by default so ordinary boots and the other
+            // gates are unaffected until N-2b-1's own audit closes.
+            if (bootarg_has("thylacine.ringprobe", 19)) {
+                static const char rp_name[]   = "/bin/ring-voice-probe";
+                static const char rp_expect[] = "RING-VOICE-PROBE PASS";
+                if (pouch_smoke_one(rp_name, sizeof(rp_name) - 1,
+                                    rp_expect, sizeof(rp_expect) - 1) != 0) {
+                    t_putstr("joey: ring-voice-probe FAILED (the Weft ring did not map; Nocturne N-2b-1)\n");
+                    return 1;
+                }
+                t_putstr("joey: ring-voice-probe OK (Weft ring mapped + geometry valid; Nocturne N-2b-1)\n");
+            }
 #endif
         } else {
             t_putstr("joey: /srv/nocturne absent (no virtio-sound function); skipping\n");

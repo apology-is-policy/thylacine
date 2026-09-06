@@ -1,6 +1,7 @@
 # 153 — Nocturne: `nocturned`, the virtio-snd driver + the mixed-voice graph core
 
-**Status:** N-1 AS-BUILT (2026-09-05, @562cbe50) + N-2a-1 AS-BUILT (2026-09-05).
+**Status:** N-1 AS-BUILT (2026-09-05, @562cbe50) + N-2a-1 AS-BUILT (2026-09-05)
++ N-2b-1 (the zero-copy Weft ring substrate + map witness) AS-BUILT (2026-09-06).
 The design is `docs/NOCTURNE.md`; this chapter is what exists in the tree.
 **N-1**: one warden-bound daemon owning the `virtio-sound` function, one
 playback stream, one 9P tree, one boot probe, one host witness. **N-2a-1**: the
@@ -127,10 +128,11 @@ graph:
 | `nodes/<id>/audio` | vpath | `0666` | 0 bytes | S16 stereo 48 kHz into voice `<id>` |
 | `nodes/<id>/ctl` | vpath | `0644` | one line | `gain <percent>` / `flush` / `remove` |
 | `nodes/<id>/info` | vpath | `0444` | that voice's stats | `EPERM` |
+| `nodes/<id>/data` | vpath | `0666` | `EINVAL` (a Weft map fid) | `EPERM` (driven by SYS_WEFT_MAP) |
 
-Voice paths encode `VBIT | (id << 4) | leaf` (leaf 0 = dir, 1/2/3 =
-audio/ctl/info) — the tapestry `surf_n`/`surf_fk` idiom, so one `u64` qid names
-both the voice and the file within it.
+Voice paths encode `VBIT | (id << 4) | leaf` (leaf 0 = dir, 1/2/3/4 =
+audio/ctl/info/data) — the tapestry `surf_n`/`surf_fk` idiom, so one `u64` qid
+names both the voice and the file within it.
 
 **Voices + the mixer.** `Shared.voices` is a `Vec<Voice>` (cap `MAX_VOICES` =
 16). Voice 0 is persistent (`owner = -1`, the root `audio` file); every other
@@ -178,6 +180,46 @@ its `CloseDevice`, or the program's death, drops the connection and the voice.
 `period-bytes`, `buffer-bytes`, `periods`, `started`, `periods-played`,
 `silence-periods`, `tx-errors`, `bad-used`, `latency-bytes`; `nodes/<id>/info`
 renders `voice`, `gain` (percent), `buffered`, `bytes-in`, `flushes`, `owner`.
+
+## The zero-copy ring (N-2b-1)
+
+A voice grows a `data` leaf: a Weft map fid, not a byte file. A client opens it
+THROUGH the `/dev/nocturne` mount (`SYS_WEFT_MAP` needs a dev9p fd -- a direct
+`/srv/nocturne` srvconn will not do) and calls `SYS_WEFT_MAP(data_fd)`; the
+kernel issues `Tweft(fid)`, nocturned's `h_weft` lazily allocates the voice's
+ring and replies `Rweft(share_id, size, entries)`, and the kernel maps the ring
+into the calling Proc. nocturned reuses the kernel Weft substrate UNCHANGED --
+`sys_weft_share_for_proc` is generic and `CAP_HW_CREATE`-gated, which nocturned
+holds as a warden-bound driver -- so there is no kernel change and `weft.tla` is
+not in play; the lifecycle mirrors netd's `weft_ensure` verbatim.
+
+**The ring** (`Shared::weft_ensure`): one ANON Burrow per voice, laid out by
+`weftlib::init_ring` as `RING_HDR (64) + READY_HDR (128) + DESC[RING_ENTRIES]
+(16 each) + payload`. `RING_ENTRIES` = 8 period slots (K >= 3); `RING_SIZE` =
+20480 (5 pages) gives a payload of 20160 B >= 8 x `PERIOD_BYTES`. nocturned is
+the CONSUMER (reads finished periods on the device clock), the client the
+PRODUCER (`prod_tail`/`cons_head` ownership). N-2b-1 builds the allocate + share
++ map half only; the period producer/consumer protocol over the ring and the
+ring-fed mixer are N-2b-2.
+
+**Lifetime** (I-7/I-37): the ring is a field on the `Voice`
+(`Option<RingVoice>`); `RingVoice`'s `Drop` runs `t_weft_unshare(share_id)` +
+`t_burrow_detach(va, size)` when the voice is removed (a connection's teardown,
+or `ctl remove`), releasing nocturned's side. The kernel's #847 dual count keeps
+the pages alive until the client's mapping is gone too, so there is no
+in-flight-page UAF regardless of teardown order. A `Vec<Voice>` reallocation
+MOVES a `RingVoice` (a Rust move is not a drop), so a voice push never
+spuriously unshares.
+
+**Authority** (I-37/I-46a): `h_weft` gates on the minting connection (the F1
+owner gate -- `EPERM` for another owner, `EBADF` for a gone voice) and refuses
+voice 0 (`EINVAL`; the world-shared byte sink has no single-producer ring).
+Because `/dev/nocturne` is one shared kernel dev9p session, the owner gate cannot
+isolate mounted clients from each other (the pre-existing F5 limitation); the
+kernel's CONSUME-ONCE share claim is the SPSC producer-uniqueness backstop --
+only the first Proc to `SYS_WEFT_MAP` a given voice's ring claims it, a second
+mapper gets a claim failure. W^X holds (the ring is ANON RW-only; `SYS_WEFT_SHARE`
+rejects EXEC). The `data` leaf is never byte-read/written (`EINVAL`/`EPERM`).
 
 ## The probe and the witness
 
@@ -269,6 +311,9 @@ single boot's wall time.
 | `audio`/`info`/`ctl` | bad verb / not writable | `EINVAL` / `EPERM` |
 | voice `audio`/`ctl` | write/`ctl` to a non-zero voice from a non-owning connection | `EPERM` (owned elsewhere) / `EBADF` (unknown id) |
 | `serve` accept | connection table full (`MAX_CONNS` = 32) | accepted then closed at once (fail-fast EOF) |
+| `Tweft` on `data` | not the owning connection / gone / voice 0 / not a `data` leaf | `EPERM` / `EBADF` / `EINVAL` / `EINVAL` |
+| `Tweft` on `data` | ring alloc / share fails (OOM, registry full) | `ENOMEM` |
+| `data` leaf | `Tread` / `Twrite` (it is a map fid) | `EINVAL` / `EPERM` |
 | device | bogus used id | dropped, `bad-used`++ (never re-posted) |
 | device | status ≠ `S_OK` | `tx-errors`++ (the slot is still re-posted) |
 
@@ -285,6 +330,11 @@ single boot's wall time.
 - Voices minted through the shared `/dev/nocturne` mount persist for the mount's
   life; per-exit lifetime needs a direct `/srv/nocturne` connection -- what the
   SDL backend does (N-2a-2, reference 142).
+- The N-2b-1 zero-copy ring shares the F5 limitation: a ring voice minted via
+  the shared `/dev/nocturne` mount is owned by the one kernel dev9p connection,
+  so the `h_weft` owner gate does not isolate mounted clients from each other --
+  the kernel's consume-once share claim is what keeps the ring single-producer.
+  The N-2b-1 formal audit is batched to the N-2b close (with N-2b-2).
 - The whole N-1..N-2a-4 surface was adversarially audited (round 1 Fable +
   round 2 Opus; `memory/audit_nocturne_closed_list.md`). Deferred by design
   (F5, P2): a voice minted via the shared mount is box-wide and outlives its

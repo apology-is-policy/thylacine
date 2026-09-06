@@ -525,6 +525,12 @@ fi
 if [[ "${THYLACINE_NOAUDIOPROBE:-0}" == "1" ]]; then
     append_tokens+=("thylacine.noaudioprobe")
 fi
+# N-2b-1: the zero-copy ring substrate witness (tools/test-ring-voice.sh runs
+# /ring-voice-probe -- map a voice's Weft ring + validate the geometry, no audio).
+# Gated off by default so ordinary boots and the other gates are unaffected.
+if [[ "${THYLACINE_RINGPROBE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.ringprobe")
+fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends

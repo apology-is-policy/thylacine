@@ -27,7 +27,11 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use libthyla_rs::ninep as p9;
-use libthyla_rs::{t_close, t_open, t_walk_create, T_OPATH, T_OREAD, T_WALK_OPEN_FROM_ROOT};
+use libthyla_rs::weft as weftlib;
+use libthyla_rs::{
+    t_burrow_attach, t_burrow_detach, t_close, t_open, t_walk_create, t_weft_share,
+    t_weft_unshare, T_OPATH, T_OREAD, T_WALK_OPEN_FROM_ROOT,
+};
 
 use crate::snd::{Stats, BUFFER_BYTES, PERIODS, PERIOD_BYTES, RATE_HZ};
 
@@ -70,6 +74,15 @@ const VLEAF_DIR: u64 = 0;
 const VLEAF_AUDIO: u64 = 1;
 const VLEAF_CTL: u64 = 2;
 const VLEAF_INFO: u64 = 3;
+const VLEAF_DATA: u64 = 4;
+
+// The per-voice Weft ring (N-2b). One ANON Burrow per ring voice, shared to the
+// owning client. RING_ENTRIES period slots (K >= 3); RING_SIZE is page-aligned
+// and fits the weftlib header (RING_HDR + READY_HDR + DESC[K]) plus K period
+// payloads (PERIOD_BYTES each). N-2b-1 allocates + shares + maps the ring; the
+// producer/consumer period protocol over it is N-2b-2.
+const RING_ENTRIES: u32 = 8;
+const RING_SIZE: u64 = 20480; // 5 pages: 320 B hdr + >= 8 * PERIOD_BYTES payload
 
 fn vpath(id: u32, leaf: u64) -> u64 {
     VBIT | ((id as u64) << 4) | leaf
@@ -99,10 +112,16 @@ const ROOT_CHILDREN: [(&[u8], u64, u32); 4] = [
 // nodes/ directory children (only the static `new`; voices are listed dynamically).
 const NODES_STATIC: [(&[u8], u64, u32); 1] = [(b"new", P_NODES_NEW, S_IFREG | 0o666)];
 // A voice directory's children (name, leaf, mode).
-const VOICE_CHILDREN: [(&[u8], u64, u32); 3] = [
+const VOICE_CHILDREN: [(&[u8], u64, u32); 4] = [
     (b"audio", VLEAF_AUDIO, S_IFREG | 0o666),
     (b"ctl", VLEAF_CTL, S_IFREG | 0o644),
     (b"info", VLEAF_INFO, S_IFREG | 0o444),
+    // The zero-copy ring map fid (N-2b). Mode 0o666 like `audio`: the file mode
+    // must PERMIT the open (the kernel's dev9p rwx enforcement gates open on the
+    // mode before any handler runs, and boot/user clients are not uid 0), so the
+    // real authority is server-side at Tweft (h_weft's owner gate) + the kernel's
+    // consume-once share claim (SPSC producer-uniqueness). Not byte-read/written.
+    (b"data", VLEAF_DATA, S_IFREG | 0o666),
 ];
 
 fn mode_of(path: u64) -> u32 {
@@ -134,6 +153,35 @@ fn is_dir(path: u64) -> bool {
     path == P_ROOT || path == P_NODES || (is_voice(path) && vleaf(path) == VLEAF_DIR)
 }
 
+/// A voice's zero-copy Weft ring (N-2b): an ANON Burrow nocturned allocates and
+/// shares to the owning client (`SYS_WEFT_SHARE` -> the client's `SYS_WEFT_MAP`
+/// on the node's `data` fid). nocturned is the CONSUMER (reads finished periods
+/// on the device clock); the client is the PRODUCER. The share is bounded by the
+/// voice (I-37): dropping the voice releases nocturned's side here; the kernel's
+/// #847 dual count keeps the pages alive until the client's mapping is gone too,
+/// so there is no in-flight-page UAF and no stale access.
+struct RingVoice {
+    ring_va: u64,
+    ring_size: u64,
+    share_id: u64,
+    geom: weftlib::RingGeom,
+}
+
+impl Drop for RingVoice {
+    fn drop(&mut self) {
+        // `t_weft_unshare` disarms an UN-CLAIMED share (a client that never
+        // mapped); if the client already claimed it the kernel consumed the id
+        // and this is a clean no-op. `t_burrow_detach` drops nocturned's own
+        // mapping. The client's mapping (if any) is reclaimed by the kernel
+        // (vma_drain / the #847 dual count), so releasing our side is safe in
+        // any interleaving.
+        unsafe {
+            let _ = t_weft_unshare(self.share_id);
+            let _ = t_burrow_detach(self.ring_va, self.ring_size);
+        }
+    }
+}
+
 /// One mixer input: an independent S16LE-stereo stream with its own bounded
 /// FIFO and gain. Voice 0 is the persistent default (the root `audio` file);
 /// every other voice is owned by the connection that minted it.
@@ -147,6 +195,9 @@ struct Voice {
     owner: i64,
     bytes_in: u64,
     flushes: u64,
+    /// The zero-copy ring, lazily allocated at the first Tweft (N-2b). None =
+    /// a byte-copy-only voice (the FIFO path). Voice 0 never has a ring.
+    ring: Option<RingVoice>,
 }
 
 impl Voice {
@@ -158,6 +209,7 @@ impl Voice {
             owner,
             bytes_in: 0,
             flushes: 0,
+            ring: None,
         }
     }
 }
@@ -192,6 +244,50 @@ impl Shared {
     /// gate).
     fn voice_owner(&self, id: u32) -> Option<i64> {
         self.voice_pos(id).map(|i| self.voices[i].owner)
+    }
+
+    /// Lazily allocate + share voice `id`'s zero-copy ring; idempotent (returns
+    /// the stored geometry). None on OOM / registry-full / a missing voice, so
+    /// the caller falls back to the byte-copy `audio` write. Voice 0 has no ring
+    /// (the world-shared byte sink); callers gate that before here.
+    fn weft_ensure(&mut self, id: u32) -> Option<(u64, u64, u32)> {
+        let i = self.voice_pos(id)?;
+        if let Some(r) = &self.voices[i].ring {
+            return Some((r.share_id, r.ring_size, r.geom.ring_entries)); // idempotent
+        }
+        // ANON, RW, demand-zero -- satisfies SYS_WEFT_SHARE's ANON + RW-only +
+        // whole-ring check; page-aligned so the later detach matches.
+        let ring_va = unsafe { t_burrow_attach(RING_SIZE) };
+        if ring_va < 0 {
+            return None;
+        }
+        let ring_va = ring_va as u64;
+        let geom = match unsafe { weftlib::init_ring(ring_va as *mut u8, RING_SIZE, RING_ENTRIES) } {
+            Some(g) => g,
+            None => {
+                unsafe {
+                    let _ = t_burrow_detach(ring_va, RING_SIZE);
+                }
+                return None;
+            }
+        };
+        // The kernel takes the I-30 registration pin (the ring lives across the
+        // correlation window even if nocturned detaches its own mapping) and
+        // mints the kernel-scoped, consume-once share_id.
+        let share_id = unsafe { t_weft_share(ring_va, RING_SIZE) };
+        if share_id <= 0 {
+            unsafe {
+                let _ = t_burrow_detach(ring_va, RING_SIZE);
+            }
+            return None;
+        }
+        self.voices[i].ring = Some(RingVoice {
+            ring_va,
+            ring_size: RING_SIZE,
+            share_id: share_id as u64,
+            geom,
+        });
+        Some((share_id as u64, RING_SIZE, RING_ENTRIES))
     }
 
     /// Total buffered bytes across every voice (the device idle-stop reads this).
@@ -541,6 +637,7 @@ impl Conn {
             p9::P9_TGETATTR => self.h_getattr(tmsg, tag),
             p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
             p9::P9_TFLUSH => self.h_flush(tmsg, tag),
+            p9::P9_TWEFT => self.h_weft(sh, tmsg, tag),
             _ => self.err(tag, p9::E_NOSYS),
         };
         if self.defer {
@@ -768,6 +865,11 @@ impl Conn {
         // audio(3): an output-only device returns zero when read (root + voice).
         if f.path == P_AUDIO || (is_voice(f.path) && vleaf(f.path) == VLEAF_AUDIO) {
             return p9::build_rread(&mut self.out_buf, tag, &[]);
+        }
+        // The `data` leaf is a Weft map fid (driven by SYS_WEFT_MAP -> Tweft),
+        // not a byte file; a Tread on it is a protocol error.
+        if is_voice(f.path) && vleaf(f.path) == VLEAF_DATA {
+            return self.err(tag, p9::E_INVAL);
         }
         let mut text: Vec<u8> = Vec::new();
         if is_voice(f.path) {
@@ -1041,6 +1143,43 @@ impl Conn {
         };
         self.pending.retain(|pw| pw.tag != a.oldtag);
         p9::build_rflush(&mut self.out_buf, tag)
+    }
+
+    /// Tweft(fid) on a voice's `data` leaf: allocate + share that voice's
+    /// zero-copy ring, reply Rweft(share_id, size, entries). The kernel issues
+    /// this only from a client's SYS_WEFT_MAP and maps the ring into that
+    /// client. Authority (I-37/I-46a): only the connection that minted the voice
+    /// (the F1 owner gate); voice 0 (the world-shared byte sink) has no ring.
+    /// The kernel's consume-once share claim makes the mapper unique -- the SPSC
+    /// producer -- even though mounted clients share one dev9p connection.
+    fn h_weft(&mut self, sh: &mut Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+        let fid = match p9::parse_tweft(tmsg) {
+            Ok(f) => f,
+            Err(_) => return self.err(tag, p9::E_PROTO),
+        };
+        let i = match self.fid_find(fid) {
+            Some(i) => i,
+            None => return self.err(tag, p9::E_BADF),
+        };
+        let f = self.fids[i].unwrap();
+        if !f.opened || !(is_voice(f.path) && vleaf(f.path) == VLEAF_DATA) {
+            return self.err(tag, p9::E_INVAL);
+        }
+        let id = vid(f.path);
+        if id == 0 {
+            return self.err(tag, p9::E_INVAL);
+        }
+        match sh.voice_owner(id) {
+            Some(o) if o == self.handle => {}
+            Some(_) => return self.err(tag, p9::E_PERM),
+            None => return self.err(tag, p9::E_BADF),
+        }
+        match sh.weft_ensure(id) {
+            Some((share_id, ring_size, ring_entries)) => {
+                p9::build_rweft(&mut self.out_buf, tag, share_id, ring_size as u32, ring_entries)
+            }
+            None => self.err(tag, p9::E_NOMEM),
+        }
     }
 }
 
