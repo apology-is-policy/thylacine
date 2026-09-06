@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/114-netdev (virtio-net transport MMIO+PCI): clean redirect to sub-netdev + sub-netd-nic"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["39245e1c"]
 touched: []
 established: []
 closed: []
