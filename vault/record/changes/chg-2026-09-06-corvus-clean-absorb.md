@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb the corvus CLEAN set -- 65-skeleton + 66-server + 68-crypto (split) + 74-9p-server (dual); fold 74's 4 verified minor atoms into sub-corvus (message-oriented /ctl, accept-time fail-closed peer read, conn-id zero-skip, no-Tflush); no security gaps in this set (60 absorbed / 97 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["b24297b0"]
 touched: [sub-corvus]
 established: []
 closed: []
