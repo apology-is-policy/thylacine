@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/53-sys-rw (SYS_READ/SYS_WRITE byte I/O): zero-fold, 3-surface redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["822b762d"]
 touched: []
 established: []
 closed: []
