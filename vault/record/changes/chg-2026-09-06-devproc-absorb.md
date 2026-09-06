@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 32-devproc -- fold the 6 read-side field contracts (cpu_ns/name/exe/cwd/qid-pid0/ns-pheno) the debug-heavy dossier lacked, then stub (52 absorbed / 105 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["8db78248"]
 touched: [sub-kernel-devproc]
 established: []
 closed: []
