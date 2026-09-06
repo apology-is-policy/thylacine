@@ -4,7 +4,7 @@ type: chg
 title: "entry/trivial-devices cluster: fold the 2 Explore-flagged non-orphan gaps -- the #57b devcons/devcons revoke-asymmetry into sub-kernel-devdev (+ an inv-i27 precision clause) and the RNDR FEAT_RNG detection/NZCV-capture mechanism into sub-kernel-content, ahead of the 109/31 stubs"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["6202dc8d"]
 touched: [sub-kernel-devdev, inv-i27, sub-kernel-content]
 established: []
 closed: []
