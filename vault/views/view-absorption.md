@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**97 absorbed · 60 live · 157 total.**
+**98 absorbed · 59 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -53,7 +53,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 100-9p-identity-presentation.md | absorbed | [[inv-i22]], [[seam-nuname-trust-stamp]], [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-client]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-perm]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-net]], [[sub-stratum-server]], [[sub-stratum-session]], [[sub-substrate-build]] |
 | 101-halls.md | live | — |
 | 102-legate.md | absorbed | [[sub-corvus]], [[sub-kernel-caps]], [[sub-kernel-perm]] |
-| 103-login.md | live | — |
+| 103-login.md | absorbed | [[abi-boot-banner]], [[sub-corvus]], [[sub-kernel-cons]], [[sub-kernel-devdev]], [[sub-kernel-joey]], [[sub-stratum-boot]], [[sub-stratum-session]] |
 | 104-stalk.md | absorbed | [[inv-i28]], [[sub-kernel-path]], [[sub-kernel-stalk]] |
 | 105-corvus-recovery.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus-mint]], [[sub-corvus]] |
 | 106-random.md | absorbed | [[inv-i16]], [[lock-random]], [[lock-rng-dev]], [[sub-kernel-content]] |
