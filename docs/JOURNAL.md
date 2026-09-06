@@ -101,6 +101,30 @@ first deliverable is a PLAN surfaced for operator signoff (survey the 157
 parallel reference files' coverage, the retirement mechanism, the sequence, the
 CLAUDE.md doc-update change, peer coordination), not blind execution.
 
+**Wrong turn, caught within the hour (aux, call 0062) -- the reusable part of
+this run.** The hook shipped fail-CLOSED for behind-main worktrees, the exact
+failure the TTrace lesson warns of. It builds quaestor from the *committing
+worktree's* source; a worktree behind `292a1f9c` has a quaestor with no
+`dossier-gate` subcommand, which hits its usage arm and exits 2 -- and the hook
+`exec`'d that, so the commit aborted. My fail-open guard covered a missing `go`,
+not an old quaestor. The root error was in my own verification last session: I
+checked that `vault/` EXISTS on main (it does, 1147 files) and concluded every
+worktree could run the gate -- but **presence of the DIRECTORY is not presence
+of the SUBCOMMAND in that worktree's HEAD.** aux, on aux-3 (behind main), was
+bricked on a ready all-green N-2c commit and diagnosed it precisely (exit 2 from
+the usage arm, exec-propagated; pre-commit lint had passed, only the commit-msg
+gate blocked). Fix: the hook no-ops when the committing worktree lacks
+`vault/meta/quaestor/dossier_gate.go` -- the feature's own source, checked before
+any `go` run so a behind worktree pays zero -- plus an `exit 2` tolerance for a
+half-merged tree. I chose the file-check over aux's usage-grep probe because the
+probe would double-compile quaestor on every commit; the file-check costs a
+behind worktree nothing, and build-error fail-open is already covered upstream
+(pre-commit runs quaestor first). Verified both directions: aux-3 no-ops in
+0.02 s, up-to-date vault still blocks and still escapes. The lesson worth keeping:
+a gate that runs the *committing worktree's* tooling must fail open when that
+tooling predates the gate, and "the directory is present" is not "the feature is
+present."
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards

@@ -522,13 +522,23 @@ the commit message carries it — the code tracks (main, aux) write no vault
 chg notes and, per the cutover rule in `CLAUDE.md`, ring the vault for owned
 prose rather than co-staging it in a kernel commit, so a chg-field-only
 escape would leave them blocked with no clean way through. `pre-commit` runs
-before any message exists; only `commit-msg` sees it. On an empty registry it
-**fails open** (returns clean) — the opposite of `lint`'s fail-closed —
-because `pre-commit` is the authoritative infra gate (it refuses an empty
-registry first), and a `commit-msg` hook that blocked on a bypassed or absent
-vault would be a worse failure than a missed reminder. `--no-verify` skips
-both hooks and is the sanctioned emergency bypass; the gate does not try to
-defeat it.
+before any message exists; only `commit-msg` sees it. The hook **fails open**
+on every infra shortfall — the opposite of `lint`'s fail-closed — because a
+reminder that blocked on infra would be worse than a missed one, and
+`pre-commit` is the authoritative infra gate (it runs first and refuses an empty
+registry or a broken build). Two fail-open cases are load-bearing and the second
+was learned by getting it wrong. (1) An empty registry: `dossier-gate` returns
+clean. (2) A **behind-main worktree** whose checked-out quaestor predates the
+feature: the hook builds quaestor from the *committing worktree's* source, and an
+older source has no `dossier-gate` subcommand — it hits quaestor's usage arm and
+exits 2, which if `exec`'d would BRICK the commit (fail-*closed*, the exact
+opposite of intent). So the hook no-ops when the worktree lacks
+`vault/meta/quaestor/dossier_gate.go` (the feature's own source, checked before
+any `go` run so a behind worktree pays nothing), with an `exit 2` tolerance as
+defense-in-depth for a half-merged tree. The gate activates for a worktree only
+once it carries the feature — correct, since a worktree is gated by its own
+tooling version. `--no-verify` skips both hooks and is the sanctioned emergency
+bypass; the gate does not try to defeat it.
 
 `quaestor lint` checks:
 
