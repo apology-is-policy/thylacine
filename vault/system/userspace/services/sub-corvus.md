@@ -333,13 +333,22 @@ authority.
 session's bound user is the recorded owner of the named dataset. A
 cross-user unwrap is refused even with a valid token, which is the
 property the design's model names explicitly and carries a negative
-counterexample for.
+counterexample for. The check is a cheap ownership-table lookup and
+precedes any crypto: the keypair is not copied out of the session slab
+until the caller is authorized, so an unauthorized unwrap costs nothing and
+never brings key material onto the code path.
 
 ## Error paths
 
 Boot failures exit; there is no degraded mode. A failed hardening step
 reports a numbered stage and dies, so a boot log identifies which of the
 five steps failed without a debugger.
+
+The same posture holds at runtime for the CSPRNG. corvus proves it seeded
+at boot, so a *later* `getrandom` failure inside any verb is an invariant
+violation, not a recoverable error: the RNG adapter exits the daemon rather
+than return short, so there is no soft path by which a token, salt or nonce
+is drawn from a generator that has stopped answering.
 
 At the wire, malformed frames answer `BadFormat`. Two of those are
 fail-stop rather than continue — a protocol-version mismatch and an

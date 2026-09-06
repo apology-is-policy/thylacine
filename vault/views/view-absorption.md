@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**60 absorbed · 97 live · 157 total.**
+**61 absorbed · 96 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -165,7 +165,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 66-corvus-server.md | absorbed | [[sub-corvus]] |
 | 67-el1h-kernel.md | live | — |
 | 68-corvus-crypto.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus]] |
-| 69-corvus-unwrap.md | live | — |
+| 69-corvus-unwrap.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus]] |
 | 70-devsrv.md | absorbed | [[sub-kernel-devsrv]], [[view-closed-sub-kernel-devsrv]] |
 | 71-srvconn.md | absorbed | [[sub-kernel-srvconn]], [[view-closed-sub-kernel-srvconn]] |
 | 72-poll.md | absorbed | [[sub-kernel-poll]] |
