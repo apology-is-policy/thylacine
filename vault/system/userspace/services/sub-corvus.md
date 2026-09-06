@@ -232,6 +232,35 @@ passphrase or own phrase can open; the host owner has no user-data
 recovery verb at all. That is the no-escrow property, and it is what makes
 mutually-encrypted homes survive a malicious host owner.
 
+**A user's recovery takes no token and no capability** — the user has lost
+the passphrase and so cannot AUTH, and a user-held recovery that needed the
+admin would not be user-held. What bounds the unauthenticated Argon2id it
+runs is a per-subject rate limit charged only on a checksum-valid-but-wrong
+phrase — a typo fails the cheap BIP-39 checksum first and is never charged —
+so a legitimate holder is never locked out and a guesser gets a bounded
+number of expensive attempts per boot. **System** recovery and its sibling
+`ADMIN_ELEVATE` add one gate: live console attachment, because the system
+identity is the most privileged secret and must never be reachable from a
+non-console peer. Both verify the system passphrase by a *real* Argon2id +
+AEGIS unwrap of the host-baked system wrap (minted by [[sub-corvus-mint]]) —
+the keypair it yields is wiped at once because only the yes/no is needed —
+not the byte-comparison the v1.0 placeholder used before the wrap existed.
+
+**The two wraps commit in a fixed order, and that order is a crash-safety
+property.** A recovery re-wraps the keypair under the new passphrase and
+rolls a fresh phrase, committing the passphrase wrap *first* and the recovery
+wrap second. Because both hold the same keypair, a crash between them strands
+nothing: the new passphrase is already live and the old phrase still valid,
+so the user can log in and re-run recovery. The fresh phrase is returned only
+once it is durably on disk.
+
+**The provisioning window is bounded, not an escrow.** Because user creation
+is admin-driven, the provisioner sees a user's *initial* recovery phrase
+once, in the creation reply — the same trust window as an admin-set initial
+passphrase. corvus keeps only the ciphertext wrap, never the plaintext
+phrase, and the window closes the moment the user runs recovery, which rolls
+a fresh phrase shown only to them.
+
 ## Data structures
 
 **`Session`** — a single global slot: an active flag, the user name and

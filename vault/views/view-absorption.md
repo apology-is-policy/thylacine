@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**62 absorbed · 95 live · 157 total.**
+**63 absorbed · 94 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -55,7 +55,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 102-legate.md | live | — |
 | 103-login.md | live | — |
 | 104-stalk.md | absorbed | [[inv-i28]], [[sub-kernel-path]], [[sub-kernel-stalk]] |
-| 105-corvus-recovery.md | live | — |
+| 105-corvus-recovery.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus-mint]], [[sub-corvus]] |
 | 106-random.md | absorbed | [[inv-i16]], [[lock-random]], [[lock-rng-dev]], [[sub-kernel-content]] |
 | 107-loom.md | live | — |
 | 108-utopia-repl.md | live | — |
