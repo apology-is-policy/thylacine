@@ -72,6 +72,18 @@ start of this segment.
   execute to cacheable Normal-WB RAM*, which also rejects the new
   write-combining index, so the encoder now forbids an executable page on any
   non-cacheable attribute.
+- **substrate-builders** (`c694c315`), **net-clients** (`a596d2d0`), and
+  **kernel-devdev** (`0c859961`) -- the small/clean tail. The builders one is
+  pure tooling (both clade drivers must now sync `build-config.sh` + `configs/`,
+  a dependency `build.sh` silently acquired at the configurator arc). net-clients
+  is one file (httpd's access log flipped to `--color=auto` over the real
+  `SYS_FD_DEVCLASS` TTY check). devdev is the audit-bearing one: the /dev
+  front-door gained `devdev_fd_devclass` (only `/dev/cons` reports class `'c'`,
+  so a walked console fd is a terminal to `is-a-terminal`) and `spoor_is_console`
+  -- a security-relevant identity check that keys on the unforgeable kernel `Dev`
+  pointer rather than a qid bit, because a dev9p server supplies its own qid path
+  and tapestryd's pane flag collides with the console bit, so a bit-only test
+  would accept a forged pane fd.
 
 **The judgment worth recording: a dossier straddling two tracks.**
 utopia-eval's post-2026-08-16 churn was *mixed* -- main's shell arc (`eval_and_or`
@@ -122,6 +134,14 @@ scan (both a real module and the dump listed) and PASS on the fix. The
 stewardship point: a bug a peer reports, in tooling that gates all three tracks,
 is not "main's problem to route around" -- it is the track that owns the tool's
 to close.
+
+**Where it stands.** Nine dossiers current, one tooling bug closed, backlog
+35 -> 27, tip `7f1636de`, both mirrors converged throughout. The clean-quick pool
+is spent: what remains is careful audit-bearing mixed-track work (`kernel-dev`,
+the H-1+viv sibling of `kernel-devdev`) or the two genuinely big dossiers
+(`coreutils-presenters`, 15 files plus a new `ps`; `libthyla-rs`, 12) -- the big
+two wanting a fresh context rather than a deep one, per the arc's own "BIG: own
+focused session, do NOT start deep in context".
 
 ---
 
