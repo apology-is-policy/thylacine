@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/42-virtio-input (P4-K virtio-input reference driver): clean redirect to sub-virtio-probes + sub-substrate-gates"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["b7867499"]
 touched: []
 established: []
 closed: []
