@@ -4,7 +4,7 @@ type: chg
 title: "docs/reference retirement: absorb 33-devctl -- mostly-already-covered (srvconn + cons carry the taxonomies); fold only the /ctl/procs STATE-column note into devctl, triple-redirect stub (56 absorbed / 101 live)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["1fb76ff4"]
 touched: [sub-kernel-devctl]
 established: []
 closed: []
