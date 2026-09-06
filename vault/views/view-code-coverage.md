@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**406 owned · 78 unowned · 484 files (83% owned) · ~20499 unswept lines.**
+**407 owned · 77 unowned · 484 files (84% owned) · ~20373 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30431 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -82,7 +82,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/halcyond | 18 | 1 | 126 |
 | usr/stub-driver | 0 | 1 | 119 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
@@ -90,6 +89,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/corvus | 1 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
+| usr/halcyond | 19 | 0 | 0 |
 | usr/httpd | 1 | 0 | 0 |
 | usr/https | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
@@ -159,7 +159,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/ports/tyrquake/tyr-glquake-launcher.c | 134 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
-| usr/halcyond/src/session_init.rs | 126 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | usr/ports/sdl2/thylacine/thyla_tap.h | 125 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |

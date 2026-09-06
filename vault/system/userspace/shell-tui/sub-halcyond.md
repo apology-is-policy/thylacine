@@ -18,6 +18,7 @@ code:
   - usr/halcyond/src/status.rs
   - usr/halcyond/src/statusset.rs
   - usr/halcyond/src/session.rs
+  - usr/halcyond/src/session_init.rs
   - usr/halcyond/src/tile.rs
   - usr/halcyond/src/tiles.rs
   - usr/halcyond/src/grid.rs
@@ -273,6 +274,17 @@ anchors are the H-2 / H-3b / H-3c / H-3d / KT-1 trigger rows +
   reference skips fail-safe.
 - **Span hygiene**: Beacon spans die at block boundaries; the SGR pen persists.
   A program dying mid-`em` must not restyle the next prompt.
+- **Freeze-mid-`pre` style-index soundness** (PL-arc audit R1 F1 [P0] + R2 F6;
+  the freeze/pre interaction is format-fuzz class). When `freeze_open` freezes an
+  open block while a `pre` is open, the pre is finalized INTO that block -- the
+  one whose `styles` vec its cells' style indices name -- never carried to a
+  fresh block. `intern_style` is append-only / degrade-to-last, so a handed-out
+  index survives even a ScrollOff interning more styles into the block before the
+  freeze; `self.open` is reassigned in exactly the one `freeze_open`
+  `mem::replace`. Both freeze triggers reach the arm and are now
+  regression-witnessed: the tile-split `set_max_cost` and the
+  `finalize_scroll_pending` ScrollOff. A stale index otherwise OOB-panics
+  `layout_block` (`len is 0 but the index is 0`).
 - **The grid containment**: an untrusted tile's OOB cell write is dropped, the
   cursor clamped.
 - **Budgets bound memory against any input**: block eviction + stored cost
@@ -348,15 +360,19 @@ presents are a recorded optimization.
 
 ## Tests
 
-- **Host: 99 `#[test]` across the twelve lib modules** (`cargo test -p halcyond
-  --lib --no-default-features` -- the reference doc's "55" predates the KT-1
-  rounds; transcript 23, tile 13, input 12, tiles 8, menu 7, layout 7, grid 6,
-  raster 6, chrome 5, downq/status/select 4 each). They pin the streaming
-  determinism, wrap/alignment/boxes, the word-through-executor leg, the
-  held-feed arms, the obj-run walk + `run_rect`/`hit_run` agreement, the menu cap
-  + window, the windowed render (a warm render lays <= 4 blocks / <= 12 lines for
-  200 blocks of history; the content height equals the whole-history sum), the
-  DownQueue policies, the grid OOB-drop.
+- **Host: 127 `#[test]` across the thirteen lib modules** (`cargo test -p
+  halcyond --lib --no-default-features`; transcript 39, tile 17, input 12, tiles
+  10, layout 8, grid 8, menu 7, raster 6, chrome 5, status/select/downq 4 each,
+  session_init 3). They pin the streaming determinism, wrap/alignment/boxes, the
+  word-through-executor leg, the held-feed arms, the obj-run walk +
+  `run_rect`/`hit_run` agreement, the menu cap + window, the windowed render (a
+  warm render lays <= 4 blocks / <= 12 lines for 200 blocks of history; the
+  content height equals the whole-history sum), the DownQueue policies, the grid
+  OOB-drop, and **both freeze-mid-`pre` triggers** (Invariants): the tile-split
+  `set_max_cost` and the ScrollOff `finalize_scroll_pending`, each
+  discrimination-proven -- sabotaging the finalize arm OOB-panics in
+  `layout_block` (`len is 0 but the index is 0` for the ScrollOff twin, `index 1`
+  for the set_max_cost twin), the arm makes both lay out clean.
 - **In-guest** (`gate-interactive`, all lever-gated + SKIP-clean on a default
   image): `ls-halcyon` (joey's choice, the rich advertisement, the
   screendump/ink, the split/zoom reflow, the tag bars + the section-4.2 keys,
