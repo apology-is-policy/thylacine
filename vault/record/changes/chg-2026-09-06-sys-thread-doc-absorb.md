@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/81-sys-thread (SYS_THREAD_SPAWN/EXIT, pthread substrate): fold the clear_child_tid join handshake into sub-kernel-death, 7-surface redirect stub"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["32118630"]
 touched: [sub-kernel-death]
 established: []
 closed: []
