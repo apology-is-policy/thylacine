@@ -35,14 +35,14 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**46 absorbed · 111 live · 157 total.**
+**47 absorbed · 110 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
 | 00-overview.md | live | — |
 | 01-boot.md | absorbed | [[abi-boot-banner]], [[inv-i16]], [[sub-kernel-boot-entry]], [[sub-kernel-boot-sequence]] |
 | 02-dtb.md | absorbed | [[inv-i15]], [[sub-kernel-dtb]] |
-| 03-mmu.md | live | — |
+| 03-mmu.md | absorbed | [[sub-kernel-mmu]] |
 | 04-extinction.md | live | — |
 | 05-kaslr.md | absorbed | [[inv-i16]], [[sub-kernel-kaslr]] |
 | 06-allocator.md | absorbed | [[sub-kernel-mm-phys]] |
