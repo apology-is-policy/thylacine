@@ -4,7 +4,7 @@ type: chg
 title: "sub-kernel-hwcap de-stale: Warp-6 V-2 -- the host-visible BAR map authority (SYS_BURROW_FROM_HOSTMEM), the hostmem_burrows counter, and the DMA-only owner-death quiesce (F1)"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["b5240804"]
 touched:
   - sub-kernel-hwcap
 established: []
