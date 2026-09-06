@@ -280,8 +280,12 @@ impl<'a> LineBuilder<'a> {
         src_item: usize,
         src_col: usize,
         bg: Option<u32>,
+        pre: bool,
     ) {
-        let face = face_for(st, in_table);
+        // PL-1b: a `pre` block forces mono (Cornucopia) regardless of a run's
+        // annotation, and never word-wraps -- the two properties that make a
+        // preformatted island (own ground + gutter added by the Item::Pre arm).
+        let face = if pre { FACE_MONO } else { face_for(st, in_table) };
         let px = px_for(st, self.sheet);
         let color = color_for(st, self.sheet);
         self.note_metrics(gs, face, px);
@@ -311,7 +315,8 @@ impl<'a> LineBuilder<'a> {
             if face != FACE_MONO && i + 1 < cells.len() {
                 gr.advance += gs.kern(face, px, ch, cells[i + 1].ch);
             }
-            if self.pen_x + gr.advance > self.width - self.sheet.pad_x && !seg.refs.is_empty() {
+            if !pre && self.pen_x + gr.advance > self.width - self.sheet.pad_x && !seg.refs.is_empty()
+            {
                 // Wrap: prefer the last space boundary inside this seg.
                 if let Some((cut, cut_col)) = last_space {
                     if cut > 0 && cut < seg.refs.len() {
@@ -435,7 +440,7 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                         } else {
                             None
                         };
-                    lb.lay_span(gs, &line.cells[s..e], &st, false, item_idx, s, bg);
+                    lb.lay_span(gs, &line.cells[s..e], &st, false, item_idx, s, bg, false);
                 }
                 lb.break_line(gs);
             }
@@ -452,6 +457,54 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                     color: sheet.rule,
                 });
                 lb.y += 7;
+            }
+            Item::Pre(lines) => {
+                // PL-1b: the preformatted code-fence island (HALCYON.md
+                // 110-113). Each line is laid MONO + verbatim (the `pre` flag
+                // forces the face and disables word-wrap), inset past a leading
+                // gutter. The own ground + the gutter rule are RectSpecs added
+                // AFTER the lines (their y-extent is now known); render_block
+                // paints rects before glyphs, so they sit BEHIND the mono text.
+                const PRE_GUTTER: i32 = 10; // the rule + its gap, the left inset
+                let top = lb.y;
+                for line in lines {
+                    lb.pen_x = sheet.pad_x + PRE_GUTTER;
+                    for (s, e, sid) in runs_of(&line.cells) {
+                        let st = b.styles[sid as usize];
+                        // A run's own SGR background still shows through; the
+                        // block ground is the default carrier otherwise.
+                        let bg = if st.bg != sheet.ground
+                            && st.bg != libhalcyon::theme::DAYLIGHT.surface
+                        {
+                            Some(st.bg)
+                        } else {
+                            None
+                        };
+                        lb.lay_span(gs, &line.cells[s..e], &st, false, item_idx, s, bg, true);
+                    }
+                    lb.break_line(gs);
+                }
+                let h = (lb.y - top).max(0) as u32;
+                if h > 0 {
+                    // The code-fence ground (Daylight `raised`, distinct from
+                    // the parchment surface) behind the whole block ...
+                    lb.rects.push(RectSpec {
+                        x: sheet.pad_x,
+                        y: top,
+                        w: (lb.width - 2 * sheet.pad_x).max(0) as u32,
+                        h,
+                        color: libhalcyon::theme::DAYLIGHT.raised,
+                    });
+                    // ... and the leading vertical gutter rule (the code-fence
+                    // marker, section 3's "leading vertical gutter rule").
+                    lb.rects.push(RectSpec {
+                        x: sheet.pad_x,
+                        y: top,
+                        w: 2,
+                        h,
+                        color: sheet.rule,
+                    });
+                }
             }
         }
         // Stamp the item's visual lines with their source address (tables
@@ -564,7 +617,7 @@ fn lay_table(
                 // width is temporarily unbounded for the span.
                 let saved_w = lb.width;
                 lb.width = i32::MAX / 2;
-                lb.lay_span(gs, &cell[s..e], &st, true, item_idx, 0, None);
+                lb.lay_span(gs, &cell[s..e], &st, true, item_idx, 0, None, false);
                 lb.width = saved_w;
             }
         }

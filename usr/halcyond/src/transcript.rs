@@ -90,6 +90,12 @@ pub enum Item {
     Line(Line),
     Table(TableModel),
     Rule,
+    /// PL-1b: a Beacon `pre` block (BEACON.md 100/370) -- preformatted lines
+    /// laid MONO + verbatim (no word-wrap, no space-collapse), set apart by
+    /// its own ground + a leading gutter rule (HALCYON.md 110-113). Each line
+    /// is a `Line` so an inline `em`/`obj` run inside the block keeps its span;
+    /// the block forces mono regardless of a run's annotation.
+    Pre(Vec<Line>),
 }
 
 pub struct Block {
@@ -306,6 +312,7 @@ const MAX_TABLE_ROWS: usize = 100_000;
 const MAX_TABLE_COLS: usize = 256; // cells per row
 const MAX_CELL_CHARS: usize = 4096;
 const MAX_TABLE_BYTES: usize = 16 << 20; // total in-progress table memory (content + Vec overhead)
+const MAX_PRE_BYTES: usize = 16 << 20; // total in-progress pre-block memory (uncharged until close)
 
 struct TableCap {
     cols: Vec<u8>,
@@ -344,6 +351,19 @@ pub struct Transcript {
     obj_suppressed: u32,
     hdr: u8,
     table: Option<TableCap>,
+    /// PL-1b: the open `pre` block's lines, accumulated between open_op(Pre)
+    /// and close_op(Pre). Built through the SAME line discipline (put_char /
+    /// newline / flush_line) so tabs, spacing and `\r` behave verbatim; the
+    /// flushed lines are redirected HERE instead of into the block's items.
+    /// None = not in a pre. Bounded by the per-block line cap AND `pre_bytes`
+    /// (MAX_PRE_BYTES); charged + cap-enforced at close (a bounded transient
+    /// like `scroll_pending`).
+    pre: Option<Vec<Line>>,
+    /// PL-1b: bytes accumulated in the open `pre` (content only). The pre is
+    /// uncharged to the block budget until close, so this bounds the transient
+    /// independently -- an unclosed / hostile pre cannot exceed MAX_PRE_BYTES
+    /// (the format-fuzz DoS floor, mirroring TableCap.bytes). Reset at open.
+    pre_bytes: usize,
     // Escape-scanner state (persists across feeds via `carry`, but the
     // scanner itself also survives a split mid-sequence).
     state: ScanState,
@@ -438,6 +458,8 @@ impl Transcript {
             obj_suppressed: 0,
             hdr: 0,
             table: None,
+            pre: None,
+            pre_bytes: 0,
             state: ScanState::Ground,
             cwd: String::new(),
             osc_buf: Vec::new(),
@@ -545,6 +567,13 @@ impl Transcript {
     }
 
     fn open_op(&mut self, op: Op, args: &[wire::Arg]) {
+        // A `pre` block nests no block op -- only inline `em`/`obj` (BEACON.md
+        // 351-355). While one is open, ignore any other open (malformed
+        // nesting, incl. a nested `pre`); em/obj still color its cells via
+        // style_idx. The format-fuzz containment guard.
+        if self.pre.is_some() && !matches!(op, Op::Em | Op::Obj) {
+            return;
+        }
         match op {
             Op::Zone => {
                 let kind = match Self::arg(args, "k") {
@@ -637,15 +666,28 @@ impl Transcript {
                 };
                 self.hdr = level;
             }
-            // `pre` is a paired block; halcyond renders it specially (mono +
-            // code-block chrome) at PL-1b. Until then, ignore the frame -- its
-            // payload still renders as ordinary text (strip-equivalent).
-            Op::Pre => {}
+            // `pre` opens a preformatted block: flush the pending flow line,
+            // then redirect subsequent flushed lines into the pre accumulator
+            // (close_op(Pre) finalizes it). Not inside a table (malformed); the
+            // top guard already blocks a nested pre.
+            Op::Pre => {
+                if self.table.is_none() && self.pre.is_none() {
+                    self.flush_line();
+                    self.pre = Some(Vec::new());
+                    self.pre_bytes = 0;
+                    self.col = 0;
+                }
+            }
             Op::Mark | Op::Rule => {} // point ops; a paired open is malformed -- ignore
         }
     }
 
     fn close_op(&mut self, op: Op) {
+        // Mirror of open_op's containment guard: while a `pre` is open, only an
+        // inline em/obj close -- or the pre's own close -- is meaningful.
+        if self.pre.is_some() && !matches!(op, Op::Em | Op::Obj | Op::Pre) {
+            return;
+        }
         match op {
             Op::Zone => {
                 self.freeze_open(BlockKind::Foreign, false);
@@ -715,7 +757,23 @@ impl Transcript {
             Op::Hdr => {
                 self.hdr = 0;
             }
-            Op::Pre => {} // PL-1b renders `pre`; ignored until then (PL-1a)
+            Op::Pre => {
+                // Flush the last pre line (routes into the accumulator), then
+                // finalize the block: charge its cost (like Table) and push
+                // the Item::Pre. A well-formed `pre` always balances; a stray
+                // close with no open falls through (self.pre is None).
+                self.flush_line();
+                if let Some(lines) = self.pre.take() {
+                    let mut cost = 0usize;
+                    for l in lines.iter() {
+                        cost += l.cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
+                    }
+                    self.open.cost += cost;
+                    self.stored_cost += cost;
+                    self.open.items.push(Item::Pre(lines));
+                    self.enforce_block_cap();
+                }
+            }
             Op::Mark | Op::Rule => {}
         }
     }
@@ -768,6 +826,13 @@ impl Transcript {
     }
 
     fn point_op(&mut self, op: Op, args: &[wire::Arg]) {
+        // PL-1b: a `pre` block contains only inline em/obj + text; a stray
+        // point op (mark/rule) inside it is malformed -- ignore it (the
+        // containment guard, mirroring open_op/close_op). Prevents a rule from
+        // interleaving into the block or freezing it mid-accumulation.
+        if self.pre.is_some() {
+            return;
+        }
         match op {
             Op::Mark => {
                 // H-3d: the output zone's command (its first child, ut's
@@ -874,11 +939,26 @@ impl Transcript {
             return;
         }
         let cells = core::mem::take(&mut self.line);
+        self.col = 0;
+        // PL-1b: inside a `pre`, the flushed line joins the pre accumulator
+        // instead of the block items -- bounded by the per-block line cap (each
+        // line is already <= MAX_LINE_CELLS via put_char's soft-wrap). Charged
+        // + cap-enforced at close_op(Pre).
+        let cap = self.max_lines_per_block;
+        if let Some(pre) = self.pre.as_mut() {
+            // Bounded by BOTH the line cap and the byte budget (the pre is
+            // uncharged to the block until close; MAX_PRE_BYTES caps the
+            // transient). A line past either bound is dropped.
+            if pre.len() < cap && self.pre_bytes < MAX_PRE_BYTES {
+                self.pre_bytes += cells.len() * core::mem::size_of::<TCell>();
+                pre.push(Line { cells });
+            }
+            return;
+        }
         let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
         self.open.cost += cost;
         self.stored_cost += cost;
         self.open.items.push(Item::Line(Line { cells }));
-        self.col = 0;
         self.enforce_block_cap();
     }
 
@@ -1161,13 +1241,22 @@ impl Transcript {
             return; // row separation is structural, not textual
         }
         if self.line.is_empty() {
+            self.col = 0;
+            // PL-1b: a blank line inside a pre is a verbatim blank pre line
+            // (the accumulator, cap-bounded); outside, a charged empty Line.
+            let cap = self.max_lines_per_block;
+            if let Some(pre) = self.pre.as_mut() {
+                if pre.len() < cap {
+                    pre.push(Line { cells: Vec::new() });
+                }
+                return;
+            }
             // A blank line is content: keep it as an empty Line item -- and
             // charge it: a million empty lines is a million items.
             let cost = ITEM_OVERHEAD;
             self.open.cost += cost;
             self.stored_cost += cost;
             self.open.items.push(Item::Line(Line { cells: Vec::new() }));
-            self.col = 0;
             self.enforce_block_cap();
             return;
         }
@@ -1776,6 +1865,13 @@ mod tests {
                         }
                     }
                     Item::Rule => s.push('R'),
+                    Item::Pre(lines) => {
+                        s.push('P');
+                        for l in lines.iter() {
+                            s.push('|');
+                            s.push_str(&line_str(l));
+                        }
+                    }
                 }
             }
             s.push('|');
@@ -1866,6 +1962,187 @@ mod tests {
         let plain_style = out.styles[l.cells[10].style as usize];
         assert_eq!(plain_style.fg, pal.fg, "SGR 0 reset");
         assert_eq!(l.cells[s.chars().count() - 1].ch, '\u{e9}', "UTF-8 decoded");
+    }
+
+    fn pre_of(items: &[Item]) -> &[Line] {
+        items
+            .iter()
+            .find_map(|i| match i {
+                Item::Pre(l) => Some(l.as_slice()),
+                _ => None,
+            })
+            .expect("an Item::Pre in the block")
+    }
+
+    #[test]
+    fn pre_block_captures_verbatim_lines() {
+        // PL-1b: a `pre` block builds ONE Item::Pre holding its lines VERBATIM
+        // -- internal spacing preserved (no collapse), line breaks significant.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Text("a  b\n"), // two spaces
+            F::Text("cd\n"),
+            F::Close(Op::Pre),
+        ]));
+        let items = &t.open_block().items;
+        let lines = pre_of(items);
+        assert_eq!(lines.len(), 2, "two verbatim pre lines");
+        assert_eq!(line_str(&lines[0]), "a  b", "spacing preserved (no collapse)");
+        assert_eq!(line_str(&lines[1]), "cd");
+        assert_eq!(items.len(), 1, "the pre content did not leak into Line items");
+    }
+
+    #[test]
+    fn pre_inline_obj_keeps_its_span() {
+        // An inline `obj` inside a pre keeps its span (a path in a `la` listing
+        // stays a resolvable object even though the block is mono).
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Text("see "),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/bin")]),
+            F::Text("bin"),
+            F::Close(Op::Obj),
+            F::Text("\n"),
+            F::Close(Op::Pre),
+        ]));
+        let b = t.open_block();
+        let lines = pre_of(&b.items);
+        assert_eq!(line_str(&lines[0]), "see bin");
+        let st = b.styles[lines[0].cells[4].style as usize]; // the 'b' of "bin"
+        assert_ne!(st.obj, 0, "the obj run's cell carries an obj index");
+        let obj = &b.objs[(st.obj - 1) as usize];
+        assert_eq!((obj.ty.as_str(), obj.refv.as_str()), ("path", "/bin"));
+    }
+
+    #[test]
+    fn pre_is_bounded_under_a_line_flood() {
+        // A hostile `pre` (a newline storm) stays bounded: the accumulator caps
+        // at the per-block line limit -- the format-fuzz DoS floor (KT-1).
+        let mut t = Transcript::with_caps(daylight(), DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, 8);
+        let mut parts = vec![F::Open(Op::Pre, &[])];
+        for _ in 0..100 {
+            parts.push(F::Text("\n"));
+        }
+        parts.push(F::Close(Op::Pre));
+        t.feed(&frames(&parts));
+        let lines = pre_of(&t.open_block().items);
+        assert!(lines.len() <= 8, "the pre line count is capped: {}", lines.len());
+    }
+
+    #[test]
+    fn pre_is_bounded_under_a_byte_flood() {
+        // Wide lines are bounded by the byte budget (MAX_PRE_BYTES), not only
+        // the line cap. A ~16 MiB pre also charges enough to FREEZE the block
+        // on close, so the Item::Pre may land in a frozen block -- look across
+        // both. The invariant: fewer lines than fed (bytes dropped some) AND
+        // the content stays within one line of the cap.
+        let mut t = Transcript::new(daylight());
+        let wide: String = core::iter::repeat('x').take(4000).collect();
+        let framed: Vec<String> = (0..700).map(|_| format!("{wide}\n")).collect();
+        let mut parts = vec![F::Open(Op::Pre, &[])];
+        for l in framed.iter() {
+            parts.push(F::Text(l.as_str()));
+        }
+        parts.push(F::Close(Op::Pre));
+        t.feed(&frames(&parts));
+        let mut lines_len = 0usize;
+        let mut cells = 0usize;
+        let measure = |ls: &[Line], ll: &mut usize, cc: &mut usize| {
+            *ll = ls.len();
+            *cc = ls.iter().map(|l| l.cells.len()).sum();
+        };
+        for b in t.frozen_blocks().iter() {
+            for it in b.items.iter() {
+                if let Item::Pre(ls) = it {
+                    measure(ls, &mut lines_len, &mut cells);
+                }
+            }
+        }
+        for it in t.open_block().items.iter() {
+            if let Item::Pre(ls) = it {
+                measure(ls, &mut lines_len, &mut cells);
+            }
+        }
+        assert!(lines_len > 0, "the pre landed (open or frozen)");
+        assert!(
+            lines_len < 700,
+            "the byte budget dropped lines: {lines_len} of 700 fed"
+        );
+        assert!(
+            cells * 8 <= MAX_PRE_BYTES + 4096 * 8,
+            "pre content bounded within one line of the cap: {} MiB",
+            cells * 8 / (1 << 20)
+        );
+    }
+
+    #[test]
+    fn pre_ignores_a_malformed_nested_block_and_still_closes() {
+        // A block op inside a pre is malformed (pre nests only inline): ignored,
+        // the pre keeps accumulating and closes cleanly -- no table leaks, no
+        // stuck-open pre. The containment guard.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Text("x\n"),
+            F::Open(Op::Table, &[("cols", "l")]), // malformed -> ignored
+            F::Text("y\n"),
+            F::Close(Op::Table), // ignored
+            F::Close(Op::Pre),
+            F::Text("after\n"), // an ordinary Line AFTER the pre
+        ]));
+        let items = &t.open_block().items;
+        let lines = pre_of(items);
+        assert_eq!(lines.len(), 2, "both x and y are pre lines (the table was ignored)");
+        assert_eq!(line_str(&lines[0]), "x");
+        assert_eq!(line_str(&lines[1]), "y");
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, Item::Line(l) if line_str(l) == "after")),
+            "text after the pre is a normal Line (the pre really closed)"
+        );
+        assert!(
+            !items.iter().any(|i| matches!(i, Item::Table(_))),
+            "the malformed nested table did not leak"
+        );
+    }
+
+    #[test]
+    fn pre_lays_mono_with_ground_and_gutter() {
+        // PL-1b render: a pre lays MONO (every seg FACE_MONO, even an annotated
+        // obj run -- a Line would lay that proportional) and emits its two
+        // chrome rects (the code-fence ground + the leading 2px gutter rule).
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/bin")]),
+            F::Text("/bin"),
+            F::Close(Op::Obj),
+            F::Text("\n"),
+            F::Close(Op::Pre),
+        ]));
+        let b = t.open_block();
+        let mut gs = crate::raster::GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let lb = crate::layout::layout_block(b, 400, &sheet, &mut gs);
+        let segs: Vec<_> = lb.lines.iter().flat_map(|l| l.segs.iter()).collect();
+        assert!(!segs.is_empty(), "the pre laid glyphs");
+        assert!(
+            segs.iter().all(|s| s.face == crate::raster::FACE_MONO),
+            "every pre seg is mono (the annotation is overridden)"
+        );
+        assert!(
+            lb.rects
+                .iter()
+                .any(|r| r.color == libhalcyon::theme::DAYLIGHT.raised),
+            "the code-fence ground rect (Daylight raised)"
+        );
+        assert!(
+            lb.rects.iter().any(|r| r.color == sheet.rule && r.w == 2),
+            "the 2px leading gutter rule"
+        );
     }
 
     #[test]
