@@ -215,6 +215,16 @@ peer's H-arc round-1 merge landed (its code touched ~5 more dossiers -- a fresh
 churn-ordered pass is owed). Open next: the post-merge stale top (ptyfs, viv,
 substrate-gates, kernel-vma, ...) and a NEW `sub-sdl-port` (aux's N-2a-2 SDL).
 
+That fresh pass found the peer's H-arc round-1 close carried its OWN
+`no-dossier-change` -- an owed 5-dossier fold, several amending the h4d2 folds from
+earlier the same run. I took the UI + beacon-relay half (`29b3267c`): sub-halcyond
+(the SpanMap is LAZY, 128 KiB outside the scrollback budget -- my h4d2 prose had a flat
+ring; AltScreen leaves Normal), sub-kaua-term (scroll_cap sizes by the in-memory Cell),
+sub-ptyhold + sub-mechanism-drivers (the shared `declare_beacon`/`relayed_tier`, ptyhost
+declaring before its mint). The **tapestryd half -- six A-F GPU/compositor findings --
+is DEFERRED** (`chg-2026-09-06-harc-audit-close-r1`'s no-dossier-change names each; it is
+the top owed item). Run hit the 600k self-compact line here.
+
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
 **Where it sits.** Run 30 closed and landed the KT-1 audit arc (`6e6503ad`). This run picked up the operator's Cmd+F report that aux reproduced and handed over (yip 0048, `memory/bug_zoom_fullscreen_surface_not_scaled.md`): zooming DOSBox-X showed its 640x417 frame native at the display's top-left on black. Compositor geometry, so main's.
