@@ -164,7 +164,9 @@ impl Producer {
                 // exceeds wire::MAX_FRAME, and halcyond's decoder would reject it
                 // and kill the tile. Flush at the cap; order is preserved (the
                 // rows split across several ScrollOff records, in sequence).
-                Boundary::Scroll(row) => {
+                Boundary::Scroll(row, _wrapped) => {
+                    // PL-3a: the soft-wrap flag is tracked + emitted by the vt;
+                    // kaua-term carries it into the ScrollOff record at PL-3b.
                     self.scroll_acc.push(row);
                     if self.scroll_acc.len() >= self.scroll_cap() {
                         self.flush_scroll(out);
