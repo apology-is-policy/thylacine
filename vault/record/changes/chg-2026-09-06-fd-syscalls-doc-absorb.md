@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/54-sys-fd-syscalls (SYS_CLOSE/SYS_DUP + pipe-probe): clean redirect to sub-kernel-handle + sub-kernel-syscall-dispatch"
 date: 2026-09-06
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["8de23124"]
 touched: []
 established: []
 closed: []
