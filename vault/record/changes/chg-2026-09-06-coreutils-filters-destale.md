@@ -4,7 +4,7 @@ type: chg
 title: "coreutils-filters de-stale: the ps-driven partition recount (51->52, 15->16), the which drift narrowed to the single / entry, realpath's shared path::normalize, and mkdir -p's race-tolerant re-check"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["d2891261"]
 touched:
   - sub-coreutils-filters
 established: []
