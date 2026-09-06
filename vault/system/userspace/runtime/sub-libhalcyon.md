@@ -9,7 +9,11 @@ code:
   - usr/lib/libhalcyon/src/layout.rs
   - usr/lib/libhalcyon/src/skeleton.rs
   - usr/lib/libhalcyon/src/place.rs
+  - usr/lib/libhalcyon/src/tag.rs
   - usr/lib/libhalcyon/Cargo.toml
+  - usr/halcyon/src/lib.rs
+  - usr/halcyon/src/main.rs
+  - usr/halcyon/Cargo.toml
 audit: light
 guarded-by: []
 validated-by: [prose]
@@ -18,7 +22,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md"]
 created: 2026-09-05
-updated: 2026-09-06
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -229,6 +233,50 @@ the_damage_reaches`, the letterbox identity/pillarbox/never-empty cases).
 Pure math, host-tested; the drift it exists to prevent is a compositor that
 scales one way and a test that expects another. See [[sub-tapestryd]]'s
 fullscreen-zoom section and [[haz-latch-keyed-on-proxy]].
+
+## The `halcyon` tool -- the executor that drives the crate
+
+`usr/halcyon` is the native (libthyla-rs) session tool that runs **as the user**
+and turns the pure crate into acts: `layout save|restore|list|delete` and
+`welcome`. It is the crate's one driver, so it lives here; the authority it
+exercises is still adjudicated in [[sub-tapestryd]], not conferred by anything it
+holds (it takes no capability, no `SPAWN_PERM`, and adds no server verb -- the
+authority is the user's own principal).
+
+- **`name_is_valid` closes traversal by construction.** A layout name is one path
+  component, `[A-Za-z0-9._-]`, no leading `-` (so a name never reads as an option),
+  no leading dot, and never the save's `.tmp` suffix (the one constant the save's
+  temp file and the list filter share). The session path is
+  `<home>/lib/halcyon/layouts/<name>` -- with the leaf constrained this way, no
+  `..` or absolute name can escape it.
+- **Save is the aurora durability discipline verbatim.** Read `/dev/tapestry/layout`
+  + each `pane/<id>/tag`, fold through `from_render_text` then `serialize`, and write
+  the SESSION tier with write-tmp, content fsync, atomic rename, then a STRICT
+  metadata fsync on the same OWRITE fd (the [[sub-aurora]] `config::save` pattern).
+  The device tier (`/lib/halcyon/layouts/`) is halcyond's / the bake's, never the
+  tool's.
+- **Restore verifies the plan against the live tree and aborts rather than
+  misplace.** The tool runs on its OWN `/srv/tapestry` session -- a
+  `Session(principal)` peer whose splits/tags/claims are judged as the user's (the
+  shared `/dev/tapestry` mount, whose peer is the mounter joey, is used only for
+  reads). It `prune_env`s the tree, drives the build with `skeleton::plan`, binds
+  each symbolic ref to a real pane id by diffing the live `layout` dump, and
+  **verifies each split's predicted nest/flatten against what the compositor
+  actually did** -- a divergence aborts rather than placing a program into the wrong
+  tile. Each tagged leaf is claimed (`pane/<id>/claim`), named, seeded with its
+  one-shot `TAPESTRY_CLAIM` token into the tool's `/env`, and spawned as the user
+  (`resolve_prog` mirrors the shell's `/bin` search, since the kernel resolves a
+  spawn name against CWD, not `$path`); the child's libtapestry auto-consumes the
+  token on its first `open`. Under a session compositor (H-4d-1) the tool instead
+  tags each leaf for the compositor to host and replays focus, anchoring the built
+  part before a pre-existing environment tile (`anchor_last` / `active_is_env`).
+- **The H-4b audit F1 build-then-fill window** (a co-resident `Session(other)` or
+  `Client` could `close`/`split` the in-flight skeleton during the ~10 s fill,
+  because `actor_owns_subtree` is vacuously true on an all-empty subtree) is
+  harmless under v1.0's single-session model and is a DoS/misplacement of an
+  in-flight restore only -- no escalation, no crash. The fix (blocking a subtree
+  with a foreign-owned empty leaf) lands with the multi-seat hardening. Prosecuted
+  where the rule lives: [[sub-tapestryd]].
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**416 owned · 68 unowned · 484 files (85% owned) · ~18231 unswept lines.**
+**419 owned · 65 unowned · 484 files (86% owned) · ~16421 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30431 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -75,10 +75,9 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/ports | 0 | 18 | 4033 |
 | usr/pouch-hello | 0 | 22 | 3384 |
 | kernel | 123 | 15 | 2118 |
-| usr/halcyon | 0 | 2 | 1739 |
 | usr/quarry | 0 | 1 | 1028 |
-| usr/lib | 56 | 3 | 461 |
 | usr/stratumd-stub | 0 | 1 | 453 |
+| usr/lib | 57 | 2 | 390 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | arch | 36 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
@@ -89,6 +88,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/corvus | 1 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
+| usr/halcyon | 2 | 0 | 0 |
 | usr/halcyond | 19 | 0 | 0 |
 | usr/httpd | 1 | 0 | 0 |
 | usr/https | 1 | 0 | 0 |
@@ -122,9 +122,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/halcyon/src/main.rs | 1275 |
 | usr/quarry/src/main.rs | 1028 |
-| usr/halcyon/src/lib.rs | 464 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 390 |
 | kernel/include/thylacine/errno.h | 388 |
@@ -171,7 +169,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | arch/arm64/psci.c | 78 |
 | kernel/include/thylacine/vdso.h | 73 |
 | usr/lib/pouch/compiler-rt/aarch64-thylacine.c | 72 |
-| usr/lib/libhalcyon/src/tag.rs | 71 |
 | usr/pouch-hello/pouch-hello-susp.c | 71 |
 | arch/arm64/psci.h | 68 |
 | kernel/vdso.c | 68 |
