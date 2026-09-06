@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**124 absorbed · 33 live · 157 total.**
+**125 absorbed · 32 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -181,7 +181,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 82-pouch-pthread.md | absorbed | [[sub-pouch-thread]] |
 | 83-pouch-signals.md | absorbed | [[sub-pouch-signal]] |
 | 84-pouch-libsodium.md | absorbed | [[sub-pouch-seam]], [[sub-substrate-build]] |
-| 85-pouch-stratumd-build.md | live | — |
+| 85-pouch-stratumd-build.md | absorbed | [[sub-pouch-net]], [[sub-pouch-seam]], [[sub-stratum-boot]], [[sub-stratum-session]], [[sub-substrate-build]] |
 | 86-pouch-stratumd-boot.md | live | — |
 | 87-pouch-fstat-lseek.md | absorbed | [[sub-pouch-fs]] |
 | 88-ninep.md | absorbed | [[sub-libthyla-rs]] |
