@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/13-verification (Phase-1 verification infra): fold the deliberate-fault matrix anti-DCE + #244 into sub-kernel-boot-sequence, claim fault_test.c + test-fault.sh"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["f6bd18e0"]
 touched: [sub-kernel-boot-sequence]
 established: []
 closed: []
