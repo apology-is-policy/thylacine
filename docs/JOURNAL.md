@@ -938,6 +938,19 @@ for the far side is the set of big audit-trigger references -- vivarium, warp, l
 weft, tapestryd, debug-fs, allowance -- each with a standing dossier to verify
 against on a fresh budget.
 
+### Run 37 continued: 57-attach-probe -- the fifteenth, applying the test-probe pattern
+
+The mount-surface E2E probe, absorbed on the pattern the chunk before it settled:
+`/attach-probe` drives `SYS_ATTACH_9P`/`SYS_MOUNT`/`SYS_UNMOUNT` from a real EL0
+Proc, so the stub redirects those surfaces to their homes -- the handlers to
+`sub-kernel-syscall-dispatch`, the attach mechanism to `sub-kernel-ninep-attach`,
+the mount composition to `sub-kernel-territory`, the transport to
+`sub-kernel-ninep-transport` -- and names the binary as its own record. Nothing
+stale; a live probe. `4b3868fb`, fixup `6ed37c92`, both mirrors. `86 absorbed / 71
+live` -- fifteen chunks, and the true self-compact boundary; `61-stratumd-stub` is
+the last probe and follows the same shape. This is where the run stops and the
+context compacts.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
