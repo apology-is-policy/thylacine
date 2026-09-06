@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**71 absorbed · 86 live · 157 total.**
+**72 absorbed · 85 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -195,5 +195,5 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 96-fs-mutation.md | live | — |
 | 97-corvus-identity-db.md | absorbed | [[sub-corvus]] |
 | 98-capability-storage.md | live | — |
-| 99-fs-permission.md | live | — |
+| 99-fs-permission.md | absorbed | [[abi-t-stat]], [[sub-kernel-content]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-perm]], [[sub-kernel-spoor]], [[sub-kernel-stalk]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]] |
 <!-- generated:end -->

@@ -68,6 +68,18 @@ never code. The vouch is the allowlist entry, not the enforcement: the check
 lives on the exec/mmap path, and a Dev that forgot to set it would simply have
 its files refused as executable backing, fail-closed.
 
+**And because every entry is system-owned, the boot filesystem is the one backing
+where per-file rwx is actually *enforced* at v1.0's start.** Its Dev sets
+`perm_enforced = true`, and its `stat_native` stamps every entry — root directory
+and file alike — `PRINCIPAL_SYSTEM` / `GID_SYSTEM`. The boot chain runs as that
+same *un-elevated* `PRINCIPAL_SYSTEM` ([[inv-i22]]: the identity carries no ambient
+authority), so it owns everything it traverses and passes the owner-rwx check,
+while a non-system principal gets only the world r/x the archive's modes grant —
+never write. That is why switching [[sub-kernel-perm]]'s enforcement on over the
+boot FS cannot brick boot: the system that must traverse it is exactly the system
+that owns it. devramfs has no `wstat_native`, so a chmod/chown on a boot-FS file
+is always refused — correct, not a gap.
+
 **The environment's content is the process's own, and its identity has to be
 manufactured.** A variable is named by a **monotonically increasing id**, assigned
 at creation and never reused, so a handle to a variable removed between a walk and
@@ -368,3 +380,7 @@ generator's mode handling, and the 40 registered tests across the five files.
 
 [[chg-2026-08-16-seven-small-surfaces]] records this interval.
 [[chg-2026-09-06-content-mayexec-vouch]] adds the #217 `may_back_exec` vouch.
+[[chg-2026-09-06-fs-permission-absorb]] makes devramfs's `perm_enforced = true` +
+the `PRINCIPAL_SYSTEM`/`GID_SYSTEM` `stat_native` stamp explicit (absorbed from
+docs/reference/99): the boot FS is the one enforced backing, and boot survives it
+because the traverser owns everything it touches.
