@@ -918,6 +918,26 @@ dossiers were absorbed at the top of this very run). `de4e9fd5`, fixup `a602a013
 both mirrors. `84 absorbed / 73 live` -- thirteen chunks since the second
 self-compact, and the point where this context reaches the checkpoint line.
 
+### Run 37 continued: 90-u-test -- the fourteenth, and settling what a test-probe doc even is
+
+One more at the checkpoint edge, and the useful thing about it is the disposition
+question it forced. `/u-test` documents a *test binary* -- the libthyla-rs
+integration smoke -- not a subsystem, and when I looked for its owning dossier
+there wasn't one, because a test probe has no subsystem to own it. Earlier in the
+run I had nearly forced an awkward stub for exactly this shape and pulled back; here
+I settled it instead of dodging it. The stub redirects the surfaces the six flows
+exercise to their real homes -- the ABI mirrors to `sub-kernel-syscall-abi`, and
+each composed flow to its kernel dossier, including the `clear_child_tid` join I
+folded into `sub-kernel-death` two chunks earlier -- and then names the test itself,
+the binary and its boot-log signature, as its own record. Nothing was stale; it is
+a live boot gate. That is the pattern the remaining two probes (`57-attach-probe`,
+`61-stratumd-stub`) will follow: redirect to what they test, name the test as the
+record, no fold and no invented home. `417aa391`, fixup `506a307b`, both mirrors.
+`85 absorbed / 72 live` -- fourteen chunks, and the self-compact line. What remains
+for the far side is the set of big audit-trigger references -- vivarium, warp, loom,
+weft, tapestryd, debug-fs, allowance -- each with a standing dossier to verify
+against on a fresh budget.
+
 ---
 
 ## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
