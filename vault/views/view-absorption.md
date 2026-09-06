@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**120 absorbed · 37 live · 157 total.**
+**121 absorbed · 36 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -154,7 +154,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 55-sys-attach-9p.md | absorbed | [[sub-kernel-ninep-attach]] |
 | 56-sys-mount.md | absorbed | [[chg-2026-05-14-p5-mount-syscall]], [[sub-kernel-territory]] |
 | 57-attach-probe.md | absorbed | [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-transport]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]] |
-| 58-corvus-syscalls.md | live | — |
+| 58-corvus-syscalls.md | absorbed | [[abi-caps]], [[sub-corvus-crypto]], [[sub-corvus]], [[sub-kernel-content]], [[sub-kernel-devproc]], [[sub-kernel-proc]] |
 | 59-joey-from-ramfs.md | absorbed | [[sub-kernel-joey]], [[sub-stratum-boot]] |
 | 60-sys-spawn-wait.md | absorbed | [[sub-kernel-elf]], [[sub-kernel-exec]], [[sub-kernel-proc]], [[sub-kernel-syscall-dispatch]] |
 | 61-stratumd-stub.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-exec]], [[sub-kernel-joey]], [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-pipe]], [[sub-kernel-spoor]], [[sub-kernel-stalk]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]], [[sub-pouch-process]] |
