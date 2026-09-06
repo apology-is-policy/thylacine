@@ -4,7 +4,7 @@ type: chg
 title: "SCRIPTURE: retire docs/reference into the vault -- CLAUDE.md step 0 routing flipped so new technical-reference prose goes to a dossier, never a new docs/reference section; the legacy tree is frozen + absorbed into redirect stubs"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["f4d09573"]
 touched: []
 established: []
 closed: []
