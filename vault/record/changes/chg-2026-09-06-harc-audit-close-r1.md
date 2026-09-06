@@ -1,0 +1,17 @@
+---
+id: chg-2026-09-06-harc-audit-close-r1
+type: chg
+title: "H-arc audit close, round 1 (batched: the zoom fix, H-4c, H-4d-1, H-4d-2a/2/3): the composed GPU arm's stale-slot expansion, the draining resize-ack re-offer, the reservation on claim-less creates, the floor at the latch, the menu seat requires hosting; the span ring lazy + packed, the obj-copy cache a map, Normal mode left on AltEnter; ptyhost declares its tier; the pts-slave 't' unit positive"
+date: 2026-09-06
+arc: arc-tapestry
+commits: []
+touched: [sub-tapestryd, sub-halcyond, sub-kaua-term, sub-ptyhold, sub-mechanism-drivers]
+established: [adt-harc-r1]
+closed: [fnd-harc-r1-a1, fnd-harc-r1-a2]
+opened: []
+mirrors-checked: []
+depth: skeletal
+no-dossier-change: "sub-tapestryd: the composed GPU arm expands a stale slot's transfer to the full surface as the direct arm does and un-stales the slot after any transfer (A-F1); `Surface.ack_deferred` + `release_displaced_gen` re-offers a standing offer refused while draining under a fresh serial (A-F2; test builds say `resize-ack <n> re-offer WxH after the drain` and pair every refusal with `... ok after a refusal`); `Layout::host_for(n, conn, peer)` treats a focused empty leaf another live PROCESS reserved (`creator_peer` beside `creator_conn`) as occupied for a claim-less create (A-F3); `floor_bars_around(n)` at the #56 latch (A-F4); `role=menu` + the `menu ` verbs require `session_declared && conn_hosts` (A-F5); the battery's scenario 2a (the draining re-offer) + the partial-FIRST single-slot client E (A-F6). sub-halcyond: `SpanMap` allocates on the first note with 16-byte `SpanSlot`s (`SPAN_MAP_BYTES` = 128 KiB per rich tile, outside the scrollback budget, B-F4); `local_obj`'s remap cache is a `BTreeMap` (B-F3); `Record::Mode(AltScreen)` leaves Normal mode (B-F5). sub-kaua-term: `scroll_cap` sizes a row by `size_of::<Cell>()` (B-F1/F2). sub-ptyhold: `declare_beacon(tier)` (the writer both pts hosts share) + `relayed_tier()` (a relay declares what its own sink renders). sub-mechanism-drivers: ptyhost declares `relayed_tier()` before its mint (C-F1; pty-4 witnesses `beacon cells inherited (pts host)`, the aurora console's tier relayed). The kernel test `9p_srvconn_transport.pts_slave_spoor_classifies_t` (C-F2) lives in the unowned kernel/test. The vault peer folds these from this record + docs/reference/139-tapestryd.md (fork 2, `res_stale`, the resize-ack diagnostic, the creator reservation, the resize protocol, menus), 150-halcyond.md (the ring + the remap + Normal mode), 152-kaua-term.md, docs/TAPESTRY.md 18.3 AS-BUILT, docs/HALCYON.md (the menu seat; rule (1) of the tagged-leaf hosting), docs/KAUA-TERM.md (every pts host declares)."
+created: 2026-09-06
+---
+Round 1 of the batched H-arc audit ([[adt-harc-r1]]: three Fable 5.1 prosecutors in parallel, 0 P0 / 2 P1 / 0 P2 / 11 P3, clean by count, every finding fixed at the close) lands the two P1s -- the composed GPU arm blitted a slot resource no present had filled once the letterbox arm began serving single-slot partial presents ([[fnd-harc-r1-a1]]), and the resize ack's draining E_AGAIN had a recovery no client implemented, pre-existing since G-6b ([[fnd-harc-r1-a2]]) -- and the eleven P3s (three coinciding with the coordinator's self-audit). The tapestryd rules live in [[sub-tapestryd]] (fork 2, the resize protocol, the creator reservation, menus); the compositor's in [[sub-halcyond]]; the host declaration in [[sub-ptyhold]] + [[sub-mechanism-drivers]]. OWED: the GPU-path witness for A-F1 on the GL host + aux's DOSBox-X re-run.

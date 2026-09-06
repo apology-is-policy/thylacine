@@ -143,12 +143,19 @@ impl Stdout { pub fn is_terminal(&self) -> bool {
   Dev's char; `fd_devclass(a dev9p file fd) == '9'`; `fd_devclass(99) < 0` (bad
   fd). A boot E2E: `ls` colored interactive, `ls | cat` clean (once the default
   flips to Auto).
-- H-4d-2a: `fd_devclass(a pts SLAVE fd) == 't'` -- in-guest only (no kernel-test
-  fixture builds a dev9p Spoor over a live SrvConn): a session tile's `ut` says
-  `beacon rich (transcript zones armed)` over a real ptyfs slave
-  (ls-gfx-session), which only the `'t'` answer produces; `devdev.fd_devclass`
-  pins `spoor_devclass` on devcons / devdev / devsrv Spoors so `'t'` reaches no
-  other Dev.
+- H-4d-2a: `fd_devclass(a pts SLAVE fd) == 't'`. The kernel unit positive is
+  `9p_srvconn_transport.pts_slave_spoor_classifies_t` (added at the H-arc
+  round-1 close, C-F2 -- the June draft's "no kernel-test fixture builds a
+  dev9p Spoor over a live SrvConn" was wrong: `test_pts`'s registry-over-a-real-
+  SrvConn fixture and the transport test's OPEN-dev9p-client-over-the-same-conn
+  fixture COMPOSE): a pts minted + slave-bound on a real SrvConn, an OPEN dev9p
+  Spoor on the same conn via `dev9p_attach_client`, then `spoor_devclass` walked
+  one variable apart -- the attach root `9`, the slave `t`, the master `9`, an
+  unbound qid `9`, the slave after `pts_free` `9` (the stale-pts fail-closed
+  arm). The in-guest witness stands too: a session tile's `ut` says `beacon rich
+  (transcript zones armed)` over a real ptyfs slave (ls-gfx-session), which only
+  the `'t'` answer produces; `devdev.fd_devclass` pins `spoor_devclass` on
+  devcons / devdev / devsrv Spoors so `'t'` reaches no other Dev.
 
 ## Status
 

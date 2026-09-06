@@ -118,6 +118,17 @@ fn run() -> i64 {
         argv.push(String::from("/bin/ut"));
     }
 
+    // 0. The Beacon tier this relay declares to the program it hosts
+    //    (KAUA-TERM.md R1; H-4d): the inherited word iff this host's own
+    //    stdout is a terminal something renders -- the frames it relays land
+    //    there -- else none. A relay renders nothing itself; declaring
+    //    nothing would hand an upstream `rich` to a sink that cannot show
+    //    it. Written before the spawn: the app's env is a deep copy of ours.
+    let tier = ptyhold::relayed_tier();
+    if !ptyhold::declare_beacon(tier) {
+        t_putstr("ptyhost: /env/BEACON write failed (the hosted program inherits the caller's tier)\n");
+    }
+
     // 1. Mint: the returned master fd IS this host's endpoint (ptyhold owns
     //    the clone-open + qid validation; its failures close the fd for us).
     let master = match Master::mint() {

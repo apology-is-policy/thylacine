@@ -776,7 +776,11 @@ DECLARED session compositor's (the seat holder of §14.12): the per-user
 compositor is the user's rio and summons the obj verb menu over its own
 tiles. The seat is one conn per display, held only while it hosts, so no
 other same-user program reaches the arm past a live compositor; the
-per-process owner check on the placed surface is unchanged.
+per-process owner check on the placed surface is unchanged. AS-BUILT
+(the H-arc round-1 audit, A-F5, 2026-09-05): the arm requires the declared
+conn to HOST a tile as well — a declarer on an idle display, which hosts
+nothing, gets no menu either (it could otherwise float one, take the
+input grab and force the composed mode with no tile of its own).
 
 **The menu inside a session tile (H-4d-2 AS-BUILT, 2026-09-05).** The
 console renderer's Helix-modal transcript + obj verb menu are ported into
@@ -1113,9 +1117,13 @@ authority) is not audit-bearing on its own.
   the creator's conn goes**: tapestryd stamps the writing conn on both
   empties a ctl `split` makes (`Pane.creator_conn`; a chord split stamps
   none), and while that conn lives the claim mint answers E_AGAIN to every
-  other conn of the principal (the renderer is never held off); the
-  reservations lift at the conn's retire, which fans one TEV_LAYOUT to the
-  declared session (a release changes no geometry). The mark is made BY
+  other conn of the principal (the renderer is never held off), and a
+  claim-less create from another PROCESS treats such a leaf as occupied in
+  its focused-leaf fallback and splits beside it (the H-arc round-1 audit,
+  A-F3: a program launched during a restore otherwise took the tool's leaf
+  out from under its tag; the same process on another conn fills its own);
+  the reservations lift at the conn's retire, which fans one TEV_LAYOUT to
+  the declared session (a release changes no geometry). The mark is made BY
   the split, so no window exists for a mark made after it. (2) **The tag
   of an empty leaf is the tile's command line** (acme; rio's `window
   cmd`): the session compositor reads `pane/<id>/tag` after its mint and

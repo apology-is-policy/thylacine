@@ -23,6 +23,39 @@ use libthyla_rs::fs::OpenOptions;
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::{t_close, t_fstat, t_open, t_write, T_ORDWR, T_WALK_OPEN_FROM_ROOT};
 
+/// The Beacon tier a pts host DECLARES to the program it hosts (KAUA-TERM.md
+/// R1; H-4d): written to this process's `/env/BEACON` before the spawn, so
+/// the hosted program inherits the host's word. Always written -- an absent
+/// value reads as `none`, and a host that renders nothing must say so, else a
+/// tier inherited from ABOVE the host (a rich tile's shell running the host)
+/// would arm frames onto a sink that cannot show them.
+pub fn declare_beacon(tier: &str) -> bool {
+    use libthyla_rs::io::Write as _;
+    match libthyla_rs::fs::File::create("/env/BEACON") {
+        Ok(mut f) => f.write_all(tier.as_bytes()).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// The tier a RELAY host declares -- one that pumps the master's bytes to its
+/// own stdout unparsed (ptyhost): what its own sink renders. The inherited
+/// tier iff the host's stdout is itself a terminal something renders (the
+/// two-condition gate a program applies, BEACON.md 12.4), else `none`. A relay
+/// adds no rendering of its own, so it passes the word down exactly when its
+/// sink would honour the frames it relays.
+pub fn relayed_tier() -> &'static str {
+    let inherited = match libthyla_rs::env::var("BEACON").as_deref().map(str::trim) {
+        Some("rich") => "rich",
+        Some("cells") => "cells",
+        _ => "none",
+    };
+    if libthyla_rs::stdout_is_terminal() {
+        inherited
+    } else {
+        "none"
+    }
+}
+
 /// The ptyfs endpoint-qid contract (PTY-DESIGN section 5): PTS_FLAG | N<<8 |
 /// filekind; filekind 1 = master.
 pub const PTS_FLAG: u64 = 1 << 40;

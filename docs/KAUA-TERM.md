@@ -157,6 +157,14 @@ it; the pts SLAVE answers `'t'` to `SYS_FD_DEVCLASS` (the kernel's pts registry,
 never a qid bit) and the Beacon gate admits `'t'` beside the console's `'c'`; `ut`'s
 pts branch arms its transcript zones from the inheritance iff rich AND its stdout
 is that terminal. Absent = none, fail-closed. Until this every tile was plain.
+EVERY pts host declares (the H-arc round-1 audit, C-F1): `ptyhost`, a relay that
+pumps the master's bytes to its own stdout unparsed, declares what its own sink
+renders -- the tier it inherited iff its stdout is itself a terminal something
+renders, else `none` (`ptyhold::relayed_tier` + `declare_beacon`, the writer both
+hosts share). A host that said nothing passed an upstream `rich` straight through
+to a sink that could not show it (cosmetic, never authority; now closed by
+construction). Witness: pty-4's inner shell says `beacon cells inherited (pts host)` --
+the aurora console's tier, relayed (`none` on a bare serial console).
 
 Main records the same contract in HALCYON 14.3 (its scripture half).
 

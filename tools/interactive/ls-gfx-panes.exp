@@ -201,6 +201,25 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "resize negative probes failed" }
     timeout { lc_fail "battery never reached the resize probes" }
 }
+# Scenario 2a (the H-arc round-1 audit, A-F2): the DRAINING refusal. B acked
+# but has not presented; the zoom offers the display size meanwhile; that ack
+# is refused E_AGAIN (the "present, then re-ack" arm no client implements).
+# The compositor re-offers the standing size when B's present drains the old
+# generation -- its own line first, then B lands the zoom on its ordinary path.
+# Pre-fix nothing arrived: B stayed pane-sized on a zoomed display.
+expect {
+    -re {tapestryd: resize-ack \d+ re-offer \d+x\d+ after the drain} {}
+    -ex "battery: resize reoffer OK" { lc_fail "B landed the re-offer without the compositor's re-offer line (a stale-serial retry, not the drain recovery)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the draining-refusal leg failed" }
+    timeout { lc_fail "no re-offer after the drain: the draining E_AGAIN was never recovered" }
+}
+expect {
+    -re {battery: resize reoffer OK (\d+) (\d+)\r?\n} {
+        lc_pass "panes: a resize ack refused while draining is re-offered when the drain completes (B at $expect_out(1,string)x$expect_out(2,string))"
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the draining-refusal leg failed after the re-offer" }
+    timeout { lc_fail "battery never landed the re-offered zoom" }
+}
 expect {
     -re {battery: resize OK (\d+) (\d+)\r?\n} {
         lc_pass "panes: B reweaved to $expect_out(1,string)x$expect_out(2,string) (exact pane fit)"
@@ -414,9 +433,12 @@ expect {
 }
 # The #56 latch's real discriminator (the fullscreen-zoom bug, aux 0048): a
 # SINGLE-SLOT client presenting PARTIAL damage stays letterboxed. D (640x400)
-# is zoomed; the compositor's own one-shot placement line -- the witness
-# aux's DOSBox log LACKED after Super+F -- must name the 2x letterbox over the
-# whole display, and its latch line is a FAIL arm. Then the pixels: the
+# is zoomed; the compositor's own one-shot placement line names the 2x
+# letterbox over the whole display and its latch line is a FAIL arm -- but D
+# presents FULL before the zoom, so pre-fix code (unlatched at that point)
+# prints the placement line too: it is the PIXELS below that discriminate
+# (the H-arc round-1 audit, A-F6), and the partial-FIRST client E at the end
+# of this leg is the arm the placement line can only pass post-fix. Then the
 # partial present's green lands through the scale, the untouched frame is
 # blue at three-quarters (black there under the bug: the native crop covers
 # only the top-left quarter), and a partial present AFTER the zoom (the
@@ -470,6 +492,34 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the rotating control failed after the latch" }
     timeout { lc_fail "battery never finished the rotating control" }
 }
+# The partial-FIRST single-slot client (A-F6 + the CPU half of A-F1): E's
+# very FIRST present is one quadrant. Pre-fix (coverage-keyed) that latches E
+# and crops it; post-fix (rotation-keyed) a single slot never latches, so E
+# letterboxes and the quadrant lands through the scale. The strong witness is
+# the ABSENCE of a latch line for E AFTER its first present -- so the `Eopen`
+# anchor precedes E's present (E reuses the rotating control's freed surface
+# id, whose latch line sits BEFORE the anchor and must not be mistaken for
+# E's). The pixel corroborates through the 2x zoom. (The GPU-path half -- a
+# stale slot resource blitted whole -- has no HVF witness; owed on the GL host.)
+expect {
+    -re {battery: singleslot Eopen (\d+)\r?\n} { set eid $expect_out(1,string) }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the partial-first client failed at create" }
+    timeout { lc_fail "battery never created the partial-first client" }
+}
+# From the anchor: a latch line for E means it cropped its partial-first
+# present (the pre-fix bug); the partialfirst marker means it got through the
+# present + zoom with no latch.
+expect {
+    -re "tapestryd: surface $eid patchwork latched" { lc_fail "the partial-FIRST single-slot client latched (pre-fix: cropped its first present)" }
+    -re {battery: singleslot partialfirst \d+ (\d+) (\d+)\r?\n} {
+        set pfx $expect_out(1,string)
+        set pfy $expect_out(2,string)
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the partial-first leg failed" }
+    timeout { lc_fail "battery never reached the partial-first samples (E stalled after its first present)" }
+}
+gfx_sample pfgreen $pfx $pfy "0 255 0"
+lc_pass "panes: a partial-FIRST single-slot present does not latch and lands through the 2x scale"
 # The declared-handoff control (the KT-1 audit's round-2 C-F3): the SAME
 # console leaf the undeclared control found tiled goes to the ZERO rect when
 # the battery's conn declares `session on`, and comes back on `session off`

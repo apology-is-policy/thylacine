@@ -63,6 +63,12 @@ zones, coreutils color + present objects, `halcyon welcome` goes out rich --
 inside a tile. halcyond's session compositor passes `--beacon rich`. A bad
 tier word is a usage error (exit 2, `kaua-term: --beacon takes
 none|cells|rich`).
+Every pts host declares (the H-arc round-1 audit, C-F1): `ptyhost`, the raw
+relay, declares what its own sink renders -- the inherited tier iff its stdout
+is a terminal something renders, else `none` -- through the writer both hosts
+now share, `ptyhold::declare_beacon` (`ptyhold::relayed_tier` is the relay's
+rule). pty-4's inner shell witnesses it (`beacon cells inherited (pts host)`: the
+aurora console's tier relayed through ptyhost's own stdout).
 
 **The `Text` record (H-4d-2).** A chosen verb's command line arrives from
 halcyond as one `Input::Text(bytes)` (tag 2; the payload is the bytes,

@@ -29,7 +29,7 @@ pub const MAX_TITLE: usize = 256;
 pub const MAX_FRAME: usize = 4 * 1024 * 1024;
 
 // One serialized CellDiff/ScrollOff entry is >= this many bytes (row u16 + col
-// u16 + one Cell = 2 + 2 + 13). Used only to cap a decode pre-allocation so a
+// u16 + one Cell = 2 + 2 + CELL_BYTES). Used only to cap a decode pre-allocation so a
 // hostile count cannot force a huge Vec before the byte under-run is caught.
 const MIN_CELL_ENTRY: usize = 2 + 2 + CELL_BYTES;
 const CELL_BYTES: usize = 4 + 4 + 4 + 1 + 4; // ch:u32 fg:u32 bg:u32 attrs:u8 span:u32

@@ -284,6 +284,107 @@ device default layout bake + the gate's welcome/menu legs; drafted).
 
 ---
 
+### The batched H-arc holotype round (round 1): the zoom fix, H-4c, H-4d-1, H-4d-2a/2/3
+
+The double-the-distance rule batched six chunks into one round: the
+fullscreen-zoom fix `f25781ad`, H-4c `26f903a0`, H-4d-1 `c96f5173`, H-4d-2a
+`8f553c78`, H-4d-2 `946ac379`, H-4d-3 `4f4e7a9f` (+ the repair `da0a5c10`).
+Three Fable 5.1 prosecutors in parallel, each with a scoped brief and one
+common preamble (scratchpad `harc-r1-{common,A,B,C}-brief.md`; the ten
+H-arc closed lists concatenated as the do-not-re-report set): A = tapestryd
+(row 42: the #56 latch re-keyed on rotation, `ComposeOp.clip`, the H-4d-1
+creator reservation, the widened menu role); B = the session compositor +
+the pts-host producer (row 142's H-4c/H-4d addenda + row 151: the cell-span
+model, the tile menu, the typed choice, the spawn paths, the 17-byte wire
+cell); C = the kernel 't' arm + the emission gate + the halcyon tool + the
+bake (row 136 + row 142's tool half). The coordinator's parallel self-audit
+(`harc-r1-self-audit.md`) re-derived the batch's central claims from the
+code -- the wire ORDER of a frame's serial record and the cells it stamps
+(`feed_until` returns at the terminator byte; `osc_end` advances the serial
+before queueing the boundary; the producer flushes the pre-frame cells
+before the Control record; the consumer notes the post-frame tag under the
+serial), the ring's full-serial validation, the obj copy's remap reset,
+grid bounds (`Grid::row` is total), the typed choice under the KT-1 lock,
+the spawn masks, the tag authority (`actor_names`: a Client never names an
+empty leaf; a Session only its own; the renderer is TCB), the kernel resolve
+(fail-closed on a loopback transport; `srvconn_ref`-held bindings; the leaf
+spinlock; one clunk), the latch's `1 << slot` bound and rotation predicate,
+`scaled_clip`'s brute-forced superset, and the panes leg's two-way
+discrimination -- and found three P3s of its own: `scroll_cap` sizes a row
+by the pre-span 16-byte cell (bounded either way; a stale constant + two
+"13 B" comments), the `resize-ack ... refused Err(11)` line every session
+gate log carries is the documented stale-serial verdict (the client acked
+serial 4 after a same-size re-CONFIGURE at serial 6; `Busy` is drained and
+the newest offer acked -- benign, now to be documented beside the state
+tuple), and a tile program entering the alt screen leaves the compositor's
+Normal mode latched (harmless: every key routes to the app and the alt
+render ignores the mark).
+
+RESULTS (the three reports, 15-23 min each): **0 P0 / 2 P1 / 0 P2 / 11 P3,
+all fixed at the close, NOT dirty** (P1 + P2 = 2; every fix local). A ran 80
+turns on Fable with no fallback; B and C both fell back to Opus 4.8 for their
+tails (11 and 40 turns; the JSONL `model` field -- both `MODEL(end)` lines
+still claimed Fable, the self-report blind to its own fallback for the third
+round running), closed under the never-skip rule since the self-audit had
+read every Opus-tail surface. The two P1s were both tapestryd's, both in the
+zoom fix's neighbourhood, and neither was visible to the panes gate: **A-F1**
+-- once the letterbox arm began serving a single-slot client's PARTIAL
+presents, the composed GPU arm blitted the slot resource WHOLE while
+transferring only the damage and never reading `res_stale[slot]` (a fresh
+generation, a hide, any CPU-arm present marks every slot stale), so a
+partial-first present composed untransferred host bytes, scaled; the direct
+arm had guarded exactly this since 4.5.8c. The fix mirrors it (expand a
+stale slot's transfer to the full surface) and un-stales the slot after any
+transfer -- the old `= !full` re-marked it on every partial present and
+would have fired the expansion on every other one. The HVF gate can only
+witness the CPU half (the partial-first client E: no latch, the quadrant
+through the scale); the GPU half is OWED on the GL host beside aux's
+DOSBox-X re-run. **A-F2, pre-existing since G-6b and surfaced by my own
+resize-ack question** -- the ack's E_AGAIN meant two things, STALE (drain,
+ack the newest) and DRAINING ("present a frame, then re-ack"), and every
+client implemented only the first, so a second offer sent while a
+generation drained was lost until an unrelated relayout; the gates passed
+because every restore ends in hosting passes that re-offer. Fixed
+server-side for every client at once: the refusal sets `ack_deferred` and
+the drain's completion re-offers the standing size under a fresh serial;
+the battery's scenario 2a constructs the refusal deterministically (ack, do
+not present, zoom, ack the zoom -> Busy, present -> the re-offer) and times
+out pre-fix. The eleven P3s: the reservation now holds off another PROCESS's
+claim-less create in its focused-leaf fallback (a program launched during a
+restore took the tool's leaf; my first cut keyed it on the CONN, and
+ls-gfx-panes failed deterministically in the tabbed leg -- the battery splits
+on its control conn and hosts on a per-surface conn, so B landed beside its
+own pre-split leaf and every later geometry shifted; re-keyed on the process,
+`creator_peer` beside `creator_conn`); the latch floors its bars at once; the menu seat requires
+HOSTING, not merely declaring (an idle declarer could float a menu and take
+the grab); the singleslot leg's placement line was satisfied by pre-fix code
+(D presents full first -- the pixels discriminate; said, and the
+partial-first client added); the span ring lazy + 16-byte (128 KiB per RICH
+tile, outside the budget, recorded not charged); the obj-copy cache a map;
+Normal mode left on an alt-screen entry; `scroll_cap` by the real cell;
+ptyhost declares what its own sink renders (`ptyhold::relayed_tier`; pty-4
+witnesses it); and the pts-slave `'t'` arm got its unit positive by
+composing two fixtures that already existed (a pts bound on a real SrvConn;
+an OPEN dev9p client over the same conn). Lesson of the round: **a proxy
+re-keyed on the property opens the arm the proxy had kept closed** -- the
+latch stopped cropping single-slot clients, so their partial presents
+reached a compose path written for full frames; the fix to a proxy must be
+followed by a sweep of every consumer the proxy's false positives had
+shielded.
+
+GATES (all green on the committed tree; the panes E-arm was corrected once --
+the compositor did letterbox the partial-first client but the placement line
+preceded the battery's marker on the wire and the client reused a freed
+surface id, so the arm was re-keyed on the latch-line negative anchored before
+the present): `tools/test.sh` PASS with the new kernel unit positive
+`9p_srvconn_transport.pts_slave_spoor_classifies_t`; `ls-gfx-panes` PASS (the
+re-offer `resize reoffer OK`, the process-keyed A-F3 tabbed leg, the
+partial-first `Eopen`/`partialfirst`); `ls-gfx-restore`; `pty-4` (`ut: beacon
+cells inherited (pts host)`, the C-F1 witness -- the aurora console's tier
+relayed); `ls-gfx-session` on the session bake (the welcome as two tiles, the
+tile menu `menu ran: ls -l -- '/lib/halcyon/session'`, the resize-ack pairs
+`serial 9 ok after a refusal`); host halcyond 107, kaua-term 30.
+
 ### H-4d-2a / H-4d-2 / H-4d-3 (same run, after the second self-compaction): rich tiles `8f553c78`, the tile menu over cell spans `946ac379`, the welcome `4f4e7a9f`
 
 **The dependency the drafted legs sat on.** Both H-4d-3 gate legs drafted before

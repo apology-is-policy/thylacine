@@ -233,12 +233,26 @@ v1.x) — the display stays blank until reboot.
   user-voted 2026-07-21).** A size-mismatched surface's placement is
   decided by PRESENT STYLE, not size: `Surface.patchwork` latches
   (one-way) the first time a present's damage does not cover the full
-  surface — the EXACT rect union (`rects_cover_full`, a y-band sweep),
+  surface ON A SURFACE THAT ROTATES SLOTS — `slots_presented`, a bitmask
+  of every slot ever presented (survives a reweave: the discipline is the
+  client's, not a generation's), names two or more (the fullscreen-zoom
+  fix `f25781ad`: keyed on coverage alone the latch pinned a single-slot
+  SDL client presenting partial rects, DOSBox-X, at native size in the
+  content's corner; a single slot IS the app's framebuffer, complete by
+  construction, so its partial damage is a hint, not a patchwork, and it
+  letterboxes with the damage projected through the scale,
+  `ComposeOp.clip` via `libhalcyon::place::scaled_clip`). The coverage
+  test is the EXACT rect union (`rects_cover_full`, a y-band sweep),
   not a single-full-rect shortcut: the battery's G-6c multi-rect leg
   tiles the full frame in two halves and must stay unlatched (the
   shortcut cropped its later legs — the moveB regression the gate
   caught). rect_count 0 counts as full; checked on every present,
-  direct-scanout mode included. An UNLATCHED
+  direct-scanout mode included. The latch says `surface N patchwork
+  latched (slot S of slots 0bMM, ...)` once and, since the H-arc round-1
+  audit (A-F4), floors the bars around the new crop at once
+  (`floor_bars_around`): the flip from the letterbox to the crop left
+  the first frame's scaled projection outside the native rect until the
+  next structural repaint. An UNLATCHED
   surface — a full-frame presenter: the SDL class (`SW_RenderPresent
   → SDL_UpdateWindowSurface` = one full rect), the battery
   (`present(None)`) — LETTERBOXES on any mismatch, scaled up OR down:
@@ -430,7 +444,15 @@ else visible wants `Composed`; nothing wants `Off`. Every entry to
 Direct is DEFERRED to the target's next present-COMPLETE
 (`pending_direct`, the F16 rule uniformly), and that present's transfer
 expands to the full surface when the client resource is stale
-(`res_stale` — composed-era presents never touched it).
+(`res_stale` — composed-era presents never touched it). The COMPOSED
+GPU arm applies the same expansion since the H-arc round-1 audit
+(A-F1): the letterbox arm now serves a single-slot client's PARTIAL
+presents, and a whole-op scaled blit of a slot resource that never
+received the full frame (a fresh generation, a hide, any CPU-arm
+present marks every slot stale) would compose bytes no present carried;
+after either arm's transfer the slot's host copy mirrors the guest slot
+and is no longer stale, whatever that present's coverage (the old
+`= !full` re-marked it on every partial present).
 
 **The screen buffer** (`Screen`, `SCREEN_RES = 0x40`): a WEAVE-subtype
 DMA chunk — the G-2 type discipline puts every `RESOURCE_ATTACH_BACKING`
@@ -479,7 +501,17 @@ resize-ack rejection now logs its discriminant and the deciding state
 (`tapestryd: resize-ack <n> WxH serial S refused Err(E) state
 Some((cfg_serial, offered, weave, draining))`) — the client sees one
 Rwrite error, and only that line separates "stale" from "no offer"
-from "echo mismatch" from "draining".
+from "echo mismatch" from "draining". Reading it: `serial 4 refused
+Err(11) state Some((6, Some((6, W, H)), true, false))` is the STALE arm
+— the client acked serial 4 after two same-size passes had re-offered
+at 6 (`draining` false); libtapestry maps it to `Busy`, the client
+keeps draining and acks the queued serial-6 CONFIGURE, and the
+compositor says `resize-ack <n> WxH serial 6 ok after a refusal` (test
+builds pair every refusal with its recovery this way). Every session
+gate log carries one such pair at the welcome's two-tile layout; it is
+the protocol working, not a wedge (the H-arc round-1 audit, SA-2).
+`draining` true is the OTHER arm, which the compositor now recovers
+itself — see the resize protocol below.
 
 **The CONFIGURE redraw wire** (the §18.3 emission half, pulled forward
 by chunk-completeness): aurora is an ACCUMULATOR client (row-damage
@@ -526,8 +558,18 @@ back to that path — the surface lands, never in the claimed leaf, which
 stays `surface none` — and `create claim=<live>` must land in the claimed
 leaf itself; a malformed token (`claim=nothex`) is E_INVAL at the syntax
 gate, raw, no surface behind it])
-plus the collapse coda (the battery exits, panes collapse, the console
-returns to fullscreen direct scanout, `-c` passes again).
+plus, since the H-arc round-1 close, the resize-reoffer leg [scenario 2a,
+A-F2: B acks then does NOT present; the zoom offers the display size; that
+ack is refused `Busy`; B's first present drains the old generation and the
+compositor re-offers the standing size under a fresh serial (`resize-ack N
+re-offer WxH after the drain`), which B acks on its ordinary path -- pre-fix
+the leg times out] and the partial-first single-slot leg [A-F6 + the CPU
+half of A-F1: client E's very first present is one quadrant at a size its
+pane letterboxes; it must NOT latch and the quadrant lands through the scale
+at the compositor's placement -- the GPU-path half, a stale slot blitted
+whole, has no HVF witness and is owed on the GL host]) plus the collapse coda
+(the battery exits, panes collapse, the console returns to fullscreen direct
+scanout, `-c` passes again).
 
 **The creator reservation (H-4d-1, 2026-09-05).** `Pane.creator_conn`: a
 ctl `split` (`pane_cmd`, which now takes the writing conn's id; the
@@ -537,7 +579,17 @@ empties the H-4b-2 owner stamp covers; a chord split stamps none. The
 claim mint (`pane/<id>/claim`, offset 0) answers **E_AGAIN** to a conn
 that is not the creator while the creator lives (after the owner check;
 `Actor::Renderer` is exempt), said in test builds as `claim on pane N
-reserved by conn C (E_AGAIN)`. `retire_conn` clears every reservation
+reserved by conn C (E_AGAIN)`; and a claim-LESS create's focused-leaf
+fallback (`Layout::host_for(n, conn, peer)`, the surface's `owner_conn` +
+`owner_peer`) treats a focused empty leaf another live PROCESS reserved
+(`creator_peer`, the splitter's stripes, stamped beside `creator_conn`) as
+occupied and splits beside it (the H-arc round-1 audit, A-F3: a program
+launched during a restore took the tool's leaf out from under its tag).
+Keyed on the process, not the conn: the battery splits on its control conn
+and hosts on a per-surface conn, and must keep filling its own pre-split
+leaf (the first cut, conn-keyed, moved B beside it and broke every later
+leg's geometry -- ls-gfx-panes caught it). Conn 0, the environment, is
+never held off. `retire_conn` clears every reservation
 the dying conn held (`Layout::release_creator`, counting the EMPTY leaves
 it freed) and, when it freed any, bumps the epoch and fans one
 `TEV_LAYOUT` to the declared session (`notify_session_layout`; test
@@ -590,7 +642,19 @@ validates + blits against the new geometry. Verdicts that do NOT consume
 the offer: a stale serial (`< cfg_serial`) → `E_AGAIN` (drain events,
 ack the newer offer); an unknown/mismatched echo → `E_INVAL`; a prior
 reweave still draining (`old_weave.is_some()`) → `E_AGAIN` (the <=2-gens
-bound — present a frame, then re-ack).
+bound). The draining arm's stated recovery — "present a frame, then
+re-ack" — was implemented by NO client (libtapestry, halcyond, the SDL
+backend all drain events and ack the newest CONFIGURE), so a second
+offer sent while a generation drained was lost until an unrelated
+relayout re-offered (the H-arc round-1 audit, A-F2, pre-existing since
+G-6b). Since that close the refusal sets `Surface.ack_deferred`, and
+`release_displaced_gen` (the first post-fence present) re-emits the
+standing offer under a fresh serial when it still differs from the
+current size (test builds: `resize-ack <n> re-offer WxH after the
+drain`) — the client's ordinary path from there. Regression: the
+battery's scenario 2a (ls-gfx-panes `resize reoffer OK`: ack, do not
+present, zoom, ack the zoom → `Busy`, present → the re-offer lands the
+zoom; pre-fix the leg times out waiting for it).
 
 **Draining the displaced generation.** The old (weave, resource) moves
 to `old_weave` and drains PASSIVELY — its last content stays displayed,
@@ -795,10 +859,13 @@ HALCYON.md 13.6 "Menus -- THE GATE" as built (2026-09-02). The renderer
 summons ONE ephemeral menu; from the placement on, the compositor owns it.
 
 **The surface.** `create W H role=menu` (`surface_ctl`; syntax first, then
-`peer_is_renderer() || session_declared(conn)` -> else E_PERM — the DECLARED
-session compositor summons menus over its own tiles since H-4d-1, and the
-`menu ` verbs pass the cfg-3 gate for it on the same test, the per-process
-owner check below unchanged; a `bind=` with the menu role is E_INVAL) mints
+`peer_is_renderer() || (session_declared(conn) && conn_hosts(conn))` -> else
+E_PERM — the DECLARED session compositor summons menus over its own tiles
+since H-4d-1, and the `menu ` verbs pass the cfg-3 gate for it on the same
+test, the per-process owner check below unchanged; a `bind=` with the menu
+role is E_INVAL; the `conn_hosts` conjunct is the H-arc round-1 audit's A-F5:
+a declarer on an idle display hosts nothing and could otherwise float a menu,
+take the grab and force Composed with no tile of its own) mints
 a `Surface { is_menu: true }`: never hosted (`create` returns before the
 G-6 host step), no Direct count, no pointer routing by construction --
 `surface_target` names it ONLY while it is the placed menu

@@ -714,9 +714,16 @@ carries the serial explicitly, `Control::Osc1936Raw { serial, frame }`) and
 that serial (`Transcript::span_tag` -> `SpanMap`, an 8192-entry ring
 validated by the full serial: a serial that fell off resolves to no span --
 reached only by a TUI repainting over a still-visible cell, which lives on
-the alt screen where no span is read). (2) `push_scrolled_rows(rows,
+the alt screen where no span is read; since the H-arc round-1 audit (B-F4)
+the ring is allocated on the FIRST note and packed to 16-byte slots, so a
+plain tile costs nothing and a rich one `SPAN_MAP_BYTES` = 128 KiB once, a
+fixed per-tile cost outside `SESSION_SCROLLBACK_BUDGET` bounded by the pane
+count -- recorded in the I-32 accounting, not charged to the history it
+would evict). (2) `push_scrolled_rows(rows,
 &spans)` interns em / obj / hdr from the tags and COPIES an obj from its
-source block into the landing block (`local_obj`, dedup per call, the wire's
+source block into the landing block (`local_obj`, dedup per call through a
+`BTreeMap` -- B-F3: a linear scan was O(n) per cell against a producer
+scrolling cells that each name a distinct frozen obj -- at the wire's
 obj-open cost; an evicted source or a full table yields 0 -- a run that lost
 its object, never a wrong one) because the grid's rows straddle zone cuts
 and a block's Line styles must index its own obj table (the invariant
@@ -727,7 +734,10 @@ rows are `select::GRID_BLOCK` rows after the transcript's
 grid's `runs_on_row` / `run_rect` / `obj_of` / `hit_run`; `step_run_with`
 takes the row source as a closure (`SessionTile::runs_for` dispatches); the
 render lists the grid in the frame under `GRID_KEY`, bands the marked grid
-row under the cells and underlines the selected run over them; Normal mode
+row under the cells and underlines the selected run over them (a program
+entering the alt screen leaves Normal mode at once -- B-F5: the alt screen
+owns every key, so the mode could only linger to resume with a stale
+selection); Normal mode
 starts on the grid's cursor row (the prompt). Host tests:
 `grid_cells_carry_their_obj_runs_and_scroll_them_into_the_landing_block`
 (the stamp resolves to the frame's state; runs / hit / rect on the grid; a

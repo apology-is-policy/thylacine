@@ -35,7 +35,7 @@ use halcyond::tile::Tile;
 use halcyond::tile::{Mark, GRID_KEY};
 use halcyond::tiles::{plan_tiles, tile_command};
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
-use kaua_term::ScreenMode;
+use kaua_term::{Record, ScreenMode};
 use libhalcyon::theme::daylight_palette;
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Write;
@@ -727,7 +727,16 @@ impl SessionTile {
             match self.dec.next_frame() {
                 Some(Ok((tag, payload))) => match parse_record(tag, &payload) {
                     Ok(rec) => {
+                        let alt_enter = matches!(rec, Record::Mode(ScreenMode::AltScreen));
                         self.tile.apply(rec);
+                        // A program entering the alt screen takes every key
+                        // (the modal gate keys on the tile's screen mode), so
+                        // the transcript's Normal mode could only linger to
+                        // resume, with a stale selection, when the app leaves
+                        // -- leave it now (the H-arc round-1 audit, B-F5).
+                        if alt_enter && self.mode == Mode::Normal {
+                            self.leave_normal();
+                        }
                         self.dirty = true;
                     }
                     // A malformed record from the untrusted parser: desync.

@@ -33,6 +33,21 @@ lc_login michael correct-horse-battery-staple-v1
 # UART (t_putstr) and renders on this same serial -- assert it directly.
 lc_send "ptyhost"
 lc_expect "job control active" "the hosted ut's session dance (setsid+acquire+set_fg+ctl)"
+# H-4d (the H-arc round-1 C-F1): EVERY pts host declares the tier it renders
+# into the hosted program's /env/BEACON. ptyhost is a RELAY, so it declares
+# what its own sink renders: the outer console shell exported the console
+# renderer's tier (`cells` under aurora on this image; `none` on a bare
+# serial console), and ptyhost's stdout IS that console, so the inner ut
+# inherits the same word -- and SAYS so, as a pts-hosted shell always does.
+# The old line here was "tier not advertised by the pts host": a host that
+# said nothing, and would have passed an upstream `rich` straight through to
+# a sink that could not show it. (joey's own PTY-4 job-control probe earlier
+# in the boot still hosts its ut undeclared -- a test driver, not a host.)
+expect {
+    -re {ut: beacon (none|cells|rich) inherited \(pts host\)} { lc_pass "PTY-4: ptyhost declared the tier its sink renders ($expect_out(1,string)) into the inner shell's env" }
+    -ex "ut: beacon tier not advertised by the pts host" { lc_fail "ptyhost declared no tier (the C-F1 regression: an upstream tier would pass straight through)" }
+    timeout { lc_fail "the inner ut never reported its inherited tier" }
+}
 
 # The inner shell is interactive through both hops (the tr trick: the output
 # token cannot appear in the typed line).

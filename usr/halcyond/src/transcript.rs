@@ -27,6 +27,7 @@
 //     an open `em` must not restyle the next prompt); the SGR pen
 //     PERSISTS across blocks (terminal semantics).
 
+use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -150,13 +151,33 @@ pub struct SpanTag {
 /// alt screen where no span is read.
 pub const SPAN_MAP_ENTRIES: usize = 8192;
 
+/// One ring slot: the serial and its tag packed into 16 bytes (block 8,
+/// serial 4, obj 2, em 1, hdr 1) -- the tuple `(u32, SpanTag)` padded to
+/// 24. Pinned by `span_slot_is_16_bytes`.
+#[derive(Clone, Copy, Default)]
+struct SpanSlot {
+    block: u64,
+    serial: u32,
+    obj: u16,
+    em: u8,
+    hdr: u8,
+}
+
+/// The ring's live footprint per rich tile (the H-arc round-1 audit, B-F4:
+/// a fixed cost OUTSIDE `SESSION_SCROLLBACK_BUDGET`, bounded by the pane
+/// count -- `MAX_PANES` x 128 KiB -- and recorded in the I-32 accounting
+/// rather than charged to the history it would otherwise evict).
+pub const SPAN_MAP_BYTES: usize = SPAN_MAP_ENTRIES * core::mem::size_of::<SpanSlot>();
+
 /// serial (`vt::Cell.span`) -> the span state after feeding that frame.
 /// The producer stamps cells with the serial of the last Beacon frame it
 /// forwarded (parser-free, R5); the consumer, feeding the same frames in
 /// order, notes the state after each -- so a cell knows its presentation
 /// however late it scrolls off, and across the grid's zone straddle.
+/// Allocated on the FIRST note: a plain tile (no Beacon frame ever) costs
+/// nothing; a rich one `SPAN_MAP_BYTES` once.
 pub struct SpanMap {
-    ring: Vec<(u32, SpanTag)>,
+    ring: Vec<SpanSlot>,
 }
 
 impl Default for SpanMap {
@@ -167,9 +188,12 @@ impl Default for SpanMap {
 
 impl SpanMap {
     pub fn new() -> SpanMap {
-        SpanMap {
-            ring: alloc::vec![(0u32, SpanTag::default()); SPAN_MAP_ENTRIES],
-        }
+        SpanMap { ring: Vec::new() }
+    }
+
+    /// The ring's heap footprint: 0 until the first frame, then `SPAN_MAP_BYTES`.
+    pub fn bytes(&self) -> usize {
+        self.ring.len() * core::mem::size_of::<SpanSlot>()
     }
 
     /// Record the state after frame `serial` (0 = no frame; ignored).
@@ -177,18 +201,32 @@ impl SpanMap {
         if serial == 0 {
             return;
         }
+        if self.ring.is_empty() {
+            self.ring = alloc::vec![SpanSlot::default(); SPAN_MAP_ENTRIES];
+        }
         let i = serial as usize % SPAN_MAP_ENTRIES;
-        self.ring[i] = (serial, tag);
+        self.ring[i] = SpanSlot {
+            block: tag.block,
+            serial,
+            obj: tag.obj,
+            em: tag.em,
+            hdr: tag.hdr,
+        };
     }
 
     /// The state a cell stamped `serial` was written under.
     pub fn get(&self, serial: u32) -> Option<SpanTag> {
-        if serial == 0 {
+        if serial == 0 || self.ring.is_empty() {
             return None;
         }
         let e = self.ring[serial as usize % SPAN_MAP_ENTRIES];
-        if e.0 == serial {
-            Some(e.1)
+        if e.serial == serial {
+            Some(SpanTag {
+                block: e.block,
+                obj: e.obj,
+                em: e.em,
+                hdr: e.hdr,
+            })
         } else {
             None
         }
@@ -1180,14 +1218,18 @@ impl Transcript {
     /// console's invariant every run/menu consumer relies on).
     pub fn push_scrolled_rows(&mut self, rows: &[Vec<vt::Cell>], spans: &SpanMap) {
         // (source block, obj) -> the index in the CURRENT open block; reset
-        // when the open block changes under us (the per-block line cap).
-        let mut remap: (u64, Vec<((u64, u16), u16)>) = (self.open.id, Vec::new());
+        // when the open block changes under us (the per-block line cap). A
+        // map, not a scan: the keys a push can meet are bounded by the ring's
+        // live serials (8192), and a producer scrolling cells that each name
+        // a distinct frozen obj must not pay O(n) per cell (the H-arc round-1
+        // audit, B-F3).
+        let mut remap: (u64, BTreeMap<(u64, u16), u16>) = (self.open.id, BTreeMap::new());
         for row in rows {
             let mut cells: Vec<TCell> = Vec::with_capacity(row.len());
             for c in row {
                 let tag = spans.get(c.span).unwrap_or_default();
                 if remap.0 != self.open.id {
-                    remap = (self.open.id, Vec::new());
+                    remap = (self.open.id, BTreeMap::new());
                 }
                 let obj = self.local_obj(tag, &mut remap.1);
                 let style = self.intern_style(Style {
@@ -1213,14 +1255,14 @@ impl Transcript {
     /// at the same cost the wire's obj-open charges. An evicted source block
     /// or a full table yields 0 -- a run that lost its object, never a wrong
     /// one.
-    fn local_obj(&mut self, tag: SpanTag, remap: &mut Vec<((u64, u16), u16)>) -> u16 {
+    fn local_obj(&mut self, tag: SpanTag, remap: &mut BTreeMap<(u64, u16), u16>) -> u16 {
         if tag.obj == 0 {
             return 0;
         }
         if tag.block == self.open.id {
             return tag.obj;
         }
-        if let Some(&(_, idx)) = remap.iter().find(|(k, _)| *k == (tag.block, tag.obj)) {
+        if let Some(&idx) = remap.get(&(tag.block, tag.obj)) {
             return idx;
         }
         let src = self
@@ -1240,7 +1282,7 @@ impl Transcript {
                 self.open.objs.len() as u16
             }
         };
-        remap.push(((tag.block, tag.obj), idx));
+        remap.insert((tag.block, tag.obj), idx);
         idx
     }
 
@@ -1371,6 +1413,28 @@ fn safe_cut(buf: &[u8]) -> usize {
 mod tests {
     use super::*;
     use alloc::format;
+
+    #[test]
+    fn span_slot_is_16_bytes_and_the_ring_allocates_on_the_first_note() {
+        // B-F4: a plain tile costs nothing; a rich one one fixed ring.
+        assert_eq!(core::mem::size_of::<SpanSlot>(), 16);
+        assert_eq!(SPAN_MAP_BYTES, SPAN_MAP_ENTRIES * 16);
+        let mut m = SpanMap::new();
+        assert_eq!(m.bytes(), 0);
+        assert_eq!(m.get(1), None, "an unallocated ring resolves nothing");
+        m.note(0, SpanTag { block: 9, obj: 1, em: 0, hdr: 0 });
+        assert_eq!(m.bytes(), 0, "serial 0 is ignored and allocates nothing");
+        let tag = SpanTag { block: 7, obj: 3, em: 2, hdr: 1 };
+        m.note(5, tag);
+        assert_eq!(m.bytes(), SPAN_MAP_BYTES);
+        assert_eq!(m.get(5), Some(tag), "the full tag round-trips the packed slot");
+        // The full serial validates the slot: a colliding serial reads none,
+        // and overwriting the slot retires the old serial.
+        assert_eq!(m.get(5 + SPAN_MAP_ENTRIES as u32), None);
+        m.note(5 + SPAN_MAP_ENTRIES as u32, SpanTag::default());
+        assert_eq!(m.get(5), None, "a serial that fell off resolves to no span");
+        assert_eq!(m.get(5 + SPAN_MAP_ENTRIES as u32), Some(SpanTag::default()));
+    }
     use alloc::vec;
     use beacon::wire::Op;
 

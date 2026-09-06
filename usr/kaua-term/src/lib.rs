@@ -255,15 +255,19 @@ impl Producer {
     }
 
     // The row cap that keeps one coalesced ScrollOff's serialized frame under
-    // wire::MAX_FRAME. Each scrolled row is `cols` cells (~13 B each) plus a
-    // small header; half MAX_FRAME leaves ample headroom for the frame envelope.
-    // At least 1 so a pathologically wide tile still makes progress.
+    // wire::MAX_FRAME. Each scrolled row is `cols` cells -- 17 B each on the
+    // wire (`wire::CELL_BYTES`), `size_of::<Cell>()` = 20 B in memory since
+    // the span field (H-4d) -- plus a small header; half MAX_FRAME leaves
+    // ample headroom for the frame envelope. At least 1 so a pathologically
+    // wide tile still makes progress.
     fn scroll_cap(&self) -> usize {
         // The frame bound (the consumer's decoder) AND a heap bound (this
         // producer's own): one ScrollOff is held as cells, then serialized,
         // then framed -- three copies -- so its cell bytes stay well under
-        // the heap even at the widest tile.
-        let per_row = self.cols.max(1) * 16 + 8;
+        // the heap even at the widest tile. Sized by the in-memory cell,
+        // the larger of the two, so one estimate bounds both (the H-arc
+        // round-1 audit, B-F1: a literal 16 predated the span field).
+        let per_row = self.cols.max(1) * core::mem::size_of::<Cell>() + 8;
         (crate::wire::MAX_FRAME / 2 / per_row)
             .min(SCROLL_ACC_BYTES / per_row)
             .max(1)

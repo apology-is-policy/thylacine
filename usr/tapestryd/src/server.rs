@@ -930,6 +930,18 @@ struct Surface {
     /// latch's rotation witness). Survives a reweave: the client's present
     /// discipline is a property of the client, not of a generation.
     slots_presented: u32,
+    /// A resize ack this surface's client sent while the prior generation
+    /// was still draining was refused (E_AGAIN, the second arm): when the
+    /// drain completes, the standing offer is emitted again under a fresh
+    /// serial, so a client that only implements the first arm (drain the
+    /// events, ack the newest CONFIGURE) recovers by its normal path (the
+    /// H-arc round-1 audit, A-F2 -- every client implemented only the first
+    /// arm, so a second offer sent during a drain was lost until an
+    /// unrelated relayout).
+    ack_deferred: bool,
+    /// Test builds: the last resize ack was refused -- the next accepted
+    /// one says so, so a gate can pair every refusal with its recovery.
+    ack_refused: bool,
     slot_stride: u64,
     /// The CURRENT weave generation (the spec's g-highest). weft_ensure,
     /// the geometry reads, and every post-fence present serve/validate
@@ -2444,6 +2456,8 @@ impl Comp {
             lb_logged: None,
             patchwork: false,
             slots_presented: 0,
+            ack_deferred: false,
+            ack_refused: false,
             slot_stride: 0,
             weave: None,
             res_ids: [0; WEAVE_SLOTS as usize], // minted with the first generation
@@ -2605,6 +2619,29 @@ impl Comp {
         }
         if let Some((oldw, old_res)) = self.surf_mut(n).and_then(|s| s.old_weave.take()) {
             self.release_gen(&oldw, &old_res);
+            // A-F2: an offer the client tried to ack DURING the drain stands
+            // unanswered; a client that only drains-and-acks-the-newest would
+            // never re-ack it. Offer it again under a fresh serial -- the
+            // client's normal path from here -- unless it went stale
+            // (the current size already) or was superseded.
+            let again = self
+                .surf_mut(n)
+                .map(|s| {
+                    let d = s.ack_deferred;
+                    s.ack_deferred = false;
+                    match s.offered {
+                        Some((_, ow, oh)) if d && (ow != s.w || oh != s.h) => Some((ow, oh)),
+                        _ => None,
+                    }
+                })
+                .flatten();
+            if let Some((ow, oh)) = again {
+                #[cfg(feature = "test-mode")]
+                say!("tapestryd: resize-ack {} re-offer {}x{} after the drain", n, ow, oh);
+                if !self.emit_configure_to(n, ow, oh) {
+                    self.retire(n);
+                }
+            }
         }
     }
 
@@ -4474,12 +4511,21 @@ impl Comp {
         if claim.is_some() && claimed.is_none() {
             say!("tapestryd: surface {} claim unmatched; focus placement", n);
         }
+        // A leaf another live PROCESS split is RESERVED to it while its conn
+        // lives (`Pane.creator_conn` + `creator_peer`): the focused-leaf
+        // fallback treats such a leaf as occupied and splits beside it, so a
+        // claim-less create (a program launched during a restore) never
+        // takes the tool's leaf out from under its tag (the H-arc round-1
+        // audit, A-F3; the claim mint's E_AGAIN was the only reader). The
+        // same process on another conn fills its own leaf (the battery's
+        // control-conn split + surface-conn host); the renderer (0) is exempt.
+        let (conn, peer) = self.surf(n).map_or((0, 0), |s| (s.owner_conn, s.owner_peer));
         let hosted = match claimed {
             Some(slot) => self
                 .layout
                 .host_into(n, slot)
-                .or_else(|| self.layout.host(n)),
-            None => self.layout.host(n),
+                .or_else(|| self.layout.host_for(n, conn, peer)),
+            None => self.layout.host_for(n, conn, peer),
         };
         if hosted.is_none() {
             say!("tapestryd: surface {} unhosted (pane table full)", n);
@@ -4522,6 +4568,17 @@ impl Comp {
     /// bound: present a frame, then re-ack).
     fn resize_ack(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
         let r = self.resize_ack_inner(n, w, h, serial);
+        if cfg!(feature = "test-mode") {
+            // Pair every refusal with its recovery: the accepted ack after a
+            // refused one says so (a gate can then require the pair).
+            if let Some(s) = self.surf_mut(n) {
+                let was_refused = s.ack_refused;
+                s.ack_refused = r.is_err();
+                if r.is_ok() && was_refused {
+                    say!("tapestryd: resize-ack {} {}x{} serial {} ok after a refusal", n, w, h, serial);
+                }
+            }
+        }
         if cfg!(feature = "test-mode") && r.is_err() {
             // The client sees one Rwrite error; the state that decided it
             // (stale vs no offer vs echo mismatch vs draining) is only
@@ -4572,7 +4629,10 @@ impl Comp {
             return Ok(());
         }
         if s.old_weave.is_some() {
-            return Err(E_AGAIN); // one reweave in flight (<=2 gens)
+            // One reweave in flight (<=2 gens): refused now, re-offered by
+            // `release_displaced_gen` when the drain completes.
+            self.surf_mut(n).unwrap().ack_deferred = true;
+            return Err(E_AGAIN);
         }
 
         // Reweave: mint the new generation FIRST (a failure leaves the
@@ -5310,6 +5370,30 @@ impl Comp {
             w: dw2,
             h: dh2,
         })
+    }
+
+    /// Floor the bars around surface `n`'s CURRENT placement in its pane
+    /// (buffer + push): the placement changed under a composed display with
+    /// no structural pass to repaint the pane (the #56 latch flip). A
+    /// hidden or unhosted surface, or a display with no screen buffer, is a
+    /// no-op.
+    fn floor_bars_around(&mut self, n: usize) {
+        if self.scanout != Scanout::Composed || !self.compose_visible(n) {
+            return;
+        }
+        let Some(slot) = self.layout.find_hosting(n) else {
+            return;
+        };
+        let Some(c) = self.layout.get(slot).map(|p| p.content) else {
+            return;
+        };
+        let inner = self.placement_rect(n, c).unwrap_or(Rect::ZERO);
+        for bar in Self::bars_around(c, inner) {
+            if !bar.is_empty() {
+                self.fill_rect(bar, pane::BG_COLOR);
+            }
+        }
+        self.screen_flush_rect(c);
     }
 
     /// The four bands of `outer` around `inner` (top, bottom, left, right;
@@ -6466,7 +6550,7 @@ impl Comp {
         }
     }
 
-    pub fn layout_cmd(&mut self, actor: Actor, creator: u64, s: &str) -> Result<(), u32> {
+    pub fn layout_cmd(&mut self, actor: Actor, creator: (u64, u64), s: &str) -> Result<(), u32> {
         let s = s.trim();
         let mut it = s.splitn(2, ' ');
         let verb = it.next().ok_or(p9::E_INVAL)?;
@@ -6538,9 +6622,11 @@ impl Comp {
     /// and each pane's ctl). Every successful mutation reconciles.
     /// Structural verbs restore a zoomed layout first (the tmux rule);
     /// `focus` keeps zoom only when it names the zoomed pane itself.
-    /// `creator` is the writing conn's id (0 for the compositor's own
-    /// internal calls): a `split` stamps it on the empties it makes (H-4d).
-    pub fn pane_cmd(&mut self, actor: Actor, creator: u64, id: u32, cmd: &str) -> Result<(), u32> {
+    /// `creator` is the writing conn's (id, peer process) -- (0, 0) for the
+    /// compositor's own internal calls: a `split` stamps it on the empties
+    /// it makes (H-4d; the process half keys the claim-less create's
+    /// fallback, `Layout::host_for`).
+    pub fn pane_cmd(&mut self, actor: Actor, creator: (u64, u64), id: u32, cmd: &str) -> Result<(), u32> {
         let slot = self.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
         let cmd = cmd.trim();
         // The trust model, per verb (syntax first, then authority): a
@@ -6581,9 +6667,9 @@ impl Comp {
             // until it goes (`Pane.creator_conn`): a restore tool's skeleton
             // is never filled by its own session compositor mid-build. A
             // hosted original keeps its surface; the stamp is inert there.
-            self.layout.set_creator(new_leaf, creator);
+            self.layout.set_creator(new_leaf, creator.0, creator.1);
             if self.layout.is_empty_leaf(slot) {
-                self.layout.set_creator(slot, creator);
+                self.layout.set_creator(slot, creator.0, creator.1);
             }
         } else if let Some(rest) = cmd.strip_prefix("move ") {
             let d = Dir::parse(rest.trim()).ok_or(p9::E_INVAL)?;
@@ -7664,7 +7750,7 @@ impl Comp {
             ChordAction::Close => {
                 let f = self.layout.focused;
                 if let Some(id) = self.layout.id_of(f) {
-                    let _ = self.pane_cmd(Actor::Renderer, 0, id, "close");
+                    let _ = self.pane_cmd(Actor::Renderer, (0, 0), id, "close");
                 }
             }
         }
@@ -14767,7 +14853,7 @@ impl Conn {
         match pane_fk(path) {
             PFK_CTL => {
                 self.layout_verb_budget()?;
-                comp.pane_cmd(actor, self.conn_id, id, s)
+                comp.pane_cmd(actor, (self.conn_id, self.peer_stripes), id, s)
             }
             PFK_MODE => {
                 let mode = Mode::parse(s).ok_or(p9::E_INVAL)?;
@@ -14843,7 +14929,7 @@ impl Conn {
             return match core::str::from_utf8(a.data)
                 .map_err(|_| p9::E_INVAL)
                 .and_then(|s| self.layout_verb_budget().map(|_| s))
-                .and_then(|s| comp.layout_cmd(actor, self.conn_id, s))
+                .and_then(|s| comp.layout_cmd(actor, (self.conn_id, self.peer_stripes), s))
             {
                 Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                 Err(e) => self.err(tag, e),
@@ -15736,7 +15822,9 @@ impl Conn {
         // H-4d: the menu verbs (`menu place` / `menu dismiss`) are ALSO the
         // declared session compositor's -- the arms below still require the
         // menu surface to be the caller's own process's.
-        let session_menu_verb = s.starts_with("menu ") && comp.session_declared(self.conn_id);
+        let session_menu_verb = s.starts_with("menu ")
+            && comp.session_declared(self.conn_id)
+            && comp.conn_hosts(self.conn_id);
         if !Self::is_ungated_ctl(s) && !self.peer_is_renderer() && !session_menu_verb {
             return Err(p9::E_PERM);
         }
@@ -16068,7 +16156,14 @@ impl Conn {
                 // while it hosts, so no other same-user program can reach
                 // this arm by declaring past a live compositor.
                 (Role::Menu, None) => {
-                    if !self.peer_is_renderer() && !comp.session_declared(self.conn_id) {
+                    // The seat is held only while it HOSTS (KT-1 round 3): a
+                    // declarer on an idle display hosts nothing and gets no
+                    // menu either -- else it could float one, take the grab
+                    // and force Composed with no tile of its own (the H-arc
+                    // round-1 audit, A-F5).
+                    if !self.peer_is_renderer()
+                        && !(comp.session_declared(self.conn_id) && comp.conn_hosts(self.conn_id))
+                    {
                         return Err(p9::E_PERM);
                     }
                     Host::Menu
@@ -16266,6 +16361,7 @@ impl Conn {
         // full frame as two tiles, which a single-full-rect shortcut
         // falsely latched (the moveB pane-center regression).
         let covers_full = rects_cover_full(&rects, w, h);
+        let mut latched = false;
         if let Some(s) = comp.surf_mut(n) {
             s.slots_presented |= 1 << slot;
             // Rotation = two or more distinct slots ever presented. Only then
@@ -16275,6 +16371,7 @@ impl Conn {
             let rotates = s.slots_presented & (s.slots_presented - 1) != 0;
             if !covers_full && rotates && !s.patchwork {
                 s.patchwork = true;
+                latched = true;
                 say!(
                     "tapestryd: surface {} patchwork latched (slot {} of slots {:#b}, {} rects of {}x{})",
                     n,
@@ -16285,6 +16382,13 @@ impl Conn {
                     h
                 );
             }
+        }
+        if latched {
+            // The placement just flipped from the letterbox to the crop: the
+            // first frame's scaled projection outside the native rect would
+            // otherwise persist until the next structural repaint (the
+            // H-arc round-1 audit, A-F4). Floor the bars now.
+            comp.floor_bars_around(n);
         }
 
         // Route by scanout mode (G-6). The slot base + rect origin ride
@@ -16677,8 +16781,23 @@ impl Conn {
             if gpu_path {
                 let scr_res = scr.map(|(r, _)| r).unwrap_or(0);
                 let res = res_ids[slot as usize];
+                // A STALE slot resource (marked at a fresh generation, at a
+                // hide, at any CPU-arm present: its host copy never received
+                // the full frame) blitted WHOLE by a scaled op would compose
+                // bytes no present carried -- the witness tokens, the
+                // pre-hide frame, undefined texture. The letterbox arm now
+                // serves a single-slot client's PARTIAL presents (the #56
+                // re-key), so expand the first transfer to the full surface
+                // exactly as the direct arm does (the H-arc round-1 audit,
+                // A-F1); the copy then mirrors the guest slot and stays so.
+                let stale = comp.surf(n).map_or(false, |s| s.res_stale[slot as usize]);
+                let xfer: Vec<(u32, u32, u32, u32)> = if stale {
+                    alloc::vec![(0, 0, w, h)]
+                } else {
+                    rects.clone()
+                };
                 let t0 = Instant::now();
-                for &(x, y, pw, ph) in &rects {
+                for &(x, y, pw, ph) in &xfer {
                     let offset = ((y as u64) * (w as u64) + x as u64) * 4;
                     if comp.gpu.transfer(res, offset, x, y, pw, ph).is_err() {
                         return Err(E_IO);
@@ -16728,15 +16847,16 @@ impl Conn {
                     comp.composed_gpu += 1;
                     comp.cost_arm = Cost::PresentComposedSlot;
                     comp.say_gpu_once(n, "slot", res, scr_res);
-                    // The slot's host copy now holds exactly what was
-                    // transferred: valid in full iff this present's damage
-                    // covered the surface (the direct arm's own rule); a
-                    // damage-only present leaves it partial and a later direct
-                    // switch expands its first transfer (4.5.8c's decision:
-                    // explicit, not ported by reflex).
-                    let full = rects_cover_full(&rects, w, h);
+                    // The slot's host copy now MIRRORS the guest slot: a
+                    // stale one was just transferred in full, and a fresh
+                    // one was complete before this present and received
+                    // everything the client changed since. So the slot is
+                    // no longer stale, whatever this present's coverage --
+                    // `!full` here made every partial present re-mark it and
+                    // the expansion above would then fire on every other
+                    // present (A-F1's second half).
                     if let Some(s) = comp.surf_mut(n) {
-                        s.res_stale[slot as usize] = !full;
+                        s.res_stale[slot as usize] = false;
                     }
                 }
             }
