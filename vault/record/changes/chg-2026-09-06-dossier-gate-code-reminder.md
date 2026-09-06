@@ -4,7 +4,7 @@ type: chg
 title: "quaestor dossier-gate: the tiered code->dossier reminder (commit-msg hook) -- staged audit:hard-owned code blocks unless the dossier is co-staged or a No-dossier-change trailer is present; other owners warn"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["6ba2970d"]
 touched: []
 established: []
 closed: []
