@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**75 absorbed · 82 live · 157 total.**
+**76 absorbed · 81 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -119,7 +119,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 20-burrow.md | absorbed | [[sub-kernel-burrow]], [[sub-kernel-handle]], [[sub-kernel-vma]] |
 | 21-elf.md | absorbed | [[sub-kernel-elf]] |
 | 22-asid.md | absorbed | [[sub-kernel-asid]], [[sub-kernel-proc]] |
-| 23-direct-map.md | live | — |
+| 23-direct-map.md | absorbed | [[sub-kernel-mm-phys]], [[sub-kernel-mm-slub]], [[sub-kernel-mmu]] |
 | 24-per-proc-pgtable.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-asid]], [[sub-kernel-fault]], [[sub-kernel-mmu]], [[sub-kernel-sched-smp]] |
 | 25-fault-dispatcher.md | absorbed | [[sub-kernel-exception]], [[sub-kernel-fault]] |
 | 26-vma.md | absorbed | [[sub-kernel-vma]] |
