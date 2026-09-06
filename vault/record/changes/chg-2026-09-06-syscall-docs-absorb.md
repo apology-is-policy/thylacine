@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/28-syscall (P3-Ec, the two-syscall minimum surface): superseded by the ~107-syscall ABI; zero-fold multi-redirect stub to syscall-dispatch + proc + cons"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["d6c3469a"]
 touched: []
 established: []
 closed: []
