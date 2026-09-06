@@ -4,7 +4,7 @@ type: chg
 title: "H-arc round-1 fold (UI + beacon-relay half): the halcyond SpanMap/AltScreen findings, kaua-term scroll_cap sizing, and the ptyhold/ptyhost render-tier relay"
 date: 2026-09-06
 arc: arc-vault
-commits: []
+commits: ["29b3267c"]
 touched:
   - sub-halcyond
   - sub-kaua-term
