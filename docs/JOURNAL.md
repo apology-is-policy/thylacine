@@ -25,7 +25,7 @@ needed the operator.
 ## 2026-09-07 (aux, sixth run) -- IM-4 the userspace sub-shell: the imperium tool, the fasces prompt, abdicate; a load-bearing question the boot prover never answered, settled by reading the kernel; a host-test wall that reshaped the crate layout
 
 **What landed.** IM-4 (`IMPERIUM-DESIGN.md` §11.6), the userspace half of the
-imperium arc, as one commit (`PENDING`): the `imperium` tool, the fasces prompt
+imperium arc, as one commit (`6c4d61be`): the `imperium` tool, the fasces prompt
 in `ut`, the `abdicate` builtin, and a new standalone `fasces` crate. Pure
 userspace -- no kernel change, no corvus change, no new invariant surface. It
 CONSUMES the IM-2 legate propagation and the IM-3 confer.
