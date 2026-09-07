@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**148 absorbed · 9 live · 157 total.**
+**149 absorbed · 8 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -134,7 +134,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 35-virtio.md | absorbed | [[inv-i15]], [[inv-i34]], [[inv-i5]], [[sub-kernel-discovery]] |
 | 36-irqfwd.md | absorbed | [[inv-i9]], [[sub-kernel-irqfwd]] |
 | 37-virtio_pci.md | absorbed | [[inv-i15]], [[inv-i34]], [[inv-i5]], [[sub-kernel-discovery]] |
-| 38-userspace.md | live | — |
+| 38-userspace.md | absorbed | [[sub-kernel-syscall-abi]], [[sub-libthyla-rs]], [[sub-substrate-build]] |
 | 39-hw-handles.md | absorbed | [[inv-i5]], [[sub-kernel-hwcap]] |
 | 40-uaccess.md | absorbed | [[sub-kernel-exception]], [[sub-kernel-uaccess]] |
 | 41-irq-bench.md | live | — |
