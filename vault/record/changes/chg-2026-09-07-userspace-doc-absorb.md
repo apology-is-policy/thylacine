@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/38-userspace (the P4-Ia1 userspace tree + libt): clean multi-redirect (build / libt / libthyla-rs)"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["6596a0e4"]
 touched: []
 established: []
 closed: []
