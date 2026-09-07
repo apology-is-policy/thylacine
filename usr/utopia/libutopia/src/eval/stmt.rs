@@ -2360,6 +2360,7 @@ pub fn note_class_for_name(name: &str) -> Option<NoteClass> {
         "interrupt" => Some(NoteClass::Interrupt),
         "pipe" => Some(NoteClass::Pipe),
         "child_exit" => Some(NoteClass::ChildExit),
+        "sak" => Some(NoteClass::Sak),
         _ if name.starts_with("tty:") => Some(NoteClass::Tty),
         _ => None,
     }

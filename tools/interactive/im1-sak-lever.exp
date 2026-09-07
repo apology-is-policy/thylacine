@@ -1,0 +1,102 @@
+#!/usr/bin/expect -f
+# tools/interactive/im1-sak-lever.exp -- IM-1: the BREAK lever + the kernel's
+# SAK witness (IMPERIUM-DESIGN.md 11.3; TRUSTED-PATH.md 12; I-27 on serial).
+#
+# Proves, over the real console, that the harness CAN inject a serial BREAK --
+# A-4c-2's note said it could not, stale since the console became a `mux=on`
+# chardev shared with the qemu monitor: Ctrl-A b is the monitor's "send a
+# BREAK" verb on the muxed serial -- and that the kernel recognizes it:
+# proc_console_sak emits `cons: SAK (<decision>)` on EVERY SAK it services.
+# Before IM-3 lands corvus as the episode consumer the trusted authority is
+# UNARMED, so the decision is the A-4c-2 attach handoff alone, and the line
+# reads `cons: SAK (unarmed)` -- which is itself the witness that (i) a trusted
+# Proc is registered (else `no trusted proc`) and (ii) the ARM gate holds (the
+# kernel alone opens no episode: the console below keeps working).
+#
+#   (b) NEGATIVE CONTROL, one variable away, and FIRST so a stale witness can
+#       never satisfy (a): a bare `b` (the lever minus the monitor escape)
+#       produces no SAK line -- the witness keys on the BREAK, not the byte.
+#   (a) POSITIVE: Ctrl-A b -> `cons: SAK (unarmed)`.
+#   (c) EVERY SAK: a second Ctrl-A b -> a second line (the refinement that
+#       retired the early return which swallowed every SAK after the first).
+#   (d) the session SURVIVES the unarmed SAK: a command afterwards EXECUTES,
+#       keyed on an UPPERCASED token the editor's lowercase echo can never
+#       produce.
+#
+# What this CANNOT see, said so the green reads no larger: an ARMED consumer's
+# episode (the freeze, the raw prompt, the END). IM-3 lands corvus as the
+# consumer and IM-5's ls-imperium scenario proves that leg end to end; the
+# kernel half is proven by the cons.episode_* suite at boot.
+#
+# Tcl trap, recorded so nobody "fixes" it back: "\x01b" is NOT Ctrl-A + b --
+# \x consumes every following hex digit, so it is one byte 0x1b (ESC). The
+# octal form "\001b" (three digits max) is the byte 0x01 followed by `b`, the
+# same spelling lc_quit uses for Ctrl-A x.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+# Wait `secs` for a SAK witness line; return the kernel's DECISION string
+# (the text inside the parentheses), or "" on timeout. Returned, not read from
+# expect_out by the caller: expect_out is local to the proc that matched.
+# Extinction and EOF are hard failures either way.
+proc sak_witness_within {secs phase} {
+    global timeout
+    set timeout $secs
+    expect {
+        -re {cons: SAK \(([a-z ]+)\)} {
+            set d $expect_out(1,string)
+            lc_step "saw: cons: SAK ($d) during '$phase'"
+            return $d
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+        timeout           { return "" }
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# (b) the negative control: the lever WITHOUT its monitor escape. The byte is
+# just typed at the shell; Enter runs it as a (nonexistent) command, which is
+# the harmless way to consume it from the line editor.
+lc_send "b"
+set d [sak_witness_within 3 "negative control: a bare 'b'"]
+if {$d ne ""} {
+    lc_fail "a bare 'b' produced a SAK line (decision '$d') -- the witness keys on the byte, not the BREAK"
+}
+lc_pass "IM-1(b): a bare 'b' is not a SAK (negative control holds)"
+
+# (a) the lever: Ctrl-A b = the qemu monitor's BREAK on the muxed serial.
+lc_step "send Ctrl-A b (monitor BREAK)"
+lc_raw_send "\001b" "monitor BREAK"
+set d [sak_witness_within 10 "the SAK witness"]
+if {$d eq ""} {
+    lc_fail "no `cons: SAK (...)` line within 10s of Ctrl-A b -- the BREAK did not reach the kernel (the mux chardev lever is broken) or proc_console_sak no longer emits the witness"
+}
+if {$d ne "unarmed"} {
+    lc_fail "SAK decision was '$d', expected 'unarmed' (pre-IM-3: a trusted Proc registered, no consumer armed)"
+}
+lc_pass "IM-1(a): Ctrl-A b reached the kernel as a BREAK: cons: SAK (unarmed)"
+
+# (c) every SAK is serviced + witnessed, not only the first of a session.
+lc_raw_send "\001b" "monitor BREAK (second)"
+set d [sak_witness_within 10 "the second SAK witness"]
+if {$d eq ""} {
+    lc_fail "the second Ctrl-A b produced no SAK line -- the first-SAK early return is back (every SAK must be serviced)"
+}
+if {$d ne "unarmed"} {
+    lc_fail "second SAK decision was '$d', expected 'unarmed'"
+}
+lc_pass "IM-1(c): a second SAK is serviced + witnessed"
+
+# (d) the unarmed SAK froze nothing: the shell still executes a command.
+lc_send "echo im1-after-sak | tr a-z A-Z"
+lc_expect "IM1-AFTER-SAK" "a command executes after the unarmed SAK"
+lc_pass "IM-1(d): the session survives an unarmed SAK (the ARM gate: no episode, no freeze)"
+
+lc_quit
+lc_pass "IM-1 im1-sak-lever: BREAK lever + SAK witness + negative control + every-SAK + session survives"
+exit 0

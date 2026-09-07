@@ -82,6 +82,18 @@ void test_cons_sak_idempotent_flood(void);
 void test_cons_sak_via_console_mgr(void);
 void test_cons_sak_does_not_terminate_trusted(void);
 void test_cons_sak_attaches_from_relinquished_state(void);
+void test_cons_episode_requires_arm(void);                // IM-1: the trusted EPISODE
+void test_cons_episode_begins_on_sak(void);
+void test_cons_episode_discards_pending_input(void);
+void test_cons_episode_freezes_nonattached_reader(void);
+void test_cons_episode_freezes_nonattached_writer(void);
+void test_cons_episode_freezes_feed_consctl_poll(void);
+void test_cons_episode_end_restores(void);
+void test_cons_episode_repeat_sak_idempotent(void);
+void test_cons_episode_gate(void);
+void test_cons_episode_relinquish_ends(void);
+void test_cons_episode_trusted_death_ends(void);
+void test_cons_episode_saved_owner_death(void);
 void test_proc_console_relinquish(void);              // A-5a (I-27)
 void test_proc_console_relinquish_other_owner(void);  // A-5a (self-only)
 void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
@@ -3134,4 +3146,560 @@ void test_cons_ring_unclaimed_on_clean_boot(void) {
     // (A held-forever lock would hang this call -- loud, and correctly so.)
     u8 scratch[4];
     (void)cons_test_tx_ring_peek(scratch, 0u);
+}
+
+// =============================================================================
+// IM-1: the trusted EPISODE (IMPERIUM-DESIGN.md 11.3; I-27 ENFORCED on serial).
+// =============================================================================
+//
+// Every test here drives the PRODUCTION SAK arm (cons_test_sak_dispatch ==
+// console_mgr's `proc_console_sak -> cons_episode_begin`) and the production
+// op core (proc_console_episode == the SYS_CONSOLE_EPISODE handler minus the
+// caller resolve), against synthetic Procs in the A-4c-2 shape. The test
+// thread's own Proc is kproc: NOT console-attached, so it is the frozen
+// world; where a test needs the ATTACHED authority to act, kproc is marked
+// attached for exactly that window (the backstop reports a leak of it).
+//
+// Cleanup runs on EVERY path (the #89 err-string discipline): the fixture is
+// torn down before the verdict is asserted, so a red assert never strands a
+// parked kthread, an open episode, or a dangling console pointer for the
+// tests after it.
+
+struct ep_fixture {
+    struct Proc *trusted;
+    struct Proc *owner;
+};
+
+// The post-SAK steady state, minus the SAK: a live trusted authority
+// (attached only through the SAK itself), optionally a live attached owner
+// (the session shell), optionally ARMED through the production op core.
+static bool ep_setup(struct ep_fixture *f, bool with_owner, bool armed) {
+    cons_test_reset();
+    f->trusted = proc_alloc();
+    f->owner   = with_owner ? proc_alloc() : NULL;
+    if (!f->trusted || (with_owner && !f->owner)) return false;
+    if (!f->trusted->notes) return false;
+    f->trusted->state = PROC_STATE_ALIVE;
+    proc_set_console_trusted(f->trusted);
+    if (f->owner) {
+        f->owner->state = PROC_STATE_ALIVE;
+        proc_mark_console_attached(f->owner);
+        proc_set_console_owner(f->owner);
+    }
+    if (armed && proc_console_episode(f->trusted, SYS_CONSOLE_EPISODE_ARM) != 0) return false;
+    return true;
+}
+
+// Order matters: clearing the trusted authority abandons an open episode AND
+// may hand the Ctrl-C target back to the owner (a live synthetic Proc), so
+// the owner's relinquish -- which drops the owner pointer, its attach AND the
+// saved pre-SAK slot -- runs AFTER it. Nothing may dangle into proc_free.
+static void ep_teardown(struct ep_fixture *f) {
+    proc_set_console_trusted(NULL);
+    if (f->owner) proc_console_relinquish(f->owner);
+    proc_set_console_owner(NULL);
+    cons_test_reset();
+    if (f->owner) {
+        f->owner->state = PROC_STATE_ZOMBIE;
+        proc_free(f->owner);
+        f->owner = NULL;
+    }
+    if (f->trusted) {
+        f->trusted->state = PROC_STATE_ZOMBIE;
+        proc_free(f->trusted);
+        f->trusted = NULL;
+    }
+}
+
+// The ARM gate: unarmed, a SAK is the A-4c-2 handoff exactly as before -- no
+// episode, no note, no termios change. This is the property that lets IM-1
+// land before its consumer (IM-3) without freezing a console nobody can end.
+void test_cons_episode_requires_arm(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, true, false), "fixture (unarmed, owner)");
+    u32 before = cons_test_termios();
+    cons_test_sak_dispatch();
+    const char *err = NULL;
+    if (cons_episode_active())                        err = "unarmed: a SAK opens no episode";
+    else if (!proc_is_console_attached(f.trusted))    err = "unarmed: the A-4c-2 handoff still ran (trusted attached)";
+    else if (proc_is_console_attached(f.owner))       err = "unarmed: the owner's attach is revoked";
+    else if (proc_test_console_owner() != NULL)       err = "unarmed: the owner is cleared";
+    else if (f.trusted->notes->count != 0u)           err = "unarmed: no `sak` note";
+    else if (cons_test_termios() != before)           err = "unarmed: termios untouched";
+    else if (proc_test_console_owner_pre_sak() != f.owner)
+                                                      err = "the unseated owner is remembered for a later episode's END";
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "requires arm");
+}
+
+// Armed: the SAK opens the episode -- RAW forced (ICANON/ECHO/ISIG/ICRNL off,
+// ONLCR kept), the `sak` note posted to the trusted Proc, the owner unseated
+// and saved. And the POST gate: userspace cannot fake the note.
+void test_cons_episode_begins_on_sak(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, true, true), "fixture (armed, owner)");
+    cons_test_set_termios(CONS_TERMIOS_ALL);   // all five on: each forced-off flag observable, ONLCR's survival too
+    cons_test_sak_dispatch();
+    const char *err = NULL;
+    u32 tio = cons_test_termios();
+    if (!cons_episode_active())                                          err = "armed: the SAK opened an episode";
+    else if ((tio & (CONS_ICANON | CONS_ECHO | CONS_ISIG | CONS_ICRNL)) != 0u)
+                                                                         err = "BEGIN forced RAW (ICANON/ECHO/ISIG/ICRNL off)";
+    else if ((tio & CONS_ONLCR) == 0u)                                   err = "BEGIN keeps ONLCR (output translation is not input trust)";
+    else if (f.trusted->notes->count != 1u)                              err = "exactly one `sak` note posted to the trusted Proc";
+    else if (proc_test_console_owner_pre_sak() != f.owner)               err = "the unseated owner saved for END";
+    else if (proc_test_console_owner() != NULL)                          err = "the owner is NULL during the episode";
+    if (!err) {
+        struct Note got;
+        spin_lock(&f.trusted->notes->lock);
+        int popped = notes_dequeue_locked(f.trusted, NULL, &got);
+        spin_unlock(&f.trusted->notes->lock);
+        if (popped != 1)                          err = "dequeued the posted note";
+        else if (!name_eq(got.name, NOTE_NAME_SAK)) err = "the note is `sak`";
+    }
+    if (!err) {
+        if (notes_post(f.trusted, NOTE_NAME_SAK, 0u, NULL, false) != -1) err = "a userspace `sak` post is refused";
+        else if (f.trusted->notes->count != 0u)                          err = "...and queues nothing";
+        else if (notes_post(f.trusted, NOTE_NAME_SAK, 0u, NULL, true) != 0) err = "the kernel-synthetic post is accepted";
+    }
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "begins on SAK");
+}
+
+// BEGIN discards EVERY pending input byte: the cooked partial line AND the
+// ring's committed line. Post-BEGIN input lands raw (no line assembly).
+void test_cons_episode_discards_pending_input(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_set_termios(CONS_ICANON);        // cooked, ECHO off: nothing reaches the wire
+    const char *line = "xy\n";
+    for (int i = 0; line[i]; i++) cons_rx_input((u8)line[i], false);
+    cons_rx_input((u8)'a', false);
+    cons_rx_input((u8)'b', false);
+    const char *err = NULL;
+    if (cons_test_rx_count() != 3u)      err = "a committed line is in the ring pre-SAK";
+    else if (cons_test_line_len() != 2u) err = "a partial line is assembling pre-SAK";
+    if (!err) {
+        cons_test_sak_dispatch();
+        if (!cons_episode_active())          err = "episode open";
+        else if (cons_test_rx_count() != 0u) err = "BEGIN discarded the ring (the committed line)";
+        else if (cons_test_line_len() != 0u) err = "BEGIN discarded the partial line";
+    }
+    if (!err) {
+        cons_rx_input((u8)'k', false);
+        if (cons_test_rx_count() != 1u)      err = "a post-BEGIN byte lands raw (no Enter needed)";
+        else if (cons_test_line_len() != 0u) err = "...and not in the line buffer";
+    }
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "discards pending input");
+}
+
+// The reader FREEZE, end to end on a real parked reader. A non-attached
+// kthread parks on data holding the slot; BEGIN makes it VACATE (slot free,
+// parked on the episode list); a key byte lands and it does NOT take it; the
+// attached authority drains it; END unfreezes it, it re-takes the slot and
+// drains the next byte. The lost-wakeup shape of cons.blocking_read_wakeup,
+// twice over (the vacate wake and the END wake).
+static volatile int  g_epr_ran;
+static volatile long g_epr_ret;
+static volatile int  g_epr_byte;
+static volatile bool g_epr_exited;
+
+static void epr_reader_entry(void) {
+    g_epr_ran = 1;
+    u8 buf[4];
+    long got = devcons.read(NULL, buf, (long)sizeof(buf), 0);
+    g_epr_ret  = got;
+    g_epr_byte = (got > 0) ? (int)buf[0] : -1;
+    g_epr_ran  = 2;
+    test_kthread_park_terminal(&g_epr_exited);
+}
+
+void test_cons_episode_freezes_nonattached_reader(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);
+    g_epr_ran = 0; g_epr_ret = -1; g_epr_byte = -1; g_epr_exited = false;
+
+    const char *err = NULL;
+    struct Thread *reader = thread_create(kproc(), epr_reader_entry);
+    if (!reader) err = "thread_create(reader)";
+    if (!err) {
+        ready(reader);
+        { int spins = 0;
+          while ((g_epr_ran < 1 || reader->state != THREAD_SLEEPING) && spins++ < 100000)
+              sched(); }
+        if (g_epr_ran != 1 || reader->state != THREAD_SLEEPING) err = "reader parked in devcons_read";
+        else if (!cons_test_reader_busy())                       err = "the parked reader holds the slot pre-SAK";
+    }
+    if (!err) {
+        cons_test_sak_dispatch();
+        if (!cons_episode_active()) err = "episode open";
+    }
+    if (!err) {
+        TEST_YIELD_UNTIL_SOFT(cons_test_episode_parked() == 1u && !cons_test_reader_busy());
+        if (cons_test_episode_parked() != 1u) err = "BEGIN made the non-attached reader VACATE onto the episode list";
+        else if (cons_test_reader_busy())     err = "the vacated slot is FREE";
+    }
+    if (!err) {
+        cons_rx_input((u8)'k', false);            // the first key byte
+        { int spins = 0; while (spins++ < 2000) sched(); }   // every chance for a wrong reader to wake
+        if (g_epr_ran != 1)                  err = "the frozen reader did not take the key byte";
+        else if (cons_test_rx_count() != 1u) err = "the key byte waits for the authority";
+    }
+    if (!err) {
+        proc_mark_console_attached(kproc());      // the authority's window
+        u8 buf[4];
+        long got = devcons.read(NULL, buf, (long)sizeof(buf), 0);
+        proc_revoke_console_attached(kproc());
+        if (got != 1L || buf[0] != (u8)'k') err = "the attached reader drained the key byte";
+        else if (cons_test_reader_busy())    err = "the attached reader released the slot";
+    }
+    if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
+    if (!err) {
+        TEST_YIELD_UNTIL_SOFT(cons_test_episode_parked() == 0u && cons_test_reader_busy());
+        if (cons_test_episode_parked() != 0u) err = "END unparked the reader";
+        else if (!cons_test_reader_busy())    err = "the unfrozen reader re-took the slot";
+    }
+    if (!err) {
+        cons_rx_input((u8)'q', false);
+        { int spins = 0; while (g_epr_ran < 2 && spins++ < 100000) sched(); }
+        if (g_epr_ran != 2)                     err = "the unfrozen reader returned";
+        else if (g_epr_ret != 1L)               err = "it returned exactly 1 byte";
+        else if ((long)g_epr_byte != (long)'q') err = "and that byte is the post-END 'q'";
+    }
+
+    // Release + reap on every path: close whatever is open (unparks the
+    // episode list), a byte unblocks a reader still parked on data, then join.
+    (void)cons_episode_end();
+    if (reader && g_epr_ran < 2) cons_rx_input((u8)'z', false);
+    if (reader) test_kthread_join_free(reader, &g_epr_exited);
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "reader freeze dance");
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);
+}
+
+// The writer FREEZE. A non-attached kthread's write parks on the episode list
+// BEFORE the TX role and emits NOTHING (echo capture is the sink); the
+// attached authority writes through; END releases the writer and its byte
+// lands. Owned state (the capture, a parked kthread): SOFT waits, release on
+// every path.
+static volatile int  g_epw_ran;
+static volatile long g_epw_ret;
+static volatile bool g_epw_exited;
+
+static void epw_writer_entry(void) {
+    g_epw_ran = 1;
+    g_epw_ret = devcons.write(NULL, "\n", 1, 0);
+    g_epw_ran = 2;
+    test_kthread_park_terminal(&g_epw_exited);
+}
+
+void test_cons_episode_freezes_nonattached_writer(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);
+    g_epw_ran = 0; g_epw_ret = -1; g_epw_exited = false;
+
+    const char *err = NULL;
+    cons_test_sak_dispatch();
+    if (!cons_episode_active()) err = "episode open";
+    cons_test_echo_capture(true);
+    struct Thread *w = NULL;
+    if (!err) {
+        w = thread_create(kproc(), epw_writer_entry);
+        if (!w) err = "thread_create(writer)";
+    }
+    if (!err) {
+        ready(w);
+        TEST_YIELD_UNTIL_SOFT(cons_test_episode_parked() == 1u);
+        u8 cap[8];
+        if (cons_test_episode_parked() != 1u)              err = "the non-attached writer parked on the episode list";
+        else if (g_epw_ran != 1)                           err = "the writer is inside its write";
+        else if (cons_test_echo_captured(cap, sizeof cap) != 0u) err = "the frozen writer emitted NOTHING";
+        else if (cons_test_tx_role_held())                 err = "a frozen writer holds no TX role";
+    }
+    if (!err) {
+        proc_mark_console_attached(kproc());
+        long got = devcons.write(NULL, "\n", 1, 0);
+        proc_revoke_console_attached(kproc());
+        u8 cap[8];
+        if (got != 1L)                                          err = "the attached writer's write completed";
+        else if (cons_test_echo_captured(cap, sizeof cap) != 1u) err = "the attached writer's byte reached the sink";
+    }
+    if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
+    if (!err) {
+        TEST_YIELD_UNTIL_SOFT(g_epw_ran == 2);
+        u8 cap[8];
+        if (g_epw_ran != 2)                                     err = "the unfrozen writer completed";
+        else if (g_epw_ret != 1L)                               err = "its write returned 1";
+        else if (cons_test_echo_captured(cap, sizeof cap) != 2u) err = "its byte reached the sink after END";
+    }
+    (void)cons_episode_end();
+    if (w) test_kthread_join_free(w, &g_epw_exited);
+    cons_test_echo_capture(false);
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "writer freeze dance");
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);
+}
+
+// The rest of the frozen world: the renderer FEED refused (G4), a non-attached
+// CONSCTL write refused (the native twin of C2-k1b F2), a non-attached POLL
+// showing no readiness even with a byte buffered (the side channel) while the
+// attached poller sees it -- and all three accepted again after END.
+void test_cons_episode_freezes_feed_consctl_poll(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_sak_dispatch();
+    const char *err = NULL;
+    if (!cons_episode_active()) err = "episode open";
+    if (!err) {
+        if (cons_feed_write("x", 1) != -1L)   err = "the renderer feed is refused during an episode";
+        else if (cons_test_rx_count() != 0u)  err = "...and injected nothing";
+    }
+    if (!err) {
+        u32 before = cons_test_termios();
+        if (cons_set_mode_cmd("+echo", 5, true) != -1L) err = "a non-attached consctl write is refused during an episode";
+        else if (cons_test_termios() != before)         err = "...and the mode is unchanged";
+    }
+    if (!err) {
+        cons_rx_input((u8)'k', false);
+        short rev = cons_poll(POLLIN | POLLOUT, NULL);
+        proc_mark_console_attached(kproc());
+        short arev = cons_poll(POLLIN | POLLOUT, NULL);
+        proc_revoke_console_attached(kproc());
+        if (rev != 0)                        err = "a non-attached poller sees NO readiness during an episode";
+        else if (arev != (POLLIN | POLLOUT)) err = "the attached poller sees POLLIN|POLLOUT";
+    }
+    if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
+    if (!err) {
+        if (cons_poll(POLLIN | POLLOUT, NULL) != (POLLIN | POLLOUT)) err = "readiness is back after END";
+        else if (cons_set_mode_cmd("-echo", 5, true) != 5L)         err = "consctl accepted after END";
+        else if (cons_feed_write("y", 1) != 1L)                     err = "the feed accepted after END";
+    }
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "frozen world");
+}
+
+// END restores: the pre-SAK termios word, the Ctrl-C target (into the empty
+// owner slot, one-shot), the attach posture (owner revoked, trusted attached),
+// the ARM (persists). A second END is refused. And the restore never clobbers
+// a claim made during the episode.
+void test_cons_episode_end_restores(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, true, true), "fixture (armed, owner)");
+    cons_test_set_termios(CONS_ICANON | CONS_ECHO | CONS_ONLCR);
+    u32 before = cons_test_termios();
+    cons_test_sak_dispatch();
+    const char *err = NULL;
+    if (!cons_episode_active())                  err = "episode open";
+    else if (proc_test_console_owner() != NULL)  err = "owner NULL during the episode";
+    if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
+    if (!err) {
+        if (cons_episode_active())                             err = "END closed the episode";
+        else if (cons_test_termios() != before)                err = "END restored the pre-SAK termios";
+        else if (proc_test_console_owner() != f.owner)         err = "END handed the Ctrl-C target back to the unseated owner";
+        else if (proc_test_console_owner_pre_sak() != NULL)    err = "the saved owner is consumed (one-shot)";
+        else if (proc_is_console_attached(f.owner))            err = "the owner's attach stays revoked (I-27: the trusted Proc is the sole attached one)";
+        else if (!proc_is_console_attached(f.trusted))         err = "the trusted Proc stays attached after END";
+        else if (!cons_episode_armed())                        err = "the ARM persists across episodes";
+        else if (proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != -1)
+                                                               err = "a second END is refused";
+    }
+    // A claim made DURING the episode wins over the restore.
+    struct Proc *claimant = NULL;
+    if (!err) {
+        claimant = proc_alloc();
+        if (!claimant) err = "proc_alloc claimant";
+    }
+    if (!err) {
+        claimant->state = PROC_STATE_ALIVE;
+        cons_test_sak_dispatch();                       // episode 2: the restored owner is unseated again
+        if (!cons_episode_active())                              err = "episode 2 open";
+        else if (proc_test_console_owner_pre_sak() != f.owner)   err = "the owner unseated + saved again";
+        if (!err) {
+            proc_set_console_owner(claimant);           // the session moved ownership on (login spawned a shell)
+            if (proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END 2 accepted";
+            else if (proc_test_console_owner() != claimant)     err = "END never clobbers a claim made during the episode";
+            else if (proc_test_console_owner_pre_sak() != NULL) err = "...but still consumes the saved owner";
+        }
+    }
+    if (claimant) {
+        proc_console_relinquish(claimant);              // drops the owner pointer (it is the owner)
+        claimant->state = PROC_STATE_ZOMBIE;
+        proc_free(claimant);
+    }
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "END restores");
+}
+
+// A repeat SAK during an open episode is idempotent: no restart, no second
+// note, the saved termios NOT re-saved (END must restore the ORIGINAL word,
+// not the RAW one a naive re-save would capture).
+void test_cons_episode_repeat_sak_idempotent(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_set_termios(CONS_TERMIOS_ALL);
+    u32 before = cons_test_termios();
+    cons_test_sak_dispatch();
+    const char *err = NULL;
+    if (!cons_episode_active()) err = "episode open";
+    u32 raw = cons_test_termios();
+    cons_test_sak_dispatch();
+    cons_test_sak_dispatch();
+    if (!err) {
+        if (!cons_episode_active())                 err = "still open after a repeat SAK";
+        else if (cons_test_termios() != raw)        err = "termios unchanged by the repeat";
+        else if (f.trusted->notes->count != 1u)     err = "exactly ONE `sak` note across the flood";
+        else if (proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
+        else if (cons_test_termios() != before)     err = "END restores the ORIGINAL termios (the repeat did not re-save RAW)";
+    }
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "repeat SAK idempotent");
+}
+
+// The op gate is the trusted IDENTITY: a stranger -- even a console-attached
+// one -- can neither ARM nor END; a bad op is refused; END with nothing open
+// is refused; the trusted ARM is accepted and idempotent.
+void test_cons_episode_gate(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, false), "fixture (unarmed)");
+    const char *err = NULL;
+    struct Proc *stranger = proc_alloc();
+    if (!stranger) err = "proc_alloc stranger";
+    if (!err) {
+        stranger->state = PROC_STATE_ALIVE;
+        proc_mark_console_attached(stranger);       // attach is not the gate; identity is
+        if (proc_console_episode(stranger, SYS_CONSOLE_EPISODE_ARM) != -1)  err = "a non-trusted ARM is refused";
+        else if (cons_episode_armed())                                      err = "...and arms nothing";
+        else if (proc_console_episode(stranger, SYS_CONSOLE_EPISODE_END) != -1) err = "a non-trusted END is refused";
+        else if (proc_console_episode(NULL, SYS_CONSOLE_EPISODE_ARM) != -1) err = "a NULL caller is refused";
+        else if (proc_console_episode(f.trusted, 0u) != -1)                 err = "op 0 is refused";
+        else if (proc_console_episode(f.trusted, 3u) != -1)                 err = "an unknown op is refused";
+        else if (proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != -1) err = "END with no open episode is refused";
+        else if (proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_ARM) != 0) err = "the trusted ARM is accepted";
+        else if (!cons_episode_armed())                                     err = "...and arms";
+        else if (proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_ARM) != 0) err = "ARM is idempotent";
+    }
+    if (!err) {
+        cons_test_sak_dispatch();
+        if (!cons_episode_active())                                             err = "episode open";
+        else if (proc_console_episode(stranger, SYS_CONSOLE_EPISODE_END) != -1) err = "a stranger's END is refused";
+        else if (!cons_episode_active())                                        err = "...and the episode stays open";
+    }
+    if (stranger) {
+        proc_revoke_console_attached(stranger);
+        stranger->state = PROC_STATE_ZOMBIE;
+        proc_free(stranger);
+    }
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "episode gate");
+}
+
+// The trusted authority's own relinquish ends an open episode (fail-safe:
+// it could never END through the gate again) -- the ARM persists, the Ctrl-C
+// target is handed back. A stranger's relinquish ends nothing.
+void test_cons_episode_relinquish_ends(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, true, true), "fixture (armed, owner)");
+    cons_test_sak_dispatch();
+    const char *err = NULL;
+    if (!cons_episode_active()) err = "episode open";
+    proc_console_relinquish(f.trusted);
+    if (!err) {
+        if (cons_episode_active())                        err = "the trusted Proc's relinquish ENDS the episode";
+        else if (!cons_episode_armed())                   err = "...the ARM persists (the consumer's declaration)";
+        else if (proc_test_console_owner() != f.owner)    err = "...and the Ctrl-C target is handed back";
+        else if (proc_is_console_attached(f.trusted))     err = "the relinquish dropped the attach";
+    }
+    if (!err) {
+        cons_test_sak_dispatch();                         // the next SAK re-attaches the same consumer: episode 2
+        if (!cons_episode_active())                       err = "episode 2 open (the SAK re-attached the armed consumer)";
+        else if (!proc_is_console_attached(f.trusted))    err = "the SAK re-attached the trusted Proc";
+        proc_console_relinquish(f.owner);                 // a stranger's relinquish: the owner drops ITS roles only
+        if (!err && !cons_episode_active())               err = "a non-trusted relinquish ends nothing";
+    }
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "relinquish ends");
+}
+
+// The two death paths, through the REAL ZOMBIE chokepoint: a child Proc
+// (rfork) takes a console role, the test opens an episode against it, the
+// child exits and is reaped. Trusted child: the episode ends fail-safe, the
+// ARM and the trusted pointer die with it. Owner child: the saved pre-SAK
+// owner is cleared, so END has nothing (and nothing dangling) to restore.
+enum { EPD_ROLE_TRUSTED = 1, EPD_ROLE_OWNER = 2 };
+static volatile int g_epd_state;   // 0 -> 1 (role taken) / -1 (setup failed); 2 = die now
+
+static void epd_child(void *arg) {
+    int role = (int)(long)arg;
+    struct Proc *me = current_thread()->proc;
+    int ok = 1;
+    proc_mark_console_attached(me);
+    if (role == EPD_ROLE_TRUSTED) {
+        proc_set_console_trusted(me);
+        if (proc_console_episode(me, SYS_CONSOLE_EPISODE_ARM) != 0) ok = -1;
+    } else {
+        proc_set_console_owner(me);
+    }
+    __atomic_store_n(&g_epd_state, ok, __ATOMIC_RELEASE);
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_epd_state, __ATOMIC_ACQUIRE) == 2);
+    exits("ok");
+}
+
+static int epd_reap(int pid) {
+    int status = -1, reaped;
+    do { reaped = wait_pid(&status); } while (reaped > 0 && reaped != pid);
+    return reaped;
+}
+
+void test_cons_episode_trusted_death_ends(void) {
+    cons_test_reset();
+    proc_set_console_trusted(NULL);
+    proc_set_console_owner(NULL);
+    g_epd_state = 0;
+    int pid = rfork(RFPROC, epd_child, (void *)(long)EPD_ROLE_TRUSTED);
+    TEST_ASSERT(pid > 0, "rfork(trusted child)");
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_epd_state, __ATOMIC_ACQUIRE) != 0);
+    const char *err = NULL;
+    if (g_epd_state != 1) err = "the child armed itself as the trusted authority";
+    if (!err) {
+        cons_test_sak_dispatch();                     // owner NULL + trusted attached: the steady handoff, then BEGIN
+        if (!cons_episode_active()) err = "episode open behind the live child";
+    }
+    __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE);
+    int reaped = epd_reap(pid);
+    if (!err && reaped != pid)                            err = "reaped the trusted child";
+    if (!err && cons_episode_active())                    err = "the trusted Proc's death ENDED the episode (fail-safe)";
+    if (!err && cons_episode_armed())                     err = "...and the ARM died with it";
+    if (!err && proc_test_console_trusted() != NULL)      err = "...and the trusted pointer is cleared";
+    cons_test_reset();
+    TEST_ASSERT(err == NULL, err ? err : "trusted death ends");
+}
+
+void test_cons_episode_saved_owner_death(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    g_epd_state = 0;
+    int pid = rfork(RFPROC, epd_child, (void *)(long)EPD_ROLE_OWNER);
+    const char *err = NULL;
+    if (pid <= 0) err = "rfork(owner child)";
+    if (!err) {
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epd_state, __ATOMIC_ACQUIRE) != 0);
+        if (g_epd_state != 1) err = "the child took the owner role";
+    }
+    if (!err) {
+        cons_test_sak_dispatch();                     // the child (attached owner) is unseated + saved
+        if (!cons_episode_active())                        err = "episode open";
+        else if (proc_test_console_owner_pre_sak() == NULL) err = "the owner child saved as the pre-SAK owner";
+    }
+    __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE);
+    int reaped = (pid > 0) ? epd_reap(pid) : -1;
+    if (!err && reaped != pid)                              err = "reaped the owner child";
+    if (!err && proc_test_console_owner_pre_sak() != NULL)  err = "the saved owner's death cleared the slot (nothing dangles)";
+    if (!err && !cons_episode_active())                     err = "the OWNER's death does not end the episode";
+    if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
+    if (!err && proc_test_console_owner() != NULL)          err = "END restored nothing (the saved owner is dead)";
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "saved owner death");
 }

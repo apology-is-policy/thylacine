@@ -291,17 +291,25 @@ login + elevation; join §25.4 at the sub-chunk that lands each):
 - **The owner/attach discipline** (the reconciliation above): the SAK clears the
   owner + attaches corvus, never owns corvus — re-validate that no medium re-opens
   the RW-7 R2-F1 hazard.
-- **The trusted EPISODE (IM-1, `IMPERIUM-DESIGN.md` §11.3)**: on a SAK that
-  attaches a trusted Proc the kernel enters an episode — the cooked partial line
-  discarded, RAW/no-echo forced, non-attached console reads AND writes FROZEN
-  (parked until END), the renderer feed refused, the `sak` note posted to the
-  trusted Proc; ended only by the attached Proc's `SYS_CONSOLE_EPISODE_END` or the
-  trusted Proc's death (NEVER a kernel timeout — an END behind corvus's back would
-  route the secret to the shell). Prosecute: a non-attached reader that drains
-  during an episode; a non-attached writer that reaches the UART; a feed byte
-  that lands; an END from a non-attached caller; a repeat SAK that restarts the
-  prompt mid-secret; the lock order (`g_cons.lock` never held across
-  `proc_console_sak`; the chokepoint END under `g_proc_table_lock`).
+- **The trusted EPISODE (IM-1, `IMPERIUM-DESIGN.md` §11.3 + its as-built
+  refinements; LANDED 2026-09-07)**: on a SAK that finds the trusted Proc alive
+  and ARMED as the episode consumer (`SYS_CONSOLE_EPISODE` = 110, op ARM; unarmed,
+  a SAK is the A-4c-2 handoff alone, so the kernel never freezes a console nobody
+  can unfreeze) the kernel opens an episode — ALL pending input discarded (the
+  ring's committed lines too, not only the partial line), RAW/no-echo forced,
+  every non-attached console read / write / poll / consctl write / renderer feed
+  FROZEN (parked or refused until END; a frozen poller is not even woken per
+  keystroke), the `sak` note posted to the trusted Proc; ended only by the
+  trusted Proc's op END, or fail-safe by its death, its own relinquish, or a
+  change of authority (NEVER a kernel timeout — an END behind corvus's back would
+  route the secret to the shell); the pre-SAK console OWNER is handed back at
+  END. Prosecute: a non-attached reader that drains a post-BEGIN byte; a
+  non-attached writer that reaches the UART; a feed or consctl byte that lands;
+  a poll that returns per keystroke; an END from a non-trusted caller; a repeat
+  SAK that restarts the prompt mid-secret; a lost wake on the three new parks;
+  the lock order (`g_proc_table_lock` -> `g_cons.lock` is the one new edge:
+  BEGIN, END and every fail-safe close take the cons leaf lock under the table
+  lock, and nothing takes them the other way round).
 
 ---
 

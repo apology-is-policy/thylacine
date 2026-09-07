@@ -993,8 +993,9 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 #define PROC_FLAG_MAY_RAISE_PAGE_BUDGET (1u << 10)
 
 // item 11 (ARCH §8.8.3): the CAUGHT-note-deliverable latch -- the non-death
-// sibling of the two terminate latches above. A 6-bit sub-field at bits
-// 11..16, one bit per note family ALIGNED TO NOTE_BIT_* (INTERRUPT=0 .. TTY=5),
+// sibling of the two terminate latches above. A 7-bit sub-field at bits
+// 11..17 (6 bits, 11..16, until IM-1 added the `sak` family), one bit per note
+// family ALIGNED TO NOTE_BIT_* (INTERRUPT=0 .. TTY=5, SAK=6),
 // so thread_caught_note_deliverable can gate it by the per-Thread note_mask
 // exactly as thread_die_pending gates the terminate latches. The per-family
 // pairing is REQUIRED for the same reason the PTY-1b comment above gives: a
@@ -1009,7 +1010,7 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // does not include notes.h; notes.c static_asserts it equals
 // NOTE_MASK_SUPPORTED << PROC_CAUGHT_NOTE_SHIFT.
 #define PROC_CAUGHT_NOTE_SHIFT      11u
-#define PROC_FLAG_CAUGHT_NOTE_MASK  (0x3fu << PROC_CAUGHT_NOTE_SHIFT)  // bits 11..16
+#define PROC_FLAG_CAUGHT_NOTE_MASK  (0x7fu << PROC_CAUGHT_NOTE_SHIFT)  // bits 11..17
 
 // #237: the PIPE terminate-disposition latch -- the THIRD terminate family
 // (interrupt, tty:quit/hup, now pipe). Armed when notes_post commits an
@@ -1022,15 +1023,18 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // handler registration, the self-managing mark, or draining the last queued
 // pipe note); NOT propagated by rfork; never armed on kproc.
 //
-// BIT 17, not the next literal gap: bits 11..16 are the caught-note sub-field
+// BIT 18, not the next literal gap: bits 11..17 are the caught-note sub-field
 // (dense, one bit per NOTE_BIT_* family), and NOTE_MASK_SUPPORTED grows per
-// chunk, so that field grows UPWARD from bit 11. 17 is the first bit above it
-// today; the static_assert makes a future widening (a 7th note family) that
+// chunk, so that field grows UPWARD from bit 11. 18 is the first bit above it
+// today; the static_assert makes a future widening (an 8th note family) that
 // grows the field into this bit a compile-time relocation rather than a silent
-// alias. (The design memo's "next free bit = 11" missed the sub-field: bit 11
-// is the INTERRUPT family's caught-note bit -- using it would have aliased two
-// unrelated latches, a collision no build would catch.)
-#define PROC_FLAG_PIPE_TERMINATE_PENDING (1u << 17)
+// alias -- exactly what happened once already: this latch sat at bit 17 until
+// IM-1's `sak` family (NOTE_BIT_SAK = 6) grew the field into it, and the
+// assert below turned that into this relocation. (The design memo's "next
+// free bit = 11" missed the sub-field: bit 11 is the INTERRUPT family's
+// caught-note bit -- using it would have aliased two unrelated latches, a
+// collision no build would catch.)
+#define PROC_FLAG_PIPE_TERMINATE_PENDING (1u << 18)
 _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
                "#237: the pipe terminate latch must not overlap the caught-note "
                "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
@@ -2078,7 +2082,9 @@ void proc_console_relinquish(struct Proc *p);
 // the target the A-4c-2 SAK re-grants the console to. Takes g_proc_table_lock.
 // Set when joey establishes corvus (SPAWN_PERM_CONSOLE_TRUSTED). Pass NULL to
 // clear; proc_become_zombie_locked also clears it on the trusted Proc's death so
-// the pointer never dangles (a then-fired SAK falls back to revoke-only).
+// the pointer never dangles (a then-fired SAK falls back to revoke-only). IM-1:
+// a CHANGE of authority disarms the episode consumer (the ARM is a property of
+// the identity) and ends an episode the old one left open, fail-safe.
 void proc_set_console_trusted(struct Proc *p);
 
 // proc_set_console_renderer — claim `p` as the bound console RENDERER (G-4,
@@ -2111,16 +2117,41 @@ void proc_test_clear_console_renderer(void);
 // proc_console_sak — the A-4c-2 SAK transition (I-27 trusted-path handoff). Run
 // from the console_mgr kthread on a recognized serial BREAK. Under
 // g_proc_table_lock (RW-7 R2-F1/F2 as-built): revoke the console-ATTACH bit from
-// the current owner (NO note -- LS-5 made `interrupt` a terminate note, so the
+// the current owner (NO `interrupt` -- LS-5 made it a terminate note, so the
 // old courtesy post would KILL a non-self-managing owner), then grant the ATTACH
 // to the trusted login authority and clear the OWNER to NULL. owner and attach
 // are distinct roles: corvus is the elevation authority, NEVER the Ctrl-C target
 // (the owner is re-established when login spawns the session shell). FAIL-SAFE:
 // with no trusted Proc alive, no attach is granted -- no Proc can redeem
 // CAP_HOSTOWNER / a clearance until a trusted login claims the console.
-// Idempotent once the trusted Proc is the sole attach holder with no owner (a
-// BREAK flood is a no-op).
-void proc_console_sak(void);
+// The handoff is idempotent once the trusted Proc is the sole attach holder
+// with no owner (a BREAK flood re-grants nothing).
+//
+// IM-1 (IMPERIUM-DESIGN.md 11.3): the SAK is ALSO the trusted EPISODE's
+// trigger. Returns true iff an episode must BEGIN -- the trusted Proc is alive,
+// ARMED as an episode consumer (SYS_CONSOLE_EPISODE_ARM) and no episode is
+// open; the `sak` note is posted to it here, under the same lock hold, and the
+// caller (console_mgr) runs cons_episode_begin next. The unseated owner is
+// remembered so the episode's END can hand the Ctrl-C target back. Emits one
+// `cons: SAK (<decision>)` diagnostic line per SAK -- the harness's witness.
+bool proc_console_sak(void);
+
+// proc_is_console_trusted — true iff `p` is the current trusted login
+// authority (compare-only under g_proc_table_lock; never dereferences).
+// Fail-closed on NULL.
+bool proc_is_console_trusted(const struct Proc *p);
+
+// proc_console_episode — the SYS_CONSOLE_EPISODE op core (IM-1). Gated on `p`
+// being the trusted login authority (the identity, not the attach bit: the
+// SAK attached it, and a relinquish ends the episode itself). ARM marks p an
+// episode consumer (sticky, idempotent); END ends the open episode and hands
+// the pre-SAK owner back into an empty owner slot. One g_proc_table_lock hold
+// covers gate + act, so the ZOMBIE chokepoint cannot interleave. 0 / -1.
+int proc_console_episode(struct Proc *p, u32 op);
+
+// Test-only readers: the saved pre-SAK owner / the trusted pointer.
+struct Proc *proc_test_console_owner_pre_sak(void);
+struct Proc *proc_test_console_trusted(void);
 
 // =============================================================================
 // P5-corvus-srv: per-Proc identity tag.

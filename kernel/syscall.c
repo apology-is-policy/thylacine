@@ -10343,6 +10343,20 @@ static s64 sys_console_relinquish_handler(void) {
     return 0;
 }
 
+// SYS_CONSOLE_EPISODE -- the trusted EPISODE's control ops (IM-1, I-27). The
+// gate (the caller IS the trusted login authority) and the act share one
+// g_proc_table_lock hold in proc_console_episode; this handler only resolves
+// the caller. Returns 0 / -1 (a non-trusted caller, a bad op, END with no
+// open episode).
+static s64 sys_console_episode_handler(u64 op) {
+    struct Thread *t = current_thread();
+    if (!t)                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                            return -1;
+    if (op > 0xffffffffull)            return -1;
+    return (s64)proc_console_episode(p, (u32)op);
+}
+
 // SYS_CONSOLE_OPEN core -- attach /dev/cons + install a KOBJ_SPOOR R|W handle.
 // The getty (joey) hands this to /sbin/login as its tty (fd 0/1/2; the Unix
 // login-reads-the-tty model). devcons_read ignores the Spoor and drains the
@@ -14560,6 +14574,11 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_open_create_handler(
             ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3],
             ctx->regs[4]);
+        return;
+
+    // IM-1: the trusted EPISODE (IMPERIUM-DESIGN.md 11.3; I-27).
+    case SYS_CONSOLE_EPISODE:
+        ctx->regs[0] = (u64)sys_console_episode_handler(ctx->regs[0]);
         return;
 
     // I-42 / CL-7k: the JIT capability.

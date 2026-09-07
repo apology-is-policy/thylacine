@@ -166,11 +166,11 @@ terminating, so test failures attribute correctly.
 ## The trusted-path note — `sak`
 
 **Registered 2026-09-07 (operator signoff, fork F3 of `docs/IMPERIUM-DESIGN.md`
-§11.9); emitted from IM-1.** A note NAME is ABI, hence the entry.
+§11.9); LIVE since IM-1 (the same day).** A note NAME is ABI, hence the entry.
 
 | Name  | Length | POSIX-equiv signal | Cause |
 |---|---|---|---|
-| `sak` | 3+1 | none (the NT/AIX secure-attention event) | Kernel-synthetic: `proc_console_sak` posts it to the trusted Proc (`g_console_trusted_proc`, corvus) when a SAK attaches it — the signal that a trusted EPISODE has begun and the console is corvus's to read and write (`TRUSTED-PATH.md` §2, `IMPERIUM-DESIGN.md` §11.3). |
+| `sak` | 3+1 | none (the NT/AIX secure-attention event) | Kernel-synthetic: `proc_console_sak` posts it to the trusted Proc (`g_console_trusted_proc`, corvus) when a serial BREAK (the SAK) opens a trusted EPISODE — which it does only if that Proc ARMED itself as the episode consumer beforehand (`SYS_CONSOLE_EPISODE` = 110, op ARM = 1; unarmed, a SAK is the A-4c-2 attach handoff alone and posts nothing) and no episode is already open. The signal that the console is corvus's alone to read and write until it ENDs the episode (op END = 2) (`TRUSTED-PATH.md` §2/§12, `IMPERIUM-DESIGN.md` §11.3). |
 
 **Default action**: IGNORE (`NOTE_DFL_IGNORE`) — an uncaught `sak` never
 terminates its target; corvus catches it. **Bit position**: `NOTE_BIT_SAK = 6`

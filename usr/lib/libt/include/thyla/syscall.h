@@ -121,6 +121,9 @@ enum {
     T_SYS_GETPGID           = 91,  // PTY-1a: read a Proc's pgid (0 = self)
     T_SYS_GETSID            = 92,  // PTY-1a: read a Proc's sid (0 = self)
     T_SYS_PTY_REGISTER      = 93,  // PTY-1c: pts registry ops (ptyfs-only)
+    // 110 = SYS_CONSOLE_EPISODE (IM-1; the trusted login authority only --
+    // native libthyla-rs; no libt wrapper).
+    T_SYS_CONSOLE_EPISODE   = 110,
     T_SYS_TTY_SIGNAL        = 94,  // PTY-1d: server-side signal-class report
     T_SYS_TTY_ACQUIRE       = 95,  // PTY-1d: controlling-terminal acquisition
     T_SYS_TTY_SET_FG        = 96,  // PTY-1d: tcsetpgrp

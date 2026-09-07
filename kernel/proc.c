@@ -38,6 +38,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/syscall.h>     // IM-1: SYS_CONSOLE_EPISODE_ARM / _END (the op ABI)
 #include <thylacine/thread.h>
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
@@ -1865,10 +1866,49 @@ bool proc_console_owner_in_session(const struct Proc *p) {
     return console_session_match(owner_sid, caller_sid);
 }
 
+// IM-1 (IMPERIUM-DESIGN.md 11.3): the console OWNER a SAK unseated, handed
+// back when the episode it opened ENDs -- else every imperium episode would
+// leave the session without a Ctrl-C target until the next login (today the
+// owner only returns when login spawns the next shell). Same lifetime
+// discipline as g_console_owner: protected by g_proc_table_lock, cleared at
+// the ZOMBIE chokepoint on that Proc's death and by its own relinquish, so it
+// never dangles. Restored only into an EMPTY owner slot: a claim made during
+// the episode (SPAWN_PERM_CONSOLE_OWNER) is never clobbered.
+static struct Proc *g_console_owner_pre_sak;   // BSS NULL
+
+// Hand the Ctrl-C target back to the Proc a SAK unseated, once the episode is
+// over. Caller holds g_proc_table_lock. One-shot: the saved pointer is
+// consumed either way. Only a LIVE Proc (the chokepoint clears a dead one, so
+// the state check is belt and braces) and only into an empty slot.
+static void proc_console_owner_restore_locked(void) {
+    struct Proc *pre = g_console_owner_pre_sak;
+    g_console_owner_pre_sak = NULL;
+    if (!pre || pre->magic != PROC_MAGIC || pre->state != PROC_STATE_ALIVE) return;
+    if (g_console_owner == NULL) g_console_owner = pre;
+}
+
 void proc_set_console_trusted(struct Proc *p) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *prev = g_console_trusted_proc;
     g_console_trusted_proc = p;
+    // IM-1: the episode ARM is a property of the authority's IDENTITY -- a
+    // new (or cleared) authority starts unarmed, and an episode the old one
+    // left open ends fail-safe (the same abandon the ZOMBIE chokepoint runs).
+    // cons's leaf lock nests under g_proc_table_lock here: a new edge with no
+    // reverse (cons queries the table only with its own lock released).
+    if (prev != p) {
+        cons_episode_disarm();
+        if (cons_episode_abandon()) proc_console_owner_restore_locked();
+    }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+bool proc_is_console_trusted(const struct Proc *p) {
+    if (!p) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool yes = (g_console_trusted_proc == p);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return yes;
 }
 
 // g_console_renderer is the single bound console RENDERER (G-4, the R2-F6
@@ -2078,6 +2118,19 @@ void proc_console_relinquish(struct Proc *p) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     proc_revoke_console_attached(p);   // atomic AND on proc_flags
     if (g_console_owner == p) g_console_owner = NULL;
+    // IM-1: a relinquish drops EVERY console role p holds, the saved pre-SAK
+    // owner included -- joey is the owner during bringup and relinquishes at
+    // the session boundary, and a SAK during bringup must not let a later
+    // episode's END re-install init as the Ctrl-C target (the RW-7 R2-F2
+    // kill, re-synthesized through the restore).
+    if (g_console_owner_pre_sak == p) g_console_owner_pre_sak = NULL;
+    // The trusted authority giving up the console mid-episode could never END
+    // it through the gate -- so the relinquish ends it: the untrusted world
+    // unfreezes, and no secret is in flight because its only reader just
+    // left. The ARM persists (it is the consumer's declaration, and the next
+    // SAK re-attaches the same Proc).
+    if (g_console_trusted_proc == p && cons_episode_abandon())
+        proc_console_owner_restore_locked();
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
@@ -2085,64 +2138,165 @@ void proc_console_relinquish(struct Proc *p) {
 // console_mgr kthread on a recognized serial BREAK. The whole transition runs
 // under g_proc_table_lock so the owner + trusted pointers cannot be reaped/freed
 // mid-transition (the A-4c-1 console-owner lifetime discipline). RW-7 R2-F2: the
-// SAK posts NO note, so it takes ONLY g_proc_table_lock -- the prior
-// g_proc_table_lock -> note q->lock edge is gone (revoke/mark/is-attached are
-// lock-free atomic RMWs), strictly simplifying the lock order.
-void proc_console_sak(void) {
+// SAK posts NO `interrupt`; revoke/mark/is-attached are lock-free atomic RMWs.
+// IM-1 adds the `sak` note to the TRUSTED Proc under the same hold -- the
+// g_proc_table_lock -> note q->lock edge is the one proc_become_zombie_locked's
+// notes_post_child_exit already takes, so the lock order is unchanged.
+bool proc_console_sak(void) {
     // DISPLAY-MODES.md 1b (audit F2): a SAK is a demand for the trusted path on
     // the EMERGENCY serial medium -- restore serial output regardless of any
     // renderer's silence, before anything else and covering the idempotent
     // repeat-SAK path below. Lockless relaxed store, so it takes no lock and
     // introduces no g_proc_table_lock -> g_cons.lock edge.
     cons_serial_silent_clear();
+    bool        begin = false;
+    const char *why;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *owner   = g_console_owner;
     struct Proc *trusted = g_console_trusted_proc;
 
     bool trusted_live = trusted && trusted->magic == PROC_MAGIC
                         && trusted->state == PROC_STATE_ALIVE;
+    bool owner_live   = owner && owner->magic == PROC_MAGIC
+                        && owner->state == PROC_STATE_ALIVE;
 
-    // Idempotent under a BREAK flood: once the trusted login authority is the
-    // sole console authority (console-attached) and no owner remains to revoke,
-    // a repeat SAK is a no-op. RW-7 R2-F1: post-fix the trusted Proc is
-    // attach-only and is NEVER the console OWNER, so the prior `owner == trusted`
-    // guard could no longer fire -- this is its replacement.
-    if (trusted_live && owner == NULL && proc_is_console_attached(trusted)) {
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
-        return;
+    // The HANDOFF is idempotent under a BREAK flood: once the trusted login
+    // authority is the sole console authority (console-attached) and no owner
+    // remains to revoke, a repeat SAK re-grants nothing. RW-7 R2-F1: post-fix
+    // the trusted Proc is attach-only and is NEVER the console OWNER, so the
+    // prior `owner == trusted` guard could no longer fire -- this is its
+    // replacement. IM-1: a no-op handoff no longer RETURNS early -- the
+    // episode decision below runs on every SAK, because the first SAK of a
+    // session leaves the owner NULL until the next login, and an early return
+    // would have made it the only SAK that could ever open an episode.
+    bool steady = trusted_live && owner == NULL && proc_is_console_attached(trusted);
+    if (!steady) {
+        // (1) Revoke the console-attach bit from the current owner. RW-7 R2-F2:
+        // post NO note here. Reusing `interrupt` to mean "you lost the console"
+        // was a benign courtesy BEFORE LS-5; LS-5 made `interrupt` a real
+        // terminate-if-uncaught note, so posting it to the old owner TERMINATES
+        // a non-self-managing owner (joey during bringup -> init dies) or
+        // spuriously kills a session shell's foreground command. SAK-revoke
+        // needs its OWN note name (a dedicated `hangup` / `console-revoked`;
+        // RW-7 R2-F3, a v1.x notes SEAM) -- until then, the attach-bit revoke
+        // is the SAK's observable effect on the old owner (it loses elevation
+        // authority). Guarded on a live owner: after the owner exited,
+        // proc_become_zombie_locked already cleared it.
+        if (owner_live) {
+            proc_revoke_console_attached(owner);
+            // IM-1: remember whom the SAK unseated, so the episode's END can
+            // hand the Ctrl-C target back. Only a LIVE owner is worth saving;
+            // a NULL owner (a session between logins) keeps the previously
+            // saved one -- the shell that lost its Ctrl-C at an earlier
+            // unarmed SAK gets it back at the next episode's END.
+            g_console_owner_pre_sak = owner;
+        }
+
+        // (2) Re-grant the console-ATTACH (elevation authority) to the trusted
+        // login authority, but do NOT make it the console OWNER. RW-7 R2-F1:
+        // owner and attach are DISTINCT roles post-LS-5 -- the OWNER is the
+        // `interrupt` (Ctrl-C) target; the ATTACH gates SAK/elevation
+        // redemption (the devcap gate keys on PROC_FLAG_CONSOLE_ATTACHED).
+        // corvus is the login AUTHORITY, never a Ctrl-C target; making it the
+        // owner meant a Ctrl-C after SAK posted `interrupt` to corvus, arming
+        // its terminate latch (non-self-managing) and killing the trusted path
+        // until reboot. The Ctrl-C owner is re-established when login spawns
+        // the session shell (SPAWN_PERM_CONSOLE_OWNER) -- or, since IM-1, when
+        // the episode this SAK opens ENDs. FAIL-SAFE: with no trusted Proc
+        // alive, the attach is simply not granted -- no Proc can redeem
+        // elevation until a trusted login claims the console.
+        g_console_owner = NULL;
+        if (trusted_live) {
+            proc_mark_console_attached(trusted);   // atomic OR; trusted ALIVE-checked
+        }
     }
 
-    // (1) Revoke the console-attach bit from the current owner. RW-7 R2-F2: post
-    // NO note here. Reusing `interrupt` to mean "you lost the console" was a
-    // benign courtesy BEFORE LS-5; LS-5 made `interrupt` a real
-    // terminate-if-uncaught note, so posting it to the old owner TERMINATES a
-    // non-self-managing owner (joey during bringup -> init dies) or spuriously
-    // kills a session shell's foreground command. SAK-revoke needs its OWN note
-    // name (a dedicated `hangup` / `console-revoked`; RW-7 R2-F3, a v1.x notes
-    // SEAM) -- until then, the attach-bit revoke is the SAK's observable effect
-    // on the old owner (it loses elevation authority). Guarded on a live owner:
-    // after the owner exited, proc_become_zombie_locked already cleared it.
-    if (owner && owner->magic == PROC_MAGIC && owner->state == PROC_STATE_ALIVE) {
-        proc_revoke_console_attached(owner);
-    }
-
-    // (2) Re-grant the console-ATTACH (elevation authority) to the trusted login
-    // authority, but do NOT make it the console OWNER. RW-7 R2-F1: owner and
-    // attach are DISTINCT roles post-LS-5 -- the OWNER is the `interrupt`
-    // (Ctrl-C) target; the ATTACH gates SAK/elevation redemption (the devcap
-    // gate keys on PROC_FLAG_CONSOLE_ATTACHED). corvus is the login AUTHORITY,
-    // never a Ctrl-C target; making it the owner meant a Ctrl-C after SAK posted
-    // `interrupt` to corvus, arming its terminate latch (non-self-managing) and
-    // killing the trusted path until reboot. The Ctrl-C owner is re-established
-    // when login spawns the session shell (SPAWN_PERM_CONSOLE_OWNER); during the
-    // login window there is no foreground terminate target. FAIL-SAFE: with no
-    // trusted Proc alive, the attach is simply not granted -- no Proc can redeem
-    // elevation until a trusted login claims the console.
-    g_console_owner = NULL;
-    if (trusted_live) {
-        proc_mark_console_attached(trusted);   // atomic OR; trusted ALIVE-checked
+    // IM-1 (IMPERIUM-DESIGN.md 11.3): the EPISODE decision, on EVERY SAK. It
+    // opens iff the trusted Proc is alive, ARMED as an episode consumer
+    // (SYS_CONSOLE_EPISODE_ARM -- unarmed, the kernel alone must not freeze a
+    // console nobody is there to unfreeze), and no episode is already open (a
+    // repeat SAK is idempotent: no restart, no second note -- the operator
+    // holding BREAK is one gesture). BEGIN and the `sak` note both happen
+    // HERE, under the lock that ALIVE-checked the trusted Proc: its death /
+    // relinquish / replacement (the same lock) is ordered entirely before or
+    // after, so an episode never opens behind a consumer that just left, and
+    // corvus can never read the note and find no episode behind it. BEGIN
+    // first, note second: a refused post (a Proc with no queue -- not a live
+    // Proc, but the fail-safe costs one call) closes the episode again, because
+    // an episode nobody was told about is a frozen console. The caught-note
+    // wake is the poster's duty under this lock (the interrupt path's
+    // discipline): a self-managing consumer blocked in an interruptible wait
+    // unwinds to read the note.
+    if (!trusted_live)               why = "no trusted proc";
+    else if (!cons_episode_armed())  why = "unarmed";
+    else if (cons_episode_active())  why = "active";
+    else if (!cons_episode_begin())  why = "not begun";
+    else if (notes_post(trusted, NOTE_NAME_SAK, 0u, NULL, true) != 0) {
+        (void)cons_episode_abandon();
+        why = "note refused";
+    } else {
+        proc_caught_note_wake(trusted);
+        begin = true;
+        why = "episode";
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
+
+    // One line per SAK, in the caller's process context, via the #126
+    // non-spinning emitter: the harness's witness that a BREAK reached the
+    // kernel and what it decided (tools/interactive: the BREAK lever). Outside
+    // the lock -- the emitter takes the TX ring lock and needs nothing of the
+    // table.
+    struct cons_diag_line l;
+    cons_diag_line_init(&l);
+    cons_diag_line_puts(&l, "cons: SAK (");
+    cons_diag_line_puts(&l, why);
+    cons_diag_line_puts(&l, ")\n");
+    (void)cons_diag_line_emit(&l);
+    return begin;
+}
+
+// IM-1: the SYS_CONSOLE_EPISODE op core. The gate is the trusted IDENTITY
+// (not the attach bit): the SAK attached the trusted Proc, and a relinquish
+// ends the episode by itself, so "trusted && open" is the whole condition. One
+// g_proc_table_lock hold covers gate + act + owner restore, so a concurrent
+// ZOMBIE chokepoint (which clears the trusted pointer and abandons the episode
+// under the same lock) is ordered entirely before or entirely after.
+int proc_console_episode(struct Proc *p, u32 op) {
+    if (!p) return -1;
+    int rc = -1;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (g_console_trusted_proc == p) {
+        switch (op) {
+        case SYS_CONSOLE_EPISODE_ARM:
+            cons_episode_arm();
+            rc = 0;
+            break;
+        case SYS_CONSOLE_EPISODE_END:
+            if (cons_episode_end()) {
+                proc_console_owner_restore_locked();
+                rc = 0;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return rc;
+}
+
+struct Proc *proc_test_console_owner_pre_sak(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *o = g_console_owner_pre_sak;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return o;
+}
+
+struct Proc *proc_test_console_trusted(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *t = g_console_trusted_proc;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return t;
 }
 
 // Test-only: read g_console_owner (the SAK-transition target assertion in
@@ -2645,11 +2799,24 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     if (g_console_owner == p) {
         g_console_owner = NULL;
     }
+    // IM-1: the saved pre-SAK owner dying leaves nothing to restore. Before
+    // the trusted block below so a dying Proc is never the one handed back.
+    if (g_console_owner_pre_sak == p) {
+        g_console_owner_pre_sak = NULL;
+    }
     // A-4c-2: likewise clear the trusted login authority (corvus) on its death,
     // so a SAK fired after it exits falls back to revoke-only rather than
-    // re-granting the console to a freed Proc.
+    // re-granting the console to a freed Proc. IM-1: an episode the dying
+    // authority left open ends here, fail-safe -- the untrusted world
+    // unfreezes, and no secret is in flight because its only reader is dead
+    // -- and the ARM dies with its holder. cons's leaf lock nests under
+    // g_proc_table_lock (a new edge, no reverse: cons queries the table only
+    // with its own lock released); the parked-waiter wakes are the
+    // child_waiters precedent below.
     if (g_console_trusted_proc == p) {
         g_console_trusted_proc = NULL;
+        cons_episode_disarm();
+        if (cons_episode_abandon()) proc_console_owner_restore_locked();
     }
     // G-4: clear the bound console renderer (Aurora) on its death -- the same
     // never-dangle chokepoint. The renderer's drain fid disarms via its own

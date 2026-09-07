@@ -342,6 +342,40 @@ u32 cons_termios_get(void);
 // renderer's display-routing choice.
 void cons_serial_silent_clear(void);
 
+// IM-1 (IMPERIUM-DESIGN.md 11.3; TRUSTED-PATH.md 12; I-27 ENFORCED on the
+// serial medium): the trusted EPISODE. A serial BREAK (the SAK) with an ARMED
+// trusted login authority opens an episode; until it ENDs the console belongs
+// to the console-ATTACHED Proc alone -- every non-attached read / write /
+// poll / consctl write / renderer feed is FROZEN (parked, never dropped). The
+// full contract is the block above cons_episode_begin in cons.c.
+//
+// cons_episode_armed / _active: lockless reads of the two flags (relaxed-
+// atomic; proc_console_sak reads them under g_proc_table_lock).
+// cons_episode_arm / _disarm: the consumer declaration (SYS_CONSOLE_EPISODE
+// ARM; cleared when the trusted authority dies or changes).
+// cons_episode_begin: open (console_mgr, after proc_console_sak said so);
+// re-checks the arm under g_cons.lock; true iff opened. cons_episode_end:
+// the trusted authority's END; cons_episode_abandon: the fail-safe end on
+// the authority's death / relinquish / replacement (proc.c, under
+// g_proc_table_lock -- the table -> cons edge). Both true iff one was open.
+bool cons_episode_armed(void);
+bool cons_episode_active(void);
+void cons_episode_arm(void);
+void cons_episode_disarm(void);
+bool cons_episode_begin(void);
+bool cons_episode_end(void);
+bool cons_episode_abandon(void);
+
+// IM-1 test hooks. cons_test_sak_dispatch drives console_mgr's SAK arm
+// EXACTLY (proc_console_sak -> cons_episode_begin). cons_test_reader_busy /
+// _episode_parked / _line_len are non-blocking observables: the reader slot,
+// the count of non-attached readers+writers parked on the episode list, the
+// cooked partial-line length.
+void cons_test_sak_dispatch(void);
+bool cons_test_reader_busy(void);
+u32  cons_test_episode_parked(void);
+u32  cons_test_line_len(void);
+
 // =============================================================================
 // #55: the console winsize (ARCH 23.5.3). One kernel-held size (cols, rows --
 // the Linux unsigned-short band; 0x0 = never set, the serial posture) beside
@@ -550,6 +584,15 @@ bool cons_test_drain_pollwake_pending(void);
 #define CONS_TEST_OWNED_TX_ROLE       (1u << 1)
 #define CONS_TEST_OWNED_MGR_HOLD      (1u << 2)
 #define CONS_TEST_OWNED_READER_BUSY   (1u << 3)
+// Bits 4 and 5 belong to the HARNESS (test.c: the UART TX stall + the RX
+// holdback live in the arch layer and get their bits there) -- the one name
+// table in test_run_all spans both sets, so a new bit here takes the next
+// free index of THAT table, not of this one.
+// IM-1: an episode (open or merely armed) a test left behind -- open, it
+// freezes every later non-attached console reader/writer (the boot hangs at
+// the login prompt); armed, a real BREAK would open one behind a synthetic,
+// by then freed, authority.
+#define CONS_TEST_OWNED_EPISODE       (1u << 6)
 u32  cons_test_release_owned_state(void);
 
 #endif // THYLACINE_CONS_H

@@ -22,6 +22,100 @@ needed the operator.
 
 
 ---
+## 2026-09-07 (aux, second run) -- IM-1: the kernel trusted EPISODE landed (I-27 enforced on serial)
+
+**Where it started.** A self-compaction at the 600k line, on an
+operator-directed arc: IM-0 scripture pushed at `94eb3efd`, the resume note
+saying "IM-1 next, the design + build order + tests are in
+`memory/project_next_session.md`, do not re-derive". The effort gate reported
+`max` before a line was read. The pickup was followed as written; what follows
+is what the code reads added to it.
+
+**What landed (one commit, hash in the phase7 row).** The trusted EPISODE of
+`IMPERIUM-DESIGN.md` 11.3: a serial BREAK with an ARMED trusted Proc opens an
+episode; BEGIN discards every pending input byte and forces RAW; every
+non-attached console read / write / poll / consctl write / renderer feed is
+FROZEN (parked, never dropped -- ratified F2) until END; the `sak` note is
+posted to the trusted Proc; `SYS_CONSOLE_EPISODE` = 110 carries ARM (1) and
+END (2), gated on the trusted IDENTITY; the trusted Proc's death, relinquish
+or replacement ends an open episode fail-safe; the pre-SAK owner is handed
+back at END. Twelve `cons.episode_*` kernel tests (two of them through the
+REAL ZOMBIE chokepoint via rfork children), 1525/1525 at boot; the
+`im1-sak-lever` LS-CI scenario; the libthyla-rs / libt / ut mirrors. The
+design's four refinements from the pickup became EIGHT, all recorded as a
+numbered list under 11.3 so the operator can veto any of them.
+
+**The findings nobody planned, in the order they bit.**
+
+1. *The 7th note family relocated a latch, exactly as its assert promised.*
+   `NOTE_BIT_SAK` = 6 widened `NOTE_MASK_SUPPORTED` to 0x7f, and the build
+   refused it: `proc.h`'s caught-note sub-field is a literal 6-bit mask at
+   bits 11..16 with `PROC_FLAG_PIPE_TERMINATE_PENDING` at bit 17, and the
+   #237 static_assert exists precisely to turn "the field grew into my bit"
+   into a compile-time relocation instead of a silent alias. It did. The
+   field is 7 bits (11..17) and the pipe latch is bit 18; every consumer was
+   symbolic, so the sweep was two lines + the comment that now records the
+   first time the assert earned its keep.
+2. *A `-1` that means "busy" cannot share a codespace with `TSLEEP_INTR`.* My
+   reader-slot helper returned -1 for "slot held, not waiting"; `TSLEEP_INTR`
+   is also -1, so the caller mapped a busy slot to the death-interrupt return
+   (0). `cons.read_busy_guard` -- an EXISTING test -- caught it on the first
+   boot. The busy code is now a positive `CONS_SLOT_BUSY`.
+3. *A new owned-state bit collided with the harness's own bits.* I gave the
+   episode backstop bit 4 (the next free index in `cons.h`); `test.c` keeps
+   the two arch UART bits at 4 and 5 and indexes ONE name table by the union.
+   Four spawn-perm tests then "leaked uart-rx-hold" -- my bit, mis-named, and
+   in truth my kproc-attached backstop firing on tests that attach kproc on
+   purpose. The kproc backstop is gone (the tests never needed it), the
+   episode bit is 6, and the name table is 7 wide with a comment saying why
+   the index is the union's.
+4. *sys_poll RETURNS on a spurious hook wake.* The freeze design masked
+   POLLIN for a frozen poller, but the console's per-byte RX relay wakes every
+   registered hook and `sys_poll` re-samples and returns the count -- zero, to
+   userspace, once per keystroke. A frozen shell would have learned the
+   secret's length and cadence with the readiness word reading 0. Fix: a
+   frozen poller's hook goes on `episode_poll_list`, which the RX relay never
+   walks; it is woken once, at END. Found by reading the poll loop for the
+   self-audit, not by a test -- the test for it is a design residue named in
+   the audit row.
+5. *BEGIN moved under the table lock.* The pickup had console_mgr call BEGIN
+   after `proc_console_sak` returned; between the two, the trusted Proc could
+   relinquish (or a test could clear it) and an episode would open behind a
+   consumer that had just left. BEGIN, the note and the caught-note wake now
+   run inside the one `g_proc_table_lock` hold that ALIVE-checked the Proc;
+   the arm re-check under `g_cons.lock` stays as belt.
+6. *Two of the twelve tests had no way to be honest without a real death.*
+   "The trusted Proc's death ends the episode" is a claim about the ZOMBIE
+   chokepoint, which is static; a helper-driven test would have proved the
+   helper. Both death tests rfork a child that takes the role, arm through
+   the production op core, open the episode against it, and reap it -- the
+   chokepoint runs for real.
+7. *The Tcl `\x` trap, twice removed.* `"\x01b"` is one byte (ESC), not
+   Ctrl-A b; `"\001b"` is right, and `lc_quit` already spells Ctrl-A x that
+   way. Recorded in the scenario so nobody "fixes" it back. Then the
+   scenario's first run failed on `expect_out` being local to the helper
+   proc that matched -- the kernel had already printed `cons: SAK (unarmed)`
+   on cue; the helper now returns the decision string.
+
+**What the boot log said that was NOT mine.** `joey: pouch-smoke spawn FAILED`
+twice per boot -- the venus-prove and vk-sdl-prove probes on a venus-off host,
+recorded as pre-existing on every boot at JOURNAL:594 and :1618. Not
+re-enqueued.
+
+**Gates.** Kernel suite 1525/1525 PASS (twice: once with findings 2-3 red,
+once green, `Thylacine boot OK`, 0 EXTINCTION); `im1-sak-lever` PASS on
+attempt 1 (34 s; the first run failed on finding 7's scoping slip, with the
+kernel's witness line already on the wire); the SMP gate 40/40 PASS
+(default-smp4 / default-smp8 / ubsan-smp4 / ubsan-smp8, N=10 each, 0
+CORRUPTION, 0 EXTERNAL-KILL); clippy clean on the touched crates. The
+holotype round is deliberately batched with IM-2 (double-distance).
+
+**Open, tracked in the audit row's residue list.** The #174 PL011 holdback
+byte across BEGIN (a FULL ring at the SAK instant); two non-attached readers
+frozen together both reading after END; the first staged chunk of a write
+that held the TX role at BEGIN; the kproc-attached windows in the tests.
+
+---
 ## 2026-09-07 (aux) -- Imperium & SAK: the arc opened; the revisit landed as IM-0 scripture (+ the origin/main merge)
 
 The operator parked Nocturne at N-3c-2 and opened a different arc: "Imperium

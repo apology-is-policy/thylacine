@@ -203,12 +203,51 @@ struct cons_input {
     // composition is the standard poll.tla case (each poller has its own private
     // Rendez + stack waiter).
     struct poll_waiter_list poll_list;
+
+    // IM-1 (IMPERIUM-DESIGN.md 11.3; I-27 ENFORCED on serial): the trusted
+    // EPISODE. `episode_armed`: the trusted login authority declared itself
+    // an episode consumer (SYS_CONSOLE_EPISODE_ARM); without it a SAK is the
+    // A-4c-2 handoff alone. `episode_active`: a SAK opened an episode that
+    // has not ENDed -- every non-attached console read / write / poll /
+    // consctl write / renderer feed is FROZEN while it is set. Both mutated
+    // under g_cons.lock, read LOCKLESSLY (the cons_episode_* accessors).
+    // `episode_saved_termios` is the word BEGIN forced RAW over, restored at
+    // END. `episode_parked` counts the non-attached readers + writers parked
+    // on `episode_waiters` right now (a test observable; under g_cons.lock).
+    //
+    // Two MULTI-waiter lists, because a Rendez is single-waiter and both
+    // parks are reachable by any number of Procs: `episode_waiters` (the
+    // FREEZE -- parked until END) and `reader_waiters` (the reader-slot park:
+    // an attached reader behind a non-attached one that is vacating, or a
+    // frozen reader re-taking the slot after END, wait here instead of
+    // taking the single-reader guard's -1). Both live in this file-scope
+    // static -> IMMORTAL, so the RW-2 2C-F1 registered-object-lifetime hazard
+    // cannot arise (the poll_list argument above).
+    //
+    // `episode_poll_list`: where a FROZEN poller's hook goes instead of
+    // `poll_list`. The RX-driven relay (console_mgr's poll_list walk on every
+    // byte) never reaches it, so a frozen poller is not woken per keystroke --
+    // sys_poll RETURNS to userspace on a hook wake (a re-sample, then the
+    // count, which for a frozen caller is 0), and one return per key byte
+    // would hand the shell the secret's length and cadence. It is walked
+    // exactly once, at END (and at BEGIN, for a poller that registered on
+    // poll_list before the SAK: its one spurious return re-registers it here).
+    bool        episode_armed;
+    bool        episode_active;
+    u32         episode_saved_termios;
+    u32         episode_parked;
+    struct poll_waiter_list episode_waiters;
+    struct poll_waiter_list reader_waiters;
+    struct poll_waiter_list episode_poll_list;
 };
 
 static struct cons_input g_cons = {
     .lock      = SPIN_LOCK_INIT,
     .termios   = CONS_TERMIOS_DEFAULT,   // LS-8b: boot default == pre-LS-8b behavior
     .poll_list = POLL_WAITER_LIST_INIT,
+    .episode_waiters   = POLL_WAITER_LIST_INIT,
+    .reader_waiters    = POLL_WAITER_LIST_INIT,
+    .episode_poll_list = POLL_WAITER_LIST_INIT,
 };
 static struct Rendez g_cons_data_rendez = RENDEZ_INIT;   // a reader parks here
 static struct Rendez g_cons_mgr_rendez  = RENDEZ_INIT;   // console_mgr parks here
@@ -358,6 +397,22 @@ static inline void cons_serial_silent_store(bool v) { __atomic_store_n(&g_cons.s
 // consctl writes it); RELAXED-atomic for consistency with the sibling flags.
 static inline u32  cons_termios_load(void)   { return __atomic_load_n(&g_cons.termios, __ATOMIC_RELAXED); }
 static inline void cons_termios_store(u32 v) { __atomic_store_n(&g_cons.termios, v, __ATOMIC_RELAXED); }
+
+// IM-1: the reader slot. Written under g_cons.lock; read locklessly by the
+// reader-slot park's cond (cons_reader_slot_free, under a Rendez lock) -- the
+// same discipline as the count.
+static inline bool cons_reader_busy_load(void)    { return __atomic_load_n(&g_cons.reader_busy, __ATOMIC_RELAXED); }
+static inline void cons_reader_busy_store(bool v) { __atomic_store_n(&g_cons.reader_busy, v, __ATOMIC_RELAXED); }
+// IM-1: the two episode flags. Written under g_cons.lock; read locklessly by
+// proc_console_sak (under g_proc_table_lock), the park conds (under a Rendez
+// lock) and the per-call freeze predicate. RELAXED is correct for the same
+// reason as the count: the no-lost-wakeup pairing comes from the Rendez lock
+// the register-then-observe parks hold, never from these loads.
+static inline bool cons_episode_armed_load(void)     { return __atomic_load_n(&g_cons.episode_armed, __ATOMIC_RELAXED); }
+static inline void cons_episode_armed_store(bool v)  { __atomic_store_n(&g_cons.episode_armed, v, __ATOMIC_RELAXED); }
+static inline bool cons_episode_active_load(void)    { return __atomic_load_n(&g_cons.episode_active, __ATOMIC_RELAXED); }
+static inline void cons_episode_active_store(bool v) { __atomic_store_n(&g_cons.episode_active, v, __ATOMIC_RELAXED); }
+static void cons_episode_wake_all(void);   // defined with the episode block below
 
 // ---------------------------------------------------------------------------
 // #75 / P1-F -- the console TX ring + the writer role (ARCH §23.5.2).
@@ -1317,13 +1372,10 @@ bool cons_rx_input(u8 byte, bool is_break) {
     return accepted;
 }
 
-// cond: the ring holds at least one byte. Runs under the Rendez lock (NOT
-// g_cons.lock), so the count read is a RELAXED atomic (see the cons_count_*
-// rationale); the Rendez lock provides the no-lost-wakeup pairing.
-static int cons_data_ready(void *arg) {
-    (void)arg;
-    return cons_count_load() > 0u;
-}
+// (The reader's data cond is cons_data_or_vacate, with the episode block: it
+// runs under the Rendez lock, NOT g_cons.lock, so its count read is a RELAXED
+// atomic -- the cons_count_* rationale; the Rendez lock provides the
+// no-lost-wakeup pairing.)
 
 // #58 test-only hold: while set, console_mgr's wake cond reads false, so a
 // woken mgr RE-PARKS without consuming any pending flag (the flags persist;
@@ -1352,6 +1404,20 @@ static int cons_mgr_pending(void *arg) {
 void cons_test_mgr_hold(bool on) {
     __atomic_store_n(&g_cons_mgr_hold, on, __ATOMIC_RELEASE);
     if (!on) wakeup(&g_cons_mgr_rendez);   // release re-arms the mgr
+}
+
+// The SAK arm of the deferred service: the A-4c-2 handoff decides and, since
+// IM-1, opens the episode + posts the `sak` note, all under ONE
+// g_proc_table_lock hold (proc.c) -- so the trusted Proc's death, relinquish
+// or replacement (the same lock) is ordered entirely before or after, never
+// between the decision and the BEGIN. Shared with the test harness
+// (cons_test_sak_dispatch) so a test drives the production arm EXACTLY.
+static void cons_sak_dispatch(void) {
+    (void)proc_console_sak();
+}
+
+void cons_test_sak_dispatch(void) {
+    cons_sak_dispatch();
 }
 
 // Service all deferred console actions in process context: drain the flags
@@ -1423,8 +1489,10 @@ static void cons_service_deferred(void) {
     // losing to a near-simultaneous SAK is the operator's intent (they hit
     // BREAK to reach the trusted prompt). Both run in process context, never
     // under g_cons.lock (proc_console_sak takes g_proc_table_lock; since
-    // R2-F2 it posts NO note -- it only revokes + re-grants the attach bit).
-    if (do_sak)       proc_console_sak();
+    // R2-F2 it posts NO `interrupt` -- it revokes + re-grants the attach bit,
+    // and since IM-1 posts the `sak` note to the TRUSTED Proc and may open
+    // the trusted episode).
+    if (do_sak)       cons_sak_dispatch();
     else if (do_intr) proc_console_post_interrupt();
 
     // LS-8a: the deferred poll-wake. A POLLIN edge (cons_rx_input set
@@ -1463,7 +1531,14 @@ void cons_test_reset(void) {
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     g_cons.head = g_cons.tail = 0u;
     cons_count_store(0u);
-    g_cons.reader_busy = false;
+    cons_reader_busy_store(false);
+    // IM-1: the episode back to the boot state (unarmed, closed). A test's
+    // leaked open episode has readers/writers parked -- woken below, after
+    // the unlock (the wake takes a plain lock + nests a wakeup).
+    bool was_active = cons_episode_active_load();
+    cons_episode_armed_store(false);
+    cons_episode_active_store(false);
+    g_cons.episode_saved_termios = 0u;
     cons_intr_store(false);
     cons_sak_store(false);
     cons_pollwake_store(false);
@@ -1482,6 +1557,8 @@ void cons_test_reset(void) {
     cons_dropreport_store(false);
     g_cons.drop_reported = false;
     spin_unlock_irqrestore(&g_cons.lock, s);
+    if (was_active) cons_episode_wake_all();
+    poll_waiter_list_wake(&g_cons.reader_waiters);   // a freed slot: nobody left waiting on it
 
     // G-4: the drain back to the boot (disarmed, empty) state.
     s = spin_lock_irqsave(&g_cons_drain.lock);
@@ -1552,8 +1629,27 @@ void cons_test_service_deferred(void) {
 
 void cons_test_set_reader_busy(bool busy) {
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    g_cons.reader_busy = busy;
+    cons_reader_busy_store(busy);
     spin_unlock_irqrestore(&g_cons.lock, s);
+    if (!busy) poll_waiter_list_wake(&g_cons.reader_waiters);   // the production release's wake
+}
+
+bool cons_test_reader_busy(void) {
+    return cons_reader_busy_load();
+}
+
+u32 cons_test_episode_parked(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 v = g_cons.episode_parked;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return v;
+}
+
+u32 cons_test_line_len(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 v = g_cons.line_len;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return v;
 }
 
 u32 cons_test_termios(void) {
@@ -1631,10 +1727,22 @@ u32 cons_test_release_owned_state(void) {
         cons_test_mgr_hold(false);
     }
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    bool busy = g_cons.reader_busy;
-    if (busy) g_cons.reader_busy = false;
+    bool busy = cons_reader_busy_load();
+    if (busy) cons_reader_busy_store(false);
     spin_unlock_irqrestore(&g_cons.lock, s);
-    if (busy) owned |= CONS_TEST_OWNED_READER_BUSY;
+    if (busy) {
+        owned |= CONS_TEST_OWNED_READER_BUSY;
+        poll_waiter_list_wake(&g_cons.reader_waiters);
+    }
+    // IM-1: an episode a test left OPEN freezes every later non-attached
+    // console reader/writer -- the boot hangs at the login prompt; one left
+    // merely ARMED lets a real BREAK open an episode behind a synthetic (by
+    // then freed) authority. Close + disarm, and report.
+    if (cons_episode_active_load() || cons_episode_armed_load()) {
+        owned |= CONS_TEST_OWNED_EPISODE;
+        cons_episode_disarm();
+        (void)cons_episode_end();
+    }
 
     return owned;
 }
@@ -1672,6 +1780,258 @@ static void devcons_close(struct Spoor *c) {
     dev_simple_close(c);
 }
 
+// =============================================================================
+// IM-1: the trusted EPISODE (IMPERIUM-DESIGN.md 11.3; TRUSTED-PATH.md 12;
+// I-27 ENFORCED on the serial medium).
+// =============================================================================
+//
+// A serial BREAK (the SAK) with an ARMED trusted login authority opens an
+// EPISODE: from BEGIN to END the console belongs to the console-ATTACHED Proc
+// alone. Everything else that could read, write, or reshape the console is
+// FROZEN -- parked, never dropped (ratified fork F2) -- so the keystrokes that
+// follow the SAK reach exactly one reader, and the bytes the authority paints
+// are the only EL0 bytes on the wire. While an episode is open:
+//
+//   READ    a non-attached reader never holds the reader slot: one parked on
+//           data at BEGIN vacates the slot and re-parks on episode_waiters;
+//           one arriving parks there before taking the slot. The attached
+//           reader drains, waiting its turn on reader_waiters if the vacating
+//           holder is still on its way out.
+//   WRITE   a non-attached writer parks BEFORE the TX writer role; one holding
+//           the role at BEGIN finishes the staged chunk in flight and returns
+//           short at the next boundary. Kernel writers (cons_kernel_writer_-
+//           begin, cons_diag_line_*) are untouched -- diagnostics and the
+//           Halls still print.
+//   POLL    a non-attached poller sees no readiness: neither POLLIN (the
+//           count of key bytes is a side channel on the secret) nor POLLOUT
+//           (a write would freeze). Its hook stays registered; END's hook
+//           walk re-samples it.
+//   CONSCTL a non-attached mode write is refused (-1): the native twin of the
+//           C2-k1b F2 phenotype gate -- an inherited consctl fd must not flip
+//           ECHO back on under the trusted prompt, nor a renderer's
+//           `serialsilent 1` blank the provincia on the medium the SAK just
+//           restored.
+//   FEED    the renderer's keystroke injection is refused (-1) (G4): the
+//           graphical keyboard is not the trusted input on a serial episode.
+//   DRAIN   unchanged -- the renderer's mirror carries public bytes only
+//           (ECHO is off, so no key byte is ever echoed into it).
+//
+// BEGIN discards EVERY pending input byte -- the cooked partial line AND the
+// ring's committed lines -- because a SAK is the operator's declaration that
+// what came before is not for the trusted prompt: pre-SAK bytes must never be
+// the first bytes of the secret, whether the shell had drained them or not.
+// (Documented residue: a PL011 holdback byte parked by #174 RX back-pressure
+// -- reachable only with a FULL ring at the instant of the SAK -- is pumped
+// into the ring by the attached reader's first drain.)
+//
+// No kernel timeout, by design: an episode ended behind the consumer's back
+// would route the next keystrokes -- the secret -- to the shell. The consumer
+// bounds its own prompt and ENDs; its death, relinquish or replacement ends
+// the episode fail-safe (proc.c), and a hung consumer is a hung TCB, the class
+// of corvus dying at boot.
+//
+// Locking: the flags flip under g_cons.lock; the parked waiters are woken with
+// it RELEASED (poll_waiter_list_wake takes a plain lock + nests a wakeup,
+// illegal under an irqsave leaf). proc.c calls end / abandon / arm / disarm
+// UNDER g_proc_table_lock -- the table -> cons edge; there is no reverse edge
+// (cons_input_read's owner query runs with g_cons.lock released, and no cond
+// takes a lock).
+
+bool cons_episode_armed(void)  { return cons_episode_armed_load(); }
+bool cons_episode_active(void) { return cons_episode_active_load(); }
+
+void cons_episode_arm(void)    { cons_episode_armed_store(true); }
+void cons_episode_disarm(void) { cons_episode_armed_store(false); }
+
+// The episode's trust predicate for the CALLING context: frozen iff an
+// episode is open and the caller is a Proc that is not console-attached. A
+// NULL thread/Proc is kernel context, which the episode never freezes. A
+// kproc thread (the in-kernel tests' consumers and writers) is a Proc that
+// is NOT attached, and IS frozen -- the conservative reading, and what the
+// tests rely on. Takes no lock (an atomic flag + an atomic proc_flags load),
+// so it is legal under g_cons.lock and under a Rendez lock.
+static bool cons_caller_frozen(void) {
+    if (!cons_episode_active_load()) return false;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return false;
+    return !proc_is_console_attached(t->proc);
+}
+
+static int cons_episode_over(void *arg) {
+    (void)arg;
+    return !cons_episode_active_load();
+}
+
+// Park until the open episode ENDs. Returns 0 (ended, or none open) or
+// TSLEEP_INTR (#811 death-interrupt; the caller unwinds). The #354
+// register-then-observe shape: the hook is registered under g_cons.lock
+// BEFORE tsleep re-samples the flag under the waiter's own Rendez lock, so an
+// END's clear-then-wake is either seen by the cond re-check or delivered to
+// the registered hook (I-9); the stack Rendez/hook are unregistered before
+// this frame pops (poll.tla NoStaleHook). Untimed (deadline 0): no kernel
+// timeout, see above.
+static int cons_episode_park(void) {
+    struct Rendez      pr;
+    struct poll_waiter pw;
+    rendez_init(&pr);
+    poll_waiter_init(&pw, &pr);
+
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if (!cons_episode_active_load()) {
+        spin_unlock_irqrestore(&g_cons.lock, s);
+        return 0;
+    }
+    poll_waiter_list_register(&g_cons.episode_waiters, &pw);
+    g_cons.episode_parked++;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+
+    int ts = tsleep(&pr, cons_episode_over, NULL, 0);
+    poll_waiter_list_unregister(&pw);
+
+    s = spin_lock_irqsave(&g_cons.lock);
+    g_cons.episode_parked--;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return (ts == TSLEEP_INTR) ? TSLEEP_INTR : 0;
+}
+
+// Wake everything an episode transition may have parked: the frozen readers
+// and writers, the reader parked on data (a non-attached one vacates at
+// BEGIN, an attached one re-evaluates at END), the reader-slot waiters, and
+// the pollers (readiness changes for the non-attached at both transitions).
+// Lock-free: the caller released g_cons.lock; a wake with no waiter is a
+// no-op.
+static void cons_episode_wake_all(void) {
+    poll_waiter_list_wake(&g_cons.episode_waiters);
+    wakeup(&g_cons_data_rendez);
+    poll_waiter_list_wake(&g_cons.reader_waiters);
+    poll_waiter_list_wake(&g_cons.poll_list);
+    poll_waiter_list_wake(&g_cons.episode_poll_list);
+}
+
+static void cons_episode_diag(const char *what) {
+    struct cons_diag_line l;
+    cons_diag_line_init(&l);
+    cons_diag_line_puts(&l, "cons: trusted episode ");
+    cons_diag_line_puts(&l, what);
+    cons_diag_line_puts(&l, "\n");
+    (void)cons_diag_line_emit(&l);
+}
+
+// BEGIN. Called by proc_console_sak (console_mgr's process context) UNDER
+// g_proc_table_lock, so the trusted Proc it decided on cannot die, relinquish
+// or be replaced between the decision and this; the arm is re-checked under
+// g_cons.lock anyway (belt: a test reset clears it without the table lock).
+// Returns true iff an episode opened. Already open -> no-op (a repeat SAK is
+// idempotent; the saved termios is NOT re-saved, or END would restore RAW).
+bool cons_episode_begin(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if (!cons_episode_armed_load() || cons_episode_active_load()) {
+        spin_unlock_irqrestore(&g_cons.lock, s);
+        return false;
+    }
+    g_cons.episode_saved_termios = cons_termios_load();
+    cons_termios_store(g_cons.episode_saved_termios
+                       & ~(CONS_ICANON | CONS_ECHO | CONS_ISIG | CONS_ICRNL));
+    // Discard: the cooked partial line AND the ring. Not delivered, not
+    // counted as a drop -- the operator's SAK abandoned them (the I-20 "ISIG
+    // characters discard the pending line" disposition, widened to the
+    // committed lines by the argument in the header).
+    g_cons.line_len = 0u;
+    g_cons.head = g_cons.tail = 0u;
+    cons_count_store(0u);
+    cons_episode_active_store(true);
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    cons_episode_wake_all();
+    cons_episode_diag("BEGIN (SAK)");
+    return true;
+}
+
+// The one close transition: restore the termios word BEGIN saved (a mode write
+// the attached authority made meanwhile is deliberately overwritten -- END
+// means "as before"), clear the flag, wake the frozen world. True iff an
+// episode was open.
+static bool cons_episode_close(const char *what) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if (!cons_episode_active_load()) {
+        spin_unlock_irqrestore(&g_cons.lock, s);
+        return false;
+    }
+    cons_termios_store(g_cons.episode_saved_termios);
+    cons_episode_active_store(false);
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    cons_episode_wake_all();
+    cons_episode_diag(what);
+    return true;
+}
+
+bool cons_episode_end(void) {
+    return cons_episode_close("END");
+}
+
+// The fail-safe close: the trusted authority died, relinquished, or was
+// replaced (proc.c, under g_proc_table_lock). The same transition; a distinct
+// entry so the diagnostic names the cause.
+bool cons_episode_abandon(void) {
+    return cons_episode_close("ABANDONED (trusted proc gone)");
+}
+
+static int cons_reader_slot_free(void *arg) {
+    (void)arg;
+    return !cons_reader_busy_load();
+}
+
+// Take the reader slot. `wait`: park on reader_waiters while it is held (the
+// register-then-observe shape; the release clears under g_cons.lock and wakes
+// outside it); else the single-reader guard refuses. Returns 0 holding the
+// slot, CONS_SLOT_BUSY when refused, TSLEEP_INTR on a death-interrupt. The
+// busy code is POSITIVE on purpose: TSLEEP_INTR is -1, and a -1 "busy" was
+// indistinguishable from it (cons.read_busy_guard caught the collision).
+#define CONS_SLOT_BUSY  1
+static int cons_reader_slot_take(bool wait) {
+    for (;;) {
+        irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+        if (!cons_reader_busy_load()) {
+            cons_reader_busy_store(true);
+            spin_unlock_irqrestore(&g_cons.lock, s);
+            return 0;
+        }
+        if (!wait) {
+            spin_unlock_irqrestore(&g_cons.lock, s);
+            return CONS_SLOT_BUSY;
+        }
+        struct Rendez      pr;
+        struct poll_waiter pw;
+        rendez_init(&pr);
+        poll_waiter_init(&pw, &pr);
+        poll_waiter_list_register(&g_cons.reader_waiters, &pw);
+        spin_unlock_irqrestore(&g_cons.lock, s);
+        int ts = tsleep(&pr, cons_reader_slot_free, NULL, 0);
+        poll_waiter_list_unregister(&pw);
+        if (ts == TSLEEP_INTR) return TSLEEP_INTR;
+        // AWOKEN -- re-contend (another waiter may have won).
+    }
+}
+
+static void cons_reader_slot_release(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    cons_reader_busy_store(false);
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    poll_waiter_list_wake(&g_cons.reader_waiters);
+}
+
+// cond for the slot holder's data wait: a byte is buffered, OR an episode
+// opened and this reader is not attached (it must wake to VACATE the slot --
+// sleep() re-checks the cond on every wake, so a wake with a false cond would
+// re-sleep, and a non-attached reader would sit on the slot through the whole
+// episode). `arg` is the reader's Proc (pinned: it is the running Proc).
+// proc_is_console_attached is an atomic load of proc_flags -- no lock, legal
+// under the Rendez lock.
+static int cons_data_or_vacate(void *arg) {
+    const struct Proc *rp = (const struct Proc *)arg;
+    if (cons_count_load() > 0u) return 1;
+    return cons_episode_active_load() && rp && !proc_is_console_attached(rp);
+}
+
 // A-4c-1: blocking console read. Drains the RX ring; blocks on
 // g_cons_data_rendez when empty (death-interruptible per #811). Single-reader:
 // a 2nd concurrent blocking read returns -1 (the data Rendez is single-waiter;
@@ -1684,17 +2044,36 @@ static void devcons_close(struct Spoor *c) {
 // (the namespace path). Both call cons_input_read, so the single-reader busy-guard
 // (g_cons.reader_busy) bounds the console to one reader ACROSS both doors -- there
 // is no second reader path that could race the first.
+//
+// IM-1: the FREEZE. A non-attached reader never holds the slot while an
+// episode is open: one arriving parks through the episode before taking the
+// slot; one holding it at BEGIN vacates (releases, parks, re-takes). The
+// attached-ness is re-read at every decision (the SAK flips it), never
+// cached. A reader that has been frozen re-takes the slot by WAITING, not by
+// the guard's -1 -- the attached authority may still be mid-read at END, and
+// a -1 there would read to the shell as its console going away; an attached
+// reader during an episode waits the same way (the holder is the vacating
+// non-attached reader). Every other contender keeps the documented -1.
 long cons_input_read(void *buf, long n) {
     if (!buf || n < 0) return -1;
     if (n == 0)        return 0;
 
-    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    if (g_cons.reader_busy) {
-        spin_unlock_irqrestore(&g_cons.lock, s);
-        return -1;
+    struct Thread *reader = current_thread();
+    struct Proc   *rp     = reader ? reader->proc : NULL;
+    bool frozen_once = false;
+
+    for (;;) {
+        if (cons_caller_frozen()) {
+            if (cons_episode_park() == TSLEEP_INTR) return 0;
+            frozen_once = true;
+        }
+        bool wait = frozen_once ||
+                    (cons_episode_active_load() && rp && proc_is_console_attached(rp));
+        int rc = cons_reader_slot_take(wait);
+        if (rc == TSLEEP_INTR)    return 0;
+        if (rc == CONS_SLOT_BUSY) return -1;
+        break;   // holding the slot; a BEGIN that raced the take is caught under the lock below
     }
-    g_cons.reader_busy = true;
-    spin_unlock_irqrestore(&g_cons.lock, s);
 
     // RW-11 SA-1b: a TRUSTED console reader -- the session shell (the console
     // OWNER) or a console-ATTACHED authority (login/corvus) -- is an interactive
@@ -1706,18 +2085,30 @@ long cons_input_read(void *buf, long n) {
     // self-promote above NORMAL and starve it (a fixed-priority band, no aging).
     // The band==NORMAL pre-check keeps the (locking) owner query off the path once
     // the reader is already promoted (sticky) -- and bounds it to interactive
-    // frequency for an untrusted reader that stays NORMAL.
-    struct Thread *reader = current_thread();
-    if (reader && reader->band == SCHED_BAND_NORMAL && reader->proc &&
-        (proc_is_console_attached(reader->proc) ||
-         proc_is_console_owner(reader->proc))) {
+    // frequency for an untrusted reader that stays NORMAL. (`reader` is the
+    // current thread resolved at entry, above.)
+    if (reader && reader->band == SCHED_BAND_NORMAL && rp &&
+        (proc_is_console_attached(rp) || proc_is_console_owner(rp))) {
         sched_mark_interactive(reader);
     }
 
     u8 *out = (u8 *)buf;
     long got = 0;
     for (;;) {
-        s = spin_lock_irqsave(&g_cons.lock);
+        irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+        // IM-1: re-checked UNDER the lock BEGIN flips the flag under, before a
+        // single byte is drained -- a non-attached reader woken by BEGIN must
+        // not take the key byte that landed between BEGIN and its wake. It
+        // VACATES: releases the slot, parks through the episode, re-takes the
+        // slot by waiting, and resumes with nothing drained.
+        if (cons_episode_active_load() && rp && !proc_is_console_attached(rp)) {
+            cons_reader_busy_store(false);
+            spin_unlock_irqrestore(&g_cons.lock, s);
+            poll_waiter_list_wake(&g_cons.reader_waiters);
+            if (cons_episode_park() == TSLEEP_INTR)  return got;
+            if (cons_reader_slot_take(true) != 0)    return got;
+            continue;
+        }
         u32 c = cons_count_load();
         while (c > 0u && got < n) {
             out[got++] = g_cons.ring[g_cons.head];
@@ -1735,12 +2126,10 @@ long cons_input_read(void *buf, long n) {
         // guard (reader_busy) means at most one pump runs at a time.
         uart_rx_pump();
         if (got > 0) break;            // read() returns as soon as >= 1 byte is ready
-        if (sleep(&g_cons_data_rendez, cons_data_ready, NULL) == SLEEP_INTR) break;
+        if (sleep(&g_cons_data_rendez, cons_data_or_vacate, rp) == SLEEP_INTR) break;
     }
 
-    s = spin_lock_irqsave(&g_cons.lock);
-    g_cons.reader_busy = false;
-    spin_unlock_irqrestore(&g_cons.lock, s);
+    cons_reader_slot_release();
     return got;
 }
 
@@ -1803,7 +2192,20 @@ long cons_output_write(const void *buf, long n) {
     // glyphs and escape sequences. The role is a sleeping park, NOT a spinlock:
     // a contending writer parks on the role list, so a long write makes peers
     // wait but never pins a CPU.
-    if (cons_tx_role_acquire() != 0) return -1;   // #811 death before we wrote anything
+    //
+    // IM-1: the FREEZE. A non-attached writer parks BEFORE the role while an
+    // episode is open (never holding the role parked -- the attached authority
+    // must be able to write), and re-checks after taking it (a BEGIN can land
+    // between the park and the acquire). Death: -1, nothing written.
+    for (;;) {
+        if (cons_caller_frozen()) {
+            if (cons_episode_park() == TSLEEP_INTR) return -1;
+            continue;
+        }
+        if (cons_tx_role_acquire() != 0) return -1;   // #811 death before we wrote anything
+        if (!cons_caller_frozen()) break;
+        cons_tx_role_release();
+    }
 
     // The UNIT this writer pushes is a staged chunk (<= CONS_TX_STAGE cooked
     // bytes), pushed under ONE ring-lock hold when it fits -- so a ring-fitting
@@ -1820,6 +2222,12 @@ long cons_output_write(const void *buf, long n) {
     u8   stage[CONS_TX_STAGE];
     long i = 0;
     while (i < n) {
+        // IM-1: a writer holding the role when an episode opens finishes the
+        // chunk in flight and stops at the next boundary -- a short count (the
+        // #67 shape), and the caller's retry parks. Never before the first
+        // chunk: a zero count would read as an error to a caller that saw no
+        // freeze, and the post-acquire check above already covered it.
+        if (i > 0 && cons_caller_frozen()) break;
         u32  len;
         long used = cons_stage_chunk(bytes + i, n - i, tio, stage, CONS_TX_STAGE, &len);
         if (i + used < n && len > 0u) {
@@ -2027,12 +2435,21 @@ short cons_drain_poll(short events, struct poll_waiter *pw) {
 // error: a blocking writer loops, and the reader's drain frees room. It is
 // deliberately not -EAGAIN -- this Dev has no non-blocking contract to hang that
 // on, and an errno here would make the renderer treat back-pressure as failure.
+//
+// IM-1 (G4): refused (-1) while a trusted episode is open -- the graphical
+// keyboard is not the trusted input on a serial episode, and an injection
+// path into the RX ring during the prompt is exactly the spoof the episode
+// exists to exclude. A loop that finds one opening stops short (the renderer
+// retries and is refused).
 long cons_feed_write(const void *buf, long n) {
     if (!buf || n < 0) return -1;
+    if (cons_episode_active_load()) return -1;
     const u8 *bytes = (const u8 *)buf;
     long i = 0;
-    for (; i < n; i++)
+    for (; i < n; i++) {
+        if (cons_episode_active_load()) break;
         if (!cons_rx_input(bytes[i], /*is_break=*/false)) break;
+    }
     return i;
 }
 
@@ -2128,6 +2545,14 @@ static long cons_parse_u16_token(const u8 *b, long n, long *i) {
 
 long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
     if (!buf || n < 0) return -1;
+    // IM-1: while an episode is open only the attached authority may reshape
+    // the console -- the native twin of the C2-k1b F2 phenotype gate (which
+    // keys on the OWNER's session and is empty post-SAK anyway). The
+    // renderer's verbs are refused too: `serialsilent 1` under the trusted
+    // prompt would blank the provincia on the emergency medium the SAK just
+    // restored. Refused BEFORE the parse so a frozen writer learns nothing
+    // about the grammar's acceptance of its tokens.
+    if (cons_caller_frozen()) return -1;
     const u8 *b = (const u8 *)buf;
 
     // Parse ALL tokens first (atomic apply): a single malformed token rejects
@@ -2459,12 +2884,27 @@ int cons_stat_native_fill(struct Spoor *c, struct t_stat *out) {
 // sys_poll_for_proc's fast path unregisters it -- the poll.tla / devpipe
 // discipline. The poll_waiter_list_register nests the (plain) list lock under
 // g_cons.lock (irqsave) -- lock order object -> list, IRQs already masked.
+//
+// IM-1: a FROZEN caller (an episode is open, the caller is not attached) sees
+// NO readiness -- POLLIN would leak the count of key bytes, POLLOUT would
+// promise a write that freezes -- and its hook goes on episode_poll_list,
+// which the per-byte RX relay never walks: sys_poll returns to userspace on
+// any hook wake, so a frozen poller left on poll_list would return once per
+// keystroke, handing the shell the secret's length and cadence with the
+// readiness word still reading 0. It is woken exactly once, at END (the
+// transition walks both lists), re-samples unfrozen, and re-registers on
+// poll_list. Decided under g_cons.lock, the lock BEGIN/END flip the flag
+// under, so the sample, the flag and the list choice are one snapshot.
 short cons_poll(short events, struct poll_waiter *pw) {
     short revents = 0;
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    if ((events & POLLIN) && cons_count_load() > 0u) revents |= POLLIN;
-    if (events & POLLOUT)                            revents |= POLLOUT;
-    if (pw) poll_waiter_list_register(&g_cons.poll_list, pw);
+    bool frozen = cons_caller_frozen();
+    if (!frozen) {
+        if ((events & POLLIN) && cons_count_load() > 0u) revents |= POLLIN;
+        if (events & POLLOUT)                            revents |= POLLOUT;
+    }
+    if (pw) poll_waiter_list_register(frozen ? &g_cons.episode_poll_list
+                                             : &g_cons.poll_list, pw);
     spin_unlock_irqrestore(&g_cons.lock, s);
     return revents;
 }

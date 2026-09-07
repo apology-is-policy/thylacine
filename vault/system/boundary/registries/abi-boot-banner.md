@@ -45,6 +45,7 @@ mirrors:
   - "tools/interactive/ls-gfx-dosbox-input.exp"
   - "tools/interactive/ls-gfx-dosbox-tombraider.exp"
   - "tools/interactive/ls-gfx-throttle.exp"
+  - "tools/interactive/im1-sak-lever.exp"
 literals:
   - "Thylacine boot OK"
   - "EXTINCTION:"
@@ -55,7 +56,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-05
+updated: 2026-09-07
 ---
 ## The surface
 

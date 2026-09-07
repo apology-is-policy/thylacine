@@ -2184,7 +2184,42 @@ enum {
     //
     //   Audit-bearing: the #50 path-mutation-family row (AUDIT-TRIGGERS.md).
     SYS_OPEN_CREATE = 109,   // arg: start_fd(x0) path_va(x1) path_len(x2) omode(x3) perm(x4)
+
+    // IM-1 (IMPERIUM-DESIGN.md 11.3; TRUSTED-PATH.md 12; I-27 ENFORCED on the
+    // serial medium): SYS_CONSOLE_EPISODE(op) -> 0 / -1 -- the trusted
+    // EPISODE's two control ops, callable ONLY by the trusted login authority
+    // (the Proc joey established with SPAWN_PERM_CONSOLE_TRUSTED: corvus).
+    //
+    //   SYS_CONSOLE_EPISODE_ARM (1): declare the caller an episode CONSUMER.
+    //     From then on a serial BREAK (the SAK) that lands with the caller
+    //     alive and no episode open OPENS one: every pending console input
+    //     byte is discarded, the line discipline is forced RAW, every
+    //     non-attached console read / write / poll / consctl write / renderer
+    //     feed is FROZEN (parked, never dropped), and the `sak` note is posted
+    //     to the caller. UNARMED, a SAK is the A-4c-2 attach handoff exactly
+    //     as before -- the kernel alone can never freeze a console that nobody
+    //     is there to unfreeze. Sticky until the caller dies; idempotent.
+    //   SYS_CONSOLE_EPISODE_END (2): end the open episode: restore the saved
+    //     termios, unfreeze the non-attached world, and hand the pre-SAK
+    //     console OWNER (the Ctrl-C target) back if nobody claimed the slot
+    //     meanwhile. -1 with no open episode. The caller stays console-
+    //     attached (I-27 as today).
+    //
+    //   NO kernel timeout: an episode ended behind the consumer's back would
+    //   route the next keystrokes -- the secret -- to the shell; the consumer
+    //   bounds its own prompt and ENDs. The trusted Proc's death, or its own
+    //   SYS_CONSOLE_RELINQUISH, ends an open episode fail-safe: the untrusted
+    //   world unfreezes, and no secret is in flight because its only reader
+    //   is gone.
+    //
+    //   Audit-bearing: the IM-1 trusted-episode row (AUDIT-TRIGGERS.md).
+    SYS_CONSOLE_EPISODE = 110,   // arg: op(x0)
 };
+
+// SYS_CONSOLE_EPISODE ops (x0). ABI: mirrored by libthyla-rs
+// T_CONSOLE_EPISODE_* and docs/ERRORS.md.
+#define SYS_CONSOLE_EPISODE_ARM  1u
+#define SYS_CONSOLE_EPISODE_END  2u
 
 // V-2 (GPU-DESIGN §6.2.1): the host-dictated cache attribute a
 // SYS_BURROW_FROM_HOSTMEM mapping is created with. The kernel maps each to a

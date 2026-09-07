@@ -698,6 +698,18 @@ void test_cons_sak_idempotent_flood(void);
 void test_cons_sak_via_console_mgr(void);
 void test_cons_sak_does_not_terminate_trusted(void);
 void test_cons_sak_attaches_from_relinquished_state(void);
+void test_cons_episode_requires_arm(void);                // IM-1: the trusted EPISODE
+void test_cons_episode_begins_on_sak(void);
+void test_cons_episode_discards_pending_input(void);
+void test_cons_episode_freezes_nonattached_reader(void);
+void test_cons_episode_freezes_nonattached_writer(void);
+void test_cons_episode_freezes_feed_consctl_poll(void);
+void test_cons_episode_end_restores(void);
+void test_cons_episode_repeat_sak_idempotent(void);
+void test_cons_episode_gate(void);
+void test_cons_episode_relinquish_ends(void);
+void test_cons_episode_trusted_death_ends(void);
+void test_cons_episode_saved_owner_death(void);
 void test_proc_console_relinquish(void);
 void test_proc_console_relinquish_other_owner(void);
 void test_cons_console_open(void);
@@ -2415,6 +2427,26 @@ struct test_case g_tests[] = {
                                        test_cons_sak_does_not_terminate_trusted, false, NULL },
     { "cons.sak_attaches_from_relinquished_state",
                                        test_cons_sak_attaches_from_relinquished_state, false, NULL },
+    // IM-1: the trusted EPISODE (IMPERIUM-DESIGN.md 11.3; I-27 on serial).
+    { "cons.episode_requires_arm",     test_cons_episode_requires_arm,     false, NULL },
+    { "cons.episode_begins_on_sak",    test_cons_episode_begins_on_sak,    false, NULL },
+    { "cons.episode_discards_pending_input",
+                                       test_cons_episode_discards_pending_input, false, NULL },
+    { "cons.episode_freezes_nonattached_reader",
+                                       test_cons_episode_freezes_nonattached_reader, false, NULL },
+    { "cons.episode_freezes_nonattached_writer",
+                                       test_cons_episode_freezes_nonattached_writer, false, NULL },
+    { "cons.episode_freezes_feed_consctl_poll",
+                                       test_cons_episode_freezes_feed_consctl_poll, false, NULL },
+    { "cons.episode_end_restores",     test_cons_episode_end_restores,     false, NULL },
+    { "cons.episode_repeat_sak_idempotent",
+                                       test_cons_episode_repeat_sak_idempotent, false, NULL },
+    { "cons.episode_gate",             test_cons_episode_gate,             false, NULL },
+    { "cons.episode_relinquish_ends",  test_cons_episode_relinquish_ends,  false, NULL },
+    { "cons.episode_trusted_death_ends",
+                                       test_cons_episode_trusted_death_ends, false, NULL },
+    { "cons.episode_saved_owner_death",
+                                       test_cons_episode_saved_owner_death, false, NULL },
     { "proc.console_relinquish",       test_proc_console_relinquish,       false, NULL },
     { "proc.console_relinquish_other", test_proc_console_relinquish_other_owner, false, NULL },
     { "cons.console_open",             test_cons_console_open,             false, NULL },
@@ -3685,13 +3717,16 @@ void test_run_all(void) {
         }
         if (uart_test_rx_release_hold()) owned |= TEST_OWNED_UART_RX_HOLD;
         if (owned != 0) {
-            static const char *const names[6] = {
+            // Bit 6 = CONS_TEST_OWNED_EPISODE (cons.h; IM-1): the table spans
+            // the cons set AND the two arch bits above, so it is indexed by
+            // the UNION's bit numbers.
+            static const char *const names[7] = {
                 "echo-capture", "tx-role", "mgr-hold", "reader-busy", "uart-tx-stall",
-                "uart-rx-hold"
+                "uart-rx-hold", "episode"
             };
             uart_puts("LEAKED-STATE(");
             bool first = true;
-            for (int b = 0; b < 6; b++) {
+            for (int b = 0; b < 7; b++) {
                 if (!(owned & (1u << b))) continue;
                 if (!first) uart_puts(",");
                 uart_puts(names[b]);

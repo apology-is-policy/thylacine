@@ -365,6 +365,78 @@ State: `g_cons.episode_active` (atomic) + the saved termios word + an episode
   pixels), a smaller TCB delta, and no ABI designed blind to the only backend that
   needs it.
 
+**As-built refinements (IM-1, landed 2026-09-07). Each is a delta from the
+bullets above, settled during the kernel reads and flagged here so the operator
+can veto any of them:**
+
+1. **The ARM gate.** A SAK opens an episode only if the trusted Proc has
+   declared itself an episode CONSUMER -- `SYS_CONSOLE_EPISODE(ARM)` (110, op
+   1; gate: the caller IS `g_console_trusted_proc`). Unarmed, a SAK is the
+   A-4c-2 handoff exactly as before (attach corvus, no freeze, no note).
+   Without the gate IM-1 alone would freeze the console on every BREAK with
+   nobody to END it -- a regression in the window between IM-1 and IM-3. corvus
+   arms once at startup (IM-3). The arm is a property of the trusted IDENTITY:
+   it dies with the Proc and is cleared when the authority changes; it
+   survives the Proc's own relinquish.
+2. **Every SAK, not the first.** The `sak` note + BEGIN fire on EVERY SAK that
+   finds an armed, alive trusted Proc and no open episode. The pre-IM-1
+   idempotent early return (trusted attached, owner NULL) would have swallowed
+   every SAK after the first of a session, because the owner stays NULL until
+   the next login. The handoff half stays idempotent (a repeat re-grants
+   nothing); the episode half is decided on every SAK; a SAK during an open
+   episode is a no-op (no restart, no second note). `proc_console_sak` emits
+   one `cons: SAK (<decision>)` diagnostic per SAK -- the harness's witness
+   (`tools/interactive/im1-sak-lever.exp`: Ctrl-A b on the muxed serial IS a
+   BREAK; A-4c-2's "no BREAK injectable" note was stale).
+3. **The pre-SAK OWNER is handed back at END.** The SAK remembers the console
+   owner it unseats (`g_console_owner_pre_sak`; cleared at that Proc's death
+   and by its own relinquish, so a bringup-era SAK can never re-install init
+   as the Ctrl-C target); END restores it into an EMPTY owner slot only (a
+   claim made during the episode wins), one-shot. Without it every imperium
+   episode would leave the session without a Ctrl-C target until the next
+   login. Supersedes "the console OWNER is re-established by login / the
+   session as today" above.
+4. **One syscall, two ops.** `SYS_CONSOLE_EPISODE = 110` carries ARM (1) and
+   END (2); the reserved `SYS_CONSOLE_EPISODE_END (110)` above is the END op.
+   The END gate is the trusted IDENTITY plus an open episode -- not the attach
+   bit: the SAK attached the caller, and a relinquish ends the episode by
+   itself (item 6).
+5. **BEGIN discards ALL pending input** -- the ring's committed lines as well
+   as the cooked partial line: a completed-but-undrained line is pre-SAK input
+   by the same argument (the shell had not consumed it, and the SAK is the
+   operator declaring that what follows is for the trusted prompt). Documented
+   residue: a PL011 holdback byte parked by #174 back-pressure (a FULL ring at
+   the SAK instant) is pumped in by the attached reader's first drain.
+6. **Three fail-safe closes, all under `g_proc_table_lock`:** the trusted
+   Proc's death (the ZOMBIE chokepoint; the arm dies with it), its own
+   `SYS_CONSOLE_RELINQUISH` (it could never END through the gate again; the
+   arm persists), and a CHANGE of trusted authority (`proc_set_console_-
+   trusted`). Each hands the pre-SAK owner back. BEGIN itself runs under the
+   same lock hold that ALIVE-checked the trusted Proc, so no episode opens
+   behind a consumer that just left; the `sak` note is posted AFTER BEGIN (a
+   refused post closes the episode again -- an episode nobody was told about
+   is a frozen console), then the caught-note wake. So BEGIN, END and the
+   fail-safe closes all take the cons leaf lock under `g_proc_table_lock`:
+   one edge, no reverse (cons queries the table only with its own lock
+   released; no sleep cond takes a lock).
+7. **The frozen world is wider than read / write / feed.** A non-attached
+   consctl WRITE is refused (the native twin of C2-k1b F2: an inherited
+   consctl fd must not flip ECHO back on under the prompt; a renderer's
+   `serialsilent 1` must not blank the provincia on the medium the SAK just
+   restored) -- G4 generalized. And a non-attached POLL reports no readiness
+   AND is not woken per key byte: its hook parks on a separate list the
+   per-byte RX relay never walks, because `sys_poll` returns to userspace on
+   any hook wake, so one return per keystroke would have handed the shell the
+   secret's length and cadence with the readiness word reading 0. It is woken
+   once, at END.
+8. **A frozen reader re-takes its slot by WAITING**, never by the
+   single-reader guard's -1 (the authority may still be mid-read at END, and
+   a -1 reads to the shell as its console going away); an attached reader
+   during an episode waits the same way behind a vacating non-attached
+   holder. Every other contender keeps the documented -1. Consequence: two
+   non-attached readers frozen together both get the console after END, in
+   turn, where pre-episode the second would have been refused.
+
 ### 11.4 The propagating legate scope -- kernel, I-25 STRENGTHENED, spec-first (IM-2)
 
 - The grant gains `flags` (PROPAGATING): a new **`SYS_CAP_GRANT_IMPERIUM`**

@@ -256,6 +256,14 @@ pub const T_SYS_UNLINK: u64           = 58;
 // and composes create-else-open bounded (T_OEXCL / DMDIR are the exclusive
 // arms, server-atomic).
 pub const T_SYS_OPEN_CREATE: u64      = 109;
+// IM-1 (IMPERIUM-DESIGN.md 11.3): the trusted EPISODE's control ops --
+// callable only by the trusted login authority (corvus). ARM declares the
+// caller an episode consumer (a serial BREAK then opens an episode: input
+// discarded, RAW forced, the non-attached world frozen, the `sak` note
+// posted); END closes the open episode. 0 / -1.
+pub const T_SYS_CONSOLE_EPISODE: u64  = 110;
+pub const T_CONSOLE_EPISODE_ARM: u64  = 1;
+pub const T_CONSOLE_EPISODE_END: u64  = 2;
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
@@ -650,6 +658,10 @@ pub const T_NOTE_BIT_SNARE:      u8 = 4;
 // does defer a ^Z, and the kernel routes an all-masked pgrp's tty:susp to a
 // note POST whose stop is applied later at the EL0-return tail.
 pub const T_NOTE_BIT_TTY:        u8 = 5;
+// IM-1: the `sak` trusted-path note -- kernel-synthetic-only (a SYS_POSTNOTE
+// of the name is refused), posted to the trusted login authority when a
+// serial BREAK opens a trusted episode. Default IGNORE. Its own bit.
+pub const T_NOTE_BIT_SAK:        u8 = 6;
 
 // NOTE_MASK_SUPPORTED — the union of every NOTE_BIT_* the kernel knows
 // about today. Setting bits outside this is tolerated (no-op) so future
@@ -662,7 +674,7 @@ pub const T_NOTE_BIT_TTY:        u8 = 5;
 // ties it to the NoteClass set at compile time, which catches a variant added
 // without the bit; it CANNOT catch the kernel growing a bit this file never
 // hears about, because both sides of that check live here.
-pub const T_NOTE_MASK_SUPPORTED: u64 = 0x3f;
+pub const T_NOTE_MASK_SUPPORTED: u64 = 0x7f;
 
 // SYS_POSTNOTE sentinel for "send to my own Proc" (kernel maps pid == 0
 // to the calling Proc's pid; matches POSIX kill(0, sig) "send to my
@@ -2592,6 +2604,21 @@ pub unsafe fn t_open_create(start_fd: i64, path: *const u8, path_len: usize,
         in("x3") omode as u64,
         in("x4") perm as u64,
         in("x8") T_SYS_OPEN_CREATE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_console_episode — the trusted EPISODE's control ops (IM-1). `op` is
+// T_CONSOLE_EPISODE_ARM or T_CONSOLE_EPISODE_END. Callable only by the trusted
+// login authority; -1 otherwise, on a bad op, or on END with no open episode.
+#[inline(always)]
+pub unsafe fn t_console_episode(op: u64) -> i64 {
+    let mut x0: i64 = op as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_CONSOLE_EPISODE,
         options(nostack)
     );
     x0
