@@ -4,7 +4,7 @@ type: chg
 title: "abi-boot-banner: declare the s7-nora-probe.exp gate (mirrors 28 -> 29; EXTINCTION deliverers 24 -> 25)"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["f2e177f9"]
 touched:
   - abi-boot-banner
 established: []
