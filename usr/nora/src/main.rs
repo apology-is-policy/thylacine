@@ -200,6 +200,28 @@ fn run(
         t_putstr(&format!("nora: EXIT path=redraw1 code=1 err={:?}\n", e));
         return 1;
     }
+    // F1: replay the launch type-ahead NOW, before the poll loop. nora's mux
+    // polls the pts ready fd, which never fires for already-drained pending, so
+    // poll() alone would strand a typed-ahead command (a complete `:q` would read
+    // as a hang) until the next real keystroke. A typed-ahead quit exits here; a
+    // change repaints. (LSP on_saved re-syncs on the next real key -- a rare
+    // type-ahead `:w` does not lose its save, only the immediate LSP re-check.)
+    {
+        let mut dirty = false;
+        let mut saved = false;
+        let quit = dispatch_input(src.drain_pending(), ed, term, &mut dirty, &mut saved);
+        let _ = saved;
+        if quit {
+            t_putstr("nora: EXIT path=quit code=0\n");
+            return 0;
+        }
+        if dirty {
+            if let Err(e) = redraw(term, ed) {
+                t_putstr(&format!("nora: EXIT path=redraw-preloop code=1 err={:?}\n", e));
+                return 1;
+            }
+        }
+    }
     let mut mux = Mux::new();
     loop {
         if src.is_eof() {
@@ -242,37 +264,9 @@ fn run(
                     // A wake with no decoded key (a bare HUP) loops; is_eof
                     // breaks at the top. The console read is #811
                     // death-interruptible, so a dying nora unwinds here rather
-                    // than wedging.
-                    for ev in events {
-                        match ev {
-                            Event::Key(k) => {
-                                ed.handle_key(k);
-                                dirty = true;
-                                if let Some(req) = ed.take_request() {
-                                    saved |= matches!(req, Request::Save(_));
-                                    handle_request(ed, req);
-                                }
-                                if ed.quit {
-                                    break;
-                                }
-                            }
-                            // A late CPR the launch probe missed under HVF (the
-                            // slow serial answered after the deadline): resize
-                            // to the real console, swapping the 80x24 fallback
-                            // for fullscreen + repainting
-                            // (bug_nora_hvf_cpr_handshake -- the steady-state
-                            // backstop).
-                            Event::Resize(c, r) => {
-                                let c = c.clamp(MIN_DIM, MAX_DIM);
-                                let r = r.clamp(MIN_DIM, MAX_DIM);
-                                if (c, r) != (term.area().width, term.area().height) {
-                                    term.resize(Rect::new(0, 0, c, r));
-                                    dirty = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                    // than wedging. Quit is handled by the loop tail's ed.quit
+                    // check, so the return is ignored here.
+                    let _ = dispatch_input(events, ed, term, &mut dirty, &mut saved);
                 }
                 TAG_NOTES => {
                     // #55c: drain the queue; a tty:winch means the console
@@ -383,6 +377,47 @@ fn run(
 }
 
 /// Register fd 0 plus any live gopls and Ambush pipes and block for one of them.
+/// Apply a batch of decoded input Events to the editor. Returns true if the
+/// editor asked to quit. Shared by the main loop's TAG_STDIN arm and the F1
+/// pre-loop type-ahead replay (drain_pending) so both dispatch identically.
+fn dispatch_input(
+    events: Vec<Event>,
+    ed: &mut Editor,
+    term: &mut Terminal,
+    dirty: &mut bool,
+    saved: &mut bool,
+) -> bool {
+    for ev in events {
+        match ev {
+            Event::Key(k) => {
+                ed.handle_key(k);
+                *dirty = true;
+                if let Some(req) = ed.take_request() {
+                    *saved |= matches!(req, Request::Save(_));
+                    handle_request(ed, req);
+                }
+                if ed.quit {
+                    return true;
+                }
+            }
+            // A late CPR the launch probe missed under HVF (the slow serial
+            // answered after the deadline): resize to the real console, swapping
+            // the 80x24 fallback for fullscreen + repainting
+            // (bug_nora_hvf_cpr_handshake -- the steady-state backstop).
+            Event::Resize(c, r) => {
+                let c = c.clamp(MIN_DIM, MAX_DIM);
+                let r = r.clamp(MIN_DIM, MAX_DIM);
+                if (c, r) != (term.area().width, term.area().height) {
+                    term.resize(Rect::new(0, 0, c, r));
+                    *dirty = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn poll_all(
     stdin_fd: i32,
     mux: &mut Mux,

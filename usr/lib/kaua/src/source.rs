@@ -177,22 +177,16 @@ impl PollSource {
     pub fn set_external_mux(&mut self) {
         self.external_mux = true;
     }
-}
 
-impl Default for PollSource {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl EventSource for PollSource {
-    fn poll(&mut self, timeout: PollTimeout) -> Result<Vec<Event>> {
+    /// Replay the launch type-ahead (`pending`) into the parser and return its
+    /// events WITHOUT reading fd 0. `poll` calls this first; a MUX app (nora)
+    /// also calls it once BEFORE its loop, because its mux polls the pts ready fd
+    /// -- which never fires for already-drained pending, so `poll` alone would
+    /// strand a typed-ahead command until the next real keystroke (audit F1). Does
+    /// NOT flush a trailing partial -- the retained parser continues it on the
+    /// next read.
+    pub fn drain_pending(&mut self) -> Vec<Event> {
         let mut out = Vec::new();
-
-        // Replay any pre-loop type-ahead (kaua::query #117-F2) through the same
-        // retained parser FIRST, but do NOT flush here: a VT sequence split
-        // between the type-ahead tail and the first fd-0 read is assembled by the
-        // one parser across both. The flush happens once, after the drain below.
         if !self.pending.is_empty() {
             let bytes = core::mem::take(&mut self.pending);
             for b in bytes {
@@ -204,18 +198,36 @@ impl EventSource for PollSource {
                 }
             }
         }
+        out
+    }
+}
+
+impl Default for PollSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EventSource for PollSource {
+    fn poll(&mut self, timeout: PollTimeout) -> Result<Vec<Event>> {
+        // Replay any pre-loop type-ahead (kaua::query #117-F2) through the same
+        // retained parser FIRST, no flush here (a VT sequence split between the
+        // type-ahead tail and the first fd-0 read is assembled by the one parser
+        // across both; the flush happens once, after the drain below). A mux app
+        // (nora) has already drained this via drain_pending before its loop (F1),
+        // so this is a no-op there.
+        let mut out = self.drain_pending();
 
         // F2: pts slave WITH an external mux (nora) -- the mux polled `poll_fd`
-        // (/dev/pts/<n>ready) and it fired, so fd 0 has data NOW; read it ONCE (no
-        // internal re-poll: fd 0 is POLLIN-always so a re-poll blocks, and a
-        // second poll of the ready fd busy-loops its one-shot cache). Feed the
-        // parser. Flush a dangling ESC only on a PARTIAL read: a full-chunk read
-        // may have split a sequence at the boundary, and the retained parser
-        // continues it on the next mux wake (the ready fd stays readable while the
-        // ring holds more). kaua-term delivers whole xterm sequences, so a lone
-        // ESC after a partial read is a real Escape, not a split-arrow head.
-        // (A pts WITHOUT an external mux -- prowl/quarry -- falls through to the
-        // drain below, which now polls the ready fd, honoring its tick/block.)
+        // (/dev/pts/<n>ready) and it fired, so fd 0 has data NOW; read it ONCE
+        // here, SKIPPING the drain's first poll (which would return 0 -- the mux
+        // consumed the one-shot ready cache -- and strand the data). Then FALL
+        // THROUGH to the drain loop: it handles a burst remainder AND the #173 ESC
+        // holdoff by polling the ready fd (a single poller now -- the app's mux is
+        // not polling while it is inside this call), and does the single flush. No
+        // flush/return here: a bare ESC from a dribbled RAW-forwarding pts (ptyhost
+        // / pouch-pty, not kaua-term) must NOT resolve to Escape before its
+        // continuation -- the drain's pending_escape holdoff catches it (audit F2).
         if self.ready_fd.is_some() && self.external_mux {
             let n = self.inp.read(&mut self.inbuf)?;
             if n == 0 {
@@ -229,12 +241,8 @@ impl EventSource for PollSource {
                     out.push(Event::Resize(c, r));
                 }
             }
-            if n < READ_CHUNK {
-                if let Some(e) = self.parser.flush() {
-                    out.push(Event::Key(e));
-                }
-            }
-            return Ok(out);
+            // fall through to the drain loop (below) for any burst tail + the
+            // #173 ESC holdoff + the single flush.
         }
 
         // Drain every byte immediately available on fd 0 into the single retained
@@ -251,14 +259,16 @@ impl EventSource for PollSource {
         let rfd = self.ready_fd.unwrap_or(0);
         let mut drained_dry = false;
         for i in 0..DRAIN_MAX {
-            let t = if i == 0 && out.is_empty() {
-                timeout
-            } else if self.parser.pending_escape() {
+            let t = if self.parser.pending_escape() {
                 // A bare ESC is pending -- it may be the head of a split arrow/
-                // function-key sequence whose `[..` tail is still in transit.
-                // Hold off briefly for it instead of declaring the drain dry and
-                // letting flush() mis-resolve the ESC to an Escape key (#173).
+                // function-key sequence whose `[..` tail is still in transit. Hold
+                // off briefly for it instead of declaring the drain dry and letting
+                // flush() mis-resolve the ESC to an Escape key (#173). Checked
+                // FIRST so the external_mux first read's bare ESC (audit F2) and a
+                // prior DRAIN_MAX-cut ESC are held, not flushed, even at i==0.
                 PollTimeout::Millis(ESC_HOLDOFF_MS)
+            } else if i == 0 && out.is_empty() {
+                timeout
             } else {
                 PollTimeout::Zero
             };
