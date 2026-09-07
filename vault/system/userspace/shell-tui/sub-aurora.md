@@ -17,7 +17,7 @@ hazards: []
 abis: []
 design: ["docs/AURORA.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-04
-updated: 2026-09-05
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -210,8 +210,18 @@ did not reach.
   under abort-on-panic is a dark console.
 - **The settings channel must never gain a persisting or authority-bearing
   key, and an OSC-applied setting must never be persisted.** Any console
-  writer can emit it; [[sub-lib-vt]] rejects control bytes in the payload,
-  and aurora must not let a cosmetic push survive a restart.
+  writer can emit it; aurora's own OSC handler (`osc_end`, in `main.rs`) rejects any OSC whose key
+  or value carries a control byte (`b < 0x20`) — the receiving-end trust
+  boundary for a raw byte channel, and the cfg-3 F1 audit fix: the cfg-2b
+  key allowlist reads only the first token, but `config::parse` re-splits its
+  value on `.lines()`, so an embedded newline (`theme;spinifex\nmode 640 480`)
+  laundered a second statement past the single-token check until `osc_end`
+  refused the control byte (`aurora-push`'s own sender-side filter is the twin;
+  the parser is the trust boundary because a documented tool cannot produce the
+  attack — it splits its file into clean single-line OSCs, which is exactly why
+  a tool-driven test missed it, closed by the `osc-newline-attack` fixture).
+  And aurora must not let a cosmetic push survive a restart ([[sub-lib-vt]]
+  carries the analogous reject for the shared VT library).
 
 ## Seams
 

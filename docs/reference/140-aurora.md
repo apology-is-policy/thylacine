@@ -1,471 +1,60 @@
-# 140 — Aurora: the console renderer (the fbcon) + the `/dev/cons` drain/feed backend
+# 140 — Aurora: the console renderer (fbcon) + the /dev/cons drain/feed [ABSORBED INTO THE VAULT]
 
-As-built reference for Tapestry G-4: the kernel drain/feed console backend
-(`kernel/cons.c` + `kernel/devdev.c` + the `SPAWN_PERM_CONSOLE_RENDERER`
-role), the Cornucopia bake (`tools/bake-cornucopia.py` +
-`usr/lib/cornucopia`), the renderer (`usr/aurora`), and the evolved
-per-boot console gate. Binding design: `docs/AURORA.md` §3/§4 +
-`docs/TAPESTRY.md` §18.7 / §18.11-F8 / §18.12-R2-F6; the compositor it
-rides is `docs/reference/139-tapestryd.md`.
+Absorbed at the docs/reference retirement (`chg-2026-09-07-aurora-doc-absorb`).
+Tapestry G-4 — the screen-side of the terminal protocol: aurora interprets the EL0
+console byte stream into a cell grid presented through tapestryd (the fbcon claim),
+and the kernel's drain/feed pair mirrors console output into a ring the renderer
+reads while its decoded input enters the existing LS-8 line discipline (the
+swappable-backend thesis: the shell writes `/dev/cons`, the same bytes now paint a
+monitor). Its content lives, code-verified and current — across two audit:hard
+dossiers — in:
 
-## Purpose
+- **the renderer** (`usr/aurora`) — the VT/ANSI state machine, the atlas
+  alpha-blend + procedural box arms, the `wait_event`-blocking loop (a non-SQPOLL
+  Loom ring's completions are pumped by the blocked thread), the held-input queue
+  (#129) + its bounded-wait pacing (#135, so a tab-hidden aurora's held keystrokes
+  don't land in the wrong context), the **lane-safe blend** (#35 — the packed-word
+  divide corrupted only antialiased *edge* pixels, which is why the near-grey gate
+  never saw it), the dropped-frame-not-death loop (#31), the F10 settings OSD, the
+  cfg-2a strict-post-rename-fsync persistence, the cfg-3 compositor-tier mode push,
+  and the cfg-2b OSC-7770 per-user channel with its **cfg-3 F1** control-byte reject
+  (an embedded newline laundered a second statement past the single-token allowlist
+  until `vt.rs::osc_end` refused it — the parser is the trust boundary):
 
-Aurora-the-renderer is the screen-side of the terminal protocol: it
-interprets the EL0 console byte stream into a cell grid and presents it
-through tapestryd — the fbcon claim. The kernel's half is the drain/feed
-pair: console output MIRRORS into a ring the renderer reads; the
-renderer's decoded keyboard input enters the EXISTING LS-8 line
-discipline. The shell/login/ut are unchanged and unaware (AURORA §4's
-swappable-backend thesis): they write `/dev/cons`, and the same bytes now
-paint a monitor.
+      vault/system/userspace/shell-tui/sub-aurora.md   (audit: hard — cfg-3 F1 attribution sharpened)
 
-## The three console roles (I-27)
+- **the kernel backend** (`kernel/cons.c`) — the three console roles (ATTACH /
+  OWNER / RENDERER; the renderer role confers no elevation, no interrupt target;
+  the single-holder NULL-only claim race close), the drain (the drop-oldest mirror
+  tap that never blocks a writer and never consults the role), the feed
+  (`is_break` hardwired false — no feed byte can synthesize the SAK, I-27), and the
+  tee (serial stays byte-identical):
 
-| Role | Bit / holder | Conveys |
-|---|---|---|
-| console-ATTACH | `PROC_FLAG_CONSOLE_ATTACHED` (joey pre-relinquish; corvus post-SAK) | the elevation gate (SAK target, hostowner redeem) |
-| console-OWNER | `SPAWN_PERM_CONSOLE_OWNER` → `g_console_owner` (the session shell) | receives Ctrl-C `interrupt` |
-| console-RENDERER | `SPAWN_PERM_CONSOLE_RENDERER` → `g_console_renderer` (aurora) | may open `/dev/consdrain` + `/dev/consfeed` — nothing else |
+      vault/system/kernel/console-gfx/sub-kernel-cons.md   (audit: hard, I-27)
 
-The renderer role (G-4, the §18.12 R2-F6 three-role split) confers NO
-elevation authority and NO interrupt-target authority. Grant gate:
-console-attach-only (the CONSOLE_TRUSTED shape — the pair reads all
-console output and injects input, so only the boot trust anchor
-designates it) AND single-holder (`spawn_perm_grant_check` refuses while
-a live renderer exists; `proc_set_console_renderer`'s NULL-only claim
-under `g_proc_table_lock` closes the concurrent-grant race — the loser
-child lacks the flag and the open gate refuses it, fail-closed).
-`proc_become_zombie_locked` releases the role on every death path.
+- **the devdev leaves** (`/dev/consdrain` + `/dev/consfeed`, gated at open AND
+  re-gated per op, the O_PATH/CWALKONLY discipline, POLLNVAL for a non-renderer):
 
-## The kernel backend (`kernel/cons.c`)
+      vault/system/kernel/console-gfx/sub-kernel-devdev.md
 
-**The drain** is a mirror tap in `cons_emit` — the one chokepoint both
-program output (`cons_output_write`) and line-discipline echo already
-cross, so the renderer sees exactly the byte stream a terminal displays:
+- **the shared VT** — the analogous control-byte reject for the shared VT library
+  (the C-2d buffer-age union-repaint, for which aurora is the tree's Direct-scanout
+  accumulator vehicle, is carried by sub-aurora itself):
 
-- Bounded 8 KiB drop-OLDEST ring (`CONS_DRAIN_RING_SIZE`): console
-  writers NEVER block on the renderer; on overflow the newest output (the
-  prompt) survives and `overflow` counts the loss. The tap's disarmed
-  fast path is one RELAXED load per byte.
-- `cons_drain_open()` arms (single-open; a fresh open discards the prior
-  epoch's bytes); `cons_drain_close()` disarms + wakes a parked reader to
-  EOF + the registered pollers (process-context only — the handle-close
-  paths).
-- `cons_drain_read()` mirrors `cons_input_read`: single-reader
-  busy-guard, blocking (death-interruptible per #811), 0 = EOF when
-  disarmed-and-empty. The reader gets the RW-11 INTERACTIVE promotion
-  (structurally only the bound renderer reaches it) so a keystroke's echo
-  paints promptly.
-- `cons_drain_poll()`: POLLIN iff bytes buffered OR disarmed (EOF is
-  readable); read-only leaf, never POLLOUT. The IRQ-context POLLIN edge
-  (echo pushes run in IRQ context) rides the LS-8a deferred-wake relay,
-  second instance: `console_mgr` drains `poll_wake_pending` under the
-  drain's own leaf lock and walks the hook list in process context.
+      vault/system/userspace/shell-tui/sub-lib-vt.md
 
-**The feed** (`cons_feed_write`) injects bytes into `cons_rx_input`
-exactly as UART RX bytes: ICANON/ECHO/ISIG/ICRNL cooking unchanged and
-backend-independent; the echo lands in BOTH the UART and the drain (the
-renderer paints its own echo); a graphical Ctrl-C rides ISIG to the
-console OWNER via the LS-5 path. **`is_break` is hardwired false** — no
-feed byte sequence can synthesize the SAK line condition (I-27: the
-serial BREAK stays the one unforgeable trigger; the graphical SAK is the
-board-era kernel-scanned trusted-tier combo, MENAGERIE §7).
+**What this file got WRONG or MISSED by the time it was absorbed:**
 
-**The tee, deliberately.** On serial-bearing media the UART path
-continues byte-identical — the tooling ABI, the host terminal, and the
-serial trusted path all keep working; on a serial-less board the uart
-layer is inert and the ring is the only sink. The exclusive switch
-(suppressing EL0 serial output, bound from the DTB medium fact per
-TRUSTED-PATH §7) is the recorded board-era seam — it will gate
-`uart_putc`, composing with the tap. Kernel diagnostics (SYS_PUTS,
-extinction, Halls) are uart-direct and NEVER in the drain: the crash
-path must not depend on a userspace renderer.
-
-## The devdev leaves (`kernel/devdev.c`)
-
-`/dev/consdrain` (kind 10, RO) + `/dev/consfeed` (kind 11, WO). Gated at
-OPEN **and re-gated at every read/write/poll** on
-`proc_is_console_renderer` (the cons data-leaf O_PATH discipline — a
-walk-open skips `dev->open`, and #81 CWALKONLY plus the re-gate close
-the bypass; a non-renderer poll gets POLLNVAL so no hook can learn
-console-output timing). The drain open arms the tap and unwinds on a
-failed mint; the opened drain Spoor's close — including the #926/#68
-close-at-exit of a dead renderer — disarms via the COPEN-checked hook
-(exactly one opened drain Spoor exists at a time; walk intermediates and
-O_PATH Spoors never carry COPEN).
-
-## The Cornucopia bake (`tools/bake-cornucopia.py` + `usr/lib/cornucopia`)
-
-AURORA §3's two-rasterization design, build-time half: the TTF is
-rasterized ONCE (flatten outlines → nonzero-winding scanline fill at 4×
-supersample → 8-bit alpha) into a committed atlas
-(`usr/lib/cornucopia/src/atlas.bin`, 47 KiB — magic `CATL` v1) compiled
-in via the no_std `cornucopia` crate. Geometry from the font's own
-metrics (upm 1000, uniform advance 500 — verified monospace): advance
-10 px → em 20 → **cell 10×22, baseline 18** → a 128×36 console at
-1280×800. 207 glyphs (ASCII + Latin-1 + the ut prompt glyphs U+22A2 /
-U+22EE + extras). Box-drawing/blocks (U+2500–259F) are deliberately
-absent — the renderer draws them procedurally for pixel-perfect cell
-joins. Re-bake only on a font/geometry change (fonttools in a disposable
-venv; see the tool header).
-
-**Several sizes (cfg-5):** the SAME outline is baked at five progressively
-smaller advances — `atlas.bin` (10 → 10×22, the default face) plus
-`atlas-{9,8,7,6}.bin` (9×20 / 8×18 / 7×16 / 6×14). `cornucopia::ADVANCES`
-enumerates them (largest-first); `Atlas` is now a `Copy` value carrying the
-chosen blob (`Atlas::for_advance(N)`), folded into `render::Metrics` so a
-font-size change swaps the dims and the glyph source atomically.
-`verify_all()` checks every baked blob at aurora startup (a truncated
-sibling surfaces loudly, per the doc contract). 6 is the floor — below it
-the procedural box glyphs (which need cell_w/cell_h ≥ 6) break. The config
-key `font-size <advance>` and the OSD Appearance → Font row select one; the
-selection is renderer-local (no compositor round-trip, no gate — the
-compositor only ever sees pixels), so a change just rebuilds Metrics,
-recomputes cols/rows from the UNCHANGED surface, resizes the Vt, and
-re-reports the winsize (the cfg-3 reweave tail). A saved size too large for
-the surface steps DOWN to the largest baked size that fits (brick-resistance
-— a persisted font can never strand the console; realistically inert since
-the default advance 10 fits every sane mode, even 320×200).
-
-## The renderer (`usr/aurora`)
-
-An ordinary tapestryd client (libtapestry — the demo's template):
-private session → fullscreen surface → weave map → Loom presents.
-
-- `vt.rs`: UTF-8 assembly; CSI/OSC state machine (CUP/CUU..CUB/CHA/VPA,
-  ED/EL, IL/DL/ICH/DCH/ECH, save/restore, DECTCEM, a real alt-screen
-  buffer swap for 1049/1047/47); SGR 0/1/4/7/22/24/27, 16-color,
-  bright, 38;2 truecolor (libutopia emits it), 38;5 xterm-256. Unknown
-  sequences parse-and-drop. DECSTBM accepted-and-ignored (full-screen
-  scroll) — the recorded MVP seam. Colors: the Bonfire palette
-  (UTOPIA-VISUAL §1) — exact default bg `#0e0c0c` / fg `#e4ddd8` + the
-  §1.4 role-derived ANSI-16 map (bright tier = Aurora's documented
-  derivation; scripture pins no brights).
-- `render.rs`: atlas alpha-blend; procedural box arms (an exact arm mask
-  per codepoint; heavy/double render as light at this cell size — joins
-  stay exact); block fills + shade blends; notdef hollow box; underline;
-  the inverted block cursor.
-- `main.rs`: **the loop blocks on `wait_event`** — load-bearing: a
-  non-SQPOLL Loom ring's completions are pumped by the thread blocked in
-  enter (the Loom-4 CQ-wait drives the elected 9P reader), so a
-  never-blocking reap loop starves its own event stream (measured — the
-  frame clock went silent under a poll-only first cut). The 60 Hz FRAME
-  clock is the heartbeat: each wake feeds KEY runes / CSI arrow
-  sequences to the feed (press + autorepeat; the keymap already folded
-  shift/ctrl; Enter is CR), services the drain non-blockingly (bounded
-  reads per pass; a larger burst rides the kernel ring's drop-oldest —
-  skip-ahead scrolling), toggles the 1 Hz cursor blink, renders the
-  CONTIGUOUS dirty row span into the CURRENT slot, and presents exactly
-  that rect (slots rotate per present — presenting rows a pass did not
-  just render would transfer stale slot content).
-- **The held-input queue (#129) + its pacing (#135).** `cons_feed_write`
-  returns a SHORT count when the kernel RX ring is full — back-pressure,
-  not an error: the refused bytes were never taken and are still
-  aurora's. So keystrokes (and `Vt.reply` CPR answers, which ride the
-  same queue so a reply cannot overtake the typing before it) go into
-  `feed_pending`, retried at the top of every pass. ONE write attempt
-  per pass, deliberately: the console's reader may be stalled
-  indefinitely (a foreground child that stopped reading stdin parks RX
-  paused BY DESIGN — #174-audit F3), so a retry loop would wedge the
-  renderer. Bounded at `FEED_PENDING_MAX` = 4 KiB, dropping the NEWEST
-  on overflow (Linux `n_tty`'s rule for a full INPUT buffer: dropping a
-  prefix can leave a complete but DIFFERENT command, where dropping a
-  suffix leaves an incomplete one the shell rejects — the opposite of
-  `cons_drain_tap`'s drop-oldest, whose rationale is explicitly about
-  OUTPUT).
-  **#135 — the retry is only as frequent as the loop turns**, and the
-  loop turns on compositor events. `frame_tick` reaches
-  `visible_hosted()` surfaces ONLY, so a tab-backgrounded aurora
-  receives nothing at all once the hide transition's own `TEV_FOCUS`
-  is consumed; the untimed `wait_event` then parked held input until
-  the user came back, and the bytes landed in whatever the shell was
-  doing THEN. Fixed by BOUNDING the wait — `wait_is_bounded(held)` →
-  `poll_event` + a `FEED_RETRY_MS` = 50 ms nap — whenever the queue is
-  non-empty; the empty case still blocks untimed (zero idle cost, which
-  matters on the tickless-idle system). Not a retry spin: the per-pass
-  effort is unchanged, only the PASS RATE is bounded, and a nap yields.
-  This is a NARROW, BOUNDED exception to `frame_tick`'s own stated
-  expectation that "a paced client naturally suspends while hidden" —
-  aurora suspends exactly as designed the moment its queue drains, and
-  while napping it is not rendering, only retrying a console write.
-  Two compositor properties make it safe, both checked rather than
-  assumed: a present from an invisible surface "completes without
-  pixels ... content heals on later presents once visible" (the D1
-  contract), and `TEV_FRAME` COALESCES to at most one queued per
-  surface and is droppable-at-cap, so a nap cannot fill the event queue
-  — the WEDGE force-retire needs `EVENT_QUEUE_CAP` = 128 *non-droppable*
-  events, which 50 ms cannot produce.
-  **The rejected alternative was "discard held input on unfocus"**: it
-  reads as the prompt-over-complete tradeoff, but focus-lost ALSO fires
-  when aurora stays VISIBLE (a `focusdir` to a sibling in a tiled
-  layout), where frames keep arriving and the retry already delivers
-  within a tick — so it would discard input that was about to be
-  delivered correctly. Bounding the wait removes the STALENESS at its
-  source (held bytes land as soon as the console can take them, hidden
-  or not) instead of paying for promptness with the user's keystrokes.
-- **The blend is lane-safe (#35).** `render.rs::blend`'s packed R|B trick
-  originally divided the PACKED word by 255 — integer division does not
-  distribute over lanes (65536 ≡ 1 mod 255), so the B output absorbed
-  `R_sum*257`'s low byte: glyph INTERIORS (the a=0/255 short-circuits)
-  stayed exact — which is precisely why the `-c` gate (near-grey bg/fg
-  interiors) never saw it — while every antialiased EDGE pixel got a
-  garbage B correlated with R. Thin glyphs (the `⊢` prompt) are nearly
-  all edge and read wholesale violet; warm colors fringed violet/gold
-  (the user's "something with the oranges/yellows" against the Ghostty
-  serial view). Diagnosed by pixel-sampling the user's screenshot + a
-  live screendump (framebuffer-side, cocoa exonerated) and closed
-  numerically: the buggy form reproduces the exact sampled wild pixels
-  ((120,116,6)@a=127, (174,168,239)@a=191). The fix is the standard
-  lane-safe form (`na = 256-a`, `>>8`), ideal-tracking within 1; a
-  dormant `#[cfg(test)]` regression pins it (the host-harness seam).
-  The gate blindness was closed at G-5: `screendump.sh -c` now runs a
-  blend-integrity pass over exact-fg-adjacent edge pixels (each channel
-  must sit in the `[bg,fg]` envelope ±6; >5% outside fails — junctions
-  measure ~2%, the #35 formula ~15%), and
-  `tools/test-screendump-edge.sh` keeps it non-vacuous offline (a
-  synthesized pre-#35-buggy frame must fail on exactly that arm).
-- **A failed present is a DROPPED FRAME, never death (#31).** The
-  pre-#31 loop exited on any `present()` error, so one transient
-  compositor GPU hiccup (the controlq desync's client-visible face)
-  killed the console permanently. Now: the dirty rows + `prev_cursor`
-  stay set (the retry MUST re-render — slots rotate per present, so
-  re-presenting without re-rendering would ship a stale slot), the
-  failure is logged with decay (first 3 + every 64th), and only
-  `PRESENT_FAILS_FATAL` (240) CONSECUTIVE failures exit — the
-  live-stream-but-presents-never-succeed wedge. Real compositor death
-  still exits promptly via the event-stream-EOF path (`wait_event`
-  erroring), and the FIRST present stays fatal (startup must prove the
-  pipe).
-
-joey spawns `/bin/aurora` with the perm in the G-3 block (still
-console-attached), replacing tapestry-demo as the resident boot
-presenter (the demo stays baked for manual runs — first-present-wins
-scanout would race two residents). Aurora's `say!` diagnostics go
-uart-direct (SYS_PUTS) — never into its own drain, so no feedback loop.
-
-**TEV_CONFIGURE (G-6a/b)**: aurora is an accumulator client — the row
-renderer paints only dirty rows into the current slot, so every weave
-slot is a patchwork and only the compositor-side accumulator (the host
-resource in direct mode, the screen buffer in composed mode) holds a
-complete frame. So EVERY CONFIGURE marks the whole grid dirty and the
-next pass repaints it — a same-size CONFIGURE is the compositor's
-explicit full-repaint request (structural repaints blank pane content),
-and a size CHANGE also forces a full repaint into the cropped viewport.
-Aurora deliberately does NOT ack a size change (`Surface::reweave` — the
-G-6b generation fence — exists, but the fbcon's cell grid is bound to
-the console history at startup): it keeps its grid and the compositor
-crops the top-left (the ignore/crop client posture). A reweaving fbcon
-(re-derive rows/cols on resize) is a follow-up. No diagnostic is printed
-on a CONFIGURE — aurora shares `/dev/cons` with whatever it renders, so
-a chatty line interleaves byte-for-byte with a concurrent writer's
-output (`t_putstr` is not cross-Proc atomic; the G-6b battery run
-measured exactly that mangling). **TEV_FOCUS (G-6c)** falls to the
-default-ignore arm: the fbcon renders no focus state (the compositor's
-focus ring/strip highlight is chrome, outside aurora's pane).
-
-## The F10 settings OSD (`usr/aurora/src/osd.rs`)
-
-The built-in system dialog (AURORA-CONFIG.md §3.6, chunk 1 as-built) —
-deliberately **Turbo-Vision raw** (EGA gray field, double-line frame, cyan
-focus bar, drop shadow) so it reads as "system dialog, not the session",
-contrasty against both Bonfire and Kaua's fine style. It is not a program:
-it lives inside the renderer, so nothing (a future Halcyon included) can
-invoke or spoof it.
-
-- **Trigger**: bare **F10** (evdev 68) from aurora's own event stream — a
-  key the tapestryd keymap resolves no rune for and `key_bytes` always
-  dropped, so no app ever saw it (interception is regression-free). Press
-  (`value == 1`) only: the opening key's autorepeat cannot bounce the
-  panel shut. **Modal**: while open, every key routes to the OSD and
-  nothing feeds `/dev/consfeed`; serial input is unaffected (the OSD is
-  aurora-local). Known cosmetic edge: holding Esc past the close leaks
-  its autorepeats to the terminal (a tap does not).
-- **Sections**: *Appearance* (live: theme cycler + cursor blink) and
-  *Display* (live since cfg-3: the MODE row — Left/Right cycles a
-  PENDING preset, **Enter applies** through the gated compositor ctl
-  (the monitor-OSD semantic: a whole-display reconfigure never fires on
-  mere navigation); Resolution + zoom policy stay info rows. The
-  pending choice re-seeds from the APPLIED settings at every open —
-  `Osd::open_at`). Keys: Up/Dn select, Left/Right/Enter cycle, Tab
-  section, Esc/F10 close.
-- **Theme = runtime palette** (`vt.rs::Palette` + `THEMES` + `Vt::set_theme`):
-  cells bake resolved colors at write time, so a switch retints existing
-  content by **exact old→new color match** across both screens + the live
-  SGR state; truecolor passes through untouched by design. Slot aliasing
-  (Bonfire `ansi[15] == fg`) resolves fg/bg-first — benign while a theme
-  keeps `ansi[15] ≈ fg`. Themes: `bonfire` (scripture), plus the
-  **proposed names** `parchment` (light) and `spinifex` (green phosphor —
-  the Tasmanian-bushland word; held-proposal per the thematic-naming
-  discipline, trivially renameable data).
-- **Compositing**: the panel draws OVER the grid after `render_rows`
-  (`render.rs::draw_run` — explicit-color cell runs — + `darken_rect`, the
-  shadow), through the **full-frame present branch only**: slot rotation
-  means a partial rect could transfer stale panel pixels from an older
-  slot, so an open OSD routes every damaged pass through fill + all rows +
-  panel + `present(None)`, sharing the `full_fill` retry discipline
-  (`ui.dirty` stays set on a failed present). The terminal keeps updating
-  UNDER the panel (the drain still feeds the Vt). Close sets `full_fill`
-  (margins refill — the theme may have changed `pal.bg`). Panel geometry
-  derives from the current grid each draw, so a reweave needs no
-  notification (sub-floor grids clamp).
-- **Persistence (cfg-2a — the system tier)**: `/lib/aurora/config` is the
-  DEVICE's memory (AURORA-CONFIG §3.2 "the writer defines the tier":
-  aurora is a pre-login SYSTEM process and can never touch a per-user
-  encrypted home, so the OSD persists to the tier it owns — the
-  monitor-OSD semantic). `usr/aurora/src/config.rs`: `parse`/`render`
-  (pure, fail-soft — unknown keys/malformed lines ignored, config can
-  never break the fbcon) + `load` (bounded 4-KiB read at startup, applied
-  BEFORE the first present → the pre-login screen wears the persisted
-  theme) + `save` (write-tmp + fsync + rename + a **STRICT post-rename
-  fsync on the SAME OWRITE fd** — the A-1.6 swap with its metadata
-  barrier. The barrier shape is load-bearing and was earned the hard way,
-  three iterations under the persist E2E's hard kill: `SYS_FSYNC` gates
-  on RIGHT_WRITE, so any OREAD-opened fd — a parent dir or a re-opened
-  file — fails with -1 before any 9P is sent; the fd you WROTE carries
-  the right rights and stays valid across the rename (9P fids follow the
-  file), and stratumd's `h_fsync` is a whole-pool `stm_fs_commit`, making
-  it a complete barrier. A crash mid-save leaves the old config, never a
-  torn one; a failed rename leaks a tmp the next save truncates; a failed
-  barrier fails the save LOUDLY — best-effort hid the first attempt. See
-  the corvus `persist_keypair_wrap` discipline it now mirrors). The OSD
-  writes through on EVERY change (per-keystroke when cycling — immediate
-  commit, monitor-style; the MODE row is the exception: apply-on-Enter,
-  and it persists ONLY on an accepted ctl write). Baked default:
-  `usr/aurora/config.default` → the pool populate (the `/lib/ndb/local`
-  pattern, readback-verified). Keys: `theme <name>`, `cursor-blink on|off`,
-  `mode auto | <W> <H>` (cfg-3).
-- **The compositor tier + push-on-start (cfg-3)**: `Settings.mode`
-  (`osd::Mode::{Auto, Fixed}`) is the one value aurora pushes to the
-  SHARED compositor — through the GATED global ctl (AURORA-CONFIG.md
-  §3.3; aurora holds the console-renderer role the gate admits). At
-  startup, `config::load` runs BEFORE the tapestry connect and a
-  `Fixed(w,h)` mode pushes on a THROWAWAY conn
-  (`tapestry::global_ctl_once`, bounded retry) ahead of
-  `Surface::fullscreen()` — so the console surface is BORN at the
-  configured geometry (the Boot-scanout `set_mode` arm; no boot-time
-  reweave). `Auto` never pushes (it IS the boot default). The OSD's
-  Display section is live: the Mode row cycles a PENDING preset
-  (`MODE_PRESETS`: auto + six common rasters), Enter applies via
-  `surf.global_ctl("mode W H")` on aurora's own conn, and settings +
-  config::save commit only when the compositor ACCEPTED the write (a
-  refused apply must not seed the startup push). The resulting
-  CONFIGURE rides the existing resize arm — grid realloc, present,
-  winsize re-report (#55) — so the whole session learns the new
-  geometry through `tty:winch`.
-- **The per-user push (cfg-2b)**: `$home/lib/aurora` is the SESSION's
-  file, pushed in-band over the console wire as
-  `OSC 7770;aurora;<key>;<value>` (BEL or ST) — the xterm dynamic-colors
-  shape; the drain already carries every console byte, so the channel adds
-  zero kernel surface. The VT parser buffers OSC payloads (cap 256, queue
-  cap 16, fail-soft on malformed/oversize; titles swallowed as before) and
-  lands each as a `key value` line in `Vt.settings_req`; the main loop
-  applies via the SAME `config::parse` the file uses — **deliberately
-  without `config::save`** (session-scoped by scripture) — and, since
-  cfg-3, ONLY through the authority-key ALLOWLIST: `theme` and
-  `cursor-blink` pass, everything else (`mode` above all) is refused
-  with a logged `aurora: OSC settings key ... refused`. Without the
-  allowlist a session-injected `mode` would sit in `settings` and ride
-  the NEXT OSD `config::save` into the gated startup push — session
-  authority laundered through aurora's renderer role. **cfg-3 F1 (the
-  audit's P1): the allowlist reads only the first token, but
-  `config::parse` re-splits its VALUE on `.lines()`, so an embedded
-  NEWLINE (`theme;spinifex\nmode 640 480`) laundered a second statement
-  past the single-token check — so `vt.rs::osc_end` now REJECTS any OSC
-  whose key or value carries a control byte (`b < 0x20`), the
-  receiving-end twin of `aurora-push`'s own sender-side `b < 0x20`
-  filter (the PARSER is the trust boundary for a raw byte channel;
-  `aurora-push` itself cannot produce the attack — it splits its file on
-  newlines into clean single-line OSCs, which is exactly why a
-  documented-tool test missed it; the in-guest witness is the baked
-  `/lib/aurora/osc-newline-attack` fixture that `ls-gfx-mode` cats,
-  asserting no laundered retint).** The `reset system` arm is exempt by
-  construction (it re-reads aurora's OWN system file — values the
-  session cannot choose — and re-pushes nothing). The
-  `aurora-push` coreutil reads `$HOME/lib/aurora` (from the login-seeded
-  `/env`) and ALWAYS emits `reset system` first — the reset re-seeds from
-  the system file, so every session start is *system defaults ⊕ user
-  overrides* and a stale prior-session push dies at the next login (aurora
-  is boot-long; without the reset it would linger). login runs the push at
-  session start (post `/env` seed, pre shell, AS THE USER — the 0700 home
-  denies SYSTEM per A-2d — best-effort + reaped). Trust posture = xterm
-  dynamic colors: any console writer can emit the OSC; it is cosmetic,
-  session-scoped, non-persisting, aurora-local ONLY, and must never gain a
-  persisting or authority-bearing key.
-
-## The gates
-
-- **The per-boot console gate** (`tools/test.sh`, every ci-smp-gate
-  boot): `screendump -c` asserts the console signature — the exact
-  Bonfire bg DOMINANT (≥40%) + exact default-fg text pixels (≥200; AA
-  glyph cores are pure fg) + the G-5 blend-integrity edge pass (above)
-  — then a bounded retry-compare proves liveness (the cursor blink /
-  prompt arrival must eventually change a dump). Content-independent,
-  deterministic, never dropped.
-- **`tools/interactive/ls-gfx.exp`** — the fbcon claim end to end:
-  serial login + `ls /`; `-c` + differing dumps before/after; then
-  `tools/qmp-sendtext.sh` types `whoami` on kbd-pci0 (display-bound to
-  gpu0 in run-vm.sh, which is what makes device-targeted
-  `input-send-event` legal) and the serial TEE asserts the command's
-  OUTPUT — keyboard → tapestryd → aurora → consfeed → line discipline →
-  ut, no pixel OCR. It ALSO asserts the startup line
-  `#129 feed selftest PASS` — aurora is a `no_std` bin crate with no
-  cargo-test harness, so `feed_policy_selftest` scripts the accept
-  counts a back-pressured console would return (order, the drop-NEWEST
-  bound, back-pressure vs I/O error) plus the #135 pacing coupling, and
-  a failure prints FAIL and times the gate out. Revert-probed at #135:
-  pinning `wait_is_bounded` to `false` (the pre-fix always-block
-  behaviour) fails all 3 attempts deterministically on exactly that
-  line, with the CL-4 / osmesa / CL-7b GL gates still passing.
-- **`tools/interactive/ls-gfx-age.exp`** + `gfx_region.py` — the C-2d
-  buffer-age gate (`GPU-DESIGN.md` §4.5.8c/d): since every weave slot has
-  its own host resource (Warp-C C-2d-b), a damage-only present must
-  repaint the union of everything that changed since the slot it draws
-  into was last presented (`libtapestry::age()`), or the screen shows
-  what that slot held `nslots` presents ago. Aurora is the tree's
-  Direct-scanout accumulator, so it is the vehicle (composed scanout
-  cannot show a stale client slot — the screen is the accumulator there).
-  Shape: three `yes … | head -n 200` fills; a POSITIVE control (four
-  keystroke-rotated dumps must show glyphs in a cell-region rows
-  6..rows-3 × cols 2..cols/2, read off aurora's `console up` line);
-  `clear` (one all-rows present into ONE slot); then eight rounds of
-  1,1,2,1,1,2,1,1 keystrokes (row-0-only presents into successive slots)
-  each followed by a dump whose region must be EXACTLY Bonfire — every
-  pixel read, `off == 0`. The 1,1,2 pattern visits all three slot
-  residues for any constant blink rate, which is what makes the
-  one-stale-slot class (an off-by-one in the union) catchable
-  deterministically rather than at (2/3)^8. Measured 2026-08-17: green
-  0/368280 on 8/8; sabotage S1 (`stale_slot = false`, `back = 0`) red
-  3/3 attempts (rounds 2,1,2); sabotage S2 (`back` off by one) red 3/3
-  (rounds 2,5,2). Building it found and fixed the C-2d-a history record
-  (the WIDENED repaint range was recorded instead of the dirty span, a
-  fixed point at full rows that killed the damage path — the vault's
-  `sub-aurora` carries that mechanism).
-
-## Known caveats / seams
-
-- **The tee is the QEMU-era posture**: the exclusive Aurora-only switch
-  (no EL0 serial) binds at board bring-up from the DTB medium fact.
-- **DECSTBM / scroll regions** ignored (full-screen scroll); fine for
-  ut/login/nora's full-redraw style.
-- **Drain bursts beyond ~16 KiB/frame** drop-oldest (skip-ahead
-  scrolling); a scrollback buffer is an Aurora-environment item
-  (AURORA §5).
-- **One weight baked** (Regular); SGR bold maps to the bright color
-  tier, not a bold face.
-- **The Aurora ENVIRONMENT half** (session multiplexing, status band)
-  is its own post-G-4 arc (TAPESTRY §18.9).
-- **Compositor-gone**: aurora exits on the session-dead error (the F4
-  contract); no restarter at v1.0 (the shared netd/tapestryd posture) —
-  the serial console is unaffected (the tee).
-
-- **Kaua vocabulary complete (#37).** Two VT gaps against kaua's emitted
-  set, both user-found driving nora: `?7` DECAWM was ignored (kaua paints
-  the bottom-right cell under `?7l`; with wrap still on each status
-  repaint line-fed at the last row → a whole-screen scroll leaving stale
-  modeline fragments — the artifact cascade) and `[6n` CPR was unanswered
-  (kaua's size handshake got no report → nora ran the 80x24 fallback
-  inside the 128x36 grid). Fixed: the `wrap` flag + the stick-at-margin
-  overprint rule, and the CPR reply pushed through `Vt.reply` into the
-  consfeed fd — the terminal answering on the keyboard wire. Dormant
-  regressions pin both; the in-guest nora drive (type + arrows) renders
-  fullscreen with zero artifacts.
+- **Clean redirect — aurora is fully owned, with one attribution sharpened.** The
+  doc names a "vt.rs" module, but **no `usr/aurora/src/vt.rs` file exists** — aurora
+  has exactly four source files (main/render/osd/config), all claimed by sub-aurora,
+  and the VT/OSC logic (`osc_end`, the palette) lives in `main.rs` + `render.rs`. So
+  there is no ownership gap. sub-aurora had attributed the OSC control-byte reject to
+  the shared `sub-lib-vt`; the receiving-end reject is actually aurora's *own*
+  `osc_end` (in `main.rs`) — the cfg-3 F1 audit fix, sharpened
+  (`chg-2026-09-07-aurora-doc-absorb`), with sub-lib-vt noted as the shared twin.
+- **Everything else was covered** — the three console roles, the drain-drops-oldest
+  and never-consults-the-role, the `is_break`-false SAK guard, the held-input
+  queue + pacing, the #35 lane-safe blend, the cfg-2a persistence discipline. The
+  tee-is-the-QEMU-era-posture, DECSTBM-ignored, one-weight, and Aurora-environment
+  seams are live as-built seams the dossier holds. Zero code change.
