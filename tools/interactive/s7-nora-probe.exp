@@ -1,0 +1,135 @@
+#!/usr/bin/expect -f
+# tools/interactive/s7-nora-probe.exp -- s7 F3 regression: nora must RENDER its
+# first frame in a Halcyon session tile without dying to a full-ring WriteZero.
+#
+# The s7 "one frame then exit" (audit F3, OBSERVE-confirmed 2026-09-07 via
+# `nora: EXIT path=redraw1 code=1 err=WriteZero`): nora's FIRST redraw
+# (main.rs:195) writes a ~5-8 KiB opening frame to the pts s2m ring (4 KiB). ptyfs
+# slave_write breaks on a full ring returning a short/0 count; libthyla write_all
+# turns Ok(0) into WriteZero; the redraw errors and nora `return 1`s -> exits ->
+# the frozen frame under the shell ("ut+nora merged"). It is NOT a read/EOF bug:
+# at launch the master (kaua-term) is present, so a slave read would PARK, never
+# return 0 (two reverted read-side fixes chased this ghost). The fix
+# (usr/ptyfs/src/server.rs) PARKS a full-ring slave write (a PendingWrite beside
+# PendingRead, completed by poll_writes once kaua-term drains s2m) so the redraw
+# BLOCKS-then-completes instead of WriteZero'ing.
+#
+# WHY THE MARKER, NOT `screenmode -> Normal`. nora's exit markers ride the SERIAL
+# (t_putstr), so they are witnessed even when the full ring drops the alt-screen
+# leave (?1049l). The old `screenmode -> Normal` check FALSE-PASSED pre-fix: nora
+# DID exit via redraw1, but the dropped ?1049l left no Normal, so a 5s
+# negative-wait timed out green on a boot where nora had crashed. This gate keys
+# on the discriminating serial marker instead. (Caveat #243: t_putstr is not
+# line-serialized, so a concurrent daemon line can tear a marker; the regexes
+# tolerate a torn tail via [^\r\n]* but a torn HEAD would read as no-marker ->
+# a false PASS on the FAIL arms. Rare on this quiet post-login path; if it bites,
+# #243's uart ring serialization is the fix.)
+#
+# SCOPE: this proves the F3 write-side fix ONLY (nora renders + holds the tile).
+# Full input interactivity (each keystroke acts at once) is the SEPARATE F2 fix
+# (PollSource must poll /dev/pts/<n>ready, not the always-ready data fd) -- its
+# gate drives a rapid two-key sequence. See bug_s7_write_zero_and_read_batching.
+#
+# The gate drives `nora <file>` into the focused tile.
+# THYLACINE_HALCYON_SESSION=1 image; SKIPs cleanly on a default image.
+
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+lc_boot
+global lc_boot_timeout timeout
+set timeout $lc_boot_timeout
+
+expect {
+    -ex "Thylacine login: " { lc_step "login prompt" }
+    -re {EXTINCTION:}       { lc_extinction_fail "extinction before login" }
+    timeout                 { lc_fail "no login prompt" }
+    eof                     { lc_fail "qemu exited before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: "  { lc_step "password prompt" }
+    timeout           { lc_fail "no password prompt" }
+    eof               { lc_fail "qemu exited at password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" { lc_step "session path" }
+    -ex "Thylacine textual shell" { lc_step "LS-CI SKIP: default image -- session lever absent (s7 needs a session compositor)"; lc_quit; exit 77 }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during session spawn" }
+    timeout { lc_fail "neither session nor ut path" }
+    eof     { lc_fail "qemu exited during login" }
+}
+
+set A ""
+set timeout 90
+expect {
+    -re {halcyond: session tile leaf=([0-9]+) spawned} { set A $expect_out(1,string); lc_step "root tile leaf $A" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the root tile" }
+    timeout { lc_fail "no root tile spawn" }
+    eof     { lc_fail "qemu exited before the root tile" }
+}
+
+# Let the welcome tour + layout reflow (the churn window) settle, THEN launch
+# nora -- the operator's exact path (menu Edit types the verb into the tile).
+after 6000
+lc_step "typing: nora /home/michael/.ut_history"
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "nora /home/michael/.ut_history\n"} err]} {
+    lc_fail "qmp-sendtext nora failed: $err"
+}
+
+# POSITIVE: nora launched + entered the alt screen.
+set L ""
+set timeout 30
+# THE F3 REGRESSION (DISCRIMINATING). The s7 "one frame then exit" is nora's
+# FIRST redraw WriteZero'ing on a full 4 KiB pts s2m ring (audit F3, confirmed:
+# `nora: EXIT path=redraw1 code=1 err=WriteZero`). The fix (ptyfs slave-write
+# parking) makes that write BLOCK until kaua-term drains, so the redraw completes
+# and nora must NOT log a redraw-WriteZero exit. The nora exit markers ride the
+# SERIAL (t_putstr), so they are witnessed even when the full ring drops the
+# alt-screen leave -- unlike the OLD `screenmode -> Normal` check, which FALSE-
+# PASSED pre-fix (nora exited via redraw1 but the dropped ?1049l left no Normal).
+# Match on the serial marker; AltScreen alone means launched.
+expect {
+    -re {nora: EXIT path=redraw[12][^\r\n]*WriteZero} {
+        lc_fail "P0 s7 REGRESSION (F3): nora's redraw WriteZero'd on a full pts ring and exited -- the ptyfs slave-write park did not hold ([string trim $expect_out(0,string)])"
+    }
+    -re {nora: EXIT path=([a-z0-9]+)[^\r\n]*} {
+        lc_fail "s7: nora exited unexpectedly at launch via path=$expect_out(1,string) ([string trim $expect_out(0,string)])"
+    }
+    -re {halcyond: session tile leaf=([0-9]+) screenmode -> AltScreen} {
+        set L $expect_out(1,string)
+        lc_step "nora entered the alt screen (tile $L) -- launched, no redraw WriteZero exit yet"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction launching nora" }
+    timeout { lc_fail "nora never launched (no AltScreen) AND logged no EXIT marker" }
+    eof     { lc_fail "qemu exited launching nora" }
+}
+
+# nora launched. Confirm it HOLDS -- no redraw WriteZero exit in a settle window
+# (a later/larger repaint could still overflow the ring; the park must hold there
+# too). A quiet window = PASS. Any OTHER exit path (eof/pollnone) is not a
+# WriteZero and does not fail THIS gate.
+set timeout 6
+expect {
+    -re {nora: EXIT path=redraw[12][^\r\n]*WriteZero} {
+        lc_fail "P0 s7 REGRESSION (F3): a redraw WriteZero'd + nora exited AFTER launch ([string trim $expect_out(0,string)])"
+    }
+    -re {nora: EXIT path=([a-z0-9]+)[^\r\n]*} {
+        lc_fail "s7: nora exited post-launch via path=$expect_out(1,string) -- a dead editor is not a HELD tile ([string trim $expect_out(0,string)])"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction while nora held" }
+    timeout { lc_pass "s7 F3 fix: nora launched + HELD the tile with NO redraw WriteZero exit (the ptyfs slave-write park holds)" }
+    eof     { lc_fail "qemu exited post-launch -- nora did not hold the tile" }
+}
+
+# NOTE: full input interactivity (each keystroke acts at once) is the SEPARATE
+# F2 fix (PollSource must poll /dev/pts/<n>ready, not the always-ready data fd,
+# else the drain parks in read() and batches keystrokes -- the "one-key lag").
+# This gate proves ONLY the F3 write-side fix (nora renders + holds); F2's gate
+# will drive a rapid two-key sequence and assert both act. See
+# bug_s7_write_zero_and_read_batching.
+
+lc_quit
