@@ -20,7 +20,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-05
+updated: 2026-09-07
 area: userspace
 ---
 ## Purpose
@@ -154,6 +154,21 @@ a finished background job prints `[N]+ Done`, an idle `Ctrl-C` cancels the line 
 and a simultaneous keystroke repaints over the notification. A note fd that errors
 is removed rather than allowed to spin, degrading notes to sync-point delivery. A
 poll error falls through to the read, which surfaces the same EOF and breaks.
+
+**Script mode is the REPL without the loop.** `ut SCRIPT [args…]` runs a file
+non-interactively through `Repl::run_script(arg0, args, src)`, which shares the
+`Env` and evaluator with the interactive path but strips everything this layer
+adds: no line editor, no prompt, no notes loop, no banner, and no fd-0 read at
+all. It binds the positional parameters (`0`/`1`/`2`/`*`) at the script's global
+scope (mirroring a function call), sets `interactive = false` so a non-zero
+`$status` **fail-fast-propagates** (scripture §8.9 — the opposite of the
+interactive REPL, which suppresses it), evaluates the whole source in one
+`eval_source` multi-statement parse, and returns the exit code (an explicit
+`exit N` wins, else the last statement's `$status`; a parse/eval error is
+reported to the UART and yields non-zero). The `ut` binary's `parse_script`
+picks the first non-flag operand as the script, and a `#!/bin/ut` spawn arrives
+here the same way — `ut <script> <args>` with no flags — so the shell-side
+shebang ([[sub-utopia-eval]]) and script mode compose into a working `./s.ut`.
 
 ## Data structures
 

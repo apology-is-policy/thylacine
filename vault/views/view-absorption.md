@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**146 absorbed · 11 live · 157 total.**
+**147 absorbed · 10 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -188,7 +188,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 89-hardware.md | absorbed | [[moc-userspace-hardware]], [[sub-kernel-burrow]], [[sub-kernel-handle]], [[sub-libthyla-rs]], [[sub-netd-nic]] |
 | 90-u-test.md | absorbed | [[sub-kernel-syscall-abi]] |
 | 91-utopia.md | absorbed | [[sub-utopia-eval]], [[sub-utopia-interactive]], [[sub-utopia-parser]] |
-| 92-utopia-line-editor.md | live | — |
+| 92-utopia-line-editor.md | absorbed | [[sub-utopia-interactive]] |
 | 93-utopia-parser.md | absorbed | [[sub-utopia-parser]] |
 | 94-utopia-eval.md | absorbed | [[sub-utopia-eval]], [[sub-utopia-interactive]] |
 | 95-identity.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-ninep-attach]], [[sub-kernel-perm]], [[sub-kernel-proc]], [[sub-kernel-syscall-abi]] |
