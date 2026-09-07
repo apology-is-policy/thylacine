@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**147 absorbed · 10 live · 157 total.**
+**148 absorbed · 9 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -108,7 +108,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 149-warp.md | absorbed | [[sub-kernel-burrow]], [[sub-kernel-hwcap]], [[sub-kernel-weft]], [[sub-tapestryd]] |
 | 15-scheduler.md | absorbed | [[seam-eevdf-math]], [[sub-kernel-rendez]], [[sub-kernel-sched-smp]], [[sub-kernel-sched]] |
 | 150-build-config.md | live | — |
-| 150-halcyond.md | live | — |
+| 150-halcyond.md | absorbed | [[sub-halcyond]] |
 | 150-vt.md | absorbed | [[sub-halcyond]], [[sub-kaua-term]], [[sub-lib-vt]] |
 | 151-libhalcyon.md | absorbed | [[sub-aurora]], [[sub-libhalcyon]], [[sub-libtapestry]], [[sub-tapestryd]] |
 | 152-kaua-term.md | absorbed | [[sub-halcyond]], [[sub-kaua-term]], [[sub-lib-vt]], [[sub-ptyhold]], [[sub-utopia-interactive]] |
