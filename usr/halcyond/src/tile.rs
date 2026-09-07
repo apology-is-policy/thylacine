@@ -1354,11 +1354,24 @@ mod tests {
         };
         t.render(&mut cart, w, h, &mut gs, &sheet, &mut su, Some(mark));
         assert!(su > 0, "the view scrolled up: {}", su);
+        // The MARKED ROW is in view -- not the whole block. row=usize::MAX
+        // resolves (via laid_line_for) to item 0's line, a proportional body
+        // line now (14.13, ~15px), SHORTER than the mono cell (`ch`=22), so
+        // `ch` is no longer a valid row-height proxy; a 3-line block trails
+        // below the row and need not fit. Take the row's actual span.
         let oldest = t.frame[0];
+        let olb = layout_block(
+            t.scrollback.frozen_blocks().front().unwrap(),
+            w as i32,
+            &sheet,
+            &mut gs,
+        );
+        let (ory, orh) = laid_line_for(&olb, 0, usize::MAX).unwrap();
         assert!(
-            oldest.1 >= 0 && oldest.1 + ch <= viewh,
-            "the marked row is in view: y={}",
-            oldest.1
+            oldest.1 + ory >= 0 && oldest.1 + ory + orh <= viewh,
+            "the oldest block's marked row is in view: rowy={} rowh={}",
+            oldest.1 + ory,
+            orh
         );
         assert!(band(&cart), "the marked row paints its band");
 
@@ -1373,10 +1386,18 @@ mod tests {
         };
         t.render(&mut cart, w, h, &mut gs, &sheet, &mut su, Some(mark));
         let newest = t.frame[ids.len() - 1];
+        let nlb = layout_block(
+            t.scrollback.frozen_blocks().back().unwrap(),
+            w as i32,
+            &sheet,
+            &mut gs,
+        );
+        let (nry, nrh) = laid_line_for(&nlb, 0, usize::MAX).unwrap();
         assert!(
-            newest.1 >= 0 && newest.1 + ch <= viewh,
-            "the newest block's marked row is back in view: y={}",
-            newest.1
+            newest.1 + nry >= 0 && newest.1 + nry + nrh <= viewh,
+            "the newest block's marked row is back in view: rowy={} rowh={}",
+            newest.1 + nry,
+            nrh
         );
         assert!(
             (0..viewh * 40).contains(&su),

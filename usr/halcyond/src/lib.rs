@@ -3,9 +3,10 @@
 // every module here is host-testable; the bin half (main.rs, the `guest`
 // feature) owns the Surface, the console, and the event loop.
 //
-// H-2c lands the rasterization floor: the vendored DejaVu Sans Condensed
-// faces + the fontdue wrapper that fills a cartoon atlas on demand. The
-// transcript model, layout, theme, and Beacon parsing arrive at H-2d.
+// H-2c lands the rasterization floor: the vendored IBM Plex Sans faces (the
+// DejaVu -> Public Sans -> IBM Plex Sans supersessions closed 2026-09-07) + the
+// fontdue wrapper that fills a cartoon atlas on demand. The transcript model,
+// layout, theme, and Beacon parsing arrive at H-2d.
 
 #![no_std]
 
@@ -25,13 +26,20 @@ pub mod tile;
 pub mod tiles;
 pub mod transcript;
 
-/// The vendored proportional faces (third_party/dejavu-fonts; HALCYON.md
-/// section 3 -- DejaVu Sans Condensed, operator-chosen). The italic role is
-/// now taken (PL-2 / the Genera type discipline): Oblique is the italic face;
-/// BoldOblique stays vendored for a future bold-italic slot.
-pub const DEJAVU_SANS_CONDENSED: &[u8] =
-    include_bytes!("../../../third_party/dejavu-fonts/ttf/DejaVuSansCondensed.ttf");
-pub const DEJAVU_SANS_CONDENSED_BOLD: &[u8] =
-    include_bytes!("../../../third_party/dejavu-fonts/ttf/DejaVuSansCondensed-Bold.ttf");
-pub const DEJAVU_SANS_CONDENSED_OBLIQUE: &[u8] =
-    include_bytes!("../../../third_party/dejavu-fonts/ttf/DejaVuSansCondensed-Oblique.ttf");
+/// The vendored proportional faces (third_party/ibm-plex; HALCYON-VISUAL.md
+/// section 7 + HALCYON.md section 4 -- IBM Plex Sans, operator-ratified
+/// 2026-09-07, superseding Public Sans which had superseded DejaVu Sans
+/// Condensed). The operator's weight rule: baseline body/chrome is Text (450);
+/// bigger type (headings) is Regular (400), italic in full (section 8.1). So
+/// TEXT is the baseline upright, TEXT_ITALIC carries em--emph (baseline-size
+/// inline italic), BOLD is the one bold (em--strong), and HEADING_ITALIC is
+/// the Regular-weight (400) italic headings use. Cornucopia (raster) owns
+/// preformatted/terminal content; nothing here does.
+pub const IBM_PLEX_SANS_TEXT: &[u8] =
+    include_bytes!("../../../third_party/ibm-plex/ttf/IBMPlexSans-Text.ttf");
+pub const IBM_PLEX_SANS_TEXT_ITALIC: &[u8] =
+    include_bytes!("../../../third_party/ibm-plex/ttf/IBMPlexSans-TextItalic.ttf");
+pub const IBM_PLEX_SANS_BOLD: &[u8] =
+    include_bytes!("../../../third_party/ibm-plex/ttf/IBMPlexSans-Bold.ttf");
+pub const IBM_PLEX_SANS_HEADING_ITALIC: &[u8] =
+    include_bytes!("../../../third_party/ibm-plex/ttf/IBMPlexSans-Italic.ttf");

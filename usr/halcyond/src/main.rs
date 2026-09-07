@@ -17,7 +17,7 @@
 extern crate alloc;
 
 // A 64 MiB LAZY heap (demand-zero; physical pages commit as touched):
-// halcyond's working set -- two parsed DejaVu faces, atlas pages, the
+// halcyond's working set -- four parsed IBM Plex Sans faces, atlas pages, the
 // transcript's 13.3 content budget -- does not fit the 4 MiB default,
 // and the death is a SILENT exit(1) (the no_std OOM panics into
 // t_exits). Found the honest way: the first on-device boot died between
@@ -406,7 +406,7 @@ pub extern "C" fn rs_main() -> i64 {
     let mut ptr: (i32, i32) = (0, 0);
 
     let mut gs = GlyphSource::new_vendored(512);
-    if gs.face_count() != 3 {
+    if gs.face_count() != 4 {
         say!("halcyond: FAIL vendored face parse");
         return 1;
     }

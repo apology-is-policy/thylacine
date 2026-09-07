@@ -1001,7 +1001,7 @@ pub fn run(home: Option<String>) -> i64 {
     // console render brain) -- ONE mono glyph source + Daylight sheet shared
     // across every tile.
     let mut gs = GlyphSource::new_vendored(512);
-    if gs.face_count() != 3 {
+    if gs.face_count() != 4 {
         say!("halcyond: FAIL vendored face parse");
         return 1;
     }

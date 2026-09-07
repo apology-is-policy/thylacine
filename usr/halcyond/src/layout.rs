@@ -8,22 +8,28 @@
 // a line's box uses the BODY line height whenever any proportional seg is
 // present -- mono islands sit ON the body baseline and may not stretch the
 // box (a tall cell glyph may clip; deliberate) -- while a line composed
-// entirely of mono cells uses the mono cell metrics, so a foreign
-// terminal block reads exactly as a terminal would (section 4's promise).
+// entirely of mono cells (a `pre` block's verbatim lines) uses the mono cell
+// metrics, so a preformatted island reads exactly as a terminal would.
 //
-// The face rule, per cell (the MVP realization of sections 3-4):
-//   em class=code  -> MONO;
-//   annotated (obj / em / hdr / table cell) -> BODY (bold under
-//     ATTR_BOLD / em strong / hdr);
-//   un-annotated   -> MONO ("plain output renders in monospace exactly as
-//     a terminal would" -- SGR color alone is not annotation).
+// The face rule, per cell (HALCYON.md 14.13 -- the proportional-live model,
+// operator-ratified 2026-09-06): the transcript is PROPORTIONAL throughout --
+// prompt, typed input, ordinary output, prose, tables all render body. Mono
+// serves exactly two cases, and both are handled OUTSIDE this function: a
+// `pre` block (the `pre` flag forces FACE_MONO in lay_span) and alt-screen (a
+// separate raw-grid path). Here only an inline `em class=code` span (8.2's
+// inline literal) is mono. Weight/slant per section 8: em strong (and foreign
+// SGR bold on an annotated run) is the one bold; a heading is Regular-weight
+// (400) italic, ranked by SIZE (px_for) never weight; em emph is Text italic;
+// everything else -- plain output included -- is the Text-weight (450) body.
 
 use alloc::vec::Vec;
 
 use cartoon::{Cartoon, GlyphRef, Op};
 use vt::ATTR_BOLD;
 
-use crate::raster::{GlyphSource, FACE_BODY, FACE_BODY_BOLD, FACE_BODY_ITALIC, FACE_MONO};
+use crate::raster::{
+    GlyphSource, FACE_BODY, FACE_BODY_BOLD, FACE_BODY_ITALIC, FACE_HEADING_ITALIC, FACE_MONO,
+};
 use crate::transcript::{Block, BlockKind, Item, Style, TCell, EM_CODE, EM_DIM, EM_EMPH, EM_STRONG};
 
 /// The stylesheet: the paper-light theme's numbers (section 3 -- dark ink
@@ -67,7 +73,12 @@ pub fn daylight_sheet() -> Sheet {
         // and header (Daylight has no transcript-selection token; this sits in
         // the same family, darker than surface, lighter than header).
         sel_bg: 0xFFDF_D6C7,
-        body_px: 16.0,
+        // The body/prose size the Daylight mockup runs at (halcyon-daylight.css
+        // .hal-prose 11.5px; HALCYON-VISUAL 7-8 type scale). Was 16.0 -- ~40%
+        // oversized vs the ratified mockup, the dominant metric mismatch H-A
+        // corrects. Heading rank (px_for) sits above this; the sb-round eyes
+        // the absolute px on real hardware.
+        body_px: 11.5,
         pad_x: 8,
         block_gap: 6,
         table_col_gap: 16,
@@ -128,23 +139,38 @@ pub struct LaidBlock {
 }
 
 fn face_for(st: &Style, in_table: bool) -> u8 {
+    // An inline `em class=code` literal is the only mono case reaching here
+    // (8.2); a `pre` block is forced mono at the lay_span call, and alt-screen
+    // is a separate raw-grid path. Everything else is proportional (14.13).
     if st.em == EM_CODE {
         return FACE_MONO;
     }
+    // `annotated` gates only whether a foreign SGR bold promotes to the
+    // reserved bold: strong/emph/hdr are themselves annotations, so a plain
+    // run is the proportional body regardless of SGR bold -- foreign bold is
+    // NOT the one em-strong bold (8.2).
     let annotated = st.obj != 0 || st.em != 0 || st.hdr != 0 || in_table;
     if !annotated {
-        return FACE_MONO;
+        return FACE_BODY;
     }
-    // Genera type discipline (HALCYON.md section 3): bold is RESERVED for
-    // extreme emphasis -- em class=strong and foreign SGR bold, nothing else;
-    // emphasis and headings go ITALIC, with heading RANK carried by size
-    // (px_for), never weight -- bold headings are retired. Other annotated
-    // runs (an obj presentation, a table cell) stay regular body.
+    // Genera type discipline (HALCYON.md section 3 + HALCYON-VISUAL 8): bold is
+    // RESERVED for extreme emphasis -- em class=strong and foreign SGR bold on
+    // an annotated run, nothing else; emphasis and headings go ITALIC, heading
+    // RANK carried by size (px_for), never weight -- bold headings are retired.
     if st.em == EM_STRONG || st.attrs & ATTR_BOLD != 0 {
         FACE_BODY_BOLD
-    } else if st.em == EM_EMPH || st.hdr != 0 {
+    } else if st.hdr != 0 {
+        // Headings are the Regular-weight (400) italic, a DISTINCT weight from
+        // the body italic (operator's baseline=Text / bigger=Regular rule);
+        // rank stays size-carried (px_for), never weight.
+        FACE_HEADING_ITALIC
+    } else if st.em == EM_EMPH {
         FACE_BODY_ITALIC
     } else {
+        // An obj / table-cell presentation with no weight or slant is the Text
+        // body: an object is a colour + hit overlay, not a font change, so it
+        // matches surrounding proportional text; inside a `pre` block the pre
+        // flag forces it mono instead, keeping the grid's cell metrics.
         FACE_BODY
     }
 }
@@ -162,10 +188,15 @@ fn color_for(st: &Style, sheet: &Sheet) -> u32 {
 }
 
 fn px_for(st: &Style, sheet: &Sheet) -> f32 {
+    // Heading sizes are the ABSOLUTE values HALCYON-VISUAL 8.1 pins (17.5 /
+    // 14.5 / 12.5), all above the 8.1 body (11.5); rank is size alone, the
+    // weight is fixed Regular (face_for -> FACE_HEADING_ITALIC). They assume
+    // 8.1's body scale, so a body_px change is a coupled type-scale decision
+    // that revisits these three.
     match st.hdr {
-        1 => sheet.body_px * 1.4,
-        2 => sheet.body_px * 1.2,
-        3 => sheet.body_px * 1.05,
+        1 => 17.5,
+        2 => 14.5,
+        3 => 12.5,
         _ => sheet.body_px,
     }
 }
@@ -847,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn face_rule_plain_is_mono_annotated_is_body() {
+    fn face_rule_plain_and_obj_are_both_body() {
         let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
@@ -864,8 +895,14 @@ mod tests {
         let laid = layout_block(b, 600, &sheet, &mut g);
         let line = &laid.lines[0];
         assert!(line.segs.len() >= 2);
-        assert_eq!(line.segs[0].face, FACE_MONO, "un-annotated text is mono");
-        assert_eq!(line.segs[1].face, FACE_BODY, "the obj span is body");
+        assert_eq!(
+            line.segs[0].face, FACE_BODY,
+            "plain ordinary output is proportional body (14.13)"
+        );
+        assert_eq!(
+            line.segs[1].face, FACE_BODY,
+            "the obj span is body too -- an object is colour + hit, not a face change"
+        );
         assert_eq!(
             line.segs[1].color, sheet.obj,
             "obj at default ink takes the slate object colour"
@@ -875,25 +912,27 @@ mod tests {
 
     #[test]
     fn genera_headings_and_emph_are_italic_strong_is_bold() {
-        // The Genera type discipline (HALCYON.md section 3): headings and
-        // emphasis go ITALIC, never bold; bold is reserved for strong (extreme
-        // emphasis) + foreign SGR bold. Heading RANK is size (px_for), not
-        // weight. This FAILS on the pre-PL-2 rule (hdr -> bold, emph -> body).
+        // The Genera type discipline (HALCYON.md section 3 + HALCYON-VISUAL 8):
+        // headings and emphasis go ITALIC, never bold; bold is reserved for
+        // strong (extreme emphasis) + foreign SGR bold on an annotated run.
+        // Headings take the DISTINCT Regular-weight italic (FACE_HEADING_ITALIC,
+        // operator's baseline=Text / bigger=Regular rule); RANK is size (px_for),
+        // not weight. Plain output is the proportional body (14.13).
         let base = Style { fg: 0, bg: 0, attrs: 0, em: 0, obj: 0, hdr: 0 };
         let with = |em: u8, hdr: u8, attrs: u8| Style { em, hdr, attrs, ..base };
 
-        assert_eq!(face_for(&with(0, 1, 0), false), FACE_BODY_ITALIC, "hdr 1 is italic, never bold");
-        assert_eq!(face_for(&with(0, 3, 0), false), FACE_BODY_ITALIC, "hdr 3 is italic too");
-        assert_eq!(face_for(&with(EM_EMPH, 0, 0), false), FACE_BODY_ITALIC, "emph is italic");
+        assert_eq!(face_for(&with(0, 1, 0), false), FACE_HEADING_ITALIC, "hdr 1 is the regular-weight italic, never bold");
+        assert_eq!(face_for(&with(0, 3, 0), false), FACE_HEADING_ITALIC, "hdr 3 is the regular-weight italic too");
+        assert_eq!(face_for(&with(EM_EMPH, 0, 0), false), FACE_BODY_ITALIC, "emph is the Text-weight italic");
         assert_eq!(face_for(&with(EM_STRONG, 0, 0), false), FACE_BODY_BOLD, "strong is the reserved bold");
-        // An UN-annotated cell is mono even with SGR bold (today's model:
-        // un-annotated foreign output renders as a terminal; the bold check
-        // sits AFTER the annotated gate). PL-4 makes un-annotated proportional,
-        // at which point the annotated + SGR-bold -> bold path below applies live.
-        assert_eq!(face_for(&with(0, 0, ATTR_BOLD), false), FACE_MONO, "un-annotated SGR bold is still mono today");
+        // A plain (un-annotated) cell is the proportional body (14.13's
+        // proportional-live model). A foreign SGR bold on it does NOT promote
+        // to the reserved bold -- that is em-strong's alone (8.2); the SGR-bold
+        // path fires only on an ANNOTATED run (a table cell below).
+        assert_eq!(face_for(&with(0, 0, ATTR_BOLD), false), FACE_BODY, "plain SGR bold stays body -- foreign bold is not the em-strong bold");
         assert_eq!(face_for(&with(0, 0, ATTR_BOLD), true), FACE_BODY_BOLD, "annotated + foreign SGR bold -> the reserved bold");
-        assert_eq!(face_for(&with(EM_CODE, 0, 0), false), FACE_MONO, "code is mono");
-        assert_eq!(face_for(&base, false), FACE_MONO, "un-annotated is mono");
+        assert_eq!(face_for(&with(EM_CODE, 0, 0), false), FACE_MONO, "inline code is the only mono case here");
+        assert_eq!(face_for(&base, false), FACE_BODY, "plain ordinary output is proportional body (14.13)");
         assert_eq!(face_for(&Style { obj: 1, ..base }, false), FACE_BODY, "an obj presentation is regular body");
         // px_for still carries heading rank by SIZE (unchanged), so italic
         // headings are not flattened to one size.
@@ -903,11 +942,17 @@ mod tests {
     }
 
     #[test]
-    fn mixed_line_uses_body_box_mono_line_uses_cell_box() {
+    fn mixed_line_uses_body_box_pre_line_uses_cell_box() {
+        // A `pre` block's lines are all-mono (the pre flag forces FACE_MONO), so
+        // they keep the exact Cornucopia cell box; a mixed proportional line
+        // takes the body box (13.5). Plain output is proportional now (14.13),
+        // so the mono line must be a `pre` block, not plain text.
         let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
+        wire::open(&mut buf, BOp::Pre, &[]);
         buf.extend_from_slice(b"pure mono line\n");
+        wire::close(&mut buf, BOp::Pre);
         wire::open(&mut buf, BOp::Em, &[("class", "strong")]);
         buf.extend_from_slice(b"mixed");
         wire::close(&mut buf, BOp::Em);
@@ -921,13 +966,12 @@ mod tests {
         let laid = layout_block(b, 600, &sheet, &mut g);
         assert_eq!(
             laid.lines[0].h, cell_h,
-            "all-mono line keeps the exact cell box"
+            "the pre block's line keeps the exact cell box"
         );
         let body_lm = g.line_metrics(FACE_BODY, sheet.body_px).unwrap();
         assert_eq!(
-            laid.lines[1].h,
-            body_lm.line_height + 0,
-            "mixed line takes the body box"
+            laid.lines[1].h, body_lm.line_height,
+            "the mixed proportional line takes the body box"
         );
     }
 

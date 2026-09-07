@@ -13,17 +13,21 @@ use alloc::vec::Vec;
 
 use cartoon::{AtlasPacker, GlyphRef};
 
-/// A face slot in this source: the three vendored DejaVu weights (regular,
-/// bold, oblique -- HALCYON.md section 3's Genera type discipline), plus the
-/// system monospace -- the baked Cornucopia atlas (fixed cell, one size per
-/// advance), serving mono islands + foreign terminal output through the SAME
-/// packer/id space so one atlas store feeds the executor. The three
-/// proportional faces index `self.faces` directly; FACE_MONO is a sentinel,
-/// special-cased before any `faces[]` access -- never a slot.
-pub const FACE_BODY: u8 = 0;
-pub const FACE_BODY_BOLD: u8 = 1;
-pub const FACE_BODY_ITALIC: u8 = 2;
-pub const FACE_MONO: u8 = 3;
+/// A face slot in this source: the four vendored IBM Plex Sans faces
+/// (HALCYON-VISUAL.md section 7 + HALCYON.md section 4), plus the system
+/// monospace -- the baked Cornucopia atlas (fixed cell, one size per advance),
+/// serving mono islands + foreign terminal output through the SAME packer/id
+/// space so one atlas store feeds the executor. The operator's weight rule
+/// (baseline = Text 450, bigger type = Regular 400) makes headings a DISTINCT
+/// weight from body, so heading-italic is its own slot rather than the body
+/// italic at a larger size. The four proportional faces index `self.faces`
+/// directly; FACE_MONO is a sentinel, special-cased before any `faces[]`
+/// access -- never a slot.
+pub const FACE_BODY: u8 = 0; // Plex Text (450): baseline prose, prompt, chrome, objects
+pub const FACE_BODY_BOLD: u8 = 1; // Plex Bold (700): em--strong, the one bold
+pub const FACE_BODY_ITALIC: u8 = 2; // Plex Text Italic (450): em--emph, baseline-size slant
+pub const FACE_HEADING_ITALIC: u8 = 3; // Plex Regular Italic (400): headings, italic in full
+pub const FACE_MONO: u8 = 4;
 
 /// Per-(face, size) vertical metrics, integer pixels, y-down. `ascent` is
 /// baseline distance from the line top; `line_height` includes the gap.
@@ -62,10 +66,14 @@ impl GlyphSource {
     /// working set).
     pub fn new_vendored(page: u32) -> GlyphSource {
         let mut faces = Vec::new();
+        // Order matches the FACE_* indices: Text, Bold, Text-Italic, then the
+        // Regular-weight heading italic (a distinct weight from body, per the
+        // operator's baseline=Text / bigger=Regular rule).
         for bytes in [
-            crate::DEJAVU_SANS_CONDENSED,
-            crate::DEJAVU_SANS_CONDENSED_BOLD,
-            crate::DEJAVU_SANS_CONDENSED_OBLIQUE,
+            crate::IBM_PLEX_SANS_TEXT,
+            crate::IBM_PLEX_SANS_BOLD,
+            crate::IBM_PLEX_SANS_TEXT_ITALIC,
+            crate::IBM_PLEX_SANS_HEADING_ITALIC,
         ] {
             // The vendored faces parse by construction; a fontdue reject
             // here is a build-input defect, not a runtime input -- panic
@@ -104,9 +112,10 @@ impl GlyphSource {
     ///
     /// FACE_MONO ignores `px` (the baked atlas has one size per advance)
     /// and serves the Cornucopia cell; a codepoint the 207-glyph bake
-    /// lacks falls back to DejaVu rasterized to the cell height with the
-    /// advance FORCED to the cell width (the grid survives; the glyph may
-    /// clip -- recorded MVP posture; box drawing stays a renderer concern).
+    /// lacks falls back to the body face (Plex Text) rasterized to the cell
+    /// height with the advance FORCED to the cell width (the grid survives;
+    /// the glyph may clip -- recorded MVP posture; box drawing stays a
+    /// renderer concern).
     pub fn glyph(&mut self, face: u8, px: f32, ch: char) -> Option<GlyphRef> {
         let q = if face == FACE_MONO { 0 } else { size_q(px) };
         let key = (face, q, ch);
@@ -182,10 +191,12 @@ impl GlyphSource {
         })
     }
 
-    /// The kerning adjustment between two glyphs at a size (integer px),
-    /// 0 when the face carries no pair. The author adds this into the
-    /// PRECEDING glyph's resolved advance (DejaVu carries real pairs --
-    /// HALCYON.md section 2).
+    /// The kerning adjustment between two glyphs at a size (integer px), 0
+    /// when the face carries no pair. The author adds this into the PRECEDING
+    /// glyph's resolved advance. IBM Plex Sans ships kerning only in GPOS, and
+    /// fontdue's `horizontal_kern` reads only the legacy `kern` table, so this
+    /// returns 0 for every pair on the vendored faces -- Plex renders with flat
+    /// advances (an MVP posture; a GPOS shaper is the future refinement).
     pub fn kern(&self, face: u8, px: f32, left: char, right: char) -> i32 {
         let Some(f) = self.faces.get(face as usize) else {
             return 0;
@@ -222,7 +233,7 @@ mod tests {
     #[test]
     fn vendored_faces_parse() {
         let gs = GlyphSource::new_vendored(512);
-        assert_eq!(gs.face_count(), 3, "all three vendored DejaVu weights parse (regular, bold, oblique)");
+        assert_eq!(gs.face_count(), 4, "all four vendored IBM Plex Sans faces parse (Text, Bold, Text-Italic, Regular-Italic)");
         let lm = gs.line_metrics(FACE_BODY, 16.0).unwrap();
         assert!(
             lm.ascent > 8 && lm.ascent < 24,
@@ -282,14 +293,21 @@ mod tests {
     }
 
     #[test]
-    fn kerning_pairs_exist_in_dejavu() {
+    fn kern_is_zero_plex_ships_no_legacy_kern_table() {
+        // IBM Plex Sans carries kerning in GPOS only; fontdue reads only the
+        // legacy `kern` table, so every pair returns 0 -- flat advances, the
+        // recorded MVP posture (a GPOS shaper is the future refinement). This
+        // also guards the other direction: a future face WITH a legacy table
+        // would change layout metrics, and this test would catch it.
         let mut gs = GlyphSource::new_vendored(512);
-        // Force both glyphs so the face is warm (not required, but mirrors use).
         gs.glyph(FACE_BODY, 32.0, 'A').unwrap();
         gs.glyph(FACE_BODY, 32.0, 'V').unwrap();
-        let k = gs.kern(FACE_BODY, 32.0, 'A', 'V');
-        assert!(k < 0, "AV kerns negative in DejaVu at 32px: {}", k);
-        assert_eq!(gs.kern(FACE_BODY, 32.0, 'x', 'x'), 0, "xx carries no pair");
+        assert_eq!(
+            gs.kern(FACE_BODY, 32.0, 'A', 'V'),
+            0,
+            "no legacy kern pair on Plex (GPOS is not read by fontdue)"
+        );
+        assert_eq!(gs.kern(FACE_BODY, 32.0, 'x', 'x'), 0, "no pair either way");
     }
 
     #[test]
