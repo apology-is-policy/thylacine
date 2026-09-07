@@ -47,8 +47,9 @@ use tapestry::{
     TEV_PTR_BTN, TEV_PTR_MOVE,
 };
 
-use crate::chromeset::read_file;
+use crate::chromeset::{self, read_file};
 use crate::menuset::{self, MenuEvent};
+use crate::statusset;
 
 /// evdev BTN_LEFT (the tapestry PTR_BTN `code`).
 const BTN_LEFT: u16 = 0x110;
@@ -1075,11 +1076,22 @@ pub fn run(home: Option<String>) -> i64 {
     say!("halcyond: {} verb rules loaded", rules.len());
     let mut menus = menuset::MenuSet::new(ring.clone());
     let mut menu_leaf: Option<u32> = None;
+    // H-3b/H-3d: the per-leaf tag bars + the one display status bar, on the SAME
+    // session ring (the H-3c-2 event set: their CONFIGUREs wake the unified
+    // poll). The session compositor wires the Daylight chrome the single-tile
+    // console path (main.rs) already drives; tapestryd carves each leaf's tagbar
+    // rect and the session tags its own leaves, so the chrome only needs minting
+    // + painting here.
+    let mut chrome = chromeset::ChromeSet::new(ring.clone());
+    let mut status = statusset::StatusBar::new(ring.clone());
 
     let mut cart = cartoon::Cartoon::new();
     let mut inbuf = [0u8; INGEST_BUF];
     let mut wire_out: Vec<u8> = Vec::new();
     let mut relayout = true;
+    // A layout change moves tag bars too; a chrome-surface CONFIGURE (the
+    // focus move the compositor sends only to the chrome) sets it independently.
+    let mut chrome_dirty = true;
     let mut up_announced = false;
     let mut ingest_announced = false;
     let mut present_fails: u32 = 0;
@@ -1310,6 +1322,35 @@ pub fn run(home: Option<String>) -> i64 {
             if tiles.is_empty() {
                 break;
             }
+            chrome_dirty = true;
+        }
+
+        // (3b) H-3b/H-3d: the chrome. Only once a tile is up (first-present-wins:
+        // chrome never precedes content), then per pass -- the pumps are cheap
+        // idle (CONFIGURE coalesces, FRAME never queues) and refresh repaints
+        // only on a change. A chrome CONFIGURE (a relayout or a focus move)
+        // requests a reconcile; own_surface = u32::MAX matches no leaf, so
+        // reconcile skips the console self-naming (the session's leaves are
+        // named by their tiles) while still minting + keying every tag bar and
+        // reading the focused leaf. The status bar draws the focused tile's
+        // name/condition + its cwd + running-or-last command (its transcript).
+        if up_announced {
+            if chrome.pump() {
+                chrome_dirty = true;
+            }
+            if chrome_dirty {
+                chrome_dirty = false;
+                chrome.reconcile(troot, u32::MAX, &mut gs);
+            }
+            status.ensure();
+            status.pump();
+            let focused_leaf = chrome.focused().map(|(id, _, _)| *id);
+            let (cwd, cmd) = focused_leaf
+                .and_then(|l| tiles.get(&l))
+                .map(|t| (t.tile.scrollback.cwd(), t.tile.scrollback.last_command()))
+                .unwrap_or(("", None));
+            let sm = statusset::model_from(chrome.focused(), focused_leaf, cwd, cmd);
+            status.refresh(&sm, &mut gs);
         }
 
         // If any tile needs a paint (a new tile, a resize), render before we
