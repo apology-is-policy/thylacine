@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/150-halcyond (the Halcyon environment client): clean redirect -- sub-halcyond is fresh, audit:hard, all audit anchors covered"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["35f0bfca"]
 touched: []
 established: []
 closed: []
