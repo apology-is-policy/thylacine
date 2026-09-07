@@ -22,6 +22,75 @@ needed the operator.
 
 
 ---
+## 2026-09-07 (aux, fourth run) -- IM-1 + IM-2 batched holotype: a CLEAN close, and a SILENT reviewer fallback the JSONL caught
+
+The fourth run of the day did one thing: the batched adversarial holotype round
+for the two landed Imperium kernel chunks -- IM-1 (`bccb297f`, the trusted
+EPISODE, I-27) and IM-2 (`4c77db6e`, the fork-PROPAGATING legate scope, I-25
+strengthened / I-2). Batched into one round per the double-distance rule. Tip
+unchanged at `c8b25b26` -- the close landed no code (see F1).
+
+**The verdict: CLEAN. 0 P0 / 0 P1 / 0 P2 / 1 P3.** The prosecutor read both
+chunks' full scope, re-derived every load-bearing claim from the tree, and
+independently re-ran TLC on `specs/imperium.tla` (157,839 distinct states / 0
+errors, matching the commit; all four buggy cfgs trip exactly their named
+invariant). A parallel self-audit ran on the same surface while the prosecutor
+worked and reached the same 0/0/0 on nine re-derived properties
+(`scratchpad/im12-selfaudit.md`). No dirty-close round 2 owed.
+
+**The wrong turn that got caught -- a SILENT reviewer fallback.** The prosecutor
+self-reported `MODEL(start)==MODEL(end)==Fable 5.1`. That was false. Grepping the
+task JSONL for model ids returned BOTH `claude-fable-5-1` (54 lines) AND
+`claude-opus-4-8` (53 lines): it fell back to Opus 4.8 at roughly the halfway
+mark, which a subagent cannot see in its own output. This is the standing
+[[audit-h3b-closed-list]] lesson made concrete again -- the self-reported model
+line is not the detector; the JSONL `model` field is. Per the 2026-08-03 rule and
+the h3d precedent (a mid-run Opus fallback whose MODEL(end) still claimed Fable),
+a fallback round that FINISHES is closed -- no re-spawn owed; the tier is noted
+and a full-Fable diversity pass stays owed (already contemplated at IM-5). One
+sharper wrinkle this run: the ORCHESTRATOR session ALSO fell back Fable->Opus 4.8
+(the commit-attribution reminder flipped mid-run), so the author-vs-reviewer
+FAMILY-diversity axis was absent on both sides; what the round bought was CONTEXT
+independence (the prosecutor re-derived from code + re-ran the model checker, did
+not read the author's reasoning) plus the model-independent TLC re-run.
+
+**F1 [P3] -- the documented residue, confirmed not worse, kept as ratified.** The
+one finding is the pre-SAK in-flight-writer chunk: `cons_output_write`'s staging
+loop guards the freeze with `if (i > 0 && cons_caller_frozen()) break;`
+(`kernel/cons.c:2230`), so a non-attached writer that acquired the TX role while
+unfrozen and then races BEGIN emits ONE <=512 B chunk (CONS_TX_STAGE, cons.c:464)
+after the episode opens. This is exactly the residue AUDIT-TRIGGERS row 155 flags
+in its own prosecute list ("the FIRST chunk of a write that held the role at
+BEGIN goes out -- pre-SAK output by construction, or is it?"). The prosecutor
+confirmed not-worse: bounded to one unit (the role is exclusive), the content is
+the argument buffer fixed at `write()` time (genuinely pre-SAK), and there is NO
+credential path -- the RX ring is discarded at BEGIN (cons.c:1940-41) and every
+non-attached read is frozen, so post-SAK keystrokes reach only corvus. The
+residual is a bounded cosmetic pre-SAK flash. Kept as the ratified residue, no
+code change. The prosecutor's one-line hardening (drop the `i>0` qualifier so a
+frozen writer short-counts 0 on the first chunk too, making I-27 output
+exclusivity total) is OFFERED to the operator, not applied: it flips a deliberate
+author tradeoff (cons.c:2225-29 -- "a zero count would read as an error to a
+caller that saw no freeze"), which on this run's Opus fallback + operator-away is
+a fork to surface, not to auto-decide.
+
+**The cross-check finding, which is the reusable part.** The prosecutor caught F1;
+the self-audit did NOT -- it read the same loop and recorded "role-holder at a
+mid-write BEGIN finishes the chunk + short-counts," gliding past the i==0 first
+iteration the `i>0` qualifier leaves unguarded. The lesson: reading a guard is
+not prosecuting its boundary -- when a loop guard is qualified, the UNGUARDED
+first iteration IS the finding. Two independent reads, one axis of coverage the
+other missed -- exactly what the parallel-prosecutor discipline is for.
+
+**Cost / open.** ~523k subagent tokens, 56 tool uses, ~19 min wall. Open after
+this close: the full-Fable diversity pass (half-Opus this round); the F1
+hardening decision (operator to weigh; keep-residue is the live default); and two
+pre-existing, non-IM items -- the `format_status` `!n && v != 0` guard-idiom
+sweep (14 sites, devproc.c) and CLAUDE.md's condensed I-2 row still naming
+CAP_ELEVATION_ONLY as 4 bits (caps.h has 7). Closed list:
+`memory/audit_im12_closed_list.md`.
+
+---
 ## 2026-09-07 (aux, third run) -- IM-2: the fork-PROPAGATING legate scope landed (I-25 strengthened; spec-first)
 
 **Where it started.** The second self-compaction at the 600k line, IM-1 pushed
