@@ -108,10 +108,11 @@ bytes, and totals; the root `info` gains a `voices N` line.
 
 | File | Mode | Read | Write |
 |---|---|---|---|
-| `audio` | `0666` | returns 0 bytes (an output-only device, per `audio(3)`) | S16LE stereo 48000 Hz into voice 0; whole frames (4 bytes) consumed, a trailing partial dropped; blocks when the queue (64 KiB, ~340 ms) is full |
+| `audio` | `0666` | *refused* -- recording is the gated `tap` (below), never the shared mount | S16LE stereo 48000 Hz into voice 0; whole frames (4 bytes) consumed, a trailing partial dropped; blocks when the queue (64 KiB, ~340 ms) is full |
 | `info` | `0444` | the device text above, plus `voices N` | not writable |
 | `ctl` | `0644` | a one-line description | `flush` |
 | `volume` | `0444` (read-only in the mount) | the current `audio`/`mix` levels per channel (Plan 9 `volume(3)`) | not through the mount -- writes go to `nocturne-vol` / `/srv/nocturne-ctl` (below) |
+| `tap` (on `/srv/nocturne-ctl`) | `0444` | the mixed sink output as S16LE stereo -- recording; gated (see "Recording" below), one reader at a time | not writable |
 | `nodes/new` | `0666` | the id of the voice this open minted | opening it is the mint |
 | `nodes/<id>/audio` | `0666` | 0 bytes | S16LE stereo 48000 Hz into voice `<id>` |
 | `nodes/<id>/ctl` | `0644` | a one-line description | `gain <percent>` / `flush` / `remove` |
@@ -163,6 +164,39 @@ service `/srv/nocturne-ctl`, where the audio server sees the real caller -- so
 your clearance, or your being the session at the keyboard, is what the gate
 checks. A container that is not given `/srv/nocturne-ctl` simply cannot change
 the host volume, which is the point.
+
+## Recording the system audio
+
+A read of the sink **tap** captures the mixed output -- everything the machine is
+playing, as S16LE stereo at the sink rate. Because that is recording *every*
+program's audio, it is an eavesdropping surface, so it is gated exactly like the
+volume (the trusted-path idiom): you must be the session at the keyboard, the
+system, an admin (`CAP_HOSTOWNER`), or hold the `audio-graph` clearance.
+
+The tap lives on the sink-authority service, not the mount -- a read of
+`/dev/nocturne/audio` is refused, for the same reason the mounted `volume` is
+read-only (a shared mount carries the mounter's identity, so it could never judge
+the real reader). Open `/srv/nocturne-ctl/tap` over your own connection:
+
+```
+% cat /srv/nocturne-ctl/tap > recording.pcm    # raw S16LE stereo @ the sink rate
+```
+
+The bytes are raw PCM (no header); wrap them in a WAV container with the sink's
+rate + `s16le` + 2 channels to play them back. Notes:
+
+- **One reader at a time.** A second concurrent open fails with *device busy*.
+- **Realtime, not buffered.** The tap holds only a fraction of a second; a reader
+  that cannot keep up loses the oldest audio (it is a live monitor, not a
+  recorder-of-record). Write to a fast sink.
+- **Silence is not filled.** While nothing is playing the read simply waits (the
+  sink stops after about half a second of silence) and resumes the moment audio
+  plays, so a long silent gap is not represented in the captured stream.
+- **Authority is re-checked continuously.** If you stop being the session at the
+  keyboard (or your clearance is revoked) mid-recording, the next read fails --
+  recording follows the trusted path, it does not outlive it.
+
+Device capture (a microphone or line-in via `sources/`) is not yet available.
 
 ## Zero-copy ring (advanced)
 

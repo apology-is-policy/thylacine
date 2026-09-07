@@ -56,6 +56,12 @@ const FIFO_CAP: usize = 64 * 1024;
 const MAX_VOICES: usize = 16;
 /// Bytes per stereo S16 frame.
 const FRAME: usize = 4;
+/// The sink tap's mirror ceiling (N-3c-1): a bounded drop-oldest ring of the
+/// final mixed output that the single authorized reader drains. Bounded so a
+/// stalled reader bleeds the OLDEST audio rather than growing without limit (the
+/// DoS floor -- the tap is realtime, not a durable buffer); a reader keeping up
+/// (it drains faster than one period per PARKED_RETRY_MS) sees it near-empty.
+const TAP_MIRROR_MAX: usize = 8 * PERIOD_BYTES;
 
 const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 const S_IFDIR: u32 = 0o040000;
@@ -71,6 +77,7 @@ const P_AUDIO: u64 = 3;
 const P_NODES: u64 = 4;
 const P_NODES_NEW: u64 = 5;
 const P_VOLUME: u64 = 6;
+const P_TAP: u64 = 7; // /srv/nocturne-ctl/tap: the gated ear on the sink mix (N-3c-1)
 
 // Voice paths: VBIT | (id << 4) | leaf. Leaf 0 = the voice dir; 1/2/3 = the
 // audio/ctl/info files. VBIT (bit 40) is above the 6 fixed root paths AND above
@@ -137,8 +144,9 @@ const ROOT_CHILDREN: [(&[u8], u64, u32); 5] = [
 // (open=connect, never mounted), so the volume write's peer IS the writer and
 // the 6.8 gate reads the real caller. `default`/`sinks/`/`sources/`/the sink
 // `tap` join it as they land. Voices/playback are NOT here -- that is the mount.
-const ROOT_CHILDREN_CTL: [(&[u8], u64, u32); 1] = [
+const ROOT_CHILDREN_CTL: [(&[u8], u64, u32); 2] = [
     (b"volume", P_VOLUME, S_IFREG | 0o666),
+    (b"tap", P_TAP, S_IFREG | 0o444),
 ];
 
 // The root-children table for a connection: the sink-authority set on the
@@ -176,6 +184,11 @@ fn mode_of(path: u64) -> u32 {
                 .unwrap_or(S_IFREG | 0o444),
         }
     } else {
+        // The tap lives only on the control post (ROOT_CHILDREN_CTL), so
+        // ROOT_CHILDREN below does not carry it; report its read-only mode here.
+        if path == P_TAP {
+            return S_IFREG | 0o444;
+        }
         for (_, p, m) in ROOT_CHILDREN {
             if p == path {
                 return m;
@@ -296,6 +309,13 @@ pub struct Graph {
     /// `mix` the master, the mixfs master*control shape.
     sink_audio: [u32; 2],
     sink_mix: [u32; 2],
+    /// The sink tap (N-3c-1): a bounded drop-oldest mirror of the FINAL mixed
+    /// output (post-gain, post-clamp -- an ear on what actually plays), filled by
+    /// `next_period` ONLY while `tap_open`, drained by the one authorized reader.
+    /// `tap_open` is the single-reader guard (a second open gets EBUSY); it is
+    /// cleared on the holder's clunk/teardown, which also drops the mirror.
+    tap_mirror: VecDeque<u8>,
+    tap_open: bool,
 }
 
 /// The daemon's cross-thread state (N-2c). The graph lives behind a try-lockable
@@ -348,7 +368,34 @@ impl Graph {
             started: false,
             sink_audio: [100, 100],
             sink_mix: [100, 100],
+            tap_mirror: VecDeque::new(),
+            tap_open: false,
         }
+    }
+
+    /// Try to claim the single-reader sink tap (N-3c-1). True on success (the
+    /// caller now holds it); false if a reader already does (-> EBUSY). The
+    /// mirror starts empty so a new reader never inherits a prior one's audio.
+    fn tap_try_open(&mut self) -> bool {
+        if self.tap_open {
+            return false;
+        }
+        self.tap_open = true;
+        self.tap_mirror.clear();
+        true
+    }
+
+    /// Release the tap and drop its mirror (the holder clunked or vanished).
+    fn tap_release(&mut self) {
+        self.tap_open = false;
+        self.tap_mirror.clear();
+    }
+
+    /// Drain up to `max` bytes from the tap mirror (FIFO). An empty vec means the
+    /// mirror is empty -- the caller parks until `next_period` fills it.
+    fn tap_take(&mut self, max: usize) -> Vec<u8> {
+        let n = self.tap_mirror.len().min(max);
+        self.tap_mirror.drain(..n).collect()
     }
 
     fn voice_pos(&self, id: u32) -> Option<usize> {
@@ -538,6 +585,18 @@ impl Graph {
             buf[2 * i] = b[0];
             buf[2 * i + 1] = b[1];
         }
+        // N-3c-1: mirror the final mixed output to the sink tap while an
+        // authorized reader holds it (post-gain, post-clamp -- what actually
+        // plays, so a muted sink taps silence). Bounded drop-oldest: append,
+        // then trim the oldest so a stalled reader cannot grow the mirror.
+        if self.tap_open {
+            let out = &buf[..nsamp * 2];
+            self.tap_mirror.extend(out.iter().copied());
+            if self.tap_mirror.len() > TAP_MIRROR_MAX {
+                let drop = self.tap_mirror.len() - TAP_MIRROR_MAX;
+                self.tap_mirror.drain(..drop);
+            }
+        }
         // If buf held an odd trailing byte (never, PERIOD_BYTES is even), leave
         // it zeroed by the caller's cleared buffer.
         let _ = nsamp;
@@ -697,6 +756,15 @@ struct PendingWrite {
     done: usize,
 }
 
+/// A Tread on the sink tap (N-3c-1) that found the mirror empty: parked until
+/// `next_period` fills it (retried within PARKED_RETRY_MS), or failed closed
+/// (EPERM) if the peer loses authority first. `count` is already clamped to
+/// msize. At most one per connection (the tap is single-reader).
+struct PendingTapRead {
+    tag: u16,
+    count: u32,
+}
+
 pub struct Conn {
     handle: i64,
     /// N-3a-3: true iff this connection arrived on the sink-authority control
@@ -710,6 +778,12 @@ pub struct Conn {
     out_buf: Vec<u8>,
     defer: bool,
     pending: Vec<PendingWrite>,
+    /// N-3c-1: the fid on THIS connection holding the single-reader sink tap
+    /// (control post only), or None. Cleared on that fid's clunk or on teardown,
+    /// which also releases the graph's tap guard + drops the mirror.
+    tap_fid: Option<u32>,
+    /// A parked Tread on the tap awaiting a mixed period (or a fail-closed EPERM).
+    pending_tap_read: Option<PendingTapRead>,
 }
 
 pub fn post_srv_nocturne() -> Result<i64, ()> {
@@ -749,6 +823,8 @@ impl Conn {
             out_buf: Vec::new(),
             defer: false,
             pending: Vec::new(),
+            tap_fid: None,
+            pending_tap_read: None,
         }
     }
 
@@ -761,15 +837,24 @@ impl Conn {
             *slot = None;
         }
         self.pending.clear();
-        // Every voice this connection minted dies with it.
-        sh.graph.lock().drop_conn_voices(self.handle);
+        self.pending_tap_read = None;
+        // Every voice this connection minted dies with it; and if this conn held
+        // the single-reader sink tap (N-3c-1), release it so a vanished reader
+        // never wedges the guard. One lock spans both.
+        let held_tap = self.tap_fid.take().is_some();
+        let mut g = sh.graph.lock();
+        g.drop_conn_voices(self.handle);
+        if held_tap {
+            g.tap_release();
+        }
     }
 
-    /// True iff this connection has parked writes awaiting FIFO room; the
+    /// True iff this connection has parked I/O awaiting the cycle thread: a
+    /// parked write (FIFO room) or a parked tap read (a mixed period). The
     /// control loop shortens its poll timeout while any conn does, so a parked
-    /// write completes within a period of the cycle draining room.
+    /// op completes within about a period of the cycle producing.
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+        !self.pending.is_empty() || self.pending_tap_read.is_some()
     }
 
     /// Retry the parked writes in order; a fully-accepted one gets its Rwrite.
@@ -814,6 +899,39 @@ impl Conn {
                     }
                 }
                 Err(()) => return false,
+            }
+        }
+        // N-3c-1: retry a parked tap read. The cycle thread fills the mirror at
+        // period rate; re-check authority FRESH here so a mid-recording
+        // revocation (caps dropped, or the console owner changed) fails closed.
+        if let Some(ptr) = self.pending_tap_read.take() {
+            if !self.sink_authorized() {
+                self.out_buf.clear();
+                self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+                match p9::build_rlerror(&mut self.out_buf, ptr.tag, p9::E_PERM) {
+                    Ok(len) => {
+                        if !self.send_all(len) {
+                            return false;
+                        }
+                    }
+                    Err(()) => return false,
+                }
+            } else {
+                let bytes = sh.graph.lock().tap_take(ptr.count as usize);
+                if bytes.is_empty() {
+                    self.pending_tap_read = Some(ptr); // still empty -- keep parked
+                } else {
+                    self.out_buf.clear();
+                    self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+                    match p9::build_rread(&mut self.out_buf, ptr.tag, &bytes) {
+                        Ok(len) => {
+                            if !self.send_all(len) {
+                                return false;
+                            }
+                        }
+                        Err(()) => return false,
+                    }
+                }
             }
         }
         true
@@ -892,7 +1010,7 @@ impl Conn {
             p9::P9_TWRITE => self.h_write(sh, tmsg, tag),
             p9::P9_TREADDIR => self.h_readdir(sh, tmsg, tag),
             p9::P9_TGETATTR => self.h_getattr(tmsg, tag),
-            p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
+            p9::P9_TCLUNK => self.h_clunk(sh, tmsg, tag),
             p9::P9_TFLUSH => self.h_flush(tmsg, tag),
             p9::P9_TWEFT => self.h_weft(sh, tmsg, tag),
             _ => self.err(tag, p9::E_NOSYS),
@@ -929,17 +1047,21 @@ impl Conn {
         p9::build_rlerror(&mut self.out_buf, tag, code)
     }
 
-    /// I-46 / NOCTURNE.md 6.8: may this connection's peer set the SYSTEM-owned
-    /// sink volume? The two-axis rule (the console-owner SESSION -- the person at
-    /// the keyboard -- OR the `audio-graph` clearance), plus the SYSTEM TCB and
-    /// the CAP_HOSTOWNER admin axis. Read FRESH per write via SYS_SRV_PEER (caps
+    /// I-46 / NOCTURNE.md 6.8: may this connection's peer exercise the
+    /// SYSTEM-owned sink authority -- the volume WRITE and the tap READ (N-3c-1)?
+    /// The two-axis rule (the console-owner SESSION -- the person at the keyboard
+    /// -- OR the `audio-graph` clearance), plus the SYSTEM TCB and the
+    /// CAP_HOSTOWNER admin axis. Read FRESH per operation via SYS_SRV_PEER (caps
     /// mutate), fail-closed on a dead/unknown peer.
     ///
     /// The console axis is SRV_PEER_FLAG_CONSOLE_OWNER (the peer's session owns
     /// the console), NOT the `console` field (console-ATTACHMENT, which I-27
-    /// makes corvus-only -- the N-3a-2 F2). Only meaningful because this runs on
-    /// the per-connection control post, where the peer is the writer.
-    fn volume_authorized(&self) -> bool {
+    /// makes corvus-only -- the N-3a-2 F2). It is trustworthy ONLY on the
+    /// per-connection control post, where the peer is the caller; a shared mount
+    /// presents the mounter (SYSTEM), which this predicate would ADMIT -- so the
+    /// `!self.control` guard at each authority site is what keeps sink authority
+    /// off the mount (the F1 lesson), never this predicate alone.
+    fn sink_authorized(&self) -> bool {
         let mut info = TSrvPeerInfo::default();
         if unsafe { t_srv_peer(self.handle, &mut info) } != 0 || info.alive != 1 {
             return false;
@@ -1107,6 +1229,21 @@ impl Conn {
         } else {
             -1
         };
+        // N-3c-1: opening the sink tap requires (a) the CONTROL post -- the tap
+        // never rides the shared mount whose peer is the mounter=SYSTEM (the F1
+        // lesson; sink_authorized would ADMIT that peer), (b) authority AT OPEN so
+        // an unauthorized caller cannot seize the single-reader slot and wedge it,
+        // and (c) the single-reader guard. Recorded on the fid so clunk/teardown
+        // release it.
+        if f.path == P_TAP {
+            if !self.control || !self.sink_authorized() {
+                return self.err(tag, p9::E_PERM);
+            }
+            if !sh.graph.lock().tap_try_open() {
+                return self.err(tag, p9::E_BUSY);
+            }
+            self.tap_fid = Some(f.fid);
+        }
         self.fids[i] = Some(Fid {
             fid: f.fid,
             path: f.path,
@@ -1147,9 +1284,44 @@ impl Conn {
         if is_dir(f.path) {
             return self.err(tag, p9::E_ISDIR);
         }
-        // audio(3): an output-only device returns zero when read (root + voice).
-        if f.path == P_AUDIO || (is_voice(f.path) && vleaf(f.path) == VLEAF_AUDIO) {
+        // N-3c-1: the mount `/dev/nocturne/audio` READ is refused. Recording is
+        // the gated /srv/nocturne-ctl/tap, never this shared-mount file -- a
+        // shared mount cannot carry the per-reader identity a tap needs (the F1
+        // lesson). Playback (write) is unchanged. (Was the audio(3) output-only
+        // EOF; now an explicit refusal so the recording boundary is discoverable.)
+        if f.path == P_AUDIO {
+            return self.err(tag, p9::E_PERM);
+        }
+        // A per-voice `audio` read stays the audio(3) output-only EOF: it is the
+        // caller's OWN write-only voice, so it leaks nothing.
+        if is_voice(f.path) && vleaf(f.path) == VLEAF_AUDIO {
             return p9::build_rread(&mut self.out_buf, tag, &[]);
+        }
+        // N-3c-1: the sink tap -- an ear on the mixed output. Only on the control
+        // post (the F1 guard: a mount peer is SYSTEM, which sink_authorized would
+        // admit) and gated FRESH per read (authority mutates mid-recording),
+        // fail-closed. Serve buffered bytes; park when the mirror is empty (the
+        // cycle fills it at period rate; a stopped/idle sink yields nothing until
+        // playback resumes).
+        if f.path == P_TAP {
+            if !self.control || !self.sink_authorized() {
+                return self.err(tag, p9::E_PERM);
+            }
+            let cap = (self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4);
+            let want = (a.count as usize).min(cap);
+            // A zero-count read gets a zero-count reply -- never park (a parked
+            // want=0 would never be satisfiable, wedging the single-reader slot).
+            if want == 0 {
+                return p9::build_rread(&mut self.out_buf, tag, &[]);
+            }
+            let bytes = sh.graph.lock().tap_take(want);
+            if bytes.is_empty() {
+                // Park: poll_writes replies once the cycle fills the mirror.
+                self.pending_tap_read = Some(PendingTapRead { tag, count: want as u32 });
+                self.defer = true;
+                return Ok(0); // ignored: dispatch returns Disp::Deferred
+            }
+            return p9::build_rread(&mut self.out_buf, tag, &bytes);
         }
         // The `data` leaf is a Weft map fid (driven by SYS_WEFT_MAP -> Tweft),
         // not a byte file; a Tread on it is a protocol error.
@@ -1327,7 +1499,7 @@ impl Conn {
             // snapshot would be stale) and fails closed on a dead peer. Here the
             // peer IS the writer (a per-connection control conn), so the gate
             // reads the real caller's identity/caps/console-owner session.
-            if !self.volume_authorized() {
+            if !self.sink_authorized() {
                 return self.err(tag, p9::E_PERM);
             }
             let ok = {
@@ -1453,7 +1625,7 @@ impl Conn {
         p9::build_rgetattr(&mut self.out_buf, tag, valid, &Conn::qid_of(f.path), mode, 0, 0, nlink, 0)
     }
 
-    fn h_clunk(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_clunk(&mut self, sh: &Shared, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_tclunk(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -1462,6 +1634,13 @@ impl Conn {
             Some(i) => {
                 self.fids[i] = None;
                 self.pending.retain(|pw| pw.fid != a.fid);
+                // N-3c-1: clunking the tap fid releases the single-reader guard +
+                // the mirror, and abandons any parked read still on that fid.
+                if self.tap_fid == Some(a.fid) {
+                    self.tap_fid = None;
+                    self.pending_tap_read = None;
+                    sh.graph.lock().tap_release();
+                }
                 p9::build_rclunk(&mut self.out_buf, tag)
             }
             None => self.err(tag, p9::E_BADF),
@@ -1476,6 +1655,11 @@ impl Conn {
             Err(_) => return self.err(tag, p9::E_PROTO),
         };
         self.pending.retain(|pw| pw.tag != a.oldtag);
+        // N-3c-1: Tflush of a parked tap read cancels it (no Rread owed -- the
+        // flushed request just gets the Rflush; the tap fid stays open).
+        if self.pending_tap_read.as_ref().is_some_and(|p| p.tag == a.oldtag) {
+            self.pending_tap_read = None;
+        }
         p9::build_rflush(&mut self.out_buf, tag)
     }
 

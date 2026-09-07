@@ -11417,6 +11417,27 @@ int main(void) {
                     return 1;
                 }
                 t_putstr("joey: nocturne-vol-probe OK (control-post allow + mount+control deny; Nocturne N-3a-3)\n");
+            } else if (bootarg_has("thylacine.tapprobe", 18)) {
+                // N-3c-1: the sink-tap (capture) authority witness.
+                // nocturne-tap-probe proves the eavesdropping gate: a SYSTEM
+                // reader opens /srv/nocturne-ctl/tap and CAPTURES a played tone
+                // (positive), a SECOND concurrent open is EBUSY (single-reader),
+                // a /dev/nocturne/audio READ is REFUSED (no eavesdrop via the
+                // shared mount), and a user-principal child is DENIED the tap
+                // (the negative arms; without them a gate that refused every read
+                // would pass the denials alone). Needs CAP_SET_IDENTITY to stamp
+                // the child, so it rides pouch_smoke_one_caps. No wav capture (the
+                // tap reads the software mirror, not the device), so it needs no
+                // capture backend (tools/test-nocturne-tap.sh). FATAL once selected.
+                static const char tp_name[]   = "/bin/nocturne-tap-probe";
+                static const char tp_expect[] = "NOCTURNE-TAP-PROBE PASS";
+                if (pouch_smoke_one_caps(tp_name, sizeof(tp_name) - 1,
+                                         tp_expect, sizeof(tp_expect) - 1,
+                                         T_CAP_SET_IDENTITY) != 0) {
+                    t_putstr("joey: nocturne-tap-probe FAILED (the sink-tap authority; Nocturne N-3c-1)\n");
+                    return 1;
+                }
+                t_putstr("joey: nocturne-tap-probe OK (SYSTEM tap capture + mount+user deny; Nocturne N-3c-1)\n");
             } else {
                 // POST-PIVOT: bare ramfs names no longer resolve; the ramfs
                 // root is bound at /bin (#58), like /bin/corvus and /bin/login.

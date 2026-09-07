@@ -2,7 +2,11 @@
 
 **Status:** N-1 AS-BUILT (2026-09-05, @562cbe50) + N-2a-1 AS-BUILT (2026-09-05)
 + N-2b-1 (the zero-copy Weft ring substrate + map witness) AS-BUILT (2026-09-06)
-+ N-2b-2a (the ring PERIOD protocol + the ring-fed mixer) AS-BUILT (2026-09-06).
++ N-2b-2a (the ring PERIOD protocol + the ring-fed mixer) AS-BUILT (2026-09-06)
++ N-2c (the cycle/control thread split) + N-3a-1..3 (the whole-sink clearance,
+the sink volume file, the two-post per-connection authority + the console-owner
+axis) AS-BUILT (2026-09-07) + N-3c-1 (the gated sink tap -- capture authority)
+AS-BUILT (2026-09-07).
 The design is `docs/NOCTURNE.md`; this chapter is what exists in the tree.
 **N-1**: one warden-bound daemon owning the `virtio-sound` function, one
 playback stream, one 9P tree, one boot probe, one host witness. **N-2a-1**: the
@@ -122,11 +126,12 @@ graph:
 
 | Path | qid | Mode | Read | Write |
 |---|---|---|---|---|
-| `/` | 0 | `0555` dir | `Treaddir` lists `ctl info volume audio nodes` | — |
-| `audio` | 3 | `0666` | 0 bytes (output-only, `audio(3)`) | S16 stereo 48 kHz into **voice 0** |
+| `/` | 0 | `0555` dir | mount lists `ctl info volume audio nodes`; `-ctl` lists `volume tap` | — |
+| `audio` | 3 | `0666` | `EPERM` (N-3c-1: recording is the gated `-ctl/tap`, never the shared mount) | S16 stereo 48 kHz into **voice 0** |
 | `info` | 2 | `0444` | device words + counters + `voices N` | `EPERM` |
 | `ctl` | 1 | `0644` | one description line | `flush` (drops voice 0); else `EINVAL` |
 | `volume` | 6 | `0444` in the mount / `0666` on `-ctl` | `audio <l> <r>` + `mix <l> <r>` (Plan 9 `volume(3)`) | READ-ONLY in the mounted playback tree; writable only on `/srv/nocturne-ctl`, gated (N-3a-3) |
+| `tap` | 7 | `0444` (`-ctl` only) | the mixed sink output (s16 stereo @ graph rate), gated `sink_authorized` fresh per-read + single-reader (EBUSY on a 2nd open); parks while the sink is idle (N-3c-1) | — (read-only) |
 | `nodes/` | 4 | `0555` dir | `Treaddir` lists `new` + each live voice id | — |
 | `nodes/new` | 5 | `0666` | the id of the voice this open minted | (open is the mint) |
 | `nodes/<id>/audio` | vpath | `0666` | 0 bytes | S16 stereo 48 kHz into voice `<id>` |
@@ -221,10 +226,12 @@ authority surface is never globally mounted):
   `h_write` refuses a `P_VOLUME` write on any non-control connection even if an
   owner/root open slips the mode. `cat /dev/nocturne/volume` still works.
 - **`/srv/nocturne-ctl`** -- the SINK-AUTHORITY post, reached by a controller
-  over its OWN connection (`open=connect`, never mounted). The volume node here
-  is `0o666` and writable, and the peer IS the writer, so `volume_authorized`
-  judges the real caller. The native `nocturne-vol` tool connects here; the
-  console-owner session sets the volume with no grant, others need the clearance.
+  over its OWN connection (`open=connect`, never mounted). The `volume` node here
+  is `0o666` and writable, and the `tap` node (N-3c-1) is readable; the peer IS
+  the caller, so `sink_authorized` (renamed from `volume_authorized` -- it now
+  gates BOTH the volume write and the tap read) judges the real one. The native
+  `nocturne-vol` tool connects here; the console-owner session acts with no grant,
+  others need the clearance.
 
 The witness (`/nocturne-vol-probe`, `tools/test-nocturne-volume.sh`) proves the
 split BOTH ways -- and the arm the N-3a-2 witness lacked is the one that matters:
@@ -234,6 +241,38 @@ READS, and a user-principal child's `-ctl` write is REFUSED (EPERM). The
 `CAP_AUDIO_GRAPH` axis is covered by `test_devcap.clearance_audio_graph` and the
 console-owner axis by the kernel `proc_identity.peer_snapshot_console_owner`
 test.
+
+**The sink tap -- capture is a distinct authority (N-3c-1).** The `tap` node on
+`/srv/nocturne-ctl` is an EAR on the mixed sink output: a read returns the final
+post-gain, post-clamp S16 stereo the sink plays. Reading it is recording, which
+is eavesdropping on every program's audio -- so it is the sink authority, the
+same two-axis gate as the volume write (`sink_authorized`: `PRINCIPAL_SYSTEM` OR
+`CAP_HOSTOWNER` OR `CAP_AUDIO_GRAPH` OR the console-owner session), and it lives
+ONLY on `-ctl`, never the mount. Three properties make it safe:
+
+- **Off the mount.** A `/dev/nocturne/audio` READ returns `EPERM` (it was the
+  `audio(3)` output-only EOF; N-3c-1 makes it an explicit refusal so the recording
+  boundary is discoverable). The `!self.control` guard is what keeps the tap off
+  the mount -- `sink_authorized` alone would ADMIT a mount peer, because that peer
+  is the mounter (SYSTEM); the guard, not the predicate, closes the F1 class here.
+- **Fresh per read + fail-closed.** A recording is long-lived while caps and the
+  console owner mutate, so every `tap` read re-checks the peer via `SYS_SRV_PEER`
+  and returns `EPERM` the instant authority is lost -- a recording by the person
+  at the keyboard stops when they cease to own the console; one riding a clearance
+  stops on revocation.
+- **Single-reader, bounded, parking.** `next_period` mirrors each mixed period
+  into a bounded drop-oldest ring (`TAP_MIRROR_MAX` = 8 periods) ONLY while a
+  reader holds the tap; a second concurrent open returns `EBUSY` (a v1.0 bound); a
+  read parks (Tflush-able, released on clunk/teardown, reusing the parked-write
+  plumbing) while the mirror is empty, so a fully-idle sink yields nothing until
+  playback resumes. The guard + mirror are cleared on the holder's clunk/teardown.
+
+The witness (`/nocturne-tap-probe`, `tools/test-nocturne-tap.sh`, boot arg
+`thylacine.tapprobe`) proves it: SYSTEM opens the tap and CAPTURES a played tone
+(the positive arm), a second concurrent open is `EBUSY`, a mount `audio` read is
+REFUSED, and a user-principal child is DENIED the tap. Device capture
+(`sources/`) is deferred to N-3c-2 (the virtio-snd driver negotiates only a
+`D_OUTPUT` stream, so mic capture needs a new RX path + a non-wav witness).
 
 ## The zero-copy ring (N-2b-1)
 
@@ -578,4 +617,15 @@ single boot's wall time.
   pending)` (the per-voice `>= FRAME` test, not the cross-voice sum, since two
   voices with 2 residual bytes each sum to 4 while neither holds a frame).
 - The wav witness covers playback only (QEMU's `wav` backend has no capture
-  voice); the capture-side witness needs a non-wav backend (N-3).
+  voice). The SINK tap (N-3c-1) needs no capture backend -- it reads nocturned's
+  software mirror of the mix, so `/nocturne-tap-probe` captures its own played
+  tone; only DEVICE capture (`sources/`, N-3c-2) needs a non-wav backend.
+- **N-3c-1 sink tap [v1.0 bounds, by design]:** the tap is SINGLE-READER (a
+  second concurrent open returns `EBUSY`) -- one recorder at a time; a bounded
+  drop-oldest mirror (`TAP_MIRROR_MAX` = 8 periods, ~85 ms) means a reader that
+  stalls loses the OLDEST audio rather than growing the buffer (the realtime
+  monitor tradeoff / the DoS floor), so a slow consumer records gaps; and a read
+  PARKS while the sink is fully idle (idle-stop at ~513 ms of silence), so a
+  recording spanning a long gap loses that gap's timing (short gaps under the
+  idle-stop are captured as silence). Multi-reader broadcast, a larger buffer, and
+  stream-kept-running-while-tapped are v1.x refinements.

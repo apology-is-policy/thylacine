@@ -538,6 +538,14 @@ fi
 if [[ "${THYLACINE_VOLPROBE:-0}" == "1" ]]; then
     append_tokens+=("thylacine.volprobe")
 fi
+# N-3c-1: the sink-tap (capture) authority witness (tools/test-nocturne-tap.sh
+# runs /nocturne-tap-probe -- a SYSTEM reader captures a played tone on
+# /srv/nocturne-ctl/tap, a mount /dev/nocturne/audio READ is refused, and a
+# user-principal tap open is denied). No wav capture (the tap reads the software
+# mirror, not the device); gated off by default.
+if [[ "${THYLACINE_TAPPROBE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.tapprobe")
+fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends
