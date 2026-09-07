@@ -35,11 +35,11 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**151 absorbed · 6 live · 157 total.**
+**152 absorbed · 5 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
-| 00-overview.md | live | — |
+| 00-overview.md | absorbed | [[dashboard]], [[moc-boundary]], [[moc-kernel]], [[moc-stratum]], [[moc-substrate]], [[moc-userspace]], [[view-code-coverage]], [[view-invariants]], [[view-roadmap]], [[view-seams]] |
 | 01-boot.md | absorbed | [[abi-boot-banner]], [[inv-i16]], [[sub-kernel-boot-entry]], [[sub-kernel-boot-sequence]], [[sub-kernel-uart]] |
 | 02-dtb.md | absorbed | [[inv-i15]], [[sub-kernel-dtb]] |
 | 03-mmu.md | absorbed | [[sub-kernel-mmu]] |
