@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/145-vivarium (the Linux-compat pole): fold the ^C-mask container behavior into sub-viv"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["b99119f8"]
 touched: [sub-viv]
 established: []
 closed: []
