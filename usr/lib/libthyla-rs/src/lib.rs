@@ -268,6 +268,11 @@ pub const T_CONSOLE_EPISODE_END: u64  = 2;
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
 pub const T_SYS_CAP_GRANT_CLEARANCE: u64 = 61;  // A-4a clearance grant-side bridge
+// A-5a: attach the kernel UART console Dev (/dev/cons) as an fd. Gated on the
+// caller being console-ATTACHED -- the boot anchor (joey) and, post-SAK, the
+// trusted login authority (corvus; IM-3 reads the imperium key and writes the
+// provincia through it). -1 otherwise.
+pub const T_SYS_CONSOLE_OPEN: u64     = 64;
 // IM-2 (IMPERIUM-DESIGN.md 11.4): the clearance grant with a flags word (the
 // 40-byte /cap/grant form). flags 0 = a plain clearance grant;
 // T_CAP_GRANT_FLAG_PROPAGATING = the redeemed caps FLOW to the legate root's
@@ -2644,6 +2649,24 @@ pub unsafe fn t_open_create(start_fd: i64, path: *const u8, path_len: usize,
         in("x3") omode as u64,
         in("x4") perm as u64,
         in("x8") T_SYS_OPEN_CREATE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_console_open — attach the kernel console Dev (/dev/cons) and return an fd
+// carrying RIGHT_READ | RIGHT_WRITE, or -1 when the caller is not console-
+// attached (the A-5a gate: the console-trust anchor only -- joey at bringup,
+// the trusted login authority post-SAK). Reads drain the one global RX ring
+// under the single-reader slot; writes reach the UART through the console
+// writer role (an attached writer passes the IM-1 freeze).
+#[inline(always)]
+pub unsafe fn t_console_open() -> i64 {
+    let mut x0: i64;
+    asm!(
+        "svc #0",
+        lateout("x0") x0,
+        in("x8") T_SYS_CONSOLE_OPEN,
         options(nostack)
     );
     x0

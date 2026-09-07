@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**138 declared surfaces · 133 covered by a hard-audit dossier · 4 soft-owned · 1 unowned · 0 unparsed · 16 cited path(s) that do not resolve.**
+**139 declared surfaces · 134 covered by a hard-audit dossier · 4 soft-owned · 1 unowned · 0 unparsed · 16 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 

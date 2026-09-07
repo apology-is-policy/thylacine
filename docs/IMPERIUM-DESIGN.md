@@ -588,6 +588,95 @@ so the operator can veto any of them:**
 - `CLEARANCE_ACTIVATE(_SELF)` on a DISTINCT_SECRET level stays REFUSED: the only
   path is the SAK episode.
 
+**As-built refinements (IM-3, landed 2026-09-07). Each is a delta from the
+bullets above, settled during the corvus / kernel reads and flagged here so
+the operator can veto any of them:**
+
+1. **The deferred reply is a PARKED `Tread`, not an empty one.** §11.1's "a
+   verb handler that stages no response leaves the client's read parked" was
+   wrong as stated: `dispatch_tread` drained zero bytes into an `Rread` of
+   count 0, which the kernel client hands to userspace as EOF. As built,
+   `IMPERIUM_REQUEST` marks the connection `awaiting_deferred`; a `Tread` on
+   `ctl` that finds nothing staged is recorded (tag + count) and answered
+   later, when the episode stages the reply (9P permits a delayed R; since
+   #841 the srvconn client blocks with no steady-state deadline, death-
+   interruptible, so the park is safe). A `Tflush` of the parked tag (the
+   kernel client's abandon on a note-interrupted read), a `Tversion` reset, or
+   the connection's close drops the park AND the pending request.
+2. **The key wrap is its own compact layout, CRVS-KV v1 (136 bytes)**, not the
+   3752-byte CRVS v1 whose ciphertext field is fixed at the keypair length:
+   magic `CRKV` + version + the argon2 cost triple (the same emit envelope
+   `crvs_v1_unpack` enforces) + salt + nonce + a 32-byte sealed token + the
+   32-byte tag. AD = `"thylacine-corvus-capkey-v1"` || len(subject) || subject
+   || len(level) || level -- length-prefixed so no two (subject, level) pairs
+   share an AD; a distinct prefix domain-separates it from the passphrase and
+   recovery wraps. Interactive argon2id preset (2 / 16 MiB / 1).
+3. **`clearance.db` version 2.** Record kind 2 = KEY {kind, subject_len,
+   level_len, subject, level, wrap_len u16, wrap}. The reader accepts v1 and
+   v2 (a v1 reader fails closed on v2, the posture a corrupt db already has);
+   the writer emits v2. A key record whose eligibility is gone is inert (the
+   request requires both) and tolerated on load; the writer never produces
+   one (REVOKE removes both together, rolled back together).
+4. **`CLEARANCE_GRANT`'s key tail is shaped by the level**: required for a
+   DISTINCT_SECRET level, refused for a RE_AUTH one; a DISTINCT_SECRET level
+   is grantable to a USER subject only (a group cannot hold one key).
+   Idempotent on retry: eligibility present + verifier present + the supplied
+   key verifies -> OK with no rewrite (the boot ladder re-grants every boot); a
+   different key is the hostowner's reset of that subject's key -- the v1.0
+   rotation path. User self-rotation stays v1.x.
+5. **`IMPERIUM_REQUEST` needs no live login session.** The SAK plus the
+   distinct key ARE the authentication; a session would be a weaker second
+   factor bolted onto a stronger one (verb 18's session requirement exists
+   because a session is its ONLY proof). The gates: a live peer whose principal
+   is a corvus user; a DISTINCT_SECRET level (a RE_AUTH level is refused: use
+   18); eligible; enrolled; a non-empty self-restriction; the one slot.
+6. **The rate limit is the RECOVER discipline**: wrong keys per (user, level),
+   in memory, `IMPERIUM_FAIL_MAX` = 5, checked BEFORE the KDF at confer (a
+   locked subject is shown a panel and asked nothing), reset on success,
+   cleared at restart. A decline (empty key / Ctrl-C) and a prompt timeout are
+   not wrong keys and are not counted.
+7. **The episode runs INLINE in corvus's single thread**, bounded by the 60-s
+   prompt: its other clients' 9P messages wait in the kernel rings for its
+   duration. Simpler to audit than a state machine interleaved with the poll
+   loop; a documented residue.
+8. **Two wire-additive statuses**: `Timeout` (7) and `Busy` (8).
+9. **A SAK with nothing pending** renders "nothing pending -- press any key",
+   waits for one byte (bounded), and ENDs -- the §4 "when in doubt, hit the
+   SAK" check, and what `im1-sak-lever.exp` now exercises.
+10. **ARM at startup, not fatal.** corvus opens its notes fd and ARMs after
+    loading its databases; a refused ARM (a spawn outside the boot chain --
+    not the trusted authority) is a WARN and the lex curiata is unavailable
+    while everything else serves.
+11. **The provincia is an 8-bit ASCII cell grid** (glyph + attribute per
+    cell; `usr/corvus/src/provincia.rs`) rasterized to CR LF rows with minimal
+    SGR in userspace -- no Unicode box drawing: the harness decodes the serial
+    stream as iso8859-1 and the v1.x framebuffer sink consumes a byte grid.
+12. **Confer re-derives the requester LIVE** (C-22): `SYS_SRV_PEER` alive, the
+    same stripes and principal as at request time, still eligible, verifier
+    present -- any miss denies; a requester whose connection is gone gets no
+    grant and no reply.
+13. **The key prompt**: raw, unechoed; DEL/BS edit, Ctrl-U kills the line,
+    CR/LF submits; Ctrl-C or an EMPTY key DECLINES (denied, uncounted); a key
+    past `MAX_PASS_LEN` is denied; the whole prompt is bounded at 60 s ->
+    `Timeout`. The prompt's clock is `CLOCK_MONOTONIC` with an idle-slice
+    fallback (a broken clock still bounds it; a keystroke flood cannot
+    exhaust it). Every buffer is wiped on every path; the console handle is
+    closed at END.
+14. **`CLEARANCE_LIST`'s wire is unchanged** (no propagating TLV): the level's
+    `propagating` flag is corvus-internal; IM-4's `--list` may add a TLV tag
+    (additive by construction).
+15. **libthyla-rs gained `t_console_open`** (`SYS_CONSOLE_OPEN` = 64; no
+    wrapper existed -- joey and login are C). No kernel change in IM-3.
+16. **The boot ladder** grants michael the `imperium` level with the fixture
+    key `imperium-key-michael-v1` (idempotent per 4) and probes the deny
+    paths: a RE_AUTH grant with a key tail, a DISTINCT_SECRET grant without
+    one, a DISTINCT_SECRET grant to a group (all `BadFormat`), and verb 19
+    from `PRINCIPAL_SYSTEM` twice (`PermissionDenied` both times: the first
+    refusal took no slot). The boot prover is `usr/imperium-probe`, run from
+    a login session by `tools/interactive/im3-lex-curiata.exp` (confer /
+    wrong key / busy / timeout / the session survives); `im1-sak-lever.exp`
+    now asserts `cons: SAK (episode)` and the empty episode.
+
 ### 11.6 Userspace -- the sub-shell model (IM-4)
 
 - **`usr/imperium`** (native libthyla-rs; thin and untrusted, §3.1):

@@ -348,6 +348,14 @@ renderer; the pending-request consumption (imperium); the per-cap-key auth.
   §28 + IDENTITY-DESIGN §9.8 + CLAUDE.md). No code. The framebuffer trusted sink + the
   graphical SAK build with the Aurora renderer + the MENAGERIE board input path; the
   serial path is live today (A-4c).
+- **2026-09-07 (IM-1 + IM-3, aux)**: the serial trusted path is BUILT end to end. The
+  kernel EPISODE (§12; I-27 enforced on serial) + corvus as its consumer: the §9 flow
+  runs as designed -- `IMPERIUM_REQUEST` posts the pending request, the BREAK opens
+  the episode, corvus composes the provincia as the §7 cell grid and rasterizes it in
+  userspace (ratified fork F1), reads the per-cap key on the frozen console, and
+  registers the propagating grant. `usr/corvus/src/provincia.rs` is the composer the
+  v1.x framebuffer sink consumes. `IMPERIUM-DESIGN.md` §11.3 / §11.5 carry the
+  as-built refinements.
 - **2026-09-07**: the IM phase opened (aux; `IMPERIUM-DESIGN.md` §11). The serial
   EPISODE is IM-1; fork F1 ratified the serial sink as the kernel exclusivity gate
   + userspace rasterization (the §7 refinement); the `sak` note (F3) +

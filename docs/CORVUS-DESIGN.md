@@ -643,6 +643,26 @@ which is precisely what the capability model exists to prevent.
 + `CLEARANCE_ACTIVATE_SELF` are user-facing; `CLEARANCE_GRANT` / `CLEARANCE_REVOKE` are
 `CAP_HOSTOWNER`-gated eligibility admin (the hostowner decides who may become which legate).
 
+**The high-stakes path, as built (IM-3, `IMPERIUM-DESIGN.md` §11.5; 2026-09-07).** The
+diagram's "high-stakes -> the TRUSTED PATH" branch is `IMPERIUM_REQUEST` (verb 19) for a
+`DISTINCT_SECRET` level (the built-in `imperium`: `DAC_OVERRIDE | CHOWN | KILL`, 4 h,
+PROPAGATING). Eligibility for such a level is granted WITH the subject's initial
+per-(user, level) key (the `CLEARANCE_GRANT` key tail; ratified fork F4); corvus keeps a
+VERIFIER -- `argon2id(key) -> AEGIS-256 over a random 32-byte token`, the tag is the check,
+the token is discarded on both sides -- in `clearance.db` (v2, record kind 2), never a DEK
+(IDENTITY-DESIGN §3.1 axis hygiene). The request records ONE pending slot and defers its
+reply; the operator presses the SAK; the kernel opens the trusted EPISODE (IM-1) and posts
+the `sak` note; corvus, on its console handle, renders the **provincia** (the exact cap-set
+the grant will carry, the axe, the term, the requester -- BEFORE any authentication), reads
+the key raw and unechoed, verifies it, re-reads the requester LIVE (`SYS_SRV_PEER`: alive,
+the same stripes and principal, still eligible), and registers the kernel grant
+(`SYS_CAP_GRANT_IMPERIUM`, PROPAGATING); then it answers the parked read, ENDs the episode,
+and wipes every buffer. Wrong keys are counted per (user, level) (the RECOVER discipline;
+5 then locked until restart); a decline or a timeout is not counted. `CLEARANCE_ACTIVATE`
+and `CLEARANCE_ACTIVATE_SELF` on a `DISTINCT_SECRET` level stay refused: a session is not
+that secret. The episode runs inline in corvus's single thread (bounded by the 60-s
+prompt), so its other clients wait for its duration -- a documented residue.
+
 ---
 
 ## 6. Transport: the `/srv` service and per-connection sessions
@@ -749,16 +769,17 @@ Verb table:
 | 13 | GROUP_CREATE | `name_len u8` + `name` |
 | 14 | CLEARANCE_LIST | `token` (33) |
 | 15 | CLEARANCE_ACTIVATE | `token` (33) + `level_len u8` + `level` + `self_restrict u64 LE` + `valid_until_req u64 LE` (0 = level default) |
-| 16 | CLEARANCE_GRANT | `token` (33) + `subject_kind u8` (0=user,1=group) + `subject_len u8` + `subject` + `level_len u8` + `level` |
-| 17 | CLEARANCE_REVOKE | `token` (33) + `subject_kind u8` + `subject_len u8` + `subject` + `level_len u8` + `level` |
+| 16 | CLEARANCE_GRANT | `token` (33) + `subject_kind u8` (0=user,1=group) + `subject_len u8` + `subject` + `level_len u8` + `level` *(IM-3)* `[+ key_len u16 LE + key]` -- the tail is REQUIRED for a `DISTINCT_SECRET` level (user subject only; a group cannot hold one key) and REFUSED (`BadFormat`) for a `RE_AUTH` level. corvus stores a per-(user, level) VERIFIER (argon2id + AEGIS over a random token; `clearance.db` v2 record kind 2), never the key. Idempotent on retry: the same key against the standing verifier is a no-op OK; a different key is the hostowner's reset of that subject's key |
+| 17 | CLEARANCE_REVOKE | `token` (33) + `subject_kind u8` + `subject_len u8` + `subject` + `level_len u8` + `level` (no tail). *(IM-3)* also removes the subject's key verifier for the level |
 | 18 | CLEARANCE_ACTIVATE_SELF | `level_len u8` + `level` + `self_restrict u64 LE` + `valid_until_req u64 LE`. *(#139)* Verb 15 with the token removed: identity comes from the connection's kernel-stamped principal (`SYS_SRV_PEER`) instead of a bearer secret. Same OK reply, same policy. Gate: the caller's principal must resolve to a corvus user, be eligible for the level, and have a **live session of its own** -- that last is what satisfies `auth_required = RE_AUTH` without anything being quoted |
+| 19 | IMPERIUM_REQUEST | *(IM-3, `IMPERIUM-DESIGN.md` §11.5)* the verb-18 payload (`level_len u8` + `level` + `self_restrict u64 LE` + `valid_until_req u64 LE`) for a `DISTINCT_SECRET` level. Identity = the kernel-stamped principal; NO token and NO live-session requirement (the SAK plus the distinct key ARE the authentication). Gates, in order: a live peer whose principal is a corvus user; a known level that is `DISTINCT_SECRET` (a `RE_AUTH` level -> `PermissionDenied`: use 18); eligible; enrolled (a key verifier exists); `self_restrict` non-empty; ONE pending slot system-wide (else `Busy` at once). The reply is **DEFERRED**: corvus stages nothing and the requester's next `Tread` on `ctl` is PARKED (a 0-byte `Rread` would be EOF) until the SAK episode concludes -- `OK` {`legate_session_id u32` + `granted_caps u64`, the 15/18 shape} / `BadAuth` (denied: wrong key, declined, requester changed) / `RateLimited` / `Timeout` (no SAK within 60 s, or no key within the 60-s prompt). A `Tflush` of the parked tag, a `Tversion` reset, or the connection's close abandons the request |
 
 Verbs 11-13 + the USER_CREATE extension are the A-1b identity surface; full semantics + OK-response payloads + the byte format + persistence are in §16.
 
 Response frame:
 
 ```
-[0]      status            u8  (0=OK, 1=BadAuth, 2=PermissionDenied, 3=NotFound, 4=RateLimited, 5=BadFormat, 6=InternalError)
+[0]      status            u8  (0=OK, 1=BadAuth, 2=PermissionDenied, 3=NotFound, 4=RateLimited, 5=BadFormat, 6=InternalError, 7=Timeout, 8=Busy -- 7/8 are IM-3's deferred-reply outcomes, wire-additive)
 [1..3)   payload_len       u16 LE
 [3..)    payload           status-specific (e.g., session token on AUTH OK, DEK on UNWRAP OK; A-1b: {principal_id,primary_gid} on USER_CREATE OK, the resolved record on RESOLVE_* OK, the gid on GROUP_CREATE OK — see §16.7; A-5c: USER_CREATE OK and RECOVER OK additionally carry the freshly-minted 24-word recovery phrase as a trailing `phrase_len u16` + `phrase` — the OK payload grows append-only; callers updated in lockstep)
 ```

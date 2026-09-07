@@ -752,6 +752,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "imperium-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

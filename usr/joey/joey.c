@@ -2875,6 +2875,118 @@ static int do_corvus_bringup(long storage_dup_fd) {
     }
     t_putstr("joey: CLEARANCE_GRANT michael jit ok (eligibility recorded)\n");
 
+    // === IM-3: CLEARANCE_GRANT michael imperium WITH the imperium key ===
+    // A DISTINCT_SECRET level is granted together with the subject's initial
+    // per-(user, level) key (the tail: key_len u16 LE + key; IMPERIUM-DESIGN.md
+    // 11.5, ratified F4); corvus keeps a VERIFIER, never the key. Idempotent
+    // across boots: the same key against the standing verifier is a no-op OK.
+    // The fixture key is what tools/interactive/im3-lex-curiata.exp types on
+    // the trusted path.
+    {
+        static const char key[] = "imperium-key-michael-v1";
+        size_t kl = sizeof(key) - 1;
+        size_t o = 0;
+        for (int i = 0; i < 33; i++) tx[o++] = token[i];
+        tx[o++] = 0;   // subject_kind = user
+        tx[o++] = 7;   // subject_len
+        const char m3[] = "michael";
+        for (int i = 0; i < 7; i++) tx[o++] = (unsigned char)m3[i];
+        tx[o++] = 8;   // level_len
+        const char lv4[] = "imperium";
+        for (int i = 0; i < 8; i++) tx[o++] = (unsigned char)lv4[i];
+        tx[o++] = (unsigned char)(kl & 0xff);
+        tx[o++] = (unsigned char)(kl >> 8);
+        for (size_t i = 0; i < kl; i++) tx[o++] = (unsigned char)key[i];
+        pl = o;
+    }
+    if (corvus_exchange(conn_fd, 16, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: CLEARANCE_GRANT michael imperium transport FAILED\n");
+        return 1;
+    }
+    if (st != 0) {
+        t_putstr("joey: CLEARANCE_GRANT michael imperium unexpected status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: CLEARANCE_GRANT michael imperium ok (eligibility + key verifier recorded)\n");
+
+    // === IM-3 DENY-path probes: a boot that is OK proves nothing about a gate;
+    // only a refusal does. (a) a RE_AUTH level with a key tail -> BadFormat(5);
+    // (b) the DISTINCT_SECRET level with NO key -> BadFormat(5); (c) the
+    // DISTINCT_SECRET level to a GROUP -> BadFormat(5); (d) IMPERIUM_REQUEST
+    // (19) from joey -- PRINCIPAL_SYSTEM, never a corvus user -> Permission-
+    // Denied(2), TWICE: a second refusal (never Busy(8)) proves the first was
+    // refused before it could occupy the one pending slot.
+    {
+        size_t o = 0;
+        for (int i = 0; i < 33; i++) tx[o++] = token[i];
+        tx[o++] = 0; tx[o++] = 7;
+        const char m4[] = "michael";
+        for (int i = 0; i < 7; i++) tx[o++] = (unsigned char)m4[i];
+        tx[o++] = 8;
+        const char lv5[] = "fs-admin";
+        for (int i = 0; i < 8; i++) tx[o++] = (unsigned char)lv5[i];
+        tx[o++] = 1; tx[o++] = 0; tx[o++] = 'x';   // a key tail on a RE_AUTH level
+        pl = o;
+    }
+    if (corvus_exchange(conn_fd, 16, tx, pl, rx, sizeof(rx), &st, &rlen) != 0 || st != 5) {
+        t_putstr("joey: IM-3 (a) RE_AUTH grant with a key tail NOT refused BadFormat (status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr(")\n");
+        return 1;
+    }
+    {
+        size_t o = 0;
+        for (int i = 0; i < 33; i++) tx[o++] = token[i];
+        tx[o++] = 0; tx[o++] = 7;
+        const char m5[] = "michael";
+        for (int i = 0; i < 7; i++) tx[o++] = (unsigned char)m5[i];
+        tx[o++] = 8;
+        const char lv6[] = "imperium";
+        for (int i = 0; i < 8; i++) tx[o++] = (unsigned char)lv6[i];
+        pl = o;   // no key
+    }
+    if (corvus_exchange(conn_fd, 16, tx, pl, rx, sizeof(rx), &st, &rlen) != 0 || st != 5) {
+        t_putstr("joey: IM-3 (b) imperium grant WITHOUT a key NOT refused BadFormat (status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr(")\n");
+        return 1;
+    }
+    {
+        size_t o = 0;
+        for (int i = 0; i < 33; i++) tx[o++] = token[i];
+        tx[o++] = 1; tx[o++] = 7;   // subject_kind = GROUP (michael's UPG exists)
+        const char m6[] = "michael";
+        for (int i = 0; i < 7; i++) tx[o++] = (unsigned char)m6[i];
+        tx[o++] = 8;
+        const char lv7[] = "imperium";
+        for (int i = 0; i < 8; i++) tx[o++] = (unsigned char)lv7[i];
+        tx[o++] = 1; tx[o++] = 0; tx[o++] = 'x';
+        pl = o;
+    }
+    if (corvus_exchange(conn_fd, 16, tx, pl, rx, sizeof(rx), &st, &rlen) != 0 || st != 5) {
+        t_putstr("joey: IM-3 (c) imperium grant to a GROUP NOT refused BadFormat (status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr(")\n");
+        return 1;
+    }
+    for (int round = 0; round < 2; round++) {
+        size_t o = 0;
+        tx[o++] = 8;
+        const char lv8[] = "imperium";
+        for (int i = 0; i < 8; i++) tx[o++] = (unsigned char)lv8[i];
+        for (int i = 0; i < 16; i++) tx[o++] = 0;   // self_restrict 0 + valid_until_req 0
+        pl = o;
+        if (corvus_exchange(conn_fd, 19, tx, pl, rx, sizeof(rx), &st, &rlen) != 0 || st != 2) {
+            t_putstr("joey: IM-3 (d) IMPERIUM_REQUEST from PRINCIPAL_SYSTEM NOT refused PermissionDenied (status=");
+            t_putstr(itoa_dec(st, buf, sizeof(buf)));
+            t_putstr(")\n");
+            return 1;
+        }
+    }
+    t_putstr("joey: IM-3 deny-path probes ok (key-tail shape x3 refused; verb 19 refused twice, no slot taken)\n");
+
     // === #163: the user-default jit seed, probed via susan ===
     // susan is created above with NO explicit grant, so her jit eligibility can
     // only come from one of the two #163 mechanisms: corvus's USER_CREATE seed

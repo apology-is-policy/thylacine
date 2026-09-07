@@ -22,6 +22,73 @@ needed the operator.
 
 
 ---
+## 2026-09-07 (aux, fifth run) -- IM-3 the lex curiata: corvus confers imperium on the trusted path; a design claim corrected by the code; two hazards caught before the scenario ran
+
+**What landed.** IM-3 (the corvus half of the Imperium/SAK arc; `IMPERIUM-DESIGN.md`
+11.5 + 16 as-built refinements; the hash is in the phase-7 IM-3 row). On Fable 5.1 at
+effort max (the far side of the run-4 compaction came back on Fable, so the crypto
+authoring the resume note had HELD on the Opus fallback proceeded). The end-to-end
+flow is real over the serial console: a login-session program posts
+`IMPERIUM_REQUEST`, the operator presses BREAK, the kernel freezes the console
+(IM-1), corvus renders the provincia, reads the imperium key raw and unechoed,
+verifies it against a stored VERIFIER, re-reads the requester live, registers the
+PROPAGATING grant (IM-2), answers the requester's parked read, ENDs the episode; the
+requester redeems and `/proc/<pid>/imperium` reads `propagating 1`. LS-CI witnesses
+both scenarios; joey's ladder witnesses the grant and four deny paths every boot.
+
+**A design claim the code corrected (refinement 1).** 11.1 had "verified" that a verb
+handler which stages no response "leaves the client's read parked". Reading
+`dispatch_tread` showed the opposite: it drains zero bytes into an `Rread` of count 0,
+and the kernel client hands a 0-count `Rread` to userspace as EOF. The deferral had to
+be built as a PARKED `Tread` -- the request records the tag and count and corvus
+answers it later, which 9P permits; the srvconn client blocks with no steady-state
+deadline since #841, so the park is safe; `Tflush` (the kernel client's abandon on a
+note-interrupted read) drops both the park and the request. The lesson is the run-3
+one again: a "verified" line in a design revisit is a claim about what the author
+believed the code did, and it costs one read to check.
+
+**Two hazards caught before the scenario ran, one by the self-audit and one by the
+first bake.** (1) The server loop handled the `sak` note BEFORE it serviced connection
+input, so a request whose `Twrite` and the operator's BREAK landed in the same poll
+would have found "nothing pending" and stranded until its 60-s timeout -- an
+ordering the harness would have hit (it presses the SAK milliseconds after the probe's
+line) and a human might have, rarely. Connections are serviced first now, and the
+probe announces "press the SAK" only AFTER its request bytes are written. Caught
+while reading my own loop against the scenario's timeline, not by a test; the fix
+cost an incremental rebake. (2) The first LS-CI run of `im3-lex-curiata` failed
+deterministically at arm 2 on `axe:     YES`: the axe value is rendered BOLD, so an
+SGR sequence sits between the label and the value on the wire and an exact-string
+match cannot span it (arm 1's unstyled `no` matched, which is exactly why it was not
+seen earlier). The transcript bytes confirmed it (`axe:     ^[[1mYES ...`); the fix is
+a regex in the scenario, not a change to the composer -- the provincia was correct.
+Arm 1 (the whole confer path) had already passed on that run.
+
+**Refinements worth the operator's eye** (all 16 are in 11.5, flagged for veto): the
+key wrap is its OWN 136-byte layout rather than the 3752-byte CRVS v1 (whose
+ciphertext is fixed at the keypair length); `clearance.db` went to version 2 (reader
+accepts v1 and v2); the grant's key tail is required for DISTINCT_SECRET and refused
+for RE_AUTH, user-subject only; a re-grant whose key verifies rewrites nothing (the
+boot ladder re-grants every boot) and a different key is the hostowner's reset;
+`IMPERIUM_REQUEST` needs NO live login session (the SAK plus the distinct key ARE the
+authentication); wrong keys are rate-limited per (user, level) at 5 until restart,
+declines and timeouts uncounted; the episode runs INLINE in corvus's single thread
+(other clients wait <= 60 s -- the one residue I would most expect a veto on).
+
+**Gates.** corvus-crypto host tests 17/17 (4 new); clippy adds no warning in the
+changed files; full bake + `test.sh` 1535/1535 + the ladder's `CLEARANCE_GRANT michael
+imperium ok` + `IM-3 deny-path probes ok`; LS-CI `im1-sak-lever` PASS (35 s, 1 attempt;
+rewritten for the armed consumer: `cons: SAK (episode)` + two empty episodes dismissed
+by a key) and `im3-lex-curiata` PASS (91 s, 1 attempt: confer / wrong key with the
+axe / BUSY / TIMEOUT / the session survives). No SMP gate: no kernel change. The
+vault was rung (call 0073) for the corvus / corvus-crypto / libthyla-rs / joey /
+build.sh dossiers and the three new unowned surfaces.
+
+**Owed.** The IM-3 audit (crypto + privilege, audit:hard) is BATCHED with IM-4 per
+the double-distance rule; the AUDIT-TRIGGERS IM-3 row carries nine prosecution
+addenda, the verifier and the parked-read lifecycle first among them. IM-4 next:
+`usr/imperium` (the sub-shell model) + ut `abdicate` + the fasces prompt + the
+manual page.
+
 ## 2026-09-07 (aux, fourth run) -- IM-1 + IM-2 batched holotype: a CLEAN close, and a SILENT reviewer fallback the JSONL caught
 
 The fourth run of the day did one thing: the batched adversarial holotype round

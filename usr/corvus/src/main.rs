@@ -109,15 +109,24 @@ use corvus_crypto::*;
 use libthyla_rs::ninep as p9;
 
 use libthyla_rs::{
-    t_cap_grant, t_cap_grant_clearance, t_chroot, t_close, t_explicit_bzero, t_fsync,
-    t_getrandom, t_mlockall, t_open, t_poll, t_putstr, t_read, t_rename,
-    t_set_dumpable, t_set_traceable, t_srv_accept, t_srv_peer, t_unlink, t_walk_create,
-    t_walk_open, t_write, TPollFd, TSrvPeerInfo, T_CAP_AUDIO_GRAPH, T_CAP_CHOWN, T_CAP_DAC_OVERRIDE,
-    T_CAP_HOSTOWNER, T_CAP_JIT, T_CAP_KILL, T_OPATH, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN,
-    T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
+    t_cap_grant, t_cap_grant_clearance, t_cap_grant_imperium, t_chroot, t_close,
+    t_console_episode, t_console_open, t_explicit_bzero, t_fsync, t_getrandom, t_mlockall,
+    t_open, t_poll, t_putstr, t_read, t_rename, t_set_dumpable, t_set_traceable, t_srv_accept,
+    t_srv_peer, t_unlink, t_walk_create, t_walk_open, t_write, TPollFd, TSrvPeerInfo,
+    T_CAP_AUDIO_GRAPH, T_CAP_CHOWN, T_CAP_DAC_OVERRIDE, T_CAP_DEBUG, T_CAP_GRANT_FLAG_PROPAGATING,
+    T_CAP_HOSTOWNER, T_CAP_JIT, T_CAP_KILL, T_CONSOLE_EPISODE_ARM, T_CONSOLE_EPISODE_END, T_OPATH,
+    T_OREAD, T_OWRITE, T_POLLERR, T_POLLHUP, T_POLLIN, T_POLLNVAL, T_WALK_CREATE_DMDIR,
+    T_WALK_OPEN_FROM_ROOT,
 };
+use libthyla_rs::notes::Notes;
+use libthyla_rs::poll::AsFd;
+use libthyla_rs::time::monotonic_ns;
 
 use alloc::vec::Vec;
+
+// IM-3: the trusted-path composer (the provincia cell grid + its serial
+// rasterizer; TRUSTED-PATH.md 7, ratified fork F1).
+mod provincia;
 
 // =============================================================================
 // Heap allocator — required for Argon2id's working-memory matrix.
@@ -1209,10 +1218,11 @@ unsafe fn system_identity_load() -> bool {
 // =============================================================================
 
 // auth_required scales with stakes (scripture §3.1). v1.0 enforces RE_AUTH in
-// band (a valid session token IS the re-auth proof). The high-stakes paths
-// (DISTINCT_SECRET / SYSTEM_KEY / HOSTOWNER_COSIGN) require the kernel SAK
-// trusted path (A-4c, not yet built), so CLEARANCE_ACTIVATE on such a level is
-// REFUSED at v1.0 -- a documented A-4c dependency, not a silent gap.
+// band (a valid session token IS the re-auth proof). DISTINCT_SECRET is the
+// kernel SAK trusted path (IM-3, IMPERIUM-DESIGN.md 11.5): unlocked ONLY by
+// IMPERIUM_REQUEST + a serial BREAK + the per-(user, level) key typed on the
+// frozen console -- CLEARANCE_ACTIVATE(_SELF) on such a level stays REFUSED.
+// SYSTEM_KEY / HOSTOWNER_COSIGN remain unbuilt and refused (a documented gap).
 const AUTH_REQ_RE_AUTH: u8 = 0;
 const AUTH_REQ_DISTINCT_SECRET: u8 = 1;
 const AUTH_REQ_SYSTEM_KEY: u8 = 2;
@@ -1230,6 +1240,23 @@ struct ClearanceLevel {
     caps: u64,
     auth_required: u8,
     time_bound_ns: u64, // 0 = no time bound (scope ends only on legate root exit)
+    // IM-3: the scope the redeemer creates is PROPAGATING -- the caps FLOW to
+    // its rfork descendants, which die with it (IMPERIUM-DESIGN.md 11.4; the
+    // kernel bounds a propagating grant to CAP_GRANTABLE_IMPERIUM).
+    propagating: bool,
+}
+
+// The redeemer may ask for SHORTER than the level's bound, never longer; an
+// unbounded level honors the request as-is (0 = none). Shared by every path
+// that turns a level + a request into a grant (verbs 15 / 18 / 19).
+fn level_valid_for(lvl: &ClearanceLevel, valid_until_req: u64) -> u64 {
+    if valid_until_req == 0 {
+        lvl.time_bound_ns
+    } else if lvl.time_bound_ns != 0 {
+        core::cmp::min(valid_until_req, lvl.time_bound_ns)
+    } else {
+        valid_until_req
+    }
 }
 
 // The v1.0 built-in level set. fs-admin (the DAC-override + chown split out of
@@ -1246,12 +1273,14 @@ static CLEARANCE_LEVELS: &[ClearanceLevel] = &[
         caps: T_CAP_DAC_OVERRIDE | T_CAP_CHOWN,
         auth_required: AUTH_REQ_RE_AUTH,
         time_bound_ns: 0,
+        propagating: false,
     },
     ClearanceLevel {
         name: b"supervisor",
         caps: T_CAP_KILL,
         auth_required: AUTH_REQ_RE_AUTH,
         time_bound_ns: 0,
+        propagating: false,
     },
     // jit (CL-7k / I-42): the authority to create a dual-mapped code region --
     // the only path by which userspace-emitted bytes become executable. This is
@@ -1268,6 +1297,7 @@ static CLEARANCE_LEVELS: &[ClearanceLevel] = &[
         caps: T_CAP_JIT,
         auth_required: AUTH_REQ_RE_AUTH,
         time_bound_ns: 0,
+        propagating: false,
     },
     // audio-graph (Nocturne N-3a / I-46; docs/NOCTURNE.md 6.8): the whole-sink
     // authority. Its holder may operate on the SYSTEM-owned sink beyond its own
@@ -1282,6 +1312,23 @@ static CLEARANCE_LEVELS: &[ClearanceLevel] = &[
         caps: T_CAP_AUDIO_GRAPH,
         auth_required: AUTH_REQ_RE_AUTH,
         time_bound_ns: 0,
+        propagating: false,
+    },
+    // imperium (IM-3; IMPERIUM-DESIGN.md 11.5): the power-user tier. The same
+    // three elevation-only caps fs-admin + supervisor carry, but unlocked ONLY
+    // on the trusted path -- a serial BREAK opens the kernel episode and the
+    // per-user imperium key is typed on the frozen console, never a session
+    // token -- bounded to four hours, and PROPAGATING: the sub-shell's children
+    // inherit the caps and die with the scope (I-25 strengthened; a forgotten
+    // imperium shell is not a forgotten root shell). Eligibility is
+    // admin-granted WITH the key (CLEARANCE_GRANT's key tail); the request's
+    // cap-set is the self-restriction subset (`imperium chown dac`).
+    ClearanceLevel {
+        name: b"imperium",
+        caps: T_CAP_DAC_OVERRIDE | T_CAP_CHOWN | T_CAP_KILL,
+        auth_required: AUTH_REQ_DISTINCT_SECRET,
+        time_bound_ns: 4 * 3600 * 1_000_000_000,
+        propagating: true,
     },
 ];
 
@@ -1319,7 +1366,13 @@ const SUBJECT_KIND_GROUP: u8 = 1;
 
 const CLEARANCE_DB: &[u8] = b"clearance.db";
 const CLEARANCE_DB_TMP: &[u8] = b"clearance.db.tmp";
-const CLEARANCE_DB_VERSION: u32 = 1;
+// IM-3: version 2 adds the KEY record kind (the per-(user, level) capability-
+// key verifier, IMPERIUM-DESIGN.md 11.5 / ratified F4). The writer emits v2;
+// the reader accepts v1 (eligibility records only) and v2. A v1 reader fails
+// closed on a v2 file, which is the posture a corrupt-or-unknown db already
+// has: it must never silently drop records.
+const CLEARANCE_DB_VERSION_V1: u32 = 1;
+const CLEARANCE_DB_VERSION: u32 = 2;
 const CLEARANCE_DB_HEADER_LEN: usize = 12;
 // Pin the header layout (RW-6 R3-F4), mirroring identity.db's IDENTITY_DB_HEADER_LEN
 // assert: magic(4) + version(4) + count(4). A future field add on one side without
@@ -1361,8 +1414,90 @@ static mut ELIGIBILITY: Option<Vec<EligibilityRecord>> = None;
 // Retiring verb 15 (task #140) removes the amplified surface outright.
 const SEED_LEVEL_JIT: &[u8] = b"jit";
 
+// IM-3: the capability-key VERIFIER records -- one per (user, DISTINCT_SECRET
+// level), minted at CLEARANCE_GRANT from the key the hostowner supplies and
+// consumed only by the SAK episode. clearance.db record kind 2. A verifier
+// (argon2id + AEGIS over a random token; the tag is the check), never a DEK:
+// a stolen clearance.db is an offline guessing target and nothing more. Every
+// key record pairs with an eligibility record (REVOKE removes both), so the
+// bound is MAX_ELIGIBILITY by construction; a stray key with no eligibility is
+// INERT (the request path requires both) and is tolerated on load.
+const RECORD_KIND_KEY: u8 = 2;
+const MAX_CAPKEYS: usize = MAX_ELIGIBILITY;
+
+struct CapKeyRecord {
+    subject: Vec<u8>,
+    level: Vec<u8>,
+    wrap: CapKeyWrap,
+}
+
+static mut CAPKEYS: Option<Vec<CapKeyRecord>> = None;
+
 unsafe fn clearance_init() {
     core::ptr::write(core::ptr::addr_of_mut!(ELIGIBILITY), Some(Vec::new()));
+    core::ptr::write(core::ptr::addr_of_mut!(CAPKEYS), Some(Vec::new()));
+}
+
+unsafe fn capkey_count() -> usize {
+    match (*core::ptr::addr_of!(CAPKEYS)).as_ref() {
+        Some(k) => k.len(),
+        None => 0,
+    }
+}
+
+unsafe fn capkey_find(subject: &[u8], level: &[u8]) -> Option<CapKeyWrap> {
+    let table = (*core::ptr::addr_of!(CAPKEYS)).as_ref()?;
+    table
+        .iter()
+        .find(|r| r.subject == subject && r.level == level)
+        .map(|r| r.wrap.clone())
+}
+
+// Insert or replace. Ok(the previous wrap, if any) so a persist failure can
+// put it back; Err on an uninitialized or full table.
+unsafe fn capkey_set(subject: &[u8], level: &[u8], wrap: CapKeyWrap) -> Result<Option<CapKeyWrap>, ()> {
+    let table = match (*core::ptr::addr_of_mut!(CAPKEYS)).as_mut() {
+        Some(t) => t,
+        None => return Err(()),
+    };
+    for r in table.iter_mut() {
+        if r.subject == subject && r.level == level {
+            let prev = core::mem::replace(&mut r.wrap, wrap);
+            return Ok(Some(prev));
+        }
+    }
+    if table.len() >= MAX_CAPKEYS {
+        return Err(());
+    }
+    let mut s = Vec::new();
+    s.extend_from_slice(subject);
+    let mut l = Vec::new();
+    l.extend_from_slice(level);
+    table.push(CapKeyRecord { subject: s, level: l, wrap });
+    Ok(None)
+}
+
+// Remove, returning the wrap so a persist failure can restore it.
+unsafe fn capkey_take(subject: &[u8], level: &[u8]) -> Option<CapKeyWrap> {
+    let table = (*core::ptr::addr_of_mut!(CAPKEYS)).as_mut()?;
+    let idx = table
+        .iter()
+        .position(|r| r.subject == subject && r.level == level)?;
+    Some(table.remove(idx).wrap)
+}
+
+// The rollback twin of capkey_set / capkey_take: None -> remove, Some -> put
+// back. Best-effort (a full table cannot refuse a restore of a record it just
+// held; an uninitialized table never reaches here).
+unsafe fn capkey_restore(subject: &[u8], level: &[u8], prev: Option<CapKeyWrap>) {
+    match prev {
+        Some(w) => {
+            let _ = capkey_set(subject, level, w);
+        }
+        None => {
+            let _ = capkey_take(subject, level);
+        }
+    }
 }
 
 unsafe fn eligibility_count() -> usize {
@@ -1454,15 +1589,21 @@ unsafe fn user_eligible_for(user: &[u8], level: &[u8]) -> bool {
     false
 }
 
+// Serialize (v2): the eligibility records, then the key records. `count` in
+// the header is the TOTAL record count.
 unsafe fn clearance_db_serialize() -> Vec<u8> {
     let table = match (*core::ptr::addr_of!(ELIGIBILITY)).as_ref() {
         Some(t) => t,
         None => return Vec::new(),
     };
+    let keys = match (*core::ptr::addr_of!(CAPKEYS)).as_ref() {
+        Some(k) => k,
+        None => return Vec::new(),
+    };
     let mut out = Vec::new();
     out.extend_from_slice(&CORVUS_MAGIC.to_le_bytes());
     out.extend_from_slice(&CLEARANCE_DB_VERSION.to_le_bytes());
-    out.extend_from_slice(&(table.len() as u32).to_le_bytes());
+    out.extend_from_slice(&((table.len() + keys.len()) as u32).to_le_bytes());
     for r in table {
         out.push(r.subject_kind);
         out.push(r.subject.len() as u8);
@@ -1470,26 +1611,41 @@ unsafe fn clearance_db_serialize() -> Vec<u8> {
         out.extend_from_slice(&r.subject);
         out.extend_from_slice(&r.level);
     }
+    for k in keys {
+        out.push(RECORD_KIND_KEY);
+        out.push(k.subject.len() as u8);
+        out.push(k.level.len() as u8);
+        out.extend_from_slice(&k.subject);
+        out.extend_from_slice(&k.level);
+        out.extend_from_slice(&(CAPKEY_WRAP_LEN as u16).to_le_bytes());
+        out.extend_from_slice(&k.wrap.to_bytes());
+    }
     out
 }
 
-// Parse clearance.db into ELIGIBILITY. Every length is bounds-checked against the
-// remaining buffer; any malformed/truncated record (or trailing bytes) fails the
-// WHOLE load closed (the identity_db_parse discipline).
+// Parse clearance.db into ELIGIBILITY + CAPKEYS. Every length is bounds-checked
+// against the remaining buffer; any malformed/truncated record (or trailing
+// bytes) fails the WHOLE load closed (the identity_db_parse discipline). A v1
+// file carries eligibility records only; a key record (kind 2) is admitted
+// only under v2, and its wrap must parse (magic / version / the cost envelope)
+// or the load fails -- a tampered verifier is never carried live.
 unsafe fn clearance_db_parse(blob: &[u8]) -> bool {
     if blob.len() < CLEARANCE_DB_HEADER_LEN {
         return false;
     }
     let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
     let version = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
-    if magic != CORVUS_MAGIC || version != CLEARANCE_DB_VERSION {
+    if magic != CORVUS_MAGIC
+        || (version != CLEARANCE_DB_VERSION_V1 && version != CLEARANCE_DB_VERSION)
+    {
         return false;
     }
     let count = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]) as usize;
-    if count > MAX_ELIGIBILITY {
+    if count > MAX_ELIGIBILITY + MAX_CAPKEYS {
         return false;
     }
     let mut recs: Vec<EligibilityRecord> = Vec::new();
+    let mut keys: Vec<CapKeyRecord> = Vec::new();
     let mut off = CLEARANCE_DB_HEADER_LEN;
     for _ in 0..count {
         if off + 3 > blob.len() {
@@ -1499,7 +1655,8 @@ unsafe fn clearance_db_parse(blob: &[u8]) -> bool {
         let sl = blob[off + 1] as usize;
         let ll = blob[off + 2] as usize;
         off += 3;
-        if kind != SUBJECT_KIND_USER && kind != SUBJECT_KIND_GROUP {
+        let is_key = kind == RECORD_KIND_KEY && version == CLEARANCE_DB_VERSION;
+        if !is_key && kind != SUBJECT_KIND_USER && kind != SUBJECT_KIND_GROUP {
             return false;
         }
         if sl == 0 || sl > MAX_USER_LEN || ll == 0 || ll > MAX_LEVEL_LEN {
@@ -1514,12 +1671,36 @@ unsafe fn clearance_db_parse(blob: &[u8]) -> bool {
         let mut level = Vec::with_capacity(ll);
         level.extend_from_slice(&blob[off..off + ll]);
         off += ll;
-        recs.push(EligibilityRecord { subject_kind: kind, subject, level });
+        if is_key {
+            if off + 2 > blob.len() {
+                return false;
+            }
+            let wl = (blob[off] as usize) | ((blob[off + 1] as usize) << 8);
+            off += 2;
+            if wl != CAPKEY_WRAP_LEN || off + wl > blob.len() {
+                return false;
+            }
+            let wrap = match CapKeyWrap::from_bytes(&blob[off..off + wl]) {
+                Some(w) => w,
+                None => return false,
+            };
+            off += wl;
+            if keys.len() >= MAX_CAPKEYS {
+                return false;
+            }
+            keys.push(CapKeyRecord { subject, level, wrap });
+        } else {
+            if recs.len() >= MAX_ELIGIBILITY {
+                return false;
+            }
+            recs.push(EligibilityRecord { subject_kind: kind, subject, level });
+        }
     }
     if off != blob.len() {
         return false; // trailing garbage -> fail closed
     }
     core::ptr::write(core::ptr::addr_of_mut!(ELIGIBILITY), Some(recs));
+    core::ptr::write(core::ptr::addr_of_mut!(CAPKEYS), Some(keys));
     true
 }
 
@@ -1579,7 +1760,9 @@ unsafe fn clearance_load() -> bool {
     t_putstr("corvus: clearance.db loaded (");
     let mut nbuf = [0u8; 12];
     t_putstr(usize_dec(eligibility_count(), &mut nbuf));
-    t_putstr(" eligibility records)\n");
+    t_putstr(" eligibility records, ");
+    t_putstr(usize_dec(capkey_count(), &mut nbuf));
+    t_putstr(" key records)\n");
     clearance_backfill_jit()
 }
 
@@ -1677,6 +1860,10 @@ const VERB_CLEARANCE_REVOKE: u8 = 17;
 // on the wire and separately auditable, not discriminated by payload length
 // (the /cap/grant 16-vs-32 shape, which works but hides what it is doing).
 const VERB_CLEARANCE_ACTIVATE_SELF: u8 = 18;
+// IM-3 (IMPERIUM-DESIGN.md 11.5): the lex curiata. The verb-18 payload shape
+// for a DISTINCT_SECRET level; the reply is DEFERRED until the SAK episode
+// concludes (the requester's read parks), or immediate on a gate refusal.
+const VERB_IMPERIUM_REQUEST: u8 = 19;
 
 // The system passphrase is no longer a corvus-side constant (A-5c-b): ADMIN_ELEVATE
 // verifies a supplied passphrase by unwrapping the host-baked system-wrap (the admin
@@ -1697,6 +1884,11 @@ const STATUS_NOT_FOUND: u8 = 3;
 const STATUS_RATE_LIMITED: u8 = 4;
 const STATUS_BAD_FORMAT: u8 = 5;
 const STATUS_INTERNAL_ERROR: u8 = 6;
+// IM-3 (wire-additive): the deferred reply's own outcomes. TIMEOUT = no SAK
+// within the request window, or no key within the prompt bound; BUSY = a
+// request is already pending (one slot system-wide).
+const STATUS_TIMEOUT: u8 = 7;
+const STATUS_BUSY: u8 = 8;
 
 const TOKEN_LEN: usize = 33;
 const TOKEN_ENTROPY_BYTES: usize = 16;
@@ -2932,9 +3124,10 @@ unsafe fn clearance_activate_grant(handle: i64, user: &[u8], level: &[u8], self_
     // auth_required: v1.0 enforces RE_AUTH in-band. Each verb supplies its own
     // proof before calling here -- verb 15 a live session token, verb 18 a live
     // session for the caller's OWN kernel-stamped principal -- so by this point
-    // "the user authenticated" is established either way. High-stakes levels
-    // require the kernel SAK trusted path (A-4c), not yet built -> refuse
-    // (documented A-4c dependency, not a silent gap).
+    // "the user authenticated" is established either way. A DISTINCT_SECRET
+    // level is unlocked ONLY on the kernel SAK trusted path (IMPERIUM_REQUEST,
+    // verb 19, IM-3) -- a session is not that secret, so both in-band forms
+    // refuse it; SYSTEM_KEY / HOSTOWNER_COSIGN remain unbuilt and refused.
     match lvl.auth_required {
         AUTH_REQ_RE_AUTH => {}
         AUTH_REQ_DISTINCT_SECRET | AUTH_REQ_SYSTEM_KEY | AUTH_REQ_HOSTOWNER_COSIGN => {
@@ -2954,15 +3147,7 @@ unsafe fn clearance_activate_grant(handle: i64, user: &[u8], level: &[u8], self_
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
 
-    // valid_for: the user may request SHORTER than the level bound, never longer.
-    // An unbounded level (time_bound_ns == 0) honors the request as-is (0 = none).
-    let valid_for_ns = if valid_until_req == 0 {
-        lvl.time_bound_ns
-    } else if lvl.time_bound_ns != 0 {
-        core::cmp::min(valid_until_req, lvl.time_bound_ns)
-    } else {
-        valid_until_req
-    };
+    let valid_for_ns = level_valid_for(lvl, valid_until_req);
 
     // The peer's stripes -- the kernel's per-Proc identity tag + the grant
     // target. Read LIVE (C-22); a dead peer / zero stripes fails closed.
@@ -3103,14 +3288,17 @@ unsafe fn handle_clearance_activate_self(handle: i64, payload: &[u8], response: 
     clearance_activate_grant(handle, &urec.user, level, self_restrict, valid_until_req, response);
 }
 
-// Parse the CLEARANCE_GRANT / CLEARANCE_REVOKE payload (identical shape). On
-// success returns (subject_kind, subject, level). The token is present in the
-// wire (reserved for v1.x per-admin audit attribution); the authority gate is
-// the peer's live CAP_HOSTOWNER, like GROUP_CREATE.
+// Parse the CLEARANCE_GRANT / CLEARANCE_REVOKE payload (identical head). On
+// success returns (subject_kind, subject, level, tail): `tail` is whatever
+// follows the level -- empty for REVOKE and for a RE_AUTH-level GRANT; the key
+// (`key_len u16 LE + key`, parse_key_tail) for a DISTINCT_SECRET-level GRANT
+// (IM-3). The token is present in the wire (reserved for v1.x per-admin audit
+// attribution); the authority gate is the peer's live CAP_HOSTOWNER, like
+// GROUP_CREATE.
 //
 // Layout: token (33) + subject_kind u8 + subject_len u8 + subject
-//         + level_len u8 + level
-fn parse_clearance_admin(payload: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+//         + level_len u8 + level [+ tail]
+fn parse_clearance_admin(payload: &[u8]) -> Option<(u8, &[u8], &[u8], &[u8])> {
     if payload.len() < TOKEN_LEN + 1 + 1 + 1 + 1 {
         return None;
     }
@@ -3133,11 +3321,23 @@ fn parse_clearance_admin(payload: &[u8]) -> Option<(u8, &[u8], &[u8])> {
         return None;
     }
     let lvl_off = ll_off + 1;
-    if payload.len() != lvl_off + ll {
+    if payload.len() < lvl_off + ll {
         return None;
     }
     let level = &payload[lvl_off..lvl_off + ll];
-    Some((kind, subject, level))
+    Some((kind, subject, level, &payload[lvl_off + ll..]))
+}
+
+// The GRANT key tail: exactly `key_len u16 LE + key`, 1..=MAX_PASS_LEN bytes.
+fn parse_key_tail(tail: &[u8]) -> Option<&[u8]> {
+    if tail.len() < 2 {
+        return None;
+    }
+    let kl = (tail[0] as usize) | ((tail[1] as usize) << 8);
+    if kl == 0 || kl > MAX_PASS_LEN || tail.len() != 2 + kl {
+        return None;
+    }
+    Some(&tail[2..])
 }
 
 // handle_clearance_grant — CLEARANCE_GRANT verb (verb_id=16; CAP_HOSTOWNER-gated
@@ -3145,8 +3345,18 @@ fn parse_clearance_admin(payload: &[u8]) -> Option<(u8, &[u8], &[u8])> {
 // group) may activate `level`. Idempotent (re-granting an existing eligibility
 // returns OK).
 //
+// IM-3: a DISTINCT_SECRET level (imperium) is granted WITH the subject's
+// initial per-(user, level) key (ratified F4): the hostowner supplies it in
+// the tail, corvus stores only a verifier (make_capkey_wrap), and the key is
+// grantable to a USER subject alone -- a group cannot hold one key. A RE_AUTH
+// level carries no tail (BadFormat if one is present). Idempotent on retry:
+// when the eligibility AND a verifier exist and the supplied key still
+// verifies, nothing is rewritten (the boot ladder re-grants every boot); a
+// DIFFERENT key is the hostowner's reset of that subject's key -- the v1.0
+// rotation path (self-rotation is v1.x).
+//
 // Request:  token (33) + subject_kind u8 + subject_len u8 + subject
-//           + level_len u8 + level
+//           + level_len u8 + level [+ key_len u16 LE + key]
 // OK reply: no payload
 unsafe fn handle_clearance_grant(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
     // Gate FIRST -- a non-hostowner peer learns nothing about the eligibility table.
@@ -3154,14 +3364,15 @@ unsafe fn handle_clearance_grant(handle: i64, payload: &[u8], response: &mut Vec
     if (caps & T_CAP_HOSTOWNER) == 0 {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
-    let (kind, subject, level) = match parse_clearance_admin(payload) {
+    let (kind, subject, level, tail) = match parse_clearance_admin(payload) {
         Some(t) => t,
         None => return stage_response(response, STATUS_BAD_FORMAT, &[]),
     };
     // The level must be a known built-in; the subject must exist.
-    if level_by_name(level).is_none() {
-        return stage_response(response, STATUS_NOT_FOUND, &[]);
-    }
+    let lvl = match level_by_name(level) {
+        Some(l) => l,
+        None => return stage_response(response, STATUS_NOT_FOUND, &[]),
+    };
     let subject_exists = match kind {
         SUBJECT_KIND_USER => user_states_find(subject).is_some(),
         SUBJECT_KIND_GROUP => group_name_exists(subject),
@@ -3170,18 +3381,75 @@ unsafe fn handle_clearance_grant(handle: i64, payload: &[u8], response: &mut Vec
     if !subject_exists {
         return stage_response(response, STATUS_NOT_FOUND, &[]);
     }
-    // Idempotent: a re-grant of an existing eligibility is a no-op success.
-    if eligibility_has(kind, subject, level) {
-        return stage_response(response, STATUS_OK, &[]);
+    // The tail is shaped by the level: a key for DISTINCT_SECRET (user subject
+    // only), nothing otherwise. Decided before any mutation.
+    let key: Option<&[u8]> = if lvl.auth_required == AUTH_REQ_DISTINCT_SECRET {
+        if kind != SUBJECT_KIND_USER {
+            return stage_response(response, STATUS_BAD_FORMAT, &[]);
+        }
+        match parse_key_tail(tail) {
+            Some(k) => Some(k),
+            None => return stage_response(response, STATUS_BAD_FORMAT, &[]),
+        }
+    } else {
+        if !tail.is_empty() {
+            return stage_response(response, STATUS_BAD_FORMAT, &[]);
+        }
+        None
+    };
+    let has_elig = eligibility_has(kind, subject, level);
+    let key = match key {
+        None => {
+            // Idempotent: a re-grant of an existing eligibility is a no-op success.
+            if has_elig {
+                return stage_response(response, STATUS_OK, &[]);
+            }
+            if eligibility_count() >= MAX_ELIGIBILITY {
+                return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+            }
+            if !eligibility_push(kind, subject, level) {
+                return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+            }
+            if !clearance_persist() {
+                eligibility_pop_last();
+                return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+            }
+            return stage_response(response, STATUS_OK, &[]);
+        }
+        Some(k) => k,
+    };
+    // Idempotent on retry: the same key against the standing verifier changes
+    // nothing on disk (one argon2 pass, no rewrite).
+    if has_elig {
+        if let Some(w) = capkey_find(subject, level) {
+            if verify_capkey(subject, level, key, &w) {
+                return stage_response(response, STATUS_OK, &[]);
+            }
+        }
     }
-    if eligibility_count() >= MAX_ELIGIBILITY {
+    if !has_elig && eligibility_count() >= MAX_ELIGIBILITY {
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
-    if !eligibility_push(kind, subject, level) {
+    let wrap = match make_capkey_wrap(&mut ThylaRng, subject, level, key) {
+        Some(w) => w,
+        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
+    };
+    // Mutate memory (the verifier, then the eligibility if absent), persist,
+    // and roll BOTH back on a persist failure so memory matches disk.
+    let prev = match capkey_set(subject, level, wrap) {
+        Ok(p) => p,
+        Err(_) => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
+    };
+    let pushed = !has_elig && eligibility_push(kind, subject, level);
+    if !has_elig && !pushed {
+        capkey_restore(subject, level, prev);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
     if !clearance_persist() {
-        eligibility_pop_last();
+        if pushed {
+            eligibility_pop_last();
+        }
+        capkey_restore(subject, level, prev);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
     stage_response(response, STATUS_OK, &[]);
@@ -3190,31 +3458,701 @@ unsafe fn handle_clearance_grant(handle: i64, payload: &[u8], response: &mut Vec
 // handle_clearance_revoke — CLEARANCE_REVOKE verb (verb_id=17; CAP_HOSTOWNER-
 // gated). Deletes the eligibility record; an active legate keeps its already-
 // stamped caps until scope exit -- revoke blocks FUTURE activation (§3.1).
-// NotFound if no such eligibility.
+// NotFound if no such eligibility. IM-3: the subject's key verifier for the
+// level goes with the eligibility (it has no meaning without it), both rolled
+// back together on a persist failure.
 //
-// Request:  same shape as CLEARANCE_GRANT
+// Request:  same shape as CLEARANCE_GRANT (no tail)
 // OK reply: no payload
 unsafe fn handle_clearance_revoke(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
     let caps = peer_live_caps(handle);
     if (caps & T_CAP_HOSTOWNER) == 0 {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
-    let (kind, subject, level) = match parse_clearance_admin(payload) {
+    let (kind, subject, level, tail) = match parse_clearance_admin(payload) {
         Some(t) => t,
         None => return stage_response(response, STATUS_BAD_FORMAT, &[]),
     };
+    if !tail.is_empty() {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
     if !eligibility_has(kind, subject, level) {
         return stage_response(response, STATUS_NOT_FOUND, &[]);
     }
     if !eligibility_remove(kind, subject, level) {
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
+    let prev_key = capkey_take(subject, level);
     if !clearance_persist() {
         // Best-effort rollback so memory matches disk on persist failure.
         let _ = eligibility_push(kind, subject, level);
+        capkey_restore(subject, level, prev_key);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
     stage_response(response, STATUS_OK, &[]);
+}
+
+// =============================================================================
+// Imperium -- the lex curiata (IM-3; IMPERIUM-DESIGN.md 11.5). The pending
+// request slot, the per-(user, level) rate limit, IMPERIUM_REQUEST (verb 19;
+// the DEFERRED reply) and the episode consumer that runs on the `sak` note.
+// =============================================================================
+//
+// The flow: an untrusted requester (usr/imperium, or the boot probe) sends
+// IMPERIUM_REQUEST over its own /srv/corvus connection; corvus records ONE
+// pending request system-wide and stages NO reply -- the requester's next Tread
+// is PARKED (dispatch_tread) until the episode concludes. The operator presses
+// the SAK (a serial BREAK only the kernel recognizes; no program can press it);
+// the kernel opens the episode -- the console is corvus's alone, frozen for
+// everyone else -- and posts the `sak` note. corvus then, INLINE in its single
+// thread: opens the console, shows the PROVINCIA (exactly the cap-set the grant
+// would carry, read on the unforgeable channel BEFORE any authentication),
+// reads the requester's imperium key raw and unechoed, verifies it against the
+// stored verifier, re-derives the requester LIVE, and registers the kernel
+// grant (SYS_CAP_GRANT_IMPERIUM, PROPAGATING when the level says so); then it
+// stages the reply, answers the parked read, ENDs the episode, closes the
+// console handle and wipes every buffer. A SAK with nothing pending shows a
+// "nothing pending" panel and ENDs on any key.
+//
+// Bounds: one slot; 60 s from the request to a SAK else TIMEOUT; 60 s for the
+// key prompt else TIMEOUT; wrong keys counted per (user, level) (the RECOVER
+// discipline) -- past IMPERIUM_FAIL_MAX the key is not even asked for. The
+// episode blocks corvus's other clients for its duration (their 9P messages
+// wait in the kernel rings): a documented residue, simpler to audit than a
+// state machine interleaved with the poll loop.
+
+#[derive(Clone)]
+struct ImperiumPending {
+    conn_id: u64,
+    stripes: u64,
+    principal_id: u32,
+    pid: u32,
+    user: Vec<u8>,
+    level: &'static [u8],
+    caps: u64,
+    valid_for_ns: u64,
+    propagating: bool,
+    deadline_ns: u64,
+}
+
+static mut IMPERIUM_PENDING: Option<ImperiumPending> = None;
+
+const IMPERIUM_REQUEST_TIMEOUT_NS: u64 = 60 * 1_000_000_000;
+const IMPERIUM_PROMPT_TIMEOUT_MS: u64 = 60_000;
+const IMPERIUM_PROMPT_SLICE_MS: u64 = 1000;
+// Wrong keys per (user, level) before the level locks until restart. A decline
+// (empty key / Ctrl-C) or a prompt timeout is not a wrong key and is not
+// counted; the legitimate holder's real key passes first time.
+const IMPERIUM_FAIL_MAX: u32 = 5;
+
+struct ImperiumFail {
+    subject: Vec<u8>,
+    level: Vec<u8>,
+    count: u32,
+}
+
+static mut IMPERIUM_FAILS: Option<Vec<ImperiumFail>> = None;
+
+unsafe fn imperium_init() {
+    core::ptr::write(core::ptr::addr_of_mut!(IMPERIUM_FAILS), Some(Vec::new()));
+    core::ptr::write(core::ptr::addr_of_mut!(IMPERIUM_PENDING), None);
+}
+
+unsafe fn imperium_fail_count(subject: &[u8], level: &[u8]) -> u32 {
+    match (*core::ptr::addr_of!(IMPERIUM_FAILS)).as_ref() {
+        Some(v) => v
+            .iter()
+            .find(|r| r.subject == subject && r.level == level)
+            .map(|r| r.count)
+            .unwrap_or(0),
+        None => 0,
+    }
+}
+
+unsafe fn imperium_fail_inc(subject: &[u8], level: &[u8]) {
+    let v = match (*core::ptr::addr_of_mut!(IMPERIUM_FAILS)).as_mut() {
+        Some(v) => v,
+        None => return,
+    };
+    for r in v.iter_mut() {
+        if r.subject == subject && r.level == level {
+            r.count = r.count.saturating_add(1);
+            return;
+        }
+    }
+    // Only an eligible + enrolled (user, level) pair reaches a wrong-key
+    // verdict, and there are at most MAX_ELIGIBILITY of those, so the table
+    // covers its whole subject universe and can never silently un-rate-limit
+    // a subject it has no room for (the RW-6 R2-F5 class).
+    if v.len() >= MAX_ELIGIBILITY {
+        return;
+    }
+    let mut s = Vec::new();
+    s.extend_from_slice(subject);
+    let mut l = Vec::new();
+    l.extend_from_slice(level);
+    v.push(ImperiumFail { subject: s, level: l, count: 1 });
+}
+
+unsafe fn imperium_fail_reset(subject: &[u8], level: &[u8]) {
+    if let Some(v) = (*core::ptr::addr_of_mut!(IMPERIUM_FAILS)).as_mut() {
+        for r in v.iter_mut() {
+            if r.subject == subject && r.level == level {
+                r.count = 0;
+                return;
+            }
+        }
+    }
+}
+
+unsafe fn imperium_pending_is_some() -> bool {
+    (*core::ptr::addr_of!(IMPERIUM_PENDING)).is_some()
+}
+
+unsafe fn imperium_pending_snapshot() -> Option<ImperiumPending> {
+    (*core::ptr::addr_of!(IMPERIUM_PENDING)).as_ref().cloned()
+}
+
+unsafe fn imperium_pending_clear() {
+    // Assignment through the deref drops the old record (its Vec); ptr::write
+    // would leak it.
+    *core::ptr::addr_of_mut!(IMPERIUM_PENDING) = None;
+}
+
+// The requester walked away (its Tread flushed, its connection closed or
+// reset): drop its request so the slot frees and a SAK finds nothing pending.
+unsafe fn imperium_pending_cancel_if_conn(conn_id: u64) {
+    let owned = match (*core::ptr::addr_of!(IMPERIUM_PENDING)).as_ref() {
+        Some(p) => p.conn_id == conn_id,
+        None => false,
+    };
+    if owned {
+        t_putstr("corvus: imperium: request abandoned (requester gone)\n");
+        imperium_pending_clear();
+    }
+}
+
+// Milliseconds until the pending request expires: None = nothing pending (the
+// poll blocks), Some(0) = overdue, else at least 1 (never a 0 that spins).
+unsafe fn imperium_pending_remaining_ms() -> Option<i32> {
+    let p = (*core::ptr::addr_of!(IMPERIUM_PENDING)).as_ref()?;
+    let now = monotonic_ns();
+    if now >= p.deadline_ns {
+        return Some(0);
+    }
+    let ms = (p.deadline_ns - now) / 1_000_000;
+    Some(core::cmp::min(ms, (i32::MAX as u64) - 1) as i32 + 1)
+}
+
+fn putbytes(b: &[u8]) {
+    t_putstr(core::str::from_utf8(b).unwrap_or("?"));
+}
+
+fn put_hex64(v: u64) {
+    let mut buf = [0u8; 16];
+    for i in 0..16 {
+        buf[i] = nibble_to_hex((v >> (60 - 4 * i)) as u8);
+    }
+    t_putstr(core::str::from_utf8(&buf).unwrap_or("?"));
+}
+
+// A request nobody conferred within its window -> TIMEOUT to the requester.
+unsafe fn imperium_expire(conns: &mut Vec<Conn>) {
+    let (conn_id, user) = match (*core::ptr::addr_of!(IMPERIUM_PENDING)).as_ref() {
+        Some(p) if monotonic_ns() >= p.deadline_ns => (p.conn_id, p.user.clone()),
+        _ => return,
+    };
+    t_putstr("corvus: imperium: request from ");
+    putbytes(&user);
+    t_putstr(" TIMED OUT (no SAK within 60 s)\n");
+    let _ = conn_stage_deferred(conns, conn_id, STATUS_TIMEOUT, &[]);
+    imperium_pending_clear();
+}
+
+// handle_imperium_request — IMPERIUM_REQUEST verb (verb_id=19; IM-3). The
+// SELF shape of verb 18 (identity = the connection's kernel-stamped principal,
+// no token) for a DISTINCT_SECRET level -- and the reply is DEFERRED: nothing
+// is staged on the accepted path; the requester's next read parks until the
+// SAK episode concludes with OK / BadAuth (denied) / RateLimited / Timeout.
+// The gates refuse at once with the usual statuses, or BUSY while another
+// request is pending. No live login session is required: the SAK plus the
+// distinct key ARE the authentication, and a session would be a weaker second
+// factor bolted onto a stronger one.
+//
+// Request:  level_len u8 + level + self_restrict u64 LE + valid_until_req u64 LE
+// OK reply: legate_session_id u32 LE + granted_caps u64 LE (the verb 15/18 shape)
+unsafe fn handle_imperium_request(
+    handle: i64,
+    conn_id: u64,
+    payload: &[u8],
+    response: &mut Vec<u8>,
+    defer: &mut bool,
+) {
+    let (level, self_restrict, valid_until_req) = match parse_activate_tail(payload) {
+        Some(t) => t,
+        None => return stage_response(response, STATUS_BAD_FORMAT, &[]),
+    };
+    let peer = match peer_live_info(handle) {
+        Some(p) => p,
+        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
+    };
+    if peer.principal_id == PRINCIPAL_INVALID || peer.stripes == 0 {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+    // The boot chain's PRINCIPAL_SYSTEM was never minted by USER_CREATE and
+    // resolves to nothing -- the same wall verb 18 has.
+    let urec = match user_states_find_by_id(peer.principal_id) {
+        Some(u) => u,
+        None => return stage_response(response, STATUS_PERMISSION_DENIED, &[]),
+    };
+    let lvl = match level_by_name(level) {
+        Some(l) => l,
+        None => return stage_response(response, STATUS_NOT_FOUND, &[]),
+    };
+    // A RE_AUTH level has its own in-band path (verbs 15 / 18); the lex curiata
+    // is for the levels that need the trusted path.
+    if lvl.auth_required != AUTH_REQ_DISTINCT_SECRET {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+    if !user_eligible_for(&urec.user, lvl.name) {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+    // Eligible but not enrolled (no key granted): nothing could ever verify.
+    if capkey_find(&urec.user, lvl.name).is_none() {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+    let effective = if self_restrict == 0 {
+        lvl.caps
+    } else {
+        lvl.caps & self_restrict
+    };
+    if effective == 0 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let valid_for_ns = level_valid_for(lvl, valid_until_req);
+    if imperium_pending_is_some() {
+        return stage_response(response, STATUS_BUSY, &[]);
+    }
+    let now = monotonic_ns();
+    *core::ptr::addr_of_mut!(IMPERIUM_PENDING) = Some(ImperiumPending {
+        conn_id,
+        stripes: peer.stripes,
+        principal_id: peer.principal_id,
+        pid: peer.pid,
+        user: urec.user.clone(),
+        level: lvl.name,
+        caps: effective,
+        valid_for_ns,
+        propagating: lvl.propagating,
+        deadline_ns: now.saturating_add(IMPERIUM_REQUEST_TIMEOUT_NS),
+    });
+    *defer = true;
+    let mut nbuf = [0u8; 12];
+    t_putstr("corvus: imperium: request from ");
+    putbytes(&urec.user);
+    t_putstr(" pid ");
+    t_putstr(usize_dec(peer.pid as usize, &mut nbuf));
+    t_putstr(" level ");
+    putbytes(lvl.name);
+    t_putstr(" caps 0x");
+    put_hex64(effective);
+    t_putstr(" -- awaiting the SAK\n");
+}
+
+enum ImperiumOutcome {
+    Conferred { session: u32 },
+    Denied,
+    RateLimited,
+    Timeout,
+    Internal,
+}
+
+enum NextByte {
+    Byte(u8),
+    Timeout,
+    Error,
+}
+
+enum KeyRead {
+    Key(Vec<u8>),
+    Declined,
+    Timeout,
+    Overflow,
+    Error,
+}
+
+unsafe fn console_write_all(fd: i64, buf: &[u8]) -> bool {
+    let mut off = 0usize;
+    while off < buf.len() {
+        let chunk = core::cmp::min(buf.len() - off, FS_IO_CHUNK);
+        let w = t_write(fd, buf[off..].as_ptr(), chunk);
+        if w <= 0 || (w as usize) > chunk {
+            return false;
+        }
+        off += w as usize;
+    }
+    true
+}
+
+// One bounded wait for a console byte. The bound is the clock; `idle_slices`
+// counts only the polls that EXPIRED (never the ones that returned a byte), so
+// a broken clock still bounds the prompt at ~timeout_ms of idle time while a
+// keystroke flood cannot exhaust it.
+unsafe fn console_next_byte(fd: i64, start_ns: u64, timeout_ms: u64, idle_slices: &mut u64) -> NextByte {
+    loop {
+        let now = monotonic_ns();
+        let elapsed_ms = if start_ns != 0 && now >= start_ns {
+            (now - start_ns) / 1_000_000
+        } else {
+            0
+        };
+        if elapsed_ms >= timeout_ms || *idle_slices * IMPERIUM_PROMPT_SLICE_MS >= timeout_ms {
+            return NextByte::Timeout;
+        }
+        let wait = core::cmp::min(IMPERIUM_PROMPT_SLICE_MS, timeout_ms - elapsed_ms) as i32;
+        let mut pfd = TPollFd { fd: fd as i32, events: T_POLLIN, revents: 0 };
+        let rc = t_poll(&mut pfd as *mut TPollFd, 1, wait);
+        if rc < 0 {
+            return NextByte::Error;
+        }
+        if rc == 0 {
+            *idle_slices += 1;
+            continue;
+        }
+        if pfd.revents & (T_POLLERR | T_POLLHUP | T_POLLNVAL) != 0 {
+            return NextByte::Error;
+        }
+        if pfd.revents & T_POLLIN == 0 {
+            *idle_slices += 1;
+            continue;
+        }
+        let mut b = [0u8; 1];
+        let n = t_read(fd, b.as_mut_ptr(), 1);
+        if n < 0 {
+            return NextByte::Error;
+        }
+        if n == 0 {
+            continue;
+        }
+        return NextByte::Byte(b[0]);
+    }
+}
+
+// The key prompt: raw and unechoed (BEGIN forced RAW + ECHO off). DEL/BS edit,
+// Ctrl-U kills the line, CR/LF submits, Ctrl-C declines. Every path that does
+// not hand the key back wipes it first.
+unsafe fn console_read_key(fd: i64, timeout_ms: u64) -> KeyRead {
+    let mut key: Vec<u8> = Vec::with_capacity(MAX_PASS_LEN);
+    let start = monotonic_ns();
+    let mut idle: u64 = 0;
+    loop {
+        let b = match console_next_byte(fd, start, timeout_ms, &mut idle) {
+            NextByte::Byte(b) => b,
+            NextByte::Timeout => {
+                wipe(&mut key);
+                return KeyRead::Timeout;
+            }
+            NextByte::Error => {
+                wipe(&mut key);
+                return KeyRead::Error;
+            }
+        };
+        match b {
+            0x03 => {
+                wipe(&mut key);
+                return KeyRead::Declined;
+            }
+            0x0d | 0x0a => return KeyRead::Key(key),
+            0x7f | 0x08 => {
+                if let Some(last) = key.len().checked_sub(1) {
+                    key[last] = 0;
+                    key.truncate(last);
+                }
+            }
+            0x15 => {
+                wipe(&mut key);
+                key.clear();
+            }
+            c => {
+                if key.len() >= MAX_PASS_LEN {
+                    wipe(&mut key);
+                    return KeyRead::Overflow;
+                }
+                key.push(c);
+            }
+        }
+    }
+}
+
+// Dismiss an informational panel: any byte, or the bound.
+unsafe fn console_wait_any_key(fd: i64, timeout_ms: u64) {
+    let start = monotonic_ns();
+    let mut idle: u64 = 0;
+    let _ = console_next_byte(fd, start, timeout_ms, &mut idle);
+}
+
+fn caps_names(caps: u64, out: &mut Vec<&'static [u8]>) {
+    const TABLE: &[(u64, &[u8])] = &[
+        (T_CAP_DAC_OVERRIDE, b"CAP_DAC_OVERRIDE"),
+        (T_CAP_CHOWN, b"CAP_CHOWN"),
+        (T_CAP_KILL, b"CAP_KILL"),
+        (T_CAP_DEBUG, b"CAP_DEBUG"),
+        (T_CAP_JIT, b"CAP_JIT"),
+        (T_CAP_AUDIO_GRAPH, b"CAP_AUDIO_GRAPH"),
+    ];
+    let mut rest = caps;
+    for &(bit, name) in TABLE {
+        if caps & bit != 0 {
+            out.push(name);
+            rest &= !bit;
+        }
+    }
+    if rest != 0 {
+        out.push(b"CAP_?");
+    }
+}
+
+// Stage a reply into the requester's connection and answer its parked read.
+// false if the connection is gone (the reply has nowhere to go).
+unsafe fn conn_stage_deferred(conns: &mut Vec<Conn>, conn_id: u64, status: u8, payload: &[u8]) -> bool {
+    for c in conns.iter_mut() {
+        if c.conn_id == conn_id {
+            wipe(&mut c.pending_response);
+            stage_response(&mut c.pending_response, status, payload);
+            c.pending_response_off = 0;
+            c.awaiting_deferred = false;
+            conn_reply_parked(c);
+            return true;
+        }
+    }
+    false
+}
+
+// Answer a parked Tread (R1) from the staged response. A write failure is
+// left to the connection's own POLLHUP: the reply is lost with it.
+unsafe fn conn_reply_parked(conn: &mut Conn) {
+    let pr = match conn.parked_read.take() {
+        Some(p) => p,
+        None => return,
+    };
+    let cap_msize = (conn.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4);
+    let count_cap = (pr.count as usize).min(cap_msize);
+    let mut tmp = [0u8; SERVER_MSIZE_USIZE];
+    let n = drain_response(conn, &mut tmp[..count_cap], count_cap);
+    let cap = conn.out_buf.capacity();
+    conn.out_buf.clear();
+    conn.out_buf.resize(cap, 0);
+    let len = p9::build_rread(&mut conn.out_buf, pr.tag, &tmp[..n]).unwrap_or(0);
+    wipe(&mut tmp[..n]);
+    if len == 0 {
+        return;
+    }
+    let mut sent = 0usize;
+    while sent < len {
+        let w = t_write(conn.handle, conn.out_buf.as_ptr().add(sent), len - sent);
+        if w <= 0 {
+            break;
+        }
+        sent += w as usize;
+    }
+}
+
+unsafe fn episode_end() {
+    if t_console_episode(T_CONSOLE_EPISODE_END) != 0 {
+        t_putstr("corvus: imperium: EPISODE_END refused (no open episode)\n");
+    }
+}
+
+unsafe fn verdict(fd: i64, out: &mut Vec<u8>, line: &[u8]) {
+    out.clear();
+    provincia::compose_verdict(line, out);
+    let _ = console_write_all(fd, out);
+}
+
+// The `sak` note arrived: the kernel opened the episode (the console is ours
+// alone until END). Everything trusted happens here, then END + close + wipe
+// on every path.
+unsafe fn episode_consume(conns: &mut Vec<Conn>) {
+    let fd = t_console_open();
+    if fd < 0 {
+        t_putstr("corvus: imperium: episode: console open FAILED -- ending\n");
+        episode_end();
+        return;
+    }
+    let mut out: Vec<u8> = Vec::new();
+    match imperium_pending_snapshot() {
+        None => {
+            provincia::compose_nothing_pending(&mut out);
+            let _ = console_write_all(fd, &out);
+            console_wait_any_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
+            out.clear();
+            provincia::compose_verdict(b"trusted path: done", &mut out);
+            let _ = console_write_all(fd, &out);
+            t_putstr("corvus: imperium: SAK with nothing pending\n");
+        }
+        Some(p) => {
+            let outcome = episode_confer(fd, &p, conns, &mut out);
+            let mut ok = [0u8; 12];
+            let (status, plen) = match outcome {
+                ImperiumOutcome::Conferred { session } => {
+                    ok[0..4].copy_from_slice(&session.to_le_bytes());
+                    ok[4..12].copy_from_slice(&p.caps.to_le_bytes());
+                    (STATUS_OK, 12usize)
+                }
+                ImperiumOutcome::Denied => (STATUS_BAD_AUTH, 0usize),
+                ImperiumOutcome::RateLimited => (STATUS_RATE_LIMITED, 0usize),
+                ImperiumOutcome::Timeout => (STATUS_TIMEOUT, 0usize),
+                ImperiumOutcome::Internal => (STATUS_INTERNAL_ERROR, 0usize),
+            };
+            if !conn_stage_deferred(conns, p.conn_id, status, &ok[..plen]) {
+                t_putstr("corvus: imperium: requester connection gone -- reply dropped\n");
+            }
+            imperium_pending_clear();
+        }
+    }
+    wipe(&mut out);
+    episode_end();
+    let _ = t_close(fd);
+}
+
+// The conferral: rate limit -> provincia -> key -> verify -> the requester
+// LIVE -> the kernel grant. The operator's verdict line goes out on the
+// trusted channel; the requester's status is the return.
+unsafe fn episode_confer(
+    fd: i64,
+    p: &ImperiumPending,
+    conns: &mut Vec<Conn>,
+    out: &mut Vec<u8>,
+) -> ImperiumOutcome {
+    // 1. The rate limit, BEFORE the provincia and any KDF: a locked subject is
+    //    told so and asked nothing.
+    if imperium_fail_count(&p.user, p.level) >= IMPERIUM_FAIL_MAX {
+        out.clear();
+        provincia::compose_locked(&p.user, p.level, out);
+        let _ = console_write_all(fd, out);
+        console_wait_any_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
+        t_putstr("corvus: imperium: RATE-LIMITED ");
+        putbytes(&p.user);
+        t_putstr("\n");
+        return ImperiumOutcome::RateLimited;
+    }
+    // 2. The provincia: the whole grant, on the unforgeable channel, first.
+    let mut names: Vec<&'static [u8]> = Vec::new();
+    caps_names(p.caps, &mut names);
+    out.clear();
+    provincia::compose_provincia(
+        &provincia::Provincia {
+            user: &p.user,
+            pid: p.pid,
+            level: p.level,
+            caps_names: &names,
+            axe: p.caps & T_CAP_KILL != 0,
+            term_ns: p.valid_for_ns,
+            propagating: p.propagating,
+        },
+        out,
+    );
+    provincia::compose_key_prompt(out);
+    if !console_write_all(fd, out) {
+        t_putstr("corvus: imperium: console write FAILED\n");
+        return ImperiumOutcome::Internal;
+    }
+    // 3. The key.
+    let mut key = match console_read_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS) {
+        KeyRead::Key(k) => k,
+        KeyRead::Declined => {
+            verdict(fd, out, b"imperium DECLINED");
+            t_putstr("corvus: imperium: DECLINED at the prompt\n");
+            return ImperiumOutcome::Denied;
+        }
+        KeyRead::Timeout => {
+            verdict(fd, out, b"imperium TIMEOUT: no key within 60 s");
+            t_putstr("corvus: imperium: prompt TIMED OUT\n");
+            return ImperiumOutcome::Timeout;
+        }
+        KeyRead::Overflow => {
+            verdict(fd, out, b"imperium DENIED: key too long");
+            t_putstr("corvus: imperium: DENIED (key too long)\n");
+            return ImperiumOutcome::Denied;
+        }
+        KeyRead::Error => {
+            verdict(fd, out, b"imperium ERROR: console read failed");
+            t_putstr("corvus: imperium: console read FAILED\n");
+            return ImperiumOutcome::Internal;
+        }
+    };
+    if key.is_empty() {
+        verdict(fd, out, b"imperium DECLINED");
+        t_putstr("corvus: imperium: DECLINED at the prompt (empty key)\n");
+        return ImperiumOutcome::Denied;
+    }
+    // 4. Verify against the stored verifier (argon2id + the AEAD tag).
+    let wrap = match capkey_find(&p.user, p.level) {
+        Some(w) => w,
+        None => {
+            wipe(&mut key);
+            verdict(fd, out, b"imperium DENIED: not enrolled");
+            return ImperiumOutcome::Denied;
+        }
+    };
+    let good = verify_capkey(&p.user, p.level, &key, &wrap);
+    wipe(&mut key);
+    if !good {
+        imperium_fail_inc(&p.user, p.level);
+        verdict(fd, out, b"imperium DENIED: wrong key");
+        t_putstr("corvus: imperium: DENIED (wrong key) for ");
+        putbytes(&p.user);
+        t_putstr("\n");
+        return ImperiumOutcome::Denied;
+    }
+    imperium_fail_reset(&p.user, p.level);
+    // 5. The requester, LIVE (C-22): the Proc that asked must still be the
+    //    Proc that receives -- alive, the same stripes and principal, still
+    //    eligible. Read fresh; the request-time snapshot authorizes nothing.
+    let handle = match conns.iter().find(|c| c.conn_id == p.conn_id).map(|c| c.handle) {
+        Some(h) => h,
+        None => {
+            verdict(fd, out, b"imperium DENIED: requester gone");
+            return ImperiumOutcome::Denied;
+        }
+    };
+    let peer = match peer_live_info(handle) {
+        Some(x) => x,
+        None => {
+            verdict(fd, out, b"imperium DENIED: requester died");
+            return ImperiumOutcome::Denied;
+        }
+    };
+    if peer.stripes == 0 || peer.stripes != p.stripes || peer.principal_id != p.principal_id {
+        verdict(fd, out, b"imperium DENIED: requester changed");
+        return ImperiumOutcome::Denied;
+    }
+    if !user_eligible_for(&p.user, p.level) {
+        verdict(fd, out, b"imperium DENIED: eligibility revoked");
+        return ImperiumOutcome::Denied;
+    }
+    // 6. The grant. The kernel bounds a PROPAGATING mask to
+    //    CAP_GRANTABLE_IMPERIUM and refuses its redeem into an existing scope
+    //    (propagating never nests -- abdicate first).
+    let session = next_legate_session();
+    let flags = if p.propagating { T_CAP_GRANT_FLAG_PROPAGATING } else { 0 };
+    if t_cap_grant_imperium(p.caps, peer.stripes, p.valid_for_ns, session as u64, flags) != 0 {
+        verdict(fd, out, b"imperium DENIED: kernel grant refused");
+        t_putstr("corvus: imperium: kernel grant REFUSED for ");
+        putbytes(&p.user);
+        t_putstr("\n");
+        return ImperiumOutcome::Internal;
+    }
+    verdict(fd, out, b"imperium CONFERRED -- redeem in the requester");
+    let mut nbuf = [0u8; 12];
+    t_putstr("corvus: imperium: CONFERRED to ");
+    putbytes(&p.user);
+    t_putstr(" session ");
+    t_putstr(usize_dec(session as usize, &mut nbuf));
+    t_putstr(" caps 0x");
+    put_hex64(p.caps);
+    t_putstr("\n");
+    ImperiumOutcome::Conferred { session }
 }
 
 // handle_admin_elevate — ADMIN_ELEVATE verb (verb_id=7). Verifies the
@@ -3577,6 +4515,20 @@ struct Conn {
     // STRATUM-API-V1.md Q11 contract that the stream cannot be safely
     // re-synced across a version mismatch.
     tear_down_after_drain: bool,
+    // IM-3 (the deferred reply): `awaiting_deferred` is set by a verb whose
+    // reply comes later (IMPERIUM_REQUEST). While it is set, a Tread on ctl
+    // that finds nothing staged is PARKED here instead of being answered with
+    // a 0-byte Rread (which the kernel client hands to userspace as EOF), and
+    // conn_reply_parked answers it once the reply is staged. Cleared by the
+    // reply, a Tflush of the parked tag, a Tversion reset, and close.
+    awaiting_deferred: bool,
+    parked_read: Option<ParkedRead>,
+}
+
+#[derive(Copy, Clone)]
+struct ParkedRead {
+    tag: u16,
+    count: u32,
 }
 
 impl Conn {
@@ -3594,6 +4546,8 @@ impl Conn {
             pending_response: Vec::with_capacity(MAX_RESPONSE_FRAME),
             pending_response_off: 0,
             tear_down_after_drain: false,
+            awaiting_deferred: false,
+            parked_read: None,
         }
     }
 
@@ -3646,6 +4600,10 @@ impl Conn {
         self.pending_response.clear();
         self.pending_response_off = 0;
         self.version_done = false;
+        // IM-3: a reset abandons a parked read and the request it waited on.
+        self.awaiting_deferred = false;
+        self.parked_read = None;
+        unsafe { imperium_pending_cancel_if_conn(self.conn_id) };
     }
 }
 
@@ -3764,6 +4722,12 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
                                                            &mut conn.pending_response),
             VERB_CLEARANCE_REVOKE => handle_clearance_revoke(conn_handle, &payload_owned,
                                                              &mut conn.pending_response),
+            // IM-3: on the accepted path this stages NOTHING and sets
+            // awaiting_deferred -- the next Tread parks (dispatch_tread) until
+            // the episode stages the reply.
+            VERB_IMPERIUM_REQUEST => handle_imperium_request(conn_handle, conn_id, &payload_owned,
+                                                             &mut conn.pending_response,
+                                                             &mut conn.awaiting_deferred),
             _ => stage_response(&mut conn.pending_response, STATUS_BAD_FORMAT, &[]),
         }
 
@@ -3793,13 +4757,14 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
 // signals tear-down to the caller).
 // =============================================================================
 
-// Returns the byte length of the Rmsg written into conn.out_buf; 0
-// indicates no Rmsg (Tmsg parse-error so bad we couldn't even extract
-// the tag; conn should be torn down).
-unsafe fn dispatch_one(conn: &mut Conn, tmsg: &[u8]) -> usize {
+// Returns None when the conn must be torn down (a Tmsg parse-error so bad we
+// couldn't even extract the tag, or an Rmsg that could not be built), Some(0)
+// when the Tmsg was consumed with NO reply yet (a parked Tread -- the IM-3
+// deferred reply), else the byte length of the Rmsg written into conn.out_buf.
+unsafe fn dispatch_one(conn: &mut Conn, tmsg: &[u8]) -> Option<usize> {
     let hdr = match p9::peek_header(tmsg) {
         Ok(h) => h,
-        Err(_) => return 0,
+        Err(_) => return None,
     };
     let tag = hdr.tag;
     let cap = conn.out_buf.capacity();
@@ -3816,12 +4781,13 @@ unsafe fn dispatch_one(conn: &mut Conn, tmsg: &[u8]) -> usize {
         p9::P9_TWRITE => dispatch_twrite(conn, tmsg, tag),
         p9::P9_TCLUNK => dispatch_tclunk(conn, tmsg, tag),
         p9::P9_TGETATTR => dispatch_tgetattr(conn, tmsg, tag),
+        p9::P9_TFLUSH => dispatch_tflush(conn, tmsg, tag),
         _ => Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_NOSYS).unwrap_or(0)),
     };
     match result {
         Ok(n) => {
             conn.out_buf.truncate(n);
-            n
+            Some(n)
         }
         Err(_) => {
             // build_r* failed (out_buf too small? shouldn't happen). Emit
@@ -3831,7 +4797,11 @@ unsafe fn dispatch_one(conn: &mut Conn, tmsg: &[u8]) -> usize {
             conn.out_buf.resize(cap, 0);
             let n = p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO).unwrap_or(0);
             conn.out_buf.truncate(n);
-            n
+            if n == 0 {
+                None
+            } else {
+                Some(n)
+            }
         }
     }
 }
@@ -4002,6 +4972,13 @@ fn dispatch_tread(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
     // is ignored — ctl is message-oriented; corvus tracks its own
     // drain offset across the same staged response.
     let _ = args.offset;
+    // IM-3: a DEFERRED reply -- hold the Tread until the episode stages it
+    // (conn_reply_parked answers it). A 0-byte Rread is not a park: the
+    // kernel client hands it to userspace as EOF.
+    if conn.awaiting_deferred && conn.pending_response.is_empty() {
+        conn.parked_read = Some(ParkedRead { tag, count: args.count });
+        return Ok(0);
+    }
     let cap_msize = (conn.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4);
     let count_cap = (args.count as usize).min(cap_msize);
     let mut tmp = [0u8; SERVER_MSIZE_USIZE];
@@ -4047,6 +5024,26 @@ unsafe fn dispatch_twrite(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usiz
     let accepted = args.data.len() as u32;
     try_dispatch_verb(conn);
     p9::build_rwrite(&mut conn.out_buf, tag, accepted)
+}
+
+// Tflush: the client abandoned `oldtag`. The only request corvus ever holds
+// is a parked Tread (IM-3), so a flush of that tag drops the park AND the
+// pending imperium request it was waiting on -- the requester walked away, and
+// a later SAK must find nothing pending. Rflush regardless: per 9P the client
+// reuses oldtag only after it (I-10), so the Rflush is what frees the tag.
+unsafe fn dispatch_tflush(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    let args = match p9::parse_tflush(tmsg) {
+        Ok(a) => a,
+        Err(_) => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?),
+    };
+    if let Some(pr) = conn.parked_read {
+        if pr.tag == args.oldtag {
+            conn.parked_read = None;
+            conn.awaiting_deferred = false;
+            imperium_pending_cancel_if_conn(conn.conn_id);
+        }
+    }
+    p9::build_rflush(&mut conn.out_buf, tag)
 }
 
 fn dispatch_tclunk(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -4115,23 +5112,26 @@ unsafe fn service_conn(conn: &mut Conn) -> Result<bool, ()> {
 
         // Process one Tmsg.
         let tmsg_bytes: Vec<u8> = conn.in_buf[..size].to_vec();
-        let rmsg_len = dispatch_one(conn, &tmsg_bytes);
-        if rmsg_len == 0 {
-            return Ok(false);
-        }
-        // Write the Rmsg.
-        let rmsg_bytes: Vec<u8> = conn.out_buf[..rmsg_len].to_vec();
-        let mut sent: usize = 0;
-        while sent < rmsg_bytes.len() {
-            let n = t_write(
-                conn.handle,
-                rmsg_bytes.as_ptr().add(sent),
-                rmsg_bytes.len() - sent,
-            );
-            if n <= 0 {
-                return Ok(false);
+        let rmsg_len = match dispatch_one(conn, &tmsg_bytes) {
+            None => return Ok(false),
+            Some(n) => n,
+        };
+        // Write the Rmsg -- none for a parked Tread (IM-3), whose reply goes
+        // out later from conn_reply_parked.
+        if rmsg_len > 0 {
+            let rmsg_bytes: Vec<u8> = conn.out_buf[..rmsg_len].to_vec();
+            let mut sent: usize = 0;
+            while sent < rmsg_bytes.len() {
+                let n = t_write(
+                    conn.handle,
+                    rmsg_bytes.as_ptr().add(sent),
+                    rmsg_bytes.len() - sent,
+                );
+                if n <= 0 {
+                    return Ok(false);
+                }
+                sent += n as usize;
             }
-            sent += n as usize;
         }
 
         // Scrub then remove the consumed Tmsg: a Twrite frame carries the verb payload
@@ -4162,28 +5162,41 @@ unsafe fn service_conn(conn: &mut Conn) -> Result<bool, ()> {
 
 const MAX_CONNS: usize = 8;
 
-unsafe fn srv_server_loop(listener: i64) -> i64 {
+// The poll set is [listener, the notes fd] + per-conn.
+const POLL_FIXED: usize = 2;
+
+unsafe fn srv_server_loop(listener: i64, notes: &Notes) -> i64 {
     let mut conns: Vec<Conn> = Vec::with_capacity(MAX_CONNS);
     // A-5b: monotonic per-accept conn id (0 = the "no owner" sentinel).
     let mut next_conn_id: u64 = 1;
 
-    // Bounded poll-fd buffer: [listener] + per-conn (max MAX_CONNS).
-    let mut pollfds: [TPollFd; 1 + MAX_CONNS] =
-        [TPollFd { fd: 0, events: 0, revents: 0 }; 1 + MAX_CONNS];
+    // Bounded poll-fd buffer: [listener, notes] + per-conn (max MAX_CONNS).
+    let mut pollfds: [TPollFd; POLL_FIXED + MAX_CONNS] =
+        [TPollFd { fd: 0, events: 0, revents: 0 }; POLL_FIXED + MAX_CONNS];
+    let notes_fd = notes.as_raw_fd();
 
     loop {
         // Build pollfd list.
         pollfds[0] = TPollFd { fd: listener as i32, events: T_POLLIN, revents: 0 };
-        let nfds = 1 + conns.len();
+        pollfds[1] = TPollFd { fd: notes_fd, events: T_POLLIN, revents: 0 };
+        let nfds = POLL_FIXED + conns.len();
         for (i, c) in conns.iter().enumerate() {
-            pollfds[1 + i] = TPollFd { fd: c.handle as i32, events: T_POLLIN, revents: 0 };
+            pollfds[POLL_FIXED + i] = TPollFd { fd: c.handle as i32, events: T_POLLIN, revents: 0 };
         }
 
-        let rc = t_poll(pollfds.as_mut_ptr(), nfds, -1);
+        // IM-3: a pending imperium request bounds the wait at its expiry.
+        let timeout_ms = imperium_pending_remaining_ms().unwrap_or(-1);
+        let rc = t_poll(pollfds.as_mut_ptr(), nfds, timeout_ms);
         if rc < 0 {
             t_putstr("corvus: t_poll failed\n");
             return -1;
         }
+
+        // IM-3: the `sak` note is handled AFTER the connections below, so a
+        // request whose Twrite and the operator's BREAK land in the same poll
+        // is recorded before the episode looks for it -- the other order would
+        // show "nothing pending" and strand the request until its timeout.
+        let sak_ready = pollfds[1].revents & T_POLLIN != 0;
 
         // Accept new connections.
         if pollfds[0].revents & T_POLLIN != 0 {
@@ -4238,18 +5251,18 @@ unsafe fn srv_server_loop(listener: i64) -> i64 {
 
         // Service ready conns. Iterate from the end so removal doesn't
         // invalidate indices. Only service the conns that were actually
-        // POLLED this iteration (nfds-1), NOT a conn just accepted above --
-        // its pollfds[] slot was never written by t_poll and holds a STALE
-        // revents from a previously-closed conn at that index, which would
-        // spuriously close the fresh conn before its Tversion is read. The
-        // just-accepted conn is serviced on the next iteration (stalk-3b-β:
-        // the dev9p close sends Tclunk x2 before the EOF, so a peer's POLLHUP
-        // now lands in a separate poll from a reconnect's listener-POLLIN,
-        // exposing this).
-        let mut i = nfds - 1;
+        // POLLED this iteration (nfds - POLL_FIXED), NOT a conn just accepted
+        // above -- its pollfds[] slot was never written by t_poll and holds a
+        // STALE revents from a previously-closed conn at that index, which
+        // would spuriously close the fresh conn before its Tversion is read.
+        // The just-accepted conn is serviced on the next iteration
+        // (stalk-3b-β: the dev9p close sends Tclunk x2 before the EOF, so a
+        // peer's POLLHUP now lands in a separate poll from a reconnect's
+        // listener-POLLIN, exposing this).
+        let mut i = nfds - POLL_FIXED;
         while i > 0 {
             i -= 1;
-            let pf = pollfds[1 + i];
+            let pf = pollfds[POLL_FIXED + i];
             let mut should_close = false;
             if pf.revents & T_POLLIN != 0 {
                 match service_conn(&mut conns[i]) {
@@ -4265,6 +5278,24 @@ unsafe fn srv_server_loop(listener: i64) -> i64 {
                 close_conn(&mut conns, i);
             }
         }
+
+        // IM-3: the `sak` note -> the trusted episode, run INLINE (the
+        // connections wait; the prompt is bounded). Any other note on corvus's
+        // queue is drained and ignored -- corvus is never a Ctrl-C target and
+        // spawns nothing.
+        if sak_ready {
+            if let Ok(note) = notes.read() {
+                if note.name == "sak" {
+                    episode_consume(&mut conns);
+                } else {
+                    t_putstr("corvus: note ignored: ");
+                    t_putstr(&note.name);
+                    t_putstr("\n");
+                }
+            }
+        }
+        // IM-3: a request nobody conferred within its window.
+        imperium_expire(&mut conns);
     }
 
     // Drain extant conns on shutdown.
@@ -4294,6 +5325,9 @@ unsafe fn close_conn(conns: &mut Vec<Conn>, idx: usize) {
     if owner != 0 && conn.conn_id == owner {
         session_clear();
     }
+    // IM-3: a requester that left takes its pending request with it (a later
+    // SAK must find nothing pending); its parked read dies with the conn.
+    imperium_pending_cancel_if_conn(conn.conn_id);
     let _ = t_close(conn.handle);
     conns.remove(idx);
 }
@@ -4414,6 +5448,7 @@ pub extern "C" fn rs_main() -> i64 {
         groups_init();
         clearance_init();
         recover_fails_init();
+        imperium_init();
     }
 
     let rc = unsafe { t_mlockall(0) };
@@ -4488,7 +5523,27 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
-    let rc = unsafe { srv_server_loop(listener) };
+    // IM-3: the trusted-episode consumer. The notes fd first (the `sak` note
+    // lands on the Proc's queue either way, but reading it needs the fd; a
+    // syscall, so the chroot above is no obstacle), then ARM. A refused ARM
+    // means corvus is not the trusted login authority (a spawn outside the
+    // boot chain): the lex curiata is unavailable, every other duty serves.
+    let notes = match Notes::open_self() {
+        Ok(n) => n,
+        Err(_) => {
+            t_putstr("corvus: FATAL notes fd open failed\n");
+            return 1;
+        }
+    };
+    unsafe {
+        if t_console_episode(T_CONSOLE_EPISODE_ARM) == 0 {
+            t_putstr("corvus: trusted-episode consumer ARMED (imperium)\n");
+        } else {
+            t_putstr("corvus: WARN episode ARM refused (not the trusted authority) -- imperium unavailable\n");
+        }
+    }
+
+    let rc = unsafe { srv_server_loop(listener, &notes) };
     if rc < 0 {
         t_putstr("corvus: srv_server_loop FAILED\n");
         return 1;

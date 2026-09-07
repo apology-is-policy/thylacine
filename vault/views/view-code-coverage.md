@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**419 owned · 76 unowned · 495 files (84% owned) · ~20958 unswept lines.**
+**419 owned · 77 unowned · 496 files (84% owned) · ~21203 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **72 files, ~31927 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **73 files, ~32223 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -80,6 +80,7 @@ Excluded as harness and counted here rather than dropped: **72 files, ~31927 lin
 | usr/lib | 57 | 3 | 474 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
+| usr/corvus | 1 | 1 | 245 |
 | usr/libthyla-rs | 29 | 1 | 196 |
 | arch | 36 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
@@ -88,7 +89,6 @@ Excluded as harness and counted here rather than dropped: **72 files, ~31927 lin
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
 | usr/coreutils | 60 | 0 | 0 |
-| usr/corvus | 1 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
 | usr/halcyon | 2 | 0 | 0 |
@@ -144,6 +144,7 @@ Excluded as harness and counted here rather than dropped: **72 files, ~31927 lin
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/ports/dosbox-x/config.h | 254 |
+| usr/corvus/src/provincia.rs | 245 |
 | usr/ports/sdl2/thylacine/SDL_thylacineaudio.c | 231 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
