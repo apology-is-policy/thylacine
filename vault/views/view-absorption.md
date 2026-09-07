@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**142 absorbed · 15 live · 157 total.**
+**143 absorbed · 14 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -64,7 +64,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 110-resource.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-caps]], [[sub-kernel-proc]], [[sub-kernel-thread]] |
 | 111-cons.md | absorbed | [[abi-boot-banner]], [[sub-kernel-cons]], [[sub-kernel-devdev]] |
 | 112-kaua.md | absorbed | [[sub-kaua]] |
-| 113-nora.md | live | — |
+| 113-nora.md | absorbed | [[sub-nora-engine]], [[sub-nora-host]], [[sub-nora-view]], [[sub-parley]] |
 | 114-netdev.md | absorbed | [[sub-netd-nic]], [[sub-netdev]], [[sub-substrate-machine]] |
 | 115-pci-claim.md | absorbed | [[inv-i5]], [[sub-kernel-hwcap]] |
 | 116-devhw.md | absorbed | [[inv-i15]], [[inv-i34]], [[inv-i5]], [[sub-kernel-discovery]] |
