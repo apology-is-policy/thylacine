@@ -699,8 +699,15 @@ impl Graph {
     fn render_info(&self, out: &mut Vec<u8>) {
         let s = &self.stats;
         let buffered = self.fifo_len() as u64 + u64::from(s.last_latency_bytes);
+        // N-3c-2 F1: the capture counters (capture_available / source_open /
+        // periods_captured / rx_errors) are DELIBERATELY not rendered here. `info`
+        // is world-readable on the shared mount, and capture presence + live-
+        // recording activity are authority-bearing (the eavesdropping surface) --
+        // exposing them here would defeat the open path's "presence not probeable"
+        // property and side-channel who is recording. They stay in `Stats` for the
+        // driver's own use; authorized capture-state observability is a -ctl seam.
         let text = alloc::format!(
-            "device virtio-snd stream 0 playback\nformat s16c2r{}\nvoices {}\nbufsize {}\nbuffered {}\nperiod-bytes {}\nbuffer-bytes {}\nperiods {}\nstarted {}\nperiods-played {}\nsilence-periods {}\ntx-errors {}\nbad-used {}\nlatency-bytes {}\ncapture {}\ncapturing {}\nperiods-captured {}\nrx-errors {}\n",
+            "device virtio-snd stream 0 playback\nformat s16c2r{}\nvoices {}\nbufsize {}\nbuffered {}\nperiod-bytes {}\nbuffer-bytes {}\nperiods {}\nstarted {}\nperiods-played {}\nsilence-periods {}\ntx-errors {}\nbad-used {}\nlatency-bytes {}\n",
             RATE_HZ,
             self.voices.len(),
             PERIOD_BYTES,
@@ -714,10 +721,6 @@ impl Graph {
             s.tx_errors,
             s.bad_used,
             s.last_latency_bytes,
-            u8::from(self.capture_available),
-            u8::from(self.source_open),
-            s.periods_captured,
-            s.rx_errors,
         );
         out.extend_from_slice(text.as_bytes());
     }
@@ -1037,8 +1040,26 @@ impl Conn {
                     Err(()) => return false,
                 }
             } else {
-                let bytes = sh.graph.lock().source_take(ptr.count as usize);
-                if bytes.is_empty() {
+                let (bytes, available) = {
+                    let mut g = sh.graph.lock();
+                    (g.source_take(ptr.count as usize), g.capture_available)
+                };
+                if !available {
+                    // N-3c-2 F3: capture died under the reader (a device that failed
+                    // PCM_START -> has_capture cleared -> capture_available republished
+                    // false). Fail the parked read closed (ENODEV) rather than leave it
+                    // parked on a mirror the cycle will never fill again.
+                    self.out_buf.clear();
+                    self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+                    match p9::build_rlerror(&mut self.out_buf, ptr.tag, p9::E_NODEV) {
+                        Ok(len) => {
+                            if !self.send_all(len) {
+                                return false;
+                            }
+                        }
+                        Err(()) => return false,
+                    }
+                } else if bytes.is_empty() {
                     self.pending_source_read = Some(ptr); // still empty -- keep parked
                 } else {
                     self.out_buf.clear();

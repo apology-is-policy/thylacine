@@ -157,7 +157,7 @@ graph:
 |---|---|---|---|---|
 | `/` | 0 | `0555` dir | mount lists `ctl info volume audio nodes`; `-ctl` lists `volume tap source` | — |
 | `audio` | 3 | `0666` | `EPERM` (N-3c-1: recording is the gated `-ctl/tap`, never the shared mount) | S16 stereo 48 kHz into **voice 0** |
-| `info` | 2 | `0444` | device words + counters + `voices N` + `capture`/`capturing`/`periods-captured`/`rx-errors` (N-3c-2) | `EPERM` |
+| `info` | 2 | `0444` | device words + counters + `voices N` (NO capture fields -- N-3c-2 F1: capture presence/activity is authority-bearing, not world-readable on the shared mount) | `EPERM` |
 | `ctl` | 1 | `0644` | one description line | `flush` (drops voice 0); else `EINVAL` |
 | `volume` | 6 | `0444` in the mount / `0666` on `-ctl` | `audio <l> <r>` + `mix <l> <r>` (Plan 9 `volume(3)`) | READ-ONLY in the mounted playback tree; writable only on `/srv/nocturne-ctl`, gated (N-3a-3) |
 | `tap` | 7 | `0444` (`-ctl` only) | the mixed sink output (s16 stereo @ graph rate), gated `sink_authorized` fresh per-read + single-reader (EBUSY on a 2nd open); parks while the sink is idle (N-3c-1) | — (read-only) |
@@ -326,12 +326,13 @@ Unlike the tap, `source` does not appear on the mount at all (the mount lists
 `ctl info volume audio nodes`; `source` is `-ctl`-only). The witness
 (`/nocturne-capture-probe`, `tools/test-nocturne-capture.sh`, boot arg
 `thylacine.captureprobe` which forces `streams=2`) proves it DETERMINISTICALLY
-under `audiodev=none`: with `source` held, the driver's `periods-captured` in
-`info` CLIMBS (the discriminating COUNT -- content is silence under the null
-backend, so it asserts the count, never non-silence, which a broken RX path would
-also satisfy), a second concurrent open is `EBUSY`, `/dev/nocturne/source` does not
-exist, and a user-principal child is DENIED. Real captured-audio fidelity (a host
-loopback backend) is a deferred thyla-pi follow-up.
+under `audiodev=none`: with `source` held, reads off it DELIVER period-sized bytes
+(the discriminating positive -- content is silence under the null backend, so it
+asserts BYTES FLOWED, never non-silence, which a broken RX path would also satisfy;
+and it reads the capture stream itself, not the world-readable `info` counters,
+which F1 removed), a second concurrent open is `EBUSY`, `/dev/nocturne/source` does
+not exist, and a user-principal child is DENIED. Real captured-audio fidelity (a
+host loopback backend) is a deferred thyla-pi follow-up.
 
 ## The zero-copy ring (N-2b-1)
 
@@ -603,11 +604,30 @@ single boot's wall time.
   S16 stereo 48 kHz -- a voice at another shape is a future entry-conversion seam).
 - **Capture (N-3c-2) is witnessed for the AUTHORITY + the RX path, not for audio
   CONTENT fidelity.** The CI witness runs under `audiodev=none`, which clocks the
-  capture stream with silence -- enough to prove the RX path delivers periods (the
-  `periods-captured` COUNT) and the gate holds, but NOT that captured audio is
+  capture stream with silence -- enough to prove the RX path delivers periods
+  (BYTES flow off `source`) and the gate holds, but NOT that captured audio is
   faithful. A real-content witness (a thyla-pi PipeWire null-sink fed a known tone,
   captured back and energy-verified) is a deferred follow-up; it is real-silicon +
   non-deterministic, so it is not in CI.
+- **Capture STATE is not on the world-readable mount (N-3c-2 audit F1).** The driver
+  DOES keep `periods_captured` / `rx_errors` / `capture_available` / `source_open`
+  in `Stats`/`Graph`, but `render_info` deliberately does NOT emit them: `info` is
+  world-readable on the shared mount, and capture presence + live-recording activity
+  are authority-bearing (a program that can play must not learn who is recording).
+  Exposing them there also defeated the open path's "presence not probeable"
+  property (which now holds). Authorized capture-state observability (an `info` on
+  the `-ctl` post, gated) is a recorded seam.
+- **A device that PREPAREs but fails PCM_START disables capture (N-3c-2 audit F3).**
+  `start_capture` clears `has_capture` on a `PCM_START` failure (rather than let the
+  cycle retry forever, re-posting RX buffers each pass); the cycle re-publishes
+  `capture_available=false`, so a parked `source` read fails closed with `ENODEV`
+  and a later open gets `ENODEV`. The capture analog of TX `start()`'s give-up. Only
+  reachable on a pathological device (QEMU always succeeds `PCM_START`).
+- **The cycle holds the graph lock across `start_capture`/`stop_capture` device RPCs
+  (N-3c-2 audit F4).** Bounded (each `ctrl_rpc` <= ~2 s; `stop_capture` = 3), it
+  extends the deferred N-2c-F2 control-plane-freeze bound on a wedged device. Same
+  class, tracked with N-2c-F2; the refinement (drop the lock across the transitions
+  that read no graph state) applies to both playback and capture together.
 - **A parked `source` read on a live-but-silent capture keeps `has_pending()` true**
   (the F2-analog of the tap's idle busy-poll): while a reader holds `source` the RX
   stream runs and the mirror fills every period, so this is normally a non-issue; but

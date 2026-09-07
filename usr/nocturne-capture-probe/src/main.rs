@@ -10,18 +10,19 @@
 // CONTENT is silence, so this probe must NOT assert non-silence -- a silence-
 // content check would be satisfied by a BROKEN RX path AND by the working null
 // backend, indistinguishably (the broken-fixture trap). The discriminating
-// positive is the period COUNT: the driver's `periods-captured` in `info` must
-// CLIMB once an authorized reader opens `source`. A broken RX path leaves it 0
-// (=> a clean, bounded FAIL, never a hung boot -- we poll the non-blocking `info`,
-// not a blocking `source` read, to detect delivery).
+// positive is that BYTES FLOW off `source`: a working RX path delivers period-sized
+// (silent) chunks; a broken path delivers nothing, so the read parks and the boot
+// times out (a FAIL). This reads the capture stream ITSELF -- never the driver's
+// counters in the world-readable mount `info`, which N-3c-2 audit F1 removed
+// because capture state is authority-bearing (the eavesdropping surface), not
+// world-readable.
 //
 //   PARENT (SYSTEM):
 //     - opening /srv/nocturne-ctl/source is ACCEPTED (the SYSTEM axis).
 //     - the single-reader guard: a SECOND concurrent source open is EBUSY.
-//     - RX delivers: with `source` held, `info`'s periods-captured climbs past a
-//       threshold (the COUNT -- the deterministic positive).
-//     - the byte path: one `source` read returns data (>0 bytes; silent under the
-//       null backend, so no content assertion) -- the client-visible mirror works.
+//     - RX delivers: with `source` held, reads off it return period-sized data
+//       (>= ~2 periods; silent under the null backend, so BYTES FLOWED, not
+//       non-silence) -- the client-visible capture path works.
 //     - the eavesdrop-via-mount regression: /dev/nocturne/source does NOT EXIST
 //       (source is -ctl-only, never the shared mount).
 //
@@ -41,7 +42,6 @@
 extern crate alloc;
 
 use alloc::string::String;
-use core::time::Duration;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
@@ -49,27 +49,22 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use libthyla_rs::env;
 use libthyla_rs::io::Write;
 use libthyla_rs::process::{Command, Stdio};
-use libthyla_rs::time;
 use libthyla_rs::{
     t_close, t_open, t_putstr, t_read, T_OREAD, T_WALK_OPEN_FROM_ROOT,
 };
 
 // The sink-authority post (per-connection; the gate reads THIS program as peer).
 const NOC_CTL: &[u8] = b"/srv/nocturne-ctl";
-// The playback mount's info file (world-readable, non-authority): reports the
-// driver's capture counters.
-const MOUNT_INFO: &[u8] = b"/dev/nocturne/info";
 // `source` must NOT exist on the shared mount (it is -ctl-only).
 const MOUNT_SOURCE: &[u8] = b"/dev/nocturne/source";
 const SELF_BIN: &str = "/bin/nocturne-capture-probe";
 const DENY_PRINCIPAL: u32 = 1;
 
-// >= 2 captured periods proves the RX path clocks (a broken path stays at 0).
-const CAPTURED_THRESHOLD: u64 = 2;
-// Poll `info` up to this many times, sleeping between, before declaring the RX
-// path dead. 200 x 5 ms = 1 s -- generous vs the ~10.7 ms capture period.
-const POLL_TRIES: u32 = 200;
-const POLL_SLEEP_MS: u64 = 5;
+// >= this many bytes read off `source` proves the RX path DELIVERS periods (a
+// broken path delivers nothing -- the read parks, the boot times out -> FAIL). ~2
+// periods (PERIOD_BYTES=2048 x 2 = 4096). Content is silence under audiodev=none,
+// so this asserts BYTES FLOWED, never non-silence (the broken-fixture trap).
+const DELIVER_BYTES: usize = 4096;
 
 /// Write to BOTH the kernel console and fd 1 (joey's pouch_smoke checks fd 1).
 fn say(s: &str) {
@@ -98,40 +93,27 @@ fn open_source(ctl: i64) -> i64 {
     unsafe { t_open(ctl, b"source".as_ptr(), 6, T_OREAD) }
 }
 
-/// Read the driver's `periods-captured` counter from the mount `info` file. None
-/// on any read/parse failure (treated as "not yet observed").
-fn read_captured_count() -> Option<u64> {
-    let f = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, MOUNT_INFO.as_ptr(), MOUNT_INFO.len(), T_OREAD) };
-    if f < 0 {
-        return None;
-    }
-    let mut buf = [0u8; 1024];
-    let n = unsafe { t_read(f, buf.as_mut_ptr(), buf.len()) };
-    unsafe { t_close(f) };
-    if n <= 0 {
-        return None;
-    }
-    let text = core::str::from_utf8(&buf[..n as usize]).ok()?;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("periods-captured ") {
-            return rest.trim().parse::<u64>().ok();
-        }
-    }
-    None
-}
-
-/// Poll `info` until periods-captured reaches the threshold (the RX path clocks)
-/// or the bound elapses. True iff the count climbed -- the deterministic positive.
-fn capture_count_climbs() -> bool {
-    for _ in 0..POLL_TRIES {
-        if let Some(c) = read_captured_count() {
-            if c >= CAPTURED_THRESHOLD {
+/// Prove the RX path DELIVERS by reading bytes off `source` (the discriminating
+/// positive). Each read parks server-side until the cycle's pump_rx fills the
+/// mirror; a WORKING path returns period-sized silence chunks that accumulate to
+/// DELIVER_BYTES, a BROKEN path delivers nothing so the read parks and the boot
+/// times out (a FAIL). We assert BYTES FLOWED, never non-silence -- silence is what
+/// audiodev=none captures, and a non-silence check would be satisfied by a broken
+/// RX path too. Does NOT read the world-readable mount `info` (F1: capture state is
+/// authority-bearing, not exposed there).
+fn source_delivers(src: i64) -> bool {
+    let mut buf = [0u8; 4096];
+    let mut total = 0usize;
+    for _ in 0..8 {
+        let n = unsafe { t_read(src, buf.as_mut_ptr(), buf.len()) };
+        if n > 0 {
+            total += n as usize;
+            if total >= DELIVER_BYTES {
                 return true;
             }
         }
-        let _ = time::sleep(Duration::from_millis(POLL_SLEEP_MS));
     }
-    false
+    total > 0
 }
 
 /// /dev/nocturne/source must NOT exist -- capture is -ctl-only. True iff the mount
@@ -202,33 +184,24 @@ fn parent() -> i64 {
     }
     unsafe { t_close(ctl2) };
 
-    // 3. RX delivers (the deterministic COUNT): with `source` held, the driver's
-    //    periods-captured must climb. This is the discriminating positive -- a
-    //    broken RX path stays at 0. We poll the non-blocking `info`, so a dead RX
-    //    fails cleanly here rather than hanging a blocking `source` read below.
-    if !capture_count_climbs() {
-        unsafe { t_close(src) };
-        unsafe { t_close(ctl) };
-        return fail("periods-captured did not climb (the RX path delivered no periods)");
-    }
-
-    // 4. The byte path: one `source` read returns data (the mirror the cycle fills
-    //    is client-visible). Content is silence under audiodev=none, so assert only
-    //    that bytes flowed -- NEVER non-silence (the broken-fixture trap).
-    let mut buf = [0u8; 4096];
-    let n = unsafe { t_read(src, buf.as_mut_ptr(), buf.len()) };
+    // 3. RX delivers (the discriminating positive): with `source` held, reads off
+    //    it return period-sized data. A broken RX path delivers nothing -- the read
+    //    parks and the boot times out (a FAIL). Content is silence under
+    //    audiodev=none, so this asserts BYTES FLOWED, never non-silence. Reads the
+    //    capture stream itself, NOT the world-readable mount `info` (F1).
+    let delivered = source_delivers(src);
     unsafe { t_close(src) };
     unsafe { t_close(ctl) };
-    if n <= 0 {
-        return fail("a source read returned no bytes though periods-captured climbed");
+    if !delivered {
+        return fail("the source delivered no bytes (the RX path is not clocking)");
     }
 
-    // 5. The eavesdrop-via-mount regression: /dev/nocturne/source does not exist.
+    // 4. The eavesdrop-via-mount regression: /dev/nocturne/source does not exist.
     if !mount_source_absent() {
         return fail("/dev/nocturne/source exists on the shared mount (source must be -ctl-only)");
     }
 
-    // 6. Negative gate: a user-principal child -- source open AND mount source both
+    // 5. Negative gate: a user-principal child -- source open AND mount source both
     //    refused. The parent holds CAP_SET_IDENTITY (joey's spawn mask) to stamp
     //    the child's principal; the child inherits this namespace (so it sees the
     //    mount + /srv) but not SYSTEM, not the console-owner session, no clearance.
@@ -247,7 +220,7 @@ fn parent() -> i64 {
         Err(_) => return fail("could not spawn the deny child (missing CAP_SET_IDENTITY?)"),
     }
 
-    say("NOCTURNE-CAPTURE-PROBE PASS (SYSTEM source open + single-reader + periods-captured climbed + bytes flowed; mount absent + user source deny)\n");
+    say("NOCTURNE-CAPTURE-PROBE PASS (SYSTEM source open + single-reader + bytes delivered off source; mount absent + user source deny)\n");
     0
 }
 

@@ -13,10 +13,12 @@
 #
 #   POSITIVE (the probe itself, SYSTEM): opening /srv/nocturne-ctl/source is
 #   ACCEPTED, a SECOND concurrent open is EBUSY (single-reader), and -- the
-#   DETERMINISTIC COUNT -- the driver's periods-captured CLIMBS while the source is
-#   held. The witness runs under audiodev=none, so the captured CONTENT is silence;
-#   asserting non-silence would be satisfied by a BROKEN RX path too (the broken-
-#   fixture trap), so the probe asserts the COUNT, never the content.
+#   DETERMINISTIC positive -- reads off `source` DELIVER period-sized bytes while it
+#   is held. The witness runs under audiodev=none, so the captured CONTENT is
+#   silence; asserting non-silence would be satisfied by a BROKEN RX path too (the
+#   broken-fixture trap), so the probe asserts BYTES FLOWED, never the content. It
+#   reads the capture STREAM, not the driver's info counters (audit F1 keeps capture
+#   state off the world-readable mount info).
 #
 #   NEGATIVE: /dev/nocturne/source does NOT EXIST (no eavesdrop via the shared
 #   mount), and a user-principal child (SPAWN_IDENTITY_SET) is DENIED the source
@@ -64,4 +66,4 @@ if ! grep -q 'NOCTURNE-CAPTURE-DENY OK' "$LOG"; then
     exit 1
 fi
 
-echo "==> PASS: nocturne-capture-probe -- SYSTEM source open + single-reader + periods-captured climbed + mount absent/user source deny (EPERM)"
+echo "==> PASS: nocturne-capture-probe -- SYSTEM source open + single-reader + bytes delivered off source + mount absent/user source deny (EPERM)"

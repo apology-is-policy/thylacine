@@ -22,6 +22,112 @@ needed the operator.
 
 
 ---
+## 2026-09-07 (aux) -- Nocturne N-3c-2: device capture (the D_INPUT RX stream + the gated `source`)
+
+Fresh context off a self-compaction; N-3c-1 (the sink tap) was closed + pushed
+(`@6d35b3f9`) and the operator had already chosen N-3c-2 (device capture) as the
+next chunk via `AskUserQuestion`. Capture is eavesdropping-adjacent AND a driver
+surface, so the EFFORT GATE fired first -- `effort-report.sh` confirmed `max (this
+session)`, no escalation.
+
+**Research settled most of the design before the fork -- deliberately.** The
+authority model was already FIXED by scripture 6.8 (reading a device source is
+recording -> the identical `sink_authorized` gate, fresh per read, on `-ctl`), so
+there was no authority fork to surface. The as-built tree settled the SHAPE: the
+sink is a SINGLETON (no `sinks/<name>/` subtree exists; `audio`/`volume`/`tap` name
+the one sink), so `source` is the singleton mirror of that, not scripture's
+aspirational `sources/<name>/`. And the driver architecture settled the MECHANISM:
+the device (`snd`) lives SOLELY in the cycle thread, so capture had to be mediated
+through the shared graph exactly as playback is -- `source_open` requests it, the
+cycle owns the RX start/stop.
+
+**Two forks genuinely needed the operator (`AskUserQuestion`), both taken as
+recommended.** (1) The witness rigor bar = DETERMINISTIC now, real content later.
+(2) ONE chunk, not a 2a/2b split.
+
+**The witness was the crux, and the research surfaced an option scripture had not
+considered.** Scripture (6.4, the N-3 row) had anticipated needing a real capture
+backend (coreaudio loopback / Pi PipeWire null-sink -- non-deterministic,
+real-silicon). But the security-critical half (I-46: recording is gated) turns out
+to be witnessable DETERMINISTICALLY with `audiodev=none`: the null backend clocks
+the capture stream with SILENCE, and the discriminating positive is the period
+COUNT (the driver's `periods-captured` in `info` climbing), not the content.
+Asserting non-silence would have been the M-PIN broken-fixture trap -- a broken RX
+path produces all-zeros too, indistinguishable from the working null backend. One
+empirical unknown rode this as a contingency: *does* `none` actually clock capture
+periods? I built it and MEASURED: it does. `nocturned: stream 1: dir=1` (D_INPUT),
+`capture ready`, and `periods-captured` climbed under `audiodev=none` -- the
+thyla-pi contingency was not needed.
+
+**The RX path is the TX path mirrored, with one new adversarial field.** The rxq
+(`VQ_RX`=3) chain is the TX chain with the payload descriptor flipped to `F_WRITE`
+(capture is device -> guest). The one field TX does not have is the used-ring
+`len` -- the device's claimed captured byte count -- which is clamped
+`len.min(PERIOD_BYTES)` before any copy-out, so an over-long claim cannot read past
+the payload buffer (the RX analog of the TX `latency_bytes` clamp). The DMA pool
+grew 40 -> 64 KiB (build-asserted `<= 256 KiB`, the grant); I verified the page
+math by hand (RXQ at pages 10-12, RX_META 13, RX_PAYLOAD 14-15, slot 3's payload
+ending at exactly 65536).
+
+**Graceful degrade was the non-regression bar, and it holds.** Capture negotiation
+is OPTIONAL + NON-FATAL: `streams=1` (the default boot) leaves `has_capture` false
+and the daemon runs playback-only. MEASURED on the default boot: `capture disabled
+(playback-only)` + `nocturne-probe OK` + 1512/1512 kernel tests + `Thylacine boot
+OK`. Capture is also ON-DEMAND -- the RX stream starts only while an authorized
+reader holds `source` -- a privacy property beyond the gate (the mic is not even
+running otherwise).
+
+**A wrong turn caught by the self-audit, before the commit.** My first cut seeded
+`capture_available` once at driver open. Tracing the wedge path (a device where
+`stop_capture`'s re-PREPARE fails sets the driver's `has_capture` false) I found
+`Graph.capture_available` would go stale-true, so a later `source` open would be
+ACCEPTED yet capture nothing -- an accept-then-never-deliver. Benign (no crash, the
+gate still held) but wrong; the fix is to re-publish `capture_available =
+snd.has_capture()` each cycle (like `stats`/`started`), so a post-wedge open gets a
+clean ENODEV. What caught it was asking "what does each state mean and who reads
+it", not "what caller does this" -- the two-states-must-stay-in-sync question.
+
+Landed at `@18ac43e8` (19 files, +1060/-50), one chunk: the driver RX path
+(`snd.rs`), the `source` authority (`server.rs`), the cycle wiring (`main.rs`),
+`E_NODEV` (`ninep.rs`, a mirror of the ABI-pinned kernel errno), and the
+deterministic witness (`nocturne-capture-probe` + `test-nocturne-capture.sh`).
+
+**Audit (round-8, Opus fallback -- Fable out arc-wide; MODEL(start)==MODEL(end),
+no mid-run fallback): 0 P0 / 0 P1 / 1 P2 / 3 P3, all fixed-or-deferred.** The
+context-independent read caught the one thing my self-audit missed: **F1 [P2]** --
+I had added `capture`/`capturing`/`periods-captured` to the WORLD-READABLE mount
+`info` (to feed the witness's count), which defeated the open path's own
+"presence not probeable" property AND side-channelled live-recording activity to
+any principal. A claimed security property, false in the commit that introduced
+it. I reconciled by CONFINING (the principled choice for an eavesdropping surface):
+removed the capture fields from `render_info`, and switched the witness to the
+`source` BYTE-FLOW (bytes delivered off the stream) -- which also dissolved **F2
+[P3]** (the witness had keyed on a fixed count threshold, the bug_184 class,
+latent). **F3 [P3]** (a device that PREPAREs but fails PCM_START retried
+`start_capture` forever while the reader parked with no error -- my own self-found
+F-self-A folded in) is FIXED: `start_capture` now clears `has_capture` on the
+failure (the capture analog of TX `start()`'s give-up), the cycle republishes
+`capture_available=false`, and the parked read fails closed with ENODEV. **F4
+[P3]** (the cycle holds the graph lock across the capture device RPCs -- same class
+as the deferred N-2c-F2, a larger bound) is DEFERRED with N-2c-F2 (the refinement
+is shared by playback + capture). NOT a dirty close (0 P0/0 P1, P1+P2=1<6, the
+fixes are non-invasive) -> no re-audit owed. Re-verified GREEN on the fixed build:
+the byte-flow capture witness + the streams=1 non-regression, both re-booted.
+
+The F1 miss is the instructive part: my pre-commit self-audit found the
+`capture_available` wedge but NOT the info leak, because I was reasoning about the
+DRIVER + the GATE and treated the `info` render as neutral observability -- I did
+not ask "does this new render defeat a property the OPEN path claims". The
+prosecutor, having never read my justifications, re-derived the "not probeable"
+property from the open path and immediately saw the info render contradict it.
+Exactly the context-independence the fallback round is supposed to buy.
+
+**Open:** real captured-audio CONTENT fidelity is a deferred thyla-pi
+PipeWire-loopback witness (real-silicon, non-deterministic, not in CI); the `ear`
+node kind (tapping another program's voice) is N-4; the Fable-diversity pass is
+owed arc-wide (N-2c/N-3a/N-3c all ran Opus).
+
+---
 ## 2026-09-07 (aux) -- Nocturne N-3c-1: the gated sink tap (capture is a distinct authority)
 
 Fresh context off a self-compaction; the N-3a arc was closed + pushed. The next

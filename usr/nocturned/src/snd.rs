@@ -902,7 +902,16 @@ impl VirtioSnd {
             self.post_rx(s);
         }
         if self.pcm_verb_stream(R_PCM_START, 1, "capture PCM_START").is_err() {
+            // A device that PREPAREs but rejects START: GIVE UP on capture rather
+            // than let the cycle retry start_capture forever (re-posting 4 more RX
+            // buffers each pass, the avail-ring accumulation) while the authorized
+            // reader parks with no error. Clearing has_capture stops the retry and,
+            // once the cycle re-publishes capture_available=false, fails the parked
+            // reader closed with ENODEV (server poll_writes) -- the capture analog of
+            // TX start()'s give-up (drop_fifo). (N-3c-2 audit F3.)
             self.reap_rx_without_repost();
+            say!("nocturned: capture PCM_START failed; capture disabled");
+            self.has_capture = false;
             return;
         }
         self.rx_started = true;
