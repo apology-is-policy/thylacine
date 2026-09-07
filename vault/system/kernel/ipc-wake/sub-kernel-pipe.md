@@ -7,9 +7,9 @@ code: ["kernel/pipe.c", "kernel/include/thylacine/pipe.h"]
 audit: hard
 guarded-by: [inv-i9]
 validated-by: [spec-pipe, gate-smp]
-locks: [lock-pipe-ring, lock-poll-list, lock-rendez]
+locks: [lock-pipe-ring, lock-poll-list]
 created: 2026-08-01
-updated: 2026-08-14
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -24,14 +24,17 @@ byte-transport under the 9P spoor-transport adapter.
   ref=2 (one per endpoint). `SYS_PIPE` installs both as `KOBJ_SPOOR`
   handles with `R|W|TRANSFER` on BOTH ends — the wrong-end gate lives
   in the Dev (`is_read_end`), not the rights.
-- **read**: drains 1..n when data is buffered; blocks on
-  `read_rendez` when empty and the write end is open; returns 0 (EOF)
-  when empty and `write_eof`; -1 on wrong end / `SLEEP_INTR` (#811).
+- **read**: drains 1..n when data is buffered; **blocks on the
+  `poll_list`** when empty and the write end is open; returns 0 (EOF)
+  when empty and `write_eof`; `-EAGAIN` when empty, open, and `CNONBLOCK`
+  (placed after the drain and EOF checks, so it converts only the
+  would-block case and never registers a hook); -1 on wrong end /
+  `SLEEP_INTR` (#811 death).
 - **write**: appends 1..n (short when the ring fills mid-write);
-  blocks on `write_rendez` when full and the read end is open; -1
-  (EPIPE) when `read_eof` — and synthesizes the `pipe` note to the
-  writing Proc (13a; the note is informational, the -1 is the
-  load-bearing EPIPE musl translates).
+  **blocks on the `poll_list`** when full and the read end is open;
+  `-EAGAIN` when full, open, and `CNONBLOCK`; -1 (EPIPE) when `read_eof`
+  — and synthesizes the `pipe` note to the writing Proc (13a; the note is
+  informational, the -1 is the load-bearing EPIPE musl translates).
 - **close**: sets the EOF flag under `r->lock`, drops it, wakes the
   OPPOSITE rendez, then wakes the poll list — the close is a
   readiness edge (surviving read end → POLLHUP; write end → POLLERR).
@@ -52,14 +55,19 @@ byte-transport under the 9P spoor-transport adapter.
 
 ## Mechanism
 
-Read and write are lock→check→act-or-sleep loops. The acting arm
-drops `r->lock` BEFORE waking (opposite rendez + poll list); the
-sleeping arm drops it before `sleep(rendez, cond, r)` — the cond
-(`count > 0 || write_eof`; `count < CAP || read_eof`) re-checks under
-the rendez lock per the sleep discipline, with the producer's
-`wakeup` supplying the release/acquire pairing. The four wakes map
-one-to-one onto [[spec-pipe]]'s four buggy configs: delete any one
-and its NoStuck invariant produces the counterexample.
+Read and write are lock→check→act-or-sleep loops. The sleeping arm
+registers a `poll_waiter` on `poll_list` under `r->lock`
+(`pipe_block_locked`), then `sleep(&priv, pipe_waiter_ready, &pw)` drops
+the lock and blocks; on wake it unregisters and reads `sleep`'s verdict
+— `SLEEP_OK` means re-sample (another waiter may have taken the edge, so
+the loop re-checks under the lock), `SLEEP_INTR` means a death-interrupt
+and the op returns -1. The acting arm drops `r->lock` BEFORE
+`poll_waiter_list_wake`, which walks every hook — pollers and blocked I/O
+alike — under the list lock. The cond (`count > 0 || write_eof`; `count
+< CAP || read_eof`) is `pipe_waiter_ready`, evaluated under the list lock
+that orders the producer's mutation before it. The four wakes still map
+one-to-one onto [[spec-pipe]]'s four buggy configs: delete any one and
+its NoStuck invariant produces the counterexample.
 
 Ring ops are two-segment mod-arithmetic copies; `count`/`head`/`tail`
 only ever move under `r->lock`.
@@ -72,11 +80,14 @@ A partial-failure path never exercises the close path's ref logic.
 
 ## Data structures
 
-`struct pipe_ring` — **88-byte header + 4096 buf, size-pinned**:
-magic, atomic `ref`, count/head/tail, two EOF flags, `r->lock`, two
-single-waiter Rendezes, the embedded `poll_list`. The ring is
-kmalloc'd — 4184 bytes routes through the large path as an
-**order-1 (8 KiB) allocation**, ~4 KiB slack per live pipe.
+`struct pipe_ring` — **56-byte header + 4096 buf, size-pinned**:
+magic, atomic `ref`, count/head/tail, two EOF flags, `r->lock`, and ONE
+embedded `poll_waiter_list` (`poll_list`, offset 40) — the whole waiter
+story, pollers and blocked readers/writers alike. (It was an 88-byte
+header with two single-waiter Rendezes until the multi-waiter lift
+replaced both with the 16-byte list.) The ring is kmalloc'd — 4152 bytes
+routes through the large path as an **order-1 (8 KiB) allocation**,
+~4 KiB slack per live pipe.
 `struct pipe_endpoint` — 16 B, SLUB-cached, `{magic, ring,
 is_read_end}`. Diagnostics: `pipe_total_allocated/freed` (ring-level).
 
@@ -87,10 +98,16 @@ is_read_end}`. Diagnostics: `pipe_total_allocated/freed` (ring-level).
   concurrently raced the plain `--` — lost-update or both-see-zero
   (double-free). `fetch_sub` pre == 1 owns the free; pre <= 0
   extincts.
-- Single-waiter per direction: one sleeping reader, one sleeping
-  writer. A second sleeper on the same rendez is the rendez layer's
-  extinction. Multi-consumer competition multiplexes through poll,
-  not through the pipe's own rendezes.
+- **Multi-waiter, on one list (the single-waiter lift).** Every blocked
+  reader and writer registers a `poll_waiter` on the ring's `poll_list`
+  — the SAME list pollers use — so any number may sleep on either
+  direction. This replaced two single-waiter Rendezes whose "a second
+  sleeper extincts" rule was fine while pipes were kernel-only and became
+  an **unprivileged EL0 crash** the moment two threads of an EL0 Proc
+  blocked on the same end (the object-embedded-Rendez hazard: a "fine
+  in-kernel" primitive is a crash the day the object is EL0-shared). The
+  wake is one `poll_waiter_list_wake` per edge, rousing pollers and
+  blocked I/O together.
 - The poll-list wake runs AFTER `r->lock` drops on every edge —
   the register/sample side holds `r->lock`, so a concurrent register
   either precedes the mutation (the wake finds its hook) or follows
@@ -99,15 +116,18 @@ is_read_end}`. Diagnostics: `pipe_total_allocated/freed` (ring-level).
 ## Invariants enforced
 
 [[inv-i9]] specialized to the two-direction state machine —
-[[spec-pipe]]'s `NoStuckReader`/`NoStuckWriter`, composed under
-[[spec-scheduler]]'s single-rendez atomicity. `EofMonotonic` and
-`SingleWaiter` pin the rest of the protocol.
+[[spec-pipe]]'s `NoStuckReader`/`NoStuckWriter`, now carried on the
+multi-waiter `poll_list` rather than a single-rendez slot. `EofMonotonic`
+pins EOF ordering. The old `SingleWaiter` invariant is **retired** by the
+multi-waiter lift: the property it named — never two sleepers on one slot
+— was the very constraint the lift removed, not one to keep proving.
 
 ## Error paths
 
 -1: NULL/corrupt priv (endpoint magic extincts — UAF, not an error),
-wrong end, negative len, `SLEEP_INTR`. 0: EOF (read) or len ≤ 0.
-Close extincts on ref underflow or corrupt ring magic.
+wrong end, negative len, `SLEEP_INTR`. `-EAGAIN`: a `CNONBLOCK` read/write
+that would have blocked. 0: EOF (read) or len ≤ 0. Close extincts on ref
+underflow or corrupt ring magic.
 
 ## Performance
 
@@ -129,9 +149,20 @@ registered.
 
 ## Seams
 
-None open on this surface. The named lifts live elsewhere: the pouch
-`pipe(2)` translation (long landed), multi-waiter direction queues
-(never needed — poll covers it).
+- **A pipe read is not yet caught-note-interruptible (item 11 → 11c).**
+  11b-core landed the caught-note *mechanism*, but a pipe read still uses
+  plain `sleep`, not `sleep_noteintr`: only DEATH interrupts it (the #811
+  die-check; re-looping on a caught note would re-register and re-INTR, a
+  livelock). Opting in is deferred to 11c, which lands it together with
+  native/phenotype EINTR handling — returning EINTR before a native
+  reader (libthyla-rs, not EINTR-aware) can cope would break it, e.g.
+  `ut`'s `$(cmd)` capture read interrupted by the captured child's own
+  `child_exit`. See `design_caught_notes_do_not_interrupt_waits`.
+
+The pouch `pipe(2)` translation landed long ago. The "multi-waiter
+direction queues (never needed — poll covers it)" this section once
+claimed was wrong twice over: it WAS needed (the EL0-shared crash above)
+and it is now BUILT (the single-waiter lift).
 
 ## Caveats
 
@@ -162,4 +193,7 @@ None open on this surface. The named lifts live elsewhere: the pouch
 [[chg-2026-05-20-p5-poll]] (`.poll` + the wake callouts) → 13a
 (`notes_post_pipe`) → #811 INTR arms →
 [[chg-2026-07-29-96-pipe-fstat]] (fstat + qid identity, the CL-5
-build-storm door).
+build-storm door) →
+[[chg-2026-09-06-pipe-multiwaiter]] (the single→multi-waiter lift that
+retired the two Rendezes for one `poll_waiter_list`, closing the
+EL0-shared crash; `CNONBLOCK`/EAGAIN; the item-11→11c caught-note seam).

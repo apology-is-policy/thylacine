@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-08-16
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -212,6 +212,104 @@ success path drains the latch and self-corrects, the frame-push failure arms do
 not. Worth keeping as a shape — *a fidelity gap in an exemption check becomes a
 liveness bug when the thing being exempted is a latch.*
 
+### A caught note interrupts a blocked peer's wait (item 11)
+
+A note with a live handler must run at the return tail — but a peer thread
+blocked in a syscall reaches no return tail until something wakes it. So a caught
+note ARMS a per-Proc mask (`notes_arm_caught_note_locked`, the caught-note
+sub-field of `proc_flags`) and wakes every blocked peer (`proc_caught_note_wake`,
+under the process-table lock). Each woken thread re-checks a lock-free predicate,
+`thread_caught_note_deliverable`: a caught note is deliverable to *this* thread
+iff it is armed AND unmasked by the thread's own `note_mask` AND in the supported
+set (`caught & ~note_mask & NOTE_MASK_SUPPORTED`). Deliverable → the wait returns
+`*_INTR` and the handler runs at the tail; not → the thread re-parks, its wait
+intact.
+
+The predicate is what closes the **arm-2 livelock** (the N-3 guard): a caught
+note the re-entrancy guard will refuse — because a handler is already running —
+is *not* deliverable, so a thread must not wake for it. Waking anyway would find
+nothing to deliver, re-sleep, and be re-woken forever. The register-then-observe
+discipline is [[inv-i9]]'s, shared with the death-wake and the report latches:
+the arm stores under the lock the predicate re-reads under, so no wake is lost
+between the check and the sleep.
+
+### A handler that escapes its frame must not deafen the Proc (bug-2)
+
+Delivery is gated on `in_handler`: while a handler runs, `notes_deliver_at_el0_-
+return` holds every further note (VIVARIUM 6.22's conservative imprecision), and
+`in_handler` clears only at `rt_sigreturn` (`notes_noted_restore`) or exec. A
+PHENO_LINUX handler that `siglongjmp`s to an ancestor `sigsetjmp` point escapes
+its frame **without** `rt_sigreturn`, so `in_handler` stays stuck true — and the
+N-3 guard then refuses every future caught-note delivery for the life of the
+guest (permanent signal-deafness plus a queue pile-up).
+
+The detector rides the stack geometry, and it is exact for a single-stack guest.
+`note_saved_sp_el0` is the pre-handler SP; a live handler always runs BELOW it,
+while a `siglongjmp` target is an ancestor frame — older, hence higher — so a
+same-stack escape is always at or above the saved SP. Both operands are the
+SP_EL0 bank (the kernel runs EL1h), so the compare never crosses banks; on that
+condition the caller clears `in_handler`. The soundness is LOAD-BEARING on the
+handler sharing the pre-handler stack, which holds only while `sigaltstack` is
+unserved — a static assert ties the detector to the sigaltstack row so a renumber
+trips the build. **Audit F1**: the `>=` false-clears across a genuine cross-stack
+coroutine swap (a suspended context, not an abandonment), which can overwrite the
+single `note_saved_*` slot; contained (guest-self-corruption, per-Thread,
+kill-immune) and exotic (no v1.0 target does signal-driven cross-stack
+switching), documented in VIVARIUM 6.23's DEGRADED row and tracked for v1.x.
+
+### The handler-time mask is Linux's, and it is passed on (phenotype)
+
+For a PHENO_LINUX handler, delivery sets the running mask the Linux way: the
+frame's `uc_sigmask` records the PRE-handler mask (what `rt_sigreturn` restores,
+from `note_saved_mask`), while the live `note_mask` becomes `blocked | sa_mask |
+the delivered signal` (unless `SA_NODEFER`), via `vivarium_handler_mask`. That is
+the mask a running handler OBSERVES and PASSES ON: an `rt_sigprocmask` read inside
+it, an `execve` from inside it (the image inherits `mask|sa_mask|sig`), a `fork`
+from inside it (the child inherits the handler-time mask and its own `sigreturn`
+restores the saved one). Delivery itself is unchanged — the `in_handler` guard
+still holds every note for the handler's duration, so the widened mask cannot
+admit a nested delivery here; it only stops a handler's own `rt_sigprocmask` from
+outliving the handler.
+
+### A masked STOP-class note becomes pending, and is consumed by its own scan
+
+Most `tty:susp` suspends never reach the note queue: the job-control fan
+([[sub-kernel-jobctl]]) takes the stop at POST time. The queue path exists for one
+POSIX case — **every** thread masks `NOTE_BIT_TTY`, so the fan cannot stop and
+posts `tty:susp` instead (a blocked stop signal becomes *pending*). Before PTY-1f's
+round-2 F2 (#252) nothing could ever consume it: the EL0-return tail's case
+analysis handled only the terminate class, so a STOP-class note fell through every
+arm and was left queued with a comment claiming it awaited an "fd-read path" that
+does not exist for a non-self-managing Proc and *cannot* exist for a phenotyped one
+(a Linux guest has no notes fd). The `^Z` was silently lost, and one of the
+sixteen queue slots went with it. `notes_stop_note_name_locked` is the STOP-class
+twin of the terminate scanner: the tail consults it after the terminate check
+misses, and on a hit applies the stop through `proc_job_stop_self` — the same
+primitive `SYS_NOTED(NDFLT)` uses, so the #240 freshness (`susp_stop_armed`) and
+orphan-rule guards both apply without restating. The peek only yields a note once
+its family bit is *unmasked*, so the deferred stop lands exactly when the guest
+unblocks the signal; a `tty:cont` that arrived meanwhile has already disarmed the
+freshness flag, so the superseded `^Z` evaporates rather than resurrecting.
+
+**The consume is its own function because a decision and its consumption written
+as two scans are two predicates (P1).** `notes_stop_dequeue_locked` is
+*class-filtered* — it returns the first deliverable STOP-class note at **any**
+index, the same index-returning scan the peek runs. `notes_dequeue_locked` is
+class-**blind**: it pops the first mask-permitted entry in FIFO order, i.e. the
+queue head. On a one-note queue the two are indistinguishable, and every queue any
+test had built held one note — so reusing the general pop looked correct. Put a
+`child_exit` in front of the susp and they diverge: the stop applies, the
+`child_exit` is popped into a stack local nobody reads (a wait notification
+*silently destroyed*), and the `tty:susp` stays queued to re-fire. The lesson
+generalizes past this file — only a test that puts something *between* the decision
+and the consumption can tell the two scans apart (`notes.stop_dequeue_picks_its_own_note`,
+whose leg A executes the class-blind pop and asserts it takes the wrong note). A
+sibling correction (the c8ab2744 round) makes both class scans gate every hit on
+`notes_proc_default_applies(p, name)` per note rather than on a fixed name — the
+phenotype-sigtab reading that keeps a Linux guest's `SIG_DFL` susp from being
+`exits()`ed on a caught `tty:hup` queued behind it (its regression lives with the
+vivarium phenotype surface).
+
 ## Data structures
 
 `struct Note` — 32 bytes, size-pinned: name, argument, sender pid, timestamp.
@@ -353,6 +451,14 @@ Designed at the fd-first scripture commit and built as the signals sub-chunk;
 hardened across four numbered audit rounds whose findings are still visible at
 the lines they fixed. LS-5 added the uncaught-`interrupt` default terminate;
 PTY-1b added the `tty:` family and its gate; hardening #3a added `snare:*`.
+
+[[chg-2026-09-06-notes-caught-wait-mechanisms]] adds the three signal-delivery
+mechanisms that landed after the 2026-08-16 update: the caught-note interruptible
+wait (item 11 -- `notes_arm_caught_note_locked` + `thread_caught_note_deliverable`
++ the N-3 arm-2-livelock guard), the `siglongjmp`-escape `in_handler` clear
+(bug-2, the stack-geometry detector + its F1), and the phenotype handler-time mask
+(`vivarium_handler_mask`, `blocked|sa_mask|sig`). Already covered and borrowed:
+`SIG_IGN`-at-generation and `pipe`-as-a-TERMINATE-note.
 
 ## Tests
 

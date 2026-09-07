@@ -1127,7 +1127,14 @@ surface onto it, and ONLY THEN sends the Rwrite (reply-after-alloc,
 R2-F5); the conn stream is FIFO, so every post-ack present validates +
 blits against the new geometry. Bounded to <=2 generations
 (`old_weave.is_some()` → E_AGAIN); a stale serial → E_AGAIN, an
-unknown/mismatched echo → E_INVAL — none consume the offer. The
+unknown/mismatched echo → E_INVAL — none consume the offer. AS-BUILT
+(the H-arc round-1 audit, A-F2, 2026-09-05): an ack refused for the
+DRAINING reason is re-offered by the compositor when the drain
+completes (a fresh serial for the standing size, at the first
+post-fence present), so a client that only drains events and acks the
+newest CONFIGURE — every client — recovers on its ordinary path; the
+"present a frame, then re-ack" recovery the arm once asked of clients
+is no longer required of them. The
 displaced generation drains PASSIVELY (its last content stays displayed,
 never read again — tearing-freedom holds) and retires at the first
 post-fence present (the spec's `RetireDisplaced` + `ServerRelease`: the

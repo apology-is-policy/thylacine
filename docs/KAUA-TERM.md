@@ -119,10 +119,17 @@ stream down. The record ORDER is load-bearing (it delimits Beacon zones); the
 kaua-term emits in VT-stream order, flushing a pending CellDiff at every boundary.**
 
 kaua-term -> halcyond (ordered):
-- `CellDiff { changed (row,col,cell)[], cursor(row,col,vis) }` -- the live screen.
+- `CellDiff { changed (row,col,cell)[], cursor(row,col,vis), wrapped bool[] }` -- the
+  live screen. `wrapped` is the grid's per-row soft-wrap snapshot (length == rows),
+  carried like `cursor` so halcyond can rejoin soft-wrapped live rows into logical
+  lines for the normal-mode proportional render (PL-4), the live analogue of
+  ScrollOff's per-row flag (PL-3).
   (Cells are position-keyed, so intra-batch order is irrelevant -- only the
   boundary order between records matters.)
-- `ScrollOff { rows: cell[][] }` -- normal-mode lines off the top -> the transcript.
+- `ScrollOff { rows: cell[][], wrapped: bool[] }` -- normal-mode lines off the top
+  -> the transcript. `wrapped[i]` is true iff row `i` ended by AUTOWRAP (the grid
+  broke a logical line at `cols`) and continues into row `i+1`, so halcyond rejoins
+  the fragments and re-wraps at word boundaries (PL-3).
 - `Control { osc1936_raw(bytes) | bell | title(str) | exit(code) | winsize_ack }`
   -- the kaua-term forwards OSC 1936 (Beacon-zone frames) RAW, uninterpreted
   (halcyond keeps the Beacon parser -- R5 + its format-fuzz surface), plus BEL,
@@ -135,13 +142,36 @@ halcyond -> kaua-term:
   xterm-encodes honoring DECCKM/keypad -> the pts master.
 - `Resize { cols, rows }` -- the kaua-term sets the pts winsize (TIOCSWINSZ) + the
   hosted app gets SIGWINCH.
+- `Text { bytes }` (H-4d-2) -- a chosen verb's command line, written to the master
+  verbatim as ONE record (the compositor's `^E ^U <cmd>\n`): a bounded down-queue
+  drops it whole, never half a command.
+- H-4d-2b: `Osc1936Raw { serial, frame }` carries the span serial the frame
+  advanced the VT to; every cell record's `Cell.span` refers to one of these
+  (explicit on the wire, never counted at both ends).
 
-WIRE CELL = the shared `usr/lib/vt::Cell` (self-contained `ch` + inline style);
+WIRE CELL = the shared `usr/lib/vt::Cell` (self-contained `ch` + inline style,
++ `span` since H-4d-2b: the serial of the last Beacon frame the VT forwarded, 0 =
+none -- the consumer maps it to the span state after that frame, so a cell knows
+its obj / em / hdr without the producer ever parsing a Beacon body);
 halcyond interns per-block internally (its `TCell`) on ingest. IPC = a
 halcyond-owned Loom ring per tile (H-3c-2 EventRing reuse; main's side; the kernel
 primitive firms at KT-1); the contract itself is transport-agnostic. TIER = RICH
 per Halcyon tile (halcyond rasterizes with fontdue); the pts advertises `BEACON=`
 at kaua-term spawn (the aux producer side; no dynamic per-tile tier switch at v1.0).
+AS-BUILT (H-4d-2a, 2026-09-05): `kaua-term --beacon <none|cells|rich>` writes the
+tier into its own `/env/BEACON` before `spawn_on_slave`, so the hosted app inherits
+it; the pts SLAVE answers `'t'` to `SYS_FD_DEVCLASS` (the kernel's pts registry,
+never a qid bit) and the Beacon gate admits `'t'` beside the console's `'c'`; `ut`'s
+pts branch arms its transcript zones from the inheritance iff rich AND its stdout
+is that terminal. Absent = none, fail-closed. Until this every tile was plain.
+EVERY pts host declares (the H-arc round-1 audit, C-F1): `ptyhost`, a relay that
+pumps the master's bytes to its own stdout unparsed, declares what its own sink
+renders -- the tier it inherited iff its stdout is itself a terminal something
+renders, else `none` (`ptyhold::relayed_tier` + `declare_beacon`, the writer both
+hosts share). A host that said nothing passed an upstream `rich` straight through
+to a sink that could not show it (cosmetic, never authority; now closed by
+construction). Witness: pty-4's inner shell says `beacon cells inherited (pts host)` --
+the aurora console's tier, relayed (`none` on a bare serial console).
 
 Main records the same contract in HALCYON 14.3 (its scripture half).
 
@@ -263,7 +293,11 @@ its own worktree.
   render tier. Retiring the single-renderer `/dev/winsize` + `CCONSWINSZONLY`
   console special-case for tiles moves winsize AND the beacon advertisement onto
   the per-tile pts ctl together. (The console special-case stays for the non-tile
-  console/serial fallback.)
+  console/serial fallback.) **AS-BUILT (H-4d-2a):** the advertise side rides the
+  spawn (`--beacon` -> the hosted program's inherited `/env/BEACON`) plus the
+  kernel's `'t'` class, not a pts ctl verb -- per-tile as required, no dynamic
+  switch at v1.0; winsize was already per-pts (KT-1). The console special-case
+  remains.
 - **R2 -- SHARED PARSER crate** (refined by seam=B): the full-xterm PARSER
   (`usr/lib/vt`) is the one shared codebase, consumed by the kaua-term (tile
   producer) AND aurora (console renderer); halcyond consumes its `Cell` type on

@@ -3089,9 +3089,27 @@ static s64 sys_fd2path_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw, u64 a3) 
 // server-supplied stat/qid bit, so a 9P server cannot forge "I am the console"
 // (the C-2 forgeable-qid lesson: authority keys on the kernel Dev, not a
 // pass-through field). rights == 0 mirrors fd2path: read-only introspection on
-// any KOBJ_SPOOR handle, no authority conferred. The one normalization: a
-// /dev/cons leaf walked through devdev answers 'c' like a SYS_CONSOLE_OPEN fd
-// (devdev_fd_devclass), so is-a-terminal is exactly (dc == 'c').
+// any KOBJ_SPOOR handle, no authority conferred. Two normalizations over the
+// Dev's own char (spoor_devclass): a /dev/cons leaf walked through devdev
+// answers 'c' like a SYS_CONSOLE_OPEN fd (devdev_fd_devclass), and a
+// registered pts SLAVE answers 't' (H-4d) -- a terminal its pts host renders
+// (a Halcyon tile), distinct from the console 'c' (the I-27 trusted path,
+// spoor_is_console is untouched) and from a plain dev9p file '9'. The master
+// side stays '9': writing a master is typing INTO a terminal, not printing
+// onto one. The pts arm keys on the kernel's own registry (a ref-held
+// (conn, qid) binding, kernel/pts.c -- the same resolve the tty seam uses),
+// so a 9P server cannot dress a file as a terminal either. is-a-terminal is
+// (dc == 'c' || dc == 't'); the Beacon gate (BEACON.md 12.4) reads both.
+int spoor_devclass(struct Spoor *c) {
+    if (!c) return '-';
+    if (c->dc == devdev.dc) return devdev_fd_devclass(c);
+    if (c->dc == DEV9P_DC) {
+        bool is_master = false;
+        if (pts_resolve_spoor(c, &is_master) >= 0 && !is_master) return 't';
+    }
+    return c->dc;
+}
+
 static s64 sys_fd_devclass_handler(u64 fd_raw) {
     struct Thread *t = current_thread();             if (!t) return -T_E_BADF;
     struct Proc *p = t->proc;                        if (!p) return -T_E_BADF;
@@ -3100,7 +3118,7 @@ static s64 sys_fd_devclass_handler(u64 fd_raw) {
     struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, 0);
     if (!c)                                          return -T_E_BADF;
 
-    int dc = (c->dc == devdev.dc) ? devdev_fd_devclass(c) : c->dc;
+    int dc = spoor_devclass(c);
     spoor_clunk(c);
     return (s64)(u8)dc;
 }

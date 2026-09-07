@@ -78,6 +78,9 @@ pub enum ObjType {
     Url,
     Commit,
     User,
+    /// A saved Halcyon layout, by NAME (one path component, HALCYON.md
+    /// 13.7) -- the ref the session tool's verbs take, not a file path.
+    Layout,
 }
 
 impl ObjType {
@@ -88,6 +91,7 @@ impl ObjType {
             ObjType::Url => "url",
             ObjType::Commit => "commit",
             ObjType::User => "user",
+            ObjType::Layout => "layout",
         }
     }
 }
@@ -186,6 +190,35 @@ impl<'a> Sink<'a> {
             wire::point(&mut self.buf, Op::Rule, &[]);
             self.flush_frame();
         }
+    }
+
+    /// Open a preformatted block (12.2 `pre`): the payload's whitespace and
+    /// line breaks are significant. A rich sink sets it apart (mono +
+    /// code-block chrome) and neither re-wraps nor collapses it; inline
+    /// `obj`/`em` runs emitted between open and close stay affordant. The
+    /// interim home for box-drawing / column-exact output until Beacon gains
+    /// box/table primitives.
+    pub fn pre_open(&mut self) {
+        if self.tier == Tier::Rich {
+            wire::open(&mut self.buf, Op::Pre, &[]);
+            self.flush_frame();
+        }
+    }
+
+    pub fn pre_close(&mut self) {
+        if self.tier == Tier::Rich {
+            wire::close(&mut self.buf, Op::Pre);
+            self.flush_frame();
+        }
+    }
+
+    /// A preformatted block wrapping a literal string -- the common case:
+    /// bytes already laid out on the character grid (a box, aligned columns).
+    /// At `none`/`cells` this is exactly the plain payload.
+    pub fn pre(&mut self, s: &str) {
+        self.pre_open();
+        self.text(s);
+        self.pre_close();
     }
 
     /// Transcript structure (the shell only; 12.6). Explicitly non-scoped.

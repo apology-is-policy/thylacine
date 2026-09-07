@@ -22,6 +22,12 @@ pub struct FlatRow {
     pub row: usize,
 }
 
+/// H-4d: the `FlatRow.block` of a LIVE GRID row -- the virtual trailing
+/// block (HALCYON 14.11.5); `item` is the grid row, `row` is `usize::MAX`.
+/// Its runs come from the tile's cell spans (`Tile::grid_runs`), not the
+/// transcript.
+pub const GRID_BLOCK: usize = usize::MAX - 1;
+
 /// Flatten the transcript's current text rows, oldest first.
 pub fn flatten(t: &Transcript) -> Vec<FlatRow> {
     let mut out = Vec::new();
@@ -29,6 +35,20 @@ pub fn flatten(t: &Transcript) -> Vec<FlatRow> {
         push_block_rows(&mut out, bi, &b.items);
     }
     push_block_rows(&mut out, usize::MAX, &t.open_block().items);
+    out
+}
+
+/// The transcript's rows followed by `grid_rows` live-grid rows (the
+/// virtual trailing block): a tile's Normal mode walks both.
+pub fn flatten_with_grid(t: &Transcript, grid_rows: usize) -> Vec<FlatRow> {
+    let mut out = flatten(t);
+    for r in 0..grid_rows {
+        out.push(FlatRow {
+            block: GRID_BLOCK,
+            item: r,
+            row: usize::MAX,
+        });
+    }
     out
 }
 
@@ -50,6 +70,15 @@ fn push_block_rows(out: &mut Vec<FlatRow>, block: usize, items: &[Item]) {
                 }
             }
             Item::Rule => {}
+            // PL-1b: a `pre` block is one selectable unit (row usize::MAX,
+            // like a Line) -- its laid lines all carry src_row=MAX, so a mark
+            // bands the whole code fence. Per-line pre selection is a later
+            // refinement (would need src_row stamping in the layout arm).
+            Item::Pre(_) => out.push(FlatRow {
+                block,
+                item: ii,
+                row: usize::MAX,
+            }),
         }
     }
 }
@@ -82,6 +111,20 @@ pub fn row_text(t: &Transcript, fr: FlatRow) -> String {
             }
             None => String::new(),
         },
+        // PL-1b: a pre yanks its literal content (lines joined by newlines --
+        // the plain realization, verbatim).
+        Some(Item::Pre(lines)) => {
+            let mut s = String::new();
+            for (i, l) in lines.iter().enumerate() {
+                if i > 0 {
+                    s.push('\n');
+                }
+                for c in l.cells.iter() {
+                    s.push(c.ch);
+                }
+            }
+            s
+        }
         _ => String::new(),
     }
 }

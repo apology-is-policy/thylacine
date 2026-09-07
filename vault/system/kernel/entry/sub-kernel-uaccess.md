@@ -16,7 +16,7 @@ design:
   - "docs/reference/40-uaccess.md"
   - "docs/CONCURRENT-FS.md CF-3"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -126,6 +126,17 @@ The narrowness is the security property. The check requires a kernel-mode fault
 happens to land in the user half still extincts, because the faulting
 instruction is not in the table.
 
+That conjunction has a corollary the F210 audit made concrete: **a caller's
+range check must use the same user-half bound the dispatcher's gate uses.** The
+primitive does not range-check, so if a caller admits an address above the
+dispatcher's user-half gate, that address reaches the load, faults, and fails the
+gate — the fixup does not apply and the kernel extincts, from an EL0 argument.
+`SYS_PUTS` once validated against `2^48` while the gate used `2^47`, so any user
+pointer in `[2^47, 2^48)` was an unprivileged kernel extinction; the fix routes
+every bound-holder — the caller, the dispatcher gate, and the memory layer —
+through the one `UACCESS_USER_VA_TOP` constant, and the compile-time assertion
+keeps them converged.
+
 ## Error paths
 
 `-1` from every primitive on a fault. Zero from the table lookup for an
@@ -192,3 +203,8 @@ paging path.
 ## Provenance
 
 [[chg-2026-08-02-entry-sweep]].
+
+[[chg-2026-09-06-uaccess-doc-absorb]] folds the F210 P1 corollary absorbed from
+docs/reference/40: a caller's range bound must equal the dispatcher's fixup-gate
+bound, or a VA in the gap is an EL0-triggerable extinction (`SYS_PUTS` held `2^48`
+vs the gate's `2^47`; the fix converges every bound-holder on `UACCESS_USER_VA_TOP`).

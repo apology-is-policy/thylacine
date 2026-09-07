@@ -100,11 +100,28 @@ standing "design for Halcyon-on-vk" directive is hereby cashed:
   Halcyon is dark text in full daylight — the calm day.** The palettes
   themselves say which environment you are in. (Dark Halcyon themes remain a
   stylesheet matter, not a design fork.)
-- **What stays monospace**: raw-VT panes (§5), code (`em class=code` runs), and
-  any content whose alignment is character-grid semantics. Tables do NOT force
-  monospace: a Beacon `table` renders as a proportional ruled table in Halcyon
-  and as box-drawing in the cells tier — same bytes, two realizations
-  (BEACON.md §4).
+- **What stays monospace — two load-bearing cases only** (proportional-live,
+  §14.13, operator-ratified 2026-09-06). Monospace serves exactly where
+  character-grid alignment is essential: (1) the **raw-VT / alt-screen pane**
+  (§4 Class 2, §5) — a full-screen app owns its cells (nora, Quake, htop); and
+  (2) **grid-aligned output in the flow** — box-drawing and column-exact
+  listings (e.g. `la`), carried by the Beacon `pre` op (BEACON.md §3/§12.2) and
+  inline `em class=code` runs. Everything else — the prompt, typed input,
+  ordinary output, prose, tables — is **proportional** (DejaVu). A `pre` block
+  is **set apart like a code fence in Markdown or a scientific paper**: its own
+  ground colour + a leading vertical gutter rule, so a monospace island reads as
+  a deliberate inset, not a metric clash. Tables do NOT force monospace: a
+  Beacon `table` renders as a proportional ruled table in Halcyon and as
+  box-drawing in the cells tier — same bytes, two realizations (BEACON.md §4).
+- **Genera type discipline — hierarchy by size and italic, not weight.**
+  Following Symbolics Genera (the heritage this environment claims; `genera.gif`
+  is the reference), the stylesheet carries structure typographically: `hdr
+  level=1|2|3` render at descending sizes, **italic permitted, never bold**; `em
+  class=emph` renders **italic**; **bold is reserved for `em class=strong`
+  alone** — extreme emphasis in prose, nothing else. Bold headings are retired
+  (typographically crude). The Halcyon face set is therefore DejaVu proportional
+  in regular + italic + a bold kept only for `strong`, and Cornucopia mono for
+  `pre` / `em class=code` / alt-screen.
 
 ## 4. The pane-content model — two pane classes
 
@@ -116,9 +133,12 @@ pane):
   the data model for "select a past command, tweak, resubmit" and for
   block-level operations (fold a long output, yank a block, re-run).
 - Proportional body text (DejaVu) with monospace islands (Cornucopia) where
-  semantics demand; Beacon `table`/`hdr`/`em`/`obj` realized per the
-  stylesheet; plain un-annotated output renders in monospace exactly as a
-  terminal would — foreign programs lose nothing.
+  alignment is load-bearing (`pre` blocks, `em class=code`); Beacon
+  `table`/`hdr`/`em`/`obj` realized per the stylesheet. Plain un-annotated
+  output renders **proportional** too — the mainly-proportional default
+  (§14.13); a foreign program whose columnar ASCII needs the grid emits a `pre`
+  block or runs full-screen (alt-screen → the raw-VT class, §14.13), the two
+  places the character grid is preserved.
 - The **Helix-modal transcript** (TAPESTRY §14) governs keyboard interaction:
   Esc → normal mode, navigate/select/yank anywhere in read-only scrollback,
   `i` jumps to the writable prompt. Selection spans mixed-metric content
@@ -184,8 +204,11 @@ The layout system is a direct payoff of layout-as-9P (TAPESTRY §15):
   the swallow hack: our tags are authoritative).
 - **Named layouts** live in the two-tier config pattern (aurora-config
   precedent): `/lib/halcyon/layouts/` (system/device tier) +
-  `$home/lib/halcyon/layouts/` (session tier). `halcyon.rc` remains a script
-  writing `/dev/tapestry` files; a layout file is data it feeds.
+  `$home/lib/halcyon/layouts/` (session tier). `halcyon.rc` is the user's
+  session startup script (§13.7, H-4c): a ut script the per-user compositor
+  runs at session start (rio's `-i initcmd`), driving the compositor through
+  the session tool (`halcyon layout restore <name>`) -- never through the
+  shared `/dev/tapestry` mount, whose peer is the mounter (the H-4b finding).
 - Geometry-only restore (attach-on-next-launch) is the degenerate case of the
   same format; respawn is the ambition and the default.
 
@@ -767,6 +790,31 @@ AND the chrome; the H-2 transcript palette (`parchment_sheet()` from
 `vt::THEMES[1]`) is swapped for the Daylight §1 tokens in the same chunk, so
 transcript and chrome match from the start.
 
+**Menus admit the declared session (H-4d-1, 2026-09-05).** The `role=menu`
+create and the `menu place` / `menu dismiss` verbs are the renderer's OR the
+DECLARED session compositor's (the seat holder of §14.12): the per-user
+compositor is the user's rio and summons the obj verb menu over its own
+tiles. The seat is one conn per display, held only while it hosts, so no
+other same-user program reaches the arm past a live compositor; the
+per-process owner check on the placed surface is unchanged. AS-BUILT
+(the H-arc round-1 audit, A-F5, 2026-09-05): the arm requires the declared
+conn to HOST a tile as well — a declarer on an idle display, which hosts
+nothing, gets no menu either (it could otherwise float one, take the
+input grab and force the composed mode with no tile of its own).
+
+**The menu inside a session tile (H-4d-2 AS-BUILT, 2026-09-05).** The
+console renderer's Helix-modal transcript + obj verb menu are ported into
+the session compositor's tiles (150-halcyond.md "The menu in a session
+tile"): on the VT's normal screen Esc enters Normal (a full-screen app on
+the alt screen owns Esc), the console's Normal keys minus yank/paste walk
+the rows and the obj runs, Enter or a left click on a run summons its menu
+-- placed by the session compositor at display coordinates -- and a choice
+is typed into the tile it was opened over as ONE `Text` record
+`^E^U<cmd>\n` (the `^E^U` prefix moves a half-typed draft to ut's kill
+buffer instead of running into it; one record so the bounded down-queue
+drops it whole). The view follows the cursor (the marked row drags the
+scroll offset). A tile's yank register lands with the pts clipboard work.
+
 **Menus (H-3c — THE GATE).** ONE ephemeral `Role::Chrome` surface, summoned by
 halcyond via the gated global-ctl verb `menu place <x> <y> <w> <h>` /
 `menu dismiss` (names provisional; the default-deny gate). Compositor-placed at
@@ -1063,7 +1111,89 @@ authority) is not audit-bearing on its own.
   `$home/lib/halcyon/layouts/` (session tier) — the aurora-config two-tier
   precedent, including its hard-won durability discipline (fsync the same
   OWRITE fd post-rename; `gfx-status.md` cfg-2a records the three-iteration
-  lesson — do not relearn it).
+  lesson — do not relearn it). **H-4c AS-BUILT (2026-09-05): the gesture +
+  named-layout management + the startup script.** `halcyon layout list`
+  prints every layout of both tiers (name, tier, `shadowed` for a device
+  layout a session one hides); on a rich console each name is an
+  `obj type=layout` presentation (BEACON.md §12.2, the `layout` type) whose
+  menu offers `restore` / `save` / `delete` — the gesture IS the transcript's
+  own verb menu, no renderer code. `halcyon layout delete <name>` unlinks the
+  session-tier file (the device tier is read-only to the tool; the unlink's
+  durability is Stratum's commit — no directory fsync exists). A layout name
+  never begins with `-` (so a verb template needs no `--` and no name reads
+  as an option) and never ends in the save's `.tmp` (a crashed save's
+  residue, hidden from `list`). **The startup script**: once the per-user
+  compositor's first tile presents (§14.12) it spawns, AS the user under the
+  tile cap mask, `ut --home $home $home/lib/halcyon.rc` if that file exists,
+  else `halcyon layout restore default` if the image ships
+  `/lib/halcyon/layouts/default` (the first-launch welcome, H-4d), else
+  nothing — rio's `-i` idiom; no marker state (an empty rc opts out of the
+  welcome). The child is reaped by the compositor (a bounded idle poll while
+  it runs) and killed at logout.
+- **Who hosts a tagged leaf under the session compositor (H-4d-1 AS-BUILT,
+  2026-09-05).** Three rules close the race H-4c left owed (the tool's
+  splits vs the compositor filling every empty it owns, same principal,
+  last claim wins). (1) **A peer-split empty leaf is its creator's until
+  the creator's conn goes**: tapestryd stamps the writing conn on both
+  empties a ctl `split` makes (`Pane.creator_conn`; a chord split stamps
+  none), and while that conn lives the claim mint answers E_AGAIN to every
+  other conn of the principal (the renderer is never held off), and a
+  claim-less create from another PROCESS treats such a leaf as occupied in
+  its focused-leaf fallback and splits beside it (the H-arc round-1 audit,
+  A-F3: a program launched during a restore otherwise took the tool's leaf
+  out from under its tag; the same process on another conn fills its own);
+  the reservations lift at the conn's retire, which fans one TEV_LAYOUT to
+  the declared session (a release changes no geometry). The mark is made BY
+  the split, so no window exists for a mark made after it. (2) **The tag
+  of an empty leaf is the tile's command line** (acme; rio's `window
+  cmd`): the session compositor reads `pane/<id>/tag` after its mint and
+  hosts `kaua-term cols rows <tag argv>` — empty = the shell with the
+  session's `--home`, a tagged `ut` gets the same home, a bare name
+  resolves through the shell's search (`libhalcyon::tag`). (3) **The tool
+  defers to a present compositor**: the compositor marks its session
+  (`/env/HALCYON_SESSION=on`, inherited by every tile and the init child);
+  a restore that sees the mark arranges + TAGS its leaves and exits, and
+  the compositor hosts each tag the moment the tool's conn is gone. On the
+  console path (no mark) the tool spawns its tags itself, placed by claim,
+  as before. Two placement rules give the welcome its shape: a saved tree
+  whose ROOT's LAST child is the one `env` leaf puts the built part BEFORE
+  the anchor (the tool moves the pre-existing focused tile past what it
+  built; the environment's console refuses with E_PERM and keeps its
+  place), and a saved `active` naming that env leaf hands the focus to the
+  anchor at the end. Graphical programs named by a tag under a session
+  therefore open BESIDE their terminal tile (focus placement) — the
+  rio-shaped refinement (a tile's graphical child stacking over its
+  terminal) is v1.x.
+- **Rich tiles (H-4d-2a AS-BUILT, 2026-09-05) -- the dependency the welcome
+  surfaced.** Every session tile had been PLAIN by construction: `ut`
+  resolved its tier only on the console branch, the console's `/dev/beacon`
+  names the console renderer, and a pts slave answered dev9p's `'9'` to
+  `SYS_FD_DEVCLASS`, so no tool in a tile ever emitted a frame (and no KT-1
+  gate had asserted one). Now the kernel answers `'t'` for a registered pts
+  SLAVE (the pts registry's own resolve, never a qid bit; the master stays
+  `'9'`), the Beacon gate admits `'t'` beside `'c'`, and the pts HOST
+  declares the tier it renders: the session compositor spawns
+  `kaua-term --beacon rich`, the kaua-term writes it into the hosted
+  program's inherited `/env/BEACON` before the spawn (absent = none,
+  fail-closed), and `ut`'s pts branch arms its zones iff rich AND its stdout
+  is that terminal (§14.3/§14.6 AS-BUILT; BEACON.md 12.4 amended;
+  SYS-FD-DEVCLASS-SPEC.md). ls-gfx-session asserts a tile shell's
+  `beacon rich (transcript zones armed)`.
+- **The welcome AS-BUILT (H-4d-3, 2026-09-05).** The image ships
+  `/lib/halcyon/layouts/default` = `splith n=2 active=1 / leaf tag="halcyon
+  welcome" / leaf env` (baked under the session lever, readback-verified).
+  A first login with no rc restores it: the tool tags the left leaf and
+  exits, the compositor hosts `halcyon welcome` there (the H-4d-1 rules), the
+  anchor rules put the tour LEFT of the session's own shell and focus the
+  shell. `halcyon welcome` is a Beacon transcript at the tile's tier -- a
+  heading, two lines of how, a "try this" table of PATH objects whose verb
+  menus do the demonstrating (`/bin`, `$HOME`, `/dev/tapestry/layout`,
+  `/lib/halcyon/layouts`), the split/zoom/layout chords, the lineage line --
+  then it EXECs the user's shell in the same tile, so the tour sits above a
+  live prompt. DELTA from the ratified pitch: the tour's objects run IN
+  PLACE (a chosen verb's command lands in the tour's own tile), not in the
+  right pane -- "runnable objs targeting the RIGHT pane" needs a cross-tile
+  command channel and is v1.x. An empty rc still opts out.
 
 ### 13.8 Audit + scripture-sync obligations (the §18.10 pattern; owed at
 ### each chunk's close)
@@ -1221,7 +1351,9 @@ pollable (§14.11.7 / §14.11.7a). The record set:
   to reach the aux tree (a build-prep sync at KT-2; §14.10).
 - **Tier**: under B halcyond renders, so the render tier is RICH for every Halcyon
   tile; the pts advertises `BEACON=rich` (set at kaua-term spawn — §14.6's advertise
-  side), so a tier-aware program in the tile emits rich markup.
+  side), so a tier-aware program in the tile emits rich markup. AS-BUILT at
+  H-4d-2a (2026-09-05): `kaua-term --beacon rich` from the session compositor,
+  the pts slave's `'t'` class from the kernel; §13.7 "Rich tiles".
 
 The native-`ut` VT-round-trip (a native Kaua app feeding cells more directly than
 emitting VT to be re-parsed) stays a **v1.x optimization**; v1.0 native `ut` emits VT
@@ -1284,6 +1416,13 @@ read to choose output. Under multi-console **both** relocate to the per-tile pts
   stale `BEACON=rich` would emit TTF-assuming output the tile cannot honor — so the
   advertisement is per-tile, not global. Retiring the `CCONSWINSZONLY` console
   special-case for tiles moves winsize **and** beacon onto the per-tile pts ctl.
+  **AS-BUILT (H-4d-2a, 2026-09-05):** the advertise side rides the SPAWN
+  (`kaua-term --beacon <tier>` -> the hosted program's inherited
+  `/env/BEACON`) rather than a pts ctl verb -- per-tile as required, no
+  dynamic switch at v1.0 -- and the kernel's part is the pts SLAVE's `'t'`
+  class (`SYS_FD_DEVCLASS`; the Beacon gate reads `'c'` or `'t'`). The render
+  side is halcyond's rasterizer, RICH for every tile. The console
+  special-case remains for the non-tile fallback.
 
 ### 14.7 Inline media — native, out-of-band
 
@@ -1403,6 +1542,15 @@ zone-open lands in the new zone.
 
 **14.11.3 The render composition.**
 
+> **SUPERSEDED for the normal screen by §14.13 (proportional-live,
+> operator-ratified 2026-09-06).** The normal-mode composition below — a
+> proportional scrollback flow above a **mono live grid tail** — is retired:
+> the normal screen now renders the proportional live transcript throughout
+> (prompt + typing + output), painting the grid's live content proportionally
+> rather than as a fixed-cell tail. The **alt-screen** arm below is unchanged.
+> Read §14.13 for the ratified model; the text below is the KT-1.5 record it
+> amends.
+
 - **Normal mode**: the scrollback blocks (flow layout, `layout.rs`, cursor-anchored
   like #55) render above; the **live grid** renders as the tail (a fixed-height
   grid region at the bottom). The viewport shows the tail by default; scrolling up
@@ -1421,12 +1569,43 @@ transcript. The grid is not zoned; the "current zone" is simply whichever block
 ScrollOff is currently appending to. A zone-open freezes the current block and
 starts a new one; subsequent ScrollOff lines land there.
 
+**AS-BUILT at H-4d-2b (2026-09-05): the span state reaches the cells.** The
+zone/block cut is as above, but the SPAN state (obj / em / hdr) had never
+reached the grid's cells or the scrolled-off rows (interned with no obj), so
+no row in a tile ever carried an obj run -- the tile menu (H-4d-2) landed
+hollow on its first gate (Esc entered Normal mode with zero rows: the `ls`
+output was still on the 36-row grid, and the grid was invisible to the row
+machinery). Now the PRODUCER stamps every cell with the serial of the last
+Beacon frame its VT forwarded (`vt::Cell.span`; the kaua-term reads no body --
+a numeric OSC selector, R5 kept), the record carries that serial
+(`Control::Osc1936Raw { serial, frame }` -- explicit on the wire, never
+counted at both ends, so a dropped or oversize frame can never shift every
+later cell onto the wrong span), and halcyond, feeding the same frames in
+order, notes the state AFTER each under its serial (`SpanMap`, an 8192-entry
+ring validated by the full serial). A grid cell therefore resolves to
+(block, obj, em, hdr) however late it scrolls off, and `push_scrolled_rows`
+interns em / obj / hdr -- COPYING an obj from its source block into the
+landing block when the grid straddled a zone cut, so every block stays
+self-contained (its Line styles index its own obj table). Genera/CLIM-shaped:
+presentations are recorded on the output stream at output time, never
+reconstructed by the display.
+
 **14.11.5 Selection + inline media.** Helix-modal selection addresses
 `(block, item, col)` over the scrollback AND the live grid (the grid is selectable
 as the live region -- a virtual trailing block; yank re-derives cell text as
 today). Inline media (`Image`/`Embed`) stays the **out-of-band native seam**
 (§14.7): the grid is text-only; a graphical app in a tile promotes to a Tapestry
 surface (§14.8), it does not paint pixels through the cell stream.
+
+**AS-BUILT at H-4d-2b (2026-09-05):** the grid IS the virtual trailing block.
+`select::GRID_BLOCK` rows follow the transcript's in a tile's flat list
+(`flatten_with_grid`); Normal mode starts on the grid's cursor row (the
+prompt), `w` / `b` step obj runs across both (`Tile::grid_runs` -- a grid run
+is keyed by its start column + 1, the grid's analogue of a block's obj
+index), Enter and a click resolve a grid run through its cell span to the
+owning block's obj (`grid_run_obj`), and the render bands the marked grid row
+and underlines its run under `GRID_KEY`. Yank in a tile is still owed (the
+pts clipboard work).
 
 **14.11.6 Spawn.** halcyond spawns one `kaua-term` per **leaf tile**. The
 enumeration hook already exists: `ChromeSet::reconcile` (`chromeset.rs:129`)
@@ -1739,8 +1918,9 @@ already held.
     handoff (C-F11, open).
 - **KT-1.5d-2 -- one session tile.** the per-user halcyond spawns ONE kaua-term (as
   the user) hosting `ut`, folds its up-pipe into the unified poll, ingests via the
-  ii-a `Tile` model, and renders it (normal = scrollback + grid tail; alt = grid only,
-  14.11.3). This is the old ii-b render, now inside the per-user compositor.
+  ii-a `Tile` model, and renders it (normal-mode composition now proportional-live
+  per §14.13; alt = grid only, 14.11.3). This is the old ii-b render, now inside the
+  per-user compositor.
 - **KT-1.5d-3 -- multi-tile.** per-leaf spawn/teardown + N-pipe multiplex +
   focus-routed input (the old 1.5c) -> **unblocks H-4d** (the welcome's two `ut` panes).
 
@@ -1751,3 +1931,157 @@ format-fuzz audit class (ingesting untrusted per-tile record streams, 14.11.12).
 login->per-user-halcyond spawn + the aurora handoff are the new privilege-adjacent
 surfaces (an AUDIT-TRIGGERS row at KT-1.5d-1). The kaua-term parser stays the
 crash-isolated hostile-input surface (14.2).
+
+**The session init (H-4c, 2026-09-05).** After the first tile's first
+present the compositor runs ONE startup command as the user — the rc
+(`$home/lib/halcyon.rc` under `ut --home`) or the device `default` layout's
+restore — with the tile cap mask (`!CAP_SET_IDENTITY`), stdin from
+`/dev/null`, stdout/stderr its own (the daemon log). `halcyond: session init:
+<argv> (pid N)` / `session init exited (code N)` are the witnesses; a spawn
+failure is said and the session lives on (an rc is a convenience, never a
+gate). The pure decision is `halcyond::session_init` (host-tested); the rule
+itself is §13.7's.
+
+### 14.13 The proportional-live tile model (operator-ratified 2026-09-06)
+
+**The decision.** After the first hands-on interactive Halcyon session
+(2026-09-06; the operator's findings in `Found issues.txt` + screenshots
+s1..s7), the operator ratified a sharpened rendering model: **Halcyon is mainly
+proportional — the prompt included.** The guiding question is "where does
+monospace serve a real purpose?", and the answer is "where character-grid
+alignment is essential." That is exactly two cases: the **editor** (nora —
+characters must line up; a Beacon mode may make it proportional later) and
+**box-drawing / column-exact output** (e.g. `la`, until Beacon has box/table
+primitives — carried by the new `pre` op, BEACON.md §3/§12.2). Everything else —
+the prompt, typed input, ordinary output, prose, tables — is proportional. North
+star: **Halcyon reads as a professionally typeset document that is also
+interactive and a shell** (the Genera listener, §3's type discipline).
+
+**What this retires.** The §14.11.3 normal-mode composition — a proportional
+scrollback flow above a **mono live grid tail** — is retired for the normal
+screen. Under §14.11 the fresh output you are looking at (the welcome, a
+just-run `ls`) rendered mono (the live grid) and became the proportional Genera
+presentation only once it scrolled off; the two halves of one document disagreed
+on metric *and* affordance (paths were blue objects on scrollback, plain mono
+text live — the operator's s1/s5/s6). That split is gone: **the normal screen is
+proportional live.**
+
+**The seam is the existing mode boundary** (§4 Class 1 / Class 2; §14.11.3):
+
+- **Normal screen → the proportional live transcript.** Prompt + line-editing
+  echo + command output all render proportional (DejaVu), Beacon spans realized
+  (obj/em/hdr), `pre` blocks as mono islands. This is the console H-2 flow model
+  brought to the session tile; it replaces the mono-grid tail.
+- **Alt screen → the raw mono grid, full-tile.** A program on the alternate
+  screen (nora, Quake, htop) owns its cells; halcyond renders the producer's
+  grid as fixed Cornucopia cells in the terminal-content palette (Bonfire — an
+  alt-screen app *is* a terminal, so Bonfire is correct there, §3). Unchanged
+  from §14.11.3.
+  **AMENDED 2026-09-06 (s7a; operator-ratified — the s7 finding; recorded for
+  the operator).** "Bonfire is correct there" stands as the CONSOLE / non-session
+  default, but a session-aware program now FOLLOWS THE SESSION THEME rather than
+  hardcoding Bonfire on a light ground (s7: nora opened from a menu painted
+  Bonfire inside a Daylight session). The session publishes its resolved palette
+  to `/env/HALCYON_PALETTE` — a program-agnostic `role=RRGGBB` list
+  (`libhalcyon::theme::env_palette`) — and a hosted program adopts it: `nora`
+  reads it plus a `$HOME/.config/nora/palette` dotfile, precedence
+  dotfile > /env > its own compiled default. So `nora` in a Daylight session
+  renders Daylight. halcyond is UNCHANGED — it still displays the cells the
+  program emits; only the program's own output colours change (the seam ships
+  resolved RGB, §14.3, so the palette is applied at the producer). One
+  resolution note: the `surface` panel role resolves from Daylight `header` (the
+  light lift), NOT the dark `status_bg` strip, so a program painting its own ink
+  on it keeps contrast.
+
+**Rendering is a sink choice; the pts stays a fixed-width grid.** The kaua-term
+producer is UNCHANGED — it still hosts a real pts, still maintains a fixed
+`rows x cols` grid, still xterm-encodes input. The shell and every hosted
+program see an ordinary terminal (readline's column arithmetic, cursor
+addressing, and winsize all keep working). Proportional-ness is purely how
+halcyond PAINTS the grid's content in normal mode — the BEACON thesis exactly
+("annotate meaning at the producer, render at the sink"; §3 "same bytes, two
+realizations"). Nothing about proportional-live changes the producer, the pts,
+or the wire records (§14.11.2); it changes the normal-mode composition in
+halcyond.
+
+**The core mechanism — logical lines, re-wrapped.** A fixed-width grid
+hard-wraps output at `cols` (mid-word: the operator's s5 "tho/ught"). Painting
+those rows proportionally verbatim would preserve the mid-word break. So
+halcyond must render from LOGICAL lines, not grid rows: the producer's VT tracks
+per row whether the break was an autowrap-at-margin (soft) or an explicit
+newline (hard) — the standard terminal "wrapped" flag — and forwards it on the
+ScrollOff/CellDiff rows (§14.11.2 records gain a per-row wrapped bit); halcyond
+joins soft-wrapped runs into logical lines and re-wraps each at the tile's
+proportional width, breaking only at word boundaries. This is the analog of the
+console flow (`layout()`), which already word-wraps because it flows the byte
+stream, not a pre-wrapped grid. A `pre` block is the exception: its rows are
+preserved verbatim (no join, no re-wrap) — that is what `pre` is for.
+
+**The prompt + live editing.** The prompt and the line being typed are part of
+the live tail and render proportional. Editing keeps working because the
+PRODUCER'S grid handles all cursor/VT semantics (readline redraws land in the
+grid as today); halcyond re-derives the logical line + caret each frame from the
+current grid state, and places the caret at the proportional x of the cursor's
+character boundary. The caret is a character index, not a pixel offset, so
+proportional placement is well-defined. This also subsumes the stray-cursor bug
+(s2: a caret adrift from the rows) — the caret is derived from the grid cursor,
+one source of truth.
+
+> **Open implementation choice — the winsize policy.** Two ways to keep the
+> shell's hard-wrap from fighting the proportional re-wrap: (a) keep the real
+> tile-derived `cols` and rely on the soft-wrap join above; or (b) advertise a
+> wide `cols` so the shell emits long logical lines directly and halcyond does
+> all wrapping. (a) is the leading candidate — it does not lie to programs that
+> query `cols` for their own layout (`ls` columns, a foreign pager), and native
+> tools emit Beacon (`table`/`pre`) rather than depending on `cols` for the
+> renderer. Pinned at implementation, not in this design.
+
+**Where mono stays, and how it is set apart.** The two mono cases (the editor
+via alt-screen; grid-aligned output via `pre`) render Cornucopia. A `pre` block
+is **visually inset like a Markdown / scientific-paper code fence**: its own
+ground colour + a leading vertical gutter rule (§3), so a monospace island reads
+as a deliberate block, not a metric accident. Box-drawing emitters (`la` and
+kin) wrap their output in `pre`; inline `obj`/`em` runs inside a `pre` stay
+affordant (so `la`'s path entries remain presentations), but the block's spacing
+is preserved verbatim.
+
+**Which findings this dissolves** (the operator's Found-issues list):
+
+- **s1** (the welcome renders mono live; objects indistinguishable from text):
+  dissolves — normal-mode is proportional live, so objects are affordant
+  immediately (blue paths, exit-coloured prompt marks), as they already are on
+  scrollback.
+- **s5** (proportional wrap breaks mid-word): dissolves — the logical-line
+  re-wrap breaks at word boundaries.
+- **s6** (the live/scrollback boundary is visible mid-document): dissolves —
+  one metric (proportional) across the whole normal screen; ScrollOff is
+  seamless.
+- **s2** (the stray vertical cursor): dissolves — one caret, derived from the
+  grid cursor.
+- s5's uneven line heights + s6's misaligned rules become plain
+  proportional-layout bugs in one surface (`layout`/the flow), no longer
+  entangled with the grid seam.
+
+**What still needs its own fix** (NOT dissolved by the model; tracked in
+`memory/project_halcyon_stabilization.md`, built AFTER the model lands):
+
+- **s7** — the editor-in-tile: an alt-screen lifecycle bug. The alt-screen pane
+  must fill the tile (nora's rows == tile rows), adopt the Bonfire
+  terminal-content palette deliberately (correct per §3 — an alt-screen app is a
+  terminal), and tear down cleanly on exit (today ut + nora "merge" and Esc goes
+  dead — a mode-latch not cleared on the child's alt-screen exit; the B-F5
+  alt→Normal transition is adjacent).
+- **split starvation** — too many splits leave some tiles untypeable (input
+  routing / focus / per-session back-pressure).
+- **s3** — the hidden prompt after a big listing: the viewport must follow to
+  the live tail after a large scrollback insert (view-follow / scroll clamp).
+
+**Scope + audit.** This reshapes halcyond's normal-mode render composition
+(`transcript.rs` / `layout.rs` / `session.rs`), adds the soft-wrap flag to the
+vt / kaua-term wire (§14.11.2 records gain a per-row wrapped bit), adds
+`FACE_BODY_ITALIC` + retires bold headings in the stylesheet (§3), and consumes
+the Beacon `pre` op. It sits on the audit-trigger surface (KT-1; the
+session-render + format-fuzz class; AUDIT-TRIGGERS rows 142/151) and joins the
+batched stabilization audit at the arc's close. The producer/pts, the trust
+boundary (§14.11.10), the resize path (§14.11.8), and the alt-screen render are
+unchanged in shape.

@@ -1410,6 +1410,7 @@ void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
 void test_9p_srvconn_transport_deadline_vtable_routes(void);
 void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
 void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
+void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
 void test_territory_pivot_root_smoke(void);
 void test_territory_pivot_root_rejects_no_initial_root(void);
 void test_territory_pivot_root_idempotent_same_spoor(void);
@@ -3273,6 +3274,7 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.deadline_vtable_routes",        test_9p_srvconn_transport_deadline_vtable_routes,        false, NULL },
     { "9p_srvconn_transport.devgone_posts_nodev_cqe",       test_9p_srvconn_transport_devgone_posts_nodev_cqe,       false, NULL },
     { "9p_srvconn_transport.transport_err_posts_eio_cqe",   test_9p_srvconn_transport_transport_err_posts_eio_cqe,   false, NULL },
+    { "9p_srvconn_transport.pts_slave_spoor_classifies_t", test_9p_srvconn_transport_pts_slave_spoor_classifies_t, false, NULL },
     { "pipe.smoke",                                         test_pipe_smoke,                                         false, NULL },
     { "pipe.read_on_empty_returns_zero",                    test_pipe_read_on_empty_returns_zero,                    false, NULL },
     { "pipe.write_to_full_returns_zero",                    test_pipe_write_to_full_returns_zero,                    false, NULL },

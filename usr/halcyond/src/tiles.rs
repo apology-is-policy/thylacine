@@ -8,7 +8,38 @@
 // the diff logic cannot regress silently in the untestable guest body.
 
 use crate::chrome::Leaf;
+use alloc::string::String;
 use alloc::vec::Vec;
+use libhalcyon::tag::{argv_of, resolve_prog};
+
+/// The session's shell.
+pub const TILE_SHELL: &str = "/bin/ut";
+
+/// H-4d: the argv a tile's `kaua-term` hosts for an empty leaf's tag -- the
+/// tag IS the tile's command line (acme; rio's `window cmd`): empty = the
+/// shell; else the tag's words, its program resolved through the shell's
+/// search (`exists` probes). The shell gets the session's `--home` when the
+/// tag did not name one, so a tagged `ut` is the same shell the compositor
+/// spawns by default.
+pub fn tile_command(tag: &str, home: Option<&str>, exists: impl Fn(&str) -> bool) -> Vec<String> {
+    let words = argv_of(tag);
+    let mut out: Vec<String> = Vec::new();
+    match words.first() {
+        None => out.push(String::from(TILE_SHELL)),
+        Some(p) => {
+            out.push(resolve_prog(p, exists));
+            out.extend(words[1..].iter().map(|w| String::from(*w)));
+        }
+    }
+    let is_shell = out[0] == TILE_SHELL || out[0].ends_with("/ut");
+    if is_shell && !out.iter().any(|w| w == "--home") {
+        if let Some(h) = home {
+            out.push(String::from("--home"));
+            out.push(String::from(h));
+        }
+    }
+    out
+}
 
 /// The reconcile diff: leaves that need a new tile, and tiles whose leaf is
 /// gone (to be reaped).
@@ -65,6 +96,39 @@ mod tests {
             surface,
             hidden: false,
         }
+    }
+
+    #[test]
+    fn an_empty_tag_is_the_shell_with_the_home() {
+        assert_eq!(
+            tile_command("", Some("/home/cora"), |_| false),
+            ["/bin/ut", "--home", "/home/cora"]
+        );
+        assert_eq!(tile_command("  ", None, |_| false), ["/bin/ut"]);
+    }
+
+    #[test]
+    fn a_tag_is_resolved_through_the_shell_search() {
+        // A bare name found in /goroot/bin resolves there; its args ride.
+        assert_eq!(
+            tile_command("hx notes.txt", Some("/home/cora"), |p| p
+                == "/goroot/bin/hx"),
+            ["/goroot/bin/hx", "notes.txt"]
+        );
+        // Not found anywhere: the shell-identical first candidate.
+        assert_eq!(
+            tile_command("nope", Some("/home/cora"), |_| false),
+            ["/bin/nope"]
+        );
+        // A tagged shell gets the home once, never twice.
+        assert_eq!(
+            tile_command("ut", Some("/home/cora"), |p| p == "/bin/ut"),
+            ["/bin/ut", "--home", "/home/cora"]
+        );
+        assert_eq!(
+            tile_command("ut --home /tmp/x", Some("/home/cora"), |p| p == "/bin/ut"),
+            ["/bin/ut", "--home", "/tmp/x"]
+        );
     }
 
     #[test]

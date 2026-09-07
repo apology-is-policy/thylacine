@@ -12,10 +12,10 @@ guarded-by: []
 validated-by: [prose, gate-interactive]
 locks: []
 hazards: []
-abis: []
+abis: [abi-halcyon-palette]
 design: []
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-07
 area: userspace
 ---
 ## Purpose
@@ -59,6 +59,19 @@ the restore explicitly; both are idempotent. Neither runs on a **crash**: a
 native binary aborts on panic, so destructors do not run, which is why the
 shell's post-reap restore is the real backstop. The layer is written knowing its
 own cleanup is best-effort.
+
+### The session palette is adopted once, before the first render
+
+Before it parses arguments, `main` calls `adopt_session_palette`. It starts from
+`theme::BONFIRE`, applies the session's `/env/HALCYON_PALETTE` roles over it if
+present ([[abi-halcyon-palette]]), then the user's `$HOME/.config/nora/palette`
+dotfile over that -- so precedence is **dotfile > /env > BONFIRE** (the dotfile
+wins because it is applied last), and any source that is absent or unparseable
+simply does not apply. It calls `theme::set_palette` exactly once, before the
+first render, which is the whole basis of that global's soundness
+([[sub-nora-view]] Concurrency). An unthemed console keeps Bonfire; an editor in
+a Halcyon session tile follows the session theme without nora knowing anything
+about Halcyon beyond the role vocabulary.
 
 ### Sizing is a round-trip, because there is no syscall to ask
 
@@ -147,6 +160,33 @@ against, so the server's offset is used as a character column directly, with the
 error bound stated: exact on an ASCII line, a few columns off on a line with
 multi-byte characters before the symbol, and the line is always right.
 
+### The kernel half of the stack is an I-39-authorized `/proc` read
+
+On each stop the debug host reads the debuggee's kernel backtrace from
+`/proc/<pid>/kstack` — the 8b settled-thread inspect — and hands the text to the
+pure parser ([[sub-nora-view]] owns `parse_kstack`; the divider and dimmed
+`StackRow.kernel` rendering are its half too). This is the one place the layer
+touches a kernel object, and its authorization is worth stating plainly because
+the Invariants section otherwise reads as "no kernel surface at all":
+
+- **The read rides the I-39 owner axis, not a capability.** nora, Ambush and the
+  debuggee all run as the same login principal, so the debug-authority invariant
+  (I-39) authorizes the inspect through ownership rather than `CAP_DEBUG` —
+  exactly the settled-thread tier that is I-39-authorized but not debug-stop-gated
+  ([[inv-i39]]). `/proc/<pid>` is reachable in nora's namespace because Ambush,
+  which nora spawned, already opens the same file; nora mounts nothing new for it.
+- **It is best-effort and fail-open.** No debuggee pid, an unreachable or denied
+  `/proc`, or an unparseable read all leave the kernel half empty — the Go frames
+  render alone. The read never fails a stop, never hangs, and never fabricates a
+  row. The pid arrives out of band: parley decodes the DAP `process` event into
+  the debuggee's system pid, so a backend that does not emit one simply yields no
+  kernel frames.
+- **The frame it reads is the target's head thread** (the M at the stop), not the
+  stopped goroutine's own M — the goroutine-accurate kernel stack is a deferred
+  Ambush stitch. At a user breakpoint the kernel rows are the debug-trap path; a
+  goroutine blocked in a syscall shows its block path. Selecting a kernel frame
+  reports `kernel frame: <name> (no source)` because kernel DWARF is deferred.
+
 ## Data structures
 
 - **`Lsp` / `Dap`** — the two session objects. Each owns a child process handle,
@@ -177,8 +217,13 @@ console-attached, so the elevation gate is untouched. Verified rather than
 assumed — the control file's name appears exactly once in the whole crate, in
 the comment saying nora does not touch it.
 
-Nothing else from the enumerated set. No capability, no namespace mutation, no
-kernel object.
+**I-39** (debug authority) is *consumed*, not enforced: the kernel-stack read
+above inspects `/proc/<pid>/kstack` through the owner axis (the same login
+principal), the settled-thread tier that I-39 authorizes without a debug-stop.
+The kernel does the enforcing; this layer only exercises the authorization it
+already holds by identity.
+
+Nothing else from the enumerated set. No capability and no namespace mutation.
 
 ## Error paths
 
@@ -285,4 +330,5 @@ twice.
 
 ## Provenance
 
-[[chg-2026-08-03-nora-host-sweep]].
+[[chg-2026-08-03-nora-host-sweep]] · [[chg-2026-09-06-s7a-palette-destale]]
+(the `adopt_session_palette` startup adoption + [[abi-halcyon-palette]]).

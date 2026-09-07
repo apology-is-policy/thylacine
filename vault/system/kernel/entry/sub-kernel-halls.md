@@ -3,7 +3,7 @@ id: sub-kernel-halls
 type: sub
 title: "Halls of Extinction — the crash dump and the live-thread backtrace"
 parent: moc-kernel-entry
-code: ["arch/arm64/halls.c", "arch/arm64/halls.h", "arch/arm64/halls_symtab.h", "arch/arm64/halls_symtab.stub.c"]
+code: ["arch/arm64/halls.c", "arch/arm64/halls.h", "arch/arm64/halls_symtab.h", "arch/arm64/halls_symtab.stub.c", "kernel/extinction.c", "kernel/include/thylacine/extinction.h"]
 audit: hard
 guarded-by: []
 validated-by: [gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/HALLS-OF-EXTINCTION.md", "docs/TOOLING.md section 10"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -27,6 +27,19 @@ for the debugger's kernel backtrace. The two look alike and their safety
 arguments are opposites; see Caveats.
 
 ## Contract
+
+`extinction(msg)` / `extinction_with_addr(msg, addr)` — the ELE entry
+(`kernel/extinction.c`). It prints `EXTINCTION: <msg>` on a fresh line — the
+agentic loop's catastrophic-exit ABI marker, matched **literally**, so a torn
+prefix is a false negative (the tooling times out reporting no marker) on a boot
+that genuinely died, not merely a messy line — then runs `halls_dump` and ends in
+`_torpor()`: halt forever, the boot's lineage over. `ASSERT_OR_DIE(expr, msg)` is
+the assert wrapper. A **recursive** extinction — `halls_dump` itself faulting on
+state the crash destroyed — is caught: the second entry prints a marker and parks
+suppressed rather than recursing into a stack overflow. The crash emitter takes
+the console ring lock and holds it to `_torpor` ([[sub-kernel-cons]]), never the
+parking writer role — a dying machine must never block on a wake that may never
+come.
 
 `halls_dump(ctx)` — the whole dump. Called from the extinction path *after* the
 `EXTINCTION:` line and *before* the halt. A non-NULL `ctx` dumps that saved
@@ -205,6 +218,13 @@ three dispositions for one impossible input.
 **The symbol table has no end sentinel.** See Caveats — this is the one seam with
 a live consumer.
 
+**`IPI_HALT` is owed, so the `EXTINCTION:` line can still be torn by a peer CPU
+(#243).** The crash emitter serializes its *own* output under the console ring
+lock, but the other CPUs are not halted before it prints, so a peer's concurrent
+`uart_puts` (which does not take the ring) can still interleave the marker the
+tooling matches literally. The fix is an `IPI_HALT` that quiesces the peers first;
+until it lands this is a known-open tearing window on SMP.
+
 ## Caveats
 
 **The symbolizer has no upper bound, and one of its two consumers depends on it
@@ -269,3 +289,8 @@ slide translation both ways, the enter/leave nesting, the plausibility gate, and
 the symbol lookup. The dump itself has no unit test and cannot easily have one;
 its witness is that the machine keeps booting and that the fault harness produces
 a dump end to end.
+
+[[chg-2026-09-06-extinction-doc-absorb]] added `kernel/extinction.c` (previously
+unowned) — the `extinction()`/`extinction_with_addr` ELE entry, the `EXTINCTION:`
+tooling-ABI marker, the recursive-extinction suppression, the `_torpor` halt, and
+the owed-`IPI_HALT` line-tearing seam (#243) — at the 04-extinction absorption.

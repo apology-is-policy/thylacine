@@ -9,16 +9,20 @@ code:
   - usr/lib/libhalcyon/src/layout.rs
   - usr/lib/libhalcyon/src/skeleton.rs
   - usr/lib/libhalcyon/src/place.rs
+  - usr/lib/libhalcyon/src/tag.rs
   - usr/lib/libhalcyon/Cargo.toml
+  - usr/halcyon/src/lib.rs
+  - usr/halcyon/src/main.rs
+  - usr/halcyon/Cargo.toml
 audit: light
 guarded-by: []
 validated-by: [prose]
 locks: []
 hazards: []
-abis: []
+abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md"]
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -50,7 +54,10 @@ everything else is pure `no_std` + `alloc`.
 `theme::DAYLIGHT` is the `Theme` (colours + syntax), `theme::METRICS` the
 `Metrics`, `theme::hairline(&Theme)` the derived rule colour, and
 `theme::daylight_palette()` the `vt::Palette` a per-tile kaua-term stamps its
-cells in. `layout::serialize`/`parse` round-trip a `LayoutNode` tree to and
+cells in, and `theme::env_palette(theme)` (with `daylight_env_palette()` its
+`DAYLIGHT` specialization) the `role=RRGGBB` text a Halcyon session publishes to
+`/env/HALCYON_PALETTE` ([[abi-halcyon-palette]]). `layout::serialize`/`parse`
+round-trip a `LayoutNode` tree to and
 from the `halcyon-layout v1` text; `layout::prune_env` drops the env-marker
 leaves; `layout::from_render_text` builds a tree from the compositor's own
 dump (the D-decision read side). `skeleton::plan` turns a `LayoutNode` into a
@@ -67,6 +74,20 @@ coherently with halcyond's transcript. Colours are `Argb` (0xAARRGGBB,
 opaque). The `Theme` struct is theme-agnostic -- Frutiger Aero (deferred) is a
 second const of the same shape -- so nothing structural changes when a second
 theme lands.
+
+**`env_palette` is the WRITE side of the palette seam.** `theme::env_palette(theme)`
+renders the `Theme` as the 11-role `role=RRGGBB` text the session publishes to
+`/env/HALCYON_PALETTE` ([[abi-halcyon-palette]]) -- the program-agnostic roles
+(`bg fg dim accent surface border` + the five syntax roles), each emitted with
+the opaque alpha byte dropped, which a hosted pts program (nora) adopts by name.
+One role mapping is a deliberate judgement worth keeping: the **`surface` role
+resolves from `Theme.header`, NOT `status_bg`.** `surface` is a lifted PANEL a
+program paints its own dark ink on (nora's status bar, popups, current-line);
+`status_bg` is Halcyon's own dark bottom strip worn with the light `status_fg`,
+so a program painting its `fg` on it would render dark-on-dark. `header` is the
+light lift that keeps the contrast. This is the concrete write side of the `vt`
+palette-seam comment named for v1.x; the roles are host-tested against the
+`DAYLIGHT` scripture (`daylight_matches_the_scripture`).
 
 **`layout` parses UNTRUSTED input and is written to prove it can't be made to
 fault.** A layout file lives in the user's `$home`, so `parse` is bounded on
@@ -212,6 +233,50 @@ the_damage_reaches`, the letterbox identity/pillarbox/never-empty cases).
 Pure math, host-tested; the drift it exists to prevent is a compositor that
 scales one way and a test that expects another. See [[sub-tapestryd]]'s
 fullscreen-zoom section and [[haz-latch-keyed-on-proxy]].
+
+## The `halcyon` tool -- the executor that drives the crate
+
+`usr/halcyon` is the native (libthyla-rs) session tool that runs **as the user**
+and turns the pure crate into acts: `layout save|restore|list|delete` and
+`welcome`. It is the crate's one driver, so it lives here; the authority it
+exercises is still adjudicated in [[sub-tapestryd]], not conferred by anything it
+holds (it takes no capability, no `SPAWN_PERM`, and adds no server verb -- the
+authority is the user's own principal).
+
+- **`name_is_valid` closes traversal by construction.** A layout name is one path
+  component, `[A-Za-z0-9._-]`, no leading `-` (so a name never reads as an option),
+  no leading dot, and never the save's `.tmp` suffix (the one constant the save's
+  temp file and the list filter share). The session path is
+  `<home>/lib/halcyon/layouts/<name>` -- with the leaf constrained this way, no
+  `..` or absolute name can escape it.
+- **Save is the aurora durability discipline verbatim.** Read `/dev/tapestry/layout`
+  + each `pane/<id>/tag`, fold through `from_render_text` then `serialize`, and write
+  the SESSION tier with write-tmp, content fsync, atomic rename, then a STRICT
+  metadata fsync on the same OWRITE fd (the [[sub-aurora]] `config::save` pattern).
+  The device tier (`/lib/halcyon/layouts/`) is halcyond's / the bake's, never the
+  tool's.
+- **Restore verifies the plan against the live tree and aborts rather than
+  misplace.** The tool runs on its OWN `/srv/tapestry` session -- a
+  `Session(principal)` peer whose splits/tags/claims are judged as the user's (the
+  shared `/dev/tapestry` mount, whose peer is the mounter joey, is used only for
+  reads). It `prune_env`s the tree, drives the build with `skeleton::plan`, binds
+  each symbolic ref to a real pane id by diffing the live `layout` dump, and
+  **verifies each split's predicted nest/flatten against what the compositor
+  actually did** -- a divergence aborts rather than placing a program into the wrong
+  tile. Each tagged leaf is claimed (`pane/<id>/claim`), named, seeded with its
+  one-shot `TAPESTRY_CLAIM` token into the tool's `/env`, and spawned as the user
+  (`resolve_prog` mirrors the shell's `/bin` search, since the kernel resolves a
+  spawn name against CWD, not `$path`); the child's libtapestry auto-consumes the
+  token on its first `open`. Under a session compositor (H-4d-1) the tool instead
+  tags each leaf for the compositor to host and replays focus, anchoring the built
+  part before a pre-existing environment tile (`anchor_last` / `active_is_env`).
+- **The H-4b audit F1 build-then-fill window** (a co-resident `Session(other)` or
+  `Client` could `close`/`split` the in-flight skeleton during the ~10 s fill,
+  because `actor_owns_subtree` is vacuously true on an all-empty subtree) is
+  harmless under v1.0's single-session model and is a DoS/misplacement of an
+  in-flight restore only -- no escalation, no crash. The fix (blocking a subtree
+  with a foreign-owned empty leaf) lands with the multi-seat hardening. Prosecuted
+  where the rule lives: [[sub-tapestryd]].
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

@@ -9,7 +9,7 @@ guarded-by: [inv-i31]
 validated-by: [spec-asid, gate-smp]
 locks: [lock-asid]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -128,6 +128,23 @@ speculation that occurred in the rollover window. The per-CPU `flush_pending`
 flag is consumed on the slow path, under the lock, immediately before the
 publish — so a CPU cannot run a recycled ASID against entries it cached under
 the previous generation.
+
+### Teardown: there is no per-Proc free
+
+A Proc never frees its ASID. At `proc_free` the `context_id` is simply dropped;
+the hardware value stays claimed in the current generation until a rollover
+reclaims it wholesale — the same choice Linux makes at mm teardown. It is
+TLB-safe for three reasons that must *all* hold, and dropping any one lets a
+recycled value hit a stale entry, which is the [[inv-i31]] aliasing the rest of
+this layer prevents arriving by a different door:
+
+- the leaf user mappings were already invalidated by [[sub-kernel-vma]]'s
+  all-ASID broadcast before the page table was destroyed;
+- no live CPU holds a dead Proc's TTBR0 — every Thread is reaped and spun
+  off-CPU before the Proc is freed — so nothing translates under the dropped
+  ASID;
+- any eventual reuse of the value is gated by the rollover's per-CPU
+  `flush_pending` local flush.
 
 ## Data structures
 

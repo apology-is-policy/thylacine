@@ -19,7 +19,7 @@ validated-by: [prose, gate-smp]
 locks: [lock-pouch-sock-table]
 design: ["docs/POUCH-DESIGN.md", "docs/NET-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -38,7 +38,8 @@ same translation problem.
   `SYS_WALK_CREATE <name>` with `DMSRVBYTE`); `connect` = open=connect
   (`SYS_open "/srv/<name>" ORDWR`); `accept` = `SYS_SRV_ACCEPT` → a raw
   kernel Spoor fd (deliberately UNtagged); `getsockopt(SO_PEERCRED)` =
-  `SYS_SRV_PEER`.
+  `SYS_SRV_PEER` marshalled into a `struct ucred` — and since A-3 that
+  `ucred` carries the peer's **kernel-stamped principal**, not a `0/0` stub.
 - AF_INET: `socket` opens `/net/<proto>/clone` (the fid IS the new
   connection's ctl; reading it yields N); `connect`/`listen`/`shutdown`
   write ctl verbs; `accept` opens `listen`; data rides
@@ -99,6 +100,22 @@ does the open=connect-then-walk two-step a native client performs
 (open the service OREAD → the dev9p root, relative-open `<walk>` ORDWR →
 the sub-fid, drop the root), which is how the coordinator stratumd
 reaches corvus's verb protocol on its `ctl` file.
+
+**`SO_PEERCRED` carries the connecting Proc's kernel-stamped principal
+(A-3).** `getsockopt(SO_PEERCRED)` reads `SYS_srv_peer` into the 40-byte
+`pouch_srv_peer_info` and marshals `principal_id -> ucred.uid` +
+`primary_gid -> ucred.gid` — a v1.0 change from the `0/0` stub written when
+"Thylacine has no uid model." The principal is *kernel-stamped* (the kernel
+fills it from the peer Proc's durable `principal_id` at `SYS_srv_peer`), so
+a connecting Proc cannot forge the identity it presents — the property that
+lets a trusted-local server (a per-user stratumd) stamp create-ownership
+from the peer cred and be reconciled against the kernel's dev9p rwx
+enforcement without a `Tauth` handshake. This is the load-bearing local
+identity channel; the 9P `n_uname` field is the vestigial one, demoted to
+the v1.x foreign/authenticated path ([[inv-i22]] — the identity is asserted
+by the kernel, never self-elevated by the client). See
+[[sub-kernel-syscall-dispatch]] for the kernel `SYS_srv_peer` stamp and the
+attach-time `n_uname = principal` substitution.
 
 **`select` translates in userspace**, because the kernel speaks only
 `pollfd`: it builds a compacted `pollfd[]`, then clears the output sets
@@ -201,6 +218,11 @@ round against this surface before it had a node).
   large fd population, and the three patches that mirror the constant
   (0005 / 0015 / 0018) all still name it `PROC_HANDLE_MAX`.
 - `POUCH_SOCK_MAX` is 8 concurrent sockets per Proc.
+- **A stale doc-comment contradicts the live `SO_PEERCRED` marshal.**
+  `getsockopt.c`'s top-of-file comment still says `ucred.uid` / `ucred.gid`
+  are "0 at v1.0 (Thylacine has no uid model)"; the live A-3 marshal below
+  sets them from the peer's `principal_id` / `primary_gid`. The comment is
+  wrong, the assignment is right — read the code, not the header.
 - `recvfrom`'s `src` is the connection's RECORDED remote, not the
   per-datagram sender — right for a connected socket or the UDP
   request/reply idiom, wrong for a promiscuous receiver.
@@ -223,4 +245,6 @@ the kernel byte-mode SrvConn; [[adt-sockets12-r1]] 2 P1) →
 [[chg-2026-06-18-net6a2-datacalls]] (0017) →
 [[chg-2026-06-18-net6b-poll-bridge]] (0018, the readiness fd) →
 [[chg-2026-07-08-cf3b-bulk-ring]] (0020, the bulk hint) →
-[[chg-2026-07-22-52-nonblock]] (0028).
+[[chg-2026-07-22-52-nonblock]] (0028) →
+[[chg-2026-09-06-9p-identity-absorb]] (the A-3 `SO_PEERCRED`-carries-principal
+marshal in 0006, folded at the docs/reference retirement).

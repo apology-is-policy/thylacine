@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-08-14
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -67,9 +67,10 @@ One function per op, `0` on success / `-errno` on failure:
   `p9_client_abandon_async`.
 
 Error convention: `-EINVAL` bad args/magic · `-EBUSY` not-OPEN · `-EIO`
-lower-layer failure · `-<ecode>` the server's Rlerror passed through
-verbatim (any u32 — callers of Stratum-extension surfaces may need to
-translate STM_E* codes).
+lower-layer failure · `-<ecode>` the server's Rlerror ecode, **bounded to
+`[1,4095]` (Linux `MAX_ERRNO`) before negation** and otherwise collapsed to
+`-EIO` (`map_error`); callers of Stratum-extension surfaces may still need
+to translate the in-range `STM_E*` codes.
 
 ## Mechanism
 
@@ -128,9 +129,32 @@ branch.
 
 **Fail-close.** `client_mark_dead_locked` is the SOLE `c->dead` setter
 (transport EOF/error, or a demux-level protocol violation — malformed
-header, out-of-range tag, oversize); it fails every in-flight rpc `-EIO` and
+header, out-of-range tag, oversize); it fails every in-flight rpc and
 wakes both the per-rpc rendezes and the parked-sender list. A dead session
 rejects all subsequent ops; there is no reconnect (destroy + re-init above).
+The sync (WAKE_RENDEZ) front-end and the boot path fail every op `-EIO`;
+the *async* (POST_CQE / Loom) path carries one more distinction (below).
+
+**The device-gone death reason ([[inv-i29]] device-gone extension, Menagerie
+step 4).** `client_mark_dead_locked(c, bool devgone)` takes a reason, and the
+three reader sites (`client_wait`'s elected-reader loop and the two
+`p9_client_reader_pump_once*`) pass `rr == 0`: a **clean EOF** (`recv` returned
+0 — the server/driver endpoint torn down) maps a dying session's async ops to
+the device-gone `-T_E_NODEV` (ENODEV), while a `recv` error / armed-deadline /
+malformed frame (`-1`) keeps the transport `-T_E_IO`. Before step 4 both
+collapsed to `-1`. So a driver group-terminated by a `DeviceRemoved` tears down
+its served endpoint → the consumer's rings EOF → its reader sees `recv 0` → its
+in-flight Loom ops complete `-ENODEV`, the whole chain automatic with **no
+warden code on the consumer's client**. `p9_client_mark_devgone(c)` is the
+explicit secondary entry (a device-teardown hook that holds the client),
+idempotent — the first death's reason stands. The reason rides only the async
+path because it is a Loom-completion (I-29) property the sync ABI does not
+expose; the audited #841 synchronous surface is untouched. Exactly-once holds
+by the demux clearing `inflight[tag]` **before** completing, so a reply and a
+death never both terminate one op — a late reply on a death-completed op
+dispatches ownerless (the `demux_orphan_late` taxonomy below) and is
+discarded, never a second terminal CQE. Spec: `loom_devgone.tla`
+(`NoDoubleTerminal` / `DeathResultFaithful` / `SessionDeathCompletes`).
 
 **Buffers.** Tmsgs build in the two-tier `out_buf` (inline 32 KiB, or an
 msize-sized kmalloc for a `DMSRVBULK` 128-KiB session; OOM degrades to
@@ -232,8 +256,14 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
 
 - `-EINVAL` NULL/magic mismatch · `-EBUSY` before handshake · `-EIO`
   send/recv failure, malformed frame, tag pool full, fid conflict ·
-  `-<ecode>` Rlerror verbatim (hostile ecodes bounded at the dev9p layer per
-  I-14, not here).
+  `-<ecode>` the server's Rlerror, **its wire ecode bounded to `[1,4095]`
+  HERE in `map_error` before negation** (`ecode == 0 || ecode > 4095 ->
+  -EIO`) — which closes the signed-overflow UB of `-(int)0x80000000` (a
+  kernel halt reachable by ANY hostile `Rlerror` on ANY op, not just attach;
+  it traps under `-fsanitize=undefined`) and folds the malformed
+  `Rlerror(ecode=0)`-as-success corner into `-EIO`. I-14's hostile-ecode
+  bound is realised here, not deferred to dev9p (the A-3c audit F1 fix; the
+  sibling wire codec [[sub-kernel-ninep-wire]] asserts the same bound).
 - Congestion is NOT an error path: EAGAIN → spill/pump/park/retry; a
   stopped reader → role release, no latch; a dying owner → Tflush or the
   abandoned-bit reclaim. Only a genuine break (or demux violation) latches
@@ -301,7 +331,10 @@ Open: [[seam-841-mi-harness]] · [[seam-350-async-eagain]] ·
    internal zero-copy alias is valid only under the `done_reply_buf`
    discipline.
 3. Partial walks are `-EIO` at this layer.
-4. Rlerror ecodes pass through verbatim (u32-unbounded here).
+4. Rlerror ecodes are bounded to `[1,4095]` here (`map_error`) before
+   negation — NOT passed through unbounded — yielding the `[-4095,-1]`
+   passthrough window; a zero or out-of-range ecode collapses to `-EIO`
+   (A-3c F1, closing the `-(int)0x80000000` signed-overflow UB).
 5. No retry/reconnect — a dead session stays dead until destroy + re-init.
 6. Callers do NOT serialize (the old serial client's external-serialization
    contract is retired); the client serializes internally.

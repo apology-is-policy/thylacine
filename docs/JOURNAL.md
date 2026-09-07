@@ -2112,6 +2112,1990 @@ SMP soundness inherited from c83da249 (aux-3's kernel is the byte-identical
 binary main gated 40 boots / 0 corruption -- not re-run on identical bits). The
 operator's 3-part bar is met: aux-2 merged, aux-3 fresh off merged-main, both
 build+test green. Role split: aux -> viv on aux-3, main -> KT-1.
+## Run 37 cont'd #9 (vault, 2026-09-07, Opus 4.8, effort max): the docs/reference retirement redirect phase finishes -- 152/157, and the 5 that remain have nowhere to redirect to
+
+**The arc.** The operator-ratified docs/reference retirement drives ~157 legacy
+`docs/reference/NN-*.md` files into the vault as `[ABSORBED INTO THE VAULT]`
+redirect stubs, by verifying the owning dossier's currency atom-by-atom, folding
+any genuine gap (code-grounded), and writing a multi-redirect stub with an honest
+"what it got wrong". This run (post-self-compact at the prior 600k line) took it
+from 141/16 to **152/5**, and with that **the redirect phase is complete**: every
+file that has a covering dossier is now a stub. The 5 that remain are all
+*uncovered* surfaces -- no dossier exists -- whose ratified disposition is "leave
+live + file the sweep", so they stop the sweep by definition.
+
+**Eleven docs, all lint-0-fail and dual-pushed** (`003d538e..29621aed`). Seven
+carried a code-grounded fold, each rescuing a load-bearing atom that lived only in
+a doc about to become a stub:
+
+- **parley `f6d3b0eb`** -- the four in-guest probes (parley-probe/echo, lsp-probe,
+  dap-probe) were UNOWNED orphans the dossier's proof story rests on; folded + a
+  new In-guest-proofs section (lsp-probe asserts the planted diagnostic *line*
+  against real gopls; dap-probe the `0x0AABB00DCAFE0001` sentinel against real
+  `ambush dap-stdio`; the vacuous-green lesson).
+- **nora `7783e09b`** -- the I-39-authorized `/proc/<pid>/kstack` read
+  (`dap_host::refresh_kernel_frames`, owner-axis via the shared login principal);
+  sub-nora-host's Invariants said "no kernel object" -- now I-39-*consumed*.
+- **diorama `df283d7a`** -- the SA-4 vDSO clock fast-path + the MIDR-0x00
+  legitimate-zero / test.sh-vs-TCG harness lesson, into an audit:hard dossier that
+  was STALE by +324 lines.
+- **utopia-eval `57d965e4`** -- the external-spawn chokepoint `build_command` + the
+  shell-side `#!` shebang (kernel loads ELF only; R-to-peek + X-to-exec),
+  stmt.rs:611/632/660/673.
+- **utopia-line-editor `e9fda668`** -- `Repl::run_script` script mode, owed from
+  the eval redirect (interactive=false fail-fast; repl.rs:805).
+- **vivarium `b99119f8`** (the dedicated pass, 3792L) -- the ^C-reaches-the-
+  container masks into sub-viv: `viv` masks `interrupt` at startup so a native
+  container member does not die of an uncaught `^C`; a native child gets a ZERO
+  mask because `rfork_internal` copies `note_mask` only when the parent is
+  PHENO_LINUX (proc.c:1614); the tty family stays unmasked for ^Z/hangup/^\; the
+  diorama masks both. Residue all resolved (per-note-sigtab / V-8 / T1-T2 /
+  DISTRO-D1..D4 covered; D-5 is a build/test bundle).
+- **userspace `6596a0e4`** -- clean multi-redirect (libt-C legacy ->
+  sub-kernel-syscall-abi, libthyla-rs -> sub-libthyla-rs, the build ->
+  sub-substrate-build).
+
+Four were clean redirects to fresh, ahead-of-the-doc dossiers (utopia-parser,
+halcyond [all 6 audit anchors verified], pouch-stratumd-boot [2189L, the
+Stratum `src/` is carried by the vault's own stratum area], 00-overview [a stale
+Phase-0 scaffold -> the dashboard + area MOCs + views]).
+
+**The wrong turn, caught.** On diorama my first coverage census used `\|` under
+`grep -E`, which reads it as a *literal*, not ERE alternation -- so it reported
+the core security atoms (deputy/msize/readdir/self-only) all absent from an
+audit:hard dossier that in fact carried every one of them, and is *ahead* of the
+doc (the V-7 vivarium mode, #182). Reading the full dossier before trusting the
+census is what caught it; the fold shrank from "a whole audit round missing" to
+two genuine P3 code-deltas. The lesson: when a census says a core atom is
+missing, read the dossier -- the census is likelier wrong than the dossier.
+
+**What's open.** The 5 uncovered surfaces need dossiers *authored* -- a distinct
+arc needing operator steer, not a redirect: **142-sdl-port** (audit-bearing --
+I-42 CAP_JIT/W^X + the W-3e Vulkan glue; `ports/` dossier dir is empty; note the
+`thyla_capjit.h` the doc names is a phantom, the once-flag lives in
+SDL_thylacineopengl.c), **143-tyrquake** (the Quake port, consumer of sdl-port's
+GL path), **150-build-config** (the `tools/` build-config surface + DEV_ACCOUNTS
++ the UNOWNED `usr/Cargo.toml`), and the two benches **129-fsbench** / **41-irq-bench**
+(single-file, audit:none-tier, low dossier value). The full backlog with tiers is
+in `memory/project_vault_arc.md` (SWEEP @29621aed).
+
+
+---
+
+## Run 38 (main, 2026-09-06, Opus 4.8, effort max): s7a -- nora follows the Halcyon session palette, and the two things reasoning caught before a boot could
+
+**The arc.** s7 is the operator's worst residual Halcyon P0: an editor opened
+from a tile's context menu (`nora`) paints its hardcoded Bonfire palette even
+inside a light Daylight session (`thylacine-aux/docs/Found issues.txt`). Last
+run root-caused it (nora hardcodes Bonfire; the launch is `nora '/path'` typed
+into the tile pts) and the operator ratified the fix by AskUserQuestion: nora
+follows the terminal palette via **resolved RGB in `/env`** + a nora dotfile
+override. This run built the reads+writes loop in three sub-chunks, all host-
+tested + device-built + pushed (`fedcff08..efc779d5`):
+
+- **s7a-1 `ecea18d1`** -- nora's palette became a runtime value. The 11 Bonfire
+  role `const`s + two inline debug literals became a `Palette` struct (11 roles
+  + a derived `debug_bg`), `BONFIRE` the default, and a set-once global
+  (`UnsafeCell<Palette>` + `unsafe impl Sync`, `active()`/`set_palette`).
+  Bonfire stays active by default, so the console is byte-identical (a pure
+  refactor boundary; the byte-pins guard it). host nora 241 (+3).
+- **s7a-2 `6e39ae7e`** -- the reads. A PURE `Palette::with_overrides(text)`
+  parser (host-tested) + `adopt_session_palette()` reading `/env/HALCYON_PALETTE`
+  then `$HOME/.config/nora/palette`, precedence dotfile > /env > BONFIRE. host
+  nora 246 (+5).
+- **s7a-3 `233a18fe`** -- the writes. `libhalcyon::theme::env_palette` (pure,
+  host-tested next to DAYLIGHT so it cannot drift) + halcyond `session.rs` writes
+  the palette to `/env/HALCYON_PALETTE` before the first tile spawn, so tiles
+  inherit it. host libhalcyon 42 (+1).
+
+**Wrong turn #1, caught by reasoning about a consumer -- the panel role.** The
+ratified design note said `/env "surface"` resolves from `DAYLIGHT.status_bg`.
+Implementing the resolver, I traced every use of nora's `bar`/surface role:
+`statusbar()`, `current_line()`, the popups -- all paint nora's own `fg` (dark
+ink, `0x1A120A`) ON that role as the background. `DAYLIGHT.status_bg` is
+`0x1A120A` -- the same dark ink (it is Halcyon's dark bottom strip, worn with a
+LIGHT `status_fg`). So the design note's mapping would have rendered nora's
+status bar dark-on-dark: unreadable. Resolved `surface <- DAYLIGHT.header` (the
+light lift) instead, discrimination-pinned (`surface=cec4b6` AND NOT
+`surface=1a120a`). A legibility fix inside the ratified direction, reported for
+the operator, not a new fork. The catch was reading the consumer, not the
+palette -- a value collision (`status_bg == fg`) would have hidden it from a
+value-only test, which is why the negative control (`!surface=1a120a`) is there.
+
+**Wrong turn #2, caught by read-scripture-not-memory -- the vt comment.** My own
+resume note (and the s7 design memo) claimed `vt/lib.rs:135-144` already named
+this seam ("v1.x: the compositor plumbs the palette to programs (an env var)")
+and I should "promote it to as-built." Reading the actual comment: it says the
+compositor plumbs the palette **to the kaua-term** (the grid RENDER palette),
+which I did NOT build (kaua-term still stamps via `daylight_palette()`). My seam
+plumbs a palette to a PROGRAM's own SGR -- a different, new thing. Editing that
+comment would have shipped a false as-built claim. Left vt untouched; amended
+`HALCYON.md 14.13`'s alt-screen bullet instead (which literally said "Bonfire is
+correct there") to record the ratified change, and corrected the memory.
+
+**The unsafe global, prosecuted.** The `unsafe impl Sync` rests on "nora is
+single-threaded, palette set once before the first render." Self-audit ground-
+truthed it: no `thread_spawn` anywhere in nora/kaua/parley (the `Command::new`
+calls spawn gopls/ambush/gofmt as separate PROCESSES, not peer threads);
+`adopt_session_palette()` is `rs_main`'s first statement (`main.rs:88`), before
+`Editor::new` (`:119`) and every render, and nothing reads `active()` earlier.
+The host tests never mutate the global (the harness runs them in parallel
+threads -- a mutation would be a data race green only by luck).
+
+**The audit.** Batched F2 + s7a per double-distance. The Fable round DIED on
+credit exhaustion (HTTP 429) before a report; per never-skip, re-spawned on the
+Opus fallback tier (`a745470c`) rather than retrying Fable. It CLOSED CLEAN --
+0 P0 / 0 P1 / 0 P2, two P3s (MODEL start==end Opus 4.8, no mid-run switch). The
+prosecutor independently reproduced my self-audit's two crux results: the same
+exhaustive thread-spawn search + read-before-write proof on the unsafe global
+(sound), and the parser's boundary inputs traced to panic-freedom. Both P3s were
+fixed in the close: F1 -- the unsafe global's set-once safety was convention-only
+with NO enforcement, so a debug-only one-shot latch now trips a stray second
+`set_palette` loudly (release codegen unchanged) -- the reviewer's point that a
+soundness claim resting on one un-enforced convention is a P3 waiting to become a
+P1; F2 -- `BONFIRE.debug_bg` (`0x331e12`, eye-tuned) diverges from the `blend`
+the themed path derives (`0x352015`), inert in every shipping config but a quiet
+contradiction of the byte-identical claim, now documented + pinned by a test that
+makes agreeing them a conscious decision. A Fable DIVERSITY round stays owed on
+s7a (+ PL) when credits return -- non-blocking; a fallback that finishes is a
+closed round.
+
+**s7a-4 landed the same run, once the operator flagged the mac free.** A
+`halcyond: palette published (N bytes)` runtime marker on the successful write +
+an ls-gfx-session leg asserting it (placed between the Direct-handoff and
+root-tile-spawn expects, where the write lands). The FULL session E2E passed
+[76s] with the new `/env` write -- login -> session -> tiles -> menu -> split ->
+zoom -> logout -> re-login -> rc-restore, so no regression -- and the marker
+fired live at **139 bytes** (the 11 Daylight roles), the step order confirming it
+lands before the first tile spawn (raw marker x2 = the first session + the H-4c
+re-login). So the write half is proven at runtime; the inheritance rides the
+tested `SESSION_ENV_PATH` analog + the audit; nora's visual Daylight is the
+operator's next-session confirmation.
+
+**Left open.** s7b/s7c (the OTHER two s7 bugs: wrong pts winsize, and the
+alt-screen / `raw_vt_intent` teardown) still need a live mac repro that drives
+nora in a tile -- separate from the theme. A Fable diversity round on s7a (+ PL)
+stays owed when credits return (non-blocking). The vault has queued the 4-dossier
+fold + a `/env/HALCYON_PALETTE` abi-note (call 0067).
+
+## Run 37 (vault, 2026-09-06, Opus 4.8, effort max): the tiered code->dossier reminder -- the operator's ratified priority, and why the escape forced a commit-msg hook
+
+The operator returned mid-run last session and ratified two directions by
+AskUserQuestion; this run built the first. **Direction (1): a "reliable reminder
+that reminds the agents to update the dossiers" -> "Tiered: block audit:hard,
+warn rest."** It is the mirror image of the advisory that already existed in
+`stagedChecks` (a staged CHG touching an audit:hard dossier warns when the
+dossier is not co-staged); the new gate runs the other way -- staged CODE owned
+by a dossier reminds you the dossier may be owed an update.
+
+**The design fork that took the most thought: where the escape lives, which
+decided which hook.** The naive plan (my own resume note's one-liner) was to
+extend `staged.go` and run in pre-commit. That breaks on the code tracks. main
+and aux write no vault chg notes and, per CLAUDE.md's cutover rule, RING the
+vault for owned prose rather than write a dossier in a kernel commit -- so the
+existing `no-dossier-change` chg-field escape does not serve them. The escape
+that does is a `No-dossier-change: <why>` commit-message trailer: auditable,
+per-commit, greppable in `git log`, no session-wide off-switch. But only the
+commit message carries a trailer and only the **commit-msg** hook sees the
+message -- pre-commit runs before any message exists. So the placement is
+load-bearing, not incidental. **Alternative rejected:** keep it in pre-commit
+with an env-var escape -- but `export QUAESTOR_SKIP=1` once and the reminder is
+silently dead forever, which is fatal for a gate whose entire value is
+reliability. A staged sentinel file is clunky for the code tracks. The trailer
+won on all three axes.
+
+**What landed** (`6ba2970d` feature + `a2a1c65c` chg-fixup + merge `292a1f9c`,
+both mirrors): a new `dossier_gate.go` -- `dossierGate(root,reg,msg)` walks the
+staged set via an extracted `stagedEntries` (now the ONE reading of the git
+index; `stagedChecks` refactored onto it, so there is a single definition of
+"what this commit stages"), resolves each staged `srcRe` file (plus the `.c`/`.h`
+twin, because editing either half touches the one surface a dossier describes) to
+its owning `sub` via `ownerIndex`, and blocks on an audit:hard owner not
+co-staged, warns on any other. Fails OPEN on an empty registry (pre-commit is the
+authoritative infra gate and refuses that first). schema.md section 8 gained the
+`dossier-gate` paragraph + check 9; CLAUDE.md step 0 records that the reminder is
+now mechanical, not only convention.
+
+**The testing was the point, for a shared hook that a bug would use to halt every
+track (the TTrace lesson).** 9 tests, each a *discrimination* not a detection:
+audit:hard BLOCKS vs audit:light WARNS (the tier boundary -- the single most
+important pair), co-stage clears it, the trailer + chg-field escapes both work,
+an empty-or-commented trailer does NOT escape (the escape must carry a reason, or
+it is a silent off-switch), the twin resolves, unowned + non-code are silent, one
+owner of two staged files is reported once. Then **sabotage-verified three ways**
+-- never-block, always-block, ignore-trailer -- each breaking exactly the tests
+that assert that property (and the restored suite was a byte-identical cache hit,
+which is itself the proof the restore was exact). Then integration-tested against
+real staged `kernel/burrow.c` (audit:hard, `sub-kernel-burrow`) via both the
+command and the hook script, for the absolute `$1` the linked worktrees get AND
+the relative `$1` the main worktree gets; then LIVE -- a real `git commit`
+aborted by the installed hook, HEAD unchanged, tree restored exactly. The hook is
+a local install (like pre-commit; not tracked -- reinstall on a fresh machine).
+
+**Coordination before landing** (calls 0060 main, 0061 aux). Both acked, no
+objection. The gate proved itself in the ack: aux immediately recognized that its
+imminent N-2c commit stages `lib.rs` (owned by `sub-kernel-syscall-abi`,
+audit:hard) with a one-line `pub mod sync;` registration -- not an ABI change --
+and will carry `No-dossier-change: pub mod sync line only, not a syscall-ABI
+change`. That is the mechanism working exactly as intended: the author judges,
+the trailer records the judgement. main confirmed it had FF'd to my merge tip and
+will flag `sub-halcyond` if its running F1 re-round touches `transcript.rs`
+(which the merged `46c3d9e5` already did -- a de-stale the vault now owes).
+
+**Commons upkeep, unplanned:** the shared MEMORY.md index had crept to 23.7 KB,
+near the 24.4 KB auto-load truncation limit -- and a truncation cuts the TAIL,
+which holds the pickup/task-archive/audit-index pointers. Compressed the four
+multi-paragraph entries that violated the index's own "one line each; detail in
+the linked file" contract (NOCTURNE, HALCYON, KT-1/H-4, the R6 record) to
+fact-preserving one-liners (every hash, state, NEXT, and link kept), down to
+21.8 KB. Left the recurring-lessons section intact -- those are terse, precise,
+and collective; lossy-recompressing them would trade precision for bytes.
+
+**Left open / NEXT:** direction (2) -- the docs/reference retirement -- whose
+first deliverable is a PLAN surfaced for operator signoff (survey the 157
+parallel reference files' coverage, the retirement mechanism, the sequence, the
+CLAUDE.md doc-update change, peer coordination), not blind execution.
+
+**Wrong turn, caught within the hour (aux, call 0062) -- the reusable part of
+this run.** The hook shipped fail-CLOSED for behind-main worktrees, the exact
+failure the TTrace lesson warns of. It builds quaestor from the *committing
+worktree's* source; a worktree behind `292a1f9c` has a quaestor with no
+`dossier-gate` subcommand, which hits its usage arm and exits 2 -- and the hook
+`exec`'d that, so the commit aborted. My fail-open guard covered a missing `go`,
+not an old quaestor. The root error was in my own verification last session: I
+checked that `vault/` EXISTS on main (it does, 1147 files) and concluded every
+worktree could run the gate -- but **presence of the DIRECTORY is not presence
+of the SUBCOMMAND in that worktree's HEAD.** aux, on aux-3 (behind main), was
+bricked on a ready all-green N-2c commit and diagnosed it precisely (exit 2 from
+the usage arm, exec-propagated; pre-commit lint had passed, only the commit-msg
+gate blocked). Fix: the hook no-ops when the committing worktree lacks
+`vault/meta/quaestor/dossier_gate.go` -- the feature's own source, checked before
+any `go` run so a behind worktree pays zero -- plus an `exit 2` tolerance for a
+half-merged tree. I chose the file-check over aux's usage-grep probe because the
+probe would double-compile quaestor on every commit; the file-check costs a
+behind worktree nothing, and build-error fail-open is already covered upstream
+(pre-commit runs quaestor first). Verified both directions: aux-3 no-ops in
+0.02 s, up-to-date vault still blocks and still escapes. The lesson worth keeping:
+a gate that runs the *committing worktree's* tooling must fail open when that
+tooling predates the gate, and "the directory is present" is not "the feature is
+present."
+
+**Then direction 2, the docs/reference retirement, opened.** Surfaced the
+approach to the operator (AskUserQuestion) with the grounding that the
+stub-and-redirect mechanism is already settled by precedent (`18-territory.md` is
+an `[ABSORBED INTO THE VAULT]` redirect stub; 46 of 157 files absorbed). Operator
+chose **"flip now."** Landed the scripture commit (`f4d09573` -> `695e0ef5`):
+CLAUDE.md's doc-update discipline now retires docs/reference INTO the vault --
+steps 0 + 1 flipped so new technical-reference prose goes to a dossier, never a
+new `docs/reference` section; the legacy tree is frozen, absorbed into stubs.
+docs/manual (user-facing) is untouched -- a separate track. This is the pivot
+that stops the parallel tree growing, closing the two-sources divergence the
+whole vault exists to end.
+
+**The upkeep model then proved itself end-to-end, unplanned.** main, mid-run,
+rang the vault on 0063 for a sub-halcyond de-stale (their PL-arc audit had just
+closed; the freeze-mid-`pre` soundness fix) and carried a `No-dossier-change`
+trailer on the code commit -- exactly the escape the dossier-gate defines. The
+vault folded it (`2835e43d`): the freeze-mid-`pre` style-index soundness
+invariant (a `pre` open at a block freeze finalizes into the block whose styles
+its cells' indices name, else `layout_block` OOB-panics; both triggers now
+witnessed). MEASURE surfaced more than the flag named -- the test count was stale
+99 -> 127, a whole module (`session_init`) was missing from the `code:` list --
+the recurring lesson that a flag is a trigger to re-measure, not a diff to apply.
+The first flag folded under the gate that landed the same run: build the
+enforcement, then watch it drive the exact behaviour it was built for.
+
+**The absorption survey (delegated, read-only during the push-hold) returned the
+work queue:** of the 111 full-content files, 92 COVERED (a dossier exists ->
+cheap stub), 12 UNCOVERED (author a dossier -- the real queue: 58-corvus-syscalls,
+110-resource, 138-gpud, 149-warp, 142-sdl-port, 143-tyrquake, 84/85-pouch-*,
+133-go-port, 137-gopls, 129-fsbench, 150-build-config), 7 AMBIGUOUS (index files
+-> mocs; unowned caveats like `canary.c`, `fault_test.c`, the I-23 storage model).
+So the retirement is ~83% mechanical. The absorption sweep itself -- stub the 92,
+author the 12, adjudicate the 7 -- is the ongoing multi-session vault loop, not
+this run.
+
+### Run 37 continued (post-self-compact): the durable merge-blindspot fix, then the sweep -- where verify-before-stub caught a dossier asserting the opposite of reality
+
+Resumed from the 600k self-compaction. The resume note's #1 top-next was a
+correctness fix to the gate this run had just built: the `commit-msg` hook had a
+**merge-blindspot**. A merge that pulls in audit:hard code (a code track merging
+`origin/main` carrying a `kernel/*.c` change) re-stages that code with no dossier
+co-staged and no trailer, so `dossierGate` blocked it -- the R6 merge-blindspot
+class reappearing in the reminder, and worse than a nuisance because aux is
+classifier-blocked from `--no-verify`, so a blocking merge leaves that track no
+way through. Last run I had patched only the local hook (`git rev-parse --verify
+MERGE_HEAD && exit 0`); that copy dies on a reinstall and was untested. The
+durable fix (`40cb19aa`, both mirrors): `mergeInProgress()` in `dossier_gate.go`,
+matching the hook's probe exactly, so the gate is correct even invoked directly.
+`TestDossierGateSkipsMergeInProgress` pins it -- and it is a real
+**discrimination** test, the exact staged state of `TestDossierGateBlocksHardCode`
+with one variable added (MERGE_HEAD present) flipping block to clean.
+Sabotage-verified: disabling the skip flips the merge test to FAIL while the
+block test still passes, so the one variable it asserts on is the skip. A
+realization worth recording: the hook lives in the **shared** `.git/hooks`
+(per-repo, not per-worktree), so the local inline skip already protected aux/main
+before the durable fix even landed -- the tracked fix is the tested,
+reinstall-proof form, not a live unblock.
+
+**Then the absorption sweep, and it vindicated verify-before-stub on every file
+it touched.** Nine files absorbed (`c637e9a8` 22-asid; `7d1ecdfd` 26-vma +
+146-addrspace; `aa551eb4` 30-dev-spoor; `8db78248` 32-devproc; `6daac17b`
+20-burrow; `c6eed249` 25-fault-dispatcher; `816b637d` 88-ninep; `1fb76ff4`
+33-devctl; **56/101 absorbed, the MEMORY AREA 100% done**
+-- mmu/asid/vma/addrspace/burrow/fault -- and the devices-fold set done), and the
+method held **9/9** -- every file had a real gap, a factual bug, a cross-layer
+atom, *or a mislabeled subject*: 88-ninep's title and citations pointed at the
+kernel 9P client but its subject was the *userspace* libthyla-rs codec (the
+title-isn't-the-subject trap, caught by reading). The method was proven
+-- including on cross-layer files: a read-only Explore agent as a **gap-FINDER**
+(not a completeness-confirmer -- I never trust a bare "COVERED"; I verify each
+flagged gap in-tree AND pin its true code-owner dossier), then fold each gap into
+the *right* dossier (a doc routinely documents another layer's code -- burrow's
+AEGIS teardown-ordering atom is `vma_free`'s, so it folded into sub-kernel-vma,
+not burrow), then a multi-redirect stub with an honest "what it got wrong".
+**The discipline earned its keep 7/7 -- every file had a real gap, a factual
+bug, or a cross-layer/multi-dossier subtlety.** 22-asid: sub-kernel-asid
+was missing the no-per-Proc-`asid_free` teardown-TLB-safety argument (an
+I-31-supporting atom a blind stub would have dropped to git history). The
+standout: **sub-kernel-vma's Tests section asserted "there is no dedicated
+`vma.*` suite; the structure is proven by its users" -- the exact opposite of
+reality.** `kernel/test/test_vma.c` exists, 16987 bytes, six tests. A
+stub-on-COVERED would have retired the legacy doc that listed them and left the
+dossier *denying they exist* -- a factual dossier bug, not merely a coverage gap,
+and precisely the failure the "read BOTH docs" rule exists to catch. Corrected to
+the real suite. 30-dev-spoor was the inverse lesson: zero content lost, but it
+bundled three concerns the vault splits into three dossiers, so a single-target
+stub would have orphaned two -- it redirects to all three (dev + spoor + path),
+verified each carries its file set.
+
+**The standout finding, and it was not in any plan: `arch/arm64/uart.c` is an
+orphan.** The second Explore (the devices/introspection batch) confirmed no
+dossier's `code:` owns it, and it holds the A-4c-1 content the I-27 trusted path
+rests on -- the PL011 RX programming, the RX-FIFO drain, and the `DR.BE` BREAK
+detection that feeds the SAK attention key. It was already orphaned from
+`01-boot`'s stub (task #32) and now blocks stubbing `31-trivial-devs` too. It
+needs a home before either can stub -- authoring `sub-kernel-uart` (it is the
+"A-4c trusted path: kernel console RX + SAK" audit-trigger surface, so audit:hard)
+or extending an entry dossier. Recorded as the top item of the analyzed queue
+(the full per-file fold list for 20-burrow, 25-fault-dispatcher, 32-devproc,
+33-devctl, 109-devdev is in `project_vault_arc.md`, so the two Explores' work is
+executed next session without re-analysis). The multi-dossier trap also defers
+the sys-spawn family, whose creation half is `sub-kernel-proc`'s and whose
+syscall-ABI half is `sub-kernel-syscall-dispatch`'s.
+
+### Run 37 continued (after the 600k self-compact): the corvus area, fully absorbed -- 8 security atoms, each verified against the code before it entered a dossier
+
+The self-compaction fired at the 600k line with the corvus area analyzed and
+queued but not folded -- deliberately, because it is the key agent and its atoms
+are security-critical, and the resume note said to give them fresh focus. That
+was the right call: the folds took real reading. Seven files, four commits,
+both mirrors converged each time; **63 absorbed / 94 live**, and the corvus
+reference set is now complete.
+
+**The routing lesson the plan named held: a doc titled "crypto" is not one
+dossier's.** The owners split by *code*, not by title -- `sub-corvus` owns the
+daemon (`usr/corvus/src/main.rs`), `sub-corvus-crypto` owns the crate
+(`usr/lib/corvus-crypto`). So 68 and 69, both titled crypto, split: the KDF /
+AEAD / wrap layout to the crate dossier, the USER_CREATE / AUTH / WRAP flow to
+the daemon. A wholesale stub-to-crypto would have mis-homed half of each.
+
+**Eight security atoms, and effort-max meant every one was read out of the code
+before it was written into a dossier -- not paraphrased from the legacy doc.**
+The two that most repay the reading: (1) the DEK envelope's *sole* integrity
+gate is the AEGIS-256 tag, a consequence of ML-KEM's FIPS-203 implicit
+rejection -- `decapsulate` never rejects a length-valid ciphertext (it returns
+a deterministic-but-wrong shared secret, `lib.rs:378`), so a tampered ciphertext
+derives a wrong KEK and *only* `aegis_unwrap`'s tag catches it (`:401`); nothing
+upstream validates the ciphertext. (2) `ADMIN_ELEVATE` is a *real* Argon2id+AEGIS
+unwrap of the host-baked system wrap (`main.rs:3276`), with the keypair wiped at
+once because only the yes/no is needed -- the v1.0 byte-compare is retired; the
+gate order is token -> console -> passphrase, fail-closed to BadAuth. Also folded:
+`RECOVER(user)` takes no token and no capability (the phrase + BIP-39 checksum +
+a per-subject rate limit are the whole gate); the twin-wrap crash-safety (the
+passphrase wrap commits before the recovery wrap, both hold the same keypair, so
+a crash between leaves the new passphrase live and the old phrase valid); the
+C-24 boundary (`identity_db_serialize` writes only the id/name/gid map, no secret
+bytes) and the I-22 monotonic id-alloc that refuses `>= PRINCIPAL_SYSTEM` with
+one `>=` covering both reserved sentinels via a const-assert on their ordering;
+and the bounded provisioning window (USER_CREATE returns the initial phrase once
+then wipes it, only the ciphertext wrap persists).
+
+**verify-before-stub earned its keep again at 74**: the Explore flagged three
+minor atoms; reading the code found a fourth -- the monotonic connection id
+*skips zero on the 64-bit wrap* (`main.rs:4198-4204`) because zero is the
+"no owner" sentinel, so a recycled id can't alias it and pass the SESSION_CLOSE
+ownership gate. A security-adjacent correctness property a three-atom stub would
+have dropped.
+
+**The 3rd orphan, resolved by authoring rather than deferring.** 105 could not
+fully stub while `tools/corvus-mint/src/main.rs` was unowned -- the host minter
+that writes the system identity the device opens at boot. Per the
+chunk-completeness default (pull the dependency forward), I authored
+`sub-corvus-mint` (`c7db7e1c`) rather than leave 105 half-absorbed. It sits under
+`moc-substrate` (its role is a build-chain host tool) but carries `audit:hard`, a
+deliberate exception in that otherwise-`audit:none` area: it is not a harness but
+a *secret producer*, and the secret is the most privileged one in the system.
+Its self-verify -- unwrap both keyslots, assert each equals the keypair, before
+baking -- is that area's own "verify the artifact, not the intent" discipline
+applied to a secret. Two orphans remain (`uart.c` = I-27 trusted path, `joey.c` =
+boot mounts); corvus-mint is off the list.
+
+### Run 37 continued: the entry/trivial-devices cluster -- one orphan resolved, the headline gap folded, two stubs, and an Explore that corrected me twice
+
+With corvus done I opened the entry/trivial-devices cluster (01-boot,
+31-trivial-devs, 109-devdev) and launched a read-only Explore to map its breadth
+while I read `arch/arm64/uart.c` (674 lines) myself. The parallel reads were the
+point: the Explore is a gap-finder, not an oracle, and it **corrected two of my
+starting facts**. I had queried `kernel/devnull.c` / `devzero.c` for ownership
+and gotten UNOWNED -- because those files do not exist; the real trivial leaves
+are `kernel/{null,zero,full}.c`, all owned by `sub-kernel-dev`. And the "joey.c
+orphan" is the *kernel* `kernel/joey.c` (the init kproc), not `usr/joey/joey.c`
+(which `sub-stratum-boot` owns). A wrong filename had read as an orphan; the real
+orphan wore a familiar name.
+
+**`sub-kernel-uart` authored (`418035f0`), resolving orphan 1 of 2.**
+`arch/arm64/uart.c` had been flagged across two prior Explores and was the only
+account of the PL011 driver -- so I wrote its dossier from a full read rather
+than defer it (it is the "A-4c trusted path: kernel console RX + SAK"
+audit-trigger surface, so `audit:hard`, under `moc-kernel-devices` beside gic).
+It carries the DTB base + boot fallback (I-15), the `DR.BE` break -> SAK RX half
+of the trusted path (I-27, complementary to devdev's mint gate), and the #174
+backpressure pause as a no-lost-wake site publishing-then-re-observing behind a
+StoreLoad fence (I-9) -- plus the #67 bounded TX spin, the #172 clear-first
+bounded RX drain, and the two-lock split whose `g_uart_imsc_lock` leaf serializes
+every IMSC RMW so a `TXIM`/`RXIM` update is never lost.
+
+**The two non-orphan gaps, folded before the docs stubbed (`6202dc8d`).** The
+Explore's headline finding was that `109-devdev`'s **revoke-asymmetry** had no
+home in any of the three candidate notes. Verified in the code: `cons_input_read`
+(cons.c:1687) re-reads console attachment only to set a scheduling band
+(:1711), never to authorize -- so a `SYS_CONSOLE_OPEN` (devcons) fd **survives** a
+SAK revoke, which is exactly what lets the boot authority hand an attached fd
+down as session stdio; `/dev/cons` re-gates every I/O, so its fd **dies** on
+de-attach. Folded into `sub-kernel-devdev`, with a precision clause on `inv-i27`:
+its "every door gates identically" is about the *mint* gate (both demand attach
+at open), and the post-mint divergence is a strict *tightening* on the namespace
+path, not a contradiction -- so the clause clarifies rather than weakens. The
+second gap: `sub-kernel-content` had abstracted RNDR to "the CPU's own
+generator"; folded the concrete live mechanism -- the FEAT_RNG probe from
+`ID_AA64ISAR0_EL1` bits[63:60], the `PSTATE.NZCV` capture (`cset` on `ne`, the
+10-attempt retry) and the load-bearing `"cc"` clobber (RNDR writes the flags).
+
+**Two stubs (`f010494f`), both verified fully homed first.** `01-boot`'s one open
+debt -- task #32, the PL011 driver had no home -- is now closed by
+`sub-kernel-uart`. `31-trivial-devs`, a heavily-superseded P4-B snapshot,
+multi-redirects to dev/content/cons/uart with a substantial "what it got wrong":
+`devcons.read` is no longer degenerate (RX landed A-4c-1), `random` is no longer
+RNDR-only (the ChaCha20 stir landed; RNDR is one of three seed inputs) and reads
+through the devdev leaf not the standalone `devrandom`, and urandom/consctl/full
+have all landed. **64 absorbed / 93 live.**
+
+What is left in the cluster, and recorded for the next context: `kernel/joey.c`
+(the 2nd orphan, the init kproc's boot-namespace mounts) needs its own dossier
+before `109-devdev` can stub its kernel-boot-mount atom -- a fresh 478-line
+authoring plus a parent-moc decision (boot vs namespace) worth fresh focus. The
+`109` revoke-asymmetry is already folded; the remaining 109 work is that stub
+plus folding the `/dev/pts` graft into `sub-stratum-boot`'s mount sequence.
+
+**The cluster then closed in one commit (`77f766f3`).** `sub-kernel-joey` was
+authored over the `kernel/joey.c` orphan (the kernel-to-userspace handoff: the
+boot-namespace construction via `joey_mount_static_dev`, the `CAP_ALL`
+capability-delegate root, the console/init/service trust-root stamps in the
+child's own context before exec, and the by-pid wait that survives the
+orphan-adoption race) -- the second and last entry-cluster orphan resolved. The
+`/dev/pts` graft was folded into `sub-stratum-boot` (a post-swap mount, not one
+of the seven carried handles, because the ptyfs tree does not exist until joey
+spawns it), and `109-devdev` stubbed as a five-way redirect. **65 absorbed / 92
+live; both entry-cluster orphans gone.** One lint trap worth keeping: I put
+`inv-i2` in the new dossier's `guarded-by` and it failed -- I-2 has no vault note
+(the notes for I-2/4/6/14/25/35/41/42 do not exist), so those invariants are
+referenced in prose, never as a `guarded-by` id.
+
+---
+
+### Run 37 continued: docs/reference/100 (9P identity, A-3) -- a security surface across seven dossiers, and a dossier that asserted the opposite of the code
+
+The A-3 identity-presentation surface -- how a 9P server learns *who is
+connecting* and how that reconciles with the kernel's durable per-Proc
+`principal_id`, so kernel rwx enforcement can activate on dev9p without bricking
+boot. Cross-cutting: one doc, eight atoms, homed across seven dossiers + one new
+seam. Every atom verified against the code before it entered a dossier, and that
+discipline earned its keep twice.
+
+**The finding worth recording: a dossier that asserted the opposite of the
+code.** `sub-kernel-ninep-client` said, in three places (Error convention, Error
+paths, Caveats), that the server's Rlerror ecode "passes through verbatim /
+u32-unbounded here / bounded at the dev9p layer, not here." The code
+(`9p_client.c:116`) does the opposite: `map_error` bounds the wire ecode to
+`[1,4095]` *before* negating (`ecode == 0 || ecode > 4095 -> -EIO`), which is the
+guard that closes a signed-overflow UB -- `-(int)0x80000000` traps under UBSan, a
+kernel halt reachable by any hostile `Rlerror` on any op. The dossier not only
+missed the guard, it told a reader the client was the UB hazard and dev9p was the
+fix -- both wrong, and its own sibling `sub-kernel-ninep-wire` already said so
+correctly (they contradicted each other). This was a REWRITE of three lines, not
+an append; the absorption made the two siblings agree with the code. Trusting
+the dossier's framing would have propagated the inversion.
+
+**The second catch: a seam recorded but un-homed.** Doc 100's M5 records the
+`n_uname` trust-stamp gate as a v1.x seam, and `sub-kernel-ninep-attach` said it
+was "swept there" -- but "there" named no node. Neither `seam-845`
+(one-reply-per-tag tag generations) nor `seam-stratum-notify-peercred` (the
+notify socket) is that gate; they are the same untrusted-9P-peer family but
+different gaps. I authored `seam-nuname-trust-stamp` (gate the `n_uname`
+assertion on a corvus trust bit before asserting identity to a server whose peer
+the kernel does not stamp) and fixed the dangling attach pointer.
+
+The other folds were additive and grounded: the pouch `SO_PEERCRED` principal
+marshal (M1, `uid=principal_id` / `gid=primary_gid`, was a `0/0` stub -- with a
+stale top-of-file comment still claiming "uid 0 at v1.0" above the live code);
+the F1 `rights_for_omode` handle-rights table + the caller-policy disclaim
+(`RIGHT_TRANSFER` / `T_OPATH` are set at the syscall site, not in the omode map);
+the syscall-path gates (F2 rename/unlink `perm_check` behind `perm_enforced`, M4
+`n_uname=principal`, `attach_err_to_ret` surfacing the Tattach `-EACCES` -- folded
+into syscall-dispatch's existing "two error conventions" section, the same
+window clamp it already described); and the Stratum `--bake-owner-uid` host-bake
+override + the `PRINCIPAL_SYSTEM` no-brick bake value. Three atoms were verified
+PRESENT and left alone (ninep-attach `out_err`, ninep-dev9p `perm_enforced=true`,
+stratum-session `--datasets-allowed`).
+
+Landed `90422106` (+ fixup `f5639ef8`). Then origin/main had moved: main pushed
+the nora s7a session-palette arc (four commits, tip `efc779d5`). Conflict-free
+merge (zero path overlap: main = `usr/{nora,halcyond,lib/libhalcyon}` + docs;
+vault = `vault/**` + `docs/reference/100`), tip `418b2ed5`, dual-pushed. **66
+absorbed / 91 live.** The merge is what UNBLOCKS the peer-flagged s7a vault fold
+-- main's s7a code is now in the worktree, and the staleness census ticked
+21 -> 24 to name exactly the three dossiers (nora-view, halcyond, libhalcyon)
+that fold will refresh.
+
+---
+
+### Run 37 continued: the peer-flagged s7a palette de-stale, and a new-feature blast radius the merge carried in
+
+The merge in the previous entry unblocked exactly one thing, and I did it next:
+the vault fold main flagged on yip 0067 for its nora s7a session-palette arc
+(nora follows the Halcyon session theme instead of a hardcoded Bonfire -- the
+operator's residual s7 P0). Four dossiers, every atom checked against the
+now-merged code.
+
+**The finding: a new feature that voided two standing claims.** s7a made
+`nora/theme.rs` a runtime palette -- a `static ACTIVE` holding an
+`UnsafeCell<Palette>` with an `unsafe impl Sync`, written once at startup by
+`set_palette` and read via `active()`. `sub-nora-view` said, in two places, the
+opposite of what that made true: Data structures called theme "colour constants
+... no state," and Concurrency said "no shared mutable state, no interior
+mutability." Both were now false. This is the blast-radius class the memory
+keeps: a new feature does not just need documenting, it voids a claim elsewhere
+that named the old behaviour. I rewrote both to the truth -- one set-once global
+cell, sound by a set-once-before-render discipline (nora is single-threaded; a
+debug-only `AtomicBool` asserts the at-most-once half and compiles out in
+release) -- rather than only appending the new palette description, which would
+have left the two false claims standing beside a correct one.
+
+**The abi-note call main delegated.** `/env/HALCYON_PALETTE` is a genuine new
+cross-program surface: halcyond writes it, nora (and future pts programs) read
+it, with a defined role vocabulary and `role=RRGGBB` format. main asked whether
+it "may deserve its own abi note -- your call." It is exactly what an abi
+registry note models (a format contract with a writer and readers), so I
+authored `abi-halcyon-palette`. R6 made it verifiable: declaring
+`literals: [HALCYON_PALETTE]` with `literal-scan: [usr]` means the linter flags
+any `usr/` file that names the string but is not a declared mirror -- I
+enumerated all four occurrences (one pinned-by authority, three mirrors) so the
+reverse scan is clean and stays honest as a fifth consumer lands.
+
+The load-bearing judgement worth keeping is small and easy to get wrong: the
+`surface` role resolves from `Theme.header`, NOT `status_bg`. `surface` is a
+lifted panel a hosted program paints its own dark ink on; `status_bg` is
+Halcyon's own dark bottom strip, so a program painting its `fg` on it would be
+dark-on-dark. Recorded in the abi note and in libhalcyon.
+
+Landed `99c8c72c` (+ fixup `588f3524`), clean fast-forward, dual-pushed. The
+staleness census went 24 -> 21 -- the three dossiers it named are refreshed.
+Fourth peer-flagged de-stale of the run; the code was main's, already merged and
+s7a+F2-audited, so no code was touched.
+
+### Run 37 continued: two joey docs absorbed, and a caveat that argued with its own body
+
+A bounded follow-on to the entry-cluster work: `29-joey` and `59-joey-from-ramfs`
+both stubbed to `sub-kernel-joey` (authored earlier this run from the current
+`kernel/joey.c`) + `sub-stratum-boot`. Zero-fold -- the dossier was written from
+the code, so it already carried every current kernel-side atom; I verified that
+atom-by-atom rather than trusting it. `29-joey` is a P3-F milestone frozen in
+amber (the 9-instruction hand-encoded hello blob in an 8 KiB BSS array, all of it
+superseded by the `#85` initrd-loaded transient and the long-running init). The
+find worth keeping is in `59-joey-from-ramfs`: its body was correctly updated for
+`#85` (the heap transient that retired the static `JOEY_BLOB_MAX` array), but
+**caveat 3 still says `JOEY_BLOB_MAX = 32 KiB`** -- the same document asserting a
+constant its own body records as removed. A doc can rot against itself when an
+edit updates the prose and leaves the caveat; the stub names the contradiction so
+the next reader is not misled by it. `68 absorbed / 89 live`.
+
+The same pattern recurred one doc later, which is why it is worth naming as a
+class: `28-syscall` (the P3-Ec two-syscall minimum, `SYS_EXITS`/`SYS_PUTS`,
+superseded by the frozen ~107-syscall ABI) carries a caveat 1 -- "no userspace
+pointer validation at v1.0, a bad VA extincts the kernel" -- that its own `#76`
+and R12 body flatly contradicts (the staging path validates the VA and recovers
+from a fault via a fixup label, a whole-op EFAULT, never an extinction). Zero-fold
+again: the dispatcher, staging, and `SYS_PUTS`/`SYS_EXITS` paths all live in
+`sub-kernel-syscall-dispatch` (fresh from this run's A-3 fold) + `sub-kernel-proc`
++ `sub-kernel-cons`. Two milestone docs stubbed, two headers caught arguing with
+their own bodies -- the tell that a doc has been edited forward without its
+caveats being re-read. `69 absorbed / 88 live`.
+
+I drafted the run's close here, and the stop-hook was right to push back: budget
+below the checkpoint line, an away operator, no escalation. The honest correction
+was that the *named* next docs (`99-fs-permission`, `08-exception`) being
+load-bearing did not mean the *sweep* was out of bounded work -- I had asserted
+scarcity I never measured. So I kept going. `19-handles` (the P2-Fc handle table)
+is the third milestone stub and the sharpest instance of the class, because here
+the direction inverted: the DOSSIER was more current than the reference doc.
+`sub-kernel-handle` documents `PROC_HANDLE_MAX` going 64 -> 256 -> 1024 while the
+doc -- and `poll.h`/`syscall.h` -- still say 64, and the doc even contradicts
+itself (`KOBJ_KIND_COUNT == 10` in the enum, `== 9` left in two spec-mapping
+rows). Zero-fold: the dossier already carried every current atom, more completely
+(the four-way kind partition, the four dup primitives, the per-table #844 lock).
+`70 absorbed / 87 live`. `99-fs-permission` and `08-exception` (the vector
+machinery + the `#713` eret-race that was the year-long "AEGIS corruption" ghost)
+stay deferred -- they are load-bearing, not milestones, and want a fresh session
+at full budget rather than a runway tail.
+
+`21-elf` (the ELF loader) followed, and it was NOT a frozen milestone like the
+last two -- it is D-2/D-4-updated and rich (PIE placement, the `elf_read_interp`
+walk, the #215 alignment inheritance). It was a clean zero-fold stub only because
+`sub-kernel-elf`, updated the same day, already carried all of it and more (24
+rejection codes to the doc's ~21, `ELFOSABI_GNU`, the F61/F62 guards). The catch
+worth recording is the verification itself: a hand-built coverage grep,
+mis-escaped, reported `0 hits` on every single atom -- and the dossier plainly
+covers them all. Reading the file rather than trusting the grep's zero is the
+whole of the check-the-checker lesson; a "0" from a throwaway verifier is a claim
+about the verifier first. `71 absorbed / 86 live`, six chunks this run.
+
+---
+
+### Run 37 continued (after the 600k self-compact): 99-fs-permission -- the security atom hiding in the delta between an A-era doc and the code that grew past it
+
+The first heavy of the teed-up pair. `docs/reference/99-fs-permission` is a rich
+A-2/A-2a/A-2d reference, not a thin milestone, so I verified it atom-by-atom
+against six owning dossiers (`quaestor owner`) before stubbing. Most of it was
+already carried, and often the dossier was *ahead* of the doc: `abi-t-stat` has
+the record at 88 bytes (the doc says 80 -- #100 later appended `devno`);
+`sub-kernel-perm`, fresh from last run's `rights_for_omode` fold, adds
+`CAP_DAC_OVERRIDE`/`CAP_CHOWN`; `sub-kernel-ninep-dev9p` records that dev9p's
+`perm_enforced` is now **true** (A-3b landed and flipped the one flag the doc says
+is "deferred to A-3"). The walk-open access gate turned out to live in the
+*resolver* (`sub-kernel-stalk` L100-106/L416), more accurately than the doc's
+attribution to the handler, and the security-critical #81 `O_PATH` read-bypass
+close (the `CWALKONLY` reject that once stopped a leak of the 0400 `/system.key`)
+was already homed at stalk L657.
+
+What made this worth the max-effort read was the one atom that was *not* anywhere.
+The doc is A-2a-era and its `SYS_WSTAT` covers only MODE/UID/GID -- but reading the
+actual `sys_wstat_for_proc` (`kernel/syscall.c:4604`) showed the code has since
+grown a `T_WSTAT_SIZE`/ftruncate axis, and with it a #81-*class* close I could
+find in no dossier: an `O_PATH` (`CWALKONLY`) handle is born `RIGHT_WRITE` but is
+`perm_check`-exempt at open, so its write right is *hollow*, and a truncate through
+it would mutate a file the caller has no W permission on. The handler rejects
+exactly that (`(valid & T_WSTAT_SIZE) && (c->flag & CWALKONLY)`), extending #81
+from the read/write/readdir axes to the size axis. A bare "covered" -- the grep a
+thinner sweep would have run -- would have stubbed the doc and left that security
+mechanism undocumented forever, because the doc that should have prompted it never
+knew the axis existed. Verify-before-fold is the only thing that reaches a gap
+living in the *delta* between a frozen doc and the code that grew past it. Folded
+the complete handler into `sub-kernel-syscall-dispatch` (beside last run's F2
+rename/unlink gate) and devramfs's `perm_enforced = true` + `PRINCIPAL_SYSTEM`
+stamp into `sub-kernel-content`. The stub also names the doc's own header/body
+self-contradiction: its intro says A-2d enforcement "is not yet built" three
+paragraphs above a Status section that says "LANDED". `1ecd1f2f`, fixup
+`77b645e5`, both mirrors. `72 absorbed / 85 live`.
+
+---
+
+### Run 37 continued: 08-exception -- a partially-updated doc whose body still described a mechanism its own update had killed
+
+The second heavy of the pair, and it turned out zero-fold: the 425-line P1-F/P1-G
+exception reference is comprehensively superseded, and `sub-kernel-exception`
+carries every atom -- the vector table, the 288-byte frame with its offset
+asserts, the #107 return-tail ordering (preempt -> die -> notes -> stop, which is
+how I-24's "death is caught before any EL0 instruction" and I-39's "death wins
+over a stop" are made mechanical), the #713 eret-window mask rule -- more
+currently than the doc, and it even self-documents that the doc's vector table is
+stale. So the redirect was clean: uaccess for the R12 fault-recovery arm,
+sched-smp for the EL1h/I-21 model and the `thread_user_trampoline` half of #713,
+halls for the extinction primitive.
+
+What made the max-effort read worth it was the soundness-critical trio. The doc's
+#157 section walks the P4-Fix157 `SPSel` dance -- "the kernel's normal-mode steady
+state is `SPSel=0`", fix is `msr SPSel,#0; mov sp` -- and I very nearly folded it
+as a live mechanism. Reading the *current* `arch/arm64/userland.S` instead showed
+P5-el1h had reverted the kernel to *uniform* `SPSel=1` and replaced the dance with
+a direct `msr sp_el0, user_sp` write of the non-current bank; the dance is dead
+code, and the dossier is right to omit it. This is the hazard specific to a
+*partially* updated doc: a P5-el1h Status note was bolted onto the top, but the
+Phase-1 body underneath still narrated the superseded model, and the two
+contradict each other three paragraphs apart. For a soundness-critical atom the
+doc's own narrative of the mechanism is exactly what you cannot trust -- only the
+code says what ships. (#713's DAIF mask, by contrast, is still live and carried;
+and I-12 correctly is *not* claimed by the exception dossier, because the handler
+only diagnoses a W^X kernel-image fault while the enforcer is the PTE constructors
+in mmu.) `4a49f288`, fixup `f85d1599`, both mirrors. `73 absorbed / 84 live` --
+both heavy teed-up docs now done.
+
+---
+
+### Run 37 continued: 147-execve -- mostly covered, but it uniquely held one load-bearing cluster (a heap-corruption lesson included)
+
+With both teed-up heavies done, I took the LINEAGE execve reference next -- and it
+was the useful counter-example to the last two. 08-exception and 19-handles were
+zero-fold because the dossier had lapped the doc; a lazier reading would have
+assumed 147-execve was the same. It nearly is: the address-space swap
+(`sched_activate_addrspace`, the one TTBR0 move outside a context switch, with the
+two independent reasons its window runs IRQ-masked) is deep in sub-kernel-sched,
+the ASID-tag teardown soundness is in sub-kernel-asid, the close-on-exec bitmap in
+sub-kernel-handle, the #254 sigtab reset-in-place in sub-kernel-vivarium, the
+infallible `proc_exec_replace` commit in sub-kernel-proc. Eight dossiers, each
+carrying its half more completely than the doc.
+
+But one cluster lived only in the reference: the L-6a execve *core* -- the two
+front ends (`sys_execve_core` fed by the native concatenated-blob handler on one
+side and `viv_execve`'s Linux `char *[]` repack on the other), the two-pass I-30
+argv bound, the envp #140 decline-as-detector, and the one I most wanted kept: the
+caller-owns-the-blob double-free. That was a real heap corruption -- the pre-split
+body freed the argv blob inside what became the shared core, so carrying those
+frees across the split double-freed on *every* execve, and it surfaced as a
+mangled blob in an unrelated later spawn, nowhere near execve. The tell, recorded
+in the doc, is the reusable part: a comment stated the ownership rule before the
+body was adjusted to match it, so the comment licensed the bug. That belongs in a
+dossier's mechanism, not in a reference doc about to become a stub, so I folded
+the whole L-6a core into sub-kernel-exec -- code-grounded first (confirmed
+`sys_execve_core`, `VIV_LINUX_EXECVE`, the `_pad_envp` reject and the
+`/env`-preservation asymmetry are all live in the current tree, per the #157
+lesson from the chunk before). The lesson for the sweep: "mostly covered" is not
+"covered", and the residue is exactly where the load-bearing, hard-won findings
+hide. `a44662e1`, fixup `a99b06eb`, both mirrors. `74 absorbed / 83 live`.
+
+---
+
+### Run 37 continued: 24-per-proc-pgtable -- a clean zero-fold, and two ways verify-before-fold earned its keep on an easy one
+
+A palate-cleanser after execve: the Phase-3 per-Proc page-table allocator, which
+turned out zero-fold -- `sub-kernel-mmu` owns the allocator and the W^X PTE
+encoding, `sub-kernel-addrspace` the `pgtable_root` field, `sub-kernel-sched-smp`
+the TTBR0 install, `sub-kernel-asid` the teardown TLB lifecycle. But even an easy
+one paid for the discipline twice. First, when I asked quaestor who owns
+`arch/arm64/pgtable.c`, it answered UNOWNED -- and for a moment that reads as a
+coverage gap, a code file no dossier claims. It isn't: the file *doesn't exist*.
+I had synthesized the path from the doc's title, and quaestor dutifully reported
+that nothing owns a file that isn't there. The allocator lives in `mmu.c`; a grep
+settled it in one line. A probe built on a path you invented tells you about your
+invention, not the tree.
+
+Second, the doc carries a threading trip-hazard in bold -- "Phase 5+ multi-thread
+Procs need a per-Proc pgtable lock", because two CPUs faulting on the same address
+space could each allocate a fresh sub-table and leak one. With peer threads now
+sharing the AddrSpace, that would be a live race if it were still open. Reading
+the mmu dossier's Concurrency section showed it closed: the demand-fault path
+holds the address-space lock across the whole resolve-and-install, so the walk is
+serialized. The doc also still says `pgtable_root` hangs off the Proc; since L-4
+it hangs off the AddrSpace, which is exactly what lets those peer threads share
+one. Both are the good kind of stale -- a hazard resolved and a field relocated,
+caught by reading the current owner rather than carrying the doc's TODO forward.
+`767181bf`, fixup `88e8c51a`, both mirrors. `75 absorbed / 82 live` -- four chunks
+since the second self-compact.
+
+### Run 37 continued: 23-direct-map -- the fifth, and a clean one that still predates a footgun
+
+The kernel direct map, a foundational Phase-3 refactor, zero-fold across three
+memory dossiers: the mapping machinery (TTBR1 high half, the linear PA->KVA map,
+the identity-map retirement it unblocked) is in `sub-kernel-mmu`, the
+`pa_to_kva`/`kva_to_pa` round-trip in `sub-kernel-mm-phys`, the SLUB slab pointers
+in `sub-kernel-mm-slub`. The one thing worth flagging in the stub is what the
+Phase-3 doc *couldn't* have known: it predates #808, so it warns nobody that the
+`l1_directmap` cap is absolute rather than relative to `mem_base` -- a bringup at
+any other base would dereference `pa_to_kva` past the mapped window. That finding
+and its seam live in `sub-kernel-mm-phys`, which is exactly why the current
+dossier is the reference and the frozen doc is a stub. `74276f16`, fixup
+`81edf7cd`, both mirrors. `76 absorbed / 81 live` -- five chunks since the second
+self-compact, and the memory/kernel-entry frozen-milestone vein (mmu, phys, slub,
+addrspace, asid, exec, syscall-dispatch all fresh and comprehensive) is the
+productive one right now.
+
+### Run 37 continued: 148-fork -- the richest remaining doc, and still a one-fold stub because the dossiers had lapped it
+
+The biggest and most load-bearing doc left: the whole `rfork`/vfork/COW-`fork`
+arc across L-3b through L-5, 583 lines, I-44. I read it end to end expecting a
+multi-fold chunk, and got the opposite lesson: eight of its nine halves were
+already carried, and carried *well*, by dossiers written since. The vfork suspend
+-- the parent parking until the child leaves the address space, the predicate that
+reads the release off the live state (`state != ALIVE || as != parent->as`)
+rather than a flag, the ABA-safety that holds only because the parent still
+references the space it is comparing against -- is all in `sub-kernel-proc`. The
+#136 finding (the clone that refused every real address space, because the one VMA
+every Proc has, the read-only eager-anon vDSO clock page, was in none of L-4b's
+synthetic test spaces) is the centerpiece of `sub-kernel-addrspace`'s writability
+split. Descriptor inheritance with its I-5/I-6 hole is in `sub-kernel-handle`; the
+fork trampoline that refuses to be a fourth `eret` is in `sub-kernel-exception`.
+
+The one thing with no home was #137, and it is the one most worth keeping. The
+`is_write` bit was decoded from the wrong ISS position -- bit 9, which is `EA` and
+zero for every normal abort -- so it read *false* tree-wide, for the life of the
+fault path. Nothing failed until the COW break became its first real consumer,
+where a wrong-direction store re-installs read-only and loops: a hang with no
+fault logged, three layers from its cause. What let it hide is the reusable part,
+and it is a control trap of the exact family this project keeps relearning: the
+decode's unit test *mirrored the constant*, setting bit 9 and asserting the
+decoder read bit 9, so it agreed with the code instead of the hardware and could
+not have failed however wrong both were. That is a general fault-decode lesson
+wearing a fork-story costume, so I folded it into `sub-kernel-fault`'s caveats
+beside the existing read/write-encoding note, code-confirmed against the current
+`ESR_ISS_WNR_BIT == 6`. The richest doc in the queue reduced to a single fold --
+which is the absorption sweep working exactly as intended: the dossiers are the
+reference now, and the frozen doc had nothing left but its one orphan lesson.
+`0fd9c2ea`, fixup `40532ce5`, both mirrors. `77 absorbed / 80 live` -- six chunks
+since the second self-compact.
+
+### Run 37 continued: 27-exec -- the trilogy closes, and the halfway line
+
+The last big LINEAGE/exec doc, `exec_setup` -- the bridge from a parsed ELF to a
+populated address space. Zero-fold, because `sub-kernel-exec`, warm from the
+`147-execve` chunk two before it, already carries the whole spine: the three
+`exec_setup` forms, the sub-page `PT_LOAD` floor, the L-4a sparse backing, the
+#107 I-cache span over the executable segment, the D-4 `PT_INTERP` rewrite. The
+REVENANT file-backed half distributes cleanly -- the FILE fault arm to
+`sub-kernel-fault`, the Image cache to `sub-kernel-image`, the BURROW mapping
+lifecycle to `sub-kernel-burrow`. The one thing to say in the stub is what a P3-Eb
+doc necessarily gets wrong: it still frames `exec_setup` as kernel-internal with
+the EL0 transition "deferred to P3-Ed", and it predates the split between this
+spawn-into-an-empty-child path and the *detached* `exec_load_into` that `execve`
+introduced at L-2a. With this the exec/fork trilogy (27 + 147 + 148) is fully
+absorbed, and the ledger crosses its halfway line: `78 absorbed / 79 live`. The
+high-value load-bearing docs -- A-2 permission, the exception machinery, the whole
+exec/fork arc, the memory allocators -- are now dossier-first; what remains thins
+toward bringup probes and the still-unwritten uncovered set. `1e3dfb62`, fixup
+`84672c56`, both mirrors. Seven chunks since the second self-compact.
+
+### Run 37 continued: 126-revenant, and the moment I caught myself tunneling
+
+REVENANT, the I-36 audit-trigger surface: a binary paged in on fault, the seven
+soundness conditions. It absorbed cleanly -- every condition already enforced in a
+fresh dossier, warm from the two chunks before it. `sub-kernel-image` is literally
+titled around the proof that eviction cannot race a mapper; the fault arm's
+file-backed miss (the one arm that sleeps, with its deliberate lock-break) is in
+`sub-kernel-fault`, where I had folded #137 an hour earlier; the qid-version key
+that makes close-to-open coherence free is right there in the Image cache. Zero
+fold, and the ledger tips past halfway: `79 absorbed / 78 live`.
+
+The more useful thing happened just before this chunk. I had written in my own
+notes that the vein was "thinning to lower-value test-probes", and I was about to
+spend a chunk forcing an awkward stub for `/attach-probe` -- a test binary no
+dossier even witnesses. Before committing to it I ran an actual census of the 78
+live docs instead of trusting my own summary, and it was plainly wrong: what
+remains is not thin, it is *big* -- `145-vivarium` at 3792 lines, `149-warp` at
+2261, loom, weft, tapestryd, debug-fs, allowance, most of them audit-trigger
+surfaces with dossiers already standing. I had let "the high-value small docs are
+done" quietly become "the high-value docs are done", which is a different and
+false claim. The correction cost one `wc -l` over a glob; the tunnel would have
+cost a chunk on a test probe while a 1200-line capability-network reference sat
+unread. A summary of the remaining work is not the remaining work -- re-derive the
+set before you pick from it. `9477bee8`, fixup `b1ed94b9`, both mirrors. Eight
+chunks since the second self-compact.
+
+### Run 37 continued: 127-overcommit -- a clean I-32 zero-fold on the census's strength
+
+Following the census correction to a load-bearing pick: the #319 overcommit model,
+lazy-anon demand-zero plus decommit, the I-32 fourth axis. Zero-fold -- the
+substrate and `burrow_decommit` are in `sub-kernel-burrow`, the demand-zero fault
+arm with its charge-before-allocate ordering in `sub-kernel-fault`, the `vma_count`
+cap and the atomic-charge discipline in `sub-kernel-addrspace`, all fresh. The only
+stub-worthy staleness is that the doc's "userspace malloc wiring lands at #321" is
+long built. `31841eed`, fixup `0affb8c6`, both mirrors. `80 absorbed / 77 live` --
+nine chunks since the second self-compact.
+
+### Run 37 continued: 110-resource -- the I-32 floor, and the per-Proc-to-per-AddrSpace move the doc missed
+
+The DoS bound, the I-32 invariant this sweep has now leaned on five times. Zero
+fold -- the thread and child caps with their deliberate `ncpus-1` TOCTOU overshoot
+are in `sub-kernel-proc`, the page/VMA counters with their charge-beside-the-count
+discipline in `sub-kernel-addrspace`. The staleness worth naming in the stub is
+the one that matters for correctness: the doc frames the page budget as per-Proc,
+title and all, but since LINEAGE L-1 / RW-12 the enforced bound hangs off the
+**AddrSpace** (`Proc.page_budget` is only the authorization). That is not a
+cosmetic relocation -- it is the whole reason `rfork(RFMEM)` siblings and peer
+threads share one cap, and why the counter must sit on the object it charges. The
+current dossier carries that reasoning and the rejected inverse; the frozen doc
+predates it. `2626175f`, fixup `29c20ebd`, both mirrors. `81 absorbed / 76 live`
+-- ten chunks since the second self-compact.
+
+### Run 37 continued: 81-sys-thread -- an audit-trigger surface with a pthread primitive that had no kernel home
+
+The kernel pthread substrate, an audit-trigger surface, and the one small chunk in
+the batch that turned up a genuine gap. Its creation half is in `sub-kernel-thread`
+and its exit half in `sub-kernel-death`, as expected -- but the join handshake, the
+kernel half of `pthread_join`, was documented **only on the pouch userspace side**.
+The mechanism is real and load-bearing: on any Thread's exit,
+`thread_clear_child_tid_handoff` atomically zeroes the `clear_child_tid` word the
+Thread registered via `SYS_SET_TID_ADDRESS` and `torpor_wake`s every joiner parked
+on that futex VA, and a bad tidptr is skipped silently through the
+`uaccess_store_u32` fixup rather than crashing the box. That a POSIX join primitive
+lived in no kernel dossier is exactly the kind of gap the sweep exists to close, so
+I folded it into `sub-kernel-death` beside `thread_exit_self` and the death-wake,
+code-confirmed against `proc.c` and the uaccess store fixup. `32118630`, fixup
+`ac7c7ecb`, both mirrors. `82 absorbed / 75 live` -- eleven chunks since the second
+self-compact.
+
+### Run 37 continued: 53-sys-rw -- the twelfth, and where this run's post-compact arc rests
+
+The byte-I/O syscalls, a clean zero-fold to close the run's momentum: the
+dispatcher whose literal title is "the staging tiers" carries the read/write
+handlers, the rights gates, and the two-tier bounce staging; `uaccess` carries the
+byte primitives. The stub's one note is that `SYS_RW_MAX` grew from 4 KiB to 128
+KiB when CF-3 added the heap staging tier. `822b762d`, fixup `d4ddd540`, both
+mirrors. `83 absorbed / 74 live`.
+
+That is twelve chunks since the second self-compact, and a natural place to name
+the shape of the run: A-2 file permission and the exception machinery to open, the
+exec/fork trilogy (`27`/`147`/`148`) and REVENANT/I-36 as its spine, the memory
+cluster (`24`-pgtable, `23`-direct-map, `127`-overcommit, `110`-resource) all
+carrying the I-32 invariant, then `81`-sys-thread and `53`-sys-rw. Four real folds
+against the dossiers -- the `SYS_WSTAT` handler into syscall-dispatch, the execve
+core into exec, the #137 WnR-decode tautology into fault, the `clear_child_tid`
+join into death -- each one a load-bearing atom that lived only in a doc about to
+become a stub. The rest were clean redirects, because the memory and execution
+dossiers had already lapped their frozen reference docs. What remains is the big
+audit-trigger surfaces -- vivarium at 3792 lines, warp, loom, weft, tapestryd --
+which have standing dossiers and deserve a fresh budget to verify against.
+
+### Run 37 continued: 95-identity -- the thirteenth, and the run's last before the self-compact line
+
+One more clean one on the way to the 600k checkpoint: the A-1a identity model, I-22.
+Zero fold -- the identity fields and `proc_apply_identity` (the single audited
+mutation site, which extincts rather than let anything stamp `PRINCIPAL_SYSTEM`) are
+in `sub-kernel-proc`, `CAP_SET_IDENTITY` and the capabilities-only growth path in
+`sub-kernel-caps`, and the reason the identity-at-spawn needs no lock -- it runs in
+the child before EL0 -- in `sub-kernel-perm`. The stub notes the one stale line: the
+doc says A-1b's corvus authority half is "not yet landed", and corvus is built (its
+dossiers were absorbed at the top of this very run). `de4e9fd5`, fixup `a602a013`,
+both mirrors. `84 absorbed / 73 live` -- thirteen chunks since the second
+self-compact, and the point where this context reaches the checkpoint line.
+
+### Run 37 continued: 90-u-test -- the fourteenth, and settling what a test-probe doc even is
+
+One more at the checkpoint edge, and the useful thing about it is the disposition
+question it forced. `/u-test` documents a *test binary* -- the libthyla-rs
+integration smoke -- not a subsystem, and when I looked for its owning dossier
+there wasn't one, because a test probe has no subsystem to own it. Earlier in the
+run I had nearly forced an awkward stub for exactly this shape and pulled back; here
+I settled it instead of dodging it. The stub redirects the surfaces the six flows
+exercise to their real homes -- the ABI mirrors to `sub-kernel-syscall-abi`, and
+each composed flow to its kernel dossier, including the `clear_child_tid` join I
+folded into `sub-kernel-death` two chunks earlier -- and then names the test itself,
+the binary and its boot-log signature, as its own record. Nothing was stale; it is
+a live boot gate. That is the pattern the remaining two probes (`57-attach-probe`,
+`61-stratumd-stub`) will follow: redirect to what they test, name the test as the
+record, no fold and no invented home. `417aa391`, fixup `506a307b`, both mirrors.
+`85 absorbed / 72 live` -- fourteen chunks, and the self-compact line. What remains
+for the far side is the set of big audit-trigger references -- vivarium, warp, loom,
+weft, tapestryd, debug-fs, allowance -- each with a standing dossier to verify
+against on a fresh budget.
+
+### Run 37 continued: 57-attach-probe -- the fifteenth, applying the test-probe pattern
+
+The mount-surface E2E probe, absorbed on the pattern the chunk before it settled:
+`/attach-probe` drives `SYS_ATTACH_9P`/`SYS_MOUNT`/`SYS_UNMOUNT` from a real EL0
+Proc, so the stub redirects those surfaces to their homes -- the handlers to
+`sub-kernel-syscall-dispatch`, the attach mechanism to `sub-kernel-ninep-attach`,
+the mount composition to `sub-kernel-territory`, the transport to
+`sub-kernel-ninep-transport` -- and names the binary as its own record. Nothing
+stale; a live probe. `4b3868fb`, fixup `6ed37c92`, both mirrors. `86 absorbed / 71
+live` -- fifteen chunks, and the true self-compact boundary; `61-stratumd-stub` is
+the last probe and follows the same shape. This is where the run stops and the
+context compacts.
+
+### Run 37 continued (after the 3rd self-compact): the big audit-trigger references begin -- and two of the four had a load-bearing atom the count would have missed
+
+Five docs past the checkpoint, `86 -> 91 absorbed`, and the batch is where the
+sweep left the small docs behind for the invariant-bearing surfaces. The first,
+`61-stratumd-stub`, was the last test-probe: a P5 arc doc that proved a userspace
+process can be the 9P responder and introduced two real syscalls along the way
+(`SYS_WALK_OPEN`, `SYS_CHROOT`) -- but those have their own live reference docs
+(62, 77) and dossier homes, so the stub redirects the scaffold to the surfaces it
+exercises and names the stub + three probes as records. Clean. `6ac898c0`.
+
+Then the four audit-trigger references, and the discipline earned its keep on two
+of them. **117-allowance (I-34)** looked like a zero-fold -- the 188-line
+`sub-kernel-allowance` dossier covers every one of the 804-line doc's atoms -- until
+the set-once caveat. The doc says the confer `kfree(old)` is "still lock-free,
+sound only because the Proc has not entered EL0, so nothing reads `p->allowance`
+concurrently." I read the code to be sure, and it says the opposite:
+`allowance.c:66-77`, `proc_allowance_install_locked`, "audit F1" -- the swap runs
+UNDER `g_proc_table_lock` precisely because the child IS reachable by a concurrent
+`proc_group_terminate -> proc_revoke_allowance` on the inherited-clone `old`
+allowance, independent of EL0 entry; the lockless swap was a real UAF on the
+narrowed-parent-spawns-child path. The dossier had the corrected mechanism; the
+reference doc was frozen at the pre-fix understanding. Zero fold, but the stub
+names the staleness so no one reads the doc and believes the free is free.
+`1f68b95e`.
+
+**107-loom (I-29/I-30)** was a genuine fold, and it was hiding in the frontmatter.
+The 482-line `sub-kernel-loom` dossier is one of the deepest in the tree -- the
+private-counter authority, the submit-time pin, the I-32 dual charge-ledger with
+its two-owner-pointers and the thread-backstop wrong-fix -- and it lists
+`spec-loom-devgone` in `validated-by`. But the device-gone terminal itself (the
+I-29 extension: a clean EOF from a torn-down server/driver endpoint completes
+in-flight async ops `-ENODEV`, distinct from a transport `-EIO`; before Menagerie
+step 4 both collapsed to `-1`) was in no dossier BODY. Its code lives in
+`9p_client.c` (`client_mark_dead_locked(c, bool devgone)`, the reader sites
+passing `rr == 0`), not `loom.c` -- so its home is `sub-kernel-ninep-client`,
+whose Fail-close section had documented the sole dead-setter but omitted its
+reason parameter. Folded there, code-grounded to `9p_client.c:187`. `d02252fe`.
+
+**125-weft (I-37)** was the batch's true zero-fold: the 404-line dossier is
+exhaustive -- the four minted-not-asserted kinds including the HOSTMEM half-widen
+bug, the F_NOTIF three-holder tracker, the I-9 no-lost-wake across a Proc
+boundary, the I-32 sharer-settles-on-shared-out leak -- and the doc's other 800
+lines (the Tweftio data-drive, the weave share, the shared-in budget) are owned by
+`sub-kernel-ninep-dev9p`, `sub-kernel-burrow`, `sub-kernel-addrspace`, verified by
+grep and by finding `weft_binding_validate_rw`'s role covered by MEANING at the
+dossier's Prosecution (the kind-gate single chokepoint) even without the function
+name. `65f7365f`.
+
+**134-debug-fs (I-39)** closed the batch with the second fold. The today-current
+`sub-kernel-devproc` dossier covers the two-axis gate, the three-conjunct
+park-predicate fix, the SPSR guard, the atomic-CDEBUGOWNER release, the kstack
+KASLR split -- and the SA-1 stale-fire strand turned out to live correctly in
+`sub-kernel-hwdebug`. But the die-with-launcher exitkill release was only a field
+name (`debug_exitkill`) and the resume-on-release half of NoStrand. The terminate
+half -- `devproc_debug_release_cb` `proc_group_terminate`ing a launched
+exitkill-marked ALIVE target instead of resuming it, closing the orphan-to-init
+leak, the #811 cascade waking debug-parked threads by rendez not `debug_stop_req`,
+the audit-F1 trigger nuance that it fires on any ctl-fd close without a prior
+`detach` -- was absent. Folded into `sub-kernel-devproc` as a Die-with-launcher
+subsection, code-grounded to `devproc.c:940-975`, with the I-39 statement amended
+to resume-OR-terminate and a prosecution bullet. `a031a7b8`.
+
+The pattern across the batch: the dossiers had lapped the frozen docs on nearly
+everything, and the two folds and one staleness were exactly where a load-bearing
+mechanism sat one dossier over from where the doc put it (device-gone in the 9P
+client, not Loom) or in the half of an invariant the dossier had not yet reached
+(terminate-on-release, not resume). Reading the code rather than the doc's
+narrative is what separated them from the zero-folds. Next: `111-cons`,
+`139-tapestryd` (its dossier is bigger than the doc and current -- likely
+zero-fold), and `149-warp` at 2261 lines and I-45, the biggest remaining lift.
+
+### Run 37 continued: the rest of the audit-trigger set, then the mediums -- past 100 absorbed, and two UNOWNED primitive files the sweep had walked past
+
+Nine more docs to `100 absorbed / 57 live`, and the run's shape settled into two
+findings the count could not have surfaced. The audit-trigger references finished
+first: `111-cons` folded the #95 RX input-drop report into `sub-kernel-cons` (the
+dossier *referenced* "the report" without describing it, and `rx_drop_modeflush`
+-- a consctl ICANON-clear delivering a half-line the full ring drops, #95's
+truncated-command-runs shape, reachable by ordinary type-ahead -- was absent);
+`139-tapestryd` was a clean zero-fold against a dossier 400 lines *larger* than
+the doc and ahead of it; `149-warp` at 2261 lines was the biggest, and mostly
+host-side (Mesa/Venus/WSI, the TRUSTED-not-enforced half of I-45) -- the
+load-bearing guest half verified across `sub-kernel-hwcap` (the GPU-BO envelope +
+the physical-base-in-window containment) and `sub-tapestryd` (the cross-ctx
+isolation contract), a zero-fold.
+
+Then `145-vivarium`, the 3792-line giant, and the disciplined call was to **defer
+it**. It is not a single-surface doc; it is a fifteen-dossier umbrella. The I-43
+soundness core is thorough and current in `sub-kernel-vivarium` (every decide
+function, the collision re-check, the mmap-D-3 I-36 allow-list, the sigtab-tearing
+finding), and the per-feature sections each have a confirmed owner -- but the
+`^C-reaches-container` section (viv masks `interrupt` at startup; `note_mask`
+inherited only when the parent is PHENO_LINUX, so a native child gets a zero mask;
+the tty family stays unmasked for ^Z/hangup/^\) matched no dossier, and stubbing a
+3792-line doc without homing sections like it is exactly the shallow absorption
+the method forbids. Deferred with a precise residue map, not walked past.
+
+The mediums then turned up the run's other shape: **two primitive files nobody
+owned.** `12-hardening` was a clean redirect on every surface -- PAC/BTI to
+boot-entry, W^X to mmu, LSE to alternatives, KASLR to kaslr -- *except* the stack
+canary: `kernel/canary.c` was UNOWNED, its `__stack_chk_guard` link-magic ->
+KASLR-seeded-runtime-cookie-under-a-barrier lifecycle in no dossier. Folded into
+`sub-kernel-boot-sequence` (the sibling hwfeat+banner owner), which now claims the
+file. `04-extinction` was the same shape one layer down: `sub-kernel-halls`
+described the crash dump and *referenced* the extinction path, but `kernel/extinction.c`
+-- the `extinction()` ELE entry, the `EXTINCTION:` marker the whole agentic loop
+greps literally, the recursive-extinction suppression, the owed-`IPI_HALT` #243
+tearing seam -- was unowned; folded into `sub-kernel-halls`, and `101-halls` then
+redirected to it clean. **The tell both times was `quaestor owner -> UNOWNED` on a
+file the surrounding dossiers all *called* but none *claimed*** -- a hardening
+posture and a crash path each missing exactly their entry primitive. `103-login`
+and `102-legate` in between were clean zero-folds (login's DEK lifetime is
+`sub-stratum-session`'s; the legate is literally in `sub-kernel-caps`'s title).
+
+Six real folds across the run (allowance's pre-F1 lock-free-kfree staleness, loom's
+device-gone terminal, debug-fs's terminate-on-release exitkill, cons's #95
+input-drop, hardening's canary, extinction) -- every one a load-bearing atom that
+would have been lost when its frozen doc became a stub. The run then closed out to
+`107 absorbed / 50 live` on a run of clean zero-folds (`108-utopia-repl`,
+`43-virtio-gpu`, `123-tls`, `84-pouch-libsodium`, and the spawn-family cluster
+`62`/`63`/`64`) — each a doc whose dossier had simply lapped it. Next: the
+remaining ~50 live docs, then the 12 uncovered surfaces (dossiers to author) and
+the `145-vivarium` dedicated pass.
+
+---
+
+### Run 37 continued (after the 4th self-compact): 14 more docs, seven security folds, and a benches family that earned a deferral instead of a rushed stub
+
+From `a4e8d959` to `347436da`, **107 -> 121 absorbed / 36 live**, fourteen docs,
+all lint-0-fail and dual-pushed. Seven were real folds -- each a load-bearing
+atom that lived only in a doc about to become a stub -- and the through-line this
+run was *security atoms the count would have missed*.
+
+**The security folds.** `73-sys-spawn-with-perms` (`f17f0e59`): the SPAWN_PERM_*
+grant gate was owned only as a *shape* -- `sub-kernel-syscall-dispatch` carried
+the one-hop delegation for the sibling I-32 page-budget raise, but not the
+service-posting gate's two soundness atoms: the I-27 reason `CONSOLE_TRUSTED` is
+never-delegable (a service-poster must not confer the console-trust used for
+hostowner elevation) and the SMP race the atomic-stamp-in-thunk closes (a child
+scheduled onto another CPU could reach `SYS_POST_SERVICE` before a mark-after-spawn
+lands). `40-uaccess` (`ac3413b6`): the F210 P1 *corollary* -- the dossier had "the
+bound must stay pinned" and "callers must validate range" as *separate* bullets,
+but not the interaction that makes them a bug together: a caller holding a laxer
+bound than the dispatcher's fixup gate (`fi.vaddr < UACCESS_USER_VA_TOP`) is an
+EL0-triggerable extinction, because a VA in the gap passes the caller, faults in
+the non-range-checking primitive, and fails gate #2 so the fixup never applies.
+`SYS_PUTS` once held `2^48` vs the gate's `2^47`. `79-sys-burrow` (`594079d4`): the
+P6-pouch-mem-a F1 -- `burrow_unmap` matches a VMA by geometry alone, so
+`SYS_BURROW_DETACH` must bound its vaddr to the burrow window *before* the match,
+or EL0 dismantles its own stack-guard VMA (silently retiring a security page).
+`130-positioned-io` (`1ebe5569`): the cursor-untouched contract + the ordered
+ESPIPE/overflow gates the `io.ReaderAt` parallel-use guarantee rides on.
+
+**Two smaller folds, and a two-atom one.** `77-sys-chroot` (`26b3b9c3`): the
+one-way-chroot lifetime caveat -- v1.0 has no unchroot, so a persistent Proc that
+chroots pins its root Spoor (and the 9P session behind it) for life, the reason
+long-running init uses short-lived child probes. `124-net-utils` (`26d61946`): two
+client-facing atoms into `sub-netd-server` -- the `/net/cs` 0-service resolve
+footgun (a resolve for the IP only must still pass a non-zero service) and `ping`'s
+seam #256 (an ICMP-error recv fooled into waiting out its poll).
+
+**The deferral that was the right call.** `129-fsbench` verified UNOWNED, and so
+did its siblings `usr/netperf` and `usr/cpubench` -- a coherent in-guest benches
+family with no dossier and no reference docs beyond `129` + `41-irq-bench`. Rather
+than rush-stub against a home that does not exist, I deferred it with a residue
+map (the `SYS_RW_MAX=4096` syscall-bound-ceiling finding, the #343 dcache 4.1x,
+the `arwrite`/`coherence` FS-correctness probes that ruled out the FS for the
+go-build `not package main` bug) -- the same discipline as `145-vivarium`. A
+benches dossier is owed; it is one of the ~12 uncovered surfaces.
+
+**Two stale framings caught by reading the code, not the doc.** `58-corvus-syscalls`
+(`d4df899a`) is P5 hardening scaffolding whose two live claims are both refuted by
+landed work: "GETRANDOM RNDR-absent is permanent, no software-CSPRNG mixing" --
+the Lazarus W3 ChaCha20 stir landed, so an RNDR-less target (Apple/HVF, the A72)
+seeds from the DTB boot seed + CNTPCT jitter; and "flags not enforced at v1.0" --
+the I-39 debug gate now enforces `PROC_FLAG_NOTRACE`. The stub names both.
+
+**The clean redirects, and how often the dossier was AHEAD.** `138-gpud`
+(retired at G-3, `usr/gpud` deleted; the transport-pivot rationale preserved
+verbatim-in-spirit in `sub-tapestryd`), `75-devcap`, `67-el1h-kernel` (I-21,
+distributed and current), `54-sys-fd-syscalls` (the dossier carries
+`handle_dup_posix`/dup2 the doc lists as not-yet-existing), `60-sys-spawn-wait`
+(every one of its five "deferred" caveats -- COW rfork, spawn-with-caps, argv,
+the wait_pid PID-selector -- has since landed), `152-kaua-term` and `150-vt` (both
+onto dossiers dated the same day, carrying the span-serial anti-clickjack and the
+per-record-CLASS bound). The recurring shape: a first-cut doc frozen in its era,
+and a dossier that lapped it -- the absorption's job is to prove that, not assume
+it.
+
+**Left open / NEXT:** ~36 live docs remain, several big (`133-go-port`,
+`91-utopia`, `13-verification`, `136-ptyfs`); then the ~12 uncovered surfaces
+(the benches family is one, and each needs a dossier authored), and the
+`145-vivarium` dedicated pass (the `^C`-mask container fold + DISTRO-D-5 + the V-8
+findings). No operator-input item is pending; the sweep continues autonomously.
+
+---
+
+## Run 36 (2026-09-06, Opus 4.8, effort max): PL-5 -- `la` emits a `pre` code-fence box, and the content-model fork the resume note had backwards
+
+**PL-5 -- the `pre` PRODUCER (`ea731dd8`).** PL-1b (run 34) built the `pre`
+RENDER but landed host-tested only: a `pre` block needs a producer to witness it
+on the lever. PL-5 is that producer -- and the resume note's one-line plan ("wrap
+`la`'s box in `pre`") was porting against the wrong content model.
+
+**The fork, and why it was the operator's.** Ground truth (reading the CODE, not
+the note): at the RICH tier `render_long` already emitted a semantic Beacon
+`table` (`Table::new("llrlll")` + `obj type=path` name cells), landed at H-1c-2
+(`8922ccd7`) -- and HALCYON.md 14.13 line 116 renders a `table` PROPORTIONAL. But
+the same 14.13 pass (`a95d437c`, today) and BEACON.md 12.2 say box-drawing
+emitters (`la` and kin) wrap their output in `pre` (a mono island). Contradictory
+for `la` specifically. On Opus (the operator-away pin: STOP at the first
+user-input item) I surfaced it as a blocking question rather than guess --
+guessing wrong regresses user-visible output on the KT-1 format-fuzz surface and
+burns an audit cycle. The operator ratified the mono box via `pre`. The
+resolution that keeps scripture self-consistent: line 116 governs things that ARE
+tables; a `pre`-`la` isn't one, so 116 is silent -- the `table` path was simply
+the pre-14.13 realization, superseded, not a live design conflict.
+
+**The change.** `render_long`'s box geometry (widths -> rows -> content_w ->
+total) hoisted above the tier branches, so the Rich `pre`, the cells SGR box, and
+the pipe columns are three realizations of ONE box. The `if rich` arm wraps
+`boxd::top` / the `│ ...pad... │` rows / `boxd::bottom` in
+`pre_open`/`pre_close` -- the box furniture as pre payload (mono, verbatim), each
+name an `obj type=path` (affordant), the classify suffix OUTSIDE the frame, SGR
+off. strip(rich) == the plain box (BEACON 12.8 P1), byte-exact against `emit_row`.
+
+**The consumer sweep (bug_91: removing the collapsed value voids every asserter of
+it).** Exactly one consumer asserted `ls -l` -> `table`: ls-halcyon.exp, flipped
+to `1936;v1;pre`. coreutil-smoke's ls -l test is pipe-clean columns (the pipe
+never reaches the rich arm); ps is the genuine table; ls-gfx-session runs `ls -l`
+via the menu with no frame/color assertion -- all three unaffected.
+
+**A cheap witness the expensive E2E can't be.** Added an every-boot producer
+witness in coreutil-smoke: `ls -l --beacon=always /version` must emit the pre +
+obj frames AND strip to the box (the ┌ top-left + │ vertical). Caught by
+the real boot, not the ~2-min HVF lever E2E: `ls -l rich pre-box (PL-5) ok`, 56
+checks.
+
+**Verified.** Producer on the wire: `1936;v1;pre` present in the ls-halcyon
+transcript (the frame followed by the box chars). Console render (lever):
+ls-halcyon PASS [117s] -- the pre frame witnessed, and the parchment-ground pixel
+proof HELD (dom 242,235,224, 55039/440000 non-ground px), refuting my own flagged
+risk that the raised pre-box ground would flip the center rect's dominant (it is
+a minority). Session render: ls-gfx-session PASS [28s]. What caught the wrong
+turn: reading the CODE, not the resume note (a port against the wrong content
+model lands hollow -- bug_h4d2).
+
+**Then the batched PL-arc audit, closed clean via two rounds (across a
+self-compaction).** Fable was credit-exhausted, so both rounds ran on the Opus
+fallback at max -- context-independent, findings re-derived from the code -- and
+since the holotype-reviewer subagent_type was unavailable this session, they ran
+as general-purpose + `model: opus`. R1 DIRTY on ONE P0: `freeze_open` finalized an
+open `table` at a block boundary but had NO arm for an open `pre`, so a `pre`
+spanning a block-freeze committed its `Item::Pre` into the FRESH block (0 styles)
+carrying the old block's style indices, and `layout_block`'s `b.styles[sid]`
+(layout.rs:473) panicked OOB -- a console crash reachable from an untrusted tile
+stream (a ScrollOff, or a tile-split's `set_max_cost`, between pre-open and
+pre-close). Fixed by an inline pre-finalization mirroring the table arm; a pre
+spanning the freeze splits. The dirty close obliged a re-round on the fix.
+
+**The re-round came back CLEAN (0/0/0/2 P3), and my parallel self-audit and the
+prosecutor converged on the same crux from opposite ends:** the fix is sound
+because the pre finalizes into the one block whose styles vec its cells' indices
+name -- `self.open` is reassigned in exactly one place (the `mem::replace`), and
+`intern_style` is append-only / degrade-to-last so a handed-out index is never
+invalidated, even when scrolled lines intern more styles into the same block. The
+only two `freeze_open` callers that reach it with a pre open are precisely the two
+the arm handles; every other path guard-returns while pre=Some. **What the
+re-round caught that R1's close had left open: F6** -- only the `set_max_cost`
+freeze trigger was unit-tested; the `finalize_scroll_pending` (ScrollOff) trigger
+used the identical arm but was UNWITNESSED. On a format-fuzz surface that is a gap
+to close, not track, so it landed as a second regression
+(`pre_finalized_at_a_scrolloff_triggered_freeze_lays_out_without_panic`) --
+discrimination-proven: with the arm sabotaged it panics at the same layout.rs:473
+site ("len 0 index 0"; the set_max_cost twin panics "index 1"), with the arm it
+passes. Both freeze-mid-pre triggers are now test-verified, not one tested + one
+reasoned. Evidence: halcyond host 127 (+1); the sabotage/restore proof run
+in-session. Owed, non-blocking: a Fable round for the family-diversity axis when
+credits return (both rounds were Opus; a finished fallback round is closed per the
+never-skip rule, so only the diversity pass is a fresh obligation).
+
+**Then F2 -- closing the audit's own deferred P2 in the same run.** R1 had
+deferred F2 (owned): the `pre` and the pre-existing `table` in-progress
+accumulators are each a fixed-16 MiB transient, uncharged to the block budget
+until close and un-scaled by tile count -- so N tiles each holding one (pre XOR
+table) sum to N x 16 MiB and OOM the 64 MiB console heap at N>=4. The fix folds
+both into the tile's scrollback share: `transient_cap() = (max_cost/2).max(
+OPEN_BLOCK_MAX_COST)`. Because `set_max_cost` already divides ONE 32 MiB session
+budget by the tile count, half a tile's share sums across all N tiles to at most
+16 MiB in transients regardless of N. The subtlety that decided the formula: a cap
+tied to `max_cost` goes to zero for a test's `set_max_cost(1)`, so it is floored at
+one open block (512 KiB) -- and that floor is provably inert for a real tile
+(N <= MAX_PANES=32 keeps share/2 above 512 KiB), binding only for the artificial
+tiny-cap case, so no bound test breaks and the aggregate stays exactly 16 MiB.
+Single-tile behaviour is unchanged (32 MiB share -> 16 MiB cap, the old value), so
+there is no regression for the common case; only the multi-tile OOM is closed. Two
+regressions, both discrimination-proven by sabotaging `transient_cap` back to the
+fixed 16 MiB: the formula test (share/2 + the floor at set_max_cost(1)) and a
+runtime test (a 4 MiB-share tile caps a flooding pre at 2 MiB, not 16). Host 129,
+ELF green, clippy no new warnings. Unaudited -- batched with the next chunk per
+double-distance; the vault folded the F6 dossier delta @2835e43d, and the F2
+transient-bound prose is rung next.
+
+## Run 35 (vault absorption cont., 2026-09-06, Opus 4.8, effort max): the two BIG dossiers, an errno-registry reconcile that the stale tool was structurally blind to, and a triage tool that lied
+
+**Where it sits.** The continuation of Run 33 across its self-compaction (Run 33
+ended at the 600k line, tip `087b4e6a`). Same track (`../thylacine-vault`,
+`vault/bootstrap` == origin/main), same greenlight ("keep going through the
+backlog"). Main's Run 34 (Halcyon PL-3) landed in between; merged clean twice
+here (PL-3a `3c492b3b`, PL-3b/c `6d7073ec`). Backlog 25 -> 23. Tip `b10aeca6`,
+both mirrors converged.
+
+**The two BIG dossiers the resume note named.** `sub-coreutils-presenters`
+(`bbba5ea7`) was the sharply-superseded one: its title and central caveat both
+asserted the exact thing H-1c-2 (`8922ccd7`) had fixed. `--color=auto` used to
+mean *always* (fifteen `fn stdout_is_console() -> bool { true }` stubs); the arc
+built the shared probe (`libthyla_rs::stdout_is_terminal()` over
+`SYS_FD_DEVCLASS`), so all sixteen tools now default `ColorMode::Auto` and the
+old introspection-ON/grep-OFF asymmetry is gone. Added `ps.rs` (the 16th
+presenter, verified present at `usr/coreutils/src/bin/ps.rs`), documented the
+four-tool Beacon Rich tier, and retitled ("fifteen tools, fifteen copies of one
+stub" -> "sixteen tools, one console probe" -- both halves were stale).
+
+`sub-libthyla-rs` (`a85de210`) looked like the bigger job -- the stale tool
+reported 12 files, ~488 lines, led by `fs/file.rs` at +/-188 -- and was almost
+entirely a **date-field** staleness. All 12 flagged files are byte-identical
+`d1a4b8e4..HEAD` (`git diff --stat` empty): the H-4d-1 fold was the last body
+edit and left `updated:` at 2026-08-15. The one genuine post-edit change
+(`8f553c78`) touched only `lib.rs`, which the dossier explicitly excludes. Spot-
+verified the richest claims survived (the #100 File-rights caveat holds verbatim
+-- both constructors still record the constant `Rights::READ|WRITE|TRANSFER` at
+`file.rs:235`/`:291` while `rights()`'s doc describes the kernel's A-3b
+derivation). A new guise of the merge-date trap: date the churn by the
+`updated:` field, not the last body edit.
+
+**The reconcile the stale tool could not see.** Processing aux's yip 0036
+handoff, one owed errno (`T_E_NOTTY=25`) turned into a full audit of
+`abi-errno`: it was missing **sixteen** codes -- the whole V-5 socket family
+plus INTR/2BIG/CHILD/NOTDIR/ISDIR/MFILE/NOTTY/LOOP -- because **the stale tool
+tracks sub-dossier `code:` churn and is structurally blind to registry drift**.
+Reconciled the table (19 -> 35 non-zero rows, meanings from each define's own
+comment), the self-counts (`pinned-by` 20 -> 36 asserts, measured), and the
+err.rs mirror analysis (names 18 of 35, missing 17; the note's old "missing
+four" was itself stale; recorded the reverse asymmetry `DirectoryNotEmpty` -> 39
+with no `T_E_*`). First chg to trip the R6 `mirrors-checked` gate (`de809a31`).
+Then generalized it: audited all 8 abi notes -- **abi-errno was the only one
+drifted**; caps/handle-rights/note-names/loom-ring/ninep-wire/t-stat/boot-banner
+all verified current against their pinning code.
+
+**The wrong turn, and what caught it.** Hunting cheap date-field de-stales, I
+wrote a batch triage that awk-parsed `quaestor stale --all` for each dossier's
+file list. It silently returned wrong/empty lists, so the base-diff was
+vacuously empty, so it reported "FALSE CHURN" on genuinely-churned dossiers --
+`poll` (+8) and `handle` (+69) both mislabeled as byte-current. Had I trusted
+it, I would have date-bumped stale dossiers as "verified current" -- a hollow
+close on load-bearing kernel surfaces. What caught it was a cheap
+**consistency check**: grep each "false-churn" dossier for a keyword from its
+latest code arc. `poll.c` has the KOBJ_LOOM arm; the poll dossier says "loom"
+zero times. That contradiction forced a direct diff with explicit paths, which
+exposed the tool. Lesson banked in the pickup: verify de-stale base-diffs with
+explicit file paths and a `git log -1 -- <md>` base, never a parse of the tool's
+own output. (It also corrected Run 33's unverified "devctl comment-only" -- it's
++13/-4, aux's `rx_drop_modeflush` pty-4 counter.)
+
+**One small settled fold** rode through cleanly: `sub-kernel-content`
+(`b10aeca6`) gained the `devramfs.c:622 .may_back_exec = true` vouch (#217, the
+I-12 provenance floor), with `inv-i12` added to `guarded-by` -- `/env`'s Dev
+deliberately does not vouch (verified no `may_back_exec` in `devenv.c`).
+
+**What it left open.** The safe, high-value, vault-owned pool is exhausted --
+*verified*, not assumed: direct-diffed 10+ remaining candidates, all real-churn
+on active peer arcs (aux VIVARIUM/notes/PTY; main KT-1.5/Warp), which re-stale
+on the next peer push. Deferred, not dropped. Two systemic findings owed to the
+peers (surfaced via yip): (1) registries drift silently -- a periodic
+registry-drift check is owed, since abi-errno sat 16 codes behind undetected;
+(2) folding content into a dossier without bumping `updated:` manufactures
+false-churn (libthyla-rs), so bump `updated:` on every fold. And yip 0029 (the
+unowned Warp paths -- GPU-DESIGN.md scripture + warp tooling) is a vault-*scope*
+decision for the operator, not a routine de-stale.
+
+**Coda -- the upkeep model, caught live.** Right after that conclusion, while
+answering the operator's return question ("do the agents upkeep their own dossiers
+now?"), main flagged a fresh de-stale on yip 0058: `sub-halcyond` PL-4
+(proportional-live). That is the model working -- main ran `quaestor owner`
+(exit 0, vault-owned) and rang the vault to fold rather than writing
+`docs/reference` -- and it is the *distinction* that corrects "the safe pool is
+exhausted": an **unflagged** peer-active dossier is deferred (it re-stales on the
+next push), but a **flagged** one is work the vault should take. Folded
+(`82e47377`): the normal-screen tail is now documented proportional
+(`live_block -> layout_block -> render_block`, mono `paint_grid` retired for
+normal / kept for alt), the run-menu geometry inverts through the laid tail
+(`grid_hit` + `grid_run_rect`) at both summon sites, and the untrusted-drop clamp
+stays in `grid.rs` below the layout swap. It was stale *within the same day* (the
+H-arc fold `29b3267c` preceded PL-4; `updated:` was already today), so the stale
+tool could not see it -- a live instance of the same-day blind spot behind this
+run's registry finding. Run 35's ledger is 5 de-stales, not 4.
+
+---
+
+## Run 34 (2026-09-06, Opus 4.8, effort max): the Halcyon stabilization arc opens -- proportional-live ratified into scripture, then the Beacon `pre` op and Genera typography
+
+**Where it sits.** After the H-arc audit close (Run 31 part 4, `454ecde9`), the
+operator booted Halcyon interactively for the first time, filed observations
+(`thylacine-aux/docs/Found issues.txt` + screenshots s1-s7 + genera.gif) and
+directed: stabilize before more features. A design conversation ratified a
+sharpened model, which this run landed as scripture-first, then began
+implementing. Tip `ee426200`, both mirrors.
+
+**The design (ratified by the operator).** Halcyon is mainly PROPORTIONAL -- the
+prompt included. Monospace only where character-grid alignment is essential: the
+editor (nora) and box-drawing / column-exact output (`la`), each set apart like a
+Markdown code fence. The clean seam is the existing tile mode boundary: normal
+screen -> the proportional live transcript; alt screen -> the raw mono grid. This
+RETIRES the KT-1.5 "mono live grid tail + proportional scrollback" split for the
+normal screen (the source of the operator's s1/s5/s6: fresh output rendered mono,
+became proportional only on scrollback, and the two halves of one document
+disagreed on metric AND affordance). North star: a professionally typeset
+document that is also interactive and a shell.
+
+**What landed, in order.**
+- **The scripture commit (`a95d437c`, docs only).** HALCYON.md section 14.13 (the
+  proportional-live tile model, superseding 14.11.3's composition for the normal
+  screen), section 3 (the two mono cases + code-block chrome + the Genera type
+  discipline); BEACON.md the `pre` op (section 3 / 12.1 / 12.2 / 11, a v1 additive
+  amendment). The op is named `pre`, not `mono`, because BEACON never names a face
+  -- `pre` names a content PROPERTY (whitespace-significant), the stylesheet picks
+  mono + chrome. Rendering is a SINK choice: the pts/producer is unchanged (a
+  fixed-width grid; the shell sees an ordinary terminal); proportional-ness is
+  purely how halcyond PAINTS the grid in normal mode. The core mechanism (for
+  PL-3/PL-4) is logical-line reconstruction: the VT's per-row soft-wrap flag rides
+  the wire, halcyond joins soft-wrapped runs and re-wraps at word boundaries --
+  dissolving the mid-word wrap (s5). Open at implementation: the winsize policy
+  (keep real cols + soft-wrap join, vs advertise wide cols).
+- **PL-1a -- the Beacon `pre` op (`de753061`).** wire.rs Op::Pre + sink.rs
+  pre_open/pre_close/pre(s); beacon host 37/37 (a `pre` with an inline obj
+  round-trips, strip yields the exact none-tier payload).
+  **The wrong turn, and what caught it:** the beacon host test is host-only and
+  never compiles CONSUMERS. Adding Op::Pre broke halcyond's `open_op`/`close_op`
+  -- both match Op EXHAUSTIVELY with no wildcard, so a new variant fails to
+  compile. Host-green but build-RED. The USERSPACE BUILD caught it (point_op
+  already had a `_`; only the two paired-op matches broke). The lesson: for a
+  vocabulary addition, the build -- not the host test -- is the real gate; the
+  commit folds in `Op::Pre => {}` arms and says so.
+- **PL-2 -- Genera typography (`116d7055`).** face_for remapped: bold RESERVED for
+  strong (extreme emphasis) + foreign SGR bold; emphasis and headings go ITALIC;
+  heading rank stays size (px_for, unchanged). Retires bold headings (the
+  operator's genera.gif note). The Oblique face was vendored Sep 1 "for the day
+  the stylesheet takes an italic role" -- that day arrived. To keep the
+  proportional faces contiguous in faces[] (glyph indexes faces[face] directly),
+  FACE_MONO renumbered 2 -> 3 (a sentinel, special-cased; safe because every mono
+  check is the constant, never a literal 2). halcyond lib 108/108.
+  **A test earned its keep:** the new Genera assertion first FAILED on "foreign
+  SGR bold stays bold" -- because an UN-annotated cell returns FACE_MONO *before*
+  the bold check (un-annotated foreign output is mono today). The code was right;
+  my assertion was wrong. Fixed to document the nuance (and it is forward-correct
+  for PL-4, when un-annotated goes proportional).
+
+**A cross-track bug, root-caused and owned end to end.** The first PL-1a commit was
+blocked by the pre-commit vault-lint: `view-spec-coverage.md` stale. Root cause: 77
+gitignored `specs/*_TTrace_*.tla` (TLC counterexample dumps) sat on disk, and
+`quaestor render` scanned the DIRECTORY (not git), miscounting them as 77 missing
+modules -- a divergence from the project convention (`.gitignore:29`, CLAUDE.md's
+`grep -v TTrace`). Not mine, but ours: I removed the junk to unblock, then flagged
+the vault peer with the precise root cause (yip call 0057). They fixed quaestor
+(`bb14a0dc`: the scan now skips the dumps) with a discriminating regression
+(`TestSpecCoverageExcludesTTraceDumps`, fail-pre/pass-post) and pushed. The blocker
+is gone for every track.
+
+**PL-3 -- the soft-wrap rejoin (PL-3a + PL-3b/c), landed.** The keystone's first
+half. The scoping finding: s5 (proportional text wrapping mid-word, "tho/ught")
+is NOT a layout bug -- `layout.rs::lay_span` already breaks at the last space; the
+mid-word breaks are the GRID's hard wraps at `cols` surviving because each
+scrolled-off row became its own transcript Line. PL-3a (`24fd27f9`) added a
+per-row soft-wrap flag to the vt (`wrapped: Vec<bool>`, mirroring `dirty`
+site-for-site: SET on autowrap, CLEARED on col-0/erase/blank, rotated on
+scroll/IL/DL, reindexed on resize, swapped on alt) riding `Boundary::Scroll(row,
+wrapped)`. PL-3b/c (`ee426200`) carries it end to end: kaua-term threads the
+flag through `ScrollOff { rows, wrapped }` and the wire (interleaved per row, so a
+declared-length desync can never mis-shift the flags), and halcyond's
+`push_scrolled_rows` REJOINS -- accumulating RAW cells until a non-wrapped row
+ends the logical line, then interning ONE Line, which the flow layout re-wraps at
+word boundaries. Bounded by `MAX_LINE_CELLS` (a hard split); a screen-mode change
+flushes an in-flight fragment.
+
+The design choice that made it correct, and the wrong turn it avoided: hold RAW
+`vt::Cell`s in the pending carry, NOT interned `TCell`s. An interned cell's style
+is an index into whatever block was open when it was interned -- so a zone/obj
+frame arriving as a Control record, or a frozen open block, mid-soft-wrapped-line
+would leave the held indices stale against the block the line finalizes into. An
+inline `ls` path object IS exactly this case (the obj open/close ride Beacon
+frames interleaved with the ScrollOff rows), so it is not a corner case -- it is
+the common one. Raw cells intern at finalize into the then-open block, and the
+existing straddle handling (`local_obj` copies an obj across) already covers it.
+Host tests: the join, the cross-call pending carry (the last row of a batch may
+soft-wrap, its continuation still on the live grid), the mode flush, the
+endless-wrap hard split; kaua-term the flag both directions + the wire round-trip.
+Fixes s5 on the SCROLLBACK; PL-4 brings the same rejoin to the LIVE view.
+
+**PL-4 landed: the proportional-live LIVE view (the operator's main pain).** The
+normal-screen tile tail was the last mono surface -- fresh output rendered as a
+fixed cell grid under the proportional scrollback, so one document disagreed with
+itself on metric and affordance (s1/s6). PL-4 retires it. PL-4a (`6270b132`)
+carries the live grid's per-row soft-wrap state to halcyond on the CellDiff (a
+full-grid `wrapped` snapshot, like the cursor -- a wrap flag only changes with a
+same-row cell write). PL-4b-i (`f51c9b5f`) adds `Transcript::live_block`: it joins
+the live grid's soft-wrapped rows into logical lines (the PL-3 scrollback rejoin,
+now for the live grid), interns read-only into a transient block, and returns
+per-row provenance `(logical line, start col)`. PL-4b-ii-a (`4b740230`) is the
+visible swap: `tile.rs::render`'s normal path lays the live tail through
+`live_block -> layout_block -> render_block` (not `paint_grid`), with a char-index
+caret (the one cursor source, subsuming s2), proportional selection banding + obj
+underline via the provenance, and trailing-blank trim (`content_rows`) so the
+bottom-anchored prompt does not float. Alt screen stays the raw mono grid.
+
+PL-4b-ii-b (`5a1ce719`) closes the run-menu geometry: `render` caches the laid
+live tail (block + provenance + screen-y) so a menu-summon inverts through the
+SAME geometry the frame painted -- `grid_hit` maps a pointer to (grid row, run
+key) via the laid line -> `col_at_x` -> the provenance inverse, and
+`grid_run_rect` returns the run's real proportional x-extent. The wrong turn, and
+what caught it: the first cut fixed only the MOUSE path (`click()`), and its host
+tests + ls-gfx-session both passed. Enumerating EVERY GRID_KEY geometry site --
+not just the one in the file I was editing -- found the KEYBOARD `act()` path
+computing the same run rect with mono `c0*cw` / `row*ch`. ls-gfx-session passed
+because its keyboard-menu leg asserts the resolved REF, never the anchor, so a
+menu popping at the wrong x on the proportional tail was invisible to it (the
+`audit_v8` M-PIN: the fix on site N stops you asking about site N+1 -- follow the
+call, not the file). Fixed `act()` to take `grid_run_rect` too, folded into the
+same commit. main.rs's console `run at` is the Transcript `run_rect` path (already
+proportional, no grid tail), correctly untouched.
+
+E2E (both HVF, coherent bakes): ls-gfx-session PASS [28s] -- the session path, the
+live-grid keyboard menu now anchored proportionally (ref still correct);
+ls-halcyon PASS [115s] on the `THYLACINE_HALCYON=1` lever -- the console path (no
+grid tail), its real body (rich tables + 11 menu/click witnesses, 0 skip markers)
+as the coherent-build regression check. `docs/reference` is vault-owned
+(`sub-halcyond`) -- rung to the vault peer, not written here.
+
+**PL-1b landed: the `pre` code-fence render (`0274c406`).** PL-1a added the
+beacon `pre` vocabulary but halcyond no-op'd the frames; this renders them. A
+`pre` is the preformatted mono island -- verbatim (no re-wrap, no
+space-collapse), set apart by its own ground + a leading gutter rule (the
+Markdown-code-fence treatment scripture calls for). The mechanism dissolved the
+"16-byte SpanSlot has no room for a `pre` bit" worry that had it marked "needs
+fresh design": a `pre` is BLOCK-level (block chrome cannot ride a per-cell
+span), so it rides a new `Item::Pre(Vec<Line>)`, and the feed reuses the SAME
+line discipline (put_char / newline / flush_line -- tabs, spacing, `\r`
+verbatim) by REDIRECTING the flushed lines into a pre accumulator between
+open/close. lay_span gained a `pre` flag that forces mono over a run's
+annotation (an obj in a pre would else lay proportional and break the
+alignment) and disables word-wrap; the Item::Pre arm adds the ground + gutter
+RectSpecs behind the text.
+
+The self-audit catch: the pre is UNCHARGED to the block budget until close, so
+the line cap alone left an unclosed pre able to hold
+`MAX_LINES_PER_BLOCK * MAX_LINE_CELLS` cells ~= 327 MiB. Added a MAX_PRE_BYTES
+(16 MiB) byte budget mirroring TableCap.bytes -- and the byte-flood test that
+proves it also surfaced that a big pre charges enough at close to FREEZE its
+block (the Item::Pre lands in a frozen block, which the test now looks for).
+Host: 125 pass (+6, incl. the two DoS bounds + the containment guard). No E2E
+here -- a `pre` needs a producer (PL-5's `la`), so PL-1b lands host-tested and
+the E2E rides PL-5.
+
+**What is open (the arc continues).** PL-1b + PL-4 landed this run (above).
+PL-5 (`la` fences its box output in `pre`). The batched
+graphical E2E (PL-2 + PL-3a + PL-3b/c) ran GREEN before the push: ls-gfx-session
+PASS [28s] -- the session path, where `push_scrolled_rows` actually lives -- and
+ls-halcyon PASS [117s] on a `THYLACINE_HALCYON=1` bake (the console/Genera path;
+it does NOT exercise the rejoin, so ls-gfx-session is the witness that matters for
+PL-3b/c). Full plan + the screenshot findings:
+`memory/project_halcyon_stabilization.md`.
+
+## Run 33 (vault absorption cont., 2026-09-06, Opus 4.8, effort max): the shell (parser + eval), the coreutils-filters recount, and the Image-cache half of DISTRO D-3
+
+**Where it sits.** The continuation of Run 32 across a self-compaction (Run 32
+ended at the 600k line, tip `aeddb75b`). Same track (`../thylacine-vault`,
+`vault/bootstrap` == origin/main), same greenlight ("keep going through the
+knowledge backlog"). Four dossiers de-staled, all lint-green, both mirrors, final
+tip `672f5179`. Backlog 33 -> 31 measured (`quaestor stale`), 35 at Run 32's
+start of this segment.
+
+**What landed, in order.**
+- **coreutils-filters** (`d2891261`). Three self-contained landings the
+  merge-date trap hid (`git-log-since` finds nothing; the topological
+  `<dossier>..HEAD` carries all three). The load-bearing correction was a
+  *recount driven by a sibling*: H-1c-2 (`8922ccd7`) built `ps`, a sixteenth
+  colour-linking presenter, so this dossier's own partition figures were stale
+  by one -- MEASURED 52 bins = 36 filters + 16 colour-linking, so "fifty-one"
+  -> fifty-two and "fifteen of the others" -> sixteen, the partition-exact
+  claim preserved (36+16=52). Plus the `which` drift (#159) narrowed to exactly
+  the `/` entry (shell `resolve_command` is now six dirs, login seeds five,
+  dropping only the namespace root), `realpath`'s `normalize` extracted to a
+  shared `coreutils::path`, and `mkdir -p`'s race-tolerant re-check.
+- **kernel-image** (`5f58e86e`). The Image-cache half of DISTRO D-3, the arc
+  Run 32 folded into vma/elf/fault -- so this closes that story on the vault
+  side. Two shifts: the clientele generalised exec-only -> exec + phenotype
+  file-backed mmap (`image_lookup_or_create` now called from `syscall.c:6139`/
+  `:6350` beside `exec.c:939`), and the #194 `file_limit` stamp (the fault arm
+  refuses a page past `round_up(file_limit)` with SIGBUS, closing the lying-ELF
+  uncharged demand-zero mint). Care taken NOT to mis-file `file_limit` as an
+  `image_entry` key field -- it is a `struct Burrow` field, so the seven-field
+  key and Data structures stayed untouched.
+- **utopia-parser** (`53f6a876`). Purely-main, settled: the `&&`/`||` AND-OR
+  list grammar (new `StatementKind::AndOr`; `parse_pipeline_statement`'s
+  connector loop is iterative, so the three recursion bounds are untouched) and
+  `=` as a literal command argument (`UnexpectedEqualInCommand` retired as a
+  raise, now vestigial). MEASURED: parser `#[test]` 188 -> 189 (`fd4c59ae`
+  removed one, added two), and the Caveats' cross-crate stranded figure
+  re-measured 385 -> 394 (the libutopia total) / 389 -> 398.
+- **utopia-eval** (`8b78b921`, merge `672f5179`). The eval companion, and the
+  one judgment call of the run.
+- **kernel-hwcap** (`b5240804`) and **kernel-mmu** (`1a895862`, merge
+  `60eb3155`). The two remaining halves of Warp-6 V-2's host-visible BAR path,
+  which completes that arc across the vault: the burrow/fault side went in last
+  run (`sub-kernel-fault`), the KObj_PCI map authority + the DMA-only
+  owner-death quiesce here (`hwcap`), and the PTE encoder's MAIR-index widening
+  here (`mmu`). Both `audit: hard`; the mmu fold is W^X-critical (I-12) -- the
+  executable-page guard widened from *reject execute-on-device* to *confine
+  execute to cacheable Normal-WB RAM*, which also rejects the new
+  write-combining index, so the encoder now forbids an executable page on any
+  non-cacheable attribute.
+- **substrate-builders** (`c694c315`), **net-clients** (`a596d2d0`), and
+  **kernel-devdev** (`0c859961`) -- the small/clean tail. The builders one is
+  pure tooling (both clade drivers must now sync `build-config.sh` + `configs/`,
+  a dependency `build.sh` silently acquired at the configurator arc). net-clients
+  is one file (httpd's access log flipped to `--color=auto` over the real
+  `SYS_FD_DEVCLASS` TTY check). devdev is the audit-bearing one: the /dev
+  front-door gained `devdev_fd_devclass` (only `/dev/cons` reports class `'c'`,
+  so a walked console fd is a terminal to `is-a-terminal`) and `spoor_is_console`
+  -- a security-relevant identity check that keys on the unforgeable kernel `Dev`
+  pointer rather than a qid bit, because a dev9p server supplies its own qid path
+  and tapestryd's pane flag collides with the console bit, so a bit-only test
+  would accept a forged pane fd. Its header sibling **kernel-dev** (`d102f449`)
+  followed for completeness: `dev.h` now externs `devcons` and declares those
+  two helpers, tied in the vtable/bestiary dossier to the same rule -- a Dev's
+  identity is its `dc` and its pointer, never a bit a 9P server can set.
+
+**The judgment worth recording: a dossier straddling two tracks.**
+utopia-eval's post-2026-08-16 churn was *mixed* -- main's shell arc (`eval_and_or`
+short-circuit, the six-entry `$path`, `cd --`) AND aux's notes/job-control arc
+(#237 pipe-default mask, `mask tty:*`, the item-10 pts poll bridge). A partial
+fold that bumped `updated:` would falsely mark the aux half current, so the
+choice was fold-all or skip. Folding won, on two grounds checked before
+committing: the aux changes are *settled* (landed 2026-08-17..19; aux is on
+Nocturne now), and the eval dossier already *scaffolds* the notes/mask/^C
+machinery (it names `wait_pids_interruptible`, the note-handler registry, the
+held-note queue, `note_mask`), so the aux changes land as UPDATES to existing
+prose rather than fresh documentation of a peer's mechanism. That is the rule
+this run adds: fold a peer's LANDED code when the dossier already owns the file
+and the code is settled; the append-only discipline is about the record plane
+(never edit a peer's chg), not about who may describe landed state.
+
+**The wrong turns that were caught.** Two candidates were triaged and rejected
+before any edit: `kernel-loom` (its `loom_poll` addition is main's *actively-
+iterating* KT-1.5 surface with a just-opened seam `seam-loom-sqpoll-p3s`, so
+documenting it now risks re-staling) and `kernel-devctl` (its only post-dossier
+change was an F4 comment reword -- no mechanism change, so no substantive de-stale
+was owed; forcing one would have been a hollow `updated:` bump). The general
+tell: churn is not change, and a bumped date must be backed by a real mechanism
+delta.
+
+**The peer-contention event.** During utopia-eval a peer advanced main to
+`a95d437c` (a docs-only commit, docs/BEACON + docs/HALCYON). Caught by the
+pre-commit ls-remote guard, which refused the blind push. The work was still
+staged-not-committed, so the recovery was clean: verify `a95d437c` descends from
+my base and touches disjoint files, commit my work on the base, `git merge`
+(ort, no conflict), full-lint the merged tree, re-verify the mirrors had not
+moved again, push `672f5179`. No rebase, no force, no lost work -- the discipline
+behaving exactly as designed. It happened twice over the run (the docs commit
+during utopia-eval, then `de753061`'s beacon `pre` op during mmu), each handled
+identically; the ls-remote-before-every-push guard is what turns a
+concurrent-writer hazard into routine bookkeeping.
+
+**A cross-track fix, not a de-stale.** Mid-run, main flagged (yip 0057) a
+quaestor papercut in the vault's own tooling: `renderSpecCoverage` scanned the
+`specs/` directory rather than git, so a gitignored `*_TTrace_*.tla` TLC
+counterexample dump counted as a module, flipped the spec-coverage view stale,
+and blocked *every* commit on *every* track until the junk was hand-removed --
+main had hit 77 of them at once. It is squarely the vault track's domain, so it
+was fixed rather than deferred (`bb14a0dc`): the scan now excludes `_TTrace_`,
+mirroring `.gitignore` and the `grep -v TTrace` inventory rule, with a
+discriminating regression (`render_test.go`) verified to FAIL on the pre-fix
+scan (both a real module and the dump listed) and PASS on the fix. The
+stewardship point: a bug a peer reports, in tooling that gates all three tracks,
+is not "main's problem to route around" -- it is the track that owns the tool's
+to close.
+
+**Where it stands.** Eleven dossiers current, one tooling bug closed, backlog
+35 -> 25, tip `9c8cb040`, both mirrors converged throughout (fast-forwarded past
+several concurrent peer halcyond commits). The last two were `kernel-dev` (the
+dev.h header sibling of devdev) and `kernel-devproc` (whose atomic-`CDEBUGOWNER`
+fold reinforces the debug-fs no-dangle argument -- a change I had first mis-filed
+as merge-noise and the Stop hook correctly pushed me to re-triage). With those,
+the clean/thin pool is fully spent: the only substantive work left is the two big
+dossiers (`coreutils-presenters`, 15 files plus a new `ps`; `libthyla-rs`, 12),
+which want a fresh context rather than a deep one, per the arc's own "BIG: own
+focused session, do NOT start deep in context". The run self-compacted here at
+the 600k line to hand those to a fresh context.
+
+---
+
+## Run 32 (vault absorption, 2026-09-05, Opus 4.8, effort max): eight kernel dossiers (four entry/namespace + the whole proc.c cluster) + the H-arc folds
+
+**Where it sits.** A vault-track run (`../thylacine-vault`, `vault/bootstrap` ==
+origin/main), not main's. The operator ratified keeping aux's R6 tooling fix and
+greenlit "keep going through the knowledge backlog." This run de-staled the four
+kernel-entry/namespace dossiers whose code had drifted furthest, then the whole
+proc.c execution cluster (proc, caps, death, jobctl), and cleared the H-4c/H-4d-1
+fold backlog. Ten increments, all lint-green, both mirrors, final tip
+`b335e0e4`. It runs AFTER Run 31 because it consumes Run 31's output (it folds
+H-4c/H-4d-1).
+
+**The method, because it repeated four times.** Each dossier is `audit: hard`,
+so every count was RE-DERIVED by measurement against the code, never incremented
+from the dossier's own prior figure. `syscall-abi` (`13e2c89a`): 103->107 live
+syscalls, span 106->109, holes 4->3 (SYS_FD_DEVCLASS filled 80), C mirror 75->77,
+Rust 95->100 -- the Rust count intersected against the kernel enum because its
+naive `T_SYS_` prefix returns 102 and two of those are bounds constants, the trap
+the dossier already flagged. `syscall-dispatch` (`04d2cd63`): 11138->14731 lines,
+103->107 arms, 49->50 handler/inner splits, 69->88 validator sites; the one
+structural add was execve's Design-D phenotype re-decision. `stalk` (`c3989a56`):
+three whole features the dossier predated -- union resolution (the atomic member
+snapshot + cross-the-exact-source, UM-8 F4), symlink expansion (an absolute
+target re-anchors at the caller's OWN Territory root; a `..`-bearing target MUST
+restart, not splice, because a `..` pop needs a 1:1 trail), and the phenotype
+accumulator seeded at the `restart:` label. `vivarium` (`490620b0`, biggest at
+2671 churn): the principles were current and left intact; the enumerations were
+stale (T1 6->11, reject ~50->73) and two of its own caveats had gone doubly stale
+(VIV_NATIVE_CEILING 105->109).
+
+**The wrong turn worth recording.** The `syscall-abi` mirror-agreement check --
+does every name in both a library and the kernel agree on its number? -- first
+returned "0 agreeing, 0 disagreeing" for BOTH mirrors, which is impossible (the C
+mirror obviously overlaps). The cause was BSD `sed`: it does not understand `\s`,
+so the `s/^\s*.../` transforms normalizing the name->number pairs were silent
+no-ops, and `join` compared untransformed lines that never matched. Re-run with
+`[[:space:]]`, the intersections were clean (77 C names, 100 Rust names, zero
+disagreements). A control returning zero for the impossible case is the tell; the
+macOS-BSD trap is the cause.
+
+**A convention learned, not assumed.** Provenance backlinks are NOT materialized
+into dossier files -- `quaestor backlinks <id>` computes them on demand, and the
+"(generated ...)" block in stalk/vivarium stays an empty placeholder; syscall-abi
+and syscall-dispatch instead carry hand-written Provenance lines. So the two
+families take opposite handling: append to the hand-written line, leave the
+generated block alone. Verified against the territory dossier (whose chg landed
+last session and whose generated block is likewise empty).
+
+**The H-arc folds.** main lands its H-4 chunks with `no-dossier-change` naming
+the exact delta and deferring the vault-owned prose to this track (the KT-1
+inheritance pattern). Two were owed: H-4c (`447cbea9`, beacon's `ObjType::Layout`
++ three `verbs.default` rules) and H-4d-1 (`1db2e9b9`, sub-tapestryd's
+`creator_conn` reservation that answers E_AGAIN -- not E_PERM -- to a
+same-principal sibling conn while the creator lives, closing the
+restore-tool-vs-session-compositor claim race; and sub-libthyla-rs's `println`
+one-write form, which matters because the console writer role is claimed per
+write). Each folded as a vault fold-chg citing main's record, verified against the
+landed code -- not a re-derivation. One fumble, caught by lint: `depth: standard`
+on the first fold-chg; the field takes only `rich`|`skeletal`.
+
+**The run continued through two more of the proc.c cluster.** `sub-kernel-proc`
+(`63f91796`) closed the cross-refs the dispatch and vivarium de-stales opened:
+`rfork_forked_with_caps` (the Linux clone, `caps_mask = CAP_ALL`), the PHENO_LINUX
+note-mask inheritance (#127), and Design D's phenotype commit in
+`proc_exec_replace` (the ONE RELEASE store, in the infallible region -- the
+exec-replace section had the three resets but not this commit). `sub-kernel-caps`
+(`c2991edb`) was the cluster's capability sibling and its FIRST *earned* update:
+its own Provenance recorded two intervals where staleness was borrowed from
+co-tenant proc.c churn, and `830817c4` was the first caps-relevant one -- the
+fork-inherits-caps variant plus the resolved comment drift (caps.h's
+`CAP_ALL`/`CAP_ELEVATION_ONLY` comments, once four-and-omitting-DEBUG, now
+enumerate all six).
+
+**The cluster closed -- and the last sibling was more than borrowed.**
+`sub-kernel-death` landed earned (`669aad97`): #91's exit byte (`f557beb2`) means
+`t_exits(N)` and a phenotype `exit_group(N)` now reach the parent's wait as the
+real byte, not the old 0/1 collapse -- recorded as a Data-structures split
+(`group_exit_msg` = die flag + msg; `exit_status` = the numeric byte) and a
+ZOMBIE-chokepoint paragraph. `sub-kernel-jobctl` (`e0ae7d07`, fixup `b335e0e4`)
+was the interesting one. The note's guess -- "likely borrowed" -- was RIGHT about
+the churn: the word-bounded token diff (the discipline the substring scan's noisy
+`sid`/`session`/`pgrp` hits demanded, and the reason I did not bump `updated:` on
+the guess) confirmed all six owned entry points unchanged since 2026-08-14, and
+the one adjacent post-08-16 change (`proc_mark_self_managing_notes`'s Design-D
+exec-clear) is the mark's *lifecycle* -- proc/exec's, not the read polarity jobctl
+describes. But the same careful pass surfaced what a substring scan never would: a
+coverage gap that PREDATED the dossier. The `#15`/`#240` self-stop --
+`proc_job_stop_self` (a THIRD stop source, called from notes.c on `NDFLT` and
+`tty:susp` delivery) plus `susp_stop_armed` (a fourth job-control field) -- landed
+2026-08-13/14, days before the dossier's first write, and was never captured: the
+Contract had six entry points where there were seven, Data-structures said "three
+fields" for four, and the dossier's *own* third-stop-source caveat anticipated it
+abstractly while the source already existed. Added it, closing the caveat. A
+borrowed re-verify that became a real de-stale -- the lesson being that the
+word-bounded diff earns its cost not by confirming the guess but by what it finds
+beside it.
+
+Also surfaced, not fixed (yip call 0056 to aux): proc.h's "struct Proc stays 352"
+comment is stale -- the live `_Static_assert(sizeof(struct Proc) == 392)` is
+correct, VIVARIUM's phenotype fields grew it after that comment was written.
+Cosmetic (the assert is sound); a vivarium-arc code fix, not a vault edit.
+
+**Then the H-4d-2 family fold cleared the whole H-arc fold backlog.** The peer's
+merge (`f626fe04` -> `7ab2257d`) brought three chgs -- h4d2-tile-menu,
+h4d2a-rich-tiles, h4d3-welcome -- each with `no-dossier-change` and "the vault peer
+folds these." One combined fold-chg (`83ce0206` / `ab7d80b1`) across eight dossiers,
+the rich session tile in three layers: the beacon-tier plumbing (a pts slave is a
+terminal too -- `DC_PTS`, `stdout_is_terminal` = `'c'||'t'`, `env_beacon_tier`), the
+span-serial Beacon threading (a tile renders obj/em/hdr over a cell grid with no
+second parser -- lib-vt's `span_serial` -> halcyond's 8192-ring `SpanMap`, R5), and
+the tile Normal mode / menu / selection. Every named symbol verified in the landed
+code first. The fold also caught a drift my *own* pre-merge de-stale had left:
+syscall.c is 14749, not the 14731 the census recorded, because h4d2a's
+`spoor_devclass` classifier extraction landed via the merge AFTER I measured --
+corrected, with a note that it is a classifier, not a new handler/inner split
+(the 50/45 metric holds). The welcome (h4d3) is "none in code" for sub-halcyond
+(compositor-hosted), correctly no edit.
+
+**Then stratum-boot, the biggest single drift (joey.c, ~5659 lines) -- and it was
+borrowed.** The dossier scopes itself to the bringup sequence (spawn stratumd ->
+readiness -> attach -> pivot -> re-graft), and its own caveat already discloses it
+owns only that few-hundred lines of an 11578-line file, leaving init's other
+eight-ninths -- the getty loop, the gates, the smoke suite -- undescribed (task
+#177). The evidence held: the bringup's core tokens ("bound and ready",
+ATTACH_9P_SRV, PIVOT_ROOT, --fs-workers, the stratumd spawn args) have zero diff
+hits since 2026-09-02, and the pivot line last moved 2026-05-26. The whole
++1807-line growth landed in the disclaimed region (the KT-1.5d-1a login-spawned
+session bootstrap, a kaua-term boot-prove, the /viv/bin graft gates), so the
+currency action was measurement -- the caveat's count refreshed 9771/~50 ->
+11578/53, the #177 gap noted wider -- not new bringup prose. A dossier's
+self-disclosed scope is what turned a 5659-line churn into a five-minute re-verify.
+
+**And cons closed the loop the beacon fold opened.** `sub-kernel-cons` (~819 lines
+of churn, audit:hard) split by date the same way stratum-boot did: the extinction
+ring-lock tearing (455c651d / 7dd5be19) was the update's 2026-08-18 base, already
+covered -- borrowed. Three consctl surfaces landed after and were absent, and the
+first is the mirror image of this run's h4d2 fold: the `beacon <tier>` verb is the
+CONSOLE side of the render-tier chain whose CONSUMER side (DC_PTS, stdout_is_terminal,
+env_beacon_tier) I folded hours earlier -- a renderer advertises its tier here, ut
+reads it off `/dev/beacon` there. Plus the `serialsilent <0|1>` verb (a graphical
+renderer routes EL0 output off a superseded serial line; the write succeeds, only the
+bytes drop; SAK restores it) and `cons_termios_get` (the C2-k1b termios projection for
+the VIVARIUM ioctl). Folding both ends of one mechanism in one run is the vault working
+as intended: the chain is legible only when both halves are current.
+
+**And notes -- checked with the RIGHT vocabulary, which halved it.** `sub-kernel-notes`
+(~969 lines, audit:hard, aux's area but stable since 2026-09-02) first looked like a
+4-plus-mechanism de-stale, until the coverage grep was re-run with the dossier's own
+words: it says `*_INTR` and "interrupted", never "interruptible", so the first pass
+under-counted -- the "sweep every vocabulary" lesson biting on my own probe. Two
+mechanisms were already covered and borrowed (SIG_IGN-at-generation, pipe-as-a-
+TERMINATE-note); three were genuinely absent and got folded, all I-9 signal-delivery
+concurrency reasoned against no-lost-wakeup: the caught-note interruptible wait (item
+11 -- a per-Proc caught-note mask + the lock-free deliverability predicate + the N-3
+guard that closes the arm-2 livelock), the siglongjmp `in_handler` clear (bug-2, a
+stack-geometry detector exact for a single-stack guest, plus its cross-stack F1), and
+the phenotype handler-time mask.
+
+**And pipe -- the concurrency model had moved out from under it.** `sub-kernel-pipe`
+(~262 lines, audit:hard) had gone stale in a way a line-count never shows: the
+single->multi-waiter lift (dd9f9508) retired both single-waiter Rendezes for one
+`poll_waiter_list`, and the dossier's entire "single-waiter per direction, a second
+sleeper extincts" framing -- Data structures, Concurrency, Invariants, Seams -- was
+describing a shape that no longer existed. The lift is the memory's flagged lesson
+made concrete: a "fine in-kernel" Rendez is an unprivileged EL0 crash the day the
+object becomes EL0-shared, and the dossier's OWN Seams had asserted "multi-waiter
+direction queues never needed -- poll covers it," wrong twice (it was needed AND is
+now built). Also folded CNONBLOCK/EAGAIN (34ff46df) and the item-11->11c seam (a pipe
+read is deliberately NOT caught-note-interruptible yet -- only death interrupts,
+because a native reader is not EINTR-aware). Dropped `lock-rendez` from the frontmatter.
+
+**burrow was a same-day-tie flag, and a mirror-split interrupted the push.**
+`sub-kernel-burrow` looked stale (~334 lines, "changed 2026-09-05") but ground-truth
+diffing showed the only post-update change was `3de39ad0` (V-3b-1c-2b round-3, 37 min
+after the last real commit) -- a COMMENT-only refinement of `burrow_total_refs`'s
+rationale from "IRQ-preemptible" to the true "SMP cross-CPU", which the dossier's prose
+already carried. Borrowed. But its push raced a peer: I had pushed to github while main
+pushed its H-arc audit round-1 close to codeberg, and the two mirrors SPLIT (github had
+my burrow, codeberg had the peer's H-arc, both diverged from the same base). Main merged
+them (`454ecde9`) before I could -- but its merge left `view-spec-coverage.md` with 78
+duplicated lines from the textual combine. The recovery: verify my burrow work was fully
+in the converged tip (it was, `commits: ["d3c4312f"]`), reset onto it, re-render the view
+to collapse the duplication, push the fix. Both mirrors reconverged at `838cb360`. The
+lesson is the standing one -- resolve a split by MERGE never force, and re-RENDER any
+generated view a merge touched rather than trusting the textual combine.
+
+Thirteen kernel dossiers de-staled this run (syscall-abi, syscall-dispatch, stalk,
+vivarium, proc, caps, death, jobctl, stratum-boot, cons, notes, pipe, burrow), the H-arc
+fold backlog cleared ENTIRELY, and this entry. Backlog: 42 after burrow, then 47 once the
+peer's H-arc round-1 merge landed (its code touched ~5 more dossiers -- a fresh
+churn-ordered pass is owed). Open next: the post-merge stale top (ptyfs, viv,
+substrate-gates, kernel-vma, ...) and a NEW `sub-sdl-port` (aux's N-2a-2 SDL).
+
+That fresh pass found the peer's H-arc round-1 close carried its OWN
+`no-dossier-change` -- an owed 5-dossier fold, several amending the h4d2 folds from
+earlier the same run. I took the UI + beacon-relay half (`29b3267c`): sub-halcyond
+(the SpanMap is LAZY, 128 KiB outside the scrollback budget -- my h4d2 prose had a flat
+ring; AltScreen leaves Normal), sub-kaua-term (scroll_cap sizes by the in-memory Cell),
+sub-ptyhold + sub-mechanism-drivers (the shared `declare_beacon`/`relayed_tier`, ptyhost
+declaring before its mint). The **tapestryd half -- six A-F GPU/compositor findings --** was deferred at the
+600k self-compact line, then folded on the far side (`eb480b58` + fixup
+`a04b52e5`, [[chg-2026-09-06-harc-r1-fold-tapestryd]]): a new "The H-arc audit
+close, round 1" sub-section in sub-tapestryd carrying the round header + all six
+findings, plus three in-place amendments where a finding refined described
+mechanism -- the generation fence (A-F2's `ack_deferred` re-offer), the creator
+reservation (A-F3's `creator_peer` process-keying), and the menu (A-F5's
+`session_declared && conn_hosts` seat). Each verified in
+`usr/tapestryd/src/{server,pane}.rs` before a word was written (server.rs:16793
+the composed-arm stale-slot expansion, 2611 `release_displaced_gen`, 5380
+`floor_bars_around`, pane.rs:579 `host_for`, 16164 the menu gate). The two P1s
+(A-F1 the composed-arm stale blit, A-F2 the drain-refused resize-ack) landed with
+the four P3s; stale backlog 43 -> 42. The H-arc round-1 fold is now complete
+across both halves (UI `29b3267c` + tapestryd `eb480b58`). OWED at the peer (the
+implementation side): the GPU-path witness for A-F1 on the GL host + aux's real
+DOSBox-X re-run.
+
+**Then two churn-tail de-stales, each ground-truthed past the merge-date trap.**
+The stale tool dates churn by the MERGE that brought a commit into the vault
+lineage, not the commit itself, so "changed 2026-09-05" on both of these was
+misleading -- but unlike stratum-boot/burrow earlier this run, both turned out
+GENUINELY stale once diffed from the dossier's own last commit.
+`sub-substrate-gates` (`407a5a95`, backlog 42 -> 41): eight numbered tool commits
+(#88..#234, commit-dated 2026-07-30..08-13) had reached the vault only at the
+merge, so `git log --since` found nothing while `6a275990..HEAD` carried all
+eight (+333 lines). Five real gaps: #222 EXTERNAL-KILL grew a SECOND arm and the
+dossier's single-arm soundness argument was superseded by it (the harness SIGKILL
+prints nothing, which is exactly why arm 1 is blind to a real external SIGKILL --
+so arm 2 reads the shell's job notification gated on `qemu_alive_at_teardown=0`);
+#234/#143 the classifier is now a pure sourceable function driven over fixtures
+with its verdict-string map cross-checked (`test-smp-classify.sh` was UNOWNED,
+added to `code:`); #223 archive-not-delete; #200 the per-boot wall clock; #228-232
+the lean-shape gate. `sub-kernel-vma` (`a14f7f81`, backlog 41 -> 40): the DISTRO
+D-3 file-backed-mmap arc (+278 lines) the anon/COW-only dossier never mentioned --
+`vma_replace_range_in` (the MAP_FIXED split/replace, hole-free by reusing the old
+VMA as the survivor, offset preserved exactly so the #190 post-sleep geometry
+check holds), `vma_free_deferred` (a 9P FILE Burrow's `spoor_clunk` sleeps, so its
+free moves past `as->lock` -- the F5 fourth site, `out_free` mandatory per F7),
+and `vma_next_overlap_in` (#199). Both were load-bearing surfaces (substrate-gates
+evidences I-9/I-21; vma is I-12/I-7/I-32/I-44 audit:hard), described at effort max.
+
+**The kernel-vma de-stale opened a DISTRO-D-3 trio that the churn list surfaced in
+order.** D-3 (file-backed mmap) touched three kernel files, and their dossiers had
+all gone stale together at the 2026-09-05 merge: vma (done), then `sub-kernel-elf`
+(`0ffd8eca`, 40 -> 39) and `sub-kernel-fault` (`6df359aa`, 39 -> 38). elf was the
+sharpest of the three -- its whole "static ET_EXEC only, dynamic refused
+permanently" thesis was INVERTED by D-2 (ET_DYN/PIE placement at a 512 MiB bias,
+one bias site, PT_DYNAMIC narrowed to ET_EXEC) and D-4 (`elf_read_interp`, the
+rewrite-to-ldso route: PT_INTERP is still rejected AT elf_load, but the vivarium
+exec chokepoint reads it and runs the interpreter). Its code count also measured
+24, not the prose's "twenty-two" -- which had undercounted by one even at its own
+commit. fault added a SEVENTH backing arm (HOSTMEM, the Warp-6 V-2 BAR fault, the
+`device_memory` bool widened to a MAIR index) -- the arm count drifting a THIRD
+time, the exact miscount the dossier itself warns about -- plus the #190
+verify-and-bail (D-3 retired the R-5 F2 "one fixed VMA at offset 0" premise, and
+F2's *prescribed* recompute remedy was wrong: file_offset is pre-sleep-derived too,
+so a recompute files stale bytes under a fresh slot) and the #194 past-EOF SIGBUS
+(refused before allocation, so a demand-zero cannot mint memory the I-32 axis never
+sees). Three audit:hard kernel surfaces, the D-3 story now coherent across
+vma/elf/fault on the vault side (exec is a separate dossier, checked next).
+`sub-kernel-exec` turned out already current (updated 2026-09-05, covers D-4 +
+Design-D; no code change since), so the D-3 story was complete across all four
+surfaces.
+
+**Two boot-chain / gate-infra de-stales closed the run.** `sub-warden`
+(`204363fa`, 38 -> 37): #230 -- the warden was probe-gated as a bind-loop proof,
+but netd made it the network + compositor bring-up and nothing revisited the gate,
+so the lean production image had no drivers; the fix runs it unconditionally and
+SPLITS its bind database into production `BUILTIN_MANIFESTS` vs opt-in
+`FIXTURE_MANIFESTS` (`--with-fixtures`), a safety boundary because `menagerie-probe`
+binds a real QEMU-virt node. `sub-substrate-interactive` (`0faac928`, 37 -> 36):
+the `fail-probe` (a scenario's own account of the guest at failure, the
+burned-retry decider), the #230 second-QMP-monitor per-slot isolation (the console
+gate's `qmp-gate.sock` raced at JOBS=3 -- the sibling of substrate-gates' #230),
+and the #224 refinement of the in-tree refusal. That paired the two substrate gate
+dossiers (gates + interactive) current together.
+
+**Run 32 total: 8 chunks, backlog 43 -> 35, tip `3c684c60`, both mirrors
+converged throughout** (one mirror-split resolved mid-run). The 8th, after the
+600k checkpoint line fired, was `sub-libdriver-grant` (`d8281e1f`): the H-4b-1
+`caps = [...]` fork-grantable-capability vocabulary (the `Cap` enum, named-not-
+numbered because the crate is pure, fail-closed parse), the libdriver side of the
+csprng chain warden documents. Every de-stale ground-truthed past the merge-date
+trap by diffing `<dossier-commit>..HEAD` rather than trusting the stale tool's
+merge-date reading. The remaining top churn is either aux-union-arc heavy (spoor +
+the namespace/9P layer) or big multi-file (libthyla-rs 12 files, coreutils 15) --
+both better suited to a fresh focused run. Self-compacted at the 600k line here.
+
 ## Run 31 (2026-09-05, Fable 5.1, effort max): the fullscreen-zoom bug -- the latch that keyed on the proxy
 
 **Where it sits.** Run 30 closed and landed the KT-1 audit arc (`6e6503ad`). This run picked up the operator's Cmd+F report that aux reproduced and handed over (yip 0048, `memory/bug_zoom_fullscreen_surface_not_scaled.md`): zooming DOSBox-X showed its 640x417 frame native at the display's top-left on black. Compositor geometry, so main's.
@@ -2126,9 +4110,342 @@ build+test green. Role split: aux -> viv on aux-3, main -> KT-1.
 
 **Landed** at `f25781ad` (rebased onto the vault peer's dossier landing `5a34fd60`; the pre-rebase hash `ea270d39` appears in the first fixup's subject only), both mirrors.
 
+### H-4c in the same run: the gesture is the menu, the startup script is rio's `-i`
+
+The design memory listed H-4c as "the gesture (a halcyond verb `Restore layout X` that types the tool command) + named-layout management + halcyon.rc". Reading the as-built collapsed the first item to nothing new: the transcript already has ONE rules engine (`beacon::verbs`, `<type> <label> <template>`), the menu already types a chosen template with `{}` as the resolved ref, and halcyond handles obj types by string. So the gesture is `halcyon layout list` presenting each name as `obj type=layout` and three rules in `/lib/beacon/verbs` -- a value of an existing key, a scripture amendment of one table row (BEACON.md 12.2 carries the version note). The one design call was the startup script's RUNNER: ut has no profile mechanism (no `$home/lib/profile`), and since KT-1 the per-user compositor is spawned by login AS the user, so it is the user's rio -- and rio runs its init script itself (`rio -i initcmd`). The compositor runs `$home/lib/halcyon.rc` once after its first present, else the device `default` layout (the H-4d welcome's slot), else nothing; an empty rc opts out. HALCYON.md's older line "halcyon.rc remains a script writing /dev/tapestry files" was corrected: the shared mount's peer is the mounter (H-4b's finding), so the script drives the compositor through the session tool.
+
+**A race found by writing the gate, owed at H-4d.** The rc leg saves a two-tile layout and restores it at re-login: the tool splits empty leaves (owner = the user) and the compositor's `reconcile` fills every empty leaf it owns with a tile -- correct for empty tags, but a layout with TAGGED leaves would have the tool and the compositor racing for the same leaves with same-principal claims (last mint wins). Named in HALCYON.md 13.7 and the status row; the fix shape is the compositor leaving a tagged empty leaf alone (the tool tags before it spawns). Gates: restore PASS with list/delete (28 s), panes PASS, test.sh PASS, session PASS with the rc leg (51 s; the first run died in the gate SETUP -- the QMP typing tool had no `;` or `>` -- so the tool learned shifted characters and the setup became three lines). **Landed** at `26f903a0`, both mirrors..
+
 **The lesson, pinned.** A latch keyed on a proxy property fires on every class the proxy covers and the property does not. The tell was in the doc comment itself: it named the property ("rotating weave slots") and asserted a class ("the SDL class never latches") that the code never checked.
 
+### H-4d-1 (same run, after the self-compaction): a peer-split empty leaf is its creator's
+
+**The race, and why a mark after the split cannot close it.** Under the per-user
+compositor, `halcyon layout restore` builds its skeleton with `split` verbs while
+the compositor -- the same principal -- hears TEV_LAYOUT per split and fills every
+empty leaf it owns with a shell tile; both mint claims on the same leaves and the
+last mint wins. The pickup's rule ("an empty leaf carrying a tag belongs to whoever
+tagged it") is right and insufficient: the tool tags AFTER it has built the whole
+skeleton, and even tagging each leaf the instant its id is bound leaves a window the
+compositor's reconcile can enter. Only the split can mark the leaf. So tapestryd
+stamps the writing conn on both empties a ctl split makes (`Pane.creator_conn`,
+`c96f5173`), the claim mint answers E_AGAIN to every other conn of the principal
+while that conn lives, and the retire lifts the reservations + fans ONE TEV_LAYOUT
+(a release changes no geometry, so the structural fan would never fire for it). rio's
+rule: a window a program creates is that program's, not the menu's.
+
+**The second decision the race forced: who hosts a tagged leaf under a session.**
+The tool's spawn path (H-4b-3b) spawns self-hosting graphical clients; a TEXT tag
+(`halcyon welcome`, `ut`) spawned that way has no terminal. Under a session the
+compositor is the user's rio (14.12), so the tag of an empty leaf is now the tile's
+command line (acme; rio's `window cmd`): reconcile reads the tag after its mint and
+hosts `kaua-term cols rows <argv>`. The tool, seeing the compositor's mark in /env
+(`HALCYON_SESSION=on`), only tags and exits; the release then lets the compositor
+host. On the console path nothing changes. Graphical tags under a session open
+BESIDE their terminal tile -- the rio-shaped stack-over-the-terminal refinement is
+v1.x, named in HALCYON 13.7.
+
+**The welcome's shape came from two placement rules, not a bootstrap dance.** The
+first plan suppressed the root tile when an init would run and destroyed the
+bootstrap surface afterwards -- moving parts on the seat holder. The layout format
+already had the right word: an `env` leaf is "the tile that was already there". A
+saved tree whose root's LAST child is the one env leaf now puts the built part
+BEFORE the anchor (the tool moves the pre-existing focused tile past what it built,
+one `move` per step checked against the dump), and an `active` naming that env
+leaf hands the focus to the anchor -- `splith [halcyon welcome, env] active=1` is
+the welcome, and the session's own root shell IS its right pane.
+
+**The gate failed three times on itself, and the capture said so.** Every attempt's
+serial log showed the mechanism in order (`claim on pane 8 reserved by conn 10
+(E_AGAIN)`, `conn 10 released 2 reserved empty leaf/leaves`, the two spawns, the init
+exit). Attempts 2-3: the rc leg expected the init's exit line AFTER the three-tile
+witness, but the compositor now fills only once the tool is gone, so the exit line
+came first and the sequential expect consumed past it -- the arm-order lesson in
+its purest form; one alternation now. Attempt 1: the tool's `restored 0 of 0` was
+TORN by tapestryd's new line (`restored 0 of 0` | `tapestryd: claim ...` |
+` program(s)`), and the leg's error arm `halcyon: .*(refused|...)` then matched a
+daemon's unrelated `resize-ack ... refused` two lines later because a Tcl `.*` spans
+lines. The tear's mechanism was userspace: libthyla-rs's `print!` wrote one syscall
+per format FRAGMENT and `println!` the newline as another, and the kernel console
+holds its writer role per WRITE. Both fixed in the same commit (the message says "the
+preceding commit" for the println fix; the staged-only vault lint refused that
+split, so it rode H-4d-1 -- recorded here). What stays: a FULL console ring takes
+what fits and returns short (kernel cons.c, documented: progress beats atomicity
+under congestion) -- gate witnesses key on a line's tail token.
+
+**Landed** `c96f5173` (both mirrors); gates panes / restore [29 s] / test.sh /
+session [51 s, first attempt after the fixes]; host tests libhalcyon 41, halcyon 13,
+halcyond 104. Unaudited (batched). NEXT in the run: H-4d-2 (the obj verb menu in
+session tiles; the scripts are drafted) and H-4d-3 (`halcyon welcome` + the
+device default layout bake + the gate's welcome/menu legs; drafted).
+
 ---
+
+### The batched H-arc holotype round (round 1): the zoom fix, H-4c, H-4d-1, H-4d-2a/2/3
+
+The double-the-distance rule batched six chunks into one round: the
+fullscreen-zoom fix `f25781ad`, H-4c `26f903a0`, H-4d-1 `c96f5173`, H-4d-2a
+`8f553c78`, H-4d-2 `946ac379`, H-4d-3 `4f4e7a9f` (+ the repair `da0a5c10`).
+Three Fable 5.1 prosecutors in parallel, each with a scoped brief and one
+common preamble (scratchpad `harc-r1-{common,A,B,C}-brief.md`; the ten
+H-arc closed lists concatenated as the do-not-re-report set): A = tapestryd
+(row 42: the #56 latch re-keyed on rotation, `ComposeOp.clip`, the H-4d-1
+creator reservation, the widened menu role); B = the session compositor +
+the pts-host producer (row 142's H-4c/H-4d addenda + row 151: the cell-span
+model, the tile menu, the typed choice, the spawn paths, the 17-byte wire
+cell); C = the kernel 't' arm + the emission gate + the halcyon tool + the
+bake (row 136 + row 142's tool half). The coordinator's parallel self-audit
+(`harc-r1-self-audit.md`) re-derived the batch's central claims from the
+code -- the wire ORDER of a frame's serial record and the cells it stamps
+(`feed_until` returns at the terminator byte; `osc_end` advances the serial
+before queueing the boundary; the producer flushes the pre-frame cells
+before the Control record; the consumer notes the post-frame tag under the
+serial), the ring's full-serial validation, the obj copy's remap reset,
+grid bounds (`Grid::row` is total), the typed choice under the KT-1 lock,
+the spawn masks, the tag authority (`actor_names`: a Client never names an
+empty leaf; a Session only its own; the renderer is TCB), the kernel resolve
+(fail-closed on a loopback transport; `srvconn_ref`-held bindings; the leaf
+spinlock; one clunk), the latch's `1 << slot` bound and rotation predicate,
+`scaled_clip`'s brute-forced superset, and the panes leg's two-way
+discrimination -- and found three P3s of its own: `scroll_cap` sizes a row
+by the pre-span 16-byte cell (bounded either way; a stale constant + two
+"13 B" comments), the `resize-ack ... refused Err(11)` line every session
+gate log carries is the documented stale-serial verdict (the client acked
+serial 4 after a same-size re-CONFIGURE at serial 6; `Busy` is drained and
+the newest offer acked -- benign, now to be documented beside the state
+tuple), and a tile program entering the alt screen leaves the compositor's
+Normal mode latched (harmless: every key routes to the app and the alt
+render ignores the mark).
+
+RESULTS (the three reports, 15-23 min each): **0 P0 / 2 P1 / 0 P2 / 11 P3,
+all fixed at the close, NOT dirty** (P1 + P2 = 2; every fix local). A ran 80
+turns on Fable with no fallback; B and C both fell back to Opus 4.8 for their
+tails (11 and 40 turns; the JSONL `model` field -- both `MODEL(end)` lines
+still claimed Fable, the self-report blind to its own fallback for the third
+round running), closed under the never-skip rule since the self-audit had
+read every Opus-tail surface. The two P1s were both tapestryd's, both in the
+zoom fix's neighbourhood, and neither was visible to the panes gate: **A-F1**
+-- once the letterbox arm began serving a single-slot client's PARTIAL
+presents, the composed GPU arm blitted the slot resource WHOLE while
+transferring only the damage and never reading `res_stale[slot]` (a fresh
+generation, a hide, any CPU-arm present marks every slot stale), so a
+partial-first present composed untransferred host bytes, scaled; the direct
+arm had guarded exactly this since 4.5.8c. The fix mirrors it (expand a
+stale slot's transfer to the full surface) and un-stales the slot after any
+transfer -- the old `= !full` re-marked it on every partial present and
+would have fired the expansion on every other one. The HVF gate can only
+witness the CPU half (the partial-first client E: no latch, the quadrant
+through the scale); the GPU half is OWED on the GL host beside aux's
+DOSBox-X re-run. **A-F2, pre-existing since G-6b and surfaced by my own
+resize-ack question** -- the ack's E_AGAIN meant two things, STALE (drain,
+ack the newest) and DRAINING ("present a frame, then re-ack"), and every
+client implemented only the first, so a second offer sent while a
+generation drained was lost until an unrelated relayout; the gates passed
+because every restore ends in hosting passes that re-offer. Fixed
+server-side for every client at once: the refusal sets `ack_deferred` and
+the drain's completion re-offers the standing size under a fresh serial;
+the battery's scenario 2a constructs the refusal deterministically (ack, do
+not present, zoom, ack the zoom -> Busy, present -> the re-offer) and times
+out pre-fix. The eleven P3s: the reservation now holds off another PROCESS's
+claim-less create in its focused-leaf fallback (a program launched during a
+restore took the tool's leaf; my first cut keyed it on the CONN, and
+ls-gfx-panes failed deterministically in the tabbed leg -- the battery splits
+on its control conn and hosts on a per-surface conn, so B landed beside its
+own pre-split leaf and every later geometry shifted; re-keyed on the process,
+`creator_peer` beside `creator_conn`); the latch floors its bars at once; the menu seat requires
+HOSTING, not merely declaring (an idle declarer could float a menu and take
+the grab); the singleslot leg's placement line was satisfied by pre-fix code
+(D presents full first -- the pixels discriminate; said, and the
+partial-first client added); the span ring lazy + 16-byte (128 KiB per RICH
+tile, outside the budget, recorded not charged); the obj-copy cache a map;
+Normal mode left on an alt-screen entry; `scroll_cap` by the real cell;
+ptyhost declares what its own sink renders (`ptyhold::relayed_tier`; pty-4
+witnesses it); and the pts-slave `'t'` arm got its unit positive by
+composing two fixtures that already existed (a pts bound on a real SrvConn;
+an OPEN dev9p client over the same conn). Lesson of the round: **a proxy
+re-keyed on the property opens the arm the proxy had kept closed** -- the
+latch stopped cropping single-slot clients, so their partial presents
+reached a compose path written for full frames; the fix to a proxy must be
+followed by a sweep of every consumer the proxy's false positives had
+shielded.
+
+GATES (all green on the committed tree; the panes E-arm was corrected once --
+the compositor did letterbox the partial-first client but the placement line
+preceded the battery's marker on the wire and the client reused a freed
+surface id, so the arm was re-keyed on the latch-line negative anchored before
+the present): `tools/test.sh` PASS with the new kernel unit positive
+`9p_srvconn_transport.pts_slave_spoor_classifies_t`; `ls-gfx-panes` PASS (the
+re-offer `resize reoffer OK`, the process-keyed A-F3 tabbed leg, the
+partial-first `Eopen`/`partialfirst`); `ls-gfx-restore`; `pty-4` (`ut: beacon
+cells inherited (pts host)`, the C-F1 witness -- the aurora console's tier
+relayed); `ls-gfx-session` on the session bake (the welcome as two tiles, the
+tile menu `menu ran: ls -l -- '/lib/halcyon/session'`, the resize-ack pairs
+`serial 9 ok after a refusal`); host halcyond 107, kaua-term 30.
+
+### H-4d-2a / H-4d-2 / H-4d-3 (same run, after the second self-compaction): rich tiles `8f553c78`, the tile menu over cell spans `946ac379`, the welcome `4f4e7a9f`
+
+**The dependency the drafted legs sat on.** Both H-4d-3 gate legs drafted before
+the compaction assumed a session tile renders Beacon objects: the tour "at the
+rich tier", `ls /lib/halcyon` presenting path objects for the menu. Before
+applying them I went looking for the evidence that a tile is rich, and found the
+opposite, three times over: `ut` resolves its Beacon tier only inside its console
+branch (its own comment: a pts-hosted ut "takes this branch never"); the console's
+`/dev/beacon` leaf describes the CONSOLE renderer, not a tile; and `SYS_FD_DEVCLASS`
+answered dev9p's `'9'` for a pts slave, so the Auto gate every native tool composes
+(frames only onto `'c'`) refused a tile's stdout outright. The d-1 gate log (a full
+PASS) carries no `ut: beacon` line for any tile -- the tile shells printed `pts
+session ok` and nothing about their tier. KAUA-TERM.md R1 and HALCYON 14.3/14.6 had
+named the missing half since KT-1 ("the pts advertises `BEACON=` at kaua-term
+spawn, the aux producer side"); nothing had built it, and no gate had asserted it,
+so the whole session-compositor line had been running plain without anyone noticing.
+The welcome cannot exist without it (a live transcript in a tile IS the feature), so
+it was pulled forward as H-4d-2a rather than seamed (CLAUDE.md: a current-chunk
+dependency defaults to BUILD-now).
+
+**What caught it:** not a test -- a grep for the witness line in a passing log
+before trusting the premise. The general form: a gate that never asserted a property
+is silent about it, and "the design says X" is not evidence that X was built.
+
+**The design (heritage-aligned, auto-accepted under the standing autonomy).** rio
+gives a program its window as `/dev/cons` -- the window IS the terminal; Unix pairs
+`isatty()` with `TERM` -- the class says "a terminal", the env says "which". So: the
+kernel answers `'t'` for a registered pts SLAVE (`spoor_devclass`, the tty seam's own
+`pts_resolve_spoor` -- a ref-held (conn, qid) binding pointer-compared under
+`g_pts_lock`, never a server-settable qid bit; the master stays `'9'`, since
+printing onto a master is typing into the terminal; `spoor_is_console` and I-27
+untouched); the Beacon gate admits `'t'` beside `'c'`; and the pts HOST declares the
+tier it renders -- `kaua-term --beacon <tier>` writes it into its own `/env/BEACON`
+before the spawn (absent = none, fail-closed), halcyond --session passes `rich`, and
+`ut`'s pts branch arms its zones iff the inheritance says rich AND its stdout is that
+terminal. In-guest witness: the tile shell's `ut: beacon rich (transcript zones
+armed)` -- the line only the `'t'` answer + the rich inheritance produce (the kernel
+test can pin only the negative arms: no kernel-test fixture builds a dev9p Spoor over
+a live SrvConn). A ptyhost-hosted ut now says `beacon tier not advertised by the pts
+host (plain)` -- correct, ptyhost declares nothing.
+
+**H-4d-2, the menu in a tile**, landed as drafted (the console renderer's Normal
+mode + obj verb menu ported into `SessionTile`; `Tile.frame` as the hit map;
+`Mark` + the view following the cursor; a choice typed into the tile it was opened
+over as ONE `Input::Text` record `^E^U<cmd>\n`), plus a host test for the frame /
+hit / mark mechanics the draft had left unwitnessed.
+
+**H-4d-3, the welcome**, landed as drafted: the baked `default` layout (`splith
+[tour, env] active=1`), `halcyon welcome` (a Beacon tour, then `t_execve` of the
+user's shell in place), the objs-count assertion relaxed from `>= 3` to `>= 1`
+before the first run -- the count is whatever the ingest batch held when the first
+object landed, a read-batching artifact no verdict should key on.
+
+**The gate's first run lost all three attempts to arm order, again.** The init
+line (`session init: /bin/halcyon layout restore default`) landed BEFORE the root
+tile's ingest witness in every attempt; the ingest loop consumed it, the welcome
+leg's first expect then saw only `session init exited` (its failure arm) or timed
+out, and the harness killed the VM there -- so the log's silence about the tour was
+the kill, not a defect. The second run, with the ingest markers, the init line, the
+welcome markers and the tiling readings folded into ONE alternation, saw the ingest
+witness arrive AFTER the init's exit -- the order really is unknowable, which is the
+whole argument for the one-loop shape (the third time this run has needed it; it is
+now the default for any cross-process marker set).
+
+**The menu leg's silence, and the bake that never ran.** The second run's menu
+leg saw NOTHING after `ls` landed its objects -- not the placement, not the
+"no obj run" line -- for 60 s. Reading the key path against the console renderer's
+found no difference (the same rune for Esc, the same `normal_key`, the same
+`step_run`), so instead of a fourth theory the decision points got test-mode lines
+(`normal mode (R rows)`, `run -> row R obj O` / `no run back`, `act: no cursor
+row`, `act: obj O not in its block`) and the gate now paces Esc / `b` / Enter on
+those lines instead of fixed waits. The re-bake and re-run that followed did not
+run at all: the shell's cwd had persisted in `usr/` after a `cargo` step, the
+relative `tools/build.sh` and `build/…log` paths pointed at nothing, the redirect
+failed before anything launched, and the background task reported the trailing
+`echo`'s exit code -- 0. Caught by the gate finishing in seconds and its log not
+existing. The rule that follows: a background task's exit code is its LAST
+command's; verify the artifact it was supposed to produce, never the number.
+
+**The instrumented run answered at once, and the answer was structural.** `normal
+mode (0 rows)`: Esc entered Normal mode over an EMPTY row list, so `b` had nothing
+to step to and Enter bailed before any say line. A session tile's content is
+cells -- the live grid (36 rows, holding the prompt and the whole `ls` output) and
+scrolled-off rows that `push_scrolled_rows` interned with `obj: 0` -- and the
+console's row / run machinery reads transcript ITEMS, of which the tile had none.
+The port had been written against the console's all-text model without checking
+that the tile's model had the same content shape: the class of "an unconstructed
+state". HALCYON 14.11.4 ("the frames drive the same span state") and 14.11.5 ("the
+grid is a virtual trailing block") had named both missing halves since KT-1.
+
+**The design that closed it (H-4d-2b).** The obj-to-cell association must be made
+where the cells are written: stamping halcyond's grid at CellDiff time looked
+cheapest, but the producer's diff after a scroll rewrites nearly every cell (a
+shadow compare), so a consumer-side stamp is wiped by the very shift it must
+survive. So the producer stamps -- parser-free: the vt advances a span serial on
+every OSC whose code is 1936 (a numeric selector, no body read, R5 intact), stamps
+every cell it writes with it, and the record carries the serial explicitly
+(`Osc1936Raw { serial, frame }`) -- not counted at both ends, because a dropped or
+oversize frame would then shift every later cell onto the wrong object, which is
+the anti-clickjack class. halcyond notes the transcript's span state after feeding
+each frame under its serial (an 8192-ring validated by the full serial; a serial
+that fell off resolves to NO span), resolves grid cells through it, and at
+scroll-off interns em/obj/hdr -- copying an obj from its source block into the
+landing block, since the grid's rows straddle zone cuts and a block's Line styles
+must index its own obj table. The heritage check that settled it: CLIM records
+presentations on the OUTPUT stream at output time; the display never reconstructs
+them. Host-proven end to end (vt: the stamps, the scroll carrying them; halcyond: a
+stamped grid row's run, hit, rect and obj, then a zone cut + a scroll-off copying
+the obj into the landing block and the row's run resolving there).
+
+**Three wrong turns of the harness kind, all caught by an artifact, none by a
+number.** A bake and a gate that never ran (cwd persisted in `usr/`; the redirect's
+directory did not exist; the task reported the trailing echo's 0). Then a bake that
+DID run from `usr/` and failed at corvus-mint -- cargo discovers its config from the
+cwd, and `usr/.cargo` replaces crates-io with the vendored tree, whose `aegis`
+0.9.8 cannot satisfy that host tool's 0.9.12 lock; the same bake from the root
+passes. Fixed in build.sh (the step now runs from the repo root whatever the
+caller's cwd), and that failed populate had already regenerated the pool key, so
+the build directory had to be re-baked whole. And the gate's welcome loop lost a
+marker to arm order a SECOND time: separate arms are tried in list order, so a
+chunk carrying `focus -> pane 3` a line before `tagged 1 pane(s)` matched the
+later-listed `tagged` arm and consumed the focus line unseen; the loop is one
+regex alternation now (the leftmost marker wins), dispatched on the matched text
+-- the shape the draft had, before I "improved" it.
+
+**Run 4 proved the grid menu and taught the gate one more thing.** Esc entered
+Normal mode over 35 rows (the grid's), `b` selected the run on row 4, the SESSION
+compositor placed the verb menu for `/lib/halcyon/session`, Enter typed
+`ls -l -- '/lib/halcyon/session'` into the tile, and the split / zoom / close /
+logout legs passed behind it. The rc leg then failed with its "refusal" marker
+missing -- while the log showed two refusals, in order, before the release. The
+tally expect placed BEFORE the loop had consumed them: this run the compositor's
+refused mints landed before the tool's tally line, last time after it. The fourth
+arm-order bite in one run, and a second lesson on top of it: the refusal witnesses
+one interleaving (the compositor minting while the tool still lives), which nothing
+guarantees -- a tool can finish before the compositor's reconcile runs -- so
+requiring it was asserting a race outcome. The gate now REPORTS the refusal when it
+occurs and asserts the invariant that IS deterministic: the compositor hosts a
+tool-built leaf only after the release line (causally ordered through tapestryd's
+retire -> fan -> the compositor's mint -> its spawn line), in both the welcome and
+the rc leg.
+
+**Run 5: the fixed rc leg witnessed everything (the refusal, the release, three fills
+after it) and the harness still said FAIL -- with no failure line anywhere.** A
+gate that fails without an `lc_fail` line died of its own script: the harness log
+carried `invalid command name "}"` -- an orphan brace my replacement had left after
+the loop. The symptom is worth its own line: the scenario's last recorded step was
+a PASS.
+
+**The commits themselves needed a repair (`da0a5c10`).** The three sub-chunks were
+staged by hunk with zero context (`git apply --cached --unidiff-zero`) and
+committed under `git stash push --keep-index` so the vault lint would see a
+working tree equal to the index. A zero-context hunk can land one statement off;
+the pop then three-way-merged the commit's placement with the full file's, and
+wherever they differed BOTH survived -- and the whole-file commits that followed
+took the merged result. HEAD did not compile (the kaua-term `--beacon rich` block
+sat a second time inside a struct literal) and three docs carried passages twice.
+Nothing had noticed because every gate had run on the pre-commit tree; the
+halcyon-lever bake for the console-menu gate was the first build of the COMMITTED
+tree, and it failed. The dropped keep-index stash survived as a dangling commit
+holding the exact tree the gates ran on; the four files were restored from it and
+the code tree now equals it byte for byte. Rule: stage by hunk with context, or
+commit whole files and split by file -- and build the committed tree before
+calling it green.
 
 ## Run 30 (2026-09-05, Fable 5.1, effort max): the KT-1 audit's round 2 — the fixes re-prosecuted, and the two the arithmetic had not reached
 

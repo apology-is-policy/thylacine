@@ -7,6 +7,7 @@ code:
   - usr/diorama/src/server.rs
   - usr/diorama/src/main.rs
   - usr/diorama/Cargo.toml
+  - usr/diorama-probe/src/main.rs
 audit: hard
 guarded-by: [inv-i43]
 validated-by: [prose]
@@ -15,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/VIVARIUM.md"]
 created: 2026-08-04
-updated: 2026-08-15
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -249,6 +250,18 @@ sources. No caching anywhere. For an introspection surface read a handful
 of times per process lifetime this is the right trade, and it is what
 makes the freshness argument trivial.
 
+The one place that native re-read used to cost a syscall is the two clock
+renderers, and it no longer does. `clock_pair_ns` (for `/proc/stat`'s
+`btime`) and `render_uptime` each carried a private `t_timespec` mirror and
+called `t_clock_gettime` raw; both now go through `libthyla_rs::time`, which
+takes the #343 vDSO page first — a `CNTVCT_EL0` read, no syscall — so a
+monitoring tool looping on `/proc/stat` pays no kernel crossing for the
+clock (V-4c-3 SA-4). The pair reader derives *both* clocks from one counter
+sample, which is strictly better than the bypass could do: `btime` is
+`realtime - monotonic`, and two separately-taken samples let a preemption
+between them leak into that difference. The fix lived in libthyla-rs, not
+here — patching it diorama-side would only have relocated the duplication.
+
 `/proc` enumeration re-reads the live pid list per call, so a process that
 exits mid-enumeration can make a pid appear twice or not at all — a
 property Linux's own `/proc` readdir shares, since its cookie is a
@@ -402,6 +415,22 @@ Linux virtualizes this with a pid namespace.
   segments. The premise is written at the site with its trigger: when a
   file-mapping syscall lands, the kernel's own line must start carrying a
   path and this branch must read it instead of substituting.
+
+- **`/proc/cpuinfo`'s `CPU implementer` is legitimately `0x00` on some
+  targets, and proving otherwise needs the right harness.** The four
+  identity lines are `MIDR_EL1`'s fields (read at bring-up and surfaced as a
+  `/ctl/cpu` `midr` column, since `MIDR_EL1` is EL0-trapped). QEMU's TCG
+  `-cpu max` reports `MIDR_EL1 = 0x000f0510` — it deliberately does not claim
+  to be an ARM-implemented part — and that is the CPU
+  `tools/test-interactive.sh` runs by default, so a zero implementer is not a
+  fault and not evidence the register went unread (ARMv8 requires only that
+  `MIDR.Architecture` read `0xF`; an *unread* record is all-zero, a different
+  thing). This cost a boot-fatal `EXTINCTION` once, when a kernel test
+  asserted a non-zero implementer: `tools/test.sh` runs HVF with `-cpu host`
+  (Apple silicon) while the interactive harness runs TCG with `-cpu max`, so
+  **a green `test.sh` is not a sufficient gate for any assertion about a
+  hardware register** — the two harnesses disagree about the hardware they
+  present.
 
 - **The proof position is the strongest in the userspace tree, and it is
   not host tests.** The selftest is ~500 lines of assertions that run

@@ -6,6 +6,7 @@ title: "The gates — boot verdict, multi-boot classification, the v8.0 floor"
 code:
   - tools/test.sh
   - tools/smp-multiboot.sh
+  - tools/test-smp-classify.sh
   - tools/ci-smp-gate.sh
   - tools/check-v80-floor.py
   - tools/screendump.sh
@@ -16,7 +17,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -62,7 +63,7 @@ ladder is ordered, so each row is also "everything above it did not match".
 | Class | Fails? | Anchored on |
 |---|---|---|
 | CORRUPTION | yes | exact extinction strings (invalid prev state, stack canary mismatch, kernel stack overflow, already on_cpu, #860, …) |
-| EXTERNAL-KILL | **yes** | QEMU's own `terminating on signal N from pid M` (#88) |
+| EXTERNAL-KILL | **yes** | two arms — QEMU's `terminating on signal N from pid M` (catchable, #88), OR the shell's `line N: PID Killed: 9` + `qemu_alive_at_teardown=0` (SIGKILL, #222) |
 | INJECT-MISS | no | the full green-guest proof (below) |
 | TIMING | no | EMITTED warn strings only (`[SOFT-WARN]`, the irq-bench budget text) |
 | OTHER | **yes** | nothing — an unclassified nonzero exit |
@@ -85,14 +86,31 @@ signal; one by silence, one by crying wolf. The fix in each case is the same
 shape — take the explainable cause out of the bucket and give it its own honest
 label — and in neither case does the verdict change.
 
-**EXTERNAL-KILL is sound because of what CANNOT produce its evidence.** The
-message names a signal and a sender pid, but that content is not the argument.
-The argument is negative space: a guest cannot signal its own hypervisor, and
-the harness's only kill is `kill -KILL` — **uncatchable, so QEMU prints
-nothing for it.** The one killer that would make the line ambiguous is
-structurally incapable of writing it. Existence of the line is therefore the
-evidence; the signal number and pid are a bonus the classifier had been
-discarding.
+**EXTERNAL-KILL has two arms, because catchable and uncatchable signals leave
+different evidence (#222).**
+
+*Arm 1 — the QEMU report (catchable: TERM/INT/HUP).* QEMU prints
+`terminating on signal N from pid M`, which names the signal AND the sender. Its
+soundness is negative space: a guest cannot signal its own hypervisor, so the
+line's mere existence is the evidence; the signal number and pid are a bonus the
+classifier had been discarding.
+
+*Arm 2 — the shell's job notification (SIGKILL).* SIGKILL is **uncatchable, so
+QEMU prints nothing** — which means arm 1 is structurally blind to exactly the
+signal that most needs the bucket, and a real external SIGKILL therefore landed
+in OTHER (the #200 sightings, the finding that made arm 2 necessary). The only
+witness is the harness shell's own job notification, `line N: PID Killed: 9`, in
+the harness stream. That notification alone is NOT "someone else did it": bash
+emits it for the harness's OWN teardown `kill -KILL` too, whenever a command
+boundary elapses before the shell reaps. So arm 2 requires a second conjunct only
+`test.sh` can supply — `qemu_alive_at_teardown=0`, meaning the teardown kill hit
+an already-dead process, so the signal death cannot have originated here. Arm 2
+reports the sender as **NOT RECOVERABLE**, because a SIGKILL carries none — the
+premise the whole bucket rests on. The pattern anchors the whole `line N: PID
+Signal: M` shape (not a bare `Killed:`) because the harness log EMBEDS the guest
+log, so a bare token would be forgeable by guest output; and it is deliberately
+NOT widened to `Segmentation fault:` / `Abort trap:`, which are QEMU crashing —
+a different class that must not be laundered as external interference.
 
 **The pattern was validated against a fresh specimen, not against the captured
 incident** — and that is the whole reason it works. Generating a real kill from
@@ -132,6 +150,24 @@ contained `stalk.*lifetime`, which matched the PASSING line
 `[test] stalk.lifetime_no_leak ... PASS` present in *every* log — making
 TIMING a catch-all that silently absorbed any nonzero exit. It buried 23 of
 40 inject-misses, "and a real unclassified failure would have been too."
+
+**The classifier is a pure function the ladder is DRIVEN through, not a block of
+inline greps (#234).** `classify_boot()` and `harness_result_token()` are
+sourceable — `smp-multiboot.sh` `return`s at its `BASH_SOURCE != $0` source-guard
+before any side effect — so `tools/test-smp-classify.sh` drives the REAL ladder over real
+and synthetic fixtures. A classifier nobody can exercise has arms that are
+*assumed* to fire rather than known to; and a test that re-declared the patterns
+would only prove the copy agrees with itself (#143), which is why the test
+sources the production ladder instead of restating it. The producer cross-check
+is the other half: `harness_result_token` maps `test.sh`'s verdict strings to a
+capture-name token, and the classify test asserts `test.sh` STILL emits each
+literal — renaming a verdict on one side silently voids an arm otherwise, which
+is #234 found exactly that way. One arm order is load-bearing: `arc-gates` MUST
+precede `pass` (#212), because a post-banner gate fails AFTER `==> PASS` is
+already in the log, so a missing arm degrades to `pass` — worse than `unknown` —
+and would have labelled the capture OTHER-pass. The OTHER bucket now carries that
+token too (`result=<token>`), separating "QEMU vanished" (qemu-exit) from "a
+post-banner gate failed", which OTHER used to conflate.
 
 **INJECT-MISS requires proving the guest green, not merely proving the
 injection missed.** All five must hold: the `AWAITING_QMP_KEY` sentinel
@@ -205,15 +241,47 @@ fixed-host-port trap: **the constraint was invisible precisely because nothing
 enforced it**; it only surfaced as a collision when someone tried the
 concurrency the tool never said it lacked.
 
+**The lean `--production` shape is built inside the gate loop, not by a target
+nobody runs (#228/#229).** #228's root cause was not that `--production` was
+broken but that NOTHING BUILT IT, so it stayed broken silently for weeks while
+every gate stayed green; a Makefile target does not fix that, building it in the
+loop that actually runs does (~2 s, into a scratch dir). It SKIPs — reported as
+NOT coverage, the #212 discipline — when `build/generated` is absent (a
+kernel-only iteration legitimately has no userspace headers). #230 then made the
+warden UNCONDITIONAL (it had been probe-gated, so the lean image had no drivers
+at all — that was the defect, not the shape), so the lean image renders a console
+and the G-4 gate APPLIES to it; only `debug-probe` stays lean-skipped, keyed on
+joey's `ARC-GATES not-built` report — the build SHAPE, never the absence of the
+thing a gate looks for, since that absence is also what the corresponding
+regression looks like. The G-4 gate also moved to a SECOND QMP monitor
+(`THYLACINE_QMP_SOCK2`, #230): one chardev serves one client and the key-injector
+holds the first for the whole boot whenever its sentinel never arrives, so a
+shared socket made the two consumers ordering-dependent.
+
+**The DISTRO / CLADE arc gates are propagated into the exit status (#212/#232).**
+`check-arc-gates.sh` answers for the D-5 / L-6c arc chain and the three clade
+gates; both soft-skip when their external Alpine/clade bundle is absent (right on
+a fresh clone), but nothing carried the skip into the exit status, so a tree with
+a REGRESSED D-1..D-4 chain exited 0 identically to one where the arc ran. The
+checker now FAILS on an ABSENT report (a dropped gate — the shape a green boot
+hides) and otherwise states what ran; `THYLA_ARC_GATES=require` /
+`THYLA_CLADE_GATES=require` make a skip fatal for shapes that ship the fixture.
+
 ## Data structures
 
-None persistent. `build/multiboot-fails/` accumulates captured logs, cleared
-**per label** (not whole-dir) so a matrix running several labels
-back-to-back does not wipe a sibling's evidence, while stale captures from a
-since-fixed run cannot masquerade as current findings. Each failing class
-writes BOTH streams (`$LABEL-$i-<CLASS>.log` guest serial, `-harness.log` the
-harness side), and EXTERNAL-KILL appends its resolved sender record to the
-harness capture.
+None persistent. `build/multiboot-fails/` accumulates captured logs. A label's
+prior captures are **ARCHIVED, not deleted** (#223): moved to
+`archive/$LABEL-<timestamp>/` at the start of each run, per label (not
+whole-dir). Deleting them was sound for the masquerade hazard — a stale fail log
+from a since-fixed run must not read as a current finding — but the standard
+response to a RARE failure is to re-run that same label in isolation, so a
+delete-on-start makes the diagnostic act destroy the only copy of what you were
+diagnosing (it cost the #200 sighting-2 harness log, which now survives only as a
+commit-message quotation). A move is as effective against the masquerade and
+costs a rename. Each failing class writes BOTH streams
+(`$LABEL-$i-<CLASS>[-<token>].log` guest serial, `-harness.log` the harness side,
+the token being `test.sh`'s result), and arm-1 EXTERNAL-KILL appends its resolved
+sender record to the harness capture.
 
 ## Concurrency
 
@@ -296,8 +364,18 @@ ceiling, so it is run as subsets via `SMP_GATE_CONFIGS`.
   QEMU-killers in the tree were checked and falsified. The classify-time `ps`
   exists precisely so a recurrence names it — the class is a standing trap, not
   a closed case.
+- **Every boot's wall clock is recorded, not just failures' (#200).** The open
+  question on the SIGKILL sightings is whether the UBSan asymmetry is a sanitizer
+  effect or an exposure-time one — a host-side killer cannot care which sanitizer
+  built the guest, but a UBSan boot runs longer and so presents a proportionally
+  larger kill window. A per-unit-time hazard rate needs these numbers from
+  ordinary gate runs, so they ride every boot line (`(Ns)`) rather than a bespoke
+  experiment nobody re-runs.
 
 ## Provenance
 
 [[chg-2026-08-01-substrate-sweep]]; [[chg-2026-08-16-gates-external-kill]] the
-fifth class and the G-2 socket override.
+fifth class and the G-2 socket override; [[chg-2026-09-06-substrate-gates-detectors]]
+the second EXTERNAL-KILL arm (#222), the sourceable classifier + producer
+cross-check (#234/#212), archive-not-delete (#223), and the lean-shape / arc-gate
+propagation (#228/#229/#230/#232).

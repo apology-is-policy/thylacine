@@ -7,6 +7,10 @@ code:
   - kernel/main.c
   - arch/arm64/hwfeat.c
   - arch/arm64/hwfeat.h
+  - kernel/canary.c
+  - kernel/include/thylacine/canary.h
+  - kernel/fault_test.c
+  - tools/test-fault.sh
 audit: hard
 guarded-by: [inv-i15]
 validated-by: [prose, gate-smp, gate-interactive]
@@ -15,7 +19,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -86,6 +90,43 @@ The published word is deliberately Linux-shaped, so ported code's existing
 feature detection works unmodified. Two of its fields are inverted sentinels
 where zero means present, unlike every neighbouring field, and the code says so
 at the site.
+
+**The stack-canary cookie is seeded from the KASLR entropy, and the ordering is
+the subtlety.** `__stack_chk_guard` — the global cookie every
+`-fstack-protector-strong` prologue reads and epilogue re-checks — starts at a
+non-zero **link-time magic**, so functions that complete *before* `canary_init`
+runs still validate against a consistent value. `canary_init(seed)` overwrites it
+with a runtime cookie derived from the KASLR seed; the calling frame is chosen so
+that no function whose prologue sampled the old value reaches its epilogue after
+the overwrite, and a compiler barrier forces the write to complete before
+`canary_init` returns — so every frame sees exactly one cookie for its whole
+lifetime. A frame that straddled the write would fail its own epilogue check on a
+stack it never smashed. `__stack_chk_fail` routes a detected smash to
+`extinction()`, the last-resort path any kernel invariant break takes; it is one
+of the seven `tools/test-fault.sh` provokers that prove the protection actually
+*fires* rather than merely compiling in.
+
+**Those provokers are load-bearing precisely because they are fragile, and the
+fragility is in the compiler, not the protection.** Each builds one kernel with
+a single `THYLACINE_FAULT_TEST` provoker and PASSes iff *that* kernel EXTINCTIONs
+with the provoker's expected message — the only evidence a protection fires under
+attack rather than merely compiling in. Two rest on defeating the optimizer:
+`canary_smash` writes past a stack array, but at `-O2` with
+`-fstack-protector-strong` clang proves the writes are out-of-bounds UB and
+elides them (the canary never arms — the array is "unused"), so an
+`asm("":"+r"(p))` launder hides the pointer's provenance and forces all 64
+stores; `bti_fault` calls a non-guarded target through a function pointer, but
+clang devirtualizes `fp()` to a direct `bl`, which does not set `PSTATE.BTYPE`,
+so the BTI check never runs — a `volatile` on the pointer forces the `blr` that
+does. `wxe_violation` writes to `_kernel_start` (RX, no W) and the MMU raises the
+permission fault. `pac_mismatch` is deferred (forging a poisoned LR depends on
+FEAT_FPAC specifics); v1.0 verifies PAC by asserting `SCTLR_EL1.EnIA` + a
+non-zero APIA key, code-reviewing `paciasp/autiasp` emission, and the ARM-mandated
+hardware enforcement. The matrix is only as good as its being *run*:
+`test-fault.sh` sat in no gate for about a month, which is exactly how a
+`recursive_kernel_fault` provoker that emitted *nothing at all* (#244) went
+undetected — **a silent provoker is a protection that did not fire, and it reads
+identically to a passing boot unless something asserts the EXTINCTION**.
 
 **Per-CPU identity is handled differently from features.** The processor
 identifier and cache line size are recorded *by each CPU, into its own slot*, at
@@ -257,3 +298,8 @@ The writeback-granule decode, the compile-time padding constant, and the
 refuted parenthetical are [[chg-2026-08-16-boot-cwg-parenthetical]]. The banner
 emitter's writer role — the delivery half of [[abi-boot-banner]] — is
 [[chg-2026-08-16-cons-writer-set]].
+
+[[chg-2026-09-06-hardening-doc-absorb]] added `kernel/canary.c` (previously
+unowned) — the `__stack_chk_guard` link-time-magic → KASLR-seeded-runtime-cookie
+lifecycle, the barrier that keeps one cookie per frame, and `__stack_chk_fail` →
+`extinction` — at the 12-hardening absorption.

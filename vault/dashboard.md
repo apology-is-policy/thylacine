@@ -93,6 +93,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-mm-directmap-cap-absolute]] (sub-kernel-mm-phys)
 - [[seam-mount-graph-unmodeled]] (sub-kernel-territory)
 - [[seam-netd-host-tests]] (sub-netd-server, sub-netd-nic)
+- [[seam-nuname-trust-stamp]] (sub-kernel-syscall-dispatch, sub-kernel-ninep-attach)
 - [[seam-poll-heap-waiters]] (sub-kernel-poll)
 - [[seam-poll-srv-registry-retain]] (sub-kernel-poll)
 - [[seam-pouch-dirfd]] (sub-pouch-fs)
@@ -126,18 +127,17 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-torpor-cross-proc]] (sub-kernel-torpor)
 - [[seam-torpor-lock-wake-spin]] (sub-kernel-torpor)
 - [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
-- [[seam-union-mount-walk]] (sub-kernel-territory, sub-kernel-stalk)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
 - [[seam-wb-close-flush-slot]] (sub-kernel-ninep-dev9p)
 
 ## Recent changes
 
-- 2026-09-05 [[chg-2026-09-05-boot-banner-mirror-recount]] — abi-boot-banner recount: the prose caught up to the twenty-eight-mirror set
-- 2026-09-05 [[chg-2026-09-05-crate-extraction-sweep]] — The crate extractions -- the refactor the 2026-08-04 sweep named finally landed
-- 2026-09-05 [[chg-2026-09-05-exec-phenotype]] — sub-kernel-exec brought current: the phenotype threaded, the interpreter rewrite, the pheno-mount resolver
-- 2026-09-05 [[chg-2026-09-05-f2-hosting-fan]] — KT-1.5d-3 F2: backgrounded-leaf tiling + structural transparency + the hosting-fan defect (calc_geom_sig folds the hosted incarnation)
-- 2026-09-05 [[chg-2026-09-05-fullscreen-zoom]] — The fullscreen-zoom fix: the #56 patchwork latch re-keyed on slot rotation; the letterboxed compose clips to the damage's projection
-- 2026-09-05 [[chg-2026-09-05-halcyon-libs-sweep]] — The Halcyon graphics libs -- the three crates the handoff did not name
-- 2026-09-05 [[chg-2026-09-05-halcyon-session-crates]] — The KT-1 session-compositor crates dossiered: sub-halcyond + sub-kaua-term (from the 150/152 reference prose)
-- 2026-09-05 [[chg-2026-09-05-kt1-audit-close-r3]] — KT-1 audit close, round 3: the restructures re-read -- the held-cells sink, the constant open-block cap, the seat held while it hosts, TEV_LAYOUT coalesced
+- 2026-09-07 [[chg-2026-09-07-aurora-doc-absorb]] — absorb docs/reference/140-aurora (the fbcon + /dev/cons drain/feed, G-4): clean redirect + sharpen the cfg-3 F1 attribution in sub-aurora
+- 2026-09-07 [[chg-2026-09-07-diorama-doc-absorb]] — absorb docs/reference/141-diorama (the synthetic Linux world): fold the SA-4 vDSO fast-path + the MIDR-0x00 harness lesson + diorama-probe into sub-diorama
+- 2026-09-07 [[chg-2026-09-07-go-port-doc-absorb]] — absorb docs/reference/133-go-port (GOOS=thylacine capability map): fold the Loom SETATTR truncate-only fail-close into sub-kernel-loom; fork is external
+- 2026-09-07 [[chg-2026-09-07-halcyond-doc-absorb]] — absorb docs/reference/150-halcyond (the Halcyon environment client): clean redirect -- sub-halcyond is fresh, audit:hard, all audit anchors covered
+- 2026-09-07 [[chg-2026-09-07-jit-doc-absorb]] — absorb docs/reference/145-jit (the JIT capability, I-42): fold the I-cache contract (CL-7k-3 F1 create-invalidate + the cross-PE ISB publish contract) into sub-kernel-mmu
+- 2026-09-07 [[chg-2026-09-07-kaua-doc-absorb]] — absorb docs/reference/112-kaua (the console TUI substrate): clean redirect to sub-kaua (ahead of the doc's stale Status table)
+- 2026-09-07 [[chg-2026-09-07-libdriver-doc-absorb]] — absorb docs/reference/118-libdriver (the Menagerie driver framework, I-34): clean redirect to sub-libdriver-grant + sub-libdriver-discovery (grant AHEAD of the doc)
+- 2026-09-07 [[chg-2026-09-07-libhalcyon-doc-absorb]] — absorb docs/reference/151-libhalcyon (the Halcyon environment library): fold the UNOWNED halcyon tool + tag.rs into sub-libhalcyon
 <!-- generated:end -->

@@ -97,13 +97,14 @@ requires a version bump plus scripture amendment here.
 | `row`, `cell` | — | ...delimited by `row`/`cell` frames wrapping the plain cell text. The plain-stream realization (the payload between frames) is the aligned, whitespace-separated form. |
 | `hdr` | `level=1..3` | A heading. |
 | `rule` | — | A separator (self-closing). |
+| `pre` | — | A **preformatted block**: internal whitespace + line breaks are significant (character-grid alignment). The renderer sets it apart — mono + code-block chrome (own ground + a leading gutter rule) — and neither re-wraps nor collapses spacing. The interim home for box-drawing / column-exact output (`la`) until Beacon gains box/table primitives; the block-level companion to `em class=code`. May contain inline `em`/`obj`. |
 
 **v1 — inline:**
 
 | Op | Args | Meaning |
 |---|---|---|
 | `em` | `class=emph \| strong \| dim \| code` | Emphasis by class, never by face. |
-| `obj` | `type=path \| pid \| url \| commit \| user`, `ref=<canonical>` | **A presentation**: this run of text presents an object of `type`, canonically named by `ref`. For `type=path`, `ref` is the cleaned absolute 9P path. The run becomes mouse-sensitive in a rich renderer (§7). |
+| `obj` | `type=path \| pid \| url \| commit \| user \| layout`, `ref=<canonical>` | **A presentation**: this run of text presents an object of `type`, canonically named by `ref`. For `type=path`, `ref` is the cleaned absolute 9P path. The run becomes mouse-sensitive in a rich renderer (§7). |
 
 The `obj` op is the Genera payoff and the reason Beacon exists; everything else
 is furniture around it.
@@ -199,7 +200,8 @@ with `#` is an INTERNAL action a renderer interprets itself (halcyond's
 test-mode `#wedge <ms>`, THE GATE's lever), admitted only when the parser is
 asked to and dropped by a production build (the #880 strip class). The
 system tier is baked at `/lib/beacon/verbs` from `usr/lib/beacon/verbs.default`
-(path: ls / cat / stat / cd / edit / hexdump; pid: kill; url: fetch). The
+(path: ls / cat / stat / cd / edit / hexdump; pid: kill; url: fetch;
+layout: restore / save / delete -- H-4c, the ref is the layout NAME). The
 SESSION tier is deferred: halcyond is spawned pre-login as the device's
 renderer and knows no `$home`, so `$home/lib/beacon/verbs` will arrive over
 the settings channel (the aurora-config cfg-2 push precedent), not as a file
@@ -278,6 +280,11 @@ already a Bonfire palette role.)
   along).
 - **2026-09-01 (same day)**: §12 added — the concretization design pass
   (ground-truthed against the tree; implementation-grade for H-1).
+- **2026-09-06**: `pre` added — the preformatted block-level op (§3, §12.1,
+  §12.2), ratified in the Halcyon proportional-live design pass (HALCYON.md
+  §14.13). The block-level companion to `em class=code`; the interim carrier
+  for box-drawing / column-exact output until Beacon gains box/table
+  primitives. Additive; forward-compatible (rule 4).
 
 ---
 
@@ -311,7 +318,7 @@ OSC        = ESC "]"                ; 0x1B 0x5D
 SEP        = ";"                    ; 0x3B
 ST         = ESC "\"                ; 0x1B 0x5C   (parsers also accept BEL 0x07)
 version    = "v1"
-op         = "zone" / "table" / "row" / "cell" / "hdr" / "em" / "obj"   ; paired
+op         = "zone" / "table" / "row" / "cell" / "hdr" / "em" / "obj" / "pre"  ; paired
            / "mark" / "rule"                                            ; point (no close)
 arg        = key "=" value
 key        = 1*( %x61-7A )          ; lowercase a-z
@@ -341,9 +348,11 @@ Normative rules, each load-bearing:
    the forward-compat contract; v2 may add ops/keys without breaking v1
    renderers.
 5. **Nesting legality** (renderer may flatten illegal nesting, never error):
-   `zone` ⊃ anything; `table` ⊃ `row` ⊃ `cell`; `cell`/`hdr` ⊃ inline
+   `zone` ⊃ anything; `table` ⊃ `row` ⊃ `cell`; `cell`/`hdr`/`pre` ⊃ inline
    (`em`/`obj`); inline ops nest nothing. `table` direct children other than
-   `row` are illegal.
+   `row` are illegal. Inside a `pre` block, whitespace and line breaks are
+   SIGNIFICANT — the renderer preserves them verbatim (no join, no re-wrap, no
+   collapse); `pre` nests no block op.
 
 ### 12.2 The v1 op registry (normative arguments)
 
@@ -357,10 +366,19 @@ Normative rules, each load-bearing:
 | `hdr` | paired | `level=1\|2\|3` | A heading. |
 | `rule` | point | — | A separator. Plain realization: the emitter's own rule line (payload). |
 | `em` | paired | `class=emph \| strong \| dim \| code` | Emphasis by class. `code` implies monospace in every rich stylesheet. |
-| `obj` | paired | `type=path \| pid \| url \| commit \| user; ref=<canonical>` | The presentation. `type=path` ⇒ `ref` is the cleaned ABSOLUTE 9P path (the emitter resolves relative names before emitting; a ref the emitter cannot canonicalize ⇒ emit no frame, plain text only). `pid` ⇒ `ref` is the decimal pid. `url`/`commit`/`user` ⇒ ref is the literal. |
+| `obj` | paired | `type=path \| pid \| url \| commit \| user \| layout; ref=<canonical>` | The presentation. `type=path` ⇒ `ref` is the cleaned ABSOLUTE 9P path (the emitter resolves relative names before emitting; a ref the emitter cannot canonicalize ⇒ emit no frame, plain text only). `pid` ⇒ `ref` is the decimal pid. `url`/`commit`/`user` ⇒ ref is the literal. `layout` ⇒ `ref` is a saved Halcyon layout's NAME (one path component, HALCYON.md §13.7 -- never a path: the session tool's verbs take the name, and a name never begins with `-`). |
+| `pre` | paired | — (v1; `obj`/`em` permitted as inline children) | A **preformatted block**: internal whitespace + line breaks are significant. The rich renderer sets it apart (mono + code-block chrome: own ground + a leading gutter rule) and neither re-wraps nor collapses spacing. Plain realization: the literal payload (stripping every frame yields the exact `none`-tier text, rule 1). The interim carrier for box-drawing / column-exact output (`la`) until Beacon gains box/table primitives; the block-level companion to `em class=code`. Names a content PROPERTY (whitespace-significant), never a face — the stylesheet picks mono + chrome. |
 
 **Vocabulary growth policy**: any new op or key is an amendment to this table
-plus a version note; renderers already tolerate it (rule 4). Growth toward
+plus a version note; renderers already tolerate it (rule 4). **Version notes**:
+v1 (2026-09-01, the registry above); v1 + `type=layout` (2026-09-05, H-4c --
+a value of an existing key, emitted by `halcyon layout list`; the renderer's
+type handling is by string, so no parser change); v1 + `pre` (2026-09-06, the
+proportional-live ratification, HALCYON.md §14.13 -- operator-signed-off; an
+additive paired op tolerated by old renderers per rule 4). NB `pre` is NOT the
+refused typography-op class: it names a content PROPERTY (whitespace is
+significant), never a face/size/color, so the stylesheet still owns the
+realization (mono + chrome). Growth toward
 layout/typography ops is REFUSED on sight — that was the TermKit failure.
 
 ### 12.3 The tier mechanism (consctl verb + environment)
@@ -429,9 +447,31 @@ effective_tier(env_tier, dc_of_stdout, flag) =
                                   //  "floor Cells" clause is DROPPED -- an absent
                                   //  advertisement means no renderer reads frames, so
                                   //  always trusts the advertised tier, never invents one)
-    else (auto, the default)   -> if dc_of_stdout == 'c' then env_tier else None
+    else (auto, the default)   -> if dc_of_stdout in {'c', 't'} then env_tier else None
+                                  // ('t' = a pts SLAVE the kernel's pts registry knows -- H-4d-2a,
+                                  //  2026-09-05: a terminal its host renders; the host declares the
+                                  //  tier in the hosted program's BEACON at spawn, KAUA-TERM.md R1)
 ```
 
+- **AMENDED at H-4d-2a (2026-09-05): a pts slave is a terminal.**
+  `SYS_FD_DEVCLASS` answers `'t'` for a fd the kernel's pts registry knows
+  as a SLAVE (`spoor_devclass`, kernel/syscall.c: the same
+  `pts_resolve_spoor` the tty seam uses -- a ref-held (conn, qid) binding,
+  never a server-settable qid bit; the MASTER stays `'9'`, since printing
+  onto a master is typing into the terminal), and `effective_tier` admits
+  `'t'` beside `'c'` under Auto (`libthyla_rs::stdout_is_terminal()` is
+  the same pair). For a pts the advertisement is the HOST's word:
+  `kaua-term --beacon <tier>` writes the tier it renders into its own
+  `/env/BEACON` before the spawn, the hosted program inherits it, and `ut`'s
+  pts branch arms its zones from that inheritance iff the tier is rich AND
+  its stdout answers `'t'` (a redirected shell emits nothing; no per-prompt
+  re-read -- a tile's tier is fixed for its host's life). Absent = none,
+  fail-closed. Until this every session tile was PLAIN: `ut` resolved its
+  tier only inside the console branch, the console's `/dev/beacon`
+  describes the console renderer, and a pts answered dev9p's `'9'` -- so no
+  tool in a tile ever emitted a frame, and no KT-1 gate had asserted one.
+  ls-gfx-session now asserts a tile shell's `beacon rich (transcript zones
+  armed)`, the line only the `'t'` answer + the rich inheritance produce.
 - Per-tool flag: `--beacon=auto|always|never`, mirroring `--color=WHEN`
   (COREUTILS-THYLACINE-DESIGN.md). **`--color` keeps governing color; at
   `cells` tier the two gates compose** (color off ⇒ the cells realization

@@ -260,6 +260,22 @@ pub struct Pane {
     /// -- HALCYON.md 13.6); an occupied leaf's ownership is its surface's,
     /// so this field is meaningful only while the leaf is empty.
     pub owner_principal: u32,
+    /// H-4d: the CONN that created this leaf by a ctl `split` (0 = none: a
+    /// chord split, the environment, or a creator that has since gone).
+    /// While the creator conn lives, an EMPTY leaf it split is RESERVED to
+    /// it: the claim mint refuses every other same-principal conn (E_AGAIN),
+    /// so a restore tool building a skeleton is never raced by its own
+    /// session compositor filling the leaves before they are tagged (rio: a
+    /// window a program creates is that program's, not the menu's). Cleared
+    /// for every pane of a conn at its retire (`release_creator`), which is
+    /// the moment the leaves become the principal's to host. Meaningful only
+    /// while the leaf is empty (a hosted leaf's owner is its surface's).
+    pub creator_conn: u64,
+    /// The creator conn's PROCESS (its kernel stripes): a claim-less create
+    /// from another conn of the SAME process (a driver's control conn
+    /// splits, its surface conn hosts -- the battery's idiom) is not held
+    /// off by the reservation; another process's is.
+    pub creator_peer: u64,
     /// F2 (d-1b tiling completion): this leaf hosts a BACKGROUNDED surface (a
     /// non-session renderer while a session holds the display). Set by
     /// reconcile BEFORE recompute from the tree (owner-based, visibility-
@@ -331,6 +347,8 @@ impl Layout {
             visible: false,
             claim_token: None,
             owner_principal: 0,
+            creator_conn: 0,
+            creator_peer: 0,
             backgrounded: false,
         };
         let slot = match self.panes.iter().position(|s| s.is_none()) {
@@ -407,6 +425,41 @@ impl Layout {
         if let Some(p) = self.get_mut(slot) {
             p.owner_principal = principal;
         }
+    }
+
+    /// H-4d: the conn that split `slot` into being (0 = none / released).
+    pub fn pane_creator(&self, slot: usize) -> u64 {
+        self.get(slot).map_or(0, |p| p.creator_conn)
+    }
+
+    /// H-4d: stamp `slot`'s creator conn (after a ctl `split`, on both
+    /// resulting empties -- the splitter's, like the owner principal).
+    pub fn set_creator(&mut self, slot: usize, conn: u64, peer: u64) {
+        if let Some(p) = self.get_mut(slot) {
+            p.creator_conn = conn;
+            p.creator_peer = peer;
+        }
+    }
+
+    /// H-4d: release every reservation `conn` holds (its retire). Returns
+    /// how many EMPTY leaves were reserved to it -- the count the session
+    /// compositor must be told about (a released leaf is now claimable by
+    /// the principal's other conns, and no geometry changes to announce it).
+    pub fn release_creator(&mut self, conn: u64) -> usize {
+        if conn == 0 {
+            return 0;
+        }
+        let mut released = 0;
+        for p in self.panes.iter_mut().flatten() {
+            if p.creator_conn == conn {
+                p.creator_conn = 0;
+                p.creator_peer = 0;
+                if matches!(p.kind, Kind::Leaf { surface: None }) {
+                    released += 1;
+                }
+            }
+        }
+        released
     }
 
     /// The leaf hosting surface `n` (linear scan; the table is small).
@@ -510,15 +563,35 @@ impl Layout {
     /// focused leaf (orientation by aspect) and host into the new leaf.
     /// Returns the hosting slot (None: pane table exhausted).
     pub fn host(&mut self, n: usize) -> Option<usize> {
+        self.host_for(n, 0, 0)
+    }
+
+    /// `host`, for a surface conn `conn` of process `peer` creates: a
+    /// focused EMPTY leaf that another live PROCESS split (`creator_conn`
+    /// + `creator_peer`, H-4d) is that process's until its conn goes --
+    /// treated as occupied here, so the surface splits beside it instead of
+    /// taking a restore tool's leaf out from under its tag (the claim mint
+    /// already refused such a leaf; a claim-less create fell through to this
+    /// focused-leaf fallback). Keyed on the PROCESS, not the conn: a program
+    /// that splits on one conn and hosts on another (the battery's control
+    /// conn + its per-surface conns) fills its own leaf as before. `conn` 0
+    /// = the environment, never held off.
+    pub fn host_for(&mut self, n: usize, conn: u64, peer: u64) -> Option<usize> {
         let f = self.focused;
-        if let Some(p) = self.get_mut(f) {
-            if let Kind::Leaf { surface: s @ None } = &mut p.kind {
-                *s = Some(n);
-                // A new program takes the tile: its status starts fresh.
-                p.status = Status::Resting;
-                p.claim_token = None;
-                self.epoch += 1;
-                return Some(f);
+        let reserved_elsewhere = conn != 0
+            && self.get(f).map_or(false, |p| {
+                p.creator_conn != 0 && p.creator_conn != conn && p.creator_peer != peer
+            });
+        if !reserved_elsewhere {
+            if let Some(p) = self.get_mut(f) {
+                if let Kind::Leaf { surface: s @ None } = &mut p.kind {
+                    *s = Some(n);
+                    // A new program takes the tile: its status starts fresh.
+                    p.status = Status::Resting;
+                    p.claim_token = None;
+                    self.epoch += 1;
+                    return Some(f);
+                }
             }
         }
         let r = self.get(f)?.content;

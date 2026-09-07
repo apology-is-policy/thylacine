@@ -10,9 +10,9 @@ validated-by: [prose, gate-smp]
 locks: []
 hazards: []
 abis: []
-design: ["docs/ARCHITECTURE.md", "docs/VIVARIUM.md"]
+design: ["docs/ARCHITECTURE.md", "docs/VIVARIUM.md", "docs/DISTRO.md"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -25,19 +25,29 @@ struct.
 ## Contract
 
 `elf_load(blob, size, out)` returns `ELF_LOAD_OK` and fills `out`, or one of
-**twenty-two** distinct negative codes. The granularity is deliberate — one code
-per rejection class, so a test says which rule fired rather than that something
-did.
+**twenty-four** distinct negative codes (measured; the prose long said
+twenty-two, undercounting by one before D-2 even added its own). The granularity
+is deliberate — one code per rejection class, so a test says which rule fired
+rather than that something did.
 
 Two preconditions the caller owns: `blob` must be 8-byte aligned (the struct
 cast is undefined otherwise, and the sanitizer traps it), and `size` is the
 extent the file's *contents* must fit within — which is not always the extent of
 the buffer. See Mechanism.
 
-Accepted at v1.0: statically-linked `ET_EXEC`, `EM_AARCH64`, little-endian,
-64-bit, `ELFOSABI_NONE` or `ELFOSABI_GNU`. Refused: dynamic (both `PT_INTERP`
-*and* `PT_DYNAMIC`, separately), executable stacks, any segment that is both
-writable and executable.
+Accepted: `ET_EXEC` (absolute `p_vaddr`) **or `ET_DYN`** — a PIE, placed at
+`ELF_PIE_LOAD_BIAS` (DISTRO D-2) — `EM_AARCH64`, little-endian, 64-bit,
+`ELFOSABI_NONE` or `ELFOSABI_GNU`. Refused: `PT_INTERP` (still, HERE — but see
+below), `PT_DYNAMIC` **on an `ET_EXEC`** (a PIE carries one legitimately;
+accepted and never processed), executable stacks, any segment both writable and
+executable, and a biased PIE segment that leaves the window (`ELF_LOAD_PIE_OOB`).
+
+**`PT_INTERP` is refused here, yet the system is no longer static-only.** The
+loader loads exactly one image and runs no interpreter; DISTRO D-4's
+rewrite-to-ldso route reads `PT_INTERP` at the *vivarium exec chokepoint* (via
+`elf_read_interp`, below) and restarts resolution on the interpreter — so what
+reaches `elf_load` is the interpreter itself, which carries no `PT_INTERP` of its
+own, and this reject stays correct on both sides of D-4.
 
 ## Mechanism
 
@@ -66,11 +76,45 @@ explained at both ends, but it means `size` is not "how many bytes you may
 dereference" — the only reason the phdr walk stays in bounds is a check that
 lives in another file.
 
+**The PIE bias is the one number D-2 added, and it enters in a single place.** An
+`ET_DYN` image's `p_vaddr` are offsets from a base the loader chooses; `elf_load`
+adds `ELF_PIE_LOAD_BIAS` (512 MiB) to `e_entry` and to every `PT_LOAD`'s `vaddr`,
+so everything downstream — the segment mapper, the file-backed/eager split, the
+`AT_PHDR` translation — reads FINAL addresses and needed no change. `bias` is 0
+for `ET_EXEC`, so that path stays byte-identical; the W^X gate, the page-sharing
+refusal, and the alignment terms are unchanged, only the numbers moved. The bias
+is 64 KiB-aligned on purpose: stock aarch64 ELFs carry `p_align` 0x10000, so a
+multiple of it preserves the gABI `p_vaddr == p_offset (mod p_align)` congruence —
+which keeps a segment's file-offset alignment, and therefore its eligibility for
+the shared file-backed arm, the same biased or unbiased. The biased span is
+bounded inside `[BIAS, ELF_PIE_LOAD_LIMIT)` (`ELF_LOAD_PIE_OOB`), so the loader
+states what it will and will not place rather than leaning on a general allocator
+rule to catch a hostile `p_vaddr`. It is ONE constant deliberately; per-exec
+randomization is a recorded I-16-adjacent seam.
+
+**The `PT_INTERP` walk is now shared, not duplicated (D-4 / #215).**
+`elf_read_interp` is the bounded walk `elf_brand_hint` used to carry privately; D-4
+promoted it because the rewrite route ACTS on the extracted path — it resolves and
+execs it — and a second copy of "is this offset inside the prefix, is this string
+terminated" would be a second place for that judgement to drift (#140 is the
+standing demonstration). Promoting it to a second PUBLIC parser of hostile bytes
+made it inherit `elf_load`'s alignment preconditions: both the buffer alignment
+(R5-G F61 — the sibling's guard #215 gave the new walk) and the
+attacker-controlled `e_phoff` alignment (R5-G F62). It is pure, answers 0 (never a
+partial answer) for every unreadable / unterminated / empty / oversized case, and
+caps the path at `ELF_INTERP_MAX` (255; a real interpreter path is under 32 bytes).
+
 ## Data structures
 
-`struct elf_image` — entry point, the phdr table's location for `AT_PHDR`, and
-up to sixteen `elf_load_segment` records. Flat, fixed, no pointers into the
+`struct elf_image` — the entry point, the phdr table's location for `AT_PHDR`,
+and up to sixteen `elf_load_segment` records. Flat, fixed, no pointers into the
 blob, which is what lets `exec` keep using it after the header buffer is freed.
+D-2 added two fields: `load_bias` (0 for `ET_EXEC`, `ELF_PIE_LOAD_BIAS` for a
+PIE) and `type` (the `e_type`, diagnostics). `entry` and every `segments[].vaddr`
+are FINAL — they already carry the bias, and no consumer adds it. `AT_ENTRY`
+(auxv tag 9) reports `entry`; it is NOT what makes stock ldso work (musl writes
+it itself on the direct-invocation branch, #186), but the v1.x in-kernel
+dual-image lift would need it.
 
 `out` is **zeroed on entry**, another audit fix: a caller who ignores the error
 code and reads the struct anyway gets defined zeros rather than partially-parsed
@@ -93,18 +137,24 @@ Worth being exact about what this leg is worth. It is *not* the gate that makes
 W^X hold — that is `vma_alloc`, which refuses the same combination for every
 mapping in the system regardless of where it came from. This one catches the
 violation earlier and reports it precisely. Defence in depth, correctly built;
-just not the load-bearing layer, and its own file header says otherwise.
+just not the load-bearing layer, and its own file header says otherwise. The D-2
+PIE bias does not touch this leg: the W^X check reads `p_flags` above the bias
+arithmetic, so it is byte-identical whether a segment is fixed or relocated.
 
 ## Error paths
 
-Twenty-two codes, all negative, all reached before any state is mutated. `out`
-is zeroed regardless. Nothing here can fail an allocation or block, so every
-error is a pure classification.
+Twenty-four codes, all negative, all reached before any state is mutated. `out`
+is zeroed regardless. `ELF_LOAD_HAS_DYNAMIC` narrowed with D-2 — it now fires
+only on a `PT_DYNAMIC` in an `ET_EXEC`, since a PIE carries one legitimately — and
+`ELF_LOAD_PIE_OOB` is the code D-2 added. Nothing here can fail an allocation or
+block, so every error is a pure classification.
 
-The one code that travels badly is `ELF_LOAD_HAS_INTERP`: `exec` collapses every
-non-OK return to `-1`, so a dynamically-linked binary and a corrupt one fail
-identically from userspace. That is what the brand hint below was built to
-soften.
+`ELF_LOAD_HAS_INTERP` used to travel badly: `exec` collapses every non-OK return
+to `-1`, so a dynamic binary and a corrupt one failed identically. D-4 changed the
+destination, not this return — the vivarium exec chokepoint now reads `PT_INTERP`
+with `elf_read_interp` BEFORE resolution would reach this reject and rewrites the
+exec onto the interpreter, so a Linux dynamic binary RUNS. Outside a vivarium the
+collapse still stands, which is what the brand hint below was built to soften.
 
 ## Performance
 
@@ -123,8 +173,14 @@ that lives in [[sub-kernel-exec]].
 
 ## Seams
 
-- **Dynamic linking is refused permanently**, not deferred — the two rejections
-  are policy, not gaps.
+- **Dynamic linking is served by rewrite, not by a relocator here.** D-2/D-4
+  made stock dynamic binaries run — a PIE loads at the bias, and a `PT_INTERP`
+  binary is rewritten onto its interpreter at the vivarium exec chokepoint — but
+  the loader itself still processes no `PT_DYNAMIC` and runs no interpreter. A
+  true in-kernel relocator, or the dual-image `PT_INTERP` lift, is the recorded
+  v1.x seam (`AT_ENTRY` is already emitted for it).
+- Per-exec PIE base randomization is an I-16-adjacent seam: today the bias is one
+  constant, and the natural shape when it lands is a parameter on `elf_load`.
 - **Non-page-aligned segments** are rejected by exec, not here; the ELF spec
   permits them.
 - **A positive native brand** (a `.note.thylacine`-shaped marker) is the
@@ -174,6 +230,11 @@ The file's own header still describes the loader as parse-only pending a Phase 3
 that would wire mapping and a Phase 5 that would add an exec surface. Both
 arrived. The description is accurate about the function and stale about the
 world around it.
+
+DISTRO extended the accepted set: D-2 added `ET_DYN`/PIE placement + `AT_ENTRY`
+(`ELF_PIE_LOAD_BIAS`, `ELF_LOAD_PIE_OOB`, the `load_bias`/`type` fields), D-4 the
+shared `elf_read_interp` for the rewrite-to-ldso route, and #215 gave that walk
+its sibling's alignment guards. [[chg-2026-09-06-elf-distro-dynamic]].
 
 ## Tests
 

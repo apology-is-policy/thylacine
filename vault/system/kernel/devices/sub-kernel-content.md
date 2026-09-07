@@ -13,7 +13,7 @@ code:
   - kernel/include/thylacine/random.h
   - kernel/include/thylacine/chacha20.h
 audit: hard
-guarded-by: [inv-i1, inv-i16, inv-i28, inv-i32, inv-i33]
+guarded-by: [inv-i1, inv-i12, inv-i16, inv-i28, inv-i32, inv-i33]
 validated-by: [prose, gate-smp]
 locks: [lock-env, lock-random, lock-rng-dev]
 abis: []
@@ -22,7 +22,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.7"
   - "docs/PORTABILITY.md section 6"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -56,6 +56,29 @@ copied. The consequence is not incidental: the archive can never be freed, and
 the long-standing intent to release it once the real filesystem mounts is blocked
 by the shape of the table that reads it, not by anyone's priorities. Identity is
 positional — a file's name in the protocol is its index in the table plus one.
+
+**And because that content is real, system-owned files, the boot filesystem
+vouches that they may back executable pages.** Its Dev sets `may_back_exec =
+true` (#217) — the I-12 provenance floor ([[inv-i12]]): a file-backed executable
+mapping is admitted only if **both** the backing Dev carries this vouch **and**
+the mount is not `MNOEXEC`. ramfs vouches for the same reason it preserves each
+file's execute bit (Caveats) — it serves the binaries the machine executes from;
+`/env`'s Dev deliberately does not, because it serves per-process variable text,
+never code. The vouch is the allowlist entry, not the enforcement: the check
+lives on the exec/mmap path, and a Dev that forgot to set it would simply have
+its files refused as executable backing, fail-closed.
+
+**And because every entry is system-owned, the boot filesystem is the one backing
+where per-file rwx is actually *enforced* at v1.0's start.** Its Dev sets
+`perm_enforced = true`, and its `stat_native` stamps every entry — root directory
+and file alike — `PRINCIPAL_SYSTEM` / `GID_SYSTEM`. The boot chain runs as that
+same *un-elevated* `PRINCIPAL_SYSTEM` ([[inv-i22]]: the identity carries no ambient
+authority), so it owns everything it traverses and passes the owner-rwx check,
+while a non-system principal gets only the world r/x the archive's modes grant —
+never write. That is why switching [[sub-kernel-perm]]'s enforcement on over the
+boot FS cannot brick boot: the system that must traverse it is exactly the system
+that owns it. devramfs has no `wstat_native`, so a chmod/chown on a boot-FS file
+is always refused — correct, not a gap.
 
 **The environment's content is the process's own, and its identity has to be
 manufactured.** A variable is named by a **monotonically increasing id**, assigned
@@ -135,6 +158,19 @@ seed**, so it is entropy someone can partially observe. It is mixed in as
 material — through a deliberately different avalanche function, so the two
 derivations do not correlate ([[inv-i16]]) — but it does not count toward
 readiness. Only the CPU's own generator, or a pull from the host, flips the gate.
+
+**The CPU's own generator is RNDR (FEAT_RNG), and its capture idiom is
+load-bearing.** Presence is probed once at init from `ID_AA64ISAR0_EL1`
+bits[63:60] (a value `>= 1`) into a cross-CPU-read flag, which the boot banner
+reports. A read of the RNDR register sets `PSTATE.NZCV` — `Z == 0` means it
+returned fresh entropy — so the read is captured with a `cset` on `ne` and
+retried up to ten times when the source is transiently dry, and the inline
+assembly **must clobber `cc`**, because RNDR writes the flags and omitting the
+clobber is a miscompile that reads a stale condition. Since the ChaCha20-stir
+baseline RNDR is no longer the *sole* source: on an RNDR-less target (Apple
+cores under HVF, the A72) the DTB boot seed, `CNTPCT` jitter and a host
+virtio-rng pull carry it — but where RNDR is present it is the unobserved strong
+source that flips the readiness gate.
 
 **That pull is bounded twice, and each bound covers the other's blind spot.** The
 host device completes asynchronously on another thread while the guest may be
@@ -343,3 +379,8 @@ of vtable slot, the device-registration consistency check, the archive
 generator's mode handling, and the 40 registered tests across the five files.
 
 [[chg-2026-08-16-seven-small-surfaces]] records this interval.
+[[chg-2026-09-06-content-mayexec-vouch]] adds the #217 `may_back_exec` vouch.
+[[chg-2026-09-06-fs-permission-absorb]] makes devramfs's `perm_enforced = true` +
+the `PRINCIPAL_SYSTEM`/`GID_SYSTEM` `stat_native` stamp explicit (absorbed from
+docs/reference/99): the boot FS is the one enforced backing, and boot survives it
+because the traverser owns everything it touches.

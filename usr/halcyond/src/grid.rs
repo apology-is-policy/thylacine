@@ -26,6 +26,12 @@ pub struct Grid {
     cells: Vec<Cell>,
     /// `(row, col, visible)` as the producer last reported it (unclamped).
     cursor: (u16, u16, bool),
+    /// PL-4: per-row soft-wrap flags -- the vt's live-screen `wrapped`, carried
+    /// on the CellDiff. `wrapped[y]` is true iff grid row y ended by autowrap
+    /// (a mid-`cols` break of a logical line) and continues into y+1, so the
+    /// normal-mode proportional render can rejoin soft-wrapped rows into logical
+    /// lines (the live analogue of `push_scrolled_rows`, PL-3). Length == `rows`.
+    wrapped: Vec<bool>,
     /// blank fill for clears / the grown region on resize.
     fg: u32,
     bg: u32,
@@ -41,11 +47,13 @@ impl Grid {
                     ch: ' ',
                     fg,
                     bg,
-                    attrs: 0
+                    attrs: 0,
+                    span: 0,
                 };
                 cols * rows
             ],
             cursor: (0, 0, true),
+            wrapped: vec![false; rows],
             fg,
             bg,
         }
@@ -58,6 +66,7 @@ impl Grid {
             fg: self.fg,
             bg: self.bg,
             attrs: 0,
+            span: 0,
         }
     }
 
@@ -77,6 +86,32 @@ impl Grid {
         )
     }
 
+    /// The per-row soft-wrap flags (length == `rows`; PL-4). `wrapped()[y]` true
+    /// iff grid row y ended by autowrap and continues into y+1.
+    pub fn wrapped(&self) -> &[bool] {
+        &self.wrapped
+    }
+
+    /// The whole grid, row-major (`rows * cols`) -- the PL-4 proportional render
+    /// lays it as logical lines (via `Transcript::live_block`).
+    pub fn cells(&self) -> &[Cell] {
+        &self.cells
+    }
+
+    /// PL-4: the number of rows the proportional render lays -- through the last
+    /// row with content OR the cursor row, whichever is lower, so a screen of
+    /// trailing blank rows below the prompt is not painted (the bottom-anchored
+    /// view would otherwise float the prompt mid-tile). At least 1.
+    pub fn content_rows(&self) -> usize {
+        let cur = self.cursor().0 + 1;
+        let last = (0..self.rows)
+            .rev()
+            .find(|&r| self.row(r).iter().any(|c| c.ch != ' '))
+            .map(|r| r + 1)
+            .unwrap_or(0);
+        last.max(cur).min(self.rows).max(1)
+    }
+
     /// Row `r`'s cells (empty slice if out of range).
     pub fn row(&self, r: usize) -> &[Cell] {
         if r < self.rows {
@@ -92,7 +127,12 @@ impl Grid {
     /// real screen). The producer guarantees a CellDiff is flushed before every
     /// ScrollOff / Control / Mode, so the grid is coherent at every record
     /// boundary.
-    pub fn apply_celldiff(&mut self, changed: &[(u16, u16, Cell)], cursor: (u16, u16, bool)) {
+    pub fn apply_celldiff(
+        &mut self,
+        changed: &[(u16, u16, Cell)],
+        cursor: (u16, u16, bool),
+        wrapped: &[bool],
+    ) {
         for &(r, c, cell) in changed {
             let (r, c) = (r as usize, c as usize);
             if r < self.rows && c < self.cols {
@@ -102,6 +142,12 @@ impl Grid {
             // cannot corrupt the grid past its told dims.
         }
         self.cursor = cursor;
+        // Pin the wrap snapshot to `rows` (never trust the wire's length -- the
+        // format-fuzz class): a shorter vec pads false, a longer one truncates.
+        self.wrapped.resize(self.rows, false);
+        for i in 0..self.rows {
+            self.wrapped[i] = wrapped.get(i).copied().unwrap_or(false);
+        }
     }
 
     /// Resize to new dims (halcyond drives this on a tile relayout; the tile
@@ -118,7 +164,14 @@ impl Grid {
                 next[r * cols + c] = self.cells[r * self.cols + c];
             }
         }
+        // Mirror the wrap flags for the preserved rows; a grown row is not
+        // soft-wrapped until the producer's repaint says so.
+        let mut next_wrapped = vec![false; rows];
+        for r in 0..copy_rows {
+            next_wrapped[r] = self.wrapped.get(r).copied().unwrap_or(false);
+        }
         self.cells = next;
+        self.wrapped = next_wrapped;
         self.cols = cols;
         self.rows = rows;
         let (cr, cc, cv) = self.cursor;
@@ -140,6 +193,7 @@ mod tests {
             fg: 0x00FF00,
             bg: 0x000000,
             attrs: 0,
+            span: 0,
         }
     }
 
@@ -161,7 +215,7 @@ mod tests {
     #[test]
     fn celldiff_writes_and_moves_cursor() {
         let mut g = Grid::new(4, 2, 0xFFFFFF, 0);
-        g.apply_celldiff(&[(0, 1, c('h')), (1, 3, c('i'))], (1, 3, true));
+        g.apply_celldiff(&[(0, 1, c('h')), (1, 3, c('i'))], (1, 3, true), &[false, false]);
         assert_eq!(g.row(0)[1].ch, 'h');
         assert_eq!(g.row(1)[3].ch, 'i');
         assert_eq!(g.row(0)[0].ch, ' ', "untouched cell stays blank");
@@ -171,7 +225,7 @@ mod tests {
     #[test]
     fn celldiff_last_write_to_a_cell_wins() {
         let mut g = Grid::new(3, 1, 0xFFFFFF, 0);
-        g.apply_celldiff(&[(0, 0, c('a')), (0, 0, c('b'))], (0, 1, true));
+        g.apply_celldiff(&[(0, 0, c('a')), (0, 0, c('b'))], (0, 1, true), &[false]);
         assert_eq!(g.row(0)[0].ch, 'b');
     }
 
@@ -182,6 +236,7 @@ mod tests {
         g.apply_celldiff(
             &[(9, 0, c('x')), (0, 9, c('y')), (1, 1, c('z'))],
             (9, 9, true),
+            &[false, false],
         );
         assert_eq!(g.row(1)[1].ch, 'z', "the in-bounds write still landed");
         // an out-of-range cursor is clamped by the accessor, never indexes.
@@ -191,7 +246,7 @@ mod tests {
     #[test]
     fn resize_preserves_overlap_blanks_growth_clamps_cursor() {
         let mut g = Grid::new(3, 2, 0xFFFFFF, 0);
-        g.apply_celldiff(&[(0, 0, c('a')), (1, 2, c('b'))], (1, 2, true));
+        g.apply_celldiff(&[(0, 0, c('a')), (1, 2, c('b'))], (1, 2, true), &[false, false]);
         // shrink to 2x1: (0,0)='a' kept; (1,2)='b' falls outside; cursor clamps.
         g.resize(2, 1);
         assert_eq!(g.dims(), (2, 1));
@@ -203,6 +258,39 @@ mod tests {
         assert_eq!(g.dims(), (4, 3));
         assert_eq!(g.row(0)[0].ch, 'a', "overlap preserved across grow");
         assert_eq!(g.row(2)[3].ch, ' ', "grown region blank");
+    }
+
+    #[test]
+    fn celldiff_stores_wrap_and_resize_mirrors_it() {
+        // PL-4: the grid holds the per-row soft-wrap snapshot the CellDiff
+        // carries, pinned to `rows`; resize preserves it for the kept rows.
+        let mut g = Grid::new(4, 3, 0xFFFFFF, 0);
+        g.apply_celldiff(&[], (0, 0, true), &[true, false, true]);
+        assert_eq!(g.wrapped(), &[true, false, true]);
+        // a short wire vec pads false to `rows` (never indexes past the grid).
+        g.apply_celldiff(&[], (0, 0, true), &[true]);
+        assert_eq!(g.wrapped(), &[true, false, false]);
+        // shrink keeps the top rows' flags; grow blanks the new rows false.
+        g.apply_celldiff(&[], (0, 0, true), &[true, true, true]);
+        g.resize(4, 2);
+        assert_eq!(g.wrapped(), &[true, true]);
+        g.resize(4, 4);
+        assert_eq!(g.wrapped(), &[true, true, false, false]);
+    }
+
+    #[test]
+    fn content_rows_trims_trailing_blanks() {
+        // PL-4: the proportional render lays through the last content row or the
+        // cursor row, not the full grid -- so trailing blanks below the prompt
+        // are not painted.
+        let mut g = Grid::new(4, 4, 0xFFFFFF, 0);
+        assert_eq!(g.content_rows(), 1, "blank grid, cursor home -> 1 row");
+        g.apply_celldiff(&[(1, 0, c('x'))], (1, 1, true), &[]);
+        assert_eq!(g.content_rows(), 2, "content + cursor on row 1 -> 2 rows");
+        // cursor past the content still extends through the cursor.
+        let mut g2 = Grid::new(4, 4, 0xFFFFFF, 0);
+        g2.apply_celldiff(&[], (3, 0, true), &[]);
+        assert_eq!(g2.content_rows(), 4, "cursor at row 3 -> 4 rows even if blank");
     }
 
     #[test]

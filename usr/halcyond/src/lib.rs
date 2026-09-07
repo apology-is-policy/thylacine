@@ -19,16 +19,19 @@ pub mod layout;
 pub mod menu;
 pub mod raster;
 pub mod select;
+pub mod session_init;
 pub mod status;
 pub mod tile;
 pub mod tiles;
 pub mod transcript;
 
 /// The vendored proportional faces (third_party/dejavu-fonts; HALCYON.md
-/// section 3 -- DejaVu Sans Condensed, operator-chosen). Oblique +
-/// BoldOblique are vendored beside these; they get included the day the
-/// stylesheet takes an italic role.
+/// section 3 -- DejaVu Sans Condensed, operator-chosen). The italic role is
+/// now taken (PL-2 / the Genera type discipline): Oblique is the italic face;
+/// BoldOblique stays vendored for a future bold-italic slot.
 pub const DEJAVU_SANS_CONDENSED: &[u8] =
     include_bytes!("../../../third_party/dejavu-fonts/ttf/DejaVuSansCondensed.ttf");
 pub const DEJAVU_SANS_CONDENSED_BOLD: &[u8] =
     include_bytes!("../../../third_party/dejavu-fonts/ttf/DejaVuSansCondensed-Bold.ttf");
+pub const DEJAVU_SANS_CONDENSED_OBLIQUE: &[u8] =
+    include_bytes!("../../../third_party/dejavu-fonts/ttf/DejaVuSansCondensed-Oblique.ttf");

@@ -5,12 +5,12 @@ kind: registry
 stability: append-only
 title: "The errno registry — T_E_* and the POSIX-value contract"
 pinned-by:
-  - "_Static_assert per value (kernel/include/thylacine/errno.h, 20 asserts)"
+  - "_Static_assert per value (kernel/include/thylacine/errno.h, 36 asserts)"
 mirrors:
   - "usr/lib/libthyla-rs/src/err.rs: enum Error + From<i32> + as_errno + Display"
   - "usr/lib/pouch/patches/0001-pouch-syscall-seam.patch: __syscall_ret (range contract, not a value list)"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-06
 ---
 ## The surface
 
@@ -25,22 +25,40 @@ anywhere.
 | 1 | `T_E_PERM` | EPERM | **never returned by a handler** — see the collision below |
 | 2 | `T_E_NOENT` | ENOENT | walk miss, Spoor lookup miss, no such target Proc |
 | 3 | `T_E_SRCH` | ESRCH | no such process — the `setpgid`/`getpgid`/`getsid` contour |
+| 4 | `T_E_INTR` | EINTR | a blocking wait unwound to deliver a **caught** note (not death); a native caller re-issues, a Linux handler restarts iff `SA_RESTART` |
 | 5 | `T_E_IO` | EIO | block-device failure, 9P `Rerror`, transport break |
+| 7 | `T_E_2BIG` | E2BIG | the environment bounds only (`EXEC_ENV_MAX`); the ARGV bounds still answer `INVAL` — the asymmetry is tracked (#142), not accidental |
 | 9 | `T_E_BADF` | EBADF | empty slot, bad magic, wrong `KObj` kind for the op |
+| 10 | `T_E_CHILD` | ECHILD | a wait names no matching child — every reap loop's termination condition (LINEAGE L-6b `wait4`) |
 | 11 | `T_E_AGAIN` | EAGAIN | would block; note queue at depth without coalesce |
 | 12 | `T_E_NOMEM` | ENOMEM | allocator or fixed-size table exhausted |
 | 13 | `T_E_ACCES` | EACCES | **the "denied" code handlers actually use** |
 | 14 | `T_E_FAULT` | EFAULT | a `uaccess` touch faulted on the supplied user VA |
 | 16 | `T_E_BUSY` | EBUSY | per-Proc lock held and the op cannot wait; mount busy |
 | 17 | `T_E_EXIST` | EEXIST | mount point taken; create collision |
-| 19 | `T_E_NODEV` | ENODEV | the backing endpoint went away (Loom device-gone) |
+| 19 | `T_E_NODEV` | ENODEV | the backing endpoint went away (any clean server-side close; Loom device-gone) |
+| 20 | `T_E_NOTDIR` | ENOTDIR | X-search on a non-directory component — precedes the X-check, so 0755 and 0644 answer alike; distinct from `NOENT` ("safe to create") |
+| 21 | `T_E_ISDIR` | EISDIR | write/create names a directory — the 9P server, or `SYS_OPEN_CREATE`'s lexical leaf rows |
 | 22 | `T_E_INVAL` | EINVAL | structurally malformed argument |
+| 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`) |
+| 25 | `T_E_NOTTY` | ENOTTY | a `TC*`/`TIOC*` op on a non-tty fd; `isatty()` reads it via a failed `TIOCGWINSZ` |
 | 32 | `T_E_PIPE` | EPIPE | write to a closed read end |
 | 34 | `T_E_RANGE` | ERANGE | in-range for the type, past an implementation limit |
 | 38 | `T_E_NOSYS` | ENOSYS | dispatch slot exists, handler is a placeholder |
+| 40 | `T_E_LOOP` | ELOOP | a symlink chain past `STALK_MAX_FOLLOWS` (40), or `O_NOFOLLOW` on a final symlink (DISTRO D-1) |
+| 88 | `T_E_NOTSOCK` | ENOTSOCK | a socket call names an fd with no socktab entry |
+| 93 | `T_E_PROTONOSUPPORT` | EPROTONOSUPPORT | a `SOCK_*`/`IPPROTO_*` the `/net` tree has no directory for |
 | 95 | `T_E_OPNOTSUPP` | EOPNOTSUPP | reserved; appended at PTY-1d, no current emitter |
+| 97 | `T_E_AFNOSUPPORT` | EAFNOSUPPORT | AF_INET6 and everything that is not AF_INET |
+| 98 | `T_E_ADDRINUSE` | EADDRINUSE | netd refused an `announce` for this port — reported by `listen()`, not `bind()` |
+| 103 | `T_E_CONNABORTED` | ECONNABORTED | an `accept()` whose connection the data open then refused |
+| 106 | `T_E_ISCONN` | EISCONN | a second `connect()` on a connected entry |
+| 107 | `T_E_NOTCONN` | ENOTCONN | `getpeername()`/`shutdown()` on an entry still FRESH |
 | 110 | `T_E_TIMEDOUT` | ETIMEDOUT | a `tsleep`/`torpor_wait` deadline elapsed |
+| 111 | `T_E_CONNREFUSED` | ECONNREFUSED | netd rejected the dial, or the data open failed after connect |
 | 125 | `T_E_CANCELED` | ECANCELED | a Loom chain op cancelled by a failed predecessor |
+
+The **socket family** (24 remapped to EMFILE for the socket table, and 88/93/97/98/103/106/107/111) was appended at VIVARIUM V-5, its values read directly from `third_party/musl/arch/generic/bits/errno.h` because a Linux guest's libc compares against exactly those numbers — collapsing them to `EINVAL` would make a guest retry a connection that can never succeed. `INTR` (4), `2BIG` (7), `CHILD` (10) and `NOTTY` (25) each landed under the same append-under-ratified-scripture precedent the `-1` and change-protocol sections describe.
 
 Two distinctions the names do not carry on their face. `T_E_ACCES` is a
 **per-handle or per-page** rights failure; `T_E_PERM` is a **Proc-wide
@@ -87,22 +105,34 @@ The three ranges a return value can fall in, as the seam reads them:
 ## Where the registry is mirrored, and where it has drifted
 
 **`usr/lib/libthyla-rs/src/err.rs`** is the only value-by-value mirror. It
-enumerates **15** of the 19 non-zero values. Missing: `T_E_SRCH` (3),
-`T_E_NODEV` (19), `T_E_OPNOTSUPP` (95), `T_E_CANCELED` (125) — which is
-exactly the set appended *after* the mirror was written (SRCH and OPNOTSUPP
-at PTY-1, NODEV at the Menagerie arc, CANCELED at Loom-5).
+enumerates **18** of the 35 non-zero values (`as_errno`): 1, 2, 5, 9, 11, 12,
+13, 14, 16, 17, 20, 21, 22, 32, 34, 38, 40, 110. Missing — **17** — is now
+dominated by the V-5 socket family: `SRCH` (3), `INTR` (4), `2BIG` (7),
+`CHILD` (10), `NODEV` (19), `MFILE` (24), `NOTTY` (25), `NOTSOCK` (88),
+`PROTONOSUPPORT` (93), `OPNOTSUPP` (95), `AFNOSUPPORT` (97), `ADDRINUSE` (98),
+`CONNABORTED` (103), `ISCONN` (106), `NOTCONN` (107), `CONNREFUSED` (111),
+`CANCELED` (125). The gap grew, not shrank, since this section last read
+"missing four": the mirror gained `NotADirectory` (20), `IsADirectory` (21)
+and `SymlinkLoop` (40), but the whole socket family plus INTR/2BIG/CHILD/NOTTY
+appended past it.
 
 This does not lose information: `Other(i32)` carries any unenumerated errno
 through, deliberately, so unknown kernel errors stay observable. The cost is
-that a native program cannot name them. `setpgid` on a stranger's pid and a
-cancelled Loom chain op are both live emit sites, and both surface as
-`Error::Other(3)` / `Error::Other(125)`, displaying as `kernel error
+that a native program cannot name them. `setpgid` on a stranger's pid, a
+cancelled Loom chain op, and a refused `connect` all surface as
+`Error::Other(3)` / `Other(125)` / `Other(111)`, displaying as `kernel error
 (errno N)` and matchable only against a magic number.
+
+The asymmetry runs the other way once, too: `err.rs` names
+`DirectoryNotEmpty` → **39** (`ENOTEMPTY`), a server-originated value (#80)
+that has **no** `T_E_*` in `errno.h` — the kernel never mints it; a 9P
+`Rlerror` carries it through the `[-4095, -2]` passthrough. So the two lists
+disagree in both directions.
 
 **Nothing catches the lag.** The kernel's discipline is a `_Static_assert`
 per value; the Rust side has no equivalent, and no test compares the two
-lists. Each append owed a mirror update by the audit rule above; four went
-without one, and the build stayed green every time. Tracked as task #34.
+lists. Each append owed a mirror update by the audit rule above; the build
+stayed green through every omission. Tracked as task #34.
 
 **`usr/lib/libt`** deliberately holds no mirror — the C wrappers return the
 raw negative and let the caller interpret it.

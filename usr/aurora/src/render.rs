@@ -68,7 +68,7 @@ pub fn draw_run(
         {
             break;
         }
-        let cell = Cell { ch, fg, bg, attrs: 0 };
+        let cell = Cell { ch, fg, bg, attrs: 0, span: 0 };
         draw_cell(&cell, m, px, w, c, row, false);
         c += 1;
     }

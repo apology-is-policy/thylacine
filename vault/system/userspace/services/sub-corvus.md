@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -59,6 +59,16 @@ torn down, because the wire contract says a stream cannot be safely
 re-synced across a framing disagreement. The reply is delivered *before*
 the EOF: the teardown is deferred until the staged response has been fully
 drained by a subsequent read.
+
+`ctl` is **message-oriented, not a byte stream.** A `Tread` ignores the
+offset the client presents and drains instead from corvus's own
+per-connection cursor into the staged response, resetting the cursor when
+the response is exhausted so the next read returns zero bytes. The 9P
+offset would be racy on a verb-by-verb pattern — two reads of one reply
+could disagree on where they are — so the server owns the drain position
+and random-access reads on `ctl` are meaningless. The only client is the
+kernel-internal 9P client the transport drives, which reads each reply
+whole.
 
 **A response frame** is three bytes — status, 16-bit payload length —
 plus payload. Seven statuses: OK, BadAuth, PermissionDenied, NotFound,
@@ -140,6 +150,15 @@ peer can elevate mid-conversation) and console attachment is revocable in
 both directions. A dead peer or a failed query yields zero capabilities,
 so the gate fails closed by construction rather than by a branch.
 
+The accept-time snapshot is captured by one `t_srv_peer` read, and **that
+read is itself fail-closed**: a non-zero return closes the just-accepted
+handle rather than pushing a connection whose identity is unknown. It is
+not that the snapshot authorizes anything — it deliberately does not — but
+that a *failed* read must never be aliased with the zero-capability value a
+live gate treats as fail-closed. Refusing the accept keeps "no identity"
+and "no capabilities" distinct, which is the property a future
+administrative verb reading the snapshot's caps or stripes would depend on.
+
 **Persistence is atomic-by-rename.** The identity database and the
 clearance database are each serialized whole, written to a temporary name,
 fsynced, and renamed over the real one. The per-user keypair wrap and the
@@ -148,6 +167,20 @@ database aborts the boot rather than silently re-bootstrapping — which
 matters because the first user creation is the one that needs no
 authority, so a database that reads as empty would hand the next caller a
 free hostowner candidate.
+
+**The on-disk split is a secret boundary.** Two kinds of artifact persist: a
+central identity database, and per user a keypair wrap. The identity
+database is **non-secret** — a uid-to-name-to-group map, the shape
+`/etc/passwd` is world-readable in — and it is serialized as exactly that,
+never carrying a salt, nonce, ciphertext or tag. The keypair wrap is the
+only secret written, and it is ciphertext, openable solely with the
+passphrase- or phrase-derived key, so no plaintext secret ever reaches the
+filesystem. The two commit in a fixed order: the wrap is made durable
+*before* the identity record that names it, so a crash between leaves a
+harmless orphan wrap rather than a record pointing at a missing secret. The
+mirror holds at load — a user whose wrap is missing or corrupt is dropped
+fail-closed, logged and not authoritative for login, rather than admitted
+without a usable secret.
 
 **Clearance activation has two forms, and the newer one quotes nothing.**
 `CLEARANCE_ACTIVATE` (verb 15) is the **bearer** form: present a session
@@ -198,6 +231,35 @@ stores no copy of a keypair that any authority other than the user's own
 passphrase or own phrase can open; the host owner has no user-data
 recovery verb at all. That is the no-escrow property, and it is what makes
 mutually-encrypted homes survive a malicious host owner.
+
+**A user's recovery takes no token and no capability** — the user has lost
+the passphrase and so cannot AUTH, and a user-held recovery that needed the
+admin would not be user-held. What bounds the unauthenticated Argon2id it
+runs is a per-subject rate limit charged only on a checksum-valid-but-wrong
+phrase — a typo fails the cheap BIP-39 checksum first and is never charged —
+so a legitimate holder is never locked out and a guesser gets a bounded
+number of expensive attempts per boot. **System** recovery and its sibling
+`ADMIN_ELEVATE` add one gate: live console attachment, because the system
+identity is the most privileged secret and must never be reachable from a
+non-console peer. Both verify the system passphrase by a *real* Argon2id +
+AEGIS unwrap of the host-baked system wrap (minted by [[sub-corvus-mint]]) —
+the keypair it yields is wiped at once because only the yes/no is needed —
+not the byte-comparison the v1.0 placeholder used before the wrap existed.
+
+**The two wraps commit in a fixed order, and that order is a crash-safety
+property.** A recovery re-wraps the keypair under the new passphrase and
+rolls a fresh phrase, committing the passphrase wrap *first* and the recovery
+wrap second. Because both hold the same keypair, a crash between them strands
+nothing: the new passphrase is already live and the old phrase still valid,
+so the user can log in and re-run recovery. The fresh phrase is returned only
+once it is durably on disk.
+
+**The provisioning window is bounded, not an escrow.** Because user creation
+is admin-driven, the provisioner sees a user's *initial* recovery phrase
+once, in the creation reply — the same trust window as an admin-set initial
+passphrase. corvus keeps only the ciphertext wrap, never the plaintext
+phrase, and the window closes the moment the user runs recovery, which rolls
+a fresh phrase shown only to them.
 
 ## Data structures
 
@@ -254,7 +316,10 @@ written down:
   disconnecting must not wipe a live login session, because the storage
   coordinator presents the login token over its own transient connection
   to pull a home DEK, and mid-session legate elevation re-presents the
-  same token.
+  same token. The identifier is monotonic and **skips zero on the 64-bit
+  wrap**, because zero is the "no owner" sentinel: a recycled id that
+  aliased it would let an unrelated connection's close pass the ownership
+  gate and wipe a session it never created.
 
 ### The AUTH gate is a narrowing, not a design — and it cost a capability
 
@@ -307,17 +372,35 @@ requires live console attachment. corvus is the mechanism by which a
 scope-bounded legate elevation is created, not a holder of standing
 authority.
 
+The invariant reaches the numbering as well as the verbs. Identifiers are
+minted from one monotonic counter that starts above a low reserved range
+and refuses to reach the reserved top — a single `>=` test covers both the
+system principal and the null sentinel, because a compile-time assertion
+pins their ordering — so an assigned id can never *be* a privileged
+principal. The counter is persisted, so a freed id is never re-minted, and
+a user's private group takes its gid from the same counter, which is what
+keeps `uid == gid` collision-free.
+
 **The unwrap owner gate** — a DEK envelope is opened only when the
 session's bound user is the recorded owner of the named dataset. A
 cross-user unwrap is refused even with a valid token, which is the
 property the design's model names explicitly and carries a negative
-counterexample for.
+counterexample for. The check is a cheap ownership-table lookup and
+precedes any crypto: the keypair is not copied out of the session slab
+until the caller is authorized, so an unauthorized unwrap costs nothing and
+never brings key material onto the code path.
 
 ## Error paths
 
 Boot failures exit; there is no degraded mode. A failed hardening step
 reports a numbered stage and dies, so a boot log identifies which of the
 five steps failed without a debugger.
+
+The same posture holds at runtime for the CSPRNG. corvus proves it seeded
+at boot, so a *later* `getrandom` failure inside any verb is an invariant
+violation, not a recoverable error: the RNG adapter exits the daemon rather
+than return short, so there is no soft path by which a token, salt or nonce
+is drawn from a generator that has stopped answering.
 
 At the wire, malformed frames answer `BadFormat`. Two of those are
 fail-stop rather than continue — a protocol-version mismatch and an
@@ -390,6 +473,12 @@ design's model already permits a set of session records keyed by owner,
 and the connection-ownership tag is the piece that was added in
 anticipation. What remains is making the session per-connection rather
 than global, and the AUTH gate's refusal is what stands in for it today.
+
+**No `Tflush`.** The 9P server has no flush handler, because the
+kernel-internal client is single-flight — it blocks for each reply before
+issuing the next request, so no request is ever outstanding to cancel. A
+pipelined client would need one; this is the transport-layer twin of the
+same not-yet-multiplexed posture the single session slot describes above.
 
 **Rate limiting does not cover authentication.** Repeated wrong-passphrase
 AUTH attempts are bounded only by the cost of Argon2id itself.

@@ -217,6 +217,46 @@ enum Row {
     Cont(LayoutMode, u32, u32),
 }
 
+/// How many `env` leaves the tree holds.
+fn env_count(node: &LayoutNode) -> usize {
+    match node {
+        LayoutNode::Leaf { env, .. } => usize::from(*env),
+        LayoutNode::Container { children, .. } => children.iter().map(env_count).sum(),
+    }
+}
+
+/// H-4d: does the saved tree place the ENVIRONMENT's tile -- the one tile
+/// already there when the restore runs (the anchor the skeleton grows
+/// beside) -- LAST among the root's children, and nowhere else? A restore
+/// then moves the anchor past the part it built, so `splith [tour, env]`
+/// comes up as tour LEFT, the existing shell RIGHT (the welcome's shape).
+/// Any other placement of the env leaf keeps the default: the built part
+/// lands after the anchor.
+pub fn anchor_last(root: &LayoutNode) -> bool {
+    match root {
+        LayoutNode::Container { children, .. } => {
+            matches!(children.last(), Some(LayoutNode::Leaf { env: true, .. }))
+                && env_count(root) == 1
+        }
+        LayoutNode::Leaf { .. } => false,
+    }
+}
+
+/// H-4d: is the root container's ACTIVE child an env leaf -- the saved
+/// focus on the environment's own tile (the welcome leaves the user at the
+/// shell prompt, not on the tour)?
+pub fn active_is_env(root: &LayoutNode) -> bool {
+    match root {
+        LayoutNode::Container {
+            active, children, ..
+        } => matches!(
+            children.get(*active as usize),
+            Some(LayoutNode::Leaf { env: true, .. })
+        ),
+        LayoutNode::Leaf { .. } => false,
+    }
+}
+
 /// Parse the `halcyon-layout v1` format. Bounded + fail-closed on every path.
 pub fn parse(input: &str) -> Result<LayoutNode, ParseError> {
     let mut lines = input.split('\n');
@@ -890,7 +930,11 @@ mod tests {
         // A console-only save prunes to nothing: there is nothing to restore.
         assert_eq!(prune_env(&env_leaf("")), None);
         assert_eq!(
-            prune_env(&cont(LayoutMode::SplitH, 0, vec![env_leaf("halcyon"), env_leaf("")])),
+            prune_env(&cont(
+                LayoutMode::SplitH,
+                0,
+                vec![env_leaf("halcyon"), env_leaf("")]
+            )),
             None
         );
         // The console beside one program: the container dissolves to the leaf.
@@ -925,10 +969,18 @@ mod tests {
         );
         assert_eq!(
             prune_env(&saved),
-            Some(cont(LayoutMode::Tabbed, 1, vec![leaf("a"), leaf("b"), leaf("")]))
+            Some(cont(
+                LayoutMode::Tabbed,
+                1,
+                vec![leaf("a"), leaf("b"), leaf("")]
+            ))
         );
         // The active child itself pruned -> the first surviving child.
-        let saved = cont(LayoutMode::SplitH, 0, vec![env_leaf(""), leaf("a"), leaf("b")]);
+        let saved = cont(
+            LayoutMode::SplitH,
+            0,
+            vec![env_leaf(""), leaf("a"), leaf("b")],
+        );
         assert_eq!(
             prune_env(&saved),
             Some(cont(LayoutMode::SplitH, 0, vec![leaf("a"), leaf("b")]))
@@ -936,5 +988,40 @@ mod tests {
         // A tree with no env leaf is returned unchanged.
         let t = cont(LayoutMode::SplitV, 1, vec![leaf("a"), leaf("")]);
         assert_eq!(prune_env(&t), Some(t.clone()));
+    }
+    #[test]
+    fn anchor_last_means_one_env_leaf_last_under_the_root() {
+        // The welcome: the tour first, the environment's shell last, active.
+        let w = parse(
+            "halcyon-layout v1\nsplith n=2 active=1\n  leaf tag=\"halcyon welcome\"\n  leaf env\n",
+        )
+        .unwrap();
+        assert!(anchor_last(&w));
+        assert!(active_is_env(&w));
+        // The env leaf first: the default placement (built part after it).
+        let f = parse("halcyon-layout v1\nsplith n=2 active=0\n  leaf env\n  leaf tag=\"a\"\n")
+            .unwrap();
+        assert!(!anchor_last(&f));
+        assert!(active_is_env(&f));
+        // Two env leaves: no single anchor to place.
+        let two = parse(
+            "halcyon-layout v1\nsplith n=3 active=1\n  leaf env\n  leaf tag=\"a\"\n  leaf env\n",
+        )
+        .unwrap();
+        assert!(!anchor_last(&two));
+        // A nested env leaf is not the root's last child.
+        let nested = parse(
+            "halcyon-layout v1\nsplith n=2 active=0\n  leaf tag=\"a\"\n  splitv n=2 active=0\n    leaf tag=\"b\"\n    leaf env\n",
+        )
+        .unwrap();
+        assert!(!anchor_last(&nested));
+        assert!(!active_is_env(&nested));
+        // A lone leaf anchors nothing.
+        assert!(!anchor_last(
+            &parse("halcyon-layout v1\nleaf env\n").unwrap()
+        ));
+        assert!(!active_is_env(
+            &parse("halcyon-layout v1\nleaf tag=\"a\"\n").unwrap()
+        ));
     }
 }

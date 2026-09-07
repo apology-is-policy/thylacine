@@ -14,7 +14,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-05
 ---
 ## Purpose
 
@@ -45,7 +45,12 @@ fork-grantable **xor** elevation-only, never both. `CAP_ALL` is itself
 asserted against its own expansion, which forces a deliberate decision when
 a new bit is added rather than letting it default into kproc's mask.
 
-`rfork` computes `(parent_caps & caps_mask) & ~CAP_ELEVATION_ONLY`.
+`rfork` computes `(parent_caps & caps_mask) & ~CAP_ELEVATION_ONLY`. The Linux
+`clone` routes through the `rfork_forked_with_caps` variant with `caps_mask =
+CAP_ALL` — a clone carries no caps argument — so a Linux-phenotype child inherits
+the parent's whole fork-grantable set, and the `& ~CAP_ELEVATION_ONLY` strip
+still applies, so I-2's monotonic reduction holds on the phenotype path exactly
+as on the native one.
 
 ## Mechanism
 
@@ -216,12 +221,14 @@ so the invariant holds trivially today.
   "non-rfork-grantable" beside it and I-42's own "non-heritable" clause. The
   header says in as many words: do not "fix" this bit toward `CAP_ALL` on
   the strength of that phrase.
-- Two comment enumerations have drifted from the macros they describe. The
-  `CAP_ELEVATION_ONLY` comment says "All five" and then lists six; the
-  `CAP_ALL` comment enumerates four elevation-only caps and omits `DEBUG`
-  and `JIT`. The **macros are correct** and the asserts pin them — it is the
-  prose that is stale, which is the failure mode worth remembering: a
-  `_Static_assert` can pin an expression but nothing pins a sentence.
+- **The comment drift this dossier once flagged is now fixed** (`830817c4`).
+  Both enumerations had lagged their macros — the `CAP_ELEVATION_ONLY` comment
+  said "All five" and then listed six; the `CAP_ALL` comment enumerated four
+  elevation-only caps and omitted `DEBUG` and `JIT`. Both now read "All six" and
+  enumerate all six correctly. The lesson survives the fix and is worth keeping:
+  the **macros were correct throughout** and the asserts pinned them — only the
+  prose had to catch up, because a `_Static_assert` can pin an expression but
+  nothing pins a sentence.
 - The reserved-bit block lists `CAP_SIGNAL_ANY` as a future bit, then notes
   it was realized as `CAP_KILL`. Next free bit is `1<<12`.
 
@@ -243,3 +250,12 @@ in which this dossier's staleness was **borrowed from a co-tenant surface rather
 than earned**, which is worth stating twice: a churn signal keyed to files
 cannot distinguish the two, and a dossier repeatedly flagged for someone else's
 work is one a reader learns to skip.
+
+**2026-08-26: the first EARNED interval, and the reason the "learns to skip"
+warning is double-edged.** `830817c4` (phenotype-fork-inherits-caps) finally
+touched capability surface for real: `caps.h`'s `CAP_ELEVATION_ONLY` and
+`CAP_ALL` comments were corrected to enumerate all six elevation-only caps (the
+drift the Caveats once carried), and `proc.c` gained `rfork_forked_with_caps` —
+the Linux `clone`'s rfork, `caps_mask = CAP_ALL`. After two borrowed flags a
+reader had every reason to skip the third; this one was the dossier's own. Folded
+at [[chg-2026-09-05-caps-fork-inherit]].

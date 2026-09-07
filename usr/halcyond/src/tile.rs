@@ -22,16 +22,25 @@
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::grid::Grid;
-use crate::layout::{layout_block, render_block, Sheet};
+use crate::layout::{
+    caret_in_block, laid_line_for, layout_block, render_block, LaidBlock, LaidLine, Sheet,
+};
+use crate::menu::{run_rect, ObjRun};
 use crate::raster::{GlyphSource, FACE_MONO};
 use crate::transcript::{
-    Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, DEFAULT_MAX_LINES_PER_BLOCK,
+    SpanMap, SpanTag, Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, DEFAULT_MAX_LINES_PER_BLOCK,
 };
 use cartoon::{Cartoon, Op};
 use kaua_term::{Control, Record, ScreenMode};
 use vt::{Palette, ATTR_REVERSE, ATTR_UNDERLINE};
+
+/// PL-4b-ii: a render's cached proportional live tail -- the laid live block,
+/// the per-grid-row provenance `(logical line item, start column)`, and the
+/// tail's screen-y -- that a click inverts through (`Tile::live_laid`).
+type LiveLaid = (LaidBlock, Vec<(usize, usize)>, i32);
 
 pub struct Tile {
     pub grid: Grid,
@@ -57,11 +66,28 @@ pub struct Tile {
     /// below. Any new post-freeze mutation must join this key.
     heights: VecDeque<(u64, Option<i64>, i32)>,
     heights_width: i32,
+    /// H-4d: the last render's block placement -- (block id, or u64::MAX for
+    /// the open block; screen y; height) for EVERY block, in transcript
+    /// order -- the hit map for a click on an obj run and the anchor for the
+    /// keyboard menu (the console's `frame`).
+    pub frame: Vec<(u64, i32, i32)>,
+    /// H-4d: serial -> span state, noted after every Beacon frame fed; the
+    /// grid's cells and the scrolled-off rows resolve their spans through it.
+    pub spans: SpanMap,
     /// Blocks laid out by the last `render` (the window's witness).
     pub laid_last: usize,
     /// Visual lines laid out by the last `render` (the transient's witness:
     /// bounded by the view plus the two whole blocks, never the history).
     pub laid_lines_last: usize,
+    /// PL-4b-ii: the last NORMAL-mode render's proportional live tail --
+    /// (the laid live block, the per-grid-row provenance, the tail's screen-y)
+    /// -- so a click on the tail (`grid_hit` / `grid_run_rect`) inverts through
+    /// the SAME geometry the render painted, not the mono cell grid. None in
+    /// alt-screen (the tail is the mono `paint_grid`, hit by cell) and before
+    /// the first render. Rebuilt every render (O(grid), never the history), so
+    /// a stale cache never outlives one frame; a click uses the last frame's
+    /// layout exactly as the block `frame` does.
+    live_laid: Option<LiveLaid>,
 }
 
 impl Tile {
@@ -86,18 +112,174 @@ impl Tile {
             bell: false,
             heights: VecDeque::new(),
             heights_width: 0,
+            frame: Vec::new(),
+            spans: SpanMap::new(),
             laid_last: 0,
             laid_lines_last: 0,
+            live_laid: None,
+        }
+    }
+
+    /// H-4d: the block under screen `y` in the last render, with its y:
+    /// the click hit map. None on the grid tail or the gaps.
+    pub fn hit(&self, y: i32) -> Option<(u64, i32)> {
+        self.frame
+            .iter()
+            .find(|f| y >= f.1 && y < f.1 + f.2)
+            .map(|f| (f.0, f.1))
+    }
+
+    /// H-4d: the span a grid cell was written under (None: no obj).
+    fn grid_tag(&self, r: usize, c: usize) -> Option<SpanTag> {
+        let cell = *self.grid.row(r).get(c)?;
+        let t = self.spans.get(cell.span)?;
+        if t.obj == 0 {
+            None
+        } else {
+            Some(t)
+        }
+    }
+
+    /// The obj runs on live-grid row `r`, keyed by their start column + 1
+    /// (a row-unique u16, the grid's analogue of a block's obj index): the
+    /// virtual trailing block's `runs_on_row`.
+    pub fn grid_runs(&self, r: usize) -> Vec<ObjRun> {
+        let row = self.grid.row(r);
+        let mut runs = Vec::new();
+        let mut c = 0;
+        while c < row.len() {
+            match self.grid_tag(r, c) {
+                None => c += 1,
+                Some(t) => {
+                    let start = c;
+                    let mut text = String::new();
+                    while c < row.len() && self.grid_tag(r, c) == Some(t) {
+                        text.push(row[c].ch);
+                        c += 1;
+                    }
+                    runs.push(ObjRun {
+                        obj: (start as u16).saturating_add(1),
+                        text,
+                    });
+                }
+            }
+        }
+        runs
+    }
+
+    /// A grid run by key: (start col, cols, its span).
+    pub fn grid_run(&self, r: usize, key: u16) -> Option<(usize, usize, SpanTag)> {
+        let start = (key as usize).checked_sub(1)?;
+        let t = self.grid_tag(r, start)?;
+        let row = self.grid.row(r);
+        let mut c = start;
+        while c < row.len() && self.grid_tag(r, c) == Some(t) {
+            c += 1;
+        }
+        Some((start, c - start, t))
+    }
+
+    /// The (type, resolved ref) a grid run presents.
+    pub fn grid_run_obj(&self, r: usize, key: u16) -> Option<(&str, &str)> {
+        let (_, _, t) = self.grid_run(r, key)?;
+        self.scrollback.obj_in_block(t.block, t.obj)
+    }
+
+    /// The run key (start col + 1) for the obj at grid cell (r, col), walking
+    /// left to the run's start; None if the cell carries no obj.
+    fn run_key_at(&self, r: usize, col: usize) -> Option<u16> {
+        let t = self.grid_tag(r, col)?;
+        let mut start = col;
+        while start > 0 && self.grid_tag(r, start - 1) == Some(t) {
+            start -= 1;
+        }
+        Some((start as u16).saturating_add(1))
+    }
+
+    /// The obj run under a tail-relative point: (grid row, run key). In NORMAL
+    /// mode the tail is proportional (PL-4b), so the click inverts through the
+    /// last render's cached layout -- `x`/`y` relative to the tail's top-left
+    /// (the caller subtracts the tail's screen-y): the laid line under `y`, its
+    /// logical column under `x`, then the `prov` inverse back to the grid
+    /// (row, col). In alt-screen there is no cache, so it falls back to the mono
+    /// cell grid (`cw` x `ch`), the geometry `paint_grid` uses.
+    pub fn grid_hit(&self, x: i32, y: i32, cw: i32, ch: i32) -> Option<(usize, u16)> {
+        if x < 0 || y < 0 {
+            return None;
+        }
+        match &self.live_laid {
+            Some((live_lb, prov, _)) => {
+                let line = live_lb.lines.iter().find(|l| y >= l.y && y < l.y + l.h)?;
+                let col = col_at_x(line, x)?;
+                let cols = self.grid.dims().0;
+                let (r, rc) = prov_inverse(prov, line.src_item, col, cols)?;
+                self.run_key_at(r, rc).map(|k| (r, k))
+            }
+            None => {
+                if cw <= 0 || ch <= 0 {
+                    return None;
+                }
+                let (r, c) = ((y / ch) as usize, (x / cw) as usize);
+                self.run_key_at(r, c).map(|k| (r, k))
+            }
+        }
+    }
+
+    /// The tail-relative display rect (x, y, w, h) of grid run (r, key): the
+    /// proportional x-extent + laid-line y/h from the cached layout in NORMAL
+    /// mode, or the mono cell rect (`cw` x `ch`) in alt-screen / before a
+    /// render. A soft-wrapped run reports its FIRST laid piece (this rect only
+    /// rides the menu-witness say line; the menu anchors at the pointer). None
+    /// when the cell carries no run.
+    pub fn grid_run_rect(&self, r: usize, key: u16, cw: i32, ch: i32) -> Option<(i32, i32, i32, i32)> {
+        let (c0, n, _) = self.grid_run(r, key)?;
+        match &self.live_laid {
+            Some((live_lb, prov, _)) => {
+                let &(item, start) = prov.get(r)?;
+                let (a, b) = (start + c0, start + c0 + n);
+                for line in live_lb.lines.iter() {
+                    if line.src_item != item {
+                        continue;
+                    }
+                    let lo = line.segs.first().map(|s| s.src_col).unwrap_or(0);
+                    let hi = line
+                        .segs
+                        .last()
+                        .map(|s| s.src_col + s.refs.len())
+                        .unwrap_or(lo);
+                    let (aa, bb) = (a.max(lo), b.min(hi));
+                    if aa >= bb {
+                        continue;
+                    }
+                    let x0 = line_col_x(line, aa);
+                    let x1 = line_col_x(line, bb);
+                    return Some((x0, line.y, (x1 - x0).max(1), line.h));
+                }
+                None
+            }
+            None => Some((c0 as i32 * cw, r as i32 * ch, (n as i32 * cw).max(1), ch)),
         }
     }
 
     /// The record -> model dispatch (14.11.2).
     pub fn apply(&mut self, rec: Record) {
         match rec {
-            Record::CellDiff { changed, cursor } => self.grid.apply_celldiff(&changed, cursor),
-            Record::ScrollOff { rows } => self.scrollback.push_scrolled_rows(&rows),
+            Record::CellDiff {
+                changed,
+                cursor,
+                wrapped,
+            } => self.grid.apply_celldiff(&changed, cursor, &wrapped),
+            Record::ScrollOff { rows, wrapped } => {
+                self.scrollback
+                    .push_scrolled_rows(&rows, &wrapped, &self.spans)
+            }
             Record::Control(c) => self.apply_control(c),
-            Record::Mode(m) => self.mode = m,
+            Record::Mode(m) => {
+                // PL-3: a soft-wrapped ScrollOff line in flight must not carry
+                // its continuation across a screen-mode discontinuity.
+                self.scrollback.flush_scroll_pending(&self.spans);
+                self.mode = m;
+            }
         }
     }
 
@@ -106,7 +288,12 @@ impl Tile {
             // A Beacon frame is the COMPLETE ESC ] 1936 ; ... ST -- feed it to the
             // SAME beacon parser the console path uses; it drives the zone/block
             // cut + span state on the scrollback and touches no cells (14.11.4).
-            Control::Osc1936Raw(frame) => self.scrollback.feed(&frame),
+            Control::Osc1936Raw { serial, frame } => {
+                self.scrollback.feed(&frame);
+                // H-4d: the cells the producer writes next carry `serial`;
+                // they mean THIS state (after the frame).
+                self.spans.note(serial, self.scrollback.span_tag());
+            }
             Control::Title(t) => self.title = t,
             Control::Bell => self.bell = true,
             Control::Exit(code) => self.exit = Some(code),
@@ -156,6 +343,12 @@ impl Tile {
     /// laid out whole -- the transient is O(view + 2 x the open-block cap),
     /// `OPEN_BLOCK_MAX_COST` bounding both, whatever the history holds and
     /// wherever the view scrolled.
+    ///
+    /// `scroll_up` is the view's offset from the bottom, in pixels; a Normal
+    /// mode `mark` (the cursor row + its selected obj run) drags it so the
+    /// row is visible (Helix: the view follows the cursor), and the clamped
+    /// result is written back. The mark paints the row's band and, for a
+    /// selected run, the ember underline (the console renderer's pass).
     pub fn render(
         &mut self,
         cart: &mut Cartoon,
@@ -163,7 +356,8 @@ impl Tile {
         h: usize,
         gs: &mut GlyphSource,
         sheet: &Sheet,
-        scroll_up: i32,
+        scroll_up: &mut i32,
+        mark: Option<Mark>,
     ) -> i32 {
         cart.reset();
         cart.ops.push(Op::Clear {
@@ -173,8 +367,13 @@ impl Tile {
         let grid_h = self.grid.dims().1 as i32 * cell_h;
         self.laid_last = 0;
         self.laid_lines_last = 0;
+        self.frame.clear();
 
         if self.mode == ScreenMode::AltScreen {
+            // The tail is the mono grid; a click hits it by cell, not through a
+            // proportional cache -- drop any stale normal-mode layout so
+            // `grid_hit` takes the mono path.
+            self.live_laid = None;
             paint_grid(cart, &self.grid, 0, 0, gs, sheet);
             return grid_h;
         }
@@ -196,8 +395,74 @@ impl Tile {
         self.laid_lines_last += open_lb.lines.len();
         total += open_lb.height;
 
-        let content_h = total + grid_h;
-        let su = scroll_up.clamp(0, (content_h - viewh).max(0));
+        // PL-4: the live grid renders PROPORTIONALLY as the normal-mode tail
+        // (HALCYON 14.13) -- its soft-wrapped rows joined into logical lines and
+        // re-wrapped at the tile width, replacing the fixed mono grid. Laid only
+        // through the content rows so a screen of trailing blanks below the
+        // prompt is not painted (the bottom-anchored view would else float the
+        // prompt mid-tile). `prov` maps a grid row -> (logical line, start col).
+        let live_cols = self.grid.dims().0;
+        let live_rows = self.grid.content_rows();
+        let live_wrapped = self.grid.wrapped();
+        let (live_b, prov) = self.scrollback.live_block(
+            self.grid.cells(),
+            live_cols,
+            live_rows,
+            live_wrapped,
+            &self.spans,
+        );
+        let live_lb = layout_block(&live_b, widthi, sheet, gs);
+        self.laid_last += 1;
+        self.laid_lines_last += live_lb.lines.len();
+
+        let content_h = total + live_lb.height;
+
+        // The mark's row drags the view: locate its content-relative span
+        // (a frozen block's from the cached heights; the open block's is
+        // laid already) and adjust scroll_up so it is visible.
+        if let Some(m) = mark {
+            let mut rel = sheet.block_gap;
+            let mut span: Option<(i32, i32)> = None;
+            for (b, &(_, _, hgt)) in self
+                .scrollback
+                .frozen_blocks()
+                .iter()
+                .zip(self.heights.iter())
+            {
+                if b.id == m.block {
+                    let lb = layout_block(b, widthi, sheet, gs);
+                    span = Some(match laid_line_for(&lb, m.item, m.row) {
+                        Some((ly, lh)) => (rel + ly, lh),
+                        None => (rel, hgt.max(1)),
+                    });
+                    break;
+                }
+                rel += hgt + sheet.block_gap;
+            }
+            if span.is_none() && m.block == u64::MAX {
+                span = Some(match laid_line_for(&open_lb, m.item, m.row) {
+                    Some((ly, lh)) => (rel + ly, lh),
+                    None => (rel, open_lb.height.max(1)),
+                });
+            }
+            if span.is_none() && m.block == GRID_KEY {
+                let sp = live_row_spans(&live_lb, &prov, m.item, live_cols);
+                if let (Some(&(y0, _)), Some(&(y1, h1))) = (sp.first(), sp.last()) {
+                    span = Some((total + y0, (y1 + h1) - y0));
+                }
+            }
+            if let Some((r, lh)) = span {
+                // Visible iff scroll_up <= from_bottom <= scroll_up + viewh - lh.
+                let from_bottom = content_h - r - lh;
+                if from_bottom < *scroll_up {
+                    *scroll_up = from_bottom;
+                } else if from_bottom > *scroll_up + viewh - lh {
+                    *scroll_up = from_bottom - (viewh - lh).max(0);
+                }
+            }
+        }
+        *scroll_up = (*scroll_up).clamp(0, (content_h - viewh).max(0));
+        let su = *scroll_up;
         let y0 = if content_h <= viewh {
             0
         } else {
@@ -213,21 +478,87 @@ impl Tile {
             .iter()
             .zip(self.heights.iter())
         {
+            self.frame.push((b.id, y, hgt));
             if y + hgt >= 0 && y <= viewh {
                 let lb = layout_block(b, widthi, sheet, gs);
                 debug_assert_eq!(lb.height, hgt, "a frozen block's height is deterministic");
+                paint_mark(cart, &lb, y, w, sheet, mark.filter(|m| m.block == b.id));
                 render_block(cart, &lb, y, gs);
+                paint_run(cart, &lb, y, mark.filter(|m| m.block == b.id));
                 self.laid_last += 1;
                 self.laid_lines_last += lb.lines.len();
             }
             y += hgt + sheet.block_gap;
         }
+        self.frame.push((u64::MAX, y, open_lb.height));
         if y + open_lb.height >= 0 && y <= viewh {
+            let m = mark.filter(|m| m.block == u64::MAX);
+            paint_mark(cart, &open_lb, y, w, sheet, m);
             render_block(cart, &open_lb, y, gs);
+            paint_run(cart, &open_lb, y, m);
         }
         y += open_lb.height;
-        // `y` is now the grid tail's screen-y (== y0 + total).
-        paint_grid(cart, &self.grid, 0, y, gs, sheet);
+        // `y` is now the grid tail's screen-y (== y0 + total). H-4d: the
+        // live grid is the virtual trailing block (14.11.5) -- in the frame
+        // under GRID_KEY, its marked row banded under the cells, its
+        // selected run underlined over them.
+        self.frame.push((GRID_KEY, y, live_lb.height));
+        let gm = mark.filter(|m| m.block == GRID_KEY);
+        // The marked grid row's band, proportional (a soft-wrapped row spans
+        // several laid lines) -- painted UNDER the cells.
+        if let Some(m) = gm {
+            for (by, bh) in live_row_spans(&live_lb, &prov, m.item, live_cols) {
+                cart.ops.push(Op::Rect {
+                    x: 0,
+                    y: y + by,
+                    w: w as u32,
+                    h: bh as u32,
+                    color: sheet.sel_bg,
+                });
+            }
+        }
+        render_block(cart, &live_lb, y, gs);
+        // The caret: ONE source of truth (the grid cursor), placed at the
+        // proportional x of its character boundary (HALCYON 14.13; subsumes s2,
+        // the stray cursor adrift from the rows).
+        let (cr, cc, cvis) = self.grid.cursor();
+        if cvis {
+            if let Some(&(item, start)) = prov.get(cr) {
+                let (cx, cy, chh) = caret_in_block(&live_lb, item, start + cc);
+                cart.ops.push(Op::Rect {
+                    x: cx,
+                    y: y + cy,
+                    w: 2,
+                    h: chh as u32,
+                    color: libhalcyon::theme::DAYLIGHT.ember,
+                });
+            }
+        }
+        // The selected obj run underlined, proportional -- each laid piece of a
+        // wrapped run over its real x-extent, painted OVER the cells.
+        if let Some(Mark {
+            item,
+            obj: Some(key),
+            ..
+        }) = gm
+        {
+            if let Some((c0, n, _)) = self.grid_run(item, key) {
+                for (by, x0, x1) in live_run_underline(&live_lb, &prov, item, c0, n) {
+                    cart.ops.push(Op::Rect {
+                        x: x0,
+                        y: y + by,
+                        w: (x1 - x0).max(1) as u32,
+                        h: 2,
+                        color: libhalcyon::theme::DAYLIGHT.ember,
+                    });
+                }
+            }
+        }
+        // Cache this frame's proportional tail for the click inverse (`y` is the
+        // tail's screen-y). Moved in AFTER every read above (`live_lb` / `prov`
+        // are done being borrowed); `grid_hit` / `grid_run_rect` invert through
+        // it until the next render replaces it.
+        self.live_laid = Some((live_lb, prov, y));
         content_h
     }
 
@@ -271,11 +602,188 @@ impl Tile {
     }
 }
 
+/// H-4d: the frame / `Mark` key of the live grid, the virtual trailing block
+/// (`Mark.item` is then the grid row, `Mark.obj` a `grid_runs` key).
+pub const GRID_KEY: u64 = u64::MAX - 1;
+
+/// H-4d: a Normal-mode cursor position in a tile's transcript, as `render`
+/// paints it: the block (id, u64::MAX for the open block, or GRID_KEY), the
+/// row (an item, and a table row when the item is a table; the grid row
+/// under GRID_KEY), and the selected obj run on it, if any.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Mark {
+    pub block: u64,
+    pub item: usize,
+    pub row: usize,
+    pub obj: Option<u16>,
+}
+
+/// The cursor row's band under the text (`sel_bg`, full width).
+fn paint_mark(
+    cart: &mut Cartoon,
+    lb: &LaidBlock,
+    y: i32,
+    w: usize,
+    sheet: &Sheet,
+    m: Option<Mark>,
+) {
+    if let Some(m) = m {
+        if let Some((ly, lh)) = laid_line_for(lb, m.item, m.row) {
+            cart.ops.push(Op::Rect {
+                x: 0,
+                y: y + ly,
+                w: w as u32,
+                h: lh.max(0) as u32,
+                color: sheet.sel_bg,
+            });
+        }
+    }
+}
+
+/// The selected run's 2 px ember underline over the text.
+fn paint_run(cart: &mut Cartoon, lb: &LaidBlock, y: i32, m: Option<Mark>) {
+    if let Some(Mark {
+        item,
+        row,
+        obj: Some(obj),
+        ..
+    }) = m
+    {
+        if let Some(r) = run_rect(lb, item, row, obj) {
+            cart.ops.push(Op::Rect {
+                x: r.0,
+                y: y + r.1 + r.3 - 2,
+                w: r.2.max(1) as u32,
+                h: 2,
+                color: libhalcyon::theme::DAYLIGHT.ember,
+            });
+        }
+    }
+}
+
 /// Paint the live grid's cells at screen origin `(x0, y0)` into `cart` (a mono
 /// cell store: per-cell bg rect when it differs from the ground, then the glyph,
 /// then the underline; the block cursor beam last). Out-of-range is impossible
 /// -- `Grid::row` and `Grid::cursor` are already clamped (grid.rs), the tile
 /// trust boundary (14.11.12).
+/// PL-4: the x of column `col` within ONE laid line (line-scoped, for the
+/// per-line banding + underline geometry). Past the line's content -> its end.
+fn line_col_x(line: &LaidLine, col: usize) -> i32 {
+    for seg in line.segs.iter() {
+        let n = seg.refs.len();
+        if col >= seg.src_col && col < seg.src_col + n {
+            return seg.xs[col - seg.src_col];
+        }
+    }
+    line.segs.last().map(|s| s.x_end).unwrap_or(0)
+}
+
+/// PL-4b: the logical column of laid line `line` under block-relative x `x` --
+/// the seg whose [x, x_end) contains it, then the glyph cell within it (each
+/// glyph owns [xs[i], xs[i+1])). None past the content: a click beyond the last
+/// glyph, or in a gap between runs, hits no cell (so no run).
+fn col_at_x(line: &LaidLine, x: i32) -> Option<usize> {
+    for seg in line.segs.iter() {
+        if x >= seg.x && x < seg.x_end {
+            let n = seg.refs.len();
+            for i in 0..n {
+                let hi = if i + 1 < n { seg.xs[i + 1] } else { seg.x_end };
+                if x < hi {
+                    return Some(seg.src_col + i);
+                }
+            }
+            return Some(seg.src_col + n.saturating_sub(1));
+        }
+    }
+    None
+}
+
+/// PL-4b: the inverse of `prov` -- the grid (row, col-in-row) that logical
+/// column `col` of laid line `item` came from. The joined rows of one logical
+/// line hold disjoint column ranges ([start, start+cols)), so at most one row
+/// matches. None if no row covers it.
+fn prov_inverse(
+    prov: &[(usize, usize)],
+    item: usize,
+    col: usize,
+    cols: usize,
+) -> Option<(usize, usize)> {
+    for (r, &(it, start)) in prov.iter().enumerate() {
+        if it == item && start <= col && col < start + cols {
+            return Some((r, col - start));
+        }
+    }
+    None
+}
+
+/// PL-4: the (block-relative y, h) spans of `live`'s laid lines that show grid
+/// row `r`'s columns. A soft-wrapped row can span several laid lines; a laid
+/// line shared by two grid rows bands for both (matching the mono full-row
+/// band). Empty for a row past `prov`.
+fn live_row_spans(
+    live: &LaidBlock,
+    prov: &[(usize, usize)],
+    r: usize,
+    cols: usize,
+) -> Vec<(i32, i32)> {
+    let Some(&(item, start)) = prov.get(r) else {
+        return Vec::new();
+    };
+    let end = start + cols;
+    let mut spans = Vec::new();
+    for line in live.lines.iter() {
+        if line.src_item != item {
+            continue;
+        }
+        let lo = line.segs.first().map(|s| s.src_col).unwrap_or(0);
+        let hi = line
+            .segs
+            .last()
+            .map(|s| s.src_col + s.refs.len())
+            .unwrap_or(lo);
+        if lo < end && hi > start {
+            spans.push((line.y, line.h));
+        }
+    }
+    spans
+}
+
+/// PL-4: the (block-relative line-bottom y, x0, x1) underline segments for grid
+/// row `r`'s obj run at grid columns [rc0, rc0+n) -- one per laid line the run
+/// crosses, so a wrapped run underlines each piece over its real x-extent.
+fn live_run_underline(
+    live: &LaidBlock,
+    prov: &[(usize, usize)],
+    r: usize,
+    rc0: usize,
+    n: usize,
+) -> Vec<(i32, i32, i32)> {
+    let Some(&(item, start)) = prov.get(r) else {
+        return Vec::new();
+    };
+    let c0 = start + rc0;
+    let c1 = c0 + n;
+    let mut out = Vec::new();
+    for line in live.lines.iter() {
+        if line.src_item != item {
+            continue;
+        }
+        let lo = line.segs.first().map(|s| s.src_col).unwrap_or(0);
+        let hi = line
+            .segs
+            .last()
+            .map(|s| s.src_col + s.refs.len())
+            .unwrap_or(lo);
+        let a = c0.max(lo);
+        let b = c1.min(hi);
+        if a >= b {
+            continue;
+        }
+        out.push((line.y + line.h - 2, line_col_x(line, a), line_col_x(line, b)));
+    }
+    out
+}
+
 fn paint_grid(
     cart: &mut Cartoon,
     grid: &Grid,
@@ -348,6 +856,7 @@ mod tests {
             fg: 0x00FF00,
             bg: 0,
             attrs: 0,
+            span: 0,
         }
     }
 
@@ -361,6 +870,7 @@ mod tests {
         t.apply(Record::CellDiff {
             changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
             cursor: (0, 2, true),
+            wrapped: vec![],
         });
         assert_eq!(t.grid.row(0)[0].ch, 'h');
         assert_eq!(t.grid.row(0)[1].ch, 'i');
@@ -374,6 +884,7 @@ mod tests {
         let mut t = tile();
         t.apply(Record::ScrollOff {
             rows: vec![vec![cell('a'), cell('b')], vec![cell('c')]],
+            wrapped: vec![false, false],
         });
         let items = &t.scrollback.open_block().items;
         assert_eq!(items.len(), 2, "two scrolled rows -> two Line items");
@@ -426,12 +937,14 @@ mod tests {
         // an output zone with a cmd mark: the console path's own grammar. This
         // exercises the dispatch (Osc1936Raw -> scrollback.feed), reusing the
         // audited beacon parser; last_command is the observable effect.
-        t.apply(Record::Control(Control::Osc1936Raw(
-            b"\x1b]1936;v1;zone;k=output\x1b\\".to_vec(),
-        )));
-        t.apply(Record::Control(Control::Osc1936Raw(
-            b"\x1b]1936;v1;mark;k=cmd;text=ls -l\x1b\\".to_vec(),
-        )));
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 0,
+            frame: b"\x1b]1936;v1;zone;k=output\x1b\\".to_vec(),
+        }));
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 0,
+            frame: b"\x1b]1936;v1;mark;k=cmd;text=ls -l\x1b\\".to_vec(),
+        }));
         assert_eq!(t.scrollback.last_command(), Some("ls -l"));
         // the grid is untouched by a control frame.
         assert_eq!(t.grid.row(0)[0].ch, ' ');
@@ -453,14 +966,17 @@ mod tests {
         let mut t = tile();
         t.apply(Record::ScrollOff {
             rows: vec![vec![cell('1')], vec![cell('2')]],
+            wrapped: vec![false, false],
         });
         assert_eq!(t.scrollback.open_block().items.len(), 2);
-        t.apply(Record::Control(Control::Osc1936Raw(
-            b"\x1b]1936;v1;zone;k=prompt\x1b\\".to_vec(),
-        )));
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 0,
+            frame: b"\x1b]1936;v1;zone;k=prompt\x1b\\".to_vec(),
+        }));
         // the zone cut froze the old block and opened a fresh one.
         t.apply(Record::ScrollOff {
             rows: vec![vec![cell('3')]],
+            wrapped: vec![false],
         });
         assert_eq!(
             t.scrollback.open_block().items.len(),
@@ -486,10 +1002,11 @@ mod tests {
         t.apply(Record::CellDiff {
             changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
             cursor: (0, 2, true),
+            wrapped: vec![],
         });
         let mut cart = Cartoon::new();
         let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
-        let content = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let content = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert_eq!(content, 4 * ch, "alt-screen content height == grid height");
         assert!(matches!(cart.ops.first(), Some(Op::Clear { .. })));
         assert!(
@@ -507,20 +1024,51 @@ mod tests {
         t.apply(Record::CellDiff {
             changed: vec![(3, 0, cell('x'))],
             cursor: (3, 1, true),
+            wrapped: vec![],
         });
         let mut cart = Cartoon::new();
         let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
-        let grid_only = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let grid_only = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         // Three lines scroll off -> the scrollback grows -> the content is taller
         // than the grid tail alone (the flow renders above it, 14.11.3).
         t.apply(Record::ScrollOff {
             rows: vec![vec![cell('a')], vec![cell('b')], vec![cell('c')]],
+            wrapped: vec![false, false, false],
         });
-        let with_hist = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let with_hist = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert!(
             with_hist > grid_only,
             "scrollback adds content height above the grid tail ({with_hist} > {grid_only})"
         );
+    }
+
+    #[test]
+    fn render_normal_tail_is_proportional_with_a_caret() {
+        // PL-4b: the normal-mode tail renders PROPORTIONAL (via live_block, not
+        // the mono paint_grid); a 2px ember caret marks the grid cursor; and a
+        // mostly-blank TALL grid TRIMS -- the content height is far below
+        // rows*cell_h.
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let (_, ch, _) = gs.mono_cell();
+        let mut t = daylight_tile(20, 24); // tall grid, one line of content
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
+            cursor: (0, 2, true),
+            wrapped: vec![],
+        });
+        let mut cart = Cartoon::new();
+        let (w, h) = (20 * 8, (24 * ch) as usize);
+        let content = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        assert!(
+            content < 24 * ch,
+            "the trimmed proportional tail is far below the full mono grid ({content} < {})",
+            24 * ch
+        );
+        let caret = cart.ops.iter().any(|op| {
+            matches!(op, Op::Rect { w: 2, color, .. } if *color == libhalcyon::theme::DAYLIGHT.ember)
+        });
+        assert!(caret, "a 2px ember caret beam is painted at the grid cursor");
     }
 
     /// A tile whose scrollback freezes a block every `lines` rows (zone cuts)
@@ -540,8 +1088,11 @@ mod tests {
             bell: false,
             heights: VecDeque::new(),
             heights_width: 0,
+            frame: Vec::new(),
+            spans: SpanMap::new(),
             laid_last: 0,
             laid_lines_last: 0,
+            live_laid: None,
         }
     }
 
@@ -550,23 +1101,35 @@ mod tests {
             let rows: Vec<Vec<Cell>> = (0..lines_per_block)
                 .map(|_| vec![cell(ch), cell(ch), cell(ch)])
                 .collect();
-            t.apply(Record::ScrollOff { rows });
+            t.apply(Record::ScrollOff {
+                wrapped: vec![false; rows.len()],
+                rows,
+            });
             // a zone cut freezes the open block and opens the next one
-            t.apply(Record::Control(Control::Osc1936Raw(
-                b"\x1b]1936;v1;zone;k=output\x1b\\".to_vec(),
-            )));
+            t.apply(Record::Control(Control::Osc1936Raw {
+                serial: 0,
+                frame: b"\x1b]1936;v1;zone;k=output\x1b\\".to_vec(),
+            }));
         }
     }
 
     /// The exact content height by the OLD method (every block laid out).
     fn full_height(t: &Tile, w: usize, gs: &mut GlyphSource, sheet: &Sheet) -> i32 {
-        let (_, ch, _) = gs.mono_cell();
         let mut total = sheet.block_gap;
         for b in t.scrollback.frozen_blocks().iter() {
             total += layout_block(b, w as i32, sheet, gs).height + sheet.block_gap;
         }
         total += layout_block(t.scrollback.open_block(), w as i32, sheet, gs).height;
-        total + t.grid.dims().1 as i32 * ch
+        // PL-4: the tail is the proportional live grid (its content rows laid
+        // as logical lines), not rows*cell_h.
+        let (live_b, _) = t.scrollback.live_block(
+            t.grid.cells(),
+            t.grid.dims().0,
+            t.grid.content_rows(),
+            t.grid.wrapped(),
+            &t.spans,
+        );
+        total + layout_block(&live_b, w as i32, sheet, gs).height
     }
 
     #[test]
@@ -583,7 +1146,7 @@ mod tests {
 
         // Cold: every frozen block is laid out ONCE for its height (and the
         // blocks in view again, plus the open block).
-        let cold = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let cold = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert!(
             t.laid_last >= 200,
             "cold render fills the cache ({})",
@@ -597,7 +1160,7 @@ mod tests {
 
         // Warm: only the open block and the (at most two) frozen blocks that
         // touch a 4-row view are laid out -- not the 200 in history.
-        let warm = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let warm = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert_eq!(warm, cold);
         assert!(
             t.laid_last <= 4,
@@ -614,8 +1177,14 @@ mod tests {
 
         // Scrolled to the very top: the window follows the scroll -- still a
         // handful of blocks, never the whole history.
-        let top = t.render(&mut cart, w, h, &mut gs, &sheet, i32::MAX);
+        let mut su = i32::MAX;
+        let top = t.render(&mut cart, w, h, &mut gs, &sheet, &mut su, None);
         assert_eq!(top, cold);
+        assert!(
+            (0..i32::MAX).contains(&su),
+            "the clamped scroll offset is written back: {}",
+            su
+        );
         assert!(
             (1..=6).contains(&t.laid_last),
             "top-of-history render laid out {} blocks",
@@ -629,7 +1198,7 @@ mod tests {
         // New history since the last render: only the NEW frozen blocks join
         // the cache (plus the view's blocks).
         push_history(&mut t, 3, 3, 'j');
-        let grown = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let grown = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert!(grown > cold);
         assert!(
             t.laid_last <= 3 + 4,
@@ -649,7 +1218,7 @@ mod tests {
         push_history(&mut t, 4, 2, 'a');
         let mut cart = Cartoon::new();
         let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
-        let _ = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let _ = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert_eq!(t.heights.len(), 4);
         push_history(&mut t, 8, 2, 'b');
         assert_eq!(
@@ -657,7 +1226,7 @@ mod tests {
             5,
             "the block cap evicted"
         );
-        let got = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let got = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert_eq!(t.heights.len(), 5);
         let ids: Vec<u64> = t.scrollback.frozen_blocks().iter().map(|b| b.id).collect();
         let cached: Vec<u64> = t.heights.iter().map(|e| e.0).collect();
@@ -666,7 +1235,7 @@ mod tests {
 
         // A different width invalidates every cached height (a reflow).
         let w2 = (30 * cw) as usize;
-        let narrow = t.render(&mut cart, w2, h, &mut gs, &sheet, 0);
+        let narrow = t.render(&mut cart, w2, h, &mut gs, &sheet, &mut 0, None);
         assert!(
             t.laid_last >= 5,
             "a new width re-lays every block ({})",
@@ -686,34 +1255,306 @@ mod tests {
         let sheet = crate::layout::daylight_sheet();
         let (cw, ch, _) = gs.mono_cell();
         let mut t = history_tile(20, 4, 1000);
-        t.apply(Record::Control(Control::Osc1936Raw(
-            b"\x1b]1936;v1;zone;k=output\x1b\\".to_vec(),
-        )));
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 0,
+            frame: b"\x1b]1936;v1;zone;k=output\x1b\\".to_vec(),
+        }));
         t.apply(Record::ScrollOff {
             rows: vec![vec![cell('a')], vec![cell('b')]],
+            wrapped: vec![false, false],
         });
-        t.apply(Record::Control(Control::Osc1936Raw(
-            b"\x1b]1936;v1;/zone\x1b\\".to_vec(),
-        )));
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 0,
+            frame: b"\x1b]1936;v1;/zone\x1b\\".to_vec(),
+        }));
         assert_eq!(t.scrollback.frozen_blocks().len(), 1);
         let mut cart = Cartoon::new();
         let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
-        let before = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let before = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert_eq!(t.heights.len(), 1);
         assert_eq!(t.heights[0].1, None);
         // the floating exit mark: the open block is an empty Foreign one, so
         // the code lands on the frozen output block
-        t.apply(Record::Control(Control::Osc1936Raw(
-            b"\x1b]1936;v1;mark;k=exit;code=2\x1b\\".to_vec(),
-        )));
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 0,
+            frame: b"\x1b]1936;v1;mark;k=exit;code=2\x1b\\".to_vec(),
+        }));
         assert_eq!(t.scrollback.frozen_blocks()[0].exit, Some(2));
-        let after = t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        let after = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert_eq!(t.heights[0].1, Some(2), "the cache re-keyed on the exit");
         assert!(
             after > before,
             "the badge line grew the content ({after} > {before})"
         );
         assert_eq!(after, full_height(&t, w, &mut gs, &sheet));
+    }
+
+    #[test]
+    fn a_mark_drags_the_view_to_its_row_and_the_frame_maps_every_block() {
+        // H-4d: the Normal-mode cursor is visible after every render (Helix:
+        // the view follows the cursor), the block frame covers the whole
+        // history in transcript order (the click hit map), and a marked row
+        // paints its band.
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let mut t = history_tile(20, 4, 1000);
+        push_history(&mut t, 40, 3, 'm');
+        let ids: Vec<u64> = t.scrollback.frozen_blocks().iter().map(|b| b.id).collect();
+        let mut cart = Cartoon::new();
+        // A 12-row view over a 4-row grid: eight rows of history show.
+        let (w, h) = ((20 * cw) as usize, (12 * ch) as usize);
+        let viewh = h as i32;
+        let band = |cart: &Cartoon| {
+            cart.ops
+                .iter()
+                .any(|o| matches!(o, Op::Rect { color, .. } if *color == sheet.sel_bg))
+        };
+
+        // Unmarked, at the bottom: every block is in the frame, in order, y
+        // ascending without overlap; the oldest is above the view, the
+        // newest frozen one in it; no band.
+        let mut su = 0;
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut su, None);
+        assert_eq!(su, 0);
+        // ... then the open block, then the live grid (the virtual trailing block).
+        let want: Vec<u64> = ids.iter().copied().chain([u64::MAX, GRID_KEY]).collect();
+        assert_eq!(t.frame.iter().map(|f| f.0).collect::<Vec<_>>(), want);
+        assert!(
+            t.frame.windows(2).all(|p| p[0].1 + p[0].2 <= p[1].1),
+            "frame y ascends without overlap"
+        );
+        assert!(
+            t.frame[0].1 + t.frame[0].2 <= 0,
+            "the oldest block is above the view"
+        );
+        let newest = t.frame[ids.len() - 1];
+        assert!(
+            newest.1 >= 0 && newest.1 + newest.2 <= viewh,
+            "the newest frozen block is in view: y={} h={}",
+            newest.1,
+            newest.2
+        );
+        assert_eq!(t.hit(newest.1), Some((newest.0, newest.1)));
+        assert_eq!(t.hit(newest.1 + newest.2 - 1), Some((newest.0, newest.1)));
+        assert_eq!(
+            t.hit(t.frame[0].1 - 1),
+            None,
+            "the leading gap hits nothing"
+        );
+        assert!(!band(&cart), "no band without a mark");
+
+        // A mark on the oldest block's first line drags the view up to it and
+        // paints the band.
+        let mark = Mark {
+            block: ids[0],
+            item: 0,
+            row: usize::MAX,
+            obj: None,
+        };
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut su, Some(mark));
+        assert!(su > 0, "the view scrolled up: {}", su);
+        let oldest = t.frame[0];
+        assert!(
+            oldest.1 >= 0 && oldest.1 + ch <= viewh,
+            "the marked row is in view: y={}",
+            oldest.1
+        );
+        assert!(band(&cart), "the marked row paints its band");
+
+        // A mark back on the newest frozen block drags the view down again:
+        // the marked row is visible, and the offset written back is within
+        // the content.
+        let mark = Mark {
+            block: *ids.last().unwrap(),
+            item: 0,
+            row: usize::MAX,
+            obj: None,
+        };
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut su, Some(mark));
+        let newest = t.frame[ids.len() - 1];
+        assert!(
+            newest.1 >= 0 && newest.1 + ch <= viewh,
+            "the newest block's marked row is back in view: y={}",
+            newest.1
+        );
+        assert!(
+            (0..viewh * 40).contains(&su),
+            "the offset is clamped: {}",
+            su
+        );
+        assert!(band(&cart));
+    }
+
+    #[test]
+    fn grid_cells_carry_their_obj_runs_and_scroll_them_into_the_landing_block() {
+        // H-4d: a cell stamped with a frame's serial resolves to the span
+        // state after that frame -- an obj run on the LIVE GRID (the virtual
+        // trailing block), keyed by its start column; when the row scrolls
+        // off into a LATER block than the obj's, the obj is copied into the
+        // landing block so the row's run resolves there too.
+        let cs = |ch: char, span: u32| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span,
+        };
+        let mut t = daylight_tile(8, 2);
+        // Content before the obj, so the zone cut below freezes a block.
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cs('p', 0), cs('q', 0)]],
+            wrapped: vec![false],
+        });
+        let b0 = t.scrollback.open_block().id;
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 1,
+            frame: b"\x1b]1936;v1;obj;type=path;ref=/bin\x1b\\".to_vec(),
+        }));
+        assert_eq!(
+            t.spans.get(1),
+            Some(SpanTag {
+                block: b0,
+                obj: 1,
+                em: 0,
+                hdr: 0
+            })
+        );
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cs('b', 1)), (0, 1, cs('i', 1)), (0, 2, cs('n', 1))],
+            cursor: (0, 3, true),
+            wrapped: vec![],
+        });
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 2,
+            frame: b"\x1b]1936;v1;/obj\x1b\\".to_vec(),
+        }));
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 4, cs('x', 2))],
+            cursor: (0, 5, true),
+            wrapped: vec![],
+        });
+        let runs = t.grid_runs(0);
+        assert_eq!(runs.len(), 1, "one run on the grid row: {:?}", runs);
+        assert_eq!((runs[0].obj, runs[0].text.as_str()), (1, "bin"));
+        assert_eq!(t.grid_run(0, 1).map(|(c, n, _)| (c, n)), Some((0, 3)));
+        assert_eq!(t.grid_run_obj(0, 1), Some(("path", "/bin")));
+        assert_eq!(t.grid_hit(15, 3, 10, 20), Some((0, 1)), "col 1 of the run");
+        assert_eq!(t.grid_hit(45, 3, 10, 20), None, "the x after the close");
+        assert!(t.grid_runs(1).is_empty());
+
+        // A zone-open freezes b0 (it has content) and opens b1; the row then
+        // scrolls off INTO b1 carrying b0's obj: copied, and resolvable.
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 3,
+            frame: b"\x1b]1936;v1;zone;k=prompt\x1b\\".to_vec(),
+        }));
+        assert_ne!(t.scrollback.open_block().id, b0, "the zone cut froze b0");
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![
+                cs('b', 1),
+                cs('i', 1),
+                cs('n', 1),
+                cs(' ', 0),
+                cs('x', 2),
+            ]],
+            wrapped: vec![false],
+        });
+        let fr = crate::select::FlatRow {
+            block: usize::MAX,
+            item: 0,
+            row: usize::MAX,
+        };
+        let runs = crate::menu::runs_on_row(&t.scrollback, fr);
+        assert_eq!(runs.len(), 1, "the scrolled row keeps its run: {:?}", runs);
+        assert_eq!(runs[0].text, "bin");
+        assert_eq!(
+            crate::menu::obj_of(&t.scrollback, usize::MAX, runs[0].obj),
+            Some(("path", "/bin")),
+            "the obj was copied into the landing block"
+        );
+        assert_eq!(t.scrollback.open_block().objs.len(), 1);
+        assert_eq!(
+            t.scrollback.block_by_id(b0).map(|b| b.objs.len()),
+            Some(1),
+            "the source block keeps its own"
+        );
+    }
+
+    #[test]
+    fn grid_hit_inverts_a_proportional_click_to_the_run() {
+        // PL-4b-ii-b: after a proportional render, a click on the live tail
+        // inverts through the CACHED layout (not the mono cell grid) to the
+        // right grid run, and the run's display rect is its real x-extent.
+        let cs = |ch: char, span: u32| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span,
+        };
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let mut t = daylight_tile(16, 4);
+        // An obj run "bin" on grid row 0 (cols 0..3, serial 1), then a plain
+        // 'x' at col 4 (serial 2, obj closed) -- the mono test's shape.
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 1,
+            frame: b"\x1b]1936;v1;obj;type=path;ref=/bin\x1b\\".to_vec(),
+        }));
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cs('b', 1)), (0, 1, cs('i', 1)), (0, 2, cs('n', 1))],
+            cursor: (0, 3, true),
+            wrapped: vec![],
+        });
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 2,
+            frame: b"\x1b]1936;v1;/obj\x1b\\".to_vec(),
+        }));
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 4, cs('x', 2))],
+            cursor: (0, 5, true),
+            wrapped: vec![],
+        });
+        // Render populates the proportional cache (live_laid Some).
+        let mut cart = Cartoon::new();
+        let (w, h) = (16 * 8, 4 * 20);
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+
+        // The run's tail-relative rect is proportional (a real x-extent, one
+        // laid line high), and its centre inverts back to (row 0, key 1).
+        let (rx, ry, rw, rh) = t.grid_run_rect(0, 1, 8, 20).expect("the run has a rect");
+        assert!(rw > 0 && rh > 0, "a non-empty proportional rect: {rw}x{rh}");
+        let (cx, cy) = (rx + rw / 2, ry + rh / 2);
+        assert_eq!(
+            t.grid_hit(cx, cy, 8, 20),
+            Some((0, 1)),
+            "a click on 'bin' inverts to its run"
+        );
+        assert_eq!(
+            t.grid_run_obj(0, 1),
+            Some(("path", "/bin")),
+            "the returned key resolves the obj"
+        );
+        // A click far right of every glyph, or below the trimmed tail, hits no
+        // run (the proportional inverse finds no cell there).
+        assert_eq!(t.grid_hit(w as i32 - 1, cy, 8, 20), None, "past the content");
+        assert_eq!(t.grid_hit(cx, h as i32 - 1, 8, 20), None, "below the tail");
+
+        // Alt-screen drops the cache -> grid_hit falls back to the mono grid
+        // (the same (row, key) by cell), and grid_run_rect to the mono cell.
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        assert_eq!(
+            t.grid_hit(5, 5, 8, 20),
+            Some((0, 1)),
+            "alt-screen: mono hit on 'bin'"
+        );
+        assert_eq!(
+            t.grid_run_rect(0, 1, 8, 20),
+            Some((0, 0, 24, 20)),
+            "alt-screen: the mono 3-cell rect"
+        );
     }
 
     #[test]
@@ -728,7 +1569,7 @@ mod tests {
         t.apply(Record::Mode(ScreenMode::AltScreen)); // grid only, no scrollback flow
         let mut cart = Cartoon::new();
         let (w, h) = ((8 * cw) as usize, (2 * ch) as usize);
-        t.render(&mut cart, w, h, &mut gs, &sheet, 0);
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         let rects = cart
             .ops
             .iter()

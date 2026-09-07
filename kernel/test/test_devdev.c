@@ -12,6 +12,7 @@
 
 #include <thylacine/cons.h>                  // #94-B: cons_test_termios + CONS_ICANON
 #include <thylacine/dev.h>
+#include <thylacine/devsrv.h>               // H-4d: spoor_devclass never confers 't' on devsrv
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
@@ -543,10 +544,16 @@ void test_devdev_renderer_gate(void) {
 // SYS_CONSOLE_OPEN fd (devcons, dc 'c') to the is-a-terminal predicate.
 // Every other leaf, and the directory itself, answers devdev's own 'd'.
 void test_devdev_fd_devclass(void) {
+    // H-4d: the whole-Spoor classifier (the syscall's body; kernel/syscall.c).
+    extern int spoor_devclass(struct Spoor *c);
+    TEST_EXPECT_EQ((long)spoor_devclass(NULL), (long)'-', "NULL classifies as devnone");
+
     struct Spoor *cons = walk_to("cons");
     TEST_ASSERT(cons != NULL, "walk to cons");
     TEST_EXPECT_EQ((long)devdev_fd_devclass(cons), (long)'c',
                    "the cons leaf normalizes to 'c'");
+    TEST_EXPECT_EQ((long)spoor_devclass(cons), (long)'c',
+                   "spoor_devclass: the cons leaf is 'c'");
     spoor_unref(cons);
 
     struct Spoor *ctl = walk_to("consctl");
@@ -559,6 +566,8 @@ void test_devdev_fd_devclass(void) {
     TEST_ASSERT(nul != NULL, "walk to null");
     TEST_EXPECT_EQ((long)devdev_fd_devclass(nul), (long)'d',
                    "a non-cons leaf stays 'd'");
+    TEST_EXPECT_EQ((long)spoor_devclass(nul), (long)'d',
+                   "spoor_devclass: a non-cons leaf is 'd'");
     spoor_unref(nul);
 
     struct Spoor *root = devdev.attach("");
@@ -572,7 +581,21 @@ void test_devdev_fd_devclass(void) {
     struct Spoor *direct = devcons.attach(NULL);
     TEST_ASSERT(direct != NULL, "devcons attach");
     TEST_EXPECT_EQ((long)direct->dc, (long)'c', "a devcons Spoor caches dc 'c'");
+    TEST_EXPECT_EQ((long)spoor_devclass(direct), (long)'c',
+                   "spoor_devclass: a devcons Spoor is 'c'");
     spoor_unref(direct);
+
+    // H-4d: 't' is the pts registry's to confer -- a Spoor that is not a
+    // registered pts slave never reads as a terminal by any other route. The
+    // positive arm needs a dev9p Spoor over a live SrvConn (no kernel-test
+    // fixture builds one); its witness is in-guest: a session tile's shell
+    // says "beacon rich (transcript zones armed)" over a real ptyfs slave
+    // (ls-gfx-session), which only the 't' answer can produce.
+    struct Spoor *srvroot = devsrv.attach("");
+    TEST_ASSERT(srvroot != NULL, "devsrv attach");
+    TEST_EXPECT_EQ((long)spoor_devclass(srvroot), (long)'s',
+                   "spoor_devclass: a devsrv Spoor stays 's' (never 't')");
+    spoor_unref(srvroot);
 }
 
 // H-1: byte-compare for the beacon-leaf renders (no libc memcmp in the

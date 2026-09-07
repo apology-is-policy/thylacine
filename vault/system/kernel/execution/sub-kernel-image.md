@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -20,6 +20,11 @@ Two Procs running the same binary should fault into the same physical text
 pages. This is the registry that makes that true: a fixed table keyed on a
 file's identity, holding one reference to a file-backed Burrow per cached
 segment. The first exec creates; the second finds.
+
+Since DISTRO D-3 the same registry also backs the phenotype file-backed `mmap`
+arm, so a shared library mapped read-only into many Linux-phenotype Procs dedups
+exactly as a shared `a.out`'s text does — the consumer generalised from exec to
+any read-only file-backed map.
 
 The heritage name is kept deliberately — this is the Plan 9 Image, rebuilt on
 the dual-refcount Burrow lifecycle.
@@ -76,6 +81,20 @@ The refcount claim across all three outcomes is *one clunk per Spoor*, and the
 file states it as an invariant and then walks each path against it. That is the
 correct shape for a rule that is easy to satisfy twice.
 
+**The backing-size stamp (#194).** `image_lookup_or_create` takes the
+caller-sampled backing file size and stamps it on the fresh Burrow (`file_limit`)
+before publication — the Burrow is private at that point, so no lock is needed.
+The fault arm reads it to refuse a page wholly past `round_up(file_limit)` with
+SIGBUS, closing the lying-ELF mint: a phdr claiming `filesz` beyond the real file
+end used to demand-zero the difference against the uncharged FILE posture. The
+failure policy is the caller's, and the two consumers differ — the guest-facing
+`mmap` arm fail-closes on an unknown or hostile-near-2^64 size (`-EIO`) before
+mapping, while exec passes `spoor_file_size` and tolerates
+`BURROW_FILE_LIMIT_UNKNOWN`, sound only because the sole size-less backing Dev is
+the baked, immutable ramfs where a lying ELF cannot be authored. On a cache HIT
+the entry keeps its creation-time limit and the caller's value is ignored: one
+sample per cached image, the close-to-open shape.
+
 ## Data structures
 
 `struct image_entry` — the seven key scalars, the Burrow holding the cache's
@@ -123,6 +142,10 @@ are coupled by an argument rather than by a check.
 [[inv-i36]] — condition 1 (the pinned version *is* the key), part of 3 (the
 cached Burrow is read-only over a kernel-pinned Spoor), and 7's sharing clause:
 shared text is charged once because the dual refcount means one set of pages.
+Since #194 the `file_limit` stamp keeps that posture honest: a page wholly past
+the backing file's end faults to SIGBUS rather than minting an uncharged
+demand-zero page, so the uncharged FILE charge is justified by real, shared file
+bytes — the condition that always justified it.
 
 [[inv-i7]] — the cache is a handle-count holder. Its reference is what keeps
 text resident after the last Proc unmaps, which is the temporal half of the
@@ -140,7 +163,9 @@ table of live entries is not an error at all.
 
 Linear scans over a fixed 128-entry table, twice per miss. Trivial against the
 page-ins it saves. The cap is sized at two entries per binary since rodata
-joined text — roughly sixty-four binaries.
+joined text — roughly sixty-four binaries. Since D-3 the same table also holds
+phenotype library maps, so under a Linux workload the 128 slots are shared
+between exec text and mmap'd `.so` text and the effective binary count is lower.
 
 ## Prosecution
 
@@ -169,7 +194,9 @@ stays one-directional.
 `image_lookup_or_create` in place of the eager whole-ELF read)"* — naming the
 exact sub-chunk that would land the consumer. That sub-chunk landed;
 [[sub-kernel-exec]] calls it, and `main` calls the initializer. A reader who
-trusts the paragraph concludes this file is dead code. Task #64.
+trusts the paragraph concludes this file is dead code. Task #64. Since DISTRO
+D-3 there are two production consumers, not one: exec and the phenotype
+file-backed `mmap` arm in the syscall layer both call `image_lookup_or_create`.
 
 **Content-keyed deduplication is refused permanently.** Sharing here is by file
 identity only. The cross-binary content scan that would be KSM is declined as an
@@ -180,7 +207,10 @@ to say so.
 
 [[arc-revenant]] R-3 built the cache with no consumer; R-4 wired exec into it.
 #45 widened it from text to every non-writable segment and doubled the cap; that
-same change's audit added the executability field to the key.
+same change's audit added the executability field to the key. DISTRO D-3c
+generalised the cache to the phenotype file-backed `mmap` arm and added the
+`file_limit` stamp (#194), re-justifying the uncharged-FILE posture by real,
+shared file bytes.
 
 ## Tests
 

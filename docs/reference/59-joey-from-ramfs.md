@@ -1,135 +1,38 @@
-# 59. /joey loaded from the initrd (P5-joey-from-ramfs)
+# 59 — /joey loaded from the initrd (P5-joey-from-ramfs) [ABSORBED INTO THE VAULT]
 
-The first userspace process is now a real binary built from `usr/joey/` and shipped in the cpio initrd, replacing the prior 9-instruction kernel-embedded blob. This is the precursor for the P5-stratumd-bringup arc, where `/joey` extends to orchestrate stratumd-system, attach the system pool's 9P tree at `/sysroot`, and pivot root before starting `corvus` and `login`.
+Absorbed at the docs/reference retirement (`chg-2026-09-06-joey-docs-absorb`).
+This is the P5 step that replaced the P3-F kernel-embedded blob
+(`29-joey`) with a real `usr/joey/` binary shipped in the cpio initrd and loaded
+by `devramfs_lookup`. Its **`#85` exec-window-transient content is current** and
+is carried, verbatim in substance, by the vault. Its subject spans:
 
-This chunk is structural, not behavioural: the bring-up handshake (rfork → exec_setup → userland_enter → wait_pid) is unchanged. What moved is the source of the ELF — from compile-time-embedded to ramfs-loaded.
+- the **kernel-side load + orchestration** — `joey_run`'s `devramfs_lookup` of
+  `/joey`, the mandatory 8-aligned copy (cpio newc is 4-aligned; `elf_load`
+  casts an `Ehdr` and requires 8), the `#85` transient exact-size `kmalloc`
+  freed by the child at the exec window, the `KP_ZERO` tail, the boot-log
+  `released` line, and the boot-fatal failure paths:
 
----
+      vault/system/kernel/boot/sub-kernel-joey.md
 
-## Why this is the prerequisite
+- the **userspace supervisor** `/joey` grew into — everything this file lists as
+  DEFERRED (fork stratumd-system, attach the pool's 9P tree, `pivot_root`, start
+  corvus + login): now built, in
 
-P5-stratumd-bringup (per `CORVUS-DESIGN.md §3 D4` + `§10`) requires `/joey` to:
+      vault/system/stratum/sub-stratum-boot.md
 
-1. Fork children (`stratumd-system`, then `corvus`, `login`, per-user `stratumd`).
-2. Hold long-running supervisor state.
-3. Run arbitrary userspace code (a 9-instruction hand-encoded blob can't reach the SVC dispatch surface needed to issue `SYS_ATTACH_9P` etc.).
+**What this file got WRONG or MISSED by the time it was absorbed:**
 
-None of this is possible while `/joey` is a 36-byte hand-encoded program embedded in the kernel image. Replacing the source of the ELF unblocks the rest of the bring-up arc; the orchestration logic lands in subsequent chunks.
-
----
-
-## Source of truth
-
-### `usr/joey/joey.c`
-
-Userspace binary using `libt`. v1.0 minimum-viable: prints a banner via `t_putstr` and exits 0. The body grows as the bring-up arc lands.
-
-```c
-#include <thyla/syscall.h>
-
-int main(void) {
-    t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
-    return 0;
-}
-```
-
-### `usr/joey/CMakeLists.txt`
-
-Standard userspace pattern (same as `hello`, `pipe-probe`, `attach-probe`):
-
-- `add_executable(joey joey.c)` + `target_link_libraries(joey PRIVATE t)`.
-- W^X linker script enforced via the project-level `add_link_options(-T${USR_LINKER_SCRIPT})` in `usr/CMakeLists.txt`.
-- `set_target_properties(joey PROPERTIES SUFFIX "" OUTPUT_NAME joey)` so the cpio entry is exactly `joey` (no `.elf` suffix).
-
-### `tools/build.sh::build_ramfs`
-
-Curated copy list `usr_bins=( "hello" "joey" "pipe-probe" "attach-probe" )`. `joey` is the second entry; placement is alphabetical-by-convenience, not load-bearing.
-
-### `kernel/joey.c`
-
-The kernel-side orchestration. Three changes from the predecessor (P3-F embedded blob):
-
-1. `build_init_elf()` and the embedded `g_joey_program[]` instruction stream are removed.
-2. `joey_run()` now calls `devramfs_lookup(JOEY_RAMFS_NAME, &cpio_blob, &blob_size)`. The cpio blob lives in initrd memory for the kernel's lifetime; the pointer is valid past joey's exit.
-3. The cpio's 4-byte-aligned bytes are copied into an 8-aligned working buffer before being handed to `exec_setup`. The ELF loader requires 8-byte alignment for the Ehdr cast (`kernel/elf.c::elf_load` R5-G F61); cpio newc data is only 4-byte aligned, so the copy is mandatory. **As-built since #85 the buffer is a transient exact-size `kmalloc(blob_size, KP_ZERO)`, not a static array**: the child (`joey_thunk`) `kfree`s it the moment `exec_setup` returns — on both the success and failure arms — because `exec_setup` fully consumes the blob (`elf_load` fills a scalars-only `elf_image`; `exec_map_segment` copies segment bytes into Burrows; no pointer into the blob survives the call). The predecessor was a `JOEY_BLOB_MAX`-sized BSS array bumped six times (36K → 65K → 128K → 256K → 384K → 512K → 640K) as boot probes accumulated — 640 KiB of permanently-resident kernel memory holding a stale copy of an already-mapped ELF (measured: kernel BSS 2,371,584 → 1,716,224 B across the change). Alignment is inherent to the heap buffer (kmalloc's >2 KiB path returns a page-aligned direct-map KVA; slab objects sit at power-of-two boundaries ≥ 8); `KP_ZERO` keeps the bytes beyond `blob_size` in the rounded-up allocation deterministically zero, exact parity with the BSS predecessor. Ownership transfers to the child because the parent cannot be the freer: in production it parks in `wait_pid` for the machine's lifetime (joey is the long-running init). The static-buffer pattern survives only in `kernel/test/test_userspace_ramfs.c` (a 16 KiB test fixture).
-
----
-
-## ELF loading boundary
-
-The alignment requirement is non-obvious for callers handing cpio bytes to `exec_setup`. The cpio newc format pads to 4 bytes; the ELF loader's `elf_load` validates 8-byte alignment up front:
-
-```c
-if (((uintptr_t)blob) % _Alignof(struct Elf64_Ehdr) != 0)
-    return ELF_LOAD_BAD_ALIGN;
-```
-
-Three observation-based facts that motivated the static buffer:
-
-1. The 9-instruction predecessor blob was 8-aligned by construction (`_Alignas(struct Elf64_Ehdr)` on the embedded BSS), so this hazard was invisible until the cpio path started feeding `exec_setup`.
-2. `/hello`'s ramfs-lookup path in `kernel/test/test_userspace_ramfs.c` already uses an 8-aligned copy buffer; `kernel/joey.c` mirrored that.
-3. The static buffer was sized for the userspace binary budget (16 KiB headroom up to 32 KiB at this chunk; grown to 640 KiB by 2026-07 — the trend that motivated #85's replacement of the static array with the transient exact-size heap buffer described above).
-
----
-
-## Boot diagnostic
-
-`joey_run` prints the rfork message with the loaded blob size (so the source — initrd vs embedded — is immediately visible in the boot log):
-
-```
-  joey: rforking child for /joey (12744 byte ELF from initrd)
-  joey: init blob released (12744 bytes, exec-window transient)
-joey: hello from /joey (real userspace binary, loaded from ramfs)
-  joey: /joey pid=N exited cleanly (status=0)
-Thylacine boot OK
-```
-
-The `hello` line is `t_putstr` output from `/joey`'s `main`. The flanking lines are `uart_puts` from `kernel/joey.c`; the `released` line (#85) makes the init blob's non-residency visible in every boot log — the working copy is freed by the child the moment `exec_setup` returns.
-
-The "byte ELF from initrd" suffix is the disambiguator: prior boots printed `9-instr hello blob`. If a future regression accidentally fell back to an embedded blob, the byte count would mismatch the cpio entry's size.
-
----
-
-## Failure paths
-
-| Failure | Symptom | Resolution |
-|---|---|---|
-| `/joey` missing from cpio | `EXTINCTION: joey: /joey not found in initrd (devramfs_lookup failed)` | Rebuild with `tools/build.sh all`; check `usr_bins` array in `tools/build.sh`. |
-| `/joey` cpio entry has zero size | `EXTINCTION: joey: /joey in initrd has zero size` | `tools/mkcpio.py` regression; rerun ramfs build. |
-| `/joey` ELF exceeds `EXEC_FILE_MAX` (256 MiB) | `EXTINCTION: joey: /joey ELF exceeds EXEC_FILE_MAX <size>` | Definitionally corrupt — the cpio parser bounds every entry within the initrd extent, so a size this large means a devramfs/cpio regression, not a big joey. (Pre-#85 this row was a 32 KiB→640 KiB `JOEY_BLOB_MAX` tunable that boot probes tripped six times; the "cheap; BSS is sparse-mapped" advice it carried was wrong — kernel BSS is real reserved frames, which is precisely why #85 retired the static buffer.) |
-| init blob `kmalloc` fails | `EXTINCTION: joey: init blob kmalloc failed <size>` | Unrecoverable at this boot point (buddy has ~2 GiB here); indicates allocator corruption or a wildly wrong size. |
-| `exec_setup` rejects blob | `joey: exec_setup failed rc=<N>; exits(fail-exec)` — and joey reaps with status=1 | Diagnose against `kernel/elf.c::elf_load_status` codes. |
-| `/joey` faults in EL0 | `EXTINCTION: EL0 unhandled sync exception (EC in ESR_EL1) <esr>` | Userspace bug in `usr/joey/joey.c` or `libt`'s `_start`. |
-
----
-
-## What didn't change
-
-- `joey_run` remains single-call (`g_joey_run_called` guard) until the supervisor extension lands.
-- Boot-banner contract (`TOOLING.md §10`): `Thylacine boot OK` still prints after `/joey` exits cleanly.
-- Test-suite count: unchanged at 416 — no new kernel-internal tests. The boot path itself is the regression: if `/joey` fails to load or exit cleanly, `joey_run` extincts and the banner never prints, which `tools/test.sh` reports as failure.
-
----
-
-## Status
-
-| Item | State |
-|---|---|
-| `usr/joey/joey.c` + `CMakeLists.txt` | LANDED |
-| `tools/build.sh::build_ramfs` `usr_bins += "joey"` | LANDED |
-| `kernel/joey.c` refactor: embedded blob → devramfs_lookup + 8-aligned copy | LANDED |
-| Boot log distinguishes initrd vs embedded source | LANDED |
-| Long-running joey orchestrator | DEFERRED (next chunk) |
-| Forks stratumd-system | DEFERRED (P5-stratumd-bringup-b) |
-| Kernel-side 9P mount of /sysroot | DEFERRED (P5-stratumd-bringup-b) |
-| pivot_root / chroot | DEFERRED (P5-stratumd-bringup-c) |
-
-Test posture: 416/416 PASS × default + UBSan.
-
----
-
-## Known caveats
-
-1. **Pre-existing flaky EL1 extinction** unrelated to this chunk: `tools/test.sh` occasionally reports an `EXTINCTION: unhandled sync exception (EC in ESR_EL1) 0x...02000000` line on a secondary CPU during boot. The boot completes; tests pass. Documented in the predecessor handoff (`memory/project_next_session.md` "Traps + pitfalls"). Not caused by P5-joey-from-ramfs.
-2. **No explicit kernel-internal regression test** for the new path. Justification: the boot CPU's `boot_main → joey_run → /joey → exits(0) → banner` is the regression. A dedicated test would re-implement the same path against the same `devramfs_lookup`. If a future change refactors `joey_run` (e.g., the long-running supervisor), a dedicated kernel-internal test becomes worthwhile.
-3. **JOEY_BLOB_MAX = 32 KiB.** Comfortable for the v1.0 hello-style joey (12744 bytes) and for the orchestrator-extension joey (expected to stay under 32 KiB if no library bloat). Bump on demand; extinction at boot is the failure mode if exceeded.
+- Its `usr/joey/joey.c` body ("prints a banner via `t_putstr` and exits 0") is
+  the P5 minimum-viable snapshot; `/joey` is now the long-running supervisor
+  (`sub-stratum-boot`), and every row in its own Status table marked DEFERRED
+  (supervisor / stratumd fork / `/sysroot` 9P mount / `pivot_root`) has since
+  landed.
+- **Caveat 3 contradicts this file's own body.** It states
+  `JOEY_BLOB_MAX = 32 KiB`, but the body already records that `#85` retired the
+  static `JOEY_BLOB_MAX` array for a transient exact-size heap buffer — the
+  caveat is a leftover the `#85` edit did not scrub. There is no `JOEY_BLOB_MAX`
+  now; the bound is `EXEC_FILE_MAX`.
+- The **416/416 test count** is a P5 snapshot, long superseded.
+- The **"pre-existing flaky EL1 extinction on a secondary CPU"** caveat is a P5
+  boot-note, not a joey property; the SMP-soundness story is the gate's, not
+  this file's.

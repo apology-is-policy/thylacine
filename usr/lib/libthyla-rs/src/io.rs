@@ -570,12 +570,26 @@ impl Write for Stdout {
         // Unbuffered: every write is an immediate SYS_WRITE.
         Ok(())
     }
+    // One syscall per formatted statement. The trait default writes each
+    // format fragment separately, and between two fragments the console's
+    // writer role is free: another process's whole line lands INSIDE this
+    // one (a `restored 0 of 0` cut before its ` program(s)` by a daemon's
+    // line, on the session gate). A statement is the unit a reader of the
+    // serial log can rely on, so it is the unit written.
+    fn write_fmt(&mut self, args: core::fmt::Arguments<'_>) -> Result<()> {
+        let s = alloc_crate::fmt::format(args);
+        self.write_all(s.as_bytes())
+    }
 }
 
 impl Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         let rc = unsafe { t_write(FD_STDERR, buf.as_ptr(), buf.len()) };
         Error::from_syscall_return(rc).map(|n| n as usize)
+    }
+    fn write_fmt(&mut self, args: core::fmt::Arguments<'_>) -> Result<()> {
+        let s = alloc_crate::fmt::format(args);
+        self.write_all(s.as_bytes())
     }
     fn flush(&mut self) -> Result<()> {
         Ok(())

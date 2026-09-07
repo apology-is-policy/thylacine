@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -141,7 +141,14 @@ allocation failure leaves the current one untouched and the offer
 standing for a retry. The displaced generation drains *passively* —
 never read again, its last content still displayed, so tearing-freedom
 holds — and retires at the first post-fence present. At most one drains;
-a second reweave returns `E_AGAIN`.
+a second reweave returns `E_AGAIN`. A resize-ack that arrives DURING the
+drain is likewise refused `E_AGAIN` and its deferral latched
+(`Surface.ack_deferred`); when the drain completes at that first post-fence
+present, `release_displaced_gen` **re-offers** the standing configure under a
+fresh serial (A-F2, [[chg-2026-09-06-harc-audit-close-r1]]) — because a client
+that only drains-and-acks-the-newest would otherwise never re-ack the refused
+offer and never learn its new size, a recovery no client implemented and latent
+since G-6b.
 
 ### The fenced lane
 
@@ -1079,6 +1086,35 @@ leaf, both "this placement is not available to you". A claim stays strictly
 weaker than the close every peer holds: it can never take a tile that holds a
 surface.
 
+### The creator reservation -- H-4d closes the claim race (2026-09-05, H-4d-1)
+
+Owner-gating the claim still left a SAME-principal race: under a session the
+compositor is the user's rio and fills every empty leaf it owns, while the
+restore tool -- the *same* principal -- is mid-build splitting a skeleton. Last
+mint wins, and no mark made AFTER the split (a tag, a claim) can close it,
+because the compositor's reconcile runs per `TEV_LAYOUT`, per split. H-4d-1 marks
+the leaf AT the split: `Pane.creator_conn`, stamped on BOTH empties by a ctl
+split (a chord split stamps none), released at that conn's `retire_conn`. The
+claim mint then answers **E_AGAIN** -- not E_PERM -- to any OTHER conn of the
+same principal while the creator lives ("the leaf IS its principal's, just not
+yet"); the Renderer (the environment) is never held off. **The claim-LESS create
+respects the reservation too, keyed on the PROCESS** ([[chg-2026-09-06-harc-audit-close-r1]]
+A-F3): `Pane.creator_peer` sits beside `creator_conn`, and `host_for(n, conn,
+peer)` treats a focused empty leaf another live process reserved as occupied, so
+`host()`'s focused-leaf fallback cannot take a restore tool's tagged leaf out
+from under it. Keyed on the peer, not the conn, a program that splits on one conn
+and hosts on another (the battery's control conn + its per-surface conns) still
+fills its own leaf; the first ls-gfx-panes run caught the conn-keyed version in
+the tabbed leg. The release fans ONE
+`TEV_LAYOUT` to the declared session so the retry is prompt (no geometry change
+at a release). rio's rule: a window a program creates is that program's, not the
+menu's -- so a restore tool's skeleton is never filled by its own session
+compositor mid-build. The paired decision -- a session's tagged empty leaf
+becomes a terminal tile whose tag IS its command line (`kaua-term cols rows
+<argv>`), the compositor being the user's rio since KT-1 -- lives on the halcyon
+side (docs/reference/150/151); the tapestryd half is the reservation + the menu
+authority checks' `Session(p)` arms admitting the declared session.
+
 **The reap.** `reap_session_empties(principal)` closes a departed session's
 empty scaffolding when the principal's LAST live conn is gone. `retire_conn`
 (at teardown) already closed the dying conn's OCCUPIED leaves (`retire` closes
@@ -1401,8 +1437,13 @@ vs VK verdict: GL 44.8 / VK-linear 47.6 / VK-blit 51.3 fps).
 
 ## The menu -- the one ephemeral surface the compositor grabs and tears down (2026-09-02, H-3c THE GATE + its audit close)
 
-The obj verb menu: a `Role::Menu` surface (`create W H role=menu`,
-renderer-gated E_PERM, no bind, NEVER hosted, never focusable). `Comp.menu:
+The obj verb menu: a `Role::Menu` surface (`create W H role=menu`, no bind,
+NEVER hosted, never focusable). The create and the `menu ` verbs are the
+renderer's OR -- since H-4d -- the declared session compositor's, gated
+`session_declared && conn_hosts` ([[chg-2026-09-06-harc-audit-close-r1]] A-F5):
+the user's rio summons the menu over its own tiles, but an idle declarer that
+hosts nothing is refused (else it could float a menu, take the grab, and force
+Composed with no tile of its own). `Comp.menu:
 Option<MenuState { n, gen, rect }>` is the ONE placed menu. Gated global verbs:
 `menu place <surface-id> <x> <y>` (authority -> syntax -> a non-menu surface
 E_NOENT -> owned by the caller's PROCESS via `owner_peer == peer_stripes`
@@ -1522,7 +1563,68 @@ partial present's pixel through the 2x scale, the untouched frame's pixel at
 three-quarters (black under the bug); then the one-variable control (rotation
 on -> the second partial present latches at `slot 1 of slots 0b11`). The
 real-DOSBox re-run (aux's `dx-fullscreen-repro.exp`, the fixture on aux-3) is
-owed to aux after the merge. Landed `f25781ad` ([[chg-2026-09-05-fullscreen-zoom]]);
-the prosecution notes ride AUDIT-TRIGGERS row 42 for the next tapestryd round
-(the double-the-distance deferral).
+owed to aux after the merge. Landed `f25781ad` ([[chg-2026-09-05-fullscreen-zoom]]); the prosecution notes
+rode AUDIT-TRIGGERS row 42 to the next tapestryd round -- the H-arc round-1 audit
+below, which discharged the deferral (A-F1 + A-F4).
+
+## The H-arc audit close, round 1 (2026-09-06)
+
+The batched H-arc round-1 audit ([[adt-harc-r1]]: three Fable 5.1 prosecutors in
+parallel over the zoom fix + H-4c + H-4d-1 + H-4d-2a/2/3, `839a966f`; 0 P0 / 2 P1
+/ 0 P2 / 11 P3, clean by count, every finding fixed at the close) landed six
+compositor findings on this surface. The zoom section above anticipated this
+round (its "next tapestryd round" deferral); A-F1 + A-F4 discharge it.
+
+**A-F1 [P1] -- the composed GPU arm serves the letterbox re-key's partial
+presents** ([[fnd-harc-r1-a1]]). `Surface.res_stale[WEAVE_SLOTS]` marks a slot
+whose host copy never received the full frame (a fresh generation, a hide, a
+CPU-arm present, a GL adoption, a failed compose). Once the #56 re-key made the
+letterbox arm serve a single-slot client's PARTIAL presents, the composed GPU arm
+blitted a stale slot WHOLE by a scaled op -- compositing bytes no present carried
+(the witness tokens, the pre-hide frame, undefined texture). The fix mirrors the
+direct arm: a stale slot's first transfer expands to the FULL surface
+(`vec![(0,0,w,h)]`), not the damage rects; and the slot un-stales after ANY
+successful GPU transfer whatever the coverage -- the second half, because keying
+the un-stale on `full` would re-mark every partial present and fire the expansion
+on every subsequent one. A failed compose re-marks stale (the host copy then
+holds only that present's partial damage).
+
+**A-F2 [P1] -- the draining resize-ack re-offer** ([[fnd-harc-r1-a2]], the
+mechanism recorded in "The generation fence" above). Pre-existing since G-6b: a
+resize-ack arriving while a reweave still drains is refused `E_AGAIN`, and a
+client that only drains-and-acks-the-newest never re-acked it, so the surface
+never learned its new size. `Surface.ack_deferred` latches the refusal;
+`release_displaced_gen` re-offers the standing configure under a fresh serial when
+the drain completes (test-mode `resize-ack N re-offer WxH after the drain`; a
+wedged re-offer retires the surface).
+
+**A-F3 [P3] -- the creator reservation keys on the PROCESS** (recorded at "The
+creator reservation" above). `Pane.creator_peer` beside `creator_conn`;
+`host_for(n, conn, peer)` treats a focused empty leaf another live process
+reserved as occupied for a claim-LESS create, so `host()`'s focused-leaf fallback
+does not take a restore tool's tagged leaf out from under it.
+
+**A-F4 [P3] -- floor the bars at the latch flip.** When the #56 latch flips
+(letterbox -> crop) under a Composed display with no structural pass to repaint
+the pane, the first frame's scaled projection outside the native rect would
+persist until the next structural repaint. `floor_bars_around(n)` fills the four
+bands around the surface's current placement with `BG_COLOR` and flushes (a no-op
+off Composed, when hidden, or with no screen buffer).
+
+**A-F5 [P3] -- the menu seat requires hosting** (recorded at "The menu" above).
+`role=menu` and the `menu ` verbs are the renderer's OR the declared session
+compositor's, gated `session_declared && conn_hosts`: an idle declarer that hosts
+nothing is refused, so it cannot float a menu, take the grab, and force Composed
+with no tile of its own.
+
+**A-F6 [P3] -- the test coverage.** `ls-gfx-panes` gained scenario 2a (the
+draining re-offer: an ack mid-drain -> `E_AGAIN` -> the server re-offers after the
+drain) and a partial-FIRST single-slot client E (its first present is partial, so
+the slot is stale -- the witness for A-F1's full-surface expansion). The battery +
+scenarios stay [[seam-tapestry-battery-unowned]].
+
+OWED (from the peer close): the GPU-path witness for A-F1 on the GL host, and
+aux's real-DOSBox-X re-run. Folded from [[chg-2026-09-06-harc-audit-close-r1]]
+(the KT-1 inheritance: the peer's `no-dossier-change` deferred the vault prose to
+this track; the UI + beacon-relay half landed in [[chg-2026-09-06-harc-r1-fold-ui]]).
 

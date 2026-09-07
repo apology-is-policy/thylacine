@@ -45,7 +45,12 @@ pub enum Control {
     /// A Beacon frame (OSC 1936), re-synthesized as the complete `ESC ] ... ST`
     /// frame that `beacon::wire` parses -- forwarded RAW, uninterpreted, because
     /// halcyond keeps the Beacon parser (and its format-fuzz surface), R5.
-    Osc1936Raw(Vec<u8>),
+    /// `serial` is the span serial the vt advanced to at this frame: the
+    /// cells written after it carry it (`vt::Cell.span`, H-4d), so the
+    /// consumer maps a cell to the span state after feeding this frame.
+    /// Explicit on the wire (not counted at both ends) so a dropped or
+    /// oversize frame can never shift every later cell onto the wrong span.
+    Osc1936Raw { serial: u32, frame: Vec<u8> },
     /// BEL.
     Bell,
     /// OSC 0 / OSC 2 window title.
@@ -67,10 +72,29 @@ pub enum Record {
     CellDiff {
         changed: Vec<(u16, u16, Cell)>,
         cursor: (u16, u16, bool),
+        /// The live screen's per-row soft-wrap flags (the vt's active-buffer
+        /// `wrapped`) -- a full-grid snapshot carried on every CellDiff like
+        /// `cursor`, so halcyond can rejoin soft-wrapped grid rows into logical
+        /// lines and paint the normal-mode live view proportional (PL-4), the
+        /// same rejoin ScrollOff enables for scrollback (PL-3). `wrapped.len()`
+        /// is the grid's row count. NOT diffed: a wrap flag only ever changes
+        /// together with a cell write in the same row, so the snapshot rides
+        /// the very diff it is coherent with. On the alt screen it is the alt
+        /// buffer's flags (unused there -- the alt screen renders the raw mono
+        /// grid, not the proportional join).
+        wrapped: Vec<bool>,
     },
     /// Normal-mode lines that scrolled off the top -> the transcript. Coalesced:
     /// a bulk scroll is one record carrying every row that left, in order.
-    ScrollOff { rows: Vec<Vec<Cell>> },
+    /// `wrapped[i]` is true iff row `i` ended by AUTOWRAP (the grid broke a
+    /// logical line at `cols`, often mid-word) and so continues into row `i+1`
+    /// -- the consumer rejoins the fragments and re-wraps at word boundaries
+    /// (PL-3, fixing the mid-word wrap on the proportional scrollback). One flag
+    /// per row: `wrapped.len() == rows.len()`.
+    ScrollOff {
+        rows: Vec<Vec<Cell>>,
+        wrapped: Vec<bool>,
+    },
     /// An out-of-band control event.
     Control(Control),
     /// The screen-mode flip (alt-screen enter/leave).
@@ -90,6 +114,9 @@ pub struct Producer {
     cols: usize,
     last_cursor: (u16, u16, bool),
     scroll_acc: Vec<Vec<Cell>>,
+    // Parallel to `scroll_acc` (pushed together, taken together): the per-row
+    // soft-wrap flag the vt emits on each Scroll boundary (PL-3b).
+    scroll_wrapped: Vec<bool>,
 }
 
 impl Producer {
@@ -101,6 +128,7 @@ impl Producer {
             cols: vt.cols,
             last_cursor: (vt.cy as u16, vt.cx as u16, vt.cursor_visible),
             scroll_acc: Vec::new(),
+            scroll_wrapped: Vec::new(),
         }
     }
 
@@ -159,8 +187,13 @@ impl Producer {
                 // exceeds wire::MAX_FRAME, and halcyond's decoder would reject it
                 // and kill the tile. Flush at the cap; order is preserved (the
                 // rows split across several ScrollOff records, in sequence).
-                Boundary::Scroll(row) => {
+                Boundary::Scroll(row, wrapped) => {
+                    // PL-3b: carry the vt's per-row soft-wrap flag alongside the
+                    // row -- parallel vecs pushed together so they stay aligned,
+                    // and a cap-flush takes both -- so the transcript can rejoin
+                    // a logical line the grid broke mid-word at `cols`.
                     self.scroll_acc.push(row);
+                    self.scroll_wrapped.push(wrapped);
                     if self.scroll_acc.len() >= self.scroll_cap() {
                         self.flush_scroll(out);
                     }
@@ -169,9 +202,12 @@ impl Producer {
                     self.flush(vt, out);
                     out.push(Record::Control(Control::Bell));
                 }
-                Boundary::Osc(payload) => {
+                Boundary::Osc {
+                    serial,
+                    body: payload,
+                } => {
                     self.flush(vt, out);
-                    if let Some(c) = classify_osc(&payload) {
+                    if let Some(c) = classify_osc(serial, &payload) {
                         out.push(Record::Control(c));
                     }
                 }
@@ -182,10 +218,15 @@ impl Producer {
                     // AND send it whole: the consumer keeps one grid, so the
                     // alt screen's blank rows must overwrite the main's text.
                     self.flush_scroll(out);
-                    self.emit_celldiff(&outgoing, mcx, mcy, vt.cursor_visible, out);
+                    // The outgoing MAIN's wrap is now in the (swapped-away) alt
+                    // buffer, so vt.wrapped() here is the blank alt's -- but this
+                    // CellDiff is overwritten by the blank-alt full_diff below
+                    // before any render, and the alt screen renders the raw mono
+                    // grid (no join), so the wrap it carries is never read.
+                    self.emit_celldiff(&outgoing, mcx, mcy, vt.cursor_visible, vt.wrapped(), out);
                     out.push(Record::Mode(ScreenMode::AltScreen));
                     self.reset_shadow(&vt.cells, vt.cx, vt.cy, vt.cursor_visible);
-                    out.push(self.full_diff());
+                    out.push(self.full_diff(vt.wrapped()));
                 }
                 Boundary::AltLeave(restored) => {
                     // The alt live grid is discarded; announce the mode, reset
@@ -194,7 +235,7 @@ impl Producer {
                     self.flush_scroll(out);
                     out.push(Record::Mode(ScreenMode::Normal));
                     self.reset_shadow(&restored, vt.cx, vt.cy, vt.cursor_visible);
-                    out.push(self.full_diff());
+                    out.push(self.full_diff(vt.wrapped()));
                 }
             }
             // Ship whenever the held cells reach the accumulator bound,
@@ -214,13 +255,13 @@ impl Producer {
         let cursor = (vt.cy as u16, vt.cx as u16, vt.cursor_visible);
         self.shadow = vt.cells.clone();
         self.last_cursor = cursor;
-        out.push(self.full_diff());
+        out.push(self.full_diff(vt.wrapped()));
     }
 
     /// Every shadow cell as one CellDiff (the consumer redraws the whole
     /// screen): the resize and the alt-screen boundaries, where the consumer's
     /// single grid must be overwritten wholesale.
-    fn full_diff(&self) -> Record {
+    fn full_diff(&self, wrapped: &[bool]) -> Record {
         let cols = self.cols.max(1);
         let changed = self
             .shadow
@@ -231,31 +272,37 @@ impl Producer {
         Record::CellDiff {
             changed,
             cursor: self.last_cursor,
+            wrapped: wrapped.to_vec(),
         }
     }
 
     fn flush(&mut self, vt: &Vt, out: &mut Vec<Record>) {
         self.flush_scroll(out);
-        self.emit_celldiff(&vt.cells, vt.cx, vt.cy, vt.cursor_visible, out);
+        self.emit_celldiff(&vt.cells, vt.cx, vt.cy, vt.cursor_visible, vt.wrapped(), out);
     }
 
     fn flush_scroll(&mut self, out: &mut Vec<Record>) {
         if !self.scroll_acc.is_empty() {
             let rows = core::mem::take(&mut self.scroll_acc);
-            out.push(Record::ScrollOff { rows });
+            let wrapped = core::mem::take(&mut self.scroll_wrapped);
+            out.push(Record::ScrollOff { rows, wrapped });
         }
     }
 
     // The row cap that keeps one coalesced ScrollOff's serialized frame under
-    // wire::MAX_FRAME. Each scrolled row is `cols` cells (~13 B each) plus a
-    // small header; half MAX_FRAME leaves ample headroom for the frame envelope.
-    // At least 1 so a pathologically wide tile still makes progress.
+    // wire::MAX_FRAME. Each scrolled row is `cols` cells -- 17 B each on the
+    // wire (`wire::CELL_BYTES`), `size_of::<Cell>()` = 20 B in memory since
+    // the span field (H-4d) -- plus a small header; half MAX_FRAME leaves
+    // ample headroom for the frame envelope. At least 1 so a pathologically
+    // wide tile still makes progress.
     fn scroll_cap(&self) -> usize {
         // The frame bound (the consumer's decoder) AND a heap bound (this
         // producer's own): one ScrollOff is held as cells, then serialized,
         // then framed -- three copies -- so its cell bytes stay well under
-        // the heap even at the widest tile.
-        let per_row = self.cols.max(1) * 16 + 8;
+        // the heap even at the widest tile. Sized by the in-memory cell,
+        // the larger of the two, so one estimate bounds both (the H-arc
+        // round-1 audit, B-F1: a literal 16 predated the span field).
+        let per_row = self.cols.max(1) * core::mem::size_of::<Cell>() + 8;
         (crate::wire::MAX_FRAME / 2 / per_row)
             .min(SCROLL_ACC_BYTES / per_row)
             .max(1)
@@ -271,6 +318,7 @@ impl Producer {
         cx: usize,
         cy: usize,
         vis: bool,
+        wrapped: &[bool],
         out: &mut Vec<Record>,
     ) {
         let cursor = (cy as u16, cx as u16, vis);
@@ -291,7 +339,11 @@ impl Producer {
             self.shadow.copy_from_slice(current);
         }
         self.last_cursor = cursor;
-        out.push(Record::CellDiff { changed, cursor });
+        out.push(Record::CellDiff {
+            changed,
+            cursor,
+            wrapped: wrapped.to_vec(),
+        });
     }
 
     fn reset_shadow(&mut self, to: &[Cell], cx: usize, cy: usize, vis: bool) {
@@ -305,7 +357,7 @@ impl Producer {
 fn cells_in(out: &[Record]) -> usize {
     out.iter()
         .map(|r| match r {
-            Record::ScrollOff { rows } => rows.iter().map(|row| row.len()).sum(),
+            Record::ScrollOff { rows, .. } => rows.iter().map(|row| row.len()).sum(),
             Record::CellDiff { changed, .. } => changed.len(),
             _ => 0,
         })
@@ -317,7 +369,7 @@ fn cells_in(out: &[Record]) -> usize {
 /// re-synthesized as the full `ESC ] <payload> ST` frame for `beacon::wire`;
 /// every other OSC is dropped. The vt parser already consumes the 7770 aurora-
 /// config channel, so it never reaches here.
-fn classify_osc(payload: &[u8]) -> Option<Control> {
+fn classify_osc(serial: u32, payload: &[u8]) -> Option<Control> {
     let semi = payload.iter().position(|&b| b == b';')?;
     let (code, rest) = (&payload[..semi], &payload[semi + 1..]);
     match code {
@@ -329,7 +381,7 @@ fn classify_osc(payload: &[u8]) -> Option<Control> {
             f.extend_from_slice(b"\x1b]");
             f.extend_from_slice(payload);
             f.extend_from_slice(b"\x1b\\");
-            Some(Control::Osc1936Raw(f))
+            Some(Control::Osc1936Raw { serial, frame: f })
         }
         _ => None,
     }
@@ -497,7 +549,7 @@ mod tests {
             let held: usize = o
                 .iter()
                 .map(|r| match r {
-                    Record::ScrollOff { rows } => rows.len(),
+                    Record::ScrollOff { rows, .. } => rows.len(),
                     _ => 0,
                 })
                 .sum();
@@ -508,7 +560,7 @@ mod tests {
         let tail: usize = out
             .iter()
             .map(|r| match r {
-                Record::ScrollOff { rows } => rows.len(),
+                Record::ScrollOff { rows, .. } => rows.len(),
                 _ => 0,
             })
             .sum();
@@ -539,7 +591,7 @@ mod tests {
         let held: usize = all
             .iter()
             .map(|r| match r {
-                Record::ScrollOff { rows } => rows.len(),
+                Record::ScrollOff { rows, .. } => rows.len(),
                 _ => 0,
             })
             .sum();
@@ -643,7 +695,7 @@ mod tests {
         prod.drain_pending(&mut vt, &mut out);
         prod.resized(&vt, &mut out);
         assert!(
-            matches!(out.first(), Some(Record::ScrollOff { rows }) if rows.len() == 2),
+            matches!(out.first(), Some(Record::ScrollOff { rows, .. }) if rows.len() == 2),
             "first record is the two scrolled-off rows, got {:?}",
             out.first().map(|r| core::mem::discriminant(r))
         );
@@ -725,9 +777,10 @@ mod tests {
         // The full ESC ] ... ST frame, exactly what beacon::wire::parse consumes.
         assert_eq!(
             recs,
-            vec![Record::Control(Control::Osc1936Raw(
-                b"\x1b]1936;v1;zone;k=prompt\x1b\\".to_vec()
-            ))]
+            vec![Record::Control(Control::Osc1936Raw {
+                serial: 1,
+                frame: b"\x1b]1936;v1;zone;k=prompt\x1b\\".to_vec()
+            })]
         );
     }
 
@@ -741,13 +794,51 @@ mod tests {
         let so = recs
             .iter()
             .find_map(|r| match r {
-                Record::ScrollOff { rows } => Some(rows),
+                Record::ScrollOff { rows, .. } => Some(rows),
                 _ => None,
             })
             .expect("a ScrollOff");
         assert_eq!(so.len(), 1);
         let s: String = so[0].iter().map(|c| c.ch).collect();
         assert_eq!(s, "top!");
+    }
+
+    #[test]
+    fn scrolloff_carries_the_per_row_soft_wrap_flags() {
+        // PL-3b: a 4x2 tile; "abcdefghij" fills row0 (abcd, autowrap), row1
+        // (efgh, autowrap), then 'i' scrolls "abcd" off -- a row that ended by
+        // AUTOWRAP, so its ScrollOff flag is true (the consumer rejoins it).
+        let recs = produce(4, 2, b"abcdefghij");
+        let (rows, wrapped) = recs
+            .iter()
+            .find_map(|r| match r {
+                Record::ScrollOff { rows, wrapped } => Some((rows, wrapped)),
+                _ => None,
+            })
+            .expect("a ScrollOff");
+        assert_eq!(rows.len(), wrapped.len(), "one flag per row");
+        assert_eq!(rows.len(), 1);
+        let s: String = rows[0].iter().map(|c| c.ch).collect();
+        assert_eq!(s, "abcd");
+        assert!(wrapped[0], "the scrolled row ended by autowrap");
+    }
+
+    #[test]
+    fn scrolloff_flag_is_false_on_a_hard_newline() {
+        // A row terminated by an explicit LF (not autowrap) must carry false, so
+        // the consumer finalizes the logical line there. 4x2: "ab\ncd\nef"
+        // scrolls "ab" off, which ended on a newline.
+        let recs = produce(4, 2, b"ab\r\ncd\r\nef");
+        let (rows, wrapped) = recs
+            .iter()
+            .find_map(|r| match r {
+                Record::ScrollOff { rows, wrapped } => Some((rows, wrapped)),
+                _ => None,
+            })
+            .expect("a ScrollOff");
+        let s: String = rows[0].iter().map(|c| c.ch).collect();
+        assert!(s.starts_with("ab"), "row content, got {s:?}"); // tail is blank padding
+        assert!(!wrapped[0], "a newline-terminated row is not soft-wrapped");
     }
 
     #[test]
@@ -762,7 +853,7 @@ mod tests {
         let so = out
             .iter()
             .find_map(|r| match r {
-                Record::ScrollOff { rows } => Some(rows),
+                Record::ScrollOff { rows, .. } => Some(rows),
                 _ => None,
             })
             .expect("a ScrollOff");
@@ -864,7 +955,7 @@ mod tests {
         let sos: Vec<&Vec<Vec<Cell>>> = out
             .iter()
             .filter_map(|r| match r {
-                Record::ScrollOff { rows } => Some(rows),
+                Record::ScrollOff { rows, .. } => Some(rows),
                 _ => None,
             })
             .collect();
@@ -925,12 +1016,32 @@ mod tests {
         p.feed(&mut vt, b"\x1b[2;3H", &mut out); // move cursor, no cell change
         assert_eq!(out.len(), 1);
         match &out[0] {
-            Record::CellDiff { changed, cursor } => {
+            Record::CellDiff { changed, cursor, .. } => {
                 assert!(changed.is_empty());
                 assert_eq!(*cursor, (1, 2, true));
             }
             other => panic!("expected a cursor-only CellDiff, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn celldiff_carries_the_live_grid_soft_wrap() {
+        // PL-4a: "abcde" on a 4x2 grid fills row 0 (abcd) and autowraps 'e' onto
+        // row 1 WITHOUT scrolling -- so the live-screen CellDiff (not a ScrollOff)
+        // must carry the grid's per-row wrap, letting halcyond rejoin the
+        // soft-wrapped live row into a logical line (PL-4).
+        let recs = produce(4, 2, b"abcde");
+        let wrapped = recs
+            .iter()
+            .rev()
+            .find_map(|r| match r {
+                Record::CellDiff { wrapped, .. } => Some(wrapped.clone()),
+                _ => None,
+            })
+            .expect("a CellDiff");
+        assert_eq!(wrapped.len(), 2, "one flag per grid row");
+        assert!(wrapped[0], "row 0 ended by autowrap");
+        assert!(!wrapped[1], "row 1 did not");
     }
 
     // ---- the down channel: encode_key ----

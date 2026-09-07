@@ -465,6 +465,13 @@ pub struct Cell {
     pub fg: u32,
     pub bg: u32,
     pub attrs: u8,
+    /// H-4d: the serial of the last Beacon frame (OSC 1936) the parser
+    /// forwarded before this cell was written -- 0 = none. A consumer that
+    /// parses the forwarded frames in order maps the serial to the span
+    /// state after that frame (obj / em / hdr), so a cell knows its
+    /// presentation without the parser ever reading a Beacon body (R5:
+    /// one parser, in the consumer). Blanks (erase / scroll fill) carry 0.
+    pub span: u32,
 }
 
 impl Cell {
@@ -474,6 +481,7 @@ impl Cell {
             fg,
             bg,
             attrs: 0,
+            span: 0,
         }
     }
 }
@@ -488,17 +496,24 @@ impl Cell {
 pub enum Boundary {
     /// A normal-mode, full-screen (top margin at row 0) scroll pushed this row
     /// off the top of the screen -> the transcript. Carries the row's cells as
-    /// they were before the scroll. A DECSTBM region scroll (top margin != 0)
-    /// discards its top line like xterm and emits nothing.
-    Scroll(Vec<Cell>),
+    /// they were before the scroll, AND the row's soft-wrap flag: true iff the
+    /// row ended by AUTOWRAP (its content continues into what is now the top
+    /// row), so a consumer can rejoin a soft-wrapped logical line. A DECSTBM
+    /// region scroll (top margin != 0) discards its top line like xterm and
+    /// emits nothing.
+    Scroll(Vec<Cell>, bool),
     /// BEL (0x07) in ground state.
     Bell,
     /// A non-7770 OSC terminated: the raw payload bytes between the OSC
     /// introducer and the terminator (e.g. `b"0;title"` or `b"1936;v1;..."`).
     /// The consumer routes by the leading numeric code; vt stays agnostic of
     /// title/Beacon semantics. The 7770 aurora-config channel is consumed
-    /// in-parser (settings_req) and never surfaces here.
-    Osc(Vec<u8>),
+    /// in-parser (settings_req) and never surfaces here. `serial` is the
+    /// span serial this frame advanced to (a Beacon frame, code 1936) or 0
+    /// (any other OSC): the cells written after it carry that serial
+    /// (`Cell.span`), so the consumer maps them to the span state after
+    /// feeding THIS frame.
+    Osc { serial: u32, body: Vec<u8> },
     /// Entered the alt screen. Carries the OUTGOING main buffer AND its cursor
     /// `(cx, cy)` (the swap has already happened, so `cells` is the fresh blank
     /// alt and the live cursor is homed) -- the consumer flushes the main's
@@ -666,6 +681,9 @@ pub struct Vt {
     fg: u32,
     bg: u32,
     attrs: u8,
+    /// H-4d: the current span serial (see `Cell.span`) + the counter.
+    span: u32,
+    span_serial: u32,
     state: State,
     params: [u32; MAX_PARAMS],
     nparams: usize,
@@ -721,6 +739,16 @@ pub struct Vt {
     utf_acc: u32,
     utf_rem: u8,
     pub dirty: Vec<bool>, // per-row damage
+    // Per-row soft-wrap: wrapped[y] == true iff row y ended by AUTOWRAP (the
+    // cursor hit the right margin and the next glyph wrapped to y+1), so a
+    // consumer can rejoin y and y+1 into one logical line. Set ONLY in
+    // `put_char` (never on an explicit LF/IND); cleared when a col-0 glyph
+    // restarts the row or the row is blanked/erased; mirrors `cells` on every
+    // scroll / resize / IL / DL. `alt_wrapped` isolates the alt buffer so an
+    // alt-screen autowrap never corrupts the main buffer's flags (and keeps
+    // the vec length == rows across the alt swap).
+    wrapped: Vec<bool>,
+    alt_wrapped: Vec<bool>,
     // KT-1 event capture. Off by default: the console renderer (aurora) never
     // sets it, so the leaf handlers push nothing and every path is byte- and
     // allocation-identical to before. The kaua-term sets it and drains
@@ -769,6 +797,8 @@ impl Vt {
             fg: pal.fg,
             bg: pal.bg,
             attrs: 0,
+            span: 0,
+            span_serial: 0,
             state: State::Ground,
             params: [0; MAX_PARAMS],
             nparams: 0,
@@ -788,6 +818,8 @@ impl Vt {
             utf_acc: 0,
             utf_rem: 0,
             dirty: vec![true; rows],
+            wrapped: vec![false; rows],
+            alt_wrapped: vec![false; rows],
             capture_events: false,
             pending: Vec::new(),
             app_cursor: false,
@@ -807,6 +839,16 @@ impl Vt {
     pub fn set_capture_events(&mut self, on: bool) {
         self.capture_events = on;
         self.pending.clear();
+    }
+
+    /// The ACTIVE buffer's per-row soft-wrap flags (`wrapped[y]` == the flag
+    /// documented on the field: row y ended by autowrap). Alt-swapped, so this
+    /// is the alt buffer's flags on the alt screen and the main's on the normal
+    /// screen. The KT-1 consumer carries this on the live-screen CellDiff (PL-4)
+    /// so halcyond can rejoin soft-wrapped grid rows into logical lines the same
+    /// way it rejoins scrolled-off rows (PL-3).
+    pub fn wrapped(&self) -> &[bool] {
+        &self.wrapped
     }
 
     /// Resumable feed for the event-capture consumer (KT-1). Processes bytes
@@ -856,28 +898,34 @@ impl Vt {
         if self.capture_events && !self.on_alt {
             for r in 0..shift.min(self.rows) {
                 let row = self.cells[r * self.cols..(r + 1) * self.cols].to_vec();
-                self.pending.push(Boundary::Scroll(row));
+                self.pending.push(Boundary::Scroll(row, self.wrapped[r]));
             }
         }
         let mut cells = vec![Cell::blank(pfg, pbg); ncols * nrows];
+        let mut new_wrapped = vec![false; nrows];
         for r in 0..nrows {
             let or = r + shift;
             if or >= self.rows {
                 break;
             }
+            new_wrapped[r] = self.wrapped[or];
             for c in 0..ccols {
                 cells[r * ncols + c] = self.cells[or * self.cols + c];
             }
         }
         let mut alt = vec![Cell::blank(pfg, pbg); ncols * nrows];
+        let mut new_alt_wrapped = vec![false; nrows];
         let arows = if self.rows < nrows { self.rows } else { nrows };
         for r in 0..arows {
+            new_alt_wrapped[r] = self.alt_wrapped[r];
             for c in 0..ccols {
                 alt[r * ncols + c] = self.alt_cells[r * self.cols + c];
             }
         }
         self.cells = cells;
         self.alt_cells = alt;
+        self.wrapped = new_wrapped;
+        self.alt_wrapped = new_alt_wrapped;
         self.cols = ncols;
         self.rows = nrows;
         // DECSTBM resets to the full screen on resize (xterm parity).
@@ -1066,6 +1114,9 @@ impl Vt {
                 for c in self.cells.iter_mut() {
                     *c = Cell::blank(fg, bg);
                 }
+                for w in self.wrapped.iter_mut() {
+                    *w = false;
+                }
                 self.mark_all();
             }
             _ => {}
@@ -1212,6 +1263,7 @@ impl Vt {
             return;
         }
         core::mem::swap(&mut self.cells, &mut self.alt_cells);
+        core::mem::swap(&mut self.wrapped, &mut self.alt_wrapped);
         self.on_alt = enter;
         if enter {
             // A fresh alt screen (1049 semantics: implicit DECSC, so
@@ -1219,6 +1271,9 @@ impl Vt {
             let (fg, bg) = (self.pal.fg, self.bg);
             for c in self.cells.iter_mut() {
                 *c = Cell::blank(fg, bg);
+            }
+            for w in self.wrapped.iter_mut() {
+                *w = false;
             }
             self.saved = (self.cx, self.cy);
             self.saved_wrap = self.wrap;
@@ -1277,6 +1332,10 @@ impl Vt {
         // Resolve a deferred wrap left pending by the previous glyph.
         if self.cx >= self.cols {
             if self.wrap {
+                // This row filled and the next glyph wraps: mark it soft-wrapped
+                // BEFORE line_feed (which cannot tell autowrap from an explicit
+                // LF), while cy is still the leaving row.
+                self.wrapped[self.cy] = true;
                 self.cx = 0;
                 self.line_feed();
             } else {
@@ -1290,6 +1349,7 @@ impl Vt {
         // width paint clamped into the last cell.
         if w == 2 && self.cx + 1 >= self.cols {
             if self.wrap {
+                self.wrapped[self.cy] = true;
                 self.cx = 0;
                 self.line_feed();
             } else {
@@ -1300,6 +1360,11 @@ impl Vt {
             }
         }
         let (cx, cy) = (self.cx, self.cy);
+        // A glyph at column 0 restarts this row's logical line: clear any
+        // soft-wrap flag it carried (re-set below if this row fills + wraps).
+        if cx == 0 {
+            self.wrapped[cy] = false;
+        }
         let attrs = if w == 2 {
             self.attrs | ATTR_WIDE
         } else {
@@ -1326,6 +1391,7 @@ impl Vt {
             },
             bg: self.bg,
             attrs,
+            span: self.span,
         };
         self.mark(cy);
     }
@@ -1357,11 +1423,13 @@ impl Vt {
         // screen has no scrollback -- neither surfaces a Scroll boundary.
         if self.capture_events && !self.on_alt && top == 0 {
             self.pending
-                .push(Boundary::Scroll(self.cells[0..cols].to_vec()));
+                .push(Boundary::Scroll(self.cells[0..cols].to_vec(), self.wrapped[0]));
         }
         // Shift rows (top+1..=bot) up one within the band; blank row `bot`.
         self.cells
             .copy_within((top + 1) * cols..(bot + 1) * cols, top * cols);
+        self.wrapped.copy_within((top + 1)..(bot + 1), top);
+        self.wrapped[bot] = false;
         let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[bot * cols..(bot + 1) * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
@@ -1375,6 +1443,8 @@ impl Vt {
         // Shift rows (top..bot) down one within the band; blank row `top`.
         self.cells
             .copy_within(top * cols..bot * cols, (top + 1) * cols);
+        self.wrapped.copy_within(top..bot, top + 1);
+        self.wrapped[top] = false;
         let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[top * cols..(top + 1) * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
@@ -1415,8 +1485,11 @@ impl Vt {
                 for c in self.cells[cur..].iter_mut() {
                     *c = Cell::blank(fg, bg);
                 }
+                // cy..rows are erased through their last column (cy's tail
+                // included), so none ends by autowrap any more.
                 for r in self.cy..self.rows {
                     self.mark(r);
+                    self.wrapped[r] = false;
                 }
             }
             1 => {
@@ -1426,12 +1499,20 @@ impl Vt {
                 for r in 0..=self.cy {
                     self.mark(r);
                 }
+                // Rows strictly above cy are fully cleared; row cy keeps its
+                // tail (and thus its wrap status) under a start->cursor erase.
+                for r in 0..self.cy {
+                    self.wrapped[r] = false;
+                }
             }
             _ => {
                 for c in self.cells.iter_mut() {
                     *c = Cell::blank(fg, bg);
                 }
                 self.mark_all();
+                for w in self.wrapped.iter_mut() {
+                    *w = false;
+                }
             }
         }
     }
@@ -1453,6 +1534,10 @@ impl Vt {
         for c in self.cells[row + a..row + b].iter_mut() {
             *c = Cell::blank(fg, bg);
         }
+        // An erase reaching the last column ends the row's autowrap.
+        if b == self.cols {
+            self.wrapped[self.cy] = false;
+        }
         self.mark(self.cy);
     }
 
@@ -1472,6 +1557,11 @@ impl Vt {
         let end = (self.scroll_bot + 1) * cols;
         self.cells
             .copy_within(start..end - n * cols, start + n * cols);
+        self.wrapped
+            .copy_within(self.cy..(self.scroll_bot + 1 - n), self.cy + n);
+        for r in self.cy..self.cy + n {
+            self.wrapped[r] = false;
+        }
         let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[start..start + n * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
@@ -1496,6 +1586,11 @@ impl Vt {
         let start = self.cy * cols;
         let end = (self.scroll_bot + 1) * cols;
         self.cells.copy_within(start + n * cols..end, start);
+        self.wrapped
+            .copy_within((self.cy + n)..(self.scroll_bot + 1), self.cy);
+        for r in (self.scroll_bot + 1 - n)..(self.scroll_bot + 1) {
+            self.wrapped[r] = false;
+        }
         let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[end - n * cols..end].iter_mut() {
             *c = Cell::blank(fg, bg);
@@ -1594,7 +1689,24 @@ impl Vt {
         // ...) as a boundary; the consumer routes by leading code. The 7770
         // aurora-config channel is consumed above and never surfaced.
         if self.capture_events && !is_config {
-            self.pending.push(Boundary::Osc(self.osc_buf.clone()));
+            // H-4d: a Beacon frame advances the span serial; every cell
+            // written from here to the next frame carries it (`Cell.span`).
+            // A numeric OSC selector, as for titles -- the body is never
+            // read (R5). The serial skips 0 on wrap (0 = no frame yet).
+            let serial = if self.osc_buf.starts_with(b"1936;") {
+                self.span_serial = self.span_serial.wrapping_add(1);
+                if self.span_serial == 0 {
+                    self.span_serial = 1;
+                }
+                self.span = self.span_serial;
+                self.span_serial
+            } else {
+                0
+            };
+            self.pending.push(Boundary::Osc {
+                serial,
+                body: self.osc_buf.clone(),
+            });
         }
         self.osc_buf.clear();
     }
@@ -2255,13 +2367,67 @@ mod tests {
         vt.set_capture_events(true);
         assert_eq!(
             drive(&mut vt, b"\x1b]0;hi\x07"),
-            vec![Boundary::Osc(b"0;hi".to_vec())]
+            vec![Boundary::Osc {
+                serial: 0,
+                body: b"0;hi".to_vec()
+            }]
         );
         // OSC 2 (title) via ST terminator.
         assert_eq!(
             drive(&mut vt, b"\x1b]2;t\x1b\\"),
-            vec![Boundary::Osc(b"2;t".to_vec())]
+            vec![Boundary::Osc {
+                serial: 0,
+                body: b"2;t".to_vec()
+            }]
         );
+    }
+
+    #[test]
+    fn beacon_frames_stamp_cells_with_the_span_serial() {
+        // H-4d: cells before any frame carry 0; a Beacon frame advances the
+        // serial and every later cell carries it; a title OSC does not
+        // advance it; a scroll keeps the stamp on the scrolled row.
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        let b = drive(
+            &mut vt,
+            b"ab\x1b]1936;v1;obj;type=path;ref=/x\x1b\\cd\x1b]0;t\x1b\\",
+        );
+        assert_eq!(
+            b,
+            vec![
+                Boundary::Osc {
+                    serial: 1,
+                    body: b"1936;v1;obj;type=path;ref=/x".to_vec()
+                },
+                Boundary::Osc {
+                    serial: 0,
+                    body: b"0;t".to_vec()
+                }
+            ]
+        );
+        let row0: Vec<u32> = vt.cells[..4].iter().map(|c| c.span).collect();
+        assert_eq!(
+            row0,
+            vec![0, 0, 1, 1],
+            "a, b before the frame; c, d after it"
+        );
+        // The close frame is serial 2; `e` wraps onto row 1, the line feed
+        // scrolls row 0 off (its stamps ride along), `f` lands on row 1.
+        let b = drive(&mut vt, b"\x1b]1936;v1;/obj\x1b\\e\r\nf");
+        assert!(matches!(b[0], Boundary::Osc { serial: 2, .. }));
+        let scrolled: Vec<u32> = b
+            .iter()
+            .filter_map(|x| match x {
+                Boundary::Scroll(cells, _) => Some(cells.iter().map(|c| c.span).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .next()
+            .expect("row 0 scrolled off");
+        assert_eq!(scrolled, vec![0, 0, 1, 1]);
+        assert_eq!(vt.cells[0].span, 2, "e (after the close frame)");
+        assert_eq!(vt.cells[4].span, 2, "f (no frame between)");
+        assert_eq!(vt.cells[1].span, 0, "a fill blank carries no span");
     }
 
     #[test]
@@ -2270,7 +2436,10 @@ mod tests {
         vt.set_capture_events(true);
         assert_eq!(
             drive(&mut vt, b"\x1b]1936;v1;zone;k=prompt\x1b\\"),
-            vec![Boundary::Osc(b"1936;v1;zone;k=prompt".to_vec())]
+            vec![Boundary::Osc {
+                serial: 1,
+                body: b"1936;v1;zone;k=prompt".to_vec()
+            }]
         );
     }
 
@@ -2291,7 +2460,7 @@ mod tests {
         let bs = drive(&mut vt, b"\x1b[1;1Htop!\x1b[2;1Hbot!\x1b[2;1H\n");
         assert_eq!(bs.len(), 1);
         match &bs[0] {
-            Boundary::Scroll(row) => {
+            Boundary::Scroll(row, _) => {
                 let s: String = row.iter().map(|c| c.ch).collect();
                 assert_eq!(s, "top!");
             }
@@ -2299,6 +2468,40 @@ mod tests {
         }
         // Post-scroll: "bot!" is now the top row, bottom blanked.
         assert_eq!(vt.cells[0].ch, 'b');
+    }
+
+    #[test]
+    fn scroll_off_carries_the_soft_wrap_flag() {
+        // A row that ended by AUTOWRAP scrolls off wrapped=true; a row that
+        // ended by an explicit LF scrolls off wrapped=false -- the per-row
+        // flag halcyond rejoins soft-wrapped logical lines with (PL-3).
+        // Soft: "abcd" fills row 0, "e" autowraps -> wrapped[0]=true; the LF
+        // at the bottom then scrolls "abcd" off.
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        let bs = drive(&mut vt, b"abcdef\n");
+        assert_eq!(bs.len(), 1);
+        match &bs[0] {
+            Boundary::Scroll(row, wrapped) => {
+                let s: String = row.iter().map(|c| c.ch).collect();
+                assert_eq!(s, "abcd");
+                assert!(*wrapped, "an autowrapped row scrolls off wrapped=true");
+            }
+            other => panic!("expected Scroll, got {other:?}"),
+        }
+        // Hard: "ab" then LF (no autowrap); a second LF scrolls "ab" off.
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        let bs = drive(&mut vt, b"ab\ncd\n");
+        assert_eq!(bs.len(), 1);
+        match &bs[0] {
+            Boundary::Scroll(row, wrapped) => {
+                let s: String = row.iter().map(|c| c.ch).collect();
+                assert_eq!(s.trim_end(), "ab");
+                assert!(!*wrapped, "an LF-terminated row scrolls off wrapped=false");
+            }
+            other => panic!("expected Scroll, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2315,7 +2518,7 @@ mod tests {
                                         // so the absence of a Scroll boundary is meaningful, not vacuous.
         assert_eq!(vt.cells[2].ch, 'B'); // row 1 (index 1*cols=2) now holds 'B'
         assert!(
-            bs.iter().all(|b| !matches!(b, Boundary::Scroll(_))),
+            bs.iter().all(|b| !matches!(b, Boundary::Scroll(..))),
             "{bs:?}"
         );
     }
@@ -2348,7 +2551,7 @@ mod tests {
         let rows: Vec<char> = bs
             .iter()
             .filter_map(|b| match b {
-                Boundary::Scroll(r) => Some(r[0].ch),
+                Boundary::Scroll(r, _) => Some(r[0].ch),
                 _ => None,
             })
             .collect();
@@ -2377,6 +2580,12 @@ mod tests {
         assert!(vt.feed_until(b"\x1b]0;h", &mut pos).is_none()); // slice 1: no terminator yet
         let mut pos2 = 0;
         let got = vt.feed_until(b"i\x07", &mut pos2).unwrap();
-        assert_eq!(got, Boundary::Osc(b"0;hi".to_vec()));
+        assert_eq!(
+            got,
+            Boundary::Osc {
+                serial: 0,
+                body: b"0;hi".to_vec()
+            }
+        );
     }
 }

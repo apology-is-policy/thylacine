@@ -14,7 +14,7 @@ locks: []
 abis: []
 design: ["docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-02
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -63,6 +63,17 @@ verbatim with the disposable tool — one original, two callers. Stage 2 runs
 the real `build.sh` targets with the working copy overlaid. Stage 3 is the
 only recipe original to the keep tool, and it is a target list, not a
 configuration.
+
+**The overlay must carry the configurator, not just `build.sh`.** Since the
+build-configurator arc, `build.sh` sources `build-config.sh` and applies the
+`default` preset on every invocation, so a driver that syncs `build.sh` alone
+dies at that source line before it builds anything. Both drivers now pack and
+place `build-config.sh` + `configs/` beside `build.sh`; the disposable tool,
+which clones `main` and overlays the working copy, overlays the working copies of
+all of them, because the cloned tree may predate the arc and cannot supply them
+itself. It is the same lesson as the artifact assertions in reverse -- a
+dependency the recipe silently acquired will silently break every caller that
+still ships the old file set.
 
 **Quota has dimensions you cannot see.** Only an attempted create reveals
 them, and a disk can be too full to run the mechanism that would un-fill it.
@@ -143,4 +154,4 @@ None open.
 
 ## Provenance
 
-[[chg-2026-08-01-substrate-sweep]].
+[[chg-2026-08-01-substrate-sweep]] · [[chg-2026-09-06-builders-config-overlay]].

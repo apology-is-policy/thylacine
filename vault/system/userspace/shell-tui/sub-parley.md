@@ -12,6 +12,10 @@ code:
   - usr/lib/parley/src/dap.rs
   - usr/lib/parley/src/dapc.rs
   - usr/lib/parley/src/transport.rs
+  - usr/parley-probe/src/main.rs
+  - usr/parley-echo/src/main.rs
+  - usr/lsp-probe/src/main.rs
+  - usr/dap-probe/src/main.rs
 audit: light
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -20,7 +24,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -182,14 +186,60 @@ directions and under all three encodings (`char_to_byte` rounds a mid-character
 offset *up* to the next boundary, so the result is always a safe slice index,
 and the doc says so).
 
+## In-guest proofs
+
+Four probe binaries carry the coverage the host tests structurally cannot, and
+the distinction between them is the whole point. The 73 host tests are
+*synthetic* — the client is fed messages the test itself wrote, so they validate
+the client against its own assumptions about the server, which is exactly the
+shape that passes everything and fails on first contact. Three of the four
+probes exist to close that gap against a real peer.
+
+- **`parley-probe` + `parley-echo` — the transport round-trip.** `transport`
+  needs `libthyla-rs`, so it sits behind the `backend` feature and has no host
+  tests; the probe spawns `parley-echo` as a persistent child, frame-sends a
+  request, polls, pumps, decodes, and asserts the round-trip. This proves the
+  *pipe machinery*, not any protocol — `parley-echo` returns bytes and speaks
+  neither LSP nor DAP.
+
+- **`lsp-probe` — the live gopls round-trip.** It spawns the real
+  `/goroot/bin/gopls` over piped stdio **exactly as `lsp_host` does** (bare
+  `Command::new`, inherited env and caps, so a wrong invocation in nora fails
+  here too), plants an undefined identifier at a known line, and drives
+  `initialize` → `initialized` → `didOpen` → `publishDiagnostics`. It asserts the
+  diagnostic carries the planted identifier at `Severity::Error` **on the planted
+  line** — the line is what proves the range decoded, not merely that something
+  error-shaped arrived (an empty first publish is waited through, since gopls
+  commonly publishes `[]` before the type-check finishes). The PASS line's
+  `auto-replies=0` is a *measured* fact, not a gap: the client declares no
+  `workspace.configuration` and no dynamic registration, so gopls has nothing to
+  ask and the `Action::Send` arm is wired-but-unexercised on purpose.
+
+- **`dap-probe` — the live Ambush round-trip.** The only prior end-to-end DAP
+  proof (`ambush dap-selftest`) ran *in-process* over a Go `net.Pipe`, never
+  crossing a real process boundary or framing a byte. `dap-probe` spawns the real
+  `/ambush dap-stdio` (a hidden thylacine-only Ambush mode wrapping stdin/stdout
+  as a `net.Conn` into `dap.Server.RunWithClient`, so DAP rides the *same* stdio
+  transport as LSP — no `/net`, no listener-up race) and drives the canonical
+  VS-Code launch sequence against `/ambush-child` **entirely through
+  `parley::dapc`**, asserting the exact value Ambush reads back from the target's
+  memory (`0x0AABB00DCAFE0001` = `768901734683508737`). That single assertion
+  proves `dapc` classifies real Ambush frames, sequences the handshake against a
+  real backend, and that the stdio transport carries DAP as faithfully as LSP.
+
+**Each probe's exit code is the gate, and that is load-bearing rather than
+hygiene.** joey gates the boot on exit 0, so a probe failure reddens the build;
+a fork-absent build SKIPs. The first cut of the LSP wiring *printed* its failure
+and reaped `status=1` but had **no gate**, so `tools/test.sh` still exited 0 — a
+probe that cannot fail the build is a vacuous green, and the revert-probe (plant
+the wrong expected line, watch `FAIL -- diagnostic line N, expected M` fail the
+boot) is what caught it.
+
 ## Seams
 
-- **`transport` has no host tests, by design.** It needs `libthyla-rs`, so it
-  sits behind the `backend` feature and is proven end to end in-guest by
-  `parley-probe`: spawn `parley-echo` as a persistent child, frame-send a
-  request, poll, pump, decode, assert the round-trip. That probe exists, is
-  built into the ramfs, and is boot-fatal via joey — the claim that the
-  coverage lives elsewhere is one that checks out.
+- **`transport`'s host-test absence is covered in-guest, not waived.** The
+  in-guest proofs above are why the "coverage lives elsewhere" claim checks out:
+  the probes exist, are built into the ramfs, and are boot-fatal via joey.
 - Only integer request ids are minted. JSON-RPC permits string ids; a *server*
   request's id is echoed back verbatim (`Incoming::Request` keeps it as a raw
   `Value`), so string ids work in the direction they occur.

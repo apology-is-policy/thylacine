@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-02
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -132,6 +132,15 @@ tree. Each re-graft is `mkdir`-then-`MREPL`, and the `mkdir` must be
 idempotent because the pool persists across reboots and a later boot finds
 its own directories already there.
 
+**`/dev/pts` is grafted separately, after the swap, once ptyfs is up** — it is
+not one of the seven carried handles because its tree does not exist until joey
+spawns `/sbin/ptyfs`. After the spawn and a liveness connect, joey does a fresh
+open-is-connect of `/srv/ptyfs` (a 9P-mode service open yields a mountable
+dev9p root) and `MREPL`-mounts it over the `pts` synthetic stub the `/dev`
+(devdev) tree already provides — **no `mkdir`**, because the devdev walk is the
+mount point. It is boot-fatal on failure: ptyfs has no hardware or external
+dependency, so a failure there is always a defect, never an environment.
+
 `/srv` must survive because the retired `SYS_SRV_CONNECT` bypassed the
 namespace and its replacement — open-is-connect — resolves *through* it.
 `/bin` exists because the disk root holds user data only; the boot medium
@@ -239,10 +248,13 @@ event-driven; no timing constant appears in this path.
   nothing. See [[chg-2026-08-03-syscall-abi-sweep]].
 
 - **THE FILE THAT SURVIVED THAT NARROWING IS ITSELF ONLY PARTLY DESCRIBED HERE,
-  AND THIS DOSSIER IS ITS SOLE OWNER.** `usr/joey/joey.c` is **9771 lines and
-  about fifty functions**. What is written above is the bringup sequence — the
-  daemon spawn, the readiness handshake, the attach, the pivot and the
-  re-grafts, plus the service-post decision. That is a few hundred lines.
+  AND THIS DOSSIER IS ITS SOLE OWNER.** `usr/joey/joey.c` is **11578 lines and
+  53 functions** (it was 9771 / ~50 at batch 35; the +1807 since is all in the
+  parts named below, never the bringup). What is written above is the bringup
+  sequence — the daemon spawn, the readiness handshake, the attach, the pivot and
+  the re-grafts, plus the service-post decision. That is a few hundred lines, and
+  it is unchanged: the `SYS_PIVOT_ROOT` line last moved 2026-05-26, months before
+  this dossier.
 
   The rest of the file is init's other jobs and nothing in the vault describes
   any of them: the long-lived-daemon registry and the adopted-orphan reaper; the
@@ -253,6 +265,10 @@ event-driven; no timing constant appears in this path.
   regression probes. Searching the vault for the terms that name these — the
   foreign-shell gate, the identity-daemon bringup, the smoke suite, the
   toolchain gate, the orphan reaper's own function — returns **zero notes each**.
+  The 2026-09-04/05 churn enlarged exactly this region: the session getty loop
+  gained the login-spawned per-user `halcyond --session` bootstrap (KT-1.5d-1a),
+  and the smoke suite gained a kaua-term transport boot-prove and the VIVARIUM
+  `/viv/bin` union-graft gates. The gap #177 tracks is now wider, not narrower.
 
   This is not a defect in what is written above, which is accurate and scoped by
   its own title. It is a defect in the **ownership record**, and it now has teeth
@@ -271,3 +287,12 @@ event-driven; no timing constant appears in this path.
 [[chg-2026-08-15-joey-boot]] is the re-sweep after Warp-2: the nine contract
 steps re-verified unchanged, the service-post decision added, and the
 ownership scope of this file measured.
+
+[[chg-2026-09-06-joey-boot-borrowed]] re-verifies after the KT-1.5 + VIVARIUM
+merge moved joey.c ~5659 lines: the bringup sequence is BORROWED (the readiness
+token, `SYS_ATTACH_9P_SRV`, `SYS_PIVOT_ROOT`, `T_ATTACH_9P_LOOSE`, `--fs-workers`
+and the stratumd spawn args have zero diff hits; the pivot line last moved
+2026-05-26). The whole +1807-line growth is in the undescribed region -- the
+KT-1.5d-1a login-spawned session bootstrap, the kaua-term boot-prove, the viv
+`/viv/bin` graft gates -- so the caveat's line/function count was refreshed
+(9771/~50 -> 11578/53) and the #177 ownership gap noted as wider.

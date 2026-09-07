@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/MENAGERIE.md section 6"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-06
 area: userspace
 ---
 ## Purpose
@@ -100,6 +100,24 @@ folded in**: the caller gathered them, and the fold does not trust that. So the
 per-axis property survives aggregation — every conferred value is still some
 matched node's own.
 
+### The caps axis — a named capability the warden confers, not a device resource
+
+Since H-4b-1 a manifest may name fork-grantable **capabilities** beyond the
+implicit `CAP_HW_CREATE`: `caps = ["csprng"]`. This is the one axis that is NOT a
+device resource and NOT a pure decline — it asks the warden to confer authority —
+so its safety rests elsewhere than the intersection's "node supplies the values"
+property. Two things bound it. The vocabulary is **closed**: `Cap` is an enum
+(`Cap::Csprng` = `CAP_CSPRNG_READ`, for a driver that mints unguessable tokens —
+tapestryd's placement claims), `Cap::parse` returns `None` for any unknown name,
+and the parser fails closed on it, so a typo can neither widen nor silently narrow
+a driver. And the grant stays monotone under I-2: the warden maps each name to its
+`T_CAP_*` bit at spawn and **must hold the bit itself** to pass it down — this
+crate is pure (no libthyla-rs), which is exactly why the capability is carried by
+NAME here and resolved to a bit only in the warden. `Cap::parse` and `Cap::name`
+are an exact inverse pair, so `to_text` round-trips the field; a name repeated
+within the list, or a repeated `caps` key in the block, is a parse error (fail
+closed on both). See [[sub-warden]] for the name→bit resolution and the I-2 chain.
+
 ### The two consumers deliberately disagree by exactly one page
 
 `to_allowance` does not copy the grant's windows verbatim. It runs each through
@@ -133,7 +151,10 @@ somewhere real.
 ## Data structures
 
 - **`Manifest`** — name, `abi`, `binds`, `Needs`, `serves`, `restart`,
-  `lifecycle`, `gather`, and an optional `sig` carried verbatim.
+  `lifecycle`, `gather`, `caps` (a `Vec<Cap>`, empty by default), and an optional
+  `sig` carried verbatim.
+- **`Cap`** — the closed fork-grantable-capability vocabulary (`Csprng` today);
+  named not numbered, resolved to a `T_CAP_*` bit by the warden.
 - **`Needs`** — four `Copy` enums, one per axis. `Needs::NONE` is the default.
 - **`NodeResources`** — what a node physically exposes: compatibles, `reg`
   windows, wired INTIDs, and an optional bdf.
@@ -193,8 +214,9 @@ Every failure is a value; nothing panics and nothing aborts.
 `Manifest::parse` rejects an unexpected byte, a string unterminated at a newline
 or at EOF, non-UTF-8 inside a string or identifier, a missing or duplicate or
 unknown key, an empty `binds` list, a bad enum word, a bad need value, a size
-with no digits or an unknown unit or an overflowing product, and trailing
-garbage after the closing brace. All of it is one `Error::Parse`, and the
+with no digits or an unknown unit or an overflowing product, an unknown or
+repeated capability name (the `caps` vocabulary is closed), and trailing garbage
+after the closing brace. All of it is one `Error::Parse`, and the
 warden's disposition for it is "this driver is not bindable" — never a crash,
 never a partial manifest.
 
@@ -291,8 +313,9 @@ question of truncation does not arise.
   otherwise be surprised by it.
 
 - **The runtime layer has no tests, and that follows the crate's stated split.**
-  36 host tests cover these files — 11 on the manifest parser, 25 on the grant
-  and codec — and all 36 sit in the two pure modules. `driver.rs` has none,
+  39 host tests cover these files — 14 on the manifest parser (three added with
+  the `caps` vocabulary), 25 on the grant and codec — and all 39 sit in the two
+  pure modules. `driver.rs` has none,
   because it is the libthyla-rs layer and cannot run on the host. The
   consequence is worth naming: the function that converts a grant into
   kernel-enforced authority, and the three helpers that mint hardware handles,
@@ -300,4 +323,5 @@ question of truncation does not arise.
 
 ## Provenance
 
-[[chg-2026-08-03-libdriver-grant-sweep]].
+[[chg-2026-08-03-libdriver-grant-sweep]]; [[chg-2026-09-06-libdriver-caps-vocabulary]]
+the H-4b-1 `caps = [...]` fork-grantable-capability vocabulary.

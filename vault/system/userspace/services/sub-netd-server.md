@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md"]
 created: 2026-07-31
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -181,6 +181,13 @@ source). The net-4d F1 guards keep the single `deferred` slot sound
 against concurrent multiplexed reads: a second read on a deferred fid
 gets an empty Rread (the first keeps its answer) and a re-write while
 deferred is rejected `E_PROTO`.
+
+A client-facing footgun falls out of the numeric-first resolution order: a
+resolve issued for the IP only must still pass a **non-zero service**, because a
+`0` service is not special-cased — it falls through to an ndb lookup of the
+literal `"0"` and misses. The native `net::resolve` front door and the tools
+built on it (`nslookup`, `ping`) pass a valid numeric service (80) even when the
+port is immaterial, precisely to stay on the numeric path.
 
 **The #293 connect bound.** `tcp_connect` arms
 `connect_deadline_ms = now + 15 s`; `sweep_stale_connects` (every
@@ -391,7 +398,13 @@ net-2d/3d/4d/8d/weft-7):
   (≤ MAX_CONNS×MAX_FIDS), not a leak (net-4d F3).
 - **ICMP data is bounded by the socket tx buffer** (oversize →
   send_slice Err → 0, fail-closed); a non-EchoReply consumed while
-  waiting reads as WouldBlock (keep waiting).
+  waiting reads as WouldBlock (keep waiting). The client-side consequence
+  is `ping`'s seam #256: an ICMP *error* (Destination Unreachable) that
+  quotes our ident also makes the socket readable, so a `recv` that
+  assumes the first readiness edge is the EchoReply consumes the error and
+  waits for a reply that may never come — bounded only by the client's 1 s
+  poll deadline. The v1.x fix is a per-`recv` deadline (composing the
+  net-8d F2 lever).
 - An ICMP ident wrap collision (65536 clones/boot) mis-delivers a ping
   reply, never panics (net-3d F3).
 - The `h_lopen` open FLAGS are ignored (`let _ = a.flags`) — no
@@ -419,6 +432,11 @@ sites), [[adt-294-r1]] (the ready-fd clunk verification). The
 do-not-re-report preamble: [[view-closed-sub-netd-server]].
 [[chg-2026-08-16-seven-small-surfaces]] adds the phenotype poll
 translator's readiness substitution and its per-call open.
+[[chg-2026-09-06-net-utils-absorb]] folds two client-facing atoms absorbed from
+docs/reference/124: the `/net/cs` 0-service resolve footgun (a client resolving
+IP-only must still pass a non-zero service) into the resolver mechanism, and the
+`ping` seam #256 (an ICMP-error recv fooled into waiting out its poll) named on
+the existing ICMP caveat.
 
 ## Tests
 

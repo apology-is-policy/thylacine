@@ -27,6 +27,7 @@
 //     an open `em` must not restyle the next prompt); the SGR pen
 //     PERSISTS across blocks (terminal semantics).
 
+use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -89,6 +90,12 @@ pub enum Item {
     Line(Line),
     Table(TableModel),
     Rule,
+    /// PL-1b: a Beacon `pre` block (BEACON.md 100/370) -- preformatted lines
+    /// laid MONO + verbatim (no word-wrap, no space-collapse), set apart by
+    /// its own ground + a leading gutter rule (HALCYON.md 110-113). Each line
+    /// is a `Line` so an inline `em`/`obj` run inside the block keeps its span;
+    /// the block forces mono regardless of a run's annotation.
+    Pre(Vec<Line>),
 }
 
 pub struct Block {
@@ -127,6 +134,108 @@ impl Block {
 
     fn has_content(&self) -> bool {
         !self.items.is_empty() || self.exit.is_some()
+    }
+}
+
+/// H-4d: the span state a tile's cell was written under -- the block that
+/// was open (its obj table is the one `obj` indexes), the obj (idx+1; 0 =
+/// none), em, hdr. A cell reaches it through its `vt::Cell.span` serial and
+/// the tile's `SpanMap`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SpanTag {
+    pub block: u64,
+    pub obj: u16,
+    pub em: u8,
+    pub hdr: u8,
+}
+
+/// The ring holds the last `SPAN_MAP_ENTRIES` frames' tags, validated by
+/// the full serial (a serial that fell off resolves to no span). A cell
+/// keeps its serial while it stays on the grid, so the bound is reached
+/// only by more frames written OVER a still-visible cell than the ring
+/// holds without it scrolling off -- a repainting TUI, which lives on the
+/// alt screen where no span is read.
+pub const SPAN_MAP_ENTRIES: usize = 8192;
+
+/// One ring slot: the serial and its tag packed into 16 bytes (block 8,
+/// serial 4, obj 2, em 1, hdr 1) -- the tuple `(u32, SpanTag)` padded to
+/// 24. Pinned by `span_slot_is_16_bytes`.
+#[derive(Clone, Copy, Default)]
+struct SpanSlot {
+    block: u64,
+    serial: u32,
+    obj: u16,
+    em: u8,
+    hdr: u8,
+}
+
+/// The ring's live footprint per rich tile (the H-arc round-1 audit, B-F4:
+/// a fixed cost OUTSIDE `SESSION_SCROLLBACK_BUDGET`, bounded by the pane
+/// count -- `MAX_PANES` x 128 KiB -- and recorded in the I-32 accounting
+/// rather than charged to the history it would otherwise evict).
+pub const SPAN_MAP_BYTES: usize = SPAN_MAP_ENTRIES * core::mem::size_of::<SpanSlot>();
+
+/// serial (`vt::Cell.span`) -> the span state after feeding that frame.
+/// The producer stamps cells with the serial of the last Beacon frame it
+/// forwarded (parser-free, R5); the consumer, feeding the same frames in
+/// order, notes the state after each -- so a cell knows its presentation
+/// however late it scrolls off, and across the grid's zone straddle.
+/// Allocated on the FIRST note: a plain tile (no Beacon frame ever) costs
+/// nothing; a rich one `SPAN_MAP_BYTES` once.
+pub struct SpanMap {
+    ring: Vec<SpanSlot>,
+}
+
+impl Default for SpanMap {
+    fn default() -> SpanMap {
+        SpanMap::new()
+    }
+}
+
+impl SpanMap {
+    pub fn new() -> SpanMap {
+        SpanMap { ring: Vec::new() }
+    }
+
+    /// The ring's heap footprint: 0 until the first frame, then `SPAN_MAP_BYTES`.
+    pub fn bytes(&self) -> usize {
+        self.ring.len() * core::mem::size_of::<SpanSlot>()
+    }
+
+    /// Record the state after frame `serial` (0 = no frame; ignored).
+    pub fn note(&mut self, serial: u32, tag: SpanTag) {
+        if serial == 0 {
+            return;
+        }
+        if self.ring.is_empty() {
+            self.ring = alloc::vec![SpanSlot::default(); SPAN_MAP_ENTRIES];
+        }
+        let i = serial as usize % SPAN_MAP_ENTRIES;
+        self.ring[i] = SpanSlot {
+            block: tag.block,
+            serial,
+            obj: tag.obj,
+            em: tag.em,
+            hdr: tag.hdr,
+        };
+    }
+
+    /// The state a cell stamped `serial` was written under.
+    pub fn get(&self, serial: u32) -> Option<SpanTag> {
+        if serial == 0 || self.ring.is_empty() {
+            return None;
+        }
+        let e = self.ring[serial as usize % SPAN_MAP_ENTRIES];
+        if e.serial == serial {
+            Some(SpanTag {
+                block: e.block,
+                obj: e.obj,
+                em: e.em,
+                hdr: e.hdr,
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -202,7 +311,12 @@ const MAX_SPAN_NEST: usize = 64; // em/obj nesting (wire caps 8/parse; this boun
 const MAX_TABLE_ROWS: usize = 100_000;
 const MAX_TABLE_COLS: usize = 256; // cells per row
 const MAX_CELL_CHARS: usize = 4096;
-const MAX_TABLE_BYTES: usize = 16 << 20; // total in-progress table memory (content + Vec overhead)
+// The pre/table in-progress accumulators (each uncharged to the block budget
+// until close) are bounded by `transient_cap()` -- HALF the tile's scrollback
+// share, floored -- NOT a fixed constant. A fixed 16 MiB, unscaled by tile
+// count, let N tiles hold N x 16 MiB and OOM the 64 MiB heap (pre XOR table, so
+// 16 MiB per tile). Since a tile's share is SESSION_SCROLLBACK_BUDGET/N, the
+// per-tile half-share sums to SESSION_SCROLLBACK_BUDGET/2 regardless of N.
 
 struct TableCap {
     cols: Vec<u8>,
@@ -224,6 +338,12 @@ pub struct Transcript {
     /// The line being built (column-addressed; the line discipline).
     line: Vec<TCell>,
     col: usize,
+    /// PL-3: raw cells of a soft-wrapped logical line being rejoined from
+    /// ScrollOff rows -- held uninterned (self-contained style, so a block
+    /// change mid-line interns cleanly at finalize) until a non-wrapped row
+    /// ends the line. Bounded by MAX_LINE_CELLS (hard-split), the only window
+    /// in which it is off-budget.
+    scroll_pending: Vec<vt::Cell>,
     pal: Palette,
     pen: SgrPen,
     em_stack: Vec<u8>,
@@ -235,6 +355,19 @@ pub struct Transcript {
     obj_suppressed: u32,
     hdr: u8,
     table: Option<TableCap>,
+    /// PL-1b: the open `pre` block's lines, accumulated between open_op(Pre)
+    /// and close_op(Pre). Built through the SAME line discipline (put_char /
+    /// newline / flush_line) so tabs, spacing and `\r` behave verbatim; the
+    /// flushed lines are redirected HERE instead of into the block's items.
+    /// None = not in a pre. Bounded by the per-block line cap AND `pre_bytes`
+    /// (`transient_cap()`, the tile's half-share); charged + cap-enforced at
+    /// close (a bounded transient like `scroll_pending`).
+    pre: Option<Vec<Line>>,
+    /// PL-1b: bytes accumulated in the open `pre` (content only). The pre is
+    /// uncharged to the block budget until close, so this bounds the transient
+    /// independently -- an unclosed / hostile pre cannot exceed `transient_cap()`
+    /// (the format-fuzz DoS floor, mirroring TableCap.bytes). Reset at open.
+    pre_bytes: usize,
     // Escape-scanner state (persists across feeds via `carry`, but the
     // scanner itself also survives a split mid-sequence).
     state: ScanState,
@@ -329,6 +462,8 @@ impl Transcript {
             obj_suppressed: 0,
             hdr: 0,
             table: None,
+            pre: None,
+            pre_bytes: 0,
             state: ScanState::Ground,
             cwd: String::new(),
             osc_buf: Vec::new(),
@@ -338,6 +473,7 @@ impl Transcript {
             cur_param: 0,
             csi_private: false,
             carry: Vec::new(),
+            scroll_pending: Vec::new(),
             utf8: [0; 4],
             utf8_len: 0,
             utf8_need: 0,
@@ -435,6 +571,13 @@ impl Transcript {
     }
 
     fn open_op(&mut self, op: Op, args: &[wire::Arg]) {
+        // A `pre` block nests no block op -- only inline `em`/`obj` (BEACON.md
+        // 351-355). While one is open, ignore any other open (malformed
+        // nesting, incl. a nested `pre`); em/obj still color its cells via
+        // style_idx. The format-fuzz containment guard.
+        if self.pre.is_some() && !matches!(op, Op::Em | Op::Obj) {
+            return;
+        }
         match op {
             Op::Zone => {
                 let kind = match Self::arg(args, "k") {
@@ -527,11 +670,31 @@ impl Transcript {
                 };
                 self.hdr = level;
             }
+            // `pre` opens a preformatted block: flush the pending flow line,
+            // then redirect subsequent flushed lines into the pre accumulator
+            // (close_op(Pre) finalizes it). Not inside a table (malformed); the
+            // top guard already blocks a nested pre.
+            Op::Pre => {
+                if self.table.is_none() && self.pre.is_none() {
+                    self.flush_line();
+                    self.pre = Some(Vec::new());
+                    self.pre_bytes = 0;
+                    self.col = 0;
+                }
+            }
             Op::Mark | Op::Rule => {} // point ops; a paired open is malformed -- ignore
         }
     }
 
     fn close_op(&mut self, op: Op) {
+        // Mirror of open_op's containment guard: while a `pre` is open, only an
+        // inline em/obj close -- or the pre's own close -- is meaningful.
+        if self.pre.is_some() && !matches!(op, Op::Em | Op::Obj | Op::Pre) {
+            return;
+        }
+        // The table byte cap for this tile (half its scrollback share); read
+        // before any self.table borrow below so the arms can pass/compare it.
+        let byte_cap = self.transient_cap();
         match op {
             Op::Zone => {
                 self.freeze_open(BlockKind::Foreign, false);
@@ -541,7 +704,7 @@ impl Transcript {
                     // Tolerate unclosed row/cell at table close (the final
                     // row/cell -- bounded, one each -- still honors the caps).
                     if t.in_cell {
-                        Self::table_push_cell(&mut t);
+                        Self::table_push_cell(&mut t, byte_cap);
                     }
                     if t.in_row && t.rows.len() < MAX_TABLE_ROWS {
                         t.rows.push(core::mem::take(&mut t.row));
@@ -565,14 +728,14 @@ impl Transcript {
             Op::Row => {
                 if let Some(t) = self.table.as_mut() {
                     if t.in_cell {
-                        Self::table_push_cell(t);
+                        Self::table_push_cell(t, byte_cap);
                         t.in_cell = false;
                     }
                     if t.in_row {
                         // At the row cap or byte budget, drop the row (never
                         // grow the Vec-of-Vecs unboundedly on an unclosed
                         // table); else charge its overhead + keep it.
-                        if t.rows.len() < MAX_TABLE_ROWS && t.bytes < MAX_TABLE_BYTES {
+                        if t.rows.len() < MAX_TABLE_ROWS && t.bytes < byte_cap {
                             t.bytes = t.bytes.saturating_add(
                                 core::mem::size_of::<Vec<TCell>>() * (t.row.len() + 1),
                             );
@@ -587,7 +750,7 @@ impl Transcript {
             Op::Cell => {
                 if let Some(t) = self.table.as_mut() {
                     if t.in_cell {
-                        Self::table_push_cell(t);
+                        Self::table_push_cell(t, byte_cap);
                         t.in_cell = false;
                     }
                 }
@@ -600,6 +763,23 @@ impl Transcript {
             }
             Op::Hdr => {
                 self.hdr = 0;
+            }
+            Op::Pre => {
+                // Flush the last pre line (routes into the accumulator), then
+                // finalize the block: charge its cost (like Table) and push
+                // the Item::Pre. A well-formed `pre` always balances; a stray
+                // close with no open falls through (self.pre is None).
+                self.flush_line();
+                if let Some(lines) = self.pre.take() {
+                    let mut cost = 0usize;
+                    for l in lines.iter() {
+                        cost += l.cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
+                    }
+                    self.open.cost += cost;
+                    self.stored_cost += cost;
+                    self.open.items.push(Item::Pre(lines));
+                    self.enforce_block_cap();
+                }
             }
             Op::Mark | Op::Rule => {}
         }
@@ -643,8 +823,8 @@ impl Transcript {
 
     /// Finalize the current cell into the row under the col cap + byte budget;
     /// past either, the cell is dropped (never grow an unclosed table).
-    fn table_push_cell(t: &mut TableCap) {
-        if t.row.len() < MAX_TABLE_COLS && t.bytes < MAX_TABLE_BYTES {
+    fn table_push_cell(t: &mut TableCap, byte_cap: usize) {
+        if t.row.len() < MAX_TABLE_COLS && t.bytes < byte_cap {
             t.bytes = t.bytes.saturating_add(core::mem::size_of::<Vec<TCell>>());
             t.row.push(core::mem::take(&mut t.cell));
         } else {
@@ -653,6 +833,13 @@ impl Transcript {
     }
 
     fn point_op(&mut self, op: Op, args: &[wire::Arg]) {
+        // PL-1b: a `pre` block contains only inline em/obj + text; a stray
+        // point op (mark/rule) inside it is malformed -- ignore it (the
+        // containment guard, mirroring open_op/close_op). Prevents a rule from
+        // interleaving into the block or freezing it mid-accumulation.
+        if self.pre.is_some() {
+            return;
+        }
         match op {
             Op::Mark => {
                 // H-3d: the output zone's command (its first child, ut's
@@ -707,6 +894,25 @@ impl Transcript {
         if self.table.is_some() {
             self.close_op(Op::Table);
         }
+        // Symmetric with the table arm: an open `pre` at a block boundary is
+        // finalized into THIS block, where its cells' block-relative style
+        // indices are valid. Without it the Item::Pre commits to the fresh block
+        // below (0 styles) and layout_block's `b.styles[sid]` panics on a stale
+        // index -- reachable from an untrusted tile stream interleaving a
+        // ScrollOff (or a tile-split's set_max_cost) between pre-open and
+        // pre-close. Inline (no re-entrant enforce_block_cap -- the mem::replace
+        // below freezes this block); a pre spanning a block-freeze is split, its
+        // post-freeze content resuming as ordinary lines.
+        if let Some(lines) = self.pre.take() {
+            let mut cost = 0usize;
+            for l in lines.iter() {
+                cost += l.cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
+            }
+            self.open.cost += cost;
+            self.stored_cost += cost;
+            self.open.items.push(Item::Pre(lines));
+            self.pre_bytes = 0;
+        }
         let keep = self.open.has_content() || self.open.kind != BlockKind::Foreign;
         let id = self.next_id;
         self.next_id += 1;
@@ -759,11 +965,27 @@ impl Transcript {
             return;
         }
         let cells = core::mem::take(&mut self.line);
+        self.col = 0;
+        // PL-1b: inside a `pre`, the flushed line joins the pre accumulator
+        // instead of the block items -- bounded by the per-block line cap (each
+        // line is already <= MAX_LINE_CELLS via put_char's soft-wrap). Charged
+        // + cap-enforced at close_op(Pre).
+        let cap = self.max_lines_per_block;
+        let byte_cap = self.transient_cap();
+        if let Some(pre) = self.pre.as_mut() {
+            // Bounded by BOTH the line cap and the byte budget (the pre is
+            // uncharged to the block until close; transient_cap() -- the tile's
+            // half-share -- bounds the transient). A line past either is dropped.
+            if pre.len() < cap && self.pre_bytes < byte_cap {
+                self.pre_bytes += cells.len() * core::mem::size_of::<TCell>();
+                pre.push(Line { cells });
+            }
+            return;
+        }
         let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
         self.open.cost += cost;
         self.stored_cost += cost;
         self.open.items.push(Item::Line(Line { cells }));
-        self.col = 0;
         self.enforce_block_cap();
     }
 
@@ -1009,11 +1231,12 @@ impl Transcript {
 
     fn put_char(&mut self, ch: char) {
         let style = self.style_idx();
+        let byte_cap = self.transient_cap();
         if let Some(t) = self.table.as_mut() {
             // Inside a table: cell content appends (no column discipline);
             // padding between cells is the plain realization -- dropped. The
             // per-cell char cap AND the whole-table byte budget both bound it.
-            if t.in_cell && t.cell.len() < MAX_CELL_CHARS && t.bytes < MAX_TABLE_BYTES {
+            if t.in_cell && t.cell.len() < MAX_CELL_CHARS && t.bytes < byte_cap {
                 t.cell.push(TCell {
                     ch: if ch < ' ' { ' ' } else { ch },
                     style,
@@ -1046,13 +1269,22 @@ impl Transcript {
             return; // row separation is structural, not textual
         }
         if self.line.is_empty() {
+            self.col = 0;
+            // PL-1b: a blank line inside a pre is a verbatim blank pre line
+            // (the accumulator, cap-bounded); outside, a charged empty Line.
+            let cap = self.max_lines_per_block;
+            if let Some(pre) = self.pre.as_mut() {
+                if pre.len() < cap {
+                    pre.push(Line { cells: Vec::new() });
+                }
+                return;
+            }
             // A blank line is content: keep it as an empty Line item -- and
             // charge it: a million empty lines is a million items.
             let cost = ITEM_OVERHEAD;
             self.open.cost += cost;
             self.stored_cost += cost;
             self.open.items.push(Item::Line(Line { cells: Vec::new() }));
-            self.col = 0;
             self.enforce_block_cap();
             return;
         }
@@ -1106,26 +1338,251 @@ impl Transcript {
     /// here: a zone cut arrives as a separate `Control(Osc1936Raw)` record fed
     /// through `feed`, and stream order (guaranteed by the producer) lands each
     /// scroll-off in the block that was open when it happened.
-    pub fn push_scrolled_rows(&mut self, rows: &[Vec<vt::Cell>]) {
-        for row in rows {
-            let mut cells: Vec<TCell> = Vec::with_capacity(row.len());
+    ///
+    /// H-4d: each cell's span (`vt::Cell.span` -> `spans`) gives the em / obj
+    /// / hdr it was WRITTEN under -- the grid's rows straddle zone cuts, so
+    /// a row may land in a later block than the one its objs index; the obj
+    /// is then COPIED into the landing block (`local_obj`), keeping every
+    /// block self-contained (its Line styles index its own obj table, the
+    /// console's invariant every run/menu consumer relies on).
+    pub fn push_scrolled_rows(&mut self, rows: &[Vec<vt::Cell>], wrapped: &[bool], spans: &SpanMap) {
+        for (i, row) in rows.iter().enumerate() {
+            // PL-3: a soft-wrapped grid row is half of a logical line the grid
+            // broke at `cols` (often mid-word, s5). Accumulate the raw cells
+            // until a row that did NOT wrap ends the logical line, then
+            // finalize it as ONE Line so the flow layout re-wraps at word
+            // boundaries. Raw vt::Cells, not interned TCells: their style is
+            // self-contained (no block-relative index), so a block change
+            // mid-line -- a frozen open block, or an inline obj / zone frame
+            // arriving as a Control record between two ScrollOff records --
+            // interns cleanly into whatever block is open at finalize (the
+            // straddle case local_obj already copies the obj across).
+            self.scroll_pending.extend_from_slice(row);
+            // A logical line that soft-wraps forever (no LF) is hard-split at
+            // MAX_LINE_CELLS, the same clamp the feed path uses, so a
+            // pathological stream cannot grow the held fragment unbounded.
+            let ends = !wrapped.get(i).copied().unwrap_or(false);
+            if ends || self.scroll_pending.len() >= MAX_LINE_CELLS {
+                self.finalize_scroll_pending(spans);
+            }
+        }
+    }
+
+    /// Intern the pending soft-wrapped logical line into the open block as one
+    /// Line and clear it, mirroring the old per-row cost accounting so the
+    /// block-cap / eviction machinery still bounds a tile that scrolls forever.
+    /// No-op when nothing is pending.
+    fn finalize_scroll_pending(&mut self, spans: &SpanMap) {
+        if self.scroll_pending.is_empty() {
+            return;
+        }
+        let raw = core::mem::take(&mut self.scroll_pending);
+        // (source block, obj) -> the index in the open block. A map, not a
+        // scan: a cell naming a distinct frozen obj must not pay O(n) (the
+        // H-arc round-1 audit, B-F3). One push at the end, so the open block
+        // cannot change mid-loop and no reset is needed.
+        let mut remap: BTreeMap<(u64, u16), u16> = BTreeMap::new();
+        let mut cells: Vec<TCell> = Vec::with_capacity(raw.len());
+        for c in &raw {
+            let tag = spans.get(c.span).unwrap_or_default();
+            let obj = self.local_obj(tag, &mut remap);
+            let style = self.intern_style(Style {
+                fg: c.fg,
+                bg: c.bg,
+                attrs: c.attrs,
+                em: tag.em,
+                obj,
+                hdr: tag.hdr,
+            });
+            cells.push(TCell { ch: c.ch, style });
+        }
+        let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
+        self.open.cost += cost;
+        self.stored_cost += cost;
+        self.open.items.push(Item::Line(Line { cells }));
+        self.enforce_block_cap();
+    }
+
+    /// PL-3: force any in-flight soft-wrapped ScrollOff line to finalize -- at a
+    /// screen-mode change, where the content model has a hard discontinuity and
+    /// a fragment must not carry a stale continuation across it. No-op when
+    /// nothing is pending.
+    pub fn flush_scroll_pending(&mut self, spans: &SpanMap) {
+        self.finalize_scroll_pending(spans);
+    }
+
+    /// PL-4: build the LIVE grid as a transient block for the normal-mode
+    /// proportional render. Joins the grid's soft-wrapped rows into logical
+    /// lines (using `wrapped`, the CellDiff snapshot), interns each cell's span
+    /// (obj / em / hdr, the obj COPIED from its source block -- frozen or open)
+    /// into the transient block's own tables, and returns it plus, per grid row,
+    /// the `(logical-line item index, starting column in that line)` so the
+    /// caller maps a grid row / cursor / obj-run back to its proportional
+    /// position (the caret + the live selection, PL-4b). READ-ONLY -- a
+    /// per-frame render, never history, so nothing here mutates the transcript
+    /// (the obj-copy and style-intern build fresh transient tables, unlike
+    /// `finalize_scroll_pending` which writes into the open block).
+    pub fn live_block(
+        &self,
+        grid_cells: &[vt::Cell],
+        cols: usize,
+        rows: usize,
+        wrapped: &[bool],
+        spans: &SpanMap,
+    ) -> (Block, Vec<(usize, usize)>) {
+        let mut styles: Vec<Style> = Vec::new();
+        let mut objs: Vec<Obj> = Vec::new();
+        let mut remap: BTreeMap<(u64, u16), u16> = BTreeMap::new();
+        let mut items: Vec<Item> = Vec::new();
+        let mut prov: Vec<(usize, usize)> = Vec::with_capacity(rows);
+        let mut cur: Vec<TCell> = Vec::new();
+        for r in 0..rows {
+            // This grid row joins the logical line currently building (its item
+            // index is the next `items` slot; its start column is the running
+            // length); PL-4b maps a grid row / obj-run to (line, col) through it.
+            prov.push((items.len(), cur.len()));
+            let base = r * cols;
+            let row = grid_cells.get(base..base + cols).unwrap_or(&[]);
             for c in row {
-                let style = self.intern_style(Style {
+                let tag = spans.get(c.span).unwrap_or_default();
+                // The obj: the transient block owns none, so every obj is copied
+                // from its source block (frozen or open), deduped through remap;
+                // an evicted source or a full table yields 0 (a run that lost its
+                // object, never a wrong one) -- the local_obj discipline.
+                let obj = if tag.obj == 0 {
+                    0
+                } else if let Some(&idx) = remap.get(&(tag.block, tag.obj)) {
+                    idx
+                } else {
+                    let src = self
+                        .frozen
+                        .iter()
+                        .chain(core::iter::once(&self.open))
+                        .find(|b| b.id == tag.block)
+                        .and_then(|b| b.objs.get((tag.obj as usize).wrapping_sub(1)))
+                        .map(|o| (o.ty.clone(), o.refv.clone()));
+                    let idx = match src {
+                        None => 0,
+                        Some(_) if objs.len() >= MAX_OBJS_PER_BLOCK => 0,
+                        Some((ty, refv)) => {
+                            objs.push(Obj { ty, refv });
+                            objs.len() as u16
+                        }
+                    };
+                    remap.insert((tag.block, tag.obj), idx);
+                    idx
+                };
+                // The style: intern into the transient table (hot-tail fast path,
+                // capped scan -- the intern_style discipline).
+                let st = Style {
                     fg: c.fg,
                     bg: c.bg,
                     attrs: c.attrs,
-                    em: EM_NONE,
-                    obj: 0,
-                    hdr: 0,
-                });
-                cells.push(TCell { ch: c.ch, style });
+                    em: tag.em,
+                    obj,
+                    hdr: tag.hdr,
+                };
+                // The last slot when it already holds this style (the hot tail)
+                // OR when the table is full (degrade to the last -- a run keeps
+                // its neighbour's style, never overflows); else an earlier match
+                // on the capped scan; else a fresh slot.
+                let style = if styles.last() == Some(&st) || styles.len() >= MAX_STYLES_PER_BLOCK {
+                    (styles.len() - 1) as u16
+                } else if let Some(i) = styles.iter().position(|s| *s == st) {
+                    i as u16
+                } else {
+                    styles.push(st);
+                    (styles.len() - 1) as u16
+                };
+                cur.push(TCell { ch: c.ch, style });
             }
-            let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
-            self.open.cost += cost;
-            self.stored_cost += cost;
-            self.open.items.push(Item::Line(Line { cells }));
-            self.enforce_block_cap();
+            // A row that did NOT autowrap ends the logical line.
+            if !wrapped.get(r).copied().unwrap_or(false) {
+                items.push(Item::Line(Line {
+                    cells: core::mem::take(&mut cur),
+                }));
+            }
         }
+        // A trailing soft-wrapped row (the grid ends mid-logical-line) still lays.
+        if !cur.is_empty() {
+            items.push(Item::Line(Line { cells: cur }));
+        }
+        let b = Block {
+            id: u64::MAX,
+            kind: BlockKind::Foreign,
+            continuation: false,
+            exit: None,
+            cmd: None,
+            items,
+            styles,
+            objs,
+            cost: 0,
+        };
+        (b, prov)
+    }
+
+    /// The open block's index for a tagged obj: its own when the tag's block
+    /// IS the open block; else the obj is copied in once (the remap cache)
+    /// at the same cost the wire's obj-open charges. An evicted source block
+    /// or a full table yields 0 -- a run that lost its object, never a wrong
+    /// one.
+    fn local_obj(&mut self, tag: SpanTag, remap: &mut BTreeMap<(u64, u16), u16>) -> u16 {
+        if tag.obj == 0 {
+            return 0;
+        }
+        if tag.block == self.open.id {
+            return tag.obj;
+        }
+        if let Some(&idx) = remap.get(&(tag.block, tag.obj)) {
+            return idx;
+        }
+        let src = self
+            .frozen
+            .iter()
+            .find(|b| b.id == tag.block)
+            .and_then(|b| b.objs.get((tag.obj as usize).wrapping_sub(1)))
+            .map(|o| (o.ty.clone(), o.refv.clone()));
+        let idx = match src {
+            None => 0,
+            Some(_) if self.open.objs.len() >= MAX_OBJS_PER_BLOCK => 0,
+            Some((ty, refv)) => {
+                let bytes = ty.len() + refv.len();
+                self.open.cost += bytes;
+                self.stored_cost += bytes;
+                self.open.objs.push(Obj { ty, refv });
+                self.open.objs.len() as u16
+            }
+        };
+        remap.insert((tag.block, tag.obj), idx);
+        idx
+    }
+
+    /// H-4d: the span state after the last feed, as the tag for the cells
+    /// the producer writes next (the tile notes it under the frame's serial).
+    pub fn span_tag(&self) -> SpanTag {
+        SpanTag {
+            block: self.open.id,
+            obj: self.obj_stack.last().copied().unwrap_or(0),
+            em: self.em_stack.last().copied().unwrap_or(EM_NONE),
+            hdr: self.hdr,
+        }
+    }
+
+    /// The block with id `id` -- the open one or a frozen one; None once
+    /// evicted.
+    pub fn block_by_id(&self, id: u64) -> Option<&Block> {
+        if self.open.id == id {
+            Some(&self.open)
+        } else {
+            self.frozen.iter().find(|b| b.id == id)
+        }
+    }
+
+    /// The (type, resolved ref) of obj `obj` (idx+1) in block `id`.
+    pub fn obj_in_block(&self, id: u64, obj: u16) -> Option<(&str, &str)> {
+        let b = self.block_by_id(id)?;
+        let o = b.objs.get((obj as usize).checked_sub(1)?)?;
+        Some((o.ty.as_str(), o.refv.as_str()))
     }
 
     /// Re-budget a live transcript (a session shares one scrollback budget
@@ -1140,6 +1597,18 @@ impl Transcript {
         self.max_open_cost = open_cap(max_cost);
         self.enforce_block_cap();
         self.enforce_budget();
+    }
+
+    /// The per-tile cap on the pre/table in-progress accumulators (each
+    /// uncharged to the block budget until close). HALF the tile's scrollback
+    /// share: N tiles -- each share = SESSION_SCROLLBACK_BUDGET/N -- hold at
+    /// most SESSION_SCROLLBACK_BUDGET/2 in transients TOTAL, regardless of tile
+    /// count, against a fixed 16 MiB that N tiles multiply into an OOM. Floored
+    /// at one open block so an artificially tiny max_cost (a test's
+    /// set_max_cost(1)) still admits a small transient; the floor never binds
+    /// for a real tile (N <= MAX_PANES keeps max_cost/2 above it).
+    fn transient_cap(&self) -> usize {
+        (self.max_cost / 2).max(OPEN_BLOCK_MAX_COST)
     }
 
     /// The retained cost the budget bounds (frozen blocks + the open one).
@@ -1227,6 +1696,28 @@ fn safe_cut(buf: &[u8]) -> usize {
 mod tests {
     use super::*;
     use alloc::format;
+
+    #[test]
+    fn span_slot_is_16_bytes_and_the_ring_allocates_on_the_first_note() {
+        // B-F4: a plain tile costs nothing; a rich one one fixed ring.
+        assert_eq!(core::mem::size_of::<SpanSlot>(), 16);
+        assert_eq!(SPAN_MAP_BYTES, SPAN_MAP_ENTRIES * 16);
+        let mut m = SpanMap::new();
+        assert_eq!(m.bytes(), 0);
+        assert_eq!(m.get(1), None, "an unallocated ring resolves nothing");
+        m.note(0, SpanTag { block: 9, obj: 1, em: 0, hdr: 0 });
+        assert_eq!(m.bytes(), 0, "serial 0 is ignored and allocates nothing");
+        let tag = SpanTag { block: 7, obj: 3, em: 2, hdr: 1 };
+        m.note(5, tag);
+        assert_eq!(m.bytes(), SPAN_MAP_BYTES);
+        assert_eq!(m.get(5), Some(tag), "the full tag round-trips the packed slot");
+        // The full serial validates the slot: a colliding serial reads none,
+        // and overwriting the slot retires the old serial.
+        assert_eq!(m.get(5 + SPAN_MAP_ENTRIES as u32), None);
+        m.note(5 + SPAN_MAP_ENTRIES as u32, SpanTag::default());
+        assert_eq!(m.get(5), None, "a serial that fell off resolves to no span");
+        assert_eq!(m.get(5 + SPAN_MAP_ENTRIES as u32), Some(SpanTag::default()));
+    }
     use alloc::vec;
     use beacon::wire::Op;
 
@@ -1414,6 +1905,13 @@ mod tests {
                         }
                     }
                     Item::Rule => s.push('R'),
+                    Item::Pre(lines) => {
+                        s.push('P');
+                        for l in lines.iter() {
+                            s.push('|');
+                            s.push_str(&line_str(l));
+                        }
+                    }
                 }
             }
             s.push('|');
@@ -1504,6 +2002,344 @@ mod tests {
         let plain_style = out.styles[l.cells[10].style as usize];
         assert_eq!(plain_style.fg, pal.fg, "SGR 0 reset");
         assert_eq!(l.cells[s.chars().count() - 1].ch, '\u{e9}', "UTF-8 decoded");
+    }
+
+    fn pre_of(items: &[Item]) -> &[Line] {
+        items
+            .iter()
+            .find_map(|i| match i {
+                Item::Pre(l) => Some(l.as_slice()),
+                _ => None,
+            })
+            .expect("an Item::Pre in the block")
+    }
+
+    #[test]
+    fn pre_block_captures_verbatim_lines() {
+        // PL-1b: a `pre` block builds ONE Item::Pre holding its lines VERBATIM
+        // -- internal spacing preserved (no collapse), line breaks significant.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Text("a  b\n"), // two spaces
+            F::Text("cd\n"),
+            F::Close(Op::Pre),
+        ]));
+        let items = &t.open_block().items;
+        let lines = pre_of(items);
+        assert_eq!(lines.len(), 2, "two verbatim pre lines");
+        assert_eq!(line_str(&lines[0]), "a  b", "spacing preserved (no collapse)");
+        assert_eq!(line_str(&lines[1]), "cd");
+        assert_eq!(items.len(), 1, "the pre content did not leak into Line items");
+    }
+
+    #[test]
+    fn pre_inline_obj_keeps_its_span() {
+        // An inline `obj` inside a pre keeps its span (a path in a `la` listing
+        // stays a resolvable object even though the block is mono).
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Text("see "),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/bin")]),
+            F::Text("bin"),
+            F::Close(Op::Obj),
+            F::Text("\n"),
+            F::Close(Op::Pre),
+        ]));
+        let b = t.open_block();
+        let lines = pre_of(&b.items);
+        assert_eq!(line_str(&lines[0]), "see bin");
+        let st = b.styles[lines[0].cells[4].style as usize]; // the 'b' of "bin"
+        assert_ne!(st.obj, 0, "the obj run's cell carries an obj index");
+        let obj = &b.objs[(st.obj - 1) as usize];
+        assert_eq!((obj.ty.as_str(), obj.refv.as_str()), ("path", "/bin"));
+    }
+
+    #[test]
+    fn pre_is_bounded_under_a_line_flood() {
+        // A hostile `pre` (a newline storm) stays bounded: the accumulator caps
+        // at the per-block line limit -- the format-fuzz DoS floor (KT-1).
+        let mut t = Transcript::with_caps(daylight(), DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, 8);
+        let mut parts = vec![F::Open(Op::Pre, &[])];
+        for _ in 0..100 {
+            parts.push(F::Text("\n"));
+        }
+        parts.push(F::Close(Op::Pre));
+        t.feed(&frames(&parts));
+        let lines = pre_of(&t.open_block().items);
+        assert!(lines.len() <= 8, "the pre line count is capped: {}", lines.len());
+    }
+
+    #[test]
+    fn pre_is_bounded_under_a_byte_flood() {
+        // Wide lines are bounded by the byte budget (transient_cap()), not only
+        // the line cap. A ~16 MiB pre also charges enough to FREEZE the block
+        // on close, so the Item::Pre may land in a frozen block -- look across
+        // both. The invariant: fewer lines than fed (bytes dropped some) AND
+        // the content stays within one line of the cap.
+        let mut t = Transcript::new(daylight());
+        let wide: String = core::iter::repeat('x').take(4000).collect();
+        let framed: Vec<String> = (0..700).map(|_| format!("{wide}\n")).collect();
+        let mut parts = vec![F::Open(Op::Pre, &[])];
+        for l in framed.iter() {
+            parts.push(F::Text(l.as_str()));
+        }
+        parts.push(F::Close(Op::Pre));
+        t.feed(&frames(&parts));
+        let mut lines_len = 0usize;
+        let mut cells = 0usize;
+        let measure = |ls: &[Line], ll: &mut usize, cc: &mut usize| {
+            *ll = ls.len();
+            *cc = ls.iter().map(|l| l.cells.len()).sum();
+        };
+        for b in t.frozen_blocks().iter() {
+            for it in b.items.iter() {
+                if let Item::Pre(ls) = it {
+                    measure(ls, &mut lines_len, &mut cells);
+                }
+            }
+        }
+        for it in t.open_block().items.iter() {
+            if let Item::Pre(ls) = it {
+                measure(ls, &mut lines_len, &mut cells);
+            }
+        }
+        assert!(lines_len > 0, "the pre landed (open or frozen)");
+        assert!(
+            lines_len < 700,
+            "the byte budget dropped lines: {lines_len} of 700 fed"
+        );
+        assert!(
+            cells * 8 <= t.transient_cap() + 4096 * 8,
+            "pre content bounded within one line of the cap: {} MiB",
+            cells * 8 / (1 << 20)
+        );
+    }
+
+    #[test]
+    fn transient_cap_is_half_the_share_floored_at_one_open_block() {
+        // F2: the pre/table transient cap = HALF the tile's scrollback share,
+        // so N tiles (each share = SESSION_SCROLLBACK_BUDGET/N) sum to at most
+        // SESSION_SCROLLBACK_BUDGET/2 regardless of N -- vs a fixed 16 MiB that
+        // N tiles multiply into an OOM.
+        let mut t = Transcript::new(daylight());
+        // The default 32 MiB single-tile share -> 16 MiB (unchanged behavior).
+        assert_eq!(t.transient_cap(), 16 << 20);
+        // A 4-tile share (8 MiB) -> 4 MiB; aggregate over 4 tiles = 16 MiB.
+        t.set_max_cost(8 << 20);
+        assert_eq!(t.transient_cap(), 4 << 20);
+        // An artificially tiny share floors at one open block, never 0, so a
+        // test's set_max_cost(1) still admits a small transient (the floor never
+        // binds for a real tile: N <= MAX_PANES keeps share/2 above it).
+        t.set_max_cost(1);
+        assert_eq!(t.transient_cap(), OPEN_BLOCK_MAX_COST);
+    }
+
+    #[test]
+    fn the_pre_transient_scales_with_the_tile_share_not_a_fixed_16_mib() {
+        // F2 runtime: a small-share tile caps the pre at its half-share, well
+        // below the old fixed 16 MiB. Pre-F2 this tile would accumulate 16 MiB.
+        // (max_lines high so the BYTE cap binds first, not the line cap.)
+        let mut t = Transcript::with_caps(daylight(), 1000, 4 << 20, 1_000_000);
+        assert_eq!(t.transient_cap(), 2 << 20, "half the 4 MiB share");
+        let wide: String = core::iter::repeat('x').take(4000).collect();
+        let framed: Vec<String> = (0..500).map(|_| format!("{wide}\n")).collect();
+        let mut parts = vec![F::Open(Op::Pre, &[])];
+        for l in framed.iter() {
+            parts.push(F::Text(l.as_str()));
+        }
+        parts.push(F::Close(Op::Pre));
+        t.feed(&frames(&parts));
+        let mut cells = 0usize;
+        for b in t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(t.open_block()))
+        {
+            for it in b.items.iter() {
+                if let Item::Pre(ls) = it {
+                    cells += ls.iter().map(|l| l.cells.len()).sum::<usize>();
+                }
+            }
+        }
+        // Bounded within one wide line of the 2 MiB half-share -- NOT 16 MiB.
+        assert!(
+            cells * 8 <= (2 << 20) + 4000 * 8,
+            "pre bounded by the 2 MiB half-share, not 16 MiB: {} KiB",
+            cells * 8 / 1024
+        );
+        assert!(
+            cells * 8 > (2 << 20) / 2,
+            "the pre accumulated up to its cap (not dropped early): {} KiB",
+            cells * 8 / 1024
+        );
+    }
+
+    #[test]
+    fn pre_ignores_a_malformed_nested_block_and_still_closes() {
+        // A block op inside a pre is malformed (pre nests only inline): ignored,
+        // the pre keeps accumulating and closes cleanly -- no table leaks, no
+        // stuck-open pre. The containment guard.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Text("x\n"),
+            F::Open(Op::Table, &[("cols", "l")]), // malformed -> ignored
+            F::Text("y\n"),
+            F::Close(Op::Table), // ignored
+            F::Close(Op::Pre),
+            F::Text("after\n"), // an ordinary Line AFTER the pre
+        ]));
+        let items = &t.open_block().items;
+        let lines = pre_of(items);
+        assert_eq!(lines.len(), 2, "both x and y are pre lines (the table was ignored)");
+        assert_eq!(line_str(&lines[0]), "x");
+        assert_eq!(line_str(&lines[1]), "y");
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, Item::Line(l) if line_str(l) == "after")),
+            "text after the pre is a normal Line (the pre really closed)"
+        );
+        assert!(
+            !items.iter().any(|i| matches!(i, Item::Table(_))),
+            "the malformed nested table did not leak"
+        );
+    }
+
+    #[test]
+    fn pre_lays_mono_with_ground_and_gutter() {
+        // PL-1b render: a pre lays MONO (every seg FACE_MONO, even an annotated
+        // obj run -- a Line would lay that proportional) and emits its two
+        // chrome rects (the code-fence ground + the leading 2px gutter rule).
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/bin")]),
+            F::Text("/bin"),
+            F::Close(Op::Obj),
+            F::Text("\n"),
+            F::Close(Op::Pre),
+        ]));
+        let b = t.open_block();
+        let mut gs = crate::raster::GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let lb = crate::layout::layout_block(b, 400, &sheet, &mut gs);
+        let segs: Vec<_> = lb.lines.iter().flat_map(|l| l.segs.iter()).collect();
+        assert!(!segs.is_empty(), "the pre laid glyphs");
+        assert!(
+            segs.iter().all(|s| s.face == crate::raster::FACE_MONO),
+            "every pre seg is mono (the annotation is overridden)"
+        );
+        assert!(
+            lb.rects
+                .iter()
+                .any(|r| r.color == libhalcyon::theme::DAYLIGHT.raised),
+            "the code-fence ground rect (Daylight raised)"
+        );
+        assert!(
+            lb.rects.iter().any(|r| r.color == sheet.rule && r.w == 2),
+            "the 2px leading gutter rule"
+        );
+    }
+
+    #[test]
+    fn pre_spanning_a_block_freeze_lays_out_without_panic() {
+        // F1 (P0): a `pre` open when its block freezes must be finalized into
+        // THAT block -- else its Item::Pre commits to the fresh block (0 styles)
+        // carrying the old block's style indices, and layout_block's
+        // `b.styles[sid]` panics on the stale index. Reachable from an untrusted
+        // tile stream: a ScrollOff, or a tile-split's set_max_cost, between
+        // pre-open and pre-close. Pre-fix this panics in layout_block.
+        let mut t = Transcript::new(daylight());
+        // Content before the pre gives the open block an item + cost to freeze on.
+        t.feed(&frames(&[F::Text("before\n")]));
+        // Open a pre + a styled line: the pre cell interns a style index into the
+        // CURRENT open block; the pre line rides self.pre, not the block items.
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/bin")]),
+            F::Text("/bin"),
+            F::Close(Op::Obj),
+            F::Text("\n"),
+        ]));
+        // Freeze the open block WHILE the pre is open (the tile-split trigger);
+        // the fresh open block has zero styles.
+        t.set_max_cost(1);
+        t.feed(&frames(&[F::Close(Op::Pre)]));
+        // Lay out every block -- pre-fix one panics on the stale style index.
+        let mut gs = crate::raster::GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        for b in t.frozen_blocks() {
+            let _ = crate::layout::layout_block(b, 400, &sheet, &mut gs);
+        }
+        let _ = crate::layout::layout_block(t.open_block(), 400, &sheet, &mut gs);
+        // No panic reached here; the pre was finalized into a block, not lost.
+        let has_pre = t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(t.open_block()))
+            .any(|b| b.items.iter().any(|it| matches!(it, Item::Pre(_))));
+        assert!(has_pre, "the pre was finalized into a block, not lost");
+    }
+
+    #[test]
+    fn pre_finalized_at_a_scrolloff_triggered_freeze_lays_out_without_panic() {
+        // F1's OTHER trigger (the re-round's F6): a freeze mid-pre driven by a
+        // ScrollOff (push_scrolled_rows), not a tile-split (set_max_cost). The
+        // set_max_cost test above lowers the cap; here finalize_scroll_pending
+        // pushes an Item::Line into the open block and, over the open cap,
+        // freezes it WHILE a pre is open -- the identical fix arm, reached from
+        // the second of the two uncovered callers. It also interleaves a scroll
+        // Line before the finalized Item::Pre in one block. Both the scroll
+        // line's and the pre's obj-styled cells interned their indices into THIS
+        // block; the fix finalizes the pre into it, so layout_block's
+        // b.styles[sid] stays in bounds. Pre-fix: the pre carries to a fresh
+        // block and layout panics on the stale index.
+        let mut t = Transcript::with_caps(daylight(), 1000, 256, 10_000); // open cap 32
+        // A pre with an obj-styled cell: the index interns into the open block;
+        // the pre line rides self.pre uncharged, so it never freezes its own
+        // block (open.cost stays the obj's few bytes, under the cap).
+        t.feed(&frames(&[
+            F::Open(Op::Pre, &[]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/bin")]),
+            F::Text("/bin"),
+            F::Close(Op::Obj),
+            F::Text("\n"),
+        ]));
+        // One ScrollOff line lands in the open block and pushes it over the open
+        // cap: finalize_scroll_pending -> enforce_block_cap -> freeze_open with
+        // pre=Some. This is the caller the set_max_cost test does not exercise.
+        t.push_scrolled_rows(&[wrow("a scrolled grid line over the tiny cap")], &[false], &SpanMap::new());
+        // Close the pre after the freeze: with the fix it is a no-op (already
+        // finalized); pre-fix the still-open pre finalizes into the FRESH block
+        // (its stale indices name the frozen block), and layout OOB-panics below.
+        t.feed(&frames(&[F::Close(Op::Pre)]));
+        // Lay out every block -- pre-fix the pre's stale index panics here.
+        let mut gs = crate::raster::GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        for b in t.frozen_blocks() {
+            let _ = crate::layout::layout_block(b, 400, &sheet, &mut gs);
+        }
+        let _ = crate::layout::layout_block(t.open_block(), 400, &sheet, &mut gs);
+        // The scroll-triggered freeze finalized the pre into a block (not lost),
+        // alongside the scroll Line that triggered it (the interleave).
+        let has_pre = t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(t.open_block()))
+            .any(|b| b.items.iter().any(|it| matches!(it, Item::Pre(_))));
+        let has_scroll_line = t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(t.open_block()))
+            .any(|b| b.items.iter().any(|it| matches!(it, Item::Line(_))));
+        assert!(has_pre, "the pre was finalized by the scroll-triggered freeze");
+        assert!(
+            has_scroll_line,
+            "the ScrollOff line that triggered the freeze is present"
+        );
     }
 
     #[test]
@@ -1710,6 +2546,133 @@ mod tests {
     // eviction can reach any of it. Small caps make the test cheap: the open
     // block must never exceed its byte cap, and the whole transcript must
     // stay within one open-cap of the budget.
+    // PL-3: the soft-wrap rejoin. A row helper for these tests: chars -> a row
+    // of unstyled vt::Cells (span 0 -> the default tag).
+    fn wrow(s: &str) -> Vec<vt::Cell> {
+        s.chars()
+            .map(|ch| vt::Cell {
+                ch,
+                fg: 0xFFFFFF,
+                bg: 0,
+                attrs: 0,
+                span: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn soft_wrapped_scroll_rows_rejoin_into_one_logical_line() {
+        // The grid broke "hello world" at col 5 into "hello"(wrapped) +
+        // " worl"(wrapped) + "d"(not). The three ScrollOff rows rejoin into ONE
+        // Line -- so the flow layout re-wraps at the space, not mid-word (s5) --
+        // not three Lines.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let rows = alloc::vec![wrow("hello"), wrow(" worl"), wrow("d")];
+        t.push_scrolled_rows(&rows, &[true, true, false], &SpanMap::new());
+        let items = &t.open_block().items;
+        assert_eq!(items.len(), 1, "three soft-wrapped rows -> one Line");
+        let Item::Line(l) = &items[0] else {
+            panic!("a Line")
+        };
+        let s: String = l.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(s, "hello world");
+    }
+
+    #[test]
+    fn a_hard_wrapped_batch_stays_one_line_per_row() {
+        // The all-false case (a listing of distinct short lines) is unchanged:
+        // one Line per row.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let rows = alloc::vec![wrow("dev"), wrow("dl-symlink")];
+        t.push_scrolled_rows(&rows, &[false, false], &SpanMap::new());
+        assert_eq!(t.open_block().items.len(), 2, "two rows -> two Lines");
+    }
+
+    #[test]
+    fn a_pending_soft_wrapped_line_spans_push_calls() {
+        // The last row of a batch may soft-wrap (its continuation is still on
+        // the live grid); the fragment carries to the next call and rejoins,
+        // not finalizes early.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.push_scrolled_rows(&[wrow("abc")], &[true], &SpanMap::new());
+        assert_eq!(
+            t.open_block().items.len(),
+            0,
+            "nothing finalizes while a line is pending"
+        );
+        t.push_scrolled_rows(&[wrow("def")], &[false], &SpanMap::new());
+        let items = &t.open_block().items;
+        assert_eq!(items.len(), 1, "the completed line finalizes as one Line");
+        let Item::Line(l) = &items[0] else {
+            panic!("a Line")
+        };
+        let s: String = l.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(s, "abcdef");
+    }
+
+    #[test]
+    fn flush_scroll_pending_finalizes_an_in_flight_fragment() {
+        // A screen-mode change forces a held fragment out as its own Line.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.push_scrolled_rows(&[wrow("ab")], &[true], &SpanMap::new());
+        assert_eq!(t.open_block().items.len(), 0);
+        t.flush_scroll_pending(&SpanMap::new());
+        assert_eq!(t.open_block().items.len(), 1, "the fragment flushed");
+    }
+
+    #[test]
+    fn an_endless_soft_wrap_hard_splits_at_max_line_cells() {
+        // A never-ending soft-wrapped line (every row wrapped) must not grow the
+        // held fragment unbounded: it hard-splits at MAX_LINE_CELLS.
+        let mut t = Transcript::with_caps(daylight(), 1000, 8 << 20, 10_000);
+        let wide = wrow(&"a".repeat(256));
+        let n = (MAX_LINE_CELLS / 256) + 4;
+        let rows = alloc::vec![wide; n];
+        let wrapped = alloc::vec![true; n]; // never ends
+        t.push_scrolled_rows(&rows, &wrapped, &SpanMap::new());
+        assert!(
+            !t.open_block().items.is_empty(),
+            "the endless line hard-split at least once"
+        );
+        for it in &t.open_block().items {
+            if let Item::Line(l) = it {
+                assert!(
+                    l.cells.len() <= MAX_LINE_CELLS + 256,
+                    "a finalized line stayed bounded, got {}",
+                    l.cells.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_block_joins_soft_wrapped_grid_rows() {
+        // PL-4b: "abc"(wrapped) + "def"(not) on a 3x2 grid -> ONE logical line
+        // "abcdef"; the provenance maps grid row 1 to column 3 of line 0, the
+        // key the caret + live selection need.
+        let t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let grid = wrow("abcdef");
+        let (b, prov) = t.live_block(&grid, 3, 2, &[true, false], &SpanMap::new());
+        assert_eq!(b.items.len(), 1, "one logical line");
+        let Item::Line(l) = &b.items[0] else {
+            panic!("a Line")
+        };
+        let s: String = l.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(s, "abcdef");
+        assert_eq!(prov, alloc::vec![(0, 0), (0, 3)]);
+    }
+
+    #[test]
+    fn live_block_unwrapped_rows_are_separate_lines() {
+        // Two hard-terminated rows -> two logical lines; provenance keeps them
+        // apart (each starts at column 0 of its own line).
+        let t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let grid = wrow("abcdef");
+        let (b, prov) = t.live_block(&grid, 3, 2, &[false, false], &SpanMap::new());
+        assert_eq!(b.items.len(), 2, "two logical lines");
+        assert_eq!(prov, alloc::vec![(0, 0), (1, 0)]);
+    }
+
     #[test]
     fn a_re_budget_residue_is_bounded_by_the_constant_open_cap() {
         // Round-3 F5: the eviction floor keeps the newest frozen block, sized
@@ -1725,12 +2688,13 @@ mod tests {
                 fg: 0xFFFFFF,
                 bg: 0,
                 attrs: 0,
+                span: 0,
             })
             .collect();
         let rows: Vec<Vec<vt::Cell>> = alloc::vec![row; 64];
         // several cap-sized continuation blocks
         while t.frozen_blocks().len() < 6 {
-            t.push_scrolled_rows(&rows);
+            t.push_scrolled_rows(&rows, &alloc::vec![false; rows.len()], &SpanMap::new());
         }
         let last = t.frozen_blocks().back().map_or(0, |b| b.cost);
         assert!(
@@ -1760,11 +2724,12 @@ mod tests {
                 fg: 0xFFFFFF,
                 bg: 0,
                 attrs: 0,
+                span: 0,
             })
             .collect();
         let rows: Vec<Vec<vt::Cell>> = alloc::vec![row; 64];
         while t.stored_cost() < big - (big / 8) {
-            t.push_scrolled_rows(&rows);
+            t.push_scrolled_rows(&rows, &alloc::vec![false; rows.len()], &SpanMap::new());
         }
         let before = t.stored_cost();
         assert!(

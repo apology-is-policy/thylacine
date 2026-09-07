@@ -14,7 +14,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-08-15
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -133,6 +133,18 @@ corpus file through the audited 9P client, stratumd is stopped. No
 Stratum-side code exists for it, so the bake exercises the same Twrite /
 Tlcreate paths the guest does.
 
+**The bake stamps `PRINCIPAL_SYSTEM` ownership (A-3, the no-brick pass).** So
+the boot chain owns its own tree once dev9p enforces per-file rwx (A-3b), the
+pool bake stamps `PRINCIPAL_SYSTEM` (`4294967294`) everywhere: `stratum-mkfs
+--root-uid` / `--root-gid` stamps the pool ROOT inode, and host `stratumd
+--bake-owner-uid` / `--bake-owner-gid` stamps every file `stratum-fs write`
+creates ([[sub-stratum-server]]). Both are required — the mkfs root inode was
+uid=0/0755, so without `--root-uid` the `PRINCIPAL_SYSTEM` boot chain hit the
+pool root as *other* and joey's create in `/` was denied even with every baked
+file SYSTEM-owned. With root + baked files + runtime creates all SYSTEM-owned,
+the boot chain owns the whole tree. It is a stamped *value*, not a format change
+(`si_uid` / `si_gid` already exist in the inode).
+
 ## Data structures
 
 `build/` layout: `kernel/` and `kernel-undefined/` (parallel sanitizer
@@ -208,6 +220,16 @@ LS-CI mints one with `mkdisk.py` at need.
   believe you baked is that, and it has produced at least one gate that
   reported PASS having verified nothing.
 
+- **The `corvus-mint` host tool builds from the repo ROOT, not `usr/` (H-4d).**
+  Cargo's config discovery is cwd-based: launched from `usr/`, the workspace's
+  vendor replacement applies and its `aegis 0.9.8` cannot satisfy the tool's own
+  `0.9.12` lock -- a bake started there fails on the mint. The fix is the cwd,
+  not a version bump: run it from the root, where the vendor replacement does not
+  reach. (The `/lib/halcyon/layouts/default` populate step H-4d also adds is one
+  more baked file in the `/lib/beacon/verbs` shape -- mkdir + write + sync +
+  readback-cmp -- below this file's target/ledger granularity, so no target-set
+  change.)
+
 - **The stale-stage warning claims a property it achieves by maintenance,
   not by construction — and its own comment is the argument against
   itself.** The comment says it is *"checked for EVERY staged GL binary, not
@@ -234,3 +256,11 @@ LS-CI mints one with `mkdisk.py` at need.
 [[chg-2026-08-15-build-targets]] is the re-sweep: the target set nearly
 doubled, the patch-hunk chokepoint and the stale-stage warning arrived, and
 this dossier's own "prefer the header block" advice was falsified.
+
+[[chg-2026-09-05-h4d2-family-fold]] folds H-4d-2/3: the `corvus-mint`-from-root
+trip-hazard, and a note that the `/lib/halcyon/layouts/default` populate step is
+below the target/ledger granularity (no target-set change).
+
+[[chg-2026-09-06-9p-identity-absorb]] folds the A-3 bake-value pass absorbed from
+docs/reference/100: the `PRINCIPAL_SYSTEM` no-brick stamping (`stratum-mkfs
+--root-uid` + `stratumd --bake-owner-uid`).

@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-08-18
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -25,8 +25,8 @@ takes it across — the dispatch switch, the user-pointer validator, the staging
 buffers, and the split between the layer that talks to userspace and the layer
 that does the work.
 
-**What this dossier covers, precisely.** The file is 11138 lines and holds all
-103 handlers. Most of a handler is *policy belonging to its own subsystem* — a
+**What this dossier covers, precisely.** The file is 14749 lines and holds all
+107 handlers. Most of a handler is *policy belonging to its own subsystem* — a
 Burrow handler is described by [[sub-kernel-burrow]], a pts handler by
 [[sub-kernel-pts]], and so on across roughly thirty dossiers. The subject here
 is what surrounds them: dispatch, marshalling, validation, staging, error
@@ -63,8 +63,8 @@ called, never what the caller is allowed to do.
 
 ### The dispatch is exactly as wide as the ABI says
 
-103 syscall numbers are live and the switch has exactly 103 distinct arms;
-neither set has a member the other lacks. (A grep for case labels finds 106 —
+107 syscall numbers are live and the switch has exactly 107 distinct arms;
+neither set has a member the other lacks. (A grep for case labels finds 110 —
 three of them belong to a second, inner switch that routes the three pts control
 calls to their tty backends, not to the dispatcher.) Almost every arm reads only
 `x0` through `x5` and `x8`, the argument window the ABI declares; the three
@@ -81,7 +81,8 @@ The width claim itself is still a measurement rather than a mechanism.
 
 ### The phenotype prologue: what a Linux-shaped call meets before the switch
 
-A process declares a phenotype at spawn. `PHENO_NATIVE` is the default and
+A process declares a phenotype at spawn and re-decides it at every execve (the
+Design D re-decision under execve, below). `PHENO_NATIVE` is the default and
 every process outside a declared vivarium; the branch is one predictable test on
 an already-hot cache line and the native path is byte-unchanged. A
 `PHENO_LINUX` process goes through `viv_linux_dispatch`, which lives in this
@@ -152,10 +153,10 @@ store is unconditional and safe for the reason above; noted's arm stores nothing
 
 ### Two layers, and the rule about which one may hold a gate
 
-Forty-nine syscalls are split in two. A `_handler` takes raw register values,
+Fifty syscalls are split in two. A `_handler` takes raw register values,
 resolves the current thread, validates user pointers, stages buffers, and calls
 a `_for_proc` inner that takes an explicit process and kernel-side buffers.
-Forty-one of those inners are non-static, and that is what makes them the
+Forty-five of those inners are non-static, and that is what makes them the
 testable half — most are called from the kernel's own test suite, and several
 from production kernel code that needs the operation without a syscall frame.
 
@@ -222,6 +223,16 @@ source:
   which is legal at that point and would not be earlier. It runs *before* the
   frame rewrite so no instruction of the new image can observe a descriptor that
   was supposed to be gone.
+- **The phenotype is re-decided at the resolve, not inherited from the caller.**
+  The new image's ABI shape is `phenotype_decide(crossed_pheno,
+  territory_root_pheno)` — the `MPHENO_LINUX` flag the resolver crossed on the way
+  to the binary, OR-ed with the territory's declared root phenotype ([[sub-kernel-territory]]) —
+  and it is committed in `proc_exec_replace`'s single infallible region alongside
+  the address-space swap, so the number space the next instruction meets and the
+  memory it runs in flip together or not at all. This is [[inv-i43]]'s Design D:
+  a native binary exec'd inside a Linux vivarium comes out native, because the
+  shape follows the *image*, never the caller. It remains shape and not authority
+  — the decision picks a syscall numbering, never a capability.
 
 The frontier this exposes: the native execve **preserves the environment** and
 takes no envp argument at all. That is the ABI meaning rather than a shortcut —
@@ -229,6 +240,54 @@ the request is `execv`'s, "run this program, keep my environment" — and a call
 that wants to replace the environment writes `/env` first. The projection is
 staged before the commit so a later failure cannot have disturbed the caller's
 own environment.
+
+### The spawn-permission gate is two sites, and the split is the security property
+
+`SYS_SPAWN_WITH_PERMS` and `SYS_SPAWN_FULL_ARGV` carry a `perm_flags` word of
+`SPAWN_PERM_*` bits the parent asks to stamp on the child — `MAY_POST_SERVICE`
+(the child may register a `/srv/<name>` server, [[sub-kernel-devsrv]]),
+`CONSOLE_TRUSTED` (the SAK re-grant anchor), `CONSOLE_OWNER` (the Ctrl-C target),
+and the I-32 `MAY_RAISE_PAGE_BUDGET` above. The mechanism is deliberately **two
+sites, and neither is the other's redundancy**:
+
+- **The grant gate runs at the entry, before a single user-VA byte is read.**
+  `spawn_perm_grant_check` (`kernel/syscall.c`) adjudicates every requested
+  bit against the *parent's* authority and rejects the whole call on any failure,
+  placed ahead of the argument copy-in so a hostile caller cannot probe gate
+  behaviour with a side effect — the same "check before the copy, where the check
+  has no user-memory dependency" discipline the staging tiers use. Any bit outside
+  `SPAWN_PERM_ALL` is rejected here outright.
+- **The stamp runs at the thunk, in the child's own thread context, before
+  `exec_setup`.** `apply_spawn_perms` (`kernel/syscall.c`) translates the
+  parent-vetted bits into their `proc_*` marks in the child, and its placement —
+  before the fd-install loop and before the image is set up, hence before any
+  user-mode instruction of the child — is the whole point. The naive "spawn, then
+  mark the returned pid" pattern leaves a window in which the child, scheduled
+  onto another CPU between the parent's spawn-return and its next syscall, reaches
+  `SYS_POST_SERVICE` before the mark lands; baking the stamp into the thunk closes
+  it structurally, because no `userland_enter` runs before the stamp.
+
+The per-bit rules are where the trust model lives, and one distinction is
+load-bearing:
+
+- **`CONSOLE_TRUSTED` is console-attach-only and never delegable.** A process
+  that can post services must not be able to confer the console-trust used for
+  hostowner elevation — that would collapse [[inv-i27]] — so only a
+  console-attached process grants it.
+- **`MAY_POST_SERVICE` and `CONSOLE_OWNER` are holder-delegable: console-attached
+  OR an existing `MAY_POST_SERVICE` holder** (the A-5b one-hop delegation). This
+  is what lets init — the console root — confer `MAY_POST_SERVICE` on
+  `/sbin/login`, which, now a holder, re-confers it on the per-user proxy and
+  confers `CONSOLE_OWNER` on the session shell, none of the later links being
+  console-attached. It is the same one-hop shape the I-32 raise authority takes,
+  applied to a different bit.
+
+None of these is a `cap_mask` bit and none is `rfork`-propagated: each is a
+`perm_flags` *spawn-time* decision, so I-2 — the fork-grantable capability set
+only reduces — is untouched by the whole family. The backstop for the two-site
+split is an `extinction` at the tail of `apply_spawn_perms`: a bit outside
+`SPAWN_PERM_ALL` surviving to the thunk means the entry gate failed to reject it,
+which is a kernel invariant violation, not a runtime error.
 
 ### The capability is checked once, at mint, and the object type carries it after
 
@@ -244,6 +303,119 @@ authority, and gating it would turn a capability expiry into a leak.
 So the authority is enforced by *kernel-minted object type*, not by repeating a
 capability check at every touch. A re-check would be the weaker design: it has
 to be added to each new operation, and forgetting one is silent.
+
+### The FS handlers carry the identity gate, and walk-open sets the handle rights
+
+Three A-3 touches live on the FS-mutation and walk-open handlers, all in this
+file. First, the **identity gate reaches FS mutation** (A-3b/F2): once `dev9p`
+enforces (`dev->perm_enforced`), `sys_rename_handler` runs
+`perm_check(PERM_W | PERM_X)` on **both** parent directories — POSIX rename
+needs write+search on source and destination — and `sys_unlink_handler` on the
+parent, mirroring `sys_walk_create_handler` and gated on the same flag so a
+non-enforcing Dev (devramfs, whose leaves have no `.rename`) is unaffected.
+Before A-3b these gated on `RIGHT_WRITE` alone, so an `O_PATH`-born `R|W` handle
+to a no-`other-w` directory could rename or unlink its entries once the FS
+enforced; the `perm_check` closes that. The *check* is [[sub-kernel-perm]]'s;
+the *placement* — in the handler, behind `perm_enforced` — is this file's.
+
+Second, **walk-open sets the handle rights** (A-3b/F1): it derives the envelope
+from `omode` via `rights_for_omode` (so the capability axis cannot exceed the
+access `perm_check` validated) and then ORs `RIGHT_TRANSFER` as caller policy —
+with one exception, the `T_OPATH` walk-only handle, born `R|W` with NO
+`RIGHT_TRANSFER` (the confined-storage navigation base). `rights_for_omode`
+itself sets neither the transfer bit nor the `T_OPATH` base; both are decided
+here, at the mint site — the same "policy lives at the caller, the pure map
+lives in the leaf" split as the gate-placement rule above.
+
+Third, **the attach handlers assert the caller's identity** (M4): `sys_attach_9p`
+and `sys_attach_9p_srv` substitute the calling Proc's kernel-stamped
+`principal_id` for the userspace `n_uname` Tattach field (still validated for
+ABI hygiene, then superseded). Against a trusted-local Stratum server this is
+inert — the live identity channel is `SO_PEERCRED` ([[sub-pouch-net]]) — so
+`n_uname` is forward-compat for a v1.x foreign server that honours it but has no
+peer-cred, gated behind a recorded trust-stamp seam
+([[seam-nuname-trust-stamp]]).
+
+### SYS_WSTAT is the third FS identity gate, and it splits metadata from content
+
+`sys_wstat_handler` thins to the all-scalar `sys_wstat_for_proc(p, h, valid, mode,
+uid, gid, size)` — the handler/inner split that makes the gate testable without a
+live EL0 thread (the #37 pattern). It validates structurally first: at least one
+known `valid` bit and no reserved one (so a future `T_WSTAT_*` cannot be silently
+dropped), the mode masked to the rwx nine (setuid/setgid/sticky reject), `uid`/
+`gid` rejected on the invalid sentinel, a `size` with its sign bit set rejected up
+front.
+
+**The fd is kind-gated, not rights-gated — for the metadata axes.** The handle
+need only be a `KOBJ_SPOOR` of *any* rights (it rejects `KOBJ_SRV`), so `fchmod(2)`
+/`fchown(2)` work on an fd opened `O_RDONLY`: the authority to change metadata is
+the *identity* axis ([[sub-kernel-perm]]'s `perm_wstat_check`), never the handle's
+byte-I/O envelope (#47 — the "fchmod on a read-only fd is correct" semantic is
+carried at [[sub-pouch-fs]] and [[sub-kernel-dev]]). The old `RIGHT_WRITE` gate
+guarded nothing — the caller can re-walk the path — while breaking POSIX; the #46
+endowed-fd exception is the same rule, a rights-stripped handle passed cross-Proc
+still wstats iff the *receiver* passes the identity check.
+
+**`T_WSTAT_SIZE` is the exception: a truncate is content, so it alone demands
+`RIGHT_WRITE`** — the POSIX `ftruncate` model, gated on the open-time W that the
+[[sub-kernel-stalk]] walk already checked, so no identity re-check applies to it
+(the policy side of this split is [[sub-kernel-perm]]'s `T_WSTAT_SIZE`-has-no-arm
+reasoning). That split opens a hole this handler closes: an `O_PATH` (`CWALKONLY`)
+handle is born `RIGHT_WRITE` but is `perm_check`-exempt at open, so its write right
+is *hollow* — a truncate through it would mutate a file the caller has no W on. The
+#81 read-bypass close ([[sub-kernel-stalk]]'s reject of read/write/readdir on a
+navigation handle) is therefore **extended to the size axis here**: `T_WSTAT_SIZE`
+with `CWALKONLY` set is rejected. A navigation handle is not a byte-I/O channel,
+and truncate is byte I/O.
+
+**The metadata policy check is placed here; the policy itself is not.**
+`perm_wstat_check` runs only for `{MODE, UID, GID}` and only on a `perm_enforced`
+Dev, reading the file's *current* owner first — the who-may-chmod/chown/chgrp
+adjudication is [[sub-kernel-perm]]'s three-authority rule. A size-only call skips
+it (its identity check was the open-time `perm_check`). Since #47 this is the
+*sole* write-authority gate on the mode/uid/gid path: load-bearing, not additive
+to a handle right.
+
+### Positioned byte I/O reuses the read/write inner with the cursor held still
+
+`SYS_PREAD` (85) and `SYS_PWRITE` (86) are POSIX positioned I/O: a byte transfer
+at a caller-supplied absolute offset that **never reads or advances the fd
+cursor**. The absence of cursor traffic is the contract, not an optimisation —
+`io.ReaderAt`'s documented parallel-use guarantee, and every archive and loader
+reader built on it, rides on two positioned ops sharing no mutable state, and no
+Seek+Read emulation can provide it.
+
+The kernel half is thin because the Dev vtable **always** took an explicit offset
+— the Plan 9 `Dev.read(c, buf, n, off)` shape — and the per-Spoor cursor is
+syscall-layer sugar. So `sys_read_for_proc` and `sys_write_for_proc` were
+refactored onto a shared inner (`spoor_read_common` / `spoor_write_common`)
+carrying a `positioned` flag: cleared, it reads `c->offset` and advances it after
+the transfer, byte-identical to the pre-existing bodies; set, it passes the
+caller's offset straight through and touches the cursor on no path.
+
+Three positioned-specific gates guard the offset, and their ORDER is load-bearing:
+
+- **`off < 0` is rejected before the handle lookup.**
+- **A non-seekable Dev is rejected with the POSIX ESPIPE shape**, and the check
+  sits *before* the `len == 0` short-circuit — so even a zero-length positioned
+  probe on a pipe, cons, or `/srv` stream reports the refusal instead of
+  succeeding as a cursor-free no-op. `dev->seekable` (true only for devramfs and
+  dev9p) is what marks a byte-offset Dev.
+- **`len > INT64_MAX - off` is rejected** as a `u64`-arithmetic overflow guard, so
+  the offset addition never wraps.
+
+Everything else is byte-identical to the cursored path: the ref-held lookup, the
+`CWALKONLY` reject, the errno clamp. One asymmetry is worth holding onto — a
+copy-out fault mid-`pread` loses nothing, because the cursor never moved and the
+caller can repeat, unlike `SYS_READ`'s consumed-bytes-lost window. The one known
+divergence is consumer-side, not here: the Go `syscall.Pread`/`Pwrite` wrapper
+returns `(0, nil)` on a `len == 0` call rather than trapping, because indexing an
+empty slice panics — so a zero-length positioned op on a non-seekable fd is seen
+as success by that one caller where the kernel reports the ESPIPE-shaped refusal.
+The soundness pin on the metadata sibling — `dev_register` extincts a
+`wstat_native` Dev that is not `perm_enforced`, since `perm_wstat_check` is the
+only write-authority gate there — lives with the Dev registration
+([[sub-kernel-dev]]), not here.
 
 ### The hardware-mint sequence, and where the same idea is factored and where it is copied
 
@@ -309,6 +481,17 @@ Where a device's error is forwarded, an out-of-window negative is clamped to a
 generic I/O error, so a device cannot punch a value through the boundary
 library's error window and have it read as an enormous success.
 
+The 9P attach path is the concrete instance of both halves (A-3c). Both attach
+handlers refine their return from a bare `{-1, fd}` to `{-errno, fd}` via
+`attach_err_to_ret`, which surfaces the value only if it lies in the
+`[-4095, -2]` passthrough window and otherwise clamps to `-1`. The value comes
+from `p9_attached_create`'s `out_err` param, which threads the Tattach failure
+out — a per-user stratumd's dataset-scope refusal arrives as `Rlerror(EACCES)`,
+mapped to `-T_E_ACCES`. So an out-of-scope attach now returns `-EACCES` (pouch
+presents `errno == EACCES`) where it once collapsed to a bare `-1` — the reason
+that identity refusal is observable from Thylacine at all
+([[sub-kernel-ninep-attach]]).
+
 ## Data structures
 
 None owned. The dispatcher operates on the exception frame
@@ -367,7 +550,7 @@ and there the charge must stay); and **claim before drop**, not after.
 
 **[[inv-i13]]** — the user-pointer validator is the boundary. It rejects null,
 rejects anything at or above the user-VA top, and rejects a length that would
-wrap or cross that top. Sixty-nine call sites use it. It validates a *range*,
+wrap or cross that top. Eighty-eight call sites use it. It validates a *range*,
 not a pointer: a zero length passes unconditionally, which is correct because
 nothing is dereferenced, and is why every caller pairs it with the length it
 will actually touch.
@@ -389,7 +572,10 @@ is where the two steps are written.
 **[[inv-i43]]** — the phenotype prologue is where "shape, never authority" is
 kept. It renumbers and remaps arguments; it reads the capability word nowhere and
 writes it nowhere. A phenotyped process meets exactly the same gates in exactly
-the same handlers as a native one.
+the same handlers as a native one. Design D adds a second place the invariant
+lives: execve re-decides the phenotype from the resolved image (above), which
+changes the ABI numbering the process will present and nothing about what it may
+do — shape re-chosen at each image load, authority never touched.
 
 **[[inv-i44]]** — execve's detached build and rfork's frame copy are this file's
 half of address-space integrity under sharing. The decisions live here; the
@@ -398,7 +584,10 @@ object's.
 
 **[[inv-i22]]** and **[[inv-i27]]** — several handlers carry identity and
 console-trust gates. They are enforced here in the sense that this is where the
-check is written; the authority model itself is [[moc-kernel-security]]'s.
+check is written; the authority model itself is [[moc-kernel-security]]'s. The
+spawn-permission gate above is one of them: `CONSOLE_TRUSTED` is granted only by
+a console-attached process and never by a mere service-poster, which is the I-27
+line held at the child-creation boundary.
 
 ## Error paths
 
@@ -438,6 +627,21 @@ threshold so small transfers never pay the extra handle lookup.
   has two argument shapes, the gate goes in the shared core even when that costs
   a wasted copy on a refusing path — a gate in one front end is a gate the other
   does not pass, which is the handler/inner rule restated for the core split.
+- **A new `SPAWN_PERM_*` bit is gated at the entry and stamped at the thunk, and
+  the two placements are not interchangeable.** The grant check must run before
+  the argument copy-in so a refusal has no user-memory dependency to probe; the
+  stamp must run in the child's thunk before `exec_setup`, so no user-mode
+  instruction of the child precedes it. A delegable bit (`MAY_POST_SERVICE`,
+  `CONSOLE_OWNER`) widens the trust chain by one hop; `CONSOLE_TRUSTED` never
+  delegates, because a service-poster conferring console-trust would breach
+  [[inv-i27]]. The tail `extinction` in `apply_spawn_perms` is the proof the two
+  sites agree.
+- **A positioned-I/O gate order is part of its contract.** The non-seekable
+  refusal must precede the `len == 0` short-circuit, or a zero-length positioned
+  probe on a stream Dev succeeds where POSIX reports ESPIPE; the overflow guard
+  must precede the offset's use; and the shared `positioned` flag must leave the
+  cursor untouched on every path, because a single advanced cursor breaks the
+  parallel-use guarantee the whole surface exists to provide.
 - **A new phenotype row confers shape, not authority.** A translation may
   renumber and remap arguments; it may not read or write the capability word, and
   the native gate it lands on must be the same one a native caller meets.
@@ -559,6 +763,42 @@ threshold so small transfers never pay the extra handle lookup.
 [[chg-2026-08-15-syscall-dispatch-lineage]] is the re-sweep after ~3500 lines
 moved: the phenotype prologue, the three frame-taking handlers, the core/front-end
 split, and the payer attribution.
+[[chg-2026-09-05-syscall-dispatch-census]] re-derives the census after ~4300
+more lines (14731 total): 107 live/107 arms, 50 split (45 non-static inners), 88
+validator sites, and adds execve's Design-D phenotype re-decision.
+[[chg-2026-09-05-h4d2-family-fold]] folds H-4d-2a: `sys_fd_devclass_handler`'s
+inline class-pick became the named classifier `spoor_devclass` (adding the
+pts-slave `'t'` arm via `pts_resolve_spoor`; master stays `'9'`), +18 lines ->
+14749. Not a new split -- a classifier, not a `_handler`/`_for_proc` pair -- so
+the 50/45 metric is unchanged.
+[[chg-2026-09-06-9p-identity-absorb]] folds the A-3 syscall-path atoms absorbed
+from docs/reference/100: the attach-error surfacing (`attach_err_to_ret`), the
+FS-mutation identity gate (F2 rename/unlink `perm_check` behind `perm_enforced`),
+the walk-open handle-rights caller policy, and the M4 `n_uname = principal`
+substitution.
+
+[[chg-2026-09-06-fs-permission-absorb]] folds the SYS_WSTAT handler
+(`sys_wstat_for_proc`) absorbed from docs/reference/99: the kind-gate-not-rights-
+gate metadata authority (#47), the `T_WSTAT_SIZE` content/metadata split, the
+#81-class truncate-via-`O_PATH` close, and the `perm_wstat_check` placement.
+
+[[chg-2026-09-06-spawn-perms-absorb]] folds the SPAWN_PERM_* grant gate absorbed
+from docs/reference/73: the two-site security split (`spawn_perm_grant_check` at
+the entry before the user-VA read, `apply_spawn_perms` in the child thunk before
+`exec_setup`, closing the SMP mark-after-spawn race), the per-bit rules
+(`CONSOLE_TRUSTED` never-delegable I-27, `MAY_POST_SERVICE`/`CONSOLE_OWNER`
+holder-delegable one-hop), and the I-2 non-propagation (perm bits are spawn-time,
+not `cap_mask`).
+
+[[chg-2026-09-06-positioned-io-absorb]] folds the SYS_PREAD/PWRITE syscall-layer
+mechanism absorbed from docs/reference/130: the cursor-untouched contract (the
+shared `spoor_read_common`/`spoor_write_common` inner + the `positioned` flag),
+the three ordered gates (off<0; non-seekable -> ESPIPE-shape, before the len==0
+short-circuit; off+len overflow), the repeat-safe mid-`pread` fault asymmetry, and
+the consumer-side Go len==0 divergence. The Dev-half `seekable` flag stays with
+[[sub-kernel-ninep-dev9p]]; the ABI numbers with [[sub-kernel-syscall-abi]]; the
+`wstat_native`/`perm_enforced` pin with [[sub-kernel-dev]]; SYS_WSTAT #47 was
+already folded above.
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 

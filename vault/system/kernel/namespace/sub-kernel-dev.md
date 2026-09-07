@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -281,6 +281,16 @@ Covered by `dev.boot_registration_smoke`, `dev.vtable_slot_coverage`,
   exist.** It registers cons first "so the boot banner could route
   through it; not yet, but the slot is reserved". The banner still goes
   direct to the UART.
+- **The header now declares two Dev-identity query helpers, owned by
+  [[sub-kernel-devdev]].** `devdev_fd_devclass` gives the effective `dc` of a
+  devdev-backed Spoor for `SYS_FD_DEVCLASS` (only the `/dev/cons` leaf answers
+  `'c'`), and `spoor_is_console` decides console identity by the unforgeable
+  `Dev` pointer rather than a forgeable qid bit. Their semantics live in the
+  devdev dossier; they sit in this shared header — alongside the `extern struct
+  Dev devcons` the console door now needs — because callers outside devdev use
+  them. They are the runtime form of what the registry already asserts
+  structurally: a Dev's identity is its `dc` and its pointer, and neither is a
+  bit a 9P server can set.
 
 ## Provenance
 

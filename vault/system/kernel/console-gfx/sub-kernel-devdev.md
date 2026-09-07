@@ -14,7 +14,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.4"
   - "docs/IDENTITY-DESIGN.md section 9.8"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -70,6 +70,21 @@ and the read syscall gates only on the handle's rights — so a gate-at-open-onl
 design would let a path-only handle read the console. A later walk-only flag
 now also rejects such a handle at the syscall layer, so the re-gate is
 belt-and-suspenders on the highest-stakes leaf rather than the sole defence.
+
+**The re-gate is also a deliberate revoke asymmetry between the two console
+doors.** The `SYS_CONSOLE_OPEN` door (`devcons`) gates only at open — its read
+path re-reads console attachment solely to decide a scheduling band, never to
+authorize — so an already-open `devcons` fd **survives** a later attachment
+revoke (a SAK). The inherited session stdio relies on exactly that: the boot
+authority opens while attached, hands the fd to login, then relinquishes. The
+`/dev/cons` leaf re-gates every I/O, so its fd instead **stops working the
+instant the caller de-attaches** — the stricter, more-I-27-correct semantic,
+and the one that closes the fd-outlives-revoke window a path-open would open. A
+consumer that opens `/dev/cons` expecting POSIX "the fd survives a privilege
+change" semantics will be surprised; a delegated console should ride the
+inherited `devcons` stdio, not a freshly-opened `/dev/cons`. [[inv-i27]]'s
+"every door gates identically" is about the shared *mint* gate; this is the
+post-mint divergence.
 
 The poll gate exists for a subtler reason than the read gate: an ungated poller
 would register a wake hook on the console and **learn its input timing** without
@@ -139,6 +154,28 @@ The full disk is the only one that refuses writes; the randomness leaves
 consume writes rather than stirring the pool, which is a deliberate deferral
 since the generator reseeds on its own cadence.
 
+### Two identity questions, and one of them must not trust a qid bit
+
+`SYS_FD_DEVCLASS` asks a devdev-backed fd its class through `devdev_fd_devclass`:
+only the console **data** leaf (`DEV_KIND_CONS`) normalizes to `'c'`, so an fd
+walked from `/dev/cons` is indistinguishable from a `SYS_CONSOLE_OPEN` fd to the
+is-a-terminal predicate, while every control leaf (`consctl`, the drain/feed
+pair, `winsize`) and every directory answers devdev's own `'d'` — they are the
+control plane, not the terminal. (The consctl read that renders the mode line
+grew its staging buffer to 96 bytes when the render gained a trailing `beacon
+<tier>` field: the old 64-byte buffer sat below the render's reserve floor and
+EOF'd every consctl read, which the H-1a suite caught.)
+
+`spoor_is_console` answers a different question — *is this fd the kernel
+console?* — and it must answer **by unforgeable device identity, never by a qid
+bit.** A dev9p-backed Spoor copies its qid path verbatim from the 9P server, and
+tapestryd's pane flag occupies the very bit that marks a console qid, so a
+server-backed pane fd would pass a bit-only test. The predicate therefore keys on
+the kernel `Dev` pointer, which only the kernel installs: the device is `devcons`
+(the `SYS_CONSOLE_OPEN` door) or it is `devdev` with the `DEV_KIND_CONS` qid path
+(the `/dev/cons` leaf). Both console doors are covered, and neither is forgeable
+from userspace.
+
 ## Data structures
 
 A static leaf name table and an enumeration of kinds. The qid path **is** the
@@ -191,6 +228,12 @@ first thing to look at if anything ever streams from them.
   The dominance argument covers geometry and not the global termios.
 - **The console data leaf must stay attach-only**, for the renderer as much as
   for anyone.
+- **The `is this the console?` predicate must key on the device pointer, not a
+  qid bit.** A dev9p qid path is server-supplied, and at least one server
+  (tapestryd) sets the same bit a console qid uses, so a bit-only test would
+  accept a forged pane fd. Only `sp->dev == &devcons` or the `devdev`
+  `/dev/cons` leaf is unforgeable — the same lesson `devclass` normalization
+  leans on (the class is the kernel's to assign, never the server's).
 - **The drain arm must stay paired with its unwind**, and the disarm must stay
   gated on the opened flag — walk intermediates and path-only handles reach
   close too.
@@ -254,3 +297,6 @@ first thing to look at if anything ever streams from them.
 [[chg-2026-08-02-console-sweep]].
 
 [[chg-2026-08-16-seven-small-surfaces]] records this interval.
+
+[[chg-2026-09-06-devdev-fdclass-console-identity]] adds the fd-class query and
+the unforgeable console-identity predicate.

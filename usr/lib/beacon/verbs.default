@@ -7,7 +7,7 @@
 # one runs the template with every `{}` replaced by the RESOLVED ref,
 # single-quoted for ut (rc's rule: '' is the one escape) -- the command
 # acts on exactly the ref the menu displayed. Types are BEACON.md 12.2's:
-# path, pid, url, commit, user. Baked from usr/lib/beacon/verbs.default.
+# path, pid, url, commit, user, layout. Baked from usr/lib/beacon/verbs.default.
 #
 # Quoting makes the ref ONE argument; only `--` keeps a ref that begins with
 # `-` out of option position. It goes wherever the program takes it (ls,
@@ -21,3 +21,10 @@ path   edit      nora {}
 path   hexdump   hexdump {}
 pid    kill      kill {}
 url    fetch     wget {}
+# A saved layout's ref is its NAME (HALCYON.md 13.7; `halcyon layout list`
+# presents them): restore rebuilds it beside the console, save overwrites it
+# with the live tree, delete removes the session-tier file. A name never
+# begins with `-`, so no `--` is needed.
+layout restore   halcyon layout restore {}
+layout save      halcyon layout save {}
+layout delete    halcyon layout delete {}

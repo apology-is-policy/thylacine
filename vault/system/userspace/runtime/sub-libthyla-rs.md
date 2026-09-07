@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-08-15
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -186,6 +186,29 @@ the ported libc's splitter, and this — each getting it wrong differently. That
 is the argument for the principle: when N layers each normalize, they each
 normalize wrong, and the fix is not to fix N implementations but to have one.
 
+### The 9P serving codec (`ninep`)
+
+`ninep` is the `no_std`/`no_alloc` 9P2000.L wire codec for a native program that
+*serves* 9P — the T-message parsers and R-message builders a `/srv` publisher
+dispatches (corvus is the canonical consumer; it retired its own private `p9`
+module onto this). It operates entirely on caller-supplied buffers: no I/O, no
+session state, no fid table, no tag allocation — those live in the server above
+it. Only the server side landed; the client side (T-builders + R-parsers) is a
+mechanical mirror deferred until a native program needs to make *outgoing* 9P
+calls.
+
+Its codec invariants are pure wire properties: `pack_X` then `unpack_X` is the
+identity; every unpack short-circuits to `Err(())` rather than over-reading a
+short buffer, and every pack rather than over-writing; `build_r*` writes a
+placeholder size, then the body, then back-patches the total (so a
+variable-length body needs no length known up front); and `parse_twalk` bounds
+the wname array twice (`nwname <= 16`, each name `<= 255`). The distinction worth
+stating is what these are **not**: the 9P *session* invariants — [[inv-i10]] tag
+uniqueness, [[inv-i11]] fid stability — are **server-state** invariants the
+dispatcher enforces *above* the codec, never codec invariants. The wire
+constants, message-type numbers, and struct layouts are the code's (`ninep.rs`),
+pinned by the pack/unpack that reads them rather than by `#[repr(C)]`.
+
 ### Two invariants are enforced by absence rather than by checking
 
 The hardware wrappers preserve hardware-handle non-transferability
@@ -204,6 +227,31 @@ cannot express is stronger than one you remember to check**, because forgetting
 a check is silent and forgetting to add a method is impossible. The kernel
 reaches the same conclusion independently on the same JIT surface
 ([[sub-kernel-syscall-dispatch]]), which is some evidence it is the right one.
+
+### The MMIO accessor is one base-only instruction, and that is a hypervisor requirement
+
+`Mmio::read_u32`/`write_u32` do **not** use `read_volatile`/`write_volatile`;
+they funnel through module-level `mmio_read32`/`mmio_write32` primitives — a
+single `ldr`/`str` via inline asm, with the register offset folded into the
+address in Rust so the emitted instruction is base-register-only (`[xN]`, no
+displacement). Two things ride on that shape. The default memory-clobbering asm
+options are strictly stronger than `volatile`, so the compiler cannot coalesce or
+reorder the access. And a base-only load/store sets `ESR_EL1.ISV=1` (Instruction
+Syndrome Valid) on an MMIO abort, which is what lets a hypervisor (HVF on Apple
+silicon) decode the emulated access.
+
+A plain `read_volatile` is functionally correct but lets LLVM choose the
+addressing mode; once the `#[inline(always)]` driver helpers fold into a
+register-dense caller, LLVM emits pre-indexed writeback (`str w, [x, #imm]!`) or
+unscaled `stur`/`ldur` — both `ISV=0`, which trips HVF's `assert(isv)` and kills
+the guest. This was #890, and its signature was that *kernel* virtio worked under
+HVF while *userspace* tripped: the kernel's out-of-line accessors stayed base-only
+(ISV=1) by construction, the inlined userspace ones did not. The primitives ship
+for all four widths (`mmio_read8`/`16`/`32`/`64` plus the writes) and are the
+single ISV-safe MMIO accessor in the tree — every native virtio driver's local
+register helper delegates to them (PORTABILITY.md §8). The kernel-installed PTE
+carries the Device (nGnRnE) attribute so the hardware also does not reorder; all
+three layers are needed and none is redundant.
 
 ## Data structures
 
@@ -292,6 +340,13 @@ write errors by design, so a program whose output is optional does not fail
 spuriously. A program that must know whether its output landed has to use the
 write methods directly. This is documented at the macros and is easy to miss at
 a call site, since the macro looks exactly like the one it is modelled on.
+
+Since H-4d-1 the family also writes each statement in a **single** write:
+`write_fmt` formats the whole line — and `println!`/`eprintln!` its trailing
+newline — into one buffer before the one `SYS_PUTS`, rather than one syscall per
+format fragment. This is not a performance tidy: the console's writer role is
+claimed PER WRITE, so the fragment-per-syscall form let a concurrent console
+writer interleave mid-line (the torn-line the session gate's rc leg first hit).
 
 ## Performance
 
@@ -459,4 +514,10 @@ instant, and falling back to the syscall when the page is absent.
 
 ## Provenance
 
-[[chg-2026-08-03-libthyla-rs-sweep]].
+[[chg-2026-08-03-libthyla-rs-sweep]]. [[chg-2026-09-06-libthyla-rs-currency]]
+(a verified currency bump -- body already current, `updated:` field was stale).
+[[chg-2026-09-06-hardware-doc-absorb]] folds the ISV-safe MMIO accessor finding
+absorbed from docs/reference/89: `mmio_read32`/`write32` must be a single
+base-only instruction (ISV=1) so HVF can decode the emulated access -- a plain
+`read_volatile` can inline to a writeback/unscaled form (ISV=0) that trips HVF's
+`assert(isv)` (#890, the kernel-worked-userspace-tripped signature).

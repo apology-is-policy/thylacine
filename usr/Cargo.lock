@@ -643,6 +643,7 @@ dependencies = [
 name = "halcyon"
 version = "0.1.0"
 dependencies = [
+ "beacon",
  "libhalcyon",
  "libthyla-rs",
 ]

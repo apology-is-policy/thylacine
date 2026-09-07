@@ -375,6 +375,30 @@ pub extern "C" fn rs_main() -> i64 {
                 ps_raw_len
             ));
         }
+        // PL-5: `ls -l` at rich emits a `pre` code-fence box (HALCYON.md
+        // 14.13), not a table -- the box furniture is the pre payload, the
+        // name cell staying affordant as an `obj`. A single-file operand
+        // keeps the box tiny (header + one row + two borders), well under
+        // the pipe budget. Assert the pre + obj frames AND that stripping
+        // yields the box itself (the top-left corner + a vertical rule):
+        // ls -l's tiers differ by design (box at rich/cells, columns at a
+        // pipe), so this is NOT a rich-vs-plain strip identity.
+        match run_tool("ls", &["-l", "--beacon=always", "/version"], b"") {
+            Some((0, out)) => {
+                let stripped = beacon::wire::strip(&out);
+                if window_contains(&out, b"\x1b]1936;v1;pre")
+                    && window_contains(&out, b"\x1b]1936;v1;obj;type=path;ref=")
+                    && window_contains(&stripped, "\u{250c}".as_bytes())
+                    && window_contains(&stripped, "\u{2502}".as_bytes())
+                {
+                    c.pass("ls -l rich pre-box (PL-5)");
+                } else {
+                    c.fail("ls -l rich pre-box (PL-5)", "pre/obj frame or box payload missing");
+                }
+            }
+            Some((code, _)) => c.fail("ls -l rich pre-box (PL-5)", &format!("exit {}", code)),
+            None => c.fail("ls -l rich pre-box (PL-5)", "spawn/wait failed"),
+        }
         // Reset our env so the tail checks (and anything after) see none.
         let _ = write_env_beacon(b"none");
     } else {

@@ -248,7 +248,7 @@ are rare (mount-time); nothing here is hot.
   accepts the silent-failure shape at v1.0.
 - `n_uname` is forwarded but v1.0-inert on the trusted-local path — the
   live identity channel is SO_PEERCRED (A-3); the n_uname trust-stamp gate
-  is the recorded v1.x foreign-server seam (identity surface, swept there).
+  is the recorded v1.x foreign-server seam ([[seam-nuname-trust-stamp]]).
 
 ## Provenance
 

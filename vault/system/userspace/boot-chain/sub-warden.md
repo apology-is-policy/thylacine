@@ -15,7 +15,7 @@ abis: []
 design:
   - docs/MENAGERIE.md sections 3-6
 created: 2026-08-04
-updated: 2026-09-02
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -26,6 +26,14 @@ database of driver manifests, works out which slice of the machine each
 matched driver may touch, spawns it holding exactly that slice, waits to see
 whether it comes up, and restarts it a bounded number of times if it does
 not. Then it exits, and the drivers it left running outlive it.
+
+**It runs in every build shape, not as a probe (#230).** It entered the tree as a
+bind-loop proof and was gated inside init's `THYLA_BOOT_PROBES` ladder — but netd
+landed a day later and made it the thing that brings up the network, and nothing
+revisited the gate, so the lean production image booted with no drivers, no
+network and no compositor. A hardware broker is not a test. It now runs
+unconditionally, pre-pivot; the test half is a separately-gated slice of its bind
+database (Mechanism, below).
 
 It is the only place the two halves of the driver framework meet: one half
 says what is out there ([[sub-libdriver-discovery]]), the other says what a
@@ -65,14 +73,31 @@ resource is rebuilt from the broker's own trusted view, so a compromised
 helper can mis-identify a slot but cannot invent an address. The bus fabric
 comes from the kernel's mediated topology view and needs no such helper,
 because there is no untrusted reporter in that path: the kernel's own
-enumeration is the trusted view. Finally one synthetic device is appended,
-backed by no hardware, existing purely to exercise the restart ladder.
+enumeration is the trusted view. Finally one synthetic device is appended
+unconditionally, backed by no hardware; the manifest that binds it to exercise
+the restart ladder (`crash-probe`) is a fixture since #230, so on a production
+boot the device is discovered and simply matches nothing.
 
 **Bind.** Each device gets at most one manifest, the most specific match.
 Manifests marked *gather* do not bind per device; their matches are collected
 and folded into a single grant at the end, so the compositor gets one process
 holding all of its several devices rather than several processes each holding
 one.
+
+The bind database is **two sets since #230, and the split is a safety boundary.**
+`BUILTIN_MANIFESTS` is the PRODUCTION set — real hardware (the NIC driver,
+tapestryd, netd), bound in every build shape. `FIXTURE_MANIFESTS` — the 5c
+grant/narrowing proof (`menagerie-probe`) and the 5e-2 restart-ladder demo
+(`crash-probe`) — is bound ONLY when the caller passes `--with-fixtures` (joey
+does, from inside its probe ladder). The split is not cosmetic: `menagerie-probe`
+binds `arm,pl061`, a node QEMU-virt really provides, so leaving it in the
+production set would spawn a test fixture on a shipped boot. The two sets live in
+ONE binary rather than behind a cargo feature, deliberately — the production
+warden then runs the SAME code the gates exercise, differing only in the length
+of its database, where a compile-time split would ship an artifact no gate had
+run. Every run logs which database it used (`N manifests (M production, no
+fixtures | + fixtures)`), because a boot that silently bound a different device
+set than the reader assumes is the whole class of bug this arc closed.
 
 **Grant.** The manifest's declared needs are intersected with the device's
 actual resources. This is the step nothing else re-derives — see *Invariants
@@ -99,10 +124,12 @@ counter, a per-manifest gather bucket, and four integer tallies. Everything
 else is a local. The grant itself is the library's value type, constructed
 per bind and consumed twice.
 
-The manifest database is compiled in as source text and parsed at startup. A
-malformed built-in is treated as a build error rather than a runtime
-condition — the broker fails loudly and immediately, because a manifest it
-cannot parse is a driver it would silently never bind.
+The manifest database is compiled in as source text and parsed at startup — two
+sets since #230, the production `BUILTIN_MANIFESTS` and the opt-in
+`FIXTURE_MANIFESTS`, concatenated per run. A malformed built-in is treated as a
+build error rather than a runtime condition — the broker fails loudly and
+immediately, because a manifest it cannot parse is a driver it would silently
+never bind.
 
 ## Concurrency
 

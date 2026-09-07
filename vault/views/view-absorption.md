@@ -35,113 +35,113 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**46 absorbed · 113 live · 159 total.**
+**152 absorbed · 7 live · 159 total.**
 
 | document | state | absorbed into |
 |---|---|---|
-| 00-overview.md | live | — |
-| 01-boot.md | absorbed | [[abi-boot-banner]], [[inv-i16]], [[sub-kernel-boot-entry]], [[sub-kernel-boot-sequence]] |
+| 00-overview.md | absorbed | [[dashboard]], [[moc-boundary]], [[moc-kernel]], [[moc-stratum]], [[moc-substrate]], [[moc-userspace]], [[view-code-coverage]], [[view-invariants]], [[view-roadmap]], [[view-seams]] |
+| 01-boot.md | absorbed | [[abi-boot-banner]], [[inv-i16]], [[sub-kernel-boot-entry]], [[sub-kernel-boot-sequence]], [[sub-kernel-uart]] |
 | 02-dtb.md | absorbed | [[inv-i15]], [[sub-kernel-dtb]] |
-| 03-mmu.md | live | — |
-| 04-extinction.md | live | — |
+| 03-mmu.md | absorbed | [[sub-kernel-mmu]] |
+| 04-extinction.md | absorbed | [[abi-boot-banner]], [[sub-kernel-cons]], [[sub-kernel-halls]] |
 | 05-kaslr.md | absorbed | [[inv-i16]], [[sub-kernel-kaslr]] |
 | 06-allocator.md | absorbed | [[sub-kernel-mm-phys]] |
 | 07-slub.md | absorbed | [[sub-kernel-mm-slub]] |
-| 08-exception.md | live | — |
+| 08-exception.md | absorbed | [[sub-kernel-exception]], [[sub-kernel-halls]], [[sub-kernel-sched-smp]], [[sub-kernel-uaccess]] |
 | 09-test-harness.md | absorbed | [[abi-boot-banner]], [[sub-substrate-gates]], [[sub-substrate-interactive]] |
 | 10-gic.md | absorbed | [[inv-i15]], [[sub-kernel-gic]] |
-| 100-9p-identity-presentation.md | live | — |
-| 101-halls.md | live | — |
-| 102-legate.md | live | — |
-| 103-login.md | live | — |
+| 100-9p-identity-presentation.md | absorbed | [[inv-i22]], [[seam-nuname-trust-stamp]], [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-client]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-perm]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-net]], [[sub-stratum-server]], [[sub-stratum-session]], [[sub-substrate-build]] |
+| 101-halls.md | absorbed | [[sub-kernel-halls]] |
+| 102-legate.md | absorbed | [[sub-corvus]], [[sub-kernel-caps]], [[sub-kernel-perm]] |
+| 103-login.md | absorbed | [[abi-boot-banner]], [[sub-corvus]], [[sub-kernel-cons]], [[sub-kernel-devdev]], [[sub-kernel-joey]], [[sub-stratum-boot]], [[sub-stratum-session]] |
 | 104-stalk.md | absorbed | [[inv-i28]], [[sub-kernel-path]], [[sub-kernel-stalk]] |
-| 105-corvus-recovery.md | live | — |
+| 105-corvus-recovery.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus-mint]], [[sub-corvus]] |
 | 106-random.md | absorbed | [[inv-i16]], [[lock-random]], [[lock-rng-dev]], [[sub-kernel-content]] |
-| 107-loom.md | live | — |
-| 108-utopia-repl.md | live | — |
-| 109-devdev.md | live | — |
+| 107-loom.md | absorbed | [[abi-loom-ring]], [[sub-kernel-loom]], [[sub-kernel-ninep-client]], [[sub-kernel-ninep-transport]] |
+| 108-utopia-repl.md | absorbed | [[sub-utopia-eval]], [[sub-utopia-interactive]], [[sub-utopia-parser]] |
+| 109-devdev.md | absorbed | [[seam-80-pivot-orphan-mounts]], [[sub-kernel-cons]], [[sub-kernel-devdev]], [[sub-kernel-joey]], [[sub-kernel-territory]], [[sub-stratum-boot]] |
 | 11-timer.md | absorbed | [[inv-i15]], [[sub-kernel-timer]] |
-| 110-resource.md | live | — |
-| 111-cons.md | live | — |
-| 112-kaua.md | live | — |
-| 113-nora.md | live | — |
-| 114-netdev.md | live | — |
+| 110-resource.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-caps]], [[sub-kernel-proc]], [[sub-kernel-thread]] |
+| 111-cons.md | absorbed | [[abi-boot-banner]], [[sub-kernel-cons]], [[sub-kernel-devdev]] |
+| 112-kaua.md | absorbed | [[sub-kaua]] |
+| 113-nora.md | absorbed | [[sub-nora-engine]], [[sub-nora-host]], [[sub-nora-view]], [[sub-parley]] |
+| 114-netdev.md | absorbed | [[sub-netd-nic]], [[sub-netdev]], [[sub-substrate-machine]] |
 | 115-pci-claim.md | absorbed | [[inv-i5]], [[sub-kernel-hwcap]] |
 | 116-devhw.md | absorbed | [[inv-i15]], [[inv-i34]], [[inv-i5]], [[sub-kernel-discovery]] |
-| 117-allowance.md | live | — |
-| 118-libdriver.md | live | — |
-| 119-warden.md | live | — |
-| 12-hardening.md | live | — |
+| 117-allowance.md | absorbed | [[sub-kernel-allowance]], [[sub-kernel-death]], [[sub-kernel-exec]], [[sub-kernel-hwcap]], [[sub-kernel-proc]], [[sub-libdriver-grant]] |
+| 118-libdriver.md | absorbed | [[inv-i34]], [[sub-libdriver-discovery]], [[sub-libdriver-grant]], [[sub-menagerie-leaves]], [[sub-warden]] |
+| 119-warden.md | absorbed | [[inv-i34]], [[sub-libdriver-discovery]], [[sub-libdriver-grant]], [[sub-menagerie-leaves]], [[sub-warden]] |
+| 12-hardening.md | absorbed | [[abi-boot-banner]], [[sub-kernel-alternatives]], [[sub-kernel-boot-entry]], [[sub-kernel-boot-sequence]], [[sub-kernel-kaslr]], [[sub-kernel-mmu]] |
 | 120-devpci.md | absorbed | [[inv-i15]], [[inv-i34]], [[inv-i5]], [[sub-kernel-discovery]] |
 | 121-netd.md | absorbed | [[sub-netd-nic]], [[sub-netd-server]] |
-| 122-net.md | live | — |
-| 123-tls.md | live | — |
-| 124-net-utils.md | live | — |
-| 125-weft.md | live | — |
-| 126-revenant.md | live | — |
-| 127-overcommit.md | live | — |
+| 122-net.md | absorbed | [[sub-libthyla-rs]], [[sub-net-clients]], [[sub-netd-server]] |
+| 123-tls.md | absorbed | [[sub-net-clients]], [[sub-tls]] |
+| 124-net-utils.md | absorbed | [[sub-coreutils-presenters]], [[sub-libthyla-rs]], [[sub-net-clients]], [[sub-netd-server]] |
+| 125-weft.md | absorbed | [[abi-ninep-wire]], [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-loom]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-ninep-wire]], [[sub-kernel-proc]], [[sub-kernel-weft]], [[sub-libtapestry]], [[sub-netd-nic]], [[sub-netd-server]], [[sub-tapestryd]] |
+| 126-revenant.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-elf]], [[sub-kernel-exec]], [[sub-kernel-fault]], [[sub-kernel-image]], [[sub-kernel-mmu]] |
+| 127-overcommit.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-fault]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]] |
 | 128-devenv.md | absorbed | [[inv-i1]], [[inv-i32]], [[lock-env]], [[sub-kernel-content]] |
 | 129-fsbench.md | live | — |
-| 13-verification.md | live | — |
-| 130-positioned-io.md | live | — |
+| 13-verification.md | absorbed | [[abi-boot-banner]], [[sub-kernel-boot-sequence]], [[sub-substrate-gates]] |
+| 130-positioned-io.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]] |
 | 131-pounce.md | absorbed | [[adt-pounce-p5]], [[chg-2026-07-07-pounce]], [[sub-kernel-ninep-client]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-ninep-wire]], [[sub-kernel-stalk]] |
 | 132-larder.md | absorbed | [[sub-kernel-larder]], [[sub-kernel-ninep-dev9p]], [[view-closed-sub-kernel-larder]] |
-| 133-go-port.md | live | — |
-| 134-debug-fs.md | live | — |
-| 135-pty-kernel.md | live | — |
-| 136-ptyfs.md | live | — |
-| 137-gopls.md | live | — |
-| 138-gpud.md | live | — |
-| 139-tapestryd.md | live | — |
+| 133-go-port.md | absorbed | [[sub-kernel-loom]], [[sub-kernel-perm]], [[sub-kernel-syscall-dispatch]], [[sub-libthyla-rs]], [[sub-nora-host]], [[sub-stratum-boot]], [[sub-stratum-session]] |
+| 134-debug-fs.md | absorbed | [[sub-kernel-devproc]], [[sub-kernel-exception]], [[sub-kernel-halls]], [[sub-kernel-hwdebug]], [[sub-kernel-mmu]] |
+| 135-pty-kernel.md | absorbed | [[abi-note-names]], [[inv-i20]], [[sub-kernel-jobctl]], [[sub-kernel-notes]], [[sub-kernel-proc]], [[sub-kernel-pts]] |
+| 136-ptyfs.md | absorbed | [[sub-ptyfs]] |
+| 137-gopls.md | absorbed | [[abi-t-stat]], [[sub-kernel-caps]], [[sub-kernel-joey]], [[sub-kernel-ninep-dev9p]], [[sub-parley]], [[sub-stratum-session]] |
+| 138-gpud.md | absorbed | [[sub-substrate-gates]], [[sub-tapestryd]], [[sub-warden]] |
+| 139-tapestryd.md | absorbed | [[sub-kernel-weft]], [[sub-libdriver-grant]], [[sub-libtapestry]], [[sub-tapestryd]] |
 | 14-process-model.md | absorbed | [[inv-i24]], [[lock-proc-table]], [[spec-death-wake]], [[sub-kernel-death]], [[sub-kernel-proc]], [[sub-kernel-thread]], [[view-closed-sub-kernel-death]] |
-| 140-aurora.md | live | — |
-| 141-diorama.md | live | — |
-| 141-parley.md | live | — |
+| 140-aurora.md | absorbed | [[sub-aurora]], [[sub-kernel-cons]], [[sub-kernel-devdev]], [[sub-lib-vt]] |
+| 141-diorama.md | absorbed | [[sub-diorama]] |
+| 141-parley.md | absorbed | [[sub-nora-host]], [[sub-nora-view]], [[sub-parley]] |
 | 142-sdl-port.md | live | — |
 | 143-tyrquake.md | live | — |
-| 144-prowl.md | live | — |
-| 145-jit.md | live | — |
-| 145-vivarium.md | live | — |
-| 146-addrspace.md | live | — |
-| 147-execve.md | live | — |
-| 148-fork.md | live | — |
-| 149-warp.md | live | — |
+| 144-prowl.md | absorbed | [[sub-kaua]], [[sub-prowl]] |
+| 145-jit.md | absorbed | [[abi-caps]], [[inv-i12]], [[sub-corvus]], [[sub-kernel-burrow]], [[sub-kernel-caps]], [[sub-kernel-fault]], [[sub-kernel-mmu]], [[sub-libthyla-rs]] |
+| 145-vivarium.md | absorbed | [[sub-diorama]], [[sub-kernel-vivarium]], [[sub-viv]] |
+| 146-addrspace.md | absorbed | [[sub-kernel-addrspace]] |
+| 147-execve.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-asid]], [[sub-kernel-exec]], [[sub-kernel-handle]], [[sub-kernel-proc]], [[sub-kernel-sched]], [[sub-kernel-vivarium]] |
+| 148-fork.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-caps]], [[sub-kernel-exception]], [[sub-kernel-fault]], [[sub-kernel-handle]], [[sub-kernel-proc]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-thread]] |
+| 149-warp.md | absorbed | [[sub-kernel-burrow]], [[sub-kernel-hwcap]], [[sub-kernel-weft]], [[sub-tapestryd]] |
 | 15-scheduler.md | absorbed | [[seam-eevdf-math]], [[sub-kernel-rendez]], [[sub-kernel-sched-smp]], [[sub-kernel-sched]] |
 | 150-build-config.md | live | — |
-| 150-halcyond.md | live | — |
-| 150-vt.md | live | — |
-| 151-libhalcyon.md | live | — |
+| 150-halcyond.md | absorbed | [[sub-halcyond]] |
+| 150-vt.md | absorbed | [[sub-halcyond]], [[sub-kaua-term]], [[sub-lib-vt]] |
+| 151-libhalcyon.md | absorbed | [[sub-aurora]], [[sub-libhalcyon]], [[sub-libtapestry]], [[sub-tapestryd]] |
 | 152-dosbox.md | live | — |
-| 152-kaua-term.md | live | — |
+| 152-kaua-term.md | absorbed | [[sub-halcyond]], [[sub-kaua-term]], [[sub-lib-vt]], [[sub-ptyhold]], [[sub-utopia-interactive]] |
 | 153-nocturne.md | live | — |
 | 16-rendez.md | absorbed | [[lock-wait]], [[sub-kernel-rendez]] |
 | 17-smp-bringup.md | absorbed | [[seam-sparse-mpidr]], [[sub-kernel-sched-smp]] |
 | 18-territory.md | absorbed | [[inv-i1]], [[lock-territory-ns-lock]], [[spec-territory]], [[sub-kernel-territory]] |
-| 19-handles.md | live | — |
-| 20-burrow.md | live | — |
-| 21-elf.md | live | — |
-| 22-asid.md | live | — |
-| 23-direct-map.md | live | — |
-| 24-per-proc-pgtable.md | live | — |
-| 25-fault-dispatcher.md | live | — |
-| 26-vma.md | live | — |
-| 27-exec.md | live | — |
-| 28-syscall.md | live | — |
-| 29-joey.md | live | — |
-| 30-dev-spoor.md | live | — |
-| 31-trivial-devs.md | live | — |
-| 32-devproc.md | live | — |
-| 33-devctl.md | live | — |
+| 19-handles.md | absorbed | [[abi-handle-rights]], [[sub-kernel-caps]], [[sub-kernel-handle]] |
+| 20-burrow.md | absorbed | [[sub-kernel-burrow]], [[sub-kernel-handle]], [[sub-kernel-vma]] |
+| 21-elf.md | absorbed | [[sub-kernel-elf]] |
+| 22-asid.md | absorbed | [[sub-kernel-asid]], [[sub-kernel-proc]] |
+| 23-direct-map.md | absorbed | [[sub-kernel-mm-phys]], [[sub-kernel-mm-slub]], [[sub-kernel-mmu]] |
+| 24-per-proc-pgtable.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-asid]], [[sub-kernel-fault]], [[sub-kernel-mmu]], [[sub-kernel-sched-smp]] |
+| 25-fault-dispatcher.md | absorbed | [[sub-kernel-exception]], [[sub-kernel-fault]] |
+| 26-vma.md | absorbed | [[sub-kernel-vma]] |
+| 27-exec.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-elf]], [[sub-kernel-exec]], [[sub-kernel-fault]], [[sub-kernel-image]] |
+| 28-syscall.md | absorbed | [[sub-kernel-cons]], [[sub-kernel-proc]], [[sub-kernel-syscall-dispatch]] |
+| 29-joey.md | absorbed | [[sub-kernel-joey]], [[sub-stratum-boot]] |
+| 30-dev-spoor.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-path]], [[sub-kernel-spoor]] |
+| 31-trivial-devs.md | absorbed | [[sub-kernel-cons]], [[sub-kernel-content]], [[sub-kernel-dev]], [[sub-kernel-uart]] |
+| 32-devproc.md | absorbed | [[sub-kernel-devproc]] |
+| 33-devctl.md | absorbed | [[sub-kernel-cons]], [[sub-kernel-devctl]], [[sub-kernel-srvconn]] |
 | 34-devramfs.md | absorbed | [[inv-i28]], [[inv-i32]], [[inv-i33]], [[sub-kernel-content]] |
 | 35-virtio.md | absorbed | [[inv-i15]], [[inv-i34]], [[inv-i5]], [[sub-kernel-discovery]] |
 | 36-irqfwd.md | absorbed | [[inv-i9]], [[sub-kernel-irqfwd]] |
 | 37-virtio_pci.md | absorbed | [[inv-i15]], [[inv-i34]], [[inv-i5]], [[sub-kernel-discovery]] |
-| 38-userspace.md | live | — |
+| 38-userspace.md | absorbed | [[sub-kernel-syscall-abi]], [[sub-libthyla-rs]], [[sub-substrate-build]] |
 | 39-hw-handles.md | absorbed | [[inv-i5]], [[sub-kernel-hwcap]] |
-| 40-uaccess.md | live | — |
+| 40-uaccess.md | absorbed | [[sub-kernel-exception]], [[sub-kernel-uaccess]] |
 | 41-irq-bench.md | live | — |
-| 42-virtio-input.md | live | — |
-| 43-virtio-gpu.md | live | — |
+| 42-virtio-input.md | absorbed | [[sub-substrate-gates]], [[sub-virtio-probes]] |
+| 43-virtio-gpu.md | absorbed | [[sub-tapestryd]], [[sub-virtio-probes]] |
 | 44-9p-wire.md | absorbed | [[sub-kernel-ninep-wire]] |
 | 45-9p-session.md | absorbed | [[sub-kernel-ninep-session]] |
 | 46-9p-transport.md | absorbed | [[sub-kernel-ninep-transport]] |
@@ -151,51 +151,51 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 50-9p-spoor-transport.md | absorbed | [[sub-kernel-ninep-transport]] |
 | 51-pipe.md | absorbed | [[sub-kernel-pipe]] |
 | 52-sys-pipe.md | absorbed | [[sub-kernel-pipe]] |
-| 53-sys-rw.md | live | — |
-| 54-sys-fd-syscalls.md | live | — |
+| 53-sys-rw.md | absorbed | [[abi-handle-rights]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-uaccess]] |
+| 54-sys-fd-syscalls.md | absorbed | [[sub-kernel-handle]], [[sub-kernel-syscall-dispatch]] |
 | 55-sys-attach-9p.md | absorbed | [[sub-kernel-ninep-attach]] |
 | 56-sys-mount.md | absorbed | [[chg-2026-05-14-p5-mount-syscall]], [[sub-kernel-territory]] |
-| 57-attach-probe.md | live | — |
-| 58-corvus-syscalls.md | live | — |
-| 59-joey-from-ramfs.md | live | — |
-| 60-sys-spawn-wait.md | live | — |
-| 61-stratumd-stub.md | live | — |
-| 62-sys-spawn-with-fds.md | live | — |
-| 63-sys-spawn-with-caps.md | live | — |
-| 64-sys-spawn-full.md | live | — |
-| 65-corvus-skeleton.md | live | — |
-| 66-corvus-server.md | live | — |
-| 67-el1h-kernel.md | live | — |
-| 68-corvus-crypto.md | live | — |
-| 69-corvus-unwrap.md | live | — |
+| 57-attach-probe.md | absorbed | [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-transport]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]] |
+| 58-corvus-syscalls.md | absorbed | [[abi-caps]], [[sub-corvus-crypto]], [[sub-corvus]], [[sub-kernel-content]], [[sub-kernel-devproc]], [[sub-kernel-proc]] |
+| 59-joey-from-ramfs.md | absorbed | [[sub-kernel-joey]], [[sub-stratum-boot]] |
+| 60-sys-spawn-wait.md | absorbed | [[sub-kernel-elf]], [[sub-kernel-exec]], [[sub-kernel-proc]], [[sub-kernel-syscall-dispatch]] |
+| 61-stratumd-stub.md | absorbed | [[sub-kernel-dev]], [[sub-kernel-exec]], [[sub-kernel-joey]], [[sub-kernel-ninep-attach]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-pipe]], [[sub-kernel-spoor]], [[sub-kernel-stalk]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]], [[sub-pouch-process]] |
+| 62-sys-spawn-with-fds.md | absorbed | [[sub-kernel-exec]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-process]] |
+| 63-sys-spawn-with-caps.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-exec]], [[sub-kernel-syscall-dispatch]] |
+| 64-sys-spawn-full.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-exec]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-process]] |
+| 65-corvus-skeleton.md | absorbed | [[sub-corvus]] |
+| 66-corvus-server.md | absorbed | [[sub-corvus]] |
+| 67-el1h-kernel.md | absorbed | [[inv-i21]], [[sub-kernel-boot-entry]], [[sub-kernel-exception]], [[sub-kernel-mmu]], [[sub-kernel-sched-smp]], [[sub-kernel-thread]] |
+| 68-corvus-crypto.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus]] |
+| 69-corvus-unwrap.md | absorbed | [[sub-corvus-crypto]], [[sub-corvus]] |
 | 70-devsrv.md | absorbed | [[sub-kernel-devsrv]], [[view-closed-sub-kernel-devsrv]] |
 | 71-srvconn.md | absorbed | [[sub-kernel-srvconn]], [[view-closed-sub-kernel-srvconn]] |
 | 72-poll.md | absorbed | [[sub-kernel-poll]] |
-| 73-sys-spawn-with-perms.md | live | — |
-| 74-corvus-9p-server.md | live | — |
-| 75-devcap.md | live | — |
-| 76-admin-elevate.md | live | — |
-| 77-sys-chroot.md | live | — |
+| 73-sys-spawn-with-perms.md | absorbed | [[sub-halcyond]], [[sub-kernel-devsrv]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]], [[sub-netd-nic]], [[sub-ptyfs]], [[sub-stratum-boot]], [[sub-stratum-session]], [[sub-viv]] |
+| 74-corvus-9p-server.md | absorbed | [[sub-corvus]], [[sub-kernel-srvconn]] |
+| 75-devcap.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-perm]] |
+| 76-admin-elevate.md | absorbed | [[sub-corvus]], [[sub-kernel-caps]] |
+| 77-sys-chroot.md | absorbed | [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]] |
 | 78-pouch.md | absorbed | [[moc-pouch-seam]], [[seam-pouch-select-fd-bound]], [[sub-pouch-fs]], [[sub-pouch-net]], [[sub-pouch-process]], [[sub-pouch-seam]], [[sub-pouch-signal]], [[sub-pouch-thread]], [[sub-pouch-tty]] |
-| 79-sys-burrow.md | live | — |
+| 79-sys-burrow.md | absorbed | [[sub-kernel-addrspace]], [[sub-kernel-burrow]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-vma]], [[sub-pouch-process]] |
 | 80-torpor.md | absorbed | [[sub-kernel-torpor]] |
-| 81-sys-thread.md | live | — |
+| 81-sys-thread.md | absorbed | [[sub-kernel-death]], [[sub-kernel-sched-smp]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-thread]], [[sub-kernel-torpor]], [[sub-kernel-uaccess]] |
 | 82-pouch-pthread.md | absorbed | [[sub-pouch-thread]] |
 | 83-pouch-signals.md | absorbed | [[sub-pouch-signal]] |
-| 84-pouch-libsodium.md | live | — |
-| 85-pouch-stratumd-build.md | live | — |
-| 86-pouch-stratumd-boot.md | live | — |
+| 84-pouch-libsodium.md | absorbed | [[sub-pouch-seam]], [[sub-substrate-build]] |
+| 85-pouch-stratumd-build.md | absorbed | [[sub-pouch-net]], [[sub-pouch-seam]], [[sub-stratum-boot]], [[sub-stratum-session]], [[sub-substrate-build]] |
+| 86-pouch-stratumd-boot.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-content]], [[sub-kernel-exec]], [[sub-kernel-joey]], [[sub-kernel-ninep-client]], [[sub-kernel-srvconn]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]], [[sub-pouch-process]], [[sub-stratum-bdev]], [[sub-stratum-boot]] |
 | 87-pouch-fstat-lseek.md | absorbed | [[sub-pouch-fs]] |
-| 88-ninep.md | live | — |
-| 89-hardware.md | live | — |
-| 90-u-test.md | live | — |
-| 91-utopia.md | live | — |
-| 92-utopia-line-editor.md | live | — |
-| 93-utopia-parser.md | live | — |
-| 94-utopia-eval.md | live | — |
-| 95-identity.md | live | — |
-| 96-fs-mutation.md | live | — |
-| 97-corvus-identity-db.md | live | — |
-| 98-capability-storage.md | live | — |
-| 99-fs-permission.md | live | — |
+| 88-ninep.md | absorbed | [[sub-libthyla-rs]] |
+| 89-hardware.md | absorbed | [[moc-userspace-hardware]], [[sub-kernel-burrow]], [[sub-kernel-handle]], [[sub-libthyla-rs]], [[sub-netd-nic]] |
+| 90-u-test.md | absorbed | [[sub-kernel-syscall-abi]] |
+| 91-utopia.md | absorbed | [[sub-utopia-eval]], [[sub-utopia-interactive]], [[sub-utopia-parser]] |
+| 92-utopia-line-editor.md | absorbed | [[sub-utopia-interactive]] |
+| 93-utopia-parser.md | absorbed | [[sub-utopia-parser]] |
+| 94-utopia-eval.md | absorbed | [[sub-utopia-eval]], [[sub-utopia-interactive]] |
+| 95-identity.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-ninep-attach]], [[sub-kernel-perm]], [[sub-kernel-proc]], [[sub-kernel-syscall-abi]] |
+| 96-fs-mutation.md | absorbed | [[sub-kernel-ninep-dev9p]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-fs]] |
+| 97-corvus-identity-db.md | absorbed | [[sub-corvus]] |
+| 98-capability-storage.md | absorbed | [[inv-i23]], [[sub-corvus]], [[sub-kernel-ninep-attach]], [[sub-kernel-spoor]], [[sub-kernel-stalk]], [[sub-kernel-syscall-dispatch]] |
+| 99-fs-permission.md | absorbed | [[abi-t-stat]], [[sub-kernel-content]], [[sub-kernel-ninep-dev9p]], [[sub-kernel-perm]], [[sub-kernel-spoor]], [[sub-kernel-stalk]], [[sub-kernel-syscall-abi]], [[sub-kernel-syscall-dispatch]] |
 <!-- generated:end -->

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-08-16
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -63,9 +63,24 @@ writable fails the build rather than the boot.
 `make_user_pte_l3` derives user permissions from a VMA's prot: writable →
 read-write for both levels, otherwise read-only; executable → user-execute
 allowed, otherwise not. The kernel-execute bit is set unconditionally, because
-the kernel never executes user pages. It **extincts** on execute-plus-device,
-which is architecturally meaningless — defence in depth beneath the syscall
-layer that already rejects it.
+the kernel never executes user pages. The cacheability attribute is a MAIR index
+the caller passes directly — `NORMAL_WB` for cacheable RAM (the anon/code/DMA
+default), `DEVICE` (nGnRnE) for MMIO registers, and, since V-2, `NORMAL_NC`
+(write-combining) for host-visible shared memory. Two encoder-level guards sit
+beneath the syscall layer as defence in depth: the index must name a defined
+MAIR byte, so an out-of-range value **extincts** rather than selecting an
+unimplemented attribute or overflowing the field; and — the W^X half — an
+executable mapping **extincts** unless its index is `NORMAL_WB`. That last guard
+was widened at V-2 from *reject execute-on-device* to *confine execute to
+cacheable RAM*, which also rejects execute on the new write-combining index: an
+executable page is only ever legitimate on Normal-WB, so this is [[inv-i12]] one
+level below the VMA gate that already forbids W^X.
+
+The install entry keeps its original boolean device-flag form as a thin wrapper
+over the index-aware `mmu_install_user_pte_attr`, so the boolean→index mapping
+lives in exactly one place — a bare `false` and `MAIR_IDX_DEVICE` share the bit
+pattern 0, and letting every caller supply a raw index would invite exactly that
+fat-finger.
 
 **Two deliberate aliases**, and they are the same idea used twice:
 
@@ -189,6 +204,30 @@ threaded through these functions is vestigial and documented as such.
 [[inv-i39]] — cross-Proc read and write, confined to the target's own tables,
 never faulting anything in, and refusing to write a read-only page.
 
+**I-42** — the JIT's outward generalization of the self-modification alias
+(the [[sub-kernel-burrow]] `BURROW_TYPE_CODE` dual mapping), and its two I-cache
+obligations both ride this file's primitive, `arch_icache_sync_range`. *At
+create*: a code Burrow's backing is a recycled anon page, and zeroing it — which
+makes an un-emitted page decode as `UDF #0` rather than run residue — does **not**
+touch the instruction cache, and nothing on the free path does either (unmap
+broadcasts a TLBI, a *TLB* operation; `free_pages` performs no cache maintenance).
+So a fresh code region could carry a previous region's I-cache lines and execute
+bytes the Proc never emitted; `sys_jit_create_region` therefore invalidates the
+I-cache over the fresh pages before any RX PTE can name them (the CL-7k-3 F1
+finding — the code Burrow had been the sole executable backing in the tree that
+skipped this, where `exec.c`'s eager paths and `fault.c`'s FILE demand-page arm
+already did it). *At publish* (`SYS_ICACHE_SYNC`): the maintenance runs on the
+**direct map**, never the user VA — `dc cvau`/`ic ivau` can take translation
+faults and a user VA is exactly what a caller can arrange to be unmapped, and
+`IC IVAU` is architecturally PIPT-exact across every alias of the PA. The cache
+half is genuinely cross-PE (`IC IVAU` is Inner-Shareable *broadcast*); the
+trailing `ISB` is **not** — it retires prefetch on the *calling* PE only, so a
+peer PE that already executed at those exec-alias addresses must take a
+context-synchronization event (any syscall or exception return is one) before
+branching in. Nothing at v1.0 drives the exposed spin-wait case, but an
+emit-on-one-thread / execute-on-a-worker mapper (ORC's `DualMapMemoryMapper`)
+must honor the contract or make the syscall broadcast an ISB.
+
 ## Error paths
 
 Argument validation returns `-1` without touching anything: null root,
@@ -197,10 +236,10 @@ found mid-walk. Allocation failure during table growth returns `-1` and the
 fault becomes a per-Proc termination.
 
 The extinctions are for conditions that mean an assumption has already failed:
-a translation fault while patching text, execute-on-device at the encoder,
-vmalloc exhaustion, and the allocation failure during boot page-mapping — that
-last one extincts because the invariant it establishes cannot be established
-later.
+a translation fault while patching text, an executable mapping on a non-cacheable
+index or an out-of-range MAIR index at the encoder, vmalloc exhaustion, and the
+allocation failure during boot page-mapping — that last one extincts because the
+invariant it establishes cannot be established later.
 
 Unmapping is idempotent by design: an already-clear entry, or a missing
 sub-table, both return success. There is nothing to undo.
@@ -277,6 +316,13 @@ alias trick.
 Re-read 2026-08-16: the real-silicon bring-up corrected a table-walk coherence
 claim that named a maintenance operation the tree does not perform.
 [[chg-2026-08-16-mmu-fictional-clean]].
+
+Re-read 2026-09-06 for Warp-6 V-2 (`7973f8dc`): `make_user_pte_l3` took a MAIR
+index in place of the device bool (adding `NORMAL_NC` write-combining for
+host-visible shared memory), its W^X extinction widened from execute-on-device
+to execute-unless-`NORMAL_WB`, a MAIR-range extinction was added, and the bool
+install API became a wrapper over the index-aware entry.
+[[chg-2026-09-06-mmu-warp-v2-attr-index]].
 
 ## Tests
 

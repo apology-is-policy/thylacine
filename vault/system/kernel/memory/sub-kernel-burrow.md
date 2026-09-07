@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32]
 validated-by: [spec-burrow, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-08-24
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -50,8 +50,20 @@ whether *this* unmap was the drop that freed the pages. It exists because no
 caller can compute that beforehand — the Burrow's type does not say it, and a
 handle count sampled before the drop answers a different question — so the
 operation has to report its own effect. Resource accounting is its only caller.
+`burrow_map_fixed` / `burrow_map_fixed_in` place a mapping at a caller-chosen
+address (the MAP_FIXED primitive [[sub-kernel-vma]] splits around).
 `burrow_share_into(dst, v, vaddr, prot)` is the cross-Proc form.
 `burrow_decommit` releases resident pages of a lazy region without unmapping it.
+
+**The deferred-free pair** — `burrow_release_mapping_deferred` and
+`burrow_free_deferred` — exists because a FILE-backed Burrow's free reaches
+`spoor_clunk`, which may **sleep**, while every VMA mutator holds `as->lock`, a
+spinlock. `burrow_release_mapping_deferred` drops the mapping ref and settles the
+I-32 uncharge under the lock but does **not** free; it hands the caller the
+Burrow that still owes its physical free, collected on a `deferred_free_next`
+stack and passed to `burrow_free_deferred` after the unlock. The full mechanism —
+the `out_free` out-parameter every teardown path must thread and must never drop
+(a NULL `out_free` on the exact-cover arm would leak) — lives on [[sub-kernel-vma]].
 
 **Charge attribution** is three more calls — `burrow_charge_record` /
 `burrow_charge_claim` / `burrow_charge_restore` — plus
@@ -195,9 +207,11 @@ an enumeration of shapes.
 `burrow_share_into` makes one Burrow reachable from **two** Procs — the first
 path in the tree that does. No handle crosses: the destination gets only a
 mapping, and the capability is holding the namespace-gated fid that motivated
-the share. The dual refcount is what makes it safe, now spanning Procs: the
-mapping ref taken for the destination keeps the pages alive independently of
-whatever the source does with its own refs.
+the share. It maps the **whole** Burrow — the signature carries no length,
+because a share is always whole-region (`length = size`). The dual refcount is
+what makes it safe, now spanning Procs: the mapping ref taken for the
+destination keeps the pages alive independently of whatever the source does with
+its own refs.
 
 Its preconditions are the caller's to satisfy and are not checked: hold the
 destination's address-space lock, and guarantee the Burrow stays live across the
@@ -418,3 +432,11 @@ the Loom-side claim fails only the foreign-charge leg, undoing the `shared_out`
 arm fails only the payer-settles legs, and neither masks the other. Two fixes,
 two independently-failing tests, which is the bar a single test covering both
 would have quietly missed.
+
+[[chg-2026-09-06-burrow-borrowed]] re-verified this after a same-day-tie stale
+flag. The only burrow change since the 2026-08-24 update is `3de39ad0`
+(V-3b-1c-2b round-3, 16:29 the same day) — a COMMENT-only refinement of
+`burrow_total_refs`'s rationale from round-2's "IRQ-preemptible" to the true
+"SMP cross-CPU" (masking cannot serialize two CPUs; only `v->lock` can), and this
+dossier's prose already carries the SMP reasoning ("a peer CPU mutating one count
+between them"). The code is unchanged. Borrowed — nothing owed.

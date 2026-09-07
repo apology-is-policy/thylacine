@@ -503,6 +503,53 @@ It is a WARN in `lint`, never a FAIL — staleness is a property of the
 world moving rather than of the commit in hand, and a gate that refused
 the merge commit *recording* the fact would be switched off.
 
+`quaestor dossier-gate` is the **code→dossier reminder**, and the mirror
+image of the audit:hard advisory in `lint --staged` (check 3 below): there a
+staged *chg* that touches an `audit: hard` dossier warns when the dossier is
+not co-staged; here staged *code* owned by a dossier reminds you the dossier
+may be owed an update. It is **tiered** (operator-ratified 2026-09-06): a
+staged source file (`kernel|arch|mm|usr/…​.{c,h,S,rs}`, plus the `.c`/`.h`
+twin — editing either half touches the one surface the dossier describes)
+owned by an `audit: hard` `sub` dossier **blocks** the commit; any other
+owner **warns**. The one escape is a `No-dossier-change: <why>` git trailer,
+with a non-empty reason required — a bare key is a silent off-switch, the
+opposite of a reliable reminder. The same field on a staged chg is honoured
+too, so the vault track reaches the escape identically.
+
+It runs from a `commit-msg` hook, not `pre-commit`, and the placement is
+load-bearing. The escape that serves every track is the trailer, and only
+the commit message carries it — the code tracks (main, aux) write no vault
+chg notes and, per the cutover rule in `CLAUDE.md`, ring the vault for owned
+prose rather than co-staging it in a kernel commit, so a chg-field-only
+escape would leave them blocked with no clean way through. `pre-commit` runs
+before any message exists; only `commit-msg` sees it. The hook **fails open**
+on every infra shortfall — the opposite of `lint`'s fail-closed — because a
+reminder that blocked on infra would be worse than a missed one, and
+`pre-commit` is the authoritative infra gate (it runs first and refuses an empty
+registry or a broken build). Three fail-open cases are load-bearing, and two of
+them were learned by getting them wrong. (1) An empty registry: `dossier-gate`
+returns clean. (2) A **behind-main worktree** whose checked-out quaestor predates the
+feature: the hook builds quaestor from the *committing worktree's* source, and an
+older source has no `dossier-gate` subcommand — it hits quaestor's usage arm and
+exits 2, which if `exec`'d would BRICK the commit (fail-*closed*, the exact
+opposite of intent). So the hook no-ops when the worktree lacks
+`vault/meta/quaestor/dossier_gate.go` (the feature's own source, checked before
+any `go` run so a behind worktree pays nothing), with an `exit 2` tolerance as
+defense-in-depth for a half-merged tree. The gate activates for a worktree only
+once it carries the feature — correct, since a worktree is gated by its own
+tooling version. (3) A **merge in progress** (`MERGE_HEAD` present and
+resolving): a merge integrates already-committed, already-gated commits — it is
+not a new authored change to the code it brings in — so `dossierGate` returns
+clean. Without it, every merge that pulls in `audit: hard` code (a code track
+merging `origin/main`, say) would block, and a track that cannot `--no-verify`
+(aux is classifier-blocked from it) would be stuck with no clean way through —
+the R6 merge-blindspot class reappearing in the reminder. The skip lives in
+`dossier_gate.go` (`mergeInProgress`, matching `git rev-parse -q --verify
+MERGE_HEAD`) so it is tested and survives a hook reinstall; the `commit-msg`
+hook carries the same check so it never even spawns `go run` on a merge.
+`--no-verify` skips both hooks and is the sanctioned emergency
+bypass; the gate does not try to defeat it.
+
 `quaestor lint` checks:
 
 1. `id` == filename; `type` valid; required fields present per §5; enums valid.
@@ -517,6 +564,9 @@ the merge commit *recording* the fact would be switched off.
 7. View bodies match their queries (re-render and diff — a stale committed
    view fails the commit).
 8. Citation style: `file:line` patterns outside `record/` are flagged (R4).
+9. Code→dossier reminder (`dossier-gate`, the `commit-msg` hook): staged source
+   owned by an `audit: hard` dossier fails unless the dossier is co-staged or a
+   `No-dossier-change: <why>` trailer is present; other owners warn (above).
 
 Notes live under `vault/` excluding `vault/meta/` (prose + machinery) and
 `vault/journal/` — the operator's Obsidian scratch (daily notes, canvases,

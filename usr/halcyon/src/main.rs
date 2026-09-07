@@ -44,8 +44,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use halcyon::{
-    argv_of, device_layout_path, owner_is_env, parse_cmd, prog_candidates, session_dir_chain,
-    session_layout_path, Cmd, CmdError,
+    argv_of, device_layout_path, list_rows, name_is_valid, owner_is_env, parse_cmd,
+    prog_candidates, session_dir_chain, session_layout_path, session_layouts_dir, Cmd, CmdError,
+    DEVICE_LAYOUTS_DIR, SAVE_TMP_SUFFIX,
 };
 use libhalcyon::layout::{self, LayoutMode};
 use libhalcyon::skeleton::{self, Op};
@@ -55,7 +56,7 @@ use libthyla_rs::io::{self, Write};
 use libthyla_rs::process::Command;
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{
-    env, eprintln, identity, println, t_close, t_fsync, t_open, t_read, t_write, T_OREAD, T_ORDWR,
+    env, eprintln, identity, println, t_close, t_fsync, t_open, t_read, t_write, T_ORDWR, T_OREAD,
     T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -68,6 +69,9 @@ const TAG_READ_CAP: usize = layout::MAX_TAG_LEN + 8;
 /// The claim token's /env name (libtapestry reads it back on the child's
 /// first open) and its path.
 const CLAIM_ENV_PATH: &str = "/env/TAPESTRY_CLAIM";
+/// H-4d: the per-user session compositor's mark in the session's /env; while
+/// it is set a restore only TAGS its leaves (the compositor hosts them).
+const SESSION_ENV: &str = "HALCYON_SESSION";
 /// The placeholder surface: the smallest weave the compositor takes; it is
 /// never presented and lives only while the skeleton is built.
 const PLACEHOLDER_W: u32 = 16;
@@ -91,6 +95,22 @@ usage: halcyon layout save <name>
   Rebuild the saved layout beside the console: grow its panes, then spawn
   each pane's command line as you, placed into its pane. Reads the session
   tier first, then /lib/halcyon/layouts/<name>.
+
+  halcyon layout list
+  Every saved layout: yours ($HOME/lib/halcyon/layouts, the session tier)
+  and the image's (/lib/halcyon/layouts, the device tier). On a rich
+  console each name is a layout object whose menu offers restore / save /
+  delete.
+
+  halcyon layout delete <name>
+  Remove a layout from the session tier (the device tier is read-only).
+
+  At session start the per-user compositor runs $HOME/lib/halcyon.rc (a ut
+  script) if it exists, else restores the device layout named `default`.
+
+  halcyon welcome
+  The first-launch tour (the device `default` layout's left tile): a short
+  live transcript of objects to try, then your shell in the same tile.
 
   halcyon --help
 ";
@@ -119,6 +139,9 @@ fn run() -> i64 {
         }
         Ok(Cmd::LayoutSave { name }) => layout_save(name),
         Ok(Cmd::LayoutRestore { name }) => layout_restore(name),
+        Ok(Cmd::LayoutList) => layout_list(),
+        Ok(Cmd::LayoutDelete { name }) => layout_delete(name),
+        Ok(Cmd::Welcome) => welcome(),
         Err(e) => {
             report_cmd_error(e);
             2
@@ -263,7 +286,7 @@ fn mkdir_p(home: &str) -> bool {
 /// post-rename barrier rolls back to the old file, never a torn one.
 fn durable_write(path: &str, bytes: &[u8]) -> bool {
     let mut tmp = String::from(path);
-    tmp.push_str(".tmp");
+    tmp.push_str(SAVE_TMP_SUFFIX);
     let mut f = match File::create(&tmp) {
         Ok(f) => f,
         Err(_) => return false,
@@ -388,9 +411,39 @@ enum DumpRow {
 struct Dump {
     /// (depth, row), pre-order as printed.
     rows: Vec<(usize, DumpRow)>,
+    /// The focused leaf, from the header (`epoch N focused M`).
+    focused: Option<u32>,
 }
 
 impl Dump {
+    /// The mode of `id`'s parent container and that container's children in
+    /// order (None: `id` is the root, or unknown).
+    fn siblings_of(&self, id: u32) -> Option<(LayoutMode, Vec<u32>)> {
+        let at = self.rows.iter().position(|(_, r)| match r {
+            DumpRow::Leaf { id: i, .. } | DumpRow::Cont { id: i, .. } => *i == id,
+        })?;
+        let depth = self.rows[at].0;
+        if depth == 0 {
+            return None;
+        }
+        let pat = self.rows[..at]
+            .iter()
+            .rposition(|(d, r)| *d + 1 == depth && matches!(r, DumpRow::Cont { .. }))?;
+        let mode = match self.rows[pat].1 {
+            DumpRow::Cont { mode, .. } => mode,
+            DumpRow::Leaf { .. } => return None,
+        };
+        let kids = self.rows[pat + 1..]
+            .iter()
+            .take_while(|(d, _)| *d > depth - 1)
+            .filter(|(d, _)| *d == depth)
+            .map(|(_, r)| match r {
+                DumpRow::Leaf { id, .. } | DumpRow::Cont { id, .. } => *id,
+            })
+            .collect();
+        Some((mode, kids))
+    }
+
     fn leaf_ids(&self) -> Vec<u32> {
         self.rows
             .iter()
@@ -446,9 +499,15 @@ impl Dump {
 /// aborts rather than guess at the tree).
 fn parse_dump(text: &str) -> Option<Dump> {
     let mut lines = text.split('\n');
-    if !lines.next()?.starts_with("epoch ") {
+    let header = lines.next()?;
+    if !header.starts_with("epoch ") {
         return None;
     }
+    let mut hit = header.split_ascii_whitespace();
+    let focused = hit
+        .find(|t| *t == "focused")
+        .and_then(|_| hit.next())
+        .and_then(|t| t.parse::<u32>().ok());
     let mut rows: Vec<(usize, DumpRow)> = Vec::new();
     for raw in lines {
         let line = raw.trim_end_matches('\r');
@@ -480,7 +539,7 @@ fn parse_dump(text: &str) -> Option<Dump> {
         };
         rows.push((depth, row));
     }
-    Some(Dump { rows })
+    Some(Dump { rows, focused })
 }
 
 /// The ids in `after` that are not in `before`.
@@ -510,7 +569,10 @@ fn read_layout_file(home: &str, name: &str) -> Option<(String, String)> {
             }
         }
     }
-    eprintln!("halcyon: no layout named `{}` (session or device tier)", name);
+    eprintln!(
+        "halcyon: no layout named `{}` (session or device tier)",
+        name
+    );
     None
 }
 
@@ -596,10 +658,23 @@ fn layout_restore(name: &str) -> i64 {
     let tap = match Tap::open() {
         Some(t) => t,
         None => {
-            eprintln!("halcyon: {} unreachable -- is the compositor up?", TAPESTRY_SRV);
+            eprintln!(
+                "halcyon: {} unreachable -- is the compositor up?",
+                TAPESTRY_SRV
+            );
             return 1;
         }
     };
+    // H-4d: under the per-user session compositor (the mark it seeds into
+    // the session's /env) the tool arranges + TAGS the leaves and the
+    // compositor hosts each tag in a terminal tile once this conn is gone
+    // (its split reservations lift at retire); on the console path the tool
+    // spawns the tags itself, placed by claim.
+    let session_hosts = env::var(SESSION_ENV).is_some();
+    // The anchor: the tile focused before the placeholder splits beside it
+    // -- the environment's own (the console, or the session's shell), whose
+    // saved position the built part is arranged around.
+    let anchor_tile = tap.dump().and_then(|d| d.focused);
 
     // 1. The placeholder lands beside the focused tile (the console): its
     //    leaf is the one tile this session may split.
@@ -722,10 +797,21 @@ fn layout_restore(name: &str) -> i64 {
     //    empty and this session's (stamped at each split).
     drop(ph);
 
+    // 4b. The saved tree put the environment's tile LAST: move the anchor
+    //     past what was built (the welcome's tour-left, shell-right shape).
+    if layout::anchor_last(&saved) {
+        if let Some(f) = anchor_tile {
+            place_anchor_last(&tap, f);
+        }
+    }
+
     // 5. Placement: per tagged leaf, mint its claim, name it, seed the token
     //    into our /env (each spawn deep-copies the env as it stands), spawn.
+    //    Under a session compositor: name it and stop -- the compositor hosts
+    //    the tag in a terminal tile the moment this process exits.
     let mut spawned: Vec<(u32, i32, String)> = Vec::new();
     let mut failed: usize = 0;
+    let mut tagged: usize = 0;
     for pl in &plan.leaves {
         if pl.tag.trim().is_empty() {
             continue;
@@ -737,6 +823,19 @@ fn layout_restore(name: &str) -> i64 {
                 continue;
             }
         };
+        if session_hosts {
+            if tap.write(&format!("pane/{}/tag", id), &pl.tag) < 0 {
+                eprintln!("halcyon: pane {}: tag write refused", id);
+                failed += 1;
+                continue;
+            }
+            println!(
+                "halcyon: pane {}: {} (the session compositor hosts it)",
+                id, pl.tag
+            );
+            tagged += 1;
+            continue;
+        }
         let token = match tap.read(&format!("pane/{}/claim", id)) {
             Some(s) if s.trim().len() == 32 => match u128::from_str_radix(s.trim(), 16) {
                 Ok(t) => t,
@@ -794,8 +893,23 @@ fn layout_restore(name: &str) -> i64 {
             last_focus = Some(id);
         }
     }
+    // The saved focus on the environment's tile: hand it back to the anchor
+    // (the welcome leaves the user at the shell prompt, not on the tour).
+    if layout::active_is_env(&saved) {
+        if let Some(f) = anchor_tile {
+            if tap.verb(&format!("focus {}", f)) >= 0 {
+                last_focus = Some(f);
+            }
+        }
+    }
     if let Some(id) = last_focus {
         println!("halcyon: focus -> pane {}", id);
+    }
+    if session_hosts {
+        println!(
+            "halcyon: tagged {} pane(s) for the session compositor",
+            tagged
+        );
     }
     let n_landed = landed.iter().filter(|l| **l).count();
     for ((id, pid, tag), l) in spawned.iter().zip(landed.iter()) {
@@ -818,6 +932,51 @@ fn layout_restore(name: &str) -> i64 {
         0
     } else {
         1
+    }
+}
+
+/// H-4d: move the anchor tile `f` past every sibling the build put after
+/// it, one `move` per step, each verified against the dump. The environment's
+/// tile on the console path is not ours to move (E_PERM): said once, the
+/// built part then stays after it, as before.
+fn place_anchor_last(tap: &Tap, f: u32) {
+    for _ in 0..layout::MAX_NODES {
+        let dump = match tap.dump() {
+            Some(d) => d,
+            None => return,
+        };
+        let (mode, kids) = match dump.siblings_of(f) {
+            Some(x) => x,
+            None => return,
+        };
+        let at = match kids.iter().position(|&k| k == f) {
+            Some(i) => i,
+            None => return,
+        };
+        if at + 1 >= kids.len() {
+            return;
+        }
+        let dir = match mode {
+            LayoutMode::SplitH => "right",
+            LayoutMode::SplitV => "down",
+            _ => return, // a tab/stack order is not a placement
+        };
+        let rc = tap.verb(&format!("move {} {}", f, dir));
+        if rc < 0 {
+            println!(
+                "halcyon: the environment's tile keeps its place ({}: not ours to move)",
+                rc
+            );
+            return;
+        }
+        let after = tap
+            .dump()
+            .and_then(|d| d.siblings_of(f))
+            .and_then(|(_, k)| k.iter().position(|&x| x == f));
+        if after != Some(at + 1) {
+            eprintln!("halcyon: anchor move diverged at pane {}", f);
+            return;
+        }
     }
 }
 
@@ -870,5 +1029,247 @@ fn wait_landed(tap: &Tap, spawned: &[(u32, i32, String)]) -> Vec<bool> {
         }
         let _ = sleep(Duration::from_millis(LAND_POLL_MS));
         waited += LAND_POLL_MS;
+    }
+}
+
+// =============================================================================
+// list + delete (H-4c: named-layout management)
+// =============================================================================
+
+/// The names in one layouts directory (a missing or unreadable directory is
+/// an empty tier, not an error: a fresh session has no session tier yet, and
+/// an image may ship no device tier). Only valid layout names pass -- a
+/// save's `.tmp` residue and stray dotfiles are dropped.
+fn dir_names(dir: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let Ok(rd) = fs::read_dir(dir) else {
+        return names;
+    };
+    for ent in rd.flatten() {
+        if name_is_valid(ent.file_name()) {
+            names.push(ent.into_file_name());
+        }
+    }
+    names
+}
+
+/// The Beacon emission gate a native tool composes (BEACON.md 12.4): the
+/// renderer's advertised tier (`$BEACON`), the Dev class of stdout (frames go
+/// only onto the interactive console under Auto), and no flag here.
+fn stdout_is_rich() -> bool {
+    let env_tier = env::var("BEACON")
+        .and_then(|v| beacon::Tier::parse(&v))
+        .unwrap_or(beacon::Tier::None);
+    beacon::effective_tier(
+        env_tier,
+        libthyla_rs::fd_devclass(1),
+        beacon::BeaconMode::Auto,
+    ) == beacon::Tier::Rich
+}
+
+/// A `beacon::sink::Out` straight onto fd 1 (the orphan rule keeps this
+/// adapter in the bin).
+struct StdoutOut;
+
+impl beacon::sink::Out for StdoutOut {
+    fn out(&mut self, bytes: &[u8]) {
+        io::out(bytes);
+    }
+}
+
+/// `halcyon layout list`: every layout in both tiers. Rich stdout gets a
+/// table whose NAME cells are `obj type=layout` presentations (the verb menu
+/// offers restore / save / delete on them); a plain stdout gets one
+/// `name<TAB>tier` line each, a shadowed device row marked.
+fn layout_list() -> i64 {
+    let session: Vec<String> = match env::var("HOME") {
+        Some(h) if !h.is_empty() => dir_names(&session_layouts_dir(&h)),
+        _ => Vec::new(),
+    };
+    let device = dir_names(DEVICE_LAYOUTS_DIR);
+    let rows = list_rows(&session, &device);
+    if rows.is_empty() {
+        println!("halcyon: no saved layouts");
+        return 0;
+    }
+    if stdout_is_rich() {
+        let mut t = beacon::sink::Table::new("lll").hdr();
+        t.push_row(alloc::vec![
+            beacon::sink::Cell::plain("NAME"),
+            beacon::sink::Cell::plain("TIER"),
+            beacon::sink::Cell::plain(""),
+        ]);
+        for r in &rows {
+            t.push_row(alloc::vec![
+                beacon::sink::Cell::obj(beacon::sink::ObjType::Layout, &r.name, &r.name),
+                beacon::sink::Cell::plain(r.tier.as_str()),
+                beacon::sink::Cell::plain(if r.shadowed { "shadowed" } else { "" }),
+            ]);
+        }
+        let mut out = StdoutOut;
+        let mut s = beacon::sink::Sink::new(&mut out, beacon::Tier::Rich);
+        t.realize(&mut s);
+        return 0;
+    }
+    for r in &rows {
+        if r.shadowed {
+            println!("{}\t{}\t(shadowed)", r.name, r.tier.as_str());
+        } else {
+            println!("{}\t{}", r.name, r.tier.as_str());
+        }
+    }
+    0
+}
+
+/// `halcyon welcome`: the first-launch tour (HALCYON.md 13.7, H-4d) -- a
+/// live transcript that SHOWS the rich shell rather than describing it: a
+/// heading, two lines of how, a table of path objects whose verb menus do
+/// the demonstrating, the split/zoom/layout chords, the lineage. Emitted
+/// through the Beacon sink at the effective tier (rich in a session tile; a
+/// plain console gets the plain realization), then this process EXECS the
+/// user's shell so the tile becomes a prompt with the tour above it -- no
+/// wrapper stays behind to catch the shell's job-control signals. The tour's
+/// objects run in place (the menu's command lands in this tile); the pane
+/// beside it is the session's own shell.
+fn welcome() -> i64 {
+    let rich = stdout_is_rich();
+    let home = env::var("HOME")
+        .map(|h| String::from(h.trim()))
+        .filter(|h| !h.is_empty());
+    {
+        use beacon::sink::{Cell, Em, ObjType, Sink, Table};
+        let mut out = StdoutOut;
+        let tier = if rich {
+            beacon::Tier::Rich
+        } else {
+            beacon::Tier::None
+        };
+        let mut s = Sink::new(&mut out, tier);
+        s.hdr(1, "Welcome to Halcyon");
+        s.text("\n");
+        s.text(
+            "This is a live transcript, not a terminal emulator: what a command prints stays an \
+             object -- a path, a process, a saved layout -- and every object offers verbs.\n",
+        );
+        s.text("Press ");
+        s.em(Em::Code, "Esc");
+        s.text(" to leave the prompt; ");
+        s.em(Em::Code, "j");
+        s.text("/");
+        s.em(Em::Code, "k");
+        s.text(" move by row, ");
+        s.em(Em::Code, "w");
+        s.text("/");
+        s.em(Em::Code, "b");
+        s.text(" jump between objects, ");
+        s.em(Em::Code, "Enter");
+        s.text(" opens an object's verbs (or click one); ");
+        s.em(Em::Code, "i");
+        s.text(" returns to the prompt.\n");
+        s.rule();
+        s.hdr(2, "Try this");
+        s.text("\n");
+        let mut t = Table::new("ll").hdr();
+        t.push_row(alloc::vec![
+            Cell::plain("OBJECT"),
+            Cell::plain("WHAT ITS VERBS SHOW"),
+        ]);
+        t.push_row(alloc::vec![
+            Cell::obj(ObjType::Path, "/bin", "/bin"),
+            Cell::plain("every program, listed as objects (ls)"),
+        ]);
+        if let Some(h) = &home {
+            t.push_row(alloc::vec![
+                Cell::obj(ObjType::Path, h, h),
+                Cell::plain("your home; cd there from the menu"),
+            ]);
+        }
+        t.push_row(alloc::vec![
+            Cell::obj(
+                ObjType::Path,
+                "/dev/tapestry/layout",
+                "/dev/tapestry/layout"
+            ),
+            Cell::plain("the pane tree, as a file (cat)"),
+        ]);
+        t.push_row(alloc::vec![
+            Cell::obj(ObjType::Path, DEVICE_LAYOUTS_DIR, DEVICE_LAYOUTS_DIR),
+            Cell::plain("the layouts this image ships (halcyon layout list)"),
+        ]);
+        t.realize(&mut s);
+        s.rule();
+        s.text("The pane on the right is your shell: type ");
+        s.em(Em::Code, "ls");
+        s.text(" there and the listing comes back as objects. ");
+        s.em(Em::Code, "Super+H");
+        s.text(" / ");
+        s.em(Em::Code, "Super+V");
+        s.text(" split, ");
+        s.em(Em::Code, "Super+F");
+        s.text(" zooms, ");
+        s.em(Em::Code, "halcyon layout save <name>");
+        s.text(" keeps an arrangement, and ");
+        s.em(Em::Code, "$HOME/lib/halcyon.rc");
+        s.text(" runs at every login (an empty one skips this welcome).\n");
+        s.em(
+            Em::Dim,
+            "A Lisp Machine's presentations on a Plan 9 shell -- a thing thought gone, brought back.",
+        );
+        s.text("\n");
+        s.rule();
+    }
+    // The serial witness (the tile's own output is pixels): which tier the
+    // tour went out at.
+    let _ = libthyla_rs::t_putstr(&format!(
+        "halcyon: welcome shown (tier {})\n",
+        if rich { "rich" } else { "none" }
+    ));
+    // Become the shell (LINEAGE: the image is replaced in place; the pts,
+    // the pgrp and the pid stay the tile's).
+    let mut argv: Vec<u8> = b"/bin/ut\0".to_vec();
+    let mut argc: u64 = 1;
+    if let Some(h) = &home {
+        argv.extend_from_slice(b"--home\0");
+        argv.extend_from_slice(h.as_bytes());
+        argv.push(0);
+        argc += 2;
+    }
+    // SAFETY: SVC wrapper over two owned buffers; returns only on failure.
+    let rc = unsafe { libthyla_rs::t_execve(b"/bin/ut", &argv, argc) };
+    eprintln!("halcyon: welcome: exec /bin/ut failed ({})", rc);
+    1
+}
+
+/// `halcyon layout delete <name>`: unlink the session-tier file. A name that
+/// exists only in the device tier is refused by NAME (the tool never writes
+/// the image's tier); an absent name is reported as such. The unlink's
+/// durability is Stratum's own commit (no directory fsync exists at v1 --
+/// a directory cannot be opened for write, and SYS_FSYNC gates on it).
+fn layout_delete(name: &str) -> i64 {
+    let home = match home_dir() {
+        Some(h) => h,
+        None => return 1,
+    };
+    let path = session_layout_path(&home, name);
+    match fs::remove_file(&path) {
+        Ok(()) => {
+            println!("halcyon: deleted {}", name);
+            0
+        }
+        Err(Error::NotFound) => {
+            if fs::exists(device_layout_path(name)) {
+                eprintln!(
+                    "halcyon: {} is a device-tier layout ({}, read-only); nothing deleted",
+                    name, DEVICE_LAYOUTS_DIR
+                );
+            } else {
+                eprintln!("halcyon: no layout named {}", name);
+            }
+            1
+        }
+        Err(e) => {
+            eprintln!("halcyon: could not delete {}: {}", path, e);
+            1
+        }
     }
 }

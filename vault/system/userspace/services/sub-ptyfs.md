@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-08-03
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -100,6 +100,44 @@ so one malformed token rejects the whole write with the mode unchanged
 (the tcsetattr-atomic posture). A flag change resets the assembly line
 (TCSAFLUSH). A winsize write raises `tty:winch` **only if the size
 actually changed** — the Linux `TIOCSWINSZ` behaviour.
+
+A ctl write that *clears* `ICANON` is the one exception to "a flag change
+resets the assembly": it delivers the pending canonical line to the slave
+as raw bytes (`deliver_partial_line`) rather than discarding it, because
+discarding it dropped the head of a type-ahead line between a job's last
+output and the shell's prompt-mode re-arm — "mode writes deliver, never
+discard". Every *other* flag write leaves the assembly alone.
+
+**pts bytes are never cached, and the fail-safe is a refusal.** ptyfs
+answers `Twalkgetattr` — and every T-message it does not implement — with
+`E_NOSYS` via the dispatch default, so the kernel 9P client never latches
+`cacheable` for a pts fid and the Larder caches none of it (attr, dentry
+and page all off, the netd precedent). A cached tty read would replay
+stale bytes into a live terminal; the property holds because ptyfs
+declines the capability rather than because a consumer opts out of it,
+which is the prosecuted shape — a fail-*safe*, not a fail-open.
+
+**The `<n>ready` companion is why a native slave poller does not spin.** A
+pts slave (`/dev/pts/<n>`) is a non-QTPOLL file, which `dev9p_poll`
+reports as always-ready — so a native poller of its slave fd would
+`poll()` ready, `read()`, and block server-side, where a caught
+`interrupt` note cannot wake it (the "^C eats the next line" shape). The
+fix is netd's `ready`-file precedent: a **separate** per-pts
+`/dev/pts/<n>ready` whose qid carries QTPOLL, walkable but hidden from
+readdir (the master precedent). A read on it encodes the wanted poll mask
+in the Tread *offset* (count 4) and gets back the 4-byte revents — POLLIN
+iff a line is queued or the master is gone (EOF-as-readable), POLLOUT iff
+`s2m` has room, POLLHUP iff the master is gone (always, the poll(2)
+contract); non-zero replies now, zero **parks as a `PendingRead{probe:
+true, mask}` in the same flat Vec** as data reads, so `poll_reads`
+re-evaluates it non-consumingly and the same Tflush/clunk/teardown cancel
+paths dispose it — no separate machinery to miss. It is a distinct fid,
+never the slave's, because the slave's read offset is real data and a
+4-byte data read must never be misread as a probe. Scope is SLAVE
+readiness only (ptyhost pumps the master with blocking threads); pts is
+`dev9p_poll`'s second QTPOLL client after netd, kernel-side unchanged.
+`ut`'s idle loop polls `<n>ready`, not fd 0; a ready-open failure degrades
+to polling fd 0, never fails the pts dance.
 
 ## Data structures
 
@@ -247,7 +285,16 @@ The global FRAME coalescing that a compositor needs has no analogue here
   cooked line into `m2s` — the one that carries *command* bytes),
   `drop_line` (assembly overflow past `LINE_MAX`), `drop_echo` (the
   deliberate best-effort echo, counted separately so it can never be
-  mistaken for the other two). Previously every site discarded
+  mistaken for the other two), and — since the `ccb597b8` round (F2) —
+  `drop_modeflush` (a ctl write clearing `ICANON` pushing the pending
+  line into a full `m2s` as raw, via `deliver_partial_line`). The fourth
+  is **not** bookkeeping symmetry: it carries `#95`'s *exact* observed
+  shape where `drop_flush` cannot. A short cooked flush loses the line's
+  tail **and** its newline, so the line never runs; a short mode-flush
+  loses the tail but the terminator then arrives raw in the new mode, so
+  the truncated command **runs** — precisely the `sleep 30`->`sleep 3`
+  signature below. Folding it into `drop_flush` would have falsified that
+  row (the kernel twin is `rx_drop_modeflush`). Previously every site discarded
   `ring_push`'s return, so a loss left nothing behind — `#95` was found
   as `sleep 30` arriving as `sleep 3`, which is the failure mode that
   matters: a truncated command still *runs*. Counting is unconditional;

@@ -924,6 +924,99 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     }
+    // Scenario 2a (the H-arc round-1 audit, A-F2): the DRAINING refusal.
+    // B has acked (the old generation drains until B's first present) but
+    // not presented; a second, different-size offer arrives meanwhile (the
+    // zoom: the display size) and its ack is refused E_AGAIN -- the second
+    // arm, "present a frame, then re-ack", which no client implements: every
+    // client drains events and acks the newest CONFIGURE. The compositor
+    // therefore re-offers the standing size when the drain completes (B's
+    // present), so B's normal path -- wait for a CONFIGURE, ack it -- lands
+    // the zoom. Pre-fix nothing arrived and B stayed pane-sized on a zoomed
+    // display until an unrelated relayout.
+    {
+        if !write_file(root, "layout", &alloc::format!("zoom {}", pb.id)) {
+            say!("tapestry-battery: FAIL reoffer: zoom B");
+            return 1;
+        }
+        let zcfg = match wait_kind(&mut b, TEV_CONFIGURE, "B CONFIGURE (zoom)") {
+            Some(ev) => ev,
+            None => return 1,
+        };
+        let (zw, zh) = (zcfg.value >> 16, zcfg.value & 0xffff);
+        if (zw, zh) != disp {
+            say!(
+                "tapestry-battery: FAIL reoffer: the zoom offer is {}x{}, not the display",
+                zw,
+                zh
+            );
+            return 1;
+        }
+        match b.reweave(zw, zh, zcfg.code) {
+            Err(TapError::Busy) => {}
+            r => {
+                say!("tapestry-battery: FAIL reoffer: the draining ack answered {:?}", r);
+                return 1;
+            }
+        }
+        // The drain: B's first present on its current generation.
+        fill(&mut b, BLUE);
+        if b.present(None).is_err() {
+            say!("tapestry-battery: FAIL reoffer: the draining present");
+            return 1;
+        }
+        // The re-offer (a fresh serial, the standing size) -- absent pre-fix.
+        let again = match wait_kind(&mut b, TEV_CONFIGURE, "B CONFIGURE (re-offer after the drain)") {
+            Some(ev) => ev,
+            None => return 1,
+        };
+        if (again.value >> 16, again.value & 0xffff) != disp || again.code == zcfg.code {
+            say!(
+                "tapestry-battery: FAIL reoffer: got {}x{} serial {} (offer was serial {})",
+                again.value >> 16,
+                again.value & 0xffff,
+                again.code,
+                zcfg.code
+            );
+            return 1;
+        }
+        match b.handle_configure(&again) {
+            Ok(true) => {}
+            r => {
+                say!("tapestry-battery: FAIL reoffer: reweave onto the re-offer {:?}", r);
+                return 1;
+            }
+        }
+        fill(&mut b, BLUE);
+        if b.present(None).is_err() {
+            say!("tapestry-battery: FAIL reoffer: present on the re-offered generation");
+            return 1;
+        }
+        let g = read_file(root, &alloc::format!("pane/{}/geometry", pb.id)).unwrap_or_default();
+        let want = alloc::format!("0 0 {} {}", disp.0, disp.1);
+        if g.trim() != want {
+            say!("tapestry-battery: FAIL reoffer: geometry '{}' != '{}'", g.trim(), want);
+            return 1;
+        }
+        say!("battery: resize reoffer OK {} {}", b.w, b.h);
+        // Back to the pane: unzoom offers the pane size again, on the
+        // ordinary path (nothing is draining: B presented).
+        if !write_file(root, "layout", &alloc::format!("zoom {}", pb.id)) {
+            say!("tapestry-battery: FAIL reoffer: unzoom B");
+            return 1;
+        }
+        let ucfg = match wait_kind(&mut b, TEV_CONFIGURE, "B CONFIGURE (unzoom)") {
+            Some(ev) => ev,
+            None => return 1,
+        };
+        match b.handle_configure(&ucfg) {
+            Ok(true) => {}
+            r => {
+                say!("tapestry-battery: FAIL reoffer: reweave back to the pane {:?}", r);
+                return 1;
+            }
+        }
+    }
     fill(&mut b, BLUE);
     if b.present(None).is_err() {
         say!("tapestry-battery: FAIL post-reweave present");
@@ -1755,6 +1848,84 @@ pub extern "C" fn rs_main() -> i64 {
         }
         say!("battery: singleslot control presented");
         drop(d);
+    }
+    // The partial-FIRST single-slot client (the H-arc round-1 audit, A-F6 +
+    // the CPU-path half of A-F1): E never presents a full frame -- its very
+    // FIRST present is one quadrant. Keyed on coverage alone (pre-fix) that
+    // partial present LATCHES E an accumulator and crops it; keyed on
+    // rotation (post-fix) a single-slot client never latches, so E
+    // letterboxes and the quadrant lands through the scale. The strong
+    // witness is the ABSENCE of a latch line for E after its first present
+    // (Eopen anchors the watch; E reuses a freed surface id, so the earlier
+    // control's latch on the same id sits BEFORE the anchor); the pixel
+    // corroborates through a 2x zoom, where crop (native at the corner) and
+    // letterbox (scaled to fill) put the quadrant's center in different
+    // places. The GPU-path half -- a stale slot resource blitted whole --
+    // has no HVF witness and is owed on the GL host.
+    {
+        let mut e = match Surface::open(disp.0 / 2, disp.1 / 2) {
+            Ok(s) => s,
+            Err(e) => {
+                say!("tapestry-battery: FAIL client E {:?}", e);
+                return 1;
+            }
+        };
+        e.set_single_slot(true);
+        let (ew, eh) = (e.w, e.h);
+        {
+            let px = e.pixels();
+            for y in 0..eh / 4 {
+                for x in 0..ew / 4 {
+                    px[(y * ew + x) as usize] = GREEN;
+                }
+            }
+        }
+        // The anchor precedes the present, so the gate's latch watch sees
+        // ONLY E's own present -- not the rotating control's earlier latch
+        // on the same (reused) surface id.
+        say!("battery: singleslot Eopen {}", e.id);
+        if e.present(Some(Rect {
+            x: 0,
+            y: 0,
+            w: ew / 4,
+            h: eh / 4,
+        }))
+        .is_err()
+        {
+            say!("tapestry-battery: FAIL singleslot: E's partial-first present");
+            return 1;
+        }
+        // Zoom E so the quadrant's scaled center is far from its native one:
+        // post-fix (letterbox) the green fills the display top-left quadrant
+        // and (2x-center) is green; pre-fix (crop) the native quadrant sits
+        // in the display's top-left corner and the 2x-center is off it.
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        let Some(pe) = find_pane(&fresh, e.id) else {
+            say!("tapestry-battery: FAIL singleslot: E's pane not found");
+            return 1;
+        };
+        if !write_file(root, "layout", &alloc::format!("zoom {}", pe.id)) {
+            say!("tapestry-battery: FAIL singleslot: zoom E");
+            return 1;
+        }
+        let g = read_file(root, &alloc::format!("pane/{}/geometry", pe.id)).unwrap_or_default();
+        let mut it = g.split_ascii_whitespace().filter_map(|t| t.parse::<u32>().ok());
+        let (Some(cx), Some(cy), Some(cw), Some(ch)) = (it.next(), it.next(), it.next(), it.next())
+        else {
+            say!("tapestry-battery: FAIL singleslot: E's zoom geometry '{}'", g.trim());
+            return 1;
+        };
+        let (ox, oy, sw2, sh2) = libhalcyon::place::letterbox(ew, eh, cw, ch);
+        // The green quadrant's center in source (ew/8, eh/8), through the
+        // zoom's scale.
+        let gx = cx + ox + ((ew as u64 / 8) * (sw2 as u64) / (ew as u64)) as u32;
+        let gy = cy + oy + ((eh as u64 / 8) * (sh2 as u64) / (eh as u64)) as u32;
+        say!("battery: singleslot partialfirst {} {} {}", e.id, gx, gy);
+        probe(root, gx, gy);
+        nap(DUMP_MS);
+        // Unzoom before E drops, so the leg leaves the tree as it found it.
+        let _ = write_file(root, "layout", &alloc::format!("zoom {}", pe.id));
+        drop(e);
     }
 
     // The declared-handoff control, one variable away from the undeclared

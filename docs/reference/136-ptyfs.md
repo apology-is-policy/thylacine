@@ -1,352 +1,52 @@
-# 136 — ptyfs: the pseudoterminal server + /dev/pts (PTY-2)
+# 136 — ptyfs: the pseudoterminal server + /dev/pts (PTY-2) [ABSORBED INTO THE VAULT]
 
-**Status**: as-built at the PTY-2 arc close (2a `d567ed57`/`4b26a159`, 2b
-`79f885e9`, 2c `6f7ca63e`, 2d `a946012b`, 2e). Kernel-side companion:
-`docs/reference/135-pty-kernel.md` (the PTY-1 arc: sessions/pgrps, the pts
-registry, the tty signal seam, the job-control stop). Design authority:
-`docs/PTY-DESIGN.md` (§5 carries the per-sub-chunk as-built notes). The
-prosecution row: `ARCHITECTURE.md §25.4` "ptyfs".
+Absorbed at the docs/reference retirement (`chg-2026-09-07-ptyfs-doc-absorb`).
+`/sbin/ptyfs` — the native libthyla-rs device-less `/srv` 9P server owning the pts
+pairs (two byte rings, the per-pts line discipline, the termios+winsize ctl, the
+teardown semantics). It realizes **I-20's data path**; the kernel owns the
+security-routing half (PTY-1). Its content lives, code-verified and current, in
+its dedicated audit:hard dossier:
 
-## Purpose
+      vault/system/userspace/services/sub-ptyfs.md   (audit: hard, I-20)
 
-`/sbin/ptyfs` is the pseudoterminal server: a native libthyla-rs, device-less
-`/srv` 9P server (the corvus/netd grain) owning the pts pairs — the two byte
-rings, the per-pts line discipline, the per-pts termios word + winsize, and
-the teardown semantics. It realizes **I-20's data path**; the kernel owns the
-security-routing half (sessions/pgrps/controlling terminal — PTY-1). ptyfs's
-sole signal authority is the pts-scoped `SYS_TTY_SIGNAL`: it names only
-`(pts_id, class)`; the kernel resolves pts → ct_sid → fg_pgid (the I-1/I-22
-bound — ptyfs can never name a process group).
+Everything the doc carried is there — the devpts tree + qid encoding (`PTS_FLAG`
+bit 40, the `ptsname` decode contract, the S_IFCHR-vs-S_IFREG is-a-tty
+discriminator against netd's bit-40-but-S_IFREG qids), the input/output cook order
++ `SignalXorByte` + the ECHO-off no-leak chokepoint + the ring-full policy split,
+the tcsetattr-atomic ctl grammar + the mode-write-delivers-never-discards rule,
+the deferred multi-waiter `PendingRead` set + the I-9-by-single-threadedness
+argument, drain-then-EOF + `slave_opened_once` + `HupAtMostOnce`-by-construction +
+free-on-last-unref, the #13 I-1 access-control gap (0666 SYSTEM-owned; any Proc
+naming a live pts can read/inject/re-termios; inert single-session, live under
+A-5b; the per-pts-0600 fix fork), and the #95 input-drop counters — **now
+including the three atoms this absorption folded in** (see below).
 
-joey spawns it corvus-direct (`T_SPAWN_PERM_MAY_POST_SERVICE`, no fds/caps),
-gates on a bounded liveness connect, and MREPL-mounts its tree at `/dev/pts`
-(the devdev `DEV_KIND_PTS` synthetic mount-stub child — reference/109). All
-of spawn/liveness/mount/probes are **boot-fatal**: ptyfs has no
-hardware/external dependency, so failure to come up is always a defect.
+**What this file got WRONG or MISSED by the time it was absorbed:**
 
-## The tree (Linux-devpts shape + the suffix-ctl idiom)
-
-| Path | qid.path | What |
-|---|---|---|
-| `/` (mounted at `/dev/pts`) | 0 (the attach root) | the devpts directory: `{ptmx, <n>, <n>ctl}` |
-| `/dev/pts/ptmx` | 1 | the clone file: open = mint pts N, rebind the fid onto the MASTER endpoint |
-| `/dev/pts/<n>` | `PTS_FLAG\|N<<8\|2` | the slave byte channel (resolves only while the slot is live) |
-| `/dev/pts/<n>ctl` | `PTS_FLAG\|N<<8\|3` | the per-pts ctl (termios + winsize; the Plan 9 `eia0`/`eia0ctl` idiom) |
-| `/dev/pts/<n>ready` | `PTS_FLAG\|N<<8\|4` (**QTPOLL**) | the poll-readiness file (item 10): a native SLAVE poller blocks on it — walkable, **not** in readdir (a hidden companion, the master precedent) |
-| (master, minted) | `PTS_FLAG\|N<<8\|1` | the master byte channel — never walkable, never in readdir |
-
-`PTS_FLAG` = bit 40. **The qid encoding is a documented client contract**:
-`t_stat.qid_path` carries the 9P qid verbatim, so
-`ptsname(master_fd) = (fstat(mfd).qid_path >> 8) & 0xffffff` (guarded on
-`PTS_FLAG`) — no extra file or ioctl; the PTY-3 pouch `ptsname()` implements
-exactly this decode (via its `TIOCGPTN` dispatcher arm). The POSIX
-`/dev/ptmx` alias resolved at PTY-3 as a **pouch path redirect** (musl's
-`posix_openpt`/`openpty` open `/dev/pts/ptmx` — the devpts-NATIVE node
-Linux also has; a real `/dev/ptmx` symlink stays G11-blocked pre-symlinks).
-
-**Getattr mode posture (PTY-3)**: ptmx + master + slave report
-`S_IFCHR|0666` (`CHR_RW` — a pts node IS a character device, the Linux
-model); the per-pts ctl stays `S_IFREG|0666` (a control file, not a
-terminal). The mode flows VERBATIM through the kernel
-(`t_stat_from_p9_attr` passes `attr->mode` when the valid bit is set) to
-the pouch `st_mode`, making `S_ISCHR` + the qid decode the pouch
-is-a-tty discriminator — load-bearing against qid-shape collisions
-(netd's `/net` qids also use bit 40 but report `S_IFREG`). The `S_IFMT`
-bits sit above the 9 rwx bits, so the kernel dev9p perm_check/X-search
-are unaffected. Pinned end-to-end by the joey (e2b) probe leg (a kernel
-mode-masking regression or a posture revert both fail the boot).
-
-## Data path + the line discipline (PTY-2b)
-
-Two rings per pts (`RING_CAP` 4 KiB each): `m2s` (master→slave = INPUT) and
-`s2m` (slave→master = OUTPUT + echo). Five per-pts flags (the kernel LS-8
-bit values, so the ctl grammar speaks the same names): `ICANON 0x01`,
-`ECHO 0x02`, `ISIG 0x04`, `ICRNL 0x08`, `ONLCR 0x10`. **A fresh pts is FULL
-COOKED** (`TIO_DEFAULT` = all five — the Linux fresh-pts posture; the kernel
-console's ISIG-only boot word is a console posture, not the pts one).
-
-- **Input cook** (`master_write`, per byte, the cons.c order): ICRNL first
-  (CR→NL) → ISIG (the standard trio: `0x03`→INT, `0x1c`→QUIT, `0x1a`→TSTP —
-  the class is collected and the byte CONSUMED: never enqueued, never echoed
-  = `pty.tla` SignalXorByte; in canonical mode it also DISCARDS the pending
-  assembly — POSIX NOFLSH-clear, PTY-DESIGN "ISIG characters DISCARD the
-  pending line", 2026-08-17: a disposition, not a counted drop; m2s/s2m are
-  never flushed) → ICANON (erase `\b \b`; NL flushes the line
-  INCLUDING its newline; a byte past `LINE_MAX`=256 drops un-echoed) → raw.
-- **Output cook** (`slave_write`): ONLCR NL→CR NL, pair-atomic back-pressure
-  (an expansion that doesn't fit stops BEFORE its input byte — a torn pair
-  would double the CR on retry).
-- **The `echo()` chokepoint**: every echo staging passes ONE `ECHO` gate (the
-  LS-8b ECHO-off hard no-leak guarantee, per-pts — the password mask); echo
-  rides the output transform (echo IS output, the Linux model).
-- **Ring-full policy split**: the cooked flush + the echo DROP on full (tty
-  input overrun — the slave has 4 KiB unread, a wedged reader; the console
-  posture); the raw input + the output path BACK-PRESSURE via a short Rwrite.
-- `h_write`'s master arm raises the collected classes AFTER the ring work via
-  `t_tty_signal` (the syscall stays out of the pure cook, so the selftest
-  asserts classes directly; `pts_id 0` = a selftest-local pts, never signals).
-
-## The ctl (PTY-2c)
-
-Write = the tcsetattr-atomic grammar: whitespace tokens, `+name`/`-name` over
-the five flags + `winsize <cols> <rows>` (decimal ≤ 65535); ALL tokens are
-validated before ANY applies — one malformed token rejects the whole write
-with the mode unchanged; a write that CLEARS ICANON delivers the pending
-canonical line to the slave as raw bytes (`deliver_partial_line`; a short push
-into a full m2s is a real drop under its OWN counter, `drop_modeflush`), any other write leaves the assembly
-alone (PTY-DESIGN "Mode writes deliver, never discard", 2026-08-17 — it used to
-zero the assembly on any flag write, and dropped the head of a type-ahead line
-between a job's last output and ut's PROMPT-mode re-arm; LS-CI `pty-4`).
-A winsize CHANGE raises `TTY_SIG_WINCH` (iff changed — the Linux TIOCSWINSZ
-behavior); the kernel routes `tty:winch` to the fg pgrp. Read = one
-offset-served line: `+icanon +echo +isig +icrnl +onlcr winsize C R\n`
-(never defers). A ctl fid holds the slot ref but is **NOT** an EOF-counted
-endpoint (`is_endpoint_path` gates all four `open_dec` sites).
-
-## Blocking reads (the deferred multi-waiter set)
-
-An endpoint read on an empty-but-open ring parks a `PendingRead`
-(`Disp::Deferred` — the held Rread tag); `poll_reads` at the serve-loop top
-re-drains and delivers (Data or the EOF 0). A flat multi-waiter Vec (the
-net-6a-1 discipline), NOT the cons single-reader. I-9 holds by
-single-threadedness: a ring fills only via a serviced frame, so every parked
-read is re-checked before the loop parks. Cancel paths: `Tflush` (by oldtag),
-clunk (by fid), teardown/Tversion (all).
-
-## Poll-readiness: the `<n>ready` bridge (item 10)
-
-A pts slave (`/dev/pts/<n>`) is not directly pollable — a data read parks
-server-side (above), and dev9p.poll reports a non-QTPOLL file as POSIX
-always-ready. So a **native** poller of its slave fd (the hosted `ut`) would
-`poll()` fd 0, get always-ready, then block in `read()` — where a caught
-`interrupt` note cannot wake it (the "^C eats the next line" bug). The fix is
-the netd `/net/<proto>/N/ready` precedent (net-6b-2b): a **separate**
-per-pts `/dev/pts/<n>ready` file whose qid carries **QTPOLL**, so the kernel's
-`dev9p_poll` probes it instead of assuming always-ready.
-
-- **The probe** (`h_read` on a ready fid): `dev9p_poll` encodes the wanted poll
-  mask in the Tread **offset** (count 4). `ready_revents(n, mask)` returns the
-  4-byte LE bitmap — POLLIN iff `read_ready(slave)` (a line queued OR the master
-  gone ⇒ EOF-as-readable), POLLOUT iff `s2m` has room, POLLHUP iff the master is
-  gone (always reported, the poll(2) contract). Non-zero ⇒ reply now; zero ⇒
-  **park** (netd's defer). A separate fid, never the slave's, because the slave's
-  read offset is meaningless and a real 4-byte data read must never be misread as
-  a probe.
-- **Reuses the `PendingRead` set**: a parked probe is a `PendingRead{probe:true,
-  mask}` in the SAME Vec as data reads, so `poll_reads` re-evaluates it
-  (recompute revents, non-consuming, deliver once satisfiable) and the SAME
-  cancel paths (Tflush/clunk/teardown/Tversion) dispose it — no separate cancel
-  machinery to miss.
-- **Scope**: SLAVE readiness only. `ptyhost` pumps the master with two blocking
-  threads (no poll), so only the slave needs the bridge; the master + the data
-  files stay non-QTPOLL. A master-poll `<n>mready` is a future seam.
-- **Client**: `ut`'s `init_pts_session` opens `<n>ready` (OREAD) and its idle
-  loop POLLS that fd (not fd 0); it still READS fd 0. A ready-open failure
-  degrades to polling fd 0 (pre-item-10 behavior), never fails the pts dance.
-  The kernel bridge (`kernel/dev9p_poll.c`) is unchanged — pts is simply its
-  second QTPOLL client after netd.
-
-## Teardown (PTY-2d)
-
-- **Drain-then-EOF**: `ring_drain` serves Data while non-empty regardless of
-  the peer's closure; `Eof` only on empty + peer-gone.
-- **The `slave_opened_once` latch**: a master read BEFORE any slave open
-  PARKS (WouldBlock), never a spurious EOF — the Linux
-  master-blocks-until-the-slave-comes-up semantic (EOF means the slave side
-  is GONE, which requires it to have existed). The master needs no latch: it
-  is born open (the mint IS its open).
-- **HUP**: `open_dec` reports the `n_master` 1→0 edge; `Conn::close_endpoint`
-  (the single opened-endpoint drop path: clunk / rebind / connection teardown
-  / Tversion reset — a dying emulator connection IS carrier loss) raises
-  `TTY_SIG_HUP` BEFORE the unref; the kernel routes `tty:hup` dual-target
-  (fg pgrp + session leader). **HupAtMostOnce is by construction**: exactly
-  one master fd per pts can ever exist (masters are mint-only; no walk
-  resolves a master path; 9P forbids walking FROM an opened fid; a walk to an
-  existing newfid is rejected). A slave close is never a hup edge. The
-  mint-rollback keeps the raw `open_dec` (a failed mint is not carrier loss).
-- **Free**: bound `refs` (one per fid naming the pts — master/slave/ctl) is
-  the ONLY free decision; the last unref frees the slot and
-  `SYS_PTY_REGISTER(FREE)`s the kernel entry (the gen guard makes a stale
-  `pts_id` fail closed).
-
-## Cacheability (load-bearing)
-
-ptyfs answers `Twalkgetattr` (and every unknown T-message) with `E_NOSYS`
-via the dispatch default → the kernel client never latches `cacheable` → the
-**Larder never caches pts bytes** (attr/dentry/page all off for the session —
-the netd precedent). A cached tty read would replay stale bytes; this
-fail-safe posture is a prosecuted property, not an accident.
-
-## Concurrency model
-
-Single-threaded by construction: one Proc, one serve loop; every 9P frame
-across every session is processed sequentially, so the pts table needs no
-lock and the I-9 argument above holds. A future threading lift must revisit
-BOTH properties (the ARCH row records this). A buggy or malformed 9P frame
-corrupts nothing outside its own connection — the kernel validates the
-syscall surface, ptyfs validates frames (every `unwrap`/index guarded;
-malformed → `Rlerror`, never a panic), and the fid/refcount discipline
-(refs-new-before-unref-old on rebind; the netd live-slot walk property: a
-stale/forged qid is unreachable) is sound.
-
-## Access control (the honest v1.0 posture — a known gap)
-
-**The pts registry gates only the controlling-terminal syscalls**
-(`SYS_TTY_ACQUIRE`/`SET_FG`/`CONT`), NOT slave/ctl `open`/`read`/`write`. The
-*only* gate on slave and ctl I/O is the file mode — which is **0666
-SYSTEM-owned** (`FILE_RW`), so the kernel dev9p `perm_check` passes any
-principal as "other" with rw. The `Ptys` table is global across connections
-and `walk_child` resolves any live pts's `<n>`/`<n>ctl` for any connection.
-So on the shared `/dev/pts` mount, **any Proc that can name a live pts can
-read its input, inject output, flip its termios, or WINCH-spam its fg pgrp**
-— an **I-1 isolation gap**. It is inert at single-session v1.0 (one
-interactive console session) but goes live under A-5b concurrent multi-user;
-it is the same shared-mount world-reachability posture `/net` flows carry.
-
-The proper fix (task #13, pre-A-5b-multi-user) is the Unix pts model —
-per-pts owner + mode 0600/0620 so the kernel gate denies a non-owner — which
-needs either per-session `/dev/pts` submounts or per-op principal forwarding,
-because on the *shared* kernel dev9p mount every pts arrives on the one
-kernel-client connection whose peer principal is SYSTEM (ptyfs cannot see
-which user opened ptmx via SO_PEERCRED). It is a design fork for that chunk,
-not a cheap patch. ptyfs itself never names a process group — its sole
-signal authority is the pts-scoped `SYS_TTY_SIGNAL` (I-1/I-22, prosecuted at
-PTY-1); this gap is the DAC on the byte channels, orthogonal to the signal
-seam.
-
-## Tests
-
-- **The in-server selftest** (boot-gated; runs before the post): the ring
-  battery (empty/round-trip/FIFO/raw transparency), the full ldisc truth
-  table (ICRNL+flush+echo+ONLCR; assembly-holds; erase + empty-erase; the
-  ISIG trio collected + not-a-byte + not-echoed; leg (e4) an ISIG char
-  discards the pending line, its `-isig` control keeps the same bytes;
-  ECHO-off no-leak; raw+ISIG;
-  output ONLCR; line overflow), the ctl battery (render format; atomic
-  reject; winsize raise-iff-changed + band/arity rejects; mixed atomic write;
-  the mode-write delivery legs -- canonical→canonical keeps the fragment,
-  canonical→raw delivers it with the next raw byte in order and no drop
-  counted, raw→canonical prepends nothing; the walk grammar), the teardown
-  algebra (queued-bytes
-  drain-then-EOF both directions; the hup edge fires once; slave-close
-  silent; the master-read-before-slave park; free-on-last-unref).
-- **The joey 2a-2 probe** (boot-fatal, every boot): the wire data path over
-  the mounted `/dev/pts` — clone-mint, Treaddir, cooked lines, echo+ONLCR,
-  the ptsname qid decode, the ctl `-echo` no-leak proof (no blocking read
-  needed: a masked line then an unmasked one — only the second echoes),
-  winsize via `t_pread`, queued-line drain-then-EOF.
-- **The `/bin/pty-probe` openpty E2E** (boot-fatal): a two-role prover — the
-  emulator mints + spawns itself as a session-leader child (`t_setsid` →
-  slave open → `t_tty_acquire` → notes fd FIRST [self-managing]) and drives
-  the signal seam live: Ctrl-C → "interrupt" observed on the child's notes
-  fd, winsize → `tty:winch`, master close → `tty:hup`; plus the FIRST live
-  parked deferred master read (the readiness read parks until the child's
-  slave opens and writes).
-- `devdev.walk_pts_dir` (the kernel mount-stub, reference/109).
-
-## Input-drop instrumentation -- #95 (as-built)
-
-The pty ldisc has the same silent-drop problem the kernel console had, one
-layer up: a hosted session's input crosses ptyfs's `m2s` ring and a SECOND line
-discipline before reaching the shell, and every one of those sites discarded
-`ring_push`'s return value. `ring_push` is a genuine SHORT push
-(`room.min(data.len())`), so a partial write silently dropped the remainder and
-reported it in a value nobody read.
-
-Per-pts counters (`drop_flush` / `drop_line` / `drop_echo` / `drop_modeflush`) now record them:
-
-| Counter | Site | Notes |
-|---|---|---|
-| `drop_flush` | the cooked Enter-flush into `m2s` | the site that would carry **command** bytes. Both the line push and the newline push are counted. |
-| `drop_line` | line assembly past `LINE_MAX` | dropped un-echoed, the cons contract. |
-| `drop_echo` | `echo()` into `s2m` | the drop is deliberate and documented (echo is best-effort and cannot back-pressure the writer) -- counted under its own name precisely so it can never be mistaken for the `m2s` sites that carry real input. |
-| `drop_modeflush` | `deliver_partial_line` (a ctl write clearing ICANON) into `m2s` | **a real drop with its own name** (the ccb597b8 round, F2; PTY-DESIGN's rule for both ldiscs; the kernel twin is `rx_drop_modeflush`). A mode write cannot back-pressure. It was briefly folded into `drop_flush`, which would have falsified that row: a short cooked flush loses the tail AND the newline (the line never runs), a short mode-flush loses the tail and the terminator then arrives raw in the new mode, so the truncated command RUNS -- #95's exact shape. Driven on purpose by the selftest (a full `m2s`, a pending `yy`, a canonical->raw `set_tio`: +2 here, the other three unchanged, no report; the ring drains exactly `RING_CAP` then WouldBlock). |
-
-The first drop also emits one line naming the SITE:
-
-```
-ptyfs: INPUT DROP (#95) at cooked flush (m2s full) -- a pts lost bytes; further drops counted silently
-```
-
-The site name is the decisive datum; a report that only said "a byte was lost"
-would leave the next occurrence as unexplained as #95 itself.
-
-`arm_drop_report()` is called by `main` only AFTER the selftest passes, because
-battery step 9 drops a byte on purpose (`B` past `LINE_MAX`). An armed report
-would cry wolf every boot and spend the one-shot latch. The selftest asserts
-all three properties: the deliberate drop IS counted, it is counted at the LINE
-site and not the other three, and it did NOT report.
-
-Note what a short flush actually loses: the tail of the line and then the
-newline -- so the shell would never execute the line at all. That is why this
-site alone does not explain #95's observed shape (interior byte lost,
-terminator delivered, command ran); the counter is here to say whether it is
-involved, not because it is assumed to be. The mode-flush site CAN produce that
-shape (tail lost, terminator delivered raw, command runs) -- which is exactly why
-it carries its own counter rather than sharing this one.
-
-## Known caveats / seams
-
-- **PTY-3 (pouch)**: `openpty`/`forkpty`/`ptsname`/`tcsetattr` decompose onto
-  this surface (the boundary-line); `/dev/ptmx` as a POSIX alias needs
-  symlinks or a file-mount.
-- The per-pts termios is the five-flag LS-8 word; VMIN/VTIME, additional
-  c_cc chars (VERASE beyond DEL/BS, VKILL, VEOF), and per-fd (vs per-pts)
-  termios are v1.x lifts.
-- Echo drop-on-full can tear a CR-NL echo pair at the ring boundary
-  (harmless: echo is best-effort; the data path never tears).
-- `PTS_MAX` = 16 concurrent pts pairs (the #65 resource floor; ENFILE-class
-  reject at mint).
-
-### PTY-4 job-control gaps (surfaced by the first real consumer)
-
-PTY-4 (`ut` job control over a pts, `docs/PTY-DESIGN.md` §14) exercises the
-whole stop/report/resume machinery and proves it end-to-end for a foreground
-job that holds **no** outstanding terminal read (`sleep`): `^Z` stops it, the
-`WAIT_UNTRACED` report is delivered (once the PTY-1e syscall-gate fix admits
-the flag -- `8f1cb8a2`), `jobs` lists it Stopped, `fg` resumes it via
-`SYS_TTY_CONT` and it runs to a clean prompt exit. Two gaps remain, both real
-and both PTY-4 follow-ups:
-
-- **No foreground-read arbitration (TTIN).** A v1.0 pts serves every slave
-  read the moment data arrives, with no check of the reader's process group
-  vs the terminal's foreground group. So a stopped foreground job that was
-  blocked in a terminal READ (e.g. `cat`) keeps its dev9p `Tread` outstanding
-  at ptyfs; when the shell reclaims the terminal and the user types the next
-  command, ptyfs delivers those bytes to the stopped job's stale read instead
-  of the shell -- the shell never sees its input. Interactive `cat`-under-`^Z`
-  therefore does not work at v1.0. The POSIX fix is TTIN: a slave read from a
-  non-foreground-group process is suspended (or `SIGTTIN`'d) rather than
-  served. This wants the reader's pgrp at the read gate -- a kernel check
-  (`SYS_READ` on a pts slave, caller pgrp vs the pts `fg_pgid` via the
-  registry), since ptyfs (a 9P server) has no pgrp per `Tread`.
-
-- **Resume-then-re-stop -- ROOT-CAUSED + FIXED at PTY-4e (task #19).** The
-  "second `^Z` after `fg` never re-stops" report was NOT a signal-delivery
-  gap. The stop cascade (`proc_stop_wake_sleepers_locked`) reused the DEATH
-  cascade's `torpor_wake_all_for_proc`, which fabricates a COMPLETED wait
-  (`awoken = 1`) -- immaterial for a dying Proc (#811, that wake's charter),
-  but a job-stopped Proc SURVIVES: the fabricated `TORPOR_OK` rode back to
-  EL0 at resume, so a torpor-timed sleep (`libthyla_rs::time::sleep` ->
-  `/bin/sleep`) "finished" the instant `fg` resumed it -- the job exited,
-  `fg` returned Done + restored the terminal, and the second `^Z` correctly
-  found no foreground job (routed to the self-managing shell as a note; no
-  `proc_job_stop_one` -- exactly the observed KDBG signature). FIXED
-  two-layer: (a) the stop cascade now uses the NON-COMPLETING
-  `torpor_stop_wake_all_for_proc` (wakes the rendez, leaves `awoken` clear:
-  the woken waiter's tsleep re-loop takes the 8c-2 stop detour, parks with
-  the wait preserved, and re-registers its original deadline on resume --
-  parks-and-reparks made total over torpor; a real wake during the park
-  still delivers, the waiter stays bucket-linked); (b) `time::sleep`
-  re-sleeps the remainder on a spurious `Woken` (the futex contract its
-  "Woken is unreachable" comment violated). Pinned by
-  `proc.job_stop_preserves_torpor_wait` (stop -> parked, wait intact; cont
-  -> RE-SLEEPS, wait still intact -- the pre-fix code completes it right
-  there; only a real wake finishes it), `proc.job_stop_recycle`, and the
-  jc-probe re-stop/bg/fg-interrupt ladder.
-
-The remaining gap (TTIN) needs a new kernel read-gate mechanism (task #18,
-signoff) and is the natural PTY-4 continuation. The PTY-4 boot E2E
-(`/bin/jc-probe`) and the interactive `pty-4.exp` scenario both drive `sleep`
-(no terminal read) so they exercise the full stop / re-stop / bg / fg /
-interrupt cycle without depending on TTIN.
+- **Three genuine gaps, now folded into sub-ptyfs** (the dossier was
+  updated 2026-08-03, before PTY-2e item-10 and the `ccb597b8` round):
+  - **The cacheability fail-safe** — ptyfs answers `Twalkgetattr` (and every
+    unimplemented T-message) with `E_NOSYS` via the dispatch default, so the
+    kernel client never latches `cacheable` and the Larder caches no pts byte
+    (a cached tty read would replay stale bytes). A prosecuted fail-*safe*, was
+    absent.
+  - **The item-10 `<n>ready` QTPOLL readiness bridge** — the separate per-pts
+    QTPOLL companion (offset-encoded mask probe, `PendingRead{probe:true}` in the
+    same flat Vec, the "^C eats the next line" fix, pts as `dev9p_poll`'s second
+    client after netd). The whole mechanism was absent.
+  - **The `drop_modeflush` fourth #95 counter** — sub-ptyfs listed only three
+    counters; the fourth is the one that carries #95's *exact* observed shape (a
+    short mode-flush loses the tail but delivers the terminator raw, so the
+    truncated command **runs**, unlike a short cooked flush which drops the
+    newline too and never runs the line). Folding it into `drop_flush` would have
+    falsified that row.
+- **The PTY-4 #19/TTIN job-control content is kernel-side, deferred to
+  135-pty-kernel.** The resume-then-re-stop root-cause (#19 — the stop cascade
+  reused the DEATH cascade's *completing* `torpor_wake_all`, fabricating
+  `TORPOR_OK` for a *surviving* job-stopped Proc so a torpor-timed sleep
+  "finished" at resume; fixed two-layer with the non-completing
+  `torpor_stop_wake_all_for_proc` + `time::sleep` re-sleeping a spurious `Woken`)
+  and the TTIN foreground-read-arbitration gap (#18) live in the kernel
+  proc/torpor + PTY-1 job-control surfaces, not ptyfs. They are documented here
+  but their home is verified/folded when `docs/reference/135-pty-kernel.md` is
+  absorbed. Zero code change.

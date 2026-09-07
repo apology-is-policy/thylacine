@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-06
 ---
 ## Purpose
 
@@ -62,7 +62,13 @@ X25519 public key, a nonce, the encrypted key and its tag. The wrapping
 key is SHA-256 over a domain string, both shared secrets, the ephemeral
 public key and the ML-KEM ciphertext — so the key is bound to the exact
 transcript, and neither the post-quantum nor the classical half alone
-suffices.
+suffices. The authenticated cipher over that key takes associated data of
+its own — a domain prefix, the dataset name, and the 64-bit
+key-generation id — so the tag binds the envelope to the exact dataset and
+key generation that produced it. Presenting the same envelope under a
+different dataset, or after the key is rotated to a new id, fails the tag;
+that is what makes the format rotation-safe and non-replayable,
+independent of the transcript binding.
 
 **A recovery phrase** is 24 BIP-39 words over 256 bits of entropy plus an
 8-bit checksum. Derivation uses the *decoded entropy*, never the phrase
@@ -80,6 +86,18 @@ key-encryption key, which authenticated-encrypts the keypair. The keypair
 then decapsulates a data-encryption key out of an envelope. The first
 layer is memory-hard because its input is a human secret; the second is
 not, because its input is already a 256-bit key.
+
+**The DEK envelope's sole integrity gate is the AEAD tag**, which is a
+consequence of ML-KEM's FIPS-203 implicit rejection worth stating outright.
+Decapsulation never *rejects* a length-valid ciphertext: a tampered ML-KEM
+ciphertext yields a deterministic-but-wrong shared secret rather than an
+error, so the post-quantum layer raises no alarm. The wrong shared secret
+derives a wrong wrapping key, and the only place a tampered envelope is
+caught is the AEGIS-256 tag check on the wrapped key — nothing upstream
+validates the ciphertext, so the integrity of the whole unwrap rests on
+that one tag. The classical X25519 secret is folded into the same wrapping
+key, so confidentiality survives if either KEM does; but *detection* of
+tampering belongs to the tag alone.
 
 **The associated data is the domain separation, and it is built the same
 way three times.** Prefix, then subject, then a discriminator byte or a

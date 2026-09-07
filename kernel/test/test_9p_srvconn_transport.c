@@ -37,7 +37,9 @@
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
+#include <thylacine/dev9p.h>
 #include <thylacine/proc.h>
+#include <thylacine/pts.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
@@ -65,6 +67,8 @@ void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
 void test_9p_srvconn_transport_deadline_vtable_routes(void);
 void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
 void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
+void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
+void test_9p_srvconn_transport_large_frame_roundtrip(void);
 
 // =============================================================================
 // Helpers (mirror test_srv_client.c's pattern).
@@ -835,5 +839,73 @@ void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void) {
     (void)ops.close(ops.ctx);
     p9_srvconn_transport_destroy(&st);
     loom_unref(l);
+    cleanup_byte_mode_pair(server, client, conn_h);
+}
+
+// =============================================================================
+// 9p_srvconn_transport.pts_slave_spoor_classifies_t (H-4d-2a; the H-arc
+// round-1 C-F2). The SYS_FD_DEVCLASS 't' arm's unit POSITIVE: test_devdev's
+// arms are all negatives (cons 'c', null 'd', devsrv 's' -- never 't'), so a
+// regression answering '9' for a real slave passed every unit assertion and
+// was caught only by the ls-gfx-session E2E (a tile shell's armed line). This
+// composes the two fixtures that already exist -- the pts registry over a
+// real SrvConn (test_pts) and an OPEN dev9p client over the same conn (the
+// devgone test's handshake) -- into a dev9p Spoor whose (conn, qid) the
+// registry knows, and walks every arm one variable apart: the slave 't', the
+// master '9', an unbound qid '9', and the slave again after pts_free '9'
+// (the stale-pts fail-closed arm).
+// =============================================================================
+
+extern int spoor_devclass(struct Spoor *c);   // kernel/syscall.c (the syscall's body)
+
+void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void) {
+    srv_registry_reset();
+
+    struct Proc *server = NULL, *client = NULL;
+    int svc_h = -1, conn_h = -1;
+    struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+    TEST_ASSERT(cn != NULL, "open_byte_mode_pair");
+
+    // The registry half, as ptyfs does it: the server mints a pts on THIS
+    // conn (the master qid) and binds the slave qid at the slave's open.
+    const u64 master_qid = 7, slave_qid = 8, other_qid = 999;
+    s64 id = pts_mint(server, cn, master_qid);
+    TEST_ASSERT(id > 0, "pts_mint on the real conn");
+    TEST_EXPECT_EQ(pts_bind_slave(server, cn, slave_qid, (u64)id), 0, "slave bind");
+
+    // The Spoor half: an OPEN kernel 9P client over the SAME conn, and a
+    // dev9p Spoor on it (the test-path constructor: fid not owned, so its
+    // clunk sends no RPC).
+    struct p9_srvconn_transport st;
+    struct p9_transport_ops ops;
+    TEST_EXPECT_EQ(sc_open_handshaked(cn, &st, &ops), 0,
+        "handshake -> OPEN over the real srvconn");
+    struct Spoor *sp = dev9p_attach_client(&g_sc_client, /*root_fid=*/0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    TEST_EXPECT_EQ((long)sp->dc, (long)DEV9P_DC, "a dev9p Spoor carries '9'");
+    TEST_EXPECT_EQ((long)spoor_devclass(sp), (long)'9',
+        "the attach root (qid 0, never a pts) is a plain 9P file");
+
+    // The positive: the registered SLAVE qid on the bound conn answers 't'.
+    sp->qid.path = slave_qid;
+    TEST_EXPECT_EQ((long)spoor_devclass(sp), (long)'t',
+        "a registered pts SLAVE answers 't'");
+    // One variable apart, each: the master; an unbound qid on the same conn.
+    sp->qid.path = master_qid;
+    TEST_EXPECT_EQ((long)spoor_devclass(sp), (long)'9',
+        "the pts MASTER stays '9' (writing it is typing, not printing)");
+    sp->qid.path = other_qid;
+    TEST_EXPECT_EQ((long)spoor_devclass(sp), (long)'9',
+        "an unbound qid on the same conn is '9'");
+    // The stale-pts arm: free the pts and the slave qid falls closed again.
+    sp->qid.path = slave_qid;
+    TEST_EXPECT_EQ(pts_free(server, (u64)id), 0, "pts_free");
+    TEST_EXPECT_EQ((long)spoor_devclass(sp), (long)'9',
+        "a freed pts's slave qid answers '9' (fail closed, no stale 't')");
+
+    spoor_clunk(sp);                     // fid_owned=false: no Tclunk RPC
+    p9_client_destroy(&g_sc_client);
+    (void)ops.close(ops.ctx);            // teardown (idempotent) + drop adapter ref
+    p9_srvconn_transport_destroy(&st);
     cleanup_byte_mode_pair(server, client, conn_h);
 }

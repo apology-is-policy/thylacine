@@ -23,8 +23,8 @@ use alloc::vec::Vec;
 use cartoon::{Cartoon, GlyphRef, Op};
 use vt::ATTR_BOLD;
 
-use crate::raster::{GlyphSource, FACE_BODY, FACE_BODY_BOLD, FACE_MONO};
-use crate::transcript::{Block, BlockKind, Item, Style, TCell, EM_CODE, EM_DIM, EM_STRONG};
+use crate::raster::{GlyphSource, FACE_BODY, FACE_BODY_BOLD, FACE_BODY_ITALIC, FACE_MONO};
+use crate::transcript::{Block, BlockKind, Item, Style, TCell, EM_CODE, EM_DIM, EM_EMPH, EM_STRONG};
 
 /// The stylesheet: the paper-light theme's numbers (section 3 -- dark ink
 /// in full daylight). Colors are ARGB like everything in the weave.
@@ -127,16 +127,26 @@ pub struct LaidBlock {
     pub rects: Vec<RectSpec>,
 }
 
-fn face_for(st: &Style, in_table: bool) -> (u8, bool) {
+fn face_for(st: &Style, in_table: bool) -> u8 {
     if st.em == EM_CODE {
-        return (FACE_MONO, false);
+        return FACE_MONO;
     }
     let annotated = st.obj != 0 || st.em != 0 || st.hdr != 0 || in_table;
     if !annotated {
-        return (FACE_MONO, false);
+        return FACE_MONO;
     }
-    let bold = st.attrs & ATTR_BOLD != 0 || st.em == EM_STRONG || st.hdr != 0;
-    (if bold { FACE_BODY_BOLD } else { FACE_BODY }, bold)
+    // Genera type discipline (HALCYON.md section 3): bold is RESERVED for
+    // extreme emphasis -- em class=strong and foreign SGR bold, nothing else;
+    // emphasis and headings go ITALIC, with heading RANK carried by size
+    // (px_for), never weight -- bold headings are retired. Other annotated
+    // runs (an obj presentation, a table cell) stay regular body.
+    if st.em == EM_STRONG || st.attrs & ATTR_BOLD != 0 {
+        FACE_BODY_BOLD
+    } else if st.em == EM_EMPH || st.hdr != 0 {
+        FACE_BODY_ITALIC
+    } else {
+        FACE_BODY
+    }
 }
 
 fn color_for(st: &Style, sheet: &Sheet) -> u32 {
@@ -270,8 +280,12 @@ impl<'a> LineBuilder<'a> {
         src_item: usize,
         src_col: usize,
         bg: Option<u32>,
+        pre: bool,
     ) {
-        let (face, _) = face_for(st, in_table);
+        // PL-1b: a `pre` block forces mono (Cornucopia) regardless of a run's
+        // annotation, and never word-wraps -- the two properties that make a
+        // preformatted island (own ground + gutter added by the Item::Pre arm).
+        let face = if pre { FACE_MONO } else { face_for(st, in_table) };
         let px = px_for(st, self.sheet);
         let color = color_for(st, self.sheet);
         self.note_metrics(gs, face, px);
@@ -301,7 +315,8 @@ impl<'a> LineBuilder<'a> {
             if face != FACE_MONO && i + 1 < cells.len() {
                 gr.advance += gs.kern(face, px, ch, cells[i + 1].ch);
             }
-            if self.pen_x + gr.advance > self.width - self.sheet.pad_x && !seg.refs.is_empty() {
+            if !pre && self.pen_x + gr.advance > self.width - self.sheet.pad_x && !seg.refs.is_empty()
+            {
                 // Wrap: prefer the last space boundary inside this seg.
                 if let Some((cut, cut_col)) = last_space {
                     if cut > 0 && cut < seg.refs.len() {
@@ -425,7 +440,7 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                         } else {
                             None
                         };
-                    lb.lay_span(gs, &line.cells[s..e], &st, false, item_idx, s, bg);
+                    lb.lay_span(gs, &line.cells[s..e], &st, false, item_idx, s, bg, false);
                 }
                 lb.break_line(gs);
             }
@@ -442,6 +457,54 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                     color: sheet.rule,
                 });
                 lb.y += 7;
+            }
+            Item::Pre(lines) => {
+                // PL-1b: the preformatted code-fence island (HALCYON.md
+                // 110-113). Each line is laid MONO + verbatim (the `pre` flag
+                // forces the face and disables word-wrap), inset past a leading
+                // gutter. The own ground + the gutter rule are RectSpecs added
+                // AFTER the lines (their y-extent is now known); render_block
+                // paints rects before glyphs, so they sit BEHIND the mono text.
+                const PRE_GUTTER: i32 = 10; // the rule + its gap, the left inset
+                let top = lb.y;
+                for line in lines {
+                    lb.pen_x = sheet.pad_x + PRE_GUTTER;
+                    for (s, e, sid) in runs_of(&line.cells) {
+                        let st = b.styles[sid as usize];
+                        // A run's own SGR background still shows through; the
+                        // block ground is the default carrier otherwise.
+                        let bg = if st.bg != sheet.ground
+                            && st.bg != libhalcyon::theme::DAYLIGHT.surface
+                        {
+                            Some(st.bg)
+                        } else {
+                            None
+                        };
+                        lb.lay_span(gs, &line.cells[s..e], &st, false, item_idx, s, bg, true);
+                    }
+                    lb.break_line(gs);
+                }
+                let h = (lb.y - top).max(0) as u32;
+                if h > 0 {
+                    // The code-fence ground (Daylight `raised`, distinct from
+                    // the parchment surface) behind the whole block ...
+                    lb.rects.push(RectSpec {
+                        x: sheet.pad_x,
+                        y: top,
+                        w: (lb.width - 2 * sheet.pad_x).max(0) as u32,
+                        h,
+                        color: libhalcyon::theme::DAYLIGHT.raised,
+                    });
+                    // ... and the leading vertical gutter rule (the code-fence
+                    // marker, section 3's "leading vertical gutter rule").
+                    lb.rects.push(RectSpec {
+                        x: sheet.pad_x,
+                        y: top,
+                        w: 2,
+                        h,
+                        color: sheet.rule,
+                    });
+                }
             }
         }
         // Stamp the item's visual lines with their source address (tables
@@ -508,7 +571,7 @@ fn lay_table(
             let mut w = 0i32;
             for (s, e, sid) in runs_of(cell) {
                 let st = b.styles[sid as usize];
-                let (face, _) = face_for(&st, true);
+                let face = face_for(&st, true);
                 let px = px_for(&st, sheet);
                 for c in cell[s..e].iter() {
                     if let Some(gr) = gs.glyph(face, px, c.ch) {
@@ -554,7 +617,7 @@ fn lay_table(
                 // width is temporarily unbounded for the span.
                 let saved_w = lb.width;
                 lb.width = i32::MAX / 2;
-                lb.lay_span(gs, &cell[s..e], &st, true, item_idx, 0, None);
+                lb.lay_span(gs, &cell[s..e], &st, true, item_idx, 0, None, false);
                 lb.width = saved_w;
             }
         }
@@ -700,8 +763,50 @@ pub fn cursor_pos(laid: &LaidBlock, col: usize, sheet: &Sheet) -> (i32, i32, i32
     (sheet.pad_x, 0, 16)
 }
 
+/// PL-4: the pixel position of column `col` within ONE logical line of a
+/// multi-line laid block. `cursor_pos` counts a GLOBAL column across the whole
+/// block, which is wrong for the live grid, whose block holds many logical
+/// lines; this scopes to the LaidLines whose `src_item == item` (a logical
+/// line's wrapped pieces share it). `col` is the column within that logical
+/// line; the per-glyph `seg.xs` give the x directly. A column past the item's
+/// content lands at the end of its last laid line. Returns (x, line.y, line.h).
+pub fn caret_in_block(laid: &LaidBlock, item: usize, col: usize) -> (i32, i32, i32) {
+    let mut end: Option<(i32, i32, i32)> = None;
+    for line in laid.lines.iter() {
+        if line.src_item != item {
+            continue;
+        }
+        for seg in line.segs.iter() {
+            let n = seg.refs.len();
+            if col >= seg.src_col && col < seg.src_col + n {
+                return (seg.xs[col - seg.src_col], line.y, line.h);
+            }
+        }
+        let x = line.segs.last().map(|s| s.x_end).unwrap_or(0);
+        end = Some((x, line.y, line.h));
+    }
+    end.unwrap_or((0, 0, 16))
+}
+
 /// Emit a laid block into the cartoon at (0, y0): background rects first,
 /// then glyph runs (paint order is the op order).
+/// The visual span (block-relative y, height) of one source row -- a Line
+/// item, or one row of a table -- across its (possibly wrapped) laid lines.
+/// None when the row laid nothing.
+pub fn laid_line_for(laid: &LaidBlock, item: usize, row: usize) -> Option<(i32, i32)> {
+    let mut y0: Option<i32> = None;
+    let mut y1 = 0;
+    for l in laid.lines.iter() {
+        if l.src_item == item && l.src_row == row {
+            if y0.is_none() {
+                y0 = Some(l.y);
+            }
+            y1 = l.y + l.h;
+        }
+    }
+    y0.map(|y| (y, y1 - y))
+}
+
 pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &GlyphSource) {
     for r in laid.rects.iter() {
         cart.ops.push(Op::Rect {
@@ -766,6 +871,35 @@ mod tests {
             "obj at default ink takes the slate object colour"
         );
         assert!(line.segs[1].obj > 0, "the obj hit target rides the seg");
+    }
+
+    #[test]
+    fn genera_headings_and_emph_are_italic_strong_is_bold() {
+        // The Genera type discipline (HALCYON.md section 3): headings and
+        // emphasis go ITALIC, never bold; bold is reserved for strong (extreme
+        // emphasis) + foreign SGR bold. Heading RANK is size (px_for), not
+        // weight. This FAILS on the pre-PL-2 rule (hdr -> bold, emph -> body).
+        let base = Style { fg: 0, bg: 0, attrs: 0, em: 0, obj: 0, hdr: 0 };
+        let with = |em: u8, hdr: u8, attrs: u8| Style { em, hdr, attrs, ..base };
+
+        assert_eq!(face_for(&with(0, 1, 0), false), FACE_BODY_ITALIC, "hdr 1 is italic, never bold");
+        assert_eq!(face_for(&with(0, 3, 0), false), FACE_BODY_ITALIC, "hdr 3 is italic too");
+        assert_eq!(face_for(&with(EM_EMPH, 0, 0), false), FACE_BODY_ITALIC, "emph is italic");
+        assert_eq!(face_for(&with(EM_STRONG, 0, 0), false), FACE_BODY_BOLD, "strong is the reserved bold");
+        // An UN-annotated cell is mono even with SGR bold (today's model:
+        // un-annotated foreign output renders as a terminal; the bold check
+        // sits AFTER the annotated gate). PL-4 makes un-annotated proportional,
+        // at which point the annotated + SGR-bold -> bold path below applies live.
+        assert_eq!(face_for(&with(0, 0, ATTR_BOLD), false), FACE_MONO, "un-annotated SGR bold is still mono today");
+        assert_eq!(face_for(&with(0, 0, ATTR_BOLD), true), FACE_BODY_BOLD, "annotated + foreign SGR bold -> the reserved bold");
+        assert_eq!(face_for(&with(EM_CODE, 0, 0), false), FACE_MONO, "code is mono");
+        assert_eq!(face_for(&base, false), FACE_MONO, "un-annotated is mono");
+        assert_eq!(face_for(&Style { obj: 1, ..base }, false), FACE_BODY, "an obj presentation is regular body");
+        // px_for still carries heading rank by SIZE (unchanged), so italic
+        // headings are not flattened to one size.
+        let sheet = daylight_sheet();
+        assert!(px_for(&with(0, 1, 0), &sheet) > px_for(&with(0, 3, 0), &sheet), "hdr 1 > hdr 3 by size");
+        assert!(px_for(&with(0, 3, 0), &sheet) > px_for(&base, &sheet), "any heading > body by size");
     }
 
     #[test]
