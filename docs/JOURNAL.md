@@ -85,12 +85,30 @@ mux polling poll_fd) reads once; prowl/quarry (no mux) run the drain loop, now
 watching the ready fd -- the SOLE poller, avoiding the one-shot-cache two-poller
 busy-loop that run 41 had nearly shipped. prowl/quarry needed NO code change.
 
-**Open / owed.** A Fable soundness audit on F2 is IN FLIGHT
-(holotype-reviewer a876ee42fe356502e, model:fable, the kaua wake surface) --
-findings handled on completion. Runtime-confirms are GL-gated = the operator's
-session round (A fonts + D chrome + F2 interactivity: a rapid two-key sequence
-must land both keys) or a thyla-pi s7-nora-probe boot. Still owed: the batched
-Fable PL round for A+D; B (block-spacing, coupled to A's GL feedback); the
+**The F2 Fable audit closed clean-after-fixes.** The round (a876ee42fe356502e,
+Fable 5.1, MODEL start==end -- real, not a fallback) verified the central design
+SOUND (pts detection, the 24-bit n decode, no two-poller busy-loop of the
+one-shot ready cache, EOF/HUP, console unchanged, no fd leak) and found 2 P1 + 2
+P3. Both P1 were regressions I under-rated, and both are worth recording because
+the fixes are the reusable part: F1 -- nora's launch type-ahead stranded until
+the next key (my "minor one-keystroke delay" note under-rated a typed-ahead
+COMPLETE command reading as a HANG); the accurate ready fd had removed the old
+POLLIN-always instant wake that used to replay pending. F2 -- the external_mux
+branch flushed a bare ESC on every partial read, dropping the #173 protection,
+which corrupts a dribbled arrow on a RAW-forwarding pts (ptyhost/pouch-pty, not
+kaua-term -- my "kaua-term delivers whole sequences" was true only for that one
+host). Fixed @a2c065c1 (F1: drain_pending before the loop via a shared
+dispatch_input; F2: the branch first-reads then falls through to the drain
+holdoff, timeout reordered to check pending_escape first). F3/F4 (P3) deferred --
+both equal pre-fix behavior. The verify itself was the day's other milestone: the
+mac was busy (aux IM-3) and thyla-pi had NO Rust toolchain (it had only ever been
+a boot host receiving pre-built artifacts), so on the operator's word I installed
+rustup + the aarch64-unknown-none target there -- the pi is now a real second
+guest build host (rustc 1.98.1, kaua/nora clean in 24s), and a2c065c1 pushed.
+Runtime-confirms remain GL-gated = the operator's session round (A fonts + D
+chrome + F2 interactivity: a rapid two-key sequence must land both keys) or a
+thyla-pi s7-nora-probe boot. Still owed: the batched Fable PL round for A+D; B
+(block-spacing, coupled to A's GL feedback); the
 deferred polish in the commit bodies (Ad mono-cell compaction, orphaned
 third_party/dejavu-fonts removal, the D per-command exit-status feed, status.rs
 §7 mono, heading top-margins); the MEMORY.md index compaction (near its read
