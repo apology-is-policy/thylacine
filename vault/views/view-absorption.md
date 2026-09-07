@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**149 absorbed · 8 live · 157 total.**
+**150 absorbed · 7 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -182,7 +182,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 83-pouch-signals.md | absorbed | [[sub-pouch-signal]] |
 | 84-pouch-libsodium.md | absorbed | [[sub-pouch-seam]], [[sub-substrate-build]] |
 | 85-pouch-stratumd-build.md | absorbed | [[sub-pouch-net]], [[sub-pouch-seam]], [[sub-stratum-boot]], [[sub-stratum-session]], [[sub-substrate-build]] |
-| 86-pouch-stratumd-boot.md | live | — |
+| 86-pouch-stratumd-boot.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-content]], [[sub-kernel-exec]], [[sub-kernel-joey]], [[sub-kernel-ninep-client]], [[sub-kernel-srvconn]], [[sub-kernel-syscall-dispatch]], [[sub-kernel-territory]], [[sub-pouch-process]], [[sub-stratum-bdev]], [[sub-stratum-boot]] |
 | 87-pouch-fstat-lseek.md | absorbed | [[sub-pouch-fs]] |
 | 88-ninep.md | absorbed | [[sub-libthyla-rs]] |
 | 89-hardware.md | absorbed | [[moc-userspace-hardware]], [[sub-kernel-burrow]], [[sub-kernel-handle]], [[sub-libthyla-rs]], [[sub-netd-nic]] |
