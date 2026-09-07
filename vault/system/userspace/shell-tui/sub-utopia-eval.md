@@ -23,7 +23,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -75,6 +75,33 @@ ends option processing — the one way to enter a directory whose name begins wi
 `-`), and `BUILTIN_NAMES` — the list
 `is_builtin` tests and `type` answers from — agrees exactly with `try_builtin`'s
 dispatch arms.
+
+### The external spawn is one chokepoint, and `#!` is shell-side
+
+Every external spawn — foreground, the raw-mode TUI path, a redirected command,
+a pipeline element, and a background pipeline (five sites) — routes through
+`build_command(argv)`, so a script runs identically in every position
+(`./s.ut`, `./s.ut | grep x`, `./s.ut > out`, `./s.ut &`). Centralizing it is
+what lets the one interesting thing it does happen everywhere at once.
+
+That thing is `#!`. The kernel loads ELF only (ARCH §9.6.8); the shebang is a
+**shell-side** convention, kept out of the kernel exactly as Plan 9 keeps it out
+of its exec. `prepare_argv` resolves `argv[0]` through `$path`, then
+`peek_shebang` reads the first 128 bytes and `parse_shebang_line` (pure,
+host-tested) recognizes `#!interp [arg]`: a match rewrites the argv to
+`[resolve($path, interp), arg?, prog, args…]` — the interpreter itself
+`$path`-resolved, so `#!ut` works as well as `#!/bin/ut` — with at most **one**
+argument after the interpreter (the Linux/BSD convention, the trimmed remainder
+of the first line, no further word-splitting). A non-match (an `\x7fELF` head, an
+unreadable file, any non-`#!` head) passes through unchanged; the shell never
+re-peeks the interpreter, so there is no recursion (a non-ELF interpreter just
+fails the kernel's ELF load with status 127).
+
+The permission shape is Unix's, and it falls out of the mechanism rather than
+being re-checked: reading the script to peek needs the caller's **R**, and the
+kernel still gates the actual exec on the `OEXEC` **X**-bit — so a script needs
+both, and the shell adds no gate of its own. A spawn failure (bad `$path`, a
+kernel rejection) sets `$status = 127`, the bash convention.
 
 ### Implicit-fail is a mode, not a flag on the command
 
