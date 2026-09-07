@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/00-overview (the bird's-eye index): redirect to the vault dashboard + area MOCs + views"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["ecef8c8e"]
 touched: []
 established: []
 closed: []
