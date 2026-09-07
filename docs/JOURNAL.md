@@ -23,6 +23,76 @@ needed the operator.
 
 ---
 
+## Run 37 cont'd #9 (vault, 2026-09-07, Opus 4.8, effort max): the docs/reference retirement redirect phase finishes -- 152/157, and the 5 that remain have nowhere to redirect to
+
+**The arc.** The operator-ratified docs/reference retirement drives ~157 legacy
+`docs/reference/NN-*.md` files into the vault as `[ABSORBED INTO THE VAULT]`
+redirect stubs, by verifying the owning dossier's currency atom-by-atom, folding
+any genuine gap (code-grounded), and writing a multi-redirect stub with an honest
+"what it got wrong". This run (post-self-compact at the prior 600k line) took it
+from 141/16 to **152/5**, and with that **the redirect phase is complete**: every
+file that has a covering dossier is now a stub. The 5 that remain are all
+*uncovered* surfaces -- no dossier exists -- whose ratified disposition is "leave
+live + file the sweep", so they stop the sweep by definition.
+
+**Eleven docs, all lint-0-fail and dual-pushed** (`003d538e..29621aed`). Seven
+carried a code-grounded fold, each rescuing a load-bearing atom that lived only in
+a doc about to become a stub:
+
+- **parley `f6d3b0eb`** -- the four in-guest probes (parley-probe/echo, lsp-probe,
+  dap-probe) were UNOWNED orphans the dossier's proof story rests on; folded + a
+  new In-guest-proofs section (lsp-probe asserts the planted diagnostic *line*
+  against real gopls; dap-probe the `0x0AABB00DCAFE0001` sentinel against real
+  `ambush dap-stdio`; the vacuous-green lesson).
+- **nora `7783e09b`** -- the I-39-authorized `/proc/<pid>/kstack` read
+  (`dap_host::refresh_kernel_frames`, owner-axis via the shared login principal);
+  sub-nora-host's Invariants said "no kernel object" -- now I-39-*consumed*.
+- **diorama `df283d7a`** -- the SA-4 vDSO clock fast-path + the MIDR-0x00
+  legitimate-zero / test.sh-vs-TCG harness lesson, into an audit:hard dossier that
+  was STALE by +324 lines.
+- **utopia-eval `57d965e4`** -- the external-spawn chokepoint `build_command` + the
+  shell-side `#!` shebang (kernel loads ELF only; R-to-peek + X-to-exec),
+  stmt.rs:611/632/660/673.
+- **utopia-line-editor `e9fda668`** -- `Repl::run_script` script mode, owed from
+  the eval redirect (interactive=false fail-fast; repl.rs:805).
+- **vivarium `b99119f8`** (the dedicated pass, 3792L) -- the ^C-reaches-the-
+  container masks into sub-viv: `viv` masks `interrupt` at startup so a native
+  container member does not die of an uncaught `^C`; a native child gets a ZERO
+  mask because `rfork_internal` copies `note_mask` only when the parent is
+  PHENO_LINUX (proc.c:1614); the tty family stays unmasked for ^Z/hangup/^\; the
+  diorama masks both. Residue all resolved (per-note-sigtab / V-8 / T1-T2 /
+  DISTRO-D1..D4 covered; D-5 is a build/test bundle).
+- **userspace `6596a0e4`** -- clean multi-redirect (libt-C legacy ->
+  sub-kernel-syscall-abi, libthyla-rs -> sub-libthyla-rs, the build ->
+  sub-substrate-build).
+
+Four were clean redirects to fresh, ahead-of-the-doc dossiers (utopia-parser,
+halcyond [all 6 audit anchors verified], pouch-stratumd-boot [2189L, the
+Stratum `src/` is carried by the vault's own stratum area], 00-overview [a stale
+Phase-0 scaffold -> the dashboard + area MOCs + views]).
+
+**The wrong turn, caught.** On diorama my first coverage census used `\|` under
+`grep -E`, which reads it as a *literal*, not ERE alternation -- so it reported
+the core security atoms (deputy/msize/readdir/self-only) all absent from an
+audit:hard dossier that in fact carried every one of them, and is *ahead* of the
+doc (the V-7 vivarium mode, #182). Reading the full dossier before trusting the
+census is what caught it; the fold shrank from "a whole audit round missing" to
+two genuine P3 code-deltas. The lesson: when a census says a core atom is
+missing, read the dossier -- the census is likelier wrong than the dossier.
+
+**What's open.** The 5 uncovered surfaces need dossiers *authored* -- a distinct
+arc needing operator steer, not a redirect: **142-sdl-port** (audit-bearing --
+I-42 CAP_JIT/W^X + the W-3e Vulkan glue; `ports/` dossier dir is empty; note the
+`thyla_capjit.h` the doc names is a phantom, the once-flag lives in
+SDL_thylacineopengl.c), **143-tyrquake** (the Quake port, consumer of sdl-port's
+GL path), **150-build-config** (the `tools/` build-config surface + DEV_ACCOUNTS
++ the UNOWNED `usr/Cargo.toml`), and the two benches **129-fsbench** / **41-irq-bench**
+(single-file, audit:none-tier, low dossier value). The full backlog with tiers is
+in `memory/project_vault_arc.md` (SWEEP @29621aed).
+
+
+---
+
 ## Run 38 (main, 2026-09-06, Opus 4.8, effort max): s7a -- nora follows the Halcyon session palette, and the two things reasoning caught before a boot could
 
 **The arc.** s7 is the operator's worst residual Halcyon P0: an editor opened
