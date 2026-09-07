@@ -59,6 +59,7 @@ the planned nine were dropped per the 2026-05-23 spec-to-code suspension:
 | `loom.tla` | Loom-1 | Completion integrity (I-29), submit pin (I-30) |
 | `loom_multishot.tla` | Loom-5 | I-29 generalized to a CQE stream |
 | `loom_order.tla` | Loom-5 | LINK/DRAIN ordering + cancel completeness |
+| `imperium.tla` | IM-2 | The fork-PROPAGATING legate scope (I-25 strengthened): no elevated Proc outlives its anchor root; flow only under propagation, never widening; one scope per Proc, traits set once; ScopeEventuallyEmpty. 4 buggy cfgs |
 
 ---
 

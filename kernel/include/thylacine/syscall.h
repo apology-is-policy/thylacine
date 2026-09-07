@@ -2214,6 +2214,23 @@ enum {
     //
     //   Audit-bearing: the IM-1 trusted-episode row (AUDIT-TRIGGERS.md).
     SYS_CONSOLE_EPISODE = 110,   // arg: op(x0)
+
+    // IM-2 (IMPERIUM-DESIGN.md 11.4; I-25 STRENGTHENED; specs/imperium.tla):
+    // SYS_CAP_GRANT_IMPERIUM(cap_mask, target_stripes, valid_for_ns,
+    // session_id, flags) -> 0 / -1 -- the clearance grant with a FLAGS word
+    // (the 40-byte /cap/grant form; the syscall bridge because corvus is
+    // chrooted, exactly as SYS_CAP_GRANT_CLEARANCE). flags == 0 is a plain
+    // clearance grant. CAP_GRANT_FLAG_PROPAGATING (1) makes the scope the
+    // redeemer creates a PROPAGATING one: the redeemed caps (bounded to
+    // CAP_GRANTABLE_IMPERIUM = DAC_OVERRIDE|CHOWN|KILL) FLOW to its rfork
+    // descendants, which die with it. Gated on CAP_GRANT_CLEARANCE (corvus).
+    // The REDEEM still rides SYS_CAP_USE; a PROPAGATING grant is redeemable
+    // only by a Proc in NO scope (propagating never nests -- abdicate first).
+    // -1 on any clearance-grant failure, an unknown flag bit, or a
+    // PROPAGATING cap_mask outside CAP_GRANTABLE_IMPERIUM.
+    //   x0 = cap_mask, x1 = target_stripes, x2 = valid_for_ns,
+    //   x3 = session_id, x4 = flags
+    SYS_CAP_GRANT_IMPERIUM = 111,
 };
 
 // SYS_CONSOLE_EPISODE ops (x0). ABI: mirrored by libthyla-rs

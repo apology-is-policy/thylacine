@@ -9859,18 +9859,25 @@ static s64 sys_rfork_core(struct exception_context *ctx, unsigned flags,
     };
 
     // I-43 (VIVARIUM.md): a Linux fork INHERITS the parent's capabilities, so
-    // the PHENO_LINUX clone path forks with CAP_ALL as the mask -- which
+    // the PHENO_LINUX clone path forks with the FULL inheritable mask -- which
     // rfork_internal intersects with the parent's actually-held caps and then
-    // strips ~CAP_ELEVATION_ONLY, so the child gets exactly parent_caps minus
-    // elevation (I-2: <= parent, never grown; elevation never propagates by
-    // inheritance). Without this a shell-forked phenotype program (git,
-    // anything) loses every cap the container was granted -- getrandom(2), for
-    // one, would fail in a forked child that the entrypoint could call fine.
+    // strips the elevation-only bits, CARVED by the parent's legate scope
+    // (IM-2): the child gets parent_caps minus elevation, plus exactly the
+    // caps a PROPAGATING scope flows (I-2: <= parent, never grown; elevation
+    // propagates only by that carve). The mask names CAP_ELEVATION_ONLY too
+    // because the carve, not the mask, is what bounds the flow: with CAP_ALL
+    // alone a Linux child of an imperium sub-shell would be LESS elevated than
+    // a native child spawned with a full mask -- a phenotype conferring less
+    // authority is as much an I-43 breach as one conferring more. Pre-IM-2 the
+    // two masks were bit-identical after the unconditional strip. Without the
+    // inheritance a shell-forked phenotype program (git, anything) loses every
+    // cap the container was granted -- getrandom(2), for one, would fail in a
+    // forked child that the entrypoint could call fine.
     // NATIVE fork keeps CAP_NONE (Thylacine's stronger fork-zeros-caps default):
     // a native program confers caps explicitly at spawn, never by inheritance.
     struct Proc *p = t->proc;
     int pid = (p && p->phenotype == PHENO_LINUX)
-                  ? rfork_forked_with_caps(flags, &fc, CAP_ALL)
+                  ? rfork_forked_with_caps(flags, &fc, CAP_ALL | CAP_ELEVATION_ONLY)
                   : rfork_forked(flags, &fc);
     if (pid < 0) return -(s64)T_E_AGAIN;
 
@@ -10219,6 +10226,23 @@ static s64 sys_cap_grant_clearance_handler(u64 cap_mask, u64 target_stripes,
     if (!t || !t->proc)                                    return -1;
     long rc = cap_register_clearance_grant_for_writer(
         t->proc, (caps_t)cap_mask, target_stripes, valid_for_ns, session_id);
+    return (rc >= 0) ? 0 : -1;
+}
+
+// SYS_CAP_GRANT_IMPERIUM (IM-2; IMPERIUM-DESIGN.md 11.4) -- the clearance
+// grant with a flags word (the 40-byte /cap/grant form), same chrooted-corvus
+// bridge reasoning as SYS_CAP_GRANT_CLEARANCE. Forwards to
+// cap_register_imperium_grant_for_writer, which enforces the CAP_GRANT_-
+// CLEARANCE gate, every clearance bound, the flag set and the PROPAGATING
+// cap bound (CAP_GRANTABLE_IMPERIUM). The redeem rides SYS_CAP_USE.
+static s64 sys_cap_grant_imperium_handler(u64 cap_mask, u64 target_stripes,
+                                          u64 valid_for_ns, u64 session_id,
+                                          u64 flags) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                                    return -1;
+    long rc = cap_register_imperium_grant_for_writer(
+        t->proc, (caps_t)cap_mask, target_stripes, valid_for_ns, session_id,
+        flags);
     return (rc >= 0) ? 0 : -1;
 }
 
@@ -14408,6 +14432,12 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_CAP_GRANT_CLEARANCE:
         ctx->regs[0] = (u64)sys_cap_grant_clearance_handler(
             ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_CAP_GRANT_IMPERIUM:
+        ctx->regs[0] = (u64)sys_cap_grant_imperium_handler(
+            ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3],
+            ctx->regs[4]);
         return;
 
     case SYS_BOOT_COMPLETE:

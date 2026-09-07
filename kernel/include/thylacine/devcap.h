@@ -94,8 +94,34 @@ _Static_assert((CAP_GRANTABLE & ~(caps_t)CAP_ELEVATION_ONLY) == 0,
                "hostowner grant may confer only elevation-only (rfork-stripped) caps.");
 _Static_assert((CAP_GRANTABLE_CLEARANCE & ~(caps_t)CAP_ELEVATION_ONLY) == 0,
                "CAP_GRANTABLE_CLEARANCE must be a subset of CAP_ELEVATION_ONLY so "
-               "legate scope members stay UNELEVATED (I-25). Adding a fork-grantable "
-               "cap here would let an elevated scope member outlive the scope.");
+               "the scope teardown is the ONLY way a redeemed cap leaves a Proc "
+               "(I-25): a fork-grantable cap here would cross rfork by the ordinary "
+               "mask path, outside the IM-2 propagation carve, and an elevated "
+               "descendant could outlive the scope.");
+
+// IM-2 (IMPERIUM-DESIGN.md 11.4; I-25 STRENGTHENED): the PROPAGATING-grantable
+// subset -- the caps a CAP_GRANT_FLAG_PROPAGATING grant may carry, i.e. the
+// caps that may FLOW to a legate root's rfork descendants. Exactly the
+// imperium level (11.5): the fs-admin pair + the kill axis. Deliberately NOT
+// the whole clearance set: CAP_DEBUG propagating would hand a debugger's own
+// debuggee the debug authority (I-39's two-axis gate is per-grant), CAP_JIT is
+// "non-heritable" by I-42's letter (a bounded legate, never inheritance), and
+// CAP_AUDIO_GRAPH is the whole-sink authority I-46 grants per program. Those
+// three stay plain (non-propagating) clearances, so their heritability clauses
+// hold BY CONSTRUCTION here, not by corvus's policy alone. A PROPAGATING grant
+// whose cap_mask escapes this mask is rejected at register.
+#define CAP_GRANTABLE_IMPERIUM  (CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL)
+_Static_assert((CAP_GRANTABLE_IMPERIUM & ~(caps_t)CAP_GRANTABLE_CLEARANCE) == 0,
+               "CAP_GRANTABLE_IMPERIUM must be a subset of CAP_GRANTABLE_CLEARANCE: "
+               "a propagating grant is a clearance grant with a flag, never a "
+               "wider one.");
+
+// /grant flags -- the 40-byte form's fifth word (SYS_CAP_GRANT_IMPERIUM x4).
+//   CAP_GRANT_FLAG_PROPAGATING: the redeemed caps FLOW to the root's rfork
+//   descendants (LEGATE_FLAG_PROPAGATING on the scope); redeemable only by an
+//   UNSCOPED Proc (propagating never nests). Any other bit is rejected.
+#define CAP_GRANT_FLAG_PROPAGATING  (1ull << 0)
+#define CAP_GRANT_FLAGS_VALID       (CAP_GRANT_FLAG_PROPAGATING)
 
 // /grant write payload -- hostowner form, fixed-size 16-byte message:
 //   bytes [0..8)   cap_mask        u64 LE
@@ -114,6 +140,19 @@ _Static_assert((CAP_GRANTABLE_CLEARANCE & ~(caps_t)CAP_ELEVATION_ONLY) == 0,
 //   bytes [24..32)  session_id      u64 LE   (corvus audit tag; must be nonzero
 //                                             and fit in u32)
 #define CAP_GRANT_CLEARANCE_WRITE_LEN  32u
+
+// /grant write payload -- IM-2 imperium form, fixed-size 40-byte message: the
+// clearance form + a flags word. Length-discriminated like the others (16 /
+// 32 / 40 never collide). A 40-byte write with flags == 0 is exactly a
+// clearance grant.
+//   bytes [0..8)    cap_mask        u64 LE   (subset of CAP_GRANTABLE_CLEARANCE;
+//                                             of CAP_GRANTABLE_IMPERIUM when
+//                                             PROPAGATING is set)
+//   bytes [8..16)   target_stripes  u64 LE
+//   bytes [16..24)  valid_for_ns    u64 LE
+//   bytes [24..32)  session_id      u64 LE
+//   bytes [32..40)  flags           u64 LE   (CAP_GRANT_FLAGS_VALID bits only)
+#define CAP_GRANT_IMPERIUM_WRITE_LEN  40u
 
 // /use write payload -- fixed-size 8-byte message (both kinds):
 //   bytes [0..8)   cap_mask  u64 LE   (the cap-set the writer is redeeming;
@@ -188,6 +227,20 @@ long cap_register_clearance_grant_for_writer(struct Proc *writer,
                                              caps_t cap_mask, u64 target_stripes,
                                              u64 valid_for_ns, u64 session_id);
 
+// cap_register_imperium_grant_for_writer — the IM-2 /grant core (40-byte form;
+// SYS_CAP_GRANT_IMPERIUM). The clearance core with a `flags` word: everything
+// cap_register_clearance_grant_for_writer checks, PLUS flags must be within
+// CAP_GRANT_FLAGS_VALID, and a PROPAGATING grant's cap_mask must be within
+// CAP_GRANTABLE_IMPERIUM. The clearance core IS this with flags == 0.
+//
+// Returns CAP_GRANT_IMPERIUM_WRITE_LEN on success, -1 on any clearance-core
+// failure or: flags carries an unknown bit; PROPAGATING with a cap outside
+// CAP_GRANTABLE_IMPERIUM.
+long cap_register_imperium_grant_for_writer(struct Proc *writer,
+                                            caps_t cap_mask, u64 target_stripes,
+                                            u64 valid_for_ns, u64 session_id,
+                                            u64 flags);
+
 // cap_redeem_grant_for_writer — the /use write core. Does ONE locked lookup
 // of the pending grant for the writer's stripes (so the grant's kind is read
 // atomically -- no peek/redeem TOCTOU), then branches on the kind:
@@ -197,15 +250,20 @@ long cap_register_clearance_grant_for_writer(struct Proc *writer,
 //     v1.0 hostowner semantics.
 //   CLEARANCE grant (A-4a): NO console gate (auth was corvus-side before the
 //     grant was registered); the requested cap-set must be a non-empty SUBSET
-//     of the granted set (the self-restriction, I-2); makes the writer a legate
-//     root via proc_become_legate (stamps the cleared caps + the scope context).
+//     of the granted set (the self-restriction, I-2); stamps the writer via
+//     proc_become_legate -- a FRESH legate root for an unscoped writer, a
+//     FURTHER redeem (caps OR'd, tag kept) for one already in a scope (IM-2,
+//     G6). A PROPAGATING grant (CAP_GRANT_FLAG_PROPAGATING) redeemed by a
+//     writer already in ANY scope is REFUSED without consuming: propagating
+//     never nests. The stamp runs under the table lock, which serializes two
+//     redeems by peer threads of one Proc.
 //
 // Either kind consumes the grant on success (one-shot). Returns
 // CAP_USE_WRITE_LEN on success, -1 on: writer stripes == 0, requested == 0, no
 // matching pending grant (none / expired), or a per-kind gate failure (no
-// console for hostowner, cap mismatch, requested escapes the granted set). A
-// kind/gate failure does NOT consume the grant (the legitimate holder may still
-// redeem).
+// console for hostowner, cap mismatch, requested escapes the granted set, the
+// propagating-nest refusal). A kind/gate failure does NOT consume the grant
+// (the legitimate holder may still redeem).
 //
 // Tests call this directly; production path is devcap_write on a /use Spoor.
 long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask);

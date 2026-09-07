@@ -171,6 +171,7 @@ void test_proc_group_terminate_smoke(void);
 void test_proc_legate_scope_teardown(void);
 void test_proc_legate_teardown_except_and_zero(void);
 void test_proc_legate_teardown_from_zombie_chokepoint(void);
+void test_proc_rfork_refused_while_terminating(void);   // IM-2: the straggler close
 void test_pgrp_defaults_and_inherit(void);
 void test_pgrp_setsid_semantics(void);
 void test_pgrp_setpgid_rule_matrix(void);
@@ -635,6 +636,8 @@ void test_devproc_walk_unknown_pid_misses(void);
 void test_devproc_walk_to_status_file(void);
 void test_devproc_walk_dotdot_to_root(void);
 void test_devproc_read_status_format(void);
+void test_devproc_imperium_read_gated(void);   // IM-2: /proc/<pid>/imperium gate
+void test_devproc_read_imperium_format(void);  // IM-2: /proc/<pid>/imperium line
 void test_proc_cpu_ns_accounting(void);     // prowl-1: name + run_ns substrate
 void test_sched_prowl_counters(void);       // prowl-3a: per-thread sched counters + per-CPU idle_ns
 void test_devproc_read_cmdline_kproc(void);
@@ -1055,6 +1058,11 @@ void test_devcap_clearance_cross_stripes(void);
 void test_devcap_clearance_valid_until(void);
 void test_devcap_clearance_kind_isolation(void);
 void test_devcap_clearance_audio_graph(void);
+// IM-2: the propagating grant form + the two redeem arms + the nest refusal.
+void test_devcap_imperium_grant_gate_and_bounds(void);
+void test_devcap_imperium_redeem_propagating(void);
+void test_devcap_imperium_nest_refused(void);
+void test_devcap_further_redeem_keeps_scope(void);
 void test_srvconn_create_destroy(void);
 void test_srvconn_roundtrip(void);
 void test_srvconn_ring_capacity(void);
@@ -1571,6 +1579,10 @@ void test_caps_rfork_with_caps_clamps_to_parent(void);
 void test_caps_rfork_with_caps_zero_mask(void);
 void test_caps_rfork_strips_elevation_only(void);
 void test_caps_rfork_inherits_legate_scope(void);
+// IM-2: the propagation carve at rfork (flow / no flow / mask-bounded).
+void test_caps_rfork_flows_under_propagating_scope(void);
+void test_caps_rfork_no_flow_without_propagating(void);
+void test_caps_rfork_flow_bounded_by_mask(void);
 void test_mmio_handle_create_basic(void);
 void test_mmio_handle_create_misaligned_rejected(void);
 void test_mmio_handle_create_zero_size_rejected(void);
@@ -1779,6 +1791,8 @@ struct test_case g_tests[] = {
     { "pts.teardown_hup_cont",         test_pts_teardown_hup_cont,         false, NULL },
     { "proc.legate_teardown_from_zombie_chokepoint",
                                        test_proc_legate_teardown_from_zombie_chokepoint, false, NULL },
+    { "proc.rfork_refused_while_terminating",
+                                       test_proc_rfork_refused_while_terminating, false, NULL },
     { "proc.wait_pid_for_no_match",    test_proc_wait_pid_for_no_match,    false, NULL },
     { "proc.wait_pid_for_wnohang_alive_then_reap",
                                        test_proc_wait_pid_for_wnohang_alive_then_reap, false, NULL },
@@ -2355,6 +2369,8 @@ struct test_case g_tests[] = {
     { "devproc.walk_to_status_file",   test_devproc_walk_to_status_file,   false, NULL },
     { "devproc.walk_dotdot_to_root",   test_devproc_walk_dotdot_to_root,   false, NULL },
     { "devproc.read_status_format",    test_devproc_read_status_format,    false, NULL },
+    { "devproc.imperium_read_gated",   test_devproc_imperium_read_gated,   false, NULL },
+    { "devproc.read_imperium_format",  test_devproc_read_imperium_format,  false, NULL },
     { "proc.cpu_ns_accounting",        test_proc_cpu_ns_accounting,        false, NULL },
     { "scheduler.prowl_counters",      test_sched_prowl_counters,          false, NULL },
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
@@ -2711,6 +2727,10 @@ struct test_case g_tests[] = {
     { "devcap.clearance_grant_bad_args",      test_devcap_clearance_grant_bad_args,      false, NULL },
     { "devcap.clearance_redeem_basic",        test_devcap_clearance_redeem_basic,        false, NULL },
     { "devcap.clearance_audio_graph",         test_devcap_clearance_audio_graph,         false, NULL },
+    { "devcap.imperium_grant_gate_and_bounds", test_devcap_imperium_grant_gate_and_bounds, false, NULL },
+    { "devcap.imperium_redeem_propagating",   test_devcap_imperium_redeem_propagating,   false, NULL },
+    { "devcap.imperium_nest_refused",         test_devcap_imperium_nest_refused,         false, NULL },
+    { "devcap.further_redeem_keeps_scope",    test_devcap_further_redeem_keeps_scope,    false, NULL },
     { "devcap.clearance_self_restriction",    test_devcap_clearance_self_restriction,    false, NULL },
     { "devcap.clearance_redeem_beyond_grant", test_devcap_clearance_redeem_beyond_grant, false, NULL },
     { "devcap.clearance_one_shot",            test_devcap_clearance_one_shot,            false, NULL },
@@ -3461,6 +3481,15 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "caps.rfork_inherits_legate_scope",
                                        test_caps_rfork_inherits_legate_scope,
+                                                                           false, NULL },
+    { "caps.rfork_flows_under_propagating_scope",
+                                       test_caps_rfork_flows_under_propagating_scope,
+                                                                           false, NULL },
+    { "caps.rfork_no_flow_without_propagating",
+                                       test_caps_rfork_no_flow_without_propagating,
+                                                                           false, NULL },
+    { "caps.rfork_flow_bounded_by_mask",
+                                       test_caps_rfork_flow_bounded_by_mask,
                                                                            false, NULL },
     { "mmio_handle.create_basic",      test_mmio_handle_create_basic,      false, NULL },
     { "mmio_handle.create_misaligned_rejected",

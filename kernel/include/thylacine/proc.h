@@ -903,6 +903,28 @@ struct Proc {
     // group-terminate set it; the single-thread exits() path passes its own code
     // straight to proc_become_zombie_locked and never consults this).
     int group_exit_code;
+
+    // IM-2 (IMPERIUM-DESIGN.md 11.4; I-25 STRENGTHENED; specs/imperium.tla):
+    // the fork-PROPAGATING legate scope. Appended at the tail so no existing
+    // offset moves. Both belong to the A-4a legate block above in meaning --
+    // they inherit across rfork with the tag, KP_ZERO reads as not-a-legate --
+    // and are written by the same single site (proc_become_legate).
+    //   legate_caps  -- the set that FLOWS at rfork. On the root: the cap set
+    //     of the redeemed grant (propagating or not). On a member: exactly
+    //     what flowed in (the parent's legate_caps iff the scope propagates,
+    //     else 0). A FURTHER redeem ORs into `caps` only; this set is fixed
+    //     when the scope is joined (imperium.tla ScopeTraitsSetOnce), so a
+    //     member's later CAP_JIT never flows to its children.
+    //   legate_flags -- LEGATE_FLAG_PROPAGATING: the scope property. Lives in
+    //     the legate block (INHERITED, as a MEMBER property) rather than in
+    //     proc_flags (which never inherit): every Proc of a scope carries the
+    //     same value (imperium.tla PropagatingIsScopeWide), so rfork reads its
+    //     own parent's copy without a table walk and /proc/<pid>/imperium
+    //     reports a scope fact.
+    //   Both are written BEFORE the legate_scope_id RELEASE store; a reader
+    //   that ACQUIRE-loads scope_id first (rfork does) sees them coherent.
+    caps_t             legate_caps;
+    u32                legate_flags;
 };
 
 // VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
@@ -932,6 +954,14 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // its scope on every death path (clean exit AND kill / group-terminate;
 // A-4a audit F1). I-25.
 #define PROC_FLAG_LEGATE_ROOT       (1u << 5)
+// IM-2: Proc.legate_flags bits (NOT proc_flags -- these INHERIT across rfork
+// with the legate tag). LEGATE_FLAG_PROPAGATING marks a scope whose redeemed
+// caps (legate_caps) FLOW to rfork children: set on the root from the grant's
+// CAP_GRANT_FLAG_PROPAGATING, copied to every member. A scope's value never
+// changes after the join (a further redeem keeps it; a PROPAGATING redeem on a
+// Proc already in any scope is refused -- propagating never nests).
+#define LEGATE_FLAG_PROPAGATING     (1u << 0)
+#define LEGATE_FLAGS_VALID          (LEGATE_FLAG_PROPAGATING)
 // LS-5 (P2 default disposition, ARCH 8.8.2): marks a Proc that opened its
 // notes fd (devnotes, via SYS_NOTE_OPEN) -- it has declared it consumes its
 // OWN notes (the shell's wait_pids_interruptible notes-fd poll). The
@@ -1056,7 +1086,10 @@ _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) =
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 392,
+_Static_assert(sizeof(struct Proc) == 408,
+ "struct Proc size: IM-2 appended the propagating-legate pair (legate_caps "
+ "u64 + legate_flags u32, tail-padded to the 8-byte struct alignment): "
+ "392 -> 408. Before that: "
  "struct Proc size pinned at 376 bytes. LINEAGE L-1 took it 408 -> 376: "
  "seven fields left for struct AddrSpace and one pointer replaced them. "
  "The growth history below is the PRE-L-1 layout's, kept because its "
@@ -1176,6 +1209,13 @@ _Static_assert(__builtin_offsetof(struct Proc, legate_session_id) == 224,
  "A-4a legate block appends after group_exit_msg; existing "
  "offsets stay stable (KP_ZERO inits the new tail to "
  "not-a-legate).");
+_Static_assert(__builtin_offsetof(struct Proc, legate_caps) == 392,
+ "IM-2: the propagating-legate pair appends at the TAIL (after "
+ "group_exit_code) so no existing offset moves; KP_ZERO inits it to "
+ "nothing-flows.");
+_Static_assert(__builtin_offsetof(struct Proc, legate_flags) == 400,
+ "IM-2: legate_flags follows legate_caps; the 4-byte tail pad to the "
+ "8-byte struct alignment is deliberate (the next u32 field lands there).");
 // CL-5 page_budget, placed by the aux-2 merge. On main it sat at 392 in a
 // 400-byte Proc; aux's L-1 had moved the whole address-space block OUT of Proc
 // (pgtable_root, vma_lock, vma_count, page_count, shared_map_pages,
@@ -2229,23 +2269,34 @@ void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
 // A-4a: the legate stamp (the single audited legate-creation write site).
 // =============================================================================
 //
-// proc_become_legate — make `p` a legate ROOT (IDENTITY-DESIGN.md §9.8, I-25).
-// The ONLY function that creates a legate; called from the `cap` device
-// clearance redeem (devcap.c::cap_redeem_grant_for_writer) after it validated
-// the pending clearance grant. Atomically ORs `caps_to_or` (already narrowed by
-// the redeem's self_restriction to a subset of the grant) into p->caps, records
-// the scope context (a FRESH kernel-allocated legate_scope_id -- NEVER caller-
-// supplied, since it is the teardown-walk match key and a collision would tear
-// down the wrong subtree -- plus the corvus-supplied session_id + the computed
-// valid_until), and sets PROC_FLAG_LEGATE_ROOT. Durable principal_id is
-// UNCHANGED (scripture §3.1: the legate is the same human, more authority).
-// `caps_to_or` is OR'd with __ATOMIC_ACQ_REL (multi-thread Procs exist since
+// proc_become_legate — the legate stamp (IDENTITY-DESIGN.md §9.8, I-25; since
+// IM-2 also IMPERIUM-DESIGN.md 11.4 / specs/imperium.tla RedeemFresh +
+// RedeemFurther). The ONLY function that creates or extends a legate; called
+// from the `cap` device clearance redeem (devcap.c::cap_redeem_grant_for_writer)
+// after it validated the pending grant, UNDER the cap-table lock, which is what
+// serializes two redeems by peer threads of one Proc (without it both could
+// read scope 0 and mint two roots, the second overwriting the first's flowing
+// set). Two arms, decided on p->legate_scope_id:
+//   FRESH (scope 0): a FRESH kernel-allocated legate_scope_id -- NEVER caller-
+//     supplied, since it is the teardown-walk match key and a collision would
+//     tear down the wrong subtree -- plus the corvus-supplied session_id, the
+//     computed valid_until, legate_caps = `caps_to_or` (the set that flows) and
+//     legate_flags; PROC_FLAG_LEGATE_ROOT set. The block is written before the
+//     scope_id RELEASE store so an ACQUIRE reader of scope_id sees it whole.
+//   FURTHER (scope set): ONE scope per Proc, set once (G6; retires A-4a F2's
+//     re-tag). ORs `caps_to_or` into p->caps and keeps the tag, the root status,
+//     legate_caps and legate_flags; legate_valid_until becomes the EARLIER
+//     nonzero deadline. A PROPAGATING further redeem is REFUSED (-1) --
+//     propagating never nests; abdicate first.
+// `caps_to_or` (already narrowed by the redeem's self_restriction to a subset
+// of the grant) is OR'd with __ATOMIC_ACQ_REL (multi-thread Procs exist since
 // P6; a sibling thread may read p->caps in a concurrent syscall cap-check).
+// Durable principal_id is UNCHANGED (scripture §3.1: the legate is the same
+// human, more authority). Returns 0, or -1 on the refusal / an invalid flag
+// (the caller has not consumed the grant yet, so a refusal loses nothing).
 // Extincts on a NULL / corrupted Proc (a kernel-internal contract violation).
-// The matching EVAPORATION (scope teardown on root exit / valid_until expiry)
-// lands in the same chunk so a legate never exists without its teardown (I-25).
-void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
-                        u64 valid_until);
+int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
+                       u64 valid_until, u32 legate_flags);
 
 // proc_legate_teardown_if_root — if `p` is a legate ROOT, group-terminate every
 // OTHER Proc in its legate_scope_id (I-25). Called from proc_become_zombie_locked

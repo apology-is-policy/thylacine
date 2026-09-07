@@ -268,6 +268,12 @@ pub const T_CONSOLE_EPISODE_END: u64  = 2;
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
 pub const T_SYS_CAP_GRANT_CLEARANCE: u64 = 61;  // A-4a clearance grant-side bridge
+// IM-2 (IMPERIUM-DESIGN.md 11.4): the clearance grant with a flags word (the
+// 40-byte /cap/grant form). flags 0 = a plain clearance grant;
+// T_CAP_GRANT_FLAG_PROPAGATING = the redeemed caps FLOW to the legate root's
+// rfork descendants (bounded to DAC_OVERRIDE|CHOWN|KILL by the kernel).
+pub const T_SYS_CAP_GRANT_IMPERIUM: u64 = 111;
+pub const T_CAP_GRANT_FLAG_PROPAGATING: u64 = 1 << 0;
 pub const T_SYS_OPEN: u64             = 65;     // A-5b-0/stalk-1 multi-component open
 // Loom -- the io_uring-inverted 9P ring transport (docs/LOOM.md). Backs the
 // native t::loom::Ring API (Loom-6d). SETUP maps the SQ/CQ Burrow + reports
@@ -2022,6 +2028,40 @@ pub unsafe fn t_cap_grant_clearance(
         in("x2") valid_for_ns,
         in("x3") session_id,
         in("x8") T_SYS_CAP_GRANT_CLEARANCE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_cap_grant_imperium -- SYS_CAP_GRANT_IMPERIUM (IM-2): t_cap_grant_clearance
+// with a `flags` word. `flags` is 0 (a plain clearance grant) or
+// T_CAP_GRANT_FLAG_PROPAGATING (the target's scope becomes PROPAGATING: its
+// redeemed caps flow to its rfork descendants, which die with it; `cap_mask`
+// must then be within DAC_OVERRIDE|CHOWN|KILL). Caller must hold
+// CAP_GRANT_CLEARANCE (corvus). The target redeems via t_cap_use; a
+// PROPAGATING grant is redeemable only by a Proc in NO legate scope. Returns
+// 0 on success, -1 on gate fail / bad args / unknown flag / table full.
+///
+/// # Safety
+/// A raw syscall: the kernel validates every argument and fails closed, so
+/// the only contract is the ABI (register-passed scalars, no memory).
+#[inline(always)]
+pub unsafe fn t_cap_grant_imperium(
+    cap_mask: u64,
+    target_stripes: u64,
+    valid_for_ns: u64,
+    session_id: u64,
+    flags: u64,
+) -> i64 {
+    let mut x0: i64 = cap_mask as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") target_stripes,
+        in("x2") valid_for_ns,
+        in("x3") session_id,
+        in("x4") flags,
+        in("x8") T_SYS_CAP_GRANT_IMPERIUM,
         options(nostack)
     );
     x0

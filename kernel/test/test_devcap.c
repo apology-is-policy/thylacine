@@ -624,3 +624,245 @@ void test_devcap_clearance_kind_isolation(void) {
     drop_test_proc(grantor);
     cap_reset_table();
 }
+
+// =============================================================================
+// IM-2 imperium grant/redeem (IMPERIUM-DESIGN.md 11.4; specs/imperium.tla
+// RedeemFresh / RedeemFurther / BuggyRedeemNest). The 40-byte propagating
+// grant form, the two redeem arms and the nest refusal. The rfork FLOW half
+// is test_caps.c's; the straggler close is test_proc.c's.
+// =============================================================================
+
+void test_devcap_imperium_grant_gate_and_bounds(void) {
+    cap_reset_table();
+    struct Proc *nocap   = make_test_proc();
+    struct Proc *grantor = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    struct Proc *target  = make_test_proc();
+    TEST_ASSERT(nocap && grantor && target, "alloc nocap + grantor + target");
+    u64 stripes = proc_stripes(target);
+
+    // Writer gate: CAP_GRANT_CLEARANCE, exactly as the 32-byte form.
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        nocap, CAP_DAC_OVERRIDE, stripes, 0, 0x1A7, CAP_GRANT_FLAG_PROPAGATING),
+        -1, "imperium grant rejected: writer lacks CAP_GRANT_CLEARANCE");
+    // An unknown flag bit fails closed.
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE, stripes, 0, 0x1A7, 1ull << 1),
+        -1, "imperium grant rejected: unknown flag bit");
+    // PROPAGATING is bounded to CAP_GRANTABLE_IMPERIUM: the clearances whose
+    // heritability I-39 / I-42 / I-46 pin are refused WITH the flag ...
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        grantor, CAP_DEBUG, stripes, 0, 0x1A7, CAP_GRANT_FLAG_PROPAGATING),
+        -1, "propagating CAP_DEBUG refused");
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        grantor, CAP_JIT, stripes, 0, 0x1A7, CAP_GRANT_FLAG_PROPAGATING),
+        -1, "propagating CAP_JIT refused");
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        grantor, CAP_AUDIO_GRAPH, stripes, 0, 0x1A7, CAP_GRANT_FLAG_PROPAGATING),
+        -1, "propagating CAP_AUDIO_GRAPH refused");
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE | CAP_JIT, stripes, 0, 0x1A7,
+        CAP_GRANT_FLAG_PROPAGATING),
+        -1, "propagating mixed mask (one bit outside) refused whole");
+    TEST_EXPECT_EQ(cap_pending_count(), 0, "nothing registered by the refusals");
+    // ... and admitted WITHOUT it: flags 0 through the 40-byte form is a plain
+    // clearance grant.
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        grantor, CAP_JIT, stripes, 0, 0x1A7, 0),
+        (long)CAP_GRANT_IMPERIUM_WRITE_LEN, "plain CAP_JIT via the 40-byte form ok");
+    // The imperium level itself propagates.
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL, stripes, 0, 0x1A7,
+        CAP_GRANT_FLAG_PROPAGATING),
+        (long)CAP_GRANT_IMPERIUM_WRITE_LEN, "propagating imperium level ok");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "one pending (re-register replaced in place)");
+
+    drop_test_proc(target);
+    drop_test_proc(grantor);
+    drop_test_proc(nocap);
+    cap_reset_table();
+}
+
+void test_devcap_imperium_redeem_propagating(void) {
+    cap_reset_table();
+    struct Proc *grantor  = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    struct Proc *redeemer = make_test_proc();
+    TEST_ASSERT(grantor && redeemer, "alloc grantor + redeemer");
+    u64 stripes = proc_stripes(redeemer);
+
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL, stripes, 0, 0x1A7,
+        CAP_GRANT_FLAG_PROPAGATING),
+        (long)CAP_GRANT_IMPERIUM_WRITE_LEN, "propagating grant ok");
+    // Self-restrict to DAC|CHOWN: the FLOWING set is the redeemed subset, not
+    // the grant (I-2 at the redeem, carried into what descendants may get).
+    long rc = cap_redeem_grant_for_writer(redeemer, CAP_DAC_OVERRIDE | CAP_CHOWN);
+    TEST_EXPECT_EQ(rc, (long)CAP_USE_WRITE_LEN, "propagating redeem ok");
+    TEST_EXPECT_EQ(redeemer->caps & CAP_ELEVATION_ONLY,
+                   (u64)(CAP_DAC_OVERRIDE | CAP_CHOWN), "caps = the redeemed subset");
+    TEST_EXPECT_NE(redeemer->legate_scope_id, (u32)0, "became a legate root");
+    TEST_EXPECT_NE(redeemer->proc_flags & PROC_FLAG_LEGATE_ROOT, (u32)0, "ROOT flag set");
+    TEST_EXPECT_EQ(redeemer->legate_caps, (u64)(CAP_DAC_OVERRIDE | CAP_CHOWN),
+                   "legate_caps = what flows = the redeemed subset");
+    TEST_EXPECT_EQ(redeemer->legate_flags, (u32)LEGATE_FLAG_PROPAGATING,
+                   "the scope is PROPAGATING");
+    TEST_EXPECT_EQ(cap_pending_count(), 0, "grant consumed");
+
+    // Control, one variable away: the same grant WITHOUT the flag yields a
+    // plain scope -- legate_caps still records the set (a root's flowing set
+    // exists whether or not it flows) and legate_flags is 0.
+    struct Proc *plain = make_test_proc();
+    TEST_ASSERT(plain != NULL, "alloc plain");
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL, proc_stripes(plain), 0,
+        0x1A8, 0),
+        (long)CAP_GRANT_IMPERIUM_WRITE_LEN, "plain grant (flags 0) ok");
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(plain, CAP_DAC_OVERRIDE | CAP_CHOWN),
+                   (long)CAP_USE_WRITE_LEN, "plain redeem ok");
+    TEST_EXPECT_EQ(plain->legate_caps, (u64)(CAP_DAC_OVERRIDE | CAP_CHOWN),
+                   "plain root records its set");
+    TEST_EXPECT_EQ(plain->legate_flags, (u32)0, "plain scope does NOT propagate");
+
+    // Flags isolation on re-register: a PROPAGATING grant replaced in place by
+    // a plain one for the same stripes must redeem PLAIN -- cap_set_entry_locked
+    // resets `flags` with the other discriminators (the kind_isolation twin).
+    struct Proc *replaced = make_test_proc();
+    TEST_ASSERT(replaced != NULL, "alloc replaced");
+    u64 rst = proc_stripes(replaced);
+    cap_register_imperium_grant_for_writer(grantor, CAP_DAC_OVERRIDE, rst, 0, 0x1A9,
+                                           CAP_GRANT_FLAG_PROPAGATING);
+    TEST_EXPECT_EQ(cap_register_clearance_grant_for_writer(grantor, CAP_DAC_OVERRIDE, rst,
+                                                           0, 0x1AA),
+                   (long)CAP_GRANT_CLEARANCE_WRITE_LEN, "plain re-register over propagating");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "replaced in place");
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(replaced, CAP_DAC_OVERRIDE),
+                   (long)CAP_USE_WRITE_LEN, "redeem the replaced grant");
+    TEST_EXPECT_EQ(replaced->legate_flags, (u32)0,
+                   "a stale PROPAGATING flag does NOT survive a plain re-register");
+    TEST_EXPECT_EQ(replaced->legate_session_id, (u32)0x1AA, "the replacing grant's session");
+
+    drop_test_proc(replaced);
+    drop_test_proc(plain);
+    drop_test_proc(redeemer);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}
+
+void test_devcap_imperium_nest_refused(void) {
+    cap_reset_table();
+    struct Proc *grantor = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    TEST_ASSERT(grantor != NULL, "alloc grantor");
+
+    // (a) A Proc in a PLAIN scope cannot redeem a PROPAGATING grant: refused
+    //     without consuming, the scope untouched, no cap gained.
+    struct Proc *plain = make_test_proc();
+    TEST_ASSERT(plain != NULL, "alloc plain");
+    u64 ps = proc_stripes(plain);
+    cap_register_clearance_grant_for_writer(grantor, CAP_JIT, ps, 0, 0x2B1);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(plain, CAP_JIT),
+                   (long)CAP_USE_WRITE_LEN, "plain CAP_JIT redeem ok (scope 1)");
+    u32 s1 = plain->legate_scope_id;
+    TEST_EXPECT_NE(s1, (u32)0, "plain is scoped");
+    TEST_EXPECT_EQ(cap_register_imperium_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE, ps, 0, 0x2B2, CAP_GRANT_FLAG_PROPAGATING),
+        (long)CAP_GRANT_IMPERIUM_WRITE_LEN, "propagating grant registered");
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(plain, CAP_DAC_OVERRIDE), -1,
+                   "propagating redeem by a scoped Proc REFUSED");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "the refused grant is NOT consumed");
+    TEST_EXPECT_EQ(plain->legate_scope_id, s1, "scope unchanged (no re-tag)");
+    TEST_EXPECT_EQ(plain->legate_flags, (u32)0, "still not propagating");
+    TEST_EXPECT_EQ(plain->caps & CAP_DAC_OVERRIDE, (u64)0, "no DAC_OVERRIDE gained");
+    cap_reset_table();
+
+    // (b) Nor can a propagating ROOT redeem a second propagating grant.
+    struct Proc *root = make_test_proc();
+    TEST_ASSERT(root != NULL, "alloc root");
+    u64 rs = proc_stripes(root);
+    cap_register_imperium_grant_for_writer(grantor, CAP_DAC_OVERRIDE, rs, 0, 0x2B3,
+                                           CAP_GRANT_FLAG_PROPAGATING);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(root, CAP_DAC_OVERRIDE),
+                   (long)CAP_USE_WRITE_LEN, "first propagating redeem ok");
+    cap_register_imperium_grant_for_writer(grantor, CAP_CHOWN, rs, 0, 0x2B4,
+                                           CAP_GRANT_FLAG_PROPAGATING);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(root, CAP_CHOWN), -1,
+                   "second propagating redeem REFUSED (never nests)");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "not consumed");
+    TEST_EXPECT_EQ(root->legate_caps, (u64)CAP_DAC_OVERRIDE, "flowing set unchanged");
+    TEST_EXPECT_EQ(root->caps & CAP_CHOWN, (u64)0, "no CHOWN gained");
+    cap_reset_table();
+
+    // (c) A MEMBER (scope tag, no ROOT flag) is refused too: the gate keys on
+    //     the scope, not the root status.
+    struct Proc *mem = make_test_proc();
+    TEST_ASSERT(mem != NULL, "alloc member");
+    __atomic_store_n(&mem->legate_scope_id, 0x77u, __ATOMIC_RELEASE);
+    u64 ms = proc_stripes(mem);
+    cap_register_imperium_grant_for_writer(grantor, CAP_KILL, ms, 0, 0x2B5,
+                                           CAP_GRANT_FLAG_PROPAGATING);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(mem, CAP_KILL), -1,
+                   "propagating redeem by a scope MEMBER refused");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "not consumed");
+    TEST_EXPECT_EQ(mem->legate_scope_id, (u32)0x77, "member tag unchanged");
+    TEST_EXPECT_EQ(mem->caps & CAP_KILL, (u64)0, "no KILL gained");
+
+    drop_test_proc(mem);
+    drop_test_proc(root);
+    drop_test_proc(plain);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}
+
+void test_devcap_further_redeem_keeps_scope(void) {
+    cap_reset_table();
+    struct Proc *grantor = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    struct Proc *root    = make_test_proc();
+    TEST_ASSERT(grantor && root, "alloc grantor + root");
+    u64 rs = proc_stripes(root);
+
+    // Fresh: a propagating DAC|CHOWN scope with no deadline.
+    cap_register_imperium_grant_for_writer(grantor, CAP_DAC_OVERRIDE | CAP_CHOWN, rs,
+                                           0, 0x3C1, CAP_GRANT_FLAG_PROPAGATING);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(root, CAP_DAC_OVERRIDE | CAP_CHOWN),
+                   (long)CAP_USE_WRITE_LEN, "fresh propagating redeem ok");
+    u32 scope = root->legate_scope_id;
+    TEST_EXPECT_NE(scope, (u32)0, "scoped");
+    TEST_EXPECT_EQ(root->legate_valid_until, (u64)0, "no deadline yet");
+
+    // Further: a plain CAP_JIT clearance with a 1 s window. The Proc gains the
+    // cap and KEEPS its tag, root status, flowing set and propagating property
+    // (the A-4a F2 re-tag is retired); the nonzero deadline replaces 0.
+    cap_register_clearance_grant_for_writer(grantor, CAP_JIT, rs,
+                                            1000ull * 1000ull * 1000ull, 0x3C2);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(root, CAP_JIT),
+                   (long)CAP_USE_WRITE_LEN, "further CAP_JIT redeem ok");
+    TEST_EXPECT_EQ(root->legate_scope_id, scope, "scope KEPT (no fresh tag)");
+    TEST_EXPECT_NE(root->proc_flags & PROC_FLAG_LEGATE_ROOT, (u32)0, "still the root");
+    TEST_EXPECT_EQ(root->legate_caps, (u64)(CAP_DAC_OVERRIDE | CAP_CHOWN),
+                   "flowing set unchanged: JIT does NOT flow");
+    TEST_EXPECT_EQ(root->legate_flags, (u32)LEGATE_FLAG_PROPAGATING, "still propagating");
+    TEST_EXPECT_NE(root->caps & CAP_JIT, (u64)0, "gained CAP_JIT");
+    TEST_EXPECT_EQ(root->legate_session_id, (u32)0x3C1, "session KEPT (the first)");
+    u64 until1 = root->legate_valid_until;
+    TEST_EXPECT_NE(until1, (u64)0, "the nonzero deadline replaced 0");
+    TEST_EXPECT_EQ(cap_pending_count(), 0, "consumed");
+
+    // Further again with a LONGER window: the earlier deadline wins.
+    cap_register_clearance_grant_for_writer(grantor, CAP_KILL, rs,
+                                            100ull * 1000ull * 1000ull * 1000ull, 0x3C3);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(root, CAP_KILL),
+                   (long)CAP_USE_WRITE_LEN, "further CAP_KILL redeem ok");
+    TEST_EXPECT_EQ(root->legate_valid_until, until1, "the EARLIER deadline wins over a later one");
+    TEST_EXPECT_NE(root->caps & CAP_KILL, (u64)0, "gained CAP_KILL");
+    TEST_EXPECT_EQ(root->legate_caps, (u64)(CAP_DAC_OVERRIDE | CAP_CHOWN),
+                   "flowing set still unchanged");
+
+    // And a SHORTER window shortens it.
+    cap_register_clearance_grant_for_writer(grantor, CAP_DEBUG, rs, 1000ull, 0x3C4);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(root, CAP_DEBUG),
+                   (long)CAP_USE_WRITE_LEN, "further CAP_DEBUG redeem ok");
+    TEST_ASSERT(root->legate_valid_until != 0u && root->legate_valid_until < until1,
+                "a shorter window shortens the deadline");
+
+    drop_test_proc(root);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}

@@ -1243,6 +1243,21 @@ static void vfork_await_release(struct Proc *p, int child_pid);
 // surface delegates with mask=CAP_NONE so children inherit no caps —
 // the v1.0 default for any rfork-from-non-kproc-context path that
 // hasn't been explicitly designed to grant caps.
+// IM-2: undo a fully-built but never-published child (the straggler close's
+// failure path -- the parent turned out to be terminating at the link). The
+// child Thread exists but was never ready()'d: on no run tree, on no CPU, so
+// thread_free's not-RUNNING gate passes and its unlink brings thread_count to
+// 0, which is what proc_free's drain precondition wants. Everything else the
+// child acquired (the territory, the handle-table copy, the env, the exe Path,
+// the allowance, its address-space reference) is released by proc_free exactly
+// as on the pre-thread failure paths above; the ZOMBIE store is that function's
+// lifecycle gate, not a death (nothing ever observed this Proc).
+static void rfork_rollback_unpublished(struct Proc *child, struct Thread *ct) {
+    thread_free(ct);
+    child->state = PROC_STATE_ZOMBIE;
+    proc_free(child);
+}
+
 static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
                           caps_t caps_mask, const struct fork_context *fc) {
     // RFPROC alone, or RFPROC|RFMEM (LINEAGE L-3). The remaining reserved flags
@@ -1371,16 +1386,33 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // `granted \subseteq proc_caps[parent]`: the AND with caps_mask is
     // the impl-side "ceiling at parent's current caps" enforcement.
     //
-    // A-4-pre / I-2: AND with ~CAP_ELEVATION_ONLY unconditionally. An
-    // elevated parent (one that legitimately gained CAP_HOSTOWNER via the
-    // console-gated `cap` device) must not leak it across a fork —
-    // elevation-only caps are the sole sanctioned capability growth and
-    // flow ONLY through the cap device for a console-attached Proc, never
-    // by inheritance. caps_mask alone can't enforce this (a caller may
-    // pass a mask that includes the bit); the ~CAP_ELEVATION_ONLY strip
-    // is load-bearing. Honors the contract caps.h already documents.
+    // A-4-pre / I-2: AND with ~CAP_ELEVATION_ONLY. An elevated parent (one
+    // that legitimately gained CAP_HOSTOWNER via the console-gated `cap`
+    // device) must not leak it across a fork -- elevation-only caps are the
+    // sole sanctioned capability growth and flow ONLY through the cap device,
+    // never by inheritance. caps_mask alone can't enforce this (a caller may
+    // pass a mask that includes the bit); the strip is load-bearing.
+    //
+    // IM-2 (IMPERIUM-DESIGN.md 11.4; specs/imperium.tla Fork / Flow; I-25
+    // STRENGTHENED): the strip is CARVED by the parent's scope. Under a
+    // PROPAGATING legate scope exactly the parent's legate_caps -- the set the
+    // root redeemed, never its further-redeemed extras -- survive the strip:
+    //     child = (parent & mask) & ~(ELEVATION_ONLY & ~flow)
+    // with flow = parent->legate_caps iff the scope propagates, else 0 (the
+    // v1.0 strip, bit-identical). CAP_HOSTOWNER is never clearance-grantable,
+    // so it never flows; the spawn mask still bounds everything (G9: a caller
+    // whose mask omits the flowing bits gets an unelevated child). scope_id is
+    // ACQUIRE-loaded FIRST: it is the RELEASE-published word of the legate
+    // block, so legate_caps / legate_flags read after it are coherent once it
+    // reads nonzero; a parent mid-redeem reads 0 and its child is born
+    // unscoped -- the fork linearizes before the redeem, the only consistent
+    // answer. The tag inherit below keys on the same load.
     caps_t parent_caps = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE);
-    child->caps = (parent_caps & caps_mask) & ~CAP_ELEVATION_ONLY;
+    u32    pscope      = __atomic_load_n(&parent->legate_scope_id, __ATOMIC_ACQUIRE);
+    caps_t flow        = (pscope != 0u &&
+                          (parent->legate_flags & LEGATE_FLAG_PROPAGATING) != 0u)
+                       ? parent->legate_caps : (caps_t)0;
+    child->caps = (parent_caps & caps_mask) & ~(CAP_ELEVATION_ONLY & ~flow);
 
     // A-1a: identity is INHERITED across rfork (the durable principal-id +
     // groups flow parent -> child unchanged). This is the opposite of caps
@@ -1455,16 +1487,30 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // §9.8, I-25). A child of a legate-scoped Proc JOINS the scope: it
     // carries scope_id + session_id + valid_until so the teardown walk
     // (A-4a-2b) finds it and it can detect valid_until expiry at its own
-    // EL0-return tail. It carries only the FORK-GRANTABLE subset of the
-    // caps -- the elevation-only members were already stripped above by
-    // `& ~CAP_ELEVATION_ONLY` (A-4-pre), so a scope member cannot wield
-    // the legate's fs-admin authority; the membership tag governs lifetime,
-    // not authority. PROC_FLAG_LEGATE_ROOT is NOT inherited (proc_flags
+    // EL0-return tail. PROC_FLAG_LEGATE_ROOT is NOT inherited (proc_flags
     // never are; see below), so the child is a scope MEMBER, never a second
     // root. For a non-legate parent these are all 0 -> child not-a-legate.
-    child->legate_scope_id    = parent->legate_scope_id;
-    child->legate_session_id  = parent->legate_session_id;
-    child->legate_valid_until = parent->legate_valid_until;
+    //
+    // IM-2: the membership tag now governs AUTHORITY too, under propagation.
+    // legate_caps = what flowed (the carve above; 0 for a plain scope) and the
+    // PROPAGATING property inherits as a MEMBER property -- a scope-wide fact
+    // every member carries (imperium.tla PropagatingIsScopeWide), so this
+    // child's own rfork reads its own copy. Keyed on `pscope` (the ACQUIRE
+    // load above) so a parent mid-redeem yields a fully-unscoped child rather
+    // than a half-copied block. valid_until is loaded atomically: a peer
+    // thread's FURTHER redeem may be shortening it right now.
+    child->legate_scope_id    = pscope;
+    child->legate_session_id  = pscope ? parent->legate_session_id : 0u;
+    child->legate_valid_until = pscope
+        ? __atomic_load_n(&parent->legate_valid_until, __ATOMIC_RELAXED) : 0u;
+    // What the child's OWN children may receive is what it actually holds of
+    // the flow -- a spawn mask that omitted a flowing bit (G9) narrows the
+    // flowing set for the whole subtree below, never widens it (imperium.tla
+    // FlowNeverWidens); /proc/<pid>/imperium's `rods` then counts caps the
+    // Proc really carries.
+    child->legate_caps        = flow & child->caps;
+    child->legate_flags       = pscope
+        ? (parent->legate_flags & LEGATE_FLAG_PROPAGATING) : 0u;
 
     // I-34 (specs/allowance.tla): inherit the hardware allowance. A NARROWED
     // parent's child is equally narrowed -- the hardware-axis analog of caps'
@@ -1655,7 +1701,29 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // P3-A: link child into parent's children list under the proc-table
     // lock. This is the publication point — after release, the child is
     // visible to any concurrent exits()/wait_pid() on the parent.
+    //
+    // IM-2 (imperium.tla Fork vs BUGGY_STRAGGLER; IMPERIUM-DESIGN.md 11.4 G5;
+    // I-25 STRENGTHENED): re-check the parent's group_exit_msg in the SAME lock
+    // hold. The legate teardown sweep (proc_legate_teardown_if_root, run under
+    // this lock at the root's ZOMBIE transition) walks the table BY TAG and
+    // marks every member it finds; the child's tag + caps were copied above,
+    // OUTSIDE the lock, so a sweep that runs between that copy and this link
+    // walked past a child it could not see -- and that child would land here
+    // ALIVE and, under propagation, ELEVATED, with its root already dead. The
+    // sweep DID mark the parent (which is in the table), so the parent's flag
+    // is the witness: read it under the lock the sweep held, and a set flag
+    // means the sweep ran -- fail the rfork, unpublished. Uniform for every
+    // terminating parent (a kill, an exit_group, an expiry): a dying Proc
+    // cannot mint a child, and the -1 never even reaches its userspace, which
+    // dies at this syscall's own return tail. Without the re-check the
+    // v1.0 straggler was merely an unelevated Proc with a stale tag; with
+    // caps propagating it is the escape TLC finds in four steps.
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (__atomic_load_n(&parent->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        rfork_rollback_unpublished(child, ct);
+        return -1;
+    }
     proc_link_child(parent, child);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
@@ -1729,13 +1797,14 @@ int rfork_forked(unsigned flags, const struct fork_context *fc) {
 
 // The caps-bearing fork: identical to rfork_forked but with an explicit
 // caps_mask instead of the CAP_NONE default. The ONLY caller is the phenotype
-// clone path (sys_rfork_core, PHENO_LINUX), which passes CAP_ALL so a Linux
-// fork INHERITS the parent's capabilities -- Linux's own semantics (I-43 shape
-// fidelity). rfork_internal still intersects with the parent's actual caps and
-// still strips ~CAP_ELEVATION_ONLY unconditionally, so the child never exceeds
-// the parent (I-2: child_caps == parent_caps & ~elevation <= parent_caps) and
-// elevation-only caps never propagate by inheritance. Native fork keeps
-// CAP_NONE (Thylacine's stronger fork-zeros-caps default) via rfork_forked.
+// clone path (sys_rfork_core, PHENO_LINUX), which passes the full inheritable
+// mask so a Linux fork INHERITS the parent's capabilities -- Linux's own
+// semantics (I-43 shape fidelity). rfork_internal still intersects with the
+// parent's actual caps and strips the elevation-only bits carved by the
+// parent's legate scope (IM-2), so the child never exceeds the parent (I-2:
+// child_caps <= parent_caps) and elevation-only caps propagate ONLY through a
+// PROPAGATING scope's flowing set. Native fork keeps CAP_NONE (Thylacine's
+// stronger fork-zeros-caps default) via rfork_forked.
 int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
                            caps_t caps_mask) {
     if (!fc) extinction("rfork_forked_with_caps with NULL fork_context");
@@ -2648,10 +2717,37 @@ static u32 legate_scope_alloc(void) {
     return id;
 }
 
-void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
-                        u64 valid_until) {
+int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
+                       u64 valid_until, u32 legate_flags) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_become_legate: NULL or corrupted Proc");
+    if ((legate_flags & ~LEGATE_FLAGS_VALID) != 0u) return -1;   // fail closed
+
+    // IM-2 (imperium.tla RedeemFurther; IMPERIUM-DESIGN.md 11.4 G6): ONE scope
+    // per Proc, set once. A Proc already in a scope keeps its tag, its root
+    // status, its flowing set and its propagating property -- the further
+    // redeem adds caps to THIS Proc only. Pre-IM-2 this function always
+    // allocated, and a member's later redeem (CAP_JIT under imperium) walked
+    // it out of the imperium teardown: the A-4a F2 re-tag, now the
+    // privilege escape imperium_buggy_retag.cfg prints. A PROPAGATING further
+    // redeem is refused: propagating never nests (abdicate first) -- the
+    // scope's traits are fixed at the join (ScopeTraitsSetOnce). The caller
+    // holds the cap-table lock, so this decision cannot race a peer thread's
+    // redeem on the same Proc.
+    u32 have = __atomic_load_n(&p->legate_scope_id, __ATOMIC_ACQUIRE);
+    if (have != 0u) {
+        if (legate_flags & LEGATE_FLAG_PROPAGATING) return -1;
+        __atomic_fetch_or(&p->caps, caps_to_or, __ATOMIC_ACQ_REL);
+        // The EARLIER nonzero deadline wins: a scope that carries any expired
+        // deadline tears down (every member checks its own copy at its EL0
+        // tail and sweeps the whole scope), so shortening is the conservative
+        // direction and lengthening is never admitted. Atomic store: a peer
+        // thread's rfork may be copying the deadline right now.
+        u64 cur = __atomic_load_n(&p->legate_valid_until, __ATOMIC_RELAXED);
+        if (valid_until != 0u && (cur == 0u || valid_until < cur))
+            __atomic_store_n(&p->legate_valid_until, valid_until, __ATOMIC_RELAXED);
+        return 0;
+    }
 
     u32 scope = legate_scope_alloc();
 
@@ -2661,19 +2757,23 @@ void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
     __atomic_fetch_or(&p->caps, caps_to_or, __ATOMIC_ACQ_REL);
 
     // Durable principal_id is UNCHANGED (scripture §3.1). Record the scope
-    // context. session_id + valid_until are written before scope_id so a
-    // concurrent teardown walk (of some OTHER scope) that observes a nonzero
-    // scope_id via the RELEASE store below also observes these. (Correctness
-    // does not depend on it -- a fresh scope id matches no in-flight teardown
-    // ctx -- but it keeps the publication clean.)
+    // context. session_id + valid_until + the IM-2 pair (legate_caps: the set
+    // that FLOWS at rfork; legate_flags: the scope's propagating property) are
+    // written before scope_id so a reader that ACQUIRE-loads a nonzero scope_id
+    // via the RELEASE store below also observes them whole -- rfork_internal
+    // is that reader, from a peer thread of this Proc, and a torn block there
+    // would be a child with the tag but not the flowing set (or the reverse).
     p->legate_session_id  = session_id;
-    p->legate_valid_until = valid_until;
+    __atomic_store_n(&p->legate_valid_until, valid_until, __ATOMIC_RELAXED);
+    p->legate_caps        = caps_to_or;
+    p->legate_flags       = legate_flags;
     __atomic_store_n(&p->legate_scope_id, scope, __ATOMIC_RELEASE);
 
     // Mark the ROOT. One-way; NEVER inherited by rfork (proc_flags never are),
     // so an rfork child is a scope MEMBER (carries scope_id, not the flag),
     // never a second root. RELEASE pairs with the ACQUIRE read in exits().
     __atomic_fetch_or(&p->proc_flags, PROC_FLAG_LEGATE_ROOT, __ATOMIC_RELEASE);
+    return 0;
 }
 
 // Teardown walk context + callback. The callback group-terminates every Proc
@@ -2681,16 +2781,20 @@ void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
 // exits via the normal path) and kproc. Returns 0 always so proc_for_each /
 // proc_for_each_walk visits the ENTIRE table.
 //
-// Member teardown is the scripture-mandated tidiness sweep: at v1.0 the
-// clearance set is ALL elevation-only, which rfork strips, so a scope MEMBER
-// never holds the elevated caps (only the root does). I-25's privilege
-// guarantee ("no elevated Proc outlives the scope") therefore rests on the
-// ROOT -- which dies on its own exit (trigger 1) or self-terminates on
-// valid_until expiry (trigger 2, which passes except=NULL to include self).
-// A member spawned racing this walk that the sweep misses is a benign,
-// UNELEVATED straggler with a stale scope tag -- not an I-25 violation. (A
-// strict whole-subtree close via an rfork-under-lock parent-flag check is a
-// documented v1.x tidiness refinement.)
+// Member teardown is LOAD-BEARING for privilege since IM-2 (IMPERIUM-DESIGN.md
+// 11.4; specs/imperium.tla): under a PROPAGATING scope the members ARE
+// elevated (rfork_internal's carve lets the root's legate_caps through), so
+// I-25's "no elevated Proc outlives the scope" rests on this sweep reaching
+// every member, not on the root alone. The root dies on its own exit (trigger
+// 1: proc_become_zombie_locked, under g_proc_table_lock, one hold with the
+// walk) or any member self-terminates the whole scope on valid_until expiry
+// (trigger 2, except=NULL to include self). The walk is BY TAG over the whole
+// table, so a member forked while the root was merely flagged (not yet ZOMBIE)
+// is found here too. The one member the walk cannot see -- a child whose tag
+// was copied before the walk and whose link came after -- is the straggler
+// rfork_internal closes by re-checking its parent's group_exit_msg under this
+// same lock at the link: the walk marked that parent, so the child is never
+// published (imperium_buggy_straggler.cfg is the four-step escape without it).
 struct legate_teardown_ctx {
     u32          scope_id;
     struct Proc *except;
@@ -3867,8 +3971,11 @@ void el0_return_die_check(void) {
     // expiry pass is a CAS no-op. scope_id read ACQUIRE (pairs with
     // proc_become_legate's RELEASE); valid_until is its coherent companion.
     u32 scope = __atomic_load_n(&p->legate_scope_id, __ATOMIC_ACQUIRE);
-    if (scope != 0u && p->legate_valid_until != 0u &&
-        timer_now_ns() > p->legate_valid_until) {
+    // IM-2: the deadline is loaded atomically -- a peer thread's FURTHER redeem
+    // (proc_become_legate) may be shortening it concurrently.
+    u64 until = (scope != 0u)
+              ? __atomic_load_n(&p->legate_valid_until, __ATOMIC_RELAXED) : 0u;
+    if (scope != 0u && until != 0u && timer_now_ns() > until) {
         struct legate_teardown_ctx tctx = { .scope_id = scope, .except = NULL };
         proc_for_each(legate_teardown_cb, &tctx);
     }

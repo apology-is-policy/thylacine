@@ -22,6 +22,108 @@ needed the operator.
 
 
 ---
+## 2026-09-07 (aux, third run) -- IM-2: the fork-PROPAGATING legate scope landed (I-25 strengthened; spec-first)
+
+**Where it started.** The second self-compaction at the 600k line, IM-1 pushed
+at `bccb297f`, and a draft `specs/imperium.tla` in the scratchpad that had been
+written but never run. Effort max (operator-set). The plan said spec first,
+then the kernel, then the batched IM-1+IM-2 holotype.
+
+**The spec moved twice before the kernel was touched -- which is the point of
+running it first.**
+
+- The draft's `RootEnd` was one atomic step: root dead + members marked. The
+  kernel has THREE teardown shapes and the draft modelled one. Reading
+  `proc.c`: a clean exit is `proc_become_zombie_locked` -> the tag walk in the
+  SAME `g_proc_table_lock` hold (the draft's shape); a KILL is
+  `proc_group_terminate` setting the flag -- the root is doomed, not dead, and
+  its members stay alive and elevated until the root's die-check reaches the
+  chokepoint; the EXPIRY sweep is any member's EL0 tail marking the whole
+  scope, root included. Modelled as `Exit` / `Terminate`+`Die` / `Expire`, and
+  the "live root" a member's caps need became alive-OR-terminating (not yet
+  ZOMBIE). Without that split the model would have called the killed-root
+  window a violation the kernel does not have, or missed it entirely.
+- First TLC run (`imperium.cfg`: 157,839 distinct states, liveness checked;
+  the four buggy cfgs red): the retag cfg tripped on a TWO-step trace -- a root
+  re-tagging ITSELF, after which no Proc carries scope 1 -- not the member
+  escape the cfg promised. True, and beside the point: the invariant keyed the
+  live root on the scope NUMBER, which a re-tag moves. Re-keyed on the ANCHOR
+  (the root Proc of the scope first joined, by identity, captured in the
+  `first` record and inherited down the fork tree); the trace is now
+  RedeemFresh -> Fork -> BuggyRedeemRetag(member) -> Exit(root). The lesson is
+  the standing one: a counterexample must witness the CLASS the cfg names, and
+  a shallower true violation is a wrong witness.
+- A fourth switch, `BUGGY_NEST_ADMITTED` (a PROPAGATING further redeem taken
+  as flag-flip + flowing-set widening), caught by `ScopeTraitsSetOnce`; plus
+  `MembersNeverRoot`, `PropagatingIsScopeWide`, `FlowNeverWidens`. Seven
+  invariants where the design named three.
+
+**The kernel reads settled what the design left open** -- eleven as-built
+refinements in IMPERIUM-DESIGN 11.4, each flagged for veto. The ones that
+carry weight:
+
+- The straggler has exactly one shape here: `proc_for_each_walk` is a TREE
+  walk and `proc_link_child` under the lock is the publication point, so a
+  child's tag + caps (copied before the link) are invisible to a sweep that
+  runs between copy and link -- and that sweep marks the PARENT. The close is
+  one ACQUIRE load of the parent's `group_exit_msg` in the same hold as the
+  link; refused -> `rfork_rollback_unpublished` (`thread_free` of the
+  never-readied thread -- its own comment already licensed that pattern --
+  then `proc_free`). Uniform for every terminating parent.
+- Two redeems by peer threads of one Proc could both read scope 0 and mint
+  two roots, the second overwriting the first's flowing set -- harmless before
+  IM-2, a privilege question now. The stamp moved UNDER the cap-table lock
+  and BEFORE the consume, so a refusal never loses a grant either.
+- `PROC_FLAG_LEGATE_PROPAGATING` could not be a `proc_flags` bit: those never
+  inherit and the property must. It is `Proc.legate_flags` in the legate
+  block, with `Proc.legate_caps`, appended at the tail (392 -> 408, asserted).
+- `CAP_GRANTABLE_IMPERIUM` = DAC|CHOWN|KILL bounds what may propagate, so the
+  heritability clauses of I-39 (CAP_DEBUG), I-42 (CAP_JIT) and I-46
+  (CAP_AUDIO_GRAPH) hold by construction, not by corvus's policy alone.
+- The Linux-phenotype fork passed `CAP_ALL` as its mask: under imperium a
+  Linux child would have been LESS elevated than a native one, an I-43 breach
+  in the other direction. Now `CAP_ALL | CAP_ELEVATION_ONLY`, bit-identical
+  before the carve because the carve is what bounds the flow.
+- The design said `/proc/<pid>/imperium` is "0444, the two-axis gate like
+  `status`". `status` is ungated. Built as 0400 + the `sched`/`environ`
+  read-site gate; `CAP_DAC_OVERRIDE` is not a read axis.
+- The one-syscall window (the die-check is on the EL0 return tail;
+  `userland_enter` has none) is inherited I-24 semantics, now privilege-
+  bearing. Stated in the spec header and in the audit row, not hidden.
+
+**Wrong turns caught.** (1) The retag trace, above. (2) The child's
+`legate_caps` was first written as the parent's OFFER (`flow`); the
+mask-bounded test would have had a Proc reporting rods it does not hold --
+changed to `flow & child->caps`, the code twin of `FlowNeverWidens`. (3) The
+shell's working directory persisted in `specs/` after the TLC run and two
+relative-path reads failed silently-looking -- the known trap, re-issued with
+absolute paths.
+
+**Gates.** Kernel suite 1535/1535 (1525 + 10) twice: the fast kernel-only path
+and again on the full bake (ramfs rebuilt, verified by content); clippy on
+libthyla-rs adds no warning (the one new raw wrapper carries the `# Safety`
+section the other 98 lack); the SMP gate 40/40 (default + UBSan x smp4/smp8,
+N=10, 0 corruption / 0 external-kill / 0 other; ~48-55 s per boot). The gate
+had to run DETACHED under `nohup`: at ~50 s a boot, even a two-config half
+exceeds the tool's 600 s ceiling, so the split the 2026-08-03 memory
+prescribes no longer fits -- a first attempt (two configs in a background
+task) was stopped at boot 2 for that reason and for a four-line formatter
+fix that had to precede a frozen-source run. The batched IM-1+IM-2 holotype
+round is the next chunk, not this one.
+
+**Open / residue.** The phenotype flow is asserted by construction (the same
+`rfork_internal`), not by an in-kernel test -- the E2E under IM-5 is its
+witness. `/proc/self` still absent (#66). A shell already in ANY scope cannot
+obtain imperium (refinement 11; IM-4's UX must say so). A pre-existing wart
+seen while writing the formatter: `format_status` guards its numeric fields
+with `if (!n && v != 0) return 0;`, but `fmt_udec` prints "0" for zero and
+returns 0 ONLY for no-room, so the idiom continues past a truncated zero field
+(14 sites; unreachable at the 2048-byte buffer; `format_imperium` uses the
+bare `!n`) -- an owed P3 sweep, recorded in `memory/project_next_session.md`.
+The vault folds ride the main merge (call 0071). The operator may veto any of
+the eleven refinements; a veto is the next chunk.
+
+---
 ## 2026-09-07 (aux, second run) -- IM-1: the kernel trusted EPISODE landed (I-27 enforced on serial)
 
 **Where it started.** A self-compaction at the 600k line, on an

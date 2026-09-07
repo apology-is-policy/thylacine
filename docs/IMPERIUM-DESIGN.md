@@ -463,16 +463,98 @@ can veto any of them:**
   outside `legate_caps` -- still does not flow to its children.
 - **Teardown**: unchanged in mechanism (root death / expiry -> group-terminate
   every tag holder) -- now LOAD-BEARING for privilege, since members are elevated.
-- **`/proc/<pid>/imperium`** (0444; the two-axis read gate like `status`):
+- **`/proc/<pid>/imperium`** (0400 + the owner-or-`CAP_HOSTOWNER` gate at the
+  read site -- the `sched`/`environ` posture; refinement 3 below):
   `scope N session N propagating 0|1 rods N axe 0|1 caps 0xHEX until NS`, with
-  `rods = popcount(legate_caps)` and `axe = CAP_KILL held`. This is the §4
-  "unforgeable kernel flag"; `/proc/self` (the #66 cluster) folds in if cheap.
+  `rods = popcount(legate_caps)` (what flows to this Proc's children) and
+  `axe = CAP_KILL held`; `caps` is the elevation-only set as HELD (a further
+  redeem's extras show there and not in `rods`). This is the §4 "unforgeable
+  kernel flag"; `/proc/self` (the #66 cluster) folds in if cheap.
 - **Spec**: `specs/imperium.tla`, written + TLC-green BEFORE the impl (spec-first
-  RE-ENABLED for this surface, per §0): roots / members, propagation on fork, the
-  three teardown triggers, the fork-vs-teardown race, the nested redeem;
-  invariants `NoElevatedOutlivesScope`, `FlowOnlyUnderPropagatingScope`,
-  `OneScopePerProc`; buggy cfgs `imperium_buggy_straggler`,
-  `imperium_buggy_retag`, `imperium_buggy_flow_without_flag`.
+  RE-ENABLED for this surface, per §0; LANDED 2026-09-07 with IM-2): roots /
+  members, propagation on fork, the clean exit + the kill-then-die window + the
+  expiry sweep as three distinct teardown shapes, the fork-vs-teardown race, the
+  nested redeem; invariants `NoElevatedOutlivesScope` (keyed on the root Proc's
+  IDENTITY at the join -- the `anchor` -- not on the scope number a re-tag
+  moves), `FlowOnlyUnderPropagating`, `OneScopePerProc`, `ScopeTraitsSetOnce`,
+  `MembersNeverRoot`, `PropagatingIsScopeWide`, `FlowNeverWidens`, + the
+  `ScopeEventuallyEmpty` liveness; buggy cfgs `imperium_buggy_straggler`,
+  `imperium_buggy_retag`, `imperium_buggy_flow_without_flag`,
+  `imperium_buggy_nest` (each trips exactly its named invariant; the clean
+  model: 157,839 distinct states, liveness checked).
+
+**As-built refinements (IM-2, landed 2026-09-07). Each is a delta from the
+bullets above, settled during the kernel reads + the TLC runs and flagged here
+so the operator can veto any of them:**
+
+1. **The propagating property is a legate-block field, not a `proc_flags`
+   bit.** `Proc.legate_flags` (`LEGATE_FLAG_PROPAGATING`), beside the new
+   `Proc.legate_caps`, both appended at the struct tail (392 -> 408 bytes; no
+   existing offset moved). The bullets named `PROC_FLAG_LEGATE_PROPAGATING`, but
+   `proc_flags` never inherit across rfork and this property MUST (it is a
+   member property, scope-wide: `imperium.tla::PropagatingIsScopeWide`), so it
+   lives with the tag it travels with. `PROC_FLAG_LEGATE_ROOT` is unchanged and
+   still never inherits.
+2. **A PROPAGATING grant is bounded to `CAP_GRANTABLE_IMPERIUM` =
+   `DAC_OVERRIDE | CHOWN | KILL`** -- exactly the imperium level of §11.5.
+   `CAP_DEBUG` (a debugger's own debuggee would hold the debug authority; I-39
+   is per-grant), `CAP_JIT` (I-42's "non-heritable" letter) and
+   `CAP_AUDIO_GRAPH` (I-46's per-program whole-sink authority) stay plain
+   clearances: their heritability clauses hold by construction in the kernel,
+   not by corvus's policy alone. A propagating grant naming any other bit is
+   refused at register.
+3. **`/proc/<pid>/imperium` is 0400 + the read-site owner-or-`CAP_HOSTOWNER`
+   gate** (`devproc_owner_or_hostowner`, the `sched`/`environ` predicate), not
+   the 0444 the bullet said: `status` is UNGATED (0444 to every pid), so "the
+   two-axis gate like `status`" described a gate that file does not have. Who
+   is elevated and what flows is a disclosure about another user's authority;
+   `CAP_DAC_OVERRIDE` is not a read axis; a denied read formats nothing.
+4. **A child's `legate_caps` is the flow it actually HOLDS** (`flow &
+   child->caps`), not the parent's offer: a spawn mask that omits a flowing bit
+   (G9) narrows the flowing set for the whole subtree below and never widens it
+   (`FlowNeverWidens`), and `rods` counts caps the Proc really carries.
+5. **The stamp runs under the cap-table lock, before the consume.**
+   `proc_become_legate` is called inside `cap_redeem_grant_for_writer`'s
+   `g_cap_grants.lock` hold (it takes no lock and cannot sleep): the lock is
+   what serializes two redeems by peer threads of one Proc, which could
+   otherwise both read scope 0 and mint two roots, the second overwriting the
+   first's flowing set. Stamping before `cap_clear_locked` means a refusal
+   (the nest check, an invalid flag) never loses the grant.
+6. **The straggler close is the parent's `group_exit_msg` re-checked under the
+   SAME `g_proc_table_lock` hold as `proc_link_child`.** The child's tag + caps
+   are still copied outside the lock (as at A-4a): the child is invisible to
+   the sweep until the link, and the sweep marks the PARENT, so the flag is
+   the witness. A refused rfork rolls the fully-built child back
+   (`thread_free` of the never-readied thread, then `proc_free`); the -1 never
+   reaches the parent's userspace, which dies at that syscall's own return
+   tail. Uniform for every terminating parent, not only the sweep's.
+7. **The Linux-phenotype fork mask is `CAP_ALL | CAP_ELEVATION_ONLY`** (was
+   `CAP_ALL`; bit-identical before the carve): a Linux child of an imperium
+   sub-shell is exactly as elevated as a native child spawned with a full
+   mask. A phenotype conferring LESS authority is as much an I-43 breach as
+   one conferring more, and the carve, not the mask, is what bounds the flow.
+8. **The further redeem's deadline** is the earlier nonzero one, as designed;
+   as built the field is stored and loaded atomically (relaxed) because a
+   peer thread's rfork copies it and its own EL0 tail reads it.
+9. **The one-syscall window is inherited, stated, not new.** A flagged Proc
+   completes the syscall it is in (the die-check is on the EL0 return tail;
+   `userland_enter` has none), so a member marked by the sweep can finish one
+   elevated syscall per thread -- the pre-existing I-24 semantics, now
+   privilege-bearing. The spec header says so; the audit row prosecutes it.
+10. **The model grew a fourth counterexample + four invariants** beyond the
+    three the bullet named: `imperium_buggy_nest` (a PROPAGATING further
+    redeem admitted: the flag flips / the flowing set widens ->
+    `ScopeTraitsSetOnce`), plus `MembersNeverRoot`, `PropagatingIsScopeWide`,
+    `FlowNeverWidens`. The first TLC run tripped `NoElevatedOutlivesScope` on a
+    root re-tagging ITSELF (two steps) rather than the member escape the cfg
+    promised; keying the invariant on the anchor root's identity gave the
+    four-step escape and is the more faithful reading of I-25.
+11. **A consequence for §11.6 to design around:** a shell already in ANY
+    legate scope (a `jit` clearance, say) cannot obtain imperium -- its
+    `usr/imperium` child inherits that scope as a member and the PROPAGATING
+    redeem is refused. That is the ratified "propagating never nests;
+    abdicate first" rule, recorded here so IM-4's UX says so instead of
+    failing silently.
 
 ### 11.5 The *lex curiata* -- corvus (IM-3)
 

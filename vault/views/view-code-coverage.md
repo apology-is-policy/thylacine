@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**419 owned · 76 unowned · 495 files (84% owned) · ~20900 unswept lines.**
+**419 owned · 76 unowned · 495 files (84% owned) · ~20958 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **72 files, ~31927 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -75,7 +75,7 @@ Excluded as harness and counted here rather than dropped: **72 files, ~31927 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/nocturned | 0 | 3 | 3418 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| kernel | 123 | 15 | 2123 |
+| kernel | 123 | 15 | 2181 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/lib | 57 | 3 | 474 |
 | usr/stratumd-stub | 0 | 1 | 453 |
@@ -140,13 +140,13 @@ Excluded as harness and counted here rather than dropped: **72 files, ~31927 lin
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
+| kernel/include/thylacine/devcap.h | 271 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/ports/dosbox-x/config.h | 254 |
 | usr/ports/sdl2/thylacine/SDL_thylacineaudio.c | 231 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
-| kernel/include/thylacine/devcap.h | 213 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |

@@ -6,7 +6,10 @@
 //
 //   /grant — corvus writes {cap_mask, target_stripes} (CAP_GRANT_WRITE_LEN
 //            bytes); kernel records a pending grant. Gated on the writer
-//            holding CAP_GRANT_HOSTOWNER.
+//            holding CAP_GRANT_HOSTOWNER. The 32-byte form is the A-4a
+//            clearance grant; the 40-byte form (IM-2) is the clearance
+//            grant with a flags word (CAP_GRANT_FLAG_PROPAGATING: the
+//            redeemed caps flow to the legate root's rfork descendants).
 //   /use   — the target Proc writes {cap_mask} (CAP_USE_WRITE_LEN bytes);
 //            kernel ORs cap_mask into writer's caps, consumes the grant.
 //            Gated on the writer holding PROC_FLAG_CONSOLE_ATTACHED AND
@@ -67,6 +70,7 @@ struct cap_grant_entry {
                                        // window opens when the caps actually land
                                        // (avoids any userspace/kernel clock skew).
     u32                  session_id;   // CLEARANCE: corvus audit tag (-> legate)
+    u32                  flags;        // CLEARANCE: CAP_GRANT_FLAG_* (IM-2; 0 = plain)
 };
 
 struct cap_grant_table {
@@ -108,6 +112,7 @@ static void cap_clear_locked(struct cap_grant_entry *e) {
     e->expiry_ns      = 0;
     e->valid_for_ns   = 0;
     e->session_id     = 0;
+    e->flags          = 0;
 }
 
 static int cap_find_free_locked(u64 now_ns) {
@@ -139,14 +144,15 @@ static int cap_find_stripes_locked(u64 stripes) {
 // Write all fields of a slot for a fresh/replacing PENDING grant. Routing
 // BOTH register paths through this is load-bearing: a re-register over an
 // existing slot of the OTHER kind must reset EVERY discriminator field
-// (kind, valid_for_ns, session_id), or a stale clearance grant's fields
-// could survive under a hostowner cap_mask (or vice versa) and a redeem
-// would apply the wrong kind's semantics. PRECONDITION: caller holds the
-// table lock.
+// (kind, valid_for_ns, session_id, flags), or a stale clearance grant's
+// fields could survive under a hostowner cap_mask (or vice versa) and a
+// redeem would apply the wrong kind's semantics -- a stale PROPAGATING flag
+// under a re-registered plain grant would make a plain redeem propagate.
+// PRECONDITION: caller holds the table lock.
 static void cap_set_entry_locked(struct cap_grant_entry *e,
                                  enum cap_grant_kind kind, caps_t cap_mask,
                                  u64 target_stripes, u64 expiry_ns,
-                                 u64 valid_for_ns, u32 session_id) {
+                                 u64 valid_for_ns, u32 session_id, u32 flags) {
     e->state          = CAP_GRANT_PENDING;
     e->kind           = kind;
     e->cap_mask       = cap_mask;
@@ -154,6 +160,7 @@ static void cap_set_entry_locked(struct cap_grant_entry *e,
     e->expiry_ns      = expiry_ns;
     e->valid_for_ns   = valid_for_ns;
     e->session_id     = session_id;
+    e->flags          = flags;
 }
 
 // Find the slot index to write for `target_stripes` -- the existing PENDING
@@ -196,23 +203,32 @@ long cap_register_grant_for_writer(struct Proc *writer,
     // HOSTOWNER kind; valid_for_ns + session_id are 0 (clearance-only) -- set
     // explicitly so a re-register over a stale clearance slot resets them.
     cap_set_entry_locked(&g_cap_grants.entries[idx], CAP_GRANT_KIND_HOSTOWNER,
-                         cap_mask, target_stripes, expiry, 0, 0);
+                         cap_mask, target_stripes, expiry, 0, 0, 0u);
 
     spin_unlock_irqrestore(&g_cap_grants.lock, s);
     return (long)CAP_GRANT_WRITE_LEN;
 }
 
-// A-4a clearance /grant core (32-byte form). See devcap.h. Gated on
-// CAP_GRANT_CLEARANCE; cap_mask must be a non-empty subset of
-// CAP_GRANTABLE_CLEARANCE; session_id must be nonzero (sentinel) and fit u32.
-long cap_register_clearance_grant_for_writer(struct Proc *writer,
-                                             caps_t cap_mask, u64 target_stripes,
-                                             u64 valid_for_ns, u64 session_id) {
+// IM-2 imperium /grant core (40-byte form) -- the clearance core with a flags
+// word. See devcap.h. Gated on CAP_GRANT_CLEARANCE; cap_mask must be a
+// non-empty subset of CAP_GRANTABLE_CLEARANCE (of CAP_GRANTABLE_IMPERIUM when
+// PROPAGATING); session_id must be nonzero (sentinel) and fit u32; flags must
+// be within CAP_GRANT_FLAGS_VALID.
+long cap_register_imperium_grant_for_writer(struct Proc *writer,
+                                            caps_t cap_mask, u64 target_stripes,
+                                            u64 valid_for_ns, u64 session_id,
+                                            u64 flags) {
     if (!writer)                                              return -1;
     if (target_stripes == 0)                                 return -1;
     if (cap_mask == 0)                                       return -1;
     if ((cap_mask & ~(caps_t)CAP_GRANTABLE_CLEARANCE) != 0)  return -1;
     if (session_id == 0 || session_id > 0xFFFFFFFFull)       return -1;
+    if ((flags & ~(u64)CAP_GRANT_FLAGS_VALID) != 0)          return -1;
+    // A PROPAGATING grant is bounded to the imperium level: the caps that may
+    // flow to descendants are exactly CAP_GRANTABLE_IMPERIUM (devcap.h says
+    // why CAP_DEBUG / CAP_JIT / CAP_AUDIO_GRAPH are excluded by construction).
+    if ((flags & CAP_GRANT_FLAG_PROPAGATING) &&
+        (cap_mask & ~(caps_t)CAP_GRANTABLE_IMPERIUM) != 0)   return -1;
     // Writer gate: must hold CAP_GRANT_CLEARANCE (corvus). The clearance
     // analog of the hostowner grant's CAP_GRANT_HOSTOWNER gate.
     if ((writer->caps & (caps_t)CAP_GRANT_CLEARANCE) == 0)   return -1;
@@ -230,10 +246,22 @@ long cap_register_clearance_grant_for_writer(struct Proc *writer,
 
     cap_set_entry_locked(&g_cap_grants.entries[idx], CAP_GRANT_KIND_CLEARANCE,
                          cap_mask, target_stripes, expiry, valid_for_ns,
-                         (u32)session_id);
+                         (u32)session_id, (u32)flags);
 
     spin_unlock_irqrestore(&g_cap_grants.lock, s);
-    return (long)CAP_GRANT_CLEARANCE_WRITE_LEN;
+    return (long)CAP_GRANT_IMPERIUM_WRITE_LEN;
+}
+
+// A-4a clearance /grant core (32-byte form): the imperium core with flags == 0.
+// Kept as its own entry point so the 32-byte Dev write, SYS_CAP_GRANT_CLEARANCE
+// and every A-4a caller are byte-unchanged; the return value is the form's own
+// length (the Dev write echoes it).
+long cap_register_clearance_grant_for_writer(struct Proc *writer,
+                                             caps_t cap_mask, u64 target_stripes,
+                                             u64 valid_for_ns, u64 session_id) {
+    long rc = cap_register_imperium_grant_for_writer(writer, cap_mask, target_stripes,
+                                                     valid_for_ns, session_id, 0u);
+    return (rc < 0) ? -1 : (long)CAP_GRANT_CLEARANCE_WRITE_LEN;
 }
 
 long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
@@ -281,8 +309,20 @@ long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
         caps_t to_or     = cap_mask;          // == cap_mask & e->cap_mask (subset)
         u64    valid_for = e->valid_for_ns;
         u32    session   = e->session_id;
-        cap_clear_locked(e);                  // one-shot consume
-        spin_unlock_irqrestore(&g_cap_grants.lock, s);
+        u32    lflags    = (e->flags & CAP_GRANT_FLAG_PROPAGATING)
+                         ? LEGATE_FLAG_PROPAGATING : 0u;
+
+        // IM-2 (IMPERIUM-DESIGN.md 11.4 G6; imperium.tla): a PROPAGATING grant
+        // is redeemable only by a writer in NO scope -- propagating never nests
+        // (a member of a plain scope would start elevating its children; a
+        // member of an imperium scope would widen what its children receive;
+        // imperium_buggy_nest.cfg). Refused WITHOUT consuming (the grant stays
+        // pending for its window; the writer may abdicate and retry).
+        if (lflags != 0u &&
+            __atomic_load_n(&writer->legate_scope_id, __ATOMIC_ACQUIRE) != 0u) {
+            spin_unlock_irqrestore(&g_cap_grants.lock, s);
+            return -1;
+        }
 
         // The legate window opens NOW -- when the caps actually land -- not at
         // grant-register time, so a slow redeem doesn't shorten the window and
@@ -296,7 +336,20 @@ long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
         u64 valid_until = (valid_for == 0)                ? 0
                         : (valid_for > (~0ull - now))     ? ~0ull
                         : now + valid_for;
-        proc_become_legate(writer, to_or, session, valid_until);
+
+        // The stamp runs UNDER the table lock, and BEFORE the consume: the lock
+        // is what serializes two redeems by peer threads of one Proc (both
+        // could otherwise read scope 0 and mint two roots, the second
+        // overwriting the first's flowing set -- IM-2 made that a privilege
+        // question), and stamping first means a refusal inside the stamp (the
+        // defensive twin of the check above) never loses the grant.
+        // proc_become_legate takes no lock and cannot sleep.
+        if (proc_become_legate(writer, to_or, session, valid_until, lflags) != 0) {
+            spin_unlock_irqrestore(&g_cap_grants.lock, s);
+            return -1;
+        }
+        cap_clear_locked(e);                  // one-shot consume
+        spin_unlock_irqrestore(&g_cap_grants.lock, s);
         return (long)CAP_USE_WRITE_LEN;
     }
 
@@ -509,7 +562,8 @@ static long devcap_write(struct Spoor *c, const void *buf, long n, s64 off) {
 
     if (m == DEVCAP_GRANT_MAGIC) {
         // Length-discriminated: 16 bytes = hostowner grant; 32 = A-4a clearance
-        // grant. The two never collide. Any other length fails closed.
+        // grant; 40 = IM-2 imperium grant (clearance + flags). The three never
+        // collide. Any other length fails closed.
         if (n == (long)CAP_GRANT_WRITE_LEN) {
             caps_t cap_mask        = (caps_t)le64(b);
             u64    target_stripes  = le64(b + 8);
@@ -522,6 +576,15 @@ static long devcap_write(struct Spoor *c, const void *buf, long n, s64 off) {
             u64    session_id      = le64(b + 24);
             return cap_register_clearance_grant_for_writer(writer, cap_mask,
                        target_stripes, valid_for_ns, session_id);
+        }
+        if (n == (long)CAP_GRANT_IMPERIUM_WRITE_LEN) {
+            caps_t cap_mask        = (caps_t)le64(b);
+            u64    target_stripes  = le64(b + 8);
+            u64    valid_for_ns    = le64(b + 16);
+            u64    session_id      = le64(b + 24);
+            u64    flags           = le64(b + 32);
+            return cap_register_imperium_grant_for_writer(writer, cap_mask,
+                       target_stripes, valid_for_ns, session_id, flags);
         }
         return -1;
     }

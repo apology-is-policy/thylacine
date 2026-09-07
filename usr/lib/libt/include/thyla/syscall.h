@@ -124,6 +124,9 @@ enum {
     // 110 = SYS_CONSOLE_EPISODE (IM-1; the trusted login authority only --
     // native libthyla-rs; no libt wrapper).
     T_SYS_CONSOLE_EPISODE   = 110,
+    // 111 = SYS_CAP_GRANT_IMPERIUM (IM-2; corvus only -- native libthyla-rs;
+    // no libt wrapper).
+    T_SYS_CAP_GRANT_IMPERIUM = 111,
     T_SYS_TTY_SIGNAL        = 94,  // PTY-1d: server-side signal-class report
     T_SYS_TTY_ACQUIRE       = 95,  // PTY-1d: controlling-terminal acquisition
     T_SYS_TTY_SET_FG        = 96,  // PTY-1d: tcsetpgrp
