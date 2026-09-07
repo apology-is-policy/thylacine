@@ -65,14 +65,23 @@ pub extern "C" fn rs_main() -> i64 {
     let mut conns: Vec<server::Conn> = Vec::new();
 
     loop {
-        // 1. Deliver held reads whose ring filled in a prior serviced frame. I-9:
-        //    ptyfs is single-threaded and a ring fills ONLY via a client Twrite (a
-        //    POLLIN that woke this loop), so a parked read is always re-checked
-        //    here before the loop parks again -- no read wake is lost.
+        // 1. Deliver held reads whose ring filled in a prior serviced frame, THEN
+        //    parked slave writes whose s2m ring drained. Order matters: poll_reads
+        //    runs the master reads that FREE s2m room, so a parked slave write
+        //    (poll_writes, which pushes to s2m) sees that room in the same pass.
+        //    I-9: ptyfs is single-threaded and a ring's state changes ONLY via a
+        //    client Tread/Twrite (a POLL event that woke this loop), so a parked
+        //    read/write is always re-checked here before the loop parks again --
+        //    no wake is lost. This holds for the ONE kernel /dev/pts conn today.
+        //    With >1 conn (MAX_CONNS headroom for a future direct consumer) a
+        //    write parked on conn B could have its s2m freed by conn A's read
+        //    LATER in this same pass, so it waits one t_poll cycle (<=1 s) -- a
+        //    stall, not a lost wake. The fix is two passes (all reads, then all
+        //    writes); owed, latent until a second conn exists (F3).
         let mut i = conns.len();
         while i > 0 {
             i -= 1;
-            if !conns[i].poll_reads(&mut ptys) {
+            if !conns[i].poll_reads(&mut ptys) || !conns[i].poll_writes(&mut ptys) {
                 conns[i].teardown(&mut ptys);
                 let _ = unsafe { t_close(conns[i].handle()) };
                 conns.remove(i);

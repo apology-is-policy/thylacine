@@ -729,6 +729,16 @@ impl SessionTile {
                 Some(Ok((tag, payload))) => match parse_record(tag, &payload) {
                     Ok(rec) => {
                         let alt_enter = matches!(rec, Record::Mode(ScreenMode::AltScreen));
+                        #[cfg(feature = "test-mode")]
+                        match &rec {
+                            Record::Mode(ScreenMode::AltScreen) => {
+                                say!("halcyond: session tile leaf={} screenmode -> AltScreen", self.leaf)
+                            }
+                            Record::Mode(ScreenMode::Normal) => {
+                                say!("halcyond: session tile leaf={} screenmode -> Normal", self.leaf)
+                            }
+                            _ => {}
+                        }
                         self.tile.apply(rec);
                         // A program entering the alt screen takes every key
                         // (the modal gate keys on the tile's screen mode), so

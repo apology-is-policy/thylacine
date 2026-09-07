@@ -23,6 +23,100 @@ needed the operator.
 
 ---
 
+## Run 40 (main, 2026-09-07, Opus 4.8, effort max): the s7 read-side fix, twice attempted and twice demolished -- a Fable audit proves there is no transient; the real bug is write-side
+
+This run is the catch, not a win. It is worth recording precisely because two
+successive fixes for s7 ("nora opens in a tile, renders one frame, dies") were
+both wrong, and the second was wrong in the *same way* as the first one level
+deeper -- the reusable lesson is how the wrongness was caught.
+
+**The premise, inherited.** Run 39 observed nora exit immediately in a tile
+(screenmode Alt->Normal) and a sub-ms delay masking it, and theorized a
+"transient master_gone" on the pts: nora's launch read landed in a momentary
+window where the pts master fid was closed+reopened, read 0, took it for EOF,
+quit. Run 39 itself flagged this as UNCONFIRMED (the ptyfs churn it logged turned
+out to be the boot selftest). A first fix (run-40 pickup, poll-HUP re-sample) was
+already an audit P0 and reverted -- it polled for a POLLHUP the non-QTPOLL pts
+data fd never emits (`dev9p_poll.c:289`).
+
+**This run's attempt.** I re-implemented the fix the "correct" way: on
+`read()==0`, `PollSource::confirm_eof` RE-READS across a grace, latching eof only
+if 0 recurs; a cleared transient parks for input and never returns 0. I
+ground-truthed the READ semantics hard first (ptyfs `ring_drain`, server.rs:932:
+empty+master-open PARKS, empty+master-gone returns 0) -- the exact discriminator,
+verified. Compiled, clippy-clean, self-audited twice. It even resolved a "one-key
+lag puzzle" I noticed in the drain loop -- which I dismissed as orthogonal.
+
+**The catch (Fable 5.1, agent a5136040f523ecd6a, MODEL start==end -- a real
+Fable round, family-diverse from the Opus author).** The audit re-derived the one
+thing I had NOT ground-truthed: the CAUSE. `n_master` is written at exactly three
+sites (server.rs:412/483/499); the only server-path master open is `h_lopen`'s
+clone (:1481); the other `open_inc(_,true)` at :1907/:2431/:2526 are the boot
+selftest. Masters are mint-only. So per pts, `n_master` goes `0->1->0` exactly
+once -- **there is no transient**, and a pts slave `read()==0` is permanent. My
+`confirm_eof` transient arm was dead code; the fix added a delay on a real close
+and nothing else. Same error class as the P0 it replaced: I verified the read
+semantics but built on an unverified *cause* premise. I re-verified the audit's
+`n_master` enumeration and the write-side chain from the tree before accepting
+it, then reverted the fix (`source.rs` clean at HEAD).
+
+**What s7 actually is (two defects, both code-verified, both now OPEN + owned):**
+- **F3 [P1] -- write-side.** nora's first `redraw` (`main.rs:195`) writes a
+  ~5-8KB opening frame to the 4KB pts `s2m` ring. ptyfs `slave_write` breaks on a
+  full ring returning a short/0 count (server.rs:660-666); libthyla `write_all`
+  maps `Ok(0)->WriteZero` (io.rs:130); native slave writers don't retry (the
+  master side does). So the frame's second chunk WriteZeros -> `redraw` errors ->
+  nora `return 1` -> `term.leave()` -> screenmode Normal = "one frame then exit".
+  F1 makes the is_eof path impossible at startup (master present -> read parks),
+  so it was never a read bug. Intermittent by frame-vs-ring-vs-drain timing (the
+  Heisenbug); a serial write slows the writer and hides it. Hits any native
+  program bursting > a ring-full onto a tile pts. Fix: park slave writes in ptyfs.
+- **F2 [P0, pre-existing] -- the "not interactive" half.** `PollSource` parks in
+  `read()` on all 64 drain sweeps, because `dev9p_poll` returns POLLIN-always for
+  the non-QTPOLL pts data fd so the drain's `!readable` exit never fires;
+  keystroke N isn't delivered until N+1 unblocks the prior sweep. 64-deep
+  batching. This is the "one-key lag puzzle" I dismissed -- the audit caught what
+  I waved off. Fix: poll `/dev/pts/<n>ready` (QTPOLL) and read fd 0.
+
+**Disposition.** Fix reverted; F2/F3/F4 (gate)/F5 (comments) enqueued
+([[bug_s7_write_zero_and_read_batching]], [[audit_s7_confirm_closed_list]]).
+STOPPED for operator steer: the direction changed from read-side "nora
+robustness" (ratified, now proven inert) to write-side ptyfs parking + a
+PollSource poll change -- two audit surfaces, and F3 wants a confirming
+exit-status measurement (OBSERVE) before the fix. The login-loop fix + the
+halcyond marker were re-verified sound by the same audit and stay uncommitted.
+**Then the operator granted autonomy on the surfaced issues, and F3 landed.** I
+OBSERVED first (instrument nora's exits, boot): the marker was
+`nora: EXIT path=redraw1 code=1 err=WriteZero` -- the write path, confirmed, not
+is_eof. The fix mirrors ptyfs's blocking-read machinery on the write side: a
+full-ring slave write with the master present PARKS (a `PendingWrite` beside
+`PendingRead`; `poll_writes` completes it once kaua-term drains s2m; a gone
+master unparks with `Rwrite 0` -> the writer exits). A Fable 5.1 audit (real, no
+fallback) closed 0 P0 / 0 P1 / 1 P2 / 6 P3 -- the central claim survived and the
+both-ends deadlock I had flagged was WITHDRAWN (kaua-term's write_master is
+bounded by 200x1ms retries then drops + returns to reading s2m). The P2 (a
+parked write pins a shared kernel 9P tag; enough parked ops starve the pool -- a
+pre-existing class the parked READS already had) got its mis-named comment fixed
++ the real kernel per-Proc-tag-quota fix enqueued; F2/F4/F5/F6 fixed in-chunk,
+the two-pass loop + the 11c-EINTR precondition enqueued.
+
+**The tail was a false FAIL I did NOT ship around.** The audit-fix
+ls-gfx-session FAILED (init=0). Easy to call a flake or my F2 regression; it was
+neither. Ground truth: the pool fixture ships michael with NO `lib/halcyon.rc`,
+the gate's own H-4c leg CREATES it per run, and my PRESERVE=1 rebuilds KEPT the
+pool -- so the rc accumulated, the next login took the rc-path instead of
+`layout restore default`, and the gate's restore-default marker never appeared.
+A fresh-pool (PRESERVE=0) bake -> ls-gfx-session PASS + s7-nora-probe PASS, both
+green on one pool. The lesson: a stateful gate under PRESERVE=1 makes its own
+bug; reset per attempt.
+
+Net repo change this run: the ptyfs slave-write park (F3), audited + verified --
+the read-side detour cost only its own reversal. The F2 input-batching P0
+(PollSource must poll `<n>ready`) and the login-loop console fallback remain
+their own next chunks.
+
+---
+
 ## Run 37 cont'd #9 (vault, 2026-09-07, Opus 4.8, effort max): the docs/reference retirement redirect phase finishes -- 152/157, and the 5 that remain have nowhere to redirect to
 
 **The arc.** The operator-ratified docs/reference retirement drives ~157 legacy
@@ -90,6 +184,83 @@ GL path), **150-build-config** (the `tools/` build-config surface + DEV_ACCOUNTS
 (single-file, audit:none-tier, low dossier value). The full backlog with tiers is
 in `memory/project_vault_arc.md` (SWEEP @29621aed).
 
+---
+
+## Run 39 (main, 2026-09-07, Opus 4.8, effort max): the login loop, and s7 re-diagnosed from scratch -- a nora startup race, not the compositor bug we thought
+
+Two things this run, both from the operator testing live.
+
+**The login loop.** The operator booted a session-lever image CONSOLE-ONLY and
+got an endless `Thylacine login:` loop. Root cause (ground-truthed): console
+mode drops the GPU so tapestryd never starts (`run-vm.sh:305-311`); the pool
+still carries the baked session lever, so login spawns `halcyond --session`,
+which finds no compositor and exits (`session.rs:986` returns 1); login treated
+that exit as a clean logout ("its exit IS logout, regardless of status",
+`main.rs:1398` pre-fix) and returned -> the getty respawned it forever. A real
+lock-out on ANY box where the compositor can't come up (headless, GPU-less), not
+just a dev quirk. Fix landed (uncommitted, still owes its own console-mode
+boot-verify): login falls back to the console `ut` shell on a non-zero
+`halcyond --session` exit. Recorded [[bug_login_loop_no_console_fallback]].
+
+**s7, re-diagnosed.** The operator's graphical test (sb1-sb4 + a mockup, on their
+Desktop, not Downloads -- the two newest Downloads images were unrelated Threads
+screenshots) gave a rich Halcyon-render bug report (A fonts base-text-still-mono,
+B spurious blank lines, C nora-in-tile, D session chrome unwired). We took C
+(nora, the worst) per the operator. **Every prior s7 hypothesis was wrong.** I
+built a probe harness that drives `nora` into a session tile and traces
+halcyond's screenmode + key routing, and the live boot showed: nora enters the
+alt screen and IMMEDIATELY leaves it -- it renders ONE frame (`main.rs:195`
+redraw before the loop) and exits. THAT frozen frame under the resuming shell is
+the "ut+nora merged, not interactive" symptom. Ruled out, each with evidence:
+winsize (nora sized `63x35 (cpr)`, correct), focus + input routing (leaf 3 got
+every key, routed to pts), and `raw_vt_intent` (grep proved it is SET but never
+READ anywhere in halcyond -- an inert reserved latch; the h/l set-only bug there
+is real but cannot be this).
+
+The wrong turns worth keeping: (1) it is a **Heisenbug** -- run 1 (unmodified
+nora) exited, runs 2-3 with a sub-ms diagnostic serial-write added STAYED. The
+instrumentation masked the race. Intermittent = a race, per the method. (2) My
+ptyfs `n_master` instrumentation first fired inside ptyfs's **boot selftest**
+(the churn clustered at lines 2734-2740, before `selftest PASS` at 2741, long
+before nora at 3056) -- a control fabricating the defect it reports; the real
+runtime churn is separate. (3) I chased a `confirm_eof` "root cause" in
+`transcript.rs raw_vt_intent` before grepping for its readers and finding none
+-- verify the consumer before claiming a cause.
+
+Real cause: nora's fd 0 (pts slave, ptyfs) reports a TRANSIENT POLLHUP/read-0 at
+launch (a pts master fid momentarily closed+reopened during session tile setup;
+ptyfs reports HUP/EOF on `master_gone` == `n_master==0`, `server.rs:912/927`),
+and nora's PollSource latched eof on it -> immediate exit. The operator chose
+fix **B (nora robustness)**: `usr/lib/kaua/src/source.rs` now confirms a
+suspected eof persists (re-samples fd 0 across a 100ms grace; any sample without
+the hangup = transient carrier, keep running) before latching it. B moots
+needing to fully nail the churn trigger, and a terminal app shouldn't die to a
+carrier blip at launch. The gate (`s7-nora-probe.exp`) went GREEN twice -- and
+that was the trap: **the prosecutor audit (Opus fallback) caught a P0 that
+invalidated the whole fix, and the gate had passed for the wrong reason.** nora's
+fd 0 is the pts-slave DATA fd, which is NON-QTPOLL, so `dev9p_poll` returns POLLIN
+always and NEVER POLLHUP (dev9p_poll.c:289; ptyfs server.rs:227); POLLHUP is only
+on the separate `<n>ready` file nora does not poll. So `confirm_eof`, which
+re-samples for a HUP, always returned false -> it never believes ANY eof,
+including a real tile close -> nora would spin forever holding the pts open
+(strictly worse than the original premature-quit). The gate only ever exercised
+the launch transient (which always-false-confirm happens to tolerate); it never
+tested a real close. My self-audit's premise -- "ptyfs reports HUP
+level-triggered" -- was true for `ready_revents` (the `<n>ready` file) but FALSE
+for the data fd nora actually polls; I audited the wrong fd. The context-
+independent round re-derived the real fd's poll behavior and exposed it. Fix
+REVERTED (`git checkout` kaua/source.rs); s7 is unfixed again. The correct
+approach is re-READ confirmation (not re-poll -- the fd cannot emit HUP), or the
+audit's preferred fix A (stop the pts master close+reopen at its source, which
+needs the churn trigger nailed -- the run-39 ptyfs churn I logged was the
+selftest, a red herring). The fix DIRECTION is open again for the operator. The
+login-loop fallback survived the audit (F2 was P3 only); it and the screenmode
+marker stay uncommitted. **The lesson worth keeping: a green gate that only
+exercises one arm of a two-arm property proves nothing about the other arm -- and
+a self-audit that reads the wrong fd's poll code will confidently bless a false
+premise.** The full Halcyon-render set
+(A/B/D + the visual interactivity confirmation) remains for the operator +
+follow-up chunks. Detail: [[project_s7_editor_in_tile]].
 
 ---
 

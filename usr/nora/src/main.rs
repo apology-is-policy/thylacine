@@ -192,12 +192,14 @@ fn run(
     dap: &mut Option<Dap>,
     notes: Option<&libthyla_rs::notes::Notes>,
 ) -> i32 {
-    if redraw(term, ed).is_err() {
+    if let Err(e) = redraw(term, ed) {
+        t_putstr(&format!("nora: EXIT path=redraw1 code=1 err={:?}\n", e));
         return 1;
     }
     let mut mux = Mux::new();
     loop {
         if src.is_eof() {
+            t_putstr("nora: EXIT path=eof code=0\n");
             return 0;
         }
         // ONE poll(2) over fd 0 and any live server pipes -- gopls (8e-2),
@@ -211,7 +213,10 @@ fn run(
         })) {
             Some(r) => r,
             // fd 0 gone (no console) -> exit cleanly rather than spin.
-            None => return 1,
+            None => {
+                t_putstr("nora: EXIT path=pollnone code=1\n");
+                return 1;
+            }
         };
         let mut dirty = false;
         let mut saved = false;
@@ -223,7 +228,10 @@ fn run(
                     // and split-escape handling (#106-F2 / #173) is unchanged.
                     let events = match src.poll(PollTimeout::Zero) {
                         Ok(e) => e,
-                        Err(_) => return 1,
+                        Err(er) => {
+                            t_putstr(&format!("nora: EXIT path=pollerr code=1 err={:?}\n", er));
+                            return 1;
+                        }
                     };
                     // A wake with no decoded key (a bare HUP) loops; is_eof
                     // breaks at the top. The console read is #811
@@ -307,6 +315,7 @@ fn run(
             }
         }
         if ed.quit {
+            t_putstr("nora: EXIT path=quit code=0\n");
             return 0;
         }
         if let Some(l) = lsp.as_mut() {
@@ -358,8 +367,11 @@ fn run(
                 *dap = None;
             }
         }
-        if dirty && redraw(term, ed).is_err() {
-            return 1;
+        if dirty {
+            if let Err(e) = redraw(term, ed) {
+                t_putstr(&format!("nora: EXIT path=redraw2 code=1 err={:?}\n", e));
+                return 1;
+            }
         }
     }
 }
