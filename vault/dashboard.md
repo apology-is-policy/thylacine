@@ -133,11 +133,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-07 [[chg-2026-09-07-aurora-doc-absorb]] — absorb docs/reference/140-aurora (the fbcon + /dev/cons drain/feed, G-4): clean redirect + sharpen the cfg-3 F1 attribution in sub-aurora
+- 2026-09-07 [[chg-2026-09-07-diorama-doc-absorb]] — absorb docs/reference/141-diorama (the synthetic Linux world): fold the SA-4 vDSO fast-path + the MIDR-0x00 harness lesson + diorama-probe into sub-diorama
 - 2026-09-07 [[chg-2026-09-07-go-port-doc-absorb]] — absorb docs/reference/133-go-port (GOOS=thylacine capability map): fold the Loom SETATTR truncate-only fail-close into sub-kernel-loom; fork is external
 - 2026-09-07 [[chg-2026-09-07-jit-doc-absorb]] — absorb docs/reference/145-jit (the JIT capability, I-42): fold the I-cache contract (CL-7k-3 F1 create-invalidate + the cross-PE ISB publish contract) into sub-kernel-mmu
 - 2026-09-07 [[chg-2026-09-07-kaua-doc-absorb]] — absorb docs/reference/112-kaua (the console TUI substrate): clean redirect to sub-kaua (ahead of the doc's stale Status table)
 - 2026-09-07 [[chg-2026-09-07-libdriver-doc-absorb]] — absorb docs/reference/118-libdriver (the Menagerie driver framework, I-34): clean redirect to sub-libdriver-grant + sub-libdriver-discovery (grant AHEAD of the doc)
 - 2026-09-07 [[chg-2026-09-07-libhalcyon-doc-absorb]] — absorb docs/reference/151-libhalcyon (the Halcyon environment library): fold the UNOWNED halcyon tool + tag.rs into sub-libhalcyon
 - 2026-09-07 [[chg-2026-09-07-net-doc-absorb]] — absorb docs/reference/122-net (libthyla-rs::net, the native /net client): fold the SNTP trust model into sub-net-clients; redirect the protocol to sub-netd-server
-- 2026-09-07 [[chg-2026-09-07-nora-doc-absorb]] — absorb docs/reference/113-nora (the native modal editor): fold the I-39-authorized kstack read into sub-nora-host
 <!-- generated:end -->

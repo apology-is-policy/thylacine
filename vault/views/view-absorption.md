@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**143 absorbed · 14 live · 157 total.**
+**144 absorbed · 13 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -95,7 +95,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 139-tapestryd.md | absorbed | [[sub-kernel-weft]], [[sub-libdriver-grant]], [[sub-libtapestry]], [[sub-tapestryd]] |
 | 14-process-model.md | absorbed | [[inv-i24]], [[lock-proc-table]], [[spec-death-wake]], [[sub-kernel-death]], [[sub-kernel-proc]], [[sub-kernel-thread]], [[view-closed-sub-kernel-death]] |
 | 140-aurora.md | absorbed | [[sub-aurora]], [[sub-kernel-cons]], [[sub-kernel-devdev]], [[sub-lib-vt]] |
-| 141-diorama.md | live | — |
+| 141-diorama.md | absorbed | [[sub-diorama]] |
 | 141-parley.md | absorbed | [[sub-nora-host]], [[sub-nora-view]], [[sub-parley]] |
 | 142-sdl-port.md | live | — |
 | 143-tyrquake.md | live | — |
