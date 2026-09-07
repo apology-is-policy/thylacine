@@ -23,6 +23,86 @@ needed the operator.
 
 ---
 
+## Run 37 cont'd #10 (vault, 2026-09-07, Opus 4.8, effort xhigh, operator away): the vault half of the s7 F3 deadlock, three F3 folds, a seam closed, and the operator-directed ports authoring
+
+Post-self-compact continuation. This is the vault side of what Run 41 (main)
+narrates from the code side: five feature pushes, all docs work (the effort gate
+exempts docs, so no /effort max even for the audit:hard dossier). Tip
+17be890b -> 45967c81.
+
+**The abi-boot-banner declaration (09177fb0) -- I owned the consistency sweep,
+and one sentence tried to make it lie.** Run 41 covers the cross-repo lint
+deadlock; the vault's job was the count-sweep main delegated ("you own the
+consistency"). Adding one mirror (`s7-nora-probe.exp`, 28 -> 29) cascades:
+the bootOK/EXTINCTION-matching subset 27 -> 28, the delivery table's EXTINCTION:
+row 24 -> 25, the "25 of the 29" restatement, the co-update-seam and Prosecution
+counts. The catch: the note's headline sentence conflated the *historical*
+"the 2026-09 resync grew the set to twenty-eight" with the *current* total in one
+clause -- blindly changing "28" to "29" would have falsified a dated event. I
+reworded to separate the resync event (stays 28) from the now-total (29) and
+added a dated `s7-nora-probe` subsection, preserving every historical record
+(the #245 census, the resync subsection, chg-2026-09-05's mirrors-checked-for-28)
+per the note's own historical-vs-current rule. Lesson: a recount is not a
+find-and-replace; a frozen note carries dated facts that a current total must
+not overwrite.
+
+**The three F3 folds (aea90c88) and a stub that looked like a miss.** sub-ptyfs
+(the write-park, folded as the analog of the existing PendingRead/poll_reads),
+sub-nora-host (the six self-naming EXIT markers), sub-halcyond (the test-mode
+screenmode witness). Wrong turn caught: after folding sub-halcyond I checked its
+generated `## Provenance` block and it was EMPTY -- it looked like the touched
+edge had not registered. Before "fixing" it I checked two control dossiers
+(sub-kernel-joey/uart/vivarium): their Provenance blocks are empty too. The
+Provenance renderer is a project-wide STUB (writes only the header); `quaestor
+backlinks sub-halcyond` confirmed my chg's `touched` edge *does* register. So the
+empty block was correct-and-latent, not a miss -- a control one query away turned
+a phantom fix into a non-event. Also: render reads only COMMITTED chgs for the
+dashboard/backlinks, so an uncommitted chg's edges do not populate until it lands
+(verified against the committed abi chg being listed and the uncommitted F3 chg
+not).
+
+**The login-loop seam closed (5f7a3bad), and the fix beat the plan.** main's
+36cb83d8 (the console-fallback for a session-lever image booted console-mode)
+closes `seam-login-halcyond-fallback` (KT-1 C-F12). Worth recording: the seam
+*predicted* the fix as "halcyond exiting non-zero within N seconds of spawn" (a
+timing window); the actual fix keys on the child's EXIT STATUS
+(`session_failed = !status.success()`), which is cleaner -- no race, no N to
+tune, and it covers a mid-session compositor death for free (both are non-zero).
+I recorded that the fix improved on the plan in the seam's "what closed it," and
+the fold rides the identity-masking subsection so the "no new authority" claim
+(the reused `shell_cmd`, no CAP_SET_IDENTITY leak) is anchored where the masking
+is proven.
+
+**The ports plane, authored (45967c81) -- the operator's directed task.** The
+AskUserQuestion answer was "author sdl-port + tyrquake" as an audit:hard round
+(I-42 CAP_JIT/W^X + W-3e Vulkan glue), leaving the two benches + build-config as
+backlog. sub-sdl-port (audit:hard): the I-42 core is that SDL acquires CAP_JIT in
+the *platform layer* before llvmpipe (a JIT) runs, and the soundness claim is
+that SDL only *asks* (the corvus SELF-form walk in `usr/lib/thylajit/thyla_capjit.h`)
+-- corvus decides against the caller's own eligibility, nothing is granted in SDL.
+Plus the weak-symbol link discipline, the W-3e two-sided consent (surface half
+before ctx half, so no poke can name a ctx-less surface), the reweave re-bind, and
+the nogl fallback. sub-tyrquake (audit:light): the consumer -- the ramfs launcher
+(no CAP_JIT; it's acquired by the SDL backend) and the two boundary-line patches,
+guarded-by inv-i38 (the condebug per-line close publishes under the close-to-open
+cache). Two wrong turns caught by the registrar: (1) I merged the caveats into
+`## Seams` and the lint FAILed on a missing `## Caveats` (the dossier template
+requires both distinct sections) -- split them, genuine seams vs footguns; (2) I
+over-cited file:line (11 R4 warns -- the vault idiom is symbol-primary because
+lines rot), converted to `(`FILE`, `:NN`)` which is R4-clean and keeps the
+anchor. The resume-note "phantom" (`thyla_capjit.h`) was reconciled: it is a REAL
+header at `usr/lib/thylajit/`, the old docs/reference doc had named it at a wrong
+path; documented from the code, not the stale doc. The aux-side
+`thyla_tap_intent`/frame-intent symbol was confirmed absent from usr/ports/sdl2
+and deliberately not documented (as-built = on-main only).
+
+**Open / deferred.** The redirect phase (152/157) and now the operator-directed
+authoring are both complete; the two benches (129-fsbench, 41-irq-bench) +
+150-build-config stay as live reference docs per the operator's ratified call.
+Deferred vault folds owed at their merge: 0068's aux-branch content
+(Nocturne/frame-intent/DX-4/DOSBox) and 0069's IM-1 kernel-episode -- aux will
+ring when they reach main. No host was held this run (pure docs work).
+
 ## Run 41 (main, 2026-09-07, Opus 4.8, effort xhigh, operator away): s7 F3 pushed, the .exp gate's cross-repo lint deadlock, and the login-loop fix boot-verified -- all under a held mac
 
 Post-compact continuation of Run 40 (the s7 F3 landing). Three things landed,
