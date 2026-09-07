@@ -65,23 +65,23 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**419 owned · 65 unowned · 484 files (86% owned) · ~16421 unswept lines.**
+**434 owned · 50 unowned · 484 files (89% owned) · ~13701 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30431 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/ports | 0 | 18 | 4033 |
 | usr/pouch-hello | 0 | 22 | 3384 |
 | kernel | 123 | 15 | 2118 |
+| usr/ports | 14 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1028 |
 | usr/stratumd-stub | 0 | 1 | 453 |
-| usr/lib | 57 | 2 | 390 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | arch | 36 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
+| usr/lib | 58 | 1 | 72 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
 | usr/coreutils | 60 | 0 | 0 |
@@ -124,47 +124,35 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1028 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
-| usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 390 |
 | kernel/include/thylacine/errno.h | 388 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
-| usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 336 |
-| usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
-| usr/ports/sdl2/thylacine/thyla_tap.c | 320 |
-| usr/lib/thylajit/thyla_capjit.h | 318 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
-| usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |
 | kernel/include/thylacine/devcap.h | 208 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
-| usr/ports/sdl2/SDL_config.h | 186 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
 | usr/susp-mask-child/src/main.rs | 139 |
-| usr/ports/tyrquake/tyr-glquake-launcher.c | 134 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
-| usr/ports/sdl2/thylacine/thyla_tap.h | 125 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |
 | usr/pouch-hello/pouch-hello-fopen.c | 120 |
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
-| usr/ports/sdl2/thylacine-nogl/SDL_thylacineopengl_nogl.c | 118 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
-| usr/ports/sdl2/glapi-probe.c | 81 |
-| usr/ports/sdl2/thylacine/SDL_thylacinevideo.h | 79 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |
 | arch/arm64/psci.c | 78 |
 | kernel/include/thylacine/vdso.h | 73 |
@@ -176,13 +164,10 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30431 lin
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
 | kernel/include/thylacine/cpio.h | 61 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
-| usr/ports/sdl2/thylacine/SDL_thylacineopengl.h | 52 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
-| usr/ports/sdl2/thylacine/SDL_thylacinevulkan.h | 21 |
-| usr/ports/sdl2/thylacine/SDL_thylacineevents_c.h | 14 |
 <!-- generated:end -->

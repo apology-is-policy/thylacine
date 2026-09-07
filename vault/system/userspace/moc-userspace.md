@@ -4,7 +4,7 @@ type: moc
 title: "Userspace"
 parent: home
 created: 2026-07-31
-updated: 2026-08-04
+updated: 2026-09-07
 ---
 The native + ported userspace tree: the boot chain (joey, corvus, login,
 warden), the services (netd, stratumd-facing proxies, ptyfs, tapestryd),
@@ -62,6 +62,23 @@ dossiers.
   [[inv-i43]], whose whole content is that it must reformat and never
   become an authority — the newest server and the only one whose design
   property is an absence of privilege.
+
+## Ports
+
+The ported plane (ARCHITECTURE.md section 3.5: foreign code that already
+expects POSIX → pouch + musl, not native libthyla-rs). These are not
+Thylacine-authored; the dossiers describe the thin Thylacine-shaped layer a
+port needs and the boundary-line patches it carries.
+
+- [[sub-sdl-port]] — the SDL2 backend: the tapestry video driver, the OSMesa
+  GL path that acquires **CAP_JIT on the program's behalf** (I-42, the reason
+  it is audit:hard — a stock SDL-GL program's request for a context is, on this
+  platform, a request to JIT), and the two-sided Vulkan consent (W-3e). The one
+  place the ports plane touches a capability.
+- [[sub-tyrquake]] — GL Quake: the worked example that a stock SDL-GL app runs
+  unpatched at the graphics layer because [[sub-sdl-port]] carries the platform
+  facts. Holds no capability; its one obligation is the [[inv-i38]] per-line
+  close in its `-condebug` sink.
 
 ## Cross-cutting
 
