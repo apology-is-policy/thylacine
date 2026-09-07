@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/92-utopia-line-editor: clean redirect + fold Repl::run_script (script mode) into sub-utopia-interactive"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["e9fda668"]
 touched: [sub-utopia-interactive]
 established: []
 closed: []
