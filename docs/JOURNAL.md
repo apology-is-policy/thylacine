@@ -22,6 +22,79 @@ needed the operator.
 
 
 ---
+## 2026-09-07 (aux) -- Imperium & SAK: the arc opened; the revisit landed as IM-0 scripture (+ the origin/main merge)
+
+The operator parked Nocturne at N-3c-2 and opened a different arc: "Imperium
+and SAK" (Fable 5.1, `/effort max` -- the effort gate reported `max` before a
+line was read, so no question fired). The binding design was six weeks old
+(`IMPERIUM-DESIGN.md` ACCEPTED 2026-06-08 with a scheduled revisit;
+`TRUSTED-PATH.md` 2026-06-15; ROADMAP 9.1's IM bullet), so the first deliverable
+was the revisit itself: the design re-grounded against the September tree, then
+surfaced as a page (https://claude.ai/code/artifact/5e5ca828-8855-43cc-8763-8cdf7e485108)
+with four forks, all four voted the recommendation, and landed here as
+`IMPERIUM-DESIGN.md` 11 + the TRUSTED-PATH / ARCH 25.2 + 28 / CLAUDE.md /
+ROADMAP / phase7-status / ERRORS.md `sak` / SPEC-TO-CODE amendments. No code.
+
+**The finding worth keeping: scripture asserted two I-27 properties the code
+never enforced.** TRUSTED-PATH 8 says corvus is "the kernel-guaranteed sole
+writer" after a SAK; `cons_output_write` (`kernel/cons.c:1795`) is ungated --
+any Proc writes the UART. TRUSTED-PATH 2 says input goes only to corvus; the
+session shell holds the single-reader slot (`reader_busy`, `cons.c:1692`) parked
+in `cons_input_read`, so post-SAK its read would drain the typed secret. A third
+hole is newer than the design: the G-4 renderer feed (`cons_feed_write`,
+`cons.c:2030`) lets a halcyond session's keyboard reach the RX ring through
+userspace, so a renderer could type into corvus's prompt. The SAK mechanism
+(A-4c-2) is live and correct; the EPISODE it was built for does not exist --
+post-SAK corvus is attached and does nothing (no notes fd, no console handling;
+`AUTH_REQ_DISTINCT_SECRET` refused at `corvus main.rs:2940` "A-4c not yet
+built"). The revisit's value was reading `cons_output_write`, not the design.
+IM-1 builds all three properties: the freeze, the forced raw mode, the feed
+refusal, the `sak` note, `SYS_CONSOLE_EPISODE_END`.
+
+**Two wrong turns caught at the whiteboard, before code.** (1) A kernel timeout
+on the episode (a hung corvus should not freeze the console forever) -- dropped
+by asking what the kernel does with the NEXT keystroke after a timeout corvus
+does not know about: it routes the secret to the shell. So: no kernel timeout;
+corvus bounds its own prompt and ENDs; trusted death ends it; a hung corvus is a
+hung TCB, the class of corvus dying at boot. (2) The nested redeem. Asking "what
+does the first program a user runs under imperium do?" answered: it activates
+`CAP_JIT` (user-default; every GL program, verb 18). Under A-4a F2's "fresh
+scope per redeem" that member would be RE-TAGGED out of the imperium teardown
+while holding the propagated caps -- an elevated escape, and also every GL
+program failing under imperium had the rule gone the other way. Resolution:
+one scope per Proc, set once; a further redeem ORs caps and keeps the tag;
+a PROPAGATING redeem on a Proc already in any scope is refused. Both would have
+been P0s in the IM-2 round.
+
+**Two stale notes corrected.** A-4c-2's closed list says "no BREAK injectable in
+the harness" -- LS-CI's serial is a `mux=on` chardev with the qemu monitor
+(`tools/interactive/lib.exp:535,695`), so `Ctrl-A b` sends a BREAK; the arc gets
+a real end-to-end. And 102-legate's "#855 kproc orphan leak" is closed while
+init lives: joey adopts + reaps orphans with a wait-any sweep (`proc.c:995`).
+
+**The design also assigned the kernel lift to main.** The operator gave the arc
+to aux; main is on Halcyon stabilization (ptyfs/kaua/halcyond/login), disjoint
+surfaces, declared on yip. The vault owns every code surface IM touches
+(`quaestor owner`: cons.c, proc.c, devcap.c, devproc.c, notes.c, corvus,
+libutopia repl) -- code chunks ring the vault and carry `No-dossier-change`
+trailers; the retired `docs/reference` stubs are not re-written.
+
+**The merge.** aux-3 was 416 behind origin/main, and the vault had meanwhile
+retired 152/157 `docs/reference` files into redirect stubs. Merged first
+(`487fd33d`): 8 conflicts -- AUDIT-TRIGGERS index + JOURNAL (keep both), four
+reference files (take the stubs; aux-3's 192 pre-absorption lines -- the
+audio-graph level, the tapestryd zoom rows, the JIT + sys-thread notes -- rung
+to the vault as yip call 0068 rather than written into retired files), two vault
+views (re-rendered). Verified on the merged tree before committing: full bake +
+one HVF boot, `Thylacine boot OK`, 0 EXTINCTION (`build/merge-verify.log`).
+
+**Open.** IM-1 is next (the episode; audit:hard I-27; the SMP gate is owed on
+the kernel delta). The Fable-diversity pass for the Nocturne arc stays owed
+(parked with the arc). MEMORY.md is still above the hook's target; the
+coordinated main+aux curation stays owed.
+
+---
+
 ## 2026-09-07 (aux) -- Nocturne N-3c-2: device capture (the D_INPUT RX stream + the gated `source`)
 
 Fresh context off a self-compaction; N-3c-1 (the sink tap) was closed + pushed

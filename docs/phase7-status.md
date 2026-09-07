@@ -568,6 +568,24 @@ audit-bearing; floor = `make test-tcg` x2 (both clean: 793/793 + boot OK + 0
 EXTINCTION). NEXT on the MVP line: LS-5 (Ctrl-C); remaining breadth: LS-6
 (login UX) / LS-7 (editor) / LS-K (id/whoami/date).
 
+### The Imperium/Authority arc (IM) -- self-elevation on the trusted path
+
+Opened 2026-09-07 (operator-directed; aux track, Fable 5.1 at effort max) after
+the Nocturne arc was parked at N-3c-2. Binding design: `docs/IMPERIUM-DESIGN.md`
+(§11 = the as-built revisit + the plan; four forks ratified) +
+`docs/TRUSTED-PATH.md` + ROADMAP §9.1 (the IM bullet). Rows land in the
+Landed-chunks table above as each sub-chunk closes.
+
+| Sub-chunk | Scope | Bar | State |
+|---|---|---|---|
+| **IM-0** | scripture: IMPERIUM-DESIGN §11 + TRUSTED-PATH §7/§12/§15 + ARCH §25.2/§28 + CLAUDE.md rows + ROADMAP + ERRORS.md `sak` + SPEC-TO-CODE + JOURNAL | scripture, no code | *(this commit)* |
+| **IM-1** | the kernel trusted EPISODE: `cons.c` freeze (non-attached reads/writes park; the feed refused) + forced RAW + the `sak` note + `SYS_CONSOLE_EPISODE_END` (110) + the chokepoint END on trusted death; kernel unit tests; the LS-CI BREAK lever (`Ctrl-A b`) with a positive + negative control | audit:hard (I-27); suite; SMP gate | next |
+| **IM-2** | `specs/imperium.tla` FIRST; then the fork-PROPAGATING legate scope: `SYS_CAP_GRANT_IMPERIUM` (111) + the 40-byte grant form + `PROC_FLAG_LEGATE_PROPAGATING` + `legate_caps` + the rfork flow + the straggler close + one-scope-per-Proc + `/proc/<pid>/imperium` | audit:hard (I-2/I-25); spec green; suite; SMP gate | |
+| **IM-3** | corvus: the `imperium` level (DAC/CHOWN/KILL, DISTINCT_SECRET, 4h, PROPAGATING) + the per-(user,level) key wrap at CLEARANCE_GRANT + `IMPERIUM_REQUEST` (verb 19, deferred reply) + the episode consumer + audit log + a boot prover | audit:hard (crypto + privilege) | |
+| **IM-4** | `usr/imperium` (thin, untrusted; the sub-shell model) + ut `abdicate` + the fasces prompt + the manual page | host tests + boot | |
+| **IM-5** | `ls-imperium.exp` + the batched holotype rounds (per double-distance) + the SMP gate + push | audits clean; both mirrors | |
+| **IM-6** | pomerium + dictator | later | |
+
 ## Exit criteria status
 
 Per `docs/UTOPIA-SHELL-DESIGN.md §18` / `docs/ROADMAP.md §8.2`. Twelve headline checks.

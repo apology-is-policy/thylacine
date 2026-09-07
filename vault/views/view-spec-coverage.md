@@ -33,7 +33,7 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**34 dossiered · 52 missing · 86 modules.**
+**34 dossiered · 0 missing · 34 modules.**
 
 | module | spec note | state |
 |---|---|---|
@@ -49,7 +49,6 @@ reads as missing, which is the intended pressure.
 | debug_stop.tla | [[spec-debug-stop]] | dossiered |
 | fs_cache.tla | [[spec-fs-cache]] | dossiered |
 | handles.tla | [[spec-handles]] | dossiered |
-| handles_TTrace_1788722410.tla | `spec-handles-TTrace-1788722410` | **missing** |
 | loom.tla | [[spec-loom]] | dossiered |
 | loom_devgone.tla | [[spec-loom-devgone]] | dossiered |
 | loom_multishot.tla | [[spec-loom-multishot]] | dossiered |
@@ -59,47 +58,7 @@ reads as missing, which is the intended pressure.
 | pipe.tla | [[spec-pipe]] | dossiered |
 | poll.tla | [[spec-poll]] | dossiered |
 | pty.tla | [[spec-pty]] | dossiered |
-| pty_TTrace_1786686294.tla | `spec-pty-TTrace-1786686294` | **missing** |
-| pty_TTrace_1786686295.tla | `spec-pty-TTrace-1786686295` | **missing** |
-| pty_TTrace_1786686307.tla | `spec-pty-TTrace-1786686307` | **missing** |
-| pty_TTrace_1786686323.tla | `spec-pty-TTrace-1786686323` | **missing** |
-| pty_TTrace_1786686324.tla | `spec-pty-TTrace-1786686324` | **missing** |
-| pty_TTrace_1786686338.tla | `spec-pty-TTrace-1786686338` | **missing** |
-| pty_TTrace_1786686339.tla | `spec-pty-TTrace-1786686339` | **missing** |
-| pty_TTrace_1786686340.tla | `spec-pty-TTrace-1786686340` | **missing** |
-| pty_TTrace_1786697116.tla | `spec-pty-TTrace-1786697116` | **missing** |
-| pty_TTrace_1786712654.tla | `spec-pty-TTrace-1786712654` | **missing** |
-| pty_TTrace_1786712655.tla | `spec-pty-TTrace-1786712655` | **missing** |
-| pty_TTrace_1786712696.tla | `spec-pty-TTrace-1786712696` | **missing** |
-| pty_TTrace_1786712697.tla | `spec-pty-TTrace-1786712697` | **missing** |
-| pty_TTrace_1786769838.tla | `spec-pty-TTrace-1786769838` | **missing** |
-| pty_TTrace_1786769839.tla | `spec-pty-TTrace-1786769839` | **missing** |
-| pty_TTrace_1786775760.tla | `spec-pty-TTrace-1786775760` | **missing** |
-| pty_TTrace_1786775761.tla | `spec-pty-TTrace-1786775761` | **missing** |
-| pty_TTrace_1786775762.tla | `spec-pty-TTrace-1786775762` | **missing** |
-| pty_TTrace_1786775763.tla | `spec-pty-TTrace-1786775763` | **missing** |
-| pty_TTrace_1786884225.tla | `spec-pty-TTrace-1786884225` | **missing** |
-| pty_TTrace_1786884226.tla | `spec-pty-TTrace-1786884226` | **missing** |
-| pty_TTrace_1786884281.tla | `spec-pty-TTrace-1786884281` | **missing** |
-| pty_TTrace_1786884282.tla | `spec-pty-TTrace-1786884282` | **missing** |
 | pty_stop.tla | [[spec-pty-stop]] | dossiered |
-| pty_stop_TTrace_1786686293.tla | `spec-pty-stop-TTrace-1786686293` | **missing** |
-| pty_stop_TTrace_1786686306.tla | `spec-pty-stop-TTrace-1786686306` | **missing** |
-| pty_stop_TTrace_1786686323.tla | `spec-pty-stop-TTrace-1786686323` | **missing** |
-| pty_stop_TTrace_1786686338.tla | `spec-pty-stop-TTrace-1786686338` | **missing** |
-| pty_stop_TTrace_1786697115.tla | `spec-pty-stop-TTrace-1786697115` | **missing** |
-| pty_stop_TTrace_1786697116.tla | `spec-pty-stop-TTrace-1786697116` | **missing** |
-| pty_stop_TTrace_1786712656.tla | `spec-pty-stop-TTrace-1786712656` | **missing** |
-| pty_stop_TTrace_1786712672.tla | `spec-pty-stop-TTrace-1786712672` | **missing** |
-| pty_stop_TTrace_1786712697.tla | `spec-pty-stop-TTrace-1786712697` | **missing** |
-| pty_stop_TTrace_1786712698.tla | `spec-pty-stop-TTrace-1786712698` | **missing** |
-| pty_stop_TTrace_1786769839.tla | `spec-pty-stop-TTrace-1786769839` | **missing** |
-| pty_stop_TTrace_1786775764.tla | `spec-pty-stop-TTrace-1786775764` | **missing** |
-| pty_stop_TTrace_1786775765.tla | `spec-pty-stop-TTrace-1786775765` | **missing** |
-| pty_stop_TTrace_1786884227.tla | `spec-pty-stop-TTrace-1786884227` | **missing** |
-| pty_stop_TTrace_1786884250.tla | `spec-pty-stop-TTrace-1786884250` | **missing** |
-| pty_stop_TTrace_1786884282.tla | `spec-pty-stop-TTrace-1786884282` | **missing** |
-| pty_stop_TTrace_1786884283.tla | `spec-pty-stop-TTrace-1786884283` | **missing** |
 | reader_frame.tla | [[spec-reader-frame]] | dossiered |
 | sched_alpha.tla | [[spec-sched-alpha]] | dossiered |
 | sched_ctxsw.tla | [[spec-sched-ctxsw]] | dossiered |
@@ -109,17 +68,6 @@ reads as missing, which is the intended pressure.
 | scheduler.tla | [[spec-scheduler]] | dossiered |
 | tapestry_present.tla | [[spec-tapestry-present]] | dossiered |
 | territory.tla | [[spec-territory]] | dossiered |
-| territory_TTrace_1788333399.tla | `spec-territory-TTrace-1788333399` | **missing** |
-| territory_TTrace_1788333400.tla | `spec-territory-TTrace-1788333400` | **missing** |
-| territory_TTrace_1788333401.tla | `spec-territory-TTrace-1788333401` | **missing** |
-| territory_TTrace_1788333402.tla | `spec-territory-TTrace-1788333402` | **missing** |
-| territory_TTrace_1788333403.tla | `spec-territory-TTrace-1788333403` | **missing** |
-| territory_TTrace_1788333502.tla | `spec-territory-TTrace-1788333502` | **missing** |
-| territory_TTrace_1788333503.tla | `spec-territory-TTrace-1788333503` | **missing** |
-| territory_TTrace_1788333504.tla | `spec-territory-TTrace-1788333504` | **missing** |
-| territory_TTrace_1788353612.tla | `spec-territory-TTrace-1788353612` | **missing** |
-| territory_TTrace_1788353613.tla | `spec-territory-TTrace-1788353613` | **missing** |
-| territory_TTrace_1788360135.tla | `spec-territory-TTrace-1788360135` | **missing** |
 | tsleep.tla | [[spec-tsleep]] | dossiered |
 | weft.tla | [[spec-weft]] | dossiered |
 | weft_readiness.tla | [[spec-weft-readiness]] | dossiered |

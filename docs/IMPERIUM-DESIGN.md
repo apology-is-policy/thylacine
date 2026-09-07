@@ -1,10 +1,12 @@
 # Imperium -- power-user clearance, the legate's command authority
 
 **Status: ACCEPTED design (2026-06-08); landed in the canonical docs 2026-06-09.
-REVISIT scheduled at the END of the Life Support arc** (after `LS-test`) --
-imperium is the post-LS **identity-arc + Utopia-shell capstone**, not LS-arc
-work. Originated in the auxiliary track (`aux/userspace-apps`,
-`usr/apps/IMPERIUM-DESIGN.md`); brought here as the canonical design.
+REVISIT DONE 2026-09-07 (§11) -- the IM phase is OPEN on the aux track**
+(operator-directed; the four forks ratified, §11.9). imperium is the post-LS
+**identity-arc + Utopia-shell capstone**, not LS-arc work. Originated in the
+auxiliary track (`aux/userspace-apps`, `usr/apps/IMPERIUM-DESIGN.md`); brought
+here as the canonical design. §§1-9 are the rationale; **§11 is the as-built
+design the code lands against.**
 
 When built, the design folds into the A-4 / legate scripture
 (`docs/reference/102-legate.md`, `IDENTITY-DESIGN.md section 9.8`, invariant
@@ -12,8 +14,9 @@ I-25) + `CORVUS-DESIGN.md` (the clearance auth) + a `NOVEL.md` angle (the
 "abdication atomically de-escalates the entire elevated subtree -> an elevated
 shell that is *safer* than a root shell" property -- advances Angle #9's
 capability-elevation contract). The kernel lift -- the fork-propagating legate
-scope (section 2) -- is the main agent's to build + model (**spec-first
-re-enabled for that privilege surface**, like the SMP redesign); it is the
+scope (section 2) -- is built + modeled on the aux track since 2026-09-07
+(§11.4; **spec-first re-enabled for that privilege surface**, like the SMP
+redesign); it is the
 natural completion of the member-bearing legate teardown that `102-legate.md`
 already defers to v1.x (the spawn-during-teardown straggler + member-vs-reaper
 notes, #855). Builds on the COMPLETE A-4a legate mechanism; the *lex curiata*
@@ -265,4 +268,233 @@ CLI parse + the fasces renderer [pure computation: cap-set -> the bundle] + the
 corvus *lex curiata* / `cap::use_grant` flow behind a documented seam, modeled on
 `usr/legate-prover/`) is the natural next aux artifact -- the same pattern as the
 Tapestry `libtapestry` POC. It cannot RUN until the section-9 deps land, but it
-proves the tool shape + makes the fasces concrete.
+proves the tool shape + makes the fasces concrete. **Superseded 2026-09-07:** no
+skeleton is built; the arc lands the real tool at IM-4 (§11.6, §11.8).
+
+## 11. As-built revisit (2026-09-07) -- the IM phase opened; the four forks ratified
+
+**Status change.** The revisit §0 scheduled is DONE. The IM phase is OPEN on the
+**aux** track (operator-directed 2026-09-07; the kernel lift §0 reserved for the
+main agent is aux's -- main is on the Halcyon stabilization arc, disjoint
+surfaces, declared on yip). Effort max on Fable 5.1. This section is the
+as-built design the code lands against; §§1-9 above stay the rationale.
+
+### 11.1 Ground truth the revisit verified (aux-3, post-merge of origin/main)
+
+- **The legate substrate (A-4a) is complete**: the two-phase grant/redeem,
+  `proc_become_legate` (`kernel/proc.c`), the scope tag inherited on `rfork`,
+  the teardown at the ZOMBIE chokepoint and the EL0-tail expiry. At v1.0 every
+  clearance cap is elevation-only, so `rfork` strips them and a scope MEMBER is
+  unelevated (the `~CAP_ELEVATION_ONLY` strip in `rfork_internal`).
+- **The SAK mechanism (A-4c-2) is live**: PL011 BREAK -> `sak_pending` ->
+  `console_mgr` -> `proc_console_sak` (revoke the owner's attach, `owner = NULL`,
+  attach corvus; posts NO note since RW-7 R2-F2; idempotent under a BREAK flood).
+- **The episode is absent**: post-SAK corvus is attached and does nothing. It has
+  no notes fd and no console handling; `AUTH_REQ_DISTINCT_SECRET` exists in its
+  level table and is REFUSED ("A-4c not yet built").
+- **Console gates as built**: input is a single-reader slot (`reader_busy`,
+  first reader wins); `cons_output_write` is UNGATED (any Proc writes the UART);
+  the renderer feed (`cons_feed_write`) is unconditional.
+- **Orphan reaping**: init (joey) adopts and reaps orphans with a wait-any
+  WNOHANG sweep, so the "#855 kproc leak" caveat of the legate reference is
+  closed while init lives.
+- **The harness can press the SAK**: LS-CI's serial is a `mux=on` chardev
+  socket carrying the qemu monitor, so `Ctrl-A b` sends a BREAK. The A-4c-2
+  "no BREAK injectable" note is stale; the whole arc gets a real E2E.
+- **corvus's wire can defer a reply**: a verb handler that stages no response
+  leaves the client's read parked -- exactly what the *lex curiata* needs.
+
+### 11.2 The gaps between §§1-9 and the tree (each BUILT or CLOSED below)
+
+- **G1** no episode (expected; IM-1 + IM-3 build it).
+- **G2** output exclusivity is NOT enforced -- TRUSTED-PATH §8's "kernel-guaranteed
+  sole writer" is asserted, not built. I-27 property 2.
+- **G3** input exclusivity is NOT enforced -- the shell's parked read would drain
+  the typed secret. I-27 property 1.
+- **G4** the renderer feed is an injection path during an episode (a halcyond
+  session's keyboard reaches the RX ring through userspace).
+- **G5** under propagation the A-4a "benign unelevated straggler" (an `rfork`
+  racing the teardown walk) holds the caps: an I-25 violation.
+- **G6** nested redeems: `CAP_JIT` is user-default and every GL program activates
+  it; the A-4a F2 "fresh scope per redeem" would RE-TAG an imperium member on a JIT
+  activation and let it escape the imperium teardown while holding the caps.
+- **G7** no SAK -> corvus signal. **G8** no per-level secret (the DISTINCT_SECRET
+  wrap is unbuilt). **G9** spawn-time cap masks must compose with propagation.
+
+### 11.3 The episode -- kernel, I-27 ENFORCED on the serial medium (IM-1)
+
+State: `g_cons.episode_active` (atomic) + the saved termios word + an episode
+`Rendez`.
+
+- **BEGIN** (the `console_mgr` SAK dispatch): `proc_console_sak()` returns whether
+  a trusted Proc got attached; iff so `cons_episode_begin()`: discard the cooked
+  partial line (a SAK mid-line abandons the line -- pre-SAK bytes must never be
+  the first bytes of the secret), save termios, force RAW (`ICANON|ECHO|ISIG|ICRNL`
+  off), mark active, wake the data rendez so the parked shell reader re-evaluates.
+  `proc_console_sak` posts the **`sak` note** to the trusted Proc under
+  `g_proc_table_lock` (the established `exits -> notes_post` order).
+- **READ, non-attached, while active**: never holds the reader slot; parks on the
+  episode rendez until inactive, then re-acquires. **READ, attached**: normal.
+- **WRITE, non-attached, while active** (both the `devcons` and the `devdev`
+  door): parks on the episode rendez before the writer role -- **FREEZE**, never
+  drop (ratified F2). Kernel writers (`cons_kernel_writer_begin`: diag lines,
+  Halls) are unaffected; echo is off so the IRQ-context emit path is quiet.
+- **FEED** (`cons_feed_write`): refused (-1) while active (G4). **DRAIN** (the
+  renderer mirror): unchanged -- the bytes are public and the mirror cannot be
+  typed into.
+- **END**: `SYS_CONSOLE_EPISODE_END` (reserved 110; gated: the caller is
+  console-attached AND active): restore termios, clear active, wake every parked
+  reader/writer. ALSO cleared at the ZOMBIE chokepoint when the trusted Proc dies
+  (fail-safe: the untrusted world unfreezes; no secret is in flight because the
+  only reader is dead). A repeat SAK during an episode is idempotent. **No kernel
+  timeout**: an episode ended behind corvus's back would route the next
+  keystrokes -- the secret -- to the shell; corvus bounds its own prompt (a poll
+  timeout) and ENDs. A hung corvus is a hung TCB, the class of corvus dying at boot.
+- **After END** corvus stays console-attached (I-27 as today); the console OWNER
+  is re-established by login / the session as today.
+- **Lock order**: `g_cons.lock` is never held across `proc_console_sak`
+  (unchanged); the chokepoint END takes the cons leaf lock under
+  `g_proc_table_lock` -- a new edge with no reverse edge (`cons_input_read`
+  queries the owner OUTSIDE `g_cons.lock`).
+- **The serial sink (ratified F1)**: the kernel's contribution on serial is the
+  OUTPUT-EXCLUSIVITY gate above; corvus composes the provincia as a
+  medium-INDEPENDENT cell grid and rasterizes it to ANSI in userspace through its
+  console handle. The kernel cell ABI (TRUSTED-PATH §7's rasterizing sink) lands
+  with the framebuffer backend (v1.x) and consumes the same composer. Same bytes
+  on the wire, same security on serial (§8: the anchor is the chain, not the
+  pixels), a smaller TCB delta, and no ABI designed blind to the only backend that
+  needs it.
+
+### 11.4 The propagating legate scope -- kernel, I-25 STRENGTHENED, spec-first (IM-2)
+
+- The grant gains `flags` (PROPAGATING): a new **`SYS_CAP_GRANT_IMPERIUM`**
+  (reserved 111; `x0` mask, `x1` stripes, `x2` valid_for, `x3` session, `x4`
+  flags) beside `SYS_CAP_GRANT_CLEARANCE`, and a 40-byte `/cap/grant` form
+  (length-discriminated, additive). The redeem (`SYS_CAP_USE`, unchanged) sets
+  `PROC_FLAG_LEGATE_PROPAGATING` on the root and records **`legate_caps`** (the
+  redeemed set) on the Proc.
+- **`rfork`**: `child->caps = (parent_caps & mask) & ~(CAP_ELEVATION_ONLY & ~flow)`
+  with `flow = parent->legate_caps` iff the parent's scope is propagating, else 0;
+  `child->legate_caps = flow`; the propagating property is inherited as a MEMBER
+  property, never the ROOT flag. `CAP_HOSTOWNER` is never clearance-grantable, so
+  it never flows. The spawn mask still bounds everything (G9).
+- **Straggler close (G5)**: the child's scope + caps inheritance is finalized
+  under `g_proc_table_lock` at table insert; a parent already terminating
+  (`group_exit_msg` set) fails the `rfork`. A member of a torn-down scope cannot
+  mint a child.
+- **One scope per Proc, set once (G6; retires A-4a F2)**: a redeem on a Proc that
+  already carries a scope ORs the caps but keeps its tag / session / root status,
+  and `legate_valid_until` becomes the EARLIER nonzero deadline (conservative). A
+  PROPAGATING grant redeemed by a Proc already in ANY scope is REFUSED --
+  propagating scopes never nest; abdicate first. JIT under imperium therefore
+  works: the member keeps the imperium tag, and `CAP_JIT` -- elevation-only and
+  outside `legate_caps` -- still does not flow to its children.
+- **Teardown**: unchanged in mechanism (root death / expiry -> group-terminate
+  every tag holder) -- now LOAD-BEARING for privilege, since members are elevated.
+- **`/proc/<pid>/imperium`** (0444; the two-axis read gate like `status`):
+  `scope N session N propagating 0|1 rods N axe 0|1 caps 0xHEX until NS`, with
+  `rods = popcount(legate_caps)` and `axe = CAP_KILL held`. This is the §4
+  "unforgeable kernel flag"; `/proc/self` (the #66 cluster) folds in if cheap.
+- **Spec**: `specs/imperium.tla`, written + TLC-green BEFORE the impl (spec-first
+  RE-ENABLED for this surface, per §0): roots / members, propagation on fork, the
+  three teardown triggers, the fork-vs-teardown race, the nested redeem;
+  invariants `NoElevatedOutlivesScope`, `FlowOnlyUnderPropagatingScope`,
+  `OneScopePerProc`; buggy cfgs `imperium_buggy_straggler`,
+  `imperium_buggy_retag`, `imperium_buggy_flow_without_flag`.
+
+### 11.5 The *lex curiata* -- corvus (IM-3)
+
+- **The `imperium` clearance level**: caps `DAC_OVERRIDE | CHOWN | KILL`,
+  `auth_required = DISTINCT_SECRET`, `time_bound = 4h`, PROPAGATING. Eligibility
+  is admin-granted (`CLEARANCE_GRANT`), like audio-graph. The request's cap-set is
+  the self-restriction subset (the existing `self_restrict`, STS-style):
+  `imperium chown dac` is the level restricted to {CHOWN, DAC}; `imperium kill`
+  carries the axe. Multi-level composition is v1.x.
+- **The capability key (G8; ratified F4)**: at `CLEARANCE_GRANT` of a
+  DISTINCT_SECRET level the hostowner supplies the user's initial per-(user,
+  level) key; corvus stores a CRVS wrap (argon2id(key) -> AEAD over a random
+  32-byte token; the tag is the verifier) as a new additive record kind in
+  `clearance.db`. A VERIFIER, never a DEK (axis hygiene, IDENTITY-DESIGN §3.1).
+  Attempts are rate-limited (the C-16 discipline). User rotation of their own key
+  is v1.x.
+- **`IMPERIUM_REQUEST` (verb 19)** `{level, self_restrict, term_req}`: eligibility
+  + the level must be DISTINCT_SECRET + ONE pending slot system-wide (a second
+  request -> BUSY; 60 s without a SAK -> TIMEOUT). The reply is DEFERRED -- staged
+  only when the episode concludes: OK{session_id, caps} / DENIED / TIMEOUT. The
+  requester's stripes are re-read LIVE at confer time (`SYS_SRV_PEER`, C-22); a
+  dead requester gets no grant.
+- **The episode consumer**: the `sak` note (corvus adds its notes fd to the poll
+  set) -> `SYS_CONSOLE_OPEN` (gated on attached; corvus qualifies post-SAK) ->
+  compose the provincia as a cell grid -> rasterize to ANSI through the console
+  handle -> read the key (raw, no echo, bounded, 60 s poll timeout) -> verify ->
+  `SYS_CAP_GRANT_IMPERIUM(..., PROPAGATING)` -> stage the reply ->
+  `SYS_CONSOLE_EPISODE_END` -> close the handle + wipe. No pending request:
+  "trusted path: nothing pending -- press any key" -> END. Audit-log lines for
+  request / confer / deny / timeout.
+- `CLEARANCE_ACTIVATE(_SELF)` on a DISTINCT_SECRET level stays REFUSED: the only
+  path is the SAK episode.
+
+### 11.6 Userspace -- the sub-shell model (IM-4)
+
+- **`usr/imperium`** (native libthyla-rs; thin and untrusted, §3.1):
+  `imperium [caps...]` -> IMPERIUM_REQUEST -> "confer with the SAK" -> blocks on
+  the deferred reply -> on OK `cap::use_grant(caps)` (becomes the propagating
+  legate ROOT) -> spawns `ut` (fd 0/1/2 inherited, the same identity) -> waits ->
+  exits, and the root's death sweeps straggling background jobs. No caps = the
+  full level. `imperium --list` / `edict` are read-only (CLEARANCE_LIST + the
+  /proc flag). No controlling tty -> fail fast (UX, not the gate: a script's
+  request does nothing until a human presses BREAK).
+- **`ut`**: the fasces in the prompt from `/proc/<pid>/imperium` (§4: one rod per
+  held cap, the axe glyph when CAP_KILL is held, `#`); `abdicate` = exit iff a
+  legate member (else "not under imperium").
+- Sub-shell first (§6's recommendation); the in-place toggle is v1.x.
+
+### 11.7 Honest scope
+
+On a virtio-gpu-only medium the trusted path is SERIAL (TRUSTED-PATH §7,
+2026-07-17): the SAK is the BREAK, corvus's prompt goes out the UART, and a
+graphical session sees it only as the drain MIRROR -- untrusted and unwritable,
+because the feed is blocked. The graphical SAK, the kernel framebuffer sink and
+the trusted-tier keyboard stay v1.x. Pomerium + dictator (§5) stay the second
+sub-chunk (IM-6).
+
+### 11.8 The plan
+
+| Step | Lands | Bar |
+|---|---|---|
+| **IM-0** | this section + TRUSTED-PATH §7/§12/§15 + ARCH §25.2/§28 + CLAUDE.md rows + ROADMAP / phase7-status + ERRORS.md `sak` + SPEC-TO-CODE | scripture, no code |
+| **IM-1** | the episode (§11.3): cons.c / proc.c / syscall.c / notes.c + kernel unit tests + the LS-CI BREAK lever with a positive and a negative control | audit:hard (I-27); suite; SMP gate |
+| **IM-2** | `specs/imperium.tla` first, then §11.4 in proc.c / devcap.c / devproc.c / caps.h + tests | audit:hard (I-2/I-25); spec green; suite; SMP gate |
+| **IM-3** | §11.5 in corvus + a boot prover (request -> harness BREAK -> confer -> redeem) | audit:hard (crypto + privilege) |
+| **IM-4** | §11.6: `usr/imperium` + ut `abdicate` + the fasces + the manual page | host tests + boot |
+| **IM-5** | `ls-imperium.exp` (login -> `imperium chown dac` -> BREAK -> provincia -> key -> fasces -> `chown` works -> a background job -> `abdicate` -> the job is dead, the fasces gone, `chown` denied; deny arms: wrong key, ineligible user, a script cannot confer) + the batched holotype rounds per double-distance + the SMP gate | audits clean; both mirrors |
+| **IM-6** | pomerium + dictator | later |
+
+### 11.9 The ratified forks (operator, 2026-09-07 -- each the recommendation)
+
+- **F1** serial sink = the kernel output-exclusivity gate + corvus-side cell->ANSI
+  rasterization; the kernel cell ABI lands with the framebuffer sink.
+- **F2** non-attached console I/O during an episode = FREEZE (park until END).
+- **F3** the SAK -> corvus signal = a new `sak` known-note (default IGNORE; a note
+  NAME is ABI, registered in `docs/ERRORS.md`).
+- **F4** the imperium key = hostowner-set at `CLEARANCE_GRANT`; user rotation v1.x.
+- Riding the same signoff: `SYS_CONSOLE_EPISODE_END` (110) +
+  `SYS_CAP_GRANT_IMPERIUM` (111), the 40-byte `/cap/grant` form,
+  `specs/imperium.tla` spec-first, aux owning the kernel lift.
+
+### 11.10 Invariants + what the audits prosecute
+
+- **I-27 (the episode)**: input reaches only the attached Proc; output is only the
+  attached Proc's; feed blocked; raw forced; END and death lift the freeze;
+  repeat-SAK idempotent; no timeout corvus does not know about; the lock order.
+- **I-25 strengthened**: no elevated Proc outlives its scope INCLUDING propagated
+  members and the straggler; one scope per Proc; propagating never nests.
+- **I-2**: caps flow only from `legate_caps` under a propagating scope; HOSTOWNER
+  never; spawn masks still bound; JIT / DEBUG / AUDIO do not flow unless in the
+  level.
+- **I-22**: the durable identity is unchanged; the sub-shell is the same principal.
+- **corvus**: the deferred reply is conn-bound and stripes are re-read live; the
+  key wrap is a verifier, not a DEK; rate limit; secret hygiene (the key + console
+  buffers wiped, the console handle closed at END).
+- **DoS**: one pending slot with expiry; the freeze is bounded by corvus's prompt
+  timeout; an episode can be started only by BREAK, never by software.

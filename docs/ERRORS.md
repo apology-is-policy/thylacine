@@ -163,6 +163,21 @@ and multi-thread fault paths now both terminate only the offending Proc.
 `proc_fault_terminate` still emits the uart diagnostic before
 terminating, so test failures attribute correctly.
 
+## The trusted-path note — `sak`
+
+**Registered 2026-09-07 (operator signoff, fork F3 of `docs/IMPERIUM-DESIGN.md`
+§11.9); emitted from IM-1.** A note NAME is ABI, hence the entry.
+
+| Name  | Length | POSIX-equiv signal | Cause |
+|---|---|---|---|
+| `sak` | 3+1 | none (the NT/AIX secure-attention event) | Kernel-synthetic: `proc_console_sak` posts it to the trusted Proc (`g_console_trusted_proc`, corvus) when a SAK attaches it — the signal that a trusted EPISODE has begun and the console is corvus's to read and write (`TRUSTED-PATH.md` §2, `IMPERIUM-DESIGN.md` §11.3). |
+
+**Default action**: IGNORE (`NOTE_DFL_IGNORE`) — an uncaught `sak` never
+terminates its target; corvus catches it. **Bit position**: `NOTE_BIT_SAK = 6`
+(`NOTE_MASK_SUPPORTED` 0x3f -> 0x7f). Only the kernel may post it: `notes_post`
+refuses the name from a non-kernel-synthetic caller (the `snare:*` rule applied
+to a reserved name), so no program can fake the start of an episode.
+
 ## Exit-status semantics
 
 v1.0: `kernel/proc.c::sys_exits_handler` collapses non-zero exit
