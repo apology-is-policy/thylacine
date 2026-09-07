@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/93-utopia-parser (the rc-shape parser stack): clean redirect -- sub-utopia-parser is fresh + ahead"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["e7de3137"]
 touched: []
 established: []
 closed: []
