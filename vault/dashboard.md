@@ -139,5 +139,5 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-07 [[chg-2026-09-07-libdriver-doc-absorb]] — absorb docs/reference/118-libdriver (the Menagerie driver framework, I-34): clean redirect to sub-libdriver-grant + sub-libdriver-discovery (grant AHEAD of the doc)
 - 2026-09-07 [[chg-2026-09-07-libhalcyon-doc-absorb]] — absorb docs/reference/151-libhalcyon (the Halcyon environment library): fold the UNOWNED halcyon tool + tag.rs into sub-libhalcyon
 - 2026-09-07 [[chg-2026-09-07-net-doc-absorb]] — absorb docs/reference/122-net (libthyla-rs::net, the native /net client): fold the SNTP trust model into sub-net-clients; redirect the protocol to sub-netd-server
-- 2026-09-07 [[chg-2026-09-07-prowl-doc-absorb]] — absorb docs/reference/144-prowl (the scheduler-aware process monitor): clean redirect to sub-prowl (ahead of the doc)
+- 2026-09-07 [[chg-2026-09-07-parley-doc-absorb]] — absorb docs/reference/141-parley (the LSP/DAP client substrate): fold the four UNOWNED probes + the live-server round-trips into sub-parley
 <!-- generated:end -->
