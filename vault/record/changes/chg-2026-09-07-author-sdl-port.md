@@ -4,7 +4,7 @@ type: chg
 title: "author the ports plane: sub-sdl-port (audit:hard, I-42 CAP_JIT + W-3e Vulkan) + sub-tyrquake (audit:light)"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["ae93f496"]
 touched:
   - sub-sdl-port
   - sub-tyrquake
