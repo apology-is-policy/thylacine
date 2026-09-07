@@ -10,7 +10,7 @@ validated-by: [prose]
 locks: []
 design: ["docs/VIVARIUM.md"]
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -92,6 +92,34 @@ one risks waiting on an unkillable child.
 native Thylacine server that happens to serve a Linux-shaped world, so it
 spawns native; only the container's own entrypoint carries the manifest's
 phenotype, and its descendants inherit it through rfork.
+
+**^C reaches the container, not the runner, and the fix is two masks.**
+`viv` runs as `ut`'s foreground job, so its process group is `viv` + its
+diorama + every container Proc; the pts's `ISIG` cooks a `^C` into an
+`interrupt` posted to that whole pgrp. The container's shell handles it, but a
+native Proc with no handler and no notes fd dies of an uncaught `interrupt`
+(LS-5's default) -- so before the fix the first `^C` killed `viv` and the
+diorama, orphaned the container shell to init, and left two readers splitting
+the pts. The fix is a mask and only a mask: `viv` masks `interrupt`
+(`SYS_NOTE_MASK`, bit 0) at startup. The container needs nothing forwarded --
+it is in the pgrp and receives the note directly -- and nothing leaks *into* it,
+because a native child starts with a **zero** mask: `rfork_internal` copies a
+parent's `note_mask` only when the parent is `PHENO_LINUX` (`kernel/proc.c`
+`if (parent->phenotype == PHENO_LINUX)`), and the native exec-image reset zeroes
+it regardless.
+
+The tty family stays **unmasked** in `viv` on purpose, and each reason is
+load-bearing: `^Z` (`tty:susp`) must STOP `viv` *together with* the container,
+or `ut`'s `wait_pid(WUNTRACED)` on the job never sees the stop and the terminal
+is never handed back; a hangup must end `viv` with the container; `^\`
+(`tty:quit`) still kills the runner and detaches a running container, which is
+what `docker run` does under SIGQUIT. The diorama has no such constraint --
+nothing waits on it as a job -- so it masks **both** families: a server never
+dies of a keystroke, and its lifetime is its channel's. This rests on a kernel
+fact read rather than assumed: the terminate latch is armed at post *regardless*
+of the mask, but both consumers (the EL0 tail and the #811 sleep predicate)
+honour the per-thread mask, so a masked `interrupt` is neither delivered nor
+unwinds a blocked `wait_pid`.
 
 **`spawn_raw` is deliberately not `process::Command`.** Command always
 endows the parent's fds 0/1/2, and viv is routinely **fd-less** — joey
