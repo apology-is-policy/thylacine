@@ -4,7 +4,7 @@ type: chg
 title: "login degrades to the console shell when the session compositor cannot start -- closes seam-login-halcyond-fallback"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["70490e20"]
 touched:
   - sub-stratum-session
 established: []
