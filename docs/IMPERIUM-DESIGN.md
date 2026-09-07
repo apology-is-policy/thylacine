@@ -523,6 +523,21 @@ can veto any of them:**
 
 ### 11.7 Honest scope
 
+**Open presentation choice for the v1.x framebuffer sink (operator question,
+2026-09-07).** When the kernel trusted sink lands, the episode does NOT suspend
+userspace threads -- it freezes the console world only (the audio cycle, netd
+and the compositor's clients keep running; I-46 forbids a stall) -- and what the
+compositor loses is the scanout and the keyboard: the kernel is the sole
+painter for the episode and scans the SAK combo through the Menagerie
+trusted-tier keyboard. Whether it presents corvus's cell grid FULL-FRAME or as
+a centered panel over a DIMMED SNAPSHOT of the last frame (the secure-desktop
+shape) is undecided and sound either way, on one condition: the backdrop must
+be a kernel-owned COPY of the last frame, never the compositor's live buffer
+(§8: the anchor is the chain, not the pixels). The dimmed-snapshot panel keeps
+the operator's context and is the recommendation; corvus supplies the panel
+content through the same composer the serial path uses, the kernel decides the
+framing. Settle it in the framebuffer-sink chunk, not before.
+
 On a virtio-gpu-only medium the trusted path is SERIAL (TRUSTED-PATH §7,
 2026-07-17): the SAK is the BREAK, corvus's prompt goes out the UART, and a
 graphical session sees it only as the drain MIRROR -- untrusted and unwritable,
