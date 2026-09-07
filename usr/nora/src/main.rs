@@ -138,6 +138,10 @@ pub extern "C" fn rs_main() -> i64 {
     // Replay any keystroke typed during the launch probe so type-ahead is not
     // lost (kaua::query #117-audit F2).
     let mut src = PollSource::with_pending(probe.pending);
+    // F2: nora's poll_all mux polls src.poll_fd() (the pts ready fd) and calls
+    // src.poll only on a fire, so a pts read is once-and-trust -- not a re-poll
+    // that would batch keystrokes or busy-loop the ready cache.
+    src.set_external_mux();
 
     // #55c: the console-resize signal. Open the editor's note queue so a
     // `tty:winch` (posted to the session pgrp when the renderer reweaves)
@@ -207,7 +211,7 @@ fn run(
         // diagnostic, a debugger stop, and a console resize all wake the loop
         // identically -- there is no tick, so a message nothing polls for never
         // repaints.
-        let ready = match poll_all(&mut mux, lsp.as_ref(), dap.as_ref(), notes.map(|n| {
+        let ready = match poll_all(src.poll_fd(), &mut mux, lsp.as_ref(), dap.as_ref(), notes.map(|n| {
             use libthyla_rs::poll::AsFd;
             n.as_raw_fd()
         })) {
@@ -223,9 +227,11 @@ fn run(
         for r in ready {
             match r.tag {
                 TAG_STDIN => {
-                    // Zero timeout: the mux already established readability;
-                    // PollSource still runs its own drain sweep, so the paste
-                    // and split-escape handling (#106-F2 / #173) is unchanged.
+                    // Zero timeout: the mux (poll_fd = the pts ready fd, or fd 0)
+                    // already established readability. On a pts PollSource reads
+                    // fd 0 ONCE (F2); on the console it runs its drain sweep, so
+                    // the paste and split-escape handling (#106-F2 / #173) is
+                    // unchanged there.
                     let events = match src.poll(PollTimeout::Zero) {
                         Ok(e) => e,
                         Err(er) => {
@@ -378,12 +384,17 @@ fn run(
 
 /// Register fd 0 plus any live gopls and Ambush pipes and block for one of them.
 fn poll_all(
+    stdin_fd: i32,
     mux: &mut Mux,
     lsp: Option<&Lsp>,
     dap: Option<&Dap>,
     notes_fd: Option<i32>,
 ) -> Option<Vec<Ready>> {
-    let mut fds: Vec<(i32, Tag)> = alloc::vec![(0, TAG_STDIN)];
+    // stdin_fd = src.poll_fd(): the pts `/dev/pts/<n>ready` sibling on a hosted
+    // tile, or fd 0 on the console (F2 -- the pts data fd is POLLIN-always, so
+    // fd 0 is unpollable; the ready sibling gives accurate wakes so notes/LSP/DAP
+    // can multiplex against real keystrokes instead of a parked read).
+    let mut fds: Vec<(i32, Tag)> = alloc::vec![(stdin_fd, TAG_STDIN)];
     if let Some(nfd) = notes_fd {
         fds.push((nfd, TAG_NOTES)); // #55c: tty:winch
     }
