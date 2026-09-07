@@ -111,7 +111,7 @@ bytes, and totals; the root `info` gains a `voices N` line.
 | `audio` | `0666` | returns 0 bytes (an output-only device, per `audio(3)`) | S16LE stereo 48000 Hz into voice 0; whole frames (4 bytes) consumed, a trailing partial dropped; blocks when the queue (64 KiB, ~340 ms) is full |
 | `info` | `0444` | the device text above, plus `voices N` | not writable |
 | `ctl` | `0644` | a one-line description | `flush` |
-| `volume` | `0666` | the current `audio`/`mix` levels per channel (Plan 9 `volume(3)`) | `audio 50` / `audio 70 90` / `mix 40` (0..100; `audio 0` mutes) -- if you are allowed (below) |
+| `volume` | `0444` (read-only in the mount) | the current `audio`/`mix` levels per channel (Plan 9 `volume(3)`) | not through the mount -- writes go to `nocturne-vol` / `/srv/nocturne-ctl` (below) |
 | `nodes/new` | `0666` | the id of the voice this open minted | opening it is the mint |
 | `nodes/<id>/audio` | `0666` | 0 bytes | S16LE stereo 48000 Hz into voice `<id>` |
 | `nodes/<id>/ctl` | `0644` | a one-line description | `gain <percent>` / `flush` / `remove` |
@@ -124,18 +124,7 @@ interrupt. Up to 16 voices mix at once.
 
 ## Setting the volume
 
-The root `volume` file is the system volume, in Plan 9 `volume(3)` grammar over
-the active sink. Write one or more lines:
-
-```
-audio 50        # both channels to 50% (about -6 dB)
-audio 70 90     # left 70%, right 90%
-mix 40          # the master (mix) stage to 40%
-audio 0         # mute
-audio 100       # full (unity)
-```
-
-and read it back for the current levels:
+Read the current system volume with `cat` (public info):
 
 ```
 % cat /dev/nocturne/volume
@@ -143,25 +132,37 @@ audio 100 100
 mix 100 100
 ```
 
+Set it with `nocturne-vol` (Plan 9 `volume(3)` grammar over the active sink):
+
+```
+% nocturne-vol audio 50      # both channels to 50% (about -6 dB)
+% nocturne-vol audio 70 90   # left 70%, right 90%
+% nocturne-vol mix 40        # the master (mix) stage to 40%
+% nocturne-vol audio 0       # mute
+% nocturne-vol audio 100     # full (unity)
+% nocturne-vol               # print the current levels
+```
+
 The effective gain per channel is `audio` times `mix` (both 0..100, 100 =
 unity), applied to the mixed output -- `audio` the playback level, `mix` the
 master, like Plan 9's mixfs. Per-stream volume is a voice's own `ctl gain`
-(above); this file is the whole sink.
+(above); this is the whole sink.
 
 **Who may set it.** The sink is system-owned, so changing the system volume
-needs authority beyond merely seeing `/dev/nocturne`: you must be the person at
-the console (the trusted-path session), the system, an admin (`CAP_HOSTOWNER`),
-or hold the `audio-graph` clearance (granted by an administrator through the
-`cap` device). An ordinary app that only plays a voice cannot change the whole
-sink; a program that is refused gets `permission denied`. The volume OSD and a
-session's own shell (at the keyboard) can.
+needs authority beyond merely seeing `/dev/nocturne`: you must be the session at
+the keyboard (the console-owner session -- the trusted-path idiom), the system,
+an admin (`CAP_HOSTOWNER`), or hold the `audio-graph` clearance (granted by an
+administrator through the `cap` device). An ordinary app that only plays a voice
+cannot change the whole sink; a program that is refused gets `permission denied`.
 
-Authority is judged per connection: the volume works from a program connected
-directly to `/srv/nocturne` under its OWN identity (an audio app, the OSD). A
-write through a shared `/dev/nocturne` mount instead carries the mounter's
-identity -- so in a container that shares the host's mount, the write counts as
-the host's, not the container's. Give a container its own audio connection if
-you want its volume changes judged as the container's.
+**Why `nocturne-vol` and not `echo > /dev/nocturne/volume`.** The mounted
+`/dev/nocturne/volume` is read-only: a mount is a single connection and carries
+the mounter's identity (the system), so a write through it could never be judged
+as *you*. `nocturne-vol` instead opens its own connection to the sink-authority
+service `/srv/nocturne-ctl`, where the audio server sees the real caller -- so
+your clearance, or your being the session at the keyboard, is what the gate
+checks. A container that is not given `/srv/nocturne-ctl` simply cannot change
+the host volume, which is the point.
 
 ## Zero-copy ring (advanced)
 

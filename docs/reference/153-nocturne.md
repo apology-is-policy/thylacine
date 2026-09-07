@@ -126,7 +126,7 @@ graph:
 | `audio` | 3 | `0666` | 0 bytes (output-only, `audio(3)`) | S16 stereo 48 kHz into **voice 0** |
 | `info` | 2 | `0444` | device words + counters + `voices N` | `EPERM` |
 | `ctl` | 1 | `0644` | one description line | `flush` (drops voice 0); else `EINVAL` |
-| `volume` | 6 | `0666` | `audio <l> <r>` + `mix <l> <r>` (Plan 9 `volume(3)`) | the grammar; whole-sink authority gate (N-3a-2) |
+| `volume` | 6 | `0444` in the mount / `0666` on `-ctl` | `audio <l> <r>` + `mix <l> <r>` (Plan 9 `volume(3)`) | READ-ONLY in the mounted playback tree; writable only on `/srv/nocturne-ctl`, gated (N-3a-3) |
 | `nodes/` | 4 | `0555` dir | `Treaddir` lists `new` + each live voice id | — |
 | `nodes/new` | 5 | `0666` | the id of the voice this open minted | (open is the mint) |
 | `nodes/<id>/audio` | vpath | `0666` | 0 bytes | S16 stereo 48 kHz into voice `<id>` |
@@ -200,24 +200,40 @@ The sink is SYSTEM-owned, so whole-sink authority is the two-axis rule of
 I-26/I-39 (NOCTURNE.md 6.8, I-46): a `volume` write is admitted iff the
 connection's peer is `PRINCIPAL_SYSTEM`, holds `CAP_HOSTOWNER`, holds the
 `CAP_AUDIO_GRAPH` clearance (the corvus-gated "audio-graph" level, N-3a-1), OR
-is console-attached (the "person at the keyboard" axis). The gate reads the
-peer FRESH via `SYS_SRV_PEER` on each write -- never an accept-time snapshot --
-because caps mutate: a clearance can be redeemed or expire after the connection
-opens. A dead/unknown peer fails closed.
+its session OWNS the console (`SRV_PEER_FLAG_CONSOLE_OWNER` -- the person at the
+keyboard, N-3a-3). The gate reads the peer FRESH via `SYS_SRV_PEER` on each write
+-- never an accept-time snapshot -- because caps mutate: a clearance can be
+redeemed or expire after the connection opens. A dead/unknown peer fails closed.
 
-**This gate is per-DIRECT-connection, and that is load-bearing.** `t_srv_peer`
-resolves the peer of the SERVER-SIDE connection, so a write through joey's
-shared `/dev/nocturne` mount carries the MOUNTER's identity (SYSTEM), not the
-writing program's -- the Warp F1 / libtapestry idiom. Whole-sink authority is
-therefore meaningful for a client that connects DIRECTLY to `/srv/nocturne`
-(the volume OSD, the SDL backend): its own principal / clearance / console is
-what the gate sees. The shared mount is the mounter's audio session (namespace
-IS the capability, 6.8): a program that must not touch the whole sink is simply
-not given the shared mount -- it gets a direct or restricted connection. The
-witness (`/nocturne-vol-probe`, `tools/test-nocturne-volume.sh`) exercises both
-arms over direct connections: a SYSTEM write ACCEPTED + the grammar round-trip,
-and a user-principal child's write REFUSED with EPERM -- the discrimination a
-`return true` gate could not pass.
+**Two posts, because a mount cannot carry per-writer identity (N-3a-3).**
+`t_srv_peer` resolves the peer of the SERVER-SIDE connection, and 9P binds
+identity at ATTACH, per connection -- so a write through joey's ONE shared
+`/dev/nocturne` mount always carries the MOUNTER (SYSTEM), never the writing
+program (the N-3a-2 F1 bypass: any user could change system audio). Per-writer
+authority is therefore impossible through the shared mount. nocturned splits the
+tree by whether the operation carries authority (the Warp precedent -- an
+authority surface is never globally mounted):
+
+- **`/srv/nocturne`** -- the mounted PLAYBACK tree (`audio`, `nodes/`, `info`,
+  `ctl`, read-only `volume`). Namespace IS the capability; the mounter's identity
+  is irrelevant because nothing here is authority-gated. Its `volume` is `0o444`,
+  so the kernel dev9p rwx gate refuses a write-open THROUGH the mount, and
+  `h_write` refuses a `P_VOLUME` write on any non-control connection even if an
+  owner/root open slips the mode. `cat /dev/nocturne/volume` still works.
+- **`/srv/nocturne-ctl`** -- the SINK-AUTHORITY post, reached by a controller
+  over its OWN connection (`open=connect`, never mounted). The volume node here
+  is `0o666` and writable, and the peer IS the writer, so `volume_authorized`
+  judges the real caller. The native `nocturne-vol` tool connects here; the
+  console-owner session sets the volume with no grant, others need the clearance.
+
+The witness (`/nocturne-vol-probe`, `tools/test-nocturne-volume.sh`) proves the
+split BOTH ways -- and the arm the N-3a-2 witness lacked is the one that matters:
+a USER writing volume THROUGH the mount is REFUSED (the F1 regression), a SYSTEM
+write on `-ctl` is ACCEPTED + the grammar/F3 round-trip holds, the mount `volume`
+READS, and a user-principal child's `-ctl` write is REFUSED (EPERM). The
+`CAP_AUDIO_GRAPH` axis is covered by `test_devcap.clearance_audio_graph` and the
+console-owner axis by the kernel `proc_identity.peer_snapshot_console_owner`
+test.
 
 ## The zero-copy ring (N-2b-1)
 

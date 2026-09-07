@@ -111,8 +111,17 @@ impl Driver for Nocturned {
                 return Err(Error::Hardware);
             }
         };
+        // N-3a-3: the sink-authority control post -- NOT mounted, connected
+        // per-conn so the volume gate reads the writer as the peer.
+        let ctl_listener = match server::post_srv_nocturne_ctl() {
+            Ok(l) => l,
+            Err(()) => {
+                say!("nocturned: /srv/nocturne-ctl post failed");
+                return Err(Error::Hardware);
+            }
+        };
         say!(
-            "nocturned: serving /srv/nocturne (virtio-snd playback; s16c2r{} period {} B x {})",
+            "nocturned: serving /srv/nocturne (playback) + /srv/nocturne-ctl (sink authority); s16c2r{} period {} B x {}",
             snd::RATE_HZ,
             snd::PERIOD_BYTES,
             snd::PERIODS
@@ -152,7 +161,7 @@ impl Driver for Nocturned {
         let mut out = libthyla_rs::io::stdout();
         let _ = out.write_all(b"READY\n");
 
-        control_run(sh, listener)
+        control_run(sh, listener, ctl_listener)
     }
 }
 
@@ -255,7 +264,7 @@ fn cycle_run(snd: &mut VirtioSnd, sh: &'static Shared) -> ! {
 /// The CONTROL thread (D-1c): the original thread after it spawns the cycle. It
 /// serves /srv/nocturne -- accept, framing, dispatch, parked-write retry -- and
 /// touches the graph only under `sh`'s blocking lock, never across a 9P reply.
-fn control_run(sh: &'static Shared, listener: i64) -> ! {
+fn control_run(sh: &'static Shared, listener: i64, ctl_listener: i64) -> ! {
     let mut conns: Vec<Conn> = Vec::new();
     loop {
         // 1. Retry parked writes: the cycle thread frees FIFO room by draining.
@@ -275,11 +284,17 @@ fn control_run(sh: &'static Shared, listener: i64) -> ! {
         let any_pending = conns.iter().any(|c| c.has_pending());
         let timeout = if any_pending { PARKED_RETRY_MS } else { IDLE_POLL_MS };
         let nc = conns.len().min(MAX_CONNS);
-        let mut pollfds: Vec<TPollFd> = Vec::with_capacity(1 + nc);
-        // The listener is ALWAYS polled; when full we accept-and-close (below)
-        // so a connector fails fast instead of stalling on the handshake.
+        let mut pollfds: Vec<TPollFd> = Vec::with_capacity(2 + nc);
+        // Both listeners are ALWAYS polled; when full we accept-and-close (below)
+        // so a connector fails fast instead of stalling on the handshake. [0] is
+        // the playback post, [1] the sink-authority control post (N-3a-3).
         pollfds.push(TPollFd {
             fd: listener as i32,
+            events: T_POLLIN,
+            revents: 0,
+        });
+        pollfds.push(TPollFd {
+            fd: ctl_listener as i32,
             events: T_POLLIN,
             revents: 0,
         });
@@ -296,15 +311,19 @@ fn control_run(sh: &'static Shared, listener: i64) -> ! {
             continue;
         }
 
-        // 3. Accept -- push if there is room, else close immediately so the
-        //    connector's handshake fails fast and falls to its own fallback.
-        if pollfds[0].revents & T_POLLIN != 0 {
-            let h = unsafe { t_srv_accept(listener) };
-            if h >= 0 {
-                if conns.len() < MAX_CONNS {
-                    conns.push(Conn::new(h));
-                } else {
-                    let _ = unsafe { t_close(h) };
+        // 3. Accept on either post -- push if there is room, else close so the
+        //    connector fails fast and falls to its own fallback. Each conn is
+        //    tagged by the post it arrived on: playback (pollfds[0]) vs the
+        //    sink-authority control post (pollfds[1], the volume-write gate).
+        for (idx, (lfd, control)) in [(listener, false), (ctl_listener, true)].iter().enumerate() {
+            if pollfds[idx].revents & T_POLLIN != 0 {
+                let h = unsafe { t_srv_accept(*lfd) };
+                if h >= 0 {
+                    if conns.len() < MAX_CONNS {
+                        conns.push(Conn::new(h, *control));
+                    } else {
+                        let _ = unsafe { t_close(h) };
+                    }
                 }
             }
         }

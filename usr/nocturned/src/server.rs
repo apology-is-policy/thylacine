@@ -36,7 +36,8 @@ use libthyla_rs::weft as weftlib;
 use libthyla_rs::{
     t_burrow_attach, t_burrow_detach, t_close, t_open, t_srv_peer, t_walk_create,
     t_weft_share, t_weft_unshare, TSrvPeerInfo, T_CAP_AUDIO_GRAPH, T_CAP_HOSTOWNER,
-    T_OPATH, T_OREAD, T_PRINCIPAL_SYSTEM, T_WALK_OPEN_FROM_ROOT,
+    T_OPATH, T_OREAD, T_PRINCIPAL_SYSTEM, T_SRV_PEER_FLAG_CONSOLE_OWNER,
+    T_WALK_OPEN_FROM_ROOT,
 };
 
 use crate::snd::{Stats, BUFFER_BYTES, PERIODS, PERIOD_BYTES, RATE_HZ};
@@ -119,14 +120,36 @@ fn vleaf(path: u64) -> u64 {
 // recovers every id bit.
 const _: () = assert!(VBIT > ((u32::MAX as u64) << 4));
 
-// Root directory children (name, path, mode).
+// The PLAYBACK tree's root children (name, path, mode) -- what joey mounts at
+// /dev/nocturne. `volume` is READ-ONLY here (0o444): a shared mount carries the
+// mounter's SYSTEM identity, so it must never be a write-authority path (the F1
+// bypass). Writing volume goes to the CONTROL post (ROOT_CHILDREN_CTL), where
+// the peer is the writer. The mount's read-only volume still serves `cat`.
 const ROOT_CHILDREN: [(&[u8], u64, u32); 5] = [
     (b"ctl", P_CTL, S_IFREG | 0o644),
     (b"info", P_INFO, S_IFREG | 0o444),
-    (b"volume", P_VOLUME, S_IFREG | 0o666),
+    (b"volume", P_VOLUME, S_IFREG | 0o444),
     (b"audio", P_AUDIO, S_IFREG | 0o666),
     (b"nodes", P_NODES, S_IFDIR | 0o555),
 ];
+// The CONTROL post's root children (/srv/nocturne-ctl, N-3a-3): the
+// sink-authority surface, reached by a controller over its OWN connection
+// (open=connect, never mounted), so the volume write's peer IS the writer and
+// the 6.8 gate reads the real caller. `default`/`sinks/`/`sources/`/the sink
+// `tap` join it as they land. Voices/playback are NOT here -- that is the mount.
+const ROOT_CHILDREN_CTL: [(&[u8], u64, u32); 1] = [
+    (b"volume", P_VOLUME, S_IFREG | 0o666),
+];
+
+// The root-children table for a connection: the sink-authority set on the
+// control post, the playback set otherwise.
+fn root_children(control: bool) -> &'static [(&'static [u8], u64, u32)] {
+    if control {
+        &ROOT_CHILDREN_CTL
+    } else {
+        &ROOT_CHILDREN
+    }
+}
 // nodes/ directory children (only the static `new`; voices are listed dynamically).
 const NODES_STATIC: [(&[u8], u64, u32); 1] = [(b"new", P_NODES_NEW, S_IFREG | 0o666)];
 // A voice directory's children (name, leaf, mode).
@@ -605,6 +628,12 @@ impl Graph {
     /// is N-3b (single sink today). Returns false (=> EINVAL) on an unknown
     /// control or a non-numeric value; an all-blank write is likewise EINVAL.
     fn apply_volume(&mut self, data: &[u8]) -> bool {
+        // Two-pass (N-3a-3 F3): validate EVERY line into staged copies first, so
+        // a malformed line late in a multi-line write leaves the sink gain
+        // UNCHANGED (never a partial-apply-then-EINVAL). Commit only once every
+        // line has parsed.
+        let mut new_audio = self.sink_audio;
+        let mut new_mix = self.sink_mix;
         let mut any = false;
         for line in data.split(|&b| b == b'\n') {
             let line = trim_line(line);
@@ -628,11 +657,15 @@ impl Graph {
                 None => v0,
             };
             match ctl {
-                b"audio" => self.sink_audio = [v0, v1],
-                b"mix" => self.sink_mix = [v0, v1],
+                b"audio" => new_audio = [v0, v1],
+                b"mix" => new_mix = [v0, v1],
                 _ => return false,
             }
             any = true;
+        }
+        if any {
+            self.sink_audio = new_audio;
+            self.sink_mix = new_mix;
         }
         any
     }
@@ -666,6 +699,10 @@ struct PendingWrite {
 
 pub struct Conn {
     handle: i64,
+    /// N-3a-3: true iff this connection arrived on the sink-authority control
+    /// post (/srv/nocturne-ctl). It serves the ROOT_CHILDREN_CTL tree and is the
+    /// ONLY tree whose `volume` accepts writes -- the peer here is the writer.
+    control: bool,
     version_done: bool,
     msize: u32,
     fids: [Option<Fid>; MAX_FIDS],
@@ -676,11 +713,23 @@ pub struct Conn {
 }
 
 pub fn post_srv_nocturne() -> Result<i64, ()> {
+    post_srv(b"nocturne")
+}
+
+/// The sink-authority control post (/srv/nocturne-ctl, N-3a-3). NOT mounted:
+/// controllers connect per-conn (open=connect) so the volume write's peer is
+/// the writer, and the 6.8 gate judges the real caller. The `-ctl` companion
+/// name follows /srv/stratum-ctl.
+pub fn post_srv_nocturne_ctl() -> Result<i64, ()> {
+    post_srv(b"nocturne-ctl")
+}
+
+fn post_srv(name: &[u8]) -> Result<i64, ()> {
     let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
     if srv < 0 {
         return Err(());
     }
-    let listener = unsafe { t_walk_create(srv, b"nocturne".as_ptr(), 8, T_OREAD, 0) };
+    let listener = unsafe { t_walk_create(srv, name.as_ptr(), name.len(), T_OREAD, 0) };
     let _ = unsafe { t_close(srv) };
     if listener < 0 {
         return Err(());
@@ -689,9 +738,10 @@ pub fn post_srv_nocturne() -> Result<i64, ()> {
 }
 
 impl Conn {
-    pub fn new(handle: i64) -> Conn {
+    pub fn new(handle: i64, control: bool) -> Conn {
         Conn {
             handle,
+            control,
             version_done: false,
             msize: SRV_MSIZE,
             fids: [None; MAX_FIDS],
@@ -880,10 +930,15 @@ impl Conn {
     }
 
     /// I-46 / NOCTURNE.md 6.8: may this connection's peer set the SYSTEM-owned
-    /// sink volume? The two-axis rule (console-owner OR the `audio-graph`
-    /// clearance), plus the SYSTEM TCB and the CAP_HOSTOWNER admin axis. Read
-    /// FRESH per write via SYS_SRV_PEER (caps mutate), fail-closed on a
-    /// dead/unknown peer.
+    /// sink volume? The two-axis rule (the console-owner SESSION -- the person at
+    /// the keyboard -- OR the `audio-graph` clearance), plus the SYSTEM TCB and
+    /// the CAP_HOSTOWNER admin axis. Read FRESH per write via SYS_SRV_PEER (caps
+    /// mutate), fail-closed on a dead/unknown peer.
+    ///
+    /// The console axis is SRV_PEER_FLAG_CONSOLE_OWNER (the peer's session owns
+    /// the console), NOT the `console` field (console-ATTACHMENT, which I-27
+    /// makes corvus-only -- the N-3a-2 F2). Only meaningful because this runs on
+    /// the per-connection control post, where the peer is the writer.
     fn volume_authorized(&self) -> bool {
         let mut info = TSrvPeerInfo::default();
         if unsafe { t_srv_peer(self.handle, &mut info) } != 0 || info.alive != 1 {
@@ -892,7 +947,7 @@ impl Conn {
         info.principal_id == T_PRINCIPAL_SYSTEM
             || (info.caps & T_CAP_HOSTOWNER) != 0
             || (info.caps & T_CAP_AUDIO_GRAPH) != 0
-            || info.console == 1
+            || (info.flags & T_SRV_PEER_FLAG_CONSOLE_OWNER) != 0
     }
 
     fn qid_of(path: u64) -> p9::Qid {
@@ -945,7 +1000,9 @@ impl Conn {
     }
 
     /// Resolve one path component from `cur`. Returns the child path, or None.
-    fn walk_child(g: &Graph, cur: u64, name: &[u8]) -> Option<u64> {
+    /// `control` selects which root the connection sees (the sink-authority
+    /// tree on the control post, the playback tree otherwise).
+    fn walk_child(g: &Graph, cur: u64, name: &[u8], control: bool) -> Option<u64> {
         if name == b".." || name == b"." {
             // ".." off a voice leaf/dir climbs to nodes/, off nodes/ to root.
             return Some(match cur {
@@ -957,7 +1014,7 @@ impl Conn {
             });
         }
         match cur {
-            P_ROOT => ROOT_CHILDREN
+            P_ROOT => root_children(control)
                 .iter()
                 .find(|(nm, _, _)| *nm == name)
                 .map(|(_, p, _)| *p),
@@ -1001,13 +1058,14 @@ impl Conn {
             return self.err(tag, p9::E_INVAL);
         }
         let mut cur = f.path;
+        let control = self.control;
         let mut qids: [p9::Qid; p9::P9_MAX_WALK] = [p9::Qid::default(); p9::P9_MAX_WALK];
         let mut n = 0usize;
         {
             // One lock for the whole (bounded) walk; released before the reply.
             let g = sh.graph.lock();
             for k in 0..(a.nwname as usize).min(p9::P9_MAX_WALK) {
-                match Conn::walk_child(&g, cur, a.names[k]) {
+                match Conn::walk_child(&g, cur, a.names[k], control) {
                     Some(p) => {
                         cur = p;
                         qids[n] = Conn::qid_of(p);
@@ -1256,10 +1314,19 @@ impl Conn {
         }
 
         if f.path == P_VOLUME {
-            // I-46 / NOCTURNE.md 6.8: the sink volume is SYSTEM-owned authority.
+            // N-3a-3 (NOCTURNE.md 6.8): the sink volume is writable ONLY on the
+            // control post. The playback tree's volume is read-only info; the
+            // MOUNT path is closed at open (mode 0o444), and a DIRECT playback
+            // connection is closed here -- so no write can ride the mounter's
+            // (SYSTEM) identity (the F1 root fix).
+            if !self.control {
+                return self.err(tag, p9::E_PERM);
+            }
             // The two-axis gate is read FRESH per write (caps mutate -- a
             // clearance redeemed or expired after connect -- so an accept-time
-            // snapshot would be stale) and fails closed on a dead peer.
+            // snapshot would be stale) and fails closed on a dead peer. Here the
+            // peer IS the writer (a per-connection control conn), so the gate
+            // reads the real caller's identity/caps/console-owner session.
             if !self.volume_authorized() {
                 return self.err(tag, p9::E_PERM);
             }
@@ -1316,7 +1383,7 @@ impl Conn {
 
         match f.path {
             P_ROOT => {
-                for (name, path, _) in ROOT_CHILDREN {
+                for &(name, path, _) in root_children(self.control) {
                     if !push_entry(name, path, &mut ord) {
                         break;
                     }
@@ -1365,11 +1432,17 @@ impl Conn {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
-        let (mode, nlink) = if is_dir(f.path) {
-            (mode_of(f.path), 2u64)
+        // volume on the control post is writable (0o666); on the mounted
+        // playback tree it is read-only info (0o444, so the kernel dev9p gate
+        // refuses a write-open through the mount). mode_of returns the playback
+        // (0o444) mode; override for the control connection.
+        let base_mode = mode_of(f.path);
+        let mode = if f.path == P_VOLUME && self.control {
+            S_IFREG | 0o666
         } else {
-            (mode_of(f.path), 1u64)
+            base_mode
         };
+        let nlink = if is_dir(f.path) { 2u64 } else { 1u64 };
         // The security trio must be filled: dev9p's per-component X-search reads
         // it, and an unfilled trio fails closed (the /dev/pts lesson).
         let valid = p9::P9_GETATTR_MODE

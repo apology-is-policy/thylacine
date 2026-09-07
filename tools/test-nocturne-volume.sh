@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# tools/test-nocturne-volume.sh -- the Nocturne N-3a-2 sink-volume gate witness
-# (docs/NOCTURNE.md 6.8/6.10, I-46).
+# tools/test-nocturne-volume.sh -- the Nocturne N-3a-3 sink-volume authority
+# witness (docs/NOCTURNE.md 6.8/6.10, I-46).
 #
 # Boots the default build ONCE with thylacine.volprobe, which makes joey run
-# /nocturne-vol-probe after the /dev/nocturne mount. The probe runs TWO arms
-# over DIRECT /srv/nocturne connections (never joey's shared /dev/nocturne
-# mount, whose server-side peer is the SYSTEM mounter -- so a write through it
-# could never exercise the per-caller gate):
+# /nocturne-vol-probe after the /dev/nocturne mount. N-3a-3 split the tree:
+# playback is the mount, sink AUTHORITY is the per-connection /srv/nocturne-ctl
+# post. The probe proves the split BOTH ways, including the arm the N-3a-2
+# witness lacked (a user writing volume THROUGH the mount):
 #
-#   POSITIVE (the probe itself, SYSTEM): a direct-conn volume write is ACCEPTED
+#   POSITIVE (the probe itself, SYSTEM): a /srv/nocturne-ctl write is ACCEPTED
 #   and the Plan 9 volume(3) grammar round-trips -- audio/mix, one value or L R,
-#   mute (audio 0), and an unknown control -> EINVAL.
+#   mute (audio 0), unknown control -> EINVAL, and a rejected multi-line write
+#   leaves the gain UNCHANGED (F3, no partial apply); the mount volume READS.
 #
-#   NEGATIVE (a user-principal child, spawned with SPAWN_IDENTITY_SET): the SAME
-#   direct-conn write is REFUSED (EPERM) -- not SYSTEM, not console-attached, no
-#   CAP_AUDIO_GRAPH. Without this arm a return-true gate would pass the positive
-#   alone (a control must prove discrimination, not detection).
+#   NEGATIVE (a user-principal child, SPAWN_IDENTITY_SET) -- BOTH refused: a
+#   write to /dev/nocturne/volume THROUGH the mount (the F1 attack) is denied,
+#   AND a /srv/nocturne-ctl write is REFUSED (EPERM) -- not SYSTEM, not the
+#   console-owner session, no CAP_AUDIO_GRAPH. Without these a return-true gate
+#   would pass the positive alone (a control must prove discrimination).
 #
 # No wav capture (a control-file + authority test), so it needs no host audio
 # backend. Not a multi-boot; like every boot gate it must not run beside another
