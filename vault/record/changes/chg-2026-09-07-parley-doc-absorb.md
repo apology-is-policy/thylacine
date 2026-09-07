@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/141-parley (the LSP/DAP client substrate): fold the four UNOWNED probes + the live-server round-trips into sub-parley"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["f6d3b0eb"]
 touched: [sub-parley]
 established: []
 closed: []
