@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/86-pouch-stratumd-boot (the Phase 5/6 boot path): clean multi-redirect, all surfaces covered"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["25779859"]
 touched: []
 established: []
 closed: []
