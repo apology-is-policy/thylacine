@@ -22,6 +22,105 @@ needed the operator.
 
 
 ---
+## 2026-09-07 (aux) -- Nocturne N-3a-3: the F1 root fix (the shared mount cannot carry per-writer identity)
+
+The pickup was a dirty close. The round-5 audit of N-3a (the sink-volume gate,
+`851f3ab2`) had found **F1 [P1, borders P0]**: any user could mute or change the
+system volume by writing `/dev/nocturne/volume`, with no clearance and no
+keyboard. The gate logic was fine; the bypass was the transport. joey mounts
+`/srv/nocturne` at `/dev/nocturne` ONCE, and `territory_clone` shares that one
+connection to every session (`spoor_ref`); login never unmounts it. So a user's
+`Twrite` rides joey's conn, and `t_srv_peer` resolves the peer as joey = SYSTEM.
+9P binds identity at ATTACH, per connection, not per message -- so per-writer
+authority through a shared mount is **impossible by construction**. This was
+unpushed, so there was no live exposure.
+
+**The operator's own candidate was mechanically unsound, and saying so was the
+first real step.** The round-5 handoff carried the operator's vote -- "fix via
+option B, the per-Proc-conn model" -- with a named candidate: *login re-mounts
+`/dev/nocturne` on the session's own conn*. Tracing it killed it: login runs as
+`PRINCIPAL_SYSTEM` (`usr/login/src/main.rs:24`), so a login re-mount's conn peer
+is SYSTEM too -- not the user. The only mount that carries user identity is the
+home pattern's per-user *proxy* (login spawns stratumd AS the user, and the
+proxy->coordinator hop establishes identity) -- but a proxy sitting between
+nocturned and the client would break the N-2b zero-copy Weft ring, which is
+nocturned<->client shared memory. So Family 1 (a per-session mount) is
+fundamentally at odds with the ring. I did NOT silently substitute my own design
+for the operator's flawed candidate: I surfaced the correction + the sound
+alternative (the **warp precedent**, `joey.c:11437` -- "a shared mount is one
+connection, so an authority surface is never globally mounted") as a blocking
+`AskUserQuestion`, with the research attached. The operator ratified both
+recommendations: a **second /srv post** for sink authority, and **realize the
+console-owner axis now**.
+
+The research also uncovered that §6.8's "console-owner session" axis was **never
+realized**: the N-3a-2 gate checked `srv_peer_info.console`, which is
+console-*attachment* -- and I-27 makes that corvus-only, so the "person at the
+keyboard" axis was dead for every user session. `proc_console_owner_in_session`
+(the predicate that already gates a phenotype `TCSETS`) was the right concept; it
+just was not wired to the peer query. That is the N-3a-2 F2, fixed here.
+
+**Scripture first** (`db4333ca`, no code): NOCTURNE.md §6.4 (the two posts), §6.8
+(the per-conn realization + the console-owner axis via a new flag), §6.13 (the
+audit surfaces), §8 (the row), §14 (the ratification record). Then the code, in
+two sub-chunks. **N-3a-3a** (`0a0ad86c`, kernel): a new
+`SRV_PEER_FLAG_CONSOLE_OWNER` (`srv_peer_info.flags` bit 1, append-only, no
+struct-size change) set from `proc_console_owner_in_session` on the *same*
+alive-gated `g_proc_table_lock` walk that already computes caps + the renderer
+stamp -- compare-only under the held lock, never a deref, a dead peer
+fail-closing the whole flags word to 0. **N-3a-3b** (`131f9336`, userspace):
+nocturned posts `/srv/nocturne` (playback, mounted, the ring intact) +
+`/srv/nocturne-ctl` (sink authority, per-conn, never mounted); volume is 0o444
+read-only in the mount and 0o666 writable on `-ctl`; `h_write` refuses a
+`P_VOLUME` write on any non-control conn (so even an owner/root open that slips
+the mode gate cannot write); `volume_authorized` reads the new flag fresh per
+write; `apply_volume` is two-pass validate-then-apply (F3 -- a bad late line no
+longer leaves a partial change); a native `nocturne-vol` tool is the shell UX;
+and the witness is redone with the arm the N-3a-2 witness *lacked* -- a USER
+writing volume THROUGH the mount must be REFUSED. Measured: `test-nocturne-volume.sh`
+GREEN ("user mount write + control-post write both refused"; "control-post SYSTEM
+allow + grammar/F3 + mount read"), the default boot's `nocturne-probe OK`
+(playback intact after the split), 1512/1512 kernel tests, `Thylacine boot OK`.
+
+**Three wrong turns, each caught by a check, not by luck:**
+
+1. *The console-owner test caught its own false premise.* My first cut asserted
+   `console_owner == true` when the current proc (joey) was set as owner -- and
+   it FAILED, extincting the boot (a failing kernel test fails the boot, by
+   design). The cause was not the feature: joey is session-less (`sid == 0`), and
+   `console_session_match(0, 0)` is correctly `false` ("no session is never the
+   keyboard owner"). The test was wrong to use a sid-0 proc as the owner; the fix
+   injects a nonzero session id for the positive arm. The feature's sid-0
+   handling was *right*, and the test proved it by failing first.
+
+2. *The vault pre-commit hook uses a different quaestor than I did.* Two commit
+   attempts were rejected with "view-spec-coverage.md: stale generated body" even
+   though my manual `lint --staged` passed and `git diff` on the view was empty.
+   The hook is `go -C "$top/vault/meta/quaestor"` -- the **aux worktree's own**
+   embedded quaestor -- but I had rendered the coverage views with the *standalone*
+   `~/projects/thylacine-vault` quaestor (a different instance). Rendering with
+   the aux worktree's quaestor (`cd aux && go -C vault/meta/quaestor run . render
+   --root "$(pwd)"`) produced views the hook accepted.
+
+3. *A `| tail` masked a chain's exit code.* I ran `build && witness && test.sh |
+   tail -18` in the background; the reported "exit 0" was **tail's**, not the
+   chain's (the pipe's exit is the last stage). Not a correctness problem here --
+   I verified via artifacts: `build/test-boot.log` was test.sh's *default* boot
+   (`nocturne-probe`, not the volprobe), which only runs if build AND witness both
+   passed through the `&&`. But it is the exact masking trap the memory already
+   records, repeated.
+
+**Still open:** the mandatory dirty re-audit (round 6, Opus -- Fable has been out
+of credits all arc, so the Fable-diversity axis is forfeit and a Fable pass is
+owed when credits return) is IN FLIGHT as of this writing; the push waits on it.
+A self-audit ran in parallel and found nothing new (the main.rs accept-tagging
+index mapping is correct; the getattr 0o666-on-control is advisory-only; the ring
+path is structurally untouched). One item handed to the prosecutor to prosecute
+rather than dismiss: both posts share the `MAX_CONNS = 32` pool, but that
+exhaustion already existed via the playback post's `open=connect`, so it is not a
+new DoS vector.
+
+---
 ## 2026-09-06 (aux) -- Nocturne N-2a-4: DOSBox-X + glquake game audio (and a build subsystem the main merge had silently deleted)
 
 The operator chose N-2a-4 (both games' audio) after the N-2c close. The chunk
