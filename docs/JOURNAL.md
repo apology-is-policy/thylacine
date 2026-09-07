@@ -23,6 +23,50 @@ needed the operator.
 
 ---
 
+## Run 41 (main, 2026-09-07, Opus 4.8, effort xhigh, operator away): s7 F3 pushed, the .exp gate's cross-repo lint deadlock, and the login-loop fix boot-verified -- all under a held mac
+
+Post-compact continuation of Run 40 (the s7 F3 landing). Three things landed,
+all while aux held the mac ~30 min (its SMP gate, then an IM-1 build) -- I queued
+FIFO #1 and did host-free work until the grant.
+
+**F3 pushed (70f91be3).** The local F3 commit rebased onto the vault tip
+(17be890b); the JOURNAL conflict was two prepended entries (my Run 40 + vault's
+Run 37 cont'd #9), resolved by LINE-NUMBER reassembly keeping both newest-first.
+`##` and `---` are NOT unique delimiters in this file (262 sub-headers, 60
+hr-rules), so a split-by-delimiter resolver would have mangled it -- I checked
+the counts before scripting, which is the catch. Code applied clean (the vault
+commits were docs-only), so the pre-rebase F3 verify held.
+
+**The .exp gate: a cross-repo lint deadlock broken by single-ownership.**
+s7-nora-probe.exp is a new abi-boot-banner `EXTINCTION:` consumer. Committing it
+(thylacine pre-commit vault-lint) needs the note to DECLARE it first; declaring
+it (the vault registrar's unmatched-mirror arm, abi_literals.go:182, checks each
+mirror against `git ls-files`) needs the .exp already TRACKED. A genuine
+chicken-and-egg across two lints in one repo's two worktrees. vault broke it by
+owning BOTH endpoints: it brought the .exp over byte-identical and committed it
+WITH the declaration (f2e177f9 -> 09177fb0), so each lint saw a consistent state.
+I rm'd my untracked copy, ff-merged, did NOT double-commit. Lesson: a deadlock
+between two lints is broken by one actor committing both endpoints together, not
+by either going first.
+
+**The login-loop fix boot-verified + pushed (36cb83d8).** The Run-39 lock-out (a
+session-lever image booted console-mode loops forever: no GPU -> no tapestryd ->
+halcyond --session exits 1 -> pre-fix login returned -> getty respawn -> loop).
+The fix (degrade to the console ut shell on a non-zero session exit) was already
+baked in the current ramfs, so the verify needed only a console-mode boot, no
+rebuild. The hvf console boot showed the exact chain: halcyond FAIL connect ->
+"login: session compositor unavailable -- console shell fallback" -> interactive
+ut (echo round-trip) -> NO second login prompt. The fix had been reviewed in the
+Run-40 prosecutor round (F2 P3 only); committed with a No-dossier-change trailer
+(sub-stratum-session owns login/main.rs; the fallback branch rung to vault).
+
+**Open:** vault owes the 3 s7 F3 dossier folds + the login-fallback delta (call
+0070). F2 (the input-batching P0) + the A/D chunks (fonts/chrome) remain
+OPERATOR-blocked -- F2 is audit-bearing and effort-report reads xhigh (not max),
+and the operator is away to answer an /effort max question.
+
+---
+
 ## Run 40 (main, 2026-09-07, Opus 4.8, effort max): the s7 read-side fix, twice attempted and twice demolished -- a Fable audit proves there is no transient; the real bug is write-side
 
 This run is the catch, not a win. It is worth recording precisely because two
