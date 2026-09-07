@@ -2164,10 +2164,14 @@ bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out);
 // VIVARIUM V-4a-0b: `pid_out` reports the matched Proc's pid, feeding
 // srv_peer_info.pid. It rides the SAME alive-gated walk as caps + identity, so
 // a dead/reaped peer fail-closes to 0 -- never a stale pid a server could
-// resolve against a REUSED table entry.
+// resolve against a REUSED table entry. N-3a-3 (NOCTURNE.md 6.8):
+// `console_owner_out` reports whether the matched Proc's session OWNS the
+// console (proc_console_owner_in_session, computed under the same lock),
+// feeding the SRV_PEER_FLAG_CONSOLE_OWNER stamp; fail-closed false on no match.
 bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
                                    u32 *principal_out, u32 *primary_gid_out,
-                                   bool *renderer_out, int *pid_out);
+                                   bool *renderer_out, int *pid_out,
+                                   bool *console_owner_out);
 
 // =============================================================================
 // A-1a: identity mutation (the single audited write site).

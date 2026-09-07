@@ -2540,7 +2540,10 @@ struct srv_peer_info {
     u32 primary_gid;   // @28 A-1a: peer's primary group; NONE when alive == 0
     u32 flags;         // @32 cfg-3: bit 0 = SRV_PEER_FLAG_CONSOLE_RENDERER
                        //     (the peer holds the LIVE G-4 console-renderer
-                       //     role; 0 when alive == 0). Other bits reserved 0;
+                       //     role); N-3a-3: bit 1 = SRV_PEER_FLAG_CONSOLE_OWNER
+                       //     (the peer's session currently OWNS the console --
+                       //     the person at the keyboard, NOCTURNE.md 6.8). Both
+                       //     0 when alive == 0. Other bits reserved 0;
                        //     APPEND-ONLY — consumers scan by bit, unknown-clear
                        //     means absent (the AT_HWCAP discipline).
     u32 pid;           // @36 VIVARIUM V-4a-0b: peer's pid; 0 when alive == 0.
@@ -2569,6 +2572,14 @@ struct srv_peer_info {
 // alive-gated g_proc_table_lock walk as `caps`, against the single-holder
 // g_console_renderer; a dead peer fail-closes the whole flags word to 0.
 #define SRV_PEER_FLAG_CONSOLE_RENDERER (1u << 0)
+
+// N-3a-3 (NOCTURNE.md 6.8): the peer's session currently OWNS the console (the
+// foreground session -- "the person at the keyboard"), from
+// proc_console_owner_in_session on the alive-gated peer walk. Distinct from the
+// `console` field, which is console-ATTACHMENT (I-27 corvus-only). nocturned's
+// sink-authority gate reads this so the console-owner session can set the
+// volume with no clearance; a dead peer fail-closes the whole flags word to 0.
+#define SRV_PEER_FLAG_CONSOLE_OWNER (1u << 1)
 
 _Static_assert(sizeof(struct srv_peer_info) == 40,
                "struct srv_peer_info is a SYS_SRV_PEER ABI type — pinned "

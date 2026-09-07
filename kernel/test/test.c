@@ -218,6 +218,7 @@ void test_proc_identity_spawn_set_accepted_with_cap(void);
 void test_proc_identity_set_rejects_reserved(void);
 void test_proc_identity_set_rejects_system_supp_gid(void);
 void test_proc_identity_peer_snapshot_by_stripes(void);
+void test_proc_identity_peer_snapshot_console_owner(void);
 void test_proc_wait_pid_for_no_match(void);
 void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
 void test_proc_wait_pid_for_selects_target(void);
@@ -1837,6 +1838,9 @@ struct test_case g_tests[] = {
                                        false, NULL },
     { "proc_identity.peer_snapshot_by_stripes",
                                        test_proc_identity_peer_snapshot_by_stripes,
+                                       false, NULL },
+    { "proc_identity.peer_snapshot_console_owner",
+                                       test_proc_identity_peer_snapshot_console_owner,
                                        false, NULL },
     { "territory.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
     { "territory.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },

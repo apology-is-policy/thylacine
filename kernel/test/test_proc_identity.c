@@ -241,7 +241,8 @@ void test_proc_identity_peer_snapshot_by_stripes(void) {
     caps_t caps = 0; u32 pid_out = 0xABCDu; u32 gid_out = 0xABCDu;
     int    procpid = -7;
     bool found = proc_peer_snapshot_by_stripes(kp->stripes, &caps,
-                                               &pid_out, &gid_out, NULL, &procpid);
+                                               &pid_out, &gid_out, NULL, &procpid,
+                                               NULL);
     TEST_ASSERT(found, "kproc not found by its own stripes");
     TEST_EXPECT_EQ(pid_out, (u32)PRINCIPAL_SYSTEM, "snapshot principal_id");
     TEST_EXPECT_EQ(gid_out, (u32)GID_SYSTEM, "snapshot primary_gid");
@@ -250,7 +251,7 @@ void test_proc_identity_peer_snapshot_by_stripes(void) {
     // 0 sentinel fail-closes; out-params untouched.
     u32 pid2 = 0x1234u;
     int procpid2 = -7;
-    bool found0 = proc_peer_snapshot_by_stripes(0, NULL, &pid2, NULL, NULL, &procpid2);
+    bool found0 = proc_peer_snapshot_by_stripes(0, NULL, &pid2, NULL, NULL, &procpid2, NULL);
     TEST_ASSERT(!found0, "0-sentinel stripes matched a Proc");
     TEST_EXPECT_EQ(pid2, 0x1234u, "0-sentinel touched out-param");
     TEST_EXPECT_EQ(procpid2, -7, "V-4a-0b: 0-sentinel touched the pid out-param");
@@ -258,7 +259,57 @@ void test_proc_identity_peer_snapshot_by_stripes(void) {
     // a caller cannot mistake a no-match for "the peer is pid 0" (kproc).
     int procpid3 = -7;
     bool foundx = proc_peer_snapshot_by_stripes(0xFFFFFFFFFFFFFFFEull,
-                                                NULL, NULL, NULL, NULL, &procpid3);
+                                                NULL, NULL, NULL, NULL, &procpid3, NULL);
     TEST_ASSERT(!foundx, "unassigned stripes matched a Proc");
     TEST_EXPECT_EQ(procpid3, -7, "V-4a-0b: no-match left the pid out-param alone");
+}
+
+// N-3a-3 (NOCTURNE.md 6.8): the peer snapshot reports whether the matched
+// Proc's session OWNS the console -- the SRV_PEER_FLAG_CONSOLE_OWNER source the
+// nocturned sink-authority gate reads for the "person at the keyboard" axis.
+// Discrimination BOTH ways: owner-set (nonzero session) -> true, owner-NULL ->
+// false, all state restored before the asserts run.
+//
+// The boot-test proc (joey) is session-less (sid 0), and
+// console_session_match(0, 0) is correctly false ("no session is never the
+// keyboard owner"). To exercise the POSITIVE arm we inject a nonzero session id
+// on this proc for the window, then restore it. The boot-test phase is
+// single-threaded, so the unlocked sid write races no concurrent snapshot; the
+// snapshot below reads it under g_proc_table_lock as production does.
+//
+// Ambient console owner at boot-test time is joey (== p) or NULL, never a third
+// Proc (no session shell has spawned), so restoring to (was_owner ? p : NULL)
+// is exact.
+void test_proc_identity_peer_snapshot_console_owner(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    struct Proc *p = t->proc;
+    TEST_ASSERT(p->stripes != 0, "current proc has a nonzero stripes tag");
+
+    bool was_owner = proc_is_console_owner(p);
+    u32  old_sid   = p->sid;
+    const u32 test_sid = 0x51D0u; // any nonzero session id for the compare
+
+    // Owner = this proc's (nonzero) session -> the snapshot's console_owner set.
+    p->sid = test_sid;
+    proc_set_console_owner(p);
+    bool co = false;
+    bool found = proc_peer_snapshot_by_stripes(p->stripes, NULL, NULL, NULL,
+                                               NULL, NULL, &co);
+    // No owner -> the snapshot's console_owner clears (the post-SAK / fail-closed
+    // path: console_session_match(0, sid) is false).
+    proc_set_console_owner(NULL);
+    bool co_none = true;
+    bool found_none = proc_peer_snapshot_by_stripes(p->stripes, NULL, NULL, NULL,
+                                                    NULL, NULL, &co_none);
+
+    // Restore owner + sid BEFORE asserting (TEST_ASSERT returns): joey (== p) if
+    // it was the owner, else NULL -- the only two boot-test states.
+    proc_set_console_owner(was_owner ? p : NULL);
+    p->sid = old_sid;
+
+    TEST_ASSERT(found, "peer snapshot found the current proc by its stripes");
+    TEST_ASSERT(co, "console_owner set when the peer's session owns the console");
+    TEST_ASSERT(found_none, "peer snapshot still found the proc with no owner");
+    TEST_ASSERT(!co_none, "console_owner clear when there is no console owner");
 }

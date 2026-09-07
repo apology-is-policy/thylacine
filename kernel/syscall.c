@@ -10102,9 +10102,11 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     u32    peer_gid       = GID_NONE;
     bool   peer_renderer  = false;
     int    peer_pid       = 0;
+    bool   peer_owner     = false;
     bool   peer_alive = proc_peer_snapshot_by_stripes(peer_stripes, &peer_caps,
                                                       &peer_principal, &peer_gid,
-                                                      &peer_renderer, &peer_pid);
+                                                      &peer_renderer, &peer_pid,
+                                                      &peer_owner);
 
     out->stripes      = peer_stripes;
     out->caps         = peer_alive ? (u64)peer_caps : 0u;
@@ -10114,10 +10116,14 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     // NONE (the SrvConn captures only stripes + console immutably).
     out->principal_id = peer_alive ? peer_principal : PRINCIPAL_NONE;
     out->primary_gid  = peer_alive ? peer_gid       : GID_NONE;
-    // cfg-3: the renderer-role stamp rides the same alive-gated walk as
-    // caps — a dead/reaped peer fail-closes to 0 (never a stale grant).
-    out->flags        = (peer_alive && peer_renderer)
-                            ? SRV_PEER_FLAG_CONSOLE_RENDERER : 0u;
+    // cfg-3 + N-3a-3: the renderer-role and console-owner stamps ride the same
+    // alive-gated walk as caps — a dead/reaped peer fail-closes the whole flags
+    // word to 0 (never a stale grant). NOCTURNE.md 6.8 reads CONSOLE_OWNER for
+    // the sink-authority "person at the keyboard" axis.
+    out->flags        = (peer_alive && peer_renderer
+                             ? SRV_PEER_FLAG_CONSOLE_RENDERER : 0u)
+                      | (peer_alive && peer_owner
+                             ? SRV_PEER_FLAG_CONSOLE_OWNER : 0u);
     // V-4a-0b: the peer's pid, same alive gate as caps/identity -- a dead peer
     // reports 0, never a pid a REUSED table entry now owns.
     out->pid          = peer_alive ? (u32)peer_pid : 0u;

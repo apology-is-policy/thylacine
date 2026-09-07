@@ -1807,8 +1807,11 @@ pub unsafe fn t_getrandom(buf: *mut u8, len: usize, flags: u64) -> i64 {
 //   primary_gid  : peer's primary group; GID_NONE when alive == 0
 //   flags        : cfg-3 — bit 0 (T_SRV_PEER_FLAG_CONSOLE_RENDERER) = the
 //                  peer holds the LIVE console-renderer role (the tapestryd
-//                  apply-authority gate's admitted set); 0 when alive == 0.
-//                  Append-only: scan by bit, unknown-clear = absent.
+//                  apply-authority gate's admitted set); N-3a-3 — bit 1
+//                  (T_SRV_PEER_FLAG_CONSOLE_OWNER) = the peer's session OWNS
+//                  the console (NOCTURNE.md 6.8, "the person at the keyboard").
+//                  Both 0 when alive == 0. Append-only: scan by bit,
+//                  unknown-clear = absent.
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
 pub struct TSrvPeerInfo {
@@ -1827,9 +1830,13 @@ pub struct TSrvPeerInfo {
 }
 const _: () = assert!(core::mem::size_of::<TSrvPeerInfo>() == 40);
 
-// cfg-3: TSrvPeerInfo.flags bits (append-only; mirrors the kernel's
-// SRV_PEER_FLAG_CONSOLE_RENDERER in <thylacine/syscall.h>).
+// cfg-3 + N-3a-3: TSrvPeerInfo.flags bits (append-only; mirror the kernel's
+// SRV_PEER_FLAG_* in <thylacine/syscall.h>).
 pub const T_SRV_PEER_FLAG_CONSOLE_RENDERER: u32 = 1 << 0;
+// The peer's session currently OWNS the console (the foreground session, "the
+// person at the keyboard") -- NOCTURNE.md 6.8's sink-authority axis. Distinct
+// from `console` (console-ATTACHMENT, I-27 corvus-only).
+pub const T_SRV_PEER_FLAG_CONSOLE_OWNER: u32 = 1 << 1;
 
 // t_srv_accept — block until a client connects, return the server-side
 // endpoint as a KObj_Spoor handle (byte I/O — plain t_read/t_write). The
