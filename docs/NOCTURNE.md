@@ -776,8 +776,11 @@ picks its own side**.
   volume           read: Plan 9 volume(3) grammar over the active sink -- `cat` shows the level. READ-ONLY
                    in the mounted tree: WRITES are sink authority and go to /srv/nocturne-ctl (6.8), because a
                    shared mount cannot carry per-writer identity so it must never carry write authority.
-  audio            read/write: the Plan 9 audio(3) file -- a write is a s16le stereo 44.1k voice (default;
-                   `#A`-compatible); a read is an ear on the sink tap. Exists so `bind /dev/nocturne/audio /dev/audio` works.
+  audio            write: the Plan 9 audio(3) playback file -- a write is an s16le stereo voice at the graph rate
+                   (the `#A`-compatible default). READ is REFUSED here (N-3c-1): a sink tap carries eavesdropping
+                   authority and a shared mount cannot carry per-writer identity (the N-3a-2 F1 lesson), so recording
+                   is the gated `tap` on /srv/nocturne-ctl (6.8), never this file. `bind /dev/nocturne/audio
+                   /dev/audio` serves PLAYBACK.
   nodes/
     new            open+write: `voice|ear|descant name=<s> ports=<in>x<out> rate=<hz> format=<fmt> latency=<frames>
                    mode=incycle|deferred quantum-min=<n> quantum-max=<n>` -> returns the id (the tapestry `create` idiom)
@@ -792,7 +795,8 @@ picks its own side**.
     new            open+write: `<src-node>:<port> <dst-node>:<port> gain=<db>` -> id
     <id>/ctl,info
   sinks/<name>/    the device sinks (owner SYSTEM): info (read), volume/ctl(`default`) READ-ONLY here (per above)
-  sources/<name>/  device capture (same shape)
+  sources/<name>/  device capture (same shape) -- DEFERRED to N-3c-2: the virtio-snd driver negotiates only a
+                   D_OUTPUT stream (snd.rs), so device capture needs a new RX-stream path + a non-wav witness backend
 ```
 
 Everything is a file; `ls`, `cat`, `echo >` operate the graph from a shell;
@@ -815,9 +819,14 @@ per-connection-authority surface, GPU-DESIGN 4.1 / joey.c):
 - **`/srv/nocturne-ctl`** -- the **sink-authority** surface, reached by a
   controller *opening its own connection* (`open=connect`; never mounted). Its
   peer *is* the writer, so the 6.8 gate reads the real caller. Carries the
-  writable `volume` today; `default`, the sink `tap` (an ear on the sink), and
-  descant-insert-at-a-sink join it as they land (all clearance-or-console-owner
-  ops). The `-ctl` companion-post name follows `/srv/stratum-ctl`.
+  writable `volume` (N-3a-3) and the gated sink `tap` (N-3c-1 -- a read is an ear
+  on the mixed sink output: single-reader [EBUSY on a second concurrent open, a
+  v1.0 bound], bounded drop-oldest [the DoS floor], gated per-open AND re-checked
+  per-read FRESH so a mid-recording revocation [caps dropped, or the console
+  owner changes] fails closed, and a read parks while the sink is fully idle).
+  `default` and descant-insert-at-a-sink join it as they land (all
+  clearance-or-console-owner ops). The `-ctl` companion-post name follows
+  `/srv/stratum-ctl`.
 
 Why the split and not a per-session re-mount: 9P binds identity at *attach*
 (per connection), not per message, so every write through `joey`'s one shared
@@ -954,10 +963,16 @@ no audio at all (a container with no audio simply omits the mount — the
 - **Route** (`links/new` between nodes of different owners): the owner of the
   *source* end, or the clearance. Policy (§6.10) is applied by `nocturned`
   itself and needs no client authority.
-- **Read a tap** (an ear on another program's voice or on the sink): the owner
+- **Read a tap** (an ear on the sink, or on another program's voice): the owner
   of what is tapped, or the clearance — recording is eavesdropping otherwise.
-  `/dev/nocturne/audio` reads tap the sink and are therefore clearance-gated
-  by default (9front's loopback is not; ours is a security decision).
+  The **sink tap** is realized (N-3c-1) as the gated `/srv/nocturne-ctl/tap`
+  file (the sink-authority gate below), NOT as a `/dev/nocturne/audio` read:
+  9front's loopback is an ungated `/dev/audio` read, but a shared mount cannot
+  carry per-writer identity (the N-3a-2 F1 lesson), so the mount `audio` read is
+  refused and the tap is reached over the caller's own `-ctl` connection (ours is
+  a security decision — and it must therefore be an authenticated one). An ear on
+  another program's *voice* (owner-or-clearance) is the `ear` node kind, deferred
+  with the full node model (N-4).
 - **Sinks/sources** are SYSTEM-owned; `volume`/`default` on them need the
   clearance or the console-owner session (the trusted-path idiom for "the
   person at the keyboard changes the volume").
@@ -981,6 +996,16 @@ It is **not** console-*attachment* (I-27 makes that corvus-only -- the wrong
 concept, and the N-3a-2 gate's latent F2). `SYS_SRV_PEER` exposes it as a new
 `srv_peer_info.flags` bit (`SRV_PEER_FLAG_CONSOLE_OWNER`, no struct-size change),
 set on the same alive-gated peer walk as the caps/renderer snapshot.
+
+**The sink tap reads through the identical gate (N-3c-1).** Opening
+`/srv/nocturne-ctl/tap` runs the same four-axis check (`sink_authorized`, the
+N-3a-3 gate — renamed from `volume_authorized` because it now gates both the
+volume write and the tap read), and because a recording is long-lived while caps
+and the console owner mutate, every `tap` read re-checks the peer FRESH and fails
+closed (EPERM) the instant authority is lost — so a recording started by the
+person at the keyboard stops when they cease to own the console, and one riding a
+clearance stops when the clearance is revoked. The tap never appears on the
+mounted playback post, so it cannot be reached through `joey`'s shared connection.
 
 No new capability bit is needed for *use*; the clearance is one entry in the
 existing corvus-gated table; the cadence authority (§6.7) is the only new
@@ -1114,11 +1139,16 @@ per chunk, not now): the virtio-snd driver (device-response bounding; the
 in-flight-message accounting; DMA pool lifetime on death); `nocturned`'s ring
 consumer + the two-thread graph lock; **the sink-authority gate + the two-post
 split (N-3a-3): the `/srv/nocturne-ctl` per-connection surface, the four-axis
-`volume_authorized`, and the `SYS_SRV_PEER` `SRV_PEER_FLAG_CONSOLE_OWNER`
+`sink_authorized`, and the `SYS_SRV_PEER` `SRV_PEER_FLAG_CONSOLE_OWNER`
 extension in `sys_srv_peer_for_proc` + the `peer_snapshot_cb` walk** (an
 authority-check + a capability-introspection ABI surface -- prosecute the gate
 freshness, the fail-closed dead-peer path, and that no write authority survives
-on the mounted playback post); the descant substitute/bypass machinery; the
+on the mounted playback post); **the gated sink `tap` (N-3c-1): the mixed-output
+mirror + the single-reader guard + the parked tap read, and the per-READ fresh
+re-check that closes the mid-recording revocation window -- prosecute a mount
+`audio` read (must be refused), a second concurrent open (EBUSY), a stalled
+reader (bounded drop-oldest, never unbounded), and a peer that loses authority
+mid-stream (next read fails closed)**; the descant substitute/bypass machinery; the
 `Tweft` answer path in a second userspace server; the cadence-lease kernel
 object + the scheduler demotion; the SDL audio boundary-line patch; the
 `nocturne-pulse` protocol parser (untrusted wire input, the halcyond
@@ -1195,6 +1225,7 @@ transcript class).
 | &nbsp;&nbsp;**N-3a-1** the whole-sink clearance -- **LANDED 2026-09-06 (aux-3)** | `CAP_AUDIO_GRAPH`=1<<12 (caps.h, elevation-only + `CAP_GRANTABLE_CLEARANCE`), the corvus `audio-graph` clearance level (admin-granted, NOT user-default -- 6.8 "a system-level program needs a grant"), `T_CAP_AUDIO_GRAPH`; the I-46 whole-sink authority the N-3a-2 gate checks. The cap device + rfork strip are mask-driven, so no devcap.c change (the CAP_DEBUG/CAP_JIT precedent) | test_devcap.clearance_audio_graph (grant->redeem->cap, negative control one variable away) GREEN; 1464 kernel tests + boot OK; handles.tla elevation-strip buggy cfgs re-confirmed | ran at max; the batched holotype audit follows N-3a-2 |
 | &nbsp;&nbsp;**N-3a-2** the sink volume file + the two-axis gate -- **LANDED 2026-09-06 (aux-3)** | `/dev/nocturne/volume` (Plan 9 `volume(3)`: `audio`/`mix`, per-channel 0..100, `audio 0` mutes) + the sink gain STAGE in `next_period` (attenuate-before-clamp) + the 6.8 gate (`PRINCIPAL_SYSTEM` OR `CAP_HOSTOWNER` OR `CAP_AUDIO_GRAPH` OR console-attached, read FRESH via `SYS_SRV_PEER` per write); per-DIRECT-connection (the shared `/dev/nocturne` mount carries the mounter's SYSTEM authority -- the Warp F1 / libtapestry idiom). node gain percent->dB deferred to N-3b; the wav attenuation witness deferred to N-3d | `tools/test-nocturne-volume.sh` GREEN: a SYSTEM direct write ACCEPTED + the grammar round-trip, and a user-principal child's direct write REFUSED (EPERM) -- the discrimination a return-true gate could not pass | ran at max; **audit found F1 [P1]: the gate is BYPASSED through joey's shared `/dev/nocturne` mount (every mounted write presents as the mounter=SYSTEM); the witness only tested the direct path. Root fix = N-3a-3.** F2/F3 [P3] fold into N-3a-3 |
 | &nbsp;&nbsp;**N-3a-3** the F1 root fix: two-post per-connection sink authority + the console-owner axis -- **LANDED 2026-09-07 (aux-3): 3a @0a0ad86c (kernel flag) + 3b @131f9336 (nocturned + tool + witness)** | Design ratified 2026-09-07 (operator: second `/srv` post + realize the console-owner axis now). `nocturned` posts `/srv/nocturne-ctl` (the sink-authority surface, `open=connect` per-conn, never mounted) alongside the mounted playback `/srv/nocturne`; `volume` is read-only in the mount (0o444) and writable on `-ctl` (the writer's own conn = the peer, so the 6.8 gate reads the real caller). Realizes 6.8's console-owner axis: `SRV_PEER_FLAG_CONSOLE_OWNER` on `srv_peer_info.flags` from `proc_console_owner_in_session` on the alive-gated `peer_snapshot_cb` walk (fixes F2 -- was console-*attach*, corvus-only). Gate = SYSTEM OR CAP_HOSTOWNER OR CAP_AUDIO_GRAPH OR console-owner-session; `apply_volume` two-pass validate-then-apply (F3). A native `nocturne-vol` tool direct-connects `-ctl`. The Warp precedent (joey.c 11437): a shared mount is one conn, so an authority surface is never globally mounted | REDONE witness GREEN: the MOUNT write path DENIED (F1 regression) + `-ctl` SYSTEM allow / user deny + grammar/F3; kernel `proc_identity.peer_snapshot_console_owner` (both ways) + `test_devcap.clearance_audio_graph`. 1512/1512 kernel tests; boot OK; nocturne-probe OK (playback intact) | ran at max; **round-6 dirty re-audit CLOSED CLEAN (Opus; 0 P0 / 0 P1 / 0 P2 / 3 P3): F2 (the !control-guard witness) FIXED, F1 (shared MAX_CONNS pool) + F3 (two-proc console-owner test) TRACKED v1.x -- reference/153 caveats.** Fable-diversity pass owed (arc-wide, Fable out of credits) |
+| &nbsp;&nbsp;**N-3c-1** the gated sink tap — **DESIGN RATIFIED 2026-09-07 (aux-3); code pending** | Design ratified 2026-09-07 (operator `AskUserQuestion`: the sink tap is a `tap` file on `/srv/nocturne-ctl`; the mount `audio` read is refused; device `sources/` deferred to N-3c-2; N-3c before N-3b). A read of `/srv/nocturne-ctl/tap` mirrors the mixed sink output (s16le stereo at the graph rate): single-reader (EBUSY on a second open), bounded drop-oldest (the DoS floor), gated by `sink_authorized` (SYSTEM OR CAP_HOSTOWNER OR CAP_AUDIO_GRAPH OR console-owner) re-checked FRESH per-read (fail-closed on a mid-recording revocation), and a read parks while the sink is idle. The mount `/dev/nocturne/audio` read becomes refused (playback-only). Reuses the N-3a-3 substrate (the `-ctl` post + the gate, `volume_authorized`→`sink_authorized`) and the parked-write plumbing (extended to a parked read). The `ear` node kind + device `sources/` are deferred (N-4 / N-3c-2) | (pending) the tap witness: an authorized `-ctl` reader captures a played tone (positive) + a user's mount `audio` read refused + a user's `-ctl` `tap` open denied (the eavesdropping regression, one variable away) + the wav playback intact; kernel tests unchanged; the focused audit (round 7) | ran at max; security-critical (eavesdropping) — the EFFORT GATE fired, confirmed max |
 | **N-4** descants + the cadence lease | the descant contract, substitute/bypass, latency accounting, `specs/nocturne_cycle.tla`; **the kernel lift**: `specs/cadence.tla` → `KObj_Cadence`/allowance + scheduler demotion; the convolution-filter demo (a native descant with a Gardner head; the operator's example) | W-2 (+ the sabotage arm), W-3, SMP gate, the focused audit (P0/P1 → dirty-close discipline) | scheduler + a new kobj: **max, spec-first, no exceptions** |
 | **N-5** Linux compat | `nocturne-pulse` under VIVARIUM; mpv/ffplay/SDL-pulse binaries play | a curl-demo-style Linux binary leg | a wire parser: ASK unless max |
 | **N-6** silicon | thyla-pi under KVM + `pipewire`; the wav + `pw-top` witness; a JOURNAL number set | W-5 | routine |
@@ -1422,3 +1453,41 @@ what that note only asserted. Scripture-first (this commit), then the impl
 (kernel `SYS_SRV_PEER` extension + `nocturned` two-post split + `nocturne-vol` +
 the redone witness), then the mandatory dirty re-audit (round 6). `N-3a-1`'s cap
 allocation (`@79076bb4`) was audited sound and is untouched.
+
+## 15. N-3c-1 ratification record (2026-09-07): the gated sink tap
+
+N-3c (capture) opens the eavesdropping surface I-46's authority half names.
+Research — Plan 9's `/dev/audio` loopback is *ungated*, while the modern SOTA
+(PipeWire's per-sink monitor source, CoreAudio's TCC-gated system-audio capture,
+Fuchsia's `AudioCapturer` capability route, Android's `RECORD_AUDIO` +
+opt-in `AudioPlaybackCapture`) makes capture a *distinct, mediated authority*
+from playback — plus the as-built facts (the mixer already produces a mixed S16
+period; the virtio-snd driver negotiates only `D_OUTPUT`, so device mic capture
+is hardware-blocked) split the chunk cleanly: the sink tap is pure software and
+buildable now; device sources are a separate, driver-audit-bearing sub-chunk.
+
+**Operator decisions (`AskUserQuestion`, 2026-09-07), all as recommended:**
+
+1. **Tap shape = a `tap` file on `/srv/nocturne-ctl`.** A gated read streams the
+   mixed sink output; the mount `/dev/nocturne/audio` read is refused
+   (playback-only). This reconciles the §6.4/§6.8 tension the way N-3a-3 taught:
+   an eavesdropping authority cannot ride the shared mount (its peer is always
+   the mounter=SYSTEM — the F1 bug), so it lives on the caller's own `-ctl`
+   connection where the peer is the reader. Rejected: making the mount `audio`
+   read the sink tap (the F1 bug redux — the mount cannot gate); the full `ear`
+   node kind now (larger, overlaps the N-4 descant-ring machinery — deferred).
+2. **Device `sources/` (mic capture) deferred to N-3c-2.** The virtio-snd driver
+   negotiates only a playback stream, and a device-capture witness needs a
+   non-wav QEMU backend; the work is separable and driver-audit-bearing, and the
+   sink tap does not depend on it. Surfaced, not silently dropped (the
+   deferral-needs-signoff rule).
+3. **N-3c before N-3b.** The eavesdropping surface first; the node gain→dB
+   grammar (N-3b) follows.
+
+The gate is the N-3a-3 `sink_authorized` (renamed from `volume_authorized` — it
+now gates both the volume write and the tap read), re-checked FRESH per tap read
+so a mid-recording authority loss fails closed. The tap is single-reader (EBUSY
+on a second concurrent open, a v1.0 bound), bounded drop-oldest (the DoS floor),
+and a read parks while the sink is idle (death-interruptible, Tflush-able,
+reusing the parked-write plumbing). Scripture-first (this commit), then the impl,
+then the focused audit (round 7). N-3a-3 (`@b5be12a9`) is untouched.
