@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**144 absorbed · 13 live · 157 total.**
+**145 absorbed · 12 live · 157 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -189,7 +189,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 90-u-test.md | absorbed | [[sub-kernel-syscall-abi]] |
 | 91-utopia.md | absorbed | [[sub-utopia-eval]], [[sub-utopia-interactive]], [[sub-utopia-parser]] |
 | 92-utopia-line-editor.md | live | — |
-| 93-utopia-parser.md | live | — |
+| 93-utopia-parser.md | absorbed | [[sub-utopia-parser]] |
 | 94-utopia-eval.md | live | — |
 | 95-identity.md | absorbed | [[sub-kernel-caps]], [[sub-kernel-ninep-attach]], [[sub-kernel-perm]], [[sub-kernel-proc]], [[sub-kernel-syscall-abi]] |
 | 96-fs-mutation.md | absorbed | [[sub-kernel-ninep-dev9p]], [[sub-kernel-syscall-dispatch]], [[sub-pouch-fs]] |
