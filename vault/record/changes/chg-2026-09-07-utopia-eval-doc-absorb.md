@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/94-utopia-eval (the ut evaluator): fold the external-spawn chokepoint + shell-side #! shebang into sub-utopia-eval"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["57d965e4"]
 touched: [sub-utopia-eval]
 established: []
 closed: []
