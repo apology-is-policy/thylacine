@@ -4,7 +4,7 @@ type: chg
 title: "s7 F3 dossier deltas: the ptyfs slave-write park + nora's self-naming exit markers + halcyond's screenmode witness"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["b3a54b4c"]
 touched:
   - sub-ptyfs
   - sub-nora-host
