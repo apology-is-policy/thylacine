@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/141-diorama (the synthetic Linux world): fold the SA-4 vDSO fast-path + the MIDR-0x00 harness lesson + diorama-probe into sub-diorama"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["df283d7a"]
 touched: [sub-diorama]
 established: []
 closed: []
