@@ -113,6 +113,7 @@ bytes, and totals; the root `info` gains a `voices N` line.
 | `ctl` | `0644` | a one-line description | `flush` |
 | `volume` | `0444` (read-only in the mount) | the current `audio`/`mix` levels per channel (Plan 9 `volume(3)`) | not through the mount -- writes go to `nocturne-vol` / `/srv/nocturne-ctl` (below) |
 | `tap` (on `/srv/nocturne-ctl`) | `0444` | the mixed sink output as S16LE stereo -- recording; gated (see "Recording" below), one reader at a time | not writable |
+| `source` (on `/srv/nocturne-ctl`) | `0444` | a capture device (mic / line-in) as S16LE stereo -- recording; same gate, one reader at a time, on-demand; `ENODEV` if no capture device | not writable |
 | `nodes/new` | `0666` | the id of the voice this open minted | opening it is the mint |
 | `nodes/<id>/audio` | `0666` | 0 bytes | S16LE stereo 48000 Hz into voice `<id>` |
 | `nodes/<id>/ctl` | `0644` | a one-line description | `gain <percent>` / `flush` / `remove` |
@@ -196,7 +197,33 @@ rate + `s16le` + 2 channels to play them back. Notes:
   keyboard (or your clearance is revoked) mid-recording, the next read fails --
   recording follows the trusted path, it does not outlive it.
 
-Device capture (a microphone or line-in via `sources/`) is not yet available.
+## Recording from a capture device (microphone / line-in)
+
+If the machine has an audio **capture** device, its input stream is read from
+`/srv/nocturne-ctl/source` -- the same gate as the tap, for the same reason
+(recording is an eavesdropping surface). You must be the session at the keyboard,
+the system, an admin (`CAP_HOSTOWNER`), or hold the `audio-graph` clearance:
+
+```
+% cat /srv/nocturne-ctl/source > mic.pcm       # raw S16LE stereo @ the capture rate
+```
+
+The same notes as the tap apply -- one reader at a time, realtime (drop-oldest,
+not a recorder-of-record), silence-not-filled, authority re-checked per read --
+plus two that are specific to a hardware capture device:
+
+- **On-demand.** The capture device is started only while you hold `source` open
+  and stopped when you close it. Nothing is captured -- the microphone is not even
+  running -- unless an authorized reader is actively recording.
+- **Absent on a box with no capture device.** Opening `source` returns *no such
+  device* (`ENODEV`) if the machine exposes no capture input; that is distinct
+  from *permission denied*, which is what an unauthorized caller always gets
+  (whether or not a device exists). `source` never appears on the `/dev/nocturne`
+  mount -- only on `/srv/nocturne-ctl`.
+
+Tapping *another program's* voice (an `ear` on a specific stream rather than the
+whole mix or the device) is a separate, finer-grained capture that is not yet
+available.
 
 ## Zero-copy ring (advanced)
 

@@ -114,6 +114,7 @@ pub const E_AGAIN: u32 = 11; // EAGAIN/EWOULDBLOCK (a nonblocking read with no d
 pub const E_NOMEM: u32 = 12;
 pub const E_FAULT: u32 = 14;
 pub const E_EXIST: u32 = 17;
+pub const E_NODEV: u32 = 19; // ENODEV: the backing device is absent (no capture stream, N-3c-2)
 pub const E_NOTDIR: u32 = 20;
 pub const E_ISDIR: u32 = 21;
 pub const E_INVAL: u32 = 22;

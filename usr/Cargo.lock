@@ -1033,6 +1033,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nocturne-capture-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "nocturne-probe"
 version = "0.1.0"
 dependencies = [

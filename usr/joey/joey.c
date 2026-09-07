@@ -11438,6 +11438,27 @@ int main(void) {
                     return 1;
                 }
                 t_putstr("joey: nocturne-tap-probe OK (SYSTEM tap capture + mount+user deny; Nocturne N-3c-1)\n");
+            } else if (bootarg_has("thylacine.captureprobe", 22)) {
+                // N-3c-2: the device-capture (source) authority witness.
+                // nocturne-capture-probe proves the eavesdropping gate on the mic /
+                // line-in RX stream: a SYSTEM reader opens /srv/nocturne-ctl/source
+                // (positive), the driver's periods-captured CLIMBS while it is held
+                // (the deterministic COUNT -- content is silence under audiodev=none,
+                // so no content assertion), a SECOND concurrent open is EBUSY, the
+                // source is ABSENT on /dev/nocturne (never the shared mount), and a
+                // user-principal child is DENIED (the negative arm). Needs
+                // CAP_SET_IDENTITY to stamp the child, so it rides
+                // pouch_smoke_one_caps. The boot must set streams=2 + a capture
+                // stream (tools/test-nocturne-capture.sh). FATAL once selected.
+                static const char cp_name[]   = "/bin/nocturne-capture-probe";
+                static const char cp_expect[] = "NOCTURNE-CAPTURE-PROBE PASS";
+                if (pouch_smoke_one_caps(cp_name, sizeof(cp_name) - 1,
+                                         cp_expect, sizeof(cp_expect) - 1,
+                                         T_CAP_SET_IDENTITY) != 0) {
+                    t_putstr("joey: nocturne-capture-probe FAILED (the device-capture authority; Nocturne N-3c-2)\n");
+                    return 1;
+                }
+                t_putstr("joey: nocturne-capture-probe OK (SYSTEM source capture + single-reader + mount absent + user deny; Nocturne N-3c-2)\n");
             } else {
                 // POST-PIVOT: bare ramfs names no longer resolve; the ramfs
                 // root is bound at /bin (#58), like /bin/corvus and /bin/login.

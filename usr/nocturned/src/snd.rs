@@ -64,6 +64,7 @@ const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 const VQ_CONTROL: u16 = 0;
 const VQ_TX: u16 = 2;
+const VQ_RX: u16 = 3;
 
 const R_PCM_INFO: u32 = 0x0100;
 const R_PCM_SET_PARAMS: u32 = 0x0101;
@@ -74,6 +75,7 @@ const R_PCM_STOP: u32 = 0x0105;
 const S_OK: u32 = 0x8000;
 
 const D_OUTPUT: u8 = 0;
+const D_INPUT: u8 = 1;
 const FMT_S16: u8 = 5;
 const RATE_48000: u8 = 7;
 
@@ -104,7 +106,17 @@ const CTRL_REQ_OFF: usize = 6 * PAGE; // request at +0, response at +2048
 const CTRL_RESP_OFF: usize = CTRL_REQ_OFF + 2048;
 const TX_META_OFF: usize = 7 * PAGE; // per slot 64 B: xfer hdr at +0, status at +32
 const TX_PAYLOAD_OFF: usize = 8 * PAGE; // per slot PERIOD_BYTES
-const DMA_POOL_SIZE: usize = TX_PAYLOAD_OFF + PERIODS * PERIOD_BYTES;
+// The capture (RX) region (N-3c-2). Always in the pool whether or not the device
+// offers a D_INPUT stream -- a fixed layout is simpler than a conditional one, and
+// the total (~64 KiB) sits well inside the 256 KiB DMA grant. Mirrors the TX
+// region: desc/avail/used pages, per-slot meta (xfer hdr + status), and per-slot
+// payload the DEVICE fills (device-writable, the one direction flip from TX).
+const RXQ_DESC_OFF: usize = TX_PAYLOAD_OFF + PERIODS * PERIOD_BYTES;
+const RXQ_AVAIL_OFF: usize = RXQ_DESC_OFF + PAGE;
+const RXQ_USED_OFF: usize = RXQ_DESC_OFF + 2 * PAGE;
+const RX_META_OFF: usize = RXQ_DESC_OFF + 3 * PAGE; // per slot 64 B: xfer hdr +0, status +32
+const RX_PAYLOAD_OFF: usize = RXQ_DESC_OFF + 4 * PAGE; // per slot PERIOD_BYTES
+const DMA_POOL_SIZE: usize = RX_PAYLOAD_OFF + PERIODS * PERIOD_BYTES;
 
 const CTRL_WAIT_STEPS: u32 = 2000; // x 1 ms = a 2 s bound on a control round-trip
 
@@ -149,6 +161,9 @@ pub struct Stats {
     pub tx_errors: u64,
     pub bad_used: u64,
     pub last_latency_bytes: u32,
+    /// Capture (RX, N-3c-2): periods the device filled and we copied out.
+    pub periods_captured: u64,
+    pub rx_errors: u64,
 }
 
 pub struct VirtioSnd {
@@ -169,6 +184,16 @@ pub struct VirtioSnd {
     tx_inflight: u32,
     pub stats: Stats,
     started: bool,
+    /// Capture (RX, N-3c-2). `has_capture` is false when the device advertised no
+    /// D_INPUT stream (the streams=1 default) -- the whole RX path is then dormant
+    /// and playback is unaffected. `rx_notify_va` is the rxq doorbell (0 when no
+    /// capture). `rx_started` is true between `start_capture` and `stop_capture`.
+    has_capture: bool,
+    rx_notify_va: u64,
+    rx_avail_idx: u16,
+    rx_used_idx: u16,
+    rx_inflight: u32,
+    rx_started: bool,
 }
 
 impl VirtioSnd {
@@ -261,6 +286,10 @@ impl VirtioSnd {
                 return Err(Error::Hardware);
             }
         }
+        // Capture (N-3c-2) rides a SECOND stream. re-read the count (the unsafe
+        // block above scoped `streams`); >= 2 is the pre-condition for the D_INPUT
+        // path. streams == 1 (the default boot) => playback-only, unchanged.
+        let stream_count = unsafe { r32(dev_va + 4) };
 
         let ctrl_off = setup_queue(
             common_va,
@@ -296,6 +325,34 @@ impl VirtioSnd {
         };
         let ctrl_notify_va = door(ctrl_off)?;
         let tx_notify_va = door(tx_off)?;
+        // The capture rxq (N-3c-2), set up BEFORE DRIVER_OK like ctrl/tx. OPTIONAL:
+        // any failure disables capture (rx_notify_va = 0) rather than failing the
+        // driver -- playback must never regress on a capture-setup problem. The
+        // capture STREAM is negotiated (control RPCs) after DRIVER_OK below.
+        let rx_notify_va = if stream_count >= 2 {
+            match setup_queue(
+                common_va,
+                VQ_RX,
+                pool_pa + RXQ_DESC_OFF as u64,
+                pool_pa + RXQ_AVAIL_OFF as u64,
+                pool_pa + RXQ_USED_OFF as u64,
+            ) {
+                Some(rx_off) => match door(rx_off) {
+                    Ok(va) => va,
+                    Err(_) => {
+                        say!("nocturned: rxq doorbell offset invalid; capture disabled");
+                        0
+                    }
+                },
+                None => {
+                    say!("nocturned: rxq setup failed; capture disabled");
+                    0
+                }
+            }
+        } else {
+            say!("nocturned: device offers {} stream(s); capture disabled (playback-only)", stream_count);
+            0
+        };
 
         unsafe {
             w8(
@@ -319,8 +376,21 @@ impl VirtioSnd {
             tx_inflight: 0,
             stats: Stats::default(),
             started: false,
+            has_capture: false,
+            rx_notify_va,
+            rx_avail_idx: 0,
+            rx_used_idx: 0,
+            rx_inflight: 0,
+            rx_started: false,
         };
         snd.negotiate_stream()?;
+        // Capture (N-3c-2): if the rxq came up AND the device's stream 1 is a
+        // D_INPUT S16/48k/stereo stream, arm it. A failure here disables capture
+        // (playback stays up) -- negotiate_capture logs the reason.
+        if rx_notify_va != 0 && snd.negotiate_capture().is_ok() {
+            snd.has_capture = true;
+            say!("nocturned: capture ready (D_INPUT s16c2r{}); source available", RATE_HZ);
+        }
         Ok(snd)
     }
 
@@ -452,11 +522,11 @@ impl VirtioSnd {
         unsafe { r8(self.pool_va() + CTRL_RESP_OFF as u64 + off as u64) }
     }
 
-    /// A stream verb with no payload beyond the pcm_hdr; checks S_OK.
-    fn pcm_verb(&mut self, code: u32, what: &str) -> Result<(), Error> {
+    /// A stream verb with no payload beyond the pcm_hdr, for `stream`; checks S_OK.
+    fn pcm_verb_stream(&mut self, code: u32, stream: u32, what: &str) -> Result<(), Error> {
         let mut req = [0u8; 8];
         req[0..4].copy_from_slice(&code.to_le_bytes());
-        req[4..8].copy_from_slice(&0u32.to_le_bytes()); // stream_id 0
+        req[4..8].copy_from_slice(&stream.to_le_bytes());
         let n = self.ctrl_rpc(&req, 4)?;
         let status = if n >= 4 { self.resp_u32(0) } else { 0 };
         if status != S_OK {
@@ -464,6 +534,11 @@ impl VirtioSnd {
             return Err(Error::Hardware);
         }
         Ok(())
+    }
+
+    /// The playback (stream 0) verb.
+    fn pcm_verb(&mut self, code: u32, what: &str) -> Result<(), Error> {
+        self.pcm_verb_stream(code, 0, what)
     }
 
     fn negotiate_stream(&mut self) -> Result<(), Error> {
@@ -519,6 +594,63 @@ impl VirtioSnd {
             return Err(Error::Hardware);
         }
         self.pcm_verb(R_PCM_PREPARE, "PCM_PREPARE")?;
+        Ok(())
+    }
+
+    /// Query + configure stream 1 as an S16/48k/stereo D_INPUT (capture) stream
+    /// (N-3c-2) -- the playback negotiate's exact checks, mirrored for the input
+    /// direction. Err (=> capture disabled, playback unaffected) if stream 1 is
+    /// absent, not an input, or the wrong format.
+    fn negotiate_capture(&mut self) -> Result<(), Error> {
+        // PCM_INFO for stream 1: query_info { hdr, start_id 1, count 1, size 32 }.
+        let mut q = [0u8; 16];
+        q[0..4].copy_from_slice(&R_PCM_INFO.to_le_bytes());
+        q[4..8].copy_from_slice(&1u32.to_le_bytes());
+        q[8..12].copy_from_slice(&1u32.to_le_bytes());
+        q[12..16].copy_from_slice(&32u32.to_le_bytes());
+        let n = self.ctrl_rpc(&q, 4 + 32)?;
+        if n < 4 + 32 || self.resp_u32(0) != S_OK {
+            say!("nocturned: capture PCM_INFO failed (len {} status 0x{:x})", n, self.resp_u32(0));
+            return Err(Error::Hardware);
+        }
+        let formats = self.resp_u64(4 + 8);
+        let rates = self.resp_u64(4 + 16);
+        let direction = self.resp_u8(4 + 24);
+        let ch_min = self.resp_u8(4 + 25);
+        let ch_max = self.resp_u8(4 + 26);
+        say!(
+            "nocturned: stream 1: dir={} ch={}..{} formats=0x{:x} rates=0x{:x}",
+            direction, ch_min, ch_max, formats, rates
+        );
+        if direction != D_INPUT {
+            say!("nocturned: stream 1 is not capture (dir {})", direction);
+            return Err(Error::Hardware);
+        }
+        if formats & (1u64 << FMT_S16) == 0 || rates & (1u64 << RATE_48000) == 0 {
+            say!("nocturned: capture stream lacks S16 @ 48 kHz");
+            return Err(Error::Hardware);
+        }
+        if !(u32::from(ch_min) <= CHANNELS && CHANNELS <= u32::from(ch_max)) {
+            say!("nocturned: capture stream cannot do {} channels", CHANNELS);
+            return Err(Error::Hardware);
+        }
+        // SET_PARAMS { pcm_hdr(8) buffer_bytes period_bytes features channels format rate pad }.
+        let mut p = [0u8; 24];
+        p[0..4].copy_from_slice(&R_PCM_SET_PARAMS.to_le_bytes());
+        p[4..8].copy_from_slice(&1u32.to_le_bytes());
+        p[8..12].copy_from_slice(&(BUFFER_BYTES as u32).to_le_bytes());
+        p[12..16].copy_from_slice(&(PERIOD_BYTES as u32).to_le_bytes());
+        p[16..20].copy_from_slice(&0u32.to_le_bytes());
+        p[20] = CHANNELS as u8;
+        p[21] = FMT_S16;
+        p[22] = RATE_48000;
+        p[23] = 0;
+        let n = self.ctrl_rpc(&p, 4)?;
+        if n < 4 || self.resp_u32(0) != S_OK {
+            say!("nocturned: capture SET_PARAMS failed: status 0x{:x}", self.resp_u32(0));
+            return Err(Error::Hardware);
+        }
+        self.pcm_verb_stream(R_PCM_PREPARE, 1, "capture PCM_PREPARE")?;
         Ok(())
     }
 
@@ -709,6 +841,185 @@ impl VirtioSnd {
         reaped
     }
 
+    // ---- RX / capture (N-3c-2) ----------------------------------------------
+
+    pub fn has_capture(&self) -> bool {
+        self.has_capture
+    }
+
+    pub fn capturing(&self) -> bool {
+        self.rx_started
+    }
+
+    /// Post RX slot `s`: a chain the DEVICE fills. descs 3s (xfer hdr, RO) -> 3s+1
+    /// (payload, DEVICE-WRITABLE) -> 3s+2 (status, DEVICE-WRITABLE). The one flip
+    /// from post_tx is the payload's F_WRITE: capture is device -> guest.
+    fn post_rx(&mut self, s: usize) {
+        debug_assert!(s < PERIODS);
+        let pv = self.pool_va();
+        let pp = self.pool_pa();
+        let meta_off = (RX_META_OFF + s * 64) as u64;
+        let payload_off = (RX_PAYLOAD_OFF + s * PERIOD_BYTES) as u64;
+        unsafe {
+            // xfer header: stream_id 1 (the capture stream).
+            w32(pv + meta_off, 1);
+            // status word cleared (the device writes it).
+            w32(pv + meta_off + 32, 0);
+            w32(pv + meta_off + 36, 0);
+            let d = pv + RXQ_DESC_OFF as u64 + (3 * s as u64) * 16;
+            w64(d, pp + meta_off);
+            w32(d + 8, 4);
+            w16(d + 12, VIRTQ_DESC_F_NEXT);
+            w16(d + 14, (3 * s + 1) as u16);
+            w64(d + 16, pp + payload_off);
+            w32(d + 24, PERIOD_BYTES as u32);
+            w16(d + 28, VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE);
+            w16(d + 30, (3 * s + 2) as u16);
+            w64(d + 32, pp + meta_off + 32);
+            w32(d + 40, 8);
+            w16(d + 44, VIRTQ_DESC_F_WRITE);
+            w16(d + 46, 0);
+            let avail = pv + RXQ_AVAIL_OFF as u64;
+            let slot = (self.rx_avail_idx % QUEUE_SIZE) as u64;
+            w16(avail + 4 + slot * 2, (3 * s) as u16);
+            dsb_sy();
+            self.rx_avail_idx = self.rx_avail_idx.wrapping_add(1);
+            w16(avail + 2, self.rx_avail_idx);
+            dsb_sy();
+            w16(self.rx_notify_va, VQ_RX);
+        }
+        self.rx_inflight |= 1 << s;
+    }
+
+    /// Prime every RX slot and START the capture stream (on-demand: called when an
+    /// authorized reader opens `source`). No-op without a capture stream or when
+    /// already capturing.
+    pub fn start_capture(&mut self) {
+        if !self.has_capture || self.rx_started {
+            return;
+        }
+        for s in 0..PERIODS {
+            self.post_rx(s);
+        }
+        if self.pcm_verb_stream(R_PCM_START, 1, "capture PCM_START").is_err() {
+            self.reap_rx_without_repost();
+            return;
+        }
+        self.rx_started = true;
+    }
+
+    /// STOP + RELEASE the capture stream (the reader closed `source`), reap the
+    /// flushed completions WITHOUT re-posting, then re-PREPARE so a later
+    /// start_capture can prime + START again. Best-effort on a wedged device.
+    pub fn stop_capture(&mut self) {
+        if !self.rx_started {
+            return;
+        }
+        let _ = self.pcm_verb_stream(R_PCM_STOP, 1, "capture PCM_STOP");
+        let _ = self.pcm_verb_stream(R_PCM_RELEASE, 1, "capture PCM_RELEASE");
+        self.rx_started = false;
+        self.reap_rx_without_repost();
+        if self.pcm_verb_stream(R_PCM_PREPARE, 1, "capture PCM_PREPARE").is_err() {
+            say!("nocturned: capture re-PREPARE failed; capture stays down");
+            self.has_capture = false;
+        }
+    }
+
+    /// Drain the RX used ring, freeing slots, posting nothing.
+    fn reap_rx_without_repost(&mut self) {
+        let _ = unsafe { r8(self.isr_va) };
+        let pv = self.pool_va();
+        let used = pv + RXQ_USED_OFF as u64;
+        let mut passes = 0usize;
+        loop {
+            let cur = unsafe { r16(used + 2) };
+            virtio_rmb();
+            if cur == self.rx_used_idx {
+                break;
+            }
+            passes += 1;
+            if passes > QUEUE_SIZE_USZ {
+                self.stats.bad_used = self.stats.bad_used.saturating_add(1);
+                break;
+            }
+            self.rx_used_idx = self.rx_used_idx.wrapping_add(1);
+        }
+        self.rx_inflight = 0;
+    }
+
+    /// Reap captured RX periods and re-post each freed slot; hand each period's
+    /// bytes to `sink`. Called from the cycle thread while capturing (the RX twin
+    /// of `pump`). Two device-controlled fields are UNTRUSTED and bounded at the
+    /// parse site (the I-14 posture): the used id must name a posted in-flight slot
+    /// (else dropped), and the used-ring `len` is CLAMPED to PERIOD_BYTES before
+    /// any copy-out, so an over-long claim can never read past the payload buffer.
+    /// Returns the number of periods captured.
+    pub fn pump_rx<F: FnMut(&[u8])>(&mut self, mut sink: F) -> usize {
+        if !self.rx_started {
+            return 0;
+        }
+        let _ = unsafe { r8(self.isr_va) };
+        let pv = self.pool_va();
+        let used = pv + RXQ_USED_OFF as u64;
+        let mut reaped = 0usize;
+        let mut passes = 0usize;
+        loop {
+            let cur = unsafe { r16(used + 2) };
+            virtio_rmb();
+            if cur == self.rx_used_idx {
+                break;
+            }
+            // The same livelock guard as `pump`: only QUEUE_SIZE chains can ever be
+            // outstanding, so anything beyond is device misbehaviour (I-46 no-stall).
+            passes += 1;
+            if passes > QUEUE_SIZE_USZ {
+                self.stats.bad_used = self.stats.bad_used.saturating_add(1);
+                break;
+            }
+            let slot = (self.rx_used_idx % QUEUE_SIZE) as u64;
+            let entry = used + 4 + slot * 8;
+            let id = unsafe { r32(entry) } as usize;
+            let len = unsafe { r32(entry + 4) } as usize;
+            self.rx_used_idx = self.rx_used_idx.wrapping_add(1);
+            // The used id is DEVICE-controlled: it must name a chain head we posted
+            // (3s for an in-flight s). Anything else is dropped without re-posting.
+            if id % 3 != 0 || id / 3 >= PERIODS || self.rx_inflight & (1 << (id / 3)) == 0 {
+                self.stats.bad_used = self.stats.bad_used.saturating_add(1);
+                continue;
+            }
+            let s = id / 3;
+            self.rx_inflight &= !(1 << s);
+            let meta = pv + (RX_META_OFF + s * 64) as u64;
+            let status = unsafe { r32(meta + 32) };
+            if status != S_OK {
+                self.stats.rx_errors = self.stats.rx_errors.saturating_add(1);
+            }
+            // `len` = bytes the device wrote to the writable descriptors (payload +
+            // the 8-byte status). It is DEVICE-controlled, so clamp to PERIOD_BYTES
+            // -- a huge or status-inclusive value must never read past the payload.
+            let captured = len.min(PERIOD_BYTES);
+            if captured > 0 {
+                let payload = pv + (RX_PAYLOAD_OFF + s * PERIOD_BYTES) as u64;
+                let mut buf = [0u8; PERIOD_BYTES];
+                let mut i = 0usize;
+                while i + 4 <= captured {
+                    let v = unsafe { r32(payload + i as u64) };
+                    buf[i..i + 4].copy_from_slice(&v.to_le_bytes());
+                    i += 4;
+                }
+                while i < captured {
+                    buf[i] = unsafe { r8(payload + i as u64) };
+                    i += 1;
+                }
+                sink(&buf[..captured]);
+            }
+            self.stats.periods_captured = self.stats.periods_captured.saturating_add(1);
+            reaped += 1;
+            self.post_rx(s);
+        }
+        reaped
+    }
+
     /// Stop + release the stream and reset the device (`device_status = 0`), so
     /// no further DMA reaches the pool. Best-effort: a device that stopped
     /// answering is reset regardless. UNREACHED at N-1: the warden's
@@ -722,6 +1033,13 @@ impl VirtioSnd {
             self.started = false;
         }
         let _ = self.pcm_verb(R_PCM_RELEASE, "PCM_RELEASE");
+        if self.rx_started {
+            let _ = self.pcm_verb_stream(R_PCM_STOP, 1, "capture PCM_STOP");
+            self.rx_started = false;
+        }
+        if self.has_capture {
+            let _ = self.pcm_verb_stream(R_PCM_RELEASE, 1, "capture PCM_RELEASE");
+        }
         unsafe {
             w8(self.common_va + CCFG_DEVICE_STATUS, 0);
             dsb_sy();
@@ -754,3 +1072,6 @@ const _: () = assert!(6 + 8 * QUEUE_SIZE_USZ + 2 <= PAGE);
 const _: () = assert!(PERIODS * 64 <= PAGE);
 const _: () = assert!(3 * PERIODS <= QUEUE_SIZE_USZ);
 const _: () = assert!(PERIOD_BYTES % FRAME_BYTES == 0);
+// The RX region reuses the TX geometry (same QUEUE_SIZE / PERIODS / PERIOD_BYTES),
+// so the queue/meta asserts above cover it; pin the total pool inside the grant.
+const _: () = assert!(DMA_POOL_SIZE <= 256 * 1024);

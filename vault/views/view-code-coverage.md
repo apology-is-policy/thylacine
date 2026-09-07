@@ -65,17 +65,17 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**405 owned · 88 unowned · 493 files (82% owned) · ~23990 unswept lines.**
+**405 owned · 88 unowned · 493 files (82% owned) · ~24511 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **71 files, ~31496 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **72 files, ~31758 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/ports | 0 | 23 | 4678 |
 | usr/warp-prove | 0 | 1 | 4349 |
 | kernel | 116 | 22 | 3440 |
+| usr/nocturned | 0 | 3 | 3388 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/nocturned | 0 | 3 | 2867 |
 | usr/halcyon | 0 | 2 | 1202 |
 | usr/quarry | 0 | 1 | 1033 |
 | arch | 34 | 4 | 971 |
@@ -123,20 +123,20 @@ Excluded as harness and counted here rather than dropped: **71 files, ~31496 lin
 | file | lines |
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
-| usr/nocturned/src/server.rs | 1763 |
+| usr/nocturned/src/server.rs | 1943 |
 | usr/ports/gnumake/config.h | 1357 |
+| usr/nocturned/src/snd.rs | 1077 |
 | usr/quarry/src/main.rs | 1033 |
 | usr/halcyon/src/main.rs | 874 |
-| usr/nocturned/src/snd.rs | 756 |
 | arch/arm64/uart.c | 674 |
 | kernel/joey.c | 478 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 390 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 390 |
 | kernel/include/thylacine/errno.h | 388 |
+| usr/nocturned/src/main.rs | 368 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
-| usr/nocturned/src/main.rs | 348 |
 | usr/ports/sdl2/thylacine/thyla_tap.c | 333 |
 | kernel/fault_test.c | 332 |
 | usr/halcyon/src/lib.rs | 328 |

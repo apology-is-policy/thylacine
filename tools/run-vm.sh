@@ -546,6 +546,16 @@ fi
 if [[ "${THYLACINE_TAPPROBE:-0}" == "1" ]]; then
     append_tokens+=("thylacine.tapprobe")
 fi
+# N-3c-2: the device-capture (source) authority witness
+# (tools/test-nocturne-capture.sh runs /nocturne-capture-probe -- a SYSTEM reader
+# opens /srv/nocturne-ctl/source, the driver's periods-captured CLIMBS [the
+# deterministic COUNT; content is silence under audiodev=none], a second open is
+# EBUSY, the source is ABSENT on the shared mount, and a user-principal open is
+# DENIED). Needs a SECOND virtio-snd stream (the capture stream), so it forces
+# streams=2 in the device line below. Gated off by default.
+if [[ "${THYLACINE_CAPTUREPROBE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.captureprobe")
+fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends
@@ -596,7 +606,13 @@ if [[ "${THYLACINE_NO_AUDIO:-0}" != "1" ]]; then
             echo "run-vm.sh: unknown THYLACINE_AUDIODEV '$audiodev' (none|wav|coreaudio|pipewire|pa|alsa|sdl|dbus|oss|jack)" >&2
             exit 2 ;;
     esac
-    audio_flags+=(-device "virtio-sound-pci,id=snd-pci0,audiodev=snd0,streams=1,disable-legacy=on")
+    # streams default 1 (playback-only, N-1). The capture witness (N-3c-2) needs a
+    # SECOND stream (QEMU exposes stream 1 as D_INPUT at streams=2); force it there.
+    snd_streams="${THYLACINE_SND_STREAMS:-1}"
+    if [[ "${THYLACINE_CAPTUREPROBE:-0}" == "1" ]]; then
+        snd_streams=2
+    fi
+    audio_flags+=(-device "virtio-sound-pci,id=snd-pci0,audiodev=snd0,streams=$snd_streams,disable-legacy=on")
 fi
 
 # Canonical QEMU flags per TOOLING.md §3.

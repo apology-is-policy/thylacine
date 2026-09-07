@@ -78,6 +78,7 @@ const P_NODES: u64 = 4;
 const P_NODES_NEW: u64 = 5;
 const P_VOLUME: u64 = 6;
 const P_TAP: u64 = 7; // /srv/nocturne-ctl/tap: the gated ear on the sink mix (N-3c-1)
+const P_SOURCE: u64 = 8; // /srv/nocturne-ctl/source: the gated device capture read (N-3c-2)
 
 // Voice paths: VBIT | (id << 4) | leaf. Leaf 0 = the voice dir; 1/2/3 = the
 // audio/ctl/info files. VBIT (bit 40) is above the 6 fixed root paths AND above
@@ -144,9 +145,10 @@ const ROOT_CHILDREN: [(&[u8], u64, u32); 5] = [
 // (open=connect, never mounted), so the volume write's peer IS the writer and
 // the 6.8 gate reads the real caller. `default`/`sinks/`/`sources/`/the sink
 // `tap` join it as they land. Voices/playback are NOT here -- that is the mount.
-const ROOT_CHILDREN_CTL: [(&[u8], u64, u32); 2] = [
+const ROOT_CHILDREN_CTL: [(&[u8], u64, u32); 3] = [
     (b"volume", P_VOLUME, S_IFREG | 0o666),
     (b"tap", P_TAP, S_IFREG | 0o444),
+    (b"source", P_SOURCE, S_IFREG | 0o444),
 ];
 
 // The root-children table for a connection: the sink-authority set on the
@@ -184,9 +186,9 @@ fn mode_of(path: u64) -> u32 {
                 .unwrap_or(S_IFREG | 0o444),
         }
     } else {
-        // The tap lives only on the control post (ROOT_CHILDREN_CTL), so
-        // ROOT_CHILDREN below does not carry it; report its read-only mode here.
-        if path == P_TAP {
+        // The tap + source live only on the control post (ROOT_CHILDREN_CTL), so
+        // ROOT_CHILDREN below does not carry them; report their read-only mode here.
+        if path == P_TAP || path == P_SOURCE {
             return S_IFREG | 0o444;
         }
         for (_, p, m) in ROOT_CHILDREN {
@@ -316,6 +318,20 @@ pub struct Graph {
     /// cleared on the holder's clunk/teardown, which also drops the mirror.
     tap_mirror: VecDeque<u8>,
     tap_open: bool,
+    /// The device-capture source (N-3c-2): the RX twin of the tap. A bounded
+    /// drop-oldest mirror filled by the cycle's `pump_rx` while `source_open`,
+    /// drained by the one authorized reader. `source_open` is BOTH the single-reader
+    /// guard AND the cycle's on-demand capture trigger -- the cycle STARTs the RX
+    /// stream while it is set, STOPs it when cleared. `capture_available` is fixed at
+    /// driver open (whether the device offered a D_INPUT stream): false => no
+    /// `source` to open.
+    source_mirror: VecDeque<u8>,
+    source_open: bool,
+    /// Whether the device offers a capture stream. Seeded at driver open and
+    /// re-published by the cycle each iteration (like `started`), so it tracks a
+    /// mid-run capture wedge (stop_capture's re-PREPARE failing) rather than going
+    /// stale -- a post-wedge `source` open then gets a clean ENODEV, not a hang.
+    pub capture_available: bool,
 }
 
 /// The daemon's cross-thread state (N-2c). The graph lives behind a try-lockable
@@ -334,9 +350,9 @@ pub struct Shared {
 }
 
 impl Shared {
-    pub fn new() -> Shared {
+    pub fn new(capture_available: bool) -> Shared {
         Shared {
-            graph: Mutex::new(Graph::new()),
+            graph: Mutex::new(Graph::new(capture_available)),
             wake: AtomicU32::new(0),
         }
     }
@@ -358,7 +374,7 @@ impl Shared {
 }
 
 impl Graph {
-    pub fn new() -> Graph {
+    pub fn new(capture_available: bool) -> Graph {
         let mut voices = Vec::with_capacity(MAX_VOICES);
         voices.push(Voice::new(0, -1)); // the persistent default voice
         Graph {
@@ -370,6 +386,56 @@ impl Graph {
             sink_mix: [100, 100],
             tap_mirror: VecDeque::new(),
             tap_open: false,
+            source_mirror: VecDeque::new(),
+            source_open: false,
+            capture_available,
+        }
+    }
+
+    /// True iff an authorized reader currently holds `source` (the cycle uses this
+    /// to drive the on-demand RX start/stop).
+    pub fn source_open(&self) -> bool {
+        self.source_open
+    }
+
+    /// Try to claim the single-reader device-capture source (N-3c-2). True on
+    /// success (the caller holds it AND the cycle should start capturing); false if
+    /// a reader already does (-> EBUSY). Empties the mirror so a new reader never
+    /// inherits a prior one's audio.
+    fn source_try_open(&mut self) -> bool {
+        if self.source_open {
+            return false;
+        }
+        self.source_open = true;
+        self.source_mirror.clear();
+        true
+    }
+
+    /// Release the source and drop its mirror (the holder clunked or vanished);
+    /// clearing `source_open` also tells the cycle to STOP capturing.
+    fn source_release(&mut self) {
+        self.source_open = false;
+        self.source_mirror.clear();
+    }
+
+    /// Drain up to `max` bytes from the source mirror (FIFO). Empty => the reader
+    /// parks until `pump_rx` fills it.
+    fn source_take(&mut self, max: usize) -> Vec<u8> {
+        let n = self.source_mirror.len().min(max);
+        self.source_mirror.drain(..n).collect()
+    }
+
+    /// Append a captured period to the source mirror (called by the cycle's
+    /// `pump_rx` sink, under the graph lock). Bounded drop-oldest: the DoS floor, so
+    /// a slow reader cannot make the mirror grow without bound.
+    pub fn source_push(&mut self, bytes: &[u8]) {
+        if !self.source_open {
+            return;
+        }
+        self.source_mirror.extend(bytes.iter().copied());
+        if self.source_mirror.len() > TAP_MIRROR_MAX {
+            let drop = self.source_mirror.len() - TAP_MIRROR_MAX;
+            self.source_mirror.drain(..drop);
         }
     }
 
@@ -634,7 +700,7 @@ impl Graph {
         let s = &self.stats;
         let buffered = self.fifo_len() as u64 + u64::from(s.last_latency_bytes);
         let text = alloc::format!(
-            "device virtio-snd stream 0 playback\nformat s16c2r{}\nvoices {}\nbufsize {}\nbuffered {}\nperiod-bytes {}\nbuffer-bytes {}\nperiods {}\nstarted {}\nperiods-played {}\nsilence-periods {}\ntx-errors {}\nbad-used {}\nlatency-bytes {}\n",
+            "device virtio-snd stream 0 playback\nformat s16c2r{}\nvoices {}\nbufsize {}\nbuffered {}\nperiod-bytes {}\nbuffer-bytes {}\nperiods {}\nstarted {}\nperiods-played {}\nsilence-periods {}\ntx-errors {}\nbad-used {}\nlatency-bytes {}\ncapture {}\ncapturing {}\nperiods-captured {}\nrx-errors {}\n",
             RATE_HZ,
             self.voices.len(),
             PERIOD_BYTES,
@@ -648,6 +714,10 @@ impl Graph {
             s.tx_errors,
             s.bad_used,
             s.last_latency_bytes,
+            u8::from(self.capture_available),
+            u8::from(self.source_open),
+            s.periods_captured,
+            s.rx_errors,
         );
         out.extend_from_slice(text.as_bytes());
     }
@@ -784,6 +854,12 @@ pub struct Conn {
     tap_fid: Option<u32>,
     /// A parked Tread on the tap awaiting a mixed period (or a fail-closed EPERM).
     pending_tap_read: Option<PendingTapRead>,
+    /// N-3c-2: the fid holding the single-reader device-capture `source` (control
+    /// post only), or None. Cleared on that fid's clunk/teardown, which releases the
+    /// graph's source guard (STOPPING the on-demand capture) + drops the mirror.
+    source_fid: Option<u32>,
+    /// A parked Tread on `source` awaiting a captured period (or a fail-closed EPERM).
+    pending_source_read: Option<PendingTapRead>,
 }
 
 pub fn post_srv_nocturne() -> Result<i64, ()> {
@@ -825,6 +901,8 @@ impl Conn {
             pending: Vec::new(),
             tap_fid: None,
             pending_tap_read: None,
+            source_fid: None,
+            pending_source_read: None,
         }
     }
 
@@ -838,14 +916,21 @@ impl Conn {
         }
         self.pending.clear();
         self.pending_tap_read = None;
+        self.pending_source_read = None;
         // Every voice this connection minted dies with it; and if this conn held
-        // the single-reader sink tap (N-3c-1), release it so a vanished reader
-        // never wedges the guard. One lock spans both.
+        // the single-reader sink tap (N-3c-1) or device-capture source (N-3c-2),
+        // release it so a vanished reader never wedges the guard -- releasing the
+        // source also clears source_open, so the cycle STOPS the RX stream. One
+        // lock spans all.
         let held_tap = self.tap_fid.take().is_some();
+        let held_source = self.source_fid.take().is_some();
         let mut g = sh.graph.lock();
         g.drop_conn_voices(self.handle);
         if held_tap {
             g.tap_release();
+        }
+        if held_source {
+            g.source_release();
         }
     }
 
@@ -854,7 +939,9 @@ impl Conn {
     /// control loop shortens its poll timeout while any conn does, so a parked
     /// op completes within about a period of the cycle producing.
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty() || self.pending_tap_read.is_some()
+        !self.pending.is_empty()
+            || self.pending_tap_read.is_some()
+            || self.pending_source_read.is_some()
     }
 
     /// Retry the parked writes in order; a fully-accepted one gets its Rwrite.
@@ -920,6 +1007,39 @@ impl Conn {
                 let bytes = sh.graph.lock().tap_take(ptr.count as usize);
                 if bytes.is_empty() {
                     self.pending_tap_read = Some(ptr); // still empty -- keep parked
+                } else {
+                    self.out_buf.clear();
+                    self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+                    match p9::build_rread(&mut self.out_buf, ptr.tag, &bytes) {
+                        Ok(len) => {
+                            if !self.send_all(len) {
+                                return false;
+                            }
+                        }
+                        Err(()) => return false,
+                    }
+                }
+            }
+        }
+        // N-3c-2: retry a parked device-capture `source` read (the RX twin of the
+        // tap retry above). The cycle's pump_rx fills the mirror at capture-period
+        // rate; re-check authority FRESH so a mid-recording revocation fails closed.
+        if let Some(ptr) = self.pending_source_read.take() {
+            if !self.sink_authorized() {
+                self.out_buf.clear();
+                self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+                match p9::build_rlerror(&mut self.out_buf, ptr.tag, p9::E_PERM) {
+                    Ok(len) => {
+                        if !self.send_all(len) {
+                            return false;
+                        }
+                    }
+                    Err(()) => return false,
+                }
+            } else {
+                let bytes = sh.graph.lock().source_take(ptr.count as usize);
+                if bytes.is_empty() {
+                    self.pending_source_read = Some(ptr); // still empty -- keep parked
                 } else {
                     self.out_buf.clear();
                     self.out_buf.resize(SRV_MSIZE_USIZE, 0);
@@ -1244,6 +1364,28 @@ impl Conn {
             }
             self.tap_fid = Some(f.fid);
         }
+        // N-3c-2: opening the device-capture `source` -- the RX twin of the tap.
+        // Authority FIRST (an unauthorized caller gets EPERM without learning
+        // whether a capture device even exists), THEN capture-availability (a clean
+        // ENODEV for an authorized caller on a box with no D_INPUT stream), THEN the
+        // single-reader claim. Opening it turns capture ON: source_open drives the
+        // cycle to START the RX stream, so poke the (possibly parked) cycle.
+        if f.path == P_SOURCE {
+            if !self.control || !self.sink_authorized() {
+                return self.err(tag, p9::E_PERM);
+            }
+            {
+                let mut g = sh.graph.lock();
+                if !g.capture_available {
+                    return self.err(tag, p9::E_NODEV);
+                }
+                if !g.source_try_open() {
+                    return self.err(tag, p9::E_BUSY);
+                }
+            }
+            self.source_fid = Some(f.fid);
+            sh.poke_cycle();
+        }
         self.fids[i] = Some(Fid {
             fid: f.fid,
             path: f.path,
@@ -1327,6 +1469,33 @@ impl Conn {
             if bytes.is_empty() {
                 // Park: poll_writes replies once the cycle fills the mirror.
                 self.pending_tap_read = Some(PendingTapRead { tag, count: want as u32 });
+                self.defer = true;
+                return Ok(0); // ignored: dispatch returns Disp::Deferred
+            }
+            return p9::build_rread(&mut self.out_buf, tag, &bytes);
+        }
+        // N-3c-2: the device-capture `source` -- the RX twin of the tap read. Same
+        // guards verbatim: control post only (a mount peer is SYSTEM, which
+        // sink_authorized would admit), gated FRESH per read (fail-closed on a
+        // mid-recording authority loss), want==0 => an immediate empty reply (never
+        // park a want=0, which would wedge the single-reader slot), at most one
+        // outstanding read (a pipelined second would clobber/reorder), and park on
+        // an empty mirror (the cycle's pump_rx fills it at capture-period rate).
+        if f.path == P_SOURCE {
+            if !self.control || !self.sink_authorized() {
+                return self.err(tag, p9::E_PERM);
+            }
+            let cap = (self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4);
+            let want = (a.count as usize).min(cap);
+            if want == 0 {
+                return p9::build_rread(&mut self.out_buf, tag, &[]);
+            }
+            if self.pending_source_read.is_some() {
+                return self.err(tag, p9::E_BUSY);
+            }
+            let bytes = sh.graph.lock().source_take(want);
+            if bytes.is_empty() {
+                self.pending_source_read = Some(PendingTapRead { tag, count: want as u32 });
                 self.defer = true;
                 return Ok(0); // ignored: dispatch returns Disp::Deferred
             }
@@ -1650,6 +1819,13 @@ impl Conn {
                     self.pending_tap_read = None;
                     sh.graph.lock().tap_release();
                 }
+                // N-3c-2: clunking the source fid releases the single-reader guard +
+                // the mirror AND clears source_open, so the cycle STOPS the RX stream.
+                if self.source_fid == Some(a.fid) {
+                    self.source_fid = None;
+                    self.pending_source_read = None;
+                    sh.graph.lock().source_release();
+                }
                 p9::build_rclunk(&mut self.out_buf, tag)
             }
             None => self.err(tag, p9::E_BADF),
@@ -1668,6 +1844,10 @@ impl Conn {
         // flushed request just gets the Rflush; the tap fid stays open).
         if self.pending_tap_read.as_ref().is_some_and(|p| p.tag == a.oldtag) {
             self.pending_tap_read = None;
+        }
+        // N-3c-2: same for a parked device-capture `source` read.
+        if self.pending_source_read.as_ref().is_some_and(|p| p.tag == a.oldtag) {
+            self.pending_source_read = None;
         }
         p9::build_rflush(&mut self.out_buf, tag)
     }

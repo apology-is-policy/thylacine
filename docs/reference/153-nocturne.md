@@ -6,7 +6,8 @@
 + N-2c (the cycle/control thread split) + N-3a-1..3 (the whole-sink clearance,
 the sink volume file, the two-post per-connection authority + the console-owner
 axis) AS-BUILT (2026-09-07) + N-3c-1 (the gated sink tap -- capture authority)
-AS-BUILT (2026-09-07).
+AS-BUILT (2026-09-07) + N-3c-2 (device capture: the D_INPUT RX stream + the gated
+`source`) AS-BUILT (2026-09-07).
 The design is `docs/NOCTURNE.md`; this chapter is what exists in the tree.
 **N-1**: one warden-bound daemon owning the `virtio-sound` function, one
 playback stream, one 9P tree, one boot probe, one host witness. **N-2a-1**: the
@@ -68,13 +69,17 @@ region); the four capability regions come from `region(Common|Notify|Isr|Device)
 with their lengths checked before any register access (`CCFG_MIN_LEN` 0x38,
 `SND_CFG_MIN_LEN` 12). The handshake is the VIRTIO 1.2 modern sequence
 (ACKNOWLEDGE → DRIVER → features → FEATURES_OK → queues → DRIVER_OK) accepting
-only `VIRTIO_F_VERSION_1`. Two virtqueues are configured — `controlq` (0) and
-`txq` (2), 64 entries each; `eventq` and `rxq` stay disabled (QEMU's device
-implements no eventq; capture is N-3). INTx only (both MSI-X vectors parked at
-`NO_VECTOR`); the ISR byte is read-to-clear on every reap.
+only `VIRTIO_F_VERSION_1`. `controlq` (0) and `txq` (2) are always configured, 64
+entries each; `rxq` (3) is configured too **iff** the device advertises >= 2
+streams and stream 1 is a capture stream (N-3c-2, below); `eventq` stays disabled
+(QEMU's device implements no eventq). INTx only (both MSI-X vectors parked at
+`NO_VECTOR`), one line shared across control/tx/rx; the ISR byte is read-to-clear
+on every reap.
 
-**The DMA pool** (`DMA_POOL_SIZE` = 8 pages + 4 × 2048 B = 40 KiB, allocated
-via `libdriver::alloc_dma` and touched page-by-page before the device sees it):
+**The DMA pool** (`DMA_POOL_SIZE` = 14 pages + 4 × 2048 B = 64 KiB, allocated via
+`libdriver::alloc_dma` and touched page-by-page before the device sees it; the
+capture region is present whether or not the device offers a capture stream -- a
+fixed layout is simpler and 64 KiB sits well inside the 256 KiB DMA grant):
 
 | Page | Holds |
 |---|---|
@@ -82,10 +87,14 @@ via `libdriver::alloc_dma` and touched page-by-page before the device sees it):
 | 3–5 | txq desc / avail / used |
 | 6 | control request (+0) and response (+2048) |
 | 7 | per-slot TX metadata: xfer header at `s*64`, status at `s*64+32` |
-| 8… | per-slot TX payload, `PERIOD_BYTES` each |
+| 8–9 | per-slot TX payload, `PERIOD_BYTES` each |
+| 10–12 | rxq desc / avail / used (N-3c-2) |
+| 13 | per-slot RX metadata: xfer header at `s*64`, status at `s*64+32` |
+| 14… | per-slot RX payload the DEVICE fills, `PERIOD_BYTES` each |
 
 Build-time `const _: () = assert!(...)` pins the layout (a 64-entry ring's
-desc/avail/used each fit a page; `3 * PERIODS <= 64`; `PERIOD_BYTES % 4 == 0`).
+desc/avail/used each fit a page; `3 * PERIODS <= 64`; `PERIOD_BYTES % 4 == 0`;
+`DMA_POOL_SIZE <= 256 KiB`).
 
 **Stream negotiation** (`negotiate_stream`): `PCM_INFO` for stream 0 (the
 response must say OUTPUT, offer `S16` and `48000`, and admit 2 channels — the
@@ -115,6 +124,26 @@ flushed completions are reaped **without** re-posting, every in-flight bit is
 cleared, and `PCM_PREPARE` re-arms the stream for the next `start`. An idle
 machine therefore pays no periodic interrupt.
 
+**Capture (RX; N-3c-2).** `open()` tries `negotiate_capture` iff the device
+advertises `streams >= 2`: `PCM_INFO` for stream 1 must report `D_INPUT`, offer
+`S16`+`48000`, and admit 2 channels, then `SET_PARAMS`+`PREPARE` on stream 1. Any
+failure (no second stream, wrong direction/format, or a bad rxq doorbell offset)
+is NON-FATAL -- `has_capture` stays false and the daemon runs playback-only, so
+the `streams=1` default boot is unaffected (the N-1 non-regression bar). Capture
+is **on-demand**: the server sets `Graph.source_open` when an authorized reader
+opens `source` and the cycle thread (which alone owns the device) calls
+`start_capture` (prime `PERIODS` RX buffers + `PCM_START` stream 1) / `stop_capture`
+(STOP+RELEASE+re-PREPARE) as that flag flips. `pump_rx` reaps the rxq exactly like
+`pump` reaps the txq -- the used `id` is device-controlled and validated
+(`id % 3 == 0`, `id / 3 < PERIODS`, in-flight bit set; else `bad_used`, dropped) --
+and hands each period's bytes to a sink callback. The RX chain is the TX chain with
+one flip: the payload descriptor is `F_WRITE` (capture is device -> guest). The
+one NEW adversarial field is the used-ring **`len`** (the device's claimed captured
+byte count): it is clamped `len.min(PERIOD_BYTES)` before the copy, so an over-long
+claim can never read past the `PERIOD_BYTES` payload buffer (the RX analog of the
+TX `latency_bytes` clamp). A non-`S_OK` status increments `rx_errors`;
+`periods_captured` counts delivered periods.
+
 ## The server half (`server.rs`)
 
 Framing + dispatch mirror `usr/ptyfs` (one `t_read` per readable event, every
@@ -126,12 +155,13 @@ graph:
 
 | Path | qid | Mode | Read | Write |
 |---|---|---|---|---|
-| `/` | 0 | `0555` dir | mount lists `ctl info volume audio nodes`; `-ctl` lists `volume tap` | — |
+| `/` | 0 | `0555` dir | mount lists `ctl info volume audio nodes`; `-ctl` lists `volume tap source` | — |
 | `audio` | 3 | `0666` | `EPERM` (N-3c-1: recording is the gated `-ctl/tap`, never the shared mount) | S16 stereo 48 kHz into **voice 0** |
-| `info` | 2 | `0444` | device words + counters + `voices N` | `EPERM` |
+| `info` | 2 | `0444` | device words + counters + `voices N` + `capture`/`capturing`/`periods-captured`/`rx-errors` (N-3c-2) | `EPERM` |
 | `ctl` | 1 | `0644` | one description line | `flush` (drops voice 0); else `EINVAL` |
 | `volume` | 6 | `0444` in the mount / `0666` on `-ctl` | `audio <l> <r>` + `mix <l> <r>` (Plan 9 `volume(3)`) | READ-ONLY in the mounted playback tree; writable only on `/srv/nocturne-ctl`, gated (N-3a-3) |
 | `tap` | 7 | `0444` (`-ctl` only) | the mixed sink output (s16 stereo @ graph rate), gated `sink_authorized` fresh per-read + single-reader (EBUSY on a 2nd open); parks while the sink is idle (N-3c-1) | — (read-only) |
+| `source` | 8 | `0444` (`-ctl` only) | the device capture (mic / line-in D_INPUT, s16 stereo @ graph rate), gated `sink_authorized` fresh per-read + single-reader (EBUSY); `ENODEV` if the device has no capture stream; ON-DEMAND (open STARTs the RX stream, close STOPs it); parks while the mirror is empty (N-3c-2) | — (read-only) |
 | `nodes/` | 4 | `0555` dir | `Treaddir` lists `new` + each live voice id | — |
 | `nodes/new` | 5 | `0666` | the id of the voice this open minted | (open is the mint) |
 | `nodes/<id>/audio` | vpath | `0666` | 0 bytes | S16 stereo 48 kHz into voice `<id>` |
@@ -270,9 +300,38 @@ ONLY on `-ctl`, never the mount. Three properties make it safe:
 The witness (`/nocturne-tap-probe`, `tools/test-nocturne-tap.sh`, boot arg
 `thylacine.tapprobe`) proves it: SYSTEM opens the tap and CAPTURES a played tone
 (the positive arm), a second concurrent open is `EBUSY`, a mount `audio` read is
-REFUSED, and a user-principal child is DENIED the tap. Device capture
-(`sources/`) is deferred to N-3c-2 (the virtio-snd driver negotiates only a
-`D_OUTPUT` stream, so mic capture needs a new RX path + a non-wav witness).
+REFUSED, and a user-principal child is DENIED the tap.
+
+**Device capture -- the `source` (N-3c-2).** The `source` node on `/srv/nocturne-ctl`
+is the RX twin of the tap: a read returns the device's mic / line-in D_INPUT stream
+(s16 stereo @ graph rate). Reading it is recording, so it runs the **identical**
+`sink_authorized` gate (same four axes, fresh per read, fail-closed, `!self.control`
+so it never rides the mount) and the identical single-reader + bounded-drop-oldest +
+parked-read machinery -- sourced from the driver's `pump_rx` instead of the mixer's
+`next_period`. Two properties are stronger than the tap's because the source is a
+hardware stream, not a software mirror:
+
+- **On-demand.** `source_open` (set at open, cleared at clunk/teardown) drives the
+  cycle thread to `start_capture` / `stop_capture` the RX stream, so the capture
+  device is NOT live unless an authorized reader holds `source` -- defense in depth
+  beyond the gate. The cycle owns the device; the server pokes it on open so a
+  parked cycle starts capture promptly.
+- **Absent when unavailable.** `capture_available` (seeded at driver open, tracked
+  each cycle so a mid-run capture wedge is reflected) gates the open: a box with no
+  D_INPUT stream (the `streams=1` default) returns `ENODEV`, distinct from the
+  unauthorized `EPERM`. Authority is checked BEFORE availability, so an
+  unauthorized caller cannot even learn whether a capture device exists.
+
+Unlike the tap, `source` does not appear on the mount at all (the mount lists
+`ctl info volume audio nodes`; `source` is `-ctl`-only). The witness
+(`/nocturne-capture-probe`, `tools/test-nocturne-capture.sh`, boot arg
+`thylacine.captureprobe` which forces `streams=2`) proves it DETERMINISTICALLY
+under `audiodev=none`: with `source` held, the driver's `periods-captured` in
+`info` CLIMBS (the discriminating COUNT -- content is silence under the null
+backend, so it asserts the count, never non-silence, which a broken RX path would
+also satisfy), a second concurrent open is `EBUSY`, `/dev/nocturne/source` does not
+exist, and a user-principal child is DENIED. Real captured-audio fidelity (a host
+loopback backend) is a deferred thyla-pi follow-up.
 
 ## The zero-copy ring (N-2b-1)
 
@@ -525,6 +584,10 @@ single boot's wall time.
 | `data` leaf | `Tread` / `Twrite` (it is a map fid) | `EINVAL` / `EPERM` |
 | device | bogus used id | dropped, `bad-used`++ (never re-posted) |
 | device | status ≠ `S_OK` | `tx-errors`++ (the slot is still re-posted) |
+| `source` open | not authorized / 2nd concurrent reader / no capture device | `EPERM` / `EBUSY` / `ENODEV` (N-3c-2; authority checked before availability) |
+| `source` read | authority lost mid-recording | `EPERM` (fresh per-read gate, fail-closed) |
+| device (rx) | bogus used id / over-long captured `len` | dropped, `bad-used`++ / `len` clamped to `PERIOD_BYTES` before copy |
+| device (rx) | status ≠ `S_OK` | `rx-errors`++ (the slot is still re-posted) |
 
 ## Known caveats / seams
 
@@ -534,9 +597,23 @@ single boot's wall time.
   `nodes/new` voice sum cleanly, whether a voice feeds bytes (the FIFO) or the
   zero-copy ring (N-2b-2a). What is NOT built: the back-pressure wake POKE
   (N-2b-2b -- a producer on a stopped stream waits up to `IDLE_POLL_MS`),
-  ports/links, ears/`source` (capture; N-3), descants + the cadence lease (N-4),
-  and per-format/rate conversion at voice entry (D-3; N-2a-1 accepts only S16
-  stereo 48 kHz -- a voice at another shape is a future entry-conversion seam).
+  ports/links, the `ear` node kind (tapping ANOTHER program's voice; N-4 --
+  DEVICE capture via `source` IS built at N-3c-2), descants + the cadence lease
+  (N-4), and per-format/rate conversion at voice entry (D-3; N-2a-1 accepts only
+  S16 stereo 48 kHz -- a voice at another shape is a future entry-conversion seam).
+- **Capture (N-3c-2) is witnessed for the AUTHORITY + the RX path, not for audio
+  CONTENT fidelity.** The CI witness runs under `audiodev=none`, which clocks the
+  capture stream with silence -- enough to prove the RX path delivers periods (the
+  `periods-captured` COUNT) and the gate holds, but NOT that captured audio is
+  faithful. A real-content witness (a thyla-pi PipeWire null-sink fed a known tone,
+  captured back and energy-verified) is a deferred follow-up; it is real-silicon +
+  non-deterministic, so it is not in CI.
+- **A parked `source` read on a live-but-silent capture keeps `has_pending()` true**
+  (the F2-analog of the tap's idle busy-poll): while a reader holds `source` the RX
+  stream runs and the mirror fills every period, so this is normally a non-issue; but
+  if the device stops delivering while the reader waits, the control loop polls at
+  `PARKED_RETRY_MS` (10 ms) until data arrives or the reader clunks. Bounded, self-
+  inflicted, no correctness/security impact; a v1.x fix is a delivery-gated timeout.
 - Voices minted through the shared `/dev/nocturne` mount persist for the mount's
   life; per-exit lifetime needs a direct `/srv/nocturne` connection -- what the
   SDL backend does (N-2a-2, reference 142).

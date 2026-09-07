@@ -128,8 +128,10 @@ impl Driver for Nocturned {
         );
 
         // The graph both threads share, leaked to 'static so each thread holds a
-        // stable reference for the life of the Proc (D-1c).
-        let sh: &'static Shared = Box::leak(Box::new(Shared::new()));
+        // stable reference for the life of the Proc (D-1c). Seed capture-availability
+        // (fixed at driver open) so the control thread's `source` open can answer
+        // immediately, no first-cycle race (N-3c-2).
+        let sh: &'static Shared = Box::leak(Box::new(Shared::new(self.snd.has_capture())));
 
         // Spawn the CYCLE thread: it owns the device and runs the audio clock
         // (the IRQ-driven pump + float32 mix), and never touches 9P. This
@@ -221,9 +223,26 @@ fn cycle_run(snd: &mut VirtioSnd, sh: &'static Shared) -> ! {
                     }
                     idle_periods = 0;
                 }
+                // Capture (N-3c-2): the RX twin of playback, ON-DEMAND and
+                // independent of the TX stream. `source_open` (set when an
+                // authorized reader opens `source`) drives START/STOP; while
+                // capturing, pump the rxq into the source mirror the reader drains.
+                if snd.has_capture() {
+                    if g.source_open() && !snd.capturing() {
+                        snd.start_capture();
+                    } else if !g.source_open() && snd.capturing() {
+                        snd.stop_capture();
+                    }
+                    if snd.capturing() {
+                        snd.pump_rx(|cap| g.source_push(cap));
+                    }
+                }
                 // Publish device state for the control thread's `info` reader.
                 g.stats = snd.stats;
                 g.started = snd.started();
+                // Track a mid-run capture wedge so a post-wedge `source` open gets
+                // ENODEV instead of accepting-then-never-delivering (N-3c-2).
+                g.capture_available = snd.has_capture();
             }
             None => {
                 // Graph edit in progress. Keep the device fed by REPLAYING the
@@ -240,9 +259,10 @@ fn cycle_run(snd: &mut VirtioSnd, sh: &'static Shared) -> ! {
         }
 
         // Wait for the next wake.
-        if snd.started() {
-            // Running: the device period IRQ, with a bounded backstop against a
-            // device that stops interrupting (the pump reaps opportunistically).
+        if snd.started() || snd.capturing() {
+            // Running (playback OR capture): the device period IRQ, with a bounded
+            // backstop against a device that stops interrupting (the pumps reap
+            // opportunistically). One INTx line serves both the txq and rxq.
             let mut pfd = [TPollFd {
                 fd: irq_fd,
                 events: T_POLLIN,
