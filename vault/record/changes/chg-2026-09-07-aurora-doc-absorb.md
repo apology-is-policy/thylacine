@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/140-aurora (the fbcon + /dev/cons drain/feed, G-4): clean redirect + sharpen the cfg-3 F1 attribution in sub-aurora"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["660c90c4"]
 touched: [sub-aurora]
 established: []
 closed: []
