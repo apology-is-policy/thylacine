@@ -4,7 +4,7 @@ type: chg
 title: "absorb docs/reference/113-nora (the native modal editor): fold the I-39-authorized kstack read into sub-nora-host"
 date: 2026-09-07
 arc: arc-vault
-commits: ["PENDING"]
+commits: ["7783e09b"]
 touched: [sub-nora-host]
 established: []
 closed: []
