@@ -1314,6 +1314,15 @@ impl Conn {
             if want == 0 {
                 return p9::build_rread(&mut self.out_buf, tag, &[]);
             }
+            // F1 (round-7): at most ONE outstanding tap read per connection.
+            // `pending_tap_read` is a single slot, so a second concurrent read (a
+            // pipelined distinct tag) would either CLOBBER the parked one (a lost
+            // reply) or -- if the cycle filled the mirror between poll passes --
+            // drain it AHEAD of the parked first read (a reordered stream). The
+            // tap is single-reader realtime: one read at a time, refuse the rest.
+            if self.pending_tap_read.is_some() {
+                return self.err(tag, p9::E_BUSY);
+            }
             let bytes = sh.graph.lock().tap_take(want);
             if bytes.is_empty() {
                 // Park: poll_writes replies once the cycle fills the mirror.

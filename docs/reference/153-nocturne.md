@@ -629,3 +629,12 @@ single boot's wall time.
   recording spanning a long gap loses that gap's timing (short gaps under the
   idle-stop are captured as silence). Multi-reader broadcast, a larger buffer, and
   stream-kept-running-while-tapped are v1.x refinements.
+- **N-3c-1 round-7 F2 [P3, idle cost, accepted]:** a tap read parked on a
+  STOPPED (fully idle) sink keeps `has_pending()` true, so the control loop polls
+  at `PARKED_RETRY_MS` (10 ms = ~100 Hz) until playback resumes -- vs the 10 Hz
+  idle interval. Bounded and self-inflicted by an authorized reader blocking on a
+  silent sink (the same class as the tracked always-armed-listener spin), no
+  correctness/security impact. The v1.x fix is a stream-started-gated timeout (a
+  stopped stream produces nothing to serve, and `poke_cycle` already re-wakes the
+  cycle on resume) or a precise cross-thread control-thread wake; deferred as a
+  proportionate P3.

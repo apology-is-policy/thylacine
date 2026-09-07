@@ -22,6 +22,124 @@ needed the operator.
 
 
 ---
+## 2026-09-07 (aux) -- Nocturne N-3c-1: the gated sink tap (capture is a distinct authority)
+
+Fresh context off a self-compaction; the N-3a arc was closed + pushed. The next
+scripture item was N-3c (capture): ears, `sources/`, and the sink tap. Because
+capture is an EAVESDROPPING surface, the EFFORT GATE fired first --
+`effort-report.sh` confirmed `max (this session)`, no escalation.
+
+**Research before the fork, and it split the chunk cleanly.** Plan 9's
+`/dev/audio` loopback is UNGATED (anyone who can open it records); the modern
+SOTA (PipeWire's per-sink monitor source, CoreAudio's TCC-gated system-audio
+capture, Fuchsia's `AudioCapturer`, Android's `RECORD_AUDIO` + opt-in
+`AudioPlaybackCapture`) uniformly makes capture a distinct, mediated authority
+from playback. Thylacine's fit is cleaner than the portal indirection: the
+N-3a-3 `/srv/nocturne-ctl` post reads the real 9P peer, so "who may record the
+system" collapses to the SAME two-axis gate as the volume. Two as-built facts
+then decided scope: (1) the mixer already produces a mixed S16 period
+(`server.rs` `next_period`), so a sink tap is a cheap software copy -- buildable
+now; (2) the virtio-snd driver REFUSES anything but `D_OUTPUT` (`snd.rs:493`),
+so DEVICE mic capture needs a whole new RX-stream path + a non-wav witness. So
+the eavesdropping-critical half (the sink tap) is pure software and testable
+now; device `sources/` is hardware-blocked.
+
+**A scripture tension the research surfaced.** NOCTURNE.md 6.4 said a mount
+`/dev/nocturne/audio` READ is "an ear on the sink tap"; 6.8 said the tap is
+clearance-gated. In tension precisely because of the N-3a-3 transport-identity
+lesson: a shared mount cannot gate (its peer is always the mounter=SYSTEM). And
+measured, the mount audio read returns EMPTY today (`server.rs:1150`, the
+audio(3) output-only convention) -- it was never actually a tap. So the
+reconciliation was small.
+
+**Surfaced as a blocking `AskUserQuestion` (scripture-altering + security-critical
+-> the operator's vote); all three recommendations taken:** (1) tap shape = a
+`tap` FILE on `/srv/nocturne-ctl` (mount audio read refused); the full `ear` node
+kind was rejected as larger + overlapping the N-4 descant-ring machinery. (2)
+device `sources/` DEFERRED to N-3c-2 (the deferral-needs-signoff case -- surfaced,
+not dropped). (3) N-3c before N-3b. Scripture landed first (`09a1ba81`), then the
+impl (`dc179f1c`), then the audit -- the design-conversation pattern.
+
+**The implementation, and the one guard that is load-bearing.** The tap: a `tap`
+file on `ROOT_CHILDREN_CTL` only; `Graph.tap_mirror` a bounded drop-oldest ring
+(8 periods) filled in `next_period` ONLY while a reader holds it; `sink_authorized`
+(renamed from `volume_authorized` -- it now gates both the volume write and the
+tap read) checked at OPEN and FRESH per READ (fail-closed on a mid-recording
+revocation); single-reader (`tap_open`, EBUSY on a second open, released on
+clunk/teardown); an empty mirror PARKS the read and `poll_writes` serves or
+fail-closes it. The load-bearing point -- the same shape as N-3a-3's F1:
+`sink_authorized` returns TRUE for a SYSTEM peer, and a MOUNT connection's peer
+IS SYSTEM, so it is the `!self.control` guard, NOT the predicate, that keeps the
+tap off the shared mount. Both the open and the read assert `!self.control`; the
+tap file is additionally absent from the mount's `ROOT_CHILDREN` table. The mount
+`audio` READ becomes an explicit `EPERM` (was empty/EOF) so the recording
+boundary is discoverable.
+
+**A self-audit catch before the formal round.** The empty-mirror park had a
+zero-count edge: a `Tread` with count 0 computes `want=0`, so it would PARK -- and
+a `want=0` park is never satisfiable, wedging the single-reader slot forever.
+Fixed pre-audit: `want==0` returns an immediate zero-count Rread.
+
+**Witness.** NEW `/nocturne-tap-probe` (gated boot arg `thylacine.tapprobe`):
+SYSTEM opens the tap, proves a second concurrent open is `EBUSY`, plays a tone
+and CAPTURES it (the positive arm -- a gate that refused every read would pass the
+denials alone), and asserts a mount `audio` read is refused; a user-principal deny
+child is refused the tap AND the mount read.
+
+**Audit (round 7, Opus fallback -- Fable out of credits arc-wide; context
+independence exploited): 0 P0 / 0 P1 / 1 P2 / 1 P3.** The agent re-derived the two
+headline threats -- eavesdropping bypass and guard-leak DoS -- as CORRECTLY
+CLOSED (no bypass to a mirror byte; the guard released on every conn-death path).
+- **F1 [P2, borders P1] -- FIXED.** The agent found what my self-audit missed:
+  `pending_tap_read` was a single `Option`, whereas parked WRITES use an ordered
+  `Vec`. A pipelined second tap `Tread` (a distinct tag -- 9P's own concurrency
+  mechanism) OVERWRITES the parked first -> its tag never gets a reply (lost), and
+  via a cycle-fill race between poll passes the second could even drain the mirror
+  AHEAD of the first (a reordered stream). Fix: refuse a second concurrent tap
+  read with `E_BUSY` -- one outstanding read at a time on the single-reader tap
+  (preserves exactly-once AND stream order; a sequential reader never trips it).
+- **F2 [P3] -- DOCUMENTED.** A tap read parked on a STOPPED sink keeps
+  `has_pending()` true, so the control loop polls at 10 ms (100 Hz) until playback
+  resumes -- a new idle-path spin (parked WRITES only occur while playing).
+  Bounded, self-inflicted by an authorized reader on a silent sink, no
+  correctness/security impact; accepted + reference-153 caveated, v1.x fix = a
+  stream-started-gated timeout. (I found this one independently too.)
+
+**The wrong turn, caught.** My own self-audit had flagged a THIRD finding --
+tap-mirror frame-alignment: a non-frame-aligned tap read moves the mirror head
+mid-frame, so a drop-oldest under stall could split a frame -> a permanent L/R
+channel swap -- and I had drafted a fix (frame-floor `tap_take` + `EINVAL` on
+`want < FRAME`). Re-analysis WITHDREW it: a frame-aligned reader (`cat`, any sane
+recorder -- buffers are divisible by 4) NEVER misaligns even under stall; only a
+client reading odd counts gets odd-framed bytes, which is correct byte-stream
+behavior (framing is the client's job), affects only its own recording, and is
+not a system soundness issue. The agent (independent, context-independent) also
+did not flag it. Catching it kept an unneeded `EINVAL` edge out of the ABI. A
+second self-found item (the `build_rlopen`-orphan guard leak) was likewise
+withdrawn as unreachable + self-cleaning -- the agent confirmed it.
+
+**Not a dirty close** (0 P0, P1+P2=1<6, the F1 fix is a 3-line guard, not
+invasive) -> no re-audit round owed. `MODEL(start)==MODEL(end)` (Opus 4.8, no
+mid-run switch) -> no post-fallback re-spawn owed. A Fable-diversity pass remains
+owed for the whole N-2c/N-3a/N-3c arc when credits return.
+
+**Verify (final build):** `test-nocturne-tap.sh` GREEN (SYSTEM tap capture +
+single-reader EBUSY + mount read/user tap deny); default boot `nocturne-probe OK`
+(playback intact) + 1512/1512 kernel tests + `Thylacine boot OK`. No kernel delta
+(the tap is entirely userspace) -> SMP gate not owed (consistent with the arc).
+
+**Observed (inherited, not fixed):** `snd.rs:97` `0 * PAGE` trips clippy 1.97's
+`erasing_op` deny -- pre-existing N-1 code the `cargo build` gate tolerates (no
+gate runs `cargo clippy`); a trivial future clippy-clean pass on the driver, left
+untouched here to keep a tap chunk out of a driver audit surface.
+
+**Open / deferred:** device `sources/` (mic) = N-3c-2 (driver RX stream + non-wav
+witness); N-3b (node gain->dB) is the next N-3 sub-item; the tap is single-reader
++ realtime drop-oldest + idle-parking by design (multi-reader broadcast / larger
+buffer / stream-kept-running-while-tapped are v1.x); the N-3a-3 round-6 F1 (shared
+MAX_CONNS pool) + F3 (two-Proc console-owner test) stay tracked v1.x.
+
+---
 ## 2026-09-07 (aux) -- Nocturne N-3a-3: the F1 root fix (the shared mount cannot carry per-writer identity)
 
 The pickup was a dirty close. The round-5 audit of N-3a (the sink-volume gate,
