@@ -23,6 +23,80 @@ needed the operator.
 
 ---
 
+## Run 43 (main, 2026-09-07, Opus 4.8, effort MAX, operator present + granted full autonomy): three Halcyon chunks -- H-A fonts+type-model, H-D session chrome, F2 pts input-batching -- landed and pushed, with three wrong turns caught
+
+The operator picked A (fonts) at /effort max, clarified the face + weight rule
+(IBM Plex Sans; baseline body = the Text weight 450, headings = Regular 400),
+then: "proceed autonomously, self-compacting when needed, on the found issues;
+after fonts switch to chrome, I will test whenever I get to it." So A -> D -> F2
+landed autonomously; the GL visual/interactivity verification is the operator's
+round. Tip **ab413f1d**, both mirrors.
+
+**H-A (@ed45a164) -- the wrong turn that scripture caught.** The resume note's
+own design for the proportional flip was *stale*: it said thread
+`verbatim = kind==Foreign` to keep foreign output mono. Reading scripture
+instead of the stale code (feedback: "read scripture, not stale code") found
+**HALCYON 14.13** (operator-ratified 2026-09-06) had *retired* that KT-1.5
+mono-tail model: the transcript is mainly-proportional -- prompt, typed input,
+ordinary output, prose, tables all proportional; mono is exactly two cases, and
+both were already handled outside `face_for` (a `pre` block's pre-flag, and
+alt-screen's separate raw-grid `paint_grid` at tile.rs:818 -- confirmed NOT via
+layout_block, so nora/htop stay mono). So the correct Ab was one arm:
+`face_for`'s `!annotated` -> FACE_BODY, no `verbatim` threading; Ac (objects)
+subsumed. Had I followed the resume note I would have shipped foreign output
+mono against ratified scripture. Also swapped the 3 DejaVu faces (2 supersessions
+behind) for 4 Plex, and fixed a real type-scale violation the operator's own
+mockup CSS exposed: body_px 16 -> 11.5 (.hal-prose), heading px_for -> §8.1
+absolute 17.5/14.5/12.5 (the multipliers had hdr3 at ~body size). Ground truth,
+not theory: fontdue reads only the legacy `kern` table and Plex ships kerning in
+GPOS only, so kern()==0 -- the DejaVu-AV kern test became a truthful guard.
+
+**The mark-view test -- caught by re-running my own "fix".** After body 11.5,
+`a_mark_drags_the_view` failed (y=249 h=45 > viewh). My first fix (assert the
+whole block height `newest.2` instead of `ch`) STILL failed on re-run -- good
+thing I re-ran instead of trusting the reasoning. Instrumented it
+(ch=22 viewh=264 su=51, `laid_line_for(0,MAX)=(0,15)`): the render was CORRECT
+(it bottom-anchors the marked *row*, 249+15=264=viewh); `ch`(=22, the mono cell)
+was a stale row-height proxy that a proportional 15px row invalidates. Fixed to
+the marked row's actual `laid_line_for` span. halcyond host 129/129; guest
+builds; image boot-verified (test.sh: `Thylacine boot OK`, boot-ms 23354 -- the
+default boots the aurora console, so this proves image-boots+no-crash, not the
+session render, which is the operator's GL round).
+
+**H-D (@08c786d7).** The session compositor (`halcyond --session`, the login
+path) rendered its tiles but wired NO chrome -- only the single-tile main.rs path
+drives ChromeSet+StatusBar. The machinery was already multi-leaf (reconcile mints
+a Role::Chrome per leaf); tapestryd already carves the tagbar rects and the
+session tags its leaves. So the fix was wiring: ChromeSet+StatusBar on
+`ring.clone()` (EventRing is Rc-shared), driven per-pass gated on up_announced,
+`own_surface = u32::MAX` (a sentinel matching no leaf, so reconcile skips the
+console self-naming), status model from the focused tile's `t.tile.scrollback`.
+
+**F2 (@ab413f1d) -- the P0 the s7 audit surfaced, and the external_mux catch.** A
+pts slave's data fd 0 is POLLIN-always under dev9p.poll, so kaua PollSource's
+drain re-polled fd 0, never saw "not readable", and blocked in read() on an empty
+ring every sweep -- DRAIN_MAX-deep keystroke batching + a parked mux. The fix
+mirrors what ut already does (poll the accurate `/dev/pts/<n>ready` sibling).
+Wrong turn caught mid-implementation: my first read-once branch was
+UNCONDITIONAL, which would have broken prowl -- prowl and quarry call
+`src.poll(timeout)` DIRECTLY (no mux), so read-once ignoring their Millis/Block
+timeout kills prowl's REFRESH tick. So two pts modes: nora (external_mux, has a
+mux polling poll_fd) reads once; prowl/quarry (no mux) run the drain loop, now
+watching the ready fd -- the SOLE poller, avoiding the one-shot-cache two-poller
+busy-loop that run 41 had nearly shipped. prowl/quarry needed NO code change.
+
+**Open / owed.** A Fable soundness audit on F2 is IN FLIGHT
+(holotype-reviewer a876ee42fe356502e, model:fable, the kaua wake surface) --
+findings handled on completion. Runtime-confirms are GL-gated = the operator's
+session round (A fonts + D chrome + F2 interactivity: a rapid two-key sequence
+must land both keys) or a thyla-pi s7-nora-probe boot. Still owed: the batched
+Fable PL round for A+D; B (block-spacing, coupled to A's GL feedback); the
+deferred polish in the commit bodies (Ad mono-cell compaction, orphaned
+third_party/dejavu-fonts removal, the D per-command exit-status feed, status.rs
+§7 mono, heading top-margins); the MEMORY.md index compaction (near its read
+limit). Vault rung 0072 (sub-halcyond fold). All three commits used
+No-dossier-change trailers (a code track does not co-stage vault prose).
+
 ## Run 37 cont'd #10 (vault, 2026-09-07, Opus 4.8, effort xhigh, operator away): the vault half of the s7 F3 deadlock, three F3 folds, a seam closed, and the operator-directed ports authoring
 
 Post-self-compact continuation. This is the vault side of what Run 41 (main)
