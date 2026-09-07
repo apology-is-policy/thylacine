@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 91
+## Open seams: 90
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -87,7 +87,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-larder-shrinker]] (sub-kernel-larder)
 - [[seam-larder-stale-child-attr]] (sub-kernel-larder)
 - [[seam-legate-member-sweep-race]] (sub-kernel-proc)
-- [[seam-login-halcyond-fallback]] (sub-stratum-session)
 - [[seam-loom-rearm-needs-blocking-enter]] (sub-kernel-loom)
 - [[seam-loom-sqpoll-p3s]] (sub-kernel-loom, sub-kernel-poll)
 - [[seam-mm-directmap-cap-absolute]] (sub-kernel-mm-phys)
