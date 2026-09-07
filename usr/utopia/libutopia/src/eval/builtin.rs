@@ -113,7 +113,7 @@ use super::value::Value;
 /// dispatch arms.
 pub const BUILTIN_NAMES: &[&str] = &[
     "cd", "pwd", "exit", "true", "false", "unset", "eval", "source", ".", "type",
-    "whence", "jobs", "fg", "bg", "wait", "kill",
+    "whence", "jobs", "fg", "bg", "wait", "kill", "abdicate",
 ];
 
 /// The built-in names, for the #115a completion command index.
@@ -163,6 +163,7 @@ pub fn try_builtin(env: &mut Env, argv: &[String]) -> Option<EvalResult<Statemen
         "bg" => bi_bg(env, args),
         "wait" => bi_wait(env, args),
         "kill" => bi_kill(env, args),
+        "abdicate" => bi_abdicate(env, args),
         _ => return None,
     };
     Some(r)
@@ -320,6 +321,37 @@ fn bi_exit(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     env.status_set(code);
     env.request_exit(code);
     Ok(StatementFlow::Normal)
+}
+
+// ---------------------------------------------------------------------
+// abdicate (IMPERIUM-DESIGN.md 6 + 11.6)
+// ---------------------------------------------------------------------
+
+/// `abdicate` -- lay down an imperium sub-shell early (the Roman *abdicatio*:
+/// a dictator could relinquish imperium before his term ran out). Exit iff this
+/// shell is a legate member -- the kernel's `/proc/<pid>/imperium` reports a
+/// nonzero scope -- and the shell's death tears down the propagated subtree
+/// (I-25), exactly as `exit` would. Not under a scope -> a plain error, so
+/// `abdicate` in an ordinary shell says why instead of silently exiting.
+///
+/// The membership test is the kernel's unforgeable flag, read through the SAME
+/// `read_own_imperium` the prompt uses -- there is no shell-side belief about
+/// "am I elevated" that could disagree with the kernel. Takes no arguments.
+fn bi_abdicate(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    if !args.is_empty() {
+        return fail(env, "abdicate: takes no arguments".to_string(), 1);
+    }
+    match crate::repl::read_own_imperium() {
+        // A legate member: relinquish. Exit 0 -- abdication is a clean,
+        // deliberate end, not a failure; the shell's death sweeps its scope.
+        Some(_) => {
+            env.emit_line("abdicate: relinquishing imperium\n");
+            env.status_set(0);
+            env.request_exit(0);
+            Ok(StatementFlow::Normal)
+        }
+        None => fail(env, "abdicate: not under an imperium scope".to_string(), 1),
+    }
 }
 
 // ---------------------------------------------------------------------

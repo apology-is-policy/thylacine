@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**419 owned · 77 unowned · 496 files (84% owned) · ~21203 unswept lines.**
+**419 owned · 79 unowned · 498 files (84% owned) · ~21895 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **73 files, ~32223 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **73 files, ~32240 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -77,7 +77,8 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32223 lin
 | usr/pouch-hello | 0 | 22 | 3384 |
 | kernel | 123 | 15 | 2181 |
 | usr/quarry | 0 | 1 | 1033 |
-| usr/lib | 57 | 3 | 474 |
+| usr/lib | 57 | 4 | 708 |
+| usr/imperium | 0 | 1 | 458 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/corvus | 1 | 1 | 245 |
@@ -127,6 +128,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32223 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/nocturned/src/snd.rs | 1086 |
 | usr/quarry/src/main.rs | 1033 |
+| usr/imperium/src/main.rs | 458 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 390 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 390 |
@@ -145,6 +147,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32223 lin
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/ports/dosbox-x/config.h | 254 |
 | usr/corvus/src/provincia.rs | 245 |
+| usr/lib/fasces/src/lib.rs | 234 |
 | usr/ports/sdl2/thylacine/SDL_thylacineaudio.c | 231 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c | 222 |

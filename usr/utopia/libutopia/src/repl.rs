@@ -82,6 +82,29 @@ fn fmt_exit(buf: &mut [u8; 24], v: i64) -> &str {
     core::str::from_utf8(&buf[i..]).unwrap_or("0")
 }
 
+/// IM-4: read + parse THIS Proc's `/proc/<pid>/imperium` (no `/proc/self`, so
+/// getpid + format the path). `None` on getpid failure, an unopenable/unreadable
+/// file, or a non-legate `scope 0` -- every "not elevated or cannot tell" case
+/// collapses to the plain prompt. Shared parse in `fasces::parse_imperium` so
+/// the prompt, the `abdicate` builtin, and the `imperium` tool cannot drift on
+/// the kernel's line format. `pub(crate)` so the `abdicate` builtin
+/// (eval/builtin.rs) shares the exact same read-and-parse.
+pub(crate) fn read_own_imperium() -> Option<fasces::Imperium> {
+    let pid = unsafe { libthyla_rs::t_getpid() };
+    if pid <= 0 {
+        return None;
+    }
+    let mut path = String::new();
+    {
+        use core::fmt::Write as _;
+        let _ = write!(&mut path, "/proc/{}/imperium", pid);
+    }
+    let mut f = libthyla_rs::fs::File::open(&path).ok()?;
+    let mut s = String::new();
+    f.read_to_string(&mut s).ok()?;
+    fasces::parse_imperium(&s)
+}
+
 /// The Utopia read-parse-eval loop driver.
 pub struct Repl {
     env: Env,
@@ -114,6 +137,13 @@ pub struct Repl {
     /// (cells / none / host tests) the zone methods emit NOTHING, so every
     /// existing byte-exact test and the serial console are untouched.
     beacon_rich: bool,
+    /// IM-4 (IMPERIUM-DESIGN.md 11.6): this shell's own legate scope, read
+    /// ONCE from the kernel's `/proc/<pid>/imperium` flag by `probe_imperium`.
+    /// `Some` iff the shell is elevated (an `imperium` sub-shell), in which
+    /// case `prompt` renders the fasces in place of the `⊢` tack. `None` for a
+    /// plain shell (and on any read/parse failure -- fail closed). A shell's
+    /// imperium status is fixed for its life, so this is cached, not re-read.
+    imperium: Option<fasces::Imperium>,
 }
 
 impl Default for Repl {
@@ -137,6 +167,7 @@ impl Repl {
             history_path: None,
             menu_shown: false,
             beacon_rich: false,
+            imperium: None,
         }
     }
 
@@ -541,8 +572,39 @@ impl Repl {
         let home = self.env.get("home").as_scalar();
         let shown = crate::path::abbreviate_home(cwd, &home);
         let mut p = ansi::fg(Role::Path, &shown);
-        p.push_str(&ansi::fg(Role::Glyph, " \u{22a2} ")); // RIGHT TACK
+        match &self.imperium {
+            // IM-4 (IMPERIUM-DESIGN.md 4): an elevated shell shows the fasces in
+            // place of the tack -- one rod per held cap, the securis when
+            // CAP_KILL is held -- so how dangerous the shell is reads at a
+            // glance. A warning hue when the axe is present, ember otherwise.
+            // The whole fasces is ONE self-resetting SGR (no mid-token escape),
+            // so a scenario matching the `#` marker is not split by a color run.
+            Some(im) => {
+                let role = if im.axe { Role::Sand } else { Role::Glyph };
+                let f = fasces::render_fasces(im);
+                p.push(' ');
+                p.push_str(&ansi::fg(role, &f));
+                p.push(' ');
+            }
+            None => {
+                p.push_str(&ansi::fg(Role::Glyph, " \u{22a2} ")); // RIGHT TACK
+            }
+        }
         p
+    }
+
+    /// IM-4 (IMPERIUM-DESIGN.md 11.6): read this shell's own legate scope from
+    /// the kernel's unforgeable `/proc/<pid>/imperium` flag and cache the
+    /// fasces for the prompt. Run ONCE, gated on a live session (like
+    /// `open_notes` / `install_completion`): a shell is born into a scope (an
+    /// `imperium` sub-shell) or never in one (a plain login shell), and
+    /// `abdicate`/exit ENDS the elevated shell rather than de-escalating in
+    /// place, so the status never changes mid-life. A read/parse failure or a
+    /// non-legate `scope 0` leaves the prompt plain -- the fasces is a
+    /// convenience mirror the design says to distrust in favor of the SAK, so
+    /// failing closed is the correct posture.
+    pub fn probe_imperium(&mut self) {
+        self.imperium = read_own_imperium();
     }
 
     /// H-2 F10: how many command cycles have completed (each one drew a

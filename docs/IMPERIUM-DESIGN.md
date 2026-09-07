@@ -692,6 +692,69 @@ the operator can veto any of them:**
   legate member (else "not under imperium").
 - Sub-shell first (§6's recommendation); the in-place toggle is v1.x.
 
+**As-built refinements (IM-4, landed 2026-09-07). Each is a delta from the
+bullets above, settled during the implementation + the kernel reads, and flagged
+here so the operator can veto any of them:**
+
+1. **The whole chunk is PURE USERSPACE -- no kernel change, confirmed not
+   assumed.** IM-4 CONSUMES the IM-2 propagation and the IM-3 confer. The one
+   load-bearing question the IM-3 boot prover did not answer -- does
+   `Command::spawn` propagate the propagating-legate scope + caps to the spawned
+   `ut`? -- was settled by reading the kernel: every `SYS_SPAWN` variant routes
+   through `rfork_with_caps(RFPROC, ...)` -> `rfork_internal`, whose carve
+   (`child->caps = (parent & mask) & ~(CAP_ELEVATION_ONLY & ~flow)` + the
+   `legate_scope`/`legate_caps`/`legate_flags` copy) keeps the flow, and
+   `proc_exec_replace` swaps only the address space / phenotype / sigtab -- it
+   never touches `caps` or the legate fields. So `imperium` spawning `/bin/ut`
+   yields an elevated, propagating MEMBER in the root's scope that dies with it.
+2. **The `/proc/<pid>/imperium` parser is a STANDALONE crate, `usr/lib/fasces`,
+   not a libutopia module.** libthyla-rs's `_start` inline asm uses ELF
+   directives (`.type`, `.size`) the macOS assembler rejects, so ANY crate
+   depending on it (libutopia included) cannot host-compile -- which means
+   libutopia's own `#[cfg(test)]` modules have never run on host. A pure,
+   dependency-free crate host-tests cleanly (7 tests, the `corvus-crypto`
+   `cfg_attr(not(test), no_std)` pattern) AND lets the thin `imperium` tool
+   avoid pulling in the whole shell. One parser for three consumers (the prompt,
+   `abdicate`, the tool) -- no drift on a kernel-defined ABI line.
+3. **The prompt fasces** renders one rod (`‖` U+2016, capped at 6) per held
+   elevation cap, the securis (`⚔` U+2694) when CAP_KILL is held, then `#` -- in
+   a warning hue (palette Sand) when the axe is present, ember (Glyph) otherwise.
+   It is ONE self-resetting SGR (no mid-token escape), so an E2E `-ex` match on
+   the `#` marker is not split by a color run (the IM-3 bold-value trap). Read
+   ONCE (`probe_imperium`, gated like `open_notes` on a live session): a shell's
+   imperium status is fixed for its life (born into a scope or never in one;
+   `abdicate`/exit ENDS it rather than de-escalating in place).
+4. **`abdicate`** exits iff `/proc/<pid>/imperium` reports a nonzero scope -- the
+   kernel's unforgeable flag, read through the SAME `read_own_imperium` the
+   prompt uses (no shell-side belief that could disagree). Not under a scope ->
+   "not under an imperium scope", status 1, no exit. In an `imperium` sub-shell
+   `exit` and `abdicate` both end the session (the root's death sweeps the
+   scope); `abdicate` is the guarded, named form and the one that refuses in an
+   ordinary shell.
+5. **The tool fails fast on a non-interactive fd 0** (`fd_devclass` not `'c'`/
+   `'t'`) BEFORE posting a request: a script's request would otherwise park
+   forever on a reply no human is there to confer. UX, not the gate -- the SAK
+   remains the gate (§3.1).
+6. **The tool refuses when already in a scope** (reads its own `/proc` flag):
+   the kernel refuses the nested propagating redeem (11.4 consequence 11,
+   "never nests"); the tool says "abdicate first" instead of surfacing a bare
+   redeem failure.
+7. **`imperium --list` (also `edict`, `-l`) ships the /proc-flag half only** --
+   the current holdings (scope, caps by name, the axe, propagating). The
+   eligibility half ("what you could become") needs a NEW corvus verb
+   (`CLEARANCE_LIST_SELF`, the verb-18 identity shape, read-only) -- DEFERRED as
+   the one user-input fork and surfaced to the operator, because this session
+   ran on the Opus fallback (which stops at user-input items rather than adding a
+   corvus wire verb). The /proc half needs no corvus change.
+8. **The sub-shell gets no `--home`.** The user's home is a shell variable in
+   the outer `ut`, not exported to `/env`, so the spawned `ut` runs at the
+   inherited cwd (its prompt shows the absolute path; a bare `cd` goes to `/`).
+   A v1.x nicety (export `HOME`); the fasces -- the point of the elevated shell
+   -- works regardless. Documented, not silent.
+9. **The tool re-checks the grant is not wider than requested** before redeeming
+   (`granted & !self_restrict == 0`) -- defense in depth; corvus already bounds
+   it, but the tool re-verifies its own request.
+
 ### 11.7 Honest scope
 
 **Open presentation choice for the v1.x framebuffer sink (operator question,

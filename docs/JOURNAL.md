@@ -22,6 +22,81 @@ needed the operator.
 
 
 ---
+## 2026-09-07 (aux, sixth run) -- IM-4 the userspace sub-shell: the imperium tool, the fasces prompt, abdicate; a load-bearing question the boot prover never answered, settled by reading the kernel; a host-test wall that reshaped the crate layout
+
+**What landed.** IM-4 (`IMPERIUM-DESIGN.md` §11.6), the userspace half of the
+imperium arc, as one commit (`PENDING`): the `imperium` tool, the fasces prompt
+in `ut`, the `abdicate` builtin, and a new standalone `fasces` crate. Pure
+userspace -- no kernel change, no corvus change, no new invariant surface. It
+CONSUMES the IM-2 legate propagation and the IM-3 confer.
+
+**The one load-bearing question the IM-3 boot prover never answered.** The
+design says `imperium` redeems a propagating grant (becoming the legate root),
+then SPAWNS `ut` via `libthyla_rs::process::Command`, and `ut` must inherit the
+imperium caps + the scope and die with the root. But `imperium-probe` (IM-3)
+redeemed and checked `/proc/<pid>/imperium` on ITSELF, never on a spawned child
+-- so "spawn propagates the propagating-legate scope + caps" was UNVERIFIED, and
+the IM-2 carve is written entirely in terms of `rfork`, while `Command::spawn`
+is `SYS_SPAWN`. If spawn stripped `CAP_ELEVATION_ONLY` the normal way (I-2), the
+whole sub-shell would be silently broken -- an elevated tool spawning a
+powerless shell. Rather than assume, I read the kernel: every `SYS_SPAWN`
+variant (`sys_spawn_full_argv` at `syscall.c:9062`, with_fds at 8394, with_caps
+at 8285) routes through `rfork_with_caps(RFPROC, ...)` -> `rfork_internal`
+(`proc.c:1261`), whose carve at 1415 is `child->caps = (parent & mask) &
+~(CAP_ELEVATION_ONLY & ~flow)` with `flow = parent->legate_caps` iff propagating,
+and which copies `legate_scope_id`/`legate_caps`/`legate_flags` at 1502-1513. The
+last risk was exec resetting it: `proc_exec_replace` (`proc.c:3712`) swaps only
+`->as`, `->phenotype`, and the sigtab -- it never touches `caps` or the legate
+fields, and `exec.c` has zero cap/legate mutations. So the chain holds by
+construction and NO kernel change was needed. This is the "BOOT OK DOES NOT
+PROVE A GATE IS WIRED" lesson applied before writing a line: the prover proved
+the redeemer's own scope, not the child's inheritance, and the difference is the
+whole feature.
+
+**A host-test wall reshaped the crate layout.** I first put the pure
+`/proc/<pid>/imperium` parser + fasces renderer as a module inside libutopia,
+with `#[cfg(test)]` host tests -- and `cargo test --target aarch64-apple-darwin
+-p libutopia` failed to COMPILE: libthyla-rs's `_start` inline asm emits ELF
+directives (`.type`, `.size`) the macOS (Mach-O) assembler rejects, so any crate
+depending on libthyla-rs cannot host-compile. That means libutopia's own
+existing `#[cfg(test)]` modules (ansi, completion) have NEVER run on host --
+a pre-existing dead-test gap. The fix made the layout better: I pulled the
+parser into a standalone `usr/lib/fasces` crate with no libthyla-rs dependency
+(the `corvus-crypto` `cfg_attr(not(test), no_std)` pattern), which host-tests
+cleanly (7/7) AND let the thin `imperium` tool drop the heavy whole-shell
+dependency it would otherwise have carried just to parse one line. One parser,
+three consumers (the prompt, `abdicate`, the tool), no drift on a kernel-defined
+ABI line.
+
+**Two small compile bugs, caught by the target build before the bake.** A
+`match` in the tool mixed `i64` arms with a `()` block arm (fixed: every arm a
+statement); an unused `String` import. The targeted `cargo build --release -p
+imperium ...` caught both in ~2 s, before paying the ~4-min bake.
+
+**Gates.** fasces host tests 7/7. clippy: no new warning in any changed file
+(the large pile is the pre-existing libutopia/libthyla-rs `Result<_,()>` /
+missing-`# Safety` idiom classes; anchored greps to my files came back empty).
+Full bake + `test.sh`: `tests: 1535/1535 PASS`, `u-builtin-test all OK` (the new
+abdicate deny-path arm: not-a-legate -> status 1, no exit), boot OK, `imperium`
+staged in the ramfs (49240 B). No SMP gate -- no kernel change. The confer ->
+spawn -> fasces -> abdicate E2E needs the SAK a boot probe cannot press, so it
+lands with the batched holotype at IM-5.
+
+**The Opus fallback, and what it stopped me from deciding.** This session's
+attribution reminder named Opus 4.8, not Fable -- the fallback signal. Per the
+operator-away rule I built the entire fork-free core and stopped at the one
+genuine user-input item: `imperium --list`'s eligibility half ("what you could
+become") needs a NEW corvus `CLEARANCE_LIST_SELF` verb (a wire-ABI addition to
+the audited corvus surface). I shipped only the decision-free /proc-flag half
+(current holdings) and surfaced the verb as the operator's call rather than
+adding it on the fallback model.
+
+**Deltas flagged for veto (the 9 as-built refinements, §11.6).** The
+sub-shell gets no `--home` (home is a shell var, not exported to `/env`; it runs
+at the inherited cwd) -- the one most likely to draw a "fix it" rather than a
+veto.
+
+---
 ## 2026-09-07 (aux, fifth run) -- IM-3 the lex curiata: corvus confers imperium on the trusted path; a design claim corrected by the code; two hazards caught before the scenario ran
 
 **What landed.** IM-3 (the corvus half of the Imperium/SAK arc; `IMPERIUM-DESIGN.md`

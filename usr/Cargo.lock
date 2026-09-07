@@ -538,6 +538,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fasces"
+version = "0.1.0"
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -752,6 +756,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "imperium"
+version = "0.1.0"
+dependencies = [
+ "fasces",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "imperium-probe"
 version = "0.1.0"
 dependencies = [
@@ -900,6 +912,7 @@ name = "libutopia"
 version = "0.1.0"
 dependencies = [
  "beacon",
+ "fasces",
  "libthyla-rs",
 ]
 

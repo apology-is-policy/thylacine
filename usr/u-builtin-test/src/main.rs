@@ -192,6 +192,23 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // 13. abdicate in a NON-legate shell (IM-4): u-builtin-test runs as a plain
+    //     spawned child, never a legate, so `abdicate` reports "not under an
+    //     imperium scope" -- status != 0, and NO exit request (it must not exit
+    //     an ordinary shell). This is the deny half of the abdicate contract;
+    //     the confer-then-abdicate half is the ls-imperium.exp E2E (IM-5), which
+    //     needs the SAK a boot probe cannot press.
+    {
+        let mut e = fresh();
+        let st = run(&mut e, "abdicate");
+        if st == 0 {
+            return fail("abdicate not-a-legate status");
+        }
+        if e.exit_requested().is_some() {
+            return fail("abdicate not-a-legate must not exit");
+        }
+    }
+
     t_putstr("u-builtin-test: all OK\n");
     0
 }

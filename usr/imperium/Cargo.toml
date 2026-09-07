@@ -1,0 +1,18 @@
+[package]
+name = "imperium"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "imperium"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }
+# The shared, host-tested `/proc/<pid>/imperium` parser (fasces::parse_imperium):
+# one parser for the kernel ABI line, used by the prompt, the `abdicate` builtin,
+# and this tool, so the three cannot drift. A tiny pure crate -- this thin tool
+# does not pull in the whole shell (libutopia) for it.
+fasces = { path = "../lib/fasces" }

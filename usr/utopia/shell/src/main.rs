@@ -465,6 +465,11 @@ pub extern "C" fn rs_main() -> i64 {
         // #115b: load + enable ~/.ut_history persistence (after set_home, so
         // $home resolves the path). Session-only, same gate as completion.
         repl.install_history();
+        // IM-4 (IMPERIUM-DESIGN.md 11.6): read this shell's legate scope from
+        // /proc/<pid>/imperium ONCE, so an `imperium` sub-shell's first prompt
+        // already shows the fasces. Same live-session gate: a bare-spawned ut
+        // (never elevated) skips it and keeps the plain `⊢` tack.
+        repl.probe_imperium();
     }
 
     let mut out = io::stdout();
