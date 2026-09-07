@@ -110,15 +110,27 @@ allow + grammar/F3 + mount read"), the default boot's `nocturne-probe OK`
    passed through the `&&`. But it is the exact masking trap the memory already
    records, repeated.
 
-**Still open:** the mandatory dirty re-audit (round 6, Opus -- Fable has been out
-of credits all arc, so the Fable-diversity axis is forfeit and a Fable pass is
-owed when credits return) is IN FLIGHT as of this writing; the push waits on it.
-A self-audit ran in parallel and found nothing new (the main.rs accept-tagging
-index mapping is correct; the getattr 0o666-on-control is advisory-only; the ring
-path is structurally untouched). One item handed to the prosecutor to prosecute
-rather than dismiss: both posts share the `MAX_CONNS = 32` pool, but that
-exhaustion already existed via the playback post's `open=connect`, so it is not a
-new DoS vector.
+**The re-audit closed CLEAN.** Round 6 (Opus -- Fable out of credits all arc, so
+the Fable-diversity axis is forfeit and a Fable pass is owed when credits return)
+re-derived every load-bearing claim line-by-line and returned **0 P0 / 0 P1 /
+0 P2 / 3 P3**: F1/F2/F3 genuinely closed, no dirty-close criteria tripped. My
+parallel self-audit found nothing new (the main.rs accept-tagging maps
+pollfds[0]/[1] to (listener,false)/(ctl_listener,true) by index -- no off-by-one;
+the getattr 0o666-on-control is advisory-only; the ring path is structurally
+untouched). The three P3s: **F2** (the `!control` guard -- the sole F1 closer on
+a *direct* playback connect -- was untested) is FIXED with a probe arm that
+writes volume on a direct playback conn and asserts EPERM; **F1** (both posts
+share the 32-conn pool) and **F3** (the console-owner kernel test's positive arm
+has owner==peer) are TRACKED as v1.x, both with reference caveats.
+
+**A fourth wrong turn, caught by the very test it strengthened.** The F3 fix
+tried a two-Proc arm (owner=p, peer=kproc, different sessions -> expect CLEAR) --
+and it FAILED (1511/1512, boot extinct), reporting SET. The cause: in the
+boot-test context `current_thread()->proc` IS `kproc()`, so `p` and `kp` are one
+object; setting the peer's sid moved the owner's too. The arm caught its own
+false premise (same shape as the sid-0 catch earlier). Reverted to the A/B
+owner-global-dependence form; a real two-Proc test is deferred to a harness that
+can hand out a second controllable Proc.
 
 ---
 ## 2026-09-06 (aux) -- Nocturne N-2a-4: DOSBox-X + glquake game audio (and a build subsystem the main merge had silently deleted)

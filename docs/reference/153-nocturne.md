@@ -530,6 +530,27 @@ single boot's wall time.
   writer until the mount closes -- a bounded, graceful DoS (`ENOMEM` at
   `MAX_VOICES` = 16, never a crash); the proper fix (per-voice fid-refcount
   lifetime or a per-principal connection cap) is an N-2c/N-3 design decision.
+- **N-3a-3 round-6 F1 [P3, pre-existing pattern, deferred v1.x]:** both posts
+  (`/srv/nocturne` + `/srv/nocturne-ctl`) share the one `MAX_CONNS` = 32
+  connection pool with accept-and-close-when-full and no idle-conn reaper, so 32
+  idle connections starve BOTH playback accepts and the sink-authority feature
+  (the console-owner's `nocturne-vol` can no longer connect). It fails CLEAN
+  (accepted-then-closed, never an extinct -- I-32 holds) and the flood was already
+  possible against the single-post N-2 daemon via `open=connect`; the two-post
+  split only widens the blast radius to volume control. joey's already-established
+  playback mount is unaffected. Fix (v1.x): a reserved control-post slot budget
+  (cap playback at `MAX_CONNS-K`) or a per-principal live-conn cap or an
+  idle-conn reaper. Tracked; not merge-blocking (round-6 prosecutor's disposition).
+- **N-3a-3 round-6 F3 [P3, test coverage, deferred v1.x]:** the kernel
+  `proc_identity.peer_snapshot_console_owner` test proves the flag is wired and
+  owner-global-dependent (arm A owner-set vs arm B owner-NULL, peer+sid held
+  constant), but its positive arm has owner==peer, so it does not by itself
+  discriminate "the snapshot feeds `console_session_match(OWNER_sid, PEER_sid)`"
+  from "(PEER_sid, PEER_sid)". A two-Proc arm needs a second Proc distinct from
+  `current`, and in the boot test `current_thread()->proc` IS `kproc()` (so
+  owner and peer degenerate to one object). The arg wiring is meanwhile covered
+  by `console_session_match`'s value unit test (`test_vivarium`) + the audited
+  one-line call site. Deferred to a harness that can hand out a second Proc.
 - `nodes/<id>/ctl gain` is Plan 9 `volume`-style percent, not the dB grammar the
   design's `volume` file (N-3) will carry; the per-link/stage dB gains are N-3+.
 - The virtio-pci-modern constants are a private copy of netdev's (a hoist seam).

@@ -49,6 +49,9 @@ use libthyla_rs::{
 
 // The sink-authority post (per-connection; the gate reads THIS program as peer).
 const NOC_CTL: &[u8] = b"/srv/nocturne-ctl";
+// The playback post -- a DIRECT connect here (control=false) must still refuse a
+// volume write (the F2 arm: the `!control` guard, not a mount mode gate).
+const NOC_PLAY: &[u8] = b"/srv/nocturne";
 // The playback mount's volume node (read-only info; writes here are the F1 path).
 const MOUNT_VOL: &[u8] = b"/dev/nocturne/volume";
 const SELF_BIN: &str = "/bin/nocturne-vol-probe";
@@ -196,6 +199,23 @@ fn parent() -> i64 {
     unsafe { t_close(mv) };
     if mn <= 0 || !mbuf[..mn as usize].windows(5).any(|w| w == b"audio") {
         return fail("mount volume read did not render the level");
+    }
+
+    // F2 (round-6 audit): the `!control` guard is the SOLE F1 closer on a DIRECT
+    // playback connection. The mount arm is closed by the 0o444 mode gate, but a
+    // raw SrvConn to /srv/nocturne has no kernel mode gate, so only h_write's
+    // non-control refusal stands there. Prove it: even THIS process (SYSTEM)
+    // writing volume on a direct playback conn is REFUSED, because the playback
+    // post never carries write authority regardless of the peer. A reorder that
+    // checked authority before `!control` would reopen F1 here and fail this arm.
+    let pb = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, NOC_PLAY.as_ptr(), NOC_PLAY.len(), T_OREAD) };
+    if pb < 0 {
+        return fail("connect /srv/nocturne (playback) direct");
+    }
+    let pn = write_volume(pb, b"audio 0\n");
+    unsafe { t_close(pb) };
+    if pn >= 0 {
+        return fail("F2: a direct playback-post volume write was ACCEPTED (the !control guard)");
     }
 
     // Negative gate: a user-principal child -- BOTH the mount write path and the

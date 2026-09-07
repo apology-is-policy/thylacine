@@ -267,19 +267,29 @@ void test_proc_identity_peer_snapshot_by_stripes(void) {
 // N-3a-3 (NOCTURNE.md 6.8): the peer snapshot reports whether the matched
 // Proc's session OWNS the console -- the SRV_PEER_FLAG_CONSOLE_OWNER source the
 // nocturned sink-authority gate reads for the "person at the keyboard" axis.
-// Discrimination BOTH ways: owner-set (nonzero session) -> true, owner-NULL ->
-// false, all state restored before the asserts run.
 //
-// The boot-test proc (joey) is session-less (sid 0), and
-// console_session_match(0, 0) is correctly false ("no session is never the
-// keyboard owner"). To exercise the POSITIVE arm we inject a nonzero session id
-// on this proc for the window, then restore it. The boot-test phase is
-// single-threaded, so the unlocked sid write races no concurrent snapshot; the
-// snapshot below reads it under g_proc_table_lock as production does.
+// Three arms, all state restored before the asserts run. Crucially, arm A and
+// arm B snapshot the SAME peer with the SAME (nonzero) sid and differ ONLY in
+// whether an owner is set -> the result depends on g_console_owner (the global),
+// not merely on the peer having a session:
+//   A owner set (this proc), nonzero session -> SET
+//   B no owner (post-SAK)                     -> CLEAR
 //
-// Ambient console owner at boot-test time is joey (== p) or NULL, never a third
-// Proc (no session shell has spawned), so restoring to (was_owner ? p : NULL)
-// is exact.
+// The boot-test proc is session-less (sid 0) and console_session_match(0,0) is
+// correctly false, so we inject a nonzero session id for the window; the
+// boot-test phase is single-threaded so the unlocked sid write races no
+// concurrent snapshot (which reads under g_proc_table_lock as production does).
+//
+// DEFERRED (round-6 audit F3, v1.x): a full owner_sid-vs-peer_sid ARG-WIRING
+// discrimination (owner=A sid X, peer=B sid Y!=X -> CLEAR) needs a SECOND proc
+// distinct from `current` with a settable sid. In the boot-test context
+// current_thread()->proc IS kproc() (a two-proc arm with kproc as the peer
+// degenerates -- owner and peer become one object, so setting the peer's sid
+// moves the owner's too; that arm spuriously reported SET). The arg wiring is
+// meanwhile covered by console_session_match's own value unit test
+// (test_vivarium: match(X,Y) for X!=Y / X==Y / 0 cases) plus the cb's one-line
+// call read in the round-6 audit; a runtime two-proc test awaits a harness that
+// can hand out a second controllable Proc.
 void test_proc_identity_peer_snapshot_console_owner(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");
@@ -290,26 +300,27 @@ void test_proc_identity_peer_snapshot_console_owner(void) {
     u32  old_sid   = p->sid;
     const u32 test_sid = 0x51D0u; // any nonzero session id for the compare
 
-    // Owner = this proc's (nonzero) session -> the snapshot's console_owner set.
+    // Arm A -- owner set, nonzero session -> SET.
     p->sid = test_sid;
     proc_set_console_owner(p);
     bool co = false;
     bool found = proc_peer_snapshot_by_stripes(p->stripes, NULL, NULL, NULL,
                                                NULL, NULL, &co);
-    // No owner -> the snapshot's console_owner clears (the post-SAK / fail-closed
-    // path: console_session_match(0, sid) is false).
+    // Arm B -- SAME peer + sid, but no owner (post-SAK / fail-closed:
+    // console_session_match(0, sid) is false) -> CLEAR. A vs B isolates the
+    // owner-global dependence (sid held constant).
     proc_set_console_owner(NULL);
     bool co_none = true;
     bool found_none = proc_peer_snapshot_by_stripes(p->stripes, NULL, NULL, NULL,
                                                     NULL, NULL, &co_none);
 
-    // Restore owner + sid BEFORE asserting (TEST_ASSERT returns): joey (== p) if
-    // it was the owner, else NULL -- the only two boot-test states.
+    // Restore owner + sid BEFORE asserting (TEST_ASSERT returns): p if it was the
+    // owner, else NULL -- the only two boot-test states.
     proc_set_console_owner(was_owner ? p : NULL);
     p->sid = old_sid;
 
     TEST_ASSERT(found, "peer snapshot found the current proc by its stripes");
-    TEST_ASSERT(co, "console_owner set when the peer's session owns the console");
+    TEST_ASSERT(co, "A: owner set, nonzero session -> console_owner SET");
     TEST_ASSERT(found_none, "peer snapshot still found the proc with no owner");
-    TEST_ASSERT(!co_none, "console_owner clear when there is no console owner");
+    TEST_ASSERT(!co_none, "B: no owner (sid held constant) -> CLEAR (owner-global dependence)");
 }
