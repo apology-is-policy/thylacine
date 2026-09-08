@@ -1102,6 +1102,12 @@ pub fn run(home: Option<String>) -> i64 {
     let mut init_spawned = false;
 
     loop {
+        // The atlas bound, between frames: every tile re-lays its visible
+        // blocks each pass and the chrome/status/menu surfaces look their
+        // glyphs up afresh on repaint, so an eviction here costs one frame's
+        // re-pack and nothing holds a stale id across it.
+        gs.evict_if_full();
+
         // (0) Reap the session init child when it exits (the bounded poll
         // below keeps this reachable while it runs).
         if let Some(c) = init.as_mut() {

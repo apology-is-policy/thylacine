@@ -463,6 +463,9 @@ pub extern "C" fn rs_main() -> i64 {
         if t.seq != last_seq || dirty {
             last_seq = t.seq;
             dirty = false;
+            // The atlas bound, between frames (the layout cache keys on the
+            // generation, so an eviction re-lays the visible set).
+            gs.evict_if_full();
             // Evict layouts for blocks the budget dropped.
             {
                 let frozen = t.frozen_blocks();

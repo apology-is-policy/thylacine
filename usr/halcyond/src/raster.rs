@@ -40,6 +40,15 @@ pub const FACE_MONO: u8 = 4;
 /// same way it says a proportional size.
 pub const MONO_ISLAND_PX: f32 = 12.0;
 pub const MONO_GRID_PX: f32 = 20.0;
+
+/// The atlas page bound `evict_if_full` enforces between frames: 16 pages
+/// of the 512-px page every source is built with = 4 MiB of alpha, ~16x a
+/// Latin working set (four faces at three sizes plus both mono cells pack
+/// into about one page). The transcript's bytes are untrusted; without a
+/// bound a program printing distinct codepoints grew the store ~10 MB per
+/// size until the compositor's fixed heap died mute (I-32's in-process
+/// face).
+pub const MAX_ATLAS_PAGES: usize = 16;
 const MONO_ISLAND_ADVANCE: u8 = 6;
 const MONO_GRID_ADVANCE: u8 = cornucopia::DEFAULT_ADVANCE;
 
@@ -300,6 +309,23 @@ impl GlyphSource {
     pub fn regen(&mut self) {
         self.packer.regen();
         self.cache.clear();
+    }
+
+    /// The growth bound, applied BETWEEN frames: when the store holds
+    /// `MAX_ATLAS_PAGES` pages or more, evict everything (`regen`) so the
+    /// next frame re-packs only its working set. Within a frame `glyph()`
+    /// only ever inserts, so a frame's `gen()` stamp stays valid across it
+    /// (tile::paint_grid reads it once); a stream of distinct codepoints --
+    /// a program printing its way through the BMP -- can therefore grow the
+    /// store by at most one frame's glyphs past the bound, never without
+    /// limit toward the fixed heap's silent OOM exit. Returns true when it
+    /// evicted (every layout cache keys on `gen()` and re-lays).
+    pub fn evict_if_full(&mut self) -> bool {
+        if self.packer.store.pages.len() >= MAX_ATLAS_PAGES {
+            self.regen();
+            return true;
+        }
+        false
     }
 
     /// The current atlas generation (what the author stamps into ops).
@@ -652,6 +678,48 @@ mod tests {
         let a2 = gs.glyph(FACE_BODY, 16.0, 'A').unwrap();
         assert_eq!(a2.glyph, 0, "fresh table restarts ids");
         let _ = a1;
+    }
+
+    #[test]
+    fn atlas_growth_is_bounded_between_frames() {
+        // Distinct codepoints Plex lacks each rasterize the .notdef box under
+        // their OWN cache key, so a stream of them grows the store one glyph
+        // per codepoint (the hostile-output shape). Tiny pages (32 px) make
+        // the bound reachable in a test: WITHOUT the between-frames check the
+        // store grows past MAX_ATLAS_PAGES (the positive control that growth
+        // is real); WITH it, each "frame" starts under the bound and ends at
+        // most one frame's glyphs past it.
+        let mut gs = GlyphSource::new_vendored(32);
+        let mut cp = 0x4E00u32; // CJK ideographs: not in Plex
+        let mut next = |gs: &mut GlyphSource, n: usize| {
+            for _ in 0..n {
+                let ch = char::from_u32(cp).unwrap();
+                cp += 1;
+                let _ = gs.glyph(FACE_BODY, 11.5, ch);
+            }
+        };
+        next(&mut gs, 400);
+        let unbounded = gs.packer.store.pages.len();
+        assert!(unbounded > MAX_ATLAS_PAGES, "the control: 400 glyphs on 32-px pages exceed the bound ({unbounded} pages)");
+        assert!(gs.evict_if_full(), "over the bound: evicted");
+        assert_eq!(gs.packer.store.pages.len(), 0);
+        assert_eq!(gs.gen(), 1, "the generation bumped");
+        assert!(!gs.evict_if_full(), "empty: nothing to evict");
+        // Frames of 20 glyphs each: the store never exceeds the bound by
+        // more than one frame's growth, and the gen keeps bumping.
+        let per_frame = 20;
+        let mut peak = 0;
+        for _ in 0..200 {
+            gs.evict_if_full();
+            next(&mut gs, per_frame);
+            peak = peak.max(gs.packer.store.pages.len());
+        }
+        assert!(peak <= MAX_ATLAS_PAGES + per_frame, "peak {peak} pages: bounded by the frame's growth");
+        assert!(gs.gen() >= 2, "evicted again along the way (gen {})", gs.gen());
+        // A glyph looked up after an eviction is served fresh under the new
+        // generation, not from the cleared cache.
+        let a = gs.glyph(FACE_BODY, 11.5, 'a').expect("a");
+        assert!((a.glyph as usize) < gs.packer.store.glyphs.len());
     }
 
     #[test]
