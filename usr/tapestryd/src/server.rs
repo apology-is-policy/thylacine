@@ -6943,6 +6943,19 @@ impl Comp {
             .any(|&(_, n)| self.surf(n).is_some_and(|s| s.owner_conn == conn))
     }
 
+    /// Is the pane with public id `id` a leaf whose hosted surface `conn`
+    /// owns? False for an unknown id, a container, an empty leaf, and a
+    /// leaf hosted by any other conn.
+    fn leaf_hosted_by_conn(&self, id: u32, conn: u64) -> bool {
+        self.layout.slot_of_id(id).is_some_and(|slot| {
+            self.layout.is_leaf(slot)
+                && self
+                    .layout
+                    .leaf_surface(slot)
+                    .is_some_and(|n| self.surf(n).is_some_and(|s| s.owner_conn == conn))
+        })
+    }
+
     /// H-4b-2: reap a departed session's empty scaffolding. `retire_conn`
     /// (called first, at teardown) already closed the dying conn's OCCUPIED
     /// leaves -- `retire` closes the leaf that hosted each retired surface.
@@ -15757,6 +15770,23 @@ impl Conn {
             || s.starts_with("probe-screen ")
     }
 
+    /// The leaf id of a WELL-FORMED tile-status verb (`tag <id> status
+    /// ok|err|resting`, nothing more); None for anything else, so the
+    /// session admission never reaches past a verb the handler would
+    /// refuse anyway.
+    fn status_verb_leaf(s: &str) -> Option<u32> {
+        let mut it = s.strip_prefix("tag ")?.split_ascii_whitespace();
+        let id: u32 = it.next()?.parse().ok()?;
+        if it.next() != Some("status") {
+            return None;
+        }
+        Status::parse(it.next()?)?;
+        if it.next().is_some() {
+            return None;
+        }
+        Some(id)
+    }
+
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
@@ -15846,7 +15876,22 @@ impl Conn {
         let session_menu_verb = s.starts_with("menu ")
             && comp.session_declared(self.conn_id)
             && comp.conn_hosts(self.conn_id);
-        if !Self::is_ungated_ctl(s) && !self.peer_is_renderer() && !session_menu_verb {
+        // The tile status (`tag <id> status ok|err|resting`) is ALSO the
+        // DECLARED session compositor's, for a leaf THIS CONN HOSTS: the
+        // party hosting a tile is the one that knows how its last command
+        // ended (its transcript's exit mark), exactly as the renderer is for
+        // the console tile. Resolved BEFORE the gate, so a malformed verb, a
+        // foreign or empty leaf, or an undeclared conn all still meet the
+        // default deny -- a client can never record a status on a tile it
+        // does not host, which is the lie the gate exists to refuse.
+        let session_status_verb = s.starts_with("tag ")
+            && comp.session_declared(self.conn_id)
+            && Self::status_verb_leaf(s).is_some_and(|id| comp.leaf_hosted_by_conn(id, self.conn_id));
+        if !Self::is_ungated_ctl(s)
+            && !self.peer_is_renderer()
+            && !session_menu_verb
+            && !session_status_verb
+        {
             return Err(p9::E_PERM);
         }
         if s == "mode auto" {

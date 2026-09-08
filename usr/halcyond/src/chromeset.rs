@@ -72,9 +72,14 @@ struct Tile {
     surf: Surface,
     key: Key,
     name: String,
+    trail: String,
     dirty: bool,
     dead: bool,
 }
+
+/// What a host says about a leaf it hosts: the tile's program (the strip's
+/// name) and its status (the trail); None for a leaf it does not host.
+pub type Describe<'a> = &'a dyn Fn(u32) -> Option<(String, String)>;
 
 /// The live chrome surfaces, keyed by the bound pane's public id (ids are
 /// never reused, so a stale key can only mean "gone").
@@ -123,10 +128,13 @@ impl ChromeSet {
 
     /// Bring the chrome set in line with the layout: drop tiles for leaves
     /// that are gone or bar-free, create tiles for new strips, repaint the
-    /// rest (focus, statuses and names may have moved). `own_surface` is
-    /// the console surface's id: the leaf hosting it is named once, through
-    /// the pane's `tag` file (section 4.1: the name is the tile's program).
-    pub fn reconcile(&mut self, troot: i64, own_surface: u32, gs: &mut GlyphSource) {
+    /// rest (focus, statuses, names and trails may have moved). `own_surface`
+    /// is the console surface's id: the leaf hosting it is named once,
+    /// through the pane's `tag` file. `describe` is the host's word on the
+    /// leaves it hosts -- the tile's program as the name and its status as
+    /// the trail (section 4.1); a leaf it does not describe shows its `tag`
+    /// text as the name and no trail.
+    pub fn reconcile(&mut self, troot: i64, own_surface: u32, gs: &mut GlyphSource, describe: Describe) {
         if troot < 0 {
             return;
         }
@@ -144,17 +152,25 @@ impl ChromeSet {
             }
         }
         // The wanted set: every visible leaf with a carved strip.
-        let mut want: Vec<(u32, u32, u32, Key, String)> = Vec::new();
+        let mut want: Vec<(u32, u32, u32, Key, String, String)> = Vec::new();
         self.focused = None;
         for l in leaves.iter() {
+            // The name: the host's program for a leaf it hosts, else the
+            // pane's tag text. Read once per leaf; both consumers below.
+            let (name, trail) = match describe(l.id) {
+                Some(d) => d,
+                None => (
+                    read_file(troot, &format!("pane/{}/tag", l.id))
+                        .map(|s| String::from(s.trim()))
+                        .unwrap_or_default(),
+                    String::new(),
+                ),
+            };
             if l.focused {
                 // H-3d: the status bar's sources, read whether or not the
                 // leaf carves a strip (a single fullscreen leaf carves none).
-                let name = read_file(troot, &format!("pane/{}/tag", l.id))
-                    .map(|s| String::from(s.trim()))
-                    .unwrap_or_default();
                 let status = read_file(troot, &format!("pane/{}/status", l.id)).unwrap_or_default();
-                self.focused = Some((l.id, name, status));
+                self.focused = Some((l.id, name.clone(), status));
             }
             let tb = match read_file(troot, &format!("pane/{}/tagbar", l.id))
                 .and_then(|s| parse_rect(&s))
@@ -165,28 +181,26 @@ impl ChromeSet {
             if tb.2 == 0 || tb.3 == 0 {
                 continue;
             }
-            let name = read_file(troot, &format!("pane/{}/tag", l.id))
-                .map(|s| String::from(s.trim()))
-                .unwrap_or_default();
             // The status is read only where it can show (the live tile).
             let status = if l.focused {
                 read_file(troot, &format!("pane/{}/status", l.id)).unwrap_or_default()
             } else {
                 String::new()
             };
-            want.push((l.id, tb.2, tb.3, key_for(l.focused, &status), name));
+            want.push((l.id, tb.2, tb.3, key_for(l.focused, &status), name, trail));
         }
         // Gone (or bar-free): drop -- the tile lives on the shared session,
         // so its Drop says `destroy` (the explicit retire) before closing
         // its fds; a bare close would leak the slot server-side.
         let keep: Vec<u32> = want.iter().map(|w| w.0).collect();
         self.tiles.retain(|id, t| keep.contains(id) && !t.dead);
-        for (id, w, h, key, name) in want {
+        for (id, w, h, key, name, trail) in want {
             match self.tiles.get_mut(&id) {
                 Some(t) => {
-                    if t.key != key || t.name != name {
+                    if t.key != key || t.name != name || t.trail != trail {
                         t.key = key;
                         t.name = name;
+                        t.trail = trail;
                     }
                     // A strip resize arrives as the surface's own CONFIGURE
                     // (pump handles it); a same-size relayout needs a repaint
@@ -206,6 +220,7 @@ impl ChromeSet {
                             surf,
                             key,
                             name,
+                            trail,
                             dirty: true,
                             dead: false,
                         };
@@ -276,7 +291,7 @@ fn paint(t: &mut Tile, gs: &mut GlyphSource) {
         t.dirty = false;
         return;
     }
-    let cart = strip_list(t.key, &t.name, w, h, gs);
+    let cart = strip_list(t.key, &t.name, &t.trail, w, h, gs);
     let px = t.surf.pixels();
     cartoon::execute(
         &cart,

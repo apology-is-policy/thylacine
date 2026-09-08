@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 
 use alloc::string::String;
 use beacon::verbs::{parse as parse_verbs, Rule};
-use halcyond::chrome::{parse_leaves_all, parse_rect};
+use halcyond::chrome::{abbrev_home, parse_leaves_all, parse_rect, program_name};
 use halcyond::downq::DownQueue;
 use halcyond::input::{map_key, normal_key, Mode, NormalAct};
 use halcyond::layout::layout_block;
@@ -216,6 +216,12 @@ struct SessionTile {
     /// affordance (14.11.10) -- its pipe skipped, its last frame held -- reaped
     /// only when the user closes the leaf.
     exit: Option<i32>,
+    /// The tile's program (its command line's first word: `ut` for the
+    /// shell) -- the strip's name (HALCYON-VISUAL 4.1).
+    program: String,
+    /// The working directory the strip's trail last showed: a `cd` moves
+    /// the trail with no relayout to repaint it, so the loop compares.
+    trail_painted: String,
 }
 
 /// What one ingest pass concluded for a tile.
@@ -304,6 +310,8 @@ impl SessionTile {
             flat: Vec::new(),
             flat_seq: u64::MAX,
             sel: None,
+            program: program_name(argv.first().map(|s| s.as_str()).unwrap_or("")),
+            trail_painted: String::new(),
             scroll_up: 0,
             ptr: (0, 0),
             exit: None,
@@ -1084,6 +1092,9 @@ pub fn run(home: Option<String>) -> i64 {
     // + painting here.
     let mut chrome = chromeset::ChromeSet::new(ring.clone());
     let mut status = statusset::StatusBar::new(ring.clone());
+    // The tile-status feed's one-shot refusal notice (the H-3b round F4
+    // posture: a refusal drops that exit, the next exit mark retries).
+    let mut status_refusal_said = false;
 
     let mut cart = cartoon::Cartoon::new();
     let mut inbuf = [0u8; INGEST_BUF];
@@ -1337,25 +1348,85 @@ pub fn run(home: Option<String>) -> i64 {
         // only on a change. A chrome CONFIGURE (a relayout or a focus move)
         // requests a reconcile; own_surface = u32::MAX matches no leaf, so
         // reconcile skips the console self-naming (the session's leaves are
-        // named by their tiles) while still minting + keying every tag bar and
-        // reading the focused leaf. The status bar draws the focused tile's
-        // name/condition + its cwd + running-or-last command (its transcript).
+        // described by their tiles: the program as the name, the working
+        // directory as the trail) while still minting + keying every tag bar
+        // and reading the focused leaf. The status bar draws the focused
+        // tile's name/condition + its cwd + running-or-last command + last
+        // exit (its transcript).
         if up_announced {
+            // The tile-status feed (H-3b-4 on the session path): a tile's
+            // transcript latches its shell's exit mark; the compositor
+            // records it as the tile's status -- the live key, the hairline
+            // and the bar's condition all read that ONE record. On the
+            // ring's conn: the conn hosting the tile is what the gate
+            // admits. Display-only: a refusal drops this exit (said once)
+            // and the next exit mark retries.
+            for (&leaf, t) in tiles.iter_mut() {
+                if let Some(code) = t.tile.scrollback.take_exit() {
+                    let st = if code == 0 { "ok" } else { "err" };
+                    match ring.global_ctl(&format!("tag {} status {}", leaf, st)) {
+                        Ok(()) => chrome_dirty = true,
+                        Err(e) => {
+                            if !status_refusal_said {
+                                status_refusal_said = true;
+                                say!(
+                                    "halcyond: tag status refused {:?}; the live-tile key lags until the next exit",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+                // A `cd` moves the strip's trail with no relayout behind it.
+                if t.tile.scrollback.cwd() != t.trail_painted {
+                    chrome_dirty = true;
+                }
+            }
             if chrome.pump() {
                 chrome_dirty = true;
             }
             if chrome_dirty {
                 chrome_dirty = false;
-                chrome.reconcile(troot, u32::MAX, &mut gs);
+                // The name: what the tile's program calls itself -- ut's
+                // `mark k=prog` at every prompt (BEACON.md 12.12), or a
+                // foreign program's OSC 0/2 title, latest wins -- else the
+                // command line's program (a tile whose program has not
+                // spoken yet, or never does).
+                let describe = |leaf: u32| {
+                    tiles.get(&leaf).map(|t| {
+                        let title = t.tile.title.trim();
+                        (
+                            if title.is_empty() {
+                                t.program.clone()
+                            } else {
+                                String::from(title)
+                            },
+                            abbrev_home(t.tile.scrollback.cwd(), home.as_deref()),
+                        )
+                    })
+                };
+                chrome.reconcile(troot, u32::MAX, &mut gs, &describe);
+                for t in tiles.values_mut() {
+                    t.trail_painted = String::from(t.tile.scrollback.cwd());
+                }
             }
             status.ensure();
             status.pump();
             let focused_leaf = chrome.focused().map(|(id, _, _)| *id);
-            let (cwd, cmd) = focused_leaf
+            let (cwd, cmd, exit_code) = focused_leaf
                 .and_then(|l| tiles.get(&l))
-                .map(|t| (t.tile.scrollback.cwd(), t.tile.scrollback.last_command()))
-                .unwrap_or(("", None));
-            let sm = statusset::model_from(chrome.focused(), focused_leaf, cwd, cmd);
+                .map(|t| {
+                    (
+                        t.tile.scrollback.cwd(),
+                        t.tile.scrollback.last_command(),
+                        t.tile.scrollback.last_exit_code(),
+                    )
+                })
+                .unwrap_or(("", None, None));
+            // The context's directory folds home to `~` like the trail (the
+            // mockups' `transcript · ~/thylacine · ut ~`).
+            let cwd = abbrev_home(cwd, home.as_deref());
+            let sm = statusset::model_from(chrome.focused(), focused_leaf, &cwd, cmd, exit_code);
             status.refresh(&sm, &mut gs);
         }
 

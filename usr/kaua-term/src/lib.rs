@@ -55,6 +55,11 @@ pub enum Control {
     Bell,
     /// OSC 0 / OSC 2 window title.
     Title(String),
+    /// OSC 7, the working-directory report (BEACON.md 12.11): the body after
+    /// `7;` -- forwarded RAW and uninterpreted, like the Beacon frames, because
+    /// halcyond keeps the one decoder (the host check, the percent-decoding,
+    /// the control-byte and oversize rejections) and its format surface.
+    Osc7Raw(Vec<u8>),
     /// The hosted child exited with this code.
     Exit(i32),
     /// A down-channel Resize was applied (winsize set on the pts).
@@ -365,10 +370,11 @@ fn cells_in(out: &[Record]) -> usize {
 }
 
 /// Route a raw OSC payload (the bytes between the introducer and the terminator)
-/// to a Control. Titles (OSC 0/2) become Title; Beacon frames (OSC 1936) are
-/// re-synthesized as the full `ESC ] <payload> ST` frame for `beacon::wire`;
-/// every other OSC is dropped. The vt parser already consumes the 7770 aurora-
-/// config channel, so it never reaches here.
+/// to a Control. Titles (OSC 0/2) become Title; the cwd report (OSC 7) is
+/// forwarded raw; Beacon frames (OSC 1936) are re-synthesized as the full
+/// `ESC ] <payload> ST` frame for `beacon::wire`; every other OSC is dropped.
+/// The vt parser already consumes the 7770 aurora-config channel, so it never
+/// reaches here.
 fn classify_osc(serial: u32, payload: &[u8]) -> Option<Control> {
     let semi = payload.iter().position(|&b| b == b';')?;
     let (code, rest) = (&payload[..semi], &payload[semi + 1..]);
@@ -376,6 +382,7 @@ fn classify_osc(serial: u32, payload: &[u8]) -> Option<Control> {
         b"0" | b"2" => core::str::from_utf8(rest)
             .ok()
             .map(|s| Control::Title(String::from(s))),
+        b"7" => Some(Control::Osc7Raw(rest.to_vec())),
         b"1936" => {
             let mut f = Vec::with_capacity(payload.len() + 3);
             f.extend_from_slice(b"\x1b]");
@@ -769,6 +776,26 @@ mod tests {
             recs,
             vec![Record::Control(Control::Title(String::from("win")))]
         );
+    }
+
+    #[test]
+    fn cwd_report_is_forwarded_raw() {
+        // OSC 7 (BEACON.md 12.11) crosses the wire as its body, uninterpreted:
+        // halcyond's transcript is the one decoder. ST- and BEL-terminated.
+        let recs = produce(6, 1, b"\x1b]7;file://localhost/lib/aurora\x1b\\");
+        assert_eq!(
+            recs,
+            vec![Record::Control(Control::Osc7Raw(
+                b"file://localhost/lib/aurora".to_vec()
+            ))]
+        );
+        let recs = produce(6, 1, b"\x1b]7;file:///a%20b\x07");
+        assert_eq!(
+            recs,
+            vec![Record::Control(Control::Osc7Raw(b"file:///a%20b".to_vec()))]
+        );
+        // Another foreign OSC is still dropped, cells untouched.
+        assert_eq!(produce(6, 1, b"\x1b]9;whatever\x07"), vec![]);
     }
 
     #[test]

@@ -42,8 +42,9 @@ pub struct StatusBar {
     painted: Option<StatusModel>,
     /// The slot geometry last said (test builds): the witness needs the
     /// rects when they MOVE, and every say line lands in the transcript
-    /// (the observer effect) -- said per change of geometry, never per
-    /// paint, so the row-relative legs after a command see no extra row.
+    /// (the observer effect) -- said per change of GEOMETRY (`Slots::
+    /// geometry`, never the centred text's landing), never per paint, so
+    /// the row-relative legs after a command see no extra row.
     said_slots: Option<halcyond::status::Slots>,
     failed_said: bool,
     /// Whether a mint should be attempted: true at start and after a CLOSE
@@ -178,15 +179,17 @@ impl StatusBar {
         match surf.present(None) {
             Ok(()) => {
                 #[cfg(feature = "test-mode")]
-                if self.said_slots != Some(slots) {
-                    self.said_slots = Some(slots);
+                if self.said_slots != Some(slots.geometry()) {
+                    self.said_slots = Some(slots.geometry());
                     say(&format!(
-                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02}",
+                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {}",
                     surf.id,
                     slots.ws.0, slots.ws.1, slots.ctx.0, slots.ctx.1, slots.cond.0, slots.cond.1,
                     slots.clock.0, slots.clock.1,
                     halcyond::status::context_text(&model.name, &model.cwd, &model.cmd),
-                    model.condition, model.hour, model.minute
+                    model.condition, model.hour, model.minute,
+                    slots.ctx_ink.0, slots.ctx_ink.1,
+                    model.exit_code.map(|c| format!("{}", c)).unwrap_or_else(|| String::from("-"))
                     ));
                 }
                 let _ = slots;
@@ -200,13 +203,14 @@ impl StatusBar {
 }
 
 /// The model from the sources: the focused leaf (pane id, name, status),
-/// whether that leaf hosts the console (then the transcript's directory and
-/// command apply), and the clock.
+/// whether that leaf is one this process hosts (then its transcript's
+/// directory, command and last exit apply), and the clock.
 pub fn model_from(
     focused: Option<&(u32, String, String)>,
     own_pane: Option<u32>,
     cwd: &str,
     cmd: Option<&str>,
+    exit_code: Option<i64>,
 ) -> StatusModel {
     let mut m = StatusModel::empty();
     if let Some((id, name, status)) = focused {
@@ -215,6 +219,7 @@ pub fn model_from(
         if Some(*id) == own_pane {
             m.cwd = String::from(cwd);
             m.cmd = String::from(cmd.unwrap_or(""));
+            m.exit_code = exit_code;
         }
     }
     let (h, mi) = clock_hm();

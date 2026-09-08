@@ -740,7 +740,17 @@ pub struct Transcript {
     /// status feed (H-3b-4). A latch, not a queue -- only the LAST exit is
     /// the tile's status.
     last_exit: Option<i64>,
+    /// The same code, kept: the status bar's condition label reads it
+    /// (`exit N`) without consuming the feed's latch.
+    last_exit_code: Option<i64>,
+    /// BEACON.md 12.12: the program's own name, latched from its
+    /// `mark k=prog` until the tile takes it (`take_prog`) as its title.
+    prog: Option<String>,
 }
+
+/// A program name longer than this is dropped whole (an OSC title's cap;
+/// the strip's name is shown whole, so a hostile length is a hostile width).
+const PROG_MAX: usize = 256;
 
 /// Default caps: sized against the 13.3 budget (a content budget, not a
 /// pixel budget; the layout cache is bounded separately).
@@ -782,6 +792,8 @@ impl Transcript {
             frozen: VecDeque::new(),
             open: Block::new(0, BlockKind::Foreign),
             last_exit: None,
+            last_exit_code: None,
+            prog: None,
             line: Vec::new(),
             col: 0,
             pen: SgrPen::new(&pal),
@@ -841,6 +853,18 @@ impl Transcript {
     /// one landed since the last take.
     pub fn take_exit(&mut self) -> Option<i64> {
         self.last_exit.take()
+    }
+
+    /// The exit code of the most recently completed command, if any has
+    /// completed -- a peek, never consumed (the bar's `exit N` label).
+    pub fn last_exit_code(&self) -> Option<i64> {
+        self.last_exit_code
+    }
+
+    /// Take the program name the latest `mark k=prog` declared, if one
+    /// landed since the last take (BEACON.md 12.12): the tile's title.
+    pub fn take_prog(&mut self) -> Option<String> {
+        self.prog.take()
     }
 
     /// H-3d: the session's working directory as last reported by the shell
@@ -1235,10 +1259,21 @@ impl Transcript {
                         }
                     }
                 }
+                // BEACON.md 12.12: the program names itself; an empty or
+                // oversize name is dropped whole (never a truncated name).
+                if Self::arg(args, "k") == Some("prog") {
+                    if let Some(t) = Self::arg(args, "text") {
+                        let t = t.trim();
+                        if !t.is_empty() && t.len() <= PROG_MAX {
+                            self.prog = Some(String::from(t));
+                        }
+                    }
+                }
                 if Self::arg(args, "k") == Some("exit") {
                     let code = Self::arg(args, "code").and_then(|c| c.parse::<i64>().ok());
                     if code.is_some() {
                         self.last_exit = code;
+                        self.last_exit_code = code;
                         if self.open.kind != BlockKind::Foreign || self.open.has_content() {
                             self.open.exit = code;
                         } else if let Some(last) = self.frozen.back_mut() {
@@ -1502,17 +1537,32 @@ impl Transcript {
             return;
         }
         if let Some(rest) = self.osc_buf.strip_prefix(b"7;") {
-            if let Some(url) = rest.strip_prefix(b"file://") {
-                let slash = url.iter().position(|&b| b == b'/').unwrap_or(url.len());
-                let (host, path) = url.split_at(slash);
-                if (host.is_empty() || host == b"localhost") && !path.is_empty() {
-                    if let Some(p) = pct_decode_path(path) {
-                        self.cwd = p;
-                    }
+            let body = rest.to_vec();
+            self.apply_cwd_report(&body);
+        }
+        self.osc_buf.clear();
+    }
+
+    /// H-3d (BEACON.md 12.11): the working-directory report's body (after
+    /// `7;`) -- from this scanner's own OSC arm on the console path, or
+    /// forwarded raw by a tile's kaua-term (`Control::Osc7Raw`). One decoder
+    /// for both: ours only when the host is empty or `localhost`; the path
+    /// percent-decoded, absolute, control-free -- else the report is dropped
+    /// whole and the directory stands. Bounded by the caller (the 256-byte
+    /// OSC body cap at both producers).
+    pub fn apply_cwd_report(&mut self, body: &[u8]) {
+        if body.len() > OSC_MAX {
+            return;
+        }
+        if let Some(url) = body.strip_prefix(b"file://") {
+            let slash = url.iter().position(|&b| b == b'/').unwrap_or(url.len());
+            let (host, path) = url.split_at(slash);
+            if (host.is_empty() || host == b"localhost") && !path.is_empty() {
+                if let Some(p) = pct_decode_path(path) {
+                    self.cwd = p;
                 }
             }
         }
-        self.osc_buf.clear();
     }
 
     fn push_param(&mut self) {
@@ -2312,6 +2362,31 @@ mod tests {
 
     fn line_str(l: &Line) -> String {
         l.cells.iter().map(|c| c.ch).collect()
+    }
+
+    #[test]
+    fn a_raw_cwd_report_body_is_decoded_like_the_scanned_one() {
+        // The tile path's `apply_cwd_report` (the body after `7;`, forwarded
+        // by a kaua-term) is the SAME decoder the scanner's OSC arm uses:
+        // every rejection below matches the scanned test's, and an oversize
+        // body is dropped whole here too (the wire's cap is re-checked).
+        let mut t = Transcript::new(daylight());
+        t.apply_cwd_report(b"file://localhost/lib/aurora");
+        assert_eq!(t.cwd(), "/lib/aurora");
+        t.apply_cwd_report(b"file:///a%20b");
+        assert_eq!(t.cwd(), "/a b");
+        t.apply_cwd_report(b"file://otherhost/elsewhere");
+        assert_eq!(t.cwd(), "/a b", "another host's report is not ours");
+        t.apply_cwd_report(b"file://localhostrelative");
+        assert_eq!(t.cwd(), "/a b", "not absolute: rejected");
+        t.apply_cwd_report(b"file://localhost/bad%zz");
+        assert_eq!(t.cwd(), "/a b", "a malformed escape: rejected");
+        t.apply_cwd_report(b"");
+        assert_eq!(t.cwd(), "/a b", "an empty body: nothing");
+        let mut long: Vec<u8> = Vec::from(&b"file://localhost/"[..]);
+        long.extend(core::iter::repeat(b'x').take(300));
+        t.apply_cwd_report(&long);
+        assert_eq!(t.cwd(), "/a b", "oversize: dropped whole");
     }
 
     #[test]

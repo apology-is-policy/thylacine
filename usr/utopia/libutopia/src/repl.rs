@@ -200,6 +200,27 @@ impl Repl {
         }
     }
 
+    /// BEACON.md 12.12: the program-name report -- `mark k=prog;text=ut` at
+    /// every prompt beside the cwd report, inside the prompt zone. The
+    /// tile's name in Halcyon's chrome is what its program calls itself, and
+    /// the shell re-asserts its own name at each prompt because a program it
+    /// ran may have taken the tile's title while it held it. A Beacon mark,
+    /// not OSC 2: a foreign program's OSC title is PAYLOAD in both tiers
+    /// (strip keeps it), so a rich-only report on that channel would break
+    /// the strip identity; a mark is stripped with the frames by
+    /// construction, and a plain sink never sees it.
+    fn prog_report(&self, out: &mut dyn IoWrite) {
+        if self.beacon_rich {
+            let mut v: Vec<u8> = Vec::new();
+            beacon::wire::point(
+                &mut v,
+                beacon::wire::Op::Mark,
+                &[("k", "prog"), ("text", "ut")],
+            );
+            let _ = out.write_all(&v);
+        }
+    }
+
     /// H-3d (BEACON.md 12.2, the v1 amendment): the accepted command line as
     /// the output zone's FIRST child (`mark k=cmd`; the exit mark is its
     /// last), so the zone knows what ran and how it ended and a sink never
@@ -562,6 +583,7 @@ impl Repl {
         // one, so line editing never spawns zones per keystroke.
         self.zone_open(out, beacon::sink::Zone::Prompt);
         self.cwd_report(out);
+        self.prog_report(out);
         // render() borrows the editor mutably (it tracks the wrapped-render
         // cursor row), so compute the prompt string first.
         let p = self.prompt();
@@ -730,6 +752,7 @@ impl Repl {
                     self.zone_close(out);
                     self.zone_open(out, beacon::sink::Zone::Prompt);
                     self.cwd_report(out);
+                    self.prog_report(out);
                     self.emit_prompt(out);
                     // H-2 F10: one completed cycle -- the caller's cue to
                     // re-check the renderer tier before this fresh prompt
@@ -1136,6 +1159,33 @@ mod tests {
         let mut psink: Vec<u8> = Vec::new();
         plain.draw_prompt(&mut psink);
         assert!(!String::from_utf8_lossy(&psink).contains("\x1b]7;"), "plain tier: no report");
+    }
+
+    #[test]
+    fn a_rich_prompt_names_the_program_and_reasserts_it_after_a_command() {
+        // BEACON.md 12.12: the shell says what it is (`mark k=prog`) at
+        // every prompt (the initial one and the accept tail), inside the
+        // prompt zone; a plain-tier sink never sees it.
+        let mark = "\x1b]1936;v1;mark;k=prog;text=ut\x1b\\";
+        let mut repl = Repl::new();
+        repl.set_beacon_rich(true);
+        let mut sink: Vec<u8> = Vec::new();
+        repl.draw_prompt(&mut sink);
+        let s = String::from_utf8_lossy(&sink).into_owned();
+        let zone = s.find("\x1b]1936;v1;zone;k=prompt\x1b\\").expect("the prompt zone");
+        let prog = s.find(mark).expect("the program-name report");
+        assert!(prog > zone, "the report rides inside the prompt zone");
+        let mut sink2: Vec<u8> = Vec::new();
+        let _ = repl.feed(b"let x = 1\n", &mut sink2);
+        let s2 = String::from_utf8_lossy(&sink2).into_owned();
+        let exit = s2.find("mark;k=exit").expect("the exit mark");
+        let again = s2.rfind(mark).expect("re-asserted at the next prompt");
+        assert!(again > exit, "after the command's exit mark");
+        let mut plain = Repl::new();
+        let mut psink: Vec<u8> = Vec::new();
+        plain.draw_prompt(&mut psink);
+        let _ = plain.feed(b"let x = 1\n", &mut psink);
+        assert!(!String::from_utf8_lossy(&psink).contains("k=prog"), "plain tier: no report");
     }
 
     #[test]

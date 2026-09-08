@@ -23,7 +23,160 @@ needed the operator.
 
 ---
 
-## Run 44 (2026-09-08, Fable 5.1 max) -- the composition round: mockup-true Halcyon, verified by agentic screendump
+## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
+
+**Where it sits.** The first queued item after run 44's close: the chrome
+CONTENT against HALCYON-VISUAL 4/6 and the operator's mockups. Run 44 made the
+transcript mockup-true; the chrome around it still showed an empty tag bar on
+every session tile, a dot for a condition, and mono islands in the status bar.
+Small, halcyond-mostly, and it batches its Fable round with the atlas bound
+(owed since run 44).
+
+**What the mockups actually pin, measured rather than read.** The composition
+PNG's chrome strings ("listener 1", "Territory 0") are illustrative -- HALCYON.md
+names a listener only as the Genera class -- but the operator's OWN Daylight
+mockups HTML (`docs/halcyon-daylight-mockups.html`, theirs, untracked-modified)
+carries a complete content model for a shell tile: name `transcript`/`ut`, the
+trail `~/kernel/sched` (the working directory: Acme's `awd` heritage, the tag
+tracks the shell's directory), the status context `transcript · ~/thylacine ·
+ut ~` (name · cwd · cmd -- exactly what H-3d built), and the condition `⊢ ok` /
+`⊢ 1 error` / `⊢ 1 warning`. The PNG's pixels settle the colours the prose
+leaves ambiguous: `⊢ ok` is EMBER (#d37e4d measured), not sage -- sage's key on
+the dark bar is ~1.5:1 contrast, invisible -- the clock is `status_muted`, the
+trail is the sage `fg_dim`, and the context is centred (ink centre 707 of 1406).
+The `1 error` / `1 warning` labels are a diagnostics COUNT (the err mockup
+prints two error lines yet says "1 error"; the ok-class "1 warning" cannot be an
+exit code), which no producer emits today: the label is `exit N` from the exit
+mark -- honest -- and a Beacon `diag` mark is the extension owed when a
+producer exists. Not built now: dead protocol is worse than a plain label.
+
+**The defect under the missing content: the session's live tile never keyed.**
+`tag <id> status` (the tile-status verb) admits only the console renderer;
+`halcyond --session` is a declared session conn, not the renderer, and its loop
+never sent the verb anyway (run 43 deferred "the D per-command exit-status
+feed"). So on the session path the live key stayed sage, the hairline never
+went cinnabar, and the bar's condition sat idle -- an E_PERM nobody had
+observed because nobody had written the feed. Fixed at both ends: tapestryd
+admits the verb from the DECLARED session for a leaf THAT CONN HOSTS (the party
+hosting a tile is the one that knows its exit, as the renderer is for the
+console tile; the verb is parsed whole BEFORE the gate so a malformed verb or a
+foreign/empty/container/unknown id still meets the default deny, and the
+battery's negative twin holds because the battery never declares); halcyond's
+session loop takes each tile's latched exit and sends it on the ring's conn,
+refused-once-said-then-retry per exit (the H-3b F4 posture).
+
+**Landed (host: halcyond 151 = 144 + 7; the guest userspace build clean):**
+
+- The tag bar's NAME comes from the host that spawned the tile (a `describe`
+  closure: the program = argv[0]'s basename, `ut` for a shell tile; the console
+  names itself) -- the pane `tag` file keeps its ONE meaning (the H-4d command
+  line) and is read only for a leaf nobody describes. The TRAIL is the tile's
+  working directory with home folded to `~`, right-aligned in the key's dim
+  ink; a path that does not fit beside the name gives up leading components
+  (`…/sched`) and is never cut; a `cd` repaints it with no relayout behind it.
+- The status bar per the mockups: every slot proportional at 10 px, a
+  full-height ember workspace box, the context centred, the turnstile +
+  `ok`/`exit N` condition in ember/cinnabar, the clock muted. `resting` is the
+  good state (section 4.2: "exit 0 (or nothing has run yet)").
+- The console gate's condition legs re-derived: the dot is gone, so the
+  solid-rect probe would read the bar's dark; `gfx_region.py --near` counts
+  pixels near the wanted key AND requires zero near the other key in the same
+  slot -- ink of any colour would pass a slot painted the wrong state.
+
+**Flagged for the operator (their scripture, not changed):** the failure state's
+cinnabar key (#982818) on the dark bar (#1a120a) is ~1.75:1 -- legible as a
+crisp glyph, dim as a label; their CSS says so and the PNG shows only the ok
+state. Their CSS/HTML still name Public Sans (one behind their own section 7).
+
+**The first screenshot round found two dependencies the chunk had to pull
+forward, and the console gate caught a third thing.**
+
+- *The trail was empty on every tile, and so was the context's directory.*
+  The compose gate PASSED (it does not read the trail), the capture showed
+  `ut` and `⊢ ok` in the right places -- and no `~` anywhere. Measured: both
+  strips' only ink was the name and the bevel. Cause: the KT-1 wire forwarded
+  titles and Beacon frames and DROPPED every other OSC, so a session tile's
+  transcript never saw ut's OSC 7 -- the H-3d cwd was built on the console
+  byte path and never reached a tile. The trail's dependency; pulled forward:
+  `Control::Osc7Raw` crosses the wire raw (capped at the vt's 256 like a
+  title, checked before the bytes are taken) and the transcript's ONE decoder
+  applies it on both paths (`apply_cwd_report`). Kaua-term stays the dumb
+  parser it is meant to be.
+- *The left tile was named `halcyon`.* Its command line IS `halcyon` (the
+  welcome tool, which execs the shell): a host knows only what it spawned,
+  and the program is the party that knows what it is. First cut: ut emits
+  OSC 2 `ut` at each prompt, rich-only, with `wire::strip` extended to drop
+  OSC 0/2 -- and beacon's pinned `foreign_escapes_are_payload` test failed:
+  a FOREIGN program's title inside the output is payload in both tiers and
+  strip must keep it, so a rich-only report cannot ride that channel without
+  breaking the strip identity (12.1 rule 1). The test was right. Rerouted as
+  a Beacon mark, `mark k=prog;text=ut` inside the prompt zone (12.12 + the
+  12.2 registry amendment): stripped with the frames by construction, unseen
+  by every serial gate; the tile's title is ONE field fed by both the mark
+  and a foreign OSC title, latest wins in record order.
+- *The console gate (ls-halcyon) failed its keyboard-menu leg, three of
+  three.* The new condition legs had PASSED (62 cinnabar-line pixels, 33
+  ember -- on real screendumps), so the leg after them was the finding: "no
+  obj run on row 105/107". A host reproduction of the exact byte sequence
+  gave the expected rows (the prompt block holds no item; the newest row is
+  the `pwd` line), so the guest had one row more than the sequence explains.
+  It was halcyond's OWN status-bar say line: the console drain mirrors every
+  daemon line into the transcript, the H-3d design said the line only when
+  the slot GEOMETRY changed (its comment names exactly this hazard), and the
+  new `ctx_ink` field -- where the centred text landed -- changes with every
+  context, so the line was said per paint: a row after every command, and
+  `k` from the newest row landed on `pwd` instead of `ls`. The witness was
+  writing itself into the transcript it witnesses. Fixed by keying the say on
+  `Slots::geometry()` (ctx_ink zeroed) with a host test pinning the key. The
+  antialiasing finding lives beside it: the island bake's turnstile is NOT
+  crisp (3 px within a 24-box of the ink, 34 within 80), so the pixel witness
+  is a blend-line classifier (`gfx_region.py --ink`: projection >= 0.5,
+  residual <= 16 from the bar's dark to the ink), which a synthetic sweep
+  shows never confuses an ember blend for cinnabar or the reverse (the lines
+  only converge at the ground, below half-ink).
+- *Fixing the say line failed the gate's FIRST leg, three of three.* The
+  parchment proof read the display's centre band and found it header-toned
+  (206,196,182). The screendump: on the console lever the transcript opens
+  with the mirrored BOOT LOG, which the composition round's class rule
+  renders -- correctly -- as a raw island on the header ground, and the view
+  is bottom-anchored, so how much of that island the centre band sees
+  depends on how many rows the session has produced below it. The earlier
+  image passed the leg (52% parchment) BECAUSE the per-paint say lines were
+  padding the transcript; with the bug fixed the island climbed 34 rows into
+  the band and header won. A measurement keyed on content history, not on
+  the property it claims: the probe now reads the transcript's newest third
+  (`region 200 450 1080 760`), where the prompts and outputs are, and the
+  rationale sits beside it in the scenario.
+- *Two more legs of the same class, found one gate run each.* The pre-split
+  control ("no strip on a single leaf") and the zoom-drop leg ("the strip is
+  gone") both read the strip region's INTERIOR and keyed on header-vs-
+  parchment -- the island is header. Rewritten to witness what only a STRIP
+  has (a live tint on its interior, a separator key on its bottom row) plus
+  the compositor's own carve record (`pane/<id>/tagbar` = `0 0 0 0` for the
+  single leaf). And `menu_want_gone` waited for parchment under a dismissed
+  menu, where the command-path leg's chosen verb had just printed a raw
+  island: the property is "a transcript ground again, not the menu's
+  raised", and both Daylight grounds satisfy it. None of these was a
+  rendering defect; each was a witness keyed on the ground colour of
+  whatever content happened to lie under it, written before raw islands
+  existed. The gate stayed honest throughout: every red named the exact
+  rect and colour, and each fix narrowed a witness to the property it
+  claims instead of loosening it.
+
+**Verification.** Host: halcyond 155 (+11), kaua-term 35 (+2), beacon 37;
+the guest userspace build clean (libutopia is guest-only -- its bar is the
+build and the in-guest `u-repl-test`). The console lever: `ls-halcyon` PASS
+in 115 s, one attempt, every leg -- the two new condition legs on real
+screendumps (62 cinnabar-line px after the failing command, 33 ember after
+the passing one, zero of the other ink each time), the keyboard menu back
+on its row, the split/zoom/event-set/click legs unchanged. The session
+lever: `ls-gfx-compose` PASS in 51 s on the final image, and its captures
+(`build/ls-ci-compose/`) are mockup-true for the chrome: both tiles named
+`ut` -- the welcome tile, spawned as the welcome tool, took the shell's name
+through the prog mark -- both trails `~`, the context `ut · ~ · ls
+/lib/halcyon` centred in its span, `⊢ ok` in ember, the clock in the muted
+ink. Seven bakes and eight gate boots in all; the audit (batched with the
+atlas bound) is spawned at the commit, below.
 
 **Operator input.** Screenshots sc1..sc5 ("still a complete mess, even bigger
 than before"), then two supporting documents -- `docs/HALCYON-COMPOSITION.md`

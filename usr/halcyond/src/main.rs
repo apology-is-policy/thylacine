@@ -387,6 +387,9 @@ pub extern "C" fn rs_main() -> i64 {
     // cheap retry per command is the right posture).
     let mut pending_exit: Option<i64> = None;
     let mut status_refusal_said = false;
+    // The working directory the console strip's trail last showed: a `cd`
+    // moves the trail with no relayout behind it, so the loop compares.
+    let mut trail_painted = alloc::string::String::new();
     // H-3c: the verb table (BEACON.md 7; the system tier, read once) + the
     // one menu, the last frame's block placement (the hit map for
     // click-a-path and the keyboard menu's anchor: block id, screen y,
@@ -702,9 +705,21 @@ pub extern "C" fn rs_main() -> i64 {
             if chrome.pump() {
                 relayout = true;
             }
+            if t.cwd() != trail_painted {
+                relayout = true;
+            }
+            // The console tile's word on itself (HALCYON-VISUAL 4.1): its
+            // program as the strip's name, its working directory as the
+            // trail. Captured by value: the reconcile borrows the chrome set.
+            let describe = {
+                let own = chrome.own_pane();
+                let cwd = alloc::string::String::from(t.cwd());
+                move |id: u32| (Some(id) == own).then(|| (halcyond::chrome::console_name(), cwd.clone()))
+            };
             if relayout {
                 relayout = false;
-                chrome.reconcile(troot, surf.id, &mut gs);
+                chrome.reconcile(troot, surf.id, &mut gs, &describe);
+                trail_painted = alloc::string::String::from(t.cwd());
                 // A relayout re-arms the status bar's mint retry (H-3d F5):
                 // a prior mint failure may now succeed, ChromeSet's cadence.
                 status.rearm();
@@ -719,7 +734,7 @@ pub extern "C" fn rs_main() -> i64 {
                 let st = if code == 0 { "ok" } else { "err" };
                 pending_exit = None;
                 match surf.global_ctl(&alloc::format!("tag {} status {}", pane, st)) {
-                    Ok(()) => chrome.reconcile(troot, surf.id, &mut gs),
+                    Ok(()) => chrome.reconcile(troot, surf.id, &mut gs, &describe),
                     Err(e) => {
                         if !status_refusal_said {
                             status_refusal_said = true;
@@ -741,6 +756,7 @@ pub extern "C" fn rs_main() -> i64 {
                 chrome.own_pane(),
                 t.cwd(),
                 t.last_command(),
+                t.last_exit_code(),
             );
             status.refresh(&sm, &mut gs);
         }

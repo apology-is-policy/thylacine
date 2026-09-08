@@ -316,8 +316,17 @@ impl Tile {
                 // they mean THIS state (after the frame) -- incl. the
                 // structure (pre / table cell / rule) the tile rebuilds from.
                 self.spans.note(serial, self.scrollback.span_tag());
+                // BEACON.md 12.12: a program's `mark k=prog` names the tile
+                // exactly as an OSC title does -- one `title`, latest wins
+                // across both channels (the record stream keeps their order).
+                if let Some(p) = self.scrollback.take_prog() {
+                    self.title = p;
+                }
             }
             Control::Title(t) => self.title = t,
+            // The cwd report, forwarded raw (BEACON.md 12.11): the transcript's
+            // one decoder applies it, as on the console path.
+            Control::Osc7Raw(body) => self.scrollback.apply_cwd_report(&body),
             Control::Bell => self.bell = true,
             Control::Exit(code) => self.exit = Some(code),
             // The down-channel resize was applied on the pts; no model state here.
@@ -980,6 +989,62 @@ mod tests {
 
         t.apply(Record::Control(Control::Exit(0)));
         assert_eq!(t.exited(), Some(0));
+    }
+
+    // BEACON.md 12.11 on the tile path: the cwd report crosses the wire raw
+    // and the transcript's one decoder applies it -- a good report sets the
+    // directory, a foreign host's or a malformed one changes nothing, and
+    // the grid is untouched either way.
+    #[test]
+    fn a_raw_cwd_report_sets_the_scrollback_directory_through_the_one_decoder() {
+        let mut t = tile();
+        assert_eq!(t.scrollback.cwd(), "");
+        t.apply(Record::Control(Control::Osc7Raw(
+            b"file://localhost/lib/aurora".to_vec(),
+        )));
+        assert_eq!(t.scrollback.cwd(), "/lib/aurora");
+        t.apply(Record::Control(Control::Osc7Raw(b"file:///a%20b".to_vec())));
+        assert_eq!(t.scrollback.cwd(), "/a b", "percent-decoded, an empty host is ours");
+        t.apply(Record::Control(Control::Osc7Raw(
+            b"file://otherhost/elsewhere".to_vec(),
+        )));
+        assert_eq!(t.scrollback.cwd(), "/a b", "another host's report is not ours");
+        t.apply(Record::Control(Control::Osc7Raw(b"file://localhost/no\x01ctl".to_vec())));
+        assert_eq!(t.scrollback.cwd(), "/a b", "a control byte: rejected");
+        t.apply(Record::Control(Control::Osc7Raw(b"garbage".to_vec())));
+        assert_eq!(t.scrollback.cwd(), "/a b", "not a file URL: dropped whole");
+        assert!(
+            t.grid.cells().iter().all(|c| c.ch == ' ' || c.ch == '\0'),
+            "the report wrote no cell"
+        );
+    }
+
+    // BEACON.md 12.12: `mark k=prog` names the tile like an OSC title does;
+    // the two channels share one `title`, latest wins in record order; an
+    // empty or oversize name is dropped whole.
+    #[test]
+    fn a_prog_mark_names_the_tile_and_an_osc_title_after_it_wins() {
+        let mut t = tile();
+        let mut f: Vec<u8> = Vec::new();
+        beacon::wire::point(&mut f, beacon::wire::Op::Mark, &[("k", "prog"), ("text", "ut")]);
+        t.apply(Record::Control(Control::Osc1936Raw {
+            serial: 1,
+            frame: f.clone(),
+        }));
+        assert_eq!(t.title, "ut");
+        t.apply(Record::Control(Control::Title(String::from("nora"))));
+        assert_eq!(t.title, "nora", "a program's OSC title after the mark wins");
+        t.apply(Record::Control(Control::Osc1936Raw { serial: 2, frame: f }));
+        assert_eq!(t.title, "ut", "the shell re-asserts at its next prompt");
+        let mut e: Vec<u8> = Vec::new();
+        beacon::wire::point(&mut e, beacon::wire::Op::Mark, &[("k", "prog"), ("text", "  ")]);
+        t.apply(Record::Control(Control::Osc1936Raw { serial: 3, frame: e }));
+        assert_eq!(t.title, "ut", "an empty name is dropped whole");
+        let long = alloc::string::String::from_utf8(alloc::vec![b'x'; 300]).unwrap();
+        let mut l: Vec<u8> = Vec::new();
+        beacon::wire::point(&mut l, beacon::wire::Op::Mark, &[("k", "prog"), ("text", &long)]);
+        t.apply(Record::Control(Control::Osc1936Raw { serial: 4, frame: l }));
+        assert_eq!(t.title, "ut", "an oversize name is dropped whole");
     }
 
     #[test]
