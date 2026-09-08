@@ -234,6 +234,25 @@ transcript shows the display transiting THROUGH pending-direct on the way,
 the arm the flag also covers -- and ls-gfx-compose 73 s with all six legs
 at the 2.0 table. Close commit: 0c1dc04e.
 
+**The stuck-pre exit mark, and the status rows nobody wrote.** The first
+residue item was the chrome-content round's pre-existing P3: PL-1b's
+containment guard refused every point op inside an open `pre`, and the
+shell's exit mark is a point op, so a program that died between its pre
+open and close took the next command's exit with it -- the tile and the bar
+showed the previous command's state, and the prompt zone after it healed
+the block, which is why nobody saw it. The distinction the fix draws is
+whose mark it is: a rule inside a pre is the program's structure and stays
+refused; a `cmd`/`exit` mark is the shell's and ends the pre (finalized
+as-is, the posture the table capture already had at a block boundary) and
+then lands. One host test with the rule control and the cells-mode twin;
+its own commit, and it rides the next halcyond round's focus rather than
+being folded silently into the close. While its console bake ran I noticed
+`docs/halcyon-status.md` had received no row since s7a: the chrome-content
+round, the composition round, the scale scripture and its four chunks, and
+the close were all journalled and never indexed. Eight rows added, every
+hash re-derived from `git log` before it was written. Stuck-pre commit:
+94526bab.
+
 ## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
 
 **Where it sits.** The first queued item after run 44's close: the chrome
