@@ -208,6 +208,25 @@ Observed: aux's VM (from the aux tree) ran through my gate's boot despite the
 stolen lease and the note; both passed, and the contention cost nothing but is
 recorded as the resource, not a duration.
 
+**The carried finding, closed the same run.** The prosecutor carried one
+pre-existing item out of scope: the glyph atlas had no eviction bound short
+of `regen()` -- untrusted output printing distinct codepoints grew the packer
+~10 MB per size toward the compositor's fixed-heap OOM, a silent exit that
+takes the session's face with it. Ownership, not attribution: it is ours, so
+it is fixed rather than queued -- `raster::MAX_ATLAS_PAGES` (16 x 512 px = 4
+MiB, ~16x a Latin working set) + `GlyphSource::evict_if_full`, called BETWEEN
+frames at both loop tops and never inside one (`tile::paint_grid` stamps the
+generation once per frame; `glyph()` only inserts), so the store exceeds the
+bound by at most one frame's glyphs. Every id consumer already survived an
+eviction (the console's layout cache keys on the gen; tiles re-lay per pass;
+chrome/status/menu look glyphs up on repaint; nothing holds a Cartoon across
+frames -- grep, not memory). The test grows 400 `.notdef` glyphs on 32-px
+pages past the bound as the positive control, then proves frames of 20 stay
+within MAX + 20 while the gen keeps bumping. Host 144; guest ELF green; the
+audit rides the next halcyond round (double-distance). F7 stays deferred with
+its fix shape recorded (the blank CHAR, since all eight `attrs` bits are
+taken) and an empty trigger set today.
+
 ## Run 43 (main, 2026-09-07, Opus 4.8, effort MAX, operator present + granted full autonomy): three Halcyon chunks -- H-A fonts+type-model, H-D session chrome, F2 pts input-batching -- landed and pushed, with three wrong turns caught
 
 The operator picked A (fonts) at /effort max, clarified the face + weight rule
