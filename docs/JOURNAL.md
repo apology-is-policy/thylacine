@@ -136,6 +136,78 @@ detection rides `TAG_ROW_HDR`; a header row that scrolled off before its
 body joins a plain-line block, not the table. MEMORY.md compacted under its
 read limit (aux's entries preserved as hooks; cold lines to the archive).
 
+**The audit close (after the self-compaction; the same run).** The Fable 5.1
+prosecutor (`a4209c99b04ff5fd8`, MODEL start == end, 523k tokens, static +
+host-test + scratch-copy repros) returned 0 P0 / 1 P1 / 0 P2 / 8 P3 -- not
+dirty by count -- and the self-audit run alongside it 6 P3s, two of them the
+prosecutor's F4/F5 found independently. **The P1 is a regression this round
+introduced and the screendumps could not see: a click is not a pixel.** Cells
+mode rebuilds every row of a table (every line of a pre) into ONE item on the
+live grid, and the whole hit-test chain -- `prov`, the laid `src_col`s (every
+table cell run at 0), pre lines with no `src_row`, and four inverse lookups
+matching on the item alone -- was written for one-row items. So a click on
+`ps` row N opened row 0's pid; a `kill` from that menu would have killed the
+wrong process. The prosecutor proved it with two scratch tests (a `ps` shape,
+an `la` shape); both landed as the regressions. The fix threads the row
+through: `prov` = (item, row, start), `TableModel.starts` gives each cell its
+source column (the byte-fed console fills the plain-realization offsets),
+pre lines stamp `src_row`, and `prov_inverse` / `grid_run_rect` /
+`live_row_spans` / `live_run_underline` / `caret_in_block` match (item, row)
+(`laid_line_for` treats row MAX as the whole item, so a pre's one FlatRow still
+bands the fence). The lesson in one line: **a rebuilt structure collapses its
+rows into one item, and every address that named the item alone now names its
+first row** -- when a change gives an old address space a new dimension, sweep
+every consumer for the dimension it lacks.
+
+The P3s reshaped one mechanism. The rule bit "rode an inline open and died at
+any other op" (this run's own addendum 12) -- and the prosecutor showed one
+rule frame placing TWO rules (`rule`, a text line, then an `em` open starting
+the next line: no op sits between the text and the open, so the open still
+carried the bit) and a rule LOST when the frames close over it (`rule` then
+`/zone`). No op can tell whether text was written; the tile can. The episode
+now ends when the tile sees cells written after the rule frame
+(`Tile::apply(CellDiff)` -> `end_rule`; a scroll re-reports old serials and
+does not end it), and both defects go with it. The other fixes: the rebuilt
+table takes its header flag from the row tag, never the spec (a table whose
+header scrolled off drew its first BODY row as a header); a dropped block's id
+is never recycled (its cells' tags on the grid would annotate the successor
+zone -- the same family as the TAG_PROMPT catch, on the doc/raw axis); the
+console path adopts the prompt-into-output gap; a kv value wider than its group
+clamps at its column; and on the tapestryd side the one status carve goes with
+the seat at a `session on` takeover (an idle predecessor's bar had blocked the
+successor's; reachable only with a non-halcyond declared client). Deferred with
+its reason: `trim_untagged_tail` cannot tell a printed trailing space from a
+never-written column in a FRAME-LESS tile (every cell span 0) -- yank fidelity
+of trailing whitespace there needs a written-bit on the wire cell. Carried,
+pre-existing: the glyph atlas has no eviction bound short of `regen()`.
+
+**The screenshot loop is now a gate.** `tools/interactive/ls-gfx-compose.exp`
+boots the session lever, drives welcome / `cat` / `ls` + menu / nora exactly as
+the scratch harness did, and hands the captures to `gfx_compose.py`, the
+VERDICT half: every check is a property the composition scripture pins,
+measured off the pixels (the herald centred; the 19 px paragraph pitch by
+autocorrelation of the ink profile; inline chrome at the island height by the
+pill's padding COLUMNS; one rule below the title; a tag bar with text and the
+status bar; the raw island by its header-toned columns plus the gutter's;
+nora's box frame by long straight ink runs). Two wrong turns in building it,
+both the kind a check that cannot fail hides: a single probe row/column for the
+pane region ended the pane at the first glyph it crossed (a majority test on
+both axes fixed it), and a row-run rectangle finder fragmented every chrome
+ground on the text inside it (the padding columns run the full height). The
+discrimination table over the four real rounds: shots1 FAIL (herald, phantom
+rule above the title, no tag text, no status bar, no box frame), shots2 FAIL
+(herald, the old 17 px pitch, no chrome, no rule), shots3 PASS, shots4 PASS;
+`--selftest` discriminates 11 synthetic canvases one variable away. On the
+audit-fixed image the gate PASSED in 51 s (HVF) and the captures measure
+identically to shots4 (herald offsets -0.5/-1.5/-1.0, pitch 19, one rule at
+row 447, 97% status ground). Host: halcyond 143 (+5), beacon 37. The `.exp`
+matches `EXTINCTION:` and so waits on the vault's abi-boot-banner mirror
+declaration (the s7-nora-probe precedent: the vault commits it with the
+declaration) -- `gfx_compose.py` lands now, the scenario rides the ring.
+Observed: aux's VM (from the aux tree) ran through my gate's boot despite the
+stolen lease and the note; both passed, and the contention cost nothing but is
+recorded as the resource, not a duration.
+
 ## Run 43 (main, 2026-09-07, Opus 4.8, effort MAX, operator present + granted full autonomy): three Halcyon chunks -- H-A fonts+type-model, H-D session chrome, F2 pts input-batching -- landed and pushed, with three wrong turns caught
 
 The operator picked A (fonts) at /effort max, clarified the face + weight rule

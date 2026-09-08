@@ -479,10 +479,22 @@ pub extern "C" fn rs_main() -> i64 {
             // key off it).
             let mut heights: Vec<(u64, i32, i32)> = Vec::new(); // (id, h, rel_y)
             let mut total: i32 = sheet.block_gap;
-            for b in t.frozen_blocks().iter() {
+            // The gap after a block depends on the pair (a prompt runs into
+            // its output as one entry) and a block that laid nothing takes
+            // none -- the same rule the tile path applies (Tile::render).
+            let gap_after = |i: usize, lh: i32| -> i32 {
+                if lh == 0 {
+                    return 0;
+                }
+                let frozen = t.frozen_blocks();
+                let this = frozen.get(i).map(|b| b.kind).unwrap_or(t.open_block().kind);
+                let next = frozen.get(i + 1).map(|b| b.kind).unwrap_or(t.open_block().kind);
+                halcyond::layout::block_gap_between(this, next, &sheet)
+            };
+            for (i, b) in t.frozen_blocks().iter().enumerate() {
                 let lh = cache.get(b, widthi, &sheet, &mut gs).height;
                 heights.push((b.id, lh, total));
-                total += lh + sheet.block_gap;
+                total += lh + gap_after(i, lh);
             }
             let open_rel = total;
             let open_laid = layout_block(t.open_block(), widthi, &sheet, &mut gs);
@@ -594,7 +606,7 @@ pub extern "C" fn rs_main() -> i64 {
                         });
                     }
                 }
-                y += lh + sheet.block_gap;
+                y += lh + gap_after(bi, lh);
             }
             frame.push((u64::MAX, y, open_h));
             if y + open_h >= 0 && y <= viewh {

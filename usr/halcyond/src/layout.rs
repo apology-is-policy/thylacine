@@ -848,9 +848,10 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                 let top = lb.y;
                 lb.y += ISLAND_PAD_Y;
                 lb.line_class = LineClass::Raw;
-                for line in lines {
+                for (li, line) in lines.iter().enumerate() {
                     lb.x0 = sheet.pad_x + ISLAND_RULE_W + ISLAND_PAD_X;
                     lb.pen_x = lb.x0;
+                    let first = lb.lines.len();
                     for (s, e, sid) in runs_of(&line.cells) {
                         let st = b.styles[sid as usize];
                         // A run's own SGR background still shows through; the
@@ -865,6 +866,11 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                         lb.lay_span(gs, &line.cells[s..e], &st, false, item_idx, s, bg, SpanMode::Pre);
                     }
                     lb.break_line(gs);
+                    // Each pre line is its own source row: the lines share
+                    // the item, and a hit on the pre must name the line.
+                    for l in lb.lines[first..].iter_mut() {
+                        l.src_row = li;
+                    }
                 }
                 close_island(&mut lb, top);
             }
@@ -1019,12 +1025,18 @@ fn lay_table(
             }
             let align = t.cols.get(ci).copied().unwrap_or(b'l');
             let w = cellw[ri][ci];
+            // A cell wider than its column (a kv-list value past its group)
+            // starts at the column, never left of it.
             let x0 = match align {
-                b'r' => col_x[ci] + col_w[ci] - w,
-                b'c' => col_x[ci] + (col_w[ci] - w) / 2,
+                b'r' => (col_x[ci] + col_w[ci] - w).max(col_x[ci]),
+                b'c' => (col_x[ci] + (col_w[ci] - w) / 2).max(col_x[ci]),
                 _ => col_x[ci],
             };
             lb.pen_x = x0;
+            // The cell's runs carry their SOURCE columns (the cell's start
+            // in the row + the run's offset in the cell), so a laid glyph
+            // inverts to the grid cell it came from.
+            let cell_start = t.starts.get(ri).and_then(|r| r.get(ci)).copied().unwrap_or(0);
             for (s, e, sid) in runs_of(cell) {
                 let mut st = b.styles[sid as usize];
                 if t.hdr && ri == 0 {
@@ -1034,7 +1046,7 @@ fn lay_table(
                 // width is temporarily unbounded for the span.
                 let saved_w = lb.width;
                 lb.width = i32::MAX / 2;
-                lb.lay_span(gs, &cell[s..e], &st, true, item_idx, 0, None, SpanMode::Doc);
+                lb.lay_span(gs, &cell[s..e], &st, true, item_idx, cell_start + s, None, SpanMode::Doc);
                 lb.width = saved_w;
             }
         }
@@ -1189,14 +1201,16 @@ pub fn cursor_pos(laid: &LaidBlock, col: usize, sheet: &Sheet) -> (i32, i32, i32
 /// PL-4: the pixel position of column `col` within ONE logical line of a
 /// multi-line laid block. `cursor_pos` counts a GLOBAL column across the whole
 /// block, which is wrong for the live grid, whose block holds many logical
-/// lines; this scopes to the LaidLines whose `src_item == item` (a logical
-/// line's wrapped pieces share it). `col` is the column within that logical
-/// line; the per-glyph `seg.xs` give the x directly. A column past the item's
-/// content lands at the end of its last laid line. Returns (x, line.y, line.h).
-pub fn caret_in_block(laid: &LaidBlock, item: usize, col: usize) -> (i32, i32, i32) {
+/// lines; this scopes to the LaidLines of source (`item`, `row`) (a logical
+/// line's wrapped pieces share both; `row` is `usize::MAX` for a plain line
+/// and matches any row then, a table row's / pre line's index otherwise).
+/// `col` is the column within that logical line; the per-glyph `seg.xs` give
+/// the x directly. A column past the item's content lands at the end of its
+/// last laid line. Returns (x, line.y, line.h).
+pub fn caret_in_block(laid: &LaidBlock, item: usize, row: usize, col: usize) -> (i32, i32, i32) {
     let mut end: Option<(i32, i32, i32)> = None;
     for line in laid.lines.iter() {
-        if line.src_item != item {
+        if line.src_item != item || (row != usize::MAX && line.src_row != row) {
             continue;
         }
         for seg in line.segs.iter() {
@@ -1212,13 +1226,15 @@ pub fn caret_in_block(laid: &LaidBlock, item: usize, col: usize) -> (i32, i32, i
 }
 
 /// The visual span (block-relative y, height) of one source row -- a Line
-/// item, or one row of a table -- across its (possibly wrapped) laid lines.
-/// None when the row laid nothing.
+/// item, one row of a table, one line of a pre -- across its (possibly
+/// wrapped) laid lines. `row == usize::MAX` names the whole item (a Line's
+/// only row; every line of a pre, the one selectable unit `select::flatten`
+/// makes of it). None when the row laid nothing.
 pub fn laid_line_for(laid: &LaidBlock, item: usize, row: usize) -> Option<(i32, i32)> {
     let mut y0: Option<i32> = None;
     let mut y1 = 0;
     for l in laid.lines.iter() {
-        if l.src_item == item && l.src_row == row {
+        if l.src_item == item && (row == usize::MAX || l.src_row == row) {
             if y0.is_none() {
                 y0 = Some(l.y);
             }

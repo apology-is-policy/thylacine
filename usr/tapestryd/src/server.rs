@@ -15801,6 +15801,27 @@ impl Conn {
                             self.conn_id
                         );
                         comp.session_conns.clear();
+                        // What the seat minted goes with the seat: the idle
+                        // holder's status bar (the ONE per-display carve,
+                        // which would else refuse the successor's for as
+                        // long as the idle conn lived) and its menu. Its
+                        // chrome binds are pane-owner-gated, not seat-gated,
+                        // and stay.
+                        let minted: Vec<usize> = (0..MAX_SURFACES)
+                            .filter(|&n| {
+                                comp.surf(n).is_some_and(|s| {
+                                    s.owner_conn == other && (s.is_status || s.is_menu)
+                                })
+                            })
+                            .collect();
+                        for n in minted {
+                            say!(
+                                "tapestryd: session takeover retires surface {} of conn {}",
+                                n,
+                                other
+                            );
+                            comp.retire(n);
+                        }
                     }
                     comp.session_conns.push((self.conn_id, self.peer_principal));
                     say!("tapestryd: session declared by conn {}", self.conn_id);

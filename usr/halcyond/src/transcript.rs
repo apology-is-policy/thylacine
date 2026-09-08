@@ -179,11 +179,30 @@ pub struct TableModel {
     pub cols: Vec<u8>,
     pub hdr: bool,
     pub rows: Vec<Vec<Vec<TCell>>>,
+    /// Per row, each cell's START COLUMN in the row's source line: the
+    /// grid column of a rebuilt row (the padding between cells is dropped
+    /// from `rows`, so the cells alone cannot say where they sat), the
+    /// plain-realization offset (cells joined by two spaces) of a byte-fed
+    /// row. A laid cell run carries it as its `src_col`, so a click on a
+    /// table row inverts to the grid cell it came from.
+    pub starts: Vec<Vec<usize>>,
     /// The frame serial of the `table` open that produced this model in a
     /// frame-fed tile (0 for the console's byte-fed parser): the identity a
     /// later row of the SAME table joins on when its rows arrive one at a
     /// time (scroll-off) or all at once (the live grid).
     pub src: u32,
+}
+
+/// The plain realization's cell offsets for a byte-fed table row (cells
+/// joined by two spaces -- `select::row_text`'s currency).
+fn plain_starts(row: &[Vec<TCell>]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(row.len());
+    let mut off = 0usize;
+    for c in row.iter() {
+        out.push(off);
+        off += c.len() + 2;
+    }
+    out
 }
 
 pub enum Item {
@@ -526,9 +545,12 @@ fn row_shape(cells: &[vt::Cell], spans: &SpanMap) -> RowShape {
 /// it (once per rule frame), a pre line joining the open pre block, a table
 /// row joining the table of the same spec (the padding between cells --
 /// untagged-as-cell -- dropped; a cell's text is its TAG_CELL run per
-/// column), else a plain line. `interned` holds the line's cells with their
-/// styles already interned; `raw` the same cells with their tags. Returns
-/// the index of the item the line landed in.
+/// column, its start column kept in `starts`), else a plain line.
+/// `interned` holds the line's cells with their styles already interned;
+/// `raw` the same cells with their tags. Returns the item the line landed
+/// in and its ROW within it (`usize::MAX` for a plain line; the pre line /
+/// table row index otherwise) -- the address the hit-test inverts through,
+/// since every row of one rebuilt table shares the item.
 #[allow(clippy::too_many_arguments)]
 fn place_tagged_line(
     items: &mut Vec<Item>,
@@ -539,7 +561,7 @@ fn place_tagged_line(
     class: LineClass,
     spans: &SpanMap,
     last_rule: &mut u32,
-) -> usize {
+) -> (usize, usize) {
     if let Some(s) = shape.rule {
         if s != *last_rule {
             *last_rule = s;
@@ -549,19 +571,21 @@ fn place_tagged_line(
     if shape.pre {
         if let Some(Item::Pre(lines)) = items.last_mut() {
             lines.push(Line::plain(interned));
-            return items.len() - 1;
+            let row = lines.len() - 1;
+            return (items.len() - 1, row);
         }
         items.push(Item::Pre(alloc::vec![Line::plain(interned)]));
-        return items.len() - 1;
+        return (items.len() - 1, 0);
     }
     if shape.cell {
-        let (src, cols, hdr) = match spec {
-            Some((s, c, h)) => (s, c.to_vec(), h),
-            None => (shape.serial, Vec::new(), false),
+        let (src, cols) = match spec {
+            Some((s, c, _)) => (s, c.to_vec()),
+            None => (shape.serial, Vec::new()),
         };
         // Split into cells by column: consecutive TAG_CELL cells of one
         // column form the cell; anything else between them is padding.
         let mut row: Vec<Vec<TCell>> = Vec::new();
+        let mut starts: Vec<usize> = Vec::new();
         let mut cur_col: Option<usize> = None;
         for (i, c) in raw.iter().enumerate() {
             let Some(t) = interned.get(i).copied() else {
@@ -578,6 +602,7 @@ fn place_tagged_line(
                         cur_col = Some(col);
                         if row.len() < MAX_TABLE_COLS {
                             row.push(Vec::new());
+                            starts.push(i);
                         }
                     }
                     if let Some(cell) = row.last_mut() {
@@ -592,27 +617,33 @@ fn place_tagged_line(
         // Empty trailing cells are real (a blank value column); a row with
         // NO cell content at all (a table's padding-only line) is dropped.
         if row.iter().all(|c| c.is_empty()) {
-            return items.len().saturating_sub(1);
+            return (items.len().saturating_sub(1), usize::MAX);
         }
         if let Some(Item::Table(t)) = items.last_mut() {
             if t.src == src && t.rows.len() < MAX_TABLE_ROWS {
                 t.rows.push(row);
-                return items.len() - 1;
+                t.starts.push(starts);
+                let ri = t.rows.len() - 1;
+                return (items.len() - 1, ri);
             }
         }
+        // The header row is the one the tag names (TAG_ROW_HDR), never the
+        // spec's flag alone: a table whose header row scrolled off earlier
+        // restarts here with its first BODY row, which is not a header.
         items.push(Item::Table(TableModel {
             cols,
-            hdr: hdr || shape.hdr_row,
+            hdr: shape.hdr_row,
             rows: alloc::vec![row],
+            starts: alloc::vec![starts],
             src,
         }));
-        return items.len() - 1;
+        return (items.len() - 1, 0);
     }
     items.push(Item::Line(Line {
         cells: interned,
         class,
     }));
-    items.len() - 1
+    (items.len() - 1, usize::MAX)
 }
 
 /// The transcript: feed bytes in, read frozen blocks + the open tail out.
@@ -641,12 +672,17 @@ pub struct Transcript {
     table: Option<TableCap>,
     /// KT-1 cells mode (`set_cells_mode`): frames only; structure is rebuilt
     /// from tagged cells. `cur_serial` is the frame being fed; `rule_pending`
-    /// the one-frame rule tag; `last_rule_serial` dedupes the rebuilt rule
-    /// (every line after it carries the same serial); `table_specs` the specs
-    /// of the tables opened, keyed by open serial, for the rebuilt rows.
+    /// the rule EPISODE -- from a `rule` frame (its serial in `rule_serial`)
+    /// until the tile reports cells written after it (`end_rule`), every tag
+    /// noted meanwhile carries TAG_RULE, so the first line written after the
+    /// rule places it wherever the rule's frames took the transcript (an
+    /// inline open, a zone close, the next prompt); `last_rule_serial` dedupes
+    /// the rebuilt rule across the two placement paths; `table_specs` the
+    /// specs of the tables opened, keyed by open serial, for the rebuilt rows.
     cells_mode: bool,
     cur_serial: u32,
     rule_pending: bool,
+    rule_serial: u32,
     last_rule_serial: u32,
     table_specs: VecDeque<TableSpec>,
     /// PL-1b: the open `pre` block's lines, accumulated between open_op(Pre)
@@ -759,6 +795,7 @@ impl Transcript {
             cells_mode: false,
             cur_serial: 0,
             rule_pending: false,
+            rule_serial: 0,
             last_rule_serial: 0,
             table_specs: VecDeque::new(),
             pre: None,
@@ -876,11 +913,6 @@ impl Transcript {
         // style_idx. The format-fuzz containment guard.
         if self.pre.is_some() && !matches!(op, Op::Em | Op::Obj) {
             return;
-        }
-        // A pending rule tags the next line's cells: it rides through the
-        // inline opens whose cells those are, and ends at any other op.
-        if !matches!(op, Op::Em | Op::Obj | Op::Hdr) {
-            self.rule_pending = false;
         }
         match op {
             Op::Zone => {
@@ -1020,8 +1052,6 @@ impl Transcript {
         // The table byte cap for this tile (half its scrollback share); read
         // before any self.table borrow below so the arms can pass/compare it.
         let byte_cap = self.transient_cap();
-        // A close never opens the line a pending rule precedes.
-        self.rule_pending = false;
         match op {
             Op::Zone => {
                 self.freeze_open(BlockKind::Foreign, false);
@@ -1056,10 +1086,12 @@ impl Transcript {
                         }
                         return;
                     }
+                    let starts = t.rows.iter().map(|r| plain_starts(r)).collect();
                     self.open.items.push(Item::Table(TableModel {
                         cols: t.cols,
                         hdr: t.hdr,
                         rows: t.rows,
+                        starts,
                         src: 0,
                     }));
                     self.enforce_block_cap();
@@ -1186,9 +1218,6 @@ impl Transcript {
         if self.pre.is_some() {
             return;
         }
-        if op != Op::Rule {
-            self.rule_pending = false;
-        }
         match op {
             Op::Mark => {
                 // H-3d: the output zone's command (its first child, ut's
@@ -1225,9 +1254,11 @@ impl Transcript {
             }
             Op::Rule => {
                 if self.cells_mode {
-                    // Tagged onto the cells that follow (TAG_RULE); the tile
+                    // Tagged onto the cells that follow (TAG_RULE) until the
+                    // tile reports cells written after this frame; the tile
                     // places the rule before the first line carrying it.
                     self.rule_pending = true;
+                    self.rule_serial = self.cur_serial;
                     return;
                 }
                 self.flush_line();
@@ -1269,12 +1300,17 @@ impl Transcript {
             self.pre_bytes = 0;
         }
         // Cells mode: a zone-less block whose text is still on the grid has
-        // no items, but its obj table is what the grid's tags index -- drop it
-        // and its id is reused by the next zone, whose (empty) obj table then
-        // answers for the welcome's objects. Kept, it lays to 0 px.
+        // no items, but its obj table is what the grid's tags index -- drop
+        // it and the grid's objects resolve to nothing. Kept, it lays to 0 px.
         let keep = self.open.has_content()
             || self.open.kind != BlockKind::Foreign
             || (self.cells_mode && !self.open.objs.is_empty());
+        // Ids are monotonic and NEVER recycled, dropped block or not: in
+        // cells mode the dropped block's cells are still on the grid with
+        // tags naming its id, and a successor wearing the same id would
+        // inherit their annotations (a zone-less `em` line's Doc class
+        // leaking onto the raw output zone after it). A dropped id resolves
+        // to no block, which every lookup already tolerates.
         let id = self.next_id;
         self.next_id += 1;
         let mut b = core::mem::replace(&mut self.open, Block::new(id, next));
@@ -1284,11 +1320,6 @@ impl Transcript {
             self.stored_cost += b.styles.len() * core::mem::size_of::<Style>();
             self.frozen.push_back(b);
             self.enforce_budget();
-        } else {
-            self.next_id -= 1;
-            self.open.id = id - 1;
-            // (an empty Foreign block leaves no trace and its id is reused
-            // for the next open -- ids stay dense and monotonic)
         }
         self.em_stack.clear();
         self.obj_stack.clear();
@@ -1774,7 +1805,7 @@ impl Transcript {
         } else {
             LineClass::Inherit
         };
-        place_tagged_line(
+        let _ = place_tagged_line(
             &mut self.open.items,
             cells,
             &raw,
@@ -1825,7 +1856,7 @@ impl Transcript {
         rows: usize,
         wrapped: &[bool],
         spans: &SpanMap,
-    ) -> (Block, Vec<(usize, usize)>) {
+    ) -> (Block, Vec<(usize, usize, usize)>) {
         struct Pending {
             raw: Vec<vt::Cell>,
             cells: Vec<TCell>,
@@ -1834,9 +1865,10 @@ impl Transcript {
         // Pass 1: the logical lines -- soft-wrapped grid rows joined -- each
         // with its raw cells and its source zone (the first tagged cell's
         // block). `prov` provisionally maps a grid row to its LINE index and
-        // start column; it is patched to the ITEM index once the lines are
-        // placed (a pre line or a table row joins an item an earlier line
-        // started). The live grid straddles zones, so each line is classed
+        // start column; it is patched to the (ITEM, ROW) address once the
+        // lines are placed (a pre line or a table row joins an item an
+        // earlier line started, so the item alone would name the FIRST row
+        // of every rebuilt structure). The live grid straddles zones, so each line is classed
         // from its zone: a prompt zone's line is the prompt; a zone with any
         // Beacon structure -- in the cells still on the grid (the tags) or in
         // its scrolled-off part (the block's own styles/items) -- is a
@@ -1844,12 +1876,12 @@ impl Transcript {
         // tile), is raw terminal content. One late annotation classes every
         // line of its zone alike.
         let mut lines: Vec<Pending> = Vec::new();
-        let mut prov: Vec<(usize, usize)> = Vec::with_capacity(rows);
+        let mut prov: Vec<(usize, usize, usize)> = Vec::with_capacity(rows);
         let mut cur_raw: Vec<vt::Cell> = Vec::new();
         let mut cur_src: Option<u64> = None;
         let mut zone_tagged: BTreeMap<u64, bool> = BTreeMap::new();
         for r in 0..rows {
-            prov.push((lines.len(), cur_raw.len()));
+            prov.push((lines.len(), usize::MAX, cur_raw.len()));
             let base = r * cols;
             let row = grid_cells.get(base..base + cols).unwrap_or(&[]);
             for c in row {
@@ -1939,7 +1971,7 @@ impl Transcript {
         // a plain line -- patching `prov` to the item each line landed in.
         let mut zone_class: BTreeMap<u64, LineClass> = BTreeMap::new();
         let mut items: Vec<Item> = Vec::new();
-        let mut line_item: Vec<usize> = Vec::with_capacity(lines.len());
+        let mut line_item: Vec<(usize, usize)> = Vec::with_capacity(lines.len());
         let mut last_rule = self.last_rule_serial;
         for l in lines.into_iter() {
             let shape = row_shape(&l.raw, spans);
@@ -1975,9 +2007,11 @@ impl Transcript {
             );
             line_item.push(idx);
         }
-        let last = items.len().saturating_sub(1);
+        let last = (items.len().saturating_sub(1), usize::MAX);
         for p in prov.iter_mut() {
-            p.0 = line_item.get(p.0).copied().unwrap_or(last);
+            let (item, row) = line_item.get(p.0).copied().unwrap_or(last);
+            p.0 = item;
+            p.1 = row;
         }
         let b = Block {
             id: u64::MAX,
@@ -2064,14 +2098,29 @@ impl Transcript {
 
     /// KT-1: feed one Beacon frame from a tile, stamped with the serial its
     /// following cells carry. Sets the frame context the structure tags need
-    /// (`cur_serial`; a rule's tag lasts exactly until the next frame).
+    /// (`cur_serial`).
     pub fn feed_frame(&mut self, frame: &[u8], serial: u32) {
         self.cur_serial = serial;
-        // `rule_pending` is cleared by the ops themselves: it survives an
-        // inline OPEN (em/obj/hdr) that directly follows the rule, because
-        // the cells that open tags are the line after the rule -- no cell
-        // ever carries the rule frame's own serial then.
         self.feed(frame);
+    }
+
+    /// The serial of the `rule` frame whose episode is open (cells mode):
+    /// the tile ends it when it sees cells written after that frame.
+    pub fn rule_open(&self) -> Option<u32> {
+        if self.rule_pending {
+            Some(self.rule_serial)
+        } else {
+            None
+        }
+    }
+
+    /// KT-1: the tile saw cells written after the open rule frame -- the
+    /// line the rule precedes now exists, so later frames stop carrying it.
+    /// (Ending it on an OP instead loses a rule the frames close over --
+    /// `rule` then `/zone` -- and double-places one whose text line is
+    /// followed by an inline open: no op can tell whether text was written.)
+    pub fn end_rule(&mut self) {
+        self.rule_pending = false;
     }
 
     /// KT-1: this transcript is fed FRAMES only -- the text arrives as grid
@@ -3203,6 +3252,9 @@ mod tests {
             wire::point(&mut b, Op::Rule, &[]);
             frame(&mut t, &mut spans, b)
         };
+        // The "after" line's cells are written here (the tile ends the rule
+        // episode on them), before the pre opens.
+        t.end_rule();
         let s_pre = frame(&mut t, &mut spans, open(Op::Pre, &[]));
         frame(&mut t, &mut spans, close(Op::Pre));
         assert!(
@@ -3259,8 +3311,11 @@ mod tests {
         assert_eq!(text(&pl[0].cells), "mono");
         assert_eq!(prov[0].0, 0, "row 0 maps to the table item");
         assert_eq!(prov[1].0, 0, "row 1 too (the same table)");
+        assert_eq!((prov[0].1, prov[1].1), (0, 1), "each grid row names ITS table row");
         assert_eq!(prov[2].0, 2, "row 2 maps past the rule to its line");
-        assert_eq!(prov[3].0, 3);
+        assert_eq!(prov[2].1, usize::MAX, "a plain line has no row");
+        assert_eq!((prov[3].0, prov[3].1), (3, 0), "the pre's first line");
+        assert_eq!(tm.starts, alloc::vec![alloc::vec![0, 8], alloc::vec![0, 6]], "each cell's grid start column");
         // The scroll-off path rebuilds the same structure into the open block,
         // one row at a time.
         t.push_scrolled_rows(&rows, &[false, false, false, false], &spans);
@@ -3277,31 +3332,160 @@ mod tests {
         let n_rules = t.open_block().items.iter().filter(|i| matches!(i, Item::Rule)).count();
         assert_eq!(n_rules, 1, "a second line after the same rule adds no rule");
         // A rule directly followed by an inline OPEN (no cells between): the
-        // rule rides that open's tag -- its cells ARE the line after the rule
-        // -- and dies at the close.
+        // rule rides that open's tag -- its cells ARE the line after the rule.
+        // The episode ends when the tile reports cells written after the
+        // rule frame (`end_rule`), not at an op: the close noted BEFORE any
+        // cells still carries it, the one noted after does not.
         let s_rule2 = {
             let mut b = Vec::new();
             wire::point(&mut b, Op::Rule, &[]);
             frame(&mut t, &mut spans, b)
         };
+        assert_eq!(t.rule_open(), Some(s_rule2));
         let s_dim = frame(&mut t, &mut spans, open(Op::Em, &[("class", "dim")]));
-        let s_after = frame(&mut t, &mut spans, close(Op::Em));
         assert!(spans.get(s_dim).unwrap().em & TAG_RULE != 0, "the open after a rule carries it");
-        assert!(spans.get(s_after).unwrap().em & TAG_RULE == 0, "the close ends it");
+        t.end_rule();
+        let s_after = frame(&mut t, &mut spans, close(Op::Em));
+        assert!(spans.get(s_after).unwrap().em & TAG_RULE == 0, "cells written end the episode");
+        assert_eq!(t.rule_open(), None);
         t.push_scrolled_rows(&[row(&[("lineage", s_dim)])], &[false], &spans);
         let n_rules = t.open_block().items.iter().filter(|i| matches!(i, Item::Rule)).count();
         assert_eq!(n_rules, 2, "the rule before the dim line landed via the open's tag");
-        let _ = s_rule2;
+        // Audit F3: a rule, a TEXT line (its cells carry the rule serial),
+        // then an em OPEN starting the next line -- the text line ended the
+        // episode, so the open's tag carries no rule and one frame places
+        // ONE rule (pre-fix the open still carried it: two rules).
+        let s_rule3 = {
+            let mut b = Vec::new();
+            wire::point(&mut b, Op::Rule, &[]);
+            frame(&mut t, &mut spans, b)
+        };
+        t.end_rule();
+        let s_em3 = frame(&mut t, &mut spans, open(Op::Em, &[("class", "dim")]));
+        assert!(spans.get(s_em3).unwrap().em & TAG_RULE == 0);
+        t.push_scrolled_rows(&[row(&[("abc", s_rule3)]), row(&[("xyz", s_em3)])], &[false, false], &spans);
+        let n_rules = t.open_block().items.iter().filter(|i| matches!(i, Item::Rule)).count();
+        assert_eq!(n_rules, 3, "one rule frame, one rule");
+        frame(&mut t, &mut spans, close(Op::Em));
+        // Audit F8: a rule the frames close over (`rule` then `/zone`) is
+        // not lost -- the episode survives the close and the next zone's
+        // first line (the prompt) carries it.
+        let s_rule4 = {
+            let mut b = Vec::new();
+            wire::point(&mut b, Op::Rule, &[]);
+            frame(&mut t, &mut spans, b)
+        };
+        frame(&mut t, &mut spans, close(Op::Zone));
+        assert_eq!(t.rule_open(), Some(s_rule4), "a close does not end the episode");
         // A prompt zone's cells carry TAG_PROMPT and class as the prompt even
-        // though the zone-less block before it was dropped and its id reused.
+        // though the zone-less block before it was dropped (its id is never
+        // reused).
         let s_prompt = frame(&mut t, &mut spans, open(Op::Zone, &[("k", "prompt")]));
+        assert!(spans.get(s_prompt).unwrap().em & TAG_RULE != 0, "the trailing rule rides into the next zone");
         assert!(spans.get(s_prompt).unwrap().em & TAG_PROMPT != 0);
         let grid2 = row(&[("~ > ", s_prompt)]);
         let (lb, _) = t.live_block(&grid2, 12, 1, &[false], &spans);
-        let Item::Line(pl) = &lb.items[0] else {
+        assert!(matches!(lb.items[0], Item::Rule), "the rule precedes the prompt line");
+        let Item::Line(pl) = &lb.items[1] else {
             panic!("the prompt line");
         };
         assert_eq!(pl.class, LineClass::Prompt);
+    }
+
+    #[test]
+    fn cells_mode_rebuilt_body_rows_without_the_header_row_are_not_a_header() {
+        // Audit F4: a headed table whose header row scrolled off earlier --
+        // the live grid holds only BODY rows. The rebuilt table's header
+        // flag comes from the row tag (TAG_ROW_HDR), never from the spec
+        // alone, so the first body row is not bolded + ruled as a header.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.set_cells_mode(true);
+        let mut spans = SpanMap::new();
+        let mut s = 0u32;
+        let mut f = |t: &mut Transcript, spans: &mut SpanMap, bytes: Vec<u8>| -> u32 {
+            s += 1;
+            t.feed_frame(&bytes, s);
+            spans.note(s, t.span_tag());
+            s
+        };
+        let open = |op: Op, args: &[(&str, &str)]| {
+            let mut b = Vec::new();
+            wire::open(&mut b, op, args);
+            b
+        };
+        let close = |op: Op| {
+            let mut b = Vec::new();
+            wire::close(&mut b, op);
+            b
+        };
+        f(&mut t, &mut spans, open(Op::Table, &[("cols", "lr"), ("hdr", "1")]));
+        f(&mut t, &mut spans, open(Op::Row, &[]));
+        let s_h = f(&mut t, &mut spans, open(Op::Cell, &[]));
+        f(&mut t, &mut spans, close(Op::Cell));
+        f(&mut t, &mut spans, close(Op::Row));
+        f(&mut t, &mut spans, open(Op::Row, &[]));
+        let s_b = f(&mut t, &mut spans, open(Op::Cell, &[]));
+        f(&mut t, &mut spans, close(Op::Cell));
+        f(&mut t, &mut spans, close(Op::Row));
+        f(&mut t, &mut spans, close(Op::Table));
+        assert!(spans.get(s_h).unwrap().em & TAG_ROW_HDR != 0);
+        assert!(spans.get(s_b).unwrap().em & TAG_ROW_HDR == 0);
+        let gc = |ch: char, span: u32| vt::Cell { ch, fg: 0, bg: 0, attrs: 0, span };
+        let body: Vec<vt::Cell> = "body".chars().map(|c| gc(c, s_b)).collect();
+        let (b, _) = t.live_block(&body, 4, 1, &[false], &spans);
+        let Item::Table(tm) = &b.items[0] else {
+            panic!("a table")
+        };
+        assert!(!tm.hdr, "only body rows: no header row");
+        // With the header row on the grid the table IS headed.
+        let mut both: Vec<vt::Cell> = "hdr ".chars().map(|c| gc(c, s_h)).collect();
+        both.extend("body".chars().map(|c| gc(c, s_b)));
+        let (b, _) = t.live_block(&both, 4, 2, &[false, false], &spans);
+        let Item::Table(tm) = &b.items[0] else {
+            panic!("a table")
+        };
+        assert!(tm.hdr, "the header row on the grid heads the table");
+        assert_eq!(tm.rows.len(), 2);
+    }
+
+    #[test]
+    fn a_dropped_zone_less_block_never_lends_its_id_to_the_next_zone() {
+        // Audit F5: a zone-less block holding only `em` frames (no obj, no
+        // items) is dropped at the zone cut. Its cells on the grid carry tags
+        // naming its id; had the next zone reused that id, its raw lines
+        // would inherit the dim line's annotation and class as a document.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.set_cells_mode(true);
+        let mut spans = SpanMap::new();
+        let mut buf = Vec::new();
+        wire::open(&mut buf, Op::Em, &[("class", "dim")]);
+        t.feed_frame(&buf, 1);
+        spans.note(1, t.span_tag());
+        let dropped_id = spans.get(1).unwrap().block;
+        buf.clear();
+        wire::close(&mut buf, Op::Em);
+        t.feed_frame(&buf, 2);
+        spans.note(2, t.span_tag());
+        buf.clear();
+        wire::open(&mut buf, Op::Zone, &[("k", "output")]);
+        t.feed_frame(&buf, 3);
+        spans.note(3, t.span_tag());
+        let zone_id = spans.get(3).unwrap().block;
+        assert_ne!(zone_id, dropped_id, "the dropped block's id is not recycled");
+        assert!(t.block_by_id(dropped_id).is_none(), "the dropped block is gone");
+        let gc = |ch: char, span: u32| vt::Cell { ch, fg: 0, bg: 0, attrs: 0, span };
+        let mut grid: Vec<vt::Cell> = "dim".chars().map(|c| gc(c, 1)).collect();
+        grid.push(gc(' ', 0));
+        grid.extend("raw!".chars().map(|c| gc(c, 3)));
+        let (b, _) = t.live_block(&grid, 4, 2, &[false, false], &spans);
+        let Item::Line(l0) = &b.items[0] else {
+            panic!("the dim line")
+        };
+        let Item::Line(l1) = &b.items[1] else {
+            panic!("the raw line")
+        };
+        assert_eq!(l0.class, LineClass::Doc, "the annotated zone-less line is a document");
+        assert_eq!(l1.class, LineClass::Raw, "the output zone's plain line stays raw");
     }
 
     #[test]
@@ -3365,7 +3549,7 @@ mod tests {
         };
         let s: String = l.cells.iter().map(|c| c.ch).collect();
         assert_eq!(s, "abcdef");
-        assert_eq!(prov, alloc::vec![(0, 0), (0, 3)]);
+        assert_eq!(prov, alloc::vec![(0, usize::MAX, 0), (0, usize::MAX, 3)]);
     }
 
     #[test]
@@ -3376,7 +3560,7 @@ mod tests {
         let grid = wrow("abcdef");
         let (b, prov) = t.live_block(&grid, 3, 2, &[false, false], &SpanMap::new());
         assert_eq!(b.items.len(), 2, "two logical lines");
-        assert_eq!(prov, alloc::vec![(0, 0), (1, 0)]);
+        assert_eq!(prov, alloc::vec![(0, usize::MAX, 0), (1, usize::MAX, 0)]);
     }
 
     #[test]

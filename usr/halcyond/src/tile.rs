@@ -40,9 +40,11 @@ use kaua_term::{Control, Record, ScreenMode};
 use vt::{Palette, ATTR_REVERSE, ATTR_UNDERLINE};
 
 /// PL-4b-ii: a render's cached proportional live tail -- the laid live block,
-/// the per-grid-row provenance `(logical line item, start column)`, and the
-/// tail's screen-y -- that a click inverts through (`Tile::live_laid`).
-type LiveLaid = (LaidBlock, Vec<(usize, usize)>, i32);
+/// the per-grid-row provenance `(item, row within the item, start column)`
+/// (the row is `usize::MAX` for a plain line; a rebuilt table's rows and a
+/// pre's lines share one item and differ by row), and the tail's screen-y --
+/// that a click inverts through (`Tile::live_laid`).
+type LiveLaid = (LaidBlock, Vec<(usize, usize, usize)>, i32);
 
 pub struct Tile {
     pub grid: Grid,
@@ -220,7 +222,7 @@ impl Tile {
                 let line = live_lb.lines.iter().find(|l| y >= l.y && y < l.y + l.h)?;
                 let col = col_at_x(line, x)?;
                 let cols = self.grid.dims().0;
-                let (r, rc) = prov_inverse(prov, line.src_item, col, cols)?;
+                let (r, rc) = prov_inverse(prov, line.src_item, line.src_row, col, cols)?;
                 self.run_key_at(r, rc).map(|k| (r, k))
             }
             None => {
@@ -243,10 +245,10 @@ impl Tile {
         let (c0, n, _) = self.grid_run(r, key)?;
         match &self.live_laid {
             Some((live_lb, prov, _)) => {
-                let &(item, start) = prov.get(r)?;
+                let &(item, row, start) = prov.get(r)?;
                 let (a, b) = (start + c0, start + c0 + n);
                 for line in live_lb.lines.iter() {
-                    if line.src_item != item {
+                    if line.src_item != item || line.src_row != row {
                         continue;
                     }
                     let lo = line.segs.first().map(|s| s.src_col).unwrap_or(0);
@@ -276,7 +278,19 @@ impl Tile {
                 changed,
                 cursor,
                 wrapped,
-            } => self.grid.apply_celldiff(&changed, cursor, &wrapped),
+            } => {
+                // A cell written after the open `rule` frame (its serial at
+                // or past the rule's) is the line the rule precedes: the
+                // episode ends here, not at an op (transcript::end_rule). A
+                // scroll re-reports older cells with their OLD serials, so
+                // it does not end it; a bare newline changes no cell.
+                if let Some(rule) = self.scrollback.rule_open() {
+                    if changed.iter().any(|(_, _, c)| c.span >= rule && c.span != 0) {
+                        self.scrollback.end_rule();
+                    }
+                }
+                self.grid.apply_celldiff(&changed, cursor, &wrapped)
+            }
             Record::ScrollOff { rows, wrapped } => {
                 self.scrollback
                     .push_scrolled_rows(&rows, &wrapped, &self.spans)
@@ -413,7 +427,8 @@ impl Tile {
                 return 0;
             }
             let next = frozen_kinds.get(i + 1).copied().unwrap_or(open_kind);
-            block_gap_between(frozen_kinds[i], next, sheet)
+            let this = frozen_kinds.get(i).copied().unwrap_or(open_kind);
+            block_gap_between(this, next, sheet)
         };
         let mut total = sheet.block_gap;
         for (i, &(_, _, hgt)) in self.heights.iter().enumerate() {
@@ -554,8 +569,8 @@ impl Tile {
         // the stray cursor adrift from the rows).
         let (cr, cc, cvis) = self.grid.cursor();
         if cvis {
-            if let Some(&(item, start)) = prov.get(cr) {
-                let (cx, cy, chh) = caret_in_block(&live_lb, item, start + cc);
+            if let Some(&(item, row, start)) = prov.get(cr) {
+                let (cx, cy, chh) = caret_in_block(&live_lb, item, row, start + cc);
                 cart.ops.push(Op::Rect {
                     x: cx,
                     y: y + cy,
@@ -730,17 +745,20 @@ fn col_at_x(line: &LaidLine, x: i32) -> Option<usize> {
 }
 
 /// PL-4b: the inverse of `prov` -- the grid (row, col-in-row) that logical
-/// column `col` of laid line `item` came from. The joined rows of one logical
-/// line hold disjoint column ranges ([start, start+cols)), so at most one row
-/// matches. None if no row covers it.
+/// column `col` of laid line (`item`, `row`) came from. The joined rows of one
+/// logical line hold disjoint column ranges ([start, start+cols)), so at most
+/// one row matches; the rows of one rebuilt table (the lines of one pre) share
+/// the item and are told apart by `row` -- matching on the item alone named
+/// the FIRST row for every click on the structure. None if no row covers it.
 fn prov_inverse(
-    prov: &[(usize, usize)],
+    prov: &[(usize, usize, usize)],
     item: usize,
+    row: usize,
     col: usize,
     cols: usize,
 ) -> Option<(usize, usize)> {
-    for (r, &(it, start)) in prov.iter().enumerate() {
-        if it == item && start <= col && col < start + cols {
+    for (r, &(it, rw, start)) in prov.iter().enumerate() {
+        if it == item && rw == row && start <= col && col < start + cols {
             return Some((r, col - start));
         }
     }
@@ -753,17 +771,17 @@ fn prov_inverse(
 /// band). Empty for a row past `prov`.
 fn live_row_spans(
     live: &LaidBlock,
-    prov: &[(usize, usize)],
+    prov: &[(usize, usize, usize)],
     r: usize,
     cols: usize,
 ) -> Vec<(i32, i32)> {
-    let Some(&(item, start)) = prov.get(r) else {
+    let Some(&(item, row, start)) = prov.get(r) else {
         return Vec::new();
     };
     let end = start + cols;
     let mut spans = Vec::new();
     for line in live.lines.iter() {
-        if line.src_item != item {
+        if line.src_item != item || line.src_row != row {
             continue;
         }
         let lo = line.segs.first().map(|s| s.src_col).unwrap_or(0);
@@ -784,19 +802,19 @@ fn live_row_spans(
 /// crosses, so a wrapped run underlines each piece over its real x-extent.
 fn live_run_underline(
     live: &LaidBlock,
-    prov: &[(usize, usize)],
+    prov: &[(usize, usize, usize)],
     r: usize,
     rc0: usize,
     n: usize,
 ) -> Vec<(i32, i32, i32)> {
-    let Some(&(item, start)) = prov.get(r) else {
+    let Some(&(item, row, start)) = prov.get(r) else {
         return Vec::new();
     };
     let c0 = start + rc0;
     let c1 = c0 + n;
     let mut out = Vec::new();
     for line in live.lines.iter() {
-        if line.src_item != item {
+        if line.src_item != item || line.src_row != row {
             continue;
         }
         let lo = line.segs.first().map(|s| s.src_col).unwrap_or(0);
@@ -1640,5 +1658,198 @@ mod tests {
             .filter(|o| matches!(o, Op::Rect { .. }))
             .count();
         assert_eq!(rects, 1, "only the cursor beam Rect (blank cells skip bg)");
+    }
+
+    // --- the composition-round audit F1: a click on a rebuilt structure ---
+    //
+    // In cells mode every row of one rebuilt table (every line of one pre)
+    // shares an ITEM; the provenance must carry the ROW, and the laid runs
+    // their SOURCE columns, or the inverse names the structure's first row
+    // for every click on it (`ps`: a click on row N's pid opened row 0's; a
+    // `kill` from that menu killed the wrong process).
+
+    fn cs(ch: char, span: u32) -> Cell {
+        Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span,
+        }
+    }
+
+    fn frame(t: &mut Tile, serial: u32, body: &[u8]) {
+        let mut f = Vec::new();
+        f.extend_from_slice(b"\x1b]1936;v1;");
+        f.extend_from_slice(body);
+        f.extend_from_slice(b"\x1b\\");
+        t.apply(Record::Control(Control::Osc1936Raw { serial, frame: f }));
+    }
+
+    fn write(t: &mut Tile, cells: Vec<(u16, u16, Cell)>, cur: (u16, u16)) {
+        t.apply(Record::CellDiff {
+            changed: cells,
+            cursor: (cur.0, cur.1, true),
+            wrapped: vec![],
+        });
+    }
+
+    /// A `ps`-shaped Beacon table on the LIVE grid: two rows, an obj (pid)
+    /// cell in column 0 of each. A click on row 1's pid opens row 1's
+    /// object; row 1's run rect is row 1's laid line.
+    #[test]
+    fn live_grid_table_click_hits_the_clicked_row() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let mut t = Tile::new(40, 4, vt::DAYLIGHT);
+        frame(&mut t, 1, b"zone;k=output");
+        frame(&mut t, 2, b"table;cols=lr;hdr=0");
+        frame(&mut t, 3, b"row");
+        frame(&mut t, 4, b"cell");
+        frame(&mut t, 5, b"obj;type=pid;ref=100");
+        write(&mut t, vec![(0, 0, cs('1', 5)), (0, 1, cs('0', 5)), (0, 2, cs('0', 5))], (0, 3));
+        frame(&mut t, 6, b"/obj");
+        frame(&mut t, 7, b"/cell");
+        write(&mut t, vec![(0, 3, cs(' ', 7)), (0, 4, cs(' ', 7))], (0, 5));
+        frame(&mut t, 8, b"cell");
+        write(&mut t, vec![(0, 5, cs('u', 8)), (0, 6, cs('t', 8))], (0, 7));
+        frame(&mut t, 9, b"/cell");
+        frame(&mut t, 10, b"/row");
+        frame(&mut t, 11, b"row");
+        frame(&mut t, 12, b"cell");
+        frame(&mut t, 13, b"obj;type=pid;ref=200");
+        write(&mut t, vec![(1, 0, cs('2', 13)), (1, 1, cs('0', 13)), (1, 2, cs('0', 13))], (1, 3));
+        frame(&mut t, 14, b"/obj");
+        frame(&mut t, 15, b"/cell");
+        write(&mut t, vec![(1, 3, cs(' ', 15)), (1, 4, cs(' ', 15))], (1, 5));
+        frame(&mut t, 16, b"cell");
+        write(&mut t, vec![(1, 5, cs('s', 16)), (1, 6, cs('h', 16))], (1, 7));
+        frame(&mut t, 17, b"/cell");
+        frame(&mut t, 18, b"/row");
+        frame(&mut t, 19, b"/table");
+        write(&mut t, vec![], (2, 0));
+
+        // The keyboard path (cell spans) names each row's own object.
+        assert_eq!(t.grid_run_obj(1, 1), Some(("pid", "200")));
+        assert_eq!(t.grid_run_obj(0, 1), Some(("pid", "100")));
+
+        let mut cart = Cartoon::new();
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = (320usize, (4 * ch) as usize);
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+
+        // The live block IS a rebuilt table, both rows on one item.
+        let (lb, prov) = t.scrollback.live_block(
+            t.grid.cells(),
+            40,
+            t.grid.content_rows(),
+            t.grid.wrapped(),
+            &t.spans,
+        );
+        assert!(matches!(lb.items[0], Item::Table(_)), "the live grid rebuilt the table");
+        assert_eq!((prov[0].0, prov[0].1), (0, 0));
+        assert_eq!((prov[1].0, prov[1].1), (0, 1), "the same item, the next ROW");
+        let laid = crate::layout::layout_block(&lb, w as i32, &sheet, &mut gs);
+        let row1 = laid.lines.iter().find(|l| l.src_row == 1).expect("row 1 laid");
+        let pid_seg = row1.segs.iter().find(|s| s.obj != 0).expect("row 1's pid seg");
+        assert_eq!(pid_seg.src_col, 0, "the pid cell starts at grid column 0");
+        let sh_seg = row1.segs.iter().find(|s| s.obj == 0).expect("row 1's second cell");
+        assert_eq!(sh_seg.src_col, 5, "the second cell starts at its grid column");
+        let (x, y) = ((pid_seg.x + pid_seg.x_end) / 2, row1.y + row1.h / 2);
+
+        // The click on row 1's pid glyphs.
+        let hit = t.grid_hit(x, y, cw, ch);
+        let obj = hit.and_then(|(r, k)| t.grid_run_obj(r, k).map(|(a, b)| (r, a, b)));
+        assert_eq!(
+            obj,
+            Some((1usize, "pid", "200")),
+            "a click on row 1's pid opens row 1's object (hit {:?})",
+            hit
+        );
+        // And row 1's run rect sits on row 1's laid line, not row 0's.
+        let r0 = t.grid_run_rect(0, 1, cw, ch).expect("row 0 rect");
+        let r1 = t.grid_run_rect(1, 1, cw, ch).expect("row 1 rect");
+        assert_ne!(r0.1, r1.1, "row 0 and row 1 rects sit on different laid lines: {:?} vs {:?}", r0, r1);
+        assert_eq!(r1.1, row1.y, "row 1's rect is row 1's laid line");
+    }
+
+    /// The `la` shape: a `pre` box on the live grid with an obj path per
+    /// row. A click on row 1's path opens row 1's object.
+    #[test]
+    fn live_grid_pre_click_hits_the_clicked_row() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet();
+        let mut t = Tile::new(40, 4, vt::DAYLIGHT);
+        frame(&mut t, 1, b"pre");
+        write(&mut t, vec![(0, 0, cs('|', 1)), (0, 1, cs(' ', 1))], (0, 2));
+        frame(&mut t, 2, b"obj;type=path;ref=/aa");
+        write(&mut t, vec![(0, 2, cs('a', 2)), (0, 3, cs('a', 2))], (0, 4));
+        frame(&mut t, 3, b"/obj");
+        write(&mut t, vec![(0, 4, cs(' ', 3)), (0, 5, cs('|', 3))], (0, 6));
+        write(&mut t, vec![(1, 0, cs('|', 3)), (1, 1, cs(' ', 3))], (1, 2));
+        frame(&mut t, 4, b"obj;type=path;ref=/bb");
+        write(&mut t, vec![(1, 2, cs('b', 4)), (1, 3, cs('b', 4))], (1, 4));
+        frame(&mut t, 5, b"/obj");
+        write(&mut t, vec![(1, 4, cs(' ', 5)), (1, 5, cs('|', 5))], (1, 6));
+        frame(&mut t, 6, b"/pre");
+        write(&mut t, vec![], (2, 0));
+        assert_eq!(t.grid_run_obj(1, 3), Some(("path", "/bb")));
+
+        let mut cart = Cartoon::new();
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = (320usize, (4 * ch) as usize);
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        let (lb, prov) = t.scrollback.live_block(
+            t.grid.cells(),
+            40,
+            t.grid.content_rows(),
+            t.grid.wrapped(),
+            &t.spans,
+        );
+        assert!(matches!(lb.items[0], Item::Pre(_)), "the live grid rebuilt the pre");
+        assert_eq!(prov[1].0, prov[0].0, "both grid rows map to the ONE pre item");
+        assert_eq!((prov[0].1, prov[1].1), (0, 1), "each names its pre line");
+        let laid = crate::layout::layout_block(&lb, w as i32, &sheet, &mut gs);
+        let pre_lines: Vec<&crate::layout::LaidLine> =
+            laid.lines.iter().filter(|l| l.src_item == 0).collect();
+        assert_eq!(pre_lines.len(), 2);
+        assert_eq!((pre_lines[0].src_row, pre_lines[1].src_row), (0, 1), "pre lines carry their row");
+        let row1 = pre_lines[1];
+        let seg = row1.segs.iter().find(|s| s.obj != 0).expect("row 1's obj seg");
+        let (x, y) = ((seg.x + seg.x_end) / 2, row1.y + row1.h / 2);
+        let hit = t.grid_hit(x, y, cw, ch);
+        let obj = hit.and_then(|(r, k)| t.grid_run_obj(r, k).map(|(a, b)| (r, a, b)));
+        assert_eq!(
+            obj,
+            Some((1usize, "path", "/bb")),
+            "a click on row 1's path opens /bb (hit {:?})",
+            hit
+        );
+    }
+
+    /// Audit F3, through the tile: `rule`, a text line, a newline, then an
+    /// `em` open starting the next line -- the text line's cells ended the
+    /// rule episode, so the open carries no rule and one rule frame places
+    /// ONE rule on the live grid.
+    #[test]
+    fn one_rule_frame_places_one_rule_on_the_live_grid() {
+        let mut t = Tile::new(20, 4, vt::DAYLIGHT);
+        frame(&mut t, 1, b"rule");
+        assert_eq!(t.scrollback.rule_open(), Some(1));
+        write(&mut t, vec![(0, 0, cs('a', 1)), (0, 1, cs('b', 1))], (1, 0));
+        assert_eq!(t.scrollback.rule_open(), None, "cells after the rule end its episode");
+        frame(&mut t, 2, b"em;class=dim");
+        write(&mut t, vec![(1, 0, cs('x', 2)), (1, 1, cs('y', 2))], (1, 2));
+        frame(&mut t, 3, b"/em");
+        let (lb, _) = t.scrollback.live_block(
+            t.grid.cells(),
+            20,
+            t.grid.content_rows(),
+            t.grid.wrapped(),
+            &t.spans,
+        );
+        let rules = lb.items.iter().filter(|i| matches!(i, Item::Rule)).count();
+        assert_eq!(rules, 1, "one rule frame, one rule; items {}", lb.items.len());
+        assert!(matches!(lb.items[0], Item::Rule), "the rule precedes the text line");
     }
 }
