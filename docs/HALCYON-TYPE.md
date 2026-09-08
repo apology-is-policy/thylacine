@@ -385,7 +385,7 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
 
 ## 6. Chunks (in order; each its own commit + status row)
 
-- **TY-1 + TY-2 — LANDED 2026-09-08 @`*(pending)*`**, one chunk: the swap
+- **TY-1 + TY-2 — LANDED 2026-09-08 @`db1e4ce9`**, one chunk: the swap
   proved the native build by use, not by a dormant dependency. skrifa
   0.46.2 + read-fonts 0.43.3 + font-types 0.12.4 + zeno 0.3.3 (+ bytemuck)
   vendored `no_std`/`libm`; halcyond checked AND release-linked on
