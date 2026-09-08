@@ -4535,6 +4535,20 @@ impl Comp {
             if self.status.is_some() || w != disp_w || h != unit || disp_h <= unit {
                 return Err(p9::E_INVAL);
             }
+            // The display's bar belongs to whoever owns the display. While a
+            // session is declared, a SYSTEM principal -- the console
+            // renderer, which is backgrounded and showing nothing -- may not
+            // TAKE the slot. Retiring its bar at the declare is necessary and
+            // NOT sufficient on its own: the console sees the CLOSE, re-arms
+            // on the very relayout that retire causes, and races the session
+            // for the slot it was just relieved of. Whoever wins is then the
+            // owner, which is a coin toss deciding whether the user has a
+            // status bar. Refused here, the console simply stays bar-less
+            // while it is invisible and re-mints from the relayout that
+            // foregrounds it at logout.
+            if !self.session_conns.is_empty() && !principal_is_session(s.owner_principal) {
+                return Err(p9::E_PERM);
+            }
         }
         // H-3b-2: a chrome binding names a LIVE LEAF (E_NOENT otherwise),
         // judged BEFORE the weave allocation so a bad bind leaks nothing.
@@ -4571,6 +4585,7 @@ impl Comp {
         s.is_menu = is_menu;
         s.is_status = is_status;
         let gen = s.gen;
+        let owner_p = s.owner_principal;
         if is_status {
             // H-3d: the status bar is neither hosted nor pane-bound -- its
             // bind is the display. Registering it carves the layout
@@ -4580,10 +4595,15 @@ impl Comp {
             self.status = Some(StatusState { n, gen });
             #[cfg(feature = "test-mode")]
             say!(
-                "tapestryd: status bar {} created ({}x{}); the display carves {}",
+                // The owner's principal is on the line because without it the
+                // log cannot answer "whose bar is this?" -- and with two
+                // halcyonds alive (a console renderer and a session), that is
+                // exactly the question a status-bar failure poses.
+                "tapestryd: status bar {} created ({}x{}) for principal {}; the display carves {}",
                 n,
                 w,
                 h,
+                owner_p,
                 self.metrics.status_h
             );
             self.reconcile();
@@ -16040,6 +16060,35 @@ impl Conn {
                                 other
                             );
                             comp.retire(n);
+                        }
+                    }
+                    // H-3d + 14.12: the ONE per-display status bar is
+                    // first-come, and the display has just changed hands.
+                    // The console renderer mints its bar at startup and is
+                    // BACKGROUNDED the instant a session hosts a leaf --
+                    // invisible, yet still holding the slot, so the session
+                    // compositor's own `create role=status` is refused for
+                    // as long as the console lives. That is the same denial
+                    // the session-to-session takeover above retires for,
+                    // one case short: a SYSTEM-to-session handover is a
+                    // handover too. The console drops the surface on its
+                    // CLOSE and re-mints from the relayout that foregrounds
+                    // it again at logout, so this is a loan, not a seizure.
+                    // Keyed on the OWNER'S PRINCIPAL, never on backgrounded
+                    // (which is a per-leaf flag the display-bound bar never
+                    // carries) and never on the conn (the console's is a
+                    // different conn by construction, but so is a second
+                    // session's, which the block above already handled).
+                    if let Some(st) = comp.status {
+                        if comp
+                            .surf(st.n)
+                            .is_some_and(|s| !principal_is_session(s.owner_principal))
+                        {
+                            say!(
+                                "tapestryd: session declare retires the system status bar (surface {})",
+                                st.n
+                            );
+                            comp.retire(st.n);
                         }
                     }
                     comp.session_conns.push((self.conn_id, self.peer_principal));
