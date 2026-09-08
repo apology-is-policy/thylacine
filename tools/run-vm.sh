@@ -359,6 +359,13 @@ cocoa_display="cocoa"
 if [[ "${THYLACINE_HIDPI:-0}" != "0" || -n "${THYLACINE_GPU_RES:-}" ]]; then
     cocoa_display="cocoa,zoom-to-fit=on,zoom-interpolation=off"
 fi
+# THYLACINE_FULLSCREEN=1: the cocoa window opens full-screen, so a scanout
+# sized to the panel's physical pixels (THYLACINE_GPU_RES=2560x1664 on a
+# 13" Air's 2560x1664 retina) lands 1:1 on the whole display instead of a
+# window of half its points.
+if [[ "${THYLACINE_FULLSCREEN:-0}" != "0" ]]; then
+    cocoa_display="$cocoa_display,full-screen=on"
+fi
 
 # P4-K-events: QMP control socket for test-harness key injection.
 # tools/test.sh polls the boot log for the userspace virtio-input
@@ -449,6 +456,9 @@ accel="${THYLACINE_ACCEL:-$(detect_accel)}"
 #                             window (cocoa zoom-to-fit, no resampling);
 #                             Super+= x4 after login for the 2.0 render.
 #                             THYLACINE_GPU_RES=WxH for another size.
+#   THYLACINE_FULLSCREEN=1   the cocoa window full-screen: with
+#                             THYLACINE_GPU_RES at the panel's physical
+#                             pixel size the guest fills the display 1:1.
 #   THYLACINE_DISPLAY=vnc:N   serve the gpu0 console on 127.0.0.1:590N
 #                             (headless live-display; the ls-gfx-live #31
 #                             leg -- gpu-mmio0 is dropped so gpu0 binds

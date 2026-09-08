@@ -330,6 +330,43 @@ perfect at 1.0 in a 636-px one. A rhythm check does not witness content;
 enqueued with the host-first reproduction the gate is missing
 (`bug_wrapped_tour_text_garbled_at_200_in_a_split`).
 
+**The garble, hunted (run 46d, the operator present).** Ground truth
+first: a 2x crop of the capture reads `halcyon` on one line and
+`layolcyon.rc` on the next -- twelve glyphs in one pill, no overlap. So
+not two runs painted at one x (the H2 guess) but two runs CONCATENATED:
+`layo` is the tail of a 52-cell row, `lcyon.rc` the head of the next. The
+vt's own doc line named the mechanism -- `resize`: "Columns crop right /
+no history reflow -- fbcon-grade" -- and it kept each cropped row's wrap
+flag, so halcyond's join, which trusts the flags, read the tour line with
+its middle cut out. Reproduced on the host in one test before any fix
+(the tour line into 105 columns, `resize(52)`, join). Then the operator's
+own screenshot of the HiDPI image showed the same family's second face:
+"You are typing to ut, pid 2413." and then "ays an object -- a path,
+..." with the sentence's head missing. Not a crop this time: the head row
+had scrolled off as a soft-wrapped FRAGMENT, which the transcript holds
+until its continuation also scrolls off -- invisible meanwhile, and on a
+quiet shell after a resize's row slide, invisible for good. And the held
+head was finalized only by the NEXT row to scroll off, glued to it, even
+after a `clear`. Both are one forgetting: a soft-wrapped row is half of
+one logical line. The fix follows the heritage (rio's frames rewrap) and
+the SOTA (every modern terminal reflows; the one hard part, history, is
+the transcript's already): a pure `vt::reflow`, run by `Vt::resize` for
+the main screen and by halcyond's grid mirror at its CONFIGURE (parity is
+a test: four geometries, cell for cell), cursor-anchored, the slid-past
+rows scrolled off whichever screen shows, the alt screen cropped as
+before; and a `top_continues` flag (`wrapped[-1]`) the vt keeps, the
+CellDiff carries (an optional trailing byte), and `live_block` honours --
+the held fragment seeds row 0's line while it is set and lands as its own
+line the moment a normal-screen diff clears it. Two wrong turns caught by
+tests before they shipped: the property test's "identity at every width"
+had to exclude a one-column grid with wide glyphs (lossy by design) and
+size its tall step by content, not by a formula; and the alt-enter arm
+first shipped a hard-coded `false` on the outgoing main diff, which would
+have finalized a straddling fragment whenever a TUI started -- the vt now
+exposes the main flag whichever screen shows, the mode flip flushes
+nothing, and a fragment rides out a TUI session. Host: vt 59, kaua-term
+36, halcyond 182. Gates: ls-gfx-compose PASS 72 s (six legs, one attempt; the 200% capture reads the whole tour by eye), ls-halcyon PASS 118 s (48 legs, one attempt), ls-gfx-panes PASS 47 s (one attempt) -- all three levers re-baked.
+
 ## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
 
 **Where it sits.** The first queued item after run 44's close: the chrome

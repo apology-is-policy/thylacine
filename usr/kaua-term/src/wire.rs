@@ -104,6 +104,7 @@ pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
             changed,
             cursor,
             wrapped,
+            top_continues,
         } => {
             put_u16(&mut p, cursor.0);
             put_u16(&mut p, cursor.1);
@@ -120,6 +121,9 @@ pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
             for &w in wrapped {
                 p.push(w as u8);
             }
+            // The flag for the row above row 0, after the per-row snapshot;
+            // optional on decode (a frame that stops here reads false).
+            p.push(*top_continues as u8);
             T_CELLDIFF
         }
         Record::ScrollOff { rows, wrapped } => {
@@ -298,10 +302,12 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
             for _ in 0..nw {
                 wrapped.push(r.u8()? != 0);
             }
+            let top_continues = if r.done() { false } else { r.u8()? != 0 };
             Record::CellDiff {
                 changed,
                 cursor: (cr, cc, cv),
                 wrapped,
+                top_continues,
             }
         }
         T_SCROLLOFF => {
@@ -517,6 +523,13 @@ mod tests {
             changed: vec![(0, 0, cell('a')), (3, 7, cell('Z'))],
             cursor: (2, 5, true),
             wrapped: vec![true, false, true, false],
+            top_continues: true,
+        });
+        rt_record(Record::CellDiff {
+            changed: vec![],
+            cursor: (0, 0, false),
+            wrapped: vec![],
+            top_continues: false,
         });
         rt_record(Record::ScrollOff {
             rows: vec![vec![cell('x'), cell('y')], vec![cell('z')]],

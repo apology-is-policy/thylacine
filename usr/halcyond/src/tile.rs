@@ -278,6 +278,7 @@ impl Tile {
                 changed,
                 cursor,
                 wrapped,
+                top_continues,
             } => {
                 // A cell written after the open `rule` frame (its serial at
                 // or past the rule's) is the line the rule precedes: the
@@ -289,19 +290,28 @@ impl Tile {
                         self.scrollback.end_rule();
                     }
                 }
-                self.grid.apply_celldiff(&changed, cursor, &wrapped)
+                self.grid.apply_celldiff(&changed, cursor, &wrapped, top_continues);
+                // The scrolled-off fragment the transcript holds continues
+                // into row 0 only while the producer says so; the moment it
+                // does not (row 0 restarted as a line of its own), the
+                // fragment is complete as it stands and lands as a line --
+                // never glued to whatever row scrolls off next. The alt
+                // screen reports false throughout (it has no history) but
+                // the main screen returns intact at alt-leave, so a fragment
+                // rides out a TUI session and rejoins its row then.
+                if !top_continues && self.mode == ScreenMode::Normal {
+                    self.scrollback.flush_scroll_pending(&self.spans);
+                }
             }
             Record::ScrollOff { rows, wrapped } => {
                 self.scrollback
                     .push_scrolled_rows(&rows, &wrapped, &self.spans)
             }
             Record::Control(c) => self.apply_control(c),
-            Record::Mode(m) => {
-                // PL-3: a soft-wrapped ScrollOff line in flight must not carry
-                // its continuation across a screen-mode discontinuity.
-                self.scrollback.flush_scroll_pending(&self.spans);
-                self.mode = m;
-            }
+            // The producer's top flag on the next normal-screen CellDiff says
+            // whether a held soft-wrapped fragment still has its continuation
+            // (PL-3); the mode flip itself decides nothing.
+            Record::Mode(m) => self.mode = m,
         }
     }
 
@@ -338,7 +348,10 @@ impl Tile {
     /// now; the kaua-term replies with a full CellDiff. The scrollback is
     /// flow-based and reflows at layout, so it takes no dims here.
     pub fn resize(&mut self, cols: usize, rows: usize) {
-        self.grid.resize(cols, rows);
+        // The normal screen reflows (the transcript's content model: a
+        // soft-wrapped row is half of one logical line); the alt screen is
+        // the TUI's to repaint.
+        self.grid.resize(cols, rows, self.mode == ScreenMode::Normal);
     }
 
     /// `Some(code)` once the hosted child has exited (the teardown trigger,
@@ -463,6 +476,7 @@ impl Tile {
             live_rows,
             live_wrapped,
             &self.spans,
+            self.grid.top_continues(),
         );
         let live_lb = layout_block(&live_b, widthi, sheet, gs);
         self.laid_last += 1;
@@ -935,12 +949,95 @@ mod tests {
     }
 
     #[test]
+    fn a_celldiff_clearing_the_top_flag_finalizes_the_held_fragment() {
+        // A soft-wrapped row scrolls off (held as a fragment); the producer's
+        // CellDiffs say row 0 continues it (still held, joined live); then
+        // row 0 restarts -- the flag clears and the fragment lands as a line
+        // of its own, never glued to whatever scrolls off next.
+        let mut t = tile();
+        let row: Vec<Cell> = "abcdefgh".chars().map(cell).collect();
+        t.apply(Record::ScrollOff {
+            rows: vec![row],
+            wrapped: vec![true],
+        });
+        assert!(t.scrollback.open_block().items.is_empty(), "held");
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('i')), (0, 1, cell('j'))],
+            cursor: (0, 2, true),
+            wrapped: vec![false; 4],
+            top_continues: true,
+        });
+        assert!(t.scrollback.open_block().items.is_empty(), "still held while row 0 continues it");
+        assert!(t.grid.top_continues());
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('z'))],
+            cursor: (0, 1, true),
+            wrapped: vec![false; 4],
+            top_continues: false,
+        });
+        assert!(!t.grid.top_continues());
+        let items = &t.scrollback.open_block().items;
+        assert_eq!(items.len(), 1, "the fragment is a line now");
+        match &items[0] {
+            crate::transcript::Item::Line(l) => {
+                assert_eq!(l.cells.iter().map(|c| c.ch).collect::<String>(), "abcdefgh")
+            }
+            _ => panic!("a line"),
+        }
+    }
+
+    #[test]
+    fn a_held_fragment_rides_out_a_tui_session_and_rejoins_its_row_at_leave() {
+        // The alt screen's CellDiffs carry a clear flag (no history there)
+        // but the main screen comes back whole: the fragment held at entry
+        // is still held at leave, and the restored main's flag joins it.
+        let mut t = tile();
+        let row: Vec<Cell> = "abcdefgh".chars().map(cell).collect();
+        t.apply(Record::ScrollOff {
+            rows: vec![row],
+            wrapped: vec![true],
+        });
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('i'))],
+            cursor: (0, 1, true),
+            wrapped: vec![false; 4],
+            top_continues: true,
+        });
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('T'))],
+            cursor: (0, 1, true),
+            wrapped: vec![false; 4],
+            top_continues: false,
+        });
+        assert!(t.scrollback.open_block().items.is_empty(), "held through the TUI");
+        t.apply(Record::Mode(ScreenMode::Normal));
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('i'))],
+            cursor: (0, 1, true),
+            wrapped: vec![false; 4],
+            top_continues: true,
+        });
+        assert!(t.scrollback.open_block().items.is_empty(), "still held: row 0 continues it");
+        assert!(t.grid.top_continues());
+        let (lb, prov) = t.scrollback.live_block(t.grid.cells(), 20, 1, &[false], &t.spans, true);
+        match &lb.items[0] {
+            crate::transcript::Item::Line(l) => {
+                assert_eq!(l.cells.iter().map(|c| c.ch).collect::<String>(), "abcdefghi")
+            }
+            _ => panic!("a line"),
+        }
+        assert_eq!(prov[0].2, 8, "row 0 sits after the eight held cells");
+    }
+
+    #[test]
     fn celldiff_lands_on_the_grid_not_the_scrollback() {
         let mut t = tile();
         t.apply(Record::CellDiff {
             changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
             cursor: (0, 2, true),
             wrapped: vec![],
+            top_continues: false,
         });
         assert_eq!(t.grid.row(0)[0].ch, 'h');
         assert_eq!(t.grid.row(0)[1].ch, 'i');
@@ -1129,6 +1226,7 @@ mod tests {
             changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
             cursor: (0, 2, true),
             wrapped: vec![],
+            top_continues: false,
         });
         let mut cart = Cartoon::new();
         let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
@@ -1151,6 +1249,7 @@ mod tests {
             changed: vec![(3, 0, cell('x'))],
             cursor: (3, 1, true),
             wrapped: vec![],
+            top_continues: false,
         });
         let mut cart = Cartoon::new();
         let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
@@ -1182,6 +1281,7 @@ mod tests {
             changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
             cursor: (0, 2, true),
             wrapped: vec![],
+            top_continues: false,
         });
         let mut cart = Cartoon::new();
         let (w, h) = (20 * 8, (24 * ch) as usize);
@@ -1264,6 +1364,7 @@ mod tests {
             t.grid.content_rows(),
             t.grid.wrapped(),
             &t.spans,
+        false,
         );
         total + layout_block(&live_b, w as i32, sheet, gs).height
     }
@@ -1581,6 +1682,7 @@ mod tests {
             changed: vec![(0, 0, cs('b', 1)), (0, 1, cs('i', 1)), (0, 2, cs('n', 1))],
             cursor: (0, 3, true),
             wrapped: vec![],
+            top_continues: false,
         });
         t.apply(Record::Control(Control::Osc1936Raw {
             serial: 2,
@@ -1590,6 +1692,7 @@ mod tests {
             changed: vec![(0, 4, cs('x', 2))],
             cursor: (0, 5, true),
             wrapped: vec![],
+            top_continues: false,
         });
         let runs = t.grid_runs(0);
         assert_eq!(runs.len(), 1, "one run on the grid row: {:?}", runs);
@@ -1663,6 +1766,7 @@ mod tests {
             changed: vec![(0, 0, cs('b', 1)), (0, 1, cs('i', 1)), (0, 2, cs('n', 1))],
             cursor: (0, 3, true),
             wrapped: vec![],
+            top_continues: false,
         });
         t.apply(Record::Control(Control::Osc1936Raw {
             serial: 2,
@@ -1672,6 +1776,7 @@ mod tests {
             changed: vec![(0, 4, cs('x', 2))],
             cursor: (0, 5, true),
             wrapped: vec![],
+            top_continues: false,
         });
         // Render populates the proportional cache (live_laid Some).
         let mut cart = Cartoon::new();
@@ -1766,6 +1871,7 @@ mod tests {
             changed: cells,
             cursor: (cur.0, cur.1, true),
             wrapped: vec![],
+            top_continues: false,
         });
     }
 
@@ -1820,6 +1926,7 @@ mod tests {
             t.grid.content_rows(),
             t.grid.wrapped(),
             &t.spans,
+        false,
         );
         assert!(matches!(lb.items[0], Item::Table(_)), "the live grid rebuilt the table");
         assert_eq!((prov[0].0, prov[0].1), (0, 0));
@@ -1880,6 +1987,7 @@ mod tests {
             t.grid.content_rows(),
             t.grid.wrapped(),
             &t.spans,
+        false,
         );
         assert!(matches!(lb.items[0], Item::Pre(_)), "the live grid rebuilt the pre");
         assert_eq!(prov[1].0, prov[0].0, "both grid rows map to the ONE pre item");
@@ -1922,6 +2030,7 @@ mod tests {
             t.grid.content_rows(),
             t.grid.wrapped(),
             &t.spans,
+        false,
         );
         let rules = lb.items.iter().filter(|i| matches!(i, Item::Rule)).count();
         assert_eq!(rules, 1, "one rule frame, one rule; items {}", lb.items.len());

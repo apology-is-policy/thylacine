@@ -550,6 +550,199 @@ pub enum Boundary {
     AltLeave(Vec<Cell>),
 }
 
+/// The main screen re-cut at a new geometry: what `reflow` returns.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reflowed {
+    /// `ncols * nrows`, row-major.
+    pub cells: Vec<Cell>,
+    /// Per row: true iff the row is a non-final row of a logical line (it
+    /// is full and its line continues on the next row).
+    pub wrapped: Vec<bool>,
+    /// `(cx, cy)`; `cx == ncols` is the deferred-wrap state (the cursor past
+    /// the last column of a row it filled exactly).
+    pub cursor: (usize, usize),
+    /// The rows the cursor anchor pushed off the top, in screen order, each
+    /// `ncols` cells with its wrap flag -- history for a consumer that keeps
+    /// one, exactly like a scroll's.
+    pub scrolled: Vec<(Vec<Cell>, bool)>,
+    /// Whether the (off-screen) row above row 0 continues into row 0.
+    pub top_continues: bool,
+}
+
+/// Re-cut the main screen at `ncols` x `nrows`, preserving every cell of
+/// every logical line. A soft-wrapped grid row is half of ONE logical line
+/// that the grid broke at `cols` (`wrapped[y]`), so a column change must
+/// re-wrap the line at the new width -- cropping a row and keeping its
+/// wrap flag hands a consumer that rejoins rows a line with its middle cut
+/// out. A hard-wrapped row (an explicit LF) stays a line of its own. The
+/// result is what writing each line's cells through `put_char` at the new
+/// width would leave: rows fill to `ncols`, a double-width glyph moves
+/// whole to the next row (its margin pad blank is kept as a cell -- the
+/// grid cannot tell it from a typed space), a final row's trailing
+/// never-written padding is dropped and re-padded. The cursor keeps its
+/// logical cell (the deferred-wrap state included; a cursor parked on a
+/// final row's padding keeps its distance past the content, clamped to
+/// the row). Cursor-anchored like a scroll: when the re-cut content no
+/// longer fits above the cursor, the window slides down just enough to
+/// keep the cursor row, and the rows it slides past are returned as
+/// `scrolled` (a consumer's history); rows below the window are dropped.
+/// No history reflow -- the consumer's transcript owns history and
+/// re-wraps it itself. Shared by `Vt::resize` and halcyond's grid mirror,
+/// which must agree with the producer cell for cell.
+#[allow(clippy::too_many_arguments)]
+pub fn reflow(
+    cells: &[Cell],
+    wrapped: &[bool],
+    cols: usize,
+    rows: usize,
+    cursor: (usize, usize),
+    top_continues: bool,
+    ncols: usize,
+    nrows: usize,
+    blank: Cell,
+) -> Reflowed {
+    debug_assert!(ncols >= 1 && nrows >= 1, "a grid has at least one cell");
+    let (cx, cy) = cursor;
+    // Never-written padding: a blank in the default ink with no pen and no
+    // span (a typed space in a tagged tile carries its serial; an SGR bg
+    // alone does not make a cell content).
+    let is_pad = |c: &Cell| c.ch == ' ' && c.attrs == 0 && c.span == 0 && c.fg == blank.fg;
+    // A wide glyph's continuation half: the blank put_char writes after it.
+    let is_cont = |c: &Cell| c.ch == ' ' && c.attrs & ATTR_WIDE == 0;
+    let mut out: Vec<Cell> = Vec::with_capacity(cells.len().max(ncols * nrows));
+    let mut out_wrapped: Vec<bool> = Vec::with_capacity(rows.max(nrows));
+    let mut cur: Option<(usize, usize)> = None;
+    let mut r = 0;
+    while r < rows {
+        let mut r_end = r;
+        while r_end + 1 < rows && wrapped.get(r_end).copied().unwrap_or(false) {
+            r_end += 1;
+        }
+        let mut content: Vec<Cell> = Vec::with_capacity((r_end - r + 1) * cols);
+        for rr in r..=r_end {
+            content.extend_from_slice(&cells[rr * cols..(rr + 1) * cols]);
+        }
+        let cur_o = if cy >= r && cy <= r_end {
+            Some((cy - r) * cols + cx)
+        } else {
+            None
+        };
+        // Only the final row carries padding: a wrapped row filled to its
+        // last column (or its wide pad, kept).
+        let mut len = content.len();
+        while len > (r_end - r) * cols && is_pad(&content[len - 1]) {
+            len -= 1;
+        }
+        content.truncate(len);
+        let mut row: Vec<Cell> = Vec::with_capacity(ncols);
+        let mut pos: Vec<(usize, usize)> = Vec::with_capacity(len);
+        let mut i = 0;
+        while i < len {
+            let c = content[i];
+            let has_cont = i + 1 < len && is_cont(&content[i + 1]);
+            let wide = c.attrs & ATTR_WIDE != 0 && has_cont;
+            let w = if wide && ncols >= 2 { 2 } else { 1 };
+            if row.len() + w > ncols {
+                while row.len() < ncols {
+                    row.push(blank);
+                }
+                out.append(&mut row);
+                out_wrapped.push(true);
+            }
+            pos.push((out_wrapped.len(), row.len()));
+            row.push(c);
+            if wide {
+                if ncols >= 2 {
+                    pos.push((out_wrapped.len(), row.len()));
+                    row.push(content[i + 1]);
+                } else {
+                    // Single-width in a one-column grid: put_char writes no
+                    // continuation there, so none is kept.
+                    pos.push((out_wrapped.len(), row.len() - 1));
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        if let Some(o) = cur_o {
+            let last = out_wrapped.len();
+            let end = row.len();
+            cur = Some(if o < len {
+                pos[o]
+            } else if o == len {
+                (last, end)
+            } else {
+                (last, (end + (o - len)).min(ncols - 1))
+            });
+        }
+        while row.len() < ncols {
+            row.push(blank);
+        }
+        out.append(&mut row);
+        out_wrapped.push(false);
+        r = r_end + 1;
+    }
+    let (cr, cc) = cur.unwrap_or((0, 0));
+    let shift = if cr >= nrows { cr + 1 - nrows } else { 0 };
+    let scrolled: Vec<(Vec<Cell>, bool)> = (0..shift)
+        .map(|i| (out[i * ncols..(i + 1) * ncols].to_vec(), out_wrapped[i]))
+        .collect();
+    let top_continues = if shift > 0 {
+        out_wrapped[shift - 1]
+    } else {
+        top_continues
+    };
+    let total = out_wrapped.len();
+    let mut cells_out: Vec<Cell> = Vec::with_capacity(ncols * nrows);
+    let mut wrapped_out: Vec<bool> = Vec::with_capacity(nrows);
+    for i in shift..shift + nrows {
+        if i < total {
+            cells_out.extend_from_slice(&out[i * ncols..(i + 1) * ncols]);
+            wrapped_out.push(out_wrapped[i]);
+        } else {
+            cells_out.extend(core::iter::repeat_n(blank, ncols));
+            wrapped_out.push(false);
+        }
+    }
+    Reflowed {
+        cells: cells_out,
+        wrapped: wrapped_out,
+        cursor: (cc, cr - shift),
+        scrolled,
+        top_continues,
+    }
+}
+
+/// The alt screen at a new geometry: a top-left crop shifted down by
+/// `shift` rows (the cursor anchor when it is the active screen, 0 when it
+/// is not). A fullscreen TUI repaints itself on its own `tty:winch`, so
+/// nothing of it is worth re-cutting.
+#[allow(clippy::too_many_arguments)]
+fn crop(
+    cells: &[Cell],
+    wrapped: &[bool],
+    cols: usize,
+    rows: usize,
+    shift: usize,
+    ncols: usize,
+    nrows: usize,
+    blank: Cell,
+) -> (Vec<Cell>, Vec<bool>) {
+    let ccols = cols.min(ncols);
+    let mut out = vec![blank; ncols * nrows];
+    let mut out_wrapped = vec![false; nrows];
+    for r in 0..nrows {
+        let or = r + shift;
+        if or >= rows {
+            break;
+        }
+        out_wrapped[r] = wrapped.get(or).copied().unwrap_or(false);
+        out[r * ncols..r * ncols + ccols].copy_from_slice(&cells[or * cols..or * cols + ccols]);
+    }
+    (out, out_wrapped)
+}
+
 /// The SGR pen: the fg/bg/attrs state one `CSI ... m` sequence mutates.
 /// Extracted from the grid interpreter at H-2a+1 so halcyond's transcript
 /// drives the SAME machinery per block (HALCYON.md §13.4(b) -- one SGR
@@ -773,6 +966,17 @@ pub struct Vt {
     // the vec length == rows across the alt swap).
     wrapped: Vec<bool>,
     alt_wrapped: Vec<bool>,
+    // The MAIN screen's flag for the row above row 0: true iff the row that
+    // last scrolled off the top ended by autowrap and row 0 still holds its
+    // continuation -- `wrapped[-1]`, the one flag the per-row vector cannot
+    // carry. Set by the full-screen scroll that pushes a wrapped row off;
+    // cleared when row 0 restarts as a line of its own (a glyph at column
+    // 0, an erase reaching its first cell, IL/DL at row 0, a scroll-down,
+    // RIS); re-derived by a resize. A consumer holding the scrolled-off
+    // fragment joins it to row 0 only while this is set, and finalizes it
+    // the moment it clears. Alt-screen operations never touch it (the alt
+    // has no history).
+    top_continues: bool,
     // KT-1 event capture. Off by default: the console renderer (aurora) never
     // sets it, so the leaf handlers push nothing and every path is byte- and
     // allocation-identical to before. The kaua-term sets it and drains
@@ -844,6 +1048,7 @@ impl Vt {
             dirty: vec![true; rows],
             wrapped: vec![false; rows],
             alt_wrapped: vec![false; rows],
+            top_continues: false,
             capture_events: false,
             pending: Vec::new(),
             app_cursor: false,
@@ -875,6 +1080,27 @@ impl Vt {
         &self.wrapped
     }
 
+    /// Whether the row that last scrolled off the top continues into row 0
+    /// (see the field). Always false on the alt screen, which has no
+    /// history to continue from.
+    pub fn top_continues(&self) -> bool {
+        !self.on_alt && self.top_continues
+    }
+
+    /// The MAIN screen's flag whichever screen shows -- for the producer's
+    /// last main-screen diff at alt-enter (the swap has already happened).
+    pub fn main_top_continues(&self) -> bool {
+        self.top_continues
+    }
+
+    /// Row 0 restarted as a line of its own (main screen only): the row
+    /// above it, if a consumer still holds it, is complete as it stands.
+    fn restart_top(&mut self) {
+        if !self.on_alt {
+            self.top_continues = false;
+        }
+    }
+
     /// Resumable feed for the event-capture consumer (KT-1). Processes bytes
     /// from `*pos` and returns at the first boundary event (having advanced
     /// `*pos` past its triggering byte and applied its cell effect), or None at
@@ -899,81 +1125,89 @@ impl Vt {
     }
 
     /// #55 (AURORA.md section 4): the reweave grid resize. Content-preserving
-    /// and CURSOR-ANCHORED on the active screen: on a row shrink the visible
-    /// window slides down just enough to keep the cursor row (the prompt); on
-    /// grow, blank rows append at the bottom. Columns crop right / grow blank.
-    /// The INACTIVE (alt) buffer is top-left-cropped -- a fullscreen TUI on
-    /// the alt screen repaints itself on its own tty:winch. No history
-    /// reflow -- fbcon-grade. Every row is marked dirty.
+    /// and CURSOR-ANCHORED. The MAIN screen REFLOWS (`reflow`): every logical
+    /// line is re-cut at the new width, so a column change never crops a
+    /// soft-wrapped row (and never hands a consumer that rejoins rows a line
+    /// with its middle cut out); on a row shrink the window slides down just
+    /// enough to keep the cursor row (the prompt), and the rows it slides
+    /// past are scrolled off, not lost -- under capture each becomes a
+    /// Scroll boundary so a consumer's scrollback keeps them (xterm's
+    /// behaviour on a shrink), whichever screen is showing. The main screen
+    /// is reflowed whether or not it is the active one, so a resize under a
+    /// fullscreen TUI returns a whole main screen at alt-leave. The ALT
+    /// buffer is cropped (cursor-anchored while it is showing, top-left
+    /// otherwise) -- a fullscreen TUI repaints itself on its own tty:winch.
+    /// No history reflow: the consumer's transcript owns history. Every row
+    /// is marked dirty.
     pub fn resize(&mut self, ncols: usize, nrows: usize) {
         if (ncols == self.cols && nrows == self.rows) || ncols == 0 || nrows == 0 {
             return;
         }
-        let shift = if self.cy >= nrows {
-            self.cy + 1 - nrows
+        let blank = Cell::blank(self.pal.fg, self.pal.bg);
+        let (main_cells, main_wrapped, main_cursor) = if self.on_alt {
+            // The implicit DECSC at alt-enter holds the main cursor.
+            (&self.alt_cells, &self.alt_wrapped, self.saved)
         } else {
-            0
+            (&self.cells, &self.wrapped, (self.cx, self.cy))
         };
-        let ccols = if self.cols < ncols { self.cols } else { ncols };
-        let (pfg, pbg) = (self.pal.fg, self.pal.bg);
-        // Rows a shrink pushes off the top are scrolled off, not lost: under
-        // capture each becomes a Scroll boundary so a consumer's scrollback
-        // keeps them (xterm's behaviour on a shrink).
-        if self.capture_events && !self.on_alt {
-            for r in 0..shift.min(self.rows) {
-                let row = self.cells[r * self.cols..(r + 1) * self.cols].to_vec();
-                self.pending.push(Boundary::Scroll(row, self.wrapped[r]));
+        let rf = reflow(
+            main_cells,
+            main_wrapped,
+            self.cols,
+            self.rows,
+            main_cursor,
+            self.top_continues,
+            ncols,
+            nrows,
+            blank,
+        );
+        if self.capture_events {
+            for (row, w) in rf.scrolled {
+                self.pending.push(Boundary::Scroll(row, w));
             }
         }
-        let mut cells = vec![Cell::blank(pfg, pbg); ncols * nrows];
-        let mut new_wrapped = vec![false; nrows];
-        for r in 0..nrows {
-            let or = r + shift;
-            if or >= self.rows {
-                break;
+        let (alt_cells, alt_wrapped, alt_shift) = if self.on_alt {
+            let shift = if self.cy >= nrows { self.cy + 1 - nrows } else { 0 };
+            (&self.cells, &self.wrapped, shift)
+        } else {
+            (&self.alt_cells, &self.alt_wrapped, 0)
+        };
+        let (alt, alt_w) = crop(
+            alt_cells,
+            alt_wrapped,
+            self.cols,
+            self.rows,
+            alt_shift,
+            ncols,
+            nrows,
+            blank,
+        );
+        if self.on_alt {
+            self.cells = alt;
+            self.wrapped = alt_w;
+            self.alt_cells = rf.cells;
+            self.alt_wrapped = rf.wrapped;
+            // The main cursor, restored at alt-leave (which clamps).
+            self.saved = rf.cursor;
+            self.cy = self.cy.saturating_sub(alt_shift).min(nrows - 1);
+            if self.cx >= ncols {
+                self.cx = ncols - 1;
             }
-            new_wrapped[r] = self.wrapped[or];
-            for c in 0..ccols {
-                cells[r * ncols + c] = self.cells[or * self.cols + c];
-            }
+        } else {
+            self.cells = rf.cells;
+            self.wrapped = rf.wrapped;
+            self.alt_cells = alt;
+            self.alt_wrapped = alt_w;
+            (self.cx, self.cy) = rf.cursor;
+            // DECSC's slot clamps (xterm): a saved position is not a cell.
+            self.saved = (self.saved.0.min(ncols - 1), self.saved.1.min(nrows - 1));
         }
-        let mut alt = vec![Cell::blank(pfg, pbg); ncols * nrows];
-        let mut new_alt_wrapped = vec![false; nrows];
-        let arows = if self.rows < nrows { self.rows } else { nrows };
-        for r in 0..arows {
-            new_alt_wrapped[r] = self.alt_wrapped[r];
-            for c in 0..ccols {
-                alt[r * ncols + c] = self.alt_cells[r * self.cols + c];
-            }
-        }
-        self.cells = cells;
-        self.alt_cells = alt;
-        self.wrapped = new_wrapped;
-        self.alt_wrapped = new_alt_wrapped;
+        self.top_continues = rf.top_continues;
         self.cols = ncols;
         self.rows = nrows;
         // DECSTBM resets to the full screen on resize (xterm parity).
         self.scroll_top = 0;
         self.scroll_bot = nrows - 1;
-        self.cy = self.cy.saturating_sub(shift);
-        if self.cy >= nrows {
-            self.cy = nrows - 1;
-        }
-        if self.cx >= ncols {
-            self.cx = ncols - 1;
-        }
-        self.saved = (
-            if self.saved.0 >= ncols {
-                ncols - 1
-            } else {
-                self.saved.0
-            },
-            if self.saved.1 >= nrows {
-                nrows - 1
-            } else {
-                self.saved.1
-            },
-        );
         self.dirty = vec![true; nrows];
     }
 
@@ -1141,6 +1375,7 @@ impl Vt {
                 for w in self.wrapped.iter_mut() {
                     *w = false;
                 }
+                self.restart_top();
                 self.mark_all();
             }
             _ => {}
@@ -1388,6 +1623,9 @@ impl Vt {
         // soft-wrap flag it carried (re-set below if this row fills + wraps).
         if cx == 0 {
             self.wrapped[cy] = false;
+            if cy == 0 {
+                self.restart_top();
+            }
         }
         let attrs = if w == 2 {
             self.attrs | ATTR_WIDE
@@ -1449,6 +1687,10 @@ impl Vt {
             self.pending
                 .push(Boundary::Scroll(self.cells[0..cols].to_vec(), self.wrapped[0]));
         }
+        // The leaving row's continuation (if any) is now row 0.
+        if !self.on_alt && top == 0 {
+            self.top_continues = self.wrapped[0];
+        }
         // Shift rows (top+1..=bot) up one within the band; blank row `bot`.
         self.cells
             .copy_within((top + 1) * cols..(bot + 1) * cols, top * cols);
@@ -1464,6 +1706,9 @@ impl Vt {
     fn scroll_down(&mut self) {
         let cols = self.cols;
         let (top, bot) = (self.scroll_top, self.scroll_bot);
+        if top == 0 {
+            self.restart_top();
+        }
         // Shift rows (top..bot) down one within the band; blank row `top`.
         self.cells
             .copy_within(top * cols..bot * cols, (top + 1) * cols);
@@ -1504,6 +1749,10 @@ impl Vt {
         // logically ON the last column at the wrap point). Holotype G-4 F1.
         let cx = self.cx.min(self.cols - 1);
         let cur = self.cy * self.cols + cx;
+        // An erase that reaches row 0's first cell restarts row 0.
+        if mode != 0 || cur == 0 {
+            self.restart_top();
+        }
         match mode {
             0 => {
                 for c in self.cells[cur..].iter_mut() {
@@ -1555,6 +1804,9 @@ impl Vt {
             1 => (0, cx + 1),
             _ => (0, self.cols),
         };
+        if self.cy == 0 && a == 0 {
+            self.restart_top();
+        }
         for c in self.cells[row + a..row + b].iter_mut() {
             *c = Cell::blank(fg, bg);
         }
@@ -1575,6 +1827,9 @@ impl Vt {
         let n = n.min(self.scroll_bot + 1 - self.cy);
         if n == 0 {
             return;
+        }
+        if self.cy == 0 {
+            self.restart_top();
         }
         let cols = self.cols;
         let start = self.cy * cols;
@@ -1605,6 +1860,9 @@ impl Vt {
         let n = n.min(self.scroll_bot + 1 - self.cy);
         if n == 0 {
             return;
+        }
+        if self.cy == 0 {
+            self.restart_top();
         }
         let cols = self.cols;
         let start = self.cy * cols;
@@ -2611,5 +2869,331 @@ mod tests {
                 body: b"0;hi".to_vec()
             }
         );
+    }
+
+    // ---- The reflowing resize (the split-tour garble at 200%) ----
+
+    /// The screen's logical lines as strings: soft-wrapped rows joined by
+    /// their flags, each line's trailing blanks trimmed -- what a consumer
+    /// that rejoins rows (halcyond's transcript) reads off the grid.
+    fn lines_of(vt: &Vt) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        for r in 0..vt.rows {
+            cur.extend(vt.cells[r * vt.cols..(r + 1) * vt.cols].iter().map(|c| c.ch));
+            if !vt.wrapped()[r] {
+                out.push(String::from(cur.trim_end()));
+                cur.clear();
+            }
+        }
+        if !cur.is_empty() {
+            out.push(String::from(cur.trim_end()));
+        }
+        while out.last().is_some_and(|l| l.is_empty()) {
+            out.pop();
+        }
+        out
+    }
+
+    const TOUR: &str = "Super+H / Super+V split, Super+F zooms; halcyon layout save <name> \
+keeps an arrangement, and $HOME/lib/halcyon.rc runs at every login (an empty one skips this welcome).";
+
+    #[test]
+    fn a_column_shrink_re_cuts_a_soft_wrapped_line_instead_of_cropping_it() {
+        // The compose gate's 200% capture: the welcome tour printed into a
+        // 105-column split at 1.0 (two rows), then Super+= x4 halved the grid
+        // to 52 columns. The old crop kept 52 cells of each row AND the
+        // first row's wrap flag, so the consumer's join read "...halcyon
+        // layo" + "lcyon.rc runs at every login (an empty one skips thi" --
+        // the pill `layolcyon.rc` and a lost clause. A reflow re-cuts the
+        // line at 52: every cell survives, in order.
+        let mut vt = Vt::new(105, 8);
+        feed(&mut vt, TOUR.as_bytes());
+        feed(&mut vt, b"\r\n");
+        assert_eq!(lines_of(&vt), alloc::vec![String::from(TOUR)]);
+        assert!(vt.wrapped()[0] && !vt.wrapped()[1]);
+        vt.resize(52, 8);
+        let n = TOUR.chars().count();
+        let rows = n.div_ceil(52);
+        assert_eq!(lines_of(&vt)[0], TOUR, "every cell of the line survives the shrink");
+        for r in 0..rows - 1 {
+            assert!(vt.wrapped()[r], "row {r} is a non-final row of the line");
+        }
+        assert!(!vt.wrapped()[rows - 1], "the last row of the line ends it");
+        assert_eq!((vt.cx, vt.cy), (0, rows), "the cursor sits on the row after the line");
+        // The crop's tell, spelled out: neither garbled run exists.
+        let text = lines_of(&vt).join("\n");
+        assert!(!text.contains("layolcyon"), "{text}");
+        assert!(text.contains("keeps an arrangement, and"), "{text}");
+    }
+
+    #[test]
+    fn a_column_grow_re_joins_the_rows_of_a_soft_wrapped_line() {
+        // The same line printed into the narrow grid, then widened: the
+        // four rows become two (105 + 63), the flags follow, the cursor
+        // lands on the row after the line.
+        let mut vt = Vt::new(52, 8);
+        feed(&mut vt, TOUR.as_bytes());
+        feed(&mut vt, b"\r\n");
+        assert_eq!((vt.cx, vt.cy), (0, 4));
+        vt.resize(105, 8);
+        assert_eq!(lines_of(&vt)[0], TOUR);
+        assert!(vt.wrapped()[0] && !vt.wrapped()[1]);
+        assert_eq!((vt.cx, vt.cy), (0, 2));
+        // And back: a round trip is the identity on the cells.
+        vt.resize(52, 8);
+        assert_eq!(lines_of(&vt)[0], TOUR);
+        assert_eq!((vt.cx, vt.cy), (0, 4));
+    }
+
+    #[test]
+    fn hard_wrapped_rows_stay_separate_lines_across_a_reflow() {
+        // An explicit LF ends a line; a reflow never joins two of them,
+        // narrower or wider.
+        let mut vt = Vt::new(8, 4);
+        feed(&mut vt, b"ab\r\ncd\r\n");
+        vt.resize(2, 4);
+        assert_eq!(lines_of(&vt), alloc::vec!["ab", "cd"]);
+        assert!(vt.wrapped().iter().all(|w| !w));
+        assert_eq!((vt.cx, vt.cy), (0, 2));
+        vt.resize(20, 4);
+        assert_eq!(lines_of(&vt), alloc::vec!["ab", "cd"]);
+        assert_eq!((vt.cx, vt.cy), (0, 2));
+    }
+
+    #[test]
+    fn the_cursor_keeps_its_logical_cell_through_a_reflow() {
+        // A prompt with typed input, the cursor after the last glyph: the
+        // cursor's LOGICAL offset in its line is what survives, whatever
+        // row/column the new width puts it on.
+        let mut vt = Vt::new(10, 4);
+        feed(&mut vt, b"prompt> abc");
+        assert_eq!((vt.cx, vt.cy), (1, 1));
+        vt.resize(6, 4);
+        assert_eq!(lines_of(&vt)[0], "prompt> abc");
+        assert_eq!((vt.cx, vt.cy), (5, 1), "offset 11 at width 6 = row 1, col 5");
+        vt.resize(20, 4);
+        assert_eq!((vt.cx, vt.cy), (11, 0));
+        // A cursor parked past the content (CUP onto the padding) keeps its
+        // distance where the row allows it and clamps where it does not --
+        // and a clamp is lossy, as xterm's is.
+        let mut vt = Vt::new(10, 2);
+        feed(&mut vt, b"ab\x1b[1;8H"); // 'ab', cursor at col 7
+        vt.resize(20, 2);
+        assert_eq!((vt.cx, vt.cy), (7, 0), "5 past the content, kept");
+        vt.resize(5, 2);
+        assert_eq!((vt.cx, vt.cy), (4, 0), "clamped into the 5-column row");
+        vt.resize(10, 2);
+        assert_eq!((vt.cx, vt.cy), (4, 0), "the clamped distance (2) is what survives");
+    }
+
+    #[test]
+    fn the_deferred_wrap_cursor_survives_a_reflow() {
+        // A row filled exactly leaves the cursor PAST its last column (the
+        // next glyph wraps). Re-cut at a width that divides the line, the
+        // cursor is again past the last column of the new final row.
+        let mut vt = Vt::new(4, 2);
+        feed(&mut vt, b"abcd");
+        assert_eq!((vt.cx, vt.cy), (4, 0));
+        vt.resize(2, 2);
+        assert_eq!(lines_of(&vt), alloc::vec!["abcd"]);
+        assert!(vt.wrapped()[0] && !vt.wrapped()[1]);
+        assert_eq!((vt.cx, vt.cy), (2, 1), "deferred: cx == cols on the final row");
+        // The next glyph wraps exactly as it would have on a fresh grid.
+        feed(&mut vt, b"e");
+        assert_eq!(lines_of(&vt), alloc::vec!["cde"], "'ab' scrolled off; the line continues");
+        assert!(vt.wrapped()[0]);
+        assert_eq!((vt.cx, vt.cy), (1, 1));
+    }
+
+    #[test]
+    fn a_shrink_scrolls_the_rows_it_slides_past_off_the_top_in_order() {
+        // The cursor anchor: what the window slides past is history, emitted
+        // as Scroll boundaries in screen order -- the reflowed rows, with
+        // their flags -- and the top flag names the row above the new row 0.
+        let mut vt = Vt::new(8, 3);
+        vt.set_capture_events(true);
+        feed(&mut vt, b"abcdefghij\r\nxy");
+        assert_eq!((vt.cx, vt.cy), (2, 2));
+        assert!(!vt.top_continues());
+        vt.resize(4, 3);
+        // "abcdefghij" -> abcd|efgh|ij, "xy": four rows; the cursor's row 3
+        // needs a slide of one, so "abcd" (wrapped) leaves.
+        let bs = drive(&mut vt, b"");
+        assert_eq!(bs.len(), 1);
+        match &bs[0] {
+            Boundary::Scroll(row, wrapped) => {
+                let s: String = row.iter().map(|c| c.ch).collect();
+                assert_eq!(s, "abcd");
+                assert!(*wrapped, "the row that left continues into the new row 0");
+            }
+            other => panic!("expected Scroll, got {other:?}"),
+        }
+        assert_eq!(lines_of(&vt), alloc::vec!["efghij", "xy"]);
+        assert!(vt.wrapped()[0] && !vt.wrapped()[1] && !vt.wrapped()[2]);
+        assert_eq!((vt.cx, vt.cy), (2, 2));
+        assert!(vt.top_continues(), "row 0 continues the scrolled-off 'abcd'");
+        // A hard-wrapped row leaving the top clears it.
+        let mut vt = Vt::new(8, 4);
+        vt.set_capture_events(true);
+        feed(&mut vt, b"one\r\ntwo\r\nthree\r\nfour");
+        vt.resize(8, 2);
+        let bs = drive(&mut vt, b"");
+        let rows: Vec<String> = bs
+            .iter()
+            .map(|b| match b {
+                Boundary::Scroll(row, _) => String::from(row.iter().map(|c| c.ch).collect::<String>().trim_end()),
+                other => panic!("expected Scroll, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(rows, alloc::vec!["one", "two"]);
+        assert_eq!(lines_of(&vt), alloc::vec!["three", "four"]);
+        assert_eq!((vt.cx, vt.cy), (4, 1));
+        assert!(!vt.top_continues());
+    }
+
+    #[test]
+    fn top_continues_follows_the_row_above_row_zero() {
+        // Set by a full-screen scroll that pushes a WRAPPED row off; kept
+        // while row 0 still holds its continuation; cleared the moment row
+        // 0 restarts as a line of its own.
+        let arm = |bytes: &[u8]| -> Vt {
+            let mut vt = Vt::new(4, 2);
+            vt.set_capture_events(true);
+            // "abcd" fills row 0 (wrapped), "ef" on row 1; the LF at the
+            // bottom scrolls "abcd" off: row 0 = "ef" continues it.
+            drive(&mut vt, b"abcdef\r\n");
+            assert!(vt.top_continues(), "a wrapped row scrolled off");
+            drive(&mut vt, bytes);
+            vt
+        };
+        assert!(arm(b"x").top_continues(), "a glyph on row 1 changes nothing");
+        assert!(arm(b"\x1b[1;3Hz").top_continues(), "a glyph mid-row 0 overwrites, never restarts");
+        assert!(!arm(b"\x1b[Hz").top_continues(), "a glyph at (0,0) restarts row 0");
+        assert!(!arm(b"\x1b[2J").top_continues(), "ED 2");
+        assert!(!arm(b"\x1b[1J").top_continues(), "ED 1 reaches row 0's first cell");
+        assert!(arm(b"\x1b[J").top_continues(), "ED 0 from row 1 leaves row 0 alone");
+        assert!(!arm(b"\x1b[H\x1b[J").top_continues(), "ED 0 from (0,0) erases row 0");
+        assert!(!arm(b"\x1b[H\x1b[2K").top_continues(), "EL 2 on row 0");
+        assert!(!arm(b"\x1b[H\x1b[K").top_continues(), "EL 0 from column 0 of row 0");
+        assert!(arm(b"\x1b[1;2H\x1b[K").top_continues(), "EL 0 from column 1 keeps row 0's head");
+        assert!(!arm(b"\x1b[H\x1b[L").top_continues(), "IL at row 0 (row 0 is now blank)");
+        assert!(!arm(b"\x1b[H\x1b[M").top_continues(), "DL at row 0 (the continuation is gone)");
+        assert!(!arm(b"\x1b[H\x1bM").top_continues(), "RI at the top scrolls down: row 0 blank");
+        assert!(!arm(b"\x1bc").top_continues(), "RIS");
+        assert!(!arm(b"\r\n").top_continues(), "the next scroll pushes a HARD row off");
+        // The alt screen has no history: the accessor reads false there and
+        // the main's flag waits underneath.
+        let mut vt = arm(b"\x1b[?1049h");
+        assert!(!vt.top_continues());
+        drive(&mut vt, b"\x1b[Hq\x1b[2J"); // the TUI paints row 0 + clears
+        drive(&mut vt, b"\x1b[?1049l");
+        assert!(vt.top_continues(), "the main's flag is untouched by alt-screen traffic");
+    }
+
+    #[test]
+    fn a_reflow_keeps_or_rederives_top_continues() {
+        // Row 0 stays the same line's start when nothing slides past
+        // (kept); when the anchor slides rows off, the last one's flag is
+        // the new answer.
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        drive(&mut vt, b"abcdef\r\n");
+        assert!(vt.top_continues());
+        vt.resize(8, 2); // "ef" fits row 0 still
+        assert!(vt.top_continues(), "the grow slid nothing past");
+        assert_eq!(lines_of(&vt), alloc::vec!["ef"]);
+        // A shrink whose slide pushes the continuation itself off: row 0 is
+        // then a hard-wrapped line -> false.
+        let mut vt = Vt::new(8, 3);
+        vt.set_capture_events(true);
+        // "abcdefgh" (wrapped) scrolls off while feeding: row 0 = "ij"
+        // continues it.
+        drive(&mut vt, b"abcdefghij\r\nx\r\ny");
+        assert_eq!(lines_of(&vt), alloc::vec!["ij", "x", "y"]);
+        assert!(vt.top_continues());
+        assert_eq!((vt.cx, vt.cy), (1, 2));
+        vt.resize(4, 2);
+        // ij|x|y: the cursor row 2 needs a slide of 1 -> "ij" leaves, a
+        // final row: the row above the new row 0 does not continue.
+        let bs = drive(&mut vt, b"");
+        assert_eq!(bs.len(), 1);
+        assert!(matches!(&bs[0], Boundary::Scroll(_, false)));
+        assert_eq!(lines_of(&vt), alloc::vec!["x", "y"]);
+        assert!(!vt.top_continues());
+    }
+
+    #[test]
+    fn the_main_screen_reflows_beneath_the_alt_screen() {
+        // A resize while a fullscreen TUI shows: the alt buffer crops (the
+        // TUI repaints on WINCH), the main underneath re-cuts, and alt-leave
+        // restores a whole main screen with its cursor on its cell.
+        let mut vt = Vt::new(10, 4);
+        feed(&mut vt, b"prompt> abc");
+        feed(&mut vt, b"\x1b[?1049h");
+        feed(&mut vt, b"TUI");
+        vt.resize(6, 4);
+        assert!(vt.on_alt);
+        assert_eq!(lines_of(&vt)[0], "TUI", "the alt screen is cropped, not re-cut");
+        feed(&mut vt, b"\x1b[?1049l");
+        assert_eq!(lines_of(&vt)[0], "prompt> abc");
+        assert!(vt.wrapped()[0] && !vt.wrapped()[1]);
+        assert_eq!((vt.cx, vt.cy), (5, 1));
+    }
+
+    #[test]
+    fn a_wide_glyph_moves_whole_across_a_reflowed_row() {
+        // put_char never splits a double-width glyph at the margin; neither
+        // does the re-cut: the pair moves to the next row and the row it
+        // left is padded, wrapped.
+        let mut vt = Vt::new(6, 3);
+        feed(&mut vt, "ab漢c".as_bytes());
+        assert_eq!((vt.cx, vt.cy), (5, 0));
+        vt.resize(3, 3);
+        let row = |r: usize| -> Vec<char> { vt.cells[r * 3..(r + 1) * 3].iter().map(|c| c.ch).collect() };
+        assert_eq!(row(0), alloc::vec!['a', 'b', ' ']);
+        assert_eq!(row(1), alloc::vec!['漢', ' ', 'c']);
+        assert!(vt.cells[3].attrs & ATTR_WIDE != 0, "the left half keeps its width mark");
+        assert!(vt.wrapped()[0] && !vt.wrapped()[1]);
+        assert_eq!((vt.cx, vt.cy), (3, 1), "deferred at the end of the full row");
+    }
+
+    #[test]
+    fn a_rows_only_shrink_is_cursor_anchored_as_before() {
+        let mut vt = Vt::new(4, 4);
+        feed(&mut vt, b"a\r\nb\r\nc\r\nd");
+        assert_eq!((vt.cx, vt.cy), (1, 3));
+        vt.resize(4, 2);
+        assert_eq!(lines_of(&vt), alloc::vec!["c", "d"]);
+        assert_eq!((vt.cx, vt.cy), (1, 1));
+        vt.resize(4, 4);
+        assert_eq!(lines_of(&vt), alloc::vec!["c", "d"]);
+        assert_eq!((vt.cx, vt.cy), (1, 1), "a grow appends blank rows below");
+    }
+
+    #[test]
+    fn reflow_is_the_identity_on_content_at_every_width() {
+        // A property over widths: the joined lines never change, and a
+        // second reflow back to the origin width reproduces the origin grid
+        // exactly (cells and flags).
+        // (Single-width text only: a double-width glyph that lands on a
+        // margin gains put_char's pad blank, kept as a cell -- the one
+        // documented departure from exactness.)
+        let mut vt = Vt::new(40, 12);
+        feed(&mut vt, TOUR.as_bytes());
+        feed(&mut vt, b"\r\nshort\r\n\r\nx  y   z\r\n");
+        feed(&mut vt, b"\x1b[1mbold\x1b[0m and \x1b[31mred\x1b[0m here");
+        let origin_cells = vt.cells.clone();
+        let origin_wrapped = vt.wrapped().to_vec();
+        let origin_lines = lines_of(&vt);
+        let origin_cursor = (vt.cx, vt.cy);
+        for w in [1usize, 2, 3, 7, 11, 39, 41, 100, 400] {
+            vt.resize(w, 400); // enough rows that the anchor slides nothing off
+            assert_eq!(lines_of(&vt), origin_lines, "width {w}");
+            vt.resize(40, 12);
+            assert_eq!(vt.cells, origin_cells, "width {w}: the round trip is exact");
+            assert_eq!(vt.wrapped(), &origin_wrapped[..], "width {w}");
+            assert_eq!((vt.cx, vt.cy), origin_cursor, "width {w}");
+        }
     }
 }

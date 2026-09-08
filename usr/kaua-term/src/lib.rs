@@ -88,6 +88,16 @@ pub enum Record {
         /// buffer's flags (unused there -- the alt screen renders the raw mono
         /// grid, not the proportional join).
         wrapped: Vec<bool>,
+        /// The vt's flag for the row ABOVE row 0 (`Vt::top_continues`): true
+        /// iff the row that last scrolled off ended by autowrap and row 0
+        /// still holds its continuation -- `wrapped[-1]`, which the per-row
+        /// vector cannot carry. halcyond joins the scrolled-off fragment it
+        /// holds to live row 0 only while this is set, and finalizes the
+        /// fragment as a line of its own the moment a CellDiff clears it
+        /// (row 0 restarted; the continuation is gone). Always false on the
+        /// alt screen. On the wire it is an OPTIONAL trailing byte: a frame
+        /// without one decodes as false.
+        top_continues: bool,
     },
     /// Normal-mode lines that scrolled off the top -> the transcript. Coalesced:
     /// a bulk scroll is one record carrying every row that left, in order.
@@ -118,6 +128,9 @@ pub struct Producer {
     shadow: Vec<Cell>,
     cols: usize,
     last_cursor: (u16, u16, bool),
+    // The top flag as last emitted (a flip with no cell change -- a bare LF
+    // scrolling a wrapped row off -- still earns a CellDiff).
+    last_top: bool,
     scroll_acc: Vec<Vec<Cell>>,
     // Parallel to `scroll_acc` (pushed together, taken together): the per-row
     // soft-wrap flag the vt emits on each Scroll boundary (PL-3b).
@@ -132,6 +145,7 @@ impl Producer {
             shadow: vt.cells.clone(),
             cols: vt.cols,
             last_cursor: (vt.cy as u16, vt.cx as u16, vt.cursor_visible),
+            last_top: vt.top_continues(),
             scroll_acc: Vec::new(),
             scroll_wrapped: Vec::new(),
         }
@@ -228,10 +242,18 @@ impl Producer {
                     // CellDiff is overwritten by the blank-alt full_diff below
                     // before any render, and the alt screen renders the raw mono
                     // grid (no join), so the wrap it carries is never read.
-                    self.emit_celldiff(&outgoing, mcx, mcy, vt.cursor_visible, vt.wrapped(), out);
+                    self.emit_celldiff(
+                        &outgoing,
+                        mcx,
+                        mcy,
+                        vt.cursor_visible,
+                        vt.wrapped(),
+                        vt.main_top_continues(),
+                        out,
+                    );
                     out.push(Record::Mode(ScreenMode::AltScreen));
                     self.reset_shadow(&vt.cells, vt.cx, vt.cy, vt.cursor_visible);
-                    out.push(self.full_diff(vt.wrapped()));
+                    out.push(self.full_diff(vt.wrapped(), false));
                 }
                 Boundary::AltLeave(restored) => {
                     // The alt live grid is discarded; announce the mode, reset
@@ -240,7 +262,7 @@ impl Producer {
                     self.flush_scroll(out);
                     out.push(Record::Mode(ScreenMode::Normal));
                     self.reset_shadow(&restored, vt.cx, vt.cy, vt.cursor_visible);
-                    out.push(self.full_diff(vt.wrapped()));
+                    out.push(self.full_diff(vt.wrapped(), vt.top_continues()));
                 }
             }
             // Ship whenever the held cells reach the accumulator bound,
@@ -260,13 +282,16 @@ impl Producer {
         let cursor = (vt.cy as u16, vt.cx as u16, vt.cursor_visible);
         self.shadow = vt.cells.clone();
         self.last_cursor = cursor;
-        out.push(self.full_diff(vt.wrapped()));
+        out.push(self.full_diff(vt.wrapped(), vt.top_continues()));
     }
 
     /// Every shadow cell as one CellDiff (the consumer redraws the whole
     /// screen): the resize and the alt-screen boundaries, where the consumer's
     /// single grid must be overwritten wholesale.
-    fn full_diff(&self, wrapped: &[bool]) -> Record {
+    fn full_diff(&mut self, wrapped: &[bool], top_continues: bool) -> Record {
+        // Recorded like the cursor: the next incremental diff compares
+        // against what was last EMITTED, and this is an emission.
+        self.last_top = top_continues;
         let cols = self.cols.max(1);
         let changed = self
             .shadow
@@ -278,12 +303,21 @@ impl Producer {
             changed,
             cursor: self.last_cursor,
             wrapped: wrapped.to_vec(),
+            top_continues,
         }
     }
 
     fn flush(&mut self, vt: &Vt, out: &mut Vec<Record>) {
         self.flush_scroll(out);
-        self.emit_celldiff(&vt.cells, vt.cx, vt.cy, vt.cursor_visible, vt.wrapped(), out);
+        self.emit_celldiff(
+            &vt.cells,
+            vt.cx,
+            vt.cy,
+            vt.cursor_visible,
+            vt.wrapped(),
+            vt.top_continues(),
+            out,
+        );
     }
 
     fn flush_scroll(&mut self, out: &mut Vec<Record>) {
@@ -313,10 +347,12 @@ impl Producer {
             .max(1)
     }
 
-    // Diff `current` against the shadow; emit a CellDiff iff a cell changed OR
-    // the cursor moved, then update the shadow + last cursor. A geometry
-    // mismatch (should only happen via resize, which routes through resized())
-    // is resynced without emitting garbage.
+    // Diff `current` against the shadow; emit a CellDiff iff a cell changed,
+    // the cursor moved, or the top flag flipped, then update the shadow + last
+    // cursor + last top flag. A geometry mismatch (should only happen via
+    // resize, which routes through resized()) is resynced without emitting
+    // garbage.
+    #[allow(clippy::too_many_arguments)]
     fn emit_celldiff(
         &mut self,
         current: &[Cell],
@@ -324,6 +360,7 @@ impl Producer {
         cy: usize,
         vis: bool,
         wrapped: &[bool],
+        top_continues: bool,
         out: &mut Vec<Record>,
     ) {
         let cursor = (cy as u16, cx as u16, vis);
@@ -337,17 +374,19 @@ impl Producer {
                 changed.push(((i / self.cols) as u16, (i % self.cols) as u16, *cur));
             }
         }
-        if changed.is_empty() && cursor == self.last_cursor {
+        if changed.is_empty() && cursor == self.last_cursor && top_continues == self.last_top {
             return;
         }
         if !changed.is_empty() {
             self.shadow.copy_from_slice(current);
         }
         self.last_cursor = cursor;
+        self.last_top = top_continues;
         out.push(Record::CellDiff {
             changed,
             cursor,
             wrapped: wrapped.to_vec(),
+            top_continues,
         });
     }
 

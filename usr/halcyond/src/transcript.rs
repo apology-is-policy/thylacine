@@ -1940,9 +1940,10 @@ impl Transcript {
             .map(|s| (s.open_serial, s.cols.clone(), s.hdr))
     }
 
-    /// PL-3: force any in-flight soft-wrapped ScrollOff line to finalize -- at a
-    /// screen-mode change, where the content model has a hard discontinuity and
-    /// a fragment must not carry a stale continuation across it. No-op when
+    /// PL-3: force any in-flight soft-wrapped ScrollOff line to finalize --
+    /// when the producer reports that row 0 no longer continues it (the
+    /// CellDiff's `top_continues` clearing on the normal screen: row 0 was
+    /// restarted, so the fragment is complete as it stands). No-op when
     /// nothing is pending.
     pub fn flush_scroll_pending(&mut self, spans: &SpanMap) {
         self.finalize_scroll_pending(spans);
@@ -1966,6 +1967,7 @@ impl Transcript {
         rows: usize,
         wrapped: &[bool],
         spans: &SpanMap,
+        top_continues: bool,
     ) -> (Block, Vec<(usize, usize, usize)>) {
         struct Pending {
             raw: Vec<vt::Cell>,
@@ -1990,19 +1992,39 @@ impl Transcript {
         let mut cur_raw: Vec<vt::Cell> = Vec::new();
         let mut cur_src: Option<u64> = None;
         let mut zone_tagged: BTreeMap<u64, bool> = BTreeMap::new();
+        fn note(
+            c: &vt::Cell,
+            spans: &SpanMap,
+            cur_src: &mut Option<u64>,
+            zone_tagged: &mut BTreeMap<u64, bool>,
+            cur_raw: &mut Vec<vt::Cell>,
+        ) {
+            if let Some(tag) = spans.get(c.span) {
+                if cur_src.is_none() {
+                    *cur_src = Some(tag.block);
+                }
+                let e = zone_tagged.entry(tag.block).or_insert(false);
+                *e |= tag.obj != 0 || tag.em != 0 || tag.hdr != 0;
+            }
+            cur_raw.push(*c);
+        }
+        // A line straddling the scrollback edge: its head scrolled off as a
+        // soft-wrapped fragment (held in `scroll_pending`, not yet a line)
+        // while its tail is still row 0. While the producer says row 0
+        // continues that fragment, the head seeds the first live line, so
+        // the line renders whole instead of as a tail beginning mid-word;
+        // `prov` then places row 0 after the head's cells.
+        if top_continues {
+            for c in self.scroll_pending.iter() {
+                note(c, spans, &mut cur_src, &mut zone_tagged, &mut cur_raw);
+            }
+        }
         for r in 0..rows {
             prov.push((lines.len(), usize::MAX, cur_raw.len()));
             let base = r * cols;
             let row = grid_cells.get(base..base + cols).unwrap_or(&[]);
             for c in row {
-                if let Some(tag) = spans.get(c.span) {
-                    if cur_src.is_none() {
-                        cur_src = Some(tag.block);
-                    }
-                    let e = zone_tagged.entry(tag.block).or_insert(false);
-                    *e |= tag.obj != 0 || tag.em != 0 || tag.hdr != 0;
-                }
-                cur_raw.push(*c);
+                note(c, spans, &mut cur_src, &mut zone_tagged, &mut cur_raw);
             }
             // A row that did NOT autowrap ends the logical line.
             if !wrapped.get(r).copied().unwrap_or(false) {
@@ -3332,6 +3354,43 @@ mod tests {
     }
 
     #[test]
+    fn a_line_straddling_the_scrollback_edge_renders_whole_while_the_top_continues() {
+        // The operator's screenshot: "This is a live transcript ... prints
+        // st" scrolled off the top as a soft-wrapped fragment while "ays an
+        // object ..." stayed live on row 0. The fragment is held (not yet a
+        // line); with the producer's top flag set, the live render seeds its
+        // first line with it, so the line reads whole and row 0's cells sit
+        // after the head; with the flag clear the tail is a line of its own.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let head = "This is a live transcript, not a terminal emulator: what a command prints st";
+        t.push_scrolled_rows(&[wrow(head)], &[true], &SpanMap::new());
+        assert!(t.open_block().items.is_empty(), "the fragment is held, not a line");
+        let tail = "ays an object -- a path,";
+        let mut grid = wrow(tail);
+        grid.extend(wrow("next line"));
+        let cols = tail.len();
+        let text = |b: &Block, i: usize| match &b.items[i] {
+            Item::Line(l) => l.cells.iter().map(|c| c.ch).collect::<String>(),
+            _ => panic!("a line"),
+        };
+        let (b, prov) = t.live_block(&grid, cols, 2, &[false, false], &SpanMap::new(), true);
+        assert_eq!(b.items.len(), 2);
+        assert_eq!(text(&b, 0), alloc::format!("{head}{tail}"), "head + row 0 = the line");
+        assert_eq!(prov[0], (0, usize::MAX, head.len()), "row 0 starts after the head");
+        assert_eq!(prov[1], (1, usize::MAX, 0));
+        assert!(t.open_block().items.is_empty(), "the live render mutates nothing");
+        let (b, prov) = t.live_block(&grid, cols, 2, &[false, false], &SpanMap::new(), false);
+        assert_eq!(text(&b, 0), tail, "flag clear: the tail alone");
+        assert_eq!(prov[0], (0, usize::MAX, 0));
+        // The producer's flag clearing is the consumer's cue to finalize
+        // the fragment (tile.rs); flushed, it is a line of its own.
+        t.flush_scroll_pending(&SpanMap::new());
+        assert_eq!(t.open_block().items.len(), 1);
+        let (b, _) = t.live_block(&grid, cols, 2, &[false, false], &SpanMap::new(), true);
+        assert_eq!(text(&b, 0), tail, "nothing held: the flag seeds nothing");
+    }
+
+    #[test]
     fn a_hard_wrapped_batch_stays_one_line_per_row() {
         // The all-false case (a listing of distinct short lines) is unchanged:
         // one Line per row.
@@ -3483,7 +3542,7 @@ mod tests {
         ];
         let grid: Vec<vt::Cell> = rows.iter().flatten().copied().collect();
         // The live grid.
-        let (b, prov) = t.live_block(&grid, 12, 4, &[false, false, false, false], &spans);
+        let (b, prov) = t.live_block(&grid, 12, 4, &[false, false, false, false], &spans, false);
         assert_eq!(b.items.len(), 4, "table, rule, line, pre");
         let Item::Table(tm) = &b.items[0] else {
             panic!("item 0 is the rebuilt table");
@@ -3581,7 +3640,7 @@ mod tests {
         assert!(spans.get(s_prompt).unwrap().em & TAG_RULE != 0, "the trailing rule rides into the next zone");
         assert!(spans.get(s_prompt).unwrap().em & TAG_PROMPT != 0);
         let grid2 = row(&[("~ > ", s_prompt)]);
-        let (lb, _) = t.live_block(&grid2, 12, 1, &[false], &spans);
+        let (lb, _) = t.live_block(&grid2, 12, 1, &[false], &spans, false);
         assert!(matches!(lb.items[0], Item::Rule), "the rule precedes the prompt line");
         let Item::Line(pl) = &lb.items[1] else {
             panic!("the prompt line");
@@ -3629,7 +3688,7 @@ mod tests {
         assert!(spans.get(s_b).unwrap().em & TAG_ROW_HDR == 0);
         let gc = |ch: char, span: u32| vt::Cell { ch, fg: 0, bg: 0, attrs: 0, span };
         let body: Vec<vt::Cell> = "body".chars().map(|c| gc(c, s_b)).collect();
-        let (b, _) = t.live_block(&body, 4, 1, &[false], &spans);
+        let (b, _) = t.live_block(&body, 4, 1, &[false], &spans, false);
         let Item::Table(tm) = &b.items[0] else {
             panic!("a table")
         };
@@ -3637,7 +3696,7 @@ mod tests {
         // With the header row on the grid the table IS headed.
         let mut both: Vec<vt::Cell> = "hdr ".chars().map(|c| gc(c, s_h)).collect();
         both.extend("body".chars().map(|c| gc(c, s_b)));
-        let (b, _) = t.live_block(&both, 4, 2, &[false, false], &spans);
+        let (b, _) = t.live_block(&both, 4, 2, &[false, false], &spans, false);
         let Item::Table(tm) = &b.items[0] else {
             panic!("a table")
         };
@@ -3680,7 +3739,7 @@ mod tests {
         let mut grid: Vec<vt::Cell> = "dim".chars().map(|c| gc(c, 1)).collect();
         grid.push(gc(' ', 0));
         grid.extend("raw!".chars().map(|c| gc(c, 3)));
-        let (b, _) = t.live_block(&grid, 4, 2, &[false, false], &spans);
+        let (b, _) = t.live_block(&grid, 4, 2, &[false, false], &spans, false);
         let Item::Line(l0) = &b.items[0] else {
             panic!("the dim line")
         };
@@ -3738,7 +3797,7 @@ mod tests {
         row(&mut grid, &mut wrapped, "0 43554126878 1024 73203731 42", s_out, true);
         row(&mut grid, &mut wrapped, "673 64 0x610f0000", s_out, false);
         let rows = wrapped.len();
-        let (b, _) = t.live_block(&grid, cols, rows, &wrapped, &spans);
+        let (b, _) = t.live_block(&grid, cols, rows, &wrapped, &spans, false);
         let classes: Vec<LineClass> = b
             .items
             .iter()
@@ -3772,7 +3831,7 @@ mod tests {
         row(&mut grid2, &mut wrapped2, "cpus: 4", s_out2, false);
         row(&mut grid2, &mut wrapped2, "0 43554126878 1024 73203731 42", s_out2, true);
         row(&mut grid2, &mut wrapped2, "673 64 0x610f0000", s_out2, false);
-        let (b2, _) = t2.live_block(&grid2, cols, wrapped2.len(), &wrapped2, &spans2);
+        let (b2, _) = t2.live_block(&grid2, cols, wrapped2.len(), &wrapped2, &spans2, false);
         for it in b2.items.iter() {
             if let Item::Line(l) = it {
                 assert_eq!(l.class, LineClass::Raw, "raw after a scrolled-off annotated zone");
@@ -3832,7 +3891,7 @@ mod tests {
         // block's annotation is its own).
         let mut grid: Vec<vt::Cell> = "hwcap: 0x3201fb".chars().map(|c| gc(c, s_out)).collect();
         grid.resize(31, gc(' ', 0));
-        let (lb, _) = t.live_block(&grid, 31, 1, &[false], &spans);
+        let (lb, _) = t.live_block(&grid, 31, 1, &[false], &spans, false);
         let Item::Line(l) = &lb.items[0] else { panic!("the live line") };
         assert_eq!(l.class, LineClass::Raw);
         // And an annotated OWN row still makes the zone a document.
@@ -3995,7 +4054,7 @@ mod tests {
         while grid.len() < 40 {
             grid.push(gc(' ', 0));
         }
-        let (blk, _) = t.live_block(&grid, 20, 2, &[false, false], &spans);
+        let (blk, _) = t.live_block(&grid, 20, 2, &[false, false], &spans, false);
         let Item::Line(l) = &blk.items[0] else {
             panic!("the title line");
         };
@@ -4018,7 +4077,7 @@ mod tests {
         // key the caret + live selection need.
         let t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
         let grid = wrow("abcdef");
-        let (b, prov) = t.live_block(&grid, 3, 2, &[true, false], &SpanMap::new());
+        let (b, prov) = t.live_block(&grid, 3, 2, &[true, false], &SpanMap::new(), false);
         assert_eq!(b.items.len(), 1, "one logical line");
         let Item::Line(l) = &b.items[0] else {
             panic!("a Line")
@@ -4034,7 +4093,7 @@ mod tests {
         // apart (each starts at column 0 of its own line).
         let t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
         let grid = wrow("abcdef");
-        let (b, prov) = t.live_block(&grid, 3, 2, &[false, false], &SpanMap::new());
+        let (b, prov) = t.live_block(&grid, 3, 2, &[false, false], &SpanMap::new(), false);
         assert_eq!(b.items.len(), 2, "two logical lines");
         assert_eq!(prov, alloc::vec![(0, usize::MAX, 0), (1, usize::MAX, 0)]);
     }
