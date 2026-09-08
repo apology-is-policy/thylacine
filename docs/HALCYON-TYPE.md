@@ -43,6 +43,23 @@ renderers only.
 The premise that survives: the Mac's text *is* more comfortable than ours
 on the same face. §3 says by how much and by what mechanism.
 
+**The capture, explained (2026-09-08, later).** The operator then captured
+the heading's `n` as the Mac shows it (`n.png`, a magnified view) and found
+its raster "unlike anything in the lab": two-pixel stems with hard edges
+and almost no fringe. It is Safari's 35 px raster with **every other
+device pixel dropped**. Rendering the operator's own page through WebKit
+(`tools/typelab/wk.swift`, the engine Safari uses, at the panel's 2x) gives
+a 17 x 19 px `n` with 4 px stems; the capture's block grid (16 image px per
+block, found from the flat runs of its profiles) holds a 9 x 10 raster;
+decimating Safari's raster at one parity reproduces those blocks with an
+RMS ink error of **0.019**, while the other three parities, a 2 x 2 box
+average, and a 1x rendering all miss by 0.18-0.34
+(`tools/typelab/capture-explained.py`). Whatever magnifier made the capture
+shows one device pixel per point. The same view produced the earlier
+Thylacine capture, so both sides of the eye's comparison were seen at half
+resolution -- the lab's crops, one device pixel each, are the first
+un-decimated look at either.
+
 ---
 
 ## 1. Ground truth — the as-built pipeline
@@ -68,7 +85,12 @@ are what it does not share with us.
 
 ## 2. The lab (what was measured, and how)
 
-`tools/typelab` — host-only research tooling, re-runnable in a few seconds:
+`tools/typelab` — host-only research tooling, re-runnable in a few seconds
+(the lab), plus `wk.swift` (a WebKit snapshot of any HTML at the panel's
+scale, with the device-pixel rectangle of every `n` in a selector -- the
+same engine Safari renders with), `fit.rs` (§2, the fit) and
+`capture-explained.py` (§0, the observation-model test for a magnified
+capture):
 
 - **Producers.** fontdue (the as-built rasterizer, including its 3× raster
   for third-pixel placement); **skrifa 0.46 + zeno 0.3** (fontations
@@ -95,6 +117,17 @@ are what it does not share with us.
   (0.05 < ink < 0.95); **fringe px** = partial pixels per row; roughness =
   row-to-row change in ink. A straight stroke has constant true ink per
   row, so roughness is the rendering's own texture.
+
+- **The fit** (`fit.rs`, the operator's suggestion: "a stochastic search
+  for the parameter set that matches it"): given a reference raster of one
+  glyph, random search plus local refinement over hinting (none / LIGHT /
+  interpreter), an em-relative outline stroke, the blend-space exponent, a
+  coverage curve `a' = a^k`, and the fractional pen; the objective is the
+  RMS ink error at the best integer alignment. Any parameter can be pinned
+  (`gamma=1` keeps `cartoon::blend`; `stroke=0` needs no outline), which is
+  how a recipe the current pipeline can implement is scored against the
+  free optimum. Its references are WebKit's own rasters (`wk.swift`), not
+  screenshots.
 
 Two instrument bugs were caught by the pictures before any number was
 trusted, and are recorded because the class recurs: zeno stores a
@@ -147,6 +180,29 @@ row-ink; fringe as (mean darkness × pixels per row).
    the fringe exactly — ours comes out darker and a pixel wider — which is
    the residue between "stroke the outline" and whatever Apple does
    inside; by eye the heading crops are near-identical.
+2b. **The fit agrees, and refines the constant.** Against Safari's isolated
+   `n` (WebKit, the same Plex file), RMS ink error at the best alignment,
+   the blend kept as built (`gamma = 1`):
+
+   | recipe (as-built rasterizer, as-built blend, plus...) | 35 px | 17.5 px |
+   |---|---|---|
+   | nothing (the as-built) | 0.109 | 0.055 |
+   | outline stroke 0.015 em (N0) | 0.049 | 0.031 |
+   | outline stroke, best single constant: **0.012 em** | 0.046 | 0.027 |
+   | coverage curve `a^k`, k free per size (0.39 / 0.64) | 0.040 | 0.024 |
+   | coverage curve, one constant k = 0.55 | 0.045 | 0.030 |
+   | stroke 0.012 em + a curve | 0.046 | 0.027 (k ≈ 1: the curve adds nothing) |
+
+   Freeing the blend space too reaches 0.040 / 0.021, no better than the
+   curve on the as-built blend; the residual floor (0.02-0.04) is the two
+   rasterizers' own difference plus the phase. Two mechanisms reproduce the
+   Mac equally well: an **outline stroke of 0.012 em** (one constant for
+   both sizes -- the size-invariant one, and the documented Apple
+   mechanism) or a **coverage curve** (a lookup on the alpha; its best
+   exponent drifts with size, 0.39 at 35 px to 0.64 at 17.5 px, so one
+   constant costs a little at one end). No hinting mode improved any fit.
+   The stroke needs the outline (§4.5); the curve needs nothing the
+   as-built pipeline lacks.
 3. **Placement.** A single glyph at a whole-pixel origin is identical with
    subpixel positioning on or off (the quantized and positioned CoreText
    probes measure the same); the difference is in *words* — whole-pixel
@@ -220,12 +276,23 @@ stands untouched.)
 ### 4.2 Weight: an em-relative outline dilation — the smoothing
 
 Every proportional glyph is rasterized as the union of its fill and a
-stroke of its outline of width `type_smooth_em × px` (0.015 em to match
-the Mac's default; per side 0.0075 em), coverage union `f + s − f·s`. The
-constant is a **theme token**, not a global: Daylight (dark ink on light
-ground) 0.015; a dark-ground theme 0, because gamma-space blending already
-fattens light-on-dark text (the same asymmetry the Mac shows between its
-appearances). Applies to all four Plex faces; Cornucopia per §4.5.
+stroke of its outline of width `type_smooth_em × px` (**0.012 em**, the
+fit's single constant across 35 and 17.5 px, §3.2 2b; 0.015 was the
+probe-weight estimate; per side 0.006 em), coverage union `f + s − f·s`.
+The constant is a **theme token**, not a global: Daylight (dark ink on
+light ground) 0.012; a dark-ground theme 0, because gamma-space blending
+already fattens light-on-dark text (the same asymmetry the Mac shows
+between its appearances). Applies to all four Plex faces; Cornucopia per
+§4.5.
+
+**The interim, on the as-built rasterizer.** The fit shows a coverage
+curve `a' = a^k` with k = 0.55 lands the same RMS as the stroke at these
+sizes (§3.2 2b) and needs no outline: a 256-entry lookup applied to the
+glyph alpha at pack time, the `cartoon::blend` untouched. It is the
+DirectWrite / Skia family's "enhanced contrast", and it is what TY-2 ships
+if TY-1's native build of skrifa + zeno is refused or deferred -- with the
+known cost that its one constant is a compromise between sizes where the
+stroke's is not.
 
 Why a stroke and not a mask trick: the mask-domain emboldening (A2, D2:
 edge motion by a fixed 0.25 px) lands the weight at 2.0 and 1.0 but
@@ -340,8 +407,11 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
 
 ## 7. The vote
 
-1. **The amount.** 0.015 em (the Mac's default, N0), or lighter/heavier by
-   eye from the lab's §6 bracket (N1 0.020, N2 0.030, N3 0.040).
+1. **The amount and the mechanism.** The fit's answer is an outline stroke
+   of 0.012 em (one constant at both sizes; the lab's N0 at 0.015 is the
+   eye's bracket next to it), with the coverage curve k = 0.55 as the
+   as-built-pipeline interim. Ratify the fit, or pick by eye from the
+   lab's §6 bracket (N1 0.020, N2 0.030, N3 0.040).
 2. **Hinting at 1.0.** None (recommended) or the vertical-only autohinter,
    from the lab's §8 strips.
 3. **Dark grounds.** The token per theme (Daylight 0.015, dark 0), or one

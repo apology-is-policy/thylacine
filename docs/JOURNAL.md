@@ -99,9 +99,44 @@ from a subset TTF in halcyond (HALCYON.md 3's own stance). HALCYON.md 13.5
 amendment PROPOSED, not applied (the operator's document). Five ballot
 items in section 7.
 
-**Open.** The vote; BEACON 12.12 + HALCYON-WORKSPACES 7 still owed; the
-vault's banner declaration for `ls-gfx-compose.exp`; the next Fable round
-(the reflow + top flag; SC-5's declaration).
+**The capture, explained.** The operator declined the ballot to clarify:
+their own capture of the Mac's heading `n` (`n.png`, magnified) "has a
+raster unlike anything in the lab", and could a stochastic search find the
+parameters that match it? First the observation model, since a capture is
+a claim about pixels: `wk.swift` renders their exact page through WebKit
+(Safari's engine) at the panel's 2x and reports the device-pixel rect of
+every `n` (17 x 19 px, 4 px stems). The capture's block grid is 16 image
+px per block with a 9 x 10 raster inside -- half the extent. Three models
+tested against the blocks: a 2 x 2 point average of WebKit's raster (RMS
+0.18-0.22), the heading rendered at 17.5 device px (0.19), and a
+DECIMATION of the 2x raster -- every other device pixel -- which matches at
+one parity with RMS **0.019** (the other parities 0.21-0.34). Whatever
+magnifier they used shows one device pixel per point; the crisp two-pixel
+stems are the AA raster sampled at half resolution, and the earlier
+Thylacine capture (`aa.png`) went through the same view. So the "unlike
+anything" was the instrument, and the lab's CoreText specimen is Safari
+to within the ink count (142.7 vs 142.9 on the isolated `n`).
+
+**The fit.** Built as suggested (`fit.rs`: random search + refinement over
+hinting / stroke / blend exponent / coverage curve / pen phase, RMS ink
+error at the best alignment; any parameter pinnable). Against WebKit's
+isolated `n`, blend kept as built: as-built 0.109 (35 px) / 0.055 (17.5
+px); the stroke's best single constant is **0.012 em** (0.046 / 0.027; the
+0.015 from the probe weights scores 0.049 / 0.031); a coverage curve
+`a^k` fits as well (k = 0.55: 0.045 / 0.030; k free per size 0.040 /
+0.024 at 0.39 / 0.64); freeing the blend space adds nothing; no hinting
+mode helps. The design keeps the stroke as the mechanism (one constant
+across sizes, Apple's own) at 0.012 em and records the curve as the
+fontdue-era interim -- a lookup on the alpha, no outline needed.
+Wrong turns caught: a zsh `for` loop does not word-split a variable (the
+first constrained runs silently fitted the wrong size), and a `run()`
+helper that forwarded two of three constraints (the "stroke 0" rows were
+stroke-free; the stroke it found was 0.002, so the reading held).
+
+**Open.** The vote (re-posed with the fit's numbers); BEACON 12.12 +
+HALCYON-WORKSPACES 7 still owed; the vault's banner declaration for
+`ls-gfx-compose.exp`; the next Fable round (the reflow + top flag; SC-5's
+declaration).
 
 ---
 

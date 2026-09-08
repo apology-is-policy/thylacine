@@ -3,4 +3,7 @@ out/
 smoke/
 ftdump
 ct
+wk
 fontcheck
+faces
+*.ppm

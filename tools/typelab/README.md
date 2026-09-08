@@ -15,7 +15,10 @@ remembered.
 | `src/main.rs` | fontdue (the as-built rasterizer) and skrifa + zeno (outlines: unhinted / autohinter LIGHT / TrueType interpreter; exact placement; outline stroke); every pen, blend and emboldening variant; the probes; the metrics; PNG output; the driver | `cargo build --release` (fetches skrifa, zeno, png from crates.io -- a research instrument, not a vendored build input) |
 | `ftdump.c` | FreeType glyph masks: `nohint`, `light`, `light-dark` (stem darkening), `normal` (v40 interpreter); optional third-pixel outline shift | `cc -O2 -o ftdump ftdump.c $(pkg-config --cflags --libs freetype2)` (brew freetype) |
 | `ct.swift` | CoreText/Quartz compositing of a spec into a P6 PPM with font smoothing / subpixel positioning each on or off, kerning off | `swiftc -O -o ct ct.swift` |
-| `assemble.py` | the comparison page: embeds the selected renders as data URIs, the numbers table, the two Plex faces | python3 (stdlib) |
+| `assemble.py` | the comparison page: embeds the selected renders as data URIs, the numbers table, the two Plex faces; an optional third argument names a directory of extra images (the capture + fit composites) | python3 (stdlib) |
+| `wk.swift` | a WebKit snapshot (Safari's engine) of any HTML at the panel's backing scale, printing the device-pixel rect of every `n` in a selector: the reference raster a browser really paints | `swiftc -O -framework WebKit -framework Cocoa -o wk wk.swift` |
+| `src/bin/fit.rs` | the parameter fit: random search + local refinement over hinting, an em-relative outline stroke, the blend-space exponent, a coverage curve and the fractional pen, scored by RMS ink error against a reference glyph PNG; `gamma=`/`stroke=`/`k=` pin a parameter | `cargo build --release --bin fit` |
+| `capture-explained.py` | tests a magnified capture against a renderer's raster under three observation models (raw, 2x2 box, decimated) and writes the side-by-side | python3 (stdlib; `pngio.py`) |
 
 ## Run
 

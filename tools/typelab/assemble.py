@@ -227,7 +227,7 @@ function fit() {
     var cls = im.className;
     var w;
     if (cls.indexOf('crop__img') >= 0 || cls.indexOf('probe__img') >= 0) {
-      w = im.naturalWidth / dpr;              // one device pixel per magnified pixel
+      w = Math.min(im.naturalWidth / dpr, im.parentElement.clientWidth || 1e9);   // one device pixel per magnified pixel
     } else if (s === '2x') {
       w = im.naturalWidth / dpr;              // a 2.0 render at exactly one device pixel per pixel
     } else {
@@ -300,6 +300,34 @@ sec.append("<h2>7. Axis: hinting</h2>"
 sec.append("<h2>8. At 1.0</h2>"
            "<p>The 100% display is where hinting and weight decisions bite: 11.5 px body, 17.5 px heading. Strips are shown at a 100% display's pixel size, crops at 8×.</p>"
            + grid([card("1x", "A-asbuilt"), card("1x", "CT-smooth-subpx"), card("1x", "N0-skrifa-srgb-subpx-stroke015", mark=True), card("1x", "CT-nosmooth-subpx"), card("1x", "F2-skrifa-light-srgb-subpx"), card("1x", "N4-skrifa-light-srgb-subpx-stroke030"), card("1x", "I-ft-light-srgb-int"), card("1x", "B-gamma")], cols=2))
+
+EXTRA = sys.argv[3] if len(sys.argv) > 3 else None
+if EXTRA:
+    def ximg(name, alt):
+        p = os.path.join(EXTRA, name)
+        if p not in embedded:
+            embedded[p] = data_uri(p)
+        return f'<img src="{embedded[p]}" data-devpx="crop" class="crop__img" alt="{html.escape(alt)}" style="max-width:100%">'
+    sec.append("""
+<h2>8b. Your capture, explained</h2>
+<p>The <code>n.png</code> you captured from the Mac's heading is Safari's 35 px raster with <strong>every other device pixel dropped</strong>. Left: the capture's blocks (its grid is 16 image pixels per block). Middle: the same glyph rendered through WebKit here, decimated at one parity — RMS ink error 0.019 against your blocks; the other parities, a 2 × 2 average and a 1× rendering all miss by 0.18 to 0.34. Right: the full 2× raster the panel actually shows, one device pixel per cell. Whatever magnifier made the capture shows one pixel per point; the crisp two-pixel stems are the anti-aliased raster sampled at half resolution, and the same view produced the earlier Thylacine capture.</p>
+""" + ximg("capture-explained.png", "capture blocks | Safari decimated | Safari full raster") + """
+<h2>8c. The fit</h2>
+<p>Your suggestion, built: a random search with local refinement over hinting, an em-relative outline stroke, the blend space, a coverage curve and the fractional pen, scored by RMS ink error against WebKit's own isolated <em>n</em> at the best alignment. Each triptych is target | best fit | difference (red: the fit is darker, blue: the target is).</p>
+<div class="kv">
+<dt>35 px, free fit</dt><dd>RMS 0.040 — a coverage curve k ≈ 0.4 on a blend just below encoded space, stroke 0. The as-built scores 0.109, the 0.015 em stroke 0.049.</dd>
+<dt>17.5 px, free fit</dt><dd>RMS 0.021 — stroke ≈ 0.004 em, curve k ≈ 0.95, blend exponent 0.68. The as-built scores 0.055, the 0.015 em stroke 0.031.</dd>
+<dt>one constant, as-built blend</dt><dd>stroke 0.012 em: 0.046 / 0.027. Curve k = 0.55: 0.045 / 0.030. Either reproduces the Mac to the residual floor; the stroke's constant is the size-invariant one.</dd>
+</div>
+<div class="grid" style="--cols:2">
+<figure class="card"><figcaption><span class="tag">35</span> <span class="vdesc">Safari's n at 35 px · the free fit</span></figcaption>""" + ximg("fit-iso-best.png", "35 px free fit") + """</figure>
+<figure class="card"><figcaption><span class="tag">35</span> <span class="vdesc">the same target · the as-built pipeline at its best phase</span></figcaption>""" + ximg("fit-iso-asbuilt.png", "35 px as-built") + """</figure>
+<figure class="card"><figcaption><span class="tag">17.5</span> <span class="vdesc">Safari's n at 17.5 px · the free fit</span></figcaption>""" + ximg("fit-half-best.png", "17.5 px free fit") + """</figure>
+<figure class="card"><figcaption><span class="tag">17.5</span> <span class="vdesc">the same target · the as-built pipeline at its best phase</span></figcaption>""" + ximg("fit-half-asbuilt.png", "17.5 px as-built") + """</figure>
+<figure class="card"><figcaption><span class="tag">35</span> <span class="vdesc">stroke 0.012 em on the as-built blend (one constant)</span></figcaption>""" + ximg("fit-s12-35-best.png", "35 px stroke 0.012") + """</figure>
+<figure class="card"><figcaption><span class="tag">17.5</span> <span class="vdesc">stroke 0.012 em on the as-built blend (one constant)</span></figcaption>""" + ximg("fit-s12-17.5-best.png", "17.5 px stroke 0.012") + """</figure>
+</div>
+""")
 
 all_variants = sorted({k[2] for k in index}, key=lambda v: (v.startswith("CT"), v))
 sec.append("<h2>9. The numbers</h2>"
