@@ -218,6 +218,15 @@ pub extern "C" fn rs_main() -> i64 {
     // session in tapestryd (later: pts tiles), never the console mirror. The
     // console-renderer body below is unchanged (the proven aurora-shaped path,
     // still selected by joey when the device names halcyond as the renderer).
+    // The system mono face is a compiled-in build input; a failure here is
+    // a broken artifact, surfaced loudly rather than discovered as an empty
+    // grid. Ahead of the session branch so BOTH renderer paths are covered
+    // -- the atlas `verify_all` this replaced sat below the branch and so
+    // guarded only the console one.
+    if !halcyond::raster::mono_face_ok() {
+        say!("halcyond: FAIL system mono face (cornucopia subset)");
+        return 1;
+    }
     if libthyla_rs::env::args()
         .operands()
         .any(|a| a == b"--session")
@@ -237,11 +246,6 @@ pub extern "C" fn rs_main() -> i64 {
         }
         return session::run(home);
     }
-    if !cornucopia::verify_all() {
-        say!("halcyond: FAIL atlas magic/version");
-        return 1;
-    }
-
     // The renderer role: drain/feed first (fail loudly without the grant --
     // leave the scanout to whoever else presents).
     let drain = open_path("/dev/consdrain", T_OREAD);

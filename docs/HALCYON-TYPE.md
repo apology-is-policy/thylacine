@@ -446,9 +446,46 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
     laying another is how a right-aligned run walks off its edge, which is
     exactly what the kv-list test caught. Mono is untouched at every tier:
     a fixed cell has no phase.
-- **TY-4** Cornucopia live: the subset TTF (fontTools; the bake's codepoint
-  list), `FACE_MONO` on the outline at the cell table; the cells tier
-  untouched.
+- **TY-4 — LANDED 2026-09-08 @`(pending)`** Cornucopia live: the subset
+  TTF, `FACE_MONO` on the outline at the cell table; the cells tier
+  untouched. `tools/subset-cornucopia.py` cuts the font to
+  `usr/lib/cornucopia/src/cornucopia-subset.ttf` (20112 bytes against
+  10.8 MB) and reads its codepoint list **out of `atlas.bin`** rather than
+  restating it — a constant copied into two tools is a constant that
+  drifts, and taking the set from the artifact the other tier serves makes
+  "both tiers carry the same glyphs" true by construction. `GlyphSource`
+  holds `mono: Option<Face>` and two `MonoCell`s derived by
+  `Face::mono_cell`, which re-computes the bake's own formula in integers;
+  `the_derived_cell_table_is_the_baked_one` proves the two agree at all
+  eleven baked advances, against the blobs, so the cells-tier contract is
+  measured and not asserted. The mono tier now carries the theme's
+  smoothing stroke: **+18% ink at the shipping cell**, 13–20% across the
+  scale table, against the proportional tier's +18% — one rasterizer, one
+  stroke rule. `mono_advances` lost its nearest-smaller-bake step (the
+  outline serves any advance); no reachable value moved, and the table is
+  pinned as literals. **Measured binary effect**, content-verified: the
+  subset is embedded, none of the eleven atlases are — halcyond
+  2768200 → 1980872 (−787 KB, −28%), **aurora 1041960 → 394312 (−648 KB,
+  −62%)**, aurora's being feature unification, since halcyond's request for
+  the `scale` bakes had been forcing them into aurora's binary too.
+  In passing: the startup font check moved above the `--session` branch,
+  where the `cornucopia::verify_all` it replaces had sat *below* the early
+  return and so never guarded the session renderer at all.
+
+  **And it surfaced a defect in the cell geometry itself, which is the
+  bake's and not this chunk's.** The cell comes from OS/2 `usWinAscent` /
+  `usWinDescent` (889 / 208), but Cornucopia's true ink reaches
+  `head.yMax` 978 and `yMin` −220 — 89 units short above, 1.07 px at the
+  shipping advance — so **all 26 accented Latin-1 capitals plus ® lose the
+  top row of their diacritic**. The bake clips the identical row (baked
+  'Ã' ink 14011 against the live clipped raster's 13844, 1.2% apart, which
+  is scanline-vs-zeno), so Aurora, the kernel trusted sink and Halls have
+  rendered it that way since G-4. Fixing it means `head.yMax/yMin` in both
+  tools, a cell of 6×15 baseline 12 at advance 6, all eleven atlases
+  re-baked and the row pitch chased downstream — its own chunk, tracked as
+  `bug-mono-cell-clips-every-accented-capital`. Pinned meanwhile by
+  `the_cell_clips_the_diacritics_the_bake_clips`, which fails when the
+  geometry is corrected so it cannot be fixed silently.
 - **TY-5** The hinting lever (if voted).
 - **TY-6** The audit: the atlas bound under phases + stroke (I-32's
   in-process face); a hostile stream cannot make a stroke raster exceed

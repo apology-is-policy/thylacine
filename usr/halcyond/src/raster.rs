@@ -1,5 +1,10 @@
 // The glyph source: the vendored faces through the outline path (skrifa +
 // zeno, `outline.rs`; HALCYON-TYPE section 4) -> a cartoon atlas, cached.
+// Since TY-4 that includes the MONO tier: the system face is Cornucopia's
+// subset outline, rasterized into the cell, not the baked atlases (which
+// stay for the consumers that must carry no rasterizer -- Aurora, the
+// kernel trusted sink, Halls). One path, so one stroke rule: a cell now
+// carries the theme's smoothing like the prose beside it.
 // The author-side half of the 13.2 division of knowledge -- layout asks
 // THIS for glyph ids + advances and writes resolved runs; executors never
 // see a font, only the finished alpha pages.
@@ -92,24 +97,42 @@ pub fn atlas_pages_for(display_w: u32, display_h: u32, page: u32) -> usize {
     want.max(MAX_ATLAS_PAGES)
 }
 
+/// Whether the compiled-in system mono face is usable: it parses AND
+/// yields a cell at the floor advance. The startup check, callable before
+/// any `GlyphSource` exists so BOTH renderer paths can make it -- the
+/// `cornucopia::verify_all` this replaced sat after the session path's
+/// early return and so only ever guarded the console one.
+pub fn mono_face_ok() -> bool {
+    Face::parse(cornucopia::SUBSET_TTF)
+        .and_then(|f| f.mono_cell(MONO_ISLAND_ADVANCE))
+        .is_some()
+}
+
+/// The largest mono advance this source will serve. The scale range caps
+/// the island at 12 (200% of 6), so this is headroom, not a live limit --
+/// it exists because the cell is what the outline is rasterized into, and
+/// an unbounded advance is an unbounded raster on the untrusted side of
+/// I-32 (a hostile EDID reaching an unclamped percent). 20 is the largest
+/// cell the bake ever cut, so it is also the largest any cells-tier
+/// consumer has geometry for.
+pub const MONO_ADVANCE_MAX: u8 = 20;
+
 /// The mono advances at a display scale (HALCYON-SCALE 6): `round_half_up(6
-/// x s)` -- 6, 8, 9, 11, 12 at the five values -- the bake it names, or the
-/// nearest SMALLER bake when that one is absent (a smaller cell never
-/// overflows the row pitch the sheet sized for the wanted one; a larger
-/// would), down to the legibility floor of 6. Returned as (island, grid)
-/// for the two atlas slots, and since 2026-09-08 the two are EQUAL (one
-/// mono size: the grid runs at the preformatted block's). Pure: the Sheet
-/// derives its mono ems from the same answer the source selects its
-/// atlases by, so the two cannot disagree.
+/// x s)` -- 6, 8, 9, 11, 12 at the five values -- bounded below by the
+/// legibility floor of 6 (the procedural box glyphs need it) and above by
+/// `MONO_ADVANCE_MAX`. Returned as (island, grid) for the two cell slots,
+/// and since 2026-09-08 the two are EQUAL (one mono size: the grid runs at
+/// the preformatted block's). Pure: the Sheet derives its mono ems from the
+/// same answer the source selects its cells by, so the two cannot disagree.
+///
+/// Since TY-4 there is no "nearest smaller bake" step: the cell is cut from
+/// the outline at whatever advance is asked, so every advance in range is
+/// available and the answer is the scale table itself. The five reachable
+/// percents were all baked sizes anyway, so no value here moved -- which
+/// the test pins as literals rather than re-deriving.
 pub fn mono_advances(pct: u16) -> (u8, u8) {
-    let baked_at_most = |want: i32| -> u8 {
-        let mut a = want.clamp(MONO_ISLAND_ADVANCE as i32, u8::MAX as i32) as u8;
-        while a > MONO_ISLAND_ADVANCE && !cornucopia::Atlas::is_baked(a) {
-            a -= 1;
-        }
-        a
-    };
-    let one = baked_at_most(libhalcyon::scale::ipx(MONO_ISLAND_ADVANCE as i32, pct));
+    let want = libhalcyon::scale::ipx(MONO_ISLAND_ADVANCE as i32, pct);
+    let one = want.clamp(MONO_ISLAND_ADVANCE as i32, MONO_ADVANCE_MAX as i32) as u8;
     (one, one)
 }
 
@@ -138,14 +161,88 @@ struct Cached {
     advance: i32,
 }
 
+/// One monospace cell: the geometry the cells tier shares (width, height,
+/// baseline rows from the top) plus the em the outline is rasterized at to
+/// fill it. Derived from the mono face's own tables by the bake's formula
+/// (`Face::mono_cell`), so the live path and the baked atlases land on the
+/// same grid.
+#[derive(Clone, Copy)]
+struct MonoCell {
+    w: i32,
+    h: i32,
+    baseline: i32,
+    em: f32,
+}
+
+impl MonoCell {
+    /// The cell `advance` names in `face`. None only for a face with no
+    /// usable metrics -- a build-input defect the startup check catches.
+    fn derive(face: &Face, advance: u8) -> Option<MonoCell> {
+        let (h, baseline, em) = face.mono_cell(advance)?;
+        Some(MonoCell { w: advance as i32, h, baseline, em })
+    }
+
+    /// The cell used when the mono face is unusable. Only reachable in a
+    /// process that has already failed `GlyphSource::mono_ok` and is on its
+    /// way out (halcyond's startup check, the `verify_all` of the bakes it
+    /// replaced): square, non-degenerate, and safe for every division and
+    /// subtraction downstream. No glyph renders into it.
+    fn degenerate(advance: u8) -> MonoCell {
+        let w = advance.max(1) as i32;
+        MonoCell { w, h: w, baseline: w, em: w as f32 }
+    }
+}
+
+/// Rasterize `gid` from the mono face INTO the cell: the outline at the
+/// cell's em, placed with the pen at the cell's left edge and the baseline
+/// where the cell puts it, then clipped to the cell.
+///
+/// The clip is the contract, not a limitation: every consumer of a mono
+/// glyph -- the alt-screen grid, the pts geometry, the procedural box
+/// glyphs it joins against -- expects a cell to paint its own cell and no
+/// other, and the bake it replaces clipped identically (it rasterized into
+/// a cell-sized grid). A glyph whose ink exceeds its advance therefore
+/// loses the overhang here exactly as it lost it there.
+fn mono_cell_alpha(
+    face: &Face,
+    gid: skrifa::GlyphId,
+    cell: MonoCell,
+    smooth_mem: u16,
+) -> Vec<u8> {
+    // Phase 0 always: a fixed cell has no sub-pixel placement to carry.
+    let r = face.raster(gid, cell.em, smooth_mem, 0);
+    let mut out = alloc::vec![0u8; (cell.w * cell.h) as usize];
+    let (x0, y0) = (r.left, cell.baseline - r.top);
+    for y in 0..r.h as i32 {
+        let cy = y0 + y;
+        if cy < 0 || cy >= cell.h {
+            continue;
+        }
+        for x in 0..r.w as i32 {
+            let cx = x0 + x;
+            if cx < 0 || cx >= cell.w {
+                continue;
+            }
+            out[(cy * cell.w + cx) as usize] = r.alpha[(y * r.w as i32 + x) as usize];
+        }
+    }
+    out
+}
+
 /// Fonts + packer + cache, one generation at a time. `regen()` evicts all
 /// three together, so a cached id can never outlive the pages it points
 /// into (the 13.2 stale rule holds by construction on the author side
 /// too; the executor's gen check is the belt).
 pub struct GlyphSource {
     faces: Vec<Face>,
-    grid: cornucopia::Atlas,
-    island: cornucopia::Atlas,
+    /// The system monospace face -- the Cornucopia subset outline, live
+    /// since TY-4 (HALCYON-TYPE 4.5). It replaced the baked atlases here
+    /// so the mono tier carries the theme's smoothing stroke like every
+    /// other tier; the bakes stay for the consumers that must not carry a
+    /// rasterizer (Aurora, the kernel trusted sink, Halls).
+    mono: Option<Face>,
+    grid: MonoCell,
+    island: MonoCell,
     pub packer: AtlasPacker,
     /// Keyed by (face, size quantum, horizontal phase, char). The phase is
     /// part of the key because a phased raster IS a different bitmap
@@ -177,7 +274,16 @@ impl GlyphSource {
     /// island em lands on the island at every scale.
     #[inline]
     fn mono_is_grid(&self, px: f32) -> bool {
-        px >= (self.island.cell_w() + self.grid.cell_w()) as f32
+        px >= (self.island.w + self.grid.w) as f32
+    }
+
+    /// Whether the system mono face parsed and yielded a cell. False is a
+    /// build-input defect (the subset TTF is compiled in), and halcyond
+    /// fails loudly at startup on it rather than discovering it as a hole
+    /// in the grid -- the role `cornucopia::verify_all` played for the
+    /// bakes this replaced.
+    pub fn mono_ok(&self) -> bool {
+        self.mono.is_some()
     }
 
     /// Build over the vendored faces at 100% on the floor bound. `page` is
@@ -204,10 +310,21 @@ impl GlyphSource {
         }
         let mut packer = AtlasPacker::new(page, page);
         packer.set_max_pages((MAX_ATLAS_PAGES + ATLAS_PAGE_SLACK) as u32);
+        // The system mono face. A None here is the same class of defect a
+        // failed `Face::parse` is above -- caught loudly by `mono_ok` at
+        // startup, not silently by an empty grid.
+        let mono = Face::parse(cornucopia::SUBSET_TTF)
+            .filter(|f| MonoCell::derive(f, MONO_ISLAND_ADVANCE).is_some());
+        let cell = |a: u8| {
+            mono.as_ref()
+                .and_then(|f| MonoCell::derive(f, a))
+                .unwrap_or_else(|| MonoCell::degenerate(a))
+        };
         GlyphSource {
             faces,
-            grid: cornucopia::Atlas::for_advance(MONO_GRID_ADVANCE),
-            island: cornucopia::Atlas::for_advance(MONO_ISLAND_ADVANCE),
+            grid: cell(MONO_GRID_ADVANCE),
+            island: cell(MONO_ISLAND_ADVANCE),
+            mono,
             packer,
             cache: BTreeMap::new(),
             scale: 100,
@@ -250,8 +367,14 @@ impl GlyphSource {
             return false;
         }
         let (island, grid) = mono_advances(pct);
-        self.island = cornucopia::Atlas::for_advance(island);
-        self.grid = cornucopia::Atlas::for_advance(grid);
+        let cell = |a: u8| {
+            self.mono
+                .as_ref()
+                .and_then(|f| MonoCell::derive(f, a))
+                .unwrap_or_else(|| MonoCell::degenerate(a))
+        };
+        self.island = cell(island);
+        self.grid = cell(grid);
         self.scale = pct;
         self.regen();
         true
@@ -273,32 +396,24 @@ impl GlyphSource {
         self.evict_pages
     }
 
-    fn mono_atlas(&self, px: f32) -> &cornucopia::Atlas {
+    fn mono_cell_at(&self, px: f32) -> MonoCell {
         if self.mono_is_grid(px) {
-            &self.grid
+            self.grid
         } else {
-            &self.island
+            self.island
         }
     }
 
     /// The GRID mono cell geometry (w, h, baseline): the alt-screen raw-VT
     /// cell and the pts geometry (cols/rows) every tile is sized from.
     pub fn mono_cell(&self) -> (i32, i32, i32) {
-        (
-            self.grid.cell_w() as i32,
-            self.grid.cell_h() as i32,
-            self.grid.baseline() as i32,
-        )
+        (self.grid.w, self.grid.h, self.grid.baseline)
     }
 
     /// The ISLAND mono cell geometry (w, h, baseline): the document's mono
     /// -- islands, pre, raw output, the menu's literals.
     pub fn island_cell(&self) -> (i32, i32, i32) {
-        (
-            self.island.cell_w() as i32,
-            self.island.cell_h() as i32,
-            self.island.baseline() as i32,
-        )
+        (self.island.w, self.island.h, self.island.baseline)
     }
 
     pub fn face_count(&self) -> usize {
@@ -325,11 +440,11 @@ impl GlyphSource {
             return Some(c.advance);
         }
         if face == FACE_MONO {
-            return Some(self.mono_atlas(px).cell_w() as i32);
+            return Some(self.mono_cell_at(px).w);
         }
         let f = self.faces.get(face as usize)?;
-        if !f.has(ch) && ch != '\u{FFFD}' && self.island.glyph(ch).is_some() {
-            return Some(self.island.cell_w() as i32);
+        if !f.has(ch) && ch != '\u{FFFD}' && self.mono_has(ch) {
+            return Some(self.island.w);
         }
         Some((f.advance(f.glyph_id(ch), px) + 0.5) as i32)
     }
@@ -392,13 +507,20 @@ impl GlyphSource {
 
     pub fn advance_f(&mut self, face: u8, px: f32, ch: char) -> Option<f32> {
         if face == FACE_MONO {
-            return Some(self.mono_atlas(px).cell_w() as f32);
+            return Some(self.mono_cell_at(px).w as f32);
         }
         let f = self.faces.get(face as usize)?;
-        if !f.has(ch) && ch != '\u{FFFD}' && self.island.glyph(ch).is_some() {
-            return Some(self.island.cell_w() as f32);
+        if !f.has(ch) && ch != '\u{FFFD}' && self.mono_has(ch) {
+            return Some(self.island.w as f32);
         }
         Some(f.advance(f.glyph_id(ch), px))
+    }
+
+    /// Whether the system mono face carries `ch` -- the test the
+    /// proportional fallback and the mono cell both key on.
+    #[inline]
+    fn mono_has(&self, ch: char) -> bool {
+        self.mono.as_ref().is_some_and(|f| f.has(ch))
     }
 
     /// The glyph for `ch` at `px` in `face`, rasterizing on first use.
@@ -439,14 +561,21 @@ impl GlyphSource {
             });
         }
         if face == FACE_MONO {
-            let atlas = *self.mono_atlas(px);
-            let (cw, chh, base) = (
-                atlas.cell_w() as i32,
-                atlas.cell_h() as i32,
-                atlas.baseline() as i32,
-            );
-            if let Some(alpha) = atlas.glyph(ch) {
-                let id = self.packer.insert(cw as u32, chh as u32, alpha, 0, base)?;
+            let cell = self.mono_cell_at(px);
+            let (cw, chh, base) = (cell.w, cell.h, cell.baseline);
+            let smooth = self.smooth_mem;
+            // Cornucopia's own outline, rasterized into the cell -- and
+            // stroked, which is the whole point of TY-4: before it, a
+            // baked cell was the one tier that could not carry the theme's
+            // smoothing, so a proportional glyph falling back into a cell
+            // was heavier than the Cornucopia glyph beside it.
+            let alpha = self
+                .mono
+                .as_ref()
+                .filter(|f| f.has(ch))
+                .map(|f| mono_cell_alpha(f, f.glyph_id(ch), cell, smooth));
+            if let Some(alpha) = alpha {
+                let id = self.packer.insert(cw as u32, chh as u32, &alpha, 0, base)?;
                 self.cache.insert(key, Cached { id, advance: cw });
                 return Some(GlyphRef {
                     glyph: id,
@@ -465,10 +594,11 @@ impl GlyphSource {
                     advance: cw,
                 });
             }
-            // Fallback: body-rasterized at cell height, grid-advance. It
-            // carries the smoothing stroke because it IS proportional ink;
-            // the Cornucopia cells beside it are pre-baked bitmaps and
-            // cannot, until TY-4 puts the whole mono tier on this path.
+            // Fallback: body-rasterized at cell height, grid-advance --
+            // for a codepoint neither Cornucopia nor the procedural box
+            // path has. Since TY-4 it carries the same stroke as the cells
+            // beside it rather than being the only stroked thing in the
+            // grid.
             let f = self.faces.get(FACE_BODY as usize)?;
             let r = f.raster(f.glyph_id(ch), (chh - 4) as f32, self.smooth_mem, 0);
             let id = self.packer.insert(r.w, r.h, &r.alpha, r.left, r.top)?;
@@ -484,19 +614,21 @@ impl GlyphSource {
         // than as Plex's .notdef box: Cornucopia carries the prompt glyph by
         // design, and a symbol at the island cell reads as the symbol, not
         // as tofu. Still None for a glyph neither has (the .notdef box then).
-        if !f.has(ch) && ch != '\u{FFFD}' {
-            let atlas = self.island;
-            if let Some(alpha) = atlas.glyph(ch) {
-                let (cw, chh, base) = (
-                    atlas.cell_w() as i32,
-                    atlas.cell_h() as i32,
-                    atlas.baseline() as i32,
-                );
-                let id = self.packer.insert(cw as u32, chh as u32, alpha, 0, base)?;
-                self.cache.insert(key, Cached { id, advance: cw });
+        if !f.has(ch) && ch != '\u{FFFD}' && self.mono_has(ch) {
+            let cell = self.island;
+            let smooth = self.smooth_mem;
+            let alpha = self
+                .mono
+                .as_ref()
+                .map(|m| mono_cell_alpha(m, m.glyph_id(ch), cell, smooth));
+            if let Some(alpha) = alpha {
+                let id = self
+                    .packer
+                    .insert(cell.w as u32, cell.h as u32, &alpha, 0, cell.baseline)?;
+                self.cache.insert(key, Cached { id, advance: cell.w });
                 return Some(GlyphRef {
                     glyph: id,
-                    advance: cw,
+                    advance: cell.w,
                 });
             }
         }
@@ -512,12 +644,11 @@ impl GlyphSource {
     /// FACE_MONO's are the selected atlas cell's.
     pub fn line_metrics(&self, face: u8, px: f32) -> Option<LineMetrics> {
         if face == FACE_MONO {
-            let atlas = self.mono_atlas(px);
-            let (chh, base) = (atlas.cell_h() as i32, atlas.baseline() as i32);
+            let cell = self.mono_cell_at(px);
             return Some(LineMetrics {
-                ascent: base,
-                descent: chh - base,
-                line_height: chh,
+                ascent: cell.baseline,
+                descent: cell.h - cell.baseline,
+                line_height: cell.h,
             });
         }
         let f = self.faces.get(face as usize)?;
@@ -1426,12 +1557,15 @@ mod tests {
     }
 
     // HALCYON-SCALE 6: the mono advances at the five values are the
-    // operator's table (round half up of 6s and 10s), every one a bake; an
-    // off-table percent lands on the nearest smaller bake, never above
-    // (a larger cell would overflow the row pitch the sheet sized for it),
-    // never below the legibility floor.
+    // operator's table (round half up of 6s), bounded below by the
+    // legibility floor and above by MONO_ADVANCE_MAX.
+    //
+    // The values are LITERALS, not re-derived: TY-4 removed the
+    // nearest-smaller-bake step (the outline serves any advance), so this
+    // is where a claim that the removal moved nothing is falsifiable. It
+    // moved nothing because every reachable percent already named a bake.
     #[test]
-    fn mono_advances_are_the_scale_table_and_every_one_is_baked() {
+    fn mono_advances_are_the_scale_table() {
         // One mono size (2026-09-08): the grid advance IS the island's.
         assert_eq!(mono_advances(100), (6, 6));
         assert_eq!(mono_advances(125), (8, 8), "7.5 up");
@@ -1440,14 +1574,223 @@ mod tests {
         assert_eq!(mono_advances(200), (12, 12));
         for p in [100u16, 125, 150, 175, 200] {
             let (i, g) = mono_advances(p);
-            assert!(cornucopia::Atlas::is_baked(i) && cornucopia::Atlas::is_baked(g), "{p}: {i}/{g} baked");
             assert_eq!(i, g, "one mono size: the grid cell is the island cell");
         }
-        // Off the table: 140% wants 8.4 -> 8, baked.
-        assert_eq!(mono_advances(140), (8, 8), "the nearest smaller bake");
+        // Off the table: 140% wants 8.4 -> 8.
+        assert_eq!(mono_advances(140), (8, 8));
         // Below 100 (not a v1 value; the function is total): the floor.
         assert_eq!(mono_advances(50), (6, 6));
         assert_eq!(mono_advances(0), (6, 6));
+        // Above the range (SCALE_MAX is 200, so unreachable): the ceiling,
+        // which bounds the cell -- and therefore the raster -- rather than
+        // letting a percent decide how big an atlas entry gets.
+        assert_eq!(mono_advances(1000), (MONO_ADVANCE_MAX, MONO_ADVANCE_MAX));
+        assert_eq!(mono_advances(u16::MAX), (MONO_ADVANCE_MAX, MONO_ADVANCE_MAX));
+    }
+
+    // THE WIRING, which the tests above do NOT cover: they call
+    // `mono_cell_alpha` and `MonoCell::derive` directly, so they prove the
+    // functions and not that `glyph_at` reaches them. Sabotage-measured:
+    // with the mono face never consulted -- every cell falling through to
+    // the box path and then to the Plex fallback, i.e. TY-4 undone -- all
+    // 199 other tests still passed. This is the one that fails.
+    //
+    // Proven by byte-equality against the cell rasterizer's own output, so
+    // "it came from Cornucopia" is exact rather than plausible, plus the
+    // dimensions, which the Plex fallback (rasterized at cell_h - 4 and
+    // packed at its own tight size) cannot match.
+    #[test]
+    fn glyph_at_serves_the_mono_cell_from_cornucopia() {
+        let mut gs = GlyphSource::new_vendored(512);
+        assert!(gs.mono_ok(), "the system mono face is usable");
+        gs.set_smooth(12);
+        let f = Face::parse(cornucopia::SUBSET_TTF).expect("the subset parses");
+        for (px, advance) in [
+            (MONO_ISLAND_PX, gs.island_cell().0 as u8),
+            (MONO_GRID_PX, gs.mono_cell().0 as u8),
+        ] {
+            let cell = MonoCell::derive(&f, advance).expect("a cell");
+            let want = mono_cell_alpha(&f, f.glyph_id('n'), cell, 12);
+            let g = gs.glyph(FACE_MONO, px, 'n').expect("a mono glyph");
+            let e = gs.packer.store.glyphs[g.glyph as usize];
+            assert_eq!((e.w as i32, e.h as i32), (cell.w, cell.h), "the entry IS the cell");
+            assert_eq!((e.left, e.top), (0, cell.baseline), "the cell's bearing");
+            assert_eq!(g.advance, cell.w, "a mono advance is the cell width");
+            let page = &gs.packer.store.pages[e.page as usize];
+            let got: Vec<u8> = (0..e.h)
+                .flat_map(|y| {
+                    let row = ((e.y + y) * page.w + e.x) as usize;
+                    page.alpha[row..row + e.w as usize].to_vec()
+                })
+                .collect();
+            assert_eq!(got, want, "the packed cell is Cornucopia's, stroked");
+            assert!(got.iter().any(|&v| v != 0), "and it is not blank");
+        }
+    }
+
+    // THE CONTRACT WITH THE CELLS TIER (HALCYON-TYPE 4.5): halcyond derives
+    // its cell geometry from the font; Aurora, the kernel trusted sink and
+    // Halls read it out of a baked atlas. The two must be the same grid, or
+    // a pts geometry sized from one tier does not fit the other.
+    //
+    // The two sides are genuinely independent: the atlas numbers were
+    // computed by a Python tool's float ceiling and frozen into a binary
+    // blob; these come from integer arithmetic on the font's OS/2 and hmtx
+    // at runtime. Nothing here reads an atlas to answer.
+    #[test]
+    fn the_derived_cell_table_is_the_baked_one() {
+        let f = Face::parse(cornucopia::SUBSET_TTF).expect("the subset parses");
+        let mut n = 0;
+        for a in cornucopia::ADVANCES
+            .iter()
+            .chain(cornucopia::SCALE_ADVANCES.iter())
+        {
+            assert!(cornucopia::Atlas::is_baked(*a), "adv {a} is a bake");
+            let atlas = cornucopia::Atlas::for_advance(*a);
+            let (h, base, em) = f.mono_cell(*a).expect("a cell at every baked advance");
+            assert_eq!(atlas.cell_w() as i32, *a as i32, "adv {a}: cell_w IS the advance");
+            assert_eq!(h, atlas.cell_h() as i32, "adv {a}: cell_h");
+            assert_eq!(base, atlas.baseline() as i32, "adv {a}: baseline");
+            // Cornucopia's monospace advance is half its em, so the size
+            // that fills a cell of width A is 2A. Derived from the font's
+            // own ratio, not assumed -- this pins what the font says.
+            assert_eq!(em, *a as f32 * 2.0, "adv {a}: em");
+            n += 1;
+        }
+        assert_eq!(n, 11, "every baked size checked");
+        // The control: an advance no atlas holds still yields a cell, and a
+        // cell no atlas could have supplied. A derivation that secretly
+        // looked one up would have nothing to return here.
+        assert_eq!(f.mono_cell(14), Some((31, 25, 28.0)));
+        assert_eq!(f.mono_cell(17), Some((38, 31, 34.0)));
+    }
+
+    // The two tiers must also carry the same GLYPHS. `subset-cornucopia.py`
+    // reads its codepoint list out of `atlas.bin` so this holds by
+    // construction -- which is exactly the kind of claim that stops being
+    // true the day someone re-bakes without re-subsetting. Every codepoint
+    // the cells tier serves, the outline tier serves.
+    #[test]
+    fn the_subset_carries_every_baked_codepoint() {
+        let f = Face::parse(cornucopia::SUBSET_TTF).expect("the subset parses");
+        let atlas = cornucopia::Atlas::for_advance(cornucopia::DEFAULT_ADVANCE);
+        let mut n = 0;
+        for cp in 0u32..0x2600 {
+            let Some(ch) = char::from_u32(cp) else { continue };
+            if atlas.glyph(ch).is_none() {
+                continue;
+            }
+            assert!(f.has(ch), "U+{cp:04X} is baked but not in the subset");
+            n += 1;
+        }
+        assert_eq!(n, 207, "the bake's glyph count");
+        // And the box glyphs stay OUT of both (the procedural path owns
+        // them; a font's box glyphs are metrics-bound to its own line box).
+        for ch in ['\u{2500}', '\u{2502}', '\u{250C}', '\u{2588}'] {
+            assert!(atlas.glyph(ch).is_none(), "{ch:?} not baked");
+            assert!(!f.has(ch), "{ch:?} not in the subset");
+        }
+    }
+
+    // TY-4's actual behaviour change: a mono cell now carries the theme's
+    // smoothing stroke. Before it, the baked bitmap could not, so a
+    // proportional glyph falling back INTO a cell was the only stroked
+    // thing in the grid -- heavier than the Cornucopia glyph beside it.
+    //
+    // Measured on the cell's own alpha, not through the packer: the ink
+    // must rise, at every advance the scale table can ask for, and the cell
+    // must stay exactly a cell.
+    //
+    // MEASURED 2026-09-08 over 'n' at mem 12: +18% at the shipping cell
+    // (advance 6), then 18 / 13 / 20 / 18 across the 125..200% cells and
+    // +15% at the largest bake -- the same order the proportional text got
+    // at TY-2 (+18% on a 35 px italic), which is what one stroke rule for
+    // every tier should produce. The spread is pixel quantization: a
+    // 0.14--0.24 px stroke lands differently on the grid per size.
+    //
+    // The LOWER bound is the load-bearing half. The union bug TY-1 caught
+    // -- max(f, s) where f + s - f*s was due -- counts none of the stroke's
+    // new ink and yields about +3%. A floor of 8% is what makes this test
+    // able to fail on that class rather than merely observe a difference.
+
+    #[test]
+    fn the_mono_cell_is_stroked_and_stays_a_cell() {
+        let f = Face::parse(cornucopia::SUBSET_TTF).expect("the subset parses");
+        for advance in [6u8, 8, 9, 11, 12, 20] {
+            let cell = MonoCell::derive(&f, advance).expect("a cell");
+            let ink = |mem: u16| -> u32 {
+                let a = mono_cell_alpha(&f, f.glyph_id('n'), cell, mem);
+                assert_eq!(a.len(), (cell.w * cell.h) as usize, "the cell is the cell");
+                a.iter().map(|&v| v as u32).sum()
+            };
+            let (plain, smoothed) = (ink(0), ink(12));
+            assert!(plain > 0, "adv {advance}: the plain fill inked nothing");
+            let gain = (smoothed - plain) * 100 / plain;
+            assert!(
+                (8..=30).contains(&gain),
+                "adv {advance}: gain {gain}% ({plain} -> {smoothed}) out of the measured band"
+            );
+        }
+    }
+
+    // The cell is a CLIP, and that is the contract every consumer holds:
+    // the alt-screen grid, the pts geometry, and the procedural box glyphs
+    // a cell joins against all assume a cell paints its own cell and no
+    // other.
+    //
+    // AND THE CLIP CUTS REAL INK, which measuring it here is how we found
+    // out. Cornucopia's OS/2 `usWinAscent` is 889 but its true ink reaches
+    // `head.yMax` = 978, so the cell is 89 units (1.07 px at advance 6)
+    // short of the font, and every accented Latin-1 capital loses the top
+    // row of its diacritic. The BAKE does this too and always has -- its
+    // cell comes from the same OS/2 fields (`bake-cornucopia.py`), so
+    // Aurora, the kernel trusted sink and Halls have clipped the identical
+    // row since G-4. Ground truth: the baked 'A-tilde' holds 14011 ink
+    // against this path's 13844, 1.2% apart, which is scanline-vs-zeno and
+    // not a different clip.
+    //
+    // This test pins the defect rather than describing it, so it FAILS the
+    // day the geometry is corrected (`head.yMax/yMin` in both tools, all 11
+    // atlases re-baked, the row pitch chased downstream -- its own chunk;
+    // memory `bug-mono-cell-clips-every-accented-capital`). That is the
+    // right moment to update these numbers, and it cannot happen silently.
+    #[test]
+    fn the_cell_clips_the_diacritics_the_bake_clips() {
+        let f = Face::parse(cornucopia::SUBSET_TTF).expect("the subset parses");
+        let atlas = cornucopia::Atlas::for_advance(cornucopia::DEFAULT_ADVANCE);
+        let cell = MonoCell::derive(&f, MONO_ISLAND_ADVANCE).expect("the shipping cell");
+        let (mut clipped, mut deepest) = (0u32, 0i32);
+        for cp in 0u32..0x2600 {
+            let Some(ch) = char::from_u32(cp) else { continue };
+            if atlas.glyph(ch).is_none() {
+                continue;
+            }
+            // Unstroked, so this measures the geometry and not the stroke.
+            let r = f.raster(f.glyph_id(ch), cell.em, 0, 0);
+            let a = mono_cell_alpha(&f, f.glyph_id(ch), cell, 0);
+            assert_eq!(
+                a.len(),
+                (cell.w * cell.h) as usize,
+                "{ch:?}: the buffer IS the cell -- containment holds even where ink is lost"
+            );
+            if r.w == 0 {
+                continue;
+            }
+            let above = r.top - cell.baseline; // rows of ink above the cell
+            if above > 0 {
+                clipped += 1;
+                deepest = deepest.max(above);
+            }
+            // Nothing escapes horizontally without the stroke, and nothing
+            // falls out of the bottom at this cell.
+            assert!(r.left >= 0, "{ch:?}: ink left of the cell");
+            assert!(
+                r.left + r.w as i32 <= cell.w,
+                "{ch:?}: ink right of the cell"
+            );
+        }
+        assert_eq!(clipped, 26, "the accented capitals plus (R)");
+        assert_eq!(deepest, 1, "exactly one row, never more");
     }
 
     // `set_scale` selects the bakes `mono_advances` names, the cells follow

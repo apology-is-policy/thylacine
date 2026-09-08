@@ -4,8 +4,11 @@
 // smoothing" was measured to be (+18% stem weight, section 3.2), unioned
 // into the fill. No hinting (section 4.4): the outline lands where the
 // design puts it, at the whole-pixel pen the atlas caches one raster per
-// (face, size, char) for. The mono cells never come through here; they are
-// Cornucopia's bakes.
+// (face, size, char) for. Since TY-4 the MONO cells come through here too
+// -- `mono_cell` gives the grid the bake computes and `raster.rs` clips the
+// glyph into it -- so there is one rasterizer and therefore one stroke rule
+// for every tier. The bakes remain, for the consumers that must carry no
+// rasterizer at all.
 //
 // Orientation, because it bit once: font space is y-UP, zeno's default
 // TopLeft origin wants y-DOWN rows, and a BottomLeft mask is stored
@@ -158,6 +161,45 @@ impl Face {
     pub fn advance(&self, gid: GlyphId, px: f32) -> f32 {
         let units = self.hmtx.as_ref().and_then(|h| h.advance(gid)).unwrap_or(0);
         (px / self.upem as f32) * units as f32
+    }
+
+    /// The MONOSPACE cell this face fills at a cell width of `advance` px:
+    /// (cell_h, baseline, em_px), or None for a face with no OS/2 table, no
+    /// 'x', or a zero advance. This is `tools/bake-cornucopia.py`'s formula
+    /// -- the cell is the OS/2 Windows ink bounds scaled by the ratio the
+    /// advance asks for -- so the outline path lands on the SAME grid the
+    /// baked atlases carry, which is the contract the cells tier shares
+    /// (Aurora, the kernel trusted sink, the pts geometry every tile is
+    /// sized from). `the_derived_cell_table_is_the_baked_one` proves the
+    /// agreement at every baked advance rather than asserting it.
+    ///
+    /// The bake takes the ceiling in float; this takes it in integers,
+    /// which is exact and needs no libm. They can only disagree where the
+    /// product is exactly an integer, and it never is: 889 and 1097 are
+    /// both coprime to the 500-unit advance, so no cell width under 500
+    /// divides evenly.
+    pub fn mono_cell(&self, advance: u8) -> Option<(i32, i32, f32)> {
+        let os2 = self.font.os2().ok()?;
+        let units = self
+            .hmtx
+            .as_ref()
+            .and_then(|h| h.advance(self.glyph_id('x')))
+            .filter(|u| *u != 0)? as u32;
+        let a = advance as u32;
+        let ceil_div = |n: u32| ((n * a) + units - 1) / units;
+        let asc = os2.us_win_ascent() as u32;
+        let desc = os2.us_win_descent() as u32;
+        let cell_h = ceil_div(asc + desc);
+        let baseline = ceil_div(asc);
+        if cell_h == 0 || baseline == 0 || baseline > cell_h {
+            return None;
+        }
+        // The em the outline is rasterized at: the size whose advance IS
+        // the cell width. Cornucopia's advance is half its em, so this is
+        // 2x the cell width -- derived, not assumed, so a re-cut font with
+        // a different ratio still lands in its cell.
+        let em = a as f32 * self.upem as f32 / units as f32;
+        Some((cell_h as i32, baseline as i32, em))
     }
 
     /// The line metrics at `px`, fractional: (ascent, descent, line gap),

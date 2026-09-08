@@ -56,8 +56,13 @@ kaua-term = { path = "../kaua-term", default-features = false }
 # libthyla-rs, so the halcyond lib host tests build). KT-1.5d-2: `input::map_key`
 # builds a kaua KeyEvent for the tile down-channel.
 kaua = { path = "../lib/kaua", default-features = false }
-# The display-scale bakes (HALCYON-SCALE 6) ride only this binary.
-cornucopia = { path = "../lib/cornucopia", features = ["scale"] }
+# The system mono FACE: since HALCYON-TYPE TY-4 the subset outline, not the
+# baked atlases -- one rasterizer for every tier, so a mono cell carries the
+# theme's smoothing stroke like the prose beside it. The bakes stay in the
+# crate for the consumers that must carry no rasterizer (aurora, the kernel
+# trusted sink, Halls); this binary stopped asking for the `scale` set, and
+# under feature unification that took ~650 KB out of aurora's too.
+cornucopia = { path = "../lib/cornucopia", features = ["ttf"] }
 # HALCYON-TYPE (TY-1): the outline path -- skrifa parses + scales the glyph
 # outlines (read-fonts underneath), zeno fills and STROKES them (the 0.012 em
 # smoothing stroke, section 4.2). Both no_std with `libm` supplying the float
@@ -67,3 +72,11 @@ skrifa = { version = "0.46.2", default-features = false, features = ["libm"] }
 zeno = { version = "0.3.3", default-features = false, features = ["libm", "eval"] }
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
 libtapestry = { path = "../lib/libtapestry", optional = true }
+
+[dev-dependencies]
+# The BAKES, for the tests only: `the_derived_cell_table_is_the_baked_one`
+# proves the live cell geometry equals every atlas's, and
+# `the_subset_carries_every_baked_codepoint` proves the two tiers carry the
+# same glyphs. A dev-dependency, so the shipped binary still links only the
+# subset -- `cargo build` does not build dev-deps.
+cornucopia = { path = "../lib/cornucopia", features = ["ttf", "scale"] }

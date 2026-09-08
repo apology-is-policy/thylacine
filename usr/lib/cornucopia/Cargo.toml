@@ -11,8 +11,15 @@ path = "src/lib.rs"
 
 [features]
 # The display-scale bakes (HALCYON-SCALE 6: advances 11/12/13/15/18/20 for
-# the 125..200% mono cells), asked for by halcyond. The contract: a crate
-# that does not ask never depends on them (aurora's cycler and the kernel
-# sink keep the five-size set). NOT a size saving under the workspace
-# build, which unifies features -- aurora's binary carries the ~650 KB too.
+# the 125..200% mono cells). The contract: a crate that does not ask never
+# depends on them (aurora's cycler and the kernel sink keep the five-size
+# set). NOT a size saving under the workspace build, which unifies features
+# -- when anything asks, every binary carries the ~650 KB. NOTHING asks
+# since HALCYON-TYPE TY-4 put halcyond's mono tier on `ttf`; kept because
+# the bakes exist and a future cell consumer at those advances would.
 scale = []
+# The subset OUTLINE (`src/cornucopia-subset.ttf`, 20 KB) for a consumer
+# with a runtime rasterizer -- halcyond's, since TY-4. Unification means
+# aurora carries the 20 KB too; it dropped ~650 KB of `scale` in the same
+# change, so the trade is 30x in its favour.
+ttf = []
