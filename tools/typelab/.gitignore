@@ -1,0 +1,6 @@
+target/
+out/
+smoke/
+ftdump
+ct
+fontcheck

@@ -23,6 +23,88 @@ needed the operator.
 
 ---
 
+## Run 46e (2026-09-08, Fable 5.1 max, after run 46d's self-compaction) -- the type-rendering research: the premise confounded, the Mac measured, the design for the vote
+
+**Where it sits.** The operator's request at the SC-5 boundary, verbatim:
+"one general allure of mac is the fact the OS X has a really REALLY well
+sorted out typesetting and anti-aliasing -- when you compare it to Linux,
+it's day and night ... Perhaps a research and design session about
+typography and font rendering with examples would be a nice next step after
+SCALE?" A research + design chunk, scripture-first: `docs/HALCYON-TYPE.md`
+(for the vote), the lab page
+<https://claude.ai/code/artifact/dda8f9fa-73cf-4e56-a8b4-22e1be51a678>, the
+instrument `tools/typelab`. Nothing built in halcyond.
+
+**The host had no network, and then it had.** Every HTTPS fetch failed
+(crates.io, github, docs.rs, even 1.1.1.1 -- HTTP 000) inside AND outside
+the sandbox, while DNS resolved, `nc` reached crates.io:443, and aux's Pi
+tunnel worked. The error text named it: `curl: (77) error setting
+certificate verify locations` -- the session environment carries an
+`SSL_CERT_FILE` pointing at an emsdk certifi bundle that no longer exists
+(`~/.zprofile` sources `emsdk_env.sh`). `SSL_CERT_FILE=/etc/ssl/cert.pem`
+fixed curl and cargo alike. The operator asked what to enable; the answer
+was "nothing -- unset a variable". Recorded in memory because it will
+present as "no network" again.
+
+**The premise was confounded, and the confound was measurable.** The
+mockup the operator had compared against asks for `'IBM Plex Sans',
+'Helvetica Neue', Arial`; `CTFontCreateWithName("IBM Plex Sans")` on the
+Mac returned family `Helvetica` -- Plex was not installed, so the browser
+had set the mockup in Helvetica Neue. The "icicles vs smooth" judgement was
+a different face AND a different renderer. The operator installed Plex in
+Font Book mid-run (the same check then returned `IBM Plex Sans`). The lab
+renders the SAME Plex files through CoreText, so the rest compares
+renderers only.
+
+**The lab, and two instrument bugs the pictures caught.** `tools/typelab`:
+fontdue (as-built) + skrifa/zeno (outlines, autohinter, stroke) in Rust,
+FreeType masks via `ftdump.c`, CoreText compositing via `ct.swift`, the
+same Daylight text at 1.0 and 2.0, six single-glyph probes, and a
+measurement (weight = mean L* ink per row; fringe = the partial pixels'
+darkness x count). Before any number was trusted: (1) the skrifa glyphs
+came out UPSIDE DOWN -- zeno stores a `BottomLeft`-origin mask bottom-up;
+the tell was the `y` in "Thylacine" reading as a lambda in the crop, after
+a first sign-flip guess had merely moved the displacement; fixed by
+emitting the outline y-down. (2) CoreText's runs collapsed ("tryls /devto")
+-- the Swift spec parser trimmed a run's trailing space. (3) The stroke
+union added +3% weight where +18% was expected: `max(fill, stroke)` is not
+a union of partial coverages; `f + s - f*s` is. (4) A 4-neighbour mask
+bleed matched the Mac's WEIGHT but doubled the fringe (3.8 -> 7.1 partial
+px per row) -- a halo, not an edge motion; gating the gain on the neighbour
+being within r of full fixed it. Each caught by looking, not by the metric.
+
+**What the Mac does, measured (`tools/typelab/out/metrics.tsv`).**
+CoreText with smoothing OFF measures the same as our as-built: weight 5.49
+vs 5.45 on the italic n at 35 px, fringe 0.49 vs 0.48 -- Quartz blends
+exact coverage in gamma space, exactly as fontdue + `cartoon::blend` do.
+So there is NO gamma-correct blending to copy; linear-light blending makes
+the text thin (-12%, fringe 0.48 -> 0.35). Smoothing ON adds +18% stem
+weight at BOTH scales (6.45/5.49 and 3.18/2.71) with the fringe count
+nearly unchanged -- an em-relative dilation; an outline stroke of 0.015 em
+reproduces the weight within 1% (N0: 6.38). Subpixel positioning shows
+only in word spacing. Hinting adds no weight (the FreeType LIGHT desktop,
+variant I, measures like our as-built -- that IS the "day and night"). The
+"icicles" are the coverage runs of a 12-degree edge and CoreText has the
+same runs; the weight is what makes them read as an edge.
+
+**The design (`docs/HALCYON-TYPE.md`, for the vote).** Blend unchanged
+(fork closed by measurement); an em-relative outline stroke as a THEME
+token (Daylight 0.015, dark grounds 0 -- gamma-space blending already
+fattens light-on-dark); quarter-pixel horizontal phases (the HALCYON-SCALE
+7 atlas bound holds: it bounds painted AREA and an instance paints one
+phase); no hinting, the vertical-only autohinter as a lever; skrifa + zeno
+replacing fontdue (no_std + libm, VERIFY at vendor time as HALCYON.md 13.5
+already demands; fontdue mask emboldening as the fallback); Cornucopia LIVE
+from a subset TTF in halcyond (HALCYON.md 3's own stance). HALCYON.md 13.5
+amendment PROPOSED, not applied (the operator's document). Five ballot
+items in section 7.
+
+**Open.** The vote; BEACON 12.12 + HALCYON-WORKSPACES 7 still owed; the
+vault's banner declaration for `ls-gfx-compose.exp`; the next Fable round
+(the reflow + top flag; SC-5's declaration).
+
+---
+
 ## Run 46 (2026-09-08, Fable 5.1 max, after run 45's self-compaction) -- the chrome-content audit closed, the display scale designed, and its first two sub-chunks
 
 **Where it sits.** The same autonomous stretch as run 45, after the 600k
