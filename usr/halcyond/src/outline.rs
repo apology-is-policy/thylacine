@@ -97,9 +97,30 @@ fn union8(f: u8, s: u8) -> u8 {
     (f + (s * (255 - f) + 127) / 255) as u8
 }
 
-fn render(cmds: &[zeno::Command], style: zeno::Style) -> (Vec<u8>, zeno::Placement) {
+/// The horizontal offset a phase names, in pixels: 0, 1/4, 1/2, 3/4.
+#[inline]
+pub fn phase_dx(phase: u8) -> f32 {
+    (phase & 3) as f32 / 4.0
+}
+
+/// How many distinct horizontal phases a glyph can be rasterized at.
+pub const PHASES: u8 = 4;
+
+fn render(cmds: &[zeno::Command], style: zeno::Style, dx: f32) -> (Vec<u8>, zeno::Placement) {
     let mut m = zeno::Mask::new(cmds);
     m.origin(zeno::Origin::TopLeft);
+    if dx != 0.0 {
+        // BOTH, and the pair is load-bearing. `offset` alone moves the
+        // rendered BOUNDS and leaves the path where it was, so the box
+        // slides off the glyph: measured at dx = 3/4 it clipped a column
+        // and lost 15 % of the ink, and at dx = 1/4 it did nothing at all.
+        // `render_offset` is what actually translates the path. zeno's own
+        // doc says it -- "to translate both the path and its rendered
+        // bounding box, set both" -- and the pair reproduces a hand-
+        // translated command list to within a coverage level.
+        m.offset(zeno::Vector::new(dx, 0.0));
+        m.render_offset(zeno::Vector::new(dx, 0.0));
+    }
     m.style(style);
     m.render()
 }
@@ -149,12 +170,20 @@ impl Face {
         (m.ascent, m.descent, m.leading)
     }
 
-    /// Rasterize a glyph at `px`, unhinted, at the whole-pixel pen, with a
+    /// Rasterize a glyph at `px`, unhinted, at horizontal phase `phase`
+    /// quarter-pixels (0..=3; anything larger is taken modulo 4), with a
     /// smoothing stroke of `smooth_mem` thousandths of an em (0 = the plain
     /// fill). The stroke is centred on the outline, so it dilates the fill
     /// by half its width and the raster grows by at most `ceil(stroke/2)`
     /// px on each side -- at 12 mem that is under one px through 166 px.
-    pub fn raster(&self, gid: GlyphId, px: f32, smooth_mem: u16) -> Raster {
+    ///
+    /// The phase shifts the OUTLINE before rasterizing, so the returned
+    /// `left` is already the floor of the shifted bbox: a caller blits at
+    /// `whole_pen + left` and gets the sub-pixel placement for free. The
+    /// vertical is deliberately unphased (HALCYON-TYPE section 4.3:
+    /// baselines are integers and a vertical phase buys nothing on
+    /// horizontal stems).
+    pub fn raster(&self, gid: GlyphId, px: f32, smooth_mem: u16, phase: u8) -> Raster {
         let mut pen = Pen { cmds: Vec::new() };
         if let Some(glyph) = self.outlines.get(gid) {
             // A draw error mid-glyph (a malformed outline in a vendored
@@ -167,7 +196,8 @@ impl Face {
         if pen.cmds.is_empty() {
             return Raster::empty();
         }
-        let (fill, fp) = render(&pen.cmds, zeno::Style::Fill(zeno::Fill::NonZero));
+        let dx = phase_dx(phase);
+        let (fill, fp) = render(&pen.cmds, zeno::Style::Fill(zeno::Fill::NonZero), dx);
         if fp.width == 0 || fp.height == 0 {
             return Raster::empty();
         }
@@ -175,7 +205,7 @@ impl Face {
         if smooth_mem == 0 || stroke_px <= 0.0 {
             return Raster { w: fp.width, h: fp.height, left: fp.left, top: -fp.top, alpha: fill };
         }
-        let (stroke, sp) = render(&pen.cmds, zeno::Style::Stroke(zeno::Stroke::new(stroke_px)));
+        let (stroke, sp) = render(&pen.cmds, zeno::Style::Stroke(zeno::Stroke::new(stroke_px)), dx);
         if sp.width == 0 || sp.height == 0 {
             return Raster { w: fp.width, h: fp.height, left: fp.left, top: -fp.top, alpha: fill };
         }
@@ -258,17 +288,60 @@ mod tests {
         // Upright = the crossbar of the 'A' is nearer the bottom than the
         // top, and the apex row is the narrowest inked row.
         let f = text();
-        let a = f.raster(f.glyph_id('A'), 16.0, 0);
+        let a = f.raster(f.glyph_id('A'), 16.0, 0, 0);
         assert!(a.w > 4 && a.h > 8, "{}x{}", a.w, a.h);
         assert!((10..=13).contains(&a.top), "cap top {}", a.top);
         assert_eq!(a.h as i32 - a.top, 0, "'A' ends on the baseline");
         let inked = |r: &Raster, y: u32| (0..r.w).filter(|&x| r.alpha[(y * r.w + x) as usize] > 64).count();
         assert!(inked(&a, 0) < inked(&a, a.h - 1), "apex narrow, feet wide: upright");
-        let g = f.raster(f.glyph_id('g'), 16.0, 0);
+        let g = f.raster(f.glyph_id('g'), 16.0, 0, 0);
         assert!(g.h as i32 - g.top > 0, "'g' descends {} rows", g.h as i32 - g.top);
-        let sp = f.raster(f.glyph_id(' '), 16.0, 0);
+        let sp = f.raster(f.glyph_id(' '), 16.0, 0, 0);
         assert_eq!((sp.w, sp.h), (0, 0), "a space has no coverage");
         assert!(f.advance(f.glyph_id(' '), 16.0) > 0.0, "but an advance");
+    }
+
+    // HALCYON-TYPE 4.3: the phase shifts the outline before rasterizing,
+    // so the sub-pixel placement rides the mask's own `left` and the
+    // caller still blits at a whole pixel. What must hold: the four
+    // phases are DISTINCT rasters (a phase that renders identically buys
+    // nothing and would be a silent no-op), the ink is conserved within
+    // a rounding of the exact area, the box never grows by more than a
+    // pixel, and phase 0 is byte-identical to the unphased raster.
+    #[test]
+    fn the_four_phases_are_distinct_and_conserve_ink() {
+        let f = text();
+        let n = f.glyph_id('n');
+        let px = 17.5;
+        let base = f.raster(n, px, 0, 0);
+        let mut seen: Vec<(i32, Vec<u8>)> = Vec::new();
+        for p in 0..PHASES {
+            let r = f.raster(n, px, 0, p);
+            assert!(r.w <= base.w + 1, "phase {p}: {} vs {}", r.w, base.w);
+            assert_eq!(r.h, base.h, "phase {p}: the vertical is unphased");
+            assert_eq!(r.top, base.top, "phase {p}: the baseline does not move");
+            let ink: i64 = r.alpha.iter().map(|&a| a as i64).sum();
+            let b: i64 = base.alpha.iter().map(|&a| a as i64).sum();
+            // Shifting a shape cannot create or destroy area; only the
+            // pixel grid's rounding moves, so allow 2%.
+            assert!((ink - b).abs() * 50 <= b, "phase {p}: ink {ink} vs {b}");
+            seen.push((r.left, r.alpha.clone()));
+        }
+        assert_eq!(seen[0].1, base.alpha, "phase 0 IS the unphased raster");
+        for i in 0..seen.len() {
+            for j in (i + 1)..seen.len() {
+                assert_ne!(
+                    seen[i], seen[j],
+                    "phases {i} and {j} render identically -- the phase is a no-op"
+                );
+            }
+        }
+        // The phase is taken modulo 4, so a caller cannot index off the end.
+        assert_eq!(f.raster(n, px, 0, 4).alpha, seen[0].1);
+        assert_eq!(f.raster(n, px, 0, 7).alpha, seen[3].1);
+        assert_eq!(phase_dx(0), 0.0);
+        assert_eq!(phase_dx(3), 0.75);
+        assert_eq!(phase_dx(5), 0.25, "modulo 4");
     }
 
     #[test]
@@ -278,10 +351,10 @@ mod tests {
         // raster's). Stroke 0 is the plain fill byte for byte.
         let f = Face::parse(crate::IBM_PLEX_SANS_HEADING_ITALIC).unwrap();
         let n = f.glyph_id('n');
-        let plain = f.raster(n, 35.0, 0);
-        let again = f.raster(n, 35.0, 0);
+        let plain = f.raster(n, 35.0, 0, 0);
+        let again = f.raster(n, 35.0, 0, 0);
         assert_eq!(plain.alpha, again.alpha, "deterministic");
-        let smooth = f.raster(n, 35.0, 12);
+        let smooth = f.raster(n, 35.0, 12, 0);
         let ink = |r: &Raster| r.alpha.iter().map(|&a| a as u64).sum::<u64>();
         let (i0, i1) = (ink(&plain), ink(&smooth));
         assert!(i1 > i0, "more ink: {i1} vs {i0}");

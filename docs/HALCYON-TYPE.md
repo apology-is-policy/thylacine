@@ -411,6 +411,25 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
   the atlas key, the atlas-bound statement re-verified (the existing
   `a_screen_of_the_largest_heading_at_200_packs_under_the_cap` test extended
   to four phases).
+  - **TY-3a — LANDED 2026-09-08 @`*(pending)*`**, the substrate, no
+    behaviour change: `Face::raster` takes a phase, `GlyphSource::glyph_at`
+    puts it in the cache key (`glyph()` is phase 0 and is byte-identical to
+    before), `advance_f` is the fractional advance the sub-pixel pen will
+    accumulate, and FACE_MONO refuses a phase (a fixed cell has none, and
+    phasing it would blur the grid box glyphs join across). **A zeno
+    usage trap, found by an ink-conservation assertion:** `Mask::offset`
+    moves the rendered BOUNDS and leaves the path where it was, so at
+    dx = ¾ the box slid off the glyph and clipped 15 % of its ink, while at
+    dx = ¼ it did nothing at all. `render_offset` translates the path;
+    the library's own doc says to set both, and the pair reproduces a
+    hand-translated command list to within a coverage level. The bound
+    claim in §4.3 is now measured, not argued: a painted instance paints
+    exactly one phase, so a phased screen packs the *same* pages as an
+    unphased one (asserted equal), and one codepoint at four phases costs
+    four entries on one page.
+  - **TY-3b** the fractional pen in layout: `LaidGlyph` carries the whole
+    advance delta and a 2-bit phase, the lay sites accumulate in f32, and
+    measure/paint agree by sharing the accumulator.
 - **TY-4** Cornucopia live: the subset TTF (fontTools; the bake's codepoint
   list), `FACE_MONO` on the outline at the cell table; the cells tier
   untouched.

@@ -136,7 +136,11 @@ pub struct GlyphSource {
     grid: cornucopia::Atlas,
     island: cornucopia::Atlas,
     pub packer: AtlasPacker,
-    cache: BTreeMap<(u8, u32, char), Cached>,
+    /// Keyed by (face, size quantum, horizontal phase, char). The phase is
+    /// part of the key because a phased raster IS a different bitmap
+    /// (HALCYON-TYPE 4.3); FACE_MONO is always phase 0 (a fixed cell has
+    /// no phase).
+    cache: BTreeMap<(u8, u32, u8, char), Cached>,
     /// The display scale the mono atlases were selected for (percent).
     scale: u16,
     /// The smoothing stroke every proportional raster carries, in
@@ -304,7 +308,9 @@ impl GlyphSource {
         } else {
             size_q(px)
         };
-        if let Some(c) = self.cache.get(&(face, q, ch)) {
+        // The advance does not depend on the phase, so the probe uses
+        // phase 0 and a miss simply re-derives it from the tables.
+        if let Some(c) = self.cache.get(&(face, q, 0, ch)) {
             return Some(c.advance);
         }
         if face == FACE_MONO {
@@ -315,6 +321,24 @@ impl GlyphSource {
             return Some(self.island.cell_w() as i32);
         }
         Some((f.advance(f.glyph_id(ch), px) + 0.5) as i32)
+    }
+
+    /// The FRACTIONAL advance of `ch` at `px` in `face` -- what a
+    /// sub-pixel pen accumulates (HALCYON-TYPE 4.3). Rounding this is
+    /// `advance()` exactly, so a caller that measures with one and paints
+    /// with the other cannot drift: the integer path is the fractional
+    /// path's `+0.5` truncation, by construction and by test. The mono
+    /// cells and the island fallback are whole by nature (a fixed cell),
+    /// so they return their integer width as an f32. Packs nothing.
+    pub fn advance_f(&mut self, face: u8, px: f32, ch: char) -> Option<f32> {
+        if face == FACE_MONO {
+            return Some(self.mono_atlas(px).cell_w() as f32);
+        }
+        let f = self.faces.get(face as usize)?;
+        if !f.has(ch) && ch != '\u{FFFD}' && self.island.glyph(ch).is_some() {
+            return Some(self.island.cell_w() as f32);
+        }
+        Some(f.advance(f.glyph_id(ch), px))
     }
 
     /// The glyph for `ch` at `px` in `face`, rasterizing on first use.
@@ -330,12 +354,24 @@ impl GlyphSource {
     /// body face (Plex Text) rasterized to the cell height with the advance
     /// FORCED to the cell width (the grid survives; the glyph may clip).
     pub fn glyph(&mut self, face: u8, px: f32, ch: char) -> Option<GlyphRef> {
+        self.glyph_at(face, px, ch, 0)
+    }
+
+    /// `glyph` at a horizontal PHASE (0..=3 quarter-pixels; taken modulo 4
+    /// -- HALCYON-TYPE 4.3). The phase is part of the cache key because a
+    /// phased raster is a different bitmap, and it rides the OUTLINE, so
+    /// the returned bearing already carries the sub-pixel placement and the
+    /// caller still blits at a whole pixel. FACE_MONO ignores it: a fixed
+    /// cell has no phase, and phasing it would blur the grid the box glyphs
+    /// join across.
+    pub fn glyph_at(&mut self, face: u8, px: f32, ch: char, phase: u8) -> Option<GlyphRef> {
+        let phase = if face == FACE_MONO { 0 } else { phase & 3 };
         let q = if face == FACE_MONO {
             self.mono_is_grid(px) as u32
         } else {
             size_q(px)
         };
-        let key = (face, q, ch);
+        let key = (face, q, phase, ch);
         if let Some(c) = self.cache.get(&key) {
             return Some(GlyphRef {
                 glyph: c.id,
@@ -374,7 +410,7 @@ impl GlyphSource {
             // the Cornucopia cells beside it are pre-baked bitmaps and
             // cannot, until TY-4 puts the whole mono tier on this path.
             let f = self.faces.get(FACE_BODY as usize)?;
-            let r = f.raster(f.glyph_id(ch), (chh - 4) as f32, self.smooth_mem);
+            let r = f.raster(f.glyph_id(ch), (chh - 4) as f32, self.smooth_mem, 0);
             let id = self.packer.insert(r.w, r.h, &r.alpha, r.left, r.top)?;
             self.cache.insert(key, Cached { id, advance: cw });
             return Some(GlyphRef {
@@ -405,7 +441,7 @@ impl GlyphSource {
             }
         }
         let gid = f.glyph_id(ch);
-        let r = f.raster(gid, px, self.smooth_mem);
+        let r = f.raster(gid, px, self.smooth_mem, phase);
         let id = self.packer.insert(r.w, r.h, &r.alpha, r.left, r.top)?;
         let advance = (f.advance(gid, px) + 0.5) as i32;
         self.cache.insert(key, Cached { id, advance });
@@ -899,6 +935,114 @@ mod tests {
                 ge.h
             );
         }
+    }
+
+    // HALCYON-TYPE 4.3: the phase is part of the cache key (a phased
+    // raster IS a different bitmap), it never moves an ADVANCE, and the
+    // mono cells refuse it.
+    #[test]
+    fn the_phase_keys_the_cache_and_never_moves_an_advance() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let px = 17.5;
+        let ids: Vec<u32> = (0..4).map(|p| gs.glyph_at(FACE_BODY, px, 'n', p).unwrap().glyph).collect();
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert_ne!(ids[i], ids[j], "phases {i}/{j} share a cache entry");
+            }
+        }
+        // Re-asking hits the cache, not a fresh insert.
+        for (p, &id) in ids.iter().enumerate() {
+            assert_eq!(gs.glyph_at(FACE_BODY, px, 'n', p as u8).unwrap().glyph, id);
+        }
+        assert_eq!(gs.glyph(FACE_BODY, px, 'n').unwrap().glyph, ids[0], "glyph() IS phase 0");
+        assert_eq!(gs.glyph_at(FACE_BODY, px, 'n', 6).unwrap().glyph, ids[2], "phase modulo 4");
+        // The advance is the font's, whatever the phase.
+        let want = gs.advance(FACE_BODY, px, 'n').unwrap();
+        for p in 0..4 {
+            assert_eq!(gs.glyph_at(FACE_BODY, px, 'n', p).unwrap().advance, want, "phase {p}");
+        }
+        // The mono cell has no phase: every phase is the same entry.
+        let m0 = gs.glyph_at(FACE_MONO, MONO_ISLAND_PX, 'a', 0).unwrap().glyph;
+        for p in 1..4 {
+            assert_eq!(gs.glyph_at(FACE_MONO, MONO_ISLAND_PX, 'a', p).unwrap().glyph, m0, "mono phase {p}");
+        }
+    }
+
+    // The fractional advance is what a sub-pixel pen accumulates, and it
+    // must round to the integer advance the layout has always used --
+    // otherwise measuring with one and painting with the other drifts a
+    // box open. Checked over the sample, both mono tiers, the island
+    // fallback and the .notdef box.
+    #[test]
+    fn the_fractional_advance_rounds_to_the_integer_one() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let mut sample: Vec<(u8, f32, char)> = Vec::new();
+        for ch in SAMPLE.chars() {
+            for (f, px) in [(FACE_BODY, 11.5f32), (FACE_BODY_BOLD, 17.5), (FACE_HEADING_ITALIC, 35.0), (FACE_MONO, MONO_ISLAND_PX)] {
+                sample.push((f, px, ch));
+            }
+        }
+        sample.push((FACE_BODY, 10.0, '\u{22A2}')); // the island fallback
+        sample.push((FACE_BODY, 11.5, '\u{4E00}')); // .notdef
+        for (f, px, ch) in sample {
+            let i = gs.advance(f, px, ch).expect("known face");
+            let x = gs.advance_f(f, px, ch).expect("known face");
+            assert_eq!((x + 0.5) as i32, i, "{f}/{px}/{ch:?}: {x} rounds to {i}");
+            assert!(x >= 0.0, "{f}/{px}/{ch:?}: negative advance {x}");
+        }
+        assert_eq!(gs.advance_f(99, 11.5, 'a'), None, "unknown face");
+        assert_eq!(gs.packer.store.pages.len(), 0, "measuring packs nothing");
+    }
+
+    // HALCYON-SCALE 7 under phases (HALCYON-TYPE 4.3's bound claim): the
+    // store can never hold more entries than the frame PAINTS, because a
+    // painted instance paints exactly ONE phase. The adversarial shape is
+    // therefore not "more phases" but "every painted instance a distinct
+    // (codepoint, phase) pair" -- which is the same count as today's
+    // distinct-codepoint stream, and this pins that equality rather than
+    // assuming it.
+    #[test]
+    fn the_atlas_bound_holds_under_phases() {
+        let screen = |phased: bool| -> (usize, usize) {
+            let mut gs = GlyphSource::new_vendored(512);
+            gs.set_display(1280, 800);
+            gs.set_scale(200);
+            let sheet = crate::layout::daylight_sheet(200);
+            let px = sheet.hdr_px[0];
+            let lm = gs.line_metrics(FACE_BODY, px).unwrap();
+            let rows = 800 / ((px * 1.25 + 0.5) as i32);
+            let per_row = 1280 / (lm.ascent / 2).max(8);
+            let mut cp = 0x4E00u32;
+            let mut served = 0usize;
+            let mut n = 0u8;
+            for _ in 0..rows {
+                for _ in 0..per_row {
+                    // phased: every instance a distinct (cp, phase) pair.
+                    let phase = if phased { n % 4 } else { 0 };
+                    if gs.glyph_at(FACE_BODY, px, char::from_u32(cp).unwrap(), phase).is_some() {
+                        served += 1;
+                    }
+                    n = n.wrapping_add(1);
+                    cp += 1;
+                }
+            }
+            assert_eq!(served, (rows * per_row) as usize, "every glyph of the screen served");
+            assert!(!gs.evict_if_full(), "a screen of headings does not trip the eviction");
+            (gs.packer.store.pages.len(), gs.evict_pages())
+        };
+        let (plain_pages, bound) = screen(false);
+        let (phased_pages, _) = screen(true);
+        assert!(plain_pages <= bound, "{plain_pages} pages vs bound {bound}");
+        assert!(phased_pages <= bound, "phased {phased_pages} pages vs bound {bound}");
+        assert_eq!(phased_pages, plain_pages, "one phase per painted instance: the same store");
+        // And the repeat-heavy shape -- ONE codepoint at all four phases --
+        // costs four entries, not four pages.
+        let mut gs = GlyphSource::new_vendored(512);
+        for p in 0..4 {
+            gs.glyph_at(FACE_BODY, 17.5, 'n', p).unwrap();
+        }
+        assert_eq!(gs.packer.store.glyphs.len(), 4, "four phases, four entries");
+        assert_eq!(gs.packer.store.pages.len(), 1, "on one page");
     }
 
     fn ink(gs: &GlyphSource, id: u32) -> u64 {
