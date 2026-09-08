@@ -22,6 +22,53 @@ needed the operator.
 
 
 ---
+## 2026-09-08 (aux, run 6 continued, self-compact #3) -- the arm-6 logout stall ROOT-CAUSE-LOCALIZED: login hangs in its post-ut-exit cleanup, not the console
+
+The operator-chosen arc: deep-debug the arm-6 logout->login stall (after an
+imperium session, `exit` never returns to a login prompt). Ground-truth-first,
+per the playbook -- no theorizing.
+
+**Method.** An Explore agent mapped the exit->getty->login->cons chain
+(ruled out ut-exit, login-wait/exit console ops, and the console *open*; it
+pointed at the new login's prompt write parking, or the chain never reaching
+it). Then a kernel instrument -- `cons_diag_line` markers (freeze-immune, the
+#126-safe path): `DBG-DIE` at `proc_become_zombie_locked`, `DBG-WFREEZE`/
+`DBG-WROLE` at the two `cons_output_write` parks, plus joey getty markers --
+all gated on `boot_is_complete()`; and a diagnostic `.exp` that captures
+`/ctl/procs`+`/ctl/cons` before `exit` then reproduces the stall.
+
+**Two wrong turns, both caught, both reusable.** (1) The Pi CANNOT run a
+tests-ON kernel: its KVM env fails the in-kernel `virtio-rng reseed` test
+(poll-timeout), and the kernel extincts on ANY test failure (`kernel/main.c`
+842), so every tests-ON boot died at ~12s before login. Caught by measurement:
+GATED (0 DBG output) and UNGATED both failed EXACTLY 12/1535 -- identical, so
+the markers contributed 0; the failures were environmental. Fix: build
+tests-OFF (`--set TESTS=n`, keeps boot probes -> keeps joey's imperium grant).
+So the Pi is a tests-OFF host only; the mac stays the tests-ON (test.sh) host.
+(2) `LS_CI_POOL_RESTORE=0` left the per-slot pool (`build/ls-ci-slots/<scen>/
+pool.img`) UNPOPULATED -> the guest booted with no `/srv/stratum-fs`. Fixed by
+creating `pool.img.baked-snapshot`+`system.key.baked-snapshot` from the synced
+pool and using the default `POOL_RESTORE=1`.
+
+**The finding (boot5, tests-off, DBG timeline).** Arms 0-5 pass; on `exit`:
+`DBG-DIE pid=416` fires (michael's ut exits cleanly, line 1556) but `DBG-DIE
+pid=413` (login) and `pid=414` (the home-proxy stratumd) NEVER fire. So
+michael's login hangs in its post-ut-exit CLEANUP (`usr/login/src/main.rs`
+1406-1415: `unbind_home` / `evict_dek` / `session_close`); joey's getty, blocked
+in `t_wait_pid_for(413)`, never respawns login -> no prompt. `/ctl/cons` is
+clean (`tx_room_waits=0`, `tx_dropped=0`) -> NOT a console/TX-role issue, and
+the episode was inactive -> NOT the freeze. Prime suspect: `unbind_home`
+reaping the home proxy (414), which never exits -- likely the imperium session
+left an fd on `/srv/home-michael` (or corvus holds session-3 state) keeping the
+proxy's upstream open. Orthogonal to the passthrough fix (already proven) and
+to the console, exactly as the arm-6 deferral flagged.
+
+**Open.** Localize the exact cleanup step (add login markers to `unbind_home`/
+`evict_dek`/`session_close`) + find why the proxy (414) never exits after an
+imperium session; then fix. The diagnostic `.exp` + the marker recipe are in
+`scratchpad/arm6-stall-plan.md`. **Cost:** repeated mac contention (main's
+active SC-5 development); coordinated cleanly on yip (main slotted one build).
+
 ## 2026-09-08 (aux, run 6 continued, post-self-compact) -- the sub-shell-input fix VERIFIED on real ARM silicon; the Pi made an E2E offload host; an orthogonal logout stall proven + tracked
 
 **What landed.** The IM-5 sub-shell-input fix (`imperium`'s elevated sub-shell EOF'd
