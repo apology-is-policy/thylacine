@@ -212,6 +212,59 @@ module, four in `raster`), libhalcyon 49 (the theme pin gained
 each, run twice: once for the swap and again after the status-bar rule.
 Landed as `db1e4ce9` (the swap) and `9d5f38ee` (the status bar).
 
+**TY-3, the quarter-pixel phases, in the same run.** Two commits, because
+the substrate and the pen are separately testable and the substrate carried
+a finding worth isolating. `c0583fb6` gives the rasterizer a phase and the
+cache a key for it, with no behaviour change. `abbd7900` makes the pen
+fractional.
+
+**The library trap, caught by the right assertion.** zeno's `Mask::offset`
+does not translate the path -- it offsets the rendered BOUNDS and leaves the
+path where it was, so the box slides off the glyph. Measured: at ¾ px it
+clipped a column and lost 15 % of the ink; at ¼ px it did nothing at all.
+`render_offset` is what moves the path, and the library's own doc says to
+set both. What is worth keeping is *which* assertion caught it. "The four
+phases are distinct" passes on a clipped raster -- clipping is a difference,
+so the distinctness check is satisfied by the bug. The one that failed was
+ink conservation: shifting a shape cannot destroy area. **The control that
+catches a silent defect states a property the defect must violate, not one
+it happens to satisfy.**
+
+**A correction I had to make against my own reasoning.** I first accumulated
+the pen in quarter-pixels and wrote a comment claiming exact integers
+"cannot drift, which an f32 accumulator over a long line can." Backwards at
+this magnitude: f32 drift over a line is about 1e-4 px, while re-quantizing
+the *pen* to quarters compounds up to ⅛ px per glyph -- which the width
+assertion measured at **1.4 px over one line of prose**, most of the drift
+sub-pixel placement exists to remove. The pen now carries 1/256 px and the
+phase is a per-glyph decision read off it and never fed back.
+
+**And the predicted divergence, which duly arrived.** Three sites
+pre-measured a run's width by summing rounded per-glyph advances while the
+lay loop had moved to the sub-pixel pen. The kv-list test caught one: a
+right-aligned value landed off its group's edge. All three now share the lay
+path's accumulator, and so do the single-style runs (chrome strip, status
+bar, menu) through one shaper.
+
+**The witness reported the feature inert on its first run, and was right.**
+A sub-pixel pen that lands on whole pixels every time passes every other
+test in the suite. The text I fed it was a raw output zone, which lays in
+MONO, whose cells are whole by construction -- so the assertion fired
+correctly and the test, not the code, was wrong. It now feeds an annotated
+zone (what makes lines Doc rather than Raw, hence proportional). Live: 3.3 %
+of the capture's bytes changed across 313 rows, chrome to status bar.
+
+**One thing I got wrong, and it was the operator's to judge.** On the day's
+one commit I treated as too trivial to name paths for, `git add docs/` swept
+six of the operator's in-progress documents into a commit and onto both
+mirrors. I backed them up and put the remedy to them as a blocking question
+rather than choosing on their behalf. Their answer was that they wanted them
+committed anyway and were puzzled the avoidance had ever started -- so no
+harm, and the inherited "never touch these" caution is now recorded as
+checked and lifted (committing, not editing). The reusable part is not about
+those files: a directory add stages whatever is sitting there, and "it's
+only a hash fixup" is exactly when the guard comes off.
+
 **Open.** The Fable prosecution round is owed and now cannot be Fable --
 the operator ran out mid-run and switched to Opus 5, so the reviewer rule's
 fallback applies (a same-family round keeps context independence, which is
