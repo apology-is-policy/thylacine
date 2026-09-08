@@ -133,7 +133,14 @@ first constrained runs silently fitted the wrong size), and a `run()`
 helper that forwarded two of three constraints (the "stroke 0" rows were
 stroke-free; the stroke it found was 0.002, so the reading held).
 
-**Open.** The vote (re-posed with the fit's numbers); BEACON 12.12 +
+**Ratified.** The ballot re-posed with the fit's numbers came back as
+recommended on every item (`1c421e04`): the outline stroke at 0.012 em
+as the mechanism, no hinting, the amount per theme, Cornucopia live from
+a subset TTF; the HALCYON.md 13.5 amendment stays the operator's to
+apply. TY-1 (vendor skrifa + read-fonts + zeno; the native build) opens
+at the next run.
+
+**Open.** BEACON 12.12 +
 HALCYON-WORKSPACES 7 still owed; the vault's banner declaration for
 `ls-gfx-compose.exp`; the next Fable round (the reflow + top flag; SC-5's
 declaration).
