@@ -232,7 +232,7 @@ on the reset, both to aurora's surface 0), ls-halcyon 118 s with the
 console at 125% (cell 13x29) and back (10x22, 128 columns) -- its
 transcript shows the display transiting THROUGH pending-direct on the way,
 the arm the flag also covers -- and ls-gfx-compose 73 s with all six legs
-at the 2.0 table. Close commit: SCALE_CLOSE_HASH.
+at the 2.0 table. Close commit: 0c1dc04e.
 
 ## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
 
