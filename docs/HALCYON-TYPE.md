@@ -1,7 +1,8 @@
 # HALCYON-TYPE — Type rendering: the Daylight text on the screen
 
-**Status: DESIGN, for the operator's vote (2026-09-08).** Nothing here is
-built. It answers one charge, verbatim: *"one general allure of mac is the
+**Status: RATIFIED 2026-09-08 (the operator, on the fit's numbers; §7
+records the answers). Implementation: TY-1 opens.** It answers one
+charge, verbatim: *"one general allure of mac is the
 fact the OS X has a really REALLY well sorted out typesetting and
 anti-aliasing — when you compare it to Linux, it's day and night. In
 Thylacine we should strive to achieve similar reading and viewing comfort."*
@@ -406,6 +407,14 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
 ---
 
 ## 7. The vote
+
+**RATIFIED 2026-09-08 (the operator, after the capture explanation and
+the fit):** (1) the outline stroke at **0.012 em** as the mechanism
+(the coverage lookup stays the recorded interim, not the plan); (2)
+**no hinting**; (3) the amount **per theme** (Daylight 0.012, dark
+grounds 0); (4) Cornucopia **live from a subset TTF**; (5) the
+HALCYON.md §13.5 amendment is the operator's to apply to their document.
+The five items as they were put:
 
 1. **The amount and the mechanism.** The fit's answer is an outline stroke
    of 0.012 em (one constant at both sizes; the lab's N0 at 0.015 is the
