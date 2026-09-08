@@ -95,7 +95,7 @@ requires a version bump plus scripture amendment here.
 | `zone` + `mark` | `zone k=prompt \| command \| output`; `mark k=exit;code=<i64>` | The transcript structure (the OSC 133 analog): where a prompt, an entered command, and its output begin/end, and the exit-status completion mark (§12.2 normative forms). Emitted by the *shell* (ut), not by programs. |
 | `table` | column spec: per-column `l\|r\|c` alignment, optional `hdr` first-row flag | A table. Cells... |
 | `row`, `cell` | — | ...delimited by `row`/`cell` frames wrapping the plain cell text. The plain-stream realization (the payload between frames) is the aligned, whitespace-separated form. |
-| `hdr` | `level=1..3` | A heading. |
+| `hdr` | `level=1..3`, optional `class=title` | A heading; `class=title` marks a title page's heading (the herald), a role the stylesheet sets apart (§12.2). |
 | `rule` | — | A separator (self-closing). |
 | `pre` | — | A **preformatted block**: internal whitespace + line breaks are significant (character-grid alignment). The renderer sets it apart — mono + code-block chrome (own ground + a leading gutter rule) — and neither re-wraps nor collapses spacing. The interim home for box-drawing / column-exact output (`la`) until Beacon gains box/table primitives; the block-level companion to `em class=code`. May contain inline `em`/`obj`. |
 
@@ -363,7 +363,7 @@ Normative rules, each load-bearing:
 | `table` | paired | `cols=<spec>;hdr=0\|1` | `<spec>` = one char per column, `l`/`r`/`c` alignment (e.g. `cols=lrrl`). `hdr=1` ⇒ the first `row` is a header row. |
 | `row` | paired | — | Direct child of `table`. The row's payload newline is ordinary stream bytes after the close. |
 | `cell` | paired | — | Direct child of `row`. The plain-stream realization between cells (spaces/padding) is payload OUTSIDE the cell frames — so stripping yields the aligned plain table. |
-| `hdr` | paired | `level=1\|2\|3` | A heading. |
+| `hdr` | paired | `level=1\|2\|3`; optional `class=title` | A heading. **v1 amendment (2026-09-08, the composition round): `class=title`** names the heading's ROLE — a title page's heading, the herald that opens a splash or welcome screen (HALCYON-COMPOSITION.md §3's title-page pattern) — as opposed to the default section heading. A role, not a layout op: the plain realization is the same text; a rich stylesheet realizes the role (centred, its own top margin, and the `em class=dim` lines directly under it read as its deck). |
 | `rule` | point | — | A separator. Plain realization: the emitter's own rule line (payload). |
 | `em` | paired | `class=emph \| strong \| dim \| code` | Emphasis by class. `code` implies monospace in every rich stylesheet. |
 | `obj` | paired | `type=path \| pid \| url \| commit \| user \| layout; ref=<canonical>` | The presentation. `type=path` ⇒ `ref` is the cleaned ABSOLUTE 9P path (the emitter resolves relative names before emitting; a ref the emitter cannot canonicalize ⇒ emit no frame, plain text only). `pid` ⇒ `ref` is the decimal pid. `url`/`commit`/`user` ⇒ ref is the literal. `layout` ⇒ `ref` is a saved Halcyon layout's NAME (one path component, HALCYON.md §13.7 -- never a path: the session tool's verbs take the name, and a name never begins with `-`). |
@@ -378,7 +378,11 @@ proportional-live ratification, HALCYON.md §14.13 -- operator-signed-off; an
 additive paired op tolerated by old renderers per rule 4). NB `pre` is NOT the
 refused typography-op class: it names a content PROPERTY (whitespace is
 significant), never a face/size/color, so the stylesheet still owns the
-realization (mono + chrome). Growth toward
+realization (mono + chrome); v1 + `hdr class=title` (2026-09-08, the
+composition round -- a value of a new key on an existing op naming the
+heading's ROLE [a title page's herald vs a section heading], the same class
+as `em class=`: the stylesheet realizes the role, an old renderer reads a
+plain level-1 heading per rule 4). Growth toward
 layout/typography ops is REFUSED on sight — that was the TermKit failure.
 
 ### 12.3 The tier mechanism (consctl verb + environment)

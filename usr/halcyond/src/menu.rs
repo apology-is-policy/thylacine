@@ -23,7 +23,7 @@ use libhalcyon::theme::DAYLIGHT;
 
 use crate::chrome::NAME_PX;
 use crate::layout::LaidBlock;
-use crate::raster::{GlyphSource, FACE_BODY, FACE_MONO};
+use crate::raster::{GlyphSource, FACE_BODY, FACE_MONO, MONO_ISLAND_PX};
 use crate::select::FlatRow;
 use crate::transcript::{Block, Item, TCell, Transcript};
 
@@ -324,12 +324,12 @@ fn body_width(gs: &mut GlyphSource, s: &str) -> i32 {
 }
 
 fn mono_width(gs: &GlyphSource, s: &str) -> i32 {
-    let (cw, _, _) = gs.mono_cell();
+    let (cw, _, _) = gs.island_cell();
     cw * s.chars().count() as i32
 }
 
 fn row_h(gs: &GlyphSource) -> i32 {
-    let (_, ch, _) = gs.mono_cell();
+    let (_, ch, _) = gs.island_cell();
     ch + ROW_PAD
 }
 
@@ -339,7 +339,7 @@ fn row_h(gs: &GlyphSource) -> i32 {
 /// `max_h` tall (the display: the compositor refuses a taller surface -- the
 /// H-3c round F3); past the cap the item list scrolls (`menu_list`).
 pub fn menu_size(m: &Menu, gs: &mut GlyphSource, max_h: u32) -> (u32, u32) {
-    let (cw, _, _) = gs.mono_cell();
+    let (cw, _, _) = gs.island_cell();
     let title_w = body_width(gs, &m.ty) + 2 * cw + mono_width(gs, &m.refv);
     let mut w = title_w;
     if m.items.is_empty() {
@@ -387,7 +387,7 @@ fn push_body(
 fn push_mono(cart: &mut Cartoon, gs: &mut GlyphSource, x: i32, baseline: i32, color: u32, s: &str) {
     let mut refs: Vec<GlyphRef> = Vec::new();
     for c in s.chars() {
-        if let Some(g) = gs.glyph(FACE_MONO, 0.0, c) {
+        if let Some(g) = gs.glyph(FACE_MONO, MONO_ISLAND_PX, c) {
             refs.push(g);
         }
     }
@@ -422,7 +422,7 @@ pub fn menu_list(m: &Menu, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon {
             color: d.border,
         });
     }
-    let (cw, _, mono_base) = gs.mono_cell();
+    let (cw, _, mono_base) = gs.island_cell();
     let rh = row_h(gs);
     let body_asc = gs
         .line_metrics(FACE_BODY, NAME_PX)

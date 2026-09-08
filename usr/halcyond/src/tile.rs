@@ -26,12 +26,14 @@ use alloc::vec::Vec;
 
 use crate::grid::Grid;
 use crate::layout::{
-    caret_in_block, laid_line_for, layout_block, render_block, LaidBlock, LaidLine, Sheet,
+    block_gap_between, caret_in_block, laid_line_for, layout_block, render_block, LaidBlock,
+    LaidLine, Sheet,
 };
 use crate::menu::{run_rect, ObjRun};
-use crate::raster::{GlyphSource, FACE_MONO};
+use crate::raster::{GlyphSource, FACE_MONO, MONO_GRID_PX};
 use crate::transcript::{
-    SpanMap, SpanTag, Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, DEFAULT_MAX_LINES_PER_BLOCK,
+    BlockKind, SpanMap, SpanTag, Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST,
+    DEFAULT_MAX_LINES_PER_BLOCK,
 };
 use cartoon::{Cartoon, Op};
 use kaua_term::{Control, Record, ScreenMode};
@@ -100,12 +102,18 @@ impl Tile {
     pub fn with_budget(cols: usize, rows: usize, pal: Palette, max_cost: usize) -> Tile {
         Tile {
             grid: Grid::new(cols, rows, pal.fg, pal.bg),
-            scrollback: Transcript::with_caps(
-                pal,
-                DEFAULT_MAX_BLOCKS,
-                max_cost,
-                DEFAULT_MAX_LINES_PER_BLOCK,
-            ),
+            scrollback: {
+                // A tile's transcript is FRAME-fed (the text is grid cells):
+                // structure is rebuilt from the tagged cells.
+                let mut t = Transcript::with_caps(
+                    pal,
+                    DEFAULT_MAX_BLOCKS,
+                    max_cost,
+                    DEFAULT_MAX_LINES_PER_BLOCK,
+                );
+                t.set_cells_mode(true);
+                t
+            },
             mode: ScreenMode::Normal,
             title: String::new(),
             exit: None,
@@ -289,9 +297,10 @@ impl Tile {
             // SAME beacon parser the console path uses; it drives the zone/block
             // cut + span state on the scrollback and touches no cells (14.11.4).
             Control::Osc1936Raw { serial, frame } => {
-                self.scrollback.feed(&frame);
+                self.scrollback.feed_frame(&frame, serial);
                 // H-4d: the cells the producer writes next carry `serial`;
-                // they mean THIS state (after the frame).
+                // they mean THIS state (after the frame) -- incl. the
+                // structure (pre / table cell / rule) the tile rebuilds from.
                 self.spans.note(serial, self.scrollback.span_tag());
             }
             Control::Title(t) => self.title = t,
@@ -385,10 +394,30 @@ impl Tile {
         // The exact content height from the cached heights: a leading gap,
         // every frozen block plus its trailing gap, then the open block (the
         // newest, un-frozen history; no trailing gap -- the grid follows it
-        // directly as the live tail).
+        // directly as the live tail). The gap after a block depends on the
+        // pair (a prompt runs into its output as one entry), so it is read
+        // per index by the three walks below.
+        let frozen_kinds: Vec<BlockKind> = self
+            .scrollback
+            .frozen_blocks()
+            .iter()
+            .map(|b| b.kind)
+            .collect();
+        let open_kind = self.scrollback.open_block().kind;
+        // A frozen block that laid nothing (cells mode keeps a zone-less
+        // block alive for its obj table even when its text is still on the
+        // grid) takes no gap either -- else every such block is a phantom
+        // band.
+        let gap_after = |i: usize, hgt: i32| -> i32 {
+            if hgt == 0 {
+                return 0;
+            }
+            let next = frozen_kinds.get(i + 1).copied().unwrap_or(open_kind);
+            block_gap_between(frozen_kinds[i], next, sheet)
+        };
         let mut total = sheet.block_gap;
-        for &(_, _, hgt) in self.heights.iter() {
-            total += hgt + sheet.block_gap;
+        for (i, &(_, _, hgt)) in self.heights.iter().enumerate() {
+            total += hgt + gap_after(i, hgt);
         }
         let open_lb = layout_block(self.scrollback.open_block(), widthi, sheet, gs);
         self.laid_last += 1;
@@ -423,11 +452,12 @@ impl Tile {
         if let Some(m) = mark {
             let mut rel = sheet.block_gap;
             let mut span: Option<(i32, i32)> = None;
-            for (b, &(_, _, hgt)) in self
+            for (i, (b, &(_, _, hgt))) in self
                 .scrollback
                 .frozen_blocks()
                 .iter()
                 .zip(self.heights.iter())
+                .enumerate()
             {
                 if b.id == m.block {
                     let lb = layout_block(b, widthi, sheet, gs);
@@ -437,7 +467,7 @@ impl Tile {
                     });
                     break;
                 }
-                rel += hgt + sheet.block_gap;
+                rel += hgt + gap_after(i, hgt);
             }
             if span.is_none() && m.block == u64::MAX {
                 span = Some(match laid_line_for(&open_lb, m.item, m.row) {
@@ -472,11 +502,12 @@ impl Tile {
         // Bottom-anchor [scrollback][grid]: walk the blocks by their cached
         // heights, laying out + rendering only those that intersect the view.
         let mut y = y0 + sheet.block_gap;
-        for (b, &(_, _, hgt)) in self
+        for (i, (b, &(_, _, hgt))) in self
             .scrollback
             .frozen_blocks()
             .iter()
             .zip(self.heights.iter())
+            .enumerate()
         {
             self.frame.push((b.id, y, hgt));
             if y + hgt >= 0 && y <= viewh {
@@ -488,7 +519,7 @@ impl Tile {
                 self.laid_last += 1;
                 self.laid_lines_last += lb.lines.len();
             }
-            y += hgt + sheet.block_gap;
+            y += hgt + gap_after(i, hgt);
         }
         self.frame.push((u64::MAX, y, open_lb.height));
         if y + open_lb.height >= 0 && y <= viewh {
@@ -815,7 +846,9 @@ fn paint_grid(
                 });
             }
             if cell.ch != ' ' && cell.ch != '\0' {
-                if let Some(gref) = gs.glyph(FACE_MONO, 0.0, cell.ch) {
+                // The GRID mono (advance 10): a full-screen program owns its
+                // cells at the pts geometry, not the document's island size.
+                if let Some(gref) = gs.glyph(FACE_MONO, MONO_GRID_PX, cell.ch) {
                     cart.push_glyphs(gen, cx, cy + base, fg, &[gref]);
                 }
             }
@@ -1076,12 +1109,16 @@ mod tests {
     fn history_tile(cols: usize, rows: usize, max_blocks: usize) -> Tile {
         Tile {
             grid: Grid::new(cols, rows, vt::DAYLIGHT.fg, vt::DAYLIGHT.bg),
-            scrollback: Transcript::with_caps(
-                vt::DAYLIGHT,
-                max_blocks,
-                DEFAULT_MAX_COST,
-                DEFAULT_MAX_LINES_PER_BLOCK,
-            ),
+            scrollback: {
+                let mut t = Transcript::with_caps(
+                    vt::DAYLIGHT,
+                    max_blocks,
+                    DEFAULT_MAX_COST,
+                    DEFAULT_MAX_LINES_PER_BLOCK,
+                );
+                t.set_cells_mode(true);
+                t
+            },
             mode: ScreenMode::Normal,
             title: String::new(),
             exit: None,
@@ -1116,8 +1153,14 @@ mod tests {
     /// The exact content height by the OLD method (every block laid out).
     fn full_height(t: &Tile, w: usize, gs: &mut GlyphSource, sheet: &Sheet) -> i32 {
         let mut total = sheet.block_gap;
-        for b in t.scrollback.frozen_blocks().iter() {
-            total += layout_block(b, w as i32, sheet, gs).height + sheet.block_gap;
+        let frozen = t.scrollback.frozen_blocks();
+        for (i, b) in frozen.iter().enumerate() {
+            let next = frozen
+                .get(i + 1)
+                .map(|n| n.kind)
+                .unwrap_or(t.scrollback.open_block().kind);
+            let h = layout_block(b, w as i32, sheet, gs).height;
+            total += h + if h == 0 { 0 } else { block_gap_between(b.kind, next, sheet) };
         }
         total += layout_block(t.scrollback.open_block(), w as i32, sheet, gs).height;
         // PL-4: the tail is the proportional live grid (its content rows laid

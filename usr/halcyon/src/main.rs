@@ -1121,23 +1121,100 @@ fn layout_list() -> i64 {
     0
 }
 
-/// `halcyon welcome`: the first-launch tour (HALCYON.md 13.7, H-4d) -- a
-/// live transcript that SHOWS the rich shell rather than describing it: a
-/// heading, two lines of how, a table of path objects whose verb menus do
-/// the demonstrating, the split/zoom/layout chords, the lineage. Emitted
-/// through the Beacon sink at the effective tier (rich in a session tile; a
-/// plain console gets the plain realization), then this process EXECS the
-/// user's shell so the tile becomes a prompt with the tour above it -- no
-/// wrapper stays behind to catch the shell's job-control signals. The tour's
-/// objects run in place (the menu's command lands in this tile); the pane
-/// beside it is the session's own shell.
+/// One `key: value` field of a /ctl file (`cpus: 4`), trimmed; None when the
+/// file or the field is missing (the welcome then omits the fact -- it never
+/// prints a placeholder).
+fn ctl_field(path: &str, key: &str) -> Option<String> {
+    let bytes = read_capped(path, 16 * 1024).ok()?;
+    let text = core::str::from_utf8(&bytes).ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix(key) {
+            let v = rest.trim();
+            if !v.is_empty() {
+                return Some(String::from(v));
+            }
+        }
+    }
+    None
+}
+
+/// Physical memory in MiB from /ctl/memory's `total: N pages` (4 KiB pages).
+fn physical_mib() -> Option<u64> {
+    let v = ctl_field("/ctl/memory", "total:")?;
+    let pages: u64 = v.split_whitespace().next()?.parse().ok()?;
+    Some(pages * 4096 / (1024 * 1024))
+}
+
+/// What `/` is mounted from, per this process's own namespace listing
+/// (`mount / <src>` in /proc/self/ns).
+fn root_source() -> Option<String> {
+    let bytes = read_capped("/proc/self/ns", 64 * 1024).ok()?;
+    let text = core::str::from_utf8(&bytes).ok()?;
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        if it.next() == Some("mount") && it.next() == Some("/") {
+            if let Some(src) = it.next() {
+                return Some(String::from(src));
+            }
+        }
+    }
+    None
+}
+
+/// The loaded systems: init's children per /ctl/procs -- (name, pid), by
+/// pid, at most ten (five rows of two). Empty when /ctl/procs is unreadable.
+fn loaded_systems() -> Vec<(String, u32)> {
+    let mut out: Vec<(String, u32)> = Vec::new();
+    let Ok(bytes) = read_capped("/ctl/procs", 64 * 1024) else {
+        return out;
+    };
+    let Ok(text) = core::str::from_utf8(&bytes) else {
+        return out;
+    };
+    let mut rows: Vec<(u32, u32, String)> = Vec::new();
+    for line in text.lines().skip(1) {
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(ppid), Some(name)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else {
+            continue;
+        };
+        rows.push((pid, ppid, String::from(name)));
+    }
+    let init = rows
+        .iter()
+        .find(|r| r.2 == "joey")
+        .map(|r| r.0)
+        .unwrap_or(1);
+    for (pid, ppid, name) in rows.into_iter() {
+        if ppid == init && pid != init {
+            out.push((name, pid));
+        }
+    }
+    out.sort_by_key(|r| r.1);
+    out.truncate(10);
+    out
+}
+
+/// `halcyon welcome`: the first-launch herald (HALCYON.md 13.7, H-4d;
+/// HALCYON-COMPOSITION.md 5's worked composition) -- a live transcript that
+/// SHOWS the rich shell rather than describing it: the title page (a title
+/// + a dim deck of boot facts, every one read live -- never a placeholder),
+/// the loaded systems as a two-column list, then "Getting started" and
+/// "Keys and clicks" with the objects and the chords, a rule, the lineage.
+/// Emitted through the Beacon sink at the effective tier (rich in a session
+/// tile; a plain console gets the plain realization), then this process
+/// EXECS the user's shell so the tile becomes a prompt with the herald above
+/// it -- no wrapper stays behind to catch the shell's job-control signals.
+/// The objects act in place (the menu's command lands in this tile).
 fn welcome() -> i64 {
     let rich = stdout_is_rich();
     let home = env::var("HOME")
         .map(|h| String::from(h.trim()))
         .filter(|h| !h.is_empty());
     {
-        use beacon::sink::{Cell, Em, ObjType, Sink, Table};
+        use beacon::sink::{Cell, Em, HdrClass, ObjType, Sink, Table};
         let mut out = StdoutOut;
         let tier = if rich {
             beacon::Tier::Rich
@@ -1145,12 +1222,77 @@ fn welcome() -> i64 {
             beacon::Tier::None
         };
         let mut s = Sink::new(&mut out, tier);
-        s.hdr(1, "Welcome to Halcyon");
+        // The herald: the title-page heading and its deck.
+        s.hdr_class(1, HdrClass::Title, "Halcyon Terminal of Thylacine OS");
         s.text("\n");
+        let booted = match root_source() {
+            Some(src) => format!("Booted on aarch64 from {}", src),
+            None => String::from("Booted on aarch64"),
+        };
+        s.em(Em::Dim, &booted);
+        s.text("\n");
+        let mut facts = String::new();
+        if let Some(mib) = physical_mib() {
+            facts.push_str(&format!("{} MiB physical memory", mib));
+        }
+        if let Some(cpus) = ctl_field("/ctl/cpu", "cpus:") {
+            if !facts.is_empty() {
+                facts.push_str(" \u{b7} ");
+            }
+            facts.push_str(&format!("{} cpus", cpus));
+        }
+        if !facts.is_empty() {
+            s.em(Em::Dim, &facts);
+            s.text("\n");
+        }
+        // The loaded systems: init's children, name + pid, two columns.
+        let systems = loaded_systems();
+        if !systems.is_empty() {
+            s.hdr(2, "Loaded systems");
+            s.text("\n");
+            let mut t = Table::new("lrlr");
+            let half = systems.len().div_ceil(2);
+            for i in 0..half {
+                let mut row = alloc::vec![
+                    Cell::plain(&systems[i].0),
+                    Cell::em(Em::Dim, &format!("{}", systems[i].1)),
+                ];
+                if let Some((name, pid)) = systems.get(i + half) {
+                    row.push(Cell::plain(name));
+                    row.push(Cell::em(Em::Dim, &format!("{}", pid)));
+                } else {
+                    row.push(Cell::plain(""));
+                    row.push(Cell::plain(""));
+                }
+                t.push_row(row);
+            }
+            t.realize(&mut s);
+        }
+        s.hdr(2, "Getting started");
+        s.text("\n");
+        // This process execs the shell in place, so its pid IS the shell's.
+        let pid = identity::pid();
+        s.text("You are typing to ");
+        s.obj(ObjType::Pid, &format!("{}", pid), &format!("ut, pid {}", pid));
+        s.text(".\n");
         s.text(
             "This is a live transcript, not a terminal emulator: what a command prints stays an \
              object -- a path, a process, a saved layout -- and every object offers verbs.\n",
         );
+        s.text("Your territory is visible at ");
+        s.obj(ObjType::Path, "/proc/self/ns", "/proc/self/ns");
+        s.text("; try ");
+        s.em(Em::Code, "ls /dev");
+        s.text(" to start, and ");
+        s.obj(ObjType::Path, DEVICE_LAYOUTS_DIR, DEVICE_LAYOUTS_DIR);
+        s.text(" holds the layouts this image ships.\n");
+        if let Some(h) = &home {
+            s.text("Your home is ");
+            s.obj(ObjType::Path, h, h);
+            s.text(".\n");
+        }
+        s.hdr(3, "Keys and clicks");
+        s.text("\n");
         s.text("Press ");
         s.em(Em::Code, "Esc");
         s.text(" to leave the prompt; ");
@@ -1162,61 +1304,27 @@ fn welcome() -> i64 {
         s.text("/");
         s.em(Em::Code, "b");
         s.text(" jump between objects, ");
-        s.em(Em::Code, "Enter");
-        s.text(" opens an object's verbs (or click one); ");
         s.em(Em::Code, "i");
         s.text(" returns to the prompt.\n");
-        s.rule();
-        s.hdr(2, "Try this");
-        s.text("\n");
-        let mut t = Table::new("ll").hdr();
-        t.push_row(alloc::vec![
-            Cell::plain("OBJECT"),
-            Cell::plain("WHAT ITS VERBS SHOW"),
-        ]);
-        t.push_row(alloc::vec![
-            Cell::obj(ObjType::Path, "/bin", "/bin"),
-            Cell::plain("every program, listed as objects (ls)"),
-        ]);
-        if let Some(h) = &home {
-            t.push_row(alloc::vec![
-                Cell::obj(ObjType::Path, h, h),
-                Cell::plain("your home; cd there from the menu"),
-            ]);
-        }
-        t.push_row(alloc::vec![
-            Cell::obj(
-                ObjType::Path,
-                "/dev/tapestry/layout",
-                "/dev/tapestry/layout"
-            ),
-            Cell::plain("the pane tree, as a file (cat)"),
-        ]);
-        t.push_row(alloc::vec![
-            Cell::obj(ObjType::Path, DEVICE_LAYOUTS_DIR, DEVICE_LAYOUTS_DIR),
-            Cell::plain("the layouts this image ships (halcyon layout list)"),
-        ]);
-        t.realize(&mut s);
-        s.rule();
-        s.text("The pane on the right is your shell: type ");
-        s.em(Em::Code, "ls");
-        s.text(" there and the listing comes back as objects. ");
+        s.text("Press ");
+        s.em(Em::Code, "Enter");
+        s.text(" on an object, or click it, for its verbs.\n");
         s.em(Em::Code, "Super+H");
         s.text(" / ");
         s.em(Em::Code, "Super+V");
         s.text(" split, ");
         s.em(Em::Code, "Super+F");
-        s.text(" zooms, ");
+        s.text(" zooms; ");
         s.em(Em::Code, "halcyon layout save <name>");
         s.text(" keeps an arrangement, and ");
         s.em(Em::Code, "$HOME/lib/halcyon.rc");
         s.text(" runs at every login (an empty one skips this welcome).\n");
+        s.rule();
         s.em(
             Em::Dim,
             "A Lisp Machine's presentations on a Plan 9 shell -- a thing thought gone, brought back.",
         );
         s.text("\n");
-        s.rule();
     }
     // The serial witness (the tile's own output is pixels): which tier the
     // tour went out at.

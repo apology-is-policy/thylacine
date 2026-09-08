@@ -23,6 +23,119 @@ needed the operator.
 
 ---
 
+## Run 44 (2026-09-08, Fable 5.1 max) -- the composition round: mockup-true Halcyon, verified by agentic screendump
+
+**Operator input.** Screenshots sc1..sc5 ("still a complete mess, even bigger
+than before"), then two supporting documents -- `docs/HALCYON-COMPOSITION.md`
+(the implementation guide: type scale, vertical rhythm, the baseline rule for
+mono islands, DPI snapping) and `docs/halcyon_text_composition_mockup.png` (the
+welcome-screen target) -- with the mandate "we should not stop until we have a
+verified mockup-true rendering, verified by agentic screenshotting". Both
+documents are the operator's (untracked), like the four A/D docs.
+
+**The diagnosis was one mechanism.** sc1 (the "word cloud"), sc2 (the view
+jumping on Enter), sc4 (menu vs base scale) and half of sc3 were all
+`FACE_MONO` serving the fixed 22-px advance-10 Cornucopia cell -- the ALT-SCREEN
+grid's cell -- inside an 11.5-px body: every inline `em class=code` island,
+every menu literal and every blank line (`break_line` measured blanks with the
+mono metrics) stood twice the height of the prose, and the inflated content
+height bottom-anchored the view so it shifted on every new prompt line. The
+other half of sc3 was the A commit's regression: `face_for`'s `!annotated` arm
+flipped to proportional with no raw/document distinction, so foreign columnar
+output went proportional. sc5 was simply unbuilt: the Cornucopia bake omits
+U+2500-259F BY DESIGN for the renderer to draw, and nothing drew them.
+
+**Decisions (heritage-aligned; auto-accepted under the Fable autonomy grant):**
+
+- Two Cornucopia atlases, selected by the requested px like a proportional
+  size: the ISLAND (advance 6, 6x14 -- the bake is 0.5 em/advance, so the
+  mockup's "10 px Cornucopia" is nearest advance 6; advance 5 is unbaked and
+  below the box-glyph floor) for the document's mono, the GRID (advance 10)
+  for alt-screen and the pts geometry. `mono_cell()` keeps its grid meaning;
+  `island_cell()` is new.
+- A per-LINE class -- prompt / document / raw -- decided by ANNOTATION per
+  zone, not by zone kind: the welcome is zone-LESS but Beacon-rich (must be a
+  document); `cat` output sits INSIDE ut's output zone but is plain (must be
+  raw terminal content, the operator's sc3 ruling and HALCYON-VISUAL 7's
+  "preformatted output, terminal content"). Raw = the mono island with the
+  `.hal-out` chrome, char-wrapped like a terminal.
+- The composition per HALCYON-COMPOSITION 2-4 with CSS-COLLAPSING margins.
+  The PNG measures collapsed (hdr2 after the list opens 8 px, not 14; prose
+  after prose 2, not 4): the document's "4 px total" is the browser's
+  un-collapsed arithmetic. Line boxes are exactly the line-height (1.5 body,
+  1.25 headings -- Plex's 1.3-em content overflows a 1.25 box by a pixel, as
+  in the browser). The obj pill, the code ground, the rule at 8/8, the table
+  at 4/6, the `lr`-pair headerless table as the spread two-column list.
+- The herald. BEACON.md refuses layout/typography ops on sight, so NO `align`
+  key: `hdr class=title` names the heading's ROLE (a v1 amendment of the same
+  class as `em class=`); the stylesheet centres it with its 10-px top and
+  reads the `em class=dim` lines directly under it as its deck. The flag is
+  packed into the existing hdr byte so the 16-byte span slot is unchanged.
+- The welcome recomposed to the mockup's structure with LIVE facts only:
+  title, "Booted on aarch64 [from <root src>]" + "<MiB> physical memory ·
+  <N> cpus" (/ctl/memory, /ctl/cpu, /proc/self/ns), "Loaded systems" = joey's
+  children from /ctl/procs as name + dim pid, a pid object for the shell
+  (this process execs ut, so its pid IS the shell's), path objects, the keys,
+  a rule, the lineage line. The mockup's fictional numbers and keys were not
+  copied; the version number was dropped (none is introspectable).
+- Procedural box drawing on both cells: light arms 1 px, heavy a centred
+  band, DOUBLE = the outline of the union of bands (every corner and
+  junction gets its inner and outer contours for free; a single arm never
+  inks a double band's interior), blocks/shades/quadrants; arcs square.
+
+**What the first screendump found that no unit test could.** The welcome
+rendered as a document (proportional Plex, ranked italic headings, island-
+sized code grounds, obj pills, a centred title) -- and three structural gaps:
+the two-column list as misaligned prose, a phantom rule plus a blank band at
+the TOP of the tile, and the deck lines left-aligned. Root cause: the tile's
+transcript is FRAME-fed (KT-1 R5: the text is grid cells tagged with frame
+serials), so it captured a text-less table shell and an orphaned rule, which
+rendered ABOVE the live grid, while the live grid laid the table's plain
+realization proportionally. The same split silently broke `la`'s `pre` box in
+every session tile since PL-5 (the console path, byte-fed, never had it).
+Fix: KT-1 CELLS MODE -- the tag bits carry the structure (in a pre, in a
+table cell + its column, a rule precedes, the header row, in a prompt zone),
+the transcript registers table specs by open serial, and ONE placement
+routine rebuilds tables/rules/pre from tagged cells on both the live-grid and
+the scroll-off paths. The deck was left-aligned because the grid's unused
+columns rode along as untagged blanks (`trim_untagged_tail`).
+
+The second screendump found the rest: the tag bars and the status bar were
+missing because tapestryd's `role=chrome`/`role=status` gate admitted only
+the console renderer -- the per-user session compositor is not it, so D's
+chrome had failed at Create in every session boot ("GL-gated" in the
+handoff was the wrong explanation; the serial said `chrome for pane 3 failed
+Create`). The gate now also admits the declared session for a pane its
+principal owns (an occupied leaf's hosted surface's owner) and for the status
+bar while it hosts. And two tag-bit defects only the tile path could show: an
+empty zone-less block is DROPPED at the zone cut and its id REUSED by the
+prompt block that follows (`freeze_open`), so a block lookup classed the
+welcome as the prompt (the fix carries the prompt axis on the tag,
+`TAG_PROMPT`); and the rule bit died on the frame that directly followed the
+rule, since no cell sits between a rule and the next `em` open (the bit now
+rides an inline open and dies at any other op). Plex has no U+22A2, so the
+turnstile drew as tofu -- served from the island bake now.
+
+**Evidence.** Host: halcyond 138 (new: two mono sizes; procedural box glyphs
+on both cells; raw vs prompt vs doc; raw char-wrap; margin collapse; herald +
+deck; kv-list spread; the cells-mode rebuild on both paths incl. the rule
+carry-through and TAG_PROMPT; the title tag through the tile path), beacon
+37. Guest: three full bakes (`build.sh kernel` + the session lever, fresh
+pool each) and three headless HVF session boots driven by
+`scratchpad/session-shot.exp` (lib.exp login -> the welcome markers ->
+`tools/screendump.sh` per state -> `qmp-sendtext.sh` types the next state):
+welcome / raw `cat` / `ls` objects / the verb menu / nora. Verdict of the
+final round: MOCKUP-TRUE on the fourth dump (shots4/welcome.png): the herald and its deck centred and dim, the two-column list spread with right-aligned dim pids, ranked italic headings at 8/6-px openings, prose at 11.5/1.5 with obj pills and code grounds (a long island moved whole to the next line), the rule at 8/8, the dim lineage line, the 10-px prompt; both tiles carry their tag bars and the display its status bar (context + clock); `cat` output is a mono island with the .hal-out chrome; `ls` objects are pills; the verb menu opens at the document scale; nora keeps the grid cell on the alt screen.
+
+**Open at the boundary.** The Fable audit of the round (halcyond transcript/
+layout/raster + the tapestryd gate + the beacon sink -- all audit-bearing).
+The block-left rule of `.hal-block` is not drawn (the text inset is measured
+off the PNG instead). The tile's mark band on a rebuilt table row covers the
+whole table (prov maps rows to the table item). The hdr-table (`hdr=1`) row
+detection rides `TAG_ROW_HDR`; a header row that scrolled off before its
+body joins a plain-line block, not the table. MEMORY.md compacted under its
+read limit (aux's entries preserved as hooks; cold lines to the archive).
+
 ## Run 43 (main, 2026-09-07, Opus 4.8, effort MAX, operator present + granted full autonomy): three Halcyon chunks -- H-A fonts+type-model, H-D session chrome, F2 pts input-batching -- landed and pushed, with three wrong turns caught
 
 The operator picked A (fonts) at /effort max, clarified the face + weight rule

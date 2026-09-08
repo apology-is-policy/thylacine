@@ -16129,8 +16129,30 @@ impl Conn {
             }
             let host = match (role, bind) {
                 (Role::Content, None) => Host::Content { claim },
+                // The DECLARED session compositor (HALCYON.md 14.12, the
+                // user's rio) decorates ITS OWN tiles: a chrome bind is
+                // admitted from it only for a pane the session's principal
+                // owns (`pane_owner_principal`, the H-4b pane-authority
+                // axis) -- so a session can never overlay chrome on another
+                // client's pane, which is the exact threat the renderer gate
+                // closes; the renderer keeps its unconditional admission.
                 (Role::Chrome, Some(pid)) => {
-                    if !self.peer_is_renderer() {
+                    // An occupied leaf's owner is its hosted surface's; an
+                    // empty leaf's the recorded pane owner (H-4b-2).
+                    let admitted = self.peer_is_renderer()
+                        || match self.actor() {
+                            Actor::Session(p) => comp.layout.slot_of_id(pid).is_some_and(|slot| {
+                                comp.session_declared(self.conn_id)
+                                    && match comp.layout.leaf_surface(slot) {
+                                        Some(n) => {
+                                            comp.surf(n).is_some_and(|s| s.owner_principal == p)
+                                        }
+                                        None => comp.layout.pane_owner_principal(slot) == p,
+                                    }
+                            }),
+                            _ => false,
+                        };
+                    if !admitted {
                         return Err(p9::E_PERM);
                     }
                     Host::Chrome { bind: pid }
@@ -16138,9 +16160,15 @@ impl Conn {
                 // H-3d: the status bar takes no bind (its bind is the
                 // display); renderer-gated like every chrome -- an ungated
                 // status role would let any client carve the display and
-                // own the one bar that speaks for the system.
+                // own the one bar that speaks for the system. The declared
+                // session compositor is admitted while it HOSTS (the seat
+                // held only while hosting, as for the menu arm below): it
+                // took the display, so the bar that speaks for it is its
+                // own; an idle declarer carves nothing.
                 (Role::Status, None) => {
-                    if !self.peer_is_renderer() {
+                    if !self.peer_is_renderer()
+                        && !(comp.session_declared(self.conn_id) && comp.conn_hosts(self.conn_id))
+                    {
                         return Err(p9::E_PERM);
                     }
                     Host::Status
