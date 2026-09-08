@@ -459,6 +459,13 @@ accel="${THYLACINE_ACCEL:-$(detect_accel)}"
 #   THYLACINE_FULLSCREEN=1   the cocoa window full-screen: with
 #                             THYLACINE_GPU_RES at the panel's physical
 #                             pixel size the guest fills the display 1:1.
+#                             Pair both with THYLACINE_DISPLAY=gpu, not
+#                             cocoa: gpu is the production posture (gpu0
+#                             ALONE binds QemuConsole 0, the window opens
+#                             on it); cocoa keeps the vestigial gpu-mmio0
+#                             and opens on it, one View-menu switch away.
+#   (Every mode passes -parallel none: QEMU's virt machine otherwise mints
+#   a device-less `parallel0` virtual console that clutters the View menu.)
 #   THYLACINE_DISPLAY=vnc:N   serve the gpu0 console on 127.0.0.1:590N
 #                             (headless live-display; the ls-gfx-live #31
 #                             leg -- gpu-mmio0 is dropped so gpu0 binds
@@ -587,6 +594,7 @@ exec qemu-system-aarch64 \
     ${mouse_flags[@]+"${mouse_flags[@]}"} \
     ${display_flags[@]+"${display_flags[@]}"} \
     -serial "${THYLACINE_SERIAL:-mon:stdio}" \
+    -parallel none \
     ${qmp_flags[@]+"${qmp_flags[@]}"} \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \
     ${share_flags[@]+"${share_flags[@]}"} \
