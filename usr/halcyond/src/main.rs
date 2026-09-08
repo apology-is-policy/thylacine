@@ -741,10 +741,15 @@ pub extern "C" fn rs_main() -> i64 {
                 relayout = false;
                 chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe);
                 trail_painted = alloc::string::String::from(t.cwd());
-                // A relayout re-arms the status bar's mint retry (H-3d F5):
-                // a prior mint failure may now succeed, ChromeSet's cadence.
-                status.rearm();
             }
+            // The status bar's mint retry, UNCONDITIONALLY (TY-6 F8; it
+            // was inside the `relayout` arm above): a session taking the
+            // display's bar refuses this console's mint, and the console
+            // is not reliably fanned a relayout when the session ends --
+            // its own surface can hold one full-display rect across the
+            // whole session. Free while the bar is up (`rearm` returns at
+            // once), one refused mint per pass while it is down.
+            status.rearm();
             // The status feed: tell the compositor the console tile's last
             // exit (it draws the live hairline + shadow from it; the strip
             // re-reads it on the reconcile below). Rides the console

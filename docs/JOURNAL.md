@@ -96,6 +96,18 @@ paragraph: `the_cell_clips_the_diacritics_the_bake_clips` asserts the count
 is 26 and the depth is exactly one row, so it **fails the day the geometry
 is corrected**. A defect that can only be fixed loudly cannot be forgotten.
 
+*(Corrected in the same run by the TY-6 prosecutor's F4: "exactly one row"
+was measured at the shipping cell **only**, and the depth grows —
+`ceil(978a/500) − ceil(889a/500)` is 1 row at 100–150%, **2 at 175% and
+200%**, 4 at the largest bake. Worse, the one-cell pin was structurally
+blind to a second, *descender* clip: it is zero at advance 6 and worst at
+**150%**, where it takes 19 glyphs — not even at the largest cell, so no
+amount of checking the extreme would have found it. I published that number
+in four places. The pin now runs the measured pairs at every reachable
+advance. The lesson generalizes past this bug: **a pin that only ever looks
+where a quantity is smallest will report the quantity as smallest**, and it
+will look exactly as green while doing it.)*
+
 **The sabotage that found the hole in my own tests.** Five sabotages, one
 per new assertion. Four behaved: floor-instead-of-ceil geometry (caught by
 five tests), the stroke silently dropped from the cell (caught by one), the

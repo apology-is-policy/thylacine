@@ -222,11 +222,24 @@ pub const CHROME_OBJ: u8 = 2;
 /// way and laying the other is how a right-aligned run drifts off its
 /// edge and a table column comes up a pixel short -- the two must share
 /// an accumulator, not merely agree in spirit.
+///
+/// That includes the KERN `lay_span` folds into each step. It is zero for
+/// every pair today (nothing reads a pair table), so this term changes no
+/// current measurement -- but a measure that omits a term the lay adds is
+/// the drift above, waiting for the shaper to arrive. Held here so the
+/// GPOS seam lands without a second bug.
 fn run_width(gs: &mut GlyphSource, face: u8, px: f32, chars: impl Iterator<Item = char>) -> i32 {
     let mut q = 0i32;
+    let mut prev: Option<char> = None;
     for ch in chars {
+        if let Some(p) = prev {
+            if face != FACE_MONO {
+                q += gs.kern(face, px, p, ch) * GlyphSource::PEN_SCALE;
+            }
+        }
         if let Some(a) = gs.advance_fx(face, px, ch) {
             q += a;
+            prev = Some(ch);
         }
     }
     q.div_euclid(GlyphSource::PEN_SCALE)
@@ -960,7 +973,6 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
         let lines_before = lb.lines.len();
         lb.x0 = sheet.pad_x;
         lb.pen_x = sheet.pad_x;
-    lb.pen_q = 0;
         lb.pen_q = 0;
         lb.center = false;
         lb.line_class = LineClass::Doc;

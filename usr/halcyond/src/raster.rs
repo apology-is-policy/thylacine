@@ -141,7 +141,10 @@ pub fn mono_advances(pct: u16) -> (u8, u8) {
 /// eighth would round to a whole pixel -- i.e. to the NEXT pixel's phase
 /// 0 -- and moving the glyph there would desynchronise it from the whole
 /// pen the executor reconstructs, so it is clamped instead. The cost is
-/// bounded and unaccumulated: at most 1/8 px, on that one glyph.
+/// bounded and unaccumulated, and it is NOT uniform: 1/8 px across the
+/// unclamped band (remainders 0..223), rising through the clamped tail to
+/// **0.246 px at remainder 255** -- measured over the whole domain at
+/// TY-6 F5, which found this comment claiming 1/8 everywhere.
 #[inline]
 pub fn phase_of(rem_256: i32) -> u8 {
     (((rem_256 + 32) / 64).clamp(0, 3)) as u8
@@ -259,10 +262,24 @@ pub struct GlyphSource {
     evict_pages: usize,
 }
 
-/// The cache key's size quantum: half pixels.
+/// The cache key's size: the EXACT bits of the requested px.
+///
+/// It was a half-pixel quantum until TY-6 F2, justified by "the stylesheet
+/// speaks whole px today" -- which was false when it was written. The exit
+/// badge lays at `body_px * 0.9` (10.35 at 100%) and the chrome/menu name
+/// at 10.5; both quantized to 21, so ONE cache entry served both and the
+/// raster each got was whichever painted first -- re-decided at every
+/// regen, and flipping with whether a failed command happened to be on
+/// screen. The same collision at 125% (12.9375 and 13.125 -> 26).
+///
+/// Exact bits cannot alias. Two sizes that differ only below the float's
+/// resolution are the same size. The cost is that two NEARLY equal sizes
+/// no longer share entries, which is bounded: the live set is whatever the
+/// sheet names for one scale, a handful of sizes, and a scale change
+/// regens the store anyway.
 #[inline]
 fn size_q(px: f32) -> u32 {
-    (px * 2.0 + 0.5) as u32
+    px.to_bits()
 }
 
 impl GlyphSource {
@@ -443,10 +460,12 @@ impl GlyphSource {
             return Some(self.mono_cell_at(px).w);
         }
         let f = self.faces.get(face as usize)?;
-        if !f.has(ch) && ch != '\u{FFFD}' && self.mono_has(ch) {
+        // One charmap query, not two (TY-6 F9): `has` IS `glyph_id != 0`.
+        let gid = f.glyph_id(ch);
+        if gid.to_u32() == 0 && ch != '\u{FFFD}' && self.mono_has(ch) {
             return Some(self.island.w);
         }
-        Some((f.advance(f.glyph_id(ch), px) + 0.5) as i32)
+        Some((f.advance(gid, px) + 0.5) as i32)
     }
 
     /// The FRACTIONAL advance of `ch` at `px` in `face` -- what a
@@ -482,6 +501,11 @@ impl GlyphSource {
     /// A glyph the atlas cannot serve is skipped WITHOUT advancing the
     /// pen, which is what these callers did before and what keeps a
     /// refused glyph from opening a hole in the run.
+    ///
+    /// The KERN is folded into the preceding glyph's step, exactly as the
+    /// transcript's own lay loop does. Zero for every pair today, so it
+    /// moves nothing -- it is here so the GPOS seam cannot land a shaper
+    /// that the chrome strip, the status bar and the menu silently ignore.
     pub fn shape_run(
         &mut self,
         face: u8,
@@ -490,10 +514,27 @@ impl GlyphSource {
     ) -> (Vec<GlyphRef>, i32) {
         let mut refs: Vec<GlyphRef> = Vec::new();
         let (mut rem, mut width) = (0i32, 0i32);
+        let mut prev: Option<char> = None;
         for ch in chars {
             let Some(aq) = self.advance_fx(face, px, ch) else {
                 continue;
             };
+            if let Some(p) = prev {
+                if face != FACE_MONO {
+                    // The kern belongs to the PRECEDING glyph's step, which
+                    // is already pushed -- fold it into that ref's advance
+                    // and into the running width, so the pen and the
+                    // returned width stay the same number.
+                    let k = self.kern(face, px, p, ch);
+                    if k != 0 {
+                        if let Some(last) = refs.last_mut() {
+                            last.advance += k;
+                        }
+                        width += k;
+                    }
+                }
+            }
+            prev = Some(ch);
             let total = rem + aq;
             let step = total.div_euclid(Self::PEN_SCALE);
             if let Some(g) = self.glyph_at(face, px, ch, phase_of(rem)) {
@@ -510,10 +551,15 @@ impl GlyphSource {
             return Some(self.mono_cell_at(px).w as f32);
         }
         let f = self.faces.get(face as usize)?;
-        if !f.has(ch) && ch != '\u{FFFD}' && self.mono_has(ch) {
+        // One charmap query, not two (TY-6 F9). This is the MEASUREMENT
+        // path -- every laid glyph and every pre-measure comes through it,
+        // uncached since TY-3b -- so the doubled lookup was paid per glyph
+        // per lay, measured at 2.4x the cached integer path.
+        let gid = f.glyph_id(ch);
+        if gid.to_u32() == 0 && ch != '\u{FFFD}' && self.mono_has(ch) {
             return Some(self.island.w as f32);
         }
-        Some(f.advance(f.glyph_id(ch), px))
+        Some(f.advance(gid, px))
     }
 
     /// Whether the system mono face carries `ch` -- the test the
@@ -599,9 +645,18 @@ impl GlyphSource {
             // path has. Since TY-4 it carries the same stroke as the cells
             // beside it rather than being the only stroked thing in the
             // grid.
+            //
+            // It goes through the SAME clipper as a Cornucopia cell. It
+            // did not until TY-6 F1: it packed the proportional glyph's
+            // own tight raster with its own bearing and then returned the
+            // cell's advance, so a wide glyph overhung its neighbour --
+            // measured at 80 of 121 Greek/Cyrillic entries at 200%, the
+            // worst by 11 px, nearly a whole extra cell. The clip is the
+            // contract this arm was quietly outside of.
             let f = self.faces.get(FACE_BODY as usize)?;
-            let r = f.raster(f.glyph_id(ch), (chh - 4) as f32, self.smooth_mem, 0);
-            let id = self.packer.insert(r.w, r.h, &r.alpha, r.left, r.top)?;
+            let fallback = MonoCell { em: (chh - 4) as f32, ..cell };
+            let alpha = mono_cell_alpha(f, f.glyph_id(ch), fallback, smooth);
+            let id = self.packer.insert(cw as u32, chh as u32, &alpha, 0, base)?;
             self.cache.insert(key, Cached { id, advance: cw });
             return Some(GlyphRef {
                 glyph: id,
@@ -614,7 +669,9 @@ impl GlyphSource {
         // than as Plex's .notdef box: Cornucopia carries the prompt glyph by
         // design, and a symbol at the island cell reads as the symbol, not
         // as tofu. Still None for a glyph neither has (the .notdef box then).
-        if !f.has(ch) && ch != '\u{FFFD}' && self.mono_has(ch) {
+        // One charmap query for the whole path (TY-6 F9).
+        let gid = f.glyph_id(ch);
+        if gid.to_u32() == 0 && ch != '\u{FFFD}' && self.mono_has(ch) {
             let cell = self.island;
             let smooth = self.smooth_mem;
             let alpha = self
@@ -632,7 +689,6 @@ impl GlyphSource {
                 });
             }
         }
-        let gid = f.glyph_id(ch);
         let r = f.raster(gid, px, self.smooth_mem, phase);
         let id = self.packer.insert(r.w, r.h, &r.alpha, r.left, r.top)?;
         let advance = (f.advance(gid, px) + 0.5) as i32;
@@ -1588,6 +1644,81 @@ mod tests {
         assert_eq!(mono_advances(u16::MAX), (MONO_ADVANCE_MAX, MONO_ADVANCE_MAX));
     }
 
+    // TY-6 F1: the mono tier's THIRD arm -- a codepoint neither Cornucopia
+    // nor the procedural box path has, rasterized from the body face -- has
+    // to keep the cell contract too. It did not: it packed the
+    // proportional glyph's own tight raster with its own bearing and then
+    // returned the cell's advance, so the ink overhung into the next
+    // cell's columns and was blended under that cell's glyph. Measured at
+    // 80 of 121 Greek/Cyrillic entries at 200%, worst 11 px.
+    #[test]
+    fn the_mono_fallback_is_clipped_to_its_cell_like_every_other_arm() {
+        for pct in [100u16, 200] {
+            let mut gs = GlyphSource::new_vendored(512);
+            gs.set_scale(pct);
+            gs.set_smooth(12);
+            let (cw, chh, base) = gs.mono_cell();
+            let mut checked = 0;
+            // Greek + Cyrillic: outside the 208-glyph subset, outside
+            // U+2500-259F, so both earlier arms miss and this one fires.
+            for ch in ['\u{0416}', '\u{0424}', '\u{0429}', '\u{03A9}', '\u{03BE}'] {
+                let g = gs.glyph(FACE_MONO, MONO_GRID_PX, ch).expect("served");
+                let e = gs.packer.store.glyphs[g.glyph as usize];
+                assert_eq!(
+                    (e.w as i32, e.h as i32),
+                    (cw, chh),
+                    "{pct}% {ch:?}: the entry must BE the cell, not the glyph's own box"
+                );
+                assert_eq!((e.left, e.top), (0, base), "{pct}% {ch:?}: the cell's bearing");
+                assert_eq!(g.advance, cw, "{pct}% {ch:?}: the cell's advance");
+                checked += 1;
+            }
+            assert_eq!(checked, 5, "the fallback arm actually fired");
+        }
+    }
+
+    // TY-6 F2: the cache key must separate two sizes the stylesheet
+    // actually asks for. The exit badge lays at `body_px * 0.9` and the
+    // chrome/menu name at NAME_PX; under the old half-pixel quantum both
+    // landed on one entry at 100% (10.35 and 10.5 -> 21) and at 125%
+    // (12.9375 and 13.125 -> 26), so the raster each got was whichever
+    // painted first -- and which that was flipped with whether a failed
+    // command was on screen.
+    #[test]
+    fn two_sizes_the_stylesheet_asks_for_never_share_one_entry() {
+        for pct in [100u16, 125, 150, 175, 200] {
+            let mut gs = GlyphSource::new_vendored(512);
+            gs.set_scale(pct);
+            let sheet = crate::layout::daylight_sheet(pct);
+            let badge = sheet.body_px * 0.9;
+            let name = sheet.px(crate::chrome::NAME_PX);
+            assert!(badge != name, "{pct}%: the two sizes differ in the first place");
+            let a = gs.glyph(FACE_BODY, badge, 'W').unwrap();
+            let b = gs.glyph(FACE_BODY, name, 'W').unwrap();
+            assert_ne!(
+                a.glyph, b.glyph,
+                "{pct}%: {badge} and {name} must not share an atlas entry"
+            );
+        }
+    }
+
+    // TY-6 F3: `shape_run` folds the kern into the PRECEDING glyph's step,
+    // so the width it returns is the sum of the advances it returns. Zero
+    // for every pair today (no pair table is read), so this pins the
+    // internal consistency the kern arm must preserve when a GPOS shaper
+    // lands -- a kern added to the width but not to a ref, or the reverse,
+    // walks the run off its own reported edge.
+    #[test]
+    fn shape_runs_width_is_the_sum_of_the_advances_it_returns() {
+        let mut gs = GlyphSource::new_vendored(512);
+        for (face, px) in [(FACE_BODY, 11.5f32), (FACE_BODY_BOLD, 17.5), (FACE_MONO, MONO_ISLAND_PX)] {
+            let (refs, width) = gs.shape_run(face, px, "Wave AV To ff 123".chars());
+            assert!(!refs.is_empty(), "the run shaped something");
+            let sum: i32 = refs.iter().map(|r| r.advance).sum();
+            assert_eq!(sum, width, "face {face}: the width IS the steps");
+        }
+    }
+
     // THE WIRING, which the tests above do NOT cover: they call
     // `mono_cell_alpha` and `MonoCell::derive` directly, so they prove the
     // functions and not that `glyph_at` reaches them. Sabotage-measured:
@@ -1754,43 +1885,73 @@ mod tests {
     // atlases re-baked, the row pitch chased downstream -- its own chunk;
     // memory `bug-mono-cell-clips-every-accented-capital`). That is the
     // right moment to update these numbers, and it cannot happen silently.
+    //
+    // IT RUNS AT EVERY REACHABLE CELL, because TY-6 F4 caught this test
+    // asserting "exactly one row, never more" from the shipping cell alone
+    // -- and the depth is `ceil(978a/500) - ceil(889a/500)`, which GROWS:
+    // two rows at 175% and 200%, four at the largest bake. Worse, the
+    // one-cell version could not see the DESCENDER clip at all, since it
+    // is zero at advance 6 and worst (19 glyphs) at 150% -- not even at
+    // the largest cell. A pin that only ever looks where the number is
+    // smallest reports the number as smallest.
     #[test]
     fn the_cell_clips_the_diacritics_the_bake_clips() {
         let f = Face::parse(cornucopia::SUBSET_TTF).expect("the subset parses");
         let atlas = cornucopia::Atlas::for_advance(cornucopia::DEFAULT_ADVANCE);
-        let cell = MonoCell::derive(&f, MONO_ISLAND_ADVANCE).expect("the shipping cell");
-        let (mut clipped, mut deepest) = (0u32, 0i32);
-        for cp in 0u32..0x2600 {
-            let Some(ch) = char::from_u32(cp) else { continue };
-            if atlas.glyph(ch).is_none() {
-                continue;
+        // (advance, top rows lost, glyphs losing them, bottom rows lost,
+        // glyphs losing those) -- measured 2026-09-08 at every advance the
+        // scale table reaches, plus the largest bake.
+        let table = [
+            (6u8, 1i32, 26u32, 0i32, 0u32),
+            (8, 1, 26, 1, 3),
+            (9, 1, 26, 1, 19),
+            (11, 2, 26, 0, 0),
+            (12, 2, 26, 1, 3),
+            (20, 4, 26, 1, 3),
+        ];
+        for (advance, want_top, want_top_n, want_bot, want_bot_n) in table {
+            let cell = MonoCell::derive(&f, advance).expect("a cell");
+            let (mut top_n, mut top_d) = (0u32, 0i32);
+            let (mut bot_n, mut bot_d) = (0u32, 0i32);
+            for cp in 0u32..0x2600 {
+                let Some(ch) = char::from_u32(cp) else { continue };
+                if atlas.glyph(ch).is_none() {
+                    continue;
+                }
+                // Unstroked, so this measures the GEOMETRY, not the stroke.
+                let r = f.raster(f.glyph_id(ch), cell.em, 0, 0);
+                let a = mono_cell_alpha(&f, f.glyph_id(ch), cell, 0);
+                assert_eq!(
+                    a.len(),
+                    (cell.w * cell.h) as usize,
+                    "adv {advance} {ch:?}: the buffer IS the cell -- containment \
+                     holds even where ink is lost"
+                );
+                if r.w == 0 {
+                    continue;
+                }
+                let above = r.top - cell.baseline;
+                if above > 0 {
+                    top_n += 1;
+                    top_d = top_d.max(above);
+                }
+                let below = (cell.baseline - r.top + r.h as i32) - cell.h;
+                if below > 0 {
+                    bot_n += 1;
+                    bot_d = bot_d.max(below);
+                }
+                // Nothing escapes horizontally without the stroke, at any cell.
+                assert!(r.left >= 0, "adv {advance} {ch:?}: ink left of the cell");
+                assert!(
+                    r.left + r.w as i32 <= cell.w,
+                    "adv {advance} {ch:?}: ink right of the cell"
+                );
             }
-            // Unstroked, so this measures the geometry and not the stroke.
-            let r = f.raster(f.glyph_id(ch), cell.em, 0, 0);
-            let a = mono_cell_alpha(&f, f.glyph_id(ch), cell, 0);
-            assert_eq!(
-                a.len(),
-                (cell.w * cell.h) as usize,
-                "{ch:?}: the buffer IS the cell -- containment holds even where ink is lost"
-            );
-            if r.w == 0 {
-                continue;
-            }
-            let above = r.top - cell.baseline; // rows of ink above the cell
-            if above > 0 {
-                clipped += 1;
-                deepest = deepest.max(above);
-            }
-            // Nothing escapes horizontally without the stroke, and nothing
-            // falls out of the bottom at this cell.
-            assert!(r.left >= 0, "{ch:?}: ink left of the cell");
-            assert!(
-                r.left + r.w as i32 <= cell.w,
-                "{ch:?}: ink right of the cell"
-            );
+            assert_eq!(top_n, want_top_n, "adv {advance}: glyphs clipped at the top");
+            assert_eq!(top_d, want_top, "adv {advance}: rows lost at the top");
+            assert_eq!(bot_n, want_bot_n, "adv {advance}: glyphs clipped at the bottom");
+            assert_eq!(bot_d, want_bot, "adv {advance}: rows lost at the bottom");
         }
-        assert_eq!(clipped, 26, "the accented capitals plus (R)");
-        assert_eq!(deepest, 1, "exactly one row, never more");
     }
 
     // `set_scale` selects the bakes `mono_advances` names, the cells follow

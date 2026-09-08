@@ -109,6 +109,13 @@ pub fn phase_dx(phase: u8) -> f32 {
 /// How many distinct horizontal phases a glyph can be rasterized at.
 pub const PHASES: u8 = 4;
 
+/// The largest em `mono_cell` will hand back. A monospace cell's em is a
+/// small multiple of its advance (2x for Cornucopia), and the advance is
+/// capped at `raster::MONO_ADVANCE_MAX`; this is well clear of that and
+/// well inside a packer page, so it bounds the raster allocation without
+/// being reachable by any real cell.
+const EM_MAX: f32 = 512.0;
+
 fn render(cmds: &[zeno::Command], style: zeno::Style, dx: f32) -> (Vec<u8>, zeno::Placement) {
     let mut m = zeno::Mask::new(cmds);
     m.origin(zeno::Origin::TopLeft);
@@ -198,7 +205,17 @@ impl Face {
         // the cell width. Cornucopia's advance is half its em, so this is
         // 2x the cell width -- derived, not assumed, so a re-cut font with
         // a different ratio still lands in its cell.
+        //
+        // BOUNDED, because it sizes an allocation: `mono_cell_alpha` asks
+        // zeno for a raster at this em BEFORE the packer gets to refuse an
+        // oversize one, so a font whose 'x' advance is tiny against its
+        // upem would allocate first and be rejected after. The face is a
+        // build input and cannot be hostile today; this is one comparison
+        // on a path whose whole purpose is to be bounded.
         let em = a as f32 * self.upem as f32 / units as f32;
+        if !(em > 0.0) || em > EM_MAX {
+            return None;
+        }
         Some((cell_h as i32, baseline as i32, em))
     }
 

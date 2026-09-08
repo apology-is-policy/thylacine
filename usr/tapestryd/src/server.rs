@@ -16094,7 +16094,29 @@ impl Conn {
                     comp.session_conns.push((self.conn_id, self.peer_principal));
                     say!("tapestryd: session declared by conn {}", self.conn_id);
                 }
-                "off" => comp.session_conns.retain(|&(c, _)| c != self.conn_id),
+                "off" => {
+                    comp.session_conns.retain(|&(c, _)| c != self.conn_id);
+                    // The mirror of the declare above, and TY-6 F7: a seat
+                    // that gives the display back must give the display's
+                    // status bar back with it. Without this the departing
+                    // session's bar outlives its seat -- `session_conns`
+                    // is empty so the E_PERM refusal lifts, but
+                    // `comp.status` still names the live surface, so the
+                    // console's re-mint is E_INVAL for the life of that
+                    // conn and the bar stops following the display in
+                    // exactly the shape this rule exists to prevent.
+                    // (`retire_conn` already covers the ordinary logout;
+                    // this is the conn that stays alive.)
+                    if let Some(st) = comp.status {
+                        if comp.surf(st.n).is_some_and(|s| s.owner_conn == self.conn_id) {
+                            say!(
+                                "tapestryd: session release retires its status bar (surface {})",
+                                st.n
+                            );
+                            comp.retire(st.n);
+                        }
+                    }
+                }
                 _ => return Err(p9::E_INVAL),
             }
             comp.reconcile();

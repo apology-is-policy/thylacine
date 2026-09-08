@@ -1541,6 +1541,11 @@ pub fn run(home: Option<String>) -> i64 {
                     t.trail_painted = String::from(t.tile.scrollback.cwd());
                 }
             }
+            // Unconditionally, like the console path (TY-6 F8): free while
+            // the bar is up, and a session whose first mint raced the
+            // console's retire must not then wait on a relayout it may
+            // never be fanned.
+            status.rearm();
             status.ensure(&sheet);
             status.pump();
             let focused_leaf = chrome.focused().map(|(id, _, _)| *id);

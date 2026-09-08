@@ -69,10 +69,20 @@ impl StatusBar {
         }
     }
 
-    /// Re-arm the mint retry: called on a relayout (the compositor/display
-    /// state changed, so a prior failure may now succeed) -- the retry
-    /// cadence ChromeSet gets for free from reconcile. A no-op once the bar
-    /// is up.
+    /// Re-arm the mint retry: a prior failure may now succeed. A no-op
+    /// once the bar is up, so calling it every pass costs nothing.
+    ///
+    /// It used to be called ONLY under `if relayout`, which TY-6 F8 showed
+    /// is not a signal the console reliably gets: a declared session takes
+    /// the display's bar, the console's `ensure` is refused once, says so
+    /// once, and then waits for a relayout that may never arrive -- the
+    /// console's own surface can keep an unchanged full-display rect across
+    /// the whole session, so nothing fans it a CONFIGURE at either edge.
+    /// The failure mode was a display with no status bar and no further
+    /// word about it. Now the caller re-arms unconditionally: the guard
+    /// above already makes it free while the bar is up, and the cost while
+    /// it is down is one refused mint per pass -- which is the retry this
+    /// was always supposed to be.
     pub fn rearm(&mut self) {
         if self.surf.is_none() {
             self.want_mint = true;

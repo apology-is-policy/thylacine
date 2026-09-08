@@ -477,7 +477,12 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
   `usWinDescent` (889 / 208), but Cornucopia's true ink reaches
   `head.yMax` 978 and `yMin` −220 — 89 units short above, 1.07 px at the
   shipping advance — so **all 26 accented Latin-1 capitals plus ® lose the
-  top row of their diacritic**. The bake clips the identical row (baked
+  top of their diacritic**. The depth is `ceil(978a/500) − ceil(889a/500)`
+  and it GROWS with the cell: one row at 100–150%, **two at 175% and 200%,
+  four at the largest bake** — and there is a second, *descender* clip
+  (zero at the shipping cell, worst at 150% where it takes 19 glyphs).
+  TY-6 F4 caught the first version of this paragraph, and the test under
+  it, claiming "exactly one row, never more" from the shipping cell alone. The bake clips the identical row (baked
   'Ã' ink 14011 against the live clipped raster's 13844, 1.2% apart, which
   is scanline-vs-zeno), so Aurora, the kernel trusted sink and Halls have
   rendered it that way since G-4. Fixing it means `head.yMax/yMin` in both
