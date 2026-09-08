@@ -22,6 +22,65 @@ needed the operator.
 
 
 ---
+## 2026-09-08 (aux, run 6 continued, post-self-compact) -- the sub-shell-input fix VERIFIED on real ARM silicon; the Pi made an E2E offload host; an orthogonal logout stall proven + tracked
+
+**What landed.** The IM-5 sub-shell-input fix (`imperium`'s elevated sub-shell EOF'd
+at birth on the serial console). Fix: a new `is_console_passthrough` category +
+`exec_external_passthrough` (Inherit fd 0/1/2, PROMPT discipline left untouched,
+plain by-pid wait -- NOT the RAW dance, NOT wait_pids_interruptible; forwarding a
+Ctrl-C to the wrapper would sweep the propagating scope, I-25). The candidate in
+the prior handoff (route through `is_raw_command`) was WRONG and rejected after
+reading the console model: RAW is `-isig -onlcr`, but a sub-shell wants `+onlcr`
+(else its children staircase) and `+isig` (the ut prompt read services Ctrl-C as
+the `interrupt` note, not a raw byte). IMPERIUM-DESIGN 11.6 refinement 10.
+
+**The mac couldn't verify it -- so the Pi became an E2E host.** The 8 GB mac, with
+two Claude sessions + build caches, could not fit a 2 GB guest: the E2E stalled at
+boot three times (qemu swapped to ~14 MB RSS, free ~15 MB) even after the operator
+freed memory. NOT the harness bg-killer alone -- a hard memory wall. Operator
+authorized offloading QEMU to thyla-pi (4 GB/KVM, idle). Making the interactive
+harness run there took FOUR portability fixes, each a real BSD-vs-Linux gap:
+run-vm.sh (an hvf pin -> `detect_accel` fallback to kvm), test-interactive.sh (the
+BSD `script -q <file> <cmd>` vs util-linux `script -q -e -c "<cmd>" <file>`, where
+`-e` propagates the child exit the PASS/FAIL contract reads), test-serial-bridge.py
+(preflight #4 asserted macOS SO_SNDBUF semantics; Linux AF_UNIX is receiver-rcvbuf
+governed, so the sndbuf-widening is inert -- the real capacity is the app spool,
+test #1, which passes; made #4 informational on Linux), and the LS-CI fixtures
+(warp-host.sh sync ships pool.img but not the .baked-snapshot + system.key set;
+shipped + derived them). RESULT: **ls-imperium arms 0-5 ALL PASS on real ARM KVM**
+-- arm 1 (confer -> SAK -> provincia -> key -> the elevated sub-shell opens +
+`imperium --list` runs INSIDE it) and arm 3 (abdicate teardown, I-25) are the
+fix's proof.
+
+**The orthogonal stall, proven not-mine (the reusable part).** ls-imperium arm 6
+(logout michael -> login cora, to test cora's ineligibility) STALLS: no login
+prompt within 540s after `exit`. The discipline forbids waving it off, so I
+attributed it three ways rather than assume: (1) dev-accounts.exp (base
+logout->login, NO imperium) PASSES on the Pi in 105s -> it's a real STALL, not
+SD-slowness, and the Pi is fast; (2) a 3-probe bisection of ls-imperium had ALL
+probes pass incl. "reads before exit" -> michael's ut reads the console fine, the
+`exit`->getty-respawn chain hangs SILENTLY; (3) the DECISIVE test the operator
+asked for -- a note-draining passthrough variant -- did NOT clear it, PROVING the
+stall is orthogonal to my passthrough (it lives in the exit->getty / SAK-episode
+chain, existing code the imperium SESSION triggers). So: the fix is committed with
+its passthrough as the minimal plain-wait; ls-imperium is scoped to the green arms
+0-5 (arm 6's cross-user re-login deferred -- corvus ineligibility is already
+covered by joey's PRINCIPAL_SYSTEM probe + the IM-3 tests); the logout stall is a
+tracked follow-up needing proc-state at the hang. A wrong turn caught: I first
+inferred "console-read broken" from a missing exit echo; the probe overturned it
+(read is fine) -- the end-state told a different story than the missing-output did.
+
+**Coordination.** A Pi build/ slot collision (main's GL-round sync vs mine) --
+main aborted its sync cleanly (my per-chunk md5 verify confirmed no damage); we
+agreed to `hold pi` before any Pi sync henceforth, and I held it for the last run.
+
+**Cost note, for the next Pi iteration.** A non-PRESERVE rebake RE-KEYS the pool
+(system.key + pool.img ciphertext change), forcing a full paired re-sync (ramfs +
+pool + key). The pool is sparse (~362 MB actual of 2.5 GB), so it's ~minutes not
+~half an hour, but bake with THYLACINE_MKFS_PRESERVE=1 to keep the key stable and
+make future changes ramfs-only syncs.
+
+---
 ## 2026-09-08 (aux, run 6 continued) -- IM-5: the E2E + the batched holotype; a full-diversity review, and the bug the E2E caught that the review approved
 
 **What landed.** IM-5 (`IMPERIUM-DESIGN.md` §11.8): `tools/interactive/ls-imperium.exp`

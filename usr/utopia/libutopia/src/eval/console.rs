@@ -143,6 +143,23 @@ pub fn is_raw_command(argv0: &str) -> bool {
     matches!(base, "nora" | "ptyhost" | "prowl" | "quarry")
 }
 
+/// Whether `argv0` names a console-PASSTHROUGH wrapper: a thin foreground command
+/// that launches an interactive SUB-SHELL and so must be handed the console
+/// (Inherit fd 0/1/2) instead of the console path's Piped-drop stdin -- otherwise
+/// the sub-shell inherits a write-closed pipe on fd 0 and exits at birth on EOF
+/// (IM-4). Distinct from `is_raw_command`: the child is a shell, NOT a full-screen
+/// TUI, so it keeps the outer shell's PROMPT discipline (`+onlcr` for its
+/// children's output; `-icanon -echo` for its own line editor; `+isig` so the ut
+/// prompt read still cooks Ctrl-C to the `interrupt` note the shell services) --
+/// the RAW-mode dance (`-isig -onlcr`) would be wrong twice over. Matches on the
+/// BASENAME so `/bin/imperium` and a bare `imperium` both qualify. v1.0 carries a
+/// single member (`imperium`, the elevation sub-shell); the same self-declaring-
+/// binary seam noted on `is_raw_command` (a spawn flag / on-disk manifest) applies.
+pub fn is_console_passthrough(argv0: &str) -> bool {
+    let base = argv0.rsplit('/').next().unwrap_or(argv0);
+    matches!(base, "imperium")
+}
+
 // === PTY-4b: pts detection (the session-dance trigger) ===
 
 /// The ptyfs endpoint-qid contract (PTY-DESIGN section 5, the documented
@@ -228,5 +245,21 @@ mod tests {
         assert!(!is_raw_command("noragami")); // basename must match exactly
         assert!(!is_raw_command("nora.bak"));
         assert!(!is_raw_command(""));
+    }
+
+    #[test]
+    fn is_console_passthrough_matches_imperium_by_basename() {
+        // IM-4: the elevation sub-shell wrapper needs Inherit stdin, PROMPT
+        // discipline (NOT the RAW dance).
+        assert!(is_console_passthrough("imperium"));
+        assert!(is_console_passthrough("/bin/imperium"));
+        assert!(!is_console_passthrough("imperiumx")); // basename must match exactly
+        assert!(!is_console_passthrough("ut"));
+        assert!(!is_console_passthrough(""));
+        // The two console-child sets are DISJOINT: a raw TUI is never a
+        // passthrough wrapper and vice versa (the exec_external dispatch relies
+        // on this -- it checks is_raw_command first, then is_console_passthrough).
+        assert!(!is_console_passthrough("nora"));
+        assert!(!is_raw_command("imperium"));
     }
 }

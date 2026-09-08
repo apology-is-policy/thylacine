@@ -761,6 +761,33 @@ here so the operator can veto any of them:**
 9. **The tool re-checks the grant is not wider than requested** before redeeming
    (`granted & !self_restrict == 0`) -- defense in depth; corvus already bounds
    it, but the tool re-verifies its own request.
+10. **The sub-shell needs the console as a PASSTHROUGH, not the RAW dance
+    (E2E-caught at IM-5, 2026-09-08).** The bug: on the serial console (no job
+    control) the outer `ut` gives a foreground external a Piped-drop stdin (an
+    ordinary child does not read the console), so `imperium`'s fd 0 is a
+    write-closed pipe; it hands that to the spawned `ut` (`Stdio::Inherit`), whose
+    first prompt read hits EOF and exits AT BIRTH. The candidate fix (route
+    `imperium` through the existing `is_raw_command` TUI dance) is WRONG: that
+    flips the console to RAW (`-isig -onlcr`), but the sub-`ut` is a shell, not a
+    full-screen TUI -- it wants `+onlcr` (else its children's `\n` staircases on an
+    honest renderer) and relies on `+isig` (the ut prompt read services Ctrl-C as
+    the `interrupt` note, it does not read a raw `0x03`). The fix is a new
+    `is_console_passthrough` category (`libutopia::eval::console`): on the non-jc
+    console path only, `exec_external_passthrough` hands `imperium` fd 0/1/2 via
+    Inherit, leaves the outer shell's PROMPT discipline UNTOUCHED (the sub-`ut`,
+    spawned with no `--consctl-fd`, runs in the inherited mode), and waits PLAINLY
+    -- NOT `wait_pids_interruptible`, because forwarding a Ctrl-C to the wrapper
+    would terminate it and sweep the whole propagating scope (I-25). The jc/pts
+    path already hands a foreground child Inherit stdin, so a pts sub-shell already
+    worked; pipeline / redirect invocations (`imperium ... | cat`, `... > f`)
+    never reach the passthrough, so the tool's own fd-1 tty check still fails them
+    fast (refinement 5). **Known v1.x gap:** because the console OWNER stays the
+    outer `ut` (ownership is a single global Proc, not transferred to a child),
+    Ctrl-C typed at the sub-shell prompt posts `interrupt` to the OUTER shell and
+    is dropped -- inert at the sub-shell prompt. Full Ctrl-C would need
+    console-ownership transfer to the sub-shell (an I-27-adjacent kernel change);
+    the sub-shell is fully usable without it (line editor, children, correct
+    output; `exit`/`abdicate` and the SAK are the escape hatches).
 
 ### 11.7 Honest scope
 
