@@ -1250,11 +1250,20 @@ impl Transcript {
 
     fn point_op(&mut self, op: Op, args: &[wire::Arg]) {
         // PL-1b: a `pre` block contains only inline em/obj + text; a stray
-        // point op (mark/rule) inside it is malformed -- ignore it (the
-        // containment guard, mirroring open_op/close_op). Prevents a rule from
-        // interleaving into the block or freezing it mid-accumulation.
+        // point op inside it is malformed (the containment guard, mirroring
+        // open_op/close_op). A RULE is refused: it would interleave into the
+        // block or freeze it mid-accumulation. A MARK is the SHELL's, not the
+        // program's: a `cmd` or `exit` mark arriving inside an open pre means
+        // the program died between its open and its close, so the mark ENDS
+        // the pre (finalized as-is, the abandoned-capture posture) and then
+        // lands -- else a crashed command never keyed the tile or the bar,
+        // which showed the PREVIOUS command's state.
         if self.pre.is_some() {
-            return;
+            let shells = op == Op::Mark && matches!(Self::arg(args, "k"), Some("exit") | Some("cmd"));
+            if !shells {
+                return;
+            }
+            self.close_op(Op::Pre);
         }
         match op {
             Op::Mark => {
@@ -3181,6 +3190,49 @@ mod tests {
             Some(7),
             "the pre-deviation-8 floating order still lands"
         );
+    }
+
+    #[test]
+    fn an_exit_mark_ends_a_stuck_open_pre_and_still_lands() {
+        // The chrome-content round's stuck-pre P3: a program that dies
+        // between its `pre` open and close leaves the pre open, and the
+        // SHELL's exit mark that follows was swallowed by the containment
+        // guard -- the tile and the bar kept the PREVIOUS command's state.
+        // The mark is the shell's: it ends the pre (finalized as-is) and lands.
+        let mut t = Transcript::new(daylight());
+        let mut buf = Vec::new();
+        wire::open(&mut buf, Op::Zone, &[("k", "output")]);
+        wire::point(&mut buf, Op::Mark, &[("k", "cmd"), ("text", "crashy")]);
+        wire::open(&mut buf, Op::Pre, &[]);
+        buf.extend_from_slice(b"partial\n");
+        // No close: the program died here.
+        wire::point(&mut buf, Op::Mark, &[("k", "exit"), ("code", "139")]);
+        t.feed(&buf);
+        assert_eq!(t.take_exit(), Some(139), "the exit mark landed");
+        assert_eq!(t.open_block().exit, Some(139), "on the zone it completes");
+        let lines = pre_of(&t.open_block().items);
+        assert_eq!(line_str(&lines[0]), "partial", "the pre was finalized as-is");
+        // The containment guard still refuses a RULE inside an open pre.
+        let mut t2 = Transcript::new(daylight());
+        let mut b2 = Vec::new();
+        wire::open(&mut b2, Op::Pre, &[]);
+        b2.extend_from_slice(b"x\n");
+        wire::point(&mut b2, Op::Rule, &[]);
+        t2.feed(&b2);
+        assert!(t2.open_block().items.is_empty(), "the pre is still accumulating; the rule was dropped");
+        // Cells mode: the pre's tag state clears and the mark lands the same.
+        let mut c = Transcript::new(daylight());
+        c.set_cells_mode(true);
+        let mut f = Vec::new();
+        wire::open(&mut f, Op::Zone, &[("k", "output")]);
+        c.feed_frame(&f, 1);
+        f.clear();
+        wire::open(&mut f, Op::Pre, &[]);
+        c.feed_frame(&f, 2);
+        f.clear();
+        wire::point(&mut f, Op::Mark, &[("k", "exit"), ("code", "1")]);
+        c.feed_frame(&f, 3);
+        assert_eq!(c.take_exit(), Some(1), "cells mode: the exit mark landed through the stuck pre");
     }
 
     #[test]
