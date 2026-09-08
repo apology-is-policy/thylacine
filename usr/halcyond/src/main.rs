@@ -375,6 +375,7 @@ pub extern "C" fn rs_main() -> i64 {
     gs.set_scale(display.scale);
     gs.set_display(display.w, display.h);
     let mut sheet = daylight_sheet(display.scale);
+    gs.set_smooth(sheet.smooth_mem);
     {
         let (cw, ch, _) = gs.mono_cell();
         say!(
@@ -458,6 +459,7 @@ pub extern "C" fn rs_main() -> i64 {
                     sheet = daylight_sheet(di.scale);
                     sheet.gen = gen;
                     gs.set_scale(di.scale);
+                    gs.set_smooth(sheet.smooth_mem);
                     display.scale = di.scale;
                     cache.clear();
                     frame.clear();

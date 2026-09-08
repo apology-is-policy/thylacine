@@ -257,7 +257,7 @@ impl SessionTile {
         let cols = ((surf.w as i32 / geom.cell_w).max(1)) as u16;
         let rows = ((surf.h as i32 / geom.cell_h).max(1)) as u16;
         let mut cmd = Command::new("/bin/kaua-term");
-        // The tile renders RICH (halcyond rasterizes the transcript, fontdue):
+        // The tile renders RICH (halcyond rasterizes the transcript):
         // the kaua-term declares it to the hosted program (KAUA-TERM.md R1),
         // which is what arms a tile shell's zones and a tool's objects.
         cmd.arg("--beacon").arg("rich");
@@ -1003,6 +1003,7 @@ fn rescale(
     *sheet = daylight_sheet(pct);
     sheet.gen = gen;
     gs.set_scale(pct);
+    gs.set_smooth(sheet.smooth_mem);
     let (cw, ch, _) = gs.mono_cell();
     geom.cell_w = cw;
     geom.cell_h = ch;
@@ -1124,6 +1125,7 @@ pub fn run(home: Option<String>) -> i64 {
     gs.set_scale(display.scale);
     gs.set_display(display.w, display.h);
     let mut sheet = daylight_sheet(display.scale);
+    gs.set_smooth(sheet.smooth_mem);
     let (cell_w, cell_h, _) = gs.mono_cell();
     let (disp_w, disp_h) = (root_surf.w, root_surf.h);
     let mut geom = Geom {

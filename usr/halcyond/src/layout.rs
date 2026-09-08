@@ -91,6 +91,11 @@ pub struct Sheet {
     pub table_col_gap: i32,
     /// The two-column list's gap between its (name, value) groups.
     pub kv_col_gap: i32,
+    /// The smoothing stroke on every proportional glyph, thousandths of an
+    /// em (`Theme.smooth_mem`, HALCYON-TYPE 4.2): the glyph source is set
+    /// to this wherever the sheet is built, so the rasters follow the
+    /// theme the sheet was built from.
+    pub smooth_mem: u16,
     /// Bumps on any sheet change; part of the layout-cache key.
     pub gen: u32,
 }
@@ -126,6 +131,7 @@ pub fn daylight_sheet(scale: u16) -> Sheet {
     let ipx = |v: i32| libhalcyon::scale::ipx(v, scale);
     Sheet {
         ground: d.surface,
+        smooth_mem: d.smooth_mem,
         ink: d.fg,
         dim: d.fg_dim,
         accent: d.ember,

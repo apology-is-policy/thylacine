@@ -1,17 +1,22 @@
-// The glyph source: fontdue faces -> a cartoon atlas, cached. The author-
-// side half of the 13.2 division of knowledge -- layout asks THIS for
-// glyph ids + advances and writes resolved runs; executors never see a
-// font, only the finished alpha pages.
+// The glyph source: the vendored faces through the outline path (skrifa +
+// zeno, `outline.rs`; HALCYON-TYPE section 4) -> a cartoon atlas, cached.
+// The author-side half of the 13.2 division of knowledge -- layout asks
+// THIS for glyph ids + advances and writes resolved runs; executors never
+// see a font, only the finished alpha pages.
 //
 // Sizes are quantized to half pixels for the cache key (the stylesheet
 // speaks whole px today; the quantum keeps a future fractional size from
 // silently splitting the cache). Advances are rounded to integer pixels
-// (the MVP pen; subpixel positioning is a stylesheet-era refinement).
+// (the MVP pen; quarter-pixel phases are HALCYON-TYPE's TY-3). The
+// smoothing stroke (`smooth_mem`, the theme's) is a property of the whole
+// store: a change regens, so no cached raster carries a stale amount.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use cartoon::{AtlasPacker, GlyphRef};
+
+use crate::outline::Face;
 
 /// A face slot in this source: the four vendored IBM Plex Sans faces
 /// (HALCYON-VISUAL.md section 7 + HALCYON.md section 4), plus the system
@@ -127,13 +132,16 @@ struct Cached {
 /// into (the 13.2 stale rule holds by construction on the author side
 /// too; the executor's gen check is the belt).
 pub struct GlyphSource {
-    faces: Vec<fontdue::Font>,
+    faces: Vec<Face>,
     grid: cornucopia::Atlas,
     island: cornucopia::Atlas,
     pub packer: AtlasPacker,
     cache: BTreeMap<(u8, u32, char), Cached>,
     /// The display scale the mono atlases were selected for (percent).
     scale: u16,
+    /// The smoothing stroke every proportional raster carries, in
+    /// thousandths of an em (`Theme.smooth_mem`; 0 = the plain fill).
+    smooth_mem: u16,
     /// The between-frames eviction bound (`atlas_pages_for` of the last
     /// `set_display`; the floor before one).
     evict_pages: usize,
@@ -171,11 +179,11 @@ impl GlyphSource {
             crate::IBM_PLEX_SANS_TEXT_ITALIC,
             crate::IBM_PLEX_SANS_HEADING_ITALIC,
         ] {
-            // The vendored faces parse by construction; a fontdue reject
+            // The vendored faces parse by construction; a parse reject
             // here is a build-input defect, not a runtime input -- panic
             // in tests, but stay total in the API: skip the face (its
             // glyphs then miss, and text falls back per the caller).
-            if let Ok(f) = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
+            if let Some(f) = Face::parse(bytes) {
                 faces.push(f);
             }
         }
@@ -188,6 +196,7 @@ impl GlyphSource {
             packer,
             cache: BTreeMap::new(),
             scale: 100,
+            smooth_mem: 0,
             evict_pages: MAX_ATLAS_PAGES,
         }
     }
@@ -195,6 +204,25 @@ impl GlyphSource {
     /// The display scale the mono atlases serve (percent).
     pub fn scale(&self) -> u16 {
         self.scale
+    }
+
+    /// The smoothing stroke the proportional rasters carry (thousandths of
+    /// an em).
+    pub fn smooth(&self) -> u16 {
+        self.smooth_mem
+    }
+
+    /// Set the smoothing stroke (HALCYON-TYPE 4.2: the theme's amount --
+    /// `Theme.smooth_mem`; 0 = the plain fill) and evict everything, so no
+    /// cached raster carries the old amount. A no-op (false) at the current
+    /// value. Em-relative, so a display-scale change needs no re-set.
+    pub fn set_smooth(&mut self, mem: u16) -> bool {
+        if mem == self.smooth_mem {
+            return false;
+        }
+        self.smooth_mem = mem;
+        self.regen();
+        true
     }
 
     /// Select the mono atlases for a display scale (HALCYON-SCALE 6: the
@@ -283,16 +311,16 @@ impl GlyphSource {
             return Some(self.mono_atlas(px).cell_w() as i32);
         }
         let f = self.faces.get(face as usize)?;
-        if f.lookup_glyph_index(ch) == 0 && ch != '\u{FFFD}' && self.island.glyph(ch).is_some() {
+        if !f.has(ch) && ch != '\u{FFFD}' && self.island.glyph(ch).is_some() {
             return Some(self.island.cell_w() as i32);
         }
-        Some((f.metrics(ch, px).advance_width + 0.5) as i32)
+        Some((f.advance(f.glyph_id(ch), px) + 0.5) as i32)
     }
 
     /// The glyph for `ch` at `px` in `face`, rasterizing on first use.
     /// None: unknown face, or the bitmap can never fit a page. A missing
-    /// codepoint is NOT None -- fontdue rasterizes its .notdef box, which
-    /// is the correct visible outcome for unmapped input.
+    /// codepoint is NOT None -- the face's .notdef box is drawn, which is
+    /// the correct visible outcome for unmapped input.
     ///
     /// FACE_MONO's `px` selects the atlas (island or grid; the bake has one
     /// size per advance) and serves the Cornucopia cell; a box-drawing /
@@ -341,16 +369,13 @@ impl GlyphSource {
                     advance: cw,
                 });
             }
-            // Fallback: body-rasterized at cell height, grid-advance.
+            // Fallback: body-rasterized at cell height, grid-advance. It
+            // carries the smoothing stroke because it IS proportional ink;
+            // the Cornucopia cells beside it are pre-baked bitmaps and
+            // cannot, until TY-4 puts the whole mono tier on this path.
             let f = self.faces.get(FACE_BODY as usize)?;
-            let (m, bitmap) = f.rasterize(ch, (chh - 4) as f32);
-            let id = self.packer.insert(
-                m.width as u32,
-                m.height as u32,
-                &bitmap,
-                m.xmin,
-                m.height as i32 + m.ymin,
-            )?;
+            let r = f.raster(f.glyph_id(ch), (chh - 4) as f32, self.smooth_mem);
+            let id = self.packer.insert(r.w, r.h, &r.alpha, r.left, r.top)?;
             self.cache.insert(key, Cached { id, advance: cw });
             return Some(GlyphRef {
                 glyph: id,
@@ -363,7 +388,7 @@ impl GlyphSource {
         // than as Plex's .notdef box: Cornucopia carries the prompt glyph by
         // design, and a symbol at the island cell reads as the symbol, not
         // as tofu. Still None for a glyph neither has (the .notdef box then).
-        if f.lookup_glyph_index(ch) == 0 && ch != '\u{FFFD}' {
+        if !f.has(ch) && ch != '\u{FFFD}' {
             let atlas = self.island;
             if let Some(alpha) = atlas.glyph(ch) {
                 let (cw, chh, base) = (
@@ -379,18 +404,10 @@ impl GlyphSource {
                 });
             }
         }
-        let (m, bitmap) = f.rasterize(ch, px);
-        // fontdue's bitmap is w*h coverage bytes; its `ymin` is the
-        // bitmap BOTTOM relative to the baseline (y-up), so the cartoon
-        // bearing (top, y-down from the baseline) is height + ymin.
-        let id = self.packer.insert(
-            m.width as u32,
-            m.height as u32,
-            &bitmap,
-            m.xmin,
-            m.height as i32 + m.ymin,
-        )?;
-        let advance = (m.advance_width + 0.5) as i32;
+        let gid = f.glyph_id(ch);
+        let r = f.raster(gid, px, self.smooth_mem);
+        let id = self.packer.insert(r.w, r.h, &r.alpha, r.left, r.top)?;
+        let advance = (f.advance(gid, px) + 0.5) as i32;
         self.cache.insert(key, Cached { id, advance });
         Some(GlyphRef { glyph: id, advance })
     }
@@ -408,10 +425,10 @@ impl GlyphSource {
             });
         }
         let f = self.faces.get(face as usize)?;
-        let lm = f.horizontal_line_metrics(px)?;
-        let ascent = (lm.ascent + 0.5) as i32;
-        let descent = (-lm.descent + 0.5) as i32; // fontdue descent is negative
-        let gap = (lm.line_gap + 0.5) as i32;
+        let (a, d, g) = f.line_metrics(px);
+        let ascent = (a + 0.5) as i32;
+        let descent = (-d + 0.5) as i32; // the table's descent is negative
+        let gap = (g + 0.5) as i32;
         Some(LineMetrics {
             ascent,
             descent,
@@ -419,26 +436,16 @@ impl GlyphSource {
         })
     }
 
-    /// The kerning adjustment between two glyphs at a size (integer px), 0
-    /// when the face carries no pair. The author adds this into the PRECEDING
-    /// glyph's resolved advance. IBM Plex Sans ships kerning only in GPOS, and
-    /// fontdue's `horizontal_kern` reads only the legacy `kern` table, so this
-    /// returns 0 for every pair on the vendored faces -- Plex renders with flat
-    /// advances (an MVP posture; a GPOS shaper is the future refinement).
+    /// The kerning adjustment between two glyphs at a size (integer px),
+    /// which the author adds into the PRECEDING glyph's resolved advance.
+    /// Always 0 today: IBM Plex Sans ships kerning only in GPOS and the
+    /// outline path reads no pair table (fontdue before it read only the
+    /// legacy `kern` table, which Plex lacks -- the same flat advances), so
+    /// Plex renders unkerned. A GPOS shaper is the named refinement; the
+    /// seam stays so layout keeps its shape when one lands.
     pub fn kern(&self, face: u8, px: f32, left: char, right: char) -> i32 {
-        let Some(f) = self.faces.get(face as usize) else {
-            return 0;
-        };
-        match f.horizontal_kern(left, right, px) {
-            Some(k) => {
-                if k >= 0.0 {
-                    (k + 0.5) as i32
-                } else {
-                    -((-k + 0.5) as i32)
-                }
-            }
-            None => 0,
-        }
+        let _ = (face, px, left, right);
+        0
     }
 
     /// Evict everything: pages, glyph table, cache -- and bump the store
@@ -787,23 +794,181 @@ mod tests {
         let mut gs = GlyphSource::new_vendored(512);
         let sp = gs.glyph(FACE_BODY, 16.0, ' ').unwrap();
         assert!(sp.advance > 0, "space advances the pen");
+        let ge = gs.packer.store.glyphs[sp.glyph as usize];
+        assert_eq!((ge.w, ge.h), (0, 0), "a zero-area entry, as before the swap");
+    }
+
+    // The swap witness (HALCYON-TYPE TY-1): the outline path reports the
+    // metrics fontdue reported -- the SAME table choice and the SAME
+    // px/upem scale -- so no line height, advance or bearing moved when
+    // the rasterizer did. The literals are fontdue 0.9.4's own output on
+    // these faces (captured before its removal); a drift here is a layout
+    // change wearing a rasterizer swap.
+    const SAMPLE: &str = "The quick brown fox 0123456789 ~/kernel/sched Halcyon Wy.,;";
+    const LINE_METRICS: [(f32, i32, i32, i32); 11] = [
+        (10.0, 10, 3, 13),
+        (11.5, 12, 3, 15),
+        (12.0, 12, 3, 15),
+        (14.0, 14, 4, 18),
+        (16.0, 16, 4, 20),
+        (17.5, 18, 5, 23),
+        (20.0, 21, 6, 27),
+        (24.0, 25, 7, 32),
+        (28.0, 29, 8, 37),
+        (35.0, 36, 10, 46),
+        (70.0, 72, 19, 91),
+    ];
+    // (face, px, the advances of SAMPLE)
+    const ADVANCES: [(u8, f32, &str); 12] = [
+        (FACE_BODY, 11.5, "7,7,6,3,7,7,3,6,6,3,7,4,6,9,7,3,4,6,6,3,7,7,7,7,7,7,7,7,7,7,3,7,5,6,6,4,7,6,3,5,6,6,7,6,7,3,8,6,3,6,6,6,7,3,10,6,3,3,3"),
+        (FACE_BODY, 17.5, "10,10,10,4,10,10,4,9,9,4,10,7,10,14,10,4,6,10,9,4,11,11,11,11,11,11,11,11,11,11,4,11,7,9,10,7,10,10,5,7,9,9,10,10,10,4,12,9,5,9,9,10,10,4,16,9,5,5,5"),
+        (FACE_BODY, 35.0, "20,20,19,8,20,20,9,18,19,8,20,13,20,27,20,8,12,20,18,8,21,21,21,21,21,21,21,21,21,21,8,21,14,19,19,13,20,19,10,14,17,18,20,19,20,8,25,19,10,18,18,20,20,8,32,18,10,10,10"),
+        (FACE_BODY_BOLD, 11.5, "7,7,6,3,7,7,3,6,7,3,7,5,6,10,7,3,4,6,6,3,7,7,7,7,7,7,7,7,7,7,3,7,5,7,6,5,7,6,3,5,6,6,7,6,7,3,8,7,3,6,6,6,7,3,11,6,4,4,4"),
+        (FACE_BODY_BOLD, 17.5, "10,10,10,4,11,10,5,9,10,4,11,7,10,15,10,4,6,10,10,4,11,11,11,11,11,11,11,11,11,11,4,11,8,10,10,7,10,10,5,8,9,9,10,10,11,4,13,10,5,9,9,10,10,4,17,9,5,5,6"),
+        (FACE_BODY_BOLD, 35.0, "20,21,20,8,21,21,10,18,20,8,21,14,20,29,21,8,13,20,20,8,21,21,21,21,21,21,21,21,21,21,8,21,16,20,20,14,21,20,11,16,18,18,21,20,21,8,25,20,11,18,19,20,21,8,34,19,11,11,12"),
+        (FACE_BODY_ITALIC, 11.5, "6,7,6,3,7,7,3,6,6,3,7,4,6,9,7,3,4,6,6,3,7,7,7,7,7,7,7,7,7,7,3,7,5,6,6,4,7,6,3,5,5,6,7,6,7,3,8,7,3,6,6,6,7,3,10,6,3,3,3"),
+        (FACE_BODY_ITALIC, 17.5, "10,10,9,4,10,10,5,9,9,4,10,6,10,13,10,4,6,10,9,4,11,11,11,11,11,11,11,11,11,11,4,11,7,9,9,6,10,9,5,7,8,9,10,9,10,4,12,10,5,9,9,10,10,4,15,9,5,5,5"),
+        (FACE_BODY_ITALIC, 35.0, "20,20,18,8,20,20,9,17,18,8,20,13,19,26,20,8,11,19,18,8,21,21,21,21,21,21,21,21,21,21,8,21,14,18,18,13,20,18,9,14,17,17,20,18,20,8,24,20,9,17,17,19,20,8,31,17,10,10,11"),
+        (FACE_HEADING_ITALIC, 11.5, "6,6,6,3,7,6,3,6,6,3,7,4,6,9,6,3,4,6,6,3,7,7,7,7,7,7,7,7,7,7,3,7,4,6,6,4,6,6,3,4,5,6,6,6,7,3,8,7,3,6,6,6,6,3,10,6,3,3,3"),
+        (FACE_HEADING_ITALIC, 17.5, "10,10,9,4,10,10,5,9,9,4,10,6,10,13,10,4,5,10,9,4,11,11,11,11,11,11,11,11,11,11,4,11,7,9,9,6,10,9,5,7,8,9,10,9,10,4,12,10,5,9,8,10,10,4,15,8,5,5,5"),
+        (FACE_HEADING_ITALIC, 35.0, "19,20,18,8,20,20,9,17,18,8,20,13,19,26,20,8,11,19,17,8,21,21,21,21,21,21,21,21,21,21,8,21,13,18,18,13,20,18,9,13,16,17,20,18,20,8,24,20,9,17,17,19,20,8,30,17,10,10,10"),
+    ];
+    // (face, px, char, left, top, w, h): fontdue's bearing + box.
+    const BEARINGS: [(u8, f32, char, i32, i32, u32, u32); 18] = [
+        (FACE_BODY, 16.0, 'A', 0, 12, 11, 12),
+        (FACE_BODY, 16.0, 'g', 0, 10, 9, 14),
+        (FACE_BODY, 16.0, 'H', 1, 12, 9, 12),
+        (FACE_BODY, 16.0, 'y', 0, 9, 8, 13),
+        (FACE_BODY, 16.0, '.', 1, 3, 3, 4),
+        (FACE_BODY, 16.0, 'n', 1, 9, 7, 9),
+        (FACE_BODY, 35.0, 'n', 2, 19, 16, 19),
+        (FACE_BODY, 35.0, 'H', 3, 25, 19, 25),
+        (FACE_BODY, 35.0, 'g', 1, 21, 18, 29),
+        (FACE_BODY_BOLD, 16.0, 'A', 0, 12, 11, 12),
+        (FACE_BODY_BOLD, 16.0, 'g', 0, 11, 9, 15),
+        (FACE_BODY_BOLD, 35.0, 'g', 0, 22, 20, 30),
+        (FACE_BODY_ITALIC, 16.0, 'A', -1, 12, 10, 12),
+        (FACE_BODY_ITALIC, 16.0, 'y', -1, 9, 10, 13),
+        (FACE_BODY_ITALIC, 35.0, 'H', 1, 25, 24, 25),
+        (FACE_HEADING_ITALIC, 16.0, '.', 0, 2, 3, 3),
+        (FACE_HEADING_ITALIC, 35.0, 'n', 1, 19, 17, 19),
+        (FACE_HEADING_ITALIC, 35.0, 'g', -1, 21, 20, 29),
+    ];
+
+    #[test]
+    fn line_metrics_are_the_fontdue_values() {
+        let gs = GlyphSource::new_vendored(512);
+        for face in [FACE_BODY, FACE_BODY_BOLD, FACE_BODY_ITALIC, FACE_HEADING_ITALIC] {
+            for &(px, ascent, descent, line_height) in &LINE_METRICS {
+                let lm = gs.line_metrics(face, px).unwrap();
+                assert_eq!(
+                    (lm.ascent, lm.descent, lm.line_height),
+                    (ascent, descent, line_height),
+                    "face {face} at {px} px"
+                );
+            }
+        }
     }
 
     #[test]
-    fn kern_is_zero_plex_ships_no_legacy_kern_table() {
-        // IBM Plex Sans carries kerning in GPOS only; fontdue reads only the
-        // legacy `kern` table, so every pair returns 0 -- flat advances, the
-        // recorded MVP posture (a GPOS shaper is the future refinement). This
-        // also guards the other direction: a future face WITH a legacy table
-        // would change layout metrics, and this test would catch it.
+    fn advances_are_the_fontdue_values() {
+        let mut gs = GlyphSource::new_vendored(512);
+        for &(face, px, want) in &ADVANCES {
+            let got: Vec<alloc::string::String> = SAMPLE
+                .chars()
+                .map(|c| alloc::format!("{}", gs.advance(face, px, c).unwrap()))
+                .collect();
+            assert_eq!(got.join(","), want, "face {face} at {px} px");
+        }
+    }
+
+    #[test]
+    fn bearings_are_the_fontdue_values() {
+        // The bearing is exact (both rasterizers floor the left edge and
+        // ceil the top); the box may differ by the fractional edge's
+        // rounding, never by more than a pixel.
+        let mut gs = GlyphSource::new_vendored(512);
+        for &(face, px, ch, left, top, w, h) in &BEARINGS {
+            let g = gs.glyph(face, px, ch).unwrap();
+            let ge = gs.packer.store.glyphs[g.glyph as usize];
+            assert_eq!((ge.left, ge.top), (left, top), "face {face} {ch:?} at {px} px: bearing");
+            assert!(
+                ge.w.abs_diff(w) <= 1 && ge.h.abs_diff(h) <= 1,
+                "face {face} {ch:?} at {px} px: box {}x{} vs fontdue {w}x{h}",
+                ge.w,
+                ge.h
+            );
+        }
+    }
+
+    fn ink(gs: &GlyphSource, id: u32) -> u64 {
+        let (_, _, a) = glyph_alpha(gs, id);
+        a.iter().map(|&v| v as u64).sum()
+    }
+
+    // HALCYON-TYPE 4.2: the smoothing stroke is the theme's, it is a
+    // property of the whole store (a change regens), it adds the measured
+    // weight to every proportional raster, and it moves no metric: the
+    // advance and the line metrics are the tables', not the raster's.
+    #[test]
+    fn the_smoothing_stroke_is_the_themes_and_regens_on_change() {
+        assert_eq!(libhalcyon::theme::DAYLIGHT.smooth_mem, 12, "0.012 em on the light ground");
+        assert_eq!(crate::layout::daylight_sheet(100).smooth_mem, 12, "the sheet carries it");
+        let mut plain = GlyphSource::new_vendored(512);
+        assert_eq!(plain.smooth(), 0, "a fresh source is the plain fill");
+        let mut gs = GlyphSource::new_vendored(512);
+        let n0 = gs.glyph(FACE_HEADING_ITALIC, 35.0, 'n').unwrap();
+        assert!(gs.set_smooth(12));
+        assert_eq!(gs.gen(), 1, "the amount changed: everything evicted");
+        assert!(gs.packer.store.glyphs.is_empty());
+        assert!(!gs.set_smooth(12), "the same amount is a no-op");
+        assert_eq!(gs.gen(), 1);
+        let n1 = gs.glyph(FACE_HEADING_ITALIC, 35.0, 'n').unwrap();
+        let p = plain.glyph(FACE_HEADING_ITALIC, 35.0, 'n').unwrap();
+        assert_eq!((n0.advance, n1.advance, p.advance), (20, 20, 20), "the advance is the table's");
+        let (i0, i1) = (ink(&plain, p.glyph), ink(&gs, n1.glyph));
+        // fontdue's fill of this glyph summed 30182: the two exact-area
+        // rasterizers agree on the plain fill within a few percent.
+        assert!(i0.abs_diff(30182) * 100 <= 30182 * 3, "plain fill ink {i0} vs fontdue 30182");
+        // The stroke's weight: the lab measured the Mac's smoothing at +18%
+        // on this glyph (HALCYON-TYPE 3.2), and 0.012 em lands there --
+        // measured +18% INK (the sum of coverage) at the swap: 35652 over
+        // 30146. The band is the lab's prediction (15-22%) minus a point.
+        let pct = (i1 * 100) / i0;
+        assert!((114..=122).contains(&pct), "stroked ink {i1} vs plain {i0}: +{}%", pct as i64 - 100);
+        // One row taller, never wider, the bearing untouched: the stroke's
+        // half-width at 35 px is 0.21 px, under the mask's rounding.
+        let (gp, pp) = (gs.packer.store.glyphs[n1.glyph as usize], plain.packer.store.glyphs[p.glyph as usize]);
+        assert_eq!((pp.w, pp.h, gp.w, gp.h), (17, 19, 17, 20));
+        assert_eq!((pp.left, pp.top), (gp.left, gp.top));
+        for px in [11.5f32, 17.5, 35.0] {
+            assert_eq!(gs.line_metrics(FACE_BODY, px).unwrap().line_height, plain.line_metrics(FACE_BODY, px).unwrap().line_height);
+            for c in SAMPLE.chars() {
+                assert_eq!(gs.advance(FACE_BODY, px, c), plain.advance(FACE_BODY, px, c), "{c:?} at {px}");
+            }
+        }
+        // The stroke reaches the mono fallback (a codepoint the bake lacks,
+        // rasterized from the body face) the same way -- one outline path.
+        let f0 = plain.glyph(FACE_MONO, MONO_ISLAND_PX, '\u{0424}').unwrap(); // CYRILLIC EF
+        let f1 = gs.glyph(FACE_MONO, MONO_ISLAND_PX, '\u{0424}').unwrap();
+        assert_eq!((f0.advance, f1.advance), (6, 6), "the cell advance either way");
+        assert!(ink(&gs, f1.glyph) > ink(&plain, f0.glyph), "stroked in the cell too");
+        // Back to 0: the plain fill again, byte for byte.
+        assert!(gs.set_smooth(0));
+        let n2 = gs.glyph(FACE_HEADING_ITALIC, 35.0, 'n').unwrap();
+        assert_eq!(glyph_alpha(&gs, n2.glyph), glyph_alpha(&plain, p.glyph));
+    }
+
+    #[test]
+    fn kern_is_zero_no_pair_table_is_read() {
+        // IBM Plex Sans carries kerning in GPOS only, and the outline path
+        // reads no pair table, so every pair returns 0 -- flat advances,
+        // the recorded MVP posture (a GPOS shaper is the future refinement;
+        // when it lands, this is the test that changes).
         let mut gs = GlyphSource::new_vendored(512);
         gs.glyph(FACE_BODY, 32.0, 'A').unwrap();
         gs.glyph(FACE_BODY, 32.0, 'V').unwrap();
-        assert_eq!(
-            gs.kern(FACE_BODY, 32.0, 'A', 'V'),
-            0,
-            "no legacy kern pair on Plex (GPOS is not read by fontdue)"
-        );
+        assert_eq!(gs.kern(FACE_BODY, 32.0, 'A', 'V'), 0, "A/V unkerned");
         assert_eq!(gs.kern(FACE_BODY, 32.0, 'x', 'x'), 0, "no pair either way");
     }
 

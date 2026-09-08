@@ -1,6 +1,6 @@
 # halcyond -- the Halcyon environment client: the only place that thinks
 # (HALCYON.md section 13.1). Owns per-pane transcript state, the Beacon
-# parser, the VT cores, the fontdue rasterizer + atlas cache, the
+# parser, the VT cores, the outline rasterizer + atlas cache, the
 # stylesheet, and the per-frame cartoon each executor weaves into pixels.
 #
 # lib + bin from birth (the H-2a lesson: a no_std bin crate's tests are
@@ -10,11 +10,13 @@
 # The BIN (the `guest` feature, on by default) is the thin body: syscalls,
 # the tapestry Surface, the event loop.
 #
-# fontdue is the tree's first vendored registry dependency: the closure
-# lives in third_party/rust/ (cargo-vendor layout; see third_party/README.md)
-# and usr/.cargo/config.toml pins the source replacement -- builds stay
-# offline + checksum-enforced. no_std verified on aarch64-unknown-none at
-# vendor time (HALCYON.md 13.9 item 1: VERIFIED, the fallback unneeded).
+# The rasterizer is a vendored registry dependency (fontdue was the tree's
+# first; HALCYON-TYPE TY-1 swapped it for skrifa + zeno): the closure lives
+# in third_party/rust/ (cargo-vendor layout; see third_party/README.md) and
+# usr/.cargo/config.toml pins the source replacement -- builds stay offline
+# + checksum-enforced. no_std verified on aarch64-unknown-none at vendor
+# time, both times (HALCYON.md 13.5's condition: VERIFIED, the fallback
+# unneeded).
 [package]
 name = "halcyond"
 version = "0.1.0"
@@ -56,6 +58,12 @@ kaua-term = { path = "../kaua-term", default-features = false }
 kaua = { path = "../lib/kaua", default-features = false }
 # The display-scale bakes (HALCYON-SCALE 6) ride only this binary.
 cornucopia = { path = "../lib/cornucopia", features = ["scale"] }
-fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }
+# HALCYON-TYPE (TY-1): the outline path -- skrifa parses + scales the glyph
+# outlines (read-fonts underneath), zeno fills and STROKES them (the 0.012 em
+# smoothing stroke, section 4.2). Both no_std with `libm` supplying the float
+# intrinsics; nothing here links std. zeno's `eval` is the Mask renderer
+# itself (its default set is `eval` + `std`; only `std` is dropped).
+skrifa = { version = "0.46.2", default-features = false, features = ["libm"] }
+zeno = { version = "0.3.3", default-features = false, features = ["libm", "eval"] }
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
 libtapestry = { path = "../lib/libtapestry", optional = true }

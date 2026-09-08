@@ -385,12 +385,28 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
 
 ## 6. Chunks (in order; each its own commit + status row)
 
-- **TY-1** Vendor skrifa + read-fonts + zeno (`no_std`, `libm`); build
-  halcyond against the native target; the fallback decision point.
-- **TY-2** `GlyphSource` on skrifa + zeno: outline → fill ∪ stroke; the
-  theme token `type_smooth_em`; the weight witness as a unit test (the
-  stroked italic `n` at 35 px carries 15–22 % more L\* ink than the
-  unstroked, measured the lab's way; the fringe count within +1.5 px).
+- **TY-1 + TY-2 — LANDED 2026-09-08 @`*(pending)*`**, one chunk: the swap
+  proved the native build by use, not by a dormant dependency. skrifa
+  0.46.2 + read-fonts 0.43.3 + font-types 0.12.4 + zeno 0.3.3 (+ bytemuck)
+  vendored `no_std`/`libm`; halcyond checked AND release-linked on
+  `aarch64-unknown-none` (§13.5's condition met; the fallback unneeded;
+  fontdue and its closure removed, 139 crates still).
+  `usr/halcyond/src/outline.rs` is the path (§4.5: the y-negating pen so
+  zeno's TopLeft renders upright, fill ∪ stroke as f + s − f·s on the
+  explicit union box, the bearing = −placement.top); `GlyphSource` on it
+  for the four faces, the mono fallback included. The token is
+  `Theme.smooth_mem` — thousandths of an em (12 = 0.012 em), integral so
+  the theme stays `Eq` — reaching the source as `Sheet.smooth_mem` →
+  `GlyphSource::set_smooth` at every sheet (re)build (four sites; a change
+  regens, so no cached raster carries a stale amount). **Measured at the
+  swap:** the plain fill's ink is fontdue's within 0.12 % (30146 vs 30182 on
+  the 35 px italic `n`); the stroke adds **+18 % ink** there — the lab's Mac
+  figure (§3.2) exactly — +17 % on the 11.5 px body `n`, +14 % at 17.5 px,
+  +11 % on the bold `n`; the box grows one row (17×19 → 17×20), the bearing
+  is unchanged, and every advance and line metric is fontdue's to the pixel
+  (pinned as literals: 44 line-metric cells, 12 advance strings, 18
+  bearings — a drift fails the swap witness). The §4.2 interim LUT was
+  never needed. Kern stays 0 (no pair table is read; Plex is GPOS-only).
 - **TY-3** Quarter-pixel phases: the fractional pen in layout, the phase in
   the atlas key, the atlas-bound statement re-verified (the existing
   `a_screen_of_the_largest_heading_at_200_packs_under_the_cap` test extended

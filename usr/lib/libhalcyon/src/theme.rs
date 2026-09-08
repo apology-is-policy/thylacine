@@ -84,6 +84,13 @@ pub struct Theme {
     pub status_fg: Argb,
     pub status_muted: Argb,
     pub status_idle: Argb,
+    // Type (HALCYON-TYPE section 4.2): the smoothing stroke on every
+    // proportional glyph, in THOUSANDTHS of an em (the doc's
+    // `type_smooth_em` x 1000, kept integral so the theme stays `Eq`). The
+    // Mac's comfort measured as an em-relative dilation; 12 (0.012 em) is
+    // the fit's single constant across sizes. A dark ground takes 0: light
+    // ink on dark already reads heavy (the doc's per-theme rule).
+    pub smooth_mem: u16,
 }
 
 /// Chrome metrics (HALCYON-VISUAL section 3.1 / 4.3). Pixels.
@@ -182,6 +189,7 @@ pub const DAYLIGHT: Theme = Theme {
     status_fg: 0xFFF2_EBE0,
     status_muted: 0xFFC8_B89A,
     status_idle: 0xFF3A_2E22,
+    smooth_mem: 12,
 };
 
 /// The inner hairline (section 2.4) is `header` by construction -- it vanishes
@@ -307,6 +315,9 @@ mod tests {
         // status bar (section 6)
         assert_eq!(d.status_bg, 0xFF1A120A);
         assert_eq!(d.status_fg, 0xFFF2EBE0);
+        // type (HALCYON-TYPE 4.2, ratified 2026-09-08): 0.012 em on the
+        // light ground
+        assert_eq!(d.smooth_mem, 12);
     }
 
     #[test]

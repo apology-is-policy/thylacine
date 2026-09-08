@@ -122,8 +122,8 @@ pub struct AtlasPage {
 
 /// Where one rasterized glyph lives and how it hangs on the pen: blit rect
 /// on `page`, then `left`/`top` are the bearing -- the blit's top-left is
-/// `(pen_x + left, baseline_y - top)` (the classic FreeType convention
-/// fontdue also reports: `top` is the distance baseline -> bitmap top).
+/// `(pen_x + left, baseline_y - top)` (the classic FreeType convention:
+/// `top` is the distance baseline -> bitmap top, y-up).
 #[derive(Clone, Copy)]
 pub struct GlyphEntry {
     pub page: u32,
@@ -154,7 +154,7 @@ struct Shelf {
 
 /// The packer: appends rasterized alpha bitmaps into the store's last page
 /// (opening pages/shelves as needed), returning stable glyph ids. Rasterizer-
-/// agnostic: the caller (halcyond's fontdue wrapper) hands finished bitmaps.
+/// agnostic: the caller (halcyond's glyph source) hands finished bitmaps.
 pub struct AtlasPacker {
     pub store: AtlasStore,
     page_w: u32,

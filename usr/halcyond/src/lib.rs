@@ -3,10 +3,12 @@
 // every module here is host-testable; the bin half (main.rs, the `guest`
 // feature) owns the Surface, the console, and the event loop.
 //
-// H-2c lands the rasterization floor: the vendored IBM Plex Sans faces (the
-// DejaVu -> Public Sans -> IBM Plex Sans supersessions closed 2026-09-07) + the
-// fontdue wrapper that fills a cartoon atlas on demand. The transcript model,
-// layout, theme, and Beacon parsing arrive at H-2d.
+// H-2c landed the rasterization floor: the vendored IBM Plex Sans faces (the
+// DejaVu -> Public Sans -> IBM Plex Sans supersessions closed 2026-09-07) + a
+// glyph source that fills a cartoon atlas on demand -- since HALCYON-TYPE
+// TY-1 through the outline path (`outline`: skrifa + zeno, the smoothing
+// stroke) rather than fontdue. The transcript model, layout, theme, and
+// Beacon parsing arrived at H-2d.
 
 #![no_std]
 
@@ -18,6 +20,7 @@ pub mod grid;
 pub mod input;
 pub mod layout;
 pub mod menu;
+pub mod outline;
 pub mod raster;
 pub mod select;
 pub mod session_init;

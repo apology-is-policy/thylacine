@@ -152,3 +152,10 @@ replacement.
 Unlike the tarball vendors above there is no single upstream checksum:
 `usr/Cargo.lock` is the pin (crate versions + registry checksums), and
 the `.cargo-checksum.json` files carry the byte-level integrity.
+
+Composition changes since creation (one row per re-vendor that changed the
+set; the count after it):
+
+| When | Change | Crates |
+|---|---|---|
+| 2026-09-08, HALCYON-TYPE TY-1 (the rasterizer swap) | OUT: `fontdue` and its exclusive closure (`ttf-parser`, `hashbrown`, `allocator-api2`, `equivalent`, `foldhash`). IN: `skrifa` 0.46.2, `read-fonts` 0.43.3, `font-types` 0.12.4, `zeno` 0.3.3, `bytemuck` 1.25.2, `bytemuck_derive` 1.11.0 (Apache-2.0 / MIT; `bytemuck_derive` pinned below 1.12.0, whose `syn 3` would have put a second `syn` beside the tree's 2.0.117). All six build `no_std` on `aarch64-unknown-none` (`libm` / `core_maths` supply the float intrinsics), verified at vendor time by the halcyond native link. | 139 |
