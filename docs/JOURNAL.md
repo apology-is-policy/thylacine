@@ -23,6 +23,67 @@ needed the operator.
 
 ---
 
+## Run 46 (2026-09-08, Fable 5.1 max, after run 45's self-compaction) -- the chrome-content audit closed, the display scale designed, and its first two sub-chunks
+
+**Where it sits.** The same autonomous stretch as run 45, after the 600k
+self-compaction: the Fable round on the chrome content arrived, was closed
+(the paragraph sits at the end of run 45's entry: the atlas working set is
+the painted set, `1337a218`), and the next queued item -- the DPI scale,
+HALCYON-COMPOSITION section 1 -- went scripture-first.
+
+**The design (`docs/HALCYON-SCALE.md`, `a753e1ac`).** Researched before it
+was written, per the prior-art rule: Plan 9 has no DPI concept (subfonts per
+size -- which is exactly what the Cornucopia bakes are), and the SOTA for our
+shape (Wayland's fractional-scale, Fuchsia's device_pixel_ratio) is
+compositor-owned and pushed. The tree facts decided the rest: tapestryd read
+the EDID feature bit for its features line and never acknowledged it, so
+nothing knew a physical size; one `METRICS` const fed both the carve
+(tapestryd) and the paint (halcyond); Plex rasterizes at any size but mono is
+bake-only and the Cornucopia TTF is 10.8 MB, so the 0.25 steps need six more
+bakes, not a rasterizer; the ctl readers are prefix-keyed, so `scale <pct>`
+rides the ctl for free. The decision: the compositor derives a percent from
+the EDID (quarter-snapped, the smaller axis, clamped 100..200 in v1),
+publishes it, admits a `scale` verb from the seat only, and both painters
+read `Metrics::at(pct)`; halcyond scales at ONE place. Found while writing
+it, and worth more than the design: **the atlas cap landed in the audit
+close is a constant, but the painted set is bounded by the DISPLAY AREA**,
+which a 4K scanout multiplies by eight -- the cap must derive from the
+display (the constant at 1280x800). Recorded as a requirement of SC-3, not
+fixed in SC-2.
+
+**SC-1 (`edb4afbe`): the bakes.** Six atlases (advances 11/12/13/15/18/20,
+646 KB) behind a `scale` cargo feature halcyond asks for; `Atlas::is_baked`
+so a missing bake can no longer hide behind `for_advance`'s fallback to the
+10x22 cell. Honest note recorded in the crate: the workspace build unifies
+features, so aurora's binary carries the bakes too -- the feature is the
+crate's contract, not a size saving. The bins are gitignored by pattern and
+were force-added like the five before them (the first commit attempt did
+nothing and reported nothing -- `git add` refused, `&&` short-circuited, and
+only the unchanged `git log` said so).
+
+**SC-2: the compositor half.** `libhalcyon::scale` (the EDID parse as
+untrusted device input, the snap, the step) + `Metrics::at` are host-tested
+against crafted EDIDs (QEMU's, a 27" 4K, a 13" panel, garbage in five
+shapes) and the operator's worked table. tapestryd acks `F_EDID`, queries
+GET_EDID once at init and on `mode auto`, says the millimetres on the boot
+line (so "QEMU's EDID snaps to 1.0" becomes a measurement), owns
+`Comp.scale`/`metrics`, publishes the ctl line, admits the verb for the
+renderer or the declared hosting session (the cfg-3 rule the menu and the
+status bar already carry), re-carves and fans every CONFIGURE on a change,
+retires a stale-height status bar so its owner re-mints, and binds Super+=
+/ Super+- / Super+0 on the runtime chord table. The battery grew the
+negative twin (`scale 200` and `scale bogus` from a non-renderer both
+E_PERM with the ctl unchanged). Every former `METRICS.*` read in the carve
+and the paint is `self.metrics`; `Metrics::at(100) == METRICS` is the proof
+nothing at 1.0 moved. Verification in the commit.
+
+**Running through the 600k line.** The checkpoint window fired mid-SC-2;
+the step was carried to its boundary (the guest check clean, the default
+image re-baked, the battery gate re-run) before the self-compaction. SC-3
+(halcyond's `Sheet.scale` sweep + the atlas cap by display area) and SC-4
+(the gates at 200%) are the pickup, then ONE Fable round over SC-2 + SC-3
+batched with the chrome-content close's "ROUND 2 FOCUS".
+
 ## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
 
 **Where it sits.** The first queued item after run 44's close: the chrome

@@ -50,11 +50,12 @@ processes that paint chrome and glyphs, and what the bakes need.
   what it hosts or owns, E_PERM otherwise (the cfg-3 authority class).
 - **QEMU** (`virtio-gpu-pci`) advertises `edid=on` by default with `xres`
   / `yres` props; the EDID it generates carries a physical size QEMU
-  derives from a nominal DPI (about 100), not the host monitor's -- on
-  every host we have (the mac window is host-scaled; thyla-pi under KVM
-  gets the same QEMU EDID) the derived scale snaps to 1.0. The boot say
-  line prints the measured millimetres so the claim is a measurement, not
-  a memory.
+  derives from a nominal DPI, not the host monitor's -- MEASURED by SC-2's
+  boot line on 2026-09-08: `edid 325x203 mm for 1280x800 px`, i.e. 100.0
+  DPI on both axes, so on every host we have (the mac window is
+  host-scaled; thyla-pi under KVM gets the same QEMU EDID) the derived
+  scale snaps to 1.0. The boot line prints the millimetres every boot so
+  the claim stays a measurement, not a memory.
 - **The atlas** (since 1337a218) packs only what a frame PAINTS and has a
   hard cap of 24 x 512-px pages; the visible set at 1.0 is a few pages.
 

@@ -10,6 +10,7 @@ extern crate alloc;
 
 pub mod layout;
 pub mod place;
+pub mod scale;
 pub mod skeleton;
 pub mod tag;
 pub mod theme;

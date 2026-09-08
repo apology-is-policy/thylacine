@@ -28,6 +28,10 @@ pub enum ChordAction {
     SplitToggle,
     TabCycle(bool), // true = forward
     Close,
+    /// HALCYON-SCALE 6: one 25% step of the display scale (+1 / -1).
+    ScaleStep(i8),
+    /// Back to the EDID-derived scale (`scale auto`).
+    ScaleReset,
 }
 
 #[derive(Clone, Copy)]
@@ -49,6 +53,9 @@ pub struct Chords {
 
 // evdev key codes (linux/input-event-codes.h). Only the codes the default
 // chord set + the config grammar name.
+const KEY_0: u16 = 11;
+const KEY_MINUS: u16 = 12;
+const KEY_EQUAL: u16 = 13;
 const KEY_TAB: u16 = 15;
 const KEY_Q: u16 = 16;
 const KEY_E: u16 = 18;
@@ -99,6 +106,9 @@ fn key_code(name: &str) -> Option<u16> {
         "left" => KEY_LEFT,
         "right" => KEY_RIGHT,
         "down" => KEY_DOWN,
+        "0" => KEY_0,
+        "minus" => KEY_MINUS,
+        "equal" => KEY_EQUAL,
         _ => return None,
     })
 }
@@ -124,6 +134,9 @@ fn action_of(name: &str) -> Option<Option<ChordAction>> {
         "cycle" => ChordAction::TabCycle(true),
         "cycle-back" => ChordAction::TabCycle(false),
         "close" => ChordAction::Close,
+        "scale-up" => ChordAction::ScaleStep(1),
+        "scale-down" => ChordAction::ScaleStep(-1),
+        "scale-reset" => ChordAction::ScaleReset,
         "none" => return Some(None), // the unbind token
         _ => return None,
     }))
@@ -153,6 +166,11 @@ impl Chords {
                 d(KEY_TAB, false, TabCycle(true)),
                 d(KEY_TAB, true, TabCycle(false)),
                 d(KEY_Q, true, Close),
+                // HALCYON-SCALE 6: the universal zoom keys (browsers,
+                // terminals); free in this table; remappable like the rest.
+                d(KEY_EQUAL, false, ScaleStep(1)),
+                d(KEY_MINUS, false, ScaleStep(-1)),
+                d(KEY_0, false, ScaleReset),
             ],
             gaps: 1,
         }
@@ -269,6 +287,16 @@ mod tests {
             Some(ChordAction::TabCycle(false))
         ));
         assert!(matches!(c.lookup(KEY_Q, true), Some(ChordAction::Close)));
+        // HALCYON-SCALE 6: the scale chords (Super+= / Super+- / Super+0),
+        // shift-free, and their config names.
+        assert!(matches!(c.lookup(KEY_EQUAL, false), Some(ChordAction::ScaleStep(1))));
+        assert!(matches!(c.lookup(KEY_MINUS, false), Some(ChordAction::ScaleStep(-1))));
+        assert!(matches!(c.lookup(KEY_0, false), Some(ChordAction::ScaleReset)));
+        assert!(matches!(action_of("scale-up"), Some(Some(ChordAction::ScaleStep(1)))));
+        assert!(matches!(action_of("scale-reset"), Some(Some(ChordAction::ScaleReset))));
+        assert_eq!(key_code("equal"), Some(KEY_EQUAL));
+        assert_eq!(key_code("minus"), Some(KEY_MINUS));
+        assert_eq!(key_code("0"), Some(KEY_0));
         // An unbound key (no default) -> plane-reserved, no action.
         assert!(c.lookup(34 /* g */, false).is_none());
         assert_eq!(c.gaps, 1);

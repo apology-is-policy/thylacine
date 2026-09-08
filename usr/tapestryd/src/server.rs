@@ -119,6 +119,8 @@ const PRESENT_BURST_WINDOW_MS: u64 = 250;
 const PRESENT_BURST_MIN: u32 = 4;
 
 use crate::chords::{ChordAction, Chords};
+use libhalcyon::scale;
+use libhalcyon::theme::Metrics;
 use crate::gpu::{FenceTag, FencedErr, Gpu};
 use crate::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
 use libdriver::Error;
@@ -1467,6 +1469,16 @@ fn owner_unpack(v: u64) -> Option<(usize, u32)> {
 
 pub struct Comp {
     pub gpu: Gpu,
+    /// HALCYON-SCALE 4: the display scale in percent (100/125/150/175/200)
+    /// -- derived from the EDID at boot and on `mode auto`, overridden by
+    /// the `scale` verb / chords; published as `scale <pct>` in the ctl.
+    pub scale: u16,
+    /// A `scale <pct>` verb or chord in force for the rest of the session
+    /// (`scale auto` / the reset chord clear it); None = EDID-derived.
+    scale_override: Option<u16>,
+    /// `Metrics::at(scale)`: the ONE table every carve and paint here reads
+    /// (halcyond reads the same function at the same percent).
+    pub metrics: Metrics,
     surfaces: [Option<Surface>; MAX_SURFACES],
     gen_seq: u32,
     conn_seq: u64,
@@ -2286,8 +2298,16 @@ const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
     pub fn new(gpu: Gpu) -> Comp {
+        let scale = match gpu.edid_mm {
+            Some((mm_w, mm_h)) => scale::scale_pct(gpu.width, gpu.height, mm_w, mm_h),
+            None => scale::SCALE_MIN,
+        };
+        say!("tapestryd: scale {} (edid)", scale);
         Comp {
             gpu,
+            scale,
+            scale_override: None,
+            metrics: Metrics::at(scale),
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
@@ -3964,12 +3984,57 @@ impl Comp {
         Some(p.content)
     }
 
+    /// HALCYON-SCALE 3: the scale the display's EDID implies for its
+    /// current pixel geometry (100 without one).
+    fn derive_scale(&self) -> u16 {
+        match self.gpu.edid_mm {
+            Some((mm_w, mm_h)) => scale::scale_pct(self.gpu.width, self.gpu.height, mm_w, mm_h),
+            None => scale::SCALE_MIN,
+        }
+    }
+
+    /// HALCYON-SCALE 4: make `pct` the display's scale. A no-op at the
+    /// current value; otherwise the metrics table follows, a registered
+    /// status bar of the OLD height is retired (its owner re-mints at the
+    /// new one on the CLOSE -- the H-3d rearm), the ctl republishes on its
+    /// next read, and the STRUCTURAL relayout re-carves every strip and
+    /// fans every surface its CONFIGURE. `why` names the source on the
+    /// line (edid / verb / auto / chord / mode).
+    fn apply_scale(&mut self, pct: u16, why: &str) {
+        if pct == self.scale || !scale::is_valid_pct(pct) {
+            return;
+        }
+        let from = self.scale;
+        self.scale = pct;
+        self.metrics = Metrics::at(pct);
+        say!("tapestryd: scale {} -> {} ({})", from, pct, why);
+        if let Some(st) = self.status {
+            let stale = self
+                .surf(st.n)
+                .is_some_and(|s| s.h != self.metrics.status_h as u32);
+            if stale {
+                self.retire(st.n);
+            }
+        }
+        self.reconcile();
+    }
+
+    /// The re-derivation after a geometry change (`mode`): the same
+    /// millimetres over new pixels is a new DPI -- unless a verb/chord
+    /// override is in force, which stands until `scale auto`.
+    fn rescale_after_mode(&mut self) {
+        if self.scale_override.is_none() {
+            let p = self.derive_scale();
+            self.apply_scale(p, "mode");
+        }
+    }
+
     /// H-3d: the status strip -- the display's bottom `status_h` rows
     /// (Daylight 6/8: == the tag bar's height, one vertical unit) -- while a
     /// status bar is registered. The layout is recomputed above it.
     fn status_rect(&self) -> Option<Rect> {
         self.status?;
-        let unit = libhalcyon::theme::METRICS.status_h as u32;
+        let unit = self.metrics.status_h as u32;
         let (dw, dh) = (self.gpu.width, self.gpu.height);
         if dh <= unit || dw == 0 {
             return None;
@@ -4424,7 +4489,7 @@ impl Comp {
         // display width by the one vertical unit -- never cropped or
         // letterboxed (HALCYON.md 13.6). Judged before the weave allocation.
         if is_status {
-            let unit = libhalcyon::theme::METRICS.status_h as u32;
+            let unit = self.metrics.status_h as u32;
             if self.status.is_some() || w != disp_w || h != unit || disp_h <= unit {
                 return Err(p9::E_INVAL);
             }
@@ -4477,7 +4542,7 @@ impl Comp {
                 n,
                 w,
                 h,
-                libhalcyon::theme::METRICS.status_h
+                self.metrics.status_h
             );
             self.reconcile();
             return Ok(());
@@ -5531,7 +5596,7 @@ impl Comp {
     }
 
     fn paint_borders(&mut self, fill_tagbars: bool) -> Vec<Rect> {
-        use libhalcyon::theme::{DAYLIGHT as D, METRICS as M};
+        use libhalcyon::theme::DAYLIGHT as D;
         let mut painted: Vec<Rect> = Vec::new();
         let dw = self.gpu.width as u64;
         let va = match &self.screen {
@@ -5540,8 +5605,8 @@ impl Comp {
         };
         let px = va as *mut u32;
         let focused = self.layout.focused;
-        let bevel = M.bevel as u32;
-        let hair = M.hairline as u32;
+        let bevel = self.metrics.bevel as u32;
+        let hair = self.metrics.hairline as u32;
         // H-3d: the status strip's resting fill (`status_bg`, Daylight 6):
         // the bar is dark from the carve on, before and between the
         // renderer's presents (its OPAQUE Role::Status surface composites on
@@ -5795,7 +5860,7 @@ impl Comp {
                     }
                 }
                 Mode::Stacked => {
-                    let row_h = libhalcyon::theme::METRICS.tab_strip_h as u32;
+                    let row_h = self.metrics.tab_strip_h as u32;
                     for (i, _) in children.iter().enumerate() {
                         fill(
                             Rect {
@@ -5943,7 +6008,7 @@ impl Comp {
             Vec::new()
         };
         self.layout.apply_backgrounded(&bg_tiling);
-        self.layout.recompute(dw, layout_h, self.chords.gaps);
+        self.layout.recompute(dw, layout_h, self.chords.gaps, self.metrics);
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
@@ -7682,6 +7747,21 @@ impl Comp {
     /// reconciles; a no-op (edge/degenerate) does not.
     fn exec_chord(&mut self, action: ChordAction) {
         match action {
+            // HALCYON-SCALE 6: the live scale controls (Super+= / Super+- /
+            // Super+0 by default). A chord acts in the compositor, so no
+            // admission; the step is clamped, the reset re-derives.
+            ChordAction::ScaleStep(dir) => {
+                let p = scale::step(self.scale, dir);
+                if p != self.scale {
+                    self.scale_override = Some(p);
+                    self.apply_scale(p, "chord");
+                }
+            }
+            ChordAction::ScaleReset => {
+                self.scale_override = None;
+                let p = self.derive_scale();
+                self.apply_scale(p, "chord-reset");
+            }
             ChordAction::FocusDir(d) => {
                 if self.layout.focus_dir(d) {
                     self.reconcile();
@@ -13785,9 +13865,10 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "display {} {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\nmenu {}\n",
+                    "display {} {}\nscale {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\nmenu {}\n",
                     comp.gpu.width,
                     comp.gpu.height,
+                    comp.scale,
                     comp.live_count(),
                     comp.clock_hz,
                     comp.tick,
@@ -15887,20 +15968,57 @@ impl Conn {
         let session_status_verb = s.starts_with("tag ")
             && comp.session_declared(self.conn_id)
             && Self::status_verb_leaf(s).is_some_and(|id| comp.leaf_hosted_by_conn(id, self.conn_id));
+        // HALCYON-SCALE 4: the display scale is the SEAT's -- the renderer
+        // unconditionally, the declared session compositor while it hosts
+        // (the seat-held-while-hosting rule the menu and the status bar
+        // carry). A per-process client rescaling another principal's
+        // display is the cfg-3 lie this refuses.
+        let session_scale_verb = s.starts_with("scale ")
+            && comp.session_declared(self.conn_id)
+            && comp.conn_hosts(self.conn_id);
         if !Self::is_ungated_ctl(s)
             && !self.peer_is_renderer()
             && !session_menu_verb
             && !session_status_verb
+            && !session_scale_verb
         {
             return Err(p9::E_PERM);
+        }
+        if let Some(rest) = s.strip_prefix("scale ") {
+            // `scale auto` re-derives from the EDID; `scale <pct>` is one of
+            // the five values or E_INVAL. Budgeted like a layout verb: it
+            // IS one (a structural relayout).
+            let rest = rest.trim();
+            self.layout_verb_budget()?;
+            if rest == "auto" {
+                comp.scale_override = None;
+                let p = comp.derive_scale();
+                comp.apply_scale(p, "auto");
+                return Ok(());
+            }
+            let pct: u16 = rest.parse().map_err(|_| p9::E_INVAL)?;
+            if !scale::is_valid_pct(pct) {
+                return Err(p9::E_INVAL);
+            }
+            comp.scale_override = Some(pct);
+            comp.apply_scale(pct, "verb");
+            return Ok(());
         }
         if s == "mode auto" {
             // Re-probe the host's preferred rect and adopt it (base
             // virtio-gpu reports one rect, not a mode list). Absent or
-            // probe-failed: fail soft, current mode stands.
+            // probe-failed: fail soft, current mode stands. The EDID is
+            // re-queried with it (a hotplug is the one time it changes).
             let probed = comp.gpu.query_display_info().ok().flatten();
             return match probed {
-                Some((w, h)) => comp.set_mode(w, h),
+                Some((w, h)) => {
+                    let r = comp.set_mode(w, h);
+                    if r.is_ok() {
+                        comp.gpu.edid_mm = comp.gpu.query_edid().unwrap_or(None);
+                        comp.rescale_after_mode();
+                    }
+                    r
+                }
                 None => Err(p9::E_AGAIN),
             };
         }
@@ -15919,7 +16037,13 @@ impl Conn {
             if it.next().is_some() {
                 return Err(p9::E_INVAL);
             }
-            return comp.set_mode(w, h);
+            // HALCYON-SCALE 4: new pixels over the same millimetres is a
+            // new DPI -- re-derive unless a verb/chord override stands.
+            let r = comp.set_mode(w, h);
+            if r.is_ok() {
+                comp.rescale_after_mode();
+            }
+            return r;
         }
         if let Some(rate) = s.strip_prefix("clock-rate ") {
             let hz: u32 = rate.trim().parse().map_err(|_| p9::E_INVAL)?;

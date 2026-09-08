@@ -108,6 +108,28 @@ pub const METRICS: Metrics = Metrics {
     tab_strip_h: 5,
 };
 
+impl Metrics {
+    /// The chrome metrics at a display scale (HALCYON-SCALE 5; the percent
+    /// of `scale::scale_pct`): every size round-half-up scaled, the
+    /// hairline never below 1 and the bevel never below 2 (COMPOSITION
+    /// 1's structural-mark floors). The ONE function both the compositor's
+    /// carve and halcyond's paint use, so the two cannot drift; `at(100)`
+    /// is `METRICS` exactly (pinned by test).
+    pub const fn at(pct: u16) -> Metrics {
+        let hair = crate::scale::ipx(METRICS.hairline, pct);
+        let bevel = crate::scale::ipx(METRICS.bevel, pct);
+        Metrics {
+            bevel: if bevel < 2 { 2 } else { bevel },
+            gap: crate::scale::ipx(METRICS.gap, pct),
+            hairline: if hair < 1 { 1 } else { hair },
+            header_h: crate::scale::ipx(METRICS.header_h, pct),
+            status_h: crate::scale::ipx(METRICS.status_h, pct),
+            tag_pad_x: crate::scale::ipx(METRICS.tag_pad_x, pct),
+            tab_strip_h: crate::scale::ipx(METRICS.tab_strip_h, pct),
+        }
+    }
+}
+
 /// Daylight (HALCYON-VISUAL section 1). Values are the doc's #rrggbb widened to
 /// opaque Argb; the test below pins every one against the scripture.
 pub const DAYLIGHT: Theme = Theme {
@@ -295,6 +317,33 @@ mod tests {
         assert_eq!(METRICS.header_h, 20);
         assert_eq!(METRICS.status_h, 20);
         assert_eq!(METRICS.tab_strip_h, 5);
+    }
+
+    // HALCYON-SCALE 5: the scaled metrics -- the identity at 100 (nothing at
+    // 1.0 moves), round half up above it, the hairline/bevel floors held
+    // (COMPOSITION 1: `max(1, round(1 x s))`, `max(2, round(2 x s))`), and
+    // the operator's worked table (COMPOSITION 6) at 150 and 200.
+    #[test]
+    fn scaled_metrics_are_the_identity_at_100_and_the_worked_table_above() {
+        assert!(Metrics::at(100) == METRICS, "at(100) is METRICS exactly");
+        let m125 = Metrics::at(125);
+        assert_eq!((m125.header_h, m125.status_h), (25, 25));
+        assert_eq!(m125.hairline, 1, "round(1.25) = 1, the floor holds");
+        assert_eq!(m125.bevel, 3, "round(2.5) = 3 (half up)");
+        assert_eq!(m125.gap, 3);
+        assert_eq!(m125.tag_pad_x, 8, "7.5 up");
+        assert_eq!(m125.tab_strip_h, 6, "6.25 down");
+        let m150 = Metrics::at(150);
+        assert_eq!((m150.header_h, m150.status_h, m150.bevel, m150.gap, m150.hairline), (30, 30, 3, 3, 2));
+        assert_eq!((m150.tag_pad_x, m150.tab_strip_h), (9, 8));
+        let m175 = Metrics::at(175);
+        assert_eq!((m175.header_h, m175.bevel, m175.hairline, m175.gap), (35, 4, 2, 4));
+        let m200 = Metrics::at(200);
+        assert_eq!((m200.header_h, m200.status_h, m200.bevel, m200.gap, m200.hairline), (40, 40, 4, 4, 2));
+        assert_eq!((m200.tag_pad_x, m200.tab_strip_h), (12, 10));
+        // The floors bite below 100 too (not a v1 value, but the function is total).
+        let m50 = Metrics::at(50);
+        assert_eq!((m50.hairline, m50.bevel), (1, 2));
     }
 
     // The ember is shared VERBATIM with Bonfire (section 1.3) -- the link

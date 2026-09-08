@@ -787,6 +787,46 @@ pub extern "C" fn rs_main() -> i64 {
         say!("battery: tag-status gate OK");
     }
 
+    // HALCYON-SCALE 4: the display scale is the seat's (the renderer or the
+    // declared hosting session). A non-renderer's `scale 200` is refused
+    // (rc -1, E_PERM: authority before syntax -- `scale bogus` is refused
+    // the same way, never E_INVAL) AND the ctl's `scale` line -- an ungated
+    // read -- still says what it said before. A refusal that had applied
+    // the write would read 200 and every strip would be 40 px.
+    {
+        let before = read_file(root, "ctl")
+            .and_then(|t| t.lines().find_map(|l| l.strip_prefix("scale ").map(|s| String::from(s.trim()))))
+            .unwrap_or_default();
+        if before.is_empty() {
+            say!("tapestry-battery: FAIL scale: the ctl carries no `scale` line");
+            return 1;
+        }
+        for (verb, what) in [("scale 200", "a valid scale"), ("scale bogus", "a bogus scale")] {
+            let rc = raw_ctl(root, verb);
+            if rc != -1 {
+                say!(
+                    "tapestry-battery: FAIL scale: non-renderer `{}` ({}) rc {} want -1 (E_PERM)",
+                    verb,
+                    what,
+                    rc
+                );
+                return 1;
+            }
+        }
+        let after = read_file(root, "ctl")
+            .and_then(|t| t.lines().find_map(|l| l.strip_prefix("scale ").map(|s| String::from(s.trim()))))
+            .unwrap_or_default();
+        if after != before {
+            say!(
+                "tapestry-battery: FAIL scale: the refused write changed the scale {} -> {}",
+                before,
+                after
+            );
+            return 1;
+        }
+        say!("battery: scale gate OK (scale {})", before);
+    }
+
     // H-3c: the menu verbs (`menu place <surface> <x> <y>` / `menu dismiss`)
     // ride the same default-deny gate: a non-renderer sees E_PERM whatever
     // it writes (authority before syntax), and the ungated `ctl` read shows
