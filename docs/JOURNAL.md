@@ -22,6 +22,72 @@ needed the operator.
 
 
 ---
+## 2026-09-08 (aux, run 6 continued, post self-compact #3) -- the arm-6 stall ROOT CAUSE CONFIRMED + GENERALIZED: any session process pinning the per-user home mount deadlocks logout; fix is a design fork (surfaced)
+
+Picked up the localization from the entry below and drove it to a proven root
+cause on the mac (HVF), which is where `ls-imperium.exp` runs by default
+(`THYLACINE_ACCEL hvf`) -- so the whole hunt moved off the Pi: no scp, no
+pairing traps, tests-ON works (the mac has no virtio-rng-reseed issue). The Pi
+detour last session was avoidable.
+
+**Confirmed the hung line (BOOT 1, mac HVF).** Instrumented `unbind_home`
+(`usr/login/src/main.rs:1066`) with four `t_putstr` markers around its three
+steps (unmount / close-attach / `proxy.wait()`) and ran a diagnostic
+`ls-imperium-stall.exp` (arms 0-5 + capture `/ctl/procs` + `exit` + a 90s
+prompt wait). The two provisioning logins printed all four markers including
+`proxy-reaped`; the imperium login printed `enter -> unmounted ->
+attach-closed, wait proxy` then **nothing** -- login is stuck in
+`proxy.wait()`. Proxy 414 never EOFs.
+
+**Generalized it (the discriminator that reframed the bug).** Hypothesized the
+pin was the imperium background `sleep 314159 &` (zombie 424 in the pre-exit
+`/ctl/procs`, PPID joey, unreaped, cwd `/home/michael`). Tested with a MINIMAL
+`ls-bghome-stall.exp`: a plain session, `sleep 314159 & ; exit` -- **no
+imperium, no SAK, no corvus, no legate.** It STALLS identically. So the bug is
+GENERAL, and the imperium arc merely happened to background a job.
+
+**The mechanism, proven by the code + the two boots.** The per-user encrypted
+home is a `--single-session` proxy stratumd (414) that login spawns and
+synchronously reaps with `proxy.wait()` (`bind_home`, `usr/login/src/main.rs:
+884`/`1069`). The `/home/<user>` mount is inherited by EVERY process in the
+user's session (namespace copy -> each holds a Chan on login's home
+`p9_client`). The proxy EOFs only when that `p9_client` is destroyed = when
+its last fid is released; and a Proc's territory (cwd + mounts) is released
+ONLY at REAP (`territory_unref` at `proc_free`, `kernel/proc.c:668` -- NOT in
+`exits()`/`thread_exit_self`, confirmed by grep). A background job that
+outlives the login shell orphans to joey; **joey cannot reap it because joey
+is blocked in `t_wait_pid(login)`**, and login is blocked in `proxy.wait()`.
+Circular: login -> proxy 414 -> the orphan's held mount Chan -> the orphan's
+reap -> joey -> login. Normal logout works only because the shell is the sole
+session process and login reaps it directly (releasing its mount Chan) before
+`unbind_home`.
+
+**This is a recurrence of the #926-class deadlock, one layer over.** The joey
+reaper note (`usr/joey/joey.c:440`) records that #68/#926 moved the HANDLE
+TABLE close to EXIT precisely to stop "a zombie holds the resource until reap"
+deadlocks. But it did NOT move the TERRITORY (cwd + mounts), which holds the
+9P *session* fids -- so the same deadlock reappears on the namespace. Unlike
+#926, it also fires for ALIVE orphans (the bghome case), so "release at exit"
+alone is not a complete fix.
+
+**Why the fix is a fork (surfaced to the operator).** The pin is the territory
+(mount Chan), held until reap, and login cannot reap the session's non-child
+processes. So a complete fix needs BOTH "make alive orphans exit" (terminate
+the session at logout) AND "an exited/zombie process must not hold the mount
+past exit" (release the namespace 9P Chans at exit, extending #926) -- OR a
+single force/lazy-detach of the home mount at logout (evicts the DEK, leaves
+orphans with a dead home). These differ on logout semantics (does logout kill
+background jobs?) and on the per-user-encrypted-home SECURITY model (only
+terminate-or-detach evicts the DEK; a POSIX decouple leaves the home mounted +
+DEK loaded for lingering processes). A genuine value/security tradeoff -> the
+operator's call.
+
+**Cost / state.** Two mac HVF boots (~2 min each) after one instrumented build
+(PRESERVE=1, kept michael's home). Markers reverted; tree clean. Discriminators
+saved in `scratchpad/{ls-imperium-stall,ls-bghome-stall}.exp`. No fix landed
+yet -- the fork is surfaced; implementation waits on the decision.
+
+---
 ## 2026-09-08 (aux, run 6 continued, self-compact #3) -- the arm-6 logout stall ROOT-CAUSE-LOCALIZED: login hangs in its post-ut-exit cleanup, not the console
 
 The operator-chosen arc: deep-debug the arm-6 logout->login stall (after an
