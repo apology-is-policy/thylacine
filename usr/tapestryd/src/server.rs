@@ -1637,6 +1637,14 @@ pub struct Comp {
     /// focus-only epoch bump redraws borders without blanking content
     /// (idle clients must not lose their pixels to a focus ring move).
     geom_sig: u64,
+    /// HALCYON-SCALE 5: a scale change owes every follower a redraw
+    /// CONFIGURE (+ the session its TEV_LAYOUT) whether or not the geometry
+    /// moved -- the Direct arm carves nothing, a lone leaf under a menu
+    /// keeps its full rect. Set by `apply_scale`, consumed by the next
+    /// `reconcile` in whichever arm it takes; never a second fan after a
+    /// structural pass (a queued CONFIGURE is replaced wholesale, so a
+    /// same-size re-fan would overwrite a resize offer just made).
+    rescale_fan_due: bool,
     /// The conns that DECLARED themselves the display's session compositor
     /// (`session on` on their own ctl). The display handoff keys on this,
     /// never on a surface's principal: a user program drawing a window is
@@ -2298,9 +2306,19 @@ const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
     pub fn new(gpu: Gpu) -> Comp {
-        let scale = match gpu.edid_mm {
+        let derived = match gpu.edid_mm {
             Some((mm_w, mm_h)) => scale::scale_pct(gpu.width, gpu.height, mm_w, mm_h),
             None => scale::SCALE_MIN,
+        };
+        // The same guard the runtime path (`apply_scale`) applies: the seat
+        // runs at one of the five values or at 100, never at whatever the
+        // derivation returned (the scale round's F2: a wrapped percent
+        // reached the ctl through this path alone).
+        let scale = if scale::is_valid_pct(derived) {
+            derived
+        } else {
+            say!("tapestryd: scale {} off the table (edid) -> {}", derived, scale::SCALE_MIN);
+            scale::SCALE_MIN
         };
         say!("tapestryd: scale {} (edid)", scale);
         Comp {
@@ -2354,6 +2372,7 @@ impl Comp {
             pending_bind_refused_said: false,
             chrome_epoch: 0,
             geom_sig: 0,
+            rescale_fan_due: false,
             session_conns: Vec::new(),
             tick: 0,
             clock_hz: 60,
@@ -4008,6 +4027,12 @@ impl Comp {
         self.scale = pct;
         self.metrics = Metrics::at(pct);
         say!("tapestryd: scale {} -> {} ({})", from, pct, why);
+        // The fan is owed whatever the geometry does (the scale round's
+        // F3). Set BEFORE the bar retire: the retire's own reconcile
+        // consumes it inside the structural pass the carve change forces,
+        // and the reconcile below then finds the signature unchanged and
+        // fans nothing more -- ONE fan per change.
+        self.rescale_fan_due = true;
         if let Some(st) = self.status {
             let stale = self
                 .surf(st.n)
@@ -5734,10 +5759,16 @@ impl Comp {
                                            // a zero-gap config skips it (focus still shows in the strip +
                                            // the H-3b status key).
             if slot == focused && floor_w >= 1 {
-                let sy = y1 - floor_w; // innermost floor row (d == floor_w-1)
-                for x in (r.x + floor_w)..(x1 - floor_w) {
-                    unsafe {
-                        *px.add((sy as u64 * dw + x as u64) as usize) = D.border;
+                // A hairline at the scale (COMPOSITION 1; the scale round's
+                // F5): `hair` floor rows from the innermost (d == floor_w-1)
+                // outward, bounded by the floor itself.
+                let band = hair.min(floor_w);
+                for row in 0..band {
+                    let sy = y1 - floor_w + row;
+                    for x in (r.x + floor_w)..(x1 - floor_w) {
+                        unsafe {
+                            *px.add((sy as u64 * dw + x as u64) as usize) = D.border;
+                        }
                     }
                 }
             }
@@ -5851,7 +5882,13 @@ impl Comp {
                         } else {
                             each
                         };
-                        let gap = if i as u32 == n - 1 || w == 0 { 0 } else { 1 };
+                        // The segment gap is a hairline at the scale (the
+                        // scale round's F5), never wider than the segment.
+                        let gap = if i as u32 == n - 1 || w == 0 {
+                            0
+                        } else {
+                            (self.metrics.hairline as u32).min(w)
+                        };
                         fill(
                             Rect {
                                 x,
@@ -6152,8 +6189,13 @@ impl Comp {
         };
 
         match want {
-            Scanout::Boot => {}
+            // Nothing showable in either arm: a client coming up reads the
+            // ctl at its start and again at its first relayout.
+            Scanout::Boot => {
+                self.rescale_fan_due = false;
+            }
             Scanout::Off => {
+                self.rescale_fan_due = false;
                 if self.pending_direct.is_some() {
                     say!("tapestryd: scanout off clears pending-direct");
                 }
@@ -6166,7 +6208,21 @@ impl Comp {
             Scanout::Direct(n) => {
                 if self.scanout == Scanout::Direct(n) {
                     self.pending_direct = None;
-                } else if self.pending_direct != Some(n) {
+                    // This arm has no geometry to move, so a scale change
+                    // would fan nothing (the scale round's F3): the redraw
+                    // request + the session's TEV_LAYOUT ride here.
+                    if core::mem::take(&mut self.rescale_fan_due) {
+                        self.fan_scale_redraw_direct(n, dw, dh);
+                    }
+                } else if self.pending_direct == Some(n) {
+                    // Pending, and a scale change landed meanwhile: the
+                    // edge's CONFIGURE may already have been consumed at the
+                    // old scale -- a fresh redraw request (same size; a
+                    // still-queued one is replaced).
+                    if core::mem::take(&mut self.rescale_fan_due) {
+                        self.fan_scale_redraw_direct(n, dw, dh);
+                    }
+                } else {
                     // Defer to n's next present-COMPLETE (F16). Until then
                     // the current scanout (composed frame / boot pattern)
                     // stays -- transitional content, compositor policy.
@@ -6181,6 +6237,13 @@ impl Comp {
                     self.pending_bind_refused_said = false; // new episode
                     if !self.emit_configure_to(n, dw, dh) {
                         self.retire(n); // wedged; retire clears pending
+                    } else if core::mem::take(&mut self.rescale_fan_due) {
+                        // The edge's CONFIGURE is the redraw request already;
+                        // the session's TEV_LAYOUT is still owed, and the
+                        // emission is said for the gate.
+                        let serial = self.surf(n).map_or(0, |s| s.cfg_serial);
+                        say!("tapestryd: scale fan direct {} configure serial {}", n, serial);
+                        self.notify_session_layout();
                     }
                 }
             }
@@ -6194,7 +6257,13 @@ impl Comp {
                 }
                 let entering = self.scanout != Scanout::Composed;
                 let sig = self.calc_geom_sig();
-                let structural = entering || sig != self.geom_sig;
+                // A scale change is structural whatever the geometry did
+                // (the scale round's F3): a lone leaf under a menu keeps its
+                // full content rect, and the fan below is the only way its
+                // follower learns the new percent. Consumed here, after
+                // `ensure_screen` -- a degraded pass keeps it for the next.
+                let rescaled = core::mem::take(&mut self.rescale_fan_due);
+                let structural = entering || sig != self.geom_sig || rescaled;
                 if structural {
                     // Structural: full repaint, then every visible pane
                     // pre-filled from its client's last-presented slot
@@ -6970,6 +7039,23 @@ impl Comp {
             self.layout.epoch += 1;
             self.notify_session_layout();
         }
+    }
+
+    /// HALCYON-SCALE 5 (the scale round's F3): the Direct arm carves
+    /// nothing and fans nothing, so a scale change there reached its
+    /// follower only at the next unrelated relayout. The redraw CONFIGURE
+    /// (same-size by construction: Direct requires the surface
+    /// display-sized) + the session's TEV_LAYOUT; said with the serial so a
+    /// gate can witness the emission -- a same-size CONFIGURE is never
+    /// acked, so the queueing is the observable half.
+    fn fan_scale_redraw_direct(&mut self, n: usize, dw: u32, dh: u32) {
+        if !self.emit_configure_to(n, dw, dh) {
+            self.retire(n); // wedged; retire reconciles
+            return;
+        }
+        let serial = self.surf(n).map_or(0, |s| s.cfg_serial);
+        say!("tapestryd: scale fan direct {} configure serial {}", n, serial);
+        self.notify_session_layout();
     }
 
     /// Fan one TEV_LAYOUT to the declared session conn (its lowest-slot

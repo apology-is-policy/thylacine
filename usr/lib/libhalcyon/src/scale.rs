@@ -63,7 +63,10 @@ pub fn scale_pct(px_w: u32, px_h: u32, mm_w: u32, mm_h: u32) -> u16 {
     let axis = |px: u32, mm: u32| -> u16 {
         let dpi = (px as f32) * 25.4 / (mm as f32);
         let quarters = (dpi / (REFERENCE_DPI as f32) * 4.0 + 0.5) as u32; // round half up
-        let pct = (quarters * 25) as u16;
+        // Clamp BEFORE the narrowing: a 1 mm axis under thousands of pixels
+        // makes `quarters * 25` exceed u16, and a wrapped value need not be
+        // a multiple of 25 -- an off-table percent from a hostile EDID.
+        let pct = (quarters * 25).min(SCALE_MAX as u32) as u16;
         pct.clamp(SCALE_MIN, SCALE_MAX)
     };
     let w = axis(px_w, mm_w);
@@ -212,5 +215,21 @@ mod tests {
         let mut long = [0u8; 256];
         long[..128].copy_from_slice(&edid((60, 34), Some((597, 336))));
         assert_eq!(parse_edid_mm(&long), Some((597, 336)));
+    }
+
+    #[test]
+    fn a_short_millimetre_axis_never_truncates_off_the_table() {
+        // The scale round's F2: `quarters * 25` wrapped in u16 BEFORE the
+        // clamp (2481 px over 1 mm: 2626 quarters -> 65650 -> 114) -- an
+        // off-table percent from a hostile EDID, applied unguarded at boot.
+        // The clamp happens in u32 now: every result over the admitted mm
+        // range is one of the five.
+        assert_eq!(scale_pct(2481, 1600, 1, 100), SCALE_MAX);
+        for mm_w in 1..=4u32 {
+            for px_w in (2000..=8192u32).step_by(7) {
+                let p = scale_pct(px_w, 1600, mm_w, 100);
+                assert!(is_valid_pct(p), "scale_pct({px_w}, 1600, {mm_w}, 100) = {p}");
+            }
+        }
     }
 }

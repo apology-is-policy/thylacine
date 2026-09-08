@@ -270,4 +270,10 @@ LOGICAL pixels, scaled at the carve like the rest.
 - The chord defaults Super+= / Super+- / Super+0 (free keys; remappable).
 - The atlas cap deriving from the display area (a change to the run-44 /
   1337a218 constant's meaning, not its value at 1280x800).
-- The failure posture: a garbage or absent EDID is 1.0, said once.
+- The failure posture: a garbage or absent EDID is 1.0, said once -- and
+  (the audit's F2) a derivation that lands off the table at boot is 1.0
+  too, said on the boot line, the same guard the runtime path applies.
+- The fan rule (the audit's F3): a scale change fans the redraw CONFIGURE
+  to every visible surface and TEV_LAYOUT to the session WHETHER OR NOT
+  the geometry moved -- the Direct arm and a lone leaf under a menu carve
+  nothing, and a follower re-reads the ctl only on a relayout.

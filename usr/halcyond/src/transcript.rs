@@ -1351,9 +1351,14 @@ impl Transcript {
         // Cells mode: a zone-less block whose text is still on the grid has
         // no items, but its obj table is what the grid's tags index -- drop
         // it and the grid's objects resolve to nothing. Kept, it lays to 0 px.
+        // Cells mode keeps an ANNOTATED zone-less block too (an `em` with
+        // no zone around it): its rows are still on the grid naming it, and
+        // the class they carry when they scroll off is this block's -- a
+        // dropped id resolves to no block and the row would fall to the
+        // raw default (the scale round's F7).
         let keep = self.open.has_content()
             || self.open.kind != BlockKind::Foreign
-            || (self.cells_mode && !self.open.objs.is_empty());
+            || (self.cells_mode && (!self.open.objs.is_empty() || self.open.annotated_own));
         // Ids are monotonic and NEVER recycled, dropped block or not: in
         // cells mode the dropped block's cells are still on the grid with
         // tags naming its id, and a successor wearing the same id would
@@ -1364,6 +1369,13 @@ impl Transcript {
         self.next_id += 1;
         let mut b = core::mem::replace(&mut self.open, Block::new(id, next));
         self.open.continuation = continuation;
+        // A continuation is the SAME zone going on: its frames were cleared
+        // with the freeze, but the zone's own annotation still classes it
+        // (the scale round's F7) -- else the remainder of a heading's zone
+        // laid as a mono island where its first half laid as a document.
+        if continuation {
+            self.open.annotated_own = b.annotated_own;
+        }
         if keep {
             b.cost += b.styles.len() * core::mem::size_of::<Style>();
             self.stored_cost += b.styles.len() * core::mem::size_of::<Style>();
@@ -1845,8 +1857,12 @@ impl Transcript {
         // annotates nothing. Decided BEFORE this row's styles are interned.
         let owner = raw.iter().find_map(|c| spans.get(c.span).map(|t| t.block));
         let own = owner.is_none_or(|id| id == self.open.id);
+        // An owner that resolves to no block (evicted by the budget, or a
+        // zone-less block dropped at its freeze) gives its row the RAW
+        // default -- the class an un-annotated block has -- never the open
+        // zone's, which the row never belonged to (the scale round's F7).
         let foreign_class = match owner {
-            Some(id) if !own => self.block_by_id(id).map(|b| b.class()),
+            Some(id) if !own => Some(self.block_by_id(id).map_or(LineClass::Raw, |b| b.class())),
             _ => None,
         };
         // (source block, obj) -> the index in the open block. A map, not a
@@ -3578,11 +3594,14 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_zone_less_block_never_lends_its_id_to_the_next_zone() {
+    fn a_zone_less_annotated_block_never_lends_its_id_to_the_next_zone() {
         // Audit F5: a zone-less block holding only `em` frames (no obj, no
-        // items) is dropped at the zone cut. Its cells on the grid carry tags
+        // items) is cut at the zone open. Its cells on the grid carry tags
         // naming its id; had the next zone reused that id, its raw lines
         // would inherit the dim line's annotation and class as a document.
+        // Since the scale round's F7 such a block is KEPT (annotated, so its
+        // rows resolve to ITS class when they scroll off); the id rule is
+        // the same either way.
         let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
         t.set_cells_mode(true);
         let mut spans = SpanMap::new();
@@ -3600,8 +3619,11 @@ mod tests {
         t.feed_frame(&buf, 3);
         spans.note(3, t.span_tag());
         let zone_id = spans.get(3).unwrap().block;
-        assert_ne!(zone_id, dropped_id, "the dropped block's id is not recycled");
-        assert!(t.block_by_id(dropped_id).is_none(), "the dropped block is gone");
+        assert_ne!(zone_id, dropped_id, "the cut block's id is not recycled");
+        assert!(
+            t.block_by_id(dropped_id).is_some_and(|b| b.class() == LineClass::Doc),
+            "the annotated zone-less block is kept, a document in its own right"
+        );
         let gc = |ch: char, span: u32| vt::Cell { ch, fg: 0, bg: 0, attrs: 0, span };
         let mut grid: Vec<vt::Cell> = "dim".chars().map(|c| gc(c, 1)).collect();
         grid.push(gc(' ', 0));
@@ -3766,6 +3788,128 @@ mod tests {
         let own_row: Vec<vt::Cell> = "bold".chars().map(|c| gc(c, s_em)).collect();
         t.push_scrolled_rows(&[own_row], &[false], &spans);
         assert_eq!(t.open_block().class(), LineClass::Doc, "the zone's own annotation counts");
+    }
+
+    #[test]
+    fn a_continuation_of_an_annotated_zone_stays_a_document() {
+        // The scale round's F7 (route 1): the line cap splits a zone whose
+        // annotation is a frame opened in its first half; the continuation
+        // used to be minted un-annotated and its plain rows laid as a mono
+        // island where the first half laid as a document.
+        let mut t = Transcript::with_caps(daylight(), 100, usize::MAX, 4);
+        let mut buf = Vec::new();
+        wire::open(&mut buf, Op::Zone, &[("k", "output")]);
+        wire::open(&mut buf, Op::Em, &[("class", "strong")]);
+        buf.extend_from_slice(b"Heading\n");
+        wire::close(&mut buf, Op::Em);
+        for i in 0..6 {
+            buf.extend_from_slice(format!("l{}\n", i).as_bytes());
+        }
+        wire::close(&mut buf, Op::Zone);
+        t.feed(&buf);
+        let blocks = t.frozen_blocks();
+        assert_eq!(blocks.len(), 2, "the cap split the zone");
+        assert!(blocks[1].continuation);
+        assert!(blocks[0].annotated(), "the first half holds the emphasis");
+        assert!(
+            blocks[1].annotated(),
+            "the continuation inherits the zone's annotation: its plain rows lay as the same document"
+        );
+        assert_eq!(blocks[1].class(), LineClass::Doc);
+    }
+
+    #[test]
+    fn a_scrolled_row_of_an_evicted_zone_lands_raw_not_in_the_open_zones_class() {
+        // The scale round's F7 (route 2): a row whose zone the budget has
+        // already evicted scrolls off while an ANNOTATED zone is open. Its
+        // owner resolves to no block; it must take the raw default, never
+        // the open zone's document class (which would render it as prose).
+        let mut t = Transcript::with_caps(daylight(), 2, 1 << 20, 10_000);
+        t.set_cells_mode(true);
+        let mut spans = SpanMap::new();
+        let mut serial = 0u32;
+        let frame = |t: &mut Transcript, spans: &mut SpanMap, serial: &mut u32, f: &dyn Fn(&mut Vec<u8>)| -> u32 {
+            let mut b: Vec<u8> = Vec::new();
+            f(&mut b);
+            *serial += 1;
+            t.feed_frame(&b, *serial);
+            spans.note(*serial, t.span_tag());
+            *serial
+        };
+        let gc = |ch: char, span: u32| vt::Cell { ch, fg: 0, bg: 0, attrs: 0, span };
+        // Zone A (plain), closed; its text is still on the grid.
+        let s_a = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "output")]));
+        let a_id = t.open_block().id;
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::close(b, Op::Zone));
+        // Two more zones freeze behind it: the 2-block cap evicts A.
+        for _ in 0..2 {
+            let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "output")]));
+            let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::close(b, Op::Zone));
+        }
+        // Zone D opens, annotated by its own object.
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "output")]));
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Obj, &[("type", "path"), ("ref", "/lib/aurora")]));
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::close(b, Op::Obj));
+        assert!(t.block_by_id(a_id).is_none(), "A is evicted");
+        assert!(t.open_block().annotated(), "D's own object annotates D");
+        // A's row leaves the grid now.
+        let a_row: Vec<vt::Cell> = "old plain".chars().map(|c| gc(c, s_a)).collect();
+        t.push_scrolled_rows(&[a_row], &[false], &spans);
+        let classes: Vec<LineClass> = t
+            .open_block()
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Line(l) => Some(l.class),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(classes, alloc::vec![LineClass::Raw], "the orphaned row lands raw, not as D's prose");
+    }
+
+    #[test]
+    fn a_zone_less_annotated_block_is_kept_so_its_scrolled_rows_keep_their_class() {
+        // The scale round's F7 (route 2, the other face): a program emits an
+        // `em` with no zone around it. The Foreign block is annotated but
+        // item-less (its text is on the grid), and used to be DROPPED at the
+        // next zone's open -- its rows then scrolled off owner-less. Kept,
+        // they resolve to their own block's class.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.set_cells_mode(true);
+        let mut spans = SpanMap::new();
+        let mut serial = 0u32;
+        let frame = |t: &mut Transcript, spans: &mut SpanMap, serial: &mut u32, f: &dyn Fn(&mut Vec<u8>)| -> u32 {
+            let mut b: Vec<u8> = Vec::new();
+            f(&mut b);
+            *serial += 1;
+            t.feed_frame(&b, *serial);
+            spans.note(*serial, t.span_tag());
+            *serial
+        };
+        let gc = |ch: char, span: u32| vt::Cell { ch, fg: 0, bg: 0, attrs: 0, span };
+        let s_em = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Em, &[("class", "strong")]));
+        let f_id = t.open_block().id;
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::close(b, Op::Em));
+        // The shell opens a plain zone: the Foreign block freezes.
+        let s_out = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "output")]));
+        assert!(
+            t.block_by_id(f_id).is_some(),
+            "an annotated zone-less block is kept in cells mode: its rows on the grid still name it"
+        );
+        let em_row: Vec<vt::Cell> = "bold".chars().map(|c| gc(c, s_em)).collect();
+        let own_row: Vec<vt::Cell> = "cpus: 4".chars().map(|c| gc(c, s_out)).collect();
+        t.push_scrolled_rows(&[em_row, own_row], &[false, false], &spans);
+        let b = t.open_block();
+        let classes: Vec<LineClass> = b
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Line(l) => Some(l.class),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(classes, alloc::vec![LineClass::Doc, LineClass::Inherit], "the em row keeps ITS block's class; the zone's own row inherits");
+        assert_eq!(b.class(), LineClass::Raw, "the plain zone stays raw");
     }
 
     #[test]

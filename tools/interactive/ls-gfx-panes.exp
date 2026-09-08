@@ -565,6 +565,45 @@ lc_pass "panes: console restored fullscreen after the battery"
 lc_run_expect "cat /dev/winsize" "winsize 128 36"
 lc_pass "panes: winsize restored fullscreen after the battery (#55 live across reweaves)"
 
+# HALCYON-SCALE 5 (the scale round's self-finding): a scale change reaches a
+# DIRECT display. The console is a lone display-sized leaf with no bar and no
+# menu, so the reconcile the chord runs has NO geometry in it -- the arm that
+# fanned nothing (the CONFIGURE fan rode the Composed arm's STRUCTURAL pass
+# only), leaving a follower painting the old percent until some unrelated
+# relayout. The witness is the compositor's record of the redraw CONFIGURE it
+# queued to the direct surface, serial-stamped (a client never acks a same-
+# size CONFIGURE and aurora prints nothing on its redraw arm, so the emission
+# is the observable half). Both directions: Super+= steps to 125, Super+0
+# re-derives from the EDID (100 on QEMU) -- each must fan.
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+equal"} err]} {
+    lc_fail "qmp-sendtext scale chord failed: $err"
+}
+expect {
+    -re {tapestryd: scale 100 -> 125 \(chord\)} {}
+    timeout { lc_fail "Super+= never changed the scale (no `tapestryd: scale 100 -> 125 (chord)`)" }
+}
+expect {
+    -re {tapestryd: scale fan direct (\d+) configure serial (\d+)} {
+        set fan_surf $expect_out(1,string); set fan_serial $expect_out(2,string)
+    }
+    timeout { lc_fail "the DIRECT console got no redraw CONFIGURE on the scale change (the arm fanned nothing -- the follower would stay at 100 until an unrelated relayout)" }
+}
+lc_pass "panes: a scale change reaches the DIRECT console (redraw CONFIGURE serial $fan_serial queued to surface $fan_surf)"
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+0"} err]} {
+    lc_fail "qmp-sendtext scale-reset chord failed: $err"
+}
+expect {
+    -re {tapestryd: scale 125 -> 100 \(chord-reset\)} {}
+    timeout { lc_fail "Super+0 never reset the scale (no `tapestryd: scale 125 -> 100 (chord-reset)`)" }
+}
+expect {
+    -re {tapestryd: scale fan direct (\d+) configure serial (\d+)} {
+        if {$expect_out(2,string) == $fan_serial} { lc_fail "the reset's fan re-used serial $fan_serial: no fresh CONFIGURE was queued" }
+    }
+    timeout { lc_fail "the DIRECT console got no redraw CONFIGURE on the scale reset" }
+}
+lc_pass "panes: the scale reset reaches the DIRECT console too (a fresh serial)"
+
 lc_quit
 lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + close + singleslot + collapse)"
 exit 0

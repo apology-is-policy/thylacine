@@ -158,6 +158,82 @@ renderers and one in the witness itself -- the round-44 lesson again: the
 screenshot loop is a gate, and a gate's first run is where it earns its
 keep.
 
+**The scale round (Fable 5.1, MODEL start==end; after the second
+self-compaction).** One prosecutor over SC-2 + SC-3/SC-4 with the
+chrome-content close's ROUND 2 FOCUS folded in: 0 P0 / 0 P1 / 2 P2 / 5 P3,
+every one fixed in the close (`memory/audit_scale_closed_list.md`). The
+parallel self-audit -- run while the prosecutor read, per the
+audit-in-flight rule -- found one thing, and the prosecutor found the same
+thing independently from the other direction, which is the discipline
+working as designed rather than a coincidence worth celebrating.
+
+- **F1 [P2], measured, pre-existing:** the console's layout cache reset
+  itself past 512 entries ("a crude LRU stand-in"), and the console walks
+  EVERY frozen block per frame -- so past 513 blocks every keystroke
+  re-laid the whole transcript: 600 blocks, misses per pass [600, 600,
+  600] where a warm cache reads [600, 0, 0]. The 1337a218 close moved the
+  atlas working set to the painted set; this was the same shape one axis
+  over, and that close's restructure made this cache THE bound between a
+  keystroke and O(history) work. The reset is gone; the bound is the live
+  set (`evict_missing` per frame), pinned by the [600, 0, 0] walk.
+- **F2 [P2], measured, mine (SC-2):** `scale_pct` narrowed `quarters * 25`
+  to u16 BEFORE clamping -- a 1 mm EDID axis under 2481 px makes 65650,
+  wraps to 114, and 114 clamps to 114. The boot path applied it unguarded
+  (the runtime path had the guard, and used it to keep the OLD scale
+  silently on an invalid re-derive). Nothing panicked -- every consumer is
+  total -- but the seat ran off the table. The clamp is in u32 now and the
+  boot path is guarded like the runtime one; the prosecutor's sweep (31
+  off-table results over mm_w 1..=4) is the test.
+- **F3 = my S1, the Direct arm fans nothing.** Reading `reconcile` against
+  halcyond's relayout triggers: the CONFIGURE fan and the session's
+  TEV_LAYOUT ride only the Composed arm's STRUCTURAL pass, whose signature
+  folds leaf rects; the Direct arm (a lone display-sized leaf, no bar, no
+  menu) clears `pending_direct` and nothing else, and a lone leaf under a
+  menu keeps its full rect. A scale change there reached its follower at
+  the next UNRELATED relayout -- the ctl said 125, the paint said 100, and
+  a bar minted meanwhile at the old height was refused with its retry arm
+  spent. The fix is a flag `apply_scale` sets and every `reconcile` arm
+  consumes; the shape matters more than the fix: a queued CONFIGURE is
+  replaced WHOLESALE, so "fan again after the reconcile" would overwrite a
+  resize offer the structural pass had just made with a stale same-size
+  request. A fan keyed on geometry misses every change that moves no
+  geometry; a state read off a channel needs its own re-read signal. The
+  witness is a leg in ls-gfx-panes, where aurora IS the Direct console
+  after the battery: the chord's `scale 100 -> 125 (chord)` must be
+  followed by the compositor's record of the redraw CONFIGURE it queued
+  (serial-stamped), and the reset by a FRESH serial. The emission is the
+  observable half -- a same-size CONFIGURE is never acked by the client
+  library, and aurora prints nothing on its redraw arm by design.
+- **F4-F7 [P3]:** the console's caret and run underline were literal 2 px
+  (the tile path already used the sheet's mark); tapestryd's tab-segment
+  gap and cast shadow stayed 1 px above 125%; the console rendered one
+  frame at the OLD sheet before its ctl re-read (the read now runs ahead of
+  the render, as the session loop already did); and two class routes the
+  scroll-off fix had not covered -- a continuation block minted
+  un-annotated (a heading's zone laying as an island past the line cap),
+  and an owner resolving to no block falling to the OPEN zone's class, the
+  leak direction the fix targeted -- now a continuation inherits the flag,
+  an unresolvable owner takes the raw default, and cells mode keeps an
+  annotated zone-less block so its rows resolve to their own class.
+
+The 8K atlas worry from the self-audit list was withdrawn by the
+prosecutor on measurement: the 64 MiB weave cap bounds a fullscreen
+triple-buffered surface at ~5.6 Mpx, so the bound never exceeds 43 + 8
+pages, and the mode ceiling is 4K anyway. Two E2E legs joined the gates:
+ls-gfx-panes' Direct-arm fan (discriminating: the fan line does not exist
+pre-fix) and ls-halcyon's console follower at 125% (the console path's
+first runtime E2E; it passes pre-fix through the bar retire's structural
+pass, so it is a net, not the discrimination).
+
+Verification of the close: halcyond 175 (+4) and libhalcyon 48 (+1) on the
+host, the guest check clean; three levers baked and gated, one attempt
+each -- ls-gfx-panes 47 s with the Direct fan (serial 26 on the chord, 27
+on the reset, both to aurora's surface 0), ls-halcyon 118 s with the
+console at 125% (cell 13x29) and back (10x22, 128 columns) -- its
+transcript shows the display transiting THROUGH pending-direct on the way,
+the arm the flag also covers -- and ls-gfx-compose 73 s with all six legs
+at the 2.0 table. Close commit: SCALE_CLOSE_HASH.
+
 ## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
 
 **Where it sits.** The first queued item after run 44's close: the chrome

@@ -433,6 +433,46 @@ pub extern "C" fn rs_main() -> i64 {
         // (0b) Retry held input unconditionally (#129/#135).
         feed_drain(feed, &mut feed_pending, &mut feed_dropped, &mut feed_logged);
 
+        // (0b') HALCYON-SCALE 6: the display + the scale, re-read whenever
+        // a relayout is pending -- BEFORE the render, not beside the chrome
+        // reconcile below it: the CONFIGURE that carries a scale change
+        // lands at (1), and a render at (0c) ahead of this re-read would
+        // present one frame at the OLD sheet into the re-carved surface
+        // (the scale round's F6; the session path orders it this way and
+        // never does). A scale change rebuilds the render brain: the sheet
+        // at the new percent (a new generation -- every cached layout is
+        // stale by key), the mono bakes + a fresh atlas, every cache that
+        // held a size, the winsize, a menu sized at the old scale, and a
+        // repaint of every surface (the compositor re-carved them; their
+        // CONFIGUREs deliver the new sizes).
+        if announced && relayout {
+            if let Some(di) = ring.display_info() {
+                if (di.w, di.h) != (display.w, display.h) {
+                    display.w = di.w;
+                    display.h = di.h;
+                    gs.set_display(di.w, di.h);
+                }
+                if di.scale != sheet.scale {
+                    let from = sheet.scale;
+                    let gen = sheet.gen + 1;
+                    sheet = daylight_sheet(di.scale);
+                    sheet.gen = gen;
+                    gs.set_scale(di.scale);
+                    display.scale = di.scale;
+                    cache.clear();
+                    frame.clear();
+                    last_open_laid = None;
+                    menus.close();
+                    chrome.invalidate();
+                    status.invalidate();
+                    report_winsize(consctl, w, h, &gs);
+                    dirty = true;
+                    let (cw, ch, _) = gs.mono_cell();
+                    say!("halcyond: scale {} -> {} (cell {}x{})", from, di.scale, cw, ch);
+                }
+            }
+        }
+
         // (0c) Render when the transcript moved or the view is dirty
         // (pass 1 always: dirty starts true -- the first present).
         if t.seq != last_seq || dirty {
@@ -579,9 +619,9 @@ pub extern "C" fn rs_main() -> i64 {
                     if let Some(r) = run_mark(mode, sel.as_ref(), &flat, bi, laid) {
                         cart.ops.push(cartoon::Op::Rect {
                             x: r.0,
-                            y: y + r.1 + r.3 - 2,
+                            y: y + r.1 + r.3 - sheet.mark_w,
                             w: r.2.max(1) as u32,
-                            h: 2,
+                            h: sheet.mark_w as u32,
                             color: libhalcyon::theme::DAYLIGHT.ember,
                         });
                     }
@@ -605,9 +645,9 @@ pub extern "C" fn rs_main() -> i64 {
                 if let Some(r) = run_mark(mode, sel.as_ref(), &flat, usize::MAX, &open_laid) {
                     cart.ops.push(cartoon::Op::Rect {
                         x: r.0,
-                        y: y + r.1 + r.3 - 2,
+                        y: y + r.1 + r.3 - sheet.mark_w,
                         w: r.2.max(1) as u32,
-                        h: 2,
+                        h: sheet.mark_w as u32,
                         color: libhalcyon::theme::DAYLIGHT.ember,
                     });
                 }
@@ -626,8 +666,8 @@ pub extern "C" fn rs_main() -> i64 {
             cart.ops.push(cartoon::Op::Rect {
                 x: cx,
                 y: py + cy,
-                w: 2,
-                h: ch2.max(4) as u32,
+                w: sheet.mark_w as u32,
+                h: ch2.max(sheet.ipx(4)) as u32,
                 color: ccol,
             });
 
@@ -693,39 +733,6 @@ pub extern "C" fn rs_main() -> i64 {
             };
             if relayout {
                 relayout = false;
-                // HALCYON-SCALE 6: the display + the scale, re-read where
-                // the layout is re-read. A scale change rebuilds the render
-                // brain: the sheet at the new percent (a new generation --
-                // every cached layout is stale by key), the mono bakes +
-                // a fresh atlas, every cache that held a size, the winsize,
-                // a menu sized at the old scale, and a repaint of every
-                // surface (the compositor re-carved them; their CONFIGUREs
-                // deliver the new sizes).
-                if let Some(di) = ring.display_info() {
-                    if (di.w, di.h) != (display.w, display.h) {
-                        display.w = di.w;
-                        display.h = di.h;
-                        gs.set_display(di.w, di.h);
-                    }
-                    if di.scale != sheet.scale {
-                        let from = sheet.scale;
-                        let gen = sheet.gen + 1;
-                        sheet = daylight_sheet(di.scale);
-                        sheet.gen = gen;
-                        gs.set_scale(di.scale);
-                        display.scale = di.scale;
-                        cache.clear();
-                        frame.clear();
-                        last_open_laid = None;
-                        menus.close();
-                        chrome.invalidate();
-                        status.invalidate();
-                        report_winsize(consctl, w, h, &gs);
-                        dirty = true;
-                        let (cw, ch, _) = gs.mono_cell();
-                        say!("halcyond: scale {} -> {} (cell {}x{})", from, di.scale, cw, ch);
-                    }
-                }
                 chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe);
                 trail_painted = alloc::string::String::from(t.cwd());
                 // A relayout re-arms the status bar's mint retry (H-3d F5):

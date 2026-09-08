@@ -1389,29 +1389,39 @@ pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &mut Glyp
 /// an atlas eviction keeps every entry (the paint re-resolves what it
 /// draws) -- a whole-history re-lay after an eviction, the shape that once
 /// packed every distinct glyph of the transcript in ONE frame, cannot
-/// happen.
+/// happen. The bound is the LIVE set: the owner evicts the ids the budget
+/// dropped (`evict_missing`) every frame, so the map never exceeds the
+/// transcript's block cap. It is NOT a size-triggered reset: the console
+/// walks every frozen block per frame, so a reset above some count re-laid
+/// the whole history on every keystroke once the transcript outgrew it --
+/// the atlas F1 shape on the layout axis.
 pub struct LayoutCache {
     map: BTreeMap<u64, (i32, u32, LaidBlock)>,
+    misses: u64,
 }
 
 impl LayoutCache {
     pub fn new() -> LayoutCache {
         LayoutCache {
             map: BTreeMap::new(),
+            misses: 0,
         }
     }
 
     pub fn get(&mut self, b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) -> &LaidBlock {
         let hit = matches!(self.map.get(&b.id), Some(e) if e.0 == width && e.1 == sheet.gen);
         if !hit {
-            if self.map.len() > 512 {
-                // Crude LRU stand-in: reset and re-lay the visible set.
-                self.map.clear();
-            }
+            self.misses += 1;
             let laid = layout_block(b, width, sheet, gs);
             self.map.insert(b.id, (width, sheet.gen, laid));
         }
         &self.map.get(&b.id).unwrap().2
+    }
+
+    /// Layouts computed so far (every miss). A repeat walk over a warm
+    /// cache at one width + generation adds none.
+    pub fn misses(&self) -> u64 {
+        self.misses
     }
 
     pub fn evict_missing(&mut self, live: &dyn Fn(u64) -> bool) {
@@ -2089,6 +2099,39 @@ mod tests {
     // scaled sizes' line-heights, the margins double, the island's inset
     // and cell are the 200% bake's, the rules are 2 px hairlines -- and the
     // same source lays to the same glyph count either way.
+    #[test]
+    fn a_warm_layout_cache_lays_nothing_on_a_repeat_walk() {
+        // The scale round's F1: a size-triggered reset (`> 512` entries)
+        // re-laid the WHOLE transcript every frame once it held more blocks
+        // than the threshold -- the console walks every frozen block per
+        // frame, so a long session paid O(history) per keystroke (measured
+        // by the prosecutor: 600 blocks, misses per pass [600, 600, 600]).
+        // The bound is the live set, never a reset.
+        let mut t = Transcript::with_caps(daylight(), 1000, usize::MAX, 8);
+        let mut buf = Vec::new();
+        for i in 0..600 {
+            wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
+            buf.extend_from_slice(alloc::format!("line {}\n", i).as_bytes());
+            wire::close(&mut buf, BOp::Zone);
+        }
+        t.feed(&buf);
+        let blocks = t.frozen_blocks();
+        assert_eq!(blocks.len(), 600);
+        let mut g = gs();
+        let s = daylight_sheet(100);
+        let mut cache = LayoutCache::new();
+        let mut misses = Vec::new();
+        for _ in 0..3 {
+            let before = cache.misses();
+            for b in blocks.iter() {
+                let _ = cache.get(b, 600, &s, &mut g);
+            }
+            misses.push(cache.misses() - before);
+        }
+        assert_eq!(misses, alloc::vec![600, 0, 0], "a warm cache lays nothing on a repeat walk");
+        assert_eq!(cache.len(), 600, "one entry per live block, none reset away");
+    }
+
     #[test]
     fn a_block_laid_at_200_is_the_operators_table_in_pixels() {
         let mut t = Transcript::new(daylight());

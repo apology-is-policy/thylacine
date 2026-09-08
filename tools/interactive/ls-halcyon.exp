@@ -823,6 +823,36 @@ if {$census != 2} {
 }
 lc_pass "halcyon: the zoom's dropped tag bars + every menu retired server-side (surfaces 2: the console + the status bar)"
 
+# HALCYON-SCALE 6 (the scale round): the CONSOLE follows the compositor's
+# scale at runtime -- the console path's only E2E (it is inert at 1.0 by
+# construction, which every other leg of this gate proves; the compose gate
+# proves the SESSION follower at 200%). Zoomed + the status bar = the
+# Composed arm: the chord retires the old-height bar, the leaf is re-offered
+# the full display, and halcyond re-reads the ctl on that relayout. The say
+# names the percent AND the mono cell it selected: 125% must land on a
+# BIGGER cell than 1.0's 10x22 (the 13-advance grid bake), so the bakes were
+# swapped and not just the number. Super+0 re-derives from the EDID (100 on
+# QEMU): the 1.0 cell and the 128-column winsize return.
+hkey "meta_l+equal"
+set timeout $lc_cmd_timeout
+expect {
+    -re {halcyond: scale 100 -> 125 \(cell (\d+)x(\d+)\)} {
+        set scw $expect_out(1,string); set sch $expect_out(2,string)
+        if {$scw <= 10 || $sch <= 22} { lc_fail "scale 125: the mono cell ${scw}x$sch did not grow past 1.0's 10x22 (the bakes were not swapped)" }
+    }
+    timeout { lc_fail "the console never followed Super+= (no `halcyond: scale 100 -> 125` say: the relayout the bar retire fans did not reach it)" }
+    eof { lc_fail "EOF waiting for the console's scale say" }
+}
+lc_pass "halcyon: the console followed Super+= to 125% (cell ${scw}x$sch)"
+hkey "meta_l+0"
+expect {
+    -re {halcyond: scale 125 -> 100 \(cell 10x22\)} {}
+    timeout { lc_fail "the console never followed Super+0 back to 100 (cell 10x22)" }
+    eof { lc_fail "EOF waiting for the console's scale-reset say" }
+}
+lc_run_expect "cat /dev/winsize" "winsize 128 "
+lc_pass "halcyon: Super+0 returned the console to 1.0 (cell 10x22; 128 columns again)"
+
 lc_quit
 
 # Transcript greps (output-only tokens; buffer-order-immune).
