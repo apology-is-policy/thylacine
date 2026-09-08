@@ -274,6 +274,62 @@ backgrounding the compositor already audited, with layout names as naming
 -- and built nothing. The closed image (session lever) was synced to
 thyla-pi over the tunnel for the operator's GL round.
 
+**The operator's first live look (2026-09-08, back for a moment).** "A day
+and night difference," and three observations, each a size the eye caught
+that no gate could: the prompt line ran SMALLER than the prose it
+introduces (10 px against 11.5); a fullscreen mono program (nora on the
+tile's grid) ran at the grid em (the 10x22 cell) while the preformatted
+block and the raw islands ran at the island em (6x14), which they wanted
+uniform at the block's size; and the text looked "jittery" on a retina
+screen. The first two are one commit: the prompt at the base size, and
+`mono_advances` returning the island advance for both atlas slots -- the
+grid IS the island now (6/8/9/11/12 across the five scales; the 12x27 cell
+at 2.0 is the operator's own table's), with the two-slot plumbing kept so
+a later split costs nothing. A side effect worth having: a live grid row
+and its scrolled-off island now share a cell, so scroll-off no longer
+changes a row's size. The operator's COMPOSITION 6 table still lists two
+ems at 2.0 (24 / 40); their doc, their amendment. The third is not the
+rasterizer: fontdue's coverage is anti-aliased into the atlas and blended
+at paint; what they saw was the host window upscaling a 1280x800 guest 2x
+onto a retina backing store. The scale arc is the remedy -- a 2560x1600
+guest at 200% is one physical pixel per guest pixel -- so `run-vm.sh` grew
+an inert `THYLACINE_HIDPI=1` (gpu0 `xres=2560,yres=1600`; cocoa
+`zoom-to-fit=on,zoom-interpolation=off`, both verified as accepted by
+this host's QEMU 10.0.2); the guest still derives 100% from QEMU's
+100-DPI EDID, so Super+= four times after login. Whether cocoa's
+zoom-to-fit lands 1:1 on the 2x backing store is the operator's eye to
+confirm; a device-tier `/lib/halcyon/scale` default (the renderer-file
+pattern) is the follow-up if they want it automatic.
+
+The console gate then failed three attempts running on `post-split cols
+105 (want a halved grid in [40,100))` -- not the renderer: a halved
+213-column grid is 105 columns, and the range had been written as a
+literal for the 128-column grid of the 10-px cell. The bound is derived
+from the full-width read now. A literal written for one geometry is a pin
+on that geometry, and it rots the day the geometry moves -- the same
+lesson as the lifted-constant one (#230), on the gate side.
+
+The compose gate then failed its 200% leg three attempts running on "the
+prose rhythm is 36 px, not the 35 box or the 39 paragraph pitch". Ground
+truth before theory: the line tops in the capture's left pane step 35
+inside paragraphs (with a one-pixel scatter where a pill's ground starts
+above the caps) and 39 across paragraph breaks and between the eight
+empty prompt lines the gate's own keystrokes leave -- the renderer is
+right. The verdict's statistic is not: the autocorrelation of a
+two-toothed comb peaks between the teeth, and the prompt at the base size
+now weighs as much as prose, so the blend won. The check accepts one pixel
+of blend; the defect classes it guards (the grid cell at 44, the bare face
+line at 30) stay far outside it, and the 2.0 capture is still rejected at
+1.0 (the pitch reads 26 there). While looking, something the rhythm check
+cannot see: in both 2.0 captures -- this morning's and today's -- the
+split tour's WRAPPED prose is garbled: `halcyon` / `layolcyon.rc` where a
+wrapped pill's continuation and the next pill are painted at one x, and
+this morning whole clauses missing mid-line (`not a terminaland prints
+stays an object -- a pa --`). Pre-existing at 200% in a 626-px pane;
+perfect at 1.0 in a 636-px one. A rhythm check does not witness content;
+enqueued with the host-first reproduction the gate is missing
+(`bug_wrapped_tour_text_garbled_at_200_in_a_split`).
+
 ## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
 
 **Where it sits.** The first queued item after run 44's close: the chrome

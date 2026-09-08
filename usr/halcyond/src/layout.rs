@@ -148,7 +148,11 @@ pub fn daylight_sheet(scale: u16) -> Sheet {
         // The body/prose size the Daylight mockup runs at (halcyon-daylight.css
         // .hal-prose 11.5px; HALCYON-VISUAL 7-8 type scale).
         body_px: px(11.5),
-        prompt_px: px(10.0),
+        // The prompt runs at the BASE size (the operator, 2026-09-08, on the
+        // first live look: "rather small and not prominent"; it was 10 --
+        // smaller than the prose it introduces). One value, never below the
+        // body's.
+        prompt_px: px(11.5),
         hdr_px: [px(17.5), px(14.5), px(12.5)],
         mono_island_px: 2.0 * island as f32,
         mono_grid_px: 2.0 * grid as f32,
@@ -2071,7 +2075,7 @@ mod tests {
         assert_eq!(s.scale, 100);
         assert!(s.metrics == libhalcyon::theme::METRICS);
         assert_eq!((s.hairline, s.mark_w), (1, 2));
-        assert_eq!((s.body_px, s.prompt_px), (11.5, 10.0));
+        assert_eq!((s.body_px, s.prompt_px), (11.5, 11.5), "the prompt at the base size (the operator, 2026-09-08)");
         assert_eq!(s.hdr_px, [17.5, 14.5, 12.5]);
         assert_eq!((s.mono_island_px, s.mono_grid_px), (crate::raster::MONO_ISLAND_PX, crate::raster::MONO_GRID_PX));
         assert_eq!((s.pad_x, s.block_gap, s.table_col_gap, s.kv_col_gap), (12, 6, 16, 28));
@@ -2080,13 +2084,13 @@ mod tests {
         assert_eq!(d.scale, 200);
         assert_eq!((d.metrics.header_h, d.metrics.status_h, d.metrics.tag_pad_x), (40, 40, 12));
         assert_eq!((d.hairline, d.mark_w), (2, 4));
-        assert_eq!((d.body_px, d.prompt_px), (23.0, 20.0), "prose 23 at 2.0 (COMPOSITION 6)");
+        assert_eq!((d.body_px, d.prompt_px), (23.0, 23.0), "prose 23 at 2.0 (COMPOSITION 6); the prompt with it");
         assert_eq!(d.hdr_px, [35.0, 29.0, 25.0], "35 / 29 / 25 at 2.0");
-        assert_eq!((d.mono_island_px, d.mono_grid_px), (24.0, 40.0), "twice the 12 / 20 advances");
+        assert_eq!((d.mono_island_px, d.mono_grid_px), (24.0, 24.0), "twice the 12 advance: one mono size, the grid at the island's");
         assert_eq!((d.pad_x, d.block_gap, d.table_col_gap, d.kv_col_gap), (24, 12, 32, 56));
         let m = daylight_sheet(150);
         assert_eq!((m.body_px, m.hdr_px[0], m.hairline, m.metrics.header_h), (17.25, 26.25, 2, 30));
-        assert_eq!((m.mono_island_px, m.mono_grid_px), (18.0, 30.0), "advances 9 / 15");
+        assert_eq!((m.mono_island_px, m.mono_grid_px), (18.0, 18.0), "advance 9, both");
         assert_eq!(m.ipx(5), 8, "7.5 rounds up");
         assert_eq!(m.ipx(3), 5, "4.5 rounds up");
         let q = daylight_sheet(125);

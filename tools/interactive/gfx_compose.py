@@ -413,8 +413,16 @@ def check_scaled(m, fails, pct):
     e = expectations(pct)
     if not check_chrome_at_scale(m, e, fails, "scaled"):
         return
-    if m["pitch"] not in (e["box"], e["pitch"]):
-        fails.append("scaled: the prose rhythm is %s px, not the %d box or the %d paragraph pitch at %d%%" % (m["pitch"], e["box"], e["pitch"], pct))
+    # The visible tour at a scale mixes two pitches in comparable numbers --
+    # in-paragraph lines at the box and paragraph breaks + the empty prompt
+    # lines at the paragraph pitch (the prompt runs at the base size since
+    # 2026-09-08, so its lines weigh as much as prose) -- and the
+    # autocorrelation of a two-toothed comb peaks BETWEEN the teeth (measured:
+    # 36 over a pane whose line tops step 35 and 39). One pixel of blend is
+    # accepted; the defect classes this guards stay far outside it (the grid
+    # cell at 44 and the bare face line at 30 at 2.0; 22 and 15 at 1.0).
+    if min(abs(m["pitch"] - e["box"]), abs(m["pitch"] - e["pitch"])) > 1:
+        fails.append("scaled: the prose rhythm is %s px, not the %d box or the %d paragraph pitch (+-1 blend) at %d%%" % (m["pitch"], e["box"], e["pitch"], pct))
 
 
 def measure_raw(img, pct=100):

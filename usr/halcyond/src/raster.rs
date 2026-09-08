@@ -42,10 +42,16 @@ pub const FACE_MONO: u8 = 4;
 /// ems, the grid from it), so a caller says which mono it means the same
 /// way it says a proportional size -- at the SHEET's size, never these.
 pub const MONO_ISLAND_PX: f32 = 12.0;
-pub const MONO_GRID_PX: f32 = 20.0;
-/// The two mono advances at 100%: the island's 6 and the grid's 10.
+/// ONE mono size (the operator, 2026-09-08, on the first live look: a
+/// fullscreen mono program ran bigger than the preformatted block -- "they
+/// should use the preformatted block's size, so it's uniform"): the grid
+/// em IS the island em. The island/grid plumbing stays (two atlas slots,
+/// one bake in both) so a later split costs nothing; the numbers agree.
+pub const MONO_GRID_PX: f32 = MONO_ISLAND_PX;
+/// The mono advance at 100%: 6 -- the island's, and since 2026-09-08 the
+/// grid's too.
 pub const MONO_ISLAND_ADVANCE: u8 = 6;
-pub const MONO_GRID_ADVANCE: u8 = cornucopia::DEFAULT_ADVANCE;
+pub const MONO_GRID_ADVANCE: u8 = MONO_ISLAND_ADVANCE;
 
 /// The atlas page bound `evict_if_full` enforces between frames at the
 /// reference display (1280x800): 16 pages of the 512-px page every source
@@ -81,14 +87,15 @@ pub fn atlas_pages_for(display_w: u32, display_h: u32, page: u32) -> usize {
     want.max(MAX_ATLAS_PAGES)
 }
 
-/// The mono advances at a display scale (HALCYON-SCALE 6): the island
-/// `round_half_up(6 x s)`, the grid `round_half_up(10 x s)` -- 6/10, 8/13,
-/// 9/15, 11/18, 12/20 at the five values -- each the bake it names, or the
+/// The mono advances at a display scale (HALCYON-SCALE 6): `round_half_up(6
+/// x s)` -- 6, 8, 9, 11, 12 at the five values -- the bake it names, or the
 /// nearest SMALLER bake when that one is absent (a smaller cell never
 /// overflows the row pitch the sheet sized for the wanted one; a larger
-/// would), down to the legibility floor of 6. Pure: the Sheet derives its
-/// mono ems from the same answer the source selects its atlases by, so the
-/// two cannot disagree.
+/// would), down to the legibility floor of 6. Returned as (island, grid)
+/// for the two atlas slots, and since 2026-09-08 the two are EQUAL (one
+/// mono size: the grid runs at the preformatted block's). Pure: the Sheet
+/// derives its mono ems from the same answer the source selects its
+/// atlases by, so the two cannot disagree.
 pub fn mono_advances(pct: u16) -> (u8, u8) {
     let baked_at_most = |want: i32| -> u8 {
         let mut a = want.clamp(MONO_ISLAND_ADVANCE as i32, u8::MAX as i32) as u8;
@@ -97,10 +104,8 @@ pub fn mono_advances(pct: u16) -> (u8, u8) {
         }
         a
     };
-    (
-        baked_at_most(libhalcyon::scale::ipx(MONO_ISLAND_ADVANCE as i32, pct)),
-        baked_at_most(libhalcyon::scale::ipx(MONO_GRID_ADVANCE as i32, pct)),
-    )
+    let one = baked_at_most(libhalcyon::scale::ipx(MONO_ISLAND_ADVANCE as i32, pct));
+    (one, one)
 }
 
 /// Per-(face, size) vertical metrics, integer pixels, y-down. `ascent` is
@@ -912,23 +917,20 @@ mod tests {
     }
 
     #[test]
-    fn two_mono_sizes_island_below_grid() {
-        // The island (document mono) is the advance-6 cell, the grid (alt
-        // screen / pts) the advance-10 cell; the requested px picks the atlas
-        // and the cache keys them apart.
+    fn one_mono_size_the_grid_cell_is_the_island_cell() {
+        // One mono size (the operator, 2026-09-08): the grid (alt screen /
+        // pts) runs at the preformatted block's cell. Two atlas slots, one
+        // bake in both -- every request lands on the same geometry.
         let mut gs = GlyphSource::new_vendored(512);
         let (iw, ih, ib) = gs.island_cell();
         let (gw, gh, gb) = gs.mono_cell();
-        assert_eq!((iw, gw), (6, 10), "island advance 6, grid advance 10");
-        assert!(ih < gh && ib < gb, "the island cell is the smaller box ({ih} < {gh})");
+        assert_eq!((iw, ih, ib), (gw, gh, gb), "the island cell IS the grid cell");
+        assert_eq!(iw, 6, "advance 6 at 100%");
         let a_island = gs.glyph(FACE_MONO, MONO_ISLAND_PX, 'a').unwrap();
         let a_grid = gs.glyph(FACE_MONO, MONO_GRID_PX, 'a').unwrap();
-        assert_eq!(a_island.advance, iw);
-        assert_eq!(a_grid.advance, gw);
-        assert_ne!(a_island.glyph, a_grid.glyph, "two atlases, two glyph ids");
-        // Any island-range px shares the island entry (one cache key per atlas).
-        let a_island2 = gs.glyph(FACE_MONO, 10.5, 'a').unwrap();
-        assert_eq!(a_island.glyph, a_island2.glyph);
+        assert_eq!((a_island.advance, a_grid.advance), (iw, gw));
+        let a_low = gs.glyph(FACE_MONO, 10.5, 'a').unwrap();
+        assert_eq!(a_low.advance, iw, "a below-em request lands on the same cell");
         let lm = gs.line_metrics(FACE_MONO, MONO_ISLAND_PX).unwrap();
         assert_eq!(lm.line_height, ih);
         let lg = gs.line_metrics(FACE_MONO, MONO_GRID_PX).unwrap();
@@ -1061,18 +1063,19 @@ mod tests {
     // never below the legibility floor.
     #[test]
     fn mono_advances_are_the_scale_table_and_every_one_is_baked() {
-        assert_eq!(mono_advances(100), (6, 10));
-        assert_eq!(mono_advances(125), (8, 13), "7.5 up, 12.5 up");
-        assert_eq!(mono_advances(150), (9, 15));
-        assert_eq!(mono_advances(175), (11, 18), "10.5 up, 17.5 up");
-        assert_eq!(mono_advances(200), (12, 20));
+        // One mono size (2026-09-08): the grid advance IS the island's.
+        assert_eq!(mono_advances(100), (6, 6));
+        assert_eq!(mono_advances(125), (8, 8), "7.5 up");
+        assert_eq!(mono_advances(150), (9, 9));
+        assert_eq!(mono_advances(175), (11, 11), "10.5 up");
+        assert_eq!(mono_advances(200), (12, 12));
         for p in [100u16, 125, 150, 175, 200] {
             let (i, g) = mono_advances(p);
             assert!(cornucopia::Atlas::is_baked(i) && cornucopia::Atlas::is_baked(g), "{p}: {i}/{g} baked");
-            assert!(i < g, "the island cell is always the smaller");
+            assert_eq!(i, g, "one mono size: the grid cell is the island cell");
         }
-        // Off the table: 140% wants 8 / 14 -- 14 is not baked, 13 is.
-        assert_eq!(mono_advances(140), (8, 13), "the nearest smaller bake");
+        // Off the table: 140% wants 8.4 -> 8, baked.
+        assert_eq!(mono_advances(140), (8, 8), "the nearest smaller bake");
         // Below 100 (not a v1 value; the function is total): the floor.
         assert_eq!(mono_advances(50), (6, 6));
         assert_eq!(mono_advances(0), (6, 6));
@@ -1093,9 +1096,9 @@ mod tests {
         assert_eq!(gs.gen(), 1, "one eviction");
         assert!(gs.packer.store.glyphs.is_empty(), "the old cells' glyphs went");
         assert_eq!(gs.island_cell().0, 12);
-        assert_eq!(gs.mono_cell().0, 20);
+        assert_eq!(gs.mono_cell().0, 12, "one mono size: the grid cell is the island cell");
         assert_eq!(gs.island_cell().1, 27);
-        assert_eq!(gs.mono_cell().1, 44);
+        assert_eq!(gs.mono_cell().1, 27);
         for pct in [100u16, 125, 150, 175, 200] {
             gs.set_scale(pct);
             let (i, g) = mono_advances(pct);
@@ -1106,7 +1109,7 @@ mod tests {
             assert_eq!(lm.line_height, gs.island_cell().1);
         }
         assert!(gs.set_scale(100));
-        assert_eq!((gs.island_cell().0, gs.mono_cell().0), (6, 10), "back to the 1.0 cells");
+        assert_eq!((gs.island_cell().0, gs.mono_cell().0), (6, 6), "back to the 1.0 cell (one mono size)");
     }
 
     // HALCYON-SCALE 7: the eviction bound follows the display area -- the
