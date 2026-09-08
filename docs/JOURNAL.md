@@ -253,6 +253,27 @@ the close were all journalled and never indexed. Eight rows added, every
 hash re-derived from `git log` before it was written. Stuck-pre commit:
 94526bab.
 
+**The residue, measured instead of assumed.** The list I had carried since
+the composition round -- the `.hal-block` left rule, the tag-bar pills, the
+condition count, the workspace list, the PL-arc's F7 -- turned out to be
+mostly not mine to build. The rule: the operator's stylesheet declares a 2
+px `raised` left border on every block, but a pixel scan of their mockup
+PNG with the gate's own reader finds no vertical `raised` or `ember` run in
+the left margin at any row -- the rendered mockup has no rule, so the item
+was withdrawn on evidence rather than built to a CSS line the mockup itself
+does not honour. The pills and the count have no Beacon mark and no
+producer (nora would be both), so each is a 12.2 registry amendment -- the
+`prog` mark's growth path, which is owed ratification itself. F7 was
+recorded by its round as not a defect. And the workspace list is the one
+delta with a real mechanism behind it, which the 2026-09-02 vote explicitly
+deferred; a deferral is a decision, so the run did the research the fork
+needs (i3/sway and tmux for the live model, Plan 9 for the absence of one,
+Fuchsia/Genode for the split) and landed it as `docs/HALCYON-WORKSPACES.md`
+-- a proposal recommending live trees dormant through the d-1b
+backgrounding the compositor already audited, with layout names as naming
+-- and built nothing. The closed image (session lever) was synced to
+thyla-pi over the tunnel for the operator's GL round.
+
 ## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
 
 **Where it sits.** The first queued item after run 44's close: the chrome

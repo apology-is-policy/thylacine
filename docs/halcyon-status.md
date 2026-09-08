@@ -128,19 +128,30 @@ close) to both mirrors, then H-4c (the gesture + halcyon.rc) / H-4d (the welcome
 | `848c5c98` | **SC-2 -- the compositor half**: `F_EDID` acked + `GET_EDID` (bounded, checksummed, parsed by libhalcyon; the boot line prints the mm -- QEMU measures 100.0 DPI -> 100), `Comp.scale`/`metrics`, `apply_scale` (the stale bar retired, the structural relayout), the gated `scale <pct>|auto` verb on the layout budget, `scale <pct>` on the ctl, the chords; the battery's negative twin. | battery scale gate green; ls-gfx-panes / ls-halcyon / ls-gfx-compose unchanged at 1.0 |
 | `f697fcc4` | **SC-3 + SC-4 -- halcyond follows + the 200% gate**: the Sheet (`scale`, `metrics`, `hairline`, `mark_w`, `hdr_px`, the two mono ems; `px`/`ipx` the only way a logical size becomes a pixel), `mono_advances` + `set_scale`/`set_display` (`atlas_pages_for` = max(16, 2 x display area in pages)), the runtime path (`display_info` at start + every relayout; the rebuild), `/env/HALCYON_SCALE` as the verb once; `gfx_compose.py --scale` with the tag-bar PROFILE witness (both painters in one measurement) + the .exp leg (Super+= x4, the 2.0 verdict, the 1.0 verdict must REJECT, Super+0). The gate's first run found THREE defects: the compositor's live hairline was one ring; an older zone's rows scrolling off annotated the open plain zone (`annotated_own` + a foreign row carries ITS zone's class); the verdict's pane detector was parchment-only. | host halcyond 171, libhalcyon 47, cartoon 11; ls-gfx-compose PASS 218 s all six legs (cells 13x29/15x33/18x40/20x44); ls-halcyon 46 legs |
 | `0c1dc04e` | **The scale round's audit close** (Fable r1, MODEL start==end: 0 P0 / 0 P1 / 2 P2 / 5 P3 + 1 self == F3, ALL fixed): F1 the console's LayoutCache count reset re-laid the whole transcript per frame past 513 blocks (the bound is the LIVE set); F2 `scale_pct` wrapped to u16 before its clamp + the boot path unguarded; F3 a scale change in the Direct arm (or under a menu over a lone leaf) fanned NOTHING (`rescale_fan_due`, consumed by every reconcile arm -- never a second fan: a queued CONFIGURE is replaced wholesale); F4 the console marks at `mark_w`; F5 the tab gap + cast shadow at the hairline; F6 the console's re-read ahead of the render; F7 a continuation inherits `annotated_own`, an unresolvable owner -> Raw, cells mode keeps an annotated zone-less block. `memory/audit_scale_closed_list.md`. | host halcyond 175, libhalcyon 48; ls-gfx-panes 47 s (+ the Direct fan legs: serial 26/27), ls-halcyon 118 s (+ the 125% follower leg), ls-gfx-compose 73 s all six legs |
+| `94526bab` | **The stuck-pre exit mark** (the chrome-content round's pre-existing P3, PL-1b): `point_op` let no point op through an open `pre`, so a program that died between its pre open and close took the shell's exit mark with it -- the tile and the bar kept the previous command's state. A `cmd`/`exit` mark is the SHELL's: it ends the pre (finalized as-is) and lands; a rule inside a pre is still refused. Re-prosecuted with the next halcyond round (the scale close's ROUND 2 FOCUS). | host halcyond 176 (+1: byte-fed + the rule control + the cells-mode twin); ls-halcyon PASS 118 s, 48 legs, one attempt |
+| `9f4c339c` | **`docs/HALCYON-WORKSPACES.md` -- a PROPOSAL, nothing built**: the workspace model (the mockup's `1 2 3`) researched for the operator's vote -- (A) live trees dormant via the d-1b backgrounding, layout names as naming (recommended) vs (B) layouts as the list; plus the pills and the condition count as BEACON 12.2 amendments. | docs |
 
 ## Remaining work
 
-**The composition residue (after the scale round, 2026-09-08):** the operator's
-GL round on the new image (the err-state cinnabar reads ~1.75:1 on the dark
-bar -- flag it; their CSS/HTML still name Public Sans); the Beacon `diag`
-count mark; the tag-bar pills; a workspace list; the transcript's cosmetic
-scroll/pre ordering (the PL-arc's F7); the `.hal-block` left rule. The
-stuck-pre exit mark (the chrome-content round's P3) landed right after the
-scale close. Ratification owed to the operator: HALCYON-SCALE section 10
-(the percent on the wire, the 200 clamp, the chord defaults, the cap by
-display area, the garbage-EDID posture + the boot guard, the fan rule) and
-BEACON 12.12 (`mark k=prog`).
+**The composition residue (after the scale round, 2026-09-08), measured:**
+the operator's GL round on the closed image (synced to thyla-pi over the
+tunnel with the session lever; the err-state cinnabar reads ~1.75:1 on the
+dark bar -- flag it; their CSS/HTML still name Public Sans). The workspace
+list, the tag-bar pills and the condition count are NOT buildable without a
+vote -- the workspace model was deferred by the 2026-09-02 vote and the two
+marks are registry amendments with no producer: `docs/HALCYON-WORKSPACES.md`
+carries the research and the recommendation for one round-trip. WITHDRAWN
+on evidence: the `.hal-block` left rule -- the operator's stylesheet
+declares one, but the composition mockup PNG renders none (no vertical
+`raised`/`ember` run in its left margin at any row; measured with the
+gate's own PNG reader), so it is not a mockup delta. The PL-arc's F7 (the
+scroll line ordered before a straddling pre) stays TRACKED as not a defect.
+The stuck-pre exit mark (the chrome-content round's P3) landed right after
+the scale close (`94526bab`). Ratification owed to the operator:
+HALCYON-SCALE section 10 (the percent on the wire, the 200 clamp, the chord
+defaults, the cap by display area, the garbage-EDID posture + the boot
+guard, the fan rule), BEACON 12.12 (`mark k=prog`), and the workspace
+proposal's three questions.
 
 **H-3 (Presentations + the Daylight chrome) — design ratified 2026-09-01**
 (the design pass; HALCYON.md §13.6 concretized + operator votes recorded;
