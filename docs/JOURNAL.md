@@ -148,13 +148,52 @@ attempt each, on **separate per-lever bakes** -- the lesson from earlier in
 this run, where one image carrying both levers turned both gates red for
 reasons that had nothing to do with the code.
 
-**Open.** The TY-6 prosecution round is running as this is written, on Opus
-(Fable is exhausted), batched over the whole arc TY-1..TY-4 plus the
-tapestryd status-bar handover, and carrying the ROUND 2 FOCUS that two
-earlier rounds deferred to "the next halcyond round". The accented-capital
-clip is queued. The status-bar handover still has no gate witness. TY-5 (the
-hinting lever) is unbuilt and was voted "no hinting", so it stays unbuilt
-unless the operator asks.
+**The round, and what it caught.** TY-6 ran on Opus (Fable exhausted),
+batched over TY-1..TY-4 plus the tapestryd status-bar handover, carrying the
+ROUND 2 FOCUS that two earlier rounds had both deferred to "the next
+halcyond round". `MODEL(start) == MODEL(end)`, no mid-run fallback.
+**0 P0 / 1 P1 / 2 P2 / 6 P3**, all fixed, not dirty; close `7f277c5b`.
+
+The reviewer rule says a same-family round keeps context independence and
+forfeits family diversity, and this round is a clean demonstration that the
+half it keeps is worth having: **four of the nine findings came from
+measurement contradicting a confident comment, and two of those comments
+were mine.**
+
+The two that sting most, because they are the same shape:
+
+**A contract stated in a comment is not a contract all the arms keep.**
+TY-4 declared, at length, that a mono cell paints its own cell and no
+other — and left one of the three arms outside it. A codepoint neither
+Cornucopia nor the box path has was packed as the body face's *own tight
+raster* with its own bearing, then handed back the cell's advance. Measured:
+80 of 121 Greek and Cyrillic entries painting outside their cell at 200%,
+the worst overhanging by 11 px, nearly a whole extra cell. I wrote the
+contract and the violation in the same commit.
+
+**And a comment's justification can be false the day it is written.** The
+glyph cache quantized sizes to half pixels, justified by "the stylesheet
+speaks whole px today". It did not: the exit badge lays at `body_px * 0.9`
+(10.35) and the chrome name at 10.5, both landing on quantum 21. One cache
+entry served both, and which raster it held was *whichever painted first* —
+re-decided at every eviction, and flipping with whether a failed command
+happened to be on screen. That sentence had been sitting there stopping
+anyone from checking the live size set, me included.
+
+The third is the correction to my own clip measurement, recorded above.
+
+The round also caught something worth naming separately: **a commit body can
+assert a mechanism the commit does not add.** `9d5f38ee`'s message says the
+console "re-mints from the relayout that foregrounds it again at logout".
+There was no such guarantee — the re-arm sat inside an `if relayout` the
+console is not reliably fanned — so the failure mode was a display with no
+status bar and no further word about it, the refusal having been said once
+and latched. The mechanism exists now.
+
+**Open.** The status-bar handover still has no gate witness, and F7 and F8's
+fixes join it in that class — no scenario runs both levers and `server.rs`
+is not host-testable. The accented-capital clip is queued. TY-5 (the hinting
+lever) stays unbuilt; the vote was no hinting.
 
 ---
 
