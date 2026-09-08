@@ -84,7 +84,7 @@ image re-baked, the battery gate re-run) before the self-compaction. SC-3
 (the gates at 200%) are the pickup, then ONE Fable round over SC-2 + SC-3
 batched with the chrome-content close's "ROUND 2 FOCUS".
 
-**SC-3 + SC-4 (after the self-compaction; `HASH_SC3`).** halcyond scales at
+**SC-3 + SC-4 (after the self-compaction; `f697fcc4`).** halcyond scales at
 ONE place: the `Sheet` carries the percent, the compositor's `Metrics::at`
 table, the hairline, the 2 px mark, the heading sizes and the two mono ems,
 and every logical constant in the render core reaches a pixel only through
