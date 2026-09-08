@@ -446,7 +446,7 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
     laying another is how a right-aligned run walks off its edge, which is
     exactly what the kv-list test caught. Mono is untouched at every tier:
     a fixed cell has no phase.
-- **TY-4 — LANDED 2026-09-08 @`(pending)`** Cornucopia live: the subset
+- **TY-4 — LANDED 2026-09-08 @`cecfd1e3`** Cornucopia live: the subset
   TTF, `FACE_MONO` on the outline at the cell table; the cells tier
   untouched. `tools/subset-cornucopia.py` cuts the font to
   `usr/lib/cornucopia/src/cornucopia-subset.ttf` (20112 bytes against
