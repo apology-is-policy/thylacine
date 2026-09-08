@@ -419,6 +419,23 @@ detect_accel() {
 }
 accel="${THYLACINE_ACCEL:-$(detect_accel)}"
 
+# Portability: a scenario (or the caller) may PIN an accel this host cannot
+# provide -- the gfx/interactive .exp files pin `hvf` for the Apple-Silicon dev
+# loop, which no Linux host has. Rather than die on `-accel hvf`, fall back to
+# this host's native accel (detect_accel: kvm on an ARM64 Linux box like
+# thyla-pi, else tcg) so an hvf-pinned scenario still runs -- under KVM on the
+# Pi, the hardware-accel EQUIVALENT of the mac's HVF. A no-op where the pinned
+# accel IS available (the mac keeps hvf: -accel help lists it). This lets the Pi
+# serve as a QEMU offload host for the interactive E2Es when the mac is
+# memory-starved. The -cpu/GIC case below re-derives from the final accel.
+if ! qemu-system-aarch64 -accel help 2>/dev/null | grep -qw "$accel"; then
+    native="$(detect_accel)"
+    if [[ "$native" != "$accel" ]]; then
+        echo "==> run-vm: accel '$accel' unavailable on this host; using '$native'" >&2
+        accel="$native"
+    fi
+fi
+
 # Display backend (the fbcon era: tapestryd + Aurora render the console on
 # gpu0). Headless (-nographic) stays the default -- the CI/agent loop.
 #   THYLACINE_DISPLAY=cocoa   the interactive window (switch the View menu

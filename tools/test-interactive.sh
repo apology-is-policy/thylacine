@@ -529,7 +529,19 @@ run_one_scenario() {
         # steps file is the flush-immune live view. `< /dev/null` is a clean stdin;
         # `script` still waits for the wrapped command to exit (verified).
         att_t0=$SECONDS
-        LS_CI_STEPS="$steps" script -q "$transcript" expect -f "$scen" < /dev/null >/dev/null 2>&1
+        # `script` gives expect a controlling PTY (macOS expect 5.45 corrupts its
+        # std channels when stdout is not a tty). BSD (macOS) and util-linux
+        # (Linux, e.g. thyla-pi) take DIFFERENT syntax: BSD is
+        # `script -q <file> <cmd...>`; util-linux is `script -q -e -c "<cmd>" <file>`
+        # where -e propagates the child's exit code -- the PASS/FAIL/SKIP contract
+        # below reads $rc, so on Linux -e is load-bearing, not cosmetic. Detect the
+        # flavor by OS (the run-vm.sh Darwin/Linux precedent), so the interactive
+        # E2Es run on the Pi offload host, not only the mac.
+        if [[ "$(uname -s)" == "Darwin" ]]; then
+            LS_CI_STEPS="$steps" script -q "$transcript" expect -f "$scen" < /dev/null >/dev/null 2>&1
+        else
+            LS_CI_STEPS="$steps" script -q -e -c "expect -f '$scen'" "$transcript" < /dev/null >/dev/null 2>&1
+        fi
         rc=$?
         att_dur=$((SECONDS - att_t0))
         # The accel that ACTUALLY booted, read out of the artifact rather than
