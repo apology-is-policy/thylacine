@@ -411,7 +411,7 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
   the atlas key, the atlas-bound statement re-verified (the existing
   `a_screen_of_the_largest_heading_at_200_packs_under_the_cap` test extended
   to four phases).
-  - **TY-3a — LANDED 2026-09-08 @`*(pending)*`**, the substrate, no
+  - **TY-3a — LANDED 2026-09-08 @`c0583fb6`**, the substrate, no
     behaviour change: `Face::raster` takes a phase, `GlyphSource::glyph_at`
     puts it in the cache key (`glyph()` is phase 0 and is byte-identical to
     before), `advance_f` is the fractional advance the sub-pixel pen will
@@ -427,7 +427,7 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
     exactly one phase, so a phased screen packs the *same* pages as an
     unphased one (asserted equal), and one codepoint at four phases costs
     four entries on one page.
-  - **TY-3b — LANDED 2026-09-08 @`*(pending)*`**, the pen. `LaidGlyph`
+  - **TY-3b — LANDED 2026-09-08 @`abbd7900`**, the pen. `LaidGlyph`
     carries the **whole-pixel step to the next glyph** (not the font
     advance) plus its phase, so the executor's integer accumulation
     reproduces the laid `xs` exactly and nothing downstream changed. The
