@@ -30,6 +30,22 @@ static A9: &[u8] = include_bytes!("atlas-9.bin"); // 9x20
 static A8: &[u8] = include_bytes!("atlas-8.bin"); // 8x18
 static A7: &[u8] = include_bytes!("atlas-7.bin"); // 7x16
 static A6: &[u8] = include_bytes!("atlas-6.bin"); // 6x14
+// HALCYON-SCALE 6: the display-scale cells -- the island (advance 6 at
+// 100%) and the grid (advance 10) at the 0.25 steps, `round_half_up(6 x s)`
+// / `round_half_up(10 x s)`: 125% -> 8 / 13, 150% -> 9 / 15, 175% -> 11 /
+// 18, 200% -> 12 / 20 (8 and 9 are above). Feature-gated: halcyond's.
+#[cfg(feature = "scale")]
+static A20: &[u8] = include_bytes!("atlas-20.bin"); // 20x44
+#[cfg(feature = "scale")]
+static A18: &[u8] = include_bytes!("atlas-18.bin"); // 18x40
+#[cfg(feature = "scale")]
+static A15: &[u8] = include_bytes!("atlas-15.bin"); // 15x33
+#[cfg(feature = "scale")]
+static A13: &[u8] = include_bytes!("atlas-13.bin"); // 13x29
+#[cfg(feature = "scale")]
+static A12: &[u8] = include_bytes!("atlas-12.bin"); // 12x27
+#[cfg(feature = "scale")]
+static A11: &[u8] = include_bytes!("atlas-11.bin"); // 11x25
 
 /// The baked cell advances (= cell width in px), LARGEST FIRST. The config
 /// key `font-size <advance>` and the OSD Font cycler select by these; index 0
@@ -37,6 +53,11 @@ static A6: &[u8] = include_bytes!("atlas-6.bin"); // 6x14
 /// the procedural box glyphs -- which need cell_w/cell_h >= 6 -- break).
 pub const ADVANCES: [u8; 5] = [10, 9, 8, 7, 6];
 pub const DEFAULT_ADVANCE: u8 = 10;
+/// The display-scale advances (HALCYON-SCALE 6), LARGEST FIRST -- served by
+/// `for_advance` only with the `scale` feature; NOT part of `ADVANCES` (the
+/// aurora cycler's set is unchanged).
+#[cfg(feature = "scale")]
+pub const SCALE_ADVANCES: [u8; 6] = [20, 18, 15, 13, 12, 11];
 
 const MAGIC: u32 = 0x4C54_4143; // "CATL"
 const HDR_LEN: usize = 16;
@@ -60,9 +81,36 @@ impl Atlas {
             8 => A8,
             7 => A7,
             6 => A6,
+            #[cfg(feature = "scale")]
+            20 => A20,
+            #[cfg(feature = "scale")]
+            18 => A18,
+            #[cfg(feature = "scale")]
+            15 => A15,
+            #[cfg(feature = "scale")]
+            13 => A13,
+            #[cfg(feature = "scale")]
+            12 => A12,
+            #[cfg(feature = "scale")]
+            11 => A11,
             _ => A10,
         };
         Atlas { blob }
+    }
+
+    /// Whether `advance` names a baked atlas in THIS build (the five sizes,
+    /// plus the scale set with the `scale` feature); `for_advance` falls
+    /// back to the default for any other, so a caller that needs to know
+    /// asks here first.
+    pub fn is_baked(advance: u8) -> bool {
+        if ADVANCES.contains(&advance) {
+            return true;
+        }
+        #[cfg(feature = "scale")]
+        if SCALE_ADVANCES.contains(&advance) {
+            return true;
+        }
+        false
     }
 
     #[inline]
@@ -165,6 +213,16 @@ pub fn verify_all() -> bool {
         }
         i += 1;
     }
+    #[cfg(feature = "scale")]
+    {
+        let mut j = 0;
+        while j < SCALE_ADVANCES.len() {
+            if !Atlas::for_advance(SCALE_ADVANCES[j]).verify() {
+                return false;
+            }
+            j += 1;
+        }
+    }
     true
 }
 
@@ -207,5 +265,56 @@ mod tests {
         // An unknown advance falls back to the default face (forward-compat).
         assert_eq!(Atlas::for_advance(99).cell_w(), 10);
         assert_eq!(Atlas::for_advance(0).cell_w(), 10);
+        assert!(!Atlas::is_baked(99) && !Atlas::is_baked(0));
+        assert!(ADVANCES.iter().all(|&a| Atlas::is_baked(a)));
+    }
+
+    // Without the `scale` feature the scale advances are NOT baked: they
+    // fall back to the default face and `is_baked` says so -- aurora's
+    // binary carries the five sizes only.
+    #[cfg(not(feature = "scale"))]
+    #[test]
+    fn the_scale_set_is_absent_without_the_feature() {
+        for a in [11u8, 12, 13, 15, 18, 20] {
+            assert!(!Atlas::is_baked(a), "advance {a} must not be baked without `scale`");
+            assert_eq!(Atlas::for_advance(a).cell_w(), 10, "falls back at {a}");
+        }
+    }
+
+    // HALCYON-SCALE 6: with the feature every scale advance is a real bake
+    // (cell_w == advance, the cell font-derived and above the box-glyph
+    // floor), the set is largest-first monotonic like ADVANCES, and the
+    // two 0.25-step cells every scale needs -- round_half_up(6 s) for the
+    // island, round_half_up(10 s) for the grid -- are all served.
+    #[cfg(feature = "scale")]
+    #[test]
+    fn the_scale_set_is_baked_and_covers_every_step() {
+        let mut prev_w = usize::MAX;
+        let mut prev_h = usize::MAX;
+        for &a in SCALE_ADVANCES.iter() {
+            let at = Atlas::for_advance(a);
+            assert!(at.verify(), "advance {} fails verify", a);
+            assert!(Atlas::is_baked(a));
+            assert_eq!(at.cell_w(), a as usize, "cell_w == advance for {}", a);
+            assert!(at.cell_w() >= 6 && at.cell_h() >= 6);
+            assert!(at.cell_h() > at.baseline(), "baseline within the cell at {}", a);
+            assert!(at.cell_w() < prev_w && at.cell_h() < prev_h, "largest-first at {}", a);
+            prev_w = at.cell_w();
+            prev_h = at.cell_h();
+            let g = at.glyph('A').expect("'A' baked");
+            assert_eq!(g.len(), at.cell_w() * at.cell_h());
+            // The bake's cell rule: cell_h = ceil(win extents x scale), so
+            // the ratio to the advance stays within the 10x22 face's ~2.2.
+            assert!(at.cell_h() * 10 >= at.cell_w() * 21 && at.cell_h() * 10 <= at.cell_w() * 24, "cell {}x{}", at.cell_w(), at.cell_h());
+        }
+        assert!(SCALE_ADVANCES.iter().all(|a| !ADVANCES.contains(a)), "disjoint from the cycler's set");
+        // Every step's two cells: (scale percent, island advance, grid advance).
+        for (pct, island, grid) in [(100u32, 6u8, 10u8), (125, 8, 13), (150, 9, 15), (175, 11, 18), (200, 12, 20)] {
+            let ri = ((6 * pct + 50) / 100) as u8;
+            let rg = ((10 * pct + 50) / 100) as u8;
+            assert_eq!((ri, rg), (island, grid), "the rounding at {pct}%");
+            assert!(Atlas::is_baked(island) && Atlas::is_baked(grid), "{pct}%: {island}/{grid} baked");
+        }
+        assert!(verify_all());
     }
 }

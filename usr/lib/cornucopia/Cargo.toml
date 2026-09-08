@@ -8,3 +8,11 @@ license.workspace = true
 [lib]
 name = "cornucopia"
 path = "src/lib.rs"
+
+[features]
+# The display-scale bakes (HALCYON-SCALE 6: advances 11/12/13/15/18/20 for
+# the 125..200% mono cells), asked for by halcyond. The contract: a crate
+# that does not ask never depends on them (aurora's cycler and the kernel
+# sink keep the five-size set). NOT a size saving under the workspace
+# build, which unifies features -- aurora's binary carries the ~650 KB too.
+scale = []
