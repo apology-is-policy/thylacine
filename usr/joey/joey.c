@@ -3002,6 +3002,19 @@ static int do_corvus_bringup(long storage_dup_fd) {
     }
     t_putstr("joey: IM-4 deny-path probe ok (CLEARANCE_LIST_SELF refused for PRINCIPAL_SYSTEM)\n");
 
+    // holotype F4: CLEARANCE_LIST_SELF (20) with a NON-EMPTY payload -> BadFormat(5).
+    // The payload check is BEFORE the principal check, so junk is refused with 5
+    // (not 2) even from PRINCIPAL_SYSTEM -- wire hygiene, like verbs 14/18/19.
+    tx[0] = 'x';
+    pl = 1;
+    if (corvus_exchange(conn_fd, 20, tx, pl, rx, sizeof(rx), &st, &rlen) != 0 || st != 5) {
+        t_putstr("joey: IM-4 CLEARANCE_LIST_SELF with a payload NOT refused BadFormat (status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr(")\n");
+        return 1;
+    }
+    t_putstr("joey: IM-4 CLEARANCE_LIST_SELF payload-shape probe ok (junk -> BadFormat)\n");
+
     // === #163: the user-default jit seed, probed via susan ===
     // susan is created above with NO explicit grant, so her jit eligibility can
     // only come from one of the two #163 mechanisms: corvus's USER_CREATE seed

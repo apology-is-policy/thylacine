@@ -410,7 +410,11 @@ fn report_denied(status: u8) -> i64 {
             t_putstr("imperium: timed out (no SAK, or no key entered)\n");
         }
         STATUS_BUSY => {
-            t_putstr("imperium: another imperium request is pending; try again\n");
+            t_putstr(
+                "imperium: another imperium request is already pending (NOT this one) -- \
+                 if you press the SAK now it confers THAT request; do NOT confer a pid you \
+                 do not recognize. Try again once it clears.\n",
+            );
         }
         _ => {
             t_putstr("imperium: unexpected status=");
@@ -424,9 +428,15 @@ fn report_denied(status: u8) -> i64 {
 // The elevate path: request -> confer -> redeem -> sub-shell.
 fn cmd_elevate(self_restrict: u64) -> i64 {
     // (1) A non-interactive invocation cannot confer (no human to press the
-    // SAK). Fail fast rather than posting a request that parks forever. fd 0
-    // must be a terminal ('c' console or 't' pts).
-    match fd_devclass(0) {
+    // SAK). Fail fast rather than posting a request that parks until the 60-s
+    // timeout. Check fd 1 (stdout), NOT fd 0: a console `ut` gives an external
+    // child a PIPED stdin (exec_external, non-jc path), so fd 0 is never the
+    // console even for an interactive invocation -- keying on it broke the tool
+    // on the serial console, the v1.0 trusted medium (caught by ls-imperium.exp).
+    // fd 1 IS inherited to the console/pts (the stdout_is_terminal convention);
+    // a piped/file stdout (a script) fails fast, and a /dev/null stdout (dc 'c')
+    // still posts but is bounded by the 60-s timeout.
+    match fd_devclass(1) {
         Some(b'c') | Some(b't') => {}
         _ => {
             t_putstr(
@@ -469,13 +479,22 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
         let _ = unsafe { t_close(conn) };
         return 1;
     }
+    // Print THIS process's pid so the operator can check it against the pid the
+    // trusted provincia shows (corvus renders `to: <user> (pid N)`). This is the
+    // informed-consent check against a same-principal slot-hog (holotype F1): a
+    // hostile Proc that seized the one slot would make the SAK render ITS pid,
+    // not this one -- a mismatch means "do not confer". The pid is a check only
+    // because the tool surfaces its own value here.
+    let mypid = unsafe { t_getpid() };
     t_putstr("imperium: requesting ");
     if self_restrict == 0 {
         t_putstr("the full imperium level (CAP_DAC_OVERRIDE CAP_CHOWN CAP_KILL)");
     } else {
         put_cap_names(self_restrict);
     }
-    t_putstr(" -- confer with the SAK (Ctrl-A b)\n");
+    t_putstr(" as pid ");
+    put_dec(if mypid > 0 { mypid as u64 } else { 0 });
+    t_putstr(" -- confer with the SAK (Ctrl-A b); the trusted panel MUST show this pid\n");
 
     // (5) Block on the deferred reply.
     let (st, resp) = match unsafe { read_reply(conn) } {

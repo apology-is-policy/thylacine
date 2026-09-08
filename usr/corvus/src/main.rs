@@ -3106,7 +3106,13 @@ unsafe fn emit_eligible_levels(user: &[u8], response: &mut Vec<u8>) {
 //
 // Request:  (no payload -- the identity IS the connection)
 // OK reply: identical to CLEARANCE_LIST (count + per-level TLV)
-unsafe fn handle_clearance_list_self(handle: i64, response: &mut Vec<u8>) {
+unsafe fn handle_clearance_list_self(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
+    // Wire hygiene (holotype F4): the verb takes NO payload -- identity is the
+    // connection. Refuse a non-empty frame with BadFormat, as every sibling verb
+    // refuses a wrong shape (14 on token length, 18/19 via parse_activate_tail).
+    if !payload.is_empty() {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
     let peer = match peer_live_info(handle) {
         Some(p) => p,
         None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
@@ -3497,6 +3503,12 @@ unsafe fn handle_clearance_grant(handle: i64, payload: &[u8], response: &mut Vec
         capkey_restore(subject, level, prev);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
+    // A NEW verifier clears the per-(subject, level) imperium rate-limit lock
+    // (holotype F5): a different key IS the hostowner's documented reset, so a
+    // subject locked out by wrong-key attempts becomes requestable again without
+    // a corvus restart. The idempotent same-key arm returned early above, so this
+    // runs only when the key actually changed.
+    imperium_fail_reset(subject, level);
     stage_response(response, STATUS_OK, &[]);
 }
 
@@ -3877,6 +3889,11 @@ unsafe fn console_next_byte(fd: i64, start_ns: u64, timeout_ms: u64, idle_slices
             return NextByte::Error;
         }
         if n == 0 {
+            // A POLLIN that yielded no byte still counts against the prompt's
+            // idle-slice bound (holotype F6): otherwise a console that reports
+            // ready but returns 0 could spin without advancing the fallback that
+            // bounds the prompt when the monotonic clock is broken.
+            *idle_slices += 1;
             continue;
         }
         return NextByte::Byte(b[0]);
@@ -4760,6 +4777,7 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
             VERB_CLEARANCE_LIST => handle_clearance_list(&payload_owned,
                                                          &mut conn.pending_response),
             VERB_CLEARANCE_LIST_SELF => handle_clearance_list_self(conn_handle,
+                                                         &payload_owned,
                                                          &mut conn.pending_response),
             VERB_CLEARANCE_ACTIVATE_SELF => handle_clearance_activate_self(conn_handle,
                                                 &payload_owned, &mut conn.pending_response),
@@ -5023,6 +5041,15 @@ fn dispatch_tread(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
     // (conn_reply_parked answers it). A 0-byte Rread is not a park: the
     // kernel client hands it to userspace as EOF.
     if conn.awaiting_deferred && conn.pending_response.is_empty() {
+        // Only ONE Tread may park at a time. A second Tread while one is already
+        // parked (a mis-behaved multi-threaded client sharing the ctl fd) is
+        // REFUSED rather than silently overwriting the park -- overwriting would
+        // orphan the first tag (no reply, no Rflush) and strand its reader for
+        // the connection's life (holotype F3). The first parked request stays
+        // intact; the second reader gets EAGAIN.
+        if conn.parked_read.is_some() {
+            return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_AGAIN)?);
+        }
         conn.parked_read = Some(ParkedRead { tag, count: args.count });
         return Ok(0);
     }

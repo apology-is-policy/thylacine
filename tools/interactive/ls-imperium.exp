@@ -1,0 +1,183 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-imperium.exp -- IM-5: the imperium sub-shell end to end
+# (IMPERIUM-DESIGN.md 11.6 + 11.8; I-27 / I-25 / I-2 / I-22). Where
+# im3-lex-curiata.exp drove the corvus half with imperium-probe, this drives the
+# REAL `usr/imperium` tool + the `abdicate` builtin, and proves the sub-shell
+# LIFECYCLE the design promises:
+#
+#   (1) CONFER -> the elevated sub-shell: `imperium chown dac` -> the SAK ->
+#       the provincia (CAP_CHOWN, no axe) -> the fixture key -> `conferred` ->
+#       a NEW `ut` opens; `imperium --list` inside it reports `elevated -- scope`
+#       with CAP_DAC_OVERRIDE (the /proc flag AND the NEW CLEARANCE_LIST_SELF
+#       verb's POSITIVE path -- the arm joey's PRINCIPAL_SYSTEM deny cannot reach).
+#   (2) THE CAP WORKS: michael cannot create in SYSTEM-owned /home (arm 0 shows
+#       the plain shell DENIED), but under imperium CAP_DAC_OVERRIDE bypasses the
+#       parent-write check, so `mkdir /home/<x>` + a `touch` inside it succeed --
+#       witnessed by `ls` listing the file. One variable away: imperium on/off.
+#   (3) A BACKGROUND JOB, then ABDICATE: `sleep 314159 &` (its pid captured from
+#       ut's `[N] pid` line), then `abdicate` -> `imperium: relinquished` -> in
+#       the plain shell the fasces is gone (`imperium --list` -> not elevated),
+#       the cap is DENIED again, and the job's PID is GONE from `ps` (the root's
+#       death swept the scope, I-25).
+#   (4) DENY, wrong key: `imperium kill` -> the provincia's axe -> a wrong key
+#       -> `imperium: denied`, no sub-shell.
+#   (5) DENY, a script cannot confer: `echo | imperium chown` -- fd 0 is a pipe,
+#       not a tty, so the tool fails fast BEFORE posting.
+#   (6) DENY, an ineligible user: cora (never granted imperium) -> `not eligible`.
+#
+# Witnesses are on the tool's / corvus's / a coreutil's OUTPUT, never on $status
+# (ut does not propagate an external's exit code to $status on the console path
+# -- a pre-existing gap, enqueued separately) and never on the prompt glyph. The
+# fixture key `imperium-key-michael-v1` is joey's boot-ladder grant. Tcl trap:
+# "\001b" is Ctrl-A + b (the monitor BREAK = the SAK); "\x01b" would be ESC.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+proc sak_witness_within {secs phase} {
+    global timeout
+    set timeout $secs
+    expect {
+        -re {cons: SAK \(([a-z ]+)\)} {
+            set d $expect_out(1,string)
+            lc_step "saw: cons: SAK ($d) during '$phase'"
+            return $d
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+        timeout           { return "" }
+    }
+}
+
+proc press_sak {phase} {
+    lc_raw_send "\001b" "monitor BREAK ($phase)"
+    set d [sak_witness_within 10 "the SAK witness ($phase)"]
+    if {$d eq ""} {
+        lc_fail "no `cons: SAK (...)` line within 10s of Ctrl-A b ($phase)"
+    }
+    if {$d ne "episode"} {
+        lc_fail "SAK decision was '$d', expected 'episode' ($phase) -- corvus not ARMED, or an episode already open"
+    }
+}
+
+# Wait for a wanted line; the tool's own failure family is a hard fail unless it
+# is the one expected (a red line fails now, not at the timeout -- #218).
+proc expect_tool_line {want phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex $want { lc_step "saw: $want ($phase)" }
+        -re {imperium: (denied|not eligible|no imperium|too many|timed out|another imperium|unexpected status|cannot reach|could not|needs an interactive|already elevated|malformed|refusing|transport error)[^\r\n]*} {
+            lc_fail "tool said \[$expect_out(0,string)\] while waiting for \[$want\] ($phase)"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction ($phase)" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$want\] ($phase)" }
+        eof               { lc_fail "unexpected EOF ($phase)" }
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# ---- (0) baseline: the plain shell is DENIED the SYSTEM-owned /home write ----
+# mkdir prints `mkdir: <path>: permission denied` on failure (silent on success),
+# so the DENIAL is witnessed by its message. If this ever succeeds silently, the
+# DAC boundary moved and arm (2)'s discrimination is void.
+lc_send "mkdir /home/im-e2e-dac"
+lc_expect "im-e2e-dac: permission denied" "the plain shell cannot write SYSTEM-owned /home (0)"
+lc_pass "IM-5(0): baseline -- michael cannot create in /home without imperium"
+
+# ---- (1) CONFER -> the elevated sub-shell ----------------------------------
+lc_send "imperium chown dac"
+# "as pid N" is the request line (holotype F1: the operator checks this pid
+# against the provincia's). Matching it also proves the fd-1 tty check passed --
+# a regression to the fd-0 check (broken on the console) would instead print
+# "needs an interactive terminal", which expect_tool_line hard-fails on.
+expect_tool_line "as pid" "the request posted with the tool's pid (1)"
+press_sak "confer"
+lc_expect "CONFERRING IMPERIUM" "the provincia title (1)"
+lc_expect "CAP_CHOWN" "the restricted set names CAP_CHOWN (1)"
+lc_expect "axe:     no" "no axe for a request without CAP_KILL (1)"
+lc_expect "imperium key: " "the key prompt on the trusted path (1)"
+lc_raw_send "imperium-key-michael-v1\r" "the fixture key"
+lc_expect "imperium: conferred" "the tool's conferral line (1)"
+lc_expect "Thylacine textual shell" "the elevated sub-shell (a new ut) opened (1)"
+# The POSITIVE path of CLEARANCE_LIST_SELF (verb 20) + the /proc flag: the
+# sub-shell reports its own scope + the imperium caps held. joey's boot probe can
+# only prove the DENY (PRINCIPAL_SYSTEM); this is the eligible-user CONFER.
+lc_send "imperium --list"
+lc_expect "elevated -- scope" "the sub-shell reads its /proc legate scope (1)"
+lc_expect "CAP_DAC_OVERRIDE" "--list names the imperium caps held (1)"
+lc_pass "IM-5(1): request -> SAK -> provincia -> key -> conferred -> elevated sub-shell (scope + --list)"
+
+# ---- (2) THE CAP WORKS under imperium --------------------------------------
+# Same path arm (0) was DENIED; under CAP_DAC_OVERRIDE the create succeeds, and a
+# touch inside it (also a SYSTEM-owned-dir write) succeeds -- ls lists the marker.
+lc_send "mkdir /home/im-e2e-dac; touch /home/im-e2e-dac/DACWORKS; ls /home/im-e2e-dac"
+lc_expect "DACWORKS" "CAP_DAC_OVERRIDE lets the elevated shell write SYSTEM-owned /home (2)"
+lc_pass "IM-5(2): an op DENIED to the plain shell SUCCEEDS under imperium"
+
+# ---- (3) a background job, then ABDICATE + the scope teardown --------------
+set jobpid ""
+lc_send "sleep 314159 &"
+set timeout $lc_cmd_timeout
+expect {
+    -re {\[\d+\]\s+(\d+)} { set jobpid $expect_out(1,string); lc_step "bg job pid=$jobpid (3)" }
+    -re {EXTINCTION:}     { lc_extinction_fail "kernel extinction (3, bg launch)" }
+    timeout              { lc_fail "no `\[N\] pid` job line for the background sleep (3)" }
+    eof                  { lc_fail "unexpected EOF (3, bg launch)" }
+}
+lc_send "abdicate"
+lc_expect "imperium: relinquished" "abdicate -> the tool's parent resumes (3)"
+lc_send "imperium --list"
+lc_expect "not currently elevated" "after abdicate the shell is plain again (3)"
+lc_send "mkdir /home/im-e2e-after"
+lc_expect "im-e2e-after: permission denied" "after abdicate the /home write is DENIED again (3)"
+# The scope teardown (I-25) killed the sub-shell's child: its pid is gone from ps.
+# A surviving pid FAILS (loud); the marker guarantees ps finished before we judge.
+lc_send "ps; echo PS-SCAN-DONE-im5"
+set timeout $lc_cmd_timeout
+expect {
+    -re "\\y$jobpid\\y"      { lc_fail "the background job (pid $jobpid) survived abdicate -- the scope did not tear down (I-25)" }
+    -ex "PS-SCAN-DONE-im5"   { lc_step "ps finished; pid $jobpid gone -- the job died with the scope (3)" }
+    -re {EXTINCTION:}        { lc_extinction_fail "kernel extinction (3, ps)" }
+    timeout                 { lc_fail "ps did not finish within ${lc_cmd_timeout}s (3)" }
+    eof                     { lc_fail "unexpected EOF (3, ps)" }
+}
+lc_pass "IM-5(3): abdicate -> plain shell, cap denied again, the background job is dead (I-25)"
+
+# ---- (4) DENY: a wrong key, no sub-shell -----------------------------------
+lc_send "imperium kill"
+expect_tool_line "confer with the SAK" "the request posted (4)"
+press_sak "wrong key"
+lc_expect "CAP_KILL" "the provincia names CAP_KILL (4)"
+lc_raw_send "not-the-key\r" "a wrong key"
+lc_expect "imperium: denied" "a wrong key is DENIED to the requester (4)"
+lc_pass "IM-5(4): a wrong key is denied and opens no sub-shell"
+
+# ---- (5) DENY: a script cannot confer (non-tty stdout) ---------------------
+# The tool keys its fail-fast on fd 1 (stdout), so PIPE the tool's OUTPUT: its
+# stdout is the pipe, not the console -> fail fast before posting. (A pipe on
+# stdIN, `echo | imperium`, leaves stdout on the console and would post -- a
+# human typed it, so that is allowed by design.)
+lc_send "imperium chown | cat"
+lc_expect "needs an interactive terminal" "a piped-output (non-tty stdout) invocation fails fast (5)"
+lc_pass "IM-5(5): a non-interactive invocation fails fast -- a script cannot confer"
+
+# ---- session survives; then log out --------------------------------------
+lc_send "echo im5-survives | tr a-z A-Z"
+lc_expect "IM5-SURVIVES" "the session survives every arm"
+lc_send "exit"
+
+# ---- (6) DENY: an ineligible user ------------------------------------------
+# cora (the daily login, never granted imperium) is a corvus user but not
+# eligible for the level, so the request is refused at the eligibility gate.
+lc_login cora kora
+lc_send "imperium chown"
+lc_expect "not eligible" "an ineligible user is refused at the eligibility gate (6)"
+lc_pass "IM-5(6): an ineligible user cannot obtain imperium"
+
+lc_quit
+lc_pass "IM-5 ls-imperium: confer -> sub-shell -> cap works -> abdicate teardown; deny arms (wrong key / non-tty / ineligible)"
+exit 0

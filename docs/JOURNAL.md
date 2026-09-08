@@ -22,6 +22,91 @@ needed the operator.
 
 
 ---
+## 2026-09-08 (aux, run 6 continued) -- IM-5: the E2E + the batched holotype; a full-diversity review, and the bug the E2E caught that the review approved
+
+**What landed.** IM-5 (`IMPERIUM-DESIGN.md` §11.8): `tools/interactive/ls-imperium.exp`
+(the login -> confer -> elevated sub-shell -> cap works -> abdicate teardown E2E,
+plus the wrong-key / non-tty / ineligible-user deny arms), the BATCHED adversarial
+holotype over IM-3 + IM-4, and the fixes it surfaced. The operator was present and
+directed "get into IM-5, review the batch"; the `--list` eligibility fork it had
+approved earlier landed first as the `CLEARANCE_LIST_SELF` follow-up.
+
+**The review had full family diversity for once.** The orchestrator/author ran on
+the Opus 4.8 fallback this session; the holotype ran on Fable 5.1 (JSONL-verified
+pure -- 64 fable / 0 opus, no silent fallback). So this round was Opus-author vs
+Fable-reviewer -- the strongest case (both family diversity AND context
+independence), and it discharges the family-diversity concern for IM-3/IM-4 (the
+IM-1/IM-2 owed Fable pass is separate). Verdict: **0 P0 / 0 P1 / 1 P2 / 5 P3** --
+not a dirty close.
+
+**The complementary-prosecutor lesson: the E2E caught TWO console bugs the review
+approved.** The holotype read the tool's tty fail-fast (`fd_devclass(0) in {c,t}`)
+and VERIFIED IT SOUND (its point 10). The E2E then caught what the code-read could
+not -- runtime context about how a console `ut` treats its children:
+- **E1 (fixed): the tty check.** Arm 1 first failed with "needs an interactive
+  terminal" on the console: a console `ut` gives an external child a PIPED stdin
+  (`exec_external`, non-jc), so imperium's fd 0 is never the console. The review
+  was right about the code ("is fd 0 a tty" is what fd_devclass(0) answers) and
+  wrong about the world. Fixed by keying the check on fd 1 (stdout, which ut
+  inherits to the console -- the `stdout_is_terminal` convention).
+- **The sub-shell-input bug (OPEN, the E2E's deeper catch).** With E1 fixed, arm
+  1 got all the way through: request posted, SAK, provincia, key, `conferred`, the
+  sub-shell BANNER + the FASCES prompt (`/ ‖‖#`) -- and then the sub-shell EXITED
+  INSTANTLY ("imperium: relinquished"; `imperium --list` then ran in the outer
+  plain shell -> "not currently elevated"). Root cause: the SAME stdin-piping. The
+  console `ut` pipes imperium's stdin AND drops the write end; imperium spawns the
+  sub-`ut` with `Stdio::Inherit`, so the sub-`ut`'s fd 0 is that dead pipe -> it
+  reads EOF -> exits at birth. The imperium sub-shell cannot read console input on
+  a non-jc console session. It would work on a PTS (jc gives children Inherit
+  stdin), but the serial console is the v1.0 trusted medium, so this must be
+  fixed. Candidate: make imperium console-inheriting (add it to
+  `libutopia::console::is_raw_command`, the existing "this child needs the
+  console" mechanism -> `exec_external_raw` -> Inherit fd 0/1/2), verifying the
+  raw-mode dance composes with the sub-`ut`'s own line discipline. imperium cannot
+  simply open /dev/cons itself (the I-27 attach gate forbids a non-attached mint).
+  DEFERRED to the next session (found at ctx wind-down, no cores held).
+
+So this session's E2E is NOT yet green: E1 + the holotype's F1/F3/F4/F5/F6 are
+fixed and verified by test.sh (both verb-20 probes) + the holotype, but the E2E's
+full run is blocked on the sub-shell-input bug above. The fixes are committed; the
+E2E scenario is committed as written; the bug + the E2E completion are next.
+
+**The one P2 (F1): the SAK can be harvested for a slot-hog.** A hostile
+same-principal Proc (inside the design's own threat model) can loop
+`IMPERIUM_REQUEST`, hold the ONE pending slot, and be conferred at the SAK the
+operator pressed for their OWN request -- because the provincia shows the
+requester's pid but the tool never surfaced the operator's own pid to compare
+against. The trusted path's informed-consent property was defeated by a value the
+operator had no reference for. Fix (the review's "minimum"): the tool prints
+`imperium: requesting ... as pid N -- the trusted panel MUST show this pid`, and
+the BUSY message warns that a pending request may not be this one. A corvus-side
+console-owner gate was considered and rejected -- the legitimate tool is a
+NON-console-owner child of the shell, so that gate would refuse the real tool too.
+
+**The five P3s, four fixed + one deferred.** F3 (a second parked Tread orphaned
+the first tag -> refuse with EAGAIN), F4 (verb 20 accepted any payload -> BadFormat
+on non-empty, with a joey probe), F5 (a wrong-key lockout was permanent until
+reboot -> a new-verifier GRANT now clears it), F6 (the idle-slice fallback missed
+the read==0 arm) all fixed. F2 (abdicate in a DOUBLE-nested member shell says
+"relinquishing" but relinquishes nothing) DEFERRED: the common first-level abdicate
+is correct (arm 3 proves it) and I-25 holds; the fix needs /proc to expose
+root-vs-member, a larger change.
+
+**A pre-existing gap the E2E surfaced (not imperium, enqueued).** `$status` after a
+FAILING external command is 0 on the console (non-jc) path: `mkdir /home/x` printed
+"permission denied" yet `echo mka=$status` printed `mka=0`. `exec_external` sets
+`$status` from `wait_pids_interruptible`, so the reap returns 0 for a child that
+exited 1 -- or the coreutil runtime does not propagate rs_main's return (the worse,
+broader gap). It affects shell scripting; enqueued for a separate chunk. The E2E
+works around it (message-based witnesses, no $status).
+
+**A host-memory hole, worth recording.** The E2E was OOM-killed twice by the host
+(15 MB free RAM, 82% swap) with a second 2 GB VM (main's Halcyon image) also up --
+a measured infrastructure kill, not a guest defect and not the forbidden "host
+load" dodge (the system itself reported "running low on memory"). The operator
+freed memory and the run proceeded.
+
+---
 ## 2026-09-07 (aux, sixth run) -- IM-4 the userspace sub-shell: the imperium tool, the fasces prompt, abdicate; a load-bearing question the boot prover never answered, settled by reading the kernel; a host-test wall that reshaped the crate layout
 
 **What landed.** IM-4 (`IMPERIUM-DESIGN.md` §11.6), the userspace half of the

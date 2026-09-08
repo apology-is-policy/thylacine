@@ -47,6 +47,7 @@ mirrors:
   - "tools/interactive/ls-gfx-throttle.exp"
   - "tools/interactive/im1-sak-lever.exp"
   - "tools/interactive/im3-lex-curiata.exp"
+  - "tools/interactive/ls-imperium.exp"
 literals:
   - "Thylacine boot OK"
   - "EXTINCTION:"
