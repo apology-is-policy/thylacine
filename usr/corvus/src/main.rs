@@ -1864,6 +1864,12 @@ const VERB_CLEARANCE_ACTIVATE_SELF: u8 = 18;
 // for a DISTINCT_SECRET level; the reply is DEFERRED until the SAK episode
 // concludes (the requester's read parks), or immediate on a gate refusal.
 const VERB_IMPERIUM_REQUEST: u8 = 19;
+// IM-4 (IMPERIUM-DESIGN.md 11.6): the SELF form of CLEARANCE_LIST -- identity
+// from the connection's kernel-stamped principal (SYS_SRV_PEER, the verb-18
+// shape), no bearer token. Read-only disclosure of the caller's OWN eligibility
+// ladder ("what could I become"); it backs `imperium --list`'s eligibility half.
+// The reply is byte-identical to verb 14; the two share `emit_eligible_levels`.
+const VERB_CLEARANCE_LIST_SELF: u8 = 20;
 
 // The system passphrase is no longer a corvus-side constant (A-5c-b): ADMIN_ELEVATE
 // verifies a supplied passphrase by unwrapping the host-baked system-wrap (the admin
@@ -3055,11 +3061,21 @@ unsafe fn handle_clearance_list(payload: &[u8], response: &mut Vec<u8>) {
         Some(u) => u,
         None => return stage_response(response, STATUS_BAD_AUTH, &[]),
     };
+    emit_eligible_levels(&user, response);
+}
+
+// The eligible-levels reply body, shared by CLEARANCE_LIST (verb 14, session-
+// token identity) and CLEARANCE_LIST_SELF (verb 20, connection-principal
+// identity). ONE encoder so the two wire forms cannot drift: count u8, then per
+// eligible level -- name_len u8 + name + auth_required u8 + time_bound u64 LE +
+// caps_tlv_len u16 LE + caps_tlv (the versioned TLV, additive). The list is
+// bounded by CLEARANCE_LEVELS (a small static array), so the reply is bounded.
+unsafe fn emit_eligible_levels(user: &[u8], response: &mut Vec<u8>) {
     let mut out: Vec<u8> = Vec::new();
     out.push(0); // count placeholder (CLEARANCE_LEVELS <= 255)
     let mut count: u8 = 0;
     for lvl in CLEARANCE_LEVELS {
-        if !user_eligible_for(&user, lvl.name) {
+        if !user_eligible_for(user, lvl.name) {
             continue;
         }
         out.push(lvl.name.len() as u8);
@@ -3074,6 +3090,35 @@ unsafe fn handle_clearance_list(payload: &[u8], response: &mut Vec<u8>) {
     }
     out[0] = count;
     stage_response(response, STATUS_OK, &out);
+}
+
+// handle_clearance_list_self -- CLEARANCE_LIST_SELF (verb 20; IM-4). The SELF
+// form of CLEARANCE_LIST: identity is the connection's kernel-stamped principal
+// (the KObj_Srv peer is non-transferable, so it is pinned to the Proc that
+// opened the connection), NOT a bearer token -- the verb-18 shape. This is a
+// read-only disclosure of the caller's OWN eligibility ladder, so no re-auth is
+// required (listing what you may become is not an elevation, unlike verb 18's
+// activation, which needs a live session): a live corvus user reads its own
+// ladder; PRINCIPAL_SYSTEM and any principal without a corvus user record get
+// PermissionDenied (an id that was never minted by USER_CREATE has no
+// eligibility -- the same gate that keeps the boot chain out). The reply is
+// byte-identical to verb 14 via `emit_eligible_levels`.
+//
+// Request:  (no payload -- the identity IS the connection)
+// OK reply: identical to CLEARANCE_LIST (count + per-level TLV)
+unsafe fn handle_clearance_list_self(handle: i64, response: &mut Vec<u8>) {
+    let peer = match peer_live_info(handle) {
+        Some(p) => p,
+        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
+    };
+    if peer.principal_id == PRINCIPAL_INVALID {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+    let urec = match user_states_find_by_id(peer.principal_id) {
+        Some(u) => u,
+        None => return stage_response(response, STATUS_PERMISSION_DENIED, &[]),
+    };
+    emit_eligible_levels(&urec.user, response);
 }
 
 // The activation tail shared by both CLEARANCE_ACTIVATE forms (verbs 15 + 18):
@@ -4713,6 +4758,8 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
             VERB_GROUP_CREATE => handle_group_create(conn_handle, &payload_owned,
                                                      &mut conn.pending_response),
             VERB_CLEARANCE_LIST => handle_clearance_list(&payload_owned,
+                                                         &mut conn.pending_response),
+            VERB_CLEARANCE_LIST_SELF => handle_clearance_list_self(conn_handle,
                                                          &mut conn.pending_response),
             VERB_CLEARANCE_ACTIVATE_SELF => handle_clearance_activate_self(conn_handle,
                                                 &payload_owned, &mut conn.pending_response),

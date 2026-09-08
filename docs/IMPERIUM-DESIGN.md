@@ -739,13 +739,20 @@ here so the operator can veto any of them:**
    the kernel refuses the nested propagating redeem (11.4 consequence 11,
    "never nests"); the tool says "abdicate first" instead of surfacing a bare
    redeem failure.
-7. **`imperium --list` (also `edict`, `-l`) ships the /proc-flag half only** --
-   the current holdings (scope, caps by name, the axe, propagating). The
-   eligibility half ("what you could become") needs a NEW corvus verb
-   (`CLEARANCE_LIST_SELF`, the verb-18 identity shape, read-only) -- DEFERRED as
-   the one user-input fork and surfaced to the operator, because this session
-   ran on the Opus fallback (which stops at user-input items rather than adding a
-   corvus wire verb). The /proc half needs no corvus change.
+7. **`imperium --list` (also `edict`, `-l`) shows BOTH halves** -- the current
+   holdings (scope, caps by name, the axe, propagating; from the kernel's
+   `/proc/<pid>/imperium` flag) AND the eligibility ladder ("what you could
+   become"; each level's name + auth kind + caps). The eligibility half is a NEW
+   read-only corvus verb, `CLEARANCE_LIST_SELF` (20): the SELF form of
+   `CLEARANCE_LIST` (14) -- identity from the connection's kernel-stamped
+   principal (the verb-18 shape), no token, no re-auth (a listing is not an
+   activation); `PRINCIPAL_SYSTEM` and any unenrolled principal get
+   `PermissionDenied`. Verb 14 and verb 20 share one reply encoder
+   (`emit_eligible_levels`) so the wire forms cannot drift. This was surfaced as
+   a user-input fork on the Opus-fallback session and **operator-approved**
+   (2026-09-08); the tool degrades gracefully (holdings still shown) if corvus is
+   unreachable. A `PRINCIPAL_SYSTEM` deny probe rides joey's boot ladder; the
+   positive path (a login user's eligible levels) is the IM-5 `ls-imperium.exp`.
 8. **The sub-shell gets no `--home`.** The user's home is a shell variable in
    the outer `ut`, not exported to `/env`, so the spawned `ut` runs at the
    inherited cwd (its prompt shows the absolute path; a bare `cd` goes to `/`).

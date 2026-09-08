@@ -91,6 +91,20 @@ the audited corvus surface). I shipped only the decision-free /proc-flag half
 (current holdings) and surfaced the verb as the operator's call rather than
 adding it on the fallback model.
 
+**Follow-up (operator-approved, 2026-09-08).** The operator answered "yes, let's
+add it," so the eligibility half landed as a follow-up: corvus's
+`CLEARANCE_LIST_SELF` verb (20) -- the SELF form of `CLEARANCE_LIST`, identity
+from the connection's kernel-stamped principal (the verb-18 shape), no token, no
+re-auth (a listing is not an activation). Verb 14 and verb 20 now share one
+reply encoder (`emit_eligible_levels`) so the two wire forms cannot drift -- the
+refactor was the point, not a bonus. The tool's `--list` shows both halves
+(holdings from `/proc`, the ladder from corvus) and degrades gracefully if
+corvus is unreachable; the reply decode is fully bounds-checked. A
+`PRINCIPAL_SYSTEM` deny probe rides joey's ladder (the boot chain is never a
+corvus user -> `PermissionDenied`); the positive path (a login user's eligible
+levels) is IM-5's `ls-imperium.exp`, since only a login-stamped principal can
+exercise it.
+
 **Deltas flagged for veto (the 9 as-built refinements, §11.6).** The
 sub-shell gets no `--home` (home is a shell var, not exported to `/env`; it runs
 at the inherited cwd) -- the one most likely to draw a "fix it" rather than a

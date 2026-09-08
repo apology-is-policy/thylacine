@@ -48,6 +48,7 @@ use libthyla_rs::{
 use fasces::{parse_imperium, Imperium};
 
 const VERB_IMPERIUM_REQUEST: u8 = 19;
+const VERB_CLEARANCE_LIST_SELF: u8 = 20;
 const CORVUS_PROTOCOL_VERSION: u8 = 1;
 const LEVEL_IMPERIUM: &[u8] = b"imperium";
 
@@ -233,12 +234,29 @@ fn put_cap_names(caps: u64) {
     }
 }
 
-// `imperium --list`: what this shell currently holds, from the kernel flag.
+// Connect corvus's ctl (a bounded retry: /srv/corvus may still be coming up at
+// login). Returns the ctl fd, or -1.
+fn connect_corvus() -> i64 {
+    for _ in 0..64 {
+        let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/corvus".as_ptr(), 11, T_OREAD) };
+        if root >= 0 {
+            let ctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_ORDWR) };
+            let _ = unsafe { t_close(root) };
+            if ctl >= 0 {
+                return ctl;
+            }
+        }
+    }
+    -1
+}
+
+// `imperium --list`: current holdings (from the kernel /proc flag) PLUS the
+// eligibility ladder ("what you could become", from corvus CLEARANCE_LIST_SELF).
 fn cmd_list() -> i64 {
+    // (a) Current holdings, from the kernel's unforgeable /proc flag.
     match read_own_imperium() {
         None => {
             t_putstr("imperium: not currently elevated (a plain shell)\n");
-            0
         }
         Some(im) => {
             t_putstr("imperium: elevated -- scope ");
@@ -261,8 +279,115 @@ fn cmd_list() -> i64 {
             } else {
                 "  propagating: no\n"
             });
-            0
         }
+    }
+
+    // (b) The eligibility ladder, from corvus (read-only; identity is this
+    // Proc's kernel-stamped principal, so no token). Best-effort: an unreachable
+    // corvus does not fail --list, which has already shown the holdings.
+    let conn = connect_corvus();
+    if conn < 0 {
+        t_putstr("imperium: (corvus unreachable -- eligibility list unavailable)\n");
+        return 0;
+    }
+    let sent = unsafe { send_request(conn, VERB_CLEARANCE_LIST_SELF, &[]) };
+    if !sent {
+        t_putstr("imperium: (transport error -- eligibility list unavailable)\n");
+        let _ = unsafe { t_close(conn) };
+        return 0;
+    }
+    let reply = unsafe { read_reply(conn) };
+    let _ = unsafe { t_close(conn) };
+    match reply {
+        Some((STATUS_OK, body)) => print_eligible(&body),
+        Some((STATUS_PERMISSION_DENIED, _)) => {
+            t_putstr("imperium: no eligibility ladder (not a corvus user)\n");
+        }
+        Some((st, _)) => {
+            t_putstr("imperium: eligibility list status=");
+            put_dec(st as u64);
+            t_putstr("\n");
+        }
+        None => {
+            t_putstr("imperium: (transport error -- eligibility reply lost)\n");
+        }
+    }
+    0
+}
+
+// Decode + print the CLEARANCE_LIST_SELF reply: count u8, then per level
+// name_len u8 + name + auth_required u8 + time_bound u64 LE + caps_tlv_len u16 LE
+// + caps_tlv. Fully bounds-checked -- a truncated field stops the walk rather
+// than reading past the buffer.
+fn print_eligible(body: &[u8]) {
+    if body.is_empty() {
+        t_putstr("imperium: (empty eligibility reply)\n");
+        return;
+    }
+    let count = body[0];
+    if count == 0 {
+        t_putstr("imperium: eligible for no levels\n");
+        return;
+    }
+    t_putstr("imperium: eligible levels (what you could become):\n");
+    let mut off = 1usize;
+    for _ in 0..count {
+        if off >= body.len() {
+            break;
+        }
+        let nl = body[off] as usize;
+        off += 1;
+        if off + nl > body.len() {
+            break;
+        }
+        let name = &body[off..off + nl];
+        off += nl;
+        if off >= body.len() {
+            break;
+        }
+        let auth = body[off];
+        off += 1;
+        if off + 8 > body.len() {
+            break;
+        }
+        off += 8; // time_bound -- not shown here
+        if off + 2 > body.len() {
+            break;
+        }
+        let tl = (body[off] as usize) | ((body[off + 1] as usize) << 8);
+        off += 2;
+        if off + tl > body.len() {
+            break;
+        }
+        let tlv = &body[off..off + tl];
+        off += tl;
+        let caps = caps_from_tlv(tlv);
+        t_putstr("  ");
+        puts(name);
+        t_putstr(auth_label(auth));
+        t_putstr(" caps ");
+        put_hex64(caps);
+        t_putstr("\n");
+    }
+}
+
+// The caps bitmask from the versioned TLV (version u8 + tag u8 + len u16 LE +
+// value). BITMASK tag = 1, value u64 LE. Unknown/short -> 0.
+fn caps_from_tlv(tlv: &[u8]) -> u64 {
+    if tlv.len() >= 12 && tlv[1] == 1 {
+        u64::from_le_bytes([
+            tlv[4], tlv[5], tlv[6], tlv[7], tlv[8], tlv[9], tlv[10], tlv[11],
+        ])
+    } else {
+        0
+    }
+}
+
+fn auth_label(auth: u8) -> &'static str {
+    match auth {
+        0 => " (session re-auth)",
+        1 => " (distinct key, via the SAK)",
+        _ => " (special auth)",
     }
 }
 
@@ -323,18 +448,7 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
 
     // (3) Connect corvus's ctl (a bounded retry: the /srv service may still be
     // coming up right at login).
-    let mut conn: i64 = -1;
-    for _ in 0..64 {
-        let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/corvus".as_ptr(), 11, T_OREAD) };
-        if root >= 0 {
-            let ctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_ORDWR) };
-            let _ = unsafe { t_close(root) };
-            if ctl >= 0 {
-                conn = ctl;
-                break;
-            }
-        }
-    }
+    let conn = connect_corvus();
     if conn < 0 {
         t_putstr("imperium: cannot reach corvus (/srv/corvus)\n");
         return 1;

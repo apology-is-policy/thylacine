@@ -2987,6 +2987,21 @@ static int do_corvus_bringup(long storage_dup_fd) {
     }
     t_putstr("joey: IM-3 deny-path probes ok (key-tail shape x3 refused; verb 19 refused twice, no slot taken)\n");
 
+    // === IM-4 DENY probe: CLEARANCE_LIST_SELF (20) from PRINCIPAL_SYSTEM ->
+    // PermissionDenied(2). joey's own connection principal is the boot chain's
+    // PRINCIPAL_SYSTEM, which USER_CREATE never minted, so it resolves to no
+    // corvus user and has no eligibility ladder. A POSITIVE list (michael's
+    // eligible levels, incl. imperium) needs a login session's stamped
+    // principal, so it belongs to ls-imperium.exp (IM-5), not a boot probe.
+    pl = 0;   // CLEARANCE_LIST_SELF takes no payload; identity is the connection
+    if (corvus_exchange(conn_fd, 20, tx, pl, rx, sizeof(rx), &st, &rlen) != 0 || st != 2) {
+        t_putstr("joey: IM-4 CLEARANCE_LIST_SELF from PRINCIPAL_SYSTEM NOT refused PermissionDenied (status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr(")\n");
+        return 1;
+    }
+    t_putstr("joey: IM-4 deny-path probe ok (CLEARANCE_LIST_SELF refused for PRINCIPAL_SYSTEM)\n");
+
     // === #163: the user-default jit seed, probed via susan ===
     // susan is created above with NO explicit grant, so her jit eligibility can
     // only come from one of the two #163 mechanisms: corvus's USER_CREATE seed
