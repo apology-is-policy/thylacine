@@ -23,6 +23,207 @@ needed the operator.
 
 ---
 
+## Run 46f (2026-09-08, Fable 5.1 max until the model ran out, then Opus 5 -- the operator switched mid-run) -- HALCYON-TYPE TY-1 + TY-2: the rasterizer swapped and the Mac's weight reproduced
+
+**Where it sits.** Run 46e ended with the operator ratifying HALCYON-TYPE
+(@`1c421e04`): the smoothing stroke at 0.012 em, no hinting, the amount per
+theme, Cornucopia live from a subset TTF. This run builds the first two
+chunks, and builds them AS ONE, deliberately: TY-1 alone would have vendored
+skrifa and zeno and then verified the `no_std` claim against a dependency
+nothing yet used. A dormant dependency that compiles proves less than a live
+one that renders -- so the swap and the stroke landed together, and the
+native link is the proof by use.
+
+**What the swap had to preserve, and how that was made checkable.** The
+danger in replacing a rasterizer under a laid-out UI is not the pixels; it
+is the METRICS. Every advance, ascent and bearing halcyond's layout has ever
+been tuned against came out of fontdue, and a rasterizer swap that quietly
+moves them is a layout change wearing a rendering change's clothes. So
+before fontdue was removed, a throwaway host binary dumped what it reports
+on the four vendored faces -- 11 sizes of line metrics x 4 faces, the
+advances of a 59-character sample at three sizes x four faces, and 18 glyph
+bearings -- and those numbers went into `raster.rs` as literals. The swap is
+then falsifiable: `line_metrics_are_the_fontdue_values`,
+`advances_are_the_fontdue_values` and `bearings_are_the_fontdue_values` pass
+only if skrifa's table choice (hhea, OS/2 typo under USE_TYPO_METRICS, the
+Windows pair last) and its px/upem scale agree with fontdue's to the pixel.
+They do, everywhere, on the first run. The box may differ by a pixel where
+a fractional edge rounds the other way, so that assertion is `<= 1` and says
+why.
+
+**The measurement that mattered.** The lab (run 46e) predicted the Mac's
+"font smoothing" is an em-relative dilation worth about +18 % stem weight,
+and the fit put its single constant at 0.012 em. Landing it: on the 35 px
+italic `n`, the plain fill sums **30146** of coverage where fontdue summed
+**30182** -- two independent exact-area rasterizers agreeing within 0.12 %,
+which is itself the check that the new fill is the old fill -- and the
+stroked raster sums **35652**, or **+18 %**. The prediction and the
+implementation met at the same number without tuning. The smaller sizes come
+in at +17 % (11.5 px body `n`), +14 % (17.5 px) and +11 % (the bold `n`,
+which has less perimeter per unit area to dilate) -- the dilation is
+em-relative, but its effect on INK depends on the glyph's perimeter-to-area
+ratio, which is exactly why the weight reads as consistent to the eye across
+sizes rather than as a fixed percentage. The box grew one row (17x19 ->
+17x20) and the bearing did not move: at 35 px the stroke's half-width is
+0.21 px, under the mask's rounding.
+
+**The two traps, both caught by the lab having hit them first.** zeno stores
+a `BottomLeft` mask bottom-up, so the pen negates y and renders with the
+default `TopLeft` origin -- the lab's flipped-glyph bug, avoided here by
+construction rather than rediscovered. And the union of a fill and a stroke
+is `f + s - f*s`, never `max(f, s)`: the stroke straddles the outline, so on
+an edge pixel about half of it is already inside the fill and half is new
+ink, and a max counts none of the new ink (+3 % where +18 % is due). Both are
+in the code as comments that say WHY, and the second is asserted (every
+pixel of the union is at least the fill's coverage there).
+
+**One thing built more carefully than the lab's version.** The lab laid the
+fill onto the stroke's placement, on the reasoning that a stroke's box always
+contains its fill's. That is true of the geometry and not guaranteed of two
+independent roundings, and a wrong offset there is a negative `usize` cast --
+a panic at best. The shipped `raster()` computes the explicit union box
+(`min` of the lefts and tops, `max` of the rights and bottoms) and lays both
+into it, so the offsets are non-negative BY CONSTRUCTION and the code assumes
+nothing about which box is larger. It costs one allocation and removes an
+assumption.
+
+**And one self-audit finding, promoted from a scratchpad check to a proof.**
+The union's 8-bit form -- `f + (s*(255-f)+127)/255` -- is the kind of
+arithmetic that is silent when wrong: saturate it and the text is merely a
+little heavy; write `max` and it is merely a little light. No gate would
+fail either. Prosecuting it during the gate wait meant running all 65536
+pairs through Python, which proved it never exceeds 255, never falls below
+`max(f, s)`, and never lands more than one level from the real-valued union.
+A check that lives only in a scratchpad is a check that will not run again,
+so the expression became a named `union8` and that exhaustive sweep became
+`the_union_is_exact_and_bounded_everywhere` -- a test that is a proof rather
+than a sample, and that pins `union8(128,128) == 192` with the comment
+naming the max-bug it excludes.
+
+**A vendoring surprise worth recording.** `cargo vendor` of the skrifa
+closure pulled `bytemuck_derive` 1.12.0, which requires `syn 3` -- and the
+tree already carries `syn 2.0.117`, so the vendor tree grew a SECOND `syn`
+(59 files rewritten under the old one, a `syn-2.0.117/` directory appearing
+beside it). Two copies of a proc-macro dependency is not a build error; it
+is bloat that nothing would have flagged. Pinning `bytemuck_derive` to
+1.11.0 (the last release on `syn 2`) collapses it back to one. The whole
+closure -- skrifa 0.46.2, read-fonts 0.43.3, font-types 0.12.4, zeno 0.3.3,
+bytemuck 1.25.2, bytemuck_derive 1.11.0 -- came IN while fontdue and its
+exclusive closure (ttf-parser, hashbrown, allocator-api2, equivalent,
+foldhash) went OUT, and the crate count landed back on 139 exactly.
+`third_party/README.md` now carries a composition-change table, because a
+count with no history cannot be checked.
+
+**The `no_std` claim, verified twice.** HALCYON.md 13.5 requires the
+rasterizer's `no_std` claim be verified at vendor time against the native
+target, with a named fallback if it fails. `cargo check -p halcyond --target
+aarch64-unknown-none` passed before a line of the swap was written (the
+right order: prove the dependency builds before writing code against it),
+and the full `tools/build.sh userspace` release link produced a 2.77 MB
+halcyond binary afterwards. The D2 mask-emboldening fallback is unneeded.
+One feature-gate correction on the way: zeno's default set is `eval` +
+`std`, and `default-features = false` dropped `Mask` itself along with
+`std`; the manifest asks for `libm` + `eval`.
+
+**Then both graphics gates went red, and neither red was the swap.** I baked
+ONE image with BOTH `THYLACINE_HALCYON=1` (the console renderer) and
+`THYLACINE_HALCYON_SESSION=1`, and ran two gates against it. Each gate needs
+its OWN lever, and each broke in its own way. `ls-halcyon` types at the
+serial console and needs the renderer lever alone; with the session lever
+also on, login spawned the session compositor instead of a console shell, so
+the typed command's output never landed -- timeout at 90 s, 3/3.
+`ls-gfx-compose` needs the session lever alone; with the renderer lever also
+on, a console halcyond existed and took the display's status bar, so the
+session's mint was refused and the status-bar leg failed -- also 3/3. Two
+gates that discriminate on different levers cannot share a fixture. Baked
+separately, both pass: **ls-gfx-compose PASS 72 s, one attempt** -- the
+historical timing to the second -- and ls-halcyon likewise.
+
+**The mis-bake was a useful accident: the second red is a real defect.**
+tapestryd's `Comp.status` is ONE registered status bar per display, and
+`create role=status` refuses outright while it is occupied. Nothing releases
+it when the display changes hands from the SYSTEM console renderer to a user
+SESSION -- the backgrounding path keys on LEAVES, and the status bar is "not
+hosted nor pane-bound; its bind is the display", so it is not a leaf, is
+never backgrounded, and is never retired. The session's bar then fails
+`Create` for the rest of the console's life. What makes this worth the
+entry is that **the diagnosis was already in the tree, one case short**: the
+session-to-session takeover retires the outgoing holder's bar, and its own
+comment names this exact consequence -- *"the ONE per-display carve, which
+would else refuse the successor's for as long as the idle conn lived."*
+Right diagnosis, applied to session -> session and not to SYSTEM -> session.
+
+**And the obvious fix was half a fix, which only measuring it revealed.** I
+added the same retire, keyed on the owner's PRINCIPAL, and ran the
+both-levers image again. The retire fired, a bar was re-created immediately
+after, and then a `failed Create` came from whoever lost -- and the gate
+still failed. The console had seen the CLOSE, re-armed on the very relayout
+that retire causes, and raced the session for the slot it had just been
+relieved of. Whoever wins that toss decides whether the user has a status
+bar. Worse, **the log could not tell me who won**: `tapestryd: status bar N
+created` never named an owner, so with two halcyonds alive a full serial log
+could not answer the one question its own failure poses. That is the
+definition of an under-instrumented say, and the line now carries the
+owner's principal. The rule then had to be stated where it belongs: while a
+session is declared, a SYSTEM principal may not TAKE the display's bar. Two
+halves of one rule -- the retire hands the slot over, the refusal keeps it
+handed over -- and the console, invisible while backgrounded, simply stays
+bar-less until the relayout that foregrounds it at logout.
+
+**And it is a state the correct bake never constructs** -- green by
+irrelevance, not by correctness, which is the honest reading of why no gate
+ever caught it. So the fix has no permanent witness: no gate runs both
+levers, and tapestryd is a bin-only crate whose `server.rs` pulls
+libthyla-rs, so there is no host unit test either. It is measured by hand on
+a both-levers image, and the log now reads end to end: bar 1 created for
+principal 4294967294 (SYSTEM) and painted, retired at the declare, the
+console's re-mint refused, bar 4 created for principal 1000 and painted, and
+the cinnabar/ember/composition legs passing where the pre-fix image failed
+3/3. A discriminating before/after, not a gate. Both shipping
+configurations were then re-run against it, because half 2 touches a shared
+admission path: **ls-gfx-compose PASS 72 s** and **ls-halcyon PASS 118 s**,
+one attempt each.
+
+**That hand run also left one thing open, and it is not being called
+benign.** The both-levers image as a whole still fails, later, on the scale
+leg: the session follows 100 -> 125 and 125 -> 150 and not 150 -> 175. I did
+not diagnose it. Neither shipping configuration reproduces it; there is no
+baseline for that leg in a both-levers image, because the first such run
+died at the status bar; and the configuration is one nothing ships (14.12
+records the system-renderer lever as being retired). The obvious story -- two
+live renderers each relaying out per step -- is a hypothesis I did not
+measure, so it is written down as a hypothesis, with the measurement that
+would settle it, and queued.
+
+**A note on causality, since I nearly got it wrong.** My first hypothesis was
+that the swap had flipped a race: skrifa parses lazily where fontdue parses
+every glyph of every face eagerly at load, so the console halcyond would
+reach its status-bar mint sooner and win a slot it used to lose. The
+mechanism is real and the story was tidy -- and it was wrong, or at least
+unnecessary, because the actual cause was my own bake. The tell was that
+BOTH gates failed, in unrelated places; one change flipping one race does
+not explain two. Reading the second failure instead of theorizing about the
+first is what produced the answer.
+
+**Posture.** halcyond 190 host tests (+8: four in the new `outline`
+module, four in `raster`), libhalcyon 49 (the theme pin gained
+`smooth_mem`). The native release link is clean. ls-gfx-compose PASS 72 s
+(session lever) and ls-halcyon PASS 118 s (renderer lever), one attempt
+each, run twice: once for the swap and again after the status-bar rule.
+Landed as `db1e4ce9` (the swap) and `9d5f38ee` (the status bar).
+
+**Open.** The Fable prosecution round is owed and now cannot be Fable --
+the operator ran out mid-run and switched to Opus 5, so the reviewer rule's
+fallback applies (a same-family round keeps context independence, which is
+the half that matters most here). It stays batched with TY-3, per the
+double-the-distance rule. TY-3 (quarter-pixel phases), TY-4 (Cornucopia
+live -- which is also what puts the mono tier on the same stroke as the
+proportional text; today a bake cell is unstroked while a fallback glyph
+beside it is not) and TY-6 (the audit) are the remaining chunks. The
+status-bar handover's missing witness is the other open item.
+
+---
+
 ## Run 46e (2026-09-08, Fable 5.1 max, after run 46d's self-compaction) -- the type-rendering research: the premise confounded, the Mac measured, the design for the vote
 
 **Where it sits.** The operator's request at the SC-5 boundary, verbatim:
