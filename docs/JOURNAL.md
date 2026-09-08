@@ -84,6 +84,80 @@ image re-baked, the battery gate re-run) before the self-compaction. SC-3
 (the gates at 200%) are the pickup, then ONE Fable round over SC-2 + SC-3
 batched with the chrome-content close's "ROUND 2 FOCUS".
 
+**SC-3 + SC-4 (after the self-compaction; `HASH_SC3`).** halcyond scales at
+ONE place: the `Sheet` carries the percent, the compositor's `Metrics::at`
+table, the hairline, the 2 px mark, the heading sizes and the two mono ems,
+and every logical constant in the render core reaches a pixel only through
+`Sheet::px` / `Sheet::ipx`. The mono bakes are selected by advance
+(`mono_advances`: round-half-up of 6s and 10s, the nearest SMALLER bake if
+absent) from the one function the sheet's ems also derive from, so the two
+cannot disagree; the island/grid selector's threshold moves with the
+selection (a request at the old 12/20 constants would land wrong at 2.0 --
+a survivor of the sweep paints at 1.0 inside a 2.0 page). The atlas bound
+became `atlas_pages_for(display)` = max(16, 2 x display area in pages): the
+1337a218 constant at 1280x800, eight times it on 4K. Both loops re-read the
+ctl on every relayout (one read: display + scale) and a change rebuilds
+everything that held a size -- the sheet at a new generation, the atlas, the
+layout caches or every tile's heights, the grids re-fitted with a Resize
+down the wire, the menu closed, the strips and the bar invalidated, the
+winsize re-reported. The session writes `/env/HALCYON_SCALE` once as the
+verb; the value reaches the sheet only through the ctl. Pinned on the host:
+`daylight_sheet(100)` is the old literals exactly, and 200 is the operator's
+COMPOSITION 6 table (prose 23, hdr 35/29/25, the 40 px bars, the 2 px
+hairline, the 12x27 island cell).
+
+**The gate at 200%, and what it found on its first run.** `gfx_compose.py
+--scale` derives every expectation from the logical table through the one
+rounding; its strongest new witness is the tag-bar PROFILE -- walking up
+from a pane's parchment: the separator (the hairline), the strip ground plus
+the compositor's header-toned inner hairline (the tag-bar height), the bevel
+-- the compositor's carve and halcyond's paint in one measurement, profiled
+on the real 1.0 captures BEFORE it was trusted (it read (1, 20, 2), not the
+(1, 19, 2) I had written: the inner hairline sits between the bevel and the
+strip). The .exp leg chords Super+= four times, waits for the session's
+`scale A -> B (cell WxH)` say per step, judges the 2.0 captures at 2.0 AND
+asserts the 1.0 verdict REJECTS them (a scale check both scales satisfy
+proves nothing), then Super+0 back to 100. The session followed all four
+steps (cells 13x29, 15x33, 18x40, 20x44) and the 1.0 legs stayed green, and
+the 2.0 verdict failed identically three attempts running -- two real
+defects, one per painter:
+
+- **The compositor painted the live tile's inner hairline one ring thick.**
+  `paint_borders` keyed the live key/tint on `d == hair_d`; the band is
+  `hair` px from 150% up, so the second ring stayed `header` and the live
+  pane profiled (2, 38, 0). An SC-2 bug invisible at 1.0, caught by the
+  profile's exactness. One condition.
+- **`cat /ctl/cpu` after `ls /lib/halcyon` rendered as prose at 2.0.** Ground
+  truth before theory: a host test pinned the classifier RAW for a plain
+  zone after an annotated one, whole, soft-wrapped across a 31-column grid,
+  or scrolled off -- innocent. The cause was the scroll-off intern: a row of
+  an OLDER zone still leaving the grid while the new zone is open lands in
+  the open block (it has to render there), and `Block::annotated()` was a
+  scan of the styles table -- the older `ls`'s obj styles re-classed the
+  open `cat` zone a document, and its own rows, scrolled off after them,
+  rendered as prose. A 34-row grid at 1.0 never scrolled a row off during a
+  short `cat`; the 17-row grid at 2.0 does within every command -- and a
+  split at 1.0 would too. The fix records a zone's OWN annotation (the
+  em/obj/hdr frame opening while the block is open; an own row's or byte's
+  annotated style) and never a foreign row's, and a foreign scrolled row
+  carries ITS zone's class, decided before its styles are interned. The
+  reproducer fails on the old code; the pin stands beside it.
+
+The re-run with both fixes then failed on the VERDICT: its pane detector
+found a pane by parchment majority, and a 2.0 shell pane is mostly island
+once the islands are back -- it lost the shell pane and started the tour
+below its islands. Pane ground is now parchment, island ground or the
+gutter, and a pane begins after its strip's separator rows. The gate's own
+discrimination held throughout: the 1.0 captures are rejected at 200 and
+the 2.0 captures at 100, on real pixels, not only the synthetic canvas.
+The third run of the gate passed all six legs (218 s): the session followed
+Super+= x4 (cells 13x29 / 15x33 / 18x40 / 20x44), the 2.0 captures measured
+the 2.0 table and were rejected at 1.0, and Super+0 brought it back to the
+1.0 table. Three defects on the first run of a new witness, two in the
+renderers and one in the witness itself -- the round-44 lesson again: the
+screenshot loop is a gate, and a gate's first run is where it earns its
+keep.
+
 ## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
 
 **Where it sits.** The first queued item after run 44's close: the chrome

@@ -274,6 +274,15 @@ fn parse_two(text: &str, key: &str) -> Option<(u32, u32)> {
     None
 }
 
+/// The compositor's display as its global ctl reports it: the scanout
+/// geometry and the display scale in percent (HALCYON-SCALE 4).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DisplayInfo {
+    pub w: u32,
+    pub h: u32,
+    pub scale: u16,
+}
+
 /// One integer off the ctl line that starts with `key` (`scale 150`).
 fn parse_one(text: &str, key: &str) -> Option<u32> {
     for line in text.lines() {
@@ -1132,6 +1141,27 @@ impl EventRing {
         unsafe { t_close(gctl) };
         let text = core::str::from_utf8(&buf[..n]).ok()?;
         parse_two(text, "display ")
+    }
+
+    /// The display geometry AND scale off ONE read of this session's global
+    /// ctl (HALCYON-SCALE 4/6: a follower re-reads both on every relayout,
+    /// so one RPC serves both). None when the ctl is unreadable or carries
+    /// no `display` line; the scale is 100 when its line is absent.
+    pub fn display_info(&self) -> Option<DisplayInfo> {
+        let root = self.root();
+        let gctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OREAD) };
+        if gctl < 0 {
+            return None;
+        }
+        let mut buf = [0u8; 256];
+        let n = read_all(gctl, &mut buf);
+        unsafe { t_close(gctl) };
+        let text = core::str::from_utf8(&buf[..n]).ok()?;
+        let (w, h) = parse_two(text, "display ")?;
+        let scale = parse_one(text, "scale ")
+            .and_then(|v| u16::try_from(v).ok())
+            .unwrap_or(100);
+        Some(DisplayInfo { w, h, scale })
     }
 
     /// HALCYON-SCALE 4: the display scale in percent off this session's

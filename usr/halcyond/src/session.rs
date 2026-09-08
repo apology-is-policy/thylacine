@@ -36,6 +36,7 @@ use halcyond::tile::{Mark, GRID_KEY};
 use halcyond::tiles::{plan_tiles, tile_command};
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
 use kaua_term::{Record, ScreenMode};
+use libhalcyon::scale;
 use libhalcyon::theme::{daylight_env_palette, daylight_palette};
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Write;
@@ -43,8 +44,8 @@ use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_poll, t_read, t_write, TPollFd, T_POLLHUP, T_POLLIN, T_POLLOUT};
 use tapestry::{
-    EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_LAYOUT,
-    TEV_PTR_BTN, TEV_PTR_MOVE,
+    DisplayInfo, EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY,
+    TEV_LAYOUT, TEV_PTR_BTN, TEV_PTR_MOVE,
 };
 
 use crate::chromeset::{self, read_file};
@@ -123,6 +124,11 @@ const SESSION_ENV_PATH: &str = "/env/HALCYON_SESSION";
 /// run (s7a-3). A hosted pts program (nora) reads it to follow Daylight instead
 /// of a hardcoded palette; the format is `libhalcyon::theme::env_palette`.
 const HALCYON_PALETTE_ENV_PATH: &str = "/env/HALCYON_PALETTE";
+/// The user's display-scale preference (HALCYON-SCALE 6): a percent the
+/// session writes ONCE as the compositor's gated `scale` verb at start. A
+/// preference, never a source -- the compositor stays the authority and its
+/// ctl the channel, so the carve and the paint cannot disagree.
+const HALCYON_SCALE_ENV_PATH: &str = "/env/HALCYON_SCALE";
 
 /// How many connect iterations tolerate a refused `session on` before the
 /// compositor runs UNDECLARED: the seat may be mid-handover (the previous
@@ -676,6 +682,23 @@ impl SessionTile {
         })
     }
 
+    /// Re-derive the grid from the surface at `geom`'s cell -- a CONFIGURE,
+    /// or a scale change (the cell moved under the same surface): the model
+    /// reshapes and the Resize goes down the wire when the grid changed. A
+    /// dead tile keeps its last grid (its terminal is gone).
+    fn fit_to_surface(&mut self, geom: Geom, wire_out: &mut Vec<u8>) {
+        let nc = ((self.surf.w as i32 / geom.cell_w).max(1)) as u16;
+        let nr = ((self.surf.h as i32 / geom.cell_h).max(1)) as u16;
+        if (nc != self.cols || nr != self.rows) && self.exit.is_none() {
+            self.cols = nc;
+            self.rows = nr;
+            self.tile.resize(nc as usize, nr as usize);
+            wire_out.clear();
+            encode_input(&Input::Resize { cols: nc, rows: nr }, wire_out);
+            self.queue_resize(wire_out);
+        }
+    }
+
     /// Render + present the tile if dirty. Returns false on a wedge (present
     /// failed too many times in a row -- the caller counts it globally).
     fn render_if_dirty(
@@ -920,6 +943,77 @@ fn reconcile(
     }
 }
 
+/// HALCYON-SCALE 6: the user's `/env/HALCYON_SCALE` preference, written
+/// once as the gated `scale <pct>` verb (retried through the per-pass verb
+/// budget). Absent: nothing; unparsable or off the five values: said and
+/// ignored; refused (the seat is not ours): said -- the compositor's own
+/// scale stands either way.
+fn request_env_scale(ring: &EventRing) {
+    let Some(text) = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, HALCYON_SCALE_ENV_PATH) else {
+        return;
+    };
+    let want = text.trim();
+    let pct = match want.parse::<u16>() {
+        Ok(p) if scale::is_valid_pct(p) => p,
+        _ => {
+            say!(
+                "halcyond: {} ignored: {:?} is not one of 100/125/150/175/200",
+                HALCYON_SCALE_ENV_PATH,
+                want
+            );
+            return;
+        }
+    };
+    let cmd = format!("scale {}", pct);
+    for _ in 0..VERB_RETRIES {
+        match ring.global_ctl(&cmd) {
+            Ok(()) => {
+                say!("halcyond: scale {} requested ({})", pct, HALCYON_SCALE_ENV_PATH);
+                return;
+            }
+            Err(TapError::Busy) => {
+                let _ = sleep(Duration::from_millis(VERB_NAP_MS));
+            }
+            Err(e) => {
+                say!("halcyond: scale {} refused {:?} ({})", pct, e, HALCYON_SCALE_ENV_PATH);
+                return;
+            }
+        }
+    }
+    say!("halcyond: scale {} not admitted (budget) ({})", pct, HALCYON_SCALE_ENV_PATH);
+}
+
+/// HALCYON-SCALE 6: the compositor's scale changed (its ctl says a new
+/// percent): rebuild the render brain at it -- the Sheet (a new generation,
+/// so every layout cache re-lays), the glyph source (the mono bakes for the
+/// scale; the atlas regens), the cell geometry, and every tile: its cached
+/// heights dropped, its grid re-fitted to its surface at the new cell (a
+/// Resize down the wire when it changed), a repaint. The chrome, the status
+/// bar and the menu are the caller's (they live beside the tiles).
+fn rescale(
+    pct: u16,
+    sheet: &mut Sheet,
+    gs: &mut GlyphSource,
+    geom: &mut Geom,
+    tiles: &mut BTreeMap<u32, SessionTile>,
+    wire_out: &mut Vec<u8>,
+) {
+    let from = sheet.scale;
+    let gen = sheet.gen + 1;
+    *sheet = daylight_sheet(pct);
+    sheet.gen = gen;
+    gs.set_scale(pct);
+    let (cw, ch, _) = gs.mono_cell();
+    geom.cell_w = cw;
+    geom.cell_h = ch;
+    for t in tiles.values_mut() {
+        t.tile.invalidate_heights();
+        t.fit_to_surface(*geom, wire_out);
+        t.dirty = true;
+    }
+    say!("halcyond: scale {} -> {} (cell {}x{})", from, pct, cw, ch);
+}
+
 /// Connect to tapestryd as the user + take a fullscreen surface (d-2's proven
 /// bootstrap, with the console path's bounded connect retry). SQPOLL from the
 /// start: the unified poll needs the ring pollable off-thread. Returns whether
@@ -1014,15 +1108,37 @@ pub fn run(home: Option<String>) -> i64 {
         say!("halcyond: FAIL vendored face parse");
         return 1;
     }
-    let sheet = daylight_sheet();
+    // HALCYON-SCALE 6: the user's preference first -- written as the gated
+    // verb only once declared and hosting (the seat-held-while-hosting rule
+    // admits it; undeclared it would be refused) -- then the brain at the
+    // COMPOSITOR's scale, read off its ctl with the display (re-read on
+    // every relayout below). The atlas bound follows the display area.
+    if declared {
+        request_env_scale(&ring);
+    }
+    let mut display = ring.display_info().unwrap_or(DisplayInfo {
+        w: root_surf.w,
+        h: root_surf.h,
+        scale: 100,
+    });
+    gs.set_scale(display.scale);
+    gs.set_display(display.w, display.h);
+    let mut sheet = daylight_sheet(display.scale);
     let (cell_w, cell_h, _) = gs.mono_cell();
     let (disp_w, disp_h) = (root_surf.w, root_surf.h);
-    let geom = Geom {
+    let mut geom = Geom {
         cell_w,
         cell_h,
         disp_w,
         disp_h,
     };
+    say!(
+        "halcyond: scale {} (cell {}x{}, atlas bound {} pages)",
+        display.scale,
+        cell_w,
+        cell_h,
+        gs.evict_pages()
+    );
 
     // The root tile, keyed on the leaf that hosts the bootstrap surface.
     let root_leaf = match leaf_hosting(troot, root_surf.id) {
@@ -1139,7 +1255,7 @@ pub fn run(home: Option<String>) -> i64 {
         // CursorEnd + KillToStart, so a half-typed draft moves to the kill
         // buffer instead of being run INTO. One Text record: the down-queue
         // drops it whole or not at all, never half a command.
-        match menus.service(&mut gs) {
+        match menus.service(&sheet, &mut gs) {
             MenuEvent::Chosen(Action::Command(cmd)) => {
                 menus.close();
                 say!("halcyond: menu ran: {}", cmd);
@@ -1221,19 +1337,7 @@ pub fn run(home: Option<String>) -> i64 {
                         TEV_CLOSE => reap.push(leaf),
                         TEV_CONFIGURE => match t.surf.handle_configure(&e) {
                             Ok(_) => {
-                                let nc = ((t.surf.w as i32 / cell_w).max(1)) as u16;
-                                let nr = ((t.surf.h as i32 / cell_h).max(1)) as u16;
-                                if (nc != t.cols || nr != t.rows) && t.exit.is_none() {
-                                    t.cols = nc;
-                                    t.rows = nr;
-                                    t.tile.resize(nc as usize, nr as usize);
-                                    wire_out.clear();
-                                    encode_input(
-                                        &Input::Resize { cols: nc, rows: nr },
-                                        &mut wire_out,
-                                    );
-                                    t.queue_resize(&wire_out);
-                                }
+                                t.fit_to_surface(geom, &mut wire_out);
                                 t.dirty = true;
                                 // A relayout may have added or removed leaves.
                                 relayout = true;
@@ -1326,7 +1430,7 @@ pub fn run(home: Option<String>) -> i64 {
                 req.run.2.max(0) as u32,
                 req.run.3.max(0) as u32,
             );
-            if menus.open(req.model, d(req.ax, gx), d(req.ay, gy), run_d, &mut gs) {
+            if menus.open(req.model, d(req.ax, gx), d(req.ay, gy), run_d, &sheet, &mut gs) {
                 menu_leaf = Some(leaf);
             }
         }
@@ -1339,6 +1443,31 @@ pub fn run(home: Option<String>) -> i64 {
             if tiles.is_empty() {
                 break;
             }
+            // HALCYON-SCALE 6: the display + the scale, re-read where the
+            // layout is re-read; a change rebuilds the render brain
+            // (`rescale`) and drops what was sized beside it: a menu at the
+            // old scale, the strips and the bar (the compositor re-carved
+            // them; their CONFIGUREs deliver the new sizes).
+            if let Some(di) = ring.display_info() {
+                if (di.w, di.h) != (display.w, display.h) {
+                    display.w = di.w;
+                    display.h = di.h;
+                    gs.set_display(di.w, di.h);
+                }
+                if di.scale != sheet.scale {
+                    rescale(di.scale, &mut sheet, &mut gs, &mut geom, &mut tiles, &mut wire_out);
+                    display.scale = di.scale;
+                    menus.close();
+                    menu_leaf = None;
+                    chrome.invalidate();
+                    status.invalidate();
+                }
+            }
+            // A relayout re-arms the status bar's mint retry (the console
+            // path's H-3d F5 cadence): the compositor retires a bar of the
+            // old height on a scale change, and the re-mint at the new one
+            // must not wait on a further relayout if its first try raced.
+            status.rearm();
             chrome_dirty = true;
         }
 
@@ -1405,12 +1534,12 @@ pub fn run(home: Option<String>) -> i64 {
                         )
                     })
                 };
-                chrome.reconcile(troot, u32::MAX, &mut gs, &describe);
+                chrome.reconcile(troot, u32::MAX, &sheet, &mut gs, &describe);
                 for t in tiles.values_mut() {
                     t.trail_painted = String::from(t.tile.scrollback.cwd());
                 }
             }
-            status.ensure();
+            status.ensure(&sheet);
             status.pump();
             let focused_leaf = chrome.focused().map(|(id, _, _)| *id);
             let (cwd, cmd, exit_code) = focused_leaf
@@ -1427,7 +1556,7 @@ pub fn run(home: Option<String>) -> i64 {
             // mockups' `transcript · ~/thylacine · ut ~`).
             let cwd = abbrev_home(cwd, home.as_deref());
             let sm = statusset::model_from(chrome.focused(), focused_leaf, &cwd, cmd, exit_code);
-            status.refresh(&sm, &mut gs);
+            status.refresh(&sm, &sheet, &mut gs);
         }
 
         // If any tile needs a paint (a new tile, a resize), render before we

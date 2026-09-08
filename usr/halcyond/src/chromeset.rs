@@ -17,6 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use halcyond::chrome::{console_name, key_for, parse_leaves, parse_rect, strip_list, Key};
+use halcyond::layout::Sheet;
 use halcyond::raster::GlyphSource;
 use libthyla_rs::{t_close, t_open, t_read, t_write, T_OREAD, T_OWRITE};
 use tapestry::{EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE};
@@ -134,7 +135,14 @@ impl ChromeSet {
     /// leaves it hosts -- the tile's program as the name and its status as
     /// the trail (section 4.1); a leaf it does not describe shows its `tag`
     /// text as the name and no trail.
-    pub fn reconcile(&mut self, troot: i64, own_surface: u32, gs: &mut GlyphSource, describe: Describe) {
+    pub fn reconcile(
+        &mut self,
+        troot: i64,
+        own_surface: u32,
+        sheet: &Sheet,
+        gs: &mut GlyphSource,
+        describe: Describe,
+    ) {
         if troot < 0 {
             return;
         }
@@ -224,7 +232,7 @@ impl ChromeSet {
                             dirty: true,
                             dead: false,
                         };
-                        paint(&mut t, gs);
+                        paint(&mut t, sheet, gs);
                         self.failed_said.retain(|&f| f != id);
                         self.tiles.insert(id, t);
                     }
@@ -239,8 +247,16 @@ impl ChromeSet {
         }
         for t in self.tiles.values_mut() {
             if t.dirty {
-                paint(t, gs);
+                paint(t, sheet, gs);
             }
+        }
+    }
+
+    /// Every strip repaints on the next reconcile (a sheet change: the
+    /// scale moved and the compositor re-carved every bar).
+    pub fn invalidate(&mut self) {
+        for t in self.tiles.values_mut() {
+            t.dirty = true;
         }
     }
 
@@ -285,13 +301,13 @@ impl ChromeSet {
 }
 
 /// Execute the lib's strip list into the tile's surface and present it.
-fn paint(t: &mut Tile, gs: &mut GlyphSource) {
+fn paint(t: &mut Tile, sheet: &Sheet, gs: &mut GlyphSource) {
     let (w, h) = (t.surf.w, t.surf.h);
     if w == 0 || h == 0 {
         t.dirty = false;
         return;
     }
-    let cart = strip_list(t.key, &t.name, &t.trail, w, h, gs);
+    let cart = strip_list(t.key, &t.name, &t.trail, w, h, sheet, gs);
     let px = t.surf.pixels();
     cartoon::execute(
         &cart,

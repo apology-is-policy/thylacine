@@ -35,7 +35,7 @@ use halcyond::input::{
 };
 use halcyond::layout::{
     cursor_pos, daylight_sheet, layout_block, layout_pending, render_block, LaidBlock,
-    LayoutCache,
+    LayoutCache, Sheet,
 };
 use halcyond::menu::{build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run, Action, Menu};
 use halcyond::raster::GlyphSource;
@@ -46,7 +46,7 @@ use libthyla_rs::{
     t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
 };
 use tapestry::{
-    EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_BTN,
+    DisplayInfo, EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_BTN,
     TEV_PTR_MOVE,
 };
 
@@ -190,6 +190,7 @@ fn summon(
     ax: i32,
     ay: i32,
     run: (i32, i32, i32, i32),
+    sheet: &Sheet,
     gs: &mut GlyphSource,
 ) {
     let (gx, gy) = own_pane
@@ -204,7 +205,7 @@ fn summon(
         run.2.max(0) as u32,
         run.3.max(0) as u32,
     );
-    menus.open(model, d(ax, gx), d(ay, gy), run_d, gs);
+    menus.open(model, d(ax, gx), d(ay, gy), run_d, sheet, gs);
 }
 
 
@@ -360,21 +361,45 @@ pub extern "C" fn rs_main() -> i64 {
         say!("halcyond: FAIL vendored face parse");
         return 1;
     }
-    let sheet = daylight_sheet();
+    // HALCYON-SCALE 6: the render brain at the COMPOSITOR's scale -- read
+    // off its ctl beside the display (the compositor is the authority, the
+    // ctl the channel), re-read on every relayout below; a change rebuilds
+    // the sheet (a new generation), the glyph source (the mono bakes for
+    // the scale; the atlas regens) and the winsize. The atlas bound follows
+    // the display area (HALCYON-SCALE 7).
+    let mut display = ring.display_info().unwrap_or(DisplayInfo {
+        w: w as u32,
+        h: h as u32,
+        scale: 100,
+    });
+    gs.set_scale(display.scale);
+    gs.set_display(display.w, display.h);
+    let mut sheet = daylight_sheet(display.scale);
+    {
+        let (cw, ch, _) = gs.mono_cell();
+        say!(
+            "halcyond: scale {} (cell {}x{}, atlas bound {} pages)",
+            display.scale,
+            cw,
+            ch,
+            gs.evict_pages()
+        );
+    }
     let mut t = Transcript::new(libhalcyon::theme::daylight_palette());
     let mut cache = LayoutCache::new();
 
     // The winsize report: the transcript is flowed, but programs wrap to a
     // COLUMN count -- report the mono-grid equivalent (foreign/plain
-    // content is mono, so this is the terminal-compatible answer).
-    let (cell_w, cell_h, _) = gs.mono_cell();
-    let report_winsize = |ctl: i64, w: usize, h: usize| {
+    // content is mono, so this is the terminal-compatible answer). The cell
+    // is the glyph source's CURRENT grid cell (it follows the scale).
+    let report_winsize = |ctl: i64, w: usize, h: usize, gs: &GlyphSource| {
+        let (cell_w, cell_h, _) = gs.mono_cell();
         let cols = (w as i32 / cell_w).max(1);
         let rows = (h as i32 / cell_h).max(1);
         let cmd = alloc::format!("winsize {} {}", cols, rows);
         let _ = write_ctl(ctl, &cmd);
     };
-    report_winsize(consctl, w, h);
+    report_winsize(consctl, w, h, &gs);
 
     let mut mode = Mode::Insert;
     let mut scroll_up: i32 = 0; // px above the bottom anchor (0 = anchored)
@@ -620,6 +645,7 @@ pub extern "C" fn rs_main() -> i64 {
                     present_fails = 0;
                     if !announced {
                         announced = true;
+                        let (cell_w, cell_h, _) = gs.mono_cell();
                         say!(
                             "halcyond: console up {}x{} px (rich transcript; mono grid {}x{})",
                             w,
@@ -667,7 +693,40 @@ pub extern "C" fn rs_main() -> i64 {
             };
             if relayout {
                 relayout = false;
-                chrome.reconcile(troot, surf.id, &mut gs, &describe);
+                // HALCYON-SCALE 6: the display + the scale, re-read where
+                // the layout is re-read. A scale change rebuilds the render
+                // brain: the sheet at the new percent (a new generation --
+                // every cached layout is stale by key), the mono bakes +
+                // a fresh atlas, every cache that held a size, the winsize,
+                // a menu sized at the old scale, and a repaint of every
+                // surface (the compositor re-carved them; their CONFIGUREs
+                // deliver the new sizes).
+                if let Some(di) = ring.display_info() {
+                    if (di.w, di.h) != (display.w, display.h) {
+                        display.w = di.w;
+                        display.h = di.h;
+                        gs.set_display(di.w, di.h);
+                    }
+                    if di.scale != sheet.scale {
+                        let from = sheet.scale;
+                        let gen = sheet.gen + 1;
+                        sheet = daylight_sheet(di.scale);
+                        sheet.gen = gen;
+                        gs.set_scale(di.scale);
+                        display.scale = di.scale;
+                        cache.clear();
+                        frame.clear();
+                        last_open_laid = None;
+                        menus.close();
+                        chrome.invalidate();
+                        status.invalidate();
+                        report_winsize(consctl, w, h, &gs);
+                        dirty = true;
+                        let (cw, ch, _) = gs.mono_cell();
+                        say!("halcyond: scale {} -> {} (cell {}x{})", from, di.scale, cw, ch);
+                    }
+                }
+                chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe);
                 trail_painted = alloc::string::String::from(t.cwd());
                 // A relayout re-arms the status bar's mint retry (H-3d F5):
                 // a prior mint failure may now succeed, ChromeSet's cadence.
@@ -683,7 +742,7 @@ pub extern "C" fn rs_main() -> i64 {
                 let st = if code == 0 { "ok" } else { "err" };
                 pending_exit = None;
                 match surf.global_ctl(&alloc::format!("tag {} status {}", pane, st)) {
-                    Ok(()) => chrome.reconcile(troot, surf.id, &mut gs, &describe),
+                    Ok(()) => chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe),
                     Err(e) => {
                         if !status_refusal_said {
                             status_refusal_said = true;
@@ -698,7 +757,7 @@ pub extern "C" fn rs_main() -> i64 {
             // leaf's name + status (the last reconcile), the console's
             // directory + running-or-last command (the transcript), the
             // minute -- and painted only on a change.
-            status.ensure();
+            status.ensure(&sheet);
             status.pump();
             let sm = statusset::model_from(
                 chrome.focused(),
@@ -707,7 +766,7 @@ pub extern "C" fn rs_main() -> i64 {
                 t.last_command(),
                 t.last_exit_code(),
             );
-            status.refresh(&sm, &mut gs);
+            status.refresh(&sm, &sheet, &mut gs);
         }
 
         // (0e) H-3c: the menu. A choice closes it from this side and types
@@ -717,7 +776,7 @@ pub extern "C" fn rs_main() -> i64 {
         // While a menu is up `MenuSet::service` drains the menu's events
         // NON-blockingly off the one shared ring (the H-3c-2 event set);
         // the loop's unified poll wakes for them like the console's own.
-        match menus.service(&mut gs) {
+        match menus.service(&sheet, &mut gs) {
             menuset::MenuEvent::Chosen(Action::Command(cmd)) => {
                 menus.close();
                 say!("halcyond: menu ran: {}", cmd);
@@ -846,7 +905,7 @@ pub extern "C" fn rs_main() -> i64 {
                                     s.clamp(flat.len());
                                 }
                             }
-                            let page_rows = ((h as i32 / cell_h) / 2).max(1);
+                            let page_rows = ((h as i32 / gs.mono_cell().1) / 2).max(1);
                             let act = normal_key(e.code, e.rune);
                             match act {
                                 NormalAct::ScrollLines(n) => {
@@ -985,7 +1044,7 @@ pub extern "C" fn rs_main() -> i64 {
                                                     gy + by + ry,
                                                     rw,
                                                     rh,
-                                                    cell_h
+                                                    gs.mono_cell().1
                                                 );
                                             }
                                         }
@@ -1053,6 +1112,7 @@ pub extern "C" fn rs_main() -> i64 {
                                                         rx,
                                                         by + ry + rh,
                                                         (rx, by + ry, rw, rh),
+                                                        &sheet,
                                                         &mut gs,
                                                     );
                                                 }
@@ -1157,6 +1217,7 @@ pub extern "C" fn rs_main() -> i64 {
                                         ptr.0,
                                         ptr.1,
                                         (rx, by + ry, rw, rh),
+                                        &sheet,
                                         &mut gs,
                                     );
                                 }
@@ -1181,7 +1242,7 @@ pub extern "C" fn rs_main() -> i64 {
                             // by key; drop them wholesale (the reflow
                             // E2E's moment).
                             cache.clear();
-                            report_winsize(consctl, w, h);
+                            report_winsize(consctl, w, h, &gs);
                             dirty = true;
                             relayout = true;
                         }

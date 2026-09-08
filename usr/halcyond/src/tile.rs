@@ -30,7 +30,7 @@ use crate::layout::{
     LaidLine, Sheet,
 };
 use crate::menu::{run_rect, ObjRun};
-use crate::raster::{GlyphSource, FACE_MONO, MONO_GRID_PX};
+use crate::raster::{GlyphSource, FACE_MONO};
 use crate::transcript::{
     BlockKind, SpanMap, SpanTag, Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST,
     DEFAULT_MAX_LINES_PER_BLOCK,
@@ -539,7 +539,7 @@ impl Tile {
                 debug_assert_eq!(lb.height, hgt, "a frozen block's height is deterministic");
                 paint_mark(cart, &lb, y, w, sheet, mark.filter(|m| m.block == b.id));
                 render_block(cart, &lb, y, gs);
-                paint_run(cart, &lb, y, mark.filter(|m| m.block == b.id));
+                paint_run(cart, &lb, y, sheet, mark.filter(|m| m.block == b.id));
                 self.laid_last += 1;
                 self.laid_lines_last += lb.lines.len();
             }
@@ -550,7 +550,7 @@ impl Tile {
             let m = mark.filter(|m| m.block == u64::MAX);
             paint_mark(cart, &open_lb, y, w, sheet, m);
             render_block(cart, &open_lb, y, gs);
-            paint_run(cart, &open_lb, y, m);
+            paint_run(cart, &open_lb, y, sheet, m);
         }
         y += open_lb.height;
         // `y` is now the grid tail's screen-y (== y0 + total). H-4d: the
@@ -579,11 +579,11 @@ impl Tile {
         let (cr, cc, cvis) = self.grid.cursor();
         if cvis {
             if let Some(&(item, row, start)) = prov.get(cr) {
-                let (cx, cy, chh) = caret_in_block(&live_lb, item, row, start + cc);
+                let (cx, cy, chh) = caret_in_block(&live_lb, item, row, start + cc, sheet);
                 cart.ops.push(Op::Rect {
                     x: cx,
                     y: y + cy,
-                    w: 2,
+                    w: sheet.mark_w as u32,
                     h: chh as u32,
                     color: libhalcyon::theme::DAYLIGHT.ember,
                 });
@@ -598,12 +598,12 @@ impl Tile {
         }) = gm
         {
             if let Some((c0, n, _)) = self.grid_run(item, key) {
-                for (by, x0, x1) in live_run_underline(&live_lb, &prov, item, c0, n) {
+                for (by, x0, x1) in live_run_underline(&live_lb, &prov, item, c0, n, sheet.mark_w) {
                     cart.ops.push(Op::Rect {
                         x: x0,
                         y: y + by,
                         w: (x1 - x0).max(1) as u32,
-                        h: 2,
+                        h: sheet.mark_w as u32,
                         color: libhalcyon::theme::DAYLIGHT.ember,
                     });
                 }
@@ -615,6 +615,14 @@ impl Tile {
         // it until the next render replaces it.
         self.live_laid = Some((live_lb, prov, y));
         content_h
+    }
+
+    /// Drop every cached height: a SHEET change (a display scale change,
+    /// HALCYON-SCALE 6) re-sizes every block at the same width, which the
+    /// width key alone cannot see.
+    pub fn invalidate_heights(&mut self) {
+        self.heights.clear();
+        self.heights_width = 0;
     }
 
     /// Bring the height cache in line with the frozen deque at `width`:
@@ -695,8 +703,8 @@ fn paint_mark(
     }
 }
 
-/// The selected run's 2 px ember underline over the text.
-fn paint_run(cart: &mut Cartoon, lb: &LaidBlock, y: i32, m: Option<Mark>) {
+/// The selected run's ember underline (the sheet's 2-px mark) over the text.
+fn paint_run(cart: &mut Cartoon, lb: &LaidBlock, y: i32, sheet: &Sheet, m: Option<Mark>) {
     if let Some(Mark {
         item,
         row,
@@ -707,9 +715,9 @@ fn paint_run(cart: &mut Cartoon, lb: &LaidBlock, y: i32, m: Option<Mark>) {
         if let Some(r) = run_rect(lb, item, row, obj) {
             cart.ops.push(Op::Rect {
                 x: r.0,
-                y: y + r.1 + r.3 - 2,
+                y: y + r.1 + r.3 - sheet.mark_w,
                 w: r.2.max(1) as u32,
-                h: 2,
+                h: sheet.mark_w as u32,
                 color: libhalcyon::theme::DAYLIGHT.ember,
             });
         }
@@ -815,6 +823,7 @@ fn live_run_underline(
     r: usize,
     rc0: usize,
     n: usize,
+    mark_w: i32,
 ) -> Vec<(i32, i32, i32)> {
     let Some(&(item, row, start)) = prov.get(r) else {
         return Vec::new();
@@ -837,7 +846,7 @@ fn live_run_underline(
         if a >= b {
             continue;
         }
-        out.push((line.y + line.h - 2, line_col_x(line, a), line_col_x(line, b)));
+        out.push((line.y + line.h - mark_w, line_col_x(line, a), line_col_x(line, b)));
     }
     out
 }
@@ -873,18 +882,19 @@ fn paint_grid(
                 });
             }
             if cell.ch != ' ' && cell.ch != '\0' {
-                // The GRID mono (advance 10): a full-screen program owns its
-                // cells at the pts geometry, not the document's island size.
-                if let Some(gref) = gs.glyph(FACE_MONO, MONO_GRID_PX, cell.ch) {
+                // The GRID mono (advance 10 at 100%): a full-screen program
+                // owns its cells at the pts geometry, not the document's
+                // island size.
+                if let Some(gref) = gs.glyph(FACE_MONO, sheet.mono_grid_px, cell.ch) {
                     cart.push_glyphs(gen, cx, cy + base, fg, &[gref]);
                 }
             }
             if cell.attrs & ATTR_UNDERLINE != 0 {
                 cart.ops.push(Op::Rect {
                     x: cx,
-                    y: cy + ch - 1,
+                    y: cy + ch - sheet.hairline,
                     w: cw as u32,
-                    h: 1,
+                    h: sheet.hairline as u32,
                     color: fg,
                 });
             }
@@ -895,7 +905,7 @@ fn paint_grid(
         cart.ops.push(Op::Rect {
             x: x0 + curx as i32 * cw,
             y: y0 + cury as i32 * ch,
-            w: 2,
+            w: sheet.mark_w as u32,
             h: ch as u32,
             color: sheet.accent,
         });
@@ -1111,7 +1121,7 @@ mod tests {
     #[test]
     fn render_alt_is_grid_only_and_emits_glyphs() {
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let (cw, ch, _) = gs.mono_cell();
         let mut t = daylight_tile(20, 4);
         t.apply(Record::Mode(ScreenMode::AltScreen));
@@ -1134,7 +1144,7 @@ mod tests {
     #[test]
     fn render_normal_scrollback_adds_height_above_the_grid() {
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let (cw, ch, _) = gs.mono_cell();
         let mut t = daylight_tile(20, 4);
         t.apply(Record::CellDiff {
@@ -1165,7 +1175,7 @@ mod tests {
         // mostly-blank TALL grid TRIMS -- the content height is far below
         // rows*cell_h.
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let (_, ch, _) = gs.mono_cell();
         let mut t = daylight_tile(20, 24); // tall grid, one line of content
         t.apply(Record::CellDiff {
@@ -1262,7 +1272,7 @@ mod tests {
     fn render_lays_out_only_the_blocks_in_view_once_the_heights_are_cached() {
         // B2-F1: a render's layout transient must be O(view), not O(history).
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let (cw, ch, _) = gs.mono_cell();
         let mut t = history_tile(20, 4, 1000);
         push_history(&mut t, 200, 3, 'h');
@@ -1337,7 +1347,7 @@ mod tests {
     #[test]
     fn height_cache_follows_eviction_and_width_changes() {
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let (cw, ch, _) = gs.mono_cell();
         // At most 5 frozen blocks: pushing 12 evicts 7 at the front.
         let mut t = history_tile(20, 4, 5);
@@ -1378,7 +1388,7 @@ mod tests {
         // order the transcript tolerates). A non-zero code adds the badge
         // line, so a height cached before it would misplace every block below.
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let (cw, ch, _) = gs.mono_cell();
         let mut t = history_tile(20, 4, 1000);
         t.apply(Record::Control(Control::Osc1936Raw {
@@ -1422,7 +1432,7 @@ mod tests {
         // history in transcript order (the click hit map), and a marked row
         // paints its band.
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let (cw, ch, _) = gs.mono_cell();
         let mut t = history_tile(20, 4, 1000);
         push_history(&mut t, 40, 3, 'm');
@@ -1641,7 +1651,7 @@ mod tests {
             span,
         };
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let mut t = daylight_tile(16, 4);
         // An obj run "bin" on grid row 0 (cols 0..3, serial 1), then a plain
         // 'x' at col 4 (serial 2, obj closed) -- the mono test's shape.
@@ -1710,7 +1720,7 @@ mod tests {
         // Rect is emitted (only the Clear) -- the paint_grid ground-skip. The
         // cursor beam is one Rect, so exactly one Rect total (the cursor).
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let (cw, ch, _) = gs.mono_cell();
         let mut t = daylight_tile(8, 2);
         t.apply(Record::Mode(ScreenMode::AltScreen)); // grid only, no scrollback flow
@@ -1765,7 +1775,7 @@ mod tests {
     #[test]
     fn live_grid_table_click_hits_the_clicked_row() {
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let mut t = Tile::new(40, 4, vt::DAYLIGHT);
         frame(&mut t, 1, b"zone;k=output");
         frame(&mut t, 2, b"table;cols=lr;hdr=0");
@@ -1843,7 +1853,7 @@ mod tests {
     #[test]
     fn live_grid_pre_click_hits_the_clicked_row() {
         let mut gs = GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let mut t = Tile::new(40, 4, vt::DAYLIGHT);
         frame(&mut t, 1, b"pre");
         write(&mut t, vec![(0, 0, cs('|', 1)), (0, 1, cs(' ', 1))], (0, 2));

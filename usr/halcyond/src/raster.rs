@@ -29,38 +29,79 @@ pub const FACE_BODY_ITALIC: u8 = 2; // Plex Text Italic (450): em--emph, baselin
 pub const FACE_HEADING_ITALIC: u8 = 3; // Plex Regular Italic (400): headings, italic in full
 pub const FACE_MONO: u8 = 4;
 
-/// The two mono SIZES (HALCYON-COMPOSITION 2; Cornucopia bakes 0.5 em per
-/// advance px). The ISLAND is the document's mono -- inline `em class=code`,
-/// a `pre` block, raw terminal output, the menu's literals -- the advance-6
-/// bake (6x14, a 12 px em: the closest cell to the mockup's 10 px Cornucopia,
-/// advance 5 being below the box-glyph legibility floor). The GRID is the
-/// alt-screen / pts cell (advance 10, 10x22): a full-screen program owns its
-/// cells and the pts geometry is sized from it. `glyph`/`line_metrics` pick
-/// the atlas from the requested px, so a caller says which mono it means the
-/// same way it says a proportional size.
+/// The two mono SIZES at 100% (HALCYON-COMPOSITION 2; Cornucopia bakes 0.5
+/// em per advance px), LOGICAL px: the Sheet scales them (HALCYON-SCALE 6)
+/// and the atlases are selected by advance (`mono_advances`). The ISLAND is
+/// the document's mono -- inline `em class=code`, a `pre` block, raw
+/// terminal output, the menu's literals -- the advance-6 bake (6x14, a 12
+/// px em: the closest cell to the mockup's 10 px Cornucopia, advance 5
+/// being below the box-glyph legibility floor). The GRID is the alt-screen
+/// / pts cell (advance 10, 10x22): a full-screen program owns its cells and
+/// the pts geometry is sized from it. `glyph`/`line_metrics` pick the atlas
+/// from the requested px (the island below the midpoint of the two selected
+/// ems, the grid from it), so a caller says which mono it means the same
+/// way it says a proportional size -- at the SHEET's size, never these.
 pub const MONO_ISLAND_PX: f32 = 12.0;
 pub const MONO_GRID_PX: f32 = 20.0;
+/// The two mono advances at 100%: the island's 6 and the grid's 10.
+pub const MONO_ISLAND_ADVANCE: u8 = 6;
+pub const MONO_GRID_ADVANCE: u8 = cornucopia::DEFAULT_ADVANCE;
 
-/// The atlas page bound `evict_if_full` enforces between frames: 16 pages
-/// of the 512-px page every source is built with = 4 MiB of alpha, ~16x a
-/// Latin working set (four faces at three sizes plus both mono cells pack
-/// into about one page). The transcript's bytes are untrusted; without a
-/// bound a program printing distinct codepoints grew the store ~10 MB per
-/// size until the compositor's fixed heap died mute (I-32's in-process
-/// face).
+/// The atlas page bound `evict_if_full` enforces between frames at the
+/// reference display (1280x800): 16 pages of the 512-px page every source
+/// is built with = 4 MiB of alpha, ~16x a Latin working set (four faces at
+/// three sizes plus both mono cells pack into about one page). The
+/// transcript's bytes are untrusted; without a bound a program printing
+/// distinct codepoints grew the store ~10 MB per size until the
+/// compositor's fixed heap died mute (I-32's in-process face). The painted
+/// set is bounded by the DISPLAY AREA, which a larger scanout multiplies
+/// (HALCYON-SCALE 7), so the live bound is `atlas_pages_for` -- this
+/// constant is its floor, and at 1280x800 its value.
 pub const MAX_ATLAS_PAGES: usize = 16;
-/// The in-frame slack above `MAX_ATLAS_PAGES`: the packer's HARD cap is
-/// `MAX_ATLAS_PAGES + ATLAS_PAGE_SLACK` pages (6 MiB), past which an insert
-/// is refused (the glyph paints blank this frame; the next frame's eviction
-/// re-packs). The eviction bounds the steady state; this bounds the frame,
-/// whose insert count the untrusted stream would otherwise decide. Since
-/// layout measures with `advance` (no packing), a frame inserts only what
-/// it paints -- a screen of glyphs, a few pages -- so the slack is never
-/// reached by honest content and the cap never bites the eviction's
-/// re-pack of a visible set.
+/// The in-frame slack above the eviction bound: the packer's HARD cap is
+/// the bound + `ATLAS_PAGE_SLACK` pages (6 MiB at the floor), past which an
+/// insert is refused (the glyph paints blank this frame; the next frame's
+/// eviction re-packs). The eviction bounds the steady state; this bounds
+/// the frame, whose insert count the untrusted stream would otherwise
+/// decide. Since layout measures with `advance` (no packing), a frame
+/// inserts only what it paints -- a screen of glyphs, a few pages -- so the
+/// slack is never reached by honest content and the cap never bites the
+/// eviction's re-pack of a visible set.
 pub const ATLAS_PAGE_SLACK: usize = 8;
-const MONO_ISLAND_ADVANCE: u8 = 6;
-const MONO_GRID_ADVANCE: u8 = cornucopia::DEFAULT_ADVANCE;
+
+/// The eviction bound for a `display_w x display_h` scanout on `page`-px
+/// pages (HALCYON-SCALE 7): the visible glyph area is at most the screen
+/// area and shelf packing wastes up to about half a page per size and
+/// shelf, so twice the display area in pages, never below the floor. At
+/// 1280x800 on 512-px pages this is the floor (16); a 4K scanout is 64.
+pub fn atlas_pages_for(display_w: u32, display_h: u32, page: u32) -> usize {
+    let page_area = (page as u64 * page as u64).max(1);
+    let display_area = display_w as u64 * display_h as u64;
+    let want = (2 * display_area).div_ceil(page_area) as usize;
+    want.max(MAX_ATLAS_PAGES)
+}
+
+/// The mono advances at a display scale (HALCYON-SCALE 6): the island
+/// `round_half_up(6 x s)`, the grid `round_half_up(10 x s)` -- 6/10, 8/13,
+/// 9/15, 11/18, 12/20 at the five values -- each the bake it names, or the
+/// nearest SMALLER bake when that one is absent (a smaller cell never
+/// overflows the row pitch the sheet sized for the wanted one; a larger
+/// would), down to the legibility floor of 6. Pure: the Sheet derives its
+/// mono ems from the same answer the source selects its atlases by, so the
+/// two cannot disagree.
+pub fn mono_advances(pct: u16) -> (u8, u8) {
+    let baked_at_most = |want: i32| -> u8 {
+        let mut a = want.clamp(MONO_ISLAND_ADVANCE as i32, u8::MAX as i32) as u8;
+        while a > MONO_ISLAND_ADVANCE && !cornucopia::Atlas::is_baked(a) {
+            a -= 1;
+        }
+        a
+    };
+    (
+        baked_at_most(libhalcyon::scale::ipx(MONO_ISLAND_ADVANCE as i32, pct)),
+        baked_at_most(libhalcyon::scale::ipx(MONO_GRID_ADVANCE as i32, pct)),
+    )
+}
 
 /// Per-(face, size) vertical metrics, integer pixels, y-down. `ascent` is
 /// baseline distance from the line top; `line_height` includes the gap.
@@ -86,6 +127,11 @@ pub struct GlyphSource {
     island: cornucopia::Atlas,
     pub packer: AtlasPacker,
     cache: BTreeMap<(u8, u32, char), Cached>,
+    /// The display scale the mono atlases were selected for (percent).
+    scale: u16,
+    /// The between-frames eviction bound (`atlas_pages_for` of the last
+    /// `set_display`; the floor before one).
+    evict_pages: usize,
 }
 
 /// The cache key's size quantum: half pixels.
@@ -94,18 +140,21 @@ fn size_q(px: f32) -> u32 {
     (px * 2.0 + 0.5) as u32
 }
 
-/// Which mono atlas a requested size means: the grid cell from the grid em
-/// up, the island below it. Two atlases, so the cache key is the choice,
-/// not the px -- every island request shares one entry per glyph.
-#[inline]
-fn mono_is_grid(px: f32) -> bool {
-    px >= (MONO_ISLAND_PX + MONO_GRID_PX) / 2.0
-}
-
 impl GlyphSource {
-    /// Build over the vendored faces. `page` is the atlas page geometry
-    /// (one page holds many shelves; 512 fits several sizes of a Latin
-    /// working set).
+    /// Which mono atlas a requested size means: the grid cell from the
+    /// midpoint of the two SELECTED ems up (an em is twice the bake's
+    /// advance), the island below it. Two atlases, so the cache key is the
+    /// choice, not the px -- every island request shares one entry per
+    /// glyph -- and the threshold follows `set_scale`, so a sheet's scaled
+    /// island em lands on the island at every scale.
+    #[inline]
+    fn mono_is_grid(&self, px: f32) -> bool {
+        px >= (self.island.cell_w() + self.grid.cell_w()) as f32
+    }
+
+    /// Build over the vendored faces at 100% on the floor bound. `page` is
+    /// the atlas page geometry (one page holds many shelves; 512 fits
+    /// several sizes of a Latin working set).
     pub fn new_vendored(page: u32) -> GlyphSource {
         let mut faces = Vec::new();
         // Order matches the FACE_* indices: Text, Bold, Text-Italic, then the
@@ -133,11 +182,51 @@ impl GlyphSource {
             island: cornucopia::Atlas::for_advance(MONO_ISLAND_ADVANCE),
             packer,
             cache: BTreeMap::new(),
+            scale: 100,
+            evict_pages: MAX_ATLAS_PAGES,
         }
     }
 
+    /// The display scale the mono atlases serve (percent).
+    pub fn scale(&self) -> u16 {
+        self.scale
+    }
+
+    /// Select the mono atlases for a display scale (HALCYON-SCALE 6: the
+    /// island and grid bakes `mono_advances` names) and evict everything --
+    /// the author's size-change point: every cached id and every page went
+    /// with the old cells, and the packer's generation bumps so no executor
+    /// can read a stale run. A no-op (false) at the current scale.
+    pub fn set_scale(&mut self, pct: u16) -> bool {
+        if pct == self.scale {
+            return false;
+        }
+        let (island, grid) = mono_advances(pct);
+        self.island = cornucopia::Atlas::for_advance(island);
+        self.grid = cornucopia::Atlas::for_advance(grid);
+        self.scale = pct;
+        self.regen();
+        true
+    }
+
+    /// Re-derive the atlas bound for a display (HALCYON-SCALE 7): the
+    /// between-frames eviction bound follows the display area, the packer's
+    /// hard cap sits `ATLAS_PAGE_SLACK` above it. Called at start and on
+    /// every display change; a shrink leaves the store to the next
+    /// `evict_if_full`, which sees it over the new bound.
+    pub fn set_display(&mut self, display_w: u32, display_h: u32) {
+        self.evict_pages = atlas_pages_for(display_w, display_h, self.packer.page_w());
+        self.packer.set_max_pages((self.evict_pages + ATLAS_PAGE_SLACK) as u32);
+    }
+
+    /// The between-frames eviction bound in pages (the hard cap is this plus
+    /// `ATLAS_PAGE_SLACK`).
+    pub fn evict_pages(&self) -> usize {
+        self.evict_pages
+    }
+
     fn mono_atlas(&self, px: f32) -> &cornucopia::Atlas {
-        if mono_is_grid(px) {
+        if self.mono_is_grid(px) {
             &self.grid
         } else {
             &self.island
@@ -178,7 +267,7 @@ impl GlyphSource {
     /// face.
     pub fn advance(&mut self, face: u8, px: f32, ch: char) -> Option<i32> {
         let q = if face == FACE_MONO {
-            mono_is_grid(px) as u32
+            self.mono_is_grid(px) as u32
         } else {
             size_q(px)
         };
@@ -209,7 +298,7 @@ impl GlyphSource {
     /// FORCED to the cell width (the grid survives; the glyph may clip).
     pub fn glyph(&mut self, face: u8, px: f32, ch: char) -> Option<GlyphRef> {
         let q = if face == FACE_MONO {
-            mono_is_grid(px) as u32
+            self.mono_is_grid(px) as u32
         } else {
             size_q(px)
         };
@@ -235,7 +324,11 @@ impl GlyphSource {
                     advance: cw,
                 });
             }
-            if let Some(alpha) = boxglyph::alpha(cw as usize, chh as usize, ch) {
+            // The light stroke is the hairline at this scale (COMPOSITION
+            // 1: a flat structural line scales `max(1, round(s))`, and a
+            // box line joining cells is one) -- 1 px up to 125%, 2 from 150.
+            let light = libhalcyon::scale::ipx(1, self.scale).max(1) as usize;
+            if let Some(alpha) = boxglyph::alpha(cw as usize, chh as usize, ch, light) {
                 let id = self.packer.insert(cw as u32, chh as u32, &alpha, 0, base)?;
                 self.cache.insert(key, Cached { id, advance: cw });
                 return Some(GlyphRef {
@@ -350,18 +443,20 @@ impl GlyphSource {
         self.cache.clear();
     }
 
-    /// The growth bound, applied BETWEEN frames: when the store holds
-    /// `MAX_ATLAS_PAGES` pages or more, evict everything (`regen`) so the
-    /// next frame re-packs only its working set. Within a frame `glyph()`
-    /// only ever inserts, so a frame's `gen()` stamp stays valid across it
-    /// (tile::paint_grid reads it once). The frame itself is bounded by
-    /// the packer's hard cap (`ATLAS_PAGE_SLACK`), and its working set is
-    /// what it PAINTS: layout measures through `advance`, which packs
-    /// nothing, and a laid block holds codepoints + advances, not glyph
-    /// ids, so an eviction invalidates no layout -- the next paint simply
-    /// re-resolves the visible glyphs. Returns true when it evicted.
+    /// The growth bound, applied BETWEEN frames: when the store holds the
+    /// eviction bound (`evict_pages`: the display's `atlas_pages_for`, the
+    /// `MAX_ATLAS_PAGES` floor before a display is known) or more, evict
+    /// everything (`regen`) so the next frame re-packs only its working
+    /// set. Within a frame `glyph()` only ever inserts, so a frame's
+    /// `gen()` stamp stays valid across it (tile::paint_grid reads it
+    /// once). The frame itself is bounded by the packer's hard cap
+    /// (`ATLAS_PAGE_SLACK`), and its working set is what it PAINTS: layout
+    /// measures through `advance`, which packs nothing, and a laid block
+    /// holds codepoints + advances, not glyph ids, so an eviction
+    /// invalidates no layout -- the next paint simply re-resolves the
+    /// visible glyphs. Returns true when it evicted.
     pub fn evict_if_full(&mut self) -> bool {
-        if self.packer.store.pages.len() >= MAX_ATLAS_PAGES {
+        if self.packer.store.pages.len() >= self.evict_pages {
             self.regen();
             return true;
         }
@@ -417,7 +512,9 @@ pub mod boxglyph {
 
     /// The cell's alpha (row-major, cw*ch bytes) for a box/block codepoint,
     /// None for anything else (or an undrawable member: the diagonals).
-    pub fn alpha(cw: usize, ch: usize, c: char) -> Option<Vec<u8>> {
+    /// `light` is the light stroke's width in px (the hairline at the
+    /// display scale; 1 at 100%).
+    pub fn alpha(cw: usize, ch: usize, c: char, light: usize) -> Option<Vec<u8>> {
         let cp = c as u32;
         if cw < 2 || ch < 2 {
             return None;
@@ -427,7 +524,7 @@ pub mod boxglyph {
             if u == NONE && d == NONE && l == NONE && r == NONE {
                 return None;
             }
-            return Some(arms(cw, ch, [u, d, l, r]));
+            return Some(arms(cw, ch, [u, d, l, r], light.max(1)));
         }
         if (0x2580..=0x259F).contains(&cp) {
             return Some(block(cw, ch, cp));
@@ -435,13 +532,14 @@ pub mod boxglyph {
         None
     }
 
-    fn arms(cw: usize, ch: usize, w: [u8; 4]) -> Vec<u8> {
+    fn arms(cw: usize, ch: usize, w: [u8; 4], light: usize) -> Vec<u8> {
         let mut px = alloc::vec![0u8; cw * ch];
         let cx = cw / 2;
         let cy = ch / 2;
         // Stroke geometry per cell size: the heavy band and the double gap
-        // scale with the cell so a 6-px island and a 10-px grid both read.
-        let heavy = if cw >= 9 { 3 } else { 2 };
+        // scale with the cell so a 6-px island and a 10-px grid both read;
+        // the heavy band always outweighs the light stroke.
+        let heavy = (if cw >= 9 { 3 } else { 2 }).max(light + 1);
         let g = if cw >= 9 { 2 } else { 1 };
         let [u, d, l, r] = w;
 
@@ -527,7 +625,7 @@ pub mod boxglyph {
                 }
             }
         };
-        let width = |a: u8| if a == HEAVY { heavy } else { 1 };
+        let width = |a: u8| if a == HEAVY { heavy } else { light };
         if u == LIGHT || u == HEAVY {
             let (x0, x1) = stroke(width(u), cx, cw);
             ink(x0, x1, 0, cy, &mut px);
@@ -954,5 +1052,152 @@ mod tests {
             px[..w].iter().filter(|&&p| p != 0xFFF1_EAE0).count() < w / 2,
             "row 0 is mostly ground"
         );
+    }
+
+    // HALCYON-SCALE 6: the mono advances at the five values are the
+    // operator's table (round half up of 6s and 10s), every one a bake; an
+    // off-table percent lands on the nearest smaller bake, never above
+    // (a larger cell would overflow the row pitch the sheet sized for it),
+    // never below the legibility floor.
+    #[test]
+    fn mono_advances_are_the_scale_table_and_every_one_is_baked() {
+        assert_eq!(mono_advances(100), (6, 10));
+        assert_eq!(mono_advances(125), (8, 13), "7.5 up, 12.5 up");
+        assert_eq!(mono_advances(150), (9, 15));
+        assert_eq!(mono_advances(175), (11, 18), "10.5 up, 17.5 up");
+        assert_eq!(mono_advances(200), (12, 20));
+        for p in [100u16, 125, 150, 175, 200] {
+            let (i, g) = mono_advances(p);
+            assert!(cornucopia::Atlas::is_baked(i) && cornucopia::Atlas::is_baked(g), "{p}: {i}/{g} baked");
+            assert!(i < g, "the island cell is always the smaller");
+        }
+        // Off the table: 140% wants 8 / 14 -- 14 is not baked, 13 is.
+        assert_eq!(mono_advances(140), (8, 13), "the nearest smaller bake");
+        // Below 100 (not a v1 value; the function is total): the floor.
+        assert_eq!(mono_advances(50), (6, 6));
+        assert_eq!(mono_advances(0), (6, 6));
+    }
+
+    // `set_scale` selects the bakes `mono_advances` names, the cells follow
+    // (12x27 / 20x44 at 200%), the SHEET's ems land on the right atlas at
+    // every scale (the selector's threshold moves with the selection), and
+    // the store regens exactly once per change -- a repeat is a no-op.
+    #[test]
+    fn set_scale_selects_the_bakes_and_regens_once() {
+        let mut gs = GlyphSource::new_vendored(512);
+        assert_eq!(gs.scale(), 100);
+        let _ = gs.glyph(FACE_BODY, 11.5, 'a').unwrap();
+        assert!(!gs.set_scale(100), "the current scale is a no-op");
+        assert_eq!(gs.gen(), 0, "and evicts nothing");
+        assert!(gs.set_scale(200));
+        assert_eq!(gs.gen(), 1, "one eviction");
+        assert!(gs.packer.store.glyphs.is_empty(), "the old cells' glyphs went");
+        assert_eq!(gs.island_cell().0, 12);
+        assert_eq!(gs.mono_cell().0, 20);
+        assert_eq!(gs.island_cell().1, 27);
+        assert_eq!(gs.mono_cell().1, 44);
+        for pct in [100u16, 125, 150, 175, 200] {
+            gs.set_scale(pct);
+            let (i, g) = mono_advances(pct);
+            let sheet = crate::layout::daylight_sheet(pct);
+            assert_eq!(gs.advance(FACE_MONO, sheet.mono_island_px, 'x'), Some(i as i32), "{pct}: the sheet's island em is the island cell");
+            assert_eq!(gs.advance(FACE_MONO, sheet.mono_grid_px, 'x'), Some(g as i32), "{pct}: the sheet's grid em is the grid cell");
+            let lm = gs.line_metrics(FACE_MONO, sheet.mono_island_px).unwrap();
+            assert_eq!(lm.line_height, gs.island_cell().1);
+        }
+        assert!(gs.set_scale(100));
+        assert_eq!((gs.island_cell().0, gs.mono_cell().0), (6, 10), "back to the 1.0 cells");
+    }
+
+    // HALCYON-SCALE 7: the eviction bound follows the display area -- the
+    // floor at the reference display (the 1337a218 constant, unchanged at
+    // 1280x800), eight times it on a 4K scanout -- and `set_display`
+    // moves both the bound and the packer's hard cap.
+    #[test]
+    fn the_atlas_bound_follows_the_display_area() {
+        assert_eq!(atlas_pages_for(1280, 800, 512), MAX_ATLAS_PAGES, "the reference display is the floor");
+        assert_eq!(atlas_pages_for(640, 480, 512), MAX_ATLAS_PAGES, "smaller never below the floor");
+        assert_eq!(atlas_pages_for(3840, 2160, 512), 64, "4K: twice the area in pages");
+        assert_eq!(atlas_pages_for(2560, 1600, 512), 32);
+        assert_eq!(atlas_pages_for(0, 0, 512), MAX_ATLAS_PAGES, "no display: the floor");
+        let mut gs = GlyphSource::new_vendored(32);
+        assert_eq!(gs.evict_pages(), MAX_ATLAS_PAGES);
+        // 4K on 32-px pages: 2 x 8294400 / 1024 = 16200 pages; the point is
+        // the bound moves, not its size -- use a display the tiny pages make
+        // reachable: 128x128 -> ceil(2 x 16384 / 1024) = 32.
+        gs.set_display(128, 128);
+        assert_eq!(gs.evict_pages(), 32);
+        let mut cp = 0x4E00u32;
+        let mut next = |gs: &mut GlyphSource, n: usize| {
+            for _ in 0..n {
+                let _ = gs.glyph(FACE_BODY, 11.5, char::from_u32(cp).unwrap());
+                cp += 1;
+            }
+        };
+        next(&mut gs, 800);
+        assert_eq!(gs.packer.store.pages.len(), 32 + ATLAS_PAGE_SLACK, "the hard cap moved with the bound");
+        assert!(gs.evict_if_full());
+        // A display under the floor on these pages (64x64 -> 8): the floor.
+        gs.set_display(64, 64);
+        assert_eq!(gs.evict_pages(), MAX_ATLAS_PAGES, "back to the floor");
+        next(&mut gs, 800);
+        assert_eq!(gs.packer.store.pages.len(), MAX_ATLAS_PAGES + ATLAS_PAGE_SLACK);
+    }
+
+    // HALCYON-SCALE 7's pin: a full screen of the largest heading at 200%
+    // on the reference display packs under the cap -- every glyph served,
+    // none refused, the store well inside the bound.
+    #[test]
+    fn a_screen_of_the_largest_heading_at_200_packs_under_the_cap() {
+        let mut gs = GlyphSource::new_vendored(512);
+        gs.set_display(1280, 800);
+        gs.set_scale(200);
+        let sheet = crate::layout::daylight_sheet(200);
+        let px = sheet.hdr_px[0];
+        let lm = gs.line_metrics(FACE_BODY, px).unwrap();
+        let line_h = (px * 1.25 + 0.5) as i32;
+        let rows = 800 / line_h;
+        // Distinct codepoints Plex lacks: each its own .notdef box at 35
+        // px, the widest honest working set a screen can hold.
+        let per_row = 1280 / (lm.ascent / 2).max(8);
+        let mut cp = 0x4E00u32;
+        let mut served = 0;
+        for _ in 0..rows {
+            for _ in 0..per_row {
+                if gs.glyph(FACE_BODY, px, char::from_u32(cp).unwrap()).is_some() {
+                    served += 1;
+                }
+                cp += 1;
+            }
+        }
+        assert_eq!(served, (rows * per_row) as usize, "every glyph of the screen served");
+        let pages = gs.packer.store.pages.len();
+        assert!(pages <= gs.evict_pages(), "{pages} pages: inside the eviction bound ({})", gs.evict_pages());
+        assert!(!gs.evict_if_full(), "a screen of headings does not trip the eviction");
+    }
+
+    // The procedural box strokes follow the hairline rule (COMPOSITION 1):
+    // a light line is 1 px through 125% and 2 px from 150%, a heavy line
+    // always wider than it; the cell's own geometry (the double gap) is
+    // the bake's.
+    #[test]
+    fn box_light_stroke_is_the_hairline_at_scale() {
+        let rows_at_x0 = |gs: &GlyphSource, id: u32, cw: u32, chh: u32| {
+            let (_, _, a) = glyph_alpha(gs, id);
+            (0..chh).filter(|&y| a[(y * cw) as usize] == 255).count()
+        };
+        for (pct, want_light) in [(100u16, 1usize), (125, 1), (150, 2), (175, 2), (200, 2)] {
+            let mut gs = GlyphSource::new_vendored(512);
+            gs.set_scale(pct);
+            let sheet = crate::layout::daylight_sheet(pct);
+            for px in [sheet.mono_island_px, sheet.mono_grid_px] {
+                let (cw, chh, _) = if px >= sheet.mono_grid_px { gs.mono_cell() } else { gs.island_cell() };
+                let (cw, chh) = (cw as u32, chh as u32);
+                let light = gs.glyph(FACE_MONO, px, '\u{2500}').unwrap();
+                assert_eq!(rows_at_x0(&gs, light.glyph, cw, chh), want_light, "{pct}% cell {cw}: the light stroke is the hairline");
+                let heavy = gs.glyph(FACE_MONO, px, '\u{2501}').unwrap();
+                assert!(rows_at_x0(&gs, heavy.glyph, cw, chh) > want_light, "{pct}% cell {cw}: heavy outweighs light");
+            }
+        }
     }
 }

@@ -186,6 +186,15 @@ impl AtlasPacker {
         self.max_pages = n;
     }
 
+    /// The page geometry this packer opens pages at.
+    pub fn page_w(&self) -> u32 {
+        self.page_w
+    }
+
+    pub fn page_h(&self) -> u32 {
+        self.page_h
+    }
+
     /// Insert one alpha bitmap (`w x h`, rows tight) with its bearing;
     /// returns the glyph id, or None when the bitmap can never fit (larger
     /// than a page) or the store is at its page cap. An insert that fills

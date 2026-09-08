@@ -5701,7 +5701,12 @@ impl Comp {
                         let dr = (x1 - 1) - x;
                         let d = dl.min(dr).min(dt).min(db);
                         let c = match live {
-                            Some((key, tint)) if d == hair_d => {
+                            // The hairline band is `hair` px wide (Metrics::at:
+                            // 1 at 1.0, 2 from 150%): the key/tint covers ALL of
+                            // it, never one ring of it (at 2.0 the second ring
+                            // stayed `header` -- the profile the compose gate
+                            // reads at 200% caught it).
+                            Some((key, tint)) if d >= hair_d && d < hair_d + hair => {
                                 if !tb.is_empty() && y < content_y {
                                     tint
                                 } else {

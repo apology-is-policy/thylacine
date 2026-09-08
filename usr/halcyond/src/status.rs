@@ -18,11 +18,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use cartoon::{Cartoon, GlyphRef, Op};
-use libhalcyon::theme::{Argb, DAYLIGHT, METRICS};
+use libhalcyon::theme::{Argb, DAYLIGHT};
 
+use crate::layout::Sheet;
 use crate::raster::{GlyphSource, FACE_BODY};
 
-/// The bar's typeface size (the mockups' `.hal-status`: 10px).
+/// The bar's typeface size (the mockups' `.hal-status`: 10px), LOGICAL --
+/// the sheet scales it (HALCYON-SCALE 6).
 pub const STATUS_PX: f32 = 10.0;
 
 /// The condition slot's state -- the focused pane's `status` file, section
@@ -170,7 +172,7 @@ impl Slots {
     }
 }
 
-/// The horizontal padding at the bar's ends and around the context.
+/// The horizontal padding at the bar's ends and around the context (logical).
 const PAD: i32 = 8;
 /// The gap inside the right group (condition, clock).
 const GAP: i32 = 8;
@@ -184,11 +186,11 @@ struct Run {
     width: i32,
 }
 
-fn shape(gs: &mut GlyphSource, text: &str) -> Run {
+fn shape(gs: &mut GlyphSource, px: f32, text: &str) -> Run {
     let mut refs: Vec<GlyphRef> = Vec::new();
     let mut width = 0;
     for ch in text.chars() {
-        if let Some(g) = gs.glyph(FACE_BODY, STATUS_PX, ch) {
+        if let Some(g) = gs.glyph(FACE_BODY, px, ch) {
             width += g.advance;
             refs.push(g);
         }
@@ -196,12 +198,19 @@ fn shape(gs: &mut GlyphSource, text: &str) -> Run {
     Run { refs, width }
 }
 
-/// The bar's display list for a `w` x `h` surface, and where the slots
-/// landed. Right to left: the clock, the condition; then the workspaces at
-/// the left; the context takes what is left between them -- centred there
-/// when it fits, else from the left, truncated with an ellipsis (the slot
-/// that yields). A zero-sized bar yields an empty list.
-pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Cartoon, Slots) {
+/// The bar's display list for a `w` x `h` surface at the sheet's scale,
+/// and where the slots landed. Right to left: the clock, the condition;
+/// then the workspaces at the left; the context takes what is left between
+/// them -- centred there when it fits, else from the left, truncated with
+/// an ellipsis (the slot that yields). A zero-sized bar yields an empty
+/// list.
+pub fn status_list(
+    m: &StatusModel,
+    w: u32,
+    h: u32,
+    sheet: &Sheet,
+    gs: &mut GlyphSource,
+) -> (Cartoon, Slots) {
     let mut cart = Cartoon::new();
     let mut slots = Slots::default();
     if w == 0 || h == 0 {
@@ -209,9 +218,11 @@ pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Ca
     }
     let d = &DAYLIGHT;
     let (wi, hi) = (w as i32, h as i32);
+    let px = sheet.px(STATUS_PX);
+    let (pad, gap, ws_pad) = (sheet.ipx(PAD), sheet.ipx(GAP), sheet.ipx(WS_PAD));
     cart.ops.push(Op::Clear { color: d.status_bg });
     let (asc, desc) = gs
-        .line_metrics(FACE_BODY, STATUS_PX)
+        .line_metrics(FACE_BODY, px)
         .map(|mm| (mm.ascent, mm.descent))
         .unwrap_or((8, 2));
     let baseline = (hi - (asc + desc)) / 2 + asc;
@@ -220,8 +231,8 @@ pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Ca
     // The clock, right-aligned, in the bar's muted ink.
     let mut clock = String::new();
     let _ = core::fmt::write(&mut clock, format_args!("{:02}:{:02}", m.hour, m.minute));
-    let crun = shape(gs, &clock);
-    let clock_x = wi - PAD - crun.width;
+    let crun = shape(gs, px, &clock);
+    let clock_x = wi - pad - crun.width;
     if !crun.refs.is_empty() && clock_x > 0 {
         cart.push_glyphs(gen, clock_x, baseline, d.status_muted, &crun.refs);
     }
@@ -231,14 +242,14 @@ pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Ca
     // the clock; nothing (and no width) while idle.
     let label = condition_label(m.condition, m.exit_code);
     let (cond_x, cond_w) = if label.is_empty() {
-        (clock_x - GAP, 0)
+        (clock_x - gap, 0)
     } else {
         let mut text = String::new();
         text.push(TURNSTILE);
         text.push(' ');
         text.push_str(&label);
-        let run = shape(gs, &text);
-        let x = clock_x - GAP - run.width;
+        let run = shape(gs, px, &text);
+        let x = clock_x - gap - run.width;
         if !run.refs.is_empty() && x > 0 {
             cart.push_glyphs(gen, x, baseline, condition_ink(m.condition), &run.refs);
         }
@@ -249,12 +260,12 @@ pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Ca
     // The workspaces: one indicator per workspace, the bar's full height;
     // the active one an ember box with the number in the bar's own dark,
     // the rest the number in `status_idle` on the bar.
-    let mut x = PAD;
+    let mut x = pad;
     for i in 0..m.workspaces.max(1) {
         let mut num = String::new();
         let _ = core::fmt::write(&mut num, format_args!("{}", i + 1));
-        let nrun = shape(gs, &num);
-        let box_w = nrun.width + 2 * WS_PAD;
+        let nrun = shape(gs, px, &num);
+        let box_w = nrun.width + 2 * ws_pad;
         if i == m.active {
             cart.ops.push(Op::Rect {
                 x,
@@ -264,23 +275,23 @@ pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Ca
                 color: d.ember,
             });
             if !nrun.refs.is_empty() {
-                cart.push_glyphs(gen, x + WS_PAD, baseline, d.status_bg, &nrun.refs);
+                cart.push_glyphs(gen, x + ws_pad, baseline, d.status_bg, &nrun.refs);
             }
         } else if !nrun.refs.is_empty() {
-            cart.push_glyphs(gen, x + WS_PAD, baseline, d.status_idle, &nrun.refs);
+            cart.push_glyphs(gen, x + ws_pad, baseline, d.status_idle, &nrun.refs);
         }
         x += box_w;
     }
-    slots.ws = (PAD, x - PAD);
+    slots.ws = (pad, x - pad);
 
     // The context, in what is left between the workspaces and the right
     // group: centred when it fits, else from the left with an ellipsis.
-    let span_x = x + PAD;
-    let avail = cond_x - PAD - span_x;
+    let span_x = x + pad;
+    let avail = cond_x - pad - span_x;
     slots.ctx = (span_x, avail.max(0));
     if avail > 0 {
         let text = context_text(&m.name, &m.cwd, &m.cmd);
-        let mut run = shape(gs, &text);
+        let mut run = shape(gs, px, &text);
         if run.width <= avail {
             let tx = span_x + (avail - run.width) / 2;
             if !run.refs.is_empty() {
@@ -288,7 +299,7 @@ pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Ca
             }
             slots.ctx_ink = (tx, run.width);
         } else {
-            let ell = shape(gs, "\u{2026}");
+            let ell = shape(gs, px, "\u{2026}");
             while run.width + ell.width > avail {
                 match run.refs.pop() {
                     Some(g) => run.width -= g.advance,
@@ -306,14 +317,19 @@ pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Ca
     (cart, slots)
 }
 
-/// The bar's height: the one vertical unit (Daylight 8).
-pub fn bar_height() -> u32 {
-    METRICS.status_h as u32
+/// The bar's height: the one vertical unit (Daylight 8) at the sheet's
+/// scale -- the compositor carves the same `Metrics::at` value.
+pub fn bar_height(sheet: &Sheet) -> u32 {
+    sheet.metrics.status_h as u32
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sheet() -> Sheet {
+        crate::layout::daylight_sheet(100)
+    }
 
     fn model() -> StatusModel {
         StatusModel {
@@ -411,7 +427,7 @@ mod tests {
     #[test]
     fn the_list_is_dark_ground_then_the_four_slots_right_to_left_of_each_other() {
         let mut gs = GlyphSource::new_vendored(64);
-        let (c, s) = status_list(&model(), 1280, 20, &mut gs);
+        let (c, s) = status_list(&model(), 1280, 20, &sheet(), &mut gs);
         assert!(matches!(c.ops[0], Op::Clear { color: 0xFF1A120A }));
         assert!(
             s.ws.0 == PAD && s.ws.1 >= 2 * WS_PAD,
@@ -477,6 +493,7 @@ mod tests {
             },
             1280,
             20,
+            &sheet(),
             &mut gs,
         );
         assert_eq!(es.clock, s.clock, "the clock does not move with the condition");
@@ -497,6 +514,7 @@ mod tests {
             },
             1280,
             20,
+            &sheet(),
             &mut gs,
         );
         assert_eq!(is.cond.1, 0);
@@ -513,7 +531,7 @@ mod tests {
     #[test]
     fn the_say_key_ignores_every_width_the_content_decides() {
         let mut gs = GlyphSource::new_vendored(64);
-        let (_, a) = status_list(&model(), 1280, 20, &mut gs);
+        let (_, a) = status_list(&model(), 1280, 20, &sheet(), &mut gs);
         let (_, b) = status_list(
             &StatusModel {
                 cmd: String::from("a much longer command line than before"),
@@ -521,6 +539,7 @@ mod tests {
             },
             1280,
             20,
+            &sheet(),
             &mut gs,
         );
         assert_ne!(a.ctx_ink, b.ctx_ink, "the centred text moved");
@@ -534,6 +553,7 @@ mod tests {
                 },
                 1280,
                 20,
+                &sheet(),
                 gs,
             )
             .1
@@ -551,8 +571,8 @@ mod tests {
     #[test]
     fn a_narrow_bar_truncates_the_context_from_the_left_and_keeps_the_rest() {
         let mut gs = GlyphSource::new_vendored(64);
-        let wide = status_list(&model(), 1280, 20, &mut gs);
-        let narrow = status_list(&model(), 200, 20, &mut gs);
+        let wide = status_list(&model(), 1280, 20, &sheet(), &mut gs);
+        let narrow = status_list(&model(), 200, 20, &sheet(), &mut gs);
         assert!(narrow.1.ctx.1 < wide.1.ctx.1);
         assert!(
             narrow.1.clock.0 + narrow.1.clock.1 <= 200 - PAD,
@@ -570,9 +590,29 @@ mod tests {
             narrow.1.ctx_ink.1 <= narrow.1.ctx.1,
             "and ends inside it (the ellipsis counted)"
         );
-        let (c, s) = status_list(&model(), 1, 20, &mut gs);
+        let (c, s) = status_list(&model(), 1, 20, &sheet(), &mut gs);
         assert_eq!(s.ctx.1, 0);
         assert!(matches!(c.ops[0], Op::Clear { .. }));
-        assert!(status_list(&model(), 0, 20, &mut gs).0.ops.is_empty());
+        assert!(status_list(&model(), 0, 20, &sheet(), &mut gs).0.ops.is_empty());
+    }
+
+    // HALCYON-SCALE 6: the bar at 200% is 40 px (the compositor's carve),
+    // its pads double, the workspace box is the bar's full height, and the
+    // clock ends inside the doubled right pad.
+    #[test]
+    fn the_bar_at_200_doubles_its_pads_and_keeps_its_slots() {
+        let mut gs = GlyphSource::new_vendored(64);
+        gs.set_scale(200);
+        let s2 = crate::layout::daylight_sheet(200);
+        assert_eq!(bar_height(&s2), 40);
+        assert_eq!(bar_height(&sheet()), 20);
+        let (c, s) = status_list(&model(), 1280, 40, &s2, &mut gs);
+        assert_eq!(s.ws.0, 2 * PAD, "the doubled left pad");
+        assert!(s.ws.1 >= 2 * 2 * WS_PAD, "the doubled indicator pads: {:?}", s.ws);
+        assert!(c.ops.iter().any(|o| matches!(o, Op::Rect { x: 16, y: 0, h: 40, color: 0xFFE07840, .. })), "the ember box, 40 px tall at x 16");
+        assert_eq!(s.clock.0 + s.clock.1, 1280 - 2 * PAD, "the clock ends at the doubled right pad");
+        let (_, s1) = status_list(&model(), 1280, 20, &sheet(), &mut gs);
+        assert!(s.clock.1 > s1.clock.1 * 3 / 2, "the clock is wider at 2.0 ({} vs {})", s.clock.1, s1.clock.1);
+        assert_eq!(s.cond.0 + s.cond.1 + 2 * GAP, s.clock.0, "the condition sits a doubled gap left of the clock");
     }
 }

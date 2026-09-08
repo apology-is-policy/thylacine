@@ -234,6 +234,14 @@ pub struct Block {
     pub objs: Vec<Obj>,
     /// Approximate stored size, for the content budget.
     pub cost: usize,
+    /// This block's OWN zone carried an annotation (an em / obj / hdr on a
+    /// style its own rows or bytes interned). NOT the styles table: a row
+    /// of an OLDER zone scrolling off the grid while this block is open
+    /// interns its styles here (it must render), and a styles scan would
+    /// let that foreign row re-class this zone as a document -- a plain
+    /// `cat` after an annotated `ls` rendered as prose on the 17-row grid
+    /// of a 2.0 tile, where every row scrolls off within a command.
+    pub annotated_own: bool,
 }
 
 impl Block {
@@ -248,6 +256,7 @@ impl Block {
             styles: Vec::new(),
             objs: Vec::new(),
             cost: 0,
+            annotated_own: false,
         }
     }
 
@@ -258,8 +267,7 @@ impl Block {
     /// Any Beacon structure at all: an annotated style, or a table / rule /
     /// pre item. A block with none is a program's raw terminal output.
     pub fn annotated(&self) -> bool {
-        self.styles.iter().any(|s| s.annotated())
-            || self.items.iter().any(|it| !matches!(it, Item::Line(_)))
+        self.annotated_own || self.items.iter().any(|it| !matches!(it, Item::Line(_)))
     }
 
     /// The class every `Inherit` line of this block renders as: a prompt
@@ -1050,6 +1058,7 @@ impl Transcript {
                     0
                 };
                 self.hdr = level | title;
+                self.open.annotated_own = true;
             }
             // `pre` opens a preformatted block: flush the pending flow line,
             // then redirect subsequent flushed lines into the pre accumulator
@@ -1192,6 +1201,10 @@ impl Transcript {
     // pop. LIFO balance is exact, memory is bounded, and well-formed input
     // (wire-capped at depth 8/parse) never reaches the ceiling.
     fn em_push(&mut self, class: u8) {
+        // An annotation opening in this zone is the zone's own, whether or
+        // not a row of it has scrolled off yet (cells mode holds the rows on
+        // the grid until they leave).
+        self.open.annotated_own = true;
         if self.em_stack.len() >= MAX_SPAN_NEST {
             self.em_suppressed = self.em_suppressed.saturating_add(1);
         } else {
@@ -1208,6 +1221,7 @@ impl Transcript {
     }
 
     fn obj_push(&mut self, idx: u16) {
+        self.open.annotated_own = true;
         if self.obj_stack.len() >= MAX_SPAN_NEST {
             self.obj_suppressed = self.obj_suppressed.saturating_add(1);
         } else {
@@ -1743,6 +1757,9 @@ impl Transcript {
             obj: self.obj_stack.last().copied().unwrap_or(0),
             hdr: self.hdr,
         };
+        if s.annotated() {
+            self.open.annotated_own = true;
+        }
         self.intern_style(s)
     }
 
@@ -1820,6 +1837,18 @@ impl Transcript {
         }
         let mut raw = core::mem::take(&mut self.scroll_pending);
         trim_untagged_tail(&mut raw);
+        // The zone this row belongs to: the block its first tagged cell
+        // names. A row of the OPEN zone is the block's own content (its
+        // annotation counts); a row of an OLDER zone -- still leaving the
+        // grid while this zone is open, which a small grid does within one
+        // command -- lands here to render but carries ITS zone's class and
+        // annotates nothing. Decided BEFORE this row's styles are interned.
+        let owner = raw.iter().find_map(|c| spans.get(c.span).map(|t| t.block));
+        let own = owner.is_none_or(|id| id == self.open.id);
+        let foreign_class = match owner {
+            Some(id) if !own => self.block_by_id(id).map(|b| b.class()),
+            _ => None,
+        };
         // (source block, obj) -> the index in the open block. A map, not a
         // scan: a cell naming a distinct frozen obj must not pay O(n) (the
         // H-arc round-1 audit, B-F3). One push at the end, so the open block
@@ -1829,14 +1858,18 @@ impl Transcript {
         for c in &raw {
             let tag = spans.get(c.span).unwrap_or_default();
             let obj = self.local_obj(tag, &mut remap);
-            let style = self.intern_style(Style {
+            let st = Style {
                 fg: c.fg,
                 bg: c.bg,
                 attrs: c.attrs,
                 em: tag_style_em(tag.em),
                 obj,
                 hdr: tag_style_hdr(tag.hdr),
-            });
+            };
+            if own && st.annotated() {
+                self.open.annotated_own = true;
+            }
+            let style = self.intern_style(st);
             cells.push(TCell { ch: c.ch, style });
         }
         let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
@@ -1849,11 +1882,13 @@ impl Transcript {
         let spec = self.table_spec_for(shape.serial);
         let mut last_rule = self.last_rule_serial;
         // A prompt line keeps its class wherever it lands (a scrolled-off
-        // prompt row lands in the block open at finalize, often its output).
+        // prompt row lands in the block open at finalize, often its output);
+        // an older zone's row keeps that zone's class; the open zone's own
+        // row inherits (the block's class, decided by its OWN annotation).
         let class = if shape.prompt {
             LineClass::Prompt
         } else {
-            LineClass::Inherit
+            foreign_class.unwrap_or(LineClass::Inherit)
         };
         let _ = place_tagged_line(
             &mut self.open.items,
@@ -2073,6 +2108,7 @@ impl Transcript {
             styles,
             objs,
             cost: 0,
+            annotated_own: false,
         };
         (b, prov)
     }
@@ -2875,7 +2911,7 @@ mod tests {
         ]));
         let b = t.open_block();
         let mut gs = crate::raster::GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let lb = crate::layout::layout_block(b, 400, &sheet, &mut gs);
         let segs: Vec<_> = lb.lines.iter().flat_map(|l| l.segs.iter()).collect();
         assert!(!segs.is_empty(), "the pre laid glyphs");
@@ -2919,7 +2955,7 @@ mod tests {
         t.feed(&frames(&[F::Close(Op::Pre)]));
         // Lay out every block -- pre-fix one panics on the stale style index.
         let mut gs = crate::raster::GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         for b in t.frozen_blocks() {
             let _ = crate::layout::layout_block(b, 400, &sheet, &mut gs);
         }
@@ -2967,7 +3003,7 @@ mod tests {
         t.feed(&frames(&[F::Close(Op::Pre)]));
         // Lay out every block -- pre-fix the pre's stale index panics here.
         let mut gs = crate::raster::GlyphSource::new_vendored(512);
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         for b in t.frozen_blocks() {
             let _ = crate::layout::layout_block(b, 400, &sheet, &mut gs);
         }
@@ -3582,6 +3618,157 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_output_zone_after_an_annotated_one_stays_raw_wrapped_or_scrolled() {
+        // The compose gate at 200% (HALCYON-SCALE SC-4) found `cat /ctl/cpu`
+        // rendered as proportional prose after `ls /lib/halcyon` (objects)
+        // and `nora`, where the 1.0 leg -- whose `cat` ran BEFORE any
+        // annotated command -- rendered a mono island. The model's answer,
+        // pinned: a NEW output zone after an annotated zone is its own
+        // block, un-annotated, so its lines are RAW whether they sit whole
+        // on the grid, soft-wrapped across grid rows (a 31-column grid at
+        // 2.0), or scrolled off into the open block.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.set_cells_mode(true);
+        let mut spans = SpanMap::new();
+        let mut serial = 0u32;
+        let frame = |t: &mut Transcript, spans: &mut SpanMap, serial: &mut u32, f: &dyn Fn(&mut Vec<u8>)| -> u32 {
+            let mut b: Vec<u8> = Vec::new();
+            f(&mut b);
+            *serial += 1;
+            t.feed_frame(&b, *serial);
+            spans.note(*serial, t.span_tag());
+            *serial
+        };
+        // The annotated command: an output zone with an object, closed.
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "output")]));
+        let s_obj = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Obj, &[("type", "path"), ("ref", "/lib/aurora")]));
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::close(b, Op::Obj));
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::close(b, Op::Zone));
+        // The next prompt, closed; then the plain command's output zone.
+        let s_prompt = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "prompt")]));
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::close(b, Op::Zone));
+        let s_out = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "output")]));
+        let gc = |ch: char, span: u32| vt::Cell { ch, fg: 0, bg: 0, attrs: 0, span };
+        let cols = 31;
+        let mut grid: Vec<vt::Cell> = Vec::new();
+        let mut wrapped: Vec<bool> = Vec::new();
+        let row = |grid: &mut Vec<vt::Cell>, wrapped: &mut Vec<bool>, text: &str, span: u32, wrap: bool| {
+            let mut cells: Vec<vt::Cell> = text.chars().map(|c| gc(c, span)).collect();
+            cells.resize(cols, gc(' ', 0));
+            grid.extend(cells);
+            wrapped.push(wrap);
+        };
+        row(&mut grid, &mut wrapped, "aurora", s_obj, false);
+        row(&mut grid, &mut wrapped, "~ > cat /ctl/cpu", s_prompt, false);
+        row(&mut grid, &mut wrapped, "cpus: 4", s_out, false);
+        row(&mut grid, &mut wrapped, "0 43554126878 1024 73203731 42", s_out, true);
+        row(&mut grid, &mut wrapped, "673 64 0x610f0000", s_out, false);
+        let rows = wrapped.len();
+        let (b, _) = t.live_block(&grid, cols, rows, &wrapped, &spans);
+        let classes: Vec<LineClass> = b
+            .items
+            .iter()
+            .map(|it| match it {
+                Item::Line(l) => l.class,
+                _ => LineClass::Doc,
+            })
+            .collect();
+        assert_eq!(classes[0], LineClass::Doc, "the object's line is a document");
+        assert_eq!(classes[1], LineClass::Prompt);
+        assert_eq!(classes.len(), 4, "the wrapped pair joins into one line: {:?}", classes);
+        assert_eq!(classes[2], LineClass::Raw, "the plain zone's short line is raw");
+        assert_eq!(classes[3], LineClass::Raw, "the plain zone's soft-wrapped line is raw");
+        // Scrolled off: the annotated rows leave the grid into the open block
+        // first; the plain zone's rows on the grid are still raw.
+        let mut t2 = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t2.set_cells_mode(true);
+        let mut spans2 = SpanMap::new();
+        serial = 0;
+        let _ = frame(&mut t2, &mut spans2, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "output")]));
+        let s_obj2 = frame(&mut t2, &mut spans2, &mut serial, &|b| wire::open(b, Op::Obj, &[("type", "path"), ("ref", "/lib/aurora")]));
+        let _ = frame(&mut t2, &mut spans2, &mut serial, &|b| wire::close(b, Op::Obj));
+        let scrolled: Vec<vt::Cell> = "aurora".chars().map(|c| gc(c, s_obj2)).collect();
+        t2.push_scrolled_rows(&[scrolled], &[false], &spans2);
+        let _ = frame(&mut t2, &mut spans2, &mut serial, &|b| wire::close(b, Op::Zone));
+        let _ = frame(&mut t2, &mut spans2, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "prompt")]));
+        let _ = frame(&mut t2, &mut spans2, &mut serial, &|b| wire::close(b, Op::Zone));
+        let s_out2 = frame(&mut t2, &mut spans2, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "output")]));
+        let mut grid2: Vec<vt::Cell> = Vec::new();
+        let mut wrapped2: Vec<bool> = Vec::new();
+        row(&mut grid2, &mut wrapped2, "cpus: 4", s_out2, false);
+        row(&mut grid2, &mut wrapped2, "0 43554126878 1024 73203731 42", s_out2, true);
+        row(&mut grid2, &mut wrapped2, "673 64 0x610f0000", s_out2, false);
+        let (b2, _) = t2.live_block(&grid2, cols, wrapped2.len(), &wrapped2, &spans2);
+        for it in b2.items.iter() {
+            if let Item::Line(l) = it {
+                assert_eq!(l.class, LineClass::Raw, "raw after a scrolled-off annotated zone");
+            }
+        }
+    }
+
+    #[test]
+    fn an_older_zones_rows_scrolling_off_do_not_annotate_the_open_plain_zone() {
+        // The 2.0 compose gate's finding: on a 17-row grid every row scrolls
+        // off within one command, so the previous command's rows (an `ls`
+        // with objects) leave the grid WHILE the plain `cat` zone is open.
+        // They land in the cat block (they must render) -- and the old
+        // styles scan then classed the cat block a DOCUMENT: its own rows,
+        // scrolled off after them, rendered as prose instead of the mono
+        // island. The block's class is decided by its OWN annotation; the
+        // foreign row keeps ITS zone's class.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.set_cells_mode(true);
+        let mut spans = SpanMap::new();
+        let mut serial = 0u32;
+        let frame = |t: &mut Transcript, spans: &mut SpanMap, serial: &mut u32, f: &dyn Fn(&mut Vec<u8>)| -> u32 {
+            let mut b: Vec<u8> = Vec::new();
+            f(&mut b);
+            *serial += 1;
+            t.feed_frame(&b, *serial);
+            spans.note(*serial, t.span_tag());
+            *serial
+        };
+        let gc = |ch: char, span: u32| vt::Cell { ch, fg: 0, bg: 0, attrs: 0, span };
+        // The annotated zone (ls with an object), closed -> frozen.
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "output")]));
+        let s_obj = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Obj, &[("type", "path"), ("ref", "/lib/aurora")]));
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::close(b, Op::Obj));
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::close(b, Op::Zone));
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "prompt")]));
+        let _ = frame(&mut t, &mut spans, &mut serial, &|b| wire::close(b, Op::Zone));
+        // The plain zone opens; NOW the older rows leave the grid, then its own.
+        let s_out = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Zone, &[("k", "output")]));
+        let ls_row: Vec<vt::Cell> = "aurora".chars().map(|c| gc(c, s_obj)).collect();
+        let cat_row: Vec<vt::Cell> = "cpus: 4".chars().map(|c| gc(c, s_out)).collect();
+        t.push_scrolled_rows(&[ls_row, cat_row], &[false, false], &spans);
+        let b = t.open_block();
+        assert!(!b.annotated(), "a foreign row's object does not annotate the open zone");
+        assert_eq!(b.class(), LineClass::Raw, "the plain zone stays raw");
+        let classes: Vec<LineClass> = b
+            .items
+            .iter()
+            .map(|it| match it {
+                Item::Line(l) => l.class,
+                _ => LineClass::Doc,
+            })
+            .collect();
+        assert_eq!(classes, alloc::vec![LineClass::Doc, LineClass::Inherit], "the ls row keeps its zone's class; the cat row inherits (raw)");
+        assert!(b.styles.iter().any(|s| s.obj != 0), "the foreign row still renders with its object");
+        // The live grid's rows of the plain zone are raw too (the source
+        // block's annotation is its own).
+        let mut grid: Vec<vt::Cell> = "hwcap: 0x3201fb".chars().map(|c| gc(c, s_out)).collect();
+        grid.resize(31, gc(' ', 0));
+        let (lb, _) = t.live_block(&grid, 31, 1, &[false], &spans);
+        let Item::Line(l) = &lb.items[0] else { panic!("the live line") };
+        assert_eq!(l.class, LineClass::Raw);
+        // And an annotated OWN row still makes the zone a document.
+        let s_em = frame(&mut t, &mut spans, &mut serial, &|b| wire::open(b, Op::Em, &[("class", "strong")]));
+        let own_row: Vec<vt::Cell> = "bold".chars().map(|c| gc(c, s_em)).collect();
+        t.push_scrolled_rows(&[own_row], &[false], &spans);
+        assert_eq!(t.open_block().class(), LineClass::Doc, "the zone's own annotation counts");
+    }
+
+    #[test]
     fn cells_mode_title_tag_survives_to_the_laid_herald() {
         // The herald through the TILE path: `hdr class=title` arrives as a
         // frame, its text as tagged cells; the title bit must survive the
@@ -3619,7 +3806,7 @@ mod tests {
         let st = blk.styles[l.cells[0].style as usize];
         assert!(hdr_is_title(st.hdr) && hdr_level(st.hdr) == 1, "hdr byte {:#x}", st.hdr);
         assert_eq!(l.cells.len(), 5, "the unused tail is trimmed");
-        let sheet = crate::layout::daylight_sheet();
+        let sheet = crate::layout::daylight_sheet(100);
         let mut gs = crate::raster::GlyphSource::new_vendored(512);
         let laid = crate::layout::layout_block(&blk, 600, &sheet, &mut gs);
         let x0 = laid.lines[0].segs[0].x;

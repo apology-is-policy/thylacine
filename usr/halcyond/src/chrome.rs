@@ -33,11 +33,13 @@ use alloc::vec::Vec;
 
 use cartoon::{Cartoon, GlyphRef, Op};
 use libhalcyon::tag::argv_of;
-use libhalcyon::theme::{Argb, DAYLIGHT, METRICS};
+use libhalcyon::theme::{Argb, DAYLIGHT};
 
+use crate::layout::Sheet;
 use crate::raster::{GlyphSource, FACE_BODY};
 
-/// The name typeface size (section 4.3: 10.5px, proportional).
+/// The name typeface size (section 4.3: 10.5px, proportional), LOGICAL --
+/// the sheet scales it (HALCYON-SCALE 6).
 pub const NAME_PX: f32 = 10.5;
 /// The trail typeface size (section 4.3: pills and the trail at 9.5px).
 pub const TRAIL_PX: f32 = 9.5;
@@ -224,52 +226,64 @@ fn shape(gs: &mut GlyphSource, face: u8, px: f32, text: &str) -> (Vec<GlyphRef>,
 }
 
 /// The baseline that centres a face's line box in the strip above the
-/// separator.
-fn centred_baseline(gs: &mut GlyphSource, px: f32, h: u32) -> i32 {
+/// separator (`sep_h` tall).
+fn centred_baseline(gs: &mut GlyphSource, px: f32, h: u32, sep_h: i32) -> i32 {
     let (asc, desc) = gs
         .line_metrics(FACE_BODY, px)
         .map(|m| (m.ascent, m.descent))
         .unwrap_or((8, 2));
-    ((h as i32 - 1) - (asc + desc)) / 2 + asc
+    ((h as i32 - sep_h) - (asc + desc)) / 2 + asc
 }
 
-/// The strip display list (section 4.1/4.2, 4.3 metrics): the ground, the
-/// 1px separator on the bottom edge, the name at the left in the
-/// proportional face, and the trail -- the tile's status, right-aligned in
-/// its dim ink -- each vertically centred in the strip above the separator.
-/// No pills yet (H-3c), so no rule. The trail is never cut: a path gives up
-/// leading components to fit beside the name (`fit_trail`); a trail that
-/// still does not fit starts after the name and runs off the strip's edge
-/// (the mockups' `flex-shrink: 0`). A zero-sized strip yields an empty list.
-pub fn strip_list(key: Key, name: &str, trail: &str, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon {
+/// The strip display list (section 4.1/4.2, 4.3 metrics, at the sheet's
+/// scale): the ground, the hairline separator on the bottom edge, the name
+/// at the left in the proportional face, and the trail -- the tile's
+/// status, right-aligned in its dim ink -- each vertically centred in the
+/// strip above the separator. No pills yet (H-3c), so no rule. The trail
+/// is never cut: a path gives up leading components to fit beside the name
+/// (`fit_trail`); a trail that still does not fit starts after the name and
+/// runs off the strip's edge (the mockups' `flex-shrink: 0`). A zero-sized
+/// strip yields an empty list.
+pub fn strip_list(
+    key: Key,
+    name: &str,
+    trail: &str,
+    w: u32,
+    h: u32,
+    sheet: &Sheet,
+    gs: &mut GlyphSource,
+) -> Cartoon {
     let mut cart = Cartoon::new();
     if w == 0 || h == 0 {
         return cart;
     }
     let (bg, sep, ink) = key_colors(key);
+    let hair = sheet.hairline;
     cart.ops.push(Op::Clear { color: bg });
     cart.ops.push(Op::Rect {
         x: 0,
-        y: h as i32 - 1,
+        y: (h as i32 - hair).max(0),
         w,
-        h: 1,
+        h: hair as u32,
         color: sep,
     });
-    let pad = METRICS.tag_pad_x;
+    let pad = sheet.metrics.tag_pad_x;
+    let gap = sheet.ipx(GAP);
+    let (name_px, trail_px) = (sheet.px(NAME_PX), sheet.px(TRAIL_PX));
     let mut name_end = pad;
     if !name.is_empty() {
-        let baseline = centred_baseline(gs, NAME_PX, h);
-        let (refs, width) = shape(gs, FACE_BODY, NAME_PX, name);
+        let baseline = centred_baseline(gs, name_px, h, hair);
+        let (refs, width) = shape(gs, FACE_BODY, name_px, name);
         if !refs.is_empty() {
             cart.push_glyphs(gs.gen(), pad, baseline, ink, &refs);
-            name_end = pad + width + GAP;
+            name_end = pad + width + gap;
         }
     }
     if !trail.is_empty() {
         let avail = w as i32 - pad - name_end;
-        let text = fit_trail(trail, avail, |s| shape(gs, FACE_BODY, TRAIL_PX, s).1);
-        let baseline = centred_baseline(gs, TRAIL_PX, h);
-        let (refs, width) = shape(gs, FACE_BODY, TRAIL_PX, &text);
+        let text = fit_trail(trail, avail, |s| shape(gs, FACE_BODY, trail_px, s).1);
+        let baseline = centred_baseline(gs, trail_px, h, hair);
+        let (refs, width) = shape(gs, FACE_BODY, trail_px, &text);
         if !refs.is_empty() {
             let x = (w as i32 - pad - width).max(name_end);
             cart.push_glyphs(gs.gen(), x, baseline, trail_ink(key), &refs);
@@ -287,6 +301,10 @@ pub fn console_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sheet() -> Sheet {
+        crate::layout::daylight_sheet(100)
+    }
 
     const LAYOUT: &str = "epoch 7 focused 3\n\
 1 splith n=2 active=1 [0,0,1280,800]\n\
@@ -361,7 +379,7 @@ mod tests {
     #[test]
     fn strip_list_is_ground_separator_then_name() {
         let mut gs = GlyphSource::new_vendored(64);
-        let c = strip_list(Key::Cinnabar, "halcyon", "", 300, 20, &mut gs);
+        let c = strip_list(Key::Cinnabar, "halcyon", "", 300, 20, &sheet(), &mut gs);
         assert!(matches!(c.ops[0], Op::Clear { color: 0xFFDCB8B0 }));
         assert!(matches!(
             c.ops[1],
@@ -374,9 +392,9 @@ mod tests {
             }
         ));
         assert!(c.ops.len() > 2, "the name produced glyph ops");
-        let empty = strip_list(Key::Sage, "", "", 300, 20, &mut gs);
+        let empty = strip_list(Key::Sage, "", "", 300, 20, &sheet(), &mut gs);
         assert_eq!(empty.ops.len(), 2, "no name, no glyph run");
-        assert!(strip_list(Key::Sage, "x", "", 0, 20, &mut gs).ops.is_empty());
+        assert!(strip_list(Key::Sage, "x", "", 0, 20, &sheet(), &mut gs).ops.is_empty());
     }
 
     /// The glyph runs of a list: (x, ink, glyph count, width), in order.
@@ -404,24 +422,24 @@ mod tests {
     #[test]
     fn the_trail_sits_at_the_right_in_the_dim_ink() {
         let mut gs = GlyphSource::new_vendored(64);
-        let c = strip_list(Key::Sage, "ut", "~/kernel/sched", 300, 20, &mut gs);
+        let c = strip_list(Key::Sage, "ut", "~/kernel/sched", 300, 20, &sheet(), &mut gs);
         let r = runs(&c);
         assert_eq!(r.len(), 2, "the name run then the trail run: {:?}", r);
-        assert_eq!(r[0].0, METRICS.tag_pad_x, "the name at the left pad");
+        assert_eq!(r[0].0, sheet().metrics.tag_pad_x, "the name at the left pad");
         assert_eq!(r[0].1, DAYLIGHT.sage.fg, "the name in the key's ink");
         assert_eq!(r[1].1, DAYLIGHT.sage.fg_dim, "the trail in the key's dim ink");
         assert_eq!(r[1].2, "~/kernel/sched".chars().count(), "the whole trail");
         assert_eq!(
             r[1].0 + r[1].3,
-            300 - METRICS.tag_pad_x,
+            300 - sheet().metrics.tag_pad_x,
             "right-aligned at the pad"
         );
         assert!(r[1].0 > r[0].0, "the trail after the name");
         // Resting: the theme's own dim ink.
-        let rest = strip_list(Key::Resting, "ut", "~", 300, 20, &mut gs);
+        let rest = strip_list(Key::Resting, "ut", "~", 300, 20, &sheet(), &mut gs);
         assert_eq!(runs(&rest)[1].1, DAYLIGHT.fg_dim);
         // No name: the trail alone, still right-aligned.
-        let alone = strip_list(Key::Sage, "", "idle", 300, 20, &mut gs);
+        let alone = strip_list(Key::Sage, "", "idle", 300, 20, &sheet(), &mut gs);
         assert_eq!(runs(&alone).len(), 1);
     }
 
@@ -432,7 +450,7 @@ mod tests {
     #[test]
     fn a_narrow_strip_elides_the_paths_head_and_never_covers_the_name() {
         let mut gs = GlyphSource::new_vendored(64);
-        let c = strip_list(Key::Sage, "ut", "~/thylacine/kernel/sched", 90, 20, &mut gs);
+        let c = strip_list(Key::Sage, "ut", "~/thylacine/kernel/sched", 90, 20, &sheet(), &mut gs);
         let r = runs(&c);
         assert_eq!(r.len(), 2);
         assert!(
@@ -484,5 +502,34 @@ mod tests {
         assert_eq!(abbrev_home("/etc", Some("")), "/etc");
         assert_eq!(abbrev_home("", Some("/home/m")), "");
         assert_eq!(abbrev_home("/home/m/x", Some("/home/m/")), "~/x", "a trailing slash on home");
+    }
+
+    // HALCYON-SCALE 6: the strip at 200% -- the compositor carves a 40 px
+    // bar (Metrics::at), the separator is the 2 px hairline on its bottom
+    // edge, the name sits at the doubled pad in the doubled size, and the
+    // trail right-aligns at the doubled pad; the 100% strip is unchanged.
+    #[test]
+    fn the_strip_at_200_is_the_scaled_bar() {
+        let mut gs = GlyphSource::new_vendored(64);
+        gs.set_scale(200);
+        let s2 = crate::layout::daylight_sheet(200);
+        let h = s2.metrics.header_h as u32;
+        assert_eq!(h, 40);
+        let c = strip_list(Key::Sage, "ut", "~/kernel", 600, h, &s2, &mut gs);
+        assert!(matches!(c.ops[1], Op::Rect { x: 0, y: 38, w: 600, h: 2, .. }), "a 2 px separator at the bottom");
+        let r = runs(&c);
+        assert_eq!(r[0].0, 12, "the name at the doubled pad");
+        assert_eq!(r[1].0 + r[1].3, 600 - 12, "the trail right-aligned at the doubled pad");
+        // The name run is wider at 2.0 than at 1.0 (the size doubled).
+        let mut g1 = GlyphSource::new_vendored(64);
+        let s1 = crate::layout::daylight_sheet(100);
+        let c1 = strip_list(Key::Sage, "ut", "~/kernel", 300, 20, &s1, &mut g1);
+        let r1 = runs(&c1);
+        assert!(matches!(c1.ops[1], Op::Rect { y: 19, h: 1, .. }), "1.0: the 1 px separator at y 19");
+        assert!(r[0].3 > r1[0].3 * 3 / 2, "the 2.0 name ({}) is wider than the 1.0 name ({})", r[0].3, r1[0].3);
+        // The baselines centre in the strip above the separator.
+        let base = |c: &Cartoon| c.ops.iter().find_map(|o| match *o { Op::Glyphs { baseline_y, .. } => Some(baseline_y), _ => None }).unwrap();
+        assert!(base(&c) > 20 && base(&c) < 38, "the 2.0 baseline sits in the 40 px strip: {}", base(&c));
+        assert!(base(&c1) > 8 && base(&c1) < 19);
     }
 }

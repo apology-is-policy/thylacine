@@ -30,16 +30,21 @@ use cartoon::{Cartoon, GlyphRef, Op};
 use vt::ATTR_BOLD;
 
 use crate::raster::{
-    GlyphSource, FACE_BODY, FACE_BODY_BOLD, FACE_BODY_ITALIC, FACE_HEADING_ITALIC, FACE_MONO,
-    MONO_ISLAND_PX,
+    mono_advances, GlyphSource, FACE_BODY, FACE_BODY_BOLD, FACE_BODY_ITALIC, FACE_HEADING_ITALIC,
+    FACE_MONO,
 };
 use crate::transcript::{
     hdr_is_title, hdr_level, Block, BlockKind, Item, LineClass, Style, TCell, EM_CODE, EM_DIM,
     EM_EMPH, EM_STRONG,
 };
+use libhalcyon::theme::Metrics;
 
 /// The stylesheet: the paper-light theme's numbers (section 3 -- dark ink
-/// in full daylight). Colors are ARGB like everything in the weave.
+/// in full daylight) AT A DISPLAY SCALE (HALCYON-SCALE 6): every size below
+/// is PHYSICAL px, derived once from its logical value by `daylight_sheet`,
+/// and every logical constant in this module reaches a pixel only through
+/// `px` / `ipx` -- the ONE place halcyond scales. Colors are ARGB like
+/// everything in the weave.
 #[derive(Clone, Copy)]
 pub struct Sheet {
     pub ground: u32, // Daylight surface
@@ -56,9 +61,31 @@ pub struct Sheet {
     pub island_ground: u32,
     /// The island's leading gutter rule (`.hal-out` border-left).
     pub island_rule: u32,
+    /// The display scale in percent (`libhalcyon::scale`): the compositor's
+    /// value, read off its ctl; 100 is the identity on every size here.
+    pub scale: u16,
+    /// The chrome metrics at `scale` (`Metrics::at`): the tag-bar padding,
+    /// the hairline, the bar heights -- the SAME table the compositor
+    /// carves with, so the two painters agree by construction.
+    pub metrics: Metrics,
+    /// The structural hairline at `scale` (`metrics.hairline`): rules, the
+    /// obj pill's stroke, the island gutter's unit, the menu's border.
+    pub hairline: i32,
+    /// The 2-px structural marks at `scale` (`ipx(2)`): the caret and the
+    /// selected run's underline.
+    pub mark_w: i32,
     pub body_px: f32,
     /// The prompt zone's size (path / turnstile / command, section 2).
     pub prompt_px: f32,
+    /// The heading sizes by level (HALCYON-VISUAL 8.1: 17.5 / 14.5 / 12.5
+    /// logical), at `scale`.
+    pub hdr_px: [f32; 3],
+    /// The two mono ems at `scale`: twice the selected bakes' advances
+    /// (`raster::mono_advances`; the bake's 0.5-em rule) -- what a mono
+    /// span asks the glyph source for, so it lands on the island or the
+    /// grid atlas the source selected for the same scale.
+    pub mono_island_px: f32,
+    pub mono_grid_px: f32,
     pub pad_x: i32,
     pub block_gap: i32,
     pub table_col_gap: i32,
@@ -68,13 +95,35 @@ pub struct Sheet {
     pub gen: u32,
 }
 
-/// The paper-light transcript sheet, built from the Daylight visual scripture
-/// (docs/HALCYON-VISUAL.md via libhalcyon::theme -- the single token source the
-/// H-3 split names). Replaces the H-2 approximation seeded from vt::THEMES[1]:
-/// the transcript now matches the chrome that H-3a's compositor bevels + tag
-/// bar draw around it, because both derive from DAYLIGHT.
-pub fn daylight_sheet() -> Sheet {
+impl Sheet {
+    /// A logical size in physical px at this sheet's scale (fractional:
+    /// glyph sizes stay sub-pixel, COMPOSITION 1).
+    #[inline]
+    pub fn px(&self, logical: f32) -> f32 {
+        libhalcyon::scale::px(logical, self.scale)
+    }
+
+    /// A logical integer size in physical px, round half up (paddings,
+    /// gaps, pills, rules).
+    #[inline]
+    pub fn ipx(&self, logical: i32) -> i32 {
+        libhalcyon::scale::ipx(logical, self.scale)
+    }
+}
+
+/// The paper-light transcript sheet at a display scale (percent), built
+/// from the Daylight visual scripture (docs/HALCYON-VISUAL.md via
+/// libhalcyon::theme -- the single token source the H-3 split names).
+/// Replaces the H-2 approximation seeded from vt::THEMES[1]: the transcript
+/// now matches the chrome that H-3a's compositor bevels + tag bar draw
+/// around it, because both derive from DAYLIGHT. At 100 every size is the
+/// logical value (nothing at 1.0 moves; pinned by test).
+pub fn daylight_sheet(scale: u16) -> Sheet {
     let d = &libhalcyon::theme::DAYLIGHT;
+    let metrics = Metrics::at(scale);
+    let (island, grid) = mono_advances(scale);
+    let px = |v: f32| libhalcyon::scale::px(v, scale);
+    let ipx = |v: i32| libhalcyon::scale::ipx(v, scale);
     Sheet {
         ground: d.surface,
         ink: d.fg,
@@ -92,23 +141,31 @@ pub fn daylight_sheet() -> Sheet {
         // `.hal-out`'s border-left -- the one transcript stroke the mockup
         // stylesheet carries as a literal rather than a token.
         island_rule: 0xFF7A_6850,
+        scale,
+        metrics,
+        hairline: metrics.hairline,
+        mark_w: ipx(2),
         // The body/prose size the Daylight mockup runs at (halcyon-daylight.css
         // .hal-prose 11.5px; HALCYON-VISUAL 7-8 type scale).
-        body_px: 11.5,
-        prompt_px: 10.0,
+        body_px: px(11.5),
+        prompt_px: px(10.0),
+        hdr_px: [px(17.5), px(14.5), px(12.5)],
+        mono_island_px: 2.0 * island as f32,
+        mono_grid_px: 2.0 * grid as f32,
         // The text inset, MEASURED off the operator's mockup render
         // (halcyon_text_composition_mockup.png at 2x: the prose starts 22
         // image px inside the pane's parchment edge -- 11 logical; the
         // stylesheet's 10 + 2 + 8 would put it 9 px further in).
-        pad_x: 12,
-        block_gap: 6,
-        table_col_gap: 16,
-        kv_col_gap: 28,
+        pad_x: ipx(12),
+        block_gap: ipx(6),
+        table_col_gap: ipx(16),
+        kv_col_gap: ipx(28),
         gen: 0,
     }
 }
 
-// The vertical rhythm (HALCYON-COMPOSITION 2-3), logical px.
+// The vertical rhythm (HALCYON-COMPOSITION 2-3), LOGICAL px: every use
+// below goes through `Sheet::ipx` (the factors are unitless and unchanged).
 const LH_BODY: f32 = 1.5; // prose line-height
 const LH_HDR: f32 = 1.25; // heading line-height
 /// The mono row pitch of an island / raw output: round(10 x 1.55), the
@@ -121,6 +178,8 @@ const RULE_MARGIN: i32 = 8;
 const TABLE_TOP: i32 = 4;
 const TABLE_BOTTOM: i32 = 6;
 const TABLE_ROW_GAP: i32 = 3;
+/// The gap under a headed table's header rule.
+const TABLE_HDR_GAP: i32 = 3;
 const ISLAND_MARGIN: i32 = 2;
 const ISLAND_PAD_Y: i32 = 2;
 const ISLAND_PAD_X: i32 = 8;
@@ -132,6 +191,10 @@ const PROMPT_BOTTOM: i32 = 2;
 /// code span's ground (`.hal-em--code`).
 const OBJ_PAD: i32 = 4;
 const CODE_PAD: i32 = 3;
+/// The narrowest width a block lays at: the two insets plus this.
+const MIN_CONTENT_W: i32 = 8;
+/// The line box a caret falls back to when nothing laid out.
+const FALLBACK_LINE_H: i32 = 16;
 
 /// Inline chrome a seg asks for (painted under it at line close).
 pub const CHROME_NONE: u8 = 0;
@@ -255,14 +318,15 @@ fn color_for(st: &Style, sheet: &Sheet) -> u32 {
 }
 
 /// The proportional size of a run: a heading's rank is the ABSOLUTE size
-/// HALCYON-VISUAL 8.1 pins (17.5 / 14.5 / 12.5), all above the body (11.5);
-/// the weight is fixed Regular (face_for -> FACE_HEADING_ITALIC). `base` is
-/// the class's own size (body, or the prompt's).
-fn px_for(st: &Style, base: f32) -> f32 {
+/// HALCYON-VISUAL 8.1 pins (17.5 / 14.5 / 12.5 logical, the sheet's
+/// `hdr_px` at its scale), all above the body (11.5); the weight is fixed
+/// Regular (face_for -> FACE_HEADING_ITALIC). `base` is the class's own
+/// size (body, or the prompt's).
+fn px_for(st: &Style, base: f32, sheet: &Sheet) -> f32 {
     match hdr_level(st.hdr) {
-        1 => 17.5,
-        2 => 14.5,
-        3 => 12.5,
+        1 => sheet.hdr_px[0],
+        2 => sheet.hdr_px[1],
+        3 => sheet.hdr_px[2],
         _ => base,
     }
 }
@@ -367,9 +431,9 @@ impl<'a> LineBuilder<'a> {
     }
 
     /// The mono row box: the island cell centred in the `.hal-out` pitch.
-    fn mono_box(gs: &GlyphSource) -> ((i32, i32), (i32, i32)) {
+    fn mono_box(gs: &GlyphSource, sheet: &Sheet) -> ((i32, i32), (i32, i32)) {
         let (_, chh, base) = gs.island_cell();
-        let lead = (PRE_LINE_H - chh).max(0);
+        let lead = (sheet.ipx(PRE_LINE_H) - chh).max(0);
         let top = lead / 2;
         ((base + top, chh - base + lead - top), (base, chh - base))
     }
@@ -381,7 +445,7 @@ impl<'a> LineBuilder<'a> {
         let ((asc, desc), (asc_c, desc_c)) = if self.segs.is_empty() {
             // An empty line still occupies its class's line box.
             match self.line_class {
-                LineClass::Raw => Self::mono_box(gs),
+                LineClass::Raw => Self::mono_box(gs, self.sheet),
                 LineClass::Prompt => Self::body_box(gs, self.sheet.prompt_px, LH_BODY),
                 _ => Self::body_box(gs, self.sheet.body_px, LH_BODY),
             }
@@ -389,7 +453,7 @@ impl<'a> LineBuilder<'a> {
             let factor = if self.line_hdr { LH_HDR } else { LH_BODY };
             Self::body_box(gs, self.line_px, factor)
         } else {
-            Self::mono_box(gs)
+            Self::mono_box(gs, self.sheet)
         };
         let h = asc + desc;
         let baseline = self.y + asc;
@@ -413,6 +477,11 @@ impl<'a> LineBuilder<'a> {
         // The inline chrome: the code ground under a mono island (the cell
         // box), the pill around an obj (the content box + a hairline).
         let (_, ichh, ibase) = gs.island_cell();
+        let (code_pad, obj_pad, hair) = (
+            self.sheet.ipx(CODE_PAD),
+            self.sheet.ipx(OBJ_PAD),
+            self.sheet.hairline,
+        );
         for s in segs.iter() {
             if s.refs.is_empty() {
                 continue;
@@ -420,16 +489,16 @@ impl<'a> LineBuilder<'a> {
             match s.chrome {
                 CHROME_CODE => {
                     self.rects.push(RectSpec {
-                        x: s.x - CODE_PAD,
+                        x: s.x - code_pad,
                         y: baseline - ibase,
-                        w: (s.x_end - s.x + 2 * CODE_PAD).max(0) as u32,
+                        w: (s.x_end - s.x + 2 * code_pad).max(0) as u32,
                         h: ichh as u32,
                         color: self.sheet.island_ground,
                     });
                 }
                 CHROME_OBJ => {
-                    let x = s.x - OBJ_PAD;
-                    let w = (s.x_end - s.x + 2 * OBJ_PAD).max(0) as u32;
+                    let x = s.x - obj_pad;
+                    let w = (s.x_end - s.x + 2 * obj_pad).max(0) as u32;
                     let y = baseline - asc_c;
                     let hh = (asc_c + desc_c) as u32;
                     self.rects.push(RectSpec {
@@ -440,11 +509,12 @@ impl<'a> LineBuilder<'a> {
                         color: self.sheet.island_ground,
                     });
                     let stroke = self.sheet.rule;
+                    let hu = hair as u32;
                     for (rx, ry, rw, rh) in [
-                        (x, y, w, 1),
-                        (x, y + hh as i32 - 1, w, 1),
-                        (x, y, 1, hh),
-                        (x + w as i32 - 1, y, 1, hh),
+                        (x, y, w, hu),
+                        (x, y + hh as i32 - hair, w, hu),
+                        (x, y, hu, hh),
+                        (x + w as i32 - hair, y, hu, hh),
                     ] {
                         self.rects.push(RectSpec {
                             x: rx,
@@ -496,9 +566,9 @@ impl<'a> LineBuilder<'a> {
             self.sheet.body_px
         };
         let px = if face == FACE_MONO {
-            MONO_ISLAND_PX
+            self.sheet.mono_island_px
         } else {
-            px_for(st, base_px)
+            px_for(st, base_px, self.sheet)
         };
         let mut color = color_for(st, self.sheet);
         if mode == SpanMode::Raw && st.fg == self.sheet.ink {
@@ -513,8 +583,8 @@ impl<'a> LineBuilder<'a> {
             CHROME_NONE
         };
         let pad = match chrome {
-            CHROME_OBJ => OBJ_PAD,
-            CHROME_CODE => CODE_PAD,
+            CHROME_OBJ => self.sheet.ipx(OBJ_PAD),
+            CHROME_CODE => self.sheet.ipx(CODE_PAD),
             _ => 0,
         };
         let word_wrap = matches!(mode, SpanMode::Doc | SpanMode::Prompt);
@@ -663,9 +733,11 @@ enum Role {
 }
 
 impl Role {
-    /// (top, bottom) margins, logical px (COMPOSITION 3; collapsed pairwise).
-    fn margins(self) -> (i32, i32) {
-        match self {
+    /// (top, bottom) margins at the sheet's scale (COMPOSITION 3; collapsed
+    /// pairwise -- scaling then taking the larger is taking the larger
+    /// then scaling, `ipx` being monotone).
+    fn margins(self, sheet: &Sheet) -> (i32, i32) {
+        let (t, b) = match self {
             Role::Empty => (0, 0),
             Role::Prose => (PROSE_MARGIN, PROSE_MARGIN),
             Role::Hdr(level, _) => (HDR_TOP[(level.clamp(1, 3) - 1) as usize], HDR_BOTTOM),
@@ -677,7 +749,8 @@ impl Role {
             Role::Raw | Role::Pre => (ISLAND_MARGIN, ISLAND_MARGIN),
             Role::Table => (TABLE_TOP, TABLE_BOTTOM),
             Role::Rule => (RULE_MARGIN, RULE_MARGIN),
-        }
+        };
+        (sheet.ipx(t), sheet.ipx(b))
     }
 }
 
@@ -756,8 +829,14 @@ fn roles_of(b: &Block) -> Vec<Role> {
 /// and content-deterministic either way -- the property the reflow E2E
 /// pins).
 pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) -> LaidBlock {
-    let mut lb = LineBuilder::new(sheet, width.max(2 * sheet.pad_x + 8));
+    let mut lb = LineBuilder::new(sheet, width.max(2 * sheet.pad_x + sheet.ipx(MIN_CONTENT_W)));
     let roles = roles_of(b);
+    let (island_pad_y, island_pad_x, island_rule_w, island_margin) = (
+        sheet.ipx(ISLAND_PAD_Y),
+        sheet.ipx(ISLAND_PAD_X),
+        sheet.ipx(ISLAND_RULE_W),
+        sheet.ipx(ISLAND_MARGIN),
+    );
     // CSS margin collapsing: the gap before an element is the larger of the
     // previous element's bottom margin and its own top; the first element's
     // top margin is dropped (the first-child reset) unless it is the herald,
@@ -766,7 +845,7 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
     // A run of raw lines is ONE island: its chrome rects span the run.
     let mut island_top: Option<i32> = None;
     let close_island = |lb: &mut LineBuilder<'_>, top: i32| {
-        lb.y += ISLAND_PAD_Y;
+        lb.y += island_pad_y;
         let h = (lb.y - top).max(0) as u32;
         if h > 0 {
             lb.rects.push(RectSpec {
@@ -779,7 +858,7 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
             lb.rects.push(RectSpec {
                 x: sheet.pad_x,
                 y: top,
-                w: ISLAND_RULE_W as u32,
+                w: island_rule_w as u32,
                 h,
                 color: sheet.island_rule,
             });
@@ -787,13 +866,13 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
     };
     for (item_idx, item) in b.items.iter().enumerate() {
         let role = roles[item_idx];
-        let (top, bottom) = role.margins();
+        let (top, bottom) = role.margins(sheet);
         // Consecutive raw lines share one island: no margin between them.
         let joins_island = role == Role::Raw && island_top.is_some();
         if !joins_island {
             if let Some(t) = island_top.take() {
                 close_island(&mut lb, t);
-                prev_bottom = Some(ISLAND_MARGIN);
+                prev_bottom = Some(island_margin);
             }
             let gap = match prev_bottom {
                 None => match role {
@@ -820,9 +899,9 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                 if role == Role::Raw {
                     if island_top.is_none() {
                         island_top = Some(lb.y);
-                        lb.y += ISLAND_PAD_Y;
+                        lb.y += island_pad_y;
                     }
-                    lb.x0 = sheet.pad_x + ISLAND_RULE_W + ISLAND_PAD_X;
+                    lb.x0 = sheet.pad_x + island_rule_w + island_pad_x;
                     lb.pen_x = lb.x0;
                 }
                 lb.center = matches!(role, Role::Hdr(_, true) | Role::Deck(..));
@@ -846,10 +925,10 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                     x: sheet.pad_x,
                     y: lb.y,
                     w: (lb.width - 2 * sheet.pad_x).max(0) as u32,
-                    h: 1,
+                    h: sheet.hairline as u32,
                     color: sheet.rule,
                 });
-                lb.y += 1;
+                lb.y += sheet.hairline;
             }
             Item::Pre(lines) => {
                 // PL-1b: the preformatted code-fence island (HALCYON.md
@@ -859,10 +938,10 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                 // render_block paints rects before glyphs, so they sit BEHIND
                 // the mono text.
                 let top = lb.y;
-                lb.y += ISLAND_PAD_Y;
+                lb.y += island_pad_y;
                 lb.line_class = LineClass::Raw;
                 for (li, line) in lines.iter().enumerate() {
-                    lb.x0 = sheet.pad_x + ISLAND_RULE_W + ISLAND_PAD_X;
+                    lb.x0 = sheet.pad_x + island_rule_w + island_pad_x;
                     lb.pen_x = lb.x0;
                     let first = lb.lines.len();
                     for (s, e, sid) in runs_of(&line.cells) {
@@ -940,7 +1019,7 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
 /// (`.hal-block` margin-bottom 6).
 pub fn block_gap_between(prev: BlockKind, next: BlockKind, sheet: &Sheet) -> i32 {
     if prev == BlockKind::Prompt && next == BlockKind::Output {
-        PROMPT_BOTTOM
+        sheet.ipx(PROMPT_BOTTOM)
     } else {
         sheet.block_gap
     }
@@ -989,9 +1068,9 @@ fn lay_table(
                 let st = b.styles[sid as usize];
                 let face = face_for(&st, true);
                 let px = if face == FACE_MONO {
-                    MONO_ISLAND_PX
+                    sheet.mono_island_px
                 } else {
-                    px_for(&st, sheet.body_px)
+                    px_for(&st, sheet.body_px, sheet)
                 };
                 for c in cell[s..e].iter() {
                     if let Some(a) = gs.advance(face, px, c.ch) {
@@ -1075,12 +1154,12 @@ fn lay_table(
                 x: sheet.pad_x,
                 y,
                 w: (x - sheet.table_col_gap - sheet.pad_x).max(0) as u32,
-                h: 1,
+                h: sheet.hairline as u32,
                 color: sheet.rule,
             });
-            lb.y += 3;
+            lb.y += sheet.ipx(TABLE_HDR_GAP);
         } else if kv && ri + 1 < nrows {
-            lb.y += TABLE_ROW_GAP;
+            lb.y += sheet.ipx(TABLE_ROW_GAP);
         }
     }
 }
@@ -1185,6 +1264,7 @@ pub fn layout_pending(
         styles: styles.to_vec(),
         objs: Vec::new(),
         cost: 0,
+        annotated_own: styles.iter().any(|s| s.annotated()),
     };
     layout_block(&b, width, sheet, gs)
 }
@@ -1208,7 +1288,7 @@ pub fn cursor_pos(laid: &LaidBlock, col: usize, sheet: &Sheet) -> (i32, i32, i32
         let x = last.segs.last().map(|s| s.x_end).unwrap_or(sheet.pad_x);
         return (x, last.y, last.h);
     }
-    (sheet.pad_x, 0, 16)
+    (sheet.pad_x, 0, sheet.ipx(FALLBACK_LINE_H))
 }
 
 /// PL-4: the pixel position of column `col` within ONE logical line of a
@@ -1219,8 +1299,15 @@ pub fn cursor_pos(laid: &LaidBlock, col: usize, sheet: &Sheet) -> (i32, i32, i32
 /// and matches any row then, a table row's / pre line's index otherwise).
 /// `col` is the column within that logical line; the per-glyph `seg.xs` give
 /// the x directly. A column past the item's content lands at the end of its
-/// last laid line. Returns (x, line.y, line.h).
-pub fn caret_in_block(laid: &LaidBlock, item: usize, row: usize, col: usize) -> (i32, i32, i32) {
+/// last laid line. Returns (x, line.y, line.h); a line box of the sheet's
+/// fallback height when the item laid nothing.
+pub fn caret_in_block(
+    laid: &LaidBlock,
+    item: usize,
+    row: usize,
+    col: usize,
+    sheet: &Sheet,
+) -> (i32, i32, i32) {
     let mut end: Option<(i32, i32, i32)> = None;
     for line in laid.lines.iter() {
         if line.src_item != item || (row != usize::MAX && line.src_row != row) {
@@ -1235,7 +1322,7 @@ pub fn caret_in_block(laid: &LaidBlock, item: usize, row: usize, col: usize) -> 
         let x = line.segs.last().map(|s| s.x_end).unwrap_or(0);
         end = Some((x, line.y, line.h));
     }
-    end.unwrap_or((0, 0, 16))
+    end.unwrap_or((0, 0, sheet.ipx(FALLBACK_LINE_H)))
 }
 
 /// The visual span (block-relative y, height) of one source row -- a Line
@@ -1392,7 +1479,7 @@ mod tests {
         buf.extend_from_slice(b"\n");
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let b = t.frozen_blocks().front().expect("the frozen output block");
         let laid = layout_block(b, 600, &sheet, &mut g);
@@ -1448,7 +1535,7 @@ mod tests {
         buf.extend_from_slice(b"a line of text\n");
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
-        let mut sheet = daylight_sheet();
+        let mut sheet = daylight_sheet(100);
         let mut g = gs();
         let mut cache = LayoutCache::new();
         let b = t.frozen_blocks().front().expect("frozen");
@@ -1483,7 +1570,7 @@ mod tests {
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
         let b = &t.frozen_blocks()[0];
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let laid = layout_block(b, 600, &sheet, &mut g);
         let line = &laid.lines[0];
@@ -1543,10 +1630,10 @@ mod tests {
         // px_for still carries heading rank by SIZE (unchanged), so italic
         // headings are not flattened to one size; a title heading keeps its
         // level's size (the flag rides the high bits).
-        let sheet = daylight_sheet();
-        assert!(px_for(&with(0, 1, 0), sheet.body_px) > px_for(&with(0, 3, 0), sheet.body_px), "hdr 1 > hdr 3 by size");
-        assert!(px_for(&with(0, 3, 0), sheet.body_px) > px_for(&base, sheet.body_px), "any heading > body by size");
-        assert_eq!(px_for(&with(0, 1 | HDR_TITLE, 0), sheet.body_px), px_for(&with(0, 1, 0), sheet.body_px));
+        let sheet = daylight_sheet(100);
+        assert!(px_for(&with(0, 1, 0), sheet.body_px, &sheet) > px_for(&with(0, 3, 0), sheet.body_px, &sheet), "hdr 1 > hdr 3 by size");
+        assert!(px_for(&with(0, 3, 0), sheet.body_px, &sheet) > px_for(&base, sheet.body_px, &sheet), "any heading > body by size");
+        assert_eq!(px_for(&with(0, 1 | HDR_TITLE, 0), sheet.body_px, &sheet), px_for(&with(0, 1, 0), sheet.body_px, &sheet));
     }
 
     #[test]
@@ -1572,7 +1659,7 @@ mod tests {
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
         let b = &t.frozen_blocks()[0];
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let (_, cell_h, _) = g.island_cell();
         let laid = layout_block(b, 600, &sheet, &mut g);
@@ -1610,7 +1697,7 @@ mod tests {
         buf.extend_from_slice(b"\n");
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let blocks = t.frozen_blocks();
         let prompt = layout_block(&blocks[0], 600, &sheet, &mut g);
@@ -1643,7 +1730,7 @@ mod tests {
         buf.extend_from_slice(b"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\n");
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let (iw, _, _) = g.island_cell();
         // 62 cells at advance 6 = 372 px of text; a 240-px tile must wrap it.
@@ -1680,7 +1767,7 @@ mod tests {
         buf.extend_from_slice(b"\n");
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let laid = layout_block(&t.frozen_blocks()[0], 600, &sheet, &mut g);
         let ls = &laid.lines;
@@ -1716,7 +1803,7 @@ mod tests {
         buf.extend_from_slice(b"\nGetting started\n");
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let w = 600;
         let laid = layout_block(&t.frozen_blocks()[0], w, &sheet, &mut g);
@@ -1768,7 +1855,7 @@ mod tests {
         wire::close(&mut buf, BOp::Table);
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let w = 640;
         let laid = layout_block(&t.frozen_blocks()[0], w, &sheet, &mut g);
@@ -1801,7 +1888,7 @@ mod tests {
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
         let b = &t.frozen_blocks()[0];
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let wide = layout_block(b, 600, &sheet, &mut g);
         let narrow = layout_block(b, 220, &sheet, &mut g);
@@ -1851,7 +1938,7 @@ mod tests {
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
         let b = &t.frozen_blocks()[0];
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let laid = layout_block(b, 600, &sheet, &mut g);
         assert_eq!(laid.lines.len(), 3, "three table rows lay as three lines");
@@ -1867,7 +1954,7 @@ mod tests {
 
     #[test]
     fn exit_badge_only_on_failure() {
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         for (code, expect_badge) in [(0i64, false), (7, true)] {
             let mut t = Transcript::new(daylight());
@@ -1893,7 +1980,7 @@ mod tests {
         // `mark k=exit code=<i64::MIN>` is an untrusted frame; the badge's
         // magnitude must come from unsigned_abs, not `-code` (which panics on
         // i64::MIN under overflow-checks -> the console dies) (F2).
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
@@ -1938,7 +2025,7 @@ mod tests {
         buf.extend_from_slice(b"\n");
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut g = gs();
         let mut cart = Cartoon::new();
         cart.ops.push(Op::Clear {
@@ -1963,5 +2050,95 @@ mod tests {
         );
         let ink = px.iter().filter(|&&p| p != sheet.ground).count();
         assert!(ink > 100, "the session inked {} px", ink);
+    }
+
+    // HALCYON-SCALE 6/7: the sheet at 100 is the logical table exactly
+    // (nothing at 1.0 moves), and at 200 it is the operator's worked table
+    // (COMPOSITION 6) -- every size through the one round-half-up.
+    #[test]
+    fn the_sheet_at_100_is_the_logical_table_and_at_200_the_operators() {
+        let s = daylight_sheet(100);
+        assert_eq!(s.scale, 100);
+        assert!(s.metrics == libhalcyon::theme::METRICS);
+        assert_eq!((s.hairline, s.mark_w), (1, 2));
+        assert_eq!((s.body_px, s.prompt_px), (11.5, 10.0));
+        assert_eq!(s.hdr_px, [17.5, 14.5, 12.5]);
+        assert_eq!((s.mono_island_px, s.mono_grid_px), (crate::raster::MONO_ISLAND_PX, crate::raster::MONO_GRID_PX));
+        assert_eq!((s.pad_x, s.block_gap, s.table_col_gap, s.kv_col_gap), (12, 6, 16, 28));
+        assert_eq!((s.ipx(16), s.ipx(3), s.px(10.5)), (16, 3, 10.5), "the identity");
+        let d = daylight_sheet(200);
+        assert_eq!(d.scale, 200);
+        assert_eq!((d.metrics.header_h, d.metrics.status_h, d.metrics.tag_pad_x), (40, 40, 12));
+        assert_eq!((d.hairline, d.mark_w), (2, 4));
+        assert_eq!((d.body_px, d.prompt_px), (23.0, 20.0), "prose 23 at 2.0 (COMPOSITION 6)");
+        assert_eq!(d.hdr_px, [35.0, 29.0, 25.0], "35 / 29 / 25 at 2.0");
+        assert_eq!((d.mono_island_px, d.mono_grid_px), (24.0, 40.0), "twice the 12 / 20 advances");
+        assert_eq!((d.pad_x, d.block_gap, d.table_col_gap, d.kv_col_gap), (24, 12, 32, 56));
+        let m = daylight_sheet(150);
+        assert_eq!((m.body_px, m.hdr_px[0], m.hairline, m.metrics.header_h), (17.25, 26.25, 2, 30));
+        assert_eq!((m.mono_island_px, m.mono_grid_px), (18.0, 30.0), "advances 9 / 15");
+        assert_eq!(m.ipx(5), 8, "7.5 rounds up");
+        assert_eq!(m.ipx(3), 5, "4.5 rounds up");
+        let q = daylight_sheet(125);
+        assert_eq!(q.ipx(1), 1, "1.25 rounds down; the hairline floor holds");
+        assert_eq!(q.hairline, 1);
+        assert_eq!(q.mark_w, 3, "2.5 rounds up");
+    }
+
+    // A block laid at 200% is the 100% block scaled: the line boxes are the
+    // scaled sizes' line-heights, the margins double, the island's inset
+    // and cell are the 200% bake's, the rules are 2 px hairlines -- and the
+    // same source lays to the same glyph count either way.
+    #[test]
+    fn a_block_laid_at_200_is_the_operators_table_in_pixels() {
+        let mut t = Transcript::new(daylight());
+        let mut buf = Vec::new();
+        wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
+        wire::open(&mut buf, BOp::Hdr, &[("level", "1")]);
+        buf.extend_from_slice(b"Title");
+        wire::close(&mut buf, BOp::Hdr);
+        buf.extend_from_slice(b"\nprose line\n");
+        wire::point(&mut buf, BOp::Rule, &[]);
+        buf.extend_from_slice(b"after\n");
+        wire::close(&mut buf, BOp::Zone);
+        wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
+        buf.extend_from_slice(b"raw terminal bytes\n");
+        wire::close(&mut buf, BOp::Zone);
+        t.feed(&buf);
+        let blocks = t.frozen_blocks();
+        let mut g1 = gs();
+        let s1 = daylight_sheet(100);
+        let a = layout_block(&blocks[0], 600, &s1, &mut g1);
+        let mut g2 = gs();
+        g2.set_scale(200);
+        let s2 = daylight_sheet(200);
+        let b = layout_block(&blocks[0], 1200, &s2, &mut g2);
+        assert_eq!(a.lines.len(), b.lines.len(), "the same lines either way");
+        assert_eq!(a.lines[0].h, round_px(17.5 * LH_HDR), "hdr 1 at 1.0: 22");
+        assert_eq!(b.lines[0].h, round_px(35.0 * LH_HDR), "hdr 1 at 2.0: 44");
+        assert_eq!(b.lines[1].h, round_px(23.0 * LH_BODY), "prose at 2.0: 35");
+        assert_eq!(b.lines[1].y, b.lines[0].y + b.lines[0].h + 2 * HDR_BOTTOM, "the heading's bottom margin doubled");
+        let rule = b.rects.iter().find(|r| r.color == s2.rule).expect("the rule");
+        assert_eq!(rule.h, 2, "a 2 px hairline at 2.0");
+        assert_eq!(rule.x, 24, "at the doubled inset");
+        assert_eq!(rule.y, b.lines[1].y + b.lines[1].h + 2 * RULE_MARGIN);
+        assert_eq!(b.lines[2].y, rule.y + 2 + 2 * RULE_MARGIN, "the rule's height and margin both scaled");
+        assert!(b.lines[0].segs[0].px == 35.0 && b.lines[1].segs[0].px == 23.0);
+        let count = |lb: &LaidBlock| lb.lines.iter().flat_map(|l| l.segs.iter()).map(|s| s.refs.len()).sum::<usize>();
+        assert_eq!(count(&a), count(&b));
+        // The raw island: the 200% island bake (12x27) inset past the
+        // doubled gutter (2) and pad (8) from the doubled text inset (12).
+        let raw = layout_block(&blocks[1], 1200, &s2, &mut g2);
+        assert_eq!(raw.lines[0].segs[0].refs[0].advance, 12, "the advance-12 bake");
+        assert_eq!(raw.lines[0].segs[0].x, 24 + 4 + 16);
+        assert_eq!(raw.lines[0].h, 32.max(g2.island_cell().1), "the mono pitch doubled (32) holds the 27-px cell");
+        let gutter = raw.rects.iter().find(|r| r.color == s2.island_rule).expect("the gutter");
+        assert_eq!(gutter.w, 4, "the 2 px gutter rule doubled");
+        assert_eq!(g2.island_cell(), (12, 27, g2.island_cell().2));
+        // Nothing at 1.0 moved: the 100% raw island is the advance-6 bake
+        // at the 1.0 inset.
+        let raw1 = layout_block(&blocks[1], 600, &s1, &mut g1);
+        assert_eq!(raw1.lines[0].segs[0].refs[0].advance, 6);
+        assert_eq!(raw1.lines[0].segs[0].x, 12 + 2 + 8);
     }
 }

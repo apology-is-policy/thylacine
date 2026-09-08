@@ -12,6 +12,7 @@
 use alloc::format;
 use alloc::string::String;
 
+use halcyond::layout::Sheet;
 use halcyond::raster::GlyphSource;
 use halcyond::status::{bar_height, condition_for, status_list, Condition, StatusModel};
 use libthyla_rs::{t_clock_gettime, T_CLOCK_REALTIME};
@@ -79,8 +80,10 @@ impl StatusBar {
     }
 
     /// Mint the bar if there is none: the display width (off the ring's
-    /// `ctl`) by the bar height. Said once on a refusal; retried per call.
-    pub fn ensure(&mut self) {
+    /// `ctl`) by the bar height at the sheet's scale (the compositor's
+    /// carve; a bar of another height is refused). Said once on a refusal;
+    /// retried per call.
+    pub fn ensure(&mut self, sheet: &Sheet) {
         if self.surf.is_some() || !self.want_mint {
             return;
         }
@@ -89,14 +92,14 @@ impl StatusBar {
             Some(d) => d,
             None => return,
         };
-        match Surface::status_on(&self.ring, dw, bar_height()) {
+        match Surface::status_on(&self.ring, dw, bar_height(sheet)) {
             Ok(s) => {
                 #[cfg(feature = "test-mode")]
                 say(&format!(
                     "halcyond: status bar {} minted ({}x{})",
                     s.id,
                     dw,
-                    bar_height()
+                    bar_height(sheet)
                 ));
                 self.surf = Some(s);
                 self.painted = None;
@@ -154,8 +157,14 @@ impl StatusBar {
         }
     }
 
+    /// The next `refresh` repaints whatever the model (a sheet change: the
+    /// same model paints at a new size).
+    pub fn invalidate(&mut self) {
+        self.painted = None;
+    }
+
     /// Paint `model` if it differs from what is showing.
-    pub fn refresh(&mut self, model: &StatusModel, gs: &mut GlyphSource) {
+    pub fn refresh(&mut self, model: &StatusModel, sheet: &Sheet, gs: &mut GlyphSource) {
         if self.painted.as_ref() == Some(model) {
             return;
         }
@@ -167,7 +176,7 @@ impl StatusBar {
         if w == 0 || h == 0 {
             return;
         }
-        let (cart, slots) = status_list(model, w, h, gs);
+        let (cart, slots) = status_list(model, w, h, sheet, gs);
         let px = surf.pixels();
         cartoon::execute(
             &cart,
