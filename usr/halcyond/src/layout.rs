@@ -216,10 +216,36 @@ pub const CHROME_OBJ: u8 = 2;
 /// so an atlas eviction invalidates no layout and laying a block out packs
 /// nothing -- `render_block` resolves the id for what it paints, and only
 /// then (the atlas working set is the painted set, never the transcript).
+/// The whole-pixel width the sub-pixel pen lays a run of chars at: the
+/// SAME accumulation the lay loop performs (1/256 px, one whole division
+/// at the end), never a sum of rounded per-glyph advances. Measuring one
+/// way and laying the other is how a right-aligned run drifts off its
+/// edge and a table column comes up a pixel short -- the two must share
+/// an accumulator, not merely agree in spirit.
+fn run_width(gs: &mut GlyphSource, face: u8, px: f32, chars: impl Iterator<Item = char>) -> i32 {
+    let mut q = 0i32;
+    for ch in chars {
+        if let Some(a) = gs.advance_fx(face, px, ch) {
+            q += a;
+        }
+    }
+    q.div_euclid(GlyphSource::PEN_SCALE)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LaidGlyph {
     pub ch: char,
+    /// The WHOLE-pixel step from this glyph's pen to the next one's. Not
+    /// the font advance: with a sub-pixel pen the font advance is
+    /// fractional, and what the executor (which accumulates integers) must
+    /// be handed is the difference between consecutive WHOLE pen
+    /// positions. Summing these over a run gives the run's whole width by
+    /// construction, so measuring and painting cannot disagree.
     pub advance: i32,
+    /// This glyph's horizontal phase, quarter-pixels 0..=3 -- the fraction
+    /// of the true pen that the whole position dropped, which the atlas
+    /// serves as a distinct raster (HALCYON-TYPE 4.3).
+    pub phase: u8,
 }
 
 /// One positioned run: glyphs sharing a face/color/background, with the
@@ -384,6 +410,16 @@ struct LineBuilder<'a> {
     // The line under construction.
     segs: Vec<Seg>,
     pen_x: i32,
+    /// The pen's sub-pixel remainder in 1/256 px, 0..=255 (HALCYON-TYPE
+    /// 4.3). `pen_x` stays the WHOLE pixel so every width comparison in
+    /// this builder keeps its meaning; this carries what the whole part
+    /// dropped. A glyph's PHASE is read off it by rounding to the nearest
+    /// quarter -- a per-glyph decision that is never fed back, so the
+    /// coarse four-phase grid costs no accumulated drift. Reset to 0
+    /// wherever `pen_x` is ASSIGNED (a line or block start is a whole
+    /// pixel); untouched by `+= pad`, since a whole-pixel pad cannot
+    /// change a fraction.
+    pen_q: i32,
     /// The left inset of the current line (the text inset, or the island's).
     x0: i32,
     any_body: bool,
@@ -405,6 +441,7 @@ impl<'a> LineBuilder<'a> {
             y: 0,
             segs: Vec::new(),
             pen_x: sheet.pad_x,
+            pen_q: 0,
             x0: sheet.pad_x,
             any_body: false,
             line_px: 0.0,
@@ -548,6 +585,7 @@ impl<'a> LineBuilder<'a> {
         });
         self.y += h;
         self.pen_x = self.x0;
+        self.pen_q = 0;
         self.any_body = false;
         self.line_px = 0.0;
         self.line_hdr = false;
@@ -604,12 +642,7 @@ impl<'a> LineBuilder<'a> {
         // line already holds content -- the break opportunity is the space
         // that ended the previous span, which this span cannot see.
         if word_wrap && self.pen_x > self.x0 && !cells.iter().any(|c| c.ch == ' ') {
-            let mut w = 2 * pad;
-            for c in cells.iter() {
-                if let Some(a) = gs.advance(face, px, c.ch) {
-                    w += a;
-                }
-            }
+            let w = 2 * pad + run_width(gs, face, px, cells.iter().map(|c| c.ch));
             if self.pen_x + w > self.width - self.sheet.pad_x && w <= self.width - self.sheet.pad_x - self.x0 {
                 self.break_line(gs);
             }
@@ -636,16 +669,24 @@ impl<'a> LineBuilder<'a> {
         let right = self.width - self.sheet.pad_x - pad;
         while i < cells.len() {
             let ch = cells[i].ch;
-            let Some(advance) = gs.advance(face, px, ch) else {
+            let Some(adv_q) = gs.advance_fx(face, px, ch) else {
                 i += 1;
                 col += 1;
                 continue;
             };
-            let mut gr = LaidGlyph { ch, advance };
-            if face != FACE_MONO && i + 1 < cells.len() {
-                gr.advance += gs.kern(face, px, ch, cells[i + 1].ch);
-            }
-            if !no_wrap && self.pen_x + gr.advance > right && !seg.refs.is_empty() {
+            // The pen advances in QUARTER-pixels; kerning is whole px (and
+            // 0 on Plex, which ships no pair table this reads), so it
+            // scales in. The glyph's own phase and whole step are resolved
+            // AFTER the wrap decision below, because a wrap moves the pen
+            // to a line start and re-zeroes the fraction.
+            let step_q = adv_q
+                + if face != FACE_MONO && i + 1 < cells.len() {
+                    gs.kern(face, px, ch, cells[i + 1].ch) * GlyphSource::PEN_SCALE
+                } else {
+                    0
+                };
+            let provisional = (self.pen_q + step_q).div_euclid(GlyphSource::PEN_SCALE);
+            if !no_wrap && self.pen_x + provisional > right && !seg.refs.is_empty() {
                 let cut = match last_space {
                     Some((c, cc)) if word_wrap && c > 0 && c < seg.refs.len() => Some((c, cc)),
                     _ => None,
@@ -677,9 +718,25 @@ impl<'a> LineBuilder<'a> {
                         obj: obj2,
                         chrome: chrome2,
                     };
-                    for r in spill_refs {
+                    // The spilled glyphs re-lay at a NEW pen, so their
+                    // phases and whole steps are re-derived rather than
+                    // carried: a phase is relative to the pen it was laid
+                    // at, and reusing one across a line break offsets the
+                    // whole tail by up to 3/4 px. (Re-deriving also drops
+                    // the kern folded into the old advance, which is the
+                    // right answer anyway -- the pair at a wrap boundary
+                    // is not the pair that was there before it -- and is
+                    // exactly 0 on Plex today.)
+                    for mut r in spill_refs {
+                        let aq = gs
+                            .advance_fx(face2, px2, r.ch)
+                            .unwrap_or(r.advance * GlyphSource::PEN_SCALE);
+                        let total = self.pen_q + aq;
+                        r.phase = crate::raster::phase_of(self.pen_q);
+                        r.advance = total.div_euclid(GlyphSource::PEN_SCALE);
                         seg.xs.push(self.pen_x);
                         self.pen_x += r.advance;
+                        self.pen_q = total.rem_euclid(GlyphSource::PEN_SCALE);
                         seg.refs.push(r);
                     }
                     seg.x_end = self.pen_x;
@@ -707,8 +764,15 @@ impl<'a> LineBuilder<'a> {
                 }
                 last_space = None;
             }
+            let total = self.pen_q + step_q;
+            let gr = LaidGlyph {
+                ch,
+                advance: total.div_euclid(GlyphSource::PEN_SCALE),
+                phase: crate::raster::phase_of(self.pen_q),
+            };
             seg.xs.push(self.pen_x);
             self.pen_x += gr.advance;
+            self.pen_q = total.rem_euclid(GlyphSource::PEN_SCALE);
             seg.refs.push(gr);
             if ch == ' ' {
                 last_space = Some((seg.refs.len(), col + 1));
@@ -896,6 +960,8 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
         let lines_before = lb.lines.len();
         lb.x0 = sheet.pad_x;
         lb.pen_x = sheet.pad_x;
+    lb.pen_q = 0;
+        lb.pen_q = 0;
         lb.center = false;
         lb.line_class = LineClass::Doc;
         match item {
@@ -913,6 +979,7 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                     }
                     lb.x0 = sheet.pad_x + island_rule_w + island_pad_x;
                     lb.pen_x = lb.x0;
+                    lb.pen_q = 0;
                 }
                 lb.center = matches!(role, Role::Hdr(_, true) | Role::Deck(..));
                 for (s, e, sid) in runs_of(&line.cells) {
@@ -953,6 +1020,7 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                 for (li, line) in lines.iter().enumerate() {
                     lb.x0 = sheet.pad_x + island_rule_w + island_pad_x;
                     lb.pen_x = lb.x0;
+                    lb.pen_q = 0;
                     let first = lb.lines.len();
                     for (s, e, sid) in runs_of(&line.cells) {
                         let st = b.styles[sid as usize];
@@ -993,6 +1061,7 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
     }
     lb.x0 = sheet.pad_x;
     lb.pen_x = sheet.pad_x;
+    lb.pen_q = 0;
     lb.center = false;
     // The exit badge: only a FAILED command earns ink (section 4's exit
     // badge; success is silence).
@@ -1082,11 +1151,7 @@ fn lay_table(
                 } else {
                     px_for(&st, sheet.body_px, sheet)
                 };
-                for c in cell[s..e].iter() {
-                    if let Some(a) = gs.advance(face, px, c.ch) {
-                        w += a;
-                    }
-                }
+                w += run_width(gs, face, px, cell[s..e].iter().map(|c| c.ch));
             }
             if ci < ncols && w > col_w[ci] {
                 col_w[ci] = w;
@@ -1135,6 +1200,7 @@ fn lay_table(
                 _ => col_x[ci],
             };
             lb.pen_x = x0;
+            lb.pen_q = 0;
             // The cell's runs carry their SOURCE columns (the cell's start
             // in the row + the run's offset in the cell), so a laid glyph
             // inverts to the grid cell it came from.
@@ -1200,13 +1266,9 @@ fn lay_exit_badge(lb: &mut LineBuilder, code: i64, sheet: &Sheet, gs: &mut Glyph
         text.push(b as char);
     }
     let px = sheet.body_px * 0.9;
-    let mut w = 0i32;
-    for ch in text.chars() {
-        if let Some(a) = gs.advance(FACE_BODY, px, ch) {
-            w += a;
-        }
-    }
+    let w = run_width(gs, FACE_BODY, px, text.chars());
     lb.pen_x = (lb.width - sheet.pad_x - w).max(sheet.pad_x);
+    lb.pen_q = 0;
     let st = Style {
         fg: sheet.err,
         bg: sheet.ground,
@@ -1236,11 +1298,17 @@ fn lay_exit_badge(lb: &mut LineBuilder, code: i64, sheet: &Sheet, gs: &mut Glyph
         chrome: CHROME_NONE,
     };
     lb.note_metrics(FACE_BODY, px, false);
+    // The badge runs its own pen (it bypasses the block builder), so it
+    // carries its own quarter-pixel remainder too.
+    let mut q = 0i32;
     for c in cells.iter() {
-        if let Some(advance) = gs.advance(FACE_BODY, px, c.ch) {
+        if let Some(aq) = gs.advance_fx(FACE_BODY, px, c.ch) {
+            let total = q + aq;
             seg.xs.push(seg_start_x);
-            seg_start_x += advance;
-            seg.refs.push(LaidGlyph { ch: c.ch, advance });
+            let whole = total.div_euclid(GlyphSource::PEN_SCALE);
+            seg.refs.push(LaidGlyph { ch: c.ch, advance: whole, phase: crate::raster::phase_of(q) });
+            seg_start_x += whole;
+            q = total.rem_euclid(GlyphSource::PEN_SCALE);
         }
     }
     seg.x_end = seg_start_x;
@@ -1381,7 +1449,10 @@ pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &mut Glyp
             }
             refs.clear();
             for g in seg.refs.iter() {
-                let id = gs.glyph(seg.face, seg.px, g.ch).map(|r| r.glyph).unwrap_or(u32::MAX);
+                let id = gs
+                    .glyph_at(seg.face, seg.px, g.ch, g.phase)
+                    .map(|r| r.glyph)
+                    .unwrap_or(u32::MAX);
                 refs.push(GlyphRef {
                     glyph: id,
                     advance: g.advance,
@@ -1478,6 +1549,87 @@ mod tests {
 
     fn body_h(_g: &GlyphSource, sheet: &Sheet) -> i32 {
         round_px(sheet.body_px * LH_BODY)
+    }
+
+    // HALCYON-TYPE 4.3, the two things the sub-pixel pen must be: LIVE
+    // (a pen that lands on whole pixels every time is an inert feature
+    // that every test would still pass), and HONEST -- what layout
+    // measured is what the executor paints. The second is the one that
+    // matters: the executor accumulates the laid whole steps from the
+    // segment's x, so if those steps did not reproduce the laid `xs`,
+    // every hit-test and every right edge would drift from the ink.
+    #[test]
+    fn the_sub_pixel_pen_is_live_and_measures_what_it_paints() {
+        let mut t = Transcript::new(daylight());
+        let mut buf = Vec::new();
+        // An ANNOTATED zone: that is what makes the lines Doc rather than
+        // Raw, and Doc is what lays in the proportional faces. A raw
+        // output zone is mono, whose cells are whole by construction and
+        // would have made this witness vacuously green -- which is exactly
+        // what it did on the first run.
+        wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
+        buf.extend_from_slice(b"A Lisp Machine's presentations on a ");
+        wire::open(&mut buf, BOp::Em, &[("class", "strong")]);
+        buf.extend_from_slice(b"Plan 9");
+        wire::close(&mut buf, BOp::Em);
+        buf.extend_from_slice(b" shell -- a thing thought gone, brought back.\n");
+        wire::close(&mut buf, BOp::Zone);
+        t.feed(&buf);
+        let sheet = daylight_sheet(100);
+        let mut g = gs();
+        let b = t.frozen_blocks().front().expect("the frozen output block");
+        let laid = layout_block(b, 600, &sheet, &mut g);
+
+        let mut phases = [0usize; 4];
+        let mut laid_total = 0i32;
+        let mut n = 0usize;
+        for line in laid.lines.iter() {
+            for seg in line.segs.iter() {
+                // The executor's arithmetic, replayed exactly.
+                let mut pen = seg.x;
+                for (i, gl) in seg.refs.iter().enumerate() {
+                    assert_eq!(pen, seg.xs[i], "glyph {i}: executor pen != laid x");
+                    assert!(gl.phase < 4, "phase {} out of range", gl.phase);
+                    phases[gl.phase as usize] += 1;
+                    pen += gl.advance;
+                    laid_total += gl.advance;
+                    n += 1;
+                }
+                assert_eq!(pen, seg.x_end, "the run ends where the segment says");
+            }
+        }
+        assert!(n > 40, "laid {n} glyphs");
+        assert!(
+            phases[0] < n,
+            "every glyph landed on phase 0 -- the sub-pixel pen is inert"
+        );
+        assert!(
+            phases.iter().filter(|&&c| c > 0).count() >= 3,
+            "only {:?} of the four phases used",
+            phases
+        );
+
+        // Honest about width: the sub-pixel pen tracks the font's exact
+        // total at least as closely as the old whole-pixel pen, which
+        // re-rounded at EVERY glyph and drifted by up to half a pixel each
+        // time. Same text, three measures.
+        let mut exact = 0.0f32;
+        let mut integer_pen = 0i32;
+        for line in laid.lines.iter() {
+            for seg in line.segs.iter() {
+                for gl in seg.refs.iter() {
+                    exact += g.advance_f(seg.face, seg.px, gl.ch).unwrap_or(0.0);
+                    integer_pen += g.advance(seg.face, seg.px, gl.ch).unwrap_or(0);
+                }
+            }
+        }
+        let new_err = (laid_total as f32 - exact).abs();
+        let old_err = (integer_pen as f32 - exact).abs();
+        assert!(
+            new_err <= old_err,
+            "sub-pixel err {new_err} should not exceed whole-pixel err {old_err} (exact {exact})"
+        );
+        assert!(new_err <= 1.0, "sub-pixel width within a pixel of exact: {new_err}");
     }
 
     #[test]

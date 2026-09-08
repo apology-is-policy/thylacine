@@ -427,9 +427,25 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
     exactly one phase, so a phased screen packs the *same* pages as an
     unphased one (asserted equal), and one codepoint at four phases costs
     four entries on one page.
-  - **TY-3b** the fractional pen in layout: `LaidGlyph` carries the whole
-    advance delta and a 2-bit phase, the lay sites accumulate in f32, and
-    measure/paint agree by sharing the accumulator.
+  - **TY-3b — LANDED 2026-09-08 @`*(pending)*`**, the pen. `LaidGlyph`
+    carries the **whole-pixel step to the next glyph** (not the font
+    advance) plus its phase, so the executor's integer accumulation
+    reproduces the laid `xs` exactly and nothing downstream changed. The
+    pen keeps `pen_x` in whole pixels — every width comparison in the
+    builder keeps its meaning — beside a remainder in **1/256 px**. The
+    finer unit is deliberate and was measured: quantizing the *pen* to
+    quarters compounds up to ⅛ px per glyph, which came to **1.4 px over
+    one line of prose** — most of the drift sub-pixel placement exists to
+    remove. The phase is a per-glyph decision read off the remainder and
+    never fed back, so the coarse four-phase grid costs no accumulated
+    error. Spilled glyphs are **re-phased** at a wrap: a phase is relative
+    to the pen it was laid at, and carrying one across a line break
+    offsets the whole tail. Every pre-measure (`run_width`) and every
+    single-style run (`shape_run`, used by the chrome strip, the status
+    bar and the menu) now shares that accumulator — measuring one way and
+    laying another is how a right-aligned run walks off its edge, which is
+    exactly what the kv-list test caught. Mono is untouched at every tier:
+    a fixed cell has no phase.
 - **TY-4** Cornucopia live: the subset TTF (fontTools; the bake's codepoint
   list), `FACE_MONO` on the outline at the cell table; the cells tier
   untouched.

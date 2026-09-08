@@ -187,14 +187,8 @@ struct Run {
 }
 
 fn shape(gs: &mut GlyphSource, px: f32, text: &str) -> Run {
-    let mut refs: Vec<GlyphRef> = Vec::new();
-    let mut width = 0;
-    for ch in text.chars() {
-        if let Some(g) = gs.glyph(FACE_BODY, px, ch) {
-            width += g.advance;
-            refs.push(g);
-        }
-    }
+    // The sub-pixel pen, via the shared shaper (HALCYON-TYPE 4.3).
+    let (refs, width) = gs.shape_run(FACE_BODY, px, text.chars());
     Run { refs, width }
 }
 

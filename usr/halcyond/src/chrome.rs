@@ -212,17 +212,12 @@ pub fn trail_ink(key: Key) -> Argb {
     }
 }
 
-/// A run of `text` in `face` at `px`: its glyphs and their advance sum.
+/// A run of `text` in `face` at `px`: its glyphs and their whole width, at
+/// the sub-pixel pen (HALCYON-TYPE 4.3) -- the same shaper the status bar
+/// and the menu use, so every chrome surface places type the way the
+/// transcript does.
 fn shape(gs: &mut GlyphSource, face: u8, px: f32, text: &str) -> (Vec<GlyphRef>, i32) {
-    let mut refs: Vec<GlyphRef> = Vec::new();
-    let mut width = 0;
-    for ch in text.chars() {
-        if let Some(g) = gs.glyph(face, px, ch) {
-            width += g.advance;
-            refs.push(g);
-        }
-    }
-    (refs, width)
+    gs.shape_run(face, px, text.chars())
 }
 
 /// The baseline that centres a face's line box in the strip above the

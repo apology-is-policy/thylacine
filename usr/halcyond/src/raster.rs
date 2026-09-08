@@ -113,6 +113,17 @@ pub fn mono_advances(pct: u16) -> (u8, u8) {
     (one, one)
 }
 
+/// The phase a sub-pixel remainder (1/256 px) rounds to: the nearest
+/// quarter of a pixel, clamped to the last one. A remainder in the top
+/// eighth would round to a whole pixel -- i.e. to the NEXT pixel's phase
+/// 0 -- and moving the glyph there would desynchronise it from the whole
+/// pen the executor reconstructs, so it is clamped instead. The cost is
+/// bounded and unaccumulated: at most 1/8 px, on that one glyph.
+#[inline]
+pub fn phase_of(rem_256: i32) -> u8 {
+    (((rem_256 + 32) / 64).clamp(0, 3)) as u8
+}
+
 /// Per-(face, size) vertical metrics, integer pixels, y-down. `ascent` is
 /// baseline distance from the line top; `line_height` includes the gap.
 #[derive(Clone, Copy)]
@@ -330,6 +341,55 @@ impl GlyphSource {
     /// path's `+0.5` truncation, by construction and by test. The mono
     /// cells and the island fallback are whole by nature (a fixed cell),
     /// so they return their integer width as an f32. Packs nothing.
+    /// The pen's fixed-point scale: 1/256 px. Deliberately FINER than the
+    /// four phases it feeds (HALCYON-TYPE 4.3). The phase is a placement
+    /// decision taken per glyph and never accumulated; the PEN is a
+    /// running total, so quantizing it to quarters would compound up to
+    /// 1/8 px of error per glyph -- measured at 1.4 px over one line of
+    /// prose, which is most of the drift sub-pixel placement exists to
+    /// remove. At 1/256 the same line drifts by hundredths.
+    pub const PEN_SCALE: i32 = 256;
+
+    /// The advance in 1/256 px -- what the sub-pixel pen accumulates.
+    pub fn advance_fx(&mut self, face: u8, px: f32, ch: char) -> Option<i32> {
+        self.advance_f(face, px, ch)
+            .map(|a| (a * Self::PEN_SCALE as f32 + 0.5) as i32)
+    }
+
+    /// Shape a SINGLE-STYLE run at the sub-pixel pen: each glyph carries
+    /// the WHOLE step to the next one, and the returned width is their
+    /// sum, so a caller that measures with this and paints with this
+    /// cannot disagree with itself. The one place the sub-pixel pen is
+    /// implemented for simple runs -- the chrome strip, the status bar,
+    /// the menu; the transcript's own loop needs wrapping and per-segment
+    /// styles and keeps its own, against the same `advance_fx`.
+    ///
+    /// A glyph the atlas cannot serve is skipped WITHOUT advancing the
+    /// pen, which is what these callers did before and what keeps a
+    /// refused glyph from opening a hole in the run.
+    pub fn shape_run(
+        &mut self,
+        face: u8,
+        px: f32,
+        chars: impl Iterator<Item = char>,
+    ) -> (Vec<GlyphRef>, i32) {
+        let mut refs: Vec<GlyphRef> = Vec::new();
+        let (mut rem, mut width) = (0i32, 0i32);
+        for ch in chars {
+            let Some(aq) = self.advance_fx(face, px, ch) else {
+                continue;
+            };
+            let total = rem + aq;
+            let step = total.div_euclid(Self::PEN_SCALE);
+            if let Some(g) = self.glyph_at(face, px, ch, phase_of(rem)) {
+                refs.push(GlyphRef { glyph: g.glyph, advance: step });
+                width += step;
+                rem = total.rem_euclid(Self::PEN_SCALE);
+            }
+        }
+        (refs, width)
+    }
+
     pub fn advance_f(&mut self, face: u8, px: f32, ch: char) -> Option<f32> {
         if face == FACE_MONO {
             return Some(self.mono_atlas(px).cell_w() as f32);

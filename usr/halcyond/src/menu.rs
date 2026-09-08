@@ -18,7 +18,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use beacon::verbs::{expand, is_internal, rules_for, Rule};
-use cartoon::{Cartoon, GlyphRef, Op};
+use cartoon::{Cartoon, Op};
 use libhalcyon::theme::DAYLIGHT;
 
 use crate::chrome::NAME_PX;
@@ -318,11 +318,10 @@ const ROW_PAD: i32 = 4;
 const NO_VERBS: &str = "no verbs";
 
 fn body_width(gs: &mut GlyphSource, sheet: &Sheet, s: &str) -> i32 {
+    // The sub-pixel pen's width, so the menu measures what it paints
+    // (HALCYON-TYPE 4.3; `push_body` shapes with the same call).
     let px = sheet.px(NAME_PX);
-    s.chars()
-        .filter_map(|c| gs.glyph(FACE_BODY, px, c))
-        .map(|g| g.advance)
-        .sum()
+    gs.shape_run(FACE_BODY, px, s.chars()).1
 }
 
 fn mono_width(gs: &GlyphSource, s: &str) -> i32 {
@@ -379,13 +378,7 @@ fn push_body(
     s: &str,
 ) -> i32 {
     let px = sheet.px(NAME_PX);
-    let mut refs: Vec<GlyphRef> = Vec::new();
-    for c in s.chars() {
-        if let Some(g) = gs.glyph(FACE_BODY, px, c) {
-            refs.push(g);
-        }
-    }
-    let adv: i32 = refs.iter().map(|g| g.advance).sum();
+    let (refs, adv) = gs.shape_run(FACE_BODY, px, s.chars());
     if !refs.is_empty() {
         cart.push_glyphs(gs.gen(), x, baseline, color, &refs);
     }
@@ -401,12 +394,10 @@ fn push_mono(
     color: u32,
     s: &str,
 ) {
-    let mut refs: Vec<GlyphRef> = Vec::new();
-    for c in s.chars() {
-        if let Some(g) = gs.glyph(FACE_MONO, sheet.mono_island_px, c) {
-            refs.push(g);
-        }
-    }
+    // FACE_MONO refuses a phase (a fixed cell has none), so this is the
+    // whole-cell run it always was -- routed through the one shaper so
+    // there is a single place the pen lives.
+    let (refs, _) = gs.shape_run(FACE_MONO, sheet.mono_island_px, s.chars());
     if !refs.is_empty() {
         cart.push_glyphs(gs.gen(), x, baseline, color, &refs);
     }
