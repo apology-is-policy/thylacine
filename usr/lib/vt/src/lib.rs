@@ -151,6 +151,30 @@ pub const DAYLIGHT: Palette = Palette {
     },
 };
 
+/// The OSC body cap for every selector but Beacon's: a title, a cwd
+/// report, an aurora setting -- a short string each (the consumer caps a
+/// retained title at the same 256).
+pub const OSC_MAX: usize = 256;
+/// The OSC body cap once the selector reads `1936;` (a Beacon frame): the
+/// frame maximum Beacon's own parser accepts (`beacon::wire::FRAME_MAX`,
+/// pinned equal by a halcyond test -- vt has no dependency to name it). At
+/// the title cap a `mark k=cmd` of a long command line or an `obj` with a
+/// long ref was discarded at the terminator, so a tile's transcript never
+/// saw it while the console path (its own scanner) did.
+pub const OSC_BEACON_MAX: usize = 2048;
+
+/// The body cap for what is accumulating: Beacon's from the moment the
+/// selector is complete, the short one otherwise (and until then -- five
+/// bytes is inside both).
+#[inline]
+fn osc_body_cap(buf: &[u8]) -> usize {
+    if buf.starts_with(b"1936;") {
+        OSC_BEACON_MAX
+    } else {
+        OSC_MAX
+    }
+}
+
 pub const ATTR_REVERSE: u8 = 1 << 0;
 pub const ATTR_UNDERLINE: u8 = 1 << 1;
 pub const ATTR_BOLD: u8 = 1 << 2;
@@ -990,7 +1014,7 @@ impl Vt {
                     self.state = State::Ground;
                 } else if b == 0x1B {
                     self.state = State::OscEsc;
-                } else if self.osc_buf.len() < 256 {
+                } else if self.osc_buf.len() < osc_body_cap(&self.osc_buf) {
                     self.osc_buf.push(b);
                 } else {
                     self.osc_over = true; // oversize: discard at terminator

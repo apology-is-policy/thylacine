@@ -2365,6 +2365,24 @@ mod tests {
     }
 
     #[test]
+    fn the_tile_paths_beacon_osc_cap_admits_every_frame_this_scanner_does() {
+        // The two renderer paths must agree on what a Beacon frame may be:
+        // this scanner (the console path) parses frames up to
+        // `beacon::wire::FRAME_MAX`; a tile's kaua-term accumulates the OSC
+        // body under the vt's Beacon cap (vt names no beacon dependency, so
+        // the equality is pinned here). A body cap below the frame maximum
+        // silently dropped long `cmd` marks and long-ref `obj`s on the tile
+        // path only.
+        assert!(
+            vt::OSC_BEACON_MAX >= wire::FRAME_MAX,
+            "vt's Beacon OSC cap ({}) is below beacon's frame maximum ({})",
+            vt::OSC_BEACON_MAX,
+            wire::FRAME_MAX
+        );
+        assert_eq!(vt::OSC_MAX, OSC_MAX, "the short cap is the transcript's own");
+    }
+
+    #[test]
     fn a_raw_cwd_report_body_is_decoded_like_the_scanned_one() {
         // The tile path's `apply_cwd_report` (the body after `7;`, forwarded
         // by a kaua-term) is the SAME decoder the scanner's OSC arm uses:

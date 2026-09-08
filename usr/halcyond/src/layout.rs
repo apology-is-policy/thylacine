@@ -23,6 +23,7 @@
 // (400) italic, ranked by SIZE never weight; em emph is Text italic;
 // everything else is the Text-weight (450) body.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use cartoon::{Cartoon, GlyphRef, Op};
@@ -137,6 +138,17 @@ pub const CHROME_NONE: u8 = 0;
 pub const CHROME_CODE: u8 = 1;
 pub const CHROME_OBJ: u8 = 2;
 
+/// One laid glyph: the codepoint and the advance it was laid with (kerning
+/// folded in). NOT an atlas id: a laid block never references the atlas,
+/// so an atlas eviction invalidates no layout and laying a block out packs
+/// nothing -- `render_block` resolves the id for what it paints, and only
+/// then (the atlas working set is the painted set, never the transcript).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LaidGlyph {
+    pub ch: char,
+    pub advance: i32,
+}
+
 /// One positioned run: glyphs sharing a face/color/background, with the
 /// per-glyph pen x recorded for hit-testing (xs[i] is glyph i's pen; the
 /// run ends at `x_end`).
@@ -147,7 +159,7 @@ pub struct Seg {
     pub bg: Option<u32>,
     pub face: u8,
     pub px: f32,
-    pub refs: Vec<GlyphRef>,
+    pub refs: Vec<LaidGlyph>,
     pub xs: Vec<i32>,
     /// Source addressing for selection: the item index in the block and
     /// the starting cell column this seg covers (columns advance one per
@@ -514,8 +526,8 @@ impl<'a> LineBuilder<'a> {
         if word_wrap && self.pen_x > self.x0 && !cells.iter().any(|c| c.ch == ' ') {
             let mut w = 2 * pad;
             for c in cells.iter() {
-                if let Some(gr) = gs.glyph(face, px, c.ch) {
-                    w += gr.advance;
+                if let Some(a) = gs.advance(face, px, c.ch) {
+                    w += a;
                 }
             }
             if self.pen_x + w > self.width - self.sheet.pad_x && w <= self.width - self.sheet.pad_x - self.x0 {
@@ -544,11 +556,12 @@ impl<'a> LineBuilder<'a> {
         let right = self.width - self.sheet.pad_x - pad;
         while i < cells.len() {
             let ch = cells[i].ch;
-            let Some(mut gr) = gs.glyph(face, px, ch) else {
+            let Some(advance) = gs.advance(face, px, ch) else {
                 i += 1;
                 col += 1;
                 continue;
             };
+            let mut gr = LaidGlyph { ch, advance };
             if face != FACE_MONO && i + 1 < cells.len() {
                 gr.advance += gs.kern(face, px, ch, cells[i + 1].ch);
             }
@@ -562,7 +575,7 @@ impl<'a> LineBuilder<'a> {
                 if let Some((cut, cut_col)) = cut {
                     // Wrap at the last space boundary inside this seg; the
                     // spilled glyphs re-lay at the new line start.
-                    let spill_refs: Vec<GlyphRef> = seg.refs.split_off(cut);
+                    let spill_refs: Vec<LaidGlyph> = seg.refs.split_off(cut);
                     seg.xs.truncate(cut);
                     seg.x_end = seg.xs.last().copied().unwrap_or(seg.x)
                         + seg.refs.last().map(|r| r.advance).unwrap_or(0);
@@ -981,8 +994,8 @@ fn lay_table(
                     px_for(&st, sheet.body_px)
                 };
                 for c in cell[s..e].iter() {
-                    if let Some(gr) = gs.glyph(face, px, c.ch) {
-                        w += gr.advance;
+                    if let Some(a) = gs.advance(face, px, c.ch) {
+                        w += a;
                     }
                 }
             }
@@ -1100,8 +1113,8 @@ fn lay_exit_badge(lb: &mut LineBuilder, code: i64, sheet: &Sheet, gs: &mut Glyph
     let px = sheet.body_px * 0.9;
     let mut w = 0i32;
     for ch in text.chars() {
-        if let Some(gr) = gs.glyph(FACE_BODY, px, ch) {
-            w += gr.advance;
+        if let Some(a) = gs.advance(FACE_BODY, px, ch) {
+            w += a;
         }
     }
     lb.pen_x = (lb.width - sheet.pad_x - w).max(sheet.pad_x);
@@ -1135,10 +1148,10 @@ fn lay_exit_badge(lb: &mut LineBuilder, code: i64, sheet: &Sheet, gs: &mut Glyph
     };
     lb.note_metrics(FACE_BODY, px, false);
     for c in cells.iter() {
-        if let Some(gr) = gs.glyph(FACE_BODY, px, c.ch) {
+        if let Some(advance) = gs.advance(FACE_BODY, px, c.ch) {
             seg.xs.push(seg_start_x);
-            seg_start_x += gr.advance;
-            seg.refs.push(gr);
+            seg_start_x += advance;
+            seg.refs.push(LaidGlyph { ch: c.ch, advance });
         }
     }
     seg.x_end = seg_start_x;
@@ -1245,8 +1258,14 @@ pub fn laid_line_for(laid: &LaidBlock, item: usize, row: usize) -> Option<(i32, 
 }
 
 /// Emit a laid block into the cartoon at (0, y0): background rects first,
-/// then glyph runs (paint order is the op order).
-pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &GlyphSource) {
+/// then glyph runs (paint order is the op order). The glyph ids are
+/// resolved HERE, for the glyphs this call paints (rasterized + packed on
+/// first use): the laid block carries codepoints and advances only, so the
+/// atlas working set is the painted set and an eviction between frames
+/// invalidates nothing laid. A glyph the atlas refuses (the page cap) or
+/// cannot serve paints blank with its laid advance kept -- the line's
+/// geometry never moves with the atlas.
+pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &mut GlyphSource) {
     for r in laid.rects.iter() {
         cart.ops.push(Op::Rect {
             x: r.x,
@@ -1257,14 +1276,78 @@ pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &GlyphSou
         });
     }
     let gen = gs.gen();
+    let mut refs: Vec<GlyphRef> = Vec::new();
     for line in laid.lines.iter() {
         for seg in line.segs.iter() {
             if seg.refs.is_empty() {
                 continue;
             }
+            refs.clear();
+            for g in seg.refs.iter() {
+                let id = gs.glyph(seg.face, seg.px, g.ch).map(|r| r.glyph).unwrap_or(u32::MAX);
+                refs.push(GlyphRef {
+                    glyph: id,
+                    advance: g.advance,
+                });
+            }
             // `baseline` is block-absolute (line.y + ascent).
-            cart.push_glyphs(gen, seg.x, y0 + line.baseline, seg.color, &seg.refs);
+            cart.push_glyphs(gen, seg.x, y0 + line.baseline, seg.color, &refs);
         }
+    }
+}
+
+/// Frozen-block layout, cached by block id (stable identity; the open block
+/// + pending line never cache -- they change every feed). Keyed on the
+/// width and the sheet generation ONLY: a laid block holds no atlas id, so
+/// an atlas eviction keeps every entry (the paint re-resolves what it
+/// draws) -- a whole-history re-lay after an eviction, the shape that once
+/// packed every distinct glyph of the transcript in ONE frame, cannot
+/// happen.
+pub struct LayoutCache {
+    map: BTreeMap<u64, (i32, u32, LaidBlock)>,
+}
+
+impl LayoutCache {
+    pub fn new() -> LayoutCache {
+        LayoutCache {
+            map: BTreeMap::new(),
+        }
+    }
+
+    pub fn get(&mut self, b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) -> &LaidBlock {
+        let hit = matches!(self.map.get(&b.id), Some(e) if e.0 == width && e.1 == sheet.gen);
+        if !hit {
+            if self.map.len() > 512 {
+                // Crude LRU stand-in: reset and re-lay the visible set.
+                self.map.clear();
+            }
+            let laid = layout_block(b, width, sheet, gs);
+            self.map.insert(b.id, (width, sheet.gen, laid));
+        }
+        &self.map.get(&b.id).unwrap().2
+    }
+
+    pub fn evict_missing(&mut self, live: &dyn Fn(u64) -> bool) {
+        self.map.retain(|id, _| live(*id));
+    }
+
+    /// Drop everything (a width change: every entry is stale by key).
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+impl Default for LayoutCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1274,6 +1357,7 @@ mod tests {
     use crate::transcript::{
         Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, DEFAULT_MAX_LINES_PER_BLOCK, HDR_TITLE,
     };
+    use alloc::string::String;
     use alloc::vec::Vec;
     use beacon::wire::{self, Op as BOp};
 
@@ -1287,6 +1371,103 @@ mod tests {
 
     fn body_h(_g: &GlyphSource, sheet: &Sheet) -> i32 {
         round_px(sheet.body_px * LH_BODY)
+    }
+
+    #[test]
+    fn laying_out_packs_nothing_and_painting_packs_only_what_it_paints() {
+        // The atlas working set is the PAINTED set: laying a block of 3000
+        // distinct codepoints (each a .notdef under its own key -- the shape
+        // that grew the store a page per few hundred glyphs) opens no page;
+        // painting it does; painting it again inserts nothing new; and an
+        // eviction between the two invalidates nothing laid -- the same
+        // laid block paints again against the fresh generation.
+        let mut t = Transcript::new(daylight());
+        let mut buf = Vec::new();
+        wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
+        let mut s = String::new();
+        for cp in 0x4E00u32..0x4E00 + 3000 {
+            s.push(char::from_u32(cp).unwrap());
+        }
+        buf.extend_from_slice(s.as_bytes());
+        buf.extend_from_slice(b"\n");
+        wire::close(&mut buf, BOp::Zone);
+        t.feed(&buf);
+        let sheet = daylight_sheet();
+        let mut g = gs();
+        let b = t.frozen_blocks().front().expect("the frozen output block");
+        let laid = layout_block(b, 600, &sheet, &mut g);
+        let n: usize = laid.lines.iter().flat_map(|l| l.segs.iter()).map(|s| s.refs.len()).sum();
+        assert_eq!(n, 3000, "every codepoint laid");
+        assert_eq!(g.packer.store.pages.len(), 0, "layout packed nothing");
+        assert!(g.packer.store.glyphs.is_empty());
+        let mut cart = Cartoon::new();
+        render_block(&mut cart, &laid, 0, &mut g);
+        let painted = g.packer.store.glyphs.len();
+        assert_eq!(painted, 3000, "painting packed every laid glyph once");
+        assert!(g.packer.store.pages.len() > 0);
+        assert_eq!(cart.runs.len(), 3000, "every laid glyph is a run entry");
+        cart.reset();
+        render_block(&mut cart, &laid, 0, &mut g);
+        assert_eq!(g.packer.store.glyphs.len(), painted, "a second paint inserted nothing");
+        // Evict between frames: the laid block is untouched and paints
+        // against the new generation (no stale id: every run resolves).
+        g.regen();
+        assert_eq!(g.packer.store.pages.len(), 0);
+        cart.reset();
+        render_block(&mut cart, &laid, 0, &mut g);
+        assert_eq!(g.packer.store.glyphs.len(), painted, "re-resolved the visible set only");
+        assert!(
+            cart.runs.iter().all(|r| (r.glyph as usize) < g.packer.store.glyphs.len()),
+            "every run names a glyph of the CURRENT generation"
+        );
+        assert!(cart.ops.iter().all(|op| !matches!(op, Op::Glyphs { atlas_gen, .. } if *atlas_gen != g.gen())));
+        // The in-frame cap on the real paint path: tiny pages (64 px) hold
+        // a few dozen .notdef boxes each, so the cap (24 pages) bites inside
+        // ONE paint of this block -- the store stops exactly at the cap, the
+        // refused glyphs paint blank (an id no table has) with their laid
+        // advance kept, and the line's geometry is the one laid above.
+        let mut small = GlyphSource::new_vendored(64);
+        let cap = crate::raster::MAX_ATLAS_PAGES + crate::raster::ATLAS_PAGE_SLACK;
+        let mut cart2 = Cartoon::new();
+        render_block(&mut cart2, &laid, 0, &mut small);
+        assert_eq!(small.packer.store.pages.len(), cap, "the frame stopped at the cap");
+        let served = small.packer.store.glyphs.len();
+        assert!(served > 0 && served < 3000, "some served ({served}), the rest refused");
+        assert_eq!(cart2.runs.len(), 3000, "every laid glyph still advances the pen");
+        let blank = cart2.runs.iter().filter(|r| r.glyph == u32::MAX).count();
+        assert_eq!(blank, 3000 - served, "a refused glyph is a blank run entry, nothing else");
+        let laid_again = layout_block(b, 600, &sheet, &mut small);
+        assert_eq!(laid_again.height, laid.height, "the geometry never moved with the atlas");
+    }
+
+    #[test]
+    fn the_laid_cache_survives_an_atlas_eviction_and_follows_width_and_sheet() {
+        let mut t = Transcript::new(daylight());
+        let mut buf = Vec::new();
+        wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
+        buf.extend_from_slice(b"a line of text\n");
+        wire::close(&mut buf, BOp::Zone);
+        t.feed(&buf);
+        let mut sheet = daylight_sheet();
+        let mut g = gs();
+        let mut cache = LayoutCache::new();
+        let b = t.frozen_blocks().front().expect("frozen");
+        let h1 = cache.get(b, 300, &sheet, &mut g).height;
+        assert_eq!(cache.len(), 1);
+        assert_eq!(g.packer.store.pages.len(), 0, "a cached layout packed nothing");
+        g.regen();
+        let p = cache.get(b, 300, &sheet, &mut g) as *const LaidBlock;
+        assert_eq!(cache.len(), 1, "an eviction is not a miss");
+        let p2 = cache.get(b, 300, &sheet, &mut g) as *const LaidBlock;
+        assert_eq!(p, p2, "the same entry served");
+        assert_eq!(cache.get(b, 300, &sheet, &mut g).height, h1);
+        // A width change is a miss (a re-lay), a sheet change too.
+        let _ = cache.get(b, 120, &sheet, &mut g);
+        assert_eq!(cache.len(), 1, "replaced, not accumulated");
+        sheet.gen += 1;
+        let _ = cache.get(b, 120, &sheet, &mut g);
+        cache.evict_missing(&|_| false);
+        assert!(cache.is_empty());
     }
 
     #[test]
@@ -1766,7 +1947,7 @@ mod tests {
         let mut y = 4;
         for b in t.frozen_blocks().iter() {
             let laid = layout_block(b, 300, &sheet, &mut g);
-            render_block(&mut cart, &laid, y, &g);
+            render_block(&mut cart, &laid, y, &mut g);
             y += laid.height + sheet.block_gap;
         }
         let w = 300usize;

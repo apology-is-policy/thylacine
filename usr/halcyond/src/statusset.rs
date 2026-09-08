@@ -13,7 +13,7 @@ use alloc::format;
 use alloc::string::String;
 
 use halcyond::raster::GlyphSource;
-use halcyond::status::{bar_height, condition_for, status_list, StatusModel};
+use halcyond::status::{bar_height, condition_for, status_list, Condition, StatusModel};
 use libthyla_rs::{t_clock_gettime, T_CLOCK_REALTIME};
 use tapestry::{EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE};
 
@@ -40,12 +40,13 @@ pub struct StatusBar {
     surf: Option<Surface>,
     /// The model last painted (a repaint happens only on a change).
     painted: Option<StatusModel>,
-    /// The slot geometry last said (test builds): the witness needs the
-    /// rects when they MOVE, and every say line lands in the transcript
-    /// (the observer effect) -- said per change of GEOMETRY (`Slots::
-    /// geometry`, never the centred text's landing), never per paint, so
-    /// the row-relative legs after a command see no extra row.
-    said_slots: Option<halcyond::status::Slots>,
+    /// The say key last said (test builds): the witness needs the rects
+    /// when the STATE changes, and every say line lands in the transcript
+    /// (the observer effect) -- said per change of the fixed slots + the
+    /// condition state (`Slots::stable`: never the centred text's landing,
+    /// never the label's width), never per paint, so the row-relative legs
+    /// after a command see no extra row.
+    said_slots: Option<(halcyond::status::Slots, Condition)>,
     failed_said: bool,
     /// Whether a mint should be attempted: true at start and after a CLOSE
     /// (the compositor dropped the bar), cleared by each attempt. A FAILED
@@ -179,8 +180,8 @@ impl StatusBar {
         match surf.present(None) {
             Ok(()) => {
                 #[cfg(feature = "test-mode")]
-                if self.said_slots != Some(slots.geometry()) {
-                    self.said_slots = Some(slots.geometry());
+                if self.said_slots != Some((slots.stable(), model.condition)) {
+                    self.said_slots = Some((slots.stable(), model.condition));
                     say(&format!(
                     "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {}",
                     surf.id,

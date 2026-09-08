@@ -799,6 +799,41 @@ mod tests {
     }
 
     #[test]
+    fn a_beacon_frame_past_the_title_cap_crosses_the_wire_whole() {
+        // The vt's OSC cap is per selector (BEACON.md 12): a Beacon frame
+        // may run to the frame maximum, a title stays at 256. Before this a
+        // `mark k=cmd` of a long command line was discarded at the
+        // terminator and a session tile's status bar kept showing the
+        // PREVIOUS command; the console path's own scanner took it.
+        let mut frame: Vec<u8> = Vec::from(&b"\x1b]1936;v1;mark;k=cmd;text="[..]);
+        frame.extend(core::iter::repeat(b'x').take(1000));
+        frame.extend_from_slice(b"\x1b\\");
+        assert!(frame.len() > 256 && frame.len() < vt::OSC_BEACON_MAX);
+        let recs = produce(6, 1, &frame);
+        assert_eq!(recs.len(), 1, "one record for the 1 KiB frame");
+        match &recs[0] {
+            Record::Control(Control::Osc1936Raw { frame: f, .. }) => {
+                assert_eq!(f, &frame, "the frame crossed whole")
+            }
+            other => panic!("not a Beacon record: {other:?}"),
+        }
+        // Past Beacon's own maximum the frame is still dropped whole.
+        let mut huge: Vec<u8> = Vec::from(&b"\x1b]1936;v1;mark;k=cmd;text="[..]);
+        huge.extend(core::iter::repeat(b'x').take(vt::OSC_BEACON_MAX + 10));
+        huge.extend_from_slice(b"\x1b\\");
+        assert_eq!(produce(6, 1, &huge), vec![], "over the frame maximum: dropped whole");
+        // A title keeps the short cap.
+        let mut title: Vec<u8> = Vec::from(&b"\x1b]2;"[..]);
+        title.extend(core::iter::repeat(b't').take(300));
+        title.extend_from_slice(b"\x07");
+        assert_eq!(produce(6, 1, &title), vec![], "a 300-byte title: dropped at the terminator");
+        let mut short: Vec<u8> = Vec::from(&b"\x1b]2;"[..]);
+        short.extend(core::iter::repeat(b't').take(vt::OSC_MAX - 2));
+        short.extend_from_slice(b"\x07");
+        assert_eq!(produce(6, 1, &short).len(), 1, "a title inside the cap is a record");
+    }
+
+    #[test]
     fn osc1936_reframed_for_beacon() {
         let recs = produce(6, 1, b"\x1b]1936;v1;zone;k=prompt\x1b\\");
         // The full ESC ] ... ST frame, exactly what beacon::wire::parse consumes.

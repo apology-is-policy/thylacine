@@ -102,18 +102,22 @@ pub fn context_text(name: &str, cwd: &str, cmd: &str) -> String {
 }
 
 /// The condition's label: `ok`; `exit N` (or `err` with no code known);
-/// nothing while idle.
+/// nothing while idle. The STATE is the pane's recorded status -- the one
+/// record the live tile keys -- and the code is the transcript's own peek;
+/// the two diverge only when a status write was refused, and then the
+/// label follows the state word (`err`, never `exit 0` in cinnabar): a
+/// label must never contradict its ink.
 pub fn condition_label(c: Condition, exit_code: Option<i64>) -> String {
     match c {
         Condition::Idle => String::new(),
         Condition::Ok => String::from("ok"),
         Condition::Err => match exit_code {
-            Some(n) => {
+            Some(n) if n != 0 => {
                 let mut s = String::new();
                 let _ = core::fmt::write(&mut s, format_args!("exit {}", n));
                 s
             }
-            None => String::from("err"),
+            _ => String::from("err"),
         },
     }
 }
@@ -145,14 +149,22 @@ pub struct Slots {
 }
 
 impl Slots {
-    /// The slot GEOMETRY alone -- `ctx_ink` zeroed. The say line is keyed on
-    /// this, never on where the centred text landed: that moves with every
-    /// context text, and a say per paint writes itself into the console
-    /// transcript it witnesses (the drain mirrors every daemon line), which
-    /// is one extra row after every command for the row-relative legs.
-    pub fn geometry(&self) -> Slots {
+    /// The slots that do not move with the content: the workspaces and
+    /// the clock (tabular digits: every `HH:MM` is one width); the context
+    /// span, where its text landed, and the condition slot are zeroed. The
+    /// say line is keyed on this plus the condition STATE, never on a
+    /// width the content decides -- the centred text's landing moves with
+    /// every context text, and the condition slot's width with every
+    /// distinct exit code (`exit 1` / `exit 12` / `exit 127`), and a say
+    /// per paint writes itself into the console transcript it witnesses
+    /// (the drain mirrors every daemon line), which is one extra row after
+    /// a command for the row-relative legs. A witness reads the slot rects
+    /// off the say of the paint that CHANGED the state.
+    pub fn stable(&self) -> Slots {
         Slots {
+            ctx: (0, 0),
             ctx_ink: (0, 0),
+            cond: (0, 0),
             ..*self
         }
     }
@@ -362,6 +374,20 @@ mod tests {
         assert_eq!(condition_label(Condition::Err, Some(-1)), "exit -1");
         assert_eq!(condition_label(Condition::Err, None), "err");
         assert_eq!(condition_label(Condition::Idle, Some(3)), "");
+        assert_eq!(
+            condition_label(Condition::Err, Some(i64::MIN)),
+            "exit -9223372036854775808"
+        );
+    }
+
+    #[test]
+    fn a_label_never_contradicts_its_state() {
+        // The state is the pane's record, the code the transcript's peek;
+        // after a refused status write they diverge (a refused `ok` after
+        // an `err`, or the reverse). The label then follows the STATE word
+        // -- never `exit 0` in cinnabar, never `exit 3` in ember.
+        assert_eq!(condition_label(Condition::Err, Some(0)), "err");
+        assert_eq!(condition_label(Condition::Ok, Some(3)), "ok");
     }
 
     #[test]
@@ -485,7 +511,7 @@ mod tests {
     // centred context landed share one geometry (no say between them); a
     // condition change moves the slots and does not.
     #[test]
-    fn the_geometry_key_ignores_where_the_context_landed() {
+    fn the_say_key_ignores_every_width_the_content_decides() {
         let mut gs = GlyphSource::new_vendored(64);
         let (_, a) = status_list(&model(), 1280, 20, &mut gs);
         let (_, b) = status_list(
@@ -498,18 +524,28 @@ mod tests {
             &mut gs,
         );
         assert_ne!(a.ctx_ink, b.ctx_ink, "the centred text moved");
-        assert_eq!(a.geometry(), b.geometry(), "the geometry did not");
-        let (_, e) = status_list(
-            &StatusModel {
-                condition: Condition::Err,
-                exit_code: Some(1),
-                ..model()
-            },
-            1280,
-            20,
-            &mut gs,
-        );
-        assert_ne!(a.geometry(), e.geometry(), "a condition change is a geometry change");
+        assert_eq!(a.stable(), b.stable(), "the key did not");
+        let err = |code: i64, gs: &mut GlyphSource| {
+            status_list(
+                &StatusModel {
+                    condition: Condition::Err,
+                    exit_code: Some(code),
+                    ..model()
+                },
+                1280,
+                20,
+                gs,
+            )
+            .1
+        };
+        let (e1, e12, e127) = (err(1, &mut gs), err(12, &mut gs), err(127, &mut gs));
+        assert!(e1.cond.1 < e12.cond.1 && e12.cond.1 < e127.cond.1, "the label widens with the code");
+        assert_ne!(e1.ctx.1, e127.ctx.1, "and the context span shrinks with it");
+        assert_eq!(e1.stable(), e12.stable(), "a wider code is not a new say");
+        assert_eq!(e1.stable(), e127.stable());
+        assert_eq!(a.stable(), e1.stable(), "ok vs err: the STATE rides beside the key, not inside it");
+        assert_eq!(a.stable().ws, a.ws, "the workspaces stay in the key");
+        assert_eq!(a.stable().clock, a.clock, "and so does the clock");
     }
 
     #[test]

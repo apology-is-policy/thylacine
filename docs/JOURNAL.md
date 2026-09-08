@@ -178,6 +178,68 @@ through the prog mark -- both trails `~`, the context `ut · ~ · ls
 ink. Seven bakes and eight gate boots in all; the audit (batched with the
 atlas bound) is spawned at the commit, below.
 
+**The audit close (after the self-compaction; the same run).** The Fable 5.1
+round (MODEL start == end, 477k tokens, 78 tool uses, 19 min; it ran the
+three host suites itself) returned 0 P0 / 0 P1 / 1 P2 / 4 P3 on the chrome
+content + the atlas bound together, and the parallel self-audit found two
+more, neither coinciding. Not dirty by count; dirty by the P2's fix, which
+restructured the render core, so the next halcyond round re-prosecutes it
+(`memory/audit_chrome_content_closed_list.md`, "ROUND 2 FOCUS").
+
+The P2 was the atlas bound's SHAPE, and the prosecutor was right that run
+44's close claimed more than it held: "at most one frame's glyphs past the
+bound" is no bound when the untrusted stream decides how many distinct
+glyphs one frame inserts and the packer never refuses a page (measured:
+~45K distinct glyphs at 11.5 px is 16 pages; a full-BMP dump ~60K is 26).
+Worse, the console's layout cache keyed on the atlas generation, so the
+frame after every eviction re-laid the WHOLE history -- every distinct glyph
+of the transcript packed in one frame -- and a working set above the bound
+did that every frame, forever. The fix is a rule, not a number: **the atlas
+working set is the painted set.** `GlyphSource::advance` measures from the
+font's tables and packs nothing, and it is what layout measures with; a
+laid block holds `LaidGlyph {ch, advance}` and never an atlas id;
+`render_block` resolves ids for the glyphs it paints (a refused glyph
+paints blank with its laid advance kept, so the geometry never moves with
+the atlas); the layout cache (moved into the lib, host-tested) keys on
+width and sheet only, so an eviction invalidates nothing laid; and the
+packer takes a HARD cap (`set_max_pages`, 24 pages = 6 MiB) past which an
+insert is refused. The witness lays 3000 distinct codepoints and asserts
+zero pages, paints them and asserts 3000 glyphs, evicts and paints again
+against the new generation, then on 64-px pages shows the cap biting inside
+one paint with the geometry unchanged. The eviction stays and now re-packs
+only what is visible.
+
+The P3s: `condition_label` painted `⊢ exit 0` in cinnabar after a refused
+status write (the state is the pane's record, the code the transcript's
+peek; the label now follows the state word); the status say line was still
+said per distinct exit-code WIDTH (`exit 1` / `exit 12` / `exit 127` -- the
+same observer effect this run had just fixed for the centred text; the key
+is now the fixed slots + the condition STATE); the vt capped EVERY OSC body
+at 256, so a Beacon frame past it -- a `cmd` mark of a long command line,
+an `obj` with a long ref -- vanished on the TILE path while the console's
+own scanner took it (pre-existing on KT-1; the cap is per selector now,
+2048 for `1936;`, pinned against beacon's frame maximum and crossed end to
+end through the real producer); and `gfx_region.py --near` was dead code
+shipped as a witness (removed). The prosecutor also withdrew, and this run
+enqueued, a pre-existing PL-1b edge: the shell's exit mark is swallowed
+inside a program's stuck-open `pre` (`memory/bug_exit_mark_lost_inside_a_
+stuck_open_pre.md`, with its fix shape).
+
+The self-audit's finding is the one to keep: **the session feed had no
+positive witness.** `resting` and `ok` paint identically, so every compose
+capture this run passed with the feed refused -- the very defect the chunk
+existed to fix could have regressed unseen. `ls-gfx-compose.exp` gained the
+failing-command leg (`ls /nonexistent-h3d` then `pwd`; the bar's say line
+names the slot, the capture's own height locates the bar): 57 cinnabar-line
+px with zero ember, then 33 ember with zero cinnabar, PASS 55 s before the
+fixes and again after. Verification of the close: host cartoon 12 (+1), vt
+47, kaua-term 36 (+1), halcyond 160 (+5), beacon 37; both levers re-baked
+and re-run (the fix touches layout and paint): compose PASS 55 s with the
+new leg, ls-halcyon PASS (the console lever, every leg) -- the numbers are
+in the close commit.
+
+## Run 44 (2026-09-08, Fable 5.1 max) -- the composition round: mockup-true Halcyon, verified by agentic screendump
+
 **Operator input.** Screenshots sc1..sc5 ("still a complete mess, even bigger
 than before"), then two supporting documents -- `docs/HALCYON-COMPOSITION.md`
 (the implementation guide: type scale, vertical rhythm, the baseline rule for

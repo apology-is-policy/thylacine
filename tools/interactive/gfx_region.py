@@ -3,7 +3,6 @@
 # given colour. The ls-gfx-age gate's instrument (GPU-DESIGN.md 4.5.8c).
 #
 #   gfx_region.py FILE.png X0 Y0 X1 Y1 [R G B]
-#   gfx_region.py --near FILE.png X0 Y0 X1 Y1 R G B TOL
 #   gfx_region.py --ink FILE.png X0 Y0 X1 Y1 BR BG BB R G B
 #
 # Prints "<off> <total> <dom_r> <dom_g> <dom_b>": `off` pixels in the
@@ -13,21 +12,19 @@
 # read -- no stride -- because the gate asserts `off == 0` on the negative leg,
 # and a subsampled zero would prove nothing about the pixels it skipped.
 #
-# `--near` prints ONE number: how many pixels of the rect lie within TOL of
-# (R,G,B) on every channel. A box tolerance is the wrong witness for an
-# ANTIALIASED ink: a glyph's pixels lie on the blend line from the ground to
-# the ink, most of them far from the ink itself, and a tolerance wide enough
-# to catch them also catches the other ink's blends (ember and cinnabar sit
-# within 80 of each other on every channel).
-#
-# `--ink` is that witness: it prints how many pixels of the rect lie ON the
-# segment from the ground (BR,BG,BB) to the ink (R,G,B) -- projection t >=
-# 0.5 (at least half the ink) with a perpendicular residual <= 16 -- so a
-# glyph's antialiased body counts and the OTHER ink's blends do not (an
-# ember blend never comes within 16 of the cinnabar line at t >= 0.5, and
-# vice versa: the lines only converge at the ground, below t = 0.5). A
-# scenario asks for the ink it wants AND for zero of the ink it must not
-# see, so the leg discriminates two states rather than any ink at all.
+# `--ink` prints ONE number: how many pixels of the rect lie ON the segment
+# from the ground (BR,BG,BB) to the ink (R,G,B) -- projection t >= 0.5 (at
+# least half the ink) with a perpendicular residual <= 16. That is the
+# witness for an ANTIALIASED ink: a glyph's pixels lie on the blend line
+# from the ground to the ink, most of them far from the ink itself, so a
+# box tolerance around the ink misses the body and, widened enough to catch
+# it, catches the other ink's blends too (ember and cinnabar sit within 80
+# of each other on every channel). On the blend line a glyph's body counts
+# and the OTHER ink's blends do not (an ember blend never comes within 16
+# of the cinnabar line at t >= 0.5, and vice versa: the lines only converge
+# at the ground, below t = 0.5). A scenario asks for the ink it wants AND
+# for zero of the ink it must not see, so the leg discriminates two states
+# rather than any ink at all.
 #
 # A REPORTER, not a judge: the scenario owns the thresholds, next to the
 # argument for them. Reuses gfx_fp.py's stdlib-only PNG decoder.
@@ -46,23 +43,6 @@ def clamp_rect(args, w, h):
         sys.stderr.write(f"gfx_region.py: empty rect after clamping to {w}x{h}\n")
         sys.exit(2)
     return x0, y0, x1, y1
-
-
-def near(argv):
-    if len(argv) != 9:
-        sys.stderr.write("usage: gfx_region.py --near FILE.png X0 Y0 X1 Y1 R G B TOL\n")
-        sys.exit(2)
-    w, h, bpp, px = read_png(argv[0])
-    x0, y0, x1, y1 = clamp_rect(argv[1:5], w, h)
-    r, g, b, tol = (int(v) for v in argv[5:9])
-    n = 0
-    for y in range(y0, y1):
-        row = y * w * bpp
-        for x in range(x0, x1):
-            i = row + x * bpp
-            if abs(px[i] - r) <= tol and abs(px[i + 1] - g) <= tol and abs(px[i + 2] - b) <= tol:
-                n += 1
-    print(n)
 
 
 def ink(argv):
@@ -94,9 +74,6 @@ def ink(argv):
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "--near":
-        near(sys.argv[2:])
-        return
     if len(sys.argv) > 1 and sys.argv[1] == "--ink":
         ink(sys.argv[2:])
         return

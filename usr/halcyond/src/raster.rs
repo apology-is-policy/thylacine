@@ -49,6 +49,16 @@ pub const MONO_GRID_PX: f32 = 20.0;
 /// size until the compositor's fixed heap died mute (I-32's in-process
 /// face).
 pub const MAX_ATLAS_PAGES: usize = 16;
+/// The in-frame slack above `MAX_ATLAS_PAGES`: the packer's HARD cap is
+/// `MAX_ATLAS_PAGES + ATLAS_PAGE_SLACK` pages (6 MiB), past which an insert
+/// is refused (the glyph paints blank this frame; the next frame's eviction
+/// re-packs). The eviction bounds the steady state; this bounds the frame,
+/// whose insert count the untrusted stream would otherwise decide. Since
+/// layout measures with `advance` (no packing), a frame inserts only what
+/// it paints -- a screen of glyphs, a few pages -- so the slack is never
+/// reached by honest content and the cap never bites the eviction's
+/// re-pack of a visible set.
+pub const ATLAS_PAGE_SLACK: usize = 8;
 const MONO_ISLAND_ADVANCE: u8 = 6;
 const MONO_GRID_ADVANCE: u8 = cornucopia::DEFAULT_ADVANCE;
 
@@ -115,11 +125,13 @@ impl GlyphSource {
                 faces.push(f);
             }
         }
+        let mut packer = AtlasPacker::new(page, page);
+        packer.set_max_pages((MAX_ATLAS_PAGES + ATLAS_PAGE_SLACK) as u32);
         GlyphSource {
             faces,
             grid: cornucopia::Atlas::for_advance(MONO_GRID_ADVANCE),
             island: cornucopia::Atlas::for_advance(MONO_ISLAND_ADVANCE),
-            packer: AtlasPacker::new(page, page),
+            packer,
             cache: BTreeMap::new(),
         }
     }
@@ -154,6 +166,33 @@ impl GlyphSource {
 
     pub fn face_count(&self) -> usize {
         self.faces.len()
+    }
+
+    /// The advance of `ch` at `px` in `face` -- metrics only, from the
+    /// font's tables: NOTHING is rasterized or packed. This is what layout
+    /// measures with, so laying a block out touches no atlas page and the
+    /// atlas working set is exactly what a frame PAINTS (`glyph`), never
+    /// what the transcript holds. Agrees with `glyph`'s advance for every
+    /// codepoint, including the mono cell and the island fallback for a
+    /// codepoint the proportional face lacks. None only for an unknown
+    /// face.
+    pub fn advance(&mut self, face: u8, px: f32, ch: char) -> Option<i32> {
+        let q = if face == FACE_MONO {
+            mono_is_grid(px) as u32
+        } else {
+            size_q(px)
+        };
+        if let Some(c) = self.cache.get(&(face, q, ch)) {
+            return Some(c.advance);
+        }
+        if face == FACE_MONO {
+            return Some(self.mono_atlas(px).cell_w() as i32);
+        }
+        let f = self.faces.get(face as usize)?;
+        if f.lookup_glyph_index(ch) == 0 && ch != '\u{FFFD}' && self.island.glyph(ch).is_some() {
+            return Some(self.island.cell_w() as i32);
+        }
+        Some((f.metrics(ch, px).advance_width + 0.5) as i32)
     }
 
     /// The glyph for `ch` at `px` in `face`, rasterizing on first use.
@@ -315,11 +354,12 @@ impl GlyphSource {
     /// `MAX_ATLAS_PAGES` pages or more, evict everything (`regen`) so the
     /// next frame re-packs only its working set. Within a frame `glyph()`
     /// only ever inserts, so a frame's `gen()` stamp stays valid across it
-    /// (tile::paint_grid reads it once); a stream of distinct codepoints --
-    /// a program printing its way through the BMP -- can therefore grow the
-    /// store by at most one frame's glyphs past the bound, never without
-    /// limit toward the fixed heap's silent OOM exit. Returns true when it
-    /// evicted (every layout cache keys on `gen()` and re-lays).
+    /// (tile::paint_grid reads it once). The frame itself is bounded by
+    /// the packer's hard cap (`ATLAS_PAGE_SLACK`), and its working set is
+    /// what it PAINTS: layout measures through `advance`, which packs
+    /// nothing, and a laid block holds codepoints + advances, not glyph
+    /// ids, so an eviction invalidates no layout -- the next paint simply
+    /// re-resolves the visible glyphs. Returns true when it evicted.
     pub fn evict_if_full(&mut self) -> bool {
         if self.packer.store.pages.len() >= MAX_ATLAS_PAGES {
             self.regen();
@@ -699,14 +739,26 @@ mod tests {
             }
         };
         next(&mut gs, 400);
-        let unbounded = gs.packer.store.pages.len();
-        assert!(unbounded > MAX_ATLAS_PAGES, "the control: 400 glyphs on 32-px pages exceed the bound ({unbounded} pages)");
+        let cap = MAX_ATLAS_PAGES + ATLAS_PAGE_SLACK;
+        assert_eq!(
+            gs.packer.store.pages.len(),
+            cap,
+            "the control: 400 glyphs on 32-px pages want more than the cap, and got exactly the cap"
+        );
+        // Past the cap an insert is REFUSED, not grown into: the frame's
+        // bound (the eviction below cannot bound a frame -- the stream
+        // decides how many distinct glyphs one frame paints).
+        let refused = '\u{9000}'; // a CJK codepoint the stream never reaches
+        assert!(gs.glyph(FACE_BODY, 11.5, refused).is_none(), "at the cap: refused");
+        assert_eq!(gs.packer.store.pages.len(), cap, "a refusal opens nothing");
         assert!(gs.evict_if_full(), "over the bound: evicted");
         assert_eq!(gs.packer.store.pages.len(), 0);
         assert_eq!(gs.gen(), 1, "the generation bumped");
         assert!(!gs.evict_if_full(), "empty: nothing to evict");
+        assert!(gs.glyph(FACE_BODY, 11.5, refused).is_some(), "the eviction reopened the store");
         // Frames of 20 glyphs each: the store never exceeds the bound by
-        // more than one frame's growth, and the gen keeps bumping.
+        // more than one frame's growth (and never the hard cap), and the
+        // gen keeps bumping.
         let per_frame = 20;
         let mut peak = 0;
         for _ in 0..200 {
@@ -715,11 +767,50 @@ mod tests {
             peak = peak.max(gs.packer.store.pages.len());
         }
         assert!(peak <= MAX_ATLAS_PAGES + per_frame, "peak {peak} pages: bounded by the frame's growth");
+        assert!(peak <= cap, "peak {peak} pages: never past the hard cap");
         assert!(gs.gen() >= 2, "evicted again along the way (gen {})", gs.gen());
         // A glyph looked up after an eviction is served fresh under the new
         // generation, not from the cleared cache.
         let a = gs.glyph(FACE_BODY, 11.5, 'a').expect("a");
         assert!((a.glyph as usize) < gs.packer.store.glyphs.len());
+    }
+
+    #[test]
+    fn advance_measures_without_packing_and_agrees_with_glyph() {
+        // Layout measures through `advance`: the atlas stays EMPTY however
+        // much is measured (5000 distinct codepoints Plex lacks, the shape
+        // that grew the store a page per few hundred glyphs), and for every
+        // codepoint the advance is the one `glyph` later paints with --
+        // the proportional face, the mono cells, the island fallback for a
+        // codepoint Plex lacks (the turnstile), and the .notdef box.
+        let mut gs = GlyphSource::new_vendored(512);
+        let mut sample: Vec<(u8, f32, char)> = Vec::new();
+        for ch in "The quick brown fox 0123456789 ~/kernel/sched".chars() {
+            sample.push((FACE_BODY, 11.5, ch));
+            sample.push((FACE_BODY_BOLD, 17.5, ch));
+            sample.push((FACE_MONO, MONO_ISLAND_PX, ch));
+            sample.push((FACE_MONO, MONO_GRID_PX, ch));
+        }
+        sample.push((FACE_BODY, 10.0, '\u{22A2}'));
+        sample.push((FACE_MONO, MONO_ISLAND_PX, '\u{2500}'));
+        for cp in 0x4E00u32..0x4E00 + 5000 {
+            sample.push((FACE_BODY, 11.5, char::from_u32(cp).unwrap()));
+        }
+        let advances: Vec<i32> = sample
+            .iter()
+            .map(|&(f, px, ch)| gs.advance(f, px, ch).expect("a known face"))
+            .collect();
+        assert_eq!(gs.packer.store.pages.len(), 0, "measuring packed nothing");
+        assert!(gs.packer.store.glyphs.is_empty());
+        assert_eq!(gs.gen(), 0);
+        for (i, &(f, px, ch)) in sample.iter().enumerate().take(400) {
+            let g = gs.glyph(f, px, ch).expect("paints");
+            assert_eq!(g.advance, advances[i], "{f}/{px}/{ch:?}: paint advance == measured advance");
+            // And the cache hit path agrees too.
+            assert_eq!(gs.advance(f, px, ch), Some(advances[i]));
+        }
+        assert!(gs.packer.store.pages.len() >= 1, "painting packs");
+        assert_eq!(gs.advance(99, 11.5, 'a'), None, "an unknown face measures nothing");
     }
 
     #[test]

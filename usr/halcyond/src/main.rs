@@ -26,7 +26,6 @@ extern crate alloc;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 64 * 1024 * 1024 }> =
     libthyla_rs::alloc::ThylaAllocN;
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use beacon::verbs::{parse as parse_verbs, Rule};
@@ -35,7 +34,8 @@ use halcyond::input::{
     FEED_PENDING_MAX, FEED_RETRY_MS,
 };
 use halcyond::layout::{
-    cursor_pos, daylight_sheet, layout_block, layout_pending, render_block, LaidBlock, Sheet,
+    cursor_pos, daylight_sheet, layout_block, layout_pending, render_block, LaidBlock,
+    LayoutCache,
 };
 use halcyond::menu::{build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run, Action, Menu};
 use halcyond::raster::GlyphSource;
@@ -207,59 +207,6 @@ fn summon(
     menus.open(model, d(ax, gx), d(ay, gy), run_d, gs);
 }
 
-struct CacheEnt {
-    width: i32,
-    sheet_gen: u32,
-    atlas_gen: u32,
-    laid: LaidBlock,
-}
-
-/// Frozen-block layout, cached by block id (stable identity; the open
-/// block + pending line never cache -- they change every feed).
-struct LayoutCache {
-    map: BTreeMap<u64, CacheEnt>,
-}
-
-impl LayoutCache {
-    fn new() -> LayoutCache {
-        LayoutCache {
-            map: BTreeMap::new(),
-        }
-    }
-
-    fn get(
-        &mut self,
-        b: &halcyond::transcript::Block,
-        width: i32,
-        sheet: &Sheet,
-        gs: &mut GlyphSource,
-    ) -> &LaidBlock {
-        let gen = gs.gen();
-        let hit = matches!(self.map.get(&b.id),
-            Some(e) if e.width == width && e.sheet_gen == sheet.gen && e.atlas_gen == gen);
-        if !hit {
-            if self.map.len() > 512 {
-                // Crude LRU stand-in: reset and re-lay the visible set.
-                self.map.clear();
-            }
-            let laid = layout_block(b, width, sheet, gs);
-            self.map.insert(
-                b.id,
-                CacheEnt {
-                    width,
-                    sheet_gen: sheet.gen,
-                    atlas_gen: gen,
-                    laid,
-                },
-            );
-        }
-        &self.map.get(&b.id).unwrap().laid
-    }
-
-    fn evict_missing(&mut self, live: &dyn Fn(u64) -> bool) {
-        self.map.retain(|id, _| live(*id));
-    }
-}
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -466,8 +413,10 @@ pub extern "C" fn rs_main() -> i64 {
         if t.seq != last_seq || dirty {
             last_seq = t.seq;
             dirty = false;
-            // The atlas bound, between frames (the layout cache keys on the
-            // generation, so an eviction re-lays the visible set).
+            // The atlas bound, between frames. The layout cache does NOT
+            // key on the generation: a laid block holds codepoints, not
+            // atlas ids, so an eviction re-resolves only what the frame
+            // paints -- never re-lays the history.
             gs.evict_if_full();
             // Evict layouts for blocks the budget dropped.
             {
@@ -601,7 +550,7 @@ pub extern "C" fn rs_main() -> i64 {
                         }
                     }
                     let laid = cache.get(b, widthi, &sheet, &mut gs);
-                    render_block(&mut cart, laid, y, &gs);
+                    render_block(&mut cart, laid, y, &mut gs);
                     if let Some(r) = run_mark(mode, sel.as_ref(), &flat, bi, laid) {
                         cart.ops.push(cartoon::Op::Rect {
                             x: r.0,
@@ -627,7 +576,7 @@ pub extern "C" fn rs_main() -> i64 {
                         });
                     }
                 }
-                render_block(&mut cart, &open_laid, y, &gs);
+                render_block(&mut cart, &open_laid, y, &mut gs);
                 if let Some(r) = run_mark(mode, sel.as_ref(), &flat, usize::MAX, &open_laid) {
                     cart.ops.push(cartoon::Op::Rect {
                         x: r.0,
@@ -640,7 +589,7 @@ pub extern "C" fn rs_main() -> i64 {
             }
             let py = y + open_laid.height;
             last_open_laid = Some(open_laid);
-            render_block(&mut cart, &pending_laid, py, &gs);
+            render_block(&mut cart, &pending_laid, py, &mut gs);
             // The cursor: a beam at the pending column (Insert ink; Normal
             // renders it hollow-dim -- the mode is visible at a glance).
             let (cx, cy, ch2) = cursor_pos(&pending_laid, t.pending_col(), &sheet);
@@ -1231,7 +1180,7 @@ pub extern "C" fn rs_main() -> i64 {
                             // Width changed: every cached layout is stale
                             // by key; drop them wholesale (the reflow
                             // E2E's moment).
-                            cache.map.clear();
+                            cache.clear();
                             report_winsize(consctl, w, h);
                             dirty = true;
                             relayout = true;
