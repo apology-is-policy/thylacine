@@ -75,6 +75,71 @@ proc gfx_sample {tag x y want} {
     if {$rgba ne $want} { lc_fail "$tag: pixel ($x,$y) = '$rgba', want '$want'" }
 }
 
+# HALCYON-SCALE 5 (the scale round's self-finding) + SC-5: a scale change
+# reaches a DIRECT display, and the reset returns to the BOOT scale. The
+# console is a lone display-sized leaf with no bar and no menu, so the
+# reconcile the chord runs has NO geometry in it -- the arm that fanned
+# nothing (the CONFIGURE fan rode the Composed arm's STRUCTURAL pass only),
+# leaving a follower painting the old percent until some unrelated relayout.
+# The witness is the compositor's record of the redraw CONFIGURE it queued
+# to the direct surface, serial-stamped (a client never acks a same-size
+# CONFIGURE and aurora prints nothing on its redraw arm, so the emission is
+# the observable half). Both directions: Super+= steps one up from wherever
+# the seat booted, Super+0 re-derives -- to the EDID's 100 on a plain boot,
+# to the DECLARED value when thylacine.scale=<pct> was on the cmdline (a
+# declaration is what `auto` returns to). The chord's own say line names
+# the boot value, so this doubles as the boot-scale witness: `want` is what
+# the seat must have booted at.
+proc scale_legs {want} {
+    global repo qmp
+    if {$want + 25 > 200} { lc_fail "the boot scale $want leaves no room for the Super+= step (the clamp is 200)" }
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+equal"} err]} {
+        lc_fail "qmp-sendtext scale chord failed: $err"
+    }
+    expect {
+        -re {tapestryd: scale (\d+) -> (\d+) \(chord\)} {
+            set from $expect_out(1,string); set to $expect_out(2,string)
+            if {$from != $want} { lc_fail "the seat booted at scale $from, want $want ([expr {$want == 100 ? "no declaration: the EDID's 100" : "the declared thylacine.scale=$want"}])" }
+            if {$to != $want + 25} { lc_fail "Super+= stepped $from -> $to, want [expr {$want + 25}]" }
+        }
+        timeout { lc_fail "Super+= never changed the scale (no `tapestryd: scale $want -> [expr {$want + 25}] (chord)`)" }
+    }
+    lc_pass "panes: the seat booted at scale $want ([expr {$want == 100 ? "EDID-derived" : "declared on the cmdline"}]) and Super+= stepped to [expr {$want + 25}]"
+    expect {
+        -re {tapestryd: scale fan direct (\d+) configure serial (\d+)} {
+            set fan_surf $expect_out(1,string); set fan_serial $expect_out(2,string)
+        }
+        timeout { lc_fail "the DIRECT console got no redraw CONFIGURE on the scale change (the arm fanned nothing -- the follower would stay at $want until an unrelated relayout)" }
+    }
+    lc_pass "panes: a scale change reaches the DIRECT console (redraw CONFIGURE serial $fan_serial queued to surface $fan_surf)"
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+0"} err]} {
+        lc_fail "qmp-sendtext scale-reset chord failed: $err"
+    }
+    expect {
+        -re {tapestryd: scale (\d+) -> (\d+) \(chord-reset\)} {
+            if {$expect_out(2,string) != $want} { lc_fail "Super+0 reset to $expect_out(2,string), want the boot value $want (a declaration must be what `auto` returns to, never the EDID)" }
+        }
+        timeout { lc_fail "Super+0 never reset the scale (no `tapestryd: scale [expr {$want + 25}] -> $want (chord-reset)`)" }
+    }
+    expect {
+        -re {tapestryd: scale fan direct (\d+) configure serial (\d+)} {
+            if {$expect_out(2,string) == $fan_serial} { lc_fail "the reset's fan re-used serial $fan_serial: no fresh CONFIGURE was queued" }
+        }
+        timeout { lc_fail "the DIRECT console got no redraw CONFIGURE on the scale reset" }
+    }
+    lc_pass "panes: the scale reset reaches the DIRECT console too (a fresh serial) and lands on the boot scale $want"
+}
+
+# The scale the seat must have booted at: THYLACINE_SCALE in this harness's
+# environment (run-vm.sh emits `thylacine.scale=<pct>`), else 200 under
+# THYLACINE_HIDPI, else the EDID's 100 (QEMU's synthetic one claims 100 DPI).
+set want_scale 100
+if {[info exists env(THYLACINE_SCALE)] && $env(THYLACINE_SCALE) ne ""} {
+    set want_scale $env(THYLACINE_SCALE)
+} elseif {[info exists env(THYLACINE_HIDPI)] && $env(THYLACINE_HIDPI) ne "0" && $env(THYLACINE_HIDPI) ne ""} {
+    set want_scale 200
+}
+
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
@@ -86,6 +151,18 @@ for {set i 0} {$i < 12} {incr i} {
 }
 if {!$ok} { lc_fail "pre-battery console verify (-c) never passed" }
 lc_pass "panes: pre-battery console verified"
+
+# SC-5, the declared run: every leg below the battery's say lines samples a
+# 1.0-literal pixel (a tab's ember at (1119,17), a quadrant's centre), so at
+# any other scale only the scale legs can run. Run them here, on the lone
+# direct console, and stop: this run is the declaration's witness; the plain
+# run (100) is the control and runs everything.
+if {$want_scale != 100} {
+    scale_legs $want_scale
+    lc_quit
+    lc_pass "ls-gfx-panes: the declared-scale run (thylacine.scale=$want_scale: booted there, stepped, reset back; the 1.0-literal pixel legs skipped)"
+    exit 0
+}
 
 # The battery (foreground; its say! lines land on the serial tee).
 lc_send "tapestry-battery"
@@ -171,6 +248,24 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the tag-status gate leg failed" }
     timeout { lc_fail "battery never reached the tag-status gate" }
 }
+
+# HALCYON-SCALE 3/4: the boot scale, read off the battery's scale-gate line
+# (the ctl's `scale` as the seat set it at boot). Without a declaration
+# QEMU's DPI-less EDID derives 100; with THYLACINE_SCALE=<pct> in this
+# harness's environment (run-vm.sh emits `thylacine.scale=<pct>`) the
+# compositor must boot AT the declared value (SC-5) -- the chord legs below
+# step from wherever the boot landed, and the reset chord returns THERE, not
+# to the EDID's 100. Run once each way: the plain run is the control.
+set boot_scale ""
+expect {
+    -re {battery: scale gate OK \(scale (\d+)\)} { set boot_scale $expect_out(1,string) }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the scale gate leg failed" }
+    timeout { lc_fail "battery never reached the scale gate" }
+}
+if {$boot_scale ne $want_scale} {
+    lc_fail "the seat booted at scale $boot_scale, want $want_scale (the ctl's scale line as the battery read it)"
+}
+lc_pass "panes: the seat booted at scale $boot_scale (the ctl, as the battery read it)"
 
 # H-3c: the menu verbs (`menu place` / `menu dismiss`) are gated like the
 # tile status -- a NON-renderer is refused whatever it writes, and the
@@ -565,44 +660,8 @@ lc_pass "panes: console restored fullscreen after the battery"
 lc_run_expect "cat /dev/winsize" "winsize 128 36"
 lc_pass "panes: winsize restored fullscreen after the battery (#55 live across reweaves)"
 
-# HALCYON-SCALE 5 (the scale round's self-finding): a scale change reaches a
-# DIRECT display. The console is a lone display-sized leaf with no bar and no
-# menu, so the reconcile the chord runs has NO geometry in it -- the arm that
-# fanned nothing (the CONFIGURE fan rode the Composed arm's STRUCTURAL pass
-# only), leaving a follower painting the old percent until some unrelated
-# relayout. The witness is the compositor's record of the redraw CONFIGURE it
-# queued to the direct surface, serial-stamped (a client never acks a same-
-# size CONFIGURE and aurora prints nothing on its redraw arm, so the emission
-# is the observable half). Both directions: Super+= steps to 125, Super+0
-# re-derives from the EDID (100 on QEMU) -- each must fan.
-if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+equal"} err]} {
-    lc_fail "qmp-sendtext scale chord failed: $err"
-}
-expect {
-    -re {tapestryd: scale 100 -> 125 \(chord\)} {}
-    timeout { lc_fail "Super+= never changed the scale (no `tapestryd: scale 100 -> 125 (chord)`)" }
-}
-expect {
-    -re {tapestryd: scale fan direct (\d+) configure serial (\d+)} {
-        set fan_surf $expect_out(1,string); set fan_serial $expect_out(2,string)
-    }
-    timeout { lc_fail "the DIRECT console got no redraw CONFIGURE on the scale change (the arm fanned nothing -- the follower would stay at 100 until an unrelated relayout)" }
-}
-lc_pass "panes: a scale change reaches the DIRECT console (redraw CONFIGURE serial $fan_serial queued to surface $fan_surf)"
-if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+0"} err]} {
-    lc_fail "qmp-sendtext scale-reset chord failed: $err"
-}
-expect {
-    -re {tapestryd: scale 125 -> 100 \(chord-reset\)} {}
-    timeout { lc_fail "Super+0 never reset the scale (no `tapestryd: scale 125 -> 100 (chord-reset)`)" }
-}
-expect {
-    -re {tapestryd: scale fan direct (\d+) configure serial (\d+)} {
-        if {$expect_out(2,string) == $fan_serial} { lc_fail "the reset's fan re-used serial $fan_serial: no fresh CONFIGURE was queued" }
-    }
-    timeout { lc_fail "the DIRECT console got no redraw CONFIGURE on the scale reset" }
-}
-lc_pass "panes: the scale reset reaches the DIRECT console too (a fresh serial)"
+# The scale legs (see scale_legs above): the control at the EDID's 100.
+scale_legs $boot_scale
 
 lc_quit
 lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + close + singleslot + collapse)"

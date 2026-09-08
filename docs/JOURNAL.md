@@ -367,6 +367,40 @@ exposes the main flag whichever screen shows, the mode flip flushes
 nothing, and a fragment rides out a TUI session. Host: vt 59, kaua-term
 36, halcyond 182. Gates: ls-gfx-compose PASS 72 s (six legs, one attempt; the 200% capture reads the whole tour by eye), ls-halcyon PASS 118 s (48 legs, one attempt), ls-gfx-panes PASS 47 s (one attempt) -- all three levers re-baked.
 
+**The View menu, and the ratification (run 46d, continued).** The
+operator's next two messages were tooling: the cocoa window opened on
+`gpu-mmio0` with a `parallel0` beside it. Two causes, both measured before
+touching anything: the `cocoa` mode keeps the vestigial MMIO GPU by design
+(the testing hybrid; DISPLAY-MODES.md kept it out of gpu mode on purpose)
+while `THYLACINE_DISPLAY=gpu` -- the production posture -- already drops it,
+and the recipe I had given named the wrong one; and `parallel0` is QEMU's
+default `-parallel vc` chardev with nothing behind it (`info chardev` on a
+bare `-M virt`), which `-parallel none` removes in every mode (5bfac583).
+Then "that drops me to Aurora": `THYLACINE_HALCYON_SESSION=1` is a
+bake-time lever, not a run flag -- the image on disk was the default lever
+from the gate chain; re-baked. Then the word: "After rebuilding, you can
+proceed with HALCYON-SCALE." Section 10 is ratified. What the arc still
+cost was four chords per boot, and the reason was pinned before designing
+around it: virtio-gpu-pci has no DPI or physical-size property (edid
+on/off, xres, yres -- checked on this host's 10.0.2) and cocoa passes no
+physical size, so QEMU's EDID claims 100 DPI at any resolution and the
+derivation is right about a wrong input. The heritage and the SOTA agree
+on the shape: plan9.ini's `monitor=`, Linux's `video=`, Fuchsia's board
+`display_pixel_density` -- the boot side DECLARES the display and the
+component that owns the decision reads it. So SC-5: `thylacine.scale=<pct>`
+on the kernel command line, the channel joey and aurora already read, as
+the derived scale's FIRST source (`scale auto` and the reset chord return
+to the declaration, not the EDID); the parser lives in the host-tested
+libhalcyon (the LAST whole-word token, NUL-ended -- the FDT property
+carries its NUL; off-table said and ignored), tapestryd reads it once at
+probe and drops a token that fills its buffer rather than parse a cut
+value as a shorter valid percent. Not a pool file: the pool is baked per
+image and a display is per boot. The panes gate's scale legs became
+parametric on the boot scale so the SAME script is the control (plain:
+100 -> 125 -> 100) and the witness (`THYLACINE_SCALE=150`: 150 -> 175 ->
+150 -- a declaration ignored or a reset to the EDID both fail). Verified:
+libhalcyon 49 host tests (+1); ls-gfx-panes plain PASS 48 s (the control: booted 100 -> 125 -> 100, every leg) and with THYLACINE_SCALE=150 PASS 29 s (the witness: booted 150, Super+= to 175, Super+0 back to 150 -- the first declared run had booted at 150 too and failed only a 1.0-literal pixel leg downstream, which the restructure skips); the session lever re-baked + ls-gfx-compose PASS 73 s (six legs, the 200% leg chording from an undeclared 100). ls-halcyon not re-run: the console lever's boot derivation is the same tokenless path the plain panes run covers.
+
 ## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
 
 **Where it sits.** The first queued item after run 44's close: the chrome

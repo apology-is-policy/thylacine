@@ -1474,8 +1474,14 @@ pub struct Comp {
     /// the `scale` verb / chords; published as `scale <pct>` in the ctl.
     pub scale: u16,
     /// A `scale <pct>` verb or chord in force for the rest of the session
-    /// (`scale auto` / the reset chord clear it); None = EDID-derived.
+    /// (`scale auto` / the reset chord clear it); None = derived.
     scale_override: Option<u16>,
+    /// HALCYON-SCALE 3 (SC-5): the platform's declaration off the kernel
+    /// command line, read once at probe -- the derived scale's FIRST
+    /// source (a declaration outranks a measurement: it exists for the
+    /// display whose EDID cannot say, QEMU's, or lies). None = the EDID
+    /// derives. Never written after probe.
+    declared: Option<u16>,
     /// `Metrics::at(scale)`: the ONE table every carve and paint here reads
     /// (halcyond reads the same function at the same percent).
     pub metrics: Metrics,
@@ -2305,10 +2311,16 @@ struct GlAdopt {
 const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
-    pub fn new(gpu: Gpu) -> Comp {
-        let derived = match gpu.edid_mm {
-            Some((mm_w, mm_h)) => scale::scale_pct(gpu.width, gpu.height, mm_w, mm_h),
-            None => scale::SCALE_MIN,
+    pub fn new(gpu: Gpu, declared: Option<u16>) -> Comp {
+        let (derived, src) = match declared {
+            Some(p) => (p, "declared"),
+            None => (
+                match gpu.edid_mm {
+                    Some((mm_w, mm_h)) => scale::scale_pct(gpu.width, gpu.height, mm_w, mm_h),
+                    None => scale::SCALE_MIN,
+                },
+                "edid",
+            ),
         };
         // The same guard the runtime path (`apply_scale`) applies: the seat
         // runs at one of the five values or at 100, never at whatever the
@@ -2317,14 +2329,15 @@ impl Comp {
         let scale = if scale::is_valid_pct(derived) {
             derived
         } else {
-            say!("tapestryd: scale {} off the table (edid) -> {}", derived, scale::SCALE_MIN);
+            say!("tapestryd: scale {} off the table ({}) -> {}", derived, src, scale::SCALE_MIN);
             scale::SCALE_MIN
         };
-        say!("tapestryd: scale {} (edid)", scale);
+        say!("tapestryd: scale {} ({})", scale, src);
         Comp {
             gpu,
             scale,
             scale_override: None,
+            declared,
             metrics: Metrics::at(scale),
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
@@ -4003,9 +4016,13 @@ impl Comp {
         Some(p.content)
     }
 
-    /// HALCYON-SCALE 3: the scale the display's EDID implies for its
-    /// current pixel geometry (100 without one).
+    /// HALCYON-SCALE 3: the platform's declaration while one stands, else
+    /// the scale the display's EDID implies for its current pixel geometry
+    /// (100 without one).
     fn derive_scale(&self) -> u16 {
+        if let Some(p) = self.declared {
+            return p;
+        }
         match self.gpu.edid_mm {
             Some((mm_w, mm_h)) => scale::scale_pct(self.gpu.width, self.gpu.height, mm_w, mm_h),
             None => scale::SCALE_MIN,
@@ -16076,9 +16093,9 @@ impl Conn {
             return Err(p9::E_PERM);
         }
         if let Some(rest) = s.strip_prefix("scale ") {
-            // `scale auto` re-derives from the EDID; `scale <pct>` is one of
-            // the five values or E_INVAL. Budgeted like a layout verb: it
-            // IS one (a structural relayout).
+            // `scale auto` re-derives (the declaration, else the EDID);
+            // `scale <pct>` is one of the five values or E_INVAL. Budgeted
+            // like a layout verb: it IS one (a structural relayout).
             let rest = rest.trim();
             self.layout_verb_budget()?;
             if rest == "auto" {

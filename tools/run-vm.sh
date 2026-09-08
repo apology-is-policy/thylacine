@@ -459,6 +459,11 @@ accel="${THYLACINE_ACCEL:-$(detect_accel)}"
 #   THYLACINE_FULLSCREEN=1   the cocoa window full-screen: with
 #                             THYLACINE_GPU_RES at the panel's physical
 #                             pixel size the guest fills the display 1:1.
+#   THYLACINE_SCALE=<pct>    declare the display scale to the guest
+#                             (thylacine.scale=<pct> on the cmdline; the
+#                             compositor boots at it instead of deriving
+#                             100 from QEMU's DPI-less EDID). HIDPI=1
+#                             implies 200.
 #                             Pair both with THYLACINE_DISPLAY=gpu, not
 #                             cocoa: gpu is the production posture (gpu0
 #                             ALONE binds QemuConsole 0, the window opens
@@ -565,6 +570,20 @@ case "${THYLACINE_DISPLAY:-none}" in
     console)            append_tokens+=("thylacine.display=console") ;;
     gpu|gpu-headless)   append_tokens+=("thylacine.display=gpu") ;;
 esac
+# HALCYON-SCALE 3 (SC-5): the platform's scale declaration. QEMU's synthetic
+# EDID claims 100 DPI at any size (cocoa passes no physical size; virtio-gpu
+# has no DPI property), so a HiDPI scanout derived 100 and cost four chords
+# per boot. THYLACINE_SCALE=<pct> declares it (tapestryd reads the token at
+# boot; one of 100/125/150/175/200, anything else is said and ignored);
+# THYLACINE_HIDPI=1 implies 200 unless THYLACINE_SCALE says otherwise.
+# Emitted only when set, so every gate at 1.0 stays tokenless.
+scale_decl="${THYLACINE_SCALE:-}"
+if [[ -z "$scale_decl" && "${THYLACINE_HIDPI:-0}" != "0" ]]; then
+    scale_decl=200
+fi
+if [[ -n "$scale_decl" ]]; then
+    append_tokens+=("thylacine.scale=${scale_decl}")
+fi
 append_flags=()
 if (( ${#append_tokens[@]} > 0 )); then
     append_flags=(-append "${append_tokens[*]}")

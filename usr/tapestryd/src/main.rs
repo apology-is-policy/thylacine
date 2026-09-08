@@ -62,8 +62,8 @@ use libthyla_rs::hardware::PCI_BAR_VA_STRIDE;
 use libthyla_rs::io::Write;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_close, t_open, t_poll, t_srv_accept, t_walk_create, TPollFd, T_OPATH, T_OREAD, T_POLLHUP,
-    T_POLLIN, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_open, t_poll, t_read, t_srv_accept, t_walk_create, TPollFd, T_OPATH, T_OREAD,
+    T_POLLHUP, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
 };
 
 use crate::input::{
@@ -177,6 +177,38 @@ fn post_srv_warp() -> Result<i64, ()> {
     Ok(listener)
 }
 
+/// HALCYON-SCALE 3 (SC-5): the platform's scale declaration off the kernel
+/// command line -- `/hw/chosen/bootargs` (QEMU's -append; the channel joey's
+/// opt-outs and aurora's display mode already read). None when the file is
+/// absent or unreadable, when the read FILLS the buffer (a token cut at the
+/// end must never parse as a shorter valid percent), or when the token's
+/// value is not one of the five (said once).
+fn declared_scale() -> Option<u16> {
+    // SAFETY: SVC wrappers over a path literal and an owned buffer.
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/hw/chosen/bootargs".as_ptr(), 19, T_OREAD) };
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 1024];
+    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    unsafe { t_close(fd) };
+    if n <= 0 {
+        return None;
+    }
+    if n as usize >= buf.len() {
+        say!("tapestryd: bootargs longer than {} bytes; a scale declaration is ignored", buf.len());
+        return None;
+    }
+    match libhalcyon::scale::declared_scale(&buf[..n as usize]) {
+        libhalcyon::scale::Declared::Scale(p) => Some(p),
+        libhalcyon::scale::Declared::Invalid => {
+            say!("tapestryd: thylacine.scale ignored: not one of 100/125/150/175/200");
+            None
+        }
+        libhalcyon::scale::Declared::None => None,
+    }
+}
+
 struct Tapestryd {
     comp: Comp,
     kbd: Option<InputDev>,
@@ -266,7 +298,7 @@ impl Driver for Tapestryd {
             .unwrap_or((0x7FFF, 0x7FFF));
 
         Ok(Tapestryd {
-            comp: Comp::new(g),
+            comp: Comp::new(g, declared_scale()),
             kbd,
             tablet,
             mouse,

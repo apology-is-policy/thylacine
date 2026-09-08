@@ -118,6 +118,53 @@ pub fn parse_edid_mm(edid: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
+/// The platform's scale declaration on the kernel command line
+/// (HALCYON-SCALE 3, SC-5): what `declared_scale` found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Declared {
+    /// No `thylacine.scale=` token.
+    None,
+    /// A token with one of the five values.
+    Scale(u16),
+    /// A token whose value is not one of the five (or not a number): the
+    /// reader says so once and ignores it; the EDID stands.
+    Invalid,
+}
+
+/// Find the platform's declaration in the kernel command line: the LAST
+/// whole-word `thylacine.scale=<pct>` token (the key at the start or after
+/// a space -- `xthylacine.scale=` and `thylacine.scalex=` are not it; the
+/// value ended by a space, a NUL, a newline or the end -- the FDT property
+/// carries its NUL). A declaration outranks the EDID because it exists for
+/// the display whose EDID cannot say (QEMU's synthetic one) or lies.
+pub fn declared_scale(bootargs: &[u8]) -> Declared {
+    const KEY: &[u8] = b"thylacine.scale=";
+    let is_end = |b: u8| matches!(b, b' ' | 0 | b'\n' | b'\r' | b'\t');
+    let mut out = Declared::None;
+    let mut i = 0;
+    while i + KEY.len() <= bootargs.len() {
+        let at_word = i == 0 || is_end(bootargs[i - 1]);
+        if at_word && &bootargs[i..i + KEY.len()] == KEY {
+            let start = i + KEY.len();
+            let mut end = start;
+            while end < bootargs.len() && !is_end(bootargs[end]) {
+                end += 1;
+            }
+            let parsed = core::str::from_utf8(&bootargs[start..end])
+                .ok()
+                .and_then(|v| v.parse::<u16>().ok());
+            out = match parsed {
+                Some(p) if is_valid_pct(p) => Declared::Scale(p),
+                _ => Declared::Invalid,
+            };
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +278,25 @@ mod tests {
                 assert!(is_valid_pct(p), "scale_pct({px_w}, 1600, {mm_w}, 100) = {p}");
             }
         }
+    }
+
+    #[test]
+    fn the_declaration_is_the_last_whole_word_token_with_a_table_value() {
+        use super::Declared::*;
+        assert_eq!(declared_scale(b""), None);
+        assert_eq!(declared_scale(b"thylacine.display=gpu"), None);
+        assert_eq!(declared_scale(b"thylacine.scale=200"), Scale(200));
+        assert_eq!(declared_scale(b"thylacine.scale=200\0"), Scale(200), "the FDT property's NUL ends the value");
+        assert_eq!(declared_scale(b"a=b thylacine.scale=150 c=d"), Scale(150));
+        assert_eq!(declared_scale(b"thylacine.nowatchpoint thylacine.scale=125\n"), Scale(125));
+        assert_eq!(declared_scale(b"thylacine.scale=100 thylacine.scale=175"), Scale(175), "the last token wins");
+        assert_eq!(declared_scale(b"thylacine.scale=300"), Invalid, "off the table");
+        assert_eq!(declared_scale(b"thylacine.scale=abc"), Invalid);
+        assert_eq!(declared_scale(b"thylacine.scale="), Invalid, "an empty value");
+        assert_eq!(declared_scale(b"thylacine.scale=200x"), Invalid);
+        assert_eq!(declared_scale(b"thylacine.scale=99999"), Invalid, "past u16 is not a panic");
+        assert_eq!(declared_scale(b"xthylacine.scale=200"), None, "a letter before the key is another word");
+        assert_eq!(declared_scale(b"thylacine.scalex=200"), None, "a longer key is another key");
+        assert_eq!(declared_scale(b"thylacine.scale=150 thylacine.scale=bad"), Invalid, "the last token wins even when invalid");
     }
 }

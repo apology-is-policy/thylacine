@@ -101,13 +101,33 @@ processes that paint chrome and glyphs, and what the bakes need.
   4) beats everything for the rest of the session; `scale auto`
   re-derives. The user's `/env/HALCYON_SCALE` is not a third source: the
   session compositor reads it at start and WRITES the verb (section 6).
+- **The platform's declaration** (SC-5, 2026-09-08): `thylacine.scale=<pct>`
+  on the kernel command line, read ONCE at boot from `/hw/chosen/bootargs`
+  (the channel joey's opt-outs and aurora's display mode already ride;
+  QEMU's `-append`). When present and one of the five values it IS the
+  derived scale -- `scale auto` and a `mode` change return to it, not to
+  the EDID -- because a declaration outranks a measurement: it exists for
+  the display whose EDID cannot say (QEMU's synthetic one claims 100 DPI at
+  any size -- the cocoa backend passes no physical size and virtio-gpu has
+  no DPI property -- so a 2560x1600 scanout shown 1:1 on a retina panel
+  derived 100 and cost four chords per boot) and for the panel whose EDID
+  lies. Prior art: plan9.ini's `monitor=`/`vgasize=` (the boot side
+  declares the display; the component that owns the decision reads it),
+  Linux's `video=` parameter, Fuchsia's board-level `display_pixel_density`
+  (a device-tier declaration that outranks the EDID). Not a pool file: the
+  pool is baked per image and a display is per boot. Malformed or off the
+  table: said once and ignored, the EDID stands (the same fail-soft as a
+  garbage EDID). The verb still beats it for the session. `run-vm.sh` emits
+  it from `THYLACINE_SCALE=<pct>`; `THYLACINE_HIDPI=1` implies 200 unless
+  told otherwise; nothing is emitted otherwise, so every gate at 1.0 is
+  untouched. The boot line names the source: `scale 200 (declared)`.
 
 ## 4. The authority and the channel
 
 - **tapestryd is the authority.** `Comp.scale: u16` (percent) is set at
-  boot from the EDID and republished on every change; the ctl text gains
-  the line `scale <pct>` (after `display W H`; every existing reader is
-  prefix-keyed and unaffected).
+  boot from the platform's declaration, else the EDID, and republished on
+  every change; the ctl text gains the line `scale <pct>` (after `display
+  W H`; every existing reader is prefix-keyed and unaffected).
 - **The verb**: `scale <pct>` (one of the five values; anything else
   E_INVAL) and `scale auto`, admitted for the RENDERER unconditionally
   and for the DECLARED session compositor while it hosts (`conn_hosts`,
@@ -264,7 +284,7 @@ LOGICAL pixels, scaled at the carve like the rest.
   chrome-content close's "ROUND 2 FOCUS" (the atlas fix), since both live
   in the render core.
 
-## 10. For the operator (ratification owed; built under the autonomy grant)
+## 10. For the operator (RATIFIED 2026-09-08 -- "you can proceed with HALCYON-SCALE"; built under the autonomy grant)
 
 - Percent on the ctl / verb (`scale 150`), five values, clamp 100..200.
 - The chord defaults Super+= / Super+- / Super+0 (free keys; remappable).
@@ -277,3 +297,7 @@ LOGICAL pixels, scaled at the carve like the rest.
   to every visible surface and TEV_LAYOUT to the session WHETHER OR NOT
   the geometry moved -- the Direct arm and a lone leaf under a menu carve
   nothing, and a follower re-reads the ctl only on a relayout.
+- Added under the same word, veto if wrong (SC-5, after the ratification):
+  the platform's declaration `thylacine.scale=<pct>` (section 3) as the
+  derived scale's first source, so a HiDPI guest boots at 2.0 without the
+  four chords; `scale auto` returns to the declaration, not the EDID.
