@@ -22,7 +22,7 @@ needed the operator.
 
 
 ---
-## 2026-09-09 (aux, run 6, self-compact #6) -- inline media: slice 1b (render path on real hardware) + the operator's width-fit ruling + slice 2 (vendor zune + the `view` decoder)
+## 2026-09-09 (aux, run 6, self-compact #6) -- inline media: slice 1b (render path on real hardware) + the operator's width-fit ruling + slice 2 (vendor zune) + slice 3a (the channel wire + view's writer) + the channel design decided
 
 Picked up the resume note at `ca785f1e` and built slice 1b: prove the
 `Item::Image` render path -- layout letterbox + `cartoon::Op::Image` -- reaches
@@ -104,12 +104,38 @@ Chosen pure-Rust PNG over a ported C codec deliberately (H-7 format-fuzz posture
 the decoder parses untrusted bytes, and a fuzz-friendly memory-safe decoder in a
 sacrificial process is the whole point.
 
-**Next.** Slice 3 -- the per-pane channel (the one genuinely-new IPC + a
-format-fuzz trust boundary; load-bearing). Its design (the endpoint, the
-place-request format, the auth/pane-addressing) is being locked from the tree's
-precedents before implementing across halcyond + view + login; surfacing it to
-the operator per the design-conversation pattern. Then the `view test.png` E2E
-inline + a boot witness, `gallery` (B), then expand.
+**The channel design, decided (design-conversation pattern).** Slice 3 is the one
+genuinely-new IPC and a format-fuzz trust boundary, so I didn't plunge in -- I
+delegated a read-only research pass over the tree's precedents (/srv posting, the
+TAPESTRY_CLAIM /env token, the one-hop MAY_POST_SERVICE grant, halcyond's
+pane/transcript model, the native 9P-server scaffolding, and whether any existing
+tapestryd surface takes a copy-in raster). It confirmed: the transport is a
+9P-mode /srv service (post = `t_walk_create("/srv/x")`, client = the corvus
+two-step `t_open` then walk `place`); every existing pixel channel is share-OUT +
+map (which unprivileged `view` can't use), so the RGBA copy-in is a genuinely new
+parse surface. Then I surfaced ONE decision to the operator -- console spike
+(namespace-scoped, one transcript, fastest to a visual in the UI they're using)
+vs per-pane-token-first (the session compositor's isolation model up front). They
+chose the **console spike**.
+
+**Slice 3a (`9bb7947a`): the wire contract + view's writer.** New
+`usr/lib/inlinewire` (pure, no_std, zero deps, host-tested): the ONE place-request
+format both halves share, so they can't drift AND halcyond never pulls view's
+decoder -- a 16-byte header ("HPL1" + format + w + h, LE) then w*h ARGB u32s as LE
+bytes; `parse` fully validates (magic/format/dims/MAX_PIXELS) before any alloc.
+view's `place_on_halcyon` does the corvus /srv two-step and writes header +
+payload in 60 KiB chunks, falling back to reporting the decode when no service is
+posted (so view is coherent standalone). A design note caught while writing it:
+the first `MAGIC` value I typed decoded to the wrong ASCII ("HLI1"), true-comment /
+wrong-value -- fixed to 0x314c5048 and pinned by a test asserting the packed bytes
+read "HPL1", so the value can't drift from the comment again.
+
+**Next.** Slice 3b -- the reader + the E2E: halcyond posts + serves /srv/halcyon
+(a minimal 9P server folded into rs_main's unified poll, the nocturned pattern;
+accumulate Twrites -> `inject_image`), joey grants it MAY_POST_SERVICE, `view` +
+a test.png get staged, then a boot proves `view /test.png` inline (screenshot),
+and the format-fuzz audit + the dossier land. Full plan in
+`memory/project_next_session.md`.
 
 ---
 ## 2026-09-09 (aux, run 6, self-compact #5) -- inline media / `view`: research + ratified design + scripture (reserved I-47)
