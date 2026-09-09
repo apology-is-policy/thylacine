@@ -14,3 +14,4 @@ pub mod scale;
 pub mod skeleton;
 pub mod tag;
 pub mod theme;
+pub mod toml;
