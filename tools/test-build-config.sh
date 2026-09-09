@@ -96,5 +96,47 @@ tmp="$(mktemp)"; bc_reset; bc_apply_preset dev; bc_resolve 2>/dev/null; bc_emit_
 if grep -q '^DEV_ACCOUNTS' "$tmp" && grep -q '# \[compile\]' "$tmp"; then ok "emit shape"; else bad "emit shape"; fi
 rm -f "$tmp"
 
+echo "== T-display: the Halcyon axes (theme + the two levers) =="
+# T-display-theme: HALCYON_THEME is a free STRING, not an enumerated choice --
+# the pool bake takes every *.toml in usr/lib/halcyon/themes/, so a hard-coded
+# list here would refuse a theme the bake would happily install.
+bc_reset
+bc_set_one HALCYON_THEME nightjar >/dev/null
+eq "theme accepts a name"        "$(bc_get HALCYON_THEME)" "nightjar"
+bc_set_one HALCYON_THEME some-new-theme-nobody-listed >/dev/null
+eq "theme accepts an UNLISTED name" "$(bc_get HALCYON_THEME)" "some-new-theme-nobody-listed"
+bc_reset
+eq "theme default is empty (built-in Daylight)" "$(bc_get HALCYON_THEME)" ""
+
+# T-display-export: the three symbols reach build.sh's env knobs. A bool maps
+# to 1/0 and the string passes through raw; a wrong map fails here.
+# The env must be CLEARED FIRST, and that is not tidiness: bc__export_env
+# deliberately does not clobber an already-set var (the D-b transition shim),
+# so an earlier bc_export in this very file leaves these set and the export
+# below would silently no-op. A shared fixture generates its own bugs.
+unset THYLACINE_HALCYON_THEME THYLACINE_HALCYON_SESSION THYLACINE_HALCYON
+bc_reset
+bc_set_one HALCYON_THEME nightjar >/dev/null
+bc_set_one HALCYON_SESSION y >/dev/null
+bc_export
+eq "export THEME"   "${THYLACINE_HALCYON_THEME:-}"   "nightjar"
+eq "export SESSION" "${THYLACINE_HALCYON_SESSION:-}" "1"
+eq "export CONSOLE (untouched control)" "${THYLACINE_HALCYON:-}" "0"
+unset THYLACINE_HALCYON_THEME THYLACINE_HALCYON_SESSION THYLACINE_HALCYON
+
+# T-display-default: HALCYON IS THE DEFAULT UI (operator-directed 2026-09-09).
+# A bare build.sh applies the `default` preset, so this is what a user gets.
+# The CONSOLE lever must stay OFF -- it also bakes a wedge-test verb rule.
+bc_reset; bc_apply_preset default
+eq "default profile: session ON"  "$(bc_get HALCYON_SESSION)" "y"
+eq "default profile: console OFF" "$(bc_get HALCYON_CONSOLE)" "n"
+
+# T-display-ci: the gate image must NOT get the session lever -- 35 interactive
+# scenarios log in and then drive a shell, and the lever replaces `ut` on
+# /dev/cons. Pinned EXPLICITLY so a future default.config edit cannot drag the
+# gate fleet along with it.
+bc_reset; bc_apply_preset ci
+eq "ci profile: session OFF" "$(bc_get HALCYON_SESSION)" "n"
+
 echo
 if [[ "$fail" == 0 ]]; then echo "ALL PASS"; exit 0; else echo "FAILURES"; exit 1; fi

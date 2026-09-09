@@ -139,10 +139,36 @@ it once, in the schema.
   `HARDENING_FULL`, `KASLR`, `SANITIZE`, `TICKLESS`.
 - **bake-content** — `CHUNK_GOROOT`, `CHUNK_CLADE` (+`CHUNK_STORM`), `CHUNK_CHASE_W2`,
   `CHUNK_ALPINE`, `CHUNK_QUAKE`, `CHUNK_AURORA_CFG`.
+- **display** (added 2026-09-09) — `HALCYON_SESSION`, `HALCYON_CONSOLE`,
+  `HALCYON_THEME`. The Halcyon axes, which had lived only as raw `THYLACINE_*`
+  env vars and so were invisible to the configurator.
 - **pool-control** — `DISK_SIZE`, `MKFS_SEED`, `MKFS_PRESERVE`.
 
 One symbol per independent decision — the orthogonalization that dissolves the
 bundles.
+
+**The display group carries two decisions worth stating, because both look
+like arbitrary choices and are not.**
+
+*The two Halcyon levers are separate symbols, not one.* `HALCYON_SESSION` is
+the per-user environment after login (the forward path); `HALCYON_CONSOLE`
+replaces aurora as the pre-login system renderer and build.sh's own bake
+comment marks it *being retired*. Collapsing them into a single "use Halcyon"
+bool would also hide that the console lever is **not a pure renderer swap** —
+it additionally bakes a `#wedge 6000` test rule into `/lib/beacon/verbs` (the
+#880 strip-for-production class), so it is a dev/test shape and is deliberately
+NOT what "Halcyon is the default UI" turns on.
+
+*`HALCYON_THEME` is typed `string`, not `choice:`.* The pool bake installs
+whatever `*.toml` sits in `usr/lib/halcyon/themes/`, so an enumerated schema
+type would refuse a theme the bake would happily take — the list would rot the
+moment a theme was added. Discoverability is solved one layer up instead, where
+it belongs: **the wizard reads the directory at run time** and offers the real
+files as a numbered menu, labelled with each theme's own `[meta] name`
+(`WZ_DIR_THEMES`, overridable so the discovery itself is testable). Drop a
+`.toml` in and it appears; nothing in the tool needs editing. `libhalcyon`'s
+`every_shipped_theme_loads` test closes the loop from the other side, reading
+the same directory and failing by filename when a theme does not parse.
 
 ### 4.3 Presets replace the bundles (migration)
 

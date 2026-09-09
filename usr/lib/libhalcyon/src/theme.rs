@@ -1262,6 +1262,52 @@ mod tests {
     // here makes this fail, naming it, which is exactly the reminder the
     // author of that key needs.
     #[test]
+    /// EVERY theme in the gallery loads -- discovered by reading the directory,
+    /// not by an `include_str!` per file, because the pool bake installs
+    /// whatever `*.toml` is there and a hand-listed set here would pass while
+    /// the newest theme was broken. This is the host-side check for "does the
+    /// theme I just wrote load": `cargo test -p libhalcyon` names the file and
+    /// the reason. (`std` only under `cfg(test)`; the crate stays `no_std`.)
+    #[test]
+    fn every_shipped_theme_loads() {
+        extern crate std;
+        use std::string::String;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../halcyon/themes");
+        let mut seen = 0usize;
+        let mut names: std::vec::Vec<String> = std::vec::Vec::new();
+        for ent in std::fs::read_dir(&dir).expect("themes dir must exist") {
+            let path = ent.expect("readable dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).expect("readable theme");
+            let l = Theme::from_toml(&text)
+                .unwrap_or_else(|e| panic!("{} does not load: {}", file, describe(&e)));
+            // A gallery theme carries no `base`, so it must set every key --
+            // that is the whole point of the no-base mode (a forgotten key
+            // would otherwise arrive as a Daylight colour).
+            assert!(
+                l.inherited.is_empty(),
+                "{} sets no `base`, so it must set every key; missing: {:?}",
+                file,
+                l.inherited
+            );
+            names.push(file);
+            seen += 1;
+        }
+        // The CONTROL: a directory read that silently matched nothing would
+        // pass every assertion above. Two themes have shipped since the arc
+        // closed, so anything less means the read, not the themes, is broken.
+        assert!(
+            seen >= 2,
+            "expected to find the shipped gallery themes, found {} in {:?} -- \
+             the directory read is broken, not the themes",
+            seen,
+            dir
+        );
+    }
+
     fn the_annotated_template_loads_and_sets_every_key() {
         let l = Theme::from_toml(TEMPLATE)
             .unwrap_or_else(|e| panic!("TEMPLATE.toml does not load: {}", describe(&e)));

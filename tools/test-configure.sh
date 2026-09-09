@@ -116,5 +116,36 @@ assert_eq "$(cfg_val "$TMP/edit8.config" KASLR)" y "8 edit: --edit loads the pro
 real_after="$(ls "$REPO_ROOT"/configs/ | sort)"
 assert_eq "$real_after" "$real_before" "9 isolation: real configs/ unchanged (BC_DIR_CONFIGS honored)"
 
+# --- 10. the theme picker DISCOVERS the directory ---------------------------
+# The property worth pinning is not "aero/nightjar are offered" -- that is true
+# of a hard-coded list too, and would pass while the feature was broken. Point
+# the discovery at a temp dir holding a theme that exists NOWHERE in the tree:
+# it can only appear in the menu if the directory is actually read.
+THEMES="$TMP/themes"; mkdir -p "$THEMES"
+printf '[meta]\nname = "Zzz Invented"\n' > "$THEMES/zzz-invented.toml"
+menu="$(yes '' | BC_DIR_CONFIGS="$TMP" WZ_DIR_THEMES="$THEMES" "$CONFIGURE" \
+          --from dev --name themedisc 2>&1 || true)"
+case "$menu" in
+    *"zzz-invented"*) assert_eq "found" "found" "10 theme menu READS the directory (invented theme offered)" ;;
+    *)                assert_eq "missing" "found" "10 theme menu READS the directory (invented theme offered)" ;;
+esac
+# ... and shows the theme's OWN [meta] name beside it, so the operator does not
+# have to open each file to learn what it is.
+case "$menu" in
+    *"Zzz Invented"*) assert_eq "found" "found" "11 theme menu labels each entry with its [meta] name" ;;
+    *)                assert_eq "missing" "found" "11 theme menu labels each entry with its [meta] name" ;;
+esac
+# CONTROL, one variable away: with the directory EMPTY the same run must offer
+# no themes at all. Without this, a menu that printed every *.toml on the host
+# -- or ignored the override entirely -- would still pass case 10.
+EMPTY="$TMP/themes-empty"; mkdir -p "$EMPTY"
+menu2="$(yes '' | BC_DIR_CONFIGS="$TMP" WZ_DIR_THEMES="$EMPTY" "$CONFIGURE" \
+           --from dev --name themeempty 2>&1 || true)"
+case "$menu2" in
+    *"zzz-invented"*|*"nightjar"*)
+        assert_eq "leaked" "clean" "12 CONTROL: an empty theme dir offers nothing" ;;
+    *)  assert_eq "clean" "clean" "12 CONTROL: an empty theme dir offers nothing" ;;
+esac
+
 echo "== $pass passed, $fail failed =="
 [[ "$fail" -eq 0 ]]
