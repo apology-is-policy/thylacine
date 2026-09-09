@@ -134,12 +134,29 @@ lc_run_expect "ls -l /lib/aurora; pwd" "/home/michael"
 # content round's observer-effect bug); with that fixed it read header-
 # dominant on three boots straight -- a measurement keyed on content
 # history, not on the property it claims.
+# THE BAND MOVE WAS NOT ENOUGH, and the paragraph above says why without
+# drawing the conclusion: if the verdict depends on how many rows precede the
+# shell, then ANY change to the boot chatter can flip it -- moving the band
+# only changes which line count breaks it. Measured 2026-09-09: two new
+# startup lines (halcyond and tapestryd each naming the theme in force) put
+# the boot-log island back under the lower band, and this read header-dominant
+# on three boots straight, deterministically.
+#
+# So assert THE PROPERTY THIS CLAIMS instead of a proxy for it: the dominant
+# ground is a DAYLIGHT ground. Both members are Daylight's -- 242,235,224 is
+# the pane surface, 206,196,182 is the `header` the raw-output island sits on
+# -- and which one wins is a fact about content history, which this gate does
+# not exist to pin. Discrimination is unchanged and by construction: it is a
+# whitelist of two exact LIGHT colours, so aurora's Bonfire dark ground (or an
+# unpainted buffer) fails it as hard as it did before. The ink floor below is
+# what keeps "painted" from meaning "cleared".
 set v [region 200 450 1080 760]
 if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off total dr dg db]} {
     lc_fail "gfx_region verdict unparseable: $v"
 }
-if {$dr != 242 || $dg != 235 || $db != 224} {
-    lc_fail "dominant color ($dr,$dg,$db) is not the Daylight surface (242,235,224) -- halcyond is not painting"
+set dom "$dr,$dg,$db"
+if {$dom ne "242,235,224" && $dom ne "206,196,182"} {
+    lc_fail "dominant color ($dom) is neither Daylight ground (surface 242,235,224 nor island header 206,196,182) -- halcyond is not painting"
 }
 if {$off < 300} {
     lc_fail "only $off/$total non-ground pixels -- no ink on the transcript"

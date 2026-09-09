@@ -953,6 +953,41 @@ fn reconcile(
     }
 }
 
+/// HALCYON-THEME 3.4: push our RESOLVED theme to the compositor, so the
+/// chrome it paints and the content we paint are the same theme.
+///
+/// Only a DECLARED session may: the verb is seat-gated exactly like `scale`.
+/// And only a push can carry it -- the user's theme file lives in the user's
+/// home, which tapestryd is not entitled to read, so the compositor would
+/// otherwise be stuck on the system file while the pane inside it was
+/// something else.
+///
+/// A refusal is SAID, never silently absorbed: the visible result would be a
+/// pane in one theme inside chrome in another, and the operator deserves to
+/// know which half failed.
+fn push_theme(ring: &EventRing, theme: &libhalcyon::theme::Theme) {
+    let cmd = format!("theme {}", libhalcyon::theme::to_wire(theme));
+    for _ in 0..VERB_RETRIES {
+        match ring.global_ctl(&cmd) {
+            Ok(()) => {
+                say!("halcyond: theme pushed to the compositor");
+                return;
+            }
+            Err(TapError::Busy) => {
+                let _ = sleep(Duration::from_millis(VERB_NAP_MS));
+            }
+            Err(e) => {
+                say!(
+                    "halcyond: theme push refused ({:?}) -- the chrome keeps the system theme",
+                    e
+                );
+                return;
+            }
+        }
+    }
+    say!("halcyond: theme push kept busy -- the chrome keeps the system theme");
+}
+
 /// HALCYON-SCALE 6: the user's `/env/HALCYON_SCALE` preference, written
 /// once as the gated `scale <pct>` verb (retried through the per-pass verb
 /// budget). Absent: nothing; unparsable or off the five values: said and
@@ -1161,6 +1196,11 @@ pub fn run(home: Option<String>) -> i64 {
         resolved.inherited.len()
     );
     let theme = resolved.theme;
+    // The compositor paints the chrome around our panes and cannot read the
+    // user's file; a declared seat is the only party that can tell it.
+    if declared {
+        push_theme(&ring, &theme);
+    }
     let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     let (cell_w, cell_h, _) = gs.mono_cell();

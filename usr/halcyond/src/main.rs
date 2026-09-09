@@ -391,6 +391,17 @@ pub extern "C" fn rs_main() -> i64 {
     for n in &resolved.notes {
         say!("halcyond: {}", n);
     }
+    // One line naming the theme in force, on every path including the absent
+    // one -- the witness that this renderer's load path ran at all.
+    say!(
+        "halcyond: theme {} ({:?})",
+        if resolved.name.is_empty() {
+            "built-in"
+        } else {
+            &resolved.name
+        },
+        resolved.source
+    );
     let theme = resolved.theme;
     let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);

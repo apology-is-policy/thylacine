@@ -776,6 +776,215 @@ pub const SYSTEM_THEME_PATH: &str = "/lib/halcyon/theme.toml";
 /// console renderer is not anyone's session and takes the system file.
 pub const USER_THEME_REL: &str = "/lib/halcyon/theme.toml";
 
+/// The RESOLVED theme as one line, for the seam that pushes it to another
+/// process (HALCYON-THEME 3.4's display coherence).
+///
+/// 72 comma-separated fields in a fixed order: 64 colours as `RRGGBB` (the
+/// opaque alpha is not on the wire), then `smooth`, then the 7 geometry
+/// integers. Both ends call THIS pair, so the format cannot drift between
+/// them, and `a_distinct_theme_survives_the_wire` round-trips a theme whose
+/// every field differs -- so a field left out of `to_wire` comes back as the
+/// built-in's and fails, which is the only way to catch an omission here.
+///
+/// Why not push the TOML text instead: a ctl verb is one LINE, TOML is not,
+/// and the user's file may be up to `THEME_MAX`. This is bounded at ~500
+/// bytes and needs no parser on the far side.
+pub fn to_wire(t: &Theme) -> String {
+    let mut s = String::new();
+    let mut c = |v: Argb| {
+        if !s.is_empty() {
+            s.push(',');
+        }
+        let _ = write!(s, "{:06x}", v & 0x00FF_FFFF);
+    };
+    for v in [
+        t.floor,
+        t.surface,
+        t.header,
+        t.raised,
+        t.border,
+        t.blank,
+        t.selection,
+        t.island_rule,
+        t.fg,
+        t.fg_dim,
+        t.fg_muted,
+        t.fg_subtle,
+        t.bevel_top,
+        t.bevel_left,
+        t.bevel_right,
+        t.bevel_bottom,
+        t.ember,
+        t.ember_dim,
+        t.ember_deep,
+        t.status_bg,
+        t.status_fg,
+        t.status_muted,
+        t.status_idle,
+        t.sage.key,
+        t.sage.tint,
+        t.sage.raised,
+        t.sage.border,
+        t.sage.fg,
+        t.sage.fg_dim,
+        t.sage.fg_muted,
+        t.cinnabar.key,
+        t.cinnabar.tint,
+        t.cinnabar.raised,
+        t.cinnabar.border,
+        t.cinnabar.fg,
+        t.cinnabar.fg_dim,
+        t.cinnabar.fg_muted,
+        t.syntax.slate,
+        t.syntax.sage,
+        t.syntax.sand,
+        t.syntax.moss,
+        t.syntax.ash,
+        t.syntax.dusk,
+        t.syntax.smoke,
+        t.syntax.fen,
+        t.syntax.cinnabar,
+        t.terminal.bg,
+        t.terminal.fg,
+    ] {
+        c(v);
+    }
+    for v in t.terminal.ansi {
+        c(v);
+    }
+    for n in [
+        t.smooth_mem as i32,
+        t.metrics.bevel,
+        t.metrics.gap,
+        t.metrics.hairline,
+        t.metrics.header_h,
+        t.metrics.status_h,
+        t.metrics.tag_pad_x,
+        t.metrics.tab_strip_h,
+    ] {
+        let _ = write!(s, ",{n}");
+    }
+    s
+}
+
+/// The number of fields `to_wire` emits. A short line is refused rather than
+/// applied to whatever it reached, so a truncated push cannot half-theme a
+/// display.
+pub const WIRE_FIELDS: usize = 72;
+
+/// The inverse of `to_wire`. `None` on any deviation -- a wrong count, a bad
+/// colour, a geometry value outside the same bounds the FILE must satisfy.
+///
+/// The bounds are re-checked here on purpose: this arrives from another
+/// process, so it is untrusted input in its own right, and a display whose
+/// hairline came over a wire it did not validate is a `scale`-class hazard
+/// wearing a theme's clothes.
+pub fn from_wire(line: &str) -> Option<Theme> {
+    let f: alloc::vec::Vec<&str> = line.trim().split(',').collect();
+    if f.len() != WIRE_FIELDS {
+        return None;
+    }
+    let col = |i: usize| -> Option<Argb> {
+        let h = f[i];
+        if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let mut v = 0u32;
+        for ch in h.chars() {
+            v = (v << 4) | ch.to_digit(16)?;
+        }
+        Some(0xFF00_0000 | v)
+    };
+    let num = |i: usize, key: &str| -> Option<i32> {
+        let n: i64 = f[i].parse().ok()?;
+        let (lo, hi) = geometry_bounds(key);
+        if lo == 0 && hi == 0 {
+            return None;
+        }
+        if n < lo || n > hi {
+            return None;
+        }
+        Some(n as i32)
+    };
+    let mut ansi = [0u32; 16];
+    for (j, slot) in ansi.iter_mut().enumerate() {
+        *slot = col(48 + j)?;
+    }
+    let smooth: i64 = f[64].parse().ok()?;
+    if !(0..=200).contains(&smooth) {
+        return None;
+    }
+    Some(Theme {
+        floor: col(0)?,
+        surface: col(1)?,
+        header: col(2)?,
+        raised: col(3)?,
+        border: col(4)?,
+        blank: col(5)?,
+        selection: col(6)?,
+        island_rule: col(7)?,
+        fg: col(8)?,
+        fg_dim: col(9)?,
+        fg_muted: col(10)?,
+        fg_subtle: col(11)?,
+        bevel_top: col(12)?,
+        bevel_left: col(13)?,
+        bevel_right: col(14)?,
+        bevel_bottom: col(15)?,
+        ember: col(16)?,
+        ember_dim: col(17)?,
+        ember_deep: col(18)?,
+        status_bg: col(19)?,
+        status_fg: col(20)?,
+        status_muted: col(21)?,
+        status_idle: col(22)?,
+        sage: LiveKey {
+            key: col(23)?,
+            tint: col(24)?,
+            raised: col(25)?,
+            border: col(26)?,
+            fg: col(27)?,
+            fg_dim: col(28)?,
+            fg_muted: col(29)?,
+        },
+        cinnabar: LiveKey {
+            key: col(30)?,
+            tint: col(31)?,
+            raised: col(32)?,
+            border: col(33)?,
+            fg: col(34)?,
+            fg_dim: col(35)?,
+            fg_muted: col(36)?,
+        },
+        syntax: Syntax {
+            slate: col(37)?,
+            sage: col(38)?,
+            sand: col(39)?,
+            moss: col(40)?,
+            ash: col(41)?,
+            dusk: col(42)?,
+            smoke: col(43)?,
+            fen: col(44)?,
+            cinnabar: col(45)?,
+        },
+        terminal: vt::Palette {
+            bg: col(46)?,
+            fg: col(47)?,
+            ansi,
+        },
+        smooth_mem: smooth as u16,
+        metrics: Metrics {
+            bevel: num(65, "bevel")?,
+            gap: num(66, "gap")?,
+            hairline: num(67, "hairline")?,
+            header_h: num(68, "header_h")?,
+            status_h: num(69, "status_h")?,
+            tag_pad_x: num(70, "tag_pad_x")?,
+            tab_strip_h: num(71, "tab_strip_h")?,
+        },
+    })
+}
+
 /// Where a resolved theme came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -920,6 +1129,107 @@ mod tests {
         // refusal is the SIZE's and not the content's.
         let ok = &big[..THEME_MAX];
         assert!(Theme::from_toml(ok).is_ok(), "just under the cap must load");
+    }
+
+    // THE PUSH SEAM (3.4's display coherence). A theme whose EVERY field
+    // differs from the built-in must survive the round trip -- so a field
+    // left out of `to_wire` comes back as the built-in's and this fails,
+    // which is the only way to catch an omission in a hand-written codec.
+    #[test]
+    fn a_distinct_theme_survives_the_wire() {
+        // Build it from a file setting all 57 keys to distinct values: the
+        // same machinery the registry sweep uses, so the two cannot disagree
+        // about what "every field" means.
+        let mut full = String::new();
+        let mut last = "";
+        let mut n = 0u32;
+        for (table, key) in KEYS {
+            if *table != last {
+                full.push('[');
+                full.push_str(table);
+                full.push_str("]\n");
+                last = table;
+            }
+            full.push_str(key);
+            full.push_str(" = ");
+            // A distinct value per key, so no two fields can be confused.
+            if *key == "ansi" {
+                full.push('[');
+                for i in 0..16u32 {
+                    let _ = core::fmt::write(
+                        &mut full,
+                        format_args!("\"#{:02x}{:02x}{:02x}\",", 0x40 + i, i, 0x80 + i),
+                    );
+                }
+                full.push(']');
+            } else if *table == "geometry" || *table == "type" {
+                // Inside each token's own bounds, and distinct where it can be.
+                let v = match *key {
+                    "bevel" => 5,
+                    "gap" => 6,
+                    "hairline" => 7,
+                    "header_h" => 31,
+                    "status_h" => 33,
+                    "tag_pad_x" => 11,
+                    "tab_strip_h" => 13,
+                    _ => 9, // type.smooth
+                };
+                let _ = core::fmt::write(&mut full, format_args!("{v}"));
+            } else {
+                n += 1;
+                let _ = core::fmt::write(&mut full, format_args!("\"#{:06x}\"", 0x112200 + n));
+            }
+            full.push('\n');
+        }
+        let t = Theme::from_toml(&full)
+            .expect("the all-keys file must load")
+            .theme;
+        assert!(t != builtin(), "the fixture must differ from the built-in");
+
+        let wire = to_wire(&t);
+        assert_eq!(wire.split(',').count(), WIRE_FIELDS);
+        assert_eq!(from_wire(&wire), Some(t), "a field did not survive to_wire");
+        assert!(wire.len() < 700, "the line is bounded: {}", wire.len());
+    }
+
+    // Untrusted in its own right: this arrives from ANOTHER PROCESS, so a
+    // display whose hairline came over an unvalidated wire is a scale-class
+    // hazard in a theme's clothes.
+    #[test]
+    fn a_malformed_wire_is_refused_with_its_bounds_rechecked() {
+        let good = to_wire(&builtin());
+        assert!(from_wire(&good).is_some(), "the control must pass");
+        assert_eq!(from_wire(""), None);
+        assert_eq!(from_wire(&good[..good.len() - 1]), None, "a truncated push");
+        assert_eq!(
+            from_wire(&alloc::format!("{good},0")),
+            None,
+            "one field too many"
+        );
+        // Mutate a NAMED FIELD, never a substring: `replacen("ff", ..)` on
+        // this line finds nothing (the alpha byte is not on the wire), so it
+        // would have re-tested the unmodified control and passed.
+        let mut f: alloc::vec::Vec<&str> = good.split(',').collect();
+        let was = f[0];
+        f[0] = "zz1122";
+        assert_ne!(f[0], was, "the mutation must actually mutate");
+        assert_eq!(from_wire(&f.join(",")), None, "non-hex");
+        f[0] = was;
+        assert!(
+            from_wire(&f.join(",")).is_some(),
+            "the control, one field back"
+        );
+        // The geometry bounds are re-checked HERE, not trusted from the far
+        // side: a hairline of 0 is refused on the wire exactly as in a file.
+        f[67] = "0";
+        assert_eq!(from_wire(&f.join(",")), None, "hairline 0 on the wire");
+        f[67] = "1";
+        assert!(
+            from_wire(&f.join(",")).is_some(),
+            "the control, one field back"
+        );
+        f[64] = "999";
+        assert_eq!(from_wire(&f.join(",")), None, "smooth out of range");
     }
 
     // 3.4: the user's file wins, and a REFUSED file falls through to the next

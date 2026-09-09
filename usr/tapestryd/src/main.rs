@@ -183,6 +183,71 @@ fn post_srv_warp() -> Result<i64, ()> {
 /// absent or unreadable, when the read FILLS the buffer (a token cut at the
 /// end must never parse as a shorter valid percent), or when the token's
 /// value is not one of the five (said once).
+/// The SYSTEM theme file, read once at startup (HALCYON-THEME 3.4).
+///
+/// tapestryd is system-spawned, so the USER's file cannot reach it by being
+/// read -- a user's home is that user's, and this process is not them. The
+/// user tier arrives as a PUSH from their declared session instead, over the
+/// `theme` ctl verb, which is why the display and the content can agree at
+/// all.
+///
+/// Refused-or-absent is not fatal: the built-in stands, loudly if a file was
+/// there and would not load.
+fn system_theme() -> libhalcyon::theme::Theme {
+    const PATH: &str = libhalcyon::theme::SYSTEM_THEME_PATH;
+    // SAFETY: SVC wrappers over a path literal and an owned buffer.
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, PATH.as_ptr(), PATH.len(), T_OREAD) };
+    if fd < 0 {
+        // 4.1: a missing file is not an error. It IS still worth one line --
+        // the absent path is otherwise indistinguishable from a read that
+        // never ran, and an unwitnessed load path is one nobody can tell has
+        // broken (measured: this function left NO trace in the first gate
+        // capture, which is how the gap was found).
+        say!("tapestryd: theme built-in (no {})", PATH);
+        return libhalcyon::theme::builtin();
+    }
+    // One byte past the cap, so a file AT the cap is distinguishable from one
+    // that was cut: `from_toml` refuses anything over it, and a short read
+    // that filled the buffer would otherwise be a valid truncated prefix.
+    let mut buf = alloc::vec![0u8; libhalcyon::theme::THEME_MAX + 1];
+    let mut got = 0usize;
+    loop {
+        let n = unsafe { t_read(fd, buf.as_mut_ptr().add(got), buf.len() - got) };
+        if n <= 0 {
+            break;
+        }
+        got += n as usize;
+        if got == buf.len() {
+            break;
+        }
+    }
+    unsafe { t_close(fd) };
+    let text = match core::str::from_utf8(&buf[..got]) {
+        Ok(t) => t,
+        Err(_) => {
+            say!(
+                "tapestryd: {} is not utf-8; the built-in theme stands",
+                PATH
+            );
+            return libhalcyon::theme::builtin();
+        }
+    };
+    let r = libhalcyon::theme::resolve(Some(text), None);
+    for n in &r.notes {
+        say!("tapestryd: {}", n);
+    }
+    say!(
+        "tapestryd: theme {} ({:?})",
+        if r.name.is_empty() {
+            "built-in"
+        } else {
+            &r.name
+        },
+        r.source
+    );
+    r.theme
+}
+
 fn declared_scale() -> Option<u16> {
     // SAFETY: SVC wrappers over a path literal and an owned buffer.
     let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/hw/chosen/bootargs".as_ptr(), 19, T_OREAD) };
@@ -298,7 +363,7 @@ impl Driver for Tapestryd {
             .unwrap_or((0x7FFF, 0x7FFF));
 
         Ok(Tapestryd {
-            comp: Comp::new(g, declared_scale()),
+            comp: Comp::new(g, declared_scale(), system_theme()),
             kbd,
             tablet,
             mouse,

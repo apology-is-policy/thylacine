@@ -2318,7 +2318,7 @@ struct GlAdopt {
 const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
-    pub fn new(gpu: Gpu, declared: Option<u16>) -> Comp {
+    pub fn new(gpu: Gpu, declared: Option<u16>, theme: libhalcyon::theme::Theme) -> Comp {
         let (derived, src) = match declared {
             Some(p) => (p, "declared"),
             None => (
@@ -2345,8 +2345,8 @@ impl Comp {
             scale,
             scale_override: None,
             declared,
-            metrics: libhalcyon::theme::builtin().metrics.at(scale),
-            theme: libhalcyon::theme::builtin(),
+            metrics: theme.metrics.at(scale),
+            theme,
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
@@ -4044,6 +4044,35 @@ impl Comp {
     /// next read, and the STRUCTURAL relayout re-carves every strip and
     /// fans every surface its CONFIGURE. `why` names the source on the
     /// line (edid / verb / auto / chord / mode).
+    /// Adopt a theme pushed by the declared session (HALCYON-THEME 3.4).
+    ///
+    /// The GEOMETRY may move, so this is a structural change and takes the
+    /// same shape as `apply_scale`: re-derive the scaled metrics, owe the
+    /// fan, retire a status bar whose height no longer matches so its owner
+    /// re-mints at the new one, and reconcile. A theme that changes only
+    /// COLOURS still needs the fan -- every painted surface is now wrong,
+    /// and no geometry moved to trigger a redraw on its own (the scale
+    /// round's F3 lesson: a fan keyed on geometry misses every change that
+    /// moves no geometry).
+    fn apply_theme(&mut self, t: libhalcyon::theme::Theme) {
+        if t == self.theme {
+            return; // idempotent: a re-push of the same theme fans nothing
+        }
+        self.theme = t;
+        self.metrics = self.theme.metrics.at(self.scale);
+        say!("tapestryd: theme applied (session push)");
+        self.rescale_fan_due = true;
+        if let Some(st) = self.status {
+            let stale = self
+                .surf(st.n)
+                .is_some_and(|s| s.h != self.metrics.status_h as u32);
+            if stale {
+                self.retire(st.n);
+            }
+        }
+        self.reconcile();
+    }
+
     fn apply_scale(&mut self, pct: u16, why: &str) {
         if pct == self.scale || !scale::is_valid_pct(pct) {
             return;
@@ -16165,13 +16194,38 @@ impl Conn {
         let session_scale_verb = s.starts_with("scale ")
             && comp.session_declared(self.conn_id)
             && comp.conn_hosts(self.conn_id);
+        // HALCYON-THEME 3.4: the theme is the SEAT's, on exactly the `scale`
+        // terms. tapestryd paints the chrome and halcyond paints the content,
+        // and they must agree or the bevel does not match the pane -- but the
+        // user's theme file lives in the user's home, which this process is
+        // not entitled to read. So a DECLARED session that is hosting pushes
+        // its resolved theme. A per-process client re-theming another
+        // principal's display is the same cfg-3 lie `scale` refuses.
+        let session_theme_verb = s.starts_with("theme ")
+            && comp.session_declared(self.conn_id)
+            && comp.conn_hosts(self.conn_id);
         if !Self::is_ungated_ctl(s)
             && !self.peer_is_renderer()
             && !session_menu_verb
             && !session_status_verb
             && !session_scale_verb
+            && !session_theme_verb
         {
             return Err(p9::E_PERM);
+        }
+        if let Some(rest) = s.strip_prefix("theme ") {
+            // Budgeted like a layout verb: it IS one -- the metrics may move,
+            // so every carve is re-decided.
+            self.layout_verb_budget()?;
+            // UNTRUSTED INPUT even past the gate: the sender is the seat, but
+            // a seat is still another process, and `from_wire` re-checks the
+            // geometry bounds rather than trusting the far side (a display
+            // whose hairline arrived unvalidated is a scale-class hazard).
+            let Some(t) = libhalcyon::theme::from_wire(rest) else {
+                return Err(p9::E_INVAL);
+            };
+            comp.apply_theme(t);
+            return Ok(());
         }
         if let Some(rest) = s.strip_prefix("scale ") {
             // `scale auto` re-derives (the declaration, else the EDID);
