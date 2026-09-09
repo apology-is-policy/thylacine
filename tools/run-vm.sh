@@ -620,6 +620,15 @@ fi
 if [[ "${THYLACINE_CAPTUREPROBE:-0}" == "1" ]]; then
     append_tokens+=("thylacine.captureprobe")
 fi
+# I-47 slice 1b (docs/HALCYON.md 14.7): the inline-image render-path witness.
+# halcyond (the console renderer) injects a baked raster into the transcript so
+# a boot proves Item::Image -> cartoon Op::Image on the REAL scanout, before the
+# out-of-band channel (slice 3) or the decoder (slice 2) exist -- the de-risk
+# the host layout/cartoon tests cannot do. Same "1" convention as the probes
+# above; screendump the result (tools/screendump.sh). Gated off by default.
+if [[ "${THYLACINE_VIEWTEST:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.viewtest")
+fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends

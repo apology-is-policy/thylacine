@@ -28,6 +28,7 @@ pub mod status;
 pub mod tile;
 pub mod tiles;
 pub mod transcript;
+pub mod viewtest;
 
 /// The vendored proportional faces (third_party/ibm-plex; HALCYON-VISUAL.md
 /// section 7 + HALCYON.md section 4 -- IBM Plex Sans, operator-ratified

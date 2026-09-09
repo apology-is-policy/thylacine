@@ -901,6 +901,32 @@ impl Transcript {
         self.col
     }
 
+    /// Slice 1b test lever (HALCYON.md 14.7 staging, I-47): inject a decoded
+    /// ARGB raster as its own frozen block, so the inline-image RENDER PATH --
+    /// layout letterbox + `cartoon::Op::Image` blit -- can be witnessed on real
+    /// hardware BEFORE the out-of-band channel (slice 3) or the decoder (slice
+    /// 2) exist. The only producer is main's `thylacine.viewtest` bootarg gate;
+    /// there is no wire op for an image (that IS slice 3). `argb` is `w`-tight,
+    /// `h` rows; a length mismatch or a zero dimension is ignored (fail-safe,
+    /// like every other malformed reference on the render path). An image is a
+    /// non-Line item, so the block's `class()` is Doc (the PROSE margins the
+    /// Role::Image arm wants) with no styles table needed.
+    pub fn inject_image(&mut self, w: u32, h: u32, argb: Vec<u32>) {
+        if w == 0 || h == 0 || argb.len() != (w as usize).saturating_mul(h as usize) {
+            return;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let cost = argb.len() * core::mem::size_of::<u32>() + ITEM_OVERHEAD;
+        let mut b = Block::new(id, BlockKind::Foreign);
+        b.items.push(Item::Image { w, h, argb });
+        b.cost = cost;
+        self.stored_cost += cost;
+        self.frozen.push_back(b);
+        self.enforce_budget();
+        self.seq = self.seq.wrapping_add(1);
+    }
+
     /// (em_stack, obj_stack) depths -- the nesting bound witness (F4).
     #[cfg(test)]
     pub(crate) fn nest_depths(&self) -> (usize, usize) {

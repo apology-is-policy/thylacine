@@ -397,6 +397,26 @@ pub extern "C" fn rs_main() -> i64 {
     let mut t = Transcript::new(libhalcyon::theme::daylight_palette());
     let mut cache = LayoutCache::new();
 
+    // I-47 slice 1b: the inline-image witness. When the boot declares
+    // `thylacine.viewtest` (run-vm.sh THYLACINE_VIEWTEST=1), inject a raster
+    // into the transcript so the render path (Item::Image -> cartoon Op::Image)
+    // shows on the real scanout -- the de-risk the host test cannot do. Reads
+    // the FDT bootargs the way tapestryd reads its scale token; best-effort
+    // (a missing /hw or an absent token simply injects nothing).
+    {
+        let ba = open_path("/hw/chosen/bootargs", T_OREAD);
+        if ba >= 0 {
+            let mut bbuf = [0u8; 512];
+            let n = unsafe { t_read(ba, bbuf.as_mut_ptr(), bbuf.len()) };
+            let _ = unsafe { libthyla_rs::t_close(ba) };
+            if n > 0 && halcyond::viewtest::declared(&bbuf[..n as usize]) {
+                let (iw, ih, argb) = halcyond::viewtest::raster();
+                t.inject_image(iw, ih, argb);
+                say!("halcyond: viewtest -- inline image injected ({}x{}; I-47 slice 1b)", iw, ih);
+            }
+        }
+    }
+
     // The winsize report: the transcript is flowed, but programs wrap to a
     // COLUMN count -- report the mono-grid equivalent (foreign/plain
     // content is mono, so this is the terminal-compatible answer). The cell

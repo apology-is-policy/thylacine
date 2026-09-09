@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 68 unowned · 502 files (86% owned) · ~20865 unswept lines.**
+**434 owned · 69 unowned · 503 files (86% owned) · ~20984 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~32280 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -79,8 +79,8 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | usr/lib | 58 | 5 | 1316 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/imperium | 0 | 1 | 591 |
+| usr/halcyond | 19 | 2 | 551 |
 | usr/stratumd-stub | 0 | 1 | 453 |
-| usr/halcyond | 19 | 1 | 432 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/corvus | 1 | 1 | 245 |
@@ -164,6 +164,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |
 | usr/pouch-hello/pouch-hello-fopen.c | 120 |
+| usr/halcyond/src/viewtest.rs | 119 |
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
