@@ -68,10 +68,15 @@ than panics.
 (free the compressed input before the event loop) -> `Surface::fullscreen`
 (bounded connect retry, a labelled block that yields the Surface -- no post-loop
 `unwrap`) -> `FrameIntent::Static` -> `paint` into `pixels()` -> `present(None)`.
-The decode runs on a **128 MiB `ThylaAllocN` heap** (an image decoder's peak is
-~8*npx + the input, far past the default 4 MiB); `GALLERY_MAX_PIXELS` is sized to
-that heap and checked BEFORE decode, so the pixel bound is REAL, not a phantom
-the allocator OOM-exits past. The success is announced on serial
+The decode runs on a **192 MiB `ThylaAllocN` heap**, sized for the WORST decode
+mode: a PROGRESSIVE JPEG holds a full-image coefficient buffer per input component
+(~2 B * components * npx, zune mcu_prog.rs) alongside the output, so its peak ~=
+READ_CAP + 12*npx (vs baseline/PNG ~8*npx) -- 12*12M + 16 MiB = 160 MiB fits, to
+view a ~12 Mpx photo. `GALLERY_MAX_PIXELS` (12 Mpx) is checked BEFORE decode, so
+the pixel bound is REAL, not a phantom the allocator OOM-exits past (the pre-JPEG
+128 MiB OOM-exited a 12 Mpx progressive JPEG -- the JPEG round's F1). ThylaAllocN
+is lazy demand-zero overcommit, so the 192 MiB reservation commits only touched
+pages, within the 256 MiB per-AddrSpace page budget (I-32). The success is announced on serial
 (`gallery: <path> WxH shown FWxFH at OX,OY on DWxDH`, where WxH is the NATIVE
 raster and FWxFH the fitted size) -- printed only after a successful present, so
 it is the end-to-end witness the E2E keys on. Then an event loop: `TEV_KEY` ->
@@ -114,7 +119,8 @@ Nearest-neighbor scale is one `dst`-pixel iteration: O(dw*dh), independent of th
 source size (a huge source only changes the sample stride). The compressed input
 is `drop`ped after decode, so only the raster (<= `GALLERY_MAX_PIXELS`*4 bytes,
 ~48 MiB at the 12 Mpx cap) is held for the viewer's lifetime -- comfortably
-inside the 128 MiB heap and bounded by the per-AddrSpace page budget (I-32).
+inside the 192 MiB heap (the transient DECODE peak, ~160 MiB for a progressive
+JPEG, is the sizing constraint) and bounded by the per-AddrSpace page budget (I-32).
 Present is once (a `Static` surface), plus one repaint per CONFIGURE.
 
 ## Prosecution
@@ -165,3 +171,11 @@ F2: `bytes` freed after decode. F3: the connect `unwrap` replaced by a
 Surface-yielding block. The finding's whole-system note (view shared the OOM
 ceiling) was fixed in the same chunk ([[sub-view]]). A Fable-diversity pass is
 owed with the rest of the inline-media arc.
+
+The JPEG slice's Opus round then found the R-GALLERY-1 heap sizing itself
+under-modeled PROGRESSIVE JPEG (a full-image coefficient buffer per input
+component, ~2 B * components * npx, alongside the output -- peak ~12*npx vs the
+~8*npx the 128 MiB assumed): a 12 Mpx progressive would OOM 128 MiB. Fixed by
+bumping the heap 128 -> 192 MiB (keeping the 12 Mpx cap; the JPEG round's F1) so a
+12 Mpx progressive photo (~160 MiB peak) fits. See [[sub-view]] + the I-47
+AUDIT-TRIGGERS row for the full JPEG-round close.

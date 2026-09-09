@@ -13,13 +13,18 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-// An image decoder's working set (the compressed input + the samples buffer +
-// the ARGB buffer -- all live at once during decode, peak ~= 8*npx + input) far
-// exceeds the default 4 MiB heap. Size it for a ~12 Mpx source (covers 4K images
-// and typical photos); GALLERY_MAX_PIXELS rejects anything larger up front so the
-// bound is REAL, not a phantom the allocator OOMs past.
+// An image decoder's working set far exceeds the default 4 MiB heap, and the
+// worst case is a PROGRESSIVE JPEG: zune holds a full-image coefficient buffer
+// per input component (~2 B * components * npx, up to 4 for CMYK, zune
+// mcu_prog.rs) ALONGSIDE the output during decode -- peak ~= READ_CAP + 12*npx,
+// vs a baseline/PNG ~8*npx. To view a ~12 Mpx photo (12*12M + 16 MiB = 160 MiB)
+// the heap is 192 MiB (lazy demand-zero overcommit -- only touched pages commit,
+// and 160 MiB is well under the 256 MiB per-AddrSpace page budget, I-32).
+// GALLERY_MAX_PIXELS rejects anything larger up front, so the bound is REAL, not
+// a phantom the allocator OOMs past (the former 128 MiB OOM-exited a 12 Mpx
+// progressive JPEG -- holotype F1).
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 128 * 1024 * 1024 }> =
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 192 * 1024 * 1024 }> =
     libthyla_rs::alloc::ThylaAllocN;
 
 use libthyla_rs::env;
@@ -39,14 +44,16 @@ macro_rules! say {
     }};
 }
 
-// The compressed-input cap, coherent with the 128 MiB heap: a 12 Mpx image's
-// decode peak is ~96 MiB, so the input must stay well under the remainder. 16
-// MiB holds any real image's compressed bytes with room to spare.
+// The compressed-input cap. It is held ACROSS the decode (zune borrows the input
+// slice), so it is part of the peak working set -- counted in the budget below.
+// 16 MiB holds any real image's compressed bytes with room to spare.
 const READ_CAP: usize = 16 * 1024 * 1024;
 
-// The decode pixel budget, sized to the heap (peak ~= 8*npx + input <= 128 MiB).
-// Rejected BEFORE decode via a headers-only dimension read, so an over-budget
-// image gets a clean error instead of a silent OOM-exit.
+// The decode pixel budget, sized to the 192 MiB heap for the worst-case
+// progressive-JPEG peak (~= READ_CAP + 12*npx; see the allocator note): 12*12M +
+// 16 MiB = 160 MiB, inside the heap with margin. Rejected BEFORE decode via a
+// headers-only dimension read, so an over-budget image gets a clean error instead
+// of a silent OOM-exit.
 const GALLERY_MAX_PIXELS: u64 = 12 * 1024 * 1024;
 
 // tapestryd is warden-spawned well before this, but a slow bring-up must not

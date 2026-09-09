@@ -31,11 +31,17 @@ use view::{decode_jpeg, decode_png, jpeg_dimensions, png_dimensions, sniff, with
 // decode peak is ~48 MiB, so the input must stay well under the remainder).
 const READ_CAP: usize = 16 * 1024 * 1024;
 
-// view's own decode pixel budget, sized to the heap (peak ~= 8*npx + input),
-// checked from the headers BEFORE decode so an over-budget image is a clean
-// report rather than a silent OOM-exit. halcyond re-caps the CHANNEL downstream
-// (display-adaptive); this only bounds view's local decode.
-const VIEW_MAX_PIXELS: u64 = 6 * 1024 * 1024;
+// view's own decode pixel budget, sized to the heap for the WORST-CASE decode
+// peak + the held compressed input, checked from the headers BEFORE decode so an
+// over-budget image is a clean report rather than a silent OOM-exit. The worst
+// case is a PROGRESSIVE JPEG: zune holds a full-image coefficient buffer per
+// input component (~2 B * components * npx, up to 4 for CMYK, zune mcu_prog.rs)
+// ALONGSIDE the output during decode -- peak ~= READ_CAP + 12*npx, vs a
+// baseline/PNG ~8*npx. So 12*3M + 16 MiB = 52 MiB fits the 64 MiB heap with
+// margin; the former 6M (88 MiB) OOM-exited a progressive JPEG (holotype F1).
+// halcyond re-caps the CHANNEL downstream to ~1 Mpx (display-adaptive), so this
+// rarely binds the inline path; it bounds view's local decode.
+const VIEW_MAX_PIXELS: u64 = 3 * 1024 * 1024;
 
 /// Write the whole buffer to `fd` in bounded chunks, looping on the returned
 /// count (a 9P-backed fid caps a Twrite at the negotiated msize). False on any

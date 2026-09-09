@@ -138,12 +138,14 @@ pub fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32), &'static str> {
     Ok((info.width as u32, info.height as u32))
 }
 
-/// Decode a JPEG to opaque ARGB. zune-jpeg converts to its output colorspace --
-/// RGB for a colour image, Luma for grayscale -- which we read from
-/// `get_output_colorspace` (never assumed) and normalize to 0xAARRGGBB: a Luma
-/// channel replicates across R/G/B, RGB maps straight through, alpha is always
-/// opaque (JPEG carries none). A 4-component output (CMYK/YCCK) is REFUSED rather
-/// than mis-rendered as RGBA -- unlike PNG's 4th channel, JPEG's is not alpha.
+/// Decode a JPEG to opaque ARGB. zune-jpeg's output colorspace is only ever RGB
+/// (colour) or Luma (grayscale) -- a CMYK/YCCK input is converted to RGB, never
+/// emitted as 4 channels -- which we read from `get_output_colorspace` (never
+/// assumed) and normalize to 0xAARRGGBB: a Luma channel replicates across R/G/B,
+/// RGB maps straight through, alpha is always opaque (JPEG carries none). The
+/// `nc != 1 && nc != 3` guard below is therefore DEFENSIVE: unreachable with
+/// today's zune, it fail-closes should a future zune emit a 4th channel (which
+/// would not be alpha, so must not be mis-mapped as RGBA).
 pub fn decode_jpeg(bytes: &[u8]) -> Result<Raster, &'static str> {
     use zune_jpeg::JpegDecoder;
 
@@ -301,5 +303,46 @@ mod tests {
             decode_jpeg(&JPEG_MAGIC).is_err(),
             "magic alone is not a decodable image"
         );
+    }
+
+    // A 16x16 GRAYSCALE JPEG (top half 0x40, bottom 0xC0; make-test-jpg.sh via
+    // cjpeg -grayscale). A grayscale JPEG decodes as Luma (nc==1), exercising the
+    // replicate-across-R/G/B arm the colour fixtures never reach: every pixel
+    // must be gray (r==g==b) and opaque.
+    #[test]
+    fn decode_jpeg_grayscale_to_luma_argb() {
+        let jpg = include_bytes!("testdata/gray.jpg");
+        assert_eq!(sniff(jpg), Kind::Jpeg);
+        let r = decode_jpeg(jpg).expect("decode gray.jpg");
+        assert_eq!((r.w, r.h), (16, 16));
+        assert_eq!(r.argb.len(), 16 * 16);
+        for &px in &r.argb {
+            assert_eq!((px >> 24) & 0xFF, 0xFF, "opaque");
+            let (rr, gg, bb) = ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
+            assert!(rr == gg && gg == bb, "gray means r==g==b, got {:08X}", px);
+        }
+        let g = |x: u32, y: u32| ((r.argb[(y * 16 + x) as usize] >> 8) & 0xFF) as i32;
+        assert!((g(8, 4) - 0x40).abs() <= 40, "top half ~0x40, got {}", g(8, 4));
+        assert!((g(8, 12) - 0xC0).abs() <= 40, "bottom half ~0xC0, got {}", g(8, 12));
+    }
+
+    // A 32x32 PROGRESSIVE JPEG (jpegtran -progressive of quad.jpg; SOF2). The
+    // progressive decode path holds full-image coefficient buffers the baseline
+    // path does not (the peak the viewers' heap budgets now account for --
+    // holotype F1); this pins that it still decodes to a w*h ARGB with the same
+    // quadrant content.
+    #[test]
+    fn decode_jpeg_progressive_to_argb() {
+        let jpg = include_bytes!("testdata/prog.jpg");
+        assert_eq!(sniff(jpg), Kind::Jpeg);
+        let r = decode_jpeg(jpg).expect("decode prog.jpg");
+        assert_eq!((r.w, r.h), (32, 32));
+        assert_eq!(r.argb.len(), 32 * 32);
+        let at = |x: u32, y: u32| r.argb[(y * 32 + x) as usize];
+        let chan = |px: u32, sh: u32| ((px >> sh) & 0xFF) as i32;
+        let tl = at(8, 8); // red quadrant
+        assert!(chan(tl, 16) > chan(tl, 8) + 40 && chan(tl, 16) > chan(tl, 0) + 40, "TL red-dominant, got {:08X}", tl);
+        let br = at(24, 24); // white quadrant
+        assert!(chan(br, 16) > 150 && chan(br, 8) > 150 && chan(br, 0) > 150, "BR bright, got {:08X}", br);
     }
 }

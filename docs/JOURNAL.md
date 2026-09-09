@@ -22,6 +22,100 @@ needed the operator.
 
 
 ---
+## 2026-09-09 (aux, run 8, post self-compact) -- gallery arc E2E-verified + PUSHED; then the JPEG slice (zune-jpeg): both viewers decode JPEG; one Opus holotype in flight
+
+Picked up from the run-7 self-compact at the 600k line: the gallery arc was
+committed through `8454ecb3` but its OOM fix had NOT been E2E-re-verified on
+hardware (the fix changed the allocator + added a headers-only precheck), and
+nothing was pushed. Two things this run: close the gallery arc (verify + push),
+then the operator-ratified JPEG slice.
+
+**Re-prosecuted the OOM fix from a fresh context before trusting it.** I missed
+that OOM the first time (the E2E was green only because /test.png is 256 Kpx), so
+the first act was to re-read `cfa4f83f` cold: the 128 MiB lazy-overcommit heap
+(decode peak ~112 MiB at the 12 Mpx budget -- fits), the headers-only
+`png_dimensions`+`within_pixel_budget` precheck rejecting over-budget BEFORE the
+heap-hungry decode, `drop(bytes)`, the Surface-yielding connect block. Sound; the
+humility loop closed on my own read, not on the green.
+
+**Gallery arc CLOSED + PUSHED.** Waited out main's required WEAVE-SKEIN SMP gate
+on the shared mac (~48 min; interrupting a required gate for a provably-passing
+formality is not a fair trade -- a Monitor woke me the moment the lease freed).
+Then, on the fix-tip: `THYLACINE_HALCYON=1 build.sh all`, and both E2Es GREEN on
+HVF -- `ls-gfx-gallery` (`gallery: /test.png 640x400 shown 1280x800 at 0,0`) +
+`ls-gfx-inline-view` (`view: /test.png placed inline (640x400)` + halcyond's
+injection witness). Pushed `7846ecd7..8454ecb3` to BOTH mirrors (github + codeberg).
+
+**The JPEG slice `8f5a4143` (ratified "gallery first, then JPEG").** Both
+inline-media viewers now decode JPEG as well as PNG.
+
+- **Verified the vendor before adding it** (the discipline the OOM miss taught):
+  crates.io says `zune-jpeg` 0.4.21 depends on ONLY `zune-core ^0.4` (already
+  vendored at 0.4.12), so `cargo vendor` added exactly one crate dir with zero
+  churn to the existing tree (measured: `git status third_party/rust/` = one `??`).
+- **The safe-decode property, measured not assumed.** Vendored
+  `default-features=false`, and zune-jpeg's Cargo.toml `default =
+  ["x86","neon","std"]` -- so all three are OFF, which activates the crate's own
+  `#![cfg_attr(not(any(feature="x86",feature="neon")), forbid(unsafe_code))]`. The
+  JPEG decode is therefore ENTIRELY safe Rust, in the sacrificial view/gallery
+  process: hostile bytes can only panic (caught at the process boundary), never
+  reach memory unsafety -- the same posture as PNG.
+- **`argb.len() == w*h` proven, not hoped.** `decode_jpeg` reads `nc` from
+  `get_output_colorspace()`; the concern was whether that matches the nc zune
+  sizes the decode buffer with. It does, by construction: `output_buffer_size()`
+  (decoder.rs:261) and `get_output_colorspace()` (decoder.rs:665) BOTH call
+  `self.options.jpeg_get_out_colorspace()`, and `decode()` returns exactly
+  `output_buffer_size()` bytes -> `samples.len() == npx*nc` -> `chunks_exact(nc)`
+  yields exactly npx chunks. So the place path (a header declaring w*h + a payload
+  of argb.len()*4) cannot desync.
+- **Keying on the reported colorspace makes it robust:** RGB (nc=3) and Luma
+  (nc=1) normalize to opaque ARGB; a 4-component CMYK/YCCK output is REFUSED, not
+  mis-read as RGBA (JPEG's 4th channel is not alpha). The default out-colorspace
+  is RGB (never BGR), so nc==3 is RGB order.
+- **The DRY refactor.** view's decode/place tail factored into
+  `check_budget`+`place_decoded` (PNG + JPEG share it); gallery's Png arm
+  converted to the same `check_budget` for symmetry with its new Jpeg arm. Both
+  bins' PNG E2Es RE-RAN GREEN after the refactor -- the regression check.
+- **Witnessed on hardware:** `ls-gfx-jpeg.exp` (view `/test.jpg` inline + gallery
+  `/test.jpg` fullscreen), PASS [31s] on HVF, all three witnesses (`view:
+  /test.jpg placed inline`, halcyond `inline image placed (640x400)`, `gallery:
+  /test.jpg 640x400 shown 1280x800`). Fixtures `test.jpg`+`quad.jpg` from
+  `make-test-jpg.sh` (sips), committed; view lib tests 6 -> 9.
+
+**Opus holotype on the JPEG decode: 1 P1 + 2 P3, ALL FIXED** (format-fuzz
+surface; Fable credit-exhausted -> the Opus fallback, context-independence not
+family diversity; MODEL start==end). My concurrent self-audit had found no P0/P1
+(nc-consistency + `forbid(unsafe_code)`) -- and MISSED the P1, which is the lesson
+of the round:
+
+- **F1 [P1] -- the one I missed.** I sized the JPEG budget by mirroring
+  decode_png's ~8*npx peak. But a PROGRESSIVE JPEG is a different beast: zune
+  holds a full-image i16 coefficient buffer PER input component
+  (mcu_prog.rs:101-106, `2 B * components * npx`) ALONGSIDE the output during
+  decode -- peak ~= READ_CAP + 12*npx (4-comp), ~1.5x the baseline. A 3-comp
+  4:4:4 progressive at 6 Mpx = ~70 MiB OOM-exits view's 64 MiB heap: the exact
+  "misleading OOM" class R-GALLERY-1 F1 closed, on the NEW progressive path, and
+  progressive is the common web format. The green E2E hid it AGAIN because
+  /test.jpg is baseline + 256 Kpx (the one image that fits -- small AND baseline).
+  LESSON: **a decode budget copied from one codec under-models another; size to
+  the worst decode MODE's peak, not the format's typical one.** Fixed: view
+  6M->3M (52 MiB fits 64; the channel re-caps inline to ~1 Mpx anyway); gallery
+  heap 128->192 MiB keeping 12M (160 MiB fits, to view ~12 Mpx photos; lazy
+  overcommit within the 256 MiB page budget). Both budgets now documented against
+  the progressive worst case.
+- **F2/F3 [P3, fixed].** F2: the `nc != 1 && nc != 3` "CMYK REFUSED" comment
+  described an unreachable path (zune only ever outputs RGB/Luma) -> reworded as a
+  defensive guard. F3: the Luma + progressive paths were reachable but untested
+  (fixtures were baseline 3-comp -- exactly where F1 hid) -> added `gray.jpg`
+  (grayscale) + `prog.jpg` (SOF2 progressive) fixtures + tests (view lib 9 -> 11).
+
+Verified sound (the prosecutor re-derived from zune source, not comments):
+memory-safe decode, `argb.len()==w*h` exactly, nc in {1,3}, the refactor, E2E
+honesty. Non-invasive fix (budget constants + a heap bump) + P0=0 / (P1+P2)=1 ->
+close NOT dirty, no round 2. The fix's own E2E re-run (all 3, on the new budget)
+is the hardware witness. Fable-diversity pass still owed.
+
+---
 ## 2026-09-09 (aux, run 7, post-compact) -- inline media EXPAND begins: the `view` obj-verb lands; the rest stops for the operator (Opus fallback)
 
 Picked up the ratified inline-media expand from the run-6 self-compact. First
