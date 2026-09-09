@@ -471,7 +471,33 @@ pub const NAME_MAX: usize = 64;
 /// accepted whole or refused whole, and a chokepoint cannot be forgotten at
 /// the next place someone prints a theme's name.
 fn name_is_presentable(s: &str) -> bool {
-    s.len() <= NAME_MAX && !s.chars().any(|c| c.is_control())
+    // Length first: it is the cheap discriminator, so a 32 KB "name" is
+    // refused without scanning it.
+    s.len() <= NAME_MAX && !s.chars().any(is_forgeable)
+}
+
+/// Characters that can forge or scramble a rendered line.
+///
+/// `char::is_control()` is Unicode category **Cc only** -- it catches ESC, CR,
+/// BEL and NUL, which is what the round-1 finding named. It does NOT catch
+/// category **Cf**: a bidi override (U+202E) reverses the remainder of the
+/// line it lands in, and zero-width joiners/spaces hide text. In-guest that is
+/// inert -- neither `vt`'s cell grid nor the outline path implements bidi, so
+/// an override renders as one absent glyph -- but `halcyon theme lint` prints
+/// this name to whatever terminal the operator is on, and a HOST emulator does
+/// implement bidi. The name sits mid-line inside `path: OK -- "<name>", ...`,
+/// so an override there reverses the rest of the report's line.
+fn is_forgeable(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{00AD}'                      // soft hyphen
+            | '\u{200B}'..='\u{200F}'       // zero-width + LRM/RLM
+            | '\u{202A}'..='\u{202E}'       // bidi embedding + overrides
+            | '\u{2060}'..='\u{2064}'       // word joiner + invisible operators
+            | '\u{2066}'..='\u{2069}'       // bidi isolates
+            | '\u{FEFF}'                    // BOM / zero-width no-break
+            | '\u{E0000}'..='\u{E007F}'     // tag characters
+        )
 }
 
 /// `"#RRGGBB"` -> opaque `Argb`. Rejects any other shape, INCLUDING
@@ -1224,6 +1250,38 @@ mod tests {
     /// The shipped dark theme, compiled in for the test only -- the guest
     /// reads it off the filesystem.
     const NIGHTJAR: &str = include_str!("../../halcyon/themes/nightjar.toml");
+    const TEMPLATE: &str = include_str!("../../halcyon/themes/TEMPLATE.toml");
+
+    // The annotated template is a theme AUTHOR's starting point, and it says
+    // of itself that it "loads as-is". A template that does not load is worse
+    // than no template: it teaches the format wrong and burns the author's
+    // first attempt on a defect that is not theirs.
+    //
+    // It also carries no `base`, so this is the standing check that the
+    // template still sets EVERY key -- a key added to the schema and not added
+    // here makes this fail, naming it, which is exactly the reminder the
+    // author of that key needs.
+    #[test]
+    fn the_annotated_template_loads_and_sets_every_key() {
+        let l = Theme::from_toml(TEMPLATE)
+            .unwrap_or_else(|e| panic!("TEMPLATE.toml does not load: {}", describe(&e)));
+        assert!(
+            l.inherited.is_empty(),
+            "TEMPLATE.toml has no `base`, so it must set every key; missing: {:?}",
+            l.inherited
+        );
+        // It ships the built-in's values, so an author who changes nothing
+        // gets exactly Daylight -- the claim its header makes.
+        assert_eq!(
+            l.theme, DAYLIGHT,
+            "TEMPLATE.toml is meant to BE Daylight until edited, so a reader can \
+             change one key and see only that key move"
+        );
+        // And its own advice holds in it: the two terminal keys agree with
+        // their palette twins (the template's "bite #1").
+        assert_eq!(l.theme.terminal.bg, l.theme.surface);
+        assert_eq!(l.theme.terminal.fg, l.theme.fg);
+    }
 
     // TH-5: THE ARC'S PROOF. An arc that ships only the theme it started with
     // has proved nothing -- every mechanism could be subtly Daylight-shaped
@@ -1732,6 +1790,24 @@ mod tests {
         // pinning it to the wrong layer would break the day the parser changed
         // -- and the property that matters is that it does not get through.
         assert!(Theme::from_toml(&based("line one\nline two")).is_err());
+        // Round 2 (R2-F4): category Cf too, not just Cc. A bidi override in a
+        // name reverses the rest of the lint's line on a host terminal.
+        for (label, bad) in [
+            ("RLO", "safe\u{202e}desrever"),
+            ("LRI", "a\u{2066}b"),
+            ("ZWSP", "a\u{200b}b"),
+            ("BOM", "a\u{feff}b"),
+            ("soft hyphen", "a\u{00ad}b"),
+            ("tag char", "a\u{e0041}b"),
+        ] {
+            assert!(
+                matches!(
+                    Theme::from_toml(&based(bad)),
+                    Err(LoadError::BadName { .. })
+                ),
+                "{label} must be refused"
+            );
+        }
         // Bounded, so a 60 KB "name" cannot be printed at a console.
         let long = "x".repeat(NAME_MAX + 1);
         assert!(matches!(
@@ -1832,8 +1908,23 @@ mod tests {
         );
         // Kept as documentation of the layout, no longer load-bearing as the
         // guard: a size that moves is informative, a size that does not is not
-        // evidence.
-        assert_eq!(core::mem::size_of::<Theme>(), 288);
+        // evidence. It KEEPS ITS MESSAGE, though -- a bare `288 != 292` with
+        // nothing to read invites the reader to bump the number, which is the
+        // opposite of what a failure here means.
+        assert_eq!(
+            core::mem::size_of::<Theme>(),
+            288,
+            "Theme's layout moved. If a FIELD was added, the destructure above \
+             already told you; add it to KEYS and to `set_key` in both \
+             directions, then update this number."
+        );
+        // The nested types carry their own pins because the destructure above
+        // cannot see INTO them -- it names `sage`, not `sage.key`. Metrics,
+        // LiveKey and Syntax have no tail padding, so any added field grows
+        // them and trips these. `vt::Palette` had NO pin at all, and it is the
+        // one that also escapes `KEYS.len()`, since its sixteen ANSI slots sit
+        // under a single `("terminal","ansi")` row.
+        assert_eq!(core::mem::size_of::<vt::Palette>(), 72, "bg + fg + 16 ansi");
         assert_eq!(core::mem::size_of::<Metrics>(), 28, "7 x i32");
         assert_eq!(core::mem::size_of::<LiveKey>(), 28, "7 x Argb");
         assert_eq!(core::mem::size_of::<Syntax>(), 36, "9 x Argb");

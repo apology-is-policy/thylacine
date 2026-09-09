@@ -3674,23 +3674,34 @@ populate_stratum_pool() {
     # HALCYON-THEME 4.1). An operator switches by copying a gallery file over
     # theme.toml. Baked UNCONDITIONALLY: it is content, not a lever, and a
     # theme nobody can reach has not been shipped.
-    local nightjar_src="$REPO_ROOT/usr/lib/halcyon/themes/nightjar.toml"
-    if [[ -f "$nightjar_src" ]]; then
+    # EVERY *.toml in the gallery, not a hand-listed one: a theme added to the
+    # source tree and not to this line would simply not ship, silently, and
+    # "a theme nobody can reach has not been shipped" applies to the annotated
+    # TEMPLATE.toml exactly as much as to nightjar.
+    local themes_dir="$REPO_ROOT/usr/lib/halcyon/themes"
+    if compgen -G "$themes_dir/*.toml" >/dev/null; then
         # /lib/halcyon may or may not exist yet (the renderer lever above
         # makes it only under THYLACINE_HALCYON): tolerate EEXIST.
         "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon >/dev/null 2>&1 || true
-        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon/themes \
-            || { echo "==> populate pool: mkdir /lib/halcyon/themes FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/themes/nightjar.toml < "$nightjar_src" \
-            || { echo "==> populate pool: write nightjar.toml FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon/themes >/dev/null 2>&1 || true
+        local theme_src theme_base baked=0
+        for theme_src in "$themes_dir"/*.toml; do
+            theme_base="$(basename "$theme_src")"
+            "$stratum_fs_bin" -s "$sock_path" write "/lib/halcyon/themes/$theme_base" < "$theme_src" \
+                || { echo "==> populate pool: write $theme_base FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            baked=$((baked + 1))
+        done
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync (themes) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         # Readback-verified like the verb table: a theme that arrived
         # TRUNCATED would still be valid TOML, and the loader would refuse it
         # for its size rather than tell anyone the bake was short.
-        "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/themes/nightjar.toml | cmp -s - "$nightjar_src" \
-            || { echo "==> populate pool: nightjar.toml readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        echo "==> populate pool: /lib/halcyon/themes/nightjar.toml baked + readback-verified (HALCYON-THEME TH-5)"
+        for theme_src in "$themes_dir"/*.toml; do
+            theme_base="$(basename "$theme_src")"
+            "$stratum_fs_bin" -s "$sock_path" read "/lib/halcyon/themes/$theme_base" | cmp -s - "$theme_src" \
+                || { echo "==> populate pool: $theme_base readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
+        echo "==> populate pool: $baked theme(s) baked + readback-verified into /lib/halcyon/themes (HALCYON-THEME TH-5)"
     fi
 
     # TH-5b: put a gallery theme IN FORCE. `THYLACINE_HALCYON_THEME=<name>`

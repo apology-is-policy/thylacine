@@ -886,7 +886,15 @@ fn paint_grid(
             } else {
                 (cell.fg, cell.bg)
             };
-            if bg != sheet.ground {
+            // Both arms, matching the transcript's identical test: a cell that
+            // never set a background carries the vt pen's default, which is
+            // `[terminal] bg` and which a theme may set apart from the pane
+            // ground. Testing only `sheet.ground` made a tile emit a Rect for
+            // EVERY cell under such a theme (cols x rows per frame) where the
+            // intent is "only cells with an explicit background" -- and painted
+            // that terminal ground over the pane's, so the same content
+            // rendered differently in a tile than in the console transcript.
+            if bg != sheet.ground && bg != sheet.theme.terminal.bg {
                 cart.ops.push(Op::Rect {
                     x: cx,
                     y: cy,

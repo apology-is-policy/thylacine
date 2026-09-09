@@ -963,7 +963,13 @@ pub fn global_ctl_once(cmd: &str) -> Result<(), TapError> {
     unsafe { t_close(ctl) };
     unsafe { t_close(root) };
     if rc < 0 {
-        return Err(TapError::Protocol);
+        // Through the helper like every other ctl write, even though no verb
+        // this function carries today can return E_AGAIN: the rule is "every
+        // write path that can be budgeted goes through here", and a rule kept
+        // by the current caller's choice of verb is not kept at all. Leaving
+        // it flattened would put F3's defect back the day a pre-Surface
+        // one-shot carries `theme` or `scale`.
+        return Err(errno_to_taperror(rc));
     }
     Ok(())
 }

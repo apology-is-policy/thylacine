@@ -414,16 +414,12 @@ pub extern "C" fn rs_main() -> i64 {
     // (`peer_is_renderer`), so it pushes too -- the session's push is for the
     // USER tier, this one is for the system tier the compositor could not
     // reach in time.
-    match ring.global_ctl(&alloc::format!(
-        "theme {}",
-        libhalcyon::theme::to_wire(&theme)
-    )) {
-        Ok(()) => say!("halcyond: theme pushed to the compositor"),
-        Err(e) => say!(
-            "halcyond: theme push refused ({:?}) -- the chrome keeps its own",
-            e
-        ),
-    }
+    // The SAME helper the session uses, deliberately: this had its own inline
+    // version with no `Busy` arm, so a push arriving in a service pass whose
+    // per-pass layout budget was already spent got one attempt and gave up
+    // permanently -- on the very path that exists because the compositor
+    // cannot read the file itself.
+    session::push_theme(&ring, &theme);
     let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     {

@@ -364,11 +364,26 @@ fn face_for(st: &Style, in_table: bool) -> u8 {
     }
 }
 
+/// Did this cell CHOOSE no foreground? -- i.e. is it still carrying the vt
+/// pen's default, which is `[terminal] fg`?
+///
+/// The TERMINAL tier, not `sheet.ink` (`[palette] fg`). They are separate
+/// settable keys, and a theme may legitimately set them apart -- the bg half
+/// of this same test says so in its own comment and gets it right. Comparing
+/// against `sheet.ink` is correct only by AUTHORSHIP convention (both shipped
+/// themes happen to set them equal), and when an author breaks that
+/// convention every hook below silently stops firing: em-dim, object
+/// colouring and the raw dim step all go dead, which is TH-6 F1's symptom
+/// class reachable through a supported input instead of through a constant.
+fn is_default_ink(st: &Style, sheet: &Sheet) -> bool {
+    st.fg == sheet.theme.terminal.fg
+}
+
 fn color_for(st: &Style, sheet: &Sheet) -> u32 {
-    if st.em == EM_DIM && st.fg == sheet.ink {
+    if st.em == EM_DIM && is_default_ink(st, sheet) {
         return sheet.dim;
     }
-    if st.obj != 0 && st.fg == sheet.ink {
+    if st.obj != 0 && is_default_ink(st, sheet) {
         // Presentation refs take the object-reference colour (Daylight slate,
         // section 1.5), NOT the ember accent -- the accent is the caret/turnstile.
         return sheet.obj;
@@ -642,7 +657,7 @@ impl<'a> LineBuilder<'a> {
             px_for(st, base_px, self.sheet)
         };
         let mut color = color_for(st, self.sheet);
-        if mode == SpanMode::Raw && st.fg == self.sheet.ink {
+        if mode == SpanMode::Raw && is_default_ink(st, self.sheet) {
             // `.hal-out`: raw output's default ink is the dim step.
             color = self.sheet.dim;
         }
@@ -2473,5 +2488,52 @@ mod tests {
         let raw1 = layout_block(&blocks[1], 600, &s1, &mut g1);
         assert_eq!(raw1.lines[0].segs[0].refs[0].advance, 6);
         assert_eq!(raw1.lines[0].segs[0].x, 12 + 2 + 8);
+    }
+
+    // TH-6 ROUND 2, R2-F1: `[palette] fg` and `[terminal] fg` are SEPARATE
+    // settable keys, and the hooks that decide "this cell chose no colour"
+    // must test the pen's default -- the TERMINAL tier -- not the sheet's ink.
+    //
+    // Nothing constructed a sheet and a pen from DIFFERENT tiers of one theme
+    // before this, which is exactly why comparing against `sheet.ink` looked
+    // right: both shipped themes happen to set the two equal, so every test
+    // that existed agreed with the wrong comparison. This builds the theme an
+    // author is free to write and checks the hooks still fire.
+    #[test]
+    fn the_ink_hooks_follow_the_terminal_tier_not_the_palette_tier() {
+        let mut d = libhalcyon::theme::DAYLIGHT;
+        // The freedom the format documents: a theme whose terminal ink differs
+        // from its chrome ink.
+        d.terminal.fg = 0xFFFF_FFFF;
+        assert_ne!(d.terminal.fg, d.fg, "the fixture must actually split them");
+        let sheet = sheet_for(&d, 100);
+        assert_eq!(sheet.ink, d.fg, "the sheet's ink is the PALETTE tier");
+
+        // A cell that set no colour carries the PEN's default.
+        let base = Style { fg: d.terminal.fg, bg: d.terminal.bg, attrs: 0, em: 0, obj: 0, hdr: 0 };
+        assert_eq!(
+            color_for(&Style { em: EM_DIM, ..base }, &sheet),
+            sheet.dim,
+            "em-dim must still take the dim step when the tiers differ"
+        );
+        assert_eq!(
+            color_for(&Style { obj: 1, ..base }, &sheet),
+            sheet.obj,
+            "an object reference must still take the object colour"
+        );
+        // ...and a cell that DID choose a colour is still left alone.
+        let chosen = Style { fg: 0xFF00_FF00, ..base };
+        assert_eq!(
+            color_for(&Style { em: EM_DIM, ..chosen }, &sheet),
+            0xFF00_FF00,
+            "an explicit SGR foreground is never overridden"
+        );
+        // The control, one variable away: with the tiers equal -- every theme
+        // shipped today -- the same hooks fire, so this is not a behaviour
+        // change for Daylight or Nightjar.
+        let agreed = sheet_for(&libhalcyon::theme::DAYLIGHT, 100);
+        let ab = Style { fg: agreed.theme.terminal.fg, bg: 0, attrs: 0, em: 0, obj: 0, hdr: 0 };
+        assert_eq!(color_for(&Style { em: EM_DIM, ..ab }, &agreed), agreed.dim);
+        assert_eq!(color_for(&Style { obj: 1, ..ab }, &agreed), agreed.obj);
     }
 }

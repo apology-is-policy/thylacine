@@ -965,7 +965,13 @@ fn reconcile(
 /// A refusal is SAID, never silently absorbed: the visible result would be a
 /// pane in one theme inside chrome in another, and the operator deserves to
 /// know which half failed.
-fn push_theme(ring: &EventRing, theme: &libhalcyon::theme::Theme) {
+/// `pub(crate)` so the CONSOLE renderer uses this one too. It had its own
+/// inline version with no `Busy` arm at all, so a push landing in a service
+/// pass whose four-verb layout budget was already spent got exactly one
+/// attempt and gave up for the life of the boot -- and the console's push is
+/// the LOAD-BEARING one, since tapestryd comes up before the pool it would
+/// read the theme file from is mounted. One implementation, both renderers.
+pub(crate) fn push_theme(ring: &EventRing, theme: &libhalcyon::theme::Theme) {
     let cmd = format!("theme {}", libhalcyon::theme::to_wire(theme));
     for _ in 0..VERB_RETRIES {
         match ring.global_ctl(&cmd) {
@@ -978,14 +984,14 @@ fn push_theme(ring: &EventRing, theme: &libhalcyon::theme::Theme) {
             }
             Err(e) => {
                 say!(
-                    "halcyond: theme push refused ({:?}) -- the chrome keeps the system theme",
+                    "halcyond: theme push refused ({:?}) -- the chrome keeps its own",
                     e
                 );
                 return;
             }
         }
     }
-    say!("halcyond: theme push kept busy -- the chrome keeps the system theme");
+    say!("halcyond: theme push kept busy -- the chrome keeps its own");
 }
 
 /// HALCYON-SCALE 6: the user's `/env/HALCYON_SCALE` preference, written

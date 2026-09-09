@@ -1,0 +1,169 @@
+# A Halcyon theme, annotated -- copy this, change the colours, keep the shape.
+#
+# HOW TO USE IT
+#   1. Copy to a new name and edit the values. Every key below is REQUIRED,
+#      because this file has no `base` (see "THE TWO MODES").
+#   2. Check it without booting anything you care about:
+#          halcyon theme lint /path/to/your-theme.toml
+#      A refusal names the LINE to fix. A file with `base` also gets every key
+#      it INHERITED named, so nothing is silently left at the default.
+#   3. Put it in force: copy it to /lib/halcyon/theme.toml (system, all users)
+#      or $HOME/lib/halcyon/theme.toml (yours). The user file wins. A file that
+#      fails to load falls to the NEXT TIER DOWN, not to the built-in -- so a
+#      typo in your own file leaves the system theme you had, not a surprise.
+#
+# THE TWO MODES, and why you probably want this one
+#   `base = "daylight"` in [meta] inherits every key you do not set. Convenient
+#   for retinting a few roles -- and exactly wrong for a dark theme, because
+#   the one key you forget arrives as a bright Daylight colour in the middle of
+#   your dark bar. OMIT `base` (as this file does) and the loader REQUIRES all
+#   57 keys and NAMES the ones you missed. That is what makes "some hardcoded
+#   daylight colour kicked in somewhere" impossible rather than merely
+#   unlikely.
+#
+# THE RULES A FILE MUST FOLLOW
+#   * Colours are "#RRGGBB", six hex digits, nothing else. Alpha is REFUSED:
+#     translucency is not a theme decision.
+#   * A file is accepted WHOLE or refused whole. There is no partial apply.
+#   * `[type] smooth` and every `[geometry]` value is an integer with bounds
+#     (given per key below). Out of range refuses the file.
+#   * `[terminal] ansi` must be EXACTLY 16 entries.
+#   * `[meta] name` is shown to people, so it may not contain control or
+#     format characters (ESC, CR, NUL, bidi overrides, zero-width marks) and
+#     is capped at 64 bytes.
+#   * Unknown keys and unknown [tables] are REFUSED, not ignored -- a silently
+#     dropped key is a colour you believe you set.
+#
+# FIVE THINGS THAT WILL BITE YOU
+#   1. KEEP `[terminal] bg` == `[palette] surface` AND `[terminal] fg` ==
+#      `[palette] fg`. You are allowed to set them apart, and the renderer no
+#      longer breaks if you do -- but "this cell chose no colour" is decided by
+#      the TERMINAL pair, so splitting them makes hosted programs render on a
+#      different ground from everything around them. Split them only on
+#      purpose.
+#   2. THE EMBER IS SHARED VERBATIM between themes (HALCYON-VISUAL 1.3). It is
+#      how the terminal, the compositor and the console read as one system.
+#      Changing it is a bigger decision than changing anything else here.
+#   3. THE FOUR BEVEL FACES ARE ONE DECISION, not four colours. They encode a
+#      single light source from the north-north-west: top brightest (near
+#      perpendicular), left next (grazing), right darker (facing away, some
+#      bounce), bottom darkest (shadowed). Regenerate all four together; never
+#      nudge one. If they stop differing you get a flat two-value diagonal.
+#   4. `smooth` IS PER-THEME. 12 on a light ground, 0 on a dark one: light ink
+#      on dark already reads heavy, and dilating it further thickens past
+#      legibility.
+#   5. `blank` IS NOT A SHADE OF YOUR GROUND. It is what the display shows
+#      before any program has drawn -- an empty pane. Pick it deliberately.
+#
+# The authority for the key list is `theme::KEYS` in
+# usr/lib/libhalcyon/src/theme.rs; the roles are HALCYON-VISUAL.md; the format
+# is HALCYON-THEME.md. The values below are the built-in Daylight theme, so
+# this file loads as-is -- it is a working starting point, not a stub.
+
+[meta]
+name = "Template"
+# base = "daylight"      # uncomment to inherit unset keys (see THE TWO MODES)
+
+[palette]
+# --- Ground (HALCYON-VISUAL 1.1): five steps, dark to light or light to dark.
+floor       = "#8A7660"  # the workspace behind every pane; also the bevel's perceptual midpoint
+surface     = "#F2EBE0"  # a pane's own background -- the single most visible colour here
+header      = "#CEC4B6"  # tag-bar background; ALSO the inner hairline (2.4)
+raised      = "#BDB0A0"  # a pill's background (the small rounded status chips)
+border      = "#A89880"  # explicit strokes, tag-bar separators, the cast shadow
+blank       = "#101014"  # an EMPTY pane, before anything draws in it (see bite #5)
+selection   = "#DFD6C7"  # selected text in the transcript; a warm step between surface and header
+island_rule = "#7A6850"  # the left stroke down a block of raw command output
+
+# --- Ink (1.2): four steps of emphasis on the ground above.
+fg        = "#1A120A"    # body text
+fg_dim    = "#3A2E22"    # de-emphasised text
+fg_muted  = "#6A5A48"    # metadata, trailing detail
+fg_subtle = "#9A8878"    # the faintest legible step
+
+# --- Bevel, NNW (2.1): ONE light source, four faces. See bite #3.
+bevel_top    = "#F8F2E6"  # key light, near perpendicular -- the brightest
+bevel_left   = "#E2D6C0"  # grazing incidence
+bevel_right  = "#362410"  # facing away, some bounce
+bevel_bottom = "#221405"  # fully shadowed -- the darkest
+
+# --- Accent (1.3): the ember. SHARED VERBATIM between themes. See bite #2.
+ember      = "#E07840"   # prompt turnstile, caret, running indicator, active workspace
+ember_dim  = "#B85F2A"   # pill stroke on an active tile
+ember_deep = "#C86030"   # separator under a resting pane's active tile
+
+# --- Status bar (6): four independent roles, NOT derived from the ground.
+status_bg    = "#1A120A"  # the bar's own strip -- Daylight's is dark on a light page
+status_fg    = "#F2EBE0"  # text on that strip
+status_muted = "#C8B89A"  # secondary text on it
+status_idle  = "#3A2E22"  # the idle/inactive indicator
+
+# --- Live-tile keys (1.4). A tile shows sage when its last command SUCCEEDED
+# and cinnabar when it FAILED. `key` is the load-bearing mark (separator,
+# content hairline, active pill); `tint` is the tag bar's background in that
+# state, so it must stay a BACKGROUND, not a signal colour.
+[palette.sage]
+key      = "#1E5844"  # the mark: separator, hairline, active pill
+tint     = "#B8CCC4"  # tag-bar background in this state
+raised   = "#A6BDB4"  # pill background
+border   = "#86A096"  # vertical rule, muted pill stroke
+fg       = "#0C2820"  # tag name
+fg_dim   = "#14342A"  # trailing metadata
+fg_muted = "#33604F"  # muted pill text
+
+# The error key must NOT read as the accent. Check it against your `ember`:
+# if a person could confuse them at a glance, the tile's state is unreadable.
+[palette.cinnabar]
+key      = "#982818"
+tint     = "#DCB8B0"
+raised   = "#D0A89E"
+border   = "#B88C80"
+fg       = "#3C1008"
+fg_dim   = "#521A10"
+fg_muted = "#7A4034"
+
+# --- Syntax (1.5): the editor/highlighting tier. Named by ROLE, not by hue,
+# so a theme can reassign them coherently.
+[palette.syntax]
+slate    = "#3A4878"  # keyword / info / OBJECT REFERENCE (the presentation colour)
+sage     = "#1E5844"  # type
+sand     = "#7A5020"  # member / warning
+moss     = "#3A5818"  # constant
+ash      = "#6A3828"  # function / identifier
+dusk     = "#4A3868"  # string
+smoke    = "#6A7060"  # comment
+fen      = "#1E5828"  # success
+cinnabar = "#982818"  # error
+
+# --- The terminal a hosted program's escape sequences resolve against.
+# KEEP bg == palette.surface AND fg == palette.fg unless you mean otherwise
+# (bite #1). `ansi` is exactly 16: black, red, green, yellow, blue, magenta,
+# cyan, white, then the eight BRIGHT variants. No two slots may share a value
+# EXCEPT slot 15 (bright white), which aliases `fg`.
+[terminal]
+bg = "#F2EBE0"
+fg = "#1A120A"
+ansi = [
+  "#3A332E", "#9C3A28", "#3F6B3F", "#8A6520",
+  "#3A4E86", "#6A4E86", "#2F6E62", "#6B5F58",
+  "#9A8C82", "#B4472E", "#4E8046", "#A07828",
+  "#4A62A8", "#7E5EA0", "#3A8578", "#1A120A",
+]
+
+# --- Type (HALCYON-TYPE 4.2). The typefaces are NOT themeable -- they are
+# Thylacine's visual identity. This is only the smoothing AMOUNT.
+[type]
+smooth = 12              # thousandths of an em, 0..200. 12 on light, 0 on dark (bite #4)
+
+# --- Geometry (HALCYON-VISUAL 3.1/4.3), in LOGICAL pixels at 100% scale. The
+# compositor scales these for the display; these are the base. A theme is
+# usually a change of LIGHT, not of proportion -- but you must still state them
+# when there is no `base` to inherit from.
+[geometry]
+bevel       = 2          # pane bevel width, 2..64
+gap         = 2          # inter-pane gap AND workspace padding, 0..64
+hairline    = 1          # structural hairline, 1..32
+header_h    = 20         # tag bar height, 1..256
+status_h    = 20         # status bar height, 1..256
+tag_pad_x   = 6          # tag bar horizontal padding, 0..128
+tab_strip_h = 5          # tab/stack indicator strip, 0..128

@@ -177,9 +177,13 @@ proc tgrep {pat what} {
 # parsed, resolved and painted can put Nightjar's #1A1614 or #2A2422 on this
 # screen -- there is no other source of those values in the tree -- so the
 # pixel check IS the end-to-end witness of the load path, not a proxy for it.
+# `dark` is an explicit per-theme FACT, not `$ls_theme ne "daylight"`. The
+# parchment assertion below is only sound for a theme whose palette cannot
+# reach Daylight's surface; a future LIGHT gallery theme would hard-fail it
+# with a message accusing a Daylight constant that is not there.
 switch -- $ls_theme {
-    daylight { set grounds {242,235,224 206,196,182} }
-    nightjar { set grounds {26,22,20 42,36,34} }
+    daylight { set grounds {242,235,224 206,196,182} ; set dark 0 }
+    nightjar { set grounds {26,22,20 42,36,34}       ; set dark 1 }
     default  { lc_fail "ls-halcyon: unknown LS_THEME '$ls_theme'" }
 }
 set dom "$dr,$dg,$db"
@@ -203,7 +207,7 @@ if {$ls_theme ne "daylight"} {
     # coincidence either: Nightjar's lightest ink is (232,224,212), darker than
     # parchment in every channel, so no blend of its ink and ground can produce
     # (242,235,224). Measured on the fix: 272800/272800.
-    if {$off != $total} {
+    if {$dark && $off != $total} {
         lc_fail "[expr {$total - $off}] of $total pixels are DAYLIGHT parchment (242,235,224) in a $ls_theme transcript -- a Daylight constant is still painting into themed content (TH-6 F1)"
     }
     lc_pass "halcyon: not one Daylight pixel in the $ls_theme transcript ($off/$total)"
@@ -398,30 +402,42 @@ if {$ls_theme ne "daylight"} {
 switch -- $ls_theme {
     daylight { set bev_l {226 214 192} ; set bev_t {248 242 230} }
     nightjar { set bev_l {58 51 46}    ; set bev_t {78 69 62} }
+    # Two switches enumerate this same variable with different arm sets. The
+    # one above fails an unknown theme first, so this cannot fire today -- but
+    # add a third theme there and forget it here, and `bevel_want` reads UNSET
+    # globals: an uncaught Tcl error, i.e. a run that dies with no failure
+    # line, which is this project's tell for a script that died rather than a
+    # gate that failed.
+    default  { lc_fail "ls-halcyon: no bevel colours for LS_THEME '$ls_theme' -- add an arm beside the grounds switch" }
 }
 
 # `bevel_want` is shared by both runs so the two checks cannot drift, and so
 # the values live in the `$bev_*` pair rather than in literals at each site.
 proc bevel_want {when} {
     global bev_l bev_t ls_theme
-    set vl [region 1 120 3 560]
-    if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vl -> l_off l_tot lr lg lb]} {
-        lc_fail "bevel_left region unparseable ($when): $vl"
+    # RETRIED, like `strip_want` and for its reason: this samples after a
+    # chord, and a fixed `after 1500` is a guess about how long the
+    # compositor's reconcile takes on a loaded host. A single early sample
+    # would fail with a message naming THE COMPOSITOR as the culprit -- a
+    # fabricated defect with a wrong cause attached, which is worse than a
+    # missed one. The last reading is reported so a real failure still says
+    # what it saw.
+    set lr ""; set lg ""; set lb ""; set tr ""; set tg ""; set tb ""
+    for {set i 0} {$i < 12} {incr i} {
+        set vl [region 1 120 3 560]
+        set vt [region 120 1 560 3]
+        if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vl -> l_off l_tot lr lg lb]
+            && [regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vt -> t_off t_tot tr tg tb]
+            && [list $lr $lg $lb] eq $bev_l && [list $tr $tg $tb] eq $bev_t} {
+            if {[list $lr $lg $lb] eq [list $tr $tg $tb]} {
+                lc_fail "$when: bevel_left == bevel_top -- the NNW four-value bevel collapsed to a two-value diagonal (section 2.1 broken)"
+            }
+            lc_pass "halcyon: TAPESTRYD painted the $ls_theme bevel $when (left $bev_l != top $bev_t -- four-value NNW)"
+            return
+        }
+        after 500
     }
-    if {[list $lr $lg $lb] ne $bev_l} {
-        lc_fail "$when: left-edge dominant ($lr,$lg,$lb) is not $ls_theme bevel_left ($bev_l) -- THE COMPOSITOR is not painting this theme's chrome"
-    }
-    set vt [region 120 1 560 3]
-    if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vt -> t_off t_tot tr tg tb]} {
-        lc_fail "bevel_top region unparseable ($when): $vt"
-    }
-    if {[list $tr $tg $tb] ne $bev_t} {
-        lc_fail "$when: top-edge dominant ($tr,$tg,$tb) is not $ls_theme bevel_top ($bev_t) -- THE COMPOSITOR is not painting this theme's chrome"
-    }
-    if {[list $lr $lg $lb] eq [list $tr $tg $tb]} {
-        lc_fail "$when: bevel_left == bevel_top -- the NNW four-value bevel collapsed to a two-value diagonal (section 2.1 broken)"
-    }
-    lc_pass "halcyon: TAPESTRYD painted the $ls_theme bevel $when (left $bev_l != top $bev_t -- four-value NNW)"
+    lc_fail "$when: after 12 samples the edges read left ($lr,$lg,$lb) / top ($tr,$tg,$tb), wanted $ls_theme bevel_left ($bev_l) / bevel_top ($bev_t) -- THE COMPOSITOR is not painting this theme's chrome"
 }
 
 if {$ls_theme ne "daylight"} {

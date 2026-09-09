@@ -406,6 +406,63 @@ the arc's central claim. And the round itself was an Opus fallback: it was
 spawned on Fable and died of credit exhaustion before emitting a line, so a
 Fable-diversity pass on this surface is still owed.
 
+### Round 2: the fix was right and its correctness had quietly become conditional
+
+Round 2 came back **0 P0 / 1 P1 / 1 P2 / 6 P3** — a clean close by the rule, so
+no round 3. The three named fixes were structurally sound; none of them broke
+anything. But the P1 is the interesting kind.
+
+`sheet.ink` is `[palette] fg`. The pen's default is `[terminal] fg`. **They are
+separate keys in separate tables**, and the three hooks that decide "this cell
+chose no colour" compared across that boundary. So F1's fix — moving the pen
+from a constant to `theme.terminal` — left the hooks correct only *by
+authorship convention*: both shipped themes happen to set the two equal. An
+author who sets them apart, which the format explicitly permits, silently loses
+em-dim, object-reference colouring and the raw dim step. That is F1's exact
+symptom class, reachable through a **supported input** rather than through a
+constant.
+
+Two things make this worth writing down. First, the bg half of the very same
+test already got it right one screen below, and its comment names the exact
+freedom the fg half ignored — the codebase knew. Second, **no test built a
+sheet and a pen from different tiers of one theme**, which is precisely why
+comparing against `sheet.ink` looked correct: every existing test used a theme
+where the two agree, so they all agreed with the wrong comparison. The
+regression test now constructs the theme an author is free to write.
+
+Its sibling, found in a *fourth* file the round hadn't been pointed at: session
+tiles tested only `bg != sheet.ground`, so under such a theme every cell emitted
+a rectangle and the same content rendered on a different ground in a tile than
+in the transcript.
+
+And R2-F2 is the shape worth remembering: F3's fix repaired the errno mapping
+and *one* of the two callers of the same verb. The console renderer's push —
+the load-bearing one, since the compositor comes up before the pool it would
+read the theme file from is mounted — still had no retry arm at all. Both
+renderers now share one `push_theme`.
+
+### The template, and the test that caught me writing it wrong
+
+The operator asked, mid-run, whether the TOML was stable and documented enough
+to hand to another Claude for authoring themes. The format is stable; the
+documentation was scattered across four places, with the best per-key notes
+being Rust comments in `theme.rs`. So: `usr/lib/halcyon/themes/TEMPLATE.toml` —
+all 57 keys with a one-line what-it-paints, the format rules, and five named
+traps, the first of which is R2-F1's freedom.
+
+Its header claims the file "loads as-is" and *is* Daylight until edited, so the
+test asserts exactly that — and it failed immediately. I had hand-approximated
+the values from memory of the palette's character, and I was wrong in ways that
+matter: Daylight's `floor` is a mid-tone `#8A7660`, not a light one; its `blank`
+is near-black `#101014` (which the template's own trap #5 warns about); and its
+right and bottom bevel faces are genuinely dark, `#362410` and `#221405`, where
+I had written near-neighbours of the surface and flattened the light direction
+the bevel exists to encode. Regenerated from `to_wire(&DAYLIGHT)`.
+
+A documentation file that lies about the thing it documents is worse than no
+file, and the only reason this one doesn't is that it is loaded and compared by
+a test rather than proofread.
+
 ---
 
 ## Run 46h (2026-09-08, Opus 5 max, after the 600k self-compaction) -- HALCYON-TYPE TY-4: Cornucopia live, and the defect that fell out of measuring it
