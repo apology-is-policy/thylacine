@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 
 use cartoon::{Cartoon, GlyphRef, Op};
 use libhalcyon::tag::argv_of;
-use libhalcyon::theme::{Argb, DAYLIGHT};
+use libhalcyon::theme::{Argb, Theme};
 
 use crate::layout::Sheet;
 use crate::raster::{GlyphSource, FACE_BODY};
@@ -192,8 +192,7 @@ pub fn key_for(focused: bool, status: &str) -> Key {
 }
 
 /// The strip's colours per key: (ground, separator, name ink).
-pub fn key_colors(key: Key) -> (Argb, Argb, Argb) {
-    let d = &DAYLIGHT;
+pub fn key_colors(d: &Theme, key: Key) -> (Argb, Argb, Argb) {
     match key {
         Key::Resting => (d.header, d.ember_deep, d.fg),
         Key::Sage => (d.sage.tint, d.sage.key, d.sage.fg),
@@ -203,8 +202,7 @@ pub fn key_colors(key: Key) -> (Argb, Argb, Argb) {
 
 /// The trail's ink per key (the mockups' `.hal-tag-trail`): the dim step of
 /// the strip's own ink family, so the trail recedes behind the name.
-pub fn trail_ink(key: Key) -> Argb {
-    let d = &DAYLIGHT;
+pub fn trail_ink(d: &Theme, key: Key) -> Argb {
     match key {
         Key::Resting => d.fg_dim,
         Key::Sage => d.sage.fg_dim,
@@ -252,7 +250,7 @@ pub fn strip_list(
     if w == 0 || h == 0 {
         return cart;
     }
-    let (bg, sep, ink) = key_colors(key);
+    let (bg, sep, ink) = key_colors(&sheet.theme, key);
     let hair = sheet.hairline;
     cart.ops.push(Op::Clear { color: bg });
     cart.ops.push(Op::Rect {
@@ -281,7 +279,7 @@ pub fn strip_list(
         let (refs, width) = shape(gs, FACE_BODY, trail_px, &text);
         if !refs.is_empty() {
             let x = (w as i32 - pad - width).max(name_end);
-            cart.push_glyphs(gs.gen(), x, baseline, trail_ink(key), &refs);
+            cart.push_glyphs(gs.gen(), x, baseline, trail_ink(&sheet.theme, key), &refs);
         }
     }
     cart
@@ -296,6 +294,7 @@ pub fn console_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libhalcyon::theme::DAYLIGHT;
 
     fn sheet() -> Sheet {
         crate::layout::daylight_sheet(100)
@@ -361,12 +360,15 @@ mod tests {
     #[test]
     fn strip_colors_match_the_scripture() {
         assert_eq!(
-            key_colors(Key::Resting),
+            key_colors(&DAYLIGHT, Key::Resting),
             (0xFFCEC4B6, 0xFFC86030, 0xFF1A120A)
         );
-        assert_eq!(key_colors(Key::Sage), (0xFFB8CCC4, 0xFF1E5844, 0xFF0C2820));
         assert_eq!(
-            key_colors(Key::Cinnabar),
+            key_colors(&DAYLIGHT, Key::Sage),
+            (0xFFB8CCC4, 0xFF1E5844, 0xFF0C2820)
+        );
+        assert_eq!(
+            key_colors(&DAYLIGHT, Key::Cinnabar),
             (0xFFDCB8B0, 0xFF982818, 0xFF3C1008)
         );
     }

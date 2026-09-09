@@ -1485,6 +1485,13 @@ pub struct Comp {
     /// `Metrics::at(scale)`: the ONE table every carve and paint here reads
     /// (halcyond reads the same function at the same percent).
     pub metrics: Metrics,
+    /// The RESOLVED theme this compositor paints its chrome in
+    /// (HALCYON-THEME 3.2). Resolved once at construction -- TH-4's loader
+    /// lands there, and a declared session's push re-decides it -- so no
+    /// painter below reaches for a constant. The chrome and the content must
+    /// agree or the bevel does not match the pane, which is why this and
+    /// halcyond's `Sheet.theme` have to come from the same file.
+    pub theme: libhalcyon::theme::Theme,
     surfaces: [Option<Surface>; MAX_SURFACES],
     gen_seq: u32,
     conn_seq: u64,
@@ -2339,6 +2346,7 @@ impl Comp {
             scale_override: None,
             declared,
             metrics: Metrics::at(scale),
+            theme: libhalcyon::theme::builtin(),
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
@@ -5249,7 +5257,7 @@ impl Comp {
         // process lifetime.
         unsafe {
             for i in 0..(dw * dh) as usize {
-                *px.add(i) = pane::BG_COLOR;
+                *px.add(i) = self.theme.blank;
             }
         }
         let _ = self.paint_borders(true);
@@ -5409,13 +5417,13 @@ impl Comp {
                 }
                 let tb = p.tagbar.intersect(r);
                 if !tb.is_empty() {
-                    fills.push((tb, libhalcyon::theme::DAYLIGHT.header));
+                    fills.push((tb, self.theme.header));
                 }
                 match &p.kind {
                     pane::Kind::Leaf { surface: None } => {
                         let c = p.content.intersect(r);
                         if !c.is_empty() {
-                            fills.push((c, pane::BG_COLOR));
+                            fills.push((c, self.theme.blank));
                         }
                     }
                     // The bars around a letterboxed or cropped surface are
@@ -5428,7 +5436,7 @@ impl Comp {
                         for bar in Self::bars_around(c, inner) {
                             let b = bar.intersect(r);
                             if !b.is_empty() {
-                                fills.push((b, pane::BG_COLOR));
+                                fills.push((b, self.theme.blank));
                             }
                         }
                     }
@@ -5445,7 +5453,7 @@ impl Comp {
             if let Some(sr) = self.status_rect() {
                 let i = sr.intersect(r);
                 if !i.is_empty() {
-                    fills.push((i, libhalcyon::theme::DAYLIGHT.status_bg));
+                    fills.push((i, self.theme.status_bg));
                 }
             }
             for (fr, color) in fills {
@@ -5517,7 +5525,7 @@ impl Comp {
         let inner = self.placement_rect(n, c).unwrap_or(Rect::ZERO);
         for bar in Self::bars_around(c, inner) {
             if !bar.is_empty() {
-                self.fill_rect(bar, pane::BG_COLOR);
+                self.fill_rect(bar, self.theme.blank);
             }
         }
         self.screen_flush_rect(c);
@@ -5658,7 +5666,8 @@ impl Comp {
     }
 
     fn paint_borders(&mut self, fill_tagbars: bool) -> Vec<Rect> {
-        use libhalcyon::theme::DAYLIGHT as D;
+        let th = self.theme;
+        let th = &th;
         let mut painted: Vec<Rect> = Vec::new();
         let dw = self.gpu.width as u64;
         let va = match &self.screen {
@@ -5680,7 +5689,7 @@ impl Comp {
                 for y in sr.y..sr.y + sr.h {
                     for x in sr.x..sr.x + sr.w {
                         unsafe {
-                            *px.add((y as u64 * dw + x as u64) as usize) = D.status_bg;
+                            *px.add((y as u64 * dw + x as u64) as usize) = th.status_bg;
                         }
                     }
                 }
@@ -5694,19 +5703,19 @@ impl Comp {
         let ring_color = |dl: u32, dr: u32, dt: u32, db: u32, floor_w: u32| -> u32 {
             let d = dl.min(dr).min(dt).min(db);
             if d < floor_w {
-                D.floor
+                th.floor
             } else if d < floor_w + bevel {
                 if dt == d {
-                    D.bevel_top
+                    th.bevel_top
                 } else if db == d {
-                    D.bevel_bottom
+                    th.bevel_bottom
                 } else if dl == d {
-                    D.bevel_left
+                    th.bevel_left
                 } else {
-                    D.bevel_right
+                    th.bevel_right
                 }
             } else {
-                D.header // the inner hairline (section 2.4, == header)
+                th.header // the inner hairline (section 2.4, == header)
             }
         };
         for (slot, _id) in self.layout.live_ids() {
@@ -5744,8 +5753,8 @@ impl Comp {
             // not.
             let live: Option<(u32, u32)> = if slot == focused {
                 let k = match p.status {
-                    Status::Err => &D.cinnabar,
-                    _ => &D.sage,
+                    Status::Err => &th.cinnabar,
+                    _ => &th.sage,
                 };
                 Some((k.key, k.tint))
             } else {
@@ -5804,7 +5813,7 @@ impl Comp {
                     let sy = y1 - floor_w + row;
                     for x in (r.x + floor_w)..(x1 - floor_w) {
                         unsafe {
-                            *px.add((sy as u64 * dw + x as u64) as usize) = D.border;
+                            *px.add((sy as u64 * dw + x as u64) as usize) = th.border;
                         }
                     }
                 }
@@ -5815,7 +5824,7 @@ impl Comp {
             // hairline+strip read as one header band). halcyond's OPAQUE
             // Role::Chrome surface composites ON TOP when present (H-3b-3);
             // absent it (aurora, or before halcyond binds) the strip is never
-            // bare BG_COLOR. Inside the ring, above `content` -- disjoint from
+            // the bare blank fill. Inside the ring, above `content` -- disjoint from
             // the bands and the shadow. STRUCTURAL repaints only
             // (`fill_tagbars`): a focus-only repaint changes nothing in the
             // strip, and refilling + pushing it there would paint over a
@@ -5825,7 +5834,7 @@ impl Comp {
                 for y in tb.y..tb.y + tb.h {
                     for x in tb.x..tb.x + tb.w {
                         unsafe {
-                            *px.add((y as u64 * dw + x as u64) as usize) = D.header;
+                            *px.add((y as u64 * dw + x as u64) as usize) = th.header;
                         }
                     }
                 }
@@ -5897,16 +5906,17 @@ impl Comp {
             if n == 0 {
                 continue;
             }
+            let theme = self.theme;
             let seg_color = |i: usize| {
-                use libhalcyon::theme::DAYLIGHT as D;
+                let th = &theme;
                 if i == active {
                     if hot == Some(children[i]) {
-                        D.ember
+                        th.ember
                     } else {
-                        D.ember_deep
+                        th.ember_deep
                     }
                 } else {
-                    D.header
+                    th.header
                 }
             };
             match mode {

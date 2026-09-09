@@ -24,7 +24,7 @@ use halcyond::chrome::{abbrev_home, parse_leaves_all, parse_rect, program_name};
 use halcyond::downq::DownQueue;
 use halcyond::input::{map_key, normal_key, Mode, NormalAct};
 use halcyond::layout::layout_block;
-use halcyond::layout::{daylight_sheet, Sheet};
+use halcyond::layout::{sheet_for, Sheet};
 use halcyond::menu::{
     build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run_with, Action, Menu, ObjRun,
 };
@@ -1008,7 +1008,8 @@ fn rescale(
 ) {
     let from = sheet.scale;
     let gen = sheet.gen + 1;
-    *sheet = daylight_sheet(pct);
+    let t = sheet.theme;
+    *sheet = sheet_for(&t, pct);
     sheet.gen = gen;
     gs.set_scale(pct);
     gs.set_smooth(sheet.smooth_mem);
@@ -1132,7 +1133,11 @@ pub fn run(home: Option<String>) -> i64 {
     });
     gs.set_scale(display.scale);
     gs.set_display(display.w, display.h);
-    let mut sheet = daylight_sheet(display.scale);
+    // THE ONE PLACE the session resolves its theme (HALCYON-THEME 3.2);
+    // TH-4's loader lands here, and it is also where the user's theme file
+    // will be pushed to tapestryd so the chrome and the content agree.
+    let theme = libhalcyon::theme::builtin();
+    let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     let (cell_w, cell_h, _) = gs.mono_cell();
     let (disp_w, disp_h) = (root_surf.w, root_surf.h);

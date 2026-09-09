@@ -19,7 +19,6 @@ use alloc::vec::Vec;
 
 use beacon::verbs::{expand, is_internal, rules_for, Rule};
 use cartoon::{Cartoon, Op};
-use libhalcyon::theme::DAYLIGHT;
 
 use crate::chrome::NAME_PX;
 use crate::layout::{LaidBlock, Sheet};
@@ -409,7 +408,7 @@ fn push_mono(
 /// rule, then the items in monospace -- the selected one on a `header`
 /// band.
 pub fn menu_list(m: &Menu, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource) -> Cartoon {
-    let d = &DAYLIGHT;
+    let d = &sheet.theme;
     let mut cart = Cartoon::new();
     if w == 0 || h == 0 {
         return cart;

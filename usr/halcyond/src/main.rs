@@ -34,8 +34,8 @@ use halcyond::input::{
     FEED_PENDING_MAX, FEED_RETRY_MS,
 };
 use halcyond::layout::{
-    cursor_pos, daylight_sheet, layout_block, layout_pending, render_block, LaidBlock,
-    LayoutCache, Sheet,
+    cursor_pos, layout_block, layout_pending, render_block, sheet_for, LaidBlock, LayoutCache,
+    Sheet,
 };
 use halcyond::menu::{build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run, Action, Menu};
 use halcyond::raster::GlyphSource;
@@ -378,7 +378,11 @@ pub extern "C" fn rs_main() -> i64 {
     });
     gs.set_scale(display.scale);
     gs.set_display(display.w, display.h);
-    let mut sheet = daylight_sheet(display.scale);
+    // THE ONE PLACE this renderer resolves its theme (HALCYON-THEME 3.2);
+    // TH-4's loader lands here. Everything downstream is handed the resolved
+    // `&Theme` -- through the sheet, which carries it.
+    let theme = libhalcyon::theme::builtin();
+    let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     {
         let (cw, ch, _) = gs.mono_cell();
@@ -460,7 +464,8 @@ pub extern "C" fn rs_main() -> i64 {
                 if di.scale != sheet.scale {
                     let from = sheet.scale;
                     let gen = sheet.gen + 1;
-                    sheet = daylight_sheet(di.scale);
+                    let t = sheet.theme;
+                    sheet = sheet_for(&t, di.scale);
                     sheet.gen = gen;
                     gs.set_scale(di.scale);
                     gs.set_smooth(sheet.smooth_mem);
@@ -628,7 +633,7 @@ pub extern "C" fn rs_main() -> i64 {
                             y: y + r.1 + r.3 - sheet.mark_w,
                             w: r.2.max(1) as u32,
                             h: sheet.mark_w as u32,
-                            color: libhalcyon::theme::DAYLIGHT.ember,
+                            color: sheet.accent,
                         });
                     }
                 }
@@ -654,7 +659,7 @@ pub extern "C" fn rs_main() -> i64 {
                         y: y + r.1 + r.3 - sheet.mark_w,
                         w: r.2.max(1) as u32,
                         h: sheet.mark_w as u32,
-                        color: libhalcyon::theme::DAYLIGHT.ember,
+                        color: sheet.accent,
                     });
                 }
             }

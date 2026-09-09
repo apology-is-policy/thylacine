@@ -599,7 +599,7 @@ impl Tile {
                     y: y + cy,
                     w: sheet.mark_w as u32,
                     h: chh as u32,
-                    color: libhalcyon::theme::DAYLIGHT.ember,
+                    color: sheet.accent,
                 });
             }
         }
@@ -618,7 +618,7 @@ impl Tile {
                         y: y + by,
                         w: (x1 - x0).max(1) as u32,
                         h: sheet.mark_w as u32,
-                        color: libhalcyon::theme::DAYLIGHT.ember,
+                        color: sheet.accent,
                     });
                 }
             }
@@ -732,7 +732,7 @@ fn paint_run(cart: &mut Cartoon, lb: &LaidBlock, y: i32, sheet: &Sheet, m: Optio
                 y: y + r.1 + r.3 - sheet.mark_w,
                 w: r.2.max(1) as u32,
                 h: sheet.mark_w as u32,
-                color: libhalcyon::theme::DAYLIGHT.ember,
+                color: sheet.accent,
             });
         }
     }
@@ -932,6 +932,7 @@ mod tests {
     use crate::transcript::Item;
     use alloc::vec;
     use alloc::vec::Vec;
+    use libhalcyon::theme::DAYLIGHT;
     use vt::Cell;
 
     fn cell(ch: char) -> Cell {
@@ -1292,7 +1293,7 @@ mod tests {
             24 * ch
         );
         let caret = cart.ops.iter().any(|op| {
-            matches!(op, Op::Rect { w: 2, color, .. } if *color == libhalcyon::theme::DAYLIGHT.ember)
+            matches!(op, Op::Rect { w: 2, color, .. } if *color == DAYLIGHT.ember)
         });
         assert!(caret, "a 2px ember caret beam is painted at the grid cursor");
     }

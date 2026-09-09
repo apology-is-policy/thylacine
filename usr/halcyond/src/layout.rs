@@ -47,7 +47,14 @@ use libhalcyon::theme::Metrics;
 /// everything in the weave.
 #[derive(Clone, Copy)]
 pub struct Sheet {
-    pub ground: u32, // Daylight surface
+    /// The RESOLVED theme this sheet was built from (HALCYON-THEME 3.2).
+    /// Every painter already takes a `&Sheet`, so carrying the theme here is
+    /// what lets the chrome helpers reach a token without naming a constant.
+    /// The fields below stay as they are: they are the sheet's own
+    /// vocabulary, derived once, and a painter that wants `ground` should not
+    /// have to know it is the theme's `surface`.
+    pub theme: libhalcyon::theme::Theme,
+    pub ground: u32, // the theme's surface
     pub ink: u32,    // Daylight fg
     pub dim: u32,    // Daylight fg_dim (em--dim, raw output ink, the Normal-mode caret)
     pub accent: u32, // Daylight ember (the Insert caret / turnstile / running mark)
@@ -116,20 +123,28 @@ impl Sheet {
     }
 }
 
-/// The paper-light transcript sheet at a display scale (percent), built
-/// from the Daylight visual scripture (docs/HALCYON-VISUAL.md via
-/// libhalcyon::theme -- the single token source the H-3 split names).
-/// Replaces the H-2 approximation seeded from vt::THEMES[1]: the transcript
-/// now matches the chrome that H-3a's compositor bevels + tag bar draw
-/// around it, because both derive from DAYLIGHT. At 100 every size is the
-/// logical value (nothing at 1.0 moves; pinned by test).
+/// The transcript sheet for a RESOLVED theme at a display scale (percent).
+///
+/// The transcript matches the chrome that the compositor bevels + tag bar
+/// draw around it because both derive from the same `Theme` -- which is now
+/// a parameter rather than a constant this function reaches for
+/// (HALCYON-THEME 3.2). At 100 every size is the logical value (nothing at
+/// 1.0 moves; pinned by test).
+/// The built-in theme's sheet. TEST-ONLY: production resolves a theme once at
+/// startup and calls `sheet_for` with it, so a paint path cannot reach a
+/// Daylight-specific constructor (HALCYON-THEME 3.2).
+#[cfg(test)]
 pub fn daylight_sheet(scale: u16) -> Sheet {
-    let d = &libhalcyon::theme::DAYLIGHT;
+    sheet_for(&libhalcyon::theme::builtin(), scale)
+}
+
+pub fn sheet_for(d: &libhalcyon::theme::Theme, scale: u16) -> Sheet {
     let metrics = Metrics::at(scale);
     let (island, grid) = mono_advances(scale);
     let px = |v: f32| libhalcyon::scale::px(v, scale);
     let ipx = |v: i32| libhalcyon::scale::ipx(v, scale);
     Sheet {
+        theme: *d,
         ground: d.surface,
         smooth_mem: d.smooth_mem,
         ink: d.fg,
@@ -139,14 +154,9 @@ pub fn daylight_sheet(scale: u16) -> Sheet {
         err: d.cinnabar.key,
         ok: d.syntax.fen,
         rule: d.border,
-        // A parchment-compatible selection band: a warm step between surface
-        // and header (Daylight has no transcript-selection token; this sits in
-        // the same family, darker than surface, lighter than header).
-        sel_bg: 0xFFDF_D6C7,
+        sel_bg: d.selection,
         island_ground: d.header,
-        // `.hal-out`'s border-left -- the one transcript stroke the mockup
-        // stylesheet carries as a literal rather than a token.
-        island_rule: 0xFF7A_6850,
+        island_rule: d.island_rule,
         scale,
         metrics,
         hairline: metrics.hairline,
@@ -996,12 +1006,11 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                 lb.center = matches!(role, Role::Hdr(_, true) | Role::Deck(..));
                 for (s, e, sid) in runs_of(&line.cells) {
                     let st = b.styles[sid as usize];
-                    let bg =
-                        if st.bg != sheet.ground && st.bg != libhalcyon::theme::DAYLIGHT.surface {
-                            Some(st.bg)
-                        } else {
-                            None
-                        };
+                    let bg = if st.bg != sheet.ground && st.bg != sheet.theme.terminal.bg {
+                        Some(st.bg)
+                    } else {
+                        None
+                    };
                     lb.lay_span(gs, &line.cells[s..e], &st, false, item_idx, s, bg, mode);
                 }
                 lb.break_line(gs);
@@ -1037,10 +1046,12 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                     for (s, e, sid) in runs_of(&line.cells) {
                         let st = b.styles[sid as usize];
                         // A run's own SGR background still shows through; the
-                        // block ground is the default carrier otherwise.
-                        let bg = if st.bg != sheet.ground
-                            && st.bg != libhalcyon::theme::DAYLIGHT.surface
-                        {
+                        // block ground is the default carrier otherwise. The
+                        // second arm is the TERMINAL default, not a constant:
+                        // a cell that never set a background carries the vt
+                        // palette's bg, which a theme may set apart from the
+                        // sheet's ground (HALCYON-THEME 3.1's `[terminal]`).
+                        let bg = if st.bg != sheet.ground && st.bg != sheet.theme.terminal.bg {
                             Some(st.bg)
                         } else {
                             None
@@ -1544,6 +1555,111 @@ impl Default for LayoutCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // THE OPERATOR'S QUESTION, made mechanical: "if a theme is made and all
+    // colours are changed, some hardcoded Daylight colour won't kick in
+    // somewhere". Retint every token the sheet reads and assert NO sheet
+    // colour still holds a Daylight value. This is what caught the two
+    // literals `daylight_sheet` carried before TH-2 (`sel_bg` and
+    // `island_rule`, neither of which was a theme token at all), and it
+    // fails again the day a new literal is written into `sheet_for`.
+    #[test]
+    fn a_fully_retinted_theme_leaves_no_daylight_colour_in_the_sheet() {
+        // A bijection on the colour space: distinct inputs stay distinct, and
+        // no colour maps to itself (c == !c is impossible in 24 bits).
+        let flip = |c: u32| 0xFF00_0000 | (!c & 0x00FF_FFFF);
+        let base = libhalcyon::theme::builtin();
+        let mut t = base;
+        t.floor = flip(t.floor);
+        t.surface = flip(t.surface);
+        t.header = flip(t.header);
+        t.raised = flip(t.raised);
+        t.border = flip(t.border);
+        t.blank = flip(t.blank);
+        t.selection = flip(t.selection);
+        t.island_rule = flip(t.island_rule);
+        t.fg = flip(t.fg);
+        t.fg_dim = flip(t.fg_dim);
+        t.fg_muted = flip(t.fg_muted);
+        t.fg_subtle = flip(t.fg_subtle);
+        t.ember = flip(t.ember);
+        t.syntax.slate = flip(t.syntax.slate);
+        t.syntax.fen = flip(t.syntax.fen);
+        t.cinnabar.key = flip(t.cinnabar.key);
+
+        let daylight: &[u32] = &[
+            base.floor,
+            base.surface,
+            base.header,
+            base.raised,
+            base.border,
+            base.blank,
+            base.selection,
+            base.island_rule,
+            base.fg,
+            base.fg_dim,
+            base.fg_muted,
+            base.fg_subtle,
+            base.ember,
+            base.syntax.slate,
+            base.syntax.fen,
+            base.cinnabar.key,
+        ];
+        // The retint must not accidentally land on ANOTHER Daylight colour,
+        // or a survivor could pass by coincidence. Checked, not assumed.
+        for c in [
+            t.surface,
+            t.fg,
+            t.fg_dim,
+            t.ember,
+            t.syntax.slate,
+            t.cinnabar.key,
+            t.syntax.fen,
+            t.border,
+            t.selection,
+            t.header,
+            t.island_rule,
+        ] {
+            assert!(!daylight.contains(&c), "the retint collided with Daylight");
+        }
+
+        let s = sheet_for(&t, 100);
+        for (name, c) in [
+            ("ground", s.ground),
+            ("ink", s.ink),
+            ("dim", s.dim),
+            ("accent", s.accent),
+            ("obj", s.obj),
+            ("err", s.err),
+            ("ok", s.ok),
+            ("rule", s.rule),
+            ("sel_bg", s.sel_bg),
+            ("island_ground", s.island_ground),
+            ("island_rule", s.island_rule),
+        ] {
+            assert!(
+                !daylight.contains(&c),
+                "sheet.{name} is still a Daylight colour ({c:#010x}) -- it did \
+                 not come from the theme"
+            );
+        }
+        // And the sheet followed the theme, rather than merely differing from
+        // Daylight: the positive control.
+        assert_eq!(s.ground, t.surface);
+        assert_eq!(s.sel_bg, t.selection);
+        assert_eq!(s.island_rule, t.island_rule);
+        assert_eq!(s.theme.surface, t.surface, "the sheet carries the theme");
+    }
+
+    // The built-in is the scripture's Daylight -- the loader's floor, so a
+    // change here re-themes every installation with no theme file.
+    #[test]
+    fn the_builtin_is_daylight() {
+        let b = libhalcyon::theme::builtin();
+        assert_eq!(b.surface, 0xFFF2EBE0);
+        assert_eq!(b.fg, 0xFF1A120A);
+        assert_eq!(b.ember, 0xFFE07840);
+    }
     use crate::transcript::{
         Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, DEFAULT_MAX_LINES_PER_BLOCK, HDR_TITLE,
     };

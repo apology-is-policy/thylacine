@@ -1,18 +1,20 @@
-// theme -- the Daylight visual scripture as code (docs/HALCYON-VISUAL.md).
+// theme -- the whole coherent visual, as one type (docs/HALCYON-THEME.md).
 //
-// This is the SINGLE token source the ratified H-3 split names: halcyond's
-// transcript Sheet + chrome surface AND tapestryd's pane bevel/hairline/
-// cast-shadow constants both derive from here and nowhere else (the doc's
-// "consumed by libhalcyon::theme; the tag-bar and pane compositor read their
-// values from here and nowhere else").
+// `Theme` is the single token source the ratified H-3 split names: halcyond's
+// transcript Sheet + chrome surface AND tapestryd's pane bevel / hairline /
+// cast-shadow all read a `&Theme` and nothing else. Since TH-1 it also carries
+// the TERMINAL palette (foreign SGR's fg/bg + ANSI-16), which used to live as
+// a hand-copied const in `vt`; since TH-2 nothing in production may name a
+// theme CONSTANT at all -- see the visibility split below.
 //
 // Colours are `Argb` = 0xAARRGGBB with the alpha byte 0xFF (opaque) -- the
 // pixel format the cartoon executor writes and tapestryd's chrome painter
-// fills (tapestryd's own BG_COLOR is 0xFF101014, same convention).
+// fills (the compositor's blank fill is `blank`, same convention).
 //
-// The struct is theme-agnostic (HALCYON-VISUAL section 1.4/4/9: only the
-// palette differs between themes). Frutiger Aero (deferred to a later chunk)
-// is a second `Theme` const of this exact shape; nothing structural changes.
+// A second theme is a FILE, not a second const (HALCYON-THEME 3.3): the struct
+// is theme-agnostic (HALCYON-VISUAL section 1.4/4/9 -- only the palette differs
+// between themes), so Nocturne and Frutiger Aero are TOML, parsed into this
+// exact shape. `DAYLIGHT` is the built-in floor, reachable through `builtin()`.
 
 use alloc::string::String;
 use core::fmt::Write as _;
@@ -49,8 +51,8 @@ pub struct Syntax {
     pub cinnabar: Argb, // error
 }
 
-/// The full theme. One instance per Halcyon theme; `DAYLIGHT` is the only one
-/// at H-3a.
+/// The full theme: every colour, the terminal palette, and the type stroke.
+/// One instance per Halcyon theme, resolved once and threaded as `&Theme`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     // Ground (section 1.1)
@@ -59,6 +61,20 @@ pub struct Theme {
     pub header: Argb,  // tag bar bg; ALSO the inner hairline (section 2.4)
     pub raised: Argb,  // pill bg
     pub border: Argb,  // explicit strokes, tag-bar separators, the cast shadow
+    // The compositor's fill for a pane with nothing in it yet. NOT a shade of
+    // the ground: it is what the display shows before any client presents, and
+    // a theme that leaves it behind paints a near-black hole in a light
+    // workspace (it was `tapestryd::pane::BG_COLOR`, a literal, until TH-2).
+    pub blank: Argb,
+    // Transcript-only grounds the chrome scripture has no token for, promoted
+    // here at TH-2 because a literal in a paint site is a Daylight colour that
+    // survives a theme change -- the exact failure HALCYON-THEME exists to
+    // close. `selection` is a warm step between surface and header;
+    // `island_rule` is the mono island's left stroke (`.hal-out`'s
+    // border-left, the one transcript stroke the mockup stylesheet carries as
+    // a literal rather than a token).
+    pub selection: Argb,
+    pub island_rule: Argb,
     // Ink (section 1.2)
     pub fg: Argb,
     pub fg_dim: Argb,
@@ -170,14 +186,16 @@ pub const fn light_terminal(ground: Argb, ink: Argb) -> vt::Palette {
 const DAYLIGHT_SURFACE: Argb = 0xFFF2_EBE0;
 const DAYLIGHT_INK: Argb = 0xFF1A_120A;
 
-/// Daylight (HALCYON-VISUAL section 1). Values are the doc's #rrggbb widened to
-/// opaque Argb; the test below pins every one against the scripture.
-pub const DAYLIGHT: Theme = Theme {
+// The value. Always private; the two arms below decide who may NAME it.
+const DAYLIGHT_THEME: Theme = Theme {
     floor: 0xFF8A_7660,
     surface: DAYLIGHT_SURFACE,
     header: 0xFFCE_C4B6,
     raised: 0xFFBD_B0A0,
     border: 0xFFA8_9880,
+    blank: 0xFF10_1014,
+    selection: 0xFFDF_D6C7,
+    island_rule: 0xFF7A_6850,
     fg: DAYLIGHT_INK,
     fg_dim: 0xFF3A_2E22,
     fg_muted: 0xFF6A_5A48,
@@ -228,6 +246,39 @@ pub const DAYLIGHT: Theme = Theme {
     terminal: light_terminal(DAYLIGHT_SURFACE, DAYLIGHT_INK),
     smooth_mem: 12,
 };
+
+// NOTHING IN PRODUCTION MAY NAME A THEME CONSTANT (HALCYON-THEME 3.2). Every
+// colour, stroke and geometry token is reached through a `&Theme` threaded
+// from the ONE place that resolves it; a paint site that reaches for
+// `DAYLIGHT` instead is a Daylight colour surviving a theme change, which is
+// the failure this whole arc exists to close.
+//
+// Stating that rule in a comment is how it rots, so it is a VISIBILITY SPLIT:
+// outside the `theme-fixture` feature the const is crate-private and a
+// production reference does not COMPILE. Consumers enable the feature as a
+// DEV-dependency, so their scripture-pinning tests keep it and their shipped
+// binaries do not (resolver 2 keeps a dev-only feature out of `cargo build`
+// -- the same mechanism TY-4 used for cornucopia's atlases).
+//
+// The loader's floor is `builtin()`, which is public on purpose: something
+// must be able to say "no theme file, use the built-in".
+
+/// Daylight (HALCYON-VISUAL section 1). Values are the doc's #rrggbb widened to
+/// opaque Argb; the test below pins every one against the scripture.
+#[cfg(feature = "theme-fixture")]
+pub const DAYLIGHT: Theme = DAYLIGHT_THEME;
+#[cfg(not(feature = "theme-fixture"))]
+pub(crate) const DAYLIGHT: Theme = DAYLIGHT_THEME;
+
+/// The built-in theme: the floor no installation can remove, and what the
+/// loader falls back to when there is no theme file (HALCYON-THEME 4.1).
+///
+/// Call this at THE ONE PLACE that resolves a session's theme -- never at a
+/// paint site, which must be handed the resolved `&Theme`. Until the loader
+/// lands (TH-4) that one place is each renderer's startup.
+pub const fn builtin() -> Theme {
+    DAYLIGHT_THEME
+}
 
 /// The inner hairline (section 2.4) is `header` by construction -- it vanishes
 /// alongside a tag bar and shows only against content. One name for the intent.

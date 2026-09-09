@@ -80,3 +80,8 @@ libtapestry = { path = "../lib/libtapestry", optional = true }
 # same glyphs. A dev-dependency, so the shipped binary still links only the
 # subset -- `cargo build` does not build dev-deps.
 cornucopia = { path = "../lib/cornucopia", features = ["ttf", "scale"] }
+# The Daylight const, for the scripture-pinning tests only (HALCYON-THEME
+# 3.2). Production reaches every token through a threaded `&Theme`; enabling
+# the fixture here and NOT in [dependencies] is what makes a production
+# reference fail to compile in the shipped build.
+libhalcyon = { path = "../lib/libhalcyon", features = ["theme-fixture"] }

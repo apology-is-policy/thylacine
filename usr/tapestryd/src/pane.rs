@@ -31,11 +31,10 @@ use libhalcyon::theme;
 
 pub const MAX_PANES: usize = 32;
 
-/// The blank/empty-pane fill (compositor background before a client presents).
-/// The Daylight chrome colours (bevel/hairline/floor/strip) live in
-/// `libhalcyon::theme::DAYLIGHT` -- the single token source (HALCYON-VISUAL);
-/// server.rs's painters read them from there.
-pub const BG_COLOR: u32 = 0xFF10_1014;
+// The blank/empty-pane fill moved to `Theme.blank` at HALCYON-THEME TH-2: it
+// was the last chrome colour outside the token source, and a near-black hole
+// is exactly what a light theme must be able to retint. Every chrome colour
+// now reaches a painter through `Comp.theme`.
 
 // The tab/stack indicator strip height (G-6c; glyph-free per D7 -- the
 // compositor paints colored segments, never titles) is carved from the TOP

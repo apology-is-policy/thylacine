@@ -18,7 +18,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use cartoon::{Cartoon, GlyphRef, Op};
-use libhalcyon::theme::{Argb, DAYLIGHT};
+use libhalcyon::theme::{Argb, Theme};
 
 use crate::layout::Sheet;
 use crate::raster::{GlyphSource, FACE_BODY};
@@ -128,8 +128,7 @@ pub fn condition_label(c: Condition, exit_code: Option<i64>) -> String {
 /// the good state -- sage does not read on the dark bar, and the ember is
 /// the theme's own accent, the same "fine, carry on" the turnstile means at
 /// the prompt -- and the cinnabar key for a failure.
-pub fn condition_ink(c: Condition) -> Argb {
-    let d = &DAYLIGHT;
+pub fn condition_ink(d: &Theme, c: Condition) -> Argb {
     match c {
         Condition::Idle => d.status_idle,
         Condition::Ok => d.ember,
@@ -210,7 +209,7 @@ pub fn status_list(
     if w == 0 || h == 0 {
         return (cart, slots);
     }
-    let d = &DAYLIGHT;
+    let d = &sheet.theme;
     let (wi, hi) = (w as i32, h as i32);
     let px = sheet.px(STATUS_PX);
     let (pad, gap, ws_pad) = (sheet.ipx(PAD), sheet.ipx(GAP), sheet.ipx(WS_PAD));
@@ -245,7 +244,7 @@ pub fn status_list(
         let run = shape(gs, px, &text);
         let x = clock_x - gap - run.width;
         if !run.refs.is_empty() && x > 0 {
-            cart.push_glyphs(gen, x, baseline, condition_ink(m.condition), &run.refs);
+            cart.push_glyphs(gen, x, baseline, condition_ink(d, m.condition), &run.refs);
         }
         (x, run.width)
     };
@@ -320,6 +319,7 @@ pub fn bar_height(sheet: &Sheet) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libhalcyon::theme::DAYLIGHT;
 
     fn sheet() -> Sheet {
         crate::layout::daylight_sheet(100)
@@ -402,9 +402,15 @@ mod tests {
 
     #[test]
     fn the_condition_inks_are_the_mockups() {
-        assert_eq!(condition_ink(Condition::Ok), DAYLIGHT.ember);
-        assert_eq!(condition_ink(Condition::Err), DAYLIGHT.cinnabar.key);
-        assert_eq!(condition_ink(Condition::Idle), DAYLIGHT.status_idle);
+        assert_eq!(condition_ink(&DAYLIGHT, Condition::Ok), DAYLIGHT.ember);
+        assert_eq!(
+            condition_ink(&DAYLIGHT, Condition::Err),
+            DAYLIGHT.cinnabar.key
+        );
+        assert_eq!(
+            condition_ink(&DAYLIGHT, Condition::Idle),
+            DAYLIGHT.status_idle
+        );
     }
 
     #[test]
