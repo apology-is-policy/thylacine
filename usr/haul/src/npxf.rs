@@ -862,8 +862,8 @@ mod tests {
     // request, never silently pass in the default suite.
     //
     //   npxf-server -l 127.0.0.1:5640 -r <tree> -t <tokenfile> -R
-    //   FORAGE_NPXF_ADDR=127.0.0.1:5640 FORAGE_NPXF_TOKEN=<token> \
-    //     cargo test -p forage --lib --no-default-features \
+    //   HAUL_NPXF_ADDR=127.0.0.1:5640 HAUL_NPXF_TOKEN=<token> \
+    //     cargo test -p haul --lib --no-default-features \
     //       --target aarch64-apple-darwin -- --ignored --nocapture
 
     #[test]
@@ -871,10 +871,10 @@ mod tests {
     fn interoperates_with_a_live_npxf_server() {
         use std::io::{Read, Write};
 
-        let addr = std::env::var("FORAGE_NPXF_ADDR")
-            .expect("set FORAGE_NPXF_ADDR=host:port to run the live interop test");
-        let token = std::env::var("FORAGE_NPXF_TOKEN")
-            .expect("set FORAGE_NPXF_TOKEN to the server's token");
+        let addr = std::env::var("HAUL_NPXF_ADDR")
+            .expect("set HAUL_NPXF_ADDR=host:port to run the live interop test");
+        let token = std::env::var("HAUL_NPXF_TOKEN")
+            .expect("set HAUL_NPXF_TOKEN to the server's token");
 
         let mut sock = std::net::TcpStream::connect(&addr).expect("connect to npxf-server");
         sock.set_read_timeout(Some(std::time::Duration::from_secs(15)))

@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 60 unowned · 494 files (87% owned) · ~17363 unswept lines.**
+**434 owned · 60 unowned · 494 files (87% owned) · ~17367 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30471 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,7 +74,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 0 | 22 | 3384 |
 | kernel | 123 | 15 | 2118 |
-| usr/forage | 0 | 4 | 1788 |
+| usr/haul | 0 | 4 | 1792 |
 | usr/ports | 14 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1028 |
 | usr/lib | 58 | 3 | 1003 |
@@ -124,8 +124,8 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1028 |
-| usr/forage/src/npxf.rs | 949 |
-| usr/forage/src/main.rs | 709 |
+| usr/haul/src/npxf.rs | 949 |
+| usr/haul/src/main.rs | 713 |
 | usr/lib/libhalcyon/src/toml.rs | 629 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/halcyond/src/outline.rs | 432 |
@@ -157,7 +157,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/pouch-hello/pouch-hello-fopen.c | 120 |
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
-| usr/forage/src/addr.rs | 105 |
+| usr/haul/src/addr.rs | 105 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
@@ -179,6 +179,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
-| usr/forage/src/lib.rs | 25 |
+| usr/haul/src/lib.rs | 25 |
 | usr/tapestryd/src/lib.rs | 18 |
 <!-- generated:end -->

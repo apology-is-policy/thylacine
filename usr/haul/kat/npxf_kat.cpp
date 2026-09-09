@@ -1,5 +1,5 @@
 // Generate cross-implementation known-answer vectors for the npxf secure
-// channel, for Thylacine's guest-side client (usr/forage) to be pinned against.
+// channel, for Thylacine's guest-side client (usr/haul) to be pinned against.
 //
 // THE POINT OF THE #include: `derive`, `absorb`, `transcript_start`,
 // `confirm_tag` and `expand_label` live in channel.cpp's ANONYMOUS namespace,

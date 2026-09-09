@@ -1,15 +1,15 @@
 // Dial-string parsing, pure and host-tested.
 //
-// This exists because forage advertised one syntax and implemented another.
+// This exists because haul advertised one syntax and implemented another.
 // Its usage line, its doc comments and its design doc all said Plan 9's
 // `host!port` -- the form every dial-style tool in this lineage takes, and the
 // form the tree uses everywhere internally (`tcp!127.0.0.1!80`). But the code
 // handed the string straight to `SocketAddrV4::parse`, which wants
 // `a.b.c.d:port`, so the documented form was rejected:
 //
-//     forage: address (want host!port)
+//     haul: address (want host!port)
 //
-// Nothing caught it, because until the npxf channel gave forage a server to
+// Nothing caught it, because until the npxf channel gave haul a server to
 // talk to, NO BYTE HAD EVER CROSSED IT. A whole surface can agree with itself
 // about a syntax it does not implement, as long as nothing ever runs it.
 //

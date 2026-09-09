@@ -1,10 +1,10 @@
-# FORAGE — mounting a remote 9P2000.L tree
+# HAUL — mounting a remote 9P2000.L tree
 
 **Status**: AS-BUILT. Plain transport `5094f1ad`; the npxf secure channel this
 document specifies landed with the row added to `docs/AUDIT-TRIGGERS.md`.
 
 The thylacine ranged well beyond its den to feed; what it brought back went in
-the larder. `forage` grafts a tree from *outside the machine* into the local
+the larder. `haul` grafts a tree from *outside the machine* into the local
 namespace, and the pages it yields are cached by the Larder (the guest-side FS
 cache, I-38). The name is a **proposal** under CLAUDE.md "Thematic naming" — the
 operator has not ratified it. `mount` and `srv` are the Plan 9 words; `quarry`
@@ -48,7 +48,7 @@ Where should the encryption terminate?
 | Option | Shape | Cost |
 |---|---|---|
 | **A host-side bridge** | a host process terminates npxf and re-exports plain 9P to the guest | plaintext 9P crosses the host/guest boundary; the guest holds no credential and authenticates nothing; a second moving part to deploy |
-| **In the guest** | forage speaks npxf itself | the crypto runs in Thylacine userspace; the guest holds the token and is a real authenticated party |
+| **In the guest** | haul speaks npxf itself | the crypto runs in Thylacine userspace; the guest holds the token and is a real authenticated party |
 
 **The operator chose: terminate in the guest.** They also chose to build the
 plain-9P transport first, so the two halves could be landed and reviewed
@@ -70,17 +70,17 @@ at once.
 
 ```
   ut ──9P──> kernel 9P client ──pipe──┐
-                                      │   forage (userspace)
+                                      │   haul (userspace)
                                       ├── pump_up   ──seal──> TCP ──> npxf-server
                                       └── pump_down <─open─── TCP <──
 ```
 
-`forage [-a aname] [-t file | --token-env VAR] [-v] host!port mountpoint [cmd ...]`
+`haul [-a aname] [-t file | --token-env VAR] [-v] host!port mountpoint [cmd ...]`
 
 Two half-duplex pipes: `c2s` carries T-messages, `s2c` carries R-messages. Two
 pump threads, one per direction. The main thread performs the attach, then
 either runs `cmd` (which sees the tree, being a child — §4.3) or parks for the
-mount's lifetime. forage *is* the transport, so exiting while someone is walking
+mount's lifetime. haul *is* the transport, so exiting while someone is walking
 the tree would tear the session down under them.
 
 ### 2.1 The two orderings that matter
@@ -164,7 +164,7 @@ widely-reviewed primitives (RustCrypto's `chacha20poly1305`, `x25519-dalek`,
 
 ### 3.2 Fail-closed on entropy
 
-The ephemeral scalar is the whole of the session's forward secrecy. `forage`
+The ephemeral scalar is the whole of the session's forward secrecy. `haul`
 takes it from `SYS_GETRANDOM` (which gates on `CAP_CSPRNG_READ`) and **refuses
 to connect if that fails**. There is no weaker source and no degraded mode: a
 channel that merely looks encrypted is worse than a refusal, because the user
@@ -193,7 +193,7 @@ The transport had been built, reviewed and booted without a single byte ever
 crossing it, because there was no plain 9P2000.L endpoint to point it at. Three
 independent layers now stand between that and a claim of correctness.
 
-**1. Known-answer vectors, from npxf's own code** (`usr/forage/kat/`).
+**1. Known-answer vectors, from npxf's own code** (`usr/haul/kat/`).
 `kat/npxf_kat.cpp` `#include`s npxf's `channel.cpp` so it calls the reference
 `derive()` / `absorb()` / `confirm_tag()` — *not* a re-derivation of them. That
 matters: a generator that re-implemented the schedule would encode my reading of
@@ -216,10 +216,10 @@ the handshake, seals a Tversion and decrypts an authenticated Rversion. It skips
 loudly without a server rather than passing silently, and a wrong token fails it
 at `ServerAuth` — so it discriminates.
 
-**3. The guest E2E** (`tools/interactive/forage-npxf.exp`). Everything above
+**3. The guest E2E** (`tools/interactive/haul-npxf.exp`). Everything above
 proves the *protocol*; only a boot proves the *plumbing* — the pipes, the pumps,
 the synchronous attach and the mount. The scenario asserts the mount line
-including the mode word (a forage that silently fell back to plaintext would
+including the mode word (a haul that silently fell back to plaintext would
 otherwise print an equally cheerful line), then reads real file **content**
 through the channel, then a directory listing so the proof is not one server-op
 wide.
@@ -237,11 +237,11 @@ npxf-server -l 127.0.0.1:5640 -r <tree> -t <tokenfile> -R
 
 # on the dev host
 ssh -f -N -L 5640:127.0.0.1:5640 thyla-pi
-FORAGE_NPXF_ADDR=127.0.0.1:5640 FORAGE_NPXF_TOKEN=<token> \
-  cargo test -p forage --lib --no-default-features \
+HAUL_NPXF_ADDR=127.0.0.1:5640 HAUL_NPXF_TOKEN=<token> \
+  cargo test -p haul --lib --no-default-features \
     --target aarch64-apple-darwin -- --ignored --nocapture
-FORAGE_NPXF_PORT=5640 FORAGE_NPXF_TOKEN=<token> \
-  tools/test-interactive.sh forage-npxf
+HAUL_NPXF_PORT=5640 HAUL_NPXF_TOKEN=<token> \
+  tools/test-interactive.sh haul-npxf
 ```
 
 The exported tree must hold `hello.txt` containing `the thylacine is real`.
@@ -278,7 +278,7 @@ single closer by CAS removes the double close but not that race. A pump now
 closes **nothing**: the main thread observes `STOPPED` and lets the *process*
 exit, which closes every fd at once from outside both pumps. The kernel sees the
 same EOF, bounded by the 200 ms poll. Exiting is correct rather than merely
-convenient — forage *is* the transport, so once either direction is dead the
+convenient — haul *is* the transport, so once either direction is dead the
 mount is dead.
 
 ### 4.3 The one that changes the shape: a mount is not visible to the shell
@@ -286,34 +286,34 @@ mount is dead.
 With the channel finally up and the tree mounted, the read still failed:
 
 ```
-forage: 10.0.2.2!5640 mounted at /home/cora/host (aname /, npxf encrypted)
+haul: 10.0.2.2!5640 mounted at /home/cora/host (aname /, npxf encrypted)
 cat: /home/cora/host/hello.txt: no such file or namespace entry
 ```
 
 Both lines are correct. **A mount lands in the calling Proc's Territory and
 nowhere else** — that is I-1, working exactly as specified — and a child
-inherits its parent's namespace at spawn, never the reverse. `forage ... &` from
+inherits its parent's namespace at spawn, never the reverse. `haul ... &` from
 a shell is a *child* of that shell, so it mounted into its own namespace and the
 shell could not see it. `login` gets this right by construction: it mounts the
 user's home and *then* spawns the shell, so the shell is downstream of the
 mount.
 
-This is not a bug in forage; it is the capability model refusing to let a child
-reach into its parent. But it does mean forage's original shape — background it,
+This is not a bug in haul; it is the capability model refusing to let a child
+reach into its parent. But it does mean haul's original shape — background it,
 then use the tree from the shell — **cannot work**, and the operator's request
 was precisely "mount that endpoint transparently as a directory."
 
 The obvious answer is Plan 9's own — `rfork; mount; exec` — so
-`forage <addr> <mnt> [cmd ...]` was built: mount, then run `cmd` as a child,
+`haul <addr> <mnt> [cmd ...]` was built: mount, then run `cmd` as a child,
 which should see the tree by being downstream of the mount. **It does not
 work, and that is the more interesting finding.**
 
 ```
-forage: .. mount check: 5 entr(y/ies) here, first "."
+haul: .. mount check: 5 entr(y/ies) here, first "."
 cat: /tmp/host/hello.txt: no such file or namespace entry
 ```
 
-forage lists the remote tree from its own namespace — a real Twalk + Treaddir
+haul lists the remote tree from its own namespace — a real Twalk + Treaddir
 through the channel — and its own child cannot see the mount. Measured at
 `/home/cora/host` (inside another mount) **and** at `/tmp/host` (plain ramfs),
 so the mount point's location is not the discriminator: **a `SYS_SPAWN` child
@@ -323,8 +323,8 @@ That is surprising, because `territory_clone` deep-copies the mount table, and
 because `login` mounts the user's home and then spawns the shell. Whether the
 spawn path reaches that clone, and what actually makes login's case work, are
 both untested. It is a kernel-side question, tracked in
-`memory/bug_nested_mount_lost_at_spawn_clone.md`, and **not forage's to answer**
-— which is why the E2E now asserts what forage itself proves (the mount, and a
+`memory/bug_nested_mount_lost_at_spawn_clone.md`, and **not haul's to answer**
+— which is why the E2E now asserts what haul itself proves (the mount, and a
 readdir of the remote tree through the encrypted channel) and leaves the reader
 out of it.
 
@@ -336,7 +336,7 @@ separate chunk with a real design question attached (naming, lifetime, who
 unmounts), and it wants the operator's vote.
 
 **A note on method, since it cost a boot and would have cost more.** The
-nested-mount explanation fit the first measurement perfectly: forage's mount
+nested-mount explanation fit the first measurement perfectly: haul's mount
 point was inside the home's 9P mount, login's is in the ramfs root, and a
 mount-cross keyed on Spoor identity would plausibly fail across a clone. It was
 still wrong. The one-variable control — same scenario, ramfs mount point —
@@ -345,7 +345,7 @@ cause.
 
 ### 4.4 What only the E2E could find
 
-**forage advertised one address syntax and implemented another.** Its usage
+**haul advertised one address syntax and implemented another.** Its usage
 line, its doc comments and this document all said Plan 9's `host!port` — the
 form every dial-style tool in the lineage takes and the form the tree uses
 internally (`tcp!127.0.0.1!80`). The code handed the string straight to
@@ -353,19 +353,19 @@ internally (`tcp!127.0.0.1!80`). The code handed the string straight to
 rejected outright:
 
 ```
-forage: address (want host!port)
+haul: address (want host!port)
 ```
 
 The error message asked for exactly what it had just refused.
 
 Nothing caught this — not the type checker, not clippy, not a review, not a
-boot — because **until the npxf channel gave forage a server to talk to, no byte
+boot — because **until the npxf channel gave haul a server to talk to, no byte
 had ever crossed it**. A whole surface can agree with itself about a syntax it
 does not implement, for as long as nothing ever runs it. This is the concrete
 answer to "was the E2E worth the loop cost": it found a bug that made the tool
 unusable by its own documented interface, on its first real invocation.
 
-Now `usr/forage/src/addr.rs` — pure, host-tested, 6 tests — accepts both forms,
+Now `usr/haul/src/addr.rs` — pure, host-tested, 6 tests — accepts both forms,
 splitting from the right so a Plan 9 network prefix (`tcp!host!port`) leaves a
 host that fails *visibly* rather than being truncated into something that
 happens to parse.
@@ -391,7 +391,7 @@ wrong kind of server does not make the probe skip; it makes it hang, because
 **the guest port is a rendezvous, not a private address**.
 
 And then the third, which killed the approach outright. Moved to a private guest
-port, forage reported `sent flight 1 (40 bytes)` — a *successful* write — while
+port, haul reported `sent flight 1 (40 bytes)` — a *successful* write — while
 the server logged `read: Resource temporarily unavailable`. The 40 bytes went
 nowhere.
 
@@ -420,7 +420,7 @@ dropped, because the case for it evaporated once the right route was found;
 is a real defect independent of all this.
 
 And a third, in this scenario's own first draft: it exited **0** when the server
-was absent, and the harness reported `PASS: forage-npxf [0s]`. The harness has a
+was absent, and the harness reported `PASS: haul-npxf [0s]`. The harness has a
 real skip convention — exit **77** plus an `LS-CI SKIP:` line, which it reports
 as SKIP and annotates "NOT a guest result, and NOT coverage". A green that means
 nothing ran is strictly worse than a red, and this one appeared the moment an
@@ -434,21 +434,21 @@ nothing ran is strictly worse than a red, and this one appeared the moment an
   mirroring npxf's own two mechanisms, which is deliberately the least
   surprising interface for the operator who designed them. Neither is the right
   long-term home. Thylacine's answer to "who holds a credential" is **corvus**
-  (the key agent, the factotum in this lineage), and a `forage` that asked
+  (the key agent, the factotum in this lineage), and a `haul` that asked
   corvus for the token would keep the secret out of the filesystem and out of
   `/env` entirely. That is its own chunk, and it wants the operator's vote on
   the shape.
 - **`/dev/random` is world-rw while `SYS_GETRANDOM` is capability-gated**
-  (the standing H-4b-1 item). forage deliberately uses the *gated* path and
+  (the standing H-4b-1 item). haul deliberately uses the *gated* path and
   fails closed; a future consumer reaching for the ungated one would be a hole.
 - **`ut` cannot parse a bare `host!port`.** Its lexer emits `Bang` for any `!`
   that is not `!=`, so `10.0.2.100!7830` dies with
   `UnexpectedToken { expected: "`;`, newline, or end of input" }`. The address
-  must be quoted. This is not forage's bug and not forage's alone: `dial`,
+  must be quoted. This is not haul's bug and not haul's alone: `dial`,
   `con`, `nc`, `ping` and `nslookup` all take the same form, and the whole
   family is affected the moment a person types one — the form had only ever
   appeared in C string literals before. Tracked in
   `memory/bug_ut_bang_collides_with_plan9_addresses.md`; a shell whose lexer
   fights the OS's native address syntax deserves a real fix, not a documented
   workaround.
-- **The name.** `forage` is unratified.
+- **The name.** `haul` is unratified.
