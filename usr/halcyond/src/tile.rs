@@ -1212,7 +1212,7 @@ mod tests {
     // are shape assertions (a Clear, then glyph runs, plus the height contract),
     // not pixel checks -- the pixels are the ls-gfx-session E2E's job.
     fn daylight_tile(cols: usize, rows: usize) -> Tile {
-        Tile::new(cols, rows, vt::DAYLIGHT)
+        Tile::new(cols, rows, libhalcyon::theme::daylight_palette())
     }
 
     #[test]
@@ -1301,10 +1301,10 @@ mod tests {
     /// and holds at most `max_blocks` frozen blocks.
     fn history_tile(cols: usize, rows: usize, max_blocks: usize) -> Tile {
         Tile {
-            grid: Grid::new(cols, rows, vt::DAYLIGHT.fg, vt::DAYLIGHT.bg),
+            grid: Grid::new(cols, rows, libhalcyon::theme::daylight_palette().fg, libhalcyon::theme::daylight_palette().bg),
             scrollback: {
                 let mut t = Transcript::with_caps(
-                    vt::DAYLIGHT,
+                    libhalcyon::theme::daylight_palette(),
                     max_blocks,
                     DEFAULT_MAX_COST,
                     DEFAULT_MAX_LINES_PER_BLOCK,
@@ -1882,7 +1882,7 @@ mod tests {
     fn live_grid_table_click_hits_the_clicked_row() {
         let mut gs = GlyphSource::new_vendored(512);
         let sheet = crate::layout::daylight_sheet(100);
-        let mut t = Tile::new(40, 4, vt::DAYLIGHT);
+        let mut t = Tile::new(40, 4, libhalcyon::theme::daylight_palette());
         frame(&mut t, 1, b"zone;k=output");
         frame(&mut t, 2, b"table;cols=lr;hdr=0");
         frame(&mut t, 3, b"row");
@@ -1961,7 +1961,7 @@ mod tests {
     fn live_grid_pre_click_hits_the_clicked_row() {
         let mut gs = GlyphSource::new_vendored(512);
         let sheet = crate::layout::daylight_sheet(100);
-        let mut t = Tile::new(40, 4, vt::DAYLIGHT);
+        let mut t = Tile::new(40, 4, libhalcyon::theme::daylight_palette());
         frame(&mut t, 1, b"pre");
         write(&mut t, vec![(0, 0, cs('|', 1)), (0, 1, cs(' ', 1))], (0, 2));
         frame(&mut t, 2, b"obj;type=path;ref=/aa");
@@ -2016,7 +2016,7 @@ mod tests {
     /// ONE rule on the live grid.
     #[test]
     fn one_rule_frame_places_one_rule_on_the_live_grid() {
-        let mut t = Tile::new(20, 4, vt::DAYLIGHT);
+        let mut t = Tile::new(20, 4, libhalcyon::theme::daylight_palette());
         frame(&mut t, 1, b"rule");
         assert_eq!(t.scrollback.rule_open(), Some(1));
         write(&mut t, vec![(0, 0, cs('a', 1)), (0, 1, cs('b', 1))], (1, 0));

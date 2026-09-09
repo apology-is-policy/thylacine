@@ -23,6 +23,7 @@
 
 extern crate alloc;
 
+pub mod cmdline;
 pub mod wire;
 
 use alloc::string::String;

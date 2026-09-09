@@ -84,6 +84,13 @@ pub struct Theme {
     pub status_fg: Argb,
     pub status_muted: Argb,
     pub status_idle: Argb,
+    // The terminal palette foreign SGR renders through (HALCYON-THEME 3.1):
+    // the default fg/bg plus the ANSI-16. Halcyon's OWN output renders
+    // through the Sheet, which is built from the chrome tokens above; this is
+    // what a hosted program's escape sequences resolve against. It lives here
+    // -- rather than as a const in `vt` -- because it is a THEME decision:
+    // `vt` owns the type and the renderer, the theme owns the colours.
+    pub terminal: vt::Palette,
     // Type (HALCYON-TYPE section 4.2): the smoothing stroke on every
     // proportional glyph, in THOUSANDTHS of an em (the doc's
     // `type_smooth_em` x 1000, kept integral so the theme stays `Eq`). The
@@ -137,15 +144,41 @@ impl Metrics {
     }
 }
 
+/// The terminal palette for a theme on a LIGHT ground: the theme's own
+/// surface and ink over `vt`'s proven light ANSI-16, with bright-white
+/// aliased to the ink.
+///
+/// The alias is `vt`'s slot-uniqueness rule (its `PARCHMENT` note): within a
+/// palette no two slots may share a value EXCEPT `ansi[15] == fg`, which every
+/// theme carries so a `set_theme` remap maps it consistently. Written once
+/// here so a second light theme inherits the rule instead of restating it.
+pub const fn light_terminal(ground: Argb, ink: Argb) -> vt::Palette {
+    let mut ansi = vt::PARCHMENT.ansi;
+    ansi[15] = ink;
+    vt::Palette {
+        bg: ground,
+        fg: ink,
+        ansi,
+    }
+}
+
+// Daylight's ground and ink, named because a const initializer cannot refer to
+// the const it is defining and these two are each used twice within it -- once
+// as a chrome token, once through `light_terminal`. One literal per colour is
+// the whole point: the terminal palette is DERIVED from the chrome, not
+// transcribed beside it.
+const DAYLIGHT_SURFACE: Argb = 0xFFF2_EBE0;
+const DAYLIGHT_INK: Argb = 0xFF1A_120A;
+
 /// Daylight (HALCYON-VISUAL section 1). Values are the doc's #rrggbb widened to
 /// opaque Argb; the test below pins every one against the scripture.
 pub const DAYLIGHT: Theme = Theme {
     floor: 0xFF8A_7660,
-    surface: 0xFFF2_EBE0,
+    surface: DAYLIGHT_SURFACE,
     header: 0xFFCE_C4B6,
     raised: 0xFFBD_B0A0,
     border: 0xFFA8_9880,
-    fg: 0xFF1A_120A,
+    fg: DAYLIGHT_INK,
     fg_dim: 0xFF3A_2E22,
     fg_muted: 0xFF6A_5A48,
     fg_subtle: 0xFF9A_8878,
@@ -185,10 +218,14 @@ pub const DAYLIGHT: Theme = Theme {
         fen: 0xFF1E_5828,
         cinnabar: 0xFF98_2818,
     },
+    // Four independent roles in the scripture's own table (HALCYON-VISUAL
+    // section 6), NOT derivations -- they equal the ink and the surface today,
+    // and a theme may legitimately separate them. Literals, deliberately.
     status_bg: 0xFF1A_120A,
     status_fg: 0xFFF2_EBE0,
     status_muted: 0xFFC8_B89A,
     status_idle: 0xFF3A_2E22,
+    terminal: light_terminal(DAYLIGHT_SURFACE, DAYLIGHT_INK),
     smooth_mem: 12,
 };
 
@@ -198,20 +235,18 @@ pub const fn hairline(t: &Theme) -> Argb {
     t.header
 }
 
-/// The transcript's vt palette, grounded in Daylight so it AGREES with the
-/// `Sheet` built from `DAYLIGHT` (bg == surface, fg == fg). This agreement is
-/// load-bearing: halcyond's "default ink" test (`st.fg == sheet.ink`, the
-/// hook that applies the obj/dim semantic colours) only fires when the pen's
-/// default fg -- which comes from THIS palette -- equals `sheet.ink`. The
-/// ANSI-16 is the proven light set (vt's PARCHMENT, which Daylight formalizes),
-/// with bright-white pinned to the default fg for coherence. Foreign-program
-/// SGR renders through this; halcyon's own output renders through the Sheet.
-pub fn daylight_palette() -> vt::Palette {
-    // Single source of truth is `vt::DAYLIGHT` (so a per-tile kaua-term, which
-    // depends on `vt` but not this crate, stamps identical cells -- HALCYON.md
-    // 14.12). The `daylight_is_vt_daylight` test pins that const against this
-    // theme's surface/fg, so the two cannot drift apart silently.
-    vt::DAYLIGHT
+/// The transcript's vt palette: Daylight's own `terminal`.
+///
+/// It AGREES with the `Sheet` built from `DAYLIGHT` (bg == surface, fg == fg)
+/// BY CONSTRUCTION since HALCYON-THEME TH-1 -- `light_terminal` is handed the
+/// same two consts the chrome tokens use, so there is nothing left to drift.
+/// The agreement is load-bearing: halcyond's "default ink" test
+/// (`st.fg == sheet.ink`, the hook that applies the obj/dim semantic colours)
+/// only fires when the pen's default fg -- which comes from THIS palette --
+/// equals `sheet.ink`. Foreign-program SGR renders through this; halcyon's own
+/// output renders through the Sheet.
+pub const fn daylight_palette() -> vt::Palette {
+    DAYLIGHT.terminal
 }
 
 /// The session palette as the `role=RRGGBB` text a Halcyon session publishes to
@@ -258,18 +293,37 @@ pub fn daylight_env_palette() -> String {
 mod tests {
     use super::*;
 
-    // The single-source pin: `vt::DAYLIGHT` (the kaua-term's render palette,
-    // HALCYON.md 14.12) must equal what this theme derives -- surface as bg,
-    // fg as fg, Parchment's ANSI with bright-white aliased to fg. A drift makes
-    // a session tile's grid theme diverge from halcyond's transcript.
+    // The terminal palette IS the theme's ground and ink (HALCYON-THEME 3.1).
+    // Before TH-1 this compared two independently-written consts in two
+    // crates; now it states one relationship the construction already
+    // guarantees, which is what makes it cheap to keep: it fails only if
+    // someone gives `terminal` a hand-written value again.
     #[test]
-    fn daylight_is_vt_daylight() {
+    fn the_terminal_palette_is_the_theme_ground_and_ink() {
         let p = daylight_palette();
-        assert_eq!(p.bg, DAYLIGHT.surface);
-        assert_eq!(p.fg, DAYLIGHT.fg);
-        let mut want = vt::THEMES[1].1.ansi; // Parchment
+        assert_eq!(p.bg, DAYLIGHT.surface, "bg is the surface");
+        assert_eq!(p.fg, DAYLIGHT.fg, "fg is the ink");
+        let mut want = vt::PARCHMENT.ansi;
         want[15] = DAYLIGHT.fg;
-        assert_eq!(p.ansi, want);
+        assert_eq!(p.ansi, want, "the light ANSI-16 with bright-white aliased");
+        // vt's slot-uniqueness rule: within a palette no two slots share a
+        // value EXCEPT ansi[15] == fg. A theme that broke it would mis-slot
+        // cells across a `set_theme` remap.
+        for (i, c) in p.ansi.iter().enumerate() {
+            for (j, d) in p.ansi.iter().enumerate() {
+                assert!(i == j || c != d, "ansi[{i}] and ansi[{j}] share a value");
+            }
+            assert!(i == 15 || *c != p.fg, "ansi[{i}] aliases fg but is not 15");
+        }
+    }
+
+    // The seam a compositor uses to TELL a producer its theme: Daylight must
+    // survive the argv round trip, or a session tile's cells are born in a
+    // different palette than the transcript beside them.
+    #[test]
+    fn daylight_survives_the_palette_spec_round_trip() {
+        let spec = vt::palette_to_spec(&daylight_palette());
+        assert_eq!(vt::palette_from_spec(&spec), Some(daylight_palette()));
     }
 
     // Every Daylight value pinned against HALCYON-VISUAL section 1/2/6. A drift

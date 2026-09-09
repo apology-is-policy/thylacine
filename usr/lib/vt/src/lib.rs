@@ -56,7 +56,7 @@ const ANSI: [u32; 16] = [
 // involvement). Cells bake RESOLVED colors at write time, so a theme switch
 // remaps existing cells by exact old->new color match (set_theme); truecolor
 // SGR passes through a switch untouched, by design.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Palette {
     pub bg: u32,
     pub fg: u32,
@@ -78,7 +78,7 @@ pub const BONFIRE: Palette = Palette {
 // one-sided alias (a slot aliasing fg in one theme but not another) would
 // mis-slot cells on the round-trip -- ansi[0] below is deliberately distinct
 // from fg for exactly that reason.
-const PARCHMENT: Palette = Palette {
+pub const PARCHMENT: Palette = Palette {
     bg: 0xFFF1_EAE0,
     fg: 0xFF2B_2320,
     ansi: [
@@ -132,24 +132,68 @@ pub static THEMES: [(&str, Palette); 3] = [
     ("spinifex", SPINIFEX),
 ];
 
-// Daylight: the Halcyon compositor's render palette (HALCYON.md section 14.12).
-// A per-tile kaua-term stamps cells in the COMPOSITOR's theme, because the seam
-// ships resolved RGB (14.3) -- the palette must be applied at the producer, not
-// re-mapped in halcyond. Parchment's ANSI over the exact Daylight surface + ink
-// (libhalcyon::DAYLIGHT), so a session tile's grid composites coherently with
-// halcyond's Daylight transcript. Single source of truth: libhalcyon::
-// daylight_palette() returns this. NOT in THEMES (it is the render palette, not
-// a user-selectable set_theme choice). v1.x: the compositor plumbs the palette
-// to the kaua-term (14.6's tier precedent) rather than the producer defaulting.
-pub const DAYLIGHT: Palette = Palette {
-    bg: 0xFFF2_EBE0, // libhalcyon DAYLIGHT.surface
-    fg: 0xFF1A_120A, // libhalcyon DAYLIGHT.fg
-    ansi: {
-        let mut a = PARCHMENT.ansi;
-        a[15] = 0xFF1A_120A; // bright white == default fg (the slot-uniqueness alias)
-        a
-    },
-};
+/// The 18 colours as `RRGGBB,RRGGBB,...` -- bg, fg, then ansi[0..16].
+///
+/// A per-tile kaua-term must stamp cells in the COMPOSITOR's theme, because
+/// the seam ships resolved RGB (HALCYON.md 14.3): the palette is applied at
+/// the producer and cannot be re-mapped downstream. This pair is how the
+/// compositor says which -- 14.6's tier precedent (`--beacon`) applied to the
+/// palette, so a Halcyon theme reaches the terminal core by being PASSED
+/// rather than by being duplicated inside it. A theme's colours are the
+/// compositor's to own; this crate only renders them.
+///
+/// The alpha byte is dropped: a spec is opaque by construction, so a decoder
+/// re-adds 0xFF and `from_spec(to_spec(p)) == p` holds for any opaque `p`.
+pub fn palette_to_spec(p: &Palette) -> String {
+    let mut s = String::new();
+    let mut put = |c: u32| {
+        if !s.is_empty() {
+            s.push(',');
+        }
+        for shift in [16, 8, 0] {
+            let byte = (c >> shift) as u8;
+            for nib in [byte >> 4, byte & 0xF] {
+                s.push(char::from_digit(nib as u32, 16).unwrap_or('0'));
+            }
+        }
+    };
+    put(p.bg);
+    put(p.fg);
+    for c in p.ansi {
+        put(c);
+    }
+    s
+}
+
+/// The inverse of `palette_to_spec`. `None` on any deviation -- a wrong count,
+/// a short or long field, a non-hex digit. Total on arbitrary input (a spec
+/// arrives as argv, so a malformed one must fail, never panic); the caller
+/// decides what a failure means, and both callers treat it as loud.
+pub fn palette_from_spec(s: &str) -> Option<Palette> {
+    let mut vals = [0u32; 18];
+    let mut n = 0usize;
+    for field in s.split(',') {
+        if n == 18 || field.len() != 6 {
+            return None;
+        }
+        let mut v = 0u32;
+        for ch in field.chars() {
+            v = (v << 4) | ch.to_digit(16)?;
+        }
+        vals[n] = 0xFF00_0000 | v;
+        n += 1;
+    }
+    if n != 18 {
+        return None;
+    }
+    let mut ansi = [0u32; 16];
+    ansi.copy_from_slice(&vals[2..]);
+    Some(Palette {
+        bg: vals[0],
+        fg: vals[1],
+        ansi,
+    })
+}
 
 /// The OSC body cap for every selector but Beacon's: a title, a cwd
 /// report, an aurora setting -- a short string each (the consumer caps a
@@ -1002,7 +1046,8 @@ impl Vt {
     }
 
     /// Like `new`, but the screen is born in `pal` (its default fg/bg + ANSI).
-    /// A per-tile kaua-term uses this with `DAYLIGHT` so its cells carry the
+    /// A per-tile kaua-term uses this with the palette its HOST declared
+    /// (`palette_from_spec` over `--palette`) so its cells carry the
     /// COMPOSITOR's theme (HALCYON.md 14.6/14.12) -- the seam ships resolved
     /// RGB, so the palette is applied at the producer, not re-mapped downstream.
     pub fn with_palette(cols: usize, rows: usize, pal: Palette) -> Vt {
@@ -2064,6 +2109,63 @@ mod tests {
 
     fn feed(vt: &mut Vt, s: &[u8]) {
         vt.feed(s);
+    }
+
+    // The seam format the compositor uses to TELL a producer its theme
+    // (HALCYON-THEME 3.1). Round-trip over every shipped palette: a spec that
+    // did not decode to what it encoded would silently re-theme a tile.
+    #[test]
+    fn a_palette_round_trips_through_its_spec() {
+        for (name, pal) in THEMES.iter() {
+            let spec = palette_to_spec(pal);
+            assert_eq!(spec.len(), 18 * 6 + 17, "{name}: 18 fields, 17 commas");
+            assert_eq!(
+                palette_from_spec(&spec),
+                Some(*pal),
+                "{name} did not survive the round trip"
+            );
+        }
+    }
+
+    // Total on malformed input: a spec arrives as argv, so every deviation
+    // must be a clean None rather than a panic or a half-read palette. The
+    // POSITIVE control one variable away proves the refusals are the format's
+    // and not a decoder that refuses everything.
+    #[test]
+    fn a_malformed_spec_is_refused_not_guessed() {
+        let good = palette_to_spec(&BONFIRE);
+        assert!(palette_from_spec(&good).is_some(), "the control must pass");
+        assert_eq!(palette_from_spec(""), None, "empty");
+        let short = &good[..good.len() - 1];
+        assert_eq!(palette_from_spec(short), None, "short field");
+        let seventeen = &good[..good.len() - 7];
+        assert_eq!(palette_from_spec(seventeen), None, "17 fields");
+        let mut extra = good.clone();
+        extra.push_str(",000000");
+        assert_eq!(palette_from_spec(&extra), None, "19 fields");
+        let mut bad_digit = good.clone();
+        bad_digit.replace_range(0..1, "g");
+        assert_eq!(palette_from_spec(&bad_digit), None, "non-hex digit");
+        assert_eq!(palette_from_spec("112233,,"), None, "empty field");
+        // A 7-char field: the length check and the digit check are separate
+        // refusals, and this one is all-hex so only the length can catch it.
+        let long_field: String = core::iter::repeat("aabbccd")
+            .take(18)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(palette_from_spec(&long_field), None, "7-char fields");
+    }
+
+    // The alpha byte is not part of the wire; a decoded palette is opaque, so
+    // a cell born from a spec composites like one born from a const.
+    #[test]
+    fn a_decoded_palette_is_opaque() {
+        let p = palette_from_spec(&palette_to_spec(&PARCHMENT)).unwrap();
+        assert_eq!(p.bg >> 24, 0xFF);
+        assert_eq!(p.fg >> 24, 0xFF);
+        for c in p.ansi {
+            assert_eq!(c >> 24, 0xFF, "every ansi slot opaque");
+        }
     }
 
     // Holotype G-4 F1: the deferred-wrap-at-last-row + ESC[1J / ESC[1K case

@@ -257,13 +257,21 @@ impl SessionTile {
         let cols = ((surf.w as i32 / geom.cell_w).max(1)) as u16;
         let rows = ((surf.h as i32 / geom.cell_h).max(1)) as u16;
         let mut cmd = Command::new("/bin/kaua-term");
-        // The tile renders RICH (halcyond rasterizes the transcript):
-        // the kaua-term declares it to the hosted program (KAUA-TERM.md R1),
-        // which is what arms a tile shell's zones and a tool's objects.
-        cmd.arg("--beacon").arg("rich");
-        cmd.arg(format!("{}", cols)).arg(format!("{}", rows));
-        for a in argv {
-            cmd.arg(a.clone());
+        // Everything this compositor DECLARES to the tile: the RICH render
+        // tier (halcyond rasterizes the transcript, which is what arms a tile
+        // shell's zones and a tool's objects -- KAUA-TERM.md R1), and the
+        // palette its cells are born in (HALCYON-THEME 3.1 -- the seam ships
+        // resolved RGB, so this is the only moment the theme can be chosen).
+        // Built by `session_init::tile_argv`, which is host-tested against the
+        // parser the child actually runs.
+        for a in session_init::tile_argv(
+            kaua_term::cmdline::Tier::Rich,
+            &daylight_palette(),
+            cols,
+            rows,
+            argv,
+        ) {
+            cmd.arg(a);
         }
         // The identity axis stops here whatever the parent holds: a tile's
         // programs never spawn as another principal (login masks it too; this

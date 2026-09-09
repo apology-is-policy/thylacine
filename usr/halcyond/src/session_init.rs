@@ -18,6 +18,39 @@ pub const DEFAULT_LAYOUT: &str = "default";
 /// Where that layout lives (HALCYON.md 13.7's device tier).
 pub const DEVICE_DEFAULT_PATH: &str = "/lib/halcyon/layouts/default";
 
+/// The argv (after argv[0]) for a tile's `kaua-term`: what this compositor
+/// DECLARES to the terminal it spawns -- the render tier, the palette its
+/// cells are born in, the geometry, then the hosted command.
+///
+/// Pure, and separate from the spawn, because a declaration that never
+/// arrives is invisible: the tile just wears the wrong theme and nothing
+/// fails. `kaua_term::cmdline::parse` is the other end, so the test below
+/// drives what we BUILD through the parser the child actually RUNS.
+pub fn tile_argv(
+    tier: kaua_term::cmdline::Tier,
+    palette: &vt::Palette,
+    cols: u16,
+    rows: u16,
+    argv: &[String],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push(String::from("--beacon"));
+    out.push(String::from(tier.as_str()));
+    out.push(String::from("--palette"));
+    out.push(vt::palette_to_spec(palette));
+    out.push(fmt_u16(cols));
+    out.push(fmt_u16(rows));
+    out.extend(argv.iter().cloned());
+    out
+}
+
+fn fmt_u16(v: u16) -> String {
+    use core::fmt::Write as _;
+    let mut s = String::new();
+    let _ = write!(s, "{}", v);
+    s
+}
+
 /// The rc's full path for a session home (a trailing slash is trimmed).
 pub fn rc_path(home: &str) -> String {
     let mut s = String::from(home.trim_end_matches('/'));
@@ -80,6 +113,59 @@ pub fn argv(init: &Init) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kaua_term::cmdline::{self, Tier};
+
+    // THE SEAM, both ends, in one test: the args this compositor builds,
+    // parsed by the parser its child runs. A unit test of either half alone
+    // would pass with the two halves disagreeing -- which is the failure that
+    // matters, because a tile wearing the wrong palette renders fine.
+    #[test]
+    fn the_args_we_build_declare_our_theme_to_the_parser_the_child_runs() {
+        let pal = libhalcyon::theme::daylight_palette();
+        let hosted = [String::from("/bin/ut")];
+        let args = tile_argv(Tier::Rich, &pal, 100, 40, &hosted);
+        let owned: Vec<&[u8]> = args.iter().map(|s| s.as_bytes()).collect();
+        let parsed = cmdline::parse(&owned).expect("our own args must parse");
+        assert_eq!(parsed.tier, Tier::Rich);
+        assert_eq!(
+            parsed.palette,
+            Some(pal),
+            "the child is born in OUR theme, not a constant of its own"
+        );
+        assert_eq!((parsed.cols, parsed.rows), (100, 40));
+        assert_eq!(parsed.argv, hosted.to_vec());
+    }
+
+    // The sabotage the test above must catch: drop the declaration and the
+    // child falls back to a palette that is not ours. Pinned so a future edit
+    // that removes the flag cannot leave the suite green.
+    #[test]
+    fn an_undeclared_tile_would_not_wear_our_theme() {
+        let pal = libhalcyon::theme::daylight_palette();
+        let bare = [String::from("100"), String::from("40")];
+        let owned: Vec<&[u8]> = bare.iter().map(|s| s.as_bytes()).collect();
+        let parsed = cmdline::parse(&owned).unwrap();
+        assert_eq!(parsed.palette, None);
+        let fallback = vt::BONFIRE;
+        assert_ne!(
+            fallback, pal,
+            "the fallback must be VISIBLY not our theme, so a plumbing break shows"
+        );
+    }
+
+    // Every hosted argv survives verbatim, including one that looks like a
+    // flag -- the positional parser stops taking flags at the dimensions, so
+    // a program named `--palette` is a program, not a second declaration.
+    #[test]
+    fn a_hosted_argv_that_looks_like_a_flag_is_still_the_program() {
+        let pal = libhalcyon::theme::daylight_palette();
+        let hosted = [String::from("--palette"), String::from("-x")];
+        let args = tile_argv(Tier::None, &pal, 8, 2, &hosted);
+        let owned: Vec<&[u8]> = args.iter().map(|s| s.as_bytes()).collect();
+        let parsed = cmdline::parse(&owned).unwrap();
+        assert_eq!(parsed.palette, Some(pal), "ours, not the hosted one");
+        assert_eq!(parsed.argv, hosted.to_vec());
+    }
 
     #[test]
     fn the_rc_wins_over_the_device_default() {
