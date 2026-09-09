@@ -69,7 +69,7 @@ standing "design for Halcyon-on-vk" directive is hereby cashed:
   proven): glyphs rasterized CPU-side by the native `no_std` TTF rasterizer
   (TAPESTRY §14 — "foundational, not a nicety"; it becomes a deliverable of
   this phase), cached in GPU atlases, drawn as quads. Kerning-pair support:
-  yes (DejaVu carries real kern pairs). Complex shaping (HarfBuzz-class
+  yes (Plex carries real kern pairs). Complex shaping (HarfBuzz-class
   CJK/ligatures/RTL): deferred, unchanged.
 - **Eye-candy has a home, later**: GPU compose puts translucency (the §15 RGBA
   reservation, carried "from day one" for exactly this), animation, and 3D
@@ -91,8 +91,13 @@ standing "design for Halcyon-on-vk" directive is hereby cashed:
 
 - **Faces**: **Cornucopia** (monospace; the system face — the baked atlas keeps
   serving Aurora/trusted-sink/Halls, the TTF outline serves Halcyon at
-  arbitrary sizes) + **DejaVu Sans Condensed** (proportional; operator-chosen;
-  free license, vendorable under `third_party/` with a manifest).
+  arbitrary sizes) + **IBM Plex Sans** (proportional; operator-chosen; regular
+  weight for headings, the family's own Text weight (450) for everything
+  else — body, chrome, `obj`; free license, vendorable under `third_party/`
+  with a manifest).
+  **AMENDED 2026-09-07 (the Plex weight review; operator-ratified):**
+  supersedes Public Sans, which itself had superseded DejaVu Sans Condensed —
+  see HALCYON-VISUAL.md §7 for the full chain and rationale.
 - **The default theme is paper-light** — the Genera black-on-white heritage, as
   a **complementary Bonfire schema**: the same palette identity re-grounded on
   light (aurora's held-proposal `parchment` theme is the natural seed). The
@@ -107,8 +112,8 @@ standing "design for Halcyon-on-vk" directive is hereby cashed:
   (2) **grid-aligned output in the flow** — box-drawing and column-exact
   listings (e.g. `la`), carried by the Beacon `pre` op (BEACON.md §3/§12.2) and
   inline `em class=code` runs. Everything else — the prompt, typed input,
-  ordinary output, prose, tables — is **proportional** (DejaVu). A `pre` block
-  is **set apart like a code fence in Markdown or a scientific paper**: its own
+  ordinary output, prose, tables — is **proportional** (IBM Plex Sans). A `pre`
+  block is **set apart like a code fence in Markdown or a scientific paper**: its own
   ground colour + a leading vertical gutter rule, so a monospace island reads as
   a deliberate inset, not a metric clash. Tables do NOT force monospace: a
   Beacon `table` renders as a proportional ruled table in Halcyon and as
@@ -119,9 +124,14 @@ standing "design for Halcyon-on-vk" directive is hereby cashed:
   level=1|2|3` render at descending sizes, **italic permitted, never bold**; `em
   class=emph` renders **italic**; **bold is reserved for `em class=strong`
   alone** — extreme emphasis in prose, nothing else. Bold headings are retired
-  (typographically crude). The Halcyon face set is therefore DejaVu proportional
-  in regular + italic + a bold kept only for `strong`, and Cornucopia mono for
-  `pre` / `em class=code` / alt-screen.
+  (typographically crude). The Halcyon face set is therefore IBM Plex Sans —
+  regular weight for headings (italic where the whole heading leans into it),
+  the family's own Text weight (450) for body and chrome, and Bold kept only
+  for `strong` — plus Cornucopia mono for `pre` / `em class=code` / alt-screen.
+  **AMENDED 2026-09-07**: headings are now the *lighter* of the two
+  proportional weights in use, not the heavier — rank was never carried by
+  weight to begin with, so this inverts nothing load-bearing; Text (450) exists
+  to keep small chrome legible, not to outrank the headings sitting above it.
 
 ## 4. The pane-content model — two pane classes
 
@@ -132,7 +142,7 @@ pane):
   entries are command blocks (prompt + command + output + exit badge), which is
   the data model for "select a past command, tweak, resubmit" and for
   block-level operations (fold a long output, yank a block, re-run).
-- Proportional body text (DejaVu) with monospace islands (Cornucopia) where
+- Proportional body text (IBM Plex Sans) with monospace islands (Cornucopia) where
   alignment is load-bearing (`pre` blocks, `em class=code`); Beacon
   `table`/`hdr`/`em`/`obj` realized per the stylesheet. Plain un-annotated
   output renders **proportional** too — the mainly-proportional default
@@ -215,7 +225,7 @@ The layout system is a direct payoff of layout-as-9P (TAPESTRY §15):
 ## 8. Scope
 
 **In (this phase):** the rich transcript + Beacon rendering; the vk renderer +
-glyph-atlas text; the TTF rasterizer; DejaVu vendored; the paper-light theme;
+glyph-atlas text; the TTF rasterizer; IBM Plex Sans vendored; the paper-light theme;
 presentations + verbs + context menus; the executable tag bar (titles first,
 execution per the rules engine); mouse per §6; layouts per §7; raw-VT panes on
 the shared VT core; Aurora-as-panes; compose-under-Halcyon (§10); image display
@@ -290,7 +300,7 @@ it, in that order, per the addendum.
   zones → emitters ls/grep/ps/stat. Lands value with no Halcyon binary.
 - **H-2 — halcyond + the transcript MVP on the CPU floor** (§13.2–§13.5):
   the shared-VT-core extraction, the display-list module, the CPU executor
-  over `libtapestry`, fontdue+DejaVu glyph pipeline, the paper-light theme,
+  over `libtapestry`, fontdue+Plex glyph pipeline, the paper-light theme,
   zones → blocks. **A usable rich Halcyon shell pane, end to end.**
 - **H-3 — presentations**: `obj` rendering, the verbs rules engine, context
   menus (compositor-placed chrome, §13.6), the executable tag bar.
@@ -539,8 +549,8 @@ line boxes.
   every remote input. All font PARSING stays in halcyond (Rust) — executors
   only ever see finished atlas bitmaps.
 - **Metrics mixing rule** (the Genera look without ransom-note lines): the
-  transcript line-height is DejaVu's, per stylesheet size; Cornucopia
-  islands (code/`em code`/aligned content) set their baseline ON the DejaVu
+  transcript line-height is Plex's, per stylesheet size; Cornucopia
+  islands (code/`em code`/aligned content) set their baseline ON the Plex
   baseline and may not stretch the line box; box-drawing glyphs appear only
   in raw-VT panes and cells-tier content, never proportional flow.
 - **Images** (H-7): PNG decodes in halcyond — the bound recommendation is
@@ -1969,7 +1979,7 @@ proportional live.**
 **The seam is the existing mode boundary** (§4 Class 1 / Class 2; §14.11.3):
 
 - **Normal screen → the proportional live transcript.** Prompt + line-editing
-  echo + command output all render proportional (DejaVu), Beacon spans realized
+  echo + command output all render proportional (IBM Plex Sans), Beacon spans realized
   (obj/em/hdr), `pre` blocks as mono islands. This is the console H-2 flow model
   brought to the session tile; it replaces the mono-grid tail.
 - **Alt screen → the raw mono grid, full-tile.** A program on the alternate

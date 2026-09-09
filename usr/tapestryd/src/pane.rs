@@ -31,20 +31,17 @@ use libhalcyon::theme;
 
 pub const MAX_PANES: usize = 32;
 
-/// The blank/empty-pane fill (compositor background before a client presents).
-/// The Daylight chrome colours (bevel/hairline/floor/strip) live in
-/// `libhalcyon::theme::DAYLIGHT` -- the single token source (HALCYON-VISUAL);
-/// server.rs's painters read them from there.
-pub const BG_COLOR: u32 = 0xFF10_1014;
+// The blank/empty-pane fill moved to `Theme.blank` at HALCYON-THEME TH-2: it
+// was the last chrome colour outside the token source, and a near-black hole
+// is exactly what a light theme must be able to retint. Every chrome colour
+// now reaches a painter through `Comp.theme`.
 
-/// The tab/stack indicator strip height (G-6c; glyph-free per D7 -- the
-/// compositor paints colored segments, never titles). Carved from the TOP
-/// of a tabbed/stacked container's rect: tabbed = ONE row divided into
-/// per-child segments; stacked = one full-width row PER child. The value
-/// lives in `theme::METRICS.tab_strip_h` (the single chrome-token source).
-fn tab_strip_h() -> u32 {
-    theme::METRICS.tab_strip_h as u32
-}
+// The tab/stack indicator strip height (G-6c; glyph-free per D7 -- the
+// compositor paints colored segments, never titles) is carved from the TOP
+// of a tabbed/stacked container's rect: tabbed = ONE row divided into
+// per-child segments; stacked = one full-width row PER child. The value is
+// `Layout.metrics.tab_strip_h` -- `Metrics::at(scale)`, the single
+// chrome-token source at the display's scale (HALCYON-SCALE 5).
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Dir {
@@ -303,6 +300,10 @@ pub struct Layout {
     /// slots are reused, ids never are (a freed target self-clears at the
     /// next recompute).
     zoomed_id: Option<u32>,
+    /// The chrome metrics the last recompute carved with (HALCYON-SCALE 5:
+    /// `Metrics::at(scale)`, handed in by Comp -- the one table both the
+    /// carve and the paint read).
+    pub metrics: theme::Metrics,
 }
 
 impl Layout {
@@ -314,6 +315,7 @@ impl Layout {
             id_seq: 0,
             epoch: 1,
             zoomed_id: None,
+            metrics: theme::builtin().metrics,
         };
         let root = l
             .alloc(None, Kind::Leaf { surface: None })
@@ -1243,10 +1245,10 @@ impl Layout {
 
     /// The strip rows a tabbed/stacked container carves (0 = too small
     /// to carve; children then get the full rect and no strip paints).
-    fn strip_h(mode: Mode, n: u32, rect: Rect) -> u32 {
+    fn strip_h(mode: Mode, n: u32, rect: Rect, unit: u32) -> u32 {
         let total = match mode {
-            Mode::Tabbed => tab_strip_h(),
-            Mode::Stacked => tab_strip_h() * n.max(1),
+            Mode::Tabbed => unit,
+            Mode::Stacked => unit * n.max(1),
             _ => 0,
         };
         if total == 0 || rect.h < total + 8 || rect.w < 8 {
@@ -1286,7 +1288,7 @@ impl Layout {
                     if eff.is_empty() {
                         return None;
                     }
-                    let strip = Self::strip_h(*m, eff.len() as u32, *rect);
+                    let strip = Self::strip_h(*m, eff.len() as u32, *rect, self.metrics.tab_strip_h as u32);
                     if strip == 0 {
                         return None;
                     }
@@ -1352,7 +1354,8 @@ impl Layout {
     }
 
     /// Recompute geometry + visibility for the whole tree.
-    pub fn recompute(&mut self, disp_w: u32, disp_h: u32, gaps: u32) {
+    pub fn recompute(&mut self, disp_w: u32, disp_h: u32, gaps: u32, metrics: theme::Metrics) {
+        self.metrics = metrics;
         // Pass 1: mark everything hidden, then walk the visible tree.
         for p in self.panes.iter_mut().flatten() {
             p.visible = false;
@@ -1399,7 +1402,7 @@ impl Layout {
         // chrome (HALCYON-VISUAL section 2/2.4), the floor is the tunable
         // inter-pane gap (section 2.3 -- at gaps=1 the two abutting floors
         // give the 2px inter-pane floor).
-        let chrome = (theme::METRICS.bevel + theme::METRICS.hairline) as u32;
+        let chrome = (self.metrics.bevel + self.metrics.hairline) as u32;
         let inset = if self.foreground_leaf_count() > 1 {
             gaps + chrome
         } else {
@@ -1411,7 +1414,7 @@ impl Layout {
         // fullscreen leaf stays borderless AND bar-free (stage-0). A leaf too
         // short to spare the strip stays bar-free (the `+ tag_h` client floor,
         // mirroring strip_h's `+ 8`).
-        let tag_h = theme::METRICS.header_h as u32;
+        let tag_h = self.metrics.header_h as u32;
         for p in self.panes.iter_mut().flatten() {
             if !p.visible {
                 continue;
@@ -1490,7 +1493,7 @@ impl Layout {
                     .copied()
                     .filter(|&c| !self.is_bg_subtree(c))
                     .collect();
-                let strip = Self::strip_h(mode, eff.len() as u32, rect);
+                let strip = Self::strip_h(mode, eff.len() as u32, rect, self.metrics.tab_strip_h as u32);
                 let shown = children
                     .get(active)
                     .copied()

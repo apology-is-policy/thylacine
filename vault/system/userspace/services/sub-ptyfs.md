@@ -164,9 +164,13 @@ reading for the child's first output races the child's slave open and
 gets a spurious 0. The master needs no such latch: the mint **is** its
 open, so `n_master == 0` implies it once was 1.
 
-`Conn` carries a 32-entry fid table and a flat `Vec<PendingRead>`.
-Bounds: 8 connections, 32 fids, **16 pts pairs** — a bound rather than
-headroom, since an unbounded pts table is a DoS vector.
+`Conn` carries a 32-entry fid table and two flat park queues — a
+`Vec<PendingRead>` and, since s7 F3, a `Vec<PendingWrite>`. A
+`PendingWrite{fid, slot_n, tag, data}` owns its un-acked input bytes (a
+`Vec`, so unlike the `Copy` `PendingRead` it is moved, not copied —
+`poll_writes` indexes and `remove`s). Bounds: 8 connections, 32 fids,
+**16 pts pairs** — a bound rather than headroom, since an unbounded pts
+table is a DoS vector.
 
 ## Concurrency
 
@@ -189,6 +193,26 @@ to retrofit after a single deferred slot clobbered a held reply.
 `read_ready` exists so a long-parked read does not allocate a drain
 buffer on every 1-second poll tick. A pure mirror of the drain's ring +
 EOF logic; the drains stay authoritative.
+
+**The output side parks symmetrically (s7 F3).** A non-empty slave write
+onto a full `s2m` ring used to reply `Rwrite 0`; a native slave writer
+(nora/prowl/quarry via kaua's `write_all`) reads a 0-count as a fatal
+`WriteZero` and exits — the s7 "one frame then exit" when a first frame
+exceeds the 4 KiB ring. So a full-ring write with the master **present**
+now parks a `PendingWrite` (`self.defer` → `Disp::Deferred`, no reply)
+instead. `poll_writes` runs at the same serve-loop top *after*
+`poll_reads` (the serve loop's `poll_reads(..) || poll_writes(..)`), so a
+master read that drained `s2m` in this pass frees room the write sees in
+the *same* pass — the [[inv-i9]] argument's output half. It re-runs
+`slave_write` (which re-cooks ONLCR and re-applies back-pressure, so
+parking the raw input is correct) and replies the count that fit: `>=1`
+is a legal short write the guest's `write_all` loops on; `0` with the
+master still present keeps it parked; `0` with the master **gone** unparks
+with `Rwrite 0` so the writer sees `WriteZero` and exits — a closed tile
+has no terminal and its `s2m` never drains. Queued writes for one pts stay
+**FIFO**: `h_write` refuses to `slave_write` ahead of an already-parked
+write for the same slot, so a later write never takes freed room ahead of
+an earlier parked one.
 
 The serve loop drops the listener from the poll set while the connection
 table is full — otherwise a pending 9th connection keeps the listener
@@ -216,7 +240,15 @@ lifetime. Fact 3 is a two-line check that reads like protocol hygiene
 and is load-bearing for a safety property — its absence in
 [[sub-tapestryd]] is batch 27's finding.
 
-[[inv-i9]] via the `poll_reads` ordering above.
+[[inv-i9]] via the `poll_reads` — and, since s7 F3, `poll_writes` —
+ordering above (both re-attempt at the serve-loop top before the loop can
+block in `t_poll`). The write-park also holds [[inv-i20]]'s **byte
+conservation** across a park: it never acks bytes the ring did not take
+(no `Rwrite 0` on a non-empty write while the master lives) and re-runs
+the cook on retry, so no input byte is dropped or double-counted. Each
+parked read or write pins its 9P tag until the deferred reply, which is
+[[inv-i10]] (the tag is released exactly once, at that reply) — see
+Caveats for the shared-pool bound that pinning implies.
 
 ## Error paths
 
@@ -325,6 +357,14 @@ The global FRAME coalescing that a compositor needs has no analogue here
   paginated across a concurrent mode change sees two different lines.
   Bounded to 64 bytes and single-threaded, so it cannot tear mid-token,
   but the halves need not agree.
+- **A parked write (or read) pins a shared kernel 9P tag** until
+  `poll_writes`/`poll_reads` replies, and every Proc reaches ptyfs through
+  ONE `/dev/pts` client, so enough simultaneously-parked ops (~64) exhaust
+  the kernel's `P9_SESSION_MAX_OUTSTANDING` (64) tag pool for *all* pts
+  users — a pre-existing class the parked reads already carried, now shared
+  by the writes. `MAX_FIDS` caps only one `Conn`'s contribution, not the
+  shared pool. The real fix is a kernel per-Proc outstanding-tag quota;
+  enqueued (the s7 F3 audit's lone P2), not closed here.
 
 ## Provenance
 
@@ -333,6 +373,12 @@ per-pts line discipline (2b), the termios/winsize ctl (2c), teardown and
 SIGHUP (2d), the focused audit (2e). Swept into the vault by
 [[chg-2026-08-02-server-sweeps]], which mints [[inv-i20]] and
 [[spec-pty]].
+
+The output-side park (`PendingWrite` / `poll_writes`) landed with the s7
+F3 fix (main @70f91be3), audited 0 P0 / 0 P1 / 1 P2 / 6 P3 (Fable 5.1);
+its lone P2 is the tag-pin bound in Caveats. It adds a mechanism to the
+existing ptyfs audit surface, not a new surface, so the AUDIT-TRIGGERS
+ptyfs row is unchanged.
 
 ## Tests
 
@@ -350,7 +396,10 @@ not an edge, free-on-last-unref).
 
 The 9P layer and the kernel registration are proven separately by the
 in-guest `/dev/pts` boot probe and the `pty-probe` openpty E2E, which
-drives a live controlling session.
+drives a live controlling session. The write-park's guest-observable
+behaviour — a first frame larger than the ring completing instead of
+killing the writer — is the s7 `s7-nora-probe.exp` interactive gate (nora
+held in a tile), not the `server::selftest` battery.
 
 ## Referenced by
 

@@ -23,6 +23,7 @@
 
 extern crate alloc;
 
+pub mod cmdline;
 pub mod wire;
 
 use alloc::string::String;
@@ -55,6 +56,11 @@ pub enum Control {
     Bell,
     /// OSC 0 / OSC 2 window title.
     Title(String),
+    /// OSC 7, the working-directory report (BEACON.md 12.11): the body after
+    /// `7;` -- forwarded RAW and uninterpreted, like the Beacon frames, because
+    /// halcyond keeps the one decoder (the host check, the percent-decoding,
+    /// the control-byte and oversize rejections) and its format surface.
+    Osc7Raw(Vec<u8>),
     /// The hosted child exited with this code.
     Exit(i32),
     /// A down-channel Resize was applied (winsize set on the pts).
@@ -83,6 +89,16 @@ pub enum Record {
         /// buffer's flags (unused there -- the alt screen renders the raw mono
         /// grid, not the proportional join).
         wrapped: Vec<bool>,
+        /// The vt's flag for the row ABOVE row 0 (`Vt::top_continues`): true
+        /// iff the row that last scrolled off ended by autowrap and row 0
+        /// still holds its continuation -- `wrapped[-1]`, which the per-row
+        /// vector cannot carry. halcyond joins the scrolled-off fragment it
+        /// holds to live row 0 only while this is set, and finalizes the
+        /// fragment as a line of its own the moment a CellDiff clears it
+        /// (row 0 restarted; the continuation is gone). Always false on the
+        /// alt screen. On the wire it is an OPTIONAL trailing byte: a frame
+        /// without one decodes as false.
+        top_continues: bool,
     },
     /// Normal-mode lines that scrolled off the top -> the transcript. Coalesced:
     /// a bulk scroll is one record carrying every row that left, in order.
@@ -113,6 +129,9 @@ pub struct Producer {
     shadow: Vec<Cell>,
     cols: usize,
     last_cursor: (u16, u16, bool),
+    // The top flag as last emitted (a flip with no cell change -- a bare LF
+    // scrolling a wrapped row off -- still earns a CellDiff).
+    last_top: bool,
     scroll_acc: Vec<Vec<Cell>>,
     // Parallel to `scroll_acc` (pushed together, taken together): the per-row
     // soft-wrap flag the vt emits on each Scroll boundary (PL-3b).
@@ -127,6 +146,7 @@ impl Producer {
             shadow: vt.cells.clone(),
             cols: vt.cols,
             last_cursor: (vt.cy as u16, vt.cx as u16, vt.cursor_visible),
+            last_top: vt.top_continues(),
             scroll_acc: Vec::new(),
             scroll_wrapped: Vec::new(),
         }
@@ -223,10 +243,18 @@ impl Producer {
                     // CellDiff is overwritten by the blank-alt full_diff below
                     // before any render, and the alt screen renders the raw mono
                     // grid (no join), so the wrap it carries is never read.
-                    self.emit_celldiff(&outgoing, mcx, mcy, vt.cursor_visible, vt.wrapped(), out);
+                    self.emit_celldiff(
+                        &outgoing,
+                        mcx,
+                        mcy,
+                        vt.cursor_visible,
+                        vt.wrapped(),
+                        vt.main_top_continues(),
+                        out,
+                    );
                     out.push(Record::Mode(ScreenMode::AltScreen));
                     self.reset_shadow(&vt.cells, vt.cx, vt.cy, vt.cursor_visible);
-                    out.push(self.full_diff(vt.wrapped()));
+                    out.push(self.full_diff(vt.wrapped(), false));
                 }
                 Boundary::AltLeave(restored) => {
                     // The alt live grid is discarded; announce the mode, reset
@@ -235,7 +263,7 @@ impl Producer {
                     self.flush_scroll(out);
                     out.push(Record::Mode(ScreenMode::Normal));
                     self.reset_shadow(&restored, vt.cx, vt.cy, vt.cursor_visible);
-                    out.push(self.full_diff(vt.wrapped()));
+                    out.push(self.full_diff(vt.wrapped(), vt.top_continues()));
                 }
             }
             // Ship whenever the held cells reach the accumulator bound,
@@ -255,13 +283,16 @@ impl Producer {
         let cursor = (vt.cy as u16, vt.cx as u16, vt.cursor_visible);
         self.shadow = vt.cells.clone();
         self.last_cursor = cursor;
-        out.push(self.full_diff(vt.wrapped()));
+        out.push(self.full_diff(vt.wrapped(), vt.top_continues()));
     }
 
     /// Every shadow cell as one CellDiff (the consumer redraws the whole
     /// screen): the resize and the alt-screen boundaries, where the consumer's
     /// single grid must be overwritten wholesale.
-    fn full_diff(&self, wrapped: &[bool]) -> Record {
+    fn full_diff(&mut self, wrapped: &[bool], top_continues: bool) -> Record {
+        // Recorded like the cursor: the next incremental diff compares
+        // against what was last EMITTED, and this is an emission.
+        self.last_top = top_continues;
         let cols = self.cols.max(1);
         let changed = self
             .shadow
@@ -273,12 +304,21 @@ impl Producer {
             changed,
             cursor: self.last_cursor,
             wrapped: wrapped.to_vec(),
+            top_continues,
         }
     }
 
     fn flush(&mut self, vt: &Vt, out: &mut Vec<Record>) {
         self.flush_scroll(out);
-        self.emit_celldiff(&vt.cells, vt.cx, vt.cy, vt.cursor_visible, vt.wrapped(), out);
+        self.emit_celldiff(
+            &vt.cells,
+            vt.cx,
+            vt.cy,
+            vt.cursor_visible,
+            vt.wrapped(),
+            vt.top_continues(),
+            out,
+        );
     }
 
     fn flush_scroll(&mut self, out: &mut Vec<Record>) {
@@ -308,10 +348,12 @@ impl Producer {
             .max(1)
     }
 
-    // Diff `current` against the shadow; emit a CellDiff iff a cell changed OR
-    // the cursor moved, then update the shadow + last cursor. A geometry
-    // mismatch (should only happen via resize, which routes through resized())
-    // is resynced without emitting garbage.
+    // Diff `current` against the shadow; emit a CellDiff iff a cell changed,
+    // the cursor moved, or the top flag flipped, then update the shadow + last
+    // cursor + last top flag. A geometry mismatch (should only happen via
+    // resize, which routes through resized()) is resynced without emitting
+    // garbage.
+    #[allow(clippy::too_many_arguments)]
     fn emit_celldiff(
         &mut self,
         current: &[Cell],
@@ -319,6 +361,7 @@ impl Producer {
         cy: usize,
         vis: bool,
         wrapped: &[bool],
+        top_continues: bool,
         out: &mut Vec<Record>,
     ) {
         let cursor = (cy as u16, cx as u16, vis);
@@ -332,17 +375,19 @@ impl Producer {
                 changed.push(((i / self.cols) as u16, (i % self.cols) as u16, *cur));
             }
         }
-        if changed.is_empty() && cursor == self.last_cursor {
+        if changed.is_empty() && cursor == self.last_cursor && top_continues == self.last_top {
             return;
         }
         if !changed.is_empty() {
             self.shadow.copy_from_slice(current);
         }
         self.last_cursor = cursor;
+        self.last_top = top_continues;
         out.push(Record::CellDiff {
             changed,
             cursor,
             wrapped: wrapped.to_vec(),
+            top_continues,
         });
     }
 
@@ -365,10 +410,11 @@ fn cells_in(out: &[Record]) -> usize {
 }
 
 /// Route a raw OSC payload (the bytes between the introducer and the terminator)
-/// to a Control. Titles (OSC 0/2) become Title; Beacon frames (OSC 1936) are
-/// re-synthesized as the full `ESC ] <payload> ST` frame for `beacon::wire`;
-/// every other OSC is dropped. The vt parser already consumes the 7770 aurora-
-/// config channel, so it never reaches here.
+/// to a Control. Titles (OSC 0/2) become Title; the cwd report (OSC 7) is
+/// forwarded raw; Beacon frames (OSC 1936) are re-synthesized as the full
+/// `ESC ] <payload> ST` frame for `beacon::wire`; every other OSC is dropped.
+/// The vt parser already consumes the 7770 aurora-config channel, so it never
+/// reaches here.
 fn classify_osc(serial: u32, payload: &[u8]) -> Option<Control> {
     let semi = payload.iter().position(|&b| b == b';')?;
     let (code, rest) = (&payload[..semi], &payload[semi + 1..]);
@@ -376,6 +422,7 @@ fn classify_osc(serial: u32, payload: &[u8]) -> Option<Control> {
         b"0" | b"2" => core::str::from_utf8(rest)
             .ok()
             .map(|s| Control::Title(String::from(s))),
+        b"7" => Some(Control::Osc7Raw(rest.to_vec())),
         b"1936" => {
             let mut f = Vec::with_capacity(payload.len() + 3);
             f.extend_from_slice(b"\x1b]");
@@ -769,6 +816,61 @@ mod tests {
             recs,
             vec![Record::Control(Control::Title(String::from("win")))]
         );
+    }
+
+    #[test]
+    fn cwd_report_is_forwarded_raw() {
+        // OSC 7 (BEACON.md 12.11) crosses the wire as its body, uninterpreted:
+        // halcyond's transcript is the one decoder. ST- and BEL-terminated.
+        let recs = produce(6, 1, b"\x1b]7;file://localhost/lib/aurora\x1b\\");
+        assert_eq!(
+            recs,
+            vec![Record::Control(Control::Osc7Raw(
+                b"file://localhost/lib/aurora".to_vec()
+            ))]
+        );
+        let recs = produce(6, 1, b"\x1b]7;file:///a%20b\x07");
+        assert_eq!(
+            recs,
+            vec![Record::Control(Control::Osc7Raw(b"file:///a%20b".to_vec()))]
+        );
+        // Another foreign OSC is still dropped, cells untouched.
+        assert_eq!(produce(6, 1, b"\x1b]9;whatever\x07"), vec![]);
+    }
+
+    #[test]
+    fn a_beacon_frame_past_the_title_cap_crosses_the_wire_whole() {
+        // The vt's OSC cap is per selector (BEACON.md 12): a Beacon frame
+        // may run to the frame maximum, a title stays at 256. Before this a
+        // `mark k=cmd` of a long command line was discarded at the
+        // terminator and a session tile's status bar kept showing the
+        // PREVIOUS command; the console path's own scanner took it.
+        let mut frame: Vec<u8> = Vec::from(&b"\x1b]1936;v1;mark;k=cmd;text="[..]);
+        frame.extend(core::iter::repeat(b'x').take(1000));
+        frame.extend_from_slice(b"\x1b\\");
+        assert!(frame.len() > 256 && frame.len() < vt::OSC_BEACON_MAX);
+        let recs = produce(6, 1, &frame);
+        assert_eq!(recs.len(), 1, "one record for the 1 KiB frame");
+        match &recs[0] {
+            Record::Control(Control::Osc1936Raw { frame: f, .. }) => {
+                assert_eq!(f, &frame, "the frame crossed whole")
+            }
+            other => panic!("not a Beacon record: {other:?}"),
+        }
+        // Past Beacon's own maximum the frame is still dropped whole.
+        let mut huge: Vec<u8> = Vec::from(&b"\x1b]1936;v1;mark;k=cmd;text="[..]);
+        huge.extend(core::iter::repeat(b'x').take(vt::OSC_BEACON_MAX + 10));
+        huge.extend_from_slice(b"\x1b\\");
+        assert_eq!(produce(6, 1, &huge), vec![], "over the frame maximum: dropped whole");
+        // A title keeps the short cap.
+        let mut title: Vec<u8> = Vec::from(&b"\x1b]2;"[..]);
+        title.extend(core::iter::repeat(b't').take(300));
+        title.extend_from_slice(b"\x07");
+        assert_eq!(produce(6, 1, &title), vec![], "a 300-byte title: dropped at the terminator");
+        let mut short: Vec<u8> = Vec::from(&b"\x1b]2;"[..]);
+        short.extend(core::iter::repeat(b't').take(vt::OSC_MAX - 2));
+        short.extend_from_slice(b"\x07");
+        assert_eq!(produce(6, 1, &short).len(), 1, "a title inside the cap is a record");
     }
 
     #[test]

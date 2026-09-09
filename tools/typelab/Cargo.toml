@@ -1,0 +1,10 @@
+[package]
+name = "typelab"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fontdue = "0.9.4"
+png = "0.18.1"
+skrifa = "0.46.2"
+zeno = "0.3.3"

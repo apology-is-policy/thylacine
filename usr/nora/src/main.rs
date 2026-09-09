@@ -138,6 +138,10 @@ pub extern "C" fn rs_main() -> i64 {
     // Replay any keystroke typed during the launch probe so type-ahead is not
     // lost (kaua::query #117-audit F2).
     let mut src = PollSource::with_pending(probe.pending);
+    // F2: nora's poll_all mux polls src.poll_fd() (the pts ready fd) and calls
+    // src.poll only on a fire, so a pts read is once-and-trust -- not a re-poll
+    // that would batch keystrokes or busy-loop the ready cache.
+    src.set_external_mux();
 
     // #55c: the console-resize signal. Open the editor's note queue so a
     // `tty:winch` (posted to the session pgrp when the renderer reweaves)
@@ -192,12 +196,36 @@ fn run(
     dap: &mut Option<Dap>,
     notes: Option<&libthyla_rs::notes::Notes>,
 ) -> i32 {
-    if redraw(term, ed).is_err() {
+    if let Err(e) = redraw(term, ed) {
+        t_putstr(&format!("nora: EXIT path=redraw1 code=1 err={:?}\n", e));
         return 1;
+    }
+    // F1: replay the launch type-ahead NOW, before the poll loop. nora's mux
+    // polls the pts ready fd, which never fires for already-drained pending, so
+    // poll() alone would strand a typed-ahead command (a complete `:q` would read
+    // as a hang) until the next real keystroke. A typed-ahead quit exits here; a
+    // change repaints. (LSP on_saved re-syncs on the next real key -- a rare
+    // type-ahead `:w` does not lose its save, only the immediate LSP re-check.)
+    {
+        let mut dirty = false;
+        let mut saved = false;
+        let quit = dispatch_input(src.drain_pending(), ed, term, &mut dirty, &mut saved);
+        let _ = saved;
+        if quit {
+            t_putstr("nora: EXIT path=quit code=0\n");
+            return 0;
+        }
+        if dirty {
+            if let Err(e) = redraw(term, ed) {
+                t_putstr(&format!("nora: EXIT path=redraw-preloop code=1 err={:?}\n", e));
+                return 1;
+            }
+        }
     }
     let mut mux = Mux::new();
     loop {
         if src.is_eof() {
+            t_putstr("nora: EXIT path=eof code=0\n");
             return 0;
         }
         // ONE poll(2) over fd 0 and any live server pipes -- gopls (8e-2),
@@ -205,60 +233,40 @@ fn run(
         // diagnostic, a debugger stop, and a console resize all wake the loop
         // identically -- there is no tick, so a message nothing polls for never
         // repaints.
-        let ready = match poll_all(&mut mux, lsp.as_ref(), dap.as_ref(), notes.map(|n| {
+        let ready = match poll_all(src.poll_fd(), &mut mux, lsp.as_ref(), dap.as_ref(), notes.map(|n| {
             use libthyla_rs::poll::AsFd;
             n.as_raw_fd()
         })) {
             Some(r) => r,
             // fd 0 gone (no console) -> exit cleanly rather than spin.
-            None => return 1,
+            None => {
+                t_putstr("nora: EXIT path=pollnone code=1\n");
+                return 1;
+            }
         };
         let mut dirty = false;
         let mut saved = false;
         for r in ready {
             match r.tag {
                 TAG_STDIN => {
-                    // Zero timeout: the mux already established readability;
-                    // PollSource still runs its own drain sweep, so the paste
-                    // and split-escape handling (#106-F2 / #173) is unchanged.
+                    // Zero timeout: the mux (poll_fd = the pts ready fd, or fd 0)
+                    // already established readability. On a pts PollSource reads
+                    // fd 0 ONCE (F2); on the console it runs its drain sweep, so
+                    // the paste and split-escape handling (#106-F2 / #173) is
+                    // unchanged there.
                     let events = match src.poll(PollTimeout::Zero) {
                         Ok(e) => e,
-                        Err(_) => return 1,
+                        Err(er) => {
+                            t_putstr(&format!("nora: EXIT path=pollerr code=1 err={:?}\n", er));
+                            return 1;
+                        }
                     };
                     // A wake with no decoded key (a bare HUP) loops; is_eof
                     // breaks at the top. The console read is #811
                     // death-interruptible, so a dying nora unwinds here rather
-                    // than wedging.
-                    for ev in events {
-                        match ev {
-                            Event::Key(k) => {
-                                ed.handle_key(k);
-                                dirty = true;
-                                if let Some(req) = ed.take_request() {
-                                    saved |= matches!(req, Request::Save(_));
-                                    handle_request(ed, req);
-                                }
-                                if ed.quit {
-                                    break;
-                                }
-                            }
-                            // A late CPR the launch probe missed under HVF (the
-                            // slow serial answered after the deadline): resize
-                            // to the real console, swapping the 80x24 fallback
-                            // for fullscreen + repainting
-                            // (bug_nora_hvf_cpr_handshake -- the steady-state
-                            // backstop).
-                            Event::Resize(c, r) => {
-                                let c = c.clamp(MIN_DIM, MAX_DIM);
-                                let r = r.clamp(MIN_DIM, MAX_DIM);
-                                if (c, r) != (term.area().width, term.area().height) {
-                                    term.resize(Rect::new(0, 0, c, r));
-                                    dirty = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                    // than wedging. Quit is handled by the loop tail's ed.quit
+                    // check, so the return is ignored here.
+                    let _ = dispatch_input(events, ed, term, &mut dirty, &mut saved);
                 }
                 TAG_NOTES => {
                     // #55c: drain the queue; a tty:winch means the console
@@ -307,6 +315,7 @@ fn run(
             }
         }
         if ed.quit {
+            t_putstr("nora: EXIT path=quit code=0\n");
             return 0;
         }
         if let Some(l) = lsp.as_mut() {
@@ -358,20 +367,69 @@ fn run(
                 *dap = None;
             }
         }
-        if dirty && redraw(term, ed).is_err() {
-            return 1;
+        if dirty {
+            if let Err(e) = redraw(term, ed) {
+                t_putstr(&format!("nora: EXIT path=redraw2 code=1 err={:?}\n", e));
+                return 1;
+            }
         }
     }
 }
 
 /// Register fd 0 plus any live gopls and Ambush pipes and block for one of them.
+/// Apply a batch of decoded input Events to the editor. Returns true if the
+/// editor asked to quit. Shared by the main loop's TAG_STDIN arm and the F1
+/// pre-loop type-ahead replay (drain_pending) so both dispatch identically.
+fn dispatch_input(
+    events: Vec<Event>,
+    ed: &mut Editor,
+    term: &mut Terminal,
+    dirty: &mut bool,
+    saved: &mut bool,
+) -> bool {
+    for ev in events {
+        match ev {
+            Event::Key(k) => {
+                ed.handle_key(k);
+                *dirty = true;
+                if let Some(req) = ed.take_request() {
+                    *saved |= matches!(req, Request::Save(_));
+                    handle_request(ed, req);
+                }
+                if ed.quit {
+                    return true;
+                }
+            }
+            // A late CPR the launch probe missed under HVF (the slow serial
+            // answered after the deadline): resize to the real console, swapping
+            // the 80x24 fallback for fullscreen + repainting
+            // (bug_nora_hvf_cpr_handshake -- the steady-state backstop).
+            Event::Resize(c, r) => {
+                let c = c.clamp(MIN_DIM, MAX_DIM);
+                let r = r.clamp(MIN_DIM, MAX_DIM);
+                if (c, r) != (term.area().width, term.area().height) {
+                    term.resize(Rect::new(0, 0, c, r));
+                    *dirty = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn poll_all(
+    stdin_fd: i32,
     mux: &mut Mux,
     lsp: Option<&Lsp>,
     dap: Option<&Dap>,
     notes_fd: Option<i32>,
 ) -> Option<Vec<Ready>> {
-    let mut fds: Vec<(i32, Tag)> = alloc::vec![(0, TAG_STDIN)];
+    // stdin_fd = src.poll_fd(): the pts `/dev/pts/<n>ready` sibling on a hosted
+    // tile, or fd 0 on the console (F2 -- the pts data fd is POLLIN-always, so
+    // fd 0 is unpollable; the ready sibling gives accurate wakes so notes/LSP/DAP
+    // can multiplex against real keystrokes instead of a parked read).
+    let mut fds: Vec<(i32, Tag)> = alloc::vec![(stdin_fd, TAG_STDIN)];
     if let Some(nfd) = notes_fd {
         fds.push((nfd, TAG_NOTES)); // #55c: tty:winch
     }

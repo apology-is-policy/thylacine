@@ -15,8 +15,13 @@
    ============================================================ */
 
 :root {
-  /* ---- typefaces ---------------------------------------- */
-  --hal-prop: "DejaVu Sans Condensed", "Arial Narrow", sans-serif;
+  /* ---- typefaces ------------------------------------------
+     Public Sans replaces DejaVu Sans Condensed (H-1 type
+     review). It now covers prose, tag names, the prompt, and
+     all interface chrome — pills, paths, commands, trail,
+     status bar, exit badge. Cornucopia is reserved for
+     preformatted output: see HALCYON-VISUAL.md §4/§7/§8. ---- */
+  --hal-prop: "Public Sans", "Helvetica Neue", Arial, sans-serif;
   --hal-mono: "Cornucopia", "Iosevka Term", "Fira Code", monospace;
 
   /* ---- metrics ------------------------------------------ */
@@ -228,7 +233,7 @@
 
 .hal-tag-trail {
   margin-left: auto;
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 9.5px;
   flex-shrink: 0;
   padding-left: 4px;
@@ -240,7 +245,7 @@
 
 /* Command pills. Executable text, not labels. */
 .hal-pill {
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 9.5px;
   padding: 0 4px;
   line-height: 14px;
@@ -341,15 +346,12 @@
 }
 
 .hal-block {
-  border-left: 2px solid var(--hal-raised);
-  padding: 3px 0 3px 8px;
   margin-bottom: 6px;
 }
-.hal-block--current { border-left-color: var(--hal-ember); }
 
 .hal-prompt { display: flex; align-items: baseline; margin-bottom: 2px; }
 .hal-path {
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 10px;
   color: var(--hal-fg-muted);
   white-space: nowrap;
@@ -357,13 +359,13 @@
   text-overflow: ellipsis;
 }
 .hal-turnstile {
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 10px;
   padding: 0 3px;
   flex-shrink: 0;
   color: var(--hal-ember);
 }
-.hal-cmd { font-family: var(--hal-mono); font-size: 10px; color: var(--hal-fg); }
+.hal-cmd { font-family: var(--hal-prop); font-size: 10px; color: var(--hal-fg); }
 .hal-caret { border-right: 2px solid var(--hal-ember); padding-right: 1px; }
 
 .hal-out {
@@ -385,6 +387,54 @@
   margin: 2px 0;
   color: var(--hal-fg);
 }
+
+/* ---- headings & emphasis — Genera hierarchy -------------
+   Beacon `hdr level=1|2|3` and `em class=emph|strong|dim|code`.
+   Hierarchy is carried by SIZE only — never weight. Regular
+   weight throughout except `em--strong`, the one sanctioned
+   bold. All three heading levels are italic in their entirety;
+   italic is what marks a line as a heading at all, size is what
+   ranks it. See HALCYON-VISUAL.md §8. ------------------------ */
+.hal-hdr {
+  font-family: var(--hal-prop);
+  font-weight: 400;
+  font-style: italic;
+  line-height: 1.25;
+  color: var(--hal-fg);
+  margin: 6px 0 2px;
+}
+.hal-hdr:first-child { margin-top: 0; }
+.hal-hdr--1 { font-size: 17.5px; margin-top: 10px; }
+.hal-hdr--2 { font-size: 14.5px; margin-top: 8px; }
+.hal-hdr--3 { font-size: 12.5px; margin-top: 6px; }
+
+.hal-em--emph {
+  font-style: italic;
+  font-weight: 400;
+}
+.hal-em--strong {
+  font-style: normal;
+  font-weight: 700;
+}
+.hal-em--dim {
+  font-style: normal;
+  font-weight: 400;
+  color: var(--hal-fg-dim);
+}
+.hal-em--code {
+  font-family: var(--hal-mono);
+  font-style: normal;
+  font-weight: 400;
+  background: var(--hal-header);
+  padding: 0 3px;
+}
+
+.hal-rule {
+  border: none;
+  border-top: var(--hal-hair) solid var(--hal-border);
+  margin: 6px 0;
+}
+
 .hal-obj {
   padding: 0 4px;
   font-size: 10px;
@@ -393,7 +443,7 @@
   color: var(--hal-slate);
 }
 .hal-exit {
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 9px;
   padding: 0 3px;
   display: inline-block;
@@ -425,7 +475,7 @@
   align-items: center;
   padding: 0 8px;
   height: var(--hal-status-h);
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 10px;
   background: var(--hal-status-bg);
 }
@@ -814,6 +864,107 @@ footer.colophon code { font-family: var(--hal-mono); font-size: 12px; }
   <div style="margin-top:2px">cons  klog  loom  null  tapestry  zero</div>
   <div style="margin-top:4px"><span style="color:var(--bf-path)">~</span><span style="color:var(--bf-ember)"> ⊢ </span><span class="hal-caret"></span></div>
 </div></div></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~/thylacine/kernel/sched · make check</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>14:22</span></div></div></div></div>
+</section>
+<section class="spec">
+  <div class="spec-head"><h2>Headings and emphasis</h2><span class="spec-sub">Genera hierarchy</span></div>
+  <p class="spec-note">Beacon's <code>hdr level=1|2|3</code> and <code>em class=emph|strong|dim|code</code>,
+  realized. Rank is carried by size alone — weight never changes rank. Every
+  heading is italic in its entirety; that is what says "heading," size is what
+  says which level.</p>
+  <div class="spec-stage"><div class="hal-wm" style="height:330px"><div class="hal-workspace" style="grid-template-columns:1fr"><div class="hal-pane"><div class="hal-pane-inner"><div class="hal-tag hal-tag--live-ok"><span class="hal-tag-name">transcript</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">man eevdf</span><span class="hal-tag-trail">~/kernel/sched</span></div><div class="hal-body hal-body--lit-ok">
+<div class="hal-transcript">
+  <div class="hal-block hal-block--current">
+    <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">man eevdf</span></div>
+    <h1 class="hal-hdr hal-hdr--1">EEVDF</h1>
+    <h2 class="hal-hdr hal-hdr--2">NAME</h2>
+    <p class="hal-prose">eevdf — the default Thylacine process scheduler</p>
+    <h2 class="hal-hdr hal-hdr--2">DESCRIPTION</h2>
+    <p class="hal-prose"><em class="hal-em hal-em--emph">EEVDF</em> picks the task whose <strong class="hal-em hal-em--strong">virtual deadline</strong> falls earliest. Weight is derived from <code class="hal-em hal-em--code">nice(2)</code> <span class="hal-em hal-em--dim">(POSIX compatibility only — Territory namespaces do not expose it)</span>.</p>
+    <h3 class="hal-hdr hal-hdr--3">Tuning</h3>
+    <p class="hal-prose">See <code class="hal-em hal-em--code">/proc/sched/eevdf</code> for the live slice parameters.</p>
+  </div>
+  <div class="hal-prompt"><span class="hal-path">~/thylacine/kernel/sched</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd hal-caret"></span></div>
+</div></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~/thylacine/kernel/sched · man eevdf</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>14:22</span></div></div></div>
+  </div>
+</section>
+<section class="spec">
+  <div class="spec-head"><h2>An intro screen</h2><span class="spec-sub">paper-style</span></div>
+  <p class="spec-note">The same foreign-output idea, styled closer to a typeset
+  paper: a centred title offset from the top, a longer paragraph carrying all
+  three emphasis classes, a partial rule as a quiet section break, then a
+  genuinely executed <code>ls -la</code> whose preformatted output is a
+  box-drawn listing. The gutter still belongs to the `pre` block alone.</p>
+  <div class="spec-stage"><div class="hal-wm" style="height:460px"><div class="hal-workspace" style="grid-template-columns:1fr"><div class="hal-pane"><div class="hal-pane-inner"><div class="hal-tag hal-tag--live-ok"><span class="hal-tag-name">ut</span><span class="hal-tag-rule">│</span><span class="hal-pill hal-pill--on">ls -la</span><span class="hal-tag-trail">~</span></div><div class="hal-body hal-body--lit-ok">
+<div class="hal-transcript">
+  <div class="hal-block">
+    <h1 class="hal-hdr hal-hdr--1" style="text-align:center;margin-top:14px;">Thylacine</h1>
+    <p class="hal-prose">Thylacine is a <em class="hal-em hal-em--emph">Plan 9-heritage</em> kernel for aarch64, composed almost entirely around <strong class="hal-em hal-em--strong">9P</strong> as the one interface every resource speaks — files, processes, even scheduler state present themselves through the same namespace. Capability-typed handles replace ambient authority throughout, and the EEVDF scheduler is <em class="hal-em hal-em--emph">formally verified</em> with TLA+ rather than merely tested. <span class="hal-em hal-em--dim">None of this is POSIX by accident — a compatibility layer exists, but it is a guest, not the foundation.</span></p>
+    <hr class="hal-rule" style="width:60px;margin:10px auto;">
+    <p class="hal-prose">The kernel tree, as it stands today:</p>
+  </div>
+  <div class="hal-block">
+    <div class="hal-prompt"><span class="hal-path">~</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd">ls -la</span></div>
+    <pre class="hal-out">┌────────────┬────────┬──────────────┬──────────────┐
+│    mode    │   size │   modified   │     name     │
+├────────────┼────────┼──────────────┼──────────────┤
+│ drwxr-xr-x │   4096 │ Sep  6 09:14 │ kernel/      │
+│ drwxr-xr-x │   4096 │ Sep  5 22:03 │ usr/         │
+│ -rw-r--r-- │   1842 │ Sep  1 08:25 │ VISION.md    │
+│ -rw-r--r-- │    612 │ Sep  6 09:11 │ ROADMAP.md   │
+│ -rwxr-xr-x │  88420 │ Sep  6 14:02 │ ut           │
+└────────────┴────────┴──────────────┴──────────────┘</pre>
+  </div>
+  <div class="hal-prompt"><span class="hal-path">~</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd hal-caret"></span></div>
+</div></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">transcript · ~</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>14:22</span></div></div></div>
+  </div>
+</section>
+<section class="spec">
+  <div class="spec-head"><h2>Welcome screen</h2><span class="spec-sub">proposed — Plex dual-weight, subheadings</span></div>
+  <p class="spec-note">Two proposals bundled for review before either is committed.
+  First: the proportional face becomes IBM Plex Sans, with headings left at
+  plain regular weight (rank is still size-only, per §8) and every other
+  proportional element — body, chrome, `obj` — moved to Plex's own Text
+  weight (450), which reads with more contrast at these small sizes than
+  Regular does. Second: this screen is broken into named `hdr
+  level=2`/`level=3` subsections rather than relying on bare rules alone.
+  Both are scoped to this one block below — the rest of this sheet is still
+  Public Sans and rule-only until a decision is made.</p>
+  <div class="spec-stage"><div class="hal-wm" style="height:520px;--hal-prop:'IBM Plex Sans','Helvetica Neue',Arial,sans-serif;font-weight:450;"><div class="hal-workspace" style="grid-template-columns:1fr"><div class="hal-pane"><div class="hal-pane-inner"><div class="hal-tag hal-tag--live-ok"><span class="hal-tag-name">ut</span><span class="hal-tag-trail">listener 1</span></div><div class="hal-body hal-body--lit-ok">
+<div class="hal-transcript">
+  <div class="hal-block">
+    <h1 class="hal-hdr hal-hdr--1" style="text-align:center;margin-top:10px;">Halcyon Terminal of Thylacine OS 1.1</h1>
+    <p class="hal-prose hal-em--dim" style="text-align:center;margin:4px 0 0;">Booted from Territory 0, aarch64</p>
+    <p class="hal-prose hal-em--dim" style="text-align:center;margin:0 0 8px;">512M physical memory · EEVDF, 4 cpus</p>
+    <h2 class="hal-hdr hal-hdr--2">Loaded systems</h2>
+    <div style="display:flex;gap:28px;margin:4px 0 6px;">
+      <div class="sys-col">
+        <div class="sys-row"><span>kernel</span><span class="hal-em hal-em--dim">0.3.1</span></div>
+        <div class="sys-row"><span>loom</span><span class="hal-em hal-em--dim">1.4</span></div>
+        <div class="sys-row"><span>burrow</span><span class="hal-em hal-em--dim">0.9</span></div>
+        <div class="sys-row"><span>9p</span><span class="hal-em hal-em--dim">2.0</span></div>
+        <div class="sys-row"><span>pouch</span><span class="hal-em hal-em--dim">1.2</span></div>
+      </div>
+      <div class="sys-col">
+        <div class="sys-row"><span>utopia</span><span class="hal-em hal-em--dim">0.6</span></div>
+        <div class="sys-row"><span>halcyon</span><span class="hal-em hal-em--dim">0.2</span></div>
+        <div class="sys-row"><span>cairn</span><span class="hal-em hal-em--dim">0.3</span></div>
+        <div class="sys-row"><span>beacon</span><span class="hal-em hal-em--dim">1.0</span></div>
+        <div class="sys-row"><span>quake</span><span class="hal-em hal-em--dim">1.09</span></div>
+      </div>
+    </div>
+    <h2 class="hal-hdr hal-hdr--2">Getting started</h2>
+    <p class="hal-prose">You are typing to <span class="hal-obj">ut, listener 1</span>.</p>
+    <p class="hal-prose">Territory namespaces are visible at <code class="hal-em hal-em--code">/</code>; try <code class="hal-em hal-em--code">ls /dev</code> to start.</p>
+    <h3 class="hal-hdr hal-hdr--3">Keys and clicks</h3>
+    <p class="hal-prose">Press <code class="hal-em hal-em--code">Control-h</code> for a list of line-editing commands.</p>
+    <p class="hal-prose">Type <code class="hal-em hal-em--code">help</code> to list command-processor verbs.</p>
+    <p class="hal-prose">Hold Shift and click the tag bar's rightmost pill for the pane's own menu.</p>
+    <hr class="hal-rule">
+    <p class="hal-prose hal-em--dim" style="margin:4px 0 0;">Thylacine is free and open software; see <code class="hal-em hal-em--code">LICENSE</code>. Territory namespaces, capability handles, and the EEVDF scheduler are specified in <code class="hal-em hal-em--code">ARCHITECTURE.md</code>. This build carries no warranty of any kind.</p>
+  </div>
+  <div class="hal-prompt"><span class="hal-path">~</span><span class="hal-turnstile"> ⊢ </span><span class="hal-cmd hal-caret"></span></div>
+</div></div></div></div></div><div class="hal-status"><div class="hal-ws hal-ws--on">1</div><div class="hal-ws">2</div><div class="hal-ws">3</div><div class="hal-status-mid">Territory 0 · listener 1</div><div class="hal-status-right"><span class="hal-status-ok">⊢ ok</span><span>23:49</span></div></div></div>
+  </div>
 </section>
 <section class="spec">
   <div class="spec-head"><h2>Tag bar</h2><span class="spec-sub">all states</span></div>

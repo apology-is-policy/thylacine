@@ -49,6 +49,7 @@ const C_BELL: u8 = 1;
 const C_TITLE: u8 = 2;
 const C_EXIT: u8 = 3;
 const C_WINSIZE_ACK: u8 = 4;
+const C_OSC7: u8 = 5;
 
 /// A down-channel input record (halcyond -> kaua-term).
 #[derive(Clone, Debug, PartialEq)]
@@ -103,6 +104,7 @@ pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
             changed,
             cursor,
             wrapped,
+            top_continues,
         } => {
             put_u16(&mut p, cursor.0);
             put_u16(&mut p, cursor.1);
@@ -119,6 +121,9 @@ pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
             for &w in wrapped {
                 p.push(w as u8);
             }
+            // The flag for the row above row 0, after the per-row snapshot;
+            // optional on decode (a frame that stops here reads false).
+            p.push(*top_continues as u8);
             T_CELLDIFF
         }
         Record::ScrollOff { rows, wrapped } => {
@@ -154,6 +159,11 @@ pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
                     put_u32(&mut p, *code as u32);
                 }
                 Control::WinsizeAck => p.push(C_WINSIZE_ACK),
+                Control::Osc7Raw(body) => {
+                    p.push(C_OSC7);
+                    put_u32(&mut p, body.len() as u32);
+                    p.extend_from_slice(body);
+                }
             }
             T_CONTROL
         }
@@ -292,10 +302,12 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
             for _ in 0..nw {
                 wrapped.push(r.u8()? != 0);
             }
+            let top_continues = if r.done() { false } else { r.u8()? != 0 };
             Record::CellDiff {
                 changed,
                 cursor: (cr, cc, cv),
                 wrapped,
+                top_continues,
             }
         }
         T_SCROLLOFF => {
@@ -338,6 +350,16 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
                 }
                 C_EXIT => Control::Exit(r.u32()? as i32),
                 C_WINSIZE_ACK => Control::WinsizeAck,
+                C_OSC7 => {
+                    // The vt caps an OSC body at 256 bytes on the untrusted
+                    // side; the consumer decodes it into a retained path, so
+                    // the same cap is enforced HERE too (the Title's rule).
+                    let n = r.u32()? as usize;
+                    if n > MAX_TITLE {
+                        return Err(WireError::Malformed);
+                    }
+                    Control::Osc7Raw(r.take(n)?.to_vec())
+                }
                 _ => return Err(WireError::Malformed),
             };
             Record::Control(c)
@@ -501,6 +523,13 @@ mod tests {
             changed: vec![(0, 0, cell('a')), (3, 7, cell('Z'))],
             cursor: (2, 5, true),
             wrapped: vec![true, false, true, false],
+            top_continues: true,
+        });
+        rt_record(Record::CellDiff {
+            changed: vec![],
+            cursor: (0, 0, false),
+            wrapped: vec![],
+            top_continues: false,
         });
         rt_record(Record::ScrollOff {
             rows: vec![vec![cell('x'), cell('y')], vec![cell('z')]],
@@ -514,8 +543,31 @@ mod tests {
         rt_record(Record::Control(Control::Title(String::from("hi there"))));
         rt_record(Record::Control(Control::Exit(-7)));
         rt_record(Record::Control(Control::WinsizeAck));
+        rt_record(Record::Control(Control::Osc7Raw(
+            b"file://localhost/lib/aurora".to_vec(),
+        )));
+        rt_record(Record::Control(Control::Osc7Raw(Vec::new())));
         rt_record(Record::Mode(ScreenMode::AltScreen));
         rt_record(Record::Mode(ScreenMode::Normal));
+    }
+
+    #[test]
+    fn oversize_cwd_report_is_malformed_not_retained() {
+        // The vt caps an OSC body at 256; a frame claiming more is rejected
+        // before any allocation of its length (the Title's rule).
+        let mut p = vec![C_OSC7];
+        put_u32(&mut p, (MAX_TITLE + 1) as u32);
+        p.extend(core::iter::repeat(b'x').take(MAX_TITLE + 1));
+        assert_eq!(parse_record(T_CONTROL, &p), Err(WireError::Malformed));
+        let mut ok = vec![C_OSC7];
+        put_u32(&mut ok, MAX_TITLE as u32);
+        ok.extend(core::iter::repeat(b'x').take(MAX_TITLE));
+        assert!(parse_record(T_CONTROL, &ok).is_ok(), "exactly the cap is accepted");
+        // Truncated: the length outruns the payload.
+        let mut short = vec![C_OSC7];
+        put_u32(&mut short, 8);
+        short.extend_from_slice(b"abc");
+        assert_eq!(parse_record(T_CONTROL, &short), Err(WireError::Malformed));
     }
 
     fn rt_input(inp: Input) {

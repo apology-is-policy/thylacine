@@ -18,11 +18,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use beacon::verbs::{expand, is_internal, rules_for, Rule};
-use cartoon::{Cartoon, GlyphRef, Op};
-use libhalcyon::theme::DAYLIGHT;
+use cartoon::{Cartoon, Op};
 
 use crate::chrome::NAME_PX;
-use crate::layout::LaidBlock;
+use crate::layout::{LaidBlock, Sheet};
 use crate::raster::{GlyphSource, FACE_BODY, FACE_MONO};
 use crate::select::FlatRow;
 use crate::transcript::{Block, Item, TCell, Transcript};
@@ -309,38 +308,40 @@ impl Menu {
 }
 
 /// Menu metrics (Daylight: the tag bar's padding family; the menu is the
-/// raised ground with the border stroke -- chrome, not content).
+/// raised ground with the border stroke -- chrome, not content), LOGICAL:
+/// the sheet scales them (HALCYON-SCALE 6).
 pub const MENU_PAD_X: i32 = 8;
 pub const MENU_PAD_Y: i32 = 4;
-pub const MENU_MAX_W: u32 = 640;
+pub const MENU_MAX_W: i32 = 640;
 const ROW_PAD: i32 = 4;
 const NO_VERBS: &str = "no verbs";
 
-fn body_width(gs: &mut GlyphSource, s: &str) -> i32 {
-    s.chars()
-        .filter_map(|c| gs.glyph(FACE_BODY, NAME_PX, c))
-        .map(|g| g.advance)
-        .sum()
+fn body_width(gs: &mut GlyphSource, sheet: &Sheet, s: &str) -> i32 {
+    // The sub-pixel pen's width, so the menu measures what it paints
+    // (HALCYON-TYPE 4.3; `push_body` shapes with the same call).
+    let px = sheet.px(NAME_PX);
+    gs.shape_run(FACE_BODY, px, s.chars()).1
 }
 
 fn mono_width(gs: &GlyphSource, s: &str) -> i32 {
-    let (cw, _, _) = gs.mono_cell();
+    let (cw, _, _) = gs.island_cell();
     cw * s.chars().count() as i32
 }
 
-fn row_h(gs: &GlyphSource) -> i32 {
-    let (_, ch, _) = gs.mono_cell();
-    ch + ROW_PAD
+fn row_h(gs: &GlyphSource, sheet: &Sheet) -> i32 {
+    let (_, ch, _) = gs.island_cell();
+    ch + sheet.ipx(ROW_PAD)
 }
 
-/// The menu's surface size for its content: the widest of the title (type
-/// label + ref) and the items, padded; one row per item (or the "no verbs"
-/// row) under the title row and its rule. Capped at MENU_MAX_W wide and at
-/// `max_h` tall (the display: the compositor refuses a taller surface -- the
-/// H-3c round F3); past the cap the item list scrolls (`menu_list`).
-pub fn menu_size(m: &Menu, gs: &mut GlyphSource, max_h: u32) -> (u32, u32) {
-    let (cw, _, _) = gs.mono_cell();
-    let title_w = body_width(gs, &m.ty) + 2 * cw + mono_width(gs, &m.refv);
+/// The menu's surface size for its content at the sheet's scale: the
+/// widest of the title (type label + ref) and the items, padded; one row
+/// per item (or the "no verbs" row) under the title row and its rule.
+/// Capped at MENU_MAX_W (scaled) wide and at `max_h` tall (the display: the
+/// compositor refuses a taller surface -- the H-3c round F3); past the cap
+/// the item list scrolls (`menu_list`).
+pub fn menu_size(m: &Menu, sheet: &Sheet, gs: &mut GlyphSource, max_h: u32) -> (u32, u32) {
+    let (cw, _, _) = gs.island_cell();
+    let title_w = body_width(gs, sheet, &m.ty) + 2 * cw + mono_width(gs, &m.refv);
     let mut w = title_w;
     if m.items.is_empty() {
         w = w.max(mono_width(gs, NO_VERBS));
@@ -349,16 +350,19 @@ pub fn menu_size(m: &Menu, gs: &mut GlyphSource, max_h: u32) -> (u32, u32) {
         w = w.max(mono_width(gs, &it.label));
     }
     let rows = 1 + m.items.len().max(1) as i32;
-    let h = 2 * MENU_PAD_Y + rows * row_h(gs) + 1;
-    let w = (w + 2 * MENU_PAD_X).max(1) as u32;
-    (w.min(MENU_MAX_W), (h.max(1) as u32).min(max_h.max(1)))
+    let h = 2 * sheet.ipx(MENU_PAD_Y) + rows * row_h(gs, sheet) + sheet.hairline;
+    let w = (w + 2 * sheet.ipx(MENU_PAD_X)).max(1) as u32;
+    (
+        w.min(sheet.ipx(MENU_MAX_W).max(1) as u32),
+        (h.max(1) as u32).min(max_h.max(1)),
+    )
 }
 
 /// How many item rows fit under the title row and its rule in `h`, and the
 /// first item shown so the selection stays inside them.
-pub fn item_window(m: &Menu, h: u32, gs: &GlyphSource) -> (usize, usize) {
-    let rh = row_h(gs).max(1);
-    let fit = ((h as i32 - 2 * MENU_PAD_Y - 1 - rh) / rh).max(1) as usize;
+pub fn item_window(m: &Menu, h: u32, sheet: &Sheet, gs: &GlyphSource) -> (usize, usize) {
+    let rh = row_h(gs, sheet).max(1);
+    let fit = ((h as i32 - 2 * sheet.ipx(MENU_PAD_Y) - sheet.hairline - rh) / rh).max(1) as usize;
     let first = if m.sel >= fit { m.sel + 1 - fit } else { 0 };
     (first, fit)
 }
@@ -366,53 +370,58 @@ pub fn item_window(m: &Menu, h: u32, gs: &GlyphSource) -> (usize, usize) {
 fn push_body(
     cart: &mut Cartoon,
     gs: &mut GlyphSource,
+    sheet: &Sheet,
     x: i32,
     baseline: i32,
     color: u32,
     s: &str,
 ) -> i32 {
-    let mut refs: Vec<GlyphRef> = Vec::new();
-    for c in s.chars() {
-        if let Some(g) = gs.glyph(FACE_BODY, NAME_PX, c) {
-            refs.push(g);
-        }
-    }
-    let adv: i32 = refs.iter().map(|g| g.advance).sum();
+    let px = sheet.px(NAME_PX);
+    let (refs, adv) = gs.shape_run(FACE_BODY, px, s.chars());
     if !refs.is_empty() {
         cart.push_glyphs(gs.gen(), x, baseline, color, &refs);
     }
     adv
 }
 
-fn push_mono(cart: &mut Cartoon, gs: &mut GlyphSource, x: i32, baseline: i32, color: u32, s: &str) {
-    let mut refs: Vec<GlyphRef> = Vec::new();
-    for c in s.chars() {
-        if let Some(g) = gs.glyph(FACE_MONO, 0.0, c) {
-            refs.push(g);
-        }
-    }
+fn push_mono(
+    cart: &mut Cartoon,
+    gs: &mut GlyphSource,
+    sheet: &Sheet,
+    x: i32,
+    baseline: i32,
+    color: u32,
+    s: &str,
+) {
+    // FACE_MONO refuses a phase (a fixed cell has none), so this is the
+    // whole-cell run it always was -- routed through the one shaper so
+    // there is a single place the pen lives.
+    let (refs, _) = gs.shape_run(FACE_MONO, sheet.mono_island_px, s.chars());
     if !refs.is_empty() {
         cart.push_glyphs(gs.gen(), x, baseline, color, &refs);
     }
 }
 
-/// The menu display list for a w x h surface: raised ground, 1px border
-/// stroke, the title row (type in the proportional face, muted; the
-/// resolved ref in monospace, full ink), a rule, then the items in
-/// monospace -- the selected one on a `header` band.
-pub fn menu_list(m: &Menu, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon {
-    let d = &DAYLIGHT;
+/// The menu display list for a w x h surface at the sheet's scale: raised
+/// ground, the hairline border stroke, the title row (type in the
+/// proportional face, muted; the resolved ref in monospace, full ink), a
+/// rule, then the items in monospace -- the selected one on a `header`
+/// band.
+pub fn menu_list(m: &Menu, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource) -> Cartoon {
+    let d = &sheet.theme;
     let mut cart = Cartoon::new();
     if w == 0 || h == 0 {
         return cart;
     }
     cart.ops.push(Op::Clear { color: d.raised });
     let (wi, hi) = (w as i32, h as i32);
+    let hair = sheet.hairline;
+    let hu = hair as u32;
     for r in [
-        (0, 0, w, 1),
-        (0, hi - 1, w, 1),
-        (0, 0, 1, h),
-        (wi - 1, 0, 1, h),
+        (0, 0, w, hu),
+        (0, (hi - hair).max(0), w, hu),
+        (0, 0, hu, h),
+        ((wi - hair).max(0), 0, hu, h),
     ] {
         cart.ops.push(Op::Rect {
             x: r.0,
@@ -422,52 +431,59 @@ pub fn menu_list(m: &Menu, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon {
             color: d.border,
         });
     }
-    let (cw, _, mono_base) = gs.mono_cell();
-    let rh = row_h(gs);
+    let (cw, _, mono_base) = gs.island_cell();
+    let rh = row_h(gs, sheet);
+    let (pad_x, pad_y, row_pad) = (
+        sheet.ipx(MENU_PAD_X),
+        sheet.ipx(MENU_PAD_Y),
+        sheet.ipx(ROW_PAD),
+    );
     let body_asc = gs
-        .line_metrics(FACE_BODY, NAME_PX)
+        .line_metrics(FACE_BODY, sheet.px(NAME_PX))
         .map(|lm| lm.ascent)
         .unwrap_or(8);
-    let mut y = MENU_PAD_Y;
+    let mut y = pad_y;
     // Title: "<type>  <ref>".
-    let mut x = MENU_PAD_X;
+    let mut x = pad_x;
     x += push_body(
         &mut cart,
         gs,
+        sheet,
         x,
-        y + ROW_PAD / 2 + body_asc,
+        y + row_pad / 2 + body_asc,
         d.fg_muted,
         &m.ty,
     );
     x += 2 * cw;
-    push_mono(&mut cart, gs, x, y + ROW_PAD / 2 + mono_base, d.fg, &m.refv);
+    push_mono(&mut cart, gs, sheet, x, y + row_pad / 2 + mono_base, d.fg, &m.refv);
     y += rh;
     cart.ops.push(Op::Rect {
-        x: 1,
+        x: hair,
         y,
-        w: w - 2,
-        h: 1,
+        w: (wi - 2 * hair).max(0) as u32,
+        h: hu,
         color: d.border,
     });
-    y += 1;
+    y += hair;
     if m.items.is_empty() {
         push_mono(
             &mut cart,
             gs,
-            MENU_PAD_X,
-            y + ROW_PAD / 2 + mono_base,
+            sheet,
+            pad_x,
+            y + row_pad / 2 + mono_base,
             d.fg_muted,
             NO_VERBS,
         );
         return cart;
     }
-    let (first, fit) = item_window(m, h, gs);
+    let (first, fit) = item_window(m, h, sheet, gs);
     for (i, it) in m.items.iter().enumerate().skip(first).take(fit) {
         if i == m.sel {
             cart.ops.push(Op::Rect {
-                x: 1,
+                x: hair,
                 y,
-                w: w - 2,
+                w: (wi - 2 * hair).max(0) as u32,
                 h: rh as u32,
                 color: d.header,
             });
@@ -479,8 +495,9 @@ pub fn menu_list(m: &Menu, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon {
         push_mono(
             &mut cart,
             gs,
-            MENU_PAD_X,
-            y + ROW_PAD / 2 + mono_base,
+            sheet,
+            pad_x,
+            y + row_pad / 2 + mono_base,
             ink,
             &it.label,
         );
@@ -493,6 +510,10 @@ pub fn menu_list(m: &Menu, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon {
 mod tests {
     use super::*;
     use crate::layout::{daylight_sheet, layout_block};
+
+    fn sheet() -> Sheet {
+        daylight_sheet(100)
+    }
     use crate::select::flatten;
     use beacon::verbs::parse;
     use beacon::wire::{self, Op as BOp};
@@ -607,7 +628,7 @@ mod tests {
         let t = corpus();
         let flat = flatten(&t);
         let b = &t.frozen_blocks()[flat[1].block];
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut gs = GlyphSource::new_vendored(64);
         let laid = layout_block(b, 800, &sheet, &mut gs);
         let runs = runs_on_row(&t, flat[1]);
@@ -680,15 +701,15 @@ mod tests {
         let rules = parse("path ls ls {}\npath cat cat {}\n", false);
         let m = build_menu(&rules, "path", "/lib/aurora/config");
         let mut gs = GlyphSource::new_vendored(64);
-        let (w, h) = menu_size(&m, &mut gs, 800);
+        let (w, h) = menu_size(&m, &sheet(), &mut gs, 800);
         assert!(w > 40 && h > 20, "{}x{}", w, h);
-        let (w0, h0) = menu_size(&build_menu(&rules, "pid", "1"), &mut gs, 800);
+        let (w0, h0) = menu_size(&build_menu(&rules, "pid", "1"), &sheet(), &mut gs, 800);
         assert!(
             h0 < h,
             "no verbs = one placeholder row; two verbs = two rows"
         );
         assert!(w0 > 0);
-        let c = menu_list(&m, w, h, &mut gs);
+        let c = menu_list(&m, w, h, &sheet(), &mut gs);
         assert!(
             matches!(c.ops[0], Op::Clear { color: 0xFFBDB0A0 }),
             "raised ground"
@@ -723,7 +744,7 @@ mod tests {
                 >= 4,
             "type + ref + two labels"
         );
-        assert!(menu_list(&m, 0, 0, &mut gs).ops.is_empty());
+        assert!(menu_list(&m, 0, 0, &sheet(), &mut gs).ops.is_empty());
     }
 
     // The H-3c round F3: a verb-rich type must not ask the compositor for a
@@ -738,25 +759,25 @@ mod tests {
         let mut m = build_menu(&rules, "path", "/x");
         assert_eq!(m.items.len(), 40);
         let mut gs = GlyphSource::new_vendored(64);
-        let (_, uncapped) = menu_size(&m, &mut gs, u32::MAX);
-        let (w, h) = menu_size(&m, &mut gs, 200);
+        let (_, uncapped) = menu_size(&m, &sheet(), &mut gs, u32::MAX);
+        let (w, h) = menu_size(&m, &sheet(), &mut gs, 200);
         assert!(
             uncapped > 200 && h == 200,
             "uncapped {} capped {}",
             uncapped,
             h
         );
-        let (first, fit) = item_window(&m, h, &gs);
+        let (first, fit) = item_window(&m, h, &sheet(), &gs);
         assert_eq!(first, 0);
         assert!(fit >= 2 && fit < 40, "fit {}", fit);
         for _ in 0..39 {
             m.key(MenuKey::Down);
         }
         assert_eq!(m.sel, 39);
-        let (first, _) = item_window(&m, h, &gs);
+        let (first, _) = item_window(&m, h, &sheet(), &gs);
         assert_eq!(first, 40 - fit, "the window ends at the selection");
         // The selected band lies inside the surface.
-        let c = menu_list(&m, w, h, &mut gs);
+        let c = menu_list(&m, w, h, &sheet(), &mut gs);
         let band = c
             .ops
             .iter()

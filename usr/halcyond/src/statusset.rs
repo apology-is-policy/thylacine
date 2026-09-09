@@ -12,8 +12,9 @@
 use alloc::format;
 use alloc::string::String;
 
+use halcyond::layout::Sheet;
 use halcyond::raster::GlyphSource;
-use halcyond::status::{bar_height, condition_for, status_list, StatusModel};
+use halcyond::status::{bar_height, condition_for, status_list, Condition, StatusModel};
 use libthyla_rs::{t_clock_gettime, T_CLOCK_REALTIME};
 use tapestry::{EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE};
 
@@ -40,11 +41,13 @@ pub struct StatusBar {
     surf: Option<Surface>,
     /// The model last painted (a repaint happens only on a change).
     painted: Option<StatusModel>,
-    /// The slot geometry last said (test builds): the witness needs the
-    /// rects when they MOVE, and every say line lands in the transcript
-    /// (the observer effect) -- said per change of geometry, never per
-    /// paint, so the row-relative legs after a command see no extra row.
-    said_slots: Option<halcyond::status::Slots>,
+    /// The say key last said (test builds): the witness needs the rects
+    /// when the STATE changes, and every say line lands in the transcript
+    /// (the observer effect) -- said per change of the fixed slots + the
+    /// condition state (`Slots::stable`: never the centred text's landing,
+    /// never the label's width), never per paint, so the row-relative legs
+    /// after a command see no extra row.
+    said_slots: Option<(halcyond::status::Slots, Condition)>,
     failed_said: bool,
     /// Whether a mint should be attempted: true at start and after a CLOSE
     /// (the compositor dropped the bar), cleared by each attempt. A FAILED
@@ -66,10 +69,20 @@ impl StatusBar {
         }
     }
 
-    /// Re-arm the mint retry: called on a relayout (the compositor/display
-    /// state changed, so a prior failure may now succeed) -- the retry
-    /// cadence ChromeSet gets for free from reconcile. A no-op once the bar
-    /// is up.
+    /// Re-arm the mint retry: a prior failure may now succeed. A no-op
+    /// once the bar is up, so calling it every pass costs nothing.
+    ///
+    /// It used to be called ONLY under `if relayout`, which TY-6 F8 showed
+    /// is not a signal the console reliably gets: a declared session takes
+    /// the display's bar, the console's `ensure` is refused once, says so
+    /// once, and then waits for a relayout that may never arrive -- the
+    /// console's own surface can keep an unchanged full-display rect across
+    /// the whole session, so nothing fans it a CONFIGURE at either edge.
+    /// The failure mode was a display with no status bar and no further
+    /// word about it. Now the caller re-arms unconditionally: the guard
+    /// above already makes it free while the bar is up, and the cost while
+    /// it is down is one refused mint per pass -- which is the retry this
+    /// was always supposed to be.
     pub fn rearm(&mut self) {
         if self.surf.is_none() {
             self.want_mint = true;
@@ -77,8 +90,10 @@ impl StatusBar {
     }
 
     /// Mint the bar if there is none: the display width (off the ring's
-    /// `ctl`) by the bar height. Said once on a refusal; retried per call.
-    pub fn ensure(&mut self) {
+    /// `ctl`) by the bar height at the sheet's scale (the compositor's
+    /// carve; a bar of another height is refused). Said once on a refusal;
+    /// retried per call.
+    pub fn ensure(&mut self, sheet: &Sheet) {
         if self.surf.is_some() || !self.want_mint {
             return;
         }
@@ -87,14 +102,14 @@ impl StatusBar {
             Some(d) => d,
             None => return,
         };
-        match Surface::status_on(&self.ring, dw, bar_height()) {
+        match Surface::status_on(&self.ring, dw, bar_height(sheet)) {
             Ok(s) => {
                 #[cfg(feature = "test-mode")]
                 say(&format!(
                     "halcyond: status bar {} minted ({}x{})",
                     s.id,
                     dw,
-                    bar_height()
+                    bar_height(sheet)
                 ));
                 self.surf = Some(s);
                 self.painted = None;
@@ -152,8 +167,14 @@ impl StatusBar {
         }
     }
 
+    /// The next `refresh` repaints whatever the model (a sheet change: the
+    /// same model paints at a new size).
+    pub fn invalidate(&mut self) {
+        self.painted = None;
+    }
+
     /// Paint `model` if it differs from what is showing.
-    pub fn refresh(&mut self, model: &StatusModel, gs: &mut GlyphSource) {
+    pub fn refresh(&mut self, model: &StatusModel, sheet: &Sheet, gs: &mut GlyphSource) {
         if self.painted.as_ref() == Some(model) {
             return;
         }
@@ -165,7 +186,7 @@ impl StatusBar {
         if w == 0 || h == 0 {
             return;
         }
-        let (cart, slots) = status_list(model, w, h, gs);
+        let (cart, slots) = status_list(model, w, h, sheet, gs);
         let px = surf.pixels();
         cartoon::execute(
             &cart,
@@ -178,15 +199,17 @@ impl StatusBar {
         match surf.present(None) {
             Ok(()) => {
                 #[cfg(feature = "test-mode")]
-                if self.said_slots != Some(slots) {
-                    self.said_slots = Some(slots);
+                if self.said_slots != Some((slots.stable(), model.condition)) {
+                    self.said_slots = Some((slots.stable(), model.condition));
                     say(&format!(
-                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02}",
+                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {}",
                     surf.id,
                     slots.ws.0, slots.ws.1, slots.ctx.0, slots.ctx.1, slots.cond.0, slots.cond.1,
                     slots.clock.0, slots.clock.1,
                     halcyond::status::context_text(&model.name, &model.cwd, &model.cmd),
-                    model.condition, model.hour, model.minute
+                    model.condition, model.hour, model.minute,
+                    slots.ctx_ink.0, slots.ctx_ink.1,
+                    model.exit_code.map(|c| format!("{}", c)).unwrap_or_else(|| String::from("-"))
                     ));
                 }
                 let _ = slots;
@@ -200,13 +223,14 @@ impl StatusBar {
 }
 
 /// The model from the sources: the focused leaf (pane id, name, status),
-/// whether that leaf hosts the console (then the transcript's directory and
-/// command apply), and the clock.
+/// whether that leaf is one this process hosts (then its transcript's
+/// directory, command and last exit apply), and the clock.
 pub fn model_from(
     focused: Option<&(u32, String, String)>,
     own_pane: Option<u32>,
     cwd: &str,
     cmd: Option<&str>,
+    exit_code: Option<i64>,
 ) -> StatusModel {
     let mut m = StatusModel::empty();
     if let Some((id, name, status)) = focused {
@@ -215,6 +239,7 @@ pub fn model_from(
         if Some(*id) == own_pane {
             m.cwd = String::from(cwd);
             m.cmd = String::from(cmd.unwrap_or(""));
+            m.exit_code = exit_code;
         }
     }
     let (h, mi) = clock_hm();

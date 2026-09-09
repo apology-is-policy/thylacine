@@ -2995,6 +2995,1785 @@ SMP soundness inherited from c83da249 (aux-3's kernel is the byte-identical
 binary main gated 40 boots / 0 corruption -- not re-run on identical bits). The
 operator's 3-part bar is met: aux-2 merged, aux-3 fresh off merged-main, both
 build+test green. Role split: aux -> viv on aux-3, main -> KT-1.
+## Run 46j (2026-09-09, Opus 5 max) -- HALCYON-THEME TH-1 + TH-2: the palette had two owners and neither was in charge
+
+**Where it sits.** The operator asked, after seeing the TY-4 type work: *"The
+daylight theme colors -- are they together somewhere on one place and described,
+so that another theme can be easily made? ALL of the colors, so that if a theme
+is made and all colors are changed to form a dark theme, some hardcoded daylight
+color won't kick it in somewhere."* Answering it honestly meant finding three
+defects, which became `docs/HALCYON-THEME.md` (@`65b37191`, authorized in full:
+*"no matter how big it is -- we do it properly and completely"*). This run is
+chunks 1 and 2 of six.
+
+### The cycle, and why it was not just duplicated hex
+
+The design named `vt::DAYLIGHT` as hand-copied hex, and it was:
+
+```rust
+pub const DAYLIGHT: Palette = Palette {
+    bg: 0xFFF2_EBE0, // libhalcyon DAYLIGHT.surface
+    fg: 0xFF1A_120A, // libhalcyon DAYLIGHT.fg
+```
+
+with three comments forming a ring, each naming another as the source of truth:
+`libhalcyon::theme` opened *"This is the SINGLE token source"*; `vt::DAYLIGHT`
+said the source was `libhalcyon::daylight_palette()`; and `daylight_palette()`
+said the source was `vt::DAYLIGHT`. A test pinned the pair, so they could not
+drift *silently* -- the cost was only that a second theme would have to be
+authored twice, in two crates.
+
+**But the transcription was the symptom, not the defect.** `vt::DAYLIGHT` was
+*Halcyon's* palette living inside the *terminal core*, and the terminal core
+cannot see `libhalcyon` -- so the value had no way to arrive except by being
+copied. That reframing decided the fix. Deleting the const forces the real
+question: then what does `kaua-term` use? It is a separate process, it names
+`vt::DAYLIGHT`, and it does not depend on `libhalcyon`.
+
+The alternative was tempting and wrong: give `kaua-term` a `libhalcyon`
+dependency so it can read the derived value. That closes the transcription, but
+it adds a crate edge TH-2's visibility split would immediately have to remove --
+and worse, it hides the plumbing requirement behind a convenient default. So
+TH-1 built the seam `vt`'s own comment had already named as the v1.x intent:
+*"the compositor plumbs the palette to the kaua-term rather than the producer
+defaulting."* `--palette <18 RRGGBB>`, riding the `--beacon` tier precedent that
+was already there. Landed `1773b06a`.
+
+**An un-plumbed tile falls back to BONFIRE -- dark, inside a light pane.** That
+is deliberate. A plumbing break should be loud, not silently almost-right.
+
+### The self-audit finding: a quiet misparse of a theme declaration
+
+The first parser was positional. Flags in an unexpected order would be read as
+*dimensions* -- falling back to 80x24 and running the next argument as the
+program. Nothing would fail; the tile would just be the wrong size running the
+wrong thing. A quiet misparse of a theme declaration is the exact failure class
+this arc exists to close, so the parse became order-independent and now refuses
+an unknown flag before the dimensions rather than guessing at it.
+
+### TH-2: the rule is a compile error, because a comment rots
+
+`theme::DAYLIGHT` is public only under a new `theme-fixture` feature, enabled as
+a **dev**-dependency: tests keep the const, shipped binaries cannot see it,
+because resolver 2 keeps a dev-only feature out of `cargo build`. That is TY-4's
+cornucopia mechanism reused.
+
+**Both halves sabotage-measured**, because an enforcement claim nobody tried to
+break is an untested premise. A `DAYLIGHT.ember` at module scope in `tile.rs`
+gives `error[E0603]: constant DAYLIGHT is private` on the guest build; the ~20
+test references compile and pass. Landed `d910d665`.
+
+The residue is stated rather than glossed: `builtin()` is public and returns the
+same values, so the split bounds which *name* production may use, not which
+*values* it can reach. Something must be able to say "no theme file, use the
+built-in". Its only callers are the two renderer startups and `Comp::new` --
+which is exactly where TH-4's loader goes.
+
+### Four things the threading found that nobody had listed
+
+The chunk was supposed to be mechanical. It was not.
+
+1. **`sel_bg: 0xFFDF_D6C7`** and **2. `island_rule: 0xFF7A_6850`** -- two
+   literals inside `daylight_sheet` itself, each with a comment explaining that
+   the scripture had no token for it. That comment is precisely how a literal
+   survives review: it reads as a considered decision rather than a gap.
+3. **`tapestryd::pane::BG_COLOR = 0xFF10_1014`** -- the near-black blank-pane
+   fill. The same defect in the opposite direction: a *dark* literal that would
+   survive into a *light* theme. All three are tokens now (`selection`,
+   `island_rule`, `blank`); `BG_COLOR` is deleted.
+4. **Not a literal at all.** Two layout comparisons read
+   `st.bg != DAYLIGHT.surface` beside `st.bg != sheet.ground`. Those were the
+   same value, so the second arm looked redundant -- but its *meaning* is "the
+   cell carries the terminal's default background", and under a dark theme the
+   Daylight constant would classify a legitimately-parchment cell background as
+   "no background" and paint its text invisible. Both now read the resolved
+   `sheet.theme.terminal.bg`. This one had no hex literal to grep for.
+
+### The test that answers the operator's question
+
+`a_fully_retinted_theme_leaves_no_daylight_colour_in_the_sheet` inverts every
+token, **checks the retint did not collide with another Daylight value** (a
+survivor could otherwise pass by coincidence), then asserts no sheet colour is
+still a Daylight one. Sabotage-measured: restoring the `sel_bg` literal fails it
+*by name*.
+
+And the seam test from TH-1,
+`the_args_we_build_declare_our_theme_to_the_parser_the_child_runs`, drives
+halcyond's *built* args through kaua-term's *real* parser -- the TY-4 lesson
+applied, since a unit test of either half alone passes with the halves
+disagreeing. Dropping the flag fails exactly 2 tests by the palette compare.
+
+### Open, and not claimed as proven
+
+- **tapestryd's chrome has no host-testable seam.** `server.rs` carries no test
+  module, so the compositor half of the retint claim rests on the build plus the
+  compose gate -- an owed witness, not a proven one.
+- The workspace is not `rustfmt`-clean at HEAD (raster.rs 56 diffs,
+  transcript.rs 54, and so on) and was not made so here. "Clean on every line
+  this chunk touched" was verified by intersecting `cargo fmt --check` output
+  against `git diff`, not by running rustfmt over files this chunk does not own.
+
+---
+
+## Run 46h (2026-09-08, Opus 5 max, after the 600k self-compaction) -- HALCYON-TYPE TY-4: Cornucopia live, and the defect that fell out of measuring it
+
+**Where it sits.** TY-1..TY-3 put the proportional text on the outline path
+and gave it a smoothing stroke and sub-pixel placement. The mono tier was
+still on the baked atlases, and a baked bitmap cannot carry a per-theme
+dilation without a second bake set -- so a proportional glyph *falling back*
+into a cell was the only stroked thing in the grid, heavier than the
+Cornucopia glyph beside it. TY-4 closes that by giving halcyond the outline
+for mono too, which makes it one rasterizer and therefore one stroke rule.
+Landed at `cecfd1e3`, hash fixup `d6e7b553`, both mirrors.
+
+**Where the subset lives, and why not `third_party`.** The obvious home for
+a font is `third_party/`, beside IBM Plex. But that tree's discipline is
+explicit -- "pristine, unmodified upstream source", "a byte-for-byte copy of
+a published upstream release" -- and a subset is a *derived* artifact. The
+right precedent was already in the tree one directory over: the baked
+atlases, generated from the same font by a tool in `tools/` and committed so
+that ordinary builds need no font tooling. So the subset sits beside them,
+generated by `tools/subset-cornucopia.py`, and `third_party` stays honest.
+
+**The one decision in the tool that is worth copying.** The subsetter does
+not restate the bake's codepoint list; it reads the list **out of
+`atlas.bin`**. A constant copied into two tools is a constant that drifts,
+and the claim that matters here -- both tiers carry the same glyphs -- is
+then true by construction rather than by maintenance. It also inherits the
+bake's own exclusions free: a codepoint the font lacks, or one whose advance
+is not the monospace advance, never entered the atlas and so never enters
+the subset. 207 codepoints in, 208 out (the subsetter keeps U+22A3 because
+it shares a glyph with the turnstile U+22A2), 20112 bytes against the
+font's 10.8 MB.
+
+**The contract with the cells tier, measured rather than asserted.**
+halcyond now derives its cell geometry from the font; Aurora, the kernel
+trusted sink and Halls read theirs out of a blob. If those two ever
+disagree, the pts geometry every tile is sized from stops fitting. So
+`Face::mono_cell` re-computes the bake's own formula -- and
+`the_derived_cell_table_is_the_baked_one` checks the result against all
+eleven baked atlases. The two sides are genuinely independent: one is a
+Python float ceiling frozen into a binary blob months ago, the other is
+integer arithmetic on the font's tables at runtime. They agree exactly at
+every advance. Two *unbaked* advances are pinned as the control that the
+derivation computes rather than looks up -- a lookup would have nothing to
+return there.
+
+**What measuring the clip turned up, which nobody planned.** The cell is a
+clip, and I wanted to know whether it ever bites. It does: 32 of 207 glyphs
+at the largest cell. The first instinct is to call that TY-4's stroke
+pushing ink over the edge, so I measured at stroke zero as well, which
+splits the effect in two and only one half is mine. **26 glyphs overflow the
+TOP with no stroke at all** -- every accented Latin-1 capital, plus ® --
+and the stroke adds only two glyphs touching the left and right edges, by
+about 0.07 px.
+
+The cause is in the font's metadata, not the code: Cornucopia's OS/2
+`usWinAscent` is **889**, but its true ink reaches `head.yMax` **978**. The
+cell is 89 units short -- 1.07 px at the shipping advance -- so every
+accented capital loses the top row of its diacritic. And since
+`bake-cornucopia.py` computes the cell from the same two OS/2 fields, **the
+bake clips the identical row and has since G-4**: the baked `Ã` holds 14011
+of ink against this path's clipped 13844, 1.2 % apart, which is
+scanline-versus-zeno and not a different clip. Aurora, the kernel trusted
+sink and Halls have all been rendering it that way.
+
+That is a pre-existing defect, which changes the attribution and nothing
+else. It is written up as `bug-mono-cell-clips-every-accented-capital` with
+the fix sized (derive from `head.yMax/yMin`; the shipping cell becomes 6x15
+baseline 12; all eleven atlases re-baked and the row pitch chased
+downstream -- its own chunk, because the cell is a cross-tier contract). The
+part I am most pleased with is that it is pinned by a test rather than a
+paragraph: `the_cell_clips_the_diacritics_the_bake_clips` asserts the count
+is 26 and the depth is exactly one row, so it **fails the day the geometry
+is corrected**. A defect that can only be fixed loudly cannot be forgotten.
+
+*(Corrected in the same run by the TY-6 prosecutor's F4: "exactly one row"
+was measured at the shipping cell **only**, and the depth grows —
+`ceil(978a/500) − ceil(889a/500)` is 1 row at 100–150%, **2 at 175% and
+200%**, 4 at the largest bake. Worse, the one-cell pin was structurally
+blind to a second, *descender* clip: it is zero at advance 6 and worst at
+**150%**, where it takes 19 glyphs — not even at the largest cell, so no
+amount of checking the extreme would have found it. I published that number
+in four places. The pin now runs the measured pairs at every reachable
+advance. The lesson generalizes past this bug: **a pin that only ever looks
+where a quantity is smallest will report the quantity as smallest**, and it
+will look exactly as green while doing it.)*
+
+**The sabotage that found the hole in my own tests.** Five sabotages, one
+per new assertion. Four behaved: floor-instead-of-ceil geometry (caught by
+five tests), the stroke silently dropped from the cell (caught by one), the
+TY-1 union bug `max(f,s)` re-applied to this tier (caught by three -- and
+this is what the stroke test's 8 % floor is *for*, since that bug yields
+about +3 % where +18 % is due), and the island fallback removed (caught by a
+pre-existing advance-agreement test).
+
+The fifth did not. **With the mono face never consulted -- TY-4 entirely
+undone, every cell falling through to the Plex fallback -- all 199 tests
+passed.** Every test I had written called `mono_cell_alpha` and
+`MonoCell::derive` directly. They proved the *functions* and never once
+proved that `glyph_at` reaches them. That is the unit-versus-wiring gap, and
+it is worth noting that the code was correct the whole time; what was broken
+was my evidence that it was. The repair is
+`glyph_at_serves_the_mono_cell_from_cornucopia`, which reads the packed
+bytes back out of the atlas page and compares them byte-for-byte against the
+cell rasterizer's own output, and is the only test that fails on that
+sabotage.
+
+**A gap closed in passing.** The startup font check (`cornucopia::verify_all`
+before, `raster::mono_face_ok()` now) sat *below* the `--session` early
+return in `main.rs`. So the session renderer -- the one a real user logs into
+-- never verified its font artifact at all. The new check is above the
+branch.
+
+**What it cost, measured by content and not by timestamp.** The shipped
+halcyond went 2768200 -> 1980872 bytes, **-787 KB**; aurora went 1041960 ->
+394312, **-648 KB**. Aurora's is the larger relative win and it is not
+obvious: aurora never asked for the `scale` bakes, but Cargo unifies
+features across a workspace, so halcyond's request had been forcing ~650 KB
+into aurora's binary all along. Dropping the request freed it. Verified by
+searching both the binary and the booting ramfs for the artifacts
+themselves: the subset TTF is present, none of the eleven atlases are.
+
+**Gates.** `ls-halcyon` PASS 119 s and `ls-gfx-compose` PASS 72 s, one
+attempt each, on **separate per-lever bakes** -- the lesson from earlier in
+this run, where one image carrying both levers turned both gates red for
+reasons that had nothing to do with the code.
+
+**The round, and what it caught.** TY-6 ran on Opus (Fable exhausted),
+batched over TY-1..TY-4 plus the tapestryd status-bar handover, carrying the
+ROUND 2 FOCUS that two earlier rounds had both deferred to "the next
+halcyond round". `MODEL(start) == MODEL(end)`, no mid-run fallback.
+**0 P0 / 1 P1 / 2 P2 / 6 P3**, all fixed, not dirty; close `7f277c5b`.
+
+The reviewer rule says a same-family round keeps context independence and
+forfeits family diversity, and this round is a clean demonstration that the
+half it keeps is worth having: **four of the nine findings came from
+measurement contradicting a confident comment, and two of those comments
+were mine.**
+
+The two that sting most, because they are the same shape:
+
+**A contract stated in a comment is not a contract all the arms keep.**
+TY-4 declared, at length, that a mono cell paints its own cell and no
+other — and left one of the three arms outside it. A codepoint neither
+Cornucopia nor the box path has was packed as the body face's *own tight
+raster* with its own bearing, then handed back the cell's advance. Measured:
+80 of 121 Greek and Cyrillic entries painting outside their cell at 200%,
+the worst overhanging by 11 px, nearly a whole extra cell. I wrote the
+contract and the violation in the same commit.
+
+**And a comment's justification can be false the day it is written.** The
+glyph cache quantized sizes to half pixels, justified by "the stylesheet
+speaks whole px today". It did not: the exit badge lays at `body_px * 0.9`
+(10.35) and the chrome name at 10.5, both landing on quantum 21. One cache
+entry served both, and which raster it held was *whichever painted first* —
+re-decided at every eviction, and flipping with whether a failed command
+happened to be on screen. That sentence had been sitting there stopping
+anyone from checking the live size set, me included.
+
+The third is the correction to my own clip measurement, recorded above.
+
+The round also caught something worth naming separately: **a commit body can
+assert a mechanism the commit does not add.** `9d5f38ee`'s message says the
+console "re-mints from the relayout that foregrounds it again at logout".
+There was no such guarantee — the re-arm sat inside an `if relayout` the
+console is not reliably fanned — so the failure mode was a display with no
+status bar and no further word about it, the refusal having been said once
+and latched. The mechanism exists now.
+
+**Open.** The status-bar handover still has no gate witness, and F7 and F8's
+fixes join it in that class — no scenario runs both levers and `server.rs`
+is not host-testable. The accented-capital clip is queued. TY-5 (the hinting
+lever) stays unbuilt; the vote was no hinting.
+
+---
+
+## Run 46f (2026-09-08, Fable 5.1 max until the model ran out, then Opus 5 -- the operator switched mid-run) -- HALCYON-TYPE TY-1 + TY-2: the rasterizer swapped and the Mac's weight reproduced
+
+**Where it sits.** Run 46e ended with the operator ratifying HALCYON-TYPE
+(@`1c421e04`): the smoothing stroke at 0.012 em, no hinting, the amount per
+theme, Cornucopia live from a subset TTF. This run builds the first two
+chunks, and builds them AS ONE, deliberately: TY-1 alone would have vendored
+skrifa and zeno and then verified the `no_std` claim against a dependency
+nothing yet used. A dormant dependency that compiles proves less than a live
+one that renders -- so the swap and the stroke landed together, and the
+native link is the proof by use.
+
+**What the swap had to preserve, and how that was made checkable.** The
+danger in replacing a rasterizer under a laid-out UI is not the pixels; it
+is the METRICS. Every advance, ascent and bearing halcyond's layout has ever
+been tuned against came out of fontdue, and a rasterizer swap that quietly
+moves them is a layout change wearing a rendering change's clothes. So
+before fontdue was removed, a throwaway host binary dumped what it reports
+on the four vendored faces -- 11 sizes of line metrics x 4 faces, the
+advances of a 59-character sample at three sizes x four faces, and 18 glyph
+bearings -- and those numbers went into `raster.rs` as literals. The swap is
+then falsifiable: `line_metrics_are_the_fontdue_values`,
+`advances_are_the_fontdue_values` and `bearings_are_the_fontdue_values` pass
+only if skrifa's table choice (hhea, OS/2 typo under USE_TYPO_METRICS, the
+Windows pair last) and its px/upem scale agree with fontdue's to the pixel.
+They do, everywhere, on the first run. The box may differ by a pixel where
+a fractional edge rounds the other way, so that assertion is `<= 1` and says
+why.
+
+**The measurement that mattered.** The lab (run 46e) predicted the Mac's
+"font smoothing" is an em-relative dilation worth about +18 % stem weight,
+and the fit put its single constant at 0.012 em. Landing it: on the 35 px
+italic `n`, the plain fill sums **30146** of coverage where fontdue summed
+**30182** -- two independent exact-area rasterizers agreeing within 0.12 %,
+which is itself the check that the new fill is the old fill -- and the
+stroked raster sums **35652**, or **+18 %**. The prediction and the
+implementation met at the same number without tuning. The smaller sizes come
+in at +17 % (11.5 px body `n`), +14 % (17.5 px) and +11 % (the bold `n`,
+which has less perimeter per unit area to dilate) -- the dilation is
+em-relative, but its effect on INK depends on the glyph's perimeter-to-area
+ratio, which is exactly why the weight reads as consistent to the eye across
+sizes rather than as a fixed percentage. The box grew one row (17x19 ->
+17x20) and the bearing did not move: at 35 px the stroke's half-width is
+0.21 px, under the mask's rounding.
+
+**The two traps, both caught by the lab having hit them first.** zeno stores
+a `BottomLeft` mask bottom-up, so the pen negates y and renders with the
+default `TopLeft` origin -- the lab's flipped-glyph bug, avoided here by
+construction rather than rediscovered. And the union of a fill and a stroke
+is `f + s - f*s`, never `max(f, s)`: the stroke straddles the outline, so on
+an edge pixel about half of it is already inside the fill and half is new
+ink, and a max counts none of the new ink (+3 % where +18 % is due). Both are
+in the code as comments that say WHY, and the second is asserted (every
+pixel of the union is at least the fill's coverage there).
+
+**One thing built more carefully than the lab's version.** The lab laid the
+fill onto the stroke's placement, on the reasoning that a stroke's box always
+contains its fill's. That is true of the geometry and not guaranteed of two
+independent roundings, and a wrong offset there is a negative `usize` cast --
+a panic at best. The shipped `raster()` computes the explicit union box
+(`min` of the lefts and tops, `max` of the rights and bottoms) and lays both
+into it, so the offsets are non-negative BY CONSTRUCTION and the code assumes
+nothing about which box is larger. It costs one allocation and removes an
+assumption.
+
+**And one self-audit finding, promoted from a scratchpad check to a proof.**
+The union's 8-bit form -- `f + (s*(255-f)+127)/255` -- is the kind of
+arithmetic that is silent when wrong: saturate it and the text is merely a
+little heavy; write `max` and it is merely a little light. No gate would
+fail either. Prosecuting it during the gate wait meant running all 65536
+pairs through Python, which proved it never exceeds 255, never falls below
+`max(f, s)`, and never lands more than one level from the real-valued union.
+A check that lives only in a scratchpad is a check that will not run again,
+so the expression became a named `union8` and that exhaustive sweep became
+`the_union_is_exact_and_bounded_everywhere` -- a test that is a proof rather
+than a sample, and that pins `union8(128,128) == 192` with the comment
+naming the max-bug it excludes.
+
+**A vendoring surprise worth recording.** `cargo vendor` of the skrifa
+closure pulled `bytemuck_derive` 1.12.0, which requires `syn 3` -- and the
+tree already carries `syn 2.0.117`, so the vendor tree grew a SECOND `syn`
+(59 files rewritten under the old one, a `syn-2.0.117/` directory appearing
+beside it). Two copies of a proc-macro dependency is not a build error; it
+is bloat that nothing would have flagged. Pinning `bytemuck_derive` to
+1.11.0 (the last release on `syn 2`) collapses it back to one. The whole
+closure -- skrifa 0.46.2, read-fonts 0.43.3, font-types 0.12.4, zeno 0.3.3,
+bytemuck 1.25.2, bytemuck_derive 1.11.0 -- came IN while fontdue and its
+exclusive closure (ttf-parser, hashbrown, allocator-api2, equivalent,
+foldhash) went OUT, and the crate count landed back on 139 exactly.
+`third_party/README.md` now carries a composition-change table, because a
+count with no history cannot be checked.
+
+**The `no_std` claim, verified twice.** HALCYON.md 13.5 requires the
+rasterizer's `no_std` claim be verified at vendor time against the native
+target, with a named fallback if it fails. `cargo check -p halcyond --target
+aarch64-unknown-none` passed before a line of the swap was written (the
+right order: prove the dependency builds before writing code against it),
+and the full `tools/build.sh userspace` release link produced a 2.77 MB
+halcyond binary afterwards. The D2 mask-emboldening fallback is unneeded.
+One feature-gate correction on the way: zeno's default set is `eval` +
+`std`, and `default-features = false` dropped `Mask` itself along with
+`std`; the manifest asks for `libm` + `eval`.
+
+**Then both graphics gates went red, and neither red was the swap.** I baked
+ONE image with BOTH `THYLACINE_HALCYON=1` (the console renderer) and
+`THYLACINE_HALCYON_SESSION=1`, and ran two gates against it. Each gate needs
+its OWN lever, and each broke in its own way. `ls-halcyon` types at the
+serial console and needs the renderer lever alone; with the session lever
+also on, login spawned the session compositor instead of a console shell, so
+the typed command's output never landed -- timeout at 90 s, 3/3.
+`ls-gfx-compose` needs the session lever alone; with the renderer lever also
+on, a console halcyond existed and took the display's status bar, so the
+session's mint was refused and the status-bar leg failed -- also 3/3. Two
+gates that discriminate on different levers cannot share a fixture. Baked
+separately, both pass: **ls-gfx-compose PASS 72 s, one attempt** -- the
+historical timing to the second -- and ls-halcyon likewise.
+
+**The mis-bake was a useful accident: the second red is a real defect.**
+tapestryd's `Comp.status` is ONE registered status bar per display, and
+`create role=status` refuses outright while it is occupied. Nothing releases
+it when the display changes hands from the SYSTEM console renderer to a user
+SESSION -- the backgrounding path keys on LEAVES, and the status bar is "not
+hosted nor pane-bound; its bind is the display", so it is not a leaf, is
+never backgrounded, and is never retired. The session's bar then fails
+`Create` for the rest of the console's life. What makes this worth the
+entry is that **the diagnosis was already in the tree, one case short**: the
+session-to-session takeover retires the outgoing holder's bar, and its own
+comment names this exact consequence -- *"the ONE per-display carve, which
+would else refuse the successor's for as long as the idle conn lived."*
+Right diagnosis, applied to session -> session and not to SYSTEM -> session.
+
+**And the obvious fix was half a fix, which only measuring it revealed.** I
+added the same retire, keyed on the owner's PRINCIPAL, and ran the
+both-levers image again. The retire fired, a bar was re-created immediately
+after, and then a `failed Create` came from whoever lost -- and the gate
+still failed. The console had seen the CLOSE, re-armed on the very relayout
+that retire causes, and raced the session for the slot it had just been
+relieved of. Whoever wins that toss decides whether the user has a status
+bar. Worse, **the log could not tell me who won**: `tapestryd: status bar N
+created` never named an owner, so with two halcyonds alive a full serial log
+could not answer the one question its own failure poses. That is the
+definition of an under-instrumented say, and the line now carries the
+owner's principal. The rule then had to be stated where it belongs: while a
+session is declared, a SYSTEM principal may not TAKE the display's bar. Two
+halves of one rule -- the retire hands the slot over, the refusal keeps it
+handed over -- and the console, invisible while backgrounded, simply stays
+bar-less until the relayout that foregrounds it at logout.
+
+**And it is a state the correct bake never constructs** -- green by
+irrelevance, not by correctness, which is the honest reading of why no gate
+ever caught it. So the fix has no permanent witness: no gate runs both
+levers, and tapestryd is a bin-only crate whose `server.rs` pulls
+libthyla-rs, so there is no host unit test either. It is measured by hand on
+a both-levers image, and the log now reads end to end: bar 1 created for
+principal 4294967294 (SYSTEM) and painted, retired at the declare, the
+console's re-mint refused, bar 4 created for principal 1000 and painted, and
+the cinnabar/ember/composition legs passing where the pre-fix image failed
+3/3. A discriminating before/after, not a gate. Both shipping
+configurations were then re-run against it, because half 2 touches a shared
+admission path: **ls-gfx-compose PASS 72 s** and **ls-halcyon PASS 118 s**,
+one attempt each.
+
+**That hand run also left one thing open, and it is not being called
+benign.** The both-levers image as a whole still fails, later, on the scale
+leg: the session follows 100 -> 125 and 125 -> 150 and not 150 -> 175. I did
+not diagnose it. Neither shipping configuration reproduces it; there is no
+baseline for that leg in a both-levers image, because the first such run
+died at the status bar; and the configuration is one nothing ships (14.12
+records the system-renderer lever as being retired). The obvious story -- two
+live renderers each relaying out per step -- is a hypothesis I did not
+measure, so it is written down as a hypothesis, with the measurement that
+would settle it, and queued.
+
+**A note on causality, since I nearly got it wrong.** My first hypothesis was
+that the swap had flipped a race: skrifa parses lazily where fontdue parses
+every glyph of every face eagerly at load, so the console halcyond would
+reach its status-bar mint sooner and win a slot it used to lose. The
+mechanism is real and the story was tidy -- and it was wrong, or at least
+unnecessary, because the actual cause was my own bake. The tell was that
+BOTH gates failed, in unrelated places; one change flipping one race does
+not explain two. Reading the second failure instead of theorizing about the
+first is what produced the answer.
+
+**Posture.** halcyond 190 host tests (+8: four in the new `outline`
+module, four in `raster`), libhalcyon 49 (the theme pin gained
+`smooth_mem`). The native release link is clean. ls-gfx-compose PASS 72 s
+(session lever) and ls-halcyon PASS 118 s (renderer lever), one attempt
+each, run twice: once for the swap and again after the status-bar rule.
+Landed as `db1e4ce9` (the swap) and `9d5f38ee` (the status bar).
+
+**TY-3, the quarter-pixel phases, in the same run.** Two commits, because
+the substrate and the pen are separately testable and the substrate carried
+a finding worth isolating. `c0583fb6` gives the rasterizer a phase and the
+cache a key for it, with no behaviour change. `abbd7900` makes the pen
+fractional.
+
+**The library trap, caught by the right assertion.** zeno's `Mask::offset`
+does not translate the path -- it offsets the rendered BOUNDS and leaves the
+path where it was, so the box slides off the glyph. Measured: at ¾ px it
+clipped a column and lost 15 % of the ink; at ¼ px it did nothing at all.
+`render_offset` is what moves the path, and the library's own doc says to
+set both. What is worth keeping is *which* assertion caught it. "The four
+phases are distinct" passes on a clipped raster -- clipping is a difference,
+so the distinctness check is satisfied by the bug. The one that failed was
+ink conservation: shifting a shape cannot destroy area. **The control that
+catches a silent defect states a property the defect must violate, not one
+it happens to satisfy.**
+
+**A correction I had to make against my own reasoning.** I first accumulated
+the pen in quarter-pixels and wrote a comment claiming exact integers
+"cannot drift, which an f32 accumulator over a long line can." Backwards at
+this magnitude: f32 drift over a line is about 1e-4 px, while re-quantizing
+the *pen* to quarters compounds up to ⅛ px per glyph -- which the width
+assertion measured at **1.4 px over one line of prose**, most of the drift
+sub-pixel placement exists to remove. The pen now carries 1/256 px and the
+phase is a per-glyph decision read off it and never fed back.
+
+**And the predicted divergence, which duly arrived.** Three sites
+pre-measured a run's width by summing rounded per-glyph advances while the
+lay loop had moved to the sub-pixel pen. The kv-list test caught one: a
+right-aligned value landed off its group's edge. All three now share the lay
+path's accumulator, and so do the single-style runs (chrome strip, status
+bar, menu) through one shaper.
+
+**The witness reported the feature inert on its first run, and was right.**
+A sub-pixel pen that lands on whole pixels every time passes every other
+test in the suite. The text I fed it was a raw output zone, which lays in
+MONO, whose cells are whole by construction -- so the assertion fired
+correctly and the test, not the code, was wrong. It now feeds an annotated
+zone (what makes lines Doc rather than Raw, hence proportional). Live: 3.3 %
+of the capture's bytes changed across 313 rows, chrome to status bar.
+
+**One thing I got wrong, and it was the operator's to judge.** On the day's
+one commit I treated as too trivial to name paths for, `git add docs/` swept
+six of the operator's in-progress documents into a commit and onto both
+mirrors. I backed them up and put the remedy to them as a blocking question
+rather than choosing on their behalf. Their answer was that they wanted them
+committed anyway and were puzzled the avoidance had ever started -- so no
+harm, and the inherited "never touch these" caution is now recorded as
+checked and lifted (committing, not editing). The reusable part is not about
+those files: a directory add stages whatever is sitting there, and "it's
+only a hash fixup" is exactly when the guard comes off.
+
+**Open.** The Fable prosecution round is owed and now cannot be Fable --
+the operator ran out mid-run and switched to Opus 5, so the reviewer rule's
+fallback applies (a same-family round keeps context independence, which is
+the half that matters most here). It stays batched with TY-3, per the
+double-the-distance rule. TY-3 (quarter-pixel phases), TY-4 (Cornucopia
+live -- which is also what puts the mono tier on the same stroke as the
+proportional text; today a bake cell is unstroked while a fallback glyph
+beside it is not) and TY-6 (the audit) are the remaining chunks. The
+status-bar handover's missing witness is the other open item.
+
+---
+
+## Run 46e (2026-09-08, Fable 5.1 max, after run 46d's self-compaction) -- the type-rendering research: the premise confounded, the Mac measured, the design for the vote
+
+**Where it sits.** The operator's request at the SC-5 boundary, verbatim:
+"one general allure of mac is the fact the OS X has a really REALLY well
+sorted out typesetting and anti-aliasing -- when you compare it to Linux,
+it's day and night ... Perhaps a research and design session about
+typography and font rendering with examples would be a nice next step after
+SCALE?" A research + design chunk, scripture-first: `docs/HALCYON-TYPE.md`
+(for the vote), the lab page
+<https://claude.ai/code/artifact/dda8f9fa-73cf-4e56-a8b4-22e1be51a678>, the
+instrument `tools/typelab`. Nothing built in halcyond.
+
+**The host had no network, and then it had.** Every HTTPS fetch failed
+(crates.io, github, docs.rs, even 1.1.1.1 -- HTTP 000) inside AND outside
+the sandbox, while DNS resolved, `nc` reached crates.io:443, and aux's Pi
+tunnel worked. The error text named it: `curl: (77) error setting
+certificate verify locations` -- the session environment carries an
+`SSL_CERT_FILE` pointing at an emsdk certifi bundle that no longer exists
+(`~/.zprofile` sources `emsdk_env.sh`). `SSL_CERT_FILE=/etc/ssl/cert.pem`
+fixed curl and cargo alike. The operator asked what to enable; the answer
+was "nothing -- unset a variable". Recorded in memory because it will
+present as "no network" again.
+
+**The premise was confounded, and the confound was measurable.** The
+mockup the operator had compared against asks for `'IBM Plex Sans',
+'Helvetica Neue', Arial`; `CTFontCreateWithName("IBM Plex Sans")` on the
+Mac returned family `Helvetica` -- Plex was not installed, so the browser
+had set the mockup in Helvetica Neue. The "icicles vs smooth" judgement was
+a different face AND a different renderer. The operator installed Plex in
+Font Book mid-run (the same check then returned `IBM Plex Sans`). The lab
+renders the SAME Plex files through CoreText, so the rest compares
+renderers only.
+
+**The lab, and two instrument bugs the pictures caught.** `tools/typelab`:
+fontdue (as-built) + skrifa/zeno (outlines, autohinter, stroke) in Rust,
+FreeType masks via `ftdump.c`, CoreText compositing via `ct.swift`, the
+same Daylight text at 1.0 and 2.0, six single-glyph probes, and a
+measurement (weight = mean L* ink per row; fringe = the partial pixels'
+darkness x count). Before any number was trusted: (1) the skrifa glyphs
+came out UPSIDE DOWN -- zeno stores a `BottomLeft`-origin mask bottom-up;
+the tell was the `y` in "Thylacine" reading as a lambda in the crop, after
+a first sign-flip guess had merely moved the displacement; fixed by
+emitting the outline y-down. (2) CoreText's runs collapsed ("tryls /devto")
+-- the Swift spec parser trimmed a run's trailing space. (3) The stroke
+union added +3% weight where +18% was expected: `max(fill, stroke)` is not
+a union of partial coverages; `f + s - f*s` is. (4) A 4-neighbour mask
+bleed matched the Mac's WEIGHT but doubled the fringe (3.8 -> 7.1 partial
+px per row) -- a halo, not an edge motion; gating the gain on the neighbour
+being within r of full fixed it. Each caught by looking, not by the metric.
+
+**What the Mac does, measured (`tools/typelab/out/metrics.tsv`).**
+CoreText with smoothing OFF measures the same as our as-built: weight 5.49
+vs 5.45 on the italic n at 35 px, fringe 0.49 vs 0.48 -- Quartz blends
+exact coverage in gamma space, exactly as fontdue + `cartoon::blend` do.
+So there is NO gamma-correct blending to copy; linear-light blending makes
+the text thin (-12%, fringe 0.48 -> 0.35). Smoothing ON adds +18% stem
+weight at BOTH scales (6.45/5.49 and 3.18/2.71) with the fringe count
+nearly unchanged -- an em-relative dilation; an outline stroke of 0.015 em
+reproduces the weight within 1% (N0: 6.38). Subpixel positioning shows
+only in word spacing. Hinting adds no weight (the FreeType LIGHT desktop,
+variant I, measures like our as-built -- that IS the "day and night"). The
+"icicles" are the coverage runs of a 12-degree edge and CoreText has the
+same runs; the weight is what makes them read as an edge.
+
+**The design (`docs/HALCYON-TYPE.md`, for the vote).** Blend unchanged
+(fork closed by measurement); an em-relative outline stroke as a THEME
+token (Daylight 0.015, dark grounds 0 -- gamma-space blending already
+fattens light-on-dark); quarter-pixel horizontal phases (the HALCYON-SCALE
+7 atlas bound holds: it bounds painted AREA and an instance paints one
+phase); no hinting, the vertical-only autohinter as a lever; skrifa + zeno
+replacing fontdue (no_std + libm, VERIFY at vendor time as HALCYON.md 13.5
+already demands; fontdue mask emboldening as the fallback); Cornucopia LIVE
+from a subset TTF in halcyond (HALCYON.md 3's own stance). HALCYON.md 13.5
+amendment PROPOSED, not applied (the operator's document). Five ballot
+items in section 7.
+
+**The capture, explained.** The operator declined the ballot to clarify:
+their own capture of the Mac's heading `n` (`n.png`, magnified) "has a
+raster unlike anything in the lab", and could a stochastic search find the
+parameters that match it? First the observation model, since a capture is
+a claim about pixels: `wk.swift` renders their exact page through WebKit
+(Safari's engine) at the panel's 2x and reports the device-pixel rect of
+every `n` (17 x 19 px, 4 px stems). The capture's block grid is 16 image
+px per block with a 9 x 10 raster inside -- half the extent. Three models
+tested against the blocks: a 2 x 2 point average of WebKit's raster (RMS
+0.18-0.22), the heading rendered at 17.5 device px (0.19), and a
+DECIMATION of the 2x raster -- every other device pixel -- which matches at
+one parity with RMS **0.019** (the other parities 0.21-0.34). Whatever
+magnifier they used shows one device pixel per point; the crisp two-pixel
+stems are the AA raster sampled at half resolution, and the earlier
+Thylacine capture (`aa.png`) went through the same view. So the "unlike
+anything" was the instrument, and the lab's CoreText specimen is Safari
+to within the ink count (142.7 vs 142.9 on the isolated `n`).
+
+**The fit.** Built as suggested (`fit.rs`: random search + refinement over
+hinting / stroke / blend exponent / coverage curve / pen phase, RMS ink
+error at the best alignment; any parameter pinnable). Against WebKit's
+isolated `n`, blend kept as built: as-built 0.109 (35 px) / 0.055 (17.5
+px); the stroke's best single constant is **0.012 em** (0.046 / 0.027; the
+0.015 from the probe weights scores 0.049 / 0.031); a coverage curve
+`a^k` fits as well (k = 0.55: 0.045 / 0.030; k free per size 0.040 /
+0.024 at 0.39 / 0.64); freeing the blend space adds nothing; no hinting
+mode helps. The design keeps the stroke as the mechanism (one constant
+across sizes, Apple's own) at 0.012 em and records the curve as the
+fontdue-era interim -- a lookup on the alpha, no outline needed.
+Wrong turns caught: a zsh `for` loop does not word-split a variable (the
+first constrained runs silently fitted the wrong size), and a `run()`
+helper that forwarded two of three constraints (the "stroke 0" rows were
+stroke-free; the stroke it found was 0.002, so the reading held).
+
+**Ratified.** The ballot re-posed with the fit's numbers came back as
+recommended on every item (`1c421e04`): the outline stroke at 0.012 em
+as the mechanism, no hinting, the amount per theme, Cornucopia live from
+a subset TTF; the HALCYON.md 13.5 amendment stays the operator's to
+apply. TY-1 (vendor skrifa + read-fonts + zeno; the native build) opens
+at the next run.
+
+**Open.** BEACON 12.12 +
+HALCYON-WORKSPACES 7 still owed; the vault's banner declaration for
+`ls-gfx-compose.exp`; the next Fable round (the reflow + top flag; SC-5's
+declaration).
+
+---
+
+## Run 46 (2026-09-08, Fable 5.1 max, after run 45's self-compaction) -- the chrome-content audit closed, the display scale designed, and its first two sub-chunks
+
+**Where it sits.** The same autonomous stretch as run 45, after the 600k
+self-compaction: the Fable round on the chrome content arrived, was closed
+(the paragraph sits at the end of run 45's entry: the atlas working set is
+the painted set, `1337a218`), and the next queued item -- the DPI scale,
+HALCYON-COMPOSITION section 1 -- went scripture-first.
+
+**The design (`docs/HALCYON-SCALE.md`, `a753e1ac`).** Researched before it
+was written, per the prior-art rule: Plan 9 has no DPI concept (subfonts per
+size -- which is exactly what the Cornucopia bakes are), and the SOTA for our
+shape (Wayland's fractional-scale, Fuchsia's device_pixel_ratio) is
+compositor-owned and pushed. The tree facts decided the rest: tapestryd read
+the EDID feature bit for its features line and never acknowledged it, so
+nothing knew a physical size; one `METRICS` const fed both the carve
+(tapestryd) and the paint (halcyond); Plex rasterizes at any size but mono is
+bake-only and the Cornucopia TTF is 10.8 MB, so the 0.25 steps need six more
+bakes, not a rasterizer; the ctl readers are prefix-keyed, so `scale <pct>`
+rides the ctl for free. The decision: the compositor derives a percent from
+the EDID (quarter-snapped, the smaller axis, clamped 100..200 in v1),
+publishes it, admits a `scale` verb from the seat only, and both painters
+read `Metrics::at(pct)`; halcyond scales at ONE place. Found while writing
+it, and worth more than the design: **the atlas cap landed in the audit
+close is a constant, but the painted set is bounded by the DISPLAY AREA**,
+which a 4K scanout multiplies by eight -- the cap must derive from the
+display (the constant at 1280x800). Recorded as a requirement of SC-3, not
+fixed in SC-2.
+
+**SC-1 (`edb4afbe`): the bakes.** Six atlases (advances 11/12/13/15/18/20,
+646 KB) behind a `scale` cargo feature halcyond asks for; `Atlas::is_baked`
+so a missing bake can no longer hide behind `for_advance`'s fallback to the
+10x22 cell. Honest note recorded in the crate: the workspace build unifies
+features, so aurora's binary carries the bakes too -- the feature is the
+crate's contract, not a size saving. The bins are gitignored by pattern and
+were force-added like the five before them (the first commit attempt did
+nothing and reported nothing -- `git add` refused, `&&` short-circuited, and
+only the unchanged `git log` said so).
+
+**SC-2: the compositor half.** `libhalcyon::scale` (the EDID parse as
+untrusted device input, the snap, the step) + `Metrics::at` are host-tested
+against crafted EDIDs (QEMU's, a 27" 4K, a 13" panel, garbage in five
+shapes) and the operator's worked table. tapestryd acks `F_EDID`, queries
+GET_EDID once at init and on `mode auto`, says the millimetres on the boot
+line (so "QEMU's EDID snaps to 1.0" becomes a measurement), owns
+`Comp.scale`/`metrics`, publishes the ctl line, admits the verb for the
+renderer or the declared hosting session (the cfg-3 rule the menu and the
+status bar already carry), re-carves and fans every CONFIGURE on a change,
+retires a stale-height status bar so its owner re-mints, and binds Super+=
+/ Super+- / Super+0 on the runtime chord table. The battery grew the
+negative twin (`scale 200` and `scale bogus` from a non-renderer both
+E_PERM with the ctl unchanged). Every former `METRICS.*` read in the carve
+and the paint is `self.metrics`; `Metrics::at(100) == METRICS` is the proof
+nothing at 1.0 moved. Verification in the commit.
+
+**Running through the 600k line.** The checkpoint window fired mid-SC-2;
+the step was carried to its boundary (the guest check clean, the default
+image re-baked, the battery gate re-run) before the self-compaction. SC-3
+(halcyond's `Sheet.scale` sweep + the atlas cap by display area) and SC-4
+(the gates at 200%) are the pickup, then ONE Fable round over SC-2 + SC-3
+batched with the chrome-content close's "ROUND 2 FOCUS".
+
+**SC-3 + SC-4 (after the self-compaction; `f697fcc4`).** halcyond scales at
+ONE place: the `Sheet` carries the percent, the compositor's `Metrics::at`
+table, the hairline, the 2 px mark, the heading sizes and the two mono ems,
+and every logical constant in the render core reaches a pixel only through
+`Sheet::px` / `Sheet::ipx`. The mono bakes are selected by advance
+(`mono_advances`: round-half-up of 6s and 10s, the nearest SMALLER bake if
+absent) from the one function the sheet's ems also derive from, so the two
+cannot disagree; the island/grid selector's threshold moves with the
+selection (a request at the old 12/20 constants would land wrong at 2.0 --
+a survivor of the sweep paints at 1.0 inside a 2.0 page). The atlas bound
+became `atlas_pages_for(display)` = max(16, 2 x display area in pages): the
+1337a218 constant at 1280x800, eight times it on 4K. Both loops re-read the
+ctl on every relayout (one read: display + scale) and a change rebuilds
+everything that held a size -- the sheet at a new generation, the atlas, the
+layout caches or every tile's heights, the grids re-fitted with a Resize
+down the wire, the menu closed, the strips and the bar invalidated, the
+winsize re-reported. The session writes `/env/HALCYON_SCALE` once as the
+verb; the value reaches the sheet only through the ctl. Pinned on the host:
+`daylight_sheet(100)` is the old literals exactly, and 200 is the operator's
+COMPOSITION 6 table (prose 23, hdr 35/29/25, the 40 px bars, the 2 px
+hairline, the 12x27 island cell).
+
+**The gate at 200%, and what it found on its first run.** `gfx_compose.py
+--scale` derives every expectation from the logical table through the one
+rounding; its strongest new witness is the tag-bar PROFILE -- walking up
+from a pane's parchment: the separator (the hairline), the strip ground plus
+the compositor's header-toned inner hairline (the tag-bar height), the bevel
+-- the compositor's carve and halcyond's paint in one measurement, profiled
+on the real 1.0 captures BEFORE it was trusted (it read (1, 20, 2), not the
+(1, 19, 2) I had written: the inner hairline sits between the bevel and the
+strip). The .exp leg chords Super+= four times, waits for the session's
+`scale A -> B (cell WxH)` say per step, judges the 2.0 captures at 2.0 AND
+asserts the 1.0 verdict REJECTS them (a scale check both scales satisfy
+proves nothing), then Super+0 back to 100. The session followed all four
+steps (cells 13x29, 15x33, 18x40, 20x44) and the 1.0 legs stayed green, and
+the 2.0 verdict failed identically three attempts running -- two real
+defects, one per painter:
+
+- **The compositor painted the live tile's inner hairline one ring thick.**
+  `paint_borders` keyed the live key/tint on `d == hair_d`; the band is
+  `hair` px from 150% up, so the second ring stayed `header` and the live
+  pane profiled (2, 38, 0). An SC-2 bug invisible at 1.0, caught by the
+  profile's exactness. One condition.
+- **`cat /ctl/cpu` after `ls /lib/halcyon` rendered as prose at 2.0.** Ground
+  truth before theory: a host test pinned the classifier RAW for a plain
+  zone after an annotated one, whole, soft-wrapped across a 31-column grid,
+  or scrolled off -- innocent. The cause was the scroll-off intern: a row of
+  an OLDER zone still leaving the grid while the new zone is open lands in
+  the open block (it has to render there), and `Block::annotated()` was a
+  scan of the styles table -- the older `ls`'s obj styles re-classed the
+  open `cat` zone a document, and its own rows, scrolled off after them,
+  rendered as prose. A 34-row grid at 1.0 never scrolled a row off during a
+  short `cat`; the 17-row grid at 2.0 does within every command -- and a
+  split at 1.0 would too. The fix records a zone's OWN annotation (the
+  em/obj/hdr frame opening while the block is open; an own row's or byte's
+  annotated style) and never a foreign row's, and a foreign scrolled row
+  carries ITS zone's class, decided before its styles are interned. The
+  reproducer fails on the old code; the pin stands beside it.
+
+The re-run with both fixes then failed on the VERDICT: its pane detector
+found a pane by parchment majority, and a 2.0 shell pane is mostly island
+once the islands are back -- it lost the shell pane and started the tour
+below its islands. Pane ground is now parchment, island ground or the
+gutter, and a pane begins after its strip's separator rows. The gate's own
+discrimination held throughout: the 1.0 captures are rejected at 200 and
+the 2.0 captures at 100, on real pixels, not only the synthetic canvas.
+The third run of the gate passed all six legs (218 s): the session followed
+Super+= x4 (cells 13x29 / 15x33 / 18x40 / 20x44), the 2.0 captures measured
+the 2.0 table and were rejected at 1.0, and Super+0 brought it back to the
+1.0 table. Three defects on the first run of a new witness, two in the
+renderers and one in the witness itself -- the round-44 lesson again: the
+screenshot loop is a gate, and a gate's first run is where it earns its
+keep.
+
+**The scale round (Fable 5.1, MODEL start==end; after the second
+self-compaction).** One prosecutor over SC-2 + SC-3/SC-4 with the
+chrome-content close's ROUND 2 FOCUS folded in: 0 P0 / 0 P1 / 2 P2 / 5 P3,
+every one fixed in the close (`memory/audit_scale_closed_list.md`). The
+parallel self-audit -- run while the prosecutor read, per the
+audit-in-flight rule -- found one thing, and the prosecutor found the same
+thing independently from the other direction, which is the discipline
+working as designed rather than a coincidence worth celebrating.
+
+- **F1 [P2], measured, pre-existing:** the console's layout cache reset
+  itself past 512 entries ("a crude LRU stand-in"), and the console walks
+  EVERY frozen block per frame -- so past 513 blocks every keystroke
+  re-laid the whole transcript: 600 blocks, misses per pass [600, 600,
+  600] where a warm cache reads [600, 0, 0]. The 1337a218 close moved the
+  atlas working set to the painted set; this was the same shape one axis
+  over, and that close's restructure made this cache THE bound between a
+  keystroke and O(history) work. The reset is gone; the bound is the live
+  set (`evict_missing` per frame), pinned by the [600, 0, 0] walk.
+- **F2 [P2], measured, mine (SC-2):** `scale_pct` narrowed `quarters * 25`
+  to u16 BEFORE clamping -- a 1 mm EDID axis under 2481 px makes 65650,
+  wraps to 114, and 114 clamps to 114. The boot path applied it unguarded
+  (the runtime path had the guard, and used it to keep the OLD scale
+  silently on an invalid re-derive). Nothing panicked -- every consumer is
+  total -- but the seat ran off the table. The clamp is in u32 now and the
+  boot path is guarded like the runtime one; the prosecutor's sweep (31
+  off-table results over mm_w 1..=4) is the test.
+- **F3 = my S1, the Direct arm fans nothing.** Reading `reconcile` against
+  halcyond's relayout triggers: the CONFIGURE fan and the session's
+  TEV_LAYOUT ride only the Composed arm's STRUCTURAL pass, whose signature
+  folds leaf rects; the Direct arm (a lone display-sized leaf, no bar, no
+  menu) clears `pending_direct` and nothing else, and a lone leaf under a
+  menu keeps its full rect. A scale change there reached its follower at
+  the next UNRELATED relayout -- the ctl said 125, the paint said 100, and
+  a bar minted meanwhile at the old height was refused with its retry arm
+  spent. The fix is a flag `apply_scale` sets and every `reconcile` arm
+  consumes; the shape matters more than the fix: a queued CONFIGURE is
+  replaced WHOLESALE, so "fan again after the reconcile" would overwrite a
+  resize offer the structural pass had just made with a stale same-size
+  request. A fan keyed on geometry misses every change that moves no
+  geometry; a state read off a channel needs its own re-read signal. The
+  witness is a leg in ls-gfx-panes, where aurora IS the Direct console
+  after the battery: the chord's `scale 100 -> 125 (chord)` must be
+  followed by the compositor's record of the redraw CONFIGURE it queued
+  (serial-stamped), and the reset by a FRESH serial. The emission is the
+  observable half -- a same-size CONFIGURE is never acked by the client
+  library, and aurora prints nothing on its redraw arm by design.
+- **F4-F7 [P3]:** the console's caret and run underline were literal 2 px
+  (the tile path already used the sheet's mark); tapestryd's tab-segment
+  gap and cast shadow stayed 1 px above 125%; the console rendered one
+  frame at the OLD sheet before its ctl re-read (the read now runs ahead of
+  the render, as the session loop already did); and two class routes the
+  scroll-off fix had not covered -- a continuation block minted
+  un-annotated (a heading's zone laying as an island past the line cap),
+  and an owner resolving to no block falling to the OPEN zone's class, the
+  leak direction the fix targeted -- now a continuation inherits the flag,
+  an unresolvable owner takes the raw default, and cells mode keeps an
+  annotated zone-less block so its rows resolve to their own class.
+
+The 8K atlas worry from the self-audit list was withdrawn by the
+prosecutor on measurement: the 64 MiB weave cap bounds a fullscreen
+triple-buffered surface at ~5.6 Mpx, so the bound never exceeds 43 + 8
+pages, and the mode ceiling is 4K anyway. Two E2E legs joined the gates:
+ls-gfx-panes' Direct-arm fan (discriminating: the fan line does not exist
+pre-fix) and ls-halcyon's console follower at 125% (the console path's
+first runtime E2E; it passes pre-fix through the bar retire's structural
+pass, so it is a net, not the discrimination).
+
+Verification of the close: halcyond 175 (+4) and libhalcyon 48 (+1) on the
+host, the guest check clean; three levers baked and gated, one attempt
+each -- ls-gfx-panes 47 s with the Direct fan (serial 26 on the chord, 27
+on the reset, both to aurora's surface 0), ls-halcyon 118 s with the
+console at 125% (cell 13x29) and back (10x22, 128 columns) -- its
+transcript shows the display transiting THROUGH pending-direct on the way,
+the arm the flag also covers -- and ls-gfx-compose 73 s with all six legs
+at the 2.0 table. Close commit: 0c1dc04e.
+
+**The stuck-pre exit mark, and the status rows nobody wrote.** The first
+residue item was the chrome-content round's pre-existing P3: PL-1b's
+containment guard refused every point op inside an open `pre`, and the
+shell's exit mark is a point op, so a program that died between its pre
+open and close took the next command's exit with it -- the tile and the bar
+showed the previous command's state, and the prompt zone after it healed
+the block, which is why nobody saw it. The distinction the fix draws is
+whose mark it is: a rule inside a pre is the program's structure and stays
+refused; a `cmd`/`exit` mark is the shell's and ends the pre (finalized
+as-is, the posture the table capture already had at a block boundary) and
+then lands. One host test with the rule control and the cells-mode twin;
+its own commit, and it rides the next halcyond round's focus rather than
+being folded silently into the close. While its console bake ran I noticed
+`docs/halcyon-status.md` had received no row since s7a: the chrome-content
+round, the composition round, the scale scripture and its four chunks, and
+the close were all journalled and never indexed. Eight rows added, every
+hash re-derived from `git log` before it was written. Stuck-pre commit:
+94526bab.
+
+**The residue, measured instead of assumed.** The list I had carried since
+the composition round -- the `.hal-block` left rule, the tag-bar pills, the
+condition count, the workspace list, the PL-arc's F7 -- turned out to be
+mostly not mine to build. The rule: the operator's stylesheet declares a 2
+px `raised` left border on every block, but a pixel scan of their mockup
+PNG with the gate's own reader finds no vertical `raised` or `ember` run in
+the left margin at any row -- the rendered mockup has no rule, so the item
+was withdrawn on evidence rather than built to a CSS line the mockup itself
+does not honour. The pills and the count have no Beacon mark and no
+producer (nora would be both), so each is a 12.2 registry amendment -- the
+`prog` mark's growth path, which is owed ratification itself. F7 was
+recorded by its round as not a defect. And the workspace list is the one
+delta with a real mechanism behind it, which the 2026-09-02 vote explicitly
+deferred; a deferral is a decision, so the run did the research the fork
+needs (i3/sway and tmux for the live model, Plan 9 for the absence of one,
+Fuchsia/Genode for the split) and landed it as `docs/HALCYON-WORKSPACES.md`
+-- a proposal recommending live trees dormant through the d-1b
+backgrounding the compositor already audited, with layout names as naming
+-- and built nothing. The closed image (session lever) was synced to
+thyla-pi over the tunnel for the operator's GL round.
+
+**The operator's first live look (2026-09-08, back for a moment).** "A day
+and night difference," and three observations, each a size the eye caught
+that no gate could: the prompt line ran SMALLER than the prose it
+introduces (10 px against 11.5); a fullscreen mono program (nora on the
+tile's grid) ran at the grid em (the 10x22 cell) while the preformatted
+block and the raw islands ran at the island em (6x14), which they wanted
+uniform at the block's size; and the text looked "jittery" on a retina
+screen. The first two are one commit: the prompt at the base size, and
+`mono_advances` returning the island advance for both atlas slots -- the
+grid IS the island now (6/8/9/11/12 across the five scales; the 12x27 cell
+at 2.0 is the operator's own table's), with the two-slot plumbing kept so
+a later split costs nothing. A side effect worth having: a live grid row
+and its scrolled-off island now share a cell, so scroll-off no longer
+changes a row's size. The operator's COMPOSITION 6 table still lists two
+ems at 2.0 (24 / 40); their doc, their amendment. The third is not the
+rasterizer: fontdue's coverage is anti-aliased into the atlas and blended
+at paint; what they saw was the host window upscaling a 1280x800 guest 2x
+onto a retina backing store. The scale arc is the remedy -- a 2560x1600
+guest at 200% is one physical pixel per guest pixel -- so `run-vm.sh` grew
+an inert `THYLACINE_HIDPI=1` (gpu0 `xres=2560,yres=1600`; cocoa
+`zoom-to-fit=on,zoom-interpolation=off`, both verified as accepted by
+this host's QEMU 10.0.2); the guest still derives 100% from QEMU's
+100-DPI EDID, so Super+= four times after login. Whether cocoa's
+zoom-to-fit lands 1:1 on the 2x backing store is the operator's eye to
+confirm; a device-tier `/lib/halcyon/scale` default (the renderer-file
+pattern) is the follow-up if they want it automatic.
+
+The console gate then failed three attempts running on `post-split cols
+105 (want a halved grid in [40,100))` -- not the renderer: a halved
+213-column grid is 105 columns, and the range had been written as a
+literal for the 128-column grid of the 10-px cell. The bound is derived
+from the full-width read now. A literal written for one geometry is a pin
+on that geometry, and it rots the day the geometry moves -- the same
+lesson as the lifted-constant one (#230), on the gate side.
+
+The compose gate then failed its 200% leg three attempts running on "the
+prose rhythm is 36 px, not the 35 box or the 39 paragraph pitch". Ground
+truth before theory: the line tops in the capture's left pane step 35
+inside paragraphs (with a one-pixel scatter where a pill's ground starts
+above the caps) and 39 across paragraph breaks and between the eight
+empty prompt lines the gate's own keystrokes leave -- the renderer is
+right. The verdict's statistic is not: the autocorrelation of a
+two-toothed comb peaks between the teeth, and the prompt at the base size
+now weighs as much as prose, so the blend won. The check accepts one pixel
+of blend; the defect classes it guards (the grid cell at 44, the bare face
+line at 30) stay far outside it, and the 2.0 capture is still rejected at
+1.0 (the pitch reads 26 there). While looking, something the rhythm check
+cannot see: in both 2.0 captures -- this morning's and today's -- the
+split tour's WRAPPED prose is garbled: `halcyon` / `layolcyon.rc` where a
+wrapped pill's continuation and the next pill are painted at one x, and
+this morning whole clauses missing mid-line (`not a terminaland prints
+stays an object -- a pa --`). Pre-existing at 200% in a 626-px pane;
+perfect at 1.0 in a 636-px one. A rhythm check does not witness content;
+enqueued with the host-first reproduction the gate is missing
+(`bug_wrapped_tour_text_garbled_at_200_in_a_split`).
+
+**The garble, hunted (run 46d, the operator present).** Ground truth
+first: a 2x crop of the capture reads `halcyon` on one line and
+`layolcyon.rc` on the next -- twelve glyphs in one pill, no overlap. So
+not two runs painted at one x (the H2 guess) but two runs CONCATENATED:
+`layo` is the tail of a 52-cell row, `lcyon.rc` the head of the next. The
+vt's own doc line named the mechanism -- `resize`: "Columns crop right /
+no history reflow -- fbcon-grade" -- and it kept each cropped row's wrap
+flag, so halcyond's join, which trusts the flags, read the tour line with
+its middle cut out. Reproduced on the host in one test before any fix
+(the tour line into 105 columns, `resize(52)`, join). Then the operator's
+own screenshot of the HiDPI image showed the same family's second face:
+"You are typing to ut, pid 2413." and then "ays an object -- a path,
+..." with the sentence's head missing. Not a crop this time: the head row
+had scrolled off as a soft-wrapped FRAGMENT, which the transcript holds
+until its continuation also scrolls off -- invisible meanwhile, and on a
+quiet shell after a resize's row slide, invisible for good. And the held
+head was finalized only by the NEXT row to scroll off, glued to it, even
+after a `clear`. Both are one forgetting: a soft-wrapped row is half of
+one logical line. The fix follows the heritage (rio's frames rewrap) and
+the SOTA (every modern terminal reflows; the one hard part, history, is
+the transcript's already): a pure `vt::reflow`, run by `Vt::resize` for
+the main screen and by halcyond's grid mirror at its CONFIGURE (parity is
+a test: four geometries, cell for cell), cursor-anchored, the slid-past
+rows scrolled off whichever screen shows, the alt screen cropped as
+before; and a `top_continues` flag (`wrapped[-1]`) the vt keeps, the
+CellDiff carries (an optional trailing byte), and `live_block` honours --
+the held fragment seeds row 0's line while it is set and lands as its own
+line the moment a normal-screen diff clears it. Two wrong turns caught by
+tests before they shipped: the property test's "identity at every width"
+had to exclude a one-column grid with wide glyphs (lossy by design) and
+size its tall step by content, not by a formula; and the alt-enter arm
+first shipped a hard-coded `false` on the outgoing main diff, which would
+have finalized a straddling fragment whenever a TUI started -- the vt now
+exposes the main flag whichever screen shows, the mode flip flushes
+nothing, and a fragment rides out a TUI session. Host: vt 59, kaua-term
+36, halcyond 182. Gates: ls-gfx-compose PASS 72 s (six legs, one attempt; the 200% capture reads the whole tour by eye), ls-halcyon PASS 118 s (48 legs, one attempt), ls-gfx-panes PASS 47 s (one attempt) -- all three levers re-baked.
+
+**The View menu, and the ratification (run 46d, continued).** The
+operator's next two messages were tooling: the cocoa window opened on
+`gpu-mmio0` with a `parallel0` beside it. Two causes, both measured before
+touching anything: the `cocoa` mode keeps the vestigial MMIO GPU by design
+(the testing hybrid; DISPLAY-MODES.md kept it out of gpu mode on purpose)
+while `THYLACINE_DISPLAY=gpu` -- the production posture -- already drops it,
+and the recipe I had given named the wrong one; and `parallel0` is QEMU's
+default `-parallel vc` chardev with nothing behind it (`info chardev` on a
+bare `-M virt`), which `-parallel none` removes in every mode (5bfac583).
+Then "that drops me to Aurora": `THYLACINE_HALCYON_SESSION=1` is a
+bake-time lever, not a run flag -- the image on disk was the default lever
+from the gate chain; re-baked. Then the word: "After rebuilding, you can
+proceed with HALCYON-SCALE." Section 10 is ratified. What the arc still
+cost was four chords per boot, and the reason was pinned before designing
+around it: virtio-gpu-pci has no DPI or physical-size property (edid
+on/off, xres, yres -- checked on this host's 10.0.2) and cocoa passes no
+physical size, so QEMU's EDID claims 100 DPI at any resolution and the
+derivation is right about a wrong input. The heritage and the SOTA agree
+on the shape: plan9.ini's `monitor=`, Linux's `video=`, Fuchsia's board
+`display_pixel_density` -- the boot side DECLARES the display and the
+component that owns the decision reads it. So SC-5: `thylacine.scale=<pct>`
+on the kernel command line, the channel joey and aurora already read, as
+the derived scale's FIRST source (`scale auto` and the reset chord return
+to the declaration, not the EDID); the parser lives in the host-tested
+libhalcyon (the LAST whole-word token, NUL-ended -- the FDT property
+carries its NUL; off-table said and ignored), tapestryd reads it once at
+probe and drops a token that fills its buffer rather than parse a cut
+value as a shorter valid percent. Not a pool file: the pool is baked per
+image and a display is per boot. The panes gate's scale legs became
+parametric on the boot scale so the SAME script is the control (plain:
+100 -> 125 -> 100) and the witness (`THYLACINE_SCALE=150`: 150 -> 175 ->
+150 -- a declaration ignored or a reset to the EDID both fail). Verified:
+libhalcyon 49 host tests (+1); ls-gfx-panes plain PASS 48 s (the control: booted 100 -> 125 -> 100, every leg) and with THYLACINE_SCALE=150 PASS 29 s (the witness: booted 150, Super+= to 175, Super+0 back to 150 -- the first declared run had booted at 150 too and failed only a 1.0-literal pixel leg downstream, which the restructure skips); the session lever re-baked + ls-gfx-compose PASS 73 s (six legs, the 200% leg chording from an undeclared 100). ls-halcyon not re-run: the console lever's boot derivation is the same tokenless path the plain panes run covers.
+
+## Run 45 (2026-09-08, Fable 5.1 max) -- the chrome content: the tag bar's name + trail, the status bar per the mockups, and the session tile that never keyed
+
+**Where it sits.** The first queued item after run 44's close: the chrome
+CONTENT against HALCYON-VISUAL 4/6 and the operator's mockups. Run 44 made the
+transcript mockup-true; the chrome around it still showed an empty tag bar on
+every session tile, a dot for a condition, and mono islands in the status bar.
+Small, halcyond-mostly, and it batches its Fable round with the atlas bound
+(owed since run 44).
+
+**What the mockups actually pin, measured rather than read.** The composition
+PNG's chrome strings ("listener 1", "Territory 0") are illustrative -- HALCYON.md
+names a listener only as the Genera class -- but the operator's OWN Daylight
+mockups HTML (`docs/halcyon-daylight-mockups.html`, theirs, untracked-modified)
+carries a complete content model for a shell tile: name `transcript`/`ut`, the
+trail `~/kernel/sched` (the working directory: Acme's `awd` heritage, the tag
+tracks the shell's directory), the status context `transcript · ~/thylacine ·
+ut ~` (name · cwd · cmd -- exactly what H-3d built), and the condition `⊢ ok` /
+`⊢ 1 error` / `⊢ 1 warning`. The PNG's pixels settle the colours the prose
+leaves ambiguous: `⊢ ok` is EMBER (#d37e4d measured), not sage -- sage's key on
+the dark bar is ~1.5:1 contrast, invisible -- the clock is `status_muted`, the
+trail is the sage `fg_dim`, and the context is centred (ink centre 707 of 1406).
+The `1 error` / `1 warning` labels are a diagnostics COUNT (the err mockup
+prints two error lines yet says "1 error"; the ok-class "1 warning" cannot be an
+exit code), which no producer emits today: the label is `exit N` from the exit
+mark -- honest -- and a Beacon `diag` mark is the extension owed when a
+producer exists. Not built now: dead protocol is worse than a plain label.
+
+**The defect under the missing content: the session's live tile never keyed.**
+`tag <id> status` (the tile-status verb) admits only the console renderer;
+`halcyond --session` is a declared session conn, not the renderer, and its loop
+never sent the verb anyway (run 43 deferred "the D per-command exit-status
+feed"). So on the session path the live key stayed sage, the hairline never
+went cinnabar, and the bar's condition sat idle -- an E_PERM nobody had
+observed because nobody had written the feed. Fixed at both ends: tapestryd
+admits the verb from the DECLARED session for a leaf THAT CONN HOSTS (the party
+hosting a tile is the one that knows its exit, as the renderer is for the
+console tile; the verb is parsed whole BEFORE the gate so a malformed verb or a
+foreign/empty/container/unknown id still meets the default deny, and the
+battery's negative twin holds because the battery never declares); halcyond's
+session loop takes each tile's latched exit and sends it on the ring's conn,
+refused-once-said-then-retry per exit (the H-3b F4 posture).
+
+**Landed (host: halcyond 151 = 144 + 7; the guest userspace build clean):**
+
+- The tag bar's NAME comes from the host that spawned the tile (a `describe`
+  closure: the program = argv[0]'s basename, `ut` for a shell tile; the console
+  names itself) -- the pane `tag` file keeps its ONE meaning (the H-4d command
+  line) and is read only for a leaf nobody describes. The TRAIL is the tile's
+  working directory with home folded to `~`, right-aligned in the key's dim
+  ink; a path that does not fit beside the name gives up leading components
+  (`…/sched`) and is never cut; a `cd` repaints it with no relayout behind it.
+- The status bar per the mockups: every slot proportional at 10 px, a
+  full-height ember workspace box, the context centred, the turnstile +
+  `ok`/`exit N` condition in ember/cinnabar, the clock muted. `resting` is the
+  good state (section 4.2: "exit 0 (or nothing has run yet)").
+- The console gate's condition legs re-derived: the dot is gone, so the
+  solid-rect probe would read the bar's dark; `gfx_region.py --near` counts
+  pixels near the wanted key AND requires zero near the other key in the same
+  slot -- ink of any colour would pass a slot painted the wrong state.
+
+**Flagged for the operator (their scripture, not changed):** the failure state's
+cinnabar key (#982818) on the dark bar (#1a120a) is ~1.75:1 -- legible as a
+crisp glyph, dim as a label; their CSS says so and the PNG shows only the ok
+state. Their CSS/HTML still name Public Sans (one behind their own section 7).
+
+**The first screenshot round found two dependencies the chunk had to pull
+forward, and the console gate caught a third thing.**
+
+- *The trail was empty on every tile, and so was the context's directory.*
+  The compose gate PASSED (it does not read the trail), the capture showed
+  `ut` and `⊢ ok` in the right places -- and no `~` anywhere. Measured: both
+  strips' only ink was the name and the bevel. Cause: the KT-1 wire forwarded
+  titles and Beacon frames and DROPPED every other OSC, so a session tile's
+  transcript never saw ut's OSC 7 -- the H-3d cwd was built on the console
+  byte path and never reached a tile. The trail's dependency; pulled forward:
+  `Control::Osc7Raw` crosses the wire raw (capped at the vt's 256 like a
+  title, checked before the bytes are taken) and the transcript's ONE decoder
+  applies it on both paths (`apply_cwd_report`). Kaua-term stays the dumb
+  parser it is meant to be.
+- *The left tile was named `halcyon`.* Its command line IS `halcyon` (the
+  welcome tool, which execs the shell): a host knows only what it spawned,
+  and the program is the party that knows what it is. First cut: ut emits
+  OSC 2 `ut` at each prompt, rich-only, with `wire::strip` extended to drop
+  OSC 0/2 -- and beacon's pinned `foreign_escapes_are_payload` test failed:
+  a FOREIGN program's title inside the output is payload in both tiers and
+  strip must keep it, so a rich-only report cannot ride that channel without
+  breaking the strip identity (12.1 rule 1). The test was right. Rerouted as
+  a Beacon mark, `mark k=prog;text=ut` inside the prompt zone (12.12 + the
+  12.2 registry amendment): stripped with the frames by construction, unseen
+  by every serial gate; the tile's title is ONE field fed by both the mark
+  and a foreign OSC title, latest wins in record order.
+- *The console gate (ls-halcyon) failed its keyboard-menu leg, three of
+  three.* The new condition legs had PASSED (62 cinnabar-line pixels, 33
+  ember -- on real screendumps), so the leg after them was the finding: "no
+  obj run on row 105/107". A host reproduction of the exact byte sequence
+  gave the expected rows (the prompt block holds no item; the newest row is
+  the `pwd` line), so the guest had one row more than the sequence explains.
+  It was halcyond's OWN status-bar say line: the console drain mirrors every
+  daemon line into the transcript, the H-3d design said the line only when
+  the slot GEOMETRY changed (its comment names exactly this hazard), and the
+  new `ctx_ink` field -- where the centred text landed -- changes with every
+  context, so the line was said per paint: a row after every command, and
+  `k` from the newest row landed on `pwd` instead of `ls`. The witness was
+  writing itself into the transcript it witnesses. Fixed by keying the say on
+  `Slots::geometry()` (ctx_ink zeroed) with a host test pinning the key. The
+  antialiasing finding lives beside it: the island bake's turnstile is NOT
+  crisp (3 px within a 24-box of the ink, 34 within 80), so the pixel witness
+  is a blend-line classifier (`gfx_region.py --ink`: projection >= 0.5,
+  residual <= 16 from the bar's dark to the ink), which a synthetic sweep
+  shows never confuses an ember blend for cinnabar or the reverse (the lines
+  only converge at the ground, below half-ink).
+- *Fixing the say line failed the gate's FIRST leg, three of three.* The
+  parchment proof read the display's centre band and found it header-toned
+  (206,196,182). The screendump: on the console lever the transcript opens
+  with the mirrored BOOT LOG, which the composition round's class rule
+  renders -- correctly -- as a raw island on the header ground, and the view
+  is bottom-anchored, so how much of that island the centre band sees
+  depends on how many rows the session has produced below it. The earlier
+  image passed the leg (52% parchment) BECAUSE the per-paint say lines were
+  padding the transcript; with the bug fixed the island climbed 34 rows into
+  the band and header won. A measurement keyed on content history, not on
+  the property it claims: the probe now reads the transcript's newest third
+  (`region 200 450 1080 760`), where the prompts and outputs are, and the
+  rationale sits beside it in the scenario.
+- *Two more legs of the same class, found one gate run each.* The pre-split
+  control ("no strip on a single leaf") and the zoom-drop leg ("the strip is
+  gone") both read the strip region's INTERIOR and keyed on header-vs-
+  parchment -- the island is header. Rewritten to witness what only a STRIP
+  has (a live tint on its interior, a separator key on its bottom row) plus
+  the compositor's own carve record (`pane/<id>/tagbar` = `0 0 0 0` for the
+  single leaf). And `menu_want_gone` waited for parchment under a dismissed
+  menu, where the command-path leg's chosen verb had just printed a raw
+  island: the property is "a transcript ground again, not the menu's
+  raised", and both Daylight grounds satisfy it. None of these was a
+  rendering defect; each was a witness keyed on the ground colour of
+  whatever content happened to lie under it, written before raw islands
+  existed. The gate stayed honest throughout: every red named the exact
+  rect and colour, and each fix narrowed a witness to the property it
+  claims instead of loosening it.
+
+**Verification.** Host: halcyond 155 (+11), kaua-term 35 (+2), beacon 37;
+the guest userspace build clean (libutopia is guest-only -- its bar is the
+build and the in-guest `u-repl-test`). The console lever: `ls-halcyon` PASS
+in 115 s, one attempt, every leg -- the two new condition legs on real
+screendumps (62 cinnabar-line px after the failing command, 33 ember after
+the passing one, zero of the other ink each time), the keyboard menu back
+on its row, the split/zoom/event-set/click legs unchanged. The session
+lever: `ls-gfx-compose` PASS in 51 s on the final image, and its captures
+(`build/ls-ci-compose/`) are mockup-true for the chrome: both tiles named
+`ut` -- the welcome tile, spawned as the welcome tool, took the shell's name
+through the prog mark -- both trails `~`, the context `ut · ~ · ls
+/lib/halcyon` centred in its span, `⊢ ok` in ember, the clock in the muted
+ink. Seven bakes and eight gate boots in all; the audit (batched with the
+atlas bound) is spawned at the commit, below.
+
+**The audit close (after the self-compaction; the same run).** The Fable 5.1
+round (MODEL start == end, 477k tokens, 78 tool uses, 19 min; it ran the
+three host suites itself) returned 0 P0 / 0 P1 / 1 P2 / 4 P3 on the chrome
+content + the atlas bound together, and the parallel self-audit found two
+more, neither coinciding. Not dirty by count; dirty by the P2's fix, which
+restructured the render core, so the next halcyond round re-prosecutes it
+(`memory/audit_chrome_content_closed_list.md`, "ROUND 2 FOCUS").
+
+The P2 was the atlas bound's SHAPE, and the prosecutor was right that run
+44's close claimed more than it held: "at most one frame's glyphs past the
+bound" is no bound when the untrusted stream decides how many distinct
+glyphs one frame inserts and the packer never refuses a page (measured:
+~45K distinct glyphs at 11.5 px is 16 pages; a full-BMP dump ~60K is 26).
+Worse, the console's layout cache keyed on the atlas generation, so the
+frame after every eviction re-laid the WHOLE history -- every distinct glyph
+of the transcript packed in one frame -- and a working set above the bound
+did that every frame, forever. The fix is a rule, not a number: **the atlas
+working set is the painted set.** `GlyphSource::advance` measures from the
+font's tables and packs nothing, and it is what layout measures with; a
+laid block holds `LaidGlyph {ch, advance}` and never an atlas id;
+`render_block` resolves ids for the glyphs it paints (a refused glyph
+paints blank with its laid advance kept, so the geometry never moves with
+the atlas); the layout cache (moved into the lib, host-tested) keys on
+width and sheet only, so an eviction invalidates nothing laid; and the
+packer takes a HARD cap (`set_max_pages`, 24 pages = 6 MiB) past which an
+insert is refused. The witness lays 3000 distinct codepoints and asserts
+zero pages, paints them and asserts 3000 glyphs, evicts and paints again
+against the new generation, then on 64-px pages shows the cap biting inside
+one paint with the geometry unchanged. The eviction stays and now re-packs
+only what is visible.
+
+The P3s: `condition_label` painted `⊢ exit 0` in cinnabar after a refused
+status write (the state is the pane's record, the code the transcript's
+peek; the label now follows the state word); the status say line was still
+said per distinct exit-code WIDTH (`exit 1` / `exit 12` / `exit 127` -- the
+same observer effect this run had just fixed for the centred text; the key
+is now the fixed slots + the condition STATE); the vt capped EVERY OSC body
+at 256, so a Beacon frame past it -- a `cmd` mark of a long command line,
+an `obj` with a long ref -- vanished on the TILE path while the console's
+own scanner took it (pre-existing on KT-1; the cap is per selector now,
+2048 for `1936;`, pinned against beacon's frame maximum and crossed end to
+end through the real producer); and `gfx_region.py --near` was dead code
+shipped as a witness (removed). The prosecutor also withdrew, and this run
+enqueued, a pre-existing PL-1b edge: the shell's exit mark is swallowed
+inside a program's stuck-open `pre` (`memory/bug_exit_mark_lost_inside_a_
+stuck_open_pre.md`, with its fix shape).
+
+The self-audit's finding is the one to keep: **the session feed had no
+positive witness.** `resting` and `ok` paint identically, so every compose
+capture this run passed with the feed refused -- the very defect the chunk
+existed to fix could have regressed unseen. `ls-gfx-compose.exp` gained the
+failing-command leg (`ls /nonexistent-h3d` then `pwd`; the bar's say line
+names the slot, the capture's own height locates the bar): 57 cinnabar-line
+px with zero ember, then 33 ember with zero cinnabar, PASS 55 s before the
+fixes and again after. Verification of the close: host cartoon 12 (+1), vt
+47, kaua-term 36 (+1), halcyond 160 (+5), beacon 37; both levers re-baked
+and re-run (the fix touches layout and paint): compose PASS 55 s with the
+new leg, ls-halcyon PASS (the console lever, every leg) -- the numbers are
+in the close commit.
+
+## Run 44 (2026-09-08, Fable 5.1 max) -- the composition round: mockup-true Halcyon, verified by agentic screendump
+
+**Operator input.** Screenshots sc1..sc5 ("still a complete mess, even bigger
+than before"), then two supporting documents -- `docs/HALCYON-COMPOSITION.md`
+(the implementation guide: type scale, vertical rhythm, the baseline rule for
+mono islands, DPI snapping) and `docs/halcyon_text_composition_mockup.png` (the
+welcome-screen target) -- with the mandate "we should not stop until we have a
+verified mockup-true rendering, verified by agentic screenshotting". Both
+documents are the operator's (untracked), like the four A/D docs.
+
+**The diagnosis was one mechanism.** sc1 (the "word cloud"), sc2 (the view
+jumping on Enter), sc4 (menu vs base scale) and half of sc3 were all
+`FACE_MONO` serving the fixed 22-px advance-10 Cornucopia cell -- the ALT-SCREEN
+grid's cell -- inside an 11.5-px body: every inline `em class=code` island,
+every menu literal and every blank line (`break_line` measured blanks with the
+mono metrics) stood twice the height of the prose, and the inflated content
+height bottom-anchored the view so it shifted on every new prompt line. The
+other half of sc3 was the A commit's regression: `face_for`'s `!annotated` arm
+flipped to proportional with no raw/document distinction, so foreign columnar
+output went proportional. sc5 was simply unbuilt: the Cornucopia bake omits
+U+2500-259F BY DESIGN for the renderer to draw, and nothing drew them.
+
+**Decisions (heritage-aligned; auto-accepted under the Fable autonomy grant):**
+
+- Two Cornucopia atlases, selected by the requested px like a proportional
+  size: the ISLAND (advance 6, 6x14 -- the bake is 0.5 em/advance, so the
+  mockup's "10 px Cornucopia" is nearest advance 6; advance 5 is unbaked and
+  below the box-glyph floor) for the document's mono, the GRID (advance 10)
+  for alt-screen and the pts geometry. `mono_cell()` keeps its grid meaning;
+  `island_cell()` is new.
+- A per-LINE class -- prompt / document / raw -- decided by ANNOTATION per
+  zone, not by zone kind: the welcome is zone-LESS but Beacon-rich (must be a
+  document); `cat` output sits INSIDE ut's output zone but is plain (must be
+  raw terminal content, the operator's sc3 ruling and HALCYON-VISUAL 7's
+  "preformatted output, terminal content"). Raw = the mono island with the
+  `.hal-out` chrome, char-wrapped like a terminal.
+- The composition per HALCYON-COMPOSITION 2-4 with CSS-COLLAPSING margins.
+  The PNG measures collapsed (hdr2 after the list opens 8 px, not 14; prose
+  after prose 2, not 4): the document's "4 px total" is the browser's
+  un-collapsed arithmetic. Line boxes are exactly the line-height (1.5 body,
+  1.25 headings -- Plex's 1.3-em content overflows a 1.25 box by a pixel, as
+  in the browser). The obj pill, the code ground, the rule at 8/8, the table
+  at 4/6, the `lr`-pair headerless table as the spread two-column list.
+- The herald. BEACON.md refuses layout/typography ops on sight, so NO `align`
+  key: `hdr class=title` names the heading's ROLE (a v1 amendment of the same
+  class as `em class=`); the stylesheet centres it with its 10-px top and
+  reads the `em class=dim` lines directly under it as its deck. The flag is
+  packed into the existing hdr byte so the 16-byte span slot is unchanged.
+- The welcome recomposed to the mockup's structure with LIVE facts only:
+  title, "Booted on aarch64 [from <root src>]" + "<MiB> physical memory ·
+  <N> cpus" (/ctl/memory, /ctl/cpu, /proc/self/ns), "Loaded systems" = joey's
+  children from /ctl/procs as name + dim pid, a pid object for the shell
+  (this process execs ut, so its pid IS the shell's), path objects, the keys,
+  a rule, the lineage line. The mockup's fictional numbers and keys were not
+  copied; the version number was dropped (none is introspectable).
+- Procedural box drawing on both cells: light arms 1 px, heavy a centred
+  band, DOUBLE = the outline of the union of bands (every corner and
+  junction gets its inner and outer contours for free; a single arm never
+  inks a double band's interior), blocks/shades/quadrants; arcs square.
+
+**What the first screendump found that no unit test could.** The welcome
+rendered as a document (proportional Plex, ranked italic headings, island-
+sized code grounds, obj pills, a centred title) -- and three structural gaps:
+the two-column list as misaligned prose, a phantom rule plus a blank band at
+the TOP of the tile, and the deck lines left-aligned. Root cause: the tile's
+transcript is FRAME-fed (KT-1 R5: the text is grid cells tagged with frame
+serials), so it captured a text-less table shell and an orphaned rule, which
+rendered ABOVE the live grid, while the live grid laid the table's plain
+realization proportionally. The same split silently broke `la`'s `pre` box in
+every session tile since PL-5 (the console path, byte-fed, never had it).
+Fix: KT-1 CELLS MODE -- the tag bits carry the structure (in a pre, in a
+table cell + its column, a rule precedes, the header row, in a prompt zone),
+the transcript registers table specs by open serial, and ONE placement
+routine rebuilds tables/rules/pre from tagged cells on both the live-grid and
+the scroll-off paths. The deck was left-aligned because the grid's unused
+columns rode along as untagged blanks (`trim_untagged_tail`).
+
+The second screendump found the rest: the tag bars and the status bar were
+missing because tapestryd's `role=chrome`/`role=status` gate admitted only
+the console renderer -- the per-user session compositor is not it, so D's
+chrome had failed at Create in every session boot ("GL-gated" in the
+handoff was the wrong explanation; the serial said `chrome for pane 3 failed
+Create`). The gate now also admits the declared session for a pane its
+principal owns (an occupied leaf's hosted surface's owner) and for the status
+bar while it hosts. And two tag-bit defects only the tile path could show: an
+empty zone-less block is DROPPED at the zone cut and its id REUSED by the
+prompt block that follows (`freeze_open`), so a block lookup classed the
+welcome as the prompt (the fix carries the prompt axis on the tag,
+`TAG_PROMPT`); and the rule bit died on the frame that directly followed the
+rule, since no cell sits between a rule and the next `em` open (the bit now
+rides an inline open and dies at any other op). Plex has no U+22A2, so the
+turnstile drew as tofu -- served from the island bake now.
+
+**Evidence.** Host: halcyond 138 (new: two mono sizes; procedural box glyphs
+on both cells; raw vs prompt vs doc; raw char-wrap; margin collapse; herald +
+deck; kv-list spread; the cells-mode rebuild on both paths incl. the rule
+carry-through and TAG_PROMPT; the title tag through the tile path), beacon
+37. Guest: three full bakes (`build.sh kernel` + the session lever, fresh
+pool each) and three headless HVF session boots driven by
+`scratchpad/session-shot.exp` (lib.exp login -> the welcome markers ->
+`tools/screendump.sh` per state -> `qmp-sendtext.sh` types the next state):
+welcome / raw `cat` / `ls` objects / the verb menu / nora. Verdict of the
+final round: MOCKUP-TRUE on the fourth dump (shots4/welcome.png): the herald and its deck centred and dim, the two-column list spread with right-aligned dim pids, ranked italic headings at 8/6-px openings, prose at 11.5/1.5 with obj pills and code grounds (a long island moved whole to the next line), the rule at 8/8, the dim lineage line, the 10-px prompt; both tiles carry their tag bars and the display its status bar (context + clock); `cat` output is a mono island with the .hal-out chrome; `ls` objects are pills; the verb menu opens at the document scale; nora keeps the grid cell on the alt screen.
+
+**Open at the boundary.** The Fable audit of the round (halcyond transcript/
+layout/raster + the tapestryd gate + the beacon sink -- all audit-bearing).
+The block-left rule of `.hal-block` is not drawn (the text inset is measured
+off the PNG instead). The tile's mark band on a rebuilt table row covers the
+whole table (prov maps rows to the table item). The hdr-table (`hdr=1`) row
+detection rides `TAG_ROW_HDR`; a header row that scrolled off before its
+body joins a plain-line block, not the table. MEMORY.md compacted under its
+read limit (aux's entries preserved as hooks; cold lines to the archive).
+
+**The audit close (after the self-compaction; the same run).** The Fable 5.1
+prosecutor (`a4209c99b04ff5fd8`, MODEL start == end, 523k tokens, static +
+host-test + scratch-copy repros) returned 0 P0 / 1 P1 / 0 P2 / 8 P3 -- not
+dirty by count -- and the self-audit run alongside it 6 P3s, two of them the
+prosecutor's F4/F5 found independently. **The P1 is a regression this round
+introduced and the screendumps could not see: a click is not a pixel.** Cells
+mode rebuilds every row of a table (every line of a pre) into ONE item on the
+live grid, and the whole hit-test chain -- `prov`, the laid `src_col`s (every
+table cell run at 0), pre lines with no `src_row`, and four inverse lookups
+matching on the item alone -- was written for one-row items. So a click on
+`ps` row N opened row 0's pid; a `kill` from that menu would have killed the
+wrong process. The prosecutor proved it with two scratch tests (a `ps` shape,
+an `la` shape); both landed as the regressions. The fix threads the row
+through: `prov` = (item, row, start), `TableModel.starts` gives each cell its
+source column (the byte-fed console fills the plain-realization offsets),
+pre lines stamp `src_row`, and `prov_inverse` / `grid_run_rect` /
+`live_row_spans` / `live_run_underline` / `caret_in_block` match (item, row)
+(`laid_line_for` treats row MAX as the whole item, so a pre's one FlatRow still
+bands the fence). The lesson in one line: **a rebuilt structure collapses its
+rows into one item, and every address that named the item alone now names its
+first row** -- when a change gives an old address space a new dimension, sweep
+every consumer for the dimension it lacks.
+
+The P3s reshaped one mechanism. The rule bit "rode an inline open and died at
+any other op" (this run's own addendum 12) -- and the prosecutor showed one
+rule frame placing TWO rules (`rule`, a text line, then an `em` open starting
+the next line: no op sits between the text and the open, so the open still
+carried the bit) and a rule LOST when the frames close over it (`rule` then
+`/zone`). No op can tell whether text was written; the tile can. The episode
+now ends when the tile sees cells written after the rule frame
+(`Tile::apply(CellDiff)` -> `end_rule`; a scroll re-reports old serials and
+does not end it), and both defects go with it. The other fixes: the rebuilt
+table takes its header flag from the row tag, never the spec (a table whose
+header scrolled off drew its first BODY row as a header); a dropped block's id
+is never recycled (its cells' tags on the grid would annotate the successor
+zone -- the same family as the TAG_PROMPT catch, on the doc/raw axis); the
+console path adopts the prompt-into-output gap; a kv value wider than its group
+clamps at its column; and on the tapestryd side the one status carve goes with
+the seat at a `session on` takeover (an idle predecessor's bar had blocked the
+successor's; reachable only with a non-halcyond declared client). Deferred with
+its reason: `trim_untagged_tail` cannot tell a printed trailing space from a
+never-written column in a FRAME-LESS tile (every cell span 0) -- yank fidelity
+of trailing whitespace there needs a written-bit on the wire cell. Carried,
+pre-existing: the glyph atlas has no eviction bound short of `regen()`.
+
+**The screenshot loop is now a gate.** `tools/interactive/ls-gfx-compose.exp`
+boots the session lever, drives welcome / `cat` / `ls` + menu / nora exactly as
+the scratch harness did, and hands the captures to `gfx_compose.py`, the
+VERDICT half: every check is a property the composition scripture pins,
+measured off the pixels (the herald centred; the 19 px paragraph pitch by
+autocorrelation of the ink profile; inline chrome at the island height by the
+pill's padding COLUMNS; one rule below the title; a tag bar with text and the
+status bar; the raw island by its header-toned columns plus the gutter's;
+nora's box frame by long straight ink runs). Two wrong turns in building it,
+both the kind a check that cannot fail hides: a single probe row/column for the
+pane region ended the pane at the first glyph it crossed (a majority test on
+both axes fixed it), and a row-run rectangle finder fragmented every chrome
+ground on the text inside it (the padding columns run the full height). The
+discrimination table over the four real rounds: shots1 FAIL (herald, phantom
+rule above the title, no tag text, no status bar, no box frame), shots2 FAIL
+(herald, the old 17 px pitch, no chrome, no rule), shots3 PASS, shots4 PASS;
+`--selftest` discriminates 11 synthetic canvases one variable away. On the
+audit-fixed image the gate PASSED in 51 s (HVF) and the captures measure
+identically to shots4 (herald offsets -0.5/-1.5/-1.0, pitch 19, one rule at
+row 447, 97% status ground). Host: halcyond 143 (+5), beacon 37. The `.exp`
+matches `EXTINCTION:` and so waits on the vault's abi-boot-banner mirror
+declaration (the s7-nora-probe precedent: the vault commits it with the
+declaration) -- `gfx_compose.py` lands now, the scenario rides the ring.
+Observed: aux's VM (from the aux tree) ran through my gate's boot despite the
+stolen lease and the note; both passed, and the contention cost nothing but is
+recorded as the resource, not a duration.
+
+**The carried finding, closed the same run.** The prosecutor carried one
+pre-existing item out of scope: the glyph atlas had no eviction bound short
+of `regen()` -- untrusted output printing distinct codepoints grew the packer
+~10 MB per size toward the compositor's fixed-heap OOM, a silent exit that
+takes the session's face with it. Ownership, not attribution: it is ours, so
+it is fixed rather than queued -- `raster::MAX_ATLAS_PAGES` (16 x 512 px = 4
+MiB, ~16x a Latin working set) + `GlyphSource::evict_if_full`, called BETWEEN
+frames at both loop tops and never inside one (`tile::paint_grid` stamps the
+generation once per frame; `glyph()` only inserts), so the store exceeds the
+bound by at most one frame's glyphs. Every id consumer already survived an
+eviction (the console's layout cache keys on the gen; tiles re-lay per pass;
+chrome/status/menu look glyphs up on repaint; nothing holds a Cartoon across
+frames -- grep, not memory). The test grows 400 `.notdef` glyphs on 32-px
+pages past the bound as the positive control, then proves frames of 20 stay
+within MAX + 20 while the gen keeps bumping. Host 144; guest ELF green; the
+audit rides the next halcyond round (double-distance). F7 stays deferred with
+its fix shape recorded (the blank CHAR, since all eight `attrs` bits are
+taken) and an empty trigger set today.
+
+## Run 43 (main, 2026-09-07, Opus 4.8, effort MAX, operator present + granted full autonomy): three Halcyon chunks -- H-A fonts+type-model, H-D session chrome, F2 pts input-batching -- landed and pushed, with three wrong turns caught
+
+The operator picked A (fonts) at /effort max, clarified the face + weight rule
+(IBM Plex Sans; baseline body = the Text weight 450, headings = Regular 400),
+then: "proceed autonomously, self-compacting when needed, on the found issues;
+after fonts switch to chrome, I will test whenever I get to it." So A -> D -> F2
+landed autonomously; the GL visual/interactivity verification is the operator's
+round. Tip **ab413f1d**, both mirrors.
+
+**H-A (@ed45a164) -- the wrong turn that scripture caught.** The resume note's
+own design for the proportional flip was *stale*: it said thread
+`verbatim = kind==Foreign` to keep foreign output mono. Reading scripture
+instead of the stale code (feedback: "read scripture, not stale code") found
+**HALCYON 14.13** (operator-ratified 2026-09-06) had *retired* that KT-1.5
+mono-tail model: the transcript is mainly-proportional -- prompt, typed input,
+ordinary output, prose, tables all proportional; mono is exactly two cases, and
+both were already handled outside `face_for` (a `pre` block's pre-flag, and
+alt-screen's separate raw-grid `paint_grid` at tile.rs:818 -- confirmed NOT via
+layout_block, so nora/htop stay mono). So the correct Ab was one arm:
+`face_for`'s `!annotated` -> FACE_BODY, no `verbatim` threading; Ac (objects)
+subsumed. Had I followed the resume note I would have shipped foreign output
+mono against ratified scripture. Also swapped the 3 DejaVu faces (2 supersessions
+behind) for 4 Plex, and fixed a real type-scale violation the operator's own
+mockup CSS exposed: body_px 16 -> 11.5 (.hal-prose), heading px_for -> §8.1
+absolute 17.5/14.5/12.5 (the multipliers had hdr3 at ~body size). Ground truth,
+not theory: fontdue reads only the legacy `kern` table and Plex ships kerning in
+GPOS only, so kern()==0 -- the DejaVu-AV kern test became a truthful guard.
+
+**The mark-view test -- caught by re-running my own "fix".** After body 11.5,
+`a_mark_drags_the_view` failed (y=249 h=45 > viewh). My first fix (assert the
+whole block height `newest.2` instead of `ch`) STILL failed on re-run -- good
+thing I re-ran instead of trusting the reasoning. Instrumented it
+(ch=22 viewh=264 su=51, `laid_line_for(0,MAX)=(0,15)`): the render was CORRECT
+(it bottom-anchors the marked *row*, 249+15=264=viewh); `ch`(=22, the mono cell)
+was a stale row-height proxy that a proportional 15px row invalidates. Fixed to
+the marked row's actual `laid_line_for` span. halcyond host 129/129; guest
+builds; image boot-verified (test.sh: `Thylacine boot OK`, boot-ms 23354 -- the
+default boots the aurora console, so this proves image-boots+no-crash, not the
+session render, which is the operator's GL round).
+
+**H-D (@08c786d7).** The session compositor (`halcyond --session`, the login
+path) rendered its tiles but wired NO chrome -- only the single-tile main.rs path
+drives ChromeSet+StatusBar. The machinery was already multi-leaf (reconcile mints
+a Role::Chrome per leaf); tapestryd already carves the tagbar rects and the
+session tags its leaves. So the fix was wiring: ChromeSet+StatusBar on
+`ring.clone()` (EventRing is Rc-shared), driven per-pass gated on up_announced,
+`own_surface = u32::MAX` (a sentinel matching no leaf, so reconcile skips the
+console self-naming), status model from the focused tile's `t.tile.scrollback`.
+
+**F2 (@ab413f1d) -- the P0 the s7 audit surfaced, and the external_mux catch.** A
+pts slave's data fd 0 is POLLIN-always under dev9p.poll, so kaua PollSource's
+drain re-polled fd 0, never saw "not readable", and blocked in read() on an empty
+ring every sweep -- DRAIN_MAX-deep keystroke batching + a parked mux. The fix
+mirrors what ut already does (poll the accurate `/dev/pts/<n>ready` sibling).
+Wrong turn caught mid-implementation: my first read-once branch was
+UNCONDITIONAL, which would have broken prowl -- prowl and quarry call
+`src.poll(timeout)` DIRECTLY (no mux), so read-once ignoring their Millis/Block
+timeout kills prowl's REFRESH tick. So two pts modes: nora (external_mux, has a
+mux polling poll_fd) reads once; prowl/quarry (no mux) run the drain loop, now
+watching the ready fd -- the SOLE poller, avoiding the one-shot-cache two-poller
+busy-loop that run 41 had nearly shipped. prowl/quarry needed NO code change.
+
+**The F2 Fable audit closed clean-after-fixes.** The round (a876ee42fe356502e,
+Fable 5.1, MODEL start==end -- real, not a fallback) verified the central design
+SOUND (pts detection, the 24-bit n decode, no two-poller busy-loop of the
+one-shot ready cache, EOF/HUP, console unchanged, no fd leak) and found 2 P1 + 2
+P3. Both P1 were regressions I under-rated, and both are worth recording because
+the fixes are the reusable part: F1 -- nora's launch type-ahead stranded until
+the next key (my "minor one-keystroke delay" note under-rated a typed-ahead
+COMPLETE command reading as a HANG); the accurate ready fd had removed the old
+POLLIN-always instant wake that used to replay pending. F2 -- the external_mux
+branch flushed a bare ESC on every partial read, dropping the #173 protection,
+which corrupts a dribbled arrow on a RAW-forwarding pts (ptyhost/pouch-pty, not
+kaua-term -- my "kaua-term delivers whole sequences" was true only for that one
+host). Fixed @a2c065c1 (F1: drain_pending before the loop via a shared
+dispatch_input; F2: the branch first-reads then falls through to the drain
+holdoff, timeout reordered to check pending_escape first). F3/F4 (P3) deferred --
+both equal pre-fix behavior. The verify itself was the day's other milestone: the
+mac was busy (aux IM-3) and thyla-pi had NO Rust toolchain (it had only ever been
+a boot host receiving pre-built artifacts), so on the operator's word I installed
+rustup + the aarch64-unknown-none target there -- the pi is now a real second
+guest build host (rustc 1.98.1, kaua/nora clean in 24s), and a2c065c1 pushed.
+Runtime-confirms remain GL-gated = the operator's session round (A fonts + D
+chrome + F2 interactivity: a rapid two-key sequence must land both keys) or a
+thyla-pi s7-nora-probe boot. Still owed: the batched Fable PL round for A+D; B
+(block-spacing, coupled to A's GL feedback); the
+deferred polish in the commit bodies (Ad mono-cell compaction, orphaned
+third_party/dejavu-fonts removal, the D per-command exit-status feed, status.rs
+§7 mono, heading top-margins); the MEMORY.md index compaction (near its read
+limit). Vault rung 0072 (sub-halcyond fold). All three commits used
+No-dossier-change trailers (a code track does not co-stage vault prose).
+
+## Run 37 cont'd #10 (vault, 2026-09-07, Opus 4.8, effort xhigh, operator away): the vault half of the s7 F3 deadlock, three F3 folds, a seam closed, and the operator-directed ports authoring
+
+Post-self-compact continuation. This is the vault side of what Run 41 (main)
+narrates from the code side: five feature pushes, all docs work (the effort gate
+exempts docs, so no /effort max even for the audit:hard dossier). Tip
+17be890b -> 45967c81.
+
+**The abi-boot-banner declaration (09177fb0) -- I owned the consistency sweep,
+and one sentence tried to make it lie.** Run 41 covers the cross-repo lint
+deadlock; the vault's job was the count-sweep main delegated ("you own the
+consistency"). Adding one mirror (`s7-nora-probe.exp`, 28 -> 29) cascades:
+the bootOK/EXTINCTION-matching subset 27 -> 28, the delivery table's EXTINCTION:
+row 24 -> 25, the "25 of the 29" restatement, the co-update-seam and Prosecution
+counts. The catch: the note's headline sentence conflated the *historical*
+"the 2026-09 resync grew the set to twenty-eight" with the *current* total in one
+clause -- blindly changing "28" to "29" would have falsified a dated event. I
+reworded to separate the resync event (stays 28) from the now-total (29) and
+added a dated `s7-nora-probe` subsection, preserving every historical record
+(the #245 census, the resync subsection, chg-2026-09-05's mirrors-checked-for-28)
+per the note's own historical-vs-current rule. Lesson: a recount is not a
+find-and-replace; a frozen note carries dated facts that a current total must
+not overwrite.
+
+**The three F3 folds (aea90c88) and a stub that looked like a miss.** sub-ptyfs
+(the write-park, folded as the analog of the existing PendingRead/poll_reads),
+sub-nora-host (the six self-naming EXIT markers), sub-halcyond (the test-mode
+screenmode witness). Wrong turn caught: after folding sub-halcyond I checked its
+generated `## Provenance` block and it was EMPTY -- it looked like the touched
+edge had not registered. Before "fixing" it I checked two control dossiers
+(sub-kernel-joey/uart/vivarium): their Provenance blocks are empty too. The
+Provenance renderer is a project-wide STUB (writes only the header); `quaestor
+backlinks sub-halcyond` confirmed my chg's `touched` edge *does* register. So the
+empty block was correct-and-latent, not a miss -- a control one query away turned
+a phantom fix into a non-event. Also: render reads only COMMITTED chgs for the
+dashboard/backlinks, so an uncommitted chg's edges do not populate until it lands
+(verified against the committed abi chg being listed and the uncommitted F3 chg
+not).
+
+**The login-loop seam closed (5f7a3bad), and the fix beat the plan.** main's
+36cb83d8 (the console-fallback for a session-lever image booted console-mode)
+closes `seam-login-halcyond-fallback` (KT-1 C-F12). Worth recording: the seam
+*predicted* the fix as "halcyond exiting non-zero within N seconds of spawn" (a
+timing window); the actual fix keys on the child's EXIT STATUS
+(`session_failed = !status.success()`), which is cleaner -- no race, no N to
+tune, and it covers a mid-session compositor death for free (both are non-zero).
+I recorded that the fix improved on the plan in the seam's "what closed it," and
+the fold rides the identity-masking subsection so the "no new authority" claim
+(the reused `shell_cmd`, no CAP_SET_IDENTITY leak) is anchored where the masking
+is proven.
+
+**The ports plane, authored (45967c81) -- the operator's directed task.** The
+AskUserQuestion answer was "author sdl-port + tyrquake" as an audit:hard round
+(I-42 CAP_JIT/W^X + W-3e Vulkan glue), leaving the two benches + build-config as
+backlog. sub-sdl-port (audit:hard): the I-42 core is that SDL acquires CAP_JIT in
+the *platform layer* before llvmpipe (a JIT) runs, and the soundness claim is
+that SDL only *asks* (the corvus SELF-form walk in `usr/lib/thylajit/thyla_capjit.h`)
+-- corvus decides against the caller's own eligibility, nothing is granted in SDL.
+Plus the weak-symbol link discipline, the W-3e two-sided consent (surface half
+before ctx half, so no poke can name a ctx-less surface), the reweave re-bind, and
+the nogl fallback. sub-tyrquake (audit:light): the consumer -- the ramfs launcher
+(no CAP_JIT; it's acquired by the SDL backend) and the two boundary-line patches,
+guarded-by inv-i38 (the condebug per-line close publishes under the close-to-open
+cache). Two wrong turns caught by the registrar: (1) I merged the caveats into
+`## Seams` and the lint FAILed on a missing `## Caveats` (the dossier template
+requires both distinct sections) -- split them, genuine seams vs footguns; (2) I
+over-cited file:line (11 R4 warns -- the vault idiom is symbol-primary because
+lines rot), converted to `(`FILE`, `:NN`)` which is R4-clean and keeps the
+anchor. The resume-note "phantom" (`thyla_capjit.h`) was reconciled: it is a REAL
+header at `usr/lib/thylajit/`, the old docs/reference doc had named it at a wrong
+path; documented from the code, not the stale doc. The aux-side
+`thyla_tap_intent`/frame-intent symbol was confirmed absent from usr/ports/sdl2
+and deliberately not documented (as-built = on-main only).
+
+**Open / deferred.** The redirect phase (152/157) and now the operator-directed
+authoring are both complete; the two benches (129-fsbench, 41-irq-bench) +
+150-build-config stay as live reference docs per the operator's ratified call.
+Deferred vault folds owed at their merge: 0068's aux-branch content
+(Nocturne/frame-intent/DX-4/DOSBox) and 0069's IM-1 kernel-episode -- aux will
+ring when they reach main. No host was held this run (pure docs work).
+
+## Run 41 (main, 2026-09-07, Opus 4.8, effort xhigh, operator away): s7 F3 pushed, the .exp gate's cross-repo lint deadlock, and the login-loop fix boot-verified -- all under a held mac
+
+Post-compact continuation of Run 40 (the s7 F3 landing). Three things landed,
+all while aux held the mac ~30 min (its SMP gate, then an IM-1 build) -- I queued
+FIFO #1 and did host-free work until the grant.
+
+**F3 pushed (70f91be3).** The local F3 commit rebased onto the vault tip
+(17be890b); the JOURNAL conflict was two prepended entries (my Run 40 + vault's
+Run 37 cont'd #9), resolved by LINE-NUMBER reassembly keeping both newest-first.
+`##` and `---` are NOT unique delimiters in this file (262 sub-headers, 60
+hr-rules), so a split-by-delimiter resolver would have mangled it -- I checked
+the counts before scripting, which is the catch. Code applied clean (the vault
+commits were docs-only), so the pre-rebase F3 verify held.
+
+**The .exp gate: a cross-repo lint deadlock broken by single-ownership.**
+s7-nora-probe.exp is a new abi-boot-banner `EXTINCTION:` consumer. Committing it
+(thylacine pre-commit vault-lint) needs the note to DECLARE it first; declaring
+it (the vault registrar's unmatched-mirror arm, abi_literals.go:182, checks each
+mirror against `git ls-files`) needs the .exp already TRACKED. A genuine
+chicken-and-egg across two lints in one repo's two worktrees. vault broke it by
+owning BOTH endpoints: it brought the .exp over byte-identical and committed it
+WITH the declaration (f2e177f9 -> 09177fb0), so each lint saw a consistent state.
+I rm'd my untracked copy, ff-merged, did NOT double-commit. Lesson: a deadlock
+between two lints is broken by one actor committing both endpoints together, not
+by either going first.
+
+**The login-loop fix boot-verified + pushed (36cb83d8).** The Run-39 lock-out (a
+session-lever image booted console-mode loops forever: no GPU -> no tapestryd ->
+halcyond --session exits 1 -> pre-fix login returned -> getty respawn -> loop).
+The fix (degrade to the console ut shell on a non-zero session exit) was already
+baked in the current ramfs, so the verify needed only a console-mode boot, no
+rebuild. The hvf console boot showed the exact chain: halcyond FAIL connect ->
+"login: session compositor unavailable -- console shell fallback" -> interactive
+ut (echo round-trip) -> NO second login prompt. The fix had been reviewed in the
+Run-40 prosecutor round (F2 P3 only); committed with a No-dossier-change trailer
+(sub-stratum-session owns login/main.rs; the fallback branch rung to vault).
+
+**Open:** vault owes the 3 s7 F3 dossier folds + the login-fallback delta (call
+0070). F2 (the input-batching P0) + the A/D chunks (fonts/chrome) remain
+OPERATOR-blocked -- F2 is audit-bearing and effort-report reads xhigh (not max),
+and the operator is away to answer an /effort max question.
+
+---
+
+## Run 40 (main, 2026-09-07, Opus 4.8, effort max): the s7 read-side fix, twice attempted and twice demolished -- a Fable audit proves there is no transient; the real bug is write-side
+
+This run is the catch, not a win. It is worth recording precisely because two
+successive fixes for s7 ("nora opens in a tile, renders one frame, dies") were
+both wrong, and the second was wrong in the *same way* as the first one level
+deeper -- the reusable lesson is how the wrongness was caught.
+
+**The premise, inherited.** Run 39 observed nora exit immediately in a tile
+(screenmode Alt->Normal) and a sub-ms delay masking it, and theorized a
+"transient master_gone" on the pts: nora's launch read landed in a momentary
+window where the pts master fid was closed+reopened, read 0, took it for EOF,
+quit. Run 39 itself flagged this as UNCONFIRMED (the ptyfs churn it logged turned
+out to be the boot selftest). A first fix (run-40 pickup, poll-HUP re-sample) was
+already an audit P0 and reverted -- it polled for a POLLHUP the non-QTPOLL pts
+data fd never emits (`dev9p_poll.c:289`).
+
+**This run's attempt.** I re-implemented the fix the "correct" way: on
+`read()==0`, `PollSource::confirm_eof` RE-READS across a grace, latching eof only
+if 0 recurs; a cleared transient parks for input and never returns 0. I
+ground-truthed the READ semantics hard first (ptyfs `ring_drain`, server.rs:932:
+empty+master-open PARKS, empty+master-gone returns 0) -- the exact discriminator,
+verified. Compiled, clippy-clean, self-audited twice. It even resolved a "one-key
+lag puzzle" I noticed in the drain loop -- which I dismissed as orthogonal.
+
+**The catch (Fable 5.1, agent a5136040f523ecd6a, MODEL start==end -- a real
+Fable round, family-diverse from the Opus author).** The audit re-derived the one
+thing I had NOT ground-truthed: the CAUSE. `n_master` is written at exactly three
+sites (server.rs:412/483/499); the only server-path master open is `h_lopen`'s
+clone (:1481); the other `open_inc(_,true)` at :1907/:2431/:2526 are the boot
+selftest. Masters are mint-only. So per pts, `n_master` goes `0->1->0` exactly
+once -- **there is no transient**, and a pts slave `read()==0` is permanent. My
+`confirm_eof` transient arm was dead code; the fix added a delay on a real close
+and nothing else. Same error class as the P0 it replaced: I verified the read
+semantics but built on an unverified *cause* premise. I re-verified the audit's
+`n_master` enumeration and the write-side chain from the tree before accepting
+it, then reverted the fix (`source.rs` clean at HEAD).
+
+**What s7 actually is (two defects, both code-verified, both now OPEN + owned):**
+- **F3 [P1] -- write-side.** nora's first `redraw` (`main.rs:195`) writes a
+  ~5-8KB opening frame to the 4KB pts `s2m` ring. ptyfs `slave_write` breaks on a
+  full ring returning a short/0 count (server.rs:660-666); libthyla `write_all`
+  maps `Ok(0)->WriteZero` (io.rs:130); native slave writers don't retry (the
+  master side does). So the frame's second chunk WriteZeros -> `redraw` errors ->
+  nora `return 1` -> `term.leave()` -> screenmode Normal = "one frame then exit".
+  F1 makes the is_eof path impossible at startup (master present -> read parks),
+  so it was never a read bug. Intermittent by frame-vs-ring-vs-drain timing (the
+  Heisenbug); a serial write slows the writer and hides it. Hits any native
+  program bursting > a ring-full onto a tile pts. Fix: park slave writes in ptyfs.
+- **F2 [P0, pre-existing] -- the "not interactive" half.** `PollSource` parks in
+  `read()` on all 64 drain sweeps, because `dev9p_poll` returns POLLIN-always for
+  the non-QTPOLL pts data fd so the drain's `!readable` exit never fires;
+  keystroke N isn't delivered until N+1 unblocks the prior sweep. 64-deep
+  batching. This is the "one-key lag puzzle" I dismissed -- the audit caught what
+  I waved off. Fix: poll `/dev/pts/<n>ready` (QTPOLL) and read fd 0.
+
+**Disposition.** Fix reverted; F2/F3/F4 (gate)/F5 (comments) enqueued
+([[bug_s7_write_zero_and_read_batching]], [[audit_s7_confirm_closed_list]]).
+STOPPED for operator steer: the direction changed from read-side "nora
+robustness" (ratified, now proven inert) to write-side ptyfs parking + a
+PollSource poll change -- two audit surfaces, and F3 wants a confirming
+exit-status measurement (OBSERVE) before the fix. The login-loop fix + the
+halcyond marker were re-verified sound by the same audit and stay uncommitted.
+**Then the operator granted autonomy on the surfaced issues, and F3 landed.** I
+OBSERVED first (instrument nora's exits, boot): the marker was
+`nora: EXIT path=redraw1 code=1 err=WriteZero` -- the write path, confirmed, not
+is_eof. The fix mirrors ptyfs's blocking-read machinery on the write side: a
+full-ring slave write with the master present PARKS (a `PendingWrite` beside
+`PendingRead`; `poll_writes` completes it once kaua-term drains s2m; a gone
+master unparks with `Rwrite 0` -> the writer exits). A Fable 5.1 audit (real, no
+fallback) closed 0 P0 / 0 P1 / 1 P2 / 6 P3 -- the central claim survived and the
+both-ends deadlock I had flagged was WITHDRAWN (kaua-term's write_master is
+bounded by 200x1ms retries then drops + returns to reading s2m). The P2 (a
+parked write pins a shared kernel 9P tag; enough parked ops starve the pool -- a
+pre-existing class the parked READS already had) got its mis-named comment fixed
++ the real kernel per-Proc-tag-quota fix enqueued; F2/F4/F5/F6 fixed in-chunk,
+the two-pass loop + the 11c-EINTR precondition enqueued.
+
+**The tail was a false FAIL I did NOT ship around.** The audit-fix
+ls-gfx-session FAILED (init=0). Easy to call a flake or my F2 regression; it was
+neither. Ground truth: the pool fixture ships michael with NO `lib/halcyon.rc`,
+the gate's own H-4c leg CREATES it per run, and my PRESERVE=1 rebuilds KEPT the
+pool -- so the rc accumulated, the next login took the rc-path instead of
+`layout restore default`, and the gate's restore-default marker never appeared.
+A fresh-pool (PRESERVE=0) bake -> ls-gfx-session PASS + s7-nora-probe PASS, both
+green on one pool. The lesson: a stateful gate under PRESERVE=1 makes its own
+bug; reset per attempt.
+
+Net repo change this run: the ptyfs slave-write park (F3), audited + verified --
+the read-side detour cost only its own reversal. The F2 input-batching P0
+(PollSource must poll `<n>ready`) and the login-loop console fallback remain
+their own next chunks.
+
+---
+
 ## Run 37 cont'd #9 (vault, 2026-09-07, Opus 4.8, effort max): the docs/reference retirement redirect phase finishes -- 152/157, and the 5 that remain have nowhere to redirect to
 
 **The arc.** The operator-ratified docs/reference retirement drives ~157 legacy
@@ -3062,6 +4841,83 @@ GL path), **150-build-config** (the `tools/` build-config surface + DEV_ACCOUNTS
 (single-file, audit:none-tier, low dossier value). The full backlog with tiers is
 in `memory/project_vault_arc.md` (SWEEP @29621aed).
 
+---
+
+## Run 39 (main, 2026-09-07, Opus 4.8, effort max): the login loop, and s7 re-diagnosed from scratch -- a nora startup race, not the compositor bug we thought
+
+Two things this run, both from the operator testing live.
+
+**The login loop.** The operator booted a session-lever image CONSOLE-ONLY and
+got an endless `Thylacine login:` loop. Root cause (ground-truthed): console
+mode drops the GPU so tapestryd never starts (`run-vm.sh:305-311`); the pool
+still carries the baked session lever, so login spawns `halcyond --session`,
+which finds no compositor and exits (`session.rs:986` returns 1); login treated
+that exit as a clean logout ("its exit IS logout, regardless of status",
+`main.rs:1398` pre-fix) and returned -> the getty respawned it forever. A real
+lock-out on ANY box where the compositor can't come up (headless, GPU-less), not
+just a dev quirk. Fix landed (uncommitted, still owes its own console-mode
+boot-verify): login falls back to the console `ut` shell on a non-zero
+`halcyond --session` exit. Recorded [[bug_login_loop_no_console_fallback]].
+
+**s7, re-diagnosed.** The operator's graphical test (sb1-sb4 + a mockup, on their
+Desktop, not Downloads -- the two newest Downloads images were unrelated Threads
+screenshots) gave a rich Halcyon-render bug report (A fonts base-text-still-mono,
+B spurious blank lines, C nora-in-tile, D session chrome unwired). We took C
+(nora, the worst) per the operator. **Every prior s7 hypothesis was wrong.** I
+built a probe harness that drives `nora` into a session tile and traces
+halcyond's screenmode + key routing, and the live boot showed: nora enters the
+alt screen and IMMEDIATELY leaves it -- it renders ONE frame (`main.rs:195`
+redraw before the loop) and exits. THAT frozen frame under the resuming shell is
+the "ut+nora merged, not interactive" symptom. Ruled out, each with evidence:
+winsize (nora sized `63x35 (cpr)`, correct), focus + input routing (leaf 3 got
+every key, routed to pts), and `raw_vt_intent` (grep proved it is SET but never
+READ anywhere in halcyond -- an inert reserved latch; the h/l set-only bug there
+is real but cannot be this).
+
+The wrong turns worth keeping: (1) it is a **Heisenbug** -- run 1 (unmodified
+nora) exited, runs 2-3 with a sub-ms diagnostic serial-write added STAYED. The
+instrumentation masked the race. Intermittent = a race, per the method. (2) My
+ptyfs `n_master` instrumentation first fired inside ptyfs's **boot selftest**
+(the churn clustered at lines 2734-2740, before `selftest PASS` at 2741, long
+before nora at 3056) -- a control fabricating the defect it reports; the real
+runtime churn is separate. (3) I chased a `confirm_eof` "root cause" in
+`transcript.rs raw_vt_intent` before grepping for its readers and finding none
+-- verify the consumer before claiming a cause.
+
+Real cause: nora's fd 0 (pts slave, ptyfs) reports a TRANSIENT POLLHUP/read-0 at
+launch (a pts master fid momentarily closed+reopened during session tile setup;
+ptyfs reports HUP/EOF on `master_gone` == `n_master==0`, `server.rs:912/927`),
+and nora's PollSource latched eof on it -> immediate exit. The operator chose
+fix **B (nora robustness)**: `usr/lib/kaua/src/source.rs` now confirms a
+suspected eof persists (re-samples fd 0 across a 100ms grace; any sample without
+the hangup = transient carrier, keep running) before latching it. B moots
+needing to fully nail the churn trigger, and a terminal app shouldn't die to a
+carrier blip at launch. The gate (`s7-nora-probe.exp`) went GREEN twice -- and
+that was the trap: **the prosecutor audit (Opus fallback) caught a P0 that
+invalidated the whole fix, and the gate had passed for the wrong reason.** nora's
+fd 0 is the pts-slave DATA fd, which is NON-QTPOLL, so `dev9p_poll` returns POLLIN
+always and NEVER POLLHUP (dev9p_poll.c:289; ptyfs server.rs:227); POLLHUP is only
+on the separate `<n>ready` file nora does not poll. So `confirm_eof`, which
+re-samples for a HUP, always returned false -> it never believes ANY eof,
+including a real tile close -> nora would spin forever holding the pts open
+(strictly worse than the original premature-quit). The gate only ever exercised
+the launch transient (which always-false-confirm happens to tolerate); it never
+tested a real close. My self-audit's premise -- "ptyfs reports HUP
+level-triggered" -- was true for `ready_revents` (the `<n>ready` file) but FALSE
+for the data fd nora actually polls; I audited the wrong fd. The context-
+independent round re-derived the real fd's poll behavior and exposed it. Fix
+REVERTED (`git checkout` kaua/source.rs); s7 is unfixed again. The correct
+approach is re-READ confirmation (not re-poll -- the fd cannot emit HUP), or the
+audit's preferred fix A (stop the pts master close+reopen at its source, which
+needs the churn trigger nailed -- the run-39 ptyfs churn I logged was the
+selftest, a red herring). The fix DIRECTION is open again for the operator. The
+login-loop fallback survived the audit (F2 was P3 only); it and the screenmode
+marker stay uncommitted. **The lesson worth keeping: a green gate that only
+exercises one arm of a two-arm property proves nothing about the other arm -- and
+a self-audit that reads the wrong fd's poll code will confidently bless a false
+premise.** The full Halcyon-render set
+(A/B/D + the visual interactivity confirmation) remains for the operator +
+follow-up chunks. Detail: [[project_s7_editor_in_tile]].
 
 ---
 

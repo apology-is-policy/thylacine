@@ -122,8 +122,8 @@ pub struct AtlasPage {
 
 /// Where one rasterized glyph lives and how it hangs on the pen: blit rect
 /// on `page`, then `left`/`top` are the bearing -- the blit's top-left is
-/// `(pen_x + left, baseline_y - top)` (the classic FreeType convention
-/// fontdue also reports: `top` is the distance baseline -> bitmap top).
+/// `(pen_x + left, baseline_y - top)` (the classic FreeType convention:
+/// `top` is the distance baseline -> bitmap top, y-up).
 #[derive(Clone, Copy)]
 pub struct GlyphEntry {
     pub page: u32,
@@ -154,12 +154,18 @@ struct Shelf {
 
 /// The packer: appends rasterized alpha bitmaps into the store's last page
 /// (opening pages/shelves as needed), returning stable glyph ids. Rasterizer-
-/// agnostic: the caller (halcyond's fontdue wrapper) hands finished bitmaps.
+/// agnostic: the caller (halcyond's glyph source) hands finished bitmaps.
 pub struct AtlasPacker {
     pub store: AtlasStore,
     page_w: u32,
     page_h: u32,
     shelf: Shelf,
+    /// The hard page cap (0 = unbounded): an insert that would open a page
+    /// past it is REFUSED rather than grown into. The author's between-frames
+    /// eviction reclaims; this is the in-frame bound that eviction cannot
+    /// be, because the untrusted stream decides how many distinct glyphs
+    /// one frame paints.
+    max_pages: u32,
 }
 
 impl AtlasPacker {
@@ -170,29 +176,46 @@ impl AtlasPacker {
             page_w,
             page_h,
             shelf: Shelf { x: 0, y: 0, h: 0 },
+            max_pages: 0,
         }
+    }
+
+    /// Bound the store at `n` pages (0 = unbounded): past it `insert`
+    /// returns None instead of opening a page.
+    pub fn set_max_pages(&mut self, n: u32) {
+        self.max_pages = n;
+    }
+
+    /// The page geometry this packer opens pages at.
+    pub fn page_w(&self) -> u32 {
+        self.page_w
+    }
+
+    pub fn page_h(&self) -> u32 {
+        self.page_h
     }
 
     /// Insert one alpha bitmap (`w x h`, rows tight) with its bearing;
     /// returns the glyph id, or None when the bitmap can never fit (larger
-    /// than a page). An insert that fills the current page opens a new one
-    /// WITHOUT a gen bump (pages are append-only within a gen); `regen()`
-    /// is the author's explicit reset for eviction, which is what bumps.
+    /// than a page) or the store is at its page cap. An insert that fills
+    /// the current page opens a new one WITHOUT a gen bump (pages are
+    /// append-only within a gen); `regen()` is the author's explicit reset
+    /// for eviction, which is what bumps.
     pub fn insert(&mut self, w: u32, h: u32, alpha: &[u8], left: i32, top: i32) -> Option<u32> {
         if w > self.page_w || h > self.page_h {
             return None;
         }
         debug_assert_eq!(alpha.len(), (w as usize) * (h as usize));
-        if self.store.pages.is_empty() {
-            self.open_page();
+        if self.store.pages.is_empty() && !self.open_page() {
+            return None;
         }
         // Fit on the current shelf, else open a shelf, else a page.
         if self.shelf.x + w > self.page_w {
             let ny = self.shelf.y + self.shelf.h;
             self.shelf = Shelf { x: 0, y: ny, h: 0 };
         }
-        if self.shelf.y + h > self.page_h {
-            self.open_page();
+        if self.shelf.y + h > self.page_h && !self.open_page() {
+            return None;
         }
         let page_idx = (self.store.pages.len() - 1) as u32;
         let (gx, gy) = (self.shelf.x, self.shelf.y);
@@ -224,10 +247,15 @@ impl AtlasPacker {
         self.shelf = Shelf { x: 0, y: 0, h: 0 };
     }
 
-    fn open_page(&mut self) {
+    /// Open a page; false (and nothing opened) at the page cap.
+    fn open_page(&mut self) -> bool {
+        if self.max_pages != 0 && self.store.pages.len() >= self.max_pages as usize {
+            return false;
+        }
         let alpha = alloc::vec![0u8; (self.page_w * self.page_h) as usize];
         self.store.pages.push(AtlasPage { w: self.page_w, h: self.page_h, alpha });
         self.shelf = Shelf { x: 0, y: 0, h: 0 };
+        true
     }
 }
 
@@ -612,5 +640,41 @@ mod tests {
         assert_eq!(pg.alpha[(ga.y * pg.w + ga.x) as usize], 1);
         assert_eq!(pg.alpha[(gb.y * pg.w + gb.x) as usize], 5);
         assert_eq!(pg.alpha[(gc.y * pg.w + gc.x) as usize], 9);
+    }
+
+    #[test]
+    fn packer_refuses_past_the_page_cap_until_a_regen() {
+        // The in-frame bound: a page cap is a refusal, never growth. 4x4
+        // pages, one 4x4 glyph per page, cap 2: the third insert is None
+        // and the store holds exactly the cap; the earlier ids still stand;
+        // a regen (the between-frames eviction) reopens the store.
+        let mut p = AtlasPacker::new(4, 4);
+        p.set_max_pages(2);
+        let a = p.insert(4, 4, &[1u8; 16], 0, 0).unwrap();
+        let b = p.insert(4, 4, &[2u8; 16], 0, 0).unwrap();
+        assert_eq!(p.store.pages.len(), 2);
+        assert!(p.insert(4, 4, &[3u8; 16], 0, 0).is_none(), "at the cap: refused");
+        assert!(p.insert(4, 4, &[3u8; 16], 0, 0).is_none(), "still refused");
+        assert_eq!(p.store.pages.len(), 2, "no page opened by a refusal");
+        assert_eq!(p.store.glyphs.len(), 2);
+        assert_eq!(p.store.glyphs[a as usize].page, 0);
+        assert_eq!(p.store.glyphs[b as usize].page, 1);
+        // A glyph that fits the current page is still accepted at the cap.
+        let mut q = AtlasPacker::new(4, 4);
+        q.set_max_pages(1);
+        assert!(q.insert(2, 2, &[1u8; 4], 0, 0).is_some());
+        assert!(q.insert(2, 2, &[1u8; 4], 0, 0).is_some(), "shelf 0 still has room");
+        assert!(q.insert(2, 2, &[1u8; 4], 0, 0).is_some(), "shelf 1 on the same page");
+        assert!(q.insert(2, 2, &[1u8; 4], 0, 0).is_some());
+        assert!(q.insert(2, 2, &[1u8; 4], 0, 0).is_none(), "the page is full and a second is past the cap");
+        p.regen();
+        assert_eq!(p.store.pages.len(), 0);
+        assert!(p.insert(4, 4, &[3u8; 16], 0, 0).is_some(), "the regen reopened the store");
+        // Unbounded (the default) still grows.
+        let mut u = AtlasPacker::new(4, 4);
+        for _ in 0..5 {
+            assert!(u.insert(4, 4, &[0u8; 16], 0, 0).is_some());
+        }
+        assert_eq!(u.store.pages.len(), 5);
     }
 }

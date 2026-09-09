@@ -128,8 +128,18 @@ must not kill the fbcon; the pre-#55 ignore/crop posture is retired to exactly
 this sub-floor case); else `Vt::resize` — content-preserving and
 **cursor-anchored** (on a row shrink the visible window slides down just enough
 to keep the cursor row; on grow, blank rows append at the bottom; no history
-reflow — fbcon-grade), full repaint on the new generation, then the winsize
-write. Consumers: native apps (ut's Repl, nora/Kaua) handle `tty:winch` on their
+reflow — the consumer's transcript owns history), full repaint on the new
+generation, then the winsize write. **Since 2026-09-08 the main screen REFLOWS
+on a column change** (`vt::reflow`, shared with halcyond's grid mirror): every
+soft-wrapped logical line is re-cut at the new width, so a shrink never crops a
+row — the pre-reflow "columns crop right" kept each cropped row's wrap flag,
+and a consumer rejoining rows by those flags (halcyond's transcript) read a
+line with its middle cut out (the split-tour garble at 200%: `halcyon layo` +
+`lcyon.rc runs at every login`). The rows the cursor anchor slides past are
+scrolled off (Scroll boundaries under capture, whichever screen shows); the alt
+screen is cropped (a fullscreen TUI repaints on `tty:winch`); a double-width
+glyph moves whole. The console (aurora) gets the same reflow for free.
+Consumers: native apps (ut's Repl, nora/Kaua) handle `tty:winch` on their
 notes fd → read `/dev/winsize` (CPR if `0 0` — the serial fallback, where the
 host terminal answers) → relayout; pouch apps get SIGWINCH + TIOCGWINSZ through
 the landed PTY-3 plumbing plus the 0021 cons arm.

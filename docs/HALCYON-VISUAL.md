@@ -5,7 +5,8 @@ for every program that draws chrome on Thylacine's own framebuffer. Consumed by
 `libhalcyon::theme`; the tag-bar and pane compositor read their values from here
 and nowhere else.
 
-**STATUS**: PROPOSED — H-1 chunk, Daylight only.
+**STATUS**: ADOPTED 2026-09-07 — Daylight, IBM Plex Sans dual-weight and the
+§8 heading/emphasis hierarchy included.
 
 **Companion**: UTOPIA-VISUAL U-2 (*Bonfire*). Bonfire lights the Utopia terminal
 at night; Daylight is the calm day around it. The two are not alternatives —
@@ -294,13 +295,16 @@ pill contents are commands, and clicking one runs it.
 |---|---|---|
 | Name | proportional | The tile's program. Never truncated. |
 | Rule | proportional | `│` U+2502. Present only when pills follow. |
-| Pills | monospace | Commands. First is active; the rest are available. |
-| Trail | monospace | Right-aligned status. Never truncated. |
+| Pills | proportional | Commands. First is active; the rest are available. |
+| Trail | proportional | Right-aligned status. Never truncated. |
 
-Pills are monospace because they are code. The name and the surrounding chrome
-are proportional because they are prose. This is the same two-typeface rule that
-governs the rest of Halcyon: monospace is reserved for things that are literally
-text a machine will read.
+Pills, name, and trail are all proportional. A comparative type review (H-1)
+found no case for splitting the bar across two faces: the bar is one line of
+chrome and reads as one voice, whether the segment names a program or echoes a
+command a click will run. Monospace is reserved for preformatted output — text
+a program printed and Halcyon displays verbatim — not for interface labels,
+however literal their content. A command name in a pill is chrome; that same
+command's output in a transcript block is not.
 
 When the bar overflows, muted pills shrink and ellipsise. The name, the active
 pill, and the trail never do.
@@ -444,22 +448,108 @@ what says so. It also grounds the composition — without it the workspace float
 
 ## 7. Typefaces
 
-Two, as in HALCYON.md §4, unchanged by this scripture.
+Two. HALCYON.md §4 named DejaVu Sans Condensed and Cornucopia. DejaVu Sans
+Condensed was superseded by Public Sans (2026-09-07 type review); Public
+Sans was in turn superseded by IBM Plex Sans the same day, once Plex's own
+Text weight resolved the one thing Public Sans couldn't — contrast at the
+9.5–10.5px sizes tag-bar chrome actually runs at. HALCYON.md §4 reflects
+this chain.
 
-| Role | Face | Use |
-|---|---|---|
-| Proportional | DejaVu Sans Condensed | Tag names, prose output, all chrome. |
-| Monospace | Cornucopia | Pills, paths, commands, terminal content, trail. |
+| Role | Face | Weight | Use |
+|---|---|---|---|
+| Proportional — headings | IBM Plex Sans | Regular (400) | `hdr level=1\|2\|3`, italic in full (§8.1). |
+| Proportional — everything else | IBM Plex Sans | Text (450) | Prose, tag names, the prompt, and all other chrome — pills, paths, commands, trail, status bar, exit badge, `obj`. |
+| Monospace | Cornucopia | — | Preformatted output, terminal content. |
 
-Condensed is not a stylistic preference. Tag bars are dense and horizontal and a
-condensed face fits more legible characters into the same run.
+Text (450) is a named IBM Plex weight sitting between Regular (400) and
+Medium (500), drawn specifically to hold up at small sizes where Regular
+starts to look thin and grey. Headings are deliberately left at plain
+Regular — the lighter of the two proportional weights now in play — because
+rank was never carried by weight (§1.2's own rule, extended to headings in
+§8.1) and Text solves a legibility problem headings don't have: nothing set
+as a heading is running at 10px.
 
-The monospace face appears as islands inside proportional text, never the
-reverse. A monospace island always means the content is literal.
+Density was the original argument for a condensed cut, under DejaVu; it
+never became the operative constraint under Public Sans and isn't one under
+Plex either. If the bar's horizontal budget becomes tight again, revisit
+this rather than reintroducing a second proportional face by default.
+
+The monospace face appears as islands of preformatted output inside
+proportional text, never the reverse. A monospace island means the content is
+a program's verbatim output, not merely that it is short or literal — a path
+or a command name is both, and is proportional.
 
 ---
 
-## 8. Discipline summary
+## 8. Headings and emphasis
+
+Realizes Beacon's `hdr level=1|2|3` and `em class=emph|strong|dim|code`
+(BEACON.md §3) — the vocabulary is Beacon's; the sizes, slants, and colours
+below are Halcyon's, and belong nowhere else. Beacon programs emit meaning;
+this section is the renderer owning style (BEACON.md §3's own stance).
+
+### 8.1 Headings
+
+| Level | Size | Style | Margin (top) |
+|---|---|---|---|
+| `hdr level=1` | 17.5px | italic, regular weight | 10px |
+| `hdr level=2` | 14.5px | italic, regular weight | 8px |
+| `hdr level=3` | 12.5px | italic, regular weight | 6px |
+
+Rank is carried by size alone. Weight never moves among the three levels —
+`hdr level=1|2|3` all sit at IBM Plex Sans Regular (400), just larger and, in
+full, slanted. That is a deliberate step down from body prose, which runs at
+the family's Text weight (450, §7) for contrast at small sizes; headings
+don't have that legibility problem, so they stay at the plainer weight
+rather than inheriting one they don't need — the two proportional weights in
+this system serve two different problems, not one hierarchy. This is the
+same discipline §1.2 already applies to the text scale (recession, never
+weight); headings extend it along a second axis, because size is the axis a
+heading actually needs and colour-recession is the wrong tool here — a
+heading is the most foregrounded text on the line, not the least. All three
+levels hold full `fg` (`#1a120a`).
+
+**The whole heading is italic, not a lead-in word.** This is the Genera debt
+paid directly: Dynamic Windows never reached for bold to mark structure — a
+Lisp machine screen was a typeset document, not a terminal pretending to be
+one, and its headings and definitional text leaned on slant the way this
+environment now does. Bold headings were tried and retired (HALCYON.md §3:
+"typographically crude") — a bold heading and a bold `em class=strong`
+inside its own body text would compete for the same visual weight, and the
+reader would lose the ability to tell "this is a section" from "this is the
+one urgent word in it." Slant does not collide that way: nothing else in
+Halcyon's running text is set in italic wholesale, so a heading reads as a
+heading the instant the eye lands on it, before size is even parsed.
+
+### 8.2 Emphasis
+
+| Class | Style | Colour | Note |
+|---|---|---|---|
+| `em--emph` | italic | `fg` | Ordinary inline emphasis. The heading's slant, borrowed for a word. |
+| `em--strong` | bold | `fg` | The one bold in the entire proportional face. Extreme emphasis, nothing else — HALCYON.md §3. |
+| `em--dim` | roman | `fg_dim` | Recession, not slant — an aside, a caveat, a thing true but not load-bearing. Uses the existing text-scale step (§1.2), not a new one. |
+| `em--code` | mono (Cornucopia) | inherits | An inline literal — a path fragment, a syscall name, a flag — set apart by face and a `header`-tint background, never by colour alone. Block-level literal content is `pre` (§7), not this. |
+
+Four classes, two axes. `emph`/`strong` move along slant/weight — the same
+axis headings use, because both are ways of saying "more." `dim` moves along
+the palette's recession axis instead, because it says "less," and §1.2
+already owns that vocabulary; reusing it here rather than inventing a second
+one is the same instinct that keeps `sage`/`cinnabar` to two states in §1.4.
+`code` is orthogonal to both — it is not emphasis at all but a face switch,
+Beacon's `class=code` doing inline the same job `pre` does at block scope
+(§7), which is why it borrows `pre`'s own `header` ground rather than
+inventing a new one.
+
+### 8.3 `rule`
+
+Beacon's block-level separator (BEACON.md §3) is a 1px `border` hairline,
+matching every other structural rule in Daylight (§2.4, §5.3). No new colour
+value; a rule is a hairline like the ones that already exist, not a new kind
+of mark.
+
+---
+
+## 9. Discipline summary
 
 - One light source, NNW, fixed. Four bevel values derive from it and are
   regenerated together or not at all.
@@ -476,14 +566,26 @@ reverse. A monospace island always means the content is literal.
 - The cast shadow belongs to the live tile and is never the neighbour's border.
 - Tag bar and status bar are both 20px. One vertical unit.
 - Bevel 2px, gap 2px, hairline 1px, radius 0.
-- Monospace means literal. Everything else is proportional.
+- Monospace means preformatted output. Everything else — including pills,
+  paths, and commands — is proportional.
 - Bonfire surfaces inside a pane are never recoloured.
 - Ember is shared verbatim with UTOPIA-VISUAL U-2 and is the link between the
   two surfaces.
+- Heading rank is size only, never weight. Every heading is italic in full —
+  that is what marks it as a heading, size is what ranks it.
+- `em--strong` is the only bold in the proportional face. `em--dim` recedes by
+  colour, not slant or weight — the text scale's own vocabulary, not a new one.
+- The leading gutter rule belongs to preformatted/mono content alone (`pre`,
+  §7). A block wrapper carries no border of its own — the gutter is what says
+  "literal," not what says "one turn of the transcript."
+- The proportional face runs two weights, not one: Regular for headings,
+  Text (450) for everything else. Headings are the lighter of the two on
+  purpose — Text exists to fix small-size contrast, a problem headings don't
+  have.
 
 ---
 
-## 9. Open design questions
+## 10. Open design questions
 
 1. **Status in resting panes.** A build failing in a pane the user is not
    looking at currently shows the ember active-tile treatment, identical to a
@@ -505,10 +607,11 @@ reverse. A monospace island always means the content is literal.
 
 ---
 
-## 10. References
+## 11. References
 
 - `docs/UTOPIA-VISUAL.md` — Bonfire, U-2. The night half of the identity.
 - `docs/HALCYON.md` — the graphical shell design this scripture serves.
+- `docs/BEACON.md` §3 — the `hdr`/`em` vocabulary §8 realizes.
 - `docs/ARCHITECTURE.md` — Halcyon's place in the system.
 - `docs/ROADMAP.md §8` — the Halcyon execution phase.
 - `share/halcyon/halcyon-daylight.css` — token source, canonical.

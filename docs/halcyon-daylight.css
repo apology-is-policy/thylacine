@@ -8,8 +8,13 @@
    ============================================================ */
 
 :root {
-  /* ---- typefaces ---------------------------------------- */
-  --hal-prop: "DejaVu Sans Condensed", "Arial Narrow", sans-serif;
+  /* ---- typefaces ------------------------------------------
+     Public Sans replaces DejaVu Sans Condensed (H-1 type
+     review). It now covers prose, tag names, the prompt, and
+     all interface chrome — pills, paths, commands, trail,
+     status bar, exit badge. Cornucopia is reserved for
+     preformatted output: see HALCYON-VISUAL.md §4/§7/§8. ---- */
+  --hal-prop: "Public Sans", "Helvetica Neue", Arial, sans-serif;
   --hal-mono: "Cornucopia", "Iosevka Term", "Fira Code", monospace;
 
   /* ---- metrics ------------------------------------------ */
@@ -221,7 +226,7 @@
 
 .hal-tag-trail {
   margin-left: auto;
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 9.5px;
   flex-shrink: 0;
   padding-left: 4px;
@@ -233,7 +238,7 @@
 
 /* Command pills. Executable text, not labels. */
 .hal-pill {
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 9.5px;
   padding: 0 4px;
   line-height: 14px;
@@ -342,7 +347,7 @@
 
 .hal-prompt { display: flex; align-items: baseline; margin-bottom: 2px; }
 .hal-path {
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 10px;
   color: var(--hal-fg-muted);
   white-space: nowrap;
@@ -350,13 +355,13 @@
   text-overflow: ellipsis;
 }
 .hal-turnstile {
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 10px;
   padding: 0 3px;
   flex-shrink: 0;
   color: var(--hal-ember);
 }
-.hal-cmd { font-family: var(--hal-mono); font-size: 10px; color: var(--hal-fg); }
+.hal-cmd { font-family: var(--hal-prop); font-size: 10px; color: var(--hal-fg); }
 .hal-caret { border-right: 2px solid var(--hal-ember); padding-right: 1px; }
 
 .hal-out {
@@ -386,7 +391,7 @@
   color: var(--hal-slate);
 }
 .hal-exit {
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 9px;
   padding: 0 3px;
   display: inline-block;
@@ -418,7 +423,7 @@
   align-items: center;
   padding: 0 8px;
   height: var(--hal-status-h);
-  font-family: var(--hal-mono);
+  font-family: var(--hal-prop);
   font-size: 10px;
   background: var(--hal-status-bg);
 }

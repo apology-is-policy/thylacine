@@ -32,7 +32,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md"]
 created: 2026-09-05
-updated: 2026-09-06
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -188,7 +188,13 @@ interaction of its own. `Mode` is `Insert` (keys flow to the pts) or `Normal` (a
 selection state): Esc enters Normal, but only when the VT is on its normal screen
 -- a full-screen app owns Esc -- and a `Record::Mode(AltScreen)` (the app switching
 TO full-screen) leaves Normal on the spot (B-F5), so a selection cannot outlive the
-screen it was made on. `normal_input` is the navigator -- the console's
+screen it was made on. Since s7 F3, that same ingest point -- where `Record::Mode`
+is matched just before `tile.apply(rec)` -- emits a test-mode
+`halcyond: session tile leaf=<n> screenmode -> AltScreen`/`-> Normal` witness: a
+`#[cfg(feature = "test-mode")]` `say!`, inert without the feature and with no
+render effect either way, that gives the compositor-side proof a hosted app (nora)
+entered its alt screen and restored it -- observed at the compositor's ingest,
+distinct from the child's own EXIT markers on the serial ([[sub-nora-host]]). `normal_input` is the navigator -- the console's
 Normal keys minus yank/paste, moving a cursor that starts on the grid's prompt row
 with the view following it (`render(.., &mut scroll_up, Option<Mark>)`: the
 selection band and the ember underline). `Sel` is the selection; `Tile.frame`

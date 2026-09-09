@@ -1084,6 +1084,23 @@ struct PendingRead {
     mask: u16,
 }
 
+/// A blocking SLAVE write holding its Rwrite, parked on a FULL s2m ring -- the
+/// output-side analog of PendingRead. A native slave writer (nora/prowl/quarry
+/// via kaua's write_all) treats a 0-count Rwrite as a fatal WriteZero (this
+/// killed nora's first frame in a tile -- s7), so ptyfs must never reply 0 to a
+/// non-empty write. It parks until the master (kaua-term) drains s2m; poll_writes
+/// then replies the count that fit (>=1) and the guest's write_all loops on the
+/// remainder. It holds the un-acked INPUT bytes: slave_write re-runs the ONLCR
+/// cook and its back-pressure on retry, so parking the input is correct. It is
+/// not Copy (owns a Vec), so poll_writes indexes and removes rather than copying
+/// the way poll_reads does.
+struct PendingWrite {
+    fid: u32,
+    slot_n: u32,
+    tag: u16,
+    data: Vec<u8>,
+}
+
 pub struct Conn {
     handle: i64,
     version_done: bool,
@@ -1093,6 +1110,7 @@ pub struct Conn {
     out_buf: Vec<u8>,
     defer: bool,
     pending_reads: Vec<PendingRead>,
+    pending_writes: Vec<PendingWrite>,
 }
 
 impl Conn {
@@ -1106,6 +1124,7 @@ impl Conn {
             out_buf: Vec::new(),
             defer: false,
             pending_reads: Vec::new(),
+            pending_writes: Vec::new(),
         }
     }
 
@@ -1165,6 +1184,7 @@ impl Conn {
             }
         }
         self.pending_reads.clear(); // the held Rreads die with the connection
+        self.pending_writes.clear(); // and the held Rwrites die with it too
     }
 
     fn fid_find(&self, fid: u32) -> Option<usize> {
@@ -1207,6 +1227,7 @@ impl Conn {
         if let Some(i) = self.fid_find(fid) {
             let f = self.fids[i].take().unwrap();
             self.pending_reads.retain(|pr| pr.fid != fid);
+            self.pending_writes.retain(|pw| pw.fid != fid);
             if f.opened {
                 Conn::close_endpoint(ptys, f.path);
             }
@@ -1361,6 +1382,7 @@ impl Conn {
             }
         }
         self.pending_reads.clear();
+        self.pending_writes.clear();
     }
 
     fn h_attach(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -1689,8 +1711,50 @@ impl Conn {
                 }
             }
             consumed
-        } else {
+        } else if a.data.is_empty() || ptys.master_gone(n) {
+            // A 0-length write, or the master is GONE (n_master==0): reply what
+            // slave_write fits (0 on a gone master -> WriteZero -> the writer
+            // exits, correct -- a closed tile has no terminal, and a gone master's
+            // s2m never drains, so parking would hang the writer forever).
             ptys.slave_write(n, a.data)
+        } else {
+            // Master present, non-empty output. A native slave writer
+            // (nora/prowl/quarry via kaua's write_all) turns a 0-count Rwrite into
+            // a fatal WriteZero -- the s7 "one frame then exit" (a first frame >
+            // the 4 KiB ring). So PARK the write (defer the Rwrite) when the ring
+            // is full now, OR when an earlier write is already queued for this
+            // slot -- parking behind it keeps writers FIFO (F2): letting a later
+            // write take freed room ahead of a parked earlier one inverts the
+            // order two writers on one pts observe. Do NOT slave_write when a
+            // prior write is parked (that IS the overtake). poll_writes drains the
+            // queue in order once the master (kaua-term) drains s2m; a partial fit
+            // (>=1) is a legal short write the guest loops on.
+            let consumed = if self.pending_writes.iter().any(|pw| pw.slot_n == n) {
+                0
+            } else {
+                ptys.slave_write(n, a.data)
+            };
+            if consumed == 0 {
+                // The binding bound is the SHARED kernel 9P tag pool
+                // (P9_SESSION_MAX_OUTSTANDING == 64), NOT this per-Conn MAX_FIDS: a
+                // parked write holds its tag until poll_writes replies, and every
+                // Proc shares ONE /dev/pts client, so enough parked ops starve the
+                // pool for all pts users (F1 -- the pre-existing parked-READ class;
+                // the real fix is a kernel per-Proc outstanding quota, tracked).
+                // MAX_FIDS caps only THIS Conn's contribution.
+                if self.pending_writes.len() >= MAX_FIDS {
+                    return self.err(tag, p9::E_PROTO);
+                }
+                self.pending_writes.push(PendingWrite {
+                    fid: a.fid,
+                    slot_n: n,
+                    tag,
+                    data: a.data.to_vec(),
+                });
+                self.defer = true;
+                return Ok(0); // dispatch returns Disp::Deferred (no reply yet)
+            }
+            consumed
         };
         p9::build_rwrite(&mut self.out_buf, tag, pushed as u32)
     }
@@ -1801,6 +1865,7 @@ impl Conn {
             Err(_) => return self.err(tag, p9::E_PROTO),
         };
         self.pending_reads.retain(|pr| pr.tag != a.oldtag);
+        self.pending_writes.retain(|pw| pw.tag != a.oldtag);
         p9::build_rflush(&mut self.out_buf, tag)
     }
 
@@ -1864,6 +1929,49 @@ impl Conn {
         self.out_buf.clear();
         self.out_buf.resize(SRV_MSIZE_USIZE, 0);
         match p9::build_rread(&mut self.out_buf, tag, data) {
+            Ok(rlen) => self.send_all(rlen),
+            Err(()) => false,
+        }
+    }
+
+    /// Complete any parked SLAVE write whose s2m ring now has room -- the
+    /// output-side analog of poll_reads, called at the same loop top (main.rs).
+    /// Re-run slave_write per parked write: >=1 consumed sends the held Rwrite
+    /// (the guest's write_all loops on the remainder); 0 with the master PRESENT
+    /// keeps it parked (transient back-pressure); 0 with the master GONE unparks
+    /// with a 0-count Rwrite so the writer sees WriteZero and exits (the ring will
+    /// never drain -- a closed tile has no terminal). FIFO over the Vec. False on
+    /// a held-Rwrite send failure (session dead -> tear down). I-9: single-
+    /// threaded, so the master read that freed s2m room is fully processed before
+    /// the loop parks -- the write wake is never lost.
+    pub fn poll_writes(&mut self, ptys: &mut Ptys) -> bool {
+        let mut i = 0;
+        while i < self.pending_writes.len() {
+            let slot_n = self.pending_writes[i].slot_n;
+            let consumed = ptys.slave_write(slot_n, &self.pending_writes[i].data);
+            if consumed == 0 {
+                if ptys.master_gone(slot_n) {
+                    let pw = self.pending_writes.remove(i);
+                    if !self.deliver_write(pw.tag, 0) {
+                        return false;
+                    }
+                } else {
+                    i += 1; // room still zero, master present -- keep parked
+                }
+                continue;
+            }
+            let pw = self.pending_writes.remove(i);
+            if !self.deliver_write(pw.tag, consumed as u32) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn deliver_write(&mut self, tag: u16, count: u32) -> bool {
+        self.out_buf.clear();
+        self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+        match p9::build_rwrite(&mut self.out_buf, tag, count) {
             Ok(rlen) => self.send_all(rlen),
             Err(()) => false,
         }

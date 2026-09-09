@@ -16,6 +16,10 @@
 // so the app inherits it and (with its stdout answering 't' to SYS_FD_DEVCLASS)
 // emits the markup its host renders. Absent = none, fail-closed: a host that
 // declared nothing renders no frames, so the app must not emit them.
+// The host also DECLARES ITS THEME the same way (HALCYON-THEME 3.1):
+// `--palette <18 RRGGBB>` is the palette cells are born in, because the seam
+// ships resolved RGB and cannot be re-themed downstream. Absent = the vt
+// default -- a kaua-term nobody themed is just a terminal.
 //
 // Two blocking threads, like ptyhost, because the pts master is non-QTPOLL:
 //   - OUTPUT (this thread): master -> the vt parser -> the record producer ->
@@ -36,10 +40,11 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use kaua_term::cmdline;
 use kaua_term::wire::{encode_record, parse_input, FrameDecoder, Input};
 use kaua_term::{encode_key, Control, Producer, Record};
 use ptyhold::{set_winsize, Master};
-use vt::{Vt, DAYLIGHT};
+use vt::Vt;
 
 use libthyla_rs::{
     env, t_burrow_attach, t_close, t_exit_group, t_putstr, t_read, t_wait_pid_for, t_write, thread,
@@ -224,11 +229,6 @@ extern "C" fn pump_in(arg: u64) {
     unsafe { t_exit_group(0) }
 }
 
-fn parse_dim(a: Option<&[u8]>) -> Option<u16> {
-    let s = core::str::from_utf8(a?).ok()?;
-    s.parse::<u16>().ok().filter(|&d| d >= 1)
-}
-
 fn write_env_beacon(tier: &str) -> bool {
     use libthyla_rs::io::Write as _;
     match libthyla_rs::fs::File::create("/env/BEACON") {
@@ -238,42 +238,25 @@ fn write_env_beacon(tier: &str) -> bool {
 }
 
 fn run() -> i64 {
-    // argv: kaua-term [--beacon TIER] <cols> <rows> [prog [args...]]
-    let mut args = env::args();
-    let _argv0 = args.next();
-    let mut next = args.next();
-    let mut tier = "none";
-    if next == Some(b"--beacon".as_slice()) {
-        tier = match args.next() {
-            Some(b"rich") => "rich",
-            Some(b"cells") => "cells",
-            Some(b"none") => "none",
-            _ => {
-                t_putstr("kaua-term: --beacon takes none|cells|rich\n");
-                return 2;
-            }
-        };
-        next = args.next();
-    }
-    let cols = parse_dim(next).unwrap_or(80);
-    let rows = parse_dim(args.next()).unwrap_or(24);
-    let mut argv: Vec<String> = Vec::new();
-    for a in args {
-        match core::str::from_utf8(a) {
-            Ok(s) => argv.push(String::from(s)),
-            Err(_) => {
-                t_putstr("kaua-term: non-utf8 argument\n");
-                return 2;
-            }
+    // The whole argv contract is `cmdline` -- pure logic, host-tested against
+    // the args halcyond actually builds (KT/HALCYON-THEME 3.1). This function
+    // owns only the I/O the parse cannot do.
+    let argv0_skipped: Vec<&[u8]> = env::args().skip(1).collect();
+    let cmd = match cmdline::parse(&argv0_skipped) {
+        Ok(c) => c,
+        Err(e) => {
+            t_putstr(e.message());
+            return 2;
         }
-    }
-    if argv.is_empty() {
-        argv.push(String::from("/bin/ut"));
-    }
+    };
+    let (cols, rows, argv) = (cmd.cols, cmd.rows, cmd.argv);
+    // A kaua-term nobody themed is just a terminal: it takes the vt default
+    // rather than guessing at a compositor's colours.
+    let palette = cmd.palette.unwrap_or(vt::BONFIRE);
 
     // The advertisement precedes the spawn: the app's env is a deep copy of
     // ours at that instant.
-    if !write_env_beacon(tier) {
+    if !write_env_beacon(cmd.tier.as_str()) {
         t_putstr("kaua-term: /env/BEACON write failed (the app inherits the caller's tier)\n");
     }
 
@@ -323,10 +306,10 @@ fn run() -> i64 {
     }
 
     // The output thread (this one): master -> producer -> records -> fd 1.
-    // Cells are born in the compositor's Daylight palette (HALCYON.md 14.12):
-    // the seam ships resolved RGB, so halcyond cannot re-theme downstream -- the
-    // tile grid must composite coherently with halcyond's Daylight transcript.
-    let mut vt = Vt::with_palette(cols as usize, rows as usize, DAYLIGHT);
+    // Cells are born in the host's palette (HALCYON.md 14.12): the seam ships
+    // resolved RGB, so halcyond cannot re-theme downstream -- the tile grid
+    // must composite coherently with the transcript beside it.
+    let mut vt = Vt::with_palette(cols as usize, rows as usize, palette);
     vt.set_capture_events(true);
     let mut prod = Producer::new(&vt);
     let mut recs: Vec<Record> = Vec::new();

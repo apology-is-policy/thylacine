@@ -40,12 +40,13 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**140 declared surfaces · 135 covered by a hard-audit dossier · 4 soft-owned · 1 unowned · 0 unparsed · 16 cited path(s) that do not resolve.**
+**144 declared surfaces · 140 covered by a hard-audit dossier · 3 soft-owned · 1 unowned · 0 unparsed · 18 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
 | declared surface | cited path | |
 |---|---|---|
+| **HALCYON-SCALE: the display scale -- the EDID-derived percent the com… | `tools/interactive/ls-gfx-compose.exp` | no such file in the tree |
 | A-5c RECOVER recovery keyslot (corvus) | `usr/corvus-mint` | no such file in the tree |
 | Hardware allowance / I-34 (Menagerie build-arc 2) | `kernel/libt/libthyla-rs` | no such file in the tree |
 | Initial bringup | `init/init.c` | no such file in the tree |
@@ -59,6 +60,7 @@ changed on main? — is the next increment, tracked as task #169.
 | W-3e: the SDL2 Vulkan glue + the img poke-completion + the first-Vulka… | `usr/ports/mesa/patches/0020` | no such file in the tree |
 | `thread_spawn` / `thread_exit` / multi-thread exit | `specs/pthread.tla` | **possibly a documented NEGATIVE — read the claim** |
 | `torpor_wait` / `torpor_wake` | `specs/futex.tla` | **possibly a documented NEGATIVE — read the claim** |
+| halcyond: the Halcyon transcript renderer + the shared VT core + the r… | `tools/interactive/ls-gfx-compose.exp` | no such file in the tree |
 | mesa W-3d: the WSI DIRECT path -- vn_wsi_thylacine + the no-eager-mint… | `usr/ports/mesa/patches/0018` | no such file in the tree |
 | pouch pthread boundary-line | `specs/pthread.tla` | **possibly a documented NEGATIVE — read the claim** |
 | tapestryd + halcyond + ut: the status bar -- the display-level chrome … | `usr/halcyond/src/{status.rs` | no such file in the tree |
@@ -67,7 +69,6 @@ changed on main? — is the next increment, tracked as task #169.
 
 | declared surface | state | why |
 |---|---|---|
-| DOSBox-X dynrec: the CAP_JIT dual-map code-cache consumer (Cryptid DX-4; I-42/I-12) | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
 | Host-side pool populate via existing `stratumd + stratum-fs` (host build infra) | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
 | Kaua console-TUI substrate: the cons/consctl backend + the ut raw-mode dance (LS-7) | soft-owned | owned by [[sub-kaua]], [[sub-nora-engine]], [[sub-nora-host]], [[sub-nora-view]] (+2 more), none `audit: hard` |
 | Thylacine mkfs RNG seed pinning | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |

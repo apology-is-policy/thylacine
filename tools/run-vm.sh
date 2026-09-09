@@ -316,9 +316,23 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "consol
     # PCI function shape, so the guest driver claims it identically;
     # disable-legacy=on is valid on both (the -gl models are modern-only).
     gpu_dev="${THYLACINE_GPU_DEV:-virtio-gpu-pci}"
+    # HiDPI (2026-09-08, the operator's retina look): THYLACINE_HIDPI=1 gives
+    # gpu0 a 2560x1600 scanout (THYLACINE_GPU_RES=WxH sets any size) so a
+    # cocoa window of 1280x800 POINTS on a 2x backing store shows one guest
+    # pixel per physical pixel under zoom-to-fit -- the 1.0 framebuffer
+    # upscaled 2x by the host was the "jittery" text. QEMU's EDID still
+    # claims 100 DPI at any size, so the guest derives 100%: press Super+=
+    # four times after login (Super+0 returns) and halcyond rasterizes at
+    # 2.0 into the doubled pixels. Inert unless set.
+    gpu_res=""
+    if [[ -n "${THYLACINE_GPU_RES:-}" ]]; then
+        gpu_res=",xres=${THYLACINE_GPU_RES%x*},yres=${THYLACINE_GPU_RES#*x}"
+    elif [[ "${THYLACINE_HIDPI:-0}" != "0" ]]; then
+        gpu_res=",xres=2560,yres=1600"
+    fi
     gpu_flags=(
         -device "virtio-gpu-device,id=gpu-mmio0"
-        -device "$gpu_dev,id=gpu0,disable-legacy=on"
+        -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res"
     )
     # vnc/egl-headless display modes drop the vestigial MMIO gpu: a display
     # backend binds QemuConsole 0, and gpu-mmio0 (probe-only, driverless in
@@ -334,9 +348,23 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "consol
     if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
        || "${THYLACINE_DISPLAY:-none}" == "dbus-gl" || "${THYLACINE_DISPLAY:-none}" == "gpu" ]]; then
         gpu_flags=(
-            -device "$gpu_dev,id=gpu0,disable-legacy=on"
+            -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res"
         )
     fi
+fi
+# The cocoa backend under HiDPI: zoom-to-fit maps the (doubled) guest
+# scanout onto the window's points, nearest-neighbour so a 2x guest lands
+# 1:1 on a 2x backing store instead of being resampled.
+cocoa_display="cocoa"
+if [[ "${THYLACINE_HIDPI:-0}" != "0" || -n "${THYLACINE_GPU_RES:-}" ]]; then
+    cocoa_display="cocoa,zoom-to-fit=on,zoom-interpolation=off"
+fi
+# THYLACINE_FULLSCREEN=1: the cocoa window opens full-screen, so a scanout
+# sized to the panel's physical pixels (THYLACINE_GPU_RES=2560x1664 on a
+# 13" Air's 2560x1664 retina) lands 1:1 on the whole display instead of a
+# window of half its points.
+if [[ "${THYLACINE_FULLSCREEN:-0}" != "0" ]]; then
+    cocoa_display="$cocoa_display,full-screen=on"
 fi
 
 # P4-K-events: QMP control socket for test-harness key injection.
@@ -441,6 +469,25 @@ fi
 #   THYLACINE_DISPLAY=cocoa   the interactive window (switch the View menu
 #                             to the virtio-gpu console; serial stays on
 #                             this terminal)
+#   THYLACINE_HIDPI=1        a 2560x1600 scanout shown 1:1 on a retina
+#                             window (cocoa zoom-to-fit, no resampling);
+#                             Super+= x4 after login for the 2.0 render.
+#                             THYLACINE_GPU_RES=WxH for another size.
+#   THYLACINE_FULLSCREEN=1   the cocoa window full-screen: with
+#                             THYLACINE_GPU_RES at the panel's physical
+#                             pixel size the guest fills the display 1:1.
+#   THYLACINE_SCALE=<pct>    declare the display scale to the guest
+#                             (thylacine.scale=<pct> on the cmdline; the
+#                             compositor boots at it instead of deriving
+#                             100 from QEMU's DPI-less EDID). HIDPI=1
+#                             implies 200.
+#                             Pair both with THYLACINE_DISPLAY=gpu, not
+#                             cocoa: gpu is the production posture (gpu0
+#                             ALONE binds QemuConsole 0, the window opens
+#                             on it); cocoa keeps the vestigial gpu-mmio0
+#                             and opens on it, one View-menu switch away.
+#   (Every mode passes -parallel none: QEMU's virt machine otherwise mints
+#   a device-less `parallel0` virtual console that clutters the View menu.)
 #   THYLACINE_DISPLAY=vnc:N   serve the gpu0 console on 127.0.0.1:590N
 #                             (headless live-display; the ls-gfx-live #31
 #                             leg -- gpu-mmio0 is dropped so gpu0 binds
@@ -454,14 +501,14 @@ case "${THYLACINE_DISPLAY:-none}" in
     # testing-hybrid (serial LIVE, no bootarg) -- ls-gfx-live.exp logs in and
     # sweeps desync diagnostics over serial under vnc, so those must not silence.
     console) display_flags=(-nographic) ;;
-    gpu)   display_flags=(-display cocoa) ;;
+    gpu)   display_flags=(-display "$cocoa_display") ;;
     # gpu-headless: gpu DEPLOYMENT (GPU present, aurora primary, serial silenced
     # by 1b) on a HEADLESS backend -- QEMU maintains the scanout surface under
     # -nographic (see the gpu_flags note), so aurora runs + screendump captures
     # it, and the serial-silence is assertable on -serial. The CI/E2E shape of
     # mode 1a; cocoa is the operator-facing one.
     gpu-headless) display_flags=(-nographic) ;;
-    cocoa) display_flags=(-display cocoa) ;;
+    cocoa) display_flags=(-display "$cocoa_display") ;;
     vnc:*) display_flags=(-display "vnc=127.0.0.1:${THYLACINE_DISPLAY#vnc:}") ;;
     # Headless GL for the Warp arc: needs a Linux host with an openable DRM
     # render node (docs/GPU-HOST-SETUP.md; tools/gl-host-probe.sh rung 6 is
@@ -583,6 +630,20 @@ case "${THYLACINE_DISPLAY:-none}" in
     console)            append_tokens+=("thylacine.display=console") ;;
     gpu|gpu-headless)   append_tokens+=("thylacine.display=gpu") ;;
 esac
+# HALCYON-SCALE 3 (SC-5): the platform's scale declaration. QEMU's synthetic
+# EDID claims 100 DPI at any size (cocoa passes no physical size; virtio-gpu
+# has no DPI property), so a HiDPI scanout derived 100 and cost four chords
+# per boot. THYLACINE_SCALE=<pct> declares it (tapestryd reads the token at
+# boot; one of 100/125/150/175/200, anything else is said and ignored);
+# THYLACINE_HIDPI=1 implies 200 unless THYLACINE_SCALE says otherwise.
+# Emitted only when set, so every gate at 1.0 stays tokenless.
+scale_decl="${THYLACINE_SCALE:-}"
+if [[ -z "$scale_decl" && "${THYLACINE_HIDPI:-0}" != "0" ]]; then
+    scale_decl=200
+fi
+if [[ -n "$scale_decl" ]]; then
+    append_tokens+=("thylacine.scale=${scale_decl}")
+fi
 append_flags=()
 if (( ${#append_tokens[@]} > 0 )); then
     append_flags=(-append "${append_tokens[*]}")
@@ -657,6 +718,7 @@ exec qemu-system-aarch64 \
     ${mouse_flags[@]+"${mouse_flags[@]}"} \
     ${display_flags[@]+"${display_flags[@]}"} \
     -serial "${THYLACINE_SERIAL:-mon:stdio}" \
+    -parallel none \
     ${qmp_flags[@]+"${qmp_flags[@]}"} \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \
     ${share_flags[@]+"${share_flags[@]}"} \

@@ -119,6 +119,8 @@ const PRESENT_BURST_WINDOW_MS: u64 = 250;
 const PRESENT_BURST_MIN: u32 = 4;
 
 use crate::chords::{ChordAction, Chords};
+use libhalcyon::scale;
+use libhalcyon::theme::Metrics;
 use crate::gpu::{FenceTag, FencedErr, Gpu};
 use crate::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
 use libdriver::Error;
@@ -1493,6 +1495,29 @@ fn owner_unpack(v: u64) -> Option<(usize, u32)> {
 
 pub struct Comp {
     pub gpu: Gpu,
+    /// HALCYON-SCALE 4: the display scale in percent (100/125/150/175/200)
+    /// -- derived from the EDID at boot and on `mode auto`, overridden by
+    /// the `scale` verb / chords; published as `scale <pct>` in the ctl.
+    pub scale: u16,
+    /// A `scale <pct>` verb or chord in force for the rest of the session
+    /// (`scale auto` / the reset chord clear it); None = derived.
+    scale_override: Option<u16>,
+    /// HALCYON-SCALE 3 (SC-5): the platform's declaration off the kernel
+    /// command line, read once at probe -- the derived scale's FIRST
+    /// source (a declaration outranks a measurement: it exists for the
+    /// display whose EDID cannot say, QEMU's, or lies). None = the EDID
+    /// derives. Never written after probe.
+    declared: Option<u16>,
+    /// `Metrics::at(scale)`: the ONE table every carve and paint here reads
+    /// (halcyond reads the same function at the same percent).
+    pub metrics: Metrics,
+    /// The RESOLVED theme this compositor paints its chrome in
+    /// (HALCYON-THEME 3.2). Resolved once at construction -- TH-4's loader
+    /// lands there, and a declared session's push re-decides it -- so no
+    /// painter below reaches for a constant. The chrome and the content must
+    /// agree or the bevel does not match the pane, which is why this and
+    /// halcyond's `Sheet.theme` have to come from the same file.
+    pub theme: libhalcyon::theme::Theme,
     surfaces: [Option<Surface>; MAX_SURFACES],
     gen_seq: u32,
     conn_seq: u64,
@@ -1651,6 +1676,14 @@ pub struct Comp {
     /// focus-only epoch bump redraws borders without blanking content
     /// (idle clients must not lose their pixels to a focus ring move).
     geom_sig: u64,
+    /// HALCYON-SCALE 5: a scale change owes every follower a redraw
+    /// CONFIGURE (+ the session its TEV_LAYOUT) whether or not the geometry
+    /// moved -- the Direct arm carves nothing, a lone leaf under a menu
+    /// keeps its full rect. Set by `apply_scale`, consumed by the next
+    /// `reconcile` in whichever arm it takes; never a second fan after a
+    /// structural pass (a queued CONFIGURE is replaced wholesale, so a
+    /// same-size re-fan would overwrite a resize offer just made).
+    rescale_fan_due: bool,
     /// The conns that DECLARED themselves the display's session compositor
     /// (`session on` on their own ctl). The display handoff keys on this,
     /// never on a surface's principal: a user program drawing a window is
@@ -2311,9 +2344,35 @@ struct GlAdopt {
 const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
-    pub fn new(gpu: Gpu) -> Comp {
+    pub fn new(gpu: Gpu, declared: Option<u16>) -> Comp {
+        let (derived, src) = match declared {
+            Some(p) => (p, "declared"),
+            None => (
+                match gpu.edid_mm {
+                    Some((mm_w, mm_h)) => scale::scale_pct(gpu.width, gpu.height, mm_w, mm_h),
+                    None => scale::SCALE_MIN,
+                },
+                "edid",
+            ),
+        };
+        // The same guard the runtime path (`apply_scale`) applies: the seat
+        // runs at one of the five values or at 100, never at whatever the
+        // derivation returned (the scale round's F2: a wrapped percent
+        // reached the ctl through this path alone).
+        let scale = if scale::is_valid_pct(derived) {
+            derived
+        } else {
+            say!("tapestryd: scale {} off the table ({}) -> {}", derived, src, scale::SCALE_MIN);
+            scale::SCALE_MIN
+        };
+        say!("tapestryd: scale {} ({})", scale, src);
         Comp {
             gpu,
+            scale,
+            scale_override: None,
+            declared,
+            metrics: libhalcyon::theme::builtin().metrics.at(scale),
+            theme: libhalcyon::theme::builtin(),
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
@@ -2360,6 +2419,7 @@ impl Comp {
             pending_bind_refused_said: false,
             chrome_epoch: 0,
             geom_sig: 0,
+            rescale_fan_due: false,
             session_conns: Vec::new(),
             tick: 0,
             clock_hz: 60,
@@ -3991,12 +4051,67 @@ impl Comp {
         Some(p.content)
     }
 
+    /// HALCYON-SCALE 3: the platform's declaration while one stands, else
+    /// the scale the display's EDID implies for its current pixel geometry
+    /// (100 without one).
+    fn derive_scale(&self) -> u16 {
+        if let Some(p) = self.declared {
+            return p;
+        }
+        match self.gpu.edid_mm {
+            Some((mm_w, mm_h)) => scale::scale_pct(self.gpu.width, self.gpu.height, mm_w, mm_h),
+            None => scale::SCALE_MIN,
+        }
+    }
+
+    /// HALCYON-SCALE 4: make `pct` the display's scale. A no-op at the
+    /// current value; otherwise the metrics table follows, a registered
+    /// status bar of the OLD height is retired (its owner re-mints at the
+    /// new one on the CLOSE -- the H-3d rearm), the ctl republishes on its
+    /// next read, and the STRUCTURAL relayout re-carves every strip and
+    /// fans every surface its CONFIGURE. `why` names the source on the
+    /// line (edid / verb / auto / chord / mode).
+    fn apply_scale(&mut self, pct: u16, why: &str) {
+        if pct == self.scale || !scale::is_valid_pct(pct) {
+            return;
+        }
+        let from = self.scale;
+        self.scale = pct;
+        self.metrics = self.theme.metrics.at(pct);
+        say!("tapestryd: scale {} -> {} ({})", from, pct, why);
+        // The fan is owed whatever the geometry does (the scale round's
+        // F3). Set BEFORE the bar retire: the retire's own reconcile
+        // consumes it inside the structural pass the carve change forces,
+        // and the reconcile below then finds the signature unchanged and
+        // fans nothing more -- ONE fan per change.
+        self.rescale_fan_due = true;
+        if let Some(st) = self.status {
+            let stale = self
+                .surf(st.n)
+                .is_some_and(|s| s.h != self.metrics.status_h as u32);
+            if stale {
+                self.retire(st.n);
+            }
+        }
+        self.reconcile();
+    }
+
+    /// The re-derivation after a geometry change (`mode`): the same
+    /// millimetres over new pixels is a new DPI -- unless a verb/chord
+    /// override is in force, which stands until `scale auto`.
+    fn rescale_after_mode(&mut self) {
+        if self.scale_override.is_none() {
+            let p = self.derive_scale();
+            self.apply_scale(p, "mode");
+        }
+    }
+
     /// H-3d: the status strip -- the display's bottom `status_h` rows
     /// (Daylight 6/8: == the tag bar's height, one vertical unit) -- while a
     /// status bar is registered. The layout is recomputed above it.
     fn status_rect(&self) -> Option<Rect> {
         self.status?;
-        let unit = libhalcyon::theme::METRICS.status_h as u32;
+        let unit = self.metrics.status_h as u32;
         let (dw, dh) = (self.gpu.width, self.gpu.height);
         if dh <= unit || dw == 0 {
             return None;
@@ -4451,9 +4566,23 @@ impl Comp {
         // display width by the one vertical unit -- never cropped or
         // letterboxed (HALCYON.md 13.6). Judged before the weave allocation.
         if is_status {
-            let unit = libhalcyon::theme::METRICS.status_h as u32;
+            let unit = self.metrics.status_h as u32;
             if self.status.is_some() || w != disp_w || h != unit || disp_h <= unit {
                 return Err(p9::E_INVAL);
+            }
+            // The display's bar belongs to whoever owns the display. While a
+            // session is declared, a SYSTEM principal -- the console
+            // renderer, which is backgrounded and showing nothing -- may not
+            // TAKE the slot. Retiring its bar at the declare is necessary and
+            // NOT sufficient on its own: the console sees the CLOSE, re-arms
+            // on the very relayout that retire causes, and races the session
+            // for the slot it was just relieved of. Whoever wins is then the
+            // owner, which is a coin toss deciding whether the user has a
+            // status bar. Refused here, the console simply stays bar-less
+            // while it is invisible and re-mints from the relayout that
+            // foregrounds it at logout.
+            if !self.session_conns.is_empty() && !principal_is_session(s.owner_principal) {
+                return Err(p9::E_PERM);
             }
         }
         // H-3b-2: a chrome binding names a LIVE LEAF (E_NOENT otherwise),
@@ -4491,6 +4620,7 @@ impl Comp {
         s.is_menu = is_menu;
         s.is_status = is_status;
         let gen = s.gen;
+        let owner_p = s.owner_principal;
         if is_status {
             // H-3d: the status bar is neither hosted nor pane-bound -- its
             // bind is the display. Registering it carves the layout
@@ -4500,11 +4630,16 @@ impl Comp {
             self.status = Some(StatusState { n, gen });
             #[cfg(feature = "test-mode")]
             say!(
-                "tapestryd: status bar {} created ({}x{}); the display carves {}",
+                // The owner's principal is on the line because without it the
+                // log cannot answer "whose bar is this?" -- and with two
+                // halcyonds alive (a console renderer and a session), that is
+                // exactly the question a status-bar failure poses.
+                "tapestryd: status bar {} created ({}x{}) for principal {}; the display carves {}",
                 n,
                 w,
                 h,
-                libhalcyon::theme::METRICS.status_h
+                owner_p,
+                self.metrics.status_h
             );
             self.reconcile();
             return Ok(());
@@ -5149,7 +5284,7 @@ impl Comp {
         // process lifetime.
         unsafe {
             for i in 0..(dw * dh) as usize {
-                *px.add(i) = pane::BG_COLOR;
+                *px.add(i) = self.theme.blank;
             }
         }
         let _ = self.paint_borders(true);
@@ -5309,13 +5444,13 @@ impl Comp {
                 }
                 let tb = p.tagbar.intersect(r);
                 if !tb.is_empty() {
-                    fills.push((tb, libhalcyon::theme::DAYLIGHT.header));
+                    fills.push((tb, self.theme.header));
                 }
                 match &p.kind {
                     pane::Kind::Leaf { surface: None } => {
                         let c = p.content.intersect(r);
                         if !c.is_empty() {
-                            fills.push((c, pane::BG_COLOR));
+                            fills.push((c, self.theme.blank));
                         }
                     }
                     // The bars around a letterboxed or cropped surface are
@@ -5328,7 +5463,7 @@ impl Comp {
                         for bar in Self::bars_around(c, inner) {
                             let b = bar.intersect(r);
                             if !b.is_empty() {
-                                fills.push((b, pane::BG_COLOR));
+                                fills.push((b, self.theme.blank));
                             }
                         }
                     }
@@ -5345,7 +5480,7 @@ impl Comp {
             if let Some(sr) = self.status_rect() {
                 let i = sr.intersect(r);
                 if !i.is_empty() {
-                    fills.push((i, libhalcyon::theme::DAYLIGHT.status_bg));
+                    fills.push((i, self.theme.status_bg));
                 }
             }
             for (fr, color) in fills {
@@ -5417,7 +5552,7 @@ impl Comp {
         let inner = self.placement_rect(n, c).unwrap_or(Rect::ZERO);
         for bar in Self::bars_around(c, inner) {
             if !bar.is_empty() {
-                self.fill_rect(bar, pane::BG_COLOR);
+                self.fill_rect(bar, self.theme.blank);
             }
         }
         self.screen_flush_rect(c);
@@ -5558,7 +5693,8 @@ impl Comp {
     }
 
     fn paint_borders(&mut self, fill_tagbars: bool) -> Vec<Rect> {
-        use libhalcyon::theme::{DAYLIGHT as D, METRICS as M};
+        let th = self.theme;
+        let th = &th;
         let mut painted: Vec<Rect> = Vec::new();
         let dw = self.gpu.width as u64;
         let va = match &self.screen {
@@ -5567,8 +5703,8 @@ impl Comp {
         };
         let px = va as *mut u32;
         let focused = self.layout.focused;
-        let bevel = M.bevel as u32;
-        let hair = M.hairline as u32;
+        let bevel = self.metrics.bevel as u32;
+        let hair = self.metrics.hairline as u32;
         // H-3d: the status strip's resting fill (`status_bg`, Daylight 6):
         // the bar is dark from the carve on, before and between the
         // renderer's presents (its OPAQUE Role::Status surface composites on
@@ -5580,7 +5716,7 @@ impl Comp {
                 for y in sr.y..sr.y + sr.h {
                     for x in sr.x..sr.x + sr.w {
                         unsafe {
-                            *px.add((y as u64 * dw + x as u64) as usize) = D.status_bg;
+                            *px.add((y as u64 * dw + x as u64) as usize) = th.status_bg;
                         }
                     }
                 }
@@ -5594,19 +5730,19 @@ impl Comp {
         let ring_color = |dl: u32, dr: u32, dt: u32, db: u32, floor_w: u32| -> u32 {
             let d = dl.min(dr).min(dt).min(db);
             if d < floor_w {
-                D.floor
+                th.floor
             } else if d < floor_w + bevel {
                 if dt == d {
-                    D.bevel_top
+                    th.bevel_top
                 } else if db == d {
-                    D.bevel_bottom
+                    th.bevel_bottom
                 } else if dl == d {
-                    D.bevel_left
+                    th.bevel_left
                 } else {
-                    D.bevel_right
+                    th.bevel_right
                 }
             } else {
-                D.header // the inner hairline (section 2.4, == header)
+                th.header // the inner hairline (section 2.4, == header)
             }
         };
         for (slot, _id) in self.layout.live_ids() {
@@ -5644,8 +5780,8 @@ impl Comp {
             // not.
             let live: Option<(u32, u32)> = if slot == focused {
                 let k = match p.status {
-                    Status::Err => &D.cinnabar,
-                    _ => &D.sage,
+                    Status::Err => &th.cinnabar,
+                    _ => &th.sage,
                 };
                 Some((k.key, k.tint))
             } else {
@@ -5663,7 +5799,12 @@ impl Comp {
                         let dr = (x1 - 1) - x;
                         let d = dl.min(dr).min(dt).min(db);
                         let c = match live {
-                            Some((key, tint)) if d == hair_d => {
+                            // The hairline band is `hair` px wide (Metrics::at:
+                            // 1 at 1.0, 2 from 150%): the key/tint covers ALL of
+                            // it, never one ring of it (at 2.0 the second ring
+                            // stayed `header` -- the profile the compose gate
+                            // reads at 200% caught it).
+                            Some((key, tint)) if d >= hair_d && d < hair_d + hair => {
                                 if !tb.is_empty() && y < content_y {
                                     tint
                                 } else {
@@ -5691,10 +5832,16 @@ impl Comp {
                                            // a zero-gap config skips it (focus still shows in the strip +
                                            // the H-3b status key).
             if slot == focused && floor_w >= 1 {
-                let sy = y1 - floor_w; // innermost floor row (d == floor_w-1)
-                for x in (r.x + floor_w)..(x1 - floor_w) {
-                    unsafe {
-                        *px.add((sy as u64 * dw + x as u64) as usize) = D.border;
+                // A hairline at the scale (COMPOSITION 1; the scale round's
+                // F5): `hair` floor rows from the innermost (d == floor_w-1)
+                // outward, bounded by the floor itself.
+                let band = hair.min(floor_w);
+                for row in 0..band {
+                    let sy = y1 - floor_w + row;
+                    for x in (r.x + floor_w)..(x1 - floor_w) {
+                        unsafe {
+                            *px.add((sy as u64 * dw + x as u64) as usize) = th.border;
+                        }
                     }
                 }
             }
@@ -5704,7 +5851,7 @@ impl Comp {
             // hairline+strip read as one header band). halcyond's OPAQUE
             // Role::Chrome surface composites ON TOP when present (H-3b-3);
             // absent it (aurora, or before halcyond binds) the strip is never
-            // bare BG_COLOR. Inside the ring, above `content` -- disjoint from
+            // the bare blank fill. Inside the ring, above `content` -- disjoint from
             // the bands and the shadow. STRUCTURAL repaints only
             // (`fill_tagbars`): a focus-only repaint changes nothing in the
             // strip, and refilling + pushing it there would paint over a
@@ -5714,7 +5861,7 @@ impl Comp {
                 for y in tb.y..tb.y + tb.h {
                     for x in tb.x..tb.x + tb.w {
                         unsafe {
-                            *px.add((y as u64 * dw + x as u64) as usize) = D.header;
+                            *px.add((y as u64 * dw + x as u64) as usize) = th.header;
                         }
                     }
                 }
@@ -5786,16 +5933,17 @@ impl Comp {
             if n == 0 {
                 continue;
             }
+            let theme = self.theme;
             let seg_color = |i: usize| {
-                use libhalcyon::theme::DAYLIGHT as D;
+                let th = &theme;
                 if i == active {
                     if hot == Some(children[i]) {
-                        D.ember
+                        th.ember
                     } else {
-                        D.ember_deep
+                        th.ember_deep
                     }
                 } else {
-                    D.header
+                    th.header
                 }
             };
             match mode {
@@ -5808,7 +5956,13 @@ impl Comp {
                         } else {
                             each
                         };
-                        let gap = if i as u32 == n - 1 || w == 0 { 0 } else { 1 };
+                        // The segment gap is a hairline at the scale (the
+                        // scale round's F5), never wider than the segment.
+                        let gap = if i as u32 == n - 1 || w == 0 {
+                            0
+                        } else {
+                            (self.metrics.hairline as u32).min(w)
+                        };
                         fill(
                             Rect {
                                 x,
@@ -5822,7 +5976,7 @@ impl Comp {
                     }
                 }
                 Mode::Stacked => {
-                    let row_h = libhalcyon::theme::METRICS.tab_strip_h as u32;
+                    let row_h = self.metrics.tab_strip_h as u32;
                     for (i, _) in children.iter().enumerate() {
                         fill(
                             Rect {
@@ -5970,7 +6124,7 @@ impl Comp {
             Vec::new()
         };
         self.layout.apply_backgrounded(&bg_tiling);
-        self.layout.recompute(dw, layout_h, self.chords.gaps);
+        self.layout.recompute(dw, layout_h, self.chords.gaps, self.metrics);
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
@@ -6109,8 +6263,13 @@ impl Comp {
         };
 
         match want {
-            Scanout::Boot => {}
+            // Nothing showable in either arm: a client coming up reads the
+            // ctl at its start and again at its first relayout.
+            Scanout::Boot => {
+                self.rescale_fan_due = false;
+            }
             Scanout::Off => {
+                self.rescale_fan_due = false;
                 if self.pending_direct.is_some() {
                     say!("tapestryd: scanout off clears pending-direct");
                 }
@@ -6123,7 +6282,21 @@ impl Comp {
             Scanout::Direct(n) => {
                 if self.scanout == Scanout::Direct(n) {
                     self.pending_direct = None;
-                } else if self.pending_direct != Some(n) {
+                    // This arm has no geometry to move, so a scale change
+                    // would fan nothing (the scale round's F3): the redraw
+                    // request + the session's TEV_LAYOUT ride here.
+                    if core::mem::take(&mut self.rescale_fan_due) {
+                        self.fan_scale_redraw_direct(n, dw, dh);
+                    }
+                } else if self.pending_direct == Some(n) {
+                    // Pending, and a scale change landed meanwhile: the
+                    // edge's CONFIGURE may already have been consumed at the
+                    // old scale -- a fresh redraw request (same size; a
+                    // still-queued one is replaced).
+                    if core::mem::take(&mut self.rescale_fan_due) {
+                        self.fan_scale_redraw_direct(n, dw, dh);
+                    }
+                } else {
                     // Defer to n's next present-COMPLETE (F16). Until then
                     // the current scanout (composed frame / boot pattern)
                     // stays -- transitional content, compositor policy.
@@ -6138,6 +6311,13 @@ impl Comp {
                     self.pending_bind_refused_said = false; // new episode
                     if !self.emit_configure_to(n, dw, dh) {
                         self.retire(n); // wedged; retire clears pending
+                    } else if core::mem::take(&mut self.rescale_fan_due) {
+                        // The edge's CONFIGURE is the redraw request already;
+                        // the session's TEV_LAYOUT is still owed, and the
+                        // emission is said for the gate.
+                        let serial = self.surf(n).map_or(0, |s| s.cfg_serial);
+                        say!("tapestryd: scale fan direct {} configure serial {}", n, serial);
+                        self.notify_session_layout();
                     }
                 }
             }
@@ -6151,7 +6331,13 @@ impl Comp {
                 }
                 let entering = self.scanout != Scanout::Composed;
                 let sig = self.calc_geom_sig();
-                let structural = entering || sig != self.geom_sig;
+                // A scale change is structural whatever the geometry did
+                // (the scale round's F3): a lone leaf under a menu keeps its
+                // full content rect, and the fan below is the only way its
+                // follower learns the new percent. Consumed here, after
+                // `ensure_screen` -- a degraded pass keeps it for the next.
+                let rescaled = core::mem::take(&mut self.rescale_fan_due);
+                let structural = entering || sig != self.geom_sig || rescaled;
                 if structural {
                     // Structural: full repaint, then every visible pane
                     // pre-filled from its client's last-presented slot
@@ -6929,6 +7115,23 @@ impl Comp {
         }
     }
 
+    /// HALCYON-SCALE 5 (the scale round's F3): the Direct arm carves
+    /// nothing and fans nothing, so a scale change there reached its
+    /// follower only at the next unrelated relayout. The redraw CONFIGURE
+    /// (same-size by construction: Direct requires the surface
+    /// display-sized) + the session's TEV_LAYOUT; said with the serial so a
+    /// gate can witness the emission -- a same-size CONFIGURE is never
+    /// acked, so the queueing is the observable half.
+    fn fan_scale_redraw_direct(&mut self, n: usize, dw: u32, dh: u32) {
+        if !self.emit_configure_to(n, dw, dh) {
+            self.retire(n); // wedged; retire reconciles
+            return;
+        }
+        let serial = self.surf(n).map_or(0, |s| s.cfg_serial);
+        say!("tapestryd: scale fan direct {} configure serial {}", n, serial);
+        self.notify_session_layout();
+    }
+
     /// Fan one TEV_LAYOUT to the declared session conn (its lowest-slot
     /// surface) outside a reconcile: a tree-state change with no geometry
     /// in it (a reservation release). A push that wedges retires the
@@ -6968,6 +7171,19 @@ impl Comp {
             .hosted_leaves()
             .iter()
             .any(|&(_, n)| self.surf(n).is_some_and(|s| s.owner_conn == conn))
+    }
+
+    /// Is the pane with public id `id` a leaf whose hosted surface `conn`
+    /// owns? False for an unknown id, a container, an empty leaf, and a
+    /// leaf hosted by any other conn.
+    fn leaf_hosted_by_conn(&self, id: u32, conn: u64) -> bool {
+        self.layout.slot_of_id(id).is_some_and(|slot| {
+            self.layout.is_leaf(slot)
+                && self
+                    .layout
+                    .leaf_surface(slot)
+                    .is_some_and(|n| self.surf(n).is_some_and(|s| s.owner_conn == conn))
+        })
     }
 
     /// H-4b-2: reap a departed session's empty scaffolding. `retire_conn`
@@ -7714,6 +7930,21 @@ impl Comp {
     /// reconciles; a no-op (edge/degenerate) does not.
     fn exec_chord(&mut self, action: ChordAction) {
         match action {
+            // HALCYON-SCALE 6: the live scale controls (Super+= / Super+- /
+            // Super+0 by default). A chord acts in the compositor, so no
+            // admission; the step is clamped, the reset re-derives.
+            ChordAction::ScaleStep(dir) => {
+                let p = scale::step(self.scale, dir);
+                if p != self.scale {
+                    self.scale_override = Some(p);
+                    self.apply_scale(p, "chord");
+                }
+            }
+            ChordAction::ScaleReset => {
+                self.scale_override = None;
+                let p = self.derive_scale();
+                self.apply_scale(p, "chord-reset");
+            }
             ChordAction::FocusDir(d) => {
                 if self.layout.focus_dir(d) {
                     self.reconcile();
@@ -13817,9 +14048,10 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "display {} {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\nmenu {}\n",
+                    "display {} {}\nscale {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\nmenu {}\n",
                     comp.gpu.width,
                     comp.gpu.height,
+                    comp.scale,
                     comp.live_count(),
                     comp.clock_hz,
                     comp.tick,
@@ -15802,6 +16034,23 @@ impl Conn {
             || s.starts_with("probe-screen ")
     }
 
+    /// The leaf id of a WELL-FORMED tile-status verb (`tag <id> status
+    /// ok|err|resting`, nothing more); None for anything else, so the
+    /// session admission never reaches past a verb the handler would
+    /// refuse anyway.
+    fn status_verb_leaf(s: &str) -> Option<u32> {
+        let mut it = s.strip_prefix("tag ")?.split_ascii_whitespace();
+        let id: u32 = it.next()?.parse().ok()?;
+        if it.next() != Some("status") {
+            return None;
+        }
+        Status::parse(it.next()?)?;
+        if it.next().is_some() {
+            return None;
+        }
+        Some(id)
+    }
+
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
@@ -15846,11 +16095,83 @@ impl Conn {
                             self.conn_id
                         );
                         comp.session_conns.clear();
+                        // What the seat minted goes with the seat: the idle
+                        // holder's status bar (the ONE per-display carve,
+                        // which would else refuse the successor's for as
+                        // long as the idle conn lived) and its menu. Its
+                        // chrome binds are pane-owner-gated, not seat-gated,
+                        // and stay.
+                        let minted: Vec<usize> = (0..MAX_SURFACES)
+                            .filter(|&n| {
+                                comp.surf(n).is_some_and(|s| {
+                                    s.owner_conn == other && (s.is_status || s.is_menu)
+                                })
+                            })
+                            .collect();
+                        for n in minted {
+                            say!(
+                                "tapestryd: session takeover retires surface {} of conn {}",
+                                n,
+                                other
+                            );
+                            comp.retire(n);
+                        }
+                    }
+                    // H-3d + 14.12: the ONE per-display status bar is
+                    // first-come, and the display has just changed hands.
+                    // The console renderer mints its bar at startup and is
+                    // BACKGROUNDED the instant a session hosts a leaf --
+                    // invisible, yet still holding the slot, so the session
+                    // compositor's own `create role=status` is refused for
+                    // as long as the console lives. That is the same denial
+                    // the session-to-session takeover above retires for,
+                    // one case short: a SYSTEM-to-session handover is a
+                    // handover too. The console drops the surface on its
+                    // CLOSE and re-mints from the relayout that foregrounds
+                    // it again at logout, so this is a loan, not a seizure.
+                    // Keyed on the OWNER'S PRINCIPAL, never on backgrounded
+                    // (which is a per-leaf flag the display-bound bar never
+                    // carries) and never on the conn (the console's is a
+                    // different conn by construction, but so is a second
+                    // session's, which the block above already handled).
+                    if let Some(st) = comp.status {
+                        if comp
+                            .surf(st.n)
+                            .is_some_and(|s| !principal_is_session(s.owner_principal))
+                        {
+                            say!(
+                                "tapestryd: session declare retires the system status bar (surface {})",
+                                st.n
+                            );
+                            comp.retire(st.n);
+                        }
                     }
                     comp.session_conns.push((self.conn_id, self.peer_principal));
                     say!("tapestryd: session declared by conn {}", self.conn_id);
                 }
-                "off" => comp.session_conns.retain(|&(c, _)| c != self.conn_id),
+                "off" => {
+                    comp.session_conns.retain(|&(c, _)| c != self.conn_id);
+                    // The mirror of the declare above, and TY-6 F7: a seat
+                    // that gives the display back must give the display's
+                    // status bar back with it. Without this the departing
+                    // session's bar outlives its seat -- `session_conns`
+                    // is empty so the E_PERM refusal lifts, but
+                    // `comp.status` still names the live surface, so the
+                    // console's re-mint is E_INVAL for the life of that
+                    // conn and the bar stops following the display in
+                    // exactly the shape this rule exists to prevent.
+                    // (`retire_conn` already covers the ordinary logout;
+                    // this is the conn that stays alive.)
+                    if let Some(st) = comp.status {
+                        if comp.surf(st.n).is_some_and(|s| s.owner_conn == self.conn_id) {
+                            say!(
+                                "tapestryd: session release retires its status bar (surface {})",
+                                st.n
+                            );
+                            comp.retire(st.n);
+                        }
+                    }
+                }
                 _ => return Err(p9::E_INVAL),
             }
             comp.reconcile();
@@ -15870,16 +16191,68 @@ impl Conn {
         let session_menu_verb = s.starts_with("menu ")
             && comp.session_declared(self.conn_id)
             && comp.conn_hosts(self.conn_id);
-        if !Self::is_ungated_ctl(s) && !self.peer_is_renderer() && !session_menu_verb {
+        // The tile status (`tag <id> status ok|err|resting`) is ALSO the
+        // DECLARED session compositor's, for a leaf THIS CONN HOSTS: the
+        // party hosting a tile is the one that knows how its last command
+        // ended (its transcript's exit mark), exactly as the renderer is for
+        // the console tile. Resolved BEFORE the gate, so a malformed verb, a
+        // foreign or empty leaf, or an undeclared conn all still meet the
+        // default deny -- a client can never record a status on a tile it
+        // does not host, which is the lie the gate exists to refuse.
+        let session_status_verb = s.starts_with("tag ")
+            && comp.session_declared(self.conn_id)
+            && Self::status_verb_leaf(s).is_some_and(|id| comp.leaf_hosted_by_conn(id, self.conn_id));
+        // HALCYON-SCALE 4: the display scale is the SEAT's -- the renderer
+        // unconditionally, the declared session compositor while it hosts
+        // (the seat-held-while-hosting rule the menu and the status bar
+        // carry). A per-process client rescaling another principal's
+        // display is the cfg-3 lie this refuses.
+        let session_scale_verb = s.starts_with("scale ")
+            && comp.session_declared(self.conn_id)
+            && comp.conn_hosts(self.conn_id);
+        if !Self::is_ungated_ctl(s)
+            && !self.peer_is_renderer()
+            && !session_menu_verb
+            && !session_status_verb
+            && !session_scale_verb
+        {
             return Err(p9::E_PERM);
+        }
+        if let Some(rest) = s.strip_prefix("scale ") {
+            // `scale auto` re-derives (the declaration, else the EDID);
+            // `scale <pct>` is one of the five values or E_INVAL. Budgeted
+            // like a layout verb: it IS one (a structural relayout).
+            let rest = rest.trim();
+            self.layout_verb_budget()?;
+            if rest == "auto" {
+                comp.scale_override = None;
+                let p = comp.derive_scale();
+                comp.apply_scale(p, "auto");
+                return Ok(());
+            }
+            let pct: u16 = rest.parse().map_err(|_| p9::E_INVAL)?;
+            if !scale::is_valid_pct(pct) {
+                return Err(p9::E_INVAL);
+            }
+            comp.scale_override = Some(pct);
+            comp.apply_scale(pct, "verb");
+            return Ok(());
         }
         if s == "mode auto" {
             // Re-probe the host's preferred rect and adopt it (base
             // virtio-gpu reports one rect, not a mode list). Absent or
-            // probe-failed: fail soft, current mode stands.
+            // probe-failed: fail soft, current mode stands. The EDID is
+            // re-queried with it (a hotplug is the one time it changes).
             let probed = comp.gpu.query_display_info().ok().flatten();
             return match probed {
-                Some((w, h)) => comp.set_mode(w, h),
+                Some((w, h)) => {
+                    let r = comp.set_mode(w, h);
+                    if r.is_ok() {
+                        comp.gpu.edid_mm = comp.gpu.query_edid().unwrap_or(None);
+                        comp.rescale_after_mode();
+                    }
+                    r
+                }
                 None => Err(p9::E_AGAIN),
             };
         }
@@ -15898,7 +16271,13 @@ impl Conn {
             if it.next().is_some() {
                 return Err(p9::E_INVAL);
             }
-            return comp.set_mode(w, h);
+            // HALCYON-SCALE 4: new pixels over the same millimetres is a
+            // new DPI -- re-derive unless a verb/chord override stands.
+            let r = comp.set_mode(w, h);
+            if r.is_ok() {
+                comp.rescale_after_mode();
+            }
+            return r;
         }
         if let Some(rate) = s.strip_prefix("clock-rate ") {
             let hz: u32 = rate.trim().parse().map_err(|_| p9::E_INVAL)?;
@@ -16174,8 +16553,30 @@ impl Conn {
             }
             let host = match (role, bind) {
                 (Role::Content, None) => Host::Content { claim },
+                // The DECLARED session compositor (HALCYON.md 14.12, the
+                // user's rio) decorates ITS OWN tiles: a chrome bind is
+                // admitted from it only for a pane the session's principal
+                // owns (`pane_owner_principal`, the H-4b pane-authority
+                // axis) -- so a session can never overlay chrome on another
+                // client's pane, which is the exact threat the renderer gate
+                // closes; the renderer keeps its unconditional admission.
                 (Role::Chrome, Some(pid)) => {
-                    if !self.peer_is_renderer() {
+                    // An occupied leaf's owner is its hosted surface's; an
+                    // empty leaf's the recorded pane owner (H-4b-2).
+                    let admitted = self.peer_is_renderer()
+                        || match self.actor() {
+                            Actor::Session(p) => comp.layout.slot_of_id(pid).is_some_and(|slot| {
+                                comp.session_declared(self.conn_id)
+                                    && match comp.layout.leaf_surface(slot) {
+                                        Some(n) => {
+                                            comp.surf(n).is_some_and(|s| s.owner_principal == p)
+                                        }
+                                        None => comp.layout.pane_owner_principal(slot) == p,
+                                    }
+                            }),
+                            _ => false,
+                        };
+                    if !admitted {
                         return Err(p9::E_PERM);
                     }
                     Host::Chrome { bind: pid }
@@ -16183,9 +16584,15 @@ impl Conn {
                 // H-3d: the status bar takes no bind (its bind is the
                 // display); renderer-gated like every chrome -- an ungated
                 // status role would let any client carve the display and
-                // own the one bar that speaks for the system.
+                // own the one bar that speaks for the system. The declared
+                // session compositor is admitted while it HOSTS (the seat
+                // held only while hosting, as for the menu arm below): it
+                // took the display, so the bar that speaks for it is its
+                // own; an idle declarer carves nothing.
                 (Role::Status, None) => {
-                    if !self.peer_is_renderer() {
+                    if !self.peer_is_renderer()
+                        && !(comp.session_declared(self.conn_id) && comp.conn_hosts(self.conn_id))
+                    {
                         return Err(p9::E_PERM);
                     }
                     Host::Status

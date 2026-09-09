@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 91
+## Open seams: 90
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -87,7 +87,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-larder-shrinker]] (sub-kernel-larder)
 - [[seam-larder-stale-child-attr]] (sub-kernel-larder)
 - [[seam-legate-member-sweep-race]] (sub-kernel-proc)
-- [[seam-login-halcyond-fallback]] (sub-stratum-session)
 - [[seam-loom-rearm-needs-blocking-enter]] (sub-kernel-loom)
 - [[seam-loom-sqpoll-p3s]] (sub-kernel-loom, sub-kernel-poll)
 - [[seam-mm-directmap-cap-absolute]] (sub-kernel-mm-phys)
@@ -133,11 +132,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-07 [[chg-2026-09-07-aurora-doc-absorb]] — absorb docs/reference/140-aurora (the fbcon + /dev/cons drain/feed, G-4): clean redirect + sharpen the cfg-3 F1 attribution in sub-aurora
+- 2026-09-07 [[chg-2026-09-07-author-sdl-port]] — author the ports plane: sub-sdl-port (audit:hard, I-42 CAP_JIT + W-3e Vulkan) + sub-tyrquake (audit:light)
+- 2026-09-07 [[chg-2026-09-07-boot-banner-s7-nora-probe]] — abi-boot-banner: declare the s7-nora-probe.exp gate (mirrors 28 -> 29; EXTINCTION deliverers 24 -> 25)
 - 2026-09-07 [[chg-2026-09-07-diorama-doc-absorb]] — absorb docs/reference/141-diorama (the synthetic Linux world): fold the SA-4 vDSO fast-path + the MIDR-0x00 harness lesson + diorama-probe into sub-diorama
 - 2026-09-07 [[chg-2026-09-07-go-port-doc-absorb]] — absorb docs/reference/133-go-port (GOOS=thylacine capability map): fold the Loom SETATTR truncate-only fail-close into sub-kernel-loom; fork is external
 - 2026-09-07 [[chg-2026-09-07-halcyond-doc-absorb]] — absorb docs/reference/150-halcyond (the Halcyon environment client): clean redirect -- sub-halcyond is fresh, audit:hard, all audit anchors covered
 - 2026-09-07 [[chg-2026-09-07-jit-doc-absorb]] — absorb docs/reference/145-jit (the JIT capability, I-42): fold the I-cache contract (CL-7k-3 F1 create-invalidate + the cross-PE ISB publish contract) into sub-kernel-mmu
 - 2026-09-07 [[chg-2026-09-07-kaua-doc-absorb]] — absorb docs/reference/112-kaua (the console TUI substrate): clean redirect to sub-kaua (ahead of the doc's stale Status table)
-- 2026-09-07 [[chg-2026-09-07-libdriver-doc-absorb]] — absorb docs/reference/118-libdriver (the Menagerie driver framework, I-34): clean redirect to sub-libdriver-grant + sub-libdriver-discovery (grant AHEAD of the doc)
-- 2026-09-07 [[chg-2026-09-07-libhalcyon-doc-absorb]] — absorb docs/reference/151-libhalcyon (the Halcyon environment library): fold the UNOWNED halcyon tool + tag.rs into sub-libhalcyon
 <!-- generated:end -->

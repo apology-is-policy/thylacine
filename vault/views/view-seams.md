@@ -15,6 +15,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-848-pivot-walk-race]] | closed | sub-kernel-ninep-attach | fnd-16c-r1-f6 | task #848 |
 | [[seam-90-death-half]] | closed | sub-kernel-ninep-client | fnd-8c3-r1-f1 | task #90 |
 | [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
+| [[seam-login-halcyond-fallback]] | closed | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
 | [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
@@ -68,7 +69,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-larder-shrinker]] | open | sub-kernel-larder | fnd-29-r1-f1 |  |
 | [[seam-larder-stale-child-attr]] | open | sub-kernel-larder | fnd-l1f-r1-f3 |  |
 | [[seam-legate-member-sweep-race]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
-| [[seam-login-halcyond-fallback]] | open | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
 | [[seam-loom-rearm-needs-blocking-enter]] | open | sub-kernel-loom | chg-2026-08-02-async-sweep |  |
 | [[seam-loom-sqpoll-p3s]] | open | sub-kernel-loom, sub-kernel-poll | fnd-kt1-r1-a1 | memory bug_loom_poll_substrate_p3s.md; the KT-1 audit round 1 (A-F1..A-F4) |
 | [[seam-mm-directmap-cap-absolute]] | open | sub-kernel-mm-phys | chg-2026-05-31-808-directmap-pagemap | #808 audit F2; Lazarus board bringup |

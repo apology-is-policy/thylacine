@@ -121,11 +121,20 @@ lc_login michael correct-horse-battery-staple-v1
 lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
 lc_run_expect "ls -l /lib/aurora; pwd" "/home/michael"
 
-# The pixel proof: the dominant color of a center rect IS the parchment
-# ground (242,235,224) -- aurora's Bonfire dark can never produce it -- and
-# ink exists on top (off > 0 alone would pass an unpainted buffer; require
-# real text mass).
-set v [region 200 150 1080 650]
+# The pixel proof: the dominant color of a rect over the transcript's
+# newest third IS the parchment ground (242,235,224) -- aurora's Bonfire
+# dark can never produce it -- and ink exists on top (off > 0 alone would
+# pass an unpainted buffer; require real text mass). The LOWER band, not the
+# display's centre: on this lever the transcript opens with the mirrored
+# boot log, which the composition round's class rule renders as a raw
+# island on the `header` ground (206,196,182), and the view is bottom-
+# anchored, so how much of that island the centre band sees depends on how
+# many rows the session has produced below it. The centre-band form passed
+# only while a per-paint say line was padding the transcript (the chrome-
+# content round's observer-effect bug); with that fixed it read header-
+# dominant on three boots straight -- a measurement keyed on content
+# history, not on the property it claims.
+set v [region 200 450 1080 760]
 if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off total dr dg db]} {
     lc_fail "gfx_region verdict unparseable: $v"
 }
@@ -140,8 +149,12 @@ lc_pass "halcyon: parchment ground + ink ($off/$total non-ground px, dom $dr,$dg
 # The reflow E2E: full grid -> compositor split (REAL Super+H over QMP) ->
 # halcyond reflows + re-reports -> zoom restores. The winsize read is the
 # kernel-visible witness of the CONFIGURE path end to end.
-lc_run_expect "cat /dev/winsize" "winsize 128 "
-lc_pass "halcyon: full-width mono grid reported (128 cols)"
+lc_run_expect "cat /dev/winsize" "winsize 213 "
+# The full-width column count, the reference every halved-grid check below
+# derives from (a literal range written for one cell size rots the day the
+# cell changes -- it did, at 6 px).
+set full_cols 213
+lc_pass "halcyon: full-width mono grid reported ($full_cols cols: the 6-px island cell, one mono size)"
 
 # H-3d: THE STATUS BAR (HALCYON.md 13.6; Daylight 6). halcyond mints ONE
 # Role::Status surface once the console is up; the compositor carves the
@@ -152,12 +165,13 @@ lc_pass "halcyon: full-width mono grid reported (128 cols)"
 # is outside the transcript). Pixels: the strip's left end is the bar's own
 # dark (status_bg 26,18,10) and the active workspace indicator is ember
 # (224,120,64) -- colours nothing else on this screen is painted -- and the
-# condition dot follows the console's last exit: cinnabar (152,40,24) after
-# a failing command (a quiet `grep -q` miss: exit 1 with no operand error --
-# the sanity control below greps for that wording), sage (30,88,68) after a
-# passing one, in step with the live tile. The context slot carries the console's directory (ut's OSC 7)
-# and its running-or-last command (ut's cmd mark) -- checked at the end by
-# tgrep, order-independent.
+# condition (the turnstile + its label) follows the console's last exit:
+# cinnabar (152,40,24) after a failing command (a quiet `grep -q` miss: exit
+# 1 with no operand error -- the sanity control below greps for that
+# wording), ember after a passing one (the operator's mockups: sage does not
+# read on the dark bar), in step with the live tile. The context slot
+# carries the console's directory (ut's OSC 7) and its running-or-last
+# command (ut's cmd mark) -- checked at the end by tgrep, order-independent.
 lc_send "cat /dev/tapestry/ctl"
 set dispw 0; set disph 0
 expect {
@@ -198,8 +212,17 @@ strip_want [expr {$dispw - 6}] [expr {$sy + 2}] [expr {$dispw - 1}] [expr {$sy +
 strip_want 9 [expr {$sy + 5}] 13 [expr {$sy + 15}] 224 120 64 "the active workspace indicator (ember)" 0
 lc_pass "halcyon: the status bar is dark at both ends with the ember workspace indicator at the left"
 # A failing command -> the live tile AND the bar's condition go cinnabar
-# (the same record); a passing one -> sage. The painted line carries the
-# condition slot's rect (the dot is its left 8px).
+# (the same record); a passing one -> the good state. The painted line
+# carries the condition slot's rect: the turnstile + its label (`⊢ exit 1`
+# / `⊢ ok`) in the key's ink. Glyphs are ANTIALIASED (the island bake's
+# turnstile too -- measured: 3 px within a 24-box of the ink, 34 within 80),
+# so the leg counts the pixels ON the blend line from the bar's dark to the
+# ink (gfx_region.py --ink: at least half the ink, a tight residual) AND
+# requires NONE on the other state's line in the same slot -- ink of any
+# colour would pass a slot painted the wrong state, a box tolerance wide
+# enough for the blends also catches the other ink (ember and cinnabar sit
+# within 80 of each other), and a dominant-colour verdict cannot see a
+# glyph at all (the slot is mostly the bar's dark).
 proc status_painted {want_cond what} {
     global timeout lc_cmd_timeout
     set timeout $lc_cmd_timeout
@@ -210,19 +233,44 @@ proc status_painted {want_cond what} {
         timeout { lc_fail "$what: no status bar painted line with condition $want_cond" }
     }
 }
+# Pixels of a screendump rect on the blend line from the bar's dark
+# (status_bg 26,18,10) to the ink (r,g,b): the antialiased-glyph witness.
+proc ink_of {x0 y0 x1 y1 r g b} {
+    global repo qmp
+    set out /tmp/ls-halcyon-[pid].png
+    file delete -force $out
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return -1 }
+    if {![file exists $out]} { return -1 }
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py --ink $out $x0 $y0 $x1 $y1 26 18 10 $r $g $b} n]} { return -1 }
+    return $n
+}
+# The condition slot [cx, cx+cw) across the bar's middle 16 rows must carry
+# >= 6 px of the (r,g,b) ink and 0 px of the (nr,ng,nb) ink; retried across
+# the paint (the say line precedes the present).
+proc cond_want {cx cw smid r g b nr ng nb what} {
+    set n -1; set m -1
+    for {set i 0} {$i < 12} {incr i} {
+        set n [ink_of $cx [expr {$smid - 8}] [expr {$cx + $cw}] [expr {$smid + 8}] $r $g $b]
+        set m [ink_of $cx [expr {$smid - 8}] [expr {$cx + $cw}] [expr {$smid + 8}] $nr $ng $nb]
+        if {$n >= 6 && $m == 0} { return $n }
+        after 500
+    }
+    lc_fail "$what: the condition slot $cx+$cw never read >= 6 px of the $r,$g,$b ink with none of $nr,$ng,$nb (last $n / $m)"
+}
 lc_send "grep -q h3d-not-there /lib/beacon/verbs"
 set p [status_painted Err "after a failing command"]
 set cx [lindex $p 0]
-strip_want [expr {$cx + 1}] [expr {$smid - 3}] [expr {$cx + 7}] [expr {$smid + 3}] 152 40 24 "condition dot after a failing command (cinnabar)" 0
-lc_pass "halcyon: the bar's condition went cinnabar with the failing command (context \"[lindex $p 2]\")"
+set cw [lindex $p 1]
+set n [cond_want $cx $cw $smid 152 40 24 224 120 64 "condition after a failing command (cinnabar)"]
+lc_pass "halcyon: the bar's condition went cinnabar with the failing command ($n px; context \"[lindex $p 2]\")"
 lc_send "cd /lib/aurora; ls; pwd"
 set p [status_painted Ok "after a passing command"]
-# F3: the dot's x moves with the condition label ("ok" is narrower than
-# "err"), so re-extract cx from THIS (Ok) painted line -- reusing the Err
-# line's cx read the sage dot ~2px off, passing only by pixel overlap.
+# F3: the slot's x moves with the condition label ("ok" is narrower than
+# "exit 1"), so re-extract cx/cw from THIS (Ok) painted line.
 set cx [lindex $p 0]
-strip_want [expr {$cx + 1}] [expr {$smid - 3}] [expr {$cx + 7}] [expr {$smid + 3}] 30 88 68 "condition dot after a passing command (sage)" 0
-lc_pass "halcyon: the bar's condition went sage with the passing command (context \"[lindex $p 2]\")"
+set cw [lindex $p 1]
+set n [cond_want $cx $cw $smid 224 120 64 152 40 24 "condition after a passing command (ember)"]
+lc_pass "halcyon: the bar's condition went ember with the passing command ($n px; context \"[lindex $p 2]\")"
 lc_run_expect "pwd" "/lib/aurora"
 lc_run_expect "cd; pwd" "/home/michael"
 
@@ -282,17 +330,22 @@ proc menu_want_raised {mx my mw mh what} {
     }
     lc_fail "$what: the menu rect $mx,$my ${mw}x$mh never read Daylight raised (189,176,160): $v"
 }
+# The menu is gone when its rect reads a TRANSCRIPT ground again -- the
+# parchment, or the `header` a raw island paints (a verb chosen from the
+# menu runs a command whose output can be an island right where the menu
+# stood: the command-path leg's `stat`); the menu's own `raised`
+# (189,176,160) is what must have gone, and neither ground can be it.
 proc menu_want_gone {mx my mw mh what} {
     set v ""
     for {set i 0} {$i < 12} {incr i} {
         set v [region $mx $my [expr {$mx + $mw}] [expr {$my + $mh}]]
         if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot dr dg db] \
-                && $dr == 242 && $dg == 235 && $db == 224} {
+                && (($dr == 242 && $dg == 235 && $db == 224) || ($dr == 206 && $dg == 196 && $db == 182))} {
             return "$off $tot"
         }
         after 500
     }
-    lc_fail "$what: the menu rect $mx,$my ${mw}x$mh never read parchment again after the dismiss: $v"
+    lc_fail "$what: the menu rect $mx,$my ${mw}x$mh never read a transcript ground (parchment or a raw island's header) again after the dismiss: $v"
 }
 proc menu_expect_dismissed {reason what} {
     global timeout lc_cmd_timeout
@@ -340,13 +393,54 @@ lc_pass "halcyon: Esc dismissed the menu compositor-side and the transcript heal
 hkey "i"
 
 # H-3b-3 control: the tag-bar strip does not exist on a single fullscreen
-# leaf -- the region the left pane's strip will occupy after the split is
-# transcript parchment now, not Daylight header (the strip APPEARS with the
-# split; the name ink appears with halcyond's paint).
-set vpre [region 8 6 300 22 206 196 182]
-if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vpre -> p_off p_tot pr pg pb]} { lc_fail "pre-split strip region unparseable: $vpre" }
-if {$pr == 206 && $pg == 196 && $pb == 182} { lc_fail "pre-split: the strip region already reads header on a single leaf (the >1-leaf gate is broken)" }
-lc_pass "halcyon: pre-split control -- no tag-bar strip on a single leaf (dom $pr,$pg,$pb)"
+# leaf (the strip APPEARS with the split; the name ink appears with
+# halcyond's paint). Witnessed by what only a STRIP has -- a live tint on
+# its interior, a separator key on its bottom row (4.2) -- and by the
+# compositor's own carve record (`pane/<id>/tagbar` = `0 0 0 0`); never by
+# the interior reading `header`: the transcript's raw island (the mirrored
+# boot log on this lever) is the same `header` tone a resting strip would
+# be, and the view is bottom-anchored, so whether the island sits under the
+# strip region is content history (the chrome-content round read header
+# there on a single leaf, three boots straight, with no strip in sight).
+# The dominant colour of a rect, or "" when unparseable.
+proc dom_of {x0 y0 x1 y1} {
+    set v [region $x0 $y0 $x1 $y1]
+    if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot r g b]} { return "$r $g $b" }
+    return ""
+}
+# 1 iff neither the strip interior's tint nor its separator's key is there.
+proc no_strip_at_left {} {
+    set inner [dom_of 8 6 300 22]
+    set sep [dom_of 8 23 300 24]
+    if {$inner eq "" || $sep eq ""} { return 0 }
+    if {$inner eq "184 204 196" || $inner eq "220 184 176"} { return 0 }
+    if {$sep eq "200 96 48" || $sep eq "30 88 68" || $sep eq "152 40 24"} { return 0 }
+    return 1
+}
+proc single_leaf_tagbar_zero {what} {
+    global timeout lc_cmd_timeout
+    lc_send "cat /dev/tapestry/layout"
+    set timeout $lc_cmd_timeout
+    set leaf_id ""
+    expect {
+        -re {[\r\n] *(\d+)\*? leaf surface=\d+ \[} { set leaf_id $expect_out(1,string) }
+        timeout { lc_fail "$what: no leaf row in the layout file" }
+        eof     { lc_fail "$what: EOF reading the layout" }
+    }
+    lc_send "cat /dev/tapestry/pane/$leaf_id/tagbar"
+    expect {
+        -re {(\d+) (\d+) (\d+) (\d+)[\r\n]} {
+            set rect "$expect_out(1,string) $expect_out(2,string) $expect_out(3,string) $expect_out(4,string)"
+            if {$rect ne "0 0 0 0"} { lc_fail "$what: the single leaf's tagbar file reads a carved strip ($rect) -- the >1-leaf gate is broken" }
+        }
+        timeout { lc_fail "$what: no rect from pane $leaf_id's tagbar file" }
+        eof     { lc_fail "$what: EOF reading pane $leaf_id's tagbar" }
+    }
+    return $leaf_id
+}
+if {![no_strip_at_left]} { lc_fail "pre-split: the strip region already carries a strip's tint or separator on a single leaf (inner [dom_of 8 6 300 22], sep [dom_of 8 23 300 24]) -- the >1-leaf gate is broken" }
+set pre_leaf [single_leaf_tagbar_zero "pre-split"]
+lc_pass "halcyon: pre-split control -- no tag-bar strip on a single leaf (pane $pre_leaf tagbar 0 0 0 0; no tint, no separator key)"
 
 hkey "meta_l+h"
 lc_send "cat /dev/winsize"
@@ -354,8 +448,10 @@ set timeout $lc_cmd_timeout
 expect {
     -re {winsize (\d+) (\d+)[\r\n]} {
         set c $expect_out(1,string)
-        if {$c >= 100 || $c < 40} {
-            lc_fail "post-split cols $c (want a halved grid in \[40,100))"
+        set lo [expr {int($full_cols * 0.40)}]
+        set hi [expr {int($full_cols * 0.55)}]
+        if {$c < $lo || $c > $hi} {
+            lc_fail "post-split cols $c (want a halved grid in \[$lo,$hi\] of the full $full_cols)"
         }
         lc_pass "halcyon: split reflow re-reported winsize ($c cols)"
     }
@@ -690,21 +786,23 @@ strip_want 8 23 300 24 30 88 68 "left strip separator after recovery (sage key)"
 strip_want 3 120 4 560 30 88 68 "left hairline after recovery (sage key)" 0
 lc_pass "halcyon: a zero exit re-keyed the live tile sage (the status is the last exit)"
 hkey "meta_l+f"
-lc_run_expect "cat /dev/winsize" "winsize 128 "
+lc_run_expect "cat /dev/winsize" "winsize 213 "
 lc_pass "halcyon: zoom restored the full grid (reflow round-trip)"
 # Zoomed = one visible leaf: the strips are ZERO and halcyond drops its
-# chrome tiles; the region reads the transcript's parchment again -- not
-# header, and not the live tint it read a moment ago (a "not header" test
-# would pass on the tint before the zoom lands).
+# chrome tiles. The live tint it read a moment ago and the sage separator
+# under it are gone from the strip region (a strip's own features -- the
+# pre-split control's reasoning: the interior's ground is not a witness,
+# the raw island paints `header` there too), and the compositor's carve
+# record for the one leaf reads `0 0 0 0`. Retried: the zoom lands a
+# relayout, then halcyond's drop.
 set gone 0
-set v ""
 for {set i 0} {$i < 12} {incr i} {
-    set v [region 8 6 300 22]
-    if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> zo zt zr zg zb] && $zr == 242 && $zg == 235 && $zb == 224} { set gone 1; break }
+    if {[no_strip_at_left]} { set gone 1; break }
     after 500
 }
-if {!$gone} { lc_fail "zoomed: the left strip region never read the transcript parchment (chrome not dropped / strip not ZERO): $v" }
-lc_pass "halcyon: zoom dropped the tag bars (single leaf, strip ZERO, parchment at the top)"
+if {!$gone} { lc_fail "zoomed: the left strip region still carries the strip's tint or separator (inner [dom_of 8 6 300 22], sep [dom_of 8 23 300 24]) -- chrome not dropped / strip not ZERO" }
+set zoom_leaf [single_leaf_tagbar_zero "zoomed"]
+lc_pass "halcyon: zoom dropped the tag bars (single leaf $zoom_leaf, strip ZERO: no tint, no separator key)"
 
 # H-3c: the surface census after the zoom. The tag-bar surfaces the zoom
 # dropped live on the renderer's SHARED session, whose Drop must say
@@ -730,6 +828,37 @@ if {$census != 2} {
     lc_fail "surfaces $census after the zoom: dropped shared-session surfaces leaked server-side (want 2 = the console + the status bar)"
 }
 lc_pass "halcyon: the zoom's dropped tag bars + every menu retired server-side (surfaces 2: the console + the status bar)"
+
+# HALCYON-SCALE 6 (the scale round): the CONSOLE follows the compositor's
+# scale at runtime -- the console path's only E2E (it is inert at 1.0 by
+# construction, which every other leg of this gate proves; the compose gate
+# proves the SESSION follower at 200%). Zoomed + the status bar = the
+# Composed arm: the chord retires the old-height bar, the leaf is re-offered
+# the full display, and halcyond re-reads the ctl on that relayout. The say
+# names the percent AND the mono cell it selected: 125% must land on a
+# BIGGER cell than 1.0's 6x14 (the 8-advance bake; one mono size since
+# 2026-09-08 -- the grid runs at the preformatted block's cell), so the bakes
+# were swapped and not just the number. Super+0 re-derives from the EDID (100
+# on QEMU): the 1.0 cell and the 213-column winsize return.
+hkey "meta_l+equal"
+set timeout $lc_cmd_timeout
+expect {
+    -re {halcyond: scale 100 -> 125 \(cell (\d+)x(\d+)\)} {
+        set scw $expect_out(1,string); set sch $expect_out(2,string)
+        if {$scw <= 6 || $sch <= 14} { lc_fail "scale 125: the mono cell ${scw}x$sch did not grow past 1.0's 6x14 (the bakes were not swapped)" }
+    }
+    timeout { lc_fail "the console never followed Super+= (no `halcyond: scale 100 -> 125` say: the relayout the bar retire fans did not reach it)" }
+    eof { lc_fail "EOF waiting for the console's scale say" }
+}
+lc_pass "halcyon: the console followed Super+= to 125% (cell ${scw}x$sch)"
+hkey "meta_l+0"
+expect {
+    -re {halcyond: scale 125 -> 100 \(cell 6x14\)} {}
+    timeout { lc_fail "the console never followed Super+0 back to 100 (cell 6x14)" }
+    eof { lc_fail "EOF waiting for the console's scale-reset say" }
+}
+lc_run_expect "cat /dev/winsize" "winsize 213 "
+lc_pass "halcyon: Super+0 returned the console to 1.0 (cell 6x14; 213 columns again)"
 
 lc_quit
 

@@ -15,7 +15,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-09-05
+updated: 2026-09-07
 ---
 ## Purpose
 
@@ -208,6 +208,34 @@ CSPRNG_READ); the session compositor masks `!T_CAP_SET_IDENTITY` again on
 each tile spawn (the second hop's own guard), and the kernel intersects, so
 both hops are monotone. Witness: `/bin/caps-probe` in a session tile -- a
 plain spawn succeeds, the same spawn with an identity request is REFUSED.
-Open here: [[seam-login-halcyond-fallback]] (a lever-on image whose
-compositor cannot start re-prompts forever).
+
+## login degrades to the console shell when the compositor cannot start (2026-09-07)
+
+[[seam-login-halcyond-fallback]] is now **closed**. A session-lever image
+(`/lib/halcyon/session == "on"`) booted console-mode was a real lock-out:
+`THYLACINE_DISPLAY=console` drops the GPU stack, so tapestryd never starts, but
+the pool still carries the lever, so login spawns `halcyond --session`, which
+finds no compositor and exits 1. Pre-fix login treated that exit as a clean
+logout and returned -- so joey's getty respawned login, which re-ran halcyond,
+which failed identically: an endless login loop with **no usable shell** on any
+box where the compositor cannot come up (console-mode, headless, a GPU that
+never binds).
+
+The fix distinguishes a bootstrap failure from a logout by the child's exit
+status. For the `ut` path an exit is logout regardless of status (unchanged).
+For the session path `session_failed = !status.success()` (a `wait()` error also
+counts as failed) -- a **clean** last-tile logout returns 0 and returns to the
+getty prompt unchanged, but `session_halcyon && session_failed` prints `login:
+session compositor unavailable -- console shell fallback` and degrades to the
+console shell for that seat. The fallback **reuses the already-constructed
+`shell_cmd`** -- the default no-lever image's exact path, built above with
+`CONSOLE_OWNER`, the consctl fd, `--home`, the stamped user identity, and the
+masked `SHELL_CAPS` (so **no new authority**, and in particular no
+`CAP_SET_IDENTITY` leak -- it inherits the masking of the subsection above),
+and it enters the same `/home/<user>` bind. `session_failed` covers both a
+connect-fail and a mid-session compositor **death** (both yield a non-zero
+exit), which is why the fix already satisfies the run-40 F2 [P3] "a mid-session
+death should degrade too". Witnessed console-mode (a session-lever image booted
+`THYLACINE_DISPLAY=console`): the fallback line, then an interactive `ut` shell
+with an echo round-trip, and **no** second `Thylacine login:` prompt.
 

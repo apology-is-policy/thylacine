@@ -1407,8 +1407,39 @@ pub extern "C" fn rs_main() -> i64 {
         }
     };
 
-    // Session leader: wait the shell. Its exit IS logout (regardless of status).
-    let _ = child.wait();
+    // Session leader: wait the shell/compositor. For the ut path an exit IS
+    // logout regardless of status. For the session path a CLEAN logout (the user
+    // closed the last tile) returns 0, but a compositor that never came up (no
+    // tapestryd -- e.g. a console-mode boot of a session-lever image) or that
+    // died mid-session returns non-zero (halcyond session::run: connect-fail /
+    // compositor-gone -> 1; clean last-tile logout -> 0).
+    let session_status = child.wait();
+
+    // FALLBACK -- the console-lockout fix. The lever is on but halcyond exited
+    // with failure. Without a fallback, login returns and joey's getty respawns
+    // it, which re-runs halcyond -> the same failure -> an endless login loop
+    // that locks the user out of a session-lever image whenever the compositor
+    // cannot come up (console-mode, a headless box, a GPU that never binds).
+    // Degrade to the proven console shell -- the default (no-lever) image's exact
+    // path, already built above as `shell_cmd` with CONSOLE_OWNER + the consctl
+    // fd + --home + the user identity, and inheriting the same /home/<user> bind.
+    // A clean logout (status 0) skips this and returns to the getty prompt,
+    // unchanged. A wait() error (could not reap) counts as a failed session.
+    let session_failed = match &session_status {
+        Ok(st) => !st.success(),
+        Err(_) => true,
+    };
+    if session_halcyon && session_failed {
+        t_putstr("login: session compositor unavailable -- console shell fallback\n");
+        match shell_cmd.spawn() {
+            Ok(mut sh) => {
+                let _ = sh.wait();
+            }
+            Err(_) => {
+                t_putstr("login: fallback console shell spawn failed\n");
+            }
+        }
+    }
 
     // Logout: tear down the home (unmount /home/<user> + close the attach -> the
     // single-session proxy's upstream EOFs -> the proxy exits -> reap it), then

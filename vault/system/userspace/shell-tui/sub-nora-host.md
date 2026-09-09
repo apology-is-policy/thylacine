@@ -241,6 +241,18 @@ Saves are durable: create-truncate, write, then sync. A server that rejects the
 sync is tolerated, since the bytes are already written and the barrier is
 best-effort.
 
+**Every exit path names itself (s7 F3).** The six ways the editor leaves each
+emit one `nora: EXIT path=<name> code=<n> [err=<e>]` line via `t_putstr` before
+returning: `redraw1`/`redraw2` (an initial or steady-state repaint failed,
+code 1), `eof` (stdin closed, code 0), `pollnone`/`pollerr` (the one poll
+returned nothing or an error, code 1), and `quit` (`:q`, code 0). They are the
+discriminating witness the s7 gate keys on — "one frame then exit" vs a clean
+hold are two different `path=` values, not one anonymous exit. `t_putstr` is a
+direct console write and is **not** line-serialized against other console
+writers (the [[seam-extinction-line-unserialized]] / #243 class), so a marker
+can interleave with concurrent output; acceptable for a diagnostic that only
+has to be greppable on the serial log, never rendered.
+
 ## Performance
 
 Not a measured surface, and deliberately event-driven — the loop does nothing
@@ -331,4 +343,6 @@ twice.
 ## Provenance
 
 [[chg-2026-08-03-nora-host-sweep]] · [[chg-2026-09-06-s7a-palette-destale]]
-(the `adopt_session_palette` startup adoption + [[abi-halcyon-palette]]).
+(the `adopt_session_palette` startup adoption + [[abi-halcyon-palette]]) ·
+[[chg-2026-09-07-s7-f3-dossier-deltas]] (the self-naming exit markers, the F3
+discriminating witness).
