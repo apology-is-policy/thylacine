@@ -22,7 +22,7 @@ needed the operator.
 
 
 ---
-## 2026-09-09 (aux, run 6, self-compact #6) -- inline media slice 1b: the render path proven on real hardware, the first inline-image screenshot
+## 2026-09-09 (aux, run 6, self-compact #6) -- inline media: slice 1b (render path on real hardware) + the operator's width-fit ruling + slice 2 (vendor zune + the `view` decoder)
 
 Picked up the resume note at `ca785f1e` and built slice 1b: prove the
 `Item::Image` render path -- layout letterbox + `cartoon::Op::Image` -- reaches
@@ -71,10 +71,45 @@ with scale; at 200% a 480-tall native would blit native). This boot was HVF/M2,
 not V3D -- the thyla-pi V3D witness is still worth taking when a later slice
 boots there anyway.
 
-**Next.** Slice 2 -- vendor `zune-png` (+ `zune-jpeg`) into third_party, VERIFY
-no_std on aarch64-unknown-none at vendor time, and the native `view` coreutil
-(decode + type-sniff: image -> render, else exec cat). Then slice 3 (the per-pane
-channel: `view test.png` E2E inline), `gallery` (B), then expand.
+**The operator's width-fit ruling (`0b7741f1`).** Seeing the screenshot, the
+operator ruled: a small image renders at its EXACT native size when it fits,
+scaling down only when it does not. That is precisely what they were reacting to
+-- the witness raster was 720x480, fit the 1280 pane width, yet my slice-1
+letterbox scaled it to 480x320 because of an artificial `IMAGE_MAX_H=320` cap.
+Removed the cap: the inline path now bounds only by the content WIDTH (letterbox
+with `ah=i32::MAX`), height unbounded (the transcript scrolls). A regression test
+pins a tall image (100x500 in a 600px pane) at native height -- capped to 320
+before. The general `letterbox` helper is unchanged and still caps both
+dimensions for the future gallery/fullscreen path. A pure, host-tested change --
+the render path itself was already hardware-proven, so no re-boot.
+
+**Slice 2 (`ee9f1048`): vendor zune + the `view` decoder.** Vendored zune-png
+0.4.10 + zune-core 0.4.12 + zune-inflate 0.2.54 + simd-adler32 0.3.10 into
+third_party/rust (cargo vendor, additive -- 4 new crate dirs, ZERO existing crate
+touched, confirmed by `git status`). The vendor gotcha handled cleanly: the
+offline source-replacement in `usr/.cargo/config.toml` had to be commented out so
+cargo could fetch a not-yet-vendored crate, then restored via `git checkout`. All
+four build no_std on aarch64-unknown-none (zune `default-features=false`) --
+VERIFIED at vendor time by the `view` guest build, the one thing the README's
+regenerate procedure requires. New `usr/view` crate (lib+bin, the halcyond
+pattern): the lib is the pure `sniff` (PNG/JPEG magic) + `decode_png` -> ARGB
+(Luma/LumaA/RGB/RGBA + 16->8 + palette-expand), host-tested against a hand-built
+2x2 RGBA PNG fixture decoded to its four corner colors; the bin reads + sniffs,
+PNG -> decode + report (slice 3 hands the raster to halcyond), non-image -> cat
+(the operator's fallback). Decode runs in the sacrificial `view`, never halcyond
+(the blast-radius amendment). Not staged into the boot image yet -- no point until
+it displays (slice 3).
+
+Chosen pure-Rust PNG over a ported C codec deliberately (H-7 format-fuzz posture):
+the decoder parses untrusted bytes, and a fuzz-friendly memory-safe decoder in a
+sacrificial process is the whole point.
+
+**Next.** Slice 3 -- the per-pane channel (the one genuinely-new IPC + a
+format-fuzz trust boundary; load-bearing). Its design (the endpoint, the
+place-request format, the auth/pane-addressing) is being locked from the tree's
+precedents before implementing across halcyond + view + login; surfacing it to
+the operator per the design-conversation pattern. Then the `view test.png` E2E
+inline + a boot witness, `gallery` (B), then expand.
 
 ---
 ## 2026-09-09 (aux, run 6, self-compact #5) -- inline media / `view`: research + ratified design + scripture (reserved I-47)
