@@ -89,11 +89,30 @@ the console transcript is at parity with writing text to `/dev/cons`, which any
 holder already can, so the spike gates on format-fuzz safety + the resource bound.
 The per-pane token + quota land with the session-path channel.
 
-**Open / owed.** A Fable-tier holotype round on the format-fuzz surface (this was
-Opus-authored; Fable diversity owed at merge). The session-path per-pane channel,
-JPEG, `--fullscreen` (`gallery`), the obj-verb rule, and `Embed` (video) remain
-seams. AUDIT-TRIGGERS row + the [[sub-halcyond]]/[[sub-view]] dossiers landed with
-the code.
+**The audit found a P0, and it was the exact class the prompt named (@b28ee180).**
+The focused holotype round ran on the OPUS fallback -- the Fable prosecutor died
+mid-spawn on a 429 credit error (Fable IS credit-exhausted, confirming the
+standing memory), so per "NEVER SKIP A ROUND FOR WANT OF FABLE" I re-spawned Opus
+with the context-independence framing. It confirmed my held self-audit finding
+AND sharpened it into a P0: I had estimated 4 conns x 8 MiB; the prosecutor
+re-derived that a `Vec<u8>` grown incrementally to just over 8 MiB DOUBLES to
+16 MiB capacity, so `MAX_CONNS`=4 x 16 MiB = the whole 64 MiB heap -- and even
+2 conns beside a flooded 32 MiB transcript OOM-exit the console renderer. An
+unprivileged process can open the world-writable `place` and slow-loris it.
+Fixed (b28ee180): `MAX_CONNS` 4->1 (the spike drives one view; a second waits),
+`PLACE_MAX_PIXELS` 2->1 Mpx, and `reserve_exact` so the buffer holds exactly
+`total_len` (no doubling) -- peak place ~8 MiB, bounded by construction; plus the
+F3 POLLHUP fix. The E2E stayed 3/3 green with the tighter bounds. This is a DIRTY
+CLOSE (a P0 returned), so a round-2 re-audit of the fix is in flight. **The
+lesson: a per-element cap is not a per-container bound, and Vec doubling hides a
+2x factor in any "it fits" arithmetic** -- the E2E drove ONE well-behaved client,
+so only the adversarial read found it. Closed list:
+`memory/audit_inline_media_closed_list.md`.
+
+**Open / owed.** The round-2 re-audit verdict (+ its closed-list entry). A
+Fable-DIVERSITY pass when credits return (both rounds were Opus -- context
+independence without family diversity). The session-path per-pane channel, JPEG,
+`--fullscreen` (`gallery`), the obj-verb rule, and `Embed` (video) remain seams.
 
 ---
 ## 2026-09-09 (aux, run 6, self-compact #6) -- inline media: slice 1b (render path on real hardware) + the operator's width-fit ruling + slice 2 (vendor zune) + slice 3a (the channel wire + view's writer) + the channel design decided
