@@ -90,12 +90,33 @@ safety+DoS, video/audio-split, staging) + 13.5 decoder rec updated to zune;
 quaestor owner: all four doc paths UNOWNED (design docs, not code surfaces) -- no
 dossier update owed; the AUDIT-TRIGGERS row lands with the implementation.
 
-**Open / next.** The eb26e8b8 main-merge (latest Halcyon: HALCYON-TYPE +
-HALCYON-THEME) is committed but NOT yet built/tested/pushed -- a build-verify is
-owed on the mac before push (deferred while main held the machine). Then the
-PNG-inline spike (channel + `Item::Image` + `view` PNG-only + reflow) proven on
-thyla-pi's V3D, then the expand chunk (JPEG + verb + `--fullscreen` + the per-pane
-DoS quota + the format-fuzz audit).
+**A second wrong turn, caught by the operator -- the Weft direction.** After the
+scripture landed, the channel-mapping pass verified that `SYS_WEFT_SHARE` gates on
+`CAP_HW_CREATE` (syscall.c:6907 -- a deliberate anti-DoS gate), so an unprivileged
+`view` cannot Weft-share *in* to halcyond: Weft is a privileged-server-shares-OUT
+mechanism, the reverse of the design's trust direction. Surfaced as a fork; the
+operator's reply -- "how does DOSBox/Quake render?" -- was the key. Verified in the
+tree: those apps are unprivileged clients that MAP a tapestryd-shared framebuffer
+(`SYS_WEFT_MAP` is uncapped) and present; tapestryd (holding `CAP_HW_CREATE`) is the
+sharer. I had invented a Weft wall by flipping the trust direction. The fix split
+the feature cleanly by CONTENT MODEL: a STATIC inline image is a cartoon-blit into
+halcyond's transcript with a one-shot BOUNDED WRITE handoff (Weft was the wrong tool
+and direction); a FULLSCREEN view is a separate program, `gallery`, that takes a
+Tapestry PANE surface exactly like DOSBox (zero-copy, unprivileged, NO new
+compositor code, rides I-40/I-45). Scripture amended before any code (14.7 -> `view`
+(A) / `gallery` (B) + bounded write; I-47 handoff -> bounded write; 13.5). The
+reusable lesson: when a mechanism seems to "need a capability the actor can't get,"
+check whether the working precedent runs it in the OTHER direction.
+
+**Landed + pushed this segment.** The eb26e8b8 main-merge (latest Halcyon:
+HALCYON-TYPE + HALCYON-THEME) was build-verified GREEN (`build.sh all` + `test.sh`:
+boot banner, arc gates L-6c/D-5 PASS) and pushed to both mirrors with the scripture
+(`43185c12`), followed by the view/gallery amendment (this commit).
+
+**Next.** The `view`-inline SPIKE (A: the per-pane channel + `Item::Image` + `view`
+PNG-only + reflow), proven on thyla-pi's V3D -- it proves the one new mechanism.
+Then `gallery` (B, the native libtapestry pane viewer, lower-risk), then expand
+(JPEG + both obj-verbs + the per-pane DoS quota + the format-fuzz audit).
 
 ---
 ## 2026-09-09 (aux, run 6, self-compact #4) -- the arm-6 arc CLOSE: audit SOUND 0/0/0/2 P3, SMP gate 40 boots clean, ls-imperium arm 6 re-added
