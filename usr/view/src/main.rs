@@ -10,8 +10,13 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+// Decoding an image needs far more than the default 4 MiB heap (peak ~= 8*npx +
+// the compressed input, all live during decode); size it for a ~6 Mpx inline
+// image, with VIEW_MAX_PIXELS the REAL bound (a bare MAX_PIXELS that exceeds the
+// heap is a phantom the allocator OOMs past).
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 64 * 1024 * 1024 }> =
+    libthyla_rs::alloc::ThylaAllocN;
 
 use libthyla_rs::eprintln;
 use libthyla_rs::env;
@@ -20,12 +25,17 @@ use libthyla_rs::io;
 use libthyla_rs::process::Command;
 use libthyla_rs::{t_close, t_open, t_write, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT};
 
-use view::{decode_png, sniff, Kind, Raster};
+use view::{decode_png, png_dimensions, sniff, within_pixel_budget, Kind, Raster};
 
-// A generous cap on the file we will read into memory to decode (the channel's
-// per-pane quota is the real bound, slice 3; this just refuses a pathological
-// slurp). 64 MiB holds any real inline image's compressed bytes.
-const READ_CAP: usize = 64 * 1024 * 1024;
+// The compressed-input cap, coherent with the 64 MiB heap (a 6 Mpx image's
+// decode peak is ~48 MiB, so the input must stay well under the remainder).
+const READ_CAP: usize = 16 * 1024 * 1024;
+
+// view's own decode pixel budget, sized to the heap (peak ~= 8*npx + input),
+// checked from the headers BEFORE decode so an over-budget image is a clean
+// report rather than a silent OOM-exit. halcyond re-caps the CHANNEL downstream
+// (display-adaptive); this only bounds view's local decode.
+const VIEW_MAX_PIXELS: u64 = 6 * 1024 * 1024;
 
 /// Write the whole buffer to `fd` in bounded chunks, looping on the returned
 /// count (a 9P-backed fid caps a Twrite at the negotiated msize). False on any
@@ -110,8 +120,37 @@ pub extern "C" fn rs_main() -> i64 {
     };
 
     match sniff(&bytes) {
-        Kind::Png => match decode_png(&bytes) {
-            Ok(r) => match place_on_halcyon(&r) {
+        Kind::Png => {
+            // Reject an over-budget image up front (headers-only) so a huge PNG
+            // is a clean report, not a silent OOM-exit mid-decode.
+            match png_dimensions(&bytes) {
+                Ok((w, h)) if !within_pixel_budget(w, h, VIEW_MAX_PIXELS) => {
+                    eprintln!(
+                        "view: {}: image too large ({}x{}; over the {} Mpx budget)",
+                        path,
+                        w,
+                        h,
+                        VIEW_MAX_PIXELS >> 20
+                    );
+                    return 1;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("view: {}: {}", path, e);
+                    return 1;
+                }
+            }
+            let r = match decode_png(&bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("view: {}: {}", path, e);
+                    return 1;
+                }
+            };
+            // The compressed input is done; free it before the (blocking) channel
+            // write so only the raster is held.
+            drop(bytes);
+            match place_on_halcyon(&r) {
                 Ok(()) => {
                     libthyla_rs::println!("view: {} placed inline ({}x{})", path, r.w, r.h);
                     0
@@ -130,12 +169,8 @@ pub extern "C" fn rs_main() -> i64 {
                     );
                     0
                 }
-            },
-            Err(e) => {
-                eprintln!("view: {}: {}", path, e);
-                1
             }
-        },
+        }
         Kind::Jpeg => {
             eprintln!("view: {}: JPEG decode lands in a later slice", path);
             1

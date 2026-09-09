@@ -13,8 +13,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+// An image decoder's working set (the compressed input + the samples buffer +
+// the ARGB buffer -- all live at once during decode, peak ~= 8*npx + input) far
+// exceeds the default 4 MiB heap. Size it for a ~12 Mpx source (covers 4K images
+// and typical photos); GALLERY_MAX_PIXELS rejects anything larger up front so the
+// bound is REAL, not a phantom the allocator OOMs past.
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 128 * 1024 * 1024 }> =
+    libthyla_rs::alloc::ThylaAllocN;
 
 use libthyla_rs::env;
 use libthyla_rs::eprintln;
@@ -23,7 +29,7 @@ use libthyla_rs::io;
 use libthyla_rs::time::{sleep, Duration};
 
 use tapestry::{FrameIntent, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY};
-use view::{decode_png, sniff, Kind};
+use view::{decode_png, png_dimensions, sniff, within_pixel_budget, Kind};
 
 macro_rules! say {
     ($($a:tt)*) => {{
@@ -33,10 +39,15 @@ macro_rules! say {
     }};
 }
 
-// A generous cap on the file slurped to decode (the decoder's own MAX_PIXELS is
-// the pixel bound; this refuses a pathological compressed slurp). 64 MiB holds
-// any real image's compressed bytes.
-const READ_CAP: usize = 64 * 1024 * 1024;
+// The compressed-input cap, coherent with the 128 MiB heap: a 12 Mpx image's
+// decode peak is ~96 MiB, so the input must stay well under the remainder. 16
+// MiB holds any real image's compressed bytes with room to spare.
+const READ_CAP: usize = 16 * 1024 * 1024;
+
+// The decode pixel budget, sized to the heap (peak ~= 8*npx + input <= 128 MiB).
+// Rejected BEFORE decode via a headers-only dimension read, so an over-budget
+// image gets a clean error instead of a silent OOM-exit.
+const GALLERY_MAX_PIXELS: u64 = 12 * 1024 * 1024;
 
 // tapestryd is warden-spawned well before this, but a slow bring-up must not
 // flake a manual/menu run.
@@ -77,13 +88,35 @@ pub extern "C" fn rs_main() -> i64 {
     // Decode HERE (the blast-radius amendment). Unlike view, a non-image is an
     // error -- there is no fullscreen fallback.
     let raster = match sniff(&bytes) {
-        Kind::Png => match decode_png(&bytes) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("gallery: {}: {}", path, e);
-                return 1;
+        Kind::Png => {
+            // Reject an over-budget image UP FRONT, from the headers alone, so a
+            // huge PNG gets a clean error instead of a silent OOM-exit mid-decode
+            // (the decode peak can dwarf the heap).
+            match png_dimensions(&bytes) {
+                Ok((w, h)) if !within_pixel_budget(w, h, GALLERY_MAX_PIXELS) => {
+                    eprintln!(
+                        "gallery: {}: image too large ({}x{}; over the {} Mpx budget)",
+                        path,
+                        w,
+                        h,
+                        GALLERY_MAX_PIXELS >> 20
+                    );
+                    return 1;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("gallery: {}: {}", path, e);
+                    return 1;
+                }
             }
-        },
+            match decode_png(&bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("gallery: {}: {}", path, e);
+                    return 1;
+                }
+            }
+        }
         Kind::Jpeg => {
             eprintln!("gallery: {}: JPEG decode lands in a later slice", path);
             return 1;
@@ -93,26 +126,32 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     };
+    // The compressed input is done; free it before the event loop so only the
+    // raster occupies the heap for the viewer's lifetime (F2).
+    drop(bytes);
 
     // Connect a fullscreen tapestryd surface (bounded retry, the tapestry-demo
-    // pattern).
-    let mut surf: Option<Surface> = None;
-    for i in 0..CONNECT_TRIES {
-        match Surface::fullscreen() {
-            Ok(s) => {
-                surf = Some(s);
-                break;
-            }
-            Err(e) => {
-                if i == CONNECT_TRIES - 1 {
-                    eprintln!("gallery: no compositor: {:?}", e);
-                    return 1;
+    // pattern). The loop YIELDS the Surface directly, so there is no post-loop
+    // `unwrap` whose soundness would silently depend on CONNECT_TRIES being
+    // non-zero (F3).
+    let mut surf = 'connect: {
+        for i in 0..CONNECT_TRIES {
+            match Surface::fullscreen() {
+                Ok(s) => break 'connect s,
+                Err(e) => {
+                    if i + 1 == CONNECT_TRIES {
+                        eprintln!("gallery: no compositor: {:?}", e);
+                        return 1;
+                    }
+                    let _ = sleep(Duration::from_millis(CONNECT_DELAY_MS));
                 }
-                let _ = sleep(Duration::from_millis(CONNECT_DELAY_MS));
             }
         }
-    }
-    let mut surf = surf.unwrap();
+        // Reachable only if CONNECT_TRIES were 0 (the loop never runs); a clean
+        // exit rather than a panic.
+        eprintln!("gallery: no compositor (no connect attempts)");
+        return 1;
+    };
     // A still image: declare Static so the compositor does not pace us a frame
     // clock (we present once, and again only on a resize).
     let _ = surf.intent(FrameIntent::Static);

@@ -47,6 +47,29 @@ pub struct Raster {
 /// length overflow.
 pub const MAX_PIXELS: u64 = 64 * 1024 * 1024;
 
+/// Read a PNG's pixel dimensions from its headers WITHOUT decoding the image.
+/// Callers use this to reject an over-budget image (a clean error) BEFORE the
+/// full decode, whose peak working set (samples + argb + the compressed input)
+/// can dwarf a fixed heap -- a bare `MAX_PIXELS` that exceeds the heap is a
+/// phantom bound (the allocator OOMs first). Cheap: parses only the IHDR.
+pub fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), &'static str> {
+    use zune_png::PngDecoder;
+    let mut dec = PngDecoder::new(bytes);
+    dec.decode_headers().map_err(|_| "png: malformed headers")?;
+    let (w, h) = dec.get_dimensions().ok_or("png: no dimensions")?;
+    Ok((w as u32, h as u32))
+}
+
+/// Does an image of `w x h` fit a decode budget of `max` pixels? The budget must
+/// be sized to the CALLER's heap, not to [`MAX_PIXELS`]: the decode peak is the
+/// compressed input + the samples buffer + the ARGB buffer, all live at once, so
+/// a pixel bound larger than the heap can serve is a phantom the allocator OOMs
+/// past. Both viewers (`view` inline, `gallery` fullscreen) call this on the
+/// [`png_dimensions`] result before decoding. Checked in u64 -- no overflow.
+pub fn within_pixel_budget(w: u32, h: u32, max: u64) -> bool {
+    (w as u64) * (h as u64) <= max
+}
+
 /// Decode a PNG to opaque-or-alpha ARGB. zune expands sub-8-bit and palette
 /// images and reports the resulting colorspace; we normalize every case
 /// (Luma / LumaA / RGB / RGBA, 8- or 16-bit) to 0xAARRGGBB. 16-bit samples are
@@ -155,5 +178,24 @@ mod tests {
     fn decode_png_rejects_garbage() {
         assert!(decode_png(b"not a png at all, just bytes").is_err());
         assert!(decode_png(&PNG_MAGIC).is_err(), "magic alone is not a decodable image");
+    }
+
+    // The headers-only dimension read: the same dims decode_png reports, but
+    // WITHOUT the full-image allocation (so a caller can reject an over-budget
+    // image before the heap-hungry decode).
+    #[test]
+    fn png_dimensions_reads_ihdr_without_decoding() {
+        assert_eq!(png_dimensions(include_bytes!("testdata/2x2.png")).unwrap(), (2, 2));
+        assert_eq!(png_dimensions(include_bytes!("../testdata/test.png")).unwrap(), (640, 400));
+        assert!(png_dimensions(b"not a png").is_err());
+    }
+
+    #[test]
+    fn pixel_budget_is_inclusive_and_overflow_safe() {
+        assert!(within_pixel_budget(640, 400, 6 * 1024 * 1024));
+        assert!(within_pixel_budget(2048, 3072, 6 * 1024 * 1024), "6 Mpx fits a 6 Mpx budget");
+        assert!(!within_pixel_budget(4000, 4000, 6 * 1024 * 1024), "16 Mpx over budget");
+        // largest u32 dims must not overflow the product (u64 math)
+        assert!(!within_pixel_budget(u32::MAX, u32::MAX, 6 * 1024 * 1024));
     }
 }

@@ -61,9 +61,16 @@ nearest-neighbor scale the source into the fit rect, forced opaque
 its slice length, so a truncated/hostile raster or a short frame clamps rather
 than panics.
 
-**The client body (`main.rs`).** Read (`slurp_capped`, 64 MiB cap) -> sniff ->
-decode -> `Surface::fullscreen` (bounded connect retry) -> `FrameIntent::Static`
--> `paint` into `pixels()` -> `present(None)`. The success is announced on serial
+**The client body (`main.rs`).** Read (`slurp_capped`, 16 MiB cap) -> sniff ->
+**reject an over-budget image from the headers alone** (`view::png_dimensions` +
+`within_pixel_budget` vs `GALLERY_MAX_PIXELS` = 12 Mpx) -> decode -> `drop(bytes)`
+(free the compressed input before the event loop) -> `Surface::fullscreen`
+(bounded connect retry, a labelled block that yields the Surface -- no post-loop
+`unwrap`) -> `FrameIntent::Static` -> `paint` into `pixels()` -> `present(None)`.
+The decode runs on a **128 MiB `ThylaAllocN` heap** (an image decoder's peak is
+~8*npx + the input, far past the default 4 MiB); `GALLERY_MAX_PIXELS` is sized to
+that heap and checked BEFORE decode, so the pixel bound is REAL, not a phantom
+the allocator OOM-exits past. The success is announced on serial
 (`gallery: <path> WxH shown FWxFH at OX,OY on DWxDH`, where WxH is the NATIVE
 raster and FWxFH the fitted size) -- printed only after a successful present, so
 it is the end-to-end witness the E2E keys on. Then an event loop: `TEV_KEY` ->
@@ -104,10 +111,11 @@ EventRing + one Loom ring), whose ring lifecycle libtapestry owns.
 ## Performance
 
 Nearest-neighbor scale is one `dst`-pixel iteration: O(dw*dh), independent of the
-source size (a huge source only changes the sample stride). The raster is held
-for the viewer's lifetime (up to `MAX_PIXELS`*4 bytes); acceptable for a
-short-lived sacrificial viewer, and bounded by the per-AddrSpace page budget
-(I-32). Present is once (a `Static` surface), plus one repaint per CONFIGURE.
+source size (a huge source only changes the sample stride). The compressed input
+is `drop`ped after decode, so only the raster (<= `GALLERY_MAX_PIXELS`*4 bytes,
+~48 MiB at the 12 Mpx cap) is held for the viewer's lifetime -- comfortably
+inside the 128 MiB heap and bounded by the per-AddrSpace page budget (I-32).
+Present is once (a `Static` surface), plus one repaint per CONFIGURE.
 
 ## Prosecution
 
@@ -147,6 +155,12 @@ sequencing vote). The obj-verbs `path view view {}` + `path gallery gallery {}`
 are baked in `usr/lib/beacon/verbs.default` ([[sub-beacon]]). Host tests:
 `gallery` lib 10 (`fit_rect`, `paint`, `is_exit_key`). E2E:
 `tools/interactive/ls-gfx-gallery.exp` (the serial present witness, SKIP-clean on
-aurora). An Opus holotype round is prudent (I-40/I-45-adjacent) even though the
-client adds no hard surface; a Fable-diversity pass is owed with the rest of the
-inline-media arc.
+aurora). Opus holotype round 1 (Fable credit-exhausted): 1 P1 + 2 P3, all fixed
+-- **F1 (the P1)**: gallery had declared the default 4 MiB `ThylaAlloc`, so
+`READ_CAP`/`MAX_PIXELS` were phantom bounds and any image past ~0.3-0.5 Mpx
+OOM-exited silently (the E2E was green only because `/test.png` is 256 Kpx);
+fixed with the 128 MiB heap + the headers-only `GALLERY_MAX_PIXELS` pre-check.
+F2: `bytes` freed after decode. F3: the connect `unwrap` replaced by a
+Surface-yielding block. The finding's whole-system note (view shared the OOM
+ceiling) was fixed in the same chunk ([[sub-view]]). A Fable-diversity pass is
+owed with the rest of the inline-media arc.

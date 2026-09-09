@@ -61,9 +61,23 @@ after its own palette/sub-8-bit expansion -- Luma / LumaA / RGB / RGBA, 8- or
 16-bit -- to one `0xAARRGGBB` per pixel (16-bit taken high-byte `>> 8`; Luma
 replicated across RGB; a missing alpha opaque). `cartoon::Op::Image` composites
 the alpha over the pane ground, so a transparent PNG shows the pane through.
-`MAX_PIXELS` (64 Mpx) bounds the decode; the channel's tighter cap is halcyond's.
+`MAX_PIXELS` (64 Mpx) is the absolute ceiling; the REAL bound is the caller's
+heap. `png_dimensions` reads the IHDR WITHOUT decoding and `within_pixel_budget`
+compares `w*h` (in u64, no overflow) to a caller budget, so a viewer rejects an
+over-budget image from the headers alone -- BEFORE the heap-hungry decode
+(`decode_png` allocates the samples buffer + the ARGB buffer + holds the input,
+peak ~8*npx). Both are reused by [[sub-gallery]]; the channel's tighter cap is
+halcyond's.
 
 ### The channel writer (`view` bin)
+
+The bin flow: read (`slurp_capped`, 16 MiB cap) -> sniff -> **reject over-budget
+from the headers** (`png_dimensions` + `within_pixel_budget` vs `VIEW_MAX_PIXELS`
+= 6 Mpx) -> `decode_png` -> `drop(bytes)` -> `place_on_halcyon`. The decode runs
+on a **64 MiB `ThylaAllocN` heap** (the default 4 MiB cannot hold an image's
+decode peak -- the pre-fix `view` OOM-exited on any inline image past ~0.3 Mpx,
+the sibling of the [[sub-gallery]] holotype's F1); `VIEW_MAX_PIXELS` is the real
+bound, checked before decode.
 
 `place_on_halcyon` opens `/srv/halcyon` (9p-mode -> a root fid), walks + opens
 `place` O_WRONLY, and writes the `inlinewire` header then the ARGB payload in
@@ -117,15 +131,21 @@ bound and the enforcement of the parse against hostile bytes are the reader's
 
 ## Performance
 
-A one-shot: one file read (`slurp_capped`, 64 MiB cap), one zune decode, one
-channel write. No steady state.
+A one-shot: one file read (`slurp_capped`, 16 MiB cap) on a 64 MiB heap, a
+headers-only dimension read, one zune decode (`bytes` freed after), one channel
+write. No steady state.
 
 ## Prosecution
 
 - **The decoder against hostile image bytes.** Malformed / truncated / oversize
-  PNGs; the colorspace normalization (every zune arm); the `MAX_PIXELS` bound;
-  garbage rejected. Runs in the sacrificial process, so a decode crash is one
-  shell line. zune is pure Rust (fuzz-friendlier than a ported C codec).
+  PNGs; the colorspace normalization (every zune arm); garbage rejected. Runs in
+  the sacrificial process, so a decode crash is one shell line. zune is pure Rust
+  (fuzz-friendlier than a ported C codec).
+- **The heap against a dimension bomb.** A small compressed PNG can declare huge
+  dimensions; `png_dimensions` + `within_pixel_budget` reject `w*h > VIEW_MAX_PIXELS`
+  from the IHDR before `decode_png` allocates, so an over-budget image is a clean
+  report, never a silent OOM-exit (the pre-fix defect: a bare `MAX_PIXELS` far
+  above the heap was a phantom bound -- [[sub-gallery]]'s holotype F1).
 - **The wire against drift.** `inlinewire::parse` validates before it returns;
   the pack/parse round-trip + the bounds rejections are host-tested; the magic
   reads as `HPL1` in a hexdump (a true-comment/wrong-value guard).
@@ -136,11 +156,12 @@ channel write. No steady state.
 ## Seams
 
 - JPEG decode (`zune-jpeg`) is a later slice; `sniff` already classifies it.
-- `--fullscreen` (`gallery`, a native libtapestry pane) and `Embed` (the
-  out-of-band pixel surface for video) are unbuilt (I-47 / the HALCYON 14.7
-  medium split: images native, video a ported C codec, audio -> Nocturne).
-- The obj-verb (`path view view {}` in `/lib/beacon/verbs`) that puts `view` on
-  the Esc+w/b menu is a one-line rule, unbuilt at the console spike.
+- `--fullscreen` LANDED as `gallery` (a native libtapestry pane, [[sub-gallery]]);
+  `Embed` (the out-of-band pixel surface for video) is unbuilt (I-47 / the HALCYON
+  14.7 medium split: images native, video a ported C codec, audio -> Nocturne).
+- The obj-verbs (`path view view {}` + `path gallery gallery {}` in
+  `/lib/beacon/verbs`) that put both viewers on the Esc+w/b menu LANDED
+  ([[sub-beacon]]).
 - The per-user SESSION-path channel (a per-pane control endpoint + token/quota)
   is halcyond's seam; the console spike posts ONE `/srv/halcyon`.
 
