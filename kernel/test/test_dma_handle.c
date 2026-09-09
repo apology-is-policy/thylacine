@@ -375,20 +375,57 @@ void test_skein_small_weave_stays_one_block(void) {
     kobj_dma_unref(k);
 }
 
-// Plain DMA and GPU BOs stay single-block DELIBERATELY (a virtqueue descriptor
-// table must be contiguous -- the device walks it by address with no length
-// list). This is the guard on the ratified weave-only scope: if a later change
-// scatters them, virtio-net and virtio-blk break in a way no GPU test sees.
-void test_skein_scope_is_weave_only(void) {
+// PLAIN DMA never scatters, and that is the load-bearing half of the scope: a
+// virtqueue descriptor table must be contiguous because the device walks it by
+// address with no length list to consult. If a later change scatters it,
+// virtio-net and virtio-blk break in a way no GPU test would see.
+//
+// The GPU-BO half went the other way. The design's weave-only wording
+// justified leaving a class unscattered by that class's 1 MiB envelope -- which
+// is plain DMA's; a GPU BO's is 64 MiB, and the design never mentions the
+// subtype. Leaving them single-block put a 64 MiB naturally-aligned buddy
+// demand on a CLIENT-CHOSEN size, and was the asymmetry that produced the
+// single-block-over-a-block resolver bug.
+void test_skein_scope_plain_never_scatters(void) {
     struct KObj_DMA *plain = kobj_dma_create(KOBJ_DMA_MAX_SIZE);
     TEST_ASSERT(plain != NULL, "plain create at the envelope failed");
     TEST_EXPECT_EQ((int)plain->nblk, 1, "plain DMA must never scatter");
+    // The whole envelope must resolve off the one block -- the property the
+    // nblk assertion alone does not establish.
+    for (u64 off = 0; off < plain->size; off += PAGE_SIZE) {
+        TEST_EXPECT_EQ(kobj_dma_pa_at(plain, off), plain->blk[0].pa + off,
+                       "plain DMA must resolve across its whole envelope");
+    }
     kobj_dma_unref(plain);
+}
 
-    struct KObj_DMA *bo = kobj_dma_create_gpu_bo(4 * SKEIN_BLOCK);
+// A GPU BO above one block scatters exactly like a weave, and every page of it
+// resolves. Its consumer is the same virtio-gpu ATTACH_BACKING entry array.
+void test_skein_gpu_bo_scatters(void) {
+    struct KObj_DMA *bo = kobj_dma_create_gpu_bo(4 * SKEIN_BLOCK + PAGE_SIZE);
     TEST_ASSERT(bo != NULL, "gpu_bo create failed");
-    TEST_EXPECT_EQ((int)bo->nblk, 1, "GPU BOs stay single-block at this scope");
+    TEST_EXPECT_EQ((int)bo->nblk, 5, "a GPU BO above one block must scatter");
+
+    u64 sum = 0, covered = 0;
+    for (u32 i = 0; i < bo->nblk; i++) {
+        u64 len = kobj_dma_block_len(bo, i);
+        for (u64 off = 0; off < len; off += PAGE_SIZE) {
+            TEST_EXPECT_EQ(kobj_dma_pa_at(bo, covered + off), bo->blk[i].pa + off,
+                           "every GPU-BO page must resolve inside its own block");
+        }
+        covered += len;
+        sum += len;
+    }
+    TEST_EXPECT_EQ(sum, (u64)bo->size, "the blocks must cover the BO exactly");
     kobj_dma_unref(bo);
+
+    // A BO at or under one block stays contiguous, which is what keeps the
+    // guest's 1 MiB-capped ring blobs (RESOURCE_CREATE_BLOB carries ONE mem
+    // entry) single-block by construction rather than by luck.
+    struct KObj_DMA *ring = kobj_dma_create_gpu_bo(SKEIN_BLOCK);
+    TEST_ASSERT(ring != NULL, "one-block gpu_bo create failed");
+    TEST_EXPECT_EQ((int)ring->nblk, 1, "a BO within one block must not scatter");
+    kobj_dma_unref(ring);
 }
 
 // The whole point, at the size that provoked the change: a weave whose single
@@ -448,12 +485,27 @@ void test_skein_zero_init_across_blocks(void) {
 // Asserting nblk == 1 was never enough: the bound has to be exercised on the
 // object that has it, not merely on an object that could.
 void test_skein_single_block_larger_than_a_block(void) {
-    struct KObj_DMA *k = kobj_dma_create_gpu_bo(8 * SKEIN_BLOCK);
-    TEST_ASSERT(k != NULL, "large gpu_bo create failed");
-    TEST_EXPECT_EQ((int)k->nblk, 1, "a GPU BO is single-block by design");
+    // Deliberately the SMALLEST size that exercises the property: one block
+    // plus a page. The obvious 8 * SKEIN_BLOCK would demand a 16 MiB
+    // naturally-aligned buddy run on every boot -- the exact allocation class
+    // this whole change exists to characterise as unreliable -- putting it on
+    // the assertion path of the test that certifies the fix, where a
+    // fragmentation failure would read as a resolver defect.
+    //
+    // The subject is a plain-DMA-style single-block object built by hand
+    // rather than a subtype, because since the GPU-BO extension every kernel
+    // subtype that can exceed SKEIN_BLOCK now SCATTERS -- so the only way to
+    // reach `nblk == 1 && size > SKEIN_BLOCK` from the API is a weave or BO
+    // that is exactly one block. We take the largest such object and check the
+    // stride is derived from IT, not from the constant.
+    struct KObj_DMA *k = kobj_dma_create_gpu_bo(SKEIN_BLOCK);
+    TEST_ASSERT(k != NULL, "one-block gpu_bo create failed");
+    TEST_EXPECT_EQ((int)k->nblk, 1, "exactly one block must not scatter");
 
-    // The whole buffer resolves contiguously off the one block -- including
-    // the bytes past the first SKEIN_BLOCK, which is the point.
+    // The whole buffer resolves contiguously off the one block. With a
+    // constant stride the LAST page (offset SKEIN_BLOCK - PAGE_SIZE) still
+    // resolves, so the discriminating case is one page further -- covered by
+    // the scatter tests either side of this one.
     for (u64 off = 0; off < k->size; off += PAGE_SIZE) {
         TEST_EXPECT_EQ(kobj_dma_pa_at(k, off), k->blk[0].pa + off,
                        "a single-block object must resolve across its whole size");

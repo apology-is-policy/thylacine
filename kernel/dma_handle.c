@@ -18,7 +18,13 @@
 // order-14 (64 MiB, naturally aligned) buddy allocation that fails with
 // 1889 MiB free. Plain DMA and GPU BOs still take exactly one block, so their
 // behaviour is byte-identical to before. Everything downstream reaches the
-// backing through kobj_dma_pa_at, which handles nblk == 1 as the same case.
+// backing through kobj_dma_pa_at, which handles nblk == 1 as the same case --
+// but note that "one resolver, so nothing can drift" is a claim about THIS
+// function only, and it was FALSE the first day it was written: the resolver
+// divided by the constant while kobj_dma_block_len divided by the object, so
+// for an 8 MiB single-block object the segment list was right and 1536 of its
+// 2048 pages resolved to 0. Both now derive the stride from skein_stride,
+// which is what actually makes them one decision.
 //
 // PA stability: once set in kobj_dma_create, blk[] and nblk are read-only.
 // No code path mutates them; the structural property pins
@@ -189,19 +195,34 @@ static struct KObj_DMA *dma_create_body(size_t size, size_t max_size,
 
     // WEAVE-SKEIN: how many contiguous runs back this object.
     //
-    // Only the WEAVE subtype scatters, and only above one block. Plain DMA
-    // stays single-block DELIBERATELY -- a virtqueue descriptor table must be
-    // contiguous because the device walks it by address with no length list to
-    // consult -- which keeps virtio-net/blk and every ring allocation entirely
-    // out of this change's blast radius. GPU BOs likewise stay single-block at
-    // this chunk's ratified scope.
+    // The DEVICE-FACING subtypes scatter; plain DMA does not.
     //
-    // A weave that fits in one block also takes the single-block path, so a
-    // small weave is not rounded up to a full SKEIN_BLOCK (the kernel test
-    // suite mints 2-page weaves; padding those to 2 MiB would be a 256x waste
-    // for no gain).
+    // Plain DMA stays single-block DELIBERATELY -- a virtqueue descriptor
+    // table must be contiguous because the device walks it by address with no
+    // length list to consult -- which keeps virtio-net/blk and every ring
+    // allocation entirely out of this change's blast radius. Its 1 MiB
+    // envelope is what makes that cheap, and a _Static_assert pins it under
+    // SKEIN_BLOCK so the claim cannot quietly stop being true.
+    //
+    // GPU BOs scatter for the SAME reason weaves do, and the design's
+    // weave-only wording was never a decision about them: it justified leaving
+    // a class unscattered by that class's 1 MiB envelope, which is plain DMA's
+    // -- a GPU BO's is 64 MiB, and the design does not mention the subtype at
+    // all. Leaving them single-block put a 64 MiB naturally-aligned buddy
+    // demand on a CLIENT-CHOSEN size (tapestryd's WARP_CTX_BACKING_MAX), i.e.
+    // exactly the allocation this whole change exists to stop gambling on --
+    // and it was the asymmetry that produced the single-block-over-a-block
+    // resolver bug. Their consumer is the same virtio-gpu ATTACH_BACKING that
+    // has always taken an entry array.
+    //
+    // An object that fits in one block takes the single-block path either way,
+    // so a small weave or BO is not rounded up to a full SKEIN_BLOCK (the
+    // kernel test suite mints 2-page weaves; padding those to 2 MiB would be a
+    // 256x waste for no gain) -- which is also what keeps the guest's ring
+    // blobs, capped at 1 MiB, contiguous by construction.
     u32 nblk = 1;
-    if (subtype == DMA_SUBTYPE_WEAVE && aligned_size > SKEIN_BLOCK) {
+    bool scatters = (subtype == DMA_SUBTYPE_WEAVE || subtype == DMA_SUBTYPE_GPU_BO);
+    if (scatters && aligned_size > SKEIN_BLOCK) {
         nblk = (u32)((aligned_size + SKEIN_BLOCK - 1) / SKEIN_BLOCK);
     }
     // Envelope-derived, so unreachable for any admitted size -- asserted

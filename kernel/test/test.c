@@ -1584,7 +1584,8 @@ void test_dma_map_proc_free_releases_kobj(void);
 void test_skein_blocks_tile_the_buffer(void);
 void test_skein_offset_resolution(void);
 void test_skein_small_weave_stays_one_block(void);
-void test_skein_scope_is_weave_only(void);
+void test_skein_scope_plain_never_scatters(void);
+void test_skein_gpu_bo_scatters(void);
 void test_skein_full_envelope_weave(void);
 void test_skein_zero_init_across_blocks(void);
 void test_skein_single_block_larger_than_a_block(void);
@@ -3519,7 +3520,10 @@ struct test_case g_tests[] = {
     { "skein.small_weave_stays_one_block",
                                        test_skein_small_weave_stays_one_block,
                                                                            false, NULL },
-    { "skein.scope_is_weave_only",     test_skein_scope_is_weave_only,     false, NULL },
+    { "skein.scope_plain_never_scatters",
+                                       test_skein_scope_plain_never_scatters,
+                                                                           false, NULL },
+    { "skein.gpu_bo_scatters",         test_skein_gpu_bo_scatters,         false, NULL },
     { "skein.full_envelope_weave",     test_skein_full_envelope_weave,     false, NULL },
     { "skein.zero_init_across_blocks", test_skein_zero_init_across_blocks, false, NULL },
     { "skein.single_block_larger_than_a_block",

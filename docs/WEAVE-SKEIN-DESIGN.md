@@ -418,3 +418,28 @@ so the implementation is bound by decisions rather than by preferences.
    (§8) are both out. *Consequence: the smallest surface to prosecute on an
    I-40/I-45 trigger, and the anon deferral stays a deferral — recorded, not
    silently inherited.*
+
+   **AMENDED AT IMPLEMENTATION to weave AND GPU BO** (audit round 1, F2). The
+   ballot item is otherwise honoured: plain `SYS_DMA_CREATE` never scatters,
+   and the anon deferral is untouched.
+
+   The amendment is not a re-litigation, because **this document does not
+   mention GPU BOs anywhere** — `grep -i gpu_bo` returns one hit, a struct
+   field. §3.2's justification for leaving a class unscattered is, verbatim,
+   *"those buffers are small (`KOBJ_DMA_MAX_SIZE` is 1 MiB, order <= 8)"* plus
+   *"a virtqueue descriptor table must be contiguous"*. Both are statements
+   about **plain DMA**. A GPU BO's envelope is 64 MiB and its consumer is the
+   same `ATTACH_BACKING` entry array a weave uses, so it was on the wrong side
+   of a line drawn for a different subtype.
+
+   Leaving it there had two measured costs. It put a 64 MiB naturally-aligned
+   buddy demand on a **client-chosen** size (tapestryd's
+   `WARP_CTX_BACKING_MAX`, over 8 contexts) — the exact gamble this document
+   exists to end — and the raised warden grant doubled it from order 13 to
+   order 14. And it was the asymmetry that produced the round's P0: a resolver
+   written for the small single-block case, applied to a 64 MiB one.
+
+   Ring blobs stay contiguous by construction (`WARP_RING_MAX` is 1 MiB, under
+   `SKEIN_BLOCK`), because `RESOURCE_CREATE_BLOB` carries a single mem entry —
+   `wring_mint` now asserts that rather than assuming it, since the two
+   constants live in different repositories and nothing links them.

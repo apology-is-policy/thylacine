@@ -835,9 +835,16 @@ static s64 sys_hostmem_refcount_handler(u64 va, u64 len) {
 // returns the underlying PA so the driver can embed it in device-visible
 // descriptors.
 //
-// Returns: non-negative PA on success, -1 on failure. PA fits in 40 bits
-// (TCR.IPS bound at v1.0); the s64 cast is safe — no valid PA has the
-// sign bit set.
+// Returns: non-negative PA on success; SYS_DMA_MAP_PA_SCATTERED (-2) when the
+// mapping SUCCEEDED but the object is a skein and has no single PA; -1 on
+// failure. PA fits in 40 bits (TCR.IPS bound at v1.0); the s64 cast is safe —
+// no valid PA has the sign bit set.
+//
+// THE -2 AND -1 UNWINDS ARE DIFFERENT and a caller must not conflate them:
+// -1 leaves nothing installed, -2 leaves a LIVE MAPPING at `vaddr` that the
+// caller owns and must burrow_detach if it gives up. A caller that treats -2
+// as -1 leaks a VMA; one that also rewinds a VA allocator hands the same
+// address out twice.
 //
 // Failure cases:
 //   - NULL Proc / corrupted Proc.
@@ -853,6 +860,10 @@ static s64 sys_hostmem_refcount_handler(u64 va, u64 len) {
 //   - burrow_create_dma OOM.
 //   - burrow_map failure (overlap with existing VMA, vaddr misalign,
 //     overflow, SLUB OOM for the Vma struct).
+//
+// NOT a failure case, listed here because it is the one non-obvious return:
+//   - the object is a skein (nblk > 1) -> SYS_DMA_MAP_PA_SCATTERED. The map
+//     happened; only the PA is unrepresentable. Use SYS_DMA_SEGMENTS.
 static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;

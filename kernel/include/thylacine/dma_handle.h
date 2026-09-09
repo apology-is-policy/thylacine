@@ -48,7 +48,8 @@
 //   - Backing is Normal cacheable RAM (not Device memory). CPU + device
 //     both access via Normal-WB PTEs; QEMU virt's VirtIO transports are
 //     coherent, so no explicit cache maintenance is needed at v1.0.
-//   - SLUB-allocated `pages` chunk released to buddy on free.
+//   - Backing pages released to the buddy on the last unref -- N runs for a
+//     scattered object, one for a contiguous one (see struct dma_block).
 
 #ifndef THYLACINE_DMA_HANDLE_H
 #define THYLACINE_DMA_HANDLE_H
@@ -239,8 +240,9 @@ u64 kobj_dma_block_len(const struct KObj_DMA *k, u32 i);
 // Refcount ops. Mirror kobj_mmio_ref / kobj_irq_ref.
 void kobj_dma_ref(struct KObj_DMA *k);
 
-// Decrement ref. If zero: free_pages(k->pages, k->order) + clobber
-// magic + kfree(k). After the unref that drops ref to 0, `k` is INVALID.
+// Decrement ref. If zero: free every block of the skein (each at its OWN
+// recorded order) + clobber magic + kfree(k). After the unref that drops ref
+// to 0, `k` is INVALID.
 //
 // NULL-safe.
 void kobj_dma_unref(struct KObj_DMA *k);

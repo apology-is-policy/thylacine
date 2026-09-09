@@ -1208,6 +1208,13 @@ pub struct TDmaSeg {
     pub pa: u64,
     pub len: u64,
 }
+// The kernel pins this record's size and both field offsets with
+// _Static_asserts; the Rust mirror must too. `repr(C)` fixes the ORDER but
+// nothing here would notice a field whose type changed width -- the
+// audit_pci3 F3 class, where the TPciInfo mirror asserted 3 of its offsets
+// and the drift landed in the fourth.
+const _: () = assert!(core::mem::size_of::<TDmaSeg>() == 16);
+const _: () = assert!(core::mem::align_of::<TDmaSeg>() == 8);
 
 // t_dma_segments — read a KObj_DMA's backing segment list (SYS_DMA_SEGMENTS).
 //
