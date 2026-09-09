@@ -600,6 +600,18 @@ impl Theme {
     /// a caller's theme: the result is a new value, so a refusal cannot leave
     /// a half-applied visual behind.
     pub fn from_toml(src: &str) -> Result<Loaded, LoadError> {
+        // A file this big is refused BEFORE parsing, and the bound is not
+        // about memory -- the parser's own caps handle that. It is about
+        // TRUNCATION: a caller's slurp stops at its own limit and returns
+        // what it got, and a truncated theme can be perfectly valid TOML,
+        // which is worse than malformed because 4.2 never fires. Refusing
+        // anything that could have been cut is the only way to tell.
+        if src.len() > THEME_MAX {
+            return Err(LoadError::Syntax(crate::toml::Error {
+                line: 1,
+                kind: crate::toml::Kind::TooLarge,
+            }));
+        }
         let entries = crate::toml::parse(src).map_err(LoadError::Syntax)?;
 
         // `base` first: it decides the starting point AND whether the file
@@ -739,9 +751,145 @@ pub fn env_palette(theme: &Theme) -> String {
     s
 }
 
-/// `env_palette(&DAYLIGHT)` -- the session's Daylight roles as /env text.
+/// `env_palette(&DAYLIGHT)` -- the built-in's roles as /env text.
+///
+/// TEST-ONLY since TH-4a: the session publishes `env_palette(&resolved)`, so
+/// the export is a RENDERING of the theme in force (3.5) rather than a second
+/// hand-kept list. A production caller here would publish Daylight's roles to
+/// a hosted program while the session itself painted something else.
+#[cfg(test)]
 pub fn daylight_env_palette() -> String {
     env_palette(&DAYLIGHT)
+}
+
+/// The largest theme file that will be read. Comfortably above any real one
+/// (the full 57-key Nocturne is a few KiB) and comfortably BELOW any reader's
+/// truncation point, so a file that was cut short is refused rather than
+/// parsed as a valid prefix.
+pub const THEME_MAX: usize = 64 * 1024;
+
+/// The system theme file (HALCYON-THEME 3.4). `/lib/halcyon/` is already the
+/// established home (`/lib/halcyon/renderer`, `/lib/halcyon/layouts`), so this
+/// adds a file rather than a convention.
+pub const SYSTEM_THEME_PATH: &str = "/lib/halcyon/theme.toml";
+/// The user's, relative to `$HOME`. Read by the user's SESSION only: the
+/// console renderer is not anyone's session and takes the system file.
+pub const USER_THEME_REL: &str = "/lib/halcyon/theme.toml";
+
+/// Where a resolved theme came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// No theme file, or none that loaded. The default installation.
+    BuiltIn,
+    /// `/lib/halcyon/theme.toml`.
+    System,
+    /// `$HOME/lib/halcyon/theme.toml`.
+    User,
+}
+
+/// A resolved theme plus what the resolution is owed to say.
+#[derive(Clone, Debug)]
+pub struct Resolved {
+    pub theme: Theme,
+    pub source: Source,
+    /// `[meta] name`, or empty.
+    pub name: String,
+    /// What to SAY. A missing file is silent (4.1); a malformed one is LOUD
+    /// and names its line and its tier, because a theme that quietly did not
+    /// apply is indistinguishable from one that did nothing.
+    pub notes: alloc::vec::Vec<String>,
+    /// Keys the winning file inherited from its base -- what
+    /// `halcyon theme lint` reports (4.3).
+    pub inherited: alloc::vec::Vec<String>,
+}
+
+/// One line of English for a refusal. The author reads this and knows where
+/// to look, which is the entire point of refusing whole rather than partly.
+pub fn describe(e: &LoadError) -> String {
+    let mut s = String::new();
+    let _ = match e {
+        LoadError::Syntax(p) => {
+            let what = match p.kind {
+                crate::toml::Kind::BadTable => "malformed [table] header",
+                crate::toml::Kind::BadKey => "not a key = value line",
+                crate::toml::Kind::BadValue => {
+                    "unsupported value (no floats, bools, dates or inline tables)"
+                }
+                crate::toml::Kind::BadString => "malformed string (no escapes in this subset)",
+                crate::toml::Kind::BadInt => "malformed integer",
+                crate::toml::Kind::BadArray => "malformed array",
+                crate::toml::Kind::Duplicate => "the same key twice in one table",
+                crate::toml::Kind::TooLarge => "too large",
+            };
+            write!(s, "line {}: {}", p.line, what)
+        }
+        LoadError::UnknownTable { line } => write!(s, "line {line}: unknown [table]"),
+        LoadError::UnknownKey { line } => write!(s, "line {line}: unknown key"),
+        LoadError::BadColour { line } => write!(s, "line {line}: not a \"#RRGGBB\" colour"),
+        LoadError::BadShape { line } => write!(s, "line {line}: wrong kind of value for this key"),
+        LoadError::OutOfRange { line } => write!(s, "line {line}: value out of range"),
+        LoadError::UnknownBase { line } => write!(s, "line {line}: unknown base theme"),
+        LoadError::Incomplete { missing } => {
+            let _ = write!(
+                s,
+                "no [meta] base, so every key is required; {} missing:",
+                missing.len()
+            );
+            // Name them -- capped, because a file that set nothing would
+            // otherwise print the whole schema at a console.
+            for k in missing.iter().take(8) {
+                let _ = write!(s, " {k}");
+            }
+            if missing.len() > 8 {
+                let _ = write!(s, " ... and {} more", missing.len() - 8);
+            }
+            Ok(())
+        }
+    };
+    s
+}
+
+/// Resolve the session's theme from the two file tiers (HALCYON-THEME 3.4).
+///
+/// Pure: the CONTENTS are injected, so the policy is host-tested and the I/O
+/// stays at the caller. `None` means the file is absent, which is not an
+/// error (4.1) -- the default installation has neither.
+///
+/// The user's file wins over the system's. A file that fails to load falls
+/// through to the NEXT TIER DOWN rather than to the built-in directly: a user
+/// whose own file has a typo still gets the system theme, which is what they
+/// were seeing before they wrote it.
+pub fn resolve(system: Option<&str>, user: Option<&str>) -> Resolved {
+    let mut notes: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    for (src, source, tier) in [
+        (user, Source::User, "user"),
+        (system, Source::System, "system"),
+    ] {
+        let Some(text) = src else { continue };
+        match Theme::from_toml(text) {
+            Ok(l) => {
+                return Resolved {
+                    theme: l.theme,
+                    source,
+                    name: l.name,
+                    notes,
+                    inherited: l.inherited,
+                }
+            }
+            Err(e) => {
+                let mut n = String::new();
+                let _ = write!(n, "theme: {tier} theme.toml REFUSED -- {}", describe(&e));
+                notes.push(n);
+            }
+        }
+    }
+    Resolved {
+        theme: builtin(),
+        source: Source::BuiltIn,
+        name: String::new(),
+        notes,
+        inherited: alloc::vec::Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -749,6 +897,95 @@ mod tests {
     use super::*;
 
     // ---- the theme file (HALCYON-THEME 3.3 / 4) ----
+
+    // A theme file big enough to have been TRUNCATED by its reader is refused
+    // whole. A cut file can be valid TOML -- so 4.2 would never fire, and the
+    // author would get a silently half-applied visual, which is the exact
+    // outcome the whole refusal policy exists to prevent.
+    #[test]
+    fn an_oversized_file_is_refused_before_it_can_be_a_valid_prefix() {
+        let mut big = String::from("[meta]\nbase = \"daylight\"\n[palette]\n");
+        // Legal, parseable content -- the point is that SIZE alone refuses it.
+        while big.len() <= THEME_MAX {
+            big.push_str("# a comment line that is entirely valid\n");
+        }
+        assert!(matches!(
+            Theme::from_toml(&big),
+            Err(LoadError::Syntax(crate::toml::Error {
+                kind: crate::toml::Kind::TooLarge,
+                ..
+            }))
+        ));
+        // The control: the same content just under the cap loads fine, so the
+        // refusal is the SIZE's and not the content's.
+        let ok = &big[..THEME_MAX];
+        assert!(Theme::from_toml(ok).is_ok(), "just under the cap must load");
+    }
+
+    // 3.4: the user's file wins, and a REFUSED file falls through to the next
+    // tier DOWN -- not straight to the built-in. A user whose own file has a
+    // typo keeps the system theme, which is what they were seeing before they
+    // wrote it.
+    #[test]
+    fn the_tiers_resolve_in_order_and_a_refusal_falls_one_step() {
+        let sys = "[meta]\nbase = \"daylight\"\nname = \"Sys\"\n[palette]\nsurface = \"#111111\"\n";
+        let usr = "[meta]\nbase = \"daylight\"\nname = \"Usr\"\n[palette]\nsurface = \"#222222\"\n";
+        let bad = "[meta]\nbase = \"daylight\"\n[palette]\nsurface = \"nope\"\n";
+
+        let r = resolve(None, None);
+        assert_eq!(r.source, Source::BuiltIn);
+        assert!(r.notes.is_empty(), "a MISSING file is silent (4.1)");
+
+        let r = resolve(Some(sys), None);
+        assert_eq!((r.source, r.theme.surface), (Source::System, 0xFF111111));
+
+        let r = resolve(Some(sys), Some(usr));
+        assert_eq!((r.source, r.theme.surface), (Source::User, 0xFF222222));
+        assert_eq!(r.name, "Usr");
+
+        // The user's is refused: the SYSTEM one wins, and the refusal is LOUD.
+        let r = resolve(Some(sys), Some(bad));
+        assert_eq!((r.source, r.theme.surface), (Source::System, 0xFF111111));
+        assert_eq!(r.notes.len(), 1);
+        assert!(r.notes[0].contains("user"), "{}", r.notes[0]);
+        assert!(r.notes[0].contains("line 4"), "{}", r.notes[0]);
+
+        // Both refused: the built-in, and BOTH said -- a silent fallback here
+        // is indistinguishable from a theme that applied and looked the same.
+        let r = resolve(Some(bad), Some(bad));
+        assert_eq!(r.source, Source::BuiltIn);
+        assert_eq!(r.notes.len(), 2);
+        assert!(r.notes[0].contains("user") && r.notes[1].contains("system"));
+    }
+
+    // Every refusal produces a line a person can act on: a tier, a line
+    // number, and what was wrong. A note that just said "theme failed" would
+    // satisfy the LOUD requirement while helping nobody.
+    #[test]
+    fn every_refusal_describes_itself_usefully() {
+        let cases = [
+            "[palette\n",
+            "[meta]\nbase = \"daylight\"\n[palette]\nsurface = \"nope\"\n",
+            "[meta]\nbase = \"daylight\"\n[palette]\nnope = \"#111111\"\n",
+            "[meta]\nbase = \"twilight\"\n",
+            "[meta]\nbase = \"daylight\"\n[geometry]\nhairline = 0\n",
+            "[palette]\nsurface = \"#111111\"\n",
+        ];
+        for src in cases {
+            let e = Theme::from_toml(src).unwrap_err();
+            let d = describe(&e);
+            assert!(!d.is_empty(), "for {src:?}");
+            assert!(
+                d.contains("line") || d.contains("missing"),
+                "{d:?} names neither a line nor the missing keys"
+            );
+        }
+        // The incomplete case names actual keys, capped so a file that set
+        // nothing cannot print the whole schema at a console.
+        let d = describe(&Theme::from_toml("[palette]\nsurface = \"#111111\"\n").unwrap_err());
+        assert!(d.contains("palette.floor"), "{d}");
+        assert!(d.contains("more"), "the list is capped: {d}");
+    }
 
     /// A minimal file setting exactly one key, for the registry sweep.
     fn only(table: &str, key: &str, val: &str) -> String {

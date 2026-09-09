@@ -378,10 +378,20 @@ pub extern "C" fn rs_main() -> i64 {
     });
     gs.set_scale(display.scale);
     gs.set_display(display.w, display.h);
-    // THE ONE PLACE this renderer resolves its theme (HALCYON-THEME 3.2);
-    // TH-4's loader lands here. Everything downstream is handed the resolved
-    // `&Theme` -- through the sheet, which carries it.
-    let theme = libhalcyon::theme::builtin();
+    // THE ONE PLACE this renderer resolves its theme (HALCYON-THEME 3.2/3.4).
+    // The SYSTEM file only: the console renderer is nobody's session, so
+    // there is no user tier to read -- and reading one would mean a console
+    // wearing whichever user happened to log in last. Everything downstream
+    // is handed the resolved `&Theme`, through the sheet that carries it.
+    let resolved = libhalcyon::theme::resolve(
+        chromeset::read_file(T_WALK_OPEN_FROM_ROOT, libhalcyon::theme::SYSTEM_THEME_PATH)
+            .as_deref(),
+        None,
+    );
+    for n in &resolved.notes {
+        say!("halcyond: {}", n);
+    }
+    let theme = resolved.theme;
     let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     {
