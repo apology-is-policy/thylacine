@@ -132,17 +132,66 @@ base, diff test NAMES rather than counts. Base 1512, now 1518, **+6 skein and
 nothing lost** -- the wobble was in my grep against a shared UART log, not in
 the suite.
 
+### Two audit rounds, and the fix that deleted its own regression test
+
+**Round 1** (Opus fallback; the Fable spawn died on credit exhaustion mid-run)
+independently derived the same P0 the self-audit had just fixed — it
+transcribed the arithmetic into a host harness and walked 14 object classes
+before discovering the fix existed. Two prosecutions converging is itself
+evidence. It added three facts the self-audit lacked: the bug reaches the
+**console** (`gl_adoption` returns tapestryd's *own* mapping), it fires at the
+**default** 1280x800 geometry, and the header comment claiming the resolver and
+the segment copy-out "cannot drift apart" was false the day it was written.
+
+Its F2 is the one that changed the design. The grant raise doubled the
+client-triggered contiguous demand from order 13 to order 14 on GPU BOs — the
+one class the skein did not cover. The ratified scope said "weave only", but
+that wording justified leaving a class unscattered by *plain DMA's* 1 MiB
+envelope and virtqueue contiguity; the document does not mention GPU BOs
+anywhere. A 64 MiB envelope on a client-chosen size was on the wrong side of a
+line drawn for a different subtype — and it was the asymmetry that produced the
+P0. So the skein was extended, and the amendment recorded rather than absorbed.
+
+**Round 2** prosecuted the fixes, and its sharpest finding was mine. Round 1's
+F4 objected that the P0's regression test demanded a 16 MiB naturally-aligned
+block on every boot — the exact allocation this chunk calls unreliable, on the
+assertion path of the test certifying the fix. Correct objection. The fix
+shrank the subject to exactly one block, where `off / SKEIN_BLOCK` is 0 for
+every in-range offset — **so it passes on the buggy resolver.** A fix for a
+fragile fixture had quietly deleted the only test that could fail.
+
+Restored by building the object directly, and sabotage-measured: with the
+constant stride back, **exactly one of ten tests fails**, and it is that one.
+The restored fixture then caught its own bug on first run — the suggested
+`order = 11` is 8 MiB for a 16 MiB object, and the resolver's
+bound-against-the-block guard correctly refused. The guard working, not the fix
+failing. *A suggested fix is a hypothesis.*
+
+Round 2 also found the file header still denying GPU-BO scatter **inside the
+comment block round 1's own correction was appended to** — the third false
+comment in one chunk, two lines above an edit. Re-read the block, not the line.
+
+**F12 was the one that could not be fixed by typing.** All four re-routed
+tapestryd sites are GL-gated, and local QEMU is `virgl=0` — so nothing this
+close reported had executed any of them. Fixed by running the prove gate on
+thyla-pi's real V3D over KVM: `WARP-2 GATE: VERIFIED`. Before writing up the
+residue as a hole, I measured it: a 1280x800 weave is 5.86 blocks and one slot
+spans 2, so **multi-entry ATTACH_BACKING is exercised on every boot already**
+and the console gate verifies the pixels. What is genuinely unwitnessed is a
+multi-segment list that came from a *GPU BO* rather than a weave — and the
+device call is byte-identical. A thin residue, not a hole.
+
 ### Posture and what is open
 
-`f2e507dd`. 1518 kernel test names, 0 FAIL, no extinction; 2560x1664 boots with
-the full suite green at that geometry. Host suites: tapestryd 21 (was 12),
+`6761d536`. 1522 kernel test names, 0 FAIL, no extinction; 2560x1664 boots with
+the full suite green at that geometry. **SMP gate PASS** — 40 boots across
+default/ubsan x smp4/smp8, zero corruption. Host suites: tapestryd 21 (was 12),
 libhalcyon 81, halcyond 209, libtapestry 10, halcyon 21, vt 62, kaua-term 44.
 
-The Fable prosecutor round died on credit exhaustion (HTTP 429) and was
-re-spawned on the Opus fallback per scripture, with the fallback's own
-instructions attached -- it brings context independence, not family diversity,
-so it must re-derive rather than accept this chunk's comments, several of which
-make load-bearing claims. **A Fable-diversity pass on this surface is owed and
+Both prosecutor rounds ran on the Opus fallback — the Fable spawn died on
+credit exhaustion (HTTP 429), and mid-session the `holotype-reviewer` agent
+definition stopped resolving, so round 2's prosecute discipline was inlined in
+the prompt instead. **A Fable-diversity pass on this surface is owed and
 currently unpayable**, the same debt HALCYON-THEME carries.
 
 ## Run 46j (2026-09-09, Opus 5 max) -- HALCYON-THEME TH-1 + TH-2: the palette had two owners and neither was in charge
