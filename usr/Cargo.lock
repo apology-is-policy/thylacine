@@ -577,6 +577,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "forage"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "fork-probe"
 version = "0.1.0"
 dependencies = [
