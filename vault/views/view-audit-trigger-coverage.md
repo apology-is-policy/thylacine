@@ -40,12 +40,13 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**135 declared surfaces · 131 covered by a hard-audit dossier · 3 soft-owned · 1 unowned · 0 unparsed · 16 cited path(s) that do not resolve.**
+**136 declared surfaces · 131 covered by a hard-audit dossier · 4 soft-owned · 1 unowned · 0 unparsed · 17 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
 | declared surface | cited path | |
 |---|---|---|
+| **FORAGE: the npxf secure channel -- a second implementation of a hand… | `lib/bin` | no such file in the tree |
 | A-5c RECOVER recovery keyslot (corvus) | `usr/corvus-mint` | no such file in the tree |
 | Hardware allowance / I-34 (Menagerie build-arc 2) | `kernel/libt/libthyla-rs` | no such file in the tree |
 | Initial bringup | `init/init.c` | no such file in the tree |
@@ -67,6 +68,7 @@ changed on main? — is the next increment, tracked as task #169.
 
 | declared surface | state | why |
 |---|---|---|
+| **FORAGE: the npxf secure channel -- a second implementation of a hand-rolled AEAD protoco… | soft-owned | owned by [[sub-substrate-machine]], none `audit: hard` |
 | Host-side pool populate via existing `stratumd + stratum-fs` (host build infra) | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
 | Kaua console-TUI substrate: the cons/consctl backend + the ut raw-mode dance (LS-7) | soft-owned | owned by [[sub-kaua]], [[sub-nora-engine]], [[sub-nora-host]], [[sub-nora-view]] (+2 more), none `audit: hard` |
 | Thylacine mkfs RNG seed pinning | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
