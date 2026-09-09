@@ -1,0 +1,22 @@
+# forage -- mount a remote 9P2000.L tree served over TCP.
+#
+# Native (libthyla-rs) per the Plan 9 split: authored within Thylacine, so no
+# musl and no pouch boundary-line. The only dependency is libthyla-rs itself --
+# the /net TCP client, SYS_PIPE, SYS_ATTACH_9P and SYS_MOUNT are all it needs.
+#
+# NO CRYPTO HERE, deliberately. This is the plain-9P half; the npxf secure
+# channel (X25519 + ChaCha20-Poly1305, docs/FORAGE-DESIGN.md) layers on top of
+# the SAME framed pump, as its own chunk with its own audit.
+[package]
+name = "forage"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "forage"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }

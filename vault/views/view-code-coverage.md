@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 56 unowned · 490 files (88% owned) · ~15575 unswept lines.**
+**434 owned · 57 unowned · 491 files (88% owned) · ~15934 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30471 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -79,6 +79,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/lib | 58 | 3 | 1003 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/halcyond | 19 | 1 | 432 |
+| usr/forage | 0 | 1 | 359 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/tapestryd | 7 | 2 | 235 |
@@ -128,6 +129,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/halcyond/src/outline.rs | 432 |
 | kernel/include/thylacine/errno.h | 388 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
+| usr/forage/src/main.rs | 359 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/lib/libhalcyon/src/scale.rs | 302 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
