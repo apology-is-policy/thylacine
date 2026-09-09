@@ -532,6 +532,81 @@ present. Filed to the vault on call 0076 with the three specific errors; the
 `surface <- header` mapping the note calls "the one mapping worth pinning" is
 unchanged and still correct.
 
+### The next chunk's premise was false: tapestryd's tests could never have run
+
+Both TH-6 rounds named `usr/tapestryd/src/server.rs` (17941 lines) the
+least-covered surface, so it was the obvious thing to open next. The chunk
+turned out to rest on a premise that does not hold.
+
+`usr/tapestryd/src/chords.rs` carries a `#[cfg(test)] mod tests` with four
+test functions. They had never run, and could not:
+
+```
+cargo test -p tapestryd --target aarch64-apple-darwin
+  -> error: unknown directive   .size _start
+     error: unknown directive   .type __thyla_rfork_spawn
+     error: could not compile `libthyla-rs` (lib) due to 4 previous errors
+```
+
+tapestryd was a bin-only crate with an **unconditional** `libthyla-rs`
+dependency, so the test harness build pulls in the whole guest body and dies
+on inline aarch64 asm whose ELF-only `.size`/`.type` directives the Mach-O
+assembler rejects. The guest target is no escape either -- `aarch64-unknown-none`
+has no test runner. And `grep -rn "cargo test" tools/ Makefile` returns
+nothing, so no gate was ever going to report them as skipped.
+
+**A test that cannot be compiled is indistinguishable from one that passes,
+because neither produces a failure.** Four plausible-looking cases sat there
+reading as coverage. Absence of a red is not evidence of a green.
+
+The lesson was already written down -- in this tree, in the sibling crate's
+manifest. `usr/halcyond/Cargo.toml` opens with *"lib + bin from birth (the
+H-2a lesson: a no_std bin crate's tests are dormant)"* and even explains doing
+the same for two of its own dependencies, *"default-features off drops the
+`bin` process, whose libthyla-rs dep does not host-compile"*. The pattern was
+proven and the hazard was named. It simply never propagated one directory
+over. **A lesson recorded in one crate's manifest does not reach its sibling.**
+
+Applied it: `[lib]` carrying `pane` / `chords` / `keymap` (each verified to
+reference no syscall crate -- zero `libthyla_rs`, `libdriver` or `say!` hits),
+`[[bin]] required-features = ["guest"]`, the guest deps optional. The four
+tests now run and pass; they were correct all along.
+
+That change has a trap of its own, which the manifest now records: a bin whose
+`required-features` are unmet is **skipped silently** rather than failing, and
+this crate's comment had advertised `--no-default-features` as the production
+strip -- which would now drop `guest` and ship nothing. So the guest artifact
+was verified by moving it aside and confirming it is *reproduced* (542760
+bytes), never by an exit code. The first attempt at that verification was
+itself wrong and worth recording: building via `--manifest-path` from the repo
+root silently targeted the **host**, because `usr/.cargo/config.toml` is
+directory-scoped, and the resulting libthyla-rs failure looked exactly like a
+real breakage until I noticed the target.
+
+Then the actual deliverable, because a manifest edit that turns four dormant
+tests green would read as a win while leaving server.rs exactly as uncovered:
+the status-bar admission rule is now `pane::admit_status_bar(&StatusReq)`,
+pure over eight scalars, with `create` reduced to filling the struct and
+mapping the verdict (`Malformed` -> E_INVAL, `NotYours` -> E_PERM). A struct
+rather than a positional argument list because the two bools and the four
+u32s are mutually transposable and the compiler would not catch a swap.
+
+This is the rule from `9d5f38ee` -- the one the audit-trigger row records as
+having no witness of any kind, host or guest, and which runs 46f and 46h both
+left owed. Eight tests now cover it, each one field off a valid base, and the
+two non-obvious ones are sabotage-measured in isolation: deleting the
+ownership arm fails `a_system_renderer_may_not_take_a_declared_sessions_bar`
+and **nothing else** -- both positive controls stay green, so the test
+discriminates that rule rather than any edit to the function -- and swapping
+the arms' order fails `malformed_is_judged_before_ownership` alone. The order
+matters because it decides which errno a malformed request from a SYSTEM
+principal sees, and nothing else was looking.
+
+What this does **not** close, stated plainly: the two halves' interaction
+across a live declare/undeclare cycle is still a guest-only claim, the
+both-levers leg is still owed, and `Comp` as a whole is still untestable. Half
+of item (f) on that row, not all of it.
+
 ---
 
 ## Run 46h (2026-09-08, Opus 5 max, after the 600k self-compaction) -- HALCYON-TYPE TY-4: Cornucopia live, and the defect that fell out of measuring it

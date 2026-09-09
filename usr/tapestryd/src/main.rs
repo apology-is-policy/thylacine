@@ -46,11 +46,10 @@ macro_rules! say {
     }};
 }
 
-mod chords;
+// `chords`, `keymap` and `pane` live in the LIB half (src/lib.rs) so they are
+// host-testable; these are the bin-only modules, which syscall.
 mod gpu;
 mod input;
-mod keymap;
-mod pane;
 mod server;
 
 use alloc::vec::Vec;
@@ -70,8 +69,8 @@ use crate::input::{
     InputDev, RawInputEvent, ABS_X, ABS_Y, BTN_LEFT, EV_ABS, EV_KEY, EV_REL, EV_SYN, REL_WHEEL,
     REL_X, REL_Y,
 };
-use crate::keymap::Mods;
 use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_WARP};
+use tapestryd::keymap::{self, Mods};
 
 // =============================================================================
 // User-VA layout (driver-private): the BAR windows + the device rings; the

@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 54 unowned · 488 files (88% owned) · ~15340 unswept lines.**
+**434 owned · 55 unowned · 489 files (88% owned) · ~15357 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30471 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -84,6 +84,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | arch | 36 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
+| usr/tapestryd | 7 | 1 | 17 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
 | usr/coreutils | 60 | 0 | 0 |
@@ -105,7 +106,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/ptyhost | 1 | 0 | 0 |
 | usr/sntp | 1 | 0 | 0 |
-| usr/tapestryd | 7 | 0 | 0 |
 | usr/utopia | 26 | 0 | 0 |
 | usr/virtio-blk-rw | 1 | 0 | 0 |
 | usr/virtio-gpu | 1 | 0 | 0 |
@@ -174,4 +174,5 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
+| usr/tapestryd/src/lib.rs | 17 |
 <!-- generated:end -->

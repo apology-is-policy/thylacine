@@ -118,11 +118,11 @@ use libthyla_rs::{
 const PRESENT_BURST_WINDOW_MS: u64 = 250;
 const PRESENT_BURST_MIN: u32 = 4;
 
-use crate::chords::{ChordAction, Chords};
+use tapestryd::chords::{ChordAction, Chords};
 use libhalcyon::scale;
 use libhalcyon::theme::Metrics;
 use crate::gpu::{FenceTag, FencedErr, Gpu};
-use crate::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
+use tapestryd::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
 use libdriver::Error;
 
 pub const MAX_CONNS: usize = 8;
@@ -4568,23 +4568,23 @@ impl Comp {
         // display width by the one vertical unit -- never cropped or
         // letterboxed (HALCYON.md 13.6). Judged before the weave allocation.
         if is_status {
-            let unit = self.metrics.status_h as u32;
-            if self.status.is_some() || w != disp_w || h != unit || disp_h <= unit {
-                return Err(p9::E_INVAL);
-            }
-            // The display's bar belongs to whoever owns the display. While a
-            // session is declared, a SYSTEM principal -- the console
-            // renderer, which is backgrounded and showing nothing -- may not
-            // TAKE the slot. Retiring its bar at the declare is necessary and
-            // NOT sufficient on its own: the console sees the CLOSE, re-arms
-            // on the very relayout that retire causes, and races the session
-            // for the slot it was just relieved of. Whoever wins is then the
-            // owner, which is a coin toss deciding whether the user has a
-            // status bar. Refused here, the console simply stays bar-less
-            // while it is invisible and re-mints from the relayout that
-            // foregrounds it at logout.
-            if !self.session_conns.is_empty() && !principal_is_session(s.owner_principal) {
-                return Err(p9::E_PERM);
+            // The rule itself is `pane::admit_status_bar` -- pure over
+            // scalars, so it is host-testable; see it for why refusing the
+            // SYSTEM taker is not redundant with retiring its bar.
+            let req = pane::StatusReq {
+                bar_registered: self.status.is_some(),
+                w,
+                h,
+                disp_w,
+                disp_h,
+                status_h: self.metrics.status_h as u32,
+                session_declared: !self.session_conns.is_empty(),
+                requester_is_session: principal_is_session(s.owner_principal),
+            };
+            match pane::admit_status_bar(&req) {
+                pane::StatusAdmit::Admit => {}
+                pane::StatusAdmit::Malformed => return Err(p9::E_INVAL),
+                pane::StatusAdmit::NotYours => return Err(p9::E_PERM),
             }
         }
         // H-3b-2: a chrome binding names a LIVE LEAF (E_NOENT otherwise),
@@ -7880,7 +7880,7 @@ impl Comp {
             }
             return false;
         }
-        let super_held = mods & crate::keymap::MOD_SUPER != 0;
+        let super_held = mods & tapestryd::keymap::MOD_SUPER != 0;
         if value == 2 {
             // Repeat: follows its press's disposition; a repeat while
             // Super is held is plane-reserved regardless.
@@ -7893,7 +7893,7 @@ impl Comp {
         // H-3c: a chord dismisses a placed menu first, then acts -- the
         // environment's plane outranks a modal.
         self.menu_dismiss("chord");
-        self.chord_action(code, mods & crate::keymap::MOD_SHIFT != 0);
+        self.chord_action(code, mods & tapestryd::keymap::MOD_SHIFT != 0);
         true
     }
 
