@@ -2345,7 +2345,7 @@ impl Comp {
             scale,
             scale_override: None,
             declared,
-            metrics: Metrics::at(scale),
+            metrics: libhalcyon::theme::builtin().metrics.at(scale),
             theme: libhalcyon::theme::builtin(),
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
@@ -4050,7 +4050,7 @@ impl Comp {
         }
         let from = self.scale;
         self.scale = pct;
-        self.metrics = Metrics::at(pct);
+        self.metrics = self.theme.metrics.at(pct);
         say!("tapestryd: scale {} -> {} ({})", from, pct, why);
         // The fan is owed whatever the geometry does (the scale round's
         // F3). Set BEFORE the bar retire: the retire's own reconcile

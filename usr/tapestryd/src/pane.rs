@@ -315,7 +315,7 @@ impl Layout {
             id_seq: 0,
             epoch: 1,
             zoomed_id: None,
-            metrics: theme::METRICS,
+            metrics: theme::builtin().metrics,
         };
         let root = l
             .alloc(None, Kind::Leaf { surface: None })

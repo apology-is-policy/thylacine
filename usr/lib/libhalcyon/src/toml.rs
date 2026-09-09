@@ -27,6 +27,10 @@ pub struct Entry<'a> {
     pub table: &'a str,
     pub key: &'a str,
     pub line: u32,
+    /// The line the `[table]` header was on (0 for the root table). A caller
+    /// rejecting a whole TABLE should point the author at the header they
+    /// mistyped, not at the first key that happens to sit under it.
+    pub table_line: u32,
     pub value: Value<'a>,
 }
 
@@ -162,6 +166,7 @@ fn valid_key(k: &str) -> bool {
 pub fn parse(src: &str) -> Result<Vec<Entry<'_>>, Error> {
     let mut out: Vec<Entry<'_>> = Vec::new();
     let mut table = "";
+    let mut table_line = 0u32;
     let mut lines = src.lines().enumerate();
     while let Some((i, raw)) = lines.next() {
         let lineno = i as u32 + 1;
@@ -171,6 +176,7 @@ pub fn parse(src: &str) -> Result<Vec<Entry<'_>>, Error> {
         }
         if line.starts_with('[') {
             table = parse_header(line).ok_or_else(|| err(lineno, Kind::BadTable))?;
+            table_line = lineno;
             continue;
         }
         let (key, rest) = line
@@ -226,6 +232,7 @@ pub fn parse(src: &str) -> Result<Vec<Entry<'_>>, Error> {
             table,
             key,
             line: lineno,
+            table_line,
             value,
         });
     }

@@ -139,7 +139,7 @@ pub fn daylight_sheet(scale: u16) -> Sheet {
 }
 
 pub fn sheet_for(d: &libhalcyon::theme::Theme, scale: u16) -> Sheet {
-    let metrics = Metrics::at(scale);
+    let metrics = d.metrics.at(scale);
     let (island, grid) = mono_advances(scale);
     let px = |v: f32| libhalcyon::scale::px(v, scale);
     let ipx = |v: i32| libhalcyon::scale::ipx(v, scale);
