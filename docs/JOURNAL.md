@@ -23,6 +23,126 @@ needed the operator.
 
 ---
 
+## Run 46j (2026-09-09, Opus 5 max) -- HALCYON-THEME TH-1 + TH-2: the palette had two owners and neither was in charge
+
+**Where it sits.** The operator asked, after seeing the TY-4 type work: *"The
+daylight theme colors -- are they together somewhere on one place and described,
+so that another theme can be easily made? ALL of the colors, so that if a theme
+is made and all colors are changed to form a dark theme, some hardcoded daylight
+color won't kick it in somewhere."* Answering it honestly meant finding three
+defects, which became `docs/HALCYON-THEME.md` (@`65b37191`, authorized in full:
+*"no matter how big it is -- we do it properly and completely"*). This run is
+chunks 1 and 2 of six.
+
+### The cycle, and why it was not just duplicated hex
+
+The design named `vt::DAYLIGHT` as hand-copied hex, and it was:
+
+```rust
+pub const DAYLIGHT: Palette = Palette {
+    bg: 0xFFF2_EBE0, // libhalcyon DAYLIGHT.surface
+    fg: 0xFF1A_120A, // libhalcyon DAYLIGHT.fg
+```
+
+with three comments forming a ring, each naming another as the source of truth:
+`libhalcyon::theme` opened *"This is the SINGLE token source"*; `vt::DAYLIGHT`
+said the source was `libhalcyon::daylight_palette()`; and `daylight_palette()`
+said the source was `vt::DAYLIGHT`. A test pinned the pair, so they could not
+drift *silently* -- the cost was only that a second theme would have to be
+authored twice, in two crates.
+
+**But the transcription was the symptom, not the defect.** `vt::DAYLIGHT` was
+*Halcyon's* palette living inside the *terminal core*, and the terminal core
+cannot see `libhalcyon` -- so the value had no way to arrive except by being
+copied. That reframing decided the fix. Deleting the const forces the real
+question: then what does `kaua-term` use? It is a separate process, it names
+`vt::DAYLIGHT`, and it does not depend on `libhalcyon`.
+
+The alternative was tempting and wrong: give `kaua-term` a `libhalcyon`
+dependency so it can read the derived value. That closes the transcription, but
+it adds a crate edge TH-2's visibility split would immediately have to remove --
+and worse, it hides the plumbing requirement behind a convenient default. So
+TH-1 built the seam `vt`'s own comment had already named as the v1.x intent:
+*"the compositor plumbs the palette to the kaua-term rather than the producer
+defaulting."* `--palette <18 RRGGBB>`, riding the `--beacon` tier precedent that
+was already there. Landed `1773b06a`.
+
+**An un-plumbed tile falls back to BONFIRE -- dark, inside a light pane.** That
+is deliberate. A plumbing break should be loud, not silently almost-right.
+
+### The self-audit finding: a quiet misparse of a theme declaration
+
+The first parser was positional. Flags in an unexpected order would be read as
+*dimensions* -- falling back to 80x24 and running the next argument as the
+program. Nothing would fail; the tile would just be the wrong size running the
+wrong thing. A quiet misparse of a theme declaration is the exact failure class
+this arc exists to close, so the parse became order-independent and now refuses
+an unknown flag before the dimensions rather than guessing at it.
+
+### TH-2: the rule is a compile error, because a comment rots
+
+`theme::DAYLIGHT` is public only under a new `theme-fixture` feature, enabled as
+a **dev**-dependency: tests keep the const, shipped binaries cannot see it,
+because resolver 2 keeps a dev-only feature out of `cargo build`. That is TY-4's
+cornucopia mechanism reused.
+
+**Both halves sabotage-measured**, because an enforcement claim nobody tried to
+break is an untested premise. A `DAYLIGHT.ember` at module scope in `tile.rs`
+gives `error[E0603]: constant DAYLIGHT is private` on the guest build; the ~20
+test references compile and pass. Landed `d910d665`.
+
+The residue is stated rather than glossed: `builtin()` is public and returns the
+same values, so the split bounds which *name* production may use, not which
+*values* it can reach. Something must be able to say "no theme file, use the
+built-in". Its only callers are the two renderer startups and `Comp::new` --
+which is exactly where TH-4's loader goes.
+
+### Four things the threading found that nobody had listed
+
+The chunk was supposed to be mechanical. It was not.
+
+1. **`sel_bg: 0xFFDF_D6C7`** and **2. `island_rule: 0xFF7A_6850`** -- two
+   literals inside `daylight_sheet` itself, each with a comment explaining that
+   the scripture had no token for it. That comment is precisely how a literal
+   survives review: it reads as a considered decision rather than a gap.
+3. **`tapestryd::pane::BG_COLOR = 0xFF10_1014`** -- the near-black blank-pane
+   fill. The same defect in the opposite direction: a *dark* literal that would
+   survive into a *light* theme. All three are tokens now (`selection`,
+   `island_rule`, `blank`); `BG_COLOR` is deleted.
+4. **Not a literal at all.** Two layout comparisons read
+   `st.bg != DAYLIGHT.surface` beside `st.bg != sheet.ground`. Those were the
+   same value, so the second arm looked redundant -- but its *meaning* is "the
+   cell carries the terminal's default background", and under a dark theme the
+   Daylight constant would classify a legitimately-parchment cell background as
+   "no background" and paint its text invisible. Both now read the resolved
+   `sheet.theme.terminal.bg`. This one had no hex literal to grep for.
+
+### The test that answers the operator's question
+
+`a_fully_retinted_theme_leaves_no_daylight_colour_in_the_sheet` inverts every
+token, **checks the retint did not collide with another Daylight value** (a
+survivor could otherwise pass by coincidence), then asserts no sheet colour is
+still a Daylight one. Sabotage-measured: restoring the `sel_bg` literal fails it
+*by name*.
+
+And the seam test from TH-1,
+`the_args_we_build_declare_our_theme_to_the_parser_the_child_runs`, drives
+halcyond's *built* args through kaua-term's *real* parser -- the TY-4 lesson
+applied, since a unit test of either half alone passes with the halves
+disagreeing. Dropping the flag fails exactly 2 tests by the palette compare.
+
+### Open, and not claimed as proven
+
+- **tapestryd's chrome has no host-testable seam.** `server.rs` carries no test
+  module, so the compositor half of the retint claim rests on the build plus the
+  compose gate -- an owed witness, not a proven one.
+- The workspace is not `rustfmt`-clean at HEAD (raster.rs 56 diffs,
+  transcript.rs 54, and so on) and was not made so here. "Clean on every line
+  this chunk touched" was verified by intersecting `cargo fmt --check` output
+  against `git diff`, not by running rustfmt over files this chunk does not own.
+
+---
+
 ## Run 46h (2026-09-08, Opus 5 max, after the 600k self-compaction) -- HALCYON-TYPE TY-4: Cornucopia live, and the defect that fell out of measuring it
 
 **Where it sits.** TY-1..TY-3 put the proportional text on the outline path
