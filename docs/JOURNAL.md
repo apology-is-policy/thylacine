@@ -23,6 +23,128 @@ needed the operator.
 
 ---
 
+## Run 46k (2026-09-09, Opus 5 max, after a self-compaction) -- WEAVE-SKEIN: the fix landed, and the diagnosis it was built on was wrong
+
+**Where it sits.** The operator could not boot a 2560x1664 display:
+`tapestryd: t_dma_create_weave(51118080) failed -1`, no scanout, fall back to
+serial. The previous run diagnosed it, took the design to a four-item ballot,
+got all four ratified as recommended (`903fc5a7`), and deliberately did not
+open the implementation at 570k context. This run implemented it -- and
+measured that the diagnosis was wrong.
+
+### What the design said, and what was actually true
+
+The ratified design named the buddy allocator. `order_for_pages` rounds a
+48.75 MiB weave up to order 14, so one span demands **64 MiB contiguous and
+naturally aligned**; the failing guest showed 1889 MiB free, which read as
+fragmentation. That reasoning is in `docs/WEAVE-SKEIN-DESIGN.md` section 1, and
+it survived a ballot.
+
+The real bound is in `usr/warden/src/main.rs`: tapestryd's manifest granted
+`dma = "pool: 32 MiB"`. `allowance_permits` refuses a 48.75 MiB weave inside
+`sys_dma_create_weave_handler` and returns -1 **before
+`kobj_dma_create_weave` is ever called**. The allocator was never reached. The
+change that fixes the operator's display is one line.
+
+**How it surfaced, which was luck shaped like method.** After the kernel side
+landed, the 2560x1664 boot still printed the identical
+`t_dma_create_weave(51118080) failed -1`. The CREATE was failing, not the map --
+and the boot log names the grant on every boot, one line above the failure:
+`warden: bind virtio-pci:18 ... dma=0x2000000`. It had been printing that on
+every boot of this system's life.
+
+### Why the wrong cause was so convincing
+
+**The two bounds sit at the same 32 MiB threshold.** The allowance cap is
+32 MiB. The buddy's order 13 -> 14 boundary is 32 MiB. So the boot evidence --
+2048x1280 (30 MiB) works, 2560x1664 (48.75 MiB) does not -- fits *both* stories
+exactly, and no amount of re-reading it could separate them. **Two causes, one
+reading: only a second axis can help.** The second axis turned out to be
+changing the allocator and watching the failure not move.
+
+The design's elimination list also carried a false entry, and that is how the
+allowance escaped: *"tapestryd's allowance is BROAD so it passes."* It is
+narrowed. The item was listed as checked without being read. **A negative over
+a set you did not enumerate is a guess** -- and putting it inside a list headed
+"ruled out by elimination" is exactly what makes a guess look like diligence.
+
+### The sabotage that measured the wrong thing
+
+The design's test plan said: force `nblk = 1`, confirm 2560x1664 fails again.
+Done -- and tapestryd SEGVed at `addr=0x2600000`, which looked like
+confirmation.
+
+It was not. Forcing `nblk = 1` while leaving the resolver's stride at 2 MiB
+produces a state that **never existed**: `kobj_dma_pa_at` divides the offset by
+`SKEIN_BLOCK` regardless of `nblk`, so it refuses every offset past the first
+2 MiB. The run proved the resolver is live. It said nothing about whether the
+allocator would have coped, which was the question.
+
+The honest sabotage is `SKEIN_BLOCK` = 64 MiB -- `nblk == 1` **and** a matching
+stride, i.e. exact pre-skein semantics. **That run passes**: `exit=0`, 0
+weave-create failures, `scanout direct 0 slot 0 (2560x1664)`. The order-14
+allocation succeeds on a freshly-booted 2 GiB guest.
+
+**A sabotage must reproduce the OLD behaviour, not merely break the new one.**
+Breaking it proves the code runs; it never proves the code was needed. Both
+sabotages "confirmed" the change -- one by measuring the right thing.
+
+### So what did the skein earn
+
+Stated exactly, because a run that reads as uniformly successful is usually one
+written up carelessly: **the skein is a fragility fix, not the bug fix.**
+
+What is real: `order_for_pages` does round up, so a 48.75 MiB weave does depend
+on a free 64 MiB *naturally-aligned* block. That is luck about when in a
+system's life the compositor starts -- and tapestryd is `restart = on-crash`,
+so a restart on a long-uptime fragmented box is precisely the unlucky case. The
+skein removes the dependence and cuts waste from 15.25 MiB (24%) to 0.25 MiB
+(0.5%). Landing it was right; describing it as the bug fix would not have been.
+
+### The implementation, and two choices the design left open
+
+All four ratified decisions landed as ratified: `SYS_DMA_SEGMENTS` = 110 that
+refuses rather than truncates; `SYS_DMA_MAP` fail-closed at -2 on a skein;
+`SKEIN_BLOCK` = 2 MiB; the name `skein`; weave-only scope.
+
+Two choices the design marked as the implementer's:
+
+- **`blk[]` is an inline fixed array**, not the sketch's pointer. Same field
+  names and `k->blk[i]` at every use, so the deviation is invisible at call
+  sites -- and it removes an allocation, a free, and the whole double-free /
+  dangling-array finding class from an I-40/I-45 surface, for 768 bytes on a
+  handful of live objects.
+- **The tail block is sized to its own buddy order**, not padded. Section 3.3
+  expected that to cost complexity; it costs none, because `order` is already
+  per-block for `free_pages` and the fault formula is stride-uniform (the tail
+  is last, so no later index depends on its length). The 2560x1664 weave wastes
+  0.25 MiB instead of 1.25 MiB.
+
+`Burrow.pa` is now 0 for a DMA Burrow, deliberately: a plausible-looking base
+is what a future reader would add an offset to and address another object's
+pages once a weave scatters.
+
+### The count that wobbled
+
+The PASS-line grep read 1470 on one run and 1469 on the next at the same
+geometry. A vanishing test is not something to shrug at, so: stash, build the
+base, diff test NAMES rather than counts. Base 1512, now 1518, **+6 skein and
+nothing lost** -- the wobble was in my grep against a shared UART log, not in
+the suite.
+
+### Posture and what is open
+
+`f2e507dd`. 1518 kernel test names, 0 FAIL, no extinction; 2560x1664 boots with
+the full suite green at that geometry. Host suites: tapestryd 21 (was 12),
+libhalcyon 81, halcyond 209, libtapestry 10, halcyon 21, vt 62, kaua-term 44.
+
+The Fable prosecutor round died on credit exhaustion (HTTP 429) and was
+re-spawned on the Opus fallback per scripture, with the fallback's own
+instructions attached -- it brings context independence, not family diversity,
+so it must re-derive rather than accept this chunk's comments, several of which
+make load-bearing claims. **A Fable-diversity pass on this surface is owed and
+currently unpayable**, the same debt HALCYON-THEME carries.
+
 ## Run 46j (2026-09-09, Opus 5 max) -- HALCYON-THEME TH-1 + TH-2: the palette had two owners and neither was in charge
 
 **Where it sits.** The operator asked, after seeing the TY-4 type work: *"The

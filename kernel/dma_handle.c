@@ -101,6 +101,21 @@ static void dma_free_blocks(struct KObj_DMA *k, u32 n) {
     }
 }
 
+// The buffer distance between consecutive blocks.
+//
+// SKEIN_BLOCK for a real skein -- but a SINGLE-block object's one block spans
+// the WHOLE buffer, and that is not a degenerate case: plain DMA is capped at
+// 1 MiB, but a GPU BO is single-block BY DESIGN with a 64 MiB envelope, so
+// `nblk == 1 && size > SKEIN_BLOCK` is ordinary. Dividing such an object's
+// offsets by SKEIN_BLOCK yields an index past nblk and refuses every byte
+// after the first 2 MiB, i.e. a client faults on most of its own buffer.
+//
+// Derived rather than stored: a stored stride is a second source of truth
+// about the same fact, and the two can drift.
+static inline u64 skein_stride(const struct KObj_DMA *k) {
+    return (k->nblk == 1) ? (u64)k->size : SKEIN_BLOCK;
+}
+
 u64 kobj_dma_block_len(const struct KObj_DMA *k, u32 i) {
     if (!k || k->magic != KOBJ_DMA_MAGIC) return 0;
     if (i >= k->nblk)                     return 0;
@@ -111,7 +126,7 @@ u64 kobj_dma_block_len(const struct KObj_DMA *k, u32 i) {
     // segment handed to a device must not name pages past the buffer's end,
     // and the sum over all blocks must equal size (the copy-out relies on it).
     u64 alloc_bytes = (u64)PAGE_SIZE << k->blk[i].order;
-    u64 covered     = (u64)i * SKEIN_BLOCK;      // blocks before i, uniform stride
+    u64 covered     = (u64)i * skein_stride(k);
     if (covered >= k->size)                 return 0;   // structurally impossible
     u64 remaining   = (u64)k->size - covered;
     return alloc_bytes < remaining ? alloc_bytes : remaining;
@@ -121,12 +136,13 @@ u64 kobj_dma_pa_at(const struct KObj_DMA *k, u64 byte_off) {
     if (!k || k->magic != KOBJ_DMA_MAGIC) return 0;
     if (byte_off >= (u64)k->size)         return 0;
 
-    // Uniform stride: every block but the last spans exactly SKEIN_BLOCK, so
-    // the block index is a division rather than a walk. nblk == 1 (plain DMA,
-    // and any weave that fits one block) takes the same path with idx 0 --
-    // there is no separate contiguous case to keep in sync.
-    u64 idx = byte_off / SKEIN_BLOCK;
-    u64 off = byte_off % SKEIN_BLOCK;
+    // Uniform stride, so the block index is a division rather than a walk --
+    // but the stride is a property of the OBJECT, not the constant (see
+    // skein_stride: a single-block object's one block spans the whole buffer,
+    // which for a GPU BO can be 64 MiB).
+    u64 stride = skein_stride(k);
+    u64 idx = byte_off / stride;
+    u64 off = byte_off % stride;
     if (idx >= (u64)k->nblk) return 0;
 
     // Bound the offset against the resolved block's OWN allocation, not just

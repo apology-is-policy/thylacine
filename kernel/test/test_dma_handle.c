@@ -433,3 +433,34 @@ void test_skein_zero_init_across_blocks(void) {
     }
     kobj_dma_unref(k);
 }
+
+// A SINGLE-BLOCK object LARGER than SKEIN_BLOCK must resolve throughout.
+//
+// This is the case scope_is_weave_only constructs and never queries: a GPU BO
+// is single-block by design but its envelope is KOBJ_DMA_GPU_BO_MAX_SIZE
+// (64 MiB), so `nblk == 1` and `size > SKEIN_BLOCK` is an ORDINARY state, not
+// an exotic one -- tapestryd's WARP_CTX_BACKING_MAX is 64 MiB and its own
+// comment names a client's 32 MiB texture heap. Resolving such an object by
+// dividing the offset by SKEIN_BLOCK yields a block index past nblk and
+// refuses every byte after the first block, so the client faults on most of
+// its own buffer.
+//
+// Asserting nblk == 1 was never enough: the bound has to be exercised on the
+// object that has it, not merely on an object that could.
+void test_skein_single_block_larger_than_a_block(void) {
+    struct KObj_DMA *k = kobj_dma_create_gpu_bo(8 * SKEIN_BLOCK);
+    TEST_ASSERT(k != NULL, "large gpu_bo create failed");
+    TEST_EXPECT_EQ((int)k->nblk, 1, "a GPU BO is single-block by design");
+
+    // The whole buffer resolves contiguously off the one block -- including
+    // the bytes past the first SKEIN_BLOCK, which is the point.
+    for (u64 off = 0; off < k->size; off += PAGE_SIZE) {
+        TEST_EXPECT_EQ(kobj_dma_pa_at(k, off), k->blk[0].pa + off,
+                       "a single-block object must resolve across its whole size");
+    }
+    TEST_EXPECT_EQ(kobj_dma_block_len(k, 0), (u64)k->size,
+                   "the single block must report the whole buffer");
+    TEST_EXPECT_EQ(kobj_dma_pa_at(k, k->size), (u64)0,
+                   "one byte past the end must still refuse");
+    kobj_dma_unref(k);
+}

@@ -1587,6 +1587,7 @@ void test_skein_small_weave_stays_one_block(void);
 void test_skein_scope_is_weave_only(void);
 void test_skein_full_envelope_weave(void);
 void test_skein_zero_init_across_blocks(void);
+void test_skein_single_block_larger_than_a_block(void);
 void test_handle_hw_mmio_dup_rejected(void);
 void test_handle_hw_irq_dup_rejected(void);
 void test_handle_hw_mmio_close_releases_claim(void);
@@ -3521,6 +3522,9 @@ struct test_case g_tests[] = {
     { "skein.scope_is_weave_only",     test_skein_scope_is_weave_only,     false, NULL },
     { "skein.full_envelope_weave",     test_skein_full_envelope_weave,     false, NULL },
     { "skein.zero_init_across_blocks", test_skein_zero_init_across_blocks, false, NULL },
+    { "skein.single_block_larger_than_a_block",
+                                       test_skein_single_block_larger_than_a_block,
+                                                                           false, NULL },
     { "perm.check_owner_group_other",  test_perm_check_owner_group_other,  false, NULL },
     { "perm.check_owner_first",        test_perm_check_owner_first_authoritative, false, NULL },
     { "perm.check_hostowner_override", test_perm_check_hostowner_override, false, NULL },

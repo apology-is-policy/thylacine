@@ -111,6 +111,25 @@ struct page;
 #define KOBJ_DMA_MAX_BLOCKS \
     ((unsigned)(KOBJ_DMA_WEAVE_MAX_SIZE / SKEIN_BLOCK))
 
+// The block array is fixed, so the bound that keeps a weave inside it is a
+// COMPILE-TIME obligation, not a runtime hope: the envelope must not need more
+// blocks than the array holds. Checked here rather than trusted, because the
+// runtime guard in dma_create_body would be the last thing between a raised
+// envelope and a kernel-memory write past blk[].
+_Static_assert(KOBJ_DMA_WEAVE_MAX_SIZE <= (u64)KOBJ_DMA_MAX_BLOCKS * SKEIN_BLOCK,
+               "a full weave must fit in KObj_DMA.blk[]");
+// The buddy allocates in power-of-two page runs, so a block size that is not
+// one would make order_for_pages over-allocate every block silently.
+_Static_assert(SKEIN_BLOCK % PAGE_SIZE == 0 &&
+               (SKEIN_BLOCK & (SKEIN_BLOCK - 1)) == 0,
+               "SKEIN_BLOCK must be a power-of-two page multiple");
+// Plain DMA never scatters, and its envelope is what makes that safe: one
+// block always covers it. If KOBJ_DMA_MAX_SIZE ever rose past SKEIN_BLOCK the
+// single-block stride would still be correct (skein_stride derives it from
+// size), but the claim "plain DMA is small so contiguity is cheap" would not.
+_Static_assert(KOBJ_DMA_MAX_SIZE <= SKEIN_BLOCK,
+               "plain DMA is single-block; its envelope must stay within one");
+
 // One physically-contiguous run of a KObj_DMA's backing. A plain DMA object
 // has exactly one (nblk == 1); a skein has N, VA-contiguous when mapped but
 // physically scattered.
