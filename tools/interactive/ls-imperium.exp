@@ -169,18 +169,23 @@ lc_pass "IM-5(5): a non-interactive invocation fails fast -- a script cannot con
 lc_send "echo im5-survives | tr a-z A-Z"
 lc_expect "IM5-SURVIVES" "the session survives every arm"
 
-# ---- (6) an ineligible user (cora) -- DEFERRED -----------------------------
-# Arm 6 tested cora's ineligibility, which requires logging michael OUT and cora
-# IN mid-scenario. That logout->login STALLS after an imperium session (no login
-# prompt within 540s), a real defect ORTHOGONAL to the sub-shell fix: it lives in
-# the exit->getty/SAK-episode chain, NOT the passthrough. PROVEN orthogonal -- a
-# note-draining passthrough variant did NOT clear it, and dev-accounts.exp's base
-# logout->login passes on the same host (Pi/KVM) in 105s. The corvus eligibility
-# gate is already covered (joey's PRINCIPAL_SYSTEM deny probe + the IM-3 corvus
-# tests), so no coverage is lost by deferring the cross-user re-login here.
-# Re-add arm 6 once the exit->login stall is fixed. Tracked:
-# memory/project_next_session.md + docs/JOURNAL.md.
+# ---- (6) DENY: an ineligible user (cora) -- michael logout -> cora login ----
+# RE-ADDED (arm-6 arc): this arm was deferred because michael's logout after an
+# imperium session STALLED (no login prompt within 540s) -- a session proc
+# outliving the login shell pinned the per-user encrypted-home mount, so login's
+# proxy.wait() deadlocked. FIXED by Part D (territory-at-exit, 8bcc2e3f) + A1
+# (kernel session hangup, 6758a1bd), so `exit` now returns to getty. This arm is
+# therefore a FAILS-WITHOUT-FIX regression control for the logout-stall fix AS
+# WELL AS the eligibility gate: cora (the daily login, never granted imperium) is
+# a corvus user but not eligible for the level, so the request is refused at the
+# eligibility gate ("not eligible for the imperium level", usr/imperium).
+lc_send "exit"
+lc_login cora kora
+lc_run_expect "pwd" "/home/cora"
+lc_send "imperium chown"
+lc_expect "not eligible" "an ineligible user is refused at the eligibility gate (6)"
+lc_pass "IM-5(6): michael logout -> cora login (the arm-6 logout-stall fix, was a >540s STALL) -> cora is not eligible for imperium"
 
 lc_quit
-lc_pass "IM-5 ls-imperium: confer -> elevated sub-shell (scope + --list) -> DACWORKS -> abdicate teardown (I-25); deny arms (wrong key / non-tty). Arm 6 (cross-user ineligibility) deferred pending the orthogonal exit->login stall."
+lc_pass "IM-5 ls-imperium: confer -> elevated sub-shell (scope + --list) -> DACWORKS -> abdicate teardown (I-25); deny arms (wrong key / non-tty / ineligible cora); the michael->cora cross-user re-login (arm 6) proves the logout-stall fix (Part D + A1)."
 exit 0

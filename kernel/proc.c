@@ -2857,8 +2857,12 @@ void proc_legate_teardown_if_root(struct Proc *p) {
 // userspace cross-Proc kill -- so it is NOT I-26-gated (login lacks CAP_KILL by
 // design; the kernel does the hangup). It implements A-5 decision (3)'s "no
 // orphaned session Proc": logout reclaims the user's session so its per-user
-// encrypted-home mount is fully released (with Part D, each member releases its
-// mount ref at its own exit). `except = p`: the leader dies via the surrounding
+// encrypted-home mount is released for the in-session process tree (with Part D,
+// each terminated member releases its mount ref at its own exit). A member that
+// SYS_SETSID's out of the session escapes this sweep and keeps its mount ref
+// pinned -- the narrow residual tracked as arm-6 F2 (the robust cure bounds the
+// mount to the DEK lease, not to session membership). `except = p`: the leader
+// dies via the surrounding
 // zombie transition. A non-armed Proc, or an armed non-leader (a setsid that
 // somehow did not take), is a no-op. PRECONDITION: caller holds
 // g_proc_table_lock (the LOCKED proc_for_each_walk; proc_group_terminate is a
@@ -2872,6 +2876,16 @@ static int session_hangup_cb(struct Proc *m, void *arg) {
     struct session_hangup_ctx *ctx = arg;
     if (m == ctx->except)  return 0;
     if (m == g_kproc)      return 0;
+    // ISOLATION DEPENDENCY (arm-6 F1): sid == leader-pid identifies EXACTLY the
+    // leader's genuine fork-descendants ONLY because pids never recycle
+    // (g_next_pid is strictly monotonic + extincts at INT_MAX rather than
+    // wrapping -- proc_alloc). A member's sid is set only to its own pid (setsid)
+    // or inherited from its parent (rfork), so the value leader-pid propagates
+    // solely down the leader's subtree. If pid recycling is ever introduced (a
+    // free-list / a wrap), a stale sid on an orphaned member of a DEFUNCT
+    // same-numbered session could alias here -> a cross-session termination.
+    // Unlike the legate teardown this mirrors (which keys on a dedicated
+    // non-reusable legate_scope_id), this path leans on the pid property.
     if (m->state == PROC_STATE_ALIVE && (u32)m->sid == ctx->sid)
         proc_group_terminate(m, "session leader exit");
     return 0;   // visit every Proc

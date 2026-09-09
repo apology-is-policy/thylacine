@@ -22,6 +22,79 @@ needed the operator.
 
 
 ---
+## 2026-09-09 (aux, run 6, self-compact #4) -- the arm-6 arc CLOSE: audit SOUND 0/0/0/2 P3, SMP gate 40 boots clean, ls-imperium arm 6 re-added
+
+The fix from the prior entry (Part D `8bcc2e3f` + A1 `6758a1bd`, tip `0ae4a9ed`)
+came into this run already landed + pushed. This run is the arc close: the
+formal audit, the SMP concurrency witness, and the deferred E2E arm the fix
+unblocks.
+
+**Audit -- a caught wrong turn, then a clean verdict.** The holotype-reviewer's
+Fable round died mid-launch on a usage-credit 429 (HTTP 429, `claude-fable-5-1`).
+Per the never-skip-a-round rule it re-spawned straight on the Opus fallback tier
+(no Fable retry, since it died of credit exhaustion). `MODEL(start) ==
+MODEL(end) == Opus 4.8`, no mid-run fallback. Verdict **SOUND 0 P0 / 0 P1 / 0 P2
+/ 2 P3**, run in parallel with an independent self-audit; the two **converged on
+every soundness point** -- the Part D UAF closed by the #926/#68 `live_peers==0`
+envelope + devproc-reads-under-`g_proc_table_lock`; the A1 held-lock walk-safety
+(byte-for-byte the legate teardown); the monotonic-pid session isolation;
+login-survives; I-26 untouched.
+
+The self-audit's own path is worth recording: it *flagged* a sid-reuse
+mis-target hazard (session_hangup_cb matches `m->sid == leader-pid`, and a pid
+looks reusable), then **withdrew it** on reading `proc_alloc` -- `g_next_pid` is
+strictly monotonic and extincts at INT_MAX rather than recycling, so
+`sid==leader-pid` uniquely identifies the leader's descendants. The independent
+Opus prosecutor reached the SAME spot but filed it sharper as **F1 [P3]**: the
+isolation is sound today but rests on an *implicit global property* where the
+legate teardown it mirrors uses a *dedicated non-reusable* `legate_scope_id`;
+nothing at the call site recorded the dependency. Fixed by documenting it at
+`session_hangup_cb` -- so a future pid-recycling change can't silently
+reintroduce a cross-session kill. **Lesson: a guard's isolation can rest on an
+implicit global property where the precedent it mirrors uses a local one -- name
+the dependency the mirror silently swapped.**
+
+**F2 [P3] -- a real residual, out of scope, surfaced as a design fork.** A
+session member that `SYS_SETSID`'s out of the session (sid = own pid) escapes the
+hangup and keeps its deep-copied home-mount `spoor_ref` pinned -> login's
+`unbind_home`->`proxy.wait()` blocks -> the SAME stall, for that (uncommon,
+daemonizing) case. The reported bug (plain `sleep &`) IS fixed. This is a
+pre-existing property of the per-session home-proxy architecture: the mount
+lifetime is bound to session MEMBERSHIP, not the DEK LEASE. Minimal honest fix
+landed -- the proc.c:2860 claim softened from "fully released" to "released for
+the in-session process tree." The robust cure (bind the mount to the DEK lease;
+force-detach at logout independent of `proxy.wait`, since login orders
+`unbind_home` before `evict_dek`) is a **design fork owed to the operator**,
+enqueued in `memory/bug_logout_stall_session_pins_home_mount.md`. **Lesson: a
+fix that reclaims by membership leaves the detached case -- bind the resource to
+the lease, not the membership.**
+
+**SMP gate -- the second caught wrong turn.** The first run aborted at pre-flight
+(RC=1, no boots): `ci-smp-gate.sh` auto-enables `BAKE_CLADE=1` whenever
+`build/clade/stage/bin` exists (line 98), and the PRESERVE'd 2.6 GB pool is too
+small to hold /clade, so it refused rather than boot without clangd. clangd is
+irrelevant to the death path -- every boot exercises Part D's territory
+detach/free split on every proc exit. Re-ran with `THYLACINE_BAKE_CLADE=0`: the
+full matrix default/ubsan x smp4/smp8 at N=10 = **40 boots, 0 corruption /
+0 external-kill / 0 timing / 0 other** across all four configs. This is the
+concurrency witness the audit flagged as owed (the findings were static proofs
+reusing two already-audited envelopes).
+
+**arm-6 re-add -- verified, capture-confirmed.** `ls-imperium` arm 6 (michael
+logout -> cora login -> cora not eligible for imperium) was deferred *because*
+that cross-user re-login stalled (>540s) on this very bug. Re-added as a
+fails-without-fix regression control. The full scenario (arms 0-6) PASSED in
+31s; I checked the transcript rather than trusting the green: `login: home cora
+bound at /home/cora` (the re-login the fix unblocks), `/home/cora` (pwd),
+`imperium: not eligible` (the gate), `IM-5(6) PASS`. Not a vacuous pass -- the
+arm executed its assertions.
+
+Posture: `tools/test.sh` PASS (boot banner + arc gates L-6c/D-5); ci-smp-gate
+40/40 boots clean; ls-imperium 7/7 arms. The two P3 fixes are comment-only.
+Owed: the vault death-path dossiers (rung to the vault agent per the code-track
+discipline) and the F2 design fork (operator's vote).
+
+---
 ## 2026-09-09 (aux, run 6 continued) -- the arm-6 logout deadlock FIXED: territory-at-exit (Part D) + the kernel-driven session hangup (A1); both parts verified, arc close (SMP gate + audit) owed
 
 The operator ratified the fix over two blocking questions: **A1** (kernel session
