@@ -26,7 +26,9 @@ recognized image it decodes them and the picture appears INLINE in the
 scrollback (letterboxed to the pane width, at native size when it fits); if they
 are not, it falls back to `cat`. This is the writer half of inline media (I-47,
 `docs/HALCYON.md` 14.7); the reader half -- the `/srv/halcyon` place channel and
-the transcript injection -- lives in [[sub-halcyond]].
+the transcript injection -- lives in [[sub-halcyond]]. The FULLSCREEN sibling
+(`view --fullscreen`) is [[sub-gallery]], which reuses this crate's decode and
+blits to its own tapestryd surface instead of the transcript.
 
 The load-bearing design choice: **the image decode runs HERE, in the
 short-lived, unprivileged `view` process, never in halcyond** (the blast-radius

@@ -1,0 +1,38 @@
+# `gallery` -- the fullscreen inline-media viewer (I-47, HALCYON.md 14.7; the
+# `view --fullscreen` variant). A short-lived native program: decode a
+# recognized image and blit it letterboxed to a fullscreen tapestryd surface
+# (the DOSBox/Quake client pattern -- rides I-40/I-45, no new compositor code).
+# Decode is REUSED from `view` (the already-audited zune path), never re-rolled,
+# and still runs HERE in the sacrificial process, never in the compositor.
+#
+# lib + bin (the view/halcyond pattern): the LIB is the pure display geometry
+# (fit + blit), host-tested via
+#   cargo test -p gallery --lib --no-default-features --target aarch64-apple-darwin
+# the BIN is the thin syscall/tapestry body (the `backend` feature).
+[package]
+name = "gallery"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[features]
+default = ["backend"]
+backend = ["dep:libthyla-rs", "dep:libtapestry", "dep:view"]
+
+[lib]
+name = "gallery"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gallery"
+path = "src/main.rs"
+required-features = ["backend"]
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+libtapestry = { path = "../lib/libtapestry", optional = true }
+# The audited decode/sniff brain, reused by the BIN (default-features=false =
+# pure, no backend of its own -- gallery brings the syscalls). Optional + under
+# `backend` so the pure lib test pulls nothing.
+view = { path = "../view", default-features = false, optional = true }

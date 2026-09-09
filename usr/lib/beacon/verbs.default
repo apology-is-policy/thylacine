@@ -16,6 +16,7 @@
 path   ls        ls -l -- {}
 path   cat       cat -- {}
 path   view      view {}
+path   gallery   gallery {}
 path   stat      stat -- {}
 path   cd        cd {}
 path   edit      nora {}

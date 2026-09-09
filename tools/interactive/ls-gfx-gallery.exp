@@ -1,0 +1,123 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-gallery.exp -- the fullscreen inline-media E2E (I-47,
+# HALCYON.md 14.7; the `view --fullscreen` variant). `gallery /test.png` decodes
+# a PNG in the sacrificial `gallery` process (reusing view's audited zune path)
+# and blits it letterboxed to a FULLSCREEN tapestryd surface (the DOSBox/Quake
+# client pattern; rides I-40/I-45, no new compositor code).
+#
+# THE LOAD-BEARING PROOF is the SERIAL WITNESS: gallery prints its "shown" line
+# ONLY after a successful connect -> decode -> fullscreen surface mint -> weave
+# map -> paint -> present. That single line proves the WHOLE gallery client path
+# ran end to end on real hardware; gallery's own error lines (no compositor / not
+# a recognized image / present failed) hard-fail, so a broken path goes RED.
+#
+# The screendump is a RECORD, not a gate: whether a second fullscreen client's
+# pixels reach the physical scanout OVER the halcyond console is the
+# tapestry-demo/DOSBox-proven scanout path, and gallery's true home is the
+# graphical SESSION (where the compositor tiles it as a pane). The pre/post delta
+# is reported for the operator; a session-mode visual+input gate is owed.
+#
+# Needs the halcyond-renderer image (THYLACINE_HALCYON=1: /test.png and the
+# renderer lever are gated with it); SKIPs (77) cleanly on a default aurora
+# image, like ls-gfx-inline-view. Runs under HVF; needs the QMP socket + python3.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set scen [file dirname [info script]]
+
+proc dump {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return $err }
+    return ""
+}
+proc region {png args} {
+    global scen
+    return [exec python3 $scen/gfx_region.py $png {*}$args]
+}
+
+lc_boot
+
+# The renderer probe: aurora => the HALCYON lever (and /test.png) is not baked
+# => SKIP (never a red on a default image).
+set timeout $lc_boot_timeout
+expect {
+    -ex "joey: halcyond spawned" { lc_step "joey chose halcyond (lever image)" }
+    -ex "joey: aurora spawned" {
+        puts "\nLS-CI SKIP: default image (aurora fbcon) -- gallery needs the\
+              halcyond lever image (THYLACINE_HALCYON=1: /test.png + renderer)."
+        exit 77
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the renderer spawn" }
+    timeout { lc_fail "no renderer spawn line within ${lc_boot_timeout}s" }
+    eof     { lc_fail "qemu exited before the renderer spawn" }
+}
+
+lc_login michael correct-horse-battery-staple-v1
+
+# Baseline screendump (the console, before gallery paints). The pre/post delta
+# is derived against the pre-dump's own dominant colour, so the console chrome
+# that is in BOTH dumps cancels (the ls-gfx-inline-view instrument).
+set W 0
+set H 0
+expect {
+    -re {halcyond: console up (\d+)x(\d+) px} { set W $expect_out(1,string); set H $expect_out(2,string) }
+    timeout {}
+}
+if {$W == 0} { set W 1280; set H 800 }
+set pre $repo/build/ls-gfx-gallery-pre.png
+set gr 14; set gg 12; set gb 12
+if {[dump $pre] eq ""} {
+    lassign [region $pre 0 0 $W $H] _ _ gr gg gb
+    lassign [region $pre 0 0 $W $H $gr $gg $gb] off_pre tot_pre
+    lc_step "gallery: pre-dump ground=($gr,$gg,$gb) off_pre=$off_pre/$tot_pre"
+}
+
+# THE E2E. gallery is foreground (it blocks on its tapestryd event loop); the
+# "shown" line is printed to serial before it blocks, so it arrives first.
+set timeout 60
+lc_send "gallery /test.png"
+expect {
+    -re {gallery: /test\.png 640x400 shown (\d+)x(\d+) at \d+,\d+ on (\d+)x(\d+)} {
+        lc_step "gallery: 640x400 decoded, shown $expect_out(1,string)x$expect_out(2,string)\
+                 on $expect_out(3,string)x$expect_out(4,string)\
+                 (read->decode->fullscreen->paint->present OK on hardware)"
+    }
+    -re {gallery: [^\r\n]*(no compositor|not a recognized image|read failed|present failed|JPEG)} {
+        lc_fail "gallery failed: $expect_out(0,string)"
+    }
+    "snare:"          { lc_fail "gallery faulted (snare)" }
+    "user fault"      { lc_fail "gallery user fault" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction while gallery ran" }
+    timeout           { lc_fail "gallery did not present /test.png within 60s" }
+}
+lc_pass "gallery: /test.png decoded + presented to a fullscreen tapestryd surface (I-47 client path end to end)"
+
+# Screendump for the record (informational). If the image reached the scanout,
+# the delta over the whole frame dwarfs the console; if not (the second-client
+# scanout race in console mode), the serial witness above still stands.
+after 800
+set post $repo/build/ls-gfx-gallery.png
+if {[dump $post] eq ""} {
+    lassign [region $post 0 0 $W $H $gr $gg $gb] off_post tot_post
+    lc_step "gallery: post-dump saved ($post); non-ground=$off_post/$tot_post\
+             (a large jump vs off_pre = the image is on the scanout)"
+}
+
+# Best-effort exit: Esc reaches the FOCUSED surface (QMP -> virtio-keyboard ->
+# tapestryd). If gallery has focus it exits (is_exit_key, host-tested) and the
+# shell returns. Focus of a second fullscreen client in console mode is the
+# uncertain part, so this recovery is NOT gated -- the VM is torn down next.
+after 300
+catch {exec $repo/tools/qmp-send-key.sh -s $qmp esc}
+set timeout 8
+lc_send "echo GALLERY_SHELL_BACK"
+expect {
+    -ex "GALLERY_SHELL_BACK" { lc_step "gallery: Esc exited it; the shell is live again" }
+    timeout { lc_step "gallery: shell not confirmed back within 8s (focus model in console mode; not gated)" }
+}
+
+lc_pass "ls-gfx-gallery: the I-47 fullscreen `view --fullscreen` (gallery) client path verified"
