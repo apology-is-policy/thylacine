@@ -15,3 +15,4 @@ extern crate alloc;
 pub mod chords;
 pub mod keymap;
 pub mod pane;
+pub mod skein;

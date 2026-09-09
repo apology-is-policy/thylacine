@@ -916,18 +916,118 @@ static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     burrow_unref(b);
     spin_unlock(&p->as->lock);
 
+    // WEAVE-SKEIN: FAIL CLOSED on a scattered object rather than approximate.
+    // The mapping SUCCEEDED and is live at `vaddr` (it is the point of the
+    // call); what cannot be answered is "the PA", because a skein has N. We
+    // return the distinguished SYS_DMA_MAP_PA_SCATTERED rather than blk[0].pa
+    // because a caller that embeds a base in a device descriptor and assumes
+    // the rest of the buffer follows it would then program the device to walk
+    // off the end of the first block into whatever the buddy handed out next
+    // -- silent corruption, where this is a visible refusal. A caller that
+    // does not know the value sees a negative and fails, which is the correct
+    // outcome for code that assumed contiguity; one that does calls
+    // SYS_DMA_SEGMENTS for the list.
+    //
+    // Every pre-skein caller (virtio-net, virtio-blk, every ring) mints via
+    // plain SYS_DMA_CREATE, which is always nblk == 1, so none of them can
+    // reach this arm.
+    if (kd->nblk != 1) {
+        handle_put(&hh);
+        return SYS_DMA_MAP_PA_SCATTERED;
+    }
+
     // PA fits in 40 bits at v1.0 (TCR.IPS bound; mmu.c:668). The s64 cast is
-    // safe — no valid PA has the sign bit set. Read kd->pa before handle_put
+    // safe — no valid PA has the sign bit set. Read the block before handle_put
     // (kd is also kept alive by burrow_create_dma's ref, but read it while we
     // still demonstrably hold a ref).
-    s64 pa = (s64)kd->pa;
+    s64 pa = (s64)kd->blk[0].pa;
     handle_put(&hh);
     return pa;
 }
 
-// Forward decl: the common user-VA range check (defined below) -- SYS_PCI_INFO
-// copies a struct out, so it needs the bound check before its definition site.
+// Forward decl: the common user-VA range check (defined below) -- both
+// SYS_DMA_SEGMENTS and SYS_PCI_INFO copy structs out, so they need the bound
+// check before its definition site.
 static bool sys_validate_user_buf(u64 buf_va, u64 len);
+
+// =============================================================================
+// SYS_DMA_SEGMENTS — read a KObj_DMA's backing segment list (WEAVE-SKEIN).
+// =============================================================================
+//
+// AArch64 ABI: x0 = handle index, x1 = user buffer, x2 = max entries.
+// Fills `struct t_dma_seg { u64 pa; u64 len; }` entries in ascending buffer
+// order and returns the count; -1 on failure.
+//
+// This is the companion to SYS_DMA_MAP's fail-closed PA: where the object is a
+// skein, this call is the ONLY way to learn where it lives, and a driver needs
+// the list to hand a device a scatter-gather backing (virtio-gpu's
+// RESOURCE_ATTACH_BACKING takes exactly this array).
+//
+// REFUSES rather than truncates when the caller's buffer is too small. A
+// truncated list is the dangerous shape: the caller would attach a partial
+// backing, believe it whole, and the device would read a prefix and garbage
+// past it. Failing makes the caller size its buffer correctly.
+//
+// It exposes no authority the caller does not already hold: the same PA is
+// what SYS_DMA_MAP returns for a contiguous object, and the caller must own a
+// RIGHT_MAP handle to the object either way. It is gated identically to
+// SYS_DMA_MAP (CAP_HW_CREATE + RIGHT_MAP) so the two cannot drift.
+//
+// Failure cases: no/corrupt Proc; missing CAP_HW_CREATE; bad handle (range,
+// kind, missing RIGHT_MAP); corrupted object; count > max_entries; the user
+// buffer failing the range check or the copy-out faulting.
+static s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
+        return -1;
+
+    // #844: handle_get holds a ref on the obj across the whole read, so the
+    // blk[] snapshot cannot be freed under us by a sibling thread's close.
+    // handle_put on EVERY exit path.
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (hh.kind != KOBJ_DMA)               { handle_put(&hh); return -1; }
+    if ((hh.rights & RIGHT_MAP) == 0)      { handle_put(&hh); return -1; }
+
+    struct KObj_DMA *kd = (struct KObj_DMA *)hh.obj;
+    if (!kd)                               { handle_put(&hh); return -1; }
+    if (kd->magic != KOBJ_DMA_MAGIC)       { handle_put(&hh); return -1; }
+
+    u32 n = kd->nblk;
+    if (n == 0 || n > KOBJ_DMA_MAX_BLOCKS) { handle_put(&hh); return -1; }
+    if ((u64)n > max_entries)              { handle_put(&hh); return -1; }
+
+    // Validate EXACTLY the bytes about to be written, after n is known. n is
+    // bounded by KOBJ_DMA_MAX_BLOCKS (32) above, so the multiply cannot
+    // overflow -- deriving the length from the object rather than from the
+    // caller's max_entries is what keeps that true regardless of what
+    // max_entries holds.
+    u64 bytes = (u64)n * (u64)sizeof(struct t_dma_seg);
+    if (!sys_validate_user_buf(buf_va, bytes)) { handle_put(&hh); return -1; }
+
+    for (u32 i = 0; i < n; i++) {
+        struct t_dma_seg seg = {0};        // zeroes any padding -> no leak
+        seg.pa  = kd->blk[i].pa;
+        seg.len = kobj_dma_block_len(kd, i);
+        if (seg.len == 0)                  { handle_put(&hh); return -1; }
+
+        const u8 *src = (const u8 *)&seg;
+        u64 base = buf_va + (u64)i * (u64)sizeof(struct t_dma_seg);
+        for (u64 b = 0; b < sizeof(struct t_dma_seg); b++) {
+            if (uaccess_store_u8(base + b, src[b]) != 0) {
+                handle_put(&hh);
+                return -1;
+            }
+        }
+    }
+
+    handle_put(&hh);
+    return (s64)n;
+}
 
 // =============================================================================
 // SYS_PCI_CLAIM — claim a VirtIO-PCI function as a KObj_PCI handle (pci-1c).
@@ -14176,6 +14276,12 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_dma_map_handler(ctx->regs[0],
                                                 ctx->regs[1],
                                                 ctx->regs[2]);
+        return;
+
+    case SYS_DMA_SEGMENTS:
+        ctx->regs[0] = (u64)sys_dma_segments_handler(ctx->regs[0],
+                                                     ctx->regs[1],
+                                                     ctx->regs[2]);
         return;
 
     case SYS_PCI_CLAIM:

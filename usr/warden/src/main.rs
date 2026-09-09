@@ -111,7 +111,19 @@ driver "tapestryd" {
     needs {
         pci = "node"
         irq = "node:interrupts"
-        dma = "pool: 32 MiB"
+        # WEAVE-SKEIN: matches KOBJ_DMA_WEAVE_MAX_SIZE, the kernel's own
+        # per-object envelope. It read 32 MiB and was the FIRST of the two
+        # bounds a 2560x1664 display hit -- allowance_permits refuses a
+        # 48.75 MiB weave before kobj_dma_create_weave is ever called, so the
+        # allocator's order-14 problem was never even reached. Two bounds at
+        # the SAME 32 MiB threshold read as one failure, which is why the
+        # first diagnosis named only the allocator.
+        #
+        # Confers no reach the kernel did not already permit for this object
+        # class: the weave and GPU-BO envelopes are both 64 MiB, so a number
+        # below that only makes the envelope unreachable in a second,
+        # invisible way. The other axes (mmio, irq, pci) are untouched.
+        dma = "pool: 64 MiB"
     }
     serves    = "/dev/tapestry"
     restart   = on-crash

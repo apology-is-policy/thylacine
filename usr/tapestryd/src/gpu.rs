@@ -22,6 +22,7 @@
 // the G-6+ lift.
 
 use libdriver::Error;
+use tapestryd::skein::Seg;   // WEAVE-SKEIN: the scatter-gather backing entry
 use libthyla_rs::handle::Rights;
 use libthyla_rs::hardware::{
     mmio_read16, mmio_read32, mmio_read8, mmio_write16, mmio_write32, mmio_write64, mmio_write8,
@@ -2775,25 +2776,60 @@ impl Gpu {
         )
     }
 
-    /// Attach the whole weave (one physically-contiguous KObj_DMA chunk) as
-    /// the resource's guest backing. Per-present slot selection rides the
-    /// TRANSFER offset, so one attach serves all slots.
-    pub fn attach_backing(&mut self, resource_id: u32, pa: u64, len: u32) -> Result<(), Error> {
+    /// Attach `segs` as the resource's guest backing -- the physically-
+    /// contiguous runs behind it, in ascending buffer order.
+    ///
+    /// WEAVE-SKEIN: this took a single `(pa, len)` pair and hardcoded
+    /// `nr_entries = 1` until 2026-09-09, which is the ONLY reason a weave had
+    /// to be one contiguous span. RESOURCE_ATTACH_BACKING has always taken an
+    /// ARRAY of virtio_gpu_mem_entry; the device never asked for contiguity,
+    /// we imposed it on ourselves, and the buddy could not serve a 64 MiB
+    /// naturally-aligned block on a fragmented heap.
+    ///
+    /// The caller is responsible for the I-45 obligation this widens: EVERY
+    /// entry must belong to this resource's own object, and the lengths must
+    /// sum to the resource's size. skein::subrange is what produces a list
+    /// with that property.
+    pub fn attach_backing(&mut self, resource_id: u32, segs: &[Seg]) -> Result<(), Error> {
+        // A zero-entry backing would leave the resource unbacked while the
+        // device answers OK; refuse rather than emit it.
+        if segs.is_empty() {
+            return Err(Error::Hardware);
+        }
+        // The entry array shares the REQ region with the header. Overrunning
+        // it walks into the DEVICE-WRITABLE response region (the same hazard
+        // the capset/stream paths guard). 32 entries at 2 MiB covers the whole
+        // 64 MiB weave envelope against the 78 the region holds.
+        let req_len = GPU_CTRL_HDR_LEN as usize + 8 + segs.len() * 16;
+        if req_len > REQ_REGION_LEN as usize {
+            return Err(Error::Hardware);
+        }
+
         let req_va = self.ring_va + REQ_OFF;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
             w32(req_va + 24, resource_id);
-            w32(req_va + 28, 1); // nr_entries
-            w64(req_va + 32, pa);
-            w32(req_va + 40, len);
-            w32(req_va + 44, 0);
+            w32(req_va + 28, segs.len() as u32); // nr_entries
+            for (i, s) in segs.iter().enumerate() {
+                let e = req_va + 32 + (i as u64) * 16;
+                w64(e, s.pa);
+                w32(e + 8, s.len as u32);
+                w32(e + 12, 0); // padding
+            }
         };
         self.ctrl.step(
             "ATTACH_BACKING",
-            GPU_CTRL_HDR_LEN + 8 + 16,
+            req_len as u32,
             GPU_CTRL_HDR_LEN,
             VIRTIO_GPU_RESP_OK_NODATA,
         )
+    }
+
+    /// The single-run form, for the object classes that stay contiguous by
+    /// design (plain DMA rings, GPU BOs). Named rather than open-coded at each
+    /// call site so "this one is contiguous on purpose" reads as a decision.
+    pub fn attach_backing_one(&mut self, resource_id: u32, pa: u64, len: u32) -> Result<(), Error> {
+        self.attach_backing(resource_id, &[Seg { pa, len: len as u64 }])
     }
 
     pub fn detach_backing(&mut self, resource_id: u32) -> Result<(), Error> {

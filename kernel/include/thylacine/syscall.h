@@ -2184,7 +2184,51 @@ enum {
     //
     //   Audit-bearing: the #50 path-mutation-family row (AUDIT-TRIGGERS.md).
     SYS_OPEN_CREATE = 109,   // arg: start_fd(x0) path_va(x1) path_len(x2) omode(x3) perm(x4)
+
+    // WEAVE-SKEIN (docs/WEAVE-SKEIN-DESIGN.md §3.5): read a KObj_DMA's
+    // backing SEGMENT LIST -- the physically-contiguous runs behind the
+    // object, in ascending buffer order. Returns the count, or -1.
+    //
+    // Why a new number rather than widening SYS_DMA_MAP: the map's return is a
+    // single s64, and a scattered object has N addresses to report. Once the
+    // weave became a skein there was no value SYS_DMA_MAP could return that is
+    // both a PA and honest, so it now REFUSES (SYS_DMA_MAP_PA_SCATTERED) and
+    // this call carries the list. Splitting them also keeps every pre-skein
+    // caller's contract byte-identical.
+    //
+    // Same gate as SYS_DMA_MAP (CAP_HW_CREATE + a RIGHT_MAP handle) because it
+    // discloses the same thing: where the caller's own buffer physically
+    // lives. REFUSES when count > max_entries rather than truncating -- a
+    // short list would be attached as a whole backing and read past its end.
+    SYS_DMA_SEGMENTS = 110,  // arg: handle(x0) buf_va(x1) max_entries(x2)
 };
+
+// WEAVE-SKEIN: SYS_DMA_MAP's return when the object is a skein (nblk > 1).
+//
+// THE MAPPING SUCCEEDED -- the VA is live and the caller owns it -- but the
+// object has no single PA to report, so none is invented. Distinct from -1
+// (the map itself failed and no VA exists), because the two demand opposite
+// unwinds: -1 leaves nothing to release, this leaves a live mapping the caller
+// must t_burrow_detach if it gives up.
+//
+// A caller that does not recognize the value sees a negative and fails, which
+// is correct: code written against a single PA cannot drive a scattered
+// buffer, and failing beats programming a device to run off the end of the
+// first block. Callers that can, call SYS_DMA_SEGMENTS.
+#define SYS_DMA_MAP_PA_SCATTERED  ((s64)-2)
+
+// WEAVE-SKEIN: one entry of SYS_DMA_SEGMENTS' output -- a physically-
+// contiguous run of the object's backing. `len` is the run's contribution to
+// the BUFFER, so the sum over the returned entries is exactly the object's
+// size (the last run's allocation may be larger than its contribution; the
+// excess is not the caller's and is never reported).
+struct t_dma_seg {
+    u64 pa;
+    u64 len;
+};
+_Static_assert(sizeof(struct t_dma_seg) == 16, "t_dma_seg ABI: size");
+_Static_assert(__builtin_offsetof(struct t_dma_seg, pa)  == 0, "t_dma_seg ABI: pa@0");
+_Static_assert(__builtin_offsetof(struct t_dma_seg, len) == 8, "t_dma_seg ABI: len@8");
 
 // V-2 (GPU-DESIGN §6.2.1): the host-dictated cache attribute a
 // SYS_BURROW_FROM_HOSTMEM mapping is created with. The kernel maps each to a

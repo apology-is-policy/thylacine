@@ -195,8 +195,10 @@ struct Burrow {
     // these are zero. For BURROW_TYPE_MMIO: kobj_mmio is the underlying
     // KObj_MMIO whose PA claim this Burrow holds; pa is the device PA
     // (page-aligned, matches kobj_mmio->pa). For BURROW_TYPE_DMA:
-    // kobj_dma is the underlying KObj_DMA whose pinned page chunk this
-    // Burrow wraps; pa is the buddy-chosen PA (matches kobj_dma->pa).
+    // kobj_dma is the underlying KObj_DMA whose pinned skein this Burrow
+    // wraps, and `pa` is 0 -- WEAVE-SKEIN made the backing a LIST of
+    // contiguous runs, so there is no base to add an offset to; the fault arm
+    // resolves each page through kobj_dma_pa_at instead.
     // For BURROW_TYPE_HOSTMEM (V-2): kobj_pci is the owning PCI claim whose
     // hostmem BAR subrange this Burrow maps; pa is that subrange's absolute PA.
     // Exactly one of kobj_mmio / kobj_dma / kobj_pci is non-NULL for hw types;
@@ -205,7 +207,7 @@ struct Burrow {
     struct KObj_MMIO *kobj_mmio;   // NULL except for BURROW_TYPE_MMIO
     struct KObj_DMA  *kobj_dma;    // NULL except for BURROW_TYPE_DMA
     struct KObj_PCI  *kobj_pci;    // NULL except for BURROW_TYPE_HOSTMEM (V-2)
-    u64               pa;           // 0 except for hw-backed types
+    u64               pa;           // MMIO/HOSTMEM base PA; 0 for ANON and DMA
     u8                hostmem_mair; // HOSTMEM only: create-time MAIR_IDX_* (V-2)
 
     // REVENANT / I-36: BURROW_TYPE_FILE fields. Zero/NULL for every other type.

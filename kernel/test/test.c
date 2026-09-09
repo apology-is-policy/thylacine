@@ -1581,6 +1581,12 @@ void test_burrow_dma_holds_kobj_ref(void);
 void test_burrow_dma_lifecycle_round_trip(void);
 void test_dma_map_install_vma(void);
 void test_dma_map_proc_free_releases_kobj(void);
+void test_skein_blocks_tile_the_buffer(void);
+void test_skein_offset_resolution(void);
+void test_skein_small_weave_stays_one_block(void);
+void test_skein_scope_is_weave_only(void);
+void test_skein_full_envelope_weave(void);
+void test_skein_zero_init_across_blocks(void);
 void test_handle_hw_mmio_dup_rejected(void);
 void test_handle_hw_irq_dup_rejected(void);
 void test_handle_hw_mmio_close_releases_claim(void);
@@ -3507,6 +3513,14 @@ struct test_case g_tests[] = {
     { "dma_map.proc_free_releases_kobj",
                                        test_dma_map_proc_free_releases_kobj,
                                                                            false, NULL },
+    { "skein.blocks_tile_the_buffer",  test_skein_blocks_tile_the_buffer,  false, NULL },
+    { "skein.offset_resolution",       test_skein_offset_resolution,       false, NULL },
+    { "skein.small_weave_stays_one_block",
+                                       test_skein_small_weave_stays_one_block,
+                                                                           false, NULL },
+    { "skein.scope_is_weave_only",     test_skein_scope_is_weave_only,     false, NULL },
+    { "skein.full_envelope_weave",     test_skein_full_envelope_weave,     false, NULL },
+    { "skein.zero_init_across_blocks", test_skein_zero_init_across_blocks, false, NULL },
     { "perm.check_owner_group_other",  test_perm_check_owner_group_other,  false, NULL },
     { "perm.check_owner_first",        test_perm_check_owner_first_authoritative, false, NULL },
     { "perm.check_hostowner_override", test_perm_check_hostowner_override, false, NULL },

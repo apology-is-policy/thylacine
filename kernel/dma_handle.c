@@ -8,12 +8,20 @@
 //
 // Lifecycle:
 //   - kobj_dma_create(size): SLUB-alloc the struct, alloc_pages(order, KP_ZERO)
-//     for the page chunk, compute pa = page_to_pa(pages), refcount=1.
+//     for each backing run, record pa = page_to_pa(pages), refcount=1.
 //   - kobj_dma_ref / kobj_dma_unref: atomic refcount ops.
-//   - On final unref: free_pages(pages, order) + clobber magic + kfree(struct).
+//   - On final unref: free every block + clobber magic + kfree(struct).
 //
-// PA stability: once set in kobj_dma_create, the pa field is read-only.
-// No code path mutates it; the structural property pins
+// WEAVE-SKEIN (docs/WEAVE-SKEIN-DESIGN.md): "the page chunk" is a LIST of
+// chunks. A weave above SKEIN_BLOCK is backed by N 2 MiB runs instead of one
+// power-of-two span, because a single span of a 48.8 MiB weave means an
+// order-14 (64 MiB, naturally aligned) buddy allocation that fails with
+// 1889 MiB free. Plain DMA and GPU BOs still take exactly one block, so their
+// behaviour is byte-identical to before. Everything downstream reaches the
+// backing through kobj_dma_pa_at, which handles nblk == 1 as the same case.
+//
+// PA stability: once set in kobj_dma_create, blk[] and nblk are read-only.
+// No code path mutates them; the structural property pins
 // specs/SPEC-TO-CODE.md's "PA stable across handle lifetime" commitment
 // for KObj_DMA.
 
@@ -80,6 +88,57 @@ static unsigned order_for_pages(size_t page_count) {
     return order;
 }
 
+// WEAVE-SKEIN: free the first `n` blocks of a partially-built skein. The
+// unwind path for a mid-skein alloc failure AND the tail of the normal free,
+// so there is exactly one loop that returns blocks to the buddy.
+static void dma_free_blocks(struct KObj_DMA *k, u32 n) {
+    for (u32 i = 0; i < n; i++) {
+        if (k->blk[i].pages) {
+            free_pages(k->blk[i].pages, k->blk[i].order);
+            k->blk[i].pages = NULL;
+            k->blk[i].pa    = 0;
+        }
+    }
+}
+
+u64 kobj_dma_block_len(const struct KObj_DMA *k, u32 i) {
+    if (!k || k->magic != KOBJ_DMA_MAGIC) return 0;
+    if (i >= k->nblk)                     return 0;
+
+    // The block's own allocation, and the buffer bytes it is responsible for.
+    // The two differ only on the LAST block, whose allocation is rounded up to
+    // its buddy order while the buffer ends mid-block. Report the smaller: a
+    // segment handed to a device must not name pages past the buffer's end,
+    // and the sum over all blocks must equal size (the copy-out relies on it).
+    u64 alloc_bytes = (u64)PAGE_SIZE << k->blk[i].order;
+    u64 covered     = (u64)i * SKEIN_BLOCK;      // blocks before i, uniform stride
+    if (covered >= k->size)                 return 0;   // structurally impossible
+    u64 remaining   = (u64)k->size - covered;
+    return alloc_bytes < remaining ? alloc_bytes : remaining;
+}
+
+u64 kobj_dma_pa_at(const struct KObj_DMA *k, u64 byte_off) {
+    if (!k || k->magic != KOBJ_DMA_MAGIC) return 0;
+    if (byte_off >= (u64)k->size)         return 0;
+
+    // Uniform stride: every block but the last spans exactly SKEIN_BLOCK, so
+    // the block index is a division rather than a walk. nblk == 1 (plain DMA,
+    // and any weave that fits one block) takes the same path with idx 0 --
+    // there is no separate contiguous case to keep in sync.
+    u64 idx = byte_off / SKEIN_BLOCK;
+    u64 off = byte_off % SKEIN_BLOCK;
+    if (idx >= (u64)k->nblk) return 0;
+
+    // Bound the offset against the resolved block's OWN allocation, not just
+    // against k->size. For a well-formed object the two agree; checking the
+    // block is what makes a malformed skein fail closed instead of handing out
+    // a PA past the block's pages.
+    if (off >= ((u64)PAGE_SIZE << k->blk[idx].order)) return 0;
+    if (!k->blk[idx].pages)                          return 0;
+
+    return k->blk[idx].pa + off;
+}
+
 // =============================================================================
 // Lifecycle.
 // =============================================================================
@@ -111,30 +170,74 @@ static struct KObj_DMA *dma_create_body(size_t size, size_t max_size,
     if (aligned_size > max_size)           return NULL;
 
     size_t page_count = aligned_size / PAGE_SIZE;
-    unsigned order = order_for_pages(page_count);
+
+    // WEAVE-SKEIN: how many contiguous runs back this object.
+    //
+    // Only the WEAVE subtype scatters, and only above one block. Plain DMA
+    // stays single-block DELIBERATELY -- a virtqueue descriptor table must be
+    // contiguous because the device walks it by address with no length list to
+    // consult -- which keeps virtio-net/blk and every ring allocation entirely
+    // out of this change's blast radius. GPU BOs likewise stay single-block at
+    // this chunk's ratified scope.
+    //
+    // A weave that fits in one block also takes the single-block path, so a
+    // small weave is not rounded up to a full SKEIN_BLOCK (the kernel test
+    // suite mints 2-page weaves; padding those to 2 MiB would be a 256x waste
+    // for no gain).
+    u32 nblk = 1;
+    if (subtype == DMA_SUBTYPE_WEAVE && aligned_size > SKEIN_BLOCK) {
+        nblk = (u32)((aligned_size + SKEIN_BLOCK - 1) / SKEIN_BLOCK);
+    }
+    // Envelope-derived, so unreachable for any admitted size -- asserted
+    // rather than assumed, because the array is fixed and an overrun here
+    // would be a kernel-memory write.
+    if (nblk > KOBJ_DMA_MAX_BLOCKS) return NULL;
 
     // Allocate the struct first. If page alloc fails below we kfree this
     // before returning NULL.
     struct KObj_DMA *k = kmalloc(sizeof(*k), KP_ZERO);
     if (!k) return NULL;
 
-    // Allocate the page chunk. KP_ZERO so the driver sees zeroed memory
+    // Allocate the backing runs. KP_ZERO so the driver sees zeroed memory
     // (matches the security expectation that DMA-reachable pages don't
     // carry residual data from prior users — defense against driver-bug
     // info-leak through descriptor padding etc.). For a weave the zeroing
     // additionally guarantees a client's first map never sees another
     // surface's stale pixels.
-    struct page *pages = alloc_pages(order, KP_ZERO);
-    if (!pages) {
-        kfree(k);
-        return NULL;
+    //
+    // Every block but the last spans exactly SKEIN_BLOCK_PAGES -- the uniform
+    // stride kobj_dma_pa_at divides by. The last is sized to its OWN order
+    // rather than padded to a full block: the fault-path formula is unaffected
+    // (the tail is last, so no later block's index depends on its length) and
+    // the per-block order is stored anyway for free_pages, so the saving is
+    // free. For the 2560x1664 weave that is 24 x 2 MiB + 1 MiB = 49 MiB
+    // against 48.75 MiB requested -- 0.5% waste, where one span would have
+    // demanded 64 MiB contiguous and failed.
+    for (u32 i = 0; i < nblk; i++) {
+        size_t done  = (size_t)i * (size_t)SKEIN_BLOCK_PAGES;
+        size_t want  = (nblk == 1) ? page_count
+                                   : (page_count - done < (size_t)SKEIN_BLOCK_PAGES
+                                          ? page_count - done
+                                          : (size_t)SKEIN_BLOCK_PAGES);
+        unsigned order = order_for_pages(want);
+
+        struct page *pages = alloc_pages(order, KP_ZERO);
+        if (!pages) {
+            // Unwind the blocks already taken. Without this a mid-skein OOM
+            // would strand up to 62 MiB in the buddy for the object's life --
+            // and the object is never returned, so nothing would ever free it.
+            dma_free_blocks(k, i);
+            kfree(k);
+            return NULL;
+        }
+        k->blk[i].pages = pages;
+        k->blk[i].order = order;
+        k->blk[i].pa    = page_to_pa(pages);
     }
 
     k->magic  = KOBJ_DMA_MAGIC;
-    k->pa     = page_to_pa(pages);
     k->size   = aligned_size;
-    k->pages  = pages;
-    k->order  = order;
+    k->nblk   = nblk;
     k->ref    = 1;
     k->weave  = (subtype == DMA_SUBTYPE_WEAVE);
     k->gpu_bo = (subtype == DMA_SUBTYPE_GPU_BO);
@@ -174,11 +277,12 @@ static void kobj_dma_free_internal(struct KObj_DMA *k) {
         extinction("kobj_dma_free_internal of corrupted KObj_DMA");
     if (k->ref != 0)
         extinction("kobj_dma_free_internal with ref > 0");
-    if (!k->pages)
+    // The skein's block 0 always exists (nblk >= 1 on every constructed
+    // object), so a NULL there is the same double-free tell it always was.
+    if (k->nblk == 0 || !k->blk[0].pages)
         extinction("kobj_dma_free_internal with NULL pages (double-free?)");
 
-    free_pages(k->pages, k->order);
-    k->pages = NULL;
+    dma_free_blocks(k, k->nblk);
 
     // Defensive: clobber magic before kfree so any stale-pointer
     // dereference between free and SLUB-list-write extincts on the

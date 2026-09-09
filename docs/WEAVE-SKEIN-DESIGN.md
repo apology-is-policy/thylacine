@@ -1,8 +1,11 @@
 # WEAVE-SKEIN — the scatter-gathered weave
 
-**Status: RATIFIED 2026-09-09 (operator signoff on all four ballot items).
-Nothing implemented yet — the implementation commit references this document's
-SHA per CLAUDE.md "Design conversation -> scripture commit".**
+**Status: RATIFIED 2026-09-09 (operator signoff on all four ballot items);
+IMPLEMENTED the same day against `903fc5a7`. All four decisions landed as
+ratified. READ SECTION 1.0 FIRST — implementation MEASURED that this document's
+diagnosis of the operator's failure was wrong (the operative bound was
+tapestryd's 32 MiB I-34 allowance, not the buddy's order-14 rounding), and the
+correction is recorded there rather than quietly edited away.**
 
 Direction approved ("scatter-gather sounds good"), then the §9 ballot returned
 **all four as recommended**: a new `SYS_DMA_SEGMENTS` with a fail-closed
@@ -32,7 +35,56 @@ single buddy block.
 So a 48.8 MiB request consumes the entire envelope — 15.2 MiB (24%) wasted —
 and succeeds only if a whole free 64 MiB aligned block exists.
 
-**It does not, and that is measured.** `/ctl/memory` in the failing guest:
+### 1.0 CORRECTION (2026-09-09, at implementation): the cause named below is
+### NOT what the operator hit
+
+**The paragraphs that follow were wrong about the operative bound, and the
+correction is the most useful thing in this document.** They are kept, struck
+through by this note rather than deleted, because the shape of the error is
+worth more than a clean document.
+
+The real cause is a SECOND bound this document never considered: tapestryd's
+warden manifest granted `dma = "pool: 32 MiB"`, so the I-34 allowance refuses a
+48.75 MiB weave in `sys_dma_create_weave_handler` — `allowance_permits` returns
+false and the handler returns -1 **before `kobj_dma_create_weave` is ever
+called**. The buddy allocator was never reached. The one-line fix is the
+manifest raise to 64 MiB, matching `KOBJ_DMA_WEAVE_MAX_SIZE`.
+
+**Measured, not argued.** With the allowance at 64 MiB and the skein DISABLED
+(`SKEIN_BLOCK` forced to 64 MiB, reproducing exact pre-skein single-span
+behaviour), 2560x1664 boots clean: `exit=0`, 0 weave-create failures,
+`scanout direct 0 slot 0 (2560x1664)`. So the order-14 allocation SUCCEEDS on a
+freshly-booted 2 GiB guest. It was never the failure.
+
+**Why the wrong cause was so convincing, which is the generalizable part:
+the two bounds sit at the SAME 32 MiB threshold.** The allowance cap is 32 MiB;
+the order 13 -> 14 boundary is also 32 MiB. So the boot evidence — 2048x1280
+(30 MiB) works, 2560x1664 (48.75 MiB) does not — fits BOTH stories exactly, and
+no amount of re-reading that evidence could separate them. **TWO CAUSES, ONE
+READING: ONLY A SECOND AXIS CAN HELP.** The second axis was changing the
+allocator and watching the failure not move.
+
+**And the elimination list below contains a false entry**, which is how the
+allowance escaped: it says "tapestryd's allowance is BROAD so it passes." It is
+not broad. The warden narrows it, and the boot log says so on every boot
+(`warden: bind virtio-pci:18 ... dma=0x2000000`). **A NEGATIVE OVER A SET YOU
+DID NOT ENUMERATE IS A GUESS** — the item was listed as checked without being
+read.
+
+**What survives, and why the skein still landed.** The order-14 rounding is
+real (`order_for_pages` rounds up; the code says so), and it makes a 48.75 MiB
+weave depend on a free 64 MiB *naturally-aligned* block. That dependence is
+luck about when in a system's life the compositor starts — and tapestryd is
+`restart = on-crash`, so a restart on a long-uptime fragmented system is
+precisely the unlucky case. The skein removes the dependence and cuts the waste
+from 15.25 MiB (24%) to 0.25 MiB (0.5%), which is measured and holds regardless.
+It is a fragility fix, NOT the bug fix. Both landed together; only the
+manifest line fixed the reported failure.
+
+---
+
+~~**It does not, and that is measured.**~~ (Superseded by 1.0.) `/ctl/memory`
+in the failing guest:
 
 ```
 total:    524288 pages   (2048 MiB)
@@ -40,17 +92,20 @@ free:     483591 pages   (1889 MiB)
 reserved:  25879 pages
 ```
 
-**1889 MiB free and the order-14 allocation still fails** — fragmentation, not
-exhaustion. Ruled out by elimination, each checked against the code: the
+~~1889 MiB free and the order-14 allocation still fails~~ — the reading was
+consistent with fragmentation but did not PROVE it, because the allocation was
+never attempted. Ruled out by elimination, each checked against the code: the
 envelope test (51122176 < 67108864, passes); the syscall's own guards
-(`syscall.c:581` — rights, size, `allowance_permits`; tapestryd's allowance is
-BROAD); the I-32 page budget (`PROC_PAGE_MAX` = 65536 pages = 256 MiB, and the
-DMA path does not charge it); a hidden order cap (`MAX_ORDER` = 18,
-`DIRECTMAP_USABLE_RAM_MAX` = 8 GiB — neither binds a 2 GiB guest).
+(`syscall.c:581` — rights, size, **`allowance_permits` — THIS IS THE ONE, and
+the claim that tapestryd's allowance is BROAD is false**); the I-32 page budget
+(`PROC_PAGE_MAX` = 65536 pages = 256 MiB, and the DMA path does not charge it);
+a hidden order cap (`MAX_ORDER` = 18, `DIRECTMAP_USABLE_RAM_MAX` = 8 GiB —
+neither binds a 2 GiB guest).
 
-**The cliff is at ~2.79 Mpx**, where the triple-buffered weave crosses 32 MiB
-and the order goes 13 -> 14. 2048x1280 boots (verified: 0 weave failures,
-`scanout direct 0 slot 0`, console up); 2560x1664 does not.
+**The cliff is at ~2.79 Mpx** for the ORDER story, and at 32 MiB for the
+allowance story — the same place, which is the whole problem. 2048x1280 boots
+(verified: 0 weave failures, `scanout direct 0 slot 0`, console up); 2560x1664
+did not.
 
 ### 1.1 The contiguity is SELF-IMPOSED
 
@@ -283,13 +338,27 @@ that `24 + 8 + segs.len()*16 <= REQ_REGION_LEN`. The caller obtains `segs` from
 
 ---
 
-## 6. Test plan
+## 6. Test plan — AS RUN
 
-- **The failing case becomes the regression test**: boot at 2560x1664 and
-  reach `scanout direct` + `console up`. It fails today, deterministically.
-- **Sabotage, both directions**: force `nblk = 1` and confirm 2560x1664 fails
-  again; that is what proves the test measures the skein rather than something
-  incidental.
+- **The failing case is the regression test**: boot at 2560x1664 and reach
+  `scanout direct` + `console up`. PASSES at the tip (`exit=0`, 0 weave
+  failures, `scanout direct 0 slot 0 (2560x1664)`, `console up 256x75 cells`);
+  the full suite is 1470 PASS / 0 FAIL at that geometry.
+- **Sabotage, both directions — and the first attempt measured the wrong
+  thing.** Forcing `nblk = 1` while leaving the resolver's `SKEIN_BLOCK` stride
+  at 2 MiB does NOT reproduce pre-skein behaviour: it makes
+  `kobj_dma_pa_at` refuse every offset past the first block, so tapestryd
+  SEGVs at `addr=0x2600000` and the run proves only that the resolver is live.
+  The honest sabotage is `SKEIN_BLOCK` = 64 MiB, which yields nblk == 1 AND a
+  matching stride — exact pre-skein semantics. **That run PASSES**, which is
+  what established section 1.0's correction. A sabotage has to reproduce the
+  OLD behaviour, not merely break the new one; breaking it proves the code
+  runs, never that it was needed.
+- **Unit-level discrimination**: under the `nblk = 1` sabotage, 4 of the 6
+  `skein.*` kernel tests fail and exactly the 2 that assert NON-skein
+  behaviour (`small_weave_stays_one_block`, `scope_is_weave_only`) still pass.
+  A sabotage that passes everything, or fails everything, would have been the
+  finding.
 - **A fragmentation test**: fragment the buddy deliberately, then mint a weave
   — it must still succeed where a single-span allocation would not.
 - **In-guest segment probe**: `sum(len) == size`, every `pa` page-aligned,

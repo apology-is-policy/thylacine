@@ -255,6 +255,7 @@ pub const T_SYS_UNLINK: u64           = 58;
 // and composes create-else-open bounded (T_OEXCL / DMDIR are the exclusive
 // arms, server-atomic).
 pub const T_SYS_OPEN_CREATE: u64      = 109;
+pub const T_SYS_DMA_SEGMENTS: u64     = 110;   // WEAVE-SKEIN: a KObj_DMA's backing segment list
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
@@ -1183,6 +1184,51 @@ pub unsafe fn t_dma_map(handle: i64, vaddr: u64, prot: u32) -> i64 {
         in("x1") vaddr,
         in("x2") prot as u64,
         in("x8") T_SYS_DMA_MAP,
+        options(nostack)
+    );
+    x0
+}
+
+// WEAVE-SKEIN (docs/WEAVE-SKEIN-DESIGN.md): t_dma_map's return when the object
+// is a SKEIN -- physically scattered backing with no single PA.
+//
+// THE MAPPING SUCCEEDED. The VA is live and yours; what does not exist is a
+// base PA, so the kernel returns this rather than inventing one. Distinct from
+// -1 (the map failed, no VA exists) because the unwinds differ: -1 leaves
+// nothing to release, this leaves a mapping you must t_burrow_detach if you
+// give up. Call t_dma_segments for the backing list.
+pub const T_DMA_MAP_PA_SCATTERED: i64 = -2;
+
+// One entry of t_dma_segments' output: a physically-contiguous run of a
+// KObj_DMA's backing. `len` is the run's contribution to the BUFFER, so the
+// entries sum to exactly the object's size.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct TDmaSeg {
+    pub pa: u64,
+    pub len: u64,
+}
+
+// t_dma_segments — read a KObj_DMA's backing segment list (SYS_DMA_SEGMENTS).
+//
+// Fills `out` with the object's contiguous runs in ascending buffer order and
+// returns the count; -1 on failure. REFUSES rather than truncating when the
+// object has more runs than `out` holds, so a short buffer is an error you see
+// instead of a partial backing you attach and believe whole.
+//
+// Same gate as t_dma_map (CAP_HW_CREATE + a RIGHT_MAP handle): it discloses
+// the same thing -- where your own buffer physically lives.
+//
+// Safety: handle must be valid + held by the caller.
+#[inline(always)]
+pub unsafe fn t_dma_segments(handle: i64, out: &mut [TDmaSeg]) -> i64 {
+    let mut x0: i64 = handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") out.as_mut_ptr() as u64,
+        in("x2") out.len() as u64,
+        in("x8") T_SYS_DMA_SEGMENTS,
         options(nostack)
     );
     x0

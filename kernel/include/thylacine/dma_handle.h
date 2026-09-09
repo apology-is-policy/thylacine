@@ -27,11 +27,19 @@
 //      before allocating.
 //
 //   5. PA stability across handle lifetime: once kobj_dma_create returns,
-//      KObj_DMA.pa never changes — there is no kernel code path that
+//      the backing PAs never change — there is no kernel code path that
 //      migrates DMA pages. The structural property (no migrator exists
 //      at v1.0) is a design commitment captured in specs/SPEC-TO-CODE.md;
-//      the impl-side enforcement is the absence of any pa-mutating code
-//      path on a live KObj_DMA.
+//      the impl-side enforcement is the absence of any code path that
+//      mutates blk[]/nblk on a live KObj_DMA.
+//
+//      WEAVE-SKEIN widened "the PA" to "the PAs": a weave larger than one
+//      SKEIN_BLOCK is backed by a LIST of contiguous runs (see struct
+//      dma_block). Stability is unchanged — the list is create-immutable —
+//      but there is no longer a single PA to name, which is why
+//      SYS_DMA_MAP refuses to return one for a skein rather than
+//      approximating with blk[0].pa. Approximating would corrupt silently
+//      for any caller that assumed the rest of the buffer followed it.
 //
 // Distinct from KObj_MMIO:
 //   - PA chosen by KERNEL (via alloc_pages) — userspace cannot specify a
@@ -45,6 +53,7 @@
 #ifndef THYLACINE_DMA_HANDLE_H
 #define THYLACINE_DMA_HANDLE_H
 
+#include <thylacine/page.h>    // PAGE_SIZE — SKEIN_BLOCK_PAGES is in terms of it
 #include <thylacine/types.h>
 
 struct page;
@@ -80,13 +89,50 @@ struct page;
 // constraint, not the device's) is the recorded follow-on if it bites.
 #define KOBJ_DMA_GPU_BO_MAX_SIZE (64ull * 1024 * 1024)
 
+// WEAVE-SKEIN (docs/WEAVE-SKEIN-DESIGN.md §3.3): the skein's block
+// granularity. A weave larger than one block is backed by a LIST of blocks of
+// this size rather than one span, so the largest contiguous run the buddy must
+// serve falls from the whole weave (order 14 for the 48.8 MiB 2560x1664 case,
+// which fails with 1889 MiB free — fragmentation, measured) to 2 MiB (order 9,
+// abundant).
+//
+// 2 MiB is the ratified choice: 25 blocks and 0.5% waste for that weave, 32
+// blocks at the full 64 MiB envelope, against the 78 mem entries the existing
+// virtio-gpu REQ region holds — so no transport change is required, with real
+// headroom left.
+#define SKEIN_BLOCK        (2ull * 1024 * 1024)
+#define SKEIN_BLOCK_PAGES  (SKEIN_BLOCK / PAGE_SIZE)
+
+// The most blocks any KObj_DMA can hold. Bounded by the largest envelope
+// (the weave's) at the block granularity, so the block array is inline and
+// fixed rather than separately allocated — which removes an allocation, a
+// free, and the whole double-free / dangling-array finding class from an
+// I-40/I-45 surface. 32 * 24 B = 768 B per object; a handful are ever live.
+#define KOBJ_DMA_MAX_BLOCKS \
+    ((unsigned)(KOBJ_DMA_WEAVE_MAX_SIZE / SKEIN_BLOCK))
+
+// One physically-contiguous run of a KObj_DMA's backing. A plain DMA object
+// has exactly one (nblk == 1); a skein has N, VA-contiguous when mapped but
+// physically scattered.
+struct dma_block {
+    u64           pa;          // block base PA (page-aligned)
+    struct page  *pages;       // the alloc_pages chunk, for free_pages
+    unsigned      order;       // buddy order of THIS block, for free_pages
+};
+
 struct KObj_DMA {
     u64           magic;       // KOBJ_DMA_MAGIC
-    u64           pa;          // physical address (page-aligned)
     size_t        size;        // requested bytes (page-aligned, > 0,
                                //   <= KOBJ_DMA_MAX_SIZE, or the weave bound)
-    struct page  *pages;       // alloc_pages chunk (kept for free_pages)
-    unsigned      order;       // buddy order for free_pages
+    // The skein. blk[0..nblk) are the backing runs, in ascending buffer order:
+    // buffer page i lives in block i / SKEIN_BLOCK_PAGES at page offset
+    // i % SKEIN_BLOCK_PAGES. That stride is UNIFORM by construction — every
+    // block but the last spans exactly SKEIN_BLOCK_PAGES — which is what keeps
+    // page resolution a division rather than a search. The tail block is sized
+    // to its own order (see kobj_dma_pa_at). Create-immutable, like `size`:
+    // nothing rewrites a live object's backing.
+    struct dma_block blk[KOBJ_DMA_MAX_BLOCKS];
+    u32           nblk;        // 1 for plain DMA / a small weave; N for a skein
     int           ref;         // refcount; starts at 1 from kobj_dma_create
     // G-2 (TAPESTRY.md §18.1 / §18.12 R2-F1): the KERNEL-MINTED device-passive
     // weave subtype bit. Set ONLY by kobj_dma_create_weave (SYS_DMA_CREATE_WEAVE),
@@ -148,6 +194,28 @@ struct KObj_DMA *kobj_dma_create_weave(size_t size);
 // struct field for its distinct device-WRITTEN safety argument). Same NULL
 // cases as kobj_dma_create (plus size > the GPU-BO bound).
 struct KObj_DMA *kobj_dma_create_gpu_bo(size_t size);
+
+// WEAVE-SKEIN: resolve a byte offset within the object's buffer to the
+// backing PA, walking the skein. THE one place buffer-offset -> PA is decided,
+// so the demand-fault arm and the segment copy-out cannot drift apart.
+//
+// `byte_off` need not be page-aligned; the returned PA carries the same
+// in-page offset. Returns 0 (never a valid backing PA — page 0 is not
+// buddy-allocated) when k is NULL/corrupted, byte_off is out of range, or the
+// resolved block is absent, so every caller's guard is one `== 0` test.
+//
+// The tail block may be SHORTER than SKEIN_BLOCK (it is sized to its own
+// buddy order rather than padded), so this bounds the offset against BOTH the
+// object's size and the resolved block's own length — an offset inside the
+// object's last block but past that block's allocation is out of range, which
+// cannot happen for a well-formed object and is refused rather than trusted.
+u64 kobj_dma_pa_at(const struct KObj_DMA *k, u64 byte_off);
+
+// WEAVE-SKEIN: length in bytes of skein block `i` (its own buddy order's page
+// count, clamped to the object's remaining size). Returns 0 for a NULL /
+// corrupted object or an out-of-range index. The sum over 0..nblk is the
+// object's size, which the segment copy-out relies on.
+u64 kobj_dma_block_len(const struct KObj_DMA *k, u32 i);
 
 // Refcount ops. Mirror kobj_mmio_ref / kobj_irq_ref.
 void kobj_dma_ref(struct KObj_DMA *k);

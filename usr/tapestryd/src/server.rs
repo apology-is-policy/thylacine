@@ -100,11 +100,13 @@ use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map,
-    t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM,
-    T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE,
-    T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
+    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_dma_segments,
+    t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TDmaSeg, TSrvPeerInfo,
+    T_DMA_MAP_PA_SCATTERED, T_GID_SYSTEM, T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE,
+    T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
+    T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
+use tapestryd::skein::{self, Seg};
 
 /// Present-pressure window for the idle throttle (#164): two adjacent
 /// buckets of this width approximate a sliding window, so `animating()`
@@ -384,6 +386,12 @@ const WARP_BO_MAX_BPP: u64 = 16;
 
 /// Triple buffering (D1): one weave carries three page-aligned slots.
 const WEAVE_SLOTS: u32 = 3;
+
+/// WEAVE-SKEIN: the most backing runs a weave can have -- the kernel's
+/// KOBJ_DMA_MAX_BLOCKS, i.e. the 64 MiB weave envelope at 2 MiB granularity.
+/// The virtio-gpu REQ region holds 78 mem entries, so a full-envelope weave
+/// uses 32 of them and no transport change is required.
+const WEAVE_MAX_SEGS: usize = 32;
 
 /// R2-F4: the bounded per-surface event queue. FRAME coalesces; a
 /// non-droppable overflow wedges the surface.
@@ -2545,6 +2553,46 @@ impl Comp {
         self.res_seq
     }
 
+    /// WEAVE-SKEIN: map a weave and read its backing SEGMENT LIST.
+    ///
+    /// ONE path for contiguous and scattered objects. t_dma_map's PA return is
+    /// deliberately discarded: the segment list is authoritative for both
+    /// shapes, so there is no branch here that only a large display takes and
+    /// that therefore rots. A 1280x800 triple-buffered weave is already 6
+    /// blocks, so the scattered path is the ordinary one, not the exotic one.
+    ///
+    /// CONTRACT ON None: nothing is installed. If the map succeeded and the
+    /// segment read then failed, this detaches the VA before returning, so
+    /// every caller's existing "close the handle" unwind stays correct and
+    /// complete.
+    fn map_weave(handle: i64, va: u64, size: u64, out: &mut [Seg]) -> Option<usize> {
+        let rc = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
+        // A skein has no single PA, so the kernel refuses to invent one rather
+        // than returning the first block's -- which a caller would embed in a
+        // device descriptor and the device would then walk off the end of.
+        // T_DMA_MAP_PA_SCATTERED means THE MAPPING SUCCEEDED and the VA is
+        // ours; only a genuinely failed map leaves nothing to detach.
+        if rc < 0 && rc != T_DMA_MAP_PA_SCATTERED {
+            return None;
+        }
+
+        let mut raw = [TDmaSeg::default(); WEAVE_MAX_SEGS];
+        let n = unsafe { t_dma_segments(handle, &mut raw) };
+        // The kernel REFUSES rather than truncating when the object has more
+        // runs than the buffer holds, so a positive n is a complete list.
+        if n <= 0 || (n as usize) > out.len() {
+            unsafe { t_burrow_detach(va, size) };
+            return None;
+        }
+        for i in 0..n as usize {
+            out[i] = Seg {
+                pa: raw[i].pa,
+                len: raw[i].len,
+            };
+        }
+        Some(n as usize)
+    }
+
     /// Allocate one weave GENERATION: DMA chunk + map + zero + one 2D
     /// resource PER SLOT, each backed by its slot, then -- on a GL host --
     /// the C-2c import of every slot resource into the compositor's own
@@ -2576,31 +2624,46 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
-        let pa = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            unsafe { t_close(handle) };
-            return Err(p9::E_NOMEM);
-        }
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_weave(handle, va, size, &mut segs) {
+            Some(n) => n,
+            None => {
+                unsafe { t_close(handle) };
+                return Err(p9::E_NOMEM);
+            }
+        };
         // Zero the weave: DMA chunk content must never leak a prior
-        // occupant's bytes into a client mapping.
+        // occupant's bytes into a client mapping. The VA range is contiguous
+        // whatever the physical backing does, so this is unchanged by the
+        // skein -- scatter is invisible above the page tables.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
 
-        // ONE RESOURCE PER SLOT (4.5.8), each backed by its own slot at
-        // `pa + i*slot_stride` rather than by the whole weave -- that is what
-        // makes slot <-> resource 1:1. The weave's PA is contiguous (the
-        // whole-weave attach this replaces relied on exactly that), so the
-        // per-slot offsets are sound.
+        // ONE RESOURCE PER SLOT (4.5.8), each backed by its own slot rather
+        // than by the whole weave -- that is what makes slot <-> resource 1:1.
+        //
+        // WEAVE-SKEIN: the slot's backing is now the weave's segment list
+        // SLICED to that slot's byte range, because a slot boundary does not
+        // land on a block boundary (a 2560x1664 slot is 16.25 MiB against
+        // 2 MiB blocks). This replaces `pa + i*slot_stride`, which was only
+        // ever correct because the weave was one contiguous span.
         let mut res_ids = [0u32; WEAVE_SLOTS as usize];
         for i in 0..WEAVE_SLOTS as usize {
             let res = self.next_res_id();
-            let ok = self.gpu.resource_create_2d(res, w, h).is_ok()
+            let mut slot_segs = [Seg::default(); WEAVE_MAX_SEGS];
+            let nslot = match skein::subrange(
+                &segs[..nsegs],
+                (i as u64) * slot_stride,
+                slot_stride,
+                &mut slot_segs,
+            ) {
+                Ok(k) => k,
+                Err(_) => 0,   // handled by the rollback below, like any step
+            };
+            let ok = nslot > 0
+                && self.gpu.resource_create_2d(res, w, h).is_ok()
                 && self
                     .gpu
-                    .attach_backing(
-                        res,
-                        pa as u64 + (i as u64) * slot_stride,
-                        slot_stride as u32,
-                    )
+                    .attach_backing(res, &slot_segs[..nslot])
                     .is_ok();
             if !ok {
                 // Roll back THIS mint (a create that succeeded with a failed
@@ -3942,7 +4005,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res, pa as u64, size as u32)
+            .attach_backing_one(res, pa as u64, size as u32)
             .is_err()
         {
             let _ = self.gpu.resource_unref(res);
@@ -4992,11 +5055,16 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += size;
-        let pa = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            unsafe { t_close(handle) };
-            return None;
-        }
+        // WEAVE-SKEIN: the screen is a weave too (1280x800x4 is 3.9 MiB, so it
+        // scatters at the default geometry, not only at large ones).
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_weave(handle, va, size, &mut segs) {
+            Some(n) => n,
+            None => {
+                unsafe { t_close(handle) };
+                return None;
+            }
+        };
         // Zero: the buffer scans out before the first chrome paint on a
         // mode change -- never a prior occupant's bytes.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
@@ -5056,7 +5124,7 @@ impl Comp {
                 )
                 .is_ok();
             let attached = created && self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_ok();
-            let backed = attached && self.gpu.attach_backing(res, pa as u64, size as u32).is_ok();
+            let backed = attached && self.gpu.attach_backing(res, &segs[..nsegs]).is_ok();
             if backed && self.screen_3d_roundtrip(res, va, dw) {
                 is3d = true;
             } else {
@@ -5088,11 +5156,7 @@ impl Comp {
                 unsafe { t_close(handle) };
                 return None;
             }
-            if self
-                .gpu
-                .attach_backing(res, pa as u64, size as u32)
-                .is_err()
-            {
+            if self.gpu.attach_backing(res, &segs[..nsegs]).is_err() {
                 let _ = self.gpu.resource_unref(res);
                 unsafe { t_burrow_detach(va, size) };
                 unsafe { t_close(handle) };
@@ -8848,7 +8912,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res_id, pa as u64, size as u32)
+            .attach_backing_one(res_id, pa as u64, size as u32)
             .is_err()
         {
             undo(&mut self.gpu, 2, res_id);
@@ -9658,7 +9722,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res_id, pa as u64, size as u32)
+            .attach_backing_one(res_id, pa as u64, size as u32)
             .is_err()
         {
             unwind(&mut self.gpu, 2, res_id);
