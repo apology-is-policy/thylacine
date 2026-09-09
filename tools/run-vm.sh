@@ -185,16 +185,54 @@ fi
 # is set, the guest's magic `10.0.2.100:7820` forwards to a HOST server on
 # `127.0.0.1:$THYLACINE_GUESTFWD_HOSTPORT` (default 28099) -- the apples-to-apples
 # NIC-path benchmark target (`tools/np3-bench.sh`). Unset (the standard boot/SMP
-# gate): net1 is byte-identical, no forwarding rule. Inert without a host server
-# (a closed target RSTs); the in-guest M6 probe gates on a bounded connect, so an
-# absent/inert guestfwd is a fast SKIP, never a hang.
+# gate): net1 is byte-identical, no forwarding rule.
+#
+# A CLOSED TARGET IS FATAL TO THE LAUNCH, not inert. This comment claimed the
+# opposite until 2026-09-09 ("Inert without a host server (a closed target
+# RSTs) ... a fast SKIP, never a hang") and that is measurably wrong: qemu
+# connects to every guestfwd target EAGERLY at startup and refuses to run if any
+# one is refused --
+#   qemu-system-aarch64: -netdev user,id=net1,guestfwd=...:5642:
+#     Failed to connect to '127.0.0.1:5642': Connection refused
+#   ... Could not open guest forwarding device 'guestfwd.tcp.7822'
+# np3-bench always starts all three servers before booting, so it never met the
+# case its own comment described. The in-guest bounded-connect SKIP is real, but
+# it can only protect a boot that HAPPENED.
+#
+# Hence THYLACINE_GUESTFWD_RULES: a caller that needs ONE forwarded endpoint
+# (forage-npxf) asks for one, instead of having to stand up two unused listeners
+# to satisfy a rule count it does not want. Default 3 keeps np3-bench's three
+# metric lanes -- 7820/+1/+2 (rtt-echo / floor-delayed-echo / bw-sink) -> the
+# host's 28099/+1/+2 -- one rule per metric so each gets its own host connection
+# (a guestfwd rule maps to one connection; same-port dials coalesce).
+#
+# TWO CONSEQUENCES OF THE EAGER CONNECT, both measured, both worth knowing
+# before reaching for a guestfwd:
+#
+#   1. The GUEST port is a rendezvous, not a private address. joey's NP-3 boot
+#      probe dials 10.0.2.100:7820 expecting an ECHO server. Forwarding 7820 to
+#      something that is not one does not make the probe skip -- it makes it
+#      CONNECT and then wait for a reply that never comes, wedging the boot
+#      before login. (Measured: pointing 7820 at a server that waits for a
+#      40-byte handshake parked the boot at `netperf: NET-PERF NP-3` past 13
+#      minutes.)
+#   2. The host connection is opened AT LAUNCH, not when the guest dials -- so a
+#      peer that expects to hear from its client promptly has already given up
+#      by the time the guest boots. (Measured: npxf-server's 15 s handshake
+#      timeout expires ~75 s before login; the guest's bytes then vanish into
+#      the dead connection, with the client reporting a SUCCESSFUL 40-byte write
+#      and the server reporting `read: Resource temporarily unavailable`.)
+#
+# For (2) there is no guestfwd setting that helps: use slirp's ordinary outbound
+# path instead. **10.0.2.2 is the host** (TCP to it lands on the host's
+# 127.0.0.1) and is dialled LAZILY, when the guest actually connects. That is
+# what `tools/interactive/forage-npxf.exp` does, and what a real deployment
+# would do anyway.
 net1_opts="user,id=net1"
 if [[ -n "${THYLACINE_GUESTFWD:-}" ]]; then
     gf_hostport="${THYLACINE_GUESTFWD_HOSTPORT:-28099}"
-    # Three rules: 7820/+1/+2 (rtt-echo / floor-delayed-echo / bw-sink) -> the host
-    # server's 28099/+1/+2. One rule per metric so each gets its own host
-    # connection (a guestfwd rule maps to one connection; same-port dials coalesce).
-    for gf_i in 0 1 2; do
+    gf_rules="${THYLACINE_GUESTFWD_RULES:-3}"
+    for (( gf_i = 0; gf_i < gf_rules; gf_i++ )); do
         net1_opts="${net1_opts},guestfwd=tcp:10.0.2.100:$((7820 + gf_i))-tcp:127.0.0.1:$((gf_hostport + gf_i))"
     done
 fi

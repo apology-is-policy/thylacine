@@ -23,6 +23,153 @@ needed the operator.
 
 ---
 
+## Run 46l (2026-09-09, Opus 5 max, after a self-compaction) -- FORAGE: the npxf secure channel, and the first byte ever to cross the transport
+
+**Where it sits.** The operator asked for Thylacine to mount their own tool's
+9P2000.L endpoint "as a directory, transparently." They had already answered two
+ballots: terminate the encrypted channel **in the guest**, and build the
+plain-9P transport first. The plain half landed last run (`5094f1ad`) with an
+honest caveat in its own commit message -- **no byte had ever crossed it**,
+because there was no plain 9P2000.L endpoint to point it at and npxf's server
+has no plaintext mode by design.
+
+So this chunk is not "add encryption to a proven transport". The channel is what
+made the transport provable at all.
+
+**The interop discipline, which is the reusable part.** A second implementation
+of a hand-rolled protocol is exactly where "my reading of their code" becomes a
+silent wire incompatibility. Three layers, each catching what the one below
+cannot:
+
+1. **Known-answer vectors generated from npxf's OWN code.** `kat/npxf_kat.cpp`
+   `#include`s npxf's `channel.cpp` so it calls the reference
+   `derive()`/`absorb()`/`confirm_tag()`. The tempting shortcut -- reimplement
+   the schedule in the generator from the public primitives -- is the trap: a
+   generator that encodes my *reading* would agree with the Rust that shares the
+   same misreading, and the two would ratify each other instead of npxf. 27 host
+   tests pin the PSK, the clamping, the DH from both sides, the transcript, all
+   three keys, both confirmation tags, both flights and two sealed records.
+   **Sabotage-verified**: one character changed in an HKDF label fails exactly
+   the two key tests; a frozen nonce fails exactly the counter test -- and it is
+   the SECOND record that catches that, which is why emitting `record_c2s1`
+   mattered.
+2. **Live interop against the real binary.** A fixture is a recording and cannot
+   prove interoperation. `interoperates_with_a_live_npxf_server` drives the
+   actual `npxf-server` over TCP with a **random** ephemeral, completes the
+   handshake, seals a Tversion and decrypts an authenticated Rversion. Server
+   log: `authenticated` / `<- Tversion` / `-> Rversion` / `version 9P2000.L,
+   msize 8192`. Wrong token -> `ServerAuth` on our side, `token mismatch` on
+   theirs. It discriminates.
+3. **The guest E2E** -- the plumbing the other two cannot see.
+
+**npxf is Linux-only** (`sys/statfs.h`, `getrandom`, `SOCK_CLOEXEC`, `O_PATH`,
+`accept4`); it does not build on the macOS dev host. It builds clean on thyla-pi
+with `CXX=g++` (clang++ is absent there), so the server runs on the Pi with an
+`ssh -L` tunnel presenting it on `127.0.0.1` -- the guestfwd only ever sees a
+local port, so the tunnel is transparent to the guest.
+
+**Three wrong turns, all mine, all caught.**
+
+*The guestfwd comment was false.* `run-vm.sh` claimed a missing host server was
+"inert (a closed target RSTs) ... a fast SKIP, never a hang." qemu actually
+connects to every guestfwd target **eagerly at startup** and refuses to launch:
+`Failed to connect to '127.0.0.1:5642': Connection refused` / `Could not open
+guest forwarding device 'guestfwd.tcp.7822'`. It installed three rules
+unconditionally; np3-bench always starts all three, so it never met the case its
+own comment described. Fixed with `THYLACINE_GUESTFWD_RULES` (default 3).
+
+*Then the boot wedged before login* at `netperf: NET-PERF NP-3`, past 13
+minutes. joey's boot probe dials `10.0.2.100:7820` expecting an **echo** server,
+and I had pointed 7820 at npxf-server, which waits for a 40-byte handshake. The
+probe connected and waited forever. **The guest port is a rendezvous, not a
+private address** -- forwarding it to the wrong kind of server does not make the
+probe skip, it makes it hang. Fixed with `THYLACINE_GUESTFWD_GUESTPORT`;
+forage-npxf uses 7830, leaving the probe's ports refused so it takes its real
+fast-SKIP path.
+
+*And my own scenario reported a green that meant nothing.* Its first draft
+exited **0** when the server was absent, and the gate printed
+`PASS: forage-npxf [0s]`. The harness has a real convention -- exit **77** plus
+an `LS-CI SKIP:` line, which it reports as SKIP and annotates "NOT a guest
+result, and NOT coverage". This surfaced the moment an `ssh -L` tunnel died
+underneath it (killed by my own earlier `ssh -O exit`, which drops the
+multiplexed session). A skip that reads as a pass is strictly worse than a red.
+
+**The finding that changed the tool's shape.** With the channel finally up, both
+of these were true at once and both were correct:
+
+```
+forage: 10.0.2.2!5640 mounted at /home/cora/host (aname /, npxf encrypted)
+cat: /home/cora/host/hello.txt: no such file or namespace entry
+```
+
+**A mount lands in the calling Proc's Territory and nowhere else** -- I-1,
+working exactly as specified -- and a child inherits its parent's namespace,
+never the reverse. `forage ... &` is a CHILD of the shell, so it mounted into
+its own namespace and the shell could not see it. (`login` gets this right by
+construction: it mounts the home and THEN spawns the shell.) So forage's
+original shape -- background it, use the tree from the shell -- cannot work, and
+the operator's request was exactly "mount that endpoint transparently as a
+directory".
+
+The obvious answer -- Plan 9's `rfork; mount; exec`, i.e.
+`forage <addr> <mnt> [cmd ...]` -- was built, and **it does not work either**,
+which is the more interesting half. forage lists the remote tree from its own
+namespace (`mount check: 5 entr(y/ies) here` -- a real Twalk + Treaddir through
+the channel) and its own CHILD still gets `no such file or namespace entry`.
+Measured at `/home/cora/host` (inside another mount) AND at `/tmp/host` (plain
+ramfs): **a SYS_SPAWN child does not appear to receive its parent's mounts at
+all**, despite `territory_clone` deep-copying the mount table and despite login
+mounting a home and then spawning a shell into it. Kernel-side question, tracked,
+NOT forage's to answer -- so the E2E now asserts what forage itself proves and
+leaves the reader out of it. The interactive answer remains posting to `/srv`;
+own chunk, operator's vote.
+
+**And the method note, because it cost a boot and would have cost more.** The
+nested-mount explanation fit the first measurement perfectly -- forage's mount
+point was inside the home's 9P mount, login's is in the ramfs root, and a
+mount-cross keyed on Spoor identity would plausibly fail across a clone. I wrote
+it into a memory note as the finding. It was WRONG, and the one-variable control
+(same scenario, ramfs mount point) refuted it in a single run. **One measurement
+plus a plausible mechanism is not a cause**; the note now leads with the
+refutation rather than the story.
+
+**And the E2E earned its cost on the first real invocation.** forage
+**advertised one address syntax and implemented another**: its usage line, its
+doc comments and its design doc all said Plan 9's `host!port`, while the code
+handed the string to `SocketAddrV4::parse`, which wants `a.b.c.d:port`. The
+documented form was rejected with `forage: address (want host!port)` -- an error
+message asking for exactly what it had just refused. Nothing caught it (not the
+type checker, not clippy, not a review, not a boot) because until the channel
+gave forage a server to talk to, no byte had ever crossed it. **A whole surface
+can agree with itself about a syntax it does not implement, for as long as
+nothing ever runs it.** Fixed by `usr/forage/src/addr.rs` -- pure, host-tested,
+both forms, splitting from the right so a `tcp!host!port` prefix fails visibly
+rather than truncating into something that happens to parse.
+
+**The self-audit found four, before any formal round.** The PRK was left on the
+stack (`Hkdf::extract` returns a `Copy` `GenericArray`, so `into()` copies and
+zeroizing only the original covered nothing -- the single visible `zeroize()`
+call is what makes that survive a reading). A failed seal left the **plaintext**
+in the caller's output buffer, since encryption is in place. `open` did not
+poison on a length violation although the contract three lines above said "ANY
+failure poisons" -- true about the tag path, false about the length path. And a
+pump closed an fd the other pump could be writing, with the fd *number*
+recyclable in between; a CAS-elected single closer removes the double close but
+not that race, so a pump now closes **nothing** and the process exit does it,
+from outside both threads.
+
+**Open, and named rather than buried.** Where the guest gets the token is still
+`-t FILE` / `--token-env` (mirroring npxf's own two mechanisms, the least
+surprising interface for the operator who designed them). Neither is the right
+long-term home: Thylacine's answer to "who holds a credential" is **corvus**,
+and that is its own chunk and wants the operator's vote. `forage` remains an
+unratified name. And both WEAVE-SKEIN audit rounds plus this one run on the Opus
+fallback -- **a Fable-diversity pass is owed and currently unpayable** (credits
+exhausted, measured).
+
+---
+
 ## Run 46k (2026-09-09, Opus 5 max, after a self-compaction) -- WEAVE-SKEIN: the fix landed, and the diagnosis it was built on was wrong
 
 **Where it sits.** The operator could not boot a 2560x1664 display:

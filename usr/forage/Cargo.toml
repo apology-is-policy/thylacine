@@ -1,12 +1,18 @@
-# forage -- mount a remote 9P2000.L tree served over TCP.
+# forage -- mount a remote 9P2000.L tree served over TCP, optionally on npxf's
+# authenticated + encrypted channel.
 #
 # Native (libthyla-rs) per the Plan 9 split: authored within Thylacine, so no
-# musl and no pouch boundary-line. The only dependency is libthyla-rs itself --
-# the /net TCP client, SYS_PIPE, SYS_ATTACH_9P and SYS_MOUNT are all it needs.
+# musl and no pouch boundary-line. The /net TCP client, SYS_PIPE, SYS_ATTACH_9P
+# and SYS_MOUNT are all the transport needs.
 #
-# NO CRYPTO HERE, deliberately. This is the plain-9P half; the npxf secure
-# channel (X25519 + ChaCha20-Poly1305, docs/FORAGE-DESIGN.md) layers on top of
-# the SAME framed pump, as its own chunk with its own audit.
+# LIB + BIN, and the reason is the same one tapestryd's manifest gives: a no_std
+# BIN crate's tests never run, because the host cannot even assemble
+# libthyla-rs. The LIB is `npxf` -- the key schedule, the handshake and the
+# record layer, pure and syscall-free, pinned to known-answer vectors from
+# npxf's own implementation. The BIN (the `guest` feature, default) is the
+# sockets, the pipes, the pumps and the mount.
+#
+#   cargo test -p forage --lib --no-default-features --target aarch64-apple-darwin
 [package]
 name = "forage"
 version = "0.1.0"
@@ -14,9 +20,34 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[lib]
+name = "forage"
+path = "src/lib.rs"
+
 [[bin]]
 name = "forage"
 path = "src/main.rs"
+required-features = ["guest"]
+
+# `guest` gates the syscall body so the lib stays host-buildable. A bin whose
+# required-features are unmet is SKIPPED SILENTLY rather than failing, so
+# `--no-default-features` builds the lib alone -- which is exactly what the host
+# test invocation above wants.
+[features]
+default = ["guest"]
+guest = ["dep:libthyla-rs"]
 
 [dependencies]
-libthyla-rs = { path = "../lib/libthyla-rs" }
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+
+# The npxf channel's primitives. default-features = false throughout: the
+# defaults pull `getrandom`, which has no bare-metal backend, and `std`. The
+# ephemeral scalar is supplied by the caller from SYS_GETRANDOM instead, so this
+# crate needs no RNG of its own.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+x25519-dalek = { version = "2", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+hkdf = { version = "0.12", default-features = false }
+subtle = { version = "2", default-features = false }
+zeroize = { version = "1", default-features = false }
