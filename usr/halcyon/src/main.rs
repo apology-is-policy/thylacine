@@ -44,12 +44,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use halcyon::{
-    argv_of, device_layout_path, list_rows, name_is_valid, owner_is_env, parse_cmd,
-    prog_candidates, session_dir_chain, session_layout_path, session_layouts_dir, Cmd, CmdError,
-    DEVICE_LAYOUTS_DIR, SAVE_TMP_SUFFIX,
+    argv_of, device_layout_path, lint_active_line, lint_files, list_rows, name_is_valid,
+    owner_is_env, parse_cmd, prog_candidates, session_dir_chain, session_layout_path,
+    session_layouts_dir, Cmd, CmdError, LintReport, ThemeFile, DEVICE_LAYOUTS_DIR, SAVE_TMP_SUFFIX,
 };
 use libhalcyon::layout::{self, LayoutMode};
 use libhalcyon::skeleton::{self, Op};
+use libhalcyon::theme;
 use libthyla_rs::err::{Error, Result};
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::{self, Write};
@@ -112,6 +113,13 @@ usage: halcyon layout save <name>
   The first-launch tour (the device `default` layout's left tile): a short
   live transcript of objects to try, then your shell in the same tile.
 
+  halcyon theme lint [<path>]
+  Check a theme file. A refusal names the line to fix; a file with
+  `base = \"daylight\"` gets every key it INHERITED named, so the convenient
+  mode stays auditable. With no <path>, checks the two tiers a session
+  resolves (/lib/halcyon/theme.toml, then $HOME/lib/halcyon/theme.toml) and
+  says which is active. Exits non-zero if a file is present and refused.
+
   halcyon --help
 ";
 
@@ -142,6 +150,7 @@ fn run() -> i64 {
         Ok(Cmd::LayoutList) => layout_list(),
         Ok(Cmd::LayoutDelete { name }) => layout_delete(name),
         Ok(Cmd::Welcome) => welcome(),
+        Ok(Cmd::ThemeLint { path }) => theme_lint(path),
         Err(e) => {
             report_cmd_error(e);
             2
@@ -157,6 +166,12 @@ fn report_cmd_error(e: CmdError) {
         CmdError::ExtraOperand => eprintln!("halcyon: layout: too many operands"),
         CmdError::BadName => {
             eprintln!("halcyon: invalid layout name (letters/digits/._- , no leading dot)")
+        }
+        CmdError::BadThemeVerb => eprintln!("halcyon: theme: expected `lint`"),
+        CmdError::BadPath => {
+            eprintln!(
+                "halcyon: theme lint: not a usable path (empty, option-shaped, or control bytes)"
+            )
         }
     }
 }
@@ -175,6 +190,144 @@ fn home_dir() -> Option<String> {
         None => {
             eprintln!("halcyon: $HOME is unset -- run me from a logged-in session");
             None
+        }
+    }
+}
+
+// =============================================================================
+// theme lint (TH-4c)
+// =============================================================================
+//
+// I/O only: every verdict is rendered by the pure `halcyon::lint_*` pair, and
+// the `active:` line comes from `theme::resolve` itself, so this file cannot
+// disagree with what a renderer would actually paint.
+
+fn theme_lint(path: Option<&str>) -> i64 {
+    match path {
+        Some(p) => theme_lint_one(p),
+        None => theme_lint_tiers(),
+    }
+}
+
+fn theme_lint_one(path: &str) -> i64 {
+    let text = match read_theme(path) {
+        Ok(Some(t)) => t,
+        // A path the caller NAMED is not 4.1's absent tier: they asked about
+        // this file, so not finding it IS the answer, and a lint that said
+        // nothing would read as approval.
+        Ok(None) => {
+            eprintln!("halcyon: {}: no such file", path);
+            return 1;
+        }
+        Err(()) => return 1,
+    };
+    let r = lint_files(&[ThemeFile {
+        label: "",
+        path,
+        text: Some(&text),
+    }]);
+    print_lint(&r)
+}
+
+fn theme_lint_tiers() -> i64 {
+    let sys_path = theme::SYSTEM_THEME_PATH;
+    let sys = match read_theme(sys_path) {
+        Ok(t) => t,
+        Err(()) => return 1,
+    };
+
+    // $HOME unset is not a failure -- the system tier is still worth checking,
+    // and a root-ish or pre-login shell has no user tier to check.
+    let home: Option<String> = match env::var("HOME") {
+        Some(h) => {
+            let h = h.trim();
+            if h.is_empty() {
+                None
+            } else {
+                Some(String::from(h.trim_end_matches('/')))
+            }
+        }
+        None => None,
+    };
+    let user_path: Option<String> = home.as_ref().map(|h| {
+        let mut s = h.clone();
+        s.push_str(theme::USER_THEME_REL);
+        s
+    });
+    let user: Option<String> = match &user_path {
+        Some(p) => match read_theme(p) {
+            Ok(t) => t,
+            Err(()) => return 1,
+        },
+        None => None,
+    };
+
+    let mut files: Vec<ThemeFile> = Vec::new();
+    files.push(ThemeFile {
+        label: "system",
+        path: sys_path,
+        text: sys.as_deref(),
+    });
+    if let Some(p) = &user_path {
+        files.push(ThemeFile {
+            label: "user",
+            path: p,
+            text: user.as_deref(),
+        });
+    }
+    let r = lint_files(&files);
+    let code = print_lint(&r);
+
+    // Only claim an active tier when both tiers were actually checked: with
+    // $HOME unset the user file might exist and win, so naming the system one
+    // "active" would be a confident wrong answer.
+    if user_path.is_some() {
+        println!("{}", lint_active_line(sys.as_deref(), user.as_deref()));
+    } else {
+        println!("active: not determined -- $HOME is unset, so the user tier was not read");
+    }
+    code
+}
+
+fn print_lint(r: &LintReport) -> i64 {
+    for l in &r.lines {
+        println!("{}", l);
+    }
+    if r.refused {
+        1
+    } else {
+        0
+    }
+}
+
+/// Read a theme file. `Ok(None)` = it is not there, which for a TIER is the
+/// default installation (HALCYON-THEME 4.1). Every other failure is reported
+/// here and returns `Err(())`.
+fn read_theme(path: &str) -> core::result::Result<Option<String>, ()> {
+    // THEME_MAX + 1, deliberately: the loader refuses a file LARGER than the
+    // cap, and it can only see that if the read hands it the extra byte.
+    // Reading at exactly the cap would make an oversized file arrive looking
+    // like one that just fits -- TH-4a's truncation hole, reopened here.
+    match read_capped(path, theme::THEME_MAX + 1) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => Ok(Some(s)),
+            Err(_) => {
+                eprintln!("halcyon: {}: not valid UTF-8", path);
+                Err(())
+            }
+        },
+        Err(Error::NotFound) => Ok(None),
+        Err(Error::NoMemory) => {
+            eprintln!(
+                "halcyon: {}: larger than the {}-byte theme cap",
+                path,
+                theme::THEME_MAX
+            );
+            Err(())
+        }
+        Err(e) => {
+            eprintln!("halcyon: {}: {}", path, e);
+            Err(())
         }
     }
 }
@@ -1273,7 +1426,11 @@ fn welcome() -> i64 {
         // This process execs the shell in place, so its pid IS the shell's.
         let pid = identity::pid();
         s.text("You are typing to ");
-        s.obj(ObjType::Pid, &format!("{}", pid), &format!("ut, pid {}", pid));
+        s.obj(
+            ObjType::Pid,
+            &format!("{}", pid),
+            &format!("ut, pid {}", pid),
+        );
         s.text(".\n");
         s.text(
             "This is a live transcript, not a terminal emulator: what a command prints stays an \

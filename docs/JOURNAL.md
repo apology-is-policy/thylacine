@@ -214,9 +214,7 @@ run still exercises every leg.
   compose and Nightjar gates -- a real witness now, but not a unit one.
 - **The dark-theme gate run stops early**, by design and stated above. Widening
   the remaining legs to be theme-aware is real work nobody has done.
-- **TH-4c (`halcyon theme lint`) and TH-6 (the audit) are not started.** The
-  loader already computes what lint needs -- `Loaded.inherited` names every key
-  a based file did not set.
+- **TH-6 (the audit) is not started.** TH-4c landed later in this run (below).
 
 ### The wrong turn nobody caught but the operator
 
@@ -246,6 +244,97 @@ rewritten -- so `git log` and the tree disagree on this name before
   transcript.rs 54, and so on) and was not made so here. "Clean on every line
   this chunk touched" was verified by intersecting `cargo fmt --check` output
   against `git diff`, not by running rustfmt over files this chunk does not own.
+
+### TH-4c: the lint is a renderer, and that is the whole design
+
+`halcyon theme lint` looked like it might want a schema checker. It does not,
+and building one would have been the mistake. The loader already computes
+everything the tool reports: `Theme::from_toml` returns the keys a based file
+did not set, and `describe(&LoadError)` turns any refusal into one line naming
+the line to fix. So the lint renders the loader's own verdict and adds nothing
+of its own. A lint that re-derived "is this file valid" could disagree with the
+loader -- and then the tool whose entire job is to build confidence in a theme
+file would be the thing undermining it.
+
+The same reasoning decided the `active:` line. It could have re-implemented the
+tier order in four lines; instead it calls `theme::resolve` and renders what
+comes back, so it cannot drift from what a renderer actually paints -- including
+the fall-one-tier-down rule, where a user file with a typo leaves the *system*
+theme in force rather than dropping to the built-in.
+
+Two decisions worth recording because they went the non-obvious way:
+
+- **An absent tier is not a refusal; an absent named path is.** The default
+  installation has neither file, and 4.1 says that is correct, so `halcyon theme
+  lint` on a stock image exits zero and reports `active: built-in (Daylight)`.
+  But `halcyon theme lint /some/path` that finds nothing exits 1 -- you asked
+  about *that* file, and a lint that printed nothing would read as approval.
+- **It does not guess whether an inherited key is a mistake.** The tempting
+  feature is a warning when a dark theme inherits a light Daylight grey. That
+  check can only be a heuristic, and a heuristic that says OK is worse than no
+  check at all -- an author would stop reading the list. 4.3's answer is
+  structural (omit `base` and the loader names every unset key), so the tool's
+  job is to make the inheritance *visible*, not to have an opinion about it.
+
+**The fixture is built from the registry, not transcribed.** A complete theme
+file is 57 keys. Writing them into a test file would mean the fixture silently
+stops being complete the day a key is added -- and then every test using it
+keeps passing while measuring something different (a *based* file's inheritance
+instead of a complete file's completeness). Built from `theme::KEYS`, it cannot
+drift. The refusal test carries its positive control one variable away: the same
+file with the single mutation undone must lint clean, because `assert!(refused)`
+is satisfied by any broken fixture, and the mutation itself is `assert_ne!`-
+checked to have actually mutated. Sabotaging the wrap guard to `width * 3`
+fails two tests by name.
+
+**The guest legs went into `ls-ci` rather than a new scenario**, for exactly
+the reason #139 already rides there: the pure half is host-tested to death, but
+nothing in the tree ever *ran* the binary, and a new scenario buys one boot's
+coverage at one boot's wall clock. What only a guest can prove is the I/O half
+-- that a missing file maps to "absent" rather than an error (the default
+installation's path), that `$HOME` joins to a real user-tier path, and that the
+exit status a script would branch on is the documented one. The status legs
+send lower-case tokens through `tr`, so a match cannot be the line editor's echo
+of the command. Leg (b) is also the standing check that `nightjar.toml` still
+sets every key: it carries no `base`, so a lost key would be refused outright.
+
+### The leg that passed for the wrong reason
+
+The first version of the refusal leg linted `/lib/halcyon/layouts/default` --
+picked because it is a real file that is definitely not TOML, so no fixture had
+to be written. The gate went green on the first attempt, all five legs PASS.
+
+Reading the guest's actual output rather than the verdict showed what had
+happened:
+
+```
+/lib/halcyon/layouts/default: no such file
+```
+
+That bake rides the **session lever**, which was off for this image. The file
+was not there, the tool took its missing-file path, exited non-zero for a
+reason that had nothing to do with a refusal, and the leg's `TH4C-REFUSED`
+token printed anyway. An unconstructed state, green -- and nothing in the run
+would ever have said so, because the leg asserted only the exit status and the
+exit status was right.
+
+The fix is to construct the state instead of scavenging for one:
+`echo th4c-not-a-theme > $HOME/th4c-bad.toml`, then lint that, with a hard-fail
+arm on `no such file` so a failed write is named immediately instead of burning
+the command timeout. The guest now says
+`REFUSED -- line 1: not a key = value line`, which is the claim.
+
+The missing-path case kept a leg of its own, where it is the *claim* rather
+than an accident -- and the pairing turns out to be the stronger test: leg (a)
+proves an absent **tier** is not an error, leg (c) proves an absent **named
+path** is. Neither proves the distinction alone, and the distinction is the
+actual design decision.
+
+One figure was wrong in scripture and is fixed: `HALCYON-THEME.md` said TH-5's
+theme must set "all 61 colours". The built schema is **57 keys** carrying 64
+colour values -- `terminal.ansi` is one key holding sixteen. The authority is
+`theme::KEYS`, which the loader counts; a number transcribed into prose can only
+go stale, so the doc now says so instead of carrying a second number.
 
 ---
 

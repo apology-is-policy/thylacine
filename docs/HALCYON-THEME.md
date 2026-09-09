@@ -274,8 +274,12 @@ but the user is not always the author.
   tapestryd, `/env/HALCYON_PALETTE` as a derived export, and a
   `halcyon theme lint` reporting inherited/missing keys.
 - **TH-5** — A second theme, shipped, as the proof the arc worked: a dark
-  Nightjar written with **no** `base`, so it must set all 61 colours. A
-  theme arc that ships only the theme it started with has proved nothing.
+  Nightjar written with **no** `base`, so it must set every key. A theme arc
+  that ships only the theme it started with has proved nothing. *(This said
+  "all 61 colours" at design time; the built schema is **57 keys**, carrying
+  64 colour values — `terminal.ansi` is one key holding sixteen. The
+  authority is `theme::KEYS`, which the loader counts; a number transcribed
+  here can only go stale.)*
 - **TH-6** — The audit. The surfaces: a new on-disk format parsed in
   `no_std` (format-fuzz class), a display-wide visual pushed over a ctl
   verb (the `scale` precedent's gate applies), and the §3.2 rule's

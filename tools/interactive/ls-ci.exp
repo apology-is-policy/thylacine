@@ -74,7 +74,71 @@ lc_expect "jit-prover: PASS" "I-42 end-to-end after a self-form acquisition"
 lc_pass "#139: a post-login program acquired CAP_JIT on its own kernel-stamped\
          principal and JIT-executed (no bearer token anywhere in the path)"
 
+# (e) TH-4c -- `halcyon theme lint` reads a theme file and reports it.
+#
+# Rides here for exactly #139's reason: the lint's pure half is host-tested to
+# death, but nothing else in the tree ever RUNS the binary, and a new scenario
+# would buy one boot's worth of coverage at one boot's worth of wall clock.
+# What only a guest can prove is the I/O half -- that a missing file maps to
+# "absent" rather than to an error (HALCYON-THEME 4.1, the DEFAULT
+# installation's path), that $HOME joins to a real user-tier path, and that the
+# exit status a script would branch on is the one the tool documents.
+
+# The no-argument form walks both tiers. Which verdict is correct depends on
+# what the harness baked, so it follows the LS_THEME contract ls-halcyon
+# already uses rather than assuming the default image.
+set ls_theme ""
+if {[info exists ::env(LS_THEME)]} { set ls_theme $::env(LS_THEME) }
+if {$ls_theme eq ""} {
+    lc_run_expect_hardfail "halcyon theme lint" "active: built-in (Daylight)" "REFUSED"
+    lc_pass "TH-4c(a): with no theme file in either tier both report absent (4.1)\
+             and the built-in is named active"
+} else {
+    lc_run_expect_hardfail "halcyon theme lint" "active: system" "REFUSED"
+    lc_pass "TH-4c(a): the lever-baked system theme ($ls_theme) is named active"
+}
+
+# The shipped dark theme, linted by path. `keys set` appears ONLY on the
+# complete-file line -- a theme that had lost a key would be refused outright
+# (it carries no `base`), so this leg is also the standing check that
+# nightjar.toml still sets every key the schema defines.
+lc_run_expect_hardfail "halcyon theme lint /lib/halcyon/themes/nightjar.toml" \
+    "keys set" "REFUSED"
+lc_pass "TH-4c(b): the shipped Nightjar theme lints COMPLETE (every key set)"
+
+# A path NAMED on the command line and not found is an error -- the deliberate
+# contrast with leg (a)'s absent TIER, which is not one. The two legs together
+# are the claim; either alone is satisfied by a tool that treats both the same.
+# The tokens below are typed lower-case and upper-cased by `tr`, so a match
+# cannot be the line editor's echo of the command (the (b) discipline above).
+lc_send "halcyon theme lint /lib/halcyon/no-such-theme.toml || echo th4c-missing | tr a-z A-Z"
+lc_expect "TH4C-MISSING" "a named path that is missing exits non-zero"
+lc_pass "TH-4c(c): a theme file named on the command line and not found is an\
+         ERROR, where an absent tier is not"
+
+# A file that IS present and is NOT a theme -- the refusal path proper.
+#
+# The fixture is WRITTEN here rather than picked out of the image, and that is
+# the lesson rather than a preference: the first version of this leg linted
+# /lib/halcyon/layouts/default, which turned out to ride the session lever.
+# With the lever off the file did not exist, so the lint took the missing-file
+# path above and the leg passed while proving nothing about a refusal. It was
+# testing an unconstructed state, and only reading the guest's actual output
+# showed it. The hard-fail arm names the write's failure immediately instead of
+# burning the command timeout on it.
+lc_send "echo th4c-not-a-theme > /home/michael/th4c-bad.toml"
+lc_run_expect_hardfail \
+    "halcyon theme lint /home/michael/th4c-bad.toml || echo th4c-refused | tr a-z A-Z" \
+    "REFUSED -- line 1" "no such file"
+lc_expect "TH4C-REFUSED" "a refused file exits non-zero"
+lc_pass "TH-4c(d): a file that is present and is not a theme is REFUSED at its\
+         line, and the tool exits non-zero"
+
+lc_send "halcyon theme lint /lib/halcyon/themes/nightjar.toml && echo th4c-ok | tr a-z A-Z"
+lc_expect "TH4C-OK" "a clean lint exits zero"
+lc_pass "TH-4c(e): a clean lint exits zero"
+
 lc_quit
 lc_pass "LS-CI ls-ci: login (LS-1) + stdout/pipeline/stderr (LS-2) + post-login\
-         CAP_JIT (#139) all verified"
+         CAP_JIT (#139) + theme lint (TH-4c) all verified"
 exit 0
