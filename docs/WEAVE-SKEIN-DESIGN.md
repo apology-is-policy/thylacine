@@ -148,10 +148,9 @@ A **skein** is a weave's backing store as a *list of blocks* rather than one
 span — a length of yarn gathered in a loose coil instead of wound into a
 single ball: physically discontinuous, logically one thread.
 
-*(Thematic name, PROPOSED per CLAUDE.md's naming discipline — it sits inside
-the existing Tapestry vocabulary of weave / weft / loom. Say the word and it
-becomes `dma_seg` / `segment` instead; nothing else in the design depends on
-the name.)*
+*(Thematic name, RATIFIED 2026-09-09 (§9.3) — it sits inside the existing
+Tapestry vocabulary of weave / weft / loom, and names the one thing that
+vocabulary lacked: a physically-discontinuous, logically-single thread.)*
 
 ```c
 struct dma_block {
