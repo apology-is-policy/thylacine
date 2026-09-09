@@ -1,0 +1,18 @@
+# inlinewire -- the inline-media place-request wire format (I-47, HALCYON.md
+# 14.7). The ONE contract shared by the writer (`view`) and the reader
+# (halcyond): a 16-byte header + w*h ARGB pixels. A dedicated tiny crate so the
+# two agree by construction (no hand-copied constants) WITHOUT dragging view's
+# decoder (zune) into halcyond -- the blast-radius amendment keeps decode out of
+# the compositor. Pure, no_std, zero deps; host-tested.
+[package]
+name = "inlinewire"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "inlinewire"
+path = "src/lib.rs"
+
+[dependencies]
