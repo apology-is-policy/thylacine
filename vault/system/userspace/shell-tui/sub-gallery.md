@@ -34,11 +34,11 @@ sacrificial process), and the compositor path is libtapestry's identical
 
 ## Contract
 
-- `gallery <image>`: sniff the leading bytes. PNG -> decode -> open a fullscreen
-  tapestryd surface -> blit the image letterboxed -> present, then wait. Esc or q
-  (or a window CLOSE) exits.
+- `gallery <image>`: sniff the leading bytes. PNG or JPEG -> decode -> open a
+  fullscreen tapestryd surface -> blit the image letterboxed -> present, then
+  wait. Esc or q (or a window CLOSE) exits.
 - Unlike `view`, a non-image is an ERROR (`return 1`), not a `cat` fallback: a
-  fullscreen `cat` is meaningless. JPEG is refused until its decoder lands.
+  fullscreen `cat` is meaningless.
 - Exit codes: 0 (shown then exited), 1 (read/decode/compositor error), 2 (usage
   / non-UTF-8 path).
 
@@ -62,8 +62,9 @@ its slice length, so a truncated/hostile raster or a short frame clamps rather
 than panics.
 
 **The client body (`main.rs`).** Read (`slurp_capped`, 16 MiB cap) -> sniff ->
-**reject an over-budget image from the headers alone** (`view::png_dimensions` +
-`within_pixel_budget` vs `GALLERY_MAX_PIXELS` = 12 Mpx) -> decode -> `drop(bytes)`
+**reject an over-budget image from the headers alone** (`check_budget` on
+`view::png_dimensions`/`jpeg_dimensions` + `within_pixel_budget` vs
+`GALLERY_MAX_PIXELS` = 12 Mpx) -> `decode_png`/`decode_jpeg` -> `drop(bytes)`
 (free the compressed input before the event loop) -> `Surface::fullscreen`
 (bounded connect retry, a labelled block that yields the Surface -- no post-loop
 `unwrap`) -> `FrameIntent::Static` -> `paint` into `pixels()` -> `present(None)`.
@@ -103,8 +104,7 @@ EventRing + one Loom ring), whose ring lifecycle libtapestry owns.
 ## Error paths
 
 - `no compositor` (connect retries exhausted) -> exit 1.
-- `not a recognized image` / a decode error / `JPEG ... later slice` -> exit 1
-  (no fallback).
+- `not a recognized image` / a decode error (PNG or JPEG) -> exit 1 (no fallback).
 - `present failed` / `re-present failed` / `event stream ended` -> exit 1.
 - usage / non-UTF-8 path -> exit 2.
 
@@ -134,7 +134,8 @@ Present is once (a `Static` surface), plus one repaint per CONFIGURE.
 
 ## Seams
 
-- JPEG decode (the next inline-media chunk; the sniff arm already refuses it).
+- JPEG decode LANDED (reuses [[sub-view]]'s `decode_jpeg`; gallery's `Jpeg` arm
+  decodes via the same `check_budget` gate as PNG -- witnessed by ls-gfx-jpeg.exp).
 - The session-path per-pane channel (a distinct trust boundary, a design fork
   surfaced to the operator) -- gallery is unaffected (it is a compositor client,
   not a place-channel writer).

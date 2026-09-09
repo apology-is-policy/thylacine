@@ -39,12 +39,14 @@ pure-Rust fuzz-friendly posture is kept either way.
 
 ## Contract
 
-- `view <path>`: sniff the leading bytes. PNG -> decode -> hand halcyond the
-  raster over `/srv/halcyon` -> "view: <path> placed inline (WxH)". A recognized
-  image with no renderer channel (no `/srv/halcyon`, or a short write) is NOT an
-  error: view reports the decode ("... decoded PNG WxH ...; not displayed
-  (why)") so it is useful standalone. JPEG is a later slice. Anything else ->
-  `cat <path>` (the operator's spec: "text would fallback to cat").
+- `view <path>`: sniff the leading bytes. A recognized image (PNG or JPEG) ->
+  decode -> hand halcyond the raster over `/srv/halcyon` -> "view: <path> placed
+  inline (WxH)". A recognized image with no renderer channel (no `/srv/halcyon`,
+  or a short write) is NOT an error: view reports the decode ("... decoded WxH
+  ...; not displayed (why)") so it is useful standalone. Anything else ->
+  `cat <path>` (the operator's spec: "text would fallback to cat"). PNG and JPEG
+  share the same headers-only budget gate then decode-and-place path, factored
+  into `check_budget` + `place_decoded`.
 - The wire it speaks is `inlinewire` (this dossier's other half), shared verbatim
   with halcyond's reader so writer and reader cannot drift: a 16-byte header
   (magic `HPL1`, `FORMAT_ARGB8888`, w, h -- all LE) then w*h ARGB `u32`s as LE
@@ -69,15 +71,28 @@ over-budget image from the headers alone -- BEFORE the heap-hungry decode
 peak ~8*npx). Both are reused by [[sub-gallery]]; the channel's tighter cap is
 halcyond's.
 
+`decode_jpeg` is the JPEG twin (`zune-jpeg`, vendored, `default-features=false`
+so `x86`/`neon`/`std` are all OFF -- which activates zune-jpeg's own
+`forbid(unsafe_code)`, so hostile JPEG bytes decode in ENTIRELY SAFE Rust: the
+worst case is a panic, caught by the sacrificial-process boundary, never memory
+unsafety). It reads the OUTPUT colorspace from `get_output_colorspace` (never
+assumed) and normalizes Luma (replicated across R/G/B) or RGB (straight) to
+opaque `0xAARRGGBB`; JPEG carries no alpha, and a 4-component (CMYK/YCCK) output
+is REFUSED rather than mis-rendered as RGBA (unlike PNG's 4th channel, JPEG's is
+not alpha). `jpeg_dimensions` reads the headers only (JPEG dims are 16-bit, so
+`w*h` cannot overflow a u32) for the same pre-decode budget gate.
+
 ### The channel writer (`view` bin)
 
 The bin flow: read (`slurp_capped`, 16 MiB cap) -> sniff -> **reject over-budget
-from the headers** (`png_dimensions` + `within_pixel_budget` vs `VIEW_MAX_PIXELS`
-= 6 Mpx) -> `decode_png` -> `drop(bytes)` -> `place_on_halcyon`. The decode runs
-on a **64 MiB `ThylaAllocN` heap** (the default 4 MiB cannot hold an image's
-decode peak -- the pre-fix `view` OOM-exited on any inline image past ~0.3 Mpx,
-the sibling of the [[sub-gallery]] holotype's F1); `VIEW_MAX_PIXELS` is the real
-bound, checked before decode.
+from the headers** (`check_budget` on `png_dimensions`/`jpeg_dimensions` +
+`within_pixel_budget` vs `VIEW_MAX_PIXELS` = 6 Mpx) -> `decode_png`/`decode_jpeg`
+-> `drop(bytes)` -> `place_decoded` (`place_on_halcyon` + the standalone report).
+The decode runs on a **64 MiB `ThylaAllocN` heap** (the default 4 MiB cannot hold
+an image's decode peak -- the pre-fix `view` OOM-exited on any inline image past
+~0.3 Mpx, the sibling of the [[sub-gallery]] holotype's F1); `VIEW_MAX_PIXELS` is
+the real bound, checked before decode. Both image arms produce a `Raster`;
+`Kind::Other` falls back to `cat`.
 
 `place_on_halcyon` opens `/srv/halcyon` (9p-mode -> a root fid), walks + opens
 `place` O_WRONLY, and writes the `inlinewire` header then the ARGB payload in
@@ -138,14 +153,19 @@ write. No steady state.
 ## Prosecution
 
 - **The decoder against hostile image bytes.** Malformed / truncated / oversize
-  PNGs; the colorspace normalization (every zune arm); garbage rejected. Runs in
-  the sacrificial process, so a decode crash is one shell line. zune is pure Rust
-  (fuzz-friendlier than a ported C codec).
-- **The heap against a dimension bomb.** A small compressed PNG can declare huge
-  dimensions; `png_dimensions` + `within_pixel_budget` reject `w*h > VIEW_MAX_PIXELS`
-  from the IHDR before `decode_png` allocates, so an over-budget image is a clean
-  report, never a silent OOM-exit (the pre-fix defect: a bare `MAX_PIXELS` far
-  above the heap was a phantom bound -- [[sub-gallery]]'s holotype F1).
+  PNGs and JPEGs; the colorspace normalization (every zune arm; JPEG's CMYK 4th
+  channel refused, not mis-read as alpha); garbage rejected. Runs in the
+  sacrificial process, so a decode crash is one shell line. BOTH decoders are
+  pure SAFE Rust: `zune-png` and `zune-jpeg` are vendored `default-features=false`,
+  which drops their `x86`/`neon`/`sse` SIMD features and so activates each crate's
+  `forbid(unsafe_code)` -- hostile bytes cannot reach memory unsafety, only a
+  panic (fuzz-friendlier than a ported C codec).
+- **The heap against a dimension bomb.** A small compressed PNG/JPEG can declare
+  huge dimensions; `png_dimensions`/`jpeg_dimensions` + `within_pixel_budget`
+  reject `w*h > VIEW_MAX_PIXELS` from the headers before the decoder allocates, so
+  an over-budget image is a clean report, never a silent OOM-exit (the pre-fix
+  defect: a bare `MAX_PIXELS` far above the heap was a phantom bound --
+  [[sub-gallery]]'s holotype F1).
 - **The wire against drift.** `inlinewire::parse` validates before it returns;
   the pack/parse round-trip + the bounds rejections are host-tested; the magic
   reads as `HPL1` in a hexdump (a true-comment/wrong-value guard).
@@ -155,7 +175,9 @@ write. No steady state.
 
 ## Seams
 
-- JPEG decode (`zune-jpeg`) is a later slice; `sniff` already classifies it.
+- JPEG decode (`zune-jpeg`) LANDED: `decode_jpeg` + `jpeg_dimensions`, the same
+  headers-only-budget-then-decode path as PNG, wired into both viewers' `Jpeg`
+  arms; fixtures `testdata/test.jpg` (E2E) + `src/testdata/quad.jpg` (lib).
 - `--fullscreen` LANDED as `gallery` (a native libtapestry pane, [[sub-gallery]]);
   `Embed` (the out-of-band pixel surface for video) is unbuilt (I-47 / the HALCYON
   14.7 medium split: images native, video a ported C codec, audio -> Nocturne).
@@ -171,7 +193,15 @@ write. No steady state.
   aarch64, and both sides agree via `inlinewire`; a big-endian target would need
   an explicit swap.
 - The witness card `usr/view/testdata/test.png` (+ `make-test-png.py`, stdlib
-  zlib) is the E2E fixture, baked to `/test.png` under `THYLACINE_HALCYON=1`.
+  zlib) is the PNG E2E fixture, baked to `/test.png` under `THYLACINE_HALCYON=1`;
+  `testdata/test.jpg` (the same card re-encoded) is the JPEG one, baked to
+  `/test.jpg`. `src/testdata/quad.jpg` is the `decode_jpeg` lib fixture -- JPEG is
+  lossy, so `decode_jpeg_quadrants_to_argb` asserts APPROXIMATE colors at quadrant
+  centers (a +-48 band). The JPEG fixtures are generated by `make-test-jpg.sh`,
+  which needs a system JPEG encoder (macOS `sips`); like the PNG card they are
+  COMMITTED, so the pool bake and host tests need no encoder. `view` lib tests: 9.
+- The `decode_jpeg`/`gallery` `Jpeg` E2E is `tools/interactive/ls-gfx-jpeg.exp`
+  (view inline + gallery fullscreen, HVF, SKIP-clean on aurora).
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

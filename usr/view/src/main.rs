@@ -25,7 +25,7 @@ use libthyla_rs::io;
 use libthyla_rs::process::Command;
 use libthyla_rs::{t_close, t_open, t_write, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT};
 
-use view::{decode_png, png_dimensions, sniff, within_pixel_budget, Kind, Raster};
+use view::{decode_jpeg, decode_png, jpeg_dimensions, png_dimensions, sniff, within_pixel_budget, Kind, Raster};
 
 // The compressed-input cap, coherent with the 64 MiB heap (a 6 Mpx image's
 // decode peak is ~48 MiB, so the input must stay well under the remainder).
@@ -88,6 +88,53 @@ fn place_on_halcyon(r: &Raster) -> Result<(), &'static str> {
     }
 }
 
+/// Reject an over-budget image from its headers BEFORE the heap-hungry decode
+/// (the decode peak can dwarf a fixed heap; a pixel cap above the heap is a
+/// phantom the allocator OOMs past). `Err(code)` bails with that exit code; the
+/// dimension read itself failing (malformed headers) is also a clean bail.
+fn check_budget(path: &str, dims: Result<(u32, u32), &'static str>, max: u64) -> Result<(), i64> {
+    match dims {
+        Ok((w, h)) if !within_pixel_budget(w, h, max) => {
+            eprintln!(
+                "view: {}: image too large ({}x{}; over the {} Mpx budget)",
+                path,
+                w,
+                h,
+                max >> 20
+            );
+            Err(1)
+        }
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("view: {}: {}", path, e);
+            Err(1)
+        }
+    }
+}
+
+/// Hand a decoded raster to halcyond and report. An absent renderer channel is
+/// NOT an error -- the decode succeeded, so report it (and why it did not
+/// display) and still exit 0, keeping `view` useful standalone.
+fn place_decoded(path: &str, r: Raster) -> i64 {
+    match place_on_halcyon(&r) {
+        Ok(()) => {
+            libthyla_rs::println!("view: {} placed inline ({}x{})", path, r.w, r.h);
+            0
+        }
+        Err(why) => {
+            libthyla_rs::println!(
+                "view: {} decoded {}x{} ({} argb px); not displayed ({})",
+                path,
+                r.w,
+                r.h,
+                r.argb.len(),
+                why
+            );
+            0
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let path = match env::args().operands().next() {
@@ -119,76 +166,55 @@ pub extern "C" fn rs_main() -> i64 {
         }
     };
 
-    match sniff(&bytes) {
+    // Decode HERE (the sacrificial process, the blast-radius amendment): a PNG
+    // or JPEG becomes a raster; anything else falls back to `cat`. Both image
+    // arms reject an over-budget image from its headers before the heap-hungry
+    // decode (check_budget).
+    let r: Raster = match sniff(&bytes) {
         Kind::Png => {
-            // Reject an over-budget image up front (headers-only) so a huge PNG
-            // is a clean report, not a silent OOM-exit mid-decode.
-            match png_dimensions(&bytes) {
-                Ok((w, h)) if !within_pixel_budget(w, h, VIEW_MAX_PIXELS) => {
-                    eprintln!(
-                        "view: {}: image too large ({}x{}; over the {} Mpx budget)",
-                        path,
-                        w,
-                        h,
-                        VIEW_MAX_PIXELS >> 20
-                    );
-                    return 1;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("view: {}: {}", path, e);
-                    return 1;
-                }
+            if let Err(c) = check_budget(path, png_dimensions(&bytes), VIEW_MAX_PIXELS) {
+                return c;
             }
-            let r = match decode_png(&bytes) {
+            match decode_png(&bytes) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("view: {}: {}", path, e);
                     return 1;
                 }
-            };
-            // The compressed input is done; free it before the (blocking) channel
-            // write so only the raster is held.
-            drop(bytes);
-            match place_on_halcyon(&r) {
-                Ok(()) => {
-                    libthyla_rs::println!("view: {} placed inline ({}x{})", path, r.w, r.h);
-                    0
-                }
-                Err(why) => {
-                    // No renderer channel (or a write error): report the decode
-                    // so `view` is still useful standalone, and say why it did
-                    // not display. Not an error exit -- the decode succeeded.
-                    libthyla_rs::println!(
-                        "view: {} decoded PNG {}x{} ({} argb px); not displayed ({})",
-                        path,
-                        r.w,
-                        r.h,
-                        r.argb.len(),
-                        why
-                    );
-                    0
-                }
             }
         }
         Kind::Jpeg => {
-            eprintln!("view: {}: JPEG decode lands in a later slice", path);
-            1
+            if let Err(c) = check_budget(path, jpeg_dimensions(&bytes), VIEW_MAX_PIXELS) {
+                return c;
+            }
+            match decode_jpeg(&bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("view: {}: {}", path, e);
+                    return 1;
+                }
+            }
         }
         // Not a recognized image: fall back to cat (the operator's spec --
         // "text would fallback to cat"). cat reads the path itself.
-        Kind::Other => match Command::new("cat").arg(path).spawn() {
-            Ok(mut child) => match child.wait() {
-                Ok(status) => status.code().unwrap_or(1) as i64,
+        Kind::Other => {
+            return match Command::new("cat").arg(path).spawn() {
+                Ok(mut child) => match child.wait() {
+                    Ok(status) => status.code().unwrap_or(1) as i64,
+                    Err(e) => {
+                        eprintln!("view: cat {}: wait failed: {:?}", path, e);
+                        1
+                    }
+                },
                 Err(e) => {
-                    eprintln!("view: cat {}: wait failed: {:?}", path, e);
+                    eprintln!("view: cat {}: spawn failed: {:?}", path, e);
                     1
                 }
-            },
-            Err(e) => {
-                eprintln!("view: cat {}: spawn failed: {:?}", path, e);
-                1
-            }
-        },
-    }
+            };
+        }
+    };
+    // The compressed input is done; free it before the (blocking) channel write
+    // so only the raster is held.
+    drop(bytes);
+    place_decoded(path, r)
 }

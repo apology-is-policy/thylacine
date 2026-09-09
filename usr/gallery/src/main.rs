@@ -29,7 +29,7 @@ use libthyla_rs::io;
 use libthyla_rs::time::{sleep, Duration};
 
 use tapestry::{FrameIntent, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY};
-use view::{decode_png, png_dimensions, sniff, within_pixel_budget, Kind};
+use view::{decode_jpeg, decode_png, jpeg_dimensions, png_dimensions, sniff, within_pixel_budget, Kind};
 
 macro_rules! say {
     ($($a:tt)*) => {{
@@ -53,6 +53,30 @@ const GALLERY_MAX_PIXELS: u64 = 12 * 1024 * 1024;
 // flake a manual/menu run.
 const CONNECT_TRIES: u32 = 25;
 const CONNECT_DELAY_MS: u64 = 200;
+
+/// Reject an over-budget image from its headers BEFORE the heap-hungry decode
+/// (the decode peak can dwarf a fixed heap; a pixel cap above the heap is a
+/// phantom the allocator OOMs past). `Err(code)` bails with that exit code; a
+/// failed dimension read (malformed headers) also bails clean.
+fn check_budget(path: &str, dims: Result<(u32, u32), &'static str>, max: u64) -> Result<(), i64> {
+    match dims {
+        Ok((w, h)) if !within_pixel_budget(w, h, max) => {
+            eprintln!(
+                "gallery: {}: image too large ({}x{}; over the {} Mpx budget)",
+                path,
+                w,
+                h,
+                max >> 20
+            );
+            Err(1)
+        }
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("gallery: {}: {}", path, e);
+            Err(1)
+        }
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -86,28 +110,12 @@ pub extern "C" fn rs_main() -> i64 {
     };
 
     // Decode HERE (the blast-radius amendment). Unlike view, a non-image is an
-    // error -- there is no fullscreen fallback.
+    // error -- there is no fullscreen fallback. Both image arms reject an
+    // over-budget image from its headers before the heap-hungry decode.
     let raster = match sniff(&bytes) {
         Kind::Png => {
-            // Reject an over-budget image UP FRONT, from the headers alone, so a
-            // huge PNG gets a clean error instead of a silent OOM-exit mid-decode
-            // (the decode peak can dwarf the heap).
-            match png_dimensions(&bytes) {
-                Ok((w, h)) if !within_pixel_budget(w, h, GALLERY_MAX_PIXELS) => {
-                    eprintln!(
-                        "gallery: {}: image too large ({}x{}; over the {} Mpx budget)",
-                        path,
-                        w,
-                        h,
-                        GALLERY_MAX_PIXELS >> 20
-                    );
-                    return 1;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("gallery: {}: {}", path, e);
-                    return 1;
-                }
+            if let Err(c) = check_budget(path, png_dimensions(&bytes), GALLERY_MAX_PIXELS) {
+                return c;
             }
             match decode_png(&bytes) {
                 Ok(r) => r,
@@ -118,8 +126,16 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         Kind::Jpeg => {
-            eprintln!("gallery: {}: JPEG decode lands in a later slice", path);
-            return 1;
+            if let Err(c) = check_budget(path, jpeg_dimensions(&bytes), GALLERY_MAX_PIXELS) {
+                return c;
+            }
+            match decode_jpeg(&bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("gallery: {}: {}", path, e);
+                    return 1;
+                }
+            }
         }
         Kind::Other => {
             eprintln!("gallery: {}: not a recognized image", path);

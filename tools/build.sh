@@ -3802,6 +3802,23 @@ populate_stratum_pool() {
         else
             echo "==> populate pool: no usr/view/testdata/test.png -- inline-media E2E fixture skipped"
         fi
+
+        # I-47 JPEG slice: the same 640x400 witness card as a JPEG (committed
+        # usr/view/testdata/test.jpg, made by make-test-jpg.sh), baked at
+        # /test.jpg so `view /test.jpg` / `gallery /test.jpg` exercise the
+        # zune-jpeg decode path end to end. Same halcyon gate + readback verify.
+        local testjpg="$REPO_ROOT/usr/view/testdata/test.jpg"
+        if [[ -f "$testjpg" ]]; then
+            "$stratum_fs_bin" -s "$sock_path" write /test.jpg < "$testjpg" \
+                || { echo "==> populate pool: write /test.jpg FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" sync \
+                || { echo "==> populate pool: sync (test.jpg) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" read /test.jpg | cmp -s - "$testjpg" \
+                || { echo "==> populate pool: /test.jpg readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            echo "==> populate pool: /test.jpg baked + readback-verified (I-47 JPEG fixture, $(wc -c < "$testjpg" | tr -d ' ') B)"
+        else
+            echo "==> populate pool: no usr/view/testdata/test.jpg -- JPEG E2E fixture skipped"
+        fi
     fi
 
     # KT-1.5d-1a (HALCYON 14.12): the per-user session lever. Under

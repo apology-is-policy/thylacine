@@ -36,4 +36,5 @@ libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
 inlinewire = { path = "../lib/inlinewire" }
 # no_std image decode. default-features=false drops zune's std (no_std + alloc).
 zune-png = { version = "0.4", default-features = false }
+zune-jpeg = { version = "0.4", default-features = false }
 zune-core = { version = "0.4", default-features = false }

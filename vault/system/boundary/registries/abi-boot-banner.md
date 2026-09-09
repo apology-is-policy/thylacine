@@ -32,6 +32,7 @@ mirrors:
   - "tools/interactive/ls-gfx-age.exp"
   - "tools/interactive/ls-gfx-inline-view.exp"
   - "tools/interactive/ls-gfx-gallery.exp"
+  - "tools/interactive/ls-gfx-jpeg.exp"
   - "tools/interactive/ls-gfx-restore.exp"
   - "tools/interactive/ls-gfx-session.exp"
   - "tools/interactive/ls-halcyon.exp"

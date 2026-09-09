@@ -126,6 +126,61 @@ pub fn decode_png(bytes: &[u8]) -> Result<Raster, &'static str> {
     })
 }
 
+/// Read a JPEG's pixel dimensions from its headers WITHOUT decoding the image.
+/// The JPEG twin of [`png_dimensions`] -- the headers-only budget gate a viewer
+/// applies before the heap-hungry decode. JPEG dimensions are 16-bit, so `w*h`
+/// cannot overflow a u32.
+pub fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32), &'static str> {
+    use zune_jpeg::JpegDecoder;
+    let mut dec = JpegDecoder::new(bytes);
+    dec.decode_headers().map_err(|_| "jpeg: malformed headers")?;
+    let info = dec.info().ok_or("jpeg: no dimensions")?;
+    Ok((info.width as u32, info.height as u32))
+}
+
+/// Decode a JPEG to opaque ARGB. zune-jpeg converts to its output colorspace --
+/// RGB for a colour image, Luma for grayscale -- which we read from
+/// `get_output_colorspace` (never assumed) and normalize to 0xAARRGGBB: a Luma
+/// channel replicates across R/G/B, RGB maps straight through, alpha is always
+/// opaque (JPEG carries none). A 4-component output (CMYK/YCCK) is REFUSED rather
+/// than mis-rendered as RGBA -- unlike PNG's 4th channel, JPEG's is not alpha.
+pub fn decode_jpeg(bytes: &[u8]) -> Result<Raster, &'static str> {
+    use zune_jpeg::JpegDecoder;
+
+    let mut dec = JpegDecoder::new(bytes);
+    dec.decode_headers().map_err(|_| "jpeg: malformed headers")?;
+    let info = dec.info().ok_or("jpeg: no dimensions")?;
+    let (w, h) = (info.width as u32, info.height as u32);
+    let cs = dec.get_output_colorspace().ok_or("jpeg: unknown colorspace")?;
+    let nc = cs.num_components();
+    if nc != 1 && nc != 3 {
+        return Err("jpeg: unsupported colorspace");
+    }
+    let npx = (w as u64) * (h as u64);
+    if npx == 0 || npx > MAX_PIXELS {
+        return Err("jpeg: image empty or over the pixel bound");
+    }
+
+    let samples: Vec<u8> = dec.decode().map_err(|_| "jpeg: decode failed")?;
+
+    let want = (npx as usize)
+        .checked_mul(nc)
+        .ok_or("jpeg: pixel-count overflow")?;
+    if samples.len() < want {
+        return Err("jpeg: short pixel buffer");
+    }
+
+    let mut argb: Vec<u32> = Vec::with_capacity(npx as usize);
+    for px in samples.chunks_exact(nc) {
+        let (r, g, b) = match nc {
+            1 => (px[0], px[0], px[0]),
+            _ => (px[0], px[1], px[2]),
+        };
+        argb.push(0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
+    }
+    Ok(Raster { w, h, argb })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +252,54 @@ mod tests {
         assert!(!within_pixel_budget(4000, 4000, 6 * 1024 * 1024), "16 Mpx over budget");
         // largest u32 dims must not overflow the product (u64 math)
         assert!(!within_pixel_budget(u32::MAX, u32::MAX, 6 * 1024 * 1024));
+    }
+
+    // A 32x32 four-quadrant JPEG (red TL / green TR // blue BL / white BR;
+    // testdata/make-test-jpg.sh). JPEG is LOSSY (YCbCr + chroma subsampling +
+    // quantization), so colors are asserted APPROXIMATELY, sampled at each
+    // quadrant CENTER -- away from the 8x8-block boundaries at the quadrant
+    // edges where chroma bleeds. This pins the zune-jpeg decode + the YCbCr->RGB
+    // ->ARGB normalization (the JPEG twin of decode_png_2x2_rgba_to_argb).
+    #[test]
+    fn decode_jpeg_quadrants_to_argb() {
+        let jpg = include_bytes!("testdata/quad.jpg");
+        assert_eq!(sniff(jpg), Kind::Jpeg);
+        let r = decode_jpeg(jpg).expect("decode quad.jpg");
+        assert_eq!((r.w, r.h), (32, 32));
+        assert_eq!(r.argb.len(), 32 * 32);
+        let at = |x: u32, y: u32| r.argb[(y * 32 + x) as usize];
+        let near = |px: u32, er: u8, eg: u8, eb: u8| {
+            assert_eq!((px >> 24) & 0xFF, 0xFF, "opaque (JPEG has no alpha)");
+            let rr = ((px >> 16) & 0xFF) as i32;
+            let gg = ((px >> 8) & 0xFF) as i32;
+            let bb = (px & 0xFF) as i32;
+            let tol = 48; // generous: quality-90 flat-region error is well under this
+            assert!(
+                (rr - er as i32).abs() <= tol
+                    && (gg - eg as i32).abs() <= tol
+                    && (bb - eb as i32).abs() <= tol,
+                "px {:08X} not near ({:02X},{:02X},{:02X})",
+                px, er, eg, eb
+            );
+        };
+        near(at(8, 8), 0xE0, 0x20, 0x20); // TL red
+        near(at(24, 8), 0x20, 0xE0, 0x20); // TR green
+        near(at(8, 24), 0x20, 0x20, 0xE0); // BL blue
+        near(at(24, 24), 0xF0, 0xF0, 0xF0); // BR white
+    }
+
+    #[test]
+    fn jpeg_dimensions_reads_headers_without_decoding() {
+        assert_eq!(jpeg_dimensions(include_bytes!("testdata/quad.jpg")).unwrap(), (32, 32));
+        assert!(jpeg_dimensions(b"not a jpeg").is_err());
+    }
+
+    #[test]
+    fn decode_jpeg_rejects_garbage() {
+        assert!(decode_jpeg(b"not a jpeg at all, just bytes").is_err());
+        assert!(
+            decode_jpeg(&JPEG_MAGIC).is_err(),
+            "magic alone is not a decodable image"
+        );
     }
 }
