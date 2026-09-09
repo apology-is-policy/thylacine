@@ -27,16 +27,11 @@ source [file join [file dirname [info script]] lib.exp]
 
 set repo $lc_repo
 set qmp [lc_qmp_sock]
-set scen [file dirname [info script]]
 
 proc dump {out} {
     global repo qmp
     if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return $err }
     return ""
-}
-proc region {png args} {
-    global scen
-    return [exec python3 $scen/gfx_region.py $png {*}$args]
 }
 
 lc_boot
@@ -58,26 +53,13 @@ expect {
 
 lc_login michael correct-horse-battery-staple-v1
 
-# Baseline screendump (the console, before gallery paints). The pre/post delta
-# is derived against the pre-dump's own dominant colour, so the console chrome
-# that is in BOTH dumps cancels (the ls-gfx-inline-view instrument).
-set W 0
-set H 0
-expect {
-    -re {halcyond: console up (\d+)x(\d+) px} { set W $expect_out(1,string); set H $expect_out(2,string) }
-    timeout {}
-}
-if {$W == 0} { set W 1280; set H 800 }
-set pre $repo/build/ls-gfx-gallery-pre.png
-set gr 14; set gg 12; set gb 12
-if {[dump $pre] eq ""} {
-    lassign [region $pre 0 0 $W $H] _ _ gr gg gb
-    lassign [region $pre 0 0 $W $H $gr $gg $gb] off_pre tot_pre
-    lc_step "gallery: pre-dump ground=($gr,$gg,$gb) off_pre=$off_pre/$tot_pre"
-}
-
 # THE E2E. gallery is foreground (it blocks on its tapestryd event loop); the
-# "shown" line is printed to serial before it blocks, so it arrives first.
+# "shown" line is printed to serial before it blocks, so it arrives first. This
+# is the LOAD-BEARING proof -- printed only after a successful connect -> decode
+# -> fullscreen mint -> weave map -> paint -> present, i.e. the whole client path
+# on real hardware. (No pre/post pixel delta: "halcyond: console up" is a
+# boot-time line a post-login expect can never re-see, and a second fullscreen
+# client's VISIBILITY over the console is the scanout-focus model, not gated.)
 set timeout 60
 lc_send "gallery /test.png"
 expect {
@@ -96,16 +78,12 @@ expect {
 }
 lc_pass "gallery: /test.png decoded + presented to a fullscreen tapestryd surface (I-47 client path end to end)"
 
-# Screendump for the record (informational). If the image reached the scanout,
-# the delta over the whole frame dwarfs the console; if not (the second-client
-# scanout race in console mode), the serial witness above still stands.
+# Screendump for the record (informational): whether a second fullscreen client's
+# pixels reach the scanout OVER the console is the scanout-focus model, not gated
+# here -- the serial witness above is the load-bearing proof.
 after 800
 set post $repo/build/ls-gfx-gallery.png
-if {[dump $post] eq ""} {
-    lassign [region $post 0 0 $W $H $gr $gg $gb] off_post tot_post
-    lc_step "gallery: post-dump saved ($post); non-ground=$off_post/$tot_post\
-             (a large jump vs off_pre = the image is on the scanout)"
-}
+if {[dump $post] eq ""} { lc_step "gallery: screendump saved ($post)" }
 
 # Best-effort exit: Esc reaches the FOCUSED surface (QMP -> virtio-keyboard ->
 # tapestryd). If gallery has focus it exits (is_exit_key, host-tested) and the
