@@ -129,6 +129,16 @@ saved layout as a menu-actionable object with **no renderer code**: `layout` is
 a new value of the existing `type` key (BEACON.md 12.2), handled by string in
 halcyond, not a new frame op.
 
+`verbs.default` also carries the **`view`** path verb (`path view view {}`,
+I-47 inline media): choosing it on a presented path types `view '<path>'` into
+the pane, and `view` sniffs the file -- an image renders inline in the
+transcript (via `/srv/halcyon`, [[sub-view]]), anything else falls back to
+`cat`. Unlike `ls`/`cat`/`stat` the template omits `--`: `view` reads a bare
+path operand and does not yet consume the `--` separator (the file's documented
+"queued" class), so a `--` would be opened as the file. It sits with the other
+`path` verbs (baked unconditionally); the obj menu that surfaces it is a
+halcyond feature, so under the aurora fail-safe the row is simply inert.
+
 **The cells tier is the coreutils colour language, relocated verbatim**
 (2026-09-01, BEACON.md 12.5): `boxd` (box furniture computed on plain text,
 coloured at emit), `color` (the `col(code, on)` single-path gate), `palette`
