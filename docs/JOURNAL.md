@@ -22,6 +22,65 @@ needed the operator.
 
 
 ---
+## 2026-09-09 (aux, run 6 continued) -- the arm-6 logout deadlock FIXED: territory-at-exit (Part D) + the kernel-driven session hangup (A1); both parts verified, arc close (SMP gate + audit) owed
+
+The operator ratified the fix over two blocking questions: **A1** (kernel session
+hangup) over A3 (grant login CAP_KILL), after a precedents survey they asked for
+(pam_mount escalating hup/term/kill; systemd `KillUserProcesses` + session
+scopes; systemd-homed; macOS FileVault; Plan 9 frees the namespace at `pexit`).
+Then the implementation surfaced a second, sharper decision: login **cannot**
+drive the reap decision (3) named -- `LOGIN_CAPS` has no `CAP_KILL`/`CAP_HOSTOWNER`
+and I-26 denies it -- so "login terminates the session" is infeasible as worded.
+The operator chose the kernel-driven realization.
+
+**The find that reframed it:** A-5 decision (3) (voted 2026-06-02) already
+mandated "logout = login reaps its group ... no orphaned session Proc," and it
+was **never implemented** -- `unbind_home` only unmounts + closes + waits the
+proxy. So this is closing a silent omission, not adding a feature. The scripture
+commit (`564de51c`) records the refinement (kernel trigger, mechanism unchanged);
+IDENTITY-DESIGN §9.9.1 is the design record.
+
+**Part D (`8bcc2e3f`) -- territory-at-exit.** A Proc's Territory freed only at
+REAP, so a zombie/orphan kept a `spoor_ref` on every inherited mount, including
+the per-user home proxy's -- login's `proxy.wait()` then deadlocked on an orphan
+joey could not reap (joey blocked in `wait(login)`, login in `proxy.wait`).
+Part D extends #68/#926 to the namespace: release `p->territory` at EXIT via a
+**locked-detach + unlocked-free split** (NULL under `g_proc_table_lock`,
+serializing with devproc `format_ns` which then renders empty -- both readers
+NULL-safe; then `territory_unref` outside the lock, the `Tclunk` may sleep). The
+#66c FOOTGUN (a lock-free free racing `format_ns`) is why the split, not a bare
+`territory_unref`, was needed -- caught by reading the ARCHITECTURE #66c note
+before writing the code. Part D **alone** cleared ls-imperium-stall (30s PASS,
+was 121s STALL) -- the abdicate-swept job already exited, so it released its mount
+ref at exit.
+
+**A1 (`6758a1bd`) -- kernel session hangup.** Part D did NOT fix a plain
+`sleep & ; exit` (the ALIVE orphan never exits), which a minimal `ls-bghome-stall`
+proved stalls with **no imperium at all** -- the bug is general. A1: login spawns
+the shell (and halcyond) with a new `SPAWN_PERM_SESSION_HANGUP`; the child thunk
+`proc_setsid`s it (leader-guard passes post-rfork; login stays OUTSIDE the
+session and survives) + arms `PROC_FLAG_SESSION_HANGUP`; on that leader's exit
+`proc_become_zombie_locked` terminates the rest of its session -- **the exact
+legate-teardown sibling** (Explore-mapped), so it is a kernel session-lifecycle
+termination, NOT a userspace kill: I-26 untouched. A1 cleared ls-bghome-stall
+(28s PASS, was STALL).
+
+**Cost / method.** One Explore agent mapped the spawn/session/death plumbing
+(the flag bit, the setsid-in-thunk, the death hook, the struct bit) so the
+load-bearing edits were precise. The vault-lint pre-commit gate caught two
+registrar gaps my changes triggered -- a stale audit-trigger coverage view (fixed
+by `quaestor render`) and an undeclared banner-literal `.exp` (my regression
+matches `EXTINCTION:`; declared in `abi-boot-banner.md` mirrors) -- both fixed
+in-tree.
+
+**Still open (the arc close, owed):** the **SMP gate** (the concurrency witness
+for the death-path change -- NOT yet run); the **formal audit** (holotype-reviewer,
+Fable/max -- the AUDIT-TRIGGERS row carries the prosecution checklist); **re-add
+ls-imperium arm 6** (the cross-user re-login the fix unblocks); the **vault
+death-path dossiers** (sub-kernel-death/-proc/-caps -- deferred via
+`No-dossier-change` trailers, owed once at the close); the reference-doc pass.
+
+---
 ## 2026-09-08 (aux, run 6 continued, post self-compact #3) -- the arm-6 stall ROOT CAUSE CONFIRMED + GENERALIZED: any session process pinning the per-user home mount deadlocks logout; fix is a design fork (surfaced)
 
 Picked up the localization from the entry below and drove it to a proven root
