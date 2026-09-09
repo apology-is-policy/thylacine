@@ -1,0 +1,130 @@
+# Nocturne -- the dark Halcyon theme.
+#
+# The thylacine is crepuscular: this is the same room after dusk, not a
+# different room. The ember is carried VERBATIM from Daylight and Bonfire
+# (HALCYON-VISUAL 1.3 -- the accent is the link between the surfaces), the
+# ground/ink ramps are inverted, and the terminal is Bonfire's own role tier
+# so a shell inside a Nocturne pane matches the aurora console outside it.
+#
+# THERE IS NO `base` KEY, DELIBERATELY. With one, every key this file forgot
+# would silently inherit DAYLIGHT -- a bright parchment landing in the middle
+# of a dark bar, which is the exact failure this arc exists to prevent
+# (HALCYON-THEME 4.3). Without one the loader requires all 57 keys and names
+# any that are missing, so "a hardcoded Daylight colour kicked in" is
+# impossible here by construction rather than by care.
+
+[meta]
+name = "Nocturne"
+
+[palette]
+# Ground (HALCYON-VISUAL 1.1). Daylight ramps DOWN from the pane surface to
+# the floor, so a pane reads as lifted off the workspace; Nocturne keeps that
+# relationship rather than inverting it -- the floor is darker than the pane.
+floor = "#0A0808"
+surface = "#1A1614"
+header = "#2A2422"
+raised = "#37302C"
+border = "#4A4038"
+# Darker than the floor: an empty pane is a hole, not a lit surface.
+blank = "#050404"
+# A step lifted from the surface, cool enough to read as a selection rather
+# than as another pane tone.
+selection = "#2E3440"
+island_rule = "#4A4038"
+
+# Ink (1.2). Light on dark, four steps of emphasis.
+fg = "#E8E0D4"
+fg_dim = "#C4BAB0"
+fg_muted = "#958A80"
+fg_subtle = "#6A605A"
+
+# Bevel, NNW (2.1) -- ONE light direction, four distinct faces, regenerated
+# together or not at all. On a dark ground the lit edges rise above the
+# surface and the shadowed ones fall below it; the direction is unchanged.
+bevel_top = "#4E453E"
+bevel_left = "#3A332E"
+bevel_right = "#14100E"
+bevel_bottom = "#0A0706"
+
+# Accent (1.3): the ember, shared VERBATIM with Daylight and Bonfire. It is
+# the one colour that must not move between themes -- it is how the surfaces
+# read as one system.
+ember = "#E07840"
+ember_dim = "#B85F2A"
+ember_deep = "#C86030"
+
+# Status bar (6). Four independent roles in the scripture's own table, not
+# derivations: Daylight's bar is a dark strip on a light page, so Nocturne's
+# is a LIFTED strip on a dark one -- the contrast is what carries, not the
+# polarity.
+status_bg = "#2A2422"
+status_fg = "#E8E0D4"
+status_muted = "#958A80"
+status_idle = "#5A5048"
+
+# Live-tile keys (1.4). The key colour stays saturated (it is the load-bearing
+# mark -- separator, content hairline, active pill); the tint becomes a dark
+# bar of the same hue instead of a light one.
+[palette.sage]
+key = "#6A9A6A"
+tint = "#192419"
+raised = "#253325"
+border = "#3A4C3A"
+fg = "#D8E8D8"
+fg_dim = "#A8C0A8"
+fg_muted = "#7A947A"
+
+[palette.cinnabar]
+key = "#C06050"
+tint = "#2A1815"
+raised = "#3A211C"
+border = "#523128"
+fg = "#F0D8D2"
+fg_dim = "#D0ACA4"
+fg_muted = "#A88078"
+
+# Syntax (1.5). Bonfire's role tier, which is the project's dark derivation of
+# the same slate/sage/sand/moss/dusk/fen/cinnabar table Daylight darkens for a
+# light ground.
+[palette.syntax]
+slate = "#8A9AC8"
+sage = "#8AB8A8"
+sand = "#C8A882"
+moss = "#B8D098"
+ash = "#C8BDB8"
+dusk = "#A898C8"
+smoke = "#7A706A"
+fen = "#6A9A6A"
+cinnabar = "#C06050"
+
+# The terminal a hosted program's SGR resolves against. bg is the pane surface
+# and fg is the ink, so halcyond's default-ink hook fires exactly as it does
+# under Daylight; the sixteen are Bonfire's, with bright-white aliased to the
+# ink (vt's slot-uniqueness rule: no two slots share a value EXCEPT ansi[15]).
+[terminal]
+bg = "#1A1614"
+fg = "#E8E0D4"
+ansi = [
+  "#2A1F1C", "#C06050", "#6A9A6A", "#C8A882",
+  "#8A9AC8", "#A898C8", "#8AB8A8", "#C8BDB8",
+  "#5A4E48", "#E07840", "#B8D098", "#E0C090",
+  "#A0B0E0", "#C0B0E0", "#A0D0C0", "#E8E0D4",
+]
+
+# The smoothing stroke (HALCYON-TYPE 4.2), in thousandths of an em. ZERO on a
+# dark ground: light ink on dark already reads heavy, so the dilation Daylight
+# needs would thicken this past legibility. The doc's per-theme rule.
+[type]
+smooth = 0
+
+# Geometry (3.1/4.3). Unchanged from the built-in: Nocturne is a change of
+# light, not of proportion -- but it must SAY so, because there is no base to
+# inherit these from.
+[geometry]
+bevel = 2
+gap = 2
+hairline = 1
+header_h = 20
+status_h = 20
+tag_pad_x = 6
+tab_strip_h = 5

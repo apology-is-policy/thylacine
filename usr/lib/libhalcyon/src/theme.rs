@@ -1107,6 +1107,145 @@ mod tests {
 
     // ---- the theme file (HALCYON-THEME 3.3 / 4) ----
 
+    /// The shipped dark theme, compiled in for the test only -- the guest
+    /// reads it off the filesystem.
+    const NOCTURNE: &str = include_str!("../../halcyon/themes/nocturne.toml");
+
+    // TH-5: THE ARC'S PROOF. An arc that ships only the theme it started with
+    // has proved nothing -- every mechanism could be subtly Daylight-shaped
+    // and nobody would know. Nocturne is written with NO `base`, so the
+    // loader requires all 57 keys and this test fails, naming them, the day
+    // one is forgotten.
+    #[test]
+    fn nocturne_is_complete_coherent_and_nothing_like_daylight() {
+        let l = Theme::from_toml(NOCTURNE).unwrap_or_else(|e| {
+            panic!("the shipped Nocturne must load: {}", describe(&e));
+        });
+        assert_eq!(l.name, "Nocturne");
+        assert!(
+            l.inherited.is_empty(),
+            "no base means nothing may be inherited, but {:?} were",
+            l.inherited
+        );
+        let n = l.theme;
+        let d = builtin();
+
+        // It is a DIFFERENT theme, not a retint of two roles: every ground
+        // and every ink differs from Daylight's.
+        for (name, a, b) in [
+            ("floor", n.floor, d.floor),
+            ("surface", n.surface, d.surface),
+            ("header", n.header, d.header),
+            ("raised", n.raised, d.raised),
+            ("border", n.border, d.border),
+            ("blank", n.blank, d.blank),
+            ("selection", n.selection, d.selection),
+            ("island_rule", n.island_rule, d.island_rule),
+            ("fg", n.fg, d.fg),
+            ("fg_dim", n.fg_dim, d.fg_dim),
+            ("fg_muted", n.fg_muted, d.fg_muted),
+            ("fg_subtle", n.fg_subtle, d.fg_subtle),
+            ("status_bg", n.status_bg, d.status_bg),
+            ("terminal.bg", n.terminal.bg, d.terminal.bg),
+        ] {
+            assert_ne!(a, b, "{name} is still Daylight's");
+        }
+
+        // It is DARK: every ground is darker than every ink. This is the
+        // property a "dark theme" actually names, and it catches a paste
+        // error no colour-by-colour comparison would.
+        let lum = |c: Argb| {
+            let (r, g, b) = ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+            (2 * r + 5 * g + b) / 8
+        };
+        for (gn, gc) in [
+            ("floor", n.floor),
+            ("surface", n.surface),
+            ("header", n.header),
+            ("blank", n.blank),
+            ("status_bg", n.status_bg),
+        ] {
+            for (inn, ic) in [("fg", n.fg), ("fg_dim", n.fg_dim), ("status_fg", n.status_fg)] {
+                assert!(
+                    lum(gc) < lum(ic),
+                    "ground {gn} ({:#08x}) is not darker than ink {inn} ({:#08x})",
+                    gc,
+                    ic
+                );
+            }
+        }
+        assert!(lum(n.blank) <= lum(n.floor), "an empty pane is a hole");
+        assert!(lum(n.floor) < lum(n.surface), "a pane is lifted off the floor");
+
+        // HALCYON-VISUAL 1.3: the ember is shared VERBATIM. It is how the
+        // surfaces read as one system, so it is the one colour a theme may
+        // not move.
+        assert_eq!(n.ember, d.ember, "the ember is shared verbatim");
+
+        // 2.1: four distinct bevel faces from ONE light direction, and the
+        // lit pair really is lighter than the shadowed pair.
+        assert!(n.bevel_top != n.bevel_left && n.bevel_right != n.bevel_bottom);
+        assert!(lum(n.bevel_top) > lum(n.bevel_left));
+        assert!(lum(n.bevel_left) > lum(n.bevel_right));
+        assert!(lum(n.bevel_right) > lum(n.bevel_bottom));
+
+        // HALCYON-TYPE 4.2's per-theme rule: light ink on dark already reads
+        // heavy, so a dark theme takes no smoothing stroke.
+        assert_eq!(n.smooth_mem, 0, "a dark ground takes 0");
+
+        // The terminal agreements TH-1 makes true by construction for the
+        // built-in must be true by AUTHORSHIP here -- a file can set them
+        // apart, and halcyond's default-ink hook only fires when they match.
+        assert_eq!(n.terminal.bg, n.surface, "bg is the pane surface");
+        assert_eq!(n.terminal.fg, n.fg, "fg is the ink");
+        // vt's slot-uniqueness rule, checked for the AUTHORED palette: no two
+        // slots share a value except ansi[15] == fg. A violation mis-slots
+        // cells across a `set_theme` remap.
+        for (i, c) in n.terminal.ansi.iter().enumerate() {
+            for (j, e) in n.terminal.ansi.iter().enumerate() {
+                assert!(i == j || c != e, "nocturne ansi[{i}] and ansi[{j}] collide");
+            }
+            assert!(i == 15 || *c != n.fg, "ansi[{i}] aliases fg but is not 15");
+        }
+        assert_eq!(n.terminal.ansi[15], n.fg);
+
+        // And it survives the push seam, so a Nocturne session can actually
+        // hand its theme to the compositor.
+        assert_eq!(from_wire(&to_wire(&n)), Some(n));
+    }
+
+    // The sheet built from Nocturne carries no Daylight colour -- the TH-2
+    // retint test's claim, made against a REAL second theme rather than a
+    // synthetic inversion.
+    #[test]
+    fn a_nocturne_sheet_carries_nothing_of_daylight() {
+        let n = Theme::from_toml(NOCTURNE).unwrap().theme;
+        let d = builtin();
+        let daylight: &[Argb] = &[
+            d.surface, d.header, d.fg, d.fg_dim, d.ember, d.border, d.selection,
+            d.island_rule, d.syntax.slate, d.syntax.fen, d.cinnabar.key,
+        ];
+        for (name, c) in [
+            ("surface", n.surface),
+            ("header", n.header),
+            ("fg", n.fg),
+            ("fg_dim", n.fg_dim),
+            ("border", n.border),
+            ("selection", n.selection),
+            ("island_rule", n.island_rule),
+            ("syntax.slate", n.syntax.slate),
+            ("syntax.fen", n.syntax.fen),
+            ("cinnabar.key", n.cinnabar.key),
+        ] {
+            assert!(
+                !daylight.contains(&c),
+                "nocturne {name} ({c:#08x}) is a Daylight colour"
+            );
+        }
+        // The ember is the deliberate exception, and it must still be there.
+        assert!(daylight.contains(&n.ember));
+    }
+
     // A theme file big enough to have been TRUNCATED by its reader is refused
     // whole. A cut file can be valid TOML -- so 4.2 would never fire, and the
     // author would get a silently half-applied visual, which is the exact
