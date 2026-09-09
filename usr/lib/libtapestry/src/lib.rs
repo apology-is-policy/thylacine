@@ -174,10 +174,31 @@ pub enum TapError {
     Loom,
     Present,
     Closed,
-    /// A resize ack answered E_AGAIN: the serial went stale (a newer
-    /// CONFIGURE superseded it -- drain events and ack that one) or a
-    /// prior reweave is still draining (present a frame, then re-ack).
+    /// The compositor answered E_AGAIN -- routine backpressure, RETRY.
+    /// Either a resize ack whose serial went stale (a newer CONFIGURE
+    /// superseded it -- drain events and ack that one), a prior reweave still
+    /// draining (present a frame, then re-ack), or a ctl verb that landed in a
+    /// service pass whose per-pass layout budget was already spent.
     Busy,
+}
+
+/// E_AGAIN as the syscall layer returns it.
+const E_AGAIN: i64 = -11;
+
+/// A negative syscall return as a `TapError`, PRESERVING E_AGAIN as `Busy`.
+///
+/// Every write path that can be budgeted must go through this. Flattening
+/// E_AGAIN into `Protocol` does not merely lose a detail -- it makes the
+/// caller's retry arm UNREACHABLE, so a routine backpressure refusal ends the
+/// operation and gets logged as a protocol error. Two `global_ctl`s shipped
+/// that way and their callers' `Busy` arms were dead code; `reweave` had the
+/// mapping inline and worked, which is what made the difference invisible.
+fn errno_to_taperror(rc: i64) -> TapError {
+    if rc == E_AGAIN {
+        TapError::Busy
+    } else {
+        TapError::Protocol
+    }
 }
 
 // The ring's ONE registered buffer: an EV_REGION-byte event landing zone per
@@ -597,11 +618,7 @@ impl Surface {
         let _ = core::fmt::write(&mut cmd, format_args!("resize {} {} {}", w, h, serial));
         let rc = unsafe { t_write(self.ctl, cmd.as_ptr(), cmd.len()) };
         if rc < 0 {
-            return Err(if rc == -11 {
-                TapError::Busy
-            } else {
-                TapError::Protocol
-            });
+            return Err(errno_to_taperror(rc));
         }
 
         let mut path = alloc::string::String::new();
@@ -785,7 +802,7 @@ impl Surface {
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         unsafe { t_close(ctl) };
         if rc < 0 {
-            return Err(TapError::Protocol);
+            return Err(errno_to_taperror(rc));
         }
         Ok(())
     }
@@ -1115,7 +1132,7 @@ impl EventRing {
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         unsafe { t_close(ctl) };
         if rc < 0 {
-            return Err(TapError::Protocol);
+            return Err(errno_to_taperror(rc));
         }
         Ok(())
     }
@@ -1308,6 +1325,40 @@ impl<T> PopFirst<T> for Vec<T> {
             None
         } else {
             Some(self.remove(0))
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    // The TH-6 round's F3: `global_ctl` flattened every negative return into
+    // `Protocol`, which did not merely lose a detail -- it made both callers'
+    // `Err(TapError::Busy) => retry` arms UNREACHABLE. A theme or scale push
+    // that landed in a service pass whose layout budget was already spent got
+    // one attempt, gave up, and logged routine backpressure as a protocol
+    // error. `reweave` had the mapping inline and worked, which is exactly
+    // what made the difference invisible: one path retried, two did not, and
+    // nothing compared them.
+    //
+    // This pins the mapping so there is one named place to be right. It cannot
+    // by itself prove a given call site USES it -- that is a wiring property,
+    // and the wiring's witness is that `errno_to_taperror` is now the only
+    // construction of `Busy` outside this test.
+    #[test]
+    fn e_again_survives_as_busy_so_a_retry_arm_stays_reachable() {
+        assert!(
+            matches!(errno_to_taperror(E_AGAIN), TapError::Busy),
+            "E_AGAIN must reach the caller as Busy or its retry arm is dead code"
+        );
+        // Everything else is a real failure and must NOT be retried -- a
+        // permission refusal retried 400 times is a hang, not a recovery.
+        for rc in [-1i64, -2, -13, -22, -105] {
+            assert!(
+                matches!(errno_to_taperror(rc), TapError::Protocol),
+                "rc {rc} must not be mistaken for backpressure"
+            );
         }
     }
 }

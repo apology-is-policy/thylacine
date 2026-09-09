@@ -94,8 +94,15 @@ if {$ls_theme eq ""} {
     lc_pass "TH-4c(a): with no theme file in either tier both report absent (4.1)\
              and the built-in is named active"
 } else {
-    lc_run_expect_hardfail "halcyon theme lint" "active: system" "REFUSED"
-    lc_pass "TH-4c(a): the lever-baked system theme ($ls_theme) is named active"
+    # Assert the NAME, not just the tier. `active: system` alone passes against
+    # an image baked with any theme under any name, so `LS_THEME=nightjar`
+    # would have been satisfied by a completely different theme being in force
+    # (TH-6 F8). The tool prints the `[meta] name`, which is title-case where
+    # the gallery filename is not.
+    set want [string totitle $ls_theme]
+    lc_run_expect_hardfail "halcyon theme lint" "active: system -- \"$want\"" "REFUSED"
+    lc_pass "TH-4c(a): the lever-baked system theme is named active AS $want --\
+             the tier and the identity, not just the tier"
 }
 
 # The shipped dark theme, linted by path. `keys set` appears ONLY on the

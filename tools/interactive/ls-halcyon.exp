@@ -162,6 +162,17 @@ set ls_theme "daylight"
 if {[info exists ::env(LS_THEME)] && $::env(LS_THEME) ne ""} {
     set ls_theme $::env(LS_THEME)
 }
+# Defined HERE rather than beside its Daylight-only call block near the end of
+# the file, so the non-Daylight run -- which exits well above that -- can use it
+# (TH-6 F6). It reads `$transcript` at call time, so its position only has to
+# be after the boot.
+proc tgrep {pat what} {
+    global transcript
+    if {[catch {exec grep -q -- $pat $transcript}]} {
+        lc_fail "transcript missing: $what ($pat)"
+    }
+    lc_pass "halcyon: $what"
+}
 # The grounds ARE the proof. Nothing but a theme file read off the disk,
 # parsed, resolved and painted can put Nightjar's #1A1614 or #2A2422 on this
 # screen -- there is no other source of those values in the tree -- so the
@@ -177,6 +188,25 @@ if {[lsearch -exact $grounds $dom] < 0} {
 }
 if {$ls_theme ne "daylight"} {
     lc_pass "halcyon: $ls_theme loaded from /lib/halcyon/theme.toml and PAINTED (ground $dom)"
+    # TH-6 F1's WITNESS, and it costs nothing because the number is already
+    # here: `region`'s reference colour is Daylight's parchment, so `$off`
+    # counts pixels that are NOT it. Under any other theme EVERY pixel must be
+    # one -- a single parchment pixel in a Nightjar transcript means something
+    # is still painting a Daylight CONSTANT into themed content.
+    #
+    # That is exactly what F1 was: the console renderer seeded its transcript
+    # pen from `daylight_palette()` twelve lines after threading the resolved
+    # theme into its sheet, so every cell's default style was Daylight's, and
+    # `st.bg != sheet.theme.terminal.bg` turned each run into a full-height
+    # parchment box on a dark pane. The `off >= 300` check below could not see
+    # it -- it was SATISFIED BY those very boxes. Reachability is not a
+    # coincidence either: Nightjar's lightest ink is (232,224,212), darker than
+    # parchment in every channel, so no blend of its ink and ground can produce
+    # (242,235,224). Measured on the fix: 272800/272800.
+    if {$off != $total} {
+        lc_fail "[expr {$total - $off}] of $total pixels are DAYLIGHT parchment (242,235,224) in a $ls_theme transcript -- a Daylight constant is still painting into themed content (TH-6 F1)"
+    }
+    lc_pass "halcyon: not one Daylight pixel in the $ls_theme transcript ($off/$total)"
 }
 if {$off < 300} {
     lc_fail "only $off/$total non-ground pixels -- no ink on the transcript"
@@ -336,8 +366,71 @@ lc_pass "halcyon: the bar's condition went ember with the passing command ($n px
 # status bar ground and the condition inks all following it -- and hands the
 # rest to the Daylight run, which still exercises every leg. Widening the
 # remaining legs is real work; claiming them by running past them is not.
+# TH-6 F6: THE COMPOSITOR'S HALF. Everything above proves HALCYOND followed
+# the theme. None of it proves TAPESTRYD did -- and tapestryd's chrome is
+# exactly what TH-5b caught painting Daylight around a Nightjar pane, silently,
+# because the compositor starts before the pool it would read the file from is
+# mounted. Until now the only pixels the non-Daylight run asserted were
+# halcyond's (its status surface is opaque and Clear()s its own ground over
+# tapestryd's fill), so the compositor's painter had NO witness on the run that
+# could actually discriminate. Two, both cheap:
+#
+# (1) the log line proving the gated `theme` verb was ADMITTED, not refused.
+tgrep "halcyond: theme pushed to the compositor" "the resolved theme was pushed over the gated verb"
 if {$ls_theme ne "daylight"} {
-    lc_pass "halcyon: $ls_theme END-TO-END -- disk -> parse -> resolve -> paint (grounds, status bar, condition inks)"
+    # Only under a lever: `apply_theme` is idempotent, so on a default image
+    # the renderer pushes the built-in the compositor already has and says
+    # nothing -- which is correct, and is also why this cannot be asserted
+    # unconditionally.
+    tgrep "tapestryd: theme applied" "the COMPOSITOR admitted the push and re-derived its metrics"
+}
+# (2) a pixel TAPESTRYD itself painted: the pane bevel (HALCYON-VISUAL 2.1,
+# `paint_borders`). The bevel needs TWO leaves -- MEASURED on a failing first
+# attempt at this leg, which sampled the pre-split screen and found columns
+# 0..8 all pane surface (26,22,20) and rows 0..24 all tag-bar header: a single
+# full-bleed pane carries no floor gap and no bevel, exactly as the pre-split
+# control at the `no_strip_at_left` leg below already states. It failed loudly
+# rather than passing hollowly, which is the safe direction for a leg that
+# asserts a thing is PRESENT.
+#
+# So the Daylight run keeps its bevel check at the real split further down, and
+# the non-Daylight run -- which exits before that -- makes its own split here.
+switch -- $ls_theme {
+    daylight { set bev_l {226 214 192} ; set bev_t {248 242 230} }
+    nightjar { set bev_l {58 51 46}    ; set bev_t {78 69 62} }
+}
+
+# `bevel_want` is shared by both runs so the two checks cannot drift, and so
+# the values live in the `$bev_*` pair rather than in literals at each site.
+proc bevel_want {when} {
+    global bev_l bev_t ls_theme
+    set vl [region 1 120 3 560]
+    if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vl -> l_off l_tot lr lg lb]} {
+        lc_fail "bevel_left region unparseable ($when): $vl"
+    }
+    if {[list $lr $lg $lb] ne $bev_l} {
+        lc_fail "$when: left-edge dominant ($lr,$lg,$lb) is not $ls_theme bevel_left ($bev_l) -- THE COMPOSITOR is not painting this theme's chrome"
+    }
+    set vt [region 120 1 560 3]
+    if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vt -> t_off t_tot tr tg tb]} {
+        lc_fail "bevel_top region unparseable ($when): $vt"
+    }
+    if {[list $tr $tg $tb] ne $bev_t} {
+        lc_fail "$when: top-edge dominant ($tr,$tg,$tb) is not $ls_theme bevel_top ($bev_t) -- THE COMPOSITOR is not painting this theme's chrome"
+    }
+    if {[list $lr $lg $lb] eq [list $tr $tg $tb]} {
+        lc_fail "$when: bevel_left == bevel_top -- the NNW four-value bevel collapsed to a two-value diagonal (section 2.1 broken)"
+    }
+    lc_pass "halcyon: TAPESTRYD painted the $ls_theme bevel $when (left $bev_l != top $bev_t -- four-value NNW)"
+}
+
+if {$ls_theme ne "daylight"} {
+    # A split of our own: two leaves is what makes a bevel exist at all.
+    hkey "meta_l+h"
+    bevel_want "under $ls_theme"
+    lc_pass "halcyon: $ls_theme END-TO-END -- disk -> parse -> resolve -> paint,\
+             BOTH halves: halcyond's grounds/status/condition inks AND the\
+             COMPOSITOR's own bevel plus its admission of the pushed verb"
     lc_quit
     exit 0
 }
@@ -529,31 +622,11 @@ expect {
     eof     { lc_fail "EOF after the split" }
 }
 
-# The Daylight bevel (HALCYON-VISUAL section 2): the split put two leaves on
-# screen, so each pane now carries the NNW single-light-source 2px four-value
-# bevel. Sample the left (halcyond) pane's edges away from the corner -- x=1,2
-# is its left bevel, y=1,2 its top bevel -- and assert BOTH the scripture
-# values AND that they differ (four-value NNW, not the Win95 two-value
-# diagonal). Origin-anchored (x/y start at 0) so it is independent of the
-# split geometry.
-set vl [region 1 120 3 560]
-if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vl -> l_off l_tot lr lg lb]} {
-    lc_fail "bevel_left region unparseable: $vl"
-}
-if {$lr != 226 || $lg != 214 || $lb != 192} {
-    lc_fail "left-edge dominant ($lr,$lg,$lb) is not Daylight bevel_left (226,214,192) -- the pane bevel is not painting"
-}
-set vt [region 120 1 560 3]
-if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vt -> t_off t_tot tr tg tb]} {
-    lc_fail "bevel_top region unparseable: $vt"
-}
-if {$tr != 248 || $tg != 242 || $tb != 230} {
-    lc_fail "top-edge dominant ($tr,$tg,$tb) is not Daylight bevel_top (248,242,230) -- the pane bevel is not painting"
-}
-if {$lr == $tr && $lg == $tg && $lb == $tb} {
-    lc_fail "bevel_left == bevel_top -- the NNW four-value bevel collapsed to a two-value diagonal (section 2.1 broken)"
-}
-lc_pass "halcyon: Daylight NNW bevel painted (left 226,214,192 != top 248,242,230 -- four-value)"
+# The bevel after the REAL split (HALCYON-VISUAL section 2): two leaves on
+# screen, so each pane carries the NNW single-light-source 2px four-value
+# bevel. Same helper the non-Daylight run uses on its own split, so the two
+# checks cannot drift and neither carries a literal colour triple.
+bevel_want "after the split"
 
 # H-3b-3/H-3b-4: the per-leaf tag bar, painted by halcyond -- the POSITIVE
 # twin of ls-gfx-panes' E_PERM probes (the same `role=chrome` create and
@@ -932,15 +1005,10 @@ lc_pass "halcyon: Super+0 returned the console to 1.0 (cell 6x14; 213 columns ag
 
 lc_quit
 
-# Transcript greps (output-only tokens; buffer-order-immune).
+# Transcript greps (output-only tokens; buffer-order-immune). `proc tgrep` is
+# defined much earlier -- above the non-Daylight early exit -- so the Nightjar
+# run can use it too (TH-6 F6); only these Daylight-only calls live here.
 log_file
-proc tgrep {pat what} {
-    global transcript
-    if {[catch {exec grep -q -- $pat $transcript}]} {
-        lc_fail "transcript missing: $what ($pat)"
-    }
-    lc_pass "halcyon: $what"
-}
 tgrep "halcyond: beacon rich advertised" "halcyond advertised the rich tier (the surface bring-up)"
 tgrep "halcyond: console up" "halcyond brought up the transcript surface"
 tgrep "ut: beacon rich exported" "the rich canary (the F7 transport half, real advertisement)"

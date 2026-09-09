@@ -133,9 +133,39 @@ The rule, and the thing that makes a second theme actually work:
 > fixture the scripture tests pin — reachable from tests and from the
 > loader's fallback, and nowhere else.
 
-Mechanically enforced, not merely stated: a `#[cfg(not(test))]` visibility
-split, so that a production reference does not compile. That is the only
-form of this rule that cannot rot.
+Mechanically enforced, not merely stated: a `#[cfg(not(feature =
+"theme-fixture"))]` visibility split, so that a production reference does not
+compile. That is the only form of this rule that cannot rot.
+
+**Its exact boundary, measured at TH-6 (F5) — because an overstated guard is
+worse than a stated convention.** The predicate above is the *feature*, not
+`cfg(test)` (this paragraph said `#[cfg(not(test))]` until TH-6; that is a
+different predicate with different semantics, and the code never had it).
+The consequence is that the rule holds where it matters and not everywhere:
+
+- **`cargo build` enforces it.** Resolver 2 keeps a dev-only feature out of a
+  normal build, so the shipped artifact — and `tools/build.sh`'s
+  `cargo build --release` — refuses a production reference with `E0603`.
+  This is the load-bearing case and it genuinely holds.
+- **A workspace `cargo test` does not.** `usr/Cargo.toml` is a virtual
+  manifest, so a bare `cargo test` in `usr/` is `--workspace`; dev-dependencies
+  are built and their features unified across the graph, so halcyond's
+  `theme-fixture` dev-dep publicizes `DAYLIGHT` to *every* member's production
+  code for the duration of that build. A §3.2 violation therefore lands green
+  under the command a developer actually runs and red at the next bake.
+
+So the one-command check, when the question is "does this reference violate
+§3.2", is a **build**, not a test:
+
+```
+cd usr && cargo build -p <crate> --target aarch64-unknown-none
+```
+
+There is no `cfg` that closes the test-build half: a looser predicate cannot
+fix an over-permissive one, and converting the fixture's consumers to
+`builtin()` would remove the guard rather than tighten it (`builtin()` is
+public — the residue §3.2 has always had, since the split bounds the *name*,
+not the *values*).
 
 ### 3.3 The file
 

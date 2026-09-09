@@ -214,7 +214,8 @@ run still exercises every leg.
   compose and Nightjar gates -- a real witness now, but not a unit one.
 - **The dark-theme gate run stops early**, by design and stated above. Widening
   the remaining legs to be theme-aware is real work nobody has done.
-- **TH-6 (the audit) is not started.** TH-4c landed later in this run (below).
+- **TH-6 closed DIRTY** (below): 0 P0 / 1 P1 / 5 P2 / 3 P3 + 4 self, all fixed,
+  and a round 2 is owed on the fixes by the project's own (P1+P2)>=6 rule.
 
 ### The wrong turn nobody caught but the operator
 
@@ -335,6 +336,75 @@ theme must set "all 61 colours". The built schema is **57 keys** carrying 64
 colour values -- `terminal.ansi` is one key holding sixteen. The authority is
 `theme::KEYS`, which the loader counts; a number transcribed into prose can only
 go stale, so the doc now says so instead of carrying a second number.
+
+### TH-6: the round found the operator's own question, unanswered
+
+The arc exists to answer one sentence: *"if a theme is made and all colors are
+changed to form a dark theme, some hardcoded daylight color won't kick it in
+somewhere."* The audit found a hardcoded Daylight colour kicking in somewhere.
+
+`main.rs` seeded the console transcript's pen from `daylight_palette()` **twelve
+lines after** threading the resolved theme into its sheet and pushing that theme
+to the compositor. Every one of halcyond's semantic hooks is an equality test
+against the sheet -- `st.fg == sheet.ink` gates em-dim, object colouring and the
+raw dim step; `st.bg != sheet.theme.terminal.bg` decides whether a cell has a
+background -- so with the pen seeded from a *different* theme, all of them
+compare two palettes that never agree. The hooks went silently dead and every
+run became a full-height Daylight parchment box on a dark pane.
+
+**Three separate guards should have caught it and none could**, which is the
+part worth keeping:
+
+- The §3.2 visibility split bounds the *name* `DAYLIGHT`. `daylight_palette()`
+  was `pub` unconditionally and handed out `DAYLIGHT.terminal` without naming
+  it. The TH-2 addendum had predicted exactly this residue class and named only
+  `builtin()` as the hole.
+- The colour-literal census cannot see it: there is no hex here to grep for.
+  F1 was found by reading a **call site**, not by searching for constants.
+- The Nightjar pixel gate passed. Its transcript leg asserts `off >= 300`
+  non-ground pixels — and that was *satisfied by the parchment boxes
+  themselves*. A green that was not merely irrelevant but was being produced by
+  the defect.
+
+The fix is one line. The regression leg is also one line, and it was free:
+`region`'s reference colour is already Daylight's parchment, so `off` already
+counts pixels that are *not* it, and under any other theme every pixel must be
+one. Sabotaging it back — reverting the fix *and* un-gating the accessor so it
+would compile — gives **22,031 of 272,800 pixels** of Daylight parchment in a
+Nightjar transcript, deterministic across 3 attempts; with the fix,
+272,800/272,800. That reachability is not luck: Nightjar's lightest ink
+(232,224,212) is darker than parchment in every channel, so no blend can
+produce it.
+
+**A second unconstructed-state catch, and this one failed loudly.** F6 asked
+for a pixel painted by *tapestryd* on the dark run, since every existing chrome
+check sat below the early exit and hardcoded Daylight. The first placement of
+that leg sampled the pre-split screen and read pane surface. Ground truth from
+the capture: columns 0–8 all surface, rows 0–24 all tag-bar header — a single
+full-bleed pane has no floor gap and therefore no bevel, which the scenario's
+own `no_strip_at_left` control already states two hundred lines further down.
+Unlike the ls-ci leg earlier in this run, this one *failed* rather than passing
+hollowly, because it asserts a thing is present. That is the safe direction, and
+it is worth designing for.
+
+**The correction I made to the prosecutor's own suggestion.** F5 reported that
+the visibility split leaks under a workspace `cargo test` (dev-dependency
+feature unification turns the fixture on for every member) and suggested gating
+on `cfg(any(test, feature = "theme-fixture"))`. That is *strictly more
+permissive* — a looser predicate cannot close an over-permissive one. Nor can
+the consumers be converted to `builtin()`: that deletes the guard rather than
+tightening it, since `builtin()` is public and always was. There is no `cfg`
+that fixes this, so it was fixed as a **claim**: the doc's predicate corrected
+(it named `cfg(not(test))`, which the code never had), the exact boundary
+written down in both doc and code, and the one command that does enforce it
+named. An overstated guard is worse than an honest convention.
+
+The close is **dirty** by the project's own rule — P1 + P2 = 6 — so a round 2 is
+owed, scoped to the fixes: F1's touches the console renderer's content path,
+F3's a shared transport used by two verbs, and F2's replaces the guard behind
+the arc's central claim. And the round itself was an Opus fallback: it was
+spawned on Fable and died of credit exhaustion before emitting a line, so a
+Fable-diversity pass on this surface is still owed.
 
 ---
 

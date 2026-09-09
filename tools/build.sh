@@ -3691,24 +3691,38 @@ populate_stratum_pool() {
         "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/themes/nightjar.toml | cmp -s - "$nightjar_src" \
             || { echo "==> populate pool: nightjar.toml readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: /lib/halcyon/themes/nightjar.toml baked + readback-verified (HALCYON-THEME TH-5)"
-        # TH-5b: put a gallery theme IN FORCE. `THYLACINE_HALCYON_THEME=<name>`
-        # copies `/lib/halcyon/themes/<name>.toml` to `/lib/halcyon/theme.toml`,
-        # which is what both renderers and tapestryd actually read. A lever
-        # rather than a default because the default installation has NO theme
-        # file (4.1) -- and without it nothing in a guest has ever loaded a
-        # theme from disk, so the whole load path would ship unwitnessed.
-        if [[ -n "${THYLACINE_HALCYON_THEME:-}" ]]; then
-            local want_theme="$REPO_ROOT/usr/lib/halcyon/themes/${THYLACINE_HALCYON_THEME}.toml"
-            [[ -f "$want_theme" ]] \
-                || { echo "==> populate pool: no such theme ${THYLACINE_HALCYON_THEME}" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-            "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/theme.toml < "$want_theme" \
-                || { echo "==> populate pool: write theme.toml FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-            "$stratum_fs_bin" -s "$sock_path" sync \
-                || { echo "==> populate pool: sync (theme.toml) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-            "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/theme.toml | cmp -s - "$want_theme" \
-                || { echo "==> populate pool: theme.toml readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-            echo "==> populate pool: HALCYON theme lever ENABLED (/lib/halcyon/theme.toml = ${THYLACINE_HALCYON_THEME})"
-        fi
+    fi
+
+    # TH-5b: put a gallery theme IN FORCE. `THYLACINE_HALCYON_THEME=<name>`
+    # copies `/lib/halcyon/themes/<name>.toml` to `/lib/halcyon/theme.toml`,
+    # which is what both renderers and tapestryd actually read. A lever rather
+    # than a default because the default installation has NO theme file (4.1)
+    # -- and without it nothing in a guest has ever loaded a theme from disk,
+    # so the whole load path would ship unwitnessed.
+    #
+    # DELIBERATELY OUTSIDE the nightjar `-f` guard above (TH-6 F9). It used to
+    # be nested inside it, which meant that if that ONE file went missing the
+    # lever became a silent no-op for EVERY theme name -- its own hard-fail on
+    # a missing theme unreachable, nothing written, nothing said. A lever that
+    # can be disabled by the absence of an unrelated file is not a lever.
+    if [[ -n "${THYLACINE_HALCYON_THEME:-}" ]]; then
+        # Constrain the name to a single gallery component before it is pasted
+        # into a path: every use is quoted, so this was not injectable, but
+        # `../../etc/foo` resolved outside the gallery and "contained by the
+        # forced .toml suffix" is a coincidence, not a bound.
+        [[ "${THYLACINE_HALCYON_THEME}" =~ ^[A-Za-z0-9_-]+$ ]] \
+            || { echo "==> populate pool: THYLACINE_HALCYON_THEME must be [A-Za-z0-9_-]+ (got '${THYLACINE_HALCYON_THEME}')" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        local want_theme="$REPO_ROOT/usr/lib/halcyon/themes/${THYLACINE_HALCYON_THEME}.toml"
+        [[ -f "$want_theme" ]] \
+            || { echo "==> populate pool: no such theme ${THYLACINE_HALCYON_THEME}" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon >/dev/null 2>&1 || true
+        "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/theme.toml < "$want_theme" \
+            || { echo "==> populate pool: write theme.toml FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (theme.toml) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/theme.toml | cmp -s - "$want_theme" \
+            || { echo "==> populate pool: theme.toml readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: HALCYON theme lever ENABLED (/lib/halcyon/theme.toml = ${THYLACINE_HALCYON_THEME})"
     fi
 
     # KT-1.5d-1a (HALCYON 14.12): the per-user session lever. Under

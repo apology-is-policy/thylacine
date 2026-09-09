@@ -436,7 +436,17 @@ pub extern "C" fn rs_main() -> i64 {
             gs.evict_pages()
         );
     }
-    let mut t = Transcript::new(libhalcyon::theme::daylight_palette());
+    // The pen's default fg/bg MUST be the RESOLVED theme's, never a constant.
+    // halcyond's semantic hooks are equality tests against the sheet --
+    // `st.fg == sheet.ink` gates em-dim, object colouring and the raw dim
+    // step, and `st.bg != sheet.theme.terminal.bg` decides "this cell has a
+    // background". Seeded from a different theme's palette, every one of those
+    // comparisons is false under any non-Daylight theme: the hooks go silently
+    // dead and the foreign ground paints through as a literal colour. This
+    // line said `daylight_palette()` until the TH-6 round, twelve lines after
+    // the resolved theme was threaded into the sheet and pushed to the
+    // compositor.
+    let mut t = Transcript::new(theme.terminal);
     let mut cache = LayoutCache::new();
 
     // The winsize report: the transcript is flowed, but programs wrap to a
