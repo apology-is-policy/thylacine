@@ -48,6 +48,7 @@ mirrors:
   - "tools/interactive/im1-sak-lever.exp"
   - "tools/interactive/im3-lex-curiata.exp"
   - "tools/interactive/ls-imperium.exp"
+  - "tools/interactive/ls-bghome-stall.exp"
 literals:
   - "Thylacine boot OK"
   - "EXTINCTION:"
@@ -58,7 +59,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-07
+updated: 2026-09-09
 ---
 ## The surface
 
@@ -101,13 +102,14 @@ fault-injection variant reports the protection did not fire.
 It is the whole agentic loop's success signal, and the mirror set above is
 what that means concretely. Since the 2026-09 resync grew the set to
 **twenty-eight** (it added thirteen consumer gates — see "The resync grew the
-set to twenty-eight" below): **twenty-seven mirrors match one or both of
-`Thylacine boot OK` / `EXTINCTION:`** — one of those twenty-seven,
-`real-pass-harness.log`, is a captured-log fixture, data not a program — plus
-`stall-watch.py` on `kernel base:`. Two more mention the literals in comments
-only (`tools/warp-host.sh`, `tools/interactive/go8d.exp`) — they become wrong
-rather than broken, so they are not mirrors. 28 mirrors + 2 mentions = the 30
-files under `tools/` that carry a literal.
+set to twenty-eight" below), and arm-6 then added `ls-bghome-stall.exp` (the
+logout-stall regression) to make **twenty-nine**: **twenty-eight mirrors match
+one or both of `Thylacine boot OK` / `EXTINCTION:`** — one of those
+twenty-eight, `real-pass-harness.log`, is a captured-log fixture, data not a
+program — plus `stall-watch.py` on `kernel base:`. Two more mention the literals
+in comments only (`tools/warp-host.sh`, `tools/interactive/go8d.exp`) — they
+become wrong rather than broken, so they are not mirrors. 29 mirrors + 2
+mentions = the 31 files under `tools/` that carry a literal.
 
 **Reading the counts below.** The dated measurements further down (the 2026-08-18
 main#245 census, the delivery classification) describe the **fifteen-member set

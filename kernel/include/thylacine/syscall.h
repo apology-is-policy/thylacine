@@ -2453,11 +2453,27 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // needing this bit. That is deliberate: it is what carries a raise down through
 // pouch programs (make, clang) that cannot set a budget themselves.
 #define SPAWN_PERM_MAY_RAISE_PAGE_BUDGET (1u << 4)
+// SPAWN_PERM_SESSION_HANGUP (arm-6, IDENTITY-DESIGN §9.9.1): make the child a
+// NEW session leader (proc_setsid in the spawn thunk -- the leader-guard passes
+// post-rfork since the child still carries the parent's pgid) AND arm
+// PROC_FLAG_SESSION_HANGUP on it, so when that leader exits the kernel
+// terminates the remaining members of its session (the legate-teardown pattern
+// applied to the login session -- proc_become_zombie_locked). This is what
+// finally implements A-5 decision (3)'s "no orphaned session Proc": logout
+// terminates the user's session so its per-user encrypted-home mount is fully
+// released. Gated like MAY_POST_SERVICE (a console-attached granter OR a holder
+// of the one-hop bit) -- the login-session-management authority login already
+// holds for CONSOLE_OWNER; the terminate is same-session-only (a Proc could
+// already kill its own descendants), so it confers no cross-authority reach.
+// NOT a cap (rfork does not propagate proc_flags), so only the marked leader
+// carries the flag.
+#define SPAWN_PERM_SESSION_HANGUP    (1u << 5)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
                                       SPAWN_PERM_CONSOLE_RENDERER | \
-                                      SPAWN_PERM_MAY_RAISE_PAGE_BUDGET)
+                                      SPAWN_PERM_MAY_RAISE_PAGE_BUDGET | \
+                                      SPAWN_PERM_SESSION_HANGUP)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id

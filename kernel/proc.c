@@ -2409,6 +2409,24 @@ void proc_mark_may_post_service(struct Proc *p) {
     __atomic_or_fetch(&p->proc_flags, PROC_FLAG_MAY_POST_SERVICE, __ATOMIC_RELAXED);
 }
 
+// arm-6 (IDENTITY-DESIGN §9.9.1): stamp PROC_FLAG_SESSION_HANGUP -- the mark
+// that makes a session leader's death hang up (terminate) the rest of its
+// session (the login-session reclamation). Set in the spawn thunk right after
+// proc_setsid made the child a session leader. Same one-way / atomic-RMW /
+// refuse-non-ALIVE discipline as proc_mark_may_post_service (the flag word is
+// multi-writer via the SAK's console-attach RMW, so the OR must be atomic);
+// never cleared, never propagated by rfork. The death hook additionally gates on
+// p->sid == p->pid, so a stray flag on a non-leader (a setsid that somehow
+// failed) is inert.
+void proc_arm_session_hangup(struct Proc *p) {
+    if (!p)                    extinction("proc_arm_session_hangup(NULL)");
+    if (p->magic != PROC_MAGIC)
+        extinction("proc_arm_session_hangup on corrupted Proc");
+    if (p->state != PROC_STATE_ALIVE)
+        extinction("proc_arm_session_hangup on non-ALIVE Proc");
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_SESSION_HANGUP, __ATOMIC_RELAXED);
+}
+
 // CL-5: resolve a spawn's requested page_budget against the parent's authority.
 // ONE function so both spawn entry points share the decision -- the
 // spawn_perm_grant_check discipline (grant authority lives in exactly one
@@ -2830,6 +2848,44 @@ void proc_legate_teardown_if_root(struct Proc *p) {
     proc_for_each_walk(g_kproc, legate_teardown_cb, &tctx);
 }
 
+// arm-6 (IDENTITY-DESIGN §9.9.1): the session-leader-exit HANGUP -- the exact
+// structural sibling of proc_legate_teardown_if_root. If `p` leads its own
+// session (sid == pid) armed with PROC_FLAG_SESSION_HANGUP (set from
+// SPAWN_PERM_SESSION_HANGUP on the login shell), group-terminate every OTHER
+// ALIVE Proc sharing its sid. This is a kernel-driven session-LIFECYCLE
+// termination (like the legate teardown / orphan rule / #811 cascade), NOT a
+// userspace cross-Proc kill -- so it is NOT I-26-gated (login lacks CAP_KILL by
+// design; the kernel does the hangup). It implements A-5 decision (3)'s "no
+// orphaned session Proc": logout reclaims the user's session so its per-user
+// encrypted-home mount is fully released (with Part D, each member releases its
+// mount ref at its own exit). `except = p`: the leader dies via the surrounding
+// zombie transition. A non-armed Proc, or an armed non-leader (a setsid that
+// somehow did not take), is a no-op. PRECONDITION: caller holds
+// g_proc_table_lock (the LOCKED proc_for_each_walk; proc_group_terminate is a
+// held-lock callee, exactly as legate_teardown_cb calls it).
+struct session_hangup_ctx {
+    u32          sid;
+    struct Proc *except;
+};
+
+static int session_hangup_cb(struct Proc *m, void *arg) {
+    struct session_hangup_ctx *ctx = arg;
+    if (m == ctx->except)  return 0;
+    if (m == g_kproc)      return 0;
+    if (m->state == PROC_STATE_ALIVE && (u32)m->sid == ctx->sid)
+        proc_group_terminate(m, "session leader exit");
+    return 0;   // visit every Proc
+}
+
+void proc_session_hangup_if_leader(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (!(__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SESSION_HANGUP))
+        return;
+    if ((u32)p->sid != (u32)p->pid) return;   // armed but not a leader -> inert (defensive)
+    struct session_hangup_ctx sctx = { .sid = (u32)p->sid, .except = p };
+    proc_for_each_walk(g_kproc, session_hangup_cb, &sctx);
+}
+
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module
 // acquire/release for g_proc_table_lock. thread.c's thread_link_into_proc
 // / thread_unlink_from_proc need to serialize with proc_count_live_peers_-
@@ -2894,6 +2950,13 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     // path -- a clean exit AND a kill / group-terminate (the path A-4b's CAP_KILL
     // drives, and the multi-thread-root SYS_EXIT_GROUP path). A-4a audit F1.
     proc_legate_teardown_if_root(p);
+
+    // arm-6 (I-24/IDENTITY-DESIGN §9.9.1): if p is a hangup-armed session
+    // leader, terminate the rest of its session -- the legate-teardown sibling
+    // at the same chokepoint, so logout reclaims the user's session (no
+    // orphaned Proc keeps the per-user encrypted home mounted). Same held-lock
+    // contract as the legate teardown above.
+    proc_session_hangup_if_leader(p);
 
     // A-4c-1: if p is the kernel console owner, clear the owner pointer so it
     // never dangles to a zombie/freed Proc. Same chokepoint discipline as the

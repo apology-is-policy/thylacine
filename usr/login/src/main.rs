@@ -45,6 +45,7 @@ use libthyla_rs::{
     t_readdir, t_set_dumpable, t_set_traceable, t_torpor_wait, t_unmount, t_walk_create,
     t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES, T_MREPL, T_OPATH, T_ORDWR,
     T_OREAD, T_OWRITE, T_POLLIN, T_SPAWN_PERM_CONSOLE_OWNER, T_SPAWN_PERM_MAY_POST_SERVICE,
+    T_SPAWN_PERM_SESSION_HANGUP,
     T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -1320,7 +1321,12 @@ pub extern "C" fn rs_main() -> i64 {
     shell_cmd
         .identity(pid, gid, &supp)
         .caps(SHELL_CAPS)
-        .perm(T_SPAWN_PERM_CONSOLE_OWNER)
+        // CONSOLE_OWNER: the shell receives Ctrl-C (LS-5). SESSION_HANGUP
+        // (arm-6): the shell is the login session leader -- on its exit (logout)
+        // the kernel terminates the rest of its session, so no orphaned job
+        // keeps the per-user encrypted home mounted and login's home-proxy
+        // teardown does not deadlock (IDENTITY-DESIGN §9.9.1).
+        .perm(T_SPAWN_PERM_CONSOLE_OWNER | T_SPAWN_PERM_SESSION_HANGUP)
         .stdin(Stdio::Inherit)
         .stdout(Stdio::Inherit)
         .stderr(Stdio::Inherit);
@@ -1359,6 +1365,12 @@ pub extern "C" fn rs_main() -> i64 {
         hal.arg("--session")
             .identity(pid, gid, &supp)
             .caps(SHELL_CAPS)
+            // SESSION_HANGUP (arm-6): halcyond is the graphical login session
+            // leader ("its exit IS logout"), so it takes the same session
+            // reclamation as the ut path -- on its exit the kernel terminates
+            // the rest of the session, closing the same home-proxy deadlock in
+            // the graphical path (IDENTITY-DESIGN §9.9.1).
+            .perm(T_SPAWN_PERM_SESSION_HANGUP)
             .stdin(Stdio::Inherit)
             .stdout(Stdio::Inherit)
             .stderr(Stdio::Inherit);

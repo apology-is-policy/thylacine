@@ -1070,6 +1070,23 @@ _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) =
                "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
                "relocate PROC_FLAG_PIPE_TERMINATE_PENDING above the field then");
 
+// PROC_FLAG_SESSION_HANGUP (arm-6, IDENTITY-DESIGN §9.9.1) -- kernel-stamped
+// from SPAWN_PERM_SESSION_HANGUP in the spawn thunk (paired with a proc_setsid
+// that makes the child a session leader). When a Proc carrying this flag AND
+// leading its own session (p->sid == p->pid) becomes a zombie,
+// proc_become_zombie_locked terminates the remaining ALIVE members of its
+// session -- the legate-teardown pattern applied to the login session, so
+// logout reclaims the user's session (A-5 decision (3)). Set-once, never
+// cleared, NOT propagated by rfork (proc_flags is not copied), so only the
+// armed leader carries it. Bit 19: above the caught-note sub-field (11..17) and
+// the pipe latch (18); the static_assert makes a future field-widening a
+// compile-time relocation rather than a silent alias.
+#define PROC_FLAG_SESSION_HANGUP    (1u << 19)
+_Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
+               "arm-6: the session-hangup flag must not overlap the caught-note "
+               "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
+               "relocate PROC_FLAG_SESSION_HANGUP above the field then");
+
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
 // lock-free wake gate -- which suppress/observe EVERY terminate family at once.
@@ -2305,6 +2322,13 @@ int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
 // no-op. PRECONDITION: caller holds g_proc_table_lock (uses the LOCKED walk).
 void proc_legate_teardown_if_root(struct Proc *p);
 
+// arm-6 (IDENTITY-DESIGN §9.9.1) -- if `p` leads its own session (sid == pid)
+// armed with PROC_FLAG_SESSION_HANGUP, group-terminate every OTHER ALIVE Proc
+// sharing its sid. The session-lifecycle sibling of the legate teardown above
+// (same chokepoint, same held-lock contract, NOT I-26-gated). A non-armed Proc
+// or an armed non-leader is a no-op. PRECONDITION: caller holds g_proc_table_lock.
+void proc_session_hangup_if_leader(struct Proc *p);
+
 // =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.
 // =============================================================================
@@ -2331,6 +2355,13 @@ bool proc_may_post_service(const struct Proc *p);
 // PROC_PAGE_HARD_MAX). LOWERING never needs this. Fail-closed on NULL/corrupt.
 void proc_mark_may_raise_page_budget(struct Proc *p);
 bool proc_may_raise_page_budget(const struct Proc *p);
+
+// arm-6 (IDENTITY-DESIGN §9.9.1): stamp PROC_FLAG_SESSION_HANGUP, from
+// SPAWN_PERM_SESSION_HANGUP in the spawn thunk (after proc_setsid makes the
+// child a session leader). One-way, idempotent, never propagated by rfork.
+// Fail-loud on NULL/corrupt/non-ALIVE (a trust-conferring stamp on a live
+// child, like proc_mark_may_post_service).
+void proc_arm_session_hangup(struct Proc *p);
 
 // proc_spawn_budget_resolve -- the single authority decision for a spawn's
 // requested page_budget. `req` is the caller's ABI field: 0 means "inherit"

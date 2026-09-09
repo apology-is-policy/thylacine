@@ -608,6 +608,13 @@ pub const T_SPAWN_PERM_CONSOLE_TRUSTED: u64 = 1 << 1;
 // console-attach, I-27); gated like MAY_POST_SERVICE, so trusted /sbin/login
 // confers it on the session shell `ut`.
 pub const T_SPAWN_PERM_CONSOLE_OWNER: u64 = 1 << 2;
+// arm-6 (IDENTITY-DESIGN §9.9.1): make the child a NEW session leader + arm the
+// kernel session hangup, so when that leader exits the kernel terminates the
+// rest of its session -- how /sbin/login reclaims the user's session (and its
+// per-user encrypted home) at logout. Gated like MAY_POST_SERVICE (login holds
+// it). Bit 5 matches SPAWN_PERM_SESSION_HANGUP (bits 3/4 -- RENDERER, RAISE --
+// are unused by native callers, so they are not mirrored here).
+pub const T_SPAWN_PERM_SESSION_HANGUP: u64 = 1 << 5;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
 // Linux values; the future musl shim is a no-op.

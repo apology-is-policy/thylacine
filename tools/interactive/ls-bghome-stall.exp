@@ -1,0 +1,36 @@
+#!/usr/bin/expect -f
+# arm-6 stall DISCRIMINATOR (scratchpad hunt tool; PROVED the bug is GENERAL, not
+# imperium-specific -- a plain orphaned bg job pins the home mount -> login's
+# proxy.wait() at unbind_home hangs). Copy to tools/interactive/ to run via
+# test-interactive.sh. RESULT 2026-09-08 (mac HVF): STALL reproduced.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_run_expect "pwd" "/home/michael"
+
+lc_send "sleep 314159 &"
+set timeout 15
+expect {
+    -re {\[\d+\]\s+(\d+)} { }
+    -re {EXTINCTION:}      { lc_fail "kernel extinction launching bg sleep" }
+    timeout               { lc_fail "no `\[N\] pid` line for the background sleep" }
+    eof                   { lc_fail "unexpected EOF launching bg sleep" }
+}
+
+lc_send "exit"
+set timeout 90
+expect {
+    -ex "Thylacine login: " {
+        lc_pass "logout->login COMPLETED -- a plain bg job did NOT pin the home (stall is imperium/zombie-specific)"
+        exit 0
+    }
+    -re {EXTINCTION:} { lc_fail "kernel extinction after exit" }
+    timeout {
+        lc_fail "STALL: no login prompt within 90s -- a plain orphaned bg job pins the home mount (GENERAL bug)"
+    }
+    eof { lc_fail "qemu exited after exit" }
+}
+exit 0

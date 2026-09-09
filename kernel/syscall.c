@@ -8453,6 +8453,15 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if ((perm_flags & SPAWN_PERM_MAY_RAISE_PAGE_BUDGET)
             && !proc_is_console_attached(p)
             && !proc_may_raise_page_budget(p))                     return -1;
+    // arm-6: SESSION_HANGUP takes the MAY_POST_SERVICE one-hop shape (a
+    // console-attached granter OR a holder of the post-service bit) -- login's
+    // session-management authority, the same gate CONSOLE_OWNER uses. The
+    // hangup terminates only same-session members (a Proc's own descendants),
+    // so it confers no cross-authority reach; the gate just scopes WHO may set
+    // up a self-reclaiming session to the login-shaped callers that need it.
+    if ((perm_flags & SPAWN_PERM_SESSION_HANGUP)
+            && !proc_is_console_attached(p)
+            && !proc_may_post_service(p))                          return -1;
     return 0;
 }
 
@@ -8487,6 +8496,16 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
     }
     if (perm_flags & SPAWN_PERM_MAY_RAISE_PAGE_BUDGET) {
         proc_mark_may_raise_page_budget(p);   // CL-5: the raise authority
+    }
+    if (perm_flags & SPAWN_PERM_SESSION_HANGUP) {
+        // arm-6 (IDENTITY-DESIGN §9.9.1): become a NEW session leader, then arm
+        // the hangup. proc_setsid's leader-guard passes here -- post-rfork the
+        // child still carries the parent's pgid (!= its own pid), so it is not
+        // yet a group leader. Arm the flag only when setsid actually made us the
+        // leader; the death hook re-checks sid == pid, so a failed setsid leaves
+        // the flag inert rather than hanging up the parent's session.
+        if (proc_setsid(p) > 0)
+            proc_arm_session_hangup(p);
     }
     if (perm_flags & ~SPAWN_PERM_ALL) {
         extinction("apply_spawn_perms: unknown SPAWN_PERM_* bit");

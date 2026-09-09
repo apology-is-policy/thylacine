@@ -287,6 +287,13 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // (console-attach-only, like CONSOLE_TRUSTED) + single-holder (refused while
 // a live renderer holds the role). joey grants it to /bin/aurora.
 #define T_SPAWN_PERM_CONSOLE_RENDERER  (1u << 3)
+// T_SPAWN_PERM_SESSION_HANGUP (arm-6, IDENTITY-DESIGN §9.9.1): make the child a
+// NEW session leader + arm the kernel session hangup (on the leader's exit the
+// kernel terminates the rest of its session). Gated like MAY_POST_SERVICE. Bit
+// 5 matches SPAWN_PERM_SESSION_HANGUP; bit 4 (MAY_RAISE_PAGE_BUDGET) has no C
+// consumer and is not mirrored here. No native C caller uses this today (login
+// is Rust); mirrored for ABI lockstep.
+#define T_SPAWN_PERM_SESSION_HANGUP    (1u << 5)
 
 // VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
 // SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM
