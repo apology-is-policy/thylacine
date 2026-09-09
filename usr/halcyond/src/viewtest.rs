@@ -35,17 +35,15 @@ fn argb(r: u8, g: u8, b: u8) -> u32 {
     0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
-/// The witness raster (`w`, `h`, ARGB `w`-tight): a bordered card whose NATIVE
-/// height exceeds the layout height cap, so a wide/tall pane both LETTERBOXES
-/// (side bars) and RESAMPLES (downscale) it -- exercising both halves the host
-/// test cannot see on the real GPU. Three bands make the transform legible:
-/// primary color bars (a clean palette), a luminance gradient (smooth under
-/// resample), and diagonal thylacine stripes (fine detail under resample). A
-/// 3px border makes the letterbox centring unmistakable.
+/// The witness raster (`w`, `h`, ARGB `w`-tight): a bordered card sized to sit
+/// comfortably inside a typical console pane at NATIVE size (width-fit shows it
+/// exact when it fits), centred with letterbox side bars. Three bands make the
+/// blit legible on the real scanout: primary color bars (a clean palette), a
+/// luminance gradient (smooth tone), and diagonal thylacine stripes (fine
+/// detail). A 3px border makes the letterbox centring unmistakable. (The
+/// resampler is exercised by the host layout test at a narrow width; a real
+/// boot proves the native-size blit + present.)
 pub fn raster() -> (u32, u32, Vec<u32>) {
-    // Native height > the layout's IMAGE_MAX_H (320), so a default-scale boot
-    // downscales (proving the resampler on the real scanout, not just a native
-    // blit); width < any console content width, so it letterboxes with bars.
     const W: u32 = 720;
     const H: u32 = 480;
     let (wi, hi) = (W as usize, H as usize);
@@ -112,8 +110,5 @@ mod tests {
         let border = argb(0x1A, 0x16, 0x12);
         assert_eq!(px[0], border, "top-left border");
         assert_eq!(px[(w as usize) - 1], border, "top-right border");
-        // Native height exceeds the layout height cap, so a default-scale boot
-        // downscales (the resample witness) rather than blitting native.
-        assert!(h > 320, "native height must exceed IMAGE_MAX_H to force a resample");
     }
 }

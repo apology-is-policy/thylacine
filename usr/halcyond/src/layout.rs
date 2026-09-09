@@ -194,8 +194,6 @@ const PRE_LINE_H: i32 = 16;
 const HDR_TOP: [i32; 3] = [10, 8, 6];
 const HDR_BOTTOM: i32 = 2;
 const PROSE_MARGIN: i32 = 2;
-/// Max inline-image height (I-47), pre-ipx; a taller image is contain-fit to it.
-const IMAGE_MAX_H: i32 = 320;
 const RULE_MARGIN: i32 = 8;
 const TABLE_TOP: i32 = 4;
 const TABLE_BOTTOM: i32 = 6;
@@ -947,6 +945,9 @@ fn roles_of(b: &Block) -> Vec<Role> {
 /// Contain-fit `(nw, nh)` into `(aw, ah)` preserving aspect, never upscaling
 /// past native (I-47 inline media). Returns the letterboxed `(w, h)`; a
 /// narrower result is centred by the caller (the side bars are the letterbox).
+/// The inline path passes `ah = i32::MAX` for WIDTH-FIT (no height cap -- the
+/// transcript scrolls); a bounded `ah` (the future gallery/fullscreen path)
+/// caps both dimensions.
 fn letterbox(nw: i32, nh: i32, aw: i32, ah: i32) -> (i32, i32) {
     if nw <= 0 || nh <= 0 || aw <= 0 || ah <= 0 {
         return (0, 0);
@@ -1103,13 +1104,15 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                 close_island(&mut lb, top);
             }
             Item::Image { w, h, argb } => {
-                // I-47 inline media: contain-fit the source into the content
-                // width (capped at IMAGE_MAX_H), resample to that rect, centre
-                // it, and reserve the flow height. render_block blits the
-                // LaidImage via Op::Image. Reflow is free: a width change
-                // re-lays here and rescales the source.
+                // I-47 inline media: WIDTH-FIT (the operator's ruling
+                // 2026-09-09) -- exact native size when the image fits the
+                // content width, scale DOWN proportionally only when wider.
+                // No height cap: the transcript scrolls, so the content width
+                // is the only fit constraint (a tall image keeps native
+                // height). render_block blits the LaidImage via Op::Image;
+                // reflow is free -- a width change re-lays + rescales.
                 let avail = (lb.width - 2 * sheet.pad_x).max(1);
-                let (dw, dh) = letterbox(*w as i32, *h as i32, avail, sheet.ipx(IMAGE_MAX_H));
+                let (dw, dh) = letterbox(*w as i32, *h as i32, avail, i32::MAX);
                 if dw > 0 && dh > 0 && !argb.is_empty() {
                     let blob =
                         Blob { w: *w, h: *h, argb: argb.clone() }.scaled(dw as u32, dh as u32);
@@ -1813,6 +1816,29 @@ mod tests {
         assert!(
             laid_n.images[0].blob.w < nw && laid_n.images[0].blob.w > 0,
             "a narrower pane scaled the image down (reflow)"
+        );
+
+        // Width-fit, no height cap (the operator's ruling 2026-09-09): a TALL
+        // image that fits the content width keeps its native height -- the
+        // transcript scrolls. Under the old IMAGE_MAX_H=320 this was capped.
+        let tall_argb: Vec<u32> = alloc::vec![0xFF44_5566u32; 100 * 500];
+        let tall = Block {
+            id: 8,
+            kind: BlockKind::Output,
+            continuation: false,
+            exit: None,
+            cmd: None,
+            items: alloc::vec![Item::Image { w: 100, h: 500, argb: tall_argb }],
+            styles: Vec::new(),
+            objs: Vec::new(),
+            cost: 0,
+            annotated_own: true,
+        };
+        let laid_t = layout_block(&tall, 600, &sheet, &mut g);
+        assert_eq!(
+            (laid_t.images[0].blob.w, laid_t.images[0].blob.h),
+            (100, 500),
+            "a tall image that fits the width keeps native height (no height cap)"
         );
     }
 
