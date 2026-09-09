@@ -4054,13 +4054,13 @@ impl Comp {
     /// and no geometry moved to trigger a redraw on its own (the scale
     /// round's F3 lesson: a fan keyed on geometry misses every change that
     /// moves no geometry).
-    fn apply_theme(&mut self, t: libhalcyon::theme::Theme) {
+    fn apply_theme(&mut self, t: libhalcyon::theme::Theme, who: &str) {
         if t == self.theme {
             return; // idempotent: a re-push of the same theme fans nothing
         }
         self.theme = t;
         self.metrics = self.theme.metrics.at(self.scale);
-        say!("tapestryd: theme applied (session push)");
+        say!("tapestryd: theme applied ({} push)", who);
         self.rescale_fan_due = true;
         if let Some(st) = self.status {
             let stale = self
@@ -16224,7 +16224,12 @@ impl Conn {
             let Some(t) = libhalcyon::theme::from_wire(rest) else {
                 return Err(p9::E_INVAL);
             };
-            comp.apply_theme(t);
+            let who = if self.peer_is_renderer() {
+                "renderer"
+            } else {
+                "session"
+            };
+            comp.apply_theme(t, who);
             return Ok(());
         }
         if let Some(rest) = s.strip_prefix("scale ") {

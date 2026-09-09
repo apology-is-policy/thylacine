@@ -403,6 +403,27 @@ pub extern "C" fn rs_main() -> i64 {
         resolved.source
     );
     let theme = resolved.theme;
+    // The compositor cannot read this file. Measured 2026-09-09 on the
+    // Nocturne lever: `tapestryd: theme built-in (no /lib/halcyon/theme.toml)`
+    // while THIS process, started later, loaded the very same path -- because
+    // tapestryd comes up before the pool it lives in is mounted. So the
+    // chrome kept Daylight's bevel and floor around a Nocturne pane, and
+    // nothing failed, which is how it would have shipped.
+    //
+    // The renderer is admitted to the `theme` verb unconditionally
+    // (`peer_is_renderer`), so it pushes too -- the session's push is for the
+    // USER tier, this one is for the system tier the compositor could not
+    // reach in time.
+    match ring.global_ctl(&alloc::format!(
+        "theme {}",
+        libhalcyon::theme::to_wire(&theme)
+    )) {
+        Ok(()) => say!("halcyond: theme pushed to the compositor"),
+        Err(e) => say!(
+            "halcyond: theme push refused ({:?}) -- the chrome keeps its own",
+            e
+        ),
+    }
     let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     {

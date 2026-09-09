@@ -154,9 +154,29 @@ set v [region 200 450 1080 760]
 if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off total dr dg db]} {
     lc_fail "gfx_region verdict unparseable: $v"
 }
+# TH-5b: which theme the image was BAKED with is the HARNESS's fact, not the
+# guest's -- keying the expectation on a line the guest emits would let a guest
+# that loaded nothing pass by saying so. `LS_THEME` comes from the same place
+# `THYLACINE_HALCYON_THEME` did, and the guest must AGREE with it.
+set ls_theme "daylight"
+if {[info exists ::env(LS_THEME)] && $::env(LS_THEME) ne ""} {
+    set ls_theme $::env(LS_THEME)
+}
+# The grounds ARE the proof. Nothing but a theme file read off the disk,
+# parsed, resolved and painted can put Nocturne's #1A1614 or #2A2422 on this
+# screen -- there is no other source of those values in the tree -- so the
+# pixel check IS the end-to-end witness of the load path, not a proxy for it.
+switch -- $ls_theme {
+    daylight { set grounds {242,235,224 206,196,182} }
+    nocturne { set grounds {26,22,20 42,36,34} }
+    default  { lc_fail "ls-halcyon: unknown LS_THEME '$ls_theme'" }
+}
 set dom "$dr,$dg,$db"
-if {$dom ne "242,235,224" && $dom ne "206,196,182"} {
-    lc_fail "dominant color ($dom) is neither Daylight ground (surface 242,235,224 nor island header 206,196,182) -- halcyond is not painting"
+if {[lsearch -exact $grounds $dom] < 0} {
+    lc_fail "dominant color ($dom) is not a $ls_theme ground (expected one of: $grounds) -- halcyond is not painting that theme"
+}
+if {$ls_theme ne "daylight"} {
+    lc_pass "halcyon: $ls_theme loaded from /lib/halcyon/theme.toml and PAINTED (ground $dom)"
 }
 if {$off < 300} {
     lc_fail "only $off/$total non-ground pixels -- no ink on the transcript"
@@ -224,8 +244,18 @@ if {$leaf_h != $disph - 20} {
 }
 lc_pass "halcyon: the carve shrank the layout -- the console leaf is $leaf_h of the ${disph}px display (strip 20)"
 set smid [expr {$sy + 10}]
-strip_want 1 [expr {$sy + 2}] 6 [expr {$sy + 18}] 26 18 10 "status bar left end (status_bg)" 0
-strip_want [expr {$dispw - 6}] [expr {$sy + 2}] [expr {$dispw - 1}] [expr {$sy + 18}] 26 18 10 "status bar right end (status_bg)" 0
+# The bar's own ground is a THEME token, not a constant -- the same lesson the
+# transcript ground taught above, found the same way: the Nocturne run failed
+# here reading 42,36,34 where this wanted Daylight's 26,18,10, which is the
+# gate correctly noticing that halcyond had followed the theme and it had not.
+# The ember below is deliberately NOT parameterised: HALCYON-VISUAL 1.3 shares
+# it verbatim between themes, so a run where it MOVED is a real failure.
+switch -- $ls_theme {
+    daylight { set sbg {26 18 10} ; set cinn {152 40 24} }
+    nocturne { set sbg {42 36 34} ; set cinn {208 64 56} }
+}
+strip_want 1 [expr {$sy + 2}] 6 [expr {$sy + 18}] {*}$sbg "status bar left end (status_bg)" 0
+strip_want [expr {$dispw - 6}] [expr {$sy + 2}] [expr {$dispw - 1}] [expr {$sy + 18}] {*}$sbg "status bar right end (status_bg)" 0
 strip_want 9 [expr {$sy + 5}] 13 [expr {$sy + 15}] 224 120 64 "the active workspace indicator (ember)" 0
 lc_pass "halcyon: the status bar is dark at both ends with the ember workspace indicator at the left"
 # A failing command -> the live tile AND the bar's condition go cinnabar
@@ -258,7 +288,11 @@ proc ink_of {x0 y0 x1 y1 r g b} {
     file delete -force $out
     if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return -1 }
     if {![file exists $out]} { return -1 }
-    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py --ink $out $x0 $y0 $x1 $y1 26 18 10 $r $g $b} n]} { return -1 }
+    # The blend runs FROM the bar's own ground, which is the theme's -- the
+    # same token `strip_want` above now reads off `$sbg`. Hardcoding Daylight
+    # here would measure a blend line the bar is not on.
+    global sbg
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py --ink $out $x0 $y0 $x1 $y1 {*}$sbg $r $g $b} n]} { return -1 }
     return $n
 }
 # The condition slot [cx, cx+cw) across the bar's middle 16 rows must carry
@@ -278,7 +312,7 @@ lc_send "grep -q h3d-not-there /lib/beacon/verbs"
 set p [status_painted Err "after a failing command"]
 set cx [lindex $p 0]
 set cw [lindex $p 1]
-set n [cond_want $cx $cw $smid 152 40 24 224 120 64 "condition after a failing command (cinnabar)"]
+set n [cond_want $cx $cw $smid {*}$cinn 224 120 64 "condition after a failing command (cinnabar)"]
 lc_pass "halcyon: the bar's condition went cinnabar with the failing command ($n px; context \"[lindex $p 2]\")"
 lc_send "cd /lib/aurora; ls; pwd"
 set p [status_painted Ok "after a passing command"]
@@ -286,8 +320,27 @@ set p [status_painted Ok "after a passing command"]
 # "exit 1"), so re-extract cx/cw from THIS (Ok) painted line.
 set cx [lindex $p 0]
 set cw [lindex $p 1]
-set n [cond_want $cx $cw $smid 224 120 64 152 40 24 "condition after a passing command (ember)"]
+set n [cond_want $cx $cw $smid 224 120 64 {*}$cinn "condition after a passing command (ember)"]
 lc_pass "halcyon: the bar's condition went ember with the passing command ($n px; context \"[lindex $p 2]\")"
+
+# WHERE THE NON-DAYLIGHT RUN STOPS, and why it stops HERE rather than running
+# on. Everything above is either theme-independent or reads its colours off
+# `$ls_theme`; everything BELOW is calibrated for Daylight's palette in ways
+# that do not merely fail under another theme -- they pass HOLLOWLY. The worst
+# is `no_strip_at_left`, which returns "no strip present" when it cannot
+# recognise the strip's colours, so under Nocturne a leg asserting a strip is
+# ABSENT would be satisfied by a strip that is plainly there.
+#
+# So the Nocturne run proves what it can prove soundly -- the file was read
+# off the disk, parsed, resolved, and PAINTED, with the transcript ground, the
+# status bar ground and the condition inks all following it -- and hands the
+# rest to the Daylight run, which still exercises every leg. Widening the
+# remaining legs is real work; claiming them by running past them is not.
+if {$ls_theme ne "daylight"} {
+    lc_pass "halcyon: $ls_theme END-TO-END -- disk -> parse -> resolve -> paint (grounds, status bar, condition inks)"
+    lc_quit
+    exit 0
+}
 lc_run_expect "pwd" "/lib/aurora"
 lc_run_expect "cd; pwd" "/home/michael"
 

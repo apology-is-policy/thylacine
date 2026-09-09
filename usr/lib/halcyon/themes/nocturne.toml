@@ -74,14 +74,19 @@ fg = "#D8E8D8"
 fg_dim = "#A8C0A8"
 fg_muted = "#7A947A"
 
+# The error key must never read as the ACCENT. Bonfire's #C06050 was the
+# obvious pick and it is wrong here: against the shared ember #E07840 it is
+# (32,24,16) away, close enough that the gate's condition-ink check could not
+# tell them apart -- which is the gate saying, correctly, that a person could
+# not either. This is a clear RED against the ember's orange.
 [palette.cinnabar]
-key = "#C06050"
-tint = "#2A1815"
-raised = "#3A211C"
-border = "#523128"
-fg = "#F0D8D2"
-fg_dim = "#D0ACA4"
-fg_muted = "#A88078"
+key = "#D04038"
+tint = "#2E1614"
+raised = "#3E1F1B"
+border = "#562E28"
+fg = "#F2D8D4"
+fg_dim = "#D4AAA4"
+fg_muted = "#AC7C76"
 
 # Syntax (1.5). Bonfire's role tier, which is the project's dark derivation of
 # the same slate/sage/sand/moss/dusk/fen/cinnabar table Daylight darkens for a
@@ -95,7 +100,7 @@ ash = "#C8BDB8"
 dusk = "#A898C8"
 smoke = "#7A706A"
 fen = "#6A9A6A"
-cinnabar = "#C06050"
+cinnabar = "#D04038"
 
 # The terminal a hosted program's SGR resolves against. bg is the pane surface
 # and fg is the ink, so halcyond's default-ink hook fires exactly as it does
