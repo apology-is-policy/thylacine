@@ -67,6 +67,12 @@ pub struct GlyphRef {
 pub struct Cartoon {
     pub ops: Vec<Op>,
     pub runs: Vec<GlyphRef>,
+    /// The image blobs `Op::Image` ops index (I-47 inline media). Per-cartoon
+    /// (per-frame) resources, unlike the persistent `AtlasStore`: the author
+    /// pushes a decoded/resampled raster with `add_blob` and emits an
+    /// `Op::Image { blob_id }` naming it. Bundling them with the ops keeps the
+    /// display list self-contained -- `execute` reads `cart.blobs`.
+    pub blobs: BlobStore,
 }
 
 impl Default for Cartoon {
@@ -77,13 +83,22 @@ impl Default for Cartoon {
 
 impl Cartoon {
     pub fn new() -> Cartoon {
-        Cartoon { ops: Vec::new(), runs: Vec::new() }
+        Cartoon { ops: Vec::new(), runs: Vec::new(), blobs: BlobStore::new() }
     }
 
-    /// Reset for the next frame, keeping both allocations.
+    /// Reset for the next frame, keeping every allocation.
     pub fn reset(&mut self) {
         self.ops.clear();
         self.runs.clear();
+        self.blobs.blobs.clear();
+    }
+
+    /// Append an image blob and return its id (its index in `blobs`), for an
+    /// `Op::Image { blob_id, .. }` to name.
+    pub fn add_blob(&mut self, b: Blob) -> u32 {
+        let id = self.blobs.blobs.len() as u32;
+        self.blobs.blobs.push(b);
+        id
     }
 
     /// Append a glyph run and its op in one step. Returns the run's start
@@ -284,6 +299,33 @@ impl Default for BlobStore {
 impl BlobStore {
     pub fn new() -> BlobStore {
         BlobStore { blobs: Vec::new() }
+    }
+}
+
+impl Blob {
+    /// Nearest-neighbor resample to `dw x dh`. The v0 letterbox scaler: the
+    /// author (halcyond's layout) scales a source raster to the reserved rect
+    /// so the executor stays a 1:1 blitter (`Op::Image` paints native size --
+    /// lib header + the H-7/I-47 note). Bilinear is a later refinement; an
+    /// empty/zero request yields an empty blob (fail-safe, like every other
+    /// malformed reference here).
+    pub fn scaled(&self, dw: u32, dh: u32) -> Blob {
+        if dw == 0 || dh == 0 || self.w == 0 || self.h == 0 {
+            return Blob { w: 0, h: 0, argb: Vec::new() };
+        }
+        if dw == self.w && dh == self.h {
+            return Blob { w: self.w, h: self.h, argb: self.argb.clone() };
+        }
+        let mut argb = Vec::with_capacity((dw as usize) * (dh as usize));
+        for y in 0..dh {
+            let sy = ((y as u64 * self.h as u64) / dh as u64) as u32;
+            let srow = (sy * self.w) as usize;
+            for x in 0..dw {
+                let sx = ((x as u64 * self.w as u64) / dw as u64) as u32;
+                argb.push(self.argb[srow + sx as usize]);
+            }
+        }
+        Blob { w: dw, h: dh, argb }
     }
 }
 

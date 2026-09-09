@@ -686,7 +686,7 @@ pub extern "C" fn rs_main() -> i64 {
             cartoon::execute(
                 &cart,
                 &gs.packer.store,
-                &cartoon::BlobStore::new(),
+                &cart.blobs,
                 px,
                 w,
                 None,

@@ -215,6 +215,13 @@ pub enum Item {
     /// is a `Line` so an inline `em`/`obj` run inside the block keeps its span;
     /// the block forces mono regardless of a run's annotation.
     Pre(Vec<Line>),
+    /// I-47 inline media (the `view` inline path A): a decoded ARGB raster,
+    /// `w`-tight rows, placed as its own transcript item. Layout letterboxes it
+    /// to the block width (resampling into a `cartoon::Blob`) and reflows it
+    /// like any other item; `render_block` blits it via `cartoon::Op::Image`.
+    /// The bytes arrive out of band (a bounded write on the per-pane control
+    /// endpoint), never down the pts -- see HALCYON.md 14.7.
+    Image { w: u32, h: u32, argb: Vec<u32> },
 }
 
 pub struct Block {
@@ -2643,6 +2650,7 @@ mod tests {
                         }
                     }
                     Item::Rule => s.push('R'),
+                    Item::Image { w, h, .. } => s.push_str(&format!("I{}x{}", w, h)),
                     Item::Pre(lines) => {
                         s.push('P');
                         for l in lines.iter() {

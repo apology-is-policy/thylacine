@@ -79,6 +79,13 @@ fn push_block_rows(out: &mut Vec<FlatRow>, block: usize, items: &[Item]) {
                 item: ii,
                 row: usize::MAX,
             }),
+            // I-47: an inline image is one selectable unit (like a Line/Pre) --
+            // addressable for the obj-verb menu (view/gallery).
+            Item::Image { .. } => out.push(FlatRow {
+                block,
+                item: ii,
+                row: usize::MAX,
+            }),
         }
     }
 }

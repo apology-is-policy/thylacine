@@ -731,7 +731,7 @@ impl SessionTile {
             cartoon::execute(
                 cart,
                 &gs.packer.store,
-                &cartoon::BlobStore::new(),
+                &cart.blobs,
                 px,
                 sw,
                 None,
