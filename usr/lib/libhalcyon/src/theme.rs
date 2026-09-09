@@ -13,7 +13,7 @@
 //
 // A second theme is a FILE, not a second const (HALCYON-THEME 3.3): the struct
 // is theme-agnostic (HALCYON-VISUAL section 1.4/4/9 -- only the palette differs
-// between themes), so Nocturne and Frutiger Aero are TOML, parsed into this
+// between themes), so Nightjar and Frutiger Aero are TOML, parsed into this
 // exact shape. `DAYLIGHT` is the built-in floor, reachable through `builtin()`.
 
 use alloc::string::String;
@@ -763,7 +763,7 @@ pub fn daylight_env_palette() -> String {
 }
 
 /// The largest theme file that will be read. Comfortably above any real one
-/// (the full 57-key Nocturne is a few KiB) and comfortably BELOW any reader's
+/// (the full 57-key Nightjar is a few KiB) and comfortably BELOW any reader's
 /// truncation point, so a file that was cut short is refused rather than
 /// parsed as a valid prefix.
 pub const THEME_MAX: usize = 64 * 1024;
@@ -1109,19 +1109,19 @@ mod tests {
 
     /// The shipped dark theme, compiled in for the test only -- the guest
     /// reads it off the filesystem.
-    const NOCTURNE: &str = include_str!("../../halcyon/themes/nocturne.toml");
+    const NIGHTJAR: &str = include_str!("../../halcyon/themes/nightjar.toml");
 
     // TH-5: THE ARC'S PROOF. An arc that ships only the theme it started with
     // has proved nothing -- every mechanism could be subtly Daylight-shaped
-    // and nobody would know. Nocturne is written with NO `base`, so the
+    // and nobody would know. Nightjar is written with NO `base`, so the
     // loader requires all 57 keys and this test fails, naming them, the day
     // one is forgotten.
     #[test]
-    fn nocturne_is_complete_coherent_and_nothing_like_daylight() {
-        let l = Theme::from_toml(NOCTURNE).unwrap_or_else(|e| {
-            panic!("the shipped Nocturne must load: {}", describe(&e));
+    fn nightjar_is_complete_coherent_and_nothing_like_daylight() {
+        let l = Theme::from_toml(NIGHTJAR).unwrap_or_else(|e| {
+            panic!("the shipped Nightjar must load: {}", describe(&e));
         });
-        assert_eq!(l.name, "Nocturne");
+        assert_eq!(l.name, "Nightjar");
         assert!(
             l.inherited.is_empty(),
             "no base means nothing may be inherited, but {:?} were",
@@ -1203,23 +1203,23 @@ mod tests {
         // cells across a `set_theme` remap.
         for (i, c) in n.terminal.ansi.iter().enumerate() {
             for (j, e) in n.terminal.ansi.iter().enumerate() {
-                assert!(i == j || c != e, "nocturne ansi[{i}] and ansi[{j}] collide");
+                assert!(i == j || c != e, "nightjar ansi[{i}] and ansi[{j}] collide");
             }
             assert!(i == 15 || *c != n.fg, "ansi[{i}] aliases fg but is not 15");
         }
         assert_eq!(n.terminal.ansi[15], n.fg);
 
-        // And it survives the push seam, so a Nocturne session can actually
+        // And it survives the push seam, so a Nightjar session can actually
         // hand its theme to the compositor.
         assert_eq!(from_wire(&to_wire(&n)), Some(n));
     }
 
-    // The sheet built from Nocturne carries no Daylight colour -- the TH-2
+    // The sheet built from Nightjar carries no Daylight colour -- the TH-2
     // retint test's claim, made against a REAL second theme rather than a
     // synthetic inversion.
     #[test]
-    fn a_nocturne_sheet_carries_nothing_of_daylight() {
-        let n = Theme::from_toml(NOCTURNE).unwrap().theme;
+    fn a_nightjar_sheet_carries_nothing_of_daylight() {
+        let n = Theme::from_toml(NIGHTJAR).unwrap().theme;
         let d = builtin();
         let daylight: &[Argb] = &[
             d.surface, d.header, d.fg, d.fg_dim, d.ember, d.border, d.selection,
@@ -1239,7 +1239,7 @@ mod tests {
         ] {
             assert!(
                 !daylight.contains(&c),
-                "nocturne {name} ({c:#08x}) is a Daylight colour"
+                "nightjar {name} ({c:#08x}) is a Daylight colour"
             );
         }
         // The ember is the deliberate exception, and it must still be there.

@@ -404,10 +404,10 @@ pub extern "C" fn rs_main() -> i64 {
     );
     let theme = resolved.theme;
     // The compositor cannot read this file. Measured 2026-09-09 on the
-    // Nocturne lever: `tapestryd: theme built-in (no /lib/halcyon/theme.toml)`
+    // Nightjar lever: `tapestryd: theme built-in (no /lib/halcyon/theme.toml)`
     // while THIS process, started later, loaded the very same path -- because
     // tapestryd comes up before the pool it lives in is mounted. So the
-    // chrome kept Daylight's bevel and floor around a Nocturne pane, and
+    // chrome kept Daylight's bevel and floor around a Nightjar pane, and
     // nothing failed, which is how it would have shipped.
     //
     // The renderer is admitted to the `theme` verb unconditionally

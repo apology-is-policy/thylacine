@@ -144,7 +144,7 @@ is small enough to parse in `no_std` without vendoring a crate (§5).
 
 ```toml
 [meta]
-name = "Nocturne"
+name = "Nightjar"
 base = "daylight"        # inherit every unset key; omit to require all (§4.2)
 
 [palette]
@@ -274,7 +274,7 @@ but the user is not always the author.
   tapestryd, `/env/HALCYON_PALETTE` as a derived export, and a
   `halcyon theme lint` reporting inherited/missing keys.
 - **TH-5** — A second theme, shipped, as the proof the arc worked: a dark
-  Nocturne written with **no** `base`, so it must set all 61 colours. A
+  Nightjar written with **no** `base`, so it must set all 61 colours. A
   theme arc that ships only the theme it started with has proved nothing.
 - **TH-6** — The audit. The surfaces: a new on-disk format parsed in
   `no_std` (format-fuzz class), a display-wide visual pushed over a ctl

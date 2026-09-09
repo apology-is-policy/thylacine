@@ -163,12 +163,12 @@ if {[info exists ::env(LS_THEME)] && $::env(LS_THEME) ne ""} {
     set ls_theme $::env(LS_THEME)
 }
 # The grounds ARE the proof. Nothing but a theme file read off the disk,
-# parsed, resolved and painted can put Nocturne's #1A1614 or #2A2422 on this
+# parsed, resolved and painted can put Nightjar's #1A1614 or #2A2422 on this
 # screen -- there is no other source of those values in the tree -- so the
 # pixel check IS the end-to-end witness of the load path, not a proxy for it.
 switch -- $ls_theme {
     daylight { set grounds {242,235,224 206,196,182} }
-    nocturne { set grounds {26,22,20 42,36,34} }
+    nightjar { set grounds {26,22,20 42,36,34} }
     default  { lc_fail "ls-halcyon: unknown LS_THEME '$ls_theme'" }
 }
 set dom "$dr,$dg,$db"
@@ -245,14 +245,14 @@ if {$leaf_h != $disph - 20} {
 lc_pass "halcyon: the carve shrank the layout -- the console leaf is $leaf_h of the ${disph}px display (strip 20)"
 set smid [expr {$sy + 10}]
 # The bar's own ground is a THEME token, not a constant -- the same lesson the
-# transcript ground taught above, found the same way: the Nocturne run failed
+# transcript ground taught above, found the same way: the Nightjar run failed
 # here reading 42,36,34 where this wanted Daylight's 26,18,10, which is the
 # gate correctly noticing that halcyond had followed the theme and it had not.
 # The ember below is deliberately NOT parameterised: HALCYON-VISUAL 1.3 shares
 # it verbatim between themes, so a run where it MOVED is a real failure.
 switch -- $ls_theme {
     daylight { set sbg {26 18 10} ; set cinn {152 40 24} }
-    nocturne { set sbg {42 36 34} ; set cinn {208 64 56} }
+    nightjar { set sbg {42 36 34} ; set cinn {208 64 56} }
 }
 strip_want 1 [expr {$sy + 2}] 6 [expr {$sy + 18}] {*}$sbg "status bar left end (status_bg)" 0
 strip_want [expr {$dispw - 6}] [expr {$sy + 2}] [expr {$dispw - 1}] [expr {$sy + 18}] {*}$sbg "status bar right end (status_bg)" 0
@@ -328,10 +328,10 @@ lc_pass "halcyon: the bar's condition went ember with the passing command ($n px
 # `$ls_theme`; everything BELOW is calibrated for Daylight's palette in ways
 # that do not merely fail under another theme -- they pass HOLLOWLY. The worst
 # is `no_strip_at_left`, which returns "no strip present" when it cannot
-# recognise the strip's colours, so under Nocturne a leg asserting a strip is
+# recognise the strip's colours, so under Nightjar a leg asserting a strip is
 # ABSENT would be satisfied by a strip that is plainly there.
 #
-# So the Nocturne run proves what it can prove soundly -- the file was read
+# So the Nightjar run proves what it can prove soundly -- the file was read
 # off the disk, parsed, resolved, and PAINTED, with the transcript ground, the
 # status bar ground and the condition inks all following it -- and hands the
 # rest to the Daylight run, which still exercises every leg. Widening the

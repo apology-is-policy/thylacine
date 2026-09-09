@@ -308,7 +308,7 @@ mod tests {
         let src = "\
 # a comment
 [meta]
-name = \"Nocturne\"   # trailing comment
+name = \"Nightjar\"   # trailing comment
 base = \"daylight\"
 
 [palette]
@@ -330,7 +330,7 @@ bevel = 2
         assert_eq!(e.len(), 7);
         assert_eq!(e[0].table, "meta");
         assert_eq!(e[0].key, "name");
-        assert_eq!(e[0].value, Value::Str("Nocturne"));
+        assert_eq!(e[0].value, Value::Str("Nightjar"));
         assert_eq!(e[0].line, 3, "the line number is the SOURCE line");
         assert_eq!(e[2].table, "palette");
         assert_eq!(e[3].table, "palette.sage", "a two-segment header");

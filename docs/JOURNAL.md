@@ -179,11 +179,11 @@ The check now asserts the property it claims -- the dominant ground is a
 Daylight ground -- which is a whitelist of two exact light colours, so
 discrimination against Bonfire dark is unchanged by construction.
 
-**TH-5/5b, Nocturne.** An arc that ships only the theme it started with has
-proved nothing. Nocturne is written with **no `base`**, so the loader requires
+**TH-5/5b, Nightjar.** An arc that ships only the theme it started with has
+proved nothing. It is written with **no `base`**, so the loader requires
 all 57 keys and names any that are missing.
 
-TH-5 shipped it; TH-5b loaded it. `nocturne loaded from
+TH-5 shipped it; TH-5b loaded it. `nightjar loaded from
 /lib/halcyon/theme.toml and PAINTED (ground 42,36,34)` -- and nothing in the
 tree but a file read off disk, parsed, resolved and painted can put that value
 on that screen, so the pixels are the proof rather than a proxy for it.
@@ -191,19 +191,19 @@ on that screen, so the pixels are the proof rather than a proxy for it.
 **It immediately found a defect worth the boot.** `tapestryd: theme built-in (no
 /lib/halcyon/theme.toml)` -- while halcyond, started later, loaded the very same
 path. The compositor comes up before the pool it lives in is mounted, so the
-chrome kept Daylight's bevel around a Nocturne pane and *nothing failed*. That
+chrome kept Daylight's bevel around a dark pane and *nothing failed*. That
 is how it would have shipped. The console renderer pushes now, carrying the
 system tier the compositor could not reach in time.
 
-**And a finding about the theme, not the harness.** The run refused Nocturne's
+**And a finding about the theme, not the harness.** The run refused the theme's
 first cinnabar (Bonfire's `#C06050`) because it sits (32,24,16) from the shared
 ember and the condition-ink check could not tell them apart -- which is the gate
 saying a *person* could not either. An error state must never read as the
 accent.
 
-The Nocturne run stops after the legs it can prove soundly, and says so: below
+The dark-theme run stops after the legs it can prove soundly, and says so: below
 that point `no_strip_at_left` returns "no strip present" when it cannot
-recognise the strip's colours, so a Nocturne run would satisfy a strip-ABSENT
+recognise the strip's colours, so a dark-theme run would satisfy a strip-ABSENT
 assertion with a strip plainly there. A hollow pass, not a failure. The Daylight
 run still exercises every leg.
 
@@ -211,12 +211,37 @@ run still exercises every leg.
 
 - **tapestryd's chrome has no host-testable seam.** `server.rs` carries no test
   module, so the compositor half of the retint claim rests on the build plus the
-  compose and Nocturne gates -- a real witness now, but not a unit one.
-- **The Nocturne gate run stops early**, by design and stated above. Widening
+  compose and Nightjar gates -- a real witness now, but not a unit one.
+- **The dark-theme gate run stops early**, by design and stated above. Widening
   the remaining legs to be theme-aware is real work nobody has done.
 - **TH-4c (`halcyon theme lint`) and TH-6 (the audit) are not started.** The
   loader already computes what lint needs -- `Loaded.inherited` names every key
   a based file did not set.
+
+### The wrong turn nobody caught but the operator
+
+The dark theme shipped as **Nocturne** through eight commits, a design doc, a
+bake, a gate lever and a boot. `docs/NOCTURNE.md` is the operator's own name
+for the Thylacine **audio system** -- ratified 2026-09-06, with a landed arc
+through N-3c-2 -- and `MEMORY.md` carries a pinned line saying so, which the
+session had loaded. The design commit picked the name, and every chunk after
+it inherited the collision without anyone re-checking it against the project's
+existing names.
+
+Nothing failed, because nothing could: a theme's name is a string in a TOML
+file, and no test in the tree knows what other subsystems are called. The
+operator caught it in one line -- *"Nocturne is the audio system, how does it
+paint?"*
+
+Renamed to **Nightjar**, which is free in both trees. The lesson is narrow and
+reusable: **a NAME is a global namespace with no compiler.** Everything else
+in this arc was checked for collisions by a build that would refuse them; the
+one identifier with no such check was the one that collided. A grep across
+`docs/*.md` before committing a name costs seconds and was never run.
+
+The eight commits keep "Nocturne" in their messages -- history is not
+rewritten -- so `git log` and the tree disagree on this name before
+`docs/halcyon-status.md`'s rename row.
 - The workspace is not `rustfmt`-clean at HEAD (raster.rs 56 diffs,
   transcript.rs 54, and so on) and was not made so here. "Clean on every line
   this chunk touched" was verified by intersecting `cargo fmt --check` output
