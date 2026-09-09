@@ -102,6 +102,14 @@ impl PlaceAccum {
                     return AccumStep::Reject;
                 }
                 self.header = Some(h);
+                // Reserve the EXACT payload capacity now, before the first
+                // extend, so the buffer never Vec-doubles: an incrementally
+                // grown Vec rounds a just-over-8-MiB length up to a 16-MiB
+                // capacity (a 2x overshoot), which is what let MAX_CONNS
+                // accumulators reach the whole 64 MiB heap (audit F1/F2). With
+                // reserve_exact the footprint is exactly total_len, so the
+                // heap budget (placesrv PLACE_MAX_PIXELS x MAX_CONNS) is real.
+                self.buf.reserve_exact(h.total_len() - self.buf.len());
                 self.buf.extend_from_slice(data);
                 h
             }
@@ -124,6 +132,16 @@ impl PlaceAccum {
             };
         }
         AccumStep::More
+    }
+
+    /// The heap this accumulator currently holds -- its buffer's CAPACITY, not
+    /// its length (the capacity is what the allocator committed). After the
+    /// header parses this equals `total_len` (reserve_exact, no Vec doubling);
+    /// it is the term a server-wide place-memory budget must sum across
+    /// connections (audit F1/F2 -- the per-image cap bounds this, MAX_CONNS x it
+    /// bounds the aggregate).
+    pub fn reserved_bytes(&self) -> usize {
+        self.buf.capacity()
     }
 }
 
@@ -232,6 +250,41 @@ mod tests {
         msg.push(0xAA); // one byte too many
         let mut a = PlaceAccum::new(CAP);
         assert!(matches!(a.write(0, &msg), AccumStep::Reject));
+    }
+
+    #[test]
+    fn capacity_is_exact_no_doubling() {
+        // F2 regression: the buffer reserves EXACTLY total_len once the header
+        // parses, so it never Vec-doubles as chunks arrive. A 512x512 image
+        // (total_len = 16 + 512*512*4 = 1,048,592, just over the 1 MiB power of
+        // two) would double to ~2 MiB capacity under incremental growth; with
+        // reserve_exact it stays at total_len. Feed the header + a small first
+        // chunk, then more chunks, and assert the footprint never exceeds
+        // total_len (allowing only tiny allocator rounding, never a 2x jump).
+        let (msg, _) = wire(512, 512);
+        let total = msg.len();
+        let mut a = PlaceAccum::new(CAP);
+        // First write carries the header + 100 payload bytes -> reserve_exact fires.
+        let _ = a.write(0, &msg[..HEADER_LEN + 100]);
+        assert!(
+            a.reserved_bytes() <= total + 4096,
+            "footprint {} must be ~total_len {} (no 2x doubling)",
+            a.reserved_bytes(),
+            total
+        );
+        assert!(
+            a.reserved_bytes() >= total,
+            "footprint {} must cover the whole payload {}",
+            a.reserved_bytes(),
+            total
+        );
+        // Draining the rest in small chunks must not grow it past total.
+        let mut off = HEADER_LEN + 100;
+        while off < total {
+            let end = (off + 37).min(total);
+            let _ = a.write(off as u64, &msg[off..end]);
+            off = end;
+        }
     }
 
     #[test]

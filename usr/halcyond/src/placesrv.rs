@@ -30,10 +30,18 @@ use libthyla_rs::{
 const SRV_MSIZE: u32 = 32768;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 const MAX_FIDS: usize = 8;
-/// A small connection table: the console spike drives ONE `view` at a time; the
-/// headroom bounds a hostile fan-out (each conn's in-flight raster is itself
-/// capped by PLACE_MAX_PIXELS, so the worst-case working set is bounded).
-const MAX_CONNS: usize = 4;
+/// The console spike drives exactly ONE `view` at a time (a user runs `view x`
+/// in their shell), so ONE connection is the honest bound -- and it is what
+/// makes the aggregate place-memory footprint safe (audit F1). A second
+/// connection WAITS (the listener drops from both poll sets while full -- see
+/// `push_fds`/`service`), which is bounded acceptance, never a spin. This is the
+/// term the heap budget multiplies: MAX_CONNS in-flight accumulators, each
+/// capped at PLACE_MAX_PIXELS, must fit the heap beside the transcript. Raising
+/// it REQUIRES either lowering PLACE_MAX_PIXELS in step or a server-wide
+/// aggregate byte budget (sum of `PlaceAccum::reserved_bytes()` across conns) --
+/// do NOT bump it alone. The session-path channel (a per-pane endpoint) is where
+/// concurrency generalizes, with its own per-pane quota.
+const MAX_CONNS: usize = 1;
 const P9_VERSION: &[u8] = b"9P2000.L";
 /// STATX_SIZE -- ninep exports MODE/NLINK/UID/GID but not SIZE.
 const P9_GETATTR_SIZE: u64 = 0x200;
@@ -50,13 +58,22 @@ const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 
 /// The heap-safe per-image pixel cap for the CONSOLE spike -- deliberately
-/// BELOW `inlinewire::MAX_PIXELS` (16 Mpx / 64 MiB). The renderer runs the whole
-/// session on a fixed 64 MiB heap beside its faces + atlas + transcript; a
-/// 2 Mpx cap admits up to 1920x1080, and the transfer peaks at the byte
-/// accumulation (8 MiB) plus the u32 conversion (8 MiB) = 16 MiB, well within
-/// the arena. Raising it (a heap bump or a streaming conversion) is an
-/// expand-slice item; `view` reports "too large" and the caller falls back.
-const PLACE_MAX_PIXELS: u64 = 2 * 1024 * 1024;
+/// BELOW `inlinewire::MAX_PIXELS` (16 Mpx). The renderer runs the whole session
+/// on a fixed 64 MiB heap (`main.rs` ThylaAllocN) beside its faces + atlas + the
+/// transcript's 32 MiB content budget, so the place path's footprint must be
+/// small AND bounded across connections.
+///
+/// THE HEAP BUDGET (audit F1/F2), the arithmetic MAX_CONNS x this cap must obey:
+/// 1 Mpx admits a full-console image (1280x800 = 1.02 Mpx fits) at native size.
+/// With `reserve_exact` the accumulator holds EXACTLY total_len = 4 MiB (no Vec
+/// doubling -- F2), and the completion `collect` adds one exact 4 MiB `Vec<u32>`
+/// transient, so ONE transfer peaks at 8 MiB. At MAX_CONNS = 1 the whole place
+/// path peaks at 8 MiB, which sits comfortably under 64 MiB beside the 32 MiB
+/// transcript cap + the faces/atlas. A larger source raster is refused (view
+/// reports "too large" and falls back to the report); the un-capped path is the
+/// gallery/session expand slice. Raising this cap or MAX_CONNS without redoing
+/// this arithmetic reintroduces the F1 OOM (2 x 2-Mpx doubled = the whole heap).
+const PLACE_MAX_PIXELS: u64 = 1024 * 1024;
 
 fn qid_of(path: u64) -> p9::Qid {
     p9::Qid {
@@ -509,8 +526,13 @@ impl PlaceServer {
         }
         for c in &self.conns {
             fds.push(TPollFd {
+                // POLLHUP too (audit F3): a peer that closes with no pending
+                // data must wake the caller's blocking poll so the conn is
+                // reaped promptly, matching `service`'s own poll -- otherwise a
+                // dead conn holds a MAX_CONNS slot until some other event wakes
+                // the loop.
                 fd: c.handle as i32,
-                events: T_POLLIN,
+                events: T_POLLIN | T_POLLHUP,
                 revents: 0,
             });
         }

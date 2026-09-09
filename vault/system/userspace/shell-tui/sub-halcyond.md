@@ -269,15 +269,24 @@ halcyond's exposure is a bounded WRITE of untrusted bytes, not a codec.
 - **The accumulator** (`inlineaccum.rs`, the PURE, host-tested brain): a `place`
   write carries an `inlinewire` header (magic/format/w/h) then the ARGB payload.
   `PlaceAccum::write` validates the header -- magic, `FORMAT_ARGB8888`,
-  dimensions, and a heap-safe per-image pixel cap (`PLACE_MAX_PIXELS` = 2 Mpx,
+  dimensions, and a heap-safe per-image pixel cap (`PLACE_MAX_PIXELS` = 1 Mpx,
   deliberately BELOW `inlinewire::MAX_PIXELS`, so a decoded raster cannot exhaust
-  halcyond's fixed 64 MiB heap) -- BEFORE it allocates a byte of payload;
-  accumulates sequential writes bounded by the header's own declared total; and
-  on completion yields the `w*h` ARGB `Vec<u32>` for `Transcript::inject_image`.
-  A clunk mid-transfer discards the partial; a malformed / over-cap /
-  non-sequential / trailing-past-total write is refused (Rlerror) and the
-  transfer torn down. This is the format-fuzz surface, and it is where the tests
-  live (Invariants + Tests below).
+  halcyond's fixed 64 MiB heap) -- BEFORE it allocates a byte of payload, and
+  `reserve_exact`s the exact `total_len` so the buffer never Vec-doubles (the
+  audit-F2 2x overshoot); accumulates sequential writes bounded by the header's
+  own declared total; and on completion yields the `w*h` ARGB `Vec<u32>` for
+  `Transcript::inject_image`. A clunk mid-transfer discards the partial; a
+  malformed / over-cap / non-sequential / trailing-past-total write is refused
+  (Rlerror) and the transfer torn down. This is the format-fuzz surface, and it
+  is where the tests live (Invariants + Tests below).
+  - **The heap budget** (audit F1, the OOM the round found + closed): the cap
+    bounds ONE image; `MAX_CONNS` bounds how many accumulate at once. With
+    `MAX_CONNS` = 1 (the console spike drives one `view`) and `reserve_exact`,
+    the whole place path peaks at ~8 MiB (one 4 MiB accumulator + one 4 MiB
+    completion `Vec<u32>`), which fits the 64 MiB heap beside the transcript's
+    32 MiB content budget + the faces/atlas. Raising `MAX_CONNS` or the cap
+    without redoing that arithmetic reintroduces the OOM (the round-1 defect was
+    `MAX_CONNS`=4 x a doubled 16 MiB = the whole heap).
 - **Authority** (the console spike): none beyond reachability. Injecting an image
   into the console transcript is at parity with writing text to `/dev/cons`
   (which any holder of the console already can), so the spike gates on
@@ -298,10 +307,11 @@ halcyond's exposure is a bounded WRITE of untrusted bytes, not a codec.
 - `EventRing` (from [[sub-libtapestry]]) -- the one SQPOLL session + ring every
   surface shares.
 - `PlaceServer` / `Conn` / `PlaceAccum` (`placesrv.rs` + `inlineaccum.rs`, I-47) --
-  the `/srv/halcyon` listener + its bounded conn table (`MAX_CONNS` = 4, each
-  fid table `MAX_FIDS` = 8) + the per-connection single-in-flight place
-  accumulator; completed rasters queue in `PlaceServer.completed`, drained per
-  loop into `Transcript::inject_image`.
+  the `/srv/halcyon` listener + its bounded conn table (`MAX_CONNS` = 1 -- the
+  console spike drives one `view`; a second connection waits, bounded acceptance;
+  the audit-F1 heap-budget term, each fid table `MAX_FIDS` = 8) + the
+  per-connection single-in-flight place accumulator; completed rasters queue in
+  `PlaceServer.completed`, drained per loop into `Transcript::inject_image`.
 - Budget constants: `SESSION_SCROLLBACK_BUDGET` = 32 MiB (shared by tile count
   via `set_max_cost`), `OPEN_BLOCK_MAX_COST` = 512 KiB (freezes a newline-free
   open block), `POLL_MAX_NFDS` = 64 (the unified-poll fan cap), `DECLARE_TRIES`
@@ -439,12 +449,14 @@ presents are a recorded optimization.
 
 ## Tests
 
-- **Host: 220 `#[test]` across the lib modules** (measured `cargo test -p
-  halcyond --lib --no-default-features`), including **inlineaccum's 9** (the I-47
+- **Host: 221 `#[test]` across the lib modules** (measured `cargo test -p
+  halcyond --lib --no-default-features`), including **inlineaccum's 10** (the I-47
   place-request accumulator, adversarial: a one-write and a split-write complete
   to the right pixels; bad magic, over-cap dimensions, a giant-claiming header,
   a non-sequential offset, and trailing bytes past the total each Reject; two
-  images on one fid; a partial-then-abandoned stays incomplete -- the
+  images on one fid; a partial-then-abandoned stays incomplete; and
+  `capacity_is_exact_no_doubling` -- the audit-F2 regression that the buffer
+  `reserve_exact`s to `total_len` with no Vec doubling -- the
   validate-before-allocate + bounded-accumulation contract). They pin the
   streaming determinism, wrap/alignment/boxes, the
   word-through-executor leg, the held-feed arms, the obj-run walk +
