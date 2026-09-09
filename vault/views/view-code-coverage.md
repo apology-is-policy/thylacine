@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 55 unowned · 489 files (88% owned) · ~15357 unswept lines.**
+**434 owned · 56 unowned · 490 files (88% owned) · ~15575 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30471 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -81,10 +81,10 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/halcyond | 19 | 1 | 432 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
+| usr/tapestryd | 7 | 2 | 235 |
 | arch | 36 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
-| usr/tapestryd | 7 | 1 | 17 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
 | usr/coreutils | 60 | 0 | 0 |
@@ -137,6 +137,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
+| usr/tapestryd/src/skein.rs | 217 |
 | kernel/include/thylacine/devcap.h | 208 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
@@ -174,5 +175,5 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
-| usr/tapestryd/src/lib.rs | 17 |
+| usr/tapestryd/src/lib.rs | 18 |
 <!-- generated:end -->
