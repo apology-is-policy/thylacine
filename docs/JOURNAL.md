@@ -22,6 +22,61 @@ needed the operator.
 
 
 ---
+## 2026-09-09 (aux, run 6, self-compact #6) -- inline media slice 1b: the render path proven on real hardware, the first inline-image screenshot
+
+Picked up the resume note at `ca785f1e` and built slice 1b: prove the
+`Item::Image` render path -- layout letterbox + `cartoon::Op::Image` -- reaches
+the REAL scanout, the one thing a host test cannot do, and hand the operator the
+first inline-image visual they asked for.
+
+**What landed (`9d662ece`).** A boot-time witness lever: `Transcript::inject_image`
+(push a decoded ARGB raster as its own frozen block -- a non-Line item, so
+`class()` is Doc with no styles table); a new lib module `viewtest` holding the
+PURE half (host-tested) -- `declared()` (the whole-word `thylacine.viewtest`
+bootarg test, the `scale::declared_scale` discipline) + `raster()` (a bordered
+card: color bars + a luminance gradient + diagonal thylacine stripes, native
+720x480 so a default-scale boot both letterboxes AND resamples); the bin reads
+`/hw/chosen/bootargs` the way tapestryd reads its scale token; `run-vm.sh`
+`THYLACINE_VIEWTEST=1` -> the append token. Host: `viewtest` 2 tests + full
+halcyond lib 211/211; guest target compiles.
+
+**Wrong turn #1, caught by reading the boot log, not the diff.** The first
+`THYLACINE_VIEWTEST=1` boot came up on AURORA, not halcyond -- `joey: aurora
+spawned pid=2478 (the console renderer)` -- so the injection (halcyond-only)
+never ran. The `/lib/halcyon/renderer = halcyond` lever is BUILD-gated on
+`THYLACINE_HALCYON=1` (build.sh:3774), which a plain `build.sh kernel` leaves as
+the aurora fail-safe. The new halcyond binary WAS in the pool; only the
+renderer-selection file was missing. Rebuilt with `THYLACINE_HALCYON=1` (pool +
+ramfs regenerate key-paired); the second boot logged `joey: halcyond spawned` +
+`halcyond: viewtest -- inline image injected (720x480; I-47 slice 1b)`. The tell
+was the boot log's renderer line -- a self-report of which binary took the
+scanout -- not anything in the code.
+
+**Wrong turn #2, predicted before it wasted a boot.** halcyond is
+bottom-anchored, and at the login prompt there are hundreds of lines of boot
+scrollback -- the top-injected image was off-screen (the baseline screendump
+confirmed: login prompt, image gone). halcyond reads keys from virtio-input, not
+serial, so the fix was QMP `send-key` (Esc -> Normal, then `g` -> scroll to top,
+`input.rs:177`) -- the same path a real keystroke takes. The retry screendump
+showed the card at the top of the transcript with the boot console flowing below
+it: color bars (ARGB channel order correct -- red is red, blue is blue), a smooth
+resampled gradient (720x480 -> 480x320), diagonal stripes, letterboxed with side
+bars. Sent to the operator.
+
+**What this de-risked, exactly.** The blit + resample land correct pixels through
+the real GPU/present path -- proven. It did NOT exercise the channel (slice 3) or
+a real decoder (slice 2): the raster is baked in-process. And "resample on the
+real GPU" is only strictly proven at scale 100 (the height cap `ipx(320)` grows
+with scale; at 200% a 480-tall native would blit native). This boot was HVF/M2,
+not V3D -- the thyla-pi V3D witness is still worth taking when a later slice
+boots there anyway.
+
+**Next.** Slice 2 -- vendor `zune-png` (+ `zune-jpeg`) into third_party, VERIFY
+no_std on aarch64-unknown-none at vendor time, and the native `view` coreutil
+(decode + type-sniff: image -> render, else exec cat). Then slice 3 (the per-pane
+channel: `view test.png` E2E inline), `gallery` (B), then expand.
+
+---
 ## 2026-09-09 (aux, run 6, self-compact #5) -- inline media / `view`: research + ratified design + scripture (reserved I-47)
 
 The operator opened a new task: Halcyon should display media inline in the
