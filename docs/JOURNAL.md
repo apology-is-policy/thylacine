@@ -22,7 +22,44 @@ needed the operator.
 
 
 ---
-## 2026-09-09 (aux, run 6, self-compact #7) -- inline media SLICE 3b: `view /test.png` shows the image inline, end to end on real hardware
+## 2026-09-09 (aux, run 7, post-compact) -- inline media EXPAND begins: the `view` obj-verb lands; the rest stops for the operator (Opus fallback)
+
+Picked up the ratified inline-media expand from the run-6 self-compact. First
+item is the operator's *original* spec: `view` on the Esc+w/b file-object menu.
+
+**Landed `47d18a4e`** -- one data row (`path view view {}`) in the shipped
+`verbs.default`, so a presented path offers "view"; choosing it types
+`view '<path>'` into the pane and `view` renders the image inline (slice 3b) or
+falls back to `cat`. The whole change is a config row + a host test on already
+audited H-3c menu machinery -- no Rust changed, so the guest binaries are
+byte-identical to the fully-green `4134e89d`.
+
+- **The `--` question, settled by reading the code, not assuming.** The note I
+  left myself said to place the verb "beside the wedge-test rule" and I nearly
+  wrote `view -- {}` to match `ls`/`cat`/`stat`. Both were wrong. `verbs.rs` +
+  `env.rs:207` (`Operands` returns `argv[1..]` verbatim -- it does NOT consume
+  `--`) proved `view` reads a bare operand, so `view -- {}` would open `--` as
+  the file; `view {}` is correct, and the verb belongs in `verbs.default`
+  unconditionally (the wedge rule is a `#`-internal *test* action, a different
+  concern). `view_obj_verb_types_view_quoted_path` pins parse+expand ->
+  `view '<path>'`; beacon host tests 38/38.
+- **Bake proven, not assumed:** `THYLACINE_HALCYON=1 build.sh pool` --
+  `/lib/beacon/verbs` readback-verified (byte-exact vs `verbs.default`+wedge, so
+  the `view` row is definitively baked). `sub-beacon` dossier updated (audit:light).
+
+**STOP -- the decision that needs the operator.** The remaining expand (JPEG via
+zune-jpeg; `gallery`/`--fullscreen`; then the session-path per-pane channel) is
+where I hand back. I am on **Opus, not Fable** (the standing 2026-09-01 grant:
+Fable auto-resolves heritage-aligned forks, Opus stops at the first user-input
+item), the note flagged the operator "may prefer to redirect the expand," and
+each remaining item carries a real judgment: JPEG adds a *second* format-fuzz
+decoder whose audit would again be **Opus-only** (Fable is credit-exhausted --
+a Fable-diversity pass is already owed on the PNG surface), deepening a gap on
+the exact security axis where the operator drew the Fable-trust line; the
+session-path channel is a genuine trust-boundary design fork regardless of
+model. Surfaced as a blocking question rather than guessed.
+
+
 
 The console spike the operator ratified. `view /test.png` now decodes a PNG in
 the sacrificial `view` process, hands the raster to halcyond over a new
