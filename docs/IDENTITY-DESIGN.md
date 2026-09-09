@@ -2144,6 +2144,10 @@ agent):
 - **(3) userspace session-leader** -- logout = login reaps its group via the A-4b
   `CAP_KILL`/`proc_group_terminate` path + unmount + corvus `SESSION_CLOSE`; NO new kernel
   session construct (the per-Proc territory + the kill path ARE the mechanism, Plan 9 idiom).
+  **REFINED 2026-09-09 (§9.9.1): the group-reap was never implemented (login lacks `CAP_KILL`
+  by design, so it CANNOT drive it), which produced the arm-6 logout deadlock. The trigger is
+  now KERNEL-driven on the session leader's exit (the legate-teardown pattern), mechanism
+  unchanged (`proc_group_terminate` over the existing `sid`).**
 - **(4, refining)** after the Stratum verdict sharpened "Full": **at-rest + session-scoped
   encryption** (home unreadable on disk without the passphrase + DEK evicted at logout -- the
   exact scripture property + the Linux/macOS LUKS/FileVault norm), NOT the stronger
@@ -2558,7 +2562,8 @@ the DEK handoff (login never holds the raw DEK; the token-forward leaks no secre
 argv/files; the coordinator install/evict has no UAF/leak; eviction actually zeroes -- the
 AEGIS/mallocng-adjacent class, prosecute hard); user-vs-user isolation (susan's session cannot
 unwrap or attach michael's dataset); the session teardown (no orphaned session Proc; the kill
-cascade is total per #811); the Stratum-side deferred-unwrap (a soft-skipped dataset is
+cascade is total per #811 -- **unmet until §9.9.1; the arm-6 fix is what makes "no orphaned
+session Proc" true**); the Stratum-side deferred-unwrap (a soft-skipped dataset is
 provably unreadable until its DEK is installed; the install validates the token).
 
 **Seams** (foreseeable, additive): concurrent multi-session corvus (v1.x -- multiple VTs /
@@ -2570,3 +2575,97 @@ for foreign/remote 9P (A-3 M5 seam).
 
 **No new spec** per the 2026-05-23 broadening -- prose validation in this section + the
 per-sub-chunk audits + the runtime + cross-reboot tests + the boot-path login E2E.
+
+### 9.9.1 arm-6 -- the logout deadlock + the kernel-driven session hangup (REFINES decision (3); operator-voted 2026-09-09)
+
+**The defect (a silent omission of decision (3)).** Decision (3) above says
+"logout = login reaps its group via the A-4b `CAP_KILL`/`proc_group_terminate`
+path + unmount + corvus `SESSION_CLOSE`," and the audit obligation asserts "no
+orphaned session Proc; the kill cascade is total." **Neither was built.**
+`unbind_home` (`usr/login/src/main.rs`) only unmounts `/home/<user>`, closes the
+attach, and reaps the home proxy; login **never terminates its session group**,
+and it **cannot** -- `LOGIN_CAPS` is `SET_IDENTITY | LOCK_PAGES | CSPRNG_READ`
+(`usr/joey/joey.c`), with **no `CAP_KILL`/`CAP_HOSTOWNER`**, and login runs as
+SYSTEM while the session runs as the user, so the I-26 two-axis gate
+(`devproc_kill_authorized`) denies login the kill. Decision (3)'s stated
+mechanism (userspace login + `CAP_KILL`) was therefore never implementable
+without widening login's privilege, and the group-reap was quietly dropped.
+
+**The consequence (proven general, mac HVF 2026-09-08).** The per-user home is a
+`--single-session` proxy stratumd login synchronously reaps via `proxy.wait()`.
+`/home/<user>` is deep-copied into every session Proc's Territory at spawn (each
+holds a `spoor_ref` on the mount source, a Spoor on login's home 9P client). The
+proxy EOFs only when that client's last fid drops; a Territory's mount refs drop
+only at `territory_unref`, which ran **only at REAP** (`proc_free`), not at exit.
+A background job outliving the login shell (a plain `sleep & ; exit`, or an
+abdicate-swept imperium job) orphans to joey; joey cannot reap it (blocked in
+`wait(login)`); login cannot exit (blocked in `proxy.wait()`). A circular
+deadlock -- logout hangs, no getty respawn, no new prompt.
+
+**The fix -- two parts (operator-voted A1 over A3=grant-login-`CAP_KILL`,
+2026-09-09).**
+
+- **Part D (territory-at-exit; extends #926 to the namespace).** A Proc releases
+  its Territory at **EXIT**, not reap -- the direct analog of #68/#926 moving the
+  handle-table close to exit so a peer sees EOF immediately. So an
+  exited/zombie session member stops pinning the home mount without waiting to be
+  reaped. Because `/proc/<pid>/ns` (`devproc format_ns`) reads `p->territory`
+  under `g_proc_table_lock` (the #57a F2 envelope), the release uses a
+  **locked-detach + unlocked-free split**: under `g_proc_table_lock` set
+  `p->territory = NULL` (serializes with `format_ns`, which then renders empty --
+  `territory_format_ns(NULL)`/`format_cwd` are both NULL-safe), then
+  `territory_unref` the detached pointer OUTSIDE the lock (the `spoor_clunk` may
+  sleep on `Tclunk`; the detached pointer is unreachable by any reader).
+  Idempotent with `proc_free`'s `territory_unref(NULL)`. **Part D alone closes
+  the imperium (killed-zombie) case** -- the abdicate-swept job already exited, so
+  it releases its mount ref at exit.
+
+- **A1 (kernel-driven session hangup; the legate-teardown pattern applied to the
+  login session).** login spawns the login shell with a new
+  `SPAWN_PERM_SESSION_HANGUP` bit; the child thunk `proc_setsid`s it (a new
+  session leader -- POSIX-correct for a login shell; login stays outside the
+  session and survives) and arms `PROC_FLAG_SESSION_HANGUP` (a spare `proc_flags`
+  bit, NOT rfork-propagated, so only the leader carries it). When that leader
+  becomes a zombie, `proc_become_zombie_locked` -- right after
+  `proc_legate_teardown_if_root`, the **exact structural sibling** -- terminates
+  the remaining session members (`proc_for_each_walk` for `sid == leader->sid`,
+  `proc_group_terminate` each), which with Part D release their mount refs at
+  exit. **A1 closes the bghome (alive-orphan) case.**
+
+**Why kernel-driven, not userspace (the decision (3) refinement).** The
+*mechanism* is unchanged from decision (3) -- `proc_group_terminate` over the
+existing per-Proc `sid`, no new session abstraction. Only the **trigger** moves
+from userspace-login (infeasible: login lacks `CAP_KILL` by deliberate design)
+to the **kernel**, on the session leader's exit. This is exactly the legate
+teardown (`proc_legate_teardown_if_root`): a kernel-driven, role-gated
+termination of dependents at the `proc_become_zombie_locked` chokepoint. So A1 is
+**not** a userspace cross-Proc kill and does **not** bypass I-26 -- it is a
+session-lifecycle termination in the same class as the legate teardown, the
+orphan rule, and the #811 death cascade (none I-26-gated). "NO new kernel session
+construct" is honored minimally: one `proc_flags` bit + one death-path walk
+reusing `sid`; no session object is added.
+
+**Invariants.** I-24 (group termination atomic + exactly-once; no EL0 after
+ZOMBIE) is the mechanism A1 rides, now also triggered by session-leader exit.
+I-25/legate is the pattern template. I-26 is untouched (kernel session-lifecycle,
+not a userspace kill). I-1 holds (A1 terminates only same-session members;
+Part D releases only the dying Proc's own Territory). I-28 holds (a zombie
+resolves no paths; live Procs' Territories are unchanged). The A-5 DEK
+session-lifetime property is *restored* -- logout now actually reclaims the
+session, so no lingering user Proc keeps the home mounted + DEK loaded (the
+pam_mount / systemd-homed / FileVault norm; the earlier claim was aspirational).
+
+**Precedents** (operator-requested): pam_mount's escalating hup/term/kill,
+systemd `KillUserProcesses` + session scopes, systemd-homed, macOS FileVault all
+terminate the session to reclaim an encrypted home; Plan 9 frees the namespace at
+`pexit` (the Part D territory-at-exit precedent); Linux lazy/force-unmount +
+FUSE-dead-server were the rejected Option C.
+
+**Staging + audit-bearing.** Two commits -- Part D (verify `ls-imperium-stall`
+clears) then A1 (verify `ls-bghome-stall` clears) -- plus the suite + the SMP
+gate. Prosecute: the Part D detach/unref split (no `format_ns` UAF/NULL-deref; no
+double-`territory_unref`; the sleep is outside the lock); the A1 session-walk
+(only same-`sid` ALIVE members, never the leader/kproc; `proc_group_terminate`
+under `g_proc_table_lock` per its contract); the spawn-flag grant/apply seam
+(`SPAWN_PERM_SESSION_HANGUP` per-bit gate; `proc_setsid` leader-guard passes
+post-rfork); no session-hangup on a non-login setsid (the flag is the gate).
