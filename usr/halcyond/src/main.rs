@@ -210,6 +210,26 @@ fn summon(
 }
 
 
+/// The heap-residual inline-media place cap (I-47 audit F4): how many pixels the
+/// `/srv/halcyon` channel may accept, given the display-scaled atlas. The 64 MiB
+/// heap (`ThylaAllocN`) is shared by the transcript's 32 MiB content budget, the
+/// atlas (which scales with the scanout -- ~6 MiB at 1280x800, ~18 MiB at 4K),
+/// the layout cache + faces + misc, and the place path (peak 8 bytes/px: the
+/// accumulator plus its completion `Vec<u32>`). So place gets the RESIDUAL after
+/// the atlas, over 8; `PlaceServer::set_max_pixels` clamps it to the placesrv
+/// floor/ceiling. This holds the full 1 Mpx (native-size images) through
+/// 2560x1600 (the operator's HiDPI) and shrinks it only past ~3K, where the atlas
+/// would otherwise crowd the heap and OOM the renderer.
+fn place_cap_for(atlas_pages: usize) -> u64 {
+    const HEAP: u64 = 64 * 1024 * 1024;
+    const TRANSCRIPT_RESERVE: u64 = 32 * 1024 * 1024; // the transcript's max_cost
+    const BASELINE_RESERVE: u64 = 10 * 1024 * 1024; // layout cache + faces + misc
+    const ATLAS_PAGE_BYTES: u64 = 512 * 512; // one 8-bit atlas page
+    let atlas = atlas_pages as u64 * ATLAS_PAGE_BYTES;
+    let residual = HEAP.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas);
+    residual / 8 // 8 bytes/px place peak; set_max_pixels clamps to [MIN, HARD]
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     // KT-1.5d-1a (HALCYON 14.12): `--session` selects the per-user SESSION
@@ -1344,13 +1364,20 @@ pub extern "C" fn rs_main() -> i64 {
         // completed rasters into the transcript. One non-blocking pass per loop
         // (cheap when idle); a completed image bumps t.seq, so the top-of-loop
         // render shows it next pass -- the same one-pass latency as the drain.
-        if let Some(p) = places.as_mut() {
-            p.service();
-            for img in p.take_completed() {
-                let (iw, ih, n) = (img.w, img.h, img.argb.len());
-                t.inject_image(img.w, img.h, img.argb);
-                dirty = true;
-                say!("halcyond: inline image placed ({}x{}, {} px; I-47)", iw, ih, n);
+        {
+            // The place cap tracks the live atlas (F4): recompute from the
+            // current display-scaled atlas bound so a large scanout shrinks the
+            // place footprint instead of OOMing the shared heap.
+            let place_cap = place_cap_for(gs.evict_pages());
+            if let Some(p) = places.as_mut() {
+                p.set_max_pixels(place_cap);
+                p.service();
+                for img in p.take_completed() {
+                    let (iw, ih, n) = (img.w, img.h, img.argb.len());
+                    t.inject_image(img.w, img.h, img.argb);
+                    dirty = true;
+                    say!("halcyond: inline image placed ({}x{}, {} px; I-47)", iw, ih, n);
+                }
             }
         }
     }

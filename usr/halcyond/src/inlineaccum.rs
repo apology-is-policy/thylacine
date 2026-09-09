@@ -136,10 +136,12 @@ impl PlaceAccum {
 
     /// The heap this accumulator currently holds -- its buffer's CAPACITY, not
     /// its length (the capacity is what the allocator committed). After the
-    /// header parses this equals `total_len` (reserve_exact, no Vec doubling);
-    /// it is the term a server-wide place-memory budget must sum across
-    /// connections (audit F1/F2 -- the per-image cap bounds this, MAX_CONNS x it
-    /// bounds the aggregate).
+    /// header parses this equals `total_len` (reserve_exact, no Vec doubling --
+    /// audit F2). A TEST/OBSERVABILITY accessor: the runtime does NOT sum it into
+    /// a budget (audit F5). The aggregate footprint is bounded structurally --
+    /// `MAX_CONNS`=1 means one accumulator at a time, and its per-image cap is set
+    /// from the heap residual (placesrv `set_max_pixels`, F4). Were `MAX_CONNS`
+    /// ever raised, THIS is the term a real cross-connection byte budget would sum.
     pub fn reserved_bytes(&self) -> usize {
         self.buf.capacity()
     }

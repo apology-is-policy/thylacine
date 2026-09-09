@@ -103,16 +103,32 @@ Fixed (b28ee180): `MAX_CONNS` 4->1 (the spike drives one view; a second waits),
 `PLACE_MAX_PIXELS` 2->1 Mpx, and `reserve_exact` so the buffer holds exactly
 `total_len` (no doubling) -- peak place ~8 MiB, bounded by construction; plus the
 F3 POLLHUP fix. The E2E stayed 3/3 green with the tighter bounds. This is a DIRTY
-CLOSE (a P0 returned), so a round-2 re-audit of the fix is in flight. **The
+CLOSE (a P0 returned), so a round-2 re-audit of the fix followed. **The
 lesson: a per-element cap is not a per-container bound, and Vec doubling hides a
 2x factor in any "it fits" arithmetic** -- the E2E drove ONE well-behaved client,
 so only the adversarial read found it. Closed list:
 `memory/audit_inline_media_closed_list.md`.
 
-**Open / owed.** The round-2 re-audit verdict (+ its closed-list entry). A
-Fable-DIVERSITY pass when credits return (both rounds were Opus -- context
-independence without family diversity). The session-path per-pane channel, JPEG,
-`--fullscreen` (`gallery`), the obj-verb rule, and `Embed` (video) remain seams.
+**Round 2 verified the fix + sharpened the budget again.** The re-audit (Opus)
+confirmed F1/F2/F3 CLOSED with no new P0/P1, but found F4 [P2]: my fix's budget
+arithmetic reasoned only at 1280x800, and **the atlas scales with the scanout**
+(~6 MiB there, ~18 MiB at 4K) -- so at 4K a fixed 8 MiB place peak leaves a thin,
+unproven margin. The default is 1280x800 (comfortable) and the operator's HiDPI
+2560x1600 still fits, but 4K is a settable `THYLACINE_GPU_RES`, so I fixed it
+rather than documenting a ceiling: a **display-adaptive cap** (`place_cap_for` ->
+`set_max_pixels`, the heap residual after the atlas) that stays 1 Mpx (native)
+through 2560x1600 and shrinks only past ~3K. Plus F5 (the comments implied a
+wired byte-sum that wasn't there -- reworded to the real structural bound) and F6
+(the MAX_CONNS=1 sole-slot tradeoff -- documented). Round 2's F4 fix is a bounded
+budget calc, not invasive, so no round 3 is triggered; it was self-audited +
+host-tested + E2E-reverified (@b1ui3ko1j, still 3/3 green). **The second lesson:
+a heap budget that names the fixed terms but omits the display-scaled one is
+right at the reference display and wrong at the extremes.**
+
+**Open / owed.** A Fable-DIVERSITY pass when credits return (both rounds were
+Opus -- context independence without family diversity). The session-path per-pane
+channel, JPEG, `--fullscreen` (`gallery`), the obj-verb rule, and `Embed` (video)
+remain seams.
 
 ---
 ## 2026-09-09 (aux, run 6, self-compact #6) -- inline media: slice 1b (render path on real hardware) + the operator's width-fit ruling + slice 2 (vendor zune) + slice 3a (the channel wire + view's writer) + the channel design decided

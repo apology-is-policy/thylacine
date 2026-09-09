@@ -32,15 +32,20 @@ const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 const MAX_FIDS: usize = 8;
 /// The console spike drives exactly ONE `view` at a time (a user runs `view x`
 /// in their shell), so ONE connection is the honest bound -- and it is what
-/// makes the aggregate place-memory footprint safe (audit F1). A second
-/// connection WAITS (the listener drops from both poll sets while full -- see
-/// `push_fds`/`service`), which is bounded acceptance, never a spin. This is the
-/// term the heap budget multiplies: MAX_CONNS in-flight accumulators, each
-/// capped at PLACE_MAX_PIXELS, must fit the heap beside the transcript. Raising
-/// it REQUIRES either lowering PLACE_MAX_PIXELS in step or a server-wide
-/// aggregate byte budget (sum of `PlaceAccum::reserved_bytes()` across conns) --
-/// do NOT bump it alone. The session-path channel (a per-pane endpoint) is where
-/// concurrency generalizes, with its own per-pane quota.
+/// makes the aggregate place-memory footprint safe (audit F1): with ONE
+/// connection there is at most ONE in-flight accumulator, so the aggregate IS
+/// the per-image footprint, and the per-image cap is set from the heap residual
+/// (`set_max_pixels`, F4). No cross-connection byte sum is wired (F5); it is
+/// unnecessary at MAX_CONNS = 1. A second connection WAITS (the listener drops
+/// from both poll sets while full -- see `push_fds`/`service`), bounded
+/// acceptance, never a spin. KNOWN spike tradeoff (F6): a client that completes
+/// an image but never clunks/disconnects holds the sole slot, denying inline
+/// media to other shells until it dies -- `view` is short-lived and exits (EOF ->
+/// POLLHUP -> reaped), and the held memory is an empty buffer, so this is a
+/// deliberate availability tradeoff, not an OOM. Raising MAX_CONNS REQUIRES
+/// wiring a real cross-connection byte budget (sum `PlaceAccum::reserved_bytes()`)
+/// -- do NOT bump it alone. The session-path channel (a per-pane endpoint) is
+/// where concurrency generalizes, with its own per-pane quota.
 const MAX_CONNS: usize = 1;
 const P9_VERSION: &[u8] = b"9P2000.L";
 /// STATX_SIZE -- ninep exports MODE/NLINK/UID/GID but not SIZE.
@@ -57,23 +62,32 @@ const P_PLACE: u64 = 1;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 
-/// The heap-safe per-image pixel cap for the CONSOLE spike -- deliberately
-/// BELOW `inlinewire::MAX_PIXELS` (16 Mpx). The renderer runs the whole session
-/// on a fixed 64 MiB heap (`main.rs` ThylaAllocN) beside its faces + atlas + the
-/// transcript's 32 MiB content budget, so the place path's footprint must be
-/// small AND bounded across connections.
+/// The per-image pixel cap CEILING -- deliberately BELOW `inlinewire::MAX_PIXELS`
+/// (16 Mpx). The effective cap is DYNAMIC (`PlaceServer.max_pixels`, set each
+/// loop by `set_max_pixels` from the renderer's remaining heap): it never exceeds
+/// this ceiling and never drops below `PLACE_MIN_PIXELS`.
 ///
-/// THE HEAP BUDGET (audit F1/F2), the arithmetic MAX_CONNS x this cap must obey:
-/// 1 Mpx admits a full-console image (1280x800 = 1.02 Mpx fits) at native size.
-/// With `reserve_exact` the accumulator holds EXACTLY total_len = 4 MiB (no Vec
-/// doubling -- F2), and the completion `collect` adds one exact 4 MiB `Vec<u32>`
-/// transient, so ONE transfer peaks at 8 MiB. At MAX_CONNS = 1 the whole place
-/// path peaks at 8 MiB, which sits comfortably under 64 MiB beside the 32 MiB
-/// transcript cap + the faces/atlas. A larger source raster is refused (view
-/// reports "too large" and falls back to the report); the un-capped path is the
-/// gallery/session expand slice. Raising this cap or MAX_CONNS without redoing
-/// this arithmetic reintroduces the F1 OOM (2 x 2-Mpx doubled = the whole heap).
-const PLACE_MAX_PIXELS: u64 = 1024 * 1024;
+/// THE HEAP BUDGET (audit F1/F2/F4). The renderer runs the whole session on a
+/// fixed 64 MiB heap (`main.rs` ThylaAllocN) shared by the transcript's 32 MiB
+/// content budget, the atlas (which SCALES WITH THE SCANOUT -- ~6 MiB at
+/// 1280x800, ~18 MiB at 4K), the layout cache, and this place path. With
+/// `reserve_exact` (F2) one transfer holds EXACTLY total_len (no Vec doubling)
+/// and the completion `collect` adds one exact same-size `Vec<u32>` transient, so
+/// the place peak is `8 bytes x pixels`; with `MAX_CONNS = 1` (F1) that is the
+/// WHOLE place footprint. The F4 defect was budgeting at 1280x800 only, where
+/// this 1 Mpx ceiling (an 8 MiB peak) is comfortable but the atlas is smallest;
+/// at 4K the atlas alone is ~18 MiB and a fixed 8 MiB place peak leaves a thin,
+/// unproven margin. So the cap is now the heap RESIDUAL after the display-scaled
+/// atlas (`main.rs place_cap_for` -> `set_max_pixels`): it stays at this 1 Mpx
+/// ceiling through 2560x1600 (the operator's HiDPI, native-size images) and
+/// shrinks only past ~3K, where the atlas would otherwise crowd it out. A source
+/// raster over the effective cap is refused (view falls back to a report); the
+/// un-capped path is the gallery/session expand slice.
+pub const PLACE_MAX_PIXELS_HARD: u64 = 1024 * 1024;
+
+/// The per-image FLOOR -- the effective cap never drops below this even under
+/// heap pressure, so a small image (a 256x256 = 64 Kpx icon) always displays.
+pub const PLACE_MIN_PIXELS: u64 = 64 * 1024;
 
 fn qid_of(path: u64) -> p9::Qid {
     p9::Qid {
@@ -170,7 +184,7 @@ impl Conn {
     /// Read available bytes and dispatch every COMPLETE 9P frame (the nocturned
     /// shape). Completed rasters are pushed to `out`. Returns false to close the
     /// connection (EOF, a wire violation, or a reply write failure).
-    fn service(&mut self, out: &mut Vec<CompletedImage>) -> bool {
+    fn service(&mut self, out: &mut Vec<CompletedImage>, max_pixels: u64) -> bool {
         let cur = self.in_buf.len();
         if cur >= SRV_MSIZE_USIZE {
             return false; // a full msize buffered with no complete frame
@@ -200,7 +214,7 @@ impl Conn {
                 return true; // a partial frame waits for the next read
             }
             let frame: Vec<u8> = self.in_buf[..size].to_vec();
-            match self.dispatch(&frame, hdr, out) {
+            match self.dispatch(&frame, hdr, out, max_pixels) {
                 Disp::Fatal => return false,
                 Disp::Reply(rlen) => {
                     if !self.send_all(rlen) {
@@ -212,7 +226,13 @@ impl Conn {
         }
     }
 
-    fn dispatch(&mut self, tmsg: &[u8], hdr: p9::Header, out: &mut Vec<CompletedImage>) -> Disp {
+    fn dispatch(
+        &mut self,
+        tmsg: &[u8],
+        hdr: p9::Header,
+        out: &mut Vec<CompletedImage>,
+        max_pixels: u64,
+    ) -> Disp {
         let tag = hdr.tag;
         self.out_buf.clear();
         self.out_buf.resize(SRV_MSIZE_USIZE, 0);
@@ -222,7 +242,7 @@ impl Conn {
             p9::P9_TWALK => self.h_walk(tmsg, tag),
             p9::P9_TLOPEN => self.h_lopen(tmsg, tag),
             p9::P9_TREAD => self.h_read(tmsg, tag),
-            p9::P9_TWRITE => self.h_write(tmsg, tag, out),
+            p9::P9_TWRITE => self.h_write(tmsg, tag, out, max_pixels),
             p9::P9_TGETATTR => self.h_getattr(tmsg, tag),
             p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
             p9::P9_TFLUSH => self.h_flush(tmsg, tag),
@@ -392,6 +412,7 @@ impl Conn {
         tmsg: &[u8],
         tag: u16,
         out: &mut Vec<CompletedImage>,
+        max_pixels: u64,
     ) -> Result<usize, ()> {
         let a = match p9::parse_twrite(tmsg) {
             Ok(a) => a,
@@ -410,7 +431,7 @@ impl Conn {
         // while one is in flight is refused (bounds the held partials).
         match &self.accum {
             Some((afid, _)) if *afid != a.fid => return self.err(tag, p9::E_BUSY),
-            None => self.accum = Some((a.fid, PlaceAccum::new(PLACE_MAX_PIXELS))),
+            None => self.accum = Some((a.fid, PlaceAccum::new(max_pixels))),
             _ => {}
         }
         let acc = &mut self.accum.as_mut().unwrap().1;
@@ -490,6 +511,11 @@ pub struct PlaceServer {
     listener: i64,
     conns: Vec<Conn>,
     completed: Vec<CompletedImage>,
+    /// The current per-image pixel cap: the heap RESIDUAL after the display-scaled
+    /// atlas (set each loop by `set_max_pixels`, F4). A transfer's accumulator is
+    /// created with this value, so the cap tracks the live display without any
+    /// per-connection state.
+    max_pixels: u64,
 }
 
 impl PlaceServer {
@@ -510,7 +536,18 @@ impl PlaceServer {
             listener,
             conns: Vec::new(),
             completed: Vec::new(),
+            max_pixels: PLACE_MAX_PIXELS_HARD,
         })
+    }
+
+    /// Set the effective per-image pixel cap from the renderer's remaining heap
+    /// (F4). The caller derives it from the live display-scaled atlas each loop;
+    /// this clamps it to `[PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD]` so a small
+    /// image always fits and no image ever exceeds the ceiling. A transfer in
+    /// flight keeps the cap it started with (the accumulator already holds it);
+    /// the next transfer picks up the new value.
+    pub fn set_max_pixels(&mut self, px: u64) {
+        self.max_pixels = px.clamp(PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD);
     }
 
     /// Append this server's fds (the listener while there is room, plus every
@@ -578,7 +615,8 @@ impl PlaceServer {
         while i > 0 {
             i -= 1;
             let pf = pfds[listener_slot + i];
-            if pf.revents & (T_POLLIN | T_POLLHUP) != 0 && !self.conns[i].service(&mut self.completed)
+            if pf.revents & (T_POLLIN | T_POLLHUP) != 0
+                && !self.conns[i].service(&mut self.completed, self.max_pixels)
             {
                 let _ = unsafe { t_close(self.conns[i].handle) };
                 self.conns.remove(i);

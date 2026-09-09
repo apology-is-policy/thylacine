@@ -279,14 +279,18 @@ halcyond's exposure is a bounded WRITE of untrusted bytes, not a codec.
   malformed / over-cap / non-sequential / trailing-past-total write is refused
   (Rlerror) and the transfer torn down. This is the format-fuzz surface, and it
   is where the tests live (Invariants + Tests below).
-  - **The heap budget** (audit F1, the OOM the round found + closed): the cap
-    bounds ONE image; `MAX_CONNS` bounds how many accumulate at once. With
-    `MAX_CONNS` = 1 (the console spike drives one `view`) and `reserve_exact`,
-    the whole place path peaks at ~8 MiB (one 4 MiB accumulator + one 4 MiB
-    completion `Vec<u32>`), which fits the 64 MiB heap beside the transcript's
-    32 MiB content budget + the faces/atlas. Raising `MAX_CONNS` or the cap
-    without redoing that arithmetic reintroduces the OOM (the round-1 defect was
-    `MAX_CONNS`=4 x a doubled 16 MiB = the whole heap).
+  - **The heap budget** (audit F1/F4, the OOM the round found + closed): the cap
+    bounds ONE image; `MAX_CONNS` = 1 bounds how many accumulate at once (one), so
+    with `reserve_exact` the whole place path peaks at `8 bytes x pixels` (a 4 MiB
+    accumulator + a 4 MiB completion `Vec<u32>` at 1 Mpx). The per-image cap is
+    DISPLAY-ADAPTIVE (`main.rs place_cap_for` -> `PlaceServer::set_max_pixels` each
+    loop): the atlas scales with the scanout (~6 MiB at 1280x800, ~18 MiB at 4K),
+    so the cap is the heap RESIDUAL after it -- holding the full 1 Mpx (native-size)
+    through 2560x1600 (the operator's HiDPI) and shrinking only past ~3K, where a
+    fixed 8 MiB place peak beside the ~18 MiB atlas + 32 MiB transcript would
+    OOM. The round-1 defect was `MAX_CONNS`=4 x a doubled 16 MiB = the whole heap;
+    the round-2 F4 refinement was the atlas term. Raising `MAX_CONNS` requires a
+    real cross-connection byte budget -- do NOT bump it alone.
 - **Authority** (the console spike): none beyond reachability. Injecting an image
   into the console transcript is at parity with writing text to `/dev/cons`
   (which any holder of the console already can), so the spike gates on
