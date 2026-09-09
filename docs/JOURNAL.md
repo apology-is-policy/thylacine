@@ -532,7 +532,7 @@ present. Filed to the vault on call 0076 with the three specific errors; the
 `surface <- header` mapping the note calls "the one mapping worth pinning" is
 unchanged and still correct.
 
-### The next chunk's premise was false: tapestryd's tests could never have run
+### I fabricated a defect, and the code had told me so before I started
 
 Both TH-6 rounds named `usr/tapestryd/src/server.rs` (17941 lines) the
 least-covered surface, so it was the obvious thing to open next. The chunk
@@ -555,22 +555,53 @@ assembler rejects. The guest target is no escape either -- `aarch64-unknown-none
 has no test runner. And `grep -rn "cargo test" tools/ Makefile` returns
 nothing, so no gate was ever going to report them as skipped.
 
-**A test that cannot be compiled is indistinguishable from one that passes,
-because neither produces a failure.** Four plausible-looking cases sat there
-reading as coverage. Absence of a red is not evidence of a green.
+I wrote that up as an unnoticed hazard -- "four plausible-looking cases sitting
+there reading as coverage", "a lesson recorded in one crate's manifest does not
+reach its sibling", "a test that cannot be compiled is indistinguishable from
+one that passes". Committed it, pushed it, and put it in a status row and an
+AUDIT-TRIGGERS addendum.
 
-The lesson was already written down -- in this tree, in the sibling crate's
-manifest. `usr/halcyond/Cargo.toml` opens with *"lib + bin from birth (the
-H-2a lesson: a no_std bin crate's tests are dormant)"* and even explains doing
-the same for two of its own dependencies, *"default-features off drops the
-`bin` process, whose libthyla-rs dep does not host-compile"*. The pattern was
-proven and the hazard was named. It simply never propagated one directory
-over. **A lesson recorded in one crate's manifest does not reach its sibling.**
+**Every word of that framing is false, and the file I had just read said so.**
+Directly above the test module:
 
-Applied it: `[lib]` carrying `pane` / `chords` / `keymap` (each verified to
-reference no syscall crate -- zero `libthyla_rs`, `libdriver` or `say!` hits),
-`[[bin]] required-features = ["guest"]`, the guest deps optional. The four
-tests now run and pass; they were correct all along.
+```rust
+// DORMANT host-harness tests (the G-4f named seam: tapestryd is no_std +
+// aarch64-asm, so `cargo test` cannot host-build it -- these document the
+// grammar + the rebind/swallow-set invariant; the in-guest witness is
+// ls-gfx-chords.exp).
+```
+
+That comment names the dormancy, diagnoses the mechanism EXACTLY -- "no_std +
+aarch64-asm, so cargo test cannot host-build it", which is precisely what I
+then "discovered" by running the compiler -- states that the tests exist to
+DOCUMENT an invariant rather than to cover it, and names a real in-guest
+witness. `tools/interactive/ls-gfx-chords.exp` exists and does witness the
+chord grammar; I checked, rather than assuming, before writing this correction.
+
+The same `DORMANT ... G-4f named seam` comment sits in four places
+(`tapestryd/src/chords.rs:256`, `aurora/src/{config,osd,render}.rs`). It is a
+named convention traceable to the G-4f audit close (`5cc97785`), whose own
+status row calls it a "dormant host-harness seam". So the lesson did not fail
+to propagate -- it propagated to both crates deliberately, and I mistook a
+recorded decision for an oversight.
+
+**The mechanism of the error is the reusable part: I ran the compiler before I
+read the file.** The measurement was real; the conclusion drawn from it was
+confident and wrong, because a measurement cannot tell you whether someone
+already knew. And the failure was self-concealing -- the chunk around it was
+sabotage-measured and gated, so it *looked* like exactly the kind of rigorous
+work whose conclusions you would not re-examine. **Rigour on the fix does not
+validate the framing of the finding.** On this project a fabricated defect
+outranks a missed one; this was a fabricated one, wearing a green test suite.
+
+What the change is actually worth, stated without the false framing: applying
+halcyond's lib+bin pattern (`[lib]` carrying `pane` / `chords` / `keymap`, each
+verified to reference no syscall crate; `[[bin]] required-features = ["guest"]`;
+guest deps optional) turns four DOCUMENTARY tests into EXECUTING ones. That is
+a real gain -- a test that only documents can drift silently from the code it
+describes, and one that runs cannot -- but it is an improvement to a considered
+design, not the closure of a defect. And it is the enabler for the part that
+does stand on its own, below.
 
 That change has a trap of its own, which the manifest now records: a bin whose
 `required-features` are unmet is **skipped silently** rather than failing, and
@@ -591,9 +622,9 @@ mapping the verdict (`Malformed` -> E_INVAL, `NotYours` -> E_PERM). A struct
 rather than a positional argument list because the two bools and the four
 u32s are mutually transposable and the compiler would not catch a swap.
 
-This is the rule from `9d5f38ee` -- the one the audit-trigger row records as
-having no witness of any kind, host or guest, and which runs 46f and 46h both
-left owed. Eight tests now cover it, each one field off a valid base, and the
+This is the rule from `9d5f38ee`, and this half needs no reframing: the
+audit-trigger row records it as having no witness of any kind, host or guest,
+*independently of any DORMANT comment*, and runs 46f and 46h both left it owed. Eight tests now cover it, each one field off a valid base, and the
 two non-obvious ones are sabotage-measured in isolation: deleting the
 ownership arm fails `a_system_renderer_may_not_take_a_declared_sessions_bar`
 and **nothing else** -- both positive controls stay green, so the test
