@@ -2825,12 +2825,6 @@ impl Gpu {
         )
     }
 
-    /// The single-run form, for the object classes that stay contiguous by
-    /// design (plain DMA rings, GPU BOs). Named rather than open-coded at each
-    /// call site so "this one is contiguous on purpose" reads as a decision.
-    pub fn attach_backing_one(&mut self, resource_id: u32, pa: u64, len: u32) -> Result<(), Error> {
-        self.attach_backing(resource_id, &[Seg { pa, len: len as u64 }])
-    }
 
     pub fn detach_backing(&mut self, resource_id: u32) -> Result<(), Error> {
         let req_va = self.ring_va + REQ_OFF;

@@ -18,6 +18,7 @@
 
 #include <thylacine/burrow.h>
 #include <thylacine/dma_handle.h>
+#include <thylacine/handle.h>   // handle_alloc/close for the SYS_DMA_SEGMENTS legs
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
@@ -25,6 +26,7 @@
 #include <thylacine/vma.h>
 
 #include "../../arch/arm64/uart.h"
+#include "../../mm/phys.h"   // alloc_pages/free_pages for the hand-built skein
 
 void test_dma_handle_create_basic(void);
 void test_dma_handle_create_zero_size_rejected(void);
@@ -377,8 +379,18 @@ void test_skein_small_weave_stays_one_block(void) {
 
 // PLAIN DMA never scatters, and that is the load-bearing half of the scope: a
 // virtqueue descriptor table must be contiguous because the device walks it by
-// address with no length list to consult. If a later change scatters it,
-// virtio-net and virtio-blk break in a way no GPU test would see.
+// address with no length list to consult.
+//
+// WHAT GUARDS THAT IS NOT THIS TEST, said plainly because the comment here
+// used to claim otherwise. Add DMA_SUBTYPE_PLAIN to dma_create_body's
+// `scatters` predicate and this stays GREEN -- KOBJ_DMA_MAX_SIZE is 1 MiB, so
+// `aligned_size > SKEIN_BLOCK` is false and nblk is 1 either way. The real
+// guard is _Static_assert(KOBJ_DMA_MAX_SIZE <= SKEIN_BLOCK), which fires at
+// compile time and is therefore never reached at runtime at all.
+//
+// What this test DOES earn is the page walk: plain DMA resolves across its
+// whole envelope. That is the assertion the P0's original test omitted, and
+// omitting it is how the P0 shipped.
 //
 // The GPU-BO half went the other way. The design's weave-only wording
 // justified leaving a class unscattered by that class's 1 MiB envelope -- which
@@ -471,41 +483,104 @@ void test_skein_zero_init_across_blocks(void) {
     kobj_dma_unref(k);
 }
 
-// A SINGLE-BLOCK object LARGER than SKEIN_BLOCK must resolve throughout.
+// The LARGEST single-block object the API can now produce -- exactly one
+// SKEIN_BLOCK -- must resolve across the whole of it.
 //
-// This is the case scope_is_weave_only constructs and never queries: a GPU BO
-// is single-block by design but its envelope is KOBJ_DMA_GPU_BO_MAX_SIZE
-// (64 MiB), so `nblk == 1` and `size > SKEIN_BLOCK` is an ORDINARY state, not
-// an exotic one -- tapestryd's WARP_CTX_BACKING_MAX is 64 MiB and its own
-// comment names a client's 32 MiB texture heap. Resolving such an object by
-// dividing the offset by SKEIN_BLOCK yields a block index past nblk and
-// refuses every byte after the first block, so the client faults on most of
-// its own buffer.
+// NAMED HONESTLY, because this test's own history is the lesson. It was
+// written as `single_block_larger_than_a_block` to catch a real P0: the
+// resolver divided by the CONSTANT, so a GPU BO above 2 MiB (envelope 64 MiB;
+// tapestryd's own comment names a client's 32 MiB texture heap) lost every
+// page past its first block. Then the audit's F2 fix made GPU BOs SCATTER --
+// which is correct, and which also made `nblk == 1 && size > SKEIN_BLOCK`
+// UNREACHABLE FROM THE API. So the test kept its old name while quietly
+// losing the ability to construct what the name claimed.
 //
-// Asserting nblk == 1 was never enough: the bound has to be exercised on the
-// object that has it, not merely on an object that could.
-void test_skein_single_block_larger_than_a_block(void) {
-    // Deliberately the SMALLEST size that exercises the property: one block
-    // plus a page. The obvious 8 * SKEIN_BLOCK would demand a 16 MiB
-    // naturally-aligned buddy run on every boot -- the exact allocation class
-    // this whole change exists to characterise as unreliable -- putting it on
-    // the assertion path of the test that certifies the fix, where a
-    // fragmentation failure would read as a resolver defect.
-    //
-    // The subject is a plain-DMA-style single-block object built by hand
-    // rather than a subtype, because since the GPU-BO extension every kernel
-    // subtype that can exceed SKEIN_BLOCK now SCATTERS -- so the only way to
-    // reach `nblk == 1 && size > SKEIN_BLOCK` from the API is a weave or BO
-    // that is exactly one block. We take the largest such object and check the
-    // stride is derived from IT, not from the constant.
+// `skein_stride`'s single-block arm is therefore DEFENSE, not live logic:
+// for every reachable object it returns a value the constant would have
+// matched. It stays because the case it covers is one subtype-envelope change
+// away -- a GPU BO WAS exactly that case -- and its live guard is the
+// `_Static_assert(KOBJ_DMA_MAX_SIZE <= SKEIN_BLOCK)` plus the fact that
+// `dma_create_body`'s `scatters` predicate is an explicit enumeration, so a
+// new subtype cannot join the unscattered class without someone typing it
+// there.
+//
+// What this test still earns: the whole-size walk. Round 1's P0 got through
+// because the test that built the dangerous object asserted only its SHAPE
+// (`nblk == 1`) and never resolved an offset. Walking is the habit that
+// catches the next one.
+// THE P0'S DISCRIMINATING REGRESSION TEST, restored.
+//
+// It was lost twice over, and both losses are instructive. The original
+// asserted only `nblk == 1` on an 8 MiB GPU BO -- constructing the dangerous
+// object and never querying it, which is how the P0 shipped. The replacement
+// walked every page but was then reduced to a ONE-BLOCK object to stop it
+// demanding a 16 MiB naturally-aligned run on every boot -- and at exactly one
+// block, `off / SKEIN_BLOCK` is 0 for every in-range offset, so it passes on
+// the BUGGY resolver too. A fix for a fragile allocation quietly removed the
+// only test that could fail.
+//
+// The state is unreachable through the API (every scattering subtype scatters,
+// and plain DMA is static-asserted under one block), so it is built DIRECTLY.
+// That is sound because kobj_dma_pa_at reads only magic / size / nblk /
+// blk[i].{pa,order,pages} and never dereferences `pages` -- the one page below
+// exists so the liveness guard passes and the PA is real.
+//
+// CLAUDE.md: "every audit finding that can be made to fail without the fix
+// MUST land a regression test." This one can: a host harness measured 3584
+// pages unresolvable under the constant stride and 0 under the derived one.
+void test_skein_stride_is_the_objects_not_the_constant(void) {
+    struct page *pg = alloc_pages(0, KP_ZERO);
+    TEST_ASSERT(pg != NULL, "backing page alloc failed");
+
+    // A single-block object spanning 16 MiB: the shape the API can no longer
+    // mint but the resolver must still handle, because it is one
+    // subtype-envelope change away -- and a GPU BO WAS exactly that change.
+    // static, not `= {0}`: the struct carries an inline 32-entry block array,
+    // so a stack initializer emits a memset the freestanding kernel has no
+    // symbol for. BSS gives the same zeroing with no libc, and the test runs
+    // once in a single-threaded window.
+    static struct KObj_DMA k;
+    k.magic       = KOBJ_DMA_MAGIC;
+    k.size        = 8 * SKEIN_BLOCK;
+    k.nblk        = 1;
+    k.blk[0].pa    = page_to_pa(pg);
+    // order 12 = 4096 pages = 16 MiB, MATCHING size. Not 11: that is 8 MiB,
+    // and the resolver's own "bound the offset against the block's OWN
+    // allocation" guard then correctly refuses every offset past 8 MiB of a
+    // 16 MiB object -- a malformed skein failing closed, which is the guard
+    // working, not the fix failing. Caught by running it; the recipe that
+    // proposed 11 was a hypothesis, not a measurement.
+    k.blk[0].order = 12;
+    k.blk[0].pages = pg;
+
+    // Under a constant SKEIN_BLOCK stride every offset at or past 2 MiB gives
+    // a block index >= nblk and resolves to 0. Under the object's own stride
+    // they all resolve. This assertion FAILS on the pre-fix resolver.
+    TEST_EXPECT_EQ(kobj_dma_pa_at(&k, SKEIN_BLOCK), k.blk[0].pa + SKEIN_BLOCK,
+                   "the first offset past one block must resolve");
+    TEST_EXPECT_EQ(kobj_dma_pa_at(&k, 4 * SKEIN_BLOCK), k.blk[0].pa + 4 * SKEIN_BLOCK,
+                   "mid-object must resolve");
+    TEST_EXPECT_EQ(kobj_dma_pa_at(&k, k.size - PAGE_SIZE),
+                   k.blk[0].pa + k.size - PAGE_SIZE,
+                   "the last page must resolve");
+    TEST_EXPECT_EQ(kobj_dma_block_len(&k, 0), (u64)k.size,
+                   "the single block must report the whole buffer");
+    // Still fail-closed at the edge.
+    TEST_EXPECT_EQ(kobj_dma_pa_at(&k, k.size), (u64)0,
+                   "one byte past the end must refuse");
+
+    free_pages(pg, 0);
+}
+
+void test_skein_one_block_resolves_throughout(void) {
+    // Exactly one block, not 8 -- the obvious `8 * SKEIN_BLOCK` would demand a
+    // 16 MiB naturally-aligned buddy run on every boot, the exact allocation
+    // class this change exists to call unreliable, on the assertion path of a
+    // test whose failure would then read as a resolver defect.
     struct KObj_DMA *k = kobj_dma_create_gpu_bo(SKEIN_BLOCK);
     TEST_ASSERT(k != NULL, "one-block gpu_bo create failed");
     TEST_EXPECT_EQ((int)k->nblk, 1, "exactly one block must not scatter");
 
-    // The whole buffer resolves contiguously off the one block. With a
-    // constant stride the LAST page (offset SKEIN_BLOCK - PAGE_SIZE) still
-    // resolves, so the discriminating case is one page further -- covered by
-    // the scatter tests either side of this one.
     for (u64 off = 0; off < k->size; off += PAGE_SIZE) {
         TEST_EXPECT_EQ(kobj_dma_pa_at(k, off), k->blk[0].pa + off,
                        "a single-block object must resolve across its whole size");
@@ -516,3 +591,77 @@ void test_skein_single_block_larger_than_a_block(void) {
                    "one byte past the end must still refuse");
     kobj_dma_unref(k);
 }
+
+// =============================================================================
+// SYS_DMA_SEGMENTS -- the refusal legs.
+// =============================================================================
+//
+// The guest exercises only the SUCCESS path (tapestryd reads a weave's list on
+// every mint), so without these the rights gate, the buffer bound and -- most
+// importantly -- refuse-vs-truncate are reachable from no test at all. That
+// last one is the leg whose failure is SILENT: a truncated list gets attached
+// as a whole backing, and the device reads a prefix plus whatever physical
+// memory follows it.
+//
+// Driven on kproc, the test_allowance_pci_claim_handler_gate pattern: the
+// handler reads current_thread()->proc, so a hand-rolled Proc would not be
+// what it sees. kproc holds CAP_ALL, so the capability gate passes and the
+// REFUSAL legs are what these actually measure.
+extern s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries);
+
+void test_dma_segments_refuses_rather_than_truncates(void) {
+    struct Proc *me = kproc();
+    TEST_ASSERT(me != NULL, "kproc");
+
+    // A weave that genuinely scatters, so nblk > 1 and the bound has teeth.
+    struct KObj_DMA *k = kobj_dma_create_weave(4 * SKEIN_BLOCK);
+    TEST_ASSERT(k != NULL, "weave create failed");
+    TEST_EXPECT_EQ((int)k->nblk, 4, "the subject must actually be scattered");
+
+    hidx_t h = handle_alloc(me, KOBJ_DMA, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, k);
+    TEST_ASSERT(h >= 0, "handle_alloc failed");
+
+    // An unmapped user VA. Every assertion below must refuse BEFORE the
+    // copy-out reaches it -- so a leg that wrongly proceeded would fail on the
+    // uaccess rather than pass, which is the safe direction for this fixture.
+    const u64 unmapped_user_va = 0x60000000ull;
+
+    TEST_EXPECT_EQ(sys_dma_segments_handler((u64)h, unmapped_user_va, 1), (s64)-1,
+                   "count > max_entries must REFUSE, never truncate");
+    TEST_EXPECT_EQ(sys_dma_segments_handler((u64)h, unmapped_user_va, 3), (s64)-1,
+                   "one short of the count must still refuse");
+
+    // The rights gate: RIGHT_MAP is required, mirroring SYS_DMA_MAP, because
+    // the call discloses the same thing -- where the caller's own buffer lives.
+    kobj_dma_ref(k);
+    hidx_t hn = handle_alloc(me, KOBJ_DMA, RIGHT_READ, k);
+    TEST_ASSERT(hn >= 0, "second handle_alloc failed");
+    TEST_EXPECT_EQ(sys_dma_segments_handler((u64)hn, unmapped_user_va, 64), (s64)-1,
+                   "a handle without RIGHT_MAP must be refused");
+
+    TEST_EXPECT_EQ(sys_dma_segments_handler(9999, unmapped_user_va, 64), (s64)-1,
+                   "an out-of-range handle must be refused");
+    TEST_EXPECT_EQ(sys_dma_segments_handler((u64)h, 0, 64), (s64)-1,
+                   "a NULL user buffer must be refused even when the count fits");
+
+    handle_close(me, hn);
+    handle_close(me, h);
+}
+
+// WHAT THIS TEST CANNOT ESTABLISH, said plainly rather than papered over with
+// a control that is not one.
+//
+// Every leg above returns a bare -1, and so would a handler that refuses
+// EVERYTHING -- these assertions are all satisfied by a broken-shut syscall.
+// The usual remedy is a positive control one variable away, and there is no
+// cheap one here: the handler copies out through uaccess to the CURRENT Proc,
+// which during the kernel suite is kproc, and giving kproc a mapped user
+// buffer to copy into is more fixture than this leg is worth.
+//
+// The success path is covered elsewhere, and load-bearingly: tapestryd calls
+// t_dma_segments on EVERY weave and BO mint, and `scanout direct 0 slot 0` in
+// the boot log is downstream of a correct list -- a truncated or empty one
+// produces a black or torn scanout, which the G-4 console gate fails on.
+// So the split is: the guest boot proves the success path, and these prove the
+// refusals it never takes. Neither is sufficient alone, and this comment
+// exists so a future reader does not mistake this file for the whole story.

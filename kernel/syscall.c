@@ -939,9 +939,14 @@ static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     // outcome for code that assumed contiguity; one that does calls
     // SYS_DMA_SEGMENTS for the list.
     //
-    // Every pre-skein caller (virtio-net, virtio-blk, every ring) mints via
-    // plain SYS_DMA_CREATE, which is always nblk == 1, so none of them can
-    // reach this arm.
+    // WHO REACHES THIS ARM, stated correctly because this is the one place a
+    // reader looks it up. Plain SYS_DMA_CREATE is always nblk == 1, so NO
+    // virtio driver (net, blk, input, gpu, every ring) can reach it -- their
+    // contract is untouched. tapestryd's weaves AND its GPU BOs both DO reach
+    // it, since both subtypes scatter above SKEIN_BLOCK; every one of its map
+    // sites routes through map_dma, which is the sole place that knows this
+    // value. (Note "every ring" was listed as unreachable for one commit --
+    // wring_mint mints via t_dma_create_gpu_bo, not plain DMA.)
     if (kd->nblk != 1) {
         handle_put(&hh);
         return SYS_DMA_MAP_PA_SCATTERED;
@@ -987,7 +992,13 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len);
 // Failure cases: no/corrupt Proc; missing CAP_HW_CREATE; bad handle (range,
 // kind, missing RIGHT_MAP); corrupted object; count > max_entries; the user
 // buffer failing the range check or the copy-out faulting.
-static s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
+// Non-static so the kernel test suite can drive the REFUSAL legs directly.
+// The guest exercises only the success path (tapestryd reads a weave's list
+// on every mint), so refuse-vs-truncate, the rights gate and the buffer
+// bound would otherwise be reachable from no test at all -- and
+// refuse-vs-truncate is the leg whose failure is SILENT (a partial backing
+// attached as a whole one).
+s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;

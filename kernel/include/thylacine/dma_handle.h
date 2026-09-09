@@ -84,10 +84,12 @@ struct page;
 // render target / texture / vertex buffer the GPU service allocates per
 // client request. Same envelope as the weave (a 4K RGBA target with mips is
 // ~44 MiB); larger scenes split across BOs. Runtime-allocated (unlike weaves,
-// which the compositor mints early), so long-uptime buddy fragmentation is a
-// real caveat for the big end of the envelope — scatter-gather backing
-// (virtio ATTACH_BACKING takes an entry list; the contiguity is OUR object's
-// constraint, not the device's) is the recorded follow-on if it bites.
+// which the compositor mints early), so long-uptime buddy fragmentation was a
+// real caveat for the big end of the envelope. IT BIT, AND THE FOLLOW-ON THIS
+// COMMENT RECORDED IS BUILT: a GPU BO above SKEIN_BLOCK is now a skein, backed
+// by an ATTACH_BACKING entry list (the contiguity was always OUR object's
+// constraint, never the device's). Raising this envelope is safe up to
+// KOBJ_DMA_MAX_BLOCKS * SKEIN_BLOCK, which a _Static_assert below pins.
 #define KOBJ_DMA_GPU_BO_MAX_SIZE (64ull * 1024 * 1024)
 
 // WEAVE-SKEIN (docs/WEAVE-SKEIN-DESIGN.md §3.3): the skein's block
@@ -104,13 +106,23 @@ struct page;
 #define SKEIN_BLOCK        (2ull * 1024 * 1024)
 #define SKEIN_BLOCK_PAGES  (SKEIN_BLOCK / PAGE_SIZE)
 
-// The most blocks any KObj_DMA can hold. Bounded by the largest envelope
-// (the weave's) at the block granularity, so the block array is inline and
-// fixed rather than separately allocated — which removes an allocation, a
-// free, and the whole double-free / dangling-array finding class from an
-// I-40/I-45 surface. 32 * 24 B = 768 B per object; a handful are ever live.
+// The most blocks any KObj_DMA can hold: the LARGEST SCATTERING ENVELOPE at
+// the block granularity. The array is inline and fixed rather than separately
+// allocated — which removes an allocation, a free, and the whole double-free /
+// dangling-array finding class from an I-40/I-45 surface. 32 * 24 B = 768 B
+// per object; a handful are ever live.
+//
+// DERIVED from the max of both scattering envelopes, not from the weave's.
+// They are equal today (64 MiB each) and this read `WEAVE_MAX_SIZE` alone for
+// one commit — satisfied by COINCIDENCE, since nothing linked them and the
+// GPU-BO envelope's own comment invites a raise. A raise would then leave
+// every oversized BO returning a bare NULL from the runtime guard, which is
+// the diagnostic-free shape this file's other asserts exist to prevent.
+#define KOBJ_DMA_SCATTER_MAX_SIZE                                  \
+    (KOBJ_DMA_WEAVE_MAX_SIZE > KOBJ_DMA_GPU_BO_MAX_SIZE            \
+         ? KOBJ_DMA_WEAVE_MAX_SIZE : KOBJ_DMA_GPU_BO_MAX_SIZE)
 #define KOBJ_DMA_MAX_BLOCKS \
-    ((unsigned)(KOBJ_DMA_WEAVE_MAX_SIZE / SKEIN_BLOCK))
+    ((unsigned)(KOBJ_DMA_SCATTER_MAX_SIZE / SKEIN_BLOCK))
 
 // The block array is fixed, so the bound that keeps a weave inside it is a
 // COMPILE-TIME obligation, not a runtime hope: the envelope must not need more
@@ -119,6 +131,9 @@ struct page;
 // envelope and a kernel-memory write past blk[].
 _Static_assert(KOBJ_DMA_WEAVE_MAX_SIZE <= (u64)KOBJ_DMA_MAX_BLOCKS * SKEIN_BLOCK,
                "a full weave must fit in KObj_DMA.blk[]");
+// The GPU-BO envelope is equally subject to it since that subtype scatters.
+_Static_assert(KOBJ_DMA_GPU_BO_MAX_SIZE <= (u64)KOBJ_DMA_MAX_BLOCKS * SKEIN_BLOCK,
+               "a full GPU BO must fit in KObj_DMA.blk[]");
 // The buddy allocates in power-of-two page runs, so a block size that is not
 // one would make order_for_pages over-allocate every block silently.
 _Static_assert(SKEIN_BLOCK % PAGE_SIZE == 0 &&

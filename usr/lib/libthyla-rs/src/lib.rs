@@ -1170,9 +1170,19 @@ pub unsafe fn t_dma_create_gpu_bo(size: u64, rights: u32) -> i64 {
 // the underlying PA. `vaddr` must be page-aligned (4 KiB); `prot` must be
 // non-zero, only R/W bits set (EXEC rejected per W^X), no W-without-R.
 //
-// Returns the buffer's PA on success (always non-negative since PA fits
-// in 40 bits at v1.0), -1 on validation failure. Driver embeds the PA
-// into device-visible descriptors (VirtIO virtqueue rings, etc.).
+// THREE returns, and conflating the two negative ones leaks memory:
+//   >= 0  the buffer's PA (fits in 40 bits at v1.0). Embed it in device-
+//         visible descriptors (VirtIO virtqueue rings, etc.).
+//   -2    T_DMA_MAP_PA_SCATTERED -- THE MAPPING SUCCEEDED. The object is a
+//         SKEIN (physically scattered) and has no single PA, so none is
+//         invented. The VA is live and YOURS: t_burrow_detach it if you give
+//         up. Call t_dma_segments for the backing list.
+//   -1    validation failure. Nothing is installed; nothing to release.
+//
+// Which objects scatter: weaves and GPU BOs above SKEIN_BLOCK (2 MiB). Plain
+// t_dma_create is always contiguous, so a virtio driver cannot see -2 -- but
+// `if rc < 0 { close(h) }` is the WRONG shape the moment a caller's handle
+// comes from anywhere else, because it drops a live mapping on the floor.
 //
 // Safety: handle must be valid + held by the caller.
 #[inline(always)]
@@ -1215,6 +1225,14 @@ pub struct TDmaSeg {
 // and the drift landed in the fourth.
 const _: () = assert!(core::mem::size_of::<TDmaSeg>() == 16);
 const _: () = assert!(core::mem::align_of::<TDmaSeg>() == 8);
+// The OFFSETS are the half that catches the drift actually worth catching.
+// Size and alignment alone are satisfied by a field SWAP -- `{ len, pa }` is
+// still 16 bytes, 8-aligned, and repr(C) lays it out faithfully swapped, so
+// every consumer would read a length where the kernel wrote a PA and hand the
+// device a length as an address. Narrowing `len` to u32 passes them too
+// (12 padded to 16). These are the mirror of the kernel's offsetof asserts.
+const _: () = assert!(core::mem::offset_of!(TDmaSeg, pa) == 0);
+const _: () = assert!(core::mem::offset_of!(TDmaSeg, len) == 8);
 
 // t_dma_segments — read a KObj_DMA's backing segment list (SYS_DMA_SEGMENTS).
 //

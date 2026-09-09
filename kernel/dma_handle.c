@@ -15,9 +15,15 @@
 // WEAVE-SKEIN (docs/WEAVE-SKEIN-DESIGN.md): "the page chunk" is a LIST of
 // chunks. A weave above SKEIN_BLOCK is backed by N 2 MiB runs instead of one
 // power-of-two span, because a single span of a 48.8 MiB weave means an
-// order-14 (64 MiB, naturally aligned) buddy allocation that fails with
-// 1889 MiB free. Plain DMA and GPU BOs still take exactly one block, so their
-// behaviour is byte-identical to before. Everything downstream reaches the
+// order-14 (64 MiB, naturally aligned) buddy allocation on a fragmented heap.
+// PLAIN DMA still takes exactly one block, so virtio-net/blk and every ring
+// are byte-identical to before; the DEVICE-FACING subtypes -- weave AND GPU BO
+// -- both scatter above SKEIN_BLOCK. (This sentence said GPU BOs did not, for
+// one commit, INSIDE the paragraph the correction below was appended to: the
+// author was editing two lines lower and did not read up. Third instance of
+// the class in this chunk alone, which is the argument for re-reading a whole
+// comment block rather than the line being changed.) Everything downstream
+// reaches the
 // backing through kobj_dma_pa_at, which handles nblk == 1 as the same case --
 // but note that "one resolver, so nothing can drift" is a claim about THIS
 // function only, and it was FALSE the first day it was written: the resolver
@@ -107,17 +113,36 @@ static void dma_free_blocks(struct KObj_DMA *k, u32 n) {
     }
 }
 
-// The buffer distance between consecutive blocks.
+// The buffer distance between consecutive blocks: SKEIN_BLOCK for a real
+// skein, the whole size for a single-block object (its one block spans the
+// entire buffer).
 //
-// SKEIN_BLOCK for a real skein -- but a SINGLE-block object's one block spans
-// the WHOLE buffer, and that is not a degenerate case: plain DMA is capped at
-// 1 MiB, but a GPU BO is single-block BY DESIGN with a 64 MiB envelope, so
-// `nblk == 1 && size > SKEIN_BLOCK` is ordinary. Dividing such an object's
-// offsets by SKEIN_BLOCK yields an index past nblk and refuses every byte
-// after the first 2 MiB, i.e. a client faults on most of its own buffer.
+// DEFENSE, NOT LIVE LOGIC -- and knowing which it is matters, because the
+// alternative reading gets it deleted. It was live: the resolver divided by
+// the constant, and a GPU BO -- single-block with a 64 MiB envelope -- lost
+// every page past its first 2 MiB, which is a client faulting on most of its
+// own buffer. Then GPU BOs were made to scatter, and `nblk == 1 && size >
+// SKEIN_BLOCK` became UNREACHABLE from the API: for every object that can now
+// exist, this returns a value dividing by the constant would have matched.
+//
+// MEASURED, not argued: over 72346 pages spanning every reachable class and
+// size (plain / weave / gpu_bo x 12 sizes incl. both sides of the block
+// boundary and the full envelope), the derived and constant strides agree on
+// EVERY page -- 0 differences, 0 unresolvable. Hand-build the unreachable
+// state instead (single-block, 16 MiB) and the constant leaves 3584 pages
+// unresolvable while the derived leaves none. So the arm is inert today and
+// load-bearing the moment the state returns.
+//
+// It stays because that state is one subtype-envelope change away, and a GPU
+// BO WAS exactly that change. Its live guards are the
+// _Static_assert(KOBJ_DMA_MAX_SIZE <= SKEIN_BLOCK) below the envelopes, and
+// the fact that dma_create_body's `scatters` predicate is an explicit
+// enumeration -- a new subtype cannot join the unscattered class without
+// someone typing it there, and this is what makes that safe when they do.
 //
 // Derived rather than stored: a stored stride is a second source of truth
-// about the same fact, and the two can drift.
+// about the same fact, and the two can drift -- which is precisely how the
+// resolver and kobj_dma_block_len came to disagree in the first place.
 static inline u64 skein_stride(const struct KObj_DMA *k) {
     return (k->nblk == 1) ? (u64)k->size : SKEIN_BLOCK;
 }

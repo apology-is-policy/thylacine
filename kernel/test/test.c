@@ -1588,7 +1588,9 @@ void test_skein_scope_plain_never_scatters(void);
 void test_skein_gpu_bo_scatters(void);
 void test_skein_full_envelope_weave(void);
 void test_skein_zero_init_across_blocks(void);
-void test_skein_single_block_larger_than_a_block(void);
+void test_skein_one_block_resolves_throughout(void);
+void test_skein_stride_is_the_objects_not_the_constant(void);
+void test_dma_segments_refuses_rather_than_truncates(void);
 void test_handle_hw_mmio_dup_rejected(void);
 void test_handle_hw_irq_dup_rejected(void);
 void test_handle_hw_mmio_close_releases_claim(void);
@@ -3526,8 +3528,14 @@ struct test_case g_tests[] = {
     { "skein.gpu_bo_scatters",         test_skein_gpu_bo_scatters,         false, NULL },
     { "skein.full_envelope_weave",     test_skein_full_envelope_weave,     false, NULL },
     { "skein.zero_init_across_blocks", test_skein_zero_init_across_blocks, false, NULL },
-    { "skein.single_block_larger_than_a_block",
-                                       test_skein_single_block_larger_than_a_block,
+    { "skein.one_block_resolves_throughout",
+                                       test_skein_one_block_resolves_throughout,
+                                                                           false, NULL },
+    { "skein.stride_is_the_objects_not_the_constant",
+                                       test_skein_stride_is_the_objects_not_the_constant,
+                                                                           false, NULL },
+    { "dma_segments.refuses_not_truncates",
+                                       test_dma_segments_refuses_rather_than_truncates,
                                                                            false, NULL },
     { "perm.check_owner_group_other",  test_perm_check_owner_group_other,  false, NULL },
     { "perm.check_owner_first",        test_perm_check_owner_first_authoritative, false, NULL },
