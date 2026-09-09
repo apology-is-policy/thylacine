@@ -3051,6 +3051,39 @@ static void proc_close_handles_at_exit(struct Proc *p) {
     }
 }
 
+// Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the Proc's Territory at EXIT,
+// not deferred to reap -- the direct analog of #68/#926 moving the handle-table
+// close to exit, so an exited/zombie Proc stops pinning its inherited 9P mount
+// sessions (the per-user home --single-session proxy) the instant it dies rather
+// than when its (possibly much later, or deadlocked) parent reaps it.
+//
+// The FOOTGUN this avoids: devproc format_ns / format_cwd read p->territory
+// under g_proc_table_lock (the #57a F2 envelope), so the free cannot run
+// lock-free the way the #926 handle-table free does (ARCHITECTURE.md the #66c
+// note). Hence the LOCKED-DETACH + UNLOCKED-FREE split: NULL p->territory UNDER
+// the lock (a concurrent format_ns then observes NULL and renders empty --
+// territory_format_ns(NULL) and format_cwd's `if(!p->territory)` are both
+// NULL-safe), THEN territory_unref the detached pointer with the lock DROPPED
+// (territory_unref's spoor_clunk may sleep on a 9P Tclunk; the detached pointer
+// is unreachable by any reader, so the sleep is safe).
+//
+// CALLED with g_proc_table_lock HELD (*s = the saved irq state); on return the
+// lock is re-held with *s refreshed. CALLED only from the last-live-thread exit
+// window (exits() / thread_exit_self, live_peers == 0, t still RUNNING so the
+// sleeping unref is legal) -- the same soundness envelope proc_close_handles_-
+// at_exit documents. IDEMPOTENT with proc_free's territory_unref: this NULLs
+// p->territory, so proc_free's territory_unref(NULL) no-ops on every path that
+// reaches here (the direct state=ZOMBIE;proc_free orphan/rollback paths, which
+// skip this, keep p->territory and free it at reap as before).
+static void proc_release_territory_at_exit(struct Proc *p, irq_state_t *s) {
+    struct Territory *dead = p->territory;
+    if (!dead) return;
+    p->territory = NULL;                                  // detach UNDER the lock
+    spin_unlock_irqrestore(&g_proc_table_lock, *s);
+    territory_unref(dead);                                // sleep-legal, lock dropped
+    *s = spin_lock_irqsave(&g_proc_table_lock);
+}
+
 // Internal: count peer Threads that are NOT in THREAD_EXITING state
 // (i.e. still live — RUNNING / RUNNABLE / SLEEPING / etc.) AND are not
 // `self`. MUST be called UNDER g_proc_table_lock.
@@ -3329,6 +3362,14 @@ void exits_code(int code, const char *msg) {
             extinction("exits: peer appeared during handle close");
     }
 
+    // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit, not
+    // reap, so a zombie stops pinning its inherited per-user home 9P mount.
+    // Same last-live-thread window as the handle close (drops + retakes the
+    // lock to sleep in territory_unref); the peer-appeared re-check mirrors it.
+    proc_release_territory_at_exit(p, &s);
+    if (proc_count_live_peers_locked(p, t) != 0)
+        extinction("exits: peer appeared during territory release");
+
     proc_become_zombie_locked(p, code, msg);
 
     // Mark the executing thread EXITING so sched() leaves it out of the
@@ -3450,6 +3491,14 @@ void thread_exit_self(void) {
     }
 
     if (become_zombie) {
+        // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit
+        // (detach-under-lock + unref-outside) BEFORE the zombie transition, so a
+        // zombie stops pinning its inherited per-user home 9P mount. Same
+        // last-live-thread window as the handle close above; the peer re-check
+        // mirrors it (no RUNNING peer exists to spawn one during the unref).
+        proc_release_territory_at_exit(p, &s);
+        if (proc_count_live_peers_locked(p, t) != 0)
+            extinction("thread_exit: peer appeared during territory release");
         // This Thread is the last live one. Proc transitions to ZOMBIE.
         // SYS_EXIT_GROUP / kill cross-thread shootdown (I-24): if a group
         // termination is in progress, use the recorded group_exit_msg + its
