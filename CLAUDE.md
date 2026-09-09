@@ -943,11 +943,35 @@ When you spot a candidate while implementing — note it in the chunk's commit m
 
 ## Build + test commands
 
-Per `TOOLING.md`. Top-level wrappers:
+Per `TOOLING.md`. Top-level wrappers.
+
+**A BARE `tools/build.sh` IS NOT THE GATE IMAGE (since 2026-09-09).** With no
+flags it applies `configs/default.config`, and that profile now sets
+`HALCYON_SESSION=y` -- **Halcyon is the default UI**, so after login the image
+runs the tiled environment instead of `ut` on `/dev/cons`. **47 interactive
+scenarios log in and 35 of those then drive a shell** (measured, not
+estimated); those 35 want `ut` and will not find it. So:
+
+- **Product / demo image, or anything a person will use** -> bare
+  `tools/build.sh` (or `--config <your profile>`). This is the Halcyon image.
+- **The gate fleet -- `tools/test-interactive.sh`, and anything asserting on a
+  post-login shell** -> `tools/build.sh --config ci`, which pins
+  `HALCYON_SESSION=n` EXPLICITLY for exactly this reason. A caller-set
+  `THYLACINE_HALCYON_SESSION=0` also wins, since `bc__export_env` does not
+  clobber a pre-set env var.
+
+The two Halcyon levers are separate and only the session one is defaulted:
+`HALCYON_CONSOLE` (halcyond as the PRE-login console renderer) stays off,
+because it is not a pure renderer swap -- it also bakes a `#wedge` test rule
+into `/lib/beacon/verbs`, the #880 strip-for-production class. Full schema +
+the theme picker: `docs/BUILD-CONFIG-DESIGN.md` section 4.2.
 
 ```bash
-# Build the kernel ELF
+# Build the kernel ELF -- the DEFAULT (Halcyon) image
 tools/build.sh kernel
+
+# Build the GATE image (no Halcyon session; what test-interactive expects)
+tools/build.sh kernel --config ci
 
 # Build the musl + sysroot
 tools/build.sh sysroot
@@ -1035,6 +1059,10 @@ make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
 # own -- presenting to the other gate as "qemu GONE, guest healthy" -- and both
 # gates restore the same build/fixtures/pool.img. Do not run it alongside the
 # SMP gate in one tree; use a separate worktree.
+# NEEDS THE GATE IMAGE: bake with `--config ci` (or THYLACINE_HALCYON_SESSION=0).
+# A bare build is the Halcyon-default image since 2026-09-09, where login
+# spawns the session compositor and the 35 shell-driving scenarios find no
+# `ut` prompt. See "Build + test commands" above.
 tools/test-interactive.sh               # full set (or: make test-interactive)
 tools/test-interactive.sh ls-ci         # one scenario by name
 
