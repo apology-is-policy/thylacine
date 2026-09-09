@@ -1,11 +1,13 @@
 # WEAVE-SKEIN — the scatter-gathered weave
 
-**Status: PROPOSAL, for the operator's signoff. Nothing implemented.**
-Design-first per CLAUDE.md "Design conversation -> scripture commit": this
-document lands before any code, and the code commit references its SHA.
+**Status: RATIFIED 2026-09-09 (operator signoff on all four ballot items).
+Nothing implemented yet — the implementation commit references this document's
+SHA per CLAUDE.md "Design conversation -> scripture commit".**
 
-Direction approved by the operator 2026-09-09 ("scatter-gather sounds good");
-the open questions in §9 are what still needs a vote.
+Direction approved ("scatter-gather sounds good"), then the §9 ballot returned
+**all four as recommended**: a new `SYS_DMA_SEGMENTS` with a fail-closed
+`SYS_DMA_MAP`; `SKEIN_BLOCK` = 2 MiB; the name **skein**; and scope **weave
+only**. §9 records each with its consequence.
 
 ---
 
@@ -324,14 +326,27 @@ rather than retrofitted.
 
 ---
 
-## 9. Open questions for signoff
+## 9. The ballot, RATIFIED 2026-09-09
 
-1. **The ABI shape.** A new `SYS_DMA_SEGMENTS` plus a fail-closed
-   `SYS_DMA_MAP` (§3.5), or fold the segment list into an extended map call?
-   The separate syscall keeps `SYS_DMA_MAP`'s existing contract intact for
-   every current caller, which is why it is the recommendation.
-2. **`SKEIN_BLOCK` = 2 MiB?** It gives 25 entries and 2.5% waste for the
-   operator's display. 4 MiB halves the entry count and doubles the tail
-   waste; 1 MiB does the reverse.
-3. **The name `skein`** (§3.1) — thematic, or plain `dma_seg`?
-4. **Scope**: weave only (recommended, §3.2), or the anon rounding too (§8)?
+All four returned as recommended. Recorded with the consequence each carries,
+so the implementation is bound by decisions rather than by preferences.
+
+1. **ABI: a new `SYS_DMA_SEGMENTS`, with `SYS_DMA_MAP` fail-closed on a
+   skein.** `SYS_DMA_MAP` keeps its exact contract for every current caller
+   (virtio-net, virtio-blk, every ring), and returns a distinguished
+   not-representable value rather than `blk[0].pa` when `nblk > 1`. The
+   segments call REFUSES rather than truncates when the caller's buffer is too
+   small. *Consequence: no existing caller is touched, and no caller can
+   attach a partial backing and believe it whole.*
+2. **`SKEIN_BLOCK` = 2 MiB.** 25 entries and 2.5% tail waste for the
+   operator's 48.8 MiB display; the largest contiguous run needed falls from
+   64 MiB to 2 MiB; 25 of the 78 available transport entries. *Consequence:
+   a full 64 MiB weave uses 32 entries, leaving real headroom.*
+3. **The name is `skein`.** `struct dma_block`, `KObj_DMA.blk` / `.nblk`,
+   `SKEIN_BLOCK`. *Consequence: the weaving vocabulary (weave / weft / loom)
+   gains the one term that names a physically-discontinuous, logically-single
+   thread.*
+4. **Scope: weave only.** Plain `SYS_DMA_CREATE` and the anon-burrow rounding
+   (§8) are both out. *Consequence: the smallest surface to prosecute on an
+   I-40/I-45 trigger, and the anon deferral stays a deferral — recorded, not
+   silently inherited.*
