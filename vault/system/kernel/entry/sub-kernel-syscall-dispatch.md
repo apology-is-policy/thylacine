@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-09
 ---
 ## Purpose
 
@@ -247,8 +247,9 @@ own environment.
 `SPAWN_PERM_*` bits the parent asks to stamp on the child — `MAY_POST_SERVICE`
 (the child may register a `/srv/<name>` server, [[sub-kernel-devsrv]]),
 `CONSOLE_TRUSTED` (the SAK re-grant anchor), `CONSOLE_OWNER` (the Ctrl-C target),
-and the I-32 `MAY_RAISE_PAGE_BUDGET` above. The mechanism is deliberately **two
-sites, and neither is the other's redundancy**:
+the I-32 `MAY_RAISE_PAGE_BUDGET` above, and the arm-6 `SESSION_HANGUP` (below).
+The mechanism is deliberately **two sites, and neither is the other's
+redundancy**:
 
 - **The grant gate runs at the entry, before a single user-VA byte is read.**
   `spawn_perm_grant_check` (`kernel/syscall.c`) adjudicates every requested
@@ -281,6 +282,19 @@ load-bearing:
   confers `CONSOLE_OWNER` on the session shell, none of the later links being
   console-attached. It is the same one-hop shape the I-32 raise authority takes,
   applied to a different bit.
+- **`SESSION_HANGUP` takes the same holder-delegable one-hop shape** (arm-6,
+  IDENTITY-DESIGN 9.9.1), and its `apply_spawn_perms` arm is the only one in the
+  family that does two steps: `proc_setsid(child)` — the child becomes a fresh
+  session leader (the leader-guard passes because post-`rfork` it still carries
+  the parent's pgid, not its own pid) — then `proc_arm_session_hangup` **only if
+  setsid succeeded**, so a failed setsid leaves the flag unarmed on a non-leader
+  (and the [[sub-kernel-death]] hangup hook re-checks `sid == pid` regardless).
+  The bit confers no cross-authority reach: a hangup-armed leader can only
+  terminate members of *its own* fresh session (its descendants), so the gate —
+  console-attached OR a `MAY_POST_SERVICE` holder — is about *who may set up a
+  self-reclaiming session*, not kill authority; the termination is kernel
+  session-*lifecycle* ([[sub-kernel-death]]), so [[inv-i26]] is untouched. login's
+  session shell (`ut`) and graphical session (`halcyond`) are spawned with it.
 
 None of these is a `cap_mask` bit and none is `rfork`-propagated: each is a
 `perm_flags` *spawn-time* decision, so I-2 — the fork-grantable capability set

@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-06
+updated: 2026-09-09
 ---
 ## Purpose
 
@@ -84,6 +84,19 @@ in `exits()` alone is what makes them fire on *every* death path — a clean
 exit and a kill alike:
 
 - the A-4a legate-scope teardown if this Proc is a legate root (audit F1);
+- **the arm-6 session hangup** (`proc_session_hangup_if_leader`, IDENTITY-DESIGN
+  9.9.1): if this Proc is a `PROC_FLAG_SESSION_HANGUP`-armed session leader
+  (`sid == pid`), `proc_group_terminate` every OTHER ALIVE Proc sharing its
+  `sid`. The structural sibling of the legate teardown, placed here for the same
+  reason — so logout reclaims the user's session on *every* leader death path (a
+  clean `exit`, a kill alike), and no orphaned session Proc keeps the per-user
+  encrypted-home mount pinned (with Part D below, each terminated member releases
+  its mount ref at its own exit). It is kernel-driven session-*lifecycle*
+  termination, not a userspace cross-Proc kill — login lacks CAP_KILL by design,
+  so I-26 is untouched. Its isolation (only genuine session members match) rests
+  on pids never recycling (`g_next_pid` is monotonic + extincts at INT_MAX); the
+  legate it mirrors keys on a dedicated non-reusable `legate_scope_id` instead —
+  an implicit-vs-local dependency recorded at `session_hangup_cb` (arm-6 audit F1);
 - clearing `g_console_owner`, `g_console_trusted_proc`, `g_console_renderer`
   and `g_init_proc` if this Proc held them, so none ever dangles;
 - the POSIX 2.4.3 orphan rule, **before** the reparent (the children list is
@@ -156,6 +169,29 @@ whole finding: `group_exit_msg` is set on *every* `SYS_EXIT_GROUP` — a clean
 `exit_group(0)` included — so without it the orderly final close read as
 "dying" and every sleep-capable hook short-circuited, silently dropping the
 dev9p write-behind flush and skipping the close-time Tclunk.
+
+**The territory release rides the same window** (arm-6 Part D, IDENTITY-DESIGN
+9.9.1; extends #926/#68 from the handle table to the namespace). A Proc's
+Territory — its per-Proc mounts + name-based cwd — was released only at reap
+(`proc_free`), so a zombie or orphan kept a `spoor_ref` on every mount it
+inherited, a per-user encrypted-home `--single-session` 9P proxy mount included;
+login's synchronous `proxy.wait()` at logout then deadlocked on an orphan the
+kernel could not reap in time (joey blocked in `wait(login)`; login blocked in
+`proxy.wait`). `proc_release_territory_at_exit` releases it in the SAME
+last-live-thread window as the handle close, with one added subtlety: devproc
+`format_ns`/`format_cwd` read `p->territory` under [[lock-proc-table]] (the #66c
+envelope), so the free cannot run lock-free the way the handle-table free does.
+It is a **detach-under-lock + free-outside-lock split** — NULL `p->territory`
+under the table lock (a concurrent devproc reader then renders empty; both
+readers are NULL-safe), then `territory_unref` the detached, now-unreachable
+pointer with the lock dropped (its `spoor_clunk` may sleep on a `Tclunk`).
+Idempotent with `proc_free`'s later `territory_unref(NULL)`. Since fork
+DEEP-COPIES the territory ([[sub-kernel-proc]]'s `territory_clone`; RFNAMEG
+sharing is unsupported at v1.0), no sibling shares it and I-1 is trivially
+preserved. **F2 (open):** a member that `SYS_SETSID`'s out of the session
+escapes the hangup above and keeps its mount ref pinned — the same stall, for
+that uncommon daemonizing case; the robust cure binds the mount to the DEK
+lease, not to session membership (tracked, arm-6 audit F2).
 
 **The vfork park, and why death pays nothing for it.** A fork that shares the
 parent's address space suspends the parent until the child leaves it, and the
@@ -260,6 +296,12 @@ target the same waiter, and the second `wakeup()` no-ops on `waiter == NULL`.
   other's owner.
 - #713 composition: the die-check runs *before* the DAIF-masked
   ELR-set..eret window, and the die path is noreturn, so it never enters it.
+- [[inv-i1]] (arm-6 Part D) — releasing the Territory at exit preserves per-Proc
+  namespace isolation: fork deep-copies it (`territory_clone`; RFNAMEG
+  unsupported), so a Proc's exit-time `territory_unref` decrements a count no
+  other Proc holds. The arm-6 session hangup composes with I-24 above — every
+  terminated member rides the same exactly-once cascade, and the leader's own
+  hangup is idempotent under the set-once `group_exit_msg` CAS.
 
 ## Error paths
 
@@ -335,6 +377,12 @@ What a change **must** re-establish:
   because the IRQ-from-EL0 tail evaluates only `group_exit_msg`, so an IPI
   cannot accelerate an interrupt-death. The no-IPI shape is also what lets
   the unit test drive the real waker on the single-CPU harness.
+- **Logout reclaims the session's process *tree*, not every process that ever
+  had the sid.** The arm-6 hangup sweeps by `sid`, so a member that `SYS_SETSID`s
+  into its own session escapes it and keeps the per-user home mount pinned — the
+  logout stall persists for that (uncommon, daemonizing) case. The reported bug
+  (a plain background job) is fixed. The residual is arm-6 audit F2: the robust
+  cure binds the mount lifetime to the DEK lease, not to session membership.
 
 - **A single-thread guarantee bounds threads, and says nothing about other
   processes.** exec resets the signal dispositions, and for one release it did so
@@ -383,3 +431,17 @@ instead of collapsing it to 0/1 — the exit-status half of self-hosting's C1 fl
 pthread-join wakeup absorbed from docs/reference/81: a peer Thread's exit atomically
 zeroes its registered `clear_child_tid` and `torpor_wake`s joiners, silently
 skipping a bad tidptr.
+
+**2026-09-09: arm-6 — territory-at-exit (Part D, `8bcc2e3f`) + the kernel session
+hangup (A1, `6758a1bd`); arc close `b1b68eaa`.** Part D moved the Territory
+release from reap to the last-live-thread exit window (the detach-under-lock +
+free-outside split), extending the #926/#68 close-at-exit discipline to the
+namespace so a zombie/orphan stops pinning its inherited per-user home mount.
+A1 added the session-leader-exit hangup to the ZOMBIE chokepoint (the
+legate-teardown sibling), realizing A-5 decision (3)'s "no orphaned session
+Proc" — kernel-driven because login lacks CAP_KILL (I-26 untouched). Scripture:
+`564de51c` (IDENTITY-DESIGN 9.9.1). Formal audit (holotype-reviewer, Opus
+fallback — Fable out of credits): SOUND 0/0/0/2 P3 — F1 fixed (the `sid==pid`
+isolation's dependency on non-recycling pids documented at `session_hangup_cb`),
+F2 tracked (the `setsid`-daemon residual, Mechanism + Caveats above). SMP gate
+40 boots, 0 corruption; ls-imperium arms 0-6 PASS.

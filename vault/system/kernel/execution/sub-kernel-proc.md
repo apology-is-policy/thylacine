@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-05
+updated: 2026-09-09
 ---
 ## Purpose
 
@@ -366,7 +366,11 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   cannot enforce it.
 - The `proc_flags` never-inherited rule is what stops a remote-login chain
   from inheriting the local-console trust anchor. A new flag added to the
-  word must be atomic-RMW (the word is multi-writer since the SAK).
+  word must be atomic-RMW (the word is multi-writer since the SAK) — the arm-6
+  `PROC_FLAG_SESSION_HANGUP` (bit 19, set by `proc_arm_session_hangup`'s
+  `__atomic_or`) is the latest: stamped in the spawn thunk right after
+  `proc_setsid` makes the child a session leader, never copied by `rfork`, and
+  read on the death side by [[sub-kernel-death]]'s session hangup.
 - `wait_pid_for`'s register-then-observe: the waiter registration and the
   no-zombie scan must stay in **one** critical section.
 - The I-32 charge helpers hold **no** counter state here; they route to the
