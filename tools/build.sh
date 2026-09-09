@@ -484,7 +484,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "kaua-term" "kaua-term-probe" "caps-probe" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "kaua-term" "kaua-term-probe" "caps-probe" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -3784,6 +3784,24 @@ populate_stratum_pool() {
             || { echo "==> populate pool: /lib/halcyon/renderer readback MISMATCH" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
         rm -f "$halrend"
         echo "==> populate pool: HALCYON renderer lever ENABLED (/lib/halcyon/renderer = halcyond)"
+
+        # I-47 (HALCYON.md 14.7): the inline-media E2E fixture. A committed
+        # 640x400 RGB witness card (usr/view/testdata/make-test-png.py) baked at
+        # /test.png so `view /test.png` displays it inline. Gated with the
+        # renderer lever (only halcyond serves the place channel), keeping the
+        # default aurora image byte-stable. Binary payload -> readback-verified.
+        local testpng="$REPO_ROOT/usr/view/testdata/test.png"
+        if [[ -f "$testpng" ]]; then
+            "$stratum_fs_bin" -s "$sock_path" write /test.png < "$testpng" \
+                || { echo "==> populate pool: write /test.png FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" sync \
+                || { echo "==> populate pool: sync (test.png) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" read /test.png | cmp -s - "$testpng" \
+                || { echo "==> populate pool: /test.png readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            echo "==> populate pool: /test.png baked + readback-verified (I-47 inline-media fixture, $(wc -c < "$testpng" | tr -d ' ') B)"
+        else
+            echo "==> populate pool: no usr/view/testdata/test.png -- inline-media E2E fixture skipped"
+        fi
     fi
 
     # KT-1.5d-1a (HALCYON 14.12): the per-user session lever. Under

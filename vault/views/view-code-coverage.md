@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 72 unowned · 506 files (85% owned) · ~21413 unswept lines.**
+**439 owned · 69 unowned · 508 files (86% owned) · ~20979 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~32280 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -76,12 +76,11 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | usr/pouch-hello | 0 | 22 | 3384 |
 | usr/ports | 14 | 9 | 2199 |
 | kernel | 123 | 15 | 2181 |
-| usr/lib | 58 | 6 | 1452 |
+| usr/lib | 59 | 5 | 1316 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/imperium | 0 | 1 | 591 |
-| usr/halcyond | 19 | 2 | 546 |
+| usr/halcyond | 21 | 2 | 546 |
 | usr/stratumd-stub | 0 | 1 | 453 |
-| usr/view | 0 | 2 | 298 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/corvus | 1 | 1 | 245 |
@@ -111,6 +110,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | usr/sntp | 1 | 0 | 0 |
 | usr/tapestryd | 7 | 0 | 0 |
 | usr/utopia | 26 | 0 | 0 |
+| usr/view | 2 | 0 | 0 |
 | usr/virtio-blk-rw | 1 | 0 | 0 |
 | usr/virtio-gpu | 1 | 0 | 0 |
 | usr/virtio-input | 1 | 0 | 0 |
@@ -157,11 +157,8 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
-| usr/view/src/main.rs | 159 |
 | kernel/cpio.c | 152 |
 | usr/susp-mask-child/src/main.rs | 139 |
-| usr/view/src/lib.rs | 139 |
-| usr/lib/inlinewire/src/lib.rs | 136 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/nocturne-vol/src/main.rs | 126 |

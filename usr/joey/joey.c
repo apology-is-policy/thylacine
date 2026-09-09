@@ -11447,11 +11447,14 @@ int main(void) {
                         }
                     }
                 }
+                // MAY_POST_SERVICE (I-47): halcyond posts /srv/halcyon for the
+                // inline-media place channel. Harmless to aurora, which posts no
+                // service; the bit is a capability to post, not an obligation.
                 long aur_pid = t_spawn_with_perms(
                     rname, rname_len,
                     /*fds=*/(const unsigned int *)0, /*fd_count=*/0,
                     /*cap_mask=*/0,
-                    T_SPAWN_PERM_CONSOLE_RENDERER);
+                    T_SPAWN_PERM_CONSOLE_RENDERER | T_SPAWN_PERM_MAY_POST_SERVICE);
                 if (aur_pid <= 0) {
                     t_putstr("joey: t_spawn_with_perms(console renderer) FAILED\n");
                     return 1;

@@ -23,6 +23,8 @@ code:
   - usr/halcyond/src/tiles.rs
   - usr/halcyond/src/grid.rs
   - usr/halcyond/src/downq.rs
+  - usr/halcyond/src/placesrv.rs
+  - usr/halcyond/src/inlineaccum.rs
   - usr/halcyond/Cargo.toml
 audit: hard
 guarded-by: []
@@ -32,7 +34,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md"]
 created: 2026-09-05
-updated: 2026-09-07
+updated: 2026-09-09
 ---
 ## Purpose
 
@@ -246,6 +248,42 @@ at the next frame tick, and a tile's CONFIGURE no longer lands only at the next
 pane-tree RPC (a Loom wait pumps ONE session -- the H-3b two-sessions latency
 bug). See [[sub-libtapestry]] for the ring side.
 
+### The inline-media place channel (I-47; the `view` reader side)
+
+halcyond receives decoded rasters from a short-lived `view` process and injects
+them into the transcript as `Item::Image` blocks (rendered by the already-built
+`cartoon::Op::Image`). The DECODE runs in `view`, never here (the blast-radius
+amendment; see [[sub-view]] for the writer + the `inlinewire` contract) -- so
+halcyond's exposure is a bounded WRITE of untrusted bytes, not a codec.
+
+- **The server** (`placesrv.rs`, the console `rs_main` path only): once the
+  console is up halcyond posts `/srv/halcyon` (a minimal 9P2000.L service; it
+  holds the console renderer's `MAY_POST_SERVICE` grant, joey ORs it beside
+  `CONSOLE_RENDERER`). The namespace is two nodes -- the root dir and a
+  write-only `place` file. The listener + live conns join the loop's unified
+  `poll(2)` (a write wakes the renderer at once), and one non-blocking
+  `service()` pass per loop accepts + drains complete frames, exactly like the
+  console drain (the same one-pass inject latency). The 9P codec is the shared
+  `libthyla_rs::ninep` server codec; the dispatch/fid/frame-read shape is
+  nocturned's (`usr/nocturned/src/server.rs`, not yet dossiered).
+- **The accumulator** (`inlineaccum.rs`, the PURE, host-tested brain): a `place`
+  write carries an `inlinewire` header (magic/format/w/h) then the ARGB payload.
+  `PlaceAccum::write` validates the header -- magic, `FORMAT_ARGB8888`,
+  dimensions, and a heap-safe per-image pixel cap (`PLACE_MAX_PIXELS` = 2 Mpx,
+  deliberately BELOW `inlinewire::MAX_PIXELS`, so a decoded raster cannot exhaust
+  halcyond's fixed 64 MiB heap) -- BEFORE it allocates a byte of payload;
+  accumulates sequential writes bounded by the header's own declared total; and
+  on completion yields the `w*h` ARGB `Vec<u32>` for `Transcript::inject_image`.
+  A clunk mid-transfer discards the partial; a malformed / over-cap /
+  non-sequential / trailing-past-total write is refused (Rlerror) and the
+  transfer torn down. This is the format-fuzz surface, and it is where the tests
+  live (Invariants + Tests below).
+- **Authority** (the console spike): none beyond reachability. Injecting an image
+  into the console transcript is at parity with writing text to `/dev/cons`
+  (which any holder of the console already can), so the spike gates on
+  format-fuzz safety + the resource bound, not a peer-identity check; the
+  per-pane token + quota land with the session-path channel (Seams).
+
 ## Data structures
 
 - `Transcript` -- zones -> `Block`s (cells + styles + objs + tables); the
@@ -259,6 +297,11 @@ bug). See [[sub-libtapestry]] for the ring side.
   (latest-wins, ahead of keys), delivered one byte per ready POLLOUT.
 - `EventRing` (from [[sub-libtapestry]]) -- the one SQPOLL session + ring every
   surface shares.
+- `PlaceServer` / `Conn` / `PlaceAccum` (`placesrv.rs` + `inlineaccum.rs`, I-47) --
+  the `/srv/halcyon` listener + its bounded conn table (`MAX_CONNS` = 4, each
+  fid table `MAX_FIDS` = 8) + the per-connection single-in-flight place
+  accumulator; completed rasters queue in `PlaceServer.completed`, drained per
+  loop into `Transcript::inject_image`.
 - Budget constants: `SESSION_SCROLLBACK_BUDGET` = 32 MiB (shared by tile count
   via `set_max_cost`), `OPEN_BLOCK_MAX_COST` = 512 KiB (freezes a newline-free
   open block), `POLL_MAX_NFDS` = 64 (the unified-poll fan cap), `DECLARE_TRIES`
@@ -307,6 +350,14 @@ anchors are the H-2 / H-3b / H-3c / H-3d / KT-1 trigger rows +
   (`ITEM_OVERHEAD` per line) + a per-block line cap + `OPEN_BLOCK_MAX_COST`; in
   the session one `SESSION_SCROLLBACK_BUDGET` shared by tile count, evicting AT
   ONCE.
+- **The place channel validates before it allocates** (I-47, format-fuzz class).
+  `PlaceAccum` parses + fully validates the `inlinewire` header (magic, format,
+  dimensions, and a heap-safe `PLACE_MAX_PIXELS` cap tighter than the wire's own)
+  from a 16-byte prefix BEFORE buffering a payload byte; each write is
+  sequential-only and cannot grow the buffer past the header's declared total;
+  a clunk mid-transfer discards the partial. So a hostile / oversize / truncated
+  place-request can neither drive a large reserve nor exhaust the renderer's
+  fixed heap -- it is refused (Rlerror) and the transfer torn down.
 
 ## Error paths
 
@@ -351,12 +402,24 @@ presents are a recorded optimization.
 - **The down channel.** The sole-writer POLLOUT one-byte discipline (never
   blocks); the geometry record never dropped; the POLLOUT set capped at
   `POLL_MAX_NFDS`.
+- **The place channel against a hostile writer** (I-47). The `inlinewire` header
+  parse (validate-before-allocate); the `PLACE_MAX_PIXELS` heap cap; the
+  sequential-only, bounded-by-declared-total accumulation; the discard on a
+  clunk / a malformed-write teardown; the bounded conn + fid tables; the
+  single-in-flight-per-conn guard. The accumulator is `inlineaccum`, host-tested
+  adversarially (Tests).
 
 ## Seams
 
 - Raw-VT panes (H-3; `raw_vt_intent` latches today), compose (H-5), the vk
-  executor + the display-list wire (H-6), images/`Embed` (H-7) are unbuilt; the
-  executor carries `Image`/`Embed` ops no transcript path emits yet.
+  executor + the display-list wire (H-6) are unbuilt.
+- **Inline images are BUILT** (I-47, the console spike): the transcript emits
+  `Item::Image` from the `/srv/halcyon` place channel, rendered by
+  `cartoon::Op::Image`. Remaining inline-media seams: the per-user SESSION-path
+  channel (a per-pane control endpoint + a per-pane token/quota, vs the console
+  spike's single service), JPEG (the `view` decoder side), `--fullscreen`
+  (`gallery`), and `Embed` (the out-of-band pixel surface for video). See
+  [[sub-view]].
 - The session-tier settings verbs (the settings push) are unbuilt.
 - Damage-rect presents are the recorded present-path optimization.
 
@@ -376,10 +439,14 @@ presents are a recorded optimization.
 
 ## Tests
 
-- **Host: 127 `#[test]` across the thirteen lib modules** (`cargo test -p
-  halcyond --lib --no-default-features`; transcript 39, tile 17, input 12, tiles
-  10, layout 8, grid 8, menu 7, raster 6, chrome 5, status/select/downq 4 each,
-  session_init 3). They pin the streaming determinism, wrap/alignment/boxes, the
+- **Host: 220 `#[test]` across the lib modules** (measured `cargo test -p
+  halcyond --lib --no-default-features`), including **inlineaccum's 9** (the I-47
+  place-request accumulator, adversarial: a one-write and a split-write complete
+  to the right pixels; bad magic, over-cap dimensions, a giant-claiming header,
+  a non-sequential offset, and trailing bytes past the total each Reject; two
+  images on one fid; a partial-then-abandoned stays incomplete -- the
+  validate-before-allocate + bounded-accumulation contract). They pin the
+  streaming determinism, wrap/alignment/boxes, the
   word-through-executor leg, the held-feed arms, the obj-run walk +
   `run_rect`/`hit_run` agreement, the menu cap + window, the windowed render (a
   warm render lays <= 4 blocks / <= 12 lines for 200 blocks of history; the

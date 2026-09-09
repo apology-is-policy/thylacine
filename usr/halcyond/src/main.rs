@@ -64,6 +64,7 @@ macro_rules! say {
 
 mod chromeset;
 mod menuset;
+mod placesrv;
 mod session;
 mod statusset;
 
@@ -451,6 +452,19 @@ pub extern "C" fn rs_main() -> i64 {
     const PRESENT_FAILS_FATAL: u32 = 240;
 
     let mut announced = false;
+
+    // I-47 (HALCYON.md 14.7): the inline-media place channel. Post /srv/halcyon
+    // so a short-lived `view` can hand this renderer a decoded raster (the
+    // console spike). Best-effort: without the MAY_POST_SERVICE grant (or if the
+    // post races) the renderer runs unchanged and inline `view` is simply
+    // unavailable -- it falls back to reporting the decode. The place fds join
+    // the unified wait below so a write wakes the loop promptly.
+    let mut places = placesrv::PlaceServer::post();
+    if places.is_some() {
+        say!("halcyond: /srv/halcyon posted (inline media; I-47)");
+    } else {
+        say!("halcyond: /srv/halcyon post failed (inline media off; not a MAY_POST_SERVICE holder?)");
+    }
 
     loop {
         // (0) The render pass runs at the TOP: pass 1 paints + presents the
@@ -904,19 +918,24 @@ pub extern "C" fn rs_main() -> i64 {
                     // matching it. A console-only wake leaves this surface's
                     // queue empty (take_event -> None); step (2) drains the
                     // console and the top re-renders.
-                    let mut waitfds = [
-                        TPollFd {
-                            fd: ring.poll_fd(),
-                            events: T_POLLIN,
-                            revents: 0,
-                        },
-                        TPollFd {
-                            fd: drain as i32,
-                            events: T_POLLIN,
-                            revents: 0,
-                        },
-                    ];
-                    if unsafe { t_poll(waitfds.as_mut_ptr(), 2, -1) } < 0 {
+                    let mut waitfds: Vec<TPollFd> = Vec::with_capacity(3 + 4);
+                    waitfds.push(TPollFd {
+                        fd: ring.poll_fd(),
+                        events: T_POLLIN,
+                        revents: 0,
+                    });
+                    waitfds.push(TPollFd {
+                        fd: drain as i32,
+                        events: T_POLLIN,
+                        revents: 0,
+                    });
+                    // I-47: the place channel (listener + live conns) joins the
+                    // wait, so an inline `view`'s write wakes the loop at once.
+                    if let Some(p) = places.as_ref() {
+                        p.push_fds(&mut waitfds);
+                    }
+                    let nfds = waitfds.len();
+                    if unsafe { t_poll(waitfds.as_mut_ptr(), nfds, -1) } < 0 {
                         say!("halcyond: unified poll failed (compositor gone); exiting");
                         return 1;
                     }
@@ -1320,5 +1339,19 @@ pub extern "C" fn rs_main() -> i64 {
             &mut drain_eof,
             &mut pending_exit,
         );
+
+        // (2b) I-47: service the inline-media place channel + inject any
+        // completed rasters into the transcript. One non-blocking pass per loop
+        // (cheap when idle); a completed image bumps t.seq, so the top-of-loop
+        // render shows it next pass -- the same one-pass latency as the drain.
+        if let Some(p) = places.as_mut() {
+            p.service();
+            for img in p.take_completed() {
+                let (iw, ih, n) = (img.w, img.h, img.argb.len());
+                t.inject_image(img.w, img.h, img.argb);
+                dirty = true;
+                say!("halcyond: inline image placed ({}x{}, {} px; I-47)", iw, ih, n);
+            }
+        }
     }
 }

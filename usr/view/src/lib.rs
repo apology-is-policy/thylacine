@@ -131,6 +131,26 @@ mod tests {
         assert_eq!(r.argb[3], 0xFFFF_FFFF, "bottom-right white");
     }
 
+    // The E2E witness card (testdata/make-test-png.py): a 640x400 RGB PNG. This
+    // decodes the EXACT bytes the boot bakes to /test.png, pinning the zune RGB
+    // path + the ARGB normalization against the fixture -- so an E2E miss is a
+    // channel/display fault, never a decode surprise. Pixels are chosen off the
+    // bright diagonal (which the generator draws white).
+    #[test]
+    fn decode_png_witness_card() {
+        let png = include_bytes!("../testdata/test.png");
+        assert_eq!(sniff(png), Kind::Png);
+        let r = decode_png(png).expect("decode witness card");
+        assert_eq!((r.w, r.h), (640, 400));
+        assert_eq!(r.argb.len(), 640 * 400);
+        // (10,10): the leftmost (red) bar, off the diagonal -> 0xFFE02020.
+        assert_eq!(r.argb[10 * 640 + 10], 0xFFE0_2020, "red bar");
+        // (600,10): the sixth (magenta) bar -> 0xFFE020E0.
+        assert_eq!(r.argb[10 * 640 + 600], 0xFFE0_20E0, "magenta bar");
+        // (100,350): the bottom luminance ramp, v = 100*255/639 = 39 -> gray.
+        assert_eq!(r.argb[350 * 640 + 100], 0xFF27_2727, "gradient gray");
+    }
+
     #[test]
     fn decode_png_rejects_garbage() {
         assert!(decode_png(b"not a png at all, just bytes").is_err());

@@ -42,7 +42,7 @@ same shape as [[view-audit-trigger-coverage]]'s limit: presence is necessary and
 never sufficient.
 
 <!-- generated:begin -->
-**ARCH §28: 47 rows · CLAUDE.md: 47 rows · AUDIT-TRIGGERS cites 44 · vault notes: 37.**
+**ARCH §28: 47 rows · CLAUDE.md: 47 rows · AUDIT-TRIGGERS cites 45 · vault notes: 37.**
 
 | gap | invariants | why it matters |
 |---|---|---|

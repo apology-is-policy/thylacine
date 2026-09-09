@@ -22,6 +22,80 @@ needed the operator.
 
 
 ---
+## 2026-09-09 (aux, run 6, self-compact #7) -- inline media SLICE 3b: `view /test.png` shows the image inline, end to end on real hardware
+
+The console spike the operator ratified. `view /test.png` now decodes a PNG in
+the sacrificial `view` process, hands the raster to halcyond over a new
+`/srv/halcyon` 9P place channel, and halcyond validates + injects it as a
+transcript `Item::Image` -- and it renders on the real scanout. Proven on HVF;
+screenshot sent.
+
+**What landed (not yet committed at the time of this entry -- the commit is the
+next act):**
+- `usr/halcyond/src/inlineaccum.rs` (NEW, PURE, host-tested 9/9): the
+  format-fuzz-critical accumulator. Validate-before-allocate (the `inlinewire`
+  header is assembled from a 16-byte prefix and fully validated -- magic, format,
+  dims, AND a heap-safe `PLACE_MAX_PIXELS`=2 Mpx cap BELOW the wire's own 16 Mpx,
+  so a decoded raster cannot exhaust halcyond's fixed 64 MiB heap -- before a
+  payload byte is buffered); sequential-only writes bounded by the header's
+  declared total; a clunk mid-transfer discards the partial. Split into a pure
+  lib module ON PURPOSE, so the untrusted-byte path is host-tested (the audit's
+  regression floor), not buried in the syscall body.
+- `usr/halcyond/src/placesrv.rs` (NEW): the minimal 9P2000.L server halcyond
+  posts (`/srv/halcyon`, root dir + write-only `place`), adapted from nocturned's
+  proven Conn/fid/frame-read/dispatch shape over the shared `libthyla_rs::ninep`
+  codec, folded into `rs_main`'s unified poll (so a place write wakes the loop at
+  once) + a service/inject step (the same one-pass latency as the console drain).
+- `usr/joey/joey.c`: the console renderer spawn now ORs in MAY_POST_SERVICE
+  (harmless to aurora, which posts nothing).
+- `usr/view` + `usr/lib/inlinewire`: staged into the image; `/test.png` (a
+  640x400 RGB witness card, `usr/view/testdata/make-test-png.py`, stdlib zlib)
+  baked to the pool under THYLACINE_HALCYON.
+- `tools/interactive/ls-gfx-inline-view.exp` (NEW gate): boots halcyond, runs
+  `view /test.png`, asserts the serial witnesses + the image on screen; SKIP-clean
+  on a default image.
+
+**The wrong turn, and what caught it.** The gate's first RED was `+0 non-ground
+px after view` -- which read as "the image never reached the screen." Ground
+truth (reading the actual screendump, not the metric) showed the image plainly
+on screen. The bug was the INSTRUMENT: `gfx_region` counts pixels differing from
+a *given* color, and I passed none, so it defaulted to the Bonfire console black
+-- against which a Daylight-parchment screen reads ~every pixel as "off" in BOTH
+dumps, so the delta cancelled to ~0. A false negative from a metric keyed on the
+wrong ground, exactly the "GREENS CAN BE IRRELEVANT" / "the LOOK catches what the
+METRIC cannot" class. Fixed by deriving the real ground from the pre-dump's
+dominant color and counting non-ground against THAT: the delta became +542756 and
+the gate is green. (A second, dumber miss on the way: my `region` Tcl proc took
+fixed args but I passed color args -> a crash that left a stray VM, killed by
+PID.) The feature was never in doubt -- the serial witnesses (`/srv/halcyon
+posted`, `inline image placed (640x400, 256000 px)`, `view ... placed inline`)
+all fired on the first boot.
+
+**Self-audit find (fixed before commit).** `inlineaccum` supports multiple images
+on one fid via a `base` offset (and I test it), but `h_write` first destroyed the
+accumulator on `Done`, defeating that and making the tested behavior unreachable.
+Keeping the accumulator bound to the fid makes the tested behavior the real one.
+
+**Verification.** Host: inlineaccum 9/9 + view 4/4 (incl. a decode of the exact
+baked witness bytes) + inlinewire 2/2; halcyond lib 220/220; guest build + clippy
+clean on the new files. E2E `ls-gfx-inline-view` 3/3 legs green on HVF. Default
+(aurora) image re-baked + `test.sh` exit 0, boot OK, all ladders "all OK" -- the
+one "FAILED" is `pouch-smoke spawn` (the pouch port is not built in this bake; an
+absent optional probe, non-fatal, wholly unrelated to the joey/view/build.sh
+changes). No SMP gate: no kernel change (joey.c is userspace init).
+
+**Trust posture (console spike).** No peer-identity gate: injecting an image into
+the console transcript is at parity with writing text to `/dev/cons`, which any
+holder already can, so the spike gates on format-fuzz safety + the resource bound.
+The per-pane token + quota land with the session-path channel.
+
+**Open / owed.** A Fable-tier holotype round on the format-fuzz surface (this was
+Opus-authored; Fable diversity owed at merge). The session-path per-pane channel,
+JPEG, `--fullscreen` (`gallery`), the obj-verb rule, and `Embed` (video) remain
+seams. AUDIT-TRIGGERS row + the [[sub-halcyond]]/[[sub-view]] dossiers landed with
+the code.
+
+---
 ## 2026-09-09 (aux, run 6, self-compact #6) -- inline media: slice 1b (render path on real hardware) + the operator's width-fit ruling + slice 2 (vendor zune) + slice 3a (the channel wire + view's writer) + the channel design decided
 
 Picked up the resume note at `ca785f1e` and built slice 1b: prove the

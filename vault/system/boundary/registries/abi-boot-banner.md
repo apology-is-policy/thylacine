@@ -30,6 +30,7 @@ mirrors:
   - "tools/display-modes/verify-gpu-headless-1b.exp"
   - "tools/interactive/item10-ctrlc.exp"
   - "tools/interactive/ls-gfx-age.exp"
+  - "tools/interactive/ls-gfx-inline-view.exp"
   - "tools/interactive/ls-gfx-restore.exp"
   - "tools/interactive/ls-gfx-session.exp"
   - "tools/interactive/ls-halcyon.exp"

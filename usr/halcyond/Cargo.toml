@@ -48,6 +48,10 @@ vt = { path = "../lib/vt" }
 cartoon = { path = "../lib/cartoon" }
 libhalcyon = { path = "../lib/libhalcyon" }
 beacon = { path = "../lib/beacon" }
+# The inline-media place-request wire (I-47), shared with `view` (the writer).
+# Pure no_std, zero deps -- safe for both the lib (the host-tested `inlineaccum`
+# accumulator) and the bin (`placesrv`, the /srv/halcyon 9P server).
+inlinewire = { path = "../lib/inlinewire" }
 # The tile seam types + wire codec only (default-features off drops the `bin`
 # process, whose libthyla-rs dep does not host-compile -- so the halcyond lib
 # host tests keep building). KT-1.5.

@@ -660,6 +660,7 @@ dependencies = [
  "beacon",
  "cartoon",
  "cornucopia",
+ "inlinewire",
  "kaua",
  "kaua-term",
  "libhalcyon",
