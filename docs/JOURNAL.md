@@ -22,6 +22,82 @@ needed the operator.
 
 
 ---
+## 2026-09-09 (aux, run 6, self-compact #5) -- inline media / `view`: research + ratified design + scripture (reserved I-47)
+
+The operator opened a new task: Halcyon should display media inline in the
+scrollable buffer -- a `view test.png` that prints the picture into the console,
+letterboxed to the pane and re-scaling on resize, wired as a file-object action
+(Esc+w/b+Enter -> view) with a `--fullscreen` variant, "choosing a media library
+knowing we also want video + sound later." Explicitly a design-conversation:
+"come back with your findings and pushback," no code yet.
+
+**Method: self-compact, then a 3-agent research fan-out to keep synthesis
+context lean.** At the 600k checkpoint the prior segment self-compacted; this
+segment picked up the resume note and fanned out three read-only agents --
+(1) Halcyon rendering feasibility, (2) the native/ported boundary + the
+service-vs-link decision, (3) external SOTA on media libs + inline-image terminal
+UX -- then synthesized. The load-bearing agent claims were re-verified against the
+tree before quoting them to the operator (trust-but-verify): `cartoon::Op::Image`
+at `usr/lib/cartoon/src/lib.rs:49` + the `execute` arm `:444` + tests `:590`/`:602`;
+`HALCYON.md` 14.7 + 13.5; `BEACON.md` 10.
+
+**The reframing the research forced (the pushback that changed the answer).** The
+operator's "one library for everything" instinct is right for video/audio and
+wrong for images, and the tree already says so:
+- The render side is mostly built: there is no image path into the transcript
+  today (pure text cells), BUT a complete, unit-tested, currently-UNUSED CPU
+  image compositor already exists one layer down (`cartoon::Op::Image`), and
+  reflow-on-resize is free (the width-keyed layout cache). The compositor floor
+  is done; decode + a channel are the only gaps.
+- For images, scripture already picked native memory-safe Rust decode (H-7),
+  explicitly because "a bespoke decoder is fuzz-friendlier than a ported one."
+  Dragging a huge C codec (FFmpeg, CVE-dense libpng/libjpeg) into the IMAGE path
+  fights the project's own format-fuzz posture.
+- External SOTA settled the video crux: as of 2026-09 there is NO production-grade
+  pure-Rust decoder for H.264/HEVC/VP9 (only AV1, via rav1d). So "video later"
+  forces a ported C codec -- but that belongs on the heavier Embed/inline-live
+  surface, and audio isn't visual at all (it routes to Nocturne). The media path
+  is split by medium, not unified on one library.
+
+**A wrong turn in the scripture itself, caught by agent 1.** `BEACON.md` 10
+(2026-09-01) rejects "out-of-band side channels" and "Beacon-carried pixels";
+`HALCYON.md` 14.7 (2026-09-03, two days later) mandates a native out-of-band
+channel for images -- with no cross-reference between them. Left unreconciled, a
+future implementer reads a flat contradiction. Reconciled in this commit: the
+rejection is scoped to Beacon's own text transport; the pixel channel is the
+sanctioned exception, and the "fragile association" failure mode is closed by
+construction (the endpoint lives in the pane's own namespace -- no hops).
+
+**A blast-radius amendment to as-written scripture.** The original 14.7 kept
+"image decode in halcyond." The ratified design moves decode into the
+short-lived, per-invocation `view` Proc: the decoder is native Rust either way,
+but a throwaway process is a strictly smaller failure domain for parsing an
+untrusted image bytestream than the whole-session compositor. Recorded as the
+I-47 (a)-clause and flagged in 14.7 + 13.5 as an amendment.
+
+**Two operator decisions (both via blocking question, Opus fallback).** (1)
+Decode architecture: **native `view` + Weft** (decode PNG/JPEG natively with the
+zune no_std crates in a short-lived proc, Weft-hand the raster to halcyond) --
+chosen over decode-in-halcyond and over one ported FFmpeg for everything. (2)
+Signoff: **approve, scripture-then-spike-first.**
+
+**Landed this segment: the scripture commit only (design-first; no code).**
+`HALCYON.md` 14.7 expanded into the full mechanism (data flow, the per-pane
+control-endpoint channel, `transcript::Item::Image`, `view`, the obj-verb,
+safety+DoS, video/audio-split, staging) + 13.5 decoder rec updated to zune;
+`BEACON.md` 10 reconciliation; `ARCHITECTURE.md` + `CLAUDE.md` section 28 reserve
+**I-47** (mirroring the I-46/Nocturne RESERVED shape); the AUX-ROADMAP arc row.
+quaestor owner: all four doc paths UNOWNED (design docs, not code surfaces) -- no
+dossier update owed; the AUDIT-TRIGGERS row lands with the implementation.
+
+**Open / next.** The eb26e8b8 main-merge (latest Halcyon: HALCYON-TYPE +
+HALCYON-THEME) is committed but NOT yet built/tested/pushed -- a build-verify is
+owed on the mac before push (deferred while main held the machine). Then the
+PNG-inline spike (channel + `Item::Image` + `view` PNG-only + reflow) proven on
+thyla-pi's V3D, then the expand chunk (JPEG + verb + `--fullscreen` + the per-pane
+DoS quota + the format-fuzz audit).
+
+---
 ## 2026-09-09 (aux, run 6, self-compact #4) -- the arm-6 arc CLOSE: audit SOUND 0/0/0/2 P3, SMP gate 40 boots clean, ls-imperium arm 6 re-added
 
 The fix from the prior entry (Part D `8bcc2e3f` + A1 `6758a1bd`, tip `0ae4a9ed`)

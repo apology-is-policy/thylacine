@@ -263,6 +263,21 @@ renderer does.
   typography in the vocabulary (stylesheet inversion); Beacon-carried pixels
   (Tapestry owns pixels).
 
+**The out-of-band rejection is scoped to Beacon's OWN transport; it does not bar
+the inline-media pixel channel** (reconciliation, 2026-09-09 — `HALCYON.md §14.7`
+proposed a native out-of-band channel for images two days after this rejection
+was written, with no cross-reference; this note closes the gap). Beacon rejects
+carrying *Beacon structure* out of band — text annotation rides the pts cleanly as
+OSC 1936, so a side channel for *it* would be gratuitously fragile — and rejects
+*Beacon* carrying pixels ("Tapestry owns pixels"). The inline-media path
+(`HALCYON.md §14.7`, reserved as **I-47**) is **consistent with both**: pixels
+travel a dedicated per-pane pixel channel (a Weft raster share + a place-request),
+**never Beacon**, and the "fragile association / dies at every hop" failure mode is
+closed *by construction* — the endpoint lives in the pane's own namespace, so
+association is structural (inherited with the namespace) and there are no hops. The
+I-47 pixel channel is thus the sanctioned exception the general rejection
+anticipated, not a reversal of it.
+
 ## 11. Naming rationale (locked) + status
 
 **Beacon** = the signal fire: structured light that *carries meaning*, relayed

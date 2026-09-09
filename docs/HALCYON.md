@@ -553,11 +553,18 @@ line boxes.
   islands (code/`em code`/aligned content) set their baseline ON the Plex
   baseline and may not stretch the line box; box-drawing glyphs appear only
   in raw-VT panes and cells-tier content, never proportional flow.
-- **Images** (H-7): PNG decodes in halcyond — the bound recommendation is
-  miniz_oxide (`no_std` inflate) + a hand-rolled defilter/chunk walker
-  (PNG's spec surface is small; a bespoke decoder is fuzz-friendlier than a
-  ported one and keeps the parse in Rust). JPEG: decide at H-7
-  (port-vs-defer); not load-bearing for the exit criteria draft.
+- **Images** (H-7): decode is **native Rust in the short-lived `view` Proc**
+  (NOT in halcyond — the §14.7 blast-radius amendment, ratified 2026-09-09),
+  the raster crossing to halcyond by Weft. The bound recommendation is the
+  **zune** codec crates — `zune-png` + `zune-jpeg` (both `no_std + alloc`,
+  competitive with libjpeg-turbo, and already the JPEG engine inside the
+  `image` crate) — covering PNG **and** JPEG in memory-safe Rust. This
+  supersedes the earlier miniz_oxide + hand-rolled-PNG note: a mature
+  `no_std` pure-Rust decoder is equally fuzz-friendly, covers JPEG for free,
+  and is far less bespoke surface to own. VERIFY the `no_std` claim at vendor
+  time by building against the native target before any code depends on it
+  (the fontdue discipline). Video/audio decode is the split-by-medium case
+  (§14.7.7): a sandboxed ported codec, never native.
 - **Inline surfaces**: an `Embed` reserves flow space; the actual pixels are
   a Tapestry surface the compositor places (the inline-live placement,
   TAPESTRY §14). The H-2 MVP may land text-only transcripts first; `Embed`
@@ -1434,14 +1441,114 @@ read to choose output. Under multi-console **both** relocate to the per-tile pts
   side is halcyond's rasterizer, RICH for every tile. The console
   special-case remains for the non-tile fallback.
 
-### 14.7 Inline media — native, out-of-band
+### 14.7 Inline media — native, out-of-band (the `view` mechanism)
 
-`cat picture.png` → an inline image is a **native** path: a `display`/type-aware
-coreutil or the shell emits an `Embed`/`Image` to `halcyond` **directly** (out of
-band), **not** PNG bytes down the pts — raw image bytes down the pts hit the VT
+`view picture.png` → an inline image is a **native** path: the pixels reach
+`halcyond` **out of band** — **not** as image bytes down the pts, which hit the VT
 parser as garbage. This matches NOVEL §3.4 (bytes-in-text rejected as the media
-mechanism) and keeps image decode in `halcyond` (Rust, the format-fuzz surface).
-Terminal image-escape protocols (sixel / kitty / iTerm) are **v1.x**.
+mechanism). Terminal image-escape protocols (sixel / kitty / iTerm) are **v1.x**:
+we own both ends of the wire, so we adopt the object model those protocols
+converged on (the image/placement split, explicit-format-never-sniff,
+resize-as-re-place, a bounded table) natively, without the escape-sequence hacks.
+
+**AS-DESIGNED (operator-ratified 2026-09-09: native `view` + Weft, spike-first;
+the design-conversation → scripture pattern).** Reserved as **I-47** (ARCH §28).
+The mechanism below **amends** this section's original "keeps image decode in
+`halcyond`": decode runs in the short-lived `view` Proc, **not** in the
+compositor — the decoder is native Rust either way (the format-fuzz intent is
+preserved), but a per-invocation throwaway is a strictly smaller failure domain
+than the whole-session `halcyond` for parsing an untrusted image bytestream.
+
+**14.7.1 Data flow.**
+
+```
+view test.png   (short-lived, NATIVE — libthyla-rs + the zune no_std codecs)
+  → open + read the file  (in the user's own namespace, with the user's rights)
+  → zune-png / zune-jpeg decode          [hostile bytes die in THIS throwaway proc]
+  → Weft-share the RGBA raster  ────────┐  + write a place-request to halcyond's
+     { format, native w/h, placement }  │    per-pane control endpoint
+                                         ▼
+halcyond → maps + COPIES the raster into a cartoon Blob (view may now exit)
+         → a new transcript Item::Image placement
+         → letterbox to the pane's px width; reflow-on-resize is free
+           (the width-keyed layout cache re-derives; halcyond resamples the blob)
+```
+
+`view` exits as soon as the share + request are delivered; the placement
+persists because `halcyond` owns the copied blob (I-7/#847 — the raster's pages
+would in any case outlive `view` while a mapping remains, but the copy makes the
+lifetime trivial and lets the Weft share drop immediately).
+
+**14.7.2 The channel — the per-pane control endpoint (the genuinely new IPC).**
+`halcyond` posts a **per-pane control endpoint** into the pane's namespace
+(modeled on the provisional-but-unbuilt `TAPESTRY §15 /dev/halcyon/pane/<id>`
+tree and the `/env` per-Proc precedent; the exact bind path is fixed in the
+implementation chunk). Any program in the pane reaches it by inheriting the
+pane's namespace. A **place-request** carries `{ format (explicitly declared —
+halcyond never sniffs the raster's provenance), native w, native h, placement =
+inline | fullscreen, a Weft handle to the RGBA raster }`. This is the
+**sanctioned out-of-band pixel channel**; `BEACON §10`'s "out-of-band side
+channels — fragile association, dies at every existing hop" rejection is scoped
+to *Beacon's own text transport* and is answered here **by construction**: the
+endpoint lives in the pane's own namespace, so association is structural
+(inherited, not guessed) and there are **no hops** — `view` is a direct namespace
+descendant of the pane's shell. See the reciprocal note in `BEACON.md §10`.
+
+**14.7.3 The transcript item.** A new `Item::Image { blob, native_w, native_h,
+placement }` beside `Line | Table | Rule | Pre` (`transcript.rs`). Layout reserves
+a letterboxed rect at the block's current px width and emits the **already-built,
+already-tested** `cartoon::Op::Image` (`usr/lib/cartoon/src/lib.rs:49` + the
+`execute` arm at `:444`, unit-tested at `:590`/`:602`, currently fed by nothing).
+Reflow is the free width-keyed layout re-derive. Under §14.11 an inline image is a
+**scrollback item** (history), never a live-grid cell — it rides `ScrollOff` into a
+history block; this is the concrete realization of §14.11.5's "the grid is
+text-only; inline media stays the out-of-band native seam."
+
+**14.7.4 `view` (native coreutil).** Sniffs magic bytes: a recognized image
+(PNG now; JPEG at the H-7-expand via `zune-jpeg`) → decode + Weft-share +
+place-request; **otherwise → `exec cat`** (the text fallback). `--fullscreen` sets
+`placement = fullscreen` (the whole content area — real dimensions if it fits,
+else letterboxed). `view` is native libthyla-rs linking the **pure-Rust `no_std`**
+zune codecs — native-linking-native, **not** the `CLAUDE.md` "native program
+linking a ported library" case (zune is Rust, not a Pouch/musl port).
+
+**14.7.5 The obj-verb.** One line in the Beacon verbs rules file
+(`path view view {}`, system tier `/lib/beacon/verbs`); the H-3c menu
+(Esc + w/b + Enter) types `view '<path>'` into the pane as an ordinary child
+(`main.rs:802-820`). **Zero mechanism change** — the verb only automates
+*invoking* `view`.
+
+**14.7.6 Safety + the DoS floor.** Decode is isolated in the sacrificial `view`
+(hostile bytes never touch the compositor). `halcyond` validates the **declared
+format tag + the native dims + bounds the raster byte size** before it maps, and
+**copies before the placement goes live** (no torn/partial placement — a
+placement shows a fully-decoded raster or nothing). A **per-pane image-table
+quota** bounds live placements + total raster bytes (the I-32 DoS floor, the
+kitty per-client-quota lesson), failing clean rather than extincting. The
+place-request parser is a **new IPC parse surface** on `halcyond` — bounds-checked
+like the 9P wire and the Beacon frame parser; it joins the format-fuzz audit
+class. Its `AUDIT-TRIGGERS` row + the `ARCH §25.4` entry land **with the
+implementation** (the reserve-then-enforce discipline).
+
+**14.7.7 Video + audio (later; the same seam, split by medium).** Video is **not**
+the static-`Image` path — it is the heavier `Embed`/inline-live surface (§14.8): a
+**sandboxed ported codec** (an FFmpeg decode-only subset, ~3 MB, or standalone
+dav1d) streams frames into a Tapestry surface composited in the tile's flow. This
+is forced by the state of the art: as of 2026-09 there is **no production-grade
+pure-Rust decoder for H.264 / HEVC / VP9** (only AV1, via `rav1d`, has a story).
+Audio does **not** render inline (it is not visual) — the decoder routes PCM to
+**Nocturne** (I-46). So the operator's "one library, knowing we want video +
+sound later" instinct is **right for the video/audio decoder** (one ported codec
+covers both) and **wrong for images** (native `zune` is smaller, safer, and
+needs no port); the media path is therefore **split by medium**, not unified on
+one library.
+
+**14.7.8 Staging** (operator-ratified spike-first 2026-09-09):
+1. **Spike**: `view test.png` → an inline, letterboxed PNG end-to-end (the
+   channel + `Item::Image` + `view` PNG-only + reflow), proven on real hardware
+   (thyla-pi's V3D).
+2. **Expand**: JPEG (`zune-jpeg`) + the obj-verb + `--fullscreen` + the per-pane
+   DoS quota + the focused (format-fuzz) audit.
 
 ### 14.8 Inline-live graphical apps + promotion (TAPESTRY §14 concretized)
 

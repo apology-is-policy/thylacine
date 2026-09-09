@@ -42,9 +42,9 @@ same shape as [[view-audit-trigger-coverage]]'s limit: presence is necessary and
 never sufficient.
 
 <!-- generated:begin -->
-**ARCH §28: 46 rows · CLAUDE.md: 46 rows · AUDIT-TRIGGERS cites 44 · vault notes: 37.**
+**ARCH §28: 47 rows · CLAUDE.md: 47 rows · AUDIT-TRIGGERS cites 44 · vault notes: 37.**
 
 | gap | invariants | why it matters |
 |---|---|---|
-| registered but no vault note | `I-2`, `I-4`, `I-6`, `I-14`, `I-25`, `I-35`, `I-41`, `I-42`, `I-46` | the vault has not written this one up; not a scripture defect |
+| registered but no vault note | `I-2`, `I-4`, `I-6`, `I-14`, `I-25`, `I-35`, `I-41`, `I-42`, `I-46`, `I-47` | the vault has not written this one up; not a scripture defect |
 <!-- generated:end -->
