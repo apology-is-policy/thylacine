@@ -59,6 +59,77 @@ the exact security axis where the operator drew the Fable-trust line; the
 session-path channel is a genuine trust-boundary design fork regardless of
 model. Surfaced as a blocking question rather than guessed.
 
+**The operator answered: gallery first, then JPEG** (the recommended path;
+gallery is lower-risk on Opus -- it adds NO new format-fuzz decoder, so it does
+not deepen the owed Fable-diversity audit debt). So gallery landed next.
+
+**Landed `20aa8e95`** -- `gallery <image>`, the fullscreen variant. It opens its
+own fullscreen tapestryd surface and blits the image letterboxed (the
+DOSBox/Quake client pattern; rides I-40/I-45 as a CLIENT, no new compositor
+code), and it REUSES view's audited zune decode (`default-features=false` -> the
+pure brain) -- no new format-fuzz surface, decode still in the sacrificial
+process. The obj-verb `path gallery gallery {}` joins `view` on the menu.
+
+- **The new logic is the letterbox FIT** (aspect-preserving, centred, scaled to
+  FILL -- the deliberate divergence from the inline native-if-fits ruling: a
+  fullscreen viewer upscales) + a nearest-neighbor blit (forced opaque; every
+  src/dst index re-checked so a truncated raster clamps, never OOB). Pure, host-
+  tested (`gallery` lib 10: fit_rect / paint / is_exit_key).
+- **Self-audit found + fixed a real bug BEFORE the formal round:** the CONFIGURE
+  handler only repainted on `Ok(true)` (a resize), missing libtapestry's contract
+  that ANY `Ok` obliges a full repaint+present -- `Ok(false)` is a same-size
+  REDRAW request after the slots were invalidated; and `Err(Busy)` is non-fatal
+  (a stale offer), not the fatal I first wrote.
+- **Wrong turn, caught by reading my own regex:** the first E2E hardcoded
+  `shown 640x400`, but gallery scales the image to FILL the display, so the
+  witness line reads `shown 1280x800` (the fitted size); 640x400 is only the
+  NATIVE raster field. The doomed run was killed by PID and re-run with a
+  captured-dimension regex.
+- **The display-model finding (joey G-4):** scanout is FIRST-PRESENT-WINS, so a
+  second fullscreen client's VISIBILITY over the halcyond console is the
+  tapestry-demo/DOSBox-proven path, not gallery's to guarantee -- gallery's home
+  is the graphical SESSION (the pane model). The E2E therefore keys on the SERIAL
+  present witness (the whole client path on hardware) and saves the screendump as
+  a record; a session-mode visual gate is owed.
+
+**The gallery E2E passed on HVF (29s, first attempt)** -- witness
+`gallery: /test.png 640x400 shown 1280x800`, Esc exited cleanly, and the
+screendump showed the image rendered (tiled beside the console -- the compositor
+gave gallery a pane, the documented console-mode display model). Screenshot sent
+to the operator.
+
+**Then the Opus holotype found the finding the green E2E hid -- F1 [P1].** BOTH
+viewers had declared the default 4 MiB `ThylaAlloc`, so `READ_CAP` (64 MiB) and
+`view::MAX_PIXELS` (64 Mpx) were PHANTOM bounds: an image decoder's peak is ~8*npx
+(compressed input + samples + ARGB, all live), which on a 4 MiB heap caps npx at
+~0.3-0.5 Mpx. Any image large enough to fill even the default 1280x800 display,
+and every real photo, OOM-exited SILENTLY (panic -> t_exits(1), no diagnostic).
+The E2E was green only because `/test.png` is 256 Kpx -- the one input that fits,
+the exact "gauge reading zero because it never started" trap the memory pins warn
+about. **This is a genuine self-audit miss**: I copied view's `ThylaAlloc` +
+`READ_CAP` pattern without seeing that view is the closed slice-3b's INLINE path
+(an OOM there merely drops the inline image) while gallery is a whole viewer (an
+OOM is total failure) -- and that view itself shared the ceiling.
+
+Fixed both (one root cause, one feature -- the fullest-spec + stewardship call,
+not just enqueue the sibling): gallery -> 128 MiB `ThylaAllocN` + a 12 Mpx budget;
+view -> 64 MiB + a 6 Mpx budget; both reject over-budget from a NEW headers-only
+`view::png_dimensions` + `within_pixel_budget` BEFORE the heap-hungry decode, so
+the bound is REAL. Plus F2 (`drop(bytes)` after decode) and F3 (the connect
+`unwrap` -> a Surface-yielding block). The round's verified-sound list (fit/paint
+bounds, the CONFIGURE lifecycle, the obj-verb quoting, the I-40/I-45 client
+obligations) stands: 0 P0, no memory-safety violation. Closed `cfa4f83f`. The
+E2E re-runs (confirming the bigger heap leaves the happy path unchanged) are
+pending the mac; not pushed until re-confirmed green.
+
+**The lesson (pinned):** a `MAX_PIXELS`/`READ_CAP` far above the process heap is
+a PHANTOM bound the allocator OOMs past -- size the pixel budget to the heap and
+check it from the headers BEFORE the decode. And a decoder E2E whose fixture is
+the one image that fits proves nothing about the images that do not.
+
+JPEG is next (the second half of the operator's vote); the session-path per-pane
+channel remains the design fork owed to the operator.
+
 
 
 The console spike the operator ratified. `view /test.png` now decodes a PNG in
