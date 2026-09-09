@@ -113,10 +113,29 @@ HALCYON-TYPE + HALCYON-THEME) was build-verified GREEN (`build.sh all` + `test.s
 boot banner, arc gates L-6c/D-5 PASS) and pushed to both mirrors with the scripture
 (`43185c12`), followed by the view/gallery amendment (this commit).
 
-**Next.** The `view`-inline SPIKE (A: the per-pane channel + `Item::Image` + `view`
-PNG-only + reflow), proven on thyla-pi's V3D -- it proves the one new mechanism.
-Then `gallery` (B, the native libtapestry pane viewer, lower-risk), then expand
-(JPEG + both obj-verbs + the per-pane DoS quota + the format-fuzz audit).
+**Slice 1 (the render path) landed + pushed `cf6aa06b`.** The build order was
+inverted for signal: prove pixels-in-the-transcript BEFORE the channel/decoder. A
+new `Item::Image { w, h, argb }` transcript item; a `layout_block` arm that
+contain-fits it to the content width and resamples (the executor stays a 1:1
+blitter, so `cartoon::Blob::scaled` does the letterbox); `render_block` emits
+`Op::Image` into a per-frame `Cartoon.blobs`; reflow is the free width-keyed re-lay.
+A host test (`layout::inline_image_lays_renders_and_reflows`) drives it end to end
+with a baked raster -- lays + resamples, emits the op, `execute` blits the top-left
+pixel, a narrow width rescales. Full halcyond lib 209/209 + cartoon 11/11 green; the
+guest target compiles. Nothing produces an `Item::Image` at runtime yet (that is the
+channel, slice 3) -- this is the render floor. Low-ripple design: `blobs` went INTO
+`Cartoon` so `render_block` kept its signature (no ripple to its ~11 callers) and
+only the two transcript-path `execute` sites changed their blob arg. Dossier
+deferred with a `No-dossier-change` trailer (sub-halcyond is audit:hard but already
+~2000 lines stale from the merge; the inline-media dossier + AUDIT-TRIGGERS row land
+with the full feature).
+
+**Next.** Slice 1b -- a boot-time baked `Item::Image` (an env-gated lever) rendered
+on a REAL boot (thyla-pi V3D) -> the first inline-image screenshot for the operator
+(de-risks the blit through the actual GPU/scanout, which the host test cannot). Then
+slice 2 (vendor `zune-png`, native decode), slice 3 (the per-pane channel: `view
+test.png` E2E), then `gallery` (B), then expand (JPEG + both obj-verbs + the DoS
+quota + the format-fuzz audit).
 
 ---
 ## 2026-09-09 (aux, run 6, self-compact #4) -- the arm-6 arc CLOSE: audit SOUND 0/0/0/2 P3, SMP gate 40 boots clean, ls-imperium arm 6 re-added
