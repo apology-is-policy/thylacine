@@ -131,11 +131,92 @@ halcyond's *built* args through kaua-term's *real* parser -- the TY-4 lesson
 applied, since a unit test of either half alone passes with the halves
 disagreeing. Dropping the flag fails exactly 2 tests by the palette compare.
 
+### TH-3 through TH-5b: the file, the load path, and a second theme
+
+**TH-3a, the parser.** A `no_std` TOML subset -- exactly this format's grammar
+and nothing else. Everything outside it is REFUSED rather than ignored, because
+silently skipping `x = 1.5` applies a theme the author did not write, which is
+the half-applied theme 4.2 forbids. **The test caught a real bug in my own
+parser**: `strip_comment` was a naive `find('#')`, which turns
+`surface = "#1A1714"` into `surface = "` -- every colour in this format begins
+with `#`, so the one construct certain to appear was the one the first draft
+could not read.
+
+The fuzz bar is seeded so a failure is reproducible. Its first form was 4000
+pure-garbage inputs, and **the discrimination assertion I added on a hunch
+failed immediately: 98% were refusals at line 1**, so the accepting paths were
+barely exercised. Half the corpus is now a valid theme file under 1-3 byte
+mutations, and the test fails if the corpus degenerates to one arm again.
+
+**TH-3b, `from_toml`.** Geometry moved into the theme -- a bevel's width and its
+four face colours are one decision. 57 keys through a `KEYS` registry sited
+beside the struct, with the registry and the setter proven to agree in BOTH
+directions. And a **struct-size pin** for the thing no behavioural test can
+reach: a baseless load starts from the built-in and relies entirely on KEYS
+covering every field, so a field added and forgotten would inherit Daylight
+silently -- in exactly the mode that exists to prevent that. No test can check a
+field nobody wrote, so `size_of::<Theme>()` is pinned with a message naming
+KEYS.
+
+**TH-4a/b, the load path.** `resolve` is pure, so the tier policy is host-tested;
+a refused file falls to the next tier DOWN, not to the built-in, so a user with
+a typo keeps the system theme. A self-audit catch: `read_file` TRUNCATES at its
+cap rather than failing, and a truncated theme can be perfectly valid TOML --
+worse than malformed, because 4.2 never fires. `THEME_MAX` refuses anything that
+could have been cut.
+
+**Then two gates in a row taught the same lesson from opposite sides.**
+
+The first compose run passed with `tapestryd: theme` absent from the capture
+entirely -- the absent-file path returned early and silently, so nothing proved
+the read had run. Added a line to every path.
+
+Those two lines then broke `ls-halcyon` 3/3, deterministically. The gate's own
+comment already knew why: its dominant-colour check is keyed on how many rows
+precede the shell, so the boot-log island moved back under the sampled band. The
+previous round *moved the band*; that only changes which line count breaks it.
+The check now asserts the property it claims -- the dominant ground is a
+Daylight ground -- which is a whitelist of two exact light colours, so
+discrimination against Bonfire dark is unchanged by construction.
+
+**TH-5/5b, Nocturne.** An arc that ships only the theme it started with has
+proved nothing. Nocturne is written with **no `base`**, so the loader requires
+all 57 keys and names any that are missing.
+
+TH-5 shipped it; TH-5b loaded it. `nocturne loaded from
+/lib/halcyon/theme.toml and PAINTED (ground 42,36,34)` -- and nothing in the
+tree but a file read off disk, parsed, resolved and painted can put that value
+on that screen, so the pixels are the proof rather than a proxy for it.
+
+**It immediately found a defect worth the boot.** `tapestryd: theme built-in (no
+/lib/halcyon/theme.toml)` -- while halcyond, started later, loaded the very same
+path. The compositor comes up before the pool it lives in is mounted, so the
+chrome kept Daylight's bevel around a Nocturne pane and *nothing failed*. That
+is how it would have shipped. The console renderer pushes now, carrying the
+system tier the compositor could not reach in time.
+
+**And a finding about the theme, not the harness.** The run refused Nocturne's
+first cinnabar (Bonfire's `#C06050`) because it sits (32,24,16) from the shared
+ember and the condition-ink check could not tell them apart -- which is the gate
+saying a *person* could not either. An error state must never read as the
+accent.
+
+The Nocturne run stops after the legs it can prove soundly, and says so: below
+that point `no_strip_at_left` returns "no strip present" when it cannot
+recognise the strip's colours, so a Nocturne run would satisfy a strip-ABSENT
+assertion with a strip plainly there. A hollow pass, not a failure. The Daylight
+run still exercises every leg.
+
 ### Open, and not claimed as proven
 
 - **tapestryd's chrome has no host-testable seam.** `server.rs` carries no test
   module, so the compositor half of the retint claim rests on the build plus the
-  compose gate -- an owed witness, not a proven one.
+  compose and Nocturne gates -- a real witness now, but not a unit one.
+- **The Nocturne gate run stops early**, by design and stated above. Widening
+  the remaining legs to be theme-aware is real work nobody has done.
+- **TH-4c (`halcyon theme lint`) and TH-6 (the audit) are not started.** The
+  loader already computes what lint needs -- `Loaded.inherited` names every key
+  a based file did not set.
 - The workspace is not `rustfmt`-clean at HEAD (raster.rs 56 diffs,
   transcript.rs 54, and so on) and was not made so here. "Clean on every line
   this chunk touched" was verified by intersecting `cargo fmt --check` output
