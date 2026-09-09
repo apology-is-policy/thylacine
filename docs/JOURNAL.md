@@ -463,6 +463,75 @@ A documentation file that lies about the thing it documents is worse than no
 file, and the only reason this one doesn't is that it is loaded and compared by
 a test rather than proofread.
 
+### The arc closes on pixels, and the one debt that could not be paid
+
+The last owed item was not a fix, it was a *measurement*. Round 2's R2-F1
+changed `usr/halcyond/src/layout.rs`'s ink-hook comparison -- the console
+renderer's content path -- and that is a place where the host suites are
+structurally unable to see the result. 209 green halcyond tests say nothing
+about which colour actually landed in a cell. Only a booted guest does.
+
+Both levers, one bake each, on a quiet mac (7 minutes of held machine, against
+the 50-70 I had budgeted):
+
+- **Nightjar**, 33 s: `not one Daylight pixel in the nightjar transcript
+  (272800/272800)`. The number is worth stating precisely because of what it is
+  *not*: it is not a gauge that only ever reads zero. The same leg read
+  22031/272800 when F1 was deliberately reintroduced during the round-1 close,
+  deterministically, three times out of three. So a zero here is a
+  discriminating result rather than the absence of one. Alongside it,
+  `TAPESTRYD painted the nightjar bevel under nightjar (left 58 51 46 != top
+  78 69 62 -- four-value NNW)` -- the compositor's own half, four distinct
+  values, so the light direction survived the theme swap.
+- **Daylight**, 119 s: 49 of 49 legs, zero failures, against a pre-round-2
+  baseline of 118 s and 49 legs.
+
+Both bakes were verified by content and not by exit code, which on this project
+is not a formality: the Nightjar log carries `populate pool: HALCYON theme lever
+ENABLED (/lib/halcyon/theme.toml = nightjar)` and the Daylight log carries that
+string zero times. A bake failure here presents as *absent content*, never as a
+non-zero status, so the exit code would have been happy either way.
+
+**The debt that could not be paid, and why no substitute was accepted.** A
+Fable-diversity pass was owed on this surface: both audit rounds ran on Opus,
+the implementation family. Re-attempted this run across the whole arc with
+`model: fable` passed explicitly -- and it died before emitting a line. The
+failure names its own evidence: `model sent to the API: claude-fable-5-1`,
+`rate_limit`, HTTP 429, `req_011CeskGU2DXcngZoR48ifm3`, "out of usage credits."
+That the override *reached* the API is the part worth recording, because a
+subagent cannot observe its own model fallback; without that line, account-level
+exhaustion and a silent reroute look identical from here.
+
+No third round was spawned, and the reasoning deserves stating because it wears
+the shape of the dodge the "never skip a round for want of Fable" rule exists to
+forbid. That rule's own stated purpose is *do not leave the surface unreviewed*.
+This surface is not unreviewed -- two full rounds, 2 P1 + 6 P2 + 9 P3, all
+fixed, round 2 clean. What is missing is specifically the **family** axis, and
+no available fallback can supply it: Sonnet and Haiku share Opus's lineage. A
+same-family third round would have spent budget without touching the debt while
+producing a close that *reads* as though the debt were paid. The debt stays
+open and labelled unpayable-for-now, which is the honest disposition.
+
+**A staleness finding fell out of the closing sweep.** Running the mandatory
+`quaestor owner` step over the arc's surfaces turned up
+`abi-halcyon-palette` -- the pin for the `/env/HALCYON_PALETTE` contract, last
+updated 2026-09-06, before the arc. It names `daylight_env_palette` as a live
+mirror in `usr/halcyond/src/session.rs`. It is not there: session.rs:1251 calls
+`env_palette(&theme)` on the *resolved* theme, and `daylight_env_palette` is
+`#[cfg(test)]` (theme.rs:882), so it does not exist in a production build at
+all. Its 11-role table still heads its source column `DAYLIGHT field`.
+
+The reason to chase this rather than note it: if that export had still been
+hardcoded, it would have been F1 again one layer out -- a built-in Daylight
+palette published to every hosted program while the session painted something
+else. It wasn't; TH-4a had already handled it, and the function's own doc
+comment names that exact failure mode. But the pin describing it had rotted into
+saying the opposite, and a pin that describes a hazard as present when it was
+closed is the same defect class as one that describes it as closed when it is
+present. Filed to the vault on call 0076 with the three specific errors; the
+`surface <- header` mapping the note calls "the one mapping worth pinning" is
+unchanged and still correct.
+
 ---
 
 ## Run 46h (2026-09-08, Opus 5 max, after the 600k self-compaction) -- HALCYON-TYPE TY-4: Cornucopia live, and the defect that fell out of measuring it
