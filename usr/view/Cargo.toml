@@ -1,0 +1,37 @@
+# `view` -- the inline-media viewer (I-47, HALCYON.md 14.7). A short-lived
+# native program: decode a recognized image and hand its raster to halcyond
+# over the per-pane channel (slice 3), else fall back to `cat`. Decode runs
+# HERE, never in halcyond (the blast-radius amendment) -- hostile image bytes
+# parse in a sacrificial process. Images use the zune no_std decoders (pure
+# Rust, fuzz-friendlier than a ported C codec -- the H-7 posture).
+#
+# lib + bin (the halcyond pattern): the LIB is the pure decode/sniff brain,
+# host-tested via
+#   cargo test -p view --lib --no-default-features --target aarch64-apple-darwin
+# (zune is portable, so the decode path host-tests too); the BIN is the thin
+# syscall body (the `backend` feature -> libthyla-rs).
+[package]
+name = "view"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[features]
+default = ["backend"]
+backend = ["dep:libthyla-rs"]
+
+[lib]
+name = "view"
+path = "src/lib.rs"
+
+[[bin]]
+name = "view"
+path = "src/main.rs"
+required-features = ["backend"]
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+# no_std image decode. default-features=false drops zune's std (no_std + alloc).
+zune-png = { version = "0.4", default-features = false }
+zune-core = { version = "0.4", default-features = false }

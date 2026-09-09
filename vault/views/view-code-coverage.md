@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 69 unowned · 503 files (86% owned) · ~20979 unswept lines.**
+**434 owned · 71 unowned · 505 files (85% owned) · ~21218 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~32280 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -84,6 +84,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/corvus | 1 | 1 | 245 |
+| usr/view | 0 | 2 | 239 |
 | usr/libthyla-rs | 29 | 1 | 196 |
 | arch | 36 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
@@ -158,6 +159,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
 | usr/susp-mask-child/src/main.rs | 139 |
+| usr/view/src/lib.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/nocturne-vol/src/main.rs | 126 |
@@ -167,6 +169,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
 | usr/halcyond/src/viewtest.rs | 114 |
+| usr/view/src/main.rs | 100 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
