@@ -204,15 +204,25 @@ fn wait_ready(r: Ready, events: i16, ms: i32) -> bool {
     n > 0 && pfd.revents & events != 0
 }
 
-/// `read_exact` with a deadline on each wait, for the pre-authentication window
-/// where a silent peer must not be able to park us forever. The bound is
-/// per-wait rather than for the whole read: a peer that dribbles bytes is making
-/// progress, and the flights here are 64 bytes, so there is nothing to dribble.
-/// npxf's own bracket is per-recv too (`SO_RCVTIMEO`), so this matches the peer.
+/// `read_exact` under a TOTAL deadline, for the pre-authentication window where
+/// a silent peer must not be able to park us.
+///
+/// The bound is for the whole read, not for each wait. A per-wait bound was the
+/// first shape here, defended with "the flights are 64 bytes, so there is
+/// nothing to dribble" -- and 64 bytes is exactly 64 dribbles: one byte every
+/// 14 seconds would have stretched a 15-second bracket to sixteen minutes, per
+/// connection, before authentication. A peer that is making progress is not
+/// thereby entitled to unlimited time.
 fn read_exact_before(fd: i64, r: Ready, buf: &mut [u8], ms: i32) -> bool {
+    let started = libthyla_rs::time::Instant::now();
     let mut off = 0usize;
     while off < buf.len() {
-        if !wait_ready(r, libthyla_rs::T_POLLIN, ms) {
+        let spent = started.elapsed().as_millis() as i64;
+        let left = ms as i64 - spent;
+        if left <= 0 {
+            return false;
+        }
+        if !wait_ready(r, libthyla_rs::T_POLLIN, left as i32) {
             return false;
         }
         let n = unsafe { libthyla_rs::t_read(fd, buf[off..].as_mut_ptr(), buf.len() - off) };
@@ -244,18 +254,29 @@ fn read_exact_before(fd: i64, r: Ready, buf: &mut [u8], ms: i32) -> bool {
 /// carries no readiness at all. See `Ready`.
 fn write_exact(fd: i64, r: Ready, buf: &[u8]) -> bool {
     let mut off = 0usize;
+    // Bounds the CUMULATIVE time spent making no progress, reset by any byte
+    // written. A per-wait bound would not terminate if readiness kept firing
+    // while the write kept returning 0 -- POLLOUT is netd's `can_send()`
+    // sampled at poll time, and a window that opens and closes again between
+    // the poll and the write is a spurious wakeup, not a contract violation.
+    // Without this the loop would be bounded only by the peer's good behaviour.
+    let mut stalled_since: Option<libthyla_rs::time::Instant> = None;
     while off < buf.len() {
         let n = unsafe { libthyla_rs::t_write(fd, buf[off..].as_ptr(), buf.len() - off) };
         if n < 0 {
             return false;
         }
         if n == 0 {
-            if !wait_ready(r, libthyla_rs::T_POLLOUT, WRITE_STALL_MS) {
+            let since = *stalled_since.get_or_insert_with(libthyla_rs::time::Instant::now);
+            let spent = since.elapsed().as_millis() as i64;
+            let left = WRITE_STALL_MS as i64 - spent;
+            if left <= 0 || !wait_ready(r, libthyla_rs::T_POLLOUT, left as i32) {
                 say!("haul: write stalled with {} bytes left", buf.len() - off);
                 return false;
             }
             continue;
         }
+        stalled_since = None;
         off += n as usize;
     }
     true
@@ -519,7 +540,9 @@ usage: haul [-a aname] [-t file | --token-env VAR] host!port mountpoint [cmd ...
 The address takes the Plan 9 form host!port, or host:port. With no token the
 connection is PLAIN 9P; npxf servers always require one.
 
-Note: ut lexes a bare `!`, so QUOTE the address at an interactive prompt.
+Note: a LITERAL host!port is typeable as-is. A composed one is not --
+`$host!$port` lexes as three tokens and ut glues words only with ~ and ^,
+so quote that form: '$host!$port' will not do it either; use "$host:$port".
 
 Example:
   haul -t /cfg/npxf.token '10.0.2.100!7820' /n/host
@@ -546,14 +569,56 @@ struct Parsed {
 /// npxf does the same on its side, and it has to: a token file written by any
 /// ordinary editor ends in a newline, and a byte of difference is a different
 /// pre-shared key and a handshake that fails with no clue why.
-/// The largest token file this will read, matching npxf's own 4096-byte cap
-/// (`read_token_file`, npxf src/npxf_main.cpp). A file bigger than this is a
-/// mistake -- a key ring, a log, the wrong path -- and refusing it beats reading
-/// it: an unbounded read on a path the caller chose is a way to turn `-t
-/// /dev/zero` into an out-of-memory kill.
-const TOKEN_FILE_MAX: usize = 4096;
+/// The largest token file this will read.
+///
+/// npxf reads into a `Bytes buf(4096)` and fails when `n == buf.size()`
+/// (`read_token_file`, npxf src/npxf_main.cpp), so its largest ACCEPTED token is
+/// 4095 bytes -- one less than the buffer, which is easy to read as 4096 and is
+/// what the comment here used to claim. The difference is not academic: a
+/// 4096-byte token file that haul accepts is refused by `npxf-server` reading
+/// the same file through the same function, so the server does not start and the
+/// guest sees only a refused connection.
+///
+/// A file bigger than this is a mistake anyway -- a key ring, a log, the wrong
+/// path -- and refusing it beats reading it: an unbounded read on a path the
+/// caller chose is a way to turn `-t /dev/zero` into an out-of-memory kill.
+const TOKEN_FILE_MAX: usize = 4095;
+
+/// Read the token named by an environment variable WITHOUT going through
+/// `env::var`.
+///
+/// `env::var` reads into a 4096-byte STACK ARRAY and copies the value out into a
+/// String, leaving the array unwiped when it returns (`libthyla-rs/src/env.rs`).
+/// So the token -- the long-lived credential, whose compromise is not bounded by
+/// the session the way a derived key's is -- would sit in a dead stack frame for
+/// the life of the process, which in the park form is the life of the machine.
+/// Wrapping the RESULT in `Zeroizing` wipes the heap copy and says nothing about
+/// the one left behind.
+///
+/// `/env/<NAME>` is a plain file on the per-Proc env device, so reading it here
+/// costs nothing and keeps the bytes in one allocation we own end to end. The
+/// name guard mirrors `env::var`'s.
+fn read_token_env(name: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
+    if name.is_empty() || name.contains('/') {
+        return Err("that is not an environment variable name");
+    }
+    let mut path = String::from("/env/");
+    path.push_str(name);
+    // NOT trimmed, matching npxf: a variable holds exactly what someone set it
+    // to, whereas a file conventionally ends with a newline nobody typed. See
+    // npxf::trim_token_file.
+    read_token_bytes(&path, false, "that environment variable is unset or empty")
+}
 
 fn read_token_file(path: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
+    read_token_bytes(path, true, "the token file is empty")
+}
+
+fn read_token_bytes(
+    path: &str,
+    trim: bool,
+    empty_msg: &'static str,
+) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     let mut f = libthyla_rs::fs::File::open(path).map_err(|_| "cannot open the token file")?;
     // Warn, as npxf does, rather than refuse: the operator may have a reason,
     // and a mount that fails on a permission bit is worse than one that says so.
@@ -589,9 +654,11 @@ fn read_token_file(path: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     // npxf::trim_token_file, not an inline pop: the exact bytes trimmed decide
     // the PSK, so the rule lives in one documented place with a test on each
     // side of the wire.
-    npxf::trim_token_file(&mut buf);
+    if trim {
+        npxf::trim_token_file(&mut buf);
+    }
     if buf.is_empty() {
-        return Err("the token file is empty");
+        return Err(empty_msg);
     }
     Ok(Zeroizing::new(buf))
 }
@@ -626,13 +693,7 @@ fn parse_args(args: Args) -> Result<Parsed, &'static str> {
     }
     let token = match &plan.token {
         Some(cmdline::TokenSource::File(path)) => Some(read_token_file(path)?),
-        Some(cmdline::TokenSource::Env(name)) => match env::var(name) {
-            // NOT trimmed, matching npxf: a variable holds exactly what someone
-            // set it to, whereas a file conventionally ends with a newline
-            // nobody typed. See npxf::trim_token_file.
-            Some(val) if !val.is_empty() => Some(Zeroizing::new(val.into_bytes())),
-            _ => return Err("that environment variable is unset or empty"),
-        },
+        Some(cmdline::TokenSource::Env(name)) => Some(read_token_env(name)?),
         None => None,
     };
 
@@ -660,8 +721,14 @@ fn npxf_handshake(fd: i64, ready: Ready, token: &[u8]) -> Result<npxf::Session, 
     }
     step!("entropy for the ephemeral: ok");
 
-    let (client, msg1) = npxf::Client::start(token, eph).map_err(|_| "the token is empty")?;
+    // Wipe BEFORE the `?`. `Client::start` takes the scalar by value, so our copy
+    // is dead either way -- but an early return would have skipped the wipe and
+    // left 32 bytes of ephemeral on the stack. Unreachable today (the only
+    // failure is EmptyToken, which both token sources already refuse upstream),
+    // and unreachable is exactly the condition under which this rots.
+    let started = npxf::Client::start(token, eph);
     eph.zeroize();
+    let (client, msg1) = started.map_err(|_| "the token is empty")?;
 
     if !write_exact(fd, ready, &msg1) {
         return Err("handshake: the connection closed while sending our opening flight");
@@ -911,7 +978,10 @@ fn run(argv: Args) -> Result<(), &'static str> {
     loop {
         if STOPPED.load(Ordering::Acquire) != STOP_NONE {
             say!("haul: {} closed the connection -- the mount is dead", args.addr);
-            return Ok(());
+            // NOT Ok(()). A supervisor that restarts on a non-zero exit would
+            // read success for a mount that is gone, and the command form's twin
+            // above already returns Err for the same event.
+            return Err("the peer closed the connection");
         }
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(200));
     }

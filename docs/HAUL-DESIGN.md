@@ -480,14 +480,21 @@ nothing ran is strictly worse than a red, and this one appeared the moment an
 - **`/dev/random` is world-rw while `SYS_GETRANDOM` is capability-gated**
   (the standing H-4b-1 item). haul deliberately uses the *gated* path and
   fails closed; a future consumer reaching for the ungated one would be a hole.
-- **`ut` cannot parse a bare `host!port`.** Its lexer emits `Bang` for any `!`
-  that is not `!=`, so `10.0.2.100!7830` dies with
-  `UnexpectedToken { expected: "`;`, newline, or end of input" }`. The address
-  must be quoted. This is not haul's bug and not haul's alone: `dial`,
-  `con`, `nc`, `ping` and `nslookup` all take the same form, and the whole
-  family is affected the moment a person types one — the form had only ever
-  appeared in C string literals before. Tracked in
-  `memory/bug_ut_bang_collides_with_plan9_addresses.md`; a shell whose lexer
-  fights the OS's native address syntax deserves a real fix, not a documented
-  workaround.
+- **`ut` and `host!port` — FIXED for the literal form, still open for the
+  composed one.** `ut` used to emit `Bang` for any `!` that was not `!=`, so
+  `10.0.2.100!7830` died with
+  `UnexpectedToken { expected: "`;`, newline, or end of input" }` and every
+  address in the tree had to be quoted at the prompt. `308bb26e` makes
+  `scan_word` keep `!` inside a word, so a **literal** address is now typeable
+  and the E2E types one unquoted as the only execution those lexer tests get.
+
+  **The composed form is not fixed and that is a different mechanism**, so it
+  did not come along for free: `$host!$port` lexes as `Var`, `Bang`, `Var`, and
+  `parse_word` glues words only with `~` and `^` — "plain span-adjacent values
+  stay separate words" (`parse.rs:622-624`). Even `10.0.2.2!$port` splits, since
+  the literal half ends at the `$`. A script composing an address from variables
+  must still quote it, and `'$host!$port'` will not do (single quotes suppress
+  the expansion) — `"$host:$port"` is the working form. Making adjacent values
+  glue is a parser change with a much wider blast radius than a lexer branch,
+  and it is not obviously desirable.
 - **The name.** `haul` is unratified.

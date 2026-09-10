@@ -40,10 +40,18 @@ pub enum Bad {
 
 /// Parse `argv[1..]` (the caller drops argv[0]).
 ///
-/// Option parsing stops as soon as the command word is in hand -- addr,
-/// mountpoint, command are the three positionals haul owns, and everything
-/// after the third belongs to the child. `--` ends it earlier, for a command
-/// whose own name starts with a dash.
+/// Option parsing stops as soon as ADDR AND MOUNTPOINT are in hand -- those are
+/// the only two positionals haul owns, and the third word is already the child's
+/// argv[0]. `--` ends it earlier, for a command whose own name starts with a
+/// dash.
+///
+/// The boundary was at three, which looked equivalent and is not: with three,
+/// the command WORD itself is still read as an option, so
+/// `haul -t /real h!1 /m -t /attacker` matches `-t` at the command position,
+/// swallows `/attacker` as haul's token path, OVERRIDES the operator's `-t`, and
+/// leaves `cmd` empty -- haul silently parks instead of running anything. Two is
+/// the count that makes "everything after the operands is the child's" true of
+/// the command name as well as its arguments.
 pub fn plan(argv: &[&str]) -> Result<Plan, Bad> {
     let mut aname = String::from("/");
     let mut token: Option<TokenSource> = None;
@@ -54,7 +62,7 @@ pub fn plan(argv: &[&str]) -> Result<Plan, Bad> {
     let mut i = 0usize;
     while i < argv.len() {
         let a = argv[i];
-        if opts_done || positional.len() >= 3 {
+        if opts_done || positional.len() >= 2 {
             positional.push(String::from(a));
             i += 1;
             continue;
@@ -160,6 +168,18 @@ mod tests {
         let p = ok(&["h!1", "/m", "/bin/foo", "-v"]);
         assert!(!p.verbose);
         assert_eq!(p.cmd, vec!["/bin/foo", "-v"]);
+    }
+
+    /// THE ROUND-2 FINDING. The command WORD is the child's too, so a command
+    /// that happens to spell one of haul's options must not be read as one --
+    /// with the boundary at three positionals, `-t` here silently replaced the
+    /// operator's token AND emptied `cmd`, so haul parked with the wrong
+    /// credential and ran nothing, with no diagnostic.
+    #[test]
+    fn a_command_named_like_an_option_is_still_the_command() {
+        let p = ok(&["-t", "/real", "h!1", "/m", "-t", "/attacker"]);
+        assert_eq!(p.token, Some(TokenSource::File(String::from("/real"))));
+        assert_eq!(p.cmd, vec!["-t", "/attacker"]);
     }
 
     #[test]

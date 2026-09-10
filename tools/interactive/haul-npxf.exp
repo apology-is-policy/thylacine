@@ -167,8 +167,19 @@ lc_pass "haul-npxf: dialled, handshook, attached, mounted and LISTED a remote np
 # and die with "cannot open the token file"; passing it through means echo
 # prints it back. One token discriminates the two outcomes -- an argument that
 # both sides would have handled identically would assert nothing.
-lc_send "haul -t npxf.token 10.0.2.2!$hostport /tmp/host2 /bin/echo child-argv -t /nonexistent-token"
-lc_expect "child-argv -t /nonexistent-token" "the child's -t reached the child, not haul's parser"
+#
+# TYPED LOWERCASE, ASSERTED UPPERCASE, which is this file's header rule (line
+# ~18: "prefer an output token that cannot appear in the typed line anyway --
+# a `tr a-z A-Z` upper-cased token"). Measured, on this harness: no typed
+# command appears anywhere in the transcript, so a plain assertion WOULD hold
+# today -- the round-2 prosecutor's claim that the line editor echoes the buffer
+# contiguously is refuted by the capture, which is expect's own match stream
+# (log_user, per lib.exp line 49). But holding by a property of the line editor
+# is not the same as holding by construction, and the editor is free to change.
+# The uppercase form cannot be produced by anything but the child's output
+# passing through `tr`.
+lc_send "haul -t npxf.token 10.0.2.2!$hostport /tmp/host2 /bin/echo child-argv -t /nonexistent-token | tr a-z A-Z"
+lc_expect "CHILD-ARGV -T /NONEXISTENT-TOKEN" "the child's -t reached the child, not haul's parser"
 lc_pass "haul-npxf: the command form runs a child and relays its argv unread"
 
 lc_quit
