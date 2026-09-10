@@ -36,6 +36,10 @@ pub enum Bad {
     WantsUsage,
     MissingValue(&'static str),
     UnknownOption,
+    /// A dash-leading word sits where the command belongs. Ambiguous by
+    /// construction -- an option written late, or a command that really is named
+    /// with a dash -- so haul refuses rather than picking one silently.
+    DashAfterOperands,
 }
 
 /// Parse `argv[1..]` (the caller drops argv[0]).
@@ -52,6 +56,15 @@ pub enum Bad {
 /// leaves `cmd` empty -- haul silently parks instead of running anything. Two is
 /// the count that makes "everything after the operands is the child's" true of
 /// the command name as well as its arguments.
+///
+/// BUT MOVING THE BOUNDARY ONLY MOVED THE SILENCE, and that is why the refusal
+/// below exists. At two, `haul h!1 /m -t /cfg.token` -- an operator writing the
+/// flag after the operands, which every getopt-shaped tool accepts -- makes `-t`
+/// the COMMAND: the token is silently dropped, haul mounts IN THE CLEAR, prints
+/// PLAIN 9P, and finally fails to exec `-t`. Neither boundary can be right for
+/// both argvs, because both are guessing at intent. So a dash-leading word at
+/// the command position is refused outright and the operator is pointed at `--`,
+/// which says which one they meant. Loud on both, silent on neither.
 pub fn plan(argv: &[&str]) -> Result<Plan, Bad> {
     let mut aname = String::from("/");
     let mut token: Option<TokenSource> = None;
@@ -63,6 +76,11 @@ pub fn plan(argv: &[&str]) -> Result<Plan, Bad> {
     while i < argv.len() {
         let a = argv[i];
         if opts_done || positional.len() >= 2 {
+            // The command word itself may not start with a dash unless `--`
+            // said so. A lone "-" is a conventional stdin operand, not a flag.
+            if !opts_done && positional.len() == 2 && a.starts_with('-') && a.len() > 1 {
+                return Err(Bad::DashAfterOperands);
+            }
             positional.push(String::from(a));
             i += 1;
             continue;
@@ -170,16 +188,48 @@ mod tests {
         assert_eq!(p.cmd, vec!["/bin/foo", "-v"]);
     }
 
-    /// THE ROUND-2 FINDING. The command WORD is the child's too, so a command
-    /// that happens to spell one of haul's options must not be read as one --
-    /// with the boundary at three positionals, `-t` here silently replaced the
-    /// operator's token AND emptied `cmd`, so haul parked with the wrong
-    /// credential and ran nothing, with no diagnostic.
+    /// THE ROUND-2 FINDING, AS AMENDED BY ROUND 3 -- and the amendment is the
+    /// interesting part. Round 2 caught that with the boundary at three
+    /// positionals, `-t` here silently replaced the operator's token AND emptied
+    /// `cmd`. Moving the boundary to two fixed that argv and broke its mirror:
+    /// `haul h!1 /m -t /cfg.token`, an option written late, then silently became
+    /// a COMMAND -- token dropped, mount in the clear.
+    ///
+    /// Both argvs are the same shape, so no boundary can read both correctly;
+    /// each choice only picks which one fails silently. Refusing serves both,
+    /// and `--` lets the operator say which they meant.
     #[test]
-    fn a_command_named_like_an_option_is_still_the_command() {
-        let p = ok(&["-t", "/real", "h!1", "/m", "-t", "/attacker"]);
+    fn a_dash_word_at_the_command_position_is_refused_not_guessed() {
+        assert_eq!(
+            plan(&["-t", "/real", "h!1", "/m", "-t", "/attacker"]),
+            Err(Bad::DashAfterOperands)
+        );
+        assert_eq!(plan(&["h!1", "/m", "-t", "/cfg.token"]), Err(Bad::DashAfterOperands));
+    }
+
+    /// The escape hatch the refusal points at has to actually work for a command
+    /// that spells one of haul's own options -- otherwise the refusal is a wall.
+    #[test]
+    fn a_double_dash_admits_a_command_named_like_an_option() {
+        let p = ok(&["-t", "/real", "--", "h!1", "/m", "-t", "/attacker"]);
         assert_eq!(p.token, Some(TokenSource::File(String::from("/real"))));
         assert_eq!(p.cmd, vec!["-t", "/attacker"]);
+    }
+
+    /// A lone "-" is a conventional operand (stdin), not a flag, so it stays a
+    /// command name. Guards the `a.len() > 1` half of the refusal.
+    #[test]
+    fn a_lone_dash_is_a_command_not_an_option() {
+        let p = ok(&["h!1", "/m", "-"]);
+        assert_eq!(p.cmd, vec!["-"]);
+    }
+
+    /// The refusal is anchored at the command POSITION, not "any dash after the
+    /// operands" -- the child's own flags must still reach it untouched.
+    #[test]
+    fn the_childs_own_flags_still_reach_it() {
+        let p = ok(&["h!1", "/m", "/bin/echo", "-n", "-t", "x"]);
+        assert_eq!(p.cmd, vec!["/bin/echo", "-n", "-t", "x"]);
     }
 
     #[test]

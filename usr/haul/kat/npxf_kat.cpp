@@ -56,7 +56,16 @@ static Bytes drain(int fd, size_t n) {
 // catches that. The check only appeared to discriminate because the sabotage
 // that "verified" it was one-sided too.
 //
-// So the responder here uses the FIXED `se_sk`, not a random one. That is what
+// AND THE FIRST REPAIR TRADED ONE COVERAGE FOR THE OTHER. Pinning the responder
+// made the CLIENT's labels checkable, and in the same stroke stopped calling
+// server_handshake at all -- so a one-sided swap in the SERVER, which the
+// vacuous version did catch, sailed through with byte-identical vectors and a
+// green gate. Measured, not reasoned: the swap was applied to a copy of npxf and
+// `regen.sh` printed PASS. Hence TWO legs below, one per handshake, each pinning
+// the OTHER side's ephemeral so both sets of labels are asserted against a
+// derive() that knows both halves. Neither leg alone is sufficient.
+//
+// So each shim uses a FIXED ephemeral, not a random one. That is what
 // makes the resulting keys COMPARABLE TO THE EMITTED LABELS: with both
 // ephemerals known we can call npxf's own derive() from the server's side and
 // assert `ckeys.send == d.c2s` -- the label itself, not a symmetry.
@@ -71,6 +80,13 @@ static void kat_responder(int fd, std::span<const uint8_t> token, const uint8_t 
                           crypto::Key &send_out, uint8_t ce_pk_out[32], Derived &d_out,
                           std::string &err) {
     try {
+        // The shim's OWN reads must be bounded. Only the real handshake sets a
+        // timeout, and it sets it on the other end -- so a sabotage that
+        // perturbs one side's confirm tag (exactly what this file exists to be
+        // run under) would leave this thread blocked in read_full forever,
+        // join() never returning and regen.sh hanging. A hung gate reads as
+        // "still running", which is the one verdict worse than "failed".
+        net::set_timeout(fd, kHandshakeTimeoutMs);
         crypto::Key psk = derive_psk(token);
 
         uint8_t msg1[kHandshakeMsg1];
@@ -133,8 +149,11 @@ static void check_direction_binding(std::span<const uint8_t> token, const uint8_
         die("client_handshake's send key is NOT c2s -- the fixture's k_c2s label is wrong");
     if (ckeys.recv != d_srv.s2c)
         die("client_handshake's recv key is NOT s2c -- the fixture's k_s2c label is wrong");
-    if (server_send != d_srv.s2c)
-        die("a server's send key is not s2c");
+    // `server_send` is the shim's own `d_srv.s2c`, so comparing the two is a
+    // tautology -- it was one, silently, until round 3 measured it. The server's
+    // labels are asserted where they can actually fail: check_server_direction
+    // below, against npxf's real server_handshake.
+    (void)server_send;
     if (ckeys.send == ckeys.recv) die("the two directions share a key");
 
     // And a record really crosses client -> server under it.
@@ -154,6 +173,89 @@ static void check_direction_binding(std::span<const uint8_t> token, const uint8_
     ::close(sv[1]);
 }
 
+// The mirror of kat_responder: npxf's REAL server_handshake on one end, a shim
+// client with a PINNED ephemeral on the other. server_handshake makes its own
+// se_sk and never reveals it, so the server's ephemeral cannot be pinned -- but
+// it does put se_pk on the wire in msg2, and X25519 is symmetric, so a client
+// holding a known ce_sk can call npxf's own derive() and obtain exactly the
+// Derived the server just computed. That makes `out.send = d.s2c` assertable.
+static void kat_client(int fd, std::span<const uint8_t> token, const uint8_t ce_sk[32],
+                       Derived &d_out, std::string &err) {
+    try {
+        net::set_timeout(fd, kHandshakeTimeoutMs);
+        crypto::Key psk = derive_psk(token);
+
+        uint8_t ce_pk[32];
+        crypto::x25519_base(ce_sk, ce_pk);
+
+        uint8_t msg1[kHandshakeMsg1];
+        std::memcpy(msg1, kMagic, 4);
+        msg1[4] = kProtocolVersion;
+        msg1[5] = msg1[6] = msg1[7] = 0;
+        std::memcpy(msg1 + 8, ce_pk, 32);
+        net::write_full(fd, msg1, sizeof msg1);
+        crypto::Hash h1 = absorb(transcript_start(), msg1, sizeof msg1);
+
+        uint8_t msg2[kHandshakeMsg2];
+        if (!net::read_full(fd, msg2, sizeof msg2)) { err = "client shim: no flight 2"; return; }
+        crypto::Hash h2 = absorb(h1, msg2, 32);
+
+        derive(psk, ce_sk, msg2, h2, d_out);
+
+        uint8_t want[32];
+        confirm_tag(d_out.cfm, "server", want);
+        if (!crypto::ct_eq(want, msg2 + 32, 32)) { err = "client shim: server tag mismatch"; return; }
+
+        uint8_t msg3[kHandshakeMsg3];
+        confirm_tag(d_out.cfm, "client", msg3);
+        net::write_full(fd, msg3, sizeof msg3);
+    } catch (const std::exception &e) {
+        err = e.what();
+    }
+}
+
+// Asserts the SERVER's labels. Without this leg a one-sided swap inside
+// server_handshake passes the whole gate, vectors byte-identical -- measured on
+// a sabotaged copy of npxf before this was written.
+static void check_server_direction_binding(std::span<const uint8_t> token, const uint8_t ce_sk[32]) {
+    int sv[2];
+    if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) die("socketpair");
+
+    Derived d_cli;
+    std::string err;
+    std::thread cli([&] { kat_client(sv[0], token, ce_sk, d_cli, err); });
+    SessionKeys skeys;
+    try {
+        server_handshake(sv[1], token, skeys);
+    } catch (const std::exception &e) {
+        cli.join();
+        die(e.what());
+    }
+    cli.join();
+    if (!err.empty()) die(err.c_str());
+
+    if (skeys.send != d_cli.s2c)
+        die("server_handshake's send key is NOT s2c -- the fixture's k_s2c label is wrong");
+    if (skeys.recv != d_cli.c2s)
+        die("server_handshake's recv key is NOT c2s -- the fixture's k_c2s label is wrong");
+
+    // And a record really crosses server -> client under it.
+    SessionKeys ckeys;
+    ckeys.send = d_cli.c2s;
+    ckeys.recv = d_cli.s2c;
+    Channel s(sv[1], skeys, kMaxRecordPayload);
+    Channel c(sv[0], ckeys, kMaxRecordPayload);
+    const uint8_t probe[] = {'k', 'a', 't'};
+    s.send(probe, sizeof probe);
+    Bytes got;
+    if (!c.recv(got) || got.size() != sizeof probe ||
+        std::memcmp(got.data(), probe, sizeof probe) != 0)
+        die("a record did not survive the server -> client direction");
+
+    ::close(sv[0]);
+    ::close(sv[1]);
+}
+
 int main() {
     // Fixed inputs. Nothing here is secret -- these are test vectors, and the
     // ephemerals are deliberately pinned so the whole schedule is deterministic.
@@ -164,16 +266,19 @@ int main() {
     for (int i = 0; i < 32; i++) se_sk[i] = uint8_t(0xA0 + i);
 
     // Before emitting anything: prove the fixture's direction claim against
-    // npxf's real handshake, so a swap cannot ride out in a green-looking file.
+    // BOTH handshakes. Either leg alone leaves a one-sided swap in the other
+    // half undetected -- measured, not assumed.
+    check_server_direction_binding(byte_span(std::string_view(token)), ce_sk);
     check_direction_binding(byte_span(std::string_view(token)), se_sk);
 
     std::printf("# npxf secure-channel known-answer vectors\n");
     std::printf("# Generated by usr/haul/kat/npxf_kat.cpp against npxf's own\n");
     std::printf("# channel.cpp -- see that file's header for why it #includes it.\n");
     std::printf("# Regenerate and diff with usr/haul/kat/regen.sh.\n");
-    std::printf("# The generator also runs npxf's client and server handshakes\n");
-    std::printf("# against each other and refuses to emit if c2s is not the\n");
-    std::printf("# client's send key.\n");
+    std::printf("# Before emitting, the generator runs npxf's REAL client_handshake\n");
+    std::printf("# against a pinned-ephemeral responder, and npxf's REAL\n");
+    std::printf("# server_handshake against a pinned-ephemeral client, and refuses\n");
+    std::printf("# to emit unless each assigns c2s/s2c to the direction named here.\n");
     std::printf("# All values hex, lowercase, no separators.\n\n");
 
     std::printf("%-12s = %s\n", "token_ascii", token.c_str());

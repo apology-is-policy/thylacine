@@ -6,9 +6,9 @@ document specifies landed with the row added to `docs/AUDIT-TRIGGERS.md`.
 The thylacine ranged well beyond its den to feed; what it brought back went in
 the larder. `haul` grafts a tree from *outside the machine* into the local
 namespace, and the pages it yields are cached by the Larder (the guest-side FS
-cache, I-38). The name is a **proposal** under CLAUDE.md "Thematic naming" — the
-operator has not ratified it. `mount` and `srv` are the Plan 9 words; `quarry`
-and `prowl` are taken.
+cache, I-38). The name was **ratified by the operator 2026-09-09**, replacing
+`forage`, which collided with `tools/forage.sh` (the build-input collector).
+`mount` and `srv` are the Plan 9 words; `quarry` and `prowl` are taken.
 
 ---
 
@@ -219,13 +219,35 @@ transcription had been right, and is now not a transcription.
 
 `kat/regen.sh` rebuilds the generator and diffs it against the committed file,
 so the fixture is a *checked* recording rather than an asserted one. It skips
-(exit 77) where npxf is absent. The generator also refuses to emit at all unless
-a real `client_handshake`/`server_handshake` pair, run against each other over a
-socketpair, agrees that `k_c2s` is the client's SEND key — because that binding
-is made in `client_handshake`, not in `derive()`, so a swap there would leave
-every vector above byte-identical while inverting what they mean. Both halves
-are sabotage-verified: the direction swap is caught by the handshake check with
-the vectors unchanged, an HKDF label change by the diff.
+(exit 77) where npxf is absent, and `make test-haul-kat` absorbs that 77 — make
+maps any non-zero recipe status to a build failure, so without the absorb a skip
+and a vector mismatch would be the same verdict.
+
+The generator also refuses to emit unless the direction LABELS hold — `k_c2s` is
+the key `client_handshake` assigns to `out.send`, and `k_s2c` the one
+`server_handshake` does. That binding is made one level above `derive()`, so a
+swap there leaves every vector byte-identical while inverting what they mean.
+
+**It takes TWO legs to check that, and the reason is the useful part.** Each leg
+runs one REAL npxf handshake against a shim holding a PINNED ephemeral, so both
+ephemerals are known and npxf's own `derive()` can be called from the other side
+to produce the labels the assertion compares against. A symmetric check — the
+obvious one, running both real handshakes against each other and asserting they
+agree — cannot detect a swap applied to both halves, and the first repair of
+that, which pinned only the responder, stopped calling `server_handshake` at all
+and so could not detect a swap in the server half either. Each version was
+"sabotage-verified" by a sabotage shaped like the hole it left.
+
+Discrimination, all four MEASURED against the current generator:
+
+| npxf under test | verdict |
+|---|---|
+| unmodified | PASS, 23 vectors |
+| client half swapped only | FAIL — `client_handshake's send key is NOT c2s` |
+| server half swapped only | FAIL — `server_handshake's send key is NOT s2c` |
+| both halves swapped | FAIL — caught by the server leg |
+
+An HKDF label change is caught by the vector diff instead.
 
 **2. Live interop against the real server** (`interoperates_with_a_live_npxf_server`,
 `#[ignore]`d). A fixture is a recording; it cannot prove interoperation, because
@@ -239,9 +261,14 @@ at `ServerAuth` — so it discriminates.
 proves the *protocol*; only a boot proves the *plumbing* — the pipes, the pumps,
 the synchronous attach and the mount. The scenario asserts the mount line
 including the mode word (a haul that silently fell back to plaintext would
-otherwise print an equally cheerful line), then reads real file **content**
-through the channel, then a directory listing so the proof is not one server-op
-wide.
+otherwise print an equally cheerful line), then a **directory listing** of the
+remote tree through the encrypted channel.
+
+It does NOT read file content, and section 8.2 explains why: the content read is
+commented out pending the spawn-inheritance question. This section claimed it
+did for a while, contradicting 8.2 two hundred lines below — worth naming
+because this is the section a reader consults to learn what the E2E proves, so
+its being the wrong one of the two is the expensive direction.
 
 ### 4.1 Running it
 

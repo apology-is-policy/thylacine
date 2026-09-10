@@ -584,6 +584,13 @@ struct Parsed {
 /// caller chose is a way to turn `-t /dev/zero` into an out-of-memory kill.
 const TOKEN_FILE_MAX: usize = 4095;
 
+/// The ENV source's cap is a different number for a different reason, and using
+/// the file's here was simply borrowing the wrong constant. npxf's `--token-env`
+/// is `getenv` + `strlen` with no cap at all, so parity is bounded not by npxf
+/// but by the kernel: `ENV_VALUE_MAX` (4096) is the most a variable can hold, so
+/// anything at or under it is a value npxf would have accepted.
+const TOKEN_ENV_MAX: usize = 4096;
+
 /// Read the token named by an environment variable WITHOUT going through
 /// `env::var`.
 ///
@@ -596,8 +603,13 @@ const TOKEN_FILE_MAX: usize = 4095;
 /// the one left behind.
 ///
 /// `/env/<NAME>` is a plain file on the per-Proc env device, so reading it here
-/// costs nothing and keeps the bytes in one allocation we own end to end. The
-/// name guard mirrors `env::var`'s.
+/// costs nothing and removes that stack copy. It does NOT make `--token-env` a
+/// wiped path, and the difference matters: the authoritative bytes live in the
+/// kernel's Env entry for the life of the Proc, untouched by our `drop`, and
+/// `env_clone_into` hands them to every child the command form spawns. npxf's
+/// `getenv` has exactly the same exposure, so this is parity rather than a
+/// weaker posture -- but `-t` remains the source to reach for when the token
+/// must not outlive its use. The name guard mirrors `env::var`'s.
 fn read_token_env(name: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     if name.is_empty() || name.contains('/') {
         return Err("that is not an environment variable name");
@@ -607,64 +619,94 @@ fn read_token_env(name: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     // NOT trimmed, matching npxf: a variable holds exactly what someone set it
     // to, whereas a file conventionally ends with a newline nobody typed. See
     // npxf::trim_token_file.
-    read_token_bytes(
-        &path,
-        false,
-        "that environment variable is not set",
-        "that environment variable is empty",
-    )
+    read_token_bytes(&path, TokenRead {
+        trim: false,
+        max: TOKEN_ENV_MAX,
+        // /env is per-Proc and synthetic: devenv reports a FIXED `T_S_IFREG |
+        // 0644` for every variable (kernel/devenv.c), and nothing consults it --
+        // devenv_wstat is `return -1`, so `chmod 600` cannot even succeed. The
+        // mode warning would therefore fire on EVERY --token-env run, saying
+        // something false and prescribing something impossible. A warning that
+        // always fires is a warning an operator learns to ignore, and this is
+        // the only place haul warns about credential exposure at all -- so
+        // leaving it on here would cost the warning its meaning on the -t path,
+        // where the bits are real.
+        warn_mode: false,
+        open_msg: "that environment variable is not set",
+        read_msg: "cannot read that environment variable",
+        large_msg: "that environment variable is too large",
+        empty_msg: "that environment variable is empty",
+    })
 }
 
 fn read_token_file(path: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
-    read_token_bytes(path, true, "cannot open the token file", "the token file is empty")
+    read_token_bytes(path, TokenRead {
+        trim: true,
+        max: TOKEN_FILE_MAX,
+        warn_mode: true,
+        open_msg: "cannot open the token file",
+        read_msg: "cannot read the token file",
+        large_msg: "the token file is too large",
+        empty_msg: "the token file is empty",
+    })
 }
 
-fn read_token_bytes(
-    path: &str,
+/// Every message names the SOURCE the caller actually used. Half of these were
+/// once hardcoded to the file wording, so a `--token-env` failure sent the
+/// reader looking for a file that was never involved.
+struct TokenRead {
     trim: bool,
+    max: usize,
+    warn_mode: bool,
     open_msg: &'static str,
+    read_msg: &'static str,
+    large_msg: &'static str,
     empty_msg: &'static str,
-) -> Result<Zeroizing<Vec<u8>>, &'static str> {
-    let mut f = libthyla_rs::fs::File::open(path).map_err(|_| open_msg)?;
+}
+
+fn read_token_bytes(path: &str, m: TokenRead) -> Result<Zeroizing<Vec<u8>>, &'static str> {
+    let mut f = libthyla_rs::fs::File::open(path).map_err(|_| m.open_msg)?;
     // Warn, as npxf does, rather than refuse: the operator may have a reason,
     // and a mount that fails on a permission bit is worse than one that says so.
     // The token is a long-lived credential shared with the far end, and a
     // world-readable one is shared with everyone on this machine too.
-    if let Ok(md) = f.metadata() {
-        let other = md.permissions() & 0o077;
-        if other != 0 {
-            say!(
-                "haul: warning: {} is readable beyond its owner (mode {:04o}) -- chmod 600 it",
-                path,
-                md.permissions() & 0o7777
-            );
+    if m.warn_mode {
+        if let Ok(md) = f.metadata() {
+            let other = md.permissions() & 0o077;
+            if other != 0 {
+                say!(
+                    "haul: warning: {} is readable beyond its owner (mode {:04o}) -- chmod 600 it",
+                    path,
+                    md.permissions() & 0o7777
+                );
+            }
         }
     }
     // Read into a fixed buffer rather than read_to_end + a length check: the
     // check has to come after the allocation, so `-t /dev/zero` would already
     // have consumed the heap by the time it fired. One byte over the cap is
     // enough to detect the overflow without ever holding more than the cap.
-    let mut buf: Vec<u8> = alloc::vec![0u8; TOKEN_FILE_MAX + 1];
+    let mut buf: Vec<u8> = alloc::vec![0u8; m.max + 1];
     let mut n = 0usize;
     while n < buf.len() {
         match f.read(&mut buf[n..]) {
             Ok(0) => break,
             Ok(got) => n += got,
-            Err(_) => return Err("cannot read the token file"),
+            Err(_) => return Err(m.read_msg),
         }
     }
-    if n > TOKEN_FILE_MAX {
-        return Err("the token file is too large");
+    if n > m.max {
+        return Err(m.large_msg);
     }
     buf.truncate(n);
     // npxf::trim_token_file, not an inline pop: the exact bytes trimmed decide
     // the PSK, so the rule lives in one documented place with a test on each
     // side of the wire.
-    if trim {
+    if m.trim {
         npxf::trim_token_file(&mut buf);
     }
     if buf.is_empty() {
-        return Err(empty_msg);
+        return Err(m.empty_msg);
     }
     Ok(Zeroizing::new(buf))
 }
@@ -692,6 +734,10 @@ fn parse_args(args: Args) -> Result<Parsed, &'static str> {
         }
         Err(cmdline::Bad::MissingValue(m)) => return Err(m),
         Err(cmdline::Bad::UnknownOption) => return Err("unknown option"),
+        Err(cmdline::Bad::DashAfterOperands) => {
+            return Err("an option must come before the address; to run a command whose name \
+                        starts with a dash, put -- after the mountpoint")
+        }
     };
 
     if plan.verbose {
@@ -886,7 +932,27 @@ fn run(argv: Args) -> Result<(), &'static str> {
     // does not say a walk crosses into the remote tree. Listing here separates
     // "the mount is wrong" from "the caller cannot see it", which are the two
     // failures that otherwise both present as `no such file or namespace entry`.
-    if VERBOSE.load(Ordering::Relaxed) != 0 {
+    //
+    // GUARDED ON STOPPED, and that guard is load-bearing rather than tidy. This
+    // is a blocking 9P round trip, and the kernel's Spoor transport sets
+    // `set_recv_deadline = NULL` -- a backend with a NULL op ignores deadlines
+    // and the recv just blocks. If the peer hangs up between t_mount and here,
+    // both pumps reach `finish` and die, and A PUMP CLOSES NOTHING by design:
+    // `s2c_wr` is still open, held by a dead thread's leaked ctx, so the kernel
+    // never sees EOF on `s2c_rd` and this read_dir never returns. That is a
+    // permanent silent hang in the one straight-line call that sits BEFORE the
+    // park loop whose whole job is to bound exactly this.
+    //
+    // The guard closes the REACHABLE window -- a peer that dies any time before
+    // the check begins. It does NOT close the race where the peer dies DURING
+    // the round trip, and that residue cannot be closed here: bounding it needs
+    // either a deadline the Spoor transport does not offer, or the dying pump to
+    // close the kernel's write end, which is the fd-recycle race `finish`
+    // deliberately refuses. So the residue is announced instead of hidden -- the
+    // step below prints BEFORE the call, so a hang has a location rather than
+    // being a silent stop after the mount line.
+    if VERBOSE.load(Ordering::Relaxed) != 0 && STOPPED.load(Ordering::Relaxed) == STOP_NONE {
+        step!("mount check: listing {} ...", args.mountpoint);
         match libthyla_rs::fs::read_dir(args.mountpoint.as_str()) {
             Ok(rd) => {
                 let mut n = 0usize;

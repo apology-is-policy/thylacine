@@ -1043,6 +1043,19 @@ WARP_HOST=thyla-pi WARP_ACCEL=kvm tools/warp-host.sh venus   # certify (2 boots)
 WARP_HOST=thyla-gl tools/warp-host.sh venus                  # iterate (2 boots)
 tools/test-venus-verdict.sh         # its verdict, no boot  (or: make test-venus-verdict)
 
+# haul's npxf known-answer vectors (#245 again). Re-derives all 23 from npxf's
+# OWN source and diffs the committed fixture, so kat/vectors.txt is a CHECKED
+# recording rather than a file whose only claim to being npxf's output is that
+# someone once said so. It also refuses to emit unless BOTH direction labels
+# hold -- one leg per handshake, each pinning the other side's ephemeral. One
+# leg is not enough and the reason is instructive: a symmetric check cannot see
+# a swap applied to both halves, and pinning only the responder stops exercising
+# server_handshake entirely. All four sabotage cases are measured in
+# HAUL-DESIGN.md 4. SKIPs cleanly (exit 0 + a SKIP line) where npxf is absent --
+# it lives outside version control, so on any other machine this is a skip, not
+# a failure.
+make test-haul-kat                  # or: usr/haul/kat/regen.sh [--write]
+
 # ARMv8.0 floor guard (#91). The SOURCE + BINARY checks run automatically at the
 # tail of every ramfs bake; these are the extras. `check-floor` adds the big pool
 # payloads (/clade, /goroot, ~6 min); `test-a72` is PORTABILITY.md section 3's

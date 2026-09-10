@@ -124,10 +124,19 @@ test-venus-verdict:
 # haul's npxf known-answer vectors, re-derived from npxf's OWN source and
 # diffed against the committed fixture. Without a caller, kat/vectors.txt is a
 # RECORDING -- a file whose only claim to being npxf's output is that someone
-# once said so (#245: a checker reachable only by hand rots). SKIPs (77) where
-# npxf is absent, the same shape as test-venus-verdict.
+# once said so (#245: a checker reachable only by hand rots).
+#
+# The recipe ABSORBS regen.sh's exit 77 rather than letting make see it. make
+# maps any non-zero recipe status to a build failure ("Error 77", exit 2), so
+# without this a skip and a vector MISMATCH are the same verdict, and since npxf
+# lives outside version control the target would be red on every checkout but
+# the one machine that has the tree. The comment here previously claimed this
+# was "the same shape as test-venus-verdict" -- that script has no exit 77 site
+# at all, having no external dependency to be missing.
 test-haul-kat:
-	@usr/haul/kat/regen.sh
+	@usr/haul/kat/regen.sh; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "test-haul-kat: SKIP (npxf absent)"; exit 0; fi; \
+	exit $$rc
 
 run:
 	@tools/run-vm.sh
