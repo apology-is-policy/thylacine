@@ -426,6 +426,74 @@ operator reaching for the exact escape hatch the refusal's message points at —
 was itself refused. An error message that names a remedy the code rejects is
 worse than the ambiguity it replaced. Fixed at `6864ebbc`.
 
+### The blocker behind the blocker: an unimplemented operation wearing ENOENT's clothes
+
+With the push out, the queued next item was the SYS_SPAWN mount question — a
+recorded finding that "a spawned child does not receive its parent's mounts",
+which would be an I-1 violation. It had survived a day partly because it was
+*already* the second hypothesis: the first blamed nested mounts, and a
+one-variable control had refuted that by reproducing on plain ramfs.
+
+But every kernel mechanism, read twice independently, said the child should
+inherit — `rfork_internal` clones unconditionally, `territory_clone` copies
+`mounts[i]` wholesale, `exec.c` contains "territory" zero times. **When every
+reading contradicts the measurement, the measurement's premise is what to test.**
+
+The untested premise: haul had only ever *listed* the mount point, while the
+child *walked through* it. Two operations, never separated. The probe separates
+them in one boot — leg A has the child list, leg B has the same child in the
+same configuration walk through:
+
+| leg | child does | result |
+|---|---|---|
+| A | `ls /tmp/probe` | `HELLO.TXT SECOND.TXT SUB` |
+| B | `cat /tmp/probe/hello.txt` | `no such file or namespace entry` |
+
+Leg A exonerates spawn outright: the child has the mount and resolution crosses
+it. Both hypotheses were wrong, and both had survived because the original
+measurement differed in **more than one variable** — parent-vs-child *and*
+list-vs-walk — with the conclusion attached to the wrong one.
+
+The npxf server was running with `-v -v -v`, and its log named the cause in three
+lines nobody had read:
+
+```
+<- T??? tag=0 len=36
+unsupported message type 140
+-> Rlerror tag=0 errno=95 (Operation not supported)
+```
+
+Message 140 is `Twalkgetattr` — POUNCE's fused walk. `dev9p` has a per-session
+`wga_unsupported` latch for exactly this, and it fired only on `-T_E_NOSYS`.
+npxf, the first foreign 9P server this tree has ever mounted, answers
+EOPNOTSUPP. Unlatched, the rejection fell through to the generic error arm and
+became a **walk failure** — so an unimplemented *operation* surfaced to userspace
+as a missing *path*. That diagnostic is what sent two investigations after the
+wrong subsystem.
+
+The comment at that very site had predicted it, before a server existed to
+trigger it: *"A future foreign server replying EOPNOTSUPP would need that code
+appended to the errno registry and classified here."* No registry change was
+needed after all — `T_E_OPNOTSUPP` was already ABI-pinned at 95, reserved in as
+many words for this — so only the classification half was ever owed.
+
+Post-fix, leg B returns `THE THYLACINE IS REAL`: the fixture's actual content,
+read by a spawned child, through the mount, over the encrypted channel. Same
+probe, same fixture, one kernel change.
+
+The regression test drives the latch by errno through the loopback responder,
+and its third arm is the one that matters: **EIO must not latch.** Latching on
+any error would "fix" the bug while silently marking a healthy session
+non-cacheable for its lifetime on one transport blip — the L1e cacheability gate
+hangs off this same flag. Reverting the fix yields exactly one failure, naming
+this case; the ENOSYS and EIO arms pass pre-fix too, so the test is aimed at the
+defect rather than at the area.
+
+One more instrument caught lying, for the third time this run: I counted suite
+failures with `grep -c "\.\.\. FAIL"` and got zero on a run that had failed.
+The harness prints `FAIL: <message>` on its own line. The test was fine; the
+count was fiction.
+
 ### On contention, said properly
 
 aux reported (yip 0084) that our two HVF guests had been mutually OOM-contending,
