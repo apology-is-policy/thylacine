@@ -78,9 +78,29 @@
 //   history             -- needs the line editor's history (U-6g).
 //   note                -- `note send/list/wait`, the richer notes argv
 //                          surface (U-7c); `kill` already covers posting.
-//   echo / printf / test / [ / time / palette / bind / mount / ... --
+//   echo / printf / test / [ / time / palette / bind / ... --
 //                          their own surfaces; echo/printf already
-//                          exist as external coreutils.
+//                          exist as external coreutils. (`mount` LEFT this
+//                          list -- see below. `bind` is its obvious sibling
+//                          and is still owed.)
+//
+// === Implemented at the HAUL /srv chunk (namespace mutation) ===
+//
+//   mount [-b|-a|-c] service mountpoint [aname]
+//               attach a posted 9P service and graft it into THIS shell's
+//               namespace. Flags are Plan 9's: -b before, -a after
+//               (mutually exclusive; default REPL), -c permit creation.
+//   unmount mountpoint
+//               remove it again, by PATH.
+//
+// These are built-ins for a reason that is structural rather than stylistic,
+// and it is worth stating because Plan 9 ships `mount` as an ordinary binary:
+// **Plan 9 SHARES a namespace between parent and child by default; Thylacine
+// CLONES at every fork.** A mount lands in the calling Proc's Territory and
+// nowhere else (I-1), so a `mount` COMMAND would mutate its own namespace and
+// exit. In a clone-always system the shell must own namespace mutation
+// in-process -- which generalises past these two verbs to every future
+// namespace tool. See HAUL-DESIGN.md 4.6.
 //
 // A name outside the implemented set is NOT intercepted here
 // (`try_builtin` returns `None`), so the caller falls through to an
@@ -113,7 +133,7 @@ use super::value::Value;
 /// dispatch arms.
 pub const BUILTIN_NAMES: &[&str] = &[
     "cd", "pwd", "exit", "true", "false", "unset", "eval", "source", ".", "type",
-    "whence", "jobs", "fg", "bg", "wait", "kill",
+    "whence", "jobs", "fg", "bg", "wait", "kill", "mount", "unmount",
 ];
 
 /// The built-in names, for the #115a completion command index.
@@ -163,9 +183,169 @@ pub fn try_builtin(env: &mut Env, argv: &[String]) -> Option<EvalResult<Statemen
         "bg" => bi_bg(env, args),
         "wait" => bi_wait(env, args),
         "kill" => bi_kill(env, args),
+        "mount" => bi_mount(env, args),
+        "unmount" => bi_unmount(env, args),
         _ => return None,
     };
     Some(r)
+}
+
+// ---------------------------------------------------------------------
+// mount / unmount -- namespace mutation, and why it MUST be a built-in
+// ---------------------------------------------------------------------
+//
+// Plan 9 ships `mount` as an ordinary binary. We cannot, and the reason is
+// structural rather than stylistic: **Plan 9 shares a namespace between parent
+// and child by default; Thylacine CLONES at every fork** (`rfork_internal`'s own
+// comment: "RFNAMEG (shared territory) is unsupported at v1.0; the parent ALWAYS
+// gets a clone"). A mount lands in the calling Proc's Territory and nowhere else
+// -- that is I-1 working as specified -- so a `mount` COMMAND would mutate its
+// own namespace and exit, leaving the shell exactly as it was.
+//
+// In a clone-always system the shell must own namespace mutation IN-PROCESS.
+// That generalises past these two verbs to every future namespace tool, and it
+// is why this sits beside `cd` rather than in coreutils. See HAUL-DESIGN.md 4.6.
+//
+// THE TWO-STEP IS NOT OPTIONAL. A /srv service CONNECTS on open, and the
+// resolver walks intermediates WITHOUT opening them -- so a single deep open of
+// `/srv/<name>/a/b` does not cross into the service. Open the service root to
+// connect, THEN attach. (The auxiliary track paid for this discovery on
+// `/srv/halcyon-<user>/<hex>/place` and handed it over before it cost us the
+// same afternoon.)
+
+/// What `mount`'s argument grammar resolved to. Pure -- no syscalls, no Env --
+/// so the grammar is testable independently of the kernel surface it drives.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MountPlan {
+    /// Bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE.
+    pub flags: u32,
+    /// The service to attach, e.g. `/srv/ptyfs`.
+    pub service: String,
+    /// Where it lands in THIS shell's namespace.
+    pub mountpoint: String,
+    /// 9P attach name; `None` means the server's default root.
+    pub aname: Option<String>,
+}
+
+/// Parse `mount`'s arguments. Plan 9's flags: `-b` before, `-a` after, `-c`
+/// permits creation in the union. `-b`/`-a` are the ORDERING (mutually
+/// exclusive, default REPL); `-c` is orthogonal and ORs in.
+pub fn parse_mount(args: &[String]) -> Result<MountPlan, String> {
+    let mut flags: u32 = 0;
+    let mut order_seen = false;
+    let mut i = 0usize;
+
+    while i < args.len() {
+        let a = args[i].as_str();
+        // A lone "-" is an operand, not a flag; anything not starting with '-'
+        // ends the option run. No `opts_done` latch: every path that would set
+        // one breaks out of the loop in the same step, so the flag would be
+        // written and never read (the compiler said so, and it was right --
+        // vestigial structure copied from a parser that genuinely needed it).
+        if !a.starts_with('-') || a.len() == 1 {
+            break;
+        }
+        if a == "--" {
+            i += 1;
+            break;
+        }
+        // Clustered short flags, as `mount -bc` is the Plan 9 spelling.
+        for c in a[1..].chars() {
+            match c {
+                'b' | 'a' => {
+                    if order_seen {
+                        return Err("mount: -b and -a are mutually exclusive".to_string());
+                    }
+                    order_seen = true;
+                    flags |= if c == 'b' { 0x0002 } else { 0x0004 };
+                }
+                'c' => flags |= 0x0008,
+                _ => return Err(alloc::format!("mount: unknown option -{}", c)),
+            }
+        }
+        i += 1;
+    }
+    if !order_seen {
+        flags |= 0x0001; // T_MREPL -- the default, as in Plan 9
+    }
+
+    let rest = &args[i..];
+    if rest.len() < 2 || rest.len() > 3 {
+        return Err("usage: mount [-b|-a|-c] service mountpoint [aname]".to_string());
+    }
+    Ok(MountPlan {
+        flags,
+        service: rest[0].clone(),
+        mountpoint: rest[1].clone(),
+        aname: rest.get(2).cloned(),
+    })
+}
+
+fn bi_mount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    let plan = match parse_mount(args) {
+        Ok(p) => p,
+        Err(m) => return fail(env, m, 1),
+    };
+
+    // 1. CONNECT. Opening a /srv name IS the attach-side connect; the resolver
+    //    will not cross into the service on a deeper walk, so this must name the
+    //    service root exactly.
+    let conn = unsafe {
+        libthyla_rs::t_open(
+            libthyla_rs::T_WALK_OPEN_FROM_ROOT,
+            plan.service.as_ptr(),
+            plan.service.len(),
+            libthyla_rs::T_ORDWR,
+        )
+    };
+    if conn < 0 {
+        return fail(env, alloc::format!("mount: cannot connect {}", plan.service), 1);
+    }
+
+    // 2. ATTACH.
+    let (ap, al) = match plan.aname.as_ref() {
+        Some(s) => (s.as_ptr(), s.len()),
+        None => (core::ptr::null(), 0usize),
+    };
+    let root = unsafe { libthyla_rs::t_attach_9p_srv(conn, ap, al, 0, 0) };
+    let _ = unsafe { libthyla_rs::t_close(conn) };
+    if root < 0 {
+        return fail(env, alloc::format!("mount: cannot attach {}", plan.service), 1);
+    }
+
+    // 3. MOUNT into THIS Proc's territory -- the whole reason this is a built-in.
+    let rc = unsafe {
+        libthyla_rs::t_mount(
+            plan.mountpoint.as_ptr(),
+            plan.mountpoint.len(),
+            root,
+            plan.flags,
+        )
+    };
+    // 4. The mount takes its OWN reference on the source (`territory.c:19`:
+    //    "mount(): spoor_ref(source) before insert"), so the fd is ours to drop
+    //    either way -- holding it would only pin a handle the shell never uses
+    //    again. login keeps its equivalent solely because it wants to unmount at
+    //    logout, and unmount here is by PATH, not by fd.
+    let _ = unsafe { libthyla_rs::t_close(root) };
+    if rc != 0 {
+        return fail(env, alloc::format!("mount: cannot mount at {}", plan.mountpoint), 1);
+    }
+    env.status_set(0);
+    Ok(StatementFlow::Normal)
+}
+
+fn bi_unmount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    if args.len() != 1 {
+        return fail(env, "usage: unmount mountpoint".to_string(), 1);
+    }
+    let mp = &args[0];
+    let rc = unsafe { libthyla_rs::t_unmount(mp.as_ptr(), mp.len()) };
+    if rc != 0 {
+        return fail(env, alloc::format!("unmount: cannot unmount {}", mp), 1);
+    }
+    env.status_set(0);
+    Ok(StatementFlow::Normal)
 }
 
 /// A runtime built-in failure: set `$errstr` + `$status` and report
