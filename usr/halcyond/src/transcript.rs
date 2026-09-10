@@ -2329,6 +2329,16 @@ impl Transcript {
         self.enforce_budget();
     }
 
+    /// This transcript's current content budget (its share of the session
+    /// scrollback budget). The caller bounds an inline-media raster against it
+    /// (I-47 F1): `enforce_budget` never evicts the last frozen block, so a
+    /// single image block CAN exceed `max_cost` -- the caller must refuse an
+    /// oversized image at inject so K image-panes cannot aggregate past the
+    /// shared budget into a compositor OOM.
+    pub fn max_cost(&self) -> usize {
+        self.max_cost
+    }
+
     /// The per-tile cap on the pre/table in-progress accumulators (each
     /// uncharged to the block budget until close). HALF the tile's scrollback
     /// share: N tiles -- each share = SESSION_SCROLLBACK_BUDGET/N -- hold at

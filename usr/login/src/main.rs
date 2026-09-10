@@ -1370,7 +1370,11 @@ pub extern "C" fn rs_main() -> i64 {
             // reclamation as the ut path -- on its exit the kernel terminates
             // the rest of the session, closing the same home-proxy deadlock in
             // the graphical path (IDENTITY-DESIGN §9.9.1).
-            .perm(T_SPAWN_PERM_SESSION_HANGUP)
+            // MAY_POST_SERVICE (I-47, HALCYON 14.7.2): the one-hop delegation
+            // (login holds the bit from joey, as it grants the home proxy) that
+            // lets the session compositor post its per-user inline-media service
+            // /srv/halcyon-<user>. A fork-grantable perm, never an elevation.
+            .perm(T_SPAWN_PERM_SESSION_HANGUP | T_SPAWN_PERM_MAY_POST_SERVICE)
             .stdin(Stdio::Inherit)
             .stdout(Stdio::Inherit)
             .stderr(Stdio::Inherit);

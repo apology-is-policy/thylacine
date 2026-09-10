@@ -60,12 +60,48 @@ fn write_all(fd: i64, buf: &[u8]) -> bool {
     true
 }
 
-/// Hand the decoded raster to halcyond over the per-pane channel (I-47,
-/// HALCYON.md 14.7): open /srv/halcyon (9p-mode -> a root), walk to `place`,
-/// write the inlinewire header then the ARGB payload in bounded chunks. `Ok`
-/// only when the whole message was accepted; `Err(reason)` lets the caller fall
-/// back to a report -- notably when no renderer posted the service.
-fn place_on_halcyon(r: &Raster) -> Result<(), &'static str> {
+/// Open a write handle to the renderer's place file (I-47, HALCYON.md 14.7).
+/// Prefers the SESSION path (14.7.2): the per-user compositor put THIS pane's
+/// full address in `/env/HALCYON_PLACE` (`/srv/halcyon-<user>/<hex>/place`),
+/// which the kernel resolves by connecting to the per-user service and walking
+/// the pane's token dir + `place`. There is NO console fallback once a session
+/// address is present -- a session has no global `/srv/halcyon`, and falling
+/// back would place into the wrong channel; a stale/dead address just fails.
+/// Absent a session address (console mode, the spike), opens the global
+/// `/srv/halcyon` two-step. `Err(reason)` lets the caller fall back to a report.
+fn open_place_write() -> Result<i64, &'static str> {
+    if let Some(addr) = libthyla_rs::env::var("HALCYON_PLACE") {
+        if !addr.is_empty() {
+            // addr = /srv/halcyon-<user>/<hex>/place. A /srv posted service
+            // CONNECTS on open, and the resolver WALKS intermediate components
+            // rather than opening them -- so a single deep open cannot cross the
+            // service to reach the token dir. Mirror the console two-step: OPEN
+            // the service root (connect), then open the "<hex>/place" subpath
+            // relative to it. Split off the last two components.
+            let (root_path, sub_path) = match split_service_addr(&addr) {
+                Some(x) => x,
+                None => return Err("halcyon: malformed HALCYON_PLACE"),
+            };
+            let root = unsafe {
+                t_open(
+                    T_WALK_OPEN_FROM_ROOT,
+                    root_path.as_ptr(),
+                    root_path.len(),
+                    T_OREAD,
+                )
+            };
+            if root < 0 {
+                return Err("halcyon: pane service unreachable");
+            }
+            let place =
+                unsafe { t_open(root, sub_path.as_ptr(), sub_path.len(), T_OWRITE) };
+            let _ = unsafe { t_close(root) };
+            if place < 0 {
+                return Err("halcyon: pane channel unreachable");
+            }
+            return Ok(place);
+        }
+    }
     const SRV: &[u8] = b"/srv/halcyon";
     const PLACE: &[u8] = b"place";
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, SRV.as_ptr(), SRV.len(), T_OREAD) };
@@ -77,6 +113,26 @@ fn place_on_halcyon(r: &Raster) -> Result<(), &'static str> {
     if place < 0 {
         return Err("halcyon: no place file");
     }
+    Ok(place)
+}
+
+/// Split `/srv/halcyon-<user>/<hex>/place` into the service root
+/// (`/srv/halcyon-<user>`) and the in-service subpath (`<hex>/place`). `None` if
+/// the address does not have at least two trailing components.
+fn split_service_addr(addr: &str) -> Option<(&str, &str)> {
+    let last = addr.rfind('/')?; // the '/' before "place"
+    let prev = addr[..last].rfind('/')?; // the '/' before "<hex>"
+    if prev == 0 {
+        return None;
+    }
+    Some((&addr[..prev], &addr[prev + 1..]))
+}
+
+/// Hand the decoded raster to halcyond: open the place channel, write the
+/// inlinewire header then the ARGB payload in bounded chunks. `Ok` only when
+/// the whole message was accepted.
+fn place_on_halcyon(r: &Raster) -> Result<(), &'static str> {
+    let place = open_place_write()?;
     let hdr = inlinewire::PlaceHeader::argb(r.w, r.h).pack();
     // The payload is the ARGB u32s as their LE bytes -- aarch64 is little-endian,
     // so the in-memory bytes ARE the wire bytes the reader reconstructs with

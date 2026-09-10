@@ -22,6 +22,117 @@ needed the operator.
 
 
 ---
+## 2026-09-10 (aux, run 9, post self-compact) -- the Halcyon SESSION-path inline-media channel (I-47, HALCYON 14.7.2): per-pane routing on the existing /srv+9P mechanism
+
+Picked up from the run-8 self-compact at the 600k line. The operator had ratified
+(run 8) shipping the session-path channel on the EXISTING mechanism now, with
+Mycelium a later "pave the trodden pathways" arc. This run built it.
+
+**The research pass found the gap the console spike hid.** In session mode
+(`halcyond --session`) the compositor spawns each tile as a `kaua-term` and OWNS
+each tile's transcript itself (the RICH tier -- it rasterizes
+`SessionTile.tile.scrollback`), while the console-spike `placesrv` runs ONLY in
+console mode (`main.rs`). So a `view` in a session tile had nowhere to place --
+the session compositor had no inline media at all. The chunk is therefore a
+session-side place server + per-tile ROUTING + the I-32 quota, not a tweak.
+
+**The routing fork went to the operator (I am on Opus -- stop at the first
+user-input item), with the research attached.** Three shapes: (A) one per-user
+service + the per-pane token as a PATH COMPONENT carried as a fully-resolved
+address in `/env/HALCYON_PLACE`, wire unchanged; (B) a distinct 9P service per
+pane; (C) one place file, token in the wire payload. I recommended A and the
+operator chose it. A is the Plan 9 capability-URL: it matches the TAPESTRY_CLAIM
+`/env` precedent, needs NO wire-format bump (the token never enters the payload
+-- it is validated once at the 9P walk), and posts ONE service (B posts N; C is a
+format break re-validated per write).
+
+**The mechanism facts, all verified in-tree before building:** `/env` is
+per-Proc + deep-copied at spawn (`kernel/env.c` `env_clone_into`), so a per-tile
+token written before `SessionTile::spawn` propagates compositor->kaua-term->ut->
+view, isolated from every other pane; `Command` has NO per-child `env()` yet
+(`process.rs:38` "environment is inherited"), so the compositor sets a per-tile
+value the way it already sets `HALCYON_PALETTE` -- write `/env/NAME` right before
+that tile's spawn (and remove after, so its own env + the next tile's snapshot
+stay clean); login already grants `MAY_POST_SERVICE` one hop (the home proxy).
+
+**What landed** (all guest-clean + clippy-clean; halcyond lib host tests 221 ->
+226): NEW `usr/halcyond/src/paneroute.rs` (the PURE, host-tested routing core --
+the canonical 32-lowercase-hex token codec + the fail-closed namespace walk; 5
+tests) + NEW `usr/halcyond/src/paneplace.rs` (`PanePlaceServer`: the per-user
+`/srv/halcyon-<user>` server, the token->leaf routes map, the peer-principal
+accept gate, leaf-tagged completions; reuses `inlineaccum`+`inlinewire`+the
+placesrv dispatch shape) + the `session.rs` wiring (`session_user`,
+`mint_place_token`, `place_cap` = the console residual / MAX_CONNS, `pane_channel`,
+the `/env` write-before-spawn, the reconcile register + reap unregister, the loop
+push_fds/service/drain-inject) + `usr/view/src/main.rs` (`open_place_write` --
+the session address preferred, no console fallback in a session).
+
+**Two authority axes, by construction:** (1) the secret CSPRNG-`u128` token is a
+path component living only in the pane's per-Proc `/env` (unguessable +
+unnameable across panes), validated fail-closed at the walk; (2) a peer-principal
+gate at accept (`t_srv_peer`) refuses any connection whose peer is not the
+session's own user -- so even a LEAKED token cannot cross a user boundary. The
+DoS floor is a static aggregate (`MAX_CONNS`=2 x the residual-derived per-image
+cap) + the tile transcript's own content budget as the per-pane STORED quota
+(both live-count and bytes, evicting clean) -- so I added NO new transcript
+plumbing; the existing 13.3 budget IS the §14.7.7 quota.
+
+**Two wrong turns, both caught by a gate rather than by me -- the reusable part.**
+
+(1) **The E2E caught TWO functional blockers my design asserted away** -- neither
+reachable by any prior gate, both invisible to the audit (they are runtime
+wiring, not soundness). FIRST: my design said "login grants halcyond
+MAY_POST_SERVICE, one hop, as for the home proxy" -- but it *didn't*: login
+spawned `halcyond --session` with only `SESSION_HANGUP` (login/main.rs:1373), so
+`PanePlaceServer::post` failed and the E2E hit my own "inline-media service
+unavailable", 3/3 deterministic. A comment/assumption is not the code -- I wrote
+the grant into the design prose and never checked login did it; `ls-gfx-session`
+never posts to /srv (it drives tapestryd), so nothing had exercised it. SECOND,
+past that: the service posted + each tile got its `/env/HALCYON_PLACE` address,
+but `view` never CONNECTED (the server-side diagnostics I added showed the
+address set, no accept). The cause: `view` did a SINGLE deep open of
+`/srv/halcyon-<user>/<hex>/place`, but a /srv posted service connects on OPEN and
+the resolver WALKS intermediate components without opening them -- so a single
+deep open cannot cross the service to the token dir. FIXED by mirroring the
+console's two-step (connect to the service root, then walk the `<hex>/place`
+subpath). The design's "the kernel resolves it by connecting and walking" was
+the tell: I asserted a resolution behavior I had not verified. Both fixes proven
+by `ls-gfx-session-image` going green (PASS 41s: view inline in a session tile,
+the serial witness + the screendump delta).
+
+(2) **The Opus holotype found the aggregate OOM I had reasoned right past.** I
+had convinced myself "the per-pane stored quota is the tile's existing content
+budget -- no new plumbing needed." The prosecutor re-derived it and found the
+hole: `enforce_budget` keeps >=1 frozen block (transcript.rs:1436), so a single
+oversized image survives ABOVE the tile's share, and the server's per-image cap
+is the FIXED residual (ignores tile count) -- so K image-panes retain K x
+per_image, exhaust the 64 MiB heap, and `t_exits(1)` kills the WHOLE session
+(I-32 OOM-extinction + I-1 blast radius). Ordinary heavy use, not adversarial.
+My "no new plumbing" was the tell -- a generative step that argued for its own
+smallness. FIXED (F1) by an inject-time per-tile budget check (an image > half
+the tile's share is refused clean). The round: 0 P0 / 1 P1 / 2 P2 / 4 P3; F1 +
+F2 (stale in-flight cap -> a live aggregate byte budget, the cross-conn sum the
+console F5 deferred at MAX_CONNS=1) + F3 (a no-channel pane inheriting a stale
+/env token -> unconditional clear) + F5 (qid u128 truncation) FIXED; F4/F6/F7
+DEFERRED (inherited / bounded-at-cap / perm-0-moot). NOT dirty. Detail:
+[[audit_inline_media_closed_list]].
+
+**Build + E2E:** widened the `/test.png`+`/test.jpg` bake gate to fire under
+`THYLACINE_HALCYON_SESSION` too (a session build needs the fixtures), and added
+`tools/interactive/ls-gfx-session-image.exp` (view inline in a session tile: the
+`session inline leaf=N 640x400` serial witness + a screendump delta; SKIP-77 on a
+default image; enrolled in the abi-boot-banner mirrors). The E2E re-run on the
+fixed image + the SMP gate close the chunk.
+
+**Owed / flagged, not done unilaterally:** the ARCH §28 I-47 row still reads
+RESERVED -- the console/gallery/JPEG slices all left it so, updating only
+`docs/AUDIT-TRIGGERS.md`; the formal RESERVED->ENFORCED flip is an arc-close
+decision for the operator (the whole inline-(A) path -- console + session + JPEG
++ fullscreen + the quota -- is now in, a natural close milestone), not a
+mid-arc side effect. A Fable-diversity audit on the whole inline-media surface
+remains owed (all rounds Opus, credit-gated).
+
+---
 ## 2026-09-09 (aux, run 8, post self-compact) -- gallery arc E2E-verified + PUSHED; then the JPEG slice (zune-jpeg): both viewers decode JPEG; one Opus holotype in flight
 
 Picked up from the run-7 self-compact at the 600k line: the gallery arc was

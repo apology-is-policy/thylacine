@@ -22,6 +22,7 @@ pub mod input;
 pub mod layout;
 pub mod menu;
 pub mod outline;
+pub mod paneroute;
 pub mod raster;
 pub mod select;
 pub mod session_init;

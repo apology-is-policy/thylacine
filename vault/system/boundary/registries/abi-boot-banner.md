@@ -35,6 +35,7 @@ mirrors:
   - "tools/interactive/ls-gfx-jpeg.exp"
   - "tools/interactive/ls-gfx-restore.exp"
   - "tools/interactive/ls-gfx-session.exp"
+  - "tools/interactive/ls-gfx-session-image.exp"
   - "tools/interactive/ls-halcyon.exp"
   - "tools/interactive/pty-susp-pouch.exp"
   - "tools/interactive/r5f9-ash.exp"

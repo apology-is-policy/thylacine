@@ -64,6 +64,7 @@ macro_rules! say {
 
 mod chromeset;
 mod menuset;
+mod paneplace;
 mod placesrv;
 mod session;
 mod statusset;

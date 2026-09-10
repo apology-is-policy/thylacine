@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**441 owned · 69 unowned · 510 files (86% owned) · ~20979 unswept lines.**
+**443 owned · 69 unowned · 512 files (86% owned) · ~20979 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~32280 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -79,7 +79,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | usr/lib | 59 | 5 | 1316 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/imperium | 0 | 1 | 591 |
-| usr/halcyond | 21 | 2 | 546 |
+| usr/halcyond | 23 | 2 | 546 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |

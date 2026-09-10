@@ -98,13 +98,26 @@ MiB = 52 MiB fits 64; the pre-JPEG-slice 6M would OOM a progressive JPEG
 channel re-caps inline to ~1 Mpx downstream, so 3 Mpx rarely binds. Both image
 arms produce a `Raster`; `Kind::Other` falls back to `cat`.
 
-`place_on_halcyon` opens `/srv/halcyon` (9p-mode -> a root fid), walks + opens
-`place` O_WRONLY, and writes the `inlinewire` header then the ARGB payload in
-bounded chunks (`write_all` loops on the returned count -- a 9P fid caps a
-Twrite at the negotiated msize). The payload is the `&[u32]` reinterpreted as its
-LE bytes (aarch64 is little-endian, so the in-memory bytes ARE the wire bytes the
-reader reconstructs with `from_le_bytes`). On an absent service or a short write
-it returns `Err`, and the caller falls back to reporting the decode.
+`open_place_write` picks the channel (I-47, HALCYON.md 14.7.2). In a SESSION the
+compositor put THIS pane's full address in `/env/HALCYON_PLACE`
+(`/srv/halcyon-<user>/<hex(token)>/place`); `view` opens it in a TWO-STEP
+(`split_service_addr` -> open the service root `/srv/halcyon-<user>` O_READ to
+CONNECT, then open the `<hex>/place` subpath relative O_WRONLY) and does NOT fall
+back to the console channel (a session has no global `/srv/halcyon`, and a
+fallback would misplace; a stale/dead address just fails). The two-step is
+load-bearing, NOT a stylistic echo of the console: a `/srv` posted service
+connects on OPEN and the resolver WALKS intermediate components without opening
+them, so a SINGLE deep open of the full address cannot cross the service to reach
+the token dir (proven at the session-image E2E -- the deep open never connected;
+the two-step does). Absent that env (console mode, the spike), it opens the
+global `/srv/halcyon` two-step (root fid -> `place` O_WRONLY). `place_on_halcyon` then
+writes the `inlinewire` header then the ARGB payload in bounded chunks
+(`write_all` loops on the returned count -- a 9P fid caps a Twrite at the
+negotiated msize). The payload is the `&[u32]` reinterpreted as its LE bytes
+(aarch64 is little-endian, so the in-memory bytes ARE the wire bytes the reader
+reconstructs with `from_le_bytes`). The token never enters the payload -- it is
+the path, validated once by the server at the walk. On an absent service or a
+short write it returns `Err`, and the caller falls back to reporting the decode.
 
 ### inlinewire (the shared wire, pure, zero deps)
 
@@ -188,8 +201,10 @@ write. No steady state.
 - The obj-verbs (`path view view {}` + `path gallery gallery {}` in
   `/lib/beacon/verbs`) that put both viewers on the Esc+w/b menu LANDED
   ([[sub-beacon]]).
-- The per-user SESSION-path channel (a per-pane control endpoint + token/quota)
-  is halcyond's seam; the console spike posts ONE `/srv/halcyon`.
+- The per-user SESSION-path channel LANDED (halcyond's `paneplace.rs`, see
+  [[sub-halcyond]]): `view` now prefers the per-pane `/env/HALCYON_PLACE` address
+  (`/srv/halcyon-<user>/<hex(token)>/place`) via `open_place_write`, falling back
+  to the console `/srv/halcyon` only when that env is absent.
 
 ## Caveats
 

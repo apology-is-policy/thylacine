@@ -3784,7 +3784,13 @@ populate_stratum_pool() {
             || { echo "==> populate pool: /lib/halcyon/renderer readback MISMATCH" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
         rm -f "$halrend"
         echo "==> populate pool: HALCYON renderer lever ENABLED (/lib/halcyon/renderer = halcyond)"
+    fi
 
+    # I-47 (HALCYON.md 14.7 + 14.7.2): the inline-media E2E fixtures, baked under
+    # EITHER the system-renderer lever (the console spike) OR the session lever
+    # (the per-user session-path channel, 14.7.2) -- both drive `view`/`gallery`,
+    # so a session build needs /test.png too. Default aurora images stay byte-stable.
+    if [[ "${THYLACINE_HALCYON:-0}" != "0" || "${THYLACINE_HALCYON_SESSION:-0}" != "0" ]]; then
         # I-47 (HALCYON.md 14.7): the inline-media E2E fixture. A committed
         # 640x400 RGB witness card (usr/view/testdata/make-test-png.py) baked at
         # /test.png so `view /test.png` displays it inline. Gated with the

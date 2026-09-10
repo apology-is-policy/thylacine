@@ -1508,6 +1508,35 @@ construction**: the endpoint lives in the pane's own namespace, so association i
 structural (inherited, not guessed) and there are **no hops** — `view` is a direct
 namespace descendant of the pane's shell. See the reciprocal note in `BEACON.md §10`.
 
+**AS-BUILT (the session-path slice, 2026-09-10; operator-ratified routing shape
+"per-user service + token path").** The compositor posts ONE per-user service
+`/srv/halcyon-<user>` (`session_user()` from `/env/USER`; login already grants
+`MAY_POST_SERVICE`). The **per-pane token** is a fresh CSPRNG `u128` used as a
+**path component**: `view` opens `/srv/halcyon-<user>/<hex(token)>/place`, the
+fully-resolved address the compositor wrote into that pane's
+`/env/HALCYON_PLACE` right before its spawn (per-Proc `/env`, deep-copied at
+spawn — so the child snapshots ITS pane's address, isolated from every other
+pane; the compositor removes it after the spawn so its own `/env` and the next
+tile's snapshot stay clean). The **wire is unchanged** (`inlinewire` v0 — the
+token never enters the payload; it is validated ONCE at the 9P walk, fail-closed
+`E_NOENT` on an unknown/dead token). Two authority axes: (1) the secret token
+(unguessable, only in the pane's own `/env`), and (2) a **peer-principal gate at
+accept** (`t_srv_peer`) refusing any connection whose peer is not the session's
+own user — so even a leaked token cannot let a different user place into the
+session. The DoS floor: `MAX_CONNS = 2` bounds concurrent transfers; the
+per-image cap is the heap residual divided by `MAX_CONNS` (so the aggregate
+in-flight fits the residual); the per-pane **stored** quota (live placements +
+raster bytes) is the tile transcript's own content budget (`inject_image` →
+`enforce_budget` evicts frozen blocks by `max_cost` + `max_blocks`, failing
+clean). The alternatives — a distinct 9P service per pane, and a token in the
+wire payload — were rejected: the former posts N services (heavier teardown, and
+§14.7.2 specifies one service); the latter bumps the wire ABI (a format break)
+and re-validates per write. Impl: `usr/halcyond/src/{paneroute,paneplace}.rs` +
+the `session.rs` wiring + `view` `open_place_write`. The console spike's global
+`/srv/halcyon` (single-conn) remains for console mode; `view` prefers the
+session address when `/env/HALCYON_PLACE` is set and never falls back to the
+console channel inside a session.
+
 **14.7.3 The transcript item.** A new `Item::Image { blob, native_w, native_h,
 placement }` beside `Line | Table | Rule | Pre` (`transcript.rs`). Layout reserves
 a letterboxed rect at the block's current px width and emits the **already-built,

@@ -52,6 +52,15 @@ impl PlaceAccum {
         }
     }
 
+    /// Refresh the per-image cap WITHOUT disturbing an in-flight buffer (I-47
+    /// F2). The cap gates the NEXT header parse, so a multi-image transfer on a
+    /// reused fid (or a transfer whose first header has not yet arrived) picks
+    /// up the current display-scaled cap rather than the one captured at
+    /// construction. A header already parsed keeps its reserve unchanged.
+    pub fn set_max_pixels(&mut self, max_pixels: u64) {
+        self.max_pixels = max_pixels;
+    }
+
     /// Feed one write at `offset`. Writes MUST be contiguous (the place channel
     /// does not support seeks); the header is resolved -- and validated against
     /// the wire rules AND the heap-safe cap -- before any payload is buffered, so
@@ -310,5 +319,27 @@ mod tests {
         assert!(matches!(a.write(0, &msg[..64]), AccumStep::More));
         // No further writes: nothing is delivered. (Drop = discard.)
         let _ = vec![0u8; 0];
+    }
+
+    #[test]
+    fn set_max_pixels_gates_the_reused_accum() {
+        // F2 regression: on a REUSED accum the refreshed cap gates the NEXT
+        // image's header. Discriminating -- the SAME two-image sequence Rejects
+        // the larger second image under the initial cap and completes it after
+        // the refresh, so the cap (not a value captured at construction)
+        // decides. This is the paneplace `_ => acc.set_max_pixels(..)` path that
+        // lets a session compositor's per-image cap track a display resize.
+        let (m1, p1) = wire(2, 2); // 4 px -- fits the initial cap
+        let m2 = wire(3, 3).0; // 9 px -- over the initial 4-px cap
+        // Without the refresh: the second image is rejected by the stale cap.
+        let mut a = PlaceAccum::new(4);
+        assert_eq!(expect_done(a.write(0, &m1)).2, p1);
+        assert!(matches!(a.write(m1.len() as u64, &m2), AccumStep::Reject));
+        // With the refresh: same sequence, cap raised after image 1 -> admitted.
+        let mut b = PlaceAccum::new(4);
+        assert_eq!(expect_done(b.write(0, &m1)).2, p1);
+        b.set_max_pixels(16);
+        let (w, h, _) = expect_done(b.write(m1.len() as u64, &m2));
+        assert_eq!((w, h), (3, 3));
     }
 }
