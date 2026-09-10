@@ -242,8 +242,18 @@ not inherit it.
 **The shape.** A new elevation-only capability:
 
 ```c
-#define CAP_POST_SERVICE (1ull << 12)     /* free bit; 11 is the current high-water */
+#define CAP_POST_SERVICE (1ull << 13)     /* 12 is CAP_AUDIO_GRAPH on aux-3 */
 /* joins CAP_ELEVATION_ONLY; MUST NOT join CAP_ALL (caps.h states the rule) */
+```
+
+**The bit number is 13, not 12, and how that was caught is the point.** The
+first draft took bit 12 because 11 is main's high-water mark. Bit 12 is
+`CAP_AUDIO_GRAPH` **on aux-3**, so "free" was true of this branch and false of
+the project. A capability bit is a project-wide ABI allocation and main's
+`caps.h` is not the register -- the union of the live branches is. Caught by
+sweeping both sides during merge prep, hours after the design was ratified.
+
+```c
 ```
 
 Every property we want falls out of the existing machinery, which is the
@@ -285,10 +295,33 @@ hand every program the user runs both service-posting AND the ability to
 re-designate the console owner. I-27 would survive (the owner bit never confers
 console-attach), but the widening is real and unnecessary given the above.
 
-**Cross-track note.** Imperium is the auxiliary track's arc (IM-0..IM-5 landed;
-IM-2, the propagating scope, at `4c77db6e`). This capability is *designed* here
-by the main track at the operator's direction and must be built in coordination
-— it is not main's to land unilaterally into imperium's conferral set.
+**Cross-track note, and a HARD SEQUENCING DEPENDENCY.** Imperium is the
+auxiliary track's arc, and as of 2026-09-10 **it is not merged into main**:
+`4c77db6e` (IM-2, the propagating scope) is an ancestor of `aux-3` only, which
+is 126 commits ahead of main while main is 57 ahead of it. Main carries the A-4
+legate (`legate_scope_id`, `legate_valid_until`) but **not** the propagating
+mark.
+
+That is not a citation detail — it decides what can be built. Elevation-only
+caps are stripped at `rfork` **and** at `SYS_SPAWN_WITH_CAPS`, so without the
+propagating scope `CAP_POST_SERVICE` cannot reach a child at all: an elevated
+shell would hold it and `haul` — a child — would not. **The cap is inert for its
+actual purpose until imperium is in main.** The first draft of this section said
+"so this isn't a dependency on unbuilt work"; it is built, but not here, and
+`git merge-base` was the one command that would have said so.
+
+Consequences for sequencing:
+
+- **The `ut` namespace builtins are UNBLOCKED** and should go first. They need
+  no new capability — attaching to a posted service is not gated, only
+  *posting* is — so they can be built and verified against a service that
+  already exists (`/srv/ptyfs`, `/srv/stratum-fs`).
+- **The cap + haul's post mode wait on the merge**, and the merge is the
+  operator's call, not a thing either track should do unilaterally at 126/57
+  divergence.
+- This capability is *designed* here by the main track at the operator's
+  direction and is not main's to land unilaterally into imperium's conferral
+  set regardless.
 
 ## 7. Invariants + audit surface
 
