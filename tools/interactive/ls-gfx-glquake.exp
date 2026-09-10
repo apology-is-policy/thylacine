@@ -67,13 +67,26 @@ proc gfx_dump_or_fail {out} {
     return ""
 }
 
-# The staged tree is the same one the pool bakes, so its presence here is the
-# same condition -- checked on the HOST before boot so the skip costs no VM
-# time.
-set glq "$repo/build/clade/stage/bin/tyr-glquake"
-if {![file exists $glq]} {
-    puts "LS-CI SKIP: no tyr-glquake staged at build/clade/stage/bin -- the GL\
-          half is not baked into this pool (see usr/ports/mesa/README.md)"
+# ASK WHAT THE MINT DECIDED. "The staged tree ... is the same condition" was the
+# claim here too, and it is false in the same way: the bake needs
+# THYLACINE_BAKE_CLADE=1 *AND* the staged tree, and this tested only the tree.
+# Same measured outcome as ls-gfx-gl -- guard passes, no /clade in the pool,
+# 240s timeout, three attempts, a regression reported that does not exist.
+# `build/pool-contents` is written by the mint (tools/build.sh) and records the
+# conjunction.
+set contents "$repo/build/pool-contents"
+if {![file exists $contents]} {
+    puts "LS-CI SKIP: no build/pool-contents -- this pool predates the bake\
+          marker, so whether /clade is in it cannot be established from the host"
+    exit 77
+}
+set fh [open $contents r]
+set txt [read $fh]
+close $fh
+if {![regexp {clade=1} $txt]} {
+    puts "LS-CI SKIP: build/pool-contents says clade=0 -- /clade is not in this\
+          pool. Re-bake with THYLACINE_BAKE_CLADE=1 (and stage the toolchain per\
+          usr/ports/mesa/README.md) before any GL gate."
     exit 77
 }
 

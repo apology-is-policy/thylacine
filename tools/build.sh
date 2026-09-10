@@ -3168,7 +3168,11 @@ build_stratum_pool_fixture() {
         echo "    minting this pool WITHOUT /clade (the on-device C/C++ toolchain)."
         forage_hint clade "the Clade toolchain" "$BUILD_DIR/clade/stage/bin"
     fi
+    local bake_goroot=0
     if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
+        bake_goroot=1
+    fi
+    if [[ "$bake_goroot" == "1" ]]; then
         # Sized against MEASURED consumption (2026-07-03, task #39): the bake
         # itself uses ~575M for ~170M logical (~3.3x FS amplification) and the
         # boot's go4c build + suite burned the ~960M that remained free in a
@@ -3247,6 +3251,20 @@ build_stratum_pool_fixture() {
     fi
     echo "==> stratum pool fixture: $(wc -c < "$pool_img" | tr -d ' ') bytes ($pool_img), $(wc -c < "$keyfile" | tr -d ' ') bytes ($keyfile)"
     ledger "pool.img + system.key: REGENERATED (fresh random key, seed=$mkfs_seed) -- the ramfs MUST be re-baked so /system.key matches"
+
+    # WHAT ACTUALLY WENT INTO THIS POOL, written where a HOST-side gate can read
+    # it. The #101/#139 family keeps recurring because the optional payloads have
+    # a TWO-part bake condition (the lever AND the staged tree) and every cheap
+    # host-side check so far has tested ONE of them. `ls-gfx-gl.exp` tested only
+    # `build/clade/stage/bin/gl-sdl-prove`, over a comment asserting "its
+    # presence here is the same condition" -- it is not, and on this machine
+    # (tree staged since Sep 1, lever unset) the guard passed, the scenario ran
+    # against a pool with no /clade, and it FAILED at 180s reporting a
+    # regression that did not exist. That is the #245 class inverted: a gate that
+    # cannot tell "not built" from "broken" reports the wrong one, loudly.
+    #
+    # A guard must ask what the MINT decided, not re-derive it from an input.
+    printf 'clade=%s\ngoroot=%s\n' "$bake_clade" "$bake_goroot" > "$BUILD_DIR/pool-contents"
 
     # P6-pouch-stratumd-boot 16c: populate the freshly-formatted pool with
     # the boot binary corpus + a sentinel for joey's post-pivot probe. The

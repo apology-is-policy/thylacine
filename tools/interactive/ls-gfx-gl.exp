@@ -52,13 +52,36 @@ proc gfx_dump_or_fail {out} {
     return ""
 }
 
-# The staged tree is the same one joey's gl_gate reads, so its presence here
-# is the same condition -- checked on the HOST before boot so the skip costs
-# no VM time.
-set prove "$repo/build/clade/stage/bin/gl-sdl-prove"
-if {![file exists $prove]} {
-    puts "LS-CI SKIP: no gl-sdl-prove staged at build/clade/stage/bin -- the GL\
-          half is not baked into this pool (see usr/ports/mesa/README.md)"
+# ASK WHAT THE MINT DECIDED, NOT WHAT ONE OF ITS INPUTS LOOKS LIKE. This guard
+# used to test `build/clade/stage/bin/gl-sdl-prove` over a comment asserting
+# "its presence here is the same condition" as joey's gl_gate. It is not: the
+# bake needs THYLACINE_BAKE_CLADE=1 *AND* the staged tree, and this checked only
+# the tree. On a machine where the toolchain was staged once and the lever is
+# unset -- the ordinary state -- the guard passed, the scenario ran against a
+# pool with no /clade, and it FAILED at 180s, three attempts, reporting a
+# regression that did not exist. The #245 class inverted: a gate that cannot
+# tell "not built" from "broken" reports the wrong one, loudly.
+#
+# `build/pool-contents` is written by the pool mint itself (tools/build.sh), so
+# it records the CONJUNCTION rather than one input. Absent = a pool minted
+# before this marker existed; treat that as unknown and skip rather than run a
+# 180s scenario on a guess.
+set contents "$repo/build/pool-contents"
+set clade_baked 0
+if {[file exists $contents]} {
+    set fh [open $contents r]
+    set txt [read $fh]
+    close $fh
+    if {[regexp {clade=1} $txt]} { set clade_baked 1 }
+} else {
+    puts "LS-CI SKIP: no build/pool-contents -- this pool predates the bake\
+          marker, so whether /clade is in it cannot be established from the host"
+    exit 77
+}
+if {!$clade_baked} {
+    puts "LS-CI SKIP: build/pool-contents says clade=0 -- /clade is not in this\
+          pool. Re-bake with THYLACINE_BAKE_CLADE=1 (and stage the toolchain per\
+          usr/ports/mesa/README.md) before any GL gate."
     exit 77
 }
 
