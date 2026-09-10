@@ -400,6 +400,32 @@ else gets committed, and `third_party/` is shared with two other tracks. The
 verification bar for that fix is a fresh clone that builds end to end, not a
 green `git status` — fixing one cause and stopping is how the second one hid.
 
+### All of it verified in the guest, and the push released
+
+The re-bake carried every round-2 and round-3 fix, and both owed scenarios ran on
+a quiet host:
+
+- **`haul-npxf` PASS [29s]**, closing round-3's F11. The witnesses are what
+  matter, not the verdict: `CHILD-ARGV` appears once (the leg that had never
+  executed), `child-argv` **zero** times (so the assertion cannot be satisfied by
+  the shell echoing the typed line — round 2's F4 refutation still holds against
+  a real run), `npxf encrypted` twice, `PLAIN 9P` never.
+- **`ls-gfx-age` PASS [41s], first attempt** — the same scenario that failed 3/3
+  an hour earlier, on a one-line detector change **with no guest change
+  whatever**. That is the cleanest possible proof the guest was never at fault.
+  And not a trivial pass: the assertion it reached is "negative leg — region
+  exactly bg on 8/8 slot-rotated dumps after clear (worst 0 px)", so the whole
+  buffer-age body ran.
+- **The pool marker wrote itself correctly**: `clade=0`, `goroot=1` — right for
+  this machine, and `clade=0` is precisely the value that turns the two gl gates
+  from a 240-second false failure into a one-line skip.
+
+One self-found defect in my own round-3 fix, caught before it ever ran: the new
+dash-word refusal sat *before* the `--` arm, so `haul h!1 /m -- foo` — an
+operator reaching for the exact escape hatch the refusal's message points at —
+was itself refused. An error message that names a remedy the code rejects is
+worse than the ambiguity it replaced. Fixed at `6864ebbc`.
+
 ### On contention, said properly
 
 aux reported (yip 0084) that our two HVF guests had been mutually OOM-contending,
