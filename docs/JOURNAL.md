@@ -241,6 +241,41 @@ Posture: 45 haul host tests (was 32), `kat/regen.sh` PASS re-deriving 23
 vectors, npxf-selftest 9/9 on macOS, guest E2E PASS [30s] against the real
 npxf-server, boot suite green with nine `u-*` suites all OK.
 
+### The full suite, and four failures I did not resolve
+
+`tools/test-interactive.sh` over all 50 scenarios: **43 PASS / 3 SKIP / 4 FAIL**,
+every failure burning all three attempts.
+
+`haul-npxf` passed, and so did every other shell-driving scenario -- `ls-ci`,
+`ls-3a/3b/3c`, `ls-5`, `ls-7`, `ls-8c`, `pty-4`, `prowl`, `quarry`,
+`viv-console-ctrlc`, the go set. That is the coverage that bears on the lexer
+change, and it is green.
+
+Three of the four look **lever-shaped**: `ls-gfx-gl` and `ls-gfx-glquake` invoke
+`/clade/bin/*` while the boot log says `clade CL-4 /clade absent
+(THYLACINE_BAKE_CLADE not set)`, and `git-shell` waits on the git port. Each
+FAILED rather than SKIPPED -- burning 180-240 s times three and reporting a
+regression. Two of them *have* skip guards that did not fire; `git-shell` has
+none. **That is the #245 class inverted: a gate that cannot tell "not built"
+from "broken" reports the wrong one, loudly.** `ls-halcyon` and `ls-gfx-chords`
+skipped correctly in the same run and name the lever to set -- that is the shape
+these should have.
+
+The fourth, `ls-gfx-age`, is **unexplained**, and it is the one that blocks the
+push: it fails with "no line-editor redraw within 15 s" after a screen-fill, the
+VM alive and the relay reporting no stall. The line editor is the subsystem this
+run touched. A causal link is implausible -- none of the typed commands contain
+a `!`, and the new branch is reachable only from a word that does -- but
+implausible is exactly what the nested-mount hypothesis was.
+
+I did not reach for host contention, and the next session should not either. It
+is a tempting story (three concurrent VMs against a 15 s window) and it is
+forbidden as a first explanation. Worth adding: three attempts under the *same*
+contention are not three independent trials, so the harness's "deterministic"
+verdict rules out a per-attempt coin flip and nothing more. The way to settle it
+is to check out `2c14a0c3` and run the scenario there. Enqueued, push blocked on
+it, and handed over rather than guessed at.
+
 ### Open, and named
 
 - **F11 deferred on the record**: residual `Copy` duplicates of the ephemeral
