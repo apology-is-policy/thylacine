@@ -292,6 +292,123 @@ it, and handed over rather than guessed at.
 - **npxf's tree has no version control.** Six files changed there this run and
   they exist only on disk.
 
+### Round 3, and the check that a fix deleted (`2ce3ebcd`)
+
+Round 3 audited round 2's fixes. **0 P0 / 1 P1 / 5 P2 / 5 P3, dirty again.** The
+finding worth the whole round is F1, because it lands on the previous round's
+repair rather than on the original code.
+
+Round 2 had found that the KAT's direction check was vacuous — it asserted that
+npxf's client and server agree with *each other*, which survives a swap applied
+to both halves. The repair pinned the responder's ephemeral so the CLIENT's
+label became assertable. That was right about the client, and in the same stroke
+it stopped calling `server_handshake` at all, leaving behind:
+
+```c
+if (server_send != d_srv.s2c) die("a server's send key is not s2c");
+```
+
+`server_send` *is* `d_srv.s2c`, assigned by the shim three lines earlier. A
+tautology, wearing a message that describes a check it is not performing. The
+prosecutor did not argue this — it applied a one-sided swap to `server_handshake`
+on a copy of npxf and ran the real gate: **byte-identical vectors, `regen.sh:
+PASS`.** And the vacuous version it replaced *had* caught that swap.
+
+So the repair traded one coverage for another while reading as though it kept
+both. **Three checks in this arc could not fail, and the shape is identical every
+time: the sabotage was designed alongside the check, so it tested the hole the
+check already covered.** A one-sided sabotage proves a check detects one-sided
+faults and says nothing about symmetric ones. Design the sabotage from the
+threat, never from the check.
+
+The gate now runs two legs, one per handshake, each pinning the *other* side's
+ephemeral so npxf's own `derive()` produces the labels to compare against. Four
+cases measured: clean PASSes 23 vectors; client-half, server-half and both-halves
+swaps each FAIL, naming the half. That table is in `HAUL-DESIGN.md` now, so a
+future simplification has something to reproduce rather than a claim to trust.
+
+F4 is the same lesson in the argument grammar. Round 2 moved the option boundary
+from three positionals to two, fixing an argv where `-t` at the command position
+silently overrode the operator's token. Round 3 found the mirror: an option
+written *after* the operands — which every getopt-shaped tool accepts — now
+became the command, silently dropping the token and **mounting in the clear**.
+Neither boundary is right, because both guess at intent; each merely picks which
+argv fails silently. haul refuses now and points at `--`.
+
+F5 (P1) is a hang in the one call that sits between `t_mount` and the park loop
+whose entire job is to bound exactly that: a blocking 9P round trip under `-v`
+with no STOPPED check. If the peer dies there, both pumps die, and a pump closes
+nothing by design (the fd-recycle race), so the kernel never sees EOF —
+and the Spoor transport sets `set_recv_deadline = NULL`. Guarding on STOPPED
+closes the reachable window; the residue can't be closed here without a deadline
+the transport doesn't offer, so it is *announced* — the step prints before the
+call, so a hang has a location instead of being a silent stop.
+
+F6: `make test-haul-kat`, added last round as the thing that makes the fixture a
+checked recording, was red-by-construction on every checkout but this one. make
+maps any non-zero recipe status to exit 2, so a skip and a vector mismatch were
+the same verdict — and npxf lives outside version control. Its comment claimed
+this was "the same shape as test-venus-verdict"; that script has zero `exit 77`
+sites, having no external dependency to be missing. A model cited without being
+read.
+
+### The blocker cleared, and it was a dead gate
+
+The push was held on `ls-gfx-age`, the one LS-CI failure I could not explain —
+"no line-editor redraw within 15s", in a run that had just changed the line
+editor. Built `2c14a0c3` in a separate worktree and ran it alone on a quiet host:
+**it fails identically**, 3/3, 129 s. Pre-existing, and not contention either,
+since it fails with the machine to itself.
+
+Then the diagnosis, which is better than the attribution. The detector matches
+one literal, `ESC[K`. The failing 197,734-byte log contains **zero `ESC[K` and
+256 `ESC[J`**. `line_editor.rs:786` dispatches on whether the terminal width is
+known: unknown gives `render_unwrapped` and per-line `ESC[K`; known gives
+`render_wrapped` and one `ESC[J` for the block — and that render says so in as
+many words, *"No per-line `\x1b[K` — (2) cleared already"*. Under aurora the
+width is known. **The gate is welded to a path the guest no longer takes, so it
+cannot pass on any tree.** The redraw it reports missing is happening.
+
+Same class as `ls-gfx-compose.exp` being Daylight-literal: an instrument pinned
+to a presentation detail that then moved. Worse than no gate, because it spends
+three attempts to report a regression that isn't there. Fixed by matching what
+the phase means — either erase counts as a repaint.
+
+Introduced by `0a7e4c18`, whose subject calls the wrapped render a "dormant
+foundation". The measurement says it is what reaches the wire.
+
+### Found by accident: a fresh clone cannot build, twice over
+
+Making the attribution worktree turned up something unrelated and worse. `git
+worktree add` doesn't materialize ignored files, and two vendored crates'
+`.cargo-checksum.json` list files this tree's own `.gitignore` excludes —
+`smoltcp/.vscode/settings.json` and `thiserror/build/probe.rs`. Cargo aborts
+before compiling anything.
+
+Fixing that revealed a second, independent cause: `build.sh:4446` makes a network
+fetch of Quake shareware, from a third-party FTP mirror, a **hard build failure**
+with no skip lever. No network, a dead mirror, or a moved URL and Thylacine does
+not build at all — including the kernel-only paths that have nothing to do with
+it.
+
+Every tree on this machine predates the ignore rules or was populated before
+them, so the files are present-but-untracked wherever anyone builds. The failure
+needs a tree git actually populated from scratch — a new contributor, a CI
+runner, a fresh machine. **The tree agrees with itself and disagrees with a clean
+checkout of itself.** Enqueued, not fixed: the `.gitignore` change decides what
+else gets committed, and `third_party/` is shared with two other tracks. The
+verification bar for that fix is a fresh clone that builds end to end, not a
+green `git status` — fixing one cause and stopping is how the second one hid.
+
+### On contention, said properly
+
+aux reported (yip 0084) that our two HVF guests had been mutually OOM-contending,
+and that the runtime OOM-killed an aux guest boot under my build. That is a
+measured mechanism and it plausibly bears on a three-way-parallel LS-CI run. It
+explains nothing about `ls-gfx-age`, which fails alone on a quiet host, and it is
+not offered for the three `/clade` failures either — a missing binary is not a
+timing condition. Recorded as measured, not reached for.
+
 ---
 
 ## Run 46l (2026-09-09, Opus 5 max, after a self-compaction) -- FORAGE: the npxf secure channel, and the first byte ever to cross the transport
