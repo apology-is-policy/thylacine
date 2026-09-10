@@ -63,9 +63,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use haul::npxf;
+use haul::{cmdline, npxf};
 use libthyla_rs::env::{self, Args};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 use libthyla_rs::io::Read;
 use libthyla_rs::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use libthyla_rs::thread;
@@ -108,12 +108,23 @@ macro_rules! step {
 /// The largest 9P message haul will relay in either direction.
 ///
 /// A 9P message is `size[4]` INCLUDING those four bytes, so this bounds the
-/// whole frame. It is a shim-side ceiling, not the negotiated msize: haul
-/// does not parse Tversion (it is a transport, not a client), so it cannot know
-/// what the two ends agreed on. 1 MiB is far above any msize the kernel
-/// negotiates and far below a length a hostile peer could use to make us
-/// allocate the heap -- which is the point of having it at all.
-const MSG_MAX: u32 = 1024 * 1024;
+/// whole frame. It is a shim-side ceiling, not the negotiated msize: haul does
+/// not parse Tversion (it is a transport, not a client), so it cannot know what
+/// the two ends agreed on.
+///
+/// The number is chosen against what the two ends CAN agree on. This transport
+/// is the pipe attach, whose msize is the fixed `SYS_ATTACH_DEFAULT_MSIZE`
+/// (4 KiB, kernel/syscall.c) -- the kernel proposes it, caps its own recv at it,
+/// and there is no path by which a larger frame is legitimate here. 64 KiB
+/// therefore leaves sixteen-fold headroom for a future msize bump while keeping
+/// the worst case a hostile server can drive to two 64 KiB buffers, one per
+/// pump, against `INITIAL_HEAP_SIZE` (4 MiB, and NOT growable).
+///
+/// It was 1 MiB, which was described as "far below a length a hostile peer could
+/// use to make us allocate the heap". Two of those is a quarter of the heap, and
+/// on exhaustion the panic handler calls `t_exits(1)` -- so a bound written to
+/// prevent a denial of service was set where it could deliver one.
+const MSG_MAX: u32 = 64 * 1024;
 
 /// A 9P message is at minimum `size[4] type[1] tag[2]`. npxf's server refuses
 /// anything shorter as a runt; matching it here means a malformed frame dies at
@@ -148,12 +159,80 @@ fn read_exact(fd: i64, buf: &mut [u8]) -> bool {
     true
 }
 
+/// How long the handshake will wait for the server's flight, matching the
+/// bracket npxf puts around its own (`kHandshakeTimeoutMs`, channel.hpp).
+///
+/// Without it, a peer that completes the TCP handshake and then says nothing
+/// holds haul in a read forever, BEFORE authentication -- so anything that can
+/// accept a connection can pin the process, with no token and no reply. The
+/// verbose trace stops at "sent flight 1", which is a good description of the
+/// symptom and no help at all against it.
+const HANDSHAKE_MS: i32 = 15_000;
+
+/// How long a stalled write waits for the far side to make room before the
+/// channel is declared dead. A healthy TCP transmit buffer drains in
+/// milliseconds; a socket that is actually gone never becomes writable at all,
+/// so the only thing this bound has to separate is "slow" from "never" -- and
+/// erring long is right, because a stalled remote filesystem should block, not
+/// tear the mount down.
+const WRITE_STALL_MS: i32 = 30_000;
+
+/// Wait for `events` on `fd`, up to `ms`. Returns false on timeout or error.
+fn wait_ready(fd: i64, events: i16, ms: i32) -> bool {
+    let mut pfd = libthyla_rs::TPollFd { fd: fd as i32, events, revents: 0 };
+    let r = unsafe { libthyla_rs::t_poll(&mut pfd, 1, ms) };
+    r > 0 && pfd.revents & events != 0
+}
+
+/// `read_exact` with a deadline on each wait, for the pre-authentication window
+/// where a silent peer must not be able to park us forever. The bound is
+/// per-wait rather than for the whole read: a peer that dribbles bytes is making
+/// progress, and the flights here are 64 bytes, so there is nothing to dribble.
+fn read_exact_before(fd: i64, buf: &mut [u8], ms: i32) -> bool {
+    let mut off = 0usize;
+    while off < buf.len() {
+        if !wait_ready(fd, libthyla_rs::T_POLLIN, ms) {
+            return false;
+        }
+        let n = unsafe { libthyla_rs::t_read(fd, buf[off..].as_mut_ptr(), buf.len() - off) };
+        if n <= 0 {
+            return false;
+        }
+        off += n as usize;
+    }
+    true
+}
+
+/// Write all of `buf`, treating a zero-byte write as back-pressure rather than
+/// as failure.
+///
+/// A /net data fd does NOT block. netd's TCP send is
+/// `send_slice(data).unwrap_or(0)` (usr/netd/src/server.rs), and dev9p hands
+/// that count straight back to EL0 (`dev9p_write` returns `accepted`,
+/// kernel/dev9p.c), so a full transmit buffer makes `t_write` return 0 with the
+/// connection perfectly healthy. The obvious `n <= 0` idiom reads that as the
+/// end of the channel and tears the mount down under nothing worse than a busy
+/// link -- and can do it MID-RECORD, leaving a truncated AEAD frame on the wire
+/// for the peer to reject.
+///
+/// The zero is ambiguous on its own: `unwrap_or(0)` swallows the error a dead
+/// socket returns too, so the count alone cannot separate "full" from "gone".
+/// Readiness can. POLLOUT is netd's `can_send()` -- established, with room --
+/// which a dead socket never reports, so waiting for it disambiguates by
+/// waiting rather than by guessing.
 fn write_exact(fd: i64, buf: &[u8]) -> bool {
     let mut off = 0usize;
     while off < buf.len() {
         let n = unsafe { libthyla_rs::t_write(fd, buf[off..].as_ptr(), buf.len() - off) };
-        if n <= 0 {
+        if n < 0 {
             return false;
+        }
+        if n == 0 {
+            if !wait_ready(fd, libthyla_rs::T_POLLOUT, WRITE_STALL_MS) {
+                say!("haul: write stalled with {} bytes left", buf.len() - off);
+                return false;
+            }
+            continue;
         }
         off += n as usize;
     }
@@ -341,12 +420,34 @@ fn read_record(src: i64, o: &mut npxf::Opener, buf: &mut Vec<u8>) -> RecordIn {
     RecordIn::Message(n)
 }
 
+/// A pump context, bound to the one entry point allowed to receive it.
+///
+/// The binding is the whole point of the trait. `UpCtx` and `DownCtx` are
+/// layout-identical -- two fds and an `Option` holding a key -- so handing
+/// `pump_up` a `DownCtx` would compile, link and run, and would seal outgoing
+/// records under the RECEIVE key. Nothing crashes; the peer simply rejects every
+/// record, and the tag failure says nothing about why. Taking the entry point as
+/// a separate argument made that swap a one-token edit away at both call sites;
+/// making it an associated constant makes it unrepresentable.
+trait Pump: Sized {
+    const ENTRY: extern "C" fn(u64);
+}
+
+impl Pump for UpCtx {
+    const ENTRY: extern "C" fn(u64) = pump_up;
+}
+
+impl Pump for DownCtx {
+    const ENTRY: extern "C" fn(u64) = pump_down;
+}
+
 /// Spawn one pump, handing it ownership of `ctx`.
 ///
 /// The Box is leaked deliberately: the pump runs for the process's life and
 /// there is no join, so nothing would ever reclaim it. The pointer is the
 /// thread's argument.
-fn spawn_pump<T>(entry: extern "C" fn(u64), ctx: T) -> Result<(), &'static str> {
+fn spawn_pump<T: Pump>(ctx: T) -> Result<(), &'static str> {
+    let entry = T::ENTRY;
     let stack = unsafe { t_burrow_attach(PUMP_STACK) };
     if stack < 0 {
         return Err("pump stack");
@@ -370,12 +471,16 @@ const USAGE: &str = "\
 usage: haul [-a aname] [-t file | --token-env VAR] host!port mountpoint [cmd ...]
   Mount a remote 9P2000.L tree served over TCP.
 
-  With a command, haul mounts, runs it WITH THE TREE VISIBLE, and exits with
-  its status. Without one it parks, holding the mount, until the peer hangs up.
-  A mount lands in the calling Proc's namespace only, and a child inherits it --
-  so a backgrounded `haul ... &` is NOT visible to the shell that started it.
-  The command is resolved from the namespace root, with no PATH search: write
-  /bin/cat, not cat.
+  Without a command haul parks, holding the mount, until the peer hangs up.
+  A mount lands in the calling Proc's namespace ONLY, so a backgrounded
+  `haul ... &` is not visible to the shell that started it.
+
+  With a command, haul mounts and then runs it -- but a spawned child is NOT
+  currently seeing the mount, which is an open kernel bug and not a property of
+  this tool. Until it is fixed, prefer the parking form. The command is resolved
+  from the namespace root, with no PATH search: write /bin/cat, not cat.
+  Everything after the command word is passed to it verbatim; `--` ends haul's
+  own options early.
 
   -a aname        the tree to attach (default \"/\")
   -t file         shared token file -- enables npxf's encrypted channel
@@ -397,7 +502,13 @@ struct Parsed {
     mountpoint: String,
     aname: String,
     /// None = plain 9P; Some = run npxf's handshake first.
-    token: Option<Vec<u8>>,
+    ///
+    /// `Zeroizing` because this is the LONG-LIVED credential: unlike a session
+    /// key, its compromise is not bounded by this connection. Every derived key
+    /// in npxf.rs already wipes on drop; the token is the one secret that used
+    /// to be left to a plain `Vec::drop`, which frees the pages without
+    /// touching the bytes.
+    token: Option<Zeroizing<Vec<u8>>>,
     /// Optional command to run WITH the mount visible. Empty = park instead.
     cmd: Vec<String>,
 }
@@ -407,71 +518,102 @@ struct Parsed {
 /// npxf does the same on its side, and it has to: a token file written by any
 /// ordinary editor ends in a newline, and a byte of difference is a different
 /// pre-shared key and a handshake that fails with no clue why.
-fn read_token_file(path: &str) -> Result<Vec<u8>, &'static str> {
+/// The largest token file this will read, matching npxf's own 4096-byte cap
+/// (`read_token_file`, npxf src/npxf_main.cpp). A file bigger than this is a
+/// mistake -- a key ring, a log, the wrong path -- and refusing it beats reading
+/// it: an unbounded read on a path the caller chose is a way to turn `-t
+/// /dev/zero` into an out-of-memory kill.
+const TOKEN_FILE_MAX: usize = 4096;
+
+fn read_token_file(path: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     let mut f = libthyla_rs::fs::File::open(path).map_err(|_| "cannot open the token file")?;
-    let mut buf: Vec<u8> = Vec::new();
-    f.read_to_end(&mut buf).map_err(|_| "cannot read the token file")?;
-    if buf.last() == Some(&b'\n') {
-        buf.pop();
+    // Warn, as npxf does, rather than refuse: the operator may have a reason,
+    // and a mount that fails on a permission bit is worse than one that says so.
+    // The token is a long-lived credential shared with the far end, and a
+    // world-readable one is shared with everyone on this machine too.
+    if let Ok(md) = f.metadata() {
+        let other = md.permissions() & 0o077;
+        if other != 0 {
+            say!(
+                "haul: warning: {} is readable beyond its owner (mode {:04o}) -- chmod 600 it",
+                path,
+                md.permissions() & 0o7777
+            );
+        }
     }
+    // Read into a fixed buffer rather than read_to_end + a length check: the
+    // check has to come after the allocation, so `-t /dev/zero` would already
+    // have consumed the heap by the time it fired. One byte over the cap is
+    // enough to detect the overflow without ever holding more than the cap.
+    let mut buf: Vec<u8> = alloc::vec![0u8; TOKEN_FILE_MAX + 1];
+    let mut n = 0usize;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(got) => n += got,
+            Err(_) => return Err("cannot read the token file"),
+        }
+    }
+    if n > TOKEN_FILE_MAX {
+        return Err("the token file is too large");
+    }
+    buf.truncate(n);
+    // npxf::trim_token_file, not an inline pop: the exact bytes trimmed decide
+    // the PSK, so the rule lives in one documented place with a test on each
+    // side of the wire.
+    npxf::trim_token_file(&mut buf);
     if buf.is_empty() {
         return Err("the token file is empty");
     }
-    Ok(buf)
+    Ok(Zeroizing::new(buf))
 }
 
 fn parse_args(args: Args) -> Result<Parsed, &'static str> {
-    let mut aname = String::from("/");
-    let mut token: Option<Vec<u8>> = None;
-    let mut positional: Vec<String> = Vec::new();
+    // Collect argv as &str up front so the grammar itself can be a pure
+    // function over strings -- haul::cmdline::plan, which is where the option/
+    // operand boundary is decided AND tested. Only the two token SOURCES need
+    // syscalls, and they are resolved after the grammar has spoken.
+    let mut argv: Vec<&str> = Vec::new();
     let mut i = 1usize; // argv[0] is the program name
-    while let Some(a) = args.get(i) {
-        if a == b"-a" {
-            i += 1;
-            match args.get_str(i) {
-                Some(v) => aname = String::from(v),
-                None => return Err("-a wants a tree name"),
-            }
-        } else if a == b"-t" || a == b"--token-file" {
-            i += 1;
-            match args.get_str(i) {
-                Some(v) => token = Some(read_token_file(v)?),
-                None => return Err("-t wants a file"),
-            }
-        } else if a == b"--token-env" {
-            i += 1;
-            match args.get_str(i) {
-                Some(v) => match env::var(v) {
-                    Some(val) if !val.is_empty() => token = Some(val.into_bytes()),
-                    _ => return Err("that environment variable is unset or empty"),
-                },
-                None => return Err("--token-env wants a variable name"),
-            }
-        } else if a == b"-v" || a == b"--verbose" {
-            VERBOSE.store(1, Ordering::Relaxed);
-        } else if a == b"-h" || a == b"--help" {
-            let _ = t_putstr(USAGE);
-            return Err("");
-        } else if a.first() == Some(&b'-') && a.len() > 1 {
-            return Err("unknown option");
-        } else {
-            match args.get_str(i) {
-                Some(v) => positional.push(String::from(v)),
-                None => return Err("argument is not UTF-8"),
-            }
+    while args.get(i).is_some() {
+        match args.get_str(i) {
+            Some(v) => argv.push(v),
+            None => return Err("argument is not UTF-8"),
         }
         i += 1;
     }
-    if positional.len() < 2 {
-        let _ = t_putstr(USAGE);
-        return Err("");
+
+    let plan = match cmdline::plan(&argv) {
+        Ok(p) => p,
+        Err(cmdline::Bad::WantsUsage) => {
+            let _ = t_putstr(USAGE);
+            return Err("");
+        }
+        Err(cmdline::Bad::MissingValue(m)) => return Err(m),
+        Err(cmdline::Bad::UnknownOption) => return Err("unknown option"),
+    };
+
+    if plan.verbose {
+        VERBOSE.store(1, Ordering::Relaxed);
     }
+    let token = match &plan.token {
+        Some(cmdline::TokenSource::File(path)) => Some(read_token_file(path)?),
+        Some(cmdline::TokenSource::Env(name)) => match env::var(name) {
+            // NOT trimmed, matching npxf: a variable holds exactly what someone
+            // set it to, whereas a file conventionally ends with a newline
+            // nobody typed. See npxf::trim_token_file.
+            Some(val) if !val.is_empty() => Some(Zeroizing::new(val.into_bytes())),
+            _ => return Err("that environment variable is unset or empty"),
+        },
+        None => None,
+    };
+
     Ok(Parsed {
-        addr: positional[0].clone(),
-        mountpoint: positional[1].clone(),
-        aname,
+        addr: plan.addr,
+        mountpoint: plan.mountpoint,
+        aname: plan.aname,
         token,
-        cmd: positional[2..].to_vec(),
+        cmd: plan.cmd,
     })
 }
 
@@ -499,8 +641,8 @@ fn npxf_handshake(fd: i64, token: &[u8]) -> Result<npxf::Session, &'static str> 
     step!("sent flight 1 ({} bytes)", msg1.len());
 
     let mut msg2 = [0u8; npxf::MSG2_LEN];
-    if !read_exact(fd, &mut msg2) {
-        return Err("handshake: the server closed without replying (wrong token, or not npxf)");
+    if !read_exact_before(fd, &mut msg2, HANDSHAKE_MS) {
+        return Err("handshake: no reply from the server (wrong token, not npxf, or unreachable)");
     }
     step!("got flight 2 ({} bytes)", msg2.len());
 
@@ -525,7 +667,7 @@ fn npxf_handshake(fd: i64, token: &[u8]) -> Result<npxf::Session, &'static str> 
 }
 
 fn run(argv: Args) -> Result<(), &'static str> {
-    let args = parse_args(argv)?;
+    let mut args = parse_args(argv)?;
 
     let (host, port) = haul::addr::split_dial(&args.addr)
         .ok_or("address needs a host and a port (host!port, or host:port)")?;
@@ -546,10 +688,19 @@ fn run(argv: Args) -> Result<(), &'static str> {
     // ordered three-flight exchange on the raw socket, so a pump concurrently
     // reading that socket would steal the server's reply. Once it returns, the
     // socket carries records only, and the pumps own it.
-    let session = match args.token.as_deref() {
-        Some(t) => Some(npxf_handshake(tcp_fd, t)?),
-        None => None,
+    // The handshake is the last thing that needs the token, so it leaves with
+    // the handshake -- taken out of `args` and dropped (which wipes it) before
+    // the mount goes up. Holding it would mean holding it for the LIFE of the
+    // mount, and the park form's life is the machine's.
+    let encrypted = args.token.is_some();
+    let token = args.token.take();
+    let handshake = match token.as_deref() {
+        Some(t) => npxf_handshake(tcp_fd, t).map(Some),
+        // A plain-9P mount reaches the same code with nothing to wipe.
+        None => Ok(None),
     };
+    drop(token);
+    let session = handshake?;
     let (sealer, opener) = match session {
         Some(s) => (Some(s.send), Some(s.recv)),
         None => (None, None),
@@ -565,22 +716,16 @@ fn run(argv: Args) -> Result<(), &'static str> {
     // BOTH PUMPS BEFORE THE ATTACH. SYS_ATTACH_9P drives Tversion + Tattach
     // synchronously; with no pump running, the kernel would wait for an
     // Rversion nothing can deliver and the mount would hang rather than fail.
-    spawn_pump(
-        pump_up,
-        UpCtx {
-            src: c2s_rd,
-            dst: tcp_fd,
-            sealer,
-        },
-    )?;
-    spawn_pump(
-        pump_down,
-        DownCtx {
-            src: tcp_fd,
-            dst: s2c_wr,
-            opener,
-        },
-    )?;
+    spawn_pump(UpCtx {
+        src: c2s_rd,
+        dst: tcp_fd,
+        sealer,
+    })?;
+    spawn_pump(DownCtx {
+        src: tcp_fd,
+        dst: s2c_wr,
+        opener,
+    })?;
     step!("pumps up; attaching (Tversion + Tattach run inside the syscall)");
 
     // The attach takes its own refs on both transport Spoors, so our copies of
@@ -651,7 +796,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
         args.addr,
         args.mountpoint,
         args.aname,
-        if args.token.is_some() {
+        if encrypted {
             "npxf encrypted"
         } else {
             "PLAIN 9P"
@@ -660,22 +805,55 @@ fn run(argv: Args) -> Result<(), &'static str> {
 
     // WITH A COMMAND: run it here, where the mount exists.
     //
-    // A mount lands in the CALLING Proc's Territory and nowhere else (I-1), and
-    // a child inherits its parent's namespace at spawn -- never the reverse. So
-    // `haul ... &` from a shell mounts into haul's OWN namespace and the
-    // shell sees nothing; measured, on the first working channel:
+    // A mount lands in the CALLING Proc's Territory and nowhere else (I-1), so
+    // `haul ... &` from a shell mounts into haul's OWN namespace and the shell
+    // sees nothing. That much is measured and settled:
     //   cat: /home/cora/host/hello.txt: no such file or namespace entry
-    // while haul sat happily mounted. This is the Plan 9 answer -- rfork,
-    // mount, exec -- and the child sees the tree because it is downstream of the
-    // mount rather than beside it. Delivering a mount to an EXISTING shell needs
-    // /srv (post the connection, let the shell mount it); that is a separate
-    // chunk and a design question, recorded in docs/HAUL-DESIGN.md.
+    // while haul sat happily mounted, its own read_dir of the mountpoint
+    // returning the five entries the server exports.
+    //
+    // The Plan 9 answer to that is rfork-mount-exec, which is this form: the
+    // child is downstream of the mount rather than beside it. AND THE CHILD DID
+    // NOT SEE IT EITHER -- measured twice, on a mountpoint inside another mount
+    // and on a plain ramfs one, which refuted the nested-mount explanation that
+    // fit the first run perfectly. Reading the kernel says it should work:
+    // rfork_internal clones the mount table unconditionally, spawn reaches it
+    // via rfork_with_caps(RFPROC, ..), and exec.c never touches a Territory. So
+    // the mechanism is UNEXPLAINED, not understood-and-accepted; it is tracked
+    // as its own chunk (memory/bug_nested_mount_lost_at_spawn_clone.md) with the
+    // interactive scenario as its reproducer.
+    //
+    // Until that lands, this form runs the command but does not promise it the
+    // tree. Delivering a mount to an EXISTING shell needs /srv (post the
+    // connection, let the shell mount it) -- a separate chunk and a design
+    // question, recorded in docs/HAUL-DESIGN.md.
     if !args.cmd.is_empty() {
         let mut c = libthyla_rs::process::Command::new(args.cmd[0].clone());
         c.args(args.cmd[1..].iter().cloned());
-        let status = match c.spawn() {
-            Ok(mut child) => child.wait().map_err(|_| "waiting for the command")?,
-            Err(_) => return Err("could not run the command"),
+        let mut child = c.spawn().map_err(|_| "could not run the command")?;
+        // Poll the child AND the transport, rather than blocking in wait().
+        //
+        // A blocking wait watches only the child, and the child is not the only
+        // thing that can end. If a pump stops mid-session, nobody drains the
+        // pipes, so every filesystem call the child makes into this mount blocks
+        // forever -- and a wait that is watching only the child then waits
+        // forever too, with the process holding a mount that cannot serve. The
+        // park form below already handles exactly this in under 200 ms; the
+        // command form had no bound at all.
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break st,
+                Err(_) => return Err("waiting for the command"),
+                Ok(None) => {}
+            }
+            if STOPPED.load(Ordering::Acquire) != STOP_NONE {
+                say!(
+                    "haul: {} closed the connection while the command was running",
+                    args.addr
+                );
+                return Err("the connection ended under the command");
+            }
+            let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
         };
         // The transport dies with us, which is correct: the command has run, so
         // the tree it needed is no longer needed.

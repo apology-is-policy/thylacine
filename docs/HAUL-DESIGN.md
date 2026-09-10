@@ -198,15 +198,34 @@ independent layers now stand between that and a claim of correctness.
 `derive()` / `absorb()` / `confirm_tag()` — *not* a re-derivation of them. That
 matters: a generator that re-implemented the schedule would encode my reading of
 npxf, so a misreading would make the generator and the Rust agree with each
-other and not with npxf. 26 host tests assert the PSK, the base multiplication
-(the clamping — a classic silent interop break), the DH from both sides, the
-transcript, all three keys, both confirmation tags, both handshake flights, and
-two sealed records at counters 0 and 1.
+other and not with npxf. 45 host tests now assert the PSK, the base
+multiplication (the clamping — a classic silent interop break), the DH from both
+sides, the transcript, all three keys, both confirmation tags, both handshake
+flights, two sealed records at counters 0 and 1, the token-file trim rule, the
+dial-string grammar and the argument boundary.
 
 The second record is not redundant: an implementation stuck on nonce 0
 reproduces record 0 exactly and is caught only by record 1. **Sabotage-verified**
 — one character changed in an HKDF label fails exactly the two key tests; a
 frozen nonce counter fails exactly the counter test.
+
+The `#include` rationale held for the key schedule and *leaked* at the layer
+below it: the record framing, the nonce construction and the counter were
+hand-assembled in the generator, duplicating `Channel::send` and `make_nonce`
+— the latter sitting in the very translation unit already included. Those now
+come from `Channel::send` itself, pointed at a socketpair and read back. **Every
+vector was byte-identical before and after**, which is the useful part: the
+transcription had been right, and is now not a transcription.
+
+`kat/regen.sh` rebuilds the generator and diffs it against the committed file,
+so the fixture is a *checked* recording rather than an asserted one. It skips
+(exit 77) where npxf is absent. The generator also refuses to emit at all unless
+a real `client_handshake`/`server_handshake` pair, run against each other over a
+socketpair, agrees that `k_c2s` is the client's SEND key — because that binding
+is made in `client_handshake`, not in `derive()`, so a swap there would leave
+every vector above byte-identical while inverting what they mean. Both halves
+are sabotage-verified: the direction swap is caught by the handshake check with
+the vectors unchanged, an HKDF label change by the diff.
 
 **2. Live interop against the real server** (`interoperates_with_a_live_npxf_server`,
 `#[ignore]`d). A fixture is a recording; it cannot prove interoperation, because
@@ -226,10 +245,30 @@ wide.
 
 ### 4.1 Running it
 
-npxf is Linux-only (`sys/statfs.h`, `getrandom`, `SOCK_CLOEXEC`, `O_PATH`,
-`accept4`), so on a macOS dev host the server runs on **thyla-pi** and an
-`ssh -L` tunnel presents it on `127.0.0.1`. The guestfwd only ever sees a local
-port, so the tunnel is transparent to the guest.
+**npxf's SERVER is Linux-only; its crypto core is not, and that distinction is
+worth more than it sounds.** The blockers that stop `npxf-server` compiling on a
+BSD host are not a shim: `server_ops.cpp` has 18 Linux-specific sites built on an
+`O_PATH` descriptor as the fid representation, reopened through `/proc/self/fd`
+(5 sites), plus `linkat(AT_EMPTY_PATH)`, `statx` and `SYS_fchmodat2`. Darwin has
+no `O_PATH` and no `/proc`, so porting it means replacing the fid model — a
+redesign of the server's containment story, not a compatibility header.
+
+The `crypto` / `channel` / `ninep` / `net` core, which is the whole of what haul
+interoperates with, ports with two small changes and now does: `getrandom` →
+`getentropy` behind one helper, and the `SOCK_CLOEXEC`/`SOCK_NONBLOCK` socket
+flags behind a `socket_ce()` wrapper that takes the fcntl round trip where libc
+has no atomic form. `build.sh` grew a Darwin branch for the ELF-only link flags.
+**`./build.sh npxf-selftest` now builds and runs on macOS: 9/9 green**, including
+the new token-trim test — so the KAT generator and the protocol tests no longer
+need thyla-pi at all. Only the SERVER does, which is why the recipe below stands.
+
+(Those npxf changes live in a tree that is **not under version control**:
+`~/projects/npxf` has no `.git`. They are `src/crypto.cpp`, `src/net.cpp`,
+`src/util.hpp`, `src/npxf_main.cpp`, `src/selftest.cpp` and `build.sh`.)
+
+On a macOS dev host the server therefore runs on **thyla-pi** and an `ssh -L`
+tunnel presents it on `127.0.0.1`. The guest reaches the host's loopback via
+slirp's `10.0.2.2`, so the tunnel is transparent to it.
 
 ```bash
 # on thyla-pi (npxf builds there with CXX=g++; clang++ is absent)

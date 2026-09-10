@@ -96,6 +96,7 @@ lc_login cora kora
 # correct implementations to derive different keys.
 lc_send "echo $token > npxf.token"
 lc_send "mkdir -p /tmp/host"
+lc_send "mkdir -p /tmp/host2"
 
 # THE COMMAND FORM, and it has to be. A mount lands in the CALLING Proc's
 # Territory and nowhere else (I-1); a child inherits its parent's namespace, but
@@ -115,12 +116,16 @@ lc_send "mkdir -p /tmp/host"
 # memory/bug_nested_mount_lost_at_spawn_clone.md, and it is NOT haul's to
 # answer here.
 #
-# THE ADDRESS IS QUOTED, and must be. `ut` lexes a bare `!` as its own Bang
-# token (libutopia lexer.rs), so Plan 9's `host!port` parses as
-# `10.0.2.2` Bang `5640` and dies with
+# THE ADDRESS IS UNQUOTED, and that is an assertion, not a convenience. `ut`
+# used to lex a bare `!` as its own Bang token, so Plan 9's `host!port` parsed
+# as `10.0.2.2` Bang `5640` and died with
 #   ut: parse error: UnexpectedToken { expected: "`;`, newline, or end of input" }
-# The form appears all over the tree in C string literals (joey's cs probes) and
-# had simply never been typed at an interactive prompt before.
+# -- which made the address form the whole tree writes in C string literals
+# (joey's cs probes, every dial/con/nc/ping/nslookup example) untypeable at the
+# prompt. libutopia's lexer now keeps `!` inside a word unless `!=` follows.
+# Typing it bare here is what proves that through the real shell: the lexer's
+# own unit tests cannot run on a host (libthyla-rs's asm will not assemble for
+# one), so this scenario is their only execution.
 
 # Steps 1-4. `-v` is load-bearing here, not decoration: the `mount check` line
 # is haul READING THE MOUNTED TREE BACK from its own namespace, which is a
@@ -136,17 +141,35 @@ lc_send "mkdir -p /tmp/host"
 # would otherwise print an equally cheerful mount line.
 # Backgrounded: with no command haul PARKS, holding the mount for its
 # lifetime, so in the foreground it would never give the shell back.
-lc_send "haul -v -t npxf.token '10.0.2.2!$hostport' /tmp/host &"
+lc_send "haul -v -t npxf.token 10.0.2.2!$hostport /tmp/host &"
 lc_expect "mount check: 5 entr" "readdir of the remote tree through the encrypted channel"
 lc_expect "npxf encrypted" "haul mounted the npxf tree (encrypted channel)"
 lc_pass "haul-npxf: dialled, handshook, attached, mounted and LISTED a remote npxf tree over the encrypted channel"
 
-# NOT ASSERTED HERE: a separate process reading a file through the mount. A
-# SYS_SPAWN child does not appear to receive its parent's mounts (measured at
-# two different mount points; see the note above), so the reader would fail for
-# a reason that has nothing to do with this transport. Tracked in
-# memory/bug_nested_mount_lost_at_spawn_clone.md; this scenario asserts what
-# haul itself can prove and leaves that question where it belongs.
+# THE COMMAND FORM, exercised without depending on the open kernel question.
+#
+# `haul ... cmd args` spawns the command, waits for it, and exits with its
+# status. Two things in that path are haul's own and are asserted here: the
+# spawn-and-wait loop (which polls the child AND the transport, so a pump dying
+# mid-command cannot wedge it forever the way a bare wait() did), and the
+# argument boundary -- everything after the command word goes to the child
+# VERBATIM, including a leading dash it would otherwise be tempting to read as
+# one of haul's own options.
+#
+# The command deliberately does NOT touch the mount. Whether a spawned child
+# sees its parent's mounts is an open kernel question
+# (memory/bug_nested_mount_lost_at_spawn_clone.md), and a scenario that asserted
+# the current wrong answer would have to be rewritten by the very fix that makes
+# it right -- a test that fails when the bug is fixed. So this asserts the parts
+# that are settled and leaves that question to its own chunk.
+# The child's argument is deliberately `-t`, haul's OWN token-file option. If
+# haul still read it, it would try to open /nonexistent-token as a credential
+# and die with "cannot open the token file"; passing it through means echo
+# prints it back. One token discriminates the two outcomes -- an argument that
+# both sides would have handled identically would assert nothing.
+lc_send "haul -t npxf.token 10.0.2.2!$hostport /tmp/host2 /bin/echo child-argv -t /nonexistent-token"
+lc_expect "child-argv -t /nonexistent-token" "the child's -t reached the child, not haul's parser"
+lc_pass "haul-npxf: the command form runs a child and relays its argv unread"
 
 lc_quit
 lc_pass "haul-npxf: guest mounted a real npxf 9P2000.L server over an authenticated, encrypted channel"

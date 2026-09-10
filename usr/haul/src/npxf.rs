@@ -103,6 +103,25 @@ fn sha256_two(a: &[u8], b: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Strip the trailing newline a token FILE carries but the token does not.
+///
+/// This is interop surface, not housekeeping. npxf derives its PSK from exactly
+/// the bytes its own `trim_token_file` (npxf `src/util.hpp`) leaves behind, so
+/// trimming a different amount here derives a different key -- and the failure
+/// surfaces as "token mismatch, or the connection was intercepted", which blames
+/// an attacker for a byte an editor added. Both `\n` and `\r`, and a run of
+/// them, so a CRLF checkout and a file ending in a blank line name the same
+/// token.
+///
+/// An environment variable is deliberately NOT trimmed, on either side: a
+/// variable holds exactly what someone set it to, whereas a file conventionally
+/// ends with a newline nobody typed.
+pub fn trim_token_file(b: &mut Vec<u8>) {
+    while matches!(b.last(), Some(b'\n') | Some(b'\r')) {
+        b.pop();
+    }
+}
+
 /// Turn an arbitrary-length token into the 32-byte pre-shared key.
 pub fn derive_psk(token: &[u8]) -> Result<[u8; 32], Error> {
     if token.is_empty() {
@@ -574,6 +593,43 @@ mod tests {
         // implements neither Debug nor PartialEq, because a derived Debug on a
         // key holder is a leak waiting for its first stray log line.
         assert_eq!(c.finish(&msg2).err(), Some(Error::ServerAuth));
+    }
+
+    /// The trim rule is interop surface, so it is asserted on BOTH sides of the
+    /// wire with the same cases. The twin is `token_file_trim` in npxf's
+    /// `src/selftest.cpp`; the failure this guards against is the two
+    /// implementations quietly disagreeing about which bytes are the token.
+    #[test]
+    fn trims_the_line_ending_a_file_carries() {
+        let t = |s: &str| {
+            let mut b = s.as_bytes().to_vec();
+            trim_token_file(&mut b);
+            String::from_utf8(b).unwrap()
+        };
+        assert_eq!(t("swordfish"), "swordfish");
+        assert_eq!(t("swordfish\n"), "swordfish");
+        assert_eq!(t("swordfish\r\n"), "swordfish");
+        assert_eq!(t("swordfish\n\n\n"), "swordfish");
+        assert_eq!(t("swordfish\r\n\r\n"), "swordfish");
+        // Only the line ending is noise. A space someone actually typed is part
+        // of the token, and so is anything in the middle.
+        assert_eq!(t("sword fish\n"), "sword fish");
+        assert_eq!(t("swordfish \n"), "swordfish ");
+        assert_eq!(t("\r\n"), "");
+        assert_eq!(t(""), "");
+    }
+
+    /// The trim must not change the PSK for a token with no line ending, and
+    /// must make a CRLF file agree with a bare one -- the property the rule
+    /// exists for, stated over `derive_psk` rather than over the bytes.
+    #[test]
+    fn every_line_ending_names_one_psk() {
+        let bare = derive_psk(b"swordfish").unwrap();
+        for spelling in ["swordfish", "swordfish\n", "swordfish\r\n", "swordfish\n\n"] {
+            let mut b = spelling.as_bytes().to_vec();
+            trim_token_file(&mut b);
+            assert_eq!(derive_psk(&b).unwrap(), bare, "{spelling:?}");
+        }
     }
 
     /// A flipped bit anywhere in the server's MAC must be caught.

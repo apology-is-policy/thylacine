@@ -22,4 +22,5 @@
 extern crate alloc;
 
 pub mod addr;
+pub mod cmdline;
 pub mod npxf;
