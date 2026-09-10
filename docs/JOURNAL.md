@@ -112,8 +112,28 @@ of the round:
 Verified sound (the prosecutor re-derived from zune source, not comments):
 memory-safe decode, `argb.len()==w*h` exactly, nc in {1,3}, the refactor, E2E
 honesty. Non-invasive fix (budget constants + a heap bump) + P0=0 / (P1+P2)=1 ->
-close NOT dirty, no round 2. The fix's own E2E re-run (all 3, on the new budget)
-is the hardware witness. Fable-diversity pass still owed.
+close NOT dirty, no round 2. **All 3 E2Es re-ran GREEN on the new budget/heap**
+(ls-gfx-jpeg + the two PNG; the 192 MiB gallery heap boots; ls-gfx-inline-view's
++542212-px on-screen delta held) and the JPEG arc PUSHED `a92f800e` (both
+mirrors). Fable-diversity pass still owed.
+
+**Post-JPEG dialogue -> a scripture decision (`026d50a6`).** The operator asked
+whether the next chunk (the Halcyon session-path per-pane channel, HALCYON 14.7.2)
+should be built as/on the parked **Mycelium** NOVEL. I laid out the fit: strong
+CONCEPTUAL match to the NOVEL's IPC-SUBSTRATE framing (a namespace-named,
+capability-scoped, message-framed channel), a POOR match to the older
+plumber-router framing in memory (14.7.2 is deliberately a direct/structural
+channel, not content-routed), but only a PARTIAL driver -- its inline path is a
+bounded write, exercising message-framing + namespace-scoping, NOT the
+handle-passing (I-4/SCM_RIGHTS) that is Mycelium's hard/novel square. The real
+argument for Mycelium is that this would be the FOURTH-plus hand-rolled mini-9P
+channel (ptyfs/corvus/nocturned/placesrv). Operator's call, and the good one:
+**ship 14.7.2 on the existing /srv+9P mechanism now; build Mycelium later as its
+own arc by "paving the trodden pathways"** -- unifying the channels that actually
+emerged, each a validated consumer + a migration candidate (empirical, not
+speculative -> no overfit). Captured in `docs/NOVEL.md` (the Mycelium para) +
+`memory/project_mycelium.md`. Next chunk: the 14.7.2 build on the existing
+mechanism (a fresh subsystem -> self-compact first).
 
 ---
 ## 2026-09-09 (aux, run 7, post-compact) -- inline media EXPAND begins: the `view` obj-verb lands; the rest stops for the operator (Opus fallback)
