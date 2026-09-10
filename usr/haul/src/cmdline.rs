@@ -79,6 +79,14 @@ pub fn plan(argv: &[&str]) -> Result<Plan, Bad> {
             // The command word itself may not start with a dash unless `--`
             // said so. A lone "-" is a conventional stdin operand, not a flag.
             if !opts_done && positional.len() == 2 && a.starts_with('-') && a.len() > 1 {
+                // `--` HERE is the operator reaching for the exact escape hatch
+                // the refusal points them at, so refusing it would make the
+                // error message a lie. Consume it and take the rest verbatim.
+                if a == "--" {
+                    opts_done = true;
+                    i += 1;
+                    continue;
+                }
                 return Err(Bad::DashAfterOperands);
             }
             positional.push(String::from(a));
@@ -222,6 +230,19 @@ mod tests {
     fn a_lone_dash_is_a_command_not_an_option() {
         let p = ok(&["h!1", "/m", "-"]);
         assert_eq!(p.cmd, vec!["-"]);
+    }
+
+    /// SELF-FOUND while auditing the refusal above, before it ever ran: `--`
+    /// written AFTER the operands is the operator reaching for the exact escape
+    /// hatch the refusal's message points them at, and the first draft refused
+    /// it -- which would have made the error message a lie. It is consumed, not
+    /// pushed, so it never reaches the child.
+    #[test]
+    fn a_double_dash_after_the_operands_is_consumed_not_refused() {
+        let p = ok(&["h!1", "/m", "--", "-weird", "-t", "x"]);
+        assert_eq!(p.addr, "h!1");
+        assert_eq!(p.mountpoint, "/m");
+        assert_eq!(p.cmd, vec!["-weird", "-t", "x"]);
     }
 
     /// The refusal is anchored at the command POSITION, not "any dash after the
