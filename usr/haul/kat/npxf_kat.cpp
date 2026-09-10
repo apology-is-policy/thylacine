@@ -55,6 +55,12 @@ static void check_direction_binding(std::span<const uint8_t> token) {
     int sv[2];
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) die("socketpair");
 
+    // If the server half throws, the client half sits in read_full with the
+    // socketpair's other end still open (both fds are main's), so there is no
+    // EOF to end it. It is bounded anyway: client_handshake's own
+    // net::set_timeout(fd, kHandshakeTimeoutMs) caps that at 15 s and then
+    // throws, which reaches `die` below. Slow, loud, and terminating -- which is
+    // all a fixture generator needs.
     SessionKeys ckeys, skeys;
     std::string server_err;
     std::thread srv([&] {

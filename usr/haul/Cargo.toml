@@ -50,4 +50,10 @@ sha2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
 hkdf = { version = "0.12", default-features = false }
 subtle = { version = "2", default-features = false }
-zeroize = { version = "1", default-features = false }
+# `alloc` is REQUIRED, not incidental: `Zeroize for Vec` lives behind it, and
+# that impl is what wipes the token's FULL CAPACITY (not just its length) on
+# drop. Without the feature `Zeroizing<Vec<u8>>` stops resolving -- a build
+# error, so it fails loud -- but relying on another crate's feature selection
+# to enable it means the token's zeroization is a property of the dependency
+# graph rather than of this manifest.
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
