@@ -177,21 +177,42 @@ const HANDSHAKE_MS: i32 = 15_000;
 /// tear the mount down.
 const WRITE_STALL_MS: i32 = 30_000;
 
-/// Wait for `events` on `fd`, up to `ms`. Returns false on timeout or error.
-fn wait_ready(fd: i64, events: i16, ms: i32) -> bool {
-    let mut pfd = libthyla_rs::TPollFd { fd: fd as i32, events, revents: 0 };
-    let r = unsafe { libthyla_rs::t_poll(&mut pfd, 1, ms) };
-    r > 0 && pfd.revents & events != 0
+/// THE READINESS FD IS NOT THE DATA FD, and using the wrong one is silent.
+///
+/// A netd connection is two files. `data` carries bytes; `ready` carries
+/// readiness, and only `ready` is marked QTPOLL (`usr/netd/src/server.rs`
+/// `P9_QTFILE | P9_QTPOLL` -- the `data` file is not). `dev9p_poll`'s QTPOLL
+/// gate deliberately FAILS SAFE for everything else: an unmarked file is
+/// "POSIX always-ready", returning the requested bits immediately rather than
+/// probing (`kernel/dev9p_poll.c`).
+///
+/// So polling the DATA fd does not fail -- it succeeds, instantly, always, and
+/// says nothing. A POLLOUT wait on it becomes a busy spin; a POLLIN wait before
+/// a blocking read becomes a no-op that leaves the read unbounded. Both are
+/// bugs that look exactly like working code, which is why this type exists
+/// instead of an `i64` parameter that either fd would satisfy.
+///
+/// `Ready(fd) == the fd to poll`; for a pipe that is the pipe itself, whose
+/// POLLOUT is real (`kernel/pipe.c` sets it on `count < PIPE_BUF_SIZE`).
+#[derive(Copy, Clone)]
+struct Ready(i64);
+
+/// Wait for `events` on a readiness fd, up to `ms`. False on timeout or error.
+fn wait_ready(r: Ready, events: i16, ms: i32) -> bool {
+    let mut pfd = libthyla_rs::TPollFd { fd: r.0 as i32, events, revents: 0 };
+    let n = unsafe { libthyla_rs::t_poll(&mut pfd, 1, ms) };
+    n > 0 && pfd.revents & events != 0
 }
 
 /// `read_exact` with a deadline on each wait, for the pre-authentication window
 /// where a silent peer must not be able to park us forever. The bound is
 /// per-wait rather than for the whole read: a peer that dribbles bytes is making
 /// progress, and the flights here are 64 bytes, so there is nothing to dribble.
-fn read_exact_before(fd: i64, buf: &mut [u8], ms: i32) -> bool {
+/// npxf's own bracket is per-recv too (`SO_RCVTIMEO`), so this matches the peer.
+fn read_exact_before(fd: i64, r: Ready, buf: &mut [u8], ms: i32) -> bool {
     let mut off = 0usize;
     while off < buf.len() {
-        if !wait_ready(fd, libthyla_rs::T_POLLIN, ms) {
+        if !wait_ready(r, libthyla_rs::T_POLLIN, ms) {
             return false;
         }
         let n = unsafe { libthyla_rs::t_read(fd, buf[off..].as_mut_ptr(), buf.len() - off) };
@@ -217,10 +238,11 @@ fn read_exact_before(fd: i64, buf: &mut [u8], ms: i32) -> bool {
 ///
 /// The zero is ambiguous on its own: `unwrap_or(0)` swallows the error a dead
 /// socket returns too, so the count alone cannot separate "full" from "gone".
-/// Readiness can. POLLOUT is netd's `can_send()` -- established, with room --
-/// which a dead socket never reports, so waiting for it disambiguates by
-/// waiting rather than by guessing.
-fn write_exact(fd: i64, buf: &[u8]) -> bool {
+/// Readiness can -- but only the RIGHT fd's. POLLOUT on the `ready` sibling is
+/// netd's `can_send()`, which is false for a dead socket and true once the send
+/// window has room; POLLOUT on `data` is the always-ready answer of a file that
+/// carries no readiness at all. See `Ready`.
+fn write_exact(fd: i64, r: Ready, buf: &[u8]) -> bool {
     let mut off = 0usize;
     while off < buf.len() {
         let n = unsafe { libthyla_rs::t_write(fd, buf[off..].as_ptr(), buf.len() - off) };
@@ -228,7 +250,7 @@ fn write_exact(fd: i64, buf: &[u8]) -> bool {
             return false;
         }
         if n == 0 {
-            if !wait_ready(fd, libthyla_rs::T_POLLOUT, WRITE_STALL_MS) {
+            if !wait_ready(r, libthyla_rs::T_POLLOUT, WRITE_STALL_MS) {
                 say!("haul: write stalled with {} bytes left", buf.len() - off);
                 return false;
             }
@@ -285,6 +307,9 @@ fn read_frame(src: i64, buf: &mut Vec<u8>) -> bool {
 struct UpCtx {
     src: i64,
     dst: i64,
+    /// Readiness for `dst`, which is the TCP connection -- so this is its
+    /// `ready` sibling, never `dst` itself. See `Ready`.
+    dst_ready: Ready,
     sealer: Option<npxf::Sealer>,
 }
 
@@ -292,6 +317,9 @@ struct UpCtx {
 struct DownCtx {
     src: i64,
     dst: i64,
+    /// Readiness for `dst`, which is a pipe -- and a pipe's own fd carries real
+    /// POLLOUT (`kernel/pipe.c`), so here it IS `dst`.
+    dst_ready: Ready,
     opener: Option<npxf::Opener>,
 }
 
@@ -326,9 +354,9 @@ extern "C" fn pump_up(arg: u64) {
 
     while read_frame(ctx.src, &mut msg) {
         let ok = match ctx.sealer.as_mut() {
-            None => write_exact(ctx.dst, &msg),
+            None => write_exact(ctx.dst, ctx.dst_ready, &msg),
             Some(s) => match s.seal(&msg, &mut rec) {
-                Ok(()) => write_exact(ctx.dst, &rec),
+                Ok(()) => write_exact(ctx.dst, ctx.dst_ready, &rec),
                 Err(e) => {
                     say!("haul: sealing a {}-byte message failed ({:?})", msg.len(), e);
                     false
@@ -353,9 +381,9 @@ extern "C" fn pump_down(arg: u64) {
         let ok = match ctx.opener.as_mut() {
             // Plain: the stream IS 9P, so the same framed relay as the other
             // direction.
-            None => read_frame(ctx.src, &mut buf) && write_exact(ctx.dst, &buf),
+            None => read_frame(ctx.src, &mut buf) && write_exact(ctx.dst, ctx.dst_ready, &buf),
             Some(o) => match read_record(ctx.src, o, &mut buf) {
-                RecordIn::Message(n) => write_exact(ctx.dst, &buf[..n]),
+                RecordIn::Message(n) => write_exact(ctx.dst, ctx.dst_ready, &buf[..n]),
                 RecordIn::Ended => false,
             },
         };
@@ -624,7 +652,7 @@ fn parse_args(args: Args) -> Result<Parsed, &'static str> {
 /// session's forward secrecy; there is no weaker source to fall back to, so a
 /// kernel that will not give us entropy ends the mount here rather than
 /// producing a channel that merely looks encrypted.
-fn npxf_handshake(fd: i64, token: &[u8]) -> Result<npxf::Session, &'static str> {
+fn npxf_handshake(fd: i64, ready: Ready, token: &[u8]) -> Result<npxf::Session, &'static str> {
     let mut eph = [0u8; 32];
     let got = libthyla_rs::rand::fill_bytes(&mut eph);
     if got.is_err() {
@@ -635,13 +663,13 @@ fn npxf_handshake(fd: i64, token: &[u8]) -> Result<npxf::Session, &'static str> 
     let (client, msg1) = npxf::Client::start(token, eph).map_err(|_| "the token is empty")?;
     eph.zeroize();
 
-    if !write_exact(fd, &msg1) {
+    if !write_exact(fd, ready, &msg1) {
         return Err("handshake: the connection closed while sending our opening flight");
     }
     step!("sent flight 1 ({} bytes)", msg1.len());
 
     let mut msg2 = [0u8; npxf::MSG2_LEN];
-    if !read_exact_before(fd, &mut msg2, HANDSHAKE_MS) {
+    if !read_exact_before(fd, ready, &mut msg2, HANDSHAKE_MS) {
         return Err("handshake: no reply from the server (wrong token, not npxf, or unreachable)");
     }
     step!("got flight 2 ({} bytes)", msg2.len());
@@ -654,7 +682,7 @@ fn npxf_handshake(fd: i64, token: &[u8]) -> Result<npxf::Session, &'static str> 
         _ => "handshake: refused",
     })?;
 
-    if !write_exact(fd, &msg3) {
+    if !write_exact(fd, ready, &msg3) {
         return Err("handshake: the connection closed while confirming");
     }
     step!("server authenticated, channel up");
@@ -677,10 +705,20 @@ fn run(argv: Args) -> Result<(), &'static str> {
     step!("dialing {}", addr);
     let stream = TcpStream::connect(addr).map_err(|_| "connect")?;
     step!("connected");
+    // The connection's READINESS fd, opened while the stream still exists to
+    // name it. This is `/net/tcp/N/ready`, the QTPOLL sibling -- the only file
+    // of the pair that carries readiness at all, and therefore the only one a
+    // POLLOUT wait may be pointed at. Its own doc comment describes exactly this
+    // use: "a bulk sender polls POLLOUT before retrying a write that returned 0".
+    let ready_file = stream.ready_fd().map_err(|_| "cannot open the connection's ready file")?;
+    let tcp_ready = Ready(ready_file.as_raw_fd() as i64);
+    core::mem::forget(ready_file);
+
     // The pumps outlive this scope and address the connection by fd, so the
     // TcpStream must NOT drop (its Drop closes ctl + data, tearing the
     // connection down under them). Leaked deliberately: haul lives for the
-    // mount's lifetime, so the connection's lifetime IS the process's.
+    // mount's lifetime, so the connection's lifetime IS the process's. The
+    // ready fd above is leaked for the same reason and in the same breath.
     let tcp_fd = stream.as_raw_fd() as i64;
     core::mem::forget(stream);
 
@@ -695,7 +733,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
     let encrypted = args.token.is_some();
     let token = args.token.take();
     let handshake = match token.as_deref() {
-        Some(t) => npxf_handshake(tcp_fd, t).map(Some),
+        Some(t) => npxf_handshake(tcp_fd, tcp_ready, t).map(Some),
         // A plain-9P mount reaches the same code with nothing to wipe.
         None => Ok(None),
     };
@@ -719,11 +757,14 @@ fn run(argv: Args) -> Result<(), &'static str> {
     spawn_pump(UpCtx {
         src: c2s_rd,
         dst: tcp_fd,
+        dst_ready: tcp_ready,
         sealer,
     })?;
     spawn_pump(DownCtx {
         src: tcp_fd,
         dst: s2c_wr,
+        // A pipe's own fd carries real POLLOUT, so it is its own readiness.
+        dst_ready: Ready(s2c_wr),
         opener,
     })?;
     step!("pumps up; attaching (Tversion + Tattach run inside the syscall)");

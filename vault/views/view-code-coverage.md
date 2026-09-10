@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 61 unowned · 495 files (87% owned) · ~17807 unswept lines.**
+**434 owned · 61 unowned · 495 files (87% owned) · ~17848 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30471 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -73,7 +73,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/haul | 0 | 5 | 2232 |
+| usr/haul | 0 | 5 | 2273 |
 | kernel | 123 | 15 | 2118 |
 | usr/ports | 14 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1028 |
@@ -125,7 +125,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30471 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1028 |
 | usr/haul/src/npxf.rs | 1005 |
-| usr/haul/src/main.rs | 891 |
+| usr/haul/src/main.rs | 932 |
 | usr/lib/libhalcyon/src/toml.rs | 629 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/halcyond/src/outline.rs | 432 |
