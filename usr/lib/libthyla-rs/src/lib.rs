@@ -255,7 +255,7 @@ pub const T_SYS_UNLINK: u64           = 58;
 // and composes create-else-open bounded (T_OEXCL / DMDIR are the exclusive
 // arms, server-atomic).
 pub const T_SYS_OPEN_CREATE: u64      = 109;
-pub const T_SYS_DMA_SEGMENTS: u64     = 110;   // WEAVE-SKEIN: a KObj_DMA's backing segment list
+pub const T_SYS_DMA_SEGMENTS: u64     = 112;   // WEAVE-SKEIN: a KObj_DMA's backing segment list (110/111 reserved to aux-3)
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;

@@ -19,19 +19,24 @@
 // deliberately one-way), so the constant is declared there and checked here --
 // the only file that can see both.
 //
-// This catches a RENUMBER of the current top. It cannot catch a NEW higher
-// number by itself, which is why the rows that lean on the ceiling assert
-// against VIV_NATIVE_CEILING individually below. The very drift this admits it
-// cannot catch DID happen: the ceiling sat at SYS_RFORK (105) while the Warp arc
-// landed SYS_DMA_CREATE_GPU_BO (106) and SYS_BURROW_FROM_HOSTMEM (107) above it,
-// and this assert -- pinned to SYS_RFORK's identity -- passed the whole time. So
-// it is re-pinned to the current top; the lesson is that "add a syscall" must
-// include "move the ceiling", which no static_assert can force on a NEW number.
-_Static_assert(VIV_NATIVE_CEILING == SYS_OPEN_CREATE,
+// This used to be pinned to the top syscall's IDENTITY (`== SYS_OPEN_CREATE`),
+// which catches a RENUMBER of that number but is structurally blind to a NEW
+// higher one: an appended syscall moves nothing the assert reads. The comment
+// here asserted that "no static_assert can force it on a NEW number" and drew
+// the conclusion that the obligation had to rest on a person. Both halves were
+// wrong, and the record is that the drift then happened three more times --
+// SYS_DMA_SEGMENTS above 109 here, and SYS_CONSOLE_EPISODE + SYS_CAP_GRANT_IMPERIUM
+// above the identical 109 on aux-3, concurrently and unremarked on both sides.
+//
+// The pin is now the SYS__NATIVE_TOP sentinel: the last member of the enum,
+// carrying no value of its own, so the compiler recomputes it on every append.
+// Adding a syscall now FAILS THE BUILD until the ceiling moves with it, which
+// is the property the four preceding failures each needed and none had.
+_Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "VIV_NATIVE_CEILING must be the highest ASSIGNED native syscall "
                "number. Adding one above it silently voids the collision "
                "argument for every vivarium row at or below the new value -- "
-               "bump the constant and re-run that check.");
+               "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
 // rather than by a per-number one. The lowest such number is restart_syscall

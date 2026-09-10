@@ -2200,7 +2200,26 @@ enum {
     // discloses the same thing: where the caller's own buffer physically
     // lives. REFUSES when count > max_entries rather than truncating -- a
     // short list would be attached as a whole backing and read past its end.
-    SYS_DMA_SEGMENTS = 110,  // arg: handle(x0) buf_va(x1) max_entries(x2)
+    // 110 and 111 are RESERVED to the aux-3 arc (SYS_CONSOLE_EPISODE,
+    // SYS_CAP_GRANT_IMPERIUM) and are holes here only until that merge lands.
+    // Do not fill them: both numbers already have consumers on a live branch,
+    // and duplicate enum values are legal C -- a second minting would compile
+    // silently on both sides and surface as two dispatch cases colliding.
+    SYS_DMA_SEGMENTS = 112,  // arg: handle(x0) buf_va(x1) max_entries(x2)
+
+    // NOT A SYSCALL. One past the highest assigned number, so that
+    // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
+    // rather than to a symbol a person must remember to re-point.
+    //
+    // This exists because the identity-pinned form it replaces was blind in
+    // exactly one direction, and that blindness fired four times: it catches a
+    // RENUMBER of the named top, but a NEW number appended above it moves
+    // nothing the assert reads. Appending here moves this sentinel, so the
+    // assert in vivarium.c fails until the ceiling is bumped with it.
+    //
+    // Load-bearing only while syscalls are appended in ascending order at the
+    // tail -- which is the append-only rule the number space already runs on.
+    SYS__NATIVE_TOP,
 };
 
 // WEAVE-SKEIN: SYS_DMA_MAP's return when the object is a skein (nblk > 1).
