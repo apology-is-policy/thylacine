@@ -23,6 +23,181 @@ needed the operator.
 
 ---
 
+## Run 46m (2026-09-10, Opus 5 max) -- the audit close: ten findings, and a lexer bug the whole tree had written around
+
+**Where it sits.** Run 46l built haul's npxf channel and got an audit back that
+closed **dirty**: 0 P0 / 4 P1 / 6 P2 / 4 P3, none fixed. Three commits sat
+unpushed because CLAUDE.md says P0/P1/P2 are fixed before merge. This run
+closed them, in the order the operator ratified: the `ut` `!` fix, then the npxf
+macOS port, then the P1 pass.
+
+### The `!` fix, and what it says about coverage
+
+`ut` lexed a bare `!` as its own `Bang` token, so `10.0.2.2!5640` -- the way
+Plan 9 writes an address, and the way *every* dial/con/nc/ping/nslookup example
+in this tree writes it -- died at the prompt with `parse error: UnexpectedToken`.
+
+**The form appears all over the tree and had never once been typed.** It lives
+in C string literals (joey's cs probes, the netd docs), so it reached the
+kernel through `argv` and never through the lexer. The shell had been unable to
+accept the project's own address syntax for its entire life.
+
+The fix mirrors the `?` rule three lines above it, with a different
+discriminator: `?` has a real postfix operator (`cmd?` is a Question), `!` does
+not, so `!` can be kept in a word unconditionally except before `=`. That also
+fixed `echo done!`, which was equally a parse error. `TokenKind::Bang` has
+exactly ONE consumer in the whole parser (`expr.rs:841`), which is what makes
+"unary NOT is untouched" a proof rather than a hope. `308bb26e`.
+
+**Then the tests could not run.** libutopia's 397 `#[test]` functions cannot
+compile for a host: libthyla-rs's two `global_asm!` blocks use ELF
+`.type`/`.size`, which the Mach-O assembler rejects, so the crate will not build
+for a host target at all. I gated them on `target_os = "none"` to see how far
+that got -- it got past the assembler and straight into `panic_impl` duplicated
+against std, plus missing `alloc::vec` imports. So host-testable libutopia is a
+real bounded chunk, not a one-liner. **I reverted the exploratory gate**: a
+partial enabler that enables nothing is worse than none, because it looks like
+the problem is solved.
+
+Before writing that up as a finding I checked whether anyone already knew --
+the lesson from the tapestryd episode, where I published a fabricated defect
+because a measurement cannot tell you what someone had already decided. The
+vault's `sub-utopia-parser` dossier is titled *"an rc-shape grammar, three
+recursion bounds, and 189 tests that cannot compile"*. **They knew.** So the
+contribution is the measured cause and the size, which I rang vault with
+(yip 0083), not the discovery.
+
+Verification moved to the guest instead: `haul-npxf.exp` now types the address
+**unquoted**, which is the only execution those two lexer tests will get. Nine
+`u-*` suites green in the boot console, zero parse errors.
+
+### "Port npxf to macOS" was the wrong shape, and measuring said so in one command
+
+My own resume note called this "the highest-leverage item on the arc" and listed
+six blockers -- `sys/statfs.h`, `getrandom`, `SOCK_CLOEXEC`, `SOCK_NONBLOCK`,
+`O_PATH`, `accept4` -- as if they were a shim. They are the first six errors,
+not the list. Behind them: `server_ops.cpp` has **18 Linux-specific sites** and
+**5 `/proc/self/fd` reopens**, built on an `O_PATH` descriptor *as the fid
+representation*, plus `linkat(AT_EMPTY_PATH)`, `statx` and `SYS_fchmodat2`.
+Darwin has neither `O_PATH` nor `/proc`. Porting the server means replacing the
+fid model, which is a redesign of its containment story.
+
+**The split is what mattered.** `crypto` / `channel` / `ninep` / `net` -- the
+whole of what haul interoperates with -- port with two changes: `getrandom` ->
+`getentropy` behind one helper, and the socket flags behind a `socket_ce()`
+wrapper. `./build.sh npxf-selftest` now builds and runs on macOS, **9/9 green**.
+The thyla-pi round trip is gone for the protocol; only the server still needs it.
+
+A method note: the first build reported `error: call to deleted constructor of
+'Fd'` at three `return fd;` sites. Those were **cascades** from the
+`SOCK_CLOEXEC` errors above them, and they disappeared without my touching them.
+Worth naming because fixing a cascade is how you "fix" a non-bug and then
+believe you understand the file.
+
+### The ten findings
+
+Full disposition in `memory/audit_haul_npxf_closed_list.md`. The three worth
+reading:
+
+**F3, the zero-byte write.** `write_exact` treated `n == 0` as fatal. netd's TCP
+send is `send_slice(data).unwrap_or(0)` and `dev9p_write` returns `accepted`
+straight to EL0, so a full transmit buffer tore the mount down under nothing
+worse than back-pressure -- possibly mid-record, leaving a truncated AEAD frame
+on the wire. I re-derived both ends of that chain rather than trusting the
+finding.
+
+The interesting part is that **the fix cannot be a retry count.**
+`unwrap_or(0)` also swallows a dead socket's error, so the same zero means
+"full" and "gone" and no amount of retrying separates them. Readiness does:
+POLLOUT is netd's `can_send()`, which a dead socket never reports. *When a count
+conflates two states, stop counting and ask the readiness question.*
+
+**F6, the fixture's provenance.** The KAT generator `#include`s npxf's
+`channel.cpp` precisely so the vectors come from npxf's real code -- and then
+hand-assembled the record framing, the nonce and the counter, duplicating
+`Channel::send` and `make_nonce`, *the latter sitting in the very translation
+unit already included*. The rationale held one layer and leaked at the next.
+
+Those now come from `Channel::send` itself, pointed at a socketpair. **Every
+vector was byte-identical before and after** -- so the transcription had been
+right, and is now not a transcription. That is a fourth independent derivation
+agreeing with the other three.
+
+The direction-swap half needed a *different* fix, and this is the part worth
+keeping: `k_c2s` is the client's SEND key, but that binding is made in
+`client_handshake`, not in `derive()`. **A swap there leaves every vector
+byte-identical while inverting what they mean.** The generator now runs npxf's
+own client and server handshakes against each other over a socketpair and
+refuses to emit unless the keys cross. Sabotage-verified as two *separate*
+discriminators: the direction swap is caught by the handshake check with the
+vectors unchanged; an HKDF label change is caught by the diff. Neither catches
+the other's case.
+
+**F10, argument capture.** `haul a!p /mnt /bin/foo -t /path` let an argument
+written for the *child* choose the credential haul authenticates with. Fixed by
+stopping option parsing at the command word -- and the rule moved out of the
+binary into `haul::cmdline` as a pure function with 11 tests, because `main.rs`
+is a no_std bin whose tests are dormant and a security-relevant grammar must not
+live only where nothing can run it.
+
+The guest assertion for it is the one I am happiest with: the E2E runs
+`haul -t npxf.token ... /bin/echo child-argv -t /nonexistent-token` and expects
+the decoy back. **One token discriminates both halves** -- haul used the real
+credential (`npxf encrypted` on the second mount) *and* passed the fake through.
+An argument both sides would have handled identically would have asserted
+nothing.
+
+### Two sabotages that passed, and why only one was a lesson
+
+The `!` trim sabotage on haul's side **passed**, which is the finding-shaped
+outcome. It passed because my compound command was
+`python3 apply && cargo test ; cp restore` -- cargo failed on a `Cargo.toml`
+path error, the `;` ran the restore unconditionally, and the test I then ran was
+against the *fixed* file. **A sabotage that passes is either a real gap or a
+sabotage that never applied, and those are indistinguishable from the result
+alone.** Redone in separate steps with the applied state printed back: both
+tests fail, restore, green.
+
+The second was smaller and the same species: I checked for `/bin/haul` in the
+ramfs with `cd build && cpio -it | grep "^bin/"` and got nothing. The `cd` had
+failed and the names are flat anyway. Twice in one run **the instrument was the
+broken thing, not the subject** -- and both times the tell was a result that was
+*too clean*: a sabotage with no failures, an archive with no matches.
+
+Same species a third time: `tools/test.sh` returned 0 and my grep for the `u-*`
+suites found nothing, which read as "the CI image does not run the parser
+tests." It runs all nine. I had grepped the harness summary
+(`/tmp/boot.log`, 29 lines) instead of the guest console
+(`build/test-boot.log`). **An absence is a claim about where you looked.**
+
+### What landed
+
+- `308bb26e` -- ut: `!` stays inside a word
+- `fb2c3c47` -- haul: npxf audit round-1 close (4 P1 + 6 P2 + 3 of 4 P3)
+- `f378c801` -- vault/views re-render
+
+Posture: 45 haul host tests (was 32), `kat/regen.sh` PASS re-deriving 23
+vectors, npxf-selftest 9/9 on macOS, guest E2E PASS [30s] against the real
+npxf-server, boot suite green with nine `u-*` suites all OK.
+
+### Open, and named
+
+- **F11 deferred on the record**: residual `Copy` duplicates of the ephemeral
+  and PSK on intermediate stack frames. Not closable by wiping one more value --
+  it needs a secret-carrying newtype through the call chain.
+- **A tree-wide sibling of F3**: `libthyla-rs`'s `io::Write::write_all` has the
+  identical `Ok(0) -> Err(WriteZero)` conflation (`io.rs:130`). Deliberately not
+  fixed inside a haul commit.
+- **The SYS_SPAWN mount question** is the operator's ratified next chunk. haul's
+  help text and comments no longer claim a child sees the mount, and the E2E
+  asserts around it rather than pinning the bug.
+- **libutopia's 397 dormant tests** now have a measured cause and a size. Rang
+  vault; not mine to land from a code track.
+- **npxf's tree has no version control.** Six files changed there this run and
+  they exist only on disk.
+
+---
+
 ## Run 46l (2026-09-09, Opus 5 max, after a self-compaction) -- FORAGE: the npxf secure channel, and the first byte ever to cross the transport
 
 **Where it sits.** The operator asked for Thylacine to mount their own tool's
