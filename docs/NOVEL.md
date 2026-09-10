@@ -321,9 +321,24 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   architecture arc for a real design session, not a quick socket backend.
   Composes I-1/I-28 (namespace-scoped access) + I-4 (the handle-transfer positive
   path it would build) + I-5/I-6 (non-transferable, rights-attenuated channel
-  handles). Name: the mycelial network, the underground substrate connecting
-  everything (the "wood wide web") — fitting the bushland palette and the
-  universal-connective-tissue role.
+  handles). **Design approach — "pave the trodden pathways" (ratified 2026-09-10,
+  the inline-media dialogue).** Mycelium is designed by UNIFYING the hand-rolled
+  per-service channels that have actually emerged from real needs — each a mini
+  9P server reinventing the same shape (a serve loop + fid table + frame reader +
+  a bespoke wire): **ptyfs, corvus, nocturned, placesrv, and the Halcyon
+  session-path channel (§14.7.2 in `docs/HALCYON.md`)**. Each is both a *validated
+  consumer* (the substrate is designed against what it actually needs) and a
+  *migration candidate* (cheap to move onto Mycelium once it lands). The
+  abstraction follows the concrete desire paths, so it fits real IPC and does not
+  overfit to one speculative driver — the discipline above ("native-first,
+  AF_UNIX a consumer not the driver") made concrete and *sequenced*: build the
+  consumers, then the substrate. The session-path channel ships NOW on the
+  existing `/srv` + 9P mechanism (it does not force the Mycelium arc — its inline
+  path is a bounded write, exercising the substrate's message-framing +
+  namespace-scoping but not its handle-passing square) and joins this set; the
+  Mycelium arc runs after the inline-media images arc. Name: the mycelial network,
+  the underground substrate connecting everything (the "wood wide web") — fitting
+  the bushland palette and the universal-connective-tissue role.
 
 - **Nocturne — an audio graph that is a file server, whose DSP is a
   capability-bounded client, not a plugin** (`docs/NOCTURNE.md`; captured
