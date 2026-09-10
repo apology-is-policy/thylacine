@@ -541,8 +541,8 @@ The address takes the Plan 9 form host!port, or host:port. With no token the
 connection is PLAIN 9P; npxf servers always require one.
 
 Note: a LITERAL host!port is typeable as-is. A composed one is not --
-`$host!$port` lexes as three tokens and ut glues words only with ~ and ^,
-so quote that form: '$host!$port' will not do it either; use "$host:$port".
+$host!$port lexes as three tokens and ut glues words only with ~ and ^, so it
+splits; single quotes suppress the expansion, so write \"$host:$port\" instead.
 
 Example:
   haul -t /cfg/npxf.token '10.0.2.100!7820' /n/host
@@ -607,19 +607,25 @@ fn read_token_env(name: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     // NOT trimmed, matching npxf: a variable holds exactly what someone set it
     // to, whereas a file conventionally ends with a newline nobody typed. See
     // npxf::trim_token_file.
-    read_token_bytes(&path, false, "that environment variable is unset or empty")
+    read_token_bytes(
+        &path,
+        false,
+        "that environment variable is not set",
+        "that environment variable is empty",
+    )
 }
 
 fn read_token_file(path: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
-    read_token_bytes(path, true, "the token file is empty")
+    read_token_bytes(path, true, "cannot open the token file", "the token file is empty")
 }
 
 fn read_token_bytes(
     path: &str,
     trim: bool,
+    open_msg: &'static str,
     empty_msg: &'static str,
 ) -> Result<Zeroizing<Vec<u8>>, &'static str> {
-    let mut f = libthyla_rs::fs::File::open(path).map_err(|_| "cannot open the token file")?;
+    let mut f = libthyla_rs::fs::File::open(path).map_err(|_| open_msg)?;
     // Warn, as npxf does, rather than refuse: the operator may have a reason,
     // and a mount that fails on a permission bit is worse than one that says so.
     // The token is a long-lived credential shared with the far end, and a
