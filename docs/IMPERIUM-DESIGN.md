@@ -243,7 +243,7 @@ not inherit it.
 
 ```c
 #define CAP_POST_SERVICE (1ull << 13)     /* 12 is CAP_AUDIO_GRAPH on aux-3 */
-/* joins CAP_ELEVATION_ONLY; MUST NOT join CAP_ALL (caps.h states the rule) */
+/* THREE masks, not one -- see below. MUST NOT join CAP_ALL. */
 ```
 
 **The bit number is 13, not 12, and how that was caught is the point.** The
@@ -255,6 +255,25 @@ sweeping both sides during merge prep, hours after the design was ratified.
 
 ```c
 ```
+
+**THE MEMBERSHIP IS THREE MASKS, and the third is the load-bearing one** (aux,
+2026-09-10, re-derived rather than carried -- the first draft of this section
+said "elevation-only" and that is necessary but NOT sufficient):
+
+1. **`CAP_ELEVATION_ONLY`** -- excluded from `CAP_ALL`, rfork-stripped (I-2).
+2. **`CAP_GRANTABLE_CLEARANCE`** -- corvus's `cap` device may grant it at all.
+3. **`CAP_GRANTABLE_IMPERIUM`** -- may FLOW TO DESCENDANTS under a propagating
+   scope. **Required, and it is the whole point.** `devcap.c:230-231` refuses a
+   PROPAGATING grant whose `cap_mask` is not a subset of this mask, and `haul`
+   is a CHILD of the shell: the shell redeems the imperium, haul must inherit.
+
+So `CAP_POST_SERVICE` joins `CAP_GRANTABLE_IMPERIUM` = {DAC_OVERRIDE, CHOWN,
+KILL} -- the **elevated-session** family. It does NOT belong in the
+clearance-only residue {DEBUG, JIT, AUDIO_GRAPH}, which are deliberately
+NON-propagating (a debugger's child is not a debugger). The design statement is
+therefore stronger than "elevation-only": **posting a service is an
+elevated-SESSION authority, like fs-admin** -- every command run inside the
+imperium can post, which is exactly the semantics `haul` needs.
 
 Every property we want falls out of the existing machinery, which is the
 argument for this shape over a bespoke one:
@@ -287,6 +306,30 @@ the flag in favour of the cap was the rejected alternative: it would touch
 joey's spawn of corvus/ptyfs, login's home proxy and its one-hop delegation, and
 the `CONSOLE_OWNER` gate that keys off the flag — a wide blast radius on a
 security-critical path for a tidiness win.
+
+**THE SLOT BOUND SHIPS WITH THE CAPABILITY, and a corrected fact is why.** I
+argued (yip 0086 turn 3) that a name-allowlist was unnecessary because
+`srv_reserve_in` refuses to displace a LIVE/RESERVING entry (`devsrv.c:311+`) --
+that part holds, and impersonation is genuinely closed. But I also wrote that
+the registry is "namespace-resident (per-Proc), so the blast radius is the
+user's own namespace and its children, not the system." **That is wrong.**
+`/srv` is "the one immortal boot registry, mounted on kproc's `/srv`"
+(`devsrv.c:82-84`): a SINGLE shared `entries[SRV_MAX_SERVICES]` with
+`SRV_MAX_SERVICES = 16` (`devsrv.h:69`), shared across clones by refcount rather
+than re-instantiated.
+
+So exhaustion is **system availability**, not self-DoS: an elevated Proc posting
+junk denies a slot to a future trusted server, another user's shell, or a TCB
+server restart. Sixteen slots makes that cheap.
+
+Hence a modest **per-poster slot bound lands WITH the capability**, not after
+it: the table is shared and small; migration cost is ZERO (TCB servers post via
+the FLAG and there are no existing cap-posters, so a cap-holder bound retrofits
+nothing); and it bounds a buggy `haul` loop as much as malice. It is an I-32
+resource bound (HOW MANY) and never an attenuation (WHICH names stays
+unbounded), so it does not reopen the name-list question. The accounting shape --
+per-Proc vs per-imperium-scope -- follows haul's post-lifetime model in
+HAUL-DESIGN 4.6 and is settled at build time.
 
 **Rejected outright: widening `MAY_POST_SERVICE` to the session shell.** The
 syscall header states the containment in as many words — the shell, "lacking
