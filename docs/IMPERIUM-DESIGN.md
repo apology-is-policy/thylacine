@@ -216,6 +216,80 @@ root-death teardown -- zero new kernel mechanism. The more elegant "your same
 shell toggles into imperium in place" needs a new "de-escalate-the-root-without-
 killing-it" teardown. **Recommend: ship the sub-shell first, evolve to in-place.**
 
+## 6.5 `CAP_POST_SERVICE` — posting a service under imperium (DESIGNED 2026-09-10)
+
+**Operator-ratified 2026-09-10.** The first capability designed *for* imperium
+rather than inherited by it, and the reason is architectural rather than
+thematic.
+
+**The problem.** `haul` mounts a remote 9P tree. A mount lands in the calling
+Proc's Territory and nowhere else (I-1), and Thylacine **clones** the namespace
+at every fork where Plan 9 **shares** it — so a `mount` *command* can never
+affect the shell that ran it. Plan 9's answer is `srv` + `mount /srv/foo`, which
+works there only because of that sharing. Here the endpoint has to reach the
+shell some other way, and `/srv` is the mechanism: its registry is namespace-
+resident, so a child's post IS visible to the parent.
+
+**Why the existing gate cannot be reused.** Posting to `/srv` is gated on
+`PROC_FLAG_MAY_POST_SERVICE`. That is a **proc flag**, and proc flags "remain
+set-once before EL0 by the Proc's own thread" (`kernel/proc.c:1768`) — the
+single-writer rule that keeps `proc_flags` free of multi-writer RMW against the
+console transitions. So it **cannot be conferred on a running shell by any
+elevation mechanism**, imperium included. Nor would widening it at login help on
+its own: proc flags do not propagate, so `haul` — a child of the shell — would
+not inherit it.
+
+**The shape.** A new elevation-only capability:
+
+```c
+#define CAP_POST_SERVICE (1ull << 12)     /* free bit; 11 is the current high-water */
+/* joins CAP_ELEVATION_ONLY; MUST NOT join CAP_ALL (caps.h states the rule) */
+```
+
+Every property we want falls out of the existing machinery, which is the
+argument for this shape over a bespoke one:
+
+| Want | Falls out of |
+|---|---|
+| never held by default, never fork-grantable | excluded from `CAP_ALL` |
+| a child never inherits it by accident | in `CAP_ELEVATION_ONLY` → stripped at every fork (I-2) |
+| `haul` CAN inherit it when the user meant it | imperium's propagating scope is exactly the exemption from that strip (§2) |
+| no program can widen it behind your back | the *lex curiata* — SAK, provincia shown on the trusted path before auth (§3) |
+| **a posted service cannot outlive the imperium** | I-25 teardown group-terminates the scope subtree on `abdicate`/term/root-exit |
+
+That last row is the one worth noticing: it answers, structurally, the "who
+unmounts it, what is its lifetime" question the `/srv` design had left open. A
+service posted under imperium dies with the imperium. sudo's backgrounded jobs
+survive a logout; a legate's cannot, and neither can its services.
+
+**The flag is KEPT, not replaced** (operator's choice of the two offered). The
+two are different tiers of one gate, and `devsrv`'s check becomes
+`PROC_FLAG_MAY_POST_SERVICE || CAP_POST_SERVICE`:
+
+- **the flag** — spawn-time, non-propagating, kernel-stamped, joey-granted: the
+  TCB's own servers (corvus, ptyfs, login's per-user home proxy).
+- **the cap** — runtime, scope-propagating, user-elevated: the interactive path.
+
+Two doors to one gate is a smell worth naming rather than hiding, but it mirrors
+a pairing already in the tree: `PROC_FLAG_CONSOLE_ATTACHED` (a stamped role) and
+`CAP_HOSTOWNER` (an elevated authority) coexist for the same reason. Retiring
+the flag in favour of the cap was the rejected alternative: it would touch
+joey's spawn of corvus/ptyfs, login's home proxy and its one-hop delegation, and
+the `CONSOLE_OWNER` gate that keys off the flag — a wide blast radius on a
+security-critical path for a tidiness win.
+
+**Rejected outright: widening `MAY_POST_SERVICE` to the session shell.** The
+syscall header states the containment in as many words — the shell, "lacking
+MAY_POST_SERVICE, cannot itself re-designate the owner" — so widening it would
+hand every program the user runs both service-posting AND the ability to
+re-designate the console owner. I-27 would survive (the owner bit never confers
+console-attach), but the widening is real and unnecessary given the above.
+
+**Cross-track note.** Imperium is the auxiliary track's arc (IM-0..IM-5 landed;
+IM-2, the propagating scope, at `4c77db6e`). This capability is *designed* here
+by the main track at the operator's direction and must be built in coordination
+— it is not main's to land unilaterally into imperium's conferral set.
+
 ## 7. Invariants + audit surface
 
 - Extends **I-25**: a propagating legate's caps flow ONLY within its

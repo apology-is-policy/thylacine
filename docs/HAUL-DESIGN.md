@@ -380,26 +380,50 @@ cat: /tmp/host/hello.txt: no such file or namespace entry
 ```
 
 haul lists the remote tree from its own namespace — a real Twalk + Treaddir
-through the channel — and its own child cannot see the mount. Measured at
+through the channel — and its own child could not see the mount. Measured at
 `/home/cora/host` (inside another mount) **and** at `/tmp/host` (plain ramfs),
-so the mount point's location is not the discriminator: **a `SYS_SPAWN` child
-does not appear to receive its parent's mounts at all.**
+so the mount point's location was not the discriminator, and this section
+concluded: *a `SYS_SPAWN` child does not appear to receive its parent's mounts
+at all.*
 
-That is surprising, because `territory_clone` deep-copies the mount table, and
-because `login` mounts the user's home and then spawns the shell. Whether the
-spawn path reaches that clone, and what actually makes login's case work, are
-both untested. It is a kernel-side question, tracked in
-`memory/bug_nested_mount_lost_at_spawn_clone.md`, and **not haul's to answer**
-— which is why the E2E now asserts what haul itself proves (the mount, and a
-readdir of the remote tree through the encrypted channel) and leaves the reader
-out of it.
+**THAT CONCLUSION WAS WRONG, and so was the nested-mount one before it. Fixed
+`e643b5f4`; the command form works.** Both survived because the measurement
+differed in MORE THAN ONE VARIABLE — parent-vs-child *and* list-vs-walk — and
+the conclusion was attached to the wrong one. haul had only ever *listed* the
+mount point; the child *walked through* it. Separating them took one boot
+(`tools/interactive/spawn-mount-probe.exp`): the child LISTS the mount fine, so
+it has the mount, so spawn was never implicated.
 
-The interactive answer therefore remains **posting the connection to `/srv`**
-and letting the shell mount it. `/srv` exists for exactly this: its registry is
-reached *through* the inherited devsrv mount, so a child's post IS visible to
-the parent — which is how login's home proxy delivers a tree to login. That is a
-separate chunk with a real design question attached (naming, lifetime, who
-unmounts), and it wants the operator's vote.
+The real cause was `dev9p` latching the POUNCE fallback only on `ENOSYS`. npxf
+answers `EOPNOTSUPP`, so the fused `Twalkgetattr` rejection fell through to the
+generic error arm and was reported as a WALK FAILURE — an unimplemented
+*operation* surfacing to userspace as a missing *path*, which is precisely what
+sent two investigations after the wrong subsystem. Full account:
+`memory/bug_nested_mount_lost_at_spawn_clone.md` (the filename is a fossil of
+hypothesis one).
+
+**`haul <addr> <mnt> [cmd ...]` therefore works, and is Plan 9's
+`rfork; mount; exec` exactly.** What still cannot work is `haul ... &` followed
+by using the tree from the *same* shell — that is I-1 doing its job.
+
+**And `/srv` ALONE DOES NOT FIX THAT, which is worth stating plainly because it
+is the natural assumption.** Plan 9's idiom is `srv` to post, then `mount
+/srv/foo /n/foo` — and it works there because **Plan 9 namespaces are SHARED
+between parent and child by default**. Thylacine clones at every fork
+(`RFNAMEG` is unsupported at v1.0, and `rfork_internal`'s own comment says "the
+parent ALWAYS gets a clone"). So a `mount` *command* can never affect the shell
+that ran it, no matter what `/srv` offers.
+
+The consequence is architectural rather than incidental: **in a clone-always
+system the shell must own namespace mutation in-process.** Where Plan 9 can
+ship `mount` as an ordinary binary, Thylacine needs it as a shell builtin — and
+`ut` has none today (`cd pwd exit true false unset eval source . type whence
+jobs fg bg wait kill`), nor does a `mount` command exist in coreutils. Both
+syscall wrappers do exist (`t_mount`, `t_attach_9p_srv`), and login's home
+proxy is the working `/srv` precedent.
+
+So the remaining chunk is `/srv` post **plus** a namespace-builtin decision, and
+it wants the operator's vote.
 
 **A note on method, since it cost a boot and would have cost more.** The
 nested-mount explanation fit the first measurement perfectly: haul's mount
@@ -493,6 +517,67 @@ nothing ran is strictly worse than a red, and this one appeared the moment an
 `ssh -L` tunnel died underneath it.
 
 ---
+
+## 4.6 The interactive shape — RATIFIED 2026-09-10
+
+The ask was "mount that endpoint transparently as a directory", and §4.3 shows
+why the obvious shapes do not reach it. What follows is the ratified design; the
+capability half is specified in `IMPERIUM-DESIGN.md` §6.5 and the whole thing is
+DESIGN ONLY — no code has been written against it.
+
+**The constraint that decides everything.** Thylacine clones the namespace at
+every fork; Plan 9 shares it. So a `mount` *command* can never affect the shell
+that ran it, and **in a clone-always system the shell must own namespace
+mutation in-process.** Where Plan 9 ships `mount` as an ordinary binary,
+Thylacine needs it as a shell builtin. This is structural, not a UX preference,
+and it generalises past haul to every future namespace tool.
+
+**Two halves, and both are needed:**
+
+**1. `haul` gains a post mode.** Instead of mounting into its own namespace, it
+posts `/srv/<name>` and pumps between the accepted connection and the npxf
+socket. The pump logic is unchanged — only the local endpoint's source differs
+(a `SYS_SRV_ACCEPT` endpoint instead of a pipe pair). **Single-session**,
+matching login's per-user home proxy: multiplexing several local clients over
+one npxf connection needs 9P session multiplexing (tag/fid renumbering) and is
+deliberately out of scope. Gated on `CAP_POST_SERVICE`, which the user's shell
+holds only under imperium — so posting a service is an explicit, SAK-consented
+act, and the service dies with the imperium (I-25).
+
+**2. `ut` gains namespace builtins.** `mount` and `unmount`, running in-process
+so the mount lands in the live shell. The mechanism is login's, verified:
+
+```
+conn = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/<name>", T_ORDWR)   // CONNECT
+root = t_attach_9p_srv(conn, aname, ...)                        // ATTACH
+t_close(conn)                        // the attach holds its own ref
+t_mount(mountpoint, root, T_MREPL)   // into MY namespace
+t_close(root)                        // territory.c:19 — mount() spoor_refs the source
+```
+
+That last line is load-bearing and non-obvious: **the mount takes its own ref**,
+so the shell need not hold the fd for the mount's life. login keeps it only
+because it wants to `t_unmount` at logout.
+
+Flags map to the existing `T_MREPL` / `T_MBEFORE` / `T_MAFTER` / `T_MCREATE`,
+i.e. Plan 9's `-b` / `-a` / `-c`. `bind` is the obvious sibling and is NOT in
+this chunk.
+
+**A deep open past a posted service does not cross** — a service connects on
+OPEN, and the resolver walks intermediates without opening them. It is the
+two-step above, always. (Found by the auxiliary track on
+`/srv/halcyon-<user>/<hex>/place`, fixed at `53fcc14c`; handed over on yip 0084
+before it could cost this chunk an afternoon.)
+
+**Rejected, with reasons**, since each looked viable:
+
+| Shape | Why not |
+|---|---|
+| `/srv` post alone | nothing can mount it into a *running* shell; the builtin is not optional |
+| the command form only (`haul <addr> <mnt> ut`) | works today and is Plan 9's `rfork; mount; exec` exactly — but it is a subshell, and exiting drops the mount |
+| `mount -e '<transport-cmd>' <mnt>` (shell owns the pipes, spawns the transport, attaches in-process) | needs no new privilege at all and is genuinely attractive; **not chosen** — it couples the shell to spawning helpers, and gives up `/srv`'s named, inspectable, reusable service. Worth revisiting if the capability path proves heavy |
+| widening `MAY_POST_SERVICE` to the session shell | hands every user program service-posting AND console-owner re-designation; the header names that containment explicitly |
+| shared namespaces (RFNAMEG) | architectural, unsupported at v1.0, and I-1-adjacent |
 
 ## 5. Open
 

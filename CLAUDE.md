@@ -462,7 +462,7 @@ names).
 | # | Invariant (condensed) | Validation |
 |---|---|---|
 | I-1 | Territory operations in Proc A don't affect Proc B | `territory.tla` |
-| I-2 | Fork-grantable caps monotonically reduce; `CAP_ELEVATION_ONLY` (HOSTOWNER+DAC_OVERRIDE+CHOWN+KILL) stripped at every fork; growth only via the `cap` device (HOSTOWNER console-gated; clearance corvus-side-gated) | `handles.tla` |
+| I-2 | Fork-grantable caps monotonically reduce; `CAP_ELEVATION_ONLY` stripped at every fork; growth only via the `cap` device (HOSTOWNER console-gated; clearance corvus-side-gated). **The set is SIX bits — HOSTOWNER+DAC_OVERRIDE+CHOWN+KILL+DEBUG+JIT — and this row said four until 2026-09-10; re-derive from `caps.h:193`, never from a prose list.** `CAP_POST_SERVICE` (bit 12) is DESIGNED as the seventh (IMPERIUM-DESIGN §6.5), unbuilt | `handles.tla` |
 | I-3 | Mount points form a DAG, never a cycle | `territory.tla` |
 | I-4 | Handles transfer between Procs only via 9P sessions (no direct-transfer syscall; the positive 9P path is still future) | `handles.tla` |
 | I-5 | `KObj_MMIO`/`KObj_IRQ`/`KObj_DMA` (and `KObj_Loom`) non-transferable | `handles.tla` + static_asserts |
