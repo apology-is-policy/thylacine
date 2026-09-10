@@ -170,11 +170,72 @@ tests." It runs all nine. I had grepped the harness summary
 (`/tmp/boot.log`, 29 lines) instead of the guest console
 (`build/test-boot.log`). **An absence is a claim about where you looked.**
 
+### Round 2, and the check that could not fail
+
+Round 2 came back 1 P0 / 1 P1 / 4 P2 / 5 P3. **The P0 and P1 were the
+readiness-fd defect above** -- the same root cause, reached from the opposite
+direction while I was fixing it. Two independent derivations agreeing is the
+strongest thing this arc produced, and it is what the audit-in-flight discipline
+is for.
+
+Its residuals were mine and I had missed them: both bounds were per-wait, not
+cumulative. My comment defended that with "the flights here are 64 bytes, so
+there is nothing to dribble." **64 bytes is exactly 64 dribbles** -- one byte
+every 14 seconds stretches a 15-second bracket to sixteen minutes, per
+connection, before authentication.
+
+**Then the finding that lands hardest.** The direction check I added to the KAT
+generator -- the one I had just written up as sabotage-verified -- was VACUOUS
+under the exact swap it names. Running npxf's client and server against each
+other and asserting `client.send == server.recv` proves the two halves agree
+WITH EACH OTHER. Apply the swap consistently to BOTH and they still agree, every
+vector stays byte-identical, and every gate goes green. **A symmetric check
+cannot detect a symmetric fault** -- and my sabotage "verified" it only because
+the sabotage was one-sided too, which proved detection and got written down as
+discrimination.
+
+Fixed by pinning the responder's ephemeral, so with both secrets known the check
+can call npxf's own `derive()` and assert the LABEL (`ckeys.send == d_srv.c2s`)
+rather than a symmetry. Both swaps now caught, each proven separately.
+
+**And one finding I refuted rather than fixed.** Round 2 claimed the E2E's
+argument-boundary assertion matched the shell's echo of the typed line rather
+than the child's output. Measured false: the transcript -- which IS expect's
+match stream -- holds the token exactly once and holds ZERO occurrences of any
+typed command, exactly as `lib.exp` documents. I took its *recommendation*
+anyway (type lowercase, assert uppercase through `tr`), because holding by a
+property of the line editor is not holding by construction. Refuting a finding
+and adopting its advice are not in tension.
+
+I also committed a file that did not compile (`2914182c`): an unescaped `"` in
+usage text closed a Rust string literal. The `cargo test` I cited was from
+before that edit. **A posture line has to be measured on the tree being
+committed, not recalled.**
+
+### One measurement that changed a severity
+
+The back-pressure path has no test, and I had been calling it unexercised. It is
+also **reachable**: netd's TX buffer is 65536 and the session allows 64
+in-flight tags at msize 4096, so the guest can put 256 KiB in flight -- sixteen
+concurrent full-msize writes overflow it. A reachable path with no test is a
+different and worse thing than a path nobody can take.
+
+The first constant I reached for was `P9_CTL_INFLIGHT_MAX` = 8, which would have
+made the path unreachable and the finding latent. It is the `/ctl` snapshot's
+reporting width, and its own comment says so. **A constant whose name contains
+the right words is not thereby the right constant.**
+
 ### What landed
 
 - `308bb26e` -- ut: `!` stays inside a word
 - `fb2c3c47` -- haul: npxf audit round-1 close (4 P1 + 6 P2 + 3 of 4 P3)
 - `f378c801` -- vault/views re-render
+- `295a8d76` -- the readiness fd is not the data fd (self-found)
+- `3adb7598` -- zeroize's alloc feature pinned; the KAT's bound named
+- `6dfe9a28` -- phase-7 status rows + the AUDIT-TRIGGERS round-1 addenda
+- `2914182c` -- round-2 close (4 P2 + 5 P3)
+- `5236f3e0` -- the build `2914182c` broke
+- `28e7a7aa` -- the round-2 addenda + the reachability correction
 
 Posture: 45 haul host tests (was 32), `kat/regen.sh` PASS re-deriving 23
 vectors, npxf-selftest 9/9 on macOS, guest E2E PASS [30s] against the real
