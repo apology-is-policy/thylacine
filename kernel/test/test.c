@@ -1359,6 +1359,7 @@ void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_wstat_size(void);
 void test_dev9p_walk_attrs(void);
+void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_read_align_heals_partial(void);
 void test_dev9p_read_align_short_not_eof(void);
@@ -3218,6 +3219,7 @@ struct test_case g_tests[] = {
     { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
     { "dev9p.wstat_size",              test_dev9p_wstat_size,                 false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
+    { "dev9p.wga_unsupported_by_errno", test_dev9p_wga_unsupported_latches_by_errno, false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
     { "dev9p.read_align_heals_partial", test_dev9p_read_align_heals_partial,    false, NULL },
     { "dev9p.read_align_short_not_eof", test_dev9p_read_align_short_not_eof,    false, NULL },

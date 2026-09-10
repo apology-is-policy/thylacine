@@ -1,0 +1,92 @@
+#!/usr/bin/expect -f
+# tools/interactive/spawn-mount-probe.exp -- DIAGNOSTIC, NOT A GATE.
+#
+# THE QUESTION. `memory/bug_nested_mount_lost_at_spawn_clone.md` records that a
+# SYS_SPAWN child could not read a file beneath a mount its parent had made, and
+# concluded "a spawned child does not receive its parent's mounts". That would be
+# an I-1 violation. But every kernel mechanism, read twice independently, says
+# the child SHOULD inherit: rfork_internal clones the territory unconditionally
+# (proc.c:1532, "the parent ALWAYS gets a clone"), territory_clone copies
+# mounts[i] wholesale with a spoor_ref + path_ref per entry (territory.c:114),
+# SYS_SPAWN_FULL_ARGV reaches it via rfork_with_caps(RFPROC, ..) (syscall.c:9184),
+# and exec.c contains the string "territory" ZERO times.
+#
+# When every reading contradicts the measurement, suspect the MEASUREMENT'S
+# PREMISE. The untested one: haul LISTED the mount point (`read_dir`, crossing
+# INTO the mounted tree) while the child WALKED THROUGH it (`open` of a component
+# BENEATH it). Those are different resolver operations, and no measurement has
+# ever separated them.
+#
+# THE DISCRIMINATOR IS LEG A, AND IT NEEDS NO CODE CHANGE. If a child can LIST
+# the mount point, it HAS the mount, and the original finding is mis-titled --
+# the defect is then the deeper walk, for anyone. Leg B re-runs the known failure
+# in the SAME BOOT so the two differ in exactly one variable: list vs walk-through.
+#
+#   A lists + B fails  -> the mount IS inherited; the deep walk is broken.
+#                         The attribution flips and the bug note is renamed.
+#   A fails + B fails  -> the child genuinely lacks the mount; the reading of
+#                         the clone path above has a hole worth finding.
+#   A lists + B works  -> nothing reproduces; the earlier failure had another
+#                         cause and the note is stale.
+#
+# `-v` on both legs prints haul's OWN mount check first, which is the control:
+# it proves the PARENT has the mount at the moment it spawns.
+#
+# An EARLIER draft of this probe had a leg commented "haul itself reads a file
+# BENEATH the mount" whose command spawned /bin/cat -- i.e. a child, i.e. the
+# thing it was meant to be the control FOR. Corrected before it ever ran. A
+# comment can be true about the wrong thing.
+#
+#   HAUL_NPXF_PORT=5640 HAUL_NPXF_TOKEN=<token> \
+#     tools/test-interactive.sh spawn-mount-probe
+
+set ::env(THYLACINE_ACCEL) hvf
+
+if {[info exists ::env(HAUL_NPXF_PORT)]} {
+    set hostport $::env(HAUL_NPXF_PORT)
+} else {
+    set hostport 5640
+}
+if {[info exists ::env(HAUL_NPXF_TOKEN)]} {
+    set token $::env(HAUL_NPXF_TOKEN)
+} else {
+    set token "thylacine-forage-e2e-token"
+}
+
+source [file join [file dirname [info script]] lib.exp]
+
+if {[catch {set probe [socket 127.0.0.1 $hostport]} err]} {
+    puts "LS-CI SKIP: no npxf server on 127.0.0.1:$hostport ($err)"
+    exit 77
+}
+close $probe
+
+lc_boot
+lc_login cora kora
+
+lc_send "echo $token > npxf.token"
+lc_send "mkdir -p /tmp/probe"
+
+# LEG A -- THE DISCRIMINATOR. The child LISTS the mount point. Every token is
+# uppercased through `tr` so it cannot match the typed line (the lib.exp echo
+# discipline). A-MARK brackets the leg so the transcript is readable even when
+# the command itself produces nothing.
+lc_send "echo leg-a-start | tr a-z A-Z"
+lc_send "haul -v -t npxf.token 10.0.2.2!$hostport /tmp/probe /bin/ls /tmp/probe | tr a-z A-Z"
+lc_send "echo leg-a-end | tr a-z A-Z"
+
+# LEG B -- THE CONTROL, one variable away: the child WALKS THROUGH the mount to
+# a file beneath it. This is the operation that failed originally.
+lc_send "echo leg-b-start | tr a-z A-Z"
+lc_send "haul -v -t npxf.token 10.0.2.2!$hostport /tmp/probe /bin/cat /tmp/probe/hello.txt | tr a-z A-Z"
+lc_send "echo leg-b-end | tr a-z A-Z"
+
+# Nothing is asserted -- this is a diagnostic, and asserting an outcome would
+# presuppose the answer it exists to find. Read the transcript: whether HELLO.TXT
+# appears between the A marks, and whether the file's CONTENT appears between the
+# B marks, is the entire result.
+lc_send "echo probe-done | tr a-z A-Z"
+lc_expect "PROBE-DONE" "both legs ran"
+
+lc_quit
+exit 0
