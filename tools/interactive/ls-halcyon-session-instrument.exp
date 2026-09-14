@@ -389,13 +389,25 @@ lc_pass "session-instrument: the tile menu's Restart respawned the retained tile
 # --- Super+Q: the structural close, then the logout ------------------------------
 after 1500
 hkey "meta_l+shift+q"
-expect {
-    -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*panes $N" {}
-    -re {EXTINCTION:} { lc_extinction_fail "extinction on Super+Q" }
-    timeout { lc_fail "Super+Q did not close leaf $B (the footer never counted $N again)" }
-    eof     { lc_fail "qemu exited on Super+Q" }
+# The structural close HANGS the tile UP (the I-4 r1 B-F4 fix): the session
+# closes the tile's down channel, the kaua-term ends its program and REAPS
+# it, then exits by itself -- so no zombie of the user's escapes to joey
+# holding the home mount (the logout stall's mechanism on main, ARM-6's
+# class). The hangup witness and the footer's count interleave freely.
+set saw_hup 0; set saw_panes 0; set tries 0
+while {(!$saw_hup || !$saw_panes) && $tries < 6} {
+    incr tries
+    expect {
+        -re "halcyond: tile $B hung up \\((\\d+) ms\\)" { set saw_hup 1; lc_step "leaf $B hung up in $expect_out(1,string) ms" }
+        -re "halcyond: tile $B killed after the hangup grace" { lc_fail "leaf $B's terminal did not come down on the hangup: killed after the grace" }
+        -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*panes $N" { set saw_panes 1 }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction on Super+Q" }
+        timeout { lc_fail "Super+Q did not close leaf $B (hung up=$saw_hup, the footer counted $N again=$saw_panes)" }
+        eof     { lc_fail "qemu exited on Super+Q" }
+    }
 }
-lc_pass "session-instrument: Super+Q closed the restarted tile structurally (the 9.3 delta); $N panes again"
+if {!$saw_hup || !$saw_panes} { lc_fail "Super+Q did not close leaf $B (hung up=$saw_hup, counted=$saw_panes)" }
+lc_pass "session-instrument: Super+Q closed the restarted tile structurally (the 9.3 delta) and hung it up; $N panes again"
 after 1000
 hkey "meta_l+shift+q"
 after 1500
@@ -414,21 +426,24 @@ expect {
     timeout { lc_fail "the compositor did not retire the session's rail with the seat" }
     eof     { lc_fail "EOF waiting for the rail's retire" }
 }
-# OPEN DEFECT, recorded not hidden (memory
-# bug_session_structural_close_no_login_prompt.md): after a logout reached
-# through Super+Q closes (the kaua-terms killed by the teardown, never
-# exited) the login prompt did not return within 90 s -- measured 3/3 on
-# 2026-09-14 -- where ls-gfx-session's typed-`exit` logout brings it back.
-# The rail's and the bar's retire above witness the seat's release; the
-# prompt's return is the open item's, asserted there once it is fixed.
-set timeout 20
+# The logout completes: login's own steps say so (the home proxy's reap is
+# the step that STALLED while a killed tile's shell survived as an orphan
+# zombie pinning the home mount -- measured 3/3 on 2026-09-14 and fixed by
+# the hangup teardown above), then the getty's prompt returns.
+set timeout 45
+expect {
+    -ex "login: logout: home proxy reaped" { lc_step "login reaped the home proxy: nothing of the session pins the home" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction after logout" }
+    timeout { lc_fail "login never reaped the home proxy after the logout: a process of the session still pins the home mount (the ARM-6 class)" }
+    eof     { lc_fail "qemu exited after logout" }
+}
 expect {
     -ex "Thylacine login: " { lc_step "the login prompt returned" }
     -re {EXTINCTION:} { lc_extinction_fail "extinction after logout" }
-    timeout { lc_step "the login prompt did not return within 20 s of a Super+Q logout (the open defect; not asserted here)" }
+    timeout { lc_fail "the login prompt did not return after the logout" }
     eof     { lc_fail "qemu exited after logout" }
 }
-lc_pass "session-instrument: closing every tile logs the session out and the rail retires with the seat"
+lc_pass "session-instrument: closing every tile logs the session out, the rail retires with the seat, and the login prompt returns"
 
 lc_pass "ls-halcyon-session-instrument: the session path under Instrument verified end to end -- both rails minted by the seat, the footer's pane count and its four conditions from the tile's facts, SPLIT H under the session's authority, the workspace list, the retained tile and its Restart, the structural close, the logout"
 # The session is gone; quit qemu from the login prompt.

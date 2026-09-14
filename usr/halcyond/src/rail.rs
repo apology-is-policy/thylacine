@@ -85,6 +85,14 @@ pub const FOOTER_NARROW_PX: f32 = 9.0;
 const TRACK_EM: f32 = 0.08;
 /// 8.2: the command shown is at most this many characters.
 pub const CMD_MAX: usize = 96;
+/// The most `chords` lines the hints read: the compositor renders one line
+/// per bound (key, shift) over a vocabulary of a few dozen keys, so this is
+/// a margin, and the bound is OURS rather than the other process's (r1 B-F6).
+pub const CHORD_LINES_MAX: usize = 128;
+/// The most `layout` rows a reset plan considers: the layout file's own
+/// node cap (`libhalcyon::layout::MAX_NODES`), so the plan's quadratic
+/// walks are bounded here, not by the compositor's pane cap (r1 B-F5).
+pub const RESET_ROWS_MAX: usize = libhalcyon::layout::MAX_NODES;
 /// 8.2: the label of the idle condition.
 pub const READY: &str = "READY";
 
@@ -370,7 +378,7 @@ pub fn rail_list(
         let chip_h = sheet.ipx(CHIP_H);
         let chip_y = sheet.ipx(CHIP_Y);
         let gap = sheet.ipx(CHIP_GAP);
-        let pitch = chip_w + gap;
+        let pitch = (chip_w + gap).max(1); // r1 B-F14: never a zero divisor
         let total = n as i32 * chip_w + (n as i32 - 1) * gap;
         let view_w = sheet.ipx(CHIPS_VIEW_W);
         let scrolls = total > view_w;
@@ -661,6 +669,7 @@ fn combo_label(combo: &str) -> String {
 pub fn hints_from_chords(text: &str) -> Vec<Hint> {
     let binds: Vec<(&str, &str)> = text
         .lines()
+        .take(CHORD_LINES_MAX)
         .filter_map(|l| {
             let mut it = l.split_ascii_whitespace();
             let combo = it.next()?;
@@ -903,6 +912,9 @@ pub fn reset_plan(layout: &str) -> Vec<(u32, String)> {
     }
     let mut rows: Vec<Row> = Vec::new();
     for line in layout.lines() {
+        if rows.len() >= RESET_ROWS_MAX {
+            return Vec::new();
+        }
         let depth = line.len() - line.trim_start().len();
         let mut it = line.trim_start().split_ascii_whitespace();
         let Some(head) = it.next() else { continue };

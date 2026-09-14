@@ -37,7 +37,6 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use kaua_term::cmdline;
@@ -47,7 +46,7 @@ use ptyhold::{set_winsize, Master};
 use vt::Vt;
 
 use libthyla_rs::{
-    env, t_burrow_attach, t_close, t_exit_group, t_putstr, t_read, t_wait_pid_for, t_write, thread,
+    env, t_burrow_attach, t_close, t_putstr, t_read, t_wait_pid_for, t_write, thread,
     torpor,
 };
 
@@ -98,6 +97,9 @@ impl WriteLock {
 struct Shared {
     mfd: i64,
     n: u64,
+    /// The hosted program's pid: the input thread hangs it up when the
+    /// down channel goes (halcyond's teardown, or halcyond's own death).
+    app_pid: i64,
     app_cursor: AtomicBool,
     // (cols << 16) | rows, or 0 for "no pending resize".
     pending_resize: AtomicU32,
@@ -223,10 +225,32 @@ extern "C" fn pump_in(arg: u64) {
             }
         }
     }
-    // Down channel gone: end the whole kaua-term (the group cascade unwinds the
-    // output thread's parked master read; process exit closes the master).
-    // SAFETY: `!`-returning SVC.
-    unsafe { t_exit_group(0) }
+    // Down channel gone: halcyond hung up on this tile (a teardown, or its
+    // own death). HANG UP the app ourselves and let the output thread reap
+    // it -- the app's zombie is OURS to collect, never joey's: an orphaned
+    // zombie keeps its namespace (the user's home mount) until init reaps
+    // it, and init cannot while login waits on the session -- the logout
+    // stall measured at HALCYON-INSTRUMENT I-4. The kill is uncatchable;
+    // the app's exit closes the slave, the output thread's master read
+    // EOFs, reaps, and tears the kaua-term down as on a normal exit. A
+    // program whose children still hold the slave keeps the master open:
+    // halcyond's bounded wait then kills us, as before.
+    hangup_app(sh.app_pid);
+    // SAFETY: `!`-returning SVC; this thread alone ends.
+    unsafe { libthyla_rs::t_thread_exit() }
+}
+
+/// `killgrp` on `/proc/<pid>/ctl` (the owner axis: the app is ours). A
+/// refusal -- the app already gone -- is inert.
+fn hangup_app(pid: i64) {
+    use libthyla_rs::io::Write as _;
+    if pid <= 0 {
+        return;
+    }
+    let path = alloc::format!("/proc/{}/ctl", pid);
+    if let Ok(mut f) = libthyla_rs::fs::OpenOptions::new().write(true).open(&path) {
+        let _ = f.write_all(b"killgrp");
+    }
 }
 
 fn write_env_beacon(tier: &str) -> bool {
@@ -283,6 +307,7 @@ fn run() -> i64 {
     let sh: &'static Shared = Box::leak(Box::new(Shared {
         mfd,
         n: master.n,
+        app_pid: pid as i64,
         app_cursor: AtomicBool::new(false),
         pending_resize: AtomicU32::new(0),
         master_write: WriteLock::new(),

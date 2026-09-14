@@ -1920,7 +1920,8 @@ impl Layout {
         // several keeps a header row like any tile.
         if tiles.len() == 1 && self.is_empty_leaf(tiles[0]) {
             let p = self.get_mut(tiles[0]).unwrap();
-            p.visible = true;
+            // Dormant when the clip took it to ZERO (r1 A-F1), as a tile.
+            p.visible = !rect.is_empty();
             p.rect = rect;
             p.tagbar = inner;
             p.content = Rect::ZERO;
@@ -1951,7 +1952,11 @@ impl Layout {
             let is_open = i == open;
             if self.is_leaf(t) {
                 let p = self.get_mut(t).unwrap();
-                p.visible = is_open;
+                // A tile the clip took to ZERO (the tree outgrew the minima
+                // through a path the fits-check does not guard) is dormant
+                // exactly like a collapsed one: nothing hosted composes there
+                // and it may not keep focus (r1 A-F1).
+                p.visible = is_open && !rect.is_empty();
                 p.rect = rect;
                 p.tagbar = header;
                 p.content = if is_open { body_rect } else { Rect::ZERO };
@@ -2792,6 +2797,39 @@ mod tests {
         assert!(l.set_weight(b, 2));
         let c = l.split(b, Mode::SplitV).unwrap();
         assert_eq!(weight(&l, c), 2);
+    }
+
+    /// r1 A-F1: a split past the minima through the tree's OWN api (the
+    /// chord path, before its fits-check) lays every child at its minimum
+    /// from the origin and the clip takes the overflow to ZERO; such a tile
+    /// is DORMANT -- not visible, nothing composes there -- so its owner
+    /// cannot lose keys into a tile with no pixels.
+    #[test]
+    fn a_tile_carved_to_zero_is_dormant() {
+        let mut l = Layout::new();
+        let area = r(0, 34, 1280, 741); // 1280x800 between the rails: 1274 usable
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        let mut f = l.root;
+        let mut refused_at = None;
+        for i in 0..6 {
+            if refused_at.is_none() && !l.split_fits(f, Mode::SplitH) {
+                refused_at = Some(i);
+            }
+            f = l.split(f, Mode::SplitH).unwrap();
+            l.recompute(area, 1, inst100(), Profile::Instrument);
+        }
+        assert_eq!(refused_at, Some(3), "5 x 260 + 4 x 7 = 1328 > 1274: the 4th split is the first refused");
+        let newest = l.get(f).unwrap();
+        assert!(newest.rect.is_empty(), "the 7th tile is carved to ZERO");
+        assert!(!newest.visible && newest.content.is_empty(), "and dormant");
+        // Every visible leaf keeps pixels, and at least the four that fit.
+        let with_pixels = l
+            .live_ids()
+            .iter()
+            .filter(|&&(slot, _)| l.is_leaf(slot) && l.get(slot).unwrap().visible)
+            .inspect(|&&(slot, _)| assert!(!l.get(slot).unwrap().rect.is_empty()))
+            .count();
+        assert!(with_pixels >= 4 && with_pixels < 7, "{}", with_pixels);
     }
 
     /// The minima (5.2): a split that cannot keep every pane at 260 wide,

@@ -83,9 +83,7 @@ const CONNECT_TRIES: u32 = 200;
 const CONNECT_DELAY_MS: u64 = 25;
 /// A layout verb (`close`) can be refused E_AGAIN by the compositor's
 /// per-pass mutation budget; retry through it, as the restore tool does.
-const VERB_RETRIES: u32 = 40;
-const VERB_NAP_MS: u64 = 10;
-const E_AGAIN: i64 = -11;
+use crate::chromeset::{E_AGAIN, VERB_NAP_MS, VERB_RETRIES};
 /// A never-succeeding present is a wedge, not a dropped frame (#31); this many
 /// consecutive failures on any tile ends the session rather than spinning.
 const PRESENT_FAILS_FATAL: u32 = 240;
@@ -398,17 +396,20 @@ impl SessionTile {
     }
 
     /// Take the surface and the command line out of a retained tile for a
-    /// Restart (14.6): the child is killed + reaped; the surface stays
-    /// live, so the leaf keeps its place, its weight and its frame.
+    /// Restart (14.6): the terminal is hung up and reaped (killed past the
+    /// grace); the surface stays live, so the leaf keeps its place, its
+    /// weight and its frame.
     fn into_parts(self) -> (Surface, Vec<String>) {
         let SessionTile {
             surf,
             argv,
             mut child,
+            _down,
+            leaf,
             ..
         } = self;
-        let _ = child.kill();
-        let _ = child.wait();
+        drop(_down);
+        end_terminal(&mut child, leaf);
         (surf, argv)
     }
 
@@ -943,12 +944,52 @@ impl SessionTile {
         }
     }
 
-    /// Surface + pipe ends drop (Surface::drop says `destroy`; the pipe fds
-    /// close, EOFing the kaua-term's input pump if it still lives).
-    fn teardown(mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+    /// The terminal is hung up and reaped; the surface and the pipe ends
+    /// drop (Surface::drop says `destroy`).
+    fn teardown(self) {
+        let SessionTile {
+            mut child,
+            _down,
+            leaf,
+            ..
+        } = self;
+        drop(_down);
+        end_terminal(&mut child, leaf);
     }
+}
+
+/// The teardown's grace: on the down channel's EOF the kaua-term hangs its
+/// program up and exits by itself once it has REAPED it (the program's
+/// zombie is its parent's to collect, never joey's -- an orphaned zombie
+/// keeps its namespace, the user's home mount, until init reaps it, and init
+/// cannot while login waits on the session: the logout stall measured at
+/// I-4, the r1 B-F4 finding). Past the grace the kill is the fallback, for a
+/// terminal that does not come down (a program whose children hold the pts).
+const TEARDOWN_GRACE_MS: u64 = 2_000;
+const TEARDOWN_POLL_MS: u64 = 25;
+
+/// Hang up: `down` is already closed by the caller. Wait for the terminal
+/// to exit within the grace, else kill it; reaped either way.
+fn end_terminal(child: &mut Child, leaf: u32) {
+    let mut waited = 0u64;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => {
+                #[cfg(feature = "test-mode")]
+                say!("halcyond: tile {} hung up ({} ms)", leaf, waited);
+                return;
+            }
+            Ok(None) => {}
+        }
+        if waited >= TEARDOWN_GRACE_MS {
+            break;
+        }
+        let _ = sleep(Duration::from_millis(TEARDOWN_POLL_MS));
+        waited += TEARDOWN_POLL_MS;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    say!("halcyond: tile {} killed after the hangup grace", leaf);
 }
 
 /// Bring the tile set in line with the layout: reap orphaned tiles (leaf
@@ -1926,6 +1967,8 @@ pub fn run(home: Option<String>) -> i64 {
                     railset::RailAction::Reset => {
                         let plan = read_file(troot, "layout").map(|l| reset_plan(&l)).unwrap_or_default();
                         say!("halcyond: reset: {} verb(s)", plan.len());
+                        let planned = plan.len();
+                        let mut landed = 0usize;
                         for (id, verb) in plan {
                             let (word, args) = verb.split_once(' ').unwrap_or((verb.as_str(), ""));
                             let cmd = if args.is_empty() {
@@ -1935,9 +1978,16 @@ pub fn run(home: Option<String>) -> i64 {
                             };
                             if layout_verb(troot, &cmd) {
                                 relayout = true;
+                                landed += 1;
                             }
                         }
-                        status.notify("LAYOUT RESET", false);
+                        // The notice tells the truth: a plan no verb of which
+                        // landed is a refused reset (the r1 B-F3 finding).
+                        if landed > 0 || planned == 0 {
+                            status.notify("LAYOUT RESET", false);
+                        } else {
+                            status.notify("RESET REFUSED", true);
+                        }
                     }
                     railset::RailAction::Theme => {
                         say!("halcyond: the theme picker is not available yet");

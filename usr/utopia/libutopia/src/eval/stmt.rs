@@ -2855,6 +2855,7 @@ fn dispatch_note(env: &mut Env, note: &Note) -> bool {
         // ignores its own SIGTSTP (the bash posture) and the v1.0 editor has
         // no resize consumer. The fd-0 EOF path backstops the hup.
         if note.name == "tty:hup" {
+            t_putstr("ut: hangup (tty:hup) -> exit 129\n");
             env.request_exit(129);
         }
         // A caught interrupt would have fired a handler above; an UNHANDLED

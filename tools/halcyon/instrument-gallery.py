@@ -12,6 +12,7 @@ and the tests read them, and `every_shipped_theme_loads` refuses a gallery
 file whose id is not its filename. `--check` diffs instead of writing.
 """
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -37,6 +38,12 @@ def render(id_, sidecar_text, ansi):
     meta, color = doc["meta"], doc["color"]
     assert meta["id"] == id_ and meta["profile"] == "instrument-v1" and meta["schema"] == 1
     assert set(doc) == {"meta", "color"} and len(color) == 35, id_
+    # The loader's own rules, so a regeneration fails HERE rather than at boot
+    # (r1 B-F11): a gallery id, sixteen distinct ANSI colours, a presentable
+    # name, and the 16 KiB cap (checked on the rendered text below).
+    assert re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", id_), f"not a gallery id: {id_}"
+    assert len(set(ansi)) == 16, f"ansi not distinct: {id_}"
+    assert 1 <= len(meta["name"]) <= 64 and meta["name"].isprintable(), f"name: {id_}"
     light = meta["color_scheme"] == "light"
     lines = [HEADER.format(name=meta["name"], word=meta["profile"], id=id_)]
     lines.append("[meta]")
@@ -53,7 +60,9 @@ def render(id_, sidecar_text, ansi):
     lines.append("[type]")
     lines.append(f"smooth = {12 if light else 0}")
     lines.append("")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    assert len(text.encode()) <= 16384, f"over INSTRUMENT_MAX: {id_}"
+    return text
 
 
 def main():

@@ -11,6 +11,7 @@
 #include <thylacine/burrow.h>  // G-2: burrow_unmap for the weave clunk-unmap
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/cons.h>
 #include <thylacine/proc.h>    // G-2: the mapping Proc's vma_lock + pid
 #include <thylacine/sched.h>   // sched() -- the wb single-flight yield-wait
 #include <thylacine/thread.h>  // G-2: current_thread for the clunk-unmap pid match
@@ -1668,8 +1669,19 @@ static void dev9p_close(struct Spoor *c) {
             if (vic >= 0)
                 (void)p9_client_clunk_async(p->client, (u32)vic);
         }
-        if (!parked)
-            (void)p9_client_clunk_async(p->client, p->fid);
+        if (!parked) {
+            int crc = p9_client_clunk_async(p->client, p->fid);
+            if (crc < 0) {
+                struct cons_diag_line dl;
+                cons_diag_line_init(&dl);
+                cons_diag_line_puts(&dl, "9p: close: clunk of fid ");
+                cons_diag_line_putdec(&dl, (u64)p->fid);
+                cons_diag_line_puts(&dl, " refused rc ");
+                cons_diag_line_putdec(&dl, (u64)(-crc));
+                cons_diag_line_puts(&dl, "\n");
+                cons_diag_line_emit(&dl);
+            }
+        }
     }
 
     if (p->attached_owner) {

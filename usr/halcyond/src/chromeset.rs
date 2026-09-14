@@ -84,13 +84,45 @@ pub fn read_file(root: i64, path: &str) -> Option<String> {
 
 /// Write one pane-tree file (a verb on a ctl, a tag). True on success.
 pub fn write_file(root: i64, path: &str, data: &str) -> bool {
+    write_file_rc(root, path, data) >= 0
+}
+
+/// `write_file` with the verdict: the write's rc (the compositor's errno,
+/// negative), or the open's when that failed -- so a refusal can be SAID
+/// and E_AGAIN retried (the r1 B-F3 finding).
+pub fn write_file_rc(root: i64, path: &str, data: &str) -> i64 {
     let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OWRITE) };
     if fd < 0 {
-        return false;
+        return fd;
     }
     let rc = unsafe { t_write(fd, data.as_ptr(), data.len()) };
     unsafe { t_close(fd) };
-    rc >= 0
+    rc
+}
+
+/// A layout verb can be refused E_AGAIN by the compositor's per-pass
+/// budget (`LAYOUT_VERBS_PER_PASS`): retry across passes, briefly.
+pub const VERB_RETRIES: u32 = 40;
+pub const VERB_NAP_MS: u64 = 10;
+pub const E_AGAIN: i64 = -11;
+
+/// A pane verb on the owner's conn, judged per write by the compositor:
+/// E_AGAIN is retried like the session's `layout_verb`; any other refusal
+/// is SAID with its rc, never swallowed (the r1 B-F3 finding).
+pub fn pane_verb(troot: i64, id: u32, verb: &str) -> bool {
+    let path = format!("pane/{}/ctl", id);
+    for _ in 0..VERB_RETRIES {
+        let rc = write_file_rc(troot, &path, verb);
+        if rc != E_AGAIN {
+            if rc < 0 {
+                say(&format!("halcyond: {} on pane {} refused rc {}", verb, id, rc));
+            }
+            return rc >= 0;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(VERB_NAP_MS));
+    }
+    say(&format!("halcyond: {} on pane {} still busy after {} tries", verb, id, VERB_RETRIES));
+    false
 }
 
 /// What a chrome surface paints (the Instrument profile; the legacy strip
@@ -242,8 +274,12 @@ impl ChromeSet {
         };
         let inst = sheet.profile == Profile::Instrument;
         let tree = parse_tree(&layout);
+        // The owner's own surface is never foreign, whatever `describe` says
+        // of it on the first pass (r1 B-F8).
         let panes = halcyond::rail::pane_count(&tree, |t| {
-            t.leaf.surface.is_some() && describe(t.leaf.id).is_none()
+            t.leaf.surface.is_some()
+                && t.leaf.surface != Some(own_surface)
+                && describe(t.leaf.id).is_none()
         })
         .max(1);
         // Said on a change, under Instrument only (test builds): a gate reads
@@ -405,10 +441,12 @@ impl ChromeSet {
                         // Where the strip sits (test builds): a gate that
                         // must press a header finds it here.
                         #[cfg(feature = "test-mode")]
-                        say(&format!(
-                            "halcyond: chrome {} for pane {} at {},{} {}x{}",
-                            t.surf.id, w.id, w.origin.0, w.origin.1, w.w, w.h
-                        ));
+                        if inst {
+                            say(&format!(
+                                "halcyond: chrome {} for pane {} at {},{} {}x{}",
+                                t.surf.id, w.id, w.origin.0, w.origin.1, w.w, w.h
+                            ));
+                        }
                         self.failed_said.retain(|&f| f != w.id);
                         self.tiles.insert(w.id, t);
                     }
@@ -484,7 +522,8 @@ impl ChromeSet {
                             }
                         }
                         TEV_PTR_BTN if inst && e.value == 1 => {
-                            let (x, y) = t.hover.unwrap_or((0, 0));
+                            // A press with no known position is not a press (r1 B-F7).
+                            let Some((x, y)) = t.hover else { continue };
                             let (w, h) = (t.surf.w, t.surf.h);
                             match t.kind {
                                 Kind::Header => {

@@ -185,10 +185,15 @@ impl RailBar {
                         }
                         TEV_PTR_BTN if e.code == BTN_LEFT => {
                             if e.value == 1 {
-                                let (x, y) = self.hover.unwrap_or((0, 0));
+                                // A press with no known position is not a press (r1 B-F7).
+                                let Some((x, y)) = self.hover else { continue };
                                 let hit = rail_hit(&self.zones, x, y);
                                 self.ink.pressed = hit;
                                 let action = match hit {
+                                    // Surface coordinates ARE display coordinates
+                                    // here: the compositor places the rail at the
+                                    // display's origin (`rail_rect` = 0,0,W,rail_h)
+                                    // (r1 B-F12).
                                     Some(RailHit::Brand) => Some(RailAction::Workspaces {
                                         x: x.max(0) as u32,
                                         y: y.max(0) as u32,

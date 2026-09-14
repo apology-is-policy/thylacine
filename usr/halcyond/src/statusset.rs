@@ -41,6 +41,29 @@ pub fn clock_hm() -> (u8, u8) {
 /// rails repaint on a change of the minute, and this is what wakes a
 /// blocking poll for it -- before, the minute lagged until an unrelated
 /// event.
+/// A test-mode say lands on the console (and the serial): a tile's strings
+/// -- its title, the cmd mark -- are untrusted bytes and must not reach the
+/// operator's terminal with their control characters (the r1 B-F1 finding;
+/// the TH-6 F4 chokepoint's sibling).
+#[cfg(feature = "test-mode")]
+fn scrub(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+/// Under legacy the painter reads none of the Instrument fields, so they
+/// must not force a repaint: a `running` flip repainted and re-presented the
+/// legacy bar twice per command for the same pixels (the r1 B-F2 finding).
+fn legacy_same(a: &StatusModel, b: &StatusModel) -> bool {
+    let strip = |m: &StatusModel| StatusModel {
+        running: false,
+        pane_count: 0,
+        host: None,
+        hints: alloc::vec::Vec::new(),
+        ..m.clone()
+    };
+    strip(a) == strip(b)
+}
+
 pub fn clock_timeout_ms() -> i32 {
     let mut ts = [0i64; 2];
     let rc = unsafe { t_clock_gettime(T_CLOCK_REALTIME, ts.as_mut_ptr() as u64) };
@@ -240,7 +263,13 @@ impl StatusBar {
 
     /// Paint `model` if it differs from what is showing.
     pub fn refresh(&mut self, model: &StatusModel, sheet: &Sheet, gs: &mut GlyphSource) {
-        if self.painted.as_ref() == Some(model) {
+        let inst = sheet.profile == libhalcyon::instrument::Profile::Instrument;
+        let same = match self.painted.as_ref() {
+            Some(p) if inst => p == model,
+            Some(p) => legacy_same(p, model),
+            None => false,
+        };
+        if same {
             return;
         }
         let surf = match self.surf.as_mut() {
@@ -287,7 +316,7 @@ impl StatusBar {
                     surf.id,
                     slots.ws.0, slots.ws.1, slots.ctx.0, slots.ctx.1, slots.cond.0, slots.cond.1,
                     slots.clock.0, slots.clock.1,
-                    halcyond::status::context_text(&model.name, &model.cwd, &model.cmd),
+                    scrub(&halcyond::status::context_text(&model.name, &model.cwd, &model.cmd)),
                     model.condition, model.hour, model.minute,
                     slots.ctx_ink.0, slots.ctx_ink.1,
                     model.exit_code.map(|c| format!("{}", c)).unwrap_or_else(|| String::from("-")),

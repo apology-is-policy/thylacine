@@ -562,7 +562,7 @@ expect {
 lc_pass "instrument: RESET is a rail action that says what it did (9.5)"
 # The mark opens the workspace list (14.1) as a 14.2 menu; Esc dismisses it.
 set bc [zone_centre [dict get $rz brand]]
-click 15 15
+click [lindex $bc 0] [lindex $bc 1]
 expect {
     -re {halcyond: rail press Workspaces \{ x: (\d+), y: (\d+) \}} {}
     timeout { lc_fail "the press on the mark did not reach halcyond" }

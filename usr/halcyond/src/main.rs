@@ -812,7 +812,7 @@ pub extern "C" fn rs_main() -> i64 {
             for a in chrome.take_actions() {
                 match a {
                     ChromeAction::Focus(id) => {
-                        if chromeset::write_file(troot, &alloc::format!("pane/{}/ctl", id), "focus") {
+                        if chromeset::pane_verb(troot, id, "focus") {
                             relayout = true;
                         }
                     }
@@ -820,7 +820,7 @@ pub extern "C" fn rs_main() -> i64 {
                         if count <= 1 {
                             say!("halcyond: final tile is protected (pane {})", id);
                             status.notify("FINAL TILE IS PROTECTED", true);
-                        } else if chromeset::write_file(troot, &alloc::format!("pane/{}/ctl", id), "close") {
+                        } else if chromeset::pane_verb(troot, id, "close") {
                             relayout = true;
                         }
                     }
@@ -945,10 +945,9 @@ pub extern "C" fn rs_main() -> i64 {
                     railset::RailAction::SplitH | railset::RailAction::SplitV => {
                         let verb = if a == railset::RailAction::SplitH { "split h" } else { "split v" };
                         if let Some((id, _, _)) = chrome.focused() {
-                            if chromeset::write_file(troot, &alloc::format!("pane/{}/ctl", id), verb) {
+                            if chromeset::pane_verb(troot, *id, verb) {
                                 relayout = true;
                             } else {
-                                say!("halcyond: {} on pane {} refused", verb, id);
                                 status.notify("SPLIT REFUSED", true);
                             }
                         }
@@ -958,12 +957,21 @@ pub extern "C" fn rs_main() -> i64 {
                             .map(|l| reset_plan(&l))
                             .unwrap_or_default();
                         say!("halcyond: reset: {} verb(s)", plan.len());
+                        let planned = plan.len();
+                        let mut landed = 0usize;
                         for (id, verb) in plan {
-                            if chromeset::write_file(troot, &alloc::format!("pane/{}/ctl", id), &verb) {
+                            if chromeset::pane_verb(troot, id, &verb) {
                                 relayout = true;
+                                landed += 1;
                             }
                         }
-                        status.notify("LAYOUT RESET", false);
+                        // The notice tells the truth: a plan no verb of which
+                        // landed is a refused reset (the r1 B-F3 finding).
+                        if landed > 0 || planned == 0 {
+                            status.notify("LAYOUT RESET", false);
+                        } else {
+                            status.notify("RESET REFUSED", true);
+                        }
                     }
                     railset::RailAction::Theme => {
                         say!("halcyond: the theme picker is not available yet");
@@ -1034,7 +1042,7 @@ pub extern "C" fn rs_main() -> i64 {
                         if count <= 1 {
                             say!("halcyond: final tile is protected (pane {})", id);
                             status.notify("FINAL TILE IS PROTECTED", true);
-                        } else if chromeset::write_file(troot, &alloc::format!("pane/{}/ctl", id), "close") {
+                        } else if chromeset::pane_verb(troot, id, "close") {
                             relayout = true;
                         }
                     }

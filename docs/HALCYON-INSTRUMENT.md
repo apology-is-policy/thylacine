@@ -1329,6 +1329,7 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   Astra's goldens; the Fable round over I-1..I-8 (double-distance batched:
   one round after I-4, one after I-8); `/lib/halcyon/profile` flips to
   `instrument` for fresh images; `legacy` stays selectable for a release.
+  **Round 1 (I-1..I-4, two Opus-5 prosecutors, 2026-09-14): 0 P0 / 1 P1 / 5 P2 / 15 P3, all P1/P2 fixed at the close, DIRTY by count -- the fixes are the I-5 round's focus (`memory/audit_instrument_closed_list.md`). The I-4 open defect (no login prompt after a Super+Q logout) is ARM-6's deadlock on main's kernel (no Part D / A1 -- aux's paused merge); fixed on the session's side: a structural close HANGS the tile UP (the down channel's EOF) and the kaua-term ends + reaps its program before exiting, so no zombie of the user's escapes to joey.**
 
 Rollback at every step is the profile word; a palette rollback never kills
 a process; a layout v2 file reads under v1 with equal weights.

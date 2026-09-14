@@ -5,6 +5,7 @@
 //   error mapping.
 
 #include <thylacine/9p_client.h>
+#include <thylacine/cons.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
@@ -1042,6 +1043,15 @@ static int client_run(struct p9_client *c, size_t built_len,
             } else if (fsr < 0) {
                 client_mark_dead_locked(c, false);
             }
+        }
+        {
+            struct cons_diag_line dl;
+            cons_diag_line_init(&dl);
+            cons_diag_line_puts(&dl, "9p: op abandoned (tag ");
+            cons_diag_line_putdec(&dl, (u64)tag);
+            cons_diag_line_puts(&dl, (wr == CLIENT_WAIT_DIED) ? ", death" : ", note");
+            cons_diag_line_puts(&dl, (flen > 0) ? ", flush sent)\n" : ", no flush staged)\n");
+            cons_diag_line_emit(&dl);
         }
         return (wr == CLIENT_WAIT_NOTEINTR) ? -P9_E_INTR : -P9_E_IO;
     }

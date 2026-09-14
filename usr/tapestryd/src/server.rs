@@ -4887,8 +4887,8 @@ impl Comp {
             // HALCYON-INSTRUMENT 8: the rail is neither hosted nor pane-bound
             // -- its bind is the display. The carve already reserves the
             // strip, so registering it moves no leaf; surface_target places
-            // it there and the reconcile fans it its CONFIGURE (and leaves
-            // Direct, as for the bar: a second visible thing).
+            // it there, the redraw request below tells it, and the reconcile
+            // leaves Direct (as for the bar: a second visible thing).
             self.rail = Some(StatusState { n, gen });
             #[cfg(feature = "test-mode")]
             say!(
@@ -4900,6 +4900,14 @@ impl Comp {
                 self.metrics.rail_h
             );
             self.reconcile();
+            // The strip is carved with or without a rail (I-2), so this
+            // registration moves no rect and the reconcile fans nothing
+            // (r1 A-F5): hand the new rail its redraw request here.
+            if let Some(t) = self.surface_target(n) {
+                if !self.emit_configure_to(n, t.w, t.h) {
+                    self.retire(n);
+                }
+            }
             return Ok(());
         }
         if is_status {
@@ -5765,7 +5773,35 @@ impl Comp {
             // status_bg is the bar's Clear colour, so the strip reads
             // correct-minus-glyphs at once; the CONFIGURE fan below repaints the
             // glyphs (visible_chrome includes the bar).
-            if let Some(sr) = self.status_rect() {
+            if let Some((top, bottom)) = self.rail_rects() {
+                // HALCYON-INSTRUMENT 8 (r1 A-F3): both rails heal like the
+                // legacy strip -- the fill, then the structure line on the
+                // workspace side, as paint_instrument lays them.
+                let inst = self.bundle.inst;
+                let hair = self.metrics.hairline.max(0) as u32;
+                let top_line = Rect {
+                    x: top.x,
+                    y: (top.y + top.h).saturating_sub(hair),
+                    w: top.w,
+                    h: hair.min(top.h),
+                };
+                let bottom_line = Rect {
+                    x: bottom.x,
+                    y: bottom.y,
+                    w: bottom.w,
+                    h: hair.min(bottom.h),
+                };
+                for (strip, line) in [(top, top_line), (bottom, bottom_line)] {
+                    let i = strip.intersect(r);
+                    if !i.is_empty() {
+                        fills.push((i, inst.rail));
+                        let l = line.intersect(r);
+                        if !l.is_empty() {
+                            fills.push((l, inst.structure));
+                        }
+                    }
+                }
+            } else if let Some(sr) = self.status_rect() {
                 let i = sr.intersect(r);
                 if !i.is_empty() {
                     fills.push((i, self.theme.status_bg));
@@ -6249,10 +6285,14 @@ impl Comp {
                 painted.push(bottom);
             }
         }
-        // The pad ring between the workspace and the root: `desktop`.
+        // The pad ring between the workspace and the root: `desktop`. Not
+        // under a zoom: the zoomed leaf fills the workspace between the
+        // rails, frame-less (5.6), and the ring would land inside its
+        // content (r1 A-F2).
         let area = self.layout.area;
         let pad = m.outer_pad.max(0) as u32;
-        if !area.is_empty() {
+        let zoomed = self.layout.zoom_id().is_some();
+        if !area.is_empty() && !zoomed {
             for r in [
                 Rect {
                     x: area.x,
@@ -6288,6 +6328,10 @@ impl Comp {
         }
         let focused = self.layout.focused;
         let focused_parent = self.layout.get(focused).and_then(|p| p.parent);
+        // The joints, painted AFTER the walk: a joint overpaints 1 px of the
+        // trailing pane's frame (3.1), so it must land above every frame
+        // whatever the slot order the walk visits them in (r1 A-F4).
+        let mut joints: Vec<Rect> = Vec::new();
         for (slot, _id) in self.layout.live_ids() {
             let (kind_split, vertical_track, is_frame_owner, rect, dividers, tagbar, empty_body, content, visible, separator) = {
                 let Some(p) = self.layout.get(slot) else { continue };
@@ -6384,19 +6428,7 @@ impl Comp {
                     }
                     .intersect(disp);
                     if !j.is_empty() {
-                        self.fill_rect(j, inst.structure);
-                        if j.w > 2 * hair && j.h > 2 * hair {
-                            self.fill_rect(
-                                Rect {
-                                    x: j.x + hair,
-                                    y: j.y + hair,
-                                    w: j.w - 2 * hair,
-                                    h: j.h - 2 * hair,
-                                },
-                                inst.desktop,
-                            );
-                        }
-                        painted.push(j);
+                        joints.push(j);
                     }
                     painted.push(d);
                 }
@@ -6407,7 +6439,10 @@ impl Comp {
                 self.fill_rect(r, inst.pane);
                 painted.push(r);
             }
-            if !is_frame_owner || rect.is_empty() {
+            // A leaf whose content IS its rect is the zoomed one (5.6): no
+            // frame, as the legacy painter's `rect == content` exemption
+            // (r1 A-F2).
+            if !is_frame_owner || rect.is_empty() || rect == content {
                 continue;
             }
             let r = rect.intersect(disp);
@@ -6448,6 +6483,21 @@ impl Comp {
                 self.fill_rect(b, colour);
                 painted.push(b);
             }
+        }
+        for j in joints {
+            self.fill_rect(j, inst.structure);
+            if j.w > 2 * hair && j.h > 2 * hair {
+                self.fill_rect(
+                    Rect {
+                        x: j.x + hair,
+                        y: j.y + hair,
+                        w: j.w - 2 * hair,
+                        h: j.h - 2 * hair,
+                    },
+                    inst.desktop,
+                );
+            }
+            painted.push(j);
         }
         painted
     }
@@ -6697,6 +6747,28 @@ impl Comp {
         };
         self.layout.apply_backgrounded(&bg_tiling);
         self.layout.recompute(area, self.chords.gaps, self.metrics, self.bundle.profile);
+        // HALCYON-INSTRUMENT 5.2 (r1 A-F1): a leaf carved to ZERO (the tree
+        // outgrew the minima through a path the fits-check does not guard --
+        // `mode`, `move`, a scale change, a restore onto a smaller display)
+        // is dormant, so it must not keep input focus: the user's keys would
+        // vanish into a tile with no pixels. Move focus to the first leaf
+        // that has some. Instrument only: the legacy carve zeroes no leaf.
+        if self.bundle.profile == libhalcyon::instrument::Profile::Instrument {
+            let f = self.layout.focused;
+            if self.layout.get(f).map_or(false, |p| p.rect.is_empty()) {
+                let rescue = self.layout.live_ids().into_iter().find(|&(slot, _)| {
+                    self.layout.is_leaf(slot)
+                        && self
+                            .layout
+                            .get(slot)
+                            .map_or(false, |p| p.visible && !p.rect.is_empty())
+                });
+                if let Some((slot, id)) = rescue {
+                    self.layout.focus(slot);
+                    say!("tapestryd: focus rescued from a dormant leaf to pane {}", id);
+                }
+            }
+        }
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
@@ -8638,8 +8710,19 @@ impl Comp {
                 }
             }
             ChordAction::Split(mode) => {
-                self.layout.unzoom();
                 let f = self.layout.focused;
+                // HALCYON-INSTRUMENT 5.2: the chord is the `split` verb's twin
+                // and meets the same minima, judged BEFORE the tree changes
+                // (the r1 A-F1 finding: this arm alone grew ZERO-rect leaves
+                // past them). Always fits under legacy.
+                if !self.layout.split_fits(f, mode) {
+                    say!(
+                        "tapestryd: chord split refused: the minima (pane {})",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    return;
+                }
+                self.layout.unzoom();
                 // The new empty leaf must record the owner of the leaf being
                 // split (its hosted surface's principal), so a SESSION that
                 // Super+H-splits its own tile can later mint the placement
