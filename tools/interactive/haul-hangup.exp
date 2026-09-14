@@ -1,0 +1,90 @@
+#!/usr/bin/expect -f
+# tools/interactive/haul-hangup.exp -- a server that hangs up must make haul
+# FAIL, promptly, rather than hang.
+#
+# THE DEFECT. SYS_ATTACH_9P runs Tversion + Tattach synchronously, reading the
+# replies from a pipe that has no deadline. haul's down pump is the only writer
+# of that pipe, and when the server hung up the pump ended WITHOUT closing its
+# end -- so the kernel waited for an Rversion that could no longer arrive, and
+# haul's main thread sat inside the syscall for good. Nothing left alive could
+# notice: no mount line, no error, and the shell never got its prompt back.
+#
+# THE FIXTURE NEEDS NOTHING EXTERNAL, which is why this is its own scenario and
+# not a leg of haul-npxf: a peer that accepts and hangs up is the whole
+# reproduction, and PLAIN 9P reaches the attach with no handshake in the way. So
+# it runs in every fleet, not only where an npxf server happens to be up. The
+# encrypted twin -- a relay that lets npxf's three flights through and hangs up
+# after them -- is a leg of haul-npxf, because it needs the real server.
+#
+# THREE ASSERTIONS, each closing a different way this could pass while wrong:
+#   1. haul names the side that ended -- the down pump -- and no other failure.
+#      A connect that never reached the peer, or an attach that somehow
+#      succeeded, fails the leg at once instead of reading as the fix.
+#   2. The shell answers the next command, so haul EXITED rather than printing
+#      its error and then hanging.
+#   3. The peer's own log shows it accepted and hung up, so the failure in (1)
+#      is the one this fixture exists to cause.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+proc read_file {path} {
+    if {[catch {set f [open $path r]}]} { return "" }
+    set d [read $f]
+    close $f
+    return $d
+}
+
+# Wait up to `secs` for glob `pat` to appear in the log at `path`; return the log.
+proc wait_log {path pat secs} {
+    set d ""
+    for {set i 0} {$i < $secs * 10} {incr i} {
+        set d [read_file $path]
+        if {[string match $pat $d]} { break }
+        after 100
+    }
+    return $d
+}
+
+lc_boot
+lc_login cora kora
+
+# The peer starts AFTER boot: an `exec` before `spawn` is a macOS expect 5.45
+# footgun (lib.exp's header), and the guest does not dial until the leg anyway.
+#
+# The PEER picks the port (it binds port 0) and logs it. A free port chosen here
+# and handed over would be check-then-use: LS-CI runs scenarios in parallel,
+# haul-npxf's relay needs a port too, and two checks can pass for one port.
+set peerlog /tmp/haul-hangup-peer-[pid].log
+file delete -force $peerlog
+set peer_pid [exec python3 $lc_repo/tools/interactive/haul-hangup-peer.py \
+    --port 0 --log $peerlog --mode accept-close &]
+
+# Wait for it to LISTEN by reading its log, not by connecting: the peer serves
+# exactly one connection, so a probe would spend it.
+set d [wait_log $peerlog "*listening*" 5]
+if {![regexp {listening 127\.0\.0\.1:([0-9]+)} $d -> port]} {
+    lc_fail "the hang-up peer never listened -- its log: $d"
+}
+lc_step "hang-up peer listening on 127.0.0.1:$port (pid $peer_pid)"
+
+# `-v` so that a regression's transcript ends on "pumps up; attaching" -- the
+# location of the hang -- rather than on nothing at all.
+lc_send "mkdir -p /tmp/hang"
+lc_run_expect_hardfail_re "haul -v 10.0.2.2!$port /tmp/hang" \
+    "attach (the server closed without replying)" \
+    {haul: (connect|attach \(9P|attach \(the connection)|mounted at}
+lc_run_expect "echo haul-returned | tr a-z A-Z" "HAUL-RETURNED"
+
+set log [wait_log $peerlog "*guest: the other side*" 12]
+if {![string match "*accepted*" $log] || ![string match "*guest: sent FIN*" $log]} {
+    lc_fail "the peer did not accept and hang up as designed -- its log: $log"
+}
+lc_step "peer log: [string map [list "\n" " | "] [string trim $log]]"
+lc_pass "haul-hangup: a server that hangs up before Rversion fails the attach, and haul exits"
+
+catch {exec kill $peer_pid}
+file delete -force $peerlog
+lc_quit
+exit 0

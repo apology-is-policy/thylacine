@@ -344,22 +344,54 @@ struct DownCtx {
     opener: Option<npxf::Opener>,
 }
 
-/// Record which direction ended, and exit the thread.
+/// The kernel -> server pump ended: record it and exit the thread, closing
+/// nothing. `finish_down` explains why this direction has nothing it may close.
+fn finish_up() -> ! {
+    let _ = STOPPED.compare_exchange(STOP_NONE, STOP_UP, Ordering::AcqRel, Ordering::Acquire);
+    unsafe { libthyla_rs::t_thread_exit() };
+}
+
+/// The server -> kernel pump ended: record it, close the pipe end the kernel's
+/// replies arrive through, and exit the thread.
 ///
-/// A PUMP CLOSES NOTHING. The obvious shape -- have the dying pump close the
-/// kernel's write end, so a session waiting on a reply sees EOF instead of
-/// parking forever -- puts one thread's `close` against the other thread's
-/// in-flight `write` on the SAME fd, and the fd number can be recycled between
-/// the two. Electing a single closer by CAS removes the double close but not
-/// that race.
+/// THE CLOSE IS WHAT MAKES A DEAD SERVER AN ERROR RATHER THAN A HANG. The kernel
+/// reads replies with no deadline (the Spoor transport's `set_recv_deadline` is
+/// NULL), so while `s2c_wr` is open, a request whose reply can no longer come
+/// waits forever. The main thread bounds that only from a loop that watches
+/// STOPPED, and it is in no such loop while it sits inside a synchronous 9P
+/// call -- `t_attach_9p`, or the `-v` listing. A server that hung up straight
+/// after the handshake used to leave haul inside the attach for good. EOF on
+/// `s2c_rd` is a transport break the kernel's 9P client latches as a dead
+/// session, failing every waiter, so the call returns an error instead.
 ///
-/// Instead the main thread observes STOPPED and lets the PROCESS exit, which
-/// closes every fd at once, from outside both pumps. The kernel sees the same
-/// EOF, bounded by the 200 ms poll, and no fd is ever closed underneath a
-/// writer. Exiting is correct rather than merely convenient: haul IS the
-/// transport, so once either direction is dead the mount is dead too.
-fn finish(which: u32) -> ! {
-    let _ = STOPPED.compare_exchange(STOP_NONE, which, Ordering::AcqRel, Ordering::Acquire);
+/// A PUMP MAY CLOSE ONLY AN FD NO OTHER THREAD CAN BE USING. The hazard is one
+/// thread's close landing on another thread's in-flight use of the same fd,
+/// whose number can be recycled in between. That is why neither pump may close
+/// `tcp_fd`, the one fd they share, and why "whichever pump dies closes the
+/// kernel's read side" is refused: the up pump would be closing THIS pump's fd.
+/// `s2c_wr` has exactly one user, this thread -- the attach took its refs on the
+/// CLIENT ends, main never touches it, and a spawned command inherits only its
+/// stdio. After the close this thread exits without reading `ctx` again, so a
+/// recycled number is never used under its old meaning. STOPPED is set first,
+/// so by the time the kernel can see the EOF, main's diagnosis names this side.
+///
+/// The up pump's end, `c2s_rd`, is just as exclusive and still stays open.
+/// Closing it would send the kernel's next write into the pipe's read-EOF arm,
+/// which posts a `pipe` note to whichever Proc issued that 9P call
+/// (`kernel/pipe.c`, the CNBFRAME branch): a transport event delivered as that
+/// Proc's own write on a closed pipe. Nor is it needed, because a call is stuck
+/// only while its REPLY direction is. Inside main's synchronous calls, every way
+/// the up pump can end either follows the kernel's own teardown (EOF on
+/// `c2s_rd`), cannot happen with the kernel's frames (a refused length, a payload
+/// over MSG_MAX, a spent record counter), or comes with netd or the connection
+/// gone -- which ends this pump's read too, since netd reports a closed socket
+/// as EOF. The one death it can have alone, a write stalled for WRITE_STALL_MS
+/// against a live peer that stopped reading, needs a full TCP send buffer
+/// (netd's is 64 KiB), and those calls send a few hundred bytes. Outside them,
+/// main watches STOPPED.
+fn finish_down(ctx: &DownCtx) -> ! {
+    let _ = STOPPED.compare_exchange(STOP_NONE, STOP_DOWN, Ordering::AcqRel, Ordering::Acquire);
+    let _ = unsafe { t_close(ctx.dst) };
     unsafe { libthyla_rs::t_thread_exit() };
 }
 
@@ -388,7 +420,7 @@ extern "C" fn pump_up(arg: u64) {
             break;
         }
     }
-    finish(STOP_UP);
+    finish_up();
 }
 
 /// server -> kernel. Takes R-messages off the wire and writes them into the
@@ -412,7 +444,7 @@ extern "C" fn pump_down(arg: u64) {
             break;
         }
     }
-    finish(STOP_DOWN);
+    finish_down(ctx);
 }
 
 enum RecordIn {
@@ -686,7 +718,16 @@ fn read_token_bytes(path: &str, m: TokenRead) -> Result<Zeroizing<Vec<u8>>, &'st
     // check has to come after the allocation, so `-t /dev/zero` would already
     // have consumed the heap by the time it fired. One byte over the cap is
     // enough to detect the overflow without ever holding more than the cap.
-    let mut buf: Vec<u8> = alloc::vec![0u8; m.max + 1];
+    //
+    // `Zeroizing` FROM THE ALLOCATION, not wrapped on the way out. Wrapping
+    // only the result wiped the success path and left the read-error and
+    // too-large returns dropping a plain Vec -- a partial token, or the first
+    // 4 KiB of whatever `-t` was mistakenly pointed at, freed unwiped (pages are
+    // zeroed on allocation here, not on free). Owning the wipe from the start
+    // covers every return, including ones added later. It also covers the
+    // bytes `truncate` and the trim leave in spare capacity: zeroize's Vec impl
+    // wipes the whole capacity, and this buffer is never reallocated.
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(alloc::vec![0u8; m.max + 1]);
     let mut n = 0usize;
     while n < buf.len() {
         match f.read(&mut buf[n..]) {
@@ -708,7 +749,7 @@ fn read_token_bytes(path: &str, m: TokenRead) -> Result<Zeroizing<Vec<u8>>, &'st
     if buf.is_empty() {
         return Err(m.empty_msg);
     }
-    Ok(Zeroizing::new(buf))
+    Ok(buf)
 }
 
 fn parse_args(args: Args) -> Result<Parsed, &'static str> {
@@ -933,25 +974,14 @@ fn run(argv: Args) -> Result<(), &'static str> {
     // "the mount is wrong" from "the caller cannot see it", which are the two
     // failures that otherwise both present as `no such file or namespace entry`.
     //
-    // GUARDED ON STOPPED, and that guard is load-bearing rather than tidy. This
-    // is a blocking 9P round trip, and the kernel's Spoor transport sets
-    // `set_recv_deadline = NULL` -- a backend with a NULL op ignores deadlines
-    // and the recv just blocks. If the peer hangs up between t_mount and here,
-    // both pumps reach `finish` and die, and A PUMP CLOSES NOTHING by design:
-    // `s2c_wr` is still open, held by a dead thread's leaked ctx, so the kernel
-    // never sees EOF on `s2c_rd` and this read_dir never returns. That is a
-    // permanent silent hang in the one straight-line call that sits BEFORE the
-    // park loop whose whole job is to bound exactly this.
-    //
-    // The guard closes the REACHABLE window -- a peer that dies any time before
-    // the check begins. It does NOT close the race where the peer dies DURING
-    // the round trip, and that residue cannot be closed here: bounding it needs
-    // either a deadline the Spoor transport does not offer, or the dying pump to
-    // close the kernel's write end, which is the fd-recycle race `finish`
-    // deliberately refuses. So the residue is announced instead of hidden -- the
-    // step below prints BEFORE the call, so a hang has a location rather than
-    // being a silent stop after the mount line.
-    if VERBOSE.load(Ordering::Relaxed) != 0 && STOPPED.load(Ordering::Relaxed) == STOP_NONE {
+    // Like the attach, this is a synchronous 9P round trip with no deadline, and
+    // a peer that hangs up during it ends it the same way: the down pump closes
+    // `s2c_wr` as it dies (`finish_down`), the kernel reads EOF, and read_dir
+    // fails instead of blocking. The STOPPED check therefore only skips a listing
+    // already known to be doomed -- and after a failure it separates "the
+    // connection ended mid-listing" from "the mount did not take", which would
+    // otherwise print the same line.
+    if VERBOSE.load(Ordering::Relaxed) != 0 && STOPPED.load(Ordering::Acquire) == STOP_NONE {
         step!("mount check: listing {} ...", args.mountpoint);
         match libthyla_rs::fs::read_dir(args.mountpoint.as_str()) {
             Ok(rd) => {
@@ -964,6 +994,9 @@ fn run(argv: Args) -> Result<(), &'static str> {
                     n += 1;
                 }
                 step!("mount check: {} entr(y/ies) here, first {:?}", n, first);
+            }
+            Err(_) if STOPPED.load(Ordering::Acquire) != STOP_NONE => {
+                step!("mount check: the connection ended during the listing")
             }
             Err(_) => step!("mount check: CANNOT read {} -- the mount did not take", args.mountpoint),
         }
@@ -993,20 +1026,19 @@ fn run(argv: Args) -> Result<(), &'static str> {
     // returning the five entries the server exports.
     //
     // The Plan 9 answer to that is rfork-mount-exec, which is this form: the
-    // child is downstream of the mount rather than beside it. AND THE CHILD DID
-    // NOT SEE IT EITHER -- measured twice, on a mountpoint inside another mount
-    // and on a plain ramfs one, which refuted the nested-mount explanation that
-    // fit the first run perfectly. Reading the kernel says it should work:
-    // rfork_internal clones the mount table unconditionally, spawn reaches it
-    // via rfork_with_caps(RFPROC, ..), and exec.c never touches a Territory. So
-    // the mechanism is UNEXPLAINED, not understood-and-accepted; it is tracked
-    // as its own chunk (memory/bug_nested_mount_lost_at_spawn_clone.md) with the
-    // interactive scenario as its reproducer.
+    // child is downstream of the mount rather than beside it, so it sees the
+    // tree -- rfork_internal clones the mount table unconditionally, and spawn
+    // reaches it through rfork_with_caps(RFPROC, ..). haul-npxf asserts it end
+    // to end: the child reads a file through the mount.
     //
-    // Until that lands, this form runs the command but does not promise it the
-    // tree. Delivering a mount to an EXISTING shell needs /srv (post the
-    // connection, let the shell mount it) -- a separate chunk and a design
-    // question, recorded in docs/HAUL-DESIGN.md.
+    // A server without the fused Twalkgetattr (npxf is one) makes this look
+    // broken in a specific way worth recognising: the child can LIST the mount
+    // point, but anything BENEATH it is "no such file or namespace entry". That
+    // was dev9p taking the server's EOPNOTSUPP for a failed walk instead of a
+    // missing operation to fall back from. Spawn was never involved.
+    //
+    // What no form of this can do is hand the mount to an EXISTING shell: a
+    // child never reaches into its parent's namespace (docs/HAUL-DESIGN.md 4.3).
     if !args.cmd.is_empty() {
         let mut c = libthyla_rs::process::Command::new(args.cmd[0].clone());
         c.args(args.cmd[1..].iter().cloned());
