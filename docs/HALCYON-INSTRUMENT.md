@@ -1,7 +1,8 @@
 # HALCYON-INSTRUMENT — the Instrument profile: Carbon Optics and the twelve, on Halcyon as built
 
-**Status: DESIGN (2026-09-14), the operator's rulings recorded in §2; the
-residue in §13 is for the operator's word.** This is Thylacine's own reading
+**Status: DESIGN (2026-09-14; Astra's round-2 amendments folded in the same
+day, §3.1), the operator's rulings recorded in §2; the residue in §13 is
+for the operator's word.** This is Thylacine's own reading
 of the Astra kit (`docs/halcyon-carbon-handoff/`, committed as shipped at
 `75c5b44a`): what the mockup fixes exactly, what the tree already has, what
 is new, and in what order it lands. Scripture before code, the
@@ -22,8 +23,8 @@ scales through it), `HALCYON-TYPE` (the rasterizer; unchanged), `HALCYON.md`
 §14.12/§14.13 (the per-user session compositor and the proportional-live
 model — the one ratified rule the mockup collides with, §13.1),
 `HALCYON-WORKSPACES` (now IN, §2), `docs/halcyon-carbon-handoff/REQUEST-TO-ASTRA.md`
-(the data owed by Astra; nothing in this document is blocked on it except
-the goldens of §11).
+and its answer `docs/halcyon-carbon-handoff/round2/RESPONSE-TO-FABLE.md`
+(folded in as §3.1 and §14; the goldens are ours to capture, §11).
 
 ---
 
@@ -107,7 +108,7 @@ profile only** (the kit's IMPLEMENTATION-SPEC §2 table, as ratified):
 |---|---|---|
 | Daylight default, paper-light | Carbon Optics default, near-black; 13 themes | §4 |
 | Fixed ember `#e07840` shared with Bonfire | The theme's `amber` (Carbon `#C7B98B`); the terminal's Bonfire ground is replaced by the theme's `terminal_bg` | §7.3 |
-| Four-face 2 px NNW bevel + inner hairline + floor gap; corner mitres | Flat 1 px `pane_border` frame; 3 px outer pad; 7 px divider track with a 2 px rule and a 5×5 joint; no bevel, no hairline, no shadow | §5.1 |
+| Four-face 2 px NNW bevel + inner hairline + floor gap; corner mitres | Flat 1 px `pane_border` frame; 3 px outer pad; 7 px divider track with a 2 px rule and a 7 × 7 joint (5 + a 1 px border); no bevel, no hairline, no shadow | §5.1 |
 | 20 px tag bar and status bar, one vertical unit | 32 px header; 34 px top rail; 25 px bottom rail | §5.1, §8 |
 | No pane-level focus; the live tile's status-coloured content outline + cast shadow | A neutral focused-pane frame (`focus_neutral`) + a 2×20 amber mark on the focused expanded header; **no** status-coloured outline; status moves to the metadata ink and the bottom rail's condition | §7.3 |
 | Name (never truncated) │ pills · trail | Index │ name (ellipsised) │ pills │ metadata │ × | §6.4 |
@@ -120,6 +121,32 @@ Everything else in HALCYON-VISUAL that is not a colour or a metric — the
 amber discipline (§1.3's scarcity, kept under a new hue), "content is never
 dimmed" (§5.2), two status states (§1.4), monospace means preformatted
 output (§7), heading rank by size (§8.1) — stands under Instrument too.
+
+### 3.1 Round-2 amendments (Astra's reply, 2026-09-14; `round2/RESPONSE-TO-FABLE.md`, committed @`009b9062`)
+
+Round 2 sits at the kit's tier of the precedence and amends the kit where
+the two disagree; where it disagrees with THIS document the row says which
+wins and why. Every number here was recomputed from the package's own data
+before it was adopted (JOURNAL run 46o, "Round 2"): the bundle verified
+and its `dist/` compared byte-for-byte, the 45 ratios and the 208 ANSI
+contrasts re-derived, the build script re-run to a byte-identical
+package, the 13 stock files loaded by the tree's parser.
+
+| Subject | The kit / this document said | Round 2 establishes | Verdict |
+|---|---|---|---|
+| Provenance | the pinned `074bc564` unverifiable | `instrument-panel.bundle`: complete history (5 commits, 2026-09-13), HEAD `074bc564`, its `dist/*` byte-identical to `reference/` | closed |
+| Divider joint | 5 × 5 at (1,1) | `* { box-sizing }` never selects a pseudo-element, so `.divider::after` is 5 px content + a 1 px border = **7 × 7 outer** at (1,1) (`styles.css:406,481`); the divider paints above the panes (z-index 4), so the joint overpaints 1 px of the trailing pane's frame across the track | adopted (§5.1, §5.7) |
+| ANSI-16 | the kit's derived arrays; this document: designed here by rule | 13 hand-authored tables: all 208 slots ≥ 3.46:1 against `terminal_bg`, sixteen distinct per theme, bright polarity and per-ramp black/white extremes | **Astra's tables adopted**; our tool becomes the lint (Appendix A, §13.9) |
+| Contrast | the 45 pairs < 4.5:1 outside Carbon kept as the design (§13.7) | 45 replacements (12 `dim`, 12 `syntax-number`, 12 `syntax-comment`, 5 `syntax-attribute`, 3 `syntax-function`, 1 `syntax-keyword`), each the old value tinted toward the ink pole until ≥ 4.6:1 against its measured ground (`header` for `dim`, `code_bg` for syntax); Carbon unchanged | adopted for the native target (§13.7); historical captures stay unamended |
+| Scrollbar | a provisional 4 px `structure` thumb (§7.7) | the position-indicator contract: lane 8, thumb 3, `dim`, no track, no pointer, overflow-only | adopted (§7.7) |
+| Goldens | Astra's captures | none captured (no font bytes, no controlled browser); `capture/capture.mjs`, a 100-scenario matrix, syntax-checked only | the oracle is our own native-mode run of that harness (§11) |
+| Fonts | Plex Mono for mono | Cornucopia in EVERY mono role; mono advance, baseline and pitch retuned to Cornucopia's metrics; the browser goldens are a geometric and chromatic reference, never a demand to distort Cornucopia | as ruled; the whole family is on this machine (§7.1) |
+| Scale convention | "1440 × 900 at 200 %" | a LOGICAL viewport at a backing factor: 200 % is a 2880 × 1800 framebuffer (`effectiveDpr = scale/100 × baseDpr`) | adopted; identical to HALCYON-SCALE |
+| Prompt | `λ path ⊢ input` (ruling 2) | the same, with the inks fixed: λ `amber`, path `terminal_path`, ⊢ `secondary`, input `text`; single spaces; a running command never replaces λ with a status glyph; never a fake prefix over bytes the shell renders | as ruled (§7.4) |
+| Chords | Super (ruling 3) | Super; footer labels GENERATED from the registry, never literals | as ruled (§8.2) |
+| Workspaces, metadata | rulings 4 and 6 | accepted; the chips of §14.1; header metadata is live data, never `MODIFIED` / `RUNNING` / `PASSED` as literals | as ruled |
+| The nine surfaces | not in the kit | one specified design each | adopted with the deltas named (§14) |
+| Pseudo boxes, baselines | — | the capture dumps DERIVE pseudo-element boxes (no `getBoundingClientRect`) and report `Range` fragments, never baselines | recorded in §11 |
 
 ## 4. The model: profile × theme × scale
 
@@ -185,7 +212,7 @@ color_scheme = "dark"         # dark | light; selects the smoothing default and 
 desktop = "#050607"
 # ... the other 34, as shipped in ui-palettes/<id>.toml ...
 
-[terminal]                    # OUR addition to the kit's sidecar: the designed ANSI-16 (Appendix A)
+[terminal]                    # OUR addition to the kit's sidecar (round 2's carry none): the authored ANSI-16 (Appendix A)
 ansi = ["#0B0D0E", ...]       # exactly 16, unique except the legacy rule ansi[15] == terminal_text
 
 [type]
@@ -271,7 +298,7 @@ Corner radius 0 everywhere.
 | Outer pad | 3 each edge | the workspace's padding, independent of the track |
 | Divider track | 7 | real layout space between siblings, never an overlay |
 | Divider rule | 2 | at offset 2 from the track's leading edge, in `structure` |
-| Divider joint | 5 × 5 | at the track's leading corner offset (1,1): 1 px `structure` border, `desktop` fill |
+| Divider joint | 7 × 7 | the OUTER box, at the track's leading corner offset (1,1): a 1 px `structure` border around a 5 × 5 `desktop` fill. It spans 1..8 across the 7 px track, so it overpaints 1 px of the trailing pane's frame (the divider paints above the panes) — round 2's correction of the kit's 5 × 5 (`styles.css:406,481`) |
 | Pane frame | 1 | `pane_border`; `focus_neutral` on the focused pane |
 | Header | 32 | index 32 │ name (flex) │ pills │ metadata (intrinsic) │ action 28; gaps 7 |
 | Focus mark | 2 × 20 | at the header's x = 0, y 6..26, only on the focused pane's expanded header |
@@ -376,7 +403,7 @@ pub struct Metrics {
     pub track: i32,           // 7
     pub rule: i32,            // 2  (floor 2)
     pub rule_off: i32,        // 2
-    pub joint: i32,           // 5
+    pub joint: i32,           // 7 outer (a 1 px border around a 5 px fill; floor 3)
     pub frame: i32,           // 1  (floor 1)
     pub index_w: i32,         // 32
     pub header_gap: i32,      // 7
@@ -491,11 +518,21 @@ silently discards children.
 
 | Role | Face | Weight | Vendored today? |
 |---|---|---|---|
-| Body, rail labels, buttons, pills | IBM Plex Sans | 400 Regular | **no** — `IBMPlexSans-Regular.ttf` (v3.005, same version as the tree's four) |
-| Header names, H1/H2, footer strong, picker titles, keywords' weight | IBM Plex Sans | 500 Medium | **no** — `IBMPlexSans-Medium.ttf` |
-| Brand (`WORKSPACE`) | IBM Plex Sans | 600 SemiBold | **no** — `IBMPlexSans-SemiBold.ttf` |
-| Emphasis (rich text) | IBM Plex Sans | 400 Italic | yes |
-| Every mono role | Cornucopia | its one weight | yes (the subset) |
+| Body, rail labels, buttons, pills | IBM Plex Sans | 400 Regular | **yes** (`d3958d68`) — `third_party/ibm-plex/ttf/IBMPlexSans-Regular.ttf`, v3.005 (the tree's four are the same version); not yet embedded |
+| Header names, H1/H2, footer strong, picker titles, keywords' weight | IBM Plex Sans | 500 Medium | **yes** (`d3958d68`) — `IBMPlexSans-Medium.ttf`; not yet embedded |
+| Brand (`WORKSPACE`) | IBM Plex Sans | 600 SemiBold | **yes** (`d3958d68`) — `IBMPlexSans-SemiBold.ttf`; not yet embedded |
+| Emphasis (rich text) | IBM Plex Sans | 400 Italic | yes (embedded) |
+| Every mono role | Cornucopia | Regular | yes — the embedded subset, **208 codepoints** (`usr/lib/cornucopia/src/cornucopia-subset.ttf`, its list read out of the baked atlas): it LACKS λ, ✓, ‹ ›, −, ⌘ and all of U+2500–257F, which the Instrument surfaces use (§7.4, §14.1, §14.3); re-subset in I-5 |
+| Mono italic (lifetimes, comments) | Cornucopia | Italic — a true face exists | no — §13.2 |
+| Mono "500" (index, doc path, clock, footer) | Cornucopia | Regular or SemiBold (no Medium exists) | §13.8 |
+
+The Cornucopia family on this machine is complete: `~/projects/cornucopia-font/`
+(the same bytes as `~/Library/Fonts/cornucopia-*.ttf`; MIT, © the operator),
+**v34.6.1**, ten faces — Light, SemiLight, Regular, SemiBold, Bold, each
+with a true Italic — 7571 codepoints each, upem 1000, ascender 889 /
+descender −170 / line gap 38 (a line pitch of 1.097 em; Plex Sans is
+1025 / −275 / 0). Plex Mono is on no machine of ours and matters only to
+the harness's historical mode (§11).
 
 Three files, ~200 KB each, embedded beside the existing four
 (`halcyond/src/lib.rs:42-48`; +~600 KB in a 1.98 MB binary — accepted, the
@@ -524,13 +561,16 @@ keys (HALCYON-THEME §2).
 | Block code (`pre`) | mono | 12 / 1.65 (19.8) | keywords "500" = the keyword colour only under Cornucopia |
 | Terminal | mono | 12 / 1.6 (19.2) | 400 |
 
-Where the mockup asks a mono weight or an italic (lifetimes, comments)
-Cornucopia has one weight and no italic: the ROLE keeps its colour and the
-slant is synthesised as a 12° shear in the outline path (`outline.rs`, one
-transform on the pen) — or, if the operator prefers, left roman (§13.2).
-Cornucopia sizes go through the live outline at the cell table
-(HALCYON-TYPE TY-4): a 12 px terminal is advance 6 at 100 %, 9 at 150 %,
-12 at 200 %, the cell height and baseline the table's.
+Where the mockup asks a mono weight or an italic (lifetimes, comments),
+the tree today embeds ONE Cornucopia face (the Regular subset) while the
+family has a true Italic and a SemiBold (§7.1). Until §13.2 and §13.8 are
+answered the ROLE keeps its colour, the slant is synthesised as a 12° shear
+in the outline path (`outline.rs`, one transform on the pen) and "500" is
+the Regular. Cornucopia sizes go through the live outline at the cell
+table (HALCYON-TYPE TY-4): a 12 px terminal is advance 6 at 100 %, 9 at
+150 %, 12 at 200 %, the cell height and baseline the table's — round 2
+confirms the target is Cornucopia's own metrics, never Plex Mono's stretched
+onto it.
 
 Smoothing: 0 on dark themes, 12 on the three light ones (`type.smooth`,
 HALCYON-TYPE §4.2); phases and the fractional pen unchanged.
@@ -623,15 +663,37 @@ and ratified scripture — §13.1 — and this document does not decide it. The
 mechanism is the same either way: a per-tile presentation flag, a header
 pill to toggle it, both presentations reading one transcript.
 
-### 7.7 Scrollbar (provisional, pending Astra's item 6)
+### 7.7 The position indicator (round 2 §6; ruling 7)
 
-A passive position indicator at the body's right edge: a 4 px wide thumb
-(scaled) in `structure`, inset 2 from the edge, minimum length 24,
-proportional to the visible fraction, shown only while the buffer
-overflows the body, over rich documents, terminal views and the picker.
-No track, no pointer behaviour. The CSS's `scrollbar-color: structure
-transparent; scrollbar-width: thin` is the reference; Astra's answer may
-replace the numbers.
+A static indicator of the scroll position, shown only while the content
+overflows its viewport, without fade, drag, click-to-jump, resize cursor or
+a focus of its own — wheel and keys scroll the content as they do today; it
+is not an accessibility slider (expose the region's scroll position
+instead) and never changes ink on focus or hover. Logical px at 100 %,
+through `Metrics::at`:
+
+| Surface | Lane (right, reserved on overflow) | Thumb | Right inset | End inset | Min thumb |
+|---|---:|---:|---:|---:|---:|
+| Rich document body | 8 | 3 | 3 | 4 | 24 |
+| Terminal transcript | 8 | 3 | 3 | 4 | 24 |
+| Picker list | 8 | 3 | 3 | 4 | 18 |
+
+The lane is reserved INSIDE the content viewport on overflow (text never
+sits under the thumb; line breaks are allowed to change by it — an explicit
+replacement of the CSS's platform-dependent `scrollbar-width: thin`), keeps
+the body's or list's own ground (no drawn track), and the thumb is `dim` at
+full opacity (the round-2 value outside Carbon; Carbon `#737A76`),
+rectangular, radius 0. With content extent C and viewport V: hidden when
+C ≤ V + 0.5; L = max(0, V − 8); T = min(L, max(min, L·V/C)); travel = L −
+T; offset = clamp(scroll, 0, C − V); the leading edge = 4 + travel ·
+offset / (C − V); both edges snapped through the shared scale helper,
+travel never negative, T = L when L < min. Follow-tail puts the thumb's end
+exactly at V − 4; an append recomputes from the retained anchor and never
+reports "at end" while the reader is in history. A raw full-screen
+application owns its grid and gets no indicator (§14.7); a terminal-history
+overlay shows it once the shell owns the view. A wide `pre` block may carry
+the horizontal twin (3 px, an 8 px lane reserved on overflow only, the same
+rules, no drag affordance).
 
 ## 8. The rails
 
@@ -650,17 +712,19 @@ refused (no top rail exists there) and `role=status` keeps its 20.
 Left to right, padding 10 / 8:
 
 - **Brand**: the 13 × 13 mark (`amber_muted` 1 px border, two 1 px `amber`
-  strokes at (3,3)-(3,8) and (3,7)-(8,7)) then the workspaces — the
-  ruling: `01 02 03` in the brand's 11/600 uppercase, the active one
-  `text`, the others `dim`, gap 9; a click switches; the box is 212 wide
-  as in the mockup so the context column starts where the mockup's does.
-  (The mockup's `WORKSPACE 01` label is the one-workspace rendering of
-  this; Astra's item 7 may refine the multi-workspace look.)
+  strokes at (3,3)-(3,8) and (3,7)-(8,7)), gap 9, then the workspaces in
+  a 212-wide cluster so the context column starts where the mockup's
+  does: with ONE workspace the mockup's `WORKSPACE 01` label (11/600
+  uppercase); with more, the numbered chips of §14.1. The mark is the
+  same unanimated glyph for every N and its only action opens the
+  workspace list (§14.1).
 - **Context**: `~/systems/ compositor │ src / renderer.rs` = the focused
   tile's cwd (the OSC 7 fact, `abbrev_home`'d, the last component in
   500), a 1 × 12 `structure` separator with 10 px margins, then the
   focused tile's name — H-3d's context slot, moved up. Single line,
-  clipped, `secondary` with `text` for the strong fragment.
+  `secondary` with `text` for the strong fragment; the cwd is
+  middle-ellipsised first, then the title end-ellipsised (§14.3); never a
+  static path outside fixture mode.
 - **Actions** (auto left margin, gap 2; each 26 tall, padding 9, 10/400
   uppercase, transparent 1 px side borders; hover `hover` ground +
   `structure` borders; pressed ink `amber`): `═ SPLIT H`, `║ SPLIT V`
@@ -674,16 +738,24 @@ Left to right, padding 10 / 8:
 
 Padding 10 each side, mono 10/500 uppercase:
 
-- **Left, the condition**: a 6 × 6 square + the label — `success` +
-  `READY` when the focused tile's last command passed or nothing ran;
-  `error` + `EXIT N` when it failed (H-3d's condition slot in the
-  mockup's clothes); a transient status message (uppercase, 1800 ms, the
-  last message resets the timer; `amber` for an action, `error` for a
-  refusal such as `FINAL TILE IS PROTECTED`) replaces the label and
-  `READY` returns when it expires. The square's glow is an effect (§10).
+- **Left, the condition** (§14.3; H-3d's condition slot in the mockup's
+  clothes): a 6 × 6 glyph area, gap 8, the label. Idle: a hollow 1 px
+  `secondary` square and `READY` or the last result. Running: a filled
+  4 × 4 `amber` square centred in the 6 × 6 and `RUNNING · <command>` in
+  `secondary`, no pulse. Success: `✓` in `success` and `EXIT 0 ·
+  <command>`. Failure: `!` in `error` and `EXIT <n> · <command>` — a stale
+  failure is never shown as running. The command is the sanitised cmd
+  mark, ≤ 96 characters, end-ellipsised to the width; an optional measured
+  elapsed time follows the dot; no click re-executes. A transient status
+  message (uppercase, 1800 ms, the last message resets the timer; `amber`
+  for an action, `error` for a refusal such as `FINAL TILE IS PROTECTED`)
+  replaces the slot and the LIVE model returns when it expires — never a
+  hard-coded `READY`. The square's glow is an effect (§10).
 - **Centre, the chord hints**: `SUPER + ARROWS  FOCUS · SUPER + TAB
-  TILES` — OUR chords (ruling 3), `dim`/`secondary` alternation, gap 8;
-  hidden below 820 wide.
+  TILES` — OUR chords (ruling 3), generated from the registry's bindings,
+  never literals; `dim`/`secondary` alternation, gap 8; hidden below 820
+  wide. `SUPER + 1–9  WORKSPACES` takes the centre while more than one
+  workspace exists and while switching or moving (§14.1).
 - **Right**: the pane count (`3 PANES`), a separator, `LOCAL` (the
   session's host name when one exists; `LOCAL` otherwise).
 
@@ -746,7 +818,8 @@ consumed chords never reach a pts (the plane's swallow set).
 The picker is a `Role::Menu` surface halcyond paints and the compositor
 places (H-3c's machinery: the grab, click-away and Esc dismiss owned by
 the compositor), anchored under the theme control at rail + 5, right
-aligned, 286 wide, `min(list, display − 72)` tall and scrolling; its rows
+aligned, 286 wide, `min(list, display − 72)` tall and scrolling (§7.7's
+indicator, min thumb 18); its rows
 are §7.3's; DARK FIELD / TERMINAL STUDIES / LIGHT FIELD in the mockup's
 order, 13 counted from the gallery (the registry decides the count; the
 gallery ships 13). Opening focuses the current theme and applies nothing;
@@ -812,12 +885,33 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
 
 ## 11. Evidence: the goldens and the gates
 
-- **Oracle.** `docs/halcyon-carbon-handoff/reference/` (frozen; SHA256SUMS)
-  and Astra's captures + geometry dumps (REQUEST-TO-ASTRA §2-3): Chromium
-  at DPR 1 and 2, fonts confirmed loaded, clock frozen at 09:41, reduced
-  motion. Until they arrive, `prototype-offline.html` rendered locally
-  with the Mac's Plex Sans is the working reference for sans + geometry
-  (its mono is a fallback face; not an oracle for mono).
+- **Oracle.** `docs/halcyon-carbon-handoff/reference/` (frozen; SHA256SUMS;
+  = the bundle's `dist/` at `074bc564`) rendered by
+  `round2/capture/capture.mjs` **on this machine** — Astra captured
+  nothing (no font bytes, no controlled browser), so the oracle is ours.
+  Pinned Playwright + Chromium, fonts injected as exact bytes with their
+  SHA256s recorded, remote requests aborted, clock frozen at 09:41,
+  `READY`, reduced motion, transitions and animations off, the caret forced
+  visible; a 100-scenario matrix (26 geometry rows × baseDpr 1 and 2 at
+  Carbon, the 13 themes at 1440 × 900, 24 states), each with `page.png` +
+  `geometry-styles.json` + `metadata.json` and a run `manifest.json`. Two
+  modes:
+  - **native** — THE ORACLE of this arc ("native-target revision 2"):
+    Plex Sans 400/500/600 from `third_party/ibm-plex/ttf/`, the full
+    Cornucopia Regular v34.6.1 in every mono role at the mockup's CSS
+    sizes, the 45 contrast replacements, `⊢` after the path, Super labels.
+    Its mono line pitch is still the CSS's Plex Mono number; the retune to
+    Cornucopia's metrics is our own target revision, masked in the diff,
+    never pixel-matched to the browser.
+  - **historical** — Plex Mono 400/500 at the pinned source: provenance
+    only, produced when Plex Mono is at hand; never compared against the
+    native raster for mono.
+  What the dumps are NOT: `Range` rectangles are line fragments, not
+  baselines (recover baselines from the face's metrics); pseudo-element
+  boxes are DERIVED from the containing block and marked so; an alpha
+  `color-mix` is recorded as rgba and its composited pixel read from the
+  PNG. "1440 × 900 at 200 %" is a 2880 × 1800 image at baseDpr 1 and a
+  5760 × 3600 one at baseDpr 2, by the stated convention (§3.1).
 - **Numerical verdict** (ACCEPTANCE-TESTS §2): opaque interiors exact RGB8
   on ≥ 3 × 3 patches; every structural edge at its snapped boundary and
   thickness; glyph bounding boxes against the pinned faces with a
@@ -845,13 +939,14 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
 
 ## 12. Slices (each its own commit, status row, tests; rollback = the profile word)
 
-- **I-0 — the oracle and the faces.** Vendor Plex Sans 400/500/600 (OFL,
-  from the Mac's v3.005 files, the same version as the tree's); the
-  goldens harness against the frozen reference; this document ratified.
-  No runtime change.
+- **I-0 — the oracle and the faces.** Plex Sans 400/500/600 vendored
+  (`d3958d68`); round 2 ingested and folded (`009b9062`, §3.1); the
+  goldens harness run here in native mode (§11), its manifest and hashes
+  recorded; this document ratified. No runtime change.
 - **I-1 — the second schema and the bundle.** `InstrumentTheme`, the
-  dispatching loader, both projections, the 13 gallery files (Appendix A's
-  ANSI included), `Visual`, the wire, `halcyon theme lint` for both.
+  dispatching loader, both projections, the 13 gallery files (round 2's
+  colours and its authored ANSI, Appendix A), `Visual`, the wire, `halcyon
+  theme lint` for both.
   Nothing paints differently yet. *Audit-bearing: a new strict parser
   (format-fuzz), the wire.*
 - **I-2 — the profile's geometry.** `Metrics` grows; the Instrument carve
@@ -862,19 +957,25 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
 - **I-3 — the stack and the headers.** Collapsed headers placed and fanned;
   the header list (index / name / pills / metadata / ×), the state matrix,
   pointer routing to chrome, expand / close / final-tile, the successor
-  rule. *Audit-bearing: pointer routing to chrome, pane authority on header
-  actions.*
+  rule; the tile states of §14.6 (empty, disconnected, crashed, ended);
+  the header verb menu (§14.9) on H-3c's surface. *Audit-bearing: pointer
+  routing to chrome, pane authority on header actions.*
 - **I-4 — the rails.** `role=rail`; the top rail's four zones on our
-  facts; the bottom rail; transient status; the narrow branch.
+  facts (the workspace chips §14.1, the context formatter §14.3); the
+  bottom rail and its marks (§14.3); transient status; the narrow branch.
   *Audit-bearing: the gated create + the carve.*
 - **I-5 — type and the rich document.** The Instrument `Sheet`, the type
   map, margin collapsing, clamp paddings, the `pre` block, the terminal
   view's colours, `λ … ⊢` in `ut`, the presentation flag and its pill, the
-  nine syntax roles in `nora`'s export, the scrollbar indicator.
+  nine syntax roles in `nora`'s export, the position indicator (§7.7), the
+  Cornucopia re-subset (λ, ✓, ‹ ›, −, ⌘, U+2500–257F; §7.1), inline media
+  and the gallery in the Instrument frame (§14.4), the raw application
+  grid (§14.7).
 - **I-6 — dividers and minima.** Capture, drag, double-click, the clamps
   and refusals; winsize through the existing path.
 - **I-7 — the picker and live switching.** The menu surface, the
-  transaction, persistence, the cooperative repaint.
+  transaction, persistence, the cooperative repaint; the dialog family
+  (§14.5).
 - **I-8 — effects and motion.** The two ops, the glows, the backdrop, the
   transitions.
 - **I-9 — parity gate, audit, rollout.** ACCEPTANCE-TESTS in full against
@@ -894,9 +995,12 @@ a process; a layout v2 file reads under v1 with equal weights.
    pill toggle; (C) B's mechanism with A's default. Recommended: **(C)** —
    the mechanism costs the same, the default follows the ratified rule,
    and the toggle gives the mockup's look to anyone who wants it per tile.
-2. **Mono italics**: a 12° synthetic shear for lifetimes and comments
-   (the browser synthesises too), or roman with the colour alone.
-   Recommended: the shear.
+2. **Mono italics**: Cornucopia HAS a true Italic (v34.6.1, on this
+   machine, §7.1). Embed an italic subset for lifetimes and comments
+   (about +20 KB; recommended — the real face, and the one thing the
+   browser goldens cannot show, since the harness requests an italic of a
+   family it was given no italic file for), a 12° synthetic shear of the
+   Regular, or roman with the colour alone.
 3. **The turnstile's ink**: `secondary` (recommended: one amber glyph per
    prompt) or `amber`.
 4. **Kerning** (§7.5): in this arc (I-5) or after the parity gate.
@@ -907,30 +1011,275 @@ a process; a layout v2 file reads under v1 with equal weights.
    close, Super+1..9 workspaces.
 6. **Fonts**: vendor 400 / 500 / 600 (recommended; +~600 KB) or keep Text
    450 as the body (a visible deviation).
-7. **Contrast**: accept the measured 45 sub-4.5:1 pairs outside Carbon as
-   the design (recommended, per Astra's item 8's answer).
+7. **Contrast**: adopt round 2's 45 replacements for the native target
+   (recommended — each recomputed here at ≥ 4.6:1, Carbon untouched,
+   historical captures unamended; §3.1), or keep the measured 45
+   sub-4.5:1 pairs as the design.
+8. **Mono weight "500"** (index, doc path, clock, footer): Cornucopia has
+   no Medium. The Regular (recommended: one mono face, as today; at 10–11
+   px under our +18 % stroke the browser's Plex Mono 500 reads as the
+   Regular's ink) or the SemiBold as a second embedded face.
+9. **Two strogg ANSI slots, retuned** (Appendix A): bright cyan `#A2C3B5`
+   → `#99C4C3` (the only slot of the 208 outside the lint's 30° hue
+   bound; without it the shipped tables fail the shipped lint) and blue
+   `#ABB8C9` → `#A3B8D7` (chroma 0.028 → 0.050, the one near-grey
+   chromatic slot), both at Astra's lightness. Done by default in
+   `tools/halcyon/ansi16.json`; a revert is two values — for the
+   operator's eye when I-1's gallery lands ("warmer and drier" is that
+   theme's stated design).
 
-## Appendix A — the ANSI-16 tables (designed here, per ruling)
+## 14. The round-2 surfaces (Astra §7, adopted 2026-09-14 with the deltas named)
 
-Owed with I-1; generated by `tools/halcyon/instrument-ansi.py` from the
-rule below and reviewed by eye per theme before the gallery files land.
-The rule, so the tables can be re-derived and checked rather than
-trusted:
+Nine surfaces the kit did not draw, specified in
+`round2/RESPONSE-TO-FABLE.md` §7 and adopted here as designs. The numbers
+below are the binding ones (logical px at 100 %, through `Metrics::at`);
+prose detail not restated is read from that section. Where the tree
+already has the mechanism the delta is named and the mechanism wins. All
+share the theme's inks; no new saturated colour anywhere.
 
-- Slots 0/7/8/15 are the theme's greys: black = the darkest of
-  `desktop`/`pane` on a dark theme and the darkest ink on a light one;
-  white = `secondary` (dark) / `dim`-of-the-inverse (light); bright black
-  = `dim`; bright white = `terminal_text` (the legacy alias rule).
-- Slots 1..6 keep their HUES (red, green, yellow, blue, magenta, cyan) in
-  the theme's temperature and saturation, each ≥ 3:1 against
-  `terminal_bg`, all sixteen distinct; the bright variants lighter on a
-  dark ground and darker on a light one; `red` and `green` agree with
-  `error` and `success` where those already carry the hue.
-- Where the kit's derived slot is hue-correct it is kept (Carbon's red,
-  green, magenta; every theme's red/green); where it is not (yellow = the
-  signal hue, blue = the path hue, the light themes' inverted polarity) it
-  is redesigned.
+### 14.1 Workspaces (HALCYON-WORKSPACES mechanism (A): live roots, per-workspace focus, bound 9)
 
-The tables themselves land in the gallery files, one per theme, and are
-listed in the I-1 commit; this appendix is the rule they are checked
-against.
+In the top rail's 212-wide brand cluster (§8.1): N = 1 keeps the mockup's
+`WORKSPACE 01`; N > 1 replaces the word with chips `01`..`09` in a
+189-wide horizontal viewport — chips 26 × 24 at y 5, gap 4, mono 10, no
+outline, no capsule; active = `hover` ground, `text` label, a 2 px `amber`
+bottom edge inset 4; inactive = transparent, `secondary`; hover on an
+inactive = `hover` + `text`; keyboard focus = a 1 px `amber` inset 2,
+independent of which is active. Past 189: 16 px ‹ › buttons at each end
+(`secondary`; `amber` pressed; `dim` disabled; they reveal, never switch)
+and a 157 viewport; the newly active chip is always scrolled fully into
+view and never hidden behind an ellipsis. At ≤ 820 the cluster shrinks to
+54, showing the mark and the active number even at N = 1; clicking the
+number opens the numbered list as a §14.2 menu, width 160. The mark is the
+same unanimated glyph for every N and its only action is that list
+(label "Workspaces"). Switching: a click on a chip; Super+1..9 from the
+registry (Super+Shift+1..9 moves the focused tile if the registry adopts
+it); the status `WORKSPACE 03 · <name>` for 1800 ms (no dot and no name
+when unnamed); the footer centre `SUPER + 1–9  WORKSPACES` while N > 1 —
+labels from the binding lookup, never a string assumed correct. Model:
+dormant processes kept; an inactive EMPTY workspace may vanish, the active
+one never; after a compaction the next switch message announces the new
+number and the Super digits follow the displayed labels; a tile move is an
+ownership-preserving structural operation, never save / restore / respawn;
+a failed switch or create keeps the current root and reports `WORKSPACE
+UNAVAILABLE`. Layout names name layouts, not workspaces.
+
+### 14.2 The object verb menu (H-3c's `Role::Menu` surface in the round-2 look)
+
+Square; min-width 224, max-width 320, padding 4, `pane` ground, 1 px
+`structure` border; the shadow (black .24, offset 0/8, blur 24) is an
+effect (§10). Anchored at the object's first visible fragment: its left,
+its bottom + 4; clamped to a 4 px display margin; placed above by 4 when it
+does not fit below; capped and scrolling with §7.7's indicator when
+neither fits. Pointer invocation picks the fragment under the pointer,
+keyboard invocation the first visible one. Title row 24 tall, horizontal
+padding 10, Sans 500 11 `text`, a 1 px `separator` below — a bounded,
+ellipsised object label, never a raw untrusted path. Items 28 tall,
+padding 10 / 10, label Sans 400 13 and an optional hint in Cornucopia 10
+`secondary` (blank when unbound), gap 16, no icon column. Hover or
+keyboard focus: `hover` ground, `text` label, a 2 px `amber` left mark at
+y 6..22. A checked item may carry a literal check before its hint; no
+checkboxes on ordinary commands. Disabled: `dim` ink, no fill, no mark,
+skipped by keyboard activation, still legible. Separators 1 px
+`separator`, vertical margin 4, inset 8. A destructive item is ordinary
+until focused, then `error` ink — never a red block. Up/Down skip disabled
+items; Home/End; Enter; Esc returns exact object focus; a pointer-away
+dismiss consumes the release under the existing grab discipline (H-3c). No
+submenus in v1 (a longer verb gets an ellipsis or a dialog). The object
+keeps its selection while the menu is up; the transcript is never dimmed.
+Carbon: `#0B0D0E`, focused row `#191C1D`, mark `#C7B98B`; Genera:
+`#E8E9E3`, `#CDD1CB`, `#3D526F`. Names are labels; execution routes through
+Beacon's typed-object verb engine under the user's authority.
+
+### 14.3 Directory, command and running marks (H-3d's status feed; the rails of §8)
+
+Top context: `<cwd> │ <focused tile title>` in Sans 11 — the cwd
+`secondary` with its basename segment `text` where the formatter can
+identify it, literal slashes, the 1 × 12 `structure` separator with 10 px
+margins; the cwd is middle-ellipsised first, then the title end-ellipsised;
+no static `~/systems/compositor` outside fixture mode. Footer left: the
+four conditions of §8.2 (idle: a hollow square and `READY` or the last
+result; running: the filled 4 × 4 `amber` square and `RUNNING · cmd`;
+success: `✓` and `EXIT 0 · cmd`; failure: `!` and `EXIT n · cmd`), the
+command the sanitised H-3d mark ≤ 96 characters, the elapsed time optional
+after the dot, no click re-executes, a transient message for 1800 ms and
+then the LIVE model. Centre: the registry-derived hints, the workspace
+hint taking precedence while switching or moving. Right: the pane count
+and `LOCAL`; the clock stays top-right. The active tile's header metadata
+may say `RUNNING` in `secondary` and an exit in `error`; the header is
+never tinted whole; a tile's dirty flag and its command status are
+independent facts, and under width pressure dirty / attention outranks
+elapsed detail.
+
+### 14.4 Inline image and the small gallery (the inline-media arc's `view` / `gallery`, in the Instrument frame)
+
+A rich block inside the 720 content width: a 1 px `separator` frame, no
+shadow, no radius, `code_bg` behind the pixels; native aspect ratio, width
+= min(intrinsic logical width, available width), no upscale unless asked,
+initial height ≤ 360 with contain scaling; transparency composites on
+`pane` (no checkerboard; a transparency-inspection tool can be a later
+verb); an unloaded image reserves its declared aspect between 80 and 240
+tall with `Loading image…` in `secondary`; a decode failure is the error
+glyph plus plain text, never a toolkit's broken-bitmap icon. Caption: gap
+6, Sans 12 / 1.45 `secondary`; an optional index or path line in
+Cornucopia 10 at gap 2. Block margin 18 above and below. Selected: the
+frame turns `amber` and a 2 px leading `amber` mark appears; the pixels
+never change; keyboard focus adds the usual inset outline OUTSIDE the
+image, never a wash over it. Verbs (Open / Copy reference / Save, as
+permitted) come through §14.2; selecting is not consent to execute.
+Gallery: 2 columns at content width ≥ 420, else 1; gap 10 both ways;
+uniform 4:3 cells containing the image without crop; captions wrap per
+cell; at most 6 items decoded initially, then a `Show all N images` action
+in the menu/link style — no hidden unbounded decode; arrows move the
+selection while the gallery owns focus (Super stays the workspace plane);
+alt text and bounded dimensions required; full fidelity regardless of
+pane focus.
+
+### 14.5 The dialog family (help's frame: `dialog_bg`, a 1 px `focus_neutral` border, the existing backdrop)
+
+Square; max width 480 for a confirmation, 420 for a one-line prompt, never
+wider than the viewport − 32. Header padding 18 / 20 / 12: an eyebrow in
+Cornucopia 10 `amber` with tracking .12 em, the title Sans 500 23 with
+margin-top 7. Body padding 0 / 20 / 18, Sans 14 / 1.5 `secondary`. Footer:
+a 1 px `separator` above, padding 12 / 20, gap 8, buttons right-aligned.
+Buttons 30 tall, padding 0 / 12, Sans 500 12, a 1 px `structure` border,
+transparent ground; hover `hover`; the default button an `amber` border
+and `text` ink (never a filled amber rectangle); keyboard focus an `amber`
+outline inset 2; a destructive button `error` border and ink, never
+pre-focused; Escape always cancels. Texts: dirty close — `Close <tile>?`
+/ `This tile has unsaved changes.`, `Cancel` (default) · `Discard` · `Save
+and close` only when a real save operation exists, else `Cancel` · `Close
+without saving`; a save failure keeps the dialog open with `error` text
+and never closes anyway. Active job — `A process is still running.` plus
+the validated process label, `Cancel` · `Close tile`; "force" wording only
+after a graceful close has failed and the action IS force termination.
+Reset — `Reset workspace layout?` / `Rearrange this workspace. Running
+tiles will remain open.`, `Cancel` · `Reset layout`, geometry only by
+design; anything that starts or stops processes must be titled `Restore
+saved layout?` and disclose it. One-line prompt (e.g. `Rename workspace`):
+label Sans 12 `secondary`, gap 6, a field 32 tall in `kbd_bg` with a 1 px
+`structure` border, padding 6 / 9, Sans 14 `text`, `amber` border on
+focus, the existing selection role; an error below at gap 6 in Sans 12
+`error`; `Cancel` · `Apply`, Apply disabled while invalid; Enter submits
+only when valid and no IME composition is active. Caret and selection
+belong to the field, never to the terminal beneath.
+
+### 14.6 Empty, disconnected, crashed and ended tiles (H-3b's status feed; the exit latch)
+
+**Empty pane** — the explicit N = 0 exception to §6.2's non-empty stack:
+the flat frame and `pane` ground, NO 32 px header (no tile exists); at the
+content's top-left, padding 20: `Empty pane` in Sans 500 17 `text`, gap 8,
+`Open a shell to start here.` in Sans 13 `secondary`, then one text-style
+action `Open shell` in `amber`, 28 tall, horizontal padding 8, hover
+`hover`; a focused empty pane gets the neutral frame but no mark and no
+index; spawning is the user's ordinary authority and the action disables
+while pending. **Disconnected** — header, order, body transcript and title
+retained; metadata `DISCONNECTED` in `error`; a notice strip prepended to
+the body: min height 32, `header` ground, a 1 px `separator` below, padding
+8 / 12, Sans 12 `secondary` with an `error` `!` — `Connection lost. The
+last output is preserved.`; no blinking caret; the verb menu offers
+Reconnect only when meaningful, Restart as a distinct NEW process, Copy
+output, Close; output is never cleared and a failed command is never
+restarted automatically. **Crashed** (a parser or renderer) — the same
+retained frame, metadata `CRASHED`, a safe reason or code and nothing else;
+one tile's failure never repaints the screen; the focus mark stays `amber`
+while the metadata is `error` — focus and failure are two facts. **Ended**
+— metadata `EXIT 0` in `success` or `EXIT n` in `error`; the body frozen
+with no caret and a final line `Process ended · exit n` in Sans 12
+`secondary`; retained until closed or restarted. A child command ending
+inside a still-running shell is NOT an ended tile — that is §14.3's marks.
+Status strings, durations and process labels are data, never the fixture
+literals.
+
+### 14.7 A full-screen terminal application inside a tile (the raw path)
+
+The 32 px header stays exactly as for any active tile. The raw grid fills
+the content rect below it in `terminal_bg`: no code-fence inset, no 2 px
+amber rule, no rich padding, no §7.7 indicator; only the 1 px pane frame
+and the header separator bound it. The grid rounds DOWN to whole cells and
+the right/bottom remainder is `terminal_bg`, never a stretched cell; an
+application's own status rows live inside its grid, apart from the OS
+footer. Cursor shape, colour and visibility follow the application's
+protocol — its explicit colour kept, otherwise `amber`; block, bar and
+underline derive from the Cornucopia cell, not the specimen's 7 × 14. No
+`λ path ⊢` and no second caret in the alternate screen; focus loss keeps
+the text's colours under the existing cursor-visibility policy, no grid
+dimming; the return to normal mode restores the prompt and the transcript
+position through the mode protocol, never from a picture of old pixels.
+
+### 14.8 Login and the pre-login console — unchanged
+
+Aurora, the pre-login console and the trusted path keep their identity,
+palette and authority: no Carbon login, no user theme before
+authentication, no new authority for a session theme file; logout returns
+the console to its own theme. "Carbon default" is the Halcyon USER SESSION
+(§4.1's scope), not the boot or authentication environment.
+
+### 14.9 Header commands: the tile verb menu (no hamburger, no command pills)
+
+The reference header anatomy stands (§6.4; the tag-bar PILLS of ruling 5
+are state, not commands, and stay). A secondary click anywhere on the
+header except `×`, or the registered context-menu chord on the focused
+header, opens a §14.2 menu for the tile: first the program-provided,
+permitted commands (e.g. Save / Save as), a separator, then the shell-owned
+Rename tile / Move to workspace / Restart / Close as applicable; unavailable
+items disabled visibly; with nothing program-provided, the shell's alone.
+Commands are typed actions scoped to the owning tile through the existing
+verbs path: a program's string is a label or a validated operand, never
+compositor authority; program commands register through a bounded existing
+protocol or a reviewed registry entry — no `pill` mark is assumed built.
+Middle-click executable-text semantics stay inside the transcript; the
+header's primary click still selects or opens the tile.
+
+## Appendix A — the ANSI-16 tables (Astra's authored set, adopted 2026-09-14; the tool is the lint)
+
+The operator delegated the tables to main (2026-09-14, "design them
+yourself"); Astra delivered a hand-authored set in round 2 regardless
+(`round2/ansi16.json`, one table per theme, also in
+`round2/palettes/*.toml`). Both were measured before choosing (JOURNAL run
+46o, "Round 2"):
+
+- **Astra's**: all 208 slots ≥ 3.46:1 against `terminal_bg`, sixteen
+  distinct per theme, every bright slot lighter (dark) / darker (light)
+  than its normal, black and white the extremes of each eight-slot ramp,
+  every chromatic slot within 30° of its name — except strogg blue (chroma
+  0.028) and strogg bright cyan (hue 168), §13.9. Mean chroma 0.056–0.082
+  per theme: the instrument's register, and "black" a readable charcoal.
+- **Ours** (`tools/halcyon/instrument-ansi.py`, the generator): hue-exact
+  by construction, but its chroma register (1.25 × the theme's own accent
+  chroma) over-saturates the warm themes — strogg bright red `#FB8274`
+  (chroma 0.150) and bright cyan `#1FC1C8`, signal bright yellow `#EBA32D`,
+  mean chroma up to 0.118 — and its black on a dark theme is the pane
+  ground, unreadable as ink.
+
+**Verdict: Astra's tables are the gallery values**, with two strogg slots
+retuned at Astra's own lightness — bright cyan `#A2C3B5` → `#99C4C3` (hue
+168° → 195°: the one slot of the 208 outside the 30° bound below, so
+"verbatim" and "the lint passes" could not both hold) and blue `#ABB8C9`
+→ `#A3B8D7` (chroma 0.028 → 0.050: the one chromatic slot the lint notes
+as grey). The adopted set is **`tools/halcyon/ansi16.json`** (= `round2/ansi16.json`
++ those two values; the record in `round2/` is never edited); I-1's
+gallery files are written from it. The tool is demoted to the CHECK:
+`tools/halcyon/instrument-ansi.py --lint <ansi16.json | palettes-dir>`
+applies the rule below to any table and exits non-zero on a violation
+(six sabotaged tables — swapped hues, black as the ground, a darker
+bright, a duplicate, a white that is not the extreme, fifteen slots —
+each fail for their own reason); the generator stays as a first draft for
+a NEW theme, held to the same lint, never the source of a shipped table.
+The rule, so a table is checked rather than trusted:
+
+- Every slot ≥ 3:1 against `terminal_bg` — black included: on a
+  near-black ground "black" is a readable charcoal, on a light ground the
+  lightest readable neutral, never the ground itself (SGR 30 text must
+  read; a program wanting RGB 0 says so in truecolor).
+- All sixteen distinct. Bright white may equal `terminal_text` (the alias
+  the parser allows) but need not.
+- Slots 1..6 within 30° of their hue names (OKLCH: red 25, green 145,
+  yellow 90, blue 262, magenta 330, cyan 200), in the theme's
+  temperature; no semantic slot is the theme's accent merely because the
+  accent exists.
+- Bright slots lighter than their normals on a dark theme, darker on a
+  light one; within each eight-slot ramp black is the darkest (dark) /
+  lightest (light) and white the opposite extreme.
+- The terminal's default fg/bg are `terminal_text` / `terminal_bg`,
+  separate from slots 7 and 15.
