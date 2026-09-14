@@ -2010,7 +2010,10 @@ proportional live.**
   resolved RGB, §14.3, so the palette is applied at the producer). One
   resolution note: the `surface` panel role resolves from Daylight `header` (the
   light lift), NOT the dark `status_bg` strip, so a program painting its own ink
-  on it keeps contrast.
+  on it keeps contrast. Amended at HALCYON-INSTRUMENT I-5c: under the
+  Instrument profile the export also carries the three prompt inks (`ut`'s
+  `λ <cwd> ⊢ `) and the nine class-named syntax roles (`nora`'s highlighter);
+  the legacy export is unchanged (HALCYON-INSTRUMENT §7.4).
 
 **Rendering is a sink choice; the pts stays a fixed-width grid.** The kaua-term
 producer is UNCHANGED — it still hosts a real pts, still maintains a fixed

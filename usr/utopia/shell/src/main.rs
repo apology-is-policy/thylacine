@@ -154,6 +154,12 @@ fn export_beacon(tier: &str) {
     }
 }
 
+/// An opaque `Argb` from the palette export as libutopia's `Rgb` (the alpha
+/// byte dropped; the export never carries one).
+fn argb_rgb(v: u32) -> palette::Rgb {
+    palette::Rgb::new((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
 fn parse_consctl_fd() -> i64 {
     let mut it = env::args().operands();
     while let Some(a) = it.next() {
@@ -383,6 +389,21 @@ pub extern "C" fn rs_main() -> i64 {
             None => {
                 t_putstr("ut: beacon tier not advertised by the pts host (plain)\n");
             }
+        }
+        // HALCYON-INSTRUMENT 7.4 (I-5c): the prompt's three inks from the
+        // session's palette export, inherited in /env/HALCYON_PALETTE the way
+        // the tier is. All three or none (`libhalcyon::theme::prompt_roles`):
+        // a session under the Instrument profile exports them and the prompt
+        // takes the lambda shape in the session's inks; under legacy the
+        // export lacks them and the Bonfire shape stands. The console path is
+        // structurally without them -- no ancestor of a console `ut` is a
+        // session, so nothing can export to its /env (a recorded residue).
+        if let Some(r) = env::var("HALCYON_PALETTE").and_then(|t| libhalcyon::theme::prompt_roles(&t)) {
+            repl.set_prompt_roles(Some(palette::PromptRoles {
+                glyph: argb_rgb(r.glyph),
+                path: argb_rgb(r.path),
+                delim: argb_rgb(r.delim),
+            }));
         }
     }
 

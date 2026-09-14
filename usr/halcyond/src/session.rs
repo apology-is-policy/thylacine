@@ -1390,13 +1390,16 @@ pub fn run(home: Option<String>) -> i64 {
     {
         say!("halcyond: could not mark {}", SESSION_ENV_PATH);
     }
-    // s7a-3: publish the Daylight palette so a tile's programs (nora) follow the
-    // session theme. Written BEFORE the first tile spawn, so every descendant
-    // inherits it via /env; best-effort, an unset value just leaves the program
-    // on its own default.
-    // DERIVED from the resolved theme (3.5), not a second hand-kept list:
-    // one direction, file -> Theme -> env, never back.
-    let palette = env_palette(&theme);
+    // s7a-3: publish the session palette so a tile's programs (nora, ut)
+    // follow the session theme. Written BEFORE the first tile spawn, so every
+    // descendant inherits it via /env; best-effort, an unset value just leaves
+    // the program on its own default.
+    // DERIVED from the resolved bundle (3.5), not a second hand-kept list:
+    // one direction, file -> Bundle -> env, never back. Keyed on the PROFILE:
+    // under Instrument the export also carries the prompt roles and the
+    // class-named syntax roles (HALCYON-INSTRUMENT 7.4), under legacy the
+    // eleven it always did.
+    let palette = env_palette(&bundle);
     match File::create(HALCYON_PALETTE_ENV_PATH).and_then(|mut f| f.write_all(palette.as_bytes())) {
         Ok(()) => say!(
             "halcyond: palette published ({} bytes) to {}",

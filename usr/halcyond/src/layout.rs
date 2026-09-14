@@ -3676,6 +3676,38 @@ pub(crate) mod tests {
         assert_eq!(red.color, s.theme.terminal.ansi[1], "an explicit SGR colour (ANSI red) stands");
     }
 
+    /// 7.4 (I-5c): the producer's prompt inks stand under the Instrument
+    /// table -- an explicit SGR colour on a prompt run is never re-inked by
+    /// the role default, so the session's `λ` (amber), the cwd
+    /// (terminal_path) and the `⊢` (secondary) reach the pixels as the
+    /// export named them, the input after the delimiter in the role's `text`,
+    /// all at the body size on the Sans.
+    #[test]
+    fn the_producers_prompt_inks_pass_through_the_instrument_table() {
+        let s = inst_sheet(1280);
+        let (a, p, d) = (s.inst.amber, s.inst.terminal_path, s.inst.secondary);
+        let sgr = |c: u32| alloc::format!("\x1b[38;2;{};{};{}m", (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+        let line = alloc::format!(
+            "{}\u{3bb} \x1b[0m{}~/src\x1b[0m{} \u{22a2} \x1b[0mls -l\n",
+            sgr(a),
+            sgr(p),
+            sgr(d)
+        );
+        let t = inst_transcript(s.theme.terminal, |buf| {
+            wire::open(buf, BOp::Zone, &[("k", "prompt")]);
+            buf.extend_from_slice(line.as_bytes());
+            wire::close(buf, BOp::Zone);
+        });
+        let mut g = gs();
+        let laid = layout_block(&t.frozen_blocks()[0], 600, &s, &mut g);
+        let segs = &laid.lines[0].segs;
+        let inks: Vec<u32> = segs.iter().map(|sg| sg.color).collect();
+        assert_eq!(inks, alloc::vec![a, p, d, s.inst.text], "lambda, path, delimiter, input");
+        assert!(segs.iter().all(|sg| sg.face == FACE_SANS && sg.px == 15.0), "the body size on the Sans");
+        assert!(segs[0].x_end <= segs[1].x && segs[1].x_end <= segs[2].x, "left to right");
+        assert_ne!(a, s.ink_prompt, "the amber is not the prompt role's default (else this proves nothing)");
+    }
+
     /// 7.2: an SGR italic takes the true Italic cell in a mono run and the
     /// italic face on an annotated proportional run -- under Instrument;
     /// legacy never read the attribute (byte-pinned).

@@ -242,6 +242,14 @@ program (`nora`) can match. That export becomes a **rendering of the
 resolved theme** rather than a second hand-maintained list — one direction,
 file → `Theme` → env, never back.
 
+**Amended at HALCYON-INSTRUMENT I-5c (2026-09-14):** the export is a
+rendering of the resolved *bundle* and keyed on the profile in force —
+under `instrument` it carries twelve more roles (the three prompt inks and
+the nine class-named syntax roles, HALCYON-INSTRUMENT §7.4); under `legacy`
+the eleven, byte-identical. The reader of the prompt roles lives beside the
+writer (`theme::prompt_roles`), so the two sides of the seam share one
+vocabulary.
+
 ## 4. The failure modes, decided
 
 **4.1 — Missing file: silent fallback to `DAYLIGHT`.** The default

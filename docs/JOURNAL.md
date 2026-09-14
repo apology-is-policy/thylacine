@@ -684,6 +684,110 @@ tree, not a pattern) and relaunched on the fixed image.
 Binary: 2,140,744 → 2,785,000 bytes (+644 KB, the three Plex cuts and the
 two subsets; accepted at §7.1). Host: halcyond 228 → 235.
 
+### I-5c: the producers -- an export keyed on the profile, a reader beside its writer, and a gate that reads deltas because the neutral inks are collinear
+
+**What landed** (`I5C_HASH`; HALCYON-INSTRUMENT §7.4 as built, §12, §13's
+addendum; HALCYON-THEME §3.5, HALCYON.md's palette paragraph and
+UTOPIA-VISUAL §3 amended; the I-5 audit row's items (r)–(t)). The
+session's palette export (`libhalcyon::theme::env_palette`) now takes the
+resolved `Bundle` and is keyed on the PROFILE: under Instrument it writes
+`prompt_glyph` (`amber`), `prompt_path` (`terminal_path`) and
+`prompt_delim` (`secondary`) after the legacy eleven, then the nine
+`syntax_*` roles by class name; under `legacy` the eleven, byte for byte
+(the Daylight test still counts 11 lines; a Carbon file run under the
+legacy profile exports 11 too). `ut` reads the export on the pts path and,
+when all three prompt roles resolve, draws `λ <cwd> ⊢ ` in those inks;
+otherwise the Bonfire shape, unchanged. `nora`'s palette gained five
+optional class roles its highlighter prefers when the export named them
+and ignores otherwise. The session gate reads the prompt off a
+screendump.
+
+**The reader sits beside the writer, on purpose.** nora already had a
+reader of this export (its `with_overrides`, mapping role NAMES to its own
+fields), and a second hand-written reader in libutopia was the obvious
+next move. It would also have been the second copy of a vocabulary with no
+compiler: a rename on the session side would have broken the prompt
+silently, in a crate whose unit tests cannot run. So the prompt roles'
+reader is `libhalcyon::theme::prompt_roles`, in the same file as the
+export, and the round trip is one host test
+(`the_instrument_export_carries_the_prompt_and_syntax_roles`: the text the
+writer emits parses back to the writer's values). The ut binary reads
+`/env` and hands `Repl` resolved inks, keeping libutopia's "the binary
+touches the kernel, the library emits bytes" layering. The reader is
+all-three-or-none -- two roles of three would paint half a prompt in the
+theme and half in a constant -- and parses hex to bytes, so no byte of the
+export text can reach the shell's output.
+
+**Why the syntax roles are exported by class name.** The obvious reading
+was that nora already followed the Instrument theme, since the export
+carried `moss` / `dusk` / `sand` / `slate` / `cinnabar` and those are
+derived from the theme in force. Under Instrument they are derived through
+the legacy PROJECTION, which maps the theme's syntax roles to the legacy
+names by hue family: `moss` is `syntax_number`, `dusk` is
+`syntax_string`, `sand` is `syntax_attribute`. That is the right mapping
+for halcyond's own painters (a hue is a hue) and the wrong one for an
+editor's class table, where nora's strings would have taken the number
+hue and its numbers the attribute hue. The class-named export makes the
+mapping the theme author's, not a projection's; nora takes the five
+classes its lexers emit and stays on its hue table without them, so a
+legacy session's nora is byte-identical (`syntax_classes_keep_the_hue_
+table_without_the_class_roles`).
+
+**The console keeps the old prompt, structurally.** The export is a
+per-Proc `/env` value inherited at spawn. A console `ut` is spawned by
+login, and no session is its ancestor, so nothing can write its `/env`;
+under the console Instrument image the prompt stays `<cwd> ⊢ ` in Bonfire's
+constants. Recorded in §13 beside the two renderers' divergence (I-7)
+rather than worked around: the alternative -- halcyond publishing to a
+global path a console shell would read -- would make a console prompt
+follow a renderer it is not hosted by.
+
+**The gate reads deltas, because the neutral inks are collinear.** The
+prompt leg was to count the lambda's amber pixels, the cwd's
+`terminal_path` pixels and the turnstile's `secondary` pixels in three
+x-bands of the root tile's content column, with `gfx_region.py --ink`
+(pixels on the blend line from the ground to an ink, the antialiased
+witness). Measured before writing it: from Carbon `open`, amber's line is
+11° off the neutrals' -- separable at half coverage, so a Bonfire-grey
+tilde in the lambda's band counts as zero amber and the legacy shape fails
+the leg -- but `terminal_path`, `secondary` and `text` lie within 3° of one
+another, indistinguishable to the instrument; and the terminal view's raw
+text (ut's own `ut: ...` lines) shares those columns 16 px in from the pad,
+so a static count of a neutral ink in the cwd's band could be satisfied by
+the first glyph of every raw line. The leg therefore reads the six counts
+before and after a second prompt from a command with no output (`true`):
+the lambda band's amber grows, the cwd band's path ink grows, the
+turnstile band's secondary ink grows, and no amber appears beside the
+lambda in either reading. The delta is the prompt's glyphs alone; the
+exact neutral values are pinned where they can be -- the export's host
+test and the layout's pass-through
+(`the_producers_prompt_inks_pass_through_the_instrument_table`, which
+also asserts amber is NOT the prompt role's default, or the test would
+prove nothing).
+
+**A witness that cannot run, named as such.** libutopia's two new prompt
+tests are written to mirror the existing prompt tests and cannot compile
+for the host, like the crate's other 397 (the open bug, memory
+`bug_libutopia_tests_cannot_compile`). They are counted nowhere; the
+prompt shape's live witnesses are the three named above. Pulling the
+host-test fix forward was considered and left where it is: it gates the
+userspace runtime's entry point and touches twenty test modules, a chunk
+of its own, and I-5c's deliverable does not depend on it.
+
+**Two things checked rather than assumed.** Plex Sans Regular has the
+lambda (advance 7.635 at 15 px; the turnstile it lacks is served from
+Cornucopia at 7.5, the I-5b fallback), read with fontTools before the leg's
+bands were drawn. The `constant DAYLIGHT is never used` warning the guest
+build printed was pre-existing: the same build with theme.rs stashed prints
+it too.
+
+**Residues** (§13's addendum): the console-path prompt; the export written
+once at session start (a mid-session theme change does not re-publish it);
+nora's five of nine; the dormant libutopia tests; the collinear neutrals.
+
+**Tests.** Host: libhalcyon 112 → 115, nora 247 → 249, halcyond 254 →
+255. Gates, one image per lever: ls-halcyon-instrument PASS 68 s, ls-halcyon-session-instrument 58 s (with the new prompt leg, its first run), ls-ci 29 s, ls-halcyon 119 s (the legacy identity), ls-gfx-compose 73 s.
+
 ### I-5b: the document -- a flow keyed on the profile, a cell one row taller than the browser's box, and two fingerprints read before the change
 
 **What landed** (`60641786`; HALCYON-INSTRUMENT §7.2 / §7.5 / §7.6 /

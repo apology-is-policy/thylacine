@@ -889,6 +889,27 @@ lambda; the turnstile keeps its role), never a byte substitution in the
 renderer. In the proportional rich presentation the same three glyphs
 carry the same roles at the body size.
 
+**As built at I-5c (the producers; JOURNAL run 46o "I-5c").** The export
+is keyed on the PROFILE: under Instrument `libhalcyon::theme::env_palette`
+writes `prompt_glyph` (`amber`), `prompt_path` (`terminal_path`) and
+`prompt_delim` (`secondary`) after the legacy eleven, plus the nine
+`syntax_*` roles by class name; under `legacy` the eleven, byte-identical.
+The reader sits beside the writer (`theme::prompt_roles`, host-tested as a
+round trip): all three or none, so `ut` takes `λ <cwd> ⊢ ` only when every
+ink of it resolved and keeps the Bonfire shape otherwise. The console is
+structurally without the export — no ancestor of a console `ut` is a
+session, so nothing can write its `/env` — and keeps `<cwd> ⊢ ` in
+Bonfire's constants (a recorded residue with the two renderers'
+divergence, I-7). The renderer substitutes no byte: an explicit prompt ink
+passes the Instrument table untouched
+(`the_producers_prompt_inks_pass_through_the_instrument_table`). `nora`
+maps the class roles by name (`hl_*`, five of the nine — the classes its
+lexers emit) and stays on its hue table without them, so a legacy session's
+nora is byte-identical. The session gate reads the prompt off a
+screendump: the lambda on amber's blend line, the cwd and the turnstile on
+theirs, no amber beside the lambda, each count growing with a second
+prompt.
+
 ### 7.5 Composition of a rich document
 
 Body padding: top `clamp(18, 2.2 % of the logical display width, 34)`,
@@ -1467,10 +1488,15 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   from the free-running mono, the position indicator §7.7 in both owners,
   the raw grid's ground §14.7; legacy byte-pinned by two fingerprints read
   off the tree before the change; the as-built notes in §7.2, §7.5, §7.6,
-  §7.7, §14.7 and §13's addendum; JOURNAL run 46o "I-5b"). Remaining:
-  **I-5c** the producers (`λ … ⊢` in `ut` and nora's nine roles through
-  the palette export); **I-5d** GPOS kerning. §14.4 waits for the
-  inline-media arc's merge (it lives on aux-3, `53fcc14c`).
+  §7.7, §14.7 and §13's addendum; JOURNAL run 46o "I-5b"). **I-5c
+  LANDED** (the producers: the palette export keyed on the profile — the
+  three prompt roles and the nine class-named syntax roles under
+  Instrument, the eleven byte-identical under legacy — with its reader
+  beside the writer; `λ <cwd> ⊢ ` in `ut` in the session's inks; nora's
+  class roles by name; the session gate's prompt leg; the as-built note in
+  §7.4 and §13's addendum; JOURNAL run 46o "I-5c"). Remaining: **I-5d**
+  GPOS kerning. §14.4 waits for the inline-media arc's merge (it lives on
+  aux-3, `53fcc14c`).
 - **I-6 — dividers and minima.** Capture, drag, double-click, the clamps
   and refusals; winsize through the existing path.
 - **I-7 — the picker and live switching.** The menu surface, the
@@ -1545,6 +1571,20 @@ above the tile's bottom); a wide `pre` is cut at its box (no horizontal
 scroll — the cartoon cannot clip); the kit's list and doc-path elements
 have no Beacon producer; the alt screen's cursor stays the bar until the
 VT core tracks the application's shape.
+
+**I-5c residues (recorded 2026-09-14 late evening):** the console-path
+prompt keeps `<cwd> ⊢ ` in Bonfire's constants (structural: the export is
+per-Proc `/env`, and no session is a console shell's ancestor); the export
+is written once at session start, so a theme change mid-session (the
+picker, I-7) does not re-publish it — a hosted program follows the theme it
+was spawned under; `nora` takes five of the nine class roles (type /
+function / lifetime / punctuation have no `HlClass`); libutopia's unit
+tests cannot compile for the host (the open bug), so the prompt shape's
+witnesses are the export's round trip, the layout's pass-through and the
+session gate's pixels; the neutral inks are collinear to the gate's
+blend-line instrument (`terminal_path`, `secondary` and `text` lie within
+3° of one another from `open`), so the gate proves their positions and
+their growth with a prompt, and the host tests their values.
 
 ## 14. The round-2 surfaces (Astra §7, adopted 2026-09-14 with the deltas named)
 

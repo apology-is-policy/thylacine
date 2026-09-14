@@ -17,6 +17,12 @@
 #             and halcyond's `rail N minted (Wx34)`; the bottom rail (the
 #             session's status bar) paints the footer: two panes after the
 #             welcome (the tour beside the shell).
+#   prompt  : (I-5c, 7.4 / 13 ruling 14) the shell's prompt is `λ <cwd> ⊢`
+#             in the session's inks -- read off a screendump of the root
+#             tile's content column: the lambda ON amber's blend line, the
+#             cwd on terminal_path's, the turnstile on secondary's, no amber
+#             beside the lambda; and a second prompt GROWS each count (the
+#             delta is the prompt's glyphs, never the raw output's).
 #   footer  : the four conditions from the shell tile's own facts -- READY,
 #             RUNNING while `sleep` runs, EXIT 0 after it, EXIT 1 after
 #             `false` -- read off the bar's say line (`condition`, `exit`,
@@ -259,6 +265,96 @@ after 2500
 set rz [rail_zones]
 lc_step "the rail's targets: splith [dict get $rz splith] reset [dict get $rz reset] theme [dict get $rz theme] clock [dict get $rz clock]"
 
+# --- The prompt's shape and inks (7.4 / 13 ruling 14; I-5c) --------------------
+# The shell is the root leaf -- the session's FIRST spawn, before the
+# restore's tour -- and its header strip's x is the content column's x (the
+# same inner rect). The transcript's left padding is 3 vw of the display
+# (I-5b, `Sheet.pad_x`: clamp 20..48, rounded), so the prompt's first glyph
+# sits at x = header.x + pad_x. At the body size (Plex 15) the lambda
+# advances 7.6, a space 3.5, the tilde 9.0 and the turnstile 7.5 (served
+# from the mono), so `λ ~ ⊢ ` puts the lambda in [0, 8), nothing in [8, 11),
+# the tilde in [11, 20) and the turnstile in [24, 31): x-bands, scanned
+# down the tile's first rows.
+#
+# gfx_region.py --ink counts pixels ON the blend line from the tile's
+# ground (Carbon `open`) to an ink -- the antialiased witness. Amber's line
+# is 11 degrees off the neutral inks' (separable at half coverage), while
+# terminal_path, secondary and text lie within 3 degrees of one another:
+# collinear to this instrument, and the terminal view's text (its rows
+# share these columns, 16 in from the pad) sits on the same lines. So a
+# STATIC count of a neutral ink proves little; the leg reads the counts
+# BEFORE and AFTER a second prompt from a command with no output, and the
+# DELTA is the prompt's glyphs alone: the lambda's amber grows, the cwd's
+# path-ink count grows, the turnstile's secondary-ink count grows, and no
+# amber ever appears beside the lambda (the legacy shape fails the first
+# band: its tilde is Bonfire's grey; an ember turnstile fails the last).
+# The exact neutral roles are pinned by the export's host test and the
+# layout's pass-through test.
+proc dump_screen {} {
+    global repo qmp
+    set out /tmp/ls-halcyon-session-instrument-[pid].png
+    file delete -force $out
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { lc_fail "screendump failed: $err" }
+    if {![file exists $out]} { lc_fail "screendump produced no file" }
+    return $out
+}
+proc line_count {png x0 y0 x1 y1 ground ink} {
+    global repo
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py --ink $png $x0 $y0 $x1 $y1 {*}$ground {*}$ink} n]} { lc_fail "gfx_region --ink failed: $n" }
+    return $n
+}
+set OPEN {18 21 22}; set AMBER {199 185 139}; set PATH_INK {150 170 166}; set SECONDARY {175 180 176}
+# One dump, six counts: lambda-band amber, gap-band amber, cwd-band path
+# ink, cwd-band amber, turnstile-band secondary ink, turnstile-band amber.
+proc prompt_counts {cx ry0 ry1} {
+    global OPEN AMBER PATH_INK SECONDARY
+    set png [dump_screen]
+    set a  [line_count $png $cx $ry0 [expr {$cx + 8}] $ry1 $OPEN $AMBER]
+    set g  [line_count $png [expr {$cx + 8}] $ry0 [expr {$cx + 11}] $ry1 $OPEN $AMBER]
+    set b  [line_count $png [expr {$cx + 11}] $ry0 [expr {$cx + 20}] $ry1 $OPEN $PATH_INK]
+    set ba [line_count $png [expr {$cx + 11}] $ry0 [expr {$cx + 20}] $ry1 $OPEN $AMBER]
+    set c  [line_count $png [expr {$cx + 24}] $ry0 [expr {$cx + 31}] $ry1 $OPEN $SECONDARY]
+    set ca [line_count $png [expr {$cx + 24}] $ry0 [expr {$cx + 31}] $ry1 $OPEN $AMBER]
+    return [list $a $g $b $ba $c $ca]
+}
+if {[catch {exec grep -a -m 1 {halcyond: session tile leaf=[0-9]* spawned pid=} $transcript} first]} {
+    lc_fail "no root tile spawn line in the transcript"
+}
+set A [lindex [regexp -inline {leaf=(\d+) spawned} $first] 1]
+if {$A eq ""} { lc_fail "no leaf id in the root tile's spawn line ('$first')" }
+set ha [header_of $A]
+set pad_x [expr {int(round(max(20.0, min(48.0, 0.03 * $W))))}]
+set cx [expr {[lindex $ha 0] + $pad_x}]
+set ry0 [expr {[lindex $ha 1] + [lindex $ha 3] + 4}]
+set ry1 [expr {$ry0 + 480}]
+# The first prompt, retried until the lambda's amber is there (the tile
+# composes on its own cadence after the welcome).
+set before ""
+for {set i 0} {$i < 12} {incr i} {
+    set before [prompt_counts $cx $ry0 $ry1]
+    if {[lindex $before 0] >= 6} break
+    after 500
+}
+lassign $before a0 g0 b0 ba0 c0 ca0
+if {$a0 < 6} { lc_fail "no amber lambda at the prompt column x=$cx rows $ry0..$ry1 (counts $before): the shell did not take the lambda shape, or not in amber" }
+if {$g0 != 0} { lc_fail "amber past the lambda's advance ($g0 pixels in \[8, 11) at x=$cx)" }
+if {$ba0 != 0 || $ca0 != 0} { lc_fail "amber at the cwd ($ba0) or the turnstile ($ca0): the one-amber-glyph rule (13 ruling 14)" }
+lc_step "the first prompt at x=$cx rows $ry0..$ry1: lambda $a0 amber, cwd $b0 on the path ink, turnstile $c0 on the secondary ink"
+# A second prompt from a command with no output.
+htype "true\n"
+set after ""
+for {set i 0} {$i < 12} {incr i} {
+    set after [prompt_counts $cx $ry0 $ry1]
+    if {[lindex $after 0] >= $a0 + 6} break
+    after 500
+}
+lassign $after a1 g1 b1 ba1 c1 ca1
+if {$a1 < $a0 + 6} { lc_fail "a second prompt did not add a lambda in amber ($a0 -> $a1)" }
+if {$b1 < $b0 + 4} { lc_fail "a second prompt did not add its cwd on the path ink ($b0 -> $b1)" }
+if {$c1 < $c0 + 4} { lc_fail "a second prompt did not add its turnstile on the secondary ink ($c0 -> $c1)" }
+if {$g1 != 0 || $ba1 != 0 || $ca1 != 0} { lc_fail "amber beside the lambda after the second prompt (gap $g1, cwd $ba1, turnstile $ca1)" }
+lc_pass "session-instrument: the prompt is `λ <cwd> ⊢` in the session's inks -- the lambda amber ($a0 -> $a1 across a second prompt), the cwd on the path ink ($b0 -> $b1), the turnstile on the secondary ink ($c0 -> $c1), no amber beside the lambda (7.4 / 13 ruling 14)"
+
 # --- The footer's conditions from the shell's facts (8.2 / 14.3) -----------
 set timeout 60
 htype "sleep 3\n"
@@ -445,7 +541,7 @@ expect {
 }
 lc_pass "session-instrument: closing every tile logs the session out, the rail retires with the seat, and the login prompt returns"
 
-lc_pass "ls-halcyon-session-instrument: the session path under Instrument verified end to end -- both rails minted by the seat, the footer's pane count and its four conditions from the tile's facts, SPLIT H under the session's authority, the workspace list, the retained tile and its Restart, the structural close, the logout"
+lc_pass "ls-halcyon-session-instrument: the session path under Instrument verified end to end -- both rails minted by the seat, the lambda prompt in the session's inks, the footer's pane count and its four conditions from the tile's facts, SPLIT H under the session's authority, the workspace list, the retained tile and its Restart, the structural close, the logout"
 # The session is gone; quit qemu from the login prompt.
 lc_step "quit qemu (Ctrl-A x)"
 catch {send -- "\001x"}

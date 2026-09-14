@@ -19,6 +19,8 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
+use crate::instrument::{Bundle, Profile};
+
 /// 0xAARRGGBB, alpha 0xFF opaque.
 pub type Argb = u32;
 
@@ -975,7 +977,7 @@ pub const fn daylight_palette() -> vt::Palette {
 }
 
 /// The session palette as the `role=RRGGBB` text a Halcyon session publishes to
-/// `/env/HALCYON_PALETTE`, resolved from `theme`. The role names are the
+/// `/env/HALCYON_PALETTE`, resolved from `bundle`. The role names are the
 /// program-agnostic Halcyon palette roles; a hosted pts program maps them to
 /// its own fields (e.g. `nora`'s `theme::Palette::with_overrides`). This is the
 /// WRITE side of the seam `vt`'s palette comment named for v1.x -- the
@@ -987,29 +989,131 @@ pub const fn daylight_palette() -> vt::Palette {
 /// `status_bg`: `status_bg` is Halcyon's own dark bottom strip (worn with the
 /// light `status_fg`), so a program that paints its `fg` on it would render
 /// dark-on-dark. `header` is the light lift that keeps that contrast.
-pub fn env_palette(theme: &Theme) -> String {
-    let roles: [(&str, Argb); 11] = [
-        ("bg", theme.surface),
-        ("fg", theme.fg),
-        ("dim", theme.fg_muted),
-        ("accent", theme.ember),
-        ("surface", theme.header),
-        ("border", theme.border),
-        ("moss", theme.syntax.moss),
-        ("dusk", theme.syntax.dusk),
-        ("sand", theme.syntax.sand),
-        ("slate", theme.syntax.slate),
-        ("cinnabar", theme.syntax.cinnabar),
-    ];
+///
+/// Under the Instrument PROFILE (HALCYON-INSTRUMENT 7.4, 13 ruling 14) the
+/// export carries twelve more roles, so a producer paints its own prompt and
+/// its syntax in the theme's inks: `prompt_glyph` (`amber` -- the one amber
+/// glyph per prompt), `prompt_path` (`terminal_path`), `prompt_delim`
+/// (`secondary` -- the turnstile is a delimiter, not a signal), and the nine
+/// `syntax_*` roles BY CLASS NAME. The legacy five above still reach a hosted
+/// program under Instrument, through the legacy projection's hue families
+/// (`moss` is `syntax_number` there), which is right for halcyond's own
+/// painters and wrong for an editor's class table -- hence the class-named
+/// set. Keyed on the profile in force, never on the schema of the file that
+/// produced the bundle: a gallery Instrument theme run under `legacy` exports
+/// the eleven, byte-identical to what the export always was.
+pub fn env_palette(bundle: &Bundle) -> String {
+    let theme = &bundle.theme;
     let mut s = String::new();
-    for (name, argb) in roles {
+    let mut put = |name: &str, argb: Argb| {
         // writeln! into a String is infallible; the `let _` documents that.
         let _ = writeln!(s, "{}={:06x}", name, argb & 0x00FF_FFFF);
+    };
+    put("bg", theme.surface);
+    put("fg", theme.fg);
+    put("dim", theme.fg_muted);
+    put("accent", theme.ember);
+    put("surface", theme.header);
+    put("border", theme.border);
+    put("moss", theme.syntax.moss);
+    put("dusk", theme.syntax.dusk);
+    put("sand", theme.syntax.sand);
+    put("slate", theme.syntax.slate);
+    put("cinnabar", theme.syntax.cinnabar);
+    if bundle.profile == Profile::Instrument {
+        let i = &bundle.inst;
+        put(PROMPT_GLYPH_ROLE, i.amber);
+        put(PROMPT_PATH_ROLE, i.terminal_path);
+        put(PROMPT_DELIM_ROLE, i.secondary);
+        put("syntax_keyword", i.syntax_keyword);
+        put("syntax_type", i.syntax_type);
+        put("syntax_function", i.syntax_function);
+        put("syntax_string", i.syntax_string);
+        put("syntax_number", i.syntax_number);
+        put("syntax_attribute", i.syntax_attribute);
+        put("syntax_lifetime", i.syntax_lifetime);
+        put("syntax_comment", i.syntax_comment);
+        put("syntax_punctuation", i.syntax_punctuation);
     }
     s
 }
 
-/// `env_palette(&DAYLIGHT)` -- the built-in's roles as /env text.
+/// The three prompt roles' names in the export -- one vocabulary for the
+/// writer above and the reader below.
+const PROMPT_GLYPH_ROLE: &str = "prompt_glyph";
+const PROMPT_PATH_ROLE: &str = "prompt_path";
+const PROMPT_DELIM_ROLE: &str = "prompt_delim";
+
+/// The prompt's three inks as a producer reads them back from the export
+/// (HALCYON-INSTRUMENT 7.4): the glyph (`λ`), the path, the delimiter (`⊢`).
+/// Opaque `Argb`, the value every painter holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PromptRoles {
+    pub glyph: Argb,
+    pub path: Argb,
+    pub delim: Argb,
+}
+
+/// The READ side of `env_palette`'s prompt roles, in the same crate as the
+/// writer so the vocabulary cannot drift between the two (the round trip is
+/// host-tested). All three or none: a producer takes the lambda shape only
+/// when every ink of it resolved, else it keeps its compiled shape -- two
+/// roles of three would paint half a prompt in the theme and half in a
+/// constant. The grammar is the export's, read the way nora's reader reads
+/// it: unknown roles, malformed hex, comment lines and blanks are skipped,
+/// the LAST occurrence of a role wins. The value is parsed to bytes and
+/// handed on as a colour -- no byte of the text ever reaches a producer's
+/// output, so the export cannot make a shell emit anything but an SGR ink.
+pub fn prompt_roles(text: &str) -> Option<PromptRoles> {
+    let (mut glyph, mut path, mut delim) = (None, None, None);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, hex)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(argb) = parse_rgb6(hex.trim()) else {
+            continue;
+        };
+        match name.trim() {
+            PROMPT_GLYPH_ROLE => glyph = Some(argb),
+            PROMPT_PATH_ROLE => path = Some(argb),
+            PROMPT_DELIM_ROLE => delim = Some(argb),
+            _ => {}
+        }
+    }
+    Some(PromptRoles {
+        glyph: glyph?,
+        path: path?,
+        delim: delim?,
+    })
+}
+
+/// Exactly six hex digits (`RRGGBB`, no `#`) as an opaque `Argb`. Byte-indexed,
+/// so a six-BYTE non-ASCII value fails cleanly rather than panicking on a
+/// char boundary; any other length or a non-hex byte is `None`.
+fn parse_rgb6(s: &str) -> Option<Argb> {
+    let b = s.as_bytes();
+    if b.len() != 6 {
+        return None;
+    }
+    let mut v: u32 = 0;
+    for &c in b {
+        let n = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            b'A'..=b'F' => c - b'A' + 10,
+            _ => return None,
+        };
+        v = (v << 4) | u32::from(n);
+    }
+    Some(0xFF00_0000 | v)
+}
+
+/// `env_palette` of the legacy built-in under the legacy profile -- Daylight's
+/// roles as /env text.
 ///
 /// TEST-ONLY since TH-4a: the session publishes `env_palette(&resolved)`, so
 /// the export is a RENDERING of the theme in force (3.5) rather than a second
@@ -1017,7 +1121,7 @@ pub fn env_palette(theme: &Theme) -> String {
 /// a hosted program while the session itself painted something else.
 #[cfg(test)]
 pub fn daylight_env_palette() -> String {
-    env_palette(&DAYLIGHT)
+    env_palette(&Bundle::from_legacy(Profile::Legacy, DAYLIGHT))
 }
 
 /// The largest theme file that will be read. Comfortably above any real one
@@ -2746,5 +2850,115 @@ mod tests {
             let hex = line.split('=').nth(1).unwrap();
             assert_eq!(hex.len(), 6, "{line} is not RRGGBB");
         }
+    }
+
+    // HALCYON-INSTRUMENT 7.4 (I-5c): under the Instrument PROFILE the export
+    // carries the three prompt roles and the nine class-named syntax roles
+    // after the legacy eleven -- Carbon's values, read back through the reader
+    // in the same crate (the round trip), and every line still RRGGBB.
+    #[test]
+    fn the_instrument_export_carries_the_prompt_and_syntax_roles() {
+        let b = Bundle::builtin(Profile::Instrument);
+        let text = env_palette(&b);
+        assert_eq!(text.lines().count(), 23);
+        // The legacy eleven lead, unchanged in order (a reader that stops at
+        // eleven still sees what it always did).
+        assert!(text.starts_with("bg=121516
+fg=f2f3ef
+"), "{text}");
+        assert!(text.contains("moss=a693ad
+"), "moss is syntax_number under the projection");
+        assert!(text.contains("prompt_glyph=c7b98b
+"), "amber");
+        assert!(text.contains("prompt_path=96aaa6
+"), "terminal_path");
+        assert!(text.contains("prompt_delim=afb4b0
+"), "secondary");
+        assert!(text.contains("syntax_keyword=c7b98b
+"));
+        assert!(text.contains("syntax_type=8ea4b8
+"));
+        assert!(text.contains("syntax_function=91aa98
+"));
+        assert!(text.contains("syntax_string=b99a7b
+"));
+        assert!(text.contains("syntax_number=a693ad
+"));
+        assert!(text.contains("syntax_attribute=b58b70
+"));
+        assert!(text.contains("syntax_lifetime=9d8fa5
+"));
+        assert!(text.contains("syntax_comment=77807c
+"));
+        assert!(text.ends_with("syntax_punctuation=a6aca8
+"));
+        for line in text.lines() {
+            let hex = line.split('=').nth(1).unwrap();
+            assert_eq!(hex.len(), 6, "{line} is not RRGGBB");
+        }
+        assert_eq!(
+            prompt_roles(&text),
+            Some(PromptRoles {
+                glyph: b.inst.amber,
+                path: b.inst.terminal_path,
+                delim: b.inst.secondary,
+            }),
+            "the reader returns the writer's roles, opaque"
+        );
+    }
+
+    // The twelve are keyed on the PROFILE, not on the schema: Daylight under
+    // legacy is the eleven it always was (byte-identical export), and so is a
+    // gallery Instrument theme run under the legacy profile. Neither carries
+    // a prompt role, so a producer keeps its compiled shape there.
+    #[test]
+    fn the_legacy_profile_exports_the_eleven_and_no_prompt_roles() {
+        let daylight = daylight_env_palette();
+        assert_eq!(daylight.lines().count(), 11);
+        assert_eq!(prompt_roles(&daylight), None);
+        let carbon_under_legacy = env_palette(&Bundle::from_instrument(
+            Profile::Legacy,
+            crate::instrument::builtin(),
+        ));
+        assert_eq!(carbon_under_legacy.lines().count(), 11);
+        assert!(!carbon_under_legacy.contains("prompt_"));
+        assert!(!carbon_under_legacy.contains("syntax_"));
+        assert_eq!(prompt_roles(&carbon_under_legacy), None);
+    }
+
+    // The reader's posture (a producer reads an /env value it did not write):
+    // all three or none; junk, comments, blanks and malformed hex skipped; the
+    // last occurrence wins; uppercase hex accepted; a six-byte non-ASCII value
+    // fails without a panic.
+    #[test]
+    fn prompt_roles_wants_all_three_and_survives_junk() {
+        let two = "prompt_glyph=c7b98b\nprompt_path=96aaa6\n";
+        assert_eq!(prompt_roles(two), None, "two of three is none");
+        let bad_hex = "prompt_glyph=c7b98b\nprompt_path=96aaa6\nprompt_delim=afb4b\n";
+        assert_eq!(prompt_roles(bad_hex), None, "a malformed role is an absent role");
+        let junk = "\
+# the session's export
+bg=121516
+
+nope=ffffff
+prompt_glyph = C7B98B
+prompt_path=zzzzzz
+prompt_path=96aaa6
+prompt_delim=000000
+prompt_delim=afb4b0
+prompt_glyph=\u{e9}\u{e9}\u{e9}
+";
+        assert_eq!(
+            prompt_roles(junk),
+            Some(PromptRoles {
+                glyph: 0xFFC7_B98B,
+                path: 0xFF96_AAA6,
+                delim: 0xFFAF_B4B0,
+            })
+        );
+        assert_eq!(prompt_roles(""), None);
+        assert_eq!(parse_rgb6("\u{e9}\u{e9}\u{e9}"), None, "six bytes, three chars");
+        assert_eq!(parse_rgb6("#c7b98b"), None);
+        assert_eq!(parse_rgb6("c7b98b00"), None);
     }
 }

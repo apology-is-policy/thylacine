@@ -142,6 +142,14 @@ warmer and slightly lower-contrast recession than `#8898b4` against `#0e1018`
 was. The command line reads as more prominent by comparison, which is correct —
 the content is the content.
 
+**Amended at HALCYON-INSTRUMENT I-5c (2026-09-14).** Under a Halcyon session
+running the Instrument profile the shell takes the prompt's three inks from
+the session's palette export and the shape becomes `λ <cwd> ⊢ ` — the lambda
+the one amber glyph of the prompt, the path in the session's `terminal_path`,
+the turnstile a delimiter in `secondary` (HALCYON-INSTRUMENT §7.4, §13 ruling
+14). Absent the export — the console, a legacy-profile session — the shape
+and the roles above stand byte for byte.
+
 ### 3.1 Path abbreviation
 
 Same rules as U-1:

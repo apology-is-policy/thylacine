@@ -38,7 +38,13 @@ pub fn bg_seq(rgb: Rgb) -> String {
 /// String. Common case: emit a path segment in Path colour, the `⊢`
 /// glyph in Glyph colour, etc.
 pub fn fg(role: Role, text: &str) -> String {
-    let rgb = rgb_of(role);
+    fg_rgb(rgb_of(role), text)
+}
+
+/// `fg` for a RESOLVED colour rather than a role -- the prompt's inks when a
+/// Halcyon session hands them down (`palette::PromptRoles`). Same bytes:
+/// the 24-bit FG escape, the text, the reset.
+pub fn fg_rgb(rgb: Rgb, text: &str) -> String {
     let mut out = fg_seq(rgb);
     out.push_str(text);
     out.push_str(RESET);

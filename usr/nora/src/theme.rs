@@ -1,7 +1,8 @@
 // nora::theme -- the editor's colour palette.
 //
 // The palette is a runtime value (`Palette`: 11 semantic roles plus one derived
-// tint) rather than a fixed set of constants, so nora running under a Halcyon
+// tint, plus five OPTIONAL class-named syntax roles since HALCYON-INSTRUMENT
+// I-5c) rather than a fixed set of constants, so nora running under a Halcyon
 // session can follow the session's theme instead of a hardcoded one. `BONFIRE`
 // is the compiled default -- nora's own identity, and the console fallback. A
 // session conveys its resolved role colours out of band and nora adopts them at
@@ -60,6 +61,19 @@ pub struct Palette {
     /// Bonfire's), so the divergence is inert. `bonfire_derived_debug_tint_
     /// documents_the_split` pins that this is intended, not drift.
     pub debug_bg: Color,
+    /// The syntax classes BY NAME (HALCYON-INSTRUMENT I-5c): a session under
+    /// the Instrument profile exports `syntax_<class>` roles beside the hue
+    /// roles above, and `syntax()` gives a class its own role when it was
+    /// given one. `None` -- the legacy export, the console, `BONFIRE` --
+    /// leaves the class on the hue table, so an unthemed or legacy-themed
+    /// nora renders exactly as before. Five of the export's nine: the
+    /// classes nora's lexers emit (KAUA.md section 12); type / function /
+    /// lifetime / punctuation have no `HlClass` to land on.
+    pub hl_keyword: Option<Color>,
+    pub hl_string: Option<Color>,
+    pub hl_attribute: Option<Color>,
+    pub hl_number: Option<Color>,
+    pub hl_comment: Option<Color>,
 }
 
 /// nora's own palette (docs/UTOPIA-VISUAL.md U-2) -- the compiled default and
@@ -78,6 +92,11 @@ pub const BONFIRE: Palette = Palette {
     slate: Color::Rgb(0x8a, 0x9a, 0xc8),
     rust: Color::Rgb(0xd0, 0x5a, 0x4a),
     debug_bg: Color::Rgb(0x33, 0x1e, 0x12),
+    hl_keyword: None,
+    hl_string: None,
+    hl_attribute: None,
+    hl_number: None,
+    hl_comment: None,
 };
 
 impl Palette {
@@ -100,6 +119,16 @@ impl Palette {
     /// | `sand`     | `gold`     | `syntax.sand`                      |
     /// | `slate`    | `slate`    | `syntax.slate`                     |
     /// | `cinnabar` | `rust`     | `syntax.cinnabar`                  |
+    ///
+    /// and, exported under the Instrument profile only (HALCYON-INSTRUMENT
+    /// 7.4 / I-5c), the syntax classes by name -- `syntax_keyword` /
+    /// `syntax_string` / `syntax_attribute` / `syntax_number` /
+    /// `syntax_comment` to `hl_keyword` / `hl_string` / `hl_attribute` /
+    /// `hl_number` / `hl_comment` (the other four of the export's nine have no
+    /// class here and are ignored like any unknown role). Why by name: under
+    /// Instrument the hue roles above reach nora through the legacy
+    /// projection's hue FAMILIES (`moss` is the theme's `syntax_number`), which
+    /// is right for the mode chips and wrong for a class table.
     ///
     /// Unknown roles, malformed hex, comment lines (`#...`) and blank lines are
     /// ignored: a hostile or partial source degrades to the roles it could parse
@@ -130,6 +159,11 @@ impl Palette {
                 "sand" => self.gold = color,
                 "slate" => self.slate = color,
                 "cinnabar" => self.rust = color,
+                "syntax_keyword" => self.hl_keyword = Some(color),
+                "syntax_string" => self.hl_string = Some(color),
+                "syntax_attribute" => self.hl_attribute = Some(color),
+                "syntax_number" => self.hl_number = Some(color),
+                "syntax_comment" => self.hl_comment = Some(color),
                 _ => {}
             }
         }
@@ -291,18 +325,21 @@ pub fn text() -> Style {
 }
 
 /// The foreground colour for a syntax-highlight class (the native lexer
-/// highlighter, docs/KAUA.md section 12), drawn from the palette's syntax hues.
-/// The caller composes it over the line's background (current-line / normal).
-/// Text and (the not-yet-emitted) Operator fall back to the body `fg`.
+/// highlighter, docs/KAUA.md section 12): the class's own role when the
+/// session exported one (`hl_*`, the Instrument profile), else the palette's
+/// hue table. The caller composes it over the line's background
+/// (current-line / normal). Text and (the not-yet-emitted) Operator fall back
+/// to the body `fg`. A shell variable reads as the kit's ATTRIBUTE class
+/// (fields, members, attributes), so `Var` takes `syntax_attribute`.
 pub fn syntax(class: HlClass) -> Color {
     let p = active();
     match class {
         HlClass::Text | HlClass::Operator => p.fg,
-        HlClass::Keyword => p.slate,
-        HlClass::Str => p.green,
-        HlClass::Var => p.violet,
-        HlClass::Comment => p.dim,
-        HlClass::Number => p.gold,
+        HlClass::Keyword => p.hl_keyword.unwrap_or(p.slate),
+        HlClass::Str => p.hl_string.unwrap_or(p.green),
+        HlClass::Var => p.hl_attribute.unwrap_or(p.violet),
+        HlClass::Comment => p.hl_comment.unwrap_or(p.dim),
+        HlClass::Number => p.hl_number.unwrap_or(p.gold),
     }
 }
 
@@ -630,5 +667,77 @@ fg=00ff00
         };
         // bg.r (0xfa) > ember.r (0xc0), so the tint's red lies between them.
         assert!(er <= dr && dr <= br, "tint {dr:#x} between ember {er:#x} and bg {br:#x}");
+    }
+
+    // I-5c: the class-named syntax roles land on the classes, by name -- and
+    // ONLY on the classes: the hue roles (the mode chips, the selection, the
+    // tab strip) are untouched by them. Distinct hexes per role, so a swapped
+    // arm (string painting keywords, say) shows.
+    #[test]
+    fn with_overrides_takes_the_syntax_roles_by_class() {
+        let text = "\
+syntax_keyword=010101
+syntax_type=020202
+syntax_function=030303
+syntax_string=040404
+syntax_number=050505
+syntax_attribute=060606
+syntax_lifetime=070707
+syntax_comment=080808
+syntax_punctuation=090909
+";
+        let p = BONFIRE.with_overrides(text);
+        assert_eq!(p.hl_keyword, Some(Color::Rgb(0x01, 0x01, 0x01)));
+        assert_eq!(p.hl_string, Some(Color::Rgb(0x04, 0x04, 0x04)));
+        assert_eq!(p.hl_number, Some(Color::Rgb(0x05, 0x05, 0x05)));
+        assert_eq!(p.hl_attribute, Some(Color::Rgb(0x06, 0x06, 0x06)));
+        assert_eq!(p.hl_comment, Some(Color::Rgb(0x08, 0x08, 0x08)));
+        // The four classes nora has no lexer class for touch nothing.
+        assert_eq!(p.slate, BONFIRE.slate);
+        assert_eq!(p.green, BONFIRE.green);
+        assert_eq!(p.violet, BONFIRE.violet);
+        assert_eq!(p.gold, BONFIRE.gold);
+        assert_eq!(p.dim, BONFIRE.dim);
+        assert_eq!(p.debug_bg, blend(p.bg, p.ember, 3, 16));
+    }
+
+    // Without the class roles -- the legacy eleven, the console, BONFIRE --
+    // the classes stay on the hue table exactly as before I-5c (the legacy
+    // nora is byte-identical); with them, each class answers its own role.
+    // `syntax()` reads the ACTIVE palette, which tests never set (see
+    // `active_defaults_to_bonfire`), so the resolution is checked through the
+    // same match on a local palette.
+    #[test]
+    fn syntax_classes_keep_the_hue_table_without_the_class_roles() {
+        let resolve = |p: &Palette, class: HlClass| -> Color {
+            match class {
+                HlClass::Text | HlClass::Operator => p.fg,
+                HlClass::Keyword => p.hl_keyword.unwrap_or(p.slate),
+                HlClass::Str => p.hl_string.unwrap_or(p.green),
+                HlClass::Var => p.hl_attribute.unwrap_or(p.violet),
+                HlClass::Comment => p.hl_comment.unwrap_or(p.dim),
+                HlClass::Number => p.hl_number.unwrap_or(p.gold),
+            }
+        };
+        let legacy = BONFIRE.with_overrides("slate=1c1d1e\nmoss=131415\ndusk=161718\nsand=191a1b\ndim=070809\n");
+        assert_eq!(legacy.hl_keyword, None);
+        assert_eq!(resolve(&legacy, HlClass::Keyword), legacy.slate);
+        assert_eq!(resolve(&legacy, HlClass::Str), legacy.green);
+        assert_eq!(resolve(&legacy, HlClass::Var), legacy.violet);
+        assert_eq!(resolve(&legacy, HlClass::Comment), legacy.dim);
+        assert_eq!(resolve(&legacy, HlClass::Number), legacy.gold);
+        assert_eq!(resolve(&legacy, HlClass::Text), legacy.fg);
+        // And the live function agrees on the unset default (BONFIRE).
+        assert_eq!(syntax(HlClass::Keyword), BONFIRE.slate);
+        assert_eq!(syntax(HlClass::Var), BONFIRE.violet);
+        let inst = legacy.with_overrides("syntax_keyword=c7b98b\nsyntax_string=b99a7b\nsyntax_attribute=b58b70\nsyntax_number=a693ad\nsyntax_comment=77807c\n");
+        assert_eq!(resolve(&inst, HlClass::Keyword), Color::Rgb(0xc7, 0xb9, 0x8b));
+        assert_eq!(resolve(&inst, HlClass::Str), Color::Rgb(0xb9, 0x9a, 0x7b));
+        assert_eq!(resolve(&inst, HlClass::Var), Color::Rgb(0xb5, 0x8b, 0x70));
+        assert_eq!(resolve(&inst, HlClass::Number), Color::Rgb(0xa6, 0x93, 0xad));
+        assert_eq!(resolve(&inst, HlClass::Comment), Color::Rgb(0x77, 0x80, 0x7c));
+        assert_eq!(resolve(&inst, HlClass::Text), inst.fg);
+        // The hue roles the legacy text set are still in force beside them.
+        assert_eq!(inst.slate, Color::Rgb(0x1c, 0x1d, 0x1e));
     }
 }
