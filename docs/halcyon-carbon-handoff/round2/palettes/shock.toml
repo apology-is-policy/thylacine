@@ -1,0 +1,75 @@
+# Round 2: authored semantic ANSI16 + explicit contrast corrections.
+# Still a stock-schema compatibility projection, not the full UI profile.
+[meta]
+name = "System Shock Node"
+
+[palette]
+floor = "#070609"
+surface = "#17131C"
+header = "#0C0A0F"
+raised = "#211A28"
+border = "#493B50"
+blank = "#100D13"
+selection = "#2B2231"
+island_rule = "#705A78"
+fg = "#E0DBE3"
+fg_dim = "#CEC5D0"
+fg_muted = "#9A8E9F"
+fg_subtle = "#817786"
+bevel_top = "#2F2E30"
+bevel_left = "#1D1C1F"
+bevel_right = "#050507"
+bevel_bottom = "#040305"
+ember = "#9978A5"
+ember_dim = "#705A78"
+ember_deep = "#705A78"
+status_bg = "#0B080D"
+status_fg = "#E0DBE3"
+status_muted = "#9A8E9F"
+status_idle = "#685B6E"
+
+[palette.sage]
+key = "#668D7B"
+tint = "#0C0A0F"
+raised = "#211A28"
+border = "#2D2533"
+fg = "#E0DBE3"
+fg_dim = "#9A8E9F"
+fg_muted = "#817786"
+
+[palette.cinnabar]
+key = "#B45E63"
+tint = "#0C0A0F"
+raised = "#211A28"
+border = "#2D2533"
+fg = "#E0DBE3"
+fg_dim = "#9A8E9F"
+fg_muted = "#817786"
+
+[palette.syntax]
+slate = "#9978A5"
+sage = "#699996"
+sand = "#B66166"
+moss = "#86748D"
+ash = "#668D7B"
+dusk = "#A98BB2"
+smoke = "#817786"
+fen = "#668D7B"
+cinnabar = "#B45E63"
+
+[terminal]
+bg = "#0D0B11"
+fg = "#C4BBC7"
+ansi = ["#756B7A", "#BB7A87", "#84A18E", "#B4A16E", "#8A9AC5", "#AC86B9", "#76ABA9", "#CBC1D1", "#A497AC", "#DDA0AD", "#A6C3AC", "#D7C492", "#ADBCE7", "#CAAADB", "#9ACAC5", "#EEE7F3"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

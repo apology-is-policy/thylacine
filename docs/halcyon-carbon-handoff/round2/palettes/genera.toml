@@ -1,0 +1,75 @@
+# Round 2: authored semantic ANSI16 + explicit contrast corrections.
+# Still a stock-schema compatibility projection, not the full UI profile.
+[meta]
+name = "Genera Ivory"
+
+[palette]
+floor = "#D5D6D0"
+surface = "#F4F4EE"
+header = "#DEE0DA"
+raised = "#CDD1CB"
+border = "#727A75"
+blank = "#E8E9E3"
+selection = "#D9DCDB"
+island_rule = "#6C7890"
+fg = "#171A19"
+fg_dim = "#343A37"
+fg_muted = "#4E5753"
+fg_subtle = "#5C635F"
+bevel_top = "#DCDDD8"
+bevel_left = "#D9DAD4"
+bevel_right = "#A6A7A2"
+bevel_bottom = "#737470"
+ember = "#3D526F"
+ember_dim = "#6C7890"
+ember_deep = "#6C7890"
+status_bg = "#E2E3DD"
+status_fg = "#171A19"
+status_muted = "#4E5753"
+status_idle = "#747D78"
+
+[palette.sage]
+key = "#4F7059"
+tint = "#DEE0DA"
+raised = "#CDD1CB"
+border = "#C3C7C1"
+fg = "#171A19"
+fg_dim = "#4E5753"
+fg_muted = "#5C635F"
+
+[palette.cinnabar]
+key = "#8E4E4B"
+tint = "#DEE0DA"
+raised = "#CDD1CB"
+border = "#C3C7C1"
+fg = "#171A19"
+fg_dim = "#4E5753"
+fg_muted = "#5C635F"
+
+[palette.syntax]
+slate = "#3D526F"
+sage = "#3D6764"
+sand = "#8E4E4B"
+moss = "#5B657A"
+ash = "#4C6C56"
+dusk = "#344C69"
+smoke = "#5F6662"
+fen = "#4F7059"
+cinnabar = "#8E4E4B"
+
+[terminal]
+bg = "#EDF0E9"
+fg = "#252C29"
+ansi = ["#737A75", "#9B4948", "#456D4B", "#82622C", "#435E91", "#83527D", "#326F72", "#303A34", "#5C655F", "#813432", "#305637", "#6B4D19", "#304773", "#693C65", "#215759", "#18221C"]
+
+[type]
+smooth = 12
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

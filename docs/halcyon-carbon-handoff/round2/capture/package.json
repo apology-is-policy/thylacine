@@ -1,0 +1,7 @@
+{
+  "name": "halcyon-reference-capture",
+  "private": true,
+  "type": "module",
+  "description": "Local-only browser reference capture. Supply exact font files. Pin installed Playwright/Chromium in the produced lockfile and metadata.",
+  "scripts": {"capture": "node capture.mjs"}
+}
