@@ -530,6 +530,41 @@ expect {
 }
 lc_pass "session-instrument: the mark opens the workspace list on the session's seat; Esc dismisses it (14.1 / 14.2)"
 
+# --- Super+T: the picker, a live commit, and the durable write (9.4 / I-7) ------
+after 800
+exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+t"
+expect {
+    -re {tapestryd: chord picker -> rail owner} {}
+    -re {tapestryd: chord picker: no rail} { lc_fail "the session had no rail for the picker chord" }
+    timeout { lc_fail "Super+T did not deliver a picker chord to the rail owner" }
+    eof     { lc_fail "EOF waiting for the picker chord" }
+}
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for picker (\S+)} {
+        lc_step "the picker ($expect_out(4,string) x $expect_out(5,string)) placed, current [string trim $expect_out(6,string)]"
+    }
+    -re {halcyond: menu (surface failed|place refused)} { lc_fail "the session could not place the picker: $expect_out(0,string)" }
+    timeout { lc_fail "Super+T did not open the picker on the session seat" }
+    eof     { lc_fail "EOF waiting for the session picker" }
+}
+# Home selects Signal (rank 1 of DARK FIELD); Enter commits it live AND, on
+# the session seat, persists it to $HOME/lib/halcyon/theme (the durable write).
+hkey "home"
+hkey "ret"
+expect {
+    -re {halcyond: theme signal applied} {}
+    -re {halcyond: theme signal refused} { lc_fail "the session picker commit refused signal" }
+    timeout { lc_fail "the session picker did not commit signal live" }
+    eof     { lc_fail "EOF waiting for the session theme commit" }
+}
+expect {
+    -re {halcyond: theme signal written} {}
+    -re {halcyond: theme signal not written} { lc_fail "the session did not persist the pick (no home or write failed)" }
+    timeout { lc_fail "the session did not write $HOME/lib/halcyon/theme" }
+    eof     { lc_fail "EOF waiting for the durable write" }
+}
+lc_pass "session-instrument: Super+T opens the picker; a commit switches the theme live and the session persists the pick to \$HOME/lib/halcyon/theme (9.4)"
+
 # --- The retained tile and its Restart (14.6 / 14.9) ---------------------------
 # B is focused since the split: `exit` ends its shell; under Instrument the
 # tile is RETAINED (no close, no logout). Its header's secondary press
@@ -638,7 +673,7 @@ expect {
 }
 lc_pass "session-instrument: closing every tile logs the session out, the rail retires with the seat, and the login prompt returns"
 
-lc_pass "ls-halcyon-session-instrument: the session path under Instrument verified end to end -- both rails minted by the seat, the lambda prompt in the session's inks, the footer's pane count and its four conditions from the tile's facts, SPLIT H under the session's authority, the workspace list, the retained tile and its Restart, the structural close, the logout"
+lc_pass "ls-halcyon-session-instrument: the session path under Instrument verified end to end -- both rails minted by the seat, the lambda prompt in the session's inks, the footer's pane count and its four conditions from the tile's facts, SPLIT H under the session's authority, the workspace list, the retained tile and its Restart, the structural close, the logout; Super+T opens the picker, a commit switches the theme live and persists the pick (9.4)"
 # The session is gone; quit qemu from the login prompt.
 lc_step "quit qemu (Ctrl-A x)"
 catch {send -- "\001x"}

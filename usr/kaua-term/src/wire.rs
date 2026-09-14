@@ -15,7 +15,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use kaua::{KeyCode, KeyEvent, Mods};
-use vt::Cell;
+use vt::{Cell, Palette};
 
 use crate::{Control, Record, ScreenMode};
 
@@ -43,6 +43,7 @@ const T_MODE: u8 = 3;
 const T_KEY: u8 = 0;
 const T_RESIZE: u8 = 1;
 const T_TEXT: u8 = 2;
+const T_PALETTE: u8 = 3;
 // Control subtags.
 const C_OSC1936: u8 = 0;
 const C_BELL: u8 = 1;
@@ -64,6 +65,12 @@ pub enum Input {
     /// One record, so a bounded down-queue drops it whole, never half a
     /// command.
     Text(Vec<u8>),
+    /// HALCYON-INSTRUMENT 9.4 (I-7): a live theme change -- the resolved
+    /// palette the tile's cells are now to be born in. The host re-themes
+    /// its vt in place and re-emits (`Vt::set_palette`), so the seam's next
+    /// diff agrees with the compositor's chrome. 18 colours: bg, fg, the
+    /// ANSI sixteen -- the same order `palette_to_spec` uses.
+    Palette(Palette),
 }
 
 /// A wire decode failure.
@@ -214,6 +221,14 @@ pub fn encode_input(inp: &Input, out: &mut Vec<u8>) {
         Input::Text(b) => {
             p.extend_from_slice(b);
             T_TEXT
+        }
+        Input::Palette(pal) => {
+            put_u32(&mut p, pal.bg);
+            put_u32(&mut p, pal.fg);
+            for c in pal.ansi {
+                put_u32(&mut p, c);
+            }
+            T_PALETTE
         }
         Input::Resize { cols, rows } => {
             put_u16(&mut p, *cols);
@@ -414,6 +429,15 @@ pub fn parse_input(tag: u8, payload: &[u8]) -> Result<Input, WireError> {
             rows: r.u16()?,
         },
         T_TEXT => Input::Text(r.take(payload.len())?.to_vec()),
+        T_PALETTE => {
+            let bg = r.u32()?;
+            let fg = r.u32()?;
+            let mut ansi = [0u32; 16];
+            for a in ansi.iter_mut() {
+                *a = r.u32()?;
+            }
+            Input::Palette(Palette { bg, fg, ansi })
+        }
         _ => return Err(WireError::Malformed),
     };
     if !r.done() {
@@ -594,6 +618,12 @@ mod tests {
         });
         rt_input(Input::Text(b"\x05\x15ls -l -- '/bin'\n".to_vec()));
         rt_input(Input::Text(Vec::new()));
+        rt_input(Input::Palette(vt::BONFIRE));
+        rt_input(Input::Palette(Palette { bg: 0xFF010203, fg: 0xFF040506, ansi: [
+            0xFF101112, 0xFF131415, 0xFF161718, 0xFF191A1B, 0xFF1C1D1E, 0xFF1F2021,
+            0xFF222324, 0xFF252627, 0xFF28292A, 0xFF2B2C2D, 0xFF2E2F30, 0xFF313233,
+            0xFF343536, 0xFF373839, 0xFF3A3B3C, 0xFF3D3E3F,
+        ] }));
     }
 
     #[test]

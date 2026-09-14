@@ -863,6 +863,8 @@ pub const TEV_LAYOUT: u16 = 10;
 /// another surface, the desktop, a track, or a placed menu's grab. A header
 /// un-hovers on it; content surfaces never receive it.
 pub const TEV_PTR_LEAVE: u16 = 11;
+/// HALCYON-INSTRUMENT 9.3 (I-7): a picker/help chord to the rail owner.
+pub const TEV_CHORD: u16 = 12;
 
 #[derive(Clone, Copy)]
 pub struct Tevent {
@@ -9254,6 +9256,39 @@ impl Comp {
                     let _ = self.pane_cmd(Actor::Renderer, (0, 0), id, "close");
                 }
             }
+            // HALCYON-INSTRUMENT 9.3 (I-7): the picker and help are the
+            // environment's, not the compositor's -- the chord layer has
+            // already dismissed any placed menu above (so Super+T over an
+            // open picker re-opens it), and here the compositor only
+            // DELIVERS the request to the registered rail's owner.
+            ChordAction::Picker => self.deliver_chord(1),
+            ChordAction::Help => self.deliver_chord(2),
+        }
+    }
+
+    /// Deliver a picker (code 1) or help (code 2) chord to the registered
+    /// rail's owner as TEV_CHORD (9.3). No rail (the legacy profile, or a
+    /// seat whose rail is not up): said and dropped -- the environment has
+    /// no picker to open there.
+    fn deliver_chord(&mut self, code: u16) {
+        let name = if code == 1 { "picker" } else { "help" };
+        match self.rail {
+            Some(r) => {
+                let ev = Tevent {
+                    kind: TEV_CHORD,
+                    code,
+                    value: 1,
+                    rune: 0,
+                    mods: 0,
+                    flags: 0,
+                    tick: self.tick,
+                };
+                if !self.push_event(r.n, ev) {
+                    self.retire(r.n);
+                }
+                say!("tapestryd: chord {} -> rail owner", name);
+            }
+            None => say!("tapestryd: chord {}: no rail", name),
         }
     }
 

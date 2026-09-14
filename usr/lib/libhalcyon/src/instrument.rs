@@ -145,6 +145,49 @@ pub const KEYS: &[(&str, &str)] = &[
 /// The `[meta]` keys, every one required.
 const META_KEYS: &[&str] = &["schema", "profile", "id", "name", "color_scheme"];
 
+/// The OPTIONAL `[meta]` keys (HALCYON-INSTRUMENT 4.2, amended at I-7): the
+/// picker's group, subtitle and order. Validated when present, refused
+/// when malformed, defaulted when absent -- a gallery file may carry none.
+const META_OPTIONAL: &[&str] = &["group", "tagline", "rank"];
+
+/// The rank a file without one sorts at: after every ranked file, then by
+/// id.
+pub const RANK_UNRANKED: u8 = 255;
+
+/// The picker's groups (9.4): the mockup's three, in its order; a file
+/// without a `group` word lands after them (`Group::label` is the row the
+/// picker paints; the trailing group's label is `OTHER`).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Group {
+    Dark,
+    Terminal,
+    Light,
+}
+
+impl Group {
+    /// The `[meta] group` word.
+    pub fn parse(word: &str) -> Option<Group> {
+        Some(match word {
+            "dark" => Group::Dark,
+            "terminal" => Group::Terminal,
+            "light" => Group::Light,
+            _ => return None,
+        })
+    }
+
+    /// The picker's group row (the mockup's `.theme-group-label` text).
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::Dark => "DARK FIELD",
+            Group::Terminal => "TERMINAL STUDIES",
+            Group::Light => "LIGHT FIELD",
+        }
+    }
+}
+
+/// The label of the trailing group for files that name none.
+pub const OTHER_GROUP_LABEL: &str = "OTHER";
+
 /// The tables this schema knows. No `[geometry]`: an Instrument file that
 /// carries one is refused at its header.
 const TABLES: &[&str] = &["meta", "color", "terminal", "type"];
@@ -281,6 +324,14 @@ pub struct LoadedInstrument {
     pub id: String,
     /// `[meta] name`, presentable (the legacy rule).
     pub name: String,
+    /// `[meta] group` (9.4), None when the file names none.
+    pub group: Option<Group>,
+    /// `[meta] tagline`, the picker's subtitle; empty when absent (the
+    /// picker shows the id then).
+    pub tagline: String,
+    /// `[meta] rank`, the order within the group; `RANK_UNRANKED` when
+    /// absent.
+    pub rank: u8,
 }
 
 /// Is this word a gallery id -- and therefore safe to become the path
@@ -418,8 +469,29 @@ pub fn from_entries(entries: &[Entry<'_>], src_len: usize) -> Result<LoadedInstr
     let mut id = String::new();
     let mut name = String::new();
     let mut light: Option<bool> = None;
+    let mut group: Option<Group> = None;
+    let mut tagline = String::new();
+    let mut rank = RANK_UNRANKED;
     let mut meta_seen = [false; META_KEYS.len()];
     for e in entries.iter().filter(|e| e.table == "meta") {
+        if META_OPTIONAL.contains(&e.key) {
+            match (e.key, &e.value) {
+                ("group", Value::Str(w)) => {
+                    group = Some(Group::parse(w).ok_or(LoadError::OutOfRange { line: e.line })?);
+                }
+                ("tagline", Value::Str(t)) => {
+                    if !theme::name_is_presentable(t) {
+                        return Err(LoadError::BadName { line: e.line });
+                    }
+                    tagline = String::from(*t);
+                }
+                ("rank", Value::Int(r)) => {
+                    rank = u8::try_from(*r).map_err(|_| LoadError::OutOfRange { line: e.line })?;
+                }
+                _ => return Err(LoadError::BadShape { line: e.line }),
+            }
+            continue;
+        }
         let idx = META_KEYS
             .iter()
             .position(|k| *k == e.key)
@@ -486,7 +558,14 @@ pub fn from_entries(entries: &[Entry<'_>], src_len: usize) -> Result<LoadedInstr
         return Err(LoadError::Incomplete { missing });
     }
     t.light = light.unwrap_or(false);
-    Ok(LoadedInstrument { theme: t, id, name })
+    Ok(LoadedInstrument {
+        theme: t,
+        id,
+        name,
+        group,
+        tagline,
+        rank,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1380,6 +1459,47 @@ mod tests {
             assert_eq!(Profile::parse(bad), None, "{bad:?}");
         }
         assert_eq!(Profile::parse(Profile::Instrument.word()), Some(Profile::Instrument));
+    }
+
+    /// I-7 (4.2 amended): the three optional meta keys load when present
+    /// and default when absent; a malformed one refuses the file whole.
+    #[test]
+    fn the_optional_meta_keys_load_validate_and_default() {
+        let base = docs("round2/ui-palettes/carbon.toml");
+        let ansi = ansi_json("round2/ansi16.json");
+        let file = instrument_file(&base, &ansi["carbon"], 0);
+        let plain = theme::load(&file).unwrap();
+        let LoadedAny::Instrument(l) = plain else { panic!("schema") };
+        assert_eq!(l.group, None, "absent group");
+        assert_eq!(l.tagline, "", "absent tagline");
+        assert_eq!(l.rank, RANK_UNRANKED, "absent rank");
+        let with = file.replacen(
+            "[meta]\n",
+            "[meta]\ngroup = \"terminal\"\ntagline = \"High contrast · pale champagne\"\nrank = 3\n",
+            1,
+        );
+        let LoadedAny::Instrument(l) = theme::load(&with).unwrap() else { panic!("schema") };
+        assert_eq!(l.group, Some(Group::Terminal));
+        assert_eq!(l.tagline, "High contrast · pale champagne");
+        assert_eq!(l.rank, 3);
+        assert_eq!(l.id, "carbon", "the required keys still load");
+        for (bad, why) in [
+            ("group = \"dusk\"\n", "an unknown group word"),
+            ("group = 1\n", "a group that is not a string"),
+            ("rank = 256\n", "a rank past u8"),
+            ("rank = -1\n", "a negative rank"),
+            ("rank = \"1\"\n", "a rank that is not an integer"),
+            ("tagline = \"a\u{1b}[31mb\"\n", "a tagline with a control byte"),
+        ] {
+            let text = file.replacen("[meta]\n", &std::format!("[meta]\n{bad}"), 1);
+            assert!(theme::load(&text).is_err(), "{why} must refuse the file");
+        }
+        assert_eq!(Group::parse("dark"), Some(Group::Dark));
+        assert_eq!(Group::parse("light"), Some(Group::Light));
+        assert_eq!(Group::Dark.label(), "DARK FIELD");
+        assert_eq!(Group::Terminal.label(), "TERMINAL STUDIES");
+        assert_eq!(Group::Light.label(), "LIGHT FIELD");
+        assert!(Group::Dark < Group::Terminal && Group::Terminal < Group::Light, "the mockup's order");
     }
 
     #[test]

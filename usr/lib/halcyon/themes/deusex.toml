@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "deusex"
 name = "Deus Ex Access"
 color_scheme = "dark"
+group = "terminal"
+tagline = "Midnight blue · aged gold"
+rank = 2
 
 [color]
 desktop = "#05080C"

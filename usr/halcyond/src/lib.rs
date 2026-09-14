@@ -21,6 +21,8 @@ pub mod indicator;
 pub mod input;
 pub mod layout;
 pub mod menu;
+pub mod picker;
+pub mod dialog;
 pub mod outline;
 pub mod rail;
 pub mod raster;

@@ -21,8 +21,10 @@ use halcyond::layout::Sheet;
 use halcyond::rail::{rail_hit, rail_list, RailHit, RailInk, RailModel, RailZones};
 use halcyond::raster::GlyphSource;
 use libhalcyon::instrument::Profile;
+use halcyond::picker;
+use halcyond::rail::NARROW_W;
 use tapestry::{
-    EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_PTR_BTN, TEV_PTR_LEAVE,
+    EventRing, Surface, TapError, TEV_CHORD, TEV_CLOSE, TEV_CONFIGURE, TEV_PTR_BTN, TEV_PTR_LEAVE,
     TEV_PTR_MOVE,
 };
 
@@ -41,8 +43,9 @@ pub enum RailAction {
     /// The split chords' pointer twins (9.5).
     SplitH,
     SplitV,
-    /// The theme control (the picker, I-7).
-    Theme,
+    /// The theme control (the picker, I-7): the display-point anchor for the
+    /// picker's top-left (the control's right edge minus the picker width).
+    Theme { x: u32, y: u32 },
     /// Reset (9.5).
     Reset,
     /// The keyboard reference (the help dialog, I-7).
@@ -93,6 +96,29 @@ impl RailBar {
     /// The actions the pump collected since the last take.
     pub fn take_actions(&mut self) -> Vec<RailAction> {
         core::mem::take(&mut self.actions)
+    }
+
+    /// The picker's anchor (9.4): the theme control's right edge minus the
+    /// picker width, at the rail's bottom + 5 (the compositor clamps into
+    /// the display); +44 at a narrow display (8.3). The same action a press
+    /// on the control and a Super+T chord both produce.
+    fn theme_anchor(zones: &RailZones, sw: i32, sh: i32, sheet: &Sheet) -> RailAction {
+        let pw = sheet.ipx(picker::WIDTH);
+        let (tx, tw) = zones
+            .buttons
+            .iter()
+            .find(|(h, _)| *h == RailHit::Theme)
+            .map(|(_, b)| (b.0, b.2))
+            .unwrap_or((0, 0));
+        let mut x = (tx + tw - pw).max(0);
+        if sw > 0 && sw <= sheet.ipx(NARROW_W) {
+            x += sheet.ipx(44);
+        }
+        let y = sh + sheet.ipx(5);
+        RailAction::Theme {
+            x: x.max(0) as u32,
+            y: y.max(0) as u32,
+        }
     }
 
     /// Re-arm the mint retry (free while the rail is up).
@@ -203,7 +229,7 @@ impl RailBar {
                                     Some(RailHit::ChipsNext) => Some(RailAction::ChipsScroll(1)),
                                     Some(RailHit::SplitH) => Some(RailAction::SplitH),
                                     Some(RailHit::SplitV) => Some(RailAction::SplitV),
-                                    Some(RailHit::Theme) => Some(RailAction::Theme),
+                                    Some(RailHit::Theme) => Some(Self::theme_anchor(&self.zones, surf.w as i32, surf.h as i32, sheet)),
                                     Some(RailHit::Reset) => Some(RailAction::Reset),
                                     Some(RailHit::Help) => Some(RailAction::Help),
                                     None => None,
@@ -217,6 +243,23 @@ impl RailBar {
                                 self.ink.pressed = None;
                             }
                             repaint = true;
+                        }
+                        // HALCYON-INSTRUMENT 9.3 (I-7): a picker/help chord the
+                        // compositor delivered here (TEV_CHORD; code 1 = picker,
+                        // 2 = help) -- the same action a press on the control
+                        // produces, so the owner opens the picker at the same
+                        // anchor. A chord with an unknown code is ignored.
+                        TEV_CHORD => {
+                            let a = match e.code {
+                                1 => Some(Self::theme_anchor(&self.zones, surf.w as i32, surf.h as i32, sheet)),
+                                2 => Some(RailAction::Help),
+                                _ => None,
+                            };
+                            if let Some(a) = a {
+                                #[cfg(feature = "test-mode")]
+                                say(&format!("halcyond: rail chord {:?}", a));
+                                self.actions.push(a);
+                            }
                         }
                         _ => {}
                     },

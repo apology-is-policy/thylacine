@@ -103,6 +103,12 @@ struct Shared {
     app_cursor: AtomicBool,
     // (cols << 16) | rows, or 0 for "no pending resize".
     pending_resize: AtomicU32,
+    // HALCYON-INSTRUMENT 9.4 (I-7): a live theme change posted by the input
+    // thread; applied by the output thread (which owns the vt). 18 colours
+    // (bg, fg, the ANSI sixteen) + a flag, so a whole Palette crosses without
+    // a lock -- read only when the flag is set, which is set last.
+    palette_pending: AtomicBool,
+    pending_palette: [AtomicU32; 18],
     // Serializes the master's TWO writers: the output thread's terminal replies
     // (CPR/DSR/DA) and the input thread's re-encoded keys. Without it a reply
     // written during a keystroke could interleave mid-sequence and corrupt the
@@ -181,6 +187,24 @@ fn apply_resize(
     }
 }
 
+/// Apply a posted live theme change (I-7): re-theme the vt in place and
+/// re-emit the changed cells, so the seam's next diff carries the new
+/// colours. The flag is read with Acquire to pair the input thread's Release.
+fn apply_palette(sh: &Shared, vt: &mut Vt, prod: &mut Producer, recs: &mut Vec<Record>, out: &mut Vec<u8>) {
+    if sh.palette_pending.swap(false, Ordering::Acquire) {
+        let bg = sh.pending_palette[0].load(Ordering::Relaxed);
+        let fg = sh.pending_palette[1].load(Ordering::Relaxed);
+        let mut ansi = [0u32; 16];
+        for (i, a) in ansi.iter_mut().enumerate() {
+            *a = sh.pending_palette[2 + i].load(Ordering::Relaxed);
+        }
+        vt.set_palette(vt::Palette { bg, fg, ansi });
+        recs.clear();
+        prod.reemit(vt, recs);
+        emit(recs, out);
+    }
+}
+
 // The INPUT thread: fd 0 -> Input -> the master / winsize.
 extern "C" fn pump_in(arg: u64) {
     // SAFETY: `arg` is the &'static Shared pointer the main thread passed.
@@ -205,6 +229,17 @@ extern "C" fn pump_in(arg: u64) {
                     }
                     // H-4d: a chosen verb's command line, as typed.
                     Ok(Input::Text(b)) => write_master(sh, &b),
+                    // I-7: a live theme change -- post it to the output thread
+                    // (the vt is its). The flag is set LAST, after every
+                    // colour, so the reader never sees a half-written palette.
+                    Ok(Input::Palette(pal)) => {
+                        sh.pending_palette[0].store(pal.bg, Ordering::Relaxed);
+                        sh.pending_palette[1].store(pal.fg, Ordering::Relaxed);
+                        for (i, c) in pal.ansi.iter().enumerate() {
+                            sh.pending_palette[2 + i].store(*c, Ordering::Relaxed);
+                        }
+                        sh.palette_pending.store(true, Ordering::Release);
+                    }
                     Ok(Input::Resize { cols, rows }) => {
                         // Flag the output thread BEFORE setting the winsize, so
                         // the app's SIGWINCH redraw is already processed at the
@@ -323,6 +358,8 @@ fn run() -> i64 {
         app_pid: pid as i64,
         app_cursor: AtomicBool::new(false),
         pending_resize: AtomicU32::new(0),
+        palette_pending: AtomicBool::new(false),
+        pending_palette: core::array::from_fn(|_| AtomicU32::new(0)),
         master_write: WriteLock::new(),
     }));
 
@@ -357,6 +394,9 @@ fn run() -> i64 {
         // Apply a pending resize before processing new output, so the CellDiff
         // is computed against the correct geometry.
         apply_resize(sh, &mut vt, &mut prod, &mut recs, &mut out);
+        // Apply a pending theme change too (I-7): a bare palette change emits
+        // no master bytes, so this is the only place its redraw ships.
+        apply_palette(sh, &mut vt, &mut prod, &mut recs, &mut out);
         // SAFETY: SVC wrapper over this thread's own stack buffer.
         let n = unsafe { t_read(mfd, buf.as_mut_ptr(), buf.len()) };
         if n <= 0 {
@@ -366,6 +406,7 @@ fn run() -> i64 {
         // returns are usually the app's SIGWINCH repaint at the NEW size: apply
         // it again here, or that repaint is parsed at the old geometry.
         apply_resize(sh, &mut vt, &mut prod, &mut recs, &mut out);
+        apply_palette(sh, &mut vt, &mut prod, &mut recs, &mut out);
         recs.clear();
         // Each capped ScrollOff is shipped as it lands: the rows one read can
         // yield are the VT's to decide (a five-byte `ESC [ 36 S` is 36 rows),

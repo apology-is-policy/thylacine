@@ -425,11 +425,14 @@ pub extern "C" fn rs_main() -> i64 {
         resolved.profile_tier
     );
     // HALCYON-INSTRUMENT 8.1: the theme's name, the rail's theme control.
-    let theme_name = if resolved.name.is_empty() {
+    let mut current_theme_id = resolved.id.clone();
+    let mut theme_name = if resolved.name.is_empty() {
         alloc::string::String::from("built-in")
     } else {
         resolved.name.clone()
     };
+    // HALCYON-INSTRUMENT 14.5 (I-7): the running-close confirmation's target.
+    let mut pending_close: Option<(u32, u32)> = None;
     let bundle = resolved.bundle;
     let theme = bundle.theme;
     // The compositor cannot read this file. Measured 2026-09-09 on the
@@ -895,6 +898,19 @@ pub extern "C" fn rs_main() -> i64 {
                         if count <= 1 {
                             say!("halcyond: final tile is protected (pane {})", id);
                             status.notify("FINAL TILE IS PROTECTED", true);
+                        } else if Some(id) == chrome.own_pane() && t.running() {
+                            // HALCYON-INSTRUMENT 14.5 (I-7): a running console
+                            // asks before closing; the close runs on the
+                            // dialog's `close` tag.
+                            let name = halcyond::chrome::console_name();
+                            let cmd = halcyond::rail::sanitise_cmd(t.last_command().unwrap_or(""));
+                            pending_close = Some((id, count));
+                            if !menus.open_dialog(halcyond::dialog::Dialog::close_running(&name, &cmd), &sheet, &mut gs) {
+                                pending_close = None;
+                                if chromeset::pane_verb(troot, id, "close") {
+                                    relayout = true;
+                                }
+                            }
                         } else if chromeset::pane_verb(troot, id, "close") {
                             relayout = true;
                         }
@@ -1028,34 +1044,22 @@ pub extern "C" fn rs_main() -> i64 {
                         }
                     }
                     railset::RailAction::Reset => {
-                        let plan = chromeset::read_file(troot, "layout")
-                            .map(|l| reset_plan(&l))
-                            .unwrap_or_default();
-                        say!("halcyond: reset: {} verb(s)", plan.len());
-                        let planned = plan.len();
-                        let mut landed = 0usize;
-                        // One retry budget for the whole plan (r2 C-F8).
-                        let mut budget = chromeset::VerbBudget::pass();
-                        for (id, verb) in plan {
-                            if chromeset::pane_verb_in(troot, id, &verb, &mut budget) {
-                                relayout = true;
-                                landed += 1;
-                            }
-                        }
-                        // The notice tells the truth: a plan no verb of which
-                        // landed is a refused reset (the r1 B-F3 finding), and
-                        // one half of which landed is a PARTIAL one (r2 C-F8).
-                        if planned == 0 || landed == planned {
-                            status.notify("LAYOUT RESET", false);
-                        } else if landed > 0 {
-                            status.notify("LAYOUT RESET (PARTIAL)", true);
-                        } else {
+                        // 9.5 / 14.5 (I-7): RESET asks first; the plan runs on
+                        // the dialog's `reset` tag (the menu-service arm).
+                        if !menus.open_dialog(halcyond::dialog::Dialog::reset(), &sheet, &mut gs) {
                             status.notify("RESET REFUSED", true);
                         }
                     }
-                    railset::RailAction::Theme => {
-                        say!("halcyond: the theme picker is not available yet");
-                        status.notify("THEME PICKER NOT AVAILABLE", true);
+                    railset::RailAction::Theme { x, y } => {
+                        // 9.4 (I-7): open the picker at the control's anchor.
+                        let gallery = session::read_gallery();
+                        if gallery.is_empty() {
+                            say!("halcyond: no gallery themes to pick");
+                            status.notify("NO THEMES", true);
+                        } else {
+                            let picker = halcyond::picker::Picker::build(gallery, &current_theme_id);
+                            menus.open_picker(picker, x, y, &sheet, &mut gs);
+                        }
                     }
                     railset::RailAction::Help => {
                         say!("halcyond: the keyboard reference is not available yet");
@@ -1158,7 +1162,86 @@ pub extern "C" fn rs_main() -> i64 {
                     act
                 );
             }
+            menuset::MenuEvent::ThemeChosen(id) => {
+                // HALCYON-INSTRUMENT 9.4 (I-7): the console seat applies the
+                // theme live and persists NOTHING (no user home here; the
+                // system word is the bake's) -- it says so.
+                menus.close();
+                match session::gallery_bundle(&id, sheet.bundle().profile) {
+                    Some((newb, name)) => {
+                        let old_term = sheet.theme.terminal;
+                        session::push_theme(&ring, &newb);
+                        let gen = sheet.gen + 1;
+                        sheet = sheet_for(&newb, sheet.scale, sheet.display_w);
+                        sheet.gen = gen;
+                        gs.set_smooth(sheet.smooth_mem);
+                        gs.set_kerning(sheet.kerning);
+                        // The console renders its own Transcript directly (no
+                        // pts host to re-emit): re-theme it in place.
+                        t.remap_palette(old_term, sheet.theme.terminal);
+                        cache.clear();
+                        frame.clear();
+                        last_open_laid = None;
+                        chrome.invalidate();
+                        status.invalidate();
+                        rail.invalidate();
+                        dirty = true;
+                        current_theme_id = id.clone();
+                        theme_name = if name.is_empty() {
+                            alloc::string::String::from("built-in")
+                        } else {
+                            name
+                        };
+                        say!("halcyond: theme {} applied (console; not persisted)", id);
+                        status.notify(&alloc::format!("THEME \u{b7} {} (NOT SAVED)", theme_name.to_uppercase()), true);
+                    }
+                    None => {
+                        say!("halcyond: theme {} refused (no gallery file)", id);
+                        status.notify("THEME REFUSED", true);
+                        dirty = true;
+                    }
+                }
+            }
+            menuset::MenuEvent::Dialog(tag) => {
+                menus.close();
+                match tag.as_str() {
+                    "reset" => {
+                        let plan = chromeset::read_file(troot, "layout")
+                            .map(|l| reset_plan(&l))
+                            .unwrap_or_default();
+                        say!("halcyond: reset: {} verb(s)", plan.len());
+                        let planned = plan.len();
+                        let mut landed = 0usize;
+                        let mut budget = chromeset::VerbBudget::pass();
+                        for (id, verb) in plan {
+                            if chromeset::pane_verb_in(troot, id, &verb, &mut budget) {
+                                relayout = true;
+                                landed += 1;
+                            }
+                        }
+                        if planned == 0 || landed == planned {
+                            status.notify("LAYOUT RESET", false);
+                        } else if landed > 0 {
+                            status.notify("LAYOUT RESET (PARTIAL)", true);
+                        } else {
+                            status.notify("RESET REFUSED", true);
+                        }
+                    }
+                    "close" => {
+                        if let Some((id, count)) = pending_close.take() {
+                            if count <= 1 {
+                                status.notify("FINAL TILE IS PROTECTED", true);
+                            } else if chromeset::pane_verb(troot, id, "close") {
+                                relayout = true;
+                            }
+                        }
+                    }
+                    _ => pending_close = None,
+                }
+                dirty = true;
+            }
             menuset::MenuEvent::Closed => {
+                pending_close = None;
                 dirty = true;
             }
             menuset::MenuEvent::None => {}

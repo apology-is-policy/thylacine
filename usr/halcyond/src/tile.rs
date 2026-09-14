@@ -108,6 +108,18 @@ pub struct Tile {
 }
 
 impl Tile {
+    /// HALCYON-INSTRUMENT 9.4 (I-7): re-theme this tile in place on a live
+    /// theme change -- the live grid and the retained scrollback both remap
+    /// their cell colours from `old` to `new` (`vt::remap_color`). The
+    /// session ALSO tells the tile's pts host (`Input::Palette`), whose own
+    /// re-emit will overwrite the live grid; this remap closes the window
+    /// until that arrives and is the console path's only re-theme. A repaint
+    /// is the caller's (`dirty`).
+    pub fn set_palette(&mut self, old: Palette, new: Palette) {
+        self.grid.remap_palette(old, new);
+        self.scrollback.remap_palette(old, new);
+    }
+
     pub fn new(cols: usize, rows: usize, pal: Palette) -> Tile {
         Tile::with_budget(cols, rows, pal, DEFAULT_MAX_COST)
     }

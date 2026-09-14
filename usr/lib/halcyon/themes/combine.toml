@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "combine"
 name = "Combine Relay"
 color_scheme = "dark"
+group = "terminal"
+tagline = "Occupation steel · cold relay"
+rank = 1
 
 [color]
 desktop = "#060A0D"

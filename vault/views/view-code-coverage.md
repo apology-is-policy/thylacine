@@ -65,16 +65,16 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 66 unowned · 500 files (86% owned) · ~22335 unswept lines.**
+**434 owned · 68 unowned · 502 files (86% owned) · ~23624 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30518 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
+| usr/halcyond | 19 | 6 | 3857 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/lib | 58 | 5 | 2950 |
-| usr/halcyond | 19 | 4 | 2688 |
+| usr/lib | 58 | 5 | 3070 |
 | usr/haul | 0 | 5 | 2557 |
 | kernel | 123 | 15 | 2118 |
 | usr/ports | 14 | 4 | 1631 |
@@ -122,20 +122,22 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | file | lines |
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
+| usr/lib/libhalcyon/src/instrument.rs | 1588 |
 | usr/halcyond/src/rail.rs | 1544 |
-| usr/lib/libhalcyon/src/instrument.rs | 1468 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/haul/src/main.rs | 1125 |
 | usr/quarry/src/main.rs | 1028 |
 | usr/haul/src/npxf.rs | 1005 |
 | usr/halcyond/src/outline.rs | 685 |
+| usr/halcyond/src/picker.rs | 643 |
 | usr/lib/libhalcyon/src/toml.rs | 629 |
 | usr/lib/libhalcyon/src/carve.rs | 479 |
+| usr/halcyond/src/dialog.rs | 473 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | kernel/include/thylacine/errno.h | 388 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
+| usr/halcyond/src/railset.rs | 357 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
-| usr/halcyond/src/railset.rs | 314 |
 | usr/lib/libhalcyon/src/scale.rs | 302 |
 | usr/haul/src/cmdline.rs | 296 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
@@ -153,8 +155,8 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
+| usr/halcyond/src/indicator.rs | 155 |
 | kernel/cpio.c | 152 |
-| usr/halcyond/src/indicator.rs | 145 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |

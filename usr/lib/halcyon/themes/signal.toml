@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "signal"
 name = "Signal Amber"
 color_scheme = "dark"
+group = "dark"
+tagline = "Graphite · industrial amber"
+rank = 1
 
 [color]
 desktop = "#0B0D0E"

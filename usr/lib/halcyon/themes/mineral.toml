@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "mineral"
 name = "Mineral Sage"
 color_scheme = "light"
+group = "light"
+tagline = "Gray green · deep teal"
+rank = 2
 
 [color]
 desktop = "#CBD2CA"

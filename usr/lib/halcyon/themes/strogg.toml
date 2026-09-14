@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "strogg"
 name = "Strogg Process"
 color_scheme = "dark"
+group = "terminal"
+tagline = "Black iron · dried oxide"
+rank = 6
 
 [color]
 desktop = "#070605"

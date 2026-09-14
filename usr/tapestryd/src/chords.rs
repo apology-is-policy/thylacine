@@ -25,6 +25,11 @@ pub enum ChordAction {
     Split(Mode),   // SplitH | SplitV
     SetMode(Mode), // Tabbed | Stacked
     Zoom,
+    /// HALCYON-INSTRUMENT 9.3 (I-7): the picker and help chords. The
+    /// compositor does not act on these -- they live in the environment --
+    /// it delivers TEV_CHORD to the registered rail's owner (server.rs).
+    Picker,
+    Help,
     SplitToggle,
     TabCycle(bool), // true = forward
     Close,
@@ -60,6 +65,7 @@ const KEY_TAB: u16 = 15;
 const KEY_Q: u16 = 16;
 const KEY_E: u16 = 18;
 const KEY_T: u16 = 20;
+const KEY_SLASH: u16 = 53;
 const KEY_S: u16 = 31;
 const KEY_F: u16 = 33;
 const KEY_H: u16 = 35;
@@ -109,6 +115,7 @@ fn key_code(name: &str) -> Option<u16> {
         "0" => KEY_0,
         "minus" => KEY_MINUS,
         "equal" => KEY_EQUAL,
+        "slash" => KEY_SLASH,
         _ => return None,
     })
 }
@@ -151,6 +158,7 @@ pub fn key_name(code: u16) -> Option<&'static str> {
         KEY_0 => "0",
         KEY_MINUS => "minus",
         KEY_EQUAL => "equal",
+        KEY_SLASH => "slash",
         _ => return None,
     })
 }
@@ -171,6 +179,8 @@ pub fn action_name(a: ChordAction) -> &'static str {
         ChordAction::Split(_) => "split-h",
         ChordAction::SplitToggle => "split-toggle",
         ChordAction::Zoom => "zoom",
+        ChordAction::Picker => "picker",
+        ChordAction::Help => "help",
         ChordAction::SetMode(Mode::Tabbed) => "tab",
         ChordAction::SetMode(_) => "stack",
         ChordAction::TabCycle(true) => "cycle",
@@ -198,6 +208,8 @@ fn action_of(name: &str) -> Option<Option<ChordAction>> {
         "split-v" => ChordAction::Split(Mode::SplitV),
         "split-toggle" => ChordAction::SplitToggle,
         "zoom" => ChordAction::Zoom,
+        "picker" => ChordAction::Picker,
+        "help" => ChordAction::Help,
         "tab" => ChordAction::SetMode(Mode::Tabbed),
         "stack" => ChordAction::SetMode(Mode::Stacked),
         "cycle" => ChordAction::TabCycle(true),
@@ -229,8 +241,10 @@ impl Chords {
                 d(KEY_H, false, Split(Mode::SplitH)),
                 d(KEY_V, false, Split(Mode::SplitV)),
                 d(KEY_F, false, Zoom),
-                d(KEY_T, false, SetMode(Mode::Tabbed)),
+                d(KEY_T, false, Picker),
+                d(KEY_T, true, SetMode(Mode::Tabbed)),
                 d(KEY_S, false, SetMode(Mode::Stacked)),
+                d(KEY_SLASH, false, Help),
                 d(KEY_E, false, SplitToggle),
                 d(KEY_TAB, false, TabCycle(true)),
                 d(KEY_TAB, true, TabCycle(false)),
@@ -388,6 +402,14 @@ mod tests {
         assert_eq!(key_code("equal"), Some(KEY_EQUAL));
         assert_eq!(key_code("minus"), Some(KEY_MINUS));
         assert_eq!(key_code("0"), Some(KEY_0));
+        // I-7 (ruling 13): Super+T opens the picker, Super+Shift+T is tabbed,
+        // Super+/ is help.
+        assert!(matches!(c.lookup(KEY_T, false), Some(ChordAction::Picker)));
+        assert!(matches!(c.lookup(KEY_T, true), Some(ChordAction::SetMode(Mode::Tabbed))));
+        assert!(matches!(c.lookup(KEY_SLASH, false), Some(ChordAction::Help)));
+        assert!(matches!(action_of("picker"), Some(Some(ChordAction::Picker))));
+        assert!(matches!(action_of("help"), Some(Some(ChordAction::Help))));
+        assert_eq!(key_code("slash"), Some(KEY_SLASH));
         // An unbound key (no default) -> plane-reserved, no action.
         assert!(c.lookup(34 /* g */, false).is_none());
         assert_eq!(c.gaps, 1);
@@ -458,8 +480,11 @@ mod tests {
         assert!(text.contains("super+tab cycle\n"));
         assert!(text.contains("super+shift+tab cycle-back\n"));
         assert!(text.contains("super+shift+q close\n"));
+        assert!(text.contains("super+t picker\n"));
+        assert!(text.contains("super+shift+t tab\n"));
+        assert!(text.contains("super+slash help\n"));
         assert!(text.contains("super+equal scale-up\n"));
-        assert_eq!(text.lines().count(), 20, "every default binding, one line each");
+        assert_eq!(text.lines().count(), 22, "every default binding, one line each");
         let mut d = Chords::new();
         d.binds.clear();
         for line in text.lines() {

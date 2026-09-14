@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "logic"
 name = "Warm Logic"
 color_scheme = "light"
+group = "light"
+tagline = "Putty paper · aubergine"
+rank = 3
 
 [color]
 desktop = "#D5D0C7"

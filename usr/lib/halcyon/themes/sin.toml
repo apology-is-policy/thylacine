@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "sin"
 name = "SiN Network"
 color_scheme = "dark"
+group = "terminal"
+tagline = "Petrol black · warning orange"
+rank = 4
 
 [color]
 desktop = "#070908"

@@ -24,6 +24,10 @@ pub struct DownQueue {
     keys: VecDeque<Vec<u8>>,
     key_bytes: usize,
     resize: Option<Vec<u8>>,
+    /// HALCYON-INSTRUMENT 9.4 (I-7): the pending live theme change; never
+    /// dropped (a stale tile would keep the old palette for life), latest
+    /// wins, delivered before any key at a record boundary, like `resize`.
+    palette: Option<Vec<u8>>,
     /// The record being written; `off` bytes of it are already out. A partial
     /// write never interleaves with another record.
     inflight: Vec<u8>,
@@ -42,13 +46,17 @@ impl DownQueue {
             keys: VecDeque::new(),
             key_bytes: 0,
             resize: None,
+            palette: None,
             inflight: Vec::new(),
             off: 0,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.off == self.inflight.len() && self.resize.is_none() && self.keys.is_empty()
+        self.off == self.inflight.len()
+            && self.resize.is_none()
+            && self.palette.is_none()
+            && self.keys.is_empty()
     }
 
     /// Queue one encoded key record. False = dropped (the cap).
@@ -67,11 +75,17 @@ impl DownQueue {
         self.resize = Some(rec.to_vec());
     }
 
+    /// Queue the encoded palette record (I-7); like `resize` -- never
+    /// dropped, latest wins, a boundary-respecting jump ahead of keys.
+    pub fn push_palette(&mut self, rec: &[u8]) {
+        self.palette = Some(rec.to_vec());
+    }
+
     /// The next byte to deliver, loading the next record at a boundary: the
     /// waiting Resize first, else the oldest key.
     pub fn next_byte(&mut self) -> Option<u8> {
         if self.off == self.inflight.len() {
-            self.inflight = match self.resize.take() {
+            self.inflight = match self.resize.take().or_else(|| self.palette.take()) {
                 Some(r) => r,
                 None => {
                     let k = self.keys.pop_front()?;
@@ -157,6 +171,23 @@ mod tests {
         q.advance();
         q.push_resize(&[4, 4]);
         assert_eq!(drain_all(&mut q), alloc::vec![3, 4, 4]);
+    }
+
+    #[test]
+    fn a_palette_is_never_dropped_and_precedes_keys() {
+        let mut q = DownQueue::new();
+        let key = [7u8; 8];
+        while q.push_key(&key) {}
+        assert!(!q.push_key(&key), "the key queue is full");
+        q.push_palette(&[3, 1, 2]);
+        let out = drain_all(&mut q);
+        assert_eq!(&out[..3], &[3, 1, 2], "the palette goes ahead of the keys");
+        assert_eq!(out.len(), 3 + DOWN_PENDING_MAX, "no queued key is lost");
+        // latest wins
+        let mut q = DownQueue::new();
+        q.push_palette(&[1, 1]);
+        q.push_palette(&[2, 2]);
+        assert_eq!(drain_all(&mut q), alloc::vec![2, 2]);
     }
 
     #[test]

@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "mesa"
 name = "Black Mesa Lab"
 color_scheme = "dark"
+group = "terminal"
+tagline = "Lab graphite · aged amber"
+rank = 5
 
 [color]
 desktop = "#070A0A"

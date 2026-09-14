@@ -20,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SIDECARS = ROOT / "docs/halcyon-carbon-handoff/round2/ui-palettes"
 ANSI = ROOT / "tools/halcyon/ansi16.json"
+PICKER = ROOT / "tools/halcyon/picker.json"
 OUT = ROOT / "usr/lib/halcyon/themes"
 # The loader's own key table (`instrument::KEYS`), read from the source so the
 # generator cannot drift from it: every `("color", "<name>")` row (r2 C-F4).
@@ -40,7 +41,7 @@ HEADER = """# {name} -- an Instrument theme ({word}; docs/HALCYON-INSTRUMENT.md 
 """
 
 
-def render(id_, sidecar_text, ansi):
+def render(id_, sidecar_text, ansi, picker):
     doc = tomllib.loads(sidecar_text)
     meta, color = doc["meta"], doc["color"]
     assert meta["id"] == id_ and meta["profile"] == "instrument-v1" and meta["schema"] == 1
@@ -65,6 +66,15 @@ def render(id_, sidecar_text, ansi):
     lines.append("[meta]")
     for k in ("schema", "profile", "id", "name", "color_scheme"):
         lines.append(f"{k} = {json.dumps(meta[k], ensure_ascii=False)}")
+    # HALCYON-INSTRUMENT 9.4 (I-7): the OPTIONAL picker keys, from picker.json.
+    pk = picker.get(id_)
+    if pk is not None:
+        assert pk["group"] in ("dark", "terminal", "light"), f"group: {id_}"
+        assert isinstance(pk["rank"], int) and 0 <= pk["rank"] <= 255, f"rank: {id_}"
+        assert isinstance(pk["tagline"], str) and pk["tagline"].isprintable() and len(pk["tagline"].encode()) <= 64, f"tagline: {id_}"
+        lines.append(f"group = {json.dumps(pk['group'])}")
+        lines.append(f"tagline = {json.dumps(pk['tagline'], ensure_ascii=False)}")
+        lines.append(f"rank = {pk['rank']}")
     lines.append("")
     lines.append("[color]")
     for k, v in color.items():
@@ -84,11 +94,12 @@ def render(id_, sidecar_text, ansi):
 def main():
     check = "--check" in sys.argv[1:]
     ansi = json.loads(ANSI.read_text())
+    picker = {k: v for k, v in json.loads(PICKER.read_text()).items() if not k.startswith("_")}
     bad = 0
     for path in sorted(SIDECARS.glob("*.toml")):
         id_ = path.stem
         assert len(ansi[id_]) == 16, id_
-        text = render(id_, path.read_text(), ansi[id_])
+        text = render(id_, path.read_text(), ansi[id_], picker)
         out = OUT / f"{id_}.toml"
         if check:
             if not out.exists() or out.read_text() != text:

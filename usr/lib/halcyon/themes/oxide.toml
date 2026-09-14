@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "oxide"
 name = "Oxidized Archive"
 color_scheme = "dark"
+group = "dark"
+tagline = "Iron-black · verdigris"
+rank = 4
 
 [color]
 desktop = "#0C0908"

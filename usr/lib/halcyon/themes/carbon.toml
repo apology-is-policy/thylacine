@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "carbon"
 name = "Carbon Optics"
 color_scheme = "dark"
+group = "dark"
+tagline = "High contrast · pale champagne"
+rank = 2
 
 [color]
 desktop = "#050607"

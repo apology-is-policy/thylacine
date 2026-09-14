@@ -670,8 +670,9 @@ set v [want_dom 8 $fy 18 [expr {$fy + 6}] 7 9 10 "the failure glyph's box"]
 if {[lindex $v 0] == 0} { lc_fail "no ink in the failure glyph's box: the bang was not painted" }
 lc_pass "instrument: a failed command shows EXIT 1 with the bang (8.2)"
 
-# --- I-4 (8.1 / 9.5): RESET, the workspace list, the theme control -------
-# Reset over a stack of one: nothing to re-equalise, said and shown.
+# --- I-4/I-7 (8.1 / 9.5 / 14.5): RESET now ASKS first, the workspace list, the picker
+# Reset over a stack of one: the press opens the confirmation dialog; the
+# `Reset layout` button (the default) runs the plan (nothing to re-equalise).
 set rc [zone_centre [dict get $rz reset]]
 click [lindex $rc 0] [lindex $rc 1]
 expect {
@@ -679,9 +680,21 @@ expect {
     timeout { lc_fail "the RESET press did not reach halcyond" }
     eof     { lc_fail "EOF waiting for RESET" }
 }
+set dx 0; set dy 0; set dw 0; set dh 0
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for dialog reset} {
+        set dx $expect_out(2,string); set dy $expect_out(3,string)
+        set dw $expect_out(4,string); set dh $expect_out(5,string)
+    }
+    timeout { lc_fail "RESET did not open the confirmation dialog (14.5)" }
+    eof     { lc_fail "EOF waiting for the reset dialog" }
+}
+lc_step "the reset dialog ($dw x $dh) placed at $dx $dy"
+# Enter activates the pre-focused default (`Reset layout`).
+hkey "ret"
 expect {
     -re {halcyond: reset: (\d+) verb\(s\)} { lc_step "reset planned $expect_out(1,string) verb(s)" }
-    timeout { lc_fail "halcyond planned no reset" }
+    timeout { lc_fail "the dialog's Reset layout did not run the plan" }
     eof     { lc_fail "EOF waiting for the reset plan" }
 }
 expect {
@@ -689,7 +702,7 @@ expect {
     timeout { lc_fail "the footer did not show LAYOUT RESET" }
     eof     { lc_fail "EOF waiting for the reset notice" }
 }
-lc_pass "instrument: RESET is a rail action that says what it did (9.5)"
+lc_pass "instrument: RESET asks first (the 14.5 dialog); its default runs the plan (9.5 / 14.5)"
 # The mark opens the workspace list (14.1) as a 14.2 menu; Esc dismisses it.
 set bc [zone_centre [dict get $rz brand]]
 click [lindex $bc 0] [lindex $bc 1]
@@ -712,21 +725,6 @@ expect {
     eof     { lc_fail "EOF waiting for the list's dismiss" }
 }
 lc_pass "instrument: the mark opens the workspace list on the menu surface; Esc dismisses it (14.1)"
-# The theme control: the picker lands at I-7; until then the press is
-# refused visibly (this leg is rewritten with the picker).
-set tc [zone_centre [dict get $rz theme]]
-click [lindex $tc 0] [lindex $tc 1]
-expect {
-    -re {halcyond: rail press Theme} {}
-    timeout { lc_fail "the theme control's press did not reach halcyond" }
-    eof     { lc_fail "EOF waiting for the theme press" }
-}
-expect {
-    -re {halcyond: status bar \d+ painted .*notice "THEME PICKER NOT AVAILABLE"} {}
-    timeout { lc_fail "the footer did not refuse the picker visibly" }
-    eof     { lc_fail "EOF waiting for the picker refusal" }
-}
-lc_pass "instrument: the theme control is routed and refused visibly until the picker lands (I-7)"
 # Off the rail (34 tall) onto the console body: the LEAVE.
 ptr_to [expr {$W / 2}] 200
 expect {
@@ -833,6 +831,69 @@ tgrep "tapestryd: theme applied (renderer push)" "the compositor applied it (the
 tgrep "profile instrument" "halcyond resolved the profile word"
 tgrep "1936;v1;pre" "ls -l emitted the rich pre frame on the wire (the code block's source, I-5b)"
 
-lc_pass "ls-halcyon-instrument: the I-2 carve, the I-3 headers and the I-4 rails verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the header as a pointer target (focus, the protected final tile, the tile menu, the leave), the 1:1 split made by the rail's SPLIT H with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty pane's placard, zoom, the stack's collapsed and open headers, expand by press, close by `x`, the rail's brand mark / label / clock pixels, the footer's READY / RUNNING / EXIT 0 / EXIT 1 and its pane count, RESET, the workspace list, the theme control's refusal; I-5b: the terminal view under raw output, the code block's ground and rule under ls -l, the position indicator following the tail"
+# --- The theme picker and live switching, LAST so a live commit does not
+# recolour the Carbon checks above (I-7 / 9.4 / 9.3).
+set rz [rail_zones]
+# The theme control opens the picker (I-7 / 9.4): a press places the picker
+# menu; Home selects the first row (Signal, rank 1 of DARK FIELD); Enter
+# commits it live -- the rail's ground changes to Signal's, and the console
+# seat says it applied without persisting.
+set tc [zone_centre [dict get $rz theme]]
+click [lindex $tc 0] [lindex $tc 1]
+expect {
+    -re {halcyond: rail press Theme} {}
+    timeout { lc_fail "the theme control's press did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for the theme press" }
+}
+set px 0; set py 0; set pw 0; set ph 0
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for picker (\S+)} {
+        set px $expect_out(2,string); set py $expect_out(3,string)
+        set pw $expect_out(4,string); set ph $expect_out(5,string)
+        lc_step "the picker ($pw x $ph) placed at $px $py, current [string trim $expect_out(6,string)]"
+    }
+    -re {halcyond: menu (surface failed|place refused)} { lc_fail "the picker was not placed: $expect_out(0,string)" }
+    timeout { lc_fail "the theme picker was not placed" }
+    eof     { lc_fail "EOF waiting for the picker" }
+}
+# The picker is the mockup's 286 wide (a real picker surface, not a stub).
+if {$pw != 286} { lc_fail "the picker is $pw wide, expected 286 (9.4)" }
+hkey "home"
+hkey "ret"
+expect {
+    -re {halcyond: theme signal applied \(console; not persisted\)} {}
+    -re {halcyond: theme signal refused} { lc_fail "the picker commit refused signal" }
+    timeout { lc_fail "the picker did not commit signal live" }
+    eof     { lc_fail "EOF waiting for the theme commit" }
+}
+expect {
+    -re {halcyond: status bar \d+ painted .*notice "THEME[^"]*SIGNAL[^"]*NOT SAVED"} {}
+    timeout { lc_fail "the footer did not report the live theme" }
+    eof     { lc_fail "EOF waiting for the theme notice" }
+}
+# Signal's rail ground (#0D1011 = 13,16,17) now paints the top strip's left pad.
+want_dom 2 2 6 6 13 16 17 "the rail re-themed to Signal's ground live"
+lc_pass "instrument: the theme control opens the picker; a commit switches the theme live (the rail re-themes; the console seat says NOT SAVED) (9.4)"
+# Super+T opens the picker too (ruling 13), delivered as a compositor chord.
+exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+t"
+expect {
+    -re {tapestryd: chord picker -> rail owner} {}
+    timeout { lc_fail "Super+T did not deliver a picker chord to the rail owner" }
+    eof     { lc_fail "EOF waiting for the picker chord" }
+}
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for picker} {}
+    timeout { lc_fail "Super+T did not open the picker" }
+    eof     { lc_fail "EOF waiting for the Super+T picker" }
+}
+hkey "esc"
+expect {
+    -re {tapestryd: menu \d+ dismissed \(esc\)} {}
+    timeout { lc_fail "Esc did not dismiss the picker" }
+    eof     { lc_fail "EOF waiting for the picker dismiss" }
+}
+lc_pass "instrument: Super+T opens the picker via a compositor chord to the rail owner; Esc dismisses it (9.3 / 9.4)"
+
+lc_pass "ls-halcyon-instrument: the I-2 carve, the I-3 headers and the I-4 rails verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the header as a pointer target (focus, the protected final tile, the tile menu, the leave), the 1:1 split made by the rail's SPLIT H with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty pane's placard, zoom, the stack's collapsed and open headers, expand by press, close by `x`, the rail's brand mark / label / clock pixels, the footer's READY / RUNNING / EXIT 0 / EXIT 1 and its pane count, RESET (now a 14.5 confirmation), the workspace list, the theme picker with a live commit and Super+T (9.4 / 9.3); I-5b: the terminal view under raw output, the code block's ground and rule under ls -l, the position indicator following the tail"
 lc_quit
 exit 0

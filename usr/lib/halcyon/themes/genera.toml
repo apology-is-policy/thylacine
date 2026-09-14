@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "genera"
 name = "Genera Ivory"
 color_scheme = "light"
+group = "light"
+tagline = "Cool ivory · ink blue"
+rank = 1
 
 [color]
 desktop = "#D5D6D0"

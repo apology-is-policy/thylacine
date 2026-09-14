@@ -46,11 +46,20 @@ pub fn lane(sheet: &Sheet) -> i32 {
 /// content `content_h` tall scrolled `scroll` px from the top; None when
 /// the content fits (the indicator is hidden) or the sheet paints none.
 pub fn thumb(view_h: i32, content_h: i32, scroll: i32, sheet: &Sheet) -> Option<(i32, i32)> {
-    if !sheet.indicator || content_h <= view_h || view_h <= 0 {
+    if !sheet.indicator {
         return None;
     }
-    let end = sheet.ipx(INSET_END);
-    let min = sheet.ipx(MIN_THUMB);
+    thumb_raw(view_h, content_h, scroll, sheet.ipx(INSET_END), sheet.ipx(MIN_THUMB))
+}
+
+/// The thumb math, parameterised by the end inset and the minimum thumb, so
+/// the picker (min thumb 18, always shown on overflow -- 7.7's "Picker list"
+/// row) and the document/terminal (min 24, gated on `sheet.indicator`) share
+/// ONE definition. None when the content fits or the viewport is empty.
+pub fn thumb_raw(view_h: i32, content_h: i32, scroll: i32, end: i32, min: i32) -> Option<(i32, i32)> {
+    if content_h <= view_h || view_h <= 0 {
+        return None;
+    }
     let l = (view_h - 2 * end).max(0);
     let t = if l < min {
         l
@@ -61,11 +70,12 @@ pub fn thumb(view_h: i32, content_h: i32, scroll: i32, sheet: &Sheet) -> Option<
     let travel = (l - t).max(0);
     let range = content_h - view_h;
     let offset = scroll.clamp(0, range);
-    // Round half up along the travel, so the end edge lands on V - 4
-    // exactly at the tail and the leading edge on 4 exactly at the top.
     let lead = end + ((2 * travel as i64 * offset as i64 + range as i64) / (2 * range as i64)) as i32;
     Some((lead, t))
 }
+
+/// The picker's min-thumb floor (7.7): 18 logical px.
+pub const PICKER_MIN_THUMB: i32 = 18;
 
 /// The thumb's rect (x, y, w, h) for a viewport `view_w` wide whose top is
 /// at `view_y`, or None when hidden.

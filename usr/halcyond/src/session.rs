@@ -938,6 +938,12 @@ impl SessionTile {
         self.down.push_resize(bytes);
     }
 
+    /// HALCYON-INSTRUMENT 9.4 (I-7): tell the tile's pts host the new
+    /// palette; never dropped, ahead of keys (like the geometry record).
+    fn queue_palette(&mut self, bytes: &[u8]) {
+        self.down.push_palette(bytes);
+    }
+
     /// Deliver queued input without ever blocking the compositor: natives
     /// cannot mark a pipe non-blocking, and a whole-key write that does not
     /// fit the ring parks the writer -- but POLLOUT means at least one free
@@ -1129,6 +1135,90 @@ pub(crate) fn push_theme(ring: &EventRing, bundle: &libhalcyon::instrument::Bund
         }
     }
     say!("halcyond: theme push kept busy -- the chrome keeps its own");
+}
+
+/// HALCYON-INSTRUMENT 9.4 (I-7): the picker's registry -- every
+/// `/lib/halcyon/themes/*.toml` that loads as an Instrument theme, as a
+/// `PickerTheme` (id, name, tagline, group, rank; the four miniature colours
+/// = the theme's own desktop / open / structure / amber). A file that fails
+/// to load, or is a legacy-schema theme, is skipped. Read at every open (13
+/// small files), so a theme dropped in appears without a restart.
+pub(crate) fn read_gallery() -> Vec<halcyond::picker::PickerTheme> {
+    let mut out = Vec::new();
+    let rd = match fs::read_dir(instrument::GALLERY_DIR) {
+        Ok(rd) => rd,
+        Err(_) => return out,
+    };
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        if !name.ends_with(".toml") {
+            continue;
+        }
+        let mut path = String::from(instrument::GALLERY_DIR);
+        path.push('/');
+        path.push_str(name);
+        let Some(text) = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, &path) else {
+            continue;
+        };
+        if let Ok(instrument::LoadedAny::Instrument(l)) = theme::load(&text) {
+            out.push(halcyond::picker::PickerTheme {
+                id: l.id,
+                name: l.name,
+                tagline: l.tagline,
+                group: l.group,
+                rank: l.rank,
+                pv_bg: l.theme.desktop,
+                pv_pane: l.theme.open,
+                pv_rule: l.theme.structure,
+                pv_signal: l.theme.amber,
+            });
+        }
+    }
+    out
+}
+
+/// The resolved bundle for a gallery id under `profile` (9.4's commit): read
+/// the gallery file, load it, project to the profile. `(bundle, name)`, or
+/// None (the id names no loadable gallery file).
+pub(crate) fn gallery_bundle(id: &str, profile: instrument::Profile) -> Option<(instrument::Bundle, String)> {
+    let path = instrument::gallery_path(id)?;
+    let text = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, &path)?;
+    let any = theme::load(&text).ok()?;
+    let name = String::from(any.name());
+    Some((any.bundle(profile), name))
+}
+
+/// Durable-write the picker's word to `$HOME/lib/halcyon/theme` (9.4): mkdir
+/// -p the two components, then tmp + fsync + rename + fsync on the SAME
+/// OWRITE fd (the aurora-config idiom). False on any failure -- the theme is
+/// in force either way; only its persistence failed.
+fn write_user_pick(home: Option<&str>, id: &str) -> bool {
+    let Some(home) = home else { return false };
+    let base = alloc::format!("{}/lib", home.trim_end_matches('/'));
+    let dir = alloc::format!("{}/halcyon", base);
+    for d in [&base, &dir] {
+        match fs::create_dir(d) {
+            Ok(()) => {}
+            Err(e) if e == libthyla_rs::err::Error::Exists => {}
+            Err(_) => return false,
+        }
+    }
+    let path = alloc::format!("{}/theme", dir);
+    let tmp = alloc::format!("{}.tmp", path);
+    let mut f = match File::create(&tmp) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    if f.write_all(id.as_bytes()).is_err() {
+        return false;
+    }
+    let _ = unsafe { libthyla_rs::t_fsync(f.as_raw_fd() as i64, 0) };
+    if fs::rename(&tmp, &path).is_err() {
+        return false;
+    }
+    let ok = unsafe { libthyla_rs::t_fsync(f.as_raw_fd() as i64, 0) == 0 };
+    drop(f);
+    ok
 }
 
 /// HALCYON-SCALE 6: the user's `/env/HALCYON_SCALE` preference, written
@@ -1367,7 +1457,8 @@ pub fn run(home: Option<String>) -> i64 {
         resolved.profile_tier
     );
     // HALCYON-INSTRUMENT 8.1: the theme's name, the rail's theme control.
-    let theme_name = if resolved.name.is_empty() {
+    let mut current_theme_id = resolved.id.clone();
+    let mut theme_name = if resolved.name.is_empty() {
         String::from("built-in")
     } else {
         resolved.name.clone()
@@ -1468,6 +1559,9 @@ pub fn run(home: Option<String>) -> i64 {
     // them (the pump's, and the tile menu's choices), and a Restart request.
     let mut tile_actions: Vec<ChromeAction> = Vec::new();
     let mut restart_req: Option<u32> = None;
+    // HALCYON-INSTRUMENT 14.5 (I-7): the tile a running-close confirmation is
+    // asking about ((id, count)); the plan runs on the dialog's `close` tag.
+    let mut pending_close: Option<(u32, u32)> = None;
     let inst_profile = bundle.profile == instrument::Profile::Instrument;
     // H-3b/H-3d: the per-leaf tag bars + the one display status bar, on the SAME
     // session ring (the H-3c-2 event set: their CONFIGUREs wake the unified
@@ -1567,7 +1661,111 @@ pub fn run(home: Option<String>) -> i64 {
                     None => say!("halcyond: internal action {} ignored (session)", act),
                 }
             }
+            MenuEvent::ThemeChosen(id) => {
+                // HALCYON-INSTRUMENT 9.4 (I-7): the live theme transaction.
+                menus.close();
+                menu_leaf = None;
+                match gallery_bundle(&id, sheet.bundle().profile) {
+                    Some((newb, name)) => {
+                        let old_term = sheet.theme.terminal;
+                        // The chrome first: the compositor validates
+                        // independently and either refuses or fans.
+                        push_theme(&ring, &newb);
+                        // Rebuild the render brain at the new theme (a new
+                        // generation: every cached layout re-lays in the new
+                        // colours); the geometry does not move.
+                        let gen = sheet.gen + 1;
+                        sheet = sheet_for(&newb, sheet.scale, sheet.display_w);
+                        sheet.gen = gen;
+                        gs.set_smooth(sheet.smooth_mem);
+                        gs.set_kerning(sheet.kerning);
+                        let new_term = sheet.theme.terminal;
+                        // Re-theme every tile's retained history in place and
+                        // tell its pts host the new palette (its own re-emit
+                        // overwrites the live grid).
+                        for t in tiles.values_mut() {
+                            t.tile.set_palette(old_term, new_term);
+                            wire_out.clear();
+                            encode_input(&Input::Palette(new_term), &mut wire_out);
+                            t.queue_palette(&wire_out);
+                            t.dirty = true;
+                        }
+                        // Re-publish /env for FUTURE spawns (a running
+                        // program is not reached -- 9.4 / 13).
+                        let palette = env_palette(&newb);
+                        let _ = File::create(HALCYON_PALETTE_ENV_PATH)
+                            .and_then(|mut f| f.write_all(palette.as_bytes()));
+                        chrome.invalidate();
+                        status.invalidate();
+                        rail.invalidate();
+                        chrome_dirty = true;
+                        current_theme_id = id.clone();
+                        theme_name = if name.is_empty() { String::from("built-in") } else { name };
+                        say!("halcyond: theme {} applied", id);
+                        // Only the session seat persists the pick (9.4).
+                        if write_user_pick(home.as_deref(), &id) {
+                            say!("halcyond: theme {} written", id);
+                            status.notify(&format!("THEME \u{b7} {}", theme_name.to_uppercase()), false);
+                        } else {
+                            say!("halcyond: theme {} not written (no home or write failed)", id);
+                            status.notify(&format!("THEME \u{b7} {} (NOT SAVED)", theme_name.to_uppercase()), true);
+                        }
+                    }
+                    None => {
+                        say!("halcyond: theme {} refused (no gallery file)", id);
+                        status.notify("THEME REFUSED", true);
+                    }
+                }
+            }
+            MenuEvent::Dialog(tag) => {
+                menus.close();
+                menu_leaf = None;
+                match tag.as_str() {
+                    "reset" => {
+                        let plan = read_file(troot, "layout").map(|l| reset_plan(&l)).unwrap_or_default();
+                        say!("halcyond: reset: {} verb(s)", plan.len());
+                        let planned = plan.len();
+                        let mut landed = 0usize;
+                        let mut budget = chromeset::VerbBudget::pass();
+                        for (id, verb) in plan {
+                            let (word, args) = verb.split_once(' ').unwrap_or((verb.as_str(), ""));
+                            let cmd = if args.is_empty() {
+                                format!("{} {}", word, id)
+                            } else {
+                                format!("{} {} {}", word, id, args)
+                            };
+                            if layout_verb_in(troot, &cmd, &mut budget) {
+                                relayout = true;
+                                landed += 1;
+                            }
+                        }
+                        if planned == 0 || landed == planned {
+                            status.notify("LAYOUT RESET", false);
+                        } else if landed > 0 {
+                            status.notify("LAYOUT RESET (PARTIAL)", true);
+                        } else {
+                            status.notify("RESET REFUSED", true);
+                        }
+                    }
+                    "close" => {
+                        if let Some((id, count)) = pending_close.take() {
+                            if count <= 1 {
+                                status.notify("FINAL TILE IS PROTECTED", true);
+                            } else {
+                                layout_verb(troot, &format!("close {}", id));
+                                relayout = true;
+                            }
+                        }
+                    }
+                    _ => {
+                        // Cancel (or an unknown tag): nothing.
+                        pending_close = None;
+                    }
+                }
+            }
             MenuEvent::Closed => {
+                // A dismissed dialog is a Cancel; drop any pending close.
+                pending_close = None;
                 if let Some(t) = menu_leaf.take().and_then(|l| tiles.get_mut(&l)) {
                     t.dirty = true;
                 }
@@ -1859,6 +2057,23 @@ pub fn run(home: Option<String>) -> i64 {
                         if count <= 1 {
                             say!("halcyond: final tile is protected (pane {})", id);
                             status.notify("FINAL TILE IS PROTECTED", true);
+                        } else if tiles.get(&id).is_some_and(|t| t.tile.scrollback.running()) {
+                            // HALCYON-INSTRUMENT 14.5 (I-7): a tile whose last
+                            // command is RUNNING asks before closing; the
+                            // close runs on the dialog's `close` tag.
+                            let t = tiles.get(&id).unwrap();
+                            let name = if t.tile.title.trim().is_empty() {
+                                t.program.clone()
+                            } else {
+                                String::from(t.tile.title.trim())
+                            };
+                            let cmd = halcyond::rail::sanitise_cmd(t.tile.scrollback.last_command().unwrap_or(""));
+                            pending_close = Some((id, count));
+                            if !menus.open_dialog(halcyond::dialog::Dialog::close_running(&name, &cmd), &sheet, &mut gs) {
+                                pending_close = None;
+                                layout_verb(troot, &format!("close {}", id));
+                                relayout = true;
+                            }
                         } else {
                             layout_verb(troot, &format!("close {}", id));
                             relayout = true;
@@ -2016,38 +2231,26 @@ pub fn run(home: Option<String>) -> i64 {
                         }
                     }
                     railset::RailAction::Reset => {
-                        let plan = read_file(troot, "layout").map(|l| reset_plan(&l)).unwrap_or_default();
-                        say!("halcyond: reset: {} verb(s)", plan.len());
-                        let planned = plan.len();
-                        let mut landed = 0usize;
-                        // One retry budget for the whole plan (r2 C-F8).
-                        let mut budget = chromeset::VerbBudget::pass();
-                        for (id, verb) in plan {
-                            let (word, args) = verb.split_once(' ').unwrap_or((verb.as_str(), ""));
-                            let cmd = if args.is_empty() {
-                                format!("{} {}", word, id)
-                            } else {
-                                format!("{} {} {}", word, id, args)
-                            };
-                            if layout_verb_in(troot, &cmd, &mut budget) {
-                                relayout = true;
-                                landed += 1;
-                            }
-                        }
-                        // The notice tells the truth: a plan no verb of which
-                        // landed is a refused reset (the r1 B-F3 finding), and
-                        // one half of which landed is a PARTIAL one (r2 C-F8).
-                        if planned == 0 || landed == planned {
-                            status.notify("LAYOUT RESET", false);
-                        } else if landed > 0 {
-                            status.notify("LAYOUT RESET (PARTIAL)", true);
-                        } else {
+                        // HALCYON-INSTRUMENT 9.5 / 14.5 (I-7): RESET asks
+                        // first now -- the plan runs on the dialog's `reset`
+                        // tag (the menu-service Dialog arm), never here.
+                        if !menus.open_dialog(halcyond::dialog::Dialog::reset(), &sheet, &mut gs) {
                             status.notify("RESET REFUSED", true);
                         }
                     }
-                    railset::RailAction::Theme => {
-                        say!("halcyond: the theme picker is not available yet");
-                        status.notify("THEME PICKER NOT AVAILABLE", true);
+                    railset::RailAction::Theme { x, y } => {
+                        // HALCYON-INSTRUMENT 9.4 (I-7): open the picker at the
+                        // control's anchor, focused on the current theme.
+                        let gallery = read_gallery();
+                        if gallery.is_empty() {
+                            say!("halcyond: no gallery themes to pick");
+                            status.notify("NO THEMES", true);
+                        } else {
+                            let picker = halcyond::picker::Picker::build(gallery, &current_theme_id);
+                            if menus.open_picker(picker, x, y, &sheet, &mut gs) {
+                                menu_leaf = None;
+                            }
+                        }
                     }
                     railset::RailAction::Help => {
                         say!("halcyond: the keyboard reference is not available yet");

@@ -147,6 +147,14 @@ pub const TEV_LAYOUT: u16 = 10;
 /// A header un-hovers on it; content surfaces never receive it.
 pub const TEV_PTR_LEAVE: u16 = 11;
 
+/// HALCYON-INSTRUMENT 9.3 (I-7): a Super chord the compositor does not act
+/// on itself -- the picker and help live in the environment, not the
+/// compositor -- delivered to the REGISTERED RAIL's owner so it can act
+/// under its own authority. `code` names the request (1 = picker, 2 =
+/// help); `value` is 1. Sent only when a rail is registered; a chord with
+/// no rail is said and dropped compositor-side.
+pub const TEV_CHORD: u16 = 12;
+
 /// A decoded tevent record (section 18.4; 24 bytes on the wire).
 #[derive(Clone, Copy, Debug)]
 pub struct Event {

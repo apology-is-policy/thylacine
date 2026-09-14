@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "shock"
 name = "System Shock Node"
 color_scheme = "dark"
+group = "terminal"
+tagline = "Machine violet · surgical teal"
+rank = 3
 
 [color]
 desktop = "#070609"

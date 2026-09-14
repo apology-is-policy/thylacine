@@ -13,6 +13,9 @@ profile = "instrument-v1"
 id = "abyssal"
 name = "Abyssal Sonar"
 color_scheme = "dark"
+group = "dark"
+tagline = "Blue-black · sea glass"
+rank = 3
 
 [color]
 desktop = "#060D0F"
