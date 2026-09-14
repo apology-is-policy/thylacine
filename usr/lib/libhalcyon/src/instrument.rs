@@ -702,6 +702,9 @@ pub struct Derived {
     pub focus_inset_header: Argb,
     /// The same inset over an open tile: `text` at 3 % over `open`.
     pub focus_inset_open: Argb,
+    /// The theme control's swatch ring (8.1): white at 12 % over `amber`
+    /// -- the kit's `inset 0 0 0 1px rgba(255,255,255,.12)`.
+    pub swatch_ring: Argb,
 }
 
 /// `fg` over `bg` at `a` / 256 -- the executor's lerp, lane by lane.
@@ -735,6 +738,7 @@ impl Derived {
             selection: over(i.open, i.amber, pct256(150)),
             focus_inset_header: over(i.header, i.text, pct256(30)),
             focus_inset_open: over(i.open, i.text, pct256(30)),
+            swatch_ring: over(i.amber, 0xFFFF_FFFF, pct256(120)),
         }
     }
 }
@@ -1050,6 +1054,10 @@ mod tests {
         assert_eq!(d.selection, 0xFF2C_2D27, "amber at 15 % over open");
         assert_eq!(d.focus_inset_header, 0xFF0F_1112, "text at 3 % over header");
         assert_eq!(d.focus_inset_open, 0xFF19_1B1C, "text at 3 % over open");
+        // The golden's swatch ring (1440 x 900 at 100 %, row 13 at x 1154):
+        // #CDC199 -- 12 % of 256 rounds to 31, and 30 lands one short in B.
+        assert_eq!(d.swatch_ring, 0xFFCD_C199, "white at 12 % over amber");
+        assert_eq!(pct256(120), 31);
         assert_eq!(pct256(15), 4);
         assert_eq!(pct256(30), 8);
         assert_eq!(pct256(150), 38);

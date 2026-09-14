@@ -36,6 +36,21 @@ pub fn clock_hm() -> (u8, u8) {
     (((secs / 3600) % 24) as u8, ((secs / 60) % 60) as u8)
 }
 
+/// Milliseconds until the wall clock's next minute (at least 1, plus a
+/// short grace so the wake lands past the boundary): the clocks on both
+/// rails repaint on a change of the minute, and this is what wakes a
+/// blocking poll for it -- before, the minute lagged until an unrelated
+/// event.
+pub fn clock_timeout_ms() -> i32 {
+    let mut ts = [0i64; 2];
+    let rc = unsafe { t_clock_gettime(T_CLOCK_REALTIME, ts.as_mut_ptr() as u64) };
+    if rc < 0 || ts[0] < 0 {
+        return 60_000;
+    }
+    let into = (ts[0] as u64 % 60) * 1000 + (ts[1].max(0) as u64 / 1_000_000);
+    (60_000u64.saturating_sub(into) as i32 + 50).clamp(1, 60_050)
+}
+
 pub struct StatusBar {
     ring: EventRing,
     surf: Option<Surface>,
@@ -47,7 +62,10 @@ pub struct StatusBar {
     /// condition state (`Slots::stable`: never the centred text's landing,
     /// never the label's width), never per paint, so the row-relative legs
     /// after a command see no extra row.
-    said_slots: Option<(halcyond::status::Slots, Condition, Option<(String, bool)>)>,
+    /// (the fixed slots, the condition, the notice, running, the pane count
+    /// -- the count is in the key because `2 PANES` and `4 PANES` are one
+    /// width and would share a `clock` slot).
+    said_slots: Option<(halcyond::status::Slots, Condition, Option<(String, bool)>, bool, u32)>,
     failed_said: bool,
     /// Whether a mint should be attempted: true at start and after a CLOSE
     /// (the compositor dropped the bar), cleared by each attempt. A FAILED
@@ -245,11 +263,27 @@ impl StatusBar {
         );
         match surf.present(None) {
             Ok(()) => {
+                // The Instrument footer paints `running` and the pane count,
+                // so they are in its key; the legacy bar paints neither, and
+                // its key must not grow -- every say lands in the console
+                // transcript as a row (the drain mirrors daemon lines), and
+                // ls-halcyon's row-relative legs count them (the chrome-content
+                // round's lesson: a say per running flip is a row per command).
                 #[cfg(feature = "test-mode")]
-                if self.said_slots.as_ref() != Some(&(slots.stable(), model.condition, model.notice.clone())) {
-                    self.said_slots = Some((slots.stable(), model.condition, model.notice.clone()));
+                let inst = sheet.profile == libhalcyon::instrument::Profile::Instrument;
+                #[cfg(feature = "test-mode")]
+                let key = (
+                    slots.stable(),
+                    model.condition,
+                    model.notice.clone(),
+                    inst && model.running,
+                    if inst { model.pane_count } else { 0 },
+                );
+                #[cfg(feature = "test-mode")]
+                if self.said_slots.as_ref() != Some(&key) {
+                    self.said_slots = Some(key);
                     say(&format!(
-                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {} notice \"{}\"",
+                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {} notice \"{}\" running {} panes {}",
                     surf.id,
                     slots.ws.0, slots.ws.1, slots.ctx.0, slots.ctx.1, slots.cond.0, slots.cond.1,
                     slots.clock.0, slots.clock.1,
@@ -257,7 +291,8 @@ impl StatusBar {
                     model.condition, model.hour, model.minute,
                     slots.ctx_ink.0, slots.ctx_ink.1,
                     model.exit_code.map(|c| format!("{}", c)).unwrap_or_else(|| String::from("-")),
-                    model.notice.as_ref().map(|n| n.0.as_str()).unwrap_or("")
+                    model.notice.as_ref().map(|n| n.0.as_str()).unwrap_or(""),
+                    model.running, model.pane_count
                     ));
                 }
                 let _ = slots;
@@ -272,7 +307,9 @@ impl StatusBar {
 
 /// The model from the sources: the focused leaf (pane id, name, status),
 /// whether that leaf is one this process hosts (then its transcript's
-/// directory, command and last exit apply), and the clock.
+/// directory, command, last exit and running state apply), the clock,
+/// and -- for the Instrument footer (8.2) -- the pane count and the chord
+/// hints.
 pub fn model_from(
     focused: Option<&(u32, String, String)>,
     own_pane: Option<u32>,
@@ -280,9 +317,14 @@ pub fn model_from(
     cmd: Option<&str>,
     exit_code: Option<i64>,
     notice: Option<(String, bool)>,
+    running: bool,
+    pane_count: u32,
+    hints: alloc::vec::Vec<(String, String)>,
 ) -> StatusModel {
     let mut m = StatusModel::empty();
     m.notice = notice;
+    m.pane_count = pane_count;
+    m.hints = hints;
     if let Some((id, name, status)) = focused {
         m.name = name.clone();
         m.condition = condition_for(status);
@@ -290,6 +332,7 @@ pub fn model_from(
             m.cwd = String::from(cwd);
             m.cmd = String::from(cmd.unwrap_or(""));
             m.exit_code = exit_code;
+            m.running = running;
         }
     }
     let (h, mi) = clock_hm();

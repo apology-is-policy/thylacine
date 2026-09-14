@@ -904,6 +904,34 @@ placing them, never hosted, never focusable, pointer-routed like a header
 (§9.1) for the top rail's buttons. Under the legacy profile `role=rail` is
 refused (no top rail exists there) and `role=status` keeps its 20.
 
+**As built at I-4.** `Role::Rail` is the second display-bound surface role:
+`create … role=rail` takes no bind, is gated exactly as `role=status` (the
+renderer, or the declared session compositor while it hosts — `E_PERM`
+otherwise, judged before the geometry) and is then admitted by
+`pane::admit_rail` (pure, host-tested: one per display, W == the display
+width, H == `rail_h`, a display taller than the strip, and the Instrument
+profile in force — a legacy display refuses it as MALFORMED, `E_INVAL`,
+since it has no strip to be exactly). Registration (`Comp.rail`, gen-pinned
+like `Comp.status`) moves no leaf — the carve has reserved the strip since
+I-2 — it PLACES the surface (`surface_target`'s rail arm, `rail_rect`) and
+keeps the display off Direct as the bar does. The rail follows the DISPLAY
+as the bar does: a declaring session retires a SYSTEM renderer's rail, a
+session release or takeover retires the holder's, and a scale or theme
+change retires a rail whose height is no longer `rail_h` (or that a legacy
+bundle leaves stripless) for its owner to re-mint. Pointer routing treats
+it as chrome (`chrome_at`, `ptr_crossing`, the test-mode press witness);
+the compositor moves no focus on a press. The `rail` file publishes its
+rect beside `statusbar`; the new `chords` file publishes the binding table
+in force (`Chords::render`, the config grammar) for the hints of §8.2.
+The compositor's own fill of the two strips (`paint_instrument`) is
+STRUCTURAL-only since I-4, as the legacy strip fill always was: ungated,
+it wiped the rail on every focus-only repaint (a latent I-2 defect the
+bar's per-command presents had hidden). halcyond's `railset::RailBar`
+mints under Instrument only, on the status bar's `rearm` / `ensure`
+cadence, and its pump turns a primary press into a
+`RailAction` that each owner acts on under its own authority — the console
+renderer through `pane/<id>/ctl`, the session through the layout file.
+
 ### 8.1 The top rail (34)
 
 Left to right, padding 10 / 8:
@@ -931,6 +959,29 @@ Left to right, padding 10 / 8:
 - **Clock**: `HH:MM`, mono 11/500, `text`, padding 10 / 5; UTC as today
   (the RTC's zone; no zone database yet).
 
+**As built at I-4.** `rail::rail_list` (pure; host-tested against the
+golden's boxes) paints the mark as marks — the ring and the two strokes at
+the measured offsets (+4, +4) 1 × 5 and (+4, +8) 5 × 1 — `WORKSPACE 01` in
+the body face (the 600 weight is I-5's), the context of §14.3, then the
+buttons right to left from the 8 px pad: `?` in mono, `↺ RESET`, `■ <theme>
+⌄` with the swatch ringed by `Derived.swatch_ring` (white at 12 % over
+`amber`: `#CDC199` on Carbon, the kit's inset shadow reproduced through the
+executor's lerp), `║ SPLIT V`, `═ SPLIT H`, and the clock in the mono
+island size. The box-drawing icons and the chevron are drawn marks of the
+golden's footprint: neither face carries U+2550/2551/2304 (the mono
+re-subset of I-5 brings the first two; the chevron stays drawn). The
+buttons sit 26 tall at y 4 (3.5 snapped half up), the separator at y 11
+(10.5 likewise), and every uppercase run is tracked 0.08 em through
+`GlyphSource::shape_run_spaced`. Actions as built: SPLIT H / V split the
+focused pane (a refusal says `SPLIT REFUSED`); RESET runs
+`rail::reset_plan` (§9.5) and says `LAYOUT RESET`; the mark opens
+`menu::workspace_menu` (one row until HALCYON-WORKSPACES); the theme
+control and `?` are routed and refused visibly (`THEME PICKER NOT
+AVAILABLE`, `HELP NOT AVAILABLE`) until I-7. The theme's name is the
+resolved bundle's (`built-in` when none was loaded). The minute now WAKES
+both owners' polls (`statusset::clock_timeout_ms`); before I-4 the clock
+lagged until an unrelated event.
+
 ### 8.2 The bottom rail (25)
 
 Padding 10 each side, mono 10/500 uppercase:
@@ -956,6 +1007,30 @@ Padding 10 each side, mono 10/500 uppercase:
 - **Right**: the pane count (`3 PANES`), a separator, `LOCAL` (the
   session's host name when one exists; `LOCAL` otherwise).
 
+**As built at I-4.** Under Instrument `status::status_list` dispatches to
+`rail::footer_list`; the legacy list is byte-identical. The four conditions
+are decided by `rail::footer_state` from the focused tile's own facts
+(`Transcript::running`, the pane's recorded status, the peeked exit code,
+the last command): READY = nothing has run yet (the hollow square — the
+golden's fixture shows the kit's filled `success` pulse at READY, a fixture
+state this design replaces, so the I-9 parity mask exempts the pulse);
+RUNNING = the filled 4 × 4 `amber` square; EXIT 0 = `✓` in the body face
+(the mono subset lacks it); EXIT n = `!`. The label is `rail::footer_label`
+(the sanitised command, ≤ 96 characters, uppercase, end-ellipsised to the
+room the centre leaves); no elapsed time yet. The hints are
+`rail::hints_from_chords` over the compositor's `chords` file, re-read at
+every relayout: `SUPER + ARROWS  FOCUS` when the four focus actions sit on
+the arrows, `SUPER + <combo>  TILES` for whatever `cycle` is bound to; the
+spans alternate `dim` / `secondary` by POSITION with `·` in `structure`,
+as the kit's `nth-child(even)` does, and the centre is centred between the
+two end groups (the kit's `space-between`). The pane count is
+`rail::pane_count` over the parsed tree (a stack counts once; `1 PANE`
+singular) less the leaves the owner calls foreign -- a hidden leaf
+hosting a surface it does not describe, which is the console renderer's
+backgrounded leaf sharing a session's root (the dump marks it `hidden`
+exactly as a zoomed-away pane). No host name exists on the device, so the right group reads
+`LOCAL`. The bar's say line (test builds) appends `running` and `panes`.
+
 ### 8.3 Narrow displays
 
 At a logical width ≤ 820: the brand shows only its mark and the active
@@ -964,6 +1039,17 @@ centre hints hide, the footer type is 9, the picker shifts right by 44
 (clamped into the display — a small, recorded safety delta), and the
 workspace root keeps a minimum width of 840 with the workspace panning.
 At 821 the wide layout returns.
+
+**As built at I-4.** Both lists take the narrow form at a surface width ≤
+820 logical (`rail::NARROW_W`): the cluster is 54 wide with the mark and
+the active number, the context and the button labels hide (icon-only
+buttons of 28; the theme control keeps its swatch and chevron), the
+footer's hints hide and its type is 9 (the mono island floor serves both
+sizes until I-5). Host-tested at 800 and 821. The workspace root's 840
+minimum and the panning are NOT built — the carve has no panning yet (a
+residue for I-6, the dividers slice, whose clamps it belongs with) — and no
+guest lane drives a narrow display (the `mode` verb is renderer-gated and
+no gate holds the renderer's seat).
 
 ## 9. Input and interaction
 
@@ -1156,7 +1242,14 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   own files and pixels — the profile arriving through the wire, the
   stack-of-one frame under two rails, the 1:1 split's snapped track, the
   rule, the joint counted as 24 `structure` around 25 `desktop`, the
-  focus frame, the empty body, zoom.
+  focus frame, the empty body, zoom. Its second slice exists since I-4:
+  `tools/interactive/ls-halcyon-session-instrument.exp` boots the
+  session-lever image with the profile lever (`THYLACINE_HALCYON_SESSION=1
+  THYLACINE_HALCYON_PROFILE=instrument`; SKIPs on any other) and drives the
+  session path — the seat's two rails, the footer's conditions and pane
+  count from the tile's facts, the rail's SPLIT H under the session's
+  authority, the workspace list, the retained tile and its Restart, the
+  structural close and the logout.
 - **Host suites.** libhalcyon: the second schema's mutation suite with a
   positive twin per case, both projections, the wire round trip, the
   weighted split arithmetic (partition, snap, minima, the two-child flex
@@ -1209,7 +1302,15 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
 - **I-4 — the rails.** `role=rail`; the top rail's four zones on our
   facts (the workspace chips §14.1, the context formatter §14.3); the
   bottom rail and its marks (§14.3); transient status; the narrow branch.
-  *Audit-bearing: the gated create + the carve.*
+  *Audit-bearing: the gated create + the carve.* **LANDED**
+  (`Role::Rail` + `pane::admit_rail` + `Comp.rail` and the `rail` /
+  `chords` files in the compositor, `Chords::render`, `Surface::rail_on`;
+  `rail::{rail_list, footer_list, hints_from_chords, reset_plan,
+  pane_count}` + `GlyphSource::shape_run_spaced` + `Derived.swatch_ring`;
+  `railset::RailBar` and its `RailAction`s in both owners, the footer
+  restyle through `status_list`, the minute wake; the as-built notes in
+  §8, §8.1–8.3, §14.1, §14.3; the fifth gate image
+  `ls-halcyon-session-instrument`; JOURNAL run 46o "I-4").
 - **I-5 — type and the rich document.** The Instrument `Sheet`, the type
   map, margin collapsing, clamp paddings, the `pre` block, the terminal
   view's colours, `λ … ⊢` in `ut`, the nine syntax roles in `nora`'s
@@ -1316,6 +1417,16 @@ ownership-preserving structural operation, never save / restore / respawn;
 a failed switch or create keeps the current root and reports `WORKSPACE
 UNAVAILABLE`. Layout names name layouts, not workspaces.
 
+**As built at I-4.** N = 1 today (no workspace mechanism exists): the rail
+shows `WORKSPACE 01` and the mark opens `menu::workspace_menu` — one
+enabled row, `01`, whose choice is a no-op said as `workspace 1 is active`.
+The chip painter for N > 1 is built and host-tested
+(`the_chips_lay_out_and_scroll_to_the_active_one`: 26 × 24 chips at y 5,
+the active one's `hover` ground and inset amber edge, the ‹ › reveal past
+189 with a 157 viewport, the active chip always in view) but nothing yet
+produces N > 1; the keyboard-focus ring, `Super+1..9`, the `WORKSPACE 03`
+status and the footer's workspace hint wait on HALCYON-WORKSPACES.
+
 ### 14.2 The object verb menu (H-3c's `Role::Menu` surface in the round-2 look)
 
 Square; min-width 224, max-width 320, padding 4, `pane` ground, 1 px
@@ -1374,6 +1485,16 @@ may say `RUNNING` in `secondary` and an exit in `error`; the header is
 never tinted whole; a tile's dirty flag and its command status are
 independent facts, and under width pressure dirty / attention outranks
 elapsed detail.
+
+**As built at I-4.** The context formatter is `rail::rail_list`'s: the cwd
+(the focused tile's OSC 7 fact, `abbrev_home`'d) split at its last `/` —
+the leading segments in `dim` (the kit's `.muted`; §8.1's "`secondary`"
+names it loosely, and the golden's pixels are `dim`), the basename in
+`text`, the title in `secondary` after the 1 × 12 separator; the cwd's
+lead middle-ellipsised first (`fit_middle`), then the title cut from its
+end, then — only when even that overflows — the basename; the title alone
+when there is no cwd, and no separator then. The header's `RUNNING`
+metadata and the footer's condition read the same transcript facts.
 
 ### 14.4 Inline image and the small gallery (the inline-media arc's `view` / `gallery`, in the Instrument frame)
 

@@ -48,6 +48,23 @@
 #             empty tile collapses to the LAST row (no separator); the empty
 #             tile's `x` (count 2) closes it and the stack dissolves.
 #
+# I-4 (HALCYON-INSTRUMENT 8 / 8.1 / 8.2 / 14.1 / 14.3; the I-4 status row),
+# on the same image:
+#
+#   rail    : halcyond minted the `role=rail` surface at the display width by
+#             34 (the `rail` file says so); its pixels are the golden's --
+#             the brand mark's 13 x 13 `amber_muted` ring at (10, 10) with
+#             the two `amber` strokes, `WORKSPACE 01` beside it, the clock
+#             at the right; the rail is a POINTER TARGET: its SPLIT H
+#             button is the split chord's twin (the split below is made by
+#             it), RESET re-equalises and says LAYOUT RESET, the mark opens
+#             the workspace list (a 14.2 menu; Esc dismisses it), the theme
+#             control says the picker is not yet available.
+#   footer  : the bottom rail's four conditions from the console's own
+#             facts -- the hollow READY square, `RUNNING` while a command
+#             runs, `EXIT 0` with the check after it, `EXIT 1` with the bang
+#             after a failure -- and the pane count that follows the split.
+#
 # HVF like ls-halcyon (bare TCG hangs at the pre-existing hwwatch E2E).
 
 set ::env(THYLACINE_ACCEL) hvf
@@ -149,6 +166,22 @@ proc rect_of {path what} {
     }
 }
 
+# The rail's targets, off halcyond's LAST `rail N painted` say line in the
+# transcript (test builds): brand [x y w h], ctx [x w], the five buttons
+# [x y w h] each, the clock [x w]. Returns a dict keyed by name.
+proc rail_zones {} {
+    global transcript
+    set lines [split [exec grep -a {halcyond: rail [0-9]* painted} $transcript] "\n"]
+    set line [lindex $lines end]
+    if {![regexp {rail (\d+) painted brand \[(\d+) (\d+) (\d+) (\d+)\] ctx \[(\d+) (\d+)\] splith \[(\d+) (\d+) (\d+) (\d+)\] splitv \[(\d+) (\d+) (\d+) (\d+)\] theme \[(\d+) (\d+) (\d+) (\d+)\] reset \[(\d+) (\d+) (\d+) (\d+)\] help \[(\d+) (\d+) (\d+) (\d+)\] clock \[(\d+) (\d+)\]} $line -> id bx by bw bh cx cw shx shy shw shh svx svy svw svh tx ty tw th rx ry rw rh hx hy hw hh kx kw]} {
+        lc_fail "no rail zones line in the transcript (last: '$line')"
+    }
+    return [dict create id $id brand [list $bx $by $bw $bh] ctx [list $cx $cw] splith [list $shx $shy $shw $shh] splitv [list $svx $svy $svw $svh] theme [list $tx $ty $tw $th] reset [list $rx $ry $rw $rh] help [list $hx $hy $hw $hh] clock [list $kx $kw]]
+}
+proc zone_centre {z} {
+    return [list [expr {[lindex $z 0] + [lindex $z 2] / 2}] [expr {[lindex $z 1] + [lindex $z 3] / 2}]]
+}
+
 proc want_rect {path want what} {
     set got [rect_of $path $what]
     if {$got ne $want} { lc_fail "$what: $path reads [join $got { }], expected [join $want { }]" }
@@ -234,6 +267,11 @@ expect {
 }
 lc_pass "instrument: frame / tagbar / geometry / dividers files publish the carve (5.5)"
 want_rect /dev/tapestry/statusbar [list 0 [expr {$H - 25}] $W 25] "halcyond's status bar is the 25 px bottom rail"
+# I-4 (8): the top rail is halcyond's `role=rail` surface -- the display
+# width by 34, registered once, placed by the compositor at the strip.
+want_rect /dev/tapestry/rail [list 0 0 $W 34] "halcyond's rail is the 34 px top rail"
+tgrep "halcyond: rail \[0-9\]* minted (${W}x34)" "halcyond minted the rail at the display width by rail_h (8)"
+tgrep "tapestryd: rail \[0-9\]* created (${W}x34) for principal" "the compositor admitted ONE rail for the display (the bar's gate)"
 
 # --- The pixels (Carbon: rail #07090A, structure #454B48, desktop #050607,
 # focus_neutral #555B58) -------------------------------------------------
@@ -243,6 +281,29 @@ want_dom 40 34 [expr {$W - 40}] 37 5 6 7 "the pad above the frame is `desktop`" 
 want_dom 3 60 4 [expr {$H - 60}] 85 91 88 "the focused tile's left frame is `focus_neutral`" 0
 want_dom 40 37 [expr {$W - 40}] 38 85 91 88 "the focused tile's top frame is `focus_neutral`" 0
 lc_pass "instrument: the rails, the pad and the focused frame are Carbon's own values on screen"
+# I-4 (8.1): the rail's own pixels, the golden's boxes -- the brand mark's
+# 13 x 13 `amber_muted` (#81785D) ring at (10, 10) with its two `amber`
+# (#C7B98B) strokes (57 non-rail pixels of 169), the label's ink beside
+# it, the clock's ink where halcyond said it landed.
+want_dom 10 10 23 11 129 120 93 "the brand mark's top edge is amber_muted" 0
+want_dom 14 14 15 19 199 185 139 "the mark's vertical stroke is amber, 5 tall at (14, 14)" 0
+want_dom 10 10 23 23 7 9 10 "the mark is a ring and two strokes on rail (57 of 169)" 57
+set rz [rail_zones]
+set v [want_dom 32 8 130 26 7 9 10 "the brand label's band"]
+if {[lindex $v 0] == 0} { lc_fail "no ink in the brand label's band: WORKSPACE 01 was not painted" }
+set kz [dict get $rz clock]
+set v [want_dom [lindex $kz 0] 8 [expr {[lindex $kz 0] + [lindex $kz 1]}] 26 7 9 10 "the clock's band"]
+if {[lindex $v 0] == 0} { lc_fail "no ink in the clock's band at [lindex $kz 0]: the clock was not painted" }
+lc_pass "instrument: the rail paints the golden's brand mark, its label and the clock (8.1)"
+# I-4 (8.2): the footer's condition from the console's facts -- the reads
+# above ran commands, so the state is EXIT 0 (the check in `success` in the
+# 6 x 6 glyph box at (10, H - 25 + 10); READY's hollow square shows only
+# before anything ran and is host-tested); the pane count says one pane.
+set fy [expr {$H - 25 + 10}]
+set v [want_dom 8 $fy 18 [expr {$fy + 6}] 7 9 10 "the success glyph's box"]
+if {[lindex $v 0] == 0} { lc_fail "no ink in the glyph box after the reads: the check was not painted" }
+tgrep {halcyond: status bar [0-9]* painted .*condition Ok .*exit 0 .*running false panes 1} "the footer's model: EXIT 0, not running, one pane"
+lc_pass "instrument: the footer shows EXIT 0 with the check after the reads (8.2)"
 
 # --- The header as a pointer target (9.1 / 6.5 / 14.9), on the lone tile --
 # The console header is (4, 38, W-8, 32): its name region starts at 39
@@ -326,7 +387,23 @@ lc_pass "instrument: the pointer's leaving the header is told to it (the hover e
 # --- The split (5.2): 1:1, the boundary snapped once ------------------------
 # E = W - 6, U = E - 7; the first child ends at 3 + round(U / 2); the track
 # is 7 from there; the second child starts 7 later and ends at W - 3.
-hkey "meta_l+h"
+# I-4 (8.1 / 9.5): the rail's SPLIT H button is the chord's pointer twin --
+# a press on it is routed to the rail's chrome surface and halcyond splits
+# the focused pane as the renderer.
+set shz [dict get $rz splith]
+set shc [zone_centre $shz]
+click [lindex $shc 0] [lindex $shc 1]
+set timeout $lc_cmd_timeout
+expect {
+    -re {tapestryd: ptr btn 272 1 -> chrome (\d+) at (\d+),(\d+)} {}
+    timeout { lc_fail "the press on SPLIT H was not routed to the rail's chrome surface" }
+    eof     { lc_fail "EOF waiting for the SPLIT H press" }
+}
+expect {
+    -re {halcyond: rail press SplitH} {}
+    timeout { lc_fail "halcyond did not act on the SPLIT H press" }
+    eof     { lc_fail "EOF waiting for halcyond's rail action" }
+}
 set u [expr {$W - 13}]
 set aend [expr {3 + ($u + 1) / 2}]
 set bx [expr {$aend + 7}]
@@ -353,7 +430,8 @@ want_rect /dev/tapestry/pane/$empty/frame [list $bx 37 [expr {$W - 3 - $bx}] [ex
 # the whole interior (the placard's surface) and its body ZERO.
 want_rect /dev/tapestry/pane/$empty/tagbar [list [expr {$bx + 1}] 38 [expr {$W - 5 - $bx}] [expr {$H - 67}]] "the empty pane's placard is its interior"
 want_rect /dev/tapestry/pane/$empty/geometry [list 0 0 0 0] "the empty pane has no body"
-lc_pass "instrument: Super+H divided the root 1:1 with a 7 px track at $aend (snapped once; frames partition the root minus the track)"
+lc_pass "instrument: the rail's SPLIT H divided the root 1:1 with a 7 px track at $aend (snapped once; frames partition the root minus the track)"
+tgrep {halcyond: status bar [0-9]* painted .*panes 2} "the footer's pane count followed the split (8.2)"
 # The rule: 2 px at offset 2 into the track, full height.
 want_dom [expr {$aend + 2}] 60 [expr {$aend + 4}] [expr {$H - 60}] 69 75 72 "the divider rule is 2 px of `structure` at offset 2" 0
 want_dom [expr {$aend}] 60 [expr {$aend + 2}] [expr {$H - 60}] 5 6 7 "the track before the rule is `desktop`" 0
@@ -431,12 +509,108 @@ want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$W - 6}] [expr {$H - 
 want_rect /dev/tapestry/pane/$leaf/geometry [list 4 70 [expr {$W - 8}] [expr {$H - 99}]] "the console's body is the stack-of-one carve again"
 lc_pass "instrument: the `x` on a stacked tile closes it through the tile's lifecycle and the stack dissolves (6.5)"
 
+# --- I-4 (8.2 / 14.3): the footer's conditions from the console's facts ----
+# A running command shows RUNNING (the filled 4 x 4 amber square), then its
+# exit: EXIT 0 with the check; a failing one EXIT 1 with the bang.
+# (The bar's say line is the sequencing witness here -- no `; pwd`, whose
+# exit would replace the line's.)
+lc_send "sleep 3"
+set timeout $lc_cmd_timeout
+expect {
+    -re {halcyond: status bar \d+ painted [^\r\n]*condition Ok [^\r\n]*running true panes 1} {}
+    timeout { lc_fail "the footer never showed the running command" }
+    eof     { lc_fail "EOF waiting for RUNNING" }
+}
+set sy [expr {$H - 25 + 11}]
+want_dom 11 $sy 15 [expr {$sy + 4}] 199 185 139 "the RUNNING square is 4 x 4 amber at (11, +11)" 0
+expect {
+    -re {halcyond: status bar \d+ painted [^\r\n]*condition Ok [^\r\n]*exit 0 [^\r\n]*running false panes 1} {}
+    timeout { lc_fail "the footer never showed EXIT 0 after the command" }
+    eof     { lc_fail "EOF waiting for EXIT 0" }
+}
+lc_pass "instrument: the footer showed RUNNING with the amber square, then EXIT 0 (8.2)"
+lc_send "false"
+expect {
+    -re {halcyond: status bar \d+ painted [^\r\n]*condition Err [^\r\n]*exit 1 [^\r\n]*running false} {}
+    timeout { lc_fail "the footer never showed EXIT 1 after `false`" }
+    eof     { lc_fail "EOF waiting for EXIT 1" }
+}
+# The bang: `error` (#BD7770) ink in the 6 x 6 glyph box.
+set v [want_dom 8 $fy 18 [expr {$fy + 6}] 7 9 10 "the failure glyph's box"]
+if {[lindex $v 0] == 0} { lc_fail "no ink in the failure glyph's box: the bang was not painted" }
+lc_pass "instrument: a failed command shows EXIT 1 with the bang (8.2)"
+
+# --- I-4 (8.1 / 9.5): RESET, the workspace list, the theme control -------
+# Reset over a stack of one: nothing to re-equalise, said and shown.
+set rc [zone_centre [dict get $rz reset]]
+click [lindex $rc 0] [lindex $rc 1]
+expect {
+    -re {halcyond: rail press Reset} {}
+    timeout { lc_fail "the RESET press did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for RESET" }
+}
+expect {
+    -re {halcyond: reset: (\d+) verb\(s\)} { lc_step "reset planned $expect_out(1,string) verb(s)" }
+    timeout { lc_fail "halcyond planned no reset" }
+    eof     { lc_fail "EOF waiting for the reset plan" }
+}
+expect {
+    -re {halcyond: status bar \d+ painted .*notice "LAYOUT RESET"} {}
+    timeout { lc_fail "the footer did not show LAYOUT RESET" }
+    eof     { lc_fail "EOF waiting for the reset notice" }
+}
+lc_pass "instrument: RESET is a rail action that says what it did (9.5)"
+# The mark opens the workspace list (14.1) as a 14.2 menu; Esc dismisses it.
+set bc [zone_centre [dict get $rz brand]]
+click 15 15
+expect {
+    -re {halcyond: rail press Workspaces \{ x: (\d+), y: (\d+) \}} {}
+    timeout { lc_fail "the press on the mark did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for the mark press" }
+}
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for Workspaces} {
+        lc_step "the workspace list ($expect_out(4,string)x$expect_out(5,string)) placed at $expect_out(2,string) $expect_out(3,string)"
+    }
+    timeout { lc_fail "the workspace list was not placed" }
+    eof     { lc_fail "EOF waiting for the workspace list" }
+}
+hkey "esc"
+expect {
+    -re {tapestryd: menu \d+ dismissed \(esc\)} {}
+    timeout { lc_fail "Esc did not dismiss the workspace list" }
+    eof     { lc_fail "EOF waiting for the list's dismiss" }
+}
+lc_pass "instrument: the mark opens the workspace list on the menu surface; Esc dismisses it (14.1)"
+# The theme control: the picker lands at I-7; until then the press is
+# refused visibly (this leg is rewritten with the picker).
+set tc [zone_centre [dict get $rz theme]]
+click [lindex $tc 0] [lindex $tc 1]
+expect {
+    -re {halcyond: rail press Theme} {}
+    timeout { lc_fail "the theme control's press did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for the theme press" }
+}
+expect {
+    -re {halcyond: status bar \d+ painted .*notice "THEME PICKER NOT AVAILABLE"} {}
+    timeout { lc_fail "the footer did not refuse the picker visibly" }
+    eof     { lc_fail "EOF waiting for the picker refusal" }
+}
+lc_pass "instrument: the theme control is routed and refused visibly until the picker lands (I-7)"
+# Off the rail (34 tall) onto the console body: the LEAVE.
+ptr_to [expr {$W / 2}] 200
+expect {
+    -re {tapestryd: ptr leave chrome (\d+)} {}
+    timeout { lc_fail "leaving the rail was not told to its chrome surface" }
+    eof     { lc_fail "EOF waiting for the rail's leave" }
+}
+
 # --- The push: how the profile reached a compositor that cannot read the
 # pool at boot --------------------------------------------------------------
 tgrep "halcyond: theme pushed to the compositor" "halcyond pushed the bundle (the profile rides the 127-field wire)"
 tgrep "tapestryd: theme applied (renderer push)" "the compositor applied it (the carve re-decided under `instrument`)"
 tgrep "profile instrument" "halcyond resolved the profile word"
 
-lc_pass "ls-halcyon-instrument: the I-2 carve and the I-3 headers verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the header as a pointer target (focus, the protected final tile, the tile menu, the leave), the 1:1 split with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty pane's placard, zoom, the stack's collapsed and open headers, expand by press, close by `x`"
+lc_pass "ls-halcyon-instrument: the I-2 carve, the I-3 headers and the I-4 rails verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the header as a pointer target (focus, the protected final tile, the tile menu, the leave), the 1:1 split made by the rail's SPLIT H with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty pane's placard, zoom, the stack's collapsed and open headers, expand by press, close by `x`, the rail's brand mark / label / clock pixels, the footer's READY / RUNNING / EXIT 0 / EXIT 1 and its pane count, RESET, the workspace list, the theme control's refusal"
 lc_quit
 exit 0

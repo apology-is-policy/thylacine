@@ -431,18 +431,170 @@ halcyon 21.
   is complete. Owed from it: the by-eye review of all 98 captures with
   the diff tool at I-9; the historical-mode run if Plex Mono ever
   matters; where the 1.0 GB run should live beyond this Mac.
-- I-1 LANDED (`457faee5`); I-2 LANDED (`02d66910`); I-3 LANDED (the
-  stack and the headers; above). Next I-4 (the rails), then the first
-  Fable round over I-1..I-4 -- the operator's idea for it: spawn the
+- I-1 LANDED (`457faee5`); I-2 LANDED (`02d66910`); I-3 LANDED
+  (`e9228df2`); I-4 LANDED (the rails; above). Next: the first
+  prosecution round over I-1..I-4 -- the operator's idea for it: spawn the
   prosecutor as OPUS 5, the other family, since this run's author is
-  Fable. Owed from I-2: a vault dossier for `libhalcyon::carve` beside
+  Fable; then I-5 (type and the rich document). Owed from I-2: a vault dossier for `libhalcyon::carve` beside
   the one owed for `libhalcyon::instrument`; the audit row's (e) and (h)
   questions. Owed from I-3: the container-tile header, the session-path
-  Instrument E2E (a fifth image with I-4), the chrome-bind admission
-  question (row (c)), the Super+Q reading (a §9.3 delta for the
-  operator).
+  Instrument E2E (PAID at I-4: `ls-halcyon-session-instrument`), the
+  chrome-bind admission question (row (c)), the Super+Q reading (a §9.3
+  delta for the operator). Owed from I-4: the 840 minimum + panning
+  (I-6), the elapsed time, the picker / help (I-7), the rails' type map
+  (I-5).
 - Unchanged from 46n: the IRQ fork, the back-pressure gap, S1 [P3], the ut
   `mount` one-liner, vault calls 0082 / 0087.
+
+### I-4: the rails -- a second display-bound role, the footer from the tile's facts, and two Tcl brackets that cost a chain
+
+**What landed.** HALCYON-INSTRUMENT 8 / 8.1-8.3 / 14.1 / 14.3 as code, with
+the as-built notes written into each section. The compositor gained its
+second display-bound surface role: `create ... role=rail` takes no bind and
+is gated exactly as `role=status` -- the renderer, or the declared session
+while it hosts (E_PERM before any geometry is read) -- then admitted by
+`pane::admit_rail`, pure over nine scalars and host-tested one field off a
+valid base: one per display, the display width by `rail_h`, a display taller
+than the strip, and the Instrument profile in force. A legacy display refuses
+the rail as MALFORMED (E_INVAL), never as an authority question: it has no
+strip to be exactly. Registration (`Comp.rail`, gen-pinned like the bar's
+record) moves no leaf -- the carve has reserved the strip since I-2 -- it
+places the surface (`surface_target`'s rail arm) and keeps the display off
+Direct as the bar does. Every path that makes the bar follow the display was
+mirrored for the rail: the declaring session retires a SYSTEM renderer's rail
+and a SYSTEM mint is refused while a session is declared; a session `off` and
+a takeover retire the holder's; a scale or theme change retires a rail whose
+height is no longer `rail_h`, and a legacy bundle one that has no strip. The
+rail is chrome for pointer routing (`chrome_at`, `ptr_crossing`, the press
+witness); no press moves focus. Two root files were added beside
+`statusbar`: `rail` (the strip's rect while registered) and `chords` -- the
+binding table in force in the config grammar (`Chords::render`, with the two
+name maps proven to invert over the whole vocabulary), so that the footer's
+hints are DERIVED from the bindings and never a literal.
+
+halcyond's new `rail` module is the pure half of both rails: `rail_list`
+paints the top rail against the golden's boxes (the mark's ring and strokes
+at the measured offsets, `WORKSPACE 01`, the context of 14.3 with the cwd's
+lead in `dim`, its basename in `text` and the title in `secondary` after the
+1 x 12 separator at y 11, the five buttons laid right to left from the 8 px
+pad at 26 tall on y 4, the swatch ringed by the new `Derived.swatch_ring`,
+the clock); `footer_list` is what `status_list` dispatches to under
+Instrument (the legacy list byte-identical): the four conditions decided by
+`footer_state` from the focused tile's own facts (READY = nothing has run,
+the hollow square; RUNNING = the filled 4 x 4 amber square; EXIT 0 = the
+check; EXIT n = the bang), the label sanitised and bounded, the hints
+alternating `dim` / `secondary` by POSITION with the dot in `structure` (the
+kit's `nth-child(even)`), the centre centred between the end groups (the
+kit's `space-between`), the pane count over the parsed tree (a stack counts
+once), `LOCAL` (no host name exists on the device). `hints_from_chords`,
+`reset_plan` (9.5: `weight 1` for weighted split children, `focus` per
+re-expanded stack, one restoring focus -- every verb judged per write by the
+compositor), `pane_count`, the narrow branch at 820 (the mark and the number,
+icon-only buttons, no hints, type 9), and the 14.1 chip painter (built and
+host-tested for N > 1 though nothing yet produces it). The bin's `RailBar`
+mints under Instrument only on the bar's `rearm` / `ensure` cadence and turns
+a primary press into a `RailAction`; both owners act -- the console renderer
+through `pane/<id>/ctl`, the session through the layout file: SPLIT H / V
+(the chord's twins), RESET (the plan, `LAYOUT RESET`), the mark (the
+workspace list as a 14.2 menu, one row), the theme control and `?` refused
+visibly until I-7. Two small things found on the way and fixed: the clock's
+minute never woke either owner's poll (the bar's comment claimed "the
+minute" as a source; nothing arranged the wake) -- `clock_timeout_ms` now
+does; and the kit's letter-spacing had no path through the shaper --
+`shape_run_spaced` accumulates it in the sub-pixel pen, `shape_run` being
+the zero-tracking case with identical arithmetic.
+
+**What the golden said that the table did not.** The kit's `.muted` on the
+cwd's leading segments is `dim`, not the `secondary` that 8.1 names loosely
+(the pixels: #737A76); the theme swatch's ring is white at 12 % over amber,
+and 12 % of 256 must round to 31 -- 30 lands one short in the blue lane
+(#CDC199 measured; `pct256(120)` gives 31); the READY state's pulse in the
+golden is the kit's filled `success` square -- a FIXTURE state the design
+replaces with the hollow secondary square (8.2), so the I-9 parity mask must
+exempt it; the footer's centre is not centred on the rail but between the
+two end groups (575.78 = 53 + (1339.39 - 53 - 240.83) / 2, exactly).
+
+**A latent I-2 defect the rail exposed.** `paint_instrument` filled BOTH
+rails on every repaint, structural or not -- the legacy strip fill is gated
+on `fill_tagbars` for exactly the reason H-3d's row states ("a focus-only
+repaint must not paint over the bar's pixels"), and the Instrument painter
+of I-2 did not carry the gate. Nothing noticed for two slices because the
+Instrument bar's PIXELS were never asserted (the I-2 / I-3 legs read its
+rect and its say line) and its owner re-presents whenever its model
+changes, i.e. twice per command, which outran the wipe. The rail's owner
+presents once at mint and then only on a CONFIGURE, so the first screendump
+that looked at the rail found the compositor's fill and nothing else --
+row 10 all `rail`, the structure line intact, the bar's check mark visible
+beside it. The fill is structural-only now, healed by the CONFIGURE fan that
+already reaches both; a green obtained by not looking is the class the
+stewardship section names.
+
+**Two more, from the session image.** The session's rail press on SPLIT H
+was refused -- by nobody: `layout_verb` opened `b"layout"` with a length of
+5 since I-3, i.e. `layou`, ENOENT, and returned false without a word. Every
+verb the session writes through the layout file -- I-3's `focus` and `close`
+from the header, H-4d's `close` of a leaf whose spawn failed -- had been
+dead for one slice, and nothing noticed because no gate had ever pressed
+one from the session; the console path acts through `pane/<id>/ctl` and
+was green. The first session-path witness found it in its first minute
+(the length is the slice's now, and an open failure says so). And the
+footer's pane count on the session image read `3 PANES` for the welcome's
+two: the console renderer's backgrounded leaf shares the root (the flat
+[aurora, A, B] the H-4b-2 row describes) and the dump marks it `hidden`
+exactly as it marks a zoomed-away pane, so only the owner can tell the
+two apart -- `pane_count` now takes a `foreign` filter the owner supplies
+(a leaf hosting a surface it does not describe), and the count is
+said on change under Instrument (`pane count N (leaves [...])`).
+
+**The two Tcl brackets.** The first gate chain lost its first scenario 3/3
+to `tgrep "halcyond: rail [0-9]* minted ..."` -- `[0-9]` inside a
+double-quoted Tcl string is command substitution (the pinned lesson, hit
+again; the guest had done everything right: `rail 3 created (1280x34) for
+principal 4294967294`, the file read `0 0 1280 34`). The session scenario
+then found two ordering faults of mine: the bar is minted BEFORE the rail in
+the owner's pass and my expects wanted the reverse (one alternation loop now,
+the ls-gfx-session idiom), and the bar's say key could not see `2 PANES`
+replace `4 PANES` -- one width, one `clock` slot, no new say -- so the pane
+count is in the key beside `running`. A third: `false; pwd` reports pwd's
+exit, so the footer legs run the bare command and take the bar's say line
+as their sequencing witness. And the legacy gate caught the observer
+effect a third time: keying the bar's say on `running` made the LEGACY
+console say twice per command -- two rows in the transcript the drain
+mirrors -- and ls-halcyon's row-relative keyboard-menu leg missed its row
+3/3 (the chrome-content round's exact lesson, "a say per running flip is a
+row per command"). The key carries `running` and the pane count only under
+Instrument, whose footer paints them; under legacy it is byte-identical to
+before. ls-ci and the compose gate ran green on the first chain; the
+instrument images on the second; the console image on the third.
+
+Gates (one image per lever): ls-halcyon-instrument PASS 64 s
+(29 legs); NEW ls-halcyon-session-instrument PASS 76 s --
+the fifth image (session + profile): both rails minted by the seat
+(principal 1000), the footer's pane count and its four conditions from the
+shell's facts, SPLIT H under the session's authority, the workspace list,
+the retained tile and its Restart, the structural close, the logout with the
+rail's retire; ls-ci PASS 29 s; ls-halcyon PASS 120 s (the
+legacy identity); ls-gfx-compose PASS 72 s. Host: libhalcyon 112 ->
+113, tapestryd 28 -> 33, halcyond 218 -> 228, halcyon 21.
+
+**Owed from I-4, and one OPEN DEFECT the fifth image surfaced.** After a
+logout reached through Super+Q closes -- the last tiles' kaua-terms KILLED
+by the teardown, never exited -- the login prompt did not return within
+90 s (3/3), where ls-gfx-session's typed-`exit` logout brings it straight
+back; the session said `logout (code 0)` and both its rails retired, so
+halcyond returned and something between login's wait and getty's next
+prompt did not. Enqueued (memory `bug_session_structural_close_no_login_
+prompt.md`), not hidden: the scenario records the prompt's absence as a
+step and asserts the seat's release; the prompt's return is the bug's own
+witness once fixed. Also owed: the workspace root's 840 minimum and the panning (8.3)
+are not built -- the carve has no panning and it belongs with I-6's clamps.
+No guest lane drives a narrow display (the `mode` verb is renderer-gated).
+The elapsed time after the footer's dot (8.2) is not shown. The picker and
+the help are refused visibly until I-7; the chip painter waits on
+HALCYON-WORKSPACES for a producer. The mono runs on both rails use the
+island size and the icons are drawn marks until I-5. The chrome mint say
+fires once per mint at the strip's origin, so a gate reading a header's
+place must read it before the tree moves again (audit row (h)).
 
 ---
 

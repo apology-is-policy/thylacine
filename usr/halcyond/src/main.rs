@@ -38,7 +38,8 @@ use halcyond::layout::{
     Sheet,
 };
 use halcyond::chrome::Described;
-use halcyond::menu::{build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run, tile_menu, Action, Menu};
+use halcyond::menu::{build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run, tile_menu, workspace_menu, Action, Menu};
+use halcyond::rail::{hints_from_chords, reset_plan, RailModel};
 use crate::chromeset::ChromeAction;
 use halcyond::raster::GlyphSource;
 use halcyond::select::{FlatRow, Sel};
@@ -66,6 +67,7 @@ macro_rules! say {
 
 mod chromeset;
 mod menuset;
+mod railset;
 mod session;
 mod statusset;
 
@@ -358,6 +360,12 @@ pub extern "C" fn rs_main() -> i64 {
     // H-3d: the status bar -- one Role::Status surface on the same ring,
     // minted once the console is up (step 0d).
     let mut status = statusset::StatusBar::new(ring.clone());
+    // HALCYON-INSTRUMENT 8: the top rail -- one Role::Rail surface on the
+    // same ring under the Instrument profile (none under legacy), and the
+    // footer's chord hints from the compositor's `chords` file, re-read
+    // with every relayout.
+    let mut rail = railset::RailBar::new(ring.clone());
+    let mut hints: Vec<(alloc::string::String, alloc::string::String)> = Vec::new();
     let mut frame: Vec<(u64, i32, i32)> = Vec::new();
     let mut last_open_laid: Option<LaidBlock> = None;
     let mut ptr: (i32, i32) = (0, 0);
@@ -413,6 +421,12 @@ pub extern "C" fn rs_main() -> i64 {
         resolved.bundle.profile.word(),
         resolved.profile_tier
     );
+    // HALCYON-INSTRUMENT 8.1: the theme's name, the rail's theme control.
+    let theme_name = if resolved.name.is_empty() {
+        alloc::string::String::from("built-in")
+    } else {
+        resolved.name.clone()
+    };
     let bundle = resolved.bundle;
     let theme = bundle.theme;
     // The compositor cannot read this file. Measured 2026-09-09 on the
@@ -535,6 +549,7 @@ pub extern "C" fn rs_main() -> i64 {
                     menus.close();
                     chrome.invalidate();
                     status.invalidate();
+                    rail.invalidate();
                     report_winsize(consctl, w, h, &gs);
                     dirty = true;
                     let (cw, ch, _) = gs.mono_cell();
@@ -850,6 +865,7 @@ pub extern "C" fn rs_main() -> i64 {
                 relayout = false;
                 chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe, false);
                 trail_painted = alloc::string::String::from(t.cwd());
+                hints = hints_from_chords(&chromeset::read_file(troot, "chords").unwrap_or_default());
             }
             // The status bar's mint retry, UNCONDITIONALLY (TY-6 F8; it
             // was inside the `relayout` arm above): a session taking the
@@ -894,8 +910,76 @@ pub extern "C" fn rs_main() -> i64 {
                 t.last_command(),
                 t.last_exit_code(),
                 notice,
+                t.running(),
+                chrome.pane_count(),
+                hints.clone(),
             );
             status.refresh(&sm, &sheet, &mut gs);
+            // HALCYON-INSTRUMENT 8.1: the top rail -- its context is the
+            // focused tile's directory and name (the console's own, or
+            // another leaf's tag), the theme in force, the minute; its
+            // buttons act here as the renderer (pane ctl), the picker and
+            // the help say what they are not yet.
+            rail.rearm();
+            rail.ensure(&sheet);
+            let _ = rail.pump(&sheet, &mut gs);
+            let (cwd, title) = match chrome.focused() {
+                Some((id, _, _)) if Some(*id) == chrome.own_pane() => {
+                    (alloc::string::String::from(t.cwd()), halcyond::chrome::console_name())
+                }
+                Some((_, name, _)) => (alloc::string::String::new(), name.clone()),
+                None => (alloc::string::String::new(), alloc::string::String::new()),
+            };
+            let (hour, minute) = statusset::clock_hm();
+            let rm = RailModel {
+                cwd,
+                title,
+                theme: theme_name.clone(),
+                hour,
+                minute,
+                ..RailModel::empty()
+            };
+            rail.refresh(&rm, &sheet, &mut gs);
+            for a in rail.take_actions() {
+                match a {
+                    railset::RailAction::SplitH | railset::RailAction::SplitV => {
+                        let verb = if a == railset::RailAction::SplitH { "split h" } else { "split v" };
+                        if let Some((id, _, _)) = chrome.focused() {
+                            if chromeset::write_file(troot, &alloc::format!("pane/{}/ctl", id), verb) {
+                                relayout = true;
+                            } else {
+                                say!("halcyond: {} on pane {} refused", verb, id);
+                                status.notify("SPLIT REFUSED", true);
+                            }
+                        }
+                    }
+                    railset::RailAction::Reset => {
+                        let plan = chromeset::read_file(troot, "layout")
+                            .map(|l| reset_plan(&l))
+                            .unwrap_or_default();
+                        say!("halcyond: reset: {} verb(s)", plan.len());
+                        for (id, verb) in plan {
+                            if chromeset::write_file(troot, &alloc::format!("pane/{}/ctl", id), &verb) {
+                                relayout = true;
+                            }
+                        }
+                        status.notify("LAYOUT RESET", false);
+                    }
+                    railset::RailAction::Theme => {
+                        say!("halcyond: the theme picker is not available yet");
+                        status.notify("THEME PICKER NOT AVAILABLE", true);
+                    }
+                    railset::RailAction::Help => {
+                        say!("halcyond: the keyboard reference is not available yet");
+                        status.notify("HELP NOT AVAILABLE", true);
+                    }
+                    railset::RailAction::Workspaces { x, y } => {
+                        menus.open(workspace_menu(1, 0), x, y, (x, y, 0, 0), &sheet, &mut gs);
+                    }
+                    railset::RailAction::Workspace(n) => say!("halcyond: workspace {} is active", n as u32 + 1),
+                    railset::RailAction::ChipsScroll(_) => {}
+                }
+            }
         }
 
         // (0e) H-3c: the menu. A choice closes it from this side and types
@@ -923,6 +1007,13 @@ pub extern "C" fn rs_main() -> i64 {
                 feed_pending.extend_from_slice(cmd.as_bytes());
                 feed_pending.push(b'\n');
                 feed_drain(feed, &mut feed_pending, &mut feed_dropped, &mut feed_logged);
+            }
+            menuset::MenuEvent::Chosen(Action::Internal(act)) if act.starts_with("workspace ") => {
+                // HALCYON-INSTRUMENT 14.1: the workspace list's choice -- one
+                // workspace exists, and it is the active one.
+                menus.close();
+                say!("halcyond: workspace {} is active", act["workspace ".len()..].trim());
+                dirty = true;
             }
             menuset::MenuEvent::Chosen(Action::Internal(act)) if act.starts_with("tile ") => {
                 // HALCYON-INSTRUMENT 14.9: the tile verb menu's choice --
@@ -1031,8 +1122,10 @@ pub extern "C" fn rs_main() -> i64 {
                         },
                     ];
                     // A transient status notice expires on the clock (8.2):
-                    // wake for it, so the live model returns.
-                    let timeout = status.notice_timeout_ms().unwrap_or(-1);
+                    // wake for it, so the live model returns; and the
+                    // rails' clocks turn with the minute.
+                    let clock = statusset::clock_timeout_ms();
+                    let timeout = status.notice_timeout_ms().map_or(clock, |ms| ms.min(clock));
                     if unsafe { t_poll(waitfds.as_mut_ptr(), 2, timeout) } < 0 {
                         say!("halcyond: unified poll failed (compositor gone); exiting");
                         return 1;

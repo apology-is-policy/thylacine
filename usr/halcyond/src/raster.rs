@@ -512,6 +512,22 @@ impl GlyphSource {
         px: f32,
         chars: impl Iterator<Item = char>,
     ) -> (Vec<GlyphRef>, i32) {
+        self.shape_run_spaced(face, px, 0.0, chars)
+    }
+
+    /// `shape_run` with letter-spacing: `tracking` px added to every
+    /// glyph's advance, the last one included (the CSS rule; HALCYON-
+    /// INSTRUMENT 8: the rails' uppercase runs at 0.08 em). Accumulated in
+    /// the sub-pixel pen like the advances themselves, so a tracked run's
+    /// width is the pen's, not a per-glyph rounding.
+    pub fn shape_run_spaced(
+        &mut self,
+        face: u8,
+        px: f32,
+        tracking: f32,
+        chars: impl Iterator<Item = char>,
+    ) -> (Vec<GlyphRef>, i32) {
+        let track_fx = (tracking * Self::PEN_SCALE as f32) as i32;
         let mut refs: Vec<GlyphRef> = Vec::new();
         let (mut rem, mut width) = (0i32, 0i32);
         let mut prev: Option<char> = None;
@@ -519,6 +535,7 @@ impl GlyphSource {
             let Some(aq) = self.advance_fx(face, px, ch) else {
                 continue;
             };
+            let aq = aq + track_fx;
             if let Some(p) = prev {
                 if face != FACE_MONO {
                     // The kern belongs to the PRECEDING glyph's step, which

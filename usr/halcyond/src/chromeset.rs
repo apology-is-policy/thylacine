@@ -173,6 +173,9 @@ pub struct ChromeSet {
     focused: Option<(u32, String, String)>,
     /// Actions the pump collected, taken by the caller.
     actions: Vec<ChromeAction>,
+    /// HALCYON-INSTRUMENT 8.2: the workspace's panes as of the last
+    /// reconcile (`rail::pane_count`), the footer's right group.
+    pane_count: u32,
 }
 
 impl ChromeSet {
@@ -185,7 +188,13 @@ impl ChromeSet {
             failed_said: Vec::new(),
             focused: None,
             actions: Vec::new(),
+            pane_count: 1,
         }
+    }
+
+    /// 8.2: the panes of the last layout read (a stack counts once).
+    pub fn pane_count(&self) -> u32 {
+        self.pane_count
     }
 
     /// The public id of the leaf hosting the console surface, once a
@@ -233,6 +242,19 @@ impl ChromeSet {
         };
         let inst = sheet.profile == Profile::Instrument;
         let tree = parse_tree(&layout);
+        let panes = halcyond::rail::pane_count(&tree, |t| {
+            t.leaf.surface.is_some() && describe(t.leaf.id).is_none()
+        })
+        .max(1);
+        // Said on a change, under Instrument only (test builds): a gate reads
+        // the count and the leaves behind it; the legacy console's transcript
+        // must not grow a row for it.
+        #[cfg(feature = "test-mode")]
+        if inst && panes != self.pane_count {
+            let ids: Vec<u32> = tree.iter().map(|t| t.leaf.id).collect();
+            say(&format!("halcyond: pane count {} (leaves {:?})", panes, ids));
+        }
+        self.pane_count = panes;
         if let Some(mine) = tree.iter().find(|t| t.leaf.surface == Some(own_surface)) {
             self.own_pane = Some(mine.leaf.id);
             if !self.own_named
@@ -380,6 +402,13 @@ impl ChromeSet {
                             dead: false,
                         };
                         paint(&mut t, sheet, gs);
+                        // Where the strip sits (test builds): a gate that
+                        // must press a header finds it here.
+                        #[cfg(feature = "test-mode")]
+                        say(&format!(
+                            "halcyond: chrome {} for pane {} at {},{} {}x{}",
+                            t.surf.id, w.id, w.origin.0, w.origin.1, w.w, w.h
+                        ));
                         self.failed_said.retain(|&f| f != w.id);
                         self.tiles.insert(w.id, t);
                     }

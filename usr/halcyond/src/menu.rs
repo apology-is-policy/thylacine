@@ -291,6 +291,27 @@ pub fn tile_menu(id: u32, name: &str, count: u32, retained: bool) -> Menu {
     }
 }
 
+/// HALCYON-INSTRUMENT 14.1: the workspace list the brand mark opens -- one
+/// row per workspace (`01`..), the active one selected, each an INTERNAL
+/// action `workspace <n>` (1-based) the owner interprets. Width 160 is the
+/// painter's minimum-width clamp's business; the title reads `Workspaces`.
+pub fn workspace_menu(count: u8, active: u8) -> Menu {
+    let mut items = Vec::new();
+    for i in 0..count.max(1) {
+        let mut label = String::new();
+        let _ = core::fmt::write(&mut label, format_args!("{:02}", i as u32 + 1));
+        let mut act = String::from("workspace ");
+        let _ = core::fmt::write(&mut act, format_args!("{}", i as u32 + 1));
+        items.push(MenuItem::new(&label, Action::Internal(act)));
+    }
+    Menu {
+        ty: String::from("Workspaces"),
+        refv: String::new(),
+        sel: (active as usize).min(items.len() - 1),
+        items,
+    }
+}
+
 /// A key on the menu surface.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuKey {

@@ -321,8 +321,8 @@ fn parse_one(text: &str, key: &str) -> Option<u32> {
 
 /// What `create` mints: a hosted content surface, a Role::Chrome surface
 /// bound to a pane's tag bar (H-3b), a Role::Menu surface (H-3c), the
-/// Role::Status bar (H-3d), or a content surface steered into a claimed
-/// empty leaf (H-4b).
+/// Role::Status bar (H-3d), the Role::Rail top rail (HALCYON-INSTRUMENT
+/// 8), or a content surface steered into a claimed empty leaf (H-4b).
 #[cfg(feature = "guest")]
 #[derive(Clone, Copy)]
 enum Mint {
@@ -330,6 +330,7 @@ enum Mint {
     Chrome(u32),
     Menu,
     Status,
+    Rail,
     Claim(u128),
 }
 
@@ -389,6 +390,18 @@ impl Surface {
     /// new width on a display resize.
     pub fn status_on(ring: &EventRing, w: u32, h: u32) -> Result<Surface, TapError> {
         Self::open_on_bound(ring, w, h, Mint::Status)
+    }
+
+    /// HALCYON-INSTRUMENT 8: the Role::Rail surface on `ring` -- the
+    /// display-top rail the Instrument carve always reserves, placed there
+    /// by the compositor while it is THE registered rail. `w` must be the
+    /// display width and `h` the profile's `rail_h`, else E_INVAL; refused
+    /// under the legacy profile (no top rail exists there); one per
+    /// display; the same gate as the status bar (the renderer, or the
+    /// declared session while it hosts). Never hosted, never focusable;
+    /// pointer-routed like a header (9.1) for its buttons.
+    pub fn rail_on(ring: &EventRing, w: u32, h: u32) -> Result<Surface, TapError> {
+        Self::open_on_bound(ring, w, h, Mint::Rail)
     }
 
     /// H-4b: a W x H content surface hosted into the SPECIFIC empty leaf
@@ -467,7 +480,7 @@ impl Surface {
             None => return fail(&[ctl], TapError::Protocol),
         };
 
-        // create W H [role=chrome bind=<pane-id> | role=menu | role=status | claim=<tok>]
+        // create W H [role=chrome bind=<pane-id> | role=menu | role=status | role=rail | claim=<tok>]
         let mut cmd = alloc::string::String::new();
         let _ = core::fmt::write(&mut cmd, format_args!("create {} {}", w, h));
         match mint {
@@ -477,6 +490,7 @@ impl Surface {
             }
             Mint::Menu => cmd.push_str(" role=menu"),
             Mint::Status => cmd.push_str(" role=status"),
+            Mint::Rail => cmd.push_str(" role=rail"),
             // The 32-hex form `pane/<id>/claim` minted (the server refuses
             // any other width).
             Mint::Claim(tok) => {

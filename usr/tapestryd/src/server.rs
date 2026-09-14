@@ -215,6 +215,7 @@ enum Host {
     Chrome { bind: u32 },
     Menu,
     Status,
+    Rail,
 }
 
 /// Layout mutations one conn may land per service pass (the H-3b round
@@ -479,6 +480,8 @@ const P_SURF_NEW: u64 = 3; // surface/new
 const P_LAYOUT: u64 = 4; // the container tree (G-6)
 const P_PANE_DIR: u64 = 5; // pane/
 const P_STATUSBAR: u64 = 6; // the status bar's rect, "x y w h" (H-3d)
+const P_RAIL: u64 = 7; // the top rail's rect, "x y w h" (HALCYON-INSTRUMENT 8)
+const P_CHORDS: u64 = 8; // the chord table in force, one binding per line (8.2)
 
 const SURF_FLAG: u64 = 1 << 40;
 const PANE_FLAG: u64 = 1 << 41; // pane qids (G-6): PANE_FLAG | id<<8 | fk
@@ -1049,6 +1052,13 @@ struct Surface {
     /// at the bottom strip the layout carves for it. Renderer-gated at
     /// create, one per display.
     is_status: bool,
+    /// HALCYON-INSTRUMENT 8: the Role::Rail surface -- the display-top
+    /// rail. Never hosted, bound to the DISPLAY like the status bar:
+    /// showable only while it is THE registered rail (`Comp.rail`,
+    /// gen-pinned), placed at the top strip the Instrument carve always
+    /// reserves. The same gate as the bar at create; refused under legacy.
+    /// A pointer target like a header (9.1).
+    is_rail: bool,
     /// The slot of this surface's last accepted present: what
     /// `menu_reassert` re-composes when a screen write lands under a placed
     /// menu. None until the first present.
@@ -1717,6 +1727,11 @@ pub struct Comp {
     /// carve), `paint_borders` fills the strip `status_bg`, and no leaf is
     /// Direct-scanned (a leaf is smaller than the display).
     status: Option<StatusState>,
+    /// HALCYON-INSTRUMENT 8: the one top rail on the display, if any. The
+    /// carve does not depend on it (the Instrument workspace always sits
+    /// between the two rails); registration only PLACES the surface there
+    /// and, like the bar, keeps the display off Direct.
+    rail: Option<StatusState>,
     /// H-3c round F1: where each pressed KEY went -- packed (slot+1) |
     /// gen<<16, 0 = none -- so a release or a repeat FOLLOWS ITS PRESS (the
     /// chord layer's rule): to the leaf that saw the press across a grab
@@ -2441,6 +2456,7 @@ impl Comp {
             last_focus: None,
             menu: None,
             status: None,
+            rail: None,
             key_owner: [0; KEYCODE_SPAN],
             btn_owner: [0; BTNCODE_SPAN],
             menu_reason: "retire",
@@ -2564,6 +2580,7 @@ impl Comp {
             chrome_bind: None,
             is_menu: false,
             is_status: false,
+            is_rail: false,
             shown_slot: None,
             comp_attached: false,
             gpu_said: false,
@@ -4122,6 +4139,15 @@ impl Comp {
                 _ => None,
             };
         }
+        if s.is_rail {
+            // HALCYON-INSTRUMENT 8: the rail shows at the top strip the
+            // Instrument carve reserves, and only while it is the registered
+            // one (gen-pinned).
+            return match self.rail {
+                Some(r) if r.n == n && r.gen == s.gen => self.rail_rect(),
+                _ => None,
+            };
+        }
         if let Some(pid) = s.chrome_bind {
             let slot = self.layout.slot_of_id(pid)?;
             let p = self.layout.get(slot)?;
@@ -4189,6 +4215,7 @@ impl Comp {
                 self.retire(st.n);
             }
         }
+        self.retire_stale_rail();
         self.reconcile();
     }
 
@@ -4214,7 +4241,24 @@ impl Comp {
                 self.retire(st.n);
             }
         }
+        self.retire_stale_rail();
         self.reconcile();
+    }
+
+    /// HALCYON-INSTRUMENT 8: a registered rail whose height is no longer the
+    /// carve's `rail_h` (a scale or theme change), or that a legacy bundle
+    /// leaves without a strip, is retired -- its owner re-mints at the new
+    /// height (the bar's rule).
+    fn retire_stale_rail(&mut self) {
+        if let Some(r) = self.rail {
+            let legacy = self.bundle.profile != libhalcyon::instrument::Profile::Instrument;
+            let stale = self
+                .surf(r.n)
+                .is_some_and(|s| legacy || s.h != self.metrics.rail_h.max(0) as u32);
+            if stale {
+                self.retire(r.n);
+            }
+        }
     }
 
     /// The re-derivation after a geometry change (`mode`): the same
@@ -4243,6 +4287,18 @@ impl Comp {
             w: dw,
             h: unit,
         })
+    }
+
+    /// HALCYON-INSTRUMENT 8: the top rail's strip while a rail is registered
+    /// (None under legacy, where no rail exists, and on a display too short
+    /// to hold one).
+    fn rail_rect(&self) -> Option<Rect> {
+        self.rail?;
+        let (top, _) = self.rail_rects()?;
+        if top.is_empty() {
+            return None;
+        }
+        Some(top)
     }
 
     /// The rectangle the pane tree is carved in: under legacy the display
@@ -4314,7 +4370,7 @@ impl Comp {
         let mut out = Vec::new();
         for n in 0..MAX_SURFACES {
             if self.surf(n).map_or(false, |s| {
-                s.chrome_bind.is_some() || s.is_menu || s.is_status
+                s.chrome_bind.is_some() || s.is_menu || s.is_status || s.is_rail
             }) {
                 if let Some(r) = self.surface_target(n) {
                     out.push((n, r));
@@ -4500,7 +4556,7 @@ impl Comp {
                 s.w,
                 s.h,
                 s.patchwork,
-                s.chrome_bind.is_some() || s.is_menu || s.is_status,
+                s.chrome_bind.is_some() || s.is_menu || s.is_status || s.is_rail,
             ),
             _ => return None,
         };
@@ -4729,11 +4785,12 @@ impl Comp {
     /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
     /// create the 2D resource, attach the whole weave as its backing.
     fn create(&mut self, n: usize, w: u32, h: u32, host: Host) -> Result<(), u32> {
-        let (chrome_bind, is_menu, is_status, claim) = match host {
-            Host::Content { claim } => (None, false, false, claim),
-            Host::Chrome { bind } => (Some(bind), false, false, None),
-            Host::Menu => (None, true, false, None),
-            Host::Status => (None, false, true, None),
+        let (chrome_bind, is_menu, is_status, is_rail, claim) = match host {
+            Host::Content { claim } => (None, false, false, false, claim),
+            Host::Chrome { bind } => (Some(bind), false, false, false, None),
+            Host::Menu => (None, true, false, false, None),
+            Host::Status => (None, false, true, false, None),
+            Host::Rail => (None, false, false, true, None),
         };
         let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
         let s = self.surf(n).ok_or(p9::E_BADF)?;
@@ -4762,6 +4819,28 @@ impl Comp {
                 requester_is_session: principal_is_session(s.owner_principal),
             };
             match pane::admit_status_bar(&req) {
+                pane::StatusAdmit::Admit => {}
+                pane::StatusAdmit::Malformed => return Err(p9::E_INVAL),
+                pane::StatusAdmit::NotYours => return Err(p9::E_PERM),
+            }
+        }
+        // HALCYON-INSTRUMENT 8: ONE top rail per display, exactly the top
+        // strip -- the display width by `rail_h` -- and only where the carve
+        // reserves one (Instrument); the bar's rule with the profile beside
+        // it (`pane::admit_rail`, pure and host-tested).
+        if is_rail {
+            let req = pane::RailReq {
+                rail_registered: self.rail.is_some(),
+                w,
+                h,
+                disp_w,
+                disp_h,
+                rail_h: self.metrics.rail_h.max(0) as u32,
+                instrument: self.bundle.profile == libhalcyon::instrument::Profile::Instrument,
+                session_declared: !self.session_conns.is_empty(),
+                requester_is_session: principal_is_session(s.owner_principal),
+            };
+            match pane::admit_rail(&req) {
                 pane::StatusAdmit::Admit => {}
                 pane::StatusAdmit::Malformed => return Err(p9::E_INVAL),
                 pane::StatusAdmit::NotYours => return Err(p9::E_PERM),
@@ -4801,8 +4880,28 @@ impl Comp {
         s.chrome_bind = chrome_bind;
         s.is_menu = is_menu;
         s.is_status = is_status;
+        s.is_rail = is_rail;
         let gen = s.gen;
         let owner_p = s.owner_principal;
+        if is_rail {
+            // HALCYON-INSTRUMENT 8: the rail is neither hosted nor pane-bound
+            // -- its bind is the display. The carve already reserves the
+            // strip, so registering it moves no leaf; surface_target places
+            // it there and the reconcile fans it its CONFIGURE (and leaves
+            // Direct, as for the bar: a second visible thing).
+            self.rail = Some(StatusState { n, gen });
+            #[cfg(feature = "test-mode")]
+            say!(
+                "tapestryd: rail {} created ({}x{}) for principal {}; the display carves {}",
+                n,
+                w,
+                h,
+                owner_p,
+                self.metrics.rail_h
+            );
+            self.reconcile();
+            return Ok(());
+        }
         if is_status {
             // H-3d: the status bar is neither hosted nor pane-bound -- its
             // bind is the display. Registering it carves the layout
@@ -6117,8 +6216,16 @@ impl Comp {
         let hair = m.hairline.max(0) as u32;
         let frame_w = m.frame.max(0) as u32;
         // The rails: the fill, then the structure line on the workspace
-        // side (inside the rail's own box: 5.1).
-        if let Some((top, bottom)) = self.rail_rects() {
+        // side (inside the rail's own box: 5.1). STRUCTURAL repaints only,
+        // as the legacy strip (H-3d): the rail and the bar are their
+        // owners' OPAQUE surfaces composited on top, and a focus-only
+        // repaint must not paint over their pixels -- measured at I-4: the
+        // rail's owner presents once at mint and then only on a CONFIGURE,
+        // so an ungated fill here wiped the rail on every focus-only
+        // repaint (each command's `tag status` is one) and the bar survived
+        // only because its own model changed per command. The structural
+        // fill is healed by the CONFIGURE fan (visible_chrome includes both).
+        if let Some((top, bottom)) = self.rail_rects().filter(|_| structural) {
             if !top.is_empty() {
                 self.fill_rect(top, inst.rail);
                 let line = Rect {
@@ -6693,6 +6800,7 @@ impl Comp {
             && active_nleaves <= 1
             && self.menu.is_none()
             && self.status.is_none()
+            && self.rail.is_none()
         {
             match self.scanout {
                 Scanout::Boot => Scanout::Boot,
@@ -6702,6 +6810,7 @@ impl Comp {
             && active_nleaves == 1
             && self.menu.is_none()
             && self.status.is_none()
+            && self.rail.is_none()
         {
             // H-3c: a placed menu is a second visible thing -- it composes
             // over the leaf, so Direct is off while one is up.
@@ -7465,6 +7574,12 @@ impl Comp {
             self.status = None;
             say!("tapestryd: status bar {} retired; the display returns", n);
         }
+        // HALCYON-INSTRUMENT 8: the registered rail dies with its surface;
+        // the strip stays carved (the compositor's own `rail` fill shows).
+        if self.rail.map_or(false, |r| r.n == n) {
+            self.rail = None;
+            say!("tapestryd: rail {} retired", n);
+        }
         // A stale last_focus naming this slot would suppress the gained
         // event for a FUTURE surface minted into it -- clear it (the
         // reconcile below re-emits for whatever takes focus).
@@ -8114,7 +8229,7 @@ impl Comp {
     fn chrome_at(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
         for n in 0..MAX_SURFACES {
             let Some(s) = self.surf(n) else { continue };
-            if s.chrome_bind.is_none() || s.w == 0 || s.h == 0 {
+            if !(s.chrome_bind.is_some() || s.is_rail) || s.w == 0 || s.h == 0 {
                 continue;
             }
             let Some(t) = self.surface_target(n) else { continue };
@@ -8145,7 +8260,7 @@ impl Comp {
     fn ptr_crossing(&mut self, now: Option<usize>, mods: u16) {
         let now_chrome = now.and_then(|n| {
             self.surf(n)
-                .filter(|s| s.chrome_bind.is_some())
+                .filter(|s| s.chrome_bind.is_some() || s.is_rail)
                 .map(|s| (n, s.gen))
         });
         let prev = self.ptr_over;
@@ -8343,7 +8458,7 @@ impl Comp {
                 let hit = self.ptr_target(self.ptr_x, self.ptr_y).map(|(n, _, _)| n);
                 #[cfg(feature = "test-mode")]
                 if let Some(n) = hit {
-                    if self.surf(n).is_some_and(|s| s.chrome_bind.is_some()) {
+                    if self.surf(n).is_some_and(|s| s.chrome_bind.is_some() || s.is_rail) {
                         say!(
                             "tapestryd: ptr btn {} {} -> chrome {} at {},{}",
                             code,
@@ -14219,6 +14334,10 @@ impl Conn {
                     Some((P_PANE_DIR, 0))
                 } else if name == b"statusbar" {
                     Some((P_STATUSBAR, 0))
+                } else if name == b"rail" {
+                    Some((P_RAIL, 0))
+                } else if name == b"chords" {
+                    Some((P_CHORDS, 0))
                 } else {
                     None
                 }
@@ -14719,6 +14838,22 @@ impl Conn {
             let r = comp.status_rect().unwrap_or(Rect::ZERO);
             let mut s = String::new();
             let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", r.x, r.y, r.w, r.h));
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
+        }
+        if f.path == P_RAIL {
+            // HALCYON-INSTRUMENT 8: the top rail's strip while a rail is
+            // registered -- "x y w h", zeros otherwise (the file always
+            // exists; under legacy it is always zeros).
+            let r = comp.rail_rect().unwrap_or(Rect::ZERO);
+            let mut s = String::new();
+            let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", r.x, r.y, r.w, r.h));
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
+        }
+        if f.path == P_CHORDS {
+            // HALCYON-INSTRUMENT 8.2: the chord table in force, in the
+            // config grammar -- what an environment derives its hints from
+            // (never a literal). Read-only; ungated like every other read.
+            let s = comp.chords.render();
             return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
         }
         if is_pane(f.path) && pane_fk(f.path) == PFK_CLAIM {
@@ -16713,7 +16848,7 @@ impl Conn {
                         let minted: Vec<usize> = (0..MAX_SURFACES)
                             .filter(|&n| {
                                 comp.surf(n).is_some_and(|s| {
-                                    s.owner_conn == other && (s.is_status || s.is_menu)
+                                    s.owner_conn == other && (s.is_status || s.is_menu || s.is_rail)
                                 })
                             })
                             .collect();
@@ -16755,6 +16890,20 @@ impl Conn {
                             comp.retire(st.n);
                         }
                     }
+                    // HALCYON-INSTRUMENT 8: the top rail follows the display
+                    // exactly as the bar does -- the console's is a loan.
+                    if let Some(r) = comp.rail {
+                        if comp
+                            .surf(r.n)
+                            .is_some_and(|s| !principal_is_session(s.owner_principal))
+                        {
+                            say!(
+                                "tapestryd: session declare retires the system rail (surface {})",
+                                r.n
+                            );
+                            comp.retire(r.n);
+                        }
+                    }
                     comp.session_conns.push((self.conn_id, self.peer_principal));
                     say!("tapestryd: session declared by conn {}", self.conn_id);
                 }
@@ -16778,6 +16927,12 @@ impl Conn {
                                 st.n
                             );
                             comp.retire(st.n);
+                        }
+                    }
+                    if let Some(r) = comp.rail {
+                        if comp.surf(r.n).is_some_and(|s| s.owner_conn == self.conn_id) {
+                            say!("tapestryd: session release retires its rail (surface {})", r.n);
+                            comp.retire(r.n);
                         }
                     }
                 }
@@ -17166,6 +17321,7 @@ impl Conn {
                         Some(Role::Chrome) => Role::Chrome,
                         Some(Role::Menu) => Role::Menu,
                         Some(Role::Status) => Role::Status,
+                        Some(Role::Rail) => Role::Rail,
                         _ => return Err(p9::E_INVAL), // pin-target is a pane role
                     };
                 } else if let Some(b) = tok.strip_prefix("bind=") {
@@ -17235,6 +17391,20 @@ impl Conn {
                         return Err(p9::E_PERM);
                     }
                     Host::Status
+                }
+                // HALCYON-INSTRUMENT 8: the top rail takes no bind (its bind
+                // is the display) and is gated exactly as the bar: the
+                // renderer, or the declared session compositor while it
+                // HOSTS. The profile is judged in `create` (the carve's
+                // fact), after the authority here -- a legacy display
+                // refuses the rail as malformed, not as not-yours.
+                (Role::Rail, None) => {
+                    if !self.peer_is_renderer()
+                        && !(comp.session_declared(self.conn_id) && comp.conn_hosts(self.conn_id))
+                    {
+                        return Err(p9::E_PERM);
+                    }
+                    Host::Rail
                 }
                 // H-3c: a menu takes no bind (the compositor places it at
                 // `menu place`); renderer-gated like chrome -- an ungated
@@ -18057,6 +18227,8 @@ impl Conn {
                 names.push((b"surface".to_vec(), P_SURF_DIR));
                 names.push((b"layout".to_vec(), P_LAYOUT));
                 names.push((b"statusbar".to_vec(), P_STATUSBAR));
+                names.push((b"rail".to_vec(), P_RAIL));
+                names.push((b"chords".to_vec(), P_CHORDS));
                 names.push((b"pane".to_vec(), P_PANE_DIR));
             }
             P_PANE_DIR => {

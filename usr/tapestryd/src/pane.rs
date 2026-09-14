@@ -116,6 +116,10 @@ pub enum Role {
     /// H-3d: the screen-bottom status bar (a SURFACE role only): the one
     /// piece of chrome bound to the DISPLAY, not to a pane.
     Status,
+    /// HALCYON-INSTRUMENT 8: the display-top rail (a SURFACE role only),
+    /// the second piece of display-bound chrome; exists only under the
+    /// Instrument profile, whose carve always reserves it.
+    Rail,
 }
 
 impl Role {
@@ -126,6 +130,7 @@ impl Role {
             Role::PinTarget => "pin-target",
             Role::Menu => "menu",
             Role::Status => "status",
+            Role::Rail => "rail",
         }
     }
     pub fn parse(s: &str) -> Option<Role> {
@@ -135,6 +140,7 @@ impl Role {
             "pin-target" => Some(Role::PinTarget),
             "menu" => Some(Role::Menu),
             "status" => Some(Role::Status),
+            "rail" => Some(Role::Rail),
             _ => None,
         }
     }
@@ -188,6 +194,48 @@ pub enum StatusAdmit {
 /// any kind, host or guest.
 pub fn admit_status_bar(r: &StatusReq) -> StatusAdmit {
     if r.bar_registered || r.w != r.disp_w || r.h != r.status_h || r.disp_h <= r.status_h {
+        return StatusAdmit::Malformed;
+    }
+    if r.session_declared && !r.requester_is_session {
+        return StatusAdmit::NotYours;
+    }
+    StatusAdmit::Admit
+}
+
+/// HALCYON-INSTRUMENT 8: what a `role=rail` registration asks for -- the
+/// status bar's request with the profile beside it, since the top rail
+/// exists only under Instrument (the legacy carve has no such strip and
+/// `rail_h` is 0 there).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RailReq {
+    /// A rail is already registered on this display.
+    pub rail_registered: bool,
+    pub w: u32,
+    pub h: u32,
+    pub disp_w: u32,
+    pub disp_h: u32,
+    /// The strip the carve reserves at the top (`Metrics::rail_h`; 0 under
+    /// legacy, where no rail exists).
+    pub rail_h: u32,
+    /// The Instrument profile is in force.
+    pub instrument: bool,
+    pub session_declared: bool,
+    pub requester_is_session: bool,
+}
+
+/// HALCYON-INSTRUMENT 8: whether a `role=rail` surface may become THE
+/// display's top rail. The status bar's rule (`admit_status_bar`) with one
+/// more malformed case: no rail under legacy -- refused as malformed (there
+/// is no strip to be exactly), never as an authority question. The order
+/// is the status bar's: geometry before ownership.
+pub fn admit_rail(r: &RailReq) -> StatusAdmit {
+    if !r.instrument
+        || r.rail_h == 0
+        || r.rail_registered
+        || r.w != r.disp_w
+        || r.h != r.rail_h
+        || r.disp_h <= r.rail_h
+    {
         return StatusAdmit::Malformed;
     }
     if r.session_declared && !r.requester_is_session {
@@ -2476,6 +2524,76 @@ mod tests {
             ..base()
         };
         assert_eq!(admit_status_bar(&r), StatusAdmit::Malformed);
+    }
+
+    // ---- HALCYON-INSTRUMENT 8: the top rail's admission (I-4) --------------
+
+    /// A well-formed rail registration on an undeclared Instrument display:
+    /// the console renderer's own case. Every test below moves exactly ONE
+    /// field off this base.
+    fn rail_base() -> RailReq {
+        RailReq {
+            rail_registered: false,
+            w: 1280,
+            h: 34,
+            disp_w: 1280,
+            disp_h: 800,
+            rail_h: 34,
+            instrument: true,
+            session_declared: false,
+            requester_is_session: false,
+        }
+    }
+
+    #[test]
+    fn the_console_may_take_the_rail_while_no_session_is_declared() {
+        assert_eq!(admit_rail(&rail_base()), StatusAdmit::Admit);
+    }
+
+    #[test]
+    fn no_rail_exists_under_legacy() {
+        // The legacy carve reserves no top strip: refused as MALFORMED (there
+        // is no rect to be exactly), whoever asks -- the renderer included.
+        let r = RailReq { instrument: false, ..rail_base() };
+        assert_eq!(admit_rail(&r), StatusAdmit::Malformed);
+        // And a zero `rail_h` (the legacy table's value) is the same refusal
+        // even if the profile word said otherwise.
+        let r = RailReq { rail_h: 0, h: 0, ..rail_base() };
+        assert_eq!(admit_rail(&r), StatusAdmit::Malformed);
+    }
+
+    #[test]
+    fn the_rail_is_exactly_the_top_strip_and_one_per_display() {
+        for w in [1279u32, 1281] {
+            assert_eq!(admit_rail(&RailReq { w, ..rail_base() }), StatusAdmit::Malformed, "w={}", w);
+        }
+        for h in [33u32, 35] {
+            assert_eq!(admit_rail(&RailReq { h, ..rail_base() }), StatusAdmit::Malformed, "h={}", h);
+        }
+        assert_eq!(
+            admit_rail(&RailReq { rail_registered: true, ..rail_base() }),
+            StatusAdmit::Malformed
+        );
+        for disp_h in [33u32, 34] {
+            assert_eq!(admit_rail(&RailReq { disp_h, ..rail_base() }), StatusAdmit::Malformed, "disp_h={}", disp_h);
+        }
+        assert_eq!(admit_rail(&RailReq { disp_h: 35, ..rail_base() }), StatusAdmit::Admit);
+    }
+
+    #[test]
+    fn a_system_renderer_may_not_take_a_declared_sessions_rail() {
+        let r = RailReq { session_declared: true, ..rail_base() };
+        assert_eq!(admit_rail(&r), StatusAdmit::NotYours);
+        // The declared session takes its own; the principal axis is inert
+        // with no session declared.
+        let r = RailReq { session_declared: true, requester_is_session: true, ..rail_base() };
+        assert_eq!(admit_rail(&r), StatusAdmit::Admit);
+        let r = RailReq { requester_is_session: true, ..rail_base() };
+        assert_eq!(admit_rail(&r), StatusAdmit::Admit);
+        // Geometry before ownership, as for the bar: a malformed request
+        // from the wrong principal reads Malformed.
+        let r = RailReq { session_declared: true, h: 20, ..rail_base() };
+        assert_eq!(admit_rail(&r), StatusAdmit::Malformed);
     }
 
     // ---------------------------------------------------------------------

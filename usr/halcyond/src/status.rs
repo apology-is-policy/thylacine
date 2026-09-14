@@ -74,6 +74,18 @@ pub struct StatusModel {
     /// PROTECTED`; the live model returns when it expires (the bin's
     /// timer, `StatusBar::notify`).
     pub notice: Option<(String, bool)>,
+    /// HALCYON-INSTRUMENT 8.2: a command is running in the focused tile
+    /// now (the transcript's open block has a cmd mark and no exit) -- the
+    /// footer's RUNNING state; the legacy bar ignores it.
+    pub running: bool,
+    /// 8.2: the workspace's panes (`rail::pane_count`), the footer's right
+    /// group.
+    pub pane_count: u32,
+    /// 8.2: the session's host name when one exists; `LOCAL` otherwise.
+    pub host: Option<String>,
+    /// 8.2: the chord hints (`rail::hints_from_chords`), the footer's
+    /// centre.
+    pub hints: Vec<(String, String)>,
 }
 
 impl StatusModel {
@@ -89,6 +101,10 @@ impl StatusModel {
             hour: 0,
             minute: 0,
             notice: None,
+            running: false,
+            pane_count: 1,
+            host: None,
+            hints: Vec::new(),
         }
     }
 }
@@ -211,6 +227,12 @@ pub fn status_list(
     sheet: &Sheet,
     gs: &mut GlyphSource,
 ) -> (Cartoon, Slots) {
+    // HALCYON-INSTRUMENT 8.2: under the Instrument profile the bar is the
+    // bottom rail (`rail::footer_list`); the legacy list below is
+    // byte-identical to what it was.
+    if sheet.profile == libhalcyon::instrument::Profile::Instrument {
+        return crate::rail::footer_list(m, w, h, sheet, gs);
+    }
     let mut cart = Cartoon::new();
     let mut slots = Slots::default();
     if w == 0 || h == 0 {
@@ -357,6 +379,10 @@ mod tests {
             hour: 14,
             minute: 22,
             notice: None,
+            running: false,
+            pane_count: 1,
+            host: None,
+            hints: Vec::new(),
         }
     }
 

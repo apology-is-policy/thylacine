@@ -50,10 +50,12 @@ use tapestry::{
 };
 
 use crate::chromeset::{self, read_file, ChromeAction};
+use crate::railset;
 use crate::menuset::{self, MenuEvent};
 use crate::statusset;
 use halcyond::chrome::{Described, Fate};
-use halcyond::menu::tile_menu;
+use halcyond::menu::{tile_menu, workspace_menu};
+use halcyond::rail::{hints_from_chords, reset_plan, RailModel};
 
 /// evdev BTN_LEFT (the tapestry PTR_BTN `code`).
 const BTN_LEFT: u16 = 0x110;
@@ -142,20 +144,29 @@ const DECLARE_TRIES: u32 = 40;
 /// retried through the per-pass mutation budget. Best-effort: a wedged
 /// compositor is caught by the ring/poll error path, and the `closed` set is
 /// the authoritative respawn guard regardless of this verb's fate.
-fn layout_verb(troot: i64, cmd: &str) {
+fn layout_verb(troot: i64, cmd: &str) -> bool {
     for _ in 0..VERB_RETRIES {
-        let fd =
-            unsafe { libthyla_rs::t_open(troot, b"layout".as_ptr(), 5, libthyla_rs::T_OWRITE) };
+        // The path's LENGTH is the slice's: this said 5 for six bytes since
+        // I-3 -- opening `layou` -- and no gate had written a layout verb
+        // from the session until I-4's rail pressed SPLIT H.
+        let path = b"layout";
+        let fd = unsafe { libthyla_rs::t_open(troot, path.as_ptr(), path.len(), libthyla_rs::T_OWRITE) };
         if fd < 0 {
-            return;
+            say!("halcyond: layout verb \"{}\": open failed rc {}", cmd, fd);
+            return false;
         }
         let rc = unsafe { t_write(fd, cmd.as_ptr(), cmd.len()) };
         unsafe { libthyla_rs::t_close(fd) };
         if rc != E_AGAIN {
-            return;
+            if rc < 0 {
+                say!("halcyond: layout verb \"{}\" refused rc {}", cmd, rc);
+            }
+            return rc >= 0;
         }
         let _ = sleep(Duration::from_millis(VERB_NAP_MS));
     }
+    say!("halcyond: layout verb \"{}\" still busy after {} tries", cmd, VERB_RETRIES);
+    false
 }
 
 /// HALCYON-INSTRUMENT 14.9: parse a tile menu action `tile <verb> <id>`.
@@ -1289,6 +1300,12 @@ pub fn run(home: Option<String>) -> i64 {
         resolved.bundle.profile.word(),
         resolved.profile_tier
     );
+    // HALCYON-INSTRUMENT 8.1: the theme's name, the rail's theme control.
+    let theme_name = if resolved.name.is_empty() {
+        String::from("built-in")
+    } else {
+        resolved.name.clone()
+    };
     let bundle = resolved.bundle;
     let theme = bundle.theme;
     // The compositor paints the chrome around our panes and cannot read the
@@ -1390,6 +1407,11 @@ pub fn run(home: Option<String>) -> i64 {
     // + painting here.
     let mut chrome = chromeset::ChromeSet::new(ring.clone());
     let mut status = statusset::StatusBar::new(ring.clone());
+    // HALCYON-INSTRUMENT 8: the top rail (a Role::Rail surface on the same
+    // ring, under Instrument only) and the footer's chord hints from the
+    // compositor's `chords` file, re-read with every relayout.
+    let mut rail = railset::RailBar::new(ring.clone());
+    let mut hints: Vec<(String, String)> = Vec::new();
     // The tile-status feed's one-shot refusal notice (the H-3b round F4
     // posture: a refusal drops that exit, the next exit mark retries).
     let mut status_refusal_said = false;
@@ -1457,6 +1479,12 @@ pub fn run(home: Option<String>) -> i64 {
                 // HALCYON-INSTRUMENT 14.9: the tile verb menu's items are
                 // `tile <verb> <id>`, interpreted here under the session's
                 // own authority -- never a shell command.
+                if let Some(n) = act.strip_prefix("workspace ") {
+                    // 14.1: the workspace list's choice -- one workspace
+                    // exists, and it is the active one.
+                    say!("halcyond: workspace {} is active", n.trim());
+                    continue;
+                }
                 match tile_verb(&act) {
                     Some(("close", id)) => tile_actions.push(ChromeAction::Close {
                         id,
@@ -1664,8 +1692,10 @@ pub fn run(home: Option<String>) -> i64 {
                     menu_leaf = None;
                     chrome.invalidate();
                     status.invalidate();
+                    rail.invalidate();
                 }
             }
+            hints = hints_from_chords(&read_file(troot, "chords").unwrap_or_default());
             // A relayout re-arms the status bar's mint retry (the console
             // path's H-3d F5 cadence): the compositor retires a bar of the
             // old height on a scale change, and the re-mint at the new one
@@ -1836,8 +1866,96 @@ pub fn run(home: Option<String>) -> i64 {
             // mockups' `transcript · ~/thylacine · ut ~`).
             let cwd = abbrev_home(cwd, home.as_deref());
             let notice = status.notice();
-            let sm = statusset::model_from(chrome.focused(), focused_leaf, &cwd, cmd, exit_code, notice);
+            let running = focused_leaf
+                .and_then(|l| tiles.get(&l))
+                .map_or(false, |t| t.tile.scrollback.running());
+            let sm = statusset::model_from(
+                chrome.focused(),
+                focused_leaf,
+                &cwd,
+                cmd,
+                exit_code,
+                notice,
+                running,
+                chrome.pane_count(),
+                hints.clone(),
+            );
             status.refresh(&sm, &sheet, &mut gs);
+            // HALCYON-INSTRUMENT 8.1: the top rail -- the focused tile's
+            // directory and name, the theme in force, the minute; its
+            // buttons act under THIS session's authority (the layout
+            // file), the picker and the help say what they are not yet.
+            rail.rearm();
+            rail.ensure(&sheet);
+            let _ = rail.pump(&sheet, &mut gs);
+            let title = focused_leaf
+                .and_then(|l| tiles.get(&l))
+                .map(|t| {
+                    let title = t.tile.title.trim();
+                    if title.is_empty() {
+                        t.program.clone()
+                    } else {
+                        String::from(title)
+                    }
+                })
+                .or_else(|| chrome.focused().map(|f| f.1.clone()))
+                .unwrap_or_default();
+            let (hour, minute) = statusset::clock_hm();
+            let rm = RailModel {
+                cwd: cwd.clone(),
+                title,
+                theme: theme_name.clone(),
+                hour,
+                minute,
+                ..RailModel::empty()
+            };
+            rail.refresh(&rm, &sheet, &mut gs);
+            for a in rail.take_actions() {
+                match a {
+                    railset::RailAction::SplitH | railset::RailAction::SplitV => {
+                        let dir = if a == railset::RailAction::SplitH { "h" } else { "v" };
+                        if let Some(id) = focused_leaf {
+                            if layout_verb(troot, &format!("split {} {}", id, dir)) {
+                                relayout = true;
+                            } else {
+                                say!("halcyond: split {} on pane {} refused", dir, id);
+                                status.notify("SPLIT REFUSED", true);
+                            }
+                        }
+                    }
+                    railset::RailAction::Reset => {
+                        let plan = read_file(troot, "layout").map(|l| reset_plan(&l)).unwrap_or_default();
+                        say!("halcyond: reset: {} verb(s)", plan.len());
+                        for (id, verb) in plan {
+                            let (word, args) = verb.split_once(' ').unwrap_or((verb.as_str(), ""));
+                            let cmd = if args.is_empty() {
+                                format!("{} {}", word, id)
+                            } else {
+                                format!("{} {} {}", word, id, args)
+                            };
+                            if layout_verb(troot, &cmd) {
+                                relayout = true;
+                            }
+                        }
+                        status.notify("LAYOUT RESET", false);
+                    }
+                    railset::RailAction::Theme => {
+                        say!("halcyond: the theme picker is not available yet");
+                        status.notify("THEME PICKER NOT AVAILABLE", true);
+                    }
+                    railset::RailAction::Help => {
+                        say!("halcyond: the keyboard reference is not available yet");
+                        status.notify("HELP NOT AVAILABLE", true);
+                    }
+                    railset::RailAction::Workspaces { x, y } => {
+                        if menus.open(workspace_menu(1, 0), x, y, (x, y, 0, 0), &sheet, &mut gs) {
+                            menu_leaf = None;
+                        }
+                    }
+                    railset::RailAction::Workspace(n) => say!("halcyond: workspace {} is active", n as u32 + 1),
+                    railset::RailAction::ChipsScroll(_) => {}
+                }
+            }
         }
 
         // If any tile needs a paint (a new tile, a resize), render before we
@@ -1895,7 +2013,10 @@ pub fn run(home: Option<String>) -> i64 {
             -1
         };
         // A transient status notice expires on the clock (8.2): wake for it,
-        // so the live model returns without waiting on an unrelated event.
+        // so the live model returns without waiting on an unrelated event;
+        // and the rails' clocks turn with the minute.
+        let clock = statusset::clock_timeout_ms();
+        let timeout = if timeout < 0 || clock < timeout { clock } else { timeout };
         let timeout = match status.notice_timeout_ms() {
             Some(ms) if timeout < 0 || ms < timeout => ms,
             _ => timeout,
