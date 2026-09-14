@@ -686,7 +686,7 @@ two subsets; accepted at §7.1). Host: halcyond 228 → 235.
 
 ### I-5c: the producers -- an export keyed on the profile, a reader beside its writer, and a gate that reads deltas because the neutral inks are collinear
 
-**What landed** (`I5C_HASH`; HALCYON-INSTRUMENT §7.4 as built, §12, §13's
+**What landed** (`ccaec844`; HALCYON-INSTRUMENT §7.4 as built, §12, §13's
 addendum; HALCYON-THEME §3.5, HALCYON.md's palette paragraph and
 UTOPIA-VISUAL §3 amended; the I-5 audit row's items (r)–(t)). The
 session's palette export (`libhalcyon::theme::env_palette`) now takes the
