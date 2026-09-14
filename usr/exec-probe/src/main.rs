@@ -106,6 +106,53 @@ pub extern "C" fn rs_main() -> i64 {
         return 0;
     }
 
+    // ---- The stdio-less launcher: NOT a leg of this gate. ------------------
+    //
+    // `exec-probe stdio-less <path> [args...]` closes fds 0-2, then replaces
+    // this image with <path>, argv = <path> [args...]. It exists because
+    // nothing else can START a native program without stdio from a shell:
+    // `ut` always passes three fds, and a spawn whose fd list has a hole is
+    // refused. execve keeps the handle table, so closing first and exec'ing
+    // second is the one way to hand a program empty stdio slots -- which is
+    // what testing a program that relies on those slots being taken needs.
+    // joey never passes this argv, so the boot gate is unchanged.
+    if args.len() >= 3 && args.get_str(1) == Some("stdio-less") {
+        let mut packed: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let mut argc: u64 = 0;
+        for i in 2..args.len() {
+            match args.get_str(i) {
+                Some(s) => {
+                    packed.extend_from_slice(s.as_bytes());
+                    packed.push(0);
+                    argc += 1;
+                }
+                None => return fail("stdio-less: an argument is not UTF-8"),
+            }
+        }
+        let path = match args.get_str(2) {
+            Some(p) => p.as_bytes(),
+            None => return fail("stdio-less: no program named"),
+        };
+        for fd in 0..3i64 {
+            let _ = unsafe { libthyla_rs::t_close(fd) };
+        }
+        // The premise, checked rather than assumed. A close that silently did
+        // nothing would hand the target ordinary stdio, and a test of its
+        // stdio-less behaviour would then fail for a reason it never names.
+        for fd in 0..3i32 {
+            if libthyla_rs::fd_devclass(fd).is_some() {
+                return fail("stdio-less: an fd in 0..3 is still open after its close");
+            }
+        }
+        // Does not return on success. fd 1 is gone, so failures go to the
+        // console like every other failure here.
+        let rc = unsafe { t_execve(path, &packed, argc) };
+        t_putstr("exec-probe: FAIL stdio-less: execve returned rc=");
+        put_i64(rc);
+        t_putstr("\n");
+        return 1;
+    }
+
     // ---- Stage 1: the failure legs, then the exec. ------------------------
     if args.len() != 1 {
         return fail("stage1 expected exactly one argv entry");

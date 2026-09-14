@@ -16,11 +16,15 @@
 #   3. SYS_ATTACH_9P's Tversion/Tattach ride the encrypted channel -- so the
 #      pumps are framing, sealing and opening correctly under the kernel's own
 #      9P client, not just under a unit test.
-#   4. SYS_MOUNT grafts it, and a READ returns the server's file CONTENT.
+#   4. SYS_MOUNT grafts it: haul LISTS the remote tree, and a spawned child
+#      READS a file's CONTENT through the mount.
+#   5. A server that hangs up after an authenticated handshake makes haul FAIL
+#      at the attach and exit -- it does not hang.
 #
-# Step 4 is the one that cannot be faked by a half-working transport: a mount
-# that "succeeded" but relays garbage still prints a mount line. The content
-# assertion is the witness.
+# Step 4's read is the one that cannot be faked by a half-working transport: a
+# mount that "succeeded" but relays garbage still prints a mount line. The
+# content assertion is the witness. Step 5's plain twin, which needs no server
+# at all, is haul-hangup.exp.
 #
 # THE SERVER IS EXTERNAL, so this scenario SKIPS (exit 77 -- the harness's skip
 # code, NOT 0, which would be reported as a PASS) rather than failing when it is
@@ -104,17 +108,13 @@ lc_send "mkdir -p /tmp/host2"
 # namespace and THE SHELL SEES NOTHING -- measured, while haul sat happily
 # mounted:
 #   cat: /home/cora/host/hello.txt: no such file or namespace entry
-# Running the reader as haul's CHILD puts it downstream of the mount.
+# Running the reader as haul's CHILD puts it downstream of the mount, and the
+# read leg below asserts that it sees the tree.
 #
-# AND IT DOES NOT WORK EITHER, which is why the read steps below are commented
-# out rather than asserted. haul lists the mounted tree from its OWN namespace
-# (`mount check: 5 entr(y/ies) here`) and its child still gets
-# `no such file or namespace entry` -- measured at /home/cora/host (inside
-# another mount) AND at /tmp/host (plain ramfs), so the mount point's location
-# is not the discriminator. A SYS_SPAWN child appears not to receive its
-# parent's mounts at all. That is a kernel-side question, tracked in
-# memory/bug_nested_mount_lost_at_spawn_clone.md, and it is NOT haul's to
-# answer here.
+# That leg once failed the same way, and spawn was not the cause: the child
+# could LIST the mount point but not open anything beneath it, because dev9p
+# fell back from the fused Twalkgetattr only on ENOSYS and npxf answers
+# EOPNOTSUPP. An unimplemented operation surfaced as a missing path.
 #
 # THE ADDRESS IS UNQUOTED, and that is an assertion, not a convenience. `ut`
 # used to lex a bare `!` as its own Bang token, so Plan 9's `host!port` parsed
@@ -146,7 +146,7 @@ lc_expect "mount check: 5 entr" "readdir of the remote tree through the encrypte
 lc_expect "npxf encrypted" "haul mounted the npxf tree (encrypted channel)"
 lc_pass "haul-npxf: dialled, handshook, attached, mounted and LISTED a remote npxf tree over the encrypted channel"
 
-# THE COMMAND FORM, exercised without depending on the open kernel question.
+# THE COMMAND FORM: the argument boundary.
 #
 # `haul ... cmd args` spawns the command, waits for it, and exits with its
 # status. Two things in that path are haul's own and are asserted here: the
@@ -156,12 +156,9 @@ lc_pass "haul-npxf: dialled, handshook, attached, mounted and LISTED a remote np
 # VERBATIM, including a leading dash it would otherwise be tempting to read as
 # one of haul's own options.
 #
-# The command deliberately does NOT touch the mount. Whether a spawned child
-# sees its parent's mounts is an open kernel question
-# (memory/bug_nested_mount_lost_at_spawn_clone.md), and a scenario that asserted
-# the current wrong answer would have to be rewritten by the very fix that makes
-# it right -- a test that fails when the bug is fixed. So this asserts the parts
-# that are settled and leaves that question to its own chunk.
+# This leg deliberately does NOT touch the mount, so that an argv failure and a
+# mount failure can never be mistaken for each other. The read leg after it is
+# the one that does.
 # The child's argument is deliberately `-t`, haul's OWN token-file option. If
 # haul still read it, it would try to open /nonexistent-token as a credential
 # and die with "cannot open the token file"; passing it through means echo
@@ -181,6 +178,74 @@ lc_pass "haul-npxf: dialled, handshook, attached, mounted and LISTED a remote np
 lc_send "haul -t npxf.token 10.0.2.2!$hostport /tmp/host2 /bin/echo child-argv -t /nonexistent-token | tr a-z A-Z"
 lc_expect "CHILD-ARGV -T /NONEXISTENT-TOKEN" "the child's -t reached the child, not haul's parser"
 lc_pass "haul-npxf: the command form runs a child and relays its argv unread"
+
+# THE READ LEG: a spawned child opens a file BENEATH the mount. Listing the mount
+# point needs only Twalk + Treaddir; opening beneath it takes the fused
+# Twalkgetattr, which npxf does not implement, so this leg is what exercises
+# dev9p's fallback on EOPNOTSUPP. The fixture line is typed nowhere, and `tr`
+# upper-cases it, so only the file's content read through the channel matches.
+lc_send "haul -t npxf.token 10.0.2.2!$hostport /tmp/host2 /bin/cat /tmp/host2/hello.txt | tr a-z A-Z"
+lc_expect "THE THYLACINE IS REAL" "a spawned child read hello.txt through the mount"
+lc_pass "haul-npxf: a spawned child read a file's content through the encrypted mount"
+
+# THE HANG-UP LEG: a server that hangs up AFTER an authenticated handshake.
+#
+# A host relay passes npxf's three flights through byte-exactly (40 bytes up, 64
+# down, 32 up) and then hangs up, so haul's handshake genuinely succeeds against
+# the real server and the connection dies before the first reply. That is what
+# the plain haul-hangup.exp cannot reach: here the down pump is reading AEAD
+# records, and it is the record reader's EOF that must end the attach. The
+# relay's own log is asserted, so a relay that failed differently -- one that
+# never reached the server, say -- cannot pass for the fix. Why the hang-up is
+# a FIN: haul-hangup-peer.py's header.
+proc read_file {path} {
+    if {[catch {set f [open $path r]}]} { return "" }
+    set d [read $f]
+    close $f
+    return $d
+}
+proc wait_log {path pat secs} {
+    set d ""
+    for {set i 0} {$i < $secs * 10} {incr i} {
+        set d [read_file $path]
+        if {[string match $pat $d]} { break }
+        after 100
+    }
+    return $d
+}
+
+# Started only now, after boot: an `exec` before `spawn` is a macOS expect 5.45
+# footgun (lib.exp's header). The relay binds port 0 and logs the port it got,
+# for the reason haul-hangup.exp gives: a port chosen here would be
+# check-then-use against a scenario running in parallel.
+set rlog /tmp/haul-npxf-relay-[pid].log
+file delete -force $rlog
+set relay_pid [exec python3 $lc_repo/tools/interactive/haul-hangup-peer.py \
+    --port 0 --log $rlog --mode relay-handshake --upstream $hostport &]
+# By its log, not by connecting: the relay serves exactly one connection.
+set d [wait_log $rlog "*listening*" 5]
+if {![regexp {listening 127\.0\.0\.1:([0-9]+)} $d -> rport]} {
+    lc_fail "the hang-up relay never listened -- its log: $d"
+}
+lc_step "hang-up relay listening on 127.0.0.1:$rport (pid $relay_pid)"
+
+lc_send "mkdir -p /tmp/host3"
+lc_run_expect_hardfail_re "haul -v -t npxf.token 10.0.2.2!$rport /tmp/host3" \
+    "attach (the server closed without replying)" \
+    {haul: (connect|handshake|attach \(9P|attach \(the connection)|mounted at}
+lc_run_expect "echo relay-leg-returned | tr a-z A-Z" "RELAY-LEG-RETURNED"
+
+set rl [wait_log $rlog "*guest: the other side*" 12]
+foreach want {"relayed flight 1 up: 40 bytes" "relayed flight 2 down: 64 bytes" \
+              "relayed flight 3 up: 32 bytes" "guest: sent FIN"} {
+    if {[string first $want $rl] < 0} {
+        lc_fail "the relay did not do what this leg assumes (no \"$want\") -- its log: $rl"
+    }
+}
+lc_step "relay log: [string map [list "\n" " | "] [string trim $rl]]"
+lc_pass "haul-npxf: a server hanging up after an authenticated handshake fails the attach, and haul exits"
+catch {exec kill $relay_pid}
+file delete -force $rlog
 
 lc_quit
 lc_pass "haul-npxf: guest mounted a real npxf 9P2000.L server over an authenticated, encrypted channel"

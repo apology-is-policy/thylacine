@@ -65,16 +65,16 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**443 owned · 76 unowned · 519 files (85% owned) · ~23801 unswept lines.**
+**443 owned · 76 unowned · 519 files (85% owned) · ~23852 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **73 files, ~32280 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **73 files, ~32327 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/nocturned | 0 | 3 | 3494 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/haul | 0 | 5 | 2506 |
+| usr/haul | 0 | 5 | 2557 |
 | usr/ports | 14 | 9 | 2199 |
 | kernel | 123 | 15 | 2181 |
 | usr/lib | 59 | 5 | 1321 |
@@ -129,8 +129,8 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/nocturned/src/server.rs | 1976 |
 | usr/ports/gnumake/config.h | 1357 |
+| usr/haul/src/main.rs | 1125 |
 | usr/nocturned/src/snd.rs | 1076 |
-| usr/haul/src/main.rs | 1074 |
 | usr/quarry/src/main.rs | 1033 |
 | usr/haul/src/npxf.rs | 1005 |
 | usr/lib/libhalcyon/src/toml.rs | 629 |

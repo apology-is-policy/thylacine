@@ -3669,6 +3669,364 @@ SMP soundness inherited from c83da249 (aux-3's kernel is the byte-identical
 binary main gated 40 boots / 0 corruption -- not re-run on identical bits). The
 operator's 3-part bar is met: aux-2 merged, aux-3 fresh off merged-main, both
 build+test green. Role split: aux -> viv on aux-3, main -> KT-1.
+## Run 46n (2026-09-10 + 2026-09-14, Opus 5 max, across a self-compaction) -- the syscall collision, a merge gate's one red boot, and a hang the obvious fix would not have closed
+
+Newest first within the JOURNAL; this entry is chronological inside (Sep 10, then Sep 14).
+
+### What this run was for
+
+Picking up from a self-compaction at `82254920`, three things were in flight: a
+codeberg push blocked on an outage, the full aux-3 -> main merge the operator had
+directed, and ut's `mount` built-in landed-but-unverified. The merge turned out
+to carry a format break, and chasing that opened the run's real finding.
+
+### The collision, and the guard that could not see it
+
+Syscall **110 was double-allocated**: main's `SYS_DMA_SEGMENTS` (WEAVE-SKEIN)
+against aux-3's `SYS_CONSOLE_EPISODE` (IMPERIUM). Duplicate enum values are legal
+C, so the merge would have compiled silently on both sides and stayed silent
+until two dispatch cases collided.
+
+Operator-ratified resolution: **main moves, 110 -> 112**; aux keeps 110/111.
+Decided on measured edit cost, which is the criterion the vault records for the
+previous collision of this exact kind -- 2 numeric sites here (`syscall.h`,
+`libthyla-rs/lib.rs`; the C mirror `libt` does not carry it at all, measured 0)
+against 6 there. The operator reached the same answer independently on aux's
+line the same hour, which is a pleasant control on the decision. Landed
+`48dc6115`.
+
+**The finding is the second half.** `VIV_NATIVE_CEILING` means "the highest
+ASSIGNED native syscall number", and the vivarium collision argument is keyed to
+it. It was pinned as `_Static_assert(VIV_NATIVE_CEILING == SYS_OPEN_CREATE)` --
+an identity pin, which catches a RENUMBER of the named symbol and is
+**structurally blind to a NEW number appended above it**, because an append moves
+nothing the assert reads.
+
+It read **109 on BOTH branches while both had numbers assigned above it**. Sixth
+and seventh drift of that constant, concurrent, unnoticed on both sides.
+
+The sharp part is the record. The header already documented four earlier drifts
+as a literal and a fifth as an identity pin; the `vivarium.c` comment describing
+that fifth one concluded *"no static_assert can force it on a NEW number"* and
+left the obligation to a person remembering. **Both halves of that were wrong,
+and the drift then recurred twice more after being written down.** Writing a
+failure mode down was treated as discharging it. The vault's phrasing for this
+same surface: *"The enforcement is that a human wrote MUST in a comment."*
+
+Fixed by pinning to a sentinel the compiler recomputes:
+
+    SYS_DMA_SEGMENTS = 112,
+    SYS__NATIVE_TOP,        // not a syscall; one past the top
+  };
+  _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1, ...);
+
+**Proved by sabotage, not by a green build.** A green build shows the current
+state is consistent; it cannot show a new guard is able to fail. Appending a fake
+`SYS__SABOTAGE = 113` fails the build at `vivarium.c:35` with the assert's own
+remediation text. The old form's blindness needed no re-staging -- main was green
+at `82254920` with the ceiling reading 109 while 110 was assigned, and that green
+build *is* the proof it could not see an append. The guard then earned itself
+within the hour: aux resolved the merge, wrote "the sentinel will catch me if I
+got the ceiling wrong," and their build passing is now a mechanical statement
+that the ceiling is right rather than an opinion.
+
+Consequence today, stated exactly rather than dramatised: **nil.** No `VIV_LINUX`
+row sits at 110-112 and the lowest ceiling-argument row is `restart_syscall` at
+128. The guard was broken; the argument it guards still held.
+
+### Four instruments caught lying, in one run
+
+1. **curl.** The resume note carried "CODEBERG IS DOWN (HTTP 000 site-wide)".
+   Codeberg *is* down -- `git ls-remote` returns a real 504 -- but the HTTP 000
+   corroboration was junk: curl in this sandbox fails with exit **77** on EVERY
+   host, github.com included, which git reaches fine. Exit 77 is a local CA-cert
+   failure, not a network verdict. A conclusion that was right for one of its two
+   reasons. (And the tree already knew: a memory entry says exactly this about
+   `SSL_CERT_FILE`. See the next section for why I did not see it.)
+2. **A census pattern with the wrong syntax.** Checking "is there a vivarium row
+   at 110-112" with `#define VIV_LINUX_x N` when the rows are enum form `= N,`.
+   It returned empty and would have returned empty regardless. The control --
+   grep a KNOWN row with the same pattern -- caught it.
+3. **A grep for the test summary** that matched nothing because I guessed the
+   harness's format instead of looking. Third time this session.
+4. **`bash -n`**, on aux's behalf. They asked me to eyeball an added `fi` and
+   noted `bash -n` passes. It proves the file PARSES, never that the `fi` closes
+   the right `if` -- and the failure here would have put my unconditional theme
+   bake inside a halcyon-only guard, shipping themes on no other image, with the
+   build, suite and gates all green. Answered with a structural nesting-depth
+   comparison against main across four markers plus global balance (5/5
+   identical), with a control proving the checker moves when nesting changes.
+
+### The memory index was silently eating its own tail
+
+Writing a new entry tripped a hook: `MEMORY.md` was **27.8 KB against a 24.4 KB
+read limit**, so roughly 3.4 KB at the end was being silently dropped on every
+load.
+
+This was not hypothetical. The entry explaining curl's exit-77 sat near the end
+of the file, and I re-derived it -- wrongly at first -- while it was already
+written down. **A memory that has outgrown its window fails exactly like no
+memory, and does it invisibly.** Rewrote it to route rather than narrate: 19.5 KB,
+every pointer verified to resolve, ~4.4 KB of headroom. Also found and closed a
+dangling link that predated the rewrite (`audit_h3b_closed_list.md` lives in the
+repo's `memory/`, not the auto-memory dir, so that relative link never resolved).
+
+### The ut mount built-in: prime suspect refuted, no boot spent
+
+`mount` returns status 1 in the guest, cause unmeasured. The standing suspicion
+was "ptyfs posts with perm 0, so it is a fixture issue." **Refuted from source.**
+Perm 0 is the *universal* posting convention -- corvus, diorama, netd and ptyfs
+all `t_walk_create(..., T_OREAD, 0)` -- and `login::attach_ctl` opens a perm-0
+service with `T_ORDWR` and mounts it every boot, using the identical four-step
+shape. Neither the mode nor the perm explains it.
+
+Also established: `fail()` (`builtin.rs:353`) only STORES the message, which is
+precisely why the cause was unmeasured, and the four failure stages each write a
+DISTINCT `$errstr`. So one line settles it -- `mount /srv/ptyfs /tmp/m; echo
+$errstr` -- and `$errstr` is confirmed readable (`env.rs:555`). Not run: it needs
+the Mac and aux needed the Mac more.
+
+A handoff defect surfaced here too. The note said the E2E was parked at
+`<scratchpad>/ns-builtins.exp`; scratchpads are **session-scoped**, so that
+resolved to an empty directory and read as "the file is gone". Recovered only
+because the previous session's temp dir had not been cleaned yet -- luck, for a
+file living in `/tmp`. Never cite a session-scoped path in durable memory.
+
+### The merge
+
+aux drove it on their branch (they resolve where they can build and test); main
+reviews and fast-forwards. 12 conflicts, all resolved, build green. Two
+review items were worth the trouble:
+
+- **`usr/Cargo.toml` is a single line**, so git offers it as one whole-line
+  conflict where *both* "take ours" and "take theirs" are silent data loss --
+  ours drops `haul`, theirs drops thirteen aux crates. I generated the union and
+  verified it **in both directions** (aux-only lost: none; main-only lost: none;
+  119 + haul = 120). One-directional would have passed a line that dropped
+  thirteen.
+- **`tools/build.sh`**: aux changed 711 lines to my 87, and my `pool-contents`
+  marker lives in it. Grepped their whole diff for `bake_goroot` /
+  `pool-contents` / `bake_clade`: zero hits, so the conflict was adjacency, not
+  semantics. Confirmed live in the merged tree by their bake log --
+  `bake config CLADE=0 GOROOT=1`.
+
+### Owed, as of Sep 10 (superseded by the list at the end)
+
+- **The codeberg push**, both tracks -- still 504 at time of writing.
+- **haul audit round 4**, in flight as this is written (round 3 closed dirty; the
+  round targets R3's own fixes, which changed mechanisms rather than lines).
+- **The ut mount diagnosis** -- one line, needs the Mac.
+- **`CAP_POST_SERVICE`** -- aux builds it after the merge; main writes no
+  imperium code.
+
+### Sep 14 -- the merge gate's one red boot
+
+aux's merge gate went red on one boot in twenty: default-smp8, a 330 s stall,
+never reaching the boot banner (aux's first run 9/10, re-run 10/10). The last guest
+line was aurora's console-up; the last host line was QEMU's
+`Resetting rate control (13148953 frames)`.
+
+**That line was misfiled first, and the way it was misfiled is the lesson.** It
+had been read as a virtio-gpu frame runaway, on the evidence that the string is
+not in the guest tree. A grep of the guest can only say a string is NOT OURS; it
+cannot say which QEMU subsystem prints it. Its rodata neighbours in the QEMU
+binary are `../audio/audio.c` and the audiodev messages, so the 13M are AUDIO
+frames -- about 274 s at 48 kHz of a started stream nobody serviced.
+
+**Localised** by diffing the stall capture against a passing boot of the same
+tree: joey was stuck INSIDE the nocturne audio probe, waiting on it with
+`t_wait_pid_for(pid, 0, ..)`, which has no timeout.
+
+**The cause candidate, confirmed from code by both tracks independently:**
+
+- nocturned's cycle thread polls its IRQ handle while a stream plays.
+- `kernel/poll.c` has no arm for an IRQ object, so its default arm returns
+  POLLNVAL.
+- POLLNVAL counts as ready, so `t_poll` never sleeps and `irq_wait()` never runs.
+- Every pass therefore takes a trapping ISR MMIO read: a guest spin for as long as
+  sound plays.
+
+The false contract is libthyla-rs's `impl AsFd for Irq` ("the poll surface
+reports the fd as readable"), wrong since `98494dee`. nocturned is its only
+consumer, and main has no audio device at all.
+
+**Still unverified: the causal link** -- that the spin starves QEMU's main loop
+into the stall. aux's live witness came back INCONCLUSIVE because the sampler
+parsed the TIME column instead of %CPU, and aux said so plainly rather than
+reading a number off the wrong column.
+
+**The operator re-ruled, four times, all on the recommended option:**
+
+1. Witness, fix, re-gate.
+2. A USERSPACE fix: a dedicated IRQ thread, with `impl AsFd for Irq` REMOVED so
+   polling an IRQ handle is a compile error.
+3. Fold haul round 4's re-review into one review of the fix commit.
+4. Main un-parks to land that fix, and aux re-merges.
+
+### Sep 14 -- haul round 4: a hang the obvious fix would not have closed
+
+**F1 [P1].** haul hung forever when a server hung up right after the handshake.
+`SYS_ATTACH_9P` reads Rversion from a pipe with no deadline. When the server
+hung up, the down pump ended -- and it closed nothing. The pipe's write end
+stayed open, the kernel never saw EOF, and haul's main thread sat inside the
+syscall with nothing left alive to notice. **F2 [P3]:** the token buffer was
+wiped only on the success path.
+
+**The round's model record was wrong.** The report said Fable end to end. The
+transcript has a `"type":"fallback"` record at line 41 and claude-opus-4-8 for the
+remaining ~70%, F1's reasoning included. A subagent's own MODEL lines cannot see
+that; only the transcript can.
+
+**Two proposed fixes were wrong before the right one:**
+
+- **The prosecutor's** was a STOPPED check before the attach. Main reaches the
+  syscall microseconds after spawning the pumps, long before the down pump can see
+  EOF through netd, so the check loses the race it exists to win.
+- **Mine** (pre-compaction) was "a dying pump closes only the pipe end it
+  exclusively owns". Right for the DOWN pump, wrong for the UP pump. Closing
+  `c2s_rd` sends the kernel's next write into `devpipe_write`'s read-EOF arm,
+  which posts a `pipe` note to whichever Proc issued the 9P call: the open
+  `bug_pipe_transport_note_on_dead_reader`, re-armed by a fix. It was caught by
+  reading the CNBFRAME arm BEFORE editing. The close buys no liveness either,
+  because a call is stuck only while its REPLY direction is.
+
+**So the landed rule is asymmetric.** The down pump records STOP_DOWN, closes
+`s2c_wr` -- the one fd with exactly one user -- and exits. The up pump closes
+nothing. Whether the up pump can die ALONE inside a synchronous call was argued
+from each of its exit arms, and the argument is written at `finish_down`, where
+the next reader will look. netd's `hangup` turned out to be a send-side FIN
+only, so it could not have been the up pump's way to wake the down pump.
+
+**S3 lived at FOUR sites, and the self-audit had named one.** The stale claim was
+"a spawned child cannot see the mount", closed at `e643b5f4` days earlier. Besides
+the main.rs comment, it survived in two blocks of `haul-npxf.exp` and in
+HAUL-DESIGN section 4, which also cited a "section 8.2" the document does not
+have. A claim outlives the fix that refutes it at every site nobody greps.
+
+**Regression coverage, built to run everywhere:**
+
+- `haul-hangup.exp` (new) needs no npxf server: a host peer accepts and FINs, and
+  plain 9P reaches the attach with nothing in between.
+- The encrypted twin in `haul-npxf.exp` relays the three flights (40/64/32 B)
+  byte-exactly to the real server, then FINs.
+- Both assert the peer's own log.
+- The peer FINs rather than resets. Closing with haul's first record unread would
+  RST, which is a different netd path.
+
+**Measured, pre-fix.** The image is 48dc6115's haul, built with the same
+`--config ci` profile.
+
+- **`haul-hangup` FAILED exactly as the defect predicts.** haul's last line was
+  `pumps up; attaching`, and the attach assertion timed out at 90 s. The peer
+  logged `STILL OPEN 10s after our FIN (21 bytes arrived)`: 21 bytes is the plain
+  Tversion, sent into a connection the server had already closed.
+- **`haul-npxf` passed its listing, argv and new read legs, and FAILED the relay
+  leg the same way.** The relay logged 40/64/32 B relayed, then
+  `STILL OPEN ... (41 bytes arrived)`: the sealed Tversion record
+  (4 + 21 + 16 = 41).
+
+The byte counts are what show each run failed at the attach and nowhere else.
+**Post-fix**, same profile: both scenarios PASS on the first attempt
+(haul-hangup 29 s, haul-npxf 30 s). In both hang-up legs haul prints
+`attach (the server closed without replying)` and hands the shell back. Also:
+`test.sh` 1522/1522, haul's host tests 50 passed + 1 ignored, and the KAT's
+23 vectors PASS.
+
+**The new tests had a race of their own, caught by one line in the gate's
+output.** The first post-fix run passed both scenarios, and its timing table said
+`scenarios OVERLAPPED 1.94x`. LS-CI runs scenarios in parallel, and each new leg
+chose its host port with check-then-use: `lc_port_bindable`, then start the peer
+on the port it found. Two scenarios checking at the same moment get the same
+answer, and the second peer's bind fails -- a false red. It passed only because
+haul-npxf reaches its relay leg about 20 s after haul-hangup's peer has already
+exited.
+
+Fixed by letting the peer bind port 0 and log the port it got. A self-test with
+two simultaneous peers got distinct ports. The discrimination was then re-run in
+both directions on the final files, so the numbers above describe what is
+committed.
+
+### Sep 14 -- the Mac, and a lease both agents believed in
+
+aux's lease on the Mac had EXPIRED 88 h earlier on the board, while both agents
+still spoke as if aux held it. My `hold` was refused ("ask them first"), aux
+released within minutes, and the lease went clean. The board is what a fresh
+context trusts, so an agreement that lives only in a call transcript is not a
+lease.
+
+### Sep 14 -- round 5, and the review that re-derived the author's blind spot
+
+**The first review spawn died at step 1** when the session's login expired. That is not a model event, so it was re-spawned on Fable.
+
+**The re-spawn came back clean**: 0 P0 / 0 P1 / 0 P2 / 2 P3. Both P3s are closed without a change: one is cosmetic, the other is the inherited back-pressure gap. Every citation I spot-checked held.
+
+**Its model record was wrong, the third time in this arc.** Its MODEL(end) said Fable. Its transcript shows:
+
+- Fable 5.1 made 41 of the 47 tool calls.
+- At line 141 the fallback lands as a CONTENT BLOCK inside an assistant message: `{"type":"fallback","from":...,"to":...}`.
+- `claude-opus-4-8` made the last six calls and wrote the whole report.
+
+My first check parsed the JSON, looked for a top-level `type == "fallback"`, found none, and would have credited the round to Fable. A raw grep of the string disagreed, and a per-line tally of the `"model"` field located the switch. So the check needs both the grep and the tally, and the parse is the part that lied.
+
+**The finding that mattered was the one it did not make.** My parallel self-audit found SA-1: haul's command form assumed fds 0-2 are open.
+
+- The kernel hands out the lowest free fd.
+- joey starts some programs with no stdio.
+- So a haul launched that way puts its connection's own fds in slots 0-2, and the command it runs inherits the connection.
+
+The review's withdrawal read "the child never inherits `s2c_wr`". It derived that from the child's three stdio ROLES and never asked what the NUMBERS were -- the same step my commit doc had skipped. The parallel self-audit exists for this reason: the prosecutor re-derived the author's claim and reached the author's conclusion, blind spot included.
+
+**Two more things fell out of chasing it:**
+
+- **The first scoping of SA-1 was too narrow.** I scoped it to the pipe ends. Walking fd numbers showed the TCP fds are opened first and take the empty slots before the pipes do, so the check belongs at the top of `run()`, before anything is opened.
+- **Refusing everywhere would have been wrong.** The park form spawns nothing, and a daemon-style launcher -- the one that produces empty stdio -- runs the park form. So only the command form is refused.
+
+**A kernel item came in from the other track.** aux's review of their nocturned fix found a lost-wakeup window: an IRQ thread that waits while a different thread reads the ISR re-blocks while the line is still high. Following it down:
+
+- `irqfwd.c` forces every claimed SPI to edge, on an assumption written for virtio-MMIO, with level support deferred "when level-triggered userspace IRQs become a real use case".
+- virtio-PCI INTx is level, and userspace PCI drivers now exist. The deferral's trigger fired and nobody flipped it.
+- Claims are exclusive per INTID, and 6-7 PCI functions share QEMU virt's 4 INTx SPIs.
+
+aux assigned it to the kernel track and main took it (`bug_irqfwd_forces_edge_on_level_intx`). The heritage fix, mask-on-fire plus ack, is an IRQ ABI change and goes to the operator as a design fork.
+
+**Measured SA-1, both directions.** Same `--config ci` profile, and the new launcher and scenario on both sides. On `83ef2426`'s haul, the hang-up leg PASSES and the stdio leg FAILS. With the fix, both PASS and haul prints the refusal. Alongside: `test.sh` 1522/1522, and `haul-npxf` all five legs.
+
+**The pre-fix failure was not the one I predicted, and the difference is a fact about the harness.** I predicted `haul: connect`, because the peer had already exited. The measured line was `haul: attach (the server closed without replying)`: the guest's connect to a host port nothing listened on SUCCEEDED, and the attach read EOF. That is consistent with slirp completing the guest's TCP handshake before it learns the host refused.
+
+The leg still discriminates, because its hard-fail arm names both lines. But the scenario's own header claimed that "a connect that never reached the peer fails the leg at once", and under slirp it cannot. A dead peer and a hung-up peer print the same line, so the first leg's check on the peer's OWN log is the only thing that tells them apart. That check was load-bearing all along, and had been described as a sanity check.
+
+**Two false starts first, both from the instruments, not the code:**
+- The harness killed the first run for LOW MEMORY before it logged a line. The operator freed memory.
+- The second hung for 20 minutes on its first command: `thyla-pi.local` had stopped resolving, and the token `ssh` had no connect timeout. The signature is a log that stays EMPTY while no child process does any work. The run script now goes through `thyla-pi-cf`, with timeouts.
+
+**The IRQ measurement closed on the same boot.** `/hw/pci` from a login shell gave net 0x24, keyboard 0x25, tablet 0x26, gpu 0x23, rng 0x24, mouse 0x25 and the 9P function 0x26. That is exactly INTID = 35 + (slot mod 4): net/rng share 36, keyboard/mouse share 37, tablet/9P share 38, and the gpu is alone on 35. The derivation from one anchor point was right, and it is now a measurement rather than an inference.
+
+### Owed at the end of the run
+
+- **ROUND 6, narrow, on Fable.** Round 5 -- the one review of `83ef2426` --
+  closed clean, but it fell back to Opus 4.8 before writing its report. So round
+  6 covers the SA-1 commit, plus a Fable re-derivation of round 5's
+  post-fallback surfaces: the KAT legs, the readiness triangle and
+  `write_exact`, and the pipe-note premise.
+- **The IRQ design fork, for the operator.** `irqfwd.c` forces edge on level
+  INTx, and the fix -- mask-on-fire plus ack -- is an ABI change. See
+  `bug_irqfwd_forces_edge_on_level_intx`.
+- **The standing back-pressure gap.** No test makes a TCP write return 0, so
+  `write_exact`'s stall bound and its POLLOUT wait have still never executed.
+- **S1 [P3]**, deferred as documentation only: haul's pre-auth write bound
+  rests on netd's `TCP_TX_BUF`, which nothing asserts.
+- **The merge (aux's).** It needs the nocturned fix (an IRQ thread, and
+  `impl AsFd for Irq` removed), joey's bounded probe wait, and a re-gate; aux then
+  re-merges main. **The causal link** -- nocturned's spin starving QEMU into the
+  stall -- has still not been witnessed live.
+- **The ut `mount` diagnosis**: one line, `mount /srv/ptyfs /tmp/m; echo $errstr`.
+- **Vault**: a haul dossier (call 0082), and the syscall-abi/vivarium dossier
+  correction (call 0087).
+- **Closed this run**: the codeberg push (both mirrors at `48dc6115` on Sep 10),
+  haul round 4's F1/F2/S3 (`83ef2426`), and SA-1 (the commit after it).
+
+---
+
 ## Run 46m (2026-09-10, Opus 5 max) -- the audit close: ten findings, and a lexer bug the whole tree had written around
 
 **Where it sits.** Run 46l built haul's npxf channel and got an audit back that

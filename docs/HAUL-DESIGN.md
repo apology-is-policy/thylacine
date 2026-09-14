@@ -83,9 +83,9 @@ either runs `cmd` (which sees the tree, being a child — §4.3) or parks for th
 mount's lifetime. haul *is* the transport, so exiting while someone is walking
 the tree would tear the session down under them.
 
-### 2.1 The two orderings that matter
+### 2.1 The orderings that matter
 
-Both of these are the kind of thing that produces a hang rather than an error,
+All three are the kind of thing that produces a hang rather than an error,
 which is why they are stated here rather than left to the code.
 
 **The handshake runs BEFORE the pumps.** It is a strictly ordered three-flight
@@ -98,6 +98,39 @@ Tattach *synchronously inside the syscall*, so it blocks until replies arrive.
 Nothing can reply unless the pumps are already running. Reversing these
 deadlocks — the kernel waits for an Rversion that only an unspawned thread could
 deliver — and a deadlock at mount time is much harder to read than a refusal.
+
+**When the reply pump dies, it closes its pipe end on the way out — and nothing
+else closes anything.** The same synchronous attach reads its replies from `s2c`
+with no deadline, so a reply that can no longer arrive is waited for until
+`s2c`'s write end closes. The main thread cannot close it: it is blocked inside
+the very call that is waiting. So the down pump, the only writer of that end,
+records which side ended and then closes it; the kernel reads EOF, latches the
+session dead and fails the attach. Before this rule, a server that hung up
+straight after the handshake left haul inside `SYS_ATTACH_9P` for good, and
+`-v`'s post-mount listing had the same hole.
+
+The rule is shaped by what a close can break. A thread closing an fd another
+thread is using lets the number be recycled under that thread's next call, so
+neither pump may close the TCP fd they share. The up pump's pipe end is its own,
+but closing it would make the kernel's next send post a `pipe` note to whichever
+Proc issued the call — and nothing needs it, since a call is stuck only while its
+*reply* direction is. Why the up pump cannot die alone inside the synchronous
+calls is argued at `finish_down` in `usr/haul/src/main.rs`; outside them, the
+main thread's loops watch for either pump stopping.
+
+**The command form refuses to start without stdio.** "`s2c_wr` has one user"
+depends on fd NUMBERS, not roles. The kernel hands out the lowest free fd, so
+a haul started with slots 0-2 empty -- as a launcher that passes no stdio would
+start it -- puts its connection's ctl, data and ready fds, then the pipe ends,
+into those slots. A spawned command inherits exactly slots 0-2 as its stdio, so
+it would inherit the connection: its output would go into the channel or the
+kernel's reply pipe, and a child holding `s2c_wr` would defeat the down pump's
+EOF. So `run()` checks fds 0-2 before it opens anything, and refuses the command
+form if any is closed. The park form spawns nothing and is exempt, which matters
+because a daemon-style launcher -- the kind that produces empty stdio -- would run
+the park form. This was found in the self-audit of the round-4 fix. The round-5
+review did not raise it: its "the child never inherits `s2c_wr`" derived the
+child's fds from their roles and never asked what the numbers were.
 
 ### 2.2 Framing
 
@@ -261,14 +294,26 @@ at `ServerAuth` — so it discriminates.
 proves the *protocol*; only a boot proves the *plumbing* — the pipes, the pumps,
 the synchronous attach and the mount. The scenario asserts the mount line
 including the mode word (a haul that silently fell back to plaintext would
-otherwise print an equally cheerful line), then a **directory listing** of the
-remote tree through the encrypted channel.
+otherwise print an equally cheerful line), a **directory listing** of the remote
+tree through the encrypted channel, and a spawned child **reading a file's
+content** through the mount — the leg that exercises dev9p's fallback from the
+fused `Twalkgetattr`, which npxf does not implement (§4.3).
 
-It does NOT read file content, and section 8.2 explains why: the content read is
-commented out pending the spawn-inheritance question. This section claimed it
-did for a while, contradicting 8.2 two hundred lines below — worth naming
-because this is the section a reader consults to learn what the E2E proves, so
-its being the wrong one of the two is the expensive direction.
+This paragraph used to say the content read was commented out pending a
+spawn-inheritance question, and it cited a "section 8.2" this document does not
+have. Both were stale: §4.3 closed that question at `e643b5f4`, and the read
+went unasserted for days after it became possible. A section a reader consults
+to learn what the E2E proves is the expensive place for a claim to rot.
+
+**And the hang-up legs.** A server that hangs up must make haul fail, not hang
+(§2.1). `tools/interactive/haul-hangup.exp` needs no external server — a host
+peer accepts and hangs up, and plain 9P reaches the attach with nothing in the
+way — so it runs in every fleet. `haul-npxf.exp`'s last leg is the encrypted
+twin: a host relay passes npxf's three flights through byte-exactly and hangs up
+after them, so the handshake genuinely succeeds and it is the AEAD record
+reader's EOF that must end the attach. Both drive
+`tools/interactive/haul-hangup-peer.py` and assert its log, so a peer that
+failed some other way cannot pass for the fix.
 
 ### 4.1 Running it
 
