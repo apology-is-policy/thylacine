@@ -386,6 +386,97 @@ expect {
 }
 lc_pass "session-instrument: the footer shows RUNNING, EXIT 0 and EXIT 1 from the tile's own facts (8.2 / 14.3)"
 
+# --- A divider drag reaches the tiles as a resize (9.2 / I-6) ------------------
+# The welcome root is [tour | shell] (tour-left, shell-right: `halcyon
+# welcome`'s shape); the track sits after the first child's frame, the
+# pair's usable extent P is the two frames' widths (each header's width
+# plus the frame), the full extent F adds the 7 px track. The two headers'
+# say lines carry their minted rects (both minted after the welcome split,
+# so they are current); the order is read off their x, never assumed, and
+# the second's start is checked against the track before anything is
+# pressed. A drag 100 px right re-lays both tiles through the existing
+# CONFIGURE -> fit -> pts winsize path: halcyond says each fit with the new
+# surface width (the frame less 2), and the shell's prompt count -- read at
+# the prompt column MOVED by the same delta -- must NOT grow: r2 made a
+# winch a silent note, so the prompt stays where it was.
+set lines [split [exec grep -a {halcyond: session tile leaf=[0-9]* spawned pid=} $transcript] "\n"]
+set T [lindex [regexp -inline {leaf=(\d+) spawned} [lindex $lines 1]] 1]
+if {$T eq "" || $T eq $A} { lc_fail "no second tile (the tour) in the transcript (leaves: $lines)" }
+set ha [header_of $A]
+set ht [header_of $T]
+if {[lindex $ht 0] < [lindex $ha 0]} {
+    set h1 $ht; set h2 $ha; set L1 $T; set L2 $A
+} else {
+    set h1 $ha; set h2 $ht; set L1 $A; set L2 $T
+}
+set origin 3
+set first [expr {[lindex $h1 2] + 2}]
+set second [expr {[lindex $h2 2] + 2}]
+set P [expr {$first + $second}]
+set F [expr {$P + 7}]
+set track [expr {$origin + $first}]
+if {[lindex $h1 0] != $origin + 1} { lc_fail "the first child's header does not start at the pad plus the frame ([lindex $h1 0] vs [expr {$origin + 1}])" }
+if {[lindex $h2 0] - 1 != $track + 7} { lc_fail "the second child's frame does not start after the first's track ([lindex $h2 0] - 1 vs [expr {$track + 7}]; headers $ha / $ht)" }
+set ty [expr {(34 + $H - 25) / 2}]
+set pre [prompt_counts $cx $ry0 $ry1]
+set p2 [expr {$track + 3 + 100}]
+set a2 [expr {(2 * ($p2 - $origin) * $P + $F) / (2 * $F)}]
+set delta [expr {$a2 - $first}]
+ptr_to [expr {$track + 3}] $ty
+ptr_op "btn left down"
+set timeout 30
+expect {
+    -re {tapestryd: divider drag start pane (\d+) track 0 at} {}
+    timeout { lc_fail "the press on the welcome's track at x=[expr {$track + 3}] did not start a drag (headers $ha / $ht)" }
+    eof     { lc_fail "EOF waiting for the drag start" }
+}
+ptr_to $p2 $ty
+ptr_op "btn left up"
+# The fits land DURING the drag (one relayout per frame fans the CONFIGUREs
+# before the release), so the three witnesses -- both fits and the drag's
+# end -- are one alternation, never a sequence (a sequence's first expect
+# would swallow the fits with the end line).
+set fit1 0; set fit2 0; set ended 0; set tries 0
+while {(!$fit1 || !$fit2 || !$ended) && $tries < 12} {
+    incr tries
+    expect {
+        -re "halcyond: session tile leaf=($L1|$L2) fit (\\d+)x(\\d+) px -> (\\d+) cols (\\d+) rows" {
+            set who $expect_out(1,string); set fw $expect_out(2,string)
+            if {$who eq $L1} {
+                if {$fw != $a2 - 2} { lc_fail "the first tile (leaf $L1) fit at $fw wide, expected [expr {$a2 - 2}] (the frame less 2)" }
+                set fit1 1
+            } else {
+                if {$fw != $P - $a2 - 2} { lc_fail "the second tile (leaf $L2) fit at $fw wide, expected [expr {$P - $a2 - 2}]" }
+                set fit2 1
+            }
+        }
+        -re "tapestryd: divider drag end pane (\\d+) track 0 release -> (\\d+):(\\d+)" {
+            if {$expect_out(2,string) != $a2 || $expect_out(3,string) != $P - $a2} {
+                lc_fail "the drag ended at $expect_out(2,string):$expect_out(3,string), expected $a2:[expr {$P - $a2}] (origin $origin, P $P, F $F)"
+            }
+            set ended 1
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction during the drag" }
+        timeout { lc_fail "the drag's witnesses did not all arrive (first fit $fit1, second fit $fit2, end $ended)" }
+        eof     { lc_fail "qemu exited during the drag" }
+    }
+}
+# The shell's prompt column moved with its frame iff the shell is the
+# second child (the first child's origin is the pad, unmoved).
+set cx2 [expr {$L2 eq $A ? $cx + $delta : $cx}]
+after 1500
+set post ""
+for {set i 0} {$i < 8} {incr i} {
+    set post [prompt_counts $cx2 $ry0 $ry1]
+    if {[lindex $post 0] == [lindex $pre 0]} break
+    after 500
+}
+if {[lindex $post 0] != [lindex $pre 0]} { lc_fail "the shell's prompt count changed across the drag's resizes ($pre -> $post at x=$cx2): the winch moved the prompt" }
+if {[lindex $post 3] != 0 || [lindex $post 5] != 0} { lc_fail "amber beside the lambda after the drag ($post)" }
+set cx $cx2
+lc_pass "session-instrument: a divider drag re-fits both tiles through the CONFIGURE path (first [expr {$a2 - 2}] wide, second [expr {$P - $a2 - 2}]) and the shell's prompt stays put across the winch (9.2 / r2)"
+ptr_to [expr {$W / 2}] [expr {$H / 2}]
+
 # --- SPLIT H on the rail: the session splits under its own authority ------------
 after 1000
 set shc [zone_centre [dict get $rz splith]]

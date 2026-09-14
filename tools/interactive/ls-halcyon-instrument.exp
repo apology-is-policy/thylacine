@@ -465,6 +465,117 @@ set v [want_dom $px0 [expr {38 + 20}] [expr {$px0 + 120}] [expr {38 + 40}] 11 13
 if {[lindex $v 0] == 0} { lc_fail "the placard's title band has no ink on it (off=0): no `Empty pane` was painted" }
 lc_pass "instrument: the empty pane paints its placard (14.6: text at the inset, no header, no action here)"
 
+# --- Dividers (9.2 / I-6): hover, the drag, the clamp, Escape, double-click --
+# The root's track sits on $aend..$aend+6 (the split above); its rule is the
+# 2 px of `structure` at offset 2 (checked above). The pointer over it paints
+# the rule `amber_muted` (129 120 93); a primary press captures the pointer
+# for the split and the rule turns `amber` (199 185 139); motion moves the
+# boundary by the mockup's ratio -- r = (p - origin) / F over the FULL extent
+# F = W - 6 including the track, the first child's extent a = round(r * P)
+# with P = W - 13 the pair's usable extent (round half up) -- so the track's
+# leading column lands at 3 + a, the pointer riding it r * 7 in. The clamps:
+# the band 22..78 % of P where it is tighter than the minima (it is, at this
+# width); Escape ends the drag at the current ratio and its release is
+# swallowed; a double-click equalises the pair (the track back at $aend).
+set ty [expr {(34 + $H - 25) / 2}]
+set P [expr {$W - 13}]
+set F [expr {$W - 6}]
+proc drag_a {p} {
+    global P F
+    return [expr {(2 * ($p - 3) * $P + $F) / (2 * $F)}]
+}
+proc want_drag_end {reason a what} {
+    global P timeout lc_cmd_timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -re "tapestryd: divider drag end pane (\\d+) track 0 $reason -> (\\d+):(\\d+)" {
+            if {$expect_out(2,string) != $a || $expect_out(3,string) != $P - $a} {
+                lc_fail "$what: the drag ended at $expect_out(2,string):$expect_out(3,string), expected $a:[expr {$P - $a}]"
+            }
+            lc_step "$what: drag end ($reason) at $a:[expr {$P - $a}]"
+        }
+        timeout { lc_fail "$what: no drag end ($reason)" }
+        eof     { lc_fail "$what: EOF waiting for the drag end" }
+    }
+}
+set tx [expr {$aend + 3}]
+ptr_to $tx $ty
+want_dom [expr {$aend + 2}] 60 [expr {$aend + 4}] [expr {$H - 60}] 129 120 93 "hover: the rule under the pointer is amber_muted" 0
+lc_pass "instrument: the pointer over the track paints its rule amber_muted (9.2)"
+ptr_op "btn left down"
+set timeout $lc_cmd_timeout
+expect {
+    -re {tapestryd: divider drag start pane (\d+) track 0 at (\d+),(\d+)} {
+        if {$expect_out(1,string) ne $root} { lc_fail "the drag captured pane $expect_out(1,string), expected the root $root" }
+    }
+    timeout { lc_fail "the press on the track did not start a drag" }
+    eof     { lc_fail "EOF waiting for the drag start" }
+}
+set p2 [expr {$tx + 100}]
+ptr_to $p2 $ty
+set a2 [drag_a $p2]
+set nx [expr {3 + $a2}]
+want_dom [expr {$nx + 2}] 60 [expr {$nx + 4}] [expr {$H - 60}] 199 185 139 "dragging: the rule is amber at the track that followed the pointer" 0
+ptr_op "btn left up"
+want_drag_end release $a2 "the drag"
+want_rect /dev/tapestry/pane/$root/dividers [list $nx 37 7 [expr {$H - 65}]] "the root's track followed the pointer by the mockup's ratio"
+want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 $a2 [expr {$H - 65}]] "the console pane grew to the pair's first extent"
+want_rect /dev/tapestry/pane/$empty/frame [list [expr {$nx + 7}] 37 [expr {$P - $a2}] [expr {$H - 65}]] "the empty pane shrank to the rest"
+# The weights ARE the extents now (5.2 as built at I-6): the dump says so.
+lc_send "cat /dev/tapestry/layout; pwd"
+set saw_w 0
+expect {
+    -re "\[\r\n\] *${leaf}\\*? leaf surface=\\d+ \\\[4,70,\\d+,\\d+\\\] w=$a2\[\r\n\]" { incr saw_w; exp_continue }
+    -re "\[\r\n\] *${empty}\\*? leaf empty \\\[0,0,0,0\\\] w=[expr {$P - $a2}]\[\r\n\]" { incr saw_w; exp_continue }
+    -re {[\r\n\\]/home/michael[\r\n]} {}
+    timeout { lc_fail "no answer reading the layout after the drag" }
+    eof     { lc_fail "EOF reading the layout after the drag" }
+}
+if {$saw_w != 2} { lc_fail "the dump does not carry the pair's extents as its weights ($a2 and [expr {$P - $a2}]; saw $saw_w of 2)" }
+# The console's tile followed as a CONFIGURE (the existing path).
+want_rect /dev/tapestry/pane/$leaf/geometry [list 4 70 [expr {$a2 - 2}] [expr {$H - 99}]] "the console's body is the grown frame less the frame and the header"
+lc_pass "instrument: a drag on the root track moves the boundary by the mockup's ratio; the weights become the extents; the release ends the capture (9.2 / 5.2)"
+# The clamp: far right stops at 78 % of P (tighter than the 260 minimum here).
+ptr_to [expr {$nx + 3}] $ty
+ptr_op "btn left down"
+ptr_to [expr {$W - 40}] $ty
+ptr_op "btn left up"
+set amax [expr {78 * $P / 100}]
+want_drag_end release $amax "the clamp"
+want_rect /dev/tapestry/pane/$root/dividers [list [expr {3 + $amax}] 37 7 [expr {$H - 65}]] "the track held at 78 % of the pair"
+lc_pass "instrument: the drag is clamped to the mockup's band (78 % of $P = $amax) (5.2 / 9.2)"
+# Escape ends the drag where it is (no rollback); the release after it is
+# the compositor's to swallow, nothing under the pointer sees it.
+set tx3 [expr {3 + $amax + 3}]
+ptr_to $tx3 $ty
+ptr_op "btn left down"
+set p3 [expr {$tx3 - 300}]
+ptr_to $p3 $ty
+set a3 [drag_a $p3]
+hkey "esc"
+want_drag_end esc $a3 "Escape"
+ptr_op "btn left up"
+expect {
+    -re {tapestryd: divider drag release swallowed \(btn 272\)} {}
+    timeout { lc_fail "the release after Escape was not swallowed" }
+    eof     { lc_fail "EOF waiting for the swallowed release" }
+}
+want_rect /dev/tapestry/pane/$root/dividers [list [expr {3 + $a3}] 37 7 [expr {$H - 65}]] "the track stays where Escape found it"
+lc_pass "instrument: Escape ends the drag at the current ratio and the trailing release is swallowed (9.2)"
+# Double-click: the pair equalised -- P is odd at this width, so the first
+# child takes (P + 1) / 2 and the track is back at $aend.
+ptr_to [expr {3 + $a3 + 3}] $ty
+ptr_op "dblclick left"
+expect {
+    -re "tapestryd: divider double-click pane $root track 0 -> equal\[\r\n\]" {}
+    timeout { lc_fail "the double-click did not equalise the pair" }
+    eof     { lc_fail "EOF waiting for the double-click" }
+}
+want_rect /dev/tapestry/pane/$root/dividers [list $aend 37 7 [expr {$H - 65}]] "the track back at the equal division"
+want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$aend - 3}] [expr {$H - 65}]] "the console pane at half again"
+lc_pass "instrument: a double-click on the track restores equal weights (9.2)"
+ptr_to [expr {$W / 2}] [expr {$H / 2}]
+
 # --- Zoom (5.6): the workspace between the rails, frame-less ----------------
 hkey "meta_l+f"
 want_rect /dev/tapestry/pane/$empty/geometry [list 0 34 $W [expr {$H - 59}]] "the zoomed tile fills the workspace"

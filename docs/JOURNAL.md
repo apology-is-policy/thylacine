@@ -684,6 +684,153 @@ tree, not a pattern) and relaunched on the fixed image.
 Binary: 2,140,744 → 2,785,000 bytes (+644 KB, the three Plex cuts and the
 two subsets; accepted at §7.1). Host: halcyond 228 → 235.
 
+### I-6: dividers -- a capture the compositor owns, weights that became the extents, and a double-click in one QMP session
+
+**What it was for.** HALCYON-INSTRUMENT 9.2 asks for the mockup's divider
+behaviour on our plane: hover, a press that captures the pointer for the
+split, motion that sets the two adjacent weights from the pointer's
+position over the FULL extent including the track, the `0.22..0.78`
+clamp and the minima, a relayout coalesced to the frame, and a capture
+that ends on release, Escape, a modal, the split's retirement or logout.
+The prep note (`scratchpad/i6-prep.md`) listed seven design questions;
+the operator is away and the standing authorization applies, so each was
+settled to the source's behaviour and recorded in 9.2 as built.
+
+**The one decision that was not in the prep note: the weights become the
+extents.** A `u16` weight per child with a sum-normalised division has no
+resolution to speak of when the container's weights are the defaults
+(`1:1` gives three positions); scaling the container up by an integer
+keeps the neighbours exact but degrades in a corner (a sibling already at
+65535). The answer that has no corner: after a drag, every divided
+child's weight IS its pixel extent along the axis, with the pair's two
+changed. That vector is a fixed point of the carve's flex rule -- the
+extents sum to the usable extent and each clears its minimum after the
+clamp, so nothing freezes and nothing re-snaps -- and the boundary lands
+exactly on the pointer's pixel while every neighbour keeps its extent to
+the pixel, in a container of any arity. `pane::tests::a_drag_moves_the_
+track_and_the_weights_become_the_extents` pins it on the reference root:
+100 px right of the track's centre puts the boundary at 837 (834 + the
+origin), the column's own 49:51 untouched and its track on the same rows.
+
+**The ratio on the pair's frame.** The source has only binary splits; ours
+are N-ary. `r = (pos - origin) / F` is computed on the two adjacent
+children plus the track between them (`F`), the first's new extent
+`round(r * P)` over the pair's usable extent (`P`) -- for two children that
+IS the mockup's `first = r * (E - 7)`, and the pointer rides the track `r
+* t` in exactly as the source's flex result puts it (the first motion event
+in the mockup itself moves the boundary by up to a pixel, since its ratio
+is the pointer's and not the track's: `drag_pair(3, 735, 692, 7, .., 741)`
+= 734, the reference's 735 less one). The band applies to the pair, the
+minima per child along the axis, the tighter side winning; a pair in the
+carve's overflow returns None and the drag is refused with nothing changed
+(`carve::tests::a_drag_is_clamped_by_the_tighter_of_the_ratio_band_and_
+the_minima`, the overflow at 519 for 260 + 260).
+
+**The capture's ends, and one that is not in 9.2.** Release, Escape (at the
+current ratio -- the source's `activeDragCancel` is its `end`, no
+rollback), a modal opening, the split's retirement and logout are 9.2's;
+a Super chord is the sixth, ending the drag BEFORE it acts, for the same
+reason the menu grab yields to a chord: a structural chord over a live
+capture would race the tree the capture holds. The retirement is judged
+by public id at every touch and at every reconcile (`drag_valid`), so a
+logout that collapses the tree ends the capture in the reconcile the
+retire runs, with no relayout owed. A release after any end is the
+compositor's to swallow (`OWNER_DRAG` in the button-owner table, rejected
+by `owner_unpack` like the click-away sentinel), so nothing under the
+pointer ever sees a release whose press it never saw -- the H-3c round's
+F1 rule, kept.
+
+**The frame cadence, and the frozen clock.** Motion records a position;
+`frame_tick` lays it out at most once; the release and Escape lay the
+final one out themselves. The last is not redundancy: under test-mode the
+frame clock is frozen and ticks only on `tick` writes, so a drag whose
+final position waited for a tick would never land there.
+
+**The gate's double-click needed the tool, not the compositor.** The
+window is 500 ms press to press. `tools/qmp-sendtext.sh -p` sends ONE
+pointer op per process, and a process spawn plus a QMP round trip per
+edge is ~100 ms each under a quiet host and unbounded under a loud one --
+a gate that double-clicked in four spawns would have been a timing gate
+in disguise (the contention class). The tool grew `dblclick left|right|
+middle`: four edges in one QMP session, milliseconds apart. The console
+gate then drives five legs on the split it already makes: hover
+(`amber_muted` at the rule), the drag (the rule `amber` at the track that
+followed the pointer WHILE dragging, then the `dividers` / `frame` /
+`geometry` files and the dump's `w=` at the extents), the 78 % clamp,
+Escape with its swallowed release, and the double-click back to the
+equal division. The session gate drags the welcome's track and reads both
+tiles' `fit` lines (a new test-mode say at the one place a CONFIGURE
+becomes the pts winsize) and the shell's prompt count unchanged across
+the winch -- the r2 silent-note fix's second witness.
+
+**Three round-1 items landed with it.** A-F1's owed half: `mode` and `move`
+(verb and chord) are judged on a CLONE of the tree before they act
+(`Layout::fits_after`) and refused `ENOMEM` only when they would push a
+tree past the minima it clears today -- a tree already past them stays
+mutable, because the moves that cure an overflow are also mutations
+(`a_mutation_that_would_create_an_overflow_is_judged_on_a_copy`: the
+reference root turned vertical needs 505 rows, refused in 394, fitting in
+835, the tree's epoch untouched by the refusal). A-F6: the chrome bind's
+judgement is one function, `pane::chrome_bind_admitted`, called by the
+create arm and by `reap_orphan_chrome` -- a session's header over a tile
+that is no longer the session's is orphaned, and because the mint judges
+the occupant with the same function the re-mint is refused where the reap
+orphaned; halcyond's chromeset already says a failed mint once per pane
+and retries per layout epoch, so the posture is bounded. A-F7: the
+renderer's and the session's allowance is two per pane, the pool sized
+for both, and `size_of::<Comp>()` is pinned under a quarter of the user
+stack as a compile-time assertion -- `server.rs` is binary-only, so a
+`#[test]` there would never have run; the first draft had one, and the
+host suite's count (40, not 42) is what said so.
+
+**Caught by the self-audit, not the gate (and it would have been the
+gate).** The first draft of the chrome reap wrote the renderer's exemption
+as "not a session principal and not 0" -- a claim about the principal's
+VALUE. The renderer's principal is `T_PRINCIPAL_SYSTEM`, not 0, so that
+condition orphaned every renderer header at every reconcile; the console
+gate would have failed at its first header. The admission keys the
+exemption on a PROPERTY -- the peer is the renderer -- and the reap now
+keys on the same class from the surface side (a declared session's conn
+with a session principal); the first gate run was killed two minutes in
+and relaunched on the fix. Two more from the same read: the double-click
+wanted a position slop (a quick re-grab 100 px along the track after a
+drag is a drag, not a reset; 4 px), and the per-motion track hit-test
+allocated a `Vec` where `surface_at` allocates nothing -- the second run
+was killed for that one too. Three launches for one green: the read-only
+self-audit during a bake is cheaper than the bake.
+
+**One silence, unexplained, recorded as such.** The first full gate run
+after the reap fix passed the hover, the drag and the clamp legs and then
+went completely silent: after the clamp drag's `cat` answered `991 37 7
+735`, the Escape leg's pointer move, press, move and Esc produced not one
+line from the guest in 90 s -- not even the `key dropped (no focused
+surface)` say the Esc earns under test-mode when the focused pane is the
+empty leaf. A repro scenario (the gate up to that leg, plus a 9P liveness
+probe and a `/proc/<pid>/kstack` read of tapestryd on a stall) ran the
+identical QMP sequence five times on the same image and every run
+captured, ended on Esc at 687:580 and swallowed the trailing release. The
+GPU wait cannot lose its edge (the kernel latches a pending count and the
+GPU's INTx line is unshared here) and has a deadline that says so; the
+input path is poll-mode, so no IRQ. Two hypotheses stand undiscriminated:
+the events never reached the drain (a virtio-input drop when the eventq
+is starved of buffers -- this gate carries the heaviest pointer traffic of
+any scenario), or the serve loop stalled with no deadline in the console
+tile's re-fit that was in flight. A test-mode `divider hover` witness now
+sits BEFORE the repaint, so the next occurrence names the side; the memory
+file `bug_i6_console_gate_compositor_silent_once` carries the evidence and
+the reading order. It is not written as a flake, and the gates were not
+re-run to green: they were re-run with the witness in.
+
+**Deferred, labelled: I-6b.** The 840 minimum with a panning workspace
+(8.3) is a mechanism through every rect consumer, not a divider clamp; no
+display in the fleet or the gates is narrower than 1280, and under 840
+the carve's overflow arm already keeps every tile's data. Recorded in 8.3,
+12 and 13 for the operator's vote, with the drag's status texts (not
+shown -- no compositor-to-footer channel) beside it.
+
+**Posture.** libhalcyon 118 (3 new), tapestryd 41 (6 new); the guest build
+of tapestryd clean; the two gates' new legs in the run below.
+
 ### I-5 round 2: three prosecutors, one hang, and the pen that had to be shared
 
 **The round.** The batched Opus-5 prosecution over I-5a..d and the round-1

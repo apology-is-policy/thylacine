@@ -141,6 +141,64 @@ fn clamp_u32(v: u128) -> u32 {
     }
 }
 
+/// The mockup's ratio clamp on a divider drag (5.2 / 9.2), in percent of
+/// the pair's usable extent: the two-child shadow of the minima, kept as
+/// the drag clamp where it is tighter.
+pub const DRAG_RATIO_MIN_PCT: u32 = 22;
+pub const DRAG_RATIO_MAX_PCT: u32 = 78;
+
+/// A divider drag between two adjacent children (9.2). The pair's frame
+/// runs from `origin` (the first child's start) over `first + track +
+/// second` -- the FULL extent including the track, the mockup's `extent`
+/// -- and the pointer's position `pos` along the axis gives the ratio
+/// `r = (pos - origin) / F`; the first child's new extent is `r * P` with
+/// `P = first + second` (the mockup's `first = r * (E - t)`, so the
+/// pointer rides the track at `r * t` in), round half up. The result is
+/// clamped to `[22 %, 78 %]` of `P` and to the minima `[min_first, P -
+/// min_second]`, the tighter bound winning on each side. Returns the pair's
+/// new extents (`first' + second' = P`, the neighbours' extents untouched),
+/// or None when no extent satisfies both minima -- the pair is in the
+/// carve's overflow, and the drag is refused with nothing changed.
+pub fn drag_pair(
+    origin: u32,
+    first: u32,
+    second: u32,
+    track: u32,
+    min_first: u32,
+    min_second: u32,
+    pos: i64,
+) -> Option<(u32, u32)> {
+    let p = first as u64 + second as u64;
+    let f = p + track as u64;
+    if f == 0 {
+        return None;
+    }
+    let rel = (pos - origin as i64).clamp(0, f as i64) as u64;
+    let a = (2 * rel * p + f) / (2 * f);
+    clamp_first(p, a, min_first as u64, min_second as u64)
+}
+
+/// Double-click (9.2): the pair's extents equalised, round half up, under
+/// the same clamps as a drag; None in the overflow, as `drag_pair`.
+pub fn equalise_pair(first: u32, second: u32, min_first: u32, min_second: u32) -> Option<(u32, u32)> {
+    let p = first as u64 + second as u64;
+    clamp_first(p, p.div_ceil(2), min_first as u64, min_second as u64)
+}
+
+/// The drag clamp: `a` (the first child's wanted extent of the pair's `p`)
+/// held to the ratio band and the minima, tighter side winning.
+fn clamp_first(p: u64, a: u64, min_first: u64, min_second: u64) -> Option<(u32, u32)> {
+    let lo = (DRAG_RATIO_MIN_PCT as u64 * p).div_ceil(100);
+    let hi = (DRAG_RATIO_MAX_PCT as u64 * p) / 100;
+    let lo = lo.max(min_first);
+    let hi = hi.min(p.checked_sub(min_second)?);
+    if lo > hi {
+        return None;
+    }
+    let a = a.clamp(lo, hi);
+    Some((clamp_u32(a as u128), clamp_u32((p - a) as u128)))
+}
+
 /// The stack's header/body allocation (5.4) inside a frame's inner box
 /// (`inner_y`, `inner_h`): `n` tiles, `open` expanded, each header
 /// `header` tall (a collapsed tile's box, its separator inside it), the open
@@ -318,6 +376,64 @@ mod tests {
     #[test]
     fn weights_of_zero_count_as_one() {
         assert_eq!(split_spans(0, 107, 7, &[0, 0], &[0, 0]), split_spans(0, 107, 7, &[1, 1], &[0, 0]));
+    }
+
+    /// A drag on the reference root (9.2): the pointer at column 741 -- the
+    /// centre of the track that sits on 738..744 -- leaves the layout where
+    /// it is, because the mockup's ratio puts the pointer `r * t` into the
+    /// track; 100 px right moves the boundary by 100 less the track's share
+    /// (`(p - origin) * P / F`); and with the new extents as the weights the
+    /// carve reproduces the pair exactly (the weights ARE the extents: a
+    /// fixed point of the flex rule, so nothing re-snaps).
+    #[test]
+    fn a_drag_follows_the_pointer_by_the_mockups_ratio() {
+        // The reference root: 3 + [735 | 7 | 692] = 1437; P = 1427, F = 1434.
+        let (o, a, b, t) = (3u32, 735u32, 692u32, 7u32);
+        // At the track's centre: r = 738 / 1434, a' = 734.45 -> 734: the
+        // mockup itself moves the boundary by up to a pixel on the first
+        // motion event (its ratio is the pointer's, not the track's).
+        assert_eq!(drag_pair(o, a, b, t, 260, 260, 741), Some((734, 693)));
+        // 100 px to the right: r = 838 / 1434 -> a' = 833.96 -> 834.
+        assert_eq!(drag_pair(o, a, b, t, 260, 260, 841), Some((834, 593)));
+        // The extents as weights reproduce the pair exactly.
+        assert_eq!(split_spans(3, 1434, 7, &[834, 593], &[260, 260]), spans(&[(3, 837), (844, 1437)]));
+        // The pointer rides the track `r * t` in: the track's leading
+        // column is the pointer less round(r * 7) = 841 - 4.
+        assert_eq!(3 + 834, 841 - 4);
+        // Left of the origin and past the far end clamp to the band.
+        assert_eq!(drag_pair(o, a, b, t, 0, 0, -50), Some((314, 1113)));
+        assert_eq!(drag_pair(o, a, b, t, 0, 0, 9_999), Some((1113, 314)));
+    }
+
+    /// The clamps (5.2): the ratio band where it is tighter than the minima
+    /// (a wide pair), the minima where they are tighter (a narrow pair),
+    /// and None when the pair cannot hold both minima (the overflow).
+    #[test]
+    fn a_drag_is_clamped_by_the_tighter_of_the_ratio_band_and_the_minima() {
+        // P = 1427: 22 % = 313.94 -> 314 and 78 % = 1113.06 -> 1113 beat 260.
+        assert_eq!(drag_pair(3, 735, 692, 7, 260, 260, 100), Some((314, 1113)));
+        assert_eq!(drag_pair(3, 735, 692, 7, 260, 260, 2000), Some((1113, 314)));
+        // P = 600: 22 % = 132 < 260, so the minima win on both sides.
+        assert_eq!(drag_pair(0, 300, 300, 7, 260, 260, -1), Some((260, 340)));
+        assert_eq!(drag_pair(0, 300, 300, 7, 260, 260, 1000), Some((340, 260)));
+        // Exactly the minima: the one admissible split, whatever the pointer.
+        assert_eq!(drag_pair(0, 260, 260, 7, 260, 260, 0), Some((260, 260)));
+        assert_eq!(drag_pair(0, 260, 260, 7, 260, 260, 400), Some((260, 260)));
+        // The overflow: 519 cannot hold 260 + 260.
+        assert_eq!(drag_pair(0, 259, 260, 7, 260, 260, 100), None);
+        assert_eq!(drag_pair(0, 0, 0, 7, 0, 0, 100), Some((0, 0)));
+        assert_eq!(drag_pair(0, 0, 0, 0, 0, 0, 100), None, "no frame at all");
+    }
+
+    /// Double-click (9.2): the pair halves, round half up, under the clamps.
+    #[test]
+    fn a_double_click_equalises_the_pair_under_the_clamps() {
+        assert_eq!(equalise_pair(735, 692, 260, 260), Some((714, 713)));
+        assert_eq!(equalise_pair(100, 101, 0, 0), Some((101, 100)));
+        // Halving would starve the second child's minimum: held there.
+        assert_eq!(equalise_pair(500, 100, 0, 350), Some((250, 350)));
+        assert_eq!(equalise_pair(200, 200, 260, 0), Some((260, 140)));
+        assert_eq!(equalise_pair(100, 100, 150, 150), None);
     }
 
     /// The header/body allocation against the reference's panes (5.4; the

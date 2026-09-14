@@ -200,6 +200,13 @@ fn actor_owner_principal(actor: Actor) -> u32 {
 /// renderer + system clients)? This is exactly the discriminator `actor()`
 /// applies to a conn's peer_principal, read here off a leaf's stamped
 /// `owner_principal`. A SESSION leaf outranks SYSTEM leaves for the display.
+/// Since I-6 the compositor's surface pool is two per pane for the renderer
+/// AND the session on top of every conn's own; `Comp` is built on the user
+/// stack (`Comp::new` into the server's field), so the pool is pinned to
+/// leave the 1 MiB stack most of its room (the size is a compile-time fact).
+const _: () = assert!(core::mem::size_of::<Comp>() <= 256 * 1024);
+const _: () = assert!(MAX_SURFACES >= MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * (MAX_SURFACES_PER_RENDERER - MAX_SURFACES_PER_CONN));
+
 fn principal_is_session(p: u32) -> bool {
     p != T_PRINCIPAL_INVALID && p != T_PRINCIPAL_SYSTEM && p != T_PRINCIPAL_NONE
 }
@@ -223,10 +230,15 @@ enum Host {
 /// pipelined batch could land ~1000 in one pass). Beyond it: E_AGAIN --
 /// the next pass takes the rest.
 const LAYOUT_VERBS_PER_PASS: u32 = 4;
-const MAX_SURFACES_PER_RENDERER: usize = MAX_SURFACES_PER_CONN + pane::MAX_PANES;
-// One renderer and one declared session compositor may each hold a tile per
-// pane on top of the per-conn allowance.
-const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * pane::MAX_PANES;
+/// Under Instrument every decorated tile costs its owner TWO surfaces -- the
+/// tile and its header -- so the renderer's (and the declared session's)
+/// allowance is two per pane on top of its own (the r1 A-F7 finding: one
+/// per pane admitted 16 decorated tiles against MAX_PANES 32).
+const MAX_SURFACES_PER_RENDERER: usize = MAX_SURFACES_PER_CONN + 2 * pane::MAX_PANES;
+// One renderer and one declared session compositor may each hold two
+// surfaces per pane on top of the per-conn allowance; the pool is sized so
+// every conn can reach its cap at once (nothing starves).
+const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * (2 * pane::MAX_PANES);
 
 /// Warp-2c: the GPU-seam slot pools. ONE context per client (the I-45
 /// exposure bound, GPU-DESIGN section 8: no cross-context resource naming,
@@ -1477,6 +1489,32 @@ const BTN_BASE: u16 = 0x100;
 /// `btn_owner` state: the press was consumed by the compositor (a
 /// click-away dismiss); its release is consumed too.
 const OWNER_SWALLOWED: u64 = 0xffff;
+/// `btn_owner` state: the press began a divider drag (HALCYON-INSTRUMENT
+/// 9.2); its release ends the drag, or is consumed if the drag already
+/// ended (Escape, a chord, a modal, the split's retirement).
+const OWNER_DRAG: u64 = 0xfffe;
+/// evdev BTN_LEFT: the primary button, the only one that drags a divider.
+const BTN_LEFT: u16 = 0x110;
+/// Two primary presses on the same track within this many milliseconds are
+/// the double-click that equalises the pair (9.2).
+const DBLCLICK_MS: u64 = 500;
+/// ... and within this many pixels of each other on both axes.
+const DBLCLICK_SLOP: u32 = 4;
+
+/// HALCYON-INSTRUMENT 9.2 (I-6): the live divider drag -- the compositor's
+/// own pointer capture. Held by the split container's public ID and the
+/// track's index (slots are reused, ids never; the pair is re-derived from
+/// the live tree at every touch, so a retired or restructured container
+/// ends the drag instead of moving a stranger's boundary).
+#[derive(Clone, Copy)]
+struct DragState {
+    cid: u32,
+    idx: usize,
+    /// The pointer's last display position; applied at most once per frame.
+    pos: (u32, u32),
+    /// A position not yet laid out (the frame cadence coalesces motion).
+    pending: bool,
+}
 fn key_idx(code: u16) -> usize {
     (code as usize) & (KEYCODE_SPAN - 1)
 }
@@ -1488,7 +1526,7 @@ fn owner_pack(n: usize, gen: u32) -> u64 {
 }
 fn owner_unpack(v: u64) -> Option<(usize, u32)> {
     let slot = v & 0xffff;
-    if slot == 0 || slot == OWNER_SWALLOWED {
+    if slot == 0 || slot == OWNER_SWALLOWED || slot == OWNER_DRAG {
         return None;
     }
     Some((slot as usize - 1, (v >> 16) as u32))
@@ -1776,6 +1814,16 @@ pub struct Comp {
     /// TEV_PTR_LEAVE when the routing moves off it. None over content, the
     /// desktop, a track, or under a grab.
     ptr_over: Option<(usize, u32)>,
+    /// HALCYON-INSTRUMENT 9.2 (I-6): the divider track under the pointer,
+    /// (container id, track index), whose rule paints `amber_muted`. None
+    /// over anything else, under a grab, and during a drag (the dragged
+    /// track paints `amber` instead).
+    track_hover: Option<(u32, usize)>,
+    /// The live divider drag (9.2): the compositor's pointer capture.
+    drag: Option<DragState>,
+    /// The last primary press on a track, for the double-click: (container
+    /// id, track index, when, where).
+    track_press: Option<(u32, usize, Instant, (u32, u32))>,
     /// Section 18.6 determinism mode (dev/test builds only -- the #880
     /// strip-for-production class, enforced by the `test-mode` cargo
     /// feature at BUILD time): the FRAME clock freezes (ticks only on
@@ -2465,6 +2513,9 @@ impl Comp {
             ptr_x: 0,
             abs_last: None,
             ptr_over: None,
+            track_hover: None,
+            drag: None,
+            track_press: None,
             ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
@@ -5629,6 +5680,9 @@ impl Comp {
             Some(s) if s.is_menu && s.weave.is_some() => (s.w, s.h, s.gen),
             _ => return Err(p9::E_NOENT),
         };
+        // 9.2: a modal opening ends a divider drag (the grab takes the
+        // pointer from the capture).
+        self.drag_end("menu");
         // The same surface placed again (a move): its old rect is healed
         // below, after the new placement composes (SA-1).
         let old_rect = match self.menu {
@@ -6332,7 +6386,7 @@ impl Comp {
         // trailing pane's frame (3.1), so it must land above every frame
         // whatever the slot order the walk visits them in (r1 A-F4).
         let mut joints: Vec<Rect> = Vec::new();
-        for (slot, _id) in self.layout.live_ids() {
+        for (slot, id) in self.layout.live_ids() {
             let (kind_split, vertical_track, is_frame_owner, rect, dividers, tagbar, empty_body, content, visible, separator) = {
                 let Some(p) = self.layout.get(slot) else { continue };
                 let (kind_split, vertical_track, is_frame_owner, empty_body) = match &p.kind {
@@ -6390,47 +6444,21 @@ impl Comp {
                 continue;
             }
             if kind_split {
-                let rule_w = m.rule.max(0) as u32;
-                let rule_off = m.rule_off.max(0) as u32;
-                let joint = m.joint.max(0) as u32;
-                for d in dividers {
-                    let d = d.intersect(disp);
-                    if d.is_empty() {
-                        continue;
-                    }
-                    self.fill_rect(d, inst.desktop);
-                    let rule = if vertical_track {
-                        Rect {
-                            x: d.x + rule_off,
-                            y: d.y,
-                            w: rule_w,
-                            h: d.h,
+                for (i, d) in dividers.into_iter().enumerate() {
+                    // 9.2 (I-6): the rule under the pointer is `amber_muted`,
+                    // the dragged one `amber` (the source's hover and
+                    // `.dragging` inks; its glow is the effects slice's).
+                    let ink = self.track_ink(id, i);
+                    if let Some((d, j)) = self.paint_track(d, vertical_track, ink) {
+                        // The joint at the track's leading corner, painted
+                        // AFTER the walk: it overpaints 1 px of the trailing
+                        // pane's frame (3.1), so it must land above every
+                        // frame whatever the slot order (r1 A-F4).
+                        if !j.is_empty() {
+                            joints.push(j);
                         }
-                    } else {
-                        Rect {
-                            x: d.x,
-                            y: d.y + rule_off,
-                            w: d.w,
-                            h: rule_w,
-                        }
-                    };
-                    self.fill_rect(rule.intersect(d), inst.structure);
-                    // The joint at the track's leading corner, offset by the
-                    // frame width (1,1): the OUTER box in `structure`, the
-                    // fill inside a `hairline` border in `desktop`. It spans
-                    // past the track by the frame, over the trailing pane's
-                    // frame -- the divider paints above the panes (3.1).
-                    let j = Rect {
-                        x: d.x + frame_w,
-                        y: d.y + frame_w,
-                        w: joint,
-                        h: joint,
+                        painted.push(d);
                     }
-                    .intersect(disp);
-                    if !j.is_empty() {
-                        joints.push(j);
-                    }
-                    painted.push(d);
                 }
                 continue;
             }
@@ -6487,21 +6515,289 @@ impl Comp {
             }
         }
         for j in joints {
-            self.fill_rect(j, inst.structure);
-            if j.w > 2 * hair && j.h > 2 * hair {
-                self.fill_rect(
-                    Rect {
-                        x: j.x + hair,
-                        y: j.y + hair,
-                        w: j.w - 2 * hair,
-                        h: j.h - 2 * hair,
-                    },
-                    inst.desktop,
-                );
-            }
+            self.paint_joint(j);
             painted.push(j);
         }
         painted
+    }
+
+    /// The divider track's ink for its rule (9.2): `amber` while it is
+    /// dragged, `amber_muted` under the pointer, `structure` at rest.
+    fn track_ink(&self, cid: u32, idx: usize) -> u32 {
+        let inst = self.bundle.inst;
+        if self.drag.is_some_and(|d| d.cid == cid && d.idx == idx) {
+            inst.amber
+        } else if self.track_hover == Some((cid, idx)) {
+            inst.amber_muted
+        } else {
+            inst.structure
+        }
+    }
+
+    /// Paint one divider track (5.1 / 5.7): the track `desktop`, the rule
+    /// `rule` wide at `rule_off` in `ink`. Returns the track's clipped rect
+    /// and the joint's rect (the OUTER box at the track's leading corner
+    /// offset by the frame; the caller paints it -- after every frame on a
+    /// structural repaint, at once on a hover repaint). None off-display.
+    fn paint_track(&mut self, d: Rect, vertical: bool, ink: u32) -> Option<(Rect, Rect)> {
+        let m = self.metrics;
+        let inst = self.bundle.inst;
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let disp = Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        };
+        let d = d.intersect(disp);
+        if d.is_empty() {
+            return None;
+        }
+        let rule_w = m.rule.max(0) as u32;
+        let rule_off = m.rule_off.max(0) as u32;
+        let joint = m.joint.max(0) as u32;
+        let frame_w = m.frame.max(0) as u32;
+        self.fill_rect(d, inst.desktop);
+        let rule = if vertical {
+            Rect {
+                x: d.x + rule_off,
+                y: d.y,
+                w: rule_w,
+                h: d.h,
+            }
+        } else {
+            Rect {
+                x: d.x,
+                y: d.y + rule_off,
+                w: d.w,
+                h: rule_w,
+            }
+        };
+        self.fill_rect(rule.intersect(d), ink);
+        let j = Rect {
+            x: d.x + frame_w,
+            y: d.y + frame_w,
+            w: joint,
+            h: joint,
+        }
+        .intersect(disp);
+        Some((d, j))
+    }
+
+    /// The joint: the OUTER box in `structure`, the fill inside a
+    /// `hairline` border in `desktop` (5.7; round 2's 7 x 7).
+    fn paint_joint(&mut self, j: Rect) {
+        let inst = self.bundle.inst;
+        let hair = self.metrics.hairline.max(0) as u32;
+        self.fill_rect(j, inst.structure);
+        if j.w > 2 * hair && j.h > 2 * hair {
+            self.fill_rect(
+                Rect {
+                    x: j.x + hair,
+                    y: j.y + hair,
+                    w: j.w - 2 * hair,
+                    h: j.h - 2 * hair,
+                },
+                inst.desktop,
+            );
+        }
+    }
+
+    // ---- HALCYON-INSTRUMENT 9.2 (I-6): dividers -- hover, capture, drag ----
+
+    /// The track under a display point as (container id, index), or None.
+    fn track_under(&self, px: u32, py: u32) -> Option<(u32, usize)> {
+        if self.bundle.profile != libhalcyon::instrument::Profile::Instrument {
+            return None;
+        }
+        let (slot, idx) = self.layout.track_at(px, py)?;
+        self.layout.id_of(slot).map(|id| (id, idx))
+    }
+
+    /// Repaint one track's rule by its current state and push it -- the
+    /// hover's own repaint (a crossing, not a relayout): the joint at once,
+    /// since no frame is repainted after it. Composed only: on a Direct
+    /// scanout no compositor chrome is on the display.
+    fn repaint_track(&mut self, cid: u32, idx: usize) {
+        if self.scanout != Scanout::Composed || self.screen.is_none() {
+            return;
+        }
+        let Some(slot) = self.layout.slot_of_id(cid) else { return };
+        let (d, vertical) = match self.layout.get(slot) {
+            Some(p) if p.visible => match (&p.kind, p.dividers.get(idx)) {
+                (pane::Kind::Container { mode, .. }, Some(&d)) => (d, *mode == Mode::SplitH),
+                _ => return,
+            },
+            _ => return,
+        };
+        let ink = self.track_ink(cid, idx);
+        if let Some((d, j)) = self.paint_track(d, vertical, ink) {
+            self.paint_joint(j);
+            self.screen_push(d);
+        }
+    }
+
+    /// The hover follows the pointer: under no grab and no drag, the track
+    /// under it lights and the one it left goes back to rest.
+    fn hover_update(&mut self) {
+        let now = if self.menu.is_none() && self.drag.is_none() {
+            self.track_under(self.ptr_x, self.ptr_y)
+        } else {
+            None
+        };
+        let prev = self.track_hover;
+        if prev == now {
+            return;
+        }
+        self.track_hover = now;
+        // The crossing's witness (test builds), said BEFORE the repaint: a
+        // gate that then sees no press on the track knows the motion reached
+        // the compositor and the fault is past this line. (The console
+        // gate's first I-6 run went silent after a clamp drag -- no hover,
+        // no press, no key -- once in six; unexplained, JOURNAL run 46o
+        // "I-6".)
+        #[cfg(feature = "test-mode")]
+        if let Some((c, i)) = now {
+            say!("tapestryd: divider hover pane {} track {} at {},{}", c, i, self.ptr_x, self.ptr_y);
+        }
+        if let Some((c, i)) = prev {
+            self.repaint_track(c, i);
+        }
+        if let Some((c, i)) = now {
+            self.repaint_track(c, i);
+        }
+    }
+
+    /// Does the drag's split still exist as a split with that track?
+    fn drag_valid(&self) -> bool {
+        let Some(d) = self.drag else { return false };
+        let Some(slot) = self.layout.slot_of_id(d.cid) else { return false };
+        match self.layout.get(slot) {
+            Some(p) if p.visible => match &p.kind {
+                pane::Kind::Container {
+                    mode: Mode::SplitH | Mode::SplitV,
+                    ..
+                } => d.idx < p.dividers.len(),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// A primary press on a track: capture the pointer for that split. The
+    /// hovered track becomes the dragged one (its rule turns `amber`).
+    fn drag_begin(&mut self, cid: u32, idx: usize) {
+        self.drag_end("replaced");
+        self.track_hover = None;
+        self.drag = Some(DragState {
+            cid,
+            idx,
+            pos: (self.ptr_x, self.ptr_y),
+            pending: false,
+        });
+        say!(
+            "tapestryd: divider drag start pane {} track {} at {},{}",
+            cid,
+            idx,
+            self.ptr_x,
+            self.ptr_y
+        );
+        self.repaint_track(cid, idx);
+    }
+
+    /// Motion under the capture: remember the position for the frame.
+    fn drag_motion(&mut self, px: u32, py: u32) {
+        if let Some(d) = self.drag.as_mut() {
+            if d.pos != (px, py) {
+                d.pos = (px, py);
+                d.pending = true;
+            }
+        }
+    }
+
+    /// Lay the drag's last position out (at most once per position): the
+    /// pair's weights follow the pointer through the one mutation path the
+    /// verb uses (`Layout::drag_track` -> `set_weight`), then a reconcile
+    /// -- the structural repaint and the CONFIGURE fan every resize takes.
+    /// A refused position (the pair at its minima) is said once per drag.
+    fn drag_apply(&mut self) {
+        let Some(d) = self.drag else { return };
+        if !d.pending {
+            return;
+        }
+        if !self.drag_valid() {
+            self.drag_end("retired");
+            return;
+        }
+        if let Some(x) = self.drag.as_mut() {
+            x.pending = false;
+        }
+        let Some(slot) = self.layout.slot_of_id(d.cid) else { return };
+        match self.layout.drag_track(slot, d.idx, d.pos) {
+            pane::DragVerdict::Changed => self.reconcile(),
+            pane::DragVerdict::Unchanged => {}
+            pane::DragVerdict::Refused => {
+                say!("tapestryd: divider drag refused: the minima (pane {})", d.cid);
+            }
+        }
+    }
+
+    /// End the capture: the final position is laid out (never dropped), the
+    /// track goes back to rest (or to hover, if the pointer is still on
+    /// it), and the reason is said. A no-op with no drag up.
+    fn drag_end(&mut self, reason: &'static str) {
+        let Some(d) = self.drag else { return };
+        if d.pending && self.drag_valid() {
+            self.drag_apply();
+        }
+        self.drag = None;
+        let pair = self
+            .layout
+            .slot_of_id(d.cid)
+            .map(|slot| {
+                let kids = self.layout.divide_of(slot);
+                let ext = |c: Option<&usize>| {
+                    c.and_then(|&c| self.layout.get(c)).map_or(0, |p| {
+                        if matches!(self.layout.get(slot).map(|q| &q.kind), Some(pane::Kind::Container { mode: Mode::SplitH, .. })) {
+                            p.rect.w
+                        } else {
+                            p.rect.h
+                        }
+                    })
+                };
+                (ext(kids.get(d.idx)), ext(kids.get(d.idx + 1)))
+            })
+            .unwrap_or((0, 0));
+        say!(
+            "tapestryd: divider drag end pane {} track {} {} -> {}:{}",
+            d.cid,
+            d.idx,
+            reason,
+            pair.0,
+            pair.1
+        );
+        self.hover_update();
+        if self.track_hover != Some((d.cid, d.idx)) {
+            self.repaint_track(d.cid, d.idx);
+        }
+    }
+
+    /// Double-click on a track (9.2): the pair equalised through the same
+    /// mutation path; a reconcile when anything moved.
+    fn equalise_track(&mut self, slot: usize, idx: usize) {
+        let cid = self.layout.id_of(slot).unwrap_or(0);
+        match self.layout.equalise_track(slot, idx) {
+            pane::DragVerdict::Changed => {
+                say!("tapestryd: divider double-click pane {} track {} -> equal", cid, idx);
+                self.reconcile();
+            }
+            pane::DragVerdict::Unchanged => {
+                say!("tapestryd: divider double-click pane {} track {} -> equal already", cid, idx);
+            }
+            pane::DragVerdict::Refused => {
+                say!("tapestryd: divider double-click refused: the minima (pane {})", cid);
+            }
+        }
     }
 
     /// Paint the tab/stack indicator strips (G-6c; D7 glyph-free -- pure
@@ -6686,7 +6982,29 @@ impl Comp {
         for n in 0..MAX_SURFACES {
             if let Some(s) = self.surf(n) {
                 if let Some(pid) = s.chrome_bind {
-                    if self.layout.slot_of_id(pid).is_none() {
+                    // The bound pane is gone -- or (r1 A-F6, I-6) it is
+                    // hosting another principal's surface now, which the
+                    // admission would refuse today: a session's header must
+                    // never stand over a tile that is not the session's (an
+                    // identity claim, if no authority). The same judgement
+                    // the create arm makes, on the same class -- a DECLARED
+                    // session's surface (the renderer's admission is
+                    // unconditional there, so its chrome is exempt here) --
+                    // so a re-mint is refused where the reap orphaned, never
+                    // re-orphaned in a loop.
+                    let stale = match self.layout.slot_of_id(pid) {
+                        None => true,
+                        Some(slot) => {
+                            self.session_declared(s.owner_conn)
+                                && principal_is_session(s.owner_principal)
+                                && !pane::chrome_bind_admitted(
+                                    s.owner_principal,
+                                    self.layout.leaf_surface(slot).and_then(|h| self.surf(h)).map(|h| h.owner_principal),
+                                    self.layout.pane_owner_principal(slot),
+                                )
+                        }
+                    };
+                    if stale {
                         orphans.push(n);
                     }
                 }
@@ -6749,6 +7067,21 @@ impl Comp {
         };
         self.layout.apply_backgrounded(&bg_tiling);
         self.layout.recompute(area, self.chords.gaps, self.metrics, self.bundle.profile);
+        // HALCYON-INSTRUMENT 9.2 (I-6): the split a drag holds may have
+        // gone (its retirement, a close, a logout collapsing the tree) --
+        // the capture ends with it, here, before the paint reads it; no
+        // relayout is owed (this one is in progress). The hovered track is
+        // re-read at the pointer: a chord that moved the tracks under a
+        // still pointer must not leave the old one lit.
+        if self.drag.is_some() && !self.drag_valid() {
+            let d = self.drag.take().unwrap();
+            say!("tapestryd: divider drag end pane {} track {} retired", d.cid, d.idx);
+        }
+        self.track_hover = if self.menu.is_none() && self.drag.is_none() {
+            self.track_under(self.ptr_x, self.ptr_y)
+        } else {
+            None
+        };
         // HALCYON-INSTRUMENT 5.2 (r1 A-F1): a leaf carved to ZERO (the tree
         // outgrew the minima through a path the fits-check does not guard --
         // `mode`, `move`, a scale change, a restore onto a smaller display)
@@ -7550,6 +7883,13 @@ impl Comp {
             if !self.actor_owns_subtree(actor, slot) {
                 return Err(p9::E_PERM);
             }
+            // HALCYON-INSTRUMENT 5.2 (r1 A-F1's owed half, I-6): a move that
+            // would push the tree past the minima it clears today is refused
+            // atomically, judged on a copy -- the split's errno, since the
+            // tree cannot grow that way here. Always fits under legacy.
+            if !self.layout.fits_after(|l| l.move_dir(slot, d)) {
+                return Err(p9::E_NOMEM);
+            }
             self.layout.unzoom();
             if !self.layout.move_dir(slot, d) {
                 return Err(p9::E_INVAL);
@@ -7596,6 +7936,11 @@ impl Comp {
             let target = self.layout.mode_target(slot).ok_or(p9::E_INVAL)?;
             if !self.actor_owns_subtree(actor, target) {
                 return Err(p9::E_PERM);
+            }
+            // 5.2 (I-6): a mode that would overflow the minima (a wide row
+            // turned into a column) is refused on a copy, as `move`.
+            if !self.layout.fits_after(|l| l.set_mode(slot, mode)) {
+                return Err(p9::E_NOMEM);
             }
             self.layout.unzoom();
             if !self.layout.set_mode(slot, mode) {
@@ -8086,6 +8431,10 @@ impl Comp {
     pub fn frame_tick(&mut self) {
         self.tick += 1;
         let t = self.tick;
+        // HALCYON-INSTRUMENT 9.2 (I-6): a divider drag re-lays at most once
+        // per frame -- the motion between ticks coalesces to its last
+        // position; the release and Escape apply the final one themselves.
+        self.drag_apply();
         // Warp-C C-3: a GPU-composition latch asked for a structural repaint
         // (chrome + the redraw CONFIGURE fan). Run it HERE, at the tick,
         // never inline in the present dispatch that found the latch: the
@@ -8208,6 +8557,16 @@ impl Comp {
                     return;
                 }
                 m.n
+            }
+            // 9.2 (I-6): Escape ENDS a divider drag at the current ratio (the
+            // source's behaviour; no rollback), swallowed like the menu's --
+            // its release and repeats through the chord swallow-set, so no
+            // stray Esc reaches the leaf that keeps focus underneath. Every
+            // other key flows: a drag is a pointer capture, not a key grab.
+            None if self.drag.is_some() && value >= 1 && (code == KEY_ESC || rune == 0x1b) => {
+                self.chord_bit_set(code, true);
+                self.drag_end("esc");
+                return;
             }
             None => match self.layout.focused_surface() {
                 Some(n) => n,
@@ -8411,6 +8770,11 @@ impl Comp {
     /// a focus companion like keys, decoupled from the pointer position;
     /// PTR_MOVE keeps the under-pointer rule). Deltas clamp to i16.
     fn ptr_rel_emit(&mut self, dx: i32, dy: i32, mods: u16) {
+        // 9.2: a divider drag captures the pointer -- the focused leaf must
+        // not see motion that is moving a boundary.
+        if self.drag.is_some() {
+            return;
+        }
         // H-3c: the grab takes the deltas too (a menu ignores them; the
         // leaf underneath must not see motion it cannot act on).
         let n = match self
@@ -8463,6 +8827,19 @@ impl Comp {
     fn ptr_commit(&mut self, px: u32, py: u32, mods: u16) {
         self.ptr_x = px;
         self.ptr_y = py;
+        // HALCYON-INSTRUMENT 9.2 (I-6): a drag captures every motion -- the
+        // boundary follows, nothing under the pointer hears a MOVE, and a
+        // header under it hears LEAVE (the crossing judged on no target).
+        if self.drag.is_some() {
+            if !self.drag_valid() {
+                self.drag_end("retired");
+            } else {
+                self.drag_motion(px, py);
+                self.ptr_crossing(None, mods);
+                return;
+            }
+        }
+        self.hover_update();
         let route = self.ptr_route(px, py);
         // A grab routes everything to the menu: the header under the
         // pointer is left as it was (the crossing is judged on the routed
@@ -8496,6 +8873,18 @@ impl Comp {
         if !pressed {
             let v = self.btn_owner[bi];
             self.btn_owner[bi] = 0;
+            if v == OWNER_DRAG {
+                // 9.2: the release ends the drag at the final position; a
+                // drag that already ended (Escape, a chord, a modal, the
+                // split's retirement) leaves a release nobody may act on.
+                if self.drag.is_some() {
+                    self.drag_end("release");
+                } else {
+                    #[cfg(feature = "test-mode")]
+                    say!("tapestryd: divider drag release swallowed (btn {})", code);
+                }
+                return;
+            }
             if v == OWNER_SWALLOWED {
                 #[cfg(feature = "test-mode")]
                 {
@@ -8532,6 +8921,41 @@ impl Comp {
                 Some(m.n)
             }
             None => {
+                // 9.2 (I-6): a divider track is the compositor's own target.
+                // The primary press captures the pointer for that split (or,
+                // twice within DBLCLICK_MS on the same track, equalises the
+                // pair); any other button on a track is swallowed on both
+                // edges -- there is nothing under a track to act.
+                if pressed {
+                    if let Some((slot, idx)) = self.layout.track_at(self.ptr_x, self.ptr_y) {
+                        let cid = self.layout.id_of(slot).unwrap_or(0);
+                        if code != BTN_LEFT || self.drag.is_some() {
+                            self.btn_owner[bi] = OWNER_SWALLOWED;
+                            return;
+                        }
+                        // The second press within the window, on the same
+                        // track AND within a few pixels of the first (a
+                        // quick re-grab after a drag is not a double-click).
+                        let here = (self.ptr_x, self.ptr_y);
+                        let twice = self.track_press.is_some_and(|(c, i, at, from)| {
+                            c == cid
+                                && i == idx
+                                && at.elapsed().as_millis() as u64 <= DBLCLICK_MS
+                                && from.0.abs_diff(here.0) <= DBLCLICK_SLOP
+                                && from.1.abs_diff(here.1) <= DBLCLICK_SLOP
+                        });
+                        if twice {
+                            self.track_press = None;
+                            self.btn_owner[bi] = OWNER_SWALLOWED;
+                            self.equalise_track(slot, idx);
+                            return;
+                        }
+                        self.track_press = Some((cid, idx, Instant::now(), here));
+                        self.btn_owner[bi] = OWNER_DRAG;
+                        self.drag_begin(cid, idx);
+                        return;
+                    }
+                }
                 // 9.1: a header under the point takes the press (its owner
                 // decides by x); a content surface takes it as before.
                 let hit = self.ptr_target(self.ptr_x, self.ptr_y).map(|(n, _, _)| n);
@@ -8590,6 +9014,11 @@ impl Comp {
     /// Wheel scroll (signed delta) at the current pointer position.
     /// Non-droppable (discrete steps; losing one skips content).
     pub fn ptr_scroll(&mut self, delta: i32, mods: u16) {
+        // 9.2: the capture takes the wheel too (nothing under a moving
+        // boundary may scroll by it).
+        if self.drag.is_some() {
+            return;
+        }
         if let Some((n, _, _)) = self.ptr_route(self.ptr_x, self.ptr_y) {
             // The H-3c round F4: wheel deltas to the placed MENU sum at the
             // back of its queue (the REL discipline): its owner reads the
@@ -8666,7 +9095,10 @@ impl Comp {
         }
         self.chord_bit_set(code, true);
         // H-3c: a chord dismisses a placed menu first, then acts -- the
-        // environment's plane outranks a modal.
+        // environment's plane outranks a modal. 9.2: it ends a divider drag
+        // the same way (at the current ratio), so a structural chord never
+        // races a capture over the tree it is about to change.
+        self.drag_end("chord");
         self.menu_dismiss("chord");
         self.chord_action(code, mods & tapestryd::keymap::MOD_SHIFT != 0);
         true
@@ -8711,6 +9143,15 @@ impl Comp {
             }
             ChordAction::MoveDir(d) => {
                 let f = self.layout.focused;
+                // 5.2 (I-6): the chord meets the minima the verb meets,
+                // judged on a copy before the tree changes.
+                if !self.layout.fits_after(|l| l.move_dir(f, d)) {
+                    say!(
+                        "tapestryd: chord move refused: the minima (pane {})",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    return;
+                }
                 self.layout.unzoom();
                 if self.layout.move_dir(f, d) {
                     self.reconcile();
@@ -8762,8 +9203,15 @@ impl Comp {
                 }
             }
             ChordAction::SetMode(mode) => {
-                self.layout.unzoom();
                 let f = self.layout.focused;
+                if !self.layout.fits_after(|l| l.set_mode(f, mode)) {
+                    say!(
+                        "tapestryd: chord mode refused: the minima (pane {})",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    return;
+                }
+                self.layout.unzoom();
                 if self.layout.set_mode(f, mode) {
                     self.reconcile();
                 }
@@ -8782,6 +9230,13 @@ impl Comp {
                     Some(Mode::SplitH) => Mode::SplitV,
                     _ => Mode::SplitH,
                 };
+                if !self.layout.fits_after(|l| l.set_mode(f, want)) {
+                    say!(
+                        "tapestryd: chord mode refused: the minima (pane {})",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    return;
+                }
                 self.layout.unzoom();
                 if self.layout.set_mode(f, want) {
                     self.reconcile();
@@ -17447,17 +17902,18 @@ impl Conn {
                 // closes; the renderer keeps its unconditional admission.
                 (Role::Chrome, Some(pid)) => {
                     // An occupied leaf's owner is its hosted surface's; an
-                    // empty leaf's the recorded pane owner (H-4b-2).
+                    // empty leaf's the recorded pane owner (H-4b-2). The
+                    // judgement is `chrome_bind_admitted`, shared with the
+                    // reap that re-judges a standing bind (r1 A-F6).
                     let admitted = self.peer_is_renderer()
                         || match self.actor() {
                             Actor::Session(p) => comp.layout.slot_of_id(pid).is_some_and(|slot| {
                                 comp.session_declared(self.conn_id)
-                                    && match comp.layout.leaf_surface(slot) {
-                                        Some(n) => {
-                                            comp.surf(n).is_some_and(|s| s.owner_principal == p)
-                                        }
-                                        None => comp.layout.pane_owner_principal(slot) == p,
-                                    }
+                                    && pane::chrome_bind_admitted(
+                                        p,
+                                        comp.layout.leaf_surface(slot).and_then(|n| comp.surf(n)).map(|s| s.owner_principal),
+                                        comp.layout.pane_owner_principal(slot),
+                                    )
                             }),
                             _ => false,
                         };
@@ -18835,3 +19291,4 @@ fn parse_u32(name: &[u8]) -> Option<u32> {
     }
     Some(v)
 }
+

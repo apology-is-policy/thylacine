@@ -793,6 +793,18 @@ impl SessionTile {
             wire_out.clear();
             encode_input(&Input::Resize { cols: nc, rows: nr }, wire_out);
             self.queue_resize(wire_out);
+            // The resize's witness (test builds): a divider drag reaches a
+            // tile as a CONFIGURE, and this is where it becomes the pts
+            // winsize (HALCYON-INSTRUMENT 9.2, the existing path).
+            #[cfg(feature = "test-mode")]
+            say!(
+                "halcyond: session tile leaf={} fit {}x{} px -> {} cols {} rows",
+                self.leaf,
+                self.surf.w,
+                self.surf.h,
+                nc,
+                nr
+            );
         }
     }
 

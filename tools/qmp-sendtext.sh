@@ -14,6 +14,7 @@
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "abs 16000 16000"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "btn left down|up"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "wheel up|down"
+#   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "dblclick left|right|middle"
 #
 # Lowercase letters, digits, space, '-', '.', '/' and '\n' only (the
 # scenario vocabulary); anything else is a hard error, not a silent skip.
@@ -126,6 +127,14 @@ if mode == "pointer":
             parts[1] in ("left", "right", "middle") and parts[2] in ("down", "up"):
         send_events([{"type": "btn",
                       "data": {"down": parts[2] == "down", "button": parts[1]}}])
+    elif parts and parts[0] == "dblclick" and len(parts) == 2 and \
+            parts[1] in ("left", "right", "middle"):
+        # Two clicks in one QMP session, milliseconds apart -- the guest's
+        # double-click window (HALCYON-INSTRUMENT 9.2) is far wider than one
+        # process spawn per edge could promise under load.
+        for down in (True, False, True, False):
+            send_events([{"type": "btn",
+                          "data": {"down": down, "button": parts[1]}}])
     elif parts and parts[0] == "wheel" and len(parts) == 2 and \
             parts[1] in ("up", "down"):
         b = "wheel-up" if parts[1] == "up" else "wheel-down"

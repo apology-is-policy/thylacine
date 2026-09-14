@@ -321,6 +321,32 @@ impl Rect {
     }
 }
 
+/// HALCYON.md 13.6 / HALCYON-INSTRUMENT 9.1: may a SESSION principal
+/// `chrome_owner` bind chrome to a pane whose hosted surface belongs to
+/// `occupant` (None: the leaf is empty), the leaf's recorded owner being
+/// `pane_owner`? An occupied leaf's owner is its surface's; an empty leaf's
+/// the recorded one (H-4b-2). Judged at the mint AND at every reconcile (r1
+/// A-F6), with one function so the two can never disagree -- the
+/// renderer's unconditional admission is the caller's, not this.
+pub fn chrome_bind_admitted(chrome_owner: u32, occupant: Option<u32>, pane_owner: u32) -> bool {
+    match occupant {
+        Some(o) => o == chrome_owner,
+        None => pane_owner == chrome_owner,
+    }
+}
+
+/// The outcome of a divider drag or double-click (9.2; `Layout::drag_track`,
+/// `Layout::equalise_track`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DragVerdict {
+    /// The weights moved; a reconcile is owed.
+    Changed,
+    /// The clamps hold the boundary where it is.
+    Unchanged,
+    /// The pair is in the carve's overflow: nothing to drag.
+    Refused,
+}
+
 /// `r` shrunk by `by` on every side; ZERO when it cannot hold that (the
 /// Instrument carve's frame and pad insets, 5.1).
 fn inset(r: Rect, by: u32) -> Rect {
@@ -336,6 +362,7 @@ fn inset(r: Rect, by: u32) -> Rect {
     }
 }
 
+#[derive(Clone)]
 pub enum Kind {
     Leaf {
         surface: Option<usize>,
@@ -347,6 +374,7 @@ pub enum Kind {
     },
 }
 
+#[derive(Clone)]
 pub struct Pane {
     pub id: u32,
     pub parent: Option<usize>,
@@ -437,6 +465,7 @@ pub struct Pane {
     pub backgrounded: bool,
 }
 
+#[derive(Clone)]
 pub struct Layout {
     panes: Vec<Option<Pane>>,
     pub root: usize,
@@ -1764,18 +1793,7 @@ impl Layout {
                 // F2 structural transparency, exactly as the legacy division:
                 // a backgrounded subtree is out of the division (a zero rect,
                 // kept visible) unless every child is.
-                let divide: Vec<usize> = {
-                    let fg: Vec<usize> = children
-                        .iter()
-                        .copied()
-                        .filter(|&c| !self.is_bg_subtree(c))
-                        .collect();
-                    if fg.is_empty() {
-                        children.clone()
-                    } else {
-                        fg
-                    }
-                };
+                let divide = Self::divide_list(&children, |c| self.is_bg_subtree(c));
                 for &c in children.iter() {
                     if !divide.contains(&c) {
                         self.carve(c, Rect::ZERO);
@@ -2115,6 +2133,174 @@ impl Layout {
         let root = inset(self.area, pad);
         let (w, h) = self.min_size_hyp(self.root, Some((slot, mode)));
         w <= root.w && h <= root.h
+    }
+
+    /// The children a split container divides (the list its tracks index,
+    /// 5.5): the foreground ones, or all of them when every child is
+    /// backgrounded (the F2 rule `carve` applies).
+    fn divide_list(children: &[usize], is_bg: impl Fn(usize) -> bool) -> Vec<usize> {
+        let fg: Vec<usize> = children.iter().copied().filter(|&c| !is_bg(c)).collect();
+        if fg.is_empty() {
+            children.to_vec()
+        } else {
+            fg
+        }
+    }
+
+    /// HALCYON-INSTRUMENT 9.2 (I-6): the split container's divided children
+    /// in track order -- track `i` separates `divide_of(slot)[i]` from
+    /// `[i + 1]`. Empty for a leaf, a stack, a tab.
+    pub fn divide_of(&self, slot: usize) -> Vec<usize> {
+        match self.get(slot).map(|p| &p.kind) {
+            Some(Kind::Container {
+                mode: Mode::SplitH | Mode::SplitV,
+                children,
+                ..
+            }) => Self::divide_list(children, |c| self.is_bg_subtree(c)),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The divider track under display point (x, y): the split container's
+    /// slot and the track's index in its `dividers` (9.1: a track routes to
+    /// the compositor itself). Only a carved container publishes tracks
+    /// (`recompute` clears them first), so a hidden or zoomed-over track is
+    /// never hit.
+    pub fn track_at(&self, x: u32, y: u32) -> Option<(usize, usize)> {
+        // A per-motion path: no allocation (as `surface_at`).
+        self.panes.iter().enumerate().find_map(|(slot, p)| {
+            let p = p.as_ref()?;
+            if !p.visible {
+                return None;
+            }
+            p.dividers.iter().position(|d| d.contains(x, y)).map(|i| (slot, i))
+        })
+    }
+
+    /// The pair of children track `idx` of `slot` separates, with the
+    /// facts a drag needs along the container's axis: (first child, second
+    /// child, origin, first extent, second extent, first minimum, second
+    /// minimum, horizontal). None when the track does not exist.
+    fn track_pair(&self, slot: usize, idx: usize) -> Option<(usize, usize, u32, u32, u32, u32, u32, bool)> {
+        let horizontal = match self.get(slot).map(|p| &p.kind) {
+            Some(Kind::Container { mode: Mode::SplitH, .. }) => true,
+            Some(Kind::Container { mode: Mode::SplitV, .. }) => false,
+            _ => return None,
+        };
+        if self.get(slot).map_or(true, |p| idx >= p.dividers.len()) {
+            return None;
+        }
+        let divide = self.divide_of(slot);
+        let (&a, &b) = (divide.get(idx)?, divide.get(idx + 1)?);
+        let (ra, rb) = (self.get(a)?.rect, self.get(b)?.rect);
+        let along = |r: Rect| if horizontal { (r.x, r.w) } else { (r.y, r.h) };
+        let (origin, ea) = along(ra);
+        let (_, eb) = along(rb);
+        let min_along = |c: usize| {
+            let (w, h) = self.min_size_hyp(c, None);
+            if horizontal {
+                w
+            } else {
+                h
+            }
+        };
+        Some((a, b, origin, ea, eb, min_along(a), min_along(b), horizontal))
+    }
+
+    /// Re-weight a split container so its children's weights ARE their
+    /// pixel extents along the axis, with the pair `(a, b)` at `(ea, eb)`:
+    /// the extents are a fixed point of the flex rule (they sum to the
+    /// usable extent and each clears its minimum), so the next carve lays
+    /// the boundary exactly where the pair says, and the neighbours keep
+    /// their extents to the pixel. Weights are `1..=65535` (a display is
+    /// narrower than that; a clipped child of 0 counts as 1). True when
+    /// some weight changed.
+    fn set_pair_extents(&mut self, slot: usize, a: usize, b: usize, ea: u32, eb: u32, horizontal: bool) -> bool {
+        let mut changed = false;
+        for c in self.divide_of(slot) {
+            let e = if c == a {
+                ea
+            } else if c == b {
+                eb
+            } else {
+                let r = self.get(c).map_or(Rect::ZERO, |p| p.rect);
+                if horizontal {
+                    r.w
+                } else {
+                    r.h
+                }
+            };
+            let w = e.clamp(1, u16::MAX as u32) as u16;
+            let before = self.get(c).map(|p| p.weight);
+            if self.set_weight(c, w) && before != Some(w) {
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// HALCYON-INSTRUMENT 9.2 (I-6): a divider drag -- track `idx` of split
+    /// container `slot` follows display point `pos` along the axis. The
+    /// two adjacent children take `carve::drag_pair`'s extents (the
+    /// mockup's ratio, the 22..78 band, the minima); the rest of the
+    /// container keeps its extents. `Refused` when the pair is in the
+    /// carve's overflow (nothing changes); `Unchanged` when the clamps put
+    /// the boundary where it already is.
+    pub fn drag_track(&mut self, slot: usize, idx: usize, pos: (u32, u32)) -> DragVerdict {
+        let Some((a, b, origin, ea, eb, ma, mb, horizontal)) = self.track_pair(slot, idx) else {
+            return DragVerdict::Refused;
+        };
+        let t = self.metrics.track.max(0) as u32;
+        let p = if horizontal { pos.0 } else { pos.1 } as i64;
+        match carve::drag_pair(origin, ea, eb, t, ma, mb, p) {
+            Some((na, nb)) if self.set_pair_extents(slot, a, b, na, nb, horizontal) => DragVerdict::Changed,
+            Some(_) => DragVerdict::Unchanged,
+            None => DragVerdict::Refused,
+        }
+    }
+
+    /// Double-click on a track (9.2): the two adjacent children equalised
+    /// (`carve::equalise_pair`, the same clamps); the neighbours untouched.
+    pub fn equalise_track(&mut self, slot: usize, idx: usize) -> DragVerdict {
+        let Some((a, b, _, ea, eb, ma, mb, horizontal)) = self.track_pair(slot, idx) else {
+            return DragVerdict::Refused;
+        };
+        match carve::equalise_pair(ea, eb, ma, mb) {
+            Some((na, nb)) if self.set_pair_extents(slot, a, b, na, nb, horizontal) => DragVerdict::Changed,
+            Some(_) => DragVerdict::Unchanged,
+            None => DragVerdict::Refused,
+        }
+    }
+
+    /// Does the tree's minimum fit the padded workspace (5.2)? Always under
+    /// legacy.
+    fn min_fits(&self) -> bool {
+        if self.profile != Profile::Instrument {
+            return true;
+        }
+        let pad = self.metrics.outer_pad.max(0) as u32;
+        let root = inset(self.area, pad);
+        let (w, h) = self.min_size();
+        w <= root.w && h <= root.h
+    }
+
+    /// HALCYON-INSTRUMENT 5.2 (r1 A-F1's owed half, I-6): would `mutate`
+    /// leave the tree past the minima that it clears today? Judged on a
+    /// COPY, before anything changes, so a refusal leaves the tree
+    /// untouched. A tree already past its minima (a layout restored onto a
+    /// smaller display) stays mutable: only a mutation that CREATES the
+    /// overflow is refused, since the moves that would cure one are also
+    /// mutations. True when the mutation itself is a no-op (the real call
+    /// answers with its own refusal). Always true under legacy.
+    pub fn fits_after(&self, mutate: impl FnOnce(&mut Layout) -> bool) -> bool {
+        if self.profile != Profile::Instrument || !self.min_fits() {
+            return true;
+        }
+        let mut trial = self.clone();
+        if !mutate(&mut trial) {
+            return true;
+        }
+        trial.min_fits()
     }
 
     fn layout_pane(&mut self, slot: usize, rect: Rect) {
@@ -2703,6 +2889,153 @@ mod tests {
         assert_eq!(l.get(root).unwrap().dividers, vec![r(1476, 74, 14, 1670)]);
         assert_eq!(l.get(s1[1]).unwrap().tagbar, r(8, 140, 1466, 64));
         assert_eq!(l.get(s1[1]).unwrap().content, r(8, 204, 1466, 1408), "1670 - 4 - 3 x 64 - 64 - 2");
+    }
+
+    // ---------------------------------------------------------------------
+    // HALCYON-INSTRUMENT 9.2 (I-6): the divider tracks as pointer targets,
+    // the drag, the double-click, the clamps -- and the fits-check on a
+    // mutation judged on a copy.
+    // ---------------------------------------------------------------------
+
+    /// A track is hit by the point inside it and names the pair it
+    /// separates; a point in a body, a header or the pad hits nothing.
+    #[test]
+    fn a_track_is_hit_and_names_its_pair() {
+        let (mut l, [p1, p2, p3], _) = reference();
+        l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
+        let root = l.root;
+        let f1 = parent(&l, p1);
+        let splitv = parent(&l, parent(&l, p2));
+        assert_eq!(l.track_at(738, 400), Some((root, 0)), "the root track's first column");
+        assert_eq!(l.track_at(744, 870), Some((root, 0)), "its last column, last row");
+        assert_eq!(l.track_at(745, 400), None, "the right column's frame");
+        assert_eq!(l.track_at(737, 400), None, "the left stack's frame");
+        assert_eq!(l.track_at(1000, 443), Some((splitv, 0)), "the column's track");
+        assert_eq!(l.track_at(1000, 450), None, "p3's frame");
+        assert_eq!(l.track_at(1, 1), None);
+        assert_eq!(l.divide_of(root), vec![f1, splitv]);
+        assert_eq!(l.divide_of(splitv), vec![parent(&l, p2), parent(&l, p3)]);
+        assert!(l.divide_of(f1).is_empty(), "a stack has no tracks");
+        assert!(l.divide_of(p3).is_empty(), "a leaf has no tracks");
+    }
+
+    /// The drag (9.2): the root track follows the pointer by the mockup's
+    /// ratio -- 100 px right of the track's centre puts the boundary at
+    /// 837 (`carve::drag_pair`'s 834 + the origin 3) -- the weights become
+    /// the extents (834 : 593), the right column keeps its own division
+    /// (49 : 51, its track on the same rows), and a second drag to the same
+    /// point changes nothing.
+    #[test]
+    fn a_drag_moves_the_track_and_the_weights_become_the_extents() {
+        let (mut l, [p1, p2, p3], _) = reference();
+        l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
+        let root = l.root;
+        let f1 = parent(&l, p1);
+        let splitv = parent(&l, parent(&l, p2));
+        assert_eq!(l.drag_track(root, 0, (841, 400)), DragVerdict::Changed);
+        assert_eq!((weight(&l, f1), weight(&l, splitv)), (834, 593));
+        assert_eq!((weight(&l, parent(&l, p2)), weight(&l, parent(&l, p3))), (49, 51), "the column's weights untouched");
+        l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
+        assert_eq!(l.get(root).unwrap().dividers, vec![r(837, 37, 7, 835)], "the track at the pointer less r * t");
+        assert_eq!(l.get(f1).unwrap().rect, r(3, 37, 834, 835));
+        assert_eq!(l.get(splitv).unwrap().rect, r(844, 37, 593, 835));
+        assert_eq!(l.get(splitv).unwrap().dividers, vec![r(844, 443, 593, 7)], "the column's track on its rows");
+        assert_eq!(l.drag_track(root, 0, (841, 400)), DragVerdict::Unchanged);
+        // A vertical track reads the pointer's y: the column's pair (406,
+        // 422 tall, minima 153 each) is held by the band -- 22 % of 828 is
+        // 183 -- when the pointer goes to the top.
+        assert_eq!(l.drag_track(splitv, 0, (1000, 0)), DragVerdict::Changed);
+        l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
+        assert_eq!(l.get(splitv).unwrap().dividers, vec![r(844, 220, 593, 7)], "37 + 183");
+        assert_eq!(l.get(parent(&l, p2)).unwrap().rect.h, 183);
+        assert_eq!(l.get(parent(&l, p3)).unwrap().rect.h, 645);
+        assert_eq!(l.get(root).unwrap().dividers, vec![r(837, 37, 7, 835)], "the root untouched by the column's drag");
+    }
+
+    /// The clamps (5.2): the band where it is tighter (78 % of the root's
+    /// 1427 is 1113, past which the pointer cannot pull), and the overflow
+    /// refused -- a 500 px workspace cannot hold two 260 minima, so the
+    /// pair is not draggable at all and nothing changes.
+    #[test]
+    fn a_drag_is_clamped_and_the_overflow_is_refused() {
+        let (mut l, [p1, p2, _], _) = reference();
+        l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
+        let root = l.root;
+        let f1 = parent(&l, p1);
+        let splitv = parent(&l, parent(&l, p2));
+        assert_eq!(l.drag_track(root, 0, (5000, 400)), DragVerdict::Changed);
+        assert_eq!((weight(&l, f1), weight(&l, splitv)), (1113, 314));
+        l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
+        assert_eq!(l.get(root).unwrap().dividers, vec![r(1116, 37, 7, 835)]);
+        assert_eq!(l.get(splitv).unwrap().rect.w, 314, "the column past its minimum still");
+        // The overflow: at 500 wide the root's usable 487 is short of 520.
+        let (mut l, _, _) = reference();
+        l.recompute(r(0, 34, 500, 841), 1, inst100(), Profile::Instrument);
+        let root = l.root;
+        let before: Vec<u16> = l.divide_of(root).iter().map(|&c| weight(&l, c)).collect();
+        assert_eq!(l.drag_track(root, 0, (300, 400)), DragVerdict::Refused);
+        assert_eq!(l.equalise_track(root, 0), DragVerdict::Refused);
+        let after: Vec<u16> = l.divide_of(root).iter().map(|&c| weight(&l, c)).collect();
+        assert_eq!(before, after, "a refused drag changes no weight");
+        // No such track.
+        assert_eq!(l.drag_track(root, 5, (300, 400)), DragVerdict::Refused);
+        assert_eq!(l.drag_track(l.focused, 0, (300, 400)), DragVerdict::Refused, "a leaf has no track");
+    }
+
+    /// Double-click (9.2): the root's pair halves (714 : 713 of 1427), the
+    /// track moving from 738 to 717; the column is untouched.
+    #[test]
+    fn a_double_click_equalises_the_pair() {
+        let (mut l, [p1, p2, _], _) = reference();
+        l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
+        let root = l.root;
+        let f1 = parent(&l, p1);
+        let splitv = parent(&l, parent(&l, p2));
+        assert_eq!(l.equalise_track(root, 0), DragVerdict::Changed);
+        assert_eq!((weight(&l, f1), weight(&l, splitv)), (714, 713));
+        l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
+        assert_eq!(l.get(root).unwrap().dividers, vec![r(717, 37, 7, 835)]);
+        assert_eq!(l.get(splitv).unwrap().dividers, vec![r(724, 443, 713, 7)]);
+        assert_eq!(l.equalise_track(root, 0), DragVerdict::Unchanged);
+    }
+
+    /// The fits-check on a copy (5.2; r1 A-F1's owed half): turning the
+    /// reference root vertical needs 505 rows (185 for the stack of four,
+    /// 313 for the column, a track), so in a 400-tall workspace it is
+    /// refused and the tree is untouched; in 841 it fits; a tree ALREADY
+    /// past its minima stays mutable; a no-op mutation is never refused.
+    #[test]
+    fn a_mutation_that_would_create_an_overflow_is_judged_on_a_copy() {
+        let (mut l, [p1, _, _], _) = reference();
+        l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
+        let root = l.root;
+        assert!(l.fits_after(|t| t.set_mode(root, Mode::SplitV)), "505 <= 835");
+        l.recompute(r(0, 34, 1440, 400), 1, inst100(), Profile::Instrument);
+        let epoch = l.epoch;
+        assert!(!l.fits_after(|t| t.set_mode(root, Mode::SplitV)), "505 > 394");
+        assert_eq!(l.epoch, epoch, "the copy was mutated, not the tree");
+        assert!(matches!(l.get(root).unwrap().kind, Kind::Container { mode: Mode::SplitH, .. }));
+        assert!(l.fits_after(|t| t.set_mode(root, Mode::SplitH)), "the same mode: a no-op");
+        assert!(l.fits_after(|_| false), "a mutation that fails is not judged");
+        assert!(l.fits_after(|t| t.set_mode(p1, Mode::SplitV)), "the left stack as a column: 373 <= 394");
+        // Already past the minima (294 < 313): every mutation stays open.
+        l.recompute(r(0, 34, 1440, 300), 1, inst100(), Profile::Instrument);
+        assert!(l.fits_after(|t| t.set_mode(root, Mode::SplitV)));
+        // Legacy has no minima.
+        l.recompute(r(0, 0, 1440, 900), 1, theme::builtin().metrics.at(100), Profile::Legacy);
+        assert!(l.fits_after(|t| t.set_mode(root, Mode::SplitV)));
+    }
+
+    /// The chrome bind's judgement (9.1; r1 A-F6): a session may decorate
+    /// its own tile or its own empty leaf, never another principal's tile,
+    /// and an empty leaf another principal split is not its to placard.
+    #[test]
+    fn a_chrome_bind_is_admitted_only_over_its_owners_pane() {
+        assert!(chrome_bind_admitted(1001, Some(1001), 0));
+        assert!(!chrome_bind_admitted(1001, Some(1002), 1001), "another principal's tile, whatever the leaf's record");
+        assert!(chrome_bind_admitted(1001, None, 1001));
+        assert!(!chrome_bind_admitted(1001, None, 0), "the environment's empty leaf");
+        assert!(!chrome_bind_admitted(1001, None, 1002));
     }
 
     /// One tile on a display is still a stack of one inside a frame under

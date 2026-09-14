@@ -1242,10 +1242,17 @@ buttons of 28; the theme control keeps its swatch and chevron), the
 footer's hints hide and its type is 9 (the free-running mono serves 10
 and 9 since I-5a; the island floor served both until then). Host-tested at
 800 and 821. The workspace root's 840
-minimum and the panning are NOT built — the carve has no panning yet (a
-residue for I-6, the dividers slice, whose clamps it belongs with) — and no
+minimum and the panning are NOT built — the carve has no panning yet — and no
 guest lane drives a narrow display (the `mode` verb is renderer-gated and
-no gate holds the renderer's seat).
+no gate holds the renderer's seat). **Deferred at I-6 to a labelled slice
+I-6b** (2026-09-14, under the standing authorization; §13 carries it for
+the operator): the panning workspace is a mechanism of its own — an
+offset every published rect, every input route, every CONFIGURE and the
+goldens' reader would carry — not a clamp of the dividers', and nothing
+in the fleet or the gates drives a display under 1280; under 840 today
+the carve's overflow arm lays every pane at its minimum from the origin
+and clips (a display that small keeps its data and never drops a tile,
+§5.2), which is the safe half of the rule.
 
 ## 9. Input and interaction
 
@@ -1295,6 +1302,77 @@ source's behaviour; a rollback would be a separate, labelled decision).
 Keyboard: a divider is not focusable in v1 (no ±0.025 arrow step); the
 `weight` verb and a chord may come later. Resizes reach clients through
 the existing CONFIGURE / reweave / pts winsize path.
+
+**As built at I-6** (the seven design questions the prep note listed,
+settled under the standing 2026-09-01 authorization; every answer is the
+source's behaviour where the source has one). **The drag lives in the
+compositor**, no verb: a divider is not a surface, and 9.1 already routes
+a track to the compositor itself. `Layout::track_at` names the split
+container and the track's index under the pointer; the compositor's own
+pointer capture (`Comp.drag`, held by the container's public ID — slots
+are reused, ids never) applies the pointer through the ONE mutation path
+the `weight` verb uses (`Layout::drag_track` → `set_weight`). **The
+weights become the extents**: on a drag or a double-click every divided
+child's weight is set to its pixel extent along the axis, with the pair's
+two changed — the extents are a fixed point of the flex rule (they sum to
+the usable extent and each clears its minimum), so the next carve lays the
+boundary exactly on the pointer's pixel and the neighbours keep theirs to
+the pixel, whatever the container's arity; a saved layout carries them as
+any other weights (`u16`; a display is narrower than 65535). **The ratio
+is the mockup's on the PAIR's frame**: `r = (pos − origin) / F` with `F`
+the two adjacent children plus the track (the full extent including the
+track, so the pointer rides the track `r · t` in, as the source's flex
+result), the first child's new extent `round(r · P)` with `P` the pair's
+usable extent (`libhalcyon::carve::drag_pair`, pure, host-tested against
+the reference root: 100 px right of the track's centre moves the boundary
+to 837 = 3 + 834). **The clamps**: the `0.22..0.78` band on the pair and
+the minima (`min_size_hyp` per child along the axis), the tighter bound
+winning on each side; a pair that cannot hold both minima (the carve's
+overflow) is not draggable at all — `Refused`, said once, nothing
+changes. **Coalescing**: motion only records the position; `frame_tick`
+lays it out at most once per frame (the reconcile every resize takes: the
+structural repaint and the CONFIGURE fan); the release and Escape lay the
+final position out at once, so it is never dropped, and a frozen frame
+clock (test-mode) still lands it. **The capture ends** on the primary
+button's release, on Escape (at the current ratio, the key swallowed with
+its release and repeats through the chord swallow-set, as the menu's), on
+any Super chord (before it acts, so a structural chord never races the
+capture over the tree it changes), on a modal opening (`menu_place`), and
+whenever the split it holds is gone or restructured (validated by id at
+every touch and at every reconcile: a close, a logout collapsing the tree,
+a same-mode split flattening beside the pair) — a release after any of
+those is the compositor's to swallow. While captured, nothing under the
+pointer hears MOVE, REL or SCROLL; a header under it hears LEAVE; every
+other key flows to the focused surface (a drag is a pointer capture, not
+a key grab). Only the primary button drags; another button on a track is
+swallowed on both edges. **Double-click** — two primary presses on the
+same track within 500 ms and 4 px of each other — equalises the TWO ADJACENT children
+(`carve::equalise_pair`, the same clamps), their neighbours untouched: the
+source's `ratio = .5` exactly, since its splits are binary; the second
+press starts no drag. **Inks**: the rule under the pointer paints
+`amber_muted`, the dragged rule `amber` (the source's `.dragging`; its
+glow is the effects slice's); the joint keeps `structure` / `desktop`; a
+hover change repaints and pushes just that track, the joint at once (no
+frame is repainted after it). **Deviations**: the source's transient
+status texts (`Ratio 52 / 48` while dragging, `Ratio reset`, `Resize
+cancelled`) are not shown — the footer is halcyond's and the compositor
+has no channel to it but a relayout; the drag's start, end (with its
+reason and the pair's extents) and the double-click are said in test
+builds instead, and the operator may vote a status channel (§13). No
+keyboard step (as above). The winsize path needed nothing: the session
+gate drags the welcome's track and reads both tiles' fits and the shell's
+unmoved prompt. Also landed here from round 1: the `mode` and `move` verbs
+and chords are judged on a COPY of the tree before they act
+(`Layout::fits_after`) and refused — `ENOMEM`, the split's class — when
+they would push a tree past the minima it clears today (a tree already
+past them stays mutable, since the moves that cure an overflow are also
+mutations); the chrome bind's admission is one function
+(`pane::chrome_bind_admitted`) judged at the mint AND at every reconcile,
+so a session's header over a tile that is no longer the session's is
+orphaned and its re-mint refused where the reap orphaned; the renderer's
+and the session's surface allowance is two per pane (a tile and its
+header), the pool sized for both, `Comp` pinned under a quarter of the
+user stack at compile time.
 
 ### 9.3 Chords — the mockup's gestures on our plane
 
@@ -1544,7 +1622,18 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   which waits for the inline-media arc's merge (it lives on aux-3,
   `53fcc14c`).
 - **I-6 — dividers and minima.** Capture, drag, double-click, the clamps
-  and refusals; winsize through the existing path.
+  and refusals; winsize through the existing path. **LANDED** (the
+  compositor's own pointer capture on the published tracks; the weights
+  become the extents; the mockup's ratio on the pair's frame; the band and
+  the minima, tighter winning; one relayout per frame, the final position
+  never dropped; Escape / a chord / a modal / the split's retirement end
+  it; the pair equalised on a double-click; hover `amber_muted`, drag
+  `amber`; the `mode` / `move` fits-checks on a copy; the chrome bind
+  re-judged at every reconcile; the two-per-pane allowance — the as-built
+  note in §9.2; the console gate's five divider legs and the session
+  gate's drag-to-fit leg; JOURNAL run 46o "I-6"). **I-6b — the 840
+  minimum and the panning workspace** (§8.3): deferred, labelled, the
+  operator's to schedule (§13).
 - **I-7 — the picker and live switching.** The menu surface, the
   transaction, persistence, the cooperative repaint; the dialog family
   (§14.5).
@@ -1647,6 +1736,19 @@ with the glyph that caused its wrap is re-kerned, but the space's step at
 the line end keeps the kern it had (invisible, the line ends there); the
 hanging space's `x_end` runs past the measure by the trailing RUN of spaces (every trailing space hangs; r2 A-F12) (selection
 rects include it).
+
+**I-6 residues (recorded 2026-09-14 night, decided under the standing
+authorization — reversible):** (1) **I-6b, the 840 minimum + the panning
+workspace** (§8.3) is deferred as its own slice: build it (a pan offset
+through every rect consumer + a lane on a narrow display) or drop the
+rule to the overflow arm's clipping for v1 — the operator's vote. (2)
+**The drag's status texts** (`Ratio 52 / 48` live, `Ratio reset`, `Resize
+cancelled`): not shown; a compositor→footer channel (a `drag` line in the
+`ctl` read fanned to the rail's owner, or a status verb) would be a small
+I-8-class addition — vote whether the live ratio is wanted at all. (3) A
+divider is not keyboard-focusable (§9.2's v1 rule stands); a `±0.025`
+arrow step would ride a chord. (4) The double-click window is 500 ms,
+wall-clock, press to press, on the same track; not a setting.
 
 ## 14. The round-2 surfaces (Astra §7, adopted 2026-09-14 with the deltas named)
 
