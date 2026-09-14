@@ -686,7 +686,7 @@ two subsets; accepted at §7.1). Host: halcyond 228 → 235.
 
 ### I-5b: the document -- a flow keyed on the profile, a cell one row taller than the browser's box, and two fingerprints read before the change
 
-**What landed** (`*(pending)*`; HALCYON-INSTRUMENT §7.2 / §7.5 / §7.6 /
+**What landed** (`60641786`; HALCYON-INSTRUMENT §7.2 / §7.5 / §7.6 /
 §7.7 / §14.7 as built, §12, §13's addendum; HALCYON-TYPE TY-4 amended).
 The `Sheet` grew the document's column: the type map's body 15 / 1.62,
 H1 clamp(23, 2.4 vw, 34) / 1.12, H2 17 / 1.3, an H3 the kit does not
