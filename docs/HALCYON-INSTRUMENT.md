@@ -81,6 +81,27 @@ come before the design.
    as-built chrome) and **instrument** (this document). A profile is a
    choice, never a rebuild (§4).
 
+The afternoon's rulings, on the §13 residue (2026-09-14, after round 2):
+
+10. **A shell tile flows proportionally, and only that** (§13.1, option A):
+    HALCYON.md §14.13 stands as the sole presentation; the mockup's mono
+    shell tiles are a reference for colours and padding only. No per-tile
+    presentation flag, no toggle pill. The mono grid remains the alternate
+    screen's (a raw application, §14.7) and `pre` islands stay mono
+    inside the flow (§7.6).
+11. **Mono faces: Cornucopia Regular + the true Italic; "500" is the
+    Regular** (§13.2, §13.8): two subsets embedded, real italics for
+    lifetimes and comments, no shear, no SemiBold (§7.1).
+12. **The 45 contrast replacements are adopted** for the native target
+    (§13.7; §3.1).
+13. **Chords** (§13.5): Super+T the picker (tabbed moves to
+    Super+Shift+T), Super+/ help, Super+Q close, Super+1..9 workspaces,
+    Super+Shift+1..9 move the focused tile (§9.3).
+14. **The turnstile is `secondary`** (§13.3): one amber glyph per prompt.
+15. **Kerning lands in I-5** (§13.4), with the rich document.
+16. The three Plex faces are vendored (§13.6, done at `d3958d68`); the two
+    strogg ANSI retunes stand by default (§13.9).
+
 ## 3. What "exact" means here, and what is amended
 
 Exact = **flat RGB8 values, geometry, ordering, text hierarchy and stable
@@ -139,7 +160,7 @@ package, the 13 stock files loaded by the tree's parser.
 | ANSI-16 | the kit's derived arrays; this document: designed here by rule | 13 hand-authored tables: all 208 slots ≥ 3.46:1 against `terminal_bg`, sixteen distinct per theme, bright polarity and per-ramp black/white extremes | **Astra's tables adopted**; our tool becomes the lint (Appendix A, §13.9) |
 | Contrast | the 45 pairs < 4.5:1 outside Carbon kept as the design (§13.7) | 45 replacements (12 `dim`, 12 `syntax-number`, 12 `syntax-comment`, 5 `syntax-attribute`, 3 `syntax-function`, 1 `syntax-keyword`), each the old value tinted toward the ink pole until ≥ 4.6:1 against its measured ground (`header` for `dim`, `code_bg` for syntax); Carbon unchanged | adopted for the native target (§13.7); historical captures stay unamended |
 | Scrollbar | a provisional 4 px `structure` thumb (§7.7) | the position-indicator contract: lane 8, thumb 3, `dim`, no track, no pointer, overflow-only | adopted (§7.7) |
-| Goldens | Astra's captures | none captured (no font bytes, no controlled browser); `capture/capture.mjs`, a 100-scenario matrix, syntax-checked only | the oracle is our own native-mode run of that harness (§11) |
+| Goldens | Astra's captures | none captured (no font bytes, no controlled browser); `capture/capture.mjs`, a 98-scenario matrix, syntax-checked only | the oracle is our own native-mode run of that harness (§11) |
 | Fonts | Plex Mono for mono | Cornucopia in EVERY mono role; mono advance, baseline and pitch retuned to Cornucopia's metrics; the browser goldens are a geometric and chromatic reference, never a demand to distort Cornucopia | as ruled; the whole family is on this machine (§7.1) |
 | Scale convention | "1440 × 900 at 200 %" | a LOGICAL viewport at a backing factor: 200 % is a 2880 × 1800 framebuffer (`effectiveDpr = scale/100 × baseDpr`) | adopted; identical to HALCYON-SCALE |
 | Prompt | `λ path ⊢ input` (ruling 2) | the same, with the inks fixed: λ `amber`, path `terminal_path`, ⊢ `secondary`, input `text`; single spaces; a running command never replaces λ with a status glyph; never a fake prefix over bytes the shell renders | as ruled (§7.4) |
@@ -522,9 +543,8 @@ silently discards children.
 | Header names, H1/H2, footer strong, picker titles, keywords' weight | IBM Plex Sans | 500 Medium | **yes** (`d3958d68`) — `IBMPlexSans-Medium.ttf`; not yet embedded |
 | Brand (`WORKSPACE`) | IBM Plex Sans | 600 SemiBold | **yes** (`d3958d68`) — `IBMPlexSans-SemiBold.ttf`; not yet embedded |
 | Emphasis (rich text) | IBM Plex Sans | 400 Italic | yes (embedded) |
-| Every mono role | Cornucopia | Regular | yes — the embedded subset, **208 codepoints** (`usr/lib/cornucopia/src/cornucopia-subset.ttf`, its list read out of the baked atlas): it LACKS λ, ✓, ‹ ›, −, ⌘ and all of U+2500–257F, which the Instrument surfaces use (§7.4, §14.1, §14.3); re-subset in I-5 |
-| Mono italic (lifetimes, comments) | Cornucopia | Italic — a true face exists | no — §13.2 |
-| Mono "500" (index, doc path, clock, footer) | Cornucopia | Regular or SemiBold (no Medium exists) | §13.8 |
+| Every mono role, incl. the mockup's "500" ones (index, doc path, clock, footer — ruling 11) | Cornucopia | Regular | yes — the embedded subset, **208 codepoints** (`usr/lib/cornucopia/src/cornucopia-subset.ttf`, its list read out of the baked atlas): it LACKS λ, ✓, ‹ ›, −, ⌘ and all of U+2500–257F, which the Instrument surfaces use (§7.4, §14.1, §14.3); re-subset in I-5 |
+| Mono italic (lifetimes, comments) | Cornucopia | Italic — the true face (ruling 11) | **no** — a second subset from `cornucopia-Italic.ttf`, I-5 |
 
 The Cornucopia family on this machine is complete: `~/projects/cornucopia-font/`
 (the same bytes as `~/Library/Fonts/cornucopia-*.ttf`; MIT, © the operator),
@@ -561,16 +581,14 @@ keys (HALCYON-THEME §2).
 | Block code (`pre`) | mono | 12 / 1.65 (19.8) | keywords "500" = the keyword colour only under Cornucopia |
 | Terminal | mono | 12 / 1.6 (19.2) | 400 |
 
-Where the mockup asks a mono weight or an italic (lifetimes, comments),
-the tree today embeds ONE Cornucopia face (the Regular subset) while the
-family has a true Italic and a SemiBold (§7.1). Until §13.2 and §13.8 are
-answered the ROLE keeps its colour, the slant is synthesised as a 12° shear
-in the outline path (`outline.rs`, one transform on the pen) and "500" is
-the Regular. Cornucopia sizes go through the live outline at the cell
-table (HALCYON-TYPE TY-4): a 12 px terminal is advance 6 at 100 %, 9 at
-150 %, 12 at 200 %, the cell height and baseline the table's — round 2
-confirms the target is Cornucopia's own metrics, never Plex Mono's stretched
-onto it.
+Where the mockup asks a mono weight, the Regular serves (ruling 11: no
+Medium exists and no SemiBold is embedded); where it asks an italic
+(lifetimes, comments), the true Cornucopia Italic serves, as a second
+subset with the Regular's codepoint list, no shear anywhere. Cornucopia
+sizes go through the live outline at the cell table (HALCYON-TYPE TY-4): a
+12 px terminal is advance 6 at 100 %, 9 at 150 %, 12 at 200 %, the cell
+height and baseline the table's — round 2 confirms the target is
+Cornucopia's own metrics, never Plex Mono's stretched onto it.
 
 Smoothing: 0 on dark themes, 12 on the three light ones (`type.smooth`,
 HALCYON-TYPE §4.2); phases and the fractional pen unchanged.
@@ -618,9 +636,9 @@ painted under Instrument (§3).
 
 `λ <cwd> ⊢ <input>` — `ut` emits the lambda as the first glyph of its
 prompt zone and keeps the turnstile before the editing line. Colours in
-the terminal view: `λ` `amber`, the cwd `terminal_path`, `⊢` `secondary`
-(one amber glyph per prompt: the discipline; the turnstile is a delimiter,
-not a signal — the operator may make it amber, §13.3), input `text`. The
+the transcript: `λ` `amber`, the cwd `terminal_path`, `⊢` `secondary`
+(ruling 14: one amber glyph per prompt; the turnstile is a delimiter, not
+a signal), input `text`. The
 change is in the producer (`libutopia` palette/ansi: the prompt shape,
 under `HALCYON_PALETTE`'s existing role export — `Role::Glyph` gains the
 lambda; the turnstile keeps its role), never a byte substitution in the
@@ -651,17 +669,17 @@ them off, §11) and here. Whether it lands in this arc or after is §13.4.
 
 ### 7.6 Presentation: terminal view vs rich document
 
-A tile's content has two presentations under Instrument. **Rich document**
-is the proportional flow (HALCYON.md §14.13, the Beacon transcript: prose,
-objects, headings, tables, `pre` islands) in the type of §7.2. **Terminal
-view** paints the same transcript mono (Cornucopia 12/1.6 on
-`terminal_bg`, the mockup's shell tiles), Beacon objects still affordant
-(obj runs underlined and coloured, the verb menu on them), `pre` inherent.
-The alt screen is the mono grid in both, full-body, as ratified. Which
-presentation a shell tile defaults to is the one conflict between the kit
-and ratified scripture — §13.1 — and this document does not decide it. The
-mechanism is the same either way: a per-tile presentation flag, a header
-pill to toggle it, both presentations reading one transcript.
+A tile's content has ONE presentation under Instrument, as under legacy
+(ruling 10): the **rich document** — the proportional flow of HALCYON.md
+§14.13 (the Beacon transcript: prose, objects, headings, tables, `pre`
+islands) in the type of §7.2. The mockup's mono shell tiles are a
+reference for their colours and paddings only: the prompt's inks (§7.4),
+`terminal_bg` / `terminal_text` behind and inside a `pre` island and the
+alternate screen, the 12/1.6 mono line in a `pre`. The alternate screen is
+the mono grid, full-body (§14.7), as ratified. There is no per-tile
+presentation flag and no toggle pill; a program that wants the mockup's
+look emits preformatted output, which is mono by the standing rule
+(HALCYON-VISUAL §7).
 
 ### 7.7 The position indicator (round 2 §6; ruling 7)
 
@@ -805,9 +823,14 @@ the existing CONFIGURE / reweave / pts winsize path.
 | Alt + J / K: next / previous tile | the cycle chords (`TabCycle`), which walk a stack's children |
 | Alt + H / V: split | Super + H / V (`Split`) — the new pane gets a NEW tile (§9.5) |
 | Close tile | Super + Q (`Close`) on the focused leaf, with the §6.5 protections |
-| Workspace N | Super + 1..9 (HALCYON-WORKSPACES §4, now to be bound; free keys) |
-| Theme picker, help, reset | pointer on the rail; chords to be chosen (§13.5) |
+| Workspace N | Super + 1..9 switches; Super + Shift + 1..9 moves the focused tile (ruling 13; HALCYON-WORKSPACES §4; free keys) |
+| Theme picker | Super + T (ruling 13); `SetMode Tabbed`, which holds Super + T today, moves to Super + Shift + T |
+| Help | Super + / (ruling 13) |
+| Reset | pointer on the rail only (no chord) |
 | Escape | ends a drag; dismisses a menu / dialog (the compositor's, as built) |
+
+The footer's hints are generated from these bindings (§8.2), so a rebind
+in `chords.rs` is a rebind of the hint.
 
 Input priority is unchanged in shape: trusted system chord > modal >
 placed menu > divider capture > the Super plane > the focused tile. The
@@ -892,8 +915,9 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   Pinned Playwright + Chromium, fonts injected as exact bytes with their
   SHA256s recorded, remote requests aborted, clock frozen at 09:41,
   `READY`, reduced motion, transitions and animations off, the caret forced
-  visible; a 100-scenario matrix (26 geometry rows × baseDpr 1 and 2 at
-  Carbon, the 13 themes at 1440 × 900, 24 states), each with `page.png` +
+  visible; a 98-scenario matrix (13 geometry rows × baseDpr 1 and 2 at
+  Carbon = 26, the 13 themes at 1440 × 900 × 2 = 26, 23 states × 2 =
+  46), each with `page.png` +
   `geometry-styles.json` + `metadata.json` and a run `manifest.json`. Two
   modes:
   - **native** — THE ORACLE of this arc ("native-target revision 2"):
@@ -920,8 +944,8 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   folded into a percentage. A missing object is a failed setup.
 - **Native goldens.** `tools/interactive/ls-gfx-instrument.exp` (a new
   LS-CI scenario on the `--config ci` image with the Instrument lever):
-  the 3-pane / 10-tile fixture (`fixtures.json`) at 1280 × 800 and 1440 ×
-  900 at 100 and 200; the state matrix S01-S14; the picker cycling all 13
+  the 3-pane / 10-tile fixture (`fixtures.json`) at 1280 × 720 and 1440 ×
+  900 at 100 and 200 (the harness's rows; there is no 1280 × 800 golden); the state matrix S01-S14; the picker cycling all 13
   with PIDs, order, expansion and scroll preserved; the seat's negative
   controls for `role=rail`, `weight` and `theme`; the crash of one
   kaua-term contained to its tile. The pixel reader is `gfx_compose.py`'s,
@@ -966,11 +990,11 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   *Audit-bearing: the gated create + the carve.*
 - **I-5 — type and the rich document.** The Instrument `Sheet`, the type
   map, margin collapsing, clamp paddings, the `pre` block, the terminal
-  view's colours, `λ … ⊢` in `ut`, the presentation flag and its pill, the
-  nine syntax roles in `nora`'s export, the position indicator (§7.7), the
-  Cornucopia re-subset (λ, ✓, ‹ ›, −, ⌘, U+2500–257F; §7.1), inline media
-  and the gallery in the Instrument frame (§14.4), the raw application
-  grid (§14.7).
+  view's colours, `λ … ⊢` in `ut`, the nine syntax roles in `nora`'s
+  export, the position indicator (§7.7), the Cornucopia re-subset (λ, ✓,
+  ‹ ›, −, ⌘, U+2500–257F) and the Italic subset (§7.1), GPOS pair kerning
+  (§7.5, ruling 15), inline media and the gallery in the Instrument frame
+  (§14.4), the raw application grid (§14.7).
 - **I-6 — dividers and minima.** Capture, drag, double-click, the clamps
   and refusals; winsize through the existing path.
 - **I-7 — the picker and live switching.** The menu surface, the
@@ -987,6 +1011,12 @@ Rollback at every step is the profile word; a palette rollback never kills
 a process; a layout v2 file reads under v1 with equal weights.
 
 ## 13. For the operator (the residue the research could not settle)
+
+**All nine RULED 2026-09-14** (§2, rulings 10–16); the items stay as the
+record of what was asked and recommended: 1 → A (against the
+recommendation); 2 → the true Italic; 3 → `secondary`; 4 → I-5; 5 → the
+proposed set; 6 → vendored; 7 → adopt; 8 → the Regular; 9 → the retunes
+stand.
 
 1. **A shell tile's default presentation** (§7.6). (A) proportional-live
    as ratified 2026-09-06 — the mockup's mono shell tiles are then a
