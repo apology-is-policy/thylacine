@@ -192,21 +192,46 @@ fn post_srv_warp() -> Result<i64, ()> {
 ///
 /// Refused-or-absent is not fatal: the built-in stands, loudly if a file was
 /// there and would not load.
-fn system_theme() -> libhalcyon::theme::Theme {
-    const PATH: &str = libhalcyon::theme::SYSTEM_THEME_PATH;
+fn system_theme() -> libhalcyon::instrument::Bundle {
+    // The system profile word first, then the system theme file: since I-1
+    // the compositor holds a BUNDLE (HALCYON-INSTRUMENT 4.1), no user tier.
+    let profile = read_system_file(libhalcyon::instrument::SYSTEM_PROFILE_PATH, "profile");
+    let text = read_system_file(libhalcyon::theme::SYSTEM_THEME_PATH, "theme");
+    let r = libhalcyon::instrument::resolve_bundle(libhalcyon::instrument::Sources {
+        system_profile: profile.as_deref(),
+        system_file: text.as_deref(),
+        ..Default::default()
+    });
+    for n in &r.notes {
+        say!("tapestryd: {}", n);
+    }
+    say!(
+        "tapestryd: theme {} ({:?}, {:?}); profile {} ({:?})",
+        if r.name.is_empty() {
+            "built-in"
+        } else {
+            &r.name
+        },
+        r.theme_tier,
+        r.schema,
+        r.bundle.profile.word(),
+        r.profile_tier
+    );
+    r.bundle
+}
+
+/// One system file, whole, or `None`: absent (4.1, one line said, since an
+/// absent path is otherwise indistinguishable from a read that never ran --
+/// measured: this left NO trace in the first gate capture) or not UTF-8.
+fn read_system_file(path: &str, what: &str) -> Option<alloc::string::String> {
     // SAFETY: SVC wrappers over a path literal and an owned buffer.
-    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, PATH.as_ptr(), PATH.len(), T_OREAD) };
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
     if fd < 0 {
-        // 4.1: a missing file is not an error. It IS still worth one line --
-        // the absent path is otherwise indistinguishable from a read that
-        // never ran, and an unwitnessed load path is one nobody can tell has
-        // broken (measured: this function left NO trace in the first gate
-        // capture, which is how the gap was found).
-        say!("tapestryd: theme built-in (no {})", PATH);
-        return libhalcyon::theme::builtin();
+        say!("tapestryd: {} built-in (no {})", what, path);
+        return None;
     }
     // One byte past the cap, so a file AT the cap is distinguishable from one
-    // that was cut: `from_toml` refuses anything over it, and a short read
+    // that was cut: the loader refuses anything over it, and a short read
     // that filled the buffer would otherwise be a valid truncated prefix.
     let mut buf = alloc::vec![0u8; libhalcyon::theme::THEME_MAX + 1];
     let mut got = 0usize;
@@ -221,30 +246,14 @@ fn system_theme() -> libhalcyon::theme::Theme {
         }
     }
     unsafe { t_close(fd) };
-    let text = match core::str::from_utf8(&buf[..got]) {
-        Ok(t) => t,
+    buf.truncate(got);
+    match alloc::string::String::from_utf8(buf) {
+        Ok(t) => Some(t),
         Err(_) => {
-            say!(
-                "tapestryd: {} is not utf-8; the built-in theme stands",
-                PATH
-            );
-            return libhalcyon::theme::builtin();
+            say!("tapestryd: {} is not utf-8; the built-in {} stands", path, what);
+            None
         }
-    };
-    let r = libhalcyon::theme::resolve(Some(text), None);
-    for n in &r.notes {
-        say!("tapestryd: {}", n);
     }
-    say!(
-        "tapestryd: theme {} ({:?})",
-        if r.name.is_empty() {
-            "built-in"
-        } else {
-            &r.name
-        },
-        r.source
-    );
-    r.theme
 }
 
 fn declared_scale() -> Option<u16> {

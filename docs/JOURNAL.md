@@ -194,6 +194,65 @@ geometry dumps, so the tree carries its identity
 fonts, two reference PNGs) and `build/` the pixels. A miscount caught on
 the way: the matrix is 98, not the 100 I wrote twice (23 states, not 24).
 
+### I-1: the second schema, the bundle, the wire -- and what the tests caught on the way
+
+Landed the same afternoon (the effort gate: `max`, confirmed before the
+first line). `libhalcyon::instrument` holds the Instrument schema
+(`InstrumentTheme`: the 35 roles, the ANSI-16, the stroke, the polarity;
+a registry of 37 keys + 5 meta keys, both directions pinned; `from_entries`
+strict -- every key required, no `base`, unknown key or table refused,
+`schema = 1`, `id` a gallery id BEFORE it can be a path, `name`
+presentable, `color_scheme` dark or light, the ANSI slot rule, 16 KiB),
+the two projections, `Profile`, `Bundle` / `Visual`, and `resolve_bundle`
+over every tier (user profile > system profile > `legacy`; pick > user
+file > system file > the profile's floor). `theme::load` parses once and
+dispatches on `[meta] profile`; the push line grew from 72 to 127 fields;
+the 13 gallery files are GENERATED from the record
+(`tools/halcyon/instrument-gallery.py`) and bake beside Nightjar; the
+compositor carries `Comp.bundle` and derives its legacy pair from it, so
+nothing paints differently; the lint reads both schemas and every tier.
+
+**Three things the tests caught that reading had not.**
+
+- **The wire could be cut inside its last integer and still apply.** The
+  truncation control (`good[..len-1]` refused) had passed since TH-4 by
+  the digit count of the legacy line's last field, `tab_strip_h = 5`:
+  one byte off leaves an empty field, which fails to parse. With the
+  Instrument `smooth` last, `...,12` cut to `...,1` parsed as smooth 1 and
+  APPLIED. A field count cannot see a shortened integer; the line now
+  ends in a literal `end`, and the test cuts it at three places. The
+  hazard was latent in the old format too: a theme with `tab_strip_h =
+  12` would have been accepted with 1.
+- **Round 2's stock projections lag their own sidecars.** `project_legacy`
+  is the kit's mapping in the kit's own double arithmetic, and against the
+  FIRST kit it reproduces all 13 stock files byte for byte. Against round
+  2 it differed on 12 themes in exactly one key: `status_idle`, which
+  Astra's `build_palettes.py` never rewrote from the amended `dim` (it
+  rewrote `fg_subtle`, the `fg_muted`s and the syntax slots). The round-2
+  `palettes/*.toml` therefore carry the first kit's `status_idle` beside
+  the amended `fg_subtle`. Nothing installs those files -- the loader
+  projects from the sidecar, which is right -- but the record is pinned
+  for what it is (`round2_stock_files_lag_their_sidecars_in_exactly_status_idle`).
+- **A test that had never run.** The census found a stray `#[test]`
+  above the gallery test's doc comment and none on
+  `the_annotated_template_loads_and_sets_every_key`, so the template's
+  `== DAYLIGHT` pin had been dead since TH-5. It runs now, and passes.
+
+Host suites: libhalcyon 81 -> 94, halcyond 209, halcyon 21, tapestryd 21,
+all green on `aarch64-apple-darwin`; the three consumers build for the
+guest target. Guest: ls-ci PASS (29 s) on the `--config ci` image with 16
+gallery files baked, the two new legs reading the real output
+(`carbon.toml: OK -- "Carbon Optics", instrument-v1 (id carbon), all 42
+keys set`; `profile: legacy (built-in)`); ls-halcyon PASS (119 s) on the
+console-lever image with `halcyond: theme pushed to the compositor` -- the
+127-field line admitted by the compositor. The first ls-halcyon run
+failed 3/3 at its first post-login command and the cause was the BAKE:
+the console lever on top of the session default spawns the tiled session
+at login, so no console shell ever printed; session lever off, pass.
+Fifteen minutes to learn that the recipe is one image per gate's lever,
+and the session default (2026-09-09) changed what the console lever's
+image is.
+
 ### Owed at the end of the run
 
 - Round 2 INGESTED, section 13 RULED, the goldens CAPTURED (above): I-0

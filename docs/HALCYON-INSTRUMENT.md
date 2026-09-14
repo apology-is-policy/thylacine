@@ -280,28 +280,46 @@ installed.
 ### 4.4 The resolved bundle, one type
 
 ```rust
-pub struct Visual {           // what every painter is handed; nothing else reads a constant
+pub struct Bundle {           // the RESOLVED, scale-free pair: what crosses the wire
     pub profile: Profile,     // Legacy | Instrument
     pub theme: Theme,         // the legacy 57 (native, or projected)
-    pub inst: Option<InstrumentTheme>,   // the 35 + ansi + smooth (native, or projected)
-    pub metrics: Metrics,     // the profile's table, at the scale
+    pub inst: InstrumentTheme,// the 35 + ansi + smooth + polarity (native, or projected)
+}
+pub struct Visual {           // what every painter is handed; nothing else reads a constant
+    pub profile: Profile,
+    pub theme: Theme,
+    pub inst: InstrumentTheme,
+    pub metrics: Metrics,     // the profile's table, at the scale: `Bundle::at(pct)`
 }
 ```
 
-`Sheet` carries a `Visual` instead of a bare `Theme` (`layout.rs:49`);
-`Comp.theme` becomes `Comp.visual`. The TH-2 rule holds: no production
+*(As built at I-1: `inst` is never absent — a bundle always carries both
+sides, one native and one projected, so the `Option` this section first
+proposed was dropped; `Bundle` is the wire's type and `Visual` = `Bundle`
++ the scaled metrics. Until I-2 the metrics are the legacy theme's table
+under either profile.)* `Sheet` carries a `Visual` instead of a bare
+`Theme` (`layout.rs:49`) from I-2; at I-1 `Comp` gains `Comp.bundle` and
+derives its `theme` and `metrics` from it in `new` and `apply_theme`
+alone, so nothing paints differently. The TH-2 rule holds: no production
 site names `DAYLIGHT`, `CARBON` or a metrics constant; both are
 `theme-fixture`-gated.
 
 ### 4.5 The wire
 
-`to_wire`/`from_wire` (`theme.rs:914-1050`, 72 fields today) gain the
-profile word, the 35 colours, the 16 ANSI entries and the smooth — one
-line, every field re-validated at the compositor (`from_wire` re-checks
-every bound; the seat is still another process). The exhaustive structural
-guard TH-6 introduced (`a_distinct_theme_survives_the_wire`) is extended,
-not bypassed: `WIRE_FIELDS` moves once, both endpoints in one commit. The
-line stays under 2 KiB.
+`to_wire`/`from_wire` (`theme.rs`, 72 fields until I-1) take a `Bundle`:
+the legacy 72 in their old positions, then the profile word, the colour
+scheme, the 35 colours, the 16 ANSI entries, the smooth, and a literal
+`end` — **127 fields**. Every field is re-validated at the compositor
+(`from_wire` re-checks every bound, the profile word, the scheme and the
+ANSI slot rule; the seat is still another process). The terminator is
+new at I-1 and closes a hazard the old line carried: a push cut inside its
+LAST integer parses as a different valid integer (`12` → `1`), and the
+count alone cannot see it — the legacy line's last field was the one-digit
+`tab_strip_h`, so its truncation control passed by the digit count. The
+exhaustive structural guard TH-6 introduced
+(`a_distinct_theme_survives_the_wire`) is extended, not bypassed:
+`WIRE_FIELDS` moved once, both endpoints in one commit. The line is
+~1 KiB, under the 2 KiB bound.
 
 ## 5. Geometry — the exact carve
 
@@ -969,10 +987,13 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   recorded; this document ratified. No runtime change.
 - **I-1 — the second schema and the bundle.** `InstrumentTheme`, the
   dispatching loader, both projections, the 13 gallery files (round 2's
-  colours and its authored ANSI, Appendix A), `Visual`, the wire, `halcyon
-  theme lint` for both.
+  colours and its authored ANSI, Appendix A), `Bundle` / `Visual`, the
+  wire, `halcyon theme lint` for both.
   Nothing paints differently yet. *Audit-bearing: a new strict parser
-  (format-fuzz), the wire.*
+  (format-fuzz), the wire.* **LANDED** (`libhalcyon::instrument`,
+  `theme::load`, the 127-field wire, the gallery generator
+  `tools/halcyon/instrument-gallery.py`, `Comp.bundle`, the lint's two
+  schemas and the profile / pick tiers; JOURNAL run 46o).
 - **I-2 — the profile's geometry.** `Metrics` grows; the Instrument carve
   (rails, outer pad, tracks, joints, frame, headers — collapsed included,
   the lone-tile rule); the `frame` / `dividers` files; weights and the

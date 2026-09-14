@@ -383,26 +383,36 @@ pub extern "C" fn rs_main() -> i64 {
     // there is no user tier to read -- and reading one would mean a console
     // wearing whichever user happened to log in last. Everything downstream
     // is handed the resolved `&Theme`, through the sheet that carries it.
-    let resolved = libhalcyon::theme::resolve(
-        chromeset::read_file(T_WALK_OPEN_FROM_ROOT, libhalcyon::theme::SYSTEM_THEME_PATH)
-            .as_deref(),
-        None,
-    );
+    // Since I-1 the resolution is a bundle (HALCYON-INSTRUMENT 4.1): the
+    // system profile word and the system theme file, no user tier.
+    let system_profile =
+        chromeset::read_file(T_WALK_OPEN_FROM_ROOT, libhalcyon::instrument::SYSTEM_PROFILE_PATH);
+    let system_file =
+        chromeset::read_file(T_WALK_OPEN_FROM_ROOT, libhalcyon::theme::SYSTEM_THEME_PATH);
+    let resolved = libhalcyon::instrument::resolve_bundle(libhalcyon::instrument::Sources {
+        system_profile: system_profile.as_deref(),
+        system_file: system_file.as_deref(),
+        ..Default::default()
+    });
     for n in &resolved.notes {
         say!("halcyond: {}", n);
     }
     // One line naming the theme in force, on every path including the absent
     // one -- the witness that this renderer's load path ran at all.
     say!(
-        "halcyond: theme {} ({:?})",
+        "halcyond: theme {} ({:?}, {:?}); profile {} ({:?})",
         if resolved.name.is_empty() {
             "built-in"
         } else {
             &resolved.name
         },
-        resolved.source
+        resolved.theme_tier,
+        resolved.schema,
+        resolved.bundle.profile.word(),
+        resolved.profile_tier
     );
-    let theme = resolved.theme;
+    let bundle = resolved.bundle;
+    let theme = bundle.theme;
     // The compositor cannot read this file. Measured 2026-09-09 on the
     // Nightjar lever: `tapestryd: theme built-in (no /lib/halcyon/theme.toml)`
     // while THIS process, started later, loaded the very same path -- because
@@ -419,7 +429,7 @@ pub extern "C" fn rs_main() -> i64 {
     // per-pass layout budget was already spent got one attempt and gave up
     // permanently -- on the very path that exists because the compositor
     // cannot read the file itself.
-    session::push_theme(&ring, &theme);
+    session::push_theme(&ring, &bundle);
     let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     {

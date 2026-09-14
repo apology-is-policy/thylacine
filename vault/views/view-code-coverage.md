@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 61 unowned · 495 files (87% owned) · ~18132 unswept lines.**
+**434 owned · 62 unowned · 496 files (87% owned) · ~19425 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30518 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,10 +74,10 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 0 | 22 | 3384 |
 | usr/haul | 0 | 5 | 2557 |
+| usr/lib | 58 | 4 | 2296 |
 | kernel | 123 | 15 | 2118 |
 | usr/ports | 14 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1028 |
-| usr/lib | 58 | 3 | 1003 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/halcyond | 19 | 1 | 432 |
 | usr/kaua-term | 3 | 1 | 276 |
@@ -123,6 +123,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
+| usr/lib/libhalcyon/src/instrument.rs | 1293 |
 | usr/haul/src/main.rs | 1125 |
 | usr/quarry/src/main.rs | 1028 |
 | usr/haul/src/npxf.rs | 1005 |

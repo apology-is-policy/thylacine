@@ -352,13 +352,33 @@ pub fn lint_files(files: &[ThemeFile]) -> LintReport {
             continue;
         };
 
-        match libhalcyon::theme::Theme::from_toml(text) {
+        // Either schema (HALCYON-INSTRUMENT 4.2): the same `load` the
+        // renderers use, so the lint cannot accept a file they would refuse.
+        match libhalcyon::theme::load(text) {
             Err(e) => {
                 refused = true;
                 let _ = write!(head, "REFUSED -- {}", libhalcyon::theme::describe(&e));
                 lines.push(head);
             }
-            Ok(l) => {
+            Ok(libhalcyon::instrument::LoadedAny::Instrument(l)) => {
+                let name: &str = if l.name.is_empty() {
+                    "(unnamed)"
+                } else {
+                    &l.name
+                };
+                // Every key is required in this schema, so a file that
+                // loaded set all of them: the 37 colour/terminal/type keys
+                // plus the five of [meta].
+                let total = libhalcyon::instrument::KEYS.len() + 5;
+                let _ = write!(
+                    head,
+                    "OK -- \"{name}\", {} (id {}), all {total} keys set",
+                    libhalcyon::instrument::PROFILE_WORD,
+                    l.id
+                );
+                lines.push(head);
+            }
+            Ok(libhalcyon::instrument::LoadedAny::Legacy(l)) => {
                 let name: &str = if l.name.is_empty() {
                     "(unnamed)"
                 } else {
@@ -392,25 +412,61 @@ pub fn lint_files(files: &[ThemeFile]) -> LintReport {
 /// really do -- including the fall-ONE-tier-down rule (a user file with a typo
 /// leaves the system theme in place, not the built-in).
 pub fn lint_active_line(system: Option<&str>, user: Option<&str>) -> String {
-    use libhalcyon::theme::Source;
-    let r = libhalcyon::theme::resolve(system, user);
+    lint_active_lines(libhalcyon::instrument::Sources {
+        system_file: system,
+        user_file: user,
+        ..Default::default()
+    })
+    .0
+}
+
+/// The `active:` and `profile:` lines for a full set of tiers (HALCYON-
+/// INSTRUMENT 4.1): the profile word (user, system, or the built-in
+/// `legacy`), then the theme -- the picker's gallery choice, the user's
+/// file, the system's, or the profile's floor -- through
+/// [`libhalcyon::instrument::resolve_bundle`] itself, so the lines cannot
+/// drift from what a renderer would paint, refusals included (a refused
+/// tier falls one step down, never straight to the built-in).
+pub fn lint_active_lines(src: libhalcyon::instrument::Sources<'_>) -> (String, String) {
+    use libhalcyon::instrument::{Profile, Schema, Tier};
+    let r = libhalcyon::instrument::resolve_bundle(src);
+    let tier = |t: Tier| match t {
+        Tier::BuiltIn => "built-in",
+        Tier::System => "system",
+        Tier::User => "user",
+        Tier::Pick => "pick",
+    };
     let mut s = String::from("active: ");
-    match r.source {
-        Source::BuiltIn => {
-            s.push_str("built-in (Daylight)");
-            return s;
-        }
-        Source::System => s.push_str("system"),
-        Source::User => s.push_str("user"),
-    }
-    s.push_str(" -- \"");
-    s.push_str(if r.name.is_empty() {
-        "(unnamed)"
+    if r.theme_tier == Tier::BuiltIn {
+        s.push_str(match r.bundle.profile {
+            Profile::Legacy => "built-in (Daylight)",
+            Profile::Instrument => "built-in (Carbon Optics)",
+        });
     } else {
-        &r.name
-    });
-    s.push('"');
-    s
+        s.push_str(tier(r.theme_tier));
+        s.push_str(" -- \"");
+        s.push_str(if r.name.is_empty() {
+            "(unnamed)"
+        } else {
+            &r.name
+        });
+        s.push('"');
+        if r.schema == Schema::Instrument {
+            s.push_str(" (");
+            s.push_str(libhalcyon::instrument::PROFILE_WORD);
+            if !r.id.is_empty() {
+                s.push_str(", id ");
+                s.push_str(&r.id);
+            }
+            s.push(')');
+        }
+    }
+    let mut p = String::from("profile: ");
+    p.push_str(r.bundle.profile.word());
+    p.push_str(" (");
+    p.push_str(tier(r.profile_tier));
+    p.push(')');
+    (s, p)
 }
 
 /// Wrap space-separated tokens into `indent`-prefixed lines of at most `width`

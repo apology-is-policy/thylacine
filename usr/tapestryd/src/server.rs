@@ -1500,6 +1500,12 @@ pub struct Comp {
     /// agree or the bevel does not match the pane, which is why this and
     /// halcyond's `Sheet.theme` have to come from the same file.
     pub theme: libhalcyon::theme::Theme,
+    /// The RESOLVED BUNDLE (HALCYON-INSTRUMENT 4.4): the profile in force
+    /// and both themes, one native and one projected. `theme` and `metrics`
+    /// above are derived from it in `new` and `apply_theme` and nowhere
+    /// else; until I-2 lands the Instrument carve every painter still reads
+    /// the legacy pair, so nothing paints differently under `instrument`.
+    pub bundle: libhalcyon::instrument::Bundle,
     surfaces: [Option<Surface>; MAX_SURFACES],
     gen_seq: u32,
     conn_seq: u64,
@@ -2330,7 +2336,8 @@ struct GlAdopt {
 const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
-    pub fn new(gpu: Gpu, declared: Option<u16>, theme: libhalcyon::theme::Theme) -> Comp {
+    pub fn new(gpu: Gpu, declared: Option<u16>, bundle: libhalcyon::instrument::Bundle) -> Comp {
+        let theme = bundle.theme;
         let (derived, src) = match declared {
             Some(p) => (p, "declared"),
             None => (
@@ -2359,6 +2366,7 @@ impl Comp {
             declared,
             metrics: theme.metrics.at(scale),
             theme,
+            bundle,
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
@@ -4142,11 +4150,12 @@ impl Comp {
     /// and no geometry moved to trigger a redraw on its own (the scale
     /// round's F3 lesson: a fan keyed on geometry misses every change that
     /// moves no geometry).
-    fn apply_theme(&mut self, t: libhalcyon::theme::Theme, who: &str) {
-        if t == self.theme {
-            return; // idempotent: a re-push of the same theme fans nothing
+    fn apply_theme(&mut self, b: libhalcyon::instrument::Bundle, who: &str) {
+        if b == self.bundle {
+            return; // idempotent: a re-push of the same bundle fans nothing
         }
-        self.theme = t;
+        self.bundle = b;
+        self.theme = b.theme;
         self.metrics = self.theme.metrics.at(self.scale);
         say!("tapestryd: theme applied ({} push)", who);
         self.rescale_fan_due = true;
@@ -16339,7 +16348,7 @@ impl Conn {
             // a seat is still another process, and `from_wire` re-checks the
             // geometry bounds rather than trusting the far side (a display
             // whose hairline arrived unvalidated is a scale-class hazard).
-            let Some(t) = libhalcyon::theme::from_wire(rest) else {
+            let Some(b) = libhalcyon::theme::from_wire(rest) else {
                 return Err(p9::E_INVAL);
             };
             let who = if self.peer_is_renderer() {
@@ -16347,7 +16356,7 @@ impl Conn {
             } else {
                 "session"
             };
-            comp.apply_theme(t, who);
+            comp.apply_theme(b, who);
             return Ok(());
         }
         if let Some(rest) = s.strip_prefix("scale ") {

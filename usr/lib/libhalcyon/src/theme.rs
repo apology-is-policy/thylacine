@@ -430,6 +430,14 @@ pub enum LoadError {
     /// Named, not counted: "some hardcoded daylight colour kicked in" is
     /// impossible when the loader tells you exactly which keys you owe.
     Incomplete { missing: alloc::vec::Vec<String> },
+    /// `[meta] profile` names a schema this binary does not have
+    /// (HALCYON-INSTRUMENT 4.2): refused whole, never half-read.
+    UnknownProfile { line: u32 },
+    /// `[meta] id` is not a gallery id (`instrument::is_gallery_id`).
+    BadId { line: u32 },
+    /// Two ANSI slots share a value (only bright white may equal the
+    /// terminal text).
+    AnsiNotDistinct { line: u32 },
 }
 
 /// A theme file, loaded.
@@ -470,7 +478,7 @@ pub const NAME_MAX: usize = 64;
 /// Refused at LOAD, not sanitised at each render site: 4.2 says a file is
 /// accepted whole or refused whole, and a chokepoint cannot be forgotten at
 /// the next place someone prints a theme's name.
-fn name_is_presentable(s: &str) -> bool {
+pub(crate) fn name_is_presentable(s: &str) -> bool {
     // Length first: it is the cheap discriminator, so a 32 KB "name" is
     // refused without scanning it.
     s.len() <= NAME_MAX && !s.chars().any(is_forgeable)
@@ -503,7 +511,7 @@ fn is_forgeable(c: char) -> bool {
 /// `"#RRGGBB"` -> opaque `Argb`. Rejects any other shape, INCLUDING
 /// `#RRGGBBAA`: alpha is not a theme decision (3.3), so admitting it would
 /// let a file set a translucency the pixel format cannot honour.
-fn parse_colour(s: &str) -> Option<Argb> {
+pub(crate) fn parse_colour(s: &str) -> Option<Argb> {
     let hex = s.strip_prefix('#')?;
     if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -698,25 +706,21 @@ impl Theme {
     /// a caller's theme: the result is a new value, so a refusal cannot leave
     /// a half-applied visual behind.
     pub fn from_toml(src: &str) -> Result<Loaded, LoadError> {
-        // A file this big is refused BEFORE parsing, and the bound is not
-        // about memory -- the parser's own caps handle that. It is about
-        // TRUNCATION: a caller's slurp stops at its own limit and returns
-        // what it got, and a truncated theme can be perfectly valid TOML,
-        // which is worse than malformed because 4.2 never fires. Refusing
-        // anything that could have been cut is the only way to tell.
-        if src.len() > THEME_MAX {
-            return Err(LoadError::Syntax(crate::toml::Error {
-                line: 1,
-                kind: crate::toml::Kind::TooLarge,
-            }));
-        }
-        let entries = crate::toml::parse(src).map_err(LoadError::Syntax)?;
+        let entries = parse_bounded(src)?;
+        Theme::from_entries(&entries)
+    }
 
+    /// The legacy schema over parsed entries. `load` dispatches here when
+    /// `[meta] profile` is absent; called directly, an Instrument file is
+    /// refused at its `profile` line as an unknown key -- which is what an
+    /// older binary does with one, and what this binary's `load` must never
+    /// do silently.
+    pub fn from_entries(entries: &[crate::toml::Entry<'_>]) -> Result<Loaded, LoadError> {
         // `base` first: it decides the starting point AND whether the file
         // must be complete, so it cannot be read in file order.
         let mut based = false;
         let mut name = String::new();
-        for e in &entries {
+        for e in entries {
             if e.table != "meta" {
                 continue;
             }
@@ -755,7 +759,7 @@ impl Theme {
         // a guard.
         let mut seen = [false; KEYS.len()];
 
-        for e in &entries {
+        for e in entries {
             if e.table == "meta" {
                 continue;
             }
@@ -798,13 +802,56 @@ impl Theme {
     }
 }
 
+/// Parse a theme file's text, refusing anything that could have been cut.
+///
+/// A file over `THEME_MAX` is refused BEFORE parsing, and the bound is not
+/// about memory -- the parser's own caps handle that. It is about
+/// TRUNCATION: a caller's slurp stops at its own limit and returns what it
+/// got, and a truncated theme can be perfectly valid TOML, which is worse
+/// than malformed because 4.2 never fires. Refusing anything that could have
+/// been cut is the only way to tell.
+fn parse_bounded(src: &str) -> Result<alloc::vec::Vec<crate::toml::Entry<'_>>, LoadError> {
+    if src.len() > THEME_MAX {
+        return Err(LoadError::Syntax(crate::toml::Error {
+            line: 1,
+            kind: crate::toml::Kind::TooLarge,
+        }));
+    }
+    crate::toml::parse(src).map_err(LoadError::Syntax)
+}
+
+/// Load a theme file of EITHER schema (HALCYON-INSTRUMENT 4.2): ONE parse,
+/// then a dispatch on `[meta] profile` -- absent is the 57-key legacy
+/// schema, `"instrument-v1"` the Instrument one, anything else refused at
+/// its line. The gallery stays one directory with two schemas in it; every
+/// reader goes through here so no reader can half-read a file it does not
+/// understand.
+pub fn load(src: &str) -> Result<crate::instrument::LoadedAny, LoadError> {
+    use crate::instrument::{LoadedAny, PROFILE_WORD};
+    let entries = parse_bounded(src)?;
+    let mut profile: Option<(&str, u32)> = None;
+    for e in entries.iter().filter(|e| e.table == "meta" && e.key == "profile") {
+        match &e.value {
+            crate::toml::Value::Str(w) => profile = Some((w, e.line)),
+            _ => return Err(LoadError::BadShape { line: e.line }),
+        }
+    }
+    match profile {
+        None => Theme::from_entries(&entries).map(LoadedAny::Legacy),
+        Some((PROFILE_WORD, _)) => {
+            crate::instrument::from_entries(&entries, src.len()).map(LoadedAny::Instrument)
+        }
+        Some((_, line)) => Err(LoadError::UnknownProfile { line }),
+    }
+}
+
 /// The `table.key` label a `missing` report names.
 ///
 /// BUILT rather than stored as a third registry column: `fg` alone appears in
 /// four tables, so the bare key would be ambiguous, and a duplicated literal
 /// could drift from the pair it labels. This costs one short allocation per
 /// missing key, on an error path only.
-fn key_name(table: &str, key: &str) -> String {
+pub(crate) fn key_name(table: &str, key: &str) -> String {
     let mut s = String::from(table);
     s.push('.');
     s.push_str(key);
@@ -898,20 +945,24 @@ pub const SYSTEM_THEME_PATH: &str = "/lib/halcyon/theme.toml";
 /// console renderer is not anyone's session and takes the system file.
 pub const USER_THEME_REL: &str = "/lib/halcyon/theme.toml";
 
-/// The RESOLVED theme as one line, for the seam that pushes it to another
-/// process (HALCYON-THEME 3.4's display coherence).
+/// The RESOLVED BUNDLE as one line, for the seam that pushes it to another
+/// process (HALCYON-THEME 3.4's display coherence; HALCYON-INSTRUMENT 4.5).
 ///
-/// 72 comma-separated fields in a fixed order: 64 colours as `RRGGBB` (the
-/// opaque alpha is not on the wire), then `smooth`, then the 7 geometry
-/// integers. Both ends call THIS pair, so the format cannot drift between
-/// them, and `a_distinct_theme_survives_the_wire` round-trips a theme whose
-/// every field differs -- so a field left out of `to_wire` comes back as the
+/// 126 comma-separated fields in a fixed order: the legacy theme's 72 (64
+/// colours as `RRGGBB`, `smooth`, the 7 geometry integers -- positions
+/// unchanged since TH-4), then the profile word, the colour scheme, the 35
+/// Instrument colours, its 16 ANSI slots and its `smooth`. Both ends call
+/// THIS pair, so the format cannot drift between them, and
+/// `a_distinct_theme_survives_the_wire` round-trips a bundle whose every
+/// field differs -- so a field left out of `to_wire` comes back as the
 /// built-in's and fails, which is the only way to catch an omission here.
 ///
 /// Why not push the TOML text instead: a ctl verb is one LINE, TOML is not,
-/// and the user's file may be up to `THEME_MAX`. This is bounded at ~500
+/// and the user's file may be up to `THEME_MAX`. This is bounded at ~900
 /// bytes and needs no parser on the far side.
-pub fn to_wire(t: &Theme) -> String {
+pub fn to_wire(b: &crate::instrument::Bundle) -> String {
+    let t = &b.theme;
+    let i = &b.inst;
     let mut s = String::new();
     let mut c = |v: Argb| {
         if !s.is_empty() {
@@ -986,22 +1037,121 @@ pub fn to_wire(t: &Theme) -> String {
     ] {
         let _ = write!(s, ",{n}");
     }
+    let _ = write!(s, ",{}", b.profile.word());
+    let _ = write!(s, ",{}", if i.light { "light" } else { "dark" });
+    for v in instrument_colours(i) {
+        let _ = write!(s, ",{:06x}", v & 0x00FF_FFFF);
+    }
+    for v in i.ansi {
+        let _ = write!(s, ",{:06x}", v & 0x00FF_FFFF);
+    }
+    let _ = write!(s, ",{}", i.smooth_mem);
+    // A TERMINATOR, so a line cut anywhere is refused: without it a push
+    // truncated inside its last integer parses as a different, valid value
+    // (measured at I-1 -- `...,12` cut to `...,1` applied smooth 1; the
+    // legacy line's last field happened to be the one-digit `tab_strip_h`,
+    // so its truncation control passed by luck of the digit count).
+    s.push_str(",end");
     s
+}
+
+/// The 35 Instrument colours in wire (= `instrument::KEYS`) order.
+fn instrument_colours(i: &crate::instrument::InstrumentTheme) -> [Argb; 35] {
+    [
+        i.desktop,
+        i.pane,
+        i.open,
+        i.header,
+        i.hover,
+        i.text,
+        i.secondary,
+        i.dim,
+        i.structure,
+        i.separator,
+        i.amber,
+        i.amber_muted,
+        i.error,
+        i.success,
+        i.terminal_path,
+        i.rail,
+        i.pane_border,
+        i.focus_neutral,
+        i.body_text,
+        i.code_text,
+        i.code_bg,
+        i.code_body,
+        i.terminal_bg,
+        i.terminal_text,
+        i.dialog_bg,
+        i.kbd_bg,
+        i.syntax_keyword,
+        i.syntax_type,
+        i.syntax_function,
+        i.syntax_string,
+        i.syntax_number,
+        i.syntax_attribute,
+        i.syntax_lifetime,
+        i.syntax_comment,
+        i.syntax_punctuation,
+    ]
+}
+
+#[cfg(test)]
+fn instrument_colours_mut(i: &mut crate::instrument::InstrumentTheme) -> [&mut Argb; 35] {
+    [
+        &mut i.desktop,
+        &mut i.pane,
+        &mut i.open,
+        &mut i.header,
+        &mut i.hover,
+        &mut i.text,
+        &mut i.secondary,
+        &mut i.dim,
+        &mut i.structure,
+        &mut i.separator,
+        &mut i.amber,
+        &mut i.amber_muted,
+        &mut i.error,
+        &mut i.success,
+        &mut i.terminal_path,
+        &mut i.rail,
+        &mut i.pane_border,
+        &mut i.focus_neutral,
+        &mut i.body_text,
+        &mut i.code_text,
+        &mut i.code_bg,
+        &mut i.code_body,
+        &mut i.terminal_bg,
+        &mut i.terminal_text,
+        &mut i.dialog_bg,
+        &mut i.kbd_bg,
+        &mut i.syntax_keyword,
+        &mut i.syntax_type,
+        &mut i.syntax_function,
+        &mut i.syntax_string,
+        &mut i.syntax_number,
+        &mut i.syntax_attribute,
+        &mut i.syntax_lifetime,
+        &mut i.syntax_comment,
+        &mut i.syntax_punctuation,
+    ]
 }
 
 /// The number of fields `to_wire` emits. A short line is refused rather than
 /// applied to whatever it reached, so a truncated push cannot half-theme a
-/// display.
-pub const WIRE_FIELDS: usize = 72;
+/// display. 72 legacy + profile + scheme + 35 + 16 + smooth + the terminator.
+pub const WIRE_FIELDS: usize = 127;
 
 /// The inverse of `to_wire`. `None` on any deviation -- a wrong count, a bad
-/// colour, a geometry value outside the same bounds the FILE must satisfy.
+/// colour, a geometry value outside the same bounds the FILE must satisfy,
+/// an unknown profile word, a duplicated ANSI slot.
 ///
 /// The bounds are re-checked here on purpose: this arrives from another
 /// process, so it is untrusted input in its own right, and a display whose
 /// hairline came over a wire it did not validate is a `scale`-class hazard
 /// wearing a theme's clothes.
-pub fn from_wire(line: &str) -> Option<Theme> {
+pub fn from_wire(line: &str) -> Option<crate::instrument::Bundle> {
+    use crate::instrument::{InstrumentTheme, Profile};
     let line = line.trim();
     // COUNT before COLLECT. The count is the cheap discriminator and the Vec
     // is proportional to the input, so materializing first let a hostile line
@@ -1013,6 +1163,9 @@ pub fn from_wire(line: &str) -> Option<Theme> {
         return None;
     }
     let f: alloc::vec::Vec<&str> = line.split(',').collect();
+    if f[WIRE_FIELDS - 1] != "end" {
+        return None;
+    }
     let col = |i: usize| -> Option<Argb> {
         let h = f[i];
         if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -1035,16 +1188,19 @@ pub fn from_wire(line: &str) -> Option<Theme> {
         }
         Some(n as i32)
     };
+    let smooth_at = |i: usize| -> Option<u16> {
+        let n: i64 = f[i].parse().ok()?;
+        let (slo, shi) = smooth_bounds();
+        if !(slo..=shi).contains(&n) {
+            return None;
+        }
+        Some(n as u16)
+    };
     let mut ansi = [0u32; 16];
     for (j, slot) in ansi.iter_mut().enumerate() {
         *slot = col(48 + j)?;
     }
-    let smooth: i64 = f[64].parse().ok()?;
-    let (slo, shi) = smooth_bounds();
-    if !(slo..=shi).contains(&smooth) {
-        return None;
-    }
-    Some(Theme {
+    let theme = Theme {
         floor: col(0)?,
         surface: col(1)?,
         header: col(2)?,
@@ -1102,7 +1258,7 @@ pub fn from_wire(line: &str) -> Option<Theme> {
             fg: col(47)?,
             ansi,
         },
-        smooth_mem: smooth as u16,
+        smooth_mem: smooth_at(64)?,
         metrics: Metrics {
             bevel: num(65, "bevel")?,
             gap: num(66, "gap")?,
@@ -1112,7 +1268,70 @@ pub fn from_wire(line: &str) -> Option<Theme> {
             tag_pad_x: num(70, "tag_pad_x")?,
             tab_strip_h: num(71, "tab_strip_h")?,
         },
-    })
+    };
+    let profile = Profile::parse(f[72])?;
+    let light = match f[73] {
+        "dark" => false,
+        "light" => true,
+        _ => return None,
+    };
+    let mut c = [0u32; 35];
+    for (j, slot) in c.iter_mut().enumerate() {
+        *slot = col(74 + j)?;
+    }
+    let mut iansi = [0u32; 16];
+    for (j, slot) in iansi.iter_mut().enumerate() {
+        *slot = col(109 + j)?;
+    }
+    // The slot rule, re-checked as the file path checks it.
+    for a in 0..16 {
+        for b in (a + 1)..16 {
+            if iansi[a] == iansi[b] {
+                return None;
+            }
+        }
+    }
+    let inst = InstrumentTheme {
+        desktop: c[0],
+        pane: c[1],
+        open: c[2],
+        header: c[3],
+        hover: c[4],
+        text: c[5],
+        secondary: c[6],
+        dim: c[7],
+        structure: c[8],
+        separator: c[9],
+        amber: c[10],
+        amber_muted: c[11],
+        error: c[12],
+        success: c[13],
+        terminal_path: c[14],
+        rail: c[15],
+        pane_border: c[16],
+        focus_neutral: c[17],
+        body_text: c[18],
+        code_text: c[19],
+        code_bg: c[20],
+        code_body: c[21],
+        terminal_bg: c[22],
+        terminal_text: c[23],
+        dialog_bg: c[24],
+        kbd_bg: c[25],
+        syntax_keyword: c[26],
+        syntax_type: c[27],
+        syntax_function: c[28],
+        syntax_string: c[29],
+        syntax_number: c[30],
+        syntax_attribute: c[31],
+        syntax_lifetime: c[32],
+        syntax_comment: c[33],
+        syntax_punctuation: c[34],
+        ansi: iansi,
+        smooth_mem: smooth_at(125)?,
+        light,
+    };
+    Some(crate::instrument::Bundle { profile, theme, inst })
 }
 
 /// Where a resolved theme came from.
@@ -1178,6 +1397,19 @@ pub fn describe(e: &LoadError) -> String {
             s,
             "line {line}: [meta] name has a control character or is over {NAME_MAX} bytes"
         ),
+        LoadError::UnknownProfile { line } => write!(
+            s,
+            "line {line}: unknown [meta] profile (this binary knows the legacy schema and \"{}\")",
+            crate::instrument::PROFILE_WORD
+        ),
+        LoadError::BadId { line } => write!(
+            s,
+            "line {line}: [meta] id is not a gallery id ([a-z][a-z0-9_-], up to {} chars)",
+            crate::instrument::ID_MAX
+        ),
+        LoadError::AnsiNotDistinct { line } => {
+            write!(s, "line {line}: two ANSI slots share a value (only slot 15 may equal terminal fg)")
+        }
         LoadError::Incomplete { missing } => {
             let _ = write!(
                 s,
@@ -1261,7 +1493,6 @@ mod tests {
     // template still sets EVERY key -- a key added to the schema and not added
     // here makes this fail, naming it, which is exactly the reminder the
     // author of that key needs.
-    #[test]
     /// EVERY theme in the gallery loads -- discovered by reading the directory,
     /// not by an `include_str!` per file, because the pool bake installs
     /// whatever `*.toml` is there and a hand-listed set here would pass while
@@ -1274,6 +1505,7 @@ mod tests {
         use std::string::String;
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../halcyon/themes");
         let mut seen = 0usize;
+        let mut instrument_seen = 0usize;
         let mut names: std::vec::Vec<String> = std::vec::Vec::new();
         for ent in std::fs::read_dir(&dir).expect("themes dir must exist") {
             let path = ent.expect("readable dir entry").path();
@@ -1282,25 +1514,41 @@ mod tests {
             }
             let file = path.file_name().unwrap().to_string_lossy().into_owned();
             let text = std::fs::read_to_string(&path).expect("readable theme");
-            let l = Theme::from_toml(&text)
-                .unwrap_or_else(|e| panic!("{} does not load: {}", file, describe(&e)));
-            // A gallery theme carries no `base`, so it must set every key --
-            // that is the whole point of the no-base mode (a forgotten key
-            // would otherwise arrive as a Daylight colour).
-            assert!(
-                l.inherited.is_empty(),
-                "{} sets no `base`, so it must set every key; missing: {:?}",
-                file,
-                l.inherited
-            );
+            // Either schema (HALCYON-INSTRUMENT 4.2): ONE gallery, dispatched
+            // by `load`. An Instrument file's id must be its filename, since
+            // the picker's word becomes that path.
+            match load(&text).unwrap_or_else(|e| panic!("{} does not load: {}", file, describe(&e))) {
+                crate::instrument::LoadedAny::Legacy(l) => {
+                    // A gallery theme carries no `base`, so it must set every
+                    // key -- that is the whole point of the no-base mode (a
+                    // forgotten key would otherwise arrive as a Daylight
+                    // colour).
+                    assert!(
+                        l.inherited.is_empty(),
+                        "{} sets no `base`, so it must set every key; missing: {:?}",
+                        file,
+                        l.inherited
+                    );
+                }
+                crate::instrument::LoadedAny::Instrument(l) => {
+                    assert_eq!(
+                        std::format!("{}.toml", l.id),
+                        file,
+                        "an Instrument gallery file is named by its [meta] id"
+                    );
+                    instrument_seen += 1;
+                }
+            }
             names.push(file);
             seen += 1;
         }
         // The CONTROL: a directory read that silently matched nothing would
-        // pass every assertion above. Two themes have shipped since the arc
-        // closed, so anything less means the read, not the themes, is broken.
+        // pass every assertion above. Two legacy themes and the thirteen
+        // Instrument ones have shipped, so anything less means the read, not
+        // the themes, is broken.
+        assert_eq!(instrument_seen, 13, "the thirteen Instrument gallery files");
         assert!(
-            seen >= 2,
+            seen >= 15,
             "expected to find the shipped gallery themes, found {} in {:?} -- \
              the directory read is broken, not the themes",
             seen,
@@ -1308,6 +1556,10 @@ mod tests {
         );
     }
 
+    // (This carried NO `#[test]` from TH-5 to I-1: a stray attribute above
+    // the gallery test had swallowed it, so the `== DAYLIGHT` pin below never
+    // ran. Found by the I-1 census; the census is the reason it is here.)
+    #[test]
     fn the_annotated_template_loads_and_sets_every_key() {
         let l = Theme::from_toml(TEMPLATE)
             .unwrap_or_else(|e| panic!("TEMPLATE.toml does not load: {}", describe(&e)));
@@ -1436,7 +1688,8 @@ mod tests {
 
         // And it survives the push seam, so a Nightjar session can actually
         // hand its theme to the compositor.
-        assert_eq!(from_wire(&to_wire(&n)), Some(n));
+        let b = crate::instrument::Bundle::from_legacy(crate::instrument::Profile::Legacy, n);
+        assert_eq!(from_wire(&to_wire(&b)), Some(b));
     }
 
     // The sheet built from Nightjar carries no Daylight colour -- the TH-2
@@ -1559,10 +1812,30 @@ mod tests {
             .theme;
         assert!(t != builtin(), "the fixture must differ from the built-in");
 
-        let wire = to_wire(&t);
+        // The Instrument side distinct too: every one of its 35 + 16 + 1
+        // fields a value no other field holds, under the OTHER polarity and
+        // profile than the floor's, so an omission on either side fails.
+        let mut inst = crate::instrument::builtin();
+        for (j, slot) in instrument_colours_mut(&mut inst).into_iter().enumerate() {
+            *slot = 0xFF33_0000 | (j as u32 + 1);
+        }
+        for (j, slot) in inst.ansi.iter_mut().enumerate() {
+            *slot = 0xFF44_0000 | (j as u32 + 1);
+        }
+        inst.smooth_mem = 17;
+        inst.light = true;
+        let b = crate::instrument::Bundle {
+            profile: crate::instrument::Profile::Instrument,
+            theme: t,
+            inst,
+        };
+        let wire = to_wire(&b);
         assert_eq!(wire.split(',').count(), WIRE_FIELDS);
-        assert_eq!(from_wire(&wire), Some(t), "a field did not survive to_wire");
-        assert!(wire.len() < 700, "the line is bounded: {}", wire.len());
+        assert_eq!(from_wire(&wire), Some(b), "a field did not survive to_wire");
+        assert!(wire.len() < 1100, "the line is bounded: {}", wire.len());
+        // And the legacy floor under the legacy profile, the other way round.
+        let floor = crate::instrument::Bundle::builtin(crate::instrument::Profile::Legacy);
+        assert_eq!(from_wire(&to_wire(&floor)), Some(floor));
     }
 
     // Untrusted in its own right: this arrives from ANOTHER PROCESS, so a
@@ -1570,7 +1843,7 @@ mod tests {
     // hazard in a theme's clothes.
     #[test]
     fn a_malformed_wire_is_refused_with_its_bounds_rechecked() {
-        let good = to_wire(&builtin());
+        let good = to_wire(&crate::instrument::Bundle::builtin(crate::instrument::Profile::Legacy));
         assert!(from_wire(&good).is_some(), "the control must pass");
         assert_eq!(from_wire(""), None);
         assert_eq!(from_wire(&good[..good.len() - 1]), None, "a truncated push");
@@ -1603,6 +1876,38 @@ mod tests {
         );
         f[64] = "999";
         assert_eq!(from_wire(&f.join(",")), None, "smooth out of range");
+        f[64] = "12";
+        // The Instrument fields are checked the same way: the profile word,
+        // the scheme, a colour, the slot rule, its smooth.
+        let was72 = f[72];
+        f[72] = "Instrument";
+        assert_eq!(from_wire(&f.join(",")), None, "an unknown profile word");
+        f[72] = was72;
+        f[73] = "dusk";
+        assert_eq!(from_wire(&f.join(",")), None, "an unknown scheme");
+        f[73] = "dark";
+        f[74] = "05060";
+        assert_eq!(from_wire(&f.join(",")), None, "a short Instrument colour");
+        f[74] = "050607";
+        let (a, b) = (f[109], f[110]);
+        f[110] = a;
+        assert_eq!(from_wire(&f.join(",")), None, "two equal ANSI slots on the wire");
+        f[110] = b;
+        f[125] = "201";
+        assert_eq!(from_wire(&f.join(",")), None, "Instrument smooth out of range");
+        f[125] = "0";
+        assert!(from_wire(&f.join(",")).is_some(), "the control, every field back");
+        // The terminator: a line cut inside its last integer is a DIFFERENT
+        // valid integer, so the count alone cannot see it (`12` -> `1`).
+        let mut g: alloc::vec::Vec<&str> = good.split(',').collect();
+        g[125] = "12";
+        let twelve = g.join(",");
+        assert!(from_wire(&twelve).is_some(), "the control with a two-digit tail");
+        assert_eq!(from_wire(&twelve[..twelve.len() - 1]), None, "cut inside the terminator");
+        assert_eq!(from_wire(&twelve[..twelve.len() - 4]), None, "cut before the terminator");
+        assert_eq!(from_wire(&twelve[..twelve.len() - 5]), None, "cut inside the last integer");
+        g[126] = "en";
+        assert_eq!(from_wire(&g.join(",")), None, "a wrong terminator");
     }
 
     // 3.4: the user's file wins, and a REFUSED file falls through to the next
@@ -1756,7 +2061,7 @@ mod tests {
             .is_ok()
         };
         let via_wire = |n: i64| {
-            let mut w = to_wire(&builtin());
+            let mut w = to_wire(&crate::instrument::Bundle::builtin(crate::instrument::Profile::Legacy));
             // Field 64 is `smooth` (64 colours precede it).
             let mut f: alloc::vec::Vec<alloc::string::String> =
                 w.split(',').map(alloc::string::String::from).collect();

@@ -315,6 +315,20 @@ but the user is not always the author.
   verb (the `scale` precedent's gate applies), and the §3.2 rule's
   enforcement.
 
+## 6.1 The second schema (I-1, 2026-09-14) — a pointer
+
+Since the Instrument arc (`docs/HALCYON-INSTRUMENT.md` §4) a theme file
+answers to ONE of two schemas, decided by `[meta] profile`: absent is the
+57-key schema this document specifies, unchanged; `"instrument-v1"` is the
+35-role Instrument schema (`libhalcyon::instrument`). `theme::load`
+parses once and dispatches; `Theme::from_toml` is the legacy schema alone
+and refuses an Instrument file at its `profile` line, which is what an
+older binary does with one. The gallery stays one directory; the loader
+resolves a *bundle* (the profile word + both themes, one native and one
+projected) and the push line grew from 72 to 127 fields with a
+terminator. §3.3, §4 and §5 above stand for the legacy schema and, in
+their failure posture, for both.
+
 ## 7. What this does not decide
 
 - **Frutiger Aero** (`HALCYON-VISUAL` names it as a later theme) becomes a

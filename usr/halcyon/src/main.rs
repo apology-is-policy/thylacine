@@ -44,12 +44,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use halcyon::{
-    argv_of, device_layout_path, lint_active_line, lint_files, list_rows, name_is_valid,
+    argv_of, device_layout_path, lint_active_lines, lint_files, list_rows, name_is_valid,
     owner_is_env, parse_cmd, prog_candidates, session_dir_chain, session_layout_path,
     session_layouts_dir, Cmd, CmdError, LintReport, ThemeFile, DEVICE_LAYOUTS_DIR, SAVE_TMP_SUFFIX,
 };
 use libhalcyon::layout::{self, LayoutMode};
 use libhalcyon::skeleton::{self, Op};
+use libhalcyon::instrument;
 use libhalcyon::theme;
 use libthyla_rs::err::{Error, Result};
 use libthyla_rs::fs::{self, File};
@@ -262,7 +263,61 @@ fn theme_lint_tiers() -> i64 {
         None => None,
     };
 
+    // The picker's gallery choice (HALCYON-INSTRUMENT 4.1): a WORD under
+    // $HOME, resolved to a gallery file only when `gallery_path` accepts it
+    // as an id -- the lint reads the same file a session would, or none.
+    let pick_path: Option<String> = home.as_ref().map(|h| {
+        let mut s = h.clone();
+        s.push_str(instrument::USER_PICK_REL);
+        s
+    });
+    let pick: Option<String> = match &pick_path {
+        Some(p) => match read_theme(p) {
+            Ok(t) => t,
+            Err(()) => return 1,
+        },
+        None => None,
+    };
+    let pick_file_path: Option<String> = pick
+        .as_deref()
+        .and_then(instrument::pick_id)
+        .and_then(instrument::gallery_path);
+    let pick_file: Option<String> = match &pick_file_path {
+        Some(p) => match read_theme(p) {
+            Ok(t) => t,
+            Err(()) => return 1,
+        },
+        None => None,
+    };
+    // The profile words, both tiers.
+    let sys_profile = match read_theme(instrument::SYSTEM_PROFILE_PATH) {
+        Ok(t) => t,
+        Err(()) => return 1,
+    };
+    let user_profile_path: Option<String> = home.as_ref().map(|h| {
+        let mut s = h.clone();
+        s.push_str(instrument::USER_PROFILE_REL);
+        s
+    });
+    let user_profile: Option<String> = match &user_profile_path {
+        Some(p) => match read_theme(p) {
+            Ok(t) => t,
+            Err(()) => return 1,
+        },
+        None => None,
+    };
+
     let mut files: Vec<ThemeFile> = Vec::new();
+    if let Some(p) = &pick_file_path {
+        files.push(ThemeFile {
+            label: "pick",
+            path: p,
+            text: pick_file.as_deref(),
+        });
+    } else if let Some(w) = pick.as_deref() {
+        println!("pick {}: REFUSED -- not a gallery id", pick_path.as_deref().unwrap_or(""));
+        let _ = w;
+    }
     files.push(ThemeFile {
         label: "system",
         path: sys_path,
@@ -282,7 +337,16 @@ fn theme_lint_tiers() -> i64 {
     // $HOME unset the user file might exist and win, so naming the system one
     // "active" would be a confident wrong answer.
     if user_path.is_some() {
-        println!("{}", lint_active_line(sys.as_deref(), user.as_deref()));
+        let (active, profile) = lint_active_lines(instrument::Sources {
+            system_profile: sys_profile.as_deref(),
+            user_profile: user_profile.as_deref(),
+            user_pick: pick.as_deref(),
+            pick_file: pick_file.as_deref(),
+            user_file: user.as_deref(),
+            system_file: sys.as_deref(),
+        });
+        println!("{}", active);
+        println!("{}", profile);
     } else {
         println!("active: not determined -- $HOME is unset, so the user tier was not read");
     }

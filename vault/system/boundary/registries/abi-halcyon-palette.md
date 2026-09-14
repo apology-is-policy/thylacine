@@ -10,12 +10,14 @@ mirrors:
   - "usr/halcyond/src/session.rs (the writer -- HALCYON_PALETTE_ENV_PATH, daylight_env_palette)"
   - "usr/nora/src/theme.rs (a reader -- Palette::with_overrides, the role->field map)"
   - "usr/nora/src/main.rs (a reader -- adopt_session_palette)"
+literal-mentions:
+  - "usr/lib/libhalcyon/src/instrument.rs (a doc comment on project_legacy naming the export as the reason the projection exists -- goes stale, never breaks)"
 literals:
   - "HALCYON_PALETTE"
 literal-scan:
   - "usr"
 created: 2026-09-06
-updated: 2026-09-06
+updated: 2026-09-14
 ---
 ## The contract
 

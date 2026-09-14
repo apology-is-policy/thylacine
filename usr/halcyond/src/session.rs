@@ -37,6 +37,7 @@ use halcyond::tiles::{plan_tiles, tile_command};
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
 use kaua_term::{Record, ScreenMode};
 use libhalcyon::scale;
+use libhalcyon::instrument;
 use libhalcyon::theme::{self, env_palette};
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Write;
@@ -971,8 +972,8 @@ fn reconcile(
 /// attempt and gave up for the life of the boot -- and the console's push is
 /// the LOAD-BEARING one, since tapestryd comes up before the pool it would
 /// read the theme file from is mounted. One implementation, both renderers.
-pub(crate) fn push_theme(ring: &EventRing, theme: &libhalcyon::theme::Theme) {
-    let cmd = format!("theme {}", libhalcyon::theme::to_wire(theme));
+pub(crate) fn push_theme(ring: &EventRing, bundle: &libhalcyon::instrument::Bundle) {
+    let cmd = format!("theme {}", libhalcyon::theme::to_wire(bundle));
     for _ in 0..VERB_RETRIES {
         match ring.global_ctl(&cmd) {
             Ok(()) => {
@@ -1181,31 +1182,56 @@ pub fn run(home: Option<String>) -> i64 {
     // nothing can remove. Every note is SAID -- a refused theme file that
     // fell back quietly is indistinguishable from one that applied and
     // happened to look the same (4.2).
-    let resolved = theme::resolve(
-        read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, theme::SYSTEM_THEME_PATH).as_deref(),
+    // Since I-1 the resolution is a BUNDLE (HALCYON-INSTRUMENT 4.1): the
+    // profile word (user, then system), then the theme -- the picker's
+    // gallery choice, the user's file, the system's -- in either schema, the
+    // other side projected. The pick is a WORD; it becomes a path only once
+    // `gallery_path` has accepted it as an id (never `../`, never a slash).
+    let under_home = |rel: &str| {
         home.as_deref()
-            .map(|h| alloc::format!("{}{}", h.trim_end_matches('/'), theme::USER_THEME_REL))
+            .map(|h| alloc::format!("{}{}", h.trim_end_matches('/'), rel))
             .and_then(|p| read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, &p))
-            .as_deref(),
-    );
+    };
+    let system_profile = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, instrument::SYSTEM_PROFILE_PATH);
+    let user_profile = under_home(instrument::USER_PROFILE_REL);
+    let user_pick = under_home(instrument::USER_PICK_REL);
+    let pick_file = user_pick
+        .as_deref()
+        .and_then(instrument::pick_id)
+        .and_then(instrument::gallery_path)
+        .and_then(|p| read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, &p));
+    let system_file = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, theme::SYSTEM_THEME_PATH);
+    let user_file = under_home(theme::USER_THEME_REL);
+    let resolved = instrument::resolve_bundle(instrument::Sources {
+        system_profile: system_profile.as_deref(),
+        user_profile: user_profile.as_deref(),
+        user_pick: user_pick.as_deref(),
+        pick_file: pick_file.as_deref(),
+        user_file: user_file.as_deref(),
+        system_file: system_file.as_deref(),
+    });
     for n in &resolved.notes {
         say!("halcyond: {}", n);
     }
     say!(
-        "halcyond: theme {} ({:?}, {} inherited)",
+        "halcyond: theme {} ({:?}, {:?}, {} inherited); profile {} ({:?})",
         if resolved.name.is_empty() {
             "built-in"
         } else {
             &resolved.name
         },
-        resolved.source,
-        resolved.inherited.len()
+        resolved.theme_tier,
+        resolved.schema,
+        resolved.inherited.len(),
+        resolved.bundle.profile.word(),
+        resolved.profile_tier
     );
-    let theme = resolved.theme;
+    let bundle = resolved.bundle;
+    let theme = bundle.theme;
     // The compositor paints the chrome around our panes and cannot read the
     // user's file; a declared seat is the only party that can tell it.
     if declared {
-        push_theme(&ring, &theme);
+        push_theme(&ring, &bundle);
     }
     let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);
