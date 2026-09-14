@@ -69,6 +69,17 @@ pub fn is_cell_face(face: u8) -> bool {
 /// What a line box asks ("does this run grow the box?"): a mono run never
 /// does (HALCYON-COMPOSITION 4), in either kind.
 #[inline]
+/// `f32::round` for a `no_std` crate: half away from zero, the rule the
+/// kern and tracking terms need on both signs (`(x + 0.5) as i32` rounds
+/// -335.87 to -335).
+pub fn round_half_away(x: f32) -> i32 {
+    if x >= 0.0 {
+        (x + 0.5) as i32
+    } else {
+        (x - 0.5) as i32
+    }
+}
+
 pub fn is_mono_face(face: u8) -> bool {
     is_cell_face(face) || face == FACE_MONO_TEXT
 }
@@ -365,6 +376,13 @@ pub struct GlyphSource {
     /// (HALCYON-TYPE 4.3); FACE_MONO is always phase 0 (a fixed cell has
     /// no phase).
     cache: BTreeMap<(u8, u32, u8, char), Cached>,
+    /// I-5d: whether proportional runs are kerned (the Instrument profile;
+    /// the owner sets it from `Sheet.kerning`). Off, `kern` is 0 for every
+    /// pair -- the legacy bytes.
+    kerning: bool,
+    /// Pair adjustments in FONT UNITS by (face, left, right): size-free, so
+    /// a rescale evicts nothing; bounded by a clear at `KERN_MEMO_MAX`.
+    kern_memo: BTreeMap<(u8, char, char), i32>,
     /// The display scale the mono atlases were selected for (percent).
     scale: u16,
     /// The smoothing stroke every proportional raster carries, in
@@ -450,6 +468,8 @@ impl GlyphSource {
             mono_italic,
             packer,
             cache: BTreeMap::new(),
+            kerning: false,
+            kern_memo: BTreeMap::new(),
             scale: 100,
             smooth_mem: 0,
             evict_pages: MAX_ATLAS_PAGES,
@@ -478,6 +498,23 @@ impl GlyphSource {
         self.smooth_mem = mem;
         self.regen();
         true
+    }
+
+    /// Switch pair kerning on or off (I-5d: on under the Instrument profile,
+    /// off under legacy -- `Sheet.kerning`). Returns whether it changed; a
+    /// change moves every proportional pen, so the caller relays out.
+    /// Nothing rasterized depends on it, so no eviction.
+    pub fn set_kerning(&mut self, on: bool) -> bool {
+        if on == self.kerning {
+            return false;
+        }
+        self.kerning = on;
+        true
+    }
+
+    /// Whether pair kerning is on.
+    pub fn kerning(&self) -> bool {
+        self.kerning
     }
 
     /// Select the mono atlases for a display scale (HALCYON-SCALE 6: the
@@ -607,6 +644,10 @@ impl GlyphSource {
     /// remove. At 1/256 the same line drifts by hundredths.
     pub const PEN_SCALE: i32 = 256;
 
+    /// The kern memo's bound (pairs); a session's text reuses a few
+    /// thousand distinct pairs, so this is rarely reached and cheap when it is.
+    const KERN_MEMO_MAX: usize = 4096;
+
     /// The advance in 1/256 px -- what the sub-pixel pen accumulates.
     pub fn advance_fx(&mut self, face: u8, px: f32, ch: char) -> Option<i32> {
         self.advance_f(face, px, ch)
@@ -660,27 +701,35 @@ impl GlyphSource {
             };
             let aq = aq + track_fx;
             if let Some(p) = prev {
-                if face != FACE_MONO {
+                if !is_mono_face(face) {
                     // The kern belongs to the PRECEDING glyph's step, which
-                    // is already pushed -- fold it into that ref's advance
-                    // and into the running width, so the pen and the
-                    // returned width stay the same number.
+                    // is already pushed: fold it into the pen's carry, so
+                    // its whole part re-lands on that ref's advance (and
+                    // the running width) and its fraction rides into this
+                    // glyph's phase -- the pen and the returned width stay
+                    // the same number, at 1/256 px.
                     let k = self.kern(face, px, p, ch);
                     if k != 0 {
+                        let carried = rem + k;
+                        let whole = carried.div_euclid(Self::PEN_SCALE);
                         if let Some(last) = refs.last_mut() {
-                            last.advance += k;
+                            last.advance += whole;
                         }
-                        width += k;
+                        width += whole;
+                        rem = carried.rem_euclid(Self::PEN_SCALE);
                     }
                 }
             }
-            prev = Some(ch);
             let total = rem + aq;
             let step = total.div_euclid(Self::PEN_SCALE);
             if let Some(g) = self.glyph_at(face, px, ch, phase_of(rem)) {
                 refs.push(GlyphRef { glyph: g.glyph, advance: step });
                 width += step;
                 rem = total.rem_euclid(Self::PEN_SCALE);
+                // The pair the NEXT glyph kerns with is this one, the last
+                // SERVED glyph -- a refused glyph advanced nothing and is
+                // nobody's left neighbour.
+                prev = Some(ch);
             }
         }
         (refs, width)
@@ -927,16 +976,47 @@ impl GlyphSource {
         })
     }
 
-    /// The kerning adjustment between two glyphs at a size (integer px),
-    /// which the author adds into the PRECEDING glyph's resolved advance.
-    /// Always 0 today: IBM Plex Sans ships kerning only in GPOS and the
-    /// outline path reads no pair table (fontdue before it read only the
-    /// legacy `kern` table, which Plex lacks -- the same flat advances), so
-    /// Plex renders unkerned. A GPOS shaper is the named refinement; the
-    /// seam stays so layout keeps its shape when one lands.
-    pub fn kern(&self, face: u8, px: f32, left: char, right: char) -> i32 {
-        let _ = (face, px, left, right);
-        0
+    /// The kerning adjustment between two glyphs at `px`, in 1/256 px (the
+    /// sub-pixel pen's unit), which the caller folds into the PRECEDING
+    /// glyph's step. Zero unless kerning is on (`set_kerning`: the
+    /// Instrument profile; legacy stays byte-identical at 0) and never for
+    /// a mono face (the cell is a grid, and Cornucopia carries no pair
+    /// table anyway). The value is the face's GPOS `kern` feature
+    /// (`outline::Face::kern_units`: HarfBuzz's first match per lookup,
+    /// summed across lookups), memoized in font units per (face, pair) and
+    /// scaled here -- the same expression the advances take, rounded once
+    /// to the pen's unit.
+    pub fn kern(&mut self, face: u8, px: f32, left: char, right: char) -> i32 {
+        if !self.kerning || is_mono_face(face) {
+            return 0;
+        }
+        let units = self.kern_units(face, left, right);
+        if units == 0 {
+            return 0;
+        }
+        let upem = prop_of(&self.faces, face).map(|f| f.upem()).unwrap_or(1000);
+        round_half_away(units as f32 * px / upem as f32 * Self::PEN_SCALE as f32)
+    }
+
+    /// The pair adjustment in FONT UNITS (see `kern`), regardless of the
+    /// switch: what the face's tables say. 0 for a mono face or a face
+    /// that did not parse.
+    pub fn kern_units(&mut self, face: u8, left: char, right: char) -> i32 {
+        if is_mono_face(face) {
+            return 0;
+        }
+        let key = (face, left, right);
+        if let Some(&u) = self.kern_memo.get(&key) {
+            return u;
+        }
+        let u = prop_of(&self.faces, face)
+            .map(|f| f.kern_units(f.glyph_id(left), f.glyph_id(right)))
+            .unwrap_or(0);
+        if self.kern_memo.len() >= Self::KERN_MEMO_MAX {
+            self.kern_memo.clear();
+        }
+        self.kern_memo.insert(key, u);
+        u
     }
 
     /// Evict everything: pages, glyph table, cache -- and bump the store
@@ -1558,17 +1638,65 @@ mod tests {
         assert_eq!(glyph_alpha(&gs, n2.glyph), glyph_alpha(&plain, p.glyph));
     }
 
+    // I-5d: the GPOS shaper the pre-I-5d test named as "the test that
+    // changes" -- a fresh source (the legacy profile) still answers 0 for
+    // every pair, byte for byte; switched on (Instrument) it reads Plex's
+    // `kern` feature in the pen's unit: A/V is -41 units of 1000 in the
+    // Regular cut, -1.312 px at 32, -336 in 1/256 px rounded.
     #[test]
-    fn kern_is_zero_no_pair_table_is_read() {
-        // IBM Plex Sans carries kerning in GPOS only, and the outline path
-        // reads no pair table, so every pair returns 0 -- flat advances,
-        // the recorded MVP posture (a GPOS shaper is the future refinement;
-        // when it lands, this is the test that changes).
+    fn kern_is_zero_until_switched_on_and_then_reads_plex_gpos_in_the_pens_unit() {
         let mut gs = GlyphSource::new_vendored(512);
-        gs.glyph(FACE_BODY, 32.0, 'A').unwrap();
-        gs.glyph(FACE_BODY, 32.0, 'V').unwrap();
-        assert_eq!(gs.kern(FACE_BODY, 32.0, 'A', 'V'), 0, "A/V unkerned");
-        assert_eq!(gs.kern(FACE_BODY, 32.0, 'x', 'x'), 0, "no pair either way");
+        assert!(!gs.kerning());
+        assert_eq!(gs.kern(FACE_SANS, 32.0, 'A', 'V'), 0, "off: A/V unkerned");
+        assert_eq!(gs.kern(FACE_BODY, 32.0, 'A', 'V'), 0);
+        assert!(gs.set_kerning(true));
+        assert!(!gs.set_kerning(true), "a no-op says so");
+        assert_eq!(gs.kern_units(FACE_SANS, 'A', 'V'), -41);
+        assert_eq!(gs.kern(FACE_SANS, 32.0, 'A', 'V'), -336);
+        assert_eq!(gs.kern(FACE_SANS, 15.0, 'A', 'V'), round_half_away(-41.0f32 * 15.0 / 1000.0 * 256.0));
+        assert_eq!(round_half_away(-335.87), -336);
+        assert_eq!(round_half_away(-0.4), 0);
+        assert_eq!(round_half_away(2.5), 3);
+        assert_eq!(gs.kern(FACE_SANS, 32.0, 'x', 'x'), 0, "no pair either way");
+        assert_ne!(gs.kern(FACE_BODY, 32.0, 'A', 'V'), 0, "the Text cut kerns too");
+        assert_ne!(gs.kern(FACE_HEADING_ITALIC, 32.0, 'A', 'V'), 0, "and the Italic");
+        // Never a mono face: the cell is a grid, and Cornucopia carries no
+        // pair table.
+        for face in [FACE_MONO, FACE_MONO_ITALIC, FACE_MONO_TEXT] {
+            assert_eq!(gs.kern(face, 32.0, 'A', 'V'), 0);
+            assert_eq!(gs.kern_units(face, 'A', 'V'), 0);
+        }
+        // Units are size-free: a regen evicts rasters, not pairs.
+        gs.regen();
+        assert_eq!(gs.kern(FACE_SANS, 32.0, 'A', 'V'), -336);
+        assert!(gs.set_kerning(false));
+        assert_eq!(gs.kern(FACE_SANS, 32.0, 'A', 'V'), 0);
+    }
+
+    // The chrome's shaper folds each kern into the preceding glyph's step
+    // through the pen's carry: the refs' steps still sum to the width, and
+    // the width is the sub-pixel sum rounded once, not a per-glyph
+    // rounding.
+    #[test]
+    fn a_kerned_run_folds_the_kern_into_the_preceding_step_at_the_pens_precision() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let (off, w_off) = gs.shape_run(FACE_SANS, 32.0, "AVATAR".chars());
+        gs.set_kerning(true);
+        let (on, w_on) = gs.shape_run(FACE_SANS, 32.0, "AVATAR".chars());
+        assert_eq!(on.len(), 6);
+        assert_eq!(on.iter().map(|r| r.advance).sum::<i32>(), w_on, "the refs' steps are the width");
+        assert_eq!(off.iter().map(|r| r.advance).sum::<i32>(), w_off);
+        assert!(w_on < w_off, "kerned {w_on} vs unkerned {w_off}");
+        let mut q = 0i32;
+        let mut prev = None;
+        for ch in "AVATAR".chars() {
+            if let Some(p) = prev {
+                q += gs.kern(FACE_SANS, 32.0, p, ch);
+            }
+            q += gs.advance_fx(FACE_SANS, 32.0, ch).unwrap();
+            prev = Some(ch);
+        }
+        assert_eq!(w_on, q.div_euclid(GlyphSource::PEN_SCALE), "the pen's whole width of {q}");
     }
 
     #[test]
@@ -1781,22 +1909,9 @@ mod tests {
     fn word_renders_through_the_executor() {
         let mut gs = GlyphSource::new_vendored(512);
         let lm = gs.line_metrics(FACE_BODY, 16.0).unwrap();
-        let mut refs = alloc::vec::Vec::new();
-        let mut prev: Option<char> = None;
-        for ch in "Halcyon".chars() {
-            let mut gr = gs.glyph(FACE_BODY, 16.0, ch).unwrap();
-            if let Some(p) = prev {
-                // Kern into the preceding advance the way layout will.
-                let k = gs.kern(FACE_BODY, 16.0, p, ch);
-                if let Some(last) = refs.last_mut() {
-                    let l: &mut GlyphRef = last;
-                    l.advance += k;
-                }
-                let _ = &mut gr;
-            }
-            refs.push(gr);
-            prev = Some(ch);
-        }
+        // Shaped at the sub-pixel pen; the kern fold (off in a fresh
+        // source) is shape_run's own.
+        let (refs, _) = gs.shape_run(FACE_BODY, 16.0, "Halcyon".chars());
         let mut cart = cartoon::Cartoon::new();
         cart.ops.push(cartoon::Op::Clear { color: 0xFFF1_EAE0 }); // parchment ground
         cart.push_glyphs(gs.gen(), 4, 4 + lm.ascent, 0xFF2B_2320, &refs);

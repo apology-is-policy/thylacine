@@ -210,6 +210,20 @@ pub struct Sheet {
     pub lh_hdr: [f32; 3],
     pub lh_pre: f32,
     pub lh_raw: f32,
+    /// I-5d: whether the glyph source kerns proportional runs (GPOS pair
+    /// adjustments) -- the Instrument profile; legacy stays at 0, byte for
+    /// byte. The owner hands it to `GlyphSource::set_kerning` beside the
+    /// smoothing.
+    pub kerning: bool,
+    /// The heading ranks' letter-spacing in em (7.2: the H1's -0.025 em,
+    /// the H2 and H3 none), added to every glyph's advance of a heading
+    /// run, the last included (the CSS rule). Zero under legacy.
+    pub hdr_track: [f32; 3],
+    /// 7.5: a space at a line's end HANGS past the measure the way CSS
+    /// collapses it (the browser never wraps a word because the space after
+    /// it would not fit); legacy keeps wrapping the word before it, byte
+    /// for byte.
+    pub hang_spaces: bool,
     pub rhythm: Rhythm,
     /// The measure a block wraps at, px (7.5: H1, prose and `pre` cap at
     /// 720 under Instrument -- each block, not a centred column; H2 and a
@@ -412,6 +426,9 @@ pub fn sheet_for(b: &libhalcyon::instrument::Bundle, scale: u16, display_w: u32)
         lh_hdr: if inst { LH_HDR_INST } else { [LH_HDR; 3] },
         lh_pre: LH_PRE_INST,
         lh_raw: LH_RAW_INST,
+        kerning: inst,
+        hdr_track: if inst { HDR_TRACK_INST } else { [0.0; 3] },
+        hang_spaces: inst,
         rhythm: if inst { INSTRUMENT_RHYTHM } else { LEGACY_RHYTHM },
         measure_cap: if inst { ipx(MEASURE_CAP) } else { NO_CAP },
         pre_pad_y: ipx(if inst { PRE_PAD_Y_INST } else { ISLAND_PAD_Y }),
@@ -460,6 +477,10 @@ const LH_BODY_INST: f32 = 1.62;
 const LH_HDR_INST: [f32; 3] = [1.12, 1.3, 1.3];
 const LH_PRE_INST: f32 = 1.65;
 const LH_RAW_INST: f32 = 1.6;
+/// 7.2: the heading ranks' letter-spacing in em -- the H1's -0.025 em; the
+/// H2 and H3 none. The golden's H1 is 34.85 px narrower than its glyphs'
+/// advances over 41 characters, exactly this.
+const HDR_TRACK_INST: [f32; 3] = [-0.025, 0.0, 0.0];
 /// The UA's 1 em block margin at the body size: paragraphs, lists, tables
 /// and the block gap (7.5, collapsed).
 const PARA_MARGIN: i32 = 15;
@@ -570,26 +591,51 @@ pub const CHROME_OBJ: u8 = 2;
 /// edge and a table column comes up a pixel short -- the two must share
 /// an accumulator, not merely agree in spirit.
 ///
-/// That includes the KERN `lay_span` folds into each step. It is zero for
-/// every pair today (nothing reads a pair table), so this term changes no
-/// current measurement -- but a measure that omits a term the lay adds is
-/// the drift above, waiting for the shaper to arrive. Held here so the
-/// GPOS seam lands without a second bug.
+/// That includes the KERN `lay_span` folds into each step (I-5d: the GPOS
+/// pair adjustment in the pen's unit, 0 under legacy) and a heading's
+/// letter-spacing -- a measure that omits a term the lay adds is the drift
+/// above.
 fn run_width(gs: &mut GlyphSource, face: u8, px: f32, chars: impl Iterator<Item = char>) -> i32 {
+    run_width_fx(gs, face, px, 0.0, chars).div_euclid(GlyphSource::PEN_SCALE)
+}
+
+/// `run_width` before its one division: the run's width in 1/256 px, with
+/// `track_em` of letter-spacing added to every glyph's advance (the last
+/// included, the CSS rule) -- what the lay loop's pen travels.
+fn run_width_fx(gs: &mut GlyphSource, face: u8, px: f32, track_em: f32, chars: impl Iterator<Item = char>) -> i32 {
+    let track_q = track_fx(px, track_em);
     let mut q = 0i32;
     let mut prev: Option<char> = None;
     for ch in chars {
         if let Some(p) = prev {
             if !is_mono_face(face) {
-                q += gs.kern(face, px, p, ch) * GlyphSource::PEN_SCALE;
+                q += gs.kern(face, px, p, ch);
             }
         }
         if let Some(a) = gs.advance_fx(face, px, ch) {
-            q += a;
+            q += a + track_q;
             prev = Some(ch);
         }
     }
-    q.div_euclid(GlyphSource::PEN_SCALE)
+    q
+}
+
+/// Letter-spacing of `em` at `px` in 1/256 px, rounded once (0 for none).
+fn track_fx(px: f32, em: f32) -> i32 {
+    if em == 0.0 {
+        0
+    } else {
+        crate::raster::round_half_away(px * em * GlyphSource::PEN_SCALE as f32)
+    }
+}
+
+/// A heading rank's letter-spacing in 1/256 px: `hdr` is the Beacon rank
+/// (0 = not a heading), the em from the sheet's table (7.2).
+fn hdr_track_fx(sheet: &Sheet, hdr: u8, px: f32) -> i32 {
+    if hdr == 0 {
+        return 0;
+    }
+    track_fx(px, sheet.hdr_track[usize::from(hdr.min(3) - 1)])
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1163,6 +1209,9 @@ impl<'a> LineBuilder<'a> {
             sheet.body_px
         };
         let px = span_px(face, st, base_px, sheet);
+        // 7.2: a heading run is tracked (the H1's -0.025 em); the term rides
+        // every advance below -- the fit, the wrap, the spill, the pen.
+        let track_q = if mono { 0 } else { hdr_track_fx(sheet, st.hdr, px) };
         // The ink: an explicit SGR colour stands; a cell that chose none
         // takes the two legacy hooks (em-dim, the object colour) and then
         // its ROLE's default (7.3) -- raw output's overrides both (`.hal-out`:
@@ -1207,6 +1256,10 @@ impl<'a> LineBuilder<'a> {
         let word_wrap = matches!(mode, SpanMode::Doc | SpanMode::Prompt);
         let no_wrap = mode == SpanMode::Pre;
         let cut_at_box = no_wrap && sheet.flow == Flow::Fractional;
+        // A line-end space hangs (7.5): it never decides a wrap; the next
+        // glyph does, and cuts after it. Proportional runs only -- a mono
+        // grid has no collapsing space.
+        let hang = sheet.hang_spaces && !mono;
         let right_edge = self.content_right() - self.right_inset;
         // A space-less span (a code island, a pill, one long word) that will
         // not fit the rest of the line moves WHOLE to the next line when the
@@ -1246,14 +1299,15 @@ impl<'a> LineBuilder<'a> {
                 col += 1;
                 continue;
             };
-            // The pen advances in QUARTER-pixels; kerning is whole px (and
-            // 0 on Plex, which ships no pair table this reads), so it
-            // scales in. The glyph's own phase and whole step are resolved
-            // AFTER the wrap decision below, because a wrap moves the pen
-            // to a line start and re-zeroes the fraction.
+            let adv_q = adv_q + track_q;
+            // The pen advances in 1/256 px and so does the kern this glyph's
+            // step carries toward the next (I-5d; 0 under legacy). The
+            // glyph's own phase and whole step are resolved AFTER the wrap
+            // decision below, because a wrap moves the pen to a line start
+            // and re-zeroes the fraction.
             let step_q = adv_q
                 + if !is_mono_face(face) && i + 1 < cells.len() {
-                    gs.kern(face, px, ch, cells[i + 1].ch) * GlyphSource::PEN_SCALE
+                    gs.kern(face, px, ch, cells[i + 1].ch)
                 } else {
                     0
                 };
@@ -1263,7 +1317,7 @@ impl<'a> LineBuilder<'a> {
                 // the line is unaddressable, as clipped text is).
                 break;
             }
-            if !no_wrap && self.pen_x + provisional > right && !seg.refs.is_empty() {
+            if !no_wrap && self.pen_x + provisional > right && !seg.refs.is_empty() && !(hang && ch == ' ') {
                 let cut = match last_space {
                     Some((c, cc)) if word_wrap && c > 0 && c < seg.refs.len() => Some((c, cc)),
                     _ => None,
@@ -1274,6 +1328,7 @@ impl<'a> LineBuilder<'a> {
                     // Wrap at the last space boundary inside this seg; the
                     // spilled glyphs re-lay at the new line start.
                     let spill_refs: Vec<LaidGlyph> = seg.refs.split_off(cut);
+                    let spill_chars: Vec<char> = spill_refs.iter().map(|r| r.ch).collect();
                     seg.xs.truncate(cut);
                     seg.x_end = seg.xs.last().copied().unwrap_or(seg.x)
                         + seg.refs.last().map(|r| r.advance).unwrap_or(0);
@@ -1299,16 +1354,22 @@ impl<'a> LineBuilder<'a> {
                     // phases and whole steps are re-derived rather than
                     // carried: a phase is relative to the pen it was laid
                     // at, and reusing one across a line break offsets the
-                    // whole tail by up to 3/4 px. (Re-deriving also drops
-                    // the kern folded into the old advance, which is the
-                    // right answer anyway -- the pair at a wrap boundary
-                    // is not the pair that was there before it -- and is
-                    // exactly 0 on Plex today.)
-                    for mut r in spill_refs {
+                    // whole tail by up to 3/4 px. Re-deriving also drops the
+                    // kern folded into the old advance, so each spilled
+                    // glyph re-kerns with the pair it now opens: its spilled
+                    // successor, or -- for the last one -- the glyph that
+                    // caused the wrap, which the main loop lays next. The
+                    // pair at the wrap boundary itself is gone with the
+                    // line: the space's step keeps a kern that ends a line.
+                    let spill_n = spill_chars.len();
+                    for (j, mut r) in spill_refs.into_iter().enumerate() {
                         let aq = gs
                             .advance_fx(face2, px2, r.ch)
-                            .unwrap_or(r.advance * GlyphSource::PEN_SCALE);
-                        let total = self.pen_q + aq;
+                            .unwrap_or(r.advance * GlyphSource::PEN_SCALE)
+                            + track_q;
+                        let next = if j + 1 < spill_n { spill_chars[j + 1] } else { ch };
+                        let k = if mono { 0 } else { gs.kern(face2, px2, r.ch, next) };
+                        let total = self.pen_q + aq + k;
                         r.phase = crate::raster::phase_of(self.pen_q);
                         r.advance = total.div_euclid(GlyphSource::PEN_SCALE);
                         seg.xs.push(self.pen_x);
@@ -3674,6 +3735,114 @@ pub(crate) mod tests {
         assert_eq!(by(4), (s.inst.body_text, FACE_SANS), "plain prose");
         let red = segs.last().unwrap();
         assert_eq!(red.color, s.theme.terminal.ansi[1], "an explicit SGR colour (ANSI red) stands");
+    }
+
+    /// The golden's text lines (matrix-carbon-1440x900-s100-baseDpr1,
+    /// geometry-styles.json textLines): the SPAN of each visual line -- the
+    /// last fragment's right minus the first's left -- NOT the sum of the
+    /// fragment widths, which Blink floors and ceils to 1/64 px per
+    /// character (+1.44 px over the 94-character paragraph line). Regular
+    /// 15 for prose and list items, Medium 17 for the H2, Medium 34 at
+    /// -0.025 em for the H1: (face, px, tracking em, text, span px).
+    const GOLDEN_SPANS: &[(u8, f32, f32, &str, f32)] = &[
+        (FACE_SANS_MEDIUM, 34.0, -0.025, "Compositor geometry should remain legible", 644.750),
+        (FACE_SANS_MEDIUM, 34.0, -0.025, "under motion.", 207.719),
+        (FACE_SANS, 15.0, 0.0, "The layout is a recursive tree of splits. Leaves own ordered tile stacks; every leaf maintains", 606.359),
+        (FACE_SANS_MEDIUM, 17.0, 0.0, "Resize constraints", 141.969),
+        (FACE_SANS, 15.0, 0.0, "Reserve the header budget before allocating body height.", 384.438),
+        (FACE_SANS, 15.0, 0.0, "Clamp each pane to its minimum usable dimension.", 346.719),
+        (FACE_SANS, 15.0, 0.0, "Keep divider movement continuous and reversible.", 340.297),
+        (FACE_SANS_MEDIUM, 34.0, -0.025, "Hard geometry, quiet surfaces.", 453.500),
+        (FACE_SANS, 15.0, 0.0, "The divider network is the workspace chassis. Its intersections are small joints; its lines", 586.062),
+        (FACE_SANS, 15.0, 0.0, "remain visible without demanding attention.", 296.219),
+        (FACE_SANS_MEDIUM, 17.0, 0.0, "Visual hierarchy", 124.719),
+        (FACE_SANS, 15.0, 0.0, "Pane focus is a structural state, not decoration.", 315.625),
+        (FACE_SANS, 15.0, 0.0, "Expanded content becomes fractionally brighter.", 325.859),
+        (FACE_SANS, 15.0, 0.0, "Amber means action, focus, or attention\u{2014}nothing else.", 366.875),
+    ];
+
+    /// I-5d: the sheet switches kerning and tracks the H1 by profile --
+    /// both off under legacy (the fingerprints stand), both on under
+    /// Instrument (7.2, 7.5).
+    #[test]
+    fn the_sheet_kerns_and_tracks_the_h1_under_instrument_only() {
+        let d = daylight_sheet(100);
+        assert!(!d.kerning);
+        assert_eq!(d.hdr_track, [0.0; 3]);
+        let s = inst_sheet(1440);
+        assert!(s.kerning);
+        assert_eq!(s.hdr_track, [-0.025, 0.0, 0.0]);
+        assert!(s.hang_spaces);
+        assert!(!d.hang_spaces);
+        assert_eq!(hdr_track_fx(&s, 1, 34.0), -218, "34 x -0.025 x 256 = -217.6");
+        assert_eq!(hdr_track_fx(&s, 2, 17.0), 0);
+        assert_eq!(hdr_track_fx(&s, 0, 15.0), 0);
+        assert_eq!(hdr_track_fx(&d, 1, 17.5), 0);
+    }
+
+    /// 7.5 (I-5d): with kerning on, the sub-pixel pen measures every golden
+    /// line to the browser's span within a quarter pixel (the per-glyph
+    /// 1/256 rounding over up to 94 glyphs) -- HarfBuzz's `kern` through
+    /// read-fonts, the H1 tracked. The control, one variable away: unkerned,
+    /// the widest miss is over a pixel; untracked, the H1 misses by 35.
+    #[test]
+    fn the_goldens_lines_measure_the_browsers_spans_with_kerning_on() {
+        let mut g = gs();
+        assert!(g.set_kerning(true));
+        let mut unkerned_gap = 0.0f32;
+        for &(face, px, track, text, span) in GOLDEN_SPANS {
+            let w = run_width_fx(&mut g, face, px, track, text.chars()) as f32 / 256.0;
+            assert!((w - span).abs() < 0.25, "{text:?}: {w} vs the browser's {span}");
+            g.set_kerning(false);
+            let u = run_width_fx(&mut g, face, px, track, text.chars()) as f32 / 256.0;
+            g.set_kerning(true);
+            unkerned_gap = unkerned_gap.max((u - span).abs());
+        }
+        assert!(unkerned_gap > 1.0, "kerning must matter to at least one line or this proves nothing (max unkerned miss {unkerned_gap})");
+        let w0 = run_width_fx(&mut g, FACE_SANS_MEDIUM, 34.0, 0.0, "Compositor geometry should remain legible".chars()) as f32 / 256.0;
+        assert!((w0 - 644.750).abs() > 30.0, "untracked H1 {w0}");
+    }
+
+    /// The golden's H1 wraps after "legible" at the pane's 647 px measure
+    /// (733 wide, 43 of padding a side): 644.75 fits and "under" does not.
+    /// Untracked and unkerned the same words are 679.8 wide and wrap a
+    /// word earlier -- the browser's wrap point needs both, AND the space
+    /// after "legible" left to hang (644.75 + a space is 652: a rule that
+    /// fits the space wraps the word, which this test found). The
+    /// paragraph wraps after "maintains" as the golden does.
+    #[test]
+    fn the_goldens_h1_and_paragraph_wrap_where_the_browser_wraps() {
+        let s = inst_sheet(1440);
+        let t = inst_transcript(s.theme.terminal, |buf| {
+            wire::open(buf, BOp::Zone, &[("k", "output")]);
+            hdr(buf, "1", "Compositor geometry should remain legible under motion.");
+            buf.extend_from_slice(b"The layout is a recursive tree of splits. Leaves own ordered tile stacks; every leaf maintains exactly one expanded tile.\n");
+            wire::close(buf, BOp::Zone);
+        });
+        let line_text = |l: &LaidLine| -> String { l.segs.iter().flat_map(|sg| sg.refs.iter().map(|r| r.ch)).collect() };
+        let mut g = gs();
+        g.set_kerning(true);
+        let laid = layout_block(&t.frozen_blocks()[0], 733, &s, &mut g);
+        let texts: Vec<String> = laid.lines.iter().map(line_text).collect();
+        assert_eq!(texts[0].trim_end(), "Compositor geometry should remain legible", "{texts:?}");
+        assert_eq!(texts[1].trim_end(), "under motion.");
+        assert_eq!(texts[2].trim_end(), "The layout is a recursive tree of splits. Leaves own ordered tile stacks; every leaf maintains");
+        assert!(texts[3].starts_with("exactly one"), "{texts:?}");
+        // The H1's laid width is the run measure's to the pixel (the lay
+        // and the measure share one accumulator), and the browser's span
+        // plus the hanging space (7.65 px at Medium 34 with the tracking).
+        let h1 = &laid.lines[0].segs;
+        let w = h1.last().unwrap().x_end - h1[0].x;
+        let measured = run_width_fx(&mut g, FACE_SANS_MEDIUM, 34.0, -0.025, "Compositor geometry should remain legible ".chars())
+            .div_euclid(GlyphSource::PEN_SCALE);
+        assert_eq!(w, measured, "the lay disagrees with the measure");
+        assert!((6..=9).contains(&(w - 645)), "H1 laid {w} px wide: 644.75 plus the hanging space");
+        // The control: untracked and unkerned, the H1 wraps a word earlier.
+        let mut plain = inst_sheet(1440);
+        plain.hdr_track = [0.0; 3];
+        let mut g0 = gs();
+        let laid0 = layout_block(&t.frozen_blocks()[0], 733, &plain, &mut g0);
+        assert_eq!(line_text(&laid0.lines[0]).trim_end(), "Compositor geometry should remain");
     }
 
     /// 7.4 (I-5c): the producer's prompt inks stand under the Instrument

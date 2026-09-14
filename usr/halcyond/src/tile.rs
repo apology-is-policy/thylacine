@@ -2509,7 +2509,7 @@ mod tests {
         let (cw, ch, _) = gs.mono_cell();
         let mut t = Tile::new(20, 4, s.theme.terminal);
         t.apply(Record::Mode(ScreenMode::AltScreen));
-        let mut ital = Cell { ch: 'x', fg: s.theme.terminal.fg, bg: s.theme.terminal.bg, attrs: ATTR_ITALIC, span: 0 };
+        let ital = Cell { ch: 'x', fg: s.theme.terminal.fg, bg: s.theme.terminal.bg, attrs: ATTR_ITALIC, span: 0 };
         let mut roman = ital;
         roman.attrs = 0;
         roman.ch = 'y';
@@ -2531,7 +2531,6 @@ mod tests {
         let ids: Vec<u32> = cart.runs.iter().map(|r| r.glyph).collect();
         assert!(ids.contains(&id_i) && ids.contains(&id_r), "the italic cell paints the Italic face, the roman the Regular ({ids:?})");
         assert!(!ids.contains(&id_x_roman));
-        ital.attrs = ATTR_ITALIC;
         // Legacy: the surface, and the Regular for both.
         let l = crate::layout::daylight_sheet(100);
         let mut cart = Cartoon::new();

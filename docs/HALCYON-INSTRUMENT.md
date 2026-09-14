@@ -932,6 +932,35 @@ lookups only, no shaping) is ~300 lines in `raster.rs` and closes the gap
 for Latin text; ligatures stay off in both the browser capture (request
 them off, §11) and here. Whether it lands in this arc or after is §13.4.
 
+**As built at I-5d (JOURNAL run 46o "I-5d").** Landed in this arc (ruling
+15). `outline::Face` resolves the `kern` feature through the DEFAULT
+script's default language system to its PairPos lookups (Plex: three, of a
+format 1 pair-set table and three format 2 class tables each; an Extension
+wrapper is unwrapped; every other lookup type is not kerning) and answers a
+pair in font units exactly as HarfBuzz applies the feature — the lookups
+SUM, within a lookup the first subtable that applies ends it, and a class
+hit applies at zero (measured against HarfBuzz over every printable-ASCII
+pair of the Regular cut: 8836 pairs, 1228 non-zero, 0 differences).
+`GlyphSource::kern` returns the adjustment in the pen's 1/256 px, from a
+size-free memo of font units, and is switched by the profile
+(`Sheet.kerning` → `set_kerning`: on under Instrument for every
+proportional face — the Bold and the Italic included, never a mono face —
+and 0 under legacy, byte for byte: the I-5b fingerprints stand). The lay
+loop carries each pair's kern in the preceding glyph's step, re-kerns a
+spilled word with the pair it now opens, and the chrome's shaper folds the
+kern through the pen's carry. Two more things the browser's widths
+demanded: the H1's −0.025 em tracking (§7.2's table, unapplied until now
+— the golden's H1 is 34.85 px narrower than its glyphs' advances) rides
+every heading advance, the last included; and a space at a line's end
+HANGS past the measure the way CSS collapses it, so "legible" stays on the
+golden's first line where a rule that fits the space had wrapped it. Both
+profile-keyed (`Sheet.hdr_track`, `Sheet.hang_spaces`). The oracle is each
+golden line's SPAN (the last fragment's right minus the first's left): the
+sum of the per-character fragment widths carries Blink's floor/ceil to
+1/64 px per character (+1.44 px over the 94-character paragraph line) and
+is not the advance sum. Fourteen lines of the 1440 × 900 golden measure
+within a quarter pixel; the H1 wraps where the browser wraps.
+
 **As built at I-5b (JOURNAL run 46o "I-5b").** The flow is PROFILE-KEYED
 (`Sheet.flow`): legacy rounds each line box to whole pixels and stacks
 integers (byte-pinned by a fingerprint over a rich transcript at two
@@ -1494,9 +1523,14 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   Instrument, the eleven byte-identical under legacy — with its reader
   beside the writer; `λ <cwd> ⊢ ` in `ut` in the session's inks; nora's
   class roles by name; the session gate's prompt leg; the as-built note in
-  §7.4 and §13's addendum; JOURNAL run 46o "I-5c"). Remaining: **I-5d**
-  GPOS kerning. §14.4 waits for the inline-media arc's merge (it lives on
-  aux-3, `53fcc14c`).
+  §7.4 and §13's addendum; JOURNAL run 46o "I-5c"). **I-5d LANDED** (GPOS
+  pair kerning through read-fonts with HarfBuzz's semantics, measured
+  against it; the H1's −0.025 em tracking; the hanging line-end space;
+  all three profile-keyed, legacy byte-pinned; the golden's fourteen line
+  spans within a quarter pixel and the H1's wrap point; the as-built note
+  in §7.5 and §13's addendum; JOURNAL run 46o "I-5d"). Remaining: §14.4,
+  which waits for the inline-media arc's merge (it lives on aux-3,
+  `53fcc14c`).
 - **I-6 — dividers and minima.** Capture, drag, double-click, the clamps
   and refusals; winsize through the existing path.
 - **I-7 — the picker and live switching.** The menu surface, the
@@ -1585,6 +1619,20 @@ session gate's pixels; the neutral inks are collinear to the gate's
 blend-line instrument (`terminal_path`, `secondary` and `text` lie within
 3° of one another from `open`), so the gate proves their positions and
 their growth with a prompt, and the host tests their values.
+
+**I-5d residues (recorded 2026-09-14 late evening):** kerning is applied
+within a style run, never across a run boundary (the browser shapes a text
+node at a time, so an inline element's boundary is the same seam); no
+`liga` / `calt` (off in the capture too, §11) and no mark positioning;
+lookup flags are not honoured (Plex's are 0 — a face that ignored marks in
+its pairs would kern across a combining mark differently); the kern memo
+is bounded by a clear, not an LRU; the chrome's Sans runs (rail, header
+names) kern under Instrument as the browser's do, so the I-5a golden-box
+witnesses hold only with a fresh (unkerned) source; a spilled word's pair
+with the glyph that caused its wrap is re-kerned, but the space's step at
+the line end keeps the kern it had (invisible, the line ends there); the
+hanging space's `x_end` runs past the measure by one space (selection
+rects include it).
 
 ## 14. The round-2 surfaces (Astra §7, adopted 2026-09-14 with the deltas named)
 

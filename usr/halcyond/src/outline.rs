@@ -24,6 +24,8 @@ use skrifa::charmap::Charmap;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlineGlyphCollection, OutlinePen};
 use skrifa::raw::tables::hmtx::Hmtx;
+use skrifa::raw::tables::gpos::{ExtensionSubtable, PairPos, PositionLookup};
+use skrifa::raw::types::{GlyphId16, Tag};
 use skrifa::raw::TableProvider;
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 
@@ -36,6 +38,114 @@ pub struct Face {
     charmap: Charmap<'static>,
     outlines: OutlineGlyphCollection<'static>,
     hmtx: Option<Hmtx<'static>>,
+    /// The `kern` feature's pair positionings, lookup by lookup (I-5d;
+    /// `kern_lookups`). Empty for a face without one (Cornucopia).
+    kern: Vec<Vec<PairPos<'static>>>,
+}
+
+/// One PairPos subtable's answer for a pair: `Some(x_advance)` when the
+/// subtable APPLIES in HarfBuzz's sense (see `Face::kern_units`), else
+/// None. A malformed subtable answers None: a build-input defect flattens
+/// to an unkerned pair, never a panic in the renderer.
+fn pair_x_advance(sub: &PairPos<'_>, left: GlyphId, right: GlyphId) -> Option<i16> {
+    match sub {
+        PairPos::Format1(f) => {
+            let idx = f.coverage().ok()?.get(left)?;
+            let set = f.pair_sets().iter().nth(usize::from(idx))?.ok()?;
+            let right16: GlyphId16 = right.try_into().ok()?;
+            for rec in set.pair_value_records().iter() {
+                let rec = rec.ok()?;
+                if rec.second_glyph() == right16 {
+                    return Some(rec.value_record1().x_advance().unwrap_or(0));
+                }
+            }
+            None
+        }
+        PairPos::Format2(f) => {
+            f.coverage().ok()?.get(left)?;
+            let c1 = f.class_def1().ok()?.get(left);
+            let c2 = f.class_def2().ok()?.get(right);
+            if c1 >= f.class1_count() || c2 >= f.class2_count() {
+                return None;
+            }
+            let rec = f.class1_records().get(usize::from(c1)).ok()?;
+            let rec = rec.class2_records().get(usize::from(c2)).ok()?;
+            Some(rec.value_record1().x_advance().unwrap_or(0))
+        }
+    }
+}
+
+/// The `kern` feature's pair positionings, lookup by lookup in index order
+/// (HarfBuzz collects a feature's lookups, sorts and dedupes them), each a
+/// list of PairPos subtables in table order. Resolved through the DEFAULT
+/// script's default language system -- `DFLT`, else `latn`, else the first
+/// script -- the way a shaper with no language tag resolves it (Plex names
+/// the same three lookups under every script it carries). An Extension
+/// lookup wrapping PairPos is unwrapped; every other lookup type (mark
+/// positioning, contextual) is not kerning and is skipped. No GPOS, no
+/// `kern` feature, or any read error -> empty: the face renders unkerned,
+/// which is what it did before this existed.
+fn kern_lookups(font: &FontRef<'static>) -> Vec<Vec<PairPos<'static>>> {
+    let mut out: Vec<Vec<PairPos<'static>>> = Vec::new();
+    let Ok(gpos) = font.gpos() else {
+        return out;
+    };
+    let (Ok(scripts), Ok(features), Ok(lookups)) =
+        (gpos.script_list(), gpos.feature_list(), gpos.lookup_list())
+    else {
+        return out;
+    };
+    let records = scripts.script_records();
+    let pick = |tag: &[u8; 4]| records.iter().find(|r| r.script_tag() == Tag::new(tag));
+    let Some(script) = pick(b"DFLT").or_else(|| pick(b"latn")).or_else(|| records.first()) else {
+        return out;
+    };
+    let Ok(script) = script.script(scripts.offset_data()) else {
+        return out;
+    };
+    let Some(Ok(langsys)) = script.default_lang_sys() else {
+        return out;
+    };
+    let feature_records = features.feature_records();
+    let mut indices: Vec<u16> = Vec::new();
+    for fi in langsys.feature_indices() {
+        let Some(rec) = feature_records.get(usize::from(fi.get())) else {
+            continue;
+        };
+        if rec.feature_tag() != Tag::new(b"kern") {
+            continue;
+        }
+        let Ok(feature) = rec.feature(features.offset_data()) else {
+            continue;
+        };
+        for li in feature.lookup_list_indices() {
+            indices.push(li.get());
+        }
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    for li in indices {
+        let Some(Ok(lookup)) = lookups.lookups().iter().nth(usize::from(li)) else {
+            continue;
+        };
+        let subs: Vec<PairPos<'static>> = match lookup {
+            PositionLookup::Pair(l) => l.subtables().iter().filter_map(Result::ok).collect(),
+            PositionLookup::Extension(l) => l
+                .subtables()
+                .iter()
+                .filter_map(Result::ok)
+                .filter_map(|e| match e {
+                    ExtensionSubtable::Pair(pp) => pp.extension().ok(),
+                    _ => None,
+                })
+                .collect(),
+            _ => continue,
+        };
+        if !subs.is_empty() {
+            out.push(subs);
+        }
+    }
+    out
 }
 
 /// One rendered glyph: `w x h` coverage bytes (rows tight, top-down) and
@@ -147,7 +257,43 @@ impl Face {
         let charmap = font.charmap();
         let outlines = font.outline_glyphs();
         let hmtx = font.hmtx().ok();
-        Some(Face { font, upem, charmap, outlines, hmtx })
+        let kern = kern_lookups(&font);
+        Some(Face { font, upem, charmap, outlines, hmtx, kern })
+    }
+
+    /// The face's units per em -- the unit every table value is in.
+    pub fn upem(&self) -> u16 {
+        self.upem
+    }
+
+    /// Whether the `kern` feature resolved to any pair positioning.
+    pub fn has_kern(&self) -> bool {
+        !self.kern.is_empty()
+    }
+
+    /// The pair adjustment between two glyphs, in FONT UNITS, exactly as
+    /// HarfBuzz applies the `kern` feature: every lookup the feature names
+    /// is applied in index order and their adjustments SUM; within one
+    /// lookup the subtables are tried in order and the FIRST that applies
+    /// ends it -- a format 1 pair set applies only when it holds the pair,
+    /// a format 2 class pair applies whenever the first glyph is covered
+    /// and both classes are in range, a zero value included (HarfBuzz's
+    /// `PairPosFormat2::apply` returns true there, so a later subtable of
+    /// that lookup is never consulted). Only the first glyph's `x_advance`
+    /// is read (Plex writes nothing else; a placement would move a glyph,
+    /// not the pen). Measured against HarfBuzz over every printable-ASCII
+    /// pair of the Regular cut: 8836 pairs, 1228 non-zero, 0 differences.
+    pub fn kern_units(&self, left: GlyphId, right: GlyphId) -> i32 {
+        let mut total = 0i32;
+        for lookup in &self.kern {
+            for sub in lookup {
+                if let Some(v) = pair_x_advance(sub, left, right) {
+                    total += i32::from(v);
+                    break;
+                }
+            }
+        }
+        total
     }
 
     /// The glyph for a char: .notdef (0) for one the face does not map,
@@ -303,6 +449,64 @@ mod tests {
 
     fn text() -> Face {
         Face::parse(crate::IBM_PLEX_SANS_TEXT).expect("Plex Text parses")
+    }
+
+    fn regular() -> Face {
+        Face::parse(crate::IBM_PLEX_SANS_REGULAR).expect("Plex Regular parses")
+    }
+
+    fn medium() -> Face {
+        Face::parse(crate::IBM_PLEX_SANS_MEDIUM).expect("Plex Medium parses")
+    }
+
+    // I-5d: the `kern` feature of every Plex cut names three PairPos
+    // lookups of four subtables each (one format 1 pair-set table, three
+    // format 2 class tables) under every script it carries; Cornucopia
+    // carries no GPOS at all.
+    #[test]
+    fn the_kern_feature_resolves_to_the_pair_positionings() {
+        for face in [text(), regular(), medium()] {
+            assert!(face.has_kern());
+            assert_eq!(face.kern.len(), 3);
+            assert!(face.kern.iter().all(|l| l.len() == 4), "four subtables a lookup");
+            assert!(matches!(face.kern[0][0], PairPos::Format1(_)), "the pair sets lead");
+            assert!(matches!(face.kern[0][3], PairPos::Format2(_)));
+        }
+        let mono = Face::parse(cornucopia::SUBSET_TTF).expect("Cornucopia parses");
+        assert!(!mono.has_kern());
+        assert_eq!(mono.kern_units(mono.glyph_id('A'), mono.glyph_id('V')), 0);
+    }
+
+    // Pair values read straight off the tables with fontTools (the same
+    // bytes), both formats, both signs, and HarfBuzz's first-match rule:
+    // `T o` is covered by lookup 1's class table at 0 AND by lookup 2's at
+    // -65 -- the lookups SUM (0 + -65) while the zero hit ended lookup 1;
+    // `1 1` is in no coverage at all; `( V` is a positive pair-set entry.
+    #[test]
+    fn pair_adjustments_read_both_formats_the_way_harfbuzz_applies_them() {
+        let f = regular();
+        let k = |a: char, b: char| f.kern_units(f.glyph_id(a), f.glyph_id(b));
+        assert_eq!(k('A', 'V'), -41);
+        assert_eq!(k('T', 'o'), -65);
+        assert_eq!(k('L', 'T'), -70);
+        assert_eq!(k('r', '.'), -80);
+        assert_eq!(k('P', '.'), -100);
+        assert_eq!(k('W', 'a'), -10);
+        assert_eq!(k('a', 'v'), -8);
+        assert_eq!(k('o', 'V'), -30);
+        // Format 1: the per-glyph pair sets.
+        assert_eq!(k('/', '/'), -120);
+        assert_eq!(k('(', 'V'), 20);
+        assert_eq!(k('B', '_'), -60);
+        assert_eq!(k('@', 'V'), -30);
+        assert_eq!(k('f', 'f'), 0);
+        assert_eq!(k('x', 'x'), 0);
+        assert_eq!(k('1', '1'), 0);
+        assert_eq!(k('7', '.'), 0);
+        assert_eq!(f.kern_units(GlyphId::default(), f.glyph_id('V')), 0, ".notdef pairs with nothing");
+        let m = medium();
+        assert_eq!(m.kern_units(m.glyph_id('A'), m.glyph_id('V')), -47);
+        assert_eq!(m.kern_units(m.glyph_id('T'), m.glyph_id('o')), -65);
     }
 
     // The union, over its WHOLE domain -- 65536 pairs, so this is a proof

@@ -448,6 +448,7 @@ pub extern "C" fn rs_main() -> i64 {
     session::push_theme(&ring, &bundle);
     let mut sheet = sheet_for(&bundle, display.scale, display.w);
     gs.set_smooth(sheet.smooth_mem);
+    gs.set_kerning(sheet.kerning);
     {
         let (cw, ch, _) = gs.mono_cell();
         say!(
@@ -545,6 +546,7 @@ pub extern "C" fn rs_main() -> i64 {
                     sheet.gen = gen;
                     gs.set_scale(di.scale);
                     gs.set_smooth(sheet.smooth_mem);
+                    gs.set_kerning(sheet.kerning);
                     display.scale = di.scale;
                     cache.clear();
                     frame.clear();

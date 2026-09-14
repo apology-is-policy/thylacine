@@ -524,6 +524,18 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
   bbox + 2·stroke; the untrusted-codepoint path unchanged. The
   AUDIT-TRIGGERS row for halcyond's raster surface gets its item.
 
+  **Amended at HALCYON-INSTRUMENT I-5d (2026-09-14).** "Kern stays 0" is
+  now the LEGACY posture only: under the Instrument profile
+  `GlyphSource::kern` reads Plex's GPOS `kern` feature (PairPos formats 1
+  and 2, HarfBuzz's first-match-per-lookup, summed) through the vendored
+  read-fonts and answers in the pen's 1/256 px; the switch is
+  `Sheet.kerning` → `set_kerning`, off under legacy so every legacy byte
+  stands (the I-5b fingerprints). The seam's unit changed with it — the
+  three folds (`run_width_fx`, the lay loop, `shape_run_spaced`'s carry)
+  take the value as-is, no longer scaled by the pen. Not a std rounding:
+  `round_half_away` is the crate's own, because `f32::round` is not in
+  `core`.
+
 ---
 
 ## 7. The vote

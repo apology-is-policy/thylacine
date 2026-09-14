@@ -1173,6 +1173,7 @@ fn rescale(
     sheet.gen = gen;
     gs.set_scale(pct);
     gs.set_smooth(sheet.smooth_mem);
+    gs.set_kerning(sheet.kerning);
     let (cw, ch, _) = gs.mono_cell();
     geom.cell_w = cw;
     geom.cell_h = ch;
@@ -1357,6 +1358,7 @@ pub fn run(home: Option<String>) -> i64 {
     }
     let mut sheet = sheet_for(&bundle, display.scale, display.w);
     gs.set_smooth(sheet.smooth_mem);
+    gs.set_kerning(sheet.kerning);
     let (cell_w, cell_h, _) = gs.mono_cell();
     let (disp_w, disp_h) = (root_surf.w, root_surf.h);
     let mut geom = Geom {

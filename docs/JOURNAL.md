@@ -684,6 +684,83 @@ tree, not a pattern) and relaunched on the fixed image.
 Binary: 2,140,744 → 2,785,000 bytes (+644 KB, the three Plex cuts and the
 two subsets; accepted at §7.1). Host: halcyond 228 → 235.
 
+### I-5d: kerning -- a pair reader measured against HarfBuzz, and an oracle that turned out to be the span, the tracking and the hanging space
+
+**What landed** (`I5D_HASH`; HALCYON-INSTRUMENT §7.5 as built, §12, §13's
+addendum; HALCYON-TYPE §6 amended; the I-5 audit row's items (u)–(x)).
+`outline::Face` reads Plex's GPOS `kern` feature through the vendored
+read-fonts — the DEFAULT script's default language system to its PairPos
+lookups, an Extension wrapper unwrapped — and answers a pair in font units
+the way HarfBuzz applies the feature: the lookups sum, within a lookup the
+first subtable that applies ends it, and a format 2 class hit applies at
+zero. `GlyphSource::kern` scales that to the pen's 1/256 px from a
+size-free memo and is switched by the profile (`Sheet.kerning`): every
+proportional face kerns under Instrument, the Bold and the Italic
+included; legacy stays at 0 and the I-5b fingerprints pass unchanged. The
+seam's unit changed from whole pixels to 1/256 and its three consumers
+changed with it. Two more sheet keys came out of the oracle, below.
+
+**The semantics were measured, not assumed.** A Python reimplementation of
+the reader (fontTools, the same bytes) was compared with HarfBuzz itself
+(uharfbuzz, installed into the scratchpad's fontenv for the purpose) over
+every printable-ASCII pair of the Regular cut: 8836 pairs, 1228 non-zero,
+0 differences — and per line, the Python's kerned width equalled the
+shaper's to the thousandth for all four cuts. That is what licenses the
+Rust reader's tests to quote pair values read straight off the tables
+(`A V` −41, `/ /` −120 in a format 1 pair set, `( V` +20, `T o` −65 as
+0 + −65 across two lookups) as HarfBuzz's answers. Without the shaper in
+the loop the same test would have pinned my reading of the spec, which is
+a different thing.
+
+**The oracle was not the number the resume note carried.** The note said
+"the p's first line sums 607.797 at 15"; HarfBuzz kerned puts that line at
+606.360 and unkerned at 607.920 — the golden sat between them, 0.12 under
+UNKERNED, which would have read as "kerning is off in the browser" had it
+been trusted. Nine prose lines showed the same excess over the kerned
+width, +0.0155 px per character, every one of them: one sixty-fourth of a
+pixel per glyph. The capture's per-character rects are LayoutUnits, each
+floored on the left and ceiled on the right, so their SUM grows by ~1/64
+per character while the SPAN (the last right minus the first left) does
+not: 606.359 against HarfBuzz's 606.360. Every span in the fixture agrees
+with the shaper within 0.015 px. The fixture in the test is the spans,
+and its doc comment says why.
+
+**The H1 was 35 px too wide, and §7.2 had said so all along.** Medium 34
+kerned is 679.6 px for the golden's H1 line; the golden's span is 644.75.
+The difference is 0.85 px per character over 41 characters: the
+`letter-spacing: -.025em` the kit's CSS applies and the type map records,
+which I-5a and I-5b never implemented — the row test measured line TOPS,
+which tracking does not move. `Sheet.hdr_track` now carries it (the H1
+only), added to every heading advance including the last, in the measure,
+the lay, the wrap and the spill. Both per-cut widths of the H1 lines agree
+to 0.013 px with the tracking in.
+
+**The hanging space, found by the wrap test.** With kerning and tracking
+in, the H1 run measured 644.75 and the wrap test still put "legible" on
+the second line. The lay loop fitted the space AFTER "legible" inside the
+647 px measure (644.75 + 7.65 > 647) and wrapped at the previous space;
+the browser collapses a line-end space and lets it hang. `Sheet.hang_spaces`
+(Instrument) exempts a space from deciding a wrap: the next glyph decides,
+and cuts after the space. Legacy keeps its rule byte for byte. The test's
+control laid the same H1 untracked and unkerned and asserts it wraps a word
+earlier, so the wrap point is the browser's only with all three.
+
+**Two things worth writing down for the next reader.** `f32::round` is not
+in `core`, and the host tests (std) passed before the guest build's clippy
+said so; the crate's `round_half_away` is the rounding, on both signs
+(`(x + 0.5) as i32` rounds −335.87 to −335). And the chrome's shaper
+carried a whole-pixel kern into the previous ref's advance; at 1/256 the
+fold goes through the pen's carry so the fraction reaches the next glyph's
+phase, and `prev` is now the last SERVED glyph rather than the last seen.
+
+**Residues** (§13's addendum): within a run only; no `liga` / `calt` /
+marks; lookup flags unread; the memo's clear; the chrome runs kern under
+Instrument (the I-5a golden-box tests run unkerned); the space at a wrap
+keeps its old kern; the hanging space's `x_end`.
+
+**Tests.** Host: halcyond 255 → 261. Gates, one image per lever:
+ls-halcyon-instrument PASS 68 s, ls-halcyon-session-instrument 57 s (the prompt leg holds under kerning), ls-ci 28 s, ls-halcyon 120 s (the legacy identity), ls-gfx-compose 72 s.
+
 ### I-5c: the producers -- an export keyed on the profile, a reader beside its writer, and a gate that reads deltas because the neutral inks are collinear
 
 **What landed** (`ccaec844`; HALCYON-INSTRUMENT §7.4 as built, §12, §13's
