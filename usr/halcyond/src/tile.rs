@@ -103,6 +103,8 @@ pub struct Tile {
     /// content overflowed the view). The layout width follows it, and a
     /// flip re-lays once in the frame that sees it.
     lane: bool,
+    /// The lane passes the last render took (bounded at three; r2 B-F1).
+    lane_passes: u8,
 }
 
 impl Tile {
@@ -140,6 +142,7 @@ impl Tile {
             laid_lines_last: 0,
             live_laid: None,
             lane: false,
+            lane_passes: 0,
         }
     }
 
@@ -496,7 +499,9 @@ impl Tile {
         // overflows at the narrower one, and what fits at the narrower fits
         // at the full. Nothing under legacy (the lane is 0).
         let lane = crate::indicator::lane(sheet);
+        let mut passes = 0u8;
         let (lay_w, open_lb, live_lb, prov, total, content_h) = loop {
+            passes += 1;
             let lay_w = widthi - if self.lane { lane } else { 0 };
             self.laid_last += self.sync_heights(lay_w, sheet, gs);
             // The exact content height from the cached heights: the top
@@ -548,8 +553,26 @@ impl Tile {
             if overflow == self.lane {
                 break (lay_w, open_lb, live_lb, prov, total, content_h);
             }
+            // BOUNDED (r2 B-F1): the loop rested on "narrowing never
+            // shortens", and a layout rule that was not monotone in the
+            // width spun it forever -- the renderer never presented again.
+            // When the two widths disagree the lane WINS: a reserved lane
+            // over content that fits paints no thumb and costs 8 px; an
+            // unreserved one over content that overflows hides the thumb.
+            // Pass 2 laid with the lane is final; pass 2 laid without it
+            // lays once more WITH it (pass 3), which is final by the same
+            // rule -- and the next frame starts from the lane, so the
+            // picture is stable across frames, never a per-frame flip.
+            if passes >= 2 {
+                if self.lane {
+                    break (lay_w, open_lb, live_lb, prov, total, content_h);
+                }
+                self.lane = true;
+                continue;
+            }
             self.lane = overflow;
         };
+        self.lane_passes = passes;
         let live_cols = self.grid.dims().0;
 
         // The mark's row drags the view: locate its content-relative span
@@ -1517,6 +1540,7 @@ mod tests {
             laid_lines_last: 0,
             live_laid: None,
             lane: false,
+            lane_passes: 0,
         }
     }
 
@@ -2471,6 +2495,36 @@ mod tests {
         assert!(!t.lane);
         assert_eq!(t.heights_width, w as i32);
         assert!(!cart.ops.iter().any(|op| matches!(op, Op::Rect { w: 3, color, .. } if *color == l.inst.dim)));
+    }
+
+    /// r2 B-F1: the lane decision is BOUNDED (three passes at most, the
+    /// lane winning a disagreement) and stable across frames -- the loop
+    /// once rested on "narrowing never shortens", which a layout rule broke,
+    /// and spun forever on ordinary content. A test that fails by hanging
+    /// is not runnable, so the bound is pinned through the pass counter
+    /// over a sweep of widths, and the next frame's single pass pins the
+    /// stability.
+    #[test]
+    fn the_lane_decision_takes_at_most_three_passes_and_holds_the_next_frame() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let s = inst_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let h = (30 * ch) as usize;
+        for cols in [20usize, 27, 33, 41, 48, 60, 77] {
+            let w = (cols * cw as usize) + 5;
+            let mut t = history_tile(60, 30, 64);
+            push_history(&mut t, 60, 1, 'h');
+            let mut cart = Cartoon::new();
+            let content = t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+            assert!(content > h as i32, "w={w}: the premise, an overflow");
+            assert!(t.lane_passes >= 1 && t.lane_passes <= 3, "w={w}: {} passes", t.lane_passes);
+            assert!(t.lane, "w={w}: an overflow reserves the lane");
+            let lane = t.lane;
+            let mut cart = Cartoon::new();
+            t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+            assert_eq!(t.lane_passes, 1, "w={w}: the next frame decides in one pass");
+            assert_eq!(t.lane, lane, "w={w}: and keeps the decision");
+        }
     }
 
     /// 7.7's stability: the lane decision, once taken, holds across frames

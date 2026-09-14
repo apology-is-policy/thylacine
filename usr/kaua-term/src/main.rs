@@ -241,15 +241,28 @@ extern "C" fn pump_in(arg: u64) {
 }
 
 /// `killgrp` on `/proc/<pid>/ctl` (the owner axis: the app is ours). A
-/// refusal -- the app already gone -- is inert.
+/// refusal -- the app already gone -- is inert, but SAID: this is the one
+/// step of the hangup chain that performs it, and a silence here read the
+/// same as the app ignoring an uncatchable kill (r2 C-F9). NOTE the scope:
+/// `killgrp` ends the app's THREAD group, not its process group -- a job
+/// the app spawned lives on, holding the slave (r2 C-F3, owed to Part D).
 fn hangup_app(pid: i64) {
     use libthyla_rs::io::Write as _;
     if pid <= 0 {
         return;
     }
     let path = alloc::format!("/proc/{}/ctl", pid);
-    if let Ok(mut f) = libthyla_rs::fs::OpenOptions::new().write(true).open(&path) {
-        let _ = f.write_all(b"killgrp");
+    match libthyla_rs::fs::OpenOptions::new().write(true).open(&path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(b"killgrp") {
+                t_putstr("kaua-term: hangup: killgrp write refused ");
+                t_putstr(&alloc::format!("{:?}\n", e));
+            }
+        }
+        Err(e) => {
+            t_putstr("kaua-term: hangup: proc ctl open refused ");
+            t_putstr(&alloc::format!("{:?}\n", e));
+        }
     }
 }
 

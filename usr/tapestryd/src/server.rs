@@ -6439,10 +6439,12 @@ impl Comp {
                 self.fill_rect(r, inst.pane);
                 painted.push(r);
             }
-            // A leaf whose content IS its rect is the zoomed one (5.6): no
-            // frame, as the legacy painter's `rect == content` exemption
-            // (r1 A-F2).
-            if !is_frame_owner || rect.is_empty() || rect == content {
+            // The zoomed leaf's content IS its rect (5.6): no frame, as the
+            // legacy painter's `rect == content` exemption (r1 A-F2). Only
+            // under a zoom: a stack container's content is its rect BY
+            // CONSTRUCTION (`show_container`), and it is exactly the frame
+            // owner every stacked leaf relies on (r2 C-F2).
+            if !is_frame_owner || rect.is_empty() || (zoomed && rect == content) {
                 continue;
             }
             let r = rect.intersect(disp);
@@ -6754,8 +6756,13 @@ impl Comp {
         // vanish into a tile with no pixels. Move focus to the first leaf
         // that has some. Instrument only: the legacy carve zeroes no leaf.
         if self.bundle.profile == libhalcyon::instrument::Profile::Instrument {
+            // Dormancy is the carve's verdict (`visible` is false for a leaf
+            // whose body the clip took, r2 C-F1 -- a 34-row rect holds a
+            // frame and a header and nothing to paint), not the frame rect.
             let f = self.layout.focused;
-            if self.layout.get(f).map_or(false, |p| p.rect.is_empty()) {
+            let dormant = self.layout.is_leaf(f)
+                && self.layout.get(f).map_or(false, |p| !p.visible || p.rect.is_empty());
+            if dormant {
                 let rescue = self.layout.live_ids().into_iter().find(|&(slot, _)| {
                     self.layout.is_leaf(slot)
                         && self

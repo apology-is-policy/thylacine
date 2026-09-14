@@ -337,6 +337,12 @@ for {set i 0} {$i < 12} {incr i} {
 }
 lassign $before a0 g0 b0 ba0 c0 ca0
 if {$a0 < 6} { lc_fail "no amber lambda at the prompt column x=$cx rows $ry0..$ry1 (counts $before): the shell did not take the lambda shape, or not in amber" }
+# ONE prompt at start (r2): the tile's first CONFIGURE resizes the pts and
+# the kernel posts tty:winch; ut once answered every idle note with a
+# newline and a fresh prompt, so two prompt zones stood before anything was
+# typed (42 amber pixels here, one prompt's 21 doubled). A silent note now
+# leaves the prompt in place: one lambda's worth, never two.
+if {$a0 > 32} { lc_fail "more than one prompt at start ($a0 amber pixels in the lambda band: a doubled prompt, the idle note service moved the prompt)" }
 if {$g0 != 0} { lc_fail "amber past the lambda's advance ($g0 pixels in \[8, 11) at x=$cx)" }
 if {$ba0 != 0 || $ca0 != 0} { lc_fail "amber at the cwd ($ba0) or the turnstile ($ca0): the one-amber-glyph rule (13 ruling 14)" }
 lc_step "the first prompt at x=$cx rows $ry0..$ry1: lambda $a0 amber, cwd $b0 on the path ink, turnstile $c0 on the secondary ink"

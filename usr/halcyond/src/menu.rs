@@ -588,6 +588,8 @@ fn push_mono(
 /// rule, then the items in monospace -- the selected one on a `header`
 /// band.
 pub fn menu_list(m: &Menu, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource) -> Cartoon {
+    // The source follows the sheet in force at every painter entry (r2 A-F2).
+    gs.set_kerning(sheet.kerning);
     if sheet.profile == libhalcyon::instrument::Profile::Instrument {
         return menu_list_inst(m, w, h, sheet, gs);
     }

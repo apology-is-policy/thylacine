@@ -331,6 +331,8 @@ pub fn strip_list(
     sheet: &Sheet,
     gs: &mut GlyphSource,
 ) -> Cartoon {
+    // The source follows the sheet in force at every painter entry (r2 A-F2).
+    gs.set_kerning(sheet.kerning);
     let mut cart = Cartoon::new();
     if w == 0 || h == 0 {
         return cart;
@@ -571,11 +573,16 @@ fn fit_end_tracked(gs: &mut GlyphSource, face: u8, px: f32, tracking: f32, text:
         return String::from(text);
     }
     let ell = '\u{2026}';
-    let ell_w = width(gs, "\u{2026}");
     let mut chars: Vec<char> = text.chars().collect();
+    // The candidate is measured WITH its ellipsis, as one run -- the run
+    // the painter shapes, whose last pair kerns (r2 A-F6: two runs summed
+    // put a name a pixel past `avail` after a `Z`, `A`, `L`; `rail::fit_end`
+    // had the one-run form all along).
     while let Some(_) = chars.pop() {
-        let w = gs.shape_run_spaced(face, px, tracking, chars.iter().copied()).1;
-        if w + ell_w <= avail {
+        let w = gs
+            .shape_run_spaced(face, px, tracking, chars.iter().copied().chain(core::iter::once(ell)))
+            .1;
+        if w <= avail {
             let mut out: String = chars.iter().collect();
             out.push(ell);
             return out;
@@ -622,6 +629,8 @@ pub fn header_list(
     sheet: &Sheet,
     gs: &mut GlyphSource,
 ) -> Cartoon {
+    // The source follows the sheet in force at every painter entry (r2 A-F2).
+    gs.set_kerning(sheet.kerning);
     let mut cart = Cartoon::new();
     if w == 0 || h == 0 {
         return cart;
@@ -776,6 +785,8 @@ pub fn placard_list(
     sheet: &Sheet,
     gs: &mut GlyphSource,
 ) -> (Cartoon, Option<(i32, i32, i32, i32)>) {
+    // The source follows the sheet in force at every painter entry (r2 A-F2).
+    gs.set_kerning(sheet.kerning);
     let mut cart = Cartoon::new();
     if w == 0 || h == 0 {
         return (cart, None);

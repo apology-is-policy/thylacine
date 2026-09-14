@@ -54,14 +54,40 @@ fn scrub(s: &str) -> String {
 /// must not force a repaint: a `running` flip repainted and re-presented the
 /// legacy bar twice per command for the same pixels (the r1 B-F2 finding).
 fn legacy_same(a: &StatusModel, b: &StatusModel) -> bool {
-    let strip = |m: &StatusModel| StatusModel {
-        running: false,
-        pane_count: 0,
-        host: None,
-        hints: alloc::vec::Vec::new(),
-        ..m.clone()
+    // Destructured with no `..` (the TH-6 F2 shape): a field added to the
+    // model fails to compile here until it is named on one side or the
+    // other -- read by the legacy painter, or stripped (r2 C-F7).
+    let key = |m: &StatusModel| {
+        let StatusModel {
+            workspaces,
+            active,
+            name,
+            cwd,
+            cmd,
+            condition,
+            exit_code,
+            hour,
+            minute,
+            notice,
+            running: _,
+            pane_count: _,
+            host: _,
+            hints: _,
+        } = m;
+        (
+            *workspaces,
+            *active,
+            name.clone(),
+            cwd.clone(),
+            cmd.clone(),
+            *condition,
+            *exit_code,
+            *hour,
+            *minute,
+            notice.clone(),
+        )
     };
-    strip(a) == strip(b)
+    key(a) == key(b)
 }
 
 pub fn clock_timeout_ms() -> i32 {

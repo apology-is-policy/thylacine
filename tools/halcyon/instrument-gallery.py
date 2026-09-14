@@ -21,6 +21,13 @@ ROOT = Path(__file__).resolve().parents[2]
 SIDECARS = ROOT / "docs/halcyon-carbon-handoff/round2/ui-palettes"
 ANSI = ROOT / "tools/halcyon/ansi16.json"
 OUT = ROOT / "usr/lib/halcyon/themes"
+# The loader's own key table (`instrument::KEYS`), read from the source so the
+# generator cannot drift from it: every `("color", "<name>")` row (r2 C-F4).
+LOADER = ROOT / "usr/lib/libhalcyon/src/instrument.rs"
+COLOR_KEYS = frozenset(re.findall(r'\("color", "([a-z_]+)"\)', LOADER.read_text()))
+assert len(COLOR_KEYS) == 35, f"instrument::KEYS carries {len(COLOR_KEYS)} colour keys, not 35"
+# The loader's colour grammar (`theme::parse_colour`): exactly `#RRGGBB`.
+COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
 
 HEADER = """# {name} -- an Instrument theme ({word}; docs/HALCYON-INSTRUMENT.md 4.2).
 #
@@ -39,11 +46,20 @@ def render(id_, sidecar_text, ansi):
     assert meta["id"] == id_ and meta["profile"] == "instrument-v1" and meta["schema"] == 1
     assert set(doc) == {"meta", "color"} and len(color) == 35, id_
     # The loader's own rules, so a regeneration fails HERE rather than at boot
-    # (r1 B-F11): a gallery id, sixteen distinct ANSI colours, a presentable
-    # name, and the 16 KiB cap (checked on the rendered text below).
+    # (r1 B-F11; completed at r2 C-F4): a gallery id, sixteen distinct ANSI
+    # colours, a presentable name of at most 64 BYTES (the loader's unit),
+    # a polarity word the loader knows, the loader's 35 colour keys and no
+    # other, every colour in its `#RRGGBB` grammar, and the 16 KiB cap
+    # (checked on the rendered text below).
     assert re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", id_), f"not a gallery id: {id_}"
     assert len(set(ansi)) == 16, f"ansi not distinct: {id_}"
-    assert 1 <= len(meta["name"]) <= 64 and meta["name"].isprintable(), f"name: {id_}"
+    assert 1 <= len(meta["name"].encode()) <= 64 and meta["name"].isprintable(), f"name: {id_}"
+    assert meta["color_scheme"] in ("dark", "light"), f"color_scheme: {id_}"
+    assert set(color) == COLOR_KEYS, f"colour keys differ from the loader's: {id_}: {sorted(set(color) ^ COLOR_KEYS)}"
+    for k, v in color.items():
+        assert isinstance(v, str) and COLOUR.fullmatch(v), f"colour {k} = {v!r} is not #RRGGBB: {id_}"
+    for v in ansi:
+        assert isinstance(v, str) and COLOUR.fullmatch(v), f"ansi {v!r} is not #RRGGBB"
     light = meta["color_scheme"] == "light"
     lines = [HEADER.format(name=meta["name"], word=meta["profile"], id=id_)]
     lines.append("[meta]")

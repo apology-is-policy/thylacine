@@ -381,6 +381,9 @@ pub extern "C" fn rs_main() -> i64 {
     // the sheet (a new generation), the glyph source (the mono bakes for
     // the scale; the atlas regens) and the winsize. The atlas bound follows
     // the display area (HALCYON-SCALE 7).
+    // A scale the table does not know is kept out of the sheet (r2 B-F11:
+    // the /env path validated, the compositor's did not); said once per value.
+    let mut scale_refused: Option<u16> = None;
     let mut display = ring.display_info().unwrap_or(DisplayInfo {
         w: w as u32,
         h: h as u32,
@@ -539,7 +542,12 @@ pub extern "C" fn rs_main() -> i64 {
                     display.h = di.h;
                     gs.set_display(di.w, di.h);
                 }
-                if di.scale != sheet.scale {
+                if di.scale != sheet.scale && !libhalcyon::scale::is_valid_pct(di.scale) {
+                    if scale_refused != Some(di.scale) {
+                        say!("halcyond: display scale {} refused (not in the table); keeping {}", di.scale, sheet.scale);
+                        scale_refused = Some(di.scale);
+                    }
+                } else if di.scale != sheet.scale {
                     let from = sheet.scale;
                     let gen = sheet.gen + 1;
                     sheet = sheet_for(&sheet.bundle(), di.scale, di.w);
@@ -567,6 +575,10 @@ pub extern "C" fn rs_main() -> i64 {
                     let gen = sheet.gen + 1;
                     sheet = sheet_for(&sheet.bundle(), sheet.scale, di.w);
                     sheet.gen = gen;
+                    // The source follows the sheet in force at EVERY rebuild
+                    // (r2 B-F7), not only the scale's.
+                    gs.set_smooth(sheet.smooth_mem);
+                    gs.set_kerning(sheet.kerning);
                     cache.clear();
                     frame.clear();
                     last_open_laid = None;
@@ -615,7 +627,9 @@ pub extern "C" fn rs_main() -> i64 {
             // and a flip re-lays once, here (Tile::render's rule: narrowing
             // never shortens wrapped content, so the decision is stable).
             let lane = halcyond::indicator::lane(&sheet);
+            let mut passes = 0u8;
             let (widthi, heights, total, open_rel, open_laid, pending_laid, open_h) = loop {
+                passes += 1;
                 let widthi = w as i32 - if lane_reserved { lane } else { 0 };
                 let mut heights: Vec<(u64, i32, i32)> = Vec::new(); // (id, h, rel_y)
                 let mut total: i32 = sheet.pad_top;
@@ -636,8 +650,24 @@ pub extern "C" fn rs_main() -> i64 {
                 let open_h = open_laid.height + pending_laid.height;
                 total += open_h + sheet.pad_bottom;
                 let overflow = total > h as i32;
-                if lane == 0 || overflow == lane_reserved {
+                if lane == 0 {
+                    // No lane on this sheet: the flag clears so a later
+                    // Instrument sheet decides afresh, as the tile's does
+                    // (r2 B-F4: a stale reservation laid 8 px narrow forever).
+                    lane_reserved = false;
                     break (widthi, heights, total, open_rel, open_laid, pending_laid, open_h);
+                }
+                if overflow == lane_reserved {
+                    break (widthi, heights, total, open_rel, open_laid, pending_laid, open_h);
+                }
+                // BOUNDED, the lane winning a disagreement (r2 B-F1; the
+                // rule and its reasons are at `Tile::render`'s loop).
+                if passes >= 2 {
+                    if lane_reserved {
+                        break (widthi, heights, total, open_rel, open_laid, pending_laid, open_h);
+                    }
+                    lane_reserved = true;
+                    continue;
                 }
                 lane_reserved = overflow;
             };
@@ -1004,16 +1034,21 @@ pub extern "C" fn rs_main() -> i64 {
                         say!("halcyond: reset: {} verb(s)", plan.len());
                         let planned = plan.len();
                         let mut landed = 0usize;
+                        // One retry budget for the whole plan (r2 C-F8).
+                        let mut budget = chromeset::VerbBudget::pass();
                         for (id, verb) in plan {
-                            if chromeset::pane_verb(troot, id, &verb) {
+                            if chromeset::pane_verb_in(troot, id, &verb, &mut budget) {
                                 relayout = true;
                                 landed += 1;
                             }
                         }
                         // The notice tells the truth: a plan no verb of which
-                        // landed is a refused reset (the r1 B-F3 finding).
-                        if landed > 0 || planned == 0 {
+                        // landed is a refused reset (the r1 B-F3 finding), and
+                        // one half of which landed is a PARTIAL one (r2 C-F8).
+                        if planned == 0 || landed == planned {
                             status.notify("LAYOUT RESET", false);
+                        } else if landed > 0 {
+                            status.notify("LAYOUT RESET (PARTIAL)", true);
                         } else {
                             status.notify("RESET REFUSED", true);
                         }

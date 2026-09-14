@@ -373,7 +373,9 @@ pub fn sheet_for(b: &libhalcyon::instrument::Bundle, scale: u16, display_w: u32)
         err: d.cinnabar.key,
         ok: d.syntax.fen,
         rule: d.border,
-        sel_bg: d.selection,
+        // 7.3: the precomputed derived selection under Instrument; the legacy
+        // token stands under legacy (r2 B-F2's sibling).
+        sel_bg: if profile == Profile::Instrument { v.derived.selection } else { d.selection },
         island_ground: d.header,
         island_rule: d.island_rule,
         scale,
@@ -441,7 +443,10 @@ pub fn sheet_for(b: &libhalcyon::instrument::Bundle, scale: u16, display_w: u32)
         raw_rule_w: if inst { 0 } else { ipx(ISLAND_RULE_W) },
         code_pad: if inst { 0 } else { ipx(CODE_PAD) },
         ground_pre: if inst { i.code_bg } else { d.header },
-        rule_pre: d.island_rule,
+        // The code block's 2 px rule is the Instrument side's `amber_muted`
+        // (7.3) -- never the legacy palette's `island_rule`, which a legacy-
+        // schema theme under the Instrument profile keeps as its own (r2 B-F2).
+        rule_pre: if inst { i.amber_muted } else { d.island_rule },
         ground_raw: if inst { i.terminal_bg } else { d.header },
         rule_raw: d.island_rule,
         ground_code: if inst { None } else { Some(d.header) },
@@ -504,7 +509,9 @@ const FLOW_SCALE: i32 = 64;
 /// A flow position rounded to its row (round half up; `LayoutUnit::Round`).
 #[inline]
 fn ypx(q: i32) -> i32 {
-    (q + FLOW_SCALE / 2).div_euclid(FLOW_SCALE)
+    // Saturating like the accumulator it reads (r2 B-F5): a saturated flow
+    // must not wrap on the half-row it adds for the rounding.
+    q.saturating_add(FLOW_SCALE / 2).div_euclid(FLOW_SCALE)
 }
 
 // The vertical rhythm (HALCYON-COMPOSITION 2-3), LOGICAL px: every use
@@ -629,13 +636,18 @@ fn track_fx(px: f32, em: f32) -> i32 {
     }
 }
 
-/// A heading rank's letter-spacing in 1/256 px: `hdr` is the Beacon rank
-/// (0 = not a heading), the em from the sheet's table (7.2).
-fn hdr_track_fx(sheet: &Sheet, hdr: u8, px: f32) -> i32 {
+/// A heading rank's letter-spacing in em: `hdr` is the Beacon rank (0 = not
+/// a heading), the em from the sheet's table (7.2).
+fn hdr_track_em(sheet: &Sheet, hdr: u8) -> f32 {
     if hdr == 0 {
-        return 0;
+        return 0.0;
     }
-    track_fx(px, sheet.hdr_track[usize::from(hdr.min(3) - 1)])
+    sheet.hdr_track[usize::from(hdr.min(3) - 1)]
+}
+
+/// `hdr_track_em` in 1/256 px at `px`.
+fn hdr_track_fx(sheet: &Sheet, hdr: u8, px: f32) -> i32 {
+    track_fx(px, hdr_track_em(sheet, hdr))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1080,7 +1092,7 @@ impl<'a> LineBuilder<'a> {
             Flow::Fractional => self.flow_box(gs),
         };
         let y = self.y();
-        let h = ypx(self.y_q + pitch_q) - y;
+        let h = ypx(self.y_q.saturating_add(pitch_q)) - y;
         let baseline = y + asc;
         let mut segs = core::mem::take(&mut self.segs);
         // The herald: centre the content between the insets.
@@ -1211,7 +1223,8 @@ impl<'a> LineBuilder<'a> {
         let px = span_px(face, st, base_px, sheet);
         // 7.2: a heading run is tracked (the H1's -0.025 em); the term rides
         // every advance below -- the fit, the wrap, the spill, the pen.
-        let track_q = if mono { 0 } else { hdr_track_fx(sheet, st.hdr, px) };
+        let track_em = if mono { 0.0 } else { hdr_track_em(sheet, st.hdr) };
+        let track_q = track_fx(px, track_em);
         // The ink: an explicit SGR colour stands; a cell that chose none
         // takes the two legacy hooks (em-dim, the object colour) and then
         // its ROLE's default (7.3) -- raw output's overrides both (`.hal-out`:
@@ -1264,10 +1277,22 @@ impl<'a> LineBuilder<'a> {
         // A space-less span (a code island, a pill, one long word) that will
         // not fit the rest of the line moves WHOLE to the next line when the
         // line already holds content -- the break opportunity is the space
-        // that ended the previous span, which this span cannot see.
+        // that ended the previous span, which this span cannot see. Measured
+        // with the tracking the lay applies (r2 A-F5: an H1's second span
+        // measured 9-17 px wide of its own lay and wrapped a word early).
+        // Under Instrument it moves whether or not it fits a fresh line, as
+        // CSS `overflow-wrap: break-word` takes the soft break first and
+        // breaks the word only on its own line; the legacy gate ("only when
+        // it fits a line") stands for the legacy bytes. That gate made a
+        // block SHORTER at a narrower measure, which is what spun the
+        // indicator lane's two-pass forever (r2 B-F1); without it the break
+        // rule is monotone in the width again.
         if word_wrap && self.pen_x > self.x0 && !cells.iter().any(|c| c.ch == ' ') {
-            let w = 2 * pad + run_width(gs, face, px, cells.iter().map(|c| c.ch));
-            if self.pen_x + w > right_edge && w <= right_edge - self.x0 {
+            let w = 2 * pad
+                + run_width_fx(gs, face, px, track_em, cells.iter().map(|c| c.ch))
+                    .div_euclid(GlyphSource::PEN_SCALE);
+            let fits_a_line = w <= right_edge - self.x0;
+            if self.pen_x + w > right_edge && (fits_a_line || sheet.flow == Flow::Fractional) {
                 self.break_line(gs);
             }
         }
@@ -1304,14 +1329,17 @@ impl<'a> LineBuilder<'a> {
             // step carries toward the next (I-5d; 0 under legacy). The
             // glyph's own phase and whole step are resolved AFTER the wrap
             // decision below, because a wrap moves the pen to a line start
-            // and re-zeroes the fraction.
+            // and re-zeroes the fraction. The wrap is judged on the glyph's
+            // OWN advance: the kern toward the next glyph belongs to a pair
+            // that may not share the line (r2 A-F9 -- a space-less run
+            // otherwise broke a glyph late by up to the widest pair).
             let step_q = adv_q
                 + if !is_mono_face(face) && i + 1 < cells.len() {
                     gs.kern(face, px, ch, cells[i + 1].ch)
                 } else {
                     0
                 };
-            let provisional = (self.pen_q + step_q).div_euclid(GlyphSource::PEN_SCALE);
+            let provisional = (self.pen_q + adv_q).div_euclid(GlyphSource::PEN_SCALE);
             if cut_at_box && self.pen_x + provisional > right && self.pen_x > self.x0 {
                 // The code block's overflow is cut at its box (the rest of
                 // the line is unaddressable, as clipped text is).
@@ -1483,12 +1511,14 @@ impl Role {
     }
 }
 
-fn roles_of(b: &Block) -> Vec<Role> {
+fn roles_of(b: &Block, fractional: bool) -> Vec<Role> {
     let block_class = b.class();
     let mut roles: Vec<Role> = Vec::with_capacity(b.items.len());
     // The herald's deck: the dim, non-empty lines directly under a title.
     let mut deck_open = false;
     let mut deck_first = true;
+    // Whether the previous item was a raw line (an island is open).
+    let mut raw_open = false;
     for item in b.items.iter() {
         let role = match item {
             Item::Table(_) => Role::Table,
@@ -1502,6 +1532,13 @@ fn roles_of(b: &Block) -> Vec<Role> {
                 };
                 match class {
                     LineClass::Prompt => Role::Prompt,
+                    // 7.5 / 7.6 (r2 B-F3): a blank un-annotated line INSIDE
+                    // a terminal-view island stays a row of it (byte
+                    // conservation with the terminal), but one that would
+                    // open an island of its own is the paragraph break --
+                    // zero height, not 47 px of `terminal_bg` around nothing.
+                    // Instrument only: the legacy island keeps its bytes.
+                    LineClass::Raw if fractional && line.cells.is_empty() && !raw_open => Role::Empty,
                     LineClass::Raw => Role::Raw,
                     _ => {
                         if line.cells.is_empty() {
@@ -1540,6 +1577,7 @@ fn roles_of(b: &Block) -> Vec<Role> {
                 deck_open = false;
             }
         }
+        raw_open = role == Role::Raw;
         roles.push(role);
     }
     // Mark the last deck line of each run.
@@ -1558,9 +1596,14 @@ fn roles_of(b: &Block) -> Vec<Role> {
 /// and content-deterministic either way -- the property the reflow E2E
 /// pins).
 pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) -> LaidBlock {
+    // The glyph source follows the sheet in force here, at the entry the
+    // owners and every test share (r2 A-F2: forty Instrument painter tests
+    // ran unkerned against a sheet that said `kerning`); the memo is
+    // size-free, so the switch costs a compare.
+    gs.set_kerning(sheet.kerning);
     let mut lb = LineBuilder::new(sheet, width.max(2 * sheet.pad_x + sheet.ipx(MIN_CONTENT_W)));
-    let roles = roles_of(b);
     let fractional = sheet.flow == Flow::Fractional;
+    let roles = roles_of(b, fractional);
     let raw_margin = sheet.ipx(sheet.rhythm.raw);
     // CSS margin collapsing: the gap before an element is the larger of the
     // previous element's bottom margin and its own top; the first element's
@@ -1846,7 +1889,8 @@ fn lay_table(
                 let st = b.styles[sid as usize];
                 let face = face_for(&st, true, sheet);
                 let px = span_px(face, &st, sheet.body_px, sheet);
-                w += run_width(gs, face, px, cell[s..e].iter().map(|c| c.ch));
+                w += run_width_fx(gs, face, px, hdr_track_em(sheet, st.hdr), cell[s..e].iter().map(|c| c.ch))
+                    .div_euclid(GlyphSource::PEN_SCALE);
             }
             if ci < ncols && w > col_w[ci] {
                 col_w[ci] = w;
@@ -1855,7 +1899,10 @@ fn lay_table(
         }
         cellw.push(ws);
     }
-    let kv = is_kv_list(t);
+    // A row longer than the `cols` spec has cells no group owns; such a
+    // table lays as a plain one, every column at or right of the inset
+    // (r2 B-F8: the extra cells laid at x = 0).
+    let kv = is_kv_list(t) && ncols == t.cols.len();
     // Column x origins (a kv-list spreads its groups over the width).
     let mut col_x = alloc::vec![0i32; ncols];
     let mut x = sheet.pad_x;
@@ -1994,10 +2041,27 @@ fn lay_exit_badge(lb: &mut LineBuilder, code: i64, sheet: &Sheet, gs: &mut Glyph
     };
     lb.note_metrics(sheet.face_body, px, 0);
     // The badge runs its own pen (it bypasses the block builder), so it
-    // carries its own quarter-pixel remainder too.
+    // carries its own quarter-pixel remainder too -- and the kern of each
+    // pair folded into the preceding step, exactly as `run_width` measured
+    // the width it was right-aligned on (r2 A-F4: a kerned measure and an
+    // unkerned lay put the badge a pixel past `content_right`).
     let mut q = 0i32;
+    let mut prev: Option<char> = None;
     for c in cells.iter() {
         if let Some(aq) = gs.advance_fx(sheet.face_body, px, c.ch) {
+            if let Some(p) = prev {
+                let k = gs.kern(sheet.face_body, px, p, c.ch);
+                if k != 0 {
+                    let carried = q + k;
+                    let whole = carried.div_euclid(GlyphSource::PEN_SCALE);
+                    if let Some(last) = seg.refs.last_mut() {
+                        last.advance += whole;
+                    }
+                    seg_start_x += whole;
+                    q = carried.rem_euclid(GlyphSource::PEN_SCALE);
+                }
+            }
+            prev = Some(c.ch);
             let total = q + aq;
             seg.xs.push(seg_start_x);
             let whole = total.div_euclid(GlyphSource::PEN_SCALE);
@@ -2022,6 +2086,7 @@ pub fn layout_pending(
     sheet: &Sheet,
     gs: &mut GlyphSource,
 ) -> LaidBlock {
+    gs.set_kerning(sheet.kerning);
     // The pending line IS the prompt under the cursor (the console flow), so
     // it takes the prompt class -- never the raw mono of an un-annotated
     // foreign block.
@@ -2102,7 +2167,9 @@ pub fn caret_in_block(
                 return (seg.xs[col - seg.src_col], line.y, box_h(line.h));
             }
         }
-        let x = line.segs.last().map(|s| s.x_end).unwrap_or(0);
+        // A blank line's caret sits at the text inset, as `cursor_pos`'s
+        // does (r2 B-F6: it sat at the tile's left edge).
+        let x = line.segs.last().map(|s| s.x_end).unwrap_or(sheet.pad_x);
         end = Some((x, line.y, box_h(line.h)));
     }
     end.unwrap_or((0, 0, sheet.ipx(FALLBACK_LINE_H)))
@@ -3456,6 +3523,19 @@ pub(crate) mod tests {
         assert_eq!(s.code_pad, 0);
         assert_eq!((s.face_code, s.face_mono_italic), (FACE_MONO_TEXT, FACE_MONO_ITALIC));
         assert_eq!((s.ground_pre, s.rule_pre), (i.code_bg, i.amber_muted));
+        // One variable away from the projection that satisfied the line
+        // above by coincidence (r2 B-F2): a LEGACY-schema theme under the
+        // Instrument profile keeps its own `island_rule` and `selection`,
+        // and the sheet must still read the Instrument side's tokens.
+        let dlb = libhalcyon::instrument::Bundle::from_legacy(
+            libhalcyon::instrument::Profile::Instrument,
+            libhalcyon::theme::DAYLIGHT,
+        );
+        let dl = sheet_for(&dlb, 100, 1440);
+        assert_ne!(dlb.theme.island_rule, dlb.inst.amber_muted, "the control: the two tokens differ here");
+        assert_eq!(dl.rule_pre, dlb.inst.amber_muted);
+        assert_ne!(dlb.theme.selection, dl.derived.selection, "the control: the two selections differ here");
+        assert_eq!(dl.sel_bg, dl.derived.selection);
         assert_eq!((s.ground_raw, s.ground_code), (i.terminal_bg, None));
         assert_eq!(
             (s.ink_prose, s.ink_prompt, s.ink_hdr, s.ink_strong),
@@ -3790,14 +3870,25 @@ pub(crate) mod tests {
         let mut g = gs();
         assert!(g.set_kerning(true));
         let mut unkerned_gap = 0.0f32;
+        // The control is PER LINE (r2 A-F10): a line whose unkerned width
+        // also lands inside the tolerance proves nothing about kerning.
+        // Ten of the fourteen discriminate (misses 0.35 .. 1.95 px); the
+        // four that do not (0.24, 0.13, 0.07, 0.03 px -- the H1's own line
+        // among them) witness the faces and the tracking only.
+        let mut discriminating = 0usize;
         for &(face, px, track, text, span) in GOLDEN_SPANS {
             let w = run_width_fx(&mut g, face, px, track, text.chars()) as f32 / 256.0;
             assert!((w - span).abs() < 0.25, "{text:?}: {w} vs the browser's {span}");
             g.set_kerning(false);
             let u = run_width_fx(&mut g, face, px, track, text.chars()) as f32 / 256.0;
             g.set_kerning(true);
-            unkerned_gap = unkerned_gap.max((u - span).abs());
+            let miss = (u - span).abs();
+            if miss >= 0.25 {
+                discriminating += 1;
+            }
+            unkerned_gap = unkerned_gap.max(miss);
         }
+        assert_eq!(discriminating, 10, "ten lines must miss the tolerance unkerned (max unkerned miss {unkerned_gap})");
         assert!(unkerned_gap > 1.0, "kerning must matter to at least one line or this proves nothing (max unkerned miss {unkerned_gap})");
         let w0 = run_width_fx(&mut g, FACE_SANS_MEDIUM, 34.0, 0.0, "Compositor geometry should remain legible".chars()) as f32 / 256.0;
         assert!((w0 - 644.750).abs() > 30.0, "untracked H1 {w0}");

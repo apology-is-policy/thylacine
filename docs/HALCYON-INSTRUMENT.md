@@ -1018,7 +1018,11 @@ prompt; a Beacon `pre` is the code block: `code_bg`, the 2 px
 1.65 row, `code_body`, 18 either side, capped at 720. The terminal view's
 bottom padding is the box's own 14 (symmetric), not the mockup tile's 36,
 which is that tile's end — the flow's end is the document's 50 (§13's
-addendum).
+addendum). **Amended at the I-5 round 2 (B-F3):** a blank un-annotated
+line INSIDE a terminal-view island stays a row of it (byte conservation
+with the terminal), but a blank line that would open an island of its own
+is the paragraph break — zero height, like the DOC empty line — not 47 px
+of `terminal_bg` around nothing.
 
 ### 7.7 The position indicator (round 2 §6; ruling 7)
 
@@ -1058,9 +1062,17 @@ along it, the end at V − 4 at the tail; the lane and the thumb through
 `ipx`). Both owners — the tile and the console path — reserve the lane by
 re-laying at W − 8 once the content overflows and paint the thumb over
 everything, in `dim` (Carbon `#737A76`); the decision persists across
-frames and a flip re-lays once (narrowing never shortens wrapped content,
-so what overflows at W overflows at W − 8, and what fits at W − 8 fits at
-W). The scroll model is the existing bottom-anchored one (`scroll_up`
+frames and a flip re-lays once. **Amended at the I-5 round 2 (B-F1):** the
+loop once rested on "narrowing never shortens wrapped content", and a
+layout rule that was not monotone in the width (the space-less span's
+old "only when it fits a line" gate) spun it forever on ordinary content
+— the renderer never presented again (measured: 58 s at 100 % on the
+production `Tile::render`). The loop is now BOUNDED at three passes and
+the lane wins a disagreement: a reserved lane over content that fits
+paints no thumb and costs 8 px; the next frame starts from the lane, so
+the picture is stable across frames. The gate is gone too (CSS
+`overflow-wrap: break-word` takes the soft break first), so the rule is
+monotone again for that cause; the bound is the guarantee. The scroll model is the existing bottom-anchored one (`scroll_up`
 pixels above the tail): while the reader is in history an append keeps
 their distance from the tail, so the thumb never reports the end until
 they return — that distance is the "retained anchor" here; a top-anchored
@@ -1542,7 +1554,9 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   Astra's goldens; the Fable round over I-1..I-8 (double-distance batched:
   one round after I-4, one after I-8); `/lib/halcyon/profile` flips to
   `instrument` for fresh images; `legacy` stays selectable for a release.
-  **Round 1 (I-1..I-4, two Opus-5 prosecutors, 2026-09-14): 0 P0 / 1 P1 / 5 P2 / 15 P3, all P1/P2 fixed at the close, DIRTY by count -- the fixes are the I-5 round's focus (`memory/audit_instrument_closed_list.md`). The I-4 open defect (no login prompt after a Super+Q logout) is ARM-6's deadlock on main's kernel (no Part D / A1 -- aux's paused merge); fixed on the session's side: a structural close HANGS the tile UP (the down channel's EOF) and the kaua-term ends + reaps its program before exiting, so no zombie of the user's escapes to joey.**
+  **Round 1 (I-1..I-4, two Opus-5 prosecutors, 2026-09-14): 0 P0 / 1 P1 / 5 P2 / 15 P3, all P1/P2 fixed at the close, DIRTY by count -- the fixes are the I-5 round's focus (`memory/audit_instrument_closed_list.md`). The I-4 open defect (no login prompt after a Super+Q logout) is ARM-6's deadlock on main's kernel (no Part D / A1 -- aux's paused merge); fixed on the session's side: a structural close HANGS the tile UP (the down channel's EOF) and the kaua-term ends + reaps its program before exiting, so no zombie of the user's escapes to joey -- FOR A TILE WHOSE PROGRAM IS THE ONLY PROCESS (the measured case and the gate's). The r2 round (C-F3) showed the cure's class: the kaua-term's `killgrp` ends the program's THREAD group, not its process group, so any child the tile's shell has alive at the close (a foreground job, a background job, a setsid daemon) keeps the pts slave, the master never EOFs, the 2 s grace is burned per tile in series, and when the master finally closes the child dies as JOEY's zombie -- ARM-6's stall again. Part D (aux's kernel change: the territory released at exit, not at reap) remains the general cure; a session-side hangup that reaches the whole session (a pts-level HUP without closing the master) needs a ptyfs verb the PTY line does not have.**
+
+  **Round 2 (I-5a..d + the round-1 fixes, three Opus-5 prosecutors, 2026-09-14): 1 P0 / 3 P1 / 7 P2 / 23 P3, all P0-P2 fixed at the close, DIRTY by count -- the fixes are round 3's focus (`memory/audit_instrument_closed_list.md`). The P0 was the indicator lane's two-pass, unbounded on a monotonicity that was false (7.7 amended); two round-1 fixes were re-fixed (the dormancy on the body, the zoom exemption on the zoom); the rail context lays on one pen; the doubled session prompt is explained and fixed in ut (a silent note leaves the prompt in place).**
 
 Rollback at every step is the profile word; a palette rollback never kills
 a process; a layout v2 file reads under v1 with equal weights.
@@ -1631,7 +1645,7 @@ names) kern under Instrument as the browser's do, so the I-5a golden-box
 witnesses hold only with a fresh (unkerned) source; a spilled word's pair
 with the glyph that caused its wrap is re-kerned, but the space's step at
 the line end keeps the kern it had (invisible, the line ends there); the
-hanging space's `x_end` runs past the measure by one space (selection
+hanging space's `x_end` runs past the measure by the trailing RUN of spaces (every trailing space hangs; r2 A-F12) (selection
 rects include it).
 
 ## 14. The round-2 surfaces (Astra §7, adopted 2026-09-14 with the deltas named)

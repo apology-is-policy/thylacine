@@ -488,6 +488,14 @@ want_dom $mid0 40 $mid1 66 8 10 11 "the collapsed console header rests on `heade
 want_dom $mid0 69 $mid1 70 41 45 43 "its last row is the `separator` (not last in the stack)" 0
 want_dom $mid0 72 $mid1 100 21 24 25 "the open tile's header rests on `open_header` (text at 1.5 % over open)" 0
 lc_pass "instrument: Super+S stacked the two tiles -- collapsed header on `header` with its separator row, open header on `open_header` (6.4, the golden's rows)"
+# r2 C-F2: the stack CONTAINER owns the frame its leaves rely on, and the
+# round-1 zoom exemption (`rect == content`) skipped it -- a container's
+# content is its rect by construction. The root container is the focused
+# tile's parent, so its 1 px frame at the root rect (3, 37, W-6, H-65) is
+# `focus_neutral`: the top row and the left column, read as pixels.
+want_dom 4 37 [expr {$W - 4}] 38 85 91 88 "the stack container's top frame row is painted focus_neutral"
+want_dom 3 38 4 [expr {$H - 29}] 85 91 88 "the stack container's left frame column is painted focus_neutral"
+lc_pass "instrument: the stack container paints its frame -- the zoom exemption is a zoom's alone (6.1; r2 C-F2)"
 # A press on the collapsed header's name: focus, and so expand -- the
 # container's active follows the focus (6.1); the empty tile collapses to
 # the LAST row (6.2 #2: later headers below the open body), no separator.
@@ -676,8 +684,13 @@ lc_step "controls: no code block and no rule column before the listing"
 expect -timeout 1 -re {.*} {}
 # A raw command: the terminal view (7.3 / 7.6) -- `terminal_bg` behind
 # un-annotated output, distinct from the code block's `code_bg`.
+# r2 B-F12: the control is the count BEFORE the command (the body already
+# holds earlier raw output), and the witness is its GROWTH by the command's
+# own island -- one row of terminal_bg is ~50 k pixels across the body.
+set raw0 [ink_of 42 70 [expr {$W - 50}] $body_y1 9 12 13]
+lc_step "control: the body holds $raw0 terminal_bg pixels before the raw command"
 lc_run_expect "cat /dev/winsize; echo 'I5B' 'RAW-DONE'" "I5B RAW-DONE"
-want_ink 42 70 [expr {$W - 50}] $body_y1 9 12 13 1000 "the terminal view's ground under raw output"
+want_ink 42 70 [expr {$W - 50}] $body_y1 9 12 13 [expr {$raw0 + 3000}] "the terminal view's ground GREW under the command's raw output"
 lc_pass "instrument: raw output sits on terminal_bg -- the terminal view (7.3 / 7.6)"
 # The listing: `ls -l` speaks Beacon's `pre` -- the code block: `code_bg`
 # across the box where no text is, the 2 px `amber_muted` rule down its

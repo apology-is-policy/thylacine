@@ -41,6 +41,12 @@ pub struct Face {
     /// The `kern` feature's pair positionings, lookup by lookup (I-5d;
     /// `kern_lookups`). Empty for a face without one (Cornucopia).
     kern: Vec<Vec<PairPos<'static>>>,
+    /// Every glyph that leads a pair in ANY of those subtables' coverage,
+    /// sorted: HarfBuzz's cheap reject. A left glyph outside it kerns with
+    /// nothing, answered without a table walk and without a memo slot
+    /// (r2 A-F3: memoizing the zeros filled the memo on distinct pairs and
+    /// cleared it 34x more often than the kerning pairs alone would).
+    kern_lefts: Vec<u16>,
 }
 
 /// One PairPos subtable's answer for a pair: `Some(x_advance)` when the
@@ -85,6 +91,26 @@ fn pair_x_advance(sub: &PairPos<'_>, left: GlyphId, right: GlyphId) -> Option<i1
 /// positioning, contextual) is not kerning and is skipped. No GPOS, no
 /// `kern` feature, or any read error -> empty: the face renders unkerned,
 /// which is what it did before this existed.
+/// The union of the first-glyph coverage of every pair subtable, sorted and
+/// deduplicated (`Face::kern_left_covered`).
+fn kern_left_coverage(kern: &[Vec<PairPos<'static>>]) -> Vec<u16> {
+    let mut out: Vec<u16> = Vec::new();
+    for lookup in kern {
+        for sub in lookup {
+            let cov = match sub {
+                PairPos::Format1(f) => f.coverage(),
+                PairPos::Format2(f) => f.coverage(),
+            };
+            if let Ok(cov) = cov {
+                out.extend(cov.iter().map(|g| g.to_u16()));
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 fn kern_lookups(font: &FontRef<'static>) -> Vec<Vec<PairPos<'static>>> {
     let mut out: Vec<Vec<PairPos<'static>>> = Vec::new();
     let Ok(gpos) = font.gpos() else {
@@ -258,7 +284,8 @@ impl Face {
         let outlines = font.outline_glyphs();
         let hmtx = font.hmtx().ok();
         let kern = kern_lookups(&font);
-        Some(Face { font, upem, charmap, outlines, hmtx, kern })
+        let kern_lefts = kern_left_coverage(&kern);
+        Some(Face { font, upem, charmap, outlines, hmtx, kern, kern_lefts })
     }
 
     /// The face's units per em -- the unit every table value is in.
@@ -269,6 +296,13 @@ impl Face {
     /// Whether the `kern` feature resolved to any pair positioning.
     pub fn has_kern(&self) -> bool {
         !self.kern.is_empty()
+    }
+
+    /// Whether `left` leads any pair the `kern` feature positions -- the
+    /// O(log n) reject before `kern_units`'s table walk. False for every
+    /// glyph of a face without the feature.
+    pub fn kern_left_covered(&self, left: GlyphId) -> bool {
+        u16::try_from(left.to_u32()).map_or(false, |g| self.kern_lefts.binary_search(&g).is_ok())
     }
 
     /// The pair adjustment between two glyphs, in FONT UNITS, exactly as
@@ -463,17 +497,32 @@ mod tests {
     // lookups of four subtables each (one format 1 pair-set table, three
     // format 2 class tables) under every script it carries; Cornucopia
     // carries no GPOS at all.
+    // The shape asserted is the READER's, not this font revision's (r2
+    // A-F11): lookups resolved, both formats present in each. No shipped
+    // cut carries a type-9 (Extension) lookup, so `kern_lookups`'s unwrap
+    // arm is untested by construction -- a synthetic fixture would be the
+    // only witness, and none is owed while every vendored face is type 2.
     #[test]
     fn the_kern_feature_resolves_to_the_pair_positionings() {
         for face in [text(), regular(), medium()] {
             assert!(face.has_kern());
-            assert_eq!(face.kern.len(), 3);
-            assert!(face.kern.iter().all(|l| l.len() == 4), "four subtables a lookup");
-            assert!(matches!(face.kern[0][0], PairPos::Format1(_)), "the pair sets lead");
-            assert!(matches!(face.kern[0][3], PairPos::Format2(_)));
+            assert!(!face.kern.is_empty() && face.kern.len() <= 8, "{} lookups", face.kern.len());
+            for l in &face.kern {
+                assert!(!l.is_empty());
+                assert!(l.iter().any(|s| matches!(s, PairPos::Format1(_))), "a pair set per lookup");
+                assert!(l.iter().any(|s| matches!(s, PairPos::Format2(_))), "a class table per lookup");
+            }
+            // The coverage reject: a glyph leading a pair is in the set, a
+            // digit (which Plex kerns with nothing) is not.
+            assert!(face.kern_left_covered(face.glyph_id('A')));
+            assert!(face.kern_left_covered(face.glyph_id('T')));
+            assert!(!face.kern_left_covered(face.glyph_id('1')), "digits lead no pair");
+            assert!(!face.kern_left_covered(GlyphId::default()), ".notdef leads no pair");
+            assert!(face.kern_lefts.len() < 1024, "a few hundred glyphs, not the font");
         }
         let mono = Face::parse(cornucopia::SUBSET_TTF).expect("Cornucopia parses");
         assert!(!mono.has_kern());
+        assert!(!mono.kern_left_covered(mono.glyph_id('A')));
         assert_eq!(mono.kern_units(mono.glyph_id('A'), mono.glyph_id('V')), 0);
     }
 

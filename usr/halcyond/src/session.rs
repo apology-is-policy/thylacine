@@ -143,7 +143,13 @@ const DECLARE_TRIES: u32 = 40;
 /// compositor is caught by the ring/poll error path, and the `closed` set is
 /// the authoritative respawn guard regardless of this verb's fate.
 fn layout_verb(troot: i64, cmd: &str) -> bool {
-    for _ in 0..VERB_RETRIES {
+    layout_verb_in(troot, cmd, &mut chromeset::VerbBudget::pass())
+}
+
+/// `layout_verb` on a shared retry budget: a plan of many verbs (the reset)
+/// naps at most one verb's worth across the whole pass (r2 C-F8).
+fn layout_verb_in(troot: i64, cmd: &str, budget: &mut chromeset::VerbBudget) -> bool {
+    loop {
         // The path's LENGTH is the slice's: this said 5 for six bytes since
         // I-3 -- opening `layou` -- and no gate had written a layout verb
         // from the session until I-4's rail pressed SPLIT H.
@@ -161,10 +167,12 @@ fn layout_verb(troot: i64, cmd: &str) -> bool {
             }
             return rc >= 0;
         }
+        if !budget.nap() {
+            say!("halcyond: layout verb \"{}\" still busy after {} tries (the pass's budget)", cmd, VERB_RETRIES);
+            return false;
+        }
         let _ = sleep(Duration::from_millis(VERB_NAP_MS));
     }
-    say!("halcyond: layout verb \"{}\" still busy after {} tries", cmd, VERB_RETRIES);
-    false
 }
 
 /// HALCYON-INSTRUMENT 14.9: parse a tile menu action `tile <verb> <id>`.
@@ -1287,6 +1295,9 @@ pub fn run(home: Option<String>) -> i64 {
     if declared {
         request_env_scale(&ring);
     }
+    // A scale the table does not know is kept out of the sheet (r2 B-F11:
+    // the /env path validated, the compositor's did not); said once per value.
+    let mut scale_refused: Option<u16> = None;
     let mut display = ring.display_info().unwrap_or(DisplayInfo {
         w: root_surf.w,
         h: root_surf.h,
@@ -1732,9 +1743,15 @@ pub fn run(home: Option<String>) -> i64 {
                     display.h = di.h;
                     gs.set_display(di.w, di.h);
                 }
-                if di.scale != sheet.scale {
+                if di.scale != sheet.scale && !scale::is_valid_pct(di.scale) {
+                    if scale_refused != Some(di.scale) {
+                        say!("halcyond: display scale {} refused (not in the table); keeping {}", di.scale, sheet.scale);
+                        scale_refused = Some(di.scale);
+                    }
+                } else if di.scale != sheet.scale {
                     rescale(di.scale, di.w, &mut sheet, &mut gs, &mut geom, &mut tiles, &mut wire_out);
                     display.scale = di.scale;
+                    scale_refused = None;
                     menus.close();
                     menu_leaf = None;
                     chrome.invalidate();
@@ -1748,6 +1765,10 @@ pub fn run(home: Option<String>) -> i64 {
                     let gen = sheet.gen + 1;
                     sheet = sheet_for(&sheet.bundle(), sheet.scale, di.w);
                     sheet.gen = gen;
+                    // The source follows the sheet in force at EVERY rebuild
+                    // (r2 B-F7), not only the scale's.
+                    gs.set_smooth(sheet.smooth_mem);
+                    gs.set_kerning(sheet.kerning);
                     for t in tiles.values_mut() {
                         t.tile.invalidate_heights();
                         t.dirty = true;
@@ -1987,6 +2008,8 @@ pub fn run(home: Option<String>) -> i64 {
                         say!("halcyond: reset: {} verb(s)", plan.len());
                         let planned = plan.len();
                         let mut landed = 0usize;
+                        // One retry budget for the whole plan (r2 C-F8).
+                        let mut budget = chromeset::VerbBudget::pass();
                         for (id, verb) in plan {
                             let (word, args) = verb.split_once(' ').unwrap_or((verb.as_str(), ""));
                             let cmd = if args.is_empty() {
@@ -1994,15 +2017,18 @@ pub fn run(home: Option<String>) -> i64 {
                             } else {
                                 format!("{} {} {}", word, id, args)
                             };
-                            if layout_verb(troot, &cmd) {
+                            if layout_verb_in(troot, &cmd, &mut budget) {
                                 relayout = true;
                                 landed += 1;
                             }
                         }
                         // The notice tells the truth: a plan no verb of which
-                        // landed is a refused reset (the r1 B-F3 finding).
-                        if landed > 0 || planned == 0 {
+                        // landed is a refused reset (the r1 B-F3 finding), and
+                        // one half of which landed is a PARTIAL one (r2 C-F8).
+                        if planned == 0 || landed == planned {
                             status.notify("LAYOUT RESET", false);
+                        } else if landed > 0 {
+                            status.notify("LAYOUT RESET (PARTIAL)", true);
                         } else {
                             status.notify("RESET REFUSED", true);
                         }
@@ -2201,10 +2227,51 @@ pub fn run(home: Option<String>) -> i64 {
         let _ = c.kill();
         let _ = c.wait();
     }
-    for (_, t) in core::mem::take(&mut tiles) {
-        t.teardown();
-    }
+    // One grace for all (r2 C-F3): every tile is hung up first, then all
+    // are waited against a single deadline, then the stragglers killed --
+    // not N serial graces (up to 64 s at MAX_PANES before login could
+    // start unbinding).
+    end_terminals(core::mem::take(&mut tiles).into_values().collect());
     code as i64
+}
+
+/// `end_terminal` over a set: every down channel closed first, one
+/// `TEARDOWN_GRACE_MS` for all, then the kill for whoever is still up.
+fn end_terminals(tiles: Vec<SessionTile>) {
+    let mut pending: Vec<(Child, u32)> = Vec::new();
+    for t in tiles {
+        let SessionTile {
+            child,
+            _down,
+            leaf,
+            ..
+        } = t;
+        drop(_down);
+        pending.push((child, leaf));
+    }
+    let mut waited = 0u64;
+    loop {
+        pending.retain_mut(|(child, leaf)| match child.try_wait() {
+            Ok(Some(_)) | Err(_) => {
+                #[cfg(feature = "test-mode")]
+                say!("halcyond: tile {} hung up ({} ms)", leaf, waited);
+                #[cfg(not(feature = "test-mode"))]
+                let _ = leaf;
+                false
+            }
+            Ok(None) => true,
+        });
+        if pending.is_empty() || waited >= TEARDOWN_GRACE_MS {
+            break;
+        }
+        let _ = sleep(Duration::from_millis(TEARDOWN_POLL_MS));
+        waited += TEARDOWN_POLL_MS;
+    }
+    for (mut child, leaf) in pending {
+        let _ = child.kill();
+        let _ = child.wait();
+        say!("halcyond: tile {} killed after the hangup grace", leaf);
+    }
 }
 
 /// Spawn the session's startup command (HALCYON.md 13.7, H-4c): the user's

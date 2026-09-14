@@ -112,7 +112,7 @@ impl Palette {
     /// | `fg`       | `fg`       | `fg`                               |
     /// | `dim`      | `dim`      | `fg_muted`                         |
     /// | `accent`   | `ember`    | `ember`                            |
-    /// | `surface`  | `bar`      | `status_bg`                        |
+    /// | `surface`  | `bar`      | `header`                           |
     /// | `border`   | `border`   | `border`                           |
     /// | `moss`     | `green`    | `syntax.moss`                      |
     /// | `dusk`     | `violet`   | `syntax.dusk`                      |

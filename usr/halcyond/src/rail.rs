@@ -249,6 +249,16 @@ fn tracked(gs: &mut GlyphSource, face: u8, px: f32, text: &str) -> Run {
     Run { refs, width }
 }
 
+/// `tracked` continuing one sub-pixel pen across runs: the fraction carried
+/// in and out (`GlyphSource::shape_run_spaced_from`). The context's three
+/// runs are three inks and two faces on ONE line of the golden -- laid as
+/// one pen they land on its 287.2 (kerned, HarfBuzz to 0.02 px); truncated
+/// one by one they came up 1.2 short (r2).
+fn tracked_from(gs: &mut GlyphSource, face: u8, px: f32, text: &str, rem: i32) -> (Run, i32) {
+    let (refs, width, rem) = gs.shape_run_spaced_from(face, px, TRACK_EM * px, text.chars(), rem);
+    (Run { refs, width }, rem)
+}
+
 fn width_of(gs: &mut GlyphSource, face: u8, px: f32, text: &str) -> i32 {
     tracked(gs, face, px, text).width
 }
@@ -337,6 +347,8 @@ pub fn rail_list(
     sheet: &Sheet,
     gs: &mut GlyphSource,
 ) -> (Cartoon, RailZones) {
+    // The source follows the sheet in force at every painter entry (r2 A-F2).
+    gs.set_kerning(sheet.kerning);
     let mut cart = Cartoon::new();
     let mut z = RailZones::default();
     if w == 0 || h == 0 {
@@ -593,7 +605,12 @@ pub fn rail_list(
     // --- The context (14.3), in what is left ----------------------------------
     if !narrow && !(m.cwd.is_empty() && m.title.is_empty()) {
         let ctx_x = pad_l + cluster_w;
-        let avail = actions_x - sheet.ipx(RAIL_GAP) - ctx_x;
+        // The three runs lay on ONE pen (`tracked_from`), whose whole width
+        // can exceed the sum of their separately truncated measures by up
+        // to two pixels (three carried fractions); the cuts below measure
+        // the parts, so the composite reserves that slack against the gap.
+        const CARRY_SLACK: i32 = 2;
+        let avail = actions_x - sheet.ipx(RAIL_GAP) - ctx_x - CARRY_SLACK;
         if avail > 0 {
             let cwd = m.cwd.to_uppercase();
             let title = m.title.to_uppercase();
@@ -627,10 +644,10 @@ pub fn rail_list(
             };
             let base = centred_in(gs, body, px, ch);
             let mut x = ctx_x;
-            let r = tracked(gs, body, px, &lead);
+            let (r, rem) = tracked_from(gs, body, px, &lead, 0);
             push(&mut cart, gen, x, base, i.dim, &r);
             x += r.width;
-            let r = tracked(gs, medium, px, &base_seg);
+            let (r, rem) = tracked_from(gs, medium, px, &base_seg, rem);
             push(&mut cart, gen, x, base, i.text, &r);
             x += r.width;
             if sep_w > 0 {
@@ -639,7 +656,7 @@ pub fn rail_list(
                 rect(&mut cart, x + sm, centre(ch, sh), hair, sh, i.structure);
                 x += sep_w;
             }
-            let r = tracked(gs, body, px, &title);
+            let (r, _) = tracked_from(gs, body, px, &title, rem);
             push(&mut cart, gen, x, base, i.secondary, &r);
             x += r.width;
             if title.is_empty() {
@@ -777,6 +794,8 @@ pub fn footer_list(
     sheet: &Sheet,
     gs: &mut GlyphSource,
 ) -> (Cartoon, Slots) {
+    // The source follows the sheet in force at every painter entry (r2 A-F2).
+    gs.set_kerning(sheet.kerning);
     let mut cart = Cartoon::new();
     let mut slots = Slots::default();
     if w == 0 || h == 0 {

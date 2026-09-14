@@ -1920,8 +1920,10 @@ impl Layout {
         // several keeps a header row like any tile.
         if tiles.len() == 1 && self.is_empty_leaf(tiles[0]) {
             let p = self.get_mut(tiles[0]).unwrap();
-            // Dormant when the clip took it to ZERO (r1 A-F1), as a tile.
-            p.visible = !rect.is_empty();
+            // Dormant when the clip left it no interior (r1 A-F1; r2 C-F1:
+            // judged on the carved placard, not the frame rect -- a rect of
+            // 2 px has a frame and nothing inside it).
+            p.visible = !inner.is_empty();
             p.rect = rect;
             p.tagbar = inner;
             p.content = Rect::ZERO;
@@ -1952,11 +1954,14 @@ impl Layout {
             let is_open = i == open;
             if self.is_leaf(t) {
                 let p = self.get_mut(t).unwrap();
-                // A tile the clip took to ZERO (the tree outgrew the minima
-                // through a path the fits-check does not guard) is dormant
-                // exactly like a collapsed one: nothing hosted composes there
-                // and it may not keep focus (r1 A-F1).
-                p.visible = is_open && !rect.is_empty();
+                // A tile the clip left no BODY (the tree outgrew the minima
+                // through a path the fits-check does not guard: a scale step,
+                // a display resize, a restore onto a smaller display) is
+                // dormant exactly like a collapsed one: nothing hosted
+                // composes there and it may not keep focus (r1 A-F1). Judged
+                // on the carved body, not the frame rect: a rect of 34 rows
+                // holds a frame and a header and no body (r2 C-F1).
+                p.visible = is_open && !body_rect.is_empty();
                 p.rect = rect;
                 p.tagbar = header;
                 p.content = if is_open { body_rect } else { Rect::ZERO };
@@ -2830,6 +2835,36 @@ mod tests {
             .inspect(|&&(slot, _)| assert!(!l.get(slot).unwrap().rect.is_empty()))
             .count();
         assert!(with_pixels >= 4 && with_pixels < 7, "{}", with_pixels);
+    }
+
+    /// r2 C-F1: dormancy is judged on the carved BODY, not the frame rect.
+    /// A lone hosted leaf whose rect is 34 rows tall (2 px of frame + the
+    /// 32 px header) has no body and is dormant; one row taller it lives.
+    /// An empty leaf's placard is dormant at the frame's own bound.
+    #[test]
+    fn a_tile_with_a_frame_but_no_body_is_dormant() {
+        // The band measured at 1280 wide: workspace heights 7..=40 leave a
+        // rect of 1..=34 rows with a ZERO body; 41 is the first with one.
+        for (h, dormant) in [(7u32, true), (40, true), (41, false)] {
+            let mut l = Layout::new();
+            let area = r(0, 34, 1280, h);
+            l.recompute(area, 1, inst100(), Profile::Instrument);
+            let slot = l.host(1).expect("the root hosts surface 1");
+            l.recompute(area, 1, inst100(), Profile::Instrument);
+            let p = l.get(slot).unwrap();
+            assert!(!p.rect.is_empty(), "h={}: the frame rect is never empty here", h);
+            assert_eq!(p.visible, !dormant, "h={}: visible", h);
+            assert_eq!(p.content.is_empty(), dormant, "h={}: the body", h);
+        }
+        // The placard's bound is the frame alone: a rect of 2 rows has no
+        // interior; 3 rows has one.
+        for (h, dormant) in [(8u32, true), (9, false)] {
+            let mut l = Layout::new();
+            let area = r(0, 34, 1280, h);
+            l.recompute(area, 1, inst100(), Profile::Instrument);
+            let p = l.get(l.root).unwrap();
+            assert_eq!(p.visible, !dormant, "placard h={}: visible", h);
+        }
     }
 
     /// The minima (5.2): a split that cannot keep every pane at 260 wide,

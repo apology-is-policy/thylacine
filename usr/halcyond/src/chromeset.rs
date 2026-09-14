@@ -106,12 +106,44 @@ pub const VERB_RETRIES: u32 = 40;
 pub const VERB_NAP_MS: u64 = 10;
 pub const E_AGAIN: i64 = -11;
 
+/// The E_AGAIN retry budget of one PASS of verbs. A reset plan issues one
+/// verb per row; with a per-VERB budget a compositor refusing E_AGAIN cost
+/// the owner's single-threaded loop `VERB_RETRIES` naps per row -- up to
+/// `RESET_ROWS_MAX` times 400 ms of a renderer serving no tile, no key,
+/// no pts (r2 C-F8). One budget per pass bounds the whole plan to the
+/// naps of one verb; a verb that finds it spent is refused and said.
+pub struct VerbBudget {
+    retries: u32,
+}
+
+impl VerbBudget {
+    pub fn pass() -> VerbBudget {
+        VerbBudget {
+            retries: VERB_RETRIES,
+        }
+    }
+
+    /// Spend one nap of the budget: false when it is spent.
+    pub fn nap(&mut self) -> bool {
+        if self.retries == 0 {
+            return false;
+        }
+        self.retries -= 1;
+        true
+    }
+}
+
 /// A pane verb on the owner's conn, judged per write by the compositor:
 /// E_AGAIN is retried like the session's `layout_verb`; any other refusal
-/// is SAID with its rc, never swallowed (the r1 B-F3 finding).
+/// is SAID with its rc, never swallowed (the r1 B-F3 finding). One verb
+/// on its own budget; a plan shares one through `pane_verb_in`.
 pub fn pane_verb(troot: i64, id: u32, verb: &str) -> bool {
+    pane_verb_in(troot, id, verb, &mut VerbBudget::pass())
+}
+
+pub fn pane_verb_in(troot: i64, id: u32, verb: &str, budget: &mut VerbBudget) -> bool {
     let path = format!("pane/{}/ctl", id);
-    for _ in 0..VERB_RETRIES {
+    loop {
         let rc = write_file_rc(troot, &path, verb);
         if rc != E_AGAIN {
             if rc < 0 {
@@ -119,10 +151,15 @@ pub fn pane_verb(troot: i64, id: u32, verb: &str) -> bool {
             }
             return rc >= 0;
         }
+        if !budget.nap() {
+            say(&format!(
+                "halcyond: {} on pane {} still busy after {} tries (the pass's budget)",
+                verb, id, VERB_RETRIES
+            ));
+            return false;
+        }
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(VERB_NAP_MS));
     }
-    say(&format!("halcyond: {} on pane {} still busy after {} tries", verb, id, VERB_RETRIES));
-    false
 }
 
 /// What a chrome surface paints (the Instrument profile; the legacy strip

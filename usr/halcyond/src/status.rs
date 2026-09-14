@@ -227,6 +227,8 @@ pub fn status_list(
     sheet: &Sheet,
     gs: &mut GlyphSource,
 ) -> (Cartoon, Slots) {
+    // The source follows the sheet in force at every painter entry (r2 A-F2).
+    gs.set_kerning(sheet.kerning);
     // HALCYON-INSTRUMENT 8.2: under the Instrument profile the bar is the
     // bottom rail (`rail::footer_list`); the legacy list below is
     // byte-identical to what it was.

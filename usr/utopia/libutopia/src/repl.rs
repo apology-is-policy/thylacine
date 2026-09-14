@@ -947,13 +947,19 @@ impl Repl {
     /// Public so a non-interactive probe can drive the real reap path
     /// (`/u-job-test`); the interactive shell calls it from `feed`.
     pub fn reap_jobs(&mut self) {
+        for line in self.reap_jobs_lines() {
+            self.env.emit_line(&line); // PTY-4b: the session terminal, not the UART
+        }
+    }
+
+    /// `reap_jobs`'s poll-and-mark half with the notification lines RETURNED
+    /// rather than printed, so the idle prompt can decide before it prints.
+    fn reap_jobs_lines(&mut self) -> Vec<String> {
         // The WNOHANG poll-and-mark half is shared with the `jobs` builtin's
         // refresh (`builtin::reap_background`); the drain-and-print half is the
         // prompt-cycle's own. One poll per live pid -- never a busy-loop.
         builtin::reap_background(&mut self.env);
-        for line in self.env.jobs_mut().take_done_notifications() {
-            self.env.emit_line(&line); // PTY-4b: the session terminal, not the UART
-        }
+        self.env.jobs_mut().take_done_notifications()
     }
 
     /// Open the shell's own note queue so `on note` / `mask note` handlers
@@ -1008,11 +1014,36 @@ impl Repl {
     /// leading `\r\n` mirrors the Cancel/Accept idiom: it moves off the
     /// in-progress line so the notification + fresh prompt land cleanly.
     pub fn on_notes_ready(&mut self, out: &mut dyn IoWrite) {
+        // Decide BEFORE printing what this batch will do. Reap finished bg
+        // jobs first (so an `on note child_exit` handler, if any, observes
+        // current job state), matching the prompt-cycle order.
+        let lines = self.reap_jobs_lines();
+        let notes = crate::eval::stmt::drain_pending_notes(&mut self.env);
+        let winch = notes.iter().any(|n| n.name == "tty:winch");
+        let silent = lines.is_empty()
+            && notes
+                .iter()
+                .all(|n| crate::eval::stmt::note_is_silent(&self.env, n));
+        if silent {
+            // Nothing to print, nothing to cancel: the prompt stays where it
+            // is. (Every pts-hosted shell drew its prompt TWICE at session
+            // start: the tile's first CONFIGURE resized the pts, the kernel
+            // posted `tty:winch`, and the fresh block below moved the prompt
+            // to a new line for a note that printed nothing.) A resize
+            // re-learns the width and redraws the prompt in place -- the
+            // editor had no resize consumer before.
+            let _ = crate::eval::stmt::dispatch_notes(&mut self.env, &notes);
+            if winch {
+                self.probe_winsize(out);
+                self.emit_prompt(out);
+            }
+            return;
+        }
         let _ = out.write_all(b"\r\n");
-        // Reap finished bg jobs first (so an `on note child_exit` handler, if
-        // any, observes current job state), matching the prompt-cycle order.
-        self.reap_jobs();
-        let interrupted = self.deliver_notes();
+        for line in &lines {
+            self.env.emit_line(line); // PTY-4b: the session terminal, not the UART
+        }
+        let interrupted = crate::eval::stmt::dispatch_notes(&mut self.env, &notes);
         if interrupted {
             self.editor.reset();
         }

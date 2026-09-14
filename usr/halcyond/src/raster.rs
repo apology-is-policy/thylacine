@@ -691,48 +691,73 @@ impl GlyphSource {
         tracking: f32,
         chars: impl Iterator<Item = char>,
     ) -> (Vec<GlyphRef>, i32) {
+        let (refs, width, _) = self.shape_run_spaced_from(face, px, tracking, chars, 0);
+        (refs, width)
+    }
+
+    /// `shape_run_spaced` continuing a pen: `rem` is the fraction (1/256 px)
+    /// carried in from the run laid before this one, and the returned third
+    /// value the fraction carried out. A composite of runs -- the rail's
+    /// context, three inks and two faces -- then accumulates like ONE pen,
+    /// as the browser's inline boxes do at 1/64 px, instead of truncating a
+    /// fraction per run (r2: three truncations put the context 1.2 px short
+    /// of the golden's kerned 287.2, which HarfBuzz reproduces to 0.02).
+    pub fn shape_run_spaced_from(
+        &mut self,
+        face: u8,
+        px: f32,
+        tracking: f32,
+        chars: impl Iterator<Item = char>,
+        rem: i32,
+    ) -> (Vec<GlyphRef>, i32, i32) {
         let track_fx = (tracking * Self::PEN_SCALE as f32) as i32;
         let mut refs: Vec<GlyphRef> = Vec::new();
-        let (mut rem, mut width) = (0i32, 0i32);
+        let (mut rem, mut width) = (rem.rem_euclid(Self::PEN_SCALE), 0i32);
         let mut prev: Option<char> = None;
         for ch in chars {
             let Some(aq) = self.advance_fx(face, px, ch) else {
                 continue;
             };
             let aq = aq + track_fx;
+            // The kern belongs to the PRECEDING glyph's step, which is
+            // already pushed: fold it into the pen's carry, so its whole
+            // part re-lands on that ref's advance (and the running width)
+            // and its fraction rides into this glyph's phase -- the pen and
+            // the returned width stay the same number, at 1/256 px. The
+            // carry is COMPUTED before the glyph is resolved (its phase
+            // needs it) and COMMITTED only once the glyph is served: a
+            // refused glyph advances nothing and is nobody's neighbour on
+            // EITHER side (r2 A-F1: a kern folded toward a glyph the atlas
+            // then refused stayed on the preceding ref, once per refusal,
+            // and walked a run's width negative at the page cap).
+            let mut carried = rem;
             if let Some(p) = prev {
                 if !is_mono_face(face) {
-                    // The kern belongs to the PRECEDING glyph's step, which
-                    // is already pushed: fold it into the pen's carry, so
-                    // its whole part re-lands on that ref's advance (and
-                    // the running width) and its fraction rides into this
-                    // glyph's phase -- the pen and the returned width stay
-                    // the same number, at 1/256 px.
-                    let k = self.kern(face, px, p, ch);
-                    if k != 0 {
-                        let carried = rem + k;
-                        let whole = carried.div_euclid(Self::PEN_SCALE);
-                        if let Some(last) = refs.last_mut() {
-                            last.advance += whole;
-                        }
-                        width += whole;
-                        rem = carried.rem_euclid(Self::PEN_SCALE);
-                    }
+                    carried = rem + self.kern(face, px, p, ch);
                 }
+            }
+            let rem_after_kern = carried.rem_euclid(Self::PEN_SCALE);
+            let Some(g) = self.glyph_at(face, px, ch, phase_of(rem_after_kern)) else {
+                continue;
+            };
+            if carried != rem {
+                let whole = carried.div_euclid(Self::PEN_SCALE);
+                if let Some(last) = refs.last_mut() {
+                    last.advance += whole;
+                }
+                width += whole;
+                rem = rem_after_kern;
             }
             let total = rem + aq;
             let step = total.div_euclid(Self::PEN_SCALE);
-            if let Some(g) = self.glyph_at(face, px, ch, phase_of(rem)) {
-                refs.push(GlyphRef { glyph: g.glyph, advance: step });
-                width += step;
-                rem = total.rem_euclid(Self::PEN_SCALE);
-                // The pair the NEXT glyph kerns with is this one, the last
-                // SERVED glyph -- a refused glyph advanced nothing and is
-                // nobody's left neighbour.
-                prev = Some(ch);
-            }
+            refs.push(GlyphRef { glyph: g.glyph, advance: step });
+            width += step;
+            rem = total.rem_euclid(Self::PEN_SCALE);
+            // The pair the NEXT glyph kerns with is this one, the last
+            // SERVED glyph.
+            prev = Some(ch);
         }
-        (refs, width)
+        (refs, width, rem)
     }
 
     pub fn advance_f(&mut self, face: u8, px: f32, ch: char) -> Option<f32> {
@@ -1005,13 +1030,24 @@ impl GlyphSource {
         if is_mono_face(face) {
             return 0;
         }
+        let Some(f) = prop_of(&self.faces, face) else {
+            return 0;
+        };
+        let (l, r) = (f.glyph_id(left), f.glyph_id(right));
+        // HarfBuzz's cheap reject (r2 A-F3): a left glyph that leads no pair
+        // answers 0 from a sorted set, taking no memo slot -- so the memo
+        // holds only pairs that CAN kern (Plex: a few hundred lefts), and a
+        // transcript of distinct pairs cannot make it clear itself per
+        // glyph. The cost is then proportional to the kerning pairs laid,
+        // not to every pair the transcript happens to form.
+        if !f.kern_left_covered(l) {
+            return 0;
+        }
         let key = (face, left, right);
         if let Some(&u) = self.kern_memo.get(&key) {
             return u;
         }
-        let u = prop_of(&self.faces, face)
-            .map(|f| f.kern_units(f.glyph_id(left), f.glyph_id(right)))
-            .unwrap_or(0);
+        let u = f.kern_units(l, r);
         if self.kern_memo.len() >= Self::KERN_MEMO_MAX {
             self.kern_memo.clear();
         }
@@ -1697,6 +1733,119 @@ mod tests {
             prev = Some(ch);
         }
         assert_eq!(w_on, q.div_euclid(GlyphSource::PEN_SCALE), "the pen's whole width of {q}");
+    }
+
+    // r2 A-F1: at the page cap a refused glyph must contribute neither an
+    // advance nor a kern -- the fold toward it stayed on the preceding ref,
+    // once per refusal, and a kerned run of refusals walked its width
+    // NEGATIVE (a right-aligned caller then placed its run past its edge).
+    #[test]
+    fn a_kerned_run_on_a_full_atlas_never_goes_negative() {
+        // The healthy answer first: every glyph served, the width their sum.
+        let mut fresh = GlyphSource::new_vendored(512);
+        assert!(fresh.set_kerning(true));
+        let text = alloc::format!("A{}A", "V".repeat(19));
+        let (refs, width) = fresh.shape_run_spaced(FACE_SANS, 33.0, 0.0, text.chars());
+        assert_eq!(refs.len(), 21);
+        assert!(width > 0 && refs.iter().all(|r| r.advance >= 0));
+        assert!(width < 21 * 33, "the A/V and V/A pairs kern the run under 21 ems: {width}");
+        // Then at the cap: 'A' cached, the store filled to its hard cap by
+        // codepoints the face lacks, so every 'V' is REFUSED.
+        let mut gs = GlyphSource::new_vendored(32);
+        assert!(gs.set_kerning(true));
+        assert!(gs.glyph(FACE_SANS, 33.0, 'A').is_some());
+        for cp in 0x4E00u32..0x4E00 + 400 {
+            let _ = gs.glyph(FACE_BODY, 11.5, char::from_u32(cp).unwrap());
+        }
+        assert!(gs.glyph(FACE_SANS, 33.0, 'V').is_none(), "the premise: the store is at its cap");
+        let (refs, width) = gs.shape_run_spaced(FACE_SANS, 33.0, 0.0, text.chars());
+        assert!(!refs.is_empty(), "the cached 'A' is served");
+        assert!(refs.len() <= 2, "no 'V' is: {}", refs.len());
+        assert!(refs.iter().all(|r| r.advance >= 0), "no negative advance: {:?}", refs.iter().map(|r| r.advance).collect::<Vec<_>>());
+        assert!(width >= 0, "no negative width: {width}");
+        assert_eq!(width, refs.iter().map(|r| r.advance).sum::<i32>());
+    }
+
+    // r2 A-F3: a left glyph that leads no pair is answered by the coverage
+    // reject and takes no memo slot; a transcript of distinct digit pairs
+    // therefore cannot churn the memo, while the pairs that kern still fill it.
+    #[test]
+    fn the_kern_memo_holds_only_the_pairs_that_can_kern() {
+        let mut gs = GlyphSource::new_vendored(512);
+        assert!(gs.set_kerning(true));
+        for l in '0'..='9' {
+            for r in ' '..='~' {
+                assert_eq!(gs.kern(FACE_SANS, 15.0, l, r), 0, "{l}{r}");
+            }
+        }
+        assert_eq!(gs.kern_memo.len(), 0, "950 digit-led pairs took no memo slot");
+        assert_ne!(gs.kern(FACE_SANS, 15.0, 'A', 'V'), 0);
+        assert_eq!(gs.kern(FACE_SANS, 15.0, 'A', '1'), 0, "a covered left with an uncovered pair is a real (memoized) zero");
+        assert_eq!(gs.kern_memo.len(), 2);
+    }
+
+    // r2 A-F7: the procedural table declines the three diagonals (no arms),
+    // so they are the ONE part of U+2500..257F the face serves in the cell
+    // since the subset carries the block -- pinned so the box-glyph
+    // precedence is stated exactly.
+    #[test]
+    fn the_three_diagonals_reach_the_face_in_the_cell() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let (cw, chh, _) = gs.island_cell();
+        let light = libhalcyon::scale::ipx(1, 100).max(1) as usize;
+        for ch in ['\u{2571}', '\u{2572}', '\u{2573}'] {
+            assert!(boxglyph::alpha(cw as usize, chh as usize, ch, light).is_none(), "{ch:?}: the table has no arms for a diagonal");
+            assert!(gs.mono_has(ch), "{ch:?}: the subset carries it");
+            let cell = gs.glyph(FACE_MONO, MONO_ISLAND_PX, ch).expect("the face serves it in the cell");
+            let (w, h, _) = glyph_alpha(&gs, cell.glyph);
+            assert_eq!((w as i32, h as i32), (cw, chh), "clipped to the cell");
+        }
+        // Every other codepoint of the block is the procedural arm's.
+        for cp in 0x2500u32..0x2580 {
+            let ch = char::from_u32(cp).unwrap();
+            if matches!(ch, '\u{2571}' | '\u{2572}' | '\u{2573}') {
+                continue;
+            }
+            assert!(boxglyph::alpha(cw as usize, chh as usize, ch, light).is_some(), "{ch:?}");
+        }
+    }
+
+    // r2 A-F8: the Italic cut's ink leaves the Regular's cell on more glyphs
+    // than the Regular's own does (the diagonals), at the shipping cell --
+    // measured here so the clip is pinned rather than discovered. What the
+    // clip takes is the outermost anti-aliased column of an italic j, /, #,
+    // ellipsis and the accented capitals; whether the Italic wants a
+    // one-column inset is a decision for the operator's eye (I-9).
+    #[test]
+    fn the_italic_cut_clips_the_ink_the_regular_does_not() {
+        let overflow = |bytes: &'static [u8]| -> (u32, f32) {
+            let f = Face::parse(bytes).expect("parses");
+            let cell = MonoCell::derive(&f, 6).expect("a cell");
+            let (mut n, mut worst) = (0u32, 0.0f32);
+            for cp in 0u32..0x2600 {
+                let Some(ch) = char::from_u32(cp) else { continue };
+                if !f.has(ch) {
+                    continue;
+                }
+                let r = f.raster(f.glyph_id(ch), cell.em, 0, 0);
+                if r.w == 0 {
+                    continue;
+                }
+                let left = r.left as f32;
+                let right = (r.left + r.w as i32) as f32;
+                if left < 0.0 || right > cell.w as f32 {
+                    n += 1;
+                    worst = worst.max((-left).max(right - cell.w as f32));
+                }
+            }
+            (n, worst)
+        };
+        let (rn, rworst) = overflow(cornucopia::SUBSET_TTF);
+        let (inr, iworst) = overflow(cornucopia::SUBSET_ITALIC_TTF);
+        assert_eq!(rn, 3, "the Regular's overflowing glyphs are the three diagonals (worst {rworst} px)");
+        assert!(inr > rn, "the Italic overflows on more glyphs: {inr} (worst {iworst} px)");
+        assert!(inr <= 64, "and not on most of them: {inr}");
+        assert!(iworst < 2.0, "by under two columns at the shipping cell: {iworst}");
     }
 
     #[test]

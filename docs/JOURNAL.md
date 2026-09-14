@@ -684,6 +684,89 @@ tree, not a pattern) and relaunched on the fixed image.
 Binary: 2,140,744 → 2,785,000 bytes (+644 KB, the three Plex cuts and the
 two subsets; accepted at §7.1). Host: halcyond 228 → 235.
 
+### I-5 round 2: three prosecutors, one hang, and the pen that had to be shared
+
+**The round.** The batched Opus-5 prosecution over I-5a..d and the round-1
+fixes ran as THREE prosecutors in parallel -- A the face (I-5a + I-5d + the
+fallback seam), B the document (I-5b), C the producers (I-5c) plus the
+round-1 fixes as the ROUND 2 FOCUS -- all on Opus 5 by the operator's
+design (the author is Fable 5.1), all reporting `MODEL(start) ==
+MODEL(end)`, ~35-46 min and ~515-579k tokens each. Distinct: **1 P0 / 3 P1
+/ 7 P2 / 23 P3** -- DIRTY by count (P1 + P2 = 10); the fixes are the next
+round's focus by the doubled-cadence rule. Every finding is measured on the
+host against the real code, not reasoned: A re-ran the HarfBuzz comparison
+over 9025 ASCII pairs x 6 cuts plus Latin-1, marks, Greek and Cyrillic (0
+differences), B re-derived the golden's flow from the JSON and measured
+`Tile::render` hanging, C probed the real `pane.rs` + `carve.rs` over 1001
+display heights.
+
+**The P0 (B-F1).** The indicator lane's two-pass rested on "narrowing
+never shortens wrapped content", asserted in 7.7's as-built paragraph and
+in the I-5 row. It was false: `lay_span`'s space-less-span pre-break had a
+width-dependent gate (a span that would not fit a fresh line stayed inline
+and hard-broke), so a block could be SHORTER at the narrower measure, and
+`Tile::render` alternated forever -- B measured 58 s at 100 % on `word <em
+class=code>mmmmmmmmmm</em> tail` at width 157. The renderer never presented
+again. Fixed twice over: the loop is BOUNDED at three passes in both
+owners with the lane winning a disagreement (stable across frames), and
+the gate is gone under Instrument (CSS `overflow-wrap: break-word` takes
+the soft break first). The lesson is the flake-dismissal one turned
+inside out: a liveness argument that lives in a comment is a claim, and
+this one had never been tested against the layout rules it depended on.
+
+**The round-1 fixes, re-prosecuted (C).** Two of round 1's own fixes were
+wrong: the dormancy rule keyed on the frame rect where a 34-row rect holds
+a frame and a header and NO body (a focused tile with no pixels, keys
+vanishing -- exactly the state A-F1 said it removed; reachable by one
+`Super+=`), and the zoom exemption `rect == content` matched every stack
+CONTAINER by construction (`show_container`), so all three frames of the
+reference layout were skipped. Both fixed at the carve and the painter,
+both pinned (the measured band 7..=40 at 1280; the console gate reads the
+stack container's frame pixels). And the logout cure was narrower than its
+sentence: `killgrp` ends the app's THREAD group, so a foreground job holds
+the slave and the ARM-6 stall returns -- the paragraph is qualified, the
+logout ends every tile under ONE grace, the session-wide hangup is aux's
+Part D or a pts-level HUP verb the PTY line does not have (owed, with the
+gate case).
+
+**The pen that had to be shared.** A-F2 (every Instrument painter test ran
+unkerned) was fixed structurally -- every painter entry sets the source's
+kerning from the sheet in force -- and that moved ONE pin: the rail
+context, 286 against the golden's 287.219. HarfBuzz settled which side was
+wrong: kerned 287.200, unkerned 288.553 -- the browser kerned, and our 286
+was three whole-pixel truncations of three separately shaped runs on one
+line. `shape_run_spaced_from` carries the fraction across runs; the
+context now lays on one pen (with 2 px of carry slack in its fit). The
+same class three more times: the exit badge (kerned measure, unkerned lay:
+1 px past the edge), the pre-break and the table measure (no tracking:
+9-17 px wide), the ellipsis cut (two runs summed: 1 px past `avail`).
+"The two must share an accumulator" was the doc-comment's rule since TY-6;
+four sites had not read it.
+
+**The doubled prompt, explained by the self-audit.** While the prosecutors
+ran, the session log settled the open bug: the root tile spawns at 213
+columns on a 1272-wide surface, the welcome split configures it to 631,
+`fit_to_surface` sends a Resize, the kernel posts `tty:winch`, and ut's
+idle note service wrote `\r\n` and re-prompted for EVERY note batch --
+even one it discarded. The tour tile takes the same path. Fixed in ut: a
+batch that prints nothing and cancels nothing leaves the prompt in place,
+and a winch re-probes the width (the editor had "no resize consumer") and
+redraws in place. The session gate pins one prompt at start.
+
+**What else moved.** The memo's 34x cost cliff got HarfBuzz's cheap reject
+(a per-face set of the glyphs that lead any pair; 950 digit-led pairs take
+0 slots); a refused glyph's kern fold walked a run negative at the page cap
+(the carry is committed only when the glyph is served); a lone blank raw
+line painted a 47 px island (now the paragraph break unless inside an
+island); the flow's reads saturate like its writes; the generator enforces
+the loader's rules read from `instrument.rs` itself; `pane_verb` shares
+one retry budget per pass and a partial reset says so. Residues recorded
+where they belong (the trailing RUN of spaces hangs; the diagonals reach
+the face; the thumb's x is clamped by the executor, not floored).
+
+**Cost.** Five gates on five images, one attempt each (below). Host: halcyond
+261 -> 266, tapestryd 34 -> 35; libhalcyon 115, nora 249 unchanged.
+
 ### I-5d: kerning -- a pair reader measured against HarfBuzz, and an oracle that turned out to be the span, the tracking and the hanging space
 
 **What landed** (`4fff598d`; HALCYON-INSTRUMENT §7.5 as built, §12, §13's
