@@ -686,7 +686,7 @@ two subsets; accepted at §7.1). Host: halcyond 228 → 235.
 
 ### I-5d: kerning -- a pair reader measured against HarfBuzz, and an oracle that turned out to be the span, the tracking and the hanging space
 
-**What landed** (`I5D_HASH`; HALCYON-INSTRUMENT §7.5 as built, §12, §13's
+**What landed** (`4fff598d`; HALCYON-INSTRUMENT §7.5 as built, §12, §13's
 addendum; HALCYON-TYPE §6 amended; the I-5 audit row's items (u)–(x)).
 `outline::Face` reads Plex's GPOS `kern` feature through the vendored
 read-fonts — the DEFAULT script's default language system to its PairPos
