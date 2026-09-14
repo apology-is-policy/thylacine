@@ -23,6 +23,87 @@ needed the operator.
 
 ---
 
+## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
+
+### What this run was for
+
+The operator returned from four days out of quota with a Halcyon UX overhaul
+designed with GPT Astra: the "Instrument Panel" mockup
+(`Instrument-Panel-Handoff-v5.zip` -- the untracked zip at the repo root whose
+origin run 46n did not know) and an implementation kit built from it,
+`docs/halcyon-carbon-handoff/`. The panes / splits / tiles / Acme / Genera basis
+stays; the visuals change, and Carbon Optics becomes the default of 13 themes.
+This run read the kit whole and checked it against the tree before any code.
+
+### What checked out
+
+- 52/52 checksums. `scripts/build_bundle.py` rebuilds the kit byte-identically
+  from `reference/` plus the markdown (a scratch copy, `diff -r` clean), so
+  every derived file is a function of the frozen CSS/JS.
+- 13 themes x 35 colours re-derived independently from `reference/styles.css`:
+  0 mismatches against `ui-palettes/`, `resolved-tokens.json` and the register.
+- The tree's real parser (`libhalcyon::theme::Theme::from_toml`, driven from a
+  scratch host crate) loads all 13 `palettes/*.toml`; a deleted key and an
+  extra key fail; the sidecar and the profile file are refused by the stock
+  loader (unknown key / unknown table), which is exactly what the kit says must
+  happen. KEYS = 57 = the kit's count.
+- The spec's geometry arithmetic against the CSS: the flex-shrink rule
+  `first = r * (E - 7)`, the border-box header accounting, the 1440x900
+  positions, the 1.5% overlay resolving to `#151819` -- all correct.
+- The nine `source-docs/` are byte-identical to the tree's docs at `ceda724f`,
+  and every section the kit cites exists and says what the kit claims
+  (HALCYON-WORKSPACES included, correctly read as a proposal).
+
+### What did not
+
+- **Provenance.** The pinned mockup commit exists only in Astra's worktree. The
+  kit's `reference/index.html` is not the zip's `source/index.html`: the zip's
+  is the offline build without the Google Fonts links; CSS and JS are
+  byte-identical, so nothing visual differs.
+- **No goldens.** Astra never rendered the page ("required sign-in"); every
+  number in the kit was derived by reading CSS. The operator's own screenshot
+  (`rendering.png`, 2938x1562, Carbon, live clock) is the first rendering on
+  record -- and its mono is a fallback face, since the Mac has Plex Sans but no
+  Plex Mono.
+- **The ANSI-16 tables are derived, not designed** (`build_bundle.py`,
+  `palette()`): yellow = the signal hue (ink-blue on Genera, teal on Abyssal),
+  magenta = the number colour (brown on Signal), and on the three light themes
+  the black/white polarity is inverted -- `ansi[0]` is the light pane colour,
+  `ansi[15]` the dark terminal ink.
+- 45 of 156 measured contrast pairs sit below 4.5:1 outside Carbon; the kit
+  preserves them on purpose.
+- Not in the kit at all: font binaries, scrollbars, a per-tile metadata
+  channel, translucent fills or blur in the executor (cartoon has an opaque
+  `Op::Rect` and the alpha glyph blit, nothing else), the verb menu, the
+  status marks, inline media, login and the pre-login console, the Aero theme,
+  a layout v2.
+
+### Operator rulings (2026-09-14)
+
+- Cornucopia stays for every mono role (Astra did not know it exists); Plex
+  Sans for proportional. Literal type parity is therefore not the bar for
+  mono; geometry and colour are.
+- The prompt: the lambda leads, and `⊢` stays as the delimiter between the
+  prompt and the user's input.
+- Super (meta) and every current chord stay; the mockup's Alt bindings are not
+  adopted.
+- Workspaces are IN (the kit had scoped HALCYON-WORKSPACES out).
+- Header metadata: ours, as designed; the kit's strings are placeholders.
+- Scrollbars: initially a position indicator into the buffer.
+- The kit is committed for the record; our own interpreted docs follow.
+
+### Owed at the end of the run
+
+- The request to Astra (`docs/halcyon-carbon-handoff/REQUEST-TO-ASTRA.md`):
+  goldens and geometry dumps, the git bundle, designed ANSI-16 tables, the
+  missing-surface designs, the scrollbar.
+- The interpreted scripture (HALCYON-INSTRUMENT) carrying the kit's section-2
+  amendments as ratified above; then slice I-0.
+- Unchanged from 46n: the IRQ fork, the back-pressure gap, S1 [P3], the ut
+  `mount` one-liner, vault calls 0082 / 0087.
+
+---
+
 ## Run 46n (2026-09-10 + 2026-09-14, Opus 5 max, across a self-compaction) -- the syscall collision, a merge gate's one red boot, and a hang the obvious fix would not have closed
 
 Newest first within the JOURNAL; this entry is chronological inside (Sep 10, then Sep 14).
@@ -357,11 +438,12 @@ The leg still discriminates, because its hard-fail arm names both lines. But the
 
 ### Owed at the end of the run
 
-- **ROUND 6, narrow, on Fable.** Round 5 -- the one review of `83ef2426` --
-  closed clean, but it fell back to Opus 4.8 before writing its report. So round
-  6 covers the SA-1 commit, plus a Fable re-derivation of round 5's
-  post-fallback surfaces: the KAT legs, the readiness triangle and
-  `write_exact`, and the pipe-note premise.
+- **ROUND 6 -- WAIVED by the operator (2026-09-14)** for the new priority
+  work; never spawned. Its scope is recorded as residue in the haul closed
+  list: the SA-1 commit was never prosecutor-reviewed, and round 5 -- the one
+  review of `83ef2426`, clean, but fallen back to Opus 4.8 before its report --
+  leaves the KAT legs, the readiness triangle and `write_exact`, and the
+  pipe-note premise with Opus verdicts only. The next haul review picks them up.
 - **The IRQ design fork, for the operator.** `irqfwd.c` forces edge on level
   INTx, and the fix -- mask-on-fire plus ack -- is an ABI change. See
   `bug_irqfwd_forces_edge_on_level_intx`.

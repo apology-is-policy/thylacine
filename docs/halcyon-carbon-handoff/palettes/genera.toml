@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/genera.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "Genera Ivory"
+
+[palette]
+floor = "#D5D6D0"
+surface = "#F4F4EE"
+header = "#DEE0DA"
+raised = "#CDD1CB"
+border = "#727A75"
+blank = "#E8E9E3"
+selection = "#D9DCDB"
+island_rule = "#6C7890"
+fg = "#171A19"
+fg_dim = "#343A37"
+fg_muted = "#4E5753"
+fg_subtle = "#747D78"
+bevel_top = "#DCDDD8"
+bevel_left = "#D9DAD4"
+bevel_right = "#A6A7A2"
+bevel_bottom = "#737470"
+ember = "#3D526F"
+ember_dim = "#6C7890"
+ember_deep = "#6C7890"
+status_bg = "#E2E3DD"
+status_fg = "#171A19"
+status_muted = "#4E5753"
+status_idle = "#747D78"
+
+[palette.sage]
+key = "#4F7059"
+tint = "#DEE0DA"
+raised = "#CDD1CB"
+border = "#C3C7C1"
+fg = "#171A19"
+fg_dim = "#4E5753"
+fg_muted = "#747D78"
+
+[palette.cinnabar]
+key = "#8E4E4B"
+tint = "#DEE0DA"
+raised = "#CDD1CB"
+border = "#C3C7C1"
+fg = "#171A19"
+fg_dim = "#4E5753"
+fg_muted = "#747D78"
+
+[palette.syntax]
+slate = "#3D526F"
+sage = "#3D6764"
+sand = "#8E4E4B"
+moss = "#6C7890"
+ash = "#4F7059"
+dusk = "#344C69"
+smoke = "#747D78"
+fen = "#4F7059"
+cinnabar = "#8E4E4B"
+
+[terminal]
+bg = "#EDF0E9"
+fg = "#252C29"
+ansi = ["#E8E9E3", "#8E4E4B", "#4F7059", "#3D526F", "#3D6764", "#6C7890", "#466C5F", "#4E5753", "#747D78", "#6D3F3D", "#3F5847", "#324257", "#32514F", "#545E6F", "#39554B", "#252C29"]
+
+[type]
+smooth = 12
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

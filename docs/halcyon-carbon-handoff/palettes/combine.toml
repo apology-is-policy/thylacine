@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/combine.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "Combine Relay"
+
+[palette]
+floor = "#060A0D"
+surface = "#111B21"
+header = "#091015"
+raised = "#162329"
+border = "#30444C"
+blank = "#0C1318"
+selection = "#213037"
+island_rule = "#536F77"
+fg = "#D7E2E4"
+fg_dim = "#C1CED0"
+fg_muted = "#889AA0"
+fg_subtle = "#56696F"
+bevel_top = "#2E3134"
+bevel_left = "#1C2023"
+bevel_right = "#05080A"
+bevel_bottom = "#030507"
+ember = "#79A7B2"
+ember_dim = "#536F77"
+ember_deep = "#536F77"
+status_bg = "#080E12"
+status_fg = "#D7E2E4"
+status_muted = "#889AA0"
+status_idle = "#56696F"
+
+[palette.sage]
+key = "#66897B"
+tint = "#091015"
+raised = "#162329"
+border = "#1D2C32"
+fg = "#D7E2E4"
+fg_dim = "#889AA0"
+fg_muted = "#56696F"
+
+[palette.cinnabar]
+key = "#AD704E"
+tint = "#091015"
+raised = "#162329"
+border = "#1D2C32"
+fg = "#D7E2E4"
+fg_dim = "#889AA0"
+fg_muted = "#56696F"
+
+[palette.syntax]
+slate = "#79A7B2"
+sage = "#AD8456"
+sand = "#AD704E"
+moss = "#536F77"
+ash = "#66897B"
+dusk = "#8DB6BF"
+smoke = "#56696F"
+fen = "#66897B"
+cinnabar = "#AD704E"
+
+[terminal]
+bg = "#081115"
+fg = "#B7C5C7"
+ansi = ["#0C1318", "#AD704E", "#66897B", "#79A7B2", "#AD8456", "#536F77", "#8A8769", "#889AA0", "#56696F", "#B99078", "#86A298", "#93B8C0", "#B99E7E", "#788F96", "#A0A08B", "#B7C5C7"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

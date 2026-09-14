@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/carbon.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "Carbon Optics"
+
+[palette]
+floor = "#050607"
+surface = "#121516"
+header = "#080A0B"
+raised = "#191C1D"
+border = "#454B48"
+blank = "#0B0D0E"
+selection = "#2D2E28"
+island_rule = "#81785D"
+fg = "#F2F3EF"
+fg_dim = "#D9DDD9"
+fg_muted = "#AFB4B0"
+fg_subtle = "#737A76"
+bevel_top = "#2D2E2F"
+bevel_left = "#1C1C1D"
+bevel_right = "#040505"
+bevel_bottom = "#030304"
+ember = "#C7B98B"
+ember_dim = "#81785D"
+ember_deep = "#81785D"
+status_bg = "#07090A"
+status_fg = "#F2F3EF"
+status_muted = "#AFB4B0"
+status_idle = "#737A76"
+
+[palette.sage]
+key = "#819B85"
+tint = "#080A0B"
+raised = "#191C1D"
+border = "#292D2B"
+fg = "#F2F3EF"
+fg_dim = "#AFB4B0"
+fg_muted = "#737A76"
+
+[palette.cinnabar]
+key = "#BD7770"
+tint = "#080A0B"
+raised = "#191C1D"
+border = "#292D2B"
+fg = "#F2F3EF"
+fg_dim = "#AFB4B0"
+fg_muted = "#737A76"
+
+[palette.syntax]
+slate = "#C7B98B"
+sage = "#8EA4B8"
+sand = "#B58B70"
+moss = "#A693AD"
+ash = "#91AA98"
+dusk = "#B99A7B"
+smoke = "#77807C"
+fen = "#819B85"
+cinnabar = "#BD7770"
+
+[terminal]
+bg = "#090C0D"
+fg = "#CBD0CC"
+ansi = ["#0B0D0E", "#BD7770", "#819B85", "#C7B98B", "#96AAA6", "#A693AD", "#8CA396", "#AFB4B0", "#737A76", "#CC9A94", "#A1B4A3", "#D3C9A7", "#B0BEBA", "#BBAEBF", "#A9B9AF", "#CBD0CC"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

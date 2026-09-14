@@ -1,0 +1,125 @@
+# PROPOSED NEW PROFILE INPUT. Not accepted by the existing theme loader.
+# Units: logical px, except suffix _mpx (1/1000px), _bp (1/10000), _ms.
+# Fixed font registry IDs here identify build-owned assets, NOT user paths.
+[profile]
+schema = 1
+id = "instrument-v1"
+default_theme = "carbon"
+
+[geometry]
+top_rail_h = 34
+status_h = 25
+outer_pad = 3
+divider_track = 7
+divider_rule = 2
+divider_rule_offset = 2
+divider_joint = 5
+divider_joint_offset = 1
+pane_frame = 1
+header_h = 32
+index_w = 32
+header_gap = 7
+action_w = 28
+action_h = 24
+focus_mark_w = 2
+focus_mark_inset_y = 6
+separator = 1
+corner_radius = 0
+brand_w = 212
+brand_mark = 13
+brand_gap = 9
+rail_pad_left = 10
+rail_pad_right = 8
+rail_button_h = 26
+rail_button_pad_x = 9
+rail_actions_gap = 2
+footer_pad_x = 10
+theme_menu_w = 286
+theme_menu_pad = 5
+theme_menu_offset_y = 5
+theme_heading_h = 27
+theme_group_h = 21
+theme_option_h = 52
+help_max_w = 540
+help_side_clearance = 16
+breakpoint_w = 820
+narrow_workspace_min_w = 840
+
+[type]
+sans_regular = "plex-sans-400"
+sans_medium = "plex-sans-500"
+sans_semibold = "plex-sans-600"
+mono_regular = "plex-mono-400"
+mono_medium = "plex-mono-500"
+body_mpx = 15000
+body_line_bp = 16200
+header_title_mpx = 13000
+metadata_mpx = 10000
+terminal_mpx = 12000
+terminal_line_bp = 16000
+code_mpx = 12000
+code_line_bp = 16500
+h1_min_mpx = 23000
+h1_viewport_bp = 240
+h1_max_mpx = 34000
+h1_line_bp = 11200
+h2_mpx = 17000
+h2_line_bp = 13000
+inline_code_bp = 8600
+
+[composition]
+body_top_min = 18
+body_top_viewport_bp = 220
+body_top_max = 34
+body_side_min = 20
+body_side_viewport_bp = 300
+body_side_max = 48
+body_bottom = 50
+content_max_w = 720
+path_margin_bottom = 28
+pre_pad_y = 15
+pre_pad_x = 17
+pre_margin_y = 18
+pre_rule = 2
+terminal_pad_top = 14
+terminal_pad_x = 16
+terminal_pad_bottom = 36
+
+[behavior]
+ratio_min_bp = 2200
+ratio_max_bp = 7800
+ratio_step_bp = 250
+root_ratio_bp = 5150
+right_ratio_bp = 4900
+new_split_ratio_bp = 5000
+pane_min_w = 260
+body_min_h = 54
+focus_halfplane_cutoff = 5
+escape_resize = "stop_at_current"
+default_terminal_view = "mono"
+prompt = "λ"
+
+[motion]
+tile_ms = 180
+hover_ms = 120
+body_opacity_ms = 100
+body_delay_ms = 70
+split_flash_ms = 250
+status_ms = 1800
+cursor_ms = 1100
+
+[effects]
+expanded_overlay_bp = 150
+focus_inset_overlay_bp = 300
+selection_overlay_bp = 1500
+drag_glow_rgb = "#D59A42"
+drag_glow_alpha_bp = 2500
+drag_glow_blur = 10
+split_flash_rgb = "#D59A42"
+split_flash_alpha_bp = 400
+status_glow_rgb = "#70A17C"
+status_glow_alpha_bp = 2500
+status_glow_blur = 8
+backdrop_rgb = "#030404"
+backdrop_alpha_bp = 7200
+backdrop_blur = 3
