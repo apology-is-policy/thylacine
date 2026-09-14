@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**443 owned · 76 unowned · 519 files (85% owned) · ~23725 unswept lines.**
+**443 owned · 76 unowned · 519 files (85% owned) · ~23801 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~32280 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/nocturned | 0 | 3 | 3418 |
+| usr/nocturned | 0 | 3 | 3494 |
 | usr/pouch-hello | 0 | 22 | 3384 |
 | usr/haul | 0 | 5 | 2506 |
 | usr/ports | 14 | 9 | 2199 |
@@ -127,18 +127,18 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32280 lin
 | file | lines |
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
-| usr/nocturned/src/server.rs | 1964 |
+| usr/nocturned/src/server.rs | 1976 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/nocturned/src/snd.rs | 1086 |
+| usr/nocturned/src/snd.rs | 1076 |
 | usr/haul/src/main.rs | 1074 |
 | usr/quarry/src/main.rs | 1033 |
 | usr/haul/src/npxf.rs | 1005 |
 | usr/lib/libhalcyon/src/toml.rs | 629 |
 | usr/imperium/src/main.rs | 591 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
+| usr/nocturned/src/main.rs | 442 |
 | usr/halcyond/src/outline.rs | 432 |
 | kernel/include/thylacine/errno.h | 388 |
-| usr/nocturned/src/main.rs | 368 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/lib/libhalcyon/src/scale.rs | 302 |

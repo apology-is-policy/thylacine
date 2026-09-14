@@ -3,8 +3,9 @@
 //
 // Warden-bound (`virtio-pci:25`, persistent): probe brings the playback stream
 // up over the modern-PCI transport (snd.rs); serve posts /srv/nocturne (joey
-// mounts it at /dev/nocturne) and runs ONE poll loop over the listener, the 9P
-// connections and the device IRQ. The tree at N-1 is the heritage floor --
+// mounts it at /dev/nocturne) and splits into three threads: a dedicated IRQ
+// waiter, the audio cycle (parks on `wake`), and the control thread polling the
+// listener + 9P connections. The tree at N-1 is the heritage floor --
 // `audio` (write S16LE stereo 48 kHz to play; Plan 9's /dev/audio shape),
 // `info` (the audiostat words + the driver counters), `ctl` -- so `bind
 // /dev/nocturne/audio /dev/audio` gives any namespace a 9front-shaped device.
@@ -41,6 +42,7 @@ use alloc::vec::Vec;
 use libdriver::driver::{run, Driver, DriverVa};
 use libdriver::resource::BoundResources;
 use libdriver::Error;
+use libthyla_rs::hardware::Irq;
 use libthyla_rs::io::Write;
 use libthyla_rs::thread;
 use libthyla_rs::{
@@ -55,13 +57,13 @@ use snd::VirtioSnd;
 /// box must not pay it forever. ~0.5 s covers a writer's inter-chunk gap.
 const IDLE_STOP_PERIODS: u64 = 48;
 
-/// The backstop timeout (ms), used two ways since the N-2c split. In the CYCLE
-/// thread it bounds how long a STOPPED stream parks before re-checking for work;
-/// a byte write wakes it sooner via the control thread's same-Proc poke, but a
-/// ring producer in ANOTHER Proc cannot poke (shared memory, no fd, no
-/// cross-Proc torpor -- N-2b-2b), so this is that ring's start latency. In the
-/// running cycle it is a device-IRQ backstop. In the CONTROL thread it is the
-/// idle poll interval when no write is parked.
+/// The backstop timeout (ms). In the CYCLE thread it bounds every park on
+/// `wake` (running OR stopped): the IRQ thread pokes each device period and the
+/// control thread pokes on new work, so the backstop only bites when neither
+/// comes -- a wedged device, or a cross-Proc ring producer that cannot poke
+/// (shared memory, no fd, no cross-Proc torpor -- N-2b-2b), for which this is
+/// the start/reap latency. In the CONTROL thread it is the idle poll interval
+/// when no write is parked.
 const IDLE_POLL_MS: i32 = 100;
 
 /// The CONTROL thread's poll timeout (ms) while any connection has a parked
@@ -77,8 +79,14 @@ const PARKED_RETRY_MS: i32 = 10;
 /// float32 buffers (~8 KiB) plus frames.
 const CYCLE_STACK: u64 = 128 * 1024;
 
+/// The IRQ thread's stack. It only loops `irq.wait()` + `poke_cycle()` (two
+/// syscalls, no on-stack buffers -- `say!` allocates on the heap), so a modest
+/// page-aligned burrow is ample; its top is 16-aligned for spawn_raw.
+const IRQ_STACK: u64 = 32 * 1024;
+
 struct Nocturned {
     snd: VirtioSnd,
+    irq: Irq,
 }
 
 /// The cycle thread's context, leaked to 'static and handed to `cycle_entry`
@@ -86,6 +94,16 @@ struct Nocturned {
 /// threads share.
 struct CycleCtx {
     snd: VirtioSnd,
+    sh: &'static Shared,
+}
+
+/// The IRQ thread's context (spawn_raw's one u64 arg). It owns the claimed `Irq`
+/// -- the device's period-completion line -- and blocks on it so the cycle
+/// thread never waits on the (untrusted) device directly (I-46 no-stall): every
+/// dispatch pokes the cycle's `wake` word, which the cycle parks on with a
+/// bounded backstop.
+struct IrqCtx {
+    irq: Irq,
     sh: &'static Shared,
 }
 
@@ -99,8 +117,8 @@ impl Driver for Nocturned {
             res.dma_max
         );
         let mut va = DriverVa::new();
-        let snd = VirtioSnd::open(res, &mut va)?;
-        Ok(Nocturned { snd })
+        let (snd, irq) = VirtioSnd::open(res, &mut va)?;
+        Ok(Nocturned { snd, irq })
     }
 
     fn serve(self, _res: &BoundResources) -> Result<(), Error> {
@@ -133,8 +151,35 @@ impl Driver for Nocturned {
         // immediately, no first-cycle race (N-3c-2).
         let sh: &'static Shared = Box::leak(Box::new(Shared::new(self.snd.has_capture())));
 
+        // Spawn the IRQ thread first: it owns the claimed Irq and blocks on the
+        // device's period-completion line (a KOBJ_IRQ has no poll-readiness arm,
+        // so it MUST be blocked on, never polled), poking the cycle's `wake` word
+        // on every dispatch. Isolating the device-wait here keeps the cycle
+        // thread off the (untrusted) device entirely -- it parks on `wake` with a
+        // bounded backstop, so a wedged device stalls only this thread (I-46).
+        let irq_ctx: &'static IrqCtx = Box::leak(Box::new(IrqCtx { irq: self.irq, sh }));
+        let irq_stack = unsafe { t_burrow_attach(IRQ_STACK) };
+        if irq_stack < 0 {
+            say!("nocturned: irq-thread stack attach failed");
+            return Err(Error::Hardware);
+        }
+        let irq_sp = (irq_stack as u64) + IRQ_STACK;
+        if unsafe {
+            thread::spawn_raw(
+                irq_entry as *const () as u64,
+                irq_sp,
+                irq_ctx as *const IrqCtx as u64,
+                0,
+            )
+        }
+        .is_err()
+        {
+            say!("nocturned: irq-thread spawn failed");
+            return Err(Error::Hardware);
+        }
+
         // Spawn the CYCLE thread: it owns the device and runs the audio clock
-        // (the IRQ-driven pump + float32 mix), and never touches 9P. This
+        // (the IRQ-poked pump + float32 mix), and never touches 9P. This
         // (original) thread becomes the CONTROL thread serving /srv/nocturne.
         // They meet only at `sh`'s try-locked graph.
         let ctx: &'static mut CycleCtx = Box::leak(Box::new(CycleCtx { snd: self.snd, sh }));
@@ -175,19 +220,55 @@ extern "C" fn cycle_entry(arg: u64) -> ! {
     cycle_run(&mut ctx.snd, ctx.sh)
 }
 
+/// The IRQ thread entry (spawn_raw ABI: one u64 arg = the leaked IrqCtx). Blocks
+/// on the device period-completion IRQ and pokes the cycle thread on each. A
+/// KOBJ_IRQ handle has no poll-readiness arm (kernel poll returns POLLNVAL), so
+/// this MUST block on `Irq::wait` (t_irq_wait), never poll -- the `impl AsFd for
+/// Irq` that let it be polled was removed to make that misuse a compile error.
+extern "C" fn irq_entry(arg: u64) -> ! {
+    // SAFETY: `arg` is the address of the IrqCtx leaked in serve(); it lives for
+    // the Proc's life and only this thread touches it (shared &, never aliased mut).
+    let ctx: &IrqCtx = unsafe { &*(arg as *const IrqCtx) };
+    loop {
+        match ctx.irq.wait() {
+            // wait() blocks in-kernel until >=1 IRQ is pending, then reads-and-
+            // clears the counter; poke the cycle so it pumps this period promptly.
+            Ok(_) => ctx.sh.poke_cycle(),
+            // Err is effectively unreachable: a death-wake returns Ok(0) (the
+            // kernel's kobj_irq_wait yields 0 on interrupt) and the thread is
+            // then terminated at the syscall tail's die-check; the only Err
+            // paths are a second waiter (KOBJ_IRQ_WAIT_BUSY -- there is exactly
+            // one) or a closed handle (the IrqCtx is leaked, never dropped).
+            // Kept as a defensive backstop: exit_self (not driver-terminate) so
+            // that if a future change ever made it reachable it stops THIS
+            // thread cleanly -- no busy-spin, no restart loop. Not the last
+            // thread, so the Proc lives; the cycle keeps its 100ms backstop.
+            Err(_) => {
+                say!("nocturned: irq-thread wait failed (unexpected); cycle keeps its backstop");
+                thread::exit_self();
+            }
+        }
+    }
+}
+
 /// The audio clock (D-1c). Runs one iteration per device period: try_lock the
 /// graph, pump the device (reap completions + refill each freed slot with a
 /// freshly-mixed period), decide start/stop, publish stats, then wait for the
 /// next period IRQ. A try_lock miss (the control thread is mid-edit) replays the
 /// last mixed period so the device never underruns -- "run last cycle's plan".
 fn cycle_run(snd: &mut VirtioSnd, sh: &'static Shared) -> ! {
-    let irq_fd = snd.irq_fd();
     let mut idle_periods: u64 = 0;
     // The last period we mixed; replayed on a try_lock miss so a brief control
     // edit never starves the device. Voices do not advance on a replay -- they
     // advance next period -- so no data is lost; at most one period repeats.
     let mut last_period = [0u8; snd::PERIOD_BYTES];
     loop {
+        // Register-then-check (F1): snapshot `wake` BEFORE the pump reads the
+        // used ring, so a poke landing after the pump but before we park is not
+        // absorbed. The IRQ line is edge-triggered and only the cycle re-arms it
+        // (by reading the ISR in pump), so an absorbed poke would strand every
+        // later completion until the 100ms backstop -- an audible dropout.
+        let seen = sh.cycle_seen();
         match sh.graph.try_lock() {
             Some(mut g) => {
                 if snd.started() {
@@ -258,26 +339,19 @@ fn cycle_run(snd: &mut VirtioSnd, sh: &'static Shared) -> ! {
             }
         }
 
-        // Wait for the next wake.
-        if snd.started() || snd.capturing() {
-            // Running (playback OR capture): the device period IRQ, with a bounded
-            // backstop against a device that stops interrupting (the pumps reap
-            // opportunistically). One INTx line serves both the txq and rxq.
-            let mut pfd = [TPollFd {
-                fd: irq_fd,
-                events: T_POLLIN,
-                revents: 0,
-            }];
-            let _ = unsafe { t_poll(pfd.as_mut_ptr(), 1, IDLE_POLL_MS) };
-            if pfd[0].revents & T_POLLIN != 0 {
-                let _ = snd.irq_wait();
-            }
-        } else {
-            // Stopped: no IRQ. Park on the control thread's poke (a byte write
-            // made a voice playable) with a bounded backstop -- a cross-Proc ring
-            // producer cannot poke (N-2b-2b), so the backstop starts it.
-            sh.cycle_park(Duration::from_millis(IDLE_POLL_MS as u64));
-        }
+        // Wait for the next wake -- ALWAYS park on `wake`, NEVER on the device.
+        // The cycle thread must not wait on the (untrusted) device directly
+        // (I-46 no-stall): a KOBJ_IRQ has no poll-readiness arm, and the old
+        // poll(irq_fd) returned POLLNVAL instantly -> a busy-spin that starved
+        // boot-completion under -smp8. Instead the dedicated IRQ thread pokes
+        // `wake` on every device period (running: playback OR capture; one INTx
+        // line serves txq + rxq), and the control thread pokes it when a byte
+        // write makes a voice playable. A cross-Proc ring producer cannot poke
+        // (shared memory, no fd -- N-2b-2b), so the bounded backstop covers both
+        // its start latency and a wedged device -- the pumps reap opportunistically
+        // on whichever wake comes first. Park on the pre-pump `seen` so a poke
+        // during this iteration is caught, not lost (register-then-check).
+        sh.cycle_park_since(seen, Duration::from_millis(IDLE_POLL_MS as u64));
     }
 }
 

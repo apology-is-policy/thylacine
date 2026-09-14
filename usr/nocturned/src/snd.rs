@@ -168,7 +168,6 @@ pub struct Stats {
 
 pub struct VirtioSnd {
     _pci: PciDev,
-    irq: Irq,
     pool: Dma,
     common_va: u64,
     isr_va: u64,
@@ -201,7 +200,11 @@ impl VirtioSnd {
     /// TX queues, and negotiate the playback stream (PCM_INFO -> SET_PARAMS ->
     /// PREPARE). `START` is deferred to `start()` so the stream begins with real
     /// data queued.
-    pub fn open(res: &BoundResources, va: &mut DriverVa) -> Result<Self, Error> {
+    ///
+    /// Returns the device AND its claimed IRQ separately: the IRQ is handed to a
+    /// dedicated waiter thread (a KOBJ_IRQ has no poll-readiness arm, so it must
+    /// be blocked on, never polled), leaving `VirtioSnd` free of the device line.
+    pub fn open(res: &BoundResources, va: &mut DriverVa) -> Result<(Self, Irq), Error> {
         let pci = unsafe { PciDev::claim(VIRTIO_DEVICE_ID_SND, BAR_WINDOW_VA) }.map_err(|e| {
             say!("nocturned: virtio-snd claim failed: {:?}", e);
             Error::Hardware
@@ -363,7 +366,6 @@ impl VirtioSnd {
 
         let mut snd = VirtioSnd {
             _pci: pci,
-            irq,
             pool,
             common_va,
             isr_va,
@@ -391,13 +393,7 @@ impl VirtioSnd {
             snd.has_capture = true;
             say!("nocturned: capture ready (D_INPUT s16c2r{}); source available", RATE_HZ);
         }
-        Ok(snd)
-    }
-
-    /// The GIC INTID this driver waits on (the poll-set fd is `irq_fd`).
-    pub fn irq_fd(&self) -> i32 {
-        use libthyla_rs::poll::AsFd;
-        self.irq.as_raw_fd()
+        Ok((snd, irq))
     }
 
     fn pool_va(&self) -> u64 {
@@ -725,12 +721,6 @@ impl VirtioSnd {
 
     pub fn started(&self) -> bool {
         self.started
-    }
-
-    /// Consume the IRQ's pending count. Only called when the poll set reported
-    /// the IRQ fd readable, so this never blocks the serve loop.
-    pub fn irq_wait(&self) -> Result<u32, ()> {
-        self.irq.wait().map_err(|_| ())
     }
 
     /// STOP + RELEASE the stream after an idle stretch and reap the flushed

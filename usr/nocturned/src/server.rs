@@ -340,12 +340,12 @@ pub struct Graph {
 /// brief edits, never across a 9P reply.
 pub struct Shared {
     pub graph: Mutex<Graph>,
-    // The cycle thread parks on this word when the stream is STOPPED (there is
-    // no device IRQ to wake it then); the control thread bumps it + wakes when a
-    // byte write makes a voice playable, so a stopped stream starts promptly
-    // instead of waiting the backstop. A ring producer in ANOTHER Proc cannot
-    // poke through this same-Proc word -- that cross-Proc wake stays N-2b-2b; a
-    // bounded backstop in the park covers it.
+    // The cycle thread ALWAYS parks on this word between iterations (register-
+    // then-check: cycle_seen() before the pump, cycle_park_since() after). Two
+    // pokers bump it: the dedicated IRQ thread on every device period, and the
+    // control thread when a byte write makes a voice playable. A ring producer
+    // in ANOTHER Proc cannot poke through this same-Proc word (that cross-Proc
+    // wake stays N-2b-2b); a bounded backstop in the park covers it.
     wake: AtomicU32,
 }
 
@@ -357,18 +357,30 @@ impl Shared {
         }
     }
 
-    /// Wake a cycle thread parked on a stopped stream. Cheap no-op when the
-    /// cycle is running (it waits on the device IRQ, not this word).
+    /// Bump `wake` and wake the single parked cycle thread. Called by the IRQ
+    /// thread on every device period AND by the control thread on new playable
+    /// work. A bump with the cycle mid-iteration is not lost: the cycle's
+    /// pre-work cycle_seen() snapshot makes its next park return at once.
     pub fn poke_cycle(&self) {
         self.wake.fetch_add(1, Ordering::Release);
         let _ = torpor::wake_one(&self.wake);
     }
 
-    /// The cycle thread's stopped-state park: sleep until a poke or `timeout`.
-    /// Register-then-observe on `wake` closes the poke-vs-park race (no lost
-    /// start).
-    pub fn cycle_park(&self, timeout: Duration) {
-        let seen = self.wake.load(Ordering::Acquire);
+    /// Snapshot `wake` BEFORE the cycle pumps. Paired with cycle_park_since()
+    /// AFTER the pump, this is register-then-check: a poke landing during the
+    /// pump moves `wake` off the snapshot, so the park returns at once instead
+    /// of absorbing it. Absorbing it would STRAND the completion -- the IRQ line
+    /// is edge-triggered and virtio INTx stays asserted until the cycle reads
+    /// the ISR, so a sleeping cycle sees no further edge and drains to the
+    /// backstop (a dropout).
+    pub fn cycle_seen(&self) -> u32 {
+        self.wake.load(Ordering::Acquire)
+    }
+
+    /// Park until `wake` moves off `seen` (a poke), `timeout` elapses, or a
+    /// spurious wake. `seen` MUST come from cycle_seen() read BEFORE the work
+    /// this park covers, or a poke during that work is lost.
+    pub fn cycle_park_since(&self, seen: u32, timeout: Duration) {
         let _ = torpor::wait(&self.wake, seen, Some(timeout));
     }
 }

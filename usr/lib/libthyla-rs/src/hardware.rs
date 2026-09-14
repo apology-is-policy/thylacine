@@ -72,7 +72,6 @@ use core::sync::atomic::{compiler_fence, Ordering};
 
 use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
-use crate::poll::AsFd;
 use crate::{
     t_burrow_from_hostmem, t_dma_create, t_dma_map, t_irq_create, t_irq_wait, t_mmio_create,
     t_mmio_map, t_pci_claim, t_pci_info, t_pci_map_bar, TPciInfo, T_PROT_READ, T_PROT_WRITE,
@@ -367,9 +366,11 @@ impl Mmio {
 /// A claimed IRQ line. Created by [`Irq::new`]; the kernel forwards
 /// matching GIC dispatches to the handle's per-Proc pending counter.
 ///
-/// Block on [`Irq::wait`] to consume one or more pending IRQs.
-///
-/// Composes with `t::poll::PollSet` via the [`AsFd`] impl.
+/// Block on [`Irq::wait`] to consume one or more pending IRQs. An `Irq` is
+/// deliberately NOT pollable: the kernel `poll(2)` has no KOBJ_IRQ readiness
+/// arm (it returns POLLNVAL), so there is no `AsFd` impl and passing an `Irq`
+/// to a `PollSet` is a compile error. A caller that wants to multiplex the IRQ
+/// against fds runs `wait()` on a dedicated thread and signals its poll loop.
 ///
 /// Non-transferable per invariant I-5.
 pub struct Irq {
@@ -418,16 +419,6 @@ impl Irq {
             return Err(hw_error(rc));
         }
         Ok(rc as u32)
-    }
-}
-
-impl AsFd for Irq {
-    /// Returns the kernel handle index. Suitable for direct use with
-    /// `t::poll::PollSet` -- when the IRQ has a pending count >= 1,
-    /// the poll surface reports the fd as readable.
-    #[inline]
-    fn as_raw_fd(&self) -> i32 {
-        self.handle.raw()
     }
 }
 
