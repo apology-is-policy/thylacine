@@ -118,6 +118,20 @@ Proc issued the call — and nothing needs it, since a call is stuck only while 
 calls is argued at `finish_down` in `usr/haul/src/main.rs`; outside them, the
 main thread's loops watch for either pump stopping.
 
+**The command form refuses to start without stdio.** "`s2c_wr` has one user"
+depends on fd NUMBERS, not roles. The kernel hands out the lowest free fd, so
+a haul started with slots 0-2 empty -- as a launcher that passes no stdio would
+start it -- puts its connection's ctl, data and ready fds, then the pipe ends,
+into those slots. A spawned command inherits exactly slots 0-2 as its stdio, so
+it would inherit the connection: its output would go into the channel or the
+kernel's reply pipe, and a child holding `s2c_wr` would defeat the down pump's
+EOF. So `run()` checks fds 0-2 before it opens anything, and refuses the command
+form if any is closed. The park form spawns nothing and is exempt, which matters
+because a daemon-style launcher -- the kind that produces empty stdio -- would run
+the park form. This was found in the self-audit of the round-4 fix. The round-5
+review did not raise it: its "the child never inherits `s2c_wr`" derived the
+child's fds from their roles and never asked what the numbers were.
+
 ### 2.2 Framing
 
 The pump parses the 9P `size[4]` prefix even on the plain path, where a blind

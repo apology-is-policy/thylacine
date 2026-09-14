@@ -308,12 +308,63 @@ released within minutes, and the lease went clean. The board is what a fresh
 context trusts, so an agreement that lives only in a call transcript is not a
 lease.
 
+### Sep 14 -- round 5, and the review that re-derived the author's blind spot
+
+**The first review spawn died at step 1** when the session's login expired. That is not a model event, so it was re-spawned on Fable.
+
+**The re-spawn came back clean**: 0 P0 / 0 P1 / 0 P2 / 2 P3. Both P3s are closed without a change: one is cosmetic, the other is the inherited back-pressure gap. Every citation I spot-checked held.
+
+**Its model record was wrong, the third time in this arc.** Its MODEL(end) said Fable. Its transcript shows:
+
+- Fable 5.1 made 41 of the 47 tool calls.
+- At line 141 the fallback lands as a CONTENT BLOCK inside an assistant message: `{"type":"fallback","from":...,"to":...}`.
+- `claude-opus-4-8` made the last six calls and wrote the whole report.
+
+My first check parsed the JSON, looked for a top-level `type == "fallback"`, found none, and would have credited the round to Fable. A raw grep of the string disagreed, and a per-line tally of the `"model"` field located the switch. So the check needs both the grep and the tally, and the parse is the part that lied.
+
+**The finding that mattered was the one it did not make.** My parallel self-audit found SA-1: haul's command form assumed fds 0-2 are open.
+
+- The kernel hands out the lowest free fd.
+- joey starts some programs with no stdio.
+- So a haul launched that way puts its connection's own fds in slots 0-2, and the command it runs inherits the connection.
+
+The review's withdrawal read "the child never inherits `s2c_wr`". It derived that from the child's three stdio ROLES and never asked what the NUMBERS were -- the same step my commit doc had skipped. The parallel self-audit exists for this reason: the prosecutor re-derived the author's claim and reached the author's conclusion, blind spot included.
+
+**Two more things fell out of chasing it:**
+
+- **The first scoping of SA-1 was too narrow.** I scoped it to the pipe ends. Walking fd numbers showed the TCP fds are opened first and take the empty slots before the pipes do, so the check belongs at the top of `run()`, before anything is opened.
+- **Refusing everywhere would have been wrong.** The park form spawns nothing, and a daemon-style launcher -- the one that produces empty stdio -- runs the park form. So only the command form is refused.
+
+**A kernel item came in from the other track.** aux's review of their nocturned fix found a lost-wakeup window: an IRQ thread that waits while a different thread reads the ISR re-blocks while the line is still high. Following it down:
+
+- `irqfwd.c` forces every claimed SPI to edge, on an assumption written for virtio-MMIO, with level support deferred "when level-triggered userspace IRQs become a real use case".
+- virtio-PCI INTx is level, and userspace PCI drivers now exist. The deferral's trigger fired and nobody flipped it.
+- Claims are exclusive per INTID, and 6-7 PCI functions share QEMU virt's 4 INTx SPIs.
+
+aux assigned it to the kernel track and main took it (`bug_irqfwd_forces_edge_on_level_intx`). The heritage fix, mask-on-fire plus ack, is an IRQ ABI change and goes to the operator as a design fork.
+
+**Measured SA-1, both directions.** Same `--config ci` profile, and the new launcher and scenario on both sides. On `83ef2426`'s haul, the hang-up leg PASSES and the stdio leg FAILS. With the fix, both PASS and haul prints the refusal. Alongside: `test.sh` 1522/1522, and `haul-npxf` all five legs.
+
+**The pre-fix failure was not the one I predicted, and the difference is a fact about the harness.** I predicted `haul: connect`, because the peer had already exited. The measured line was `haul: attach (the server closed without replying)`: the guest's connect to a host port nothing listened on SUCCEEDED, and the attach read EOF. That is consistent with slirp completing the guest's TCP handshake before it learns the host refused.
+
+The leg still discriminates, because its hard-fail arm names both lines. But the scenario's own header claimed that "a connect that never reached the peer fails the leg at once", and under slirp it cannot. A dead peer and a hung-up peer print the same line, so the first leg's check on the peer's OWN log is the only thing that tells them apart. That check was load-bearing all along, and had been described as a sanity check.
+
+**Two false starts first, both from the instruments, not the code:**
+- The harness killed the first run for LOW MEMORY before it logged a line. The operator freed memory.
+- The second hung for 20 minutes on its first command: `thyla-pi.local` had stopped resolving, and the token `ssh` had no connect timeout. The signature is a log that stays EMPTY while no child process does any work. The run script now goes through `thyla-pi-cf`, with timeouts.
+
+**The IRQ measurement closed on the same boot.** `/hw/pci` from a login shell gave net 0x24, keyboard 0x25, tablet 0x26, gpu 0x23, rng 0x24, mouse 0x25 and the 9P function 0x26. That is exactly INTID = 35 + (slot mod 4): net/rng share 36, keyboard/mouse share 37, tablet/9P share 38, and the gpu is alone on 35. The derivation from one anchor point was right, and it is now a measurement rather than an inference.
+
 ### Owed at the end of the run
 
-- **The one review of the haul fix commit.** The operator folded round 4's
-  re-review into it, so it also re-covers what round 4 reviewed after its
-  fallback: the grammar, the netd/dev9p readiness triangle, `write_exact`, and
-  the KAT legs. Spawned on Fable, and its transcript checked for a fallback.
+- **ROUND 6, narrow, on Fable.** Round 5 -- the one review of `83ef2426` --
+  closed clean, but it fell back to Opus 4.8 before writing its report. So round
+  6 covers the SA-1 commit, plus a Fable re-derivation of round 5's
+  post-fallback surfaces: the KAT legs, the readiness triangle and
+  `write_exact`, and the pipe-note premise.
+- **The IRQ design fork, for the operator.** `irqfwd.c` forces edge on level
+  INTx, and the fix -- mask-on-fire plus ack -- is an ABI change. See
+  `bug_irqfwd_forces_edge_on_level_intx`.
 - **The standing back-pressure gap.** No test makes a TCP write return 0, so
   `write_exact`'s stall bound and its POLLOUT wait have still never executed.
 - **S1 [P3]**, deferred as documentation only: haul's pre-auth write bound
@@ -326,7 +377,7 @@ lease.
 - **Vault**: a haul dossier (call 0082), and the syscall-abi/vivarium dossier
   correction (call 0087).
 - **Closed this run**: the codeberg push (both mirrors at `48dc6115` on Sep 10),
-  and haul round 4's F1/F2/S3 (this commit).
+  haul round 4's F1/F2/S3 (`83ef2426`), and SA-1 (the commit after it).
 
 ---
 

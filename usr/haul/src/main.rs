@@ -371,8 +371,10 @@ fn finish_up() -> ! {
 /// kernel's read side" is refused: the up pump would be closing THIS pump's fd.
 /// `s2c_wr` has exactly one user, this thread -- the attach took its refs on the
 /// CLIENT ends, main never touches it, and a spawned command inherits only its
-/// stdio. After the close this thread exits without reading `ctx` again, so a
-/// recycled number is never used under its old meaning. STOPPED is set first,
+/// stdio, which cannot be this fd: `run` refuses the command form unless fds 0-2
+/// are already taken, so every fd haul opens lands above them. After the close
+/// this thread exits without reading `ctx` again, so a recycled number is never
+/// used under its old meaning. STOPPED is set first,
 /// so by the time the kernel can see the EOF, main's diagnosis names this side.
 ///
 /// The up pump's end, `c2s_rd`, is just as exclusive and still stays open.
@@ -856,6 +858,23 @@ fn npxf_handshake(fd: i64, ready: Ready, token: &[u8]) -> Result<npxf::Session, 
 
 fn run(argv: Args) -> Result<(), &'static str> {
     let mut args = parse_args(argv)?;
+
+    // THE COMMAND FORM REFUSES TO START WITHOUT STDIO, before it opens anything.
+    // The kernel hands out the LOWEST free fd, so with slots 0-2 empty the
+    // connection's own fds -- ctl, data, ready, and then the pipes -- would
+    // land in them, and the command inherits exactly slots 0-2 as its stdio
+    // (`Command::spawn`, `Stdio::Inherit`). Its output would go INTO the
+    // connection, or into the kernel's reply pipe, where it also defeats
+    // `finish_down`: that close would no longer drop the last reference.
+    // `fd_devclass` is None for a closed slot, and also for a non-Spoor handle
+    // there, which `Command::spawn` would refuse anyway.
+    //
+    // The park form spawns nothing, so empty stdio is harmless there -- and a
+    // daemon-style launcher, the one that produces it, runs the park form. So
+    // only the command form is refused.
+    if !args.cmd.is_empty() && (0..3).any(|fd| libthyla_rs::fd_devclass(fd).is_none()) {
+        return Err("the command form needs stdin, stdout and stderr open (the command would otherwise inherit the connection)");
+    }
 
     let (host, port) = haul::addr::split_dial(&args.addr)
         .ok_or("address needs a host and a port (host!port, or host:port)")?;
