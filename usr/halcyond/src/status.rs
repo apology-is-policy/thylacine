@@ -68,6 +68,12 @@ pub struct StatusModel {
     /// Hours and minutes (the wall clock's UTC; the RTC's own zone).
     pub hour: u8,
     pub minute: u8,
+    /// HALCYON-INSTRUMENT 8.2 / 14.3: a transient status message (text,
+    /// is-a-refusal) that REPLACES the condition slot while it lives --
+    /// `amber` for an action, `error` for a refusal such as `FINAL TILE IS
+    /// PROTECTED`; the live model returns when it expires (the bin's
+    /// timer, `StatusBar::notify`).
+    pub notice: Option<(String, bool)>,
 }
 
 impl StatusModel {
@@ -82,6 +88,7 @@ impl StatusModel {
             exit_code: None,
             hour: 0,
             minute: 0,
+            notice: None,
         }
     }
 }
@@ -232,19 +239,32 @@ pub fn status_list(
     slots.clock = (clock_x, crun.width);
 
     // The condition: the turnstile + its label in the key's ink, left of
-    // the clock; nothing (and no width) while idle.
-    let label = condition_label(m.condition, m.exit_code);
+    // the clock; nothing (and no width) while idle. A transient notice
+    // (8.2) takes the slot instead, uppercase, in the refusal or the action
+    // ink -- the same two keys the condition uses -- until it expires.
+    let (label, ink) = match &m.notice {
+        Some((text, refusal)) => (
+            text.to_uppercase(),
+            if *refusal { d.cinnabar.key } else { d.ember },
+        ),
+        None => (
+            condition_label(m.condition, m.exit_code),
+            condition_ink(d, m.condition),
+        ),
+    };
     let (cond_x, cond_w) = if label.is_empty() {
         (clock_x - gap, 0)
     } else {
         let mut text = String::new();
-        text.push(TURNSTILE);
-        text.push(' ');
+        if m.notice.is_none() {
+            text.push(TURNSTILE);
+            text.push(' ');
+        }
         text.push_str(&label);
         let run = shape(gs, px, &text);
         let x = clock_x - gap - run.width;
         if !run.refs.is_empty() && x > 0 {
-            cart.push_glyphs(gen, x, baseline, condition_ink(d, m.condition), &run.refs);
+            cart.push_glyphs(gen, x, baseline, ink, &run.refs);
         }
         (x, run.width)
     };
@@ -336,6 +356,7 @@ mod tests {
             exit_code: Some(0),
             hour: 14,
             minute: 22,
+            notice: None,
         }
     }
 
@@ -614,5 +635,35 @@ mod tests {
         let (_, s1) = status_list(&model(), 1280, 20, &sheet(), &mut gs);
         assert!(s.clock.1 > s1.clock.1 * 3 / 2, "the clock is wider at 2.0 ({} vs {})", s.clock.1, s1.clock.1);
         assert_eq!(s.cond.0 + s.cond.1 + 2 * GAP, s.clock.0, "the condition sits a doubled gap left of the clock");
+    }
+    /// HALCYON-INSTRUMENT 8.2: a transient notice takes the condition slot
+    /// -- uppercase, no turnstile, the refusal in the failure key and an
+    /// action in the accent -- and the label returns without it.
+    #[test]
+    fn a_notice_replaces_the_condition_label_in_its_ink() {
+        let mut gs = GlyphSource::new_vendored(64);
+        let inks = |c: &Cartoon| -> Vec<(u32, u32)> {
+            c.ops
+                .iter()
+                .filter_map(|op| match *op {
+                    Op::Glyphs { color, count, .. } => Some((color, count)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut m = model();
+        m.notice = Some((String::from("Final tile is protected"), true));
+        let (c, slots) = status_list(&m, 800, 20, &sheet(), &mut gs);
+        let runs = inks(&c);
+        let refusal = runs.iter().find(|r| r.0 == DAYLIGHT.cinnabar.key).expect("the refusal ink");
+        assert_eq!(refusal.1, "FINAL TILE IS PROTECTED".chars().count() as u32, "uppercase, no turnstile");
+        assert!(!runs.iter().any(|r| r.0 == DAYLIGHT.ember), "the ok label is replaced");
+        assert!(slots.cond.1 > 0);
+        m.notice = Some((String::from("Restarted"), false));
+        let (c, _) = status_list(&m, 800, 20, &sheet(), &mut gs);
+        assert!(inks(&c).iter().any(|r| r.0 == DAYLIGHT.ember && r.1 == 9), "an action in the accent");
+        m.notice = None;
+        let (c, _) = status_list(&m, 800, 20, &sheet(), &mut gs);
+        assert!(inks(&c).iter().any(|r| r.0 == DAYLIGHT.ember && r.1 == 4), "the `\u{22a2} ok` label is back");
     }
 }

@@ -340,18 +340,107 @@ loud enough, twice. Gates: ls-ci PASS (29 s); ls-halcyon PASS (120 s);
 ls-gfx-compose PASS 73 s (the compose gate at 1.0 and 2.0 on the session image: both legacy tables measured unchanged); PASS 37 s (the carve read back through the compositor's files and pixels on the profile-lever image). Host: libhalcyon 94 -> 111,
 tapestryd 21 -> 26, halcyond 209, halcyon 21.
 
+### I-3: the stack and the headers -- a header is a pointer target, and what the golden said that the table did not
+
+**The measurement first, again.** The scripture's §6.4 table gives the
+header's regions and inks; the golden's `geometry-styles.json` (every
+element's box and computed style) plus the PNG's rows gave four facts the
+table does not state, and each became a rule: a collapsed header that is
+not its stack's last paints a 1 px `separator` as its LAST row (row 69 at
+1440 × 900; the last tile's header has none -- row 870 is `header`); an
+open tile's box ends with a `separator` row after its body (row 806 in
+the first pane, 377 in the second) -- the very row I-2's `stack_alloc`
+reserved and nobody painted (it showed `desktop` through the frame); the
+index box's right rule is column 31 on every header; and the action box
+is RESERVED whether or not the `×` shows (every header's metadata ends
+35 px from the right edge, collapsed ones included). The state captures
+pinned the rest: `hover-collapsed` paints `hover` (25,28,29) under the
+header, lights the name `text` and shows the `×`; `hover-expanded`
+changes nothing; `hover-close` turns the `×` `error`. And the derived
+opaque: `text` at 1.5 % over `open` through the executor's own lerp
+(`cartoon::blend`, a/256 per lane) reproduces Carbon's stated `#151819`
+exactly -- so `instrument::Derived` uses that arithmetic and the test pins
+the kit's figure, not a value computed by the function under test (the
+other three derived colours are worked by hand in the test; my first two
+hand sums were wrong and the test said so).
+
+**Two carves, one tree (continued).** The compositor's I-3 is small and
+sharp: `chrome_at` finds the chrome surface whose placement contains the
+point and `ptr_target` prefers it to the content hit on every ungrabbed
+pointer path; a new `TEV_PTR_LEAVE` (11) goes to a chrome surface the
+routing leaves, so a hovered header can un-hover when the pointer crosses
+onto a track or the desktop -- nothing routes a MOVE back to it from
+there. The compositor moves no focus on a chrome press (`find_hosting` is
+None for chrome), so the OWNER decides, and every decision is a pane verb
+the compositor judges per write under the owner's actor: a header
+confers nothing its owner lacks. A lone EMPTY leaf is carved as §14.6's
+placard -- no header row, its `tagbar` the whole interior, its body ZERO
+-- and rested on `pane`; the existing I-2 test that called an empty lone
+leaf "a lone tile" was hosting nothing, and now hosts a surface to keep
+its claim.
+
+**The defect the successor rule exposed.** `close_inner` clamped `active`
+to the last index but never shifted it: [A, B, C*, D] with A closed left
+`active` at 2, which now named D. Legacy could reach it only through a
+`close <id>` on a non-focused tab; a collapsed header with its own `×`
+puts it one click away. The test walks the four cases (before the open
+one, the open one, the open last one, after the open one); the fix is
+`if at < *active { *active -= 1 }` before the clamp.
+
+**Decisions taken here, recorded as such.** Under Instrument an ended
+tile is RETAINED (§14.6: `EXIT n` in the header, `Process ended · exit n`
+under the body, no caret) where legacy closes the leaf (the tmux rule,
+byte for byte as before). The scripture's §9.3 gives Super+Q "the §6.5
+protections"; read literally, a pane holding a retained tile could never
+be removed (`×` refuses the final tile, `exit` retains it), so Super+Q
+stays the unprotected STRUCTURAL close and the parenthetical is read as
+§9.5's dirty-document ask (I-7's dialog) -- a delta for the operator,
+written into §6.5's as-built note. The mono runs of the header (index,
+metadata) use the sheet's island size: Cornucopia's cell floor is a 6 px
+advance and the type map's 10 px is I-5's; the Sans name and `×` use the
+current face until Plex Sans 500 arrives with the type map.
+
+**What the scenario caught.** The I-3 legs on the lone console tile
+passed on the first attempt -- the compositor's routing line (`ptr btn
+272 1 -> chrome 1 at 1262,54`), halcyond's action line (`header 1 press
+Close { id: 1, count: 1 }`), the protection, the notice paint, the tile
+menu placed at the header's point and dismissed by Esc, the LEAVE. The
+one red leg was mine: I sampled the empty pane's `pane` ground from
+y = 100 and the placard's hint line reaches 105 -- 138 pixels of ink in
+381440, exactly the hint's lower rows. The band starts at 130 now.
+Gates (one image per lever): ls-halcyon-instrument PASS 53 s on the re-run
+(17 legs; the first run 3/3 red on the band, above); ls-ci PASS 29 s;
+ls-halcyon PASS 120 s; ls-gfx-compose PASS 73 s.
+
+**Owed from I-3.** A container TILE inside a stack (a split carved into a
+body slot) has a header rect and the compositor's resting fill but no
+chrome surface -- halcyond decorates leaves only, so a stack holding a
+split shows a blank header row for it. The session-path Instrument states
+(ended / disconnected / restart) have no E2E: the console image has no
+session tiles and the session image has no profile lever -- a fifth
+image (session + profile) belongs with I-4's rails, whose marks come from
+the session's status feed. The chrome-bind admission is judged at create
+only (audit row (c)): a session's placard surface on an empty leaf stays
+bound if a claim-less create from another principal fills that leaf.
+Host: libhalcyon 111 → 112, tapestryd 26 → 28, halcyond 209 → 218,
+halcyon 21.
+
 ### Owed at the end of the run
 
 - Round 2 INGESTED, section 13 RULED, the goldens CAPTURED (above): I-0
   is complete. Owed from it: the by-eye review of all 98 captures with
   the diff tool at I-9; the historical-mode run if Plex Mono ever
   matters; where the 1.0 GB run should live beyond this Mac.
-- I-1 LANDED (`457faee5`); I-2 LANDED (the geometry; above). Next I-3
-  (the stack and the headers), I-4 (the rails), then the first Fable
-  round over I-1..I-4. Owed from I-2: a vault dossier for
-  `libhalcyon::carve` beside the one owed for `libhalcyon::instrument`;
-  the audit row's (e) question (the focus frame of a leaf nested inside
-  a container tile) and (h) (the first carve after the renderer's push).
+- I-1 LANDED (`457faee5`); I-2 LANDED (`02d66910`); I-3 LANDED (the
+  stack and the headers; above). Next I-4 (the rails), then the first
+  Fable round over I-1..I-4 -- the operator's idea for it: spawn the
+  prosecutor as OPUS 5, the other family, since this run's author is
+  Fable. Owed from I-2: a vault dossier for `libhalcyon::carve` beside
+  the one owed for `libhalcyon::instrument`; the audit row's (e) and (h)
+  questions. Owed from I-3: the container-tile header, the session-path
+  Instrument E2E (a fifth image with I-4), the chrome-bind admission
+  question (row (c)), the Super+Q reading (a §9.3 delta for the
+  operator).
 - Unchanged from 46n: the IRQ fork, the back-pressure gap, S1 [P3], the ut
   `mount` one-liner, vault calls 0082 / 0087.
 

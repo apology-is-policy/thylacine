@@ -881,6 +881,12 @@ impl Transcript {
         &self.cwd
     }
 
+    /// HALCYON-INSTRUMENT 14.3: a command is running now -- the open block
+    /// carries a cmd mark and no exit yet (the prompt has not returned).
+    pub fn running(&self) -> bool {
+        self.open.cmd.is_some() && self.open.exit.is_none()
+    }
+
     /// H-3d: the command running now (the open output block's mark) or,
     /// between commands, the last one that ran.
     pub fn last_command(&self) -> Option<&str> {

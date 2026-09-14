@@ -37,7 +37,9 @@ use halcyond::layout::{
     cursor_pos, layout_block, layout_pending, render_block, sheet_for, LaidBlock, LayoutCache,
     Sheet,
 };
-use halcyond::menu::{build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run, Action, Menu};
+use halcyond::chrome::Described;
+use halcyond::menu::{build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run, tile_menu, Action, Menu};
+use crate::chromeset::ChromeAction;
 use halcyond::raster::GlyphSource;
 use halcyond::select::{FlatRow, Sel};
 use halcyond::transcript::Transcript;
@@ -430,7 +432,7 @@ pub extern "C" fn rs_main() -> i64 {
     // permanently -- on the very path that exists because the compositor
     // cannot read the file itself.
     session::push_theme(&ring, &bundle);
-    let mut sheet = sheet_for(&theme, bundle.profile, display.scale);
+    let mut sheet = sheet_for(&bundle, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     {
         let (cw, ch, _) = gs.mono_cell();
@@ -522,8 +524,7 @@ pub extern "C" fn rs_main() -> i64 {
                 if di.scale != sheet.scale {
                     let from = sheet.scale;
                     let gen = sheet.gen + 1;
-                    let t = sheet.theme;
-                    sheet = sheet_for(&t, sheet.profile, di.scale);
+                    sheet = sheet_for(&sheet.bundle(), di.scale);
                     sheet.gen = gen;
                     gs.set_scale(di.scale);
                     gs.set_smooth(sheet.smooth_mem);
@@ -786,23 +787,68 @@ pub extern "C" fn rs_main() -> i64 {
         // relayout; the pump is per pass (FRAME never queues, CONFIGURE
         // coalesces, so this is cheap when idle).
         if announced {
-            if chrome.pump() {
+            if chrome.pump(&sheet, &mut gs) {
                 relayout = true;
+            }
+            // HALCYON-INSTRUMENT 9.1 / 6.5 / 14.9: the header actions, each a
+            // pane verb on the console renderer's conn (the renderer acts
+            // anywhere -- the environment's authority). The console never
+            // spawns into an empty pane, so the placard offers no action.
+            for a in chrome.take_actions() {
+                match a {
+                    ChromeAction::Focus(id) => {
+                        if chromeset::write_file(troot, &alloc::format!("pane/{}/ctl", id), "focus") {
+                            relayout = true;
+                        }
+                    }
+                    ChromeAction::Close { id, count } => {
+                        if count <= 1 {
+                            say!("halcyond: final tile is protected (pane {})", id);
+                            status.notify("FINAL TILE IS PROTECTED", true);
+                        } else if chromeset::write_file(troot, &alloc::format!("pane/{}/ctl", id), "close") {
+                            relayout = true;
+                        }
+                    }
+                    ChromeAction::Menu { id, count, x, y } => {
+                        let name = if Some(id) == chrome.own_pane() {
+                            halcyond::chrome::console_name()
+                        } else {
+                            chromeset::read_file(troot, &alloc::format!("pane/{}/tag", id))
+                                .map(|s| alloc::string::String::from(s.trim()))
+                                .unwrap_or_default()
+                        };
+                        menus.open(tile_menu(id, &name, count, false), x, y, (x, y, 0, 0), &sheet, &mut gs);
+                    }
+                    ChromeAction::OpenShell(_) => {}
+                }
             }
             if t.cwd() != trail_painted {
                 relayout = true;
             }
             // The console tile's word on itself (HALCYON-VISUAL 4.1): its
             // program as the strip's name, its working directory as the
-            // trail. Captured by value: the reconcile borrows the chrome set.
+            // trail; under Instrument its command facts too (the header's
+            // metadata). Captured by value: the reconcile borrows the chrome
+            // set.
             let describe = {
                 let own = chrome.own_pane();
                 let cwd = alloc::string::String::from(t.cwd());
-                move |id: u32| (Some(id) == own).then(|| (halcyond::chrome::console_name(), cwd.clone()))
+                let running = t.running();
+                let last_exit = t.last_exit_code();
+                move |id: u32| {
+                    (Some(id) == own).then(|| Described {
+                        name: halcyond::chrome::console_name(),
+                        trail: cwd.clone(),
+                        fate: halcyond::chrome::Fate::Live,
+                        running,
+                        last_exit,
+                        dirty: false,
+                    })
+                }
             };
             if relayout {
                 relayout = false;
-                chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe);
+                chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe, false);
                 trail_painted = alloc::string::String::from(t.cwd());
             }
             // The status bar's mint retry, UNCONDITIONALLY (TY-6 F8; it
@@ -823,7 +869,7 @@ pub extern "C" fn rs_main() -> i64 {
                 let st = if code == 0 { "ok" } else { "err" };
                 pending_exit = None;
                 match surf.global_ctl(&alloc::format!("tag {} status {}", pane, st)) {
-                    Ok(()) => chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe),
+                    Ok(()) => chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe, false),
                     Err(e) => {
                         if !status_refusal_said {
                             status_refusal_said = true;
@@ -840,12 +886,14 @@ pub extern "C" fn rs_main() -> i64 {
             // minute -- and painted only on a change.
             status.ensure(&sheet);
             status.pump();
+            let notice = status.notice();
             let sm = statusset::model_from(
                 chrome.focused(),
                 chrome.own_pane(),
                 t.cwd(),
                 t.last_command(),
                 t.last_exit_code(),
+                notice,
             );
             status.refresh(&sm, &sheet, &mut gs);
         }
@@ -875,6 +923,34 @@ pub extern "C" fn rs_main() -> i64 {
                 feed_pending.extend_from_slice(cmd.as_bytes());
                 feed_pending.push(b'\n');
                 feed_drain(feed, &mut feed_pending, &mut feed_dropped, &mut feed_logged);
+            }
+            menuset::MenuEvent::Chosen(Action::Internal(act)) if act.starts_with("tile ") => {
+                // HALCYON-INSTRUMENT 14.9: the tile verb menu's choice --
+                // `tile close <id>` under the final-tile rule; a restart has
+                // no meaning for the console's own tile.
+                menus.close();
+                let mut it = act["tile ".len()..].split_ascii_whitespace();
+                match (it.next(), it.next().and_then(|v| v.parse::<u32>().ok())) {
+                    (Some("close"), Some(id)) => {
+                        let count = chromeset::read_file(troot, "layout")
+                            .map(|l| {
+                                halcyond::chrome::parse_tree(&l)
+                                    .iter()
+                                    .find(|x| x.leaf.id == id)
+                                    .map_or(1, |x| x.count)
+                            })
+                            .unwrap_or(1);
+                        if count <= 1 {
+                            say!("halcyond: final tile is protected (pane {})", id);
+                            status.notify("FINAL TILE IS PROTECTED", true);
+                        } else if chromeset::write_file(troot, &alloc::format!("pane/{}/ctl", id), "close") {
+                            relayout = true;
+                        }
+                    }
+                    (Some(verb), Some(id)) => say!("halcyond: tile {} {} is not available here", verb, id),
+                    _ => say!("halcyond: malformed tile action {}", act),
+                }
+                dirty = true;
             }
             menuset::MenuEvent::Chosen(Action::Internal(act)) => {
                 // THE GATE's lever (test builds only, the #880 strip class):
@@ -954,7 +1030,10 @@ pub extern "C" fn rs_main() -> i64 {
                             revents: 0,
                         },
                     ];
-                    if unsafe { t_poll(waitfds.as_mut_ptr(), 2, -1) } < 0 {
+                    // A transient status notice expires on the clock (8.2):
+                    // wake for it, so the live model returns.
+                    let timeout = status.notice_timeout_ms().unwrap_or(-1);
+                    if unsafe { t_poll(waitfds.as_mut_ptr(), 2, timeout) } < 0 {
                         say!("halcyond: unified poll failed (compositor gone); exiting");
                         return 1;
                     }

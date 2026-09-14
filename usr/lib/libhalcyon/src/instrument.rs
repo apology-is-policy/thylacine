@@ -679,6 +679,64 @@ pub struct Visual {
     pub theme: Theme,
     pub inst: InstrumentTheme,
     pub metrics: Metrics,
+    /// The derived opaques (7.3), computed once here so no painter blends
+    /// where the substrate is known.
+    pub derived: Derived,
+}
+
+/// HALCYON-INSTRUMENT 7.3, the derived opaques: colours the mockup states
+/// as an alpha over a KNOWN substrate, resolved once per theme so every
+/// painter fills them flat. The arithmetic is the executor's `blend`
+/// (cartoon: an 8-bit alpha over 256, per lane, truncating) -- the same
+/// lerp the transcript's antialiased edges take, so a header and a glyph on
+/// it agree on what 1.5 % of `text` over `open` is. Carbon's `open_header`
+/// is `#151819`, the kit's own figure (`carbon_derives_the_kits_opaques`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Derived {
+    /// The expanded tile's header ground: `text` at 1.5 % over `open`.
+    pub open_header: Argb,
+    /// The selection band: `amber` at 15 % over `open`.
+    pub selection: Argb,
+    /// The focused frame's 1 px inset over a collapsed header: `text` at
+    /// 3 % over `header`.
+    pub focus_inset_header: Argb,
+    /// The same inset over an open tile: `text` at 3 % over `open`.
+    pub focus_inset_open: Argb,
+}
+
+/// `fg` over `bg` at `a` / 256 -- the executor's lerp, lane by lane.
+/// (`cartoon::blend` is this exact function; it is repeated here rather
+/// than depended on so the theme library stays free of the painter's
+/// crate, and the test pins the two agree on the kit's figure.)
+pub const fn over(bg: Argb, fg: Argb, a: u8) -> Argb {
+    if a == 0 {
+        return bg;
+    }
+    if a == 255 {
+        return fg;
+    }
+    let a = a as u32;
+    let na = 256 - a;
+    let rb = (((fg & 0x00FF_00FF) * a + (bg & 0x00FF_00FF) * na) >> 8) & 0x00FF_00FF;
+    let g = (((fg & 0x0000_FF00) * a + (bg & 0x0000_FF00) * na) >> 8) & 0x0000_FF00;
+    0xFF00_0000 | rb | g
+}
+
+/// The alpha byte for a percentage of 256 (round half up): 1.5 % -> 4,
+/// 3 % -> 8, 15 % -> 38.
+const fn pct256(tenths: u32) -> u8 {
+    ((tenths * 256 + 500) / 1000) as u8
+}
+
+impl Derived {
+    pub const fn of(i: &InstrumentTheme) -> Derived {
+        Derived {
+            open_header: over(i.open, i.text, pct256(15)),
+            selection: over(i.open, i.amber, pct256(150)),
+            focus_inset_header: over(i.header, i.text, pct256(30)),
+            focus_inset_open: over(i.open, i.text, pct256(30)),
+        }
+    }
 }
 
 impl Bundle {
@@ -721,6 +779,7 @@ impl Bundle {
             theme: self.theme,
             inst: self.inst,
             metrics: self.metrics_base().at(pct),
+            derived: Derived::of(&self.inst),
         }
     }
 
@@ -979,6 +1038,27 @@ mod tests {
 
     // The compiled floor IS the record: every one of Carbon's 35 + 16 values
     // read back from the round-2 sidecar and the adopted ANSI file.
+    /// 7.3's derived opaques against the kit's own figure: Carbon's
+    /// `open_header` is `#151819` (the CSS's `text` at 1.5 % over `open`,
+    /// as Chromium rendered it on the golden: rows 70..101 of the first
+    /// pane read (21, 24, 25)). The alpha bytes are 4 / 8 / 38 of 256; the
+    /// other three are worked by hand from the same lerp.
+    #[test]
+    fn carbon_derives_the_kits_opaques() {
+        let d = Derived::of(&CARBON);
+        assert_eq!(d.open_header, 0xFF15_1819);
+        assert_eq!(d.selection, 0xFF2C_2D27, "amber at 15 % over open");
+        assert_eq!(d.focus_inset_header, 0xFF0F_1112, "text at 3 % over header");
+        assert_eq!(d.focus_inset_open, 0xFF19_1B1C, "text at 3 % over open");
+        assert_eq!(pct256(15), 4);
+        assert_eq!(pct256(30), 8);
+        assert_eq!(pct256(150), 38);
+        assert_eq!(over(0xFF10_2030, 0xFFFF_FFFF, 0), 0xFF10_2030);
+        assert_eq!(over(0xFF10_2030, 0xFFFF_FFFF, 255), 0xFFFF_FFFF);
+        let b = Bundle::builtin(Profile::Instrument);
+        assert_eq!(b.at(100).derived, d, "the visual carries them");
+    }
+
     #[test]
     fn carbon_matches_the_record() {
         let ansi = ansi_json("../../tools/halcyon/ansi16.json");

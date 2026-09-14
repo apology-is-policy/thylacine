@@ -331,6 +331,15 @@ pub struct Pane {
     /// child order (the per-container `dividers` file, 5.5). Empty for a
     /// leaf, a stack, and under the legacy profile.
     pub dividers: Vec<Rect>,
+    /// HALCYON-INSTRUMENT 6.4 (as measured on the golden, I-3): the 1 px
+    /// `separator` row after an OPEN body when a header follows it -- the
+    /// row `carve::stack_alloc` reserves between the body and the next
+    /// header. Set on the open tile (a leaf, or a container tile carved
+    /// into the body), ZERO when the open tile is the stack's last, for a
+    /// collapsed tile, and under legacy. The compositor paints it; the
+    /// separator INSIDE a collapsed header (its last row, unless last in
+    /// the stack) is halcyond's, painted with the header.
+    pub separator: Rect,
     /// The tile's recorded last-command status (see `Status`).
     pub status: Status,
     /// Visible under the current layout (tab-inactive subtrees are not).
@@ -457,6 +466,7 @@ impl Layout {
             backgrounded: false,
             weight: DEFAULT_WEIGHT,
             dividers: Vec::new(),
+            separator: Rect::ZERO,
         };
         let slot = match self.panes.iter().position(|s| s.is_none()) {
             Some(i) => {
@@ -854,6 +864,7 @@ impl Layout {
                 p.claim_token = None;
                 p.weight = DEFAULT_WEIGHT;
                 p.dividers.clear();
+                p.separator = Rect::ZERO;
             }
             // Free every other pane (the subtree was the whole tree).
             for i in 0..self.panes.len() {
@@ -875,7 +886,16 @@ impl Layout {
         {
             if let Some(at) = children.iter().position(|&c| c == slot) {
                 children.remove(at);
-                if *active >= children.len() && !children.is_empty() {
+                // HALCYON-INSTRUMENT 6.5, the successor rule: the tile at the
+                // removed index, else the previous one. Removing a child
+                // BEFORE the active one shifts the active one down by a
+                // slot, so the index follows it -- without this the open
+                // tile of [A, B, C*, D] became D when A closed (the index
+                // stayed 2 and now named D), reachable from the UI the
+                // moment a collapsed header carries its own close.
+                if at < *active {
+                    *active -= 1;
+                } else if *active >= children.len() && !children.is_empty() {
                     *active = children.len() - 1;
                 }
             }
@@ -1541,6 +1561,7 @@ impl Layout {
             p.content = Rect::ZERO;
             p.tagbar = Rect::ZERO;
             p.dividers.clear();
+            p.separator = Rect::ZERO;
         }
         match profile {
             Profile::Legacy => self.recompute_legacy(area.w, area.h, gaps),
@@ -1844,6 +1865,33 @@ impl Layout {
             h: body.len(),
         }
         .intersect(inner);
+        // HALCYON-INSTRUMENT 14.6, the empty pane: a lone EMPTY leaf is the
+        // N = 0 exception -- no 32 px header (no tile exists); its `tagbar`
+        // is the whole interior, where its chrome surface paints the
+        // placard, and its body is ZERO. An empty leaf inside a stack of
+        // several keeps a header row like any tile.
+        if tiles.len() == 1 && self.is_empty_leaf(tiles[0]) {
+            let p = self.get_mut(tiles[0]).unwrap();
+            p.visible = true;
+            p.rect = rect;
+            p.tagbar = inner;
+            p.content = Rect::ZERO;
+            return;
+        }
+        // The 1 px separator after the open body: reserved by stack_alloc
+        // between the body and the header that follows it (none when the
+        // open tile is the last).
+        let sep = if open + 1 < tiles.len() {
+            Rect {
+                x: inner.x,
+                y: body.end,
+                w: inner.w,
+                h: m.hairline.max(0) as u32,
+            }
+            .intersect(inner)
+        } else {
+            Rect::ZERO
+        };
         for (i, &t) in tiles.iter().enumerate() {
             let header = Rect {
                 x: inner.x,
@@ -1859,12 +1907,14 @@ impl Layout {
                 p.rect = rect;
                 p.tagbar = header;
                 p.content = if is_open { body_rect } else { Rect::ZERO };
+                p.separator = if is_open { sep } else { Rect::ZERO };
             } else {
                 if is_open {
                     self.carve(t, body_rect);
                 }
                 let p = self.get_mut(t).unwrap();
                 p.tagbar = header;
+                p.separator = if is_open { sep } else { Rect::ZERO };
                 if !is_open {
                     p.rect = rect;
                 }
@@ -2534,6 +2584,9 @@ mod tests {
     fn a_lone_tile_is_framed_and_a_zoom_fills_the_workspace() {
         let mut l = Layout::new();
         let a = l.root;
+        // A TILE: hosted (an empty lone leaf is the 14.6 placard, tested
+        // beside this one).
+        assert_eq!(l.host_into(1, a), Some(a));
         l.recompute(r(0, 34, 1280, 661), 1, inst100(), Profile::Instrument);
         let p = l.get(a).unwrap();
         assert!(p.visible);
@@ -2666,5 +2719,115 @@ mod tests {
         let (e, n) = (l.epoch, l.live_ids().len());
         assert_eq!(l.host(3), None, "a third tile would need 2 + 96 + 1 + 54 = 153 > 144: refused");
         assert_eq!((l.epoch, l.live_ids().len()), (e, n), "and the tree is untouched");
+    }
+    /// HALCYON-INSTRUMENT 14.6 + 6.4 (I-3): a lone EMPTY leaf is the N = 0
+    /// pane -- no header row, its `tagbar` the whole interior (the placard's
+    /// surface) and its body ZERO; hosted, it is a stack of one again. The
+    /// 1 px separator after an open body exists only when a header follows
+    /// (the golden's row 806 / 377: `separator`; the last tile's bottom row
+    /// is the frame's).
+    #[test]
+    fn an_empty_lone_leaf_is_the_placard_and_the_separator_follows_an_open_body() {
+        let mut l = Layout::new();
+        let root = l.root;
+        l.recompute(r(0, 34, 1280, 741), 1, inst100(), Profile::Instrument);
+        let p = l.get(root).unwrap();
+        assert!(p.visible && l.is_empty_leaf(root));
+        assert_eq!(p.rect, r(3, 37, 1274, 735), "the frame");
+        assert_eq!(p.tagbar, r(4, 38, 1272, 733), "the placard fills the interior");
+        assert_eq!(p.content, Rect::ZERO, "no body: no tile exists");
+        assert_eq!(p.separator, Rect::ZERO);
+        // Hosted: the header returns.
+        assert_eq!(l.host(7), Some(root));
+        l.recompute(r(0, 34, 1280, 741), 1, inst100(), Profile::Instrument);
+        let p = l.get(root).unwrap();
+        assert_eq!(p.tagbar, r(4, 38, 1272, 32));
+        assert_eq!(p.content, r(4, 70, 1272, 701));
+        assert_eq!(p.separator, Rect::ZERO, "a lone open tile is last: no separator");
+        // A stack of two with the FIRST open: the separator row sits after
+        // the body, before the second header; the collapsed second has none.
+        let b = l.split(root, Mode::Stacked).unwrap();
+        assert_eq!(l.host(8), Some(b));
+        assert!(l.focus(root));
+        l.recompute(r(0, 34, 1280, 741), 1, inst100(), Profile::Instrument);
+        let (pa, pb) = (l.get(root).unwrap(), l.get(b).unwrap());
+        assert_eq!(pa.tagbar, r(4, 38, 1272, 32));
+        assert_eq!(pa.content, r(4, 70, 1272, 668), "body: 733 - 32 - 32 - 1");
+        assert_eq!(pa.separator, r(4, 738, 1272, 1), "the row after the open body");
+        assert_eq!(pb.tagbar, r(4, 739, 1272, 32), "the second header follows the separator");
+        assert_eq!(pb.separator, Rect::ZERO);
+        assert!(!pb.visible && pb.content.is_empty());
+        // The SECOND open: last in the stack, no separator anywhere.
+        assert!(l.focus(b));
+        l.recompute(r(0, 34, 1280, 741), 1, inst100(), Profile::Instrument);
+        let (pa, pb) = (l.get(root).unwrap(), l.get(b).unwrap());
+        assert_eq!(pa.separator, Rect::ZERO);
+        assert_eq!(pb.separator, Rect::ZERO);
+        assert_eq!(pb.tagbar, r(4, 70, 1272, 32));
+        assert_eq!(pb.content, r(4, 102, 1272, 669), "body: 733 - 64, no separator row");
+        // An EMPTY leaf inside a stack of two keeps a header row (no placard).
+        let c = l.split(b, Mode::Stacked).unwrap();
+        l.recompute(r(0, 34, 1280, 741), 1, inst100(), Profile::Instrument);
+        let pc = l.get(c).unwrap();
+        assert!(l.is_empty_leaf(c) && pc.visible);
+        assert_eq!(pc.tagbar, r(4, 102, 1272, 32), "a header, not a placard");
+        assert_eq!(pc.content, r(4, 134, 1272, 637));
+        // The legacy carve is untouched by both rules.
+        l.recompute(r(0, 0, 1280, 780), 1, theme::builtin().metrics.at(100), Profile::Legacy);
+        for slot in [root, b, c] {
+            assert_eq!(l.get(slot).unwrap().separator, Rect::ZERO);
+        }
+    }
+
+    /// HALCYON-INSTRUMENT 6.5, the successor rule, and the defect the rule
+    /// exposed: closing a tile BEFORE the open one must not move the open
+    /// tile (the index shifts with it); closing the open one opens the
+    /// tile now at its index; closing the open LAST one opens the previous.
+    #[test]
+    fn closing_a_stacked_tile_keeps_or_hands_on_the_open_one_by_the_successor_rule() {
+        let stack = |l: &mut Layout| -> Vec<usize> {
+            let a = l.root;
+            let b = l.split(a, Mode::Stacked).unwrap();
+            let c = l.split(b, Mode::Stacked).unwrap();
+            let d = l.split(c, Mode::Stacked).unwrap();
+            for (i, s) in [a, b, c, d].iter().enumerate() {
+                assert_eq!(l.host_into(10 + i, *s), Some(*s));
+            }
+            vec![a, b, c, d]
+        };
+        let active_of = |l: &Layout, s: usize| -> usize {
+            match &l.get(parent(l, s)).unwrap().kind {
+                Kind::Container { children, active, .. } => children[*active],
+                _ => unreachable!(),
+            }
+        };
+        // [A, B, C*, D]: close A -> C stays open (the index followed it).
+        let mut l = Layout::new();
+        let t = stack(&mut l);
+        assert!(l.focus(t[2]));
+        l.close(t[0]);
+        assert_eq!(active_of(&l, t[2]), t[2], "the open tile survived a close before it");
+        assert_eq!(l.focused, t[2]);
+        // [A, B*, C, D]: close B (the open one) -> C, the tile now at its index.
+        let mut l = Layout::new();
+        let t = stack(&mut l);
+        assert!(l.focus(t[1]));
+        l.close(t[1]);
+        assert_eq!(active_of(&l, t[2]), t[2]);
+        assert_eq!(l.focused, t[2], "focus follows the successor");
+        // [A, B, C, D*]: close D (open, last) -> C, the previous one.
+        let mut l = Layout::new();
+        let t = stack(&mut l);
+        assert!(l.focus(t[3]));
+        l.close(t[3]);
+        assert_eq!(active_of(&l, t[2]), t[2]);
+        assert_eq!(l.focused, t[2]);
+        // [A*, B, C, D]: close D (after the open one) -> A stays.
+        let mut l = Layout::new();
+        let t = stack(&mut l);
+        assert!(l.focus(t[0]));
+        l.close(t[3]);
+        assert_eq!(active_of(&l, t[0]), t[0]);
+        assert_eq!(l.focused, t[0]);
     }
 }

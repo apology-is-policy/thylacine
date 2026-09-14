@@ -27,6 +27,27 @@
 #             `desktop`; the new empty tile's body is `pane`.
 #   zoom    : Super+F fills the workspace between the rails, frame-less.
 #
+# I-3 (HALCYON-INSTRUMENT 6 / 9.1 / 14.6 / 14.9; the I-3 status row), on the
+# same image:
+#
+#   header  : the console tile's header is a POINTER TARGET -- the
+#             compositor routes a press on it to halcyond (`ptr btn ... ->
+#             chrome`), which acts by x under its own authority: the name
+#             focuses; the `x` on a stack's FINAL tile is refused with the
+#             status notice FINAL TILE IS PROTECTED; a secondary press
+#             summons the tile verb menu, which Esc dismisses; leaving the
+#             header is told to it (`ptr leave chrome`).
+#   placard : the empty pane Super+H makes has NO header -- its `tagbar` is
+#             the whole interior, its body ZERO -- and paints the 14.6
+#             placard (text present above an all-`pane` body; no action on
+#             the console path, which never spawns).
+#   stack   : Super+S turns the split into a stack: the console collapses
+#             to a 32 px `header` row with a `separator` last row, the empty
+#             tile expands on `open_header`; a press on the collapsed header
+#             expands the console (focus IS the container's active) and the
+#             empty tile collapses to the LAST row (no separator); the empty
+#             tile's `x` (count 2) closes it and the stack dissolves.
+#
 # HVF like ls-halcyon (bare TCG hangs at the pre-existing hwwatch E2E).
 
 set ::env(THYLACINE_ACCEL) hvf
@@ -54,6 +75,30 @@ proc hkey {chord} {
         lc_fail "qmp-sendtext -k $chord failed: $err"
     }
     after 1500
+}
+
+# The virtio tablet: QEMU's absolute axis is 0..32767 and the compositor's
+# tablet drain maps it as px = ax * (W - 1) / 32767, so the axis value for
+# the CENTRE of display pixel x is (2x + 1) * 32767 / (2 (W - 1)).
+proc ptr_op {op} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p $op} err]} {
+        lc_fail "qmp-sendtext -p $op failed: $err"
+    }
+}
+proc ptr_to {x y} {
+    global W H
+    set ax [expr {((2 * $x + 1) * 32767) / (2 * ($W - 1))}]
+    set ay [expr {((2 * $y + 1) * 32767) / (2 * ($H - 1))}]
+    ptr_op "abs $ax $ay"
+    after 400
+}
+proc click {x y {btn left}} {
+    ptr_to $x $y
+    ptr_op "btn $btn down"
+    after 250
+    ptr_op "btn $btn up"
+    after 900
 }
 
 # Screendump + region verdict: "<off> <total> <dom_r> <dom_g> <dom_b>".
@@ -199,6 +244,85 @@ want_dom 3 60 4 [expr {$H - 60}] 85 91 88 "the focused tile's left frame is `foc
 want_dom 40 37 [expr {$W - 40}] 38 85 91 88 "the focused tile's top frame is `focus_neutral`" 0
 lc_pass "instrument: the rails, the pad and the focused frame are Carbon's own values on screen"
 
+# --- The header as a pointer target (9.1 / 6.5 / 14.9), on the lone tile --
+# The console header is (4, 38, W-8, 32): its name region starts at 39
+# (index 32 + gap 7); its action box is the last 28 px, 24 tall at y 4.
+set hx [expr {$W / 2}]
+set hy 54
+set cx [expr {$W - 4 - 14}]
+# A primary press on the name: routed to the chrome surface, acted on as a
+# focus (already focused: the layout does not move, the verb is admitted).
+click $hx $hy
+set timeout $lc_cmd_timeout
+expect {
+    -re {tapestryd: ptr btn 272 1 -> chrome (\d+) at (\d+),(\d+)} {
+        lc_step "the compositor routed the press to chrome surface $expect_out(1,string) at $expect_out(2,string),$expect_out(3,string)"
+    }
+    timeout { lc_fail "the press on the header was not routed to a chrome surface" }
+    eof     { lc_fail "EOF waiting for the header press" }
+}
+expect {
+    -re {halcyond: header (\d+) press Focus\((\d+)\)} {
+        if {$expect_out(1,string) ne $leaf} { lc_fail "the header press named pane $expect_out(1,string), expected the console's $leaf" }
+    }
+    timeout { lc_fail "halcyond did not act on the header press" }
+    eof     { lc_fail "EOF waiting for halcyond's header action" }
+}
+lc_pass "instrument: a press on the header's name reached halcyond as a focus (9.1)"
+# The `x` on the console -- a stack of one: refused, said, shown.
+click $cx $hy
+expect {
+    -re {halcyond: header (\d+) press Close \{ id: (\d+), count: 1 \}} {}
+    timeout { lc_fail "the press on the `x` did not reach halcyond as a close" }
+    eof     { lc_fail "EOF waiting for the close press" }
+}
+expect {
+    -re {halcyond: final tile is protected \(pane (\d+)\)} {
+        if {$expect_out(1,string) ne $leaf} { lc_fail "the protection named pane $expect_out(1,string), expected $leaf" }
+    }
+    timeout { lc_fail "the final tile was not protected" }
+    eof     { lc_fail "EOF waiting for the protection" }
+}
+expect {
+    -re {halcyond: status bar \d+ painted .*notice "FINAL TILE IS PROTECTED"} {}
+    timeout { lc_fail "the status bar did not show the FINAL TILE IS PROTECTED notice" }
+    eof     { lc_fail "EOF waiting for the notice paint" }
+}
+lc_pass "instrument: the final tile's `x` is refused and the status notice says so (6.5 / 8.2)"
+# A secondary press on the name: the tile verb menu, placed by the
+# compositor; Esc dismisses it compositor-side.
+click $hx $hy right
+expect {
+    -re {halcyond: header (\d+) press Menu \{ id: (\d+), count: 1, x: (\d+), y: (\d+) \}} {
+        set mx $expect_out(3,string); set my $expect_out(4,string)
+        if {$mx < 39 || $mx >= $W || $my < 38 || $my >= 70} { lc_fail "the menu point $mx,$my is not on the header" }
+    }
+    timeout { lc_fail "the secondary press did not reach halcyond as a menu request" }
+    eof     { lc_fail "EOF waiting for the menu press" }
+}
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for tile halcyon} {
+        lc_step "the tile menu ($expect_out(4,string)x$expect_out(5,string)) placed at $expect_out(2,string) $expect_out(3,string)"
+    }
+    timeout { lc_fail "the tile menu was not placed" }
+    eof     { lc_fail "EOF waiting for the menu placement" }
+}
+hkey "esc"
+expect {
+    -re {tapestryd: menu \d+ dismissed \(esc\)} {}
+    timeout { lc_fail "Esc did not dismiss the tile menu" }
+    eof     { lc_fail "EOF waiting for the menu dismiss" }
+}
+lc_pass "instrument: the header's secondary press summons the tile verb menu on the H-3c surface; Esc dismisses it (14.9)"
+# Leaving the header: the compositor tells the chrome surface.
+ptr_to $hx 20
+expect {
+    -re {tapestryd: ptr leave chrome (\d+)} {}
+    timeout { lc_fail "leaving the header was not told to its chrome surface" }
+    eof     { lc_fail "EOF waiting for the leave" }
+}
+lc_pass "instrument: the pointer's leaving the header is told to it (the hover ends)"
+
 # --- The split (5.2): 1:1, the boundary snapped once ------------------------
 # E = W - 6, U = E - 7; the first child ends at 3 + round(U / 2); the track
 # is 7 from there; the second child starts 7 later and ends at W - 3.
@@ -225,7 +349,10 @@ if {$rr ne $want_root} { lc_fail "the root container reads [join $rr { }], expec
 want_rect /dev/tapestry/pane/$root/dividers [list $aend 37 7 [expr {$H - 65}]] "the root's track"
 want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$aend - 3}] [expr {$H - 65}]] "the console pane's frame (first child)"
 want_rect /dev/tapestry/pane/$empty/frame [list $bx 37 [expr {$W - 3 - $bx}] [expr {$H - 65}]] "the new pane's frame (second child)"
-want_rect /dev/tapestry/pane/$empty/geometry [list [expr {$bx + 1}] 70 [expr {$W - 5 - $bx}] [expr {$H - 99}]] "the new tile's body"
+# 14.6 (I-3): the new pane is EMPTY -- no tile, no header: its `tagbar` is
+# the whole interior (the placard's surface) and its body ZERO.
+want_rect /dev/tapestry/pane/$empty/tagbar [list [expr {$bx + 1}] 38 [expr {$W - 5 - $bx}] [expr {$H - 67}]] "the empty pane's placard is its interior"
+want_rect /dev/tapestry/pane/$empty/geometry [list 0 0 0 0] "the empty pane has no body"
 lc_pass "instrument: Super+H divided the root 1:1 with a 7 px track at $aend (snapped once; frames partition the root minus the track)"
 # The rule: 2 px at offset 2 into the track, full height.
 want_dom [expr {$aend + 2}] 60 [expr {$aend + 4}] [expr {$H - 60}] 69 75 72 "the divider rule is 2 px of `structure` at offset 2" 0
@@ -237,15 +364,72 @@ want_dom [expr {$aend + 1}] 38 [expr {$aend + 8}] 45 5 6 7 "the 7 x 7 joint at (
 # the console's plain; its empty body is `pane` (#0B0D0E).
 want_dom [expr {$bx}] 60 [expr {$bx + 1}] [expr {$H - 60}] 85 91 88 "the new pane's left frame is `focus_neutral`" 0
 want_dom 3 60 4 [expr {$H - 60}] 27 31 30 "the console pane's left frame dropped to `pane_border`" 0
-want_dom [expr {$bx + 20}] 100 [expr {$W - 20}] [expr {$H - 60}] 11 13 14 "the empty tile's body is `pane`" 0
+# (The placard's two text lines sit at the 20 px inset: the title's line
+# box from 58 and the hint's to about 105 at 100 %, so the all-`pane` band
+# starts below them.)
+want_dom [expr {$bx + 20}] 130 [expr {$W - 20}] [expr {$H - 60}] 11 13 14 "the empty pane's ground below the placard's text is `pane`" 0
 lc_pass "instrument: rule, joint (24 around 25), focus frame and the empty body are Carbon's values on screen"
+# The placard's text (14.6): `Empty pane` at the 20 px inset -- ink over
+# `pane` where the title sits, none below it (no action on the console path).
+set px0 [expr {$bx + 1 + 20}]
+set v [want_dom $px0 [expr {38 + 20}] [expr {$px0 + 120}] [expr {38 + 40}] 11 13 14 "the placard's title band is pane with text on it"]
+if {[lindex $v 0] == 0} { lc_fail "the placard's title band has no ink on it (off=0): no `Empty pane` was painted" }
+lc_pass "instrument: the empty pane paints its placard (14.6: text at the inset, no header, no action here)"
 
 # --- Zoom (5.6): the workspace between the rails, frame-less ----------------
 hkey "meta_l+f"
 want_rect /dev/tapestry/pane/$empty/geometry [list 0 34 $W [expr {$H - 59}]] "the zoomed tile fills the workspace"
 hkey "meta_l+f"
-want_rect /dev/tapestry/pane/$empty/geometry [list [expr {$bx + 1}] 70 [expr {$W - 5 - $bx}] [expr {$H - 99}]] "un-zoomed: the body is back"
+want_rect /dev/tapestry/pane/$empty/tagbar [list [expr {$bx + 1}] 38 [expr {$W - 5 - $bx}] [expr {$H - 67}]] "un-zoomed: the placard is back"
 lc_pass "instrument: zoom fills the workspace between the rails and restores"
+
+# --- The stack (6.1 / 6.2 / 6.4 / 6.5): collapsed headers, expand, close --
+# Super+S: the split container becomes a stack [console, empty] with the
+# empty tile (focused) open: the console's header is the first 32 px row
+# (collapsed: `header` with a `separator` last row), the empty tile's the
+# second (open: `open_header`), its body below.
+hkey "meta_l+s"
+want_rect /dev/tapestry/pane/$leaf/tagbar [list 4 38 [expr {$W - 8}] 32] "the console's collapsed header is the first row"
+want_rect /dev/tapestry/pane/$leaf/geometry [list 0 0 0 0] "a collapsed tile has no body"
+want_rect /dev/tapestry/pane/$empty/tagbar [list 4 70 [expr {$W - 8}] 32] "the open empty tile's header follows"
+want_rect /dev/tapestry/pane/$empty/geometry [list 4 102 [expr {$W - 8}] [expr {$H - 131}]] "its body: H - 34 - 25 - 6 - 2 - 64"
+set mid0 [expr {$W / 3}]
+set mid1 [expr {2 * $W / 3}]
+want_dom $mid0 40 $mid1 66 8 10 11 "the collapsed console header rests on `header`" 0
+want_dom $mid0 69 $mid1 70 41 45 43 "its last row is the `separator` (not last in the stack)" 0
+want_dom $mid0 72 $mid1 100 21 24 25 "the open tile's header rests on `open_header` (text at 1.5 % over open)" 0
+lc_pass "instrument: Super+S stacked the two tiles -- collapsed header on `header` with its separator row, open header on `open_header` (6.4, the golden's rows)"
+# A press on the collapsed header's name: focus, and so expand -- the
+# container's active follows the focus (6.1); the empty tile collapses to
+# the LAST row (6.2 #2: later headers below the open body), no separator.
+click $hx $hy
+expect {
+    -re {halcyond: header (\d+) press Focus\((\d+)\)} {
+        if {$expect_out(1,string) ne $leaf} { lc_fail "the collapsed header press named pane $expect_out(1,string), expected the console's $leaf" }
+    }
+    timeout { lc_fail "the press on the collapsed header did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for the collapsed header press" }
+}
+want_rect /dev/tapestry/pane/$leaf/geometry [list 4 70 [expr {$W - 8}] [expr {$H - 132}]] "the console expanded: its body under its header, above the last header + the separator"
+want_rect /dev/tapestry/pane/$empty/tagbar [list 4 [expr {$H - 61}] [expr {$W - 8}] 32] "the empty tile collapsed to the last row"
+want_dom $mid0 40 $mid1 66 21 24 25 "the console's header is open now" 0
+want_dom $mid0 [expr {$H - 59}] $mid1 [expr {$H - 31}] 8 10 11 "the collapsed empty tile's header rests on `header`" 0
+want_dom $mid0 [expr {$H - 30}] $mid1 [expr {$H - 29}] 8 10 11 "the stack's last header has no separator row" 0
+want_dom $mid0 [expr {$H - 62}] $mid1 [expr {$H - 61}] 41 45 43 "the row after the open body is the `separator`" 0
+lc_pass "instrument: a press on a collapsed header expands its tile; the other collapses below the body; the separator sits after the body and not under the last header (6.2 / 6.4)"
+# The empty tile's `x` (count 2: admitted): the leaf closes, the stack
+# dissolves, the console is a stack of one again.
+click $cx [expr {$H - 61 + 16}]
+expect {
+    -re {halcyond: header (\d+) press Close \{ id: (\d+), count: 2 \}} {
+        if {$expect_out(1,string) ne $empty} { lc_fail "the `x` press named pane $expect_out(1,string), expected the empty tile's $empty" }
+    }
+    timeout { lc_fail "the press on the empty tile's `x` did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for the `x` press" }
+}
+want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$W - 6}] [expr {$H - 65}]] "the stack dissolved: the console's frame is the root again"
+want_rect /dev/tapestry/pane/$leaf/geometry [list 4 70 [expr {$W - 8}] [expr {$H - 99}]] "the console's body is the stack-of-one carve again"
+lc_pass "instrument: the `x` on a stacked tile closes it through the tile's lifecycle and the stack dissolves (6.5)"
 
 # --- The push: how the profile reached a compositor that cannot read the
 # pool at boot --------------------------------------------------------------
@@ -253,6 +437,6 @@ tgrep "halcyond: theme pushed to the compositor" "halcyond pushed the bundle (th
 tgrep "tapestryd: theme applied (renderer push)" "the compositor applied it (the carve re-decided under `instrument`)"
 tgrep "profile instrument" "halcyond resolved the profile word"
 
-lc_pass "ls-halcyon-instrument: the I-2 carve verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the 1:1 split with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty body, zoom"
+lc_pass "ls-halcyon-instrument: the I-2 carve and the I-3 headers verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the header as a pointer target (focus, the protected final tile, the tile menu, the leave), the 1:1 split with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty pane's placard, zoom, the stack's collapsed and open headers, expand by press, close by `x`"
 lc_quit
 exit 0

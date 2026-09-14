@@ -47,7 +47,7 @@ pub struct StatusBar {
     /// condition state (`Slots::stable`: never the centred text's landing,
     /// never the label's width), never per paint, so the row-relative legs
     /// after a command see no extra row.
-    said_slots: Option<(halcyond::status::Slots, Condition)>,
+    said_slots: Option<(halcyond::status::Slots, Condition, Option<(String, bool)>)>,
     failed_said: bool,
     /// Whether a mint should be attempted: true at start and after a CLOSE
     /// (the compositor dropped the bar), cleared by each attempt. A FAILED
@@ -55,7 +55,14 @@ pub struct StatusBar {
     /// persistent failure costs one attempt per relayout -- ChromeSet's
     /// cadence -- not two sync RPCs every pass (the H-3d round F5).
     want_mint: bool,
+    /// HALCYON-INSTRUMENT 8.2: the transient status message (text,
+    /// is-a-refusal, its deadline on the monotonic clock in ns). The last
+    /// message resets the timer; `notice` clears it once expired.
+    notice: Option<(String, bool, u64)>,
 }
+
+/// How long a transient status message shows (8.2: 1800 ms).
+pub const NOTICE_MS: u64 = 1800;
 
 impl StatusBar {
     pub fn new(ring: EventRing) -> StatusBar {
@@ -66,7 +73,47 @@ impl StatusBar {
             said_slots: None,
             failed_said: false,
             want_mint: true,
+            notice: None,
         }
+    }
+
+    /// Show a transient message in the condition slot (8.2): `refusal`
+    /// picks the `error` ink over the action's `amber`. The last message
+    /// resets the timer. Said in test builds, so a gate can pair the
+    /// refusal with the paint that showed it.
+    pub fn notify(&mut self, text: &str, refusal: bool) {
+        let deadline = libthyla_rs::time::monotonic_ns().saturating_add(NOTICE_MS * 1_000_000);
+        self.notice = Some((String::from(text), refusal, deadline));
+        #[cfg(feature = "test-mode")]
+        say(&format!(
+            "halcyond: status notice \"{}\" ({})",
+            text,
+            if refusal { "refusal" } else { "action" }
+        ));
+    }
+
+    /// The live notice (text, is-a-refusal), expiring it on the way out:
+    /// the caller folds it into the model it paints.
+    pub fn notice(&mut self) -> Option<(String, bool)> {
+        match &self.notice {
+            Some((text, refusal, deadline)) => {
+                if libthyla_rs::time::monotonic_ns() >= *deadline {
+                    self.notice = None;
+                    None
+                } else {
+                    Some((text.clone(), *refusal))
+                }
+            }
+            None => None,
+        }
+    }
+
+    /// Milliseconds until the notice expires (at least 1), so a blocking
+    /// wait can wake to repaint the live model; None with no notice up.
+    pub fn notice_timeout_ms(&self) -> Option<i32> {
+        let (_, _, deadline) = self.notice.as_ref()?;
+        let now = libthyla_rs::time::monotonic_ns();
+        Some(((deadline.saturating_sub(now) / 1_000_000) as i32).clamp(1, i32::MAX))
     }
 
     /// Re-arm the mint retry: a prior failure may now succeed. A no-op
@@ -199,17 +246,18 @@ impl StatusBar {
         match surf.present(None) {
             Ok(()) => {
                 #[cfg(feature = "test-mode")]
-                if self.said_slots != Some((slots.stable(), model.condition)) {
-                    self.said_slots = Some((slots.stable(), model.condition));
+                if self.said_slots.as_ref() != Some(&(slots.stable(), model.condition, model.notice.clone())) {
+                    self.said_slots = Some((slots.stable(), model.condition, model.notice.clone()));
                     say(&format!(
-                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {}",
+                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {} notice \"{}\"",
                     surf.id,
                     slots.ws.0, slots.ws.1, slots.ctx.0, slots.ctx.1, slots.cond.0, slots.cond.1,
                     slots.clock.0, slots.clock.1,
                     halcyond::status::context_text(&model.name, &model.cwd, &model.cmd),
                     model.condition, model.hour, model.minute,
                     slots.ctx_ink.0, slots.ctx_ink.1,
-                    model.exit_code.map(|c| format!("{}", c)).unwrap_or_else(|| String::from("-"))
+                    model.exit_code.map(|c| format!("{}", c)).unwrap_or_else(|| String::from("-")),
+                    model.notice.as_ref().map(|n| n.0.as_str()).unwrap_or("")
                     ));
                 }
                 let _ = slots;
@@ -231,8 +279,10 @@ pub fn model_from(
     cwd: &str,
     cmd: Option<&str>,
     exit_code: Option<i64>,
+    notice: Option<(String, bool)>,
 ) -> StatusModel {
     let mut m = StatusModel::empty();
+    m.notice = notice;
     if let Some((id, name, status)) = focused {
         m.name = name.clone();
         m.condition = condition_for(status);

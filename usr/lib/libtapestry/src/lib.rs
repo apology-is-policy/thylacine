@@ -141,6 +141,11 @@ pub const TEV_CLOSE: u16 = 8;
 /// without this the new empties waited for an unrelated event. `value` is
 /// the layout epoch.
 pub const TEV_LAYOUT: u16 = 10;
+/// The pointer left this CHROME surface (HALCYON-INSTRUMENT 9.1, I-3): sent
+/// only to a `Role::Chrome` surface, when the compositor's routing moves off
+/// it -- onto another surface, the desktop, a track, or a placed menu's grab.
+/// A header un-hovers on it; content surfaces never receive it.
+pub const TEV_PTR_LEAVE: u16 = 11;
 
 /// A decoded tevent record (section 18.4; 24 bytes on the wire).
 #[derive(Clone, Copy, Debug)]

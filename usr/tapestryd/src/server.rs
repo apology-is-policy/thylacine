@@ -843,6 +843,11 @@ pub const TEV_CLOSE: u16 = 8;
 /// that claims empties would otherwise learn of them only at an unrelated
 /// event.
 pub const TEV_LAYOUT: u16 = 10;
+/// The pointer left this CHROME surface (HALCYON-INSTRUMENT 9.1, I-3): sent
+/// only to a `Role::Chrome` surface, when the routing moves off it -- onto
+/// another surface, the desktop, a track, or a placed menu's grab. A header
+/// un-hovers on it; content surfaces never receive it.
+pub const TEV_PTR_LEAVE: u16 = 11;
 
 #[derive(Clone, Copy)]
 pub struct Tevent {
@@ -1751,6 +1756,11 @@ pub struct Comp {
     /// the first abs motion (the seed emits no delta -- the initial
     /// (0,0)->position jump is placement, not motion).
     abs_last: Option<(u32, u32)>,
+    /// HALCYON-INSTRUMENT 9.1 (I-3): the CHROME surface the pointer is over
+    /// (slot, gen) as of the last routed motion -- the one that hears
+    /// TEV_PTR_LEAVE when the routing moves off it. None over content, the
+    /// desktop, a track, or under a grab.
+    ptr_over: Option<(usize, u32)>,
     /// Section 18.6 determinism mode (dev/test builds only -- the #880
     /// strip-for-production class, enforced by the `test-mode` cargo
     /// feature at BUILD time): the FRAME clock freezes (ticks only on
@@ -2438,6 +2448,7 @@ impl Comp {
             chords: Chords::new(),
             ptr_x: 0,
             abs_last: None,
+            ptr_over: None,
             ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
@@ -6171,7 +6182,7 @@ impl Comp {
         let focused = self.layout.focused;
         let focused_parent = self.layout.get(focused).and_then(|p| p.parent);
         for (slot, _id) in self.layout.live_ids() {
-            let (kind_split, vertical_track, is_frame_owner, rect, dividers, tagbar, empty_body, content, visible) = {
+            let (kind_split, vertical_track, is_frame_owner, rect, dividers, tagbar, empty_body, content, visible, separator) = {
                 let Some(p) = self.layout.get(slot) else { continue };
                 let (kind_split, vertical_track, is_frame_owner, empty_body) = match &p.kind {
                     pane::Kind::Container { mode, .. } => (
@@ -6205,13 +6216,23 @@ impl Comp {
                     empty_body,
                     p.content,
                     p.visible,
+                    p.separator,
                 )
             };
             // Headers rest on `header` whether the tile is open or collapsed
-            // (a collapsed tile is not visible, and has one).
+            // (a collapsed tile is not visible, and has one); an EMPTY leaf's
+            // `tagbar` is its placard (14.6) and rests on `pane`.
             if structural && !tagbar.is_empty() {
                 let r = tagbar.intersect(disp);
-                self.fill_rect(r, inst.header);
+                let placard = empty_body && visible && content.is_empty();
+                self.fill_rect(r, if placard { inst.pane } else { inst.header });
+                painted.push(r);
+            }
+            // The 1 px `separator` row after an open body, before the header
+            // that follows it (6.4, measured on the golden).
+            if structural && !separator.is_empty() {
+                let r = separator.intersect(disp);
+                self.fill_rect(r, inst.separator);
                 painted.push(r);
             }
             if !visible {
@@ -6445,6 +6466,15 @@ impl Comp {
             let c = p.content;
             fold((c.x as u64) << 32 | c.y as u64);
             fold((c.w as u64) << 32 | c.h as u64);
+            // The header rect too (I-3): an empty pane's placard is a
+            // chrome surface sized by its `tagbar` with a ZERO content rect,
+            // so a resize that moves only it would otherwise read as
+            // non-structural and fan it no CONFIGURE. Under legacy the
+            // header is a function of the content rect, so nothing new
+            // folds there.
+            let t = p.tagbar;
+            fold((t.x as u64) << 32 | t.y as u64);
+            fold((t.w as u64) << 32 | t.h as u64);
             if let pane::Kind::Leaf { surface } = &p.kind {
                 // What a leaf SHOWS is geometry too: a hosting into an
                 // already-split empty leaf changes no rect, and a signature
@@ -7441,6 +7471,9 @@ impl Comp {
         if self.last_focus == Some(n) {
             self.last_focus = None;
         }
+        if self.ptr_over.map_or(false, |(o, _)| o == n) {
+            self.ptr_over = None;
+        }
         // (0) The pane side (G-6): the hosting leaf closes (single-child
         // containers collapse; the root collapses to an empty leaf). Done
         // BEFORE reconcile so the layout no longer names n.
@@ -8070,6 +8103,76 @@ impl Comp {
         Some((n, sx, sy))
     }
 
+    /// HALCYON-INSTRUMENT 9.1 (I-3): the chrome surface under a display
+    /// point -- a header, or an empty pane's placard, placed at its bound
+    /// pane's `tagbar` -- with surface-relative coordinates, clamped into
+    /// the surface as `ptr_hit` clamps (a stale size before its CONFIGURE
+    /// lands must not put a point past the owner's buffer). Chrome is placed
+    /// only where `surface_target` says, so the hit IS the placement; and a
+    /// header never overlaps a content rect (both are carved from one tree),
+    /// so trying chrome first is a preference, never a contest.
+    fn chrome_at(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
+        for n in 0..MAX_SURFACES {
+            let Some(s) = self.surf(n) else { continue };
+            if s.chrome_bind.is_none() || s.w == 0 || s.h == 0 {
+                continue;
+            }
+            let Some(t) = self.surface_target(n) else { continue };
+            if t.contains(px, py) {
+                let sx = (px - t.x).min(s.w - 1).min(0xFFFF) as u16;
+                let sy = (py - t.y).min(s.h - 1).min(0xFFFF) as u16;
+                return Some((n, sx, sy));
+            }
+        }
+        None
+    }
+
+    /// Where a pointer event goes with no grab up: the chrome surface under
+    /// the point (9.1: a header is a pointer target), else the hosted
+    /// content surface under it (`ptr_hit`).
+    fn ptr_target(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
+        self.chrome_at(px, py).or_else(|| self.ptr_hit(px, py))
+    }
+
+    /// The crossing: a chrome surface hears TEV_PTR_LEAVE when the routing
+    /// moves off it (onto content, another header, nothing, or a grab), so
+    /// a hovered header can un-hover -- its hover ground and its `x` would
+    /// otherwise stay lit when the pointer crossed onto a track or the
+    /// desktop, which route no MOVE back to it. Only chrome tracks hover,
+    /// so only chrome is told; a content surface's stream is unchanged. The
+    /// record is (slot, gen), so a retire-and-remint of the slot is never
+    /// mistaken for the same surface.
+    fn ptr_crossing(&mut self, now: Option<usize>, mods: u16) {
+        let now_chrome = now.and_then(|n| {
+            self.surf(n)
+                .filter(|s| s.chrome_bind.is_some())
+                .map(|s| (n, s.gen))
+        });
+        let prev = self.ptr_over;
+        if prev == now_chrome {
+            return;
+        }
+        if let Some((n, gen)) = prev {
+            if self.surf(n).is_some_and(|s| s.gen == gen) {
+                let ev = Tevent {
+                    kind: TEV_PTR_LEAVE,
+                    code: 0,
+                    value: 0,
+                    rune: 0,
+                    mods,
+                    flags: 0,
+                    tick: self.tick,
+                };
+                if !self.push_event(n, ev) {
+                    self.retire(n);
+                }
+                #[cfg(feature = "test-mode")]
+                say!("tapestryd: ptr leave chrome {}", n);
+            }
+        }
+        self.ptr_over = now_chrome;
+    }
+
     /// ABSOLUTE pointer motion at display coords (G-7c; the tablet
     /// drain). Also synthesizes the TEV_PTR_REL delta from the previous
     /// abs position -- the abs-only-frontend mouse-look path (QEMU cocoa
@@ -8159,14 +8262,19 @@ impl Comp {
                     .min(0xFFFF) as u16;
                 Some((m.n, sx, sy))
             }
-            None => self.ptr_hit(px, py),
+            None => self.ptr_target(px, py),
         }
     }
 
     fn ptr_commit(&mut self, px: u32, py: u32, mods: u16) {
         self.ptr_x = px;
         self.ptr_y = py;
-        if let Some((n, sx, sy)) = self.ptr_route(px, py) {
+        let route = self.ptr_route(px, py);
+        // A grab routes everything to the menu: the header under the
+        // pointer is left as it was (the crossing is judged on the routed
+        // target, so it hears LEAVE the moment routing goes elsewhere).
+        self.ptr_crossing(route.map(|(n, _, _)| n), mods);
+        if let Some((n, sx, sy)) = route {
             let ev = Tevent {
                 kind: TEV_PTR_MOVE,
                 code: 0,
@@ -8230,7 +8338,22 @@ impl Comp {
                 Some(m.n)
             }
             None => {
-                let hit = self.ptr_hit(self.ptr_x, self.ptr_y).map(|(n, _, _)| n);
+                // 9.1: a header under the point takes the press (its owner
+                // decides by x); a content surface takes it as before.
+                let hit = self.ptr_target(self.ptr_x, self.ptr_y).map(|(n, _, _)| n);
+                #[cfg(feature = "test-mode")]
+                if let Some(n) = hit {
+                    if self.surf(n).is_some_and(|s| s.chrome_bind.is_some()) {
+                        say!(
+                            "tapestryd: ptr btn {} {} -> chrome {} at {},{}",
+                            code,
+                            pressed as u8,
+                            n,
+                            self.ptr_x,
+                            self.ptr_y
+                        );
+                    }
+                }
                 // Click-to-focus (HALCYON.md 6): a press in a hosted leaf
                 // that is not the focused one focuses it -- and still
                 // reaches the client (i3 passes the click through). A pane

@@ -617,6 +617,17 @@ take the seat, mint a claim or impersonate a tile: its pane authority is
 its owner's session authority over the tile it is bound to, judged per
 write as every pane verb is (HALCYON.md §13.6, the trust model).
 
+**As built at I-3.** A collapsed leaf carries its `tagbar` while hidden,
+and `chromeset::reconcile` (halcyond) mints one `Role::Chrome` surface per
+leaf whose `tagbar` is non-empty, reading the tree through
+`chrome::parse_tree` (the leaf's index in its stack, the stack's size,
+whether it is the open tile, whether it is the last). A container TILE
+inside a stack (a split carved into a body slot) has the header rect the
+compositor publishes and rests on `header`, but no chrome surface yet:
+halcyond decorates leaves only — a residue (a stack holding a split shows
+a blank header row for it). The compositor fans a collapsed header its
+CONFIGURE like any chrome (`visible_chrome` walks `surface_target`).
+
 ### 6.4 The header's anatomy
 
 ```
@@ -639,6 +650,33 @@ Gaps of 7 between regions. The expanded header's ground is `text` at
 `header`; hover is `hover` on a collapsed header and does not override the
 expanded ground (the CSS's later declaration wins — reproduced).
 
+**As built at I-3 (`chrome::header_list`, measured against the golden's
+pixels; JOURNAL run 46o "I-3").** The golden adds two facts the table
+above does not state: a collapsed header that is not its stack's last
+paints a 1 px `separator` as its LAST row (rows 38..68 `header`, row 69
+`separator` at 1440 × 900; the last tile's header has none), and an open
+tile's box ends with a 1 px `separator` row after its body (rows 806 and
+377) — the row `stack_alloc` reserves — which the compositor paints
+(`Pane.separator`, `paint_instrument`). The index box's right rule is
+column 31 in `separator` on every header; the focus mark is 2 × 20 at
+(0, 6) on the focused open header only; the expanded ground `open_header`
+is `text` at 1.5 % over `open` through the executor's lerp
+(`instrument::Derived`, `over`; Carbon `#151819` reproduced), carried by
+the `Visual` and the `Sheet`; hover paints `hover` under a collapsed
+header, lights its name `text` and shows its `×`; the `×` under the
+pointer is `error` with the 1 px `structure` rule at its box's left edge.
+The action box is RESERVED on every header (the metadata ends 35 px from
+the right edge whether or not the `×` shows). Owed to I-5: the mono runs
+(index, metadata) use the sheet's island size (Cornucopia's 6 px advance
+floor; the type map's 10 px is I-5's), the name and the `×` the current
+Sans face at 13 / 15 px (Plex Sans 500 arrives with the type map); no
+pills (no `pill` mark is built; the region is a hook). The metadata is
+`chrome::metadata_for`: a retained tile's word (`EXIT n` in `success` /
+`error`, `DISCONNECTED`, `CRASHED`), else `RUNNING` in `secondary`
+(§14.3), else `EXIT n` in `error` after a failed last command, else the
+trail uppercase in `dim` (`amber` when a program reports the document
+dirty — no program does yet).
+
 ### 6.5 Close, and the final tile
 
 `×` sends the graceful close through the tile's existing lifecycle (a
@@ -647,6 +685,23 @@ foreground job asks first (§9.5). The successor is the tile at the removed
 index, else the previous one. A stack's final tile refuses with the status
 `FINAL TILE IS PROTECTED`; removing a pane is a separate structural act
 (today's `close` of an empty leaf), never `×`.
+
+**As built at I-3.** `×` yields `ChromeAction::Close { id, count }` to the
+owner; a `count` of one is refused with the transient status `FINAL TILE
+IS PROTECTED` (§8.2's notice, shown in the H-3d bar's condition slot until
+I-4's rail takes it; 1800 ms) and said (`halcyond: final tile is
+protected (pane N)`); otherwise the owner writes `close <id>` — the session
+through the `layout` file under its `Session` authority, the console
+renderer through the pane's `ctl` as the renderer. The successor rule is
+`Layout::close_inner`'s (the removed index, else the previous), and I-3
+fixed the index shift the rule exposed: removing a child BEFORE the open
+one left `active` naming the next tile over
+(`closing_a_stacked_tile_keeps_or_hands_on_the_open_one_by_the_successor_rule`).
+Super+Q (the compositor's `Close` chord) stays the structural act: it
+closes the focused leaf without the final-tile protection — the only
+reading under which a pane holding a retained tile can be removed at all
+(a §9.3 delta for the operator: its "with the §6.5 protections" is read as
+§9.5's dirty-document / foreground-job ask, I-7's dialog).
 
 ### 6.6 Migration
 
@@ -924,6 +979,26 @@ command into the tile (the H-3c path); `×` → §6.5. The release follows
 its press (the H-3c round F1 rule, unchanged). A click on a body focuses
 the tile and still reaches the client (click-to-focus as built).
 
+**As built at I-3.** `Comp::chrome_at` finds the chrome surface whose
+`surface_target` (the bound pane's `tagbar`) contains the point — a
+header, or an empty pane's placard — and `ptr_target` prefers it to the
+content hit (`ptr_hit`); `ptr_route`'s ungrabbed arm, `ptr_btn` and
+`ptr_scroll` all read it, so a header receives PTR_MOVE (surface-relative,
+clamped into the surface), PTR_BTN and SCROLL exactly as a hosted surface
+does, the release following its press. A new event kind, `TEV_PTR_LEAVE`
+(11), goes ONLY to a chrome surface, when the routed target moves off it
+(onto content, another header, nothing, or a placed menu's grab;
+`Comp::ptr_over`, gen-pinned): a header un-hovers on it. Click-to-focus is
+a CONTENT press's — a chrome hit hosts nothing, so the compositor moves no
+focus on a header press; the owner decides: `chromeset::pump` turns a
+primary press into `Focus(id)` (the index, the name, the metadata) or
+`Close` (the action box, `chrome::header_hit`), a secondary press
+anywhere but the `×` into `Menu { id, count, x, y }` (display
+coordinates: the tagbar's origin plus the point), and the owner writes the
+pane verb the compositor judges per write (`focus` needs `actor_hosts`,
+`close` the whole subtree). A header confers no authority its owner
+lacks. Dividers are I-6's (no capture yet).
+
 ### 9.2 Dividers (compositor-owned)
 
 Hover paints the rule `amber_muted`; a press captures the pointer for that
@@ -1123,7 +1198,14 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   pointer routing to chrome, expand / close / final-tile, the successor
   rule; the tile states of §14.6 (empty, disconnected, crashed, ended);
   the header verb menu (§14.9) on H-3c's surface. *Audit-bearing: pointer
-  routing to chrome, pane authority on header actions.*
+  routing to chrome, pane authority on header actions.* **LANDED**
+  (`chrome::parse_tree` / `header_list` / `placard_list` / `metadata_for`
+  / `Fate`, `chromeset`'s pointer pump and `ChromeAction`,
+  `instrument::Derived`, `Comp::chrome_at` + `TEV_PTR_LEAVE`,
+  `Pane.separator` + the placard carve + the successor fix, the retained
+  tiles and Restart in the session, `menu::tile_menu` + the Instrument
+  look, the status notice; the as-built notes in §6.3–6.5, §9.1, §14.2,
+  §14.6, §14.9; JOURNAL run 46o "I-3").
 - **I-4 — the rails.** `role=rail`; the top rail's four zones on our
   facts (the workspace chips §14.1, the context formatter §14.3); the
   bottom rail and its marks (§14.3); transient status; the narrow branch.
@@ -1261,6 +1343,18 @@ Carbon: `#0B0D0E`, focused row `#191C1D`, mark `#C7B98B`; Genera:
 `#E8E9E3`, `#CDD1CB`, `#3D526F`. Names are labels; execution routes through
 Beacon's typed-object verb engine under the user's authority.
 
+**As built at I-3 (the look, on H-3c's surface).** `menu::menu_size_inst`
+/ `menu_list_inst` under the Instrument profile: `pane` ground, the 1 px
+`structure` border, the 24 title row (the type in `secondary`, the label
+in `text`, end-ellipsised), a `separator` rule, 28 rows in Sans 13 `text`
+(`dim` disabled — no fill, no mark, skipped by Up / Down / Home / End,
+never activated by Enter), the selected row on `hover` with the 2 × 16
+`amber` mark at y 6, separators 1 px with margin 4 and inset 8, the width
+clamped to 224..320, padding 4 / 10; the legacy list is unchanged under
+legacy. `MenuItem` gained `enabled` and `separator_before`. Not yet: the
+anchoring rules (the placement clamps to the display as H-3c's did), the
+shadow (§10), the scroll indicator (§7.7).
+
 ### 14.3 Directory, command and running marks (H-3d's status feed; the rails of §8)
 
 Top context: `<cwd> │ <focused tile title>` in Sans 11 — the cwd
@@ -1361,6 +1455,28 @@ inside a still-running shell is NOT an ended tile — that is §14.3's marks.
 Status strings, durations and process labels are data, never the fixture
 literals.
 
+**As built at I-3.** The empty pane: `Layout::place_frame` gives a lone
+EMPTY leaf no header row — its `tagbar` is the whole interior and its
+`content` ZERO — and the compositor rests it on `pane`; halcyond's chrome
+surface there paints `chrome::placard_list` (the title, the hint, and
+`Open shell` only where the owner may spawn: the session, which re-admits
+the leaf to its spawn plan on the press; the console renderer never). An
+empty leaf inside a stack of several keeps a header row like any tile.
+The retained tiles: the session judges the stream
+(`Ingested::{Ended(n), Disconnected, Crashed}`: an exit record, an EOF
+without one, a wire error) and under Instrument RETAINS the tile
+(`SessionTile::retain`: the child killed and reaped, the pipe left out of
+the poll, the `Fate` on the tile and the header); the header's metadata
+says the word; the body (`Tile::render`) paints no caret, an ended tile's
+`Process ended · exit n` line after its content, a disconnected tile's
+notice strip (≥ 32 tall, `header`, the `separator` rule, the `error` `!`)
+prepended, a crashed tile nothing beyond the word. Under legacy the tmux
+rule stands byte for byte (a clean exit closes the leaf, anything else
+freezes the affordance). Restart (the tile menu): `SessionTile::into_parts`
+keeps the SURFACE — the leaf's place, weight and frame — and spawns the
+tile's command line again as a new process with a fresh transcript. Not
+built: Reconnect, Copy output, the disconnected tile's other verbs.
+
 ### 14.7 A full-screen terminal application inside a tile (the raw path)
 
 The 32 px header stays exactly as for any active tile. The raw grid fills
@@ -1400,6 +1516,14 @@ compositor authority; program commands register through a bounded existing
 protocol or a reviewed registry entry — no `pill` mark is assumed built.
 Middle-click executable-text semantics stay inside the transcript; the
 header's primary click still selects or opens the tile.
+
+**As built at I-3.** `menu::tile_menu(id, name, count, retained)`: Restart
+(enabled for a retained tile), Close (enabled with a sibling), then Rename
+tile… and Move to workspace… disabled behind a separator (the dialog
+family and the workspace mechanism are I-7's and I-4's); each an INTERNAL
+action `tile <verb> <id>` the owner interprets — never a shell command —
+through the same `ChromeAction` path a header press takes. No
+program-provided commands register yet.
 
 ## Appendix A — the ANSI-16 tables (Astra's authored set, adopted 2026-09-14; the tool is the lint)
 

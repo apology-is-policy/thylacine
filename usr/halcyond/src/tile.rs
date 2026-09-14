@@ -30,7 +30,7 @@ use crate::layout::{
     LaidLine, Sheet,
 };
 use crate::menu::{run_rect, ObjRun};
-use crate::raster::{GlyphSource, FACE_MONO};
+use crate::raster::{GlyphSource, FACE_BODY, FACE_MONO};
 use crate::transcript::{
     BlockKind, SpanMap, SpanTag, Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST,
     DEFAULT_MAX_LINES_PER_BLOCK,
@@ -52,6 +52,13 @@ pub struct Tile {
     pub mode: ScreenMode,
     /// OSC 0/2 title (the child's own; "" until it sets one).
     pub title: String,
+    /// HALCYON-INSTRUMENT 14.6: what became of the tile's process. `Live`
+    /// paints as always; a retained tile paints no caret and, under the
+    /// Instrument profile, its state's body mark -- the `Process ended`
+    /// line, the `Connection lost` strip. Set by the session (the bin
+    /// judges the stream); the legacy profile's frozen affordance is
+    /// unchanged by it.
+    pub fate: crate::chrome::Fate,
     exit: Option<i32>,
     /// A pending bell affordance the render consumes once (no kernel bell).
     bell: bool,
@@ -118,6 +125,7 @@ impl Tile {
             },
             mode: ScreenMode::Normal,
             title: String::new(),
+            fate: crate::chrome::Fate::Live,
             exit: None,
             bell: false,
             heights: VecDeque::new(),
@@ -413,18 +421,40 @@ impl Tile {
         self.laid_last = 0;
         self.laid_lines_last = 0;
         self.frame.clear();
+        // HALCYON-INSTRUMENT 14.6, under the Instrument profile only (the
+        // legacy affordance is byte-identical): a DISCONNECTED tile's body
+        // is prepended a notice strip, so the view starts below it; an
+        // ENDED tile's content grows by its final line.
+        let inst = sheet.profile == libhalcyon::instrument::Profile::Instrument;
+        let top = if inst && self.fate == crate::chrome::Fate::Disconnected {
+            notice_strip_h(sheet, gs)
+        } else {
+            0
+        };
+        let ended_line = if inst {
+            match self.fate {
+                crate::chrome::Fate::Ended(code) => Some((code, ended_line_h(sheet, gs))),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         if self.mode == ScreenMode::AltScreen {
             // The tail is the mono grid; a click hits it by cell, not through a
             // proportional cache -- drop any stale normal-mode layout so
             // `grid_hit` takes the mono path.
             self.live_laid = None;
-            paint_grid(cart, &self.grid, 0, 0, gs, sheet);
-            return grid_h;
+            paint_grid(cart, &self.grid, 0, top, gs, sheet);
+            if top > 0 {
+                paint_notice_strip(cart, w, top, sheet, gs);
+            }
+            return grid_h + top;
         }
 
         let widthi = w as i32;
-        let viewh = h as i32;
+        let view_end = h as i32;
+        let viewh = h as i32 - top;
         self.laid_last += self.sync_heights(widthi, sheet, gs);
 
         // The exact content height from the cached heights: a leading gap,
@@ -482,7 +512,7 @@ impl Tile {
         self.laid_last += 1;
         self.laid_lines_last += live_lb.lines.len();
 
-        let content_h = total + live_lb.height;
+        let content_h = total + live_lb.height + ended_line.map_or(0, |(_, lh)| lh);
 
         // The mark's row drags the view: locate its content-relative span
         // (a frozen block's from the cached heights; the open block's is
@@ -531,11 +561,12 @@ impl Tile {
         }
         *scroll_up = (*scroll_up).clamp(0, (content_h - viewh).max(0));
         let su = *scroll_up;
-        let y0 = if content_h <= viewh {
-            0
-        } else {
-            viewh - content_h + su
-        };
+        let y0 = top
+            + if content_h <= viewh {
+                0
+            } else {
+                viewh - content_h + su
+            };
 
         // Bottom-anchor [scrollback][grid]: walk the blocks by their cached
         // heights, laying out + rendering only those that intersect the view.
@@ -548,7 +579,7 @@ impl Tile {
             .enumerate()
         {
             self.frame.push((b.id, y, hgt));
-            if y + hgt >= 0 && y <= viewh {
+            if y + hgt >= 0 && y <= view_end {
                 let lb = layout_block(b, widthi, sheet, gs);
                 debug_assert_eq!(lb.height, hgt, "a frozen block's height is deterministic");
                 paint_mark(cart, &lb, y, w, sheet, mark.filter(|m| m.block == b.id));
@@ -560,7 +591,7 @@ impl Tile {
             y += hgt + gap_after(i, hgt);
         }
         self.frame.push((u64::MAX, y, open_lb.height));
-        if y + open_lb.height >= 0 && y <= viewh {
+        if y + open_lb.height >= 0 && y <= view_end {
             let m = mark.filter(|m| m.block == u64::MAX);
             paint_mark(cart, &open_lb, y, w, sheet, m);
             render_block(cart, &open_lb, y, gs);
@@ -591,7 +622,10 @@ impl Tile {
         // proportional x of its character boundary (HALCYON 14.13; subsumes s2,
         // the stray cursor adrift from the rows).
         let (cr, cc, cvis) = self.grid.cursor();
-        if cvis {
+        // 14.6: a retained tile has no caret (under Instrument; the legacy
+        // affordance keeps its frozen frame as it was).
+        let caret = cvis && !(inst && self.fate != crate::chrome::Fate::Live);
+        if caret {
             if let Some(&(item, row, start)) = prov.get(cr) {
                 let (cx, cy, chh) = caret_in_block(&live_lb, item, row, start + cc, sheet);
                 cart.ops.push(Op::Rect {
@@ -622,6 +656,18 @@ impl Tile {
                     });
                 }
             }
+        }
+        // 14.6: the ended tile's final line after the tail, `Process ended
+        // \u{b7} exit n` in Sans 12 `secondary`; the disconnected tile's
+        // notice strip over the top of the view.
+        if let Some((code, lh)) = ended_line {
+            let ly = y + live_lb.height;
+            if ly + lh >= 0 && ly <= view_end {
+                paint_ended_line(cart, code, ly, sheet, gs);
+            }
+        }
+        if top > 0 {
+            paint_notice_strip(cart, w, top, sheet, gs);
         }
         // Cache this frame's proportional tail for the click inverse (`y` is the
         // tail's screen-y). Moved in AFTER every read above (`live_lb` / `prov`
@@ -863,6 +909,81 @@ fn live_run_underline(
         out.push((line.y + line.h - mark_w, line_col_x(line, a), line_col_x(line, b)));
     }
     out
+}
+
+/// HALCYON-INSTRUMENT 14.6 (logical): the state texts' size (Sans 12), the
+/// notice strip's minimum height (32) and its paddings (8 / 12).
+const STATE_PX: f32 = 12.0;
+const NOTICE_MIN_H: i32 = 32;
+const NOTICE_PAD_Y: i32 = 8;
+const NOTICE_PAD_X: i32 = 12;
+pub const NOTICE_TEXT: &str = "Connection lost. The last output is preserved.";
+
+fn state_line(gs: &mut GlyphSource, sheet: &Sheet) -> (i32, i32) {
+    let px = sheet.px(STATE_PX);
+    gs.line_metrics(FACE_BODY, px)
+        .map(|m| (m.ascent, m.ascent + m.descent))
+        .unwrap_or((10, 14))
+}
+
+/// The disconnected tile's strip height: at least 32, else the line box
+/// plus its two paddings.
+pub fn notice_strip_h(sheet: &Sheet, gs: &mut GlyphSource) -> i32 {
+    let (_, lh) = state_line(gs, sheet);
+    sheet.ipx(NOTICE_MIN_H).max(lh + 2 * sheet.ipx(NOTICE_PAD_Y))
+}
+
+/// The ended tile's final line height: its line box plus the block gap.
+pub fn ended_line_h(sheet: &Sheet, gs: &mut GlyphSource) -> i32 {
+    let (_, lh) = state_line(gs, sheet);
+    lh + sheet.block_gap
+}
+
+/// `Process ended \u{b7} exit n` at `y`, in `secondary`, at the text inset.
+fn paint_ended_line(cart: &mut Cartoon, code: i32, y: i32, sheet: &Sheet, gs: &mut GlyphSource) {
+    let px = sheet.px(STATE_PX);
+    let (asc, _) = state_line(gs, sheet);
+    let mut text = String::from("Process ended \u{b7} exit ");
+    let _ = core::fmt::write(&mut text, format_args!("{}", code));
+    let (refs, _) = gs.shape_run(FACE_BODY, px, text.chars());
+    if !refs.is_empty() {
+        cart.push_glyphs(gs.gen(), sheet.pad_x, y + sheet.block_gap + asc, sheet.inst.secondary, &refs);
+    }
+}
+
+/// The disconnected tile's notice strip over the top `h` rows: `header`
+/// ground, a 1 px `separator` below, the `error` `!` then the text in
+/// `secondary`, at the strip's paddings, vertically centred.
+fn paint_notice_strip(cart: &mut Cartoon, w: usize, h: i32, sheet: &Sheet, gs: &mut GlyphSource) {
+    let i = &sheet.inst;
+    cart.ops.push(Op::Rect {
+        x: 0,
+        y: 0,
+        w: w as u32,
+        h: h.max(0) as u32,
+        color: i.header,
+    });
+    let hair = sheet.hairline.max(1);
+    cart.ops.push(Op::Rect {
+        x: 0,
+        y: (h - hair).max(0),
+        w: w as u32,
+        h: hair as u32,
+        color: i.separator,
+    });
+    let px = sheet.px(STATE_PX);
+    let (asc, lh) = state_line(gs, sheet);
+    let base = (h - lh) / 2 + asc;
+    let x = sheet.ipx(NOTICE_PAD_X);
+    let (bang, bw) = gs.shape_run(FACE_BODY, px, "!".chars());
+    let gen = gs.gen();
+    if !bang.is_empty() {
+        cart.push_glyphs(gen, x, base, i.error, &bang);
+    }
+    let (refs, _) = gs.shape_run(FACE_BODY, px, NOTICE_TEXT.chars());
+    if !refs.is_empty() {
+        cart.push_glyphs(gen, x + bw + sheet.ipx(NOTICE_PAD_Y), base, i.secondary, &refs);
+    }
 }
 
 fn paint_grid(
@@ -1323,6 +1444,7 @@ mod tests {
             },
             mode: ScreenMode::Normal,
             title: String::new(),
+            fate: crate::chrome::Fate::Live,
             exit: None,
             bell: false,
             heights: VecDeque::new(),
@@ -2044,5 +2166,98 @@ mod tests {
         let rules = lb.items.iter().filter(|i| matches!(i, Item::Rule)).count();
         assert_eq!(rules, 1, "one rule frame, one rule; items {}", lb.items.len());
         assert!(matches!(lb.items[0], Item::Rule), "the rule precedes the text line");
+    }
+    /// HALCYON-INSTRUMENT 14.6: a retained tile paints its state under the
+    /// Instrument profile -- no caret; an ended tile's `Process ended`
+    /// line in `secondary`; a disconnected tile's notice strip (`header`
+    /// ground at least 32 tall, the `error` `!`) -- and under the legacy
+    /// profile a fate changes NOTHING (the frozen affordance is what it
+    /// was, op for op).
+    #[test]
+    fn a_retained_tile_paints_its_state_under_instrument_and_nothing_new_under_legacy() {
+        use crate::chrome::Fate;
+        let mut gs = GlyphSource::new_vendored(512);
+        let inst = crate::layout::sheet_for(
+            &libhalcyon::instrument::Bundle::builtin(libhalcyon::instrument::Profile::Instrument),
+            100,
+        );
+        let legacy = crate::layout::daylight_sheet(100);
+        let (_, ch, _) = gs.mono_cell();
+        let mk = || {
+            let mut t = daylight_tile(20, 8);
+            t.apply(Record::CellDiff {
+                changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
+                cursor: (0, 2, true),
+                wrapped: vec![],
+                top_continues: false,
+            });
+            t
+        };
+        let (w, h) = (20 * 8, (8 * ch) as usize);
+        let render = |t: &mut Tile, sheet: &Sheet, gs: &mut GlyphSource| {
+            let mut c = Cartoon::new();
+            t.render(&mut c, w, h, gs, sheet, &mut 0, None);
+            c
+        };
+        let caret = |c: &Cartoon, accent: u32| {
+            c.ops.iter().any(|op| matches!(op, Op::Rect { w: 2, color, .. } if *color == accent))
+        };
+        // Legacy: op for op the same with a fate as without (the ops
+        // projected to tuples -- `Op` carries no Debug or Eq).
+        let key = |c: &Cartoon| -> (Vec<(u8, i64, i64, i64, i64, i64, i64)>, Vec<(u32, i32)>) {
+            let ops = c
+                .ops
+                .iter()
+                .map(|op| match *op {
+                    Op::Clear { color } => (0, color as i64, 0, 0, 0, 0, 0),
+                    Op::Rect { x, y, w, h, color } => (1, x as i64, y as i64, w as i64, h as i64, color as i64, 0),
+                    Op::Glyphs { atlas_gen, baseline_x, baseline_y, color, start, count } => {
+                        (2, atlas_gen as i64, baseline_x as i64, baseline_y as i64, color as i64, start as i64, count as i64)
+                    }
+                    Op::Image { blob_id, x, y, w, h } => (3, blob_id as i64, x as i64, y as i64, w as i64, h as i64, 0),
+                    Op::Embed { surface_ref, x, y, w, h } => (4, surface_ref as i64, x as i64, y as i64, w as i64, h as i64, 0),
+                })
+                .collect();
+            let runs = c.runs.iter().map(|r| (r.glyph, r.advance)).collect();
+            (ops, runs)
+        };
+        let live = render(&mut mk(), &legacy, &mut gs);
+        for fate in [Fate::Ended(3), Fate::Disconnected, Fate::Crashed] {
+            let mut t = mk();
+            t.fate = fate;
+            let c = render(&mut t, &legacy, &mut gs);
+            assert_eq!(key(&c), key(&live), "legacy unchanged under {:?}", fate);
+        }
+        assert!(caret(&live, legacy.accent));
+        // Instrument, live: the caret.
+        let c = render(&mut mk(), &inst, &mut gs);
+        assert!(caret(&c, inst.accent));
+        assert!(!c.ops.iter().any(|op| matches!(op, Op::Glyphs { color, .. } if *color == inst.inst.secondary)));
+        // Ended: no caret, the final line.
+        let mut t = mk();
+        t.fate = Fate::Ended(3);
+        let c = render(&mut t, &inst, &mut gs);
+        assert!(!caret(&c, inst.accent), "no caret on a retained tile");
+        assert!(
+            c.ops.iter().any(|op| matches!(op, Op::Glyphs { color, .. } if *color == inst.inst.secondary)),
+            "the `Process ended` line in secondary"
+        );
+        // Disconnected: the strip over the top, no caret.
+        let mut t = mk();
+        t.fate = Fate::Disconnected;
+        let c = render(&mut t, &inst, &mut gs);
+        assert!(!caret(&c, inst.accent));
+        assert!(
+            c.ops.iter().any(|op| matches!(op, Op::Rect { x: 0, y: 0, h, color, .. } if *color == inst.inst.header && *h >= 32)),
+            "the notice strip's ground"
+        );
+        assert!(c.ops.iter().any(|op| matches!(op, Op::Glyphs { color, .. } if *color == inst.inst.error)), "the `!`");
+        assert!(c.ops.iter().any(|op| matches!(op, Op::Rect { h: 1, color, .. } if *color == inst.inst.separator)), "its rule");
+        // Crashed: no caret, no strip, no line -- the metadata carries the word.
+        let mut t = mk();
+        t.fate = Fate::Crashed;
+        let c = render(&mut t, &inst, &mut gs);
+        assert!(!caret(&c, inst.accent));
+        assert!(!c.ops.iter().any(|op| matches!(op, Op::Rect { x: 0, y: 0, color, .. } if *color == inst.inst.header)));
     }
 }

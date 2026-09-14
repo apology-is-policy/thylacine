@@ -75,6 +75,14 @@ pub struct Sheet {
     /// The profile the sheet was built for (HALCYON-INSTRUMENT 4): what
     /// `metrics` below is the table of, and what a rescale rebuilds under.
     pub profile: Profile,
+    /// The resolved bundle's Instrument palette (HALCYON-INSTRUMENT 4.4):
+    /// the authored 35 under an Instrument theme, the projection under a
+    /// legacy one. The Instrument painters (the header, the placard, the
+    /// tile states, the menu) read their tokens here; the legacy painters
+    /// keep reading `theme`.
+    pub inst: libhalcyon::instrument::InstrumentTheme,
+    /// The derived opaques (7.3), resolved once with the bundle.
+    pub derived: libhalcyon::instrument::Derived,
     /// The chrome metrics at `scale` (`Metrics::at`): the tag-bar padding,
     /// the hairline, the bar heights -- the SAME table the compositor
     /// carves with, so the two painters agree by construction.
@@ -139,7 +147,24 @@ impl Sheet {
 /// Daylight-specific constructor (HALCYON-THEME 3.2).
 #[cfg(test)]
 pub fn daylight_sheet(scale: u16) -> Sheet {
-    sheet_for(&libhalcyon::theme::builtin(), Profile::Legacy, scale)
+    sheet_for(
+        &libhalcyon::instrument::Bundle::from_legacy(Profile::Legacy, libhalcyon::theme::builtin()),
+        scale,
+    )
+}
+
+impl Sheet {
+    /// The bundle this sheet was built from, for a rebuild at another
+    /// scale (`sheet_for(&sheet.bundle(), pct)`): the profile, the legacy
+    /// theme and the Instrument palette travel together, so a rescale can
+    /// never drop the authored side of the pair.
+    pub fn bundle(&self) -> libhalcyon::instrument::Bundle {
+        libhalcyon::instrument::Bundle {
+            profile: self.profile,
+            theme: self.theme,
+            inst: self.inst,
+        }
+    }
 }
 
 /// The sheet for a resolved theme under `profile` at `scale`. The metrics
@@ -148,13 +173,18 @@ pub fn daylight_sheet(scale: u16) -> Sheet {
 /// legacy, the compiled Instrument table under instrument), scaled by the
 /// one `Metrics::at` the compositor's carve also reads, so the two painters
 /// cannot drift.
-pub fn sheet_for(d: &libhalcyon::theme::Theme, profile: Profile, scale: u16) -> Sheet {
-    let metrics = libhalcyon::instrument::metrics_base(profile, d).at(scale);
+pub fn sheet_for(b: &libhalcyon::instrument::Bundle, scale: u16) -> Sheet {
+    let v = b.at(scale);
+    let d = &b.theme;
+    let profile = b.profile;
+    let metrics = v.metrics;
     let (island, grid) = mono_advances(scale);
     let px = |v: f32| libhalcyon::scale::px(v, scale);
     let ipx = |v: i32| libhalcyon::scale::ipx(v, scale);
     Sheet {
         theme: *d,
+        inst: v.inst,
+        derived: v.derived,
         ground: d.surface,
         smooth_mem: d.smooth_mem,
         ink: d.fg,
@@ -1649,7 +1679,7 @@ mod tests {
             assert!(!daylight.contains(&c), "the retint collided with Daylight");
         }
 
-        let s = sheet_for(&t, Profile::Legacy, 100);
+        let s = sheet_for(&libhalcyon::instrument::Bundle::from_legacy(Profile::Legacy, t), 100);
         for (name, c) in [
             ("ground", s.ground),
             ("ink", s.ink),
@@ -2517,7 +2547,7 @@ mod tests {
         // from its chrome ink.
         d.terminal.fg = 0xFFFF_FFFF;
         assert_ne!(d.terminal.fg, d.fg, "the fixture must actually split them");
-        let sheet = sheet_for(&d, Profile::Legacy, 100);
+        let sheet = sheet_for(&libhalcyon::instrument::Bundle::from_legacy(Profile::Legacy, d), 100);
         assert_eq!(sheet.ink, d.fg, "the sheet's ink is the PALETTE tier");
 
         // A cell that set no colour carries the PEN's default.
@@ -2542,7 +2572,7 @@ mod tests {
         // The control, one variable away: with the tiers equal -- every theme
         // shipped today -- the same hooks fire, so this is not a behaviour
         // change for Daylight or Nightjar.
-        let agreed = sheet_for(&libhalcyon::theme::DAYLIGHT, Profile::Legacy, 100);
+        let agreed = sheet_for(&libhalcyon::instrument::Bundle::from_legacy(Profile::Legacy, libhalcyon::theme::DAYLIGHT), 100);
         let ab = Style { fg: agreed.theme.terminal.fg, bg: 0, attrs: 0, em: 0, obj: 0, hdr: 0 };
         assert_eq!(color_for(&Style { em: EM_DIM, ..ab }, &agreed), agreed.dim);
         assert_eq!(color_for(&Style { obj: 1, ..ab }, &agreed), agreed.obj);
