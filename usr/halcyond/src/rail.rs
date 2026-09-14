@@ -19,13 +19,19 @@
 // hints centred between the two end groups (the CSS space-between), the
 // right group's 1 x 12 separator with 10 px margins.
 //
-// What the faces cannot yet give (I-5's type map): the brand's 600 and the
-// context's 500 weights run in the body face; the rails' mono runs use the
-// island size (Cornucopia's 6 px advance floor); the `═` / `║` split
-// icons and the `⌄` chevron, which neither face carries, are drawn as
-// marks of the golden's footprint; `↺`, `?`, `‹`, `›`, `✓`, `!` and `·`
-// are glyphs. The letter-spacing the kit sets on every uppercase run
-// (0.08 em) is honoured through `GlyphSource::shape_run_spaced`.
+// The type is the sheet's (7.2, since I-5): the brand in `face_brand`
+// (600), the context's basename in `face_medium` (500), labels and buttons
+// in `face_body` (400) at 11 / 10; the mono roles -- the chips, `?`, the
+// clock (11), the whole footer (10; 9 narrow) -- in `face_mono_text`, the
+// free-running Cornucopia at the type map's sizes (the island CELL's 6 px
+// advance floor served them until I-5). `↺`, `‹`, `›` are Sans glyphs;
+// `?`, `✓`, `!` and `·` mono ones. The `═` / `║` split icons and the `⌄`
+// chevron stay DRAWN as marks of the golden's footprint: the golden's are a
+// browser fallback font's glyphs (Plex Sans carries none of the three), 8
+// wide where Cornucopia's box glyph at 10 px is 5, so the mark reproduces
+// the oracle where the glyph would not. The letter-spacing the kit sets on
+// every uppercase run (0.08 em) is honoured through
+// `GlyphSource::shape_run_spaced`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -34,7 +40,7 @@ use cartoon::{Cartoon, GlyphRef, Op};
 use libhalcyon::theme::Argb;
 
 use crate::layout::Sheet;
-use crate::raster::{GlyphSource, FACE_BODY, FACE_MONO};
+use crate::raster::GlyphSource;
 use crate::status::{Condition, Slots, StatusModel};
 
 /// Logical px at 100 % (8.1 / 8.2 / 14.1).
@@ -344,7 +350,8 @@ pub fn rail_list(
     let gen = gs.gen();
     let px = sheet.px(RAIL_PX);
     let bpx = sheet.px(BUTTON_PX);
-    let mono_px = sheet.mono_island_px;
+    let (body, medium, brand, mono) = (sheet.face_body, sheet.face_medium, sheet.face_brand, sheet.face_mono_text);
+    let mono_px = sheet.chrome_mono_px;
     cart.ops.push(Op::Clear { color: i.rail });
     rect(&mut cart, 0, ch, wi, hair, i.structure);
 
@@ -364,9 +371,9 @@ pub fn rail_list(
         let (run, face, fpx) = if narrow {
             let mut num = String::new();
             let _ = core::fmt::write(&mut num, format_args!("{:02}", m.active as u32 + 1));
-            (tracked(gs, FACE_MONO, mono_px, &num), FACE_MONO, mono_px)
+            (tracked(gs, mono, mono_px, &num), mono, mono_px)
         } else {
-            (tracked(gs, FACE_BODY, px, "WORKSPACE 01"), FACE_BODY, px)
+            (tracked(gs, brand, px, "WORKSPACE 01"), brand, px)
         };
         let base = centred_in(gs, face, fpx, ch);
         push(&mut cart, gen, label_x, base, i.text, &run);
@@ -406,7 +413,7 @@ pub fn rail_list(
                 (prev, "\u{2039}", can_prev, RailHit::ChipsPrev),
                 (next, "\u{203A}", can_next, RailHit::ChipsNext),
             ] {
-                let run = tracked(gs, FACE_BODY, px, glyph);
+                let run = tracked(gs, body, px, glyph);
                 let color = if !can {
                     i.dim
                 } else if ink.pressed == Some(hit) {
@@ -414,7 +421,7 @@ pub fn rail_list(
                 } else {
                     i.secondary
                 };
-                let base = centred_in(gs, FACE_BODY, px, ch);
+                let base = centred_in(gs, body, px, ch);
                 push(&mut cart, gen, b.0 + (b.2 - run.width) / 2, base, color, &run);
             }
             z.chips_prev = Some(prev);
@@ -435,8 +442,8 @@ pub fn rail_list(
             }
             let mut num = String::new();
             let _ = core::fmt::write(&mut num, format_args!("{:02}", c as u32 + 1));
-            let run = tracked(gs, FACE_MONO, mono_px, &num);
-            let base = chip_y + centred_in(gs, FACE_MONO, mono_px, chip_h);
+            let run = tracked(gs, mono, mono_px, &num);
+            let base = chip_y + centred_in(gs, mono, mono_px, chip_h);
             let color = if active || hovered { i.text } else { i.secondary };
             push(&mut cart, gen, cx + (chip_w - run.width) / 2, base, color, &run);
             z.chips.push((c, b));
@@ -449,9 +456,9 @@ pub fn rail_list(
     {
         let mut text = String::new();
         let _ = core::fmt::write(&mut text, format_args!("{:02}:{:02}", m.hour, m.minute));
-        let run = tracked(gs, FACE_MONO, mono_px, &text);
+        let run = tracked(gs, mono, sheet.clock_px, &text);
         let tx = xr - sheet.ipx(CLOCK_PAD_R) - run.width;
-        let base = centred_in(gs, FACE_MONO, mono_px, ch);
+        let base = centred_in(gs, mono, sheet.clock_px, ch);
         push(&mut cart, gen, tx, base, i.text, &run);
         z.clock = (tx, run.width);
         xr = tx - sheet.ipx(CLOCK_PAD_L);
@@ -463,7 +470,7 @@ pub fn rail_list(
     let igap = sheet.ipx(BTN_INNER_GAP);
     let icon_w = sheet.ipx(ICON_W);
     let bgap = sheet.ipx(BTN_GAP);
-    let label_base = by + centred_in(gs, FACE_BODY, bpx, bh);
+    let label_base = by + centred_in(gs, body, bpx, bh);
     // A button's ink and ground by its pointer state.
     let button_ink = |hit: RailHit| -> Argb {
         if ink.pressed == Some(hit) {
@@ -487,8 +494,8 @@ pub fn rail_list(
         let bw = sheet.ipx(HELP_W);
         let bx = xr - bw;
         frame(&mut cart, RailHit::Help, bx, bw);
-        let run = tracked(gs, FACE_MONO, mono_px, "?");
-        let base = by + centred_in(gs, FACE_MONO, mono_px, bh);
+        let run = tracked(gs, mono, bpx, "?");
+        let base = by + centred_in(gs, mono, bpx, bh);
         push(&mut cart, gen, bx + (bw - run.width) / 2, base, button_ink(RailHit::Help), &run);
         z.buttons.push((RailHit::Help, (bx, by, bw, bh)));
         xr = bx - bgap;
@@ -496,14 +503,14 @@ pub fn rail_list(
     // `↺ RESET`.
     {
         let hit = RailHit::Reset;
-        let label = if narrow { None } else { Some(tracked(gs, FACE_BODY, bpx, "RESET")) };
+        let label = if narrow { None } else { Some(tracked(gs, body, bpx, "RESET")) };
         let lw = label.as_ref().map_or(0, |r| igap + r.width);
         let bw = 2 * border + 2 * pad + icon_w + lw;
         let bx = xr - bw;
         frame(&mut cart, hit, bx, bw);
         let color = button_ink(hit);
         let ix = bx + border + pad;
-        let icon = tracked(gs, FACE_BODY, bpx, "\u{21BA}");
+        let icon = tracked(gs, body, bpx, "\u{21BA}");
         push(&mut cart, gen, ix + (icon_w - icon.width) / 2, label_base, color, &icon);
         if let Some(r) = &label {
             push(&mut cart, gen, ix + icon_w + igap, label_base, color, r);
@@ -520,7 +527,7 @@ pub fn rail_list(
         let label = if narrow || name.is_empty() {
             None
         } else {
-            Some(tracked(gs, FACE_BODY, bpx, &name))
+            Some(tracked(gs, body, bpx, &name))
         };
         let lw = label.as_ref().map_or(0, |r| igap + r.width);
         let bw = 2 * border + 2 * pad + sw + lw + igap + cw;
@@ -556,7 +563,7 @@ pub fn rail_list(
     // `║ SPLIT V` then `═ SPLIT H` (icons drawn: U+2550/2551 are in no face
     // until I-5's mono re-subset).
     for (hit, text, vertical) in [(RailHit::SplitV, "SPLIT V", true), (RailHit::SplitH, "SPLIT H", false)] {
-        let label = if narrow { None } else { Some(tracked(gs, FACE_BODY, bpx, text)) };
+        let label = if narrow { None } else { Some(tracked(gs, body, bpx, text)) };
         let lw = label.as_ref().map_or(0, |r| igap + r.width);
         let bw = 2 * border + 2 * pad + icon_w + lw;
         let bx = xr - bw;
@@ -600,30 +607,30 @@ pub fn rail_list(
             } else {
                 0
             };
-            let base_w = width_of(gs, FACE_BODY, px, &base_seg);
-            let title_w = width_of(gs, FACE_BODY, px, &title);
+            let base_w = width_of(gs, medium, px, &base_seg);
+            let title_w = width_of(gs, body, px, &title);
             // The cwd's leading segments give way first (middle-ellipsised),
             // then the title is cut from its end; the basename stays whole
             // while anything else can yield.
             let lead_avail = avail - base_w - sep_w - title_w;
-            let lead = if lead.is_empty() { lead } else { fit_middle(gs, FACE_BODY, px, &lead, lead_avail) };
-            let lead_w = width_of(gs, FACE_BODY, px, &lead);
+            let lead = if lead.is_empty() { lead } else { fit_middle(gs, body, px, &lead, lead_avail) };
+            let lead_w = width_of(gs, body, px, &lead);
             let mut sep_w = sep_w;
-            let mut title = fit_end(gs, FACE_BODY, px, &title, avail - lead_w - base_w - sep_w);
+            let mut title = fit_end(gs, body, px, &title, avail - lead_w - base_w - sep_w);
             if title.is_empty() {
                 sep_w = 0;
             }
             let base_seg = if lead_w + base_w + sep_w > avail {
-                fit_end(gs, FACE_BODY, px, &base_seg, avail - lead_w - sep_w)
+                fit_end(gs, medium, px, &base_seg, avail - lead_w - sep_w)
             } else {
                 base_seg
             };
-            let base = centred_in(gs, FACE_BODY, px, ch);
+            let base = centred_in(gs, body, px, ch);
             let mut x = ctx_x;
-            let r = tracked(gs, FACE_BODY, px, &lead);
+            let r = tracked(gs, body, px, &lead);
             push(&mut cart, gen, x, base, i.dim, &r);
             x += r.width;
-            let r = tracked(gs, FACE_BODY, px, &base_seg);
+            let r = tracked(gs, medium, px, &base_seg);
             push(&mut cart, gen, x, base, i.text, &r);
             x += r.width;
             if sep_w > 0 {
@@ -632,7 +639,7 @@ pub fn rail_list(
                 rect(&mut cart, x + sm, centre(ch, sh), hair, sh, i.structure);
                 x += sep_w;
             }
-            let r = tracked(gs, FACE_BODY, px, &title);
+            let r = tracked(gs, body, px, &title);
             push(&mut cart, gen, x, base, i.secondary, &r);
             x += r.width;
             if title.is_empty() {
@@ -782,17 +789,19 @@ pub fn footer_list(
     let ch = hi - hair;
     let narrow = wi <= sheet.ipx(NARROW_W);
     let gen = gs.gen();
-    let mono_px = sheet.mono_island_px;
+    // 8.2: mono 10 / 500 (9 narrow) -- `face_mono_text` at the footer's
+    // size, the Regular serving the mockup's 500 (ruling 11).
+    let mono = sheet.face_mono_text;
     let logical_px = if narrow { FOOTER_NARROW_PX } else { FOOTER_PX };
-    let glyph_px = sheet.px(logical_px);
+    let mono_px = sheet.px(logical_px);
     cart.ops.push(Op::Clear { color: i.rail });
     rect(&mut cart, 0, 0, wi, hair, i.structure);
-    let base = oy + centred_in(gs, FACE_MONO, mono_px, ch);
+    let base = oy + centred_in(gs, mono, mono_px, ch);
     let pad = sheet.ipx(FOOT_PAD);
 
     // --- Right: the pane count, the separator, the host ------------------------
     let host = m.host.as_deref().unwrap_or("LOCAL").to_uppercase();
-    let host_run = tracked(gs, FACE_MONO, mono_px, &host);
+    let host_run = tracked(gs, mono, mono_px, &host);
     let host_x = wi - pad - host_run.width;
     push(&mut cart, gen, host_x, base, i.secondary, &host_run);
     let sm = sheet.ipx(SEP_MARGIN);
@@ -804,7 +813,7 @@ pub fn footer_list(
         &mut panes,
         format_args!("{} PANE{}", m.pane_count, if m.pane_count == 1 { "" } else { "S" }),
     );
-    let panes_run = tracked(gs, FACE_MONO, mono_px, &panes);
+    let panes_run = tracked(gs, mono, mono_px, &panes);
     let panes_x = sep_x - sm - panes_run.width;
     push(&mut cart, gen, panes_x, base, i.secondary, &panes_run);
     slots.clock = (panes_x, wi - pad - panes_x);
@@ -825,12 +834,11 @@ pub fn footer_list(
                     rect(&mut cart, gx + centre(gb, sq), gy + centre(gb, sq), sq, sq, i.amber);
                 }
                 FooterState::Success => {
-                    let run = tracked(gs, FACE_BODY, glyph_px, "\u{2713}");
-                    let b = oy + centred_in(gs, FACE_BODY, glyph_px, ch);
-                    push(&mut cart, gen, (gx + (gb - run.width) / 2).max(0), b, i.success, &run);
+                    let run = tracked(gs, mono, mono_px, "\u{2713}");
+                    push(&mut cart, gen, (gx + (gb - run.width) / 2).max(0), base, i.success, &run);
                 }
                 FooterState::Failure => {
-                    let run = tracked(gs, FACE_MONO, mono_px, "!");
+                    let run = tracked(gs, mono, mono_px, "!");
                     push(&mut cart, gen, (gx + (gb - run.width) / 2).max(0), base, i.error, &run);
                 }
             }
@@ -849,7 +857,7 @@ pub fn footer_list(
         for (n, (chord, action)) in m.hints.iter().enumerate() {
             if n > 0 {
                 spans.push(Span {
-                    run: tracked(gs, FACE_MONO, mono_px, "\u{b7}"),
+                    run: tracked(gs, mono, mono_px, "\u{b7}"),
                     color: i.structure,
                 });
                 k += 1;
@@ -857,7 +865,7 @@ pub fn footer_list(
             for text in [chord, action] {
                 let color = if k % 2 == 0 { i.dim } else { i.secondary };
                 spans.push(Span {
-                    run: tracked(gs, FACE_MONO, mono_px, text),
+                    run: tracked(gs, mono, mono_px, text),
                     color,
                 });
                 k += 1;
@@ -877,8 +885,8 @@ pub fn footer_list(
     } else {
         right_start - hgap - label_x
     };
-    let label = fit_end(gs, FACE_MONO, mono_px, &label, label_limit.max(0));
-    let label_run = tracked(gs, FACE_MONO, mono_px, &label);
+    let label = fit_end(gs, mono, mono_px, &label, label_limit.max(0));
+    let label_run = tracked(gs, mono, mono_px, &label);
     push(&mut cart, gen, label_x, base, label_ink, &label_run);
     let left_end = label_x + label_run.width;
     slots.cond = (gx, left_end - gx);
@@ -1165,6 +1173,32 @@ mod tests {
         let sv = z.buttons[3].1;
         let ix = sv.0 + 1 + 9;
         assert!(r.contains(&(ix + 2, 4 + 6, 1, 13, CARBON_SECONDARY)) && r.contains(&(ix + 4, 4 + 6, 1, 13, CARBON_SECONDARY)));
+        // The type map's widths against the golden's DOM boxes (7.2, I-5;
+        // `geometry-styles.json` at 1440 x 900 / 100%): the clock `09:41`
+        // in mono 11 tracked .08 em is 31.9 (the `#clock` box's 46.906
+        // less its 10 / 5 padding); the whole context 287.219 (Sans 11
+        // tracked .88 px, the basename in 500); the button labels SPLIT H
+        // 41.562, SPLIT V 40.594, CARBON OPTICS 87.281, RESET 33.594 in
+        // Sans 400 at 10 tracked .8 px; the split-h BOX 76.453. Within a
+        // pixel: the pen truncates its 1/256 remainder at the run's end
+        // and the browser reports the fractional box. Before I-5 the clock
+        // ran at the 12 px island cell (5 x 6 + tracking = 35) and the
+        // labels in Text 450, so these are the type change's witnesses.
+        let near = |got: i32, want: f32| (got as f32 - want).abs() <= 1.0;
+        assert!(near(z.clock.1, 31.9), "the clock run: {} vs 31.9", z.clock.1);
+        assert!(near(z.ctx.1, 287.219), "the context: {} vs 287.219", z.ctx.1);
+        let label_in = |b: (i32, i32, i32, i32), n: usize| -> i32 {
+            g.iter()
+                .find(|x| x.3 == n && x.0 > b.0 && x.0 < b.0 + b.2)
+                .map(|x| x.4)
+                .unwrap_or_else(|| panic!("a {n}-glyph label inside {b:?}: {g:?}"))
+        };
+        assert!(near(label_in(sh, 7), 41.562), "SPLIT H: {}", label_in(sh, 7));
+        assert!(near(label_in(sv, 7), 40.594), "SPLIT V: {}", label_in(sv, 7));
+        assert!(near(label_in(theme, 13), 87.281), "CARBON OPTICS: {}", label_in(theme, 13));
+        let reset = z.buttons[1].1;
+        assert!(near(label_in(reset, 5), 33.594), "RESET: {}", label_in(reset, 5));
+        assert!(near(sh.2, 76.453), "the split-h box: {}", sh.2);
         // The hit test names each target and nothing between them.
         assert_eq!(rail_hit(&z, 15, 15), Some(RailHit::Brand));
         assert_eq!(rail_hit(&z, 60, 15), Some(RailHit::Brand), "the label is the brand's too");
@@ -1326,6 +1360,15 @@ mod tests {
         let panes = g.iter().find(|x| x.3 == 7 && x.0 > 1200).expect("3 PANES");
         assert_eq!(panes.0 + panes.4, sep.0 - 10);
         assert_eq!(sl.clock, (panes.0, 1430 - panes.0));
+        // The footer's type against the golden's boxes (7.2 / 8.2, I-5):
+        // mono 10 tracked .8 px -- `READY` 29.000 (`#status-text`), `3
+        // PANES` 40.609 (`#pane-count`), `LOCAL` 29 (five glyphs), the
+        // `·` 5.812; within a pixel of the fractional boxes. At the 12 px
+        // island cell these were 34 / 47.6 / 34.
+        let near = |got: i32, want: f32| (got as f32 - want).abs() <= 1.0;
+        assert!(near(ready.4, 29.0), "READY: {}", ready.4);
+        assert!(near(panes.4, 40.609), "3 PANES: {}", panes.4);
+        assert!(near(local.4, 29.0), "LOCAL: {}", local.4);
         // The hints: five spans in position order, centred between the two
         // end groups.
         let centre: Vec<_> = g.iter().filter(|x| x.0 > 60 && x.0 < 1200).collect();
@@ -1335,6 +1378,7 @@ mod tests {
         assert_eq!(centre[2].2, CARBON_STRUCTURE);
         assert_eq!(centre[3].2, CARBON_SECONDARY);
         assert_eq!(centre[4].2, CARBON_DIM);
+        assert!(near(centre[2].4, 5.812), "the dot: {}", centre[2].4);
         let left_end = ready.0 + ready.4;
         let (cx, cw) = sl.ctx;
         assert_eq!(cx, centre[0].0);

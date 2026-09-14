@@ -525,14 +525,15 @@ pub fn item_window(m: &Menu, h: u32, sheet: &Sheet, gs: &GlyphSource) -> (usize,
 fn menu_size_inst(m: &Menu, sheet: &Sheet, gs: &mut GlyphSource, max_h: u32) -> (u32, u32) {
     let tpx = sheet.px(INST_TITLE_PX);
     let ipx = sheet.px(INST_ITEM_PX);
-    let mut w = gs.shape_run(FACE_BODY, tpx, m.ty.chars()).1
+    let (title_face, item_face) = (sheet.face_medium, sheet.face_body);
+    let mut w = gs.shape_run(title_face, tpx, m.ty.chars()).1
         + sheet.ipx(INST_PAD_X)
-        + gs.shape_run(FACE_BODY, tpx, m.refv.chars()).1;
+        + gs.shape_run(title_face, tpx, m.refv.chars()).1;
     if m.items.is_empty() {
-        w = w.max(gs.shape_run(FACE_BODY, ipx, NO_VERBS.chars()).1);
+        w = w.max(gs.shape_run(item_face, ipx, NO_VERBS.chars()).1);
     }
     for it in m.items.iter() {
-        w = w.max(gs.shape_run(FACE_BODY, ipx, it.label.chars()).1);
+        w = w.max(gs.shape_run(item_face, ipx, it.label.chars()).1);
     }
     let w = (w + 2 * sheet.ipx(INST_PAD_X) + 2 * sheet.ipx(INST_PAD))
         .clamp(sheet.ipx(INST_MIN_W), sheet.ipx(INST_MAX_W))
@@ -722,11 +723,14 @@ fn menu_list_inst(m: &Menu, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource)
     let gen = gs.gen();
     let (pad, pad_x) = (sheet.ipx(INST_PAD), sheet.ipx(INST_PAD_X));
     let (tpx, ipx) = (sheet.px(INST_TITLE_PX), sheet.px(INST_ITEM_PX));
+    // 14.2: the title row Sans 500 11, the items Sans 400 13 -- the
+    // sheet's `face_medium` / `face_body` (since I-5).
+    let (title_face, item_face) = (sheet.face_medium, sheet.face_body);
     let th = title_h(gs, sheet);
     let rh = row_h(gs, sheet);
-    let centre = |gs: &mut GlyphSource, px: f32, rows: i32| -> i32 {
+    let centre = |gs: &mut GlyphSource, face: u8, px: f32, rows: i32| -> i32 {
         let (asc, desc) = gs
-            .line_metrics(FACE_BODY, px)
+            .line_metrics(face, px)
             .map(|lm| (lm.ascent, lm.descent))
             .unwrap_or((8, 2));
         (rows - (asc + desc)) / 2 + asc
@@ -734,16 +738,16 @@ fn menu_list_inst(m: &Menu, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource)
     let mut y = pad;
     // The title: the type, then the label.
     let mut x = pad + pad_x;
-    let (refs, adv) = gs.shape_run(FACE_BODY, tpx, m.ty.chars());
-    let tbase = y + centre(gs, tpx, th);
+    let (refs, adv) = gs.shape_run(title_face, tpx, m.ty.chars());
+    let tbase = y + centre(gs, title_face, tpx, th);
     if !refs.is_empty() {
         cart.push_glyphs(gen, x, tbase, i.secondary, &refs);
     }
     x += adv + pad_x;
     let avail = wi - pad - pad_x - x;
     if avail > 0 && !m.refv.is_empty() {
-        let label = crate::chrome::fit_end_pub(gs, FACE_BODY, tpx, &m.refv, avail);
-        let (refs, _) = gs.shape_run(FACE_BODY, tpx, label.chars());
+        let label = crate::chrome::fit_end_pub(gs, title_face, tpx, &m.refv, avail);
+        let (refs, _) = gs.shape_run(title_face, tpx, label.chars());
         if !refs.is_empty() {
             cart.push_glyphs(gen, x, tbase, i.text, &refs);
         }
@@ -758,9 +762,9 @@ fn menu_list_inst(m: &Menu, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource)
     });
     y += hair;
     if m.items.is_empty() {
-        let (refs, _) = gs.shape_run(FACE_BODY, ipx, NO_VERBS.chars());
+        let (refs, _) = gs.shape_run(item_face, ipx, NO_VERBS.chars());
         if !refs.is_empty() {
-            let base = y + centre(gs, ipx, rh);
+            let base = y + centre(gs, item_face, ipx, rh);
             cart.push_glyphs(gen, pad + pad_x, base, i.dim, &refs);
         }
         return cart;
@@ -795,9 +799,9 @@ fn menu_list_inst(m: &Menu, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource)
                 color: i.amber,
             });
         }
-        let (refs, _) = gs.shape_run(FACE_BODY, ipx, it.label.chars());
+        let (refs, _) = gs.shape_run(item_face, ipx, it.label.chars());
         if !refs.is_empty() {
-            let base = y + centre(gs, ipx, rh);
+            let base = y + centre(gs, item_face, ipx, rh);
             let ink = if it.enabled { i.text } else { i.dim };
             cart.push_glyphs(gen, pad + pad_x, base, ink, &refs);
         }

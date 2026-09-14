@@ -32,7 +32,7 @@ use vt::ATTR_BOLD;
 
 use crate::raster::{
     mono_advances, GlyphSource, FACE_BODY, FACE_BODY_BOLD, FACE_BODY_ITALIC, FACE_HEADING_ITALIC,
-    FACE_MONO,
+    FACE_MONO, FACE_MONO_ITALIC, FACE_MONO_TEXT, FACE_SANS, FACE_SANS_MEDIUM, FACE_SANS_SEMIBOLD,
 };
 use crate::transcript::{
     hdr_is_title, hdr_level, Block, BlockKind, Item, LineClass, Style, TCell, EM_CODE, EM_DIM,
@@ -115,6 +115,39 @@ pub struct Sheet {
     /// to this wherever the sheet is built, so the rasters follow the
     /// theme the sheet was built from.
     pub smooth_mem: u16,
+    /// The faces by ROLE for this sheet's profile (HALCYON-INSTRUMENT 7.1
+    /// / 7.2 under Instrument; HALCYON-VISUAL 7 under legacy), so a
+    /// painter names the role and the profile picks the cut:
+    ///
+    /// | role         | legacy                 | Instrument            |
+    /// |--------------|------------------------|-----------------------|
+    /// | `face_body`  | Text 450               | Regular 400           |
+    /// | `face_strong`| Bold 700               | Bold 700              |
+    /// | `face_emph`  | Text Italic 450        | Regular Italic 400    |
+    /// | `face_hdr`   | Regular Italic 400     | Medium 500, roman     |
+    /// | `face_medium`| Text 450               | Medium 500            |
+    /// | `face_brand` | Text 450               | SemiBold 600          |
+    /// | `face_mono_text`   | the island CELL  | Cornucopia free-running|
+    /// | `face_mono_italic` | the island CELL (roman) | the Italic CELL |
+    ///
+    /// The legacy column is exactly the faces the legacy painters named
+    /// as constants before I-5 (byte-identical by construction); the
+    /// Instrument column is the type map's.
+    pub face_body: u8,
+    pub face_strong: u8,
+    pub face_emph: u8,
+    pub face_hdr: u8,
+    pub face_medium: u8,
+    pub face_brand: u8,
+    pub face_mono_text: u8,
+    pub face_mono_italic: u8,
+    /// The chrome's mono sizes at `scale` (7.2): the header's index and
+    /// metadata, the footer and a menu hint at 10; the clock at 11 --
+    /// through `face_mono_text`. Under legacy both are the island em (the
+    /// legacy chrome has no such roles; the values keep a painter on the
+    /// cell).
+    pub chrome_mono_px: f32,
+    pub clock_px: f32,
     /// Bumps on any sheet change; part of the layout-cache key.
     pub gen: u32,
 }
@@ -181,6 +214,8 @@ pub fn sheet_for(b: &libhalcyon::instrument::Bundle, scale: u16) -> Sheet {
     let (island, grid) = mono_advances(scale);
     let px = |v: f32| libhalcyon::scale::px(v, scale);
     let ipx = |v: i32| libhalcyon::scale::ipx(v, scale);
+    let inst = profile == Profile::Instrument;
+    let mono_island_px = 2.0 * island as f32;
     Sheet {
         theme: *d,
         inst: v.inst,
@@ -211,7 +246,7 @@ pub fn sheet_for(b: &libhalcyon::instrument::Bundle, scale: u16) -> Sheet {
         // body's.
         prompt_px: px(11.5),
         hdr_px: [px(17.5), px(14.5), px(12.5)],
-        mono_island_px: 2.0 * island as f32,
+        mono_island_px,
         mono_grid_px: 2.0 * grid as f32,
         // The text inset, MEASURED off the operator's mockup render
         // (halcyon_text_composition_mockup.png at 2x: the prose starts 22
@@ -221,9 +256,24 @@ pub fn sheet_for(b: &libhalcyon::instrument::Bundle, scale: u16) -> Sheet {
         block_gap: ipx(6),
         table_col_gap: ipx(16),
         kv_col_gap: ipx(28),
+        face_body: if inst { FACE_SANS } else { FACE_BODY },
+        face_strong: FACE_BODY_BOLD,
+        face_emph: if inst { FACE_HEADING_ITALIC } else { FACE_BODY_ITALIC },
+        face_hdr: if inst { FACE_SANS_MEDIUM } else { FACE_HEADING_ITALIC },
+        face_medium: if inst { FACE_SANS_MEDIUM } else { FACE_BODY },
+        face_brand: if inst { FACE_SANS_SEMIBOLD } else { FACE_BODY },
+        face_mono_text: if inst { FACE_MONO_TEXT } else { FACE_MONO },
+        face_mono_italic: if inst { FACE_MONO_ITALIC } else { FACE_MONO },
+        chrome_mono_px: if inst { px(CHROME_MONO_PX) } else { mono_island_px },
+        clock_px: if inst { px(CLOCK_PX) } else { mono_island_px },
         gen: 0,
     }
 }
+
+/// The Instrument chrome's mono sizes, LOGICAL (HALCYON-INSTRUMENT 7.2):
+/// the index, the metadata, the footer, a menu hint; and the clock.
+pub const CHROME_MONO_PX: f32 = 10.0;
+pub const CLOCK_PX: f32 = 11.0;
 
 // The vertical rhythm (HALCYON-COMPOSITION 2-3), LOGICAL px: every use
 // below goes through `Sheet::ipx` (the factors are unitless and unchanged).
@@ -1957,6 +2007,43 @@ mod tests {
             "the pill's four hairline strokes"
         );
         assert_eq!(line.h, body_h(&g, &sheet), "the prose line box is the 1.5 line-height");
+    }
+
+    // HALCYON-INSTRUMENT 7.1 / 7.2 (I-5): the sheet names the faces by
+    // ROLE and the profile picks the cut -- the legacy column is exactly
+    // the constants the legacy painters used before (byte-identical by
+    // construction), the Instrument column the type map's; the chrome's
+    // mono sizes are 10 / 11 under Instrument and the island em under
+    // legacy, scaled with the sheet.
+    #[test]
+    fn the_sheet_picks_faces_and_chrome_sizes_by_profile() {
+        use libhalcyon::instrument::{Bundle, Profile};
+        let l = daylight_sheet(100);
+        assert_eq!(
+            (l.face_body, l.face_strong, l.face_emph, l.face_hdr),
+            (FACE_BODY, FACE_BODY_BOLD, FACE_BODY_ITALIC, FACE_HEADING_ITALIC),
+            "legacy: the pre-I-5 constants"
+        );
+        assert_eq!(
+            (l.face_medium, l.face_brand, l.face_mono_text, l.face_mono_italic),
+            (FACE_BODY, FACE_BODY, FACE_MONO, FACE_MONO)
+        );
+        assert_eq!((l.chrome_mono_px, l.clock_px), (l.mono_island_px, l.mono_island_px));
+        let i = sheet_for(&Bundle::builtin(Profile::Instrument), 100);
+        assert_eq!(
+            (i.face_body, i.face_strong, i.face_emph, i.face_hdr),
+            (FACE_SANS, FACE_BODY_BOLD, FACE_HEADING_ITALIC, FACE_SANS_MEDIUM)
+        );
+        assert_eq!(
+            (i.face_medium, i.face_brand, i.face_mono_text, i.face_mono_italic),
+            (FACE_SANS_MEDIUM, FACE_SANS_SEMIBOLD, FACE_MONO_TEXT, FACE_MONO_ITALIC)
+        );
+        assert_eq!((i.chrome_mono_px, i.clock_px), (10.0, 11.0));
+        let i2 = sheet_for(&Bundle::builtin(Profile::Instrument), 200);
+        assert_eq!((i2.chrome_mono_px, i2.clock_px), (20.0, 22.0), "scaled with the sheet");
+        // The rebuild round-trips the profile (a rescale never drops it).
+        let i3 = sheet_for(&i.bundle(), 150);
+        assert_eq!((i3.face_body, i3.chrome_mono_px), (FACE_SANS, 15.0));
     }
 
     #[test]

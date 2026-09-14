@@ -666,10 +666,11 @@ the `Visual` and the `Sheet`; hover paints `hover` under a collapsed
 header, lights its name `text` and shows its `×`; the `×` under the
 pointer is `error` with the 1 px `structure` rule at its box's left edge.
 The action box is RESERVED on every header (the metadata ends 35 px from
-the right edge whether or not the `×` shows). Owed to I-5: the mono runs
-(index, metadata) use the sheet's island size (Cornucopia's 6 px advance
-floor; the type map's 10 px is I-5's), the name and the `×` the current
-Sans face at 13 / 15 px (Plex Sans 500 arrives with the type map); no
+the right edge whether or not the `×` shows). Since I-5a the type is the
+map's: the index and the metadata in the free-running Cornucopia at 10
+(the metadata tracked .04 em — an 8-character run 43 wide, the golden's
+43.203), the name in Plex Sans 500 at 13 tracked .01 em (cut to fit by the
+tracked measure), the `×` in the 400 at 15 (the CSS's face, §7.2); no
 pills (no `pill` mark is built; the region is a hook). The metadata is
 `chrome::metadata_for`: a retained tile's word (`EXIT n` in `success` /
 `error`, `DISCONNECTED`, `CRASHED`), else `RUNNING` in `secondary`
@@ -718,12 +719,12 @@ silently discards children.
 
 | Role | Face | Weight | Vendored today? |
 |---|---|---|---|
-| Body, rail labels, buttons, pills | IBM Plex Sans | 400 Regular | **yes** (`d3958d68`) — `third_party/ibm-plex/ttf/IBMPlexSans-Regular.ttf`, v3.005 (the tree's four are the same version); not yet embedded |
-| Header names, H1/H2, footer strong, picker titles, keywords' weight | IBM Plex Sans | 500 Medium | **yes** (`d3958d68`) — `IBMPlexSans-Medium.ttf`; not yet embedded |
-| Brand (`WORKSPACE`) | IBM Plex Sans | 600 SemiBold | **yes** (`d3958d68`) — `IBMPlexSans-SemiBold.ttf`; not yet embedded |
+| Body, rail labels, buttons, pills | IBM Plex Sans | 400 Regular | **yes** (`d3958d68`) — `third_party/ibm-plex/ttf/IBMPlexSans-Regular.ttf`, v3.005 (the tree's four are the same version); **embedded at I-5a** (`halcyond::IBM_PLEX_SANS_REGULAR`, `raster::FACE_SANS`) |
+| Header names, H1/H2, footer strong, picker titles, keywords' weight | IBM Plex Sans | 500 Medium | **yes** (`d3958d68`) — `IBMPlexSans-Medium.ttf`; **embedded at I-5a** (`FACE_SANS_MEDIUM`) |
+| Brand (`WORKSPACE`) | IBM Plex Sans | 600 SemiBold | **yes** (`d3958d68`) — `IBMPlexSans-SemiBold.ttf`; **embedded at I-5a** (`FACE_SANS_SEMIBOLD`) |
 | Emphasis (rich text) | IBM Plex Sans | 400 Italic | yes (embedded) |
-| Every mono role, incl. the mockup's "500" ones (index, doc path, clock, footer — ruling 11) | Cornucopia | Regular | yes — the embedded subset, **208 codepoints** (`usr/lib/cornucopia/src/cornucopia-subset.ttf`, its list read out of the baked atlas): it LACKS λ, ✓, ‹ ›, −, ⌘ and all of U+2500–257F, which the Instrument surfaces use (§7.4, §14.1, §14.3); re-subset in I-5 |
-| Mono italic (lifetimes, comments) | Cornucopia | Italic — the true face (ruling 11) | **no** — a second subset from `cornucopia-Italic.ttf`, I-5 |
+| Every mono role, incl. the mockup's "500" ones (index, doc path, clock, footer — ruling 11) | Cornucopia | Regular | yes — the embedded subset, **342 codepoints since I-5a** (`usr/lib/cornucopia/src/cornucopia-subset.ttf`, 26 KB: the bake's 207 read out of the atlas plus λ, ✓, ‹ ›, −, ⌘ and U+2500–257F through the tool's `--extra`; 208 and 20 KB before). Served TWO ways: in the CELL (`FACE_MONO`: the alt screen, `pre` islands, raw output) and FREE-RUNNING at any px (`FACE_MONO_TEXT`: the chrome's 10 / 11 px roles) — §7.2's as-built note |
+| Mono italic (lifetimes, comments) | Cornucopia | Italic — the true face (ruling 11) | **yes since I-5a** — `cornucopia-subset-italic.ttf` (28 KB), the same 342 codepoints cut with `--match` against the Regular, which refuses a cut whose cell-bearing tables (upem, the OS/2 Windows pair, the advance of `x`) differ; `FACE_MONO_ITALIC`, a CELL face, and halcyond re-checks the shared cell at startup |
 
 The Cornucopia family on this machine is complete: `~/projects/cornucopia-font/`
 (the same bytes as `~/Library/Fonts/cornucopia-*.ttf`; MIT, © the operator),
@@ -771,6 +772,54 @@ Cornucopia's own metrics, never Plex Mono's stretched onto it.
 
 Smoothing: 0 on dark themes, 12 on the three light ones (`type.smooth`,
 HALCYON-TYPE §4.2); phases and the fractional pen unchanged.
+
+**As built at I-5a (the substrate and the chrome; JOURNAL run 46o
+"I-5a").** Two KINDS of mono slot in `raster.rs`: the CELL faces
+(`FACE_MONO`, `FACE_MONO_ITALIC`) rasterize into the fixed cell the cells
+tier shares — the alt screen, `pre` islands, raw output — and the TEXT
+face (`FACE_MONO_TEXT`) runs Cornucopia free at any px like a
+proportional face: the fractional 0.5 em advance, the four phases, the
+font's hhea metrics (9 / 2 / 0 at 10 px), the store's stroke; a codepoint
+the subset lacks is served by the Instrument Sans at the same px (the
+mirror of the rule that serves the turnstile from the cell). The chrome's
+mono roles moved onto it at the table's sizes: the header's index and
+metadata (10; the metadata tracked .04 em), the clock (11), the footer
+(10; 9 narrow), the chips and `?` (10). The Sans roles moved onto the
+three new cuts through the `Sheet`'s role table (`face_body` /
+`face_medium` / `face_brand` / `face_hdr` / `face_emph` / `face_strong`
+/ `face_mono_text` / `face_mono_italic`, `chrome_mono_px` / `clock_px`;
+the legacy column is exactly the constants the legacy painters used
+before, so legacy is byte-identical by construction): the brand in 600,
+the context's basename, the header's name (13, +.01 em) and the menu's
+title in 500, the rail's labels and buttons, the placard and the menu's
+items in 400. MEASURED against the golden's DOM boxes at 1440 × 900
+(`geometry-styles.json`, `matrix-carbon-1440x900-s100-baseDpr1`): the
+clock `09:41` 31.9 (the `#clock` box's 46.906 less its 10 / 5 padding),
+`READY` 29.0, `3 PANES` 40.609, an 8-character metadata 43.203 (5.4 a
+glyph: Cornucopia's 5 at 10 px plus the .04 em), the context 287.219, the
+button labels 41.562 / 40.594 / 87.281 / 33.594 — each reproduced within
+a pixel by the pen, where the 12 px island cell had laid the clock at 35
+and `READY` at 34.8; under the legacy faces the clock, `READY` and
+`MODIFIED` witnesses fail (sabotage-measured), and the labels' ±1 alone
+does not separate Text 450 from Regular 400 — the context width and the
+sheet-role test do. Two deliberate deviations from the tables above: the
+`×` is Sans 15, not "mono 15" (the kit's CSS inherits the header's Plex
+Sans and sets no mono family on the action, so the CSS wins over §6.4's
+cell); and the `═` / `║` icons and the `⌄` chevron stay DRAWN marks of
+the golden's footprint although the subset now carries the first two —
+the golden's icons are a browser fallback font's glyphs, 8 wide, where
+Cornucopia's box glyph at 10 px is 5. In the cell path the procedural box
+glyphs are consulted BEFORE the face, so the subset's U+2500–257F never
+enter a cell and the joins stay exact (pinned by byte-equality with
+`boxglyph::alpha`). Startup: both owners' guards compare the parsed face
+count against `raster::VENDORED_FACES`, derived from the one list — the
+literal `4` they carried refused to start on the first seven-face image
+(the first gate run measured it; no host test can see a bin's guard).
+Binary 2,140,744 → 2,785,000 bytes (+644 KB: the three Plex cuts and the
+two subsets, accepted at §7.1). Not yet (I-5b): the document's own type
+— body 15 / 1.62, the headings, inline code at 0.86 × body, the italic
+in mono runs (`ATTR_ITALIC`, which neither the layout nor the grid reads
+today — an SGR 3 is silently roman everywhere), the paddings of §7.5.
 
 ### 7.3 Colour: the state matrix and the derived opaques
 
@@ -962,14 +1011,17 @@ Left to right, padding 10 / 8:
 **As built at I-4.** `rail::rail_list` (pure; host-tested against the
 golden's boxes) paints the mark as marks — the ring and the two strokes at
 the measured offsets (+4, +4) 1 × 5 and (+4, +8) 5 × 1 — `WORKSPACE 01` in
-the body face (the 600 weight is I-5's), the context of §14.3, then the
-buttons right to left from the 8 px pad: `?` in mono, `↺ RESET`, `■ <theme>
-⌄` with the swatch ringed by `Derived.swatch_ring` (white at 12 % over
-`amber`: `#CDC199` on Carbon, the kit's inset shadow reproduced through the
-executor's lerp), `║ SPLIT V`, `═ SPLIT H`, and the clock in the mono
-island size. The box-drawing icons and the chevron are drawn marks of the
-golden's footprint: neither face carries U+2550/2551/2304 (the mono
-re-subset of I-5 brings the first two; the chevron stays drawn). The
+the 600 (since I-5a; the body face until then), the context of §14.3 with
+its basename in the 500, then the buttons right to left from the 8 px pad:
+`?` in mono 10, `↺ RESET`, `■ <theme> ⌄` with the swatch ringed by
+`Derived.swatch_ring` (white at 12 % over `amber`: `#CDC199` on Carbon,
+the kit's inset shadow reproduced through the executor's lerp), `║ SPLIT
+V`, `═ SPLIT H`, and the clock in mono 11 (since I-5a; the 12 px island
+cell until then — the golden's `09:41` is 31.9 wide and the run now lays
+32). The box-drawing icons and the chevron are drawn marks of the golden's
+footprint, and stay so after I-5a's re-subset brought U+2550/2551 into the
+mono face: the golden's icons are a browser fallback font's glyphs, 8
+wide, where Cornucopia's at 10 px are 5 (§7.2). The
 buttons sit 26 tall at y 4 (3.5 snapped half up), the separator at y 11
 (10.5 likewise), and every uppercase run is tracked 0.08 em through
 `GlyphSource::shape_run_spaced`. Actions as built: SPLIT H / V split the
@@ -1014,8 +1066,11 @@ are decided by `rail::footer_state` from the focused tile's own facts
 the last command): READY = nothing has run yet (the hollow square — the
 golden's fixture shows the kit's filled `success` pulse at READY, a fixture
 state this design replaces, so the I-9 parity mask exempts the pulse);
-RUNNING = the filled 4 × 4 `amber` square; EXIT 0 = `✓` in the body face
-(the mono subset lacks it); EXIT n = `!`. The label is `rail::footer_label`
+RUNNING = the filled 4 × 4 `amber` square; EXIT 0 = `✓` in the mono face
+(since I-5a's re-subset; the body face served it until then); EXIT n =
+`!`. The whole footer runs in the free-running Cornucopia at 10 (9 narrow)
+tracked .08 em since I-5a: `READY` 29 wide, `3 PANES` 41, the golden's
+29.000 / 40.609. The label is `rail::footer_label`
 (the sanitised command, ≤ 96 characters, uppercase, end-ellipsised to the
 room the centre leaves); no elapsed time yet. The hints are
 `rail::hints_from_chords` over the compositor's `chords` file, re-read at
@@ -1044,8 +1099,9 @@ At 821 the wide layout returns.
 820 logical (`rail::NARROW_W`): the cluster is 54 wide with the mark and
 the active number, the context and the button labels hide (icon-only
 buttons of 28; the theme control keeps its swatch and chevron), the
-footer's hints hide and its type is 9 (the mono island floor serves both
-sizes until I-5). Host-tested at 800 and 821. The workspace root's 840
+footer's hints hide and its type is 9 (the free-running mono serves 10
+and 9 since I-5a; the island floor served both until then). Host-tested at
+800 and 821. The workspace root's 840
 minimum and the panning are NOT built — the carve has no panning yet (a
 residue for I-6, the dividers slice, whose clamps it belongs with) — and no
 guest lane drives a narrow display (the `mode` verb is renderer-gated and
@@ -1317,7 +1373,21 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   export, the position indicator (§7.7), the Cornucopia re-subset (λ, ✓,
   ‹ ›, −, ⌘, U+2500–257F) and the Italic subset (§7.1), GPOS pair kerning
   (§7.5, ruling 15), inline media and the gallery in the Instrument frame
-  (§14.4), the raw application grid (§14.7).
+  (§14.4), the raw application grid (§14.7). In sub-slices. **I-5a LANDED**
+  (the substrate and the chrome type map: the three Plex cuts embedded,
+  the Cornucopia re-subset to 342 codepoints and the Italic subset with the
+  shared-cell check, `FACE_SANS` / `FACE_SANS_MEDIUM` / `FACE_SANS_SEMIBOLD`
+  / `FACE_MONO_ITALIC` / `FACE_MONO_TEXT`, the box-glyph precedence in the
+  cell, the `Sheet`'s role table, the rails / headers / placard / menu on
+  the map, the golden-width witnesses, the startup guard derived; the
+  as-built notes in §7.1, §7.2, §6.4, §8.1–8.3, §14.2; JOURNAL run 46o
+  "I-5a"). Remaining: **I-5b** the document's `Sheet` (§7.2's body / H1 /
+  H2 / code sizes, §7.5's paddings and collapse, the `pre` block, the
+  terminal view's colours and default inks, the caret, the raw grid §14.7,
+  the position indicator §7.7, the italic in mono runs); **I-5c** the
+  producers (`λ … ⊢` in `ut` and nora's nine roles through the palette
+  export); **I-5d** GPOS kerning. §14.4 waits for the inline-media arc's
+  merge (it lives on aux-3, `53fcc14c`).
 - **I-6 — dividers and minima.** Capture, drag, double-click, the clamps
   and refusals; winsize through the existing path.
 - **I-7 — the picker and live switching.** The menu surface, the
@@ -1463,9 +1533,11 @@ in `text`, end-ellipsised), a `separator` rule, 28 rows in Sans 13 `text`
 never activated by Enter), the selected row on `hover` with the 2 × 16
 `amber` mark at y 6, separators 1 px with margin 4 and inset 8, the width
 clamped to 224..320, padding 4 / 10; the legacy list is unchanged under
-legacy. `MenuItem` gained `enabled` and `separator_before`. Not yet: the
-anchoring rules (the placement clamps to the display as H-3c's did), the
-shadow (§10), the scroll indicator (§7.7).
+legacy. `MenuItem` gained `enabled` and `separator_before`. Since I-5a the
+title row is Sans 500 and the items Sans 400 (the sheet's `face_medium` /
+`face_body`). Not yet: the anchoring rules (the placement clamps to the
+display as H-3c's did), the shadow (§10), the scroll indicator (§7.7), the
+hint column (no `MenuItem` carries a hint yet).
 
 ### 14.3 Directory, command and running marks (H-3d's status feed; the rails of §8)
 

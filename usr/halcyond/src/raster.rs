@@ -23,21 +23,110 @@ use cartoon::{AtlasPacker, GlyphRef};
 
 use crate::outline::Face;
 
-/// A face slot in this source: the four vendored IBM Plex Sans faces
-/// (HALCYON-VISUAL.md section 7 + HALCYON.md section 4), plus the system
-/// monospace -- the baked Cornucopia atlases (fixed cell, one size per
-/// advance), serving mono islands + terminal content through the SAME
-/// packer/id space so one atlas store feeds the executor. The operator's
-/// weight rule (baseline = Text 450, bigger type = Regular 400) makes
-/// headings a DISTINCT weight from body, so heading-italic is its own slot
-/// rather than the body italic at a larger size. The four proportional faces
-/// index `self.faces` directly; FACE_MONO is a sentinel, special-cased before
-/// any `faces[]` access -- never a slot.
-pub const FACE_BODY: u8 = 0; // Plex Text (450): baseline prose, prompt, chrome, objects
+/// A face slot in this source. The proportional faces are the vendored IBM
+/// Plex Sans cuts (HALCYON-VISUAL.md section 7 + HALCYON.md section 4 for
+/// the legacy four; HALCYON-INSTRUMENT 7.1 for the Instrument three); the
+/// monospace ones are Cornucopia's subset outlines (`usr/lib/cornucopia`),
+/// all served through the SAME packer/id space so one atlas store feeds the
+/// executor.
+///
+/// Two KINDS of mono slot (HALCYON-INSTRUMENT 7.2, I-5). The CELL faces
+/// (`FACE_MONO`, `FACE_MONO_ITALIC`) rasterize into the fixed cell the
+/// cells tier shares -- the alt-screen grid, `pre` islands, raw output:
+/// wherever columns must align and the procedural box glyphs join. The
+/// TEXT face (`FACE_MONO_TEXT`) runs Cornucopia FREE at any px, like a
+/// proportional face: the sub-pixel pen, the four phases, the font's own
+/// line metrics. The chrome's mono roles -- the header's index and
+/// metadata, the clock, the footer, a menu hint -- are 10 and 11 px runs
+/// with no grid, where the cell's 6 px advance floor was the wrong tool
+/// (I-3 and I-4 laid them at the 12 px island size and said so).
+///
+/// The legacy profile's four Plex cuts keep slots 0..3 (the operator's
+/// rule: baseline = Text 450, bigger type = Regular 400 italic, the one
+/// bold -- so heading-italic is its own slot, a DISTINCT weight from the
+/// body italic); the Instrument profile's three (400 / 500 / 600) sit above
+/// the mono sentinel. `FACE_MONO` stays 4: it is a SENTINEL in the cache
+/// key and in tests, never an index -- `prop_slot` maps every proportional
+/// id to its `faces[]` slot, so no id is ever used as an index by accident.
+pub const FACE_BODY: u8 = 0; // Plex Text (450): the legacy body, prompt, chrome, objects
 pub const FACE_BODY_BOLD: u8 = 1; // Plex Bold (700): em--strong, the one bold
-pub const FACE_BODY_ITALIC: u8 = 2; // Plex Text Italic (450): em--emph, baseline-size slant
-pub const FACE_HEADING_ITALIC: u8 = 3; // Plex Regular Italic (400): headings, italic in full
-pub const FACE_MONO: u8 = 4;
+pub const FACE_BODY_ITALIC: u8 = 2; // Plex Text Italic (450): the legacy em--emph
+pub const FACE_HEADING_ITALIC: u8 = 3; // Plex Regular Italic (400): legacy headings; Instrument emphasis
+pub const FACE_MONO: u8 = 4; // Cornucopia Regular in the CELL
+pub const FACE_SANS: u8 = 5; // Plex Regular (400): the Instrument body, rails, buttons, pills
+pub const FACE_SANS_MEDIUM: u8 = 6; // Plex Medium (500): header names, headings, strong chrome
+pub const FACE_SANS_SEMIBOLD: u8 = 7; // Plex SemiBold (600): the brand
+pub const FACE_MONO_ITALIC: u8 = 8; // Cornucopia Italic in the CELL (comments, lifetimes)
+pub const FACE_MONO_TEXT: u8 = 9; // Cornucopia Regular free-running (the chrome's mono roles)
+
+/// Whether `face` is one of the CELL mono faces (a fixed cell, no phase).
+#[inline]
+pub fn is_cell_face(face: u8) -> bool {
+    face == FACE_MONO || face == FACE_MONO_ITALIC
+}
+
+/// Whether `face` is any Cornucopia face -- a cell or the free-running one.
+/// What a line box asks ("does this run grow the box?"): a mono run never
+/// does (HALCYON-COMPOSITION 4), in either kind.
+#[inline]
+pub fn is_mono_face(face: u8) -> bool {
+    is_cell_face(face) || face == FACE_MONO_TEXT
+}
+
+/// The `faces[]` slot of a proportional id; None for a mono id or an
+/// unknown one. Explicit, so the mono sentinel sitting in the middle of
+/// the id space can never be mistaken for a slot.
+#[inline]
+fn prop_slot(face: u8) -> Option<usize> {
+    match face {
+        FACE_BODY => Some(0),
+        FACE_BODY_BOLD => Some(1),
+        FACE_BODY_ITALIC => Some(2),
+        FACE_HEADING_ITALIC => Some(3),
+        FACE_SANS => Some(4),
+        FACE_SANS_MEDIUM => Some(5),
+        FACE_SANS_SEMIBOLD => Some(6),
+        _ => None,
+    }
+}
+
+/// The proportional face an id names, out of the slot table. A free
+/// function over the field (not a `&self` method) so a caller holding it
+/// can still borrow the packer: the borrow is on `faces` alone.
+#[inline]
+fn prop_of(faces: &[Option<Face>], face: u8) -> Option<&Face> {
+    faces.get(prop_slot(face)?)?.as_ref()
+}
+
+/// The vendored proportional faces in `prop_slot` order: the legacy four
+/// (Text, Bold, Text-Italic, the Regular-weight heading italic), then the
+/// Instrument three (Regular, Medium, SemiBold). ONE list: `new_vendored`
+/// parses it, `VENDORED_FACES` is its length, and both owners' startup
+/// guards compare against THAT -- a literal count in the bins (`!= 4`,
+/// which no host test could see) was what made halcyond refuse to start
+/// on the first image that carried seven, at I-5a.
+const VENDORED: [&[u8]; 7] = [
+    crate::IBM_PLEX_SANS_TEXT,
+    crate::IBM_PLEX_SANS_BOLD,
+    crate::IBM_PLEX_SANS_TEXT_ITALIC,
+    crate::IBM_PLEX_SANS_HEADING_ITALIC,
+    crate::IBM_PLEX_SANS_REGULAR,
+    crate::IBM_PLEX_SANS_MEDIUM,
+    crate::IBM_PLEX_SANS_SEMIBOLD,
+];
+/// How many proportional faces a healthy source holds: the startup
+/// guards' expectation, derived from the list rather than restated.
+pub const VENDORED_FACES: usize = VENDORED.len();
+
+/// Whether the Italic cut lands in the Regular's cell at EVERY advance the
+/// scale table can ask for: the cells tier's contract, judged from the two
+/// faces' own tables (`Face::mono_cell` -- upem, the OS/2 Windows pair, the
+/// advance of `x`). The subset tool refuses a cut that differs; this is the
+/// runtime's own check of the same fact, so a re-cut that skipped the tool
+/// cannot ship an italic on the wrong grid.
+fn italic_shares_the_cell(regular: &Face, italic: &Face) -> bool {
+    (MONO_ISLAND_ADVANCE..=MONO_ADVANCE_MAX).all(|a| regular.mono_cell(a) == italic.mono_cell(a))
+}
 
 /// The two mono SIZES at 100% (HALCYON-COMPOSITION 2; Cornucopia bakes 0.5
 /// em per advance px), LOGICAL px: the Sheet scales them (HALCYON-SCALE 6)
@@ -97,15 +186,23 @@ pub fn atlas_pages_for(display_w: u32, display_h: u32, page: u32) -> usize {
     want.max(MAX_ATLAS_PAGES)
 }
 
-/// Whether the compiled-in system mono face is usable: it parses AND
-/// yields a cell at the floor advance. The startup check, callable before
-/// any `GlyphSource` exists so BOTH renderer paths can make it -- the
-/// `cornucopia::verify_all` this replaced sat after the session path's
-/// early return and so only ever guarded the console one.
+/// Whether the compiled-in system mono faces are usable: the Regular
+/// parses AND yields a cell at the floor advance, and the Italic parses
+/// AND shares that cell at every advance. The startup check, callable
+/// before any `GlyphSource` exists so BOTH renderer paths can make it --
+/// the `cornucopia::verify_all` this replaced sat after the session path's
+/// early return and so only ever guarded the console one. Both faces are
+/// build inputs: a false here is a defect to fix at build time, reported
+/// loudly rather than discovered as a hole in the grid or an upright
+/// "italic".
 pub fn mono_face_ok() -> bool {
-    Face::parse(cornucopia::SUBSET_TTF)
-        .and_then(|f| f.mono_cell(MONO_ISLAND_ADVANCE))
-        .is_some()
+    let Some(regular) = Face::parse(cornucopia::SUBSET_TTF) else {
+        return false;
+    };
+    if regular.mono_cell(MONO_ISLAND_ADVANCE).is_none() {
+        return false;
+    }
+    Face::parse(cornucopia::SUBSET_ITALIC_TTF).is_some_and(|it| italic_shares_the_cell(&regular, &it))
 }
 
 /// The largest mono advance this source will serve. The scale range caps
@@ -237,13 +334,22 @@ fn mono_cell_alpha(
 /// into (the 13.2 stale rule holds by construction on the author side
 /// too; the executor's gen check is the belt).
 pub struct GlyphSource {
-    faces: Vec<Face>,
+    /// The proportional faces by `prop_slot`. A slot is None only when its
+    /// bytes failed to parse -- a build-input defect (the faces are
+    /// compiled in) that must never SHIFT the slots after it, which a
+    /// positional `Vec<Face>` with a skipped push would have done.
+    faces: Vec<Option<Face>>,
     /// The system monospace face -- the Cornucopia subset outline, live
     /// since TY-4 (HALCYON-TYPE 4.5). It replaced the baked atlases here
     /// so the mono tier carries the theme's smoothing stroke like every
     /// other tier; the bakes stay for the consumers that must not carry a
-    /// rasterizer (Aurora, the kernel trusted sink, Halls).
+    /// rasterizer (Aurora, the kernel trusted sink, Halls). Serves both
+    /// `FACE_MONO` (the cell) and `FACE_MONO_TEXT` (free-running).
     mono: Option<Face>,
+    /// The true Italic, in the SAME cell (`italic_shares_the_cell`; a cut
+    /// that would not share it is refused here and the Regular serves
+    /// italic requests upright -- `mono_face_ok` reports it at startup).
+    mono_italic: Option<Face>,
     grid: MonoCell,
     island: MonoCell,
     pub packer: AtlasPacker,
@@ -307,24 +413,13 @@ impl GlyphSource {
     /// the atlas page geometry (one page holds many shelves; 512 fits
     /// several sizes of a Latin working set).
     pub fn new_vendored(page: u32) -> GlyphSource {
-        let mut faces = Vec::new();
-        // Order matches the FACE_* indices: Text, Bold, Text-Italic, then the
-        // Regular-weight heading italic (a distinct weight from body, per the
-        // operator's baseline=Text / bigger=Regular rule).
-        for bytes in [
-            crate::IBM_PLEX_SANS_TEXT,
-            crate::IBM_PLEX_SANS_BOLD,
-            crate::IBM_PLEX_SANS_TEXT_ITALIC,
-            crate::IBM_PLEX_SANS_HEADING_ITALIC,
-        ] {
-            // The vendored faces parse by construction; a parse reject
-            // here is a build-input defect, not a runtime input -- panic
-            // in tests, but stay total in the API: skip the face (its
-            // glyphs then miss, and text falls back per the caller).
-            if let Some(f) = Face::parse(bytes) {
-                faces.push(f);
-            }
-        }
+        // `VENDORED` in `prop_slot` order. The vendored faces parse by
+        // construction; a parse reject here is a build-input defect, not a
+        // runtime input -- panic in tests, but stay total in the API: the
+        // SLOT stays (None), so no later face shifts into it, and that
+        // face's glyphs miss per the caller (the startup guard, comparing
+        // `face_count` to `VENDORED_FACES`, refuses to start on it).
+        let faces: Vec<Option<Face>> = VENDORED.into_iter().map(Face::parse).collect();
         let mut packer = AtlasPacker::new(page, page);
         packer.set_max_pages((MAX_ATLAS_PAGES + ATLAS_PAGE_SLACK) as u32);
         // The system mono face. A None here is the same class of defect a
@@ -332,6 +427,9 @@ impl GlyphSource {
         // startup, not silently by an empty grid.
         let mono = Face::parse(cornucopia::SUBSET_TTF)
             .filter(|f| MonoCell::derive(f, MONO_ISLAND_ADVANCE).is_some());
+        // The Italic, admitted only into the Regular's cell.
+        let mono_italic = Face::parse(cornucopia::SUBSET_ITALIC_TTF)
+            .filter(|it| mono.as_ref().is_some_and(|re| italic_shares_the_cell(re, it)));
         let cell = |a: u8| {
             mono.as_ref()
                 .and_then(|f| MonoCell::derive(f, a))
@@ -342,6 +440,7 @@ impl GlyphSource {
             grid: cell(MONO_GRID_ADVANCE),
             island: cell(MONO_ISLAND_ADVANCE),
             mono,
+            mono_italic,
             packer,
             cache: BTreeMap::new(),
             scale: 100,
@@ -433,8 +532,27 @@ impl GlyphSource {
         (self.island.w, self.island.h, self.island.baseline)
     }
 
+    /// How many proportional faces parsed (the slots that are Some).
     pub fn face_count(&self) -> usize {
-        self.faces.len()
+        self.faces.iter().flatten().count()
+    }
+
+    /// Whether the true Italic is in service (parsed AND in the Regular's
+    /// cell); false means `FACE_MONO_ITALIC` is served upright.
+    pub fn mono_italic_ok(&self) -> bool {
+        self.mono_italic.is_some()
+    }
+
+    /// The Cornucopia face a CELL id names: the Regular, or the Italic
+    /// when it is in service (the Regular otherwise, upright -- total, so
+    /// a refused italic degrades to roman rather than to a hole).
+    #[inline]
+    fn cell_face(&self, face: u8) -> Option<&Face> {
+        if face == FACE_MONO_ITALIC {
+            self.mono_italic.as_ref().or(self.mono.as_ref())
+        } else {
+            self.mono.as_ref()
+        }
     }
 
     /// The advance of `ch` at `px` in `face` -- metrics only, from the
@@ -446,7 +564,7 @@ impl GlyphSource {
     /// codepoint the proportional face lacks. None only for an unknown
     /// face.
     pub fn advance(&mut self, face: u8, px: f32, ch: char) -> Option<i32> {
-        let q = if face == FACE_MONO {
+        let q = if is_cell_face(face) {
             self.mono_is_grid(px) as u32
         } else {
             size_q(px)
@@ -456,16 +574,14 @@ impl GlyphSource {
         if let Some(c) = self.cache.get(&(face, q, 0, ch)) {
             return Some(c.advance);
         }
-        if face == FACE_MONO {
+        if is_cell_face(face) {
             return Some(self.mono_cell_at(px).w);
         }
-        let f = self.faces.get(face as usize)?;
-        // One charmap query, not two (TY-6 F9): `has` IS `glyph_id != 0`.
-        let gid = f.glyph_id(ch);
-        if gid.to_u32() == 0 && ch != '\u{FFFD}' && self.mono_has(ch) {
-            return Some(self.island.w);
-        }
-        Some((f.advance(gid, px) + 0.5) as i32)
+        // The integer path IS the fractional path's `+0.5` truncation, for
+        // every face and every fallback arm -- one rule, so a caller that
+        // measures with one and paints with the other cannot drift (the
+        // test `the_fractional_advance_rounds_to_the_integer_one`).
+        self.advance_f(face, px, ch).map(|a| (a + 0.5) as i32)
     }
 
     /// The FRACTIONAL advance of `ch` at `px` in `face` -- what a
@@ -564,10 +680,25 @@ impl GlyphSource {
     }
 
     pub fn advance_f(&mut self, face: u8, px: f32, ch: char) -> Option<f32> {
-        if face == FACE_MONO {
+        if is_cell_face(face) {
             return Some(self.mono_cell_at(px).w as f32);
         }
-        let f = self.faces.get(face as usize)?;
+        if face == FACE_MONO_TEXT {
+            // Free-running Cornucopia: the table's advance at `px` (half
+            // the em for this font), fractional, like any face. A
+            // codepoint the subset lacks is served by the Instrument Sans
+            // at the same px with ITS advance -- the mirror of the rule
+            // below that serves the turnstile from the cell: the symbol
+            // rather than a row of .notdef boxes. `glyph_at` takes the
+            // same branch, so the measure and the paint agree.
+            let served = self.mono_has(ch) || ch == '\u{FFFD}';
+            if !served {
+                return self.advance_f(FACE_SANS, px, ch);
+            }
+            let m = self.mono.as_ref()?;
+            return Some(m.advance(m.glyph_id(ch), px));
+        }
+        let f = prop_of(&self.faces, face)?;
         // One charmap query, not two (TY-6 F9). This is the MEASUREMENT
         // path -- every laid glyph and every pre-measure comes through it,
         // uncached since TY-3b -- so the doubled lookup was paid per glyph
@@ -591,13 +722,17 @@ impl GlyphSource {
     /// codepoint is NOT None -- the face's .notdef box is drawn, which is
     /// the correct visible outcome for unmapped input.
     ///
-    /// FACE_MONO's `px` selects the atlas (island or grid; the bake has one
-    /// size per advance) and serves the Cornucopia cell; a box-drawing /
-    /// block-element codepoint (U+2500-259F, deliberately absent from the
-    /// bake) is drawn PROCEDURALLY on the cell so joins are pixel-exact
-    /// across cells; any other codepoint the bake lacks falls back to the
-    /// body face (Plex Text) rasterized to the cell height with the advance
-    /// FORCED to the cell width (the grid survives; the glyph may clip).
+    /// A CELL face's `px` selects the cell (island or grid) and serves the
+    /// Cornucopia cell -- the Regular's or the Italic's, one grid; a
+    /// box-drawing / block-element codepoint (U+2500-259F) is drawn
+    /// PROCEDURALLY on the cell so joins are pixel-exact across cells,
+    /// and that path is consulted BEFORE the face (the subset carries the
+    /// block since I-5, for the free-running path only); any other
+    /// codepoint the subset lacks falls back to the body face (Plex Text)
+    /// rasterized to the cell height with the advance FORCED to the cell
+    /// width (the grid survives; the glyph may clip). `FACE_MONO_TEXT`
+    /// rasterizes Cornucopia free at `px`, phased, and serves a codepoint
+    /// the subset lacks from the Instrument Sans.
     pub fn glyph(&mut self, face: u8, px: f32, ch: char) -> Option<GlyphRef> {
         self.glyph_at(face, px, ch, 0)
     }
@@ -610,8 +745,9 @@ impl GlyphSource {
     /// cell has no phase, and phasing it would blur the grid the box glyphs
     /// join across.
     pub fn glyph_at(&mut self, face: u8, px: f32, ch: char, phase: u8) -> Option<GlyphRef> {
-        let phase = if face == FACE_MONO { 0 } else { phase & 3 };
-        let q = if face == FACE_MONO {
+        let cell_face = is_cell_face(face);
+        let phase = if cell_face { 0 } else { phase & 3 };
+        let q = if cell_face {
             self.mono_is_grid(px) as u32
         } else {
             size_q(px)
@@ -623,21 +759,22 @@ impl GlyphSource {
                 advance: c.advance,
             });
         }
-        if face == FACE_MONO {
+        if cell_face {
             let cell = self.mono_cell_at(px);
             let (cw, chh, base) = (cell.w, cell.h, cell.baseline);
             let smooth = self.smooth_mem;
-            // Cornucopia's own outline, rasterized into the cell -- and
-            // stroked, which is the whole point of TY-4: before it, a
-            // baked cell was the one tier that could not carry the theme's
-            // smoothing, so a proportional glyph falling back into a cell
-            // was heavier than the Cornucopia glyph beside it.
-            let alpha = self
-                .mono
-                .as_ref()
-                .filter(|f| f.has(ch))
-                .map(|f| mono_cell_alpha(f, f.glyph_id(ch), cell, smooth));
-            if let Some(alpha) = alpha {
+            // The procedural box glyphs FIRST. The cells tier's contract
+            // is a line that continues pixel-exactly into its neighbours,
+            // which a font's box glyph -- bound to ITS line box -- never
+            // does; the bake omits the block for that reason. The SUBSET
+            // carries U+2500-257F since I-5 for the free-running path, so
+            // the order here is load-bearing: the face is asked only after
+            // the procedural path declines. The light stroke is the
+            // hairline at this scale (COMPOSITION 1: a flat structural
+            // line scales `max(1, round(s))`, and a box line joining cells
+            // is one) -- 1 px up to 125%, 2 from 150.
+            let light = libhalcyon::scale::ipx(1, self.scale).max(1) as usize;
+            if let Some(alpha) = boxglyph::alpha(cw as usize, chh as usize, ch, light) {
                 let id = self.packer.insert(cw as u32, chh as u32, &alpha, 0, base)?;
                 self.cache.insert(key, Cached { id, advance: cw });
                 return Some(GlyphRef {
@@ -645,11 +782,17 @@ impl GlyphSource {
                     advance: cw,
                 });
             }
-            // The light stroke is the hairline at this scale (COMPOSITION
-            // 1: a flat structural line scales `max(1, round(s))`, and a
-            // box line joining cells is one) -- 1 px up to 125%, 2 from 150.
-            let light = libhalcyon::scale::ipx(1, self.scale).max(1) as usize;
-            if let Some(alpha) = boxglyph::alpha(cw as usize, chh as usize, ch, light) {
+            // Cornucopia's own outline (the Regular's or the Italic's),
+            // rasterized into the cell -- and stroked, which is the whole
+            // point of TY-4: before it, a baked cell was the one tier that
+            // could not carry the theme's smoothing, so a proportional
+            // glyph falling back into a cell was heavier than the
+            // Cornucopia glyph beside it.
+            let alpha = self
+                .cell_face(face)
+                .filter(|f| f.has(ch))
+                .map(|f| mono_cell_alpha(f, f.glyph_id(ch), cell, smooth));
+            if let Some(alpha) = alpha {
                 let id = self.packer.insert(cw as u32, chh as u32, &alpha, 0, base)?;
                 self.cache.insert(key, Cached { id, advance: cw });
                 return Some(GlyphRef {
@@ -670,7 +813,7 @@ impl GlyphSource {
             // measured at 80 of 121 Greek/Cyrillic entries at 200%, the
             // worst by 11 px, nearly a whole extra cell. The clip is the
             // contract this arm was quietly outside of.
-            let f = self.faces.get(FACE_BODY as usize)?;
+            let f = prop_of(&self.faces, FACE_BODY)?;
             let fallback = MonoCell { em: (chh - 4) as f32, ..cell };
             let alpha = mono_cell_alpha(f, f.glyph_id(ch), fallback, smooth);
             let id = self.packer.insert(cw as u32, chh as u32, &alpha, 0, base)?;
@@ -680,7 +823,27 @@ impl GlyphSource {
                 advance: cw,
             });
         }
-        let f = self.faces.get(face as usize)?;
+        if face == FACE_MONO_TEXT {
+            // Cornucopia free-running: the outline at `px`, phased and
+            // stroked like any proportional face, its own bearing. A
+            // codepoint the subset lacks is the Instrument Sans's entry at
+            // the same px (cached under ITS key; `advance_f` took the same
+            // branch, so the laid step and the painted glyph agree).
+            let served = self.mono_has(ch) || ch == '\u{FFFD}';
+            if !served {
+                return self.glyph_at(FACE_SANS, px, ch, phase);
+            }
+            let smooth = self.smooth_mem;
+            let (r, advance) = {
+                let m = self.mono.as_ref()?;
+                let gid = m.glyph_id(ch);
+                (m.raster(gid, px, smooth, phase), (m.advance(gid, px) + 0.5) as i32)
+            };
+            let id = self.packer.insert(r.w, r.h, &r.alpha, r.left, r.top)?;
+            self.cache.insert(key, Cached { id, advance });
+            return Some(GlyphRef { glyph: id, advance });
+        }
+        let f = prop_of(&self.faces, face)?;
         // A codepoint the proportional face lacks (IBM Plex Sans has no
         // U+22A2 -- ut's turnstile) is served from the island bake rather
         // than as Plex's .notdef box: Cornucopia carries the prompt glyph by
@@ -713,10 +876,12 @@ impl GlyphSource {
         Some(GlyphRef { glyph: id, advance })
     }
 
-    /// Vertical metrics for a face at a size (integer px, y-down).
-    /// FACE_MONO's are the selected atlas cell's.
+    /// Vertical metrics for a face at a size (integer px, y-down). A cell
+    /// face's are the selected cell's; `FACE_MONO_TEXT`'s are Cornucopia's
+    /// own tables at `px` (hhea: 889 / -170 / 38 per 1000 -- 9 / 2 / 0 at
+    /// 10 px), read the way every proportional face's are.
     pub fn line_metrics(&self, face: u8, px: f32) -> Option<LineMetrics> {
-        if face == FACE_MONO {
+        if is_cell_face(face) {
             let cell = self.mono_cell_at(px);
             return Some(LineMetrics {
                 ascent: cell.baseline,
@@ -724,7 +889,11 @@ impl GlyphSource {
                 line_height: cell.h,
             });
         }
-        let f = self.faces.get(face as usize)?;
+        let f = if face == FACE_MONO_TEXT {
+            self.mono.as_ref()?
+        } else {
+            prop_of(&self.faces, face)?
+        };
         let (a, d, g) = f.line_metrics(px);
         let ascent = (a + 0.5) as i32;
         let descent = (-d + 0.5) as i32; // the table's descent is negative
@@ -1037,7 +1206,7 @@ mod tests {
     #[test]
     fn vendored_faces_parse() {
         let gs = GlyphSource::new_vendored(512);
-        assert_eq!(gs.face_count(), 4, "all four vendored IBM Plex Sans faces parse (Text, Bold, Text-Italic, Regular-Italic)");
+        assert_eq!(gs.face_count(), 7, "all seven vendored IBM Plex Sans cuts parse (Text, Bold, Text-Italic, Regular-Italic; Regular, Medium, SemiBold)");
         let lm = gs.line_metrics(FACE_BODY, 16.0).unwrap();
         assert!(
             lm.ascent > 8 && lm.ascent < 24,
@@ -1832,12 +2001,212 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 207, "the bake's glyph count");
-        // And the box glyphs stay OUT of both (the procedural path owns
-        // them; a font's box glyphs are metrics-bound to its own line box).
-        for ch in ['\u{2500}', '\u{2502}', '\u{250C}', '\u{2588}'] {
+        // The box glyphs stay OUT of the bake (the procedural path owns
+        // them on the cell; a font's box glyphs are metrics-bound to its
+        // own line box). Since I-5 the SUBSET carries U+2500-257F for the
+        // free-running face -- a superset, never a different set -- and
+        // the block elements (U+2580-259F) stay out of both.
+        for ch in ['\u{2500}', '\u{2502}', '\u{250C}'] {
             assert!(atlas.glyph(ch).is_none(), "{ch:?} not baked");
-            assert!(!f.has(ch), "{ch:?} not in the subset");
+            assert!(f.has(ch), "{ch:?} in the subset (I-5)");
         }
+        assert!(atlas.glyph('\u{2588}').is_none() && !f.has('\u{2588}'), "the block elements in neither");
+    }
+
+    // HALCYON-INSTRUMENT 7.1 (I-5): the subset carries the six Instrument
+    // glyphs and the box-drawing block BEYOND the bake, for the free-running
+    // path; the bake does not (the control -- an atlas that also carried
+    // them would make the "superset" claim vacuous).
+    #[test]
+    fn the_subset_carries_the_instrument_glyphs_beyond_the_bake() {
+        let f = Face::parse(cornucopia::SUBSET_TTF).expect("the subset parses");
+        let atlas = cornucopia::Atlas::for_advance(cornucopia::DEFAULT_ADVANCE);
+        for ch in ['\u{03BB}', '\u{2713}', '\u{2039}', '\u{203A}', '\u{2212}', '\u{2318}'] {
+            assert!(f.has(ch), "{ch:?} in the subset");
+            assert!(atlas.glyph(ch).is_none(), "{ch:?} not baked (the control)");
+        }
+        let mut n = 0;
+        for cp in 0x2500u32..=0x257F {
+            let ch = char::from_u32(cp).unwrap();
+            assert!(f.has(ch), "U+{cp:04X} in the subset");
+            assert!(atlas.glyph(ch).is_none(), "U+{cp:04X} not baked");
+            n += 1;
+        }
+        assert_eq!(n, 128);
+        // The Italic carries the same set.
+        let it = Face::parse(cornucopia::SUBSET_ITALIC_TTF).expect("the italic subset parses");
+        for cp in (0x20u32..0x2600).filter(|&cp| cp != 0xFFFD) {
+            let Some(ch) = char::from_u32(cp) else { continue };
+            assert_eq!(f.has(ch), it.has(ch), "U+{cp:04X}: the two cuts differ");
+        }
+        // And the free-running face serves them at the type map's size, at
+        // Cornucopia's own advance (half the em): 5 px at 10.
+        let mut gs = GlyphSource::new_vendored(512);
+        for ch in ['\u{03BB}', '\u{2713}', '\u{2318}', '\u{2550}', '\u{2551}'] {
+            let g = gs.glyph(FACE_MONO_TEXT, 10.0, ch).expect("served");
+            assert_eq!(g.advance, 5, "{ch:?} at 10 px");
+            let e = gs.packer.store.glyphs[g.glyph as usize];
+            assert!(e.w > 0 && e.h > 0, "{ch:?} has ink");
+        }
+    }
+
+    // The free-running mono face (7.2): Cornucopia at the type map's 10 /
+    // 11 px and at inline code's 0.86 x 15, with the font's own fractional
+    // advance (0.5 em), its own line metrics (hhea), the four phases, the
+    // store's stroke -- a proportional face in every respect but the
+    // glyphs. The cell's 6 px floor is what it exists to escape: at 10 px
+    // the advance is 5.
+    #[test]
+    fn the_text_mono_runs_free_at_the_type_maps_sizes() {
+        let mut gs = GlyphSource::new_vendored(512);
+        for (px, adv) in [(10.0f32, 5.0f32), (11.0, 5.5), (12.9, 6.45), (12.0, 6.0)] {
+            for ch in ['n', 'W', '0', ' '] {
+                let a = gs.advance_f(FACE_MONO_TEXT, px, ch).unwrap();
+                assert!((a - adv).abs() < 1e-4, "{ch:?} at {px}: {a} vs {adv}");
+                assert_eq!(gs.advance(FACE_MONO_TEXT, px, ch).unwrap(), (adv + 0.5) as i32);
+            }
+        }
+        let lm = gs.line_metrics(FACE_MONO_TEXT, 10.0).unwrap();
+        assert_eq!((lm.ascent, lm.descent, lm.line_height), (9, 2, 11), "hhea 889 / -170 / 38 at 10 px");
+        let lm = gs.line_metrics(FACE_MONO_TEXT, 11.0).unwrap();
+        assert_eq!((lm.ascent, lm.descent, lm.line_height), (10, 2, 12));
+        // Not a cell: the raster is the glyph's own box, no wider than the
+        // island cell and shorter than it, at its own bearing.
+        let (cw, chh, _) = gs.island_cell();
+        let n = gs.glyph(FACE_MONO_TEXT, 10.0, 'n').unwrap();
+        let e = gs.packer.store.glyphs[n.glyph as usize];
+        assert!(e.w as i32 <= cw && (e.h as i32) < chh, "{}x{} vs the {cw}x{chh} cell", e.w, e.h);
+        assert_ne!((e.left, e.top), (0, chh), "its own bearing, not the cell's");
+        // Phased: four distinct entries.
+        let ids: Vec<u32> = (0..crate::outline::PHASES)
+            .map(|p| gs.glyph_at(FACE_MONO_TEXT, 10.0, 'n', p).unwrap().glyph)
+            .collect();
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "phases {i} and {j} share an entry");
+            }
+        }
+        // The stroke follows the store, as for every other face.
+        let (_, _, plain) = glyph_alpha(&gs, n.glyph);
+        gs.set_smooth(12);
+        let n2 = gs.glyph(FACE_MONO_TEXT, 10.0, 'n').unwrap();
+        let (_, _, stroked) = glyph_alpha(&gs, n2.glyph);
+        let sum = |a: &Vec<u8>| a.iter().map(|&v| v as u64).sum::<u64>();
+        assert!(sum(&stroked) > sum(&plain), "the stroke adds ink");
+    }
+
+    // A codepoint the subset lacks, asked of the free-running face, is the
+    // Instrument Sans's glyph at the same size -- the symbol, not a row of
+    // .notdef boxes -- and the measure agrees with the paint.
+    #[test]
+    fn the_text_mono_falls_back_to_the_sans_for_a_missing_codepoint() {
+        let mut gs = GlyphSource::new_vendored(512);
+        for ch in ['\u{0416}', '\u{03A9}'] {
+            assert!(!gs.mono_has(ch), "{ch:?} outside the subset (the premise)");
+            let via_mono = gs.glyph(FACE_MONO_TEXT, 10.0, ch).unwrap();
+            let via_sans = gs.glyph(FACE_SANS, 10.0, ch).unwrap();
+            assert_eq!(via_mono.glyph, via_sans.glyph, "{ch:?}: the Sans's own entry");
+            assert_eq!(via_mono.advance, via_sans.advance);
+            assert_eq!(gs.advance_f(FACE_MONO_TEXT, 10.0, ch), gs.advance_f(FACE_SANS, 10.0, ch));
+            assert_eq!(gs.advance(FACE_MONO_TEXT, 10.0, ch), Some(via_sans.advance));
+        }
+    }
+
+    // The true Italic (7.1, ruling 11): in service, in the Regular's cell
+    // at every advance, and actually slanted -- a different raster from
+    // the Regular's on the same cell -- while the box glyphs stay
+    // procedural on it too.
+    #[test]
+    fn the_italic_cell_is_the_regulars_cell_and_it_slants() {
+        assert!(mono_face_ok(), "both mono faces usable");
+        let re = Face::parse(cornucopia::SUBSET_TTF).unwrap();
+        let it = Face::parse(cornucopia::SUBSET_ITALIC_TTF).unwrap();
+        assert!(italic_shares_the_cell(&re, &it));
+        for a in cornucopia::ADVANCES.iter().chain(cornucopia::SCALE_ADVANCES.iter()) {
+            assert_eq!(re.mono_cell(*a), it.mono_cell(*a), "adv {a}");
+        }
+        let mut gs = GlyphSource::new_vendored(512);
+        assert!(gs.mono_italic_ok());
+        gs.set_smooth(12);
+        let (cw, chh, base) = gs.island_cell();
+        let r = gs.glyph(FACE_MONO, MONO_ISLAND_PX, 'a').unwrap();
+        let i = gs.glyph(FACE_MONO_ITALIC, MONO_ISLAND_PX, 'a').unwrap();
+        assert_ne!(r.glyph, i.glyph, "two entries");
+        let ei = gs.packer.store.glyphs[i.glyph as usize];
+        assert_eq!((ei.w as i32, ei.h as i32, ei.left, ei.top), (cw, chh, 0, base), "the italic entry IS the cell");
+        assert_eq!(i.advance, cw);
+        let (_, _, ar) = glyph_alpha(&gs, r.glyph);
+        let (_, _, ai) = glyph_alpha(&gs, i.glyph);
+        assert_ne!(ar, ai, "the italic differs from the roman");
+        assert!(ai.iter().any(|&v| v != 0));
+        // Box glyphs: procedural on the italic cell, byte-equal to the roman's.
+        let hr = gs.glyph(FACE_MONO, MONO_ISLAND_PX, '\u{2500}').unwrap();
+        let hi = gs.glyph(FACE_MONO_ITALIC, MONO_ISLAND_PX, '\u{2500}').unwrap();
+        assert_eq!(glyph_alpha(&gs, hr.glyph).2, glyph_alpha(&gs, hi.glyph).2);
+        // The metrics are the cell's for both; a phase is refused on both.
+        assert_eq!(gs.line_metrics(FACE_MONO_ITALIC, MONO_ISLAND_PX).map(|m| m.line_height), Some(chh));
+        let p = gs.glyph_at(FACE_MONO_ITALIC, MONO_ISLAND_PX, 'a', 2).unwrap();
+        assert_eq!(p.glyph, i.glyph, "a cell has no phase");
+    }
+
+    // The order in the cell path is load-bearing since the subset carries
+    // U+2500-257F: the procedural box glyph must win over the font's. The
+    // font's glyph is what the free-running face serves, and it is NOT the
+    // full-cell line (Cornucopia's box glyphs are bound to its line box).
+    #[test]
+    fn box_drawing_stays_procedural_in_the_cell_although_the_subset_carries_it() {
+        let mut gs = GlyphSource::new_vendored(512);
+        assert!(gs.mono_has('\u{2500}'), "the subset carries the light horizontal (the premise)");
+        let (cw, chh, _) = gs.island_cell();
+        let cell = gs.glyph(FACE_MONO, MONO_ISLAND_PX, '\u{2500}').unwrap();
+        let (w, h, a) = glyph_alpha(&gs, cell.glyph);
+        let light = libhalcyon::scale::ipx(1, 100).max(1) as usize;
+        let want = boxglyph::alpha(cw as usize, chh as usize, '\u{2500}', light).unwrap();
+        assert_eq!((w as i32, h as i32), (cw, chh));
+        assert_eq!(a, want, "the cell's line is the procedural one, byte for byte");
+        // The same codepoint through the free-running face is the font's.
+        let free = gs.glyph(FACE_MONO_TEXT, MONO_ISLAND_PX, '\u{2500}').unwrap();
+        let (fw, fh, fa) = glyph_alpha(&gs, free.glyph);
+        assert!((fw, fh) != (w, h) || fa != a, "the font's glyph, not the procedural cell");
+    }
+
+    // The three Instrument weights parse into their slots and are
+    // distinct, ordered cuts: at 13 px the ink of 'n' rises 400 -> 450 ->
+    // 500 -> 600 -> 700. The slot map never aliases the mono sentinel.
+    #[test]
+    fn the_instrument_sans_weights_are_distinct_and_the_slots_never_alias() {
+        let mut gs = GlyphSource::new_vendored(512);
+        assert_eq!(gs.face_count(), VENDORED_FACES, "what the bins' startup guards expect");
+        assert_eq!(VENDORED_FACES, 7);
+        assert_eq!(prop_slot(FACE_SANS_SEMIBOLD), Some(VENDORED_FACES - 1), "the slot map covers the list exactly");
+        assert_eq!(prop_slot(FACE_MONO), None);
+        assert_eq!(prop_slot(FACE_MONO_ITALIC), None);
+        assert_eq!(prop_slot(FACE_MONO_TEXT), None);
+        let slots: Vec<usize> = [
+            FACE_BODY,
+            FACE_BODY_BOLD,
+            FACE_BODY_ITALIC,
+            FACE_HEADING_ITALIC,
+            FACE_SANS,
+            FACE_SANS_MEDIUM,
+            FACE_SANS_SEMIBOLD,
+        ]
+        .iter()
+        .map(|f| prop_slot(*f).unwrap())
+        .collect();
+        assert_eq!(slots, alloc::vec![0, 1, 2, 3, 4, 5, 6]);
+        let ink = |gs: &mut GlyphSource, face: u8| {
+            let g = gs.glyph(face, 13.0, 'n').unwrap();
+            glyph_alpha(gs, g.glyph).2.iter().map(|&v| v as u64).sum::<u64>()
+        };
+        let r = ink(&mut gs, FACE_SANS);
+        let t = ink(&mut gs, FACE_BODY);
+        let m = ink(&mut gs, FACE_SANS_MEDIUM);
+        let sb = ink(&mut gs, FACE_SANS_SEMIBOLD);
+        let b = ink(&mut gs, FACE_BODY_BOLD);
+        assert!(r < t && t < m && m < sb && sb < b, "400 {r} < 450 {t} < 500 {m} < 600 {sb} < 700 {b}");
+        assert!(is_mono_face(FACE_MONO_TEXT) && is_mono_face(FACE_MONO_ITALIC) && !is_mono_face(FACE_SANS));
+        assert!(!is_cell_face(FACE_MONO_TEXT));
     }
 
     // TY-4's actual behaviour change: a mono cell now carries the theme's

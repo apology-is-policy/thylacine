@@ -33,9 +33,16 @@
 // formula, and `the_derived_cell_table_is_the_baked_one` proves the two
 // agree at every baked advance. That is the contract the cells tier shares.
 //
-// Box-drawing/block-element codepoints (U+2500-259F) are deliberately ABSENT:
-// the renderer draws them procedurally for pixel-perfect cell joins (a
-// font's box glyphs are metrics-bound to ITS line box, not the cell).
+// Box-drawing/block-element codepoints (U+2500-259F) are deliberately ABSENT
+// from the BAKES: the renderer draws them procedurally for pixel-perfect
+// cell joins (a font's box glyphs are metrics-bound to ITS line box, not the
+// cell). The SUBSET carries U+2500-257F since HALCYON-INSTRUMENT I-5 (with
+// the six Instrument glyphs: lambda, the check mark, the angle quotes,
+// minus, the command glyph) for halcyond's FREE-RUNNING mono path -- a
+// chrome run at 10/11 px with no cell; its cell path still draws the block
+// procedurally, consulting the box glyphs before the face. So the subset is
+// a superset of the bake: every baked codepoint is in it (the test holds),
+// plus the extras the cells tier has no use for.
 //
 // The atlas.bin layout is fixed little-endian (see the bake tool header);
 // this parser and the tool must stay in lockstep.
@@ -64,12 +71,20 @@ static A12: &[u8] = include_bytes!("atlas-12.bin"); // 12x27
 #[cfg(feature = "scale")]
 static A11: &[u8] = include_bytes!("atlas-11.bin"); // 11x25
 
-/// The subset OUTLINE -- the same font, the same codepoints as the bakes,
-/// as a 20 KB TTF for the one consumer that has a runtime rasterizer
-/// (halcyond; HALCYON-TYPE.md section 4.5). Feature-gated so a consumer
-/// that only blits cells never carries it.
+/// The subset OUTLINE -- the same font, every codepoint of the bakes plus
+/// the Instrument extras, as a 26 KB TTF for the one consumer that has a
+/// runtime rasterizer (halcyond; HALCYON-TYPE.md section 4.5).
+/// Feature-gated so a consumer that only blits cells never carries it.
 #[cfg(feature = "ttf")]
 pub static SUBSET_TTF: &[u8] = include_bytes!("cornucopia-subset.ttf");
+/// The TRUE ITALIC cut to the same codepoints (HALCYON-INSTRUMENT 7.1,
+/// ruling 11: comments and lifetimes in the real face, never a shear). Cut
+/// with `--match` against the Regular subset, so its cell-bearing tables
+/// (upem, the OS/2 Windows ascent/descent, the advance of `x`) equal the
+/// Regular's and it lands in the SAME cell; halcyond re-checks that at
+/// startup. Same feature gate, same provenance (cornucopia-Italic.ttf).
+#[cfg(feature = "ttf")]
+pub static SUBSET_ITALIC_TTF: &[u8] = include_bytes!("cornucopia-subset-italic.ttf");
 
 /// The baked cell advances (= cell width in px), LARGEST FIRST. The config
 /// key `font-size <advance>` and the OSD Font cycler select by these; index 0

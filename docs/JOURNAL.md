@@ -607,6 +607,83 @@ place must read it before the tree moves again (audit row (h)).
 
 **Two lessons for the memory.** A green control one variable away (the exit-first login) located the mechanism before any instrumentation did; and the disownment reflex was live here in the other direction -- the fix EXISTED, on the other track, and "aux fixed it" is not a disposition for main's tree until the merge lands, so main carries its own half.
 
+### I-5a: the type substrate -- seven Plex cuts, two Cornucopia subsets, a mono face that runs free, and a literal that refused to boot
+
+I-5 (type and the rich document) is the arc's largest slice, so it lands in
+sub-slices: (a) the substrate and the chrome, (b) the document's sheet and
+the terminal view, (c) the producers (the `λ` prompt through the palette
+export; nora's nine syntax roles), (d) GPOS kerning. §14.4 (inline media in
+the frame) cannot land on main: the inline-media arc (`53fcc14c`) lives on
+aux-3, so it waits for the merge.
+
+**What the tree could not do.** The mono tier was cell-only: `FACE_MONO`
+rasterized Cornucopia INTO the fixed cell (advance 6 at 100 %, a 12 px em)
+and `mono_advances` floored at 6 because the procedural box glyphs need
+it. The type map asks for mono at 10 (the index, the metadata, the footer)
+and 11 (the clock): an advance of 5 and 5.5. I-3 and I-4 laid those runs at
+the island size and said so. Plex Regular / Medium / SemiBold were vendored
+but not embedded; the subset lacked λ ✓ ‹ › − ⌘ and every box-drawing
+glyph; there was no italic mono at all -- and nothing in the layout or the
+grid reads `ATTR_ITALIC` (an SGR 3 is silently roman everywhere; measured
+by grep, not assumed; I-5b's).
+
+**The design.** Two KINDS of mono slot, not a smaller cell: the cell faces
+(`FACE_MONO`, the new `FACE_MONO_ITALIC`) keep the cells tier's contract,
+and a free-running `FACE_MONO_TEXT` treats Cornucopia as a proportional
+face -- the 0.5 em fractional advance, the four phases, hhea metrics (9 /
+2 / 0 at 10 px), the store's stroke -- for the chrome's 10 / 11 px runs,
+where no grid exists. A codepoint the subset lacks falls back to the
+Instrument Sans at the same px, the mirror of the rule that serves the
+turnstile from the cell. The subset is now a SUPERSET of the bake (the
+tool's `--extra`; 208 → 342 codepoints, 20 → 26 KB), and the Italic is cut
+with `--match`, which refuses unless its cell-bearing tables equal the
+Regular's; halcyond re-checks that fact at startup (`italic_shares_the_cell`
+over every advance 6..20). Because the subset now carries U+2500–257F, the
+cell path's ORDER became load-bearing: the procedural box glyph is
+consulted BEFORE the face, so a font box glyph never enters a cell and the
+joins stay exact -- pinned by a test that asserts byte-equality with
+`boxglyph::alpha` while the free-running face serves the font's glyph. The
+`Sheet` gained a role table (`face_body` … `face_mono_italic`,
+`chrome_mono_px`, `clock_px`) whose legacy column is exactly the constants
+the legacy painters used, so legacy is byte-identical by construction; the
+rails, headers, placard and menu paint through it. `faces` became
+`Vec<Option<Face>>` with an explicit `prop_slot`: a positional Vec with a
+skipped push would have shifted every later face into the wrong slot on a
+parse failure, silently.
+
+**Measured, not believed.** The golden's DOM boxes (1440 × 900,
+`geometry-styles.json`) gave the type map's widths: `#clock` 46.906 less
+its 10 / 5 padding = 31.9 for `09:41`; `READY` 29.000; `3 PANES` 40.609; a
+`.tile-meta` of 8 characters 43.203 -- 5.4 a glyph, exactly Cornucopia's
+5 at 10 px plus the .04 em; the context 287.219; the labels 41.562 /
+40.594 / 87.281 / 33.594. The pen reproduces each within a pixel.
+Sabotage: with Instrument on the legacy faces, the clock (35), `READY`
+(34.8) and `MODIFIED` (48) witnesses fail; the labels' ±1 tolerance alone
+does NOT separate Text 450 from Regular 400 -- the context width and the
+sheet-role test do, and the audit row says so rather than letting a weak
+witness pose as a strong one. Two things the tables said that the CSS
+contradicts: the `×` is Sans 15 (the CSS inherits the header's family;
+nothing sets mono on the action), and the split icons stay drawn (the
+golden's are a fallback font's 8-wide glyphs; Cornucopia's at 10 px are
+5).
+
+**The first gate run failed in 117 s, and the cause was a literal.**
+`surfaces 0`, no console leaf: halcyond had said `FAIL vendored face
+parse` and exited -- both owners' startup guards compared `face_count()`
+to the literal `4`. No host test can see a bin's guard (the bins are the
+`guest` feature), so 235 green host tests said nothing about it; the first
+image that carried seven faces did. The count is now
+`raster::VENDORED_FACES`, derived from the one list `new_vendored` parses,
+and the test that pins the slot map pins it too. The lesson is the pinned
+one -- a guard pinned to a value re-pointed by hand goes stale; one derived
+from the thing it guards cannot -- with the twist worth writing down: the
+literal sat in the two files the host suite cannot compile, which is
+exactly where a derived value matters most. The run was killed by PID (the
+tree, not a pattern) and relaunched on the fixed image.
+
+Binary: 2,140,744 → 2,785,000 bytes (+644 KB, the three Plex cuts and the
+two subsets; accepted at §7.1). Host: halcyond 228 → 235.
+
 ## Run 46n (2026-09-10 + 2026-09-14, Opus 5 max, across a self-compaction) -- the syscall collision, a merge gate's one red boot, and a hang the obvious fix would not have closed
 
 Newest first within the JOURNAL; this entry is chronological inside (Sep 10, then Sep 14).

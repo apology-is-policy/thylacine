@@ -36,7 +36,7 @@ use libhalcyon::tag::argv_of;
 use libhalcyon::theme::{Argb, Theme};
 
 use crate::layout::Sheet;
-use crate::raster::{GlyphSource, FACE_BODY, FACE_MONO};
+use crate::raster::{GlyphSource, FACE_BODY};
 
 /// The name typeface size (section 4.3: 10.5px, proportional), LOGICAL --
 /// the sheet scales it (HALCYON-SCALE 6).
@@ -512,11 +512,16 @@ pub struct HeaderRegions {
 
 /// The action box's inner height (6.4: "28 (inner 24 tall)"), logical.
 const ACTION_H: i32 = 24;
-/// The `x` glyph's size (6.4: mono 15 -- the Sans face serves until I-5's
-/// type map), logical.
+/// The `x` glyph's size, logical. 6.4's table says "mono 15"; the kit's
+/// CSS says otherwise and wins (`.tile-action { font-size: 15px }` inherits
+/// the header's Plex Sans; nothing sets a mono family on it), so the `x`
+/// is the body face at 15.
 const ACTION_PX: f32 = 15.0;
-/// The name's size (7.2: Sans 13 / 500), logical.
+/// The name's size and tracking (7.2: Sans 13 / 500, +.01 em), logical.
 const NAME_INST_PX: f32 = 13.0;
+const NAME_TRACK_EM: f32 = 0.01;
+/// The metadata's tracking (7.2: mono 10 / 400, +.04 em, uppercase).
+const META_TRACK_EM: f32 = 0.04;
 
 pub fn header_regions(w: u32, h: u32, sheet: &Sheet) -> HeaderRegions {
     let m = &sheet.metrics;
@@ -554,14 +559,22 @@ pub fn header_hit(x: i32, y: i32, w: u32, h: u32, sheet: &Sheet) -> HeaderHit {
 /// the same shaper that paints it; whole when it fits, empty when not even
 /// the ellipsis does.
 fn fit_end(gs: &mut GlyphSource, face: u8, px: f32, text: &str, avail: i32) -> String {
-    if gs.shape_run(face, px, text.chars()).1 <= avail {
+    fit_end_tracked(gs, face, px, 0.0, text, avail)
+}
+
+/// `fit_end` for a run painted with `tracking` px of letter-spacing: the
+/// measure is the painter's (`shape_run_spaced`), so the cut lands where
+/// the tracked run actually ends.
+fn fit_end_tracked(gs: &mut GlyphSource, face: u8, px: f32, tracking: f32, text: &str, avail: i32) -> String {
+    let width = |gs: &mut GlyphSource, s: &str| gs.shape_run_spaced(face, px, tracking, s.chars()).1;
+    if width(gs, text) <= avail {
         return String::from(text);
     }
     let ell = '\u{2026}';
-    let ell_w = gs.shape_run(face, px, core::iter::once(ell)).1;
+    let ell_w = width(gs, "\u{2026}");
     let mut chars: Vec<char> = text.chars().collect();
     while let Some(_) = chars.pop() {
-        let w = gs.shape_run(face, px, chars.iter().copied()).1;
+        let w = gs.shape_run_spaced(face, px, tracking, chars.iter().copied()).1;
         if w + ell_w <= avail {
             let mut out: String = chars.iter().collect();
             out.push(ell);
@@ -594,9 +607,11 @@ fn centred_in(gs: &mut GlyphSource, face: u8, px: f32, h: i32) -> i32 {
 /// expanded or hovered, else `secondary`), end-ellipsised before the
 /// metadata; the metadata right-aligned before the action box in its ink;
 /// the `x` on the expanded or hovered header (`dim`; `error` under the
-/// pointer, with a 1 px `structure` rule at the box's left edge). The mono
-/// runs use the sheet's island size (Cornucopia's cell floor is 6 px of
-/// advance; the type map's 10 px is I-5's).
+/// pointer, with a 1 px `structure` rule at the box's left edge). The type
+/// is the sheet's (7.2, since I-5): the index and the metadata in
+/// `face_mono_text` at `chrome_mono_px` (10; the metadata tracked .04 em),
+/// the name in `face_medium` at 13 tracked .01 em, the `x` in `face_body`
+/// at 15.
 pub fn header_list(
     st: HeaderState,
     name: &str,
@@ -658,39 +673,42 @@ pub fn header_list(
         }
     }
     let gen = gs.gen();
-    let mono_px = sheet.mono_island_px;
+    let mono = sheet.face_mono_text;
+    let mono_px = sheet.chrome_mono_px;
     // The index, centred in its box.
     {
         let mut num = String::new();
         let _ = core::fmt::write(&mut num, format_args!("{:02}", st.index));
-        let (refs, width) = gs.shape_run(FACE_MONO, mono_px, num.chars());
+        let (refs, width) = gs.shape_run(mono, mono_px, num.chars());
         if !refs.is_empty() && r.index_w > 0 {
             let x = ((r.index_w - hair - width) / 2).max(0);
-            let base = centred_in(gs, FACE_MONO, mono_px, hi);
+            let base = centred_in(gs, mono, mono_px, hi);
             let ink = if st.focused && st.expanded { i.amber } else { i.dim };
             cart.push_glyphs(gen, x, base, ink, &refs);
         }
     }
-    // The metadata, right-aligned before the action box.
+    // The metadata, right-aligned before the action box, tracked .04 em.
     let mut meta_x = r.meta_right;
     if !meta.is_empty() {
-        let (refs, width) = gs.shape_run(FACE_MONO, mono_px, meta.chars());
+        let (refs, width) = gs.shape_run_spaced(mono, mono_px, META_TRACK_EM * mono_px, meta.chars());
         let x = r.meta_right - width;
         if !refs.is_empty() && x >= r.name_x {
-            let base = centred_in(gs, FACE_MONO, mono_px, hi);
+            let base = centred_in(gs, mono, mono_px, hi);
             cart.push_glyphs(gen, x, base, meta_ink_of(i, meta_ink), &refs);
             meta_x = x;
         }
     }
-    // The name, in what is left, cut from its end.
+    // The name, in what is left, cut from its end: Sans 500 at 13, +.01 em.
     if !name.is_empty() {
+        let face = sheet.face_medium;
         let px = sheet.px(NAME_INST_PX);
+        let track = NAME_TRACK_EM * px;
         let avail = meta_x - sheet.metrics.header_gap - r.name_x;
         if avail > 0 {
-            let text = fit_end(gs, FACE_BODY, px, name, avail);
-            let (refs, _) = gs.shape_run(FACE_BODY, px, text.chars());
+            let text = fit_end_tracked(gs, face, px, track, name, avail);
+            let (refs, _) = gs.shape_run_spaced(face, px, track, text.chars());
             if !refs.is_empty() {
-                let base = centred_in(gs, FACE_BODY, px, hi);
+                let base = centred_in(gs, face, px, hi);
                 let ink = if st.expanded || st.hovered { i.text } else { i.secondary };
                 cart.push_glyphs(gen, r.name_x, base, ink, &refs);
             }
@@ -699,8 +717,9 @@ pub fn header_list(
     // The action.
     if st.expanded || st.hovered {
         let (ax, ay, aw, ah) = r.action;
+        let face = sheet.face_body;
         let px = sheet.px(ACTION_PX);
-        let (refs, width) = gs.shape_run(FACE_BODY, px, "\u{d7}".chars());
+        let (refs, width) = gs.shape_run(face, px, "\u{d7}".chars());
         if !refs.is_empty() && aw > 0 {
             if st.hover_close {
                 cart.ops.push(Op::Rect {
@@ -711,7 +730,7 @@ pub fn header_list(
                     color: i.structure,
                 });
             }
-            let base = ay + centred_in(gs, FACE_BODY, px, ah);
+            let base = ay + centred_in(gs, face, px, ah);
             let ink = if st.hover_close { i.error } else { i.dim };
             cart.push_glyphs(gen, ax + (aw - width) / 2, base, ink, &refs);
         }
@@ -767,20 +786,21 @@ pub fn placard_list(
     let pad = sheet.ipx(PLACARD_PAD);
     let gap = sheet.ipx(PLACARD_GAP);
     let (tpx, bpx) = (sheet.px(PLACARD_TITLE_PX), sheet.px(PLACARD_BODY_PX));
+    let face = sheet.face_body;
     let mut y = pad;
     let line = |gs: &mut GlyphSource, px: f32| {
-        gs.line_metrics(FACE_BODY, px)
+        gs.line_metrics(face, px)
             .map(|m| (m.ascent, m.ascent + m.descent))
             .unwrap_or((12, 16))
     };
     let (asc, lh) = line(gs, tpx);
-    let (refs, _) = gs.shape_run(FACE_BODY, tpx, PLACARD_TITLE.chars());
+    let (refs, _) = gs.shape_run(face, tpx, PLACARD_TITLE.chars());
     if !refs.is_empty() {
         cart.push_glyphs(gen, pad, y + asc, i.text, &refs);
     }
     y += lh + gap;
     let (asc, lh) = line(gs, bpx);
-    let (refs, _) = gs.shape_run(FACE_BODY, bpx, PLACARD_HINT.chars());
+    let (refs, _) = gs.shape_run(face, bpx, PLACARD_HINT.chars());
     if !refs.is_empty() {
         cart.push_glyphs(gen, pad, y + asc, i.secondary, &refs);
     }
@@ -790,7 +810,7 @@ pub fn placard_list(
     }
     let ah = sheet.ipx(PLACARD_ACTION_H);
     let apad = sheet.ipx(PLACARD_ACTION_PAD);
-    let (refs, width) = gs.shape_run(FACE_BODY, bpx, PLACARD_ACTION.chars());
+    let (refs, width) = gs.shape_run(face, bpx, PLACARD_ACTION.chars());
     let rect = (pad, y, width + 2 * apad, ah);
     if hover_action {
         cart.ops.push(Op::Rect {
@@ -802,7 +822,7 @@ pub fn placard_list(
         });
     }
     if !refs.is_empty() {
-        let base = y + centred_in(gs, FACE_BODY, bpx, ah);
+        let base = y + centred_in(gs, face, bpx, ah);
         cart.push_glyphs(gen, pad + apad, base, i.amber, &refs);
     }
     (cart, Some(rect))
@@ -1176,6 +1196,25 @@ mod tests {
         assert_eq!(r.len(), 3, "index, meta, name -- no x: {:?}", r);
         assert!(r.iter().any(|x| x.1 == 0xFFAF_B4B0), "the name in secondary");
         assert!(r.iter().any(|x| x.1 == 0xFF73_7A76 && x.2 == 2), "the index in dim");
+        // The metadata's type against the golden's `.tile-meta` box (7.2,
+        // I-5): an 8-character run in mono 10 tracked .04 em is 43.203 --
+        // 5.4 px a glyph, Cornucopia's 5 plus the .4 px -- so `MODIFIED`
+        // lays 43 wide (the pen's truncation), where the 12 px island
+        // cell laid it 48. Read back through the run's advances.
+        let c8 = header_list(st(false, false, false, false, false), "ut", "MODIFIED", MetaInk::Dim, 732, 32, &s, &mut gs);
+        let meta = runs(&c8).into_iter().find(|x| x.2 == 8).expect("the 8-glyph metadata run");
+        let meta_w: i32 = {
+            let start = c8
+                .ops
+                .iter()
+                .find_map(|op| match *op {
+                    Op::Glyphs { start, count, baseline_x, .. } if count == 8 && baseline_x == meta.0 => Some(start),
+                    _ => None,
+                })
+                .unwrap();
+            c8.runs[start as usize..start as usize + 8].iter().map(|g| g.advance).sum()
+        };
+        assert!((meta_w - 43).abs() <= 1, "MODIFIED at mono 10 + .04 em: {meta_w} vs 43.203");
         // Collapsed and LAST: no separator row.
         let c = header_list(st(false, false, false, false, true), "ut", "", MetaInk::Dim, 732, 32, &s, &mut gs);
         assert!(!rects(&c).contains(&(0, 31, 732, 1, 0xFF29_2D2B)));

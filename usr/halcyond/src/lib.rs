@@ -33,12 +33,13 @@ pub mod transcript;
 /// The vendored proportional faces (third_party/ibm-plex; HALCYON-VISUAL.md
 /// section 7 + HALCYON.md section 4 -- IBM Plex Sans, operator-ratified
 /// 2026-09-07, superseding Public Sans which had superseded DejaVu Sans
-/// Condensed). The operator's weight rule: baseline body/chrome is Text (450);
-/// bigger type (headings) is Regular (400), italic in full (section 8.1). So
-/// TEXT is the baseline upright, TEXT_ITALIC carries em--emph (baseline-size
-/// inline italic), BOLD is the one bold (em--strong), and HEADING_ITALIC is
-/// the Regular-weight (400) italic headings use. Cornucopia (raster) owns
-/// preformatted/terminal content; nothing here does.
+/// Condensed). The LEGACY profile's weight rule (the operator's): baseline
+/// body/chrome is Text (450); bigger type (headings) is Regular (400),
+/// italic in full (section 8.1). So TEXT is the baseline upright,
+/// TEXT_ITALIC carries em--emph (baseline-size inline italic), BOLD is the
+/// one bold (em--strong), and HEADING_ITALIC is the Regular-weight (400)
+/// italic headings use. Cornucopia (raster) owns preformatted/terminal
+/// content; nothing here does.
 pub const IBM_PLEX_SANS_TEXT: &[u8] =
     include_bytes!("../../../third_party/ibm-plex/ttf/IBMPlexSans-Text.ttf");
 pub const IBM_PLEX_SANS_TEXT_ITALIC: &[u8] =
@@ -47,3 +48,15 @@ pub const IBM_PLEX_SANS_BOLD: &[u8] =
     include_bytes!("../../../third_party/ibm-plex/ttf/IBMPlexSans-Bold.ttf");
 pub const IBM_PLEX_SANS_HEADING_ITALIC: &[u8] =
     include_bytes!("../../../third_party/ibm-plex/ttf/IBMPlexSans-Italic.ttf");
+/// The INSTRUMENT profile's three (HALCYON-INSTRUMENT 7.1, ruling 6): the
+/// mockup's Plex Sans 400 body / rails / buttons, 500 header names /
+/// headings / strong chrome, 600 brand -- roman headings, the emphasis
+/// italic being HEADING_ITALIC above (the 400 italic). Faces are profile
+/// assets, never theme keys; the legacy four stay for the legacy profile.
+/// +~600 KB in the binary, accepted (7.1): the faces are identity.
+pub const IBM_PLEX_SANS_REGULAR: &[u8] =
+    include_bytes!("../../../third_party/ibm-plex/ttf/IBMPlexSans-Regular.ttf");
+pub const IBM_PLEX_SANS_MEDIUM: &[u8] =
+    include_bytes!("../../../third_party/ibm-plex/ttf/IBMPlexSans-Medium.ttf");
+pub const IBM_PLEX_SANS_SEMIBOLD: &[u8] =
+    include_bytes!("../../../third_party/ibm-plex/ttf/IBMPlexSans-SemiBold.ttf");

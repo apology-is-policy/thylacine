@@ -346,7 +346,9 @@ halcyond today serves the bake for its islands and grid (`raster.rs`
 `FACE_MONO`), which cannot carry a per-theme dilation without a second bake
 set. The design follows the scripture: halcyond rasterizes Cornucopia
 **live from a subset TTF** (the 207 baked codepoints subset with fontTools:
-~100 KB against the 10.8 MB full font) at the bake's cell geometry table
+~100 KB against the 10.8 MB full font — 20 KB as cut at TY-4; 342
+codepoints and 26 KB since HALCYON-INSTRUMENT I-5a, plus a 28 KB Italic)
+at the bake's cell geometry table
 (`cell_w`, `cell_h`, `baseline` per advance stay the contract the cells
 tier shares), with the same stroke rule and the same box-glyph procedural
 path. The bake tool is unchanged for its other consumers. (If the operator
@@ -491,6 +493,20 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
   `bug-mono-cell-clips-every-accented-capital`. Pinned meanwhile by
   `the_cell_clips_the_diacritics_the_bake_clips`, which fails when the
   geometry is corrected so it cannot be fixed silently.
+
+  **Amended at HALCYON-INSTRUMENT I-5a (2026-09-14).** The subset is a
+  SUPERSET of the bake (the six Instrument glyphs and U+2500–257F, by
+  `subset-cornucopia.py --extra`; 208 → 342 codepoints), a true Italic
+  subset shares its cell (`--match` in the tool; `italic_shares_the_cell`
+  re-checked at startup over every advance 6..20), and the mono tier has
+  two KINDS of slot: the cell faces (`FACE_MONO`, `FACE_MONO_ITALIC`) and a
+  free-running `FACE_MONO_TEXT` at any px — the fractional advance, the
+  phases, hhea metrics, the store's stroke — for the chrome's 10 / 11 px
+  roles, where the 6 px cell floor was the wrong tool. Because the subset
+  now carries the box-drawing block, the cell path consults the procedural
+  box glyphs BEFORE the face, so a font box glyph never enters a cell.
+  `the_subset_carries_every_baked_codepoint` still holds (207 baked, all
+  present); `the_derived_cell_table_is_the_baked_one` unchanged.
 - **TY-5** The hinting lever (if voted).
 - **TY-6** The audit: the atlas bound under phases + stroke (I-32's
   in-process face); a hostile stream cannot make a stroke raster exceed
