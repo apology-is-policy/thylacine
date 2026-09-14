@@ -1,0 +1,12 @@
+{
+  "provenance": "Exact local bytes. Plex Sans = the tree's vendored third_party/ibm-plex/ttf (IBM Plex v3.005, OFL, github.com/IBM/plex), landed @d3958d68. Cornucopia = the operator's own family, ~/projects/cornucopia-font @7cb874c (MIT, Michal Frdlik), the same bytes as ~/Library/Fonts.",
+  "sans": [
+    {"path": "/Users/northkillpd/projects/thylacine/third_party/ibm-plex/ttf/IBMPlexSans-Regular.ttf", "weight": "400", "style": "normal", "version": "3.005", "source": "github.com/IBM/plex (OFL) via third_party/ibm-plex/ttf @d3958d68"},
+    {"path": "/Users/northkillpd/projects/thylacine/third_party/ibm-plex/ttf/IBMPlexSans-Medium.ttf", "weight": "500", "style": "normal", "version": "3.005", "source": "github.com/IBM/plex (OFL) via third_party/ibm-plex/ttf @d3958d68"},
+    {"path": "/Users/northkillpd/projects/thylacine/third_party/ibm-plex/ttf/IBMPlexSans-SemiBold.ttf", "weight": "600", "style": "normal", "version": "3.005", "source": "github.com/IBM/plex (OFL) via third_party/ibm-plex/ttf @d3958d68"}
+  ],
+  "mono": [],
+  "cornucopia": [
+    {"path": "/Users/northkillpd/Library/Fonts/cornucopia-Regular.ttf", "weight": "400", "style": "normal", "version": "34.6.1", "source": "~/projects/cornucopia-font @7cb874c (MIT, Michal Frdlik)"}
+  ]
+}

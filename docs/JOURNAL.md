@@ -177,17 +177,31 @@ all of U+2500-257F -- a re-subset is I-5's. Plex Mono is nowhere local;
 only the harness's historical mode wants it. The npm registry answers
 (Playwright 1.63.0), so the goldens can be captured here.
 
+**Rulings and the oracle, the same afternoon.** The operator ruled the
+nine section-13 items in two rounds (section 2, rulings 10-16): a shell
+tile flows proportionally and ONLY that (option A -- against the
+recommendation; the mockup's mono shell tiles are a colour-and-padding
+reference, no toggle pill), Cornucopia Regular + the TRUE Italic with
+"500" = Regular, the turnstile `secondary`, kerning in I-5, Super+T /
+Super+/ / Super+Q / Super+1..9 (tabbed -> Super+Shift+T), the 45 contrast
+replacements adopted. And the goldens exist: Playwright 1.63.0 + Chromium
+153.0.8010.12 in the scratchpad, the harness in native mode, 98 scenarios
+in a few minutes, 0 errors, 87 distinct hashes with all 11 collisions
+explained (six the scale identity s100@2 == s200@1, three the baseline
+under other names, two CSS no-op states). The run is 1.0 GB, 996 MB of it
+geometry dumps, so the tree carries its identity
+(`docs/halcyon-carbon-handoff/goldens/`: manifest, per-scenario metadata,
+fonts, two reference PNGs) and `build/` the pixels. A miscount caught on
+the way: the matrix is 98, not the 100 I wrote twice (23 states, not 24).
+
 ### Owed at the end of the run
 
-- Round 2 INGESTED (above). Still owed from it: the goldens run of
-  `round2/capture/capture.mjs` in native mode on this machine (Playwright +
-  Chromium into the scratchpad; Plex Sans from `third_party/`, Cornucopia
-  Regular from the Mac) and the recording of its manifest and hashes.
-- The operator's word on HALCYON-INSTRUMENT section 13 (now nine items:
-  the true Cornucopia italic and the mono "500" mapping joined the list;
-  contrast flips to "adopt the 45").
-- Then I-1 (the second schema, the bundle, the wire) -- the EFFORT GATE
-  fires there (a new strict parser).
+- Round 2 INGESTED, section 13 RULED, the goldens CAPTURED (above): I-0
+  is complete. Owed from it: the by-eye review of all 98 captures with
+  the diff tool at I-9; the historical-mode run if Plex Mono ever
+  matters; where the 1.0 GB run should live beyond this Mac.
+- I-1 (the second schema, the bundle, the wire) -- the EFFORT GATE fires
+  there (a new strict parser); effort was `max` all afternoon.
 - Unchanged from 46n: the IRQ fork, the back-pressure gap, S1 [P3], the ut
   `mount` one-liner, vault calls 0082 / 0087.
 
