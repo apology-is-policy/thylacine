@@ -115,14 +115,77 @@ against `terminal_bg`, sixteen distinct). It keeps a theme's own role
 where the hue is already right (Carbon's red/green/yellow/magenta, every
 theme's red and green) and synthesises the rest at the theme's register.
 
+### Round 2: Astra's reply, measured before it was believed
+
+Astra's second package (47 files) landed in `docs/halcyon-carbon-handoff/round2/`
+(`009b9062`) and was folded into the scripture as a dated amendment
+(`f1931876`: section 3.1, section 14, Appendix A). Nothing in it was taken on its word:
+
+- **Provenance CLOSED.** The git bundle verifies; its five commits (Codex,
+  2026-09-13) end at `074bc564`, and `dist/*` at that commit is
+  byte-identical to BOTH `reference/` copies. The morning's one
+  unverifiable claim is now a fact of the tree.
+- **The package is a function of the kit, not typed.** Astra's
+  `build_palettes.py`, run beside the first kit, reproduces every file
+  byte-for-byte (SHA256SUMS and VALIDATION.json included).
+- **The 45 contrast replacements** are exactly the kit report's 45
+  sub-4.5:1 rows, each the old value tinted toward the ink pole until
+  >= 4.6:1 (min 4.6006 recomputed), grounds `header` for `dim` and
+  `code_bg` for the syntax roles; `resolved-tokens-round2.json` differs
+  from the kit's in precisely those 45 values, Carbon untouched.
+- **The 208 ANSI slots**: min 3.4624:1 as claimed, sixteen distinct per
+  theme, polarity and ramp extremes hold. The hue check found one slot
+  outside +-30 degrees (strogg bright cyan, 168) and one near-grey
+  (strogg blue, chroma 0.028).
+- **The tree's parser** loads the 13 round-2 stock TOMLs and refuses the
+  13 sidecars ("unknown key"); the sidecars carry NO ansi table, so the
+  Instrument schema's `[terminal] ansi` stays our addition.
+- **The capture harness**: every DOM id, dataset key and global it touches
+  exists in the pinned source (`dataset.splitId` renders as
+  `data-split-id`; the root split's id IS `root`); 100 scenarios; NOT run
+  by Astra ("syntax-checked only", and it says so in three places).
+
+**Two things Astra had right that the scripture had wrong.** The divider
+joint: `* { box-sizing: border-box }` does not select pseudo-elements, so
+`.divider::after` is 5 px content + a 1 px border = 7 x 7 outer
+(`styles.css:406,481`), overpainting 1 px of the trailing pane's frame;
+section 5.1 said 5 x 5, corrected. And the ANSI tables: the operator had
+delegated them to main in the morning, Astra sent a hand-authored set
+regardless, and side by side Astra's is the better set -- mean chroma
+0.056..0.082 per theme against our generator's up to 0.118, whose
+1.25x-accent register produced `#FB8274` and `#1FC1C8` on strogg.
+Adopted, with the two strogg slots retuned at Astra's lightness
+(`#A2C3B5` -> `#99C4C3`, `#ABB8C9` -> `#A3B8D7`); the adopted set is
+`tools/halcyon/ansi16.json`, the record in `round2/` untouched.
+
+**A check that could not fail.** The morning's `--check` said "OK on all
+13" for the generator. Under the rule as now written -- black readable,
+bright polarity, black and white the extremes of each ramp (Astra's
+clauses added to ours) -- the SAME output has 45 problems, among them
+every bright slot of the three light themes going LIGHTER instead of
+darker: the generator had the light-theme polarity inverted and the check
+never tested polarity, so it passed. The lint now encodes every clause,
+six sabotaged tables each fail for their own reason, and the generator is
+demoted to a first draft for a new theme with its register rewritten so
+its own output passes the lint it is held to.
+
+**Fonts, measured.** The full Cornucopia family is on this Mac
+(`~/projects/cornucopia-font`, v34.6.1, ten faces with true italics, 7571
+codepoints each); the tree's embedded subset has 208 codepoints and lacks
+lambda, the check mark, the angle quotes, the minus, the command glyph and
+all of U+2500-257F -- a re-subset is I-5's. Plex Mono is nowhere local;
+only the harness's historical mode wants it. The npm registry answers
+(Playwright 1.63.0), so the goldens can be captured here.
+
 ### Owed at the end of the run
 
-- **Ingest Astra's round 2** (`~/Downloads/halcyon-astra-round2`, 47 files:
-  `RESPONSE-TO-FABLE.md`, a git bundle for the pinned commit, a Playwright
-  capture script, ANSI16 tables of Astra's own, contrast amendments, round-2
-  palettes) -- read it whole, compare its ANSI tables with ours, verify the
-  bundle's commit, commit the package for the record beside the kit.
-- The operator's word on HALCYON-INSTRUMENT section 13.
+- Round 2 INGESTED (above). Still owed from it: the goldens run of
+  `round2/capture/capture.mjs` in native mode on this machine (Playwright +
+  Chromium into the scratchpad; Plex Sans from `third_party/`, Cornucopia
+  Regular from the Mac) and the recording of its manifest and hashes.
+- The operator's word on HALCYON-INSTRUMENT section 13 (now nine items:
+  the true Cornucopia italic and the mono "500" mapping joined the list;
+  contrast flips to "adopt the 45").
 - Then I-1 (the second schema, the bundle, the wire) -- the EFFORT GATE
   fires there (a new strict parser).
 - Unchanged from 46n: the IRQ fork, the back-pressure gap, S1 [P3], the ut
